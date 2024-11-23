@@ -1,0 +1,36 @@
+[package]
+name = "asap-data"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "asap-data"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+flate2 = { workspace = true }
+
+num_cpus = { workspace = true }
+rayon = { workspace = true }
+hdf5 = { workspace = true }
+hdf5-sys = { workspace = true }
+libz-sys = { workspace = true }
+tempfile = { workspace = true }
+rand = { workspace = true }
+
+zarrs = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+
+ndarray = { workspace = true }
+ndarray-rand = { workspace = true }
+ndarray-linalg = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+blas-src = { version = "0.8", features = ["openblas"] }
+[target.'cfg(target_os = "macos")'.dependencies]
+blas-src = { version = "0.8", features = ["accelerate"] }
+
+[dev-dependencies]

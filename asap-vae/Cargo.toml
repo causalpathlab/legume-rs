@@ -1,0 +1,12 @@
+[package]
+name = "asap-vae"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+candle-kernels = "0.8.0"
+[target.'cfg(target_os = "linux")'.dependencies]
+candle-core = { version = "^0.8", features = ["cuda","cudarc", "cudnn"] }
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "^0.8", features = ["metal","accelerate"] }
