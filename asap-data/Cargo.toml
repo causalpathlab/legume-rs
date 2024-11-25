@@ -23,14 +23,15 @@ rand = { workspace = true }
 zarrs = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
-
-ndarray = { workspace = true }
-ndarray-rand = { workspace = true }
-ndarray-linalg = { workspace = true }
+ndarray = "0.16"
+ndarray-rand = "0.15"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-blas-src = { version = "0.8", features = ["openblas"] }
+ndarray-linalg = { version = "0.16", features = ["openblas-system"] }
+candle-core = { version = "0.8.0", features = ["cuda","cudarc","cudnn"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
-blas-src = { version = "0.8", features = ["accelerate"] }
+candle-core = { version = "0.8.0", features = ["metal","accelerate"] }
+
 
 [dev-dependencies]
