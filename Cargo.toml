@@ -20,7 +20,3 @@ zarrs = { version = "0.17.1", features = ["gzip"] }
 serde_json = "1.0"
 serde = "1.0.214"
 
-ndarray = { version = "0.16.1", features = ["serde","blas"] }
-ndarray-rand = "0.15.0"
-ndarray-linalg = { version = "0.16.0", features = ["openblas"] }
-blas-src = { version = "0.8" }

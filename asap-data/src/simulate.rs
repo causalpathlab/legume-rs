@@ -3,7 +3,10 @@ use ndarray::prelude::*;
 use ndarray_rand::RandomExt;
 // use ndarray_stats;
 
-fn scale_columns(mut X: Array2<f32>) -> anyhow::Result<Array2<f32>> {
+#[allow(dead_code)]
+/// column-wise standardization
+/// * X: (D, N) matrix
+pub fn scale_columns(mut X: Array2<f32>) -> anyhow::Result<Array2<f32>> {
     let mu = X.mean_axis(Axis(0)).ok_or(anyhow::anyhow!("mean failed"))?;
     let sig = X.std_axis(Axis(0), 0.0);
     for j in 0..X.ncols() {
@@ -16,16 +19,16 @@ fn scale_columns(mut X: Array2<f32>) -> anyhow::Result<Array2<f32>> {
 pub struct SimulateArgs {
     /// number of rows
     #[arg(short, long)]
-    rows: usize,
+    pub rows: usize,
     /// number of columns
     #[arg(short, long)]
-    cols: usize,
+    pub cols: usize,
     /// number of factors
     #[arg(short, long)]
-    factors: Option<usize>,
+    pub factors: Option<usize>,
     /// number of batches
     #[arg(short, long)]
-    batches: Option<usize>,
+    pub batches: Option<usize>,
 }
 
 #[allow(dead_code)]
@@ -35,26 +38,39 @@ pub fn generate_factored_gamma_data(args: SimulateArgs) -> anyhow::Result<()> {
     use ndarray_rand::rand_distr::Uniform;
     // use ndarray_rand::rand_distr::unifor
 
-    let N = args.cols;
-    let D = args.rows;
-    let K = args.factors.unwrap_or(1);
-    let B = args.batches.unwrap_or(1);
+    let nn = args.cols;
+    let dd = args.rows;
+    let kk = args.factors.unwrap_or(1);
+    let bb = args.batches.unwrap_or(1);
 
     // 1. batch membership matrix
-    let batch_membership: Array1<usize> = Array1::random(N, Uniform::new(0, B));
-    let mut X: Array2<f32> = Array2::zeros((B, N));
+    let batch_membership: Array1<usize> = Array1::random(nn, Uniform::new(0, bb));
 
-    for i in 0..N {
-        let k = batch_membership[i];
-        X[[k, i]] = 1.0;
-    }
+    // let mut X: Array2<f32> = Array2::zeros((B, N));
+    // for i in 0..N {
+    //     let k = batch_membership[i];
+    //     X[[k, i]] = 1.0;
+    // }
 
     // 2. batch effect matrix
-    let ln_delta = scale_columns(Array2::random((D, B), StandardNormal).dot(&X))?;
+    let ln_delta = Array2::random((dd, bb), StandardNormal);
 
     // 3. factorization model
-    let beta: Array2<f32> = Array2::random((D, K), Gamma::<f32>::new((D * K) as f32, 1.0)?);
-    let theta: Array2<f32> = Array2::random((K, N), Gamma::<f32>::new((K * N) as f32, 1.0)?);
+    let beta: Array2<f32> = Array2::random((dd, kk), Gamma::<f32>::new((dd * kk) as f32, 1.0)?);
+    let theta: Array2<f32> = Array2::random((kk, nn), Gamma::<f32>::new((kk * nn) as f32, 1.0)?);
+
+    dbg!(beta);
+    dbg!(theta);
+
+    for j in 0..nn {
+        // generate
+        // a. beta * theta[,j]
+        // b. ln_delta[,batch_membership[j]]
+        // c. extract triplets
+    }
+
+    // let ln_delta = ln_delta.dot(&X);
+    // let ln_delta = scale_columns(ln_delta)?;
 
     // Gamma::<f32>::new((D * K) as f32, 1.0));
 
