@@ -1,6 +1,6 @@
 [workspace]
 
-members = ["asap-data","asap-vae"] # ,"asap-embed","asap-network","asap-select"
+members = ["asap-data"] # ,"asap-embed","asap-network","asap-select", ,"asap-vae"
 resolver = "2"
 
 [workspace.dependencies]
