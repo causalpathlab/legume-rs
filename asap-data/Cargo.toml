@@ -25,12 +25,15 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 ndarray = "0.16"
 ndarray-rand = "0.15"
+ndarray-csv = "0.5"
+csv = "1.3.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ndarray-linalg = { version = "0.16", features = ["openblas-system"] }
 candle-core = { version = "0.8.0", features = ["cuda","cudarc","cudnn"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# ndarray-linalg = { version = "0.16", features = ["accelerate"] }
 candle-core = { version = "0.8.0", features = ["metal","accelerate"] }
 
 

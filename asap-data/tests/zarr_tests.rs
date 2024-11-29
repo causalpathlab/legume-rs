@@ -1,6 +1,8 @@
+use asap_data::simulate::*;
 use asap_data::sparse_matrix_zarr::SparseMtxData;
 use ndarray::prelude::*;
 use ndarray_rand::RandomExt;
+use rayon::str::ParallelString;
 use std::path::PathBuf;
 use std::time::Instant;
 use tempfile::tempdir;
@@ -33,13 +35,38 @@ where
 }
 
 #[test]
+fn simulate() -> anyhow::Result<()> {
+    let args = SimulateArgs {
+        rows: 10,
+        cols: 100,
+        factors: Some(3),
+        batches: Some(2),
+        rseed: None,
+    };
+
+    let mtx_file = create_temp_dir_file(".mtx.gz")?;
+    let mtx_file = mtx_file.to_str().unwrap().to_string();
+    let dict_file = mtx_file.replace(".mtx.gz", ".dict.gz");
+    let prop_file = mtx_file.replace(".mtx.gz", ".prop.gz");
+
+    generate_factored_gamma_data_mtx(&args, &mtx_file, &dict_file, &prop_file)?;
+
+    let data =
+        measure_time(|| SparseMtxData::from_mtx_file(&mtx_file, None, None));
+    let data = data?;
+
+    data.remove_backend_file()?;
+
+    Ok(())
+}
+
+#[test]
 fn random_mtx_loading() -> anyhow::Result<()> {
     // 1. generate a random array2
     let a = Array::random((9, 1111), rand::distributions::Uniform::new(0., 1.));
 
     if let Ok(data) = SparseMtxData::from_ndarray(&a, None, None) {
-
-        let a = a.select(Axis(1), &[7,8,9]);
+        let a = a.select(Axis(1), &[7, 8, 9]);
         dbg!(&a);
 
         // 2. save it to mtx file
@@ -51,7 +78,6 @@ fn random_mtx_loading() -> anyhow::Result<()> {
             measure_time(|| SparseMtxData::from_mtx_file(mtx_file.to_str().unwrap(), None, None));
         let data = data?;
 
-
         // 4. read the column 2
         let b = measure_time(|| data.read_columns(7..10).unwrap());
         dbg!(&b);
@@ -61,7 +87,6 @@ fn random_mtx_loading() -> anyhow::Result<()> {
         let new_data = SparseMtxData::open(backend_file)?;
         let c = measure_time(|| new_data.read_columns(7..10).unwrap());
         dbg!(&c);
-
 
         // 7. remove the backend file
         data.remove_backend_file()?;

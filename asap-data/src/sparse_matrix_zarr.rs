@@ -3,7 +3,7 @@ use crate::mtx_io::*;
 use ndarray::prelude::*;
 use std::ops::Range;
 use std::sync::Arc;
-use zarrs::array::DataType::{Float32, UInt64};
+use zarrs::array::DataType;
 use zarrs::filesystem::FilesystemStore;
 use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
 
@@ -144,13 +144,17 @@ impl SparseMtxData {
         Ok(ret)
     }
 
-    pub fn from_hdf5_file(
-        hdf5_file: &str,
-        backend_file: Option<&str>,
-        index_by_row: Option<bool>,
-    ) -> anyhow::Result<Self> {
-        todo!("need to implement")
-    }
+    // pub fn from_hdf5_file(
+    //     hdf5_file: &str,
+    //     backend_file: Option<&str>,
+    //     index_by_row: Option<bool>,
+    // ) -> anyhow::Result<Self> {
+    //     todo!("need to implement")
+    // }
+
+    // pub fn to_hdf5_file(&self, hdf5_file: &str) -> anyhow::Result<()> {
+    //     todo!("export to hdf5");
+    // }
 
     /// Export the data to a mtx file. This will take time.
     /// * `mtx_file`: mtx file to be written
@@ -207,10 +211,6 @@ impl SparseMtxData {
                 "Unable to figure out the size of the backend data"
             ));
         }
-    }
-
-    pub fn to_hdf5_file(&self, hdf5_file: &str) -> anyhow::Result<()> {
-        todo!("export to hdf5");
     }
 
     /// Show the hierarchy of the zarr store
@@ -457,11 +457,11 @@ impl SparseMtxData {
         self._add_group(key)?;
 
         let key = "/by_row/data";
-        self.new_filled_array(key, Float32, csr_vals.clone())?;
+        self.new_filled_vector(key, DataType::Float32, csr_vals.clone())?;
         let key = "/by_row/indices";
-        self.new_filled_array(key, UInt64, csr_rows.clone())?;
+        self.new_filled_vector(key, DataType::UInt64, csr_rows.clone())?;
         let key = "/by_row/indptr";
-        self.new_filled_array(key, UInt64, csr_rowptr.clone())?;
+        self.new_filled_vector(key, DataType::UInt64, csr_rowptr.clone())?;
 
         Ok(())
     }
@@ -486,39 +486,46 @@ impl SparseMtxData {
         self._add_group(key)?;
 
         let key = "/by_column/data";
-        self.new_filled_array(key, Float32, csc_vals.clone())?;
+        self.new_filled_vector(key, DataType::Float32, csc_vals.clone())?;
         let key = "/by_column/indices";
         // dbg!(key);
-        self.new_filled_array(key, UInt64, csc_rows.clone())?;
+        self.new_filled_vector(key, DataType::UInt64, csc_rows.clone())?;
 
         let key = "/by_column/indptr";
         // dbg!(key);
-        self.new_filled_array(key, UInt64, csc_colptr.clone())?;
+        self.new_filled_vector(key, DataType::UInt64, csc_colptr.clone())?;
 
         Ok(())
     }
 
-    /// Helper function to create a filled 1D array
-    fn new_filled_array<V: zarrs::array::Element>(
+    /// Helper function to create a filled 1D array with the given
+    /// data type and fill value. This is the most useful function to
+    /// create a vector like data.
+    /// 
+    /// * `key` - the key name
+    /// * `dt` - the data type among `DataType`
+    /// * `vec` - the vector to be stored
+    /// 
+    fn new_filled_vector<V: zarrs::array::Element>(
         self: &mut Self,
         key: &str,
-        dt: zarrs::array::DataType,
+        dt: DataType,
         vec: Vec<V>,
     ) -> anyhow::Result<()> {
         use zarrs::array::codec::GzipCodec;
         use zarrs::array::ArrayBuilder;
+        use zarrs::array::DataType;
         use zarrs::array::FillValue;
         // use zarrs::array::ZARR_NAN_F32;
 
         let chunk_size = self.chunk_size.min(vec.len());
 
         let fill = match dt {
-            Float32 => FillValue::from(zarrs::array::ZARR_NAN_F32),
-            UInt64 => FillValue::from(0u64),
+            DataType::Float32 => FillValue::from(zarrs::array::ZARR_NAN_F32),
+            DataType::UInt64 => FillValue::from(0u64),
+            DataType::String => FillValue::from(""),
             _ => FillValue::from(0),
         };
-
-        // dbg!(vec.len());
 
         let array = ArrayBuilder::new(
             vec![vec.len() as u64],              // array shape
@@ -566,13 +573,20 @@ impl SparseMtxData {
     /// Set row names for the matrix
     /// * `row_name_file`: a file each line contains row name words
     pub fn register_row_names(self: &mut Self, row_name_file: &str) {
-        todo!("register_row_names");
+        self.add_names("row_names", row_name_file, 0..self.max_row_name_idx, "_")
+            .expect("failed to add row names");
     }
 
     /// Set column names for the matrix
     /// * `column_name_file`: a file each line contains column name words
     pub fn register_column_names(self: &mut Self, column_name_file: &str) {
-        todo!("register_column_names");
+        self.add_names(
+            "column_names",
+            column_name_file,
+            0..self.max_column_name_idx,
+            "@",
+        )
+        .expect("failed to add column names");
     }
 
     fn add_names(
@@ -582,7 +596,26 @@ impl SparseMtxData {
         name_columns: Range<usize>,
         name_sep: &str,
     ) -> anyhow::Result<()> {
-        todo!("add_names");
+        let (_names, _) = read_lines_of_words(name_file, -1)?;
+
+        let name_columns = name_columns.clone().collect::<Vec<_>>();
+
+        let _names: Vec<String> = _names
+            .iter()
+            .map(|x| {
+                name_columns
+                    .iter()
+                    .filter_map(|&i| x.get(i))
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(name_sep)
+                    .parse()
+                    .expect("invalidrow name")
+            })
+            .collect();
+
+        self.new_filled_vector(group_name, DataType::String, _names)?;
+        Ok(())
     }
 
     /// Number of rows in the matrix
