@@ -3,4 +3,32 @@ name = "asap-embed"
 version = "0.1.0"
 edition = "2021"
 
+# [[bin]]
+# name = "asap-data"
+# path = "src/main.rs"
+
 [dependencies]
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+flate2 = { workspace = true }
+
+num_cpus = { workspace = true }
+rayon = { workspace = true }
+hdf5 = { workspace = true }
+hdf5-sys = { workspace = true }
+libz-sys = { workspace = true }
+tempfile = { workspace = true }
+rand = { workspace = true }
+
+zarrs = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+
+ndarray-linalg = { version = "0.16", features = ["openblas-system"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+candle-core = { version = "0.8.0", features = ["cuda","cudarc","cudnn"] }
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.8.0", features = ["metal","accelerate"] }
+
