@@ -1,4 +1,4 @@
-use crate::common_io::open_buf_writer;
+use crate::common_io::{open_buf_writer, write_lines};
 use crate::mtx_io::write_mtx_triplets;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use csv::{ReaderBuilder, WriterBuilder};
@@ -45,6 +45,8 @@ pub struct SimulateArgs {
 /// * `mtx_file`: output data mtx file (.gz recommended)
 /// * `dict_file`: true dictionary file
 /// * `prop_file`: true proportion file
+/// * `ln_batch_file`: log batch effect file
+/// * `memb_file`: true batch membership file
 ///
 /// ```text
 /// Y(i,j) ~ Poisson( delta(i, B(j)) * sum_k beta(i,k) * theta(k,j) )
@@ -55,6 +57,8 @@ pub fn generate_factored_gamma_data_mtx(
     mtx_file: &str,
     dict_file: &str,
     prop_file: &str,
+    ln_batch_file: &str,
+    memb_file: &str,
 ) -> anyhow::Result<()> {
     use ndarray_rand::rand_distr::Gamma;
     use ndarray_rand::rand_distr::Poisson;
@@ -67,11 +71,28 @@ pub fn generate_factored_gamma_data_mtx(
     let bb = args.batches.unwrap_or(1);
     let rseed = args.rseed.unwrap_or(42);
 
+    fn write_csv<T>(file: &str, data: &Array2<T>) -> anyhow::Result<()>
+    where
+        T: serde::Serialize,
+    {
+        let buf = open_buf_writer(file)?;
+        let mut writer = WriterBuilder::new().has_headers(false).from_writer(buf);
+        writer.serialize_array2(&data)?;
+        Ok(())
+    }
+
     let mut rng = rand::rngs::StdRng::seed_from_u64(rseed);
     let threshold = 0.5_f32;
 
     // 1. batch membership matrix
     let batch_membership: Array1<usize> = Array1::random(nn, Uniform::new(0, bb));
+
+    let batch_out: Vec<Box<str>> = batch_membership
+        .iter()
+        .map(|&x| Box::from(x.to_string()))
+        .collect();
+
+    write_lines(&batch_out, memb_file)?;
 
     // 2. batch effect matrix
     let ln_delta: Array2<f32> = Array2::random((dd, bb), StandardNormal);
@@ -81,13 +102,8 @@ pub fn generate_factored_gamma_data_mtx(
     let beta: Array2<f32> = Array2::random((dd, kk), Gamma::<f32>::new(1.0, 1.0 / (dd as f32))?);
     let theta: Array2<f32> = Array2::random((kk, nn), Gamma::<f32>::new(1.0, 1.0 / (kk as f32))?);
 
-    fn write_csv(file: &str, data: &Array2<f32>) -> anyhow::Result<()> {
-        let buf = open_buf_writer(file)?;
-        let mut writer = WriterBuilder::new().has_headers(false).from_writer(buf);
-        writer.serialize_array2(&data)?;
-        Ok(())
-    }
-
+    // write_csv(&memb_file, &batch_membership)?;
+    write_csv(&ln_batch_file, &ln_delta)?;
     write_csv(&dict_file, &beta)?;
     write_csv(&prop_file, &theta)?;
 

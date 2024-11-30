@@ -2,7 +2,7 @@ use asap_data::simulate::*;
 use asap_data::sparse_matrix_zarr::SparseMtxData;
 use ndarray::prelude::*;
 use ndarray_rand::RandomExt;
-use rayon::str::ParallelString;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
 use tempfile::tempdir;
@@ -48,14 +48,26 @@ fn simulate() -> anyhow::Result<()> {
     let mtx_file = mtx_file.to_str().unwrap().to_string();
     let dict_file = mtx_file.replace(".mtx.gz", ".dict.gz");
     let prop_file = mtx_file.replace(".mtx.gz", ".prop.gz");
+    let memb_file = mtx_file.replace(".mtx.gz", ".memb.gz");
+    let ln_batch_file = mtx_file.replace(".mtx.gz", ".ln_batch.gz");
 
-    generate_factored_gamma_data_mtx(&args, &mtx_file, &dict_file, &prop_file)?;
+    generate_factored_gamma_data_mtx(
+        &args,
+        &mtx_file,
+        &dict_file,
+        &prop_file,
+        &ln_batch_file,
+        &memb_file,
+    )?;
 
-    let data =
-        measure_time(|| SparseMtxData::from_mtx_file(&mtx_file, None, None));
+    let data = measure_time(|| SparseMtxData::from_mtx_file(&mtx_file, None, None));
     let data = data?;
 
     data.remove_backend_file()?;
+
+    if let Some(temp_dir) = Path::new(&mtx_file).parent() {
+        std::fs::remove_dir_all(temp_dir)?;
+    }
 
     Ok(())
 }
