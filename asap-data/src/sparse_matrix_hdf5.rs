@@ -150,12 +150,65 @@ impl SparseMtxData {
                     let start = indptr[j_data] as usize;
                     let end = indptr[j_data + 1] as usize;
 
-                    let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
-                    let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
-                    for k in 0..(end - start) {
-                        let x_ij = data_slice[k];
-                        let ii = indices_slice[k] as usize;
-                        ret[(ii, jj)] = x_ij;
+                    if start < end {
+                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
+                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+                        for k in 0..(end - start) {
+                            let x_ij = data_slice[k];
+                            let ii = indices_slice[k] as usize;
+                            ret[(ii, jj)] = x_ij;
+                        }
+                    }
+                }
+            }
+            Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
+    /// Read rows within the range and return dense `ndarray::Array2`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    pub fn read_rows<I>(self: &Self, rows: I) -> anyhow::Result<Array2<f32>>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        // need to open backend again?
+        // let backend = hdf5::File::open(&self.file_name)?;
+        let by_row = self.hdf5_backend.group("/by_row")?;
+
+        debug_assert!(self.by_row_indptr.len() > 0);
+        // let indptr = by_row.dataset("indptr")?.read_1d::<u64>()?;
+
+        let indptr = &self.by_row_indptr;
+        let data = by_row.dataset("data")?;
+        let indices = by_row.dataset("indices")?;
+
+        let rows_vec = rows.into_iter().collect::<Vec<usize>>();
+        let nrow_out = rows_vec.len();
+
+        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
+            let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
+
+            for (ii, &i_data) in rows_vec.iter().enumerate() {
+                if i_data < nrow {
+                    debug_assert!((i_data + 1) < indptr.len());
+
+                    let start = indptr[i_data] as usize;
+                    let end = indptr[i_data + 1] as usize;
+
+                    if start < end {
+                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
+                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+
+                        for k in 0..(end - start) {
+                            let x_ij = data_slice[k];
+                            let jj = indices_slice[k] as usize;
+                            ret[(ii, jj)] = x_ij;
+                        }
                     }
                 }
             }
@@ -354,7 +407,7 @@ impl SparseMtxData {
 
         let mtx_shape = (nrow, ncol, nnz);
         self.record_mtx_shape(Some(mtx_shape))?;
-        self.record_triplets_csr(&mut mtx_triplets)
+        self.record_triplets_by_row(&mut mtx_triplets)
     }
 
     /// Add ndarray to HDF5 backend by column (CSC format)
@@ -374,7 +427,7 @@ impl SparseMtxData {
 
         let mtx_shape = (nrow, ncol, nnz);
         self.record_mtx_shape(Some(mtx_shape))?;
-        self.record_triplets_csc(&mut mtx_triplets)
+        self.record_triplets_by_col(&mut mtx_triplets)
     }
 
     /// Read mtx file and populate the data into HDF5 for faster row-by-row access
@@ -387,7 +440,7 @@ impl SparseMtxData {
         if mtx_triplets.len() == 0 {
             return Err(anyhow::anyhow!("No data in mtx file"));
         }
-        self.record_triplets_csr(&mut mtx_triplets)
+        self.record_triplets_by_row(&mut mtx_triplets)
     }
 
     /// Read mtx file and populate the data into HDF5 for faster column-by-column access
@@ -399,57 +452,140 @@ impl SparseMtxData {
             return Err(anyhow::anyhow!("No data in mtx file"));
         }
         self.record_mtx_shape(mtx_shape)?;
-        self.record_triplets_csc(&mut mtx_triplets)
+        self.record_triplets_by_col(&mut mtx_triplets)
     }
 
     /// Helper function to add triplets to HDF5 backend by row (CSR format)
-    fn record_triplets_csr(
+    fn record_triplets_by_row(
         &mut self,
         row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
     ) -> anyhow::Result<()> {
+        debug_assert!(row_col_val_triplets.len() > 0);
+
         row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
         row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
+        // dbg!(&row_col_val_triplets);
 
-        let mut csr_rowptr = vec![0];
-        let mut csr_cols = vec![row_col_val_triplets[0].1];
-        let mut csr_vals = vec![row_col_val_triplets[0].2];
+        let mut csr_rowptr = vec![];
+        let mut csr_cols = vec![];
+        let mut csr_vals = vec![];
 
-        for i in 1..row_col_val_triplets.len() {
-            for _ in row_col_val_triplets[i - 1].0..row_col_val_triplets[i].0 {
+        let nrow = self.num_rows().expect("should have `nrow`");
+        let nnz = row_col_val_triplets.len();
+
+        // fill in rowptr 0 to the first row index
+        let first = row_col_val_triplets[0].0;
+        for _ in 0..first {
+            csr_rowptr.push(0);
+        }
+
+        // for the first row/triplet
+        csr_rowptr.push(0);
+        csr_cols.push(row_col_val_triplets[0].1);
+        csr_vals.push(row_col_val_triplets[0].2);
+
+        for i in 1..nnz {
+            let lb = row_col_val_triplets[i - 1].0;
+            let ub = row_col_val_triplets[i].0;
+            for _ in lb..ub {
                 csr_rowptr.push(i);
             }
             csr_cols.push(row_col_val_triplets[i].1);
             csr_vals.push(row_col_val_triplets[i].2);
         }
 
-        csr_rowptr.push(row_col_val_triplets.len()); // mark the end
+        // fill in the rest of the rowptr
+        let last = row_col_val_triplets[nnz - 1].0 as usize;
+        for _ in last..nrow {
+            csr_rowptr.push(nnz);
+        }
 
         self.record_csr_dataset_backend(&csr_cols, &csr_vals, &csr_rowptr)
+        // row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
+        // row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
+
+        // let mut csr_rowptr = vec![0];
+        // let mut csr_cols = vec![row_col_val_triplets[0].1];
+        // let mut csr_vals = vec![row_col_val_triplets[0].2];
+
+        // for i in 1..row_col_val_triplets.len() {
+        //     for _ in row_col_val_triplets[i - 1].0..row_col_val_triplets[i].0 {
+        //         csr_rowptr.push(i);
+        //     }
+        //     csr_cols.push(row_col_val_triplets[i].1);
+        //     csr_vals.push(row_col_val_triplets[i].2);
+        // }
+
+        // csr_rowptr.push(row_col_val_triplets.len()); // mark the end
+
+        // self.record_csr_dataset_backend(&csr_cols, &csr_vals, &csr_rowptr)
     }
 
     /// Helper function to add triplets to HDF5 backend by column (CSC format)
-    fn record_triplets_csc(
+    fn record_triplets_by_col(
         &mut self,
         row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
     ) -> anyhow::Result<()> {
+        debug_assert!(row_col_val_triplets.len() > 0);
+
         row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
         row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
+        // dbg!(&row_col_val_triplets);
 
-        let mut csc_colptr = vec![0];
-        let mut csc_rows = vec![row_col_val_triplets[0].0 as u64];
-        let mut csc_vals = vec![row_col_val_triplets[0].2];
+        let mut csc_colptr = vec![];
+        let mut csc_rows = vec![];
+        let mut csc_vals = vec![];
 
-        for i in 1..row_col_val_triplets.len() {
-            for _ in row_col_val_triplets[i - 1].1..row_col_val_triplets[i].1 {
+        let ncol = self.num_columns().expect("should have `ncol`");
+        let nnz = row_col_val_triplets.len();
+
+        // fill in colptr 0 to the first column index
+        let first = row_col_val_triplets[0].1;
+        for _ in 0..first {
+            csc_colptr.push(0);
+        }
+
+        // for the first column/triplet
+        csc_colptr.push(0);
+        csc_rows.push(row_col_val_triplets[0].0);
+        csc_vals.push(row_col_val_triplets[0].2);
+
+        for i in 1..nnz {
+            let lb = row_col_val_triplets[i - 1].1;
+            let ub = row_col_val_triplets[i].1;
+            for _ in lb..ub {
                 csc_colptr.push(i);
             }
             csc_rows.push(row_col_val_triplets[i].0 as u64);
             csc_vals.push(row_col_val_triplets[i].2);
         }
 
-        csc_colptr.push(row_col_val_triplets.len()); // mark the end
+        // fill in the rest of the colptr
+        let last = row_col_val_triplets[nnz - 1].1 as usize;
+        for _ in last..ncol {
+            csc_colptr.push(nnz);
+        }
+        // dbg!(&csc_colptr);
 
         self.record_csc_dataset_backend(&csc_rows, &csc_vals, &csc_colptr)
+        // row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
+        // row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
+
+        // let mut csc_colptr = vec![0];
+        // let mut csc_rows = vec![row_col_val_triplets[0].0 as u64];
+        // let mut csc_vals = vec![row_col_val_triplets[0].2];
+
+        // for i in 1..row_col_val_triplets.len() {
+        //     for _ in row_col_val_triplets[i - 1].1..row_col_val_triplets[i].1 {
+        //         csc_colptr.push(i);
+        //     }
+        //     csc_rows.push(row_col_val_triplets[i].0 as u64);
+        //     csc_vals.push(row_col_val_triplets[i].2);
+        // }
+
+        // csc_colptr.push(row_col_val_triplets.len()); // mark the end
+
+        // self.record_csc_dataset_backend(&csc_rows, &csc_vals, &csc_colptr)
     }
 
     /// Helper function to add CSR dataset to HDF5 backend

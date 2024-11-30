@@ -102,7 +102,7 @@ impl SparseMtxData {
         if mtx_triplets.len() == 0 {
             return Err(anyhow::anyhow!("No data in mtx file"));
         }
-        self.record_triplets_csr(&mut mtx_triplets)
+        self.record_triplets_by_row(&mut mtx_triplets)
     }
 
     /// Read mtx file and populate the data for faster column-by-column access
@@ -114,7 +114,7 @@ impl SparseMtxData {
             return Err(anyhow::anyhow!("No data in mtx file"));
         }
         self.record_mtx_shape(mtx_shape)?;
-        self.record_triplets_csc(&mut mtx_triplets)
+        self.record_triplets_by_col(&mut mtx_triplets)
     }
 
     /// Create a new `SparseMtxData` instance from an `ndarray` array
@@ -250,6 +250,65 @@ impl SparseMtxData {
         Ok(())
     }
 
+    /// Read rows within the range and return dense `ndarray::Array2`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    pub fn read_rows<I>(self: &Self, rows: I) -> anyhow::Result<Array2<f32>>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        use zarrs::array::Array as ZArray;
+        use zarrs::array_subset::ArraySubset;
+
+        debug_assert!(self.by_row_indptr.len() > 0);
+        let indptr = &self.by_row_indptr;
+
+        let rows_vec = rows.into_iter().collect::<Vec<usize>>();
+        let nrow_out = rows_vec.len();
+
+        let key = "/by_row/data";
+        let data = ZArray::open(self.store.clone(), key)?;
+        let key = "/by_row/indices";
+        let indices = ZArray::open(self.store.clone(), key)?;
+
+        if let (Some(nrow), Some(ncol)) = (self.num_rows(), self.num_columns()) {
+            let nrow = nrow as usize;
+            let ncol = ncol as usize;
+
+            debug_assert!(indptr.len() > nrow);
+
+            let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
+
+            for (ii, &i_data) in rows_vec.iter().enumerate() {
+                if i_data < nrow {
+                    debug_assert!((i_data + 1) < indptr.len());
+
+                    // [start, end)
+                    let start = indptr[i_data];
+                    let end = indptr[i_data + 1];
+
+                    if start < end {
+                        let subset = ArraySubset::new_with_ranges(&[start..end]);
+                        let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
+                        let indices_slice =
+                            indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
+
+                        for k in 0..(end - start) {
+                            let x_ij = data_slice[k as usize];
+                            let jj = indices_slice[k as usize] as usize;
+                            ret[(ii, jj)] = x_ij;
+                        }
+                    }
+                }
+            }
+            Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
     /// Read columns within the range and return dense `ndarray::Array2`
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
@@ -275,23 +334,31 @@ impl SparseMtxData {
             let nrow = nrow as usize;
             let ncol = ncol as usize;
 
+            debug_assert!(indptr.len() > ncol);
+
             let mut ret: Array2<f32> = Array2::zeros((nrow, ncol_out));
+
+            // dbg!(&columns_vec);
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
                 if j_data < ncol {
                     debug_assert!((j_data + 1) < indptr.len());
 
+                    // [start, end)
                     let start = indptr[j_data];
                     let end = indptr[j_data + 1];
 
-                    let subset = ArraySubset::new_with_ranges(&[start..end]);
-                    let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
-                    let indices_slice = indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
+                    if start < end {
+                        let subset = ArraySubset::new_with_ranges(&[start..end]);
+                        let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
+                        let indices_slice =
+                            indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
 
-                    for k in 0..(end - start) {
-                        let x_ij = data_slice[k as usize];
-                        let ii = indices_slice[k as usize] as usize;
-                        ret[(ii, jj)] = x_ij;
+                        for k in 0..(end - start) {
+                            let x_ij = data_slice[k as usize];
+                            let ii = indices_slice[k as usize] as usize;
+                            ret[(ii, jj)] = x_ij;
+                        }
                     }
                 }
             }
@@ -355,7 +422,7 @@ impl SparseMtxData {
 
         // dbg!(format!("populated: {} elements", mtx_triplets.len()));
 
-        self.record_triplets_csr(&mut mtx_triplets)
+        self.record_triplets_by_row(&mut mtx_triplets)
     }
 
     /// Add ndarray to zarr backend by column (CSC format)
@@ -378,7 +445,7 @@ impl SparseMtxData {
 
         // dbg!(format!("populated: {} elements", mtx_triplets.len()));
 
-        self.record_triplets_csc(&mut mtx_triplets)
+        self.record_triplets_by_col(&mut mtx_triplets)
     }
 
     //////////////
@@ -386,50 +453,100 @@ impl SparseMtxData {
     //////////////
 
     /// Helper function to add triplets to zarr backend by row (CSR format)
-    fn record_triplets_csr(
+    fn record_triplets_by_row(
         &mut self,
         row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
     ) -> anyhow::Result<()> {
+        debug_assert!(row_col_val_triplets.len() > 0);
+
         row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
         row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
+        // dbg!(&row_col_val_triplets);
 
-        let mut csr_rowptr = vec![0u64];
-        let mut csr_cols = vec![row_col_val_triplets[0].1];
-        let mut csr_vals = vec![row_col_val_triplets[0].2];
+        let mut csr_rowptr = vec![];
+        let mut csr_cols = vec![];
+        let mut csr_vals = vec![];
 
-        for i in 1..row_col_val_triplets.len() {
-            for _ in row_col_val_triplets[i - 1].0..row_col_val_triplets[i].0 {
-                csr_rowptr.push(csr_vals.len() as u64);
-            }
-            csr_cols.push(row_col_val_triplets[i].1);
-            csr_vals.push(row_col_val_triplets[i].2);
+        let nrow = self.num_rows().expect("should have `nrow`");
+        let nnz = row_col_val_triplets.len();
+
+        // fill in rowptr 0 to the first row index
+        let first = row_col_val_triplets[0].0;
+        for _ in 0..first {
+            csr_rowptr.push(0);
         }
-        csr_rowptr.push(csr_vals.len() as u64);
+
+        // for the first row/triplet
+        csr_rowptr.push(0);
+        csr_cols.push(row_col_val_triplets[0].1);
+        csr_vals.push(row_col_val_triplets[0].2);
+
+        for i in 1..nnz {
+            let lb = row_col_val_triplets[i - 1].0;
+            let ub = row_col_val_triplets[i].0;
+            for _ in lb..ub {
+                csr_rowptr.push(i as u64);
+            }
+	    csr_cols.push(row_col_val_triplets[i].1);
+	    csr_vals.push(row_col_val_triplets[i].2);
+        }
+
+        // fill in the rest of the rowptr
+        let last = row_col_val_triplets[nnz - 1].0;
+        let m = nnz as u64;
+        for _ in last..nrow {
+            csr_rowptr.push(m);
+        }
 
         self.record_csr_dataset_backend(&csr_cols, &csr_vals, &csr_rowptr)
     }
 
     /// Helper function to add triplets to HDF5 backend by column (CSC format)
-    fn record_triplets_csc(
+    fn record_triplets_by_col(
         &mut self,
         row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
     ) -> anyhow::Result<()> {
+        debug_assert!(row_col_val_triplets.len() > 0);
+
         row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
         row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
+        // dbg!(&row_col_val_triplets);
 
-        let mut csc_colptr = vec![0u64];
-        let mut csc_rows = vec![row_col_val_triplets[0].0];
-        let mut csc_vals = vec![row_col_val_triplets[0].2];
+        let mut csc_colptr = vec![];
+        let mut csc_rows = vec![];
+        let mut csc_vals = vec![];
 
-        for i in 1..row_col_val_triplets.len() {
-            for _ in row_col_val_triplets[i - 1].1..row_col_val_triplets[i].1 {
+        let ncol = self.num_columns().expect("should have `ncol`");
+        let nnz = row_col_val_triplets.len();
+
+        // fill in colptr 0 to the first column index
+        let first = row_col_val_triplets[0].1;
+        for _ in 0..first {
+            csc_colptr.push(0);
+        }
+
+        // for the first column/triplet
+        csc_colptr.push(0);
+        csc_rows.push(row_col_val_triplets[0].0);
+        csc_vals.push(row_col_val_triplets[0].2);
+
+        for i in 1..nnz {
+            let lb = row_col_val_triplets[i - 1].1;
+            let ub = row_col_val_triplets[i].1;
+            for _ in lb..ub {
                 csc_colptr.push(i as u64);
             }
             csc_rows.push(row_col_val_triplets[i].0 as u64);
             csc_vals.push(row_col_val_triplets[i].2);
         }
 
-        csc_colptr.push(row_col_val_triplets.len() as u64); // mark the end
+        // fill in the rest of the colptr
+        let last = row_col_val_triplets[nnz - 1].1;
+        let m = nnz as u64;
+        for _ in last..ncol {
+            csc_colptr.push(m);
+        }
+        // dbg!(&csc_colptr);
 
         self.record_csc_dataset_backend(&csc_rows, &csc_vals, &csc_colptr)
     }
@@ -448,7 +565,7 @@ impl SparseMtxData {
     /// ```
     fn record_csr_dataset_backend(
         self: &mut Self,
-        csr_rows: &Vec<u64>,
+        csr_cols: &Vec<u64>,
         csr_vals: &Vec<f32>,
         csr_rowptr: &Vec<u64>,
     ) -> anyhow::Result<()> {
@@ -459,7 +576,7 @@ impl SparseMtxData {
         let key = "/by_row/data";
         self.new_filled_vector(key, DataType::Float32, csr_vals.clone())?;
         let key = "/by_row/indices";
-        self.new_filled_vector(key, DataType::UInt64, csr_rows.clone())?;
+        self.new_filled_vector(key, DataType::UInt64, csr_cols.clone())?;
         let key = "/by_row/indptr";
         self.new_filled_vector(key, DataType::UInt64, csr_rowptr.clone())?;
 
@@ -501,11 +618,11 @@ impl SparseMtxData {
     /// Helper function to create a filled 1D array with the given
     /// data type and fill value. This is the most useful function to
     /// create a vector like data.
-    /// 
+    ///
     /// * `key` - the key name
     /// * `dt` - the data type among `DataType`
     /// * `vec` - the vector to be stored
-    /// 
+    ///
     fn new_filled_vector<V: zarrs::array::Element>(
         self: &mut Self,
         key: &str,

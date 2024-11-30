@@ -1,6 +1,8 @@
+use asap_data::simulate::*;
 use asap_data::sparse_matrix_hdf5::SparseMtxData;
 use ndarray::prelude::*;
 use ndarray_rand::RandomExt;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
 use tempfile::tempdir;
@@ -103,6 +105,53 @@ fn random_ndarray_loading() -> anyhow::Result<()> {
 
         assert_eq!(a, b);
         assert_eq!(b, c);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn simulate() -> anyhow::Result<()> {
+    let args = SimulateArgs {
+        rows: 7,
+        cols: 11,
+        factors: None,
+        batches: None,
+        rseed: None,
+    };
+
+    let mtx_file = create_temp_dir_file(".mtx.gz")?;
+    let mtx_file = mtx_file.to_str().unwrap().to_string();
+    let dict_file = mtx_file.replace(".mtx.gz", ".dict.gz");
+    let prop_file = mtx_file.replace(".mtx.gz", ".prop.gz");
+    let memb_file = mtx_file.replace(".mtx.gz", ".memb.gz");
+    let ln_batch_file = mtx_file.replace(".mtx.gz", ".ln_batch.gz");
+
+    generate_factored_gamma_data_mtx(
+        &args,
+        &mtx_file,
+        &dict_file,
+        &prop_file,
+        &ln_batch_file,
+        &memb_file,
+    )?;
+
+    let data = measure_time(|| SparseMtxData::from_mtx_file(&mtx_file, None, Some(true)));
+    let data = data?;
+
+    let n = data.num_columns().expect("failed to get #col") as usize;
+    let m = data.num_rows().expect("failed to get #row") as usize;
+
+    let yy: Array2<f32> = data.read_columns(0..n)?;
+    dbg!(&yy);
+
+    let zz: Array2<f32> = data.read_rows(0..m)?;
+    dbg!(&zz);
+
+    data.remove_backend_file()?;
+
+    if let Some(temp_dir) = Path::new(&mtx_file).parent() {
+        std::fs::remove_dir_all(temp_dir)?;
     }
 
     Ok(())
