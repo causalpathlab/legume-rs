@@ -1,7 +1,7 @@
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -12,14 +12,28 @@ use tempfile::tempdir;
 ///
 #[allow(dead_code)]
 pub fn read_lines(input_file: &str) -> anyhow::Result<Vec<Box<str>>> {
-    // buffered reader
     let buf: Box<dyn BufRead> = open_buf_reader(input_file)?;
-
     let mut lines = vec![];
     for x in buf.lines() {
         lines.push(x?.into_boxed_str());
     }
     Ok(lines)
+}
+
+///
+/// Write every line into the output_file
+///
+/// * `lines` - vector of lines
+/// * `output_file` - file name--either gzipped or not
+///
+#[allow(dead_code)]
+pub fn write_lines(lines: &Vec<Box<str>>, output_file: &str) -> anyhow::Result<()> {
+    let mut buf: Box<dyn Write> = open_buf_writer(output_file)?;
+    for l in lines {
+        writeln!(buf, "{}", l)?;
+    }
+    buf.flush()?;
+    Ok(())
 }
 
 /// Read in each line by line, then parse each line into a vector or
