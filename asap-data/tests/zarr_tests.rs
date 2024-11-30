@@ -1,3 +1,4 @@
+use asap_data::common_io::read_lines;
 use asap_data::simulate::*;
 use asap_data::sparse_matrix_zarr::SparseMtxData;
 use ndarray::prelude::*;
@@ -37,10 +38,10 @@ where
 #[test]
 fn simulate() -> anyhow::Result<()> {
     let args = SimulateArgs {
-        rows: 10,
-        cols: 100,
-        factors: Some(3),
-        batches: Some(2),
+        rows: 7,
+        cols: 11,
+        factors: None,
+        batches: None,
         rseed: None,
     };
 
@@ -60,8 +61,24 @@ fn simulate() -> anyhow::Result<()> {
         &memb_file,
     )?;
 
-    let data = measure_time(|| SparseMtxData::from_mtx_file(&mtx_file, None, None));
+    let data = measure_time(|| SparseMtxData::from_mtx_file(&mtx_file, None, Some(true)));
     let data = data?;
+
+    let n = data.num_columns().expect("failed to get #col") as usize;
+    let m = data.num_rows().expect("failed to get #row") as usize;
+
+    let batch_membership = read_lines(&memb_file)?
+        .iter()
+        .map(|x| x.parse::<usize>().unwrap())
+        .collect::<Vec<usize>>();
+
+    assert_eq!(batch_membership.len(), n);
+
+    let yy: Array2<f32> = data.read_columns(0..n)?;
+    dbg!(&yy);
+
+    let zz: Array2<f32> = data.read_rows(0..m)?;
+    dbg!(&zz);
 
     data.remove_backend_file()?;
 
@@ -77,7 +94,7 @@ fn random_mtx_loading() -> anyhow::Result<()> {
     // 1. generate a random array2
     let a = Array::random((9, 1111), rand::distributions::Uniform::new(0., 1.));
 
-    if let Ok(data) = SparseMtxData::from_ndarray(&a, None, None) {
+    if let Ok(data) = SparseMtxData::from_ndarray(&a, None, Some(true)) {
         let a = a.select(Axis(1), &[7, 8, 9]);
         dbg!(&a);
 
@@ -86,8 +103,9 @@ fn random_mtx_loading() -> anyhow::Result<()> {
         measure_time(|| data.to_mtx_file(mtx_file.to_str().unwrap()))?;
 
         // 3. create another data from the mtx file
-        let data =
-            measure_time(|| SparseMtxData::from_mtx_file(mtx_file.to_str().unwrap(), None, None));
+        let data = measure_time(|| {
+            SparseMtxData::from_mtx_file(mtx_file.to_str().unwrap(), None, Some(true))
+        });
         let data = data?;
 
         // 4. read the column 2
