@@ -1,5 +1,6 @@
 use crate::common_io::*;
 use crate::mtx_io::*;
+use crate::sparse_io::*;
 use ndarray::prelude::*;
 use std::ops::Range;
 use std::sync::Arc;
@@ -38,12 +39,145 @@ pub struct SparseMtxData {
     by_row_indptr: Vec<u64>,
 }
 
+impl SparseIo for SparseMtxData {
+    /// Read columns within the range and return dense `ndarray::Array2`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns<I>(self: &Self, columns: I) -> anyhow::Result<Array2<f32>>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        use zarrs::array::Array as ZArray;
+        use zarrs::array_subset::ArraySubset;
+
+        debug_assert!(self.by_column_indptr.len() > 0);
+        let indptr = &self.by_column_indptr;
+
+        let columns_vec = columns.into_iter().collect::<Vec<usize>>();
+        let ncol_out = columns_vec.len();
+
+        let key = "/by_column/data";
+        let data = ZArray::open(self.store.clone(), key)?;
+        let key = "/by_column/indices";
+        let indices = ZArray::open(self.store.clone(), key)?;
+
+        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
+            let nrow = nrow as usize;
+            let ncol = ncol as usize;
+
+            debug_assert!(indptr.len() > ncol);
+
+            let mut ret: Array2<f32> = Array2::zeros((nrow, ncol_out));
+
+            for (jj, &j_data) in columns_vec.iter().enumerate() {
+                if j_data < ncol {
+                    debug_assert!((j_data + 1) < indptr.len());
+
+                    // [start, end)
+                    let start = indptr[j_data];
+                    let end = indptr[j_data + 1];
+
+                    if start < end {
+                        let subset = ArraySubset::new_with_ranges(&[start..end]);
+                        let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
+                        let indices_slice =
+                            indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
+
+                        for k in 0..(end - start) {
+                            let x_ij = data_slice[k as usize];
+                            let ii = indices_slice[k as usize] as usize;
+                            ret[(ii, jj)] = x_ij;
+                        }
+                    }
+                }
+            }
+            Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
+    /// Read rows within the range and return dense `ndarray::Array2`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows<I>(self: &Self, rows: I) -> anyhow::Result<Array2<f32>>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        use zarrs::array::Array as ZArray;
+        use zarrs::array_subset::ArraySubset;
+
+        debug_assert!(self.by_row_indptr.len() > 0);
+        let indptr = &self.by_row_indptr;
+
+        let rows_vec = rows.into_iter().collect::<Vec<usize>>();
+        let nrow_out = rows_vec.len();
+
+        let key = "/by_row/data";
+        let data = ZArray::open(self.store.clone(), key)?;
+        let key = "/by_row/indices";
+        let indices = ZArray::open(self.store.clone(), key)?;
+
+        if let (Some(nrow), Some(ncol)) = (self.num_rows(), self.num_columns()) {
+            let nrow = nrow as usize;
+            let ncol = ncol as usize;
+
+            debug_assert!(indptr.len() > nrow);
+
+            let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
+
+            for (ii, &i_data) in rows_vec.iter().enumerate() {
+                if i_data < nrow {
+                    debug_assert!((i_data + 1) < indptr.len());
+
+                    // [start, end)
+                    let start = indptr[i_data];
+                    let end = indptr[i_data + 1];
+
+                    if start < end {
+                        let subset = ArraySubset::new_with_ranges(&[start..end]);
+                        let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
+                        let indices_slice =
+                            indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
+
+                        for k in 0..(end - start) {
+                            let x_ij = data_slice[k as usize];
+                            let jj = indices_slice[k as usize] as usize;
+                            ret[(ii, jj)] = x_ij;
+                        }
+                    }
+                }
+            }
+            Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+}
+
 #[allow(dead_code)]
 impl SparseMtxData {
     /// Create `SparseMtxData` instance from an existing zarr backend file
     /// * `zarr_file` - zarr backend file
     pub fn open(backend_file: &str) -> anyhow::Result<Self> {
         let store = Arc::new(FilesystemStore::new(backend_file)?);
+
+        if let (Some(nrow), Some(ncol), Some(nnz)) = (
+            Self::_num_rows(store.clone()),
+            Self::_num_columns(store.clone()),
+            Self::_num_nnz(store.clone()),
+        ) {
+            dbg!(format!(
+                "#rows: {}, #columns: {}, #non-zeros: {}",
+                nrow, ncol, nnz
+            ));
+        } else {
+            anyhow::bail!("Couldn't figure out the size of this sparse matrix data");
+        }
 
         let mut ret = Self {
             store: store.clone(),
@@ -144,18 +278,6 @@ impl SparseMtxData {
         Ok(ret)
     }
 
-    // pub fn from_hdf5_file(
-    //     hdf5_file: &str,
-    //     backend_file: Option<&str>,
-    //     index_by_row: Option<bool>,
-    // ) -> anyhow::Result<Self> {
-    //     todo!("need to implement")
-    // }
-
-    // pub fn to_hdf5_file(&self, hdf5_file: &str) -> anyhow::Result<()> {
-    //     todo!("export to hdf5");
-    // }
-
     /// Export the data to a mtx file. This will take time.
     /// * `mtx_file`: mtx file to be written
     pub fn to_mtx_file(&self, mtx_file: &str) -> anyhow::Result<()> {
@@ -200,10 +322,10 @@ impl SparseMtxData {
                 }
             }
             buf.flush()?;
-            println!(
-                "{}: {} rows, {} columns, {} non-zeros",
-                mtx_file, nrow, ncol, nnz
-            );
+            // println!(
+            //     "{}: {} rows, {} columns, {} non-zeros",
+            //     mtx_file, nrow, ncol, nnz
+            // );
 
             Ok(())
         } else {
@@ -248,126 +370,6 @@ impl SparseMtxData {
             self.by_column_indptr.extend(indptr_vec);
         }
         Ok(())
-    }
-
-    /// Read rows within the range and return dense `ndarray::Array2`
-    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    pub fn read_rows<I>(self: &Self, rows: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        use zarrs::array::Array as ZArray;
-        use zarrs::array_subset::ArraySubset;
-
-        debug_assert!(self.by_row_indptr.len() > 0);
-        let indptr = &self.by_row_indptr;
-
-        let rows_vec = rows.into_iter().collect::<Vec<usize>>();
-        let nrow_out = rows_vec.len();
-
-        let key = "/by_row/data";
-        let data = ZArray::open(self.store.clone(), key)?;
-        let key = "/by_row/indices";
-        let indices = ZArray::open(self.store.clone(), key)?;
-
-        if let (Some(nrow), Some(ncol)) = (self.num_rows(), self.num_columns()) {
-            let nrow = nrow as usize;
-            let ncol = ncol as usize;
-
-            debug_assert!(indptr.len() > nrow);
-
-            let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
-
-            for (ii, &i_data) in rows_vec.iter().enumerate() {
-                if i_data < nrow {
-                    debug_assert!((i_data + 1) < indptr.len());
-
-                    // [start, end)
-                    let start = indptr[i_data];
-                    let end = indptr[i_data + 1];
-
-                    if start < end {
-                        let subset = ArraySubset::new_with_ranges(&[start..end]);
-                        let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
-                        let indices_slice =
-                            indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
-
-                        for k in 0..(end - start) {
-                            let x_ij = data_slice[k as usize];
-                            let jj = indices_slice[k as usize] as usize;
-                            ret[(ii, jj)] = x_ij;
-                        }
-                    }
-                }
-            }
-            Ok(ret)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
-
-    /// Read columns within the range and return dense `ndarray::Array2`
-    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    pub fn read_columns<I>(self: &Self, columns: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        use zarrs::array::Array as ZArray;
-        use zarrs::array_subset::ArraySubset;
-
-        debug_assert!(self.by_column_indptr.len() > 0);
-        let indptr = &self.by_column_indptr;
-
-        let columns_vec = columns.into_iter().collect::<Vec<usize>>();
-        let ncol_out = columns_vec.len();
-
-        let key = "/by_column/data";
-        let data = ZArray::open(self.store.clone(), key)?;
-        let key = "/by_column/indices";
-        let indices = ZArray::open(self.store.clone(), key)?;
-
-        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
-            let nrow = nrow as usize;
-            let ncol = ncol as usize;
-
-            debug_assert!(indptr.len() > ncol);
-
-            let mut ret: Array2<f32> = Array2::zeros((nrow, ncol_out));
-
-            // dbg!(&columns_vec);
-
-            for (jj, &j_data) in columns_vec.iter().enumerate() {
-                if j_data < ncol {
-                    debug_assert!((j_data + 1) < indptr.len());
-
-                    // [start, end)
-                    let start = indptr[j_data];
-                    let end = indptr[j_data + 1];
-
-                    if start < end {
-                        let subset = ArraySubset::new_with_ranges(&[start..end]);
-                        let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
-                        let indices_slice =
-                            indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
-
-                        for k in 0..(end - start) {
-                            let x_ij = data_slice[k as usize];
-                            let ii = indices_slice[k as usize] as usize;
-                            ret[(ii, jj)] = x_ij;
-                        }
-                    }
-                }
-            }
-            Ok(ret)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
     }
 
     /// Helper function to create a new zarr backend file
@@ -487,8 +489,8 @@ impl SparseMtxData {
             for _ in lb..ub {
                 csr_rowptr.push(i as u64);
             }
-	    csr_cols.push(row_col_val_triplets[i].1);
-	    csr_vals.push(row_col_val_triplets[i].2);
+            csr_cols.push(row_col_val_triplets[i].1);
+            csr_vals.push(row_col_val_triplets[i].2);
         }
 
         // fill in the rest of the rowptr

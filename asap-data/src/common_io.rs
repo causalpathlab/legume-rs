@@ -105,13 +105,13 @@ pub fn open_buf_reader(input_file: &str) -> anyhow::Result<Box<dyn BufRead>> {
     let ext = Path::new(input_file).extension().and_then(|x| x.to_str());
     match ext {
         Some("gz") => {
-            dbg!(input_file);
+            // dbg!(input_file);
             let input_file = File::open(input_file)?;
             let decoder = GzDecoder::new(input_file);
             Ok(Box::new(BufReader::new(decoder)))
         }
         _ => {
-            dbg!(input_file);
+            // dbg!(input_file);
             let input_file = File::open(input_file)?;
             Ok(Box::new(BufReader::new(input_file)))
         }
@@ -139,6 +139,16 @@ pub fn open_buf_writer(output_file: &str) -> anyhow::Result<Box<dyn std::io::Wri
 }
 
 #[allow(dead_code)]
+/// Create a directory if needed
+/// * `file` - file name
+pub fn mkdir(file: &str) -> anyhow::Result<()> {
+    let path = Path::new(file);
+    let dir = path.parent().ok_or(anyhow::anyhow!("no parent"))?;
+    std::fs::create_dir_all(dir)?;
+    Ok(())
+}
+
+#[allow(dead_code)]
 /// Create a temporary directory and suggest a file name
 /// * `suffix` - suffix of the file name
 pub fn create_temp_dir_file(suffix: &str) -> anyhow::Result<std::path::PathBuf> {
@@ -151,4 +161,30 @@ pub fn create_temp_dir_file(suffix: &str) -> anyhow::Result<std::path::PathBuf> 
         .to_owned();
 
     Ok(temp_file)
+}
+
+#[allow(dead_code)]
+/// Remove a file if it exists
+/// * `file` - file name
+pub fn remove_file(file: &str) -> anyhow::Result<()> {
+    let path = Path::new(file);
+    if path.exists() {
+        // dbg!("removing {}", path);
+        if path.is_file() {
+            std::fs::remove_file(path)?;
+        } else {
+            std::fs::remove_dir_all(path)?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+/// Remove a file if it exists
+/// * `files` - file name
+pub fn remove_all_files(files: &Vec<Box<str>>) -> anyhow::Result<()> {
+    for file in files {
+        remove_file(&file)?;
+    }
+    Ok(())
 }

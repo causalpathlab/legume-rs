@@ -1,9 +1,8 @@
 use crate::common_io::{open_buf_writer, write_lines};
 use crate::mtx_io::write_mtx_triplets;
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use csv::{ReaderBuilder, WriterBuilder};
+use csv::WriterBuilder;
 use ndarray::prelude::*;
-use ndarray_csv::{Array2Reader, Array2Writer};
+use ndarray_csv::Array2Writer;
 use ndarray_rand::RandomExt;
 use rand::{prelude::Distribution, SeedableRng};
 
@@ -21,21 +20,11 @@ pub fn scale_columns(mut xraw: Array2<f32>) -> anyhow::Result<Array2<f32>> {
     Ok(xraw)
 }
 
-#[derive(Args)]
-pub struct SimulateArgs {
-    /// number of rows
-    #[arg(short, long)]
+pub struct SimArgs {
     pub rows: usize,
-    /// number of columns
-    #[arg(short, long)]
     pub cols: usize,
-    /// number of factors
-    #[arg(short, long)]
     pub factors: Option<usize>,
-    /// number of batches
-    #[arg(short, long)]
     pub batches: Option<usize>,
-    /// random seed
     pub rseed: Option<u64>,
 }
 
@@ -53,7 +42,7 @@ pub struct SimulateArgs {
 /// ```
 ///
 pub fn generate_factored_gamma_data_mtx(
-    args: &SimulateArgs,
+    args: &SimArgs,
     mtx_file: &str,
     dict_file: &str,
     prop_file: &str,
