@@ -1,27 +1,11 @@
+use asap_data::common_io::create_temp_dir_file;
 use asap_data::simulate::*;
 use asap_data::sparse_matrix_hdf5::SparseMtxData;
 use ndarray::prelude::*;
 use ndarray_rand::RandomExt;
 use std::path::Path;
-use std::path::PathBuf;
 use std::time::Instant;
-use tempfile::tempdir;
-
-fn create_temp_dir_file(_suffix: &str) -> anyhow::Result<PathBuf> {
-    let _tempdir = tempdir()?.path().to_path_buf();
-    std::fs::create_dir_all(&_tempdir)?;
-    let _tempfile = tempfile::Builder::new()
-        .suffix(&_suffix)
-        .tempfile_in(_tempdir)?
-        .path()
-        .to_owned();
-
-    if _tempfile.exists() {
-        std::fs::remove_dir(&_tempfile)?;
-    }
-
-    Ok(_tempfile)
-}
+use asap_data::sparse_io::*;
 
 fn measure_time<T, F>(f: F) -> T
 where
@@ -112,7 +96,7 @@ fn random_ndarray_loading() -> anyhow::Result<()> {
 
 #[test]
 fn simulate() -> anyhow::Result<()> {
-    let args = SimulateArgs {
+    let sim_args = SimArgs {
         rows: 7,
         cols: 11,
         factors: None,
@@ -128,7 +112,7 @@ fn simulate() -> anyhow::Result<()> {
     let ln_batch_file = mtx_file.replace(".mtx.gz", ".ln_batch.gz");
 
     generate_factored_gamma_data_mtx(
-        &args,
+        &sim_args,
         &mtx_file,
         &dict_file,
         &prop_file,

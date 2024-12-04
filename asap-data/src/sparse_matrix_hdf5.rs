@@ -1,6 +1,6 @@
-// use anyhow;
 use crate::common_io::*;
 use crate::mtx_io::*;
+use crate::sparse_io::*;
 use hdf5::filters::blosc_set_nthreads;
 use ndarray::prelude::*;
 use num_cpus;
@@ -38,6 +38,110 @@ pub struct SparseMtxData {
     by_row_indptr: Vec<u64>,
 }
 
+impl SparseIo for SparseMtxData {
+    /// Read columns within the range and return dense `ndarray::Array2`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns<I>(self: &Self, columns: I) -> anyhow::Result<Array2<f32>>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        // need to open backend again?
+        // let backend = hdf5::File::open(&self.file_name)?;
+        let by_column = self.hdf5_backend.group("/by_column")?;
+
+        debug_assert!(self.by_column_indptr.len() > 0);
+        // let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
+
+        let indptr = &self.by_column_indptr;
+        let data = by_column.dataset("data")?;
+        let indices = by_column.dataset("indices")?;
+
+        let columns_vec = columns.into_iter().collect::<Vec<usize>>();
+        let ncol_out = columns_vec.len();
+
+        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
+            let mut ret: Array2<f32> = Array2::zeros((nrow, ncol_out));
+
+            for (jj, &j_data) in columns_vec.iter().enumerate() {
+                if j_data < ncol {
+                    debug_assert!((j_data + 1) < indptr.len());
+
+                    // [start, end)
+                    let start = indptr[j_data] as usize;
+                    let end = indptr[j_data + 1] as usize;
+
+                    if start < end {
+                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
+                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+                        for k in 0..(end - start) {
+                            let x_ij = data_slice[k];
+                            let ii = indices_slice[k] as usize;
+                            ret[(ii, jj)] = x_ij;
+                        }
+                    }
+                }
+            }
+            Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
+    /// Read rows within the range and return dense `ndarray::Array2`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows<I>(self: &Self, rows: I) -> anyhow::Result<Array2<f32>>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        // need to open backend again?
+        // let backend = hdf5::File::open(&self.file_name)?;
+        let by_row = self.hdf5_backend.group("/by_row")?;
+
+        debug_assert!(self.by_row_indptr.len() > 0);
+        // let indptr = by_row.dataset("indptr")?.read_1d::<u64>()?;
+
+        let indptr = &self.by_row_indptr;
+        let data = by_row.dataset("data")?;
+        let indices = by_row.dataset("indices")?;
+
+        let rows_vec = rows.into_iter().collect::<Vec<usize>>();
+        let nrow_out = rows_vec.len();
+
+        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
+            let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
+
+            for (ii, &i_data) in rows_vec.iter().enumerate() {
+                if i_data < nrow {
+                    debug_assert!((i_data + 1) < indptr.len());
+
+                    let start = indptr[i_data] as usize;
+                    let end = indptr[i_data + 1] as usize;
+
+                    if start < end {
+                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
+                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+
+                        for k in 0..(end - start) {
+                            let x_ij = data_slice[k];
+                            let jj = indices_slice[k] as usize;
+                            ret[(ii, jj)] = x_ij;
+                        }
+                    }
+                }
+            }
+            Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+}
+
 #[allow(dead_code)]
 impl SparseMtxData {
     /// Open existing `SparseMtxData` from a backend HDF5 file
@@ -49,7 +153,10 @@ impl SparseMtxData {
             Self::_num_columns(&hdf5_backend),
             Self::_num_nnz(&hdf5_backend),
         ) {
-            println!("#rows: {}, #columns: {}, #non-zeros: {}", nrow, ncol, nnz);
+            dbg!(format!(
+                "#rows: {}, #columns: {}, #non-zeros: {}",
+                nrow, ncol, nnz
+            ));
         } else {
             anyhow::bail!("Couldn't figure out the size of this sparse matrix data");
         }
@@ -66,6 +173,95 @@ impl SparseMtxData {
 
         ret.read_column_indptr()?;
         ret.read_row_indptr()?;
+
+        Ok(ret)
+    }
+
+    /// Create `SparseMtxData` from mtx file with `backend_file` as
+    /// the backend file.  If no `backend_file` is provided, it will
+    /// be the same as `mtx_file` with `.h5` extension.
+    /// * `mtx_file`: mtx file to be read into HDF5 backend
+    /// * `backend_file`: HDF5 file to be associated with
+    /// * `index_by_row`: if true, the matrix will be indexed by row
+    pub fn from_mtx_file(
+        mtx_file: &str,
+        backend_file: Option<&str>,
+        index_by_row: Option<bool>,
+    ) -> anyhow::Result<Self> {
+        // create an object
+        let mut ret = match backend_file {
+            Some(backend_file) => Self::create_backend_file(backend_file)?,
+            None => {
+                let backend_file = mtx_file.to_string() + ".h5";
+                Self::create_backend_file(backend_file.as_ref())?
+            }
+        };
+
+        // populate data from mtx file
+        ret.import_mtx_by_col(mtx_file)?;
+        ret.read_column_indptr()?;
+
+        if Some(true) == index_by_row {
+            ret.import_mtx_by_row(mtx_file)?;
+            ret.read_row_indptr()?;
+        }
+
+        Ok(ret)
+    }
+
+    /// Read mtx file and populate the data into HDF5 for faster row-by-row access
+    /// * `mtx_file`: mtx file to be read into HDF5 backend
+    pub fn import_mtx_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
+        let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
+
+        self.record_mtx_shape(mtx_shape)?;
+
+        if mtx_triplets.len() == 0 {
+            return Err(anyhow::anyhow!("No data in mtx file"));
+        }
+        self.record_triplets_by_row(&mut mtx_triplets)
+    }
+
+    /// Read mtx file and populate the data into HDF5 for faster column-by-column access
+    /// * `mtx_file`: mtx file to be read into HDF5 backend
+    pub fn import_mtx_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
+        let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
+
+        if mtx_triplets.len() == 0 {
+            return Err(anyhow::anyhow!("No data in mtx file"));
+        }
+        self.record_mtx_shape(mtx_shape)?;
+        self.record_triplets_by_col(&mut mtx_triplets)
+    }
+
+    /// Create a new `SparseMtxData` from ndarray with its backend
+    /// HDF5 file. If no `backend_file` is provided, a temporary file
+    /// will be created.
+    /// * `array`: 2D array to be written into HDF5 backend
+    /// * `backend_file`: HDF5 file to be associated with
+    /// * `index_by_row`: if true, the matrix will be indexed by row
+    ///
+    pub fn from_ndarray(
+        array: &Array2<f32>,
+        backend_file: Option<&str>,
+        index_by_row: Option<bool>,
+    ) -> anyhow::Result<Self> {
+        let mut ret = match backend_file {
+            Some(backend_file) => Self::create_backend_file(backend_file)?,
+            None => {
+                let backend_file = create_temp_dir_file(".h5")?;
+                let backend_file = backend_file.to_str().expect("to_str failed");
+                Self::create_backend_file(&backend_file)?
+            }
+        };
+
+        ret.import_ndarray_by_col(&array)?; // populate data from mtx file
+        ret.read_column_indptr()?; // reload column indptr
+
+        if Some(true) == index_by_row {
+            ret.import_ndarray_by_row(&array)?; //
+            ret.read_row_indptr()?; //
+        }
 
         Ok(ret)
     }
@@ -119,174 +315,9 @@ impl SparseMtxData {
         Ok(())
     }
 
-    /// Read columns within the range and return dense `ndarray::Array2`
-    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    pub fn read_columns<I>(self: &Self, columns: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        // need to open backend again?
-        // let backend = hdf5::File::open(&self.file_name)?;
-        let by_column = self.hdf5_backend.group("/by_column")?;
-
-        debug_assert!(self.by_column_indptr.len() > 0);
-        // let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
-
-        let indptr = &self.by_column_indptr;
-        let data = by_column.dataset("data")?;
-        let indices = by_column.dataset("indices")?;
-
-        let columns_vec = columns.into_iter().collect::<Vec<usize>>();
-        let ncol_out = columns_vec.len();
-
-        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
-            let mut ret: Array2<f32> = Array2::zeros((nrow, ncol_out));
-
-            for (jj, &j_data) in columns_vec.iter().enumerate() {
-                if j_data < ncol {
-                    debug_assert!((j_data + 1) < indptr.len());
-
-                    let start = indptr[j_data] as usize;
-                    let end = indptr[j_data + 1] as usize;
-
-                    if start < end {
-                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
-                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
-                        for k in 0..(end - start) {
-                            let x_ij = data_slice[k];
-                            let ii = indices_slice[k] as usize;
-                            ret[(ii, jj)] = x_ij;
-                        }
-                    }
-                }
-            }
-            Ok(ret)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
-
-    /// Read rows within the range and return dense `ndarray::Array2`
-    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    pub fn read_rows<I>(self: &Self, rows: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        // need to open backend again?
-        // let backend = hdf5::File::open(&self.file_name)?;
-        let by_row = self.hdf5_backend.group("/by_row")?;
-
-        debug_assert!(self.by_row_indptr.len() > 0);
-        // let indptr = by_row.dataset("indptr")?.read_1d::<u64>()?;
-
-        let indptr = &self.by_row_indptr;
-        let data = by_row.dataset("data")?;
-        let indices = by_row.dataset("indices")?;
-
-        let rows_vec = rows.into_iter().collect::<Vec<usize>>();
-        let nrow_out = rows_vec.len();
-
-        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
-            let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
-
-            for (ii, &i_data) in rows_vec.iter().enumerate() {
-                if i_data < nrow {
-                    debug_assert!((i_data + 1) < indptr.len());
-
-                    let start = indptr[i_data] as usize;
-                    let end = indptr[i_data + 1] as usize;
-
-                    if start < end {
-                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
-                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
-
-                        for k in 0..(end - start) {
-                            let x_ij = data_slice[k];
-                            let jj = indices_slice[k] as usize;
-                            ret[(ii, jj)] = x_ij;
-                        }
-                    }
-                }
-            }
-            Ok(ret)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
-
-    /// Create a new `SparseMtxData` from ndarray with its backend
-    /// HDF5 file. If no `backend_file` is provided, a temporary file
-    /// will be created.
-    /// * `array`: 2D array to be written into HDF5 backend
-    /// * `backend_file`: HDF5 file to be associated with
-    /// * `index_by_row`: if true, the matrix will be indexed by row
-    ///
-    pub fn from_ndarray(
-        array: &Array2<f32>,
-        backend_file: Option<&str>,
-        index_by_row: Option<bool>,
-    ) -> anyhow::Result<Self> {
-        let mut ret = match backend_file {
-            Some(backend_file) => Self::create_backend_file(backend_file)?,
-            None => {
-                let backend_file = create_temp_dir_file(".h5")?;
-                let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::create_backend_file(&backend_file)?
-            }
-        };
-
-        ret.import_ndarray_by_col(&array)?; // populate data from mtx file
-        ret.read_column_indptr()?; // reload column indptr
-
-        if Some(true) == index_by_row {
-            ret.import_ndarray_by_row(&array)?; //
-            ret.read_row_indptr()?; //
-        }
-
-        Ok(ret)
-    }
-
     /// Access file name of the hdf5 backend file
     pub fn get_backend_file_name(self: &Self) -> &str {
         &self.file_name
-    }
-
-    /// Create `SparseMtxData` from mtx file with `backend_file` as
-    /// the backend file.  If no `backend_file` is provided, it will
-    /// be the same as `mtx_file` with `.h5` extension.
-    /// * `mtx_file`: mtx file to be read into HDF5 backend
-    /// * `backend_file`: HDF5 file to be associated with
-    /// * `index_by_row`: if true, the matrix will be indexed by row
-    pub fn from_mtx_file(
-        mtx_file: &str,
-        backend_file: Option<&str>,
-        index_by_row: Option<bool>,
-    ) -> anyhow::Result<Self> {
-        // create an object
-        let mut ret = match backend_file {
-            Some(backend_file) => Self::create_backend_file(backend_file)?,
-            None => {
-                let backend_file = mtx_file.to_string() + ".h5";
-                Self::create_backend_file(backend_file.as_ref())?
-            }
-        };
-
-        // populate data from mtx file
-        ret.import_mtx_by_col(mtx_file)?;
-        ret.read_column_indptr()?;
-
-        if Some(true) == index_by_row {
-            ret.import_mtx_by_row(mtx_file)?;
-            ret.read_row_indptr()?;
-        }
-
-        Ok(ret)
     }
 
     /// Export the data to a mtx file. This will take time.
@@ -390,6 +421,10 @@ impl SparseMtxData {
         Ok(())
     }
 
+    /////////////////////////////////
+    // `ndarray` related functions //
+    /////////////////////////////////
+
     /// Add ndarray to HDF5 backend by row (CSR format)
     /// * `array`: ndarray to be added
     pub fn import_ndarray_by_row(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
@@ -430,30 +465,9 @@ impl SparseMtxData {
         self.record_triplets_by_col(&mut mtx_triplets)
     }
 
-    /// Read mtx file and populate the data into HDF5 for faster row-by-row access
-    /// * `mtx_file`: mtx file to be read into HDF5 backend
-    pub fn import_mtx_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
-        let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
-
-        self.record_mtx_shape(mtx_shape)?;
-
-        if mtx_triplets.len() == 0 {
-            return Err(anyhow::anyhow!("No data in mtx file"));
-        }
-        self.record_triplets_by_row(&mut mtx_triplets)
-    }
-
-    /// Read mtx file and populate the data into HDF5 for faster column-by-column access
-    /// * `mtx_file`: mtx file to be read into HDF5 backend
-    pub fn import_mtx_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
-        let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
-
-        if mtx_triplets.len() == 0 {
-            return Err(anyhow::anyhow!("No data in mtx file"));
-        }
-        self.record_mtx_shape(mtx_shape)?;
-        self.record_triplets_by_col(&mut mtx_triplets)
-    }
+    //////////////
+    // triplets //
+    //////////////
 
     /// Helper function to add triplets to HDF5 backend by row (CSR format)
     fn record_triplets_by_row(
@@ -501,24 +515,6 @@ impl SparseMtxData {
         }
 
         self.record_csr_dataset_backend(&csr_cols, &csr_vals, &csr_rowptr)
-        // row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
-        // row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
-
-        // let mut csr_rowptr = vec![0];
-        // let mut csr_cols = vec![row_col_val_triplets[0].1];
-        // let mut csr_vals = vec![row_col_val_triplets[0].2];
-
-        // for i in 1..row_col_val_triplets.len() {
-        //     for _ in row_col_val_triplets[i - 1].0..row_col_val_triplets[i].0 {
-        //         csr_rowptr.push(i);
-        //     }
-        //     csr_cols.push(row_col_val_triplets[i].1);
-        //     csr_vals.push(row_col_val_triplets[i].2);
-        // }
-
-        // csr_rowptr.push(row_col_val_triplets.len()); // mark the end
-
-        // self.record_csr_dataset_backend(&csr_cols, &csr_vals, &csr_rowptr)
     }
 
     /// Helper function to add triplets to HDF5 backend by column (CSC format)
@@ -568,27 +564,20 @@ impl SparseMtxData {
         // dbg!(&csc_colptr);
 
         self.record_csc_dataset_backend(&csc_rows, &csc_vals, &csc_colptr)
-        // row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
-        // row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
-
-        // let mut csc_colptr = vec![0];
-        // let mut csc_rows = vec![row_col_val_triplets[0].0 as u64];
-        // let mut csc_vals = vec![row_col_val_triplets[0].2];
-
-        // for i in 1..row_col_val_triplets.len() {
-        //     for _ in row_col_val_triplets[i - 1].1..row_col_val_triplets[i].1 {
-        //         csc_colptr.push(i);
-        //     }
-        //     csc_rows.push(row_col_val_triplets[i].0 as u64);
-        //     csc_vals.push(row_col_val_triplets[i].2);
-        // }
-
-        // csc_colptr.push(row_col_val_triplets.len()); // mark the end
-
-        // self.record_csc_dataset_backend(&csc_rows, &csc_vals, &csc_colptr)
     }
 
+    //////////////////////
+    // backend related  //
+    //////////////////////
+
     /// Helper function to add CSR dataset to HDF5 backend
+    ///
+    /// ```text
+    ///     └── by_row
+    ///         ├── data
+    ///         ├── indices (column indices)
+    ///         └── isndptr (row pointers)
+    /// ```
     fn record_csr_dataset_backend(
         self: &mut Self,
         csr_cols: &Vec<u64>,
@@ -598,7 +587,7 @@ impl SparseMtxData {
         // Populate them into HDF5
         if self.hdf5_backend.group("/by_row").is_err() {
             let root = self.hdf5_backend.create_group("/by_row")?;
-            println!("Group: {:?} created", root);
+            eprintln!("Group: {:?} created", root);
         }
 
         {
@@ -635,6 +624,14 @@ impl SparseMtxData {
     }
 
     /// Helper function to add CSC dataset to HDF5 backend
+    ///
+    /// ```text
+    /// Helper function to record the CSC dataset
+    ///     ├── by_column
+    ///     │   ├── data
+    ///     │   ├── indices (row indices)
+    ///     │   └── indptr (column pointers)
+    /// ```
     fn record_csc_dataset_backend(
         self: &mut Self,
         csc_rows: &Vec<u64>,
@@ -644,7 +641,7 @@ impl SparseMtxData {
         // Populate them into HDF5
         if self.hdf5_backend.group("/by_column").is_err() {
             let root = self.hdf5_backend.create_group("/by_column")?;
-            println!("Group: {:?} created", root);
+            eprintln!("Group: {:?} created", root);
         }
 
         {
@@ -685,22 +682,26 @@ impl SparseMtxData {
         Self::_num_rows(&self.hdf5_backend)
     }
 
-    fn _num_rows(file: &hdf5::File) -> Option<usize> {
-        file.attr("nrow").ok()?.read_scalar().ok()
-    }
-
     /// Number of columns in the underlying data matrix
     pub fn num_columns(self: &Self) -> Option<usize> {
         Self::_num_columns(&self.hdf5_backend)
     }
 
-    fn _num_columns(file: &hdf5::File) -> Option<usize> {
-        file.attr("ncol").ok()?.read_scalar().ok()
-    }
-
     /// Number of non-zero elements
     pub fn num_non_zeros(self: &Self) -> Option<usize> {
         Self::_num_nnz(&self.hdf5_backend)
+    }
+
+    /////////////////////////////
+    // purely helper functions //
+    /////////////////////////////
+
+    fn _num_rows(file: &hdf5::File) -> Option<usize> {
+        file.attr("nrow").ok()?.read_scalar().ok()
+    }
+
+    fn _num_columns(file: &hdf5::File) -> Option<usize> {
+        file.attr("ncol").ok()?.read_scalar().ok()
     }
 
     fn _num_nnz(file: &hdf5::File) -> Option<usize> {
@@ -728,17 +729,6 @@ impl SparseMtxData {
             set_attrs("nrow", nrow)?;
             set_attrs("ncol", ncol)?;
             set_attrs("nnz", nnz)?;
-
-            // for (attr_name, value) in [("nrow", nrow), ("ncol", ncol), ("nnz", nnz)] {
-            //     if self.hdf5_backend.attr(attr_name).is_err() {
-            //         self.hdf5_backend
-            //             .new_attr::<usize>()
-            //             .create(attr_name)?
-            //             .write_scalar(&value)?;
-            //     } else if self.hdf5_backend.attr(attr_name)?.read_scalar::<usize>()? != value {
-            //         return Err(anyhow::anyhow!(format!("{} mismatch", attr_name)));
-            //     }
-            // }
             self.hdf5_backend.flush()?;
         }
 

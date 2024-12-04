@@ -1,8 +1,10 @@
 mod common_io;
 mod mtx_io;
+mod simulate;
+mod sparse_io;
 mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
-mod simulate;
+mod statistics;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -32,17 +34,35 @@ enum Backend {
 #[derive(Subcommand)]
 enum Commands {
     /// build from one format to another
-    Build(BuildArgs),
+    Build(RunBuildArgs),
     /// subset a sparse matrix
-    Subset(SubsetArgs),
+    Subset(RunSubsetArgs),
     /// stat a sparse matrix
-    Stat(StatArgs),
+    Stat(RunStatArgs),
     /// simulate a sparse matrix data
-    Simulate,
+    Simulate(RunSimulateArgs),
 }
 
 #[derive(Args)]
-pub struct StatArgs {
+pub struct RunStatArgs {
+    /// input .zarr or .h5 file
+    #[arg(short, long)]
+    input: Box<str>,
+
+    /// output file header
+    #[arg(short, long)]
+    output: Box<str>,
+}
+
+fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
+    let output = cmd_args.output.clone();
+    common_io::mkdir(&output)?;
+
+    Ok(())
+}
+
+#[derive(Args)]
+pub struct RunSubsetArgs {
     /// input .zarr or .h5 file
     #[arg(short, long)]
     input: Box<str>,
@@ -53,18 +73,7 @@ pub struct StatArgs {
 }
 
 #[derive(Args)]
-pub struct SubsetArgs {
-    /// input .zarr or .h5 file
-    #[arg(short, long)]
-    input: Box<str>,
-
-    /// output file header
-    #[arg(short, long)]
-    output: Box<str>,
-}
-
-#[derive(Args)]
-pub struct BuildArgs {
+pub struct RunBuildArgs {
     /// input `.mtx.gz` or `.mtx` file
     #[arg(short, long)]
     mtx: Box<str>,
@@ -86,7 +95,7 @@ pub struct BuildArgs {
     output: Box<str>,
 }
 
-fn run_build(args: &BuildArgs) -> anyhow::Result<()> {
+fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
     let mtx_file = args.mtx.as_ref();
     let row_file = args.row.as_ref();
     let col_file = args.col.as_ref();
@@ -119,12 +128,104 @@ fn run_build(args: &BuildArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Args)]
+pub struct RunSimulateArgs {
+    /// number of rows
+    #[arg(short, long)]
+    pub rows: usize,
+
+    /// number of columns
+    #[arg(short, long)]
+    pub cols: usize,
+
+    /// number of factors
+    #[arg(short, long)]
+    pub factors: Option<usize>,
+
+    /// number of batches
+    #[arg(short, long)]
+    pub batches: Option<usize>,
+
+    /// output file header: {output}.{backend}
+    #[arg(short, long)]
+    output: Box<str>,
+
+    /// random seed
+    #[arg(long)]
+    pub seed: Option<u64>,
+
+    /// backend to use (HDF5 or Zarr), default: HDF5
+    #[arg(long, value_enum)]
+    backend: Option<Backend>,
+}
+
+fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
+    let output = cmd_args.output.clone();
+    common_io::mkdir(&output)?;
+
+    let backend = cmd_args.backend.clone().unwrap_or(Backend::HDF5);
+
+    let backend_file = match backend {
+        Backend::HDF5 => output.to_string() + ".h5",
+        Backend::Zarr => output.to_string() + ".zarr",
+    };
+
+    let mtx_file = output.to_string() + ".mtx.gz";
+    let dict_file = mtx_file.replace(".mtx.gz", ".dict.gz");
+    let prop_file = mtx_file.replace(".mtx.gz", ".prop.gz");
+    let memb_file = mtx_file.replace(".mtx.gz", ".memb.gz");
+    let ln_batch_file = mtx_file.replace(".mtx.gz", ".ln_batch.gz");
+
+    common_io::remove_all_files(&vec![
+        backend_file.clone().into_boxed_str(),
+        mtx_file.clone().into_boxed_str(),
+        dict_file.clone().into_boxed_str(),
+        prop_file.clone().into_boxed_str(),
+        memb_file.clone().into_boxed_str(),
+        ln_batch_file.clone().into_boxed_str(),
+    ])
+    .expect("failed to clean up existing output files");
+
+    let sim_args = simulate::SimArgs {
+        rows: cmd_args.rows,
+        cols: cmd_args.cols,
+        factors: cmd_args.factors,
+        batches: cmd_args.batches,
+        rseed: cmd_args.seed,
+    };
+
+    simulate::generate_factored_gamma_data_mtx(
+        &sim_args,
+        &mtx_file,
+        &dict_file,
+        &prop_file,
+        &ln_batch_file,
+        &memb_file,
+    )
+    .expect("something went wrong in factored gamma");
+    match backend {
+        Backend::HDF5 => {
+            use sparse_matrix_hdf5::SparseMtxData;
+            let _ = SparseMtxData::from_mtx_file(&mtx_file, Some(&backend_file), Some(true))?;
+        }
+        Backend::Zarr => {
+            use sparse_matrix_zarr::SparseMtxData;
+            let _ = SparseMtxData::from_mtx_file(&mtx_file, Some(&backend_file), Some(true))?;
+        }
+    }
+
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match &cli.commands {
         Commands::Build(args) => {
             run_build(args)?;
+        }
+        Commands::Simulate(args) => {
+            run_simulate(args)?;
         }
         _ => {
             todo!("not implemented yet");
