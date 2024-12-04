@@ -1,7 +1,0 @@
-use ndarray::prelude::*;
-
-pub trait SparseMatrix {
-    fn read_columns<I>(&self, columns: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>;
-}
