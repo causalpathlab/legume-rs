@@ -1,7 +1,6 @@
 use crate::common_io::*;
 use crate::mtx_io::*;
 use crate::sparse_io::*;
-use ndarray::prelude::*;
 use std::ops::Range;
 use std::sync::Arc;
 use zarrs::array::DataType;
@@ -37,126 +36,7 @@ pub struct SparseMtxData {
     max_column_name_idx: usize,
     by_column_indptr: Vec<u64>,
     by_row_indptr: Vec<u64>,
-}
-
-impl SparseIo for SparseMtxData {
-    /// Read columns within the range and return dense `ndarray::Array2`
-    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_columns<I>(self: &Self, columns: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        use zarrs::array::Array as ZArray;
-        use zarrs::array_subset::ArraySubset;
-
-        debug_assert!(self.by_column_indptr.len() > 0);
-        let indptr = &self.by_column_indptr;
-
-        let columns_vec = columns.into_iter().collect::<Vec<usize>>();
-        let ncol_out = columns_vec.len();
-
-        let key = "/by_column/data";
-        let data = ZArray::open(self.store.clone(), key)?;
-        let key = "/by_column/indices";
-        let indices = ZArray::open(self.store.clone(), key)?;
-
-        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
-            let nrow = nrow as usize;
-            let ncol = ncol as usize;
-
-            debug_assert!(indptr.len() > ncol);
-
-            let mut ret: Array2<f32> = Array2::zeros((nrow, ncol_out));
-
-            for (jj, &j_data) in columns_vec.iter().enumerate() {
-                if j_data < ncol {
-                    debug_assert!((j_data + 1) < indptr.len());
-
-                    // [start, end)
-                    let start = indptr[j_data];
-                    let end = indptr[j_data + 1];
-
-                    if start < end {
-                        let subset = ArraySubset::new_with_ranges(&[start..end]);
-                        let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
-                        let indices_slice =
-                            indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
-
-                        for k in 0..(end - start) {
-                            let x_ij = data_slice[k as usize];
-                            let ii = indices_slice[k as usize] as usize;
-                            ret[(ii, jj)] = x_ij;
-                        }
-                    }
-                }
-            }
-            Ok(ret)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
-
-    /// Read rows within the range and return dense `ndarray::Array2`
-    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_rows<I>(self: &Self, rows: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        use zarrs::array::Array as ZArray;
-        use zarrs::array_subset::ArraySubset;
-
-        debug_assert!(self.by_row_indptr.len() > 0);
-        let indptr = &self.by_row_indptr;
-
-        let rows_vec = rows.into_iter().collect::<Vec<usize>>();
-        let nrow_out = rows_vec.len();
-
-        let key = "/by_row/data";
-        let data = ZArray::open(self.store.clone(), key)?;
-        let key = "/by_row/indices";
-        let indices = ZArray::open(self.store.clone(), key)?;
-
-        if let (Some(nrow), Some(ncol)) = (self.num_rows(), self.num_columns()) {
-            let nrow = nrow as usize;
-            let ncol = ncol as usize;
-
-            debug_assert!(indptr.len() > nrow);
-
-            let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
-
-            for (ii, &i_data) in rows_vec.iter().enumerate() {
-                if i_data < nrow {
-                    debug_assert!((i_data + 1) < indptr.len());
-
-                    // [start, end)
-                    let start = indptr[i_data];
-                    let end = indptr[i_data + 1];
-
-                    if start < end {
-                        let subset = ArraySubset::new_with_ranges(&[start..end]);
-                        let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
-                        let indices_slice =
-                            indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
-
-                        for k in 0..(end - start) {
-                            let x_ij = data_slice[k as usize];
-                            let jj = indices_slice[k as usize] as usize;
-                            ret[(ii, jj)] = x_ij;
-                        }
-                    }
-                }
-            }
-            Ok(ret)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
+    remapped_rows: Option<HashMap<usize, usize>>,
 }
 
 #[allow(dead_code)]
@@ -187,6 +67,7 @@ impl SparseMtxData {
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
             by_row_indptr: vec![],
+            remapped_rows: None,
         };
 
         ret.read_column_indptr()?;
@@ -228,7 +109,7 @@ impl SparseMtxData {
 
     /// Read mtx file and populate the data into zarr for faster row-by-row access
     /// * `mtx_file`: mtx file to be read into zarr backend
-    pub fn import_mtx_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
+    fn import_mtx_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
 
         self.record_mtx_shape(mtx_shape)?;
@@ -241,7 +122,7 @@ impl SparseMtxData {
 
     /// Read mtx file and populate the data for faster column-by-column access
     /// * `mtx_file`: mtx file to be read into zarr backend
-    pub fn import_mtx_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
+    fn import_mtx_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
 
         if mtx_triplets.len() == 0 {
@@ -388,6 +269,7 @@ impl SparseMtxData {
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
             by_row_indptr: vec![],
+            remapped_rows: None,
         })
     }
 
@@ -406,7 +288,7 @@ impl SparseMtxData {
 
     /// Add ndarray to zarr backend by row (CSR format)
     /// * `array` - 2D array to be added to the backend
-    pub fn import_ndarray_by_row(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
+    fn import_ndarray_by_row(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
         let nrow = array.shape()[0];
         let ncol = array.shape()[1];
         let eps = 1e-6;
@@ -429,7 +311,7 @@ impl SparseMtxData {
 
     /// Add ndarray to zarr backend by column (CSC format)
     /// * `array` - 2D array to be added to the backend
-    pub fn import_ndarray_by_col(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
+    fn import_ndarray_by_col(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
         let nrow = array.shape()[0];
         let ncol = array.shape()[1];
         let eps = 1e-6;
@@ -494,7 +376,7 @@ impl SparseMtxData {
         }
 
         // fill in the rest of the rowptr
-        let last = row_col_val_triplets[nnz - 1].0;
+        let last = row_col_val_triplets[nnz - 1].0 as usize;
         let m = nnz as u64;
         for _ in last..nrow {
             csr_rowptr.push(m);
@@ -543,7 +425,7 @@ impl SparseMtxData {
         }
 
         // fill in the rest of the colptr
-        let last = row_col_val_triplets[nnz - 1].1;
+        let last = row_col_val_triplets[nnz - 1].1 as usize;
         let m = nnz as u64;
         for _ in last..ncol {
             csc_colptr.push(m);
@@ -660,46 +542,127 @@ impl SparseMtxData {
         Ok(())
     }
 
+    fn _retrieve_vector<V>(self: &Self, key: &str) -> anyhow::Result<Vec<V>>
+    where
+        V: zarrs::array::ElementOwned,
+    {
+        use zarrs::array::Array as ZArray;
+        use zarrs::array_subset::ArraySubset;
+        let data = ZArray::open(self.store.clone(), key)?;
+        let ntot = data.shape()[0];
+        let subset = ArraySubset::new_with_ranges(&[0..ntot]);
+        Ok(data.retrieve_array_subset_elements::<V>(&subset)?)
+    }
+
     /// Helper function to keep the matrix shape
     fn record_mtx_shape(
         self: &mut Self,
         mtx_shape: Option<(usize, usize, usize)>,
     ) -> anyhow::Result<()> {
-        let set_root_attr = |attr_name: &str, value: usize| -> anyhow::Result<()> {
-            let mut root = zarrs::group::Group::open(self.store.clone(), "/")?;
-
+        let check_set_attr = |attr_name: &str, value: usize| -> anyhow::Result<()> {
+            let old_value = Self::_get_group_attr::<usize>(self.store.clone(), "/", attr_name);
             let new_value = serde_json::to_value(value)?;
-            if let Some(old_value) = root.attributes().get(attr_name) {
-                if *(old_value) != new_value {
-                    return Err(anyhow::anyhow!("{} mismatch", attr_name));
+
+            match old_value {
+                Some(old_value) => {
+                    if old_value != new_value {
+                        return Err(anyhow::anyhow!("{} mismatch", attr_name));
+                    }
                 }
-            } else {
-                root.attributes_mut()
-                    .insert((*attr_name).to_string(), new_value);
-                root.store_metadata()?;
+                _ => {
+                    Self::_set_group_attr(self.store.clone(), "/", attr_name, &new_value)?;
+                }
             }
             Ok(())
         };
 
         if let Some((nrow, ncol, nnz)) = mtx_shape {
-            set_root_attr("nrow", nrow)?;
-            set_root_attr("ncol", ncol)?;
-            set_root_attr("nnz", nnz)?;
+            check_set_attr("nrow", nrow)?;
+            check_set_attr("ncol", ncol)?;
+            check_set_attr("nnz", nnz)?;
         }
         Ok(())
     }
 
+    /////////////////////////////
+    // purely helper functions //
+    /////////////////////////////
+
+    /// Helper function to set an attribute from a group named `group_name`
+    fn _set_group_attr<V>(
+        store: Arc<dyn ZStorageTraits>,
+        group_name: &str,
+        attr_name: &str,
+        value: &V,
+    ) -> anyhow::Result<()>
+    where
+        V: serde::Serialize,
+    {
+        use zarrs::group::Group;
+        let mut group = Group::open(store, group_name)?;
+
+        let new_value = serde_json::to_value(value)?;
+        group
+            .attributes_mut()
+            .insert((*attr_name).to_string(), new_value);
+        group.store_metadata()?;
+        Ok(())
+    }
+
+    /// Helper function to get an attribute from a group named `group_name`
+    fn _get_group_attr<V>(
+        store: Arc<dyn ZStorageTraits>,
+        group_name: &str,
+        attr_name: &str,
+    ) -> Option<V>
+    where
+        V: serde::de::DeserializeOwned,
+    {
+        zarrs::group::Group::open(store, group_name)
+            .ok()
+            .and_then(|grp| grp.attributes().get(attr_name).cloned())
+            .and_then(|attr| serde_json::from_value(attr.clone()).ok())
+    }
+
+    fn _num_nnz(store: Arc<dyn ZStorageTraits>) -> Option<usize> {
+        Self::_get_group_attr::<usize>(store.clone(), "/", "nnz")
+    }
+
+    fn _num_rows(store: Arc<dyn ZStorageTraits>) -> Option<usize> {
+        Self::_get_group_attr::<usize>(store.clone(), "/", "nrow")
+    }
+
+    fn _num_columns(store: Arc<dyn ZStorageTraits>) -> Option<usize> {
+        Self::_get_group_attr::<usize>(store.clone(), "/", "ncol")
+    }
+    /// Helper function to add a group in `self.store`
+    fn _add_group(self: &mut Self, group_name: &str) -> anyhow::Result<()> {
+        use zarrs::group::Group;
+
+        if Group::open(self.store.clone(), group_name).is_err() {
+            let new_group =
+                zarrs::group::GroupBuilder::new().build(self.store.clone(), group_name)?;
+            new_group.store_metadata()?;
+        } else {
+            dbg!("group already exists");
+        }
+
+        Ok(())
+    }
+}
+
+impl SparseIo for SparseMtxData {
     /// Set row names for the matrix
     /// * `row_name_file`: a file each line contains row name words
-    pub fn register_row_names(self: &mut Self, row_name_file: &str) {
-        self.add_names("row_names", row_name_file, 0..self.max_row_name_idx, "_")
+    fn register_row_names(self: &mut Self, row_name_file: &str) {
+        self.register_names("row_names", row_name_file, 0..self.max_row_name_idx, "_")
             .expect("failed to add row names");
     }
 
     /// Set column names for the matrix
     /// * `column_name_file`: a file each line contains column name words
-    pub fn register_column_names(self: &mut Self, column_name_file: &str) {
-        self.add_names(
+    fn register_column_names(self: &mut Self, column_name_file: &str) {
+        self.register_names(
             "column_names",
             column_name_file,
             0..self.max_column_name_idx,
@@ -708,9 +671,29 @@ impl SparseMtxData {
         .expect("failed to add column names");
     }
 
-    fn add_names(
+    /// Number of rows in the matrix
+    fn num_rows(self: &Self) -> Option<usize> {
+        Self::_num_rows(self.store.clone())
+    }
+
+    /// Number of columns in the matrix
+    fn num_columns(self: &Self) -> Option<usize> {
+        Self::_num_columns(self.store.clone())
+    }
+
+    /// Number of non-zero elements in the matrix
+    fn num_non_zeros(self: &Self) -> Option<usize> {
+        Self::_num_nnz(self.store.clone())
+    }
+
+    /// Add arbitrary names (a vector of strings)
+    /// * `group_name`: group name
+    /// * `name_file`: a file each line contains name words
+    /// * `name_columns`: range of columns to be used for name
+    /// * `name_sep`: separator for name columns
+    fn register_names(
         self: &mut Self,
-        group_name: &str,
+        key: &str,
         name_file: &str,
         name_columns: Range<usize>,
         name_sep: &str,
@@ -729,70 +712,188 @@ impl SparseMtxData {
                     .collect::<Vec<_>>()
                     .join(name_sep)
                     .parse()
-                    .expect("invalidrow name")
+                    .expect("invalid name")
             })
             .collect();
 
-        self.new_filled_vector(group_name, DataType::String, _names)?;
+        self.new_filled_vector(key, DataType::String, _names)?;
         Ok(())
     }
 
-    /// Number of rows in the matrix
-    pub fn num_rows(self: &Self) -> Option<u64> {
-        Self::_num_rows(self.store.clone())
+    fn row_names(&self) -> anyhow::Result<Vec<Box<str>>> {
+        self.retrieve_registered_names("row_names")
     }
 
-    /// Number of columns in the matrix
-    pub fn num_columns(self: &Self) -> Option<u64> {
-        Self::_num_columns(self.store.clone())
+    fn column_names(&self) -> anyhow::Result<Vec<Box<str>>> {
+        self.retrieve_registered_names("column_names")
     }
 
-    /// Number of non-zero elements in the matrix
-    pub fn num_non_zeros(self: &Self) -> Option<u64> {
-        Self::_num_nnz(self.store.clone())
+    /// Get back the registered names
+    /// * `key`: key for the registered names
+    fn retrieve_registered_names(&self, key: &str) -> anyhow::Result<Vec<Box<str>>> {
+        Ok(self
+            ._retrieve_vector::<String>(key)?
+            .into_iter()
+            .map(|s| s.into_boxed_str())
+            .collect())
     }
 
-    /////////////////////////////
-    // purely helper functions //
-    /////////////////////////////
-
-    fn _num_nnz(store: Arc<dyn ZStorageTraits>) -> Option<u64> {
-        Self::_get_group_attr::<u64>(store.clone(), "/", "nnz")
-    }
-
-    fn _num_rows(store: Arc<dyn ZStorageTraits>) -> Option<u64> {
-        Self::_get_group_attr::<u64>(store.clone(), "/", "nrow")
-    }
-
-    fn _num_columns(store: Arc<dyn ZStorageTraits>) -> Option<u64> {
-        Self::_get_group_attr::<u64>(store.clone(), "/", "ncol")
-    }
-
-    /// Helper function to get an attribute from a group named `group_name`
-    fn _get_group_attr<V>(
-        store: Arc<dyn ZStorageTraits>,
-        group_name: &str,
-        attr_name: &str,
-    ) -> Option<V>
+    /// Read columns within the range and return dense `ndarray::Array2`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns<I>(self: &Self, columns: I) -> anyhow::Result<Array2<f32>>
     where
-        V: serde::de::DeserializeOwned,
+        I: IntoIterator<Item = usize>,
     {
-        zarrs::group::Group::open(store, group_name)
-            .ok()
-            .and_then(|grp| grp.attributes().get(attr_name).cloned())
-            .and_then(|attr| serde_json::from_value(attr.clone()).ok())
+        use zarrs::array::Array as ZArray;
+        use zarrs::array_subset::ArraySubset;
+
+        debug_assert!(self.by_column_indptr.len() > 0);
+        let indptr = &self.by_column_indptr;
+
+        let columns_vec = columns.into_iter().collect::<Vec<usize>>();
+        let ncol_out = columns_vec.len();
+
+        let key = "/by_column/data";
+        let data = ZArray::open(self.store.clone(), key)?;
+        let key = "/by_column/indices";
+        let indices = ZArray::open(self.store.clone(), key)?;
+
+        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
+            let nrow = nrow as usize;
+            let ncol = ncol as usize;
+
+            debug_assert!(indptr.len() > ncol);
+
+            let subset = ArraySubset::new_empty(1);
+
+            let mut ret: Array2<f32> = Array2::zeros((nrow, ncol_out));
+
+            for (jj, &j_data) in columns_vec.iter().enumerate() {
+                if j_data < ncol {
+                    debug_assert!((j_data + 1) < indptr.len());
+
+                    // [start, end)
+                    let start = indptr[j_data];
+                    let end = indptr[j_data + 1];
+
+                    if start < end {
+                        let subset = ArraySubset::new_with_ranges(&[start..end]);
+
+                        let data_slice = data.retrieve_array_subset_elements::<f32>(&subset)?;
+                        let indices_slice =
+                            indices.retrieve_array_subset_elements::<u64>(&subset)?;
+
+                        for k in 0..(end - start) {
+                            let x_ij = data_slice[k as usize];
+                            let old_ii = indices_slice[k as usize] as usize;
+                            let row_idx = self
+                                .remapped_rows
+                                .as_ref()
+                                .and_then(|remap| remap.get(&old_ii))
+                                .or(Some(&old_ii));
+
+                            if let Some(ii) = row_idx {
+                                ret[(*ii, jj)] = x_ij;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
     }
 
-    /// Helper function to add a group in `self.store`
-    fn _add_group(self: &mut Self, group_name: &str) -> anyhow::Result<()> {
-        use zarrs::group::Group;
+    /// Read rows within the range and return dense `ndarray::Array2`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows<I>(self: &Self, rows: I) -> anyhow::Result<Array2<f32>>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        use zarrs::array::Array as ZArray;
+        use zarrs::array_subset::ArraySubset;
 
-        if Group::open(self.store.clone(), group_name).is_err() {
-            let new_group =
-                zarrs::group::GroupBuilder::new().build(self.store.clone(), group_name)?;
-            new_group.store_metadata()?;
+        debug_assert!(self.by_row_indptr.len() > 0);
+        let indptr = &self.by_row_indptr;
+
+        let rows_vec = rows.into_iter().collect::<Vec<usize>>();
+        let nrow_out = rows_vec.len();
+
+        let key = "/by_row/data";
+        let data = ZArray::open(self.store.clone(), key)?;
+        let key = "/by_row/indices";
+        let indices = ZArray::open(self.store.clone(), key)?;
+
+        if let (Some(nrow), Some(ncol)) = (self.num_rows(), self.num_columns()) {
+            let nrow = nrow as usize;
+            let ncol = ncol as usize;
+
+            debug_assert!(indptr.len() > nrow);
+
+            let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
+
+            for (ii, &i_data) in rows_vec.iter().enumerate() {
+                if i_data < nrow {
+                    debug_assert!((i_data + 1) < indptr.len());
+
+                    // [start, end)
+                    let start = indptr[i_data];
+                    let end = indptr[i_data + 1];
+
+                    if start < end {
+                        let subset = ArraySubset::new_with_ranges(&[start..end]);
+                        let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
+                        let indices_slice =
+                            indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
+
+                        for k in 0..(end - start) {
+                            let x_ij = data_slice[k as usize];
+                            let jj = indices_slice[k as usize] as usize;
+
+                            ret[(ii, jj)] = x_ij;
+                        }
+                    }
+                }
+            }
+            Ok(ret)
         } else {
-            dbg!("group already exists");
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
+    /// Reposition rows in a new order specified by `remap`
+    /// * `remap` - a hashmap of old row index to new row index
+    fn remap_rows(&mut self, remap: HashMap<usize, usize>) -> anyhow::Result<()> {
+        if self.remapped_rows.is_some() {
+            eprintln!("remap_rows: overwriting on the existing remapped_rows\n");
+        }
+
+        // update maximum number of rows
+        let new_nrow = remap
+            .values()
+            .max()
+            .expect("failed to figure out the new maximum number of rows")
+            + 1;
+
+        Self::_set_group_attr(self.store.clone(), "/", "nrow", &new_nrow)?;
+
+        // copy down the remap hashmap
+        self.remapped_rows = Some(HashMap::new());
+
+        for (old_idx, new_idx) in remap.iter() {
+            if *new_idx < new_nrow {
+                self.remapped_rows
+                    .as_mut()
+                    .unwrap()
+                    .insert(*old_idx, *new_idx);
+            }
         }
 
         Ok(())

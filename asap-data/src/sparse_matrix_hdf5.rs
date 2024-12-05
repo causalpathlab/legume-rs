@@ -2,8 +2,8 @@ use crate::common_io::*;
 use crate::mtx_io::*;
 use crate::sparse_io::*;
 use hdf5::filters::blosc_set_nthreads;
-use ndarray::prelude::*;
 use num_cpus;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -29,117 +29,14 @@ const MAX_COLUMN_NAME_IDX: usize = 10;
 ///
 #[derive(Debug)]
 pub struct SparseMtxData {
-    hdf5_backend: Arc<hdf5::File>,
+    backend: Arc<hdf5::File>,
     file_name: String,
     chunk_size: usize,
     max_row_name_idx: usize,
     max_column_name_idx: usize,
     by_column_indptr: Vec<u64>,
     by_row_indptr: Vec<u64>,
-}
-
-impl SparseIo for SparseMtxData {
-    /// Read columns within the range and return dense `ndarray::Array2`
-    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_columns<I>(self: &Self, columns: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        // need to open backend again?
-        // let backend = hdf5::File::open(&self.file_name)?;
-        let by_column = self.hdf5_backend.group("/by_column")?;
-
-        debug_assert!(self.by_column_indptr.len() > 0);
-        // let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
-
-        let indptr = &self.by_column_indptr;
-        let data = by_column.dataset("data")?;
-        let indices = by_column.dataset("indices")?;
-
-        let columns_vec = columns.into_iter().collect::<Vec<usize>>();
-        let ncol_out = columns_vec.len();
-
-        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
-            let mut ret: Array2<f32> = Array2::zeros((nrow, ncol_out));
-
-            for (jj, &j_data) in columns_vec.iter().enumerate() {
-                if j_data < ncol {
-                    debug_assert!((j_data + 1) < indptr.len());
-
-                    // [start, end)
-                    let start = indptr[j_data] as usize;
-                    let end = indptr[j_data + 1] as usize;
-
-                    if start < end {
-                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
-                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
-                        for k in 0..(end - start) {
-                            let x_ij = data_slice[k];
-                            let ii = indices_slice[k] as usize;
-                            ret[(ii, jj)] = x_ij;
-                        }
-                    }
-                }
-            }
-            Ok(ret)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
-
-    /// Read rows within the range and return dense `ndarray::Array2`
-    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_rows<I>(self: &Self, rows: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        // need to open backend again?
-        // let backend = hdf5::File::open(&self.file_name)?;
-        let by_row = self.hdf5_backend.group("/by_row")?;
-
-        debug_assert!(self.by_row_indptr.len() > 0);
-        // let indptr = by_row.dataset("indptr")?.read_1d::<u64>()?;
-
-        let indptr = &self.by_row_indptr;
-        let data = by_row.dataset("data")?;
-        let indices = by_row.dataset("indices")?;
-
-        let rows_vec = rows.into_iter().collect::<Vec<usize>>();
-        let nrow_out = rows_vec.len();
-
-        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
-            let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
-
-            for (ii, &i_data) in rows_vec.iter().enumerate() {
-                if i_data < nrow {
-                    debug_assert!((i_data + 1) < indptr.len());
-
-                    let start = indptr[i_data] as usize;
-                    let end = indptr[i_data + 1] as usize;
-
-                    if start < end {
-                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
-                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
-
-                        for k in 0..(end - start) {
-                            let x_ij = data_slice[k];
-                            let jj = indices_slice[k] as usize;
-                            ret[(ii, jj)] = x_ij;
-                        }
-                    }
-                }
-            }
-            Ok(ret)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
+    remapped_rows: Option<HashMap<usize, usize>>,
 }
 
 #[allow(dead_code)]
@@ -162,13 +59,14 @@ impl SparseMtxData {
         }
 
         let mut ret = Self {
-            hdf5_backend: hdf5_backend.into(),
+            backend: hdf5_backend.into(),
             file_name: backend_file.to_string(),
             chunk_size: CHUNK_SIZE,
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
             by_row_indptr: vec![],
+            remapped_rows: None,
         };
 
         ret.read_column_indptr()?;
@@ -211,7 +109,7 @@ impl SparseMtxData {
 
     /// Read mtx file and populate the data into HDF5 for faster row-by-row access
     /// * `mtx_file`: mtx file to be read into HDF5 backend
-    pub fn import_mtx_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
+    fn import_mtx_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
 
         self.record_mtx_shape(mtx_shape)?;
@@ -224,7 +122,7 @@ impl SparseMtxData {
 
     /// Read mtx file and populate the data into HDF5 for faster column-by-column access
     /// * `mtx_file`: mtx file to be read into HDF5 backend
-    pub fn import_mtx_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
+    fn import_mtx_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
 
         if mtx_triplets.len() == 0 {
@@ -268,7 +166,7 @@ impl SparseMtxData {
 
     /// Read column index pointers
     pub fn read_column_indptr(self: &mut Self) -> anyhow::Result<()> {
-        if let Ok(by_column) = self.hdf5_backend.group("/by_column") {
+        if let Ok(by_column) = self.backend.group("/by_column") {
             let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
             self.by_column_indptr.clear();
             self.by_column_indptr.extend(indptr);
@@ -278,7 +176,7 @@ impl SparseMtxData {
 
     /// Read row index pointers
     pub fn read_row_indptr(self: &mut Self) -> anyhow::Result<()> {
-        if let Ok(by_row) = self.hdf5_backend.group("/by_row") {
+        if let Ok(by_row) = self.backend.group("/by_row") {
             let indptr = by_row.dataset("indptr")?.read_1d::<u64>()?;
             self.by_row_indptr.clear();
             self.by_row_indptr.extend(indptr);
@@ -294,17 +192,16 @@ impl SparseMtxData {
         let hdf5_backend = hdf5::File::create(hdf5_file)?;
 
         Ok(Self {
-            hdf5_backend: hdf5_backend.into(),
+            backend: hdf5_backend.into(),
             file_name: hdf5_file.to_string(),
             chunk_size: CHUNK_SIZE,
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
             by_row_indptr: vec![],
+            remapped_rows: None,
         })
     }
-
-    // pub fn remap_rows
 
     /// Remove backend file to free up disk space
     pub fn remove_backend_file(self: &Self) -> anyhow::Result<()> {
@@ -323,7 +220,7 @@ impl SparseMtxData {
     /// Export the data to a mtx file. This will take time.
     /// * `mtx_file`: mtx file to be written
     pub fn to_mtx_file(&self, mtx_file: &str) -> anyhow::Result<()> {
-        let by_column = self.hdf5_backend.group("/by_column")?;
+        let by_column = self.backend.group("/by_column")?;
 
         let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
         let data = by_column.dataset("data")?;
@@ -364,70 +261,13 @@ impl SparseMtxData {
         }
     }
 
-    /// Set row names for the matrix
-    /// * `row_name_file`: a file each line contains row name words
-    pub fn register_row_names(self: &mut Self, row_name_file: &str) {
-        self.add_names("row_names", row_name_file, 0..self.max_row_name_idx, "_")
-            .expect("failed to add row names");
-    }
-
-    /// Set column names for the matrix
-    /// * `column_name_file`: a file each line contains column name words
-    pub fn register_column_names(self: &mut Self, column_name_file: &str) {
-        self.add_names(
-            "column_names",
-            column_name_file,
-            0..self.max_column_name_idx,
-            "@",
-        )
-        .expect("failed to add column names");
-    }
-
-    fn add_names(
-        self: &mut Self,
-        group_name: &str,
-        name_file: &str,
-        name_columns: Range<usize>,
-        name_sep: &str,
-    ) -> anyhow::Result<()> {
-        use hdf5::types::VarLenUnicode;
-
-        let (_names, _) = read_lines_of_words(name_file, -1)?;
-
-        let name_columns = name_columns.clone().collect::<Vec<_>>();
-
-        let _names: Vec<VarLenUnicode> = _names
-            .iter()
-            .map(|x| {
-                name_columns
-                    .iter()
-                    .filter_map(|&i| x.get(i))
-                    .map(|x| x.to_string())
-                    .collect::<Vec<_>>()
-                    .join(name_sep)
-                    .parse()
-                    .expect("invalidrow name")
-            })
-            .collect();
-
-        let root = self.hdf5_backend.group("/")?;
-        root.new_dataset::<VarLenUnicode>()
-            .shape(_names.len())
-            .chunk([self.chunk_size.min(_names.len())])
-            .blosc_zstd(9, true)
-            .create(group_name)?
-            .write(&_names)?;
-
-        Ok(())
-    }
-
     /////////////////////////////////
     // `ndarray` related functions //
     /////////////////////////////////
 
     /// Add ndarray to HDF5 backend by row (CSR format)
     /// * `array`: ndarray to be added
-    pub fn import_ndarray_by_row(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
+    fn import_ndarray_by_row(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
         let nrow = array.shape()[0];
         let ncol = array.shape()[1];
         let eps = 1e-6;
@@ -447,7 +287,7 @@ impl SparseMtxData {
 
     /// Add ndarray to HDF5 backend by column (CSC format)
     /// * `array`: ndarray to be added
-    pub fn import_ndarray_by_col(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
+    fn import_ndarray_by_col(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
         let nrow = array.shape()[0];
         let ncol = array.shape()[1];
         let eps = 1e-6;
@@ -585,8 +425,8 @@ impl SparseMtxData {
         csr_rowptr: &Vec<usize>,
     ) -> anyhow::Result<()> {
         // Populate them into HDF5
-        if self.hdf5_backend.group("/by_row").is_err() {
-            let root = self.hdf5_backend.create_group("/by_row")?;
+        if self.backend.group("/by_row").is_err() {
+            let root = self.backend.create_group("/by_row")?;
             eprintln!("Group: {:?} created", root);
         }
 
@@ -595,7 +435,7 @@ impl SparseMtxData {
             blosc_set_nthreads(num_threads as u8); // Set the number of threads for Blosc
         }
 
-        let csr = self.hdf5_backend.group("/by_row")?;
+        let csr = self.backend.group("/by_row")?;
 
         csr.new_dataset::<f32>()
             .shape(csr_vals.len())
@@ -618,7 +458,7 @@ impl SparseMtxData {
             .create("indices")?
             .write(&csr_cols)?;
 
-        self.hdf5_backend.flush()?;
+        self.backend.flush()?;
 
         Ok(())
     }
@@ -639,8 +479,8 @@ impl SparseMtxData {
         csc_colptr: &Vec<usize>,
     ) -> anyhow::Result<()> {
         // Populate them into HDF5
-        if self.hdf5_backend.group("/by_column").is_err() {
-            let root = self.hdf5_backend.create_group("/by_column")?;
+        if self.backend.group("/by_column").is_err() {
+            let root = self.backend.create_group("/by_column")?;
             eprintln!("Group: {:?} created", root);
         }
 
@@ -649,7 +489,7 @@ impl SparseMtxData {
             blosc_set_nthreads(num_threads as u8); // Set the number of threads for Blosc
         }
 
-        let csc = self.hdf5_backend.group("/by_column")?;
+        let csc = self.backend.group("/by_column")?;
 
         csc.new_dataset::<f32>()
             .shape(csc_vals.len())
@@ -672,24 +512,9 @@ impl SparseMtxData {
             .create("indices")?
             .write(&csc_rows)?;
 
-        self.hdf5_backend.flush()?;
+        self.backend.flush()?;
 
         Ok(())
-    }
-
-    /// Number of rows in the underlying data matrix
-    pub fn num_rows(self: &Self) -> Option<usize> {
-        Self::_num_rows(&self.hdf5_backend)
-    }
-
-    /// Number of columns in the underlying data matrix
-    pub fn num_columns(self: &Self) -> Option<usize> {
-        Self::_num_columns(&self.hdf5_backend)
-    }
-
-    /// Number of non-zero elements
-    pub fn num_non_zeros(self: &Self) -> Option<usize> {
-        Self::_num_nnz(&self.hdf5_backend)
     }
 
     /////////////////////////////
@@ -708,28 +533,271 @@ impl SparseMtxData {
         file.attr("nnz").ok()?.read_scalar().ok()
     }
 
+    fn set_attrs(self: &mut Self, attr_name: &str, value: usize) -> anyhow::Result<()> {
+        if self.backend.attr(attr_name).is_err() {
+            self.backend
+                .new_attr::<usize>()
+                .create(attr_name)?
+                .write_scalar(&value)?;
+        } else if self.backend.attr(attr_name)?.read_scalar::<usize>()? != value {
+            return Err(anyhow::anyhow!(format!("{} mismatch", attr_name)));
+        }
+        Ok(())
+    }
+
     /// Record the shape of the mtx file into the HDF5 backend
     fn record_mtx_shape(
         self: &mut Self,
         mtx_shape: Option<(usize, usize, usize)>,
     ) -> anyhow::Result<()> {
-        let set_attrs = |attr_name: &str, value: usize| {
-            if self.hdf5_backend.attr(attr_name).is_err() {
-                self.hdf5_backend
-                    .new_attr::<usize>()
-                    .create(attr_name)?
-                    .write_scalar(&value)?;
-            } else if self.hdf5_backend.attr(attr_name)?.read_scalar::<usize>()? != value {
-                return Err(anyhow::anyhow!(format!("{} mismatch", attr_name)));
-            }
-            Ok(())
-        };
-
         if let Some((nrow, ncol, nnz)) = mtx_shape {
-            set_attrs("nrow", nrow)?;
-            set_attrs("ncol", ncol)?;
-            set_attrs("nnz", nnz)?;
-            self.hdf5_backend.flush()?;
+            self.set_attrs("nrow", nrow)?;
+            self.set_attrs("ncol", ncol)?;
+            self.set_attrs("nnz", nnz)?;
+            self.backend.flush()?;
+        }
+
+        Ok(())
+    }
+}
+
+impl SparseIo for SparseMtxData {
+    /// Set row names for the matrix
+    /// * `row_name_file`: a file each line contains row name words
+    fn register_row_names(self: &mut Self, row_name_file: &str) {
+        self.register_names("row_names", row_name_file, 0..self.max_row_name_idx, "_")
+            .expect("failed to add row names");
+    }
+
+    /// Set column names for the matrix
+    /// * `column_name_file`: a file each line contains column name words
+    fn register_column_names(self: &mut Self, column_name_file: &str) {
+        self.register_names(
+            "column_names",
+            column_name_file,
+            0..self.max_column_name_idx,
+            "@",
+        )
+        .expect("failed to add column names");
+    }
+
+    /// Number of rows in the underlying data matrix
+    fn num_rows(self: &Self) -> Option<usize> {
+        Self::_num_rows(&self.backend)
+    }
+
+    /// Number of columns in the underlying data matrix
+    fn num_columns(self: &Self) -> Option<usize> {
+        Self::_num_columns(&self.backend)
+    }
+
+    /// Number of non-zero elements
+    fn num_non_zeros(self: &Self) -> Option<usize> {
+        Self::_num_nnz(&self.backend)
+    }
+
+    /// Add arbitrary names (a vector of strings)
+    /// * `group_name`: group name
+    /// * `name_file`: a file each line contains name words
+    /// * `name_columns`: range of columns to be used for name
+    /// * `name_sep`: separator for name columns
+    fn register_names(
+        self: &mut Self,
+        key: &str,
+        name_file: &str,
+        name_columns: Range<usize>,
+        name_sep: &str,
+    ) -> anyhow::Result<()> {
+        use hdf5::types::VarLenUnicode;
+
+        let (_names, _) = read_lines_of_words(name_file, -1)?;
+
+        let name_columns = name_columns.clone().collect::<Vec<_>>();
+
+        let _names: Vec<VarLenUnicode> = _names
+            .iter()
+            .map(|x| {
+                name_columns
+                    .iter()
+                    .filter_map(|&i| x.get(i))
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(name_sep)
+                    .parse()
+                    .expect("invalid name")
+            })
+            .collect();
+
+        let root = self.backend.group("/")?;
+        root.new_dataset::<VarLenUnicode>()
+            .shape(_names.len())
+            .chunk([self.chunk_size.min(_names.len())])
+            .blosc_zstd(9, true)
+            .create(key)?
+            .write(&_names)?;
+
+        Ok(())
+    }
+
+    fn row_names(&self) -> anyhow::Result<Vec<Box<str>>> {
+        self.retrieve_registered_names("row_names")
+    }
+
+    fn column_names(&self) -> anyhow::Result<Vec<Box<str>>> {
+        self.retrieve_registered_names("column_names")
+    }
+
+    /// Get back the registered names
+    /// * `key`: key for the registered names
+    fn retrieve_registered_names(&self, key: &str) -> anyhow::Result<Vec<Box<str>>> {
+        use hdf5::types::VarLenUnicode;
+
+        let root = self.backend.group("/")?;
+
+        Ok(root
+            .dataset(key)?
+            .read_1d::<VarLenUnicode>()?
+            .iter()
+            .map(|x| x.to_string().into_boxed_str())
+            .collect())
+    }
+
+    /// Read columns within the range and return dense `ndarray::Array2`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns<I>(self: &Self, columns: I) -> anyhow::Result<Array2<f32>>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        // need to open backend again?
+        // let backend = hdf5::File::open(&self.file_name)?;
+        let by_column = self.backend.group("/by_column")?;
+
+        debug_assert!(self.by_column_indptr.len() > 0);
+        // let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
+
+        let indptr = &self.by_column_indptr;
+        let data = by_column.dataset("data")?;
+        let indices = by_column.dataset("indices")?;
+
+        let columns_vec = columns.into_iter().collect::<Vec<usize>>();
+        let ncol_out = columns_vec.len();
+
+        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
+            let mut ret: Array2<f32> = Array2::zeros((nrow, ncol_out));
+
+            for (jj, &j_data) in columns_vec.iter().enumerate() {
+                if j_data < ncol {
+                    debug_assert!((j_data + 1) < indptr.len());
+
+                    // [start, end)
+                    let start = indptr[j_data] as usize;
+                    let end = indptr[j_data + 1] as usize;
+
+                    if start < end {
+                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
+                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+                        for k in 0..(end - start) {
+                            let x_ij = data_slice[k];
+                            let old_ii = indices_slice[k] as usize;
+                            let row_idx = self
+                                .remapped_rows
+                                .as_ref()
+                                .and_then(|remap| remap.get(&old_ii))
+                                .or(Some(&old_ii));
+
+                            if let Some(ii) = row_idx {
+                                ret[(*ii, jj)] = x_ij;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
+    /// Read rows within the range and return dense `ndarray::Array2`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows<I>(self: &Self, rows: I) -> anyhow::Result<Array2<f32>>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        // need to open backend again?
+        // let backend = hdf5::File::open(&self.file_name)?;
+        let by_row = self.backend.group("/by_row")?;
+
+        debug_assert!(self.by_row_indptr.len() > 0);
+        // let indptr = by_row.dataset("indptr")?.read_1d::<u64>()?;
+
+        let indptr = &self.by_row_indptr;
+        let data = by_row.dataset("data")?;
+        let indices = by_row.dataset("indices")?;
+
+        let rows_vec = rows.into_iter().collect::<Vec<usize>>();
+        let nrow_out = rows_vec.len();
+
+        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
+            let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
+
+            for (ii, &i_data) in rows_vec.iter().enumerate() {
+                if i_data < nrow {
+                    debug_assert!((i_data + 1) < indptr.len());
+
+                    let start = indptr[i_data] as usize;
+                    let end = indptr[i_data + 1] as usize;
+
+                    if start < end {
+                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
+                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+
+                        for k in 0..(end - start) {
+                            let x_ij = data_slice[k];
+                            let jj = indices_slice[k] as usize;
+                            ret[(ii, jj)] = x_ij;
+                        }
+                    }
+                }
+            }
+            Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
+    /// Reposition rows in a new order specified by `remap`
+    /// * `remap` - a hashmap of old row index to new row index
+    fn remap_rows(&mut self, remap: HashMap<usize, usize>) -> anyhow::Result<()> {
+        if self.remapped_rows.is_some() {
+            eprintln!("remap_rows: overwriting on the existing remapped_rows\n");
+        }
+
+        // update maximum number of rows
+        let new_nrow = remap
+            .values()
+            .max()
+            .expect("failed to figure out the new maximum number of rows")
+            .clone()
+            + 1;
+        self.set_attrs("nrow", new_nrow)?;
+        self.backend.flush()?;
+
+        // copy down the remap hashmap
+        self.remapped_rows = Some(HashMap::new());
+        for (old_idx, new_idx) in remap.iter() {
+            if *new_idx < new_nrow {
+                self.remapped_rows
+                    .as_mut()
+                    .unwrap()
+                    .insert(*old_idx, *new_idx);
+            }
         }
 
         Ok(())
