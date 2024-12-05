@@ -6,6 +6,7 @@ mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
 mod statistics;
 
+use crate::sparse_io::SparseIo;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -96,6 +97,8 @@ pub struct RunBuildArgs {
 }
 
 fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
+    use asap_data::sparse_io::SparseIo;
+
     let mtx_file = args.mtx.as_ref();
     let row_file = args.row.as_ref();
     let col_file = args.col.as_ref();
