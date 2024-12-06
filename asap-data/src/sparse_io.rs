@@ -1,22 +1,92 @@
+use clap::ValueEnum;
 pub use ndarray::prelude::*;
 pub use std::collections::HashMap;
 pub use std::ops::Range;
 
+use crate::sparse_matrix_hdf5;
+use crate::sparse_matrix_zarr;
+
+use std::sync::{Arc, Mutex};
+
+#[derive(ValueEnum, Clone, Debug)]
+#[clap(rename_all = "lowercase")]
+pub enum SparseIoBackend {
+    Zarr,
+    HDF5,
+}
+
+#[allow(dead_code)]
+/// Open a sparse matrix io (backend)
+/// * `backend_file`: file path to the sparse matrix
+/// * `backend`: backend type (HDF5 or Zarr)
+pub fn open_sparse_matrix(
+    backend_file: &str,
+    backend: &SparseIoBackend,
+) -> anyhow::Result<Arc<Mutex<dyn SparseIo<IndexIter = Vec<usize>>>>> {
+    let data: Arc<Mutex<dyn SparseIo<IndexIter = Vec<usize>>>> = match backend {
+        SparseIoBackend::HDF5 => Arc::new(Mutex::new(sparse_matrix_hdf5::SparseMtxData::open(
+            backend_file,
+        )?)),
+        SparseIoBackend::Zarr => Arc::new(Mutex::new(sparse_matrix_zarr::SparseMtxData::open(
+            backend_file,
+        )?)),
+    };
+    Ok(data)
+}
+
+#[allow(dead_code)]
+/// Create a sparse matrix io (backend) with 10x mtx
+/// * `mtx_file`: file path to the 10x mtx
+/// * `backend_file`: file path to the sparse matrix
+/// * `backend`: backend type (HDF5 or Zarr)
+pub fn create_sparse_matrix(
+    mtx_file: &str,
+    backend_file: &str,
+    backend: &SparseIoBackend,
+) -> anyhow::Result<Arc<Mutex<dyn SparseIo<IndexIter = Vec<usize>>>>> {
+    let data: Arc<Mutex<dyn SparseIo<IndexIter = Vec<usize>>>> = match backend {
+        SparseIoBackend::HDF5 => Arc::new(Mutex::new(
+            sparse_matrix_hdf5::SparseMtxData::from_mtx_file(
+                mtx_file,
+                Some(backend_file),
+                Some(true),
+            )?,
+        )),
+        SparseIoBackend::Zarr => Arc::new(Mutex::new(
+            sparse_matrix_zarr::SparseMtxData::from_mtx_file(
+                mtx_file,
+                Some(backend_file),
+                Some(true),
+            )?,
+        )),
+    };
+    Ok(data)
+}
+
 #[allow(dead_code)]
 pub trait SparseIo {
+    type IndexIter: IntoIterator<Item = usize>;
+
     /// Read columns within the range and return dense `ndarray::Array2`
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_columns<I>(&self, columns: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>;
+    fn read_columns(&self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
+        Ok(Array2::zeros((
+            self.num_rows().expect("need to know the number of rows"),
+            columns.into_iter().count(),
+        )))
+    }
 
     /// Read rows within the range and return dense `ndarray::Array2`
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_rows<I>(&self, rows: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>;
+    fn read_rows(&self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
+        Ok(Array2::zeros((
+            rows.into_iter().count(),
+            self.num_columns()
+                .expect("need to know the number of columns"),
+        )))
+    }
 
     /// Number of rows in the underlying data matrix
     fn num_rows(&self) -> Option<usize>;

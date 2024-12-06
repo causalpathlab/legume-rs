@@ -662,13 +662,12 @@ impl SparseIo for SparseMtxData {
             .collect())
     }
 
+    type IndexIter = Vec<usize>;
+
     /// Read columns within the range and return dense `ndarray::Array2`
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_columns<I>(self: &Self, columns: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>,
-    {
+    fn read_columns(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
         // need to open backend again?
         // let backend = hdf5::File::open(&self.file_name)?;
         let by_column = self.backend.group("/by_column")?;
@@ -724,10 +723,7 @@ impl SparseIo for SparseMtxData {
     /// Read rows within the range and return dense `ndarray::Array2`
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_rows<I>(self: &Self, rows: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>,
-    {
+    fn read_rows(self: &Self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
         // need to open backend again?
         // let backend = hdf5::File::open(&self.file_name)?;
         let by_row = self.backend.group("/by_row")?;

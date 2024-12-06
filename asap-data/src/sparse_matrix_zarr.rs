@@ -738,13 +738,12 @@ impl SparseIo for SparseMtxData {
             .collect())
     }
 
+    type IndexIter = Vec<usize>;
+
     /// Read columns within the range and return dense `ndarray::Array2`
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_columns<I>(self: &Self, columns: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>,
-    {
+    fn read_columns(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
         use zarrs::array::Array as ZArray;
         use zarrs::array_subset::ArraySubset;
 
@@ -764,8 +763,6 @@ impl SparseIo for SparseMtxData {
             let ncol = ncol as usize;
 
             debug_assert!(indptr.len() > ncol);
-
-            let subset = ArraySubset::new_empty(1);
 
             let mut ret: Array2<f32> = Array2::zeros((nrow, ncol_out));
 
@@ -811,10 +808,7 @@ impl SparseIo for SparseMtxData {
     /// Read rows within the range and return dense `ndarray::Array2`
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_rows<I>(self: &Self, rows: I) -> anyhow::Result<Array2<f32>>
-    where
-        I: IntoIterator<Item = usize>,
-    {
+    fn read_rows(self: &Self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
         use zarrs::array::Array as ZArray;
         use zarrs::array_subset::ArraySubset;
 

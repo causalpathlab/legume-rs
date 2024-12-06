@@ -6,8 +6,10 @@ mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
 mod statistics;
 
-use crate::sparse_io::SparseIo;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+// use std::thread::
+
+use crate::sparse_io::*;
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(version, about, long_about=None)]
@@ -23,13 +25,6 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 struct Cli {
     #[command(subcommand)]
     commands: Commands,
-}
-
-#[derive(ValueEnum, Clone, Debug)]
-#[clap(rename_all = "lowercase")]
-enum Backend {
-    Zarr,
-    HDF5,
 }
 
 #[derive(Subcommand)]
@@ -58,6 +53,10 @@ pub struct RunStatArgs {
 fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
     common_io::mkdir(&output)?;
+
+    let input = cmd_args.input.as_ref();
+
+    let data: sparse_matrix_hdf5::SparseMtxData = sparse_matrix_hdf5::SparseMtxData::open(input)?;
 
     Ok(())
 }
@@ -89,7 +88,7 @@ pub struct RunBuildArgs {
 
     /// backend to use (HDF5 or Zarr)
     #[arg(short, long, value_enum)]
-    backend: Backend,
+    backend: SparseIoBackend,
 
     /// output file header: {output}.{backend}
     #[arg(short, long)]
@@ -97,36 +96,22 @@ pub struct RunBuildArgs {
 }
 
 fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
-    use asap_data::sparse_io::SparseIo;
 
     let mtx_file = args.mtx.as_ref();
     let row_file = args.row.as_ref();
     let col_file = args.col.as_ref();
 
     let backend_file = match args.backend {
-        Backend::HDF5 => format!("{}.h5", args.output),
-        Backend::Zarr => format!("{}.zarr", args.output),
+        SparseIoBackend::HDF5 => format!("{}.h5", args.output),
+        SparseIoBackend::Zarr => format!("{}.zarr", args.output),
     };
     let backend_file = backend_file.as_ref();
 
-    let mut x =
-        sparse_matrix_hdf5::SparseMtxData::from_mtx_file(mtx_file, Some(backend_file), None)?;
+    let arc_data = create_sparse_matrix(&mtx_file, &backend_file, &args.backend)?;
+    let mut data = arc_data.lock().expect("failed to lock data");
 
-    x.register_row_names(row_file);
-    x.register_column_names(col_file);
-
-    // match args.backend {
-    // 	Backend::HDF5 => {
-    // 		let h5_file = args.output.as_ref();
-    // 		let mut mtx_data = sparse_matrix_hdf5::SparseMtxData::new(h5_file)?;
-    // 		mtx_data.load_mtx_hdf5(mtx_file)?;
-    // 	}
-    // 	Backend::Zarr => {
-    // 		let zarr_backend = args.output.as_ref();
-    // 		let mut mtx_data = sparse_matrix_zarr::SparseMtxData::create(zarr_backend)?;
-    // 		mtx_data.read_mtx_by_row(mtx_file)?;
-    // 	}
-    // }
+    data.register_row_names(row_file);
+    data.register_column_names(col_file);
 
     Ok(())
 }
@@ -159,18 +144,18 @@ pub struct RunSimulateArgs {
 
     /// backend to use (HDF5 or Zarr), default: HDF5
     #[arg(long, value_enum)]
-    backend: Option<Backend>,
+    backend: Option<SparseIoBackend>,
 }
 
 fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
     common_io::mkdir(&output)?;
 
-    let backend = cmd_args.backend.clone().unwrap_or(Backend::HDF5);
+    let backend = cmd_args.backend.clone().unwrap_or(SparseIoBackend::HDF5);
 
     let backend_file = match backend {
-        Backend::HDF5 => output.to_string() + ".h5",
-        Backend::Zarr => output.to_string() + ".zarr",
+        SparseIoBackend::HDF5 => output.to_string() + ".h5",
+        SparseIoBackend::Zarr => output.to_string() + ".zarr",
     };
 
     let mtx_file = output.to_string() + ".mtx.gz";
@@ -207,11 +192,11 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     )
     .expect("something went wrong in factored gamma");
     match backend {
-        Backend::HDF5 => {
+        SparseIoBackend::HDF5 => {
             use sparse_matrix_hdf5::SparseMtxData;
             let _ = SparseMtxData::from_mtx_file(&mtx_file, Some(&backend_file), Some(true))?;
         }
-        Backend::Zarr => {
+        SparseIoBackend::Zarr => {
             use sparse_matrix_zarr::SparseMtxData;
             let _ = SparseMtxData::from_mtx_file(&mtx_file, Some(&backend_file), Some(true))?;
         }
@@ -229,6 +214,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Simulate(args) => {
             run_simulate(args)?;
+        }
+        Commands::Stat(args) => {
+            run_stat(args)?;
         }
         _ => {
             todo!("not implemented yet");
