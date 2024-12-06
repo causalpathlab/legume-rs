@@ -57,10 +57,10 @@ fn simulate() -> anyhow::Result<()> {
 
     assert_eq!(batch_membership.len(), n);
 
-    let yy: Array2<f32> = data.read_columns(0..n)?;
+    let yy: Array2<f32> = data.read_columns((0..n).collect())?;
     dbg!(&yy);
 
-    let zz: Array2<f32> = data.read_rows(0..m)?;
+    let zz: Array2<f32> = data.read_rows((0..m).collect())?;
     dbg!(&zz);
 
     data.remove_backend_file()?;
@@ -92,13 +92,13 @@ fn random_mtx_loading() -> anyhow::Result<()> {
         let data = data?;
 
         // 4. read the column 2
-        let b = measure_time(|| data.read_columns(7..10).unwrap());
+        let b = measure_time(|| data.read_columns((7..10).collect()).unwrap());
         dbg!(&b);
 
         // 6. open the backend file directly
         let backend_file = data.get_backend_file_name();
         let new_data = SparseMtxData::open(backend_file)?;
-        let c = measure_time(|| new_data.read_columns(7..10).unwrap());
+        let c = measure_time(|| new_data.read_columns((7..10).collect()).unwrap());
         dbg!(&c);
 
         // 7. remove the backend file
@@ -123,7 +123,7 @@ fn random_ndarray_loading() -> anyhow::Result<()> {
 
         dbg!(&a);
 
-        let b = data.read_columns(2..3).unwrap();
+        let b = data.read_columns((2..3).collect()).unwrap();
 
         dbg!(&b);
 
