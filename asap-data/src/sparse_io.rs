@@ -1,12 +1,10 @@
-use clap::ValueEnum;
+use crate::sparse_matrix_hdf5;
+use crate::sparse_matrix_zarr;
+pub use clap::ValueEnum;
 pub use ndarray::prelude::*;
 pub use std::collections::HashMap;
 pub use std::ops::Range;
-
-use crate::sparse_matrix_hdf5;
-use crate::sparse_matrix_zarr;
-
-use std::sync::{Arc, Mutex};
+pub use std::sync::{Arc, Mutex};
 
 #[derive(ValueEnum, Clone, Debug)]
 #[clap(rename_all = "lowercase")]

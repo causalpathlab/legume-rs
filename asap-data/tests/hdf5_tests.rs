@@ -1,11 +1,11 @@
 use asap_data::common_io::create_temp_dir_file;
 use asap_data::simulate::*;
+use asap_data::sparse_io::*;
 use asap_data::sparse_matrix_hdf5::SparseMtxData;
 use ndarray::prelude::*;
 use ndarray_rand::RandomExt;
 use std::path::Path;
 use std::time::Instant;
-use asap_data::sparse_io::*;
 
 fn measure_time<T, F>(f: F) -> T
 where
@@ -37,7 +37,7 @@ fn random_mtx_loading() -> anyhow::Result<()> {
         let data = data?;
 
         // 4. read the column 2
-        let b = measure_time(|| data.read_columns(3..4).unwrap());
+        let b = measure_time(|| data.read_columns((3..4).collect()).unwrap());
         dbg!(&b);
 
         // 5. read the column 2
@@ -47,7 +47,7 @@ fn random_mtx_loading() -> anyhow::Result<()> {
         // 6. open the backend file directly
         let backend_file = data.get_backend_file_name();
         let new_data = SparseMtxData::open(backend_file)?;
-        let d = measure_time(|| new_data.read_columns(3..4).unwrap());
+        let d = measure_time(|| new_data.read_columns((3..4).collect()).unwrap());
         dbg!(&d);
 
         let e = measure_time(|| new_data.read_columns(vec![7]).unwrap());
@@ -77,7 +77,7 @@ fn random_ndarray_loading() -> anyhow::Result<()> {
 
         dbg!(&a);
 
-        let b = data.read_columns(2..3).unwrap();
+        let b = data.read_columns((2..3).collect()).unwrap();
 
         dbg!(&b);
 
@@ -126,10 +126,10 @@ fn simulate() -> anyhow::Result<()> {
     let n = data.num_columns().expect("failed to get #col") as usize;
     let m = data.num_rows().expect("failed to get #row") as usize;
 
-    let yy: Array2<f32> = data.read_columns(0..n)?;
+    let yy: Array2<f32> = data.read_columns((0..n).collect())?;
     dbg!(&yy);
 
-    let zz: Array2<f32> = data.read_rows(0..m)?;
+    let zz: Array2<f32> = data.read_rows((0..m).collect())?;
     dbg!(&zz);
 
     data.remove_backend_file()?;
