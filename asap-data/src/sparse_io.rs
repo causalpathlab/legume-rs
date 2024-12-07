@@ -62,7 +62,7 @@ pub fn create_sparse_matrix(
 }
 
 #[allow(dead_code)]
-pub trait SparseIo {
+pub trait SparseIo: Send + Sync {
     type IndexIter: IntoIterator<Item = usize>;
 
     /// Read columns within the range and return dense `ndarray::Array2`
