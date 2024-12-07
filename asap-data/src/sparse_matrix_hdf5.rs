@@ -251,6 +251,7 @@ impl SparseMtxData {
             println!(
                 "{}: {} rows, {} columns, {} non-zeros",
                 mtx_file, nrow, ncol, nnz
+		    
             );
 
             Ok(())

@@ -6,10 +6,11 @@ mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
 mod statistics;
 
-// use std::thread::
-
 use crate::sparse_io::*;
+use crate::statistics::RunningStatistics;
 use clap::{Args, Parser, Subcommand};
+use rayon::prelude::*;
+use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
 #[command(version, about, long_about=None)]
@@ -45,6 +46,10 @@ pub struct RunStatArgs {
     #[arg(short, long)]
     input: Box<str>,
 
+    /// backend to use (HDF5 or Zarr)
+    #[arg(short, long, value_enum)]
+    backend: SparseIoBackend,
+
     /// output file header
     #[arg(short, long)]
     output: Box<str>,
@@ -54,9 +59,60 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
     common_io::mkdir(&output)?;
 
-    let input = cmd_args.input.as_ref();
+    let input = cmd_args.input.clone();
+    let backend = cmd_args.backend.clone();
 
-    let data: sparse_matrix_hdf5::SparseMtxData = sparse_matrix_hdf5::SparseMtxData::open(input)?;
+    let arc_data = open_sparse_matrix(&input, &backend)?;
+    let data = arc_data.lock().expect("failed to lock data");
+
+    let block_size = 1000_usize;
+
+    use ndarray::Ix1;
+
+    if let (Some(nrow), Some(ncol)) = (data.num_rows(), data.num_columns()) {
+        let row_names = data.row_names().expect("no row names");
+        let col_names = data.column_names().expect("no column names");
+
+        let arc_row_stat = Arc::new(Mutex::new(RunningStatistics::new(Ix1(nrow))));
+        let arc_col_stat = Arc::new(Mutex::new(RunningStatistics::new(Ix1(ncol))));
+
+        let nblock = (ncol + block_size - 1) / block_size;
+
+        let jobs = (0..nblock).into_par_iter().map(|b| {
+            let lb: usize = b * block_size;
+            let ub: usize = ((b + 1) * block_size).min(ncol);
+            (lb, ub)
+        });
+
+        jobs.for_each(|(lb, ub)| {
+            let data = arc_data.lock().expect("failed to lock data");
+            let mut row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
+            let mut col_stat = arc_col_stat.lock().expect("failed to lock col_stat");
+
+            let xx_b = data.read_columns((lb..ub).collect()).unwrap();
+
+            for x in xx_b.axis_iter(Axis(0)) {
+                row_stat.add(&x);
+            }
+
+            for x in xx_b.axis_iter(Axis(1)) {
+                col_stat.add(&x);
+            }
+        }); // end of jobs
+
+        // output to the files
+        let row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
+        let col_stat = arc_col_stat.lock().expect("failed to lock col_stat");
+
+        let row_stat_file = format!("{}.rows.gz", output);
+        let col_stat_file = format!("{}.columns.gz", output);
+        row_stat.save(&row_stat_file, &row_names)?;
+        col_stat.save(&col_stat_file, &col_names)?;
+    } else {
+        return Err(anyhow::anyhow!(
+            "failed to get the number of rows and columns"
+        ));
+    }
 
     Ok(())
 }
@@ -96,7 +152,6 @@ pub struct RunBuildArgs {
 }
 
 fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
-
     let mtx_file = args.mtx.as_ref();
     let row_file = args.row.as_ref();
     let col_file = args.col.as_ref();
