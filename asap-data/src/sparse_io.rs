@@ -4,7 +4,6 @@ pub use clap::ValueEnum;
 pub use ndarray::prelude::*;
 pub use std::collections::HashMap;
 pub use std::ops::Range;
-pub use std::sync::{Arc, Mutex};
 
 #[derive(ValueEnum, Clone, Debug)]
 #[clap(rename_all = "lowercase")]
@@ -20,16 +19,15 @@ pub enum SparseIoBackend {
 pub fn open_sparse_matrix(
     backend_file: &str,
     backend: &SparseIoBackend,
-) -> anyhow::Result<Arc<Mutex<dyn SparseIo<IndexIter = Vec<usize>>>>> {
-    let data: Arc<Mutex<dyn SparseIo<IndexIter = Vec<usize>>>> = match backend {
-        SparseIoBackend::HDF5 => Arc::new(Mutex::new(sparse_matrix_hdf5::SparseMtxData::open(
-            backend_file,
+) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
+    match backend {
+        SparseIoBackend::Zarr => Ok(Box::new(sparse_matrix_zarr::SparseMtxData::open(
+            &backend_file,
         )?)),
-        SparseIoBackend::Zarr => Arc::new(Mutex::new(sparse_matrix_zarr::SparseMtxData::open(
-            backend_file,
+        SparseIoBackend::HDF5 => Ok(Box::new(sparse_matrix_hdf5::SparseMtxData::open(
+            &backend_file,
         )?)),
-    };
-    Ok(data)
+    }
 }
 
 #[allow(dead_code)]
@@ -41,28 +39,23 @@ pub fn create_sparse_matrix(
     mtx_file: &str,
     backend_file: &str,
     backend: &SparseIoBackend,
-) -> anyhow::Result<Arc<Mutex<dyn SparseIo<IndexIter = Vec<usize>>>>> {
-    let data: Arc<Mutex<dyn SparseIo<IndexIter = Vec<usize>>>> = match backend {
-        SparseIoBackend::HDF5 => Arc::new(Mutex::new(
-            sparse_matrix_hdf5::SparseMtxData::from_mtx_file(
-                mtx_file,
-                Some(backend_file),
-                Some(true),
-            )?,
-        )),
-        SparseIoBackend::Zarr => Arc::new(Mutex::new(
-            sparse_matrix_zarr::SparseMtxData::from_mtx_file(
-                mtx_file,
-                Some(backend_file),
-                Some(true),
-            )?,
-        )),
-    };
-    Ok(data)
+) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
+    match backend {
+        SparseIoBackend::HDF5 => Ok(Box::new(sparse_matrix_hdf5::SparseMtxData::from_mtx_file(
+            mtx_file,
+            Some(backend_file),
+            Some(true),
+        )?)),
+        SparseIoBackend::Zarr => Ok(Box::new(sparse_matrix_zarr::SparseMtxData::from_mtx_file(
+            mtx_file,
+            Some(backend_file),
+            Some(true),
+        )?)),
+    }
 }
 
 #[allow(dead_code)]
-pub trait SparseIo: Send + Sync {
+pub trait SparseIo: Sync + Send {
     type IndexIter: IntoIterator<Item = usize>;
 
     /// Read columns within the range and return dense `ndarray::Array2`
@@ -97,24 +90,37 @@ pub trait SparseIo: Send + Sync {
 
     /// Set row names for the matrix
     /// * `row_name_file`: a file each line contains row name words
-    fn register_row_names(&mut self, row_name_file: &str);
+    fn register_row_names_file(&mut self, row_name_file: &str);
 
     /// Set column names for the matrix
     /// * `column_name_file`: a file each line contains column name words
-    fn register_column_names(&mut self, column_name_file: &str);
+    fn register_column_names_file(&mut self, column_name_file: &str);
+
+    /// Set row names for the matrix
+    /// * `rows`: a vector of row names
+    fn register_row_names_vec(&mut self, rows: &Vec<Box<str>>);
+
+    /// Set column names for the matrix
+    /// * `columns`: a vector of column names
+    fn register_column_names_vec(&mut self, columns: &Vec<Box<str>>);
 
     /// Add arbitrary names (a vector of strings)
     /// * `group_name`: group name
     /// * `name_file`: a file each line contains name words
     /// * `name_columns`: range of columns to be used for name
     /// * `name_sep`: separator for name columns
-    fn register_names(
+    fn register_names_file(
         &mut self,
         key: &str,
         name_file: &str,
         name_columns: Range<usize>,
         name_sep: &str,
     ) -> anyhow::Result<()>;
+
+    /// Add arbitrary names (a vector of strings)
+    /// * `group_name`: group name
+    /// * `names`: a file each line contains name words
+    fn register_names_vec(&mut self, key: &str, names: &Vec<Box<str>>) -> anyhow::Result<()>;
 
     fn row_names(&self) -> anyhow::Result<Vec<Box<str>>>;
 
