@@ -251,7 +251,6 @@ impl SparseMtxData {
             println!(
                 "{}: {} rows, {} columns, {} non-zeros",
                 mtx_file, nrow, ncol, nnz
-		    
             );
 
             Ok(())
@@ -565,21 +564,35 @@ impl SparseMtxData {
 impl SparseIo for SparseMtxData {
     /// Set row names for the matrix
     /// * `row_name_file`: a file each line contains row name words
-    fn register_row_names(self: &mut Self, row_name_file: &str) {
-        self.register_names("row_names", row_name_file, 0..self.max_row_name_idx, "_")
+    fn register_row_names_file(self: &mut Self, row_name_file: &str) {
+        self.register_names_file("/row_names", row_name_file, 0..self.max_row_name_idx, "_")
+            .expect("failed to add row names");
+    }
+
+    /// Set row names for the matrix
+    /// * `rows`: a vector of row names
+    fn register_row_names_vec(&mut self, rows: &Vec<Box<str>>) {
+        self.register_names_vec("/row_names", rows)
             .expect("failed to add row names");
     }
 
     /// Set column names for the matrix
     /// * `column_name_file`: a file each line contains column name words
-    fn register_column_names(self: &mut Self, column_name_file: &str) {
-        self.register_names(
-            "column_names",
+    fn register_column_names_file(self: &mut Self, column_name_file: &str) {
+        self.register_names_file(
+            "/column_names",
             column_name_file,
             0..self.max_column_name_idx,
             "@",
         )
         .expect("failed to add column names");
+    }
+
+    /// Set column names for the matrix
+    /// * `columns`: a vector of column names
+    fn register_column_names_vec(&mut self, columns: &Vec<Box<str>>) {
+        self.register_names_vec("/column_names", columns)
+            .expect("failed to add column names");
     }
 
     /// Number of rows in the underlying data matrix
@@ -602,7 +615,7 @@ impl SparseIo for SparseMtxData {
     /// * `name_file`: a file each line contains name words
     /// * `name_columns`: range of columns to be used for name
     /// * `name_sep`: separator for name columns
-    fn register_names(
+    fn register_names_file(
         self: &mut Self,
         key: &str,
         name_file: &str,
@@ -633,7 +646,27 @@ impl SparseIo for SparseMtxData {
         root.new_dataset::<VarLenUnicode>()
             .shape(_names.len())
             .chunk([self.chunk_size.min(_names.len())])
-            .blosc_zstd(9, true)
+            .create(key)?
+            .write(&_names)?;
+
+        Ok(())
+    }
+
+    /// Add arbitrary names (a vector of strings)
+    /// * `group_name`: group name
+    /// * `names`: a file each line contains name words
+    fn register_names_vec(&mut self, key: &str, names: &Vec<Box<str>>) -> anyhow::Result<()> {
+        use hdf5::types::VarLenUnicode;
+
+        let _names: Vec<VarLenUnicode> = names
+            .iter()
+            .map(|x| x.to_string().parse().expect("invalid name"))
+            .collect::<Vec<_>>();
+
+        let root = self.backend.group("/")?;
+        root.new_dataset::<VarLenUnicode>()
+            .shape(_names.len())
+            .chunk([self.chunk_size.min(_names.len())])
             .create(key)?
             .write(&_names)?;
 
@@ -641,11 +674,11 @@ impl SparseIo for SparseMtxData {
     }
 
     fn row_names(&self) -> anyhow::Result<Vec<Box<str>>> {
-        self.retrieve_registered_names("row_names")
+        self.retrieve_registered_names("/row_names")
     }
 
     fn column_names(&self) -> anyhow::Result<Vec<Box<str>>> {
-        self.retrieve_registered_names("column_names")
+        self.retrieve_registered_names("/column_names")
     }
 
     /// Get back the registered names
@@ -655,12 +688,9 @@ impl SparseIo for SparseMtxData {
 
         let root = self.backend.group("/")?;
 
-        Ok(root
-            .dataset(key)?
-            .read_1d::<VarLenUnicode>()?
-            .iter()
-            .map(|x| x.to_string().into_boxed_str())
-            .collect())
+        let ret = root.dataset(key)?.read_1d::<VarLenUnicode>()?;
+
+        Ok(ret.iter().map(|x| x.to_string().into_boxed_str()).collect())
     }
 
     type IndexIter = Vec<usize>;

@@ -6,6 +6,7 @@ mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
 mod statistics;
 
+use crate::common_io::write_lines;
 use crate::sparse_io::*;
 use crate::statistics::RunningStatistics;
 use clap::{Args, Parser, Subcommand};
@@ -18,8 +19,6 @@ use std::sync::{Arc, Mutex};
 ///
 /// `asap-data` utility for processing sparse matrices
 /// - build: build from .mtx fileset to another
-/// - subset: subset a sparse matrix
-/// - merge: merge multiple sparse matrices
 /// - stat: compute basic statistics of a sparse matrix
 /// - simulate: simulate a sparse matrix
 ///
@@ -32,12 +31,29 @@ struct Cli {
 enum Commands {
     /// build from one format to another
     Build(RunBuildArgs),
-    /// subset a sparse matrix
-    Subset(RunSubsetArgs),
+    /// filter out rows and columns (Q/C)
+    Filter(RunFilterArgs),
     /// stat a sparse matrix
     Stat(RunStatArgs),
     /// simulate a sparse matrix data
     Simulate(RunSimulateArgs),
+}
+
+#[derive(Args)]
+pub struct RunFilterArgs {
+    /// input .zarr or .h5 file
+    #[arg(short, long)]
+    input: Box<str>,
+
+    /// output file header
+    #[arg(short, long)]
+    output: Box<str>,
+}
+
+fn run_filtering(cmd_args: &RunFilterArgs) -> anyhow::Result<()> {
+    todo!("need to implement add and remove row/columns");
+
+    Ok(())
 }
 
 #[derive(Args)]
@@ -46,9 +62,13 @@ pub struct RunStatArgs {
     #[arg(short, long)]
     input: Box<str>,
 
-    /// backend to use (HDF5 or Zarr)
+    /// backend to use (HDF5 or Zarr), default: Zarr
     #[arg(short, long, value_enum)]
-    backend: SparseIoBackend,
+    backend: Option<SparseIoBackend>,
+
+    /// block_size, default: 100
+    #[arg(long, value_enum)]
+    block_size: Option<usize>,
 
     /// output file header
     #[arg(short, long)]
@@ -60,54 +80,91 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     common_io::mkdir(&output)?;
 
     let input = cmd_args.input.clone();
-    let backend = cmd_args.backend.clone();
+    let backend = cmd_args.backend.clone().unwrap_or(SparseIoBackend::Zarr);
 
-    let arc_data = open_sparse_matrix(&input, &backend)?;
-    let data = arc_data.lock().expect("failed to lock data");
+    let data = open_sparse_matrix(&input, &backend)?;
 
-    let block_size = 1000_usize;
+    let block_size = cmd_args.block_size.unwrap_or(100);
 
     use ndarray::Ix1;
 
     if let (Some(nrow), Some(ncol)) = (data.num_rows(), data.num_columns()) {
         let row_names = data.row_names().expect("no row names");
-        let col_names = data.column_names().expect("no column names");
+        let col_names = data.column_names().expect("no col names");
 
         let arc_row_stat = Arc::new(Mutex::new(RunningStatistics::new(Ix1(nrow))));
-        let arc_col_stat = Arc::new(Mutex::new(RunningStatistics::new(Ix1(ncol))));
 
-        let nblock = (ncol + block_size - 1) / block_size;
+        {
+            let nblock = (ncol + block_size - 1) / block_size;
+            let arc_data = Arc::new(Mutex::new(data));
+            let jobs = (0..nblock).into_par_iter().map(|b| {
+                let lb: usize = b * block_size;
+                let ub: usize = ((b + 1) * block_size).min(ncol);
+                (lb, ub)
+            });
 
-        let jobs = (0..nblock).into_par_iter().map(|b| {
-            let lb: usize = b * block_size;
-            let ub: usize = ((b + 1) * block_size).min(ncol);
-            (lb, ub)
-        });
+            let arc_col_stat_map = Arc::new(Mutex::new(HashMap::<usize, Box<str>>::new()));
 
-        jobs.for_each(|(lb, ub)| {
-            let data = arc_data.lock().expect("failed to lock data");
-            let mut row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
-            let mut col_stat = arc_col_stat.lock().expect("failed to lock col_stat");
+            jobs.for_each(|(lb, ub)| {
+                //////////////////////
+                // take subset data //
+                //////////////////////
+                let nn_b = ub - lb;
 
-            let xx_b = data.read_columns((lb..ub).collect()).unwrap();
+                let data_b = arc_data.lock().expect("failed to lock data");
+                let xx_b = data_b.read_columns((lb..ub).collect()).unwrap();
 
-            for x in xx_b.axis_iter(Axis(0)) {
-                row_stat.add(&x);
+                // accumulate rows' statistics
+                {
+                    let mut row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
+                    for x in xx_b.axis_iter(Axis(1)) {
+                        row_stat.add(&x);
+                    }
+                }
+
+                let mut _names = vec![];
+                for i in lb..ub {
+                    _names.push(col_names[i].clone());
+                }
+
+                // accumulate columns' statistics
+                {
+                    let mut col_stat_map = arc_col_stat_map
+                        .lock()
+                        .expect("failed to lock col_stat_lines");
+
+                    let mut _stat = RunningStatistics::new(Ix1(nn_b));
+                    for x in xx_b.axis_iter(Axis(0)) {
+                        _stat.add(&x);
+                    }
+
+                    let _lines = _stat
+                        .to_string_vec(&_names, "\t")
+                        .expect("failed to generate column stat lines");
+
+                    for (glob, line) in (lb..ub).zip(_lines.iter()) {
+                        col_stat_map.insert(glob, line.clone().into());
+                    }
+                }
+            }); // end of jobs
+
+            {
+                let row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
+                let row_stat_file = format!("{}.row.stat.gz", output);
+                row_stat.save(&row_stat_file, &row_names, "\t")?;
             }
+            {
+                let col_stat_file = format!("{}.column.stat.gz", output);
+                let col_stat_map = arc_col_stat_map
+                    .lock()
+                    .expect("failed to lock col_stat_lines");
 
-            for x in xx_b.axis_iter(Axis(1)) {
-                col_stat.add(&x);
+                let mut sorted: Vec<(usize, Box<str>)> = col_stat_map.clone().into_iter().collect();
+                sorted.sort_by_key(|&(k, _)| k);
+                let lines: Vec<Box<str>> = sorted.into_iter().map(|(_, v)| v).collect();
+                write_lines(&lines, &col_stat_file)?;
             }
-        }); // end of jobs
-
-        // output to the files
-        let row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
-        let col_stat = arc_col_stat.lock().expect("failed to lock col_stat");
-
-        let row_stat_file = format!("{}.rows.gz", output);
-        let col_stat_file = format!("{}.columns.gz", output);
-        row_stat.save(&row_stat_file, &row_names)?;
-        col_stat.save(&col_stat_file, &col_names)?;
+        }
     } else {
         return Err(anyhow::anyhow!(
             "failed to get the number of rows and columns"
@@ -115,17 +172,6 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-#[derive(Args)]
-pub struct RunSubsetArgs {
-    /// input .zarr or .h5 file
-    #[arg(short, long)]
-    input: Box<str>,
-
-    /// output file header
-    #[arg(short, long)]
-    output: Box<str>,
 }
 
 #[derive(Args)]
@@ -142,9 +188,9 @@ pub struct RunBuildArgs {
     #[arg(short, long)]
     col: Box<str>,
 
-    /// backend to use (HDF5 or Zarr)
+    /// backend to use (HDF5 or Zarr), default: Zarr
     #[arg(short, long, value_enum)]
-    backend: SparseIoBackend,
+    backend: Option<SparseIoBackend>,
 
     /// output file header: {output}.{backend}
     #[arg(short, long)]
@@ -156,17 +202,17 @@ fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
     let row_file = args.row.as_ref();
     let col_file = args.col.as_ref();
 
-    let backend_file = match args.backend {
+    let backend = args.backend.clone().unwrap_or(SparseIoBackend::Zarr);
+    let backend_file = match backend {
         SparseIoBackend::HDF5 => format!("{}.h5", args.output),
         SparseIoBackend::Zarr => format!("{}.zarr", args.output),
     };
     let backend_file = backend_file.as_ref();
 
-    let arc_data = create_sparse_matrix(&mtx_file, &backend_file, &args.backend)?;
-    let mut data = arc_data.lock().expect("failed to lock data");
+    let mut data = create_sparse_matrix(&mtx_file, &backend_file, &backend)?;
 
-    data.register_row_names(row_file);
-    data.register_column_names(col_file);
+    data.register_row_names_file(row_file);
+    data.register_column_names_file(col_file);
 
     Ok(())
 }
@@ -197,7 +243,7 @@ pub struct RunSimulateArgs {
     #[arg(long)]
     pub seed: Option<u64>,
 
-    /// backend to use (HDF5 or Zarr), default: HDF5
+    /// backend to use (HDF5 or Zarr), default: Zarr
     #[arg(long, value_enum)]
     backend: Option<SparseIoBackend>,
 }
@@ -206,7 +252,7 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
     common_io::mkdir(&output)?;
 
-    let backend = cmd_args.backend.clone().unwrap_or(SparseIoBackend::HDF5);
+    let backend = cmd_args.backend.clone().unwrap_or(SparseIoBackend::Zarr);
 
     let backend_file = match backend {
         SparseIoBackend::HDF5 => output.to_string() + ".h5",
@@ -246,16 +292,19 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         &memb_file,
     )
     .expect("something went wrong in factored gamma");
-    match backend {
-        SparseIoBackend::HDF5 => {
-            use sparse_matrix_hdf5::SparseMtxData;
-            let _ = SparseMtxData::from_mtx_file(&mtx_file, Some(&backend_file), Some(true))?;
-        }
-        SparseIoBackend::Zarr => {
-            use sparse_matrix_zarr::SparseMtxData;
-            let _ = SparseMtxData::from_mtx_file(&mtx_file, Some(&backend_file), Some(true))?;
-        }
-    }
+
+    let mut data = create_sparse_matrix(&mtx_file, &backend_file, &backend)?;
+
+    let rows: Vec<Box<str>> = (0..sim_args.rows)
+        .map(|i| (i + 1).to_string().into_boxed_str())
+        .collect();
+
+    let cols: Vec<Box<str>> = (0..sim_args.cols)
+        .map(|i| (i + 1).to_string().into_boxed_str())
+        .collect();
+
+    data.register_row_names_vec(&rows);
+    data.register_column_names_vec(&cols);
 
     Ok(())
 }
