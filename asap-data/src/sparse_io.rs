@@ -84,11 +84,11 @@ pub trait SparseIo: Sync + Send {
     fn to_mtx_file(&self, mtx_file: &str) -> anyhow::Result<()>;
 
     /// Select the columns of the data and create a new backend file
-    /// * `columns`: columns to be subsetted
+    /// * `columns`: if something, columns to be subsetted
     /// * `rows`: if something, subset the rows
     fn subset_columns_rows(
         &mut self,
-        columns: &Vec<usize>,
+        columns: Option<&Vec<usize>>,
         rows: Option<&Vec<usize>>,
     ) -> anyhow::Result<()>;
 
