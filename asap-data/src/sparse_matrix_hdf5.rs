@@ -567,7 +567,7 @@ impl SparseIo for SparseMtxData {
     /// * `rows`: if something, subset the rows
     fn subset_columns_rows(
         &mut self,
-        columns: &Vec<usize>,
+        columns: Option<&Vec<usize>>,
         rows: Option<&Vec<usize>>,
     ) -> anyhow::Result<()> {
         if let (Some(ncol), Some(nrow), Some(nnz)) =
@@ -581,13 +581,13 @@ impl SparseIo for SparseMtxData {
             // 0. Create a mapping from old to new columns //
             /////////////////////////////////////////////////
 
-            let (old2new_cols, _col_names) =
-                take_subset_indices_names(&columns, ncol_data, self.column_names()?);
+            let (old2new_cols, new_col_names) =
+                take_subset_indices_names_if_needed(columns, Some(ncol_data), self.column_names()?);
 
-            let new_ncol = old2new_cols.len();
-            let (old2new_rows, _row_names) =
+            let (old2new_rows, new_row_names) =
                 take_subset_indices_names_if_needed(rows, Some(nrow_data), self.row_names()?);
-            let new_nrow = old2new_rows.len();
+
+            let (new_ncol, new_nrow) = (old2new_cols.len(), old2new_rows.len());
 
             /////////////////////////////////////////////////////////
             // 1. Create remapped Mtx only taking a subset of rows //
@@ -633,8 +633,8 @@ impl SparseIo for SparseMtxData {
             ///////////////////////////////
             let mut ret = Self::from_mtx_file(&temp_mtx_file, Some(&backend_file), Some(true))
                 .expect("failed to create a new backend");
-            ret.register_row_names_vec(&_row_names);
-            ret.register_column_names_vec(&_col_names);
+            ret.register_row_names_vec(&new_row_names);
+            ret.register_column_names_vec(&new_col_names);
 
             #[cfg(not(debug_assertions))]
             {
