@@ -85,11 +85,11 @@ pub trait SparseIo: Sync + Send {
 
     /// Select the columns of the data and create a new backend file
     /// * `columns`: columns to be subsetted
-    /// * `index_by_row`: if true, the index will be sorted by row
-    fn subset_columns(
+    /// * `rows`: if something, subset the rows
+    fn subset_columns_rows(
         &mut self,
         columns: &Vec<usize>,
-        index_by_row: Option<bool>,
+        rows: Option<&Vec<usize>>,
     ) -> anyhow::Result<()>;
 
     /// Number of rows in the underlying data matrix
@@ -146,4 +146,50 @@ pub trait SparseIo: Sync + Send {
     /// Reposition rows in a new order specified by `remap`
     /// * `remap` - a hashmap of old row index to new row index
     fn remap_rows(&mut self, remap: HashMap<usize, usize>) -> anyhow::Result<()>;
+}
+
+//////////////////////
+// helper functions //
+//////////////////////
+
+// #[allow(dead_code)]
+pub fn take_subset_indices_names(
+    new_indices: &Vec<usize>,
+    ntot: usize,
+    old_names: Vec<Box<str>>,
+) -> (HashMap<usize, usize>, Vec<Box<str>>) {
+    let mut old2new: HashMap<usize, usize> = HashMap::new();
+    let mut new2old = vec![];
+    debug_assert!(ntot == old_names.len());
+    let mut k = 0_usize;
+    for idx in new_indices.iter() {
+        if *idx < ntot {
+            old2new.insert(*idx, k);
+            new2old.push(*idx);
+            k += 1;
+        }
+    }
+
+    let new_names = new2old
+        .iter()
+        .map(|&i| old_names[i].clone())
+        .collect::<Vec<Box<str>>>();
+
+    (old2new, new_names)
+}
+
+// #[allow(dead_code)]
+pub fn take_subset_indices_names_if_needed(
+    new_indices: Option<&Vec<usize>>,
+    ntot: Option<usize>,
+    old_names: Vec<Box<str>>,
+) -> (HashMap<usize, usize>, Vec<Box<str>>) {
+    let ntot = ntot.unwrap_or(old_names.len());
+    if let Some(new_indices) = new_indices {
+        take_subset_indices_names(new_indices, ntot, old_names)
+    } else {
+        let names = old_names;
+        let identity = (0..ntot).zip(0..ntot).collect::<HashMap<usize, usize>>();
+        (identity, names)
+    }
 }
