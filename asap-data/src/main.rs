@@ -53,6 +53,10 @@ pub struct RunFilterArgs {
 fn run_filtering(cmd_args: &RunFilterArgs) -> anyhow::Result<()> {
     todo!("need to implement add and remove row/columns");
 
+// 1. compute scores
+
+// 2. subset
+
     Ok(())
 }
 
