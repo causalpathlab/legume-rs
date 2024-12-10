@@ -149,6 +149,22 @@ pub fn mkdir(file: &str) -> anyhow::Result<()> {
 }
 
 #[allow(dead_code)]
+/// Take the basename of a file
+/// * `file` - file name
+pub fn basename(file: &str) -> anyhow::Result<String> {
+    let path = Path::new(file);
+    if let Some(base) = path.file_stem() {
+        let ret = base
+            .to_str()
+            .expect("failed to convert to string")
+            .to_string();
+        Ok(ret)
+    } else {
+        return Err(anyhow::anyhow!("no file stem"));
+    }
+}
+
+#[allow(dead_code)]
 /// Create a temporary directory and suggest a file name
 /// * `suffix` - suffix of the file name
 pub fn create_temp_dir_file(suffix: &str) -> anyhow::Result<std::path::PathBuf> {

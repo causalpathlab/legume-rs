@@ -79,6 +79,19 @@ pub trait SparseIo: Sync + Send {
         )))
     }
 
+    /// Export the data to a mtx file. This will take time.
+    /// * `mtx_file`: mtx file to be written
+    fn to_mtx_file(&self, mtx_file: &str) -> anyhow::Result<()>;
+
+    /// Select the columns of the data and create a new backend file
+    /// * `columns`: columns to be subsetted
+    /// * `index_by_row`: if true, the index will be sorted by row
+    fn subset_columns(
+        &mut self,
+        columns: &Vec<usize>,
+        index_by_row: Option<bool>,
+    ) -> anyhow::Result<()>;
+
     /// Number of rows in the underlying data matrix
     fn num_rows(&self) -> Option<usize>;
 

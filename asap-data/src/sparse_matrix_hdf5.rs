@@ -96,11 +96,11 @@ impl SparseMtxData {
         };
 
         // populate data from mtx file
-        ret.import_mtx_by_col(mtx_file)?;
+        ret.import_mtx_file_by_col(mtx_file)?;
         ret.read_column_indptr()?;
 
         if Some(true) == index_by_row {
-            ret.import_mtx_by_row(mtx_file)?;
+            ret.import_mtx_file_by_row(mtx_file)?;
             ret.read_row_indptr()?;
         }
 
@@ -109,7 +109,7 @@ impl SparseMtxData {
 
     /// Read mtx file and populate the data into HDF5 for faster row-by-row access
     /// * `mtx_file`: mtx file to be read into HDF5 backend
-    fn import_mtx_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
+    fn import_mtx_file_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
 
         self.record_mtx_shape(mtx_shape)?;
@@ -122,7 +122,7 @@ impl SparseMtxData {
 
     /// Read mtx file and populate the data into HDF5 for faster column-by-column access
     /// * `mtx_file`: mtx file to be read into HDF5 backend
-    fn import_mtx_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
+    fn import_mtx_file_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
 
         if mtx_triplets.len() == 0 {
@@ -215,50 +215,6 @@ impl SparseMtxData {
     /// Access file name of the hdf5 backend file
     pub fn get_backend_file_name(self: &Self) -> &str {
         &self.file_name
-    }
-
-    /// Export the data to a mtx file. This will take time.
-    /// * `mtx_file`: mtx file to be written
-    pub fn to_mtx_file(&self, mtx_file: &str) -> anyhow::Result<()> {
-        let by_column = self.backend.group("/by_column")?;
-
-        let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
-        let data = by_column.dataset("data")?;
-        let indices = by_column.dataset("indices")?;
-
-        let mut buf = open_buf_writer(mtx_file)?;
-
-        if let (Some(ncol), Some(nrow), Some(nnz)) =
-            (self.num_columns(), self.num_rows(), self.num_non_zeros())
-        {
-            writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
-            writeln!(buf, "{}\t{}\t{}", nrow, ncol, nnz)?;
-
-            for jj in 0..ncol {
-                let start = indptr[jj] as usize;
-                let end = indptr[jj + 1] as usize;
-
-                let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
-                let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
-                // write them with 1-based indices
-                for k in 0..(end - start) {
-                    let val = data_slice[k];
-                    let ii = indices_slice[k] as usize;
-                    writeln!(buf, "{}\t{}\t{}", ii + 1, jj + 1, val)?;
-                }
-            }
-            buf.flush()?;
-            println!(
-                "{}: {} rows, {} columns, {} non-zeros",
-                mtx_file, nrow, ncol, nnz
-            );
-
-            Ok(())
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
     }
 
     /////////////////////////////////
@@ -562,6 +518,149 @@ impl SparseMtxData {
 }
 
 impl SparseIo for SparseMtxData {
+    /// Export the data to a mtx file. This will take time.
+    /// * `mtx_file`: mtx file to be written
+    fn to_mtx_file(&self, mtx_file: &str) -> anyhow::Result<()> {
+        let by_column = self.backend.group("/by_column")?;
+
+        let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
+        let data = by_column.dataset("data")?;
+        let indices = by_column.dataset("indices")?;
+
+        let mut buf = open_buf_writer(mtx_file)?;
+
+        if let (Some(ncol), Some(nrow), Some(nnz)) =
+            (self.num_columns(), self.num_rows(), self.num_non_zeros())
+        {
+            writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
+            writeln!(buf, "{}\t{}\t{}", nrow, ncol, nnz)?;
+
+            for jj in 0..ncol {
+                let start = indptr[jj] as usize;
+                let end = indptr[jj + 1] as usize;
+
+                let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
+                let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+                // write them with 1-based indices
+                for k in 0..(end - start) {
+                    let val = data_slice[k];
+                    let ii = indices_slice[k] as usize;
+                    writeln!(buf, "{}\t{}\t{}", ii + 1, jj + 1, val)?;
+                }
+            }
+            buf.flush()?;
+            // println!(
+            //     "{}: {} rows, {} columns, {} non-zeros",
+            //     mtx_file, nrow, ncol, nnz
+            // );
+
+            Ok(())
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
+    /// Select the columns of the data and create a new backend file
+    /// * `columns`: columns to be subsetted
+    /// * `index_by_row`: if true, the index will be sorted by row
+    fn subset_columns(
+        &mut self,
+        columns: &Vec<usize>,
+        index_by_row: Option<bool>,
+    ) -> anyhow::Result<()> {
+        if let (Some(ncol), Some(nrow), Some(nnz)) =
+            (self.num_columns(), self.num_rows(), self.num_non_zeros())
+        {
+            let (nrow, ncol, nnz) = (nrow as usize, ncol as usize, nnz as usize);
+
+            let backend_file = self.get_backend_file_name();
+            let _old_col_names = self.column_names()?;
+            let _row_names = self.row_names()?;
+
+            if _old_col_names.len() != ncol || _row_names.len() != nrow {
+                return Err(anyhow::anyhow!(
+                    "row or column names mismatch with the matrix shape"
+                ));
+            }
+
+            /////////////////////////////////////////////////
+            // 0. Create a mapping from old to new columns //
+            /////////////////////////////////////////////////
+
+            let mut old2new: HashMap<usize, usize> = HashMap::new();
+            let mut new2old = vec![];
+            {
+                let mut k = 0_usize;
+                for col in columns.iter() {
+                    if *col < ncol {
+                        old2new.insert(*col, k);
+                        new2old.push(*col);
+                        k += 1;
+                    }
+                }
+            }
+
+            let _col_names = new2old
+                .iter()
+                .map(|&i| _old_col_names[i].clone())
+                .collect::<Vec<Box<str>>>();
+
+            /////////////////////////////////////////////////////////
+            // 1. Create remapped Mtx only taking a subset of rows //
+            /////////////////////////////////////////////////////////
+
+            let by_column = self.backend.group("/by_column")?;
+
+            let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
+            let data = by_column.dataset("data")?;
+            let indices = by_column.dataset("indices")?;
+            debug_assert!(indptr.len() == ncol + 1);
+
+            let mut temp_mtx_file = basename(&backend_file)?;
+            temp_mtx_file += "_temp.mtx.gz";
+            let mut buf = open_buf_writer(&temp_mtx_file)?;
+            let new_ncol = old2new.len();
+
+            writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
+            writeln!(buf, "{}\t{}\t{}", nrow, new_ncol, nnz)?;
+
+            for old_jj in 0..ncol {
+                if let Some(jj) = old2new.get(&old_jj) {
+                    let (start, end) = (indptr[old_jj] as usize, indptr[old_jj + 1] as usize);
+                    let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
+                    let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+                    // write them with 1-based indices
+                    for k in 0..(end - start) {
+                        let val = data_slice[k as usize];
+                        let ii = indices_slice[k as usize] as usize;
+                        writeln!(buf, "{}\t{}\t{}", ii + 1, jj + 1, val)?;
+                    }
+                }
+            }
+            buf.flush()?;
+
+            /////////////////////////////////////
+            // 2. Remove previous backend file //
+            /////////////////////////////////////
+            remove_file(&backend_file)?;
+
+            ///////////////////////////////
+            // 3. populate a new backend //
+            ///////////////////////////////
+            let mut ret =
+                Self::from_mtx_file(&temp_mtx_file, Some(&backend_file), index_by_row.clone())
+                    .expect("failed to create a new backend");
+            ret.register_row_names_vec(&_row_names);
+            ret.register_column_names_vec(&_col_names);
+
+            remove_file(&temp_mtx_file)?;
+        }
+
+        Ok(())
+    }
+
     /// Set row names for the matrix
     /// * `row_name_file`: a file each line contains row name words
     fn register_row_names_file(self: &mut Self, row_name_file: &str) {
