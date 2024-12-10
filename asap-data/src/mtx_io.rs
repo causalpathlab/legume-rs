@@ -69,8 +69,9 @@ pub fn read_mtx_triplets(
         None
     };
 
+    // #allow(unused_variables)
     if let Some((nrow, ncol, nnz)) = mtx_shape {
-        dbg!(format!("nrow: {}, ncol: {}, nnz: {}", nrow, ncol, nnz));
+        // dbg!(format!("nrow: {}, ncol: {}, nnz: {}", nrow, ncol, nnz));
     } else {
         return Err(anyhow::anyhow!("Failed to parse mtx header"));
     };

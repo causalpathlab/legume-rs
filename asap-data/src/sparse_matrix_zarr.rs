@@ -96,11 +96,11 @@ impl SparseMtxData {
         };
 
         // populate data from mtx file
-        ret.import_mtx_by_col(mtx_file)?;
+        ret.import_mtx_file_by_col(mtx_file)?;
         ret.read_column_indptr()?;
 
         if Some(true) == index_by_row {
-            ret.import_mtx_by_row(mtx_file)?;
+            ret.import_mtx_file_by_row(mtx_file)?;
             ret.read_row_indptr()?;
         }
 
@@ -109,7 +109,7 @@ impl SparseMtxData {
 
     /// Read mtx file and populate the data into zarr for faster row-by-row access
     /// * `mtx_file`: mtx file to be read into zarr backend
-    fn import_mtx_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
+    fn import_mtx_file_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
 
         self.record_mtx_shape(mtx_shape)?;
@@ -122,7 +122,7 @@ impl SparseMtxData {
 
     /// Read mtx file and populate the data for faster column-by-column access
     /// * `mtx_file`: mtx file to be read into zarr backend
-    fn import_mtx_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
+    fn import_mtx_file_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
 
         if mtx_triplets.len() == 0 {
@@ -159,63 +159,6 @@ impl SparseMtxData {
         Ok(ret)
     }
 
-    /// Export the data to a mtx file. This will take time.
-    /// * `mtx_file`: mtx file to be written
-    pub fn to_mtx_file(&self, mtx_file: &str) -> anyhow::Result<()> {
-        use zarrs::array::Array as ZArray;
-        use zarrs::array_subset::ArraySubset;
-
-        let key = "/by_column/indptr";
-        let indptr = ZArray::open(self.store.clone(), key)?;
-        let indptr = indptr.retrieve_array_subset_ndarray::<u64>(&indptr.subset_all())?;
-
-        let key = "/by_column/data";
-        let data = ZArray::open(self.store.clone(), key)?;
-        let key = "/by_column/indices";
-        let indices = ZArray::open(self.store.clone(), key)?;
-
-        let mut buf = open_buf_writer(mtx_file)?;
-
-        if let (Some(ncol), Some(nrow), Some(nnz)) =
-            (self.num_columns(), self.num_rows(), self.num_non_zeros())
-        {
-            let nrow = nrow as usize;
-            let ncol = ncol as usize;
-            let nnz = nnz as usize;
-
-            writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
-            writeln!(buf, "{}\t{}\t{}", nrow, ncol, nnz)?;
-            debug_assert!(indptr.len() == ncol + 1);
-
-            for jj in 0..ncol {
-                let start = indptr[jj];
-                let end = indptr[jj + 1];
-
-                let subset = ArraySubset::new_with_ranges(&[start..end]);
-                let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
-                let indices_slice = indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
-
-                // write them with 1-based indices
-                for k in 0..(end - start) {
-                    let val = data_slice[k as usize];
-                    let ii = indices_slice[k as usize] as usize;
-                    writeln!(buf, "{}\t{}\t{}", ii + 1, jj + 1, val)?;
-                }
-            }
-            buf.flush()?;
-            // println!(
-            //     "{}: {} rows, {} columns, {} non-zeros",
-            //     mtx_file, nrow, ncol, nnz
-            // );
-
-            Ok(())
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
-
     /// Show the hierarchy of the zarr store
     pub fn print_hierarchy(self: &Self) -> anyhow::Result<()> {
         let node = zarrs::node::Node::open(&self.store, "/")?;
@@ -234,7 +177,7 @@ impl SparseMtxData {
         use zarrs::array::Array;
         let key = "/by_row/indptr";
         if let Ok(indptr) = Array::open(self.store.clone(), key) {
-            let indptr_vec = indptr.retrieve_array_subset_ndarray::<u64>(&indptr.subset_all())?;
+            let indptr_vec = indptr.retrieve_array_subset_elements::<u64>(&indptr.subset_all())?;
             self.by_row_indptr.clear();
             self.by_row_indptr.extend(indptr_vec);
         }
@@ -246,7 +189,7 @@ impl SparseMtxData {
         use zarrs::array::Array as ZArray;
         let key = "/by_column/indptr";
         if let Ok(indptr) = ZArray::open(self.store.clone(), key) {
-            let indptr_vec = indptr.retrieve_array_subset_ndarray::<u64>(&indptr.subset_all())?;
+            let indptr_vec = indptr.retrieve_array_subset_elements::<u64>(&indptr.subset_all())?;
             self.by_column_indptr.clear();
             self.by_column_indptr.extend(indptr_vec);
         }
@@ -499,6 +442,31 @@ impl SparseMtxData {
         Ok(())
     }
 
+    // // type DynZArray = zarrs::array::Array<dyn ReadableListableStorageTraits>;
+
+    // fn open_csc_triplets(
+    //     &self,
+    // ) -> anyhow::Result<(
+    //     zarrs::array::Array<dyn ReadableListableStorageTraits>,
+    //     zarrs::array::Array<dyn ReadableListableStorageTraits>,
+    //     zarrs::array::Array<dyn ReadableListableStorageTraits>,
+    // )> {
+    //     use zarrs::array::Array as ZArray;
+
+    //     let key = "/by_column/indptr";
+    //     let indptr: ZArray<dyn ReadableListableStorageTraits> =
+    //         ZArray::open(self.store.clone(), key)?;
+    //     // let indptr = indptr.retrieve_array_subset_ndarray::<u64>(&indptr.subset_all())?;
+
+    //     let key = "/by_column/data";
+    //     let data = ZArray::open(self.store.clone(), key)?;
+
+    //     let key = "/by_column/indices";
+    //     let indices = ZArray::open(self.store.clone(), key)?;
+
+    //     Ok((indptr, data, indices))
+    // }
+
     /// Helper function to create a filled 1D array with the given
     /// data type and fill value. This is the most useful function to
     /// create a vector like data.
@@ -542,13 +510,49 @@ impl SparseMtxData {
         Ok(())
     }
 
+    fn _open_vector(
+        self: &Self,
+        key: &str,
+    ) -> anyhow::Result<zarrs::array::Array<dyn ZStorageTraits>> {
+        use zarrs::array::Array as ZArray;
+        let ret = ZArray::open(self.store.clone(), key)?;
+        Ok(ret)
+    }
+
+    fn open_csc_triplets(
+        &self,
+    ) -> anyhow::Result<(
+        zarrs::array::Array<dyn ZStorageTraits>,
+        zarrs::array::Array<dyn ZStorageTraits>,
+        zarrs::array::Array<dyn ZStorageTraits>,
+    )> {
+        Ok((
+            self._open_vector("/by_column/indptr")?,
+            self._open_vector("/by_column/data")?,
+            self._open_vector("/by_column/indices")?,
+        ))
+    }
+
+    fn open_csr_triplets(
+        &self,
+    ) -> anyhow::Result<(
+        zarrs::array::Array<dyn ZStorageTraits>,
+        zarrs::array::Array<dyn ZStorageTraits>,
+        zarrs::array::Array<dyn ZStorageTraits>,
+    )> {
+        Ok((
+            self._open_vector("/by_row/indptr")?,
+            self._open_vector("/by_row/data")?,
+            self._open_vector("/by_row/indices")?,
+        ))
+    }
+
     fn _retrieve_vector<V>(self: &Self, key: &str) -> anyhow::Result<Vec<V>>
     where
         V: zarrs::array::ElementOwned,
     {
-        use zarrs::array::Array as ZArray;
         use zarrs::array_subset::ArraySubset;
-        let data = ZArray::open(self.store.clone(), key)?;
+        let data = self._open_vector(key)?;
         let ntot = data.shape()[0];
         let subset = ArraySubset::new_with_ranges(&[0..ntot]);
         Ok(data.retrieve_array_subset_elements::<V>(&subset)?)
@@ -652,6 +656,147 @@ impl SparseMtxData {
 }
 
 impl SparseIo for SparseMtxData {
+    /// Subset the columns of the data and create a new backend file
+    /// * `columns`: columns to be subsetted
+    /// * `index_by_row`: if true, the index will be sorted by row
+    fn subset_columns(
+        &mut self,
+        columns: &Vec<usize>,
+        index_by_row: Option<bool>,
+    ) -> anyhow::Result<()> {
+        if let (Some(ncol), Some(nrow), Some(nnz)) =
+            (self.num_columns(), self.num_rows(), self.num_non_zeros())
+        {
+            let (nrow, ncol, nnz) = (nrow as usize, ncol as usize, nnz as usize);
+
+            let backend_file = self.get_backend_file_name();
+            let _old_col_names = self.column_names()?;
+            let _row_names = self.row_names()?;
+
+            if _old_col_names.len() != ncol || _row_names.len() != nrow {
+                return Err(anyhow::anyhow!(
+                    "row or column names mismatch with the matrix shape"
+                ));
+            }
+
+            /////////////////////////////////////////////////
+            // 0. Create a mapping from old to new columns //
+            /////////////////////////////////////////////////
+
+            let mut old2new: HashMap<usize, usize> = HashMap::new();
+            let new_ncol = old2new.len();
+            let mut new2old = vec![];
+            {
+                let mut k = 0_usize;
+                for col in columns.iter() {
+                    if *col < ncol {
+                        old2new.insert(*col, k);
+                        new2old.push(*col);
+                        k += 1;
+                    }
+                }
+            }
+
+            let _col_names = new2old
+                .iter()
+                .map(|&i| _old_col_names[i].clone())
+                .collect::<Vec<Box<str>>>();
+
+            /////////////////////////////////////////////////////////
+            // 1. Create remapped Mtx only taking a subset of rows //
+            /////////////////////////////////////////////////////////
+
+            use zarrs::array_subset::ArraySubset;
+            let (indptr, data, indices) = self.open_csc_triplets()?;
+            let indptr = indptr.retrieve_array_subset_elements::<u64>(&indptr.subset_all())?;
+            debug_assert!(indptr.len() == ncol + 1);
+
+            let mut temp_mtx_file = basename(&backend_file)?;
+            temp_mtx_file += "_temp.mtx.gz";
+            let mut buf = open_buf_writer(&temp_mtx_file)?;
+
+            writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
+            writeln!(buf, "{}\t{}\t{}", nrow, new_ncol, nnz)?;
+
+            for old_jj in 0..ncol {
+                if let Some(jj) = old2new.get(&old_jj) {
+                    let (start, end) = (indptr[old_jj], indptr[old_jj + 1]);
+                    let subset = ArraySubset::new_with_ranges(&[start..end]);
+                    let data_slice = data.retrieve_array_subset_elements::<f32>(&subset)?;
+                    let indices_slice = indices.retrieve_array_subset_elements::<u64>(&subset)?;
+
+                    // write them with 1-based indices
+                    for k in 0..(end - start) {
+                        let val = data_slice[k as usize];
+                        let ii = indices_slice[k as usize] as usize;
+                        writeln!(buf, "{}\t{}\t{}", ii + 1, jj + 1, val)?;
+                    }
+                }
+            }
+            buf.flush()?;
+
+            /////////////////////////////////////
+            // 2. Remove previous backend file //
+            /////////////////////////////////////
+            remove_file(&backend_file)?;
+
+            ///////////////////////////////
+            // 3. populate a new backend //
+            ///////////////////////////////
+            let mut ret =
+                Self::from_mtx_file(&temp_mtx_file, Some(&backend_file), index_by_row.clone())
+                    .expect("failed to create a new backend");
+            ret.register_row_names_vec(&_row_names);
+            ret.register_column_names_vec(&_col_names);
+
+            remove_file(&temp_mtx_file)?;
+        } else {
+            return Err(anyhow::anyhow!("missing shape information"));
+        }
+
+        Ok(())
+    }
+
+    /// Export the data to a mtx file. This will take time.
+    /// * `mtx_file`: mtx file to be written
+    fn to_mtx_file(&self, mtx_file: &str) -> anyhow::Result<()> {
+        use zarrs::array_subset::ArraySubset;
+
+        if let (Some(ncol), Some(nrow), Some(nnz)) =
+            (self.num_columns(), self.num_rows(), self.num_non_zeros())
+        {
+            let (nrow, ncol, nnz) = (nrow as usize, ncol as usize, nnz as usize);
+
+            let mut buf = open_buf_writer(mtx_file)?;
+            writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
+            writeln!(buf, "{}\t{}\t{}", nrow, ncol, nnz)?;
+
+            let (indptr, data, indices) = self.open_csc_triplets()?;
+            let indptr = indptr.retrieve_array_subset_ndarray::<u64>(&indptr.subset_all())?;
+            debug_assert!(indptr.len() == ncol + 1);
+
+            for jj in 0..ncol {
+                let (start, end) = (indptr[jj], indptr[jj + 1]);
+                let subset = ArraySubset::new_with_ranges(&[start..end]);
+                let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
+                let indices_slice = indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
+
+                // write them with 1-based indices
+                for k in 0..(end - start) {
+                    let val = data_slice[k as usize];
+                    let ii = indices_slice[k as usize] as usize;
+                    writeln!(buf, "{}\t{}\t{}", ii + 1, jj + 1, val)?;
+                }
+            }
+            buf.flush()?;
+            Ok(())
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
     /// Set row names for the matrix
     /// * `row_name_file`: a file each line contains row name words
     fn register_row_names_file(self: &mut Self, row_name_file: &str) {
@@ -864,9 +1009,9 @@ impl SparseIo for SparseMtxData {
 
                     if start < end {
                         let subset = ArraySubset::new_with_ranges(&[start..end]);
-                        let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
+                        let data_slice = data.retrieve_array_subset_elements::<f32>(&subset)?;
                         let indices_slice =
-                            indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
+                            indices.retrieve_array_subset_elements::<u64>(&subset)?;
 
                         for k in 0..(end - start) {
                             let x_ij = data_slice[k as usize];
