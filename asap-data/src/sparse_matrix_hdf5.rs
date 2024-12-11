@@ -88,10 +88,10 @@ impl SparseMtxData {
     ) -> anyhow::Result<Self> {
         // create an object
         let mut ret = match backend_file {
-            Some(backend_file) => Self::create_backend_file(backend_file)?,
+            Some(backend_file) => Self::return_backend_file(backend_file)?,
             None => {
                 let backend_file = mtx_file.to_string() + ".h5";
-                Self::create_backend_file(backend_file.as_ref())?
+                Self::return_backend_file(backend_file.as_ref())?
             }
         };
 
@@ -145,11 +145,11 @@ impl SparseMtxData {
         index_by_row: Option<bool>,
     ) -> anyhow::Result<Self> {
         let mut ret = match backend_file {
-            Some(backend_file) => Self::create_backend_file(backend_file)?,
+            Some(backend_file) => Self::return_backend_file(backend_file)?,
             None => {
                 let backend_file = create_temp_dir_file(".h5")?;
                 let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::create_backend_file(&backend_file)?
+                Self::return_backend_file(&backend_file)?
             }
         };
 
@@ -186,9 +186,7 @@ impl SparseMtxData {
 
     /// Associate sparse matrix data with a HDF5 file
     /// * `hdf5_file`: HDF5 file to be associated with
-    fn create_backend_file(hdf5_file: &str) -> anyhow::Result<Self> {
-        // dbg!(&hdf5_file);
-
+    fn return_backend_file(hdf5_file: &str) -> anyhow::Result<Self> {
         let hdf5_backend = hdf5::File::create(hdf5_file)?;
 
         Ok(Self {
@@ -201,6 +199,19 @@ impl SparseMtxData {
             by_row_indptr: vec![],
             remapped_rows: None,
         })
+    }
+
+    /// Helper function to create a new backend file
+    fn initialize_backend(&mut self) -> anyhow::Result<()> {
+        self.remove_backend_file()?;
+        self.backend = hdf5::File::create(&self.file_name)?.into();
+        self.chunk_size = CHUNK_SIZE;
+        self.max_column_name_idx = MAX_COLUMN_NAME_IDX;
+        self.max_row_name_idx = MAX_ROW_NAME_IDX;
+        self.by_column_indptr = vec![];
+        self.by_row_indptr = vec![];
+        self.remapped_rows = None;
+        Ok(())
     }
 
     /// Remove backend file to free up disk space
@@ -601,40 +612,49 @@ impl SparseIo for SparseMtxData {
 
             let mut temp_mtx_file = basename(&backend_file)?;
             temp_mtx_file += "_temp.mtx.gz";
-            let mut buf = open_buf_writer(&temp_mtx_file)?;
 
-            writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
-            writeln!(buf, "{}\t{}\t{}", new_nrow, new_ncol, nnz)?;
+            {
+                let mut buf = open_buf_writer(&temp_mtx_file)?;
 
-            for old_jj in 0..ncol_data {
-                if let Some(jj) = old2new_cols.get(&old_jj) {
-                    let (start, end) = (indptr[old_jj] as usize, indptr[old_jj + 1] as usize);
-                    let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
-                    let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
-                    // write them with 1-based indices
-                    for k in 0..(end - start) {
-                        let val = data_slice[k as usize];
-                        let ii = indices_slice[k as usize] as usize;
-                        if let Some(ii) = old2new_rows.get(&ii) {
-                            writeln!(buf, "{}\t{}\t{}", ii + 1, jj + 1, val)?;
+                writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
+                writeln!(buf, "{}\t{}\t{}", new_nrow, new_ncol, nnz)?;
+
+                for old_jj in 0..ncol_data {
+                    if let Some(jj) = old2new_cols.get(&old_jj) {
+                        let (start, end) = (indptr[old_jj] as usize, indptr[old_jj + 1] as usize);
+                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
+                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+                        // write them with 1-based indices
+                        for k in 0..(end - start) {
+                            let val = data_slice[k as usize];
+                            let ii = indices_slice[k as usize] as usize;
+                            if let Some(ii) = old2new_rows.get(&ii) {
+                                writeln!(buf, "{}\t{}\t{}", ii + 1, jj + 1, val)?;
+                            }
                         }
                     }
                 }
-            }
-            buf.flush()?;
+                buf.flush()?;
+            } // should be kept inside
 
             /////////////////////////////////////
             // 2. Remove previous backend file //
             /////////////////////////////////////
-            remove_file(&backend_file)?;
+            self.remove_backend_file()?;
 
             ///////////////////////////////
             // 3. populate a new backend //
             ///////////////////////////////
-            let mut ret = Self::from_mtx_file(&temp_mtx_file, Some(&backend_file), Some(true))
-                .expect("failed to create a new backend");
-            ret.register_row_names_vec(&new_row_names);
-            ret.register_column_names_vec(&new_col_names);
+            self.initialize_backend()?;
+
+            // populate data from mtx file
+            self.import_mtx_file_by_col(&temp_mtx_file)?;
+            self.read_column_indptr()?;
+            self.import_mtx_file_by_row(&temp_mtx_file)?;
+            self.read_row_indptr()?;
+
+            self.register_row_names_vec(&new_row_names);
+            self.register_column_names_vec(&new_col_names);
 
             #[cfg(not(debug_assertions))]
             {

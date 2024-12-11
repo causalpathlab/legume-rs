@@ -19,6 +19,30 @@ where
 }
 
 #[test]
+fn random_ndarray_subset() -> anyhow::Result<()> {
+    let whole_mat = Array::random((15, 777), rand::distributions::Uniform::new(0., 1.));
+
+    if let Ok(mut data) = SparseMtxData::from_ndarray(&whole_mat, None, None) {
+        let nrow = data.num_rows().unwrap();
+        let ncol = data.num_columns().unwrap();
+
+        let rows: Vec<Box<str>> = (0..nrow).map(|x| x.to_string().into_boxed_str()).collect();
+        let cols: Vec<Box<str>> = (0..ncol).map(|x| x.to_string().into_boxed_str()).collect();
+        data.register_column_names_vec(&cols);
+        data.register_row_names_vec(&rows);
+
+        let a = whole_mat.select(Axis(1), &[9, 10, 500, 11, 1, 2, 3]);
+
+        data.subset_columns_rows(Some(&vec![9, 10, 500, 11, 1, 2, 3]), None)?;
+
+        let b = data.read_columns((0..data.num_columns().unwrap()).collect())?;
+
+        debug_assert_eq!(a, b);
+    }
+    Ok(())
+}
+
+#[test]
 fn random_mtx_loading() -> anyhow::Result<()> {
     // 1. generate a random array2
     let a = Array::random((9, 1111), rand::distributions::Uniform::new(0., 1.));
