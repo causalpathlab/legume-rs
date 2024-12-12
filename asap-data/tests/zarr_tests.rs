@@ -2,7 +2,6 @@ use asap_data::common_io::{create_temp_dir_file, read_lines};
 use asap_data::simulate::*;
 use asap_data::sparse_io::*;
 use asap_data::sparse_matrix_zarr::SparseMtxData;
-use ndarray::prelude::*;
 use ndarray_rand::RandomExt;
 use std::path::Path;
 use std::time::Instant;

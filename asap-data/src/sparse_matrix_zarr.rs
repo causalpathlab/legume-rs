@@ -1,8 +1,9 @@
 use crate::common_io::*;
 use crate::mtx_io::*;
 use crate::sparse_io::*;
+use rayon::prelude::*;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use zarrs::array::DataType;
 use zarrs::filesystem::FilesystemStore;
 use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
@@ -36,7 +37,6 @@ pub struct SparseMtxData {
     max_column_name_idx: usize,
     by_column_indptr: Vec<u64>,
     by_row_indptr: Vec<u64>,
-    remapped_rows: Option<HashMap<usize, usize>>,
 }
 
 #[allow(dead_code)]
@@ -67,7 +67,6 @@ impl SparseMtxData {
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
             by_row_indptr: vec![],
-            remapped_rows: None,
         };
 
         ret.read_column_indptr()?;
@@ -212,7 +211,6 @@ impl SparseMtxData {
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
             by_row_indptr: vec![],
-            remapped_rows: None,
         })
     }
 
@@ -233,7 +231,6 @@ impl SparseMtxData {
         self.max_row_name_idx = MAX_ROW_NAME_IDX;
         self.by_column_indptr = vec![];
         self.by_row_indptr = vec![];
-        self.remapped_rows = None;
 
         Ok(())
     }
@@ -661,6 +658,8 @@ impl SparseIo for SparseMtxData {
         columns: Option<&Vec<usize>>,
         rows: Option<&Vec<usize>>,
     ) -> anyhow::Result<()> {
+        use zarrs::array_subset::ArraySubset;
+
         if let (Some(ncol), Some(nrow), Some(nnz)) =
             (self.num_columns(), self.num_rows(), self.num_non_zeros())
         {
@@ -686,45 +685,37 @@ impl SparseIo for SparseMtxData {
             // 1. Create remapped Mtx only taking a subset of rows //
             /////////////////////////////////////////////////////////
 
-            use zarrs::array_subset::ArraySubset;
             let (indptr, data, indices) = self.open_csc_triplets()?;
             let indptr = indptr.retrieve_array_subset_elements::<u64>(&indptr.subset_all())?;
             debug_assert!(indptr.len() == ncol_data + 1);
 
-            let mut temp_mtx_file = basename(&backend_file)?;
-            temp_mtx_file += "_temp.mtx.gz";
+            let arc_triplets = Arc::new(Mutex::new(vec![]));
 
-            {
-                let mut buf = open_buf_writer(&temp_mtx_file)?;
+            old2new_cols.par_iter().for_each(|(&old_jj, &jj)| {
+                let mut triplets = arc_triplets.lock().expect("failed to lock triplets");
+                let (start, end) = (indptr[old_jj], indptr[old_jj + 1]);
 
-                println!("mtx file: {}", &temp_mtx_file);
+                let subset = ArraySubset::new_with_ranges(&[start..end]);
+                let data_slice = data
+                    .retrieve_array_subset_elements::<f32>(&subset)
+                    .expect("failed to retrieve data slice");
+                let indices_slice = indices
+                    .retrieve_array_subset_elements::<u64>(&subset)
+                    .expect("failed to retrieve indices slice");
 
-                writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
-                writeln!(buf, "{}\t{}\t{}", new_nrow, new_ncol, nnz)?;
-
-                for (&old_jj, &jj) in old2new_cols.iter() {
-                    let (start, end) = (indptr[old_jj], indptr[old_jj + 1]);
-
-                    let subset = ArraySubset::new_with_ranges(&[start..end]);
-                    let data_slice = data.retrieve_array_subset_elements::<f32>(&subset)?;
-                    let indices_slice = indices.retrieve_array_subset_elements::<u64>(&subset)?;
-
-                    for k in 0..(end - start) {
-                        let val = data_slice[k as usize];
-                        let ii = indices_slice[k as usize] as usize;
-                        if let Some(ii) = old2new_rows.get(&ii) {
-                            writeln!(buf, "{}\t{}\t{}", ii + 1, jj + 1, val)?;
-                        }
+                for k in 0..(end - start) {
+                    let val = data_slice[k as usize];
+                    let ii = indices_slice[k as usize] as usize;
+                    if let Some(&ii) = old2new_rows.get(&ii) {
+                        triplets.push((ii as u64, jj as u64, val));
                     }
                 }
-                buf.flush()?;
-            } // should kept inside
+            });
 
             /////////////////////////////////////
             // 2. Remove previous backend file //
             /////////////////////////////////////
             self.remove_backend_file()?;
-
             dbg!(&backend_file);
 
             ///////////////////////////////
@@ -732,20 +723,23 @@ impl SparseIo for SparseMtxData {
             ///////////////////////////////
             self.initialize_backend()?;
 
-            // populate data from mtx file for faster CSC
-            self.import_mtx_file_by_col(&temp_mtx_file)?;
+            // populate data from mtx triplets
+            {
+                let mut row_col_val_triplets =
+                    arc_triplets.lock().expect("failed to lock triplets");
+
+                debug_assert!(row_col_val_triplets.len() <= nnz); // subset
+                let nnz = row_col_val_triplets.len();
+                let mtx_shape = (new_nrow, new_ncol, nnz);
+                self.record_mtx_shape(Some(mtx_shape))?;
+                self.record_triplets_by_col(&mut row_col_val_triplets)?;
+                self.record_triplets_by_row(&mut row_col_val_triplets)?;
+            }
             self.read_column_indptr()?;
-            self.import_mtx_file_by_row(&temp_mtx_file)?;
             self.read_row_indptr()?;
 
             self.register_row_names_vec(&new_row_names);
             self.register_column_names_vec(&new_col_names);
-
-            #[cfg(not(debug_assertions))]
-            {
-                // let's keep the mtx file for debugging
-                remove_file(&temp_mtx_file)?;
-            }
         } else {
             return Err(anyhow::anyhow!("missing shape information"));
         }
@@ -907,15 +901,18 @@ impl SparseIo for SparseMtxData {
     /// Read columns within the range and return dense `ndarray::Array2`
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_columns(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
+    fn read_triplets_by_columns(
+        self: &Self,
+        columns: Self::IndexIter,
+    ) -> anyhow::Result<Vec<(usize, usize, f32)>> {
+        let mut ret: Vec<(usize, usize, f32)> = Vec::new();
+
         use zarrs::array::Array as ZArray;
         use zarrs::array_subset::ArraySubset;
 
         debug_assert!(self.by_column_indptr.len() > 0);
         let indptr = &self.by_column_indptr;
-
         let columns_vec = columns.into_iter().collect::<Vec<usize>>();
-        let ncol_out = columns_vec.len();
 
         let key = "/by_column/data";
         let data = ZArray::open(self.store.clone(), key)?;
@@ -927,8 +924,6 @@ impl SparseIo for SparseMtxData {
             let ncol = ncol as usize;
 
             debug_assert!(indptr.len() > ncol);
-
-            let mut ret: Array2<f32> = Array2::zeros((nrow, ncol_out));
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
                 if j_data < ncol {
@@ -947,20 +942,37 @@ impl SparseIo for SparseMtxData {
 
                         for k in 0..(end - start) {
                             let x_ij = data_slice[k as usize];
-                            let old_ii = indices_slice[k as usize] as usize;
-                            let row_idx = self
-                                .remapped_rows
-                                .as_ref()
-                                .and_then(|remap| remap.get(&old_ii))
-                                .or(Some(&old_ii));
-
-                            if let Some(ii) = row_idx {
-                                ret[(*ii, jj)] = x_ij;
-                            }
+                            let ii = indices_slice[k as usize] as usize;
+                            debug_assert!(ii < nrow);
+                            ret.push((ii, jj, x_ij));
                         }
                     }
                 }
             }
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+
+        Ok(ret)
+    }
+
+    /// Read columns within the range and return dense `ndarray::Array2`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
+        let ncol_out = columns.len();
+        let triplets = self.read_triplets_by_columns(columns)?;
+
+        if let Some(nrow) = self.num_rows() {
+            let nrow = nrow as usize;
+            let mut ret: Array2<f32> = Array2::zeros((nrow, ncol_out));
+
+            for (ii, jj, x_ij) in triplets {
+                ret[(ii, jj)] = x_ij;
+            }
+
             Ok(ret)
         } else {
             return Err(anyhow::anyhow!(
@@ -969,10 +981,13 @@ impl SparseIo for SparseMtxData {
         }
     }
 
-    /// Read rows within the range and return dense `ndarray::Array2`
+    /// Read rows within the range and return a vector of triplets (row, col, value)
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_rows(self: &Self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
+    fn read_triplets_by_rows(
+        &self,
+        rows: Self::IndexIter,
+    ) -> anyhow::Result<Vec<(usize, usize, f32)>> {
         use zarrs::array::Array as ZArray;
         use zarrs::array_subset::ArraySubset;
 
@@ -980,7 +995,6 @@ impl SparseIo for SparseMtxData {
         let indptr = &self.by_row_indptr;
 
         let rows_vec = rows.into_iter().collect::<Vec<usize>>();
-        let nrow_out = rows_vec.len();
 
         let key = "/by_row/data";
         let data = ZArray::open(self.store.clone(), key)?;
@@ -990,10 +1004,9 @@ impl SparseIo for SparseMtxData {
         if let (Some(nrow), Some(ncol)) = (self.num_rows(), self.num_columns()) {
             let nrow = nrow as usize;
             let ncol = ncol as usize;
-
             debug_assert!(indptr.len() > nrow);
 
-            let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
+            let mut ret: Vec<(usize, usize, f32)> = Vec::new();
 
             for (ii, &i_data) in rows_vec.iter().enumerate() {
                 if i_data < nrow {
@@ -1012,8 +1025,8 @@ impl SparseIo for SparseMtxData {
                         for k in 0..(end - start) {
                             let x_ij = data_slice[k as usize];
                             let jj = indices_slice[k as usize] as usize;
-
-                            ret[(ii, jj)] = x_ij;
+                            debug_assert!(jj < ncol);
+                            ret.push((ii, jj, x_ij));
                         }
                     }
                 }
@@ -1026,33 +1039,47 @@ impl SparseIo for SparseMtxData {
         }
     }
 
+    /// Read rows within the range and return dense `ndarray::Array2`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows(self: &Self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
+        let nrow_out = rows.len();
+        let triplets = self.read_triplets_by_rows(rows)?;
+
+        if let Some(ncol) = self.num_columns() {
+            let ncol = ncol as usize;
+            let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
+
+            for (ii, jj, x_ij) in triplets {
+                ret[(ii, jj)] = x_ij;
+            }
+
+            Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
     /// Reposition rows in a new order specified by `remap`
     /// * `remap` - a hashmap of old row index to new row index
-    fn remap_rows(&mut self, remap: HashMap<usize, usize>) -> anyhow::Result<()> {
-        if self.remapped_rows.is_some() {
-            eprintln!("remap_rows: overwriting on the existing remapped_rows\n");
-        }
+    fn reorder_rows(&mut self, remap: HashMap<usize, usize>) -> anyhow::Result<()> {
+        todo!("This should recreate triplets");
 
-        // update maximum number of rows
-        let new_nrow = remap
-            .values()
-            .max()
-            .expect("failed to figure out the new maximum number of rows")
-            + 1;
+        // Self::_set_group_attr(self.store.clone(), "/", "nrow", &new_nrow)?;
 
-        Self::_set_group_attr(self.store.clone(), "/", "nrow", &new_nrow)?;
+        // // copy down the remap hashmap
+        // self.remapped_rows = Some(HashMap::new());
 
-        // copy down the remap hashmap
-        self.remapped_rows = Some(HashMap::new());
-
-        for (old_idx, new_idx) in remap.iter() {
-            if *new_idx < new_nrow {
-                self.remapped_rows
-                    .as_mut()
-                    .unwrap()
-                    .insert(*old_idx, *new_idx);
-            }
-        }
+        // for (old_idx, new_idx) in remap.iter() {
+        //     if *new_idx < new_nrow {
+        //         self.remapped_rows
+        //             .as_mut()
+        //             .unwrap()
+        //             .insert(*old_idx, *new_idx);
+        //     }
+        // }
 
         Ok(())
     }

@@ -3,9 +3,10 @@ use crate::mtx_io::*;
 use crate::sparse_io::*;
 use hdf5::filters::blosc_set_nthreads;
 use num_cpus;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const CHUNK_SIZE: usize = 1000;
 const MAX_ROW_NAME_IDX: usize = 3;
@@ -610,57 +611,56 @@ impl SparseIo for SparseMtxData {
             let indices = by_column.dataset("indices")?;
             debug_assert!(indptr.len() == ncol_data + 1);
 
-            let mut temp_mtx_file = basename(&backend_file)?;
-            temp_mtx_file += "_temp.mtx.gz";
+            let arc_triplets = Arc::new(Mutex::new(vec![]));
 
-            {
-                let mut buf = open_buf_writer(&temp_mtx_file)?;
+            old2new_cols.par_iter().for_each(|(&old_jj, &jj)| {
+                let mut triplets = arc_triplets.lock().expect("failed to lock triplets");
 
-                writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
-                writeln!(buf, "{}\t{}\t{}", new_nrow, new_ncol, nnz)?;
-
-                for old_jj in 0..ncol_data {
-                    if let Some(jj) = old2new_cols.get(&old_jj) {
-                        let (start, end) = (indptr[old_jj] as usize, indptr[old_jj + 1] as usize);
-                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
-                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
-                        // write them with 1-based indices
-                        for k in 0..(end - start) {
-                            let val = data_slice[k as usize];
-                            let ii = indices_slice[k as usize] as usize;
-                            if let Some(ii) = old2new_rows.get(&ii) {
-                                writeln!(buf, "{}\t{}\t{}", ii + 1, jj + 1, val)?;
-                            }
-                        }
+                let (start, end) = (indptr[old_jj] as usize, indptr[old_jj + 1] as usize);
+                let data_slice = data
+                    .read_slice_1d::<f32, _>(start..end)
+                    .expect("data slice 1d");
+                let indices_slice = indices
+                    .read_slice_1d::<u64, _>(start..end)
+                    .expect("indices slice 1d");
+                // write them with 1-based indices
+                for k in 0..(end - start) {
+                    let val = data_slice[k as usize];
+                    let ii = indices_slice[k as usize] as usize;
+                    if let Some(&ii) = old2new_rows.get(&ii) {
+                        triplets.push((ii as u64, jj as u64, val));
                     }
                 }
-                buf.flush()?;
-            } // should be kept inside
+            });
 
             /////////////////////////////////////
             // 2. Remove previous backend file //
             /////////////////////////////////////
             self.remove_backend_file()?;
+            dbg!(&backend_file);
 
             ///////////////////////////////
             // 3. populate a new backend //
             ///////////////////////////////
             self.initialize_backend()?;
 
-            // populate data from mtx file
-            self.import_mtx_file_by_col(&temp_mtx_file)?;
+            // populate data from mtx triplets
+            {
+                let mut row_col_val_triplets =
+                    arc_triplets.lock().expect("failed to lock triplets");
+
+                debug_assert!(row_col_val_triplets.len() <= nnz); // subset
+                let nnz = row_col_val_triplets.len();
+                let mtx_shape = (new_nrow, new_ncol, nnz);
+                self.record_mtx_shape(Some(mtx_shape))?;
+                self.record_triplets_by_col(&mut row_col_val_triplets)?;
+                self.record_triplets_by_row(&mut row_col_val_triplets)?;
+            }
             self.read_column_indptr()?;
-            self.import_mtx_file_by_row(&temp_mtx_file)?;
             self.read_row_indptr()?;
 
             self.register_row_names_vec(&new_row_names);
             self.register_column_names_vec(&new_col_names);
-
-            #[cfg(not(debug_assertions))]
-            {
-                // let's keep the mtx file for debugging
-                remove_file(&temp_mtx_file)?;
-            }
         } else {
             return Err(anyhow::anyhow!("missing shape information"));
         }
@@ -801,10 +801,13 @@ impl SparseIo for SparseMtxData {
 
     type IndexIter = Vec<usize>;
 
-    /// Read columns within the range and return dense `ndarray::Array2`
+    /// Read columns within the range and return a vector of triplets (row, col, value)
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_columns(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
+    fn read_triplets_by_columns(
+        &self,
+        columns: Self::IndexIter,
+    ) -> anyhow::Result<Vec<(usize, usize, f32)>> {
         // need to open backend again?
         // let backend = hdf5::File::open(&self.file_name)?;
         let by_column = self.backend.group("/by_column")?;
@@ -817,10 +820,9 @@ impl SparseIo for SparseMtxData {
         let indices = by_column.dataset("indices")?;
 
         let columns_vec = columns.into_iter().collect::<Vec<usize>>();
-        let ncol_out = columns_vec.len();
 
         if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
-            let mut ret: Array2<f32> = Array2::zeros((nrow, ncol_out));
+            let mut ret = Vec::new();
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
                 if j_data < ncol {
@@ -833,18 +835,83 @@ impl SparseIo for SparseMtxData {
                     if start < end {
                         let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
                         let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+
                         for k in 0..(end - start) {
                             let x_ij = data_slice[k];
-                            let old_ii = indices_slice[k] as usize;
-                            let row_idx = self
-                                .remapped_rows
-                                .as_ref()
-                                .and_then(|remap| remap.get(&old_ii))
-                                .or(Some(&old_ii));
+                            let ii = indices_slice[k] as usize;
+                            debug_assert!(ii < nrow);
+                            ret.push((ii, jj, x_ij));
+                        }
+                    }
+                }
+            }
+            Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
 
-                            if let Some(ii) = row_idx {
-                                ret[(*ii, jj)] = x_ij;
-                            }
+    /// Read columns within the range and return dense `ndarray::Array2`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
+        let ncol_out = &columns.len();
+        let triplets = self.read_triplets_by_columns(columns)?;
+
+        if let Some(nrow) = self.num_rows() {
+            let nrow = nrow as usize;
+            let mut ret: Array2<f32> = Array2::zeros((nrow, *ncol_out));
+
+            for (ii, jj, x_ij) in triplets {
+                ret[(ii, jj)] = x_ij;
+            }
+
+            Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
+    /// Read rows within the range and return a vector of triplets (row, column, value)
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_triplets_by_rows(
+        &self,
+        rows: Self::IndexIter,
+    ) -> anyhow::Result<Vec<(usize, usize, f32)>> {
+        // need to open backend again?
+        // let backend = hdf5::File::open(&self.file_name)?;
+        let by_row = self.backend.group("/by_row")?;
+        debug_assert!(self.by_row_indptr.len() > 0);
+        let indptr = &self.by_row_indptr;
+        let data = by_row.dataset("data")?;
+        let indices = by_row.dataset("indices")?;
+
+        let rows_vec = rows.into_iter().collect::<Vec<usize>>();
+
+        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
+            let mut ret = Vec::new();
+
+            for (ii, &i_data) in rows_vec.iter().enumerate() {
+                if i_data < nrow {
+                    debug_assert!((i_data + 1) < indptr.len());
+
+                    let start = indptr[i_data] as usize;
+                    let end = indptr[i_data + 1] as usize;
+
+                    if start < end {
+                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
+                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+
+                        for k in 0..(end - start) {
+                            let x_ij = data_slice[k];
+                            let jj = indices_slice[k] as usize;
+                            debug_assert!(jj < ncol);
+                            ret.push((ii, jj, x_ij));
                         }
                     }
                 }
@@ -861,42 +928,17 @@ impl SparseIo for SparseMtxData {
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
     fn read_rows(self: &Self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
-        // need to open backend again?
-        // let backend = hdf5::File::open(&self.file_name)?;
-        let by_row = self.backend.group("/by_row")?;
+        let nrow_out = rows.len();
+        let triplets = self.read_triplets_by_rows(rows)?;
 
-        debug_assert!(self.by_row_indptr.len() > 0);
-        // let indptr = by_row.dataset("indptr")?.read_1d::<u64>()?;
-
-        let indptr = &self.by_row_indptr;
-        let data = by_row.dataset("data")?;
-        let indices = by_row.dataset("indices")?;
-
-        let rows_vec = rows.into_iter().collect::<Vec<usize>>();
-        let nrow_out = rows_vec.len();
-
-        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
+        if let Some(ncol) = self.num_columns() {
+            let ncol = ncol as usize;
             let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
 
-            for (ii, &i_data) in rows_vec.iter().enumerate() {
-                if i_data < nrow {
-                    debug_assert!((i_data + 1) < indptr.len());
-
-                    let start = indptr[i_data] as usize;
-                    let end = indptr[i_data + 1] as usize;
-
-                    if start < end {
-                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
-                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
-
-                        for k in 0..(end - start) {
-                            let x_ij = data_slice[k];
-                            let jj = indices_slice[k] as usize;
-                            ret[(ii, jj)] = x_ij;
-                        }
-                    }
-                }
+            for (ii, jj, x_ij) in triplets {
+                ret[(ii, jj)] = x_ij;
             }
+
             Ok(ret)
         } else {
             return Err(anyhow::anyhow!(
@@ -907,31 +949,33 @@ impl SparseIo for SparseMtxData {
 
     /// Reposition rows in a new order specified by `remap`
     /// * `remap` - a hashmap of old row index to new row index
-    fn remap_rows(&mut self, remap: HashMap<usize, usize>) -> anyhow::Result<()> {
+    fn reorder_rows(&mut self, remap: HashMap<usize, usize>) -> anyhow::Result<()> {
         if self.remapped_rows.is_some() {
             eprintln!("remap_rows: overwriting on the existing remapped_rows\n");
         }
 
-        // update maximum number of rows
-        let new_nrow = remap
-            .values()
-            .max()
-            .expect("failed to figure out the new maximum number of rows")
-            .clone()
-            + 1;
-        self.set_attrs("nrow", new_nrow)?;
-        self.backend.flush()?;
+        todo!("This should recreate triplets");
 
-        // copy down the remap hashmap
-        self.remapped_rows = Some(HashMap::new());
-        for (old_idx, new_idx) in remap.iter() {
-            if *new_idx < new_nrow {
-                self.remapped_rows
-                    .as_mut()
-                    .unwrap()
-                    .insert(*old_idx, *new_idx);
-            }
-        }
+        // // update maximum number of rows
+        // let new_nrow = remap
+        //     .values()
+        //     .max()
+        //     .expect("failed to figure out the new maximum number of rows")
+        //     .clone()
+        //     + 1;
+        // self.set_attrs("nrow", new_nrow)?;
+        // self.backend.flush()?;
+
+        // // copy down the remap hashmap
+        // self.remapped_rows = Some(HashMap::new());
+        // for (old_idx, new_idx) in remap.iter() {
+        //     if *new_idx < new_nrow {
+        //         self.remapped_rows
+        //             .as_mut()
+        //             .unwrap()
+        //             .insert(*old_idx, *new_idx);
+        //     }
+        // }
 
         Ok(())
     }

@@ -29,33 +29,63 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// build from one format to another
+    /// Build faster backend data from mtx
     Build(RunBuildArgs),
-    /// filter out rows and columns (Q/C)
-    Filter(RunFilterArgs),
-    /// stat a sparse matrix
+    /// Filter out rows and columns (Q/C)
+    Squeeze(RunSqueezeArgs),
+    /// Take basic statistics from a sparse matrix
     Stat(RunStatArgs),
-    /// simulate a sparse matrix data
+    /// Simulate a sparse matrix data
     Simulate(RunSimulateArgs),
 }
 
 #[derive(Args)]
-pub struct RunFilterArgs {
+pub struct RunSqueezeArgs {
     /// input .zarr or .h5 file
     #[arg(short, long)]
-    input: Box<str>,
+    data: Box<str>,
+
+    /// row number of non-zero cutoff
+    #[arg(short, long)]
+    row_nnz_cutoff: Option<usize>,
+
+    /// column number of non-zero cutoff
+    #[arg(short, long)]
+    column_nnz_cutoff: Option<usize>,
+
+    /// block_size, default: 100
+    #[arg(long, value_enum)]
+    block_size: Option<usize>,
 
     /// output file header
     #[arg(short, long)]
     output: Box<str>,
 }
 
-fn run_filtering(cmd_args: &RunFilterArgs) -> anyhow::Result<()> {
+fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
     todo!("need to implement add and remove row/columns");
 
-// 1. compute scores
+    let input_data_file = cmd_args.data.clone();
+    let row_nnz_cutoff = cmd_args.row_nnz_cutoff.unwrap_or(0);
+    let col_nnz_cutoff = cmd_args.column_nnz_cutoff.unwrap_or(0);
+    let output_data_file = cmd_args.output.clone();
+    let block_size = cmd_args.block_size.unwrap_or(100);
 
-// 2. subset
+    // let data = open_sparse_matrix(&input, &backend)?;
+
+    // // 1. compute scores
+    // {
+    //         let nblock = (ncol + block_size - 1) / block_size;
+    //         let arc_data = Arc::new(Mutex::new(data));
+    //         let jobs = (0..nblock).into_par_iter().map(|b| {
+    //             let lb: usize = b * block_size;
+    //             let ub: usize = ((b + 1) * block_size).min(ncol);
+    //             (lb, ub)
+    //         });
+
+    // }
+
+    // 2. subset
 
     Ok(())
 }
@@ -79,6 +109,8 @@ pub struct RunStatArgs {
     output: Box<str>,
 }
 
+// fn collect_statistics(
+
 fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
     common_io::mkdir(&output)?;
@@ -93,8 +125,12 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     use ndarray::Ix1;
 
     if let (Some(nrow), Some(ncol)) = (data.num_rows(), data.num_columns()) {
-        let row_names = data.row_names().expect("no row names");
-        let col_names = data.column_names().expect("no col names");
+        let row_names = data
+            .row_names()
+            .expect("No row names found; please add row names");
+        let col_names = data
+            .column_names()
+            .expect("No column names; please add column names");
 
         let arc_row_stat = Arc::new(Mutex::new(RunningStatistics::new(Ix1(nrow))));
 
