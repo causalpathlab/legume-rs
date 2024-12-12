@@ -58,26 +58,31 @@ pub fn create_sparse_matrix(
 pub trait SparseIo: Sync + Send {
     type IndexIter: IntoIterator<Item = usize>;
 
+    /// Read rows within the range and return a vector of triplets (row, column, value)
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_triplets_by_rows(
+        &self,
+        rows: Self::IndexIter,
+    ) -> anyhow::Result<Vec<(usize, usize, f32)>>;
+
+    /// Read columns within the range and return a vector of triplets (row, col, value)
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_triplets_by_columns(
+        &self,
+        columns: Self::IndexIter,
+    ) -> anyhow::Result<Vec<(usize, usize, f32)>>;
+
     /// Read columns within the range and return dense `ndarray::Array2`
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_columns(&self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
-        Ok(Array2::zeros((
-            self.num_rows().expect("need to know the number of rows"),
-            columns.into_iter().count(),
-        )))
-    }
+    fn read_columns(&self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>>;
 
     /// Read rows within the range and return dense `ndarray::Array2`
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_rows(&self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
-        Ok(Array2::zeros((
-            rows.into_iter().count(),
-            self.num_columns()
-                .expect("need to know the number of columns"),
-        )))
-    }
+    fn read_rows(&self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>>;
 
     /// Export the data to a mtx file. This will take time.
     /// * `mtx_file`: mtx file to be written
@@ -143,9 +148,9 @@ pub trait SparseIo: Sync + Send {
     /// * `key`: key for the registered names
     fn retrieve_registered_names(&self, key: &str) -> anyhow::Result<Vec<Box<str>>>;
 
-    /// Reposition rows in a new order specified by `remap`
+    /// Reposition rows in a new order specified by `remap`.
     /// * `remap` - a hashmap of old row index to new row index
-    fn remap_rows(&mut self, remap: HashMap<usize, usize>) -> anyhow::Result<()>;
+    fn reorder_rows(&mut self, remap: HashMap<usize, usize>) -> anyhow::Result<()>;
 }
 
 //////////////////////

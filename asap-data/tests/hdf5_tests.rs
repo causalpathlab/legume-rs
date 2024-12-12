@@ -2,7 +2,6 @@ use asap_data::common_io::create_temp_dir_file;
 use asap_data::simulate::*;
 use asap_data::sparse_io::*;
 use asap_data::sparse_matrix_hdf5::SparseMtxData;
-use ndarray::prelude::*;
 use ndarray_rand::RandomExt;
 use std::path::Path;
 use std::time::Instant;
@@ -20,7 +19,7 @@ where
 
 #[test]
 fn random_ndarray_subset() -> anyhow::Result<()> {
-    let whole_mat = Array::random((15, 777), rand::distributions::Uniform::new(0., 1.));
+    let whole_mat = Array::random((17, 999), rand::distributions::Uniform::new(0., 1.));
 
     if let Ok(mut data) = SparseMtxData::from_ndarray(&whole_mat, None, None) {
         let nrow = data.num_rows().unwrap();
