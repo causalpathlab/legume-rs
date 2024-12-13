@@ -2,6 +2,7 @@ use crate::common_io::*;
 use crate::mtx_io::*;
 use crate::sparse_io::*;
 use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use zarrs::array::DataType;
@@ -1063,24 +1064,78 @@ impl SparseIo for SparseMtxData {
     }
 
     /// Reposition rows in a new order specified by `remap`
-    /// * `remap` - a hashmap of old row index to new row index
-    fn reorder_rows(&mut self, remap: HashMap<usize, usize>) -> anyhow::Result<()> {
-        todo!("This should recreate triplets");
+    /// * `row_names_order` - a vector of row names in the new order
+    fn reorder_rows(&mut self, row_names_order: &Vec<Box<str>>) -> anyhow::Result<()> {
+        let new_row_names = row_names_order.clone();
+        let new_col_names = self.column_names()?.clone();
+        let name2new = build_name2index_map(&new_row_names);
 
-        // Self::_set_group_attr(self.store.clone(), "/", "nrow", &new_nrow)?;
+        let block_size = 100;
 
-        // // copy down the remap hashmap
-        // self.remapped_rows = Some(HashMap::new());
+        let old2new: HashMap<usize, usize> = self
+            .row_names()?
+            .into_par_iter()
+            .enumerate()
+            .filter_map(|(idx_old, name)| name2new.get(&name).map(|&idx_new| (idx_old, idx_new)))
+            .collect();
 
-        // for (old_idx, new_idx) in remap.iter() {
-        //     if *new_idx < new_nrow {
-        //         self.remapped_rows
-        //             .as_mut()
-        //             .unwrap()
-        //             .insert(*old_idx, *new_idx);
-        //     }
-        // }
+        if let Some(ncol) = self.num_columns() {
+            /////////////////////////////////////////////////////
+            // 1. triplets after filtering and reordering rows //
+            /////////////////////////////////////////////////////
 
+            let arc_triplets = Arc::new(Mutex::new(vec![]));
+
+            let nblock = (ncol + block_size - 1) / block_size;
+
+            (0..nblock)
+                .into_par_iter()
+                .map(|b| {
+                    let lb: usize = b * block_size;
+                    let ub: usize = ((b + 1) * block_size).min(ncol);
+                    (lb, ub)
+                })
+                .for_each(|(lb, ub)| {
+                    let _triplets_b = self
+                        .read_triplets_by_columns((lb..ub).collect())
+                        .unwrap()
+                        .into_iter()
+                        .filter_map(|(i, j, x)| {
+                            old2new.get(&i).map(|&i_new| (i_new as u64, j as u64, x))
+                        });
+                    let mut triplets = arc_triplets.lock().unwrap();
+                    triplets.extend(_triplets_b);
+                });
+
+            /////////////////////////////////////
+            // 2. Remove previous backend file //
+            /////////////////////////////////////
+            self.remove_backend_file()?;
+
+            ///////////////////////////////
+            // 3. populate a new backend //
+            ///////////////////////////////
+            self.initialize_backend()?;
+
+            // populate data from mtx triplets
+            {
+                let mut row_col_val_triplets =
+                    arc_triplets.lock().expect("failed to lock triplets");
+
+                let nnz = row_col_val_triplets.len();
+                debug_assert!(row_col_val_triplets.len() <= nnz); // subset
+                let new_nrow = new_row_names.len();
+                let mtx_shape = (new_nrow, ncol, nnz);
+                self.record_mtx_shape(Some(mtx_shape))?;
+                self.record_triplets_by_col(&mut row_col_val_triplets)?;
+                self.record_triplets_by_row(&mut row_col_val_triplets)?;
+            }
+            self.read_column_indptr()?;
+            self.read_row_indptr()?;
+
+            self.register_row_names_vec(&new_row_names);
+            self.register_column_names_vec(&new_col_names);
+        }
         Ok(())
     }
 }

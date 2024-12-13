@@ -137,56 +137,57 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
         {
             let nblock = (ncol + block_size - 1) / block_size;
             let arc_data = Arc::new(Mutex::new(data));
-            let jobs = (0..nblock).into_par_iter().map(|b| {
-                let lb: usize = b * block_size;
-                let ub: usize = ((b + 1) * block_size).min(ncol);
-                (lb, ub)
-            });
-
             let arc_col_stat_map = Arc::new(Mutex::new(HashMap::<usize, Box<str>>::new()));
 
-            jobs.for_each(|(lb, ub)| {
-                //////////////////////
-                // take subset data //
-                //////////////////////
-                let nn_b = ub - lb;
+            (0..nblock)
+                .into_par_iter()
+                .map(|b| {
+                    let lb: usize = b * block_size;
+                    let ub: usize = ((b + 1) * block_size).min(ncol);
+                    (lb, ub)
+                })
+                .for_each(|(lb, ub)| {
+                    //////////////////////
+                    // take subset data //
+                    //////////////////////
+                    let nn_b = ub - lb;
 
-                let data_b = arc_data.lock().expect("failed to lock data");
-                let xx_b = data_b.read_columns((lb..ub).collect()).unwrap();
+                    let data_b = arc_data.lock().expect("failed to lock data");
+                    let xx_b = data_b.read_columns((lb..ub).collect()).unwrap();
 
-                // accumulate rows' statistics
-                {
-                    let mut row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
-                    for x in xx_b.axis_iter(Axis(1)) {
-                        row_stat.add(&x);
-                    }
-                }
-
-                let mut _names = vec![];
-                for i in lb..ub {
-                    _names.push(col_names[i].clone());
-                }
-
-                // accumulate columns' statistics
-                {
-                    let mut col_stat_map = arc_col_stat_map
-                        .lock()
-                        .expect("failed to lock col_stat_lines");
-
-                    let mut _stat = RunningStatistics::new(Ix1(nn_b));
-                    for x in xx_b.axis_iter(Axis(0)) {
-                        _stat.add(&x);
+                    // accumulate rows' statistics
+                    {
+                        let mut row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
+                        for x in xx_b.axis_iter(Axis(1)) {
+                            row_stat.add(&x);
+                        }
                     }
 
-                    let _lines = _stat
-                        .to_string_vec(&_names, "\t")
-                        .expect("failed to generate column stat lines");
-
-                    for (glob, line) in (lb..ub).zip(_lines.iter()) {
-                        col_stat_map.insert(glob, line.clone().into());
+                    let mut _names = vec![];
+                    for i in lb..ub {
+                        _names.push(col_names[i].clone());
                     }
-                }
-            }); // end of jobs
+
+                    // accumulate columns' statistics
+                    {
+                        let mut col_stat_map = arc_col_stat_map
+                            .lock()
+                            .expect("failed to lock col_stat_lines");
+
+                        let mut _stat = RunningStatistics::new(Ix1(nn_b));
+                        for x in xx_b.axis_iter(Axis(0)) {
+                            _stat.add(&x);
+                        }
+
+                        let _lines = _stat
+                            .to_string_vec(&_names, "\t")
+                            .expect("failed to generate column stat lines");
+
+                        for (glob, line) in (lb..ub).zip(_lines.iter()) {
+                            col_stat_map.insert(glob, line.clone().into());
+                        }
+                    }
+                }); // end of jobs
 
             {
                 let row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
