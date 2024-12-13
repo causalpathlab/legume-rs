@@ -2,8 +2,10 @@ use crate::sparse_matrix_hdf5;
 use crate::sparse_matrix_zarr;
 pub use clap::ValueEnum;
 pub use ndarray::prelude::*;
+pub use rayon::prelude::*;
 pub use std::collections::HashMap;
 pub use std::ops::Range;
+pub use std::sync::{Arc, Mutex};
 
 #[derive(ValueEnum, Clone, Debug)]
 #[clap(rename_all = "lowercase")]
@@ -148,14 +150,23 @@ pub trait SparseIo: Sync + Send {
     /// * `key`: key for the registered names
     fn retrieve_registered_names(&self, key: &str) -> anyhow::Result<Vec<Box<str>>>;
 
-    /// Reposition rows in a new order specified by `remap`.
-    /// * `remap` - a hashmap of old row index to new row index
-    fn reorder_rows(&mut self, remap: HashMap<usize, usize>) -> anyhow::Result<()>;
+    /// Reposition rows in a new order specified by `remap`
+    /// * `row_names_order` - a vector of row names in the new order
+    fn reorder_rows(&mut self, row_names_order: &Vec<Box<str>>) -> anyhow::Result<()>;
 }
 
 //////////////////////
 // helper functions //
 //////////////////////
+
+// #[allow(dead_code)]
+pub fn build_name2index_map(_names: &Vec<Box<str>>) -> HashMap<Box<str>, usize> {
+    _names
+        .iter()
+        .enumerate()
+        .map(|(r, name)| (name.clone(), r))
+        .collect()
+}
 
 // #[allow(dead_code)]
 pub fn take_subset_indices_names(

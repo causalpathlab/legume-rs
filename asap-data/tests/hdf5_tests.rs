@@ -37,6 +37,32 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
         let b = data.read_columns((0..data.num_columns().unwrap()).collect())?;
 
         debug_assert_eq!(a, b);
+
+        let a = a.select(Axis(0), &[1, 7, 16]);
+
+        data.subset_columns_rows(None, Some(&vec![1, 7, 16]))?;
+        let b = data.read_columns((0..data.num_columns().unwrap()).collect())?;
+
+        debug_assert_eq!(a, b);
+        let a: Array2<f32> = a.select(Axis(0), &[2, 1, 0]);
+
+        let ncol = a.shape()[1];
+        let aa: Array2<f32> = Array2::zeros((1, ncol));
+
+        dbg!(&a);
+        dbg!(&aa);
+
+        let c = ndarray::concatenate(Axis(0), &[a.view(), aa.view()])?;
+
+        let new_row_names = vec!["16", "7", "1", "9"]
+            .into_iter()
+            .map(|x| x.to_string().into_boxed_str())
+            .collect();
+        data.reorder_rows(&new_row_names)?;
+
+        let b = data.read_columns((0..data.num_columns().unwrap()).collect())?;
+
+        debug_assert_eq!(b, c);
     }
     Ok(())
 }
