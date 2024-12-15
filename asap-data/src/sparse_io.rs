@@ -5,7 +5,6 @@ pub use ndarray::prelude::*;
 pub use rayon::prelude::*;
 pub use std::collections::HashMap;
 pub use std::ops::Range;
-pub use std::sync::{Arc, Mutex};
 
 #[derive(ValueEnum, Clone, Debug)]
 #[clap(rename_all = "lowercase")]

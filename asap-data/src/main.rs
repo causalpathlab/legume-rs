@@ -6,12 +6,33 @@ mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
 mod statistics;
 
-use crate::common_io::write_lines;
 use crate::sparse_io::*;
+type SData = dyn SparseIo<IndexIter = Vec<usize>>;
 use crate::statistics::RunningStatistics;
+
 use clap::{Args, Parser, Subcommand};
-use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
+
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    match &cli.commands {
+        Commands::Build(args) => {
+            run_build(args)?;
+        }
+        Commands::Simulate(args) => {
+            run_simulate(args)?;
+        }
+        Commands::Stat(args) => {
+            run_stat(args)?;
+        }
+        Commands::Squeeze(args) => {
+            run_squeeze(args)?;
+        }
+    }
+
+    Ok(())
+}
 
 #[derive(Parser)]
 #[command(version, about, long_about=None)]
@@ -57,35 +78,36 @@ pub struct RunSqueezeArgs {
     #[arg(long, value_enum)]
     block_size: Option<usize>,
 
-    /// output file header
-    #[arg(short, long)]
-    output: Box<str>,
+    /// backend to use (HDF5 or Zarr), default: Zarr
+    #[arg(short, long, value_enum)]
+    backend: Option<SparseIoBackend>,
 }
 
 fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
-    todo!("need to implement add and remove row/columns");
-
-    let input_data_file = cmd_args.data.clone();
+    let data_file = cmd_args.data.clone();
     let row_nnz_cutoff = cmd_args.row_nnz_cutoff.unwrap_or(0);
     let col_nnz_cutoff = cmd_args.column_nnz_cutoff.unwrap_or(0);
-    let output_data_file = cmd_args.output.clone();
+
     let block_size = cmd_args.block_size.unwrap_or(100);
+    let backend = cmd_args.backend.clone().unwrap_or(SparseIoBackend::Zarr);
 
-    // let data = open_sparse_matrix(&input, &backend)?;
+    let mut data = open_sparse_matrix(&data_file, &backend)?;
 
-    // // 1. compute scores
-    // {
-    //         let nblock = (ncol + block_size - 1) / block_size;
-    //         let arc_data = Arc::new(Mutex::new(data));
-    //         let jobs = (0..nblock).into_par_iter().map(|b| {
-    //             let lb: usize = b * block_size;
-    //             let ub: usize = ((b + 1) * block_size).min(ncol);
-    //             (lb, ub)
-    //         });
+    if let Ok((row_stat, col_stat)) = collect_row_column_stats(&data, block_size) {
+        fn nnz_index(nnz: &Vec<f32>, cutoff: usize) -> Vec<usize> {
+            nnz.iter()
+                .enumerate()
+                .filter_map(|(i, &x)| if (x as usize) > cutoff { Some(i) } else { None })
+                .collect()
+        }
 
-    // }
+        let row_nnz_vec = row_stat.count_positives().to_vec();
+        let row_idx = nnz_index(&row_nnz_vec, row_nnz_cutoff);
+        let col_nnz_vec = col_stat.count_positives().to_vec();
+        let col_idx = nnz_index(&col_nnz_vec.to_vec(), col_nnz_cutoff);
 
-    // 2. subset
+        data.subset_columns_rows(Some(&col_idx), Some(&row_idx))?;
+    }
 
     Ok(())
 }
@@ -109,107 +131,23 @@ pub struct RunStatArgs {
     output: Box<str>,
 }
 
-// fn collect_statistics(
-
 fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
     common_io::mkdir(&output)?;
 
     let input = cmd_args.input.clone();
     let backend = cmd_args.backend.clone().unwrap_or(SparseIoBackend::Zarr);
-
-    let data = open_sparse_matrix(&input, &backend)?;
-
     let block_size = cmd_args.block_size.unwrap_or(100);
 
-    use ndarray::Ix1;
+    let data: Box<SData> = open_sparse_matrix(&input, &backend.clone())?;
+    let row_names = data.row_names()?;
+    let col_names = data.column_names()?;
 
-    if let (Some(nrow), Some(ncol)) = (data.num_rows(), data.num_columns()) {
-        let row_names = data
-            .row_names()
-            .expect("No row names found; please add row names");
-        let col_names = data
-            .column_names()
-            .expect("No column names; please add column names");
-
-        let arc_row_stat = Arc::new(Mutex::new(RunningStatistics::new(Ix1(nrow))));
-
-        {
-            let nblock = (ncol + block_size - 1) / block_size;
-            let arc_data = Arc::new(Mutex::new(data));
-            let arc_col_stat_map = Arc::new(Mutex::new(HashMap::<usize, Box<str>>::new()));
-
-            (0..nblock)
-                .into_par_iter()
-                .map(|b| {
-                    let lb: usize = b * block_size;
-                    let ub: usize = ((b + 1) * block_size).min(ncol);
-                    (lb, ub)
-                })
-                .for_each(|(lb, ub)| {
-                    //////////////////////
-                    // take subset data //
-                    //////////////////////
-                    let nn_b = ub - lb;
-
-                    let data_b = arc_data.lock().expect("failed to lock data");
-                    let xx_b = data_b.read_columns((lb..ub).collect()).unwrap();
-
-                    // accumulate rows' statistics
-                    {
-                        let mut row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
-                        for x in xx_b.axis_iter(Axis(1)) {
-                            row_stat.add(&x);
-                        }
-                    }
-
-                    let mut _names = vec![];
-                    for i in lb..ub {
-                        _names.push(col_names[i].clone());
-                    }
-
-                    // accumulate columns' statistics
-                    {
-                        let mut col_stat_map = arc_col_stat_map
-                            .lock()
-                            .expect("failed to lock col_stat_lines");
-
-                        let mut _stat = RunningStatistics::new(Ix1(nn_b));
-                        for x in xx_b.axis_iter(Axis(0)) {
-                            _stat.add(&x);
-                        }
-
-                        let _lines = _stat
-                            .to_string_vec(&_names, "\t")
-                            .expect("failed to generate column stat lines");
-
-                        for (glob, line) in (lb..ub).zip(_lines.iter()) {
-                            col_stat_map.insert(glob, line.clone().into());
-                        }
-                    }
-                }); // end of jobs
-
-            {
-                let row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
-                let row_stat_file = format!("{}.row.stat.gz", output);
-                row_stat.save(&row_stat_file, &row_names, "\t")?;
-            }
-            {
-                let col_stat_file = format!("{}.column.stat.gz", output);
-                let col_stat_map = arc_col_stat_map
-                    .lock()
-                    .expect("failed to lock col_stat_lines");
-
-                let mut sorted: Vec<(usize, Box<str>)> = col_stat_map.clone().into_iter().collect();
-                sorted.sort_by_key(|&(k, _)| k);
-                let lines: Vec<Box<str>> = sorted.into_iter().map(|(_, v)| v).collect();
-                write_lines(&lines, &col_stat_file)?;
-            }
-        }
-    } else {
-        return Err(anyhow::anyhow!(
-            "failed to get the number of rows and columns"
-        ));
+    if let Ok((row_stat, col_stat)) = collect_row_column_stats(&data, block_size) {
+        let row_stat_file = format!("{}.row.stat.gz", output);
+        let col_stat_file = format!("{}.col.stat.gz", output);
+        row_stat.save(&row_stat_file, &row_names, "\t")?;
+        col_stat.save(&col_stat_file, &col_names, "\t")?;
     }
 
     Ok(())
@@ -350,44 +288,69 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+/// Collect row and column statistics returns (row_stat, col_stat)
+/// - row_stat: mean, variance, min, max
+/// - col_stat: mean, variance, min, max
+///
+/// # Arguments
+/// * data - sparse matrix data
+/// * block_size - block size for parallel computation
+///
+fn collect_row_column_stats(
+    data: &Box<SData>,
+    block_size: usize,
+) -> anyhow::Result<(RunningStatistics<Ix1>, RunningStatistics<Ix1>)> {
+    if let (Some(nrow), Some(ncol)) = (data.num_rows(), data.num_columns()) {
+        let arc_row_stat = Arc::new(Mutex::new(RunningStatistics::new(Ix1(nrow))));
+        let arc_col_stat = Arc::new(Mutex::new(RunningStatistics::new(Ix1(ncol))));
 
-    match &cli.commands {
-        Commands::Build(args) => {
-            run_build(args)?;
+        {
+            let nblock = (ncol + block_size - 1) / block_size;
+            let arc_data = Arc::new(Mutex::new(data));
+
+            (0..nblock)
+                .into_par_iter()
+                .map(|b| {
+                    let lb: usize = b * block_size;
+                    let ub: usize = ((b + 1) * block_size).min(ncol);
+                    (lb, ub)
+                })
+                .for_each(|(lb, ub)| {
+                    let data_b = arc_data.lock().expect("failed to lock data");
+
+                    // This could be inefficient since we are populating a dense matrix
+                    let xx_b = data_b.read_columns((lb..ub).collect()).unwrap();
+
+                    // accumulate rows' statistics
+                    {
+                        let mut row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
+                        for x in xx_b.axis_iter(Axis(1)) {
+                            row_stat.add(&x);
+                        }
+                    }
+
+                    // accumulate columns' statistics
+                    {
+                        let mut col_stat = arc_col_stat.lock().expect("failed to lock col_stat");
+
+                        for x in xx_b.axis_iter(Axis(0)) {
+                            for j in lb..ub {
+                                let i = j - lb;
+                                col_stat.add_element(&[j], x[i]);
+                            }
+                        }
+                    }
+                }); // end of jobs
         }
-        Commands::Simulate(args) => {
-            run_simulate(args)?;
-        }
-        Commands::Stat(args) => {
-            run_stat(args)?;
-        }
-        _ => {
-            todo!("not implemented yet");
-        }
+
+        let row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
+        let col_stat = arc_col_stat.lock().expect("failed to lock col_stat");
+
+        let ret_row = row_stat.clone();
+        let ret_col = col_stat.clone();
+
+        Ok((ret_row, ret_col))
+    } else {
+        anyhow::bail!("No row/column info");
     }
-
-    // let mtx_file = args().nth(1).expect("missing mtx file");
-
-    // let zarr_backend = "temp.zarr";
-
-    // if fs::metadata(zarr_backend).is_ok() {
-    //     // fs::remove_file(zarr_backend)?;
-    //     fs::remove_dir_all(zarr_backend)?;
-    // }
-
-    // let mut mtx_data = sparse_matrix::SparseMtxData::create(zarr_backend)?;
-
-    // mtx_data.read_mtx_by_row(mtx_file.as_ref())?;
-
-    // let h5_file = "temp.h5";
-    // if fs::metadata(h5_file).is_ok() {
-    //     fs::remove_file(h5_file)?;
-    // }
-
-    // let mut mtx_data = cell_feature_matrix::SparseMtxData::new(h5_file)?;
-    // mtx_data.load_mtx_hdf5(&mtx_file)?;
-
-    Ok(())
 }
