@@ -3,7 +3,6 @@ use crate::mtx_io::*;
 use crate::sparse_io::*;
 use hdf5::filters::blosc_set_nthreads;
 use num_cpus;
-use rayon::prelude::*;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};

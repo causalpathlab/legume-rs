@@ -1,8 +1,7 @@
 use crate::common_io::*;
 use crate::mtx_io::*;
 use crate::sparse_io::*;
-use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use zarrs::array::DataType;

@@ -1,13 +1,13 @@
 use crate::common_io::write_lines;
-use ndarray::{ArrayBase, Axis, Data, Dimension, OwnedRepr, RemoveAxis};
+use ndarray::{ArrayBase, Axis, Data, Dimension, NdIndex, OwnedRepr, RemoveAxis};
 
-#[allow(dead_code)]
 /// A container to keep track of sufficient statistics of an arbitrary
 /// shape `ndarray`
 ///
 /// # Type parameters
 /// - `S` : The shape of the array
 ///
+#[derive(Clone)]
 pub struct RunningStatistics<S>
 where
     S: Dimension + RemoveAxis,
@@ -52,6 +52,27 @@ where
         self.s0 += &xx.mapv(Self::_is_finite);
         self.s1 += &xx.mapv(Self::_finite);
         self.s2 += &xx.mapv(Self::_finite).mapv(|v| v * v);
+    }
+
+    pub fn add_element<I>(&mut self, idx: &I, val: f32)
+    where
+        I: NdIndex<S> + Clone,
+    {
+        fn get<'a, S, I>(mat: &'a mut ArrayBase<OwnedRepr<f32>, S>, idx: &'a I) -> &'a mut f32
+        where
+            S: Dimension + RemoveAxis,
+            I: NdIndex<S> + Clone,
+        {
+            mat.get_mut(idx.clone()).expect("failed to access matrix")
+        }
+
+        let idx_clone = idx.clone();
+
+        *get(&mut self.npos, &idx_clone) += Self::_is_positive(val);
+        *get(&mut self.s0, &idx_clone) += Self::_is_finite(val);
+        let safe_val = Self::_finite(val);
+        *get(&mut self.s1, &idx_clone) += safe_val;
+        *get(&mut self.s2, &idx_clone) += safe_val * safe_val;
     }
 
     pub fn clear(&mut self) {
