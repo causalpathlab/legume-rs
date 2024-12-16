@@ -6,7 +6,7 @@ pub use rayon::prelude::*;
 pub use std::collections::HashMap;
 pub use std::ops::Range;
 
-#[derive(ValueEnum, Clone, Debug)]
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
 pub enum SparseIoBackend {
     Zarr,

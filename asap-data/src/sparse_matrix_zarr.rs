@@ -679,7 +679,7 @@ impl SparseIo for SparseMtxData {
 
             let (new_ncol, new_nrow) = (old2new_cols.len(), old2new_rows.len());
 
-            println!("new_ncol: {}, new_nrow: {}", new_ncol, new_nrow);
+            // println!("new_ncol: {}, new_nrow: {}", new_ncol, new_nrow);
 
             /////////////////////////////////////////////////////////
             // 1. Create remapped Mtx only taking a subset of rows //

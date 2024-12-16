@@ -1,5 +1,6 @@
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -148,19 +149,63 @@ pub fn mkdir(file: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+trait ToStr {
+    fn to_box_str(&self) -> Box<str>;
+}
+
+impl ToStr for Path {
+    fn to_box_str(&self) -> Box<str> {
+        self.to_str()
+            .expect("failed to convert to string")
+            .to_string()
+            .into_boxed_str()
+    }
+}
+
+impl ToStr for OsStr {
+    fn to_box_str(&self) -> Box<str> {
+        self.to_str()
+            .expect("failed to convert to string")
+            .to_string()
+            .into_boxed_str()
+    }
+}
+
 #[allow(dead_code)]
 /// Take the basename of a file
 /// * `file` - file name
-pub fn basename(file: &str) -> anyhow::Result<String> {
+pub fn dir_base_ext(file: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<str>)> {
     let path = Path::new(file);
-    if let Some(base) = path.file_stem() {
-        let ret = base
-            .to_str()
-            .expect("failed to convert to string")
-            .to_string();
-        Ok(ret)
+
+    if let (Some(dir), Some(base), Some(ext)) = (path.parent(), path.file_stem(), path.extension())
+    {
+        Ok((dir.to_box_str(), base.to_box_str(), ext.to_box_str()))
     } else {
         return Err(anyhow::anyhow!("no file stem"));
+    }
+}
+
+#[allow(dead_code)]
+/// Take the basename of a file
+/// * `file` - file name
+pub fn basename(file: &str) -> anyhow::Result<Box<str>> {
+    let path = Path::new(file);
+    if let Some(base) = path.file_stem() {
+        Ok(base.to_box_str())
+    } else {
+        return Err(anyhow::anyhow!("no file stem"));
+    }
+}
+
+#[allow(dead_code)]
+/// Take the extension of a file
+/// * `file` - file name
+pub fn extension(file: &str) -> anyhow::Result<Box<str>> {
+    let path = Path::new(file);
+    if let Some(ext) = path.extension() {
+        Ok(ext.to_box_str())
+    } else {
+        return Err(anyhow::anyhow!("failed to extract extension"));
     }
 }
 

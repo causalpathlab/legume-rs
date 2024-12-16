@@ -49,10 +49,7 @@ impl SparseMtxData {
             Self::_num_columns(&hdf5_backend),
             Self::_num_nnz(&hdf5_backend),
         ) {
-            dbg!(format!(
-                "#rows: {}, #columns: {}, #non-zeros: {}",
-                nrow, ncol, nnz
-            ));
+            dbg!(nrow, ncol, nnz);
         } else {
             anyhow::bail!("Couldn't figure out the size of this sparse matrix data");
         }
