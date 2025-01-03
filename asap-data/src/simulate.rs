@@ -1,24 +1,10 @@
 use crate::common_io::{open_buf_writer, write_lines};
 use crate::mtx_io::write_mtx_triplets;
-use csv::WriterBuilder;
+use crate::ndarray_io::*;
+use crate::ndarray_util::scale_columns;
 use ndarray::prelude::*;
-use ndarray_csv::Array2Writer;
 use ndarray_rand::RandomExt;
 use rand::{prelude::Distribution, SeedableRng};
-
-#[allow(dead_code)]
-/// column-wise standardization
-/// * `xraw`: (D, N) matrix
-pub fn scale_columns(mut xraw: Array2<f32>) -> anyhow::Result<Array2<f32>> {
-    let mu = xraw
-        .mean_axis(Axis(0))
-        .ok_or(anyhow::anyhow!("mean failed"))?;
-    let sig = xraw.std_axis(Axis(0), 0.0);
-    for j in 0..xraw.ncols() {
-        xraw.column_mut(j).mapv_inplace(|x| (x - mu[j]) / sig[j]);
-    }
-    Ok(xraw)
-}
 
 pub struct SimArgs {
     pub rows: usize,
@@ -60,16 +46,6 @@ pub fn generate_factored_gamma_data_mtx(
     let bb = args.batches.unwrap_or(1);
     let rseed = args.rseed.unwrap_or(42);
 
-    fn write_csv<T>(file: &str, data: &Array2<T>) -> anyhow::Result<()>
-    where
-        T: serde::Serialize,
-    {
-        let buf = open_buf_writer(file)?;
-        let mut writer = WriterBuilder::new().has_headers(false).from_writer(buf);
-        writer.serialize_array2(&data)?;
-        Ok(())
-    }
-
     let mut rng = rand::rngs::StdRng::seed_from_u64(rseed);
     let threshold = 0.5_f32;
 
@@ -91,10 +67,9 @@ pub fn generate_factored_gamma_data_mtx(
     let beta: Array2<f32> = Array2::random((dd, kk), Gamma::<f32>::new(1.0, 1.0 / (dd as f32))?);
     let theta: Array2<f32> = Array2::random((kk, nn), Gamma::<f32>::new(1.0, 1.0 / (kk as f32))?);
 
-    // write_csv(&memb_file, &batch_membership)?;
-    write_csv(&ln_batch_file, &ln_delta)?;
-    write_csv(&dict_file, &beta)?;
-    write_csv(&prop_file, &theta)?;
+    write_tsv(&ln_batch_file, &ln_delta)?;
+    write_tsv(&dict_file, &beta)?;
+    write_tsv(&prop_file, &theta)?;
 
     // 4. putting them all together
     let mut triplets = vec![];

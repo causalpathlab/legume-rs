@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use zarrs::array::DataType;
+use zarrs::array_subset::ArraySubset;
 use zarrs::filesystem::FilesystemStore;
 use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
 
@@ -499,7 +500,11 @@ impl SparseMtxData {
         .bytes_to_bytes_codecs(vec![Arc::new(GzipCodec::new(5)?)])
         .build(self.store.clone(), key)?;
 
-        array.store_array_subset_ndarray(&[0], Array1::from(vec))?;
+        let ntot = vec.len() as u64;
+        let subset = ArraySubset::new_with_ranges(&[0..ntot]);
+        array.store_array_subset_elements(&subset, &vec)?;
+
+        // array.store_array_subset_ndarray(&[0], Array::from_vec(vec))?;
         array.store_metadata()?;
         Ok(())
     }
@@ -545,7 +550,6 @@ impl SparseMtxData {
     where
         V: zarrs::array::ElementOwned,
     {
-        use zarrs::array_subset::ArraySubset;
         let data = self._open_vector(key)?;
         let ntot = data.shape()[0];
         let subset = ArraySubset::new_with_ranges(&[0..ntot]);

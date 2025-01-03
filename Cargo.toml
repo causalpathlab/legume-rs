@@ -1,6 +1,6 @@
 [workspace]
 
-members = ["asap-data"] # ,"asap-embed","asap-network","asap-select", ,"asap-vae"
+members = ["asap-data", "asap-embed"] # ,"asap-network","asap-select", ,"asap-vae"
 resolver = "2"
 
 [workspace.dependencies]
@@ -20,3 +20,7 @@ zarrs = { version = "0.17.1", features = ["gzip"] }
 serde_json = "1.0"
 serde = "1.0.214"
 
+ndarray = { version = "0.15.6", features = ["rayon"]}
+ndarray-linalg = { version = "0.16", features = ["openblas-static"] }
+ndarray-rand = "0.14"
+instant-distance = "0.6.1"
