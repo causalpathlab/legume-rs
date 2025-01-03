@@ -23,9 +23,7 @@ rand = { workspace = true }
 zarrs = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
-ndarray = "0.16"
-ndarray-rand = "0.15"
-ndarray-csv = "0.5"
-csv = "1.3.1"
+ndarray = { workspace = true }
+ndarray-rand = { workspace = true }
 
 [dev-dependencies]
