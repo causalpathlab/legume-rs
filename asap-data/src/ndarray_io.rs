@@ -10,12 +10,11 @@ where
         .rows()
         .into_iter()
         .map(|row| {
-            let line = row
-                .iter()
+            row.iter()
                 .map(|x| format!("{}", x))
                 .collect::<Vec<String>>()
-                .join("\t");
-            line.into_boxed_str()
+                .join("\t")
+                .into_boxed_str()
         })
         .collect();
 

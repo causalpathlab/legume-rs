@@ -9,29 +9,26 @@ edition = "2021"
 
 [dependencies]
 
+anyhow = "1.0"
+clap = { version = "4.5.20", features = ["derive"] }
+flate2 = "1.0.34"
+
+num_cpus = "1.16.0"
+rayon = "1.10.0"
+hdf5 = { package = "hdf5-metno", version = "0.9", features = ["blosc"] }
+hdf5-sys = { package = "hdf5-metno-sys", version = "0.10", features = ["static", "zlib", "threadsafe"] }
+libz-sys = { version = "1", features = ["libc"], default-features = false }
+tempfile = "3.2"
+rand = "0.8.5"
+zarrs = { version = "0.17.1", features = ["gzip"] }
+serde_json = "1.0"
+serde = "1.0.214"
+ndarray = { version = "0.15.6", features = ["rayon"]}
+ndarray-linalg = { version = "0.16", features = ["openblas-static"] }
+ndarray-rand = "0.14"
 asap-data = { path = "../asap-data" }
-
-anyhow = { workspace = true }
-clap = { workspace = true }
-flate2 = { workspace = true }
-
-num_cpus = { workspace = true }
-rayon = { workspace = true }
-hdf5 = { workspace = true }
-hdf5-sys = { workspace = true }
-libz-sys = { workspace = true }
-tempfile = { workspace = true }
-rand = { workspace = true }
-
-zarrs = { workspace = true }
-serde_json = { workspace = true }
-serde = { workspace = true }
-
-ndarray = { workspace = true }
-ndarray-linalg = { workspace = true }
-ndarray-rand = { workspace = true }
-instant-distance = { workspace = true }
 ndarray-parallel = "0.9.1"
+instant-distance = "0.6.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 candle-core = { version = "0.8.0", features = ["cuda","cudarc","cudnn"] }

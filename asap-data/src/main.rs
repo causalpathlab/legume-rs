@@ -3,13 +3,14 @@ use std::sync::{Arc, Mutex};
 
 mod common_io;
 mod mtx_io;
+mod ndarray_io;
+mod ndarray_util;
 mod simulate;
 mod sparse_io;
 mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
 mod statistics;
-mod ndarray_util;
-mod ndarray_io;
+mod tensor_io;
 
 use crate::sparse_io::*;
 type SData = dyn SparseIo<IndexIter = Vec<usize>>;

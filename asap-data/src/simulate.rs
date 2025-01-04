@@ -1,10 +1,13 @@
-use crate::common_io::{open_buf_writer, write_lines};
+use crate::common_io::write_lines;
 use crate::mtx_io::write_mtx_triplets;
-use crate::ndarray_io::*;
-use crate::ndarray_util::scale_columns;
-use ndarray::prelude::*;
-use ndarray_rand::RandomExt;
-use rand::{prelude::Distribution, SeedableRng};
+use crate::tensor_io::*;
+use candle_core::{Device, Tensor};
+use rand::SeedableRng;
+use rand_distr::{Distribution, Gamma, Poisson, Uniform};
+// use crate::ndarray_io::*;
+// use crate::ndarray_util::scale_columns;
+// use ndarray::prelude::*;
+// use ndarray_rand::RandomExt;
 
 pub struct SimArgs {
     pub rows: usize,
@@ -35,11 +38,6 @@ pub fn generate_factored_gamma_data_mtx(
     ln_batch_file: &str,
     memb_file: &str,
 ) -> anyhow::Result<()> {
-    use ndarray_rand::rand_distr::Gamma;
-    use ndarray_rand::rand_distr::Poisson;
-    use ndarray_rand::rand_distr::StandardNormal;
-    use ndarray_rand::rand_distr::Uniform;
-
     let nn = args.cols;
     let dd = args.rows;
     let kk = args.factors.unwrap_or(1);
@@ -47,10 +45,12 @@ pub fn generate_factored_gamma_data_mtx(
     let rseed = args.rseed.unwrap_or(42);
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(rseed);
+
     let threshold = 0.5_f32;
 
     // 1. batch membership matrix
-    let batch_membership: Array1<usize> = Array1::random(nn, Uniform::new(0, bb));
+    let runif = Uniform::new(0, bb);
+    let batch_membership: Vec<usize> = (0..nn).map(|_| runif.sample(&mut rng)).collect();
 
     let batch_out: Vec<Box<str>> = batch_membership
         .iter()
@@ -60,16 +60,35 @@ pub fn generate_factored_gamma_data_mtx(
     write_lines(&batch_out, memb_file)?;
 
     // 2. batch effect matrix
-    let ln_delta: Array2<f32> = Array2::random((dd, bb), StandardNormal);
-    let ln_delta: Array2<f32> = scale_columns(ln_delta)?;
+    let ln_delta = Tensor::randn(0_f32, 1_f32, (dd, bb), &Device::Cpu)?;
+    let mu = ln_delta.mean_keepdim(0)?;
+    let sig = ln_delta.var_keepdim(0)?.sqrt()?;
+    let ln_delta_db = ln_delta.broadcast_sub(&mu)?.broadcast_div(&sig)?;
 
     // 3. factorization model
-    let beta: Array2<f32> = Array2::random((dd, kk), Gamma::<f32>::new(1.0, 1.0 / (dd as f32))?);
-    let theta: Array2<f32> = Array2::random((kk, nn), Gamma::<f32>::new(1.0, 1.0 / (kk as f32))?);
+    let rgamma_beta = Gamma::new(1.0, 1.0 / (dd as f32))?;
+
+    let beta_dk = Tensor::from_vec(
+        (0..(dd * kk))
+            .map(|_| rgamma_beta.sample(&mut rng))
+            .collect::<Vec<f32>>(),
+        (dd, kk),
+        &Device::Cpu,
+    )?;
+
+    let rgamma_theta = Gamma::new(1.0, 1.0 / (kk as f32))?;
+
+    let theta_kn = Tensor::from_vec(
+        (0..(kk * nn))
+            .map(|_| rgamma_theta.sample(&mut rng))
+            .collect::<Vec<f32>>(),
+        (kk, nn),
+        &Device::Cpu,
+    )?;
 
     write_tsv(&ln_batch_file, &ln_delta)?;
-    write_tsv(&dict_file, &beta)?;
-    write_tsv(&prop_file, &theta)?;
+    write_tsv(&dict_file, &beta_dk)?;
+    write_tsv(&prop_file, &theta_kn)?;
 
     // 4. putting them all together
     let mut triplets = vec![];
@@ -77,22 +96,26 @@ pub fn generate_factored_gamma_data_mtx(
     for j in 0..nn {
         let b = batch_membership[j]; // batch index
 
-        let lambda_j: Array1<f32> =
-            ln_delta.column(b).mapv(|x| x.exp()) * beta.dot(&theta.column(j));
+        let lambda_j = (ln_delta_db.narrow(1, b, 1)?.exp()?)
+            .mul(&beta_dk.matmul(&theta_kn.narrow(1, j, 1)?)?)?
+            .flatten_to(1)?;
 
-        // Sample triplets from Poisson (ignore zero values)
-        let y_samples: Array1<f32> = lambda_j.mapv(|lam_ij| {
-            let pois = Poisson::new(lam_ij as f32).unwrap();
-            pois.sample(&mut rng)
-        });
-
-        for (i, &y_ij) in y_samples.iter().enumerate() {
-            if y_ij as f32 > threshold {
-                triplets.push((i as u64, j as u64, y_ij as f32));
-            }
-        }
+        lambda_j
+            .to_vec1::<f32>()?
+            .iter()
+            .map(|&x| {
+                let rpois = Poisson::new(x).unwrap();
+                rpois.sample(&mut rng)
+            })
+            .enumerate()
+            .for_each(|(i, y_ij)| {
+                if y_ij > threshold {
+                    triplets.push((i as u64, j as u64, y_ij as f32));
+                }
+            });
     }
 
+    // dbg!(&triplets);
     write_mtx_triplets(&triplets, dd, nn, &mtx_file)?;
 
     Ok(())
