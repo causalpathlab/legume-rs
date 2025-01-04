@@ -42,10 +42,8 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
         let a = a.select(Axis(0), &[1, 7, 16]);
 
         data.subset_columns_rows(None, Some(&vec![1, 7, 16]))?;
-        let b = data.read_columns((0..data.num_columns().unwrap()).collect())?;
 
         let a: Array2<f32> = a.select(Axis(0), &[2, 1, 0]);
-
         let ncol = a.shape()[1];
         let aa: Array2<f32> = Array2::zeros((1, ncol));
 
@@ -72,9 +70,9 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
 fn simulate() -> anyhow::Result<()> {
     let sim_args = SimArgs {
         rows: 7,
-        cols: 11,
+        cols: 133,
         factors: None,
-        batches: None,
+        batches: Some(3),
         rseed: None,
     };
 
