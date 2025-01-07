@@ -17,11 +17,29 @@ where
     result
 }
 
+fn ndarray_to_dmatrix(array: &Array2<f32>) -> DMatrix<f32> {
+    let (rows, cols) = array.dim();
+
+    DMatrix::from_row_iterator(rows, cols, array.iter().cloned())
+}
+
+// fn ndarray_to_tensor(array: &Array2<f32>) -> Tensor {
+//     let data: Vec<f32> = array.iter().cloned().collect();
+//     let shape = array.shape().to_vec();
+//     Tensor::from_vec(data, shape, &Device::Cpu).unwrap()
+// }
+
+fn tensor_to_ndarray(tensor: Tensor) -> Array2<f32> {
+    let shape = tensor.dims();
+    let data = tensor.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    Array2::from_shape_vec((shape[0], shape[1]), data).unwrap()
+}
+
 #[test]
 fn random_ndarray_subset() -> anyhow::Result<()> {
-    let whole_mat = Array::random((150, 7000), rand::distributions::Uniform::new(0., 1.));
+    let whole_mat = Array::random((333, 777), rand::distributions::Uniform::new(0., 1.));
 
-    if let Ok(mut data) = SparseMtxData::from_ndarray(&whole_mat, None, None) {
+    if let Ok(mut data) = SparseMtxData::from_ndarray(&whole_mat, None, Some(true)) {
         let nrow = data.num_rows().unwrap();
         let ncol = data.num_columns().unwrap();
 
@@ -31,36 +49,53 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
         data.register_row_names_vec(&rows);
         data.print_hierarchy()?;
 
-        let a = whole_mat.select(Axis(1), &[9, 500, 10, 11, 1, 2, 3]);
+        {
+            let cols = [9, 111, 11, 1, 2, 7, 3];
+            let a = whole_mat.select(Axis(1), &cols);
 
-        data.subset_columns_rows(Some(&vec![9, 500, 10, 11, 1, 2, 3]), None)?;
+            let b = data.read_columns_tensor(Vec::from(&cols))?;
+            debug_assert_eq!(a, tensor_to_ndarray(b));
 
-        let b = data.read_columns((0..data.num_columns().unwrap()).collect())?;
+            let c = data.read_columns_dmatrix(Vec::from(&cols))?;
+            debug_assert_eq!(ndarray_to_dmatrix(&a), c);
+        }
 
-        debug_assert_eq!(a, b);
+        {
+            let rows = [9, 111, 11, 1, 2, 7, 3];
+            let a = whole_mat.select(Axis(0), &rows);
 
-        let a = a.select(Axis(0), &[1, 7, 16]);
+            let b = data.read_rows_tensor(Vec::from(&rows))?;
+            debug_assert_eq!(a, tensor_to_ndarray(b));
 
-        data.subset_columns_rows(None, Some(&vec![1, 7, 16]))?;
+            let c = data.read_rows_dmatrix(Vec::from(&rows))?;
+            debug_assert_eq!(ndarray_to_dmatrix(&a), c);
+        }
 
-        let a: Array2<f32> = a.select(Axis(0), &[2, 1, 0]);
-        let ncol = a.shape()[1];
-        let aa: Array2<f32> = Array2::zeros((1, ncol));
+        // arbitrary subset and rearrange
+        {
+            let a = whole_mat.select(Axis(1), &[9, 500, 10, 11, 1, 2, 3]);
+            data.subset_columns_rows(Some(&vec![9, 500, 10, 11, 1, 2, 3]), None)?;
+            let b = data.read_columns_ndarray((0..data.num_columns().unwrap()).collect())?;
+            debug_assert_eq!(a, b);
+            let a = whole_mat.select(Axis(1), &[9, 500, 10, 11, 1, 2, 3]);
+            let a = a.select(Axis(0), &[1, 7, 16]);
+            let a: Array2<f32> = a.select(Axis(0), &[2, 1, 0]);
+            let ncol = a.shape()[1];
+            let aa: Array2<f32> = Array2::zeros((1, ncol));
+            let c = ndarray::concatenate(Axis(0), &[a.view(), aa.view()])?;
 
-        dbg!(&a);
-        dbg!(&aa);
+            // check with this, also checking zero padding
+            data.subset_columns_rows(None, Some(&vec![1, 7, 16]))?;
+            let new_row_names = vec!["16", "7", "1", "9"]
+                .into_iter()
+                .map(|x| x.to_string().into_boxed_str())
+                .collect();
+            data.reorder_rows(&new_row_names)?;
 
-        let c = ndarray::concatenate(Axis(0), &[a.view(), aa.view()])?;
+            let b = data.read_columns_ndarray((0..data.num_columns().unwrap()).collect())?;
 
-        let new_row_names = vec!["16", "7", "1", "9"]
-            .into_iter()
-            .map(|x| x.to_string().into_boxed_str())
-            .collect();
-        data.reorder_rows(&new_row_names)?;
-
-        let b = data.read_columns((0..data.num_columns().unwrap()).collect())?;
-
-        debug_assert_eq!(b, c);
+            debug_assert_eq!(b, c);
+        }
     }
 
     Ok(())
@@ -105,10 +140,10 @@ fn simulate() -> anyhow::Result<()> {
 
     assert_eq!(batch_membership.len(), n);
 
-    let yy: Array2<f32> = data.read_columns((0..n).collect())?;
+    let yy: Array2<f32> = data.read_columns_ndarray((0..n).collect())?;
     dbg!(&yy);
 
-    let zz: Array2<f32> = data.read_rows((0..m).collect())?;
+    let zz: Array2<f32> = data.read_rows_ndarray((0..m).collect())?;
     dbg!(&zz);
 
     data.remove_backend_file()?;
@@ -140,13 +175,13 @@ fn random_mtx_loading() -> anyhow::Result<()> {
         let data = data?;
 
         // 4. read the column 2
-        let b = measure_time(|| data.read_columns((7..10).collect()).unwrap());
+        let b = measure_time(|| data.read_columns_ndarray((7..10).collect()).unwrap());
         dbg!(&b);
 
         // 6. open the backend file directly
         let backend_file = data.get_backend_file_name();
         let new_data = SparseMtxData::open(backend_file)?;
-        let c = measure_time(|| new_data.read_columns((7..10).collect()).unwrap());
+        let c = measure_time(|| new_data.read_columns_ndarray((7..10).collect()).unwrap());
         dbg!(&c);
 
         // 7. remove the backend file
@@ -171,11 +206,11 @@ fn random_ndarray_loading() -> anyhow::Result<()> {
 
         dbg!(&a);
 
-        let b = data.read_columns((2..3).collect()).unwrap();
+        let b = data.read_columns_ndarray((2..3).collect()).unwrap();
 
         dbg!(&b);
 
-        let c = data.read_columns(vec![2]).unwrap();
+        let c = data.read_columns_ndarray(vec![2]).unwrap();
 
         dbg!(&c);
 

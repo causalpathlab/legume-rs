@@ -27,7 +27,7 @@ const MAX_COLUMN_NAME_IDX: usize = 10;
 ///         └── indptr (row pointers)
 /// ```
 ///
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SparseMtxData {
     backend: Arc<hdf5::File>,
     file_name: String,
@@ -206,20 +206,6 @@ impl SparseMtxData {
         self.by_row_indptr = vec![];
 
         Ok(())
-    }
-
-    /// Remove backend file to free up disk space
-    pub fn remove_backend_file(self: &Self) -> anyhow::Result<()> {
-        let backend = std::path::Path::new(&self.file_name);
-        if backend.exists() {
-            std::fs::remove_file(&backend)?;
-        }
-        Ok(())
-    }
-
-    /// Access file name of the hdf5 backend file
-    pub fn get_backend_file_name(self: &Self) -> &str {
-        &self.file_name
     }
 
     /////////////////////////////////
@@ -523,6 +509,20 @@ impl SparseMtxData {
 }
 
 impl SparseIo for SparseMtxData {
+    /// Remove backend file to free up disk space
+    fn remove_backend_file(self: &Self) -> anyhow::Result<()> {
+        let backend = std::path::Path::new(&self.file_name);
+        if backend.exists() {
+            std::fs::remove_file(&backend)?;
+        }
+        Ok(())
+    }
+
+    /// Access file name of the hdf5 backend file
+    fn get_backend_file_name(self: &Self) -> &str {
+        &self.file_name
+    }
+
     /// Export the data to a mtx file. This will take time.
     /// * `mtx_file`: mtx file to be written
     fn to_mtx_file(&self, mtx_file: &str) -> anyhow::Result<()> {
@@ -849,7 +849,7 @@ impl SparseIo for SparseMtxData {
     /// Read columns within the range and return dense `ndarray::Array2`
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_columns(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
+    fn read_columns_ndarray(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
         let ncol_out = &columns.len();
         let triplets = self.read_triplets_by_columns(columns)?;
 
@@ -862,6 +862,48 @@ impl SparseIo for SparseMtxData {
             }
 
             Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
+    /// Read columns within the range and return dense `candle_core::Tensor`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns_tensor(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Tensor> {
+        let ncol_out = columns.len();
+        let triplets = self.read_triplets_by_columns(columns)?;
+
+        if let Some(nrow) = self.num_rows() {
+            let nrow = nrow as usize;
+            let mut data = vec![0_f32; nrow * ncol_out];
+            for (ii, jj, x_ij) in triplets {
+                data[ii * ncol_out + jj] = x_ij;
+            }
+            Ok(Tensor::from_vec(data, (nrow, ncol_out), &Device::Cpu)?)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
+    /// Read columns within the range and return dense `nalgebrea::DMatrix`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns_dmatrix(self: &Self, columns: Self::IndexIter) -> anyhow::Result<DMatrix<f32>> {
+        let ncol_out = columns.len();
+        let triplets = self.read_triplets_by_columns(columns)?;
+
+        if let Some(nrow) = self.num_rows() {
+            let nrow = nrow as usize;
+            let mut data = vec![0_f32; nrow * ncol_out];
+            for (ii, jj, x_ij) in triplets {
+                data[ii * ncol_out + jj] = x_ij;
+            }
+            Ok(DMatrix::from_row_slice(nrow, ncol_out, &data))
         } else {
             return Err(anyhow::anyhow!(
                 "Unable to figure out the size of the backend data"
@@ -920,7 +962,7 @@ impl SparseIo for SparseMtxData {
     /// Read rows within the range and return dense `ndarray::Array2`
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_rows(self: &Self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
+    fn read_rows_ndarray(self: &Self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
         let nrow_out = rows.len();
         let triplets = self.read_triplets_by_rows(rows)?;
 
@@ -933,6 +975,48 @@ impl SparseIo for SparseMtxData {
             }
 
             Ok(ret)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
+    /// Read rows within the range and return dense `candle_core::Tensor`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows_tensor(self: &Self, rows: Self::IndexIter) -> anyhow::Result<Tensor> {
+        let nrow_out = rows.len();
+        let triplets = self.read_triplets_by_rows(rows)?;
+
+        if let Some(ncol) = self.num_columns() {
+            let ncol = ncol as usize;
+            let mut data = vec![0_f32; ncol * nrow_out];
+            for (ii, jj, x_ij) in triplets {
+                data[ii * ncol + jj] = x_ij;
+            }
+            Ok(Tensor::from_vec(data, (nrow_out, ncol), &Device::Cpu)?)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
+    /// Read rows within the range and return dense `nalgebrea::DMatrix`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows_dmatrix(self: &Self, rows: Self::IndexIter) -> anyhow::Result<DMatrix<f32>> {
+        let nrow_out = rows.len();
+        let triplets = self.read_triplets_by_rows(rows)?;
+
+        if let Some(ncol) = self.num_columns() {
+            let ncol = ncol as usize;
+            let mut data = vec![0_f32; ncol * nrow_out];
+            for (ii, jj, x_ij) in triplets {
+                data[ii * ncol + jj] = x_ij;
+            }
+            Ok(DMatrix::from_row_slice(nrow_out, ncol, &data))
         } else {
             return Err(anyhow::anyhow!(
                 "Unable to figure out the size of the backend data"

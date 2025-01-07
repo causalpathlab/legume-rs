@@ -15,7 +15,8 @@ flate2 = "1.0.34"
 
 num_cpus = "1.16.0"
 rayon = "1.10.0"
-hdf5 = { package = "hdf5-metno", version = "0.9", features = ["blosc"] }
+hdf5 = { package = "hdf5-metno", version = "0.9.3", features = ["blosc"] }
+hdf5-sys = { package = "hdf5-metno-sys", version = "0.10", features = ["static", "zlib", "threadsafe"] }
 libz-sys = { version = "1.1", features = ["libc"], default-features = false }
 tempfile = "3.2"
 rand = "0.8.5"
@@ -26,10 +27,11 @@ serde = "1.0"
 ndarray = { version = "0.15", features = ["rayon"]}
 ndarray-rand = "0.14"
 rand_distr = "0.4.3"
+nalgebra = "0.33.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-candle-core = { version = "0.8.0", features = ["cuda","cudarc","cudnn"] }
+candle-core = { version = "0.8", features = ["cuda","cudarc","cudnn"] }
 [target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { version = "0.8.0", features = ["metal","accelerate"] }
+candle-core = { version = "0.8", features = ["metal","accelerate"] }
 
 [dev-dependencies]
