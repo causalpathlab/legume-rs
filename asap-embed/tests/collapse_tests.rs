@@ -2,13 +2,13 @@ use asap_data::common_io::{create_temp_dir_file, read_lines};
 
 use asap_data::simulate::*;
 use asap_data::sparse_io::*;
-use asap_data::sparse_matrix_zarr::SparseMtxData;
-use ndarray_rand::RandomExt;
+use std::borrow::{Borrow, BorrowMut};
 use std::path::Path;
 use std::time::Instant;
 
 use asap_data::common_io::*;
-use asap_embed::random_projection as rp;
+use asap_embed::random_projection::*;
+use std::sync::Arc;
 
 fn measure_time<T, F>(f: F) -> T
 where
@@ -23,21 +23,24 @@ where
 
 #[test]
 fn random_collapse() -> anyhow::Result<()> {
-    let dd = 151_usize;
-    let nn = 777_usize;
+    let dd = 17_usize;
+    let nn = 377_usize;
 
-    let whole_mat = Array::random((dd, nn), rand::distributions::Uniform::new(0., 1.));
+    use ndarray_rand::rand_distr::Uniform;
+    use ndarray_rand::RandomExt;
 
-    if let Ok(mut data) = SparseMtxData::from_ndarray(&whole_mat, None, None) {
-        let nrow = data.num_rows().unwrap();
-        let ncol = data.num_columns().unwrap();
+    let mut rng = rand::thread_rng();
+    let runif = Uniform::new(0., 1.)?;
+    let xx: Array2<f32> = Array2::random((nn, dd), runif);
 
-        let rp_result = rp::collapse_columns(&data, 3, None)?;
+    let data1: Arc<Data> = Arc::from(create_sparse_ndarray(&xx, None, None)?);
+    let data_vec = vec![data1.clone()];
 
-        let _ = rp::collapse_columns_cbind(&vec![Box::new(&data)], 3, None)?;
+    let mut rp_obj = RandProjVec::new(&data_vec, None)?;
 
-        data.remove_backend_file()?;
-    }
+    rp_obj.step1_sample_basis_cbind(10)?;
+    rp_obj.step2_proj_cbind()?;
 
+    data1.remove_backend_file()?;
     Ok(())
 }

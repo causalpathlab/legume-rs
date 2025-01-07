@@ -205,7 +205,7 @@ fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
         common_io::remove_file(&backend_file)?;
     }
 
-    let mut data = create_sparse_matrix(&mtx_file, &backend_file, &backend)?;
+    let mut data = create_sparse_mtx_file(&mtx_file, Some(&backend_file), Some(&backend))?;
 
     if let Some(row_file) = row_file {
         data.register_row_names_file(row_file);
@@ -358,7 +358,7 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     )
     .expect("something went wrong in factored gamma");
 
-    let mut data = create_sparse_matrix(&mtx_file, &backend_file, &backend)?;
+    let mut data = create_sparse_mtx_file(&mtx_file, Some(&backend_file), Some(&backend))?;
 
     let rows: Vec<Box<str>> = (1..(sim_args.rows + 1))
         .map(|i| i.to_string().into_boxed_str())
@@ -404,7 +404,7 @@ fn collect_row_column_stats(
                 let data_b = arc_data.lock().expect("failed to lock data");
 
                 // This could be inefficient since we are populating a dense matrix
-                let xx_b = data_b.read_columns((lb..ub).collect()).unwrap();
+                let xx_b = data_b.read_columns_ndarray((lb..ub).collect()).unwrap();
 
                 // accumulate rows' statistics
                 {

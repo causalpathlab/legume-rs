@@ -34,14 +34,14 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
 
         data.subset_columns_rows(Some(&vec![9, 10, 500, 11, 1, 2, 3]), None)?;
 
-        let b = data.read_columns((0..data.num_columns().unwrap()).collect())?;
+        let b = data.read_columns_ndarray((0..data.num_columns().unwrap()).collect())?;
 
         debug_assert_eq!(a, b);
 
         let a = a.select(Axis(0), &[1, 7, 16]);
 
         data.subset_columns_rows(None, Some(&vec![1, 7, 16]))?;
-        let b = data.read_columns((0..data.num_columns().unwrap()).collect())?;
+        let b = data.read_columns_ndarray((0..data.num_columns().unwrap()).collect())?;
 
         debug_assert_eq!(a, b);
         let a: Array2<f32> = a.select(Axis(0), &[2, 1, 0]);
@@ -60,7 +60,7 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
             .collect();
         data.reorder_rows(&new_row_names)?;
 
-        let b = data.read_columns((0..data.num_columns().unwrap()).collect())?;
+        let b = data.read_columns_ndarray((0..data.num_columns().unwrap()).collect())?;
 
         debug_assert_eq!(b, c);
     }
@@ -86,20 +86,20 @@ fn random_mtx_loading() -> anyhow::Result<()> {
         let data = data?;
 
         // 4. read the column 2
-        let b = measure_time(|| data.read_columns((3..4).collect()).unwrap());
+        let b = measure_time(|| data.read_columns_ndarray((3..4).collect()).unwrap());
         dbg!(&b);
 
         // 5. read the column 2
-        let c = measure_time(|| data.read_columns(vec![3]).unwrap());
+        let c = measure_time(|| data.read_columns_ndarray(vec![3]).unwrap());
         dbg!(&c);
 
         // 6. open the backend file directly
         let backend_file = data.get_backend_file_name();
         let new_data = SparseMtxData::open(backend_file)?;
-        let d = measure_time(|| new_data.read_columns((3..4).collect()).unwrap());
+        let d = measure_time(|| new_data.read_columns_ndarray((3..4).collect()).unwrap());
         dbg!(&d);
 
-        let e = measure_time(|| new_data.read_columns(vec![7]).unwrap());
+        let e = measure_time(|| new_data.read_columns_ndarray(vec![7]).unwrap());
         dbg!(&e);
 
         assert_ne!(a, e);
@@ -126,11 +126,11 @@ fn random_ndarray_loading() -> anyhow::Result<()> {
 
         dbg!(&a);
 
-        let b = data.read_columns((2..3).collect()).unwrap();
+        let b = data.read_columns_ndarray((2..3).collect()).unwrap();
 
         dbg!(&b);
 
-        let c = data.read_columns(vec![2]).unwrap();
+        let c = data.read_columns_ndarray(vec![2]).unwrap();
 
         dbg!(&c);
 
@@ -175,10 +175,10 @@ fn simulate() -> anyhow::Result<()> {
     let n = data.num_columns().expect("failed to get #col") as usize;
     let m = data.num_rows().expect("failed to get #row") as usize;
 
-    let yy: Array2<f32> = data.read_columns((0..n).collect())?;
+    let yy: Array2<f32> = data.read_columns_ndarray((0..n).collect())?;
     dbg!(&yy);
 
-    let zz: Array2<f32> = data.read_rows((0..m).collect())?;
+    let zz: Array2<f32> = data.read_rows_ndarray((0..m).collect())?;
     dbg!(&zz);
 
     data.remove_backend_file()?;

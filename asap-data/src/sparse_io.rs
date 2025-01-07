@@ -1,10 +1,13 @@
 use crate::sparse_matrix_hdf5;
 use crate::sparse_matrix_zarr;
 pub use clap::ValueEnum;
+
+pub use candle_core::{Device, Tensor};
 pub use ndarray::prelude::*;
 pub use rayon::prelude::*;
 pub use std::collections::HashMap;
 pub use std::ops::Range;
+pub use nalgebra::DMatrix;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -36,20 +39,40 @@ pub fn open_sparse_matrix(
 /// * `mtx_file`: file path to the 10x mtx
 /// * `backend_file`: file path to the sparse matrix
 /// * `backend`: backend type (HDF5 or Zarr)
-pub fn create_sparse_matrix(
+pub fn create_sparse_mtx_file(
     mtx_file: &str,
-    backend_file: &str,
-    backend: &SparseIoBackend,
+    backend_file: Option<&str>,
+    backend: Option<&SparseIoBackend>,
 ) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
     match backend {
-        SparseIoBackend::HDF5 => Ok(Box::new(sparse_matrix_hdf5::SparseMtxData::from_mtx_file(
+        Some(SparseIoBackend::HDF5) => Ok(Box::new(
+            sparse_matrix_hdf5::SparseMtxData::from_mtx_file(mtx_file, backend_file, Some(true))?,
+        )),
+        _ => Ok(Box::new(sparse_matrix_zarr::SparseMtxData::from_mtx_file(
             mtx_file,
-            Some(backend_file),
+            backend_file,
             Some(true),
         )?)),
-        SparseIoBackend::Zarr => Ok(Box::new(sparse_matrix_zarr::SparseMtxData::from_mtx_file(
-            mtx_file,
-            Some(backend_file),
+    }
+}
+
+#[allow(dead_code)]
+/// Create a sparse matrix io (backend) with dense `Array2`
+/// * `data`: data matrix
+/// * `backend_file`: file path to the sparse matrix
+/// * `backend`: backend type (HDF5 or Zarr)
+pub fn create_sparse_ndarray(
+    data: &Array2<f32>,
+    backend_file: Option<&str>,
+    backend: Option<&SparseIoBackend>,
+) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
+    match backend {
+        Some(SparseIoBackend::HDF5) => Ok(Box::new(
+            sparse_matrix_hdf5::SparseMtxData::from_ndarray(data, backend_file, Some(true))?,
+        )),
+        _ => Ok(Box::new(sparse_matrix_zarr::SparseMtxData::from_ndarray(
+            data,
+            backend_file,
             Some(true),
         )?)),
     }
@@ -78,12 +101,32 @@ pub trait SparseIo: Sync + Send {
     /// Read columns within the range and return dense `ndarray::Array2`
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_columns(&self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>>;
+    fn read_columns_ndarray(&self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>>;
+
+    /// Read columns within the range and return dense `candle_core::Tensor`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns_tensor(&self, columns: Self::IndexIter) -> anyhow::Result<Tensor>;
+
+    /// Read columns within the range and return dense `nalgebra::DMatrix`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns_dmatrix(&self, columns: Self::IndexIter) -> anyhow::Result<DMatrix<f32>>;
 
     /// Read rows within the range and return dense `ndarray::Array2`
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_rows(&self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>>;
+    fn read_rows_ndarray(&self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>>;
+
+    /// Read rows within the range and return dense `candle_core::Tensor`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows_tensor(&self, columns: Self::IndexIter) -> anyhow::Result<Tensor>;
+
+    /// Read rows within the range and return dense `nalgebra::DMatrix`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows_dmatrix(&self, rows: Self::IndexIter) -> anyhow::Result<DMatrix<f32>>;
 
     /// Export the data to a mtx file. This will take time.
     /// * `mtx_file`: mtx file to be written
@@ -152,6 +195,12 @@ pub trait SparseIo: Sync + Send {
     /// Reposition rows in a new order specified by `remap`
     /// * `row_names_order` - a vector of row names in the new order
     fn reorder_rows(&mut self, row_names_order: &Vec<Box<str>>) -> anyhow::Result<()>;
+
+    /// Remove backend file
+    fn remove_backend_file(&self) -> anyhow::Result<()>;
+
+    /// Backend file name
+    fn get_backend_file_name(&self) -> &str;
 }
 
 //////////////////////
