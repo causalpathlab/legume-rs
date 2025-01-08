@@ -60,14 +60,12 @@ impl GammaParam {
     }
 
     pub fn update_col(&mut self, update_a: &DMatrix<f32>, update_b: &DMatrix<f32>, k: usize) {
-        // self.a_stat.column_mut(k).fill(self.a0);
-        // self.b_stat.column_mut(k).fill(self.b0);
-        // Zip::from(&mut self.a_stat.column_mut(k))
-        //     .and(&update_a.column(k))
-        //     .for_each(|a, &delta_a| *a += delta_a);
-        // Zip::from(&mut self.b_stat.column_mut(k))
-        //     .and(&update_b.column(k))
-        //     .for_each(|b, &delta_b| *b += delta_b);
+        self.a_stat
+            .column_mut(k)
+            .copy_from(&update_a.map(|x| x + self.a0));
+        self.b_stat
+            .column_mut(k)
+            .copy_from(&update_b.map(|x| x + self.b0));
     }
 
     pub fn rows(&self) -> usize {
@@ -79,46 +77,37 @@ impl GammaParam {
     }
 
     pub fn calibrate(&mut self) {
-        // self.estimated_mean = &self.a_stat / &self.b_stat;
-        // self._map_log_mean();
-        // self._map_sd();
-        // self._map_log_sd();
+        self.map_update_mean();
+        self.map_update_log_mean();
+        self.map_update_sd();
+        self.map_update_log_sd();
     }
 
-    // digamma(a) - ln(b)
-    fn _map_log_mean(&mut self) {
+    // maximum a posteriori mean = a/b
+    fn map_update_mean(&mut self) {
+        self.estimated_mean = self.a_stat.zip_map(&self.b_stat, |a, b| a / b);
+    }
+
+    // maximum a posteriori sqrt(a) / b
+    fn map_update_sd(&mut self) {
+        self.estimated_sd = self.a_stat.zip_map(&self.b_stat, |a, b| a.sqrt() / b);
+    }
+
+    // maximum a posteriori log mean = digamma(a) - ln(b)
+    fn map_update_log_mean(&mut self) {
         use special::Gamma;
-        // Zip::from(&mut self.estimated_log_mean)
-        //     .and(&self.a_stat)
-        //     .and(&self.b_stat)
-        //     .for_each(|estimated_log_mean, a, b| {
-        //         *estimated_log_mean = a.digamma() - b.ln();
-        //     });
+        self.estimated_log_mean = self
+            .a_stat
+            .zip_map(&self.b_stat, |a, b| a.digamma() - b.ln());
     }
 
-    // Delta method
+    // maximum a posteriori via delta method
     // sqrt V[ln(mu)] = sqrt (V[mu] / mu)
     //                = 1/sqrt(a -1)
     // when approximated at the mode = (a - 1)/b
-    fn _map_log_sd(&mut self) {
-    //     Zip::from(&mut self.estimated_log_sd)
-    //         .and(&self.a_stat)
-    //         .for_each(|_log_sd, a| {
-    //             if *a > 1.0 {
-    //                 *_log_sd = 1.0 / (a - 1.).sqrt();
-    //             } else {
-    //                 *_log_sd = 0.0;
-    //             }
-    //         });
-    }
-
-    // sqrt(a) / b
-    fn _map_sd(&mut self) {
-        // Zip::from(&mut self.estimated_sd)
-        //     .and(&self.a_stat)
-        //     .and(&self.b_stat)
-        //     .for_each(|_sd, a, b| {
-        //         *_sd = a.sqrt() / b;
-        //     });
+    fn map_update_log_sd(&mut self) {
+        self.estimated_log_sd = self
+            .a_stat
+            .map(|a| if a > 1.0 { 1.0 / (a - 1.0).sqrt() } else { 0.0 });
     }
 }

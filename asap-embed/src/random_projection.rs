@@ -97,8 +97,8 @@ impl<'a> RandProjVec<'a> {
             });
 
             // the results of random projection
-            let rand_proj_kn: DMatrix<f32> = DMatrix::zeros(kk, ncol);
-            let arc_rand_proj_kn = Arc::new(Mutex::new(rand_proj_kn));
+            let mut rand_proj_kn: DMatrix<f32> = DMatrix::zeros(kk, ncol);
+            let arc_rand_proj_kn = Arc::new(Mutex::new(&mut rand_proj_kn));
 
             // batch to global membership and vice versa
             let mut batch_glob_index: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -159,9 +159,9 @@ impl<'a> RandProjVec<'a> {
                 offset += ncol_batch;
             }
 
-            //     self.rand_proj_kn = Some(rand_proj_kn);
-            //     self.batch_glob_index.extend(batch_glob_index);
-            //     self.batch_membership.extend(batch_membership);
+            self.rand_proj_kn = Some(rand_proj_kn);
+            self.batch_glob_index.extend(batch_glob_index);
+            self.batch_membership.extend(batch_membership);
             Ok(())
         } else {
             Err(anyhow::anyhow!("random basis matrix is not available"))
