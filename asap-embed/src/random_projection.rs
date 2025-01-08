@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 pub type Data = dyn SparseIo<IndexIter = Vec<usize>>;
 
-const DEFAULT_BLOCK_SIZE: usize = 100;
+const DEFAULT_BLOCK_SIZE: usize = 500;
 
 pub struct RandProjVec<'a> {
     data_vec: &'a Vec<Arc<Data>>,
@@ -79,6 +79,7 @@ impl<'a> RandProjVec<'a> {
         }
 
         self.rand_basis_kd = Some(rand_basis_kd);
+
         Ok(())
     }
 
@@ -127,18 +128,22 @@ impl<'a> RandProjVec<'a> {
                         (lb, ub)
                     })
                     .for_each(|(lb, ub)| {
-                        let mut proj_km = arc_rand_proj_kn.lock().expect("failed to lock proj");
                         // This could be inefficient since we are populating a dense matrix
                         let xx_dm = data_batch
                             .read_columns_dmatrix((lb..ub).collect())
                             .expect("failed to read columns");
 
                         let yy_dm = Self::normalize_columns(&xx_dm);
-
-                        let temp = rand_basis_kd * &yy_dm;
+                        let proj_block = rand_basis_kd * &yy_dm;
 
                         let (lb_glob, ub_glob) = (lb + offset, ub + offset);
-                        proj_km.columns_mut(lb_glob, ub_glob).copy_from(&temp);
+
+                        {
+                            let mut proj_kn = arc_rand_proj_kn.lock().expect("failed to lock proj");
+                            proj_kn
+                                .columns_range_mut(lb_glob..ub_glob)
+                                .copy_from(&proj_block);
+                        }
                     });
 
                 ////////////////////////////
@@ -189,7 +194,7 @@ impl<'a> RandProjVec<'a> {
             .map_init(thread_rng, |rng, _| rng.sample(StandardNormal))
             .collect();
 
-        Ok(DMatrix::from_vec(nrow, kk, rvec))
+        Ok(DMatrix::from_vec(kk, nrow, rvec))
     }
 }
 
