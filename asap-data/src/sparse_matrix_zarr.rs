@@ -160,6 +160,34 @@ impl SparseMtxData {
         Ok(ret)
     }
 
+    /// Create a new `SparseMtxData` instance from an `DMatrix` array
+    /// * `array` - 2D array to be added to the backend
+    /// * `backend_file` - Optional zarr backend file
+    /// * `index_by_row` - Optional flag to index by row (CSR format)
+    pub fn from_dmatrix(
+        matrix: &DMatrix<f32>,
+        zarr_file: Option<&str>,
+        index_by_row: Option<bool>,
+    ) -> anyhow::Result<Self> {
+        let mut ret = match zarr_file {
+            Some(backend_file) => Self::return_backend_file(backend_file)?,
+            None => {
+                let backend_file = create_temp_dir_file(".zarr")?;
+                let backend_file = backend_file.to_str().expect("to_str failed");
+                Self::return_backend_file(&backend_file)?
+            }
+        };
+
+        ret.import_dmatrix_by_col(&matrix)?; // for column-wise
+        ret.read_column_indptr()?; // pointers
+
+        if Some(true) == index_by_row {
+            ret.import_dmatrix_by_row(&matrix)?;
+            ret.read_row_indptr()?;
+        }
+        Ok(ret)
+    }
+
     /// Show the hierarchy of the zarr store
     pub fn print_hierarchy(self: &Self) -> anyhow::Result<()> {
         let node = zarrs::node::Node::open(&self.store, "/")?;
@@ -233,6 +261,30 @@ impl SparseMtxData {
     }
 
     /////////////////////////////////
+    // `dmatrix` related functions //
+    /////////////////////////////////
+
+    /// Add dmatrix to zarr backend by row (CSR format)
+    /// * `array` - 2D array to be added to the backend
+    fn import_dmatrix_by_row(&mut self, matrix: &DMatrix<f32>) -> anyhow::Result<()> {
+        let (nrow, ncol) = matrix.shape();
+        let mut mtx_triplets = dmatrix_to_triplets(&matrix);
+        let mtx_shape = (nrow, ncol, mtx_triplets.len());
+        self.record_mtx_shape(Some(mtx_shape))?;
+        self.record_triplets_by_row(&mut mtx_triplets)
+    }
+
+    /// Add dmatrix to zarr backend by column (CSC format)
+    /// * `array` - 2D array to be added to the backend
+    fn import_dmatrix_by_col(&mut self, matrix: &DMatrix<f32>) -> anyhow::Result<()> {
+        let (nrow, ncol) = matrix.shape();
+        let mut mtx_triplets = dmatrix_to_triplets(&matrix);
+        let mtx_shape = (nrow, ncol, mtx_triplets.len());
+        self.record_mtx_shape(Some(mtx_shape))?;
+        self.record_triplets_by_col(&mut mtx_triplets)
+    }
+
+    /////////////////////////////////
     // `ndarray` related functions //
     /////////////////////////////////
 
@@ -241,14 +293,9 @@ impl SparseMtxData {
     fn import_ndarray_by_row(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
         let nrow = array.shape()[0];
         let ncol = array.shape()[1];
-        let eps = 1e-6;
 
         // dbg!("importing ndarray by row...");
-        let mut mtx_triplets = array
-            .indexed_iter()
-            .filter(|(_, &elem)| elem.abs() > eps)
-            .map(|((row, col), &value)| (row as u64, col as u64, value))
-            .collect::<Vec<(u64, u64, f32)>>();
+        let mut mtx_triplets = ndarray_to_triplets(&array);
 
         let nnz = mtx_triplets.len();
         let mtx_shape = (nrow, ncol, nnz);
@@ -264,14 +311,9 @@ impl SparseMtxData {
     fn import_ndarray_by_col(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
         let nrow = array.shape()[0];
         let ncol = array.shape()[1];
-        let eps = 1e-6;
 
         // dbg!("importing ndarray by column...");
-        let mut mtx_triplets = array
-            .indexed_iter()
-            .filter(|(_, &elem)| elem.abs() > eps)
-            .map(|((row, col), &value)| (row as u64, col as u64, value))
-            .collect::<Vec<(u64, u64, f32)>>();
+        let mut mtx_triplets = ndarray_to_triplets(&array);
 
         let nnz = mtx_triplets.len();
         let mtx_shape = (nrow, ncol, nnz);

@@ -159,6 +159,38 @@ impl SparseMtxData {
         Ok(ret)
     }
 
+    /// Create a new `SparseMtxData` from DMatrix with its backend
+    /// HDF5 file. If no `backend_file` is provided, a temporary file
+    /// will be created.
+    /// * `array`: 2D array to be written into HDF5 backend
+    /// * `backend_file`: HDF5 file to be associated with
+    /// * `index_by_row`: if true, the matrix will be indexed by row
+    ///
+    pub fn from_dmatrix(
+        matrix: &DMatrix<f32>,
+        backend_file: Option<&str>,
+        index_by_row: Option<bool>,
+    ) -> anyhow::Result<Self> {
+        let mut ret = match backend_file {
+            Some(backend_file) => Self::return_backend_file(backend_file)?,
+            None => {
+                let backend_file = create_temp_dir_file(".h5")?;
+                let backend_file = backend_file.to_str().expect("to_str failed");
+                Self::return_backend_file(&backend_file)?
+            }
+        };
+
+        ret.import_dmatrix_by_col(&matrix)?; // populate data from mtx file
+        ret.read_column_indptr()?; // reload column indptr
+
+        if Some(true) == index_by_row {
+            ret.import_dmatrix_by_row(&matrix)?; //
+            ret.read_row_indptr()?; //
+        }
+
+        Ok(ret)
+    }
+
     /// Read column index pointers
     pub fn read_column_indptr(self: &mut Self) -> anyhow::Result<()> {
         if let Ok(by_column) = self.backend.group("/by_column") {
@@ -209,6 +241,30 @@ impl SparseMtxData {
     }
 
     /////////////////////////////////
+    // `dmatrix` related functions //
+    /////////////////////////////////
+
+    /// Add dmatrix to HDF5 backend by row (CSR format)
+    /// * `array` - 2D array to be added to the backend
+    fn import_dmatrix_by_row(&mut self, matrix: &DMatrix<f32>) -> anyhow::Result<()> {
+        let (nrow, ncol) = matrix.shape();
+        let mut mtx_triplets = dmatrix_to_triplets(&matrix);
+        let mtx_shape = (nrow, ncol, mtx_triplets.len());
+        self.record_mtx_shape(Some(mtx_shape))?;
+        self.record_triplets_by_row(&mut mtx_triplets)
+    }
+
+    /// Add dmatrix to HDF5 backend by column (CSC format)
+    /// * `array` - 2D array to be added to the backend
+    fn import_dmatrix_by_col(&mut self, matrix: &DMatrix<f32>) -> anyhow::Result<()> {
+        let (nrow, ncol) = matrix.shape();
+        let mut mtx_triplets = dmatrix_to_triplets(&matrix);
+        let mtx_shape = (nrow, ncol, mtx_triplets.len());
+        self.record_mtx_shape(Some(mtx_shape))?;
+        self.record_triplets_by_col(&mut mtx_triplets)
+    }
+
+    /////////////////////////////////
     // `ndarray` related functions //
     /////////////////////////////////
 
@@ -217,14 +273,8 @@ impl SparseMtxData {
     fn import_ndarray_by_row(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
         let nrow = array.shape()[0];
         let ncol = array.shape()[1];
-        let eps = 1e-6;
 
-        let mut mtx_triplets = array
-            .indexed_iter()
-            .filter(|(_, &elem)| elem.abs() > eps)
-            .map(|((row, col), &value)| (row as u64, col as u64, value))
-            .collect::<Vec<(u64, u64, f32)>>();
-
+        let mut mtx_triplets = ndarray_to_triplets(&array);
         let nnz = mtx_triplets.len();
 
         let mtx_shape = (nrow, ncol, nnz);
@@ -237,14 +287,8 @@ impl SparseMtxData {
     fn import_ndarray_by_col(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
         let nrow = array.shape()[0];
         let ncol = array.shape()[1];
-        let eps = 1e-6;
 
-        let mut mtx_triplets = array
-            .indexed_iter()
-            .filter(|(_, &elem)| elem.abs() > eps)
-            .map(|((row, col), &value)| (row as u64, col as u64, value))
-            .collect::<Vec<(u64, u64, f32)>>();
-
+        let mut mtx_triplets = ndarray_to_triplets(&array);
         let nnz = mtx_triplets.len();
 
         let mtx_shape = (nrow, ncol, nnz);

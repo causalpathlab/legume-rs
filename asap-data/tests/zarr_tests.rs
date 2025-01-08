@@ -3,6 +3,10 @@ use asap_data::simulate::*;
 use asap_data::sparse_io::*;
 use asap_data::sparse_matrix_zarr::SparseMtxData;
 use ndarray_rand::RandomExt;
+
+use approx::assert_abs_diff_eq;
+// use approx::AbsDiffEq;
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -19,20 +23,39 @@ where
 
 fn ndarray_to_dmatrix(array: &Array2<f32>) -> DMatrix<f32> {
     let (rows, cols) = array.dim();
-
     DMatrix::from_row_iterator(rows, cols, array.iter().cloned())
 }
-
-// fn ndarray_to_tensor(array: &Array2<f32>) -> Tensor {
-//     let data: Vec<f32> = array.iter().cloned().collect();
-//     let shape = array.shape().to_vec();
-//     Tensor::from_vec(data, shape, &Device::Cpu).unwrap()
-// }
 
 fn tensor_to_ndarray(tensor: Tensor) -> Array2<f32> {
     let shape = tensor.dims();
     let data = tensor.flatten_all().unwrap().to_vec1::<f32>().unwrap();
     Array2::from_shape_vec((shape[0], shape[1]), data).unwrap()
+}
+
+#[test]
+fn ndarray_dmatrix() -> anyhow::Result<()> {
+    let raw_array = Array::random((133, 373), rand::distributions::Uniform::new(0., 1.));
+    let raw_matrix = ndarray_to_dmatrix(&raw_array);
+    let data1 = create_sparse_ndarray(&raw_array, None, None)?;
+    let data2 = create_sparse_dmatrix(&raw_matrix, None, None)?;
+
+    {
+        let a = data1.read_columns_ndarray((0..data1.num_columns().unwrap()).collect())?;
+        let b = data2.read_columns_ndarray((0..data1.num_columns().unwrap()).collect())?;
+
+        debug_assert_eq!(a, b);
+    }
+
+    {
+        let a = data1.read_columns_dmatrix((0..data1.num_columns().unwrap()).collect())?;
+        let b = data2.read_columns_dmatrix((0..data1.num_columns().unwrap()).collect())?;
+
+        assert_abs_diff_eq!(&a, &b, epsilon = 1e-5);
+    }
+
+    data1.remove_backend_file()?;
+    data2.remove_backend_file()?;
+    Ok(())
 }
 
 #[test]
@@ -141,10 +164,10 @@ fn simulate() -> anyhow::Result<()> {
     assert_eq!(batch_membership.len(), n);
 
     let yy: Array2<f32> = data.read_columns_ndarray((0..n).collect())?;
-    dbg!(&yy);
+    // dbg!(&yy);
 
     let zz: Array2<f32> = data.read_rows_ndarray((0..m).collect())?;
-    dbg!(&zz);
+    // dbg!(&zz);
 
     data.remove_backend_file()?;
 
@@ -162,7 +185,7 @@ fn random_mtx_loading() -> anyhow::Result<()> {
 
     if let Ok(data) = SparseMtxData::from_ndarray(&a, None, Some(true)) {
         let a = a.select(Axis(1), &[7, 8, 9]);
-        dbg!(&a);
+        // dbg!(&a);
 
         // 2. save it to mtx file
         let mtx_file = create_temp_dir_file(".mtx.gz")?;
@@ -176,13 +199,13 @@ fn random_mtx_loading() -> anyhow::Result<()> {
 
         // 4. read the column 2
         let b = measure_time(|| data.read_columns_ndarray((7..10).collect()).unwrap());
-        dbg!(&b);
+        // dbg!(&b);
 
         // 6. open the backend file directly
         let backend_file = data.get_backend_file_name();
         let new_data = SparseMtxData::open(backend_file)?;
         let c = measure_time(|| new_data.read_columns_ndarray((7..10).collect()).unwrap());
-        dbg!(&c);
+        // dbg!(&c);
 
         // 7. remove the backend file
         data.remove_backend_file()?;
@@ -204,15 +227,15 @@ fn random_ndarray_loading() -> anyhow::Result<()> {
 
         let a = a.select(Axis(1), &[2]);
 
-        dbg!(&a);
+        // dbg!(&a);
 
         let b = data.read_columns_ndarray((2..3).collect()).unwrap();
 
-        dbg!(&b);
+        // dbg!(&b);
 
         let c = data.read_columns_ndarray(vec![2]).unwrap();
 
-        dbg!(&c);
+        // dbg!(&c);
 
         data.remove_backend_file()?;
 

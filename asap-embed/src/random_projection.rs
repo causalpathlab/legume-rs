@@ -1,14 +1,4 @@
-pub use asap_data::ndarray_util::*;
-pub use asap_data::sparse_io::*;
-use ndarray_rand::rand_distr::StandardNormal;
-use ndarray_rand::RandomExt;
-
-// use ndarray::parallel::prelude::*;
-// use ndarray::prelude::*;
-// use ndarray_linalg::transpose_data;
-// use ndarray_linalg::svd::SVD; -- could be less efficient
-// use ndarray_linalg::TruncatedOrder;
-// use ndarray_linalg::TruncatedSvd;
+use asap_data::sparse_io::*;
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -20,8 +10,8 @@ pub struct RandProjVec<'a> {
     data_vec: &'a Vec<Arc<Data>>,
     block_size: usize,
     num_batch: usize,
-    rand_basis_kd: Option<Array2<f32>>,
-    rand_proj_kn: Option<Array2<f32>>,
+    rand_basis_kd: Option<DMatrix<f32>>,
+    rand_proj_kn: Option<DMatrix<f32>>,
     batch_glob_index: HashMap<usize, Vec<usize>>,
     batch_membership: Vec<usize>,
 }
@@ -107,8 +97,8 @@ impl<'a> RandProjVec<'a> {
             });
 
             // the results of random projection
-            let mut rand_proj_kn: Array2<f32> = Array2::zeros((kk, ncol));
-            let arc_rand_proj_kn = Arc::new(Mutex::new(&mut rand_proj_kn));
+            let rand_proj_kn: DMatrix<f32> = DMatrix::zeros(kk, ncol);
+            let arc_rand_proj_kn = Arc::new(Mutex::new(rand_proj_kn));
 
             // batch to global membership and vice versa
             let mut batch_glob_index: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -139,15 +129,16 @@ impl<'a> RandProjVec<'a> {
                     .for_each(|(lb, ub)| {
                         let mut proj_km = arc_rand_proj_kn.lock().expect("failed to lock proj");
                         // This could be inefficient since we are populating a dense matrix
-                        let xx_dm = data_batch.read_columns_ndarray((lb..ub).collect()).unwrap();
-                        // normalized columns by the column-wise sum values
-                        let denom = xx_dm.sum_axis(Axis(0)).mapv(|x| 1.0 / x.max(1.0));
-                        let yy_dm = xx_dm.dot(&Array2::from_diag(&denom));
-                        let proj = rand_basis_kd.dot(&yy_dm);
+                        let xx_dm = data_batch
+                            .read_columns_dmatrix((lb..ub).collect())
+                            .expect("failed to read columns");
+
+                        let yy_dm = Self::normalize_columns(&xx_dm);
+
+                        let temp = rand_basis_kd * &yy_dm;
 
                         let (lb_glob, ub_glob) = (lb + offset, ub + offset);
-                        let target = proj_km.slice_mut(s![.., lb_glob..ub_glob]);
-                        proj.assign_to(target);
+                        proj_km.columns_mut(lb_glob, ub_glob).copy_from(&temp);
                     });
 
                 ////////////////////////////
@@ -168,19 +159,37 @@ impl<'a> RandProjVec<'a> {
                 offset += ncol_batch;
             }
 
-            self.rand_proj_kn = Some(rand_proj_kn);
-            self.batch_glob_index.extend(batch_glob_index);
-            self.batch_membership.extend(batch_membership);
+            //     self.rand_proj_kn = Some(rand_proj_kn);
+            //     self.batch_glob_index.extend(batch_glob_index);
+            //     self.batch_membership.extend(batch_membership);
             Ok(())
         } else {
             Err(anyhow::anyhow!("random basis matrix is not available"))
         }
     }
 
+    // A helper function to normalize column-wise
+    fn normalize_columns(xx_dm: &DMatrix<f32>) -> DMatrix<f32> {
+        let mut yy_dm = xx_dm.clone();
+        for mut xx_j in yy_dm.column_iter_mut() {
+            let denom = xx_j.sum().max(1.0);
+            xx_j /= denom;
+        }
+        yy_dm
+    }
+
     // A helper function to sample a random basis matrix
-    fn sample_basis_to_reduce_rows(nrow: usize, target_dim: usize) -> anyhow::Result<Array2<f32>> {
+    fn sample_basis_to_reduce_rows(nrow: usize, target_dim: usize) -> anyhow::Result<DMatrix<f32>> {
         let kk = target_dim.min(nrow);
-        Ok(scale_columns(Array2::random((kk, nrow), StandardNormal))?)
+        use rand::{thread_rng, Rng};
+        use rand_distr::StandardNormal;
+
+        let rvec: Vec<f32> = (0..(nrow * kk))
+            .into_par_iter()
+            .map_init(thread_rng, |rng, _| rng.sample(StandardNormal))
+            .collect();
+
+        Ok(DMatrix::from_vec(nrow, kk, rvec))
     }
 }
 
@@ -190,7 +199,6 @@ impl<'a> RandProjVec<'a> {
 //     target_dim: usize,
 //     block_size: Option<usize>,
 // ) -> anyhow::Result<()> {
-
 
 //     // if num_batch < 1 {
 //     //     anyhow::bail!("no data set in the vector");
