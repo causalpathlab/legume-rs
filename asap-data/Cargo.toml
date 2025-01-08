@@ -24,7 +24,7 @@ zarrs = { version = "0.17.1", features = ["gzip"] }
 serde_json = "1.0"
 serde = "1.0"
 
-ndarray = { version = "0.15", features = ["rayon"]}
+ndarray = { version = "0.16", features = ["rayon","approx"]}
 ndarray-rand = "0.14"
 rand_distr = "0.4.3"
 nalgebra = "0.33.2"
