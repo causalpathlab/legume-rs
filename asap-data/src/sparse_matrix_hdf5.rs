@@ -1,7 +1,7 @@
-use crate::common_io::*;
-use crate::mtx_io::*;
 use crate::sparse_io::*;
 use hdf5::filters::blosc_set_nthreads;
+use matrix_util::common_io::*;
+use matrix_util::mtx_io::*;
 use num_cpus;
 use std::collections::HashMap;
 use std::ops::Range;

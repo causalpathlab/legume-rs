@@ -1,26 +1,15 @@
 [package]
-name = "asap-data"
+name = "matrix-util"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "asap-data"
-path = "src/main.rs"
-
 [dependencies]
-matrix-util = { path = "../matrix-util" }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
 flate2 = { workspace = true }
 num_cpus = { workspace = true }
 rayon = { workspace = true }
-
-hdf5 = { package = "hdf5-metno", version = "0.9", features = ["blosc"] }
-hdf5-sys = { package = "hdf5-metno-sys", version = "0.10", features = ["static", "zlib", "threadsafe"] }
-libz-sys = { version = "1.1", features = ["libc"], default-features = false }
-zarrs = { version = "0.19", features = ["gzip"] }
-
 tempfile = { workspace = true }
 rand = { workspace = true }
 ndarray = { workspace = true }
@@ -28,12 +17,10 @@ ndarray-rand = { workspace = true }
 rand_distr = { workspace = true }
 nalgebra = { workspace = true }
 approx = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 candle-core = { version = "0.8", features = ["cuda","cudarc","cudnn"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 candle-core = { version = "0.8", features = ["metal","accelerate"] }
-
-[dev-dependencies]

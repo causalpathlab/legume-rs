@@ -1,9 +1,30 @@
 [workspace]
 
-members = ["asap-data", "asap-embed"] # ,"asap-network","asap-select", ,"asap-vae"
+members = ["asap-data", "asap-embed", "matrix-util"] # ,"asap-network","asap-select", ,"asap-vae"
 resolver = "2"
 
 [workspace.dependencies]
 
+anyhow = "1.0"
+flate2 = { version = "1.0.34" }
+clap = { version = "4.5.20", features = ["derive"] }
+num_cpus = "1.16.0"
+rayon = "1.10.0"
+
+tempfile = "3.2"
+rand = "0.8.5"
+ndarray = { version = "0.16", features = ["rayon","approx"]}
+ndarray-rand = "0.14"
+rand_distr = "0.4.3"
+nalgebra = "0.33.2"
+approx = "0.5.1"
+special = "0.11.3"
+serde_json = "1.0"
+serde = "1.0"
+
+instant-distance = "0.6"
+
 asap-data = { path = "asap-data"} 
 asap-embed = { path = "asap-embed" }
+matrix-util = { path = "matrix-util" }
+

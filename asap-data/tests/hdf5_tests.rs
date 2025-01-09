@@ -2,7 +2,8 @@ use asap_data::common_io::create_temp_dir_file;
 use asap_data::simulate::*;
 use asap_data::sparse_io::*;
 use asap_data::sparse_matrix_hdf5::SparseMtxData;
-use ndarray_rand::RandomExt;
+use matrix_util::ndarray_util;
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -19,7 +20,7 @@ where
 
 #[test]
 fn random_ndarray_subset() -> anyhow::Result<()> {
-    let whole_mat = Array::random((17, 999), rand::distributions::Uniform::new(0., 1.));
+    let whole_mat = ndarray_util::runif(17, 999)?;
 
     if let Ok(mut data) = SparseMtxData::from_ndarray(&whole_mat, None, None) {
         let nrow = data.num_rows().unwrap();
@@ -70,7 +71,7 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
 #[test]
 fn random_mtx_loading() -> anyhow::Result<()> {
     // 1. generate a random array2
-    let a = Array::random((9, 1111), rand::distributions::Uniform::new(0., 1.));
+    let a = ndarray_util::runif(9, 1111)?;
 
     if let Ok(data) = SparseMtxData::from_ndarray(&a, None, None) {
         let a = a.select(Axis(1), &[3]);
@@ -119,7 +120,7 @@ fn random_mtx_loading() -> anyhow::Result<()> {
 #[test]
 fn random_ndarray_loading() -> anyhow::Result<()> {
     // let mut rng = rand::thread_rng();
-    let a = Array::random((5, 7), rand::distributions::Uniform::new(0., 1.));
+    let a = ndarray_util::runif(5, 7)?;
 
     if let Ok(data) = SparseMtxData::from_ndarray(&a, None, None) {
         let a = a.select(Axis(1), &[2]);

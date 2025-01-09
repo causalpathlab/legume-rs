@@ -1,11 +1,11 @@
 pub mod matrix_param;
 pub mod random_projection;
 
-use asap_data::common_io as io;
+// use asap_data::common_io as io;
+// type SData = dyn SparseIo<IndexIter = Vec<usize>>;
+
 use asap_data::sparse_io::*;
 use clap::{Args, Parser, Subcommand};
-
-type SData = dyn SparseIo<IndexIter = Vec<usize>>;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
