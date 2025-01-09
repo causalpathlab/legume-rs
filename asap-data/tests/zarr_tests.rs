@@ -2,10 +2,9 @@ use asap_data::common_io::{create_temp_dir_file, read_lines};
 use asap_data::simulate::*;
 use asap_data::sparse_io::*;
 use asap_data::sparse_matrix_zarr::SparseMtxData;
-use ndarray_rand::RandomExt;
+use matrix_util::ndarray_util;
 
 use approx::assert_abs_diff_eq;
-// use approx::AbsDiffEq;
 
 use std::path::Path;
 use std::time::Instant;
@@ -34,7 +33,8 @@ fn tensor_to_ndarray(tensor: Tensor) -> Array2<f32> {
 
 #[test]
 fn ndarray_dmatrix() -> anyhow::Result<()> {
-    let raw_array = Array::random((133, 373), rand::distributions::Uniform::new(0., 1.));
+    let raw_array = ndarray_util::runif(133, 373)?;
+
     let raw_matrix = ndarray_to_dmatrix(&raw_array);
     let data1 = create_sparse_ndarray(&raw_array, None, None)?;
     let data2 = create_sparse_dmatrix(&raw_matrix, None, None)?;
@@ -60,9 +60,9 @@ fn ndarray_dmatrix() -> anyhow::Result<()> {
 
 #[test]
 fn random_ndarray_subset() -> anyhow::Result<()> {
-    let whole_mat = Array::random((333, 777), rand::distributions::Uniform::new(0., 1.));
+    let xx = ndarray_util::runif(333, 777)?;
 
-    if let Ok(mut data) = SparseMtxData::from_ndarray(&whole_mat, None, Some(true)) {
+    if let Ok(mut data) = SparseMtxData::from_ndarray(&xx, None, Some(true)) {
         let nrow = data.num_rows().unwrap();
         let ncol = data.num_columns().unwrap();
 
@@ -74,7 +74,7 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
 
         {
             let cols = [9, 111, 11, 1, 2, 7, 3];
-            let a = whole_mat.select(Axis(1), &cols);
+            let a = xx.select(Axis(1), &cols);
 
             let b = data.read_columns_tensor(Vec::from(&cols))?;
             debug_assert_eq!(a, tensor_to_ndarray(b));
@@ -85,7 +85,7 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
 
         {
             let rows = [9, 111, 11, 1, 2, 7, 3];
-            let a = whole_mat.select(Axis(0), &rows);
+            let a = xx.select(Axis(0), &rows);
 
             let b = data.read_rows_tensor(Vec::from(&rows))?;
             debug_assert_eq!(a, tensor_to_ndarray(b));
@@ -96,11 +96,11 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
 
         // arbitrary subset and rearrange
         {
-            let a = whole_mat.select(Axis(1), &[9, 500, 10, 11, 1, 2, 3]);
+            let a = xx.select(Axis(1), &[9, 500, 10, 11, 1, 2, 3]);
             data.subset_columns_rows(Some(&vec![9, 500, 10, 11, 1, 2, 3]), None)?;
             let b = data.read_columns_ndarray((0..data.num_columns().unwrap()).collect())?;
             debug_assert_eq!(a, b);
-            let a = whole_mat.select(Axis(1), &[9, 500, 10, 11, 1, 2, 3]);
+            let a = xx.select(Axis(1), &[9, 500, 10, 11, 1, 2, 3]);
             let a = a.select(Axis(0), &[1, 7, 16]);
             let a: Array2<f32> = a.select(Axis(0), &[2, 1, 0]);
             let ncol = a.shape()[1];
@@ -163,12 +163,8 @@ fn simulate() -> anyhow::Result<()> {
 
     assert_eq!(batch_membership.len(), n);
 
-    let yy: Array2<f32> = data.read_columns_ndarray((0..n).collect())?;
-    // dbg!(&yy);
-
-    let zz: Array2<f32> = data.read_rows_ndarray((0..m).collect())?;
-    // dbg!(&zz);
-
+    let _yy: Array2<f32> = data.read_columns_ndarray((0..n).collect())?;
+    let _zz: Array2<f32> = data.read_rows_ndarray((0..m).collect())?;
     data.remove_backend_file()?;
 
     if let Some(temp_dir) = Path::new(&mtx_file).parent() {
@@ -181,7 +177,7 @@ fn simulate() -> anyhow::Result<()> {
 #[test]
 fn random_mtx_loading() -> anyhow::Result<()> {
     // 1. generate a random array2
-    let a = Array::random((9, 1111), rand::distributions::Uniform::new(0., 1.));
+    let a = ndarray_util::runif(9, 1111)?;
 
     if let Ok(data) = SparseMtxData::from_ndarray(&a, None, Some(true)) {
         let a = a.select(Axis(1), &[7, 8, 9]);
@@ -220,7 +216,7 @@ fn random_mtx_loading() -> anyhow::Result<()> {
 
 #[test]
 fn random_ndarray_loading() -> anyhow::Result<()> {
-    let a = Array::random((15, 7000), rand::distributions::Uniform::new(0., 1.));
+    let a = ndarray_util::runif(15, 7000)?;
 
     if let Ok(data) = SparseMtxData::from_ndarray(&a, None, None) {
         data.print_hierarchy()?;

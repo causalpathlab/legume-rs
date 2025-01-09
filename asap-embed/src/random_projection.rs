@@ -1,4 +1,5 @@
 use asap_data::sparse_io::*;
+use matrix_util::dmatrix_util::*;
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -50,7 +51,7 @@ impl<'a> RandProjVec<'a> {
     /// # Returns
     /// * a `kk x nrow` matrix
     ///
-    pub fn step1_sample_basis_cbind(&mut self, dim: usize) -> anyhow::Result<()> {
+    pub fn step0_sample_basis_cbind(&mut self, dim: usize) -> anyhow::Result<()> {
         let first_data = &self.data_vec[0];
 
         let nrow = first_data.num_rows().ok_or_else(|| {
@@ -60,7 +61,7 @@ impl<'a> RandProjVec<'a> {
             )
         })?;
 
-        let rand_basis_kd = Self::sample_basis_to_reduce_rows(nrow, dim)?;
+        let rand_basis_kd = rnorm(nrow, dim.min(nrow));
 
         for (ii, data) in self.data_vec.iter().enumerate().skip(1) {
             let data_nrow = data.num_rows().ok_or_else(|| {
@@ -88,7 +89,7 @@ impl<'a> RandProjVec<'a> {
     /// # Arguments
     /// * `rand_basis_kd`: random basis matrix from step 1
     ///
-    pub fn step2_proj_cbind(&mut self) -> anyhow::Result<()> {
+    pub fn step1_proj_cbind(&mut self) -> anyhow::Result<()> {
         if let Some(rand_basis_kd) = &self.rand_basis_kd {
             let num_batch = self.num_batch;
             let kk = rand_basis_kd.nrows();
@@ -133,7 +134,7 @@ impl<'a> RandProjVec<'a> {
                             .read_columns_dmatrix((lb..ub).collect())
                             .expect("failed to read columns");
 
-                        let yy_dm = Self::normalize_columns(&xx_dm);
+                        let yy_dm = normalize_columns(&xx_dm);
                         let proj_block = rand_basis_kd * &yy_dm;
 
                         let (lb_glob, ub_glob) = (lb + offset, ub + offset);
@@ -173,28 +174,19 @@ impl<'a> RandProjVec<'a> {
         }
     }
 
-    // A helper function to normalize column-wise
-    fn normalize_columns(xx_dm: &DMatrix<f32>) -> DMatrix<f32> {
-        let mut yy_dm = xx_dm.clone();
-        for mut xx_j in yy_dm.column_iter_mut() {
-            let denom = xx_j.sum().max(1.0);
-            xx_j /= denom;
+    pub fn step2_random_sorting_cbind(&mut self) -> anyhow::Result<()> {
+        if let Some(proj_kn) = &self.rand_proj_kn {
+        } else {
+            return Err(anyhow::anyhow!("projection result not available"));
         }
-        yy_dm
+
+        Ok(())
     }
 
-    // A helper function to sample a random basis matrix
-    fn sample_basis_to_reduce_rows(nrow: usize, target_dim: usize) -> anyhow::Result<DMatrix<f32>> {
-        let kk = target_dim.min(nrow);
-        use rand::{thread_rng, Rng};
-        use rand_distr::StandardNormal;
+    pub fn step3_collapse_columns_cbind(&mut self) -> anyhow::Result<()> {
+        // match across different
 
-        let rvec: Vec<f32> = (0..(nrow * kk))
-            .into_par_iter()
-            .map_init(thread_rng, |rng, _| rng.sample(StandardNormal))
-            .collect();
-
-        Ok(DMatrix::from_vec(kk, nrow, rvec))
+        Ok(())
     }
 }
 

@@ -1,13 +1,9 @@
-use crate::common_io::write_lines;
-use crate::mtx_io::write_mtx_triplets;
-use crate::tensor_io::*;
 use candle_core::{Device, Tensor};
+use matrix_util::common_io::write_lines;
+use matrix_util::mtx_io::write_mtx_triplets;
+use matrix_util::tensor_io;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Gamma, Poisson, Uniform};
-// use crate::ndarray_io::*;
-// use crate::ndarray_util::scale_columns;
-// use ndarray::prelude::*;
-// use ndarray_rand::RandomExt;
 
 pub struct SimArgs {
     pub rows: usize,
@@ -86,9 +82,9 @@ pub fn generate_factored_gamma_data_mtx(
         &Device::Cpu,
     )?;
 
-    write_tsv(&ln_batch_file, &ln_delta)?;
-    write_tsv(&dict_file, &beta_dk)?;
-    write_tsv(&prop_file, &theta_kn)?;
+    tensor_io::write_tsv(&ln_batch_file, &ln_delta)?;
+    tensor_io::write_tsv(&dict_file, &beta_dk)?;
+    tensor_io::write_tsv(&prop_file, &theta_kn)?;
 
     // 4. putting them all together
     let mut triplets = vec![];

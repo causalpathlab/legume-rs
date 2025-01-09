@@ -1,4 +1,4 @@
-use crate::common_io::write_lines;
+use matrix_util::common_io::write_lines;
 use ndarray::{ArrayBase, Axis, Data, Dimension, NdIndex, OwnedRepr, RemoveAxis};
 
 /// A container to keep track of sufficient statistics of an arbitrary

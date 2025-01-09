@@ -1,20 +1,16 @@
-use clap::{Args, Parser, Subcommand};
-use std::sync::{Arc, Mutex};
-
-mod common_io;
-mod mtx_io;
-mod ndarray_io;
-mod ndarray_util;
 mod simulate;
 mod sparse_io;
 mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
 mod statistics;
-mod tensor_io;
 
 use crate::sparse_io::*;
-type SData = dyn SparseIo<IndexIter = Vec<usize>>;
 use crate::statistics::RunningStatistics;
+use clap::{Args, Parser, Subcommand};
+use matrix_util::*;
+use std::sync::{Arc, Mutex};
+
+type SData = dyn SparseIo<IndexIter = Vec<usize>>;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();

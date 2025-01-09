@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use asap_data::common_io::*;
 use asap_embed::random_projection::*;
+use asap_embed::rsvd::*;
 use std::sync::Arc;
 
 fn measure_time<T, F>(f: F) -> T
@@ -37,16 +38,16 @@ fn random_collapse() -> anyhow::Result<()> {
 
     let xx = DMatrix::from_vec(dd, nn, rvec);
 
-    let data1: Arc<Data> = Arc::from(create_sparse_dmatrix(&xx, None, None)?);
+    // let data1: Arc<Data> = Arc::from(create_sparse_dmatrix(&xx, None, None)?);
 
-    let data_vec = vec![data1.clone()];
+    // let data_vec = vec![data1.clone()];
 
-    let mut rp_obj = RandProjVec::new(&data_vec, None)?;
+    // let mut rp_obj = RandProjVec::new(&data_vec, None)?;
 
-    rp_obj.step1_sample_basis_cbind(10)?;
-    measure_time(|| rp_obj.step2_proj_cbind())?;
+    // rp_obj.step0_sample_basis_cbind(10)?;
+    // measure_time(|| rp_obj.step1_proj_cbind())?;
 
-    data1.remove_backend_file()?;
+    // data1.remove_backend_file()?;
 
     Ok(())
 }

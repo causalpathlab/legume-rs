@@ -9,30 +9,23 @@ path = "src/main.rs"
 
 [dependencies]
 asap-data = { path = "../asap-data" }
+matrix-util = { path = "../matrix-util" }
 
-anyhow = "1.0"
-clap = { version = "4.5.20", features = ["derive"] }
-flate2 = "1.0.34"
+anyhow = { workspace = true }
+clap = { workspace = true }
+flate2 = { workspace = true }
+num_cpus = { workspace = true }
+rayon = { workspace = true }
+tempfile = { workspace = true }
+rand = { workspace = true }
+ndarray = { workspace = true }
+ndarray-rand = { workspace = true }
+rand_distr = { workspace = true }
+nalgebra = { workspace = true }
+approx = { workspace = true }
 
-num_cpus = "1.16.0"
-rayon = "1.10.0"
-hdf5 = { package = "hdf5-metno", version = "0.9", features = ["blosc"] }
-hdf5-sys = { package = "hdf5-metno-sys", version = "0.10", features = ["static", "zlib", "threadsafe"] }
-libz-sys = { version = "1.1", features = ["libc"], default-features = false }
-tempfile = "3.2"
-zarrs = { version = "0.17.1", features = ["gzip"] }
-serde_json = "1.0"
-serde = "1.0.214"
-
-# ndarray = { version = "0.15.6", features = ["rayon"]}
-# ndarray-rand = "0.14"
-# ndarray-parallel = "0.9.1"
-instant-distance = "0.6.1"
-num-traits = "0.2.19"
-rand = "0.8.5"
-special = "0.11.3"
-nalgebra = "0.33.2"
-rand_distr = "0.4.3"
+instant-distance = { workspace = true }
+special = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 candle-core = { version = "0.8", features = ["cuda","cudarc","cudnn"] }
