@@ -12,15 +12,21 @@ num_cpus = { workspace = true }
 rayon = { workspace = true }
 tempfile = { workspace = true }
 rand = { workspace = true }
-ndarray = { workspace = true }
-ndarray-rand = { workspace = true }
 rand_distr = { workspace = true }
 nalgebra = { workspace = true }
 approx = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-candle-core = { version = "0.8", features = ["cuda","cudarc","cudnn"] }
+ndarray = { workspace = true }
+ndarray-rand = { workspace = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
+ndarray-linalg = { version = "0.16", default-features = false }
+blas-src = { version = "0.8", features = ["accelerate"] }
 candle-core = { version = "0.8", features = ["metal","accelerate"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ndarray-linalg = { version = "0.16", features = ["openblas"] }
+openblas-src = { version = "0.10" }
+candle-core = { version = "0.8", features = ["cuda","cudarc","cudnn"] }

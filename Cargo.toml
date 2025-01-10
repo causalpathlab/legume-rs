@@ -13,7 +13,8 @@ rayon = "1.10.0"
 
 tempfile = "3.2"
 rand = "0.8.5"
-ndarray = { version = "0.16", features = ["rayon","approx"]}
+ndarray = { version = "0.15", features = ["rayon","serde","approx","blas"]}
+
 ndarray-rand = "0.14"
 rand_distr = "0.4.3"
 nalgebra = "0.33.2"
@@ -24,7 +25,6 @@ serde = "1.0"
 
 instant-distance = "0.6"
 
-asap-data = { path = "asap-data"} 
+asap-data = { path = "asap-data"}
 asap-embed = { path = "asap-embed" }
 matrix-util = { path = "matrix-util" }
-

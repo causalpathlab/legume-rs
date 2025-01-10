@@ -1,8 +1,11 @@
-use crate::dmatrix_util::*;
-use nalgebra::{DMatrix, DVector};
+extern crate ndarray;
+extern crate ndarray_linalg;
+use crate::ndarray_util::runif;
+use ndarray::{s, Array1, Array2};
+use ndarray_linalg::{QR, SVD};
 
-type Mat = DMatrix<f32>;
-type Vec = DVector<f32>;
+type Mat = Array2<f32>;
+type Vec = Array1<f32>;
 
 pub trait RSVD {
     fn rsvd(&self, rank: usize) -> anyhow::Result<(Mat, Vec, Mat)>;
@@ -41,10 +44,10 @@ impl RandomizedSVD {
         Self {
             max_rank,
             iter,
-            u_vectors: Mat::zeros(0, 0),
+            u_vectors: Mat::zeros((0, 0)),
             singular_values: Vec::zeros(0),
-            v_vectors: Mat::zeros(0, 0),
-            qq: Mat::zeros(0, 0),
+            v_vectors: Mat::zeros((0, 0)),
+            qq: Mat::zeros((0, 0)),
             verbose: true,
         }
     }
@@ -75,28 +78,26 @@ impl RandomizedSVD {
 
         debug_assert!(rank > 0, "Must be at least rank = 1");
 
-        self.qq = Mat::zeros(nr, rank + oversample);
-        self.rand_subspace_iteration(xx, rank + oversample);
+        self.qq = Mat::zeros((nr, rank + oversample));
+        self.rand_subspace_iteration(xx, rank + oversample)?;
 
         let rank = rank.min(self.qq.ncols());
-        self.qq = self.qq.columns(0, rank).into_owned();
+        self.qq = self.qq.slice(s![.., 0..rank]).to_owned();
 
-        let bb = self.qq.transpose() * xx;
+        let bb = self.qq.t().dot(xx);
 
         if self.verbose {
             eprintln!("Final svd on [{} x {}]", bb.nrows(), bb.ncols());
         }
 
-        let svd = bb.svd(true, true);
-
-        if let (Some(svd_u), Some(svd_vt)) = (svd.u, svd.v_t) {
+        if let (Some(svd_u), singular_values, Some(svd_vt)) = bb.svd(true, true)? {
             if self.verbose {
                 eprintln!("Construct U, D, V");
             }
 
-            self.u_vectors = self.qq.clone() * svd_u.columns(0, rank).into_owned();
-            self.v_vectors = svd_vt.transpose().columns(0, rank).into_owned();
-            self.singular_values = svd.singular_values.rows(0, rank).into_owned();
+            self.u_vectors = self.qq.dot(&svd_u.slice(s![.., 0..rank]).to_owned());
+            self.v_vectors = svd_vt.t().slice(s![.., 0..rank]).to_owned();
+            self.singular_values = singular_values.slice(s![0..rank]).to_owned();
         } else {
             anyhow::bail!("SVD failed");
         }
@@ -112,44 +113,43 @@ impl RandomizedSVD {
     }
 
     // Find an orthonormal matrix qq whose range approximates the range of xx
-    fn rand_subspace_iteration(&mut self, xx: &Mat, rank_and_oversample: usize) {
+    fn rand_subspace_iteration(
+        &mut self,
+        xx: &Mat,
+        rank_and_oversample: usize,
+    ) -> anyhow::Result<()> {
         let nr = xx.nrows();
         let nc = xx.ncols();
 
-        let mut ll = Mat::zeros(nr, rank_and_oversample);
+        let mut ll = Mat::zeros((nr, rank_and_oversample));
 
-        let mut qq = runif(nc, rank_and_oversample);
+        let mut qq = runif(nc, rank_and_oversample)?;
 
         for i in 0..self.iter {
             if self.verbose {
                 eprintln!("[Start] LU iteration {:>10}", i + 1);
             }
 
-            let lu1 = xx * &qq;
-            ll.fill(0.);
-            ll.fill_with_identity();
-            ll.view_mut((0, 0), (nr, rank_and_oversample))
-                .lower_triangle()
-                .copy_from(&lu1);
+            let lu1 = xx.dot(&qq);
+            ll.fill(0.0);
+            ll.slice_mut(s![..nr, ..rank_and_oversample]).assign(&lu1);
 
-            let lu2 = xx.transpose() * &ll;
-            qq.fill(0.);
-            qq.fill_with_identity();
-            qq.view_mut((0, 0), (nc, rank_and_oversample))
-                .lower_triangle()
-                .copy_from(&lu2);
+            let lu2 = xx.t().dot(&ll);
+            qq.fill(0.0);
+            qq.slice_mut(s![..nc, ..rank_and_oversample]).assign(&lu2);
 
             if self.verbose {
                 eprintln!("[Done] LU iteration {:>10}", i + 1);
             }
         }
 
-        let qr = (xx * &qq).qr();
-        let kk = rank_and_oversample.min(qr.q().ncols());
-        self.qq = qr.q().columns(0, kk).into_owned();
+        let (qr_q, _) = xx.dot(&qq).qr().unwrap();
+        let kk = rank_and_oversample.min(qr_q.ncols());
+        self.qq = qr_q.slice(s![.., 0..kk]).to_owned();
 
         if self.verbose {
             eprintln!("Found Q [{} x {}]", self.qq.nrows(), self.qq.ncols());
         }
+        Ok(())
     }
 }
