@@ -1,13 +1,12 @@
-use asap_data::common_io::{create_temp_dir_file, read_lines};
+use matrix_util::common_io::{create_temp_dir_file, read_lines};
 
 use asap_data::simulate::*;
 use asap_data::sparse_io::*;
 use std::path::Path;
 use std::time::Instant;
 
-use asap_data::common_io::*;
 use asap_embed::random_projection::*;
-use asap_embed::rsvd::*;
+use matrix_util::dmatrix_rsvd::*;
 use std::sync::Arc;
 
 fn measure_time<T, F>(f: F) -> T
