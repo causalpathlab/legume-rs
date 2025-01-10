@@ -26,10 +26,13 @@ rand = { workspace = true }
 ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
 rand_distr = { workspace = true }
-nalgebra = { workspace = true }
 approx = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+nalgebra = { workspace = true }
+nalgebra-sparse = { workspace = true }
+
 
 [target.'cfg(target_os = "linux")'.dependencies]
 candle-core = { version = "0.8", features = ["cuda","cudarc","cudnn"] }

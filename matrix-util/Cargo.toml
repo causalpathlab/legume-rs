@@ -11,15 +11,21 @@ flate2 = { workspace = true }
 num_cpus = { workspace = true }
 rayon = { workspace = true }
 tempfile = { workspace = true }
+
 rand = { workspace = true }
 rand_distr = { workspace = true }
+
 nalgebra = { workspace = true }
+nalgebra-sparse = { workspace = true }
+num-traits = { workspace = true }
+
 approx = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 
 ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
+
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ndarray-linalg = { version = "0.16", default-features = false }

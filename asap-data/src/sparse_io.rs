@@ -1,9 +1,11 @@
 use crate::sparse_matrix_hdf5;
 use crate::sparse_matrix_zarr;
-pub use clap::ValueEnum;
 
-pub use candle_core::{Device, Tensor};
+pub use candle_core::Tensor;
+pub use clap::ValueEnum;
+pub use matrix_util::traits::*;
 pub use nalgebra::DMatrix;
+pub use nalgebra_sparse::csr::CsrMatrix;
 pub use ndarray::prelude::*;
 pub use rayon::prelude::*;
 pub use std::collections::HashMap;
@@ -104,13 +106,85 @@ pub fn create_sparse_dmatrix(
 pub trait SparseIo: Sync + Send {
     type IndexIter: IntoIterator<Item = usize>;
 
+    ////////////////////////////
+    // default implementation //
+    ////////////////////////////
+
+    /// Read columns within the range and return dense `ndarray::Array2`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns_ndarray(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
+        let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
+        Array2::<f32>::from_nonzero_triplets(nrow, ncol as usize, triplets)
+    }
+
+    /// Read columns within the range and return dense `candle_core::Tensor`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns_tensor(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Tensor> {
+        let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
+        Tensor::from_nonzero_triplets(nrow, ncol, triplets)
+    }
+
+    /// Read columns within the range and return dense `nalgebrea::DMatrix`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns_dmatrix(self: &Self, columns: Self::IndexIter) -> anyhow::Result<DMatrix<f32>> {
+        let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
+        DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+    }
+
+    /// Read columns within the range and return sparse `CsrMatrix`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns_csr(&self, columns: Self::IndexIter) -> anyhow::Result<CsrMatrix<f32>> {
+        let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
+        CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+    }
+
+    /// Read rows within the range and return dense `ndarray::Array2`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows_ndarray(&self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
+        let (nrow, ncol, triplets) = self.read_triplets_by_rows(rows)?;
+        Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+    }
+
+    /// Read rows within the range and return dense `candle_core::Tensor`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows_tensor(self: &Self, rows: Self::IndexIter) -> anyhow::Result<Tensor> {
+        let (nrow, ncol, triplets) = self.read_triplets_by_rows(rows)?;
+        Tensor::from_nonzero_triplets(nrow, ncol, triplets)
+    }
+
+    /// Read rows within the range and return dense `nalgebra::DMatrix`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows_dmatrix(&self, rows: Self::IndexIter) -> anyhow::Result<DMatrix<f32>> {
+        let (nrow, ncol, triplets) = self.read_triplets_by_rows(rows)?;
+        DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+    }
+
+    /// Read rows within the range and return sparse `CsrMatrix`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows_csr(&self, rows: Self::IndexIter) -> anyhow::Result<CsrMatrix<f32>> {
+        let (nrow, ncol, triplets) = self.read_triplets_by_rows(rows)?;
+        CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+    }
+
+    //////////////////////
+    // backend-specific //
+    //////////////////////
+
     /// Read rows within the range and return a vector of triplets (row, column, value)
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
     fn read_triplets_by_rows(
         &self,
         rows: Self::IndexIter,
-    ) -> anyhow::Result<Vec<(usize, usize, f32)>>;
+    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)>;
 
     /// Read columns within the range and return a vector of triplets (row, col, value)
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
@@ -118,37 +192,7 @@ pub trait SparseIo: Sync + Send {
     fn read_triplets_by_columns(
         &self,
         columns: Self::IndexIter,
-    ) -> anyhow::Result<Vec<(usize, usize, f32)>>;
-
-    /// Read columns within the range and return dense `ndarray::Array2`
-    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_columns_ndarray(&self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>>;
-
-    /// Read columns within the range and return dense `candle_core::Tensor`
-    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_columns_tensor(&self, columns: Self::IndexIter) -> anyhow::Result<Tensor>;
-
-    /// Read columns within the range and return dense `nalgebra::DMatrix`
-    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_columns_dmatrix(&self, columns: Self::IndexIter) -> anyhow::Result<DMatrix<f32>>;
-
-    /// Read rows within the range and return dense `ndarray::Array2`
-    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_rows_ndarray(&self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>>;
-
-    /// Read rows within the range and return dense `candle_core::Tensor`
-    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_rows_tensor(&self, columns: Self::IndexIter) -> anyhow::Result<Tensor>;
-
-    /// Read rows within the range and return dense `nalgebra::DMatrix`
-    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_rows_dmatrix(&self, rows: Self::IndexIter) -> anyhow::Result<DMatrix<f32>>;
+    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)>;
 
     /// Export the data to a mtx file. This will take time.
     /// * `mtx_file`: mtx file to be written
@@ -228,6 +272,15 @@ pub trait SparseIo: Sync + Send {
 //////////////////////
 // helper functions //
 //////////////////////
+
+// fn iter_len<I>(iter: &I) -> usize
+// where
+//     I: IntoIterator,
+// {
+//     for j in &iter {
+//     }
+//     // iter.clone().into_iter().count()
+// }
 
 #[allow(dead_code)]
 pub fn build_name2index_map(_names: &Vec<Box<str>>) -> HashMap<Box<str>, usize> {

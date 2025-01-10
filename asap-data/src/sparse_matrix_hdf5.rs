@@ -553,6 +553,8 @@ impl SparseMtxData {
 }
 
 impl SparseIo for SparseMtxData {
+    type IndexIter = Vec<usize>;
+
     /// Remove backend file to free up disk space
     fn remove_backend_file(self: &Self) -> anyhow::Result<()> {
         let backend = std::path::Path::new(&self.file_name);
@@ -836,15 +838,13 @@ impl SparseIo for SparseMtxData {
         Ok(ret.iter().map(|x| x.to_string().into_boxed_str()).collect())
     }
 
-    type IndexIter = Vec<usize>;
-
     /// Read columns within the range and return a vector of triplets (row, col, value)
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
     fn read_triplets_by_columns(
         &self,
         columns: Self::IndexIter,
-    ) -> anyhow::Result<Vec<(usize, usize, f32)>> {
+    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)> {
         // need to open backend again?
         // let backend = hdf5::File::open(&self.file_name)?;
         let by_column = self.backend.group("/by_column")?;
@@ -860,7 +860,7 @@ impl SparseIo for SparseMtxData {
 
         if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
             let mut ret = Vec::new();
-
+            let ncol_out = columns_vec.len();
             for (jj, &j_data) in columns_vec.iter().enumerate() {
                 if j_data < ncol {
                     debug_assert!((j_data + 1) < indptr.len());
@@ -882,72 +882,7 @@ impl SparseIo for SparseMtxData {
                     }
                 }
             }
-            Ok(ret)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
-
-    /// Read columns within the range and return dense `ndarray::Array2`
-    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_columns_ndarray(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
-        let ncol_out = &columns.len();
-        let triplets = self.read_triplets_by_columns(columns)?;
-
-        if let Some(nrow) = self.num_rows() {
-            let nrow = nrow as usize;
-            let mut ret: Array2<f32> = Array2::zeros((nrow, *ncol_out));
-
-            for (ii, jj, x_ij) in triplets {
-                ret[(ii, jj)] = x_ij;
-            }
-
-            Ok(ret)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
-
-    /// Read columns within the range and return dense `candle_core::Tensor`
-    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_columns_tensor(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Tensor> {
-        let ncol_out = columns.len();
-        let triplets = self.read_triplets_by_columns(columns)?;
-
-        if let Some(nrow) = self.num_rows() {
-            let nrow = nrow as usize;
-            let mut data = vec![0_f32; nrow * ncol_out];
-            for (ii, jj, x_ij) in triplets {
-                data[ii * ncol_out + jj] = x_ij;
-            }
-            Ok(Tensor::from_vec(data, (nrow, ncol_out), &Device::Cpu)?)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
-
-    /// Read columns within the range and return dense `nalgebrea::DMatrix`
-    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_columns_dmatrix(self: &Self, columns: Self::IndexIter) -> anyhow::Result<DMatrix<f32>> {
-        let ncol_out = columns.len();
-        let triplets = self.read_triplets_by_columns(columns)?;
-
-        if let Some(nrow) = self.num_rows() {
-            let nrow = nrow as usize;
-            let mut data = vec![0_f32; nrow * ncol_out];
-            for (ii, jj, x_ij) in triplets {
-                data[ii * ncol_out + jj] = x_ij;
-            }
-            Ok(DMatrix::from_row_slice(nrow, ncol_out, &data))
+            Ok((nrow, ncol_out, ret))
         } else {
             return Err(anyhow::anyhow!(
                 "Unable to figure out the size of the backend data"
@@ -961,7 +896,7 @@ impl SparseIo for SparseMtxData {
     fn read_triplets_by_rows(
         &self,
         rows: Self::IndexIter,
-    ) -> anyhow::Result<Vec<(usize, usize, f32)>> {
+    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)> {
         // need to open backend again?
         // let backend = hdf5::File::open(&self.file_name)?;
         let by_row = self.backend.group("/by_row")?;
@@ -974,7 +909,7 @@ impl SparseIo for SparseMtxData {
 
         if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
             let mut ret = Vec::new();
-
+            let nrow_out = rows_vec.len();
             for (ii, &i_data) in rows_vec.iter().enumerate() {
                 if i_data < nrow {
                     debug_assert!((i_data + 1) < indptr.len());
@@ -995,72 +930,7 @@ impl SparseIo for SparseMtxData {
                     }
                 }
             }
-            Ok(ret)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
-
-    /// Read rows within the range and return dense `ndarray::Array2`
-    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_rows_ndarray(self: &Self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
-        let nrow_out = rows.len();
-        let triplets = self.read_triplets_by_rows(rows)?;
-
-        if let Some(ncol) = self.num_columns() {
-            let ncol = ncol as usize;
-            let mut ret: Array2<f32> = Array2::zeros((nrow_out, ncol));
-
-            for (ii, jj, x_ij) in triplets {
-                ret[(ii, jj)] = x_ij;
-            }
-
-            Ok(ret)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
-
-    /// Read rows within the range and return dense `candle_core::Tensor`
-    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_rows_tensor(self: &Self, rows: Self::IndexIter) -> anyhow::Result<Tensor> {
-        let nrow_out = rows.len();
-        let triplets = self.read_triplets_by_rows(rows)?;
-
-        if let Some(ncol) = self.num_columns() {
-            let ncol = ncol as usize;
-            let mut data = vec![0_f32; ncol * nrow_out];
-            for (ii, jj, x_ij) in triplets {
-                data[ii * ncol + jj] = x_ij;
-            }
-            Ok(Tensor::from_vec(data, (nrow_out, ncol), &Device::Cpu)?)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
-        }
-    }
-
-    /// Read rows within the range and return dense `nalgebrea::DMatrix`
-    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
-    ///
-    fn read_rows_dmatrix(self: &Self, rows: Self::IndexIter) -> anyhow::Result<DMatrix<f32>> {
-        let nrow_out = rows.len();
-        let triplets = self.read_triplets_by_rows(rows)?;
-
-        if let Some(ncol) = self.num_columns() {
-            let ncol = ncol as usize;
-            let mut data = vec![0_f32; ncol * nrow_out];
-            for (ii, jj, x_ij) in triplets {
-                data[ii * ncol + jj] = x_ij;
-            }
-            Ok(DMatrix::from_row_slice(nrow_out, ncol, &data))
+            Ok((nrow_out, ncol, ret))
         } else {
             return Err(anyhow::anyhow!(
                 "Unable to figure out the size of the backend data"
@@ -1101,13 +971,11 @@ impl SparseIo for SparseMtxData {
                     (lb, ub)
                 })
                 .for_each(|(lb, ub)| {
-                    let _triplets_b = self
-                        .read_triplets_by_columns((lb..ub).collect())
-                        .unwrap()
-                        .into_iter()
-                        .filter_map(|(i, j, x)| {
-                            old2new.get(&i).map(|&i_new| (i_new as u64, j as u64, x))
-                        });
+                    let (_, _, _triplets_b) =
+                        self.read_triplets_by_columns((lb..ub).collect()).unwrap();
+                    let _triplets_b = _triplets_b.into_iter().filter_map(|(i, j, x)| {
+                        old2new.get(&i).map(|&i_new| (i_new as u64, j as u64, x))
+                    });
                     let mut triplets = arc_triplets.lock().unwrap();
                     triplets.extend(_triplets_b);
                 });
