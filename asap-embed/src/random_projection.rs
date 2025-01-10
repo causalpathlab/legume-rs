@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 pub type Data = dyn SparseIo<IndexIter = Vec<usize>>;
 
-const DEFAULT_BLOCK_SIZE: usize = 500;
+const DEFAULT_BLOCK_SIZE: usize = 10;
 
 pub struct RandProjVec<'a> {
     data_vec: &'a Vec<Arc<Data>>,
@@ -61,7 +61,7 @@ impl<'a> RandProjVec<'a> {
             )
         })?;
 
-        let rand_basis_kd = rnorm(nrow, dim.min(nrow));
+        let rand_basis_kd = rnorm(dim.min(nrow), nrow);
 
         for (ii, data) in self.data_vec.iter().enumerate().skip(1) {
             let data_nrow = data.num_rows().ok_or_else(|| {
@@ -121,40 +121,44 @@ impl<'a> RandProjVec<'a> {
                 // populate projection results //
                 /////////////////////////////////
 
-                (0..nblock)
-                    .into_par_iter()
+                let jobs = (0..nblock)
                     .map(|block| {
                         let lb: usize = block * self.block_size;
                         let ub: usize = ((block + 1) * self.block_size).min(ncol_batch);
                         (lb, ub)
                     })
-                    .for_each(|(lb, ub)| {
-                        // This could be inefficient since we are populating a dense matrix
-                        let xx_dm = data_batch
-                            .read_columns_dmatrix((lb..ub).collect())
-                            .expect("failed to read columns");
+                    .collect::<Vec<_>>();
 
-                        let yy_dm = normalize_columns(&xx_dm);
-                        let proj_block = rand_basis_kd * &yy_dm;
+                jobs.par_iter().for_each(|&job| {
+                    let (lb, ub) = job;
 
-                        let (lb_glob, ub_glob) = (lb + offset, ub + offset);
+                    // This could be inefficient since we are populating a dense matrix
+                    let mut yy_dm = data_batch
+                        .read_columns_dmatrix((lb..ub).collect())
+                        .expect("failed to read columns");
 
-                        {
-                            let mut proj_kn = arc_rand_proj_kn.lock().expect("failed to lock proj");
-                            proj_kn
-                                .columns_range_mut(lb_glob..ub_glob)
-                                .copy_from(&proj_block);
-                        }
-                    });
+                    normalize_columns_inplace(&mut yy_dm);
+
+                    // let yy_dm = normalize_columns(&xx_dm);
+                    let proj_block = rand_basis_kd * &yy_dm;
+
+                    let (lb_glob, ub_glob) = (lb + offset, ub + offset);
+
+                    {
+                        let mut proj_kn = arc_rand_proj_kn.lock().expect("failed to lock proj");
+                        proj_kn
+                            .columns_range_mut(lb_glob..ub_glob)
+                            .copy_from(&proj_block);
+                    }
+                });
 
                 ////////////////////////////
                 // sorted out the indexes //
                 ////////////////////////////
-
-                (0..nblock).into_iter().for_each(|block| {
-                    let lb: usize = block * self.block_size;
-                    let ub: usize = ((block + 1) * self.block_size).min(ncol_batch);
+                jobs.iter().for_each(|&job| {
+                    let (lb, ub) = job;
                     let (lb_glob, ub_glob) = (lb + offset, ub + offset);
+
                     let globs = batch_glob_index.get_mut(&batch).expect("batch glob index");
                     for j in lb_glob..ub_glob {
                         batch_membership[j] = batch;

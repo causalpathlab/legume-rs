@@ -1,7 +1,7 @@
-use asap_data::common_io::create_temp_dir_file;
 use asap_data::simulate::*;
 use asap_data::sparse_io::*;
 use asap_data::sparse_matrix_hdf5::SparseMtxData;
+use matrix_util::common_io::create_temp_dir_file;
 use matrix_util::ndarray_util;
 
 use std::path::Path;

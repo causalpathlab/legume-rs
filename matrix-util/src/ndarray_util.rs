@@ -3,6 +3,9 @@ pub use rand::{thread_rng, Rng};
 pub use rand_distr::{StandardNormal, Uniform};
 pub use rayon::prelude::*;
 
+use crate::traits::FromTriplets;
+use num_traits::Zero;
+
 #[allow(dead_code)]
 /// Sample d,n matrix from N(0,1)
 pub fn rnorm(dd: usize, nn: usize) -> anyhow::Result<Array2<f32>> {
@@ -41,4 +44,28 @@ pub fn scale_columns(mut xraw: Array2<f32>) -> anyhow::Result<Array2<f32>> {
         xraw.column_mut(j).mapv_inplace(|x| (x - mu[j]) / sig[j]);
     }
     Ok(xraw)
+}
+
+///////////////////////////
+// trait implementations //
+///////////////////////////
+
+impl<T> FromTriplets for ndarray::Array2<T>
+where
+    T: Copy + Zero,
+{
+    type Mat = Self;
+    type Scalar = T;
+
+    fn from_nonzero_triplets(
+        nrow: usize,
+        ncol: usize,
+        triplets: Vec<(usize, usize, Self::Scalar)>,
+    ) -> anyhow::Result<Self::Mat> {
+        let mut array = ndarray::Array2::<T>::zeros((nrow, ncol));
+        for (ii, jj, x_ij) in triplets {
+            array[(ii, jj)] = x_ij;
+        }
+        Ok(array)
+    }
 }

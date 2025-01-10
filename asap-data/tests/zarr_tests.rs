@@ -1,7 +1,7 @@
-use asap_data::common_io::{create_temp_dir_file, read_lines};
 use asap_data::simulate::*;
 use asap_data::sparse_io::*;
 use asap_data::sparse_matrix_zarr::SparseMtxData;
+use matrix_util::common_io::{create_temp_dir_file, read_lines};
 use matrix_util::ndarray_util;
 
 use approx::assert_abs_diff_eq;
