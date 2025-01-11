@@ -1,4 +1,4 @@
-use crate::dmatrix_util::*;
+use crate::traits::SampleOps;
 use nalgebra::{DMatrix, DVector};
 
 type Mat = DMatrix<f32>;
@@ -45,7 +45,7 @@ impl RandomizedSVD {
             singular_values: Vec::zeros(0),
             v_vectors: Mat::zeros(0, 0),
             qq: Mat::zeros(0, 0),
-            verbose: true,
+            verbose: false,
         }
     }
 
@@ -118,7 +118,7 @@ impl RandomizedSVD {
 
         let mut ll = Mat::zeros(nr, rank_and_oversample);
 
-        let mut qq = runif(nc, rank_and_oversample);
+        let mut qq = Mat::runif(nc, rank_and_oversample);
 
         for i in 0..self.iter {
             if self.verbose {

@@ -4,55 +4,45 @@ pub use rand_distr::{StandardNormal, Uniform};
 pub use rayon::prelude::*;
 
 use crate::traits::*;
-use num_traits::Float;
+use num_traits::{Float, FromPrimitive};
 
-#[allow(dead_code)]
-/// Sample d,n matrix from N(0,1)
-pub fn rnorm(dd: usize, nn: usize) -> anyhow::Result<Array2<f32>> {
-    let rvec = (0..(dd * nn))
-        .into_par_iter()
-        .map_init(thread_rng, |rng, _| rng.sample(StandardNormal))
-        .collect();
-
-    let ret: Array2<f32> = Array2::from_shape_vec((dd, nn), rvec)?;
-    Ok(ret)
-}
-
-#[allow(dead_code)]
-/// Sample d,n matrix from U(0,1)
-pub fn runif(dd: usize, nn: usize) -> anyhow::Result<Array2<f32>> {
-    let runif = Uniform::new(0_f32, 1_f32);
-
-    let rvec = (0..(dd * nn))
-        .into_par_iter()
-        .map_init(thread_rng, |rng, _| rng.sample(runif))
-        .collect();
-
-    let ret: Array2<f32> = Array2::from_shape_vec((dd, nn), rvec)?;
-    Ok(ret)
-}
-
-// #[allow(dead_code)]
-// /// column-wise standardization
-// /// * `xraw`: (D, N) matrix
-// pub fn scale_columns(mut xraw: Array2<f32>) -> anyhow::Result<Array2<f32>> {
-//     let mu = xraw
-//         .mean_axis(Axis(0))
-//         .ok_or(anyhow::anyhow!("mean failed"))?;
-//     let sig = xraw.std_axis(Axis(0), 0.0);
-//     for j in 0..xraw.ncols() {
-//         xraw.column_mut(j).mapv_inplace(|x| (x - mu[j]) / sig[j]);
-//     }
-//     Ok(xraw)
-// }
-
-///////////////////////////
-// trait implementations //
-///////////////////////////
-
-impl<T> MatInplaceOps for ndarray::Array2<T>
+impl<T> SampleOps for ndarray::Array2<T>
 where
-    T: Float,
+    T: Float + FromPrimitive + Send,
+{
+    type Mat = Self;
+    type Scalar = T;
+
+    fn runif(dd: usize, nn: usize) -> Self::Mat {
+        let u01 = Uniform::new(0_f32, 1_f32);
+
+        let rvec: Vec<T> = (0..(dd * nn))
+            .into_par_iter()
+            .map_init(thread_rng, |rng, _| {
+                let x = rng.sample(u01);
+                T::from(x).expect("failed to type")
+            })
+            .collect();
+
+        Array2::from_shape_vec((dd, nn), rvec).unwrap()
+    }
+
+    fn rnorm(dd: usize, nn: usize) -> Self::Mat {
+        let rvec = (0..(dd * nn))
+            .into_par_iter()
+            .map_init(thread_rng, |rng, _| {
+                let x: f32 = rng.sample(StandardNormal);
+                T::from(x).expect("failed to type")
+            })
+            .collect();
+
+        Array2::from_shape_vec((dd, nn), rvec).unwrap()
+    }
+}
+
+impl<T> MatOps for ndarray::Array2<T>
+where
+    T: Float + FromPrimitive,
 {
     type Mat = Self;
     type Scalar = T;
@@ -72,6 +62,20 @@ where
             let mut x_j = self.column_mut(j);
             let denom = x_j.mapv(|x| x * x).sum().max(T::one()).sqrt();
             x_j.mapv_inplace(|x| x / denom);
+        }
+    }
+
+    fn scale_columns_inplace(&mut self) {
+        let mu = self.mean_axis(Axis(0)).expect("mean failed");
+        let sig = self.std_axis(Axis(0), T::zero());
+        let ncol = self.ncols();
+
+        for j in 0..ncol {
+            if sig[j] > T::zero() {
+                self.column_mut(j).mapv_inplace(|x| (x - mu[j]) / sig[j]);
+            } else {
+                self.column_mut(j).mapv_inplace(|x| x - mu[j]);
+            }
         }
     }
 }

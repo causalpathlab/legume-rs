@@ -13,10 +13,19 @@ pub trait MatTriplets {
     ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, Self::Scalar)>)>;
 }
 
-pub trait MatInplaceOps {
+pub trait MatOps {
     type Mat;
     type Scalar;
 
     fn normalize_columns_inplace(&mut self);
     fn normalize_columns(&mut self) -> Self::Mat;
+    fn scale_columns_inplace(&mut self);
+}
+
+pub trait SampleOps {
+    type Mat;
+    type Scalar;
+
+    fn runif(dd: usize, nn: usize) -> Self::Mat;
+    fn rnorm(dd: usize, nn: usize) -> Self::Mat;
 }

@@ -1,4 +1,5 @@
 use asap_data::sparse_io::*;
+use matrix_util::dmatrix_rsvd::*;
 use matrix_util::dmatrix_util::*;
 use matrix_util::traits::*;
 
@@ -60,7 +61,7 @@ impl<'a> RandProjVec<'a> {
             )
         })?;
 
-        let rand_basis_kd = rnorm(dim.min(nrow), nrow);
+        let rand_basis_kd = DMatrix::<f32>::rnorm(dim.min(nrow), nrow);
 
         for (ii, data) in self.data_vec.iter().enumerate().skip(1) {
             let data_nrow = data.num_rows().ok_or_else(|| {
@@ -175,8 +176,21 @@ impl<'a> RandProjVec<'a> {
 
     pub fn step2_random_sorting_cbind(&mut self) -> anyhow::Result<()> {
         if let Some(proj_kn) = &self.rand_proj_kn {
+            let kk = proj_kn.nrows();
+            let nn = proj_kn.ncols();
+            let (_, _, vt_kn) = proj_kn.rsvd(kk)?;
 
-            //
+            // standardize
+
+            let mut binary_codes = DVector::<usize>::zeros(nn);
+
+            for k in 0..kk {}
+
+        // for k in 0..vt_kn.nrows(){
+        // 	let binary_shift = |x: f32| -> usize {
+        // 	    if x > 0.0 { 1 << k } else { 0 }
+        // 	};
+        // }
         } else {
             return Err(anyhow::anyhow!("projection result not available"));
         }
