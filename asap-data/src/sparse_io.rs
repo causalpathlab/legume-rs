@@ -5,7 +5,7 @@ pub use candle_core::Tensor;
 pub use clap::ValueEnum;
 pub use matrix_util::traits::*;
 pub use nalgebra::DMatrix;
-pub use nalgebra_sparse::csr::CsrMatrix;
+pub use nalgebra_sparse::{csc::CscMatrix, csr::CsrMatrix};
 pub use ndarray::prelude::*;
 pub use rayon::prelude::*;
 pub use std::collections::HashMap;
@@ -142,6 +142,14 @@ pub trait SparseIo: Sync + Send {
         CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
     }
 
+    /// Read columns within the range and return sparse `CsrMatrix`
+    /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_columns_csc(&self, columns: Self::IndexIter) -> anyhow::Result<CscMatrix<f32>> {
+        let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
+        CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+    }
+
     /// Read rows within the range and return dense `ndarray::Array2`
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
@@ -172,6 +180,14 @@ pub trait SparseIo: Sync + Send {
     fn read_rows_csr(&self, rows: Self::IndexIter) -> anyhow::Result<CsrMatrix<f32>> {
         let (nrow, ncol, triplets) = self.read_triplets_by_rows(rows)?;
         CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+    }
+
+    /// Read rows within the range and return sparse `CscMatrix`
+    /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
+    ///
+    fn read_rows_csc(&self, rows: Self::IndexIter) -> anyhow::Result<CscMatrix<f32>> {
+        let (nrow, ncol, triplets) = self.read_triplets_by_rows(rows)?;
+        CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
     }
 
     //////////////////////
