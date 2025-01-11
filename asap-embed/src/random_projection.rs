@@ -1,5 +1,6 @@
 use asap_data::sparse_io::*;
 use matrix_util::dmatrix_util::*;
+use matrix_util::traits::*;
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -45,11 +46,9 @@ impl<'a> RandProjVec<'a> {
     }
 
     ///
-    /// Step 1: Sample random projection basis matrix
+    /// Step 0: Sample random projection basis matrix
     /// # Arguments
     /// * `dim`: target dimensionality
-    /// # Returns
-    /// * a `kk x nrow` matrix
     ///
     pub fn step0_sample_basis_cbind(&mut self, dim: usize) -> anyhow::Result<()> {
         let first_data = &self.data_vec[0];
@@ -85,9 +84,7 @@ impl<'a> RandProjVec<'a> {
     }
 
     ///
-    /// Step 2: Create K x ncol projection by concatenating data across columns
-    /// # Arguments
-    /// * `rand_basis_kd`: random basis matrix from step 1
+    /// Step 1: Create K x ncol projection by concatenating data across columns
     ///
     pub fn step1_proj_cbind(&mut self) -> anyhow::Result<()> {
         if let Some(rand_basis_kd) = &self.rand_basis_kd {
@@ -129,26 +126,24 @@ impl<'a> RandProjVec<'a> {
                     })
                     .collect::<Vec<_>>();
 
+                let rand_basis_dk = rand_basis_kd.transpose();
+
                 jobs.par_iter().for_each(|&job| {
                     let (lb, ub) = job;
-
-                    // This could be inefficient since we are populating a dense matrix
-                    let mut yy_dm = data_batch
-                        .read_columns_dmatrix((lb..ub).collect())
-                        .expect("failed to read columns");
-
-                    normalize_columns_inplace(&mut yy_dm);
-
-                    // let yy_dm = normalize_columns(&xx_dm);
-                    let proj_block = rand_basis_kd * &yy_dm;
-
                     let (lb_glob, ub_glob) = (lb + offset, ub + offset);
 
+                    let mut xx_dm = data_batch
+                        .read_columns_csc((lb..ub).collect())
+                        .expect("failed to read columns");
+
+                    xx_dm.normalize_columns_inplace();
+
                     {
+                        let proj_km = (xx_dm.transpose() * &rand_basis_dk).transpose();
                         let mut proj_kn = arc_rand_proj_kn.lock().expect("failed to lock proj");
                         proj_kn
                             .columns_range_mut(lb_glob..ub_glob)
-                            .copy_from(&proj_block);
+                            .copy_from(&proj_km);
                     }
                 });
 
@@ -180,6 +175,8 @@ impl<'a> RandProjVec<'a> {
 
     pub fn step2_random_sorting_cbind(&mut self) -> anyhow::Result<()> {
         if let Some(proj_kn) = &self.rand_proj_kn {
+
+            //
         } else {
             return Err(anyhow::anyhow!("projection result not available"));
         }

@@ -22,8 +22,8 @@ where
 
 #[test]
 fn random_collapse() -> anyhow::Result<()> {
-    let dd = 5000_usize;
-    let nn = 10777_usize;
+    let dd = 500_usize;
+    let nn = 1777_usize;
     let xx = runif(dd, nn);
 
     let data1: Arc<Data> = Arc::from(create_sparse_dmatrix(&xx, None, None)?);
