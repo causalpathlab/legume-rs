@@ -1,9 +1,8 @@
 use matrix_util::common_io::{create_temp_dir_file, read_lines};
-
+use std::path::Path;
 use asap_data::simulate::*;
 use asap_data::sparse_io::*;
-use matrix_util::dmatrix_util::runif;
-use std::path::Path;
+use matrix_util::traits::SampleOps;
 use std::time::Instant;
 
 use asap_embed::random_projection::*;
@@ -24,7 +23,7 @@ where
 fn random_collapse() -> anyhow::Result<()> {
     let dd = 500_usize;
     let nn = 1777_usize;
-    let xx = runif(dd, nn);
+    let xx = DMatrix::<f32>::runif(dd, nn);
 
     let data1: Arc<Data> = Arc::from(create_sparse_dmatrix(&xx, None, None)?);
     let data_vec = vec![data1.clone()];
@@ -32,7 +31,10 @@ fn random_collapse() -> anyhow::Result<()> {
     let mut rp_obj = RandProjVec::new(&data_vec, Some(100))?;
 
     rp_obj.step0_sample_basis_cbind(10)?;
+
     measure_time(|| rp_obj.step1_proj_cbind())?;
+
+    measure_time(|| rp_obj.step2_random_sorting_cbind())?;
 
     data1.remove_backend_file()?;
 
