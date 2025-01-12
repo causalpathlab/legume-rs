@@ -113,8 +113,13 @@ impl Inference for GammaMatrix {
             .zip_map(&self.b_stat, |a, b| a.digamma() - b.ln());
     }
     fn map_calibrate_log_sd(&mut self) {
-        self.estimated_log_sd = self
-            .a_stat
-            .map(|a| if a > 1.0 { 1.0 / (a - 1.0).sqrt() } else { 0.0 });
+        self.estimated_log_sd = self.a_stat.map(|a| -> f32 {
+            if a > 1.0 {
+                1.0 / (a - 1.0).sqrt()
+            } else {
+                // this is actually not true
+                0.0
+            }
+        });
     }
 }
