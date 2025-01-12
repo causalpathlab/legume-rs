@@ -1,3 +1,5 @@
+pub trait TwoStatInference: Inference + TwoStatParam {}
+
 pub trait Inference {
     type Mat;
     type Scalar;

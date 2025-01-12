@@ -29,6 +29,17 @@ pub struct GammaMatrix {
 impl TwoStatParam for GammaMatrix {
     type Mat = Array2<f32>;
     type Scalar = f32;
+
+    /// New Poisson-Gamma parameter matrix
+    ///
+    /// x[i,j] ~ Poisson(lambda[i,j])
+    /// lambda[i,j] ~ Gamma(a0, b0)
+    ///
+    /// #Arguments
+    /// * `dims` - dimensions of the matrix (num of rows, num of columns)
+    /// * `a` - hyper parameter a0
+    /// * `b` - hyper parameter b0
+    ///
     fn new(dims: (usize, usize), a: Self::Scalar, b: Self::Scalar) -> Self {
         Self {
             num_rows: dims.0,
@@ -74,5 +85,55 @@ impl TwoStatParam for GammaMatrix {
 
     fn ncols(&self) -> usize {
         self.num_columns
+    }
+}
+
+impl Inference for GammaMatrix {
+    type Mat = Array2<f32>;
+    type Scalar = f32;
+
+    fn posterior_mean(&self) -> &Self::Mat {
+        &self.estimated_mean
+    }
+
+    fn posterior_sd(&self) -> &Self::Mat {
+        &self.estimated_sd
+    }
+
+    fn posterior_log_mean(&self) -> &Self::Mat {
+        &self.estimated_log_mean
+    }
+
+    fn posterior_log_sd(&self) -> &Self::Mat {
+        &self.estimated_log_sd
+    }
+
+    fn calibrate(&mut self) {
+        self.map_calibrate_mean();
+        self.map_calibrate_log_mean();
+        self.map_calibrate_sd();
+        self.map_calibrate_log_sd();
+    }
+
+    fn map_calibrate_mean(&mut self) {
+        self.estimated_mean = &self.a_stat / &self.b_stat;
+    }
+    fn map_calibrate_sd(&mut self) {
+        self.estimated_sd = &self.a_stat.mapv(|x| x.sqrt()) / &self.b_stat;
+    }
+    fn map_calibrate_log_mean(&mut self) {
+        use special::Gamma;
+        self.estimated_log_mean =
+            &self.a_stat.mapv(|a| Gamma::digamma(a)) - &self.b_stat.mapv(|b| b.ln());
+    }
+    fn map_calibrate_log_sd(&mut self) {
+        self.estimated_log_sd = self.a_stat.mapv(|a| -> f32 {
+            if a > 1.0 {
+                1.0 / (a - 1.0).sqrt()
+            } else {
+                // this is actually not true
+                0.0
+            }
+        });
     }
 }
