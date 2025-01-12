@@ -1,4 +1,3 @@
-pub mod matrix_param;
 pub mod random_projection;
 
 // use asap_data::common_io as io;
