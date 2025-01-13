@@ -69,24 +69,9 @@ where
         }
     }
 
-    fn normalize_columns(&mut self) -> Self::Mat {
+    fn normalize_columns(&self) -> Self::Mat {
         let mut ret = self.clone();
-        let ncol = ret.ncols();
-        for j in 0..ncol {
-            if let Some(x_j) = ret.get_col(j) {
-                let mut denom = T::zero();
-                for &x_ij in x_j.values() {
-                    denom += x_ij * x_ij;
-                }
-                denom = denom.sqrt().max(T::one());
-
-                if let Some(mut x_j) = ret.get_col_mut(j) {
-                    for x_ij in x_j.values_mut() {
-                        *x_ij /= denom;
-                    }
-                }
-            }
-        }
+        ret.normalize_columns_inplace();
         ret
     }
 
@@ -122,6 +107,12 @@ where
             }
         }
     }
+
+    fn scale_columns(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.scale_columns_inplace();
+        ret
+    }
 }
 
 impl<T> MatOps for DMatrix<T>
@@ -138,13 +129,9 @@ where
         }
     }
 
-    fn normalize_columns(&mut self) -> Self::Mat {
+    fn normalize_columns(&self) -> Self::Mat {
         let mut ret = self.clone();
-        for mut xx_j in ret.column_iter_mut() {
-            let denom = xx_j.norm().max(T::one());
-            xx_j /= denom;
-        }
-
+        ret.normalize_columns_inplace();
         ret
     }
 
@@ -157,6 +144,11 @@ where
                 xx_j /= sig;
             }
         }
+    }
+    fn scale_columns(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.scale_columns_inplace();
+        ret
     }
 }
 

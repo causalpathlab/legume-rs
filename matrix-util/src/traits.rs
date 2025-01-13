@@ -18,8 +18,9 @@ pub trait MatOps {
     type Scalar;
 
     fn normalize_columns_inplace(&mut self);
-    fn normalize_columns(&mut self) -> Self::Mat;
+    fn normalize_columns(&self) -> Self::Mat;
     fn scale_columns_inplace(&mut self);
+    fn scale_columns(&self) -> Self::Mat;
 }
 
 pub trait SampleOps {

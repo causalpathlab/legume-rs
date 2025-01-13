@@ -2,7 +2,7 @@ use asap_data::simulate::*;
 use asap_data::sparse_io::*;
 use asap_data::sparse_matrix_zarr::SparseMtxData;
 use matrix_util::common_io::{create_temp_dir_file, read_lines};
-use matrix_util::ndarray_util;
+use matrix_util::traits::SampleOps;
 
 use approx::assert_abs_diff_eq;
 
@@ -33,7 +33,7 @@ fn tensor_to_ndarray(tensor: Tensor) -> Array2<f32> {
 
 #[test]
 fn ndarray_dmatrix() -> anyhow::Result<()> {
-    let raw_array = ndarray_util::runif(133, 373)?;
+    let raw_array = Array2::<f32>::runif(133, 373);
 
     let raw_matrix = ndarray_to_dmatrix(&raw_array);
     let data1 = create_sparse_ndarray(&raw_array, None, None)?;
@@ -60,7 +60,7 @@ fn ndarray_dmatrix() -> anyhow::Result<()> {
 
 #[test]
 fn random_ndarray_subset() -> anyhow::Result<()> {
-    let xx = ndarray_util::runif(333, 777)?;
+    let xx = Array2::<f32>::runif(333, 777);
 
     if let Ok(mut data) = SparseMtxData::from_ndarray(&xx, None, Some(true)) {
         let nrow = data.num_rows().unwrap();
@@ -177,7 +177,7 @@ fn simulate() -> anyhow::Result<()> {
 #[test]
 fn random_mtx_loading() -> anyhow::Result<()> {
     // 1. generate a random array2
-    let a = ndarray_util::runif(9, 1111)?;
+    let a = Array2::<f32>::runif(9, 1111);
 
     if let Ok(data) = SparseMtxData::from_ndarray(&a, None, Some(true)) {
         let a = a.select(Axis(1), &[7, 8, 9]);
@@ -216,7 +216,7 @@ fn random_mtx_loading() -> anyhow::Result<()> {
 
 #[test]
 fn random_ndarray_loading() -> anyhow::Result<()> {
-    let a = ndarray_util::runif(15, 7000)?;
+    let a = Array2::<f32>::runif(15, 7000);
 
     if let Ok(data) = SparseMtxData::from_ndarray(&a, None, None) {
         data.print_hierarchy()?;
