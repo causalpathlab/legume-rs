@@ -26,6 +26,7 @@ approx = { workspace = true }
 
 instant-distance = { workspace = true }
 special = { workspace = true }
+indicatif = { version = "0.17.9", features = ["rayon"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 candle-core = { version = "0.8", features = ["cuda","cudarc","cudnn"] }

@@ -47,13 +47,9 @@ where
     type Mat = Self;
     type Scalar = T;
 
-    fn normalize_columns(&mut self) -> Self::Mat {
+    fn normalize_columns(&self) -> Self::Mat {
         let mut xx = self.clone();
-        for j in 0..xx.ncols() {
-            let mut x_j = xx.column_mut(j);
-            let denom = x_j.mapv(|x| x * x).sum().max(T::one()).sqrt();
-            x_j.mapv_inplace(|x| x / denom);
-        }
+        xx.normalize_columns_inplace();
         xx
     }
 
@@ -63,6 +59,12 @@ where
             let denom = x_j.mapv(|x| x * x).sum().max(T::one()).sqrt();
             x_j.mapv_inplace(|x| x / denom);
         }
+    }
+
+    fn scale_columns(&self) -> Self::Mat {
+        let mut xx = self.clone();
+        xx.scale_columns_inplace();
+        xx
     }
 
     fn scale_columns_inplace(&mut self) {

@@ -26,6 +26,7 @@ serde = { workspace = true }
 ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
 
+instant-distance = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ndarray-linalg = { version = "0.16", default-features = false }
