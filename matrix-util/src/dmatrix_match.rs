@@ -47,11 +47,22 @@ where
         use instant_distance::Builder;
         let dict = Builder::default().build(data_vec.clone(), names.clone());
 
-        ColumnDict {
+        let ret = ColumnDict {
             dict,
             data_vec,
             name2index,
+        };
+
+        #[cfg(debug_assertions)]
+        {
+            // check if the order matches
+            for (j, x) in ret.names().iter().enumerate() {
+                if let Some(&i) = ret.name2index.get(x) {
+                    debug_assert_eq!(i, j);
+                }
+            }
         }
+        ret
     }
 
     pub fn names(&self) -> &Vec<T> {
@@ -100,12 +111,3 @@ impl instant_distance::Point for VecPoint {
             .sqrt()
     }
 }
-
-// impl<T> ColumnMatch<T>
-// where
-//     T: nalgebra::RealField,
-// {
-//     fn new(data: DMatrix<T>) -> Self {
-//         ColumnMatch { data }
-//     }
-// }
