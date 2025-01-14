@@ -1,12 +1,69 @@
 pub use nalgebra::{DMatrix, DVector};
 pub use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
 
-use num_traits::Float;
+use num_traits::{Float, Zero};
 pub use rand::{thread_rng, Rng};
 pub use rand_distr::{StandardNormal, Uniform};
 pub use rayon::prelude::*;
 
 use crate::traits::*;
+
+use std::ops::AddAssign;
+
+impl<T> CompositeOps for DMatrix<T>
+where
+    T: nalgebra::RealField + Copy,
+{
+    type Scalar = T;
+    type Mat = Self;
+    type Other = CscMatrix<T>;
+
+    /// `self[:,col] += other[:,col]`
+    /// * `col` - column index
+    fn add_assign_column(&mut self, other: &Self::Other, j: usize) {
+        debug_assert_eq!(self.nrows(), other.nrows());
+        debug_assert_eq!(self.ncols(), other.ncols());
+        if let Some(x_j) = other.get_col(j) {
+            let vals = x_j.values();
+            let rows = x_j.row_indices();
+            for k in 0..vals.len() {
+                let i = rows[k];
+                let x_ij = vals[k];
+                self[(i, j)] += x_ij;
+            }
+        }
+    }
+
+    /// `self += other`
+    /// * `other` - `CscMatrix`
+    fn add_assign(&mut self, other: &Self::Other) {
+        debug_assert_eq!(self.nrows(), other.nrows());
+        debug_assert_eq!(self.ncols(), other.ncols());
+        for j in 0..other.ncols() {
+            if let Some(x_j) = other.get_col(j) {
+                let vals = x_j.values();
+                let rows = x_j.row_indices();
+                for k in 0..vals.len() {
+                    let i = rows[k];
+                    let x_ij = vals[k];
+                    self[(i, j)] += x_ij;
+                }
+            }
+        }
+    }
+}
+
+// impl<T> AddAssignCscMatrix for DMatrix<T>
+// where
+//     T: Copy + AddAssign + Zero,
+// {
+//     fn add_assign(&mut self, rhs: &Self) {
+//         // for temp in rhs.iter() {}
+//         // for (i, j, x_ij) in rhs.iter() {
+//         //     self[(i, j)] += *x_ij;
+//         // }
+//     }
+// }
 
 impl<T> SampleOps for DMatrix<T>
 where
