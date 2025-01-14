@@ -22,7 +22,7 @@ special = "0.11.3"
 serde_json = "1.0"
 serde = "1.0"
 
-nalgebra = "0.33.2"
+nalgebra = "0.33"
 nalgebra-sparse = "0.10"
 num-traits = "0.2.19"
 
