@@ -1,6 +1,7 @@
 use asap_data::sparse_io::*;
 use indicatif::ParallelProgressIterator;
-use instant_distance::HnswMap;
+use indicatif::ProgressIterator;
+use matrix_util::dmatrix_match::ColumnDict;
 use matrix_util::dmatrix_rsvd::*;
 use matrix_util::dmatrix_util::*;
 use rand::seq::SliceRandom;
@@ -8,31 +9,28 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 pub type Data = dyn SparseIo<IndexIter = Vec<usize>>;
+pub type Dict = ColumnDict<usize>;
 
 type Mat = DMatrix<f32>;
 type DVec = DVector<f32>;
 
 const DEFAULT_BLOCK_SIZE: usize = 10;
 
+/// Random projection for a vector of SparseIo data sets
+///
+///
+///
 pub struct RandProjVec<'a> {
-    data_vec: &'a Vec<Arc<Data>>,
-    block_size: usize,
-    num_batch: usize,
-    rand_basis_kd: Option<DMatrix<f32>>,
-    rand_proj_kn: Option<DMatrix<f32>>,
-    batch_glob_index: Option<HashMap<usize, Vec<usize>>>,
-    batch_membership: Option<Vec<usize>>,
-    cell_to_sample: Option<Vec<usize>>,
-    dictionaries: Option<Vec<HnswMap<ProjCell, usize>>>,
-}
-
-#[derive(Clone, Debug)]
-struct ProjCell(DVec);
-
-impl instant_distance::Point for ProjCell {
-    fn distance(&self, other: &Self) -> f32 {
-        (&self.0 - &other.0).norm()
-    }
+    raw_data_vec: &'a Vec<Arc<Data>>,                  // data matrix vec
+    block_size: usize,                                 // block size for parallel
+    num_data: usize,                                   // number of raw data matrices
+    rand_basis_kd: Option<DMatrix<f32>>,               // K x d random basis matrix
+    rand_proj_kn: Option<DMatrix<f32>>,                // K x ncol projection results
+    data_to_cells: Option<HashMap<usize, Vec<usize>>>, // map: data id -> { global ids }
+    cell_to_data: Option<Vec<usize>>,                  // map: global cell id -> data id
+    cell_to_sample: Option<Vec<usize>>,                // map: global cell id -> sample id
+    batch_dictionaries: Option<Vec<Dict>>,             // dictionary for each batch
+    cell_to_batch: Option<Vec<usize>>,                 // map: global cell id -> batch id
 }
 
 #[allow(dead_code)]
@@ -52,15 +50,16 @@ impl<'a> RandProjVec<'a> {
         }
 
         Ok(Self {
-            data_vec: &_vec,
+            raw_data_vec: _vec,
             block_size: blk,
-            num_batch: nb,
+            num_data: nb,
             rand_basis_kd: None,
             rand_proj_kn: None,
-            batch_glob_index: None,
-            batch_membership: None,
+            data_to_cells: None,
+            cell_to_data: None,
             cell_to_sample: None,
-            dictionaries: None,
+            batch_dictionaries: None,
+            cell_to_batch: None,
         })
     }
 
@@ -70,7 +69,7 @@ impl<'a> RandProjVec<'a> {
     /// * `dim`: target dimensionality
     ///
     pub fn step0_sample_basis_cbind(&mut self, dim: usize) -> anyhow::Result<()> {
-        let first_data = &self.data_vec[0];
+        let first_data = &self.raw_data_vec[0];
 
         let nrow = first_data.num_rows().ok_or_else(|| {
             anyhow::anyhow!(
@@ -81,7 +80,7 @@ impl<'a> RandProjVec<'a> {
 
         let rand_basis_kd = DMatrix::<f32>::rnorm(dim.min(nrow), nrow);
 
-        for (ii, data) in self.data_vec.iter().enumerate().skip(1) {
+        for (ii, data) in self.raw_data_vec.iter().enumerate().skip(1) {
             let data_nrow = data.num_rows().ok_or_else(|| {
                 anyhow::anyhow!(
                     "can't figure out #rows in the data: {}",
@@ -107,119 +106,86 @@ impl<'a> RandProjVec<'a> {
     ///
     pub fn step1_proj_cbind(&mut self) -> anyhow::Result<()> {
         if let Some(rand_basis_kd) = &self.rand_basis_kd {
-            let num_batch = self.num_batch;
+            let num_batch = self.num_data;
             let kk = rand_basis_kd.nrows();
             let nrow = rand_basis_kd.ncols();
-            let ncol = self.data_vec.iter().fold(0, |ncols, data| -> usize {
+            let ncol_tot = self.raw_data_vec.iter().fold(0, |ncols, data| -> usize {
                 ncols + data.num_columns().expect("failed to figure out # cols")
             });
 
-            // the results of random projection
-            let mut rand_proj_kn = Mat::zeros(kk, ncol);
-            // let arc_rand_proj_kn = Arc::new(Mutex::new(&mut rand_proj_kn));
-
-            // batch to global membership and vice versa
-            let mut batch_glob_index: HashMap<usize, Vec<usize>> = HashMap::new();
+            // data set index to global membership and vice versa
+            let mut data_to_cells: HashMap<usize, Vec<usize>> = HashMap::new();
             for b in 0..num_batch {
-                batch_glob_index.insert(b, Vec::new());
+                data_to_cells.insert(b, Vec::new());
             }
-            let mut batch_membership: Vec<usize> = vec![0; ncol];
+            let mut cell_to_data: Vec<usize> = vec![0; ncol_tot];
             let mut offset = 0;
-            let mut cell_dictionaries = vec![];
 
-            for (batch, data_batch) in self.data_vec.iter().enumerate() {
-                anyhow::ensure!(data_batch.num_rows().unwrap() == nrow);
-                let ncol_batch = data_batch.num_columns().unwrap();
-                let nblock = (ncol_batch + self.block_size - 1) / self.block_size;
+            // the results of random projection
+            let mut rand_proj_kn = Mat::zeros(kk, ncol_tot);
+            let arc_rand_proj_kn = Arc::new(Mutex::new(&mut rand_proj_kn));
+
+            for (didx, raw_data) in self.raw_data_vec.iter().enumerate() {
+                #[cfg(debug_assertions)]
+                {
+                    anyhow::ensure!(raw_data.num_rows().unwrap() == nrow);
+                }
+                let ncol_data = raw_data.num_columns().unwrap();
+                let jobs = self.create_jobs(ncol_data);
+
+                let basis_dk = rand_basis_kd.transpose();
 
                 /////////////////////////////////
                 // populate projection results //
                 /////////////////////////////////
 
-                let jobs = (0..nblock)
-                    .map(|block| {
-                        let lb: usize = block * self.block_size;
-                        let ub: usize = ((block + 1) * self.block_size).min(ncol_batch);
-                        (lb, ub)
-                    })
-                    .collect::<Vec<_>>();
-
-                let rand_basis_dk = rand_basis_kd.transpose();
-
-                let rand_proj_chunks: Vec<(usize, Mat)> = jobs
-                    .par_iter()
+                jobs.par_iter()
                     .progress_count(jobs.len() as u64)
-                    .enumerate()
-                    .map(|(ii, &job)| {
+                    .for_each(|&job| {
                         let (lb, ub) = job;
+                        let (lb_glob, ub_glob) = (lb + offset, ub + offset);
 
-                        let mut xx_dm = data_batch
+                        let mut xx_dm = raw_data
                             .read_columns_csc((lb..ub).collect())
                             .expect("failed to read columns");
 
                         xx_dm.normalize_columns_inplace();
-                        let mut proj_km = (xx_dm.transpose() * &rand_basis_dk).transpose();
-                        proj_km.scale_columns_inplace();
-                        (ii, proj_km)
-                    })
-                    .collect();
+                        let mut chunk = (xx_dm.transpose() * &basis_dk).transpose();
+                        chunk.scale_columns_inplace();
 
-                for (ii, proj) in rand_proj_chunks.iter() {
-                    let (lb, ub) = jobs[*ii];
-                    let (lb_glob, ub_glob) = (lb + offset, ub + offset);
-
-                    rand_proj_kn
-                        .columns_range_mut(lb_glob..ub_glob)
-                        .copy_from(proj);
-                }
-
-                ///////////////////////
-                // build annoy index //
-                ///////////////////////
-                {
-                    let dd = rand_proj_kn.nrows();
-                    let mut proj_cell_vecs = vec![ProjCell(DVec::zeros(dd)); ncol_batch];
-                    let mut glob_indexes = Vec::new();
-
-                    rand_proj_chunks.iter().for_each(|(job, proj)| {
-                        let (lb, ub) = jobs[*job];
-                        for (i, cell) in (lb..ub).enumerate() {
-                            proj_cell_vecs[cell].0 += proj.column(i);
-                            glob_indexes.push(cell + offset);
+                        {
+                            arc_rand_proj_kn
+                                .lock()
+                                .expect("failed to lock proj")
+                                .columns_range_mut(lb_glob..ub_glob)
+                                .copy_from(&chunk);
                         }
                     });
-
-                    // ProjCell(DVec::from(rand_proj_kn.column(0)));
-                    use instant_distance::Builder;
-                    let dict = Builder::default().build(proj_cell_vecs, glob_indexes);
-                    cell_dictionaries.push(dict);
-                }
 
                 ////////////////////////////
                 // sorted out the indexes //
                 ////////////////////////////
-                jobs.iter().for_each(|&job| {
-                    let (lb, ub) = job;
-                    let (lb_glob, ub_glob) = (lb + offset, ub + offset);
-
-                    let globs = batch_glob_index.get_mut(&batch).expect("batch glob index");
-                    for j in lb_glob..ub_glob {
-                        batch_membership[j] = batch;
-                        globs.push(j);
+                {
+                    let cells = data_to_cells.get_mut(&didx).expect("batch glob index");
+                    for &(lb, ub) in jobs.iter() {
+                        let (lb_glob, ub_glob) = (lb + offset, ub + offset);
+                        cells.extend(lb_glob..ub_glob);
+                        cell_to_data.splice(lb_glob..ub_glob, (lb..ub).map(|_| didx));
                     }
-                });
+                    cells.sort();
+                }
 
-                offset += ncol_batch;
-            } // for each batch
+                offset += ncol_data;
+            } // for each raw data matrix
 
-            self.dictionaries = Some(cell_dictionaries);
+            // self.dictionaries = Some(cell_dictionaries);
             self.rand_proj_kn = Some(rand_proj_kn);
-            self.batch_glob_index = Some(batch_glob_index);
-            self.batch_membership = Some(batch_membership);
+            self.data_to_cells = Some(data_to_cells);
+            self.cell_to_data = Some(cell_to_data);
 
             Ok(())
         } else {
-            Err(anyhow::anyhow!("random basis matrix is not available"))
+            Err(anyhow::anyhow!("Random basis matrix is not available"))
         }
     }
 
@@ -248,303 +214,305 @@ impl<'a> RandProjVec<'a> {
             let collapse_membership = binary_codes.data.as_vec().clone();
             self.cell_to_sample = Some(collapse_membership);
         } else {
-            return Err(anyhow::anyhow!("projection result not available"));
+            return Err(anyhow::anyhow!("Step 1 (projection) incomplete"));
         }
 
         Ok(())
     }
 
-    pub fn step3_collapse_columns_cbind(
+    /// Build fast look-up dictionary for each batch
+    /// using the previous random projection matrix
+    ///
+    pub fn build_dictionary_per_batch(
+        &mut self,
+        batch_membership: Option<&Vec<usize>>,
+    ) -> anyhow::Result<()> {
+        let batch_membership = match batch_membership {
+            Some(bm) => bm.clone(),
+            None => match &self.cell_to_data {
+                Some(c2d) => c2d.clone(),
+                None => anyhow::bail!("Should've had cell to data mapping"),
+            },
+        };
+
+        if let Some(rand_proj_kn) = &self.rand_proj_kn {
+            if rand_proj_kn.ncols() != batch_membership.len() {
+                return Err(anyhow::anyhow!(
+                    "batch membership should cover all the cells"
+                ));
+            }
+
+            let batches = partition_by_membership(&batch_membership, None);
+
+            let batch_names = batches.keys().cloned().collect::<Vec<usize>>();
+
+            let num_batch = batch_names
+                .iter()
+                .max()
+                .copied()
+                .ok_or(anyhow::anyhow!("unable to determine batch size"))?
+                + 1;
+
+            let dictionaries = (0..num_batch)
+                .map(|b| {
+                    if let Some(cells) = batches.get(&b) {
+                        // a. gather all the corresponding cells/columns
+                        let columns = cells
+                            .iter()
+                            .map(|&c| rand_proj_kn.column(c))
+                            .collect::<Vec<_>>();
+
+                        Dict::from_column_views(&columns, cells)
+                    } else {
+                        Dict::empty()
+                    }
+                })
+                .collect();
+
+            self.batch_dictionaries = Some(dictionaries);
+            self.cell_to_batch = Some(batch_membership);
+        } else {
+            return Err(anyhow::anyhow!("Random projection not available"));
+        }
+
+        Ok(())
+    }
+
+    /// Collapse cells to samples
+    /// * `cells_per_sample` - number of cells per sample
+    pub fn step4_collapse_columns_cbind(
         &mut self,
         cells_per_sample: Option<usize>,
     ) -> anyhow::Result<()> {
-        if let (Some(cell_to_sample), Some(rand_proj_kn), Some(rand_basis_kd)) = (
-            &self.cell_to_sample,
-            &self.rand_proj_kn,
-            &self.rand_basis_kd,
-        ) {
-            let pb_cells = Self::collapse_cells_to_samples(cell_to_sample, cells_per_sample);
-            let pb_membership = Self::sort_sample_membership(&pb_cells);
+        if let (Some(cell_to_sample), Some(rand_basis_kd)) =
+            (&self.cell_to_sample, &self.rand_basis_kd)
+        {
+            let sample2cells = partition_by_membership(cell_to_sample, cells_per_sample);
+            let cell2sample = partition_to_membership(&sample2cells);
 
-            // dbg!(pb_membership);
+            let ngenes = rand_basis_kd.ncols(); // number of genes/features
+            let nsample = sample2cells.len(); // pseudobulk samples
 
-            let dd = rand_basis_kd.ncols(); // number of genes/features
-            let nn = rand_proj_kn.ncols(); // number of cells
-            let kk = rand_proj_kn.nrows(); // number of random basis
-            let ss = pb_cells.len(); // pseudobulk samples
+            #[cfg(debug_assertions)]
+            {
+                for raw_data in self.raw_data_vec.iter() {
+                    anyhow::ensure!(raw_data.num_rows().unwrap() == ngenes);
+                }
+            }
 
             /////////////////////////////////
             // accumulate basic statistics //
             /////////////////////////////////
 
-            let mut mu_ds = Mat::zeros(dd, ss);
+            let mut stat = Stat::new(ngenes, nsample, self.num_data);
+            self.aggregate_observed_cells_within_sample(&mut stat, &cell2sample);
 
-            for cell in 0..nn {}
+            ///////////////////////////////////////
+            // collect counterfactual statistics //
+            ///////////////////////////////////////
 
-            if let Some(cell_dictionaries) = &self.dictionaries {
-                //
-                use instant_distance::Search;
-                let mut search = Search::default();
-            }
+            let mut offset = 0;
+            for (data_idx, raw_data) in self.raw_data_vec.iter().enumerate() {
+                let ncol_data = raw_data.num_columns().unwrap();
+
+                offset += ncol_data;
+            } // data set
+
+            ////////////////
+            // parameters //
+            ////////////////
+
+            stat.prob_bs = stat.n_bs;
+            stat.prob_bs
+                .column_iter_mut()
+                .for_each(|mut p_s| p_s /= p_s.sum());
+        } else {
+            return Err(anyhow::anyhow!("Step 2 (cell sorting) incomplete"));
         }
 
         Ok(())
     }
 
-    fn sort_sample_membership(pb_cells: &HashMap<usize, Vec<usize>>) -> HashMap<usize, usize> {
-        let mut sample_membership: HashMap<usize, usize> = HashMap::new();
-        let arc = Arc::new(Mutex::new(&mut sample_membership));
-        pb_cells.par_iter().for_each(|(&s, cells)| {
-            if let Ok(mut sample_membership) = arc.lock() {
-                for j in cells {
-                    sample_membership.insert(*j, s);
-                }
-            }
-        });
-        sample_membership
+    /// A helper function to collect cell statistics within each sample
+    /// * `stat` - a mutable reference to Stat
+    /// * `cell2sample` - map: cell -> sample
+    fn aggregate_observed_cells_within_sample(
+        &self,
+        stat: &mut Stat,
+        cell2sample: &HashMap<usize, usize>,
+    ) {
+        let arc_stat = Arc::new(Mutex::new(stat));
+
+        let mut offset = 0;
+        for (data_idx, raw_data) in self.raw_data_vec.iter().enumerate() {
+            let ncol_data = raw_data.num_columns().unwrap();
+            let jobs = self.create_jobs(ncol_data);
+
+            jobs.par_iter()
+                .progress_count(jobs.len() as u64)
+                .for_each(|&job| {
+                    let (lb, ub) = job;
+
+                    let mut xx_dm = raw_data
+                        .read_columns_csc((lb..ub).collect())
+                        .expect("failed to read columns");
+
+                    xx_dm.normalize_columns_inplace();
+
+                    let mut stat = arc_stat.lock().expect("failed to lock stat");
+
+                    for loc in lb..ub {
+                        let glob = loc + offset;
+                        if let Some(&s) = cell2sample.get(&glob) {
+                            if let Some(xv) = xx_dm.get_col(loc) {
+                                let rows = xv.row_indices();
+                                let vals = xv.values();
+                                for (&i, &x) in rows.iter().zip(vals.iter()) {
+                                    stat.size_s[s] += 1_f32;
+                                    stat.ysum_ds[(i, s)] += x;
+                                    stat.n_bs[(data_idx, s)] += 1_f32;
+                                }
+                            }
+                        }
+                    }
+                });
+            offset += ncol_data;
+        } // data set
     }
 
-    fn collapse_cells_to_samples(
-        sample_membership: &Vec<usize>,
-        cells_per_sample: Option<usize>,
-    ) -> HashMap<usize, Vec<usize>> {
-        // Take care of empty pseudobulk samples
-        let mut pb_position: HashMap<usize, usize> = HashMap::new();
+    fn aggregate_matched_cells_within_sample(&self, stat: &mut Stat, knn: usize) {
+        let arc_stat = Arc::new(Mutex::new(stat));
+
+        if let (Some(cell_to_batch), Some(batch_dictionaries)) =
+            (&self.cell_to_batch, &self.batch_dictionaries)
         {
-            let mut pos = 0_usize;
-            for k in sample_membership {
-                if !pb_position.contains_key(k) {
-                    pb_position.insert(*k, pos);
-                    pos += 1;
-                }
+            use instant_distance::Search;
+            let num_batches = batch_dictionaries.len();
+            let mut offset = 0;
+            for (data_idx, raw_data) in self.raw_data_vec.iter().enumerate() {
+                let ncol_data = raw_data.num_columns().unwrap();
+                let jobs = self.create_jobs(ncol_data);
+
+                jobs.par_iter()
+                    .progress_count(jobs.len() as u64)
+                    .for_each(|&job| {
+                        let (lb, ub) = job;
+                        let mut search = Search::default();
+                        let mut stat = arc_stat.lock().expect("failed to lock stat");
+
+                        for loc in lb..ub {
+                            let glob = loc + offset;
+                            let batch = cell_to_batch[glob];
+                            let mut matched = vec![];
+                            for other in 0..num_batches {
+                                if other == batch {
+                                    continue;
+                                }
+                                matched.extend(
+                                    batch_dictionaries[batch]
+                                        .match_against_by_name(
+                                            &glob,
+                                            knn,
+                                            &batch_dictionaries[other],
+                                        )
+                                        .unwrap(),
+                                );
+                            }
+                            // estimate
+                        }
+                    });
+
+                offset += ncol_data;
             }
         }
-        // dbg!(&pb_position);
+    }
 
-        let mut pb_cells: HashMap<usize, Vec<usize>> = HashMap::new();
-        for (cell, &k) in sample_membership.iter().enumerate() {
-            let &s = pb_position.get(&k).expect("failed to get position");
-            pb_cells.entry(s).or_insert(Vec::new()).push(cell);
-        }
+    fn create_jobs(&self, ntot: usize) -> Vec<(usize, usize)> {
+        let nblock = (ntot + self.block_size - 1) / self.block_size;
 
-        // Down sample cells if needed
-        pb_cells.par_iter_mut().for_each(|(_, cells)| {
-            let ncells = cells.len();
-            if let Some(ntarget) = cells_per_sample {
-                if ncells > ntarget {
-                    let mut rng = rand::thread_rng();
-                    cells.shuffle(&mut rng);
-                    cells.truncate(ntarget);
-                }
-            }
-            // dbg!(cells.len());
-        });
-        pb_cells
+        (0..nblock)
+            .map(|block| {
+                let lb: usize = block * self.block_size;
+                let ub: usize = ((block + 1) * self.block_size).min(ntot);
+                (lb, ub)
+            })
+            .collect::<Vec<_>>()
     }
 }
 
-// #[allow(dead_code)]
-// pub fn collapse_columns_cbind(
-//     data_vec: &Vec<Box<&Data>>,
-//     target_dim: usize,
-//     block_size: Option<usize>,
-// ) -> anyhow::Result<()> {
+struct Stat {
+    pub mu_ds: Mat,
+    pub mu_cf_ds: Mat,
+    pub ysum_ds: Mat,
+    pub size_s: DVec,
+    pub delta_num_db: Mat,
+    pub delta_denom_db: Mat,
+    pub n_bs: Mat,
+    pub prob_bs: Mat,
+}
 
-//     // if num_batch < 1 {
-//     //     anyhow::bail!("no data set in the vector");
-//     // }
+impl Stat {
+    pub fn new(ngene: usize, nsample: usize, nbatch: usize) -> Self {
+        Self {
+            mu_ds: Mat::zeros(ngene, nsample),
+            mu_cf_ds: Mat::zeros(ngene, nsample),
+            ysum_ds: Mat::zeros(ngene, nsample),
+            size_s: DVec::zeros(nsample),
+            delta_num_db: Mat::zeros(ngene, nbatch),
+            delta_denom_db: Mat::zeros(ngene, nbatch),
+            n_bs: Mat::zeros(nbatch, nsample),
+            prob_bs: Mat::zeros(nbatch, nsample),
+        }
+    }
+}
 
-//     ///////////////////////////////////////////////////
-//     // Step 1: Sample random projection basis matrix //
-//     ///////////////////////////////////////////////////
+fn partition_to_membership(pb_cells: &HashMap<usize, Vec<usize>>) -> HashMap<usize, usize> {
+    let mut sample_membership: HashMap<usize, usize> = HashMap::new();
+    let arc = Arc::new(Mutex::new(&mut sample_membership));
+    pb_cells.par_iter().for_each(|(&s, cells)| {
+        if let Ok(mut sample_membership) = arc.lock() {
+            for j in cells {
+                sample_membership.insert(*j, s);
+            }
+        }
+    });
+    sample_membership
+}
 
-//     // // We figure out the number of rows using the first data set
-//     // let step1 = |dim: usize| -> anyhow::Result<Array2<f32>> {
-//     //     let first_data = &data_vec[0];
-//     //     let nrow = first_data.num_rows().expect("#rows");
-//     //     let rand_basis_kd = sample_basis_to_reduce_rows(nrow, dim)?;
-//     //     Ok(rand_basis_kd)
-//     // };
+fn partition_by_membership(
+    sample_membership: &Vec<usize>,
+    cells_per_sample: Option<usize>,
+) -> HashMap<usize, Vec<usize>> {
+    // Take care of empty pseudobulk samples
+    let mut pb_position: HashMap<usize, usize> = HashMap::new();
+    {
+        let mut pos = 0_usize;
+        for k in sample_membership {
+            if !pb_position.contains_key(k) {
+                pb_position.insert(*k, pos);
+                pos += 1;
+            }
+        }
+    }
+    // dbg!(&pb_position);
 
-//     // let rand_basis_kd = step1(target_dim)?;
+    let mut pb_cells: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (cell, &k) in sample_membership.iter().enumerate() {
+        let &s = pb_position.get(&k).expect("failed to get position");
+        pb_cells.entry(s).or_default().push(cell);
+    }
 
-//     // Gather dimensionality info
-
-//     // let kk = rand_basis_kd.nrows();
-//     // let nrow = rand_basis_kd.ncols();
-//     // let ncol = data_vec.into_iter().fold(0, |ncols, data| -> usize {
-//     //     ncols + data.num_columns().expect("failed to figure out # cols")
-//     // });
-
-//     ////////////////////////////////////////
-//     // Step 2: Create K x ncol projection //
-//     ////////////////////////////////////////
-
-//     // let step2 =
-//     //     |rand_basis_kd: &Array2<f32>| -> anyhow::Result<(Array2<f32>, HashMap<_, _>, Vec<_>)> {
-//     //         let num_batch = data_vec.len();
-//     //         // the results of random projection
-//     //         let mut rand_proj_kn: Array2<f32> = Array2::zeros((kk, ncol));
-//     //         let arc_rand_proj_kn = Arc::new(Mutex::new(&mut rand_proj_kn));
-
-//     //         // batch to global membership and vice versa
-//     //         let mut batch_glob_index: HashMap<usize, Vec<usize>> = HashMap::new();
-//     //         for b in 0..num_batch {
-//     //             batch_glob_index.insert(b, Vec::new());
-//     //         }
-//     //         let mut batch_membership: Vec<usize> = vec![0; ncol];
-//     //         let mut offset = 0;
-
-//     //         for (batch, data_batch) in data_vec.into_iter().enumerate() {
-//     //             anyhow::ensure!(data_batch.num_rows().unwrap() == nrow);
-//     //             let ncol_batch = data_batch.num_columns().unwrap();
-//     //             let nblock = (ncol_batch + block_size - 1) / block_size;
-
-//     //             /////////////////////////////////
-//     //             // populate projection results //
-//     //             /////////////////////////////////
-
-//     //             (0..nblock)
-//     //                 .into_par_iter()
-//     //                 .map(|block| {
-//     //                     let lb: usize = block * block_size;
-//     //                     let ub: usize = ((block + 1) * block_size).min(ncol_batch);
-//     //                     (lb, ub)
-//     //                 })
-//     //                 .for_each(|(lb, ub)| {
-//     //                     let mut proj_km = arc_rand_proj_kn.lock().expect("failed to lock proj");
-//     //                     // This could be inefficient since we are populating a dense matrix
-//     //                     let xx_dm = data_batch.read_columns_ndarray((lb..ub).collect()).unwrap();
-//     //                     // normalized columns by the column-wise sum values
-//     //                     let denom = xx_dm.sum_axis(Axis(0)).mapv(|x| 1.0 / x.max(1.0));
-//     //                     let yy_dm = xx_dm.dot(&Array2::from_diag(&denom));
-//     //                     let proj = rand_basis_kd.dot(&yy_dm);
-
-//     //                     let (lb_glob, ub_glob) = (lb + offset, ub + offset);
-//     //                     let target = proj_km.slice_mut(s![.., lb_glob..ub_glob]);
-//     //                     proj.assign_to(target);
-//     //                 });
-
-//     //             ////////////////////////////
-//     //             // sorted out the indexes //
-//     //             ////////////////////////////
-
-//     //             (0..nblock).into_iter().for_each(|block| {
-//     //                 let lb: usize = block * block_size;
-//     //                 let ub: usize = ((block + 1) * block_size).min(ncol_batch);
-//     //                 let (lb_glob, ub_glob) = (lb + offset, ub + offset);
-//     //                 let globs = batch_glob_index.get_mut(&batch).expect("batch glob index");
-//     //                 for j in lb_glob..ub_glob {
-//     //                     batch_membership[j] = batch;
-//     //                     globs.push(j);
-//     //                 }
-//     //             });
-
-//     //             offset += ncol_batch;
-//     //         }
-//     //         Ok((rand_proj_kn, batch_glob_index, batch_membership))
-//     //     };
-
-//     // let (rand_proj_kn, batch_glob_index, batch_membership) = step2(&rand_basis_kd)?;
-
-//     //////////////////////////////////////////////////////////
-//     // Step 3: Assign columns to unified pseudobulk samples //
-//     //////////////////////////////////////////////////////////
-
-//     // fn step1(data_vec: &Vec<ArcData>, check_dim: usize) -> anyhow::Result<()> {
-//     //     for arc_data in data_vec.iter() {
-//     //         let data = arc_data.clone().lock()?;
-//     //     }
-
-//     //     Ok(())
-//     // }
-
-//     // let arc_data = Arc::new(Mutex::new(first_data.deref()));
-
-//     Ok(())
-// }
-
-// // #[allow(dead_code)]
-// // pub fn collapse_columns(
-// //     data: &Data,
-// //     target_dim: usize,
-// //     block_size: Option<usize>,
-// // ) -> anyhow::Result<()> {
-// //     let block_size = block_size.unwrap_or(100);
-
-// //     if let (Some(ncol), Some(nrow)) = (data.num_columns(), data.num_rows()) {
-// //         // 1. Sample a random matrix to project
-// //         let rand_basis_kd = sample_basis_to_reduce_rows(nrow, target_dim)?;
-// //         let kk = rand_basis_kd.nrows();
-
-// //         // let rand_basis_kd = scale_columns(Array2::random((kk, nrow), StandardNormal))?;
-
-// //         // 2. Visit each column to store up the RP matrix
-// //         let nblock = (ncol + block_size - 1) / block_size;
-// //         let arc_data = Arc::new(Mutex::new(data));
-
-// //         let mut rand_proj_kn: Array2<f32> = Array2::zeros((kk, ncol));
-// //         let arc_rand_proj_kn = Arc::new(Mutex::new(&mut rand_proj_kn));
-
-// //         (0..nblock)
-// //             .into_par_iter()
-// //             .map(|b| {
-// //                 let lb: usize = b * block_size;
-// //                 let ub: usize = ((b + 1) * block_size).min(ncol);
-// //                 (lb, ub)
-// //             })
-// //             .for_each(|(lb, ub)| {
-// //                 let data_b = arc_data.lock().expect("failed to lock data");
-// //                 let mut proj_km = arc_rand_proj_kn.lock().expect("failed to lock proj");
-// //                 // This could be inefficient since we are populating a dense matrix
-// //                 let xx_dm = data_b.read_columns_ndarray((lb..ub).collect()).unwrap();
-// //                 let target = proj_km.slice_mut(s![.., lb..ub]);
-// //                 (rand_basis_kd.dot(&xx_dm)).assign_to(target);
-// //             });
-
-// //         let binary_code_kn: Array2<u32> = Array2::zeros((kk, ncol));
-
-// //         let proj_km = arc_rand_proj_kn
-// //             .lock()
-// //             .expect("failed to lock proj")
-// //             .clone();
-
-// //         // let svd = TruncatedSvd::new(scale_columns(proj_km)?, TruncatedOrder::Largest)
-// //         //     .decompose(kk)?
-// //         //     .values_vectors();
-
-// //         // let (svd_u, svd_d, svd_vt) = svd;
-
-// //         // dbg!(&u.shape());
-// //         // dbg!(&d.shape());
-// //         // dbg!(&vt.shape());
-
-// //         // let (u, s, vt) = proj_km.svd(true, true)?;
-// //         // let vt: Array2<f32> = vt.unwrap();
-// //         // let zz = svd_obj.values_vectors();
-// //         // dbg!(zz.0);
-
-// //         //     let mut _assignment: Vec<(usize, usize)> = vt
-// //         //         .axis_iter(Axis(1))
-// //         //         .into_par_iter()
-// //         //         .enumerate()
-// //         //         .map(|(col_idx, v_j)| {
-// //         //             let idx = v_j.iter().fold(0, |acc, &v_ij| {
-// //         //                 if v_ij > 0.0 {
-// //         //                     acc // + (1 << col_idx)
-// //         //                 } else {
-// //         //                     acc
-// //         //                 }
-// //         //             });
-// //         //             (col_idx, idx)
-// //         //         })
-// //         //         .collect();
-
-// //         //     _assignment.sort_by_key(|&(i, _)| i);
-// //         // }
-
-// //         // 3. Random binary sorting
-// //     }
-
-// //     Ok(())
-// // }
+    // Down sample cells if needed
+    pb_cells.par_iter_mut().for_each(|(_, cells)| {
+        let ncells = cells.len();
+        if let Some(ntarget) = cells_per_sample {
+            if ncells > ntarget {
+                let mut rng = rand::thread_rng();
+                cells.shuffle(&mut rng);
+                cells.truncate(ntarget);
+            }
+        }
+        // dbg!(cells.len());
+    });
+    pb_cells
+}
