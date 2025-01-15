@@ -1,4 +1,5 @@
 pub mod common_io;
+pub mod dmatrix_match;
 pub mod dmatrix_rsvd;
 pub mod dmatrix_util;
 pub mod mtx_io;
