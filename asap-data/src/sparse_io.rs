@@ -210,6 +210,14 @@ pub trait SparseIo: Sync + Send {
         columns: Self::IndexIter,
     ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)>;
 
+    /// Read columns within the range and return a vector of triplets (row, col, value)
+    /// * `col` : usize
+    ///
+    fn read_triplets_by_single_column(
+        &self,
+        col: usize,
+    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)>;
+
     /// Export the data to a mtx file. This will take time.
     /// * `mtx_file`: mtx file to be written
     fn to_mtx_file(&self, mtx_file: &str) -> anyhow::Result<()>;

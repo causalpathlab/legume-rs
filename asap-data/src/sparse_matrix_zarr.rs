@@ -52,10 +52,7 @@ impl SparseMtxData {
             Self::_num_columns(store.clone()),
             Self::_num_nnz(store.clone()),
         ) {
-            dbg!(format!(
-                "#rows: {}, #columns: {}, #non-zeros: {}",
-                nrow, ncol, nnz
-            ));
+            println!("#rows: {}, #columns: {}, #non-zeros: {}", nrow, ncol, nnz);
         } else {
             anyhow::bail!("Couldn't figure out the size of this sparse matrix data");
         }
@@ -945,6 +942,61 @@ impl SparseIo for SparseMtxData {
             .collect())
     }
 
+    /// Read columns within the range and return a vector of triplets (row, col, value)
+    /// * `col` : usize
+    ///
+    fn read_triplets_by_single_column(
+        &self,
+        j_data: usize,
+    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)> {
+        use zarrs::array::Array as ZArray;
+        use zarrs::array_subset::ArraySubset;
+
+        debug_assert!(self.by_column_indptr.len() > 0);
+        let indptr = &self.by_column_indptr;
+
+        let key = "/by_column/data";
+        let data = ZArray::open(self.store.clone(), key)?;
+        let key = "/by_column/indices";
+        let indices = ZArray::open(self.store.clone(), key)?;
+
+        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
+            let mut ret: Vec<(usize, usize, f32)> = Vec::new();
+            let ncol_out = 1;
+            let jj = 0;
+
+            debug_assert!(indptr.len() > ncol);
+
+            if j_data < ncol {
+                debug_assert!((j_data + 1) < indptr.len());
+
+                // [start, end)
+                let start = indptr[j_data];
+                let end = indptr[j_data + 1];
+
+                if start < end {
+                    let subset = ArraySubset::new_with_ranges(&[start..end]);
+
+                    let data_slice = data.retrieve_array_subset_elements::<f32>(&subset)?;
+                    let indices_slice = indices.retrieve_array_subset_elements::<u64>(&subset)?;
+
+                    for k in 0..(end - start) {
+                        let x_ij = data_slice[k as usize];
+                        let ii = indices_slice[k as usize] as usize;
+                        debug_assert!(ii < nrow);
+                        ret.push((ii, jj, x_ij));
+                    }
+                }
+            }
+
+            Ok((nrow, ncol_out, ret))
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
     /// Read columns within the range and return dense `ndarray::Array2`
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
@@ -967,7 +1019,6 @@ impl SparseIo for SparseMtxData {
         let indices = ZArray::open(self.store.clone(), key)?;
 
         if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
-            let nrow = nrow as usize;
             let ncol_out = columns_vec.len();
 
             debug_assert!(indptr.len() > ncol);

@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 asap-data = { path = "../asap-data" }
 matrix-util = { path = "../matrix-util" }
+matrix-param = { path = "../matrix-param" }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
@@ -22,11 +23,12 @@ ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
 rand_distr = { workspace = true }
 nalgebra = { workspace = true }
+nalgebra-sparse = { workspace = true }
 approx = { workspace = true }
 
 instant-distance = { workspace = true }
 special = { workspace = true }
-indicatif = { version = "0.17.9", features = ["rayon"] }
+indicatif = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 candle-core = { version = "0.8", features = ["cuda","cudarc","cudnn"] }

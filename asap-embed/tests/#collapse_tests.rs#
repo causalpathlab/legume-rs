@@ -3,7 +3,7 @@ use asap_data::sparse_io_vector::SparseIoVec;
 use matrix_util::traits::SampleOps;
 use std::time::Instant;
 
-use asap_embed::traits::*;
+use asap_embed::common::*;
 use std::sync::Arc;
 
 fn measure_time<T, F>(f: F) -> T

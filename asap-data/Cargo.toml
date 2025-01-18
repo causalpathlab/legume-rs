@@ -17,7 +17,6 @@ num_cpus = { workspace = true }
 rayon = { workspace = true }
 
 hdf5 = { package = "hdf5-metno", version = "0.9", features = ["blosc"] }
-hdf5-sys = { package = "hdf5-metno-sys", version = "0.10", features = ["static", "zlib", "threadsafe"] }
 libz-sys = { version = "1.1", features = ["libc"], default-features = false }
 zarrs = { version = "0.19", features = ["gzip"] }
 
@@ -33,6 +32,8 @@ serde_json = { workspace = true }
 nalgebra = { workspace = true }
 nalgebra-sparse = { workspace = true }
 
+instant-distance = { workspace = true }
+indicatif = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 candle-core = { version = "0.8", features = ["cuda","cudarc","cudnn"] }

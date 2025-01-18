@@ -1,5 +1,7 @@
-pub mod random_projection;
-
+mod collapse_data;
+mod common;
+mod normalization;
+mod random_projection;
 // use asap_data::common_io as io;
 // type SData = dyn SparseIo<IndexIter = Vec<usize>>;
 
