@@ -839,6 +839,53 @@ impl SparseIo for SparseMtxData {
     }
 
     /// Read columns within the range and return a vector of triplets (row, col, value)
+    /// * `col` : usize
+    ///
+    fn read_triplets_by_single_column(
+        &self,
+        j_data: usize,
+    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)> {
+        let by_column = self.backend.group("/by_column")?;
+        debug_assert!(self.by_column_indptr.len() > 0);
+
+        let indptr = &self.by_column_indptr;
+        let data = by_column.dataset("data")?;
+        let indices = by_column.dataset("indices")?;
+
+        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
+            let mut ret = Vec::new();
+            let ncol_out = 1;
+            let jj = 0;
+
+            if j_data < ncol {
+                debug_assert!((j_data + 1) < indptr.len());
+
+                // [start, end)
+                let start = indptr[j_data] as usize;
+                let end = indptr[j_data + 1] as usize;
+
+                if start < end {
+                    let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
+                    let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+
+                    for k in 0..(end - start) {
+                        let x_ij = data_slice[k];
+                        let ii = indices_slice[k] as usize;
+                        debug_assert!(ii < nrow);
+                        ret.push((ii, jj, x_ij));
+                    }
+                }
+            }
+
+            Ok((nrow, ncol_out, ret))
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unable to figure out the size of the backend data"
+            ));
+        }
+    }
+
+    /// Read columns within the range and return a vector of triplets (row, col, value)
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
     fn read_triplets_by_columns(

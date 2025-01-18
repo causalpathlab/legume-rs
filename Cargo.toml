@@ -27,6 +27,7 @@ nalgebra-sparse = "0.10"
 num-traits = "0.2.19"
 
 instant-distance = "0.6"
+indicatif = { version = "0.17.9", features = ["rayon"] }
 
 asap-data = { path = "asap-data"}
 asap-embed = { path = "asap-embed" }

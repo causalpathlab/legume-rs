@@ -7,6 +7,8 @@ mod statistics;
 use crate::sparse_io::*;
 use crate::statistics::RunningStatistics;
 use clap::{Args, Parser, Subcommand};
+use indicatif::ParallelProgressIterator;
+// use indicatif::ProgressIterator;
 use matrix_util::*;
 use std::sync::{Arc, Mutex};
 
@@ -194,7 +196,7 @@ fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
     };
 
     if Path::new(&backend_file).exists() {
-        eprintln!(
+        println!(
             "This existing backend file '{}' will be deleted",
             &backend_file
         );
@@ -278,7 +280,7 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
 
     let mut data = open_sparse_matrix(&data_file, &backend)?;
 
-    eprintln!(
+    println!(
         "data: {} rows x {} columns",
         data.num_rows().unwrap(),
         data.num_columns().unwrap()
@@ -299,7 +301,7 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
 
         data.subset_columns_rows(Some(&col_idx), Some(&row_idx))?;
 
-        eprintln!(
+        println!(
             "data: {} rows x {} columns",
             data.num_rows().unwrap(),
             data.num_columns().unwrap()
@@ -344,7 +346,7 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         rseed: cmd_args.seed,
     };
 
-    simulate::generate_factored_gamma_data_mtx(
+    simulate::generate_factored_poisson_gamma_data_mtx(
         &sim_args,
         &mtx_file,
         &dict_file,
@@ -353,6 +355,8 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         &memb_file,
     )
     .expect("something went wrong in factored gamma");
+
+    println!("successfully generated factored Poisson-Gamma data");
 
     let mut data = create_sparse_mtx_file(&mtx_file, Some(&backend_file), Some(&backend))?;
 
@@ -391,6 +395,7 @@ fn collect_row_column_stats(
 
         (0..nblock)
             .into_par_iter()
+            .progress_count(nblock as u64)
             .map(|b| {
                 let lb: usize = b * block_size;
                 let ub: usize = ((b + 1) * block_size).min(ncol);

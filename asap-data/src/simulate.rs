@@ -26,7 +26,7 @@ pub struct SimArgs {
 /// Y(i,j) ~ Poisson( delta(i, B(j)) * sum_k beta(i,k) * theta(k,j) )
 /// ```
 ///
-pub fn generate_factored_gamma_data_mtx(
+pub fn generate_factored_poisson_gamma_data_mtx(
     args: &SimArgs,
     mtx_file: &str,
     dict_file: &str,

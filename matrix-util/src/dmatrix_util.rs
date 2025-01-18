@@ -1,14 +1,12 @@
 pub use nalgebra::{DMatrix, DVector};
 pub use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
 
-use num_traits::{Float, Zero};
+use num_traits::Float;
 pub use rand::{thread_rng, Rng};
 pub use rand_distr::{StandardNormal, Uniform};
 pub use rayon::prelude::*;
 
 use crate::traits::*;
-
-use std::ops::AddAssign;
 
 impl<T> CompositeOps for DMatrix<T>
 where
