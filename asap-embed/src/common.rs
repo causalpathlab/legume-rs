@@ -13,6 +13,7 @@ pub type DVec = DVector<f32>;
 #[allow(dead_code)]
 pub type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 
+#[allow(dead_code)]
 pub fn create_jobs(block_size: usize, ntot: usize) -> Vec<(usize, usize)> {
     let nblock = (ntot + block_size - 1) / block_size;
 
@@ -25,6 +26,7 @@ pub fn create_jobs(block_size: usize, ntot: usize) -> Vec<(usize, usize)> {
         .collect::<Vec<_>>()
 }
 
+#[allow(dead_code)]
 pub fn partition_to_membership(pb_cells: &HashMap<usize, Vec<usize>>) -> HashMap<usize, usize> {
     let mut sample_membership: HashMap<usize, usize> = HashMap::new();
     let arc = Arc::new(Mutex::new(&mut sample_membership));
@@ -38,6 +40,7 @@ pub fn partition_to_membership(pb_cells: &HashMap<usize, Vec<usize>>) -> HashMap
     sample_membership
 }
 
+#[allow(dead_code)]
 pub fn partition_by_membership(
     sample_membership: &Vec<usize>,
     cells_per_sample: Option<usize>,

@@ -1,6 +1,7 @@
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::fmt::{Debug, Display};
 use std::sync::{Arc, Mutex};
 
 /// A dictionary (HnswMap wrapper) for fast column look-up
@@ -13,7 +14,7 @@ pub struct ColumnDict<T> {
 
 impl<T> ColumnDict<T>
 where
-    T: Clone + Eq + std::hash::Hash,
+    T: Clone + Eq + std::hash::Hash + Debug + Display,
 {
     pub fn names(&self) -> &Vec<T> {
         &self.dict.values
@@ -42,13 +43,13 @@ where
     /// k-nearest neighbour match by name against another dictionary
     /// to return a Vec of names in the other dictionary
     ///
-    /// * `name` - the name of the column to match
+    /// * `query_name` - the name of the column to match
     /// * `knn` - the number of nearest neighbours to return
     /// * `against` - the dictionary to match against
     ///
     pub fn match_against_by_name(
         &self,
-        name: &T,
+        query_name: &T,
         knn: usize,
         against: &Self,
     ) -> anyhow::Result<Vec<T>> {
@@ -56,7 +57,7 @@ where
 
         let nquery = knn.min(against.data_vec.len());
 
-        if let Some(self_idx) = self.name2index.get(name) {
+        if let Some(self_idx) = self.name2index.get(query_name) {
             let query = &self.data_vec[*self_idx];
             let mut search = Search::default();
             let knn_iter = against.dict.search(query, &mut search).take(nquery);
@@ -67,7 +68,7 @@ where
             }
             Ok(ret)
         } else {
-            return Err(anyhow::anyhow!("Name not found"));
+            return Err(anyhow::anyhow!("name {} not found", query_name));
         }
     }
 }
@@ -79,7 +80,7 @@ pub trait ColumnDictOps<'a, T, V> {
 
 impl<'a, T, V> ColumnDictOps<'a, T, V> for ColumnDict<T>
 where
-    T: Clone + Eq + std::hash::Hash,
+    T: Clone + Eq + std::hash::Hash + Debug + Display,
     V: Sync + MakeVecPoint,
 {
     fn empty() -> Self {
@@ -114,9 +115,9 @@ where
 
         let mut name2index = HashMap::<T, usize>::new();
 
-        for j in 0..nn {
-            name2index.insert(names[j].clone(), j);
-        }
+        names.iter().enumerate().for_each(|(j, x)| {
+            name2index.insert(x.clone(), j);
+        });
 
         use instant_distance::Builder;
         let dict = Builder::default().build(data_vec.clone(), names.clone());
@@ -129,10 +130,10 @@ where
 
         #[cfg(debug_assertions)]
         {
-            // check if the order matches
-            for (j, x) in ret.names().iter().enumerate() {
+            // check if the name matches
+            for x in ret.names().iter() {
                 if let Some(&i) = ret.name2index.get(x) {
-                    debug_assert_eq!(i, j);
+                    debug_assert_eq!(*x, names[i]);
                 }
             }
         }
