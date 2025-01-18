@@ -278,7 +278,11 @@ impl SparseIoVec {
         feature_matrix: &ndarray::Array2<f32>,
         batch_membership: Vec<usize>,
     ) -> anyhow::Result<()> {
+        {
+            debug_assert_eq!(batch_membership.len(), feature_matrix.ncols());
+        }
         let batches = partition_by_membership(&batch_membership, None);
+
         let batch_names = batches.keys().cloned().collect::<Vec<usize>>();
 
         let num_batch = batch_names
@@ -311,6 +315,10 @@ impl SparseIoVec {
         feature_matrix: &nalgebra::DMatrix<f32>,
         batch_membership: Vec<usize>,
     ) -> anyhow::Result<()> {
+        {
+            debug_assert_eq!(batch_membership.len(), feature_matrix.ncols());
+        }
+
         let batches = partition_by_membership(&batch_membership, None);
         let batch_names = batches.keys().cloned().collect::<Vec<usize>>();
 
@@ -331,10 +339,12 @@ impl SparseIoVec {
                     .iter()
                     .map(|&c| feature_matrix.column(c))
                     .collect::<Vec<_>>();
+
                 dictionaries.push(ColumnDict::<usize>::from_dvector_views(
                     columns,
                     batch_cells.clone(),
                 ));
+
                 for &j in batch_cells {
                     cell_to_batch[j] = b;
                 }

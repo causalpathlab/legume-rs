@@ -1,10 +1,11 @@
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::SparseIoVec;
+use asap_embed::collapse_data::*;
+use asap_embed::common::*;
+use asap_embed::random_projection::*;
 use matrix_util::traits::SampleOps;
-use std::time::Instant;
-
-use asap_embed::traits::*;
 use std::sync::Arc;
+use std::time::Instant;
 
 fn measure_time<T, F>(f: F) -> T
 where
@@ -19,8 +20,10 @@ where
 
 #[test]
 fn random_collapse() -> anyhow::Result<()> {
-    let dd = 500_usize;
-    let nn = 1111_usize;
+    use rayon::prelude::*;
+
+    let dd = 50_usize;
+    let nn = 111_usize;
     let xx = DMatrix::<f32>::runif(dd, nn);
 
     let data1: Arc<SparseData> = Arc::from(create_sparse_dmatrix(&xx, None, None)?);
@@ -30,17 +33,22 @@ fn random_collapse() -> anyhow::Result<()> {
     data_vec.push(data1.clone())?;
     data_vec.push(data2.clone())?;
 
-    data_vec.project_cbind(10, None)?;
+    let (_, proj_kn) = data_vec.project_cbind(3, None)?;
+
+    let cells_to_samples = cells_to_samples_by_proj(&proj_kn)?;
+
+    use rand::{thread_rng, Rng};
+    let nbatch = 3;
+    let runif = rand_distr::Uniform::<usize>::new(0, nbatch);
+    let batch_membership = (0..data_vec.num_columns().unwrap())
+        .into_par_iter()
+        .map_init(thread_rng, |rng, _| rng.sample(runif))
+        .collect();
+
+    data_vec.register_batches(&proj_kn, &batch_membership)?;
+
+    data_vec.collapse_columns(&cells_to_samples, None, Some(1))?;
+
     measure_time(|| data_vec.remove_backend_file())?;
-
-    // let data_vec = vec![data1.clone(), data2.clone()];
-
-    // let mut rp_obj = RandProjVec::new(&data_vec, None)?;
-    // rp_obj.step0_sample_basis_cbind(5)?;
-    // measure_time(|| rp_obj.step1_proj_cbind())?;
-    // measure_time(|| rp_obj.step2_cell_sorting_cbind())?;
-    // measure_time(|| rp_obj.build_dictionary_per_batch(None))?;
-    // measure_time(|| rp_obj.step4_collapse_columns_cbind(Some(100)))?;
-
     Ok(())
 }

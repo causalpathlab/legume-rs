@@ -70,6 +70,17 @@ pub trait CollapsingOps {
     /// * `cell_to_batch` - map: cell -> batch
     fn register_batches(&mut self, proj_kn: &Mat, cell_to_batch: &Vec<usize>)
         -> anyhow::Result<()>;
+
+    fn collect_basic_stat(&self, sample_to_cells: &HashMap<usize, Vec<usize>>, stat: &mut Stat);
+
+    fn collect_batch_stat(&self, sample_to_cells: &HashMap<usize, Vec<usize>>, stat: &mut Stat);
+
+    fn collect_matched_stat(
+        &self,
+        sample_to_cells: &HashMap<usize, Vec<usize>>,
+        knn: usize,
+        stat: &mut Stat,
+    );
 }
 
 impl CollapsingOps for SparseIoVec {
@@ -103,16 +114,46 @@ impl CollapsingOps for SparseIoVec {
         let num_batches = self.num_batches();
 
         let mut stat = Stat::new(num_genes, num_samples, num_batches);
-        let arc_stat = Arc::new(Mutex::new(&mut stat));
+        // (&mut stat).clear();
+        // let arc_stat = Arc::new(Mutex::new(&mut stat));
 
-        /////////////////////////////////
-        // accumulate basic statistics //
-        /////////////////////////////////
+        println!("basic statistics across {} samples", num_samples);
+        self.collect_basic_stat(&sample_to_cells, &mut stat);
 
+        if num_batches > 1 {
+            println!(
+                "batch-specific statistics across {} batches over {} samples",
+                num_batches, num_samples
+            );
+
+            self.collect_batch_stat(&sample_to_cells, &mut stat);
+
+            println!(
+                "counterfactual statistics across {} batches over {} samples",
+                num_batches, num_samples,
+            );
+
+            let knn = knn.unwrap_or(DEFAULT_KNN);
+            self.collect_matched_stat(&sample_to_cells, knn, &mut stat);
+        } // if num_batches > 1
+
+        /////////////////////////////
+        // Resolve mean parameters //
+        /////////////////////////////
+
+        let (a0, b0) = (1_f32, 1_f32);
+        optimize(&stat, (a0, b0))?;
+
+        Ok(())
+    }
+
+    fn collect_basic_stat(&self, sample_to_cells: &HashMap<usize, Vec<usize>>, stat: &mut Stat) {
+        let num_samples = sample_to_cells.len();
         let num_jobs = num_samples as u64;
+        let arc_stat = Arc::new(Mutex::new(stat));
 
-        println!("collect basic statistics across {} samples", num_samples);
-
+        // ysum(g,s) = sum_j C(j,s) * Y(g,j)
+        // size(s) = sum_j C(j,s)
         sample_to_cells
             .par_iter()
             .progress_count(num_jobs)
@@ -132,231 +173,286 @@ impl CollapsingOps for SparseIoVec {
                     }
                 }
             });
+    }
 
-        if num_batches > 1 {
-            ///////////////////////////////////////
-            // collect counterfactual statistics //
-            ///////////////////////////////////////
+    fn collect_batch_stat(&self, sample_to_cells: &HashMap<usize, Vec<usize>>, stat: &mut Stat) {
+        let num_samples = sample_to_cells.len();
+        let num_jobs = num_samples as u64;
+        let arc_stat = Arc::new(Mutex::new(stat));
 
-            println!(
-                "collect counterfactual statistics across {} batches over {} samples",
-                num_samples, num_batches
-            );
+        // ysum(g,b) = sum_j sum_s C(j,s) * Y(g,j) * I(b,s)
+        // n(b,s) = sum_j C(j,s) * I(b,s)
+        sample_to_cells
+            .par_iter()
+            .progress_count(num_jobs)
+            .for_each(|(&sample, cells)| {
+                let mut stat = arc_stat.lock().expect("failed to lock stat");
 
-            let knn = knn.unwrap_or(DEFAULT_KNN);
+                let batches = self.get_batch_membership(cells.iter().cloned());
 
-            sample_to_cells
-                .par_iter()
-                .progress_count(num_jobs)
-                .for_each(|(&sample, cells)| {
-                    let mut stat = arc_stat.lock().expect("failed to lock stat");
+                // 1. read source cells
+                let mut yy = self
+                    .read_cells_csc(cells.iter().cloned())
+                    .expect("failed to read cells");
+                yy.normalize_columns_inplace();
 
-                    let batches = self.get_batch_membership(cells.iter().cloned());
-
-                    for b in batches {
-                        stat.n_bs[(b, sample)] += 1_f32;
+                yy.col_iter().zip(batches.iter()).for_each(|(y_j, &b)| {
+                    let rows = y_j.row_indices();
+                    let vals = y_j.values();
+                    for (&gene, &y) in rows.iter().zip(vals.iter()) {
+                        stat.ysum_db[(gene, b)] += y;
                     }
+                    stat.n_bs[(b, sample)] += 1_f32;
+                });
+            });
+    }
 
-                    // 1. read source cells -- use dense fo
-                    let mut yy = self
-                        .read_cells_dmatrix(cells.iter().cloned())
-                        .expect("failed to read cells");
-                    yy.normalize_columns_inplace();
+    fn collect_matched_stat(
+        &self,
+        sample_to_cells: &HashMap<usize, Vec<usize>>,
+        knn: usize,
+        stat: &mut Stat,
+    ) {
+        let num_genes = self.num_rows().expect("failed to get num genes");
+        let num_samples = sample_to_cells.len();
+        let num_batches = self.num_batches();
+        let num_jobs = num_samples as u64;
+        let arc_stat = Arc::new(Mutex::new(stat));
 
-                    let positions: HashMap<_, _> =
-                        cells.iter().enumerate().map(|(i, c)| (c, i)).collect();
+        // zsum(g,s) = sum_j C(j,s) * Z(g,j)
+        sample_to_cells
+            .par_iter()
+            .progress_count(num_jobs)
+            .for_each(|(&sample, cells)| {
+                let mut stat = arc_stat.lock().expect("failed to lock stat");
 
-                    // 2. read matched cells and distance from their source
-                    let mut matched_triplets: Vec<(usize, usize, f32)> = vec![];
-                    let mut source_columns: Vec<usize> = vec![];
-                    let mut mean_square_distances = vec![];
-                    let mut tot_ncells_matched = 0;
+                let positions: HashMap<_, _> =
+                    cells.iter().enumerate().map(|(i, c)| (c, i)).collect();
+                let mut matched_triplets: Vec<(usize, usize, f32)> = vec![];
+                let mut source_columns: Vec<usize> = vec![];
+                let mut mean_square_distances = vec![];
+                let mut tot_ncells_matched = 0;
 
-                    for target_batch in 0..num_batches {
-                        let (_, ncol, triplets, source_cells_in_target) = self
-                            .collect_matched_cells_triplets(
-                                cells.iter().cloned(),
-                                target_batch,
-                                knn,
-                                true,
-                            )
-                            .expect("failed to read matched cells");
+                let mut yy = self
+                    .read_cells_dmatrix(cells.iter().cloned())
+                    .expect("failed to read cells");
+                yy.normalize_columns_inplace();
 
-                        matched_triplets.extend(
-                            triplets
-                                .iter()
-                                .map(|(i, j, z_ij)| (*i, *j + tot_ncells_matched, *z_ij)),
-                        );
-
-                        // matched cells within this batch
-                        let mut zz = nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(
-                            num_genes, ncol, triplets,
+                for target_batch in 0..num_batches {
+                    // match cells between source and target batches
+                    let (_, ncol, triplets, source_cells_in_target) = self
+                        .collect_matched_cells_triplets(
+                            cells.iter().cloned(),
+                            target_batch,
+                            knn,
+                            true,
                         )
-                        .expect("failed to build z matrix");
-                        zz.normalize_columns_inplace();
+                        .expect("failed to read matched cells");
 
-                        let src_pos_in_target: Vec<usize> = source_cells_in_target
+                    matched_triplets.extend(
+                        triplets
                             .iter()
-                            .map(|c| {
-                                *positions
-                                    .get(&c)
-                                    .expect("failed to identify the source position")
-                            })
-                            .collect();
+                            .map(|(i, j, z_ij)| (*i, *j + tot_ncells_matched, *z_ij)),
+                    );
 
-                        let denom = zz.nrows() as f32;
-
-                        mean_square_distances.extend(
-                            // for each column of the matched matrix
-                            // MSE(j,k) = sum_g (y[g),j] - z[g,k])^2 / sum_g 1
-                            zz.col_iter()
-                                .zip(src_pos_in_target.iter())
-                                .map(|(z_j, &j)| {
-                                    // source column/cell
-                                    let y_j = yy.column(j);
-                                    // matched/target column/cell
-                                    let z_rows = z_j.row_indices();
-                                    let z_vals = z_j.values();
-
-                                    let y_tot = y_j.map(|x| x * x).sum();
-                                    // to avoid double counting
-                                    let y_overlap =
-                                        z_rows.iter().map(|&i| y_j[i] * y_j[i]).sum::<f32>();
-                                    let delta_overlap = z_rows
-                                        .iter()
-                                        .zip(z_vals.iter())
-                                        .map(|(&i, &y)| (y - y_j[i]) * (y - y_j[i]))
-                                        .sum::<f32>();
-                                    (y_tot - y_overlap + delta_overlap) / denom
-                                }),
-                        );
-
-                        source_columns.extend(src_pos_in_target);
-                        tot_ncells_matched += ncol;
-                    } // for each target batch of step 2.
-
-                    ////////////////////////////////////////////////////
-                    // a full set of y vectors needed for this sample //
-                    ////////////////////////////////////////////////////
-
-                    let mut zz_full = nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(
-                        num_genes,
-                        tot_ncells_matched,
-                        matched_triplets,
+                    // matched cells within this batch
+                    let mut zz = nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(
+                        num_genes, ncol, triplets,
                     )
-                    .expect("failed to build y matrix");
-                    zz_full.normalize_columns_inplace();
+                    .expect("failed to build z matrix");
+                    zz.normalize_columns_inplace();
 
-                    // 3. normalize distance for each source cell and
-                    // take a weighted average of the matched vectors
-                    // using this weight vector
-                    let norm_target = 2_f32.ln();
-                    let source_column_groups = partition_by_membership(&source_columns, None);
+                    let src_pos_in_target: Vec<usize> = source_cells_in_target
+                        .iter()
+                        .map(|c| {
+                            *positions
+                                .get(&c)
+                                .expect("failed to identify the source position")
+                        })
+                        .collect();
 
-                    ////////////////////////////////////////////////////////
-                    // zhat[g,j]  =  sum_k w[j,k] * z[g,k] / sum_k w[j,k] //
-                    // zsum[g,s]  =  sum_j zhat[g,j]                      //
-                    ////////////////////////////////////////////////////////
+                    let denom = zz.nrows() as f32;
 
-                    for (_, z_pos) in source_column_groups.iter() {
-                        let weights = z_pos
-                            .iter()
-                            .map(|&cell| mean_square_distances[cell])
-                            .normalized_exp(norm_target);
+                    mean_square_distances.extend(
+                        // for each column of the matched matrix
+                        // MSE(j,k) = sum_g (y[g),j] - z[g,k])^2 / sum_g 1
+                        zz.col_iter()
+                            .zip(src_pos_in_target.iter())
+                            .map(|(z_j, &j)| {
+                                // source column/cell
+                                let y_j = yy.column(j);
+                                // matched/target column/cell
+                                let z_rows = z_j.row_indices();
+                                let z_vals = z_j.values();
 
-                        let denom = weights.iter().sum::<f32>();
+                                let y_tot = y_j.map(|x| x * x).sum();
+                                // to avoid double counting
+                                let y_overlap =
+                                    z_rows.iter().map(|&i| y_j[i] * y_j[i]).sum::<f32>();
+                                let delta_overlap = z_rows
+                                    .iter()
+                                    .zip(z_vals.iter())
+                                    .map(|(&i, &z)| (z - y_j[i]) * (z - y_j[i]))
+                                    .sum::<f32>();
+                                (y_tot - y_overlap + delta_overlap) / denom
+                            }),
+                    );
 
-                        z_pos.iter().zip(weights.iter()).for_each(|(&z_pos, &w)| {
-                            let z = zz_full.get_col(z_pos).unwrap();
-                            let z_rows = z.row_indices();
-                            let z_vals = z.values();
-                            z_rows.iter().zip(z_vals.iter()).for_each(|(&gene, &z)| {
-                                stat.zsum_ds[(gene, sample)] += z * w / denom;
-                            });
+                    source_columns.extend(src_pos_in_target);
+                    tot_ncells_matched += ncol;
+                } // for each target batch of step 2.
+
+                ////////////////////////////////////////////////////
+                // a full set of y vectors needed for this sample //
+                ////////////////////////////////////////////////////
+
+                let mut zz_full = CscMatrix::from_nonzero_triplets(
+                    num_genes,
+                    tot_ncells_matched,
+                    matched_triplets,
+                )
+                .expect("failed to build y matrix");
+                zz_full.normalize_columns_inplace();
+
+                // 3. normalize distance for each source cell and
+                // take a weighted average of the matched vectors
+                // using this weight vector
+                let norm_target = 2_f32.ln();
+                let source_column_groups = partition_by_membership(&source_columns, None);
+
+                ////////////////////////////////////////////////////////
+                // zhat[g,j]  =  sum_k w[j,k] * z[g,k] / sum_k w[j,k] //
+                // zsum[g,s]  =  sum_j zhat[g,j]                      //
+                ////////////////////////////////////////////////////////
+
+                for (_, z_pos) in source_column_groups.iter() {
+                    let weights = z_pos
+                        .iter()
+                        .map(|&cell| mean_square_distances[cell])
+                        .normalized_exp(norm_target);
+
+                    let denom = weights.iter().sum::<f32>();
+
+                    z_pos.iter().zip(weights.iter()).for_each(|(&z_pos, &w)| {
+                        let z = zz_full.get_col(z_pos).unwrap();
+                        let z_rows = z.row_indices();
+                        let z_vals = z.values();
+                        z_rows.iter().zip(z_vals.iter()).for_each(|(&gene, &z)| {
+                            stat.zsum_ds[(gene, sample)] += z * w / denom;
                         });
-                    }
-                }); // for each sample
-        } // if num_batches > 1
-
-        /////////////////////////////
-        // Resolve mean parameters //
-        /////////////////////////////
-
-        let (a0, b0) = (1_f32, 1_f32);
-
-        if num_batches > 1 {
-            ////////////////////////////////////////////////////////////////////
-            // optimize three types of gamma parameters: mu, gamma, and delta //
-            ////////////////////////////////////////////////////////////////////
-
-            let mu_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
-            let gamma_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
-            let delta_param = GammaMatrix::new((num_genes, num_batches), a0, b0);
-
-            stat.gamma_ds.fill(1.0);
-            stat.delta_db.fill(1.0);
-
-            {
-                // shared component (mu_ds)
-                //
-                // y_sum_ds + z_sum_ds
-                // -----------------------------------------
-                // sum_b delta_db * n_bs + gamma_ds * size_s
-                //
-
-                // z-specific component (gamma_ds)
-                //
-                // z_sum_ds
-                // -----------------------------------
-                // mu_ds * size_s
-
-		// delta_db
-		//
-		// sum_s z_sum_ds * prob_bs
-		// ---------------------
-		// sum_s mu_ds * n_bs
-            }
-        } else {
-            ////////////////////////////////////////////////////////////
-            // pseudobulk estimation without considering batch effect //
-            ////////////////////////////////////////////////////////////
-
-            let mut mu_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
-            let denom_ds: Mat = DVec::from_element(num_genes, 1_f32) * stat.size_s.transpose();
-            mu_param.update_stat(&stat.ysum_ds, &denom_ds);
-            mu_param.calibrate();
-        }
-
-        Ok(())
+                    });
+                }
+            }); // for each sample
     }
 }
 
-struct Stat {
-    pub mu_ds: Mat,          // observed mean
-    pub ysum_ds: Mat,        // observed sum within each sample
-    pub gamma_ds: Mat,       // residual mean
-    pub zsum_ds: Mat,        // counterfactual sum within each sample
-    pub size_s: DVec,        // sample s size
-    pub delta_db: Mat,       // divergence mean
-    pub delta_num_db: Mat,   // divergence numerator
-    pub delta_denom_db: Mat, // divergence denominator
-    pub n_bs: Mat,           // batch-specific sample size
-    pub prob_bs: Mat,        // P(a cell in a batch in a sample)
+fn optimize(
+    stat: &Stat,
+    hyper: (f32, f32),
+) -> anyhow::Result<(GammaMatrix, Option<GammaMatrix>, Option<GammaMatrix>)> {
+    let (a0, b0) = hyper;
+    let num_genes = stat.num_genes();
+    let num_samples = stat.num_samples();
+    let num_batches = stat.num_batches();
+    let mut mu_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
+    let mut gamma_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
+    let mut delta_param = GammaMatrix::new((num_genes, num_batches), a0, b0);
+
+    if num_batches > 1 {
+        // temporary denominator
+        let mut denom_ds = Mat::zeros(num_genes, num_samples);
+
+        // shared component (mu_ds)
+        //
+        // y_sum_ds + z_sum_ds
+        // -----------------------------------------
+        // sum_b delta_db * n_bs + gamma_ds .* size_s
+
+        let gamma_ds = gamma_param.posterior_mean();
+        let delta_db = delta_param.posterior_mean();
+
+        denom_ds.copy_from(gamma_ds);
+        denom_ds.row_iter_mut().for_each(|mut row| {
+            row.component_mul_assign(&stat.size_s.transpose());
+        });
+        denom_ds += delta_db * &stat.n_bs;
+
+        mu_param.update_stat(&(&stat.ysum_ds + &stat.zsum_ds), &denom_ds);
+        mu_param.calibrate();
+
+        let mu_ds = mu_param.posterior_mean();
+
+        // z-specific component (gamma_ds)
+        //
+        // z_sum_ds
+        // -----------------------------------
+        // mu_ds .* size_s
+
+        denom_ds.copy_from(mu_ds);
+        denom_ds.row_iter_mut().for_each(|mut row| {
+            row.component_mul_assign(&stat.size_s.transpose());
+        });
+
+        gamma_param.update_stat(&stat.zsum_ds, &denom_ds);
+        gamma_param.calibrate();
+
+        // batch-specific effect (delta_db)
+        //
+        // y_sum_db
+        // ---------------------
+        // sum_s mu_ds * n_bs
+
+        delta_param.update_stat(&stat.ysum_db, &(mu_ds * &stat.n_bs.transpose()));
+        delta_param.calibrate();
+
+        Ok((mu_param, Some(gamma_param), Some(delta_param)))
+    } else {
+        let denom_ds: Mat = DVec::from_element(num_genes, 1_f32) * stat.size_s.transpose();
+        mu_param.update_stat(&stat.ysum_ds, &denom_ds);
+        mu_param.calibrate();
+        Ok((mu_param, None, None))
+    }
+}
+
+pub struct Stat {
+    pub ysum_ds: Mat, // observed sum within each sample
+    pub zsum_ds: Mat, // counterfactual sum within each sample
+    pub size_s: DVec, // sample s size
+    pub ysum_db: Mat, // divergence numerator
+    pub n_bs: Mat,    // batch-specific sample size
 }
 
 impl Stat {
     pub fn new(ngene: usize, nsample: usize, nbatch: usize) -> Self {
         Self {
-            mu_ds: Mat::zeros(ngene, nsample),
             ysum_ds: Mat::zeros(ngene, nsample),
-            gamma_ds: Mat::zeros(ngene, nsample),
             zsum_ds: Mat::zeros(ngene, nsample),
             size_s: DVec::zeros(nsample),
-            delta_db: Mat::zeros(ngene, nbatch),
-            delta_num_db: Mat::zeros(ngene, nbatch),
-            delta_denom_db: Mat::zeros(ngene, nbatch),
+            ysum_db: Mat::zeros(ngene, nbatch),
             n_bs: Mat::zeros(nbatch, nsample),
-            prob_bs: Mat::zeros(nbatch, nsample),
         }
+    }
+    #[allow(dead_code)]
+    pub fn num_genes(&self) -> usize {
+        self.ysum_ds.nrows()
+    }
+
+    #[allow(dead_code)]
+    pub fn num_samples(&self) -> usize {
+        self.ysum_ds.ncols()
+    }
+
+    #[allow(dead_code)]
+    pub fn num_batches(&self) -> usize {
+        self.ysum_db.ncols()
+    }
+
+    #[allow(dead_code)]
+    pub fn clear(&mut self) {
+        self.ysum_ds.fill(0_f32);
+        self.zsum_ds.fill(0_f32);
+        self.ysum_db.fill(0_f32);
+        self.size_s.fill(0_f32);
+        self.n_bs.fill(0_f32);
     }
 }
