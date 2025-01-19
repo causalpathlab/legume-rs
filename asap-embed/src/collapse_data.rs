@@ -1,8 +1,10 @@
 use crate::common::*;
 use crate::normalization::*;
 use asap_data::sparse_io_vector::SparseIoVec;
+use matrix_param::traits::Inference;
 
 use indicatif::ParallelProgressIterator;
+use indicatif::ProgressIterator;
 use matrix_util::traits::MatOps;
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +18,7 @@ use matrix_param::traits::*;
 use std::collections::HashMap;
 
 pub const DEFAULT_KNN: usize = 10;
+pub const DEFAULT_OPT_ITER: usize = 100;
 
 /// Assign each column/cell to random sample by binary encoding
 /// # Arguments
@@ -45,6 +48,11 @@ pub fn cells_to_samples_by_proj(proj_kn: &Mat) -> anyhow::Result<Vec<usize>> {
 }
 
 #[allow(dead_code)]
+/// Given a feature/projection matrix (factor x cells), we assign each
+/// cell to a sample and return pseudobulk (collapsed) matrices
+///
+/// (1) Register batches if needed (2) collapse columns/cells into samples
+///
 pub trait CollapsingOps {
     /// Collapse columns/cells into samples as allocated by
     /// `cell_to_sample` (`Vec<usize>`)
@@ -53,13 +61,15 @@ pub trait CollapsingOps {
     /// * `cell_to_sample` - map: cell -> sample
     /// * `cells_per_sample` - number of cells per sample (None: no down sampling)
     /// * `knn` - number of nearest neighbors for building HNSW graph (default: 10)
+    /// * `num_opt_iter` - number of optimization iterations (default: 100)
     ///
     fn collapse_columns(
         &self,
         cell_to_sample: &Vec<usize>,
         cells_per_sample: Option<usize>,
         knn: Option<usize>,
-    ) -> anyhow::Result<()>;
+        num_opt_iter: Option<usize>,
+    ) -> anyhow::Result<CollapsingOut>;
 
     /// Register batch information and build a `HnswMap` object for
     /// each batch for fast nearest neighbor search within each batch
@@ -71,15 +81,23 @@ pub trait CollapsingOps {
     fn register_batches(&mut self, proj_kn: &Mat, cell_to_batch: &Vec<usize>)
         -> anyhow::Result<()>;
 
-    fn collect_basic_stat(&self, sample_to_cells: &HashMap<usize, Vec<usize>>, stat: &mut Stat);
+    fn collect_basic_stat(
+        &self,
+        sample_to_cells: &HashMap<usize, Vec<usize>>,
+        stat: &mut CollapsingStat,
+    );
 
-    fn collect_batch_stat(&self, sample_to_cells: &HashMap<usize, Vec<usize>>, stat: &mut Stat);
+    fn collect_batch_stat(
+        &self,
+        sample_to_cells: &HashMap<usize, Vec<usize>>,
+        stat: &mut CollapsingStat,
+    );
 
     fn collect_matched_stat(
         &self,
         sample_to_cells: &HashMap<usize, Vec<usize>>,
         knn: usize,
-        stat: &mut Stat,
+        stat: &mut CollapsingStat,
     );
 }
 
@@ -99,12 +117,23 @@ impl CollapsingOps for SparseIoVec {
         self.register_batches_dmatrix(proj_kn, cell_to_batch.clone())
     }
 
+    ///
+    /// Collapse columns/cells into samples as allocated by
+    /// `cell_to_sample` (`Vec<usize>`)
+    ///
+    /// # Arguments
+    /// * `cell_to_sample` - map: cell -> sample
+    /// * `cells_per_sample` - number of cells per sample (None: no down sampling)
+    /// * `knn` - number of nearest neighbors for building HNSW graph (default: 10)
+    /// * `num_opt_iter` - number of optimization iterations (default: 100)
+    ///
     fn collapse_columns(
         &self,
         cell_to_sample: &Vec<usize>,
         cells_per_sample: Option<usize>,
         knn: Option<usize>,
-    ) -> anyhow::Result<()> {
+        num_opt_iter: Option<usize>,
+    ) -> anyhow::Result<CollapsingOut> {
         // Down sampling if needed
         println!("Partitioning {} cells into samples", cell_to_sample.len());
         let sample_to_cells = partition_by_membership(cell_to_sample, cells_per_sample);
@@ -113,7 +142,7 @@ impl CollapsingOps for SparseIoVec {
         let num_samples = sample_to_cells.len();
         let num_batches = self.num_batches();
 
-        let mut stat = Stat::new(num_genes, num_samples, num_batches);
+        let mut stat = CollapsingStat::new(num_genes, num_samples, num_batches);
         // (&mut stat).clear();
         // let arc_stat = Arc::new(Mutex::new(&mut stat));
 
@@ -142,12 +171,14 @@ impl CollapsingOps for SparseIoVec {
         /////////////////////////////
 
         let (a0, b0) = (1_f32, 1_f32);
-        optimize(&stat, (a0, b0))?;
-
-        Ok(())
+        optimize(&stat, (a0, b0), num_opt_iter.unwrap_or(DEFAULT_OPT_ITER))
     }
 
-    fn collect_basic_stat(&self, sample_to_cells: &HashMap<usize, Vec<usize>>, stat: &mut Stat) {
+    fn collect_basic_stat(
+        &self,
+        sample_to_cells: &HashMap<usize, Vec<usize>>,
+        stat: &mut CollapsingStat,
+    ) {
         let num_samples = sample_to_cells.len();
         let num_jobs = num_samples as u64;
         let arc_stat = Arc::new(Mutex::new(stat));
@@ -175,7 +206,11 @@ impl CollapsingOps for SparseIoVec {
             });
     }
 
-    fn collect_batch_stat(&self, sample_to_cells: &HashMap<usize, Vec<usize>>, stat: &mut Stat) {
+    fn collect_batch_stat(
+        &self,
+        sample_to_cells: &HashMap<usize, Vec<usize>>,
+        stat: &mut CollapsingStat,
+    ) {
         let num_samples = sample_to_cells.len();
         let num_jobs = num_samples as u64;
         let arc_stat = Arc::new(Mutex::new(stat));
@@ -211,7 +246,7 @@ impl CollapsingOps for SparseIoVec {
         &self,
         sample_to_cells: &HashMap<usize, Vec<usize>>,
         knn: usize,
-        stat: &mut Stat,
+        stat: &mut CollapsingStat,
     ) {
         let num_genes = self.num_rows().expect("failed to get num genes");
         let num_samples = sample_to_cells.len();
@@ -346,10 +381,13 @@ impl CollapsingOps for SparseIoVec {
     }
 }
 
+/// Optimize the mean parameters for three Gamma distributions
+///
 fn optimize(
-    stat: &Stat,
+    stat: &CollapsingStat,
     hyper: (f32, f32),
-) -> anyhow::Result<(GammaMatrix, Option<GammaMatrix>, Option<GammaMatrix>)> {
+    num_iter: usize,
+) -> anyhow::Result<CollapsingOut> {
     let (a0, b0) = hyper;
     let num_genes = stat.num_genes();
     let num_samples = stat.num_samples();
@@ -362,59 +400,79 @@ fn optimize(
         // temporary denominator
         let mut denom_ds = Mat::zeros(num_genes, num_samples);
 
-        // shared component (mu_ds)
-        //
-        // y_sum_ds + z_sum_ds
-        // -----------------------------------------
-        // sum_b delta_db * n_bs + gamma_ds .* size_s
+        (0..num_iter).progress().for_each(|_| {
+            // shared component (mu_ds)
+            //
+            // y_sum_ds + z_sum_ds
+            // -----------------------------------------
+            // sum_b delta_db * n_bs + gamma_ds .* size_s
 
-        let gamma_ds = gamma_param.posterior_mean();
-        let delta_db = delta_param.posterior_mean();
+            let gamma_ds = gamma_param.posterior_mean();
+            let delta_db = delta_param.posterior_mean();
 
-        denom_ds.copy_from(gamma_ds);
-        denom_ds.row_iter_mut().for_each(|mut row| {
-            row.component_mul_assign(&stat.size_s.transpose());
+            denom_ds.copy_from(gamma_ds);
+            denom_ds.row_iter_mut().for_each(|mut row| {
+                row.component_mul_assign(&stat.size_s.transpose());
+            });
+            denom_ds += delta_db * &stat.n_bs;
+
+            mu_param.update_stat(&(&stat.ysum_ds + &stat.zsum_ds), &denom_ds);
+            mu_param.calibrate();
+
+            let mu_ds = mu_param.posterior_mean();
+
+            // z-specific component (gamma_ds)
+            //
+            // z_sum_ds
+            // -----------------------------------
+            // mu_ds .* size_s
+
+            denom_ds.copy_from(mu_ds);
+            denom_ds.row_iter_mut().for_each(|mut row| {
+                row.component_mul_assign(&stat.size_s.transpose());
+            });
+
+            gamma_param.update_stat(&stat.zsum_ds, &denom_ds);
+            gamma_param.calibrate();
+
+            // batch-specific effect (delta_db)
+            //
+            // y_sum_db
+            // ---------------------
+            // sum_s mu_ds * n_bs
+
+            delta_param.update_stat(&stat.ysum_db, &(mu_ds * &stat.n_bs.transpose()));
+            delta_param.calibrate();
         });
-        denom_ds += delta_db * &stat.n_bs;
 
-        mu_param.update_stat(&(&stat.ysum_ds + &stat.zsum_ds), &denom_ds);
-        mu_param.calibrate();
-
-        let mu_ds = mu_param.posterior_mean();
-
-        // z-specific component (gamma_ds)
-        //
-        // z_sum_ds
-        // -----------------------------------
-        // mu_ds .* size_s
-
-        denom_ds.copy_from(mu_ds);
-        denom_ds.row_iter_mut().for_each(|mut row| {
-            row.component_mul_assign(&stat.size_s.transpose());
-        });
-
-        gamma_param.update_stat(&stat.zsum_ds, &denom_ds);
-        gamma_param.calibrate();
-
-        // batch-specific effect (delta_db)
-        //
-        // y_sum_db
-        // ---------------------
-        // sum_s mu_ds * n_bs
-
-        delta_param.update_stat(&stat.ysum_db, &(mu_ds * &stat.n_bs.transpose()));
-        delta_param.calibrate();
-
-        Ok((mu_param, Some(gamma_param), Some(delta_param)))
+        Ok(CollapsingOut {
+            mu: mu_param,
+            gamma: Some(gamma_param),
+            delta: Some(delta_param),
+        })
     } else {
         let denom_ds: Mat = DVec::from_element(num_genes, 1_f32) * stat.size_s.transpose();
         mu_param.update_stat(&stat.ysum_ds, &denom_ds);
         mu_param.calibrate();
-        Ok((mu_param, None, None))
+        Ok(CollapsingOut {
+            mu: mu_param,
+            gamma: None,
+            delta: None,
+        })
     }
 }
 
-pub struct Stat {
+/// output struct to make the model parameters more accessible
+#[allow(dead_code)]
+pub struct CollapsingOut {
+    pub mu: GammaMatrix,
+    pub gamma: Option<GammaMatrix>,
+    pub delta: Option<GammaMatrix>,
+}
+
+/// a struct to hold the sufficient statistics for the model
+#[allow(dead_code)]
+pub struct CollapsingStat {
     pub ysum_ds: Mat, // observed sum within each sample
     pub zsum_ds: Mat, // counterfactual sum within each sample
     pub size_s: DVec, // sample s size
@@ -422,7 +480,7 @@ pub struct Stat {
     pub n_bs: Mat,    // batch-specific sample size
 }
 
-impl Stat {
+impl CollapsingStat {
     pub fn new(ngene: usize, nsample: usize, nbatch: usize) -> Self {
         Self {
             ysum_ds: Mat::zeros(ngene, nsample),

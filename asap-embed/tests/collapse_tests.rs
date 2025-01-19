@@ -20,6 +20,7 @@ where
 
 #[test]
 fn random_collapse() -> anyhow::Result<()> {
+    use matrix_param::traits::Inference;
     use rayon::prelude::*;
 
     let dd = 50_usize;
@@ -47,7 +48,11 @@ fn random_collapse() -> anyhow::Result<()> {
 
     data_vec.register_batches(&proj_kn, &batch_membership)?;
 
-    data_vec.collapse_columns(&cells_to_samples, None, Some(1))?;
+    let result = data_vec.collapse_columns(&cells_to_samples, None, None, None)?;
+
+    dbg!(result.mu.posterior_mean());
+    dbg!(result.gamma.unwrap().posterior_mean());
+    dbg!(result.delta.unwrap().posterior_mean());
 
     measure_time(|| data_vec.remove_backend_file())?;
     Ok(())
