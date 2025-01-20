@@ -54,12 +54,15 @@ pub fn generate_factored_poisson_gamma_data_mtx(
         .collect();
 
     write_lines(&batch_out, memb_file)?;
+    println!("batch membership: {:?}", &memb_file);
 
     // 2. batch effect matrix
     let ln_delta = Tensor::randn(0_f32, 1_f32, (dd, bb), &Device::Cpu)?;
     let mu = ln_delta.mean_keepdim(0)?;
     let sig = ln_delta.var_keepdim(0)?.sqrt()?;
     let ln_delta_db = ln_delta.broadcast_sub(&mu)?.broadcast_div(&sig)?;
+
+    println!("simulated batch effects");
 
     // 3. factorization model
     let rgamma_beta = Gamma::new(1.0, 1.0 / (dd as f32))?;
@@ -86,14 +89,21 @@ pub fn generate_factored_poisson_gamma_data_mtx(
     tensor_io::write_tsv(&dict_file, &beta_dk)?;
     tensor_io::write_tsv(&prop_file, &theta_kn)?;
 
+    println!(
+        "wrote parameter files:\n{:?},\n{:?},\n{:?}",
+        &ln_batch_file, &dict_file, &prop_file
+    );
+
     // 4. putting them all together
     let mut triplets = vec![];
 
     for j in 0..nn {
         let b = batch_membership[j]; // batch index
 
+        let theta_j = theta_kn.narrow(1, j, 1)?.contiguous()?;
+
         let lambda_j = (ln_delta_db.narrow(1, b, 1)?.exp()?)
-            .mul(&beta_dk.matmul(&theta_kn.narrow(1, j, 1)?)?)?
+            .mul(&beta_dk.matmul(&theta_j)?)?
             .flatten_to(1)?;
 
         lambda_j

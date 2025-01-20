@@ -26,7 +26,7 @@ fn main() -> anyhow::Result<()> {
 ///
 /// Basic utility functions for processing sparse matrices
 ///
-/// - RP: build from .mtx fileset to another faster format
+/// - RP: 
 ///
 struct Cli {
     #[command(subcommand)]

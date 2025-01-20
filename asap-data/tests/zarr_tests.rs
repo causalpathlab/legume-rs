@@ -141,7 +141,7 @@ fn simulate() -> anyhow::Result<()> {
     let memb_file = mtx_file.replace(".mtx.gz", ".memb.gz");
     let ln_batch_file = mtx_file.replace(".mtx.gz", ".ln_batch.gz");
 
-    generate_factored_gamma_data_mtx(
+    generate_factored_poisson_gamma_data_mtx(
         &sim_args,
         &mtx_file,
         &dict_file,
