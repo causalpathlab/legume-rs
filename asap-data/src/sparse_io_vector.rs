@@ -5,12 +5,14 @@ use std::sync::Arc;
 
 type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 
+#[allow(dead_code)]
 pub struct SparseIoVec {
     data_vec: Vec<Arc<SparseData>>,
     cell_to_data: Vec<usize>,
     data_to_cells: HashMap<usize, Vec<usize>>,
     glob_to_loc: Vec<usize>,
     offset: usize,
+    cell_to_group: Option<Vec<usize>>,
     batch_knn_lookup: Option<Vec<ColumnDict<usize>>>,
     cell_to_batch: Option<Vec<usize>>,
 }
@@ -23,9 +25,18 @@ impl SparseIoVec {
             data_to_cells: HashMap::new(),
             glob_to_loc: vec![],
             offset: 0,
+            cell_to_group: None,
             batch_knn_lookup: None,
             cell_to_batch: None,
         }
+    }
+
+    pub fn assign_groups(&mut self, cell_to_group: Vec<usize>) {
+        self.cell_to_group = Some(cell_to_group);
+    }
+
+    pub fn take_groups(&self) -> Option<&Vec<usize>> {
+        self.cell_to_group.as_ref()
     }
 
     pub fn push(&mut self, data: Arc<SparseData>) -> anyhow::Result<()> {

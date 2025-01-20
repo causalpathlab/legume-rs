@@ -2,13 +2,13 @@ use crate::common::*;
 use crate::normalization::*;
 use asap_data::sparse_io_vector::SparseIoVec;
 use matrix_param::traits::Inference;
+use rayon::prelude::*;
 
 use indicatif::ParallelProgressIterator;
 use indicatif::ProgressIterator;
 use matrix_util::traits::MatOps;
 use std::sync::{Arc, Mutex};
 
-use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::dmatrix_util::*;
 use matrix_util::traits::*;
 
@@ -19,33 +19,6 @@ use std::collections::HashMap;
 
 pub const DEFAULT_KNN: usize = 10;
 pub const DEFAULT_OPT_ITER: usize = 100;
-
-/// Assign each column/cell to random sample by binary encoding
-/// # Arguments
-/// * `proj_kn` - random projection matrix
-/// # Returns
-/// * `Vec<usize>` - sorted column indices
-#[allow(dead_code)]
-pub fn cells_to_samples_by_proj(proj_kn: &Mat) -> anyhow::Result<Vec<usize>> {
-    let kk = proj_kn.nrows();
-    let nn = proj_kn.ncols();
-    let (_, _, mut q_nk) = proj_kn.rsvd(kk)?;
-    q_nk.scale_columns_inplace();
-
-    let mut binary_codes = DVector::<usize>::zeros(nn);
-    for k in 0..kk {
-        let binary_shift = |x: f32| -> usize {
-            if x > 0.0 {
-                1 << k
-            } else {
-                0
-            }
-        };
-        binary_codes += q_nk.column(k).map(binary_shift);
-    }
-
-    Ok(binary_codes.data.as_vec().clone())
-}
 
 #[allow(dead_code)]
 /// Given a feature/projection matrix (factor x cells), we assign each
@@ -58,15 +31,13 @@ pub trait CollapsingOps {
     /// `cell_to_sample` (`Vec<usize>`)
     ///
     /// # Arguments
-    /// * `cell_to_sample` - map: cell -> sample
-    /// * `cells_per_sample` - number of cells per sample (None: no down sampling)
+    /// * `cells_per_group` - number of cells per sample (None: no down sampling)
     /// * `knn` - number of nearest neighbors for building HNSW graph (default: 10)
     /// * `num_opt_iter` - number of optimization iterations (default: 100)
     ///
-    fn collapse_columns(
+    fn collapse_columns_as_assigned(
         &self,
-        cell_to_sample: &Vec<usize>,
-        cells_per_sample: Option<usize>,
+        cells_per_group: Option<usize>,
         knn: Option<usize>,
         num_opt_iter: Option<usize>,
     ) -> anyhow::Result<CollapsingOut>;
@@ -118,25 +89,26 @@ impl CollapsingOps for SparseIoVec {
     }
 
     ///
-    /// Collapse columns/cells into samples as allocated by
-    /// `cell_to_sample` (`Vec<usize>`)
+    /// Collapse columns/cells into samples as allocated by `assign_columns_to_samples`
     ///
     /// # Arguments
-    /// * `cell_to_sample` - map: cell -> sample
-    /// * `cells_per_sample` - number of cells per sample (None: no down sampling)
+    /// * `cells_per_group` - number of cells per group (None: no down sampling)
     /// * `knn` - number of nearest neighbors for building HNSW graph (default: 10)
     /// * `num_opt_iter` - number of optimization iterations (default: 100)
     ///
-    fn collapse_columns(
+    fn collapse_columns_as_assigned(
         &self,
-        cell_to_sample: &Vec<usize>,
-        cells_per_sample: Option<usize>,
+        cells_per_group: Option<usize>,
         knn: Option<usize>,
         num_opt_iter: Option<usize>,
     ) -> anyhow::Result<CollapsingOut> {
         // Down sampling if needed
-        println!("Partitioning {} cells into samples", cell_to_sample.len());
-        let sample_to_cells = partition_by_membership(cell_to_sample, cells_per_sample);
+
+        let cell_to_sample: &Vec<usize> = self.take_groups().ok_or(anyhow::anyhow!(
+            "The columns were not assigned before. Call `partition_columns`"
+        ))?;
+
+        let sample_to_cells = partition_by_membership(cell_to_sample, cells_per_group);
 
         let num_genes = self.num_rows()?;
         let num_samples = sample_to_cells.len();
@@ -158,7 +130,7 @@ impl CollapsingOps for SparseIoVec {
             self.collect_batch_stat(&sample_to_cells, &mut stat);
 
             println!(
-                "counterfactual statistics across {} batches over {} samples",
+                "counterfactual inference across {} batches over {} samples",
                 num_batches, num_samples,
             );
 
