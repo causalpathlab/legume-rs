@@ -1,13 +1,14 @@
-use crate::common_io::{read_lines_of_words, write_lines};
-use crate::traits::IoOps;
-use ndarray::prelude::*;
+use crate::common_io::read_lines_of_words;
+use crate::traits::*;
+pub use nalgebra::{DMatrix, DVector};
+pub use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
 use rayon::prelude::*;
 use std::fmt::Debug;
 use std::str::FromStr;
 
-impl<T> IoOps for Array2<T>
+impl<T> IoOps for DMatrix<T>
 where
-    T: FromStr + Send,
+    T: nalgebra::RealField + FromStr,
     <T as FromStr>::Err: Debug,
 {
     type Scalar = T;
@@ -39,27 +40,10 @@ where
             .flatten()
             .collect();
 
-        Ok(Array2::from_shape_vec((nrows, ncols), data)?)
+        Ok(DMatrix::<T>::from_row_iterator(
+            nrows,
+            ncols,
+            data.into_iter(),
+        ))
     }
-}
-
-#[allow(dead_code)]
-pub fn write_tsv<T: std::fmt::Display>(file: &str, data: &Array2<T>) -> anyhow::Result<()>
-where
-    T: serde::Serialize,
-{
-    let lines: Vec<Box<str>> = data
-        .rows()
-        .into_iter()
-        .map(|row| {
-            row.iter()
-                .map(|x| format!("{}", x))
-                .collect::<Vec<String>>()
-                .join("\t")
-                .into_boxed_str()
-        })
-        .collect();
-
-    write_lines(&lines, &file)?;
-    Ok(())
 }

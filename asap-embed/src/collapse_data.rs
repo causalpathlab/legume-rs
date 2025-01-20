@@ -263,10 +263,8 @@ impl CollapsingOps for SparseIoVec {
                     );
 
                     // matched cells within this batch
-                    let mut zz = nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(
-                        num_genes, ncol, triplets,
-                    )
-                    .expect("failed to build z matrix");
+                    let mut zz = CscMatrix::<f32>::from_nonzero_triplets(num_genes, ncol, triplets)
+                        .expect("failed to build z matrix");
                     zz.normalize_columns_inplace();
 
                     let src_pos_in_target: Vec<usize> = source_cells_in_target
@@ -372,7 +370,12 @@ fn optimize(
         // temporary denominator
         let mut denom_ds = Mat::zeros(num_genes, num_samples);
 
-        (0..num_iter).progress().for_each(|_| {
+        (0..num_iter).progress().for_each(|iter| {
+            #[cfg(debug_assertions)]
+            {
+                println!("iteration: {}", &iter);
+            }
+
             // shared component (mu_ds)
             //
             // y_sum_ds + z_sum_ds
