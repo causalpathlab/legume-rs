@@ -50,3 +50,11 @@ pub trait CompositeOps {
     /// * `other` - `CscMatrix`
     fn add_assign(&mut self, other: &Self::Other);
 }
+
+/// Read and write matrices from and to files
+pub trait IoOps {
+    type Scalar;
+    type Mat;
+
+    fn from_tsv(tsv_file: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat>;
+}

@@ -6,6 +6,7 @@ use asap_data::sparse_matrix_zarr::SparseMtxData;
 use asap_embed::collapse_data::*;
 use asap_embed::common::*;
 use asap_embed::random_projection::*;
+use matrix_param::traits::Inference;
 use matrix_util::common_io::{create_temp_dir_file, read_lines};
 use matrix_util::traits::SampleOps;
 use std::sync::Arc;
@@ -28,7 +29,7 @@ fn random_collapse() -> anyhow::Result<()> {
         rows: 500,
         cols: 1000,
         factors: Some(3),
-        batches: Some(2),
+        batches: Some(3),
         rseed: None,
     };
 
@@ -47,6 +48,9 @@ fn random_collapse() -> anyhow::Result<()> {
         &ln_batch_file,
         &memb_file,
     )?;
+
+    let mut ln_batch_mat = Mat::from_tsv(&ln_batch_file, None)?;
+    ln_batch_mat.scale_columns_inplace();
 
     let data = measure_time(|| SparseMtxData::from_mtx_file(&mtx_file, None, Some(true)))?;
 
@@ -67,9 +71,29 @@ fn random_collapse() -> anyhow::Result<()> {
 
     measure_time(|| data_vec.register_batches(&proj_kn, &batch_membership))?;
 
-    measure_time(|| data_vec.collapse_columns_as_assigned(Some(100), None, None))?;
+    let result = measure_time(|| data_vec.collapse_columns_as_assigned(Some(100), None, None))?;
 
     measure_time(|| data_vec.remove_backend_file())?;
+
+    use textplots::{Chart, Plot, Shape};
+
+    if let Some(delta) = result.delta {
+
+	let mut ln_batch_hat = delta.posterior_log_mean().clone();
+	ln_batch_hat.scale_columns_inplace();
+
+	// dbg!(&ln_batch_hat);
+	// dbg!(&ln_batch_mat);
+
+	dbg!(ln_batch_mat * &ln_batch_hat);
+
+	// let kk = ln_batch_mat.ncols();
+	// let ll = ln_batch_hat.ncols();
+	// for i in 0_usize..kk {
+	//     for j in 0_usize..ll {
+	//     }
+	// }
+    }
 
     Ok(())
 }
