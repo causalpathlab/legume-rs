@@ -20,11 +20,10 @@ where
 
 #[test]
 fn random_collapse() -> anyhow::Result<()> {
-    use matrix_param::traits::Inference;
     use rayon::prelude::*;
 
     let dd = 50_usize;
-    let nn = 111_usize;
+    let nn = 1111_usize;
     let xx = DMatrix::<f32>::runif(dd, nn);
 
     let data1: Arc<SparseData> = Arc::from(create_sparse_dmatrix(&xx, None, None)?);
@@ -34,9 +33,11 @@ fn random_collapse() -> anyhow::Result<()> {
     data_vec.push(data1.clone())?;
     data_vec.push(data2.clone())?;
 
-    let (_, proj_kn) = data_vec.project_cbind(3, None)?;
+    let result = data_vec.project_columns(3, None)?;
 
-    let cells_to_samples = cells_to_samples_by_proj(&proj_kn)?;
+    let proj_kn = result.proj;
+
+    measure_time(|| data_vec.assign_columns_to_samples(Some(&proj_kn), None))?;
 
     use rand::{thread_rng, Rng};
     let nbatch = 3;
@@ -46,13 +47,9 @@ fn random_collapse() -> anyhow::Result<()> {
         .map_init(thread_rng, |rng, _| rng.sample(runif))
         .collect();
 
-    data_vec.register_batches(&proj_kn, &batch_membership)?;
+    measure_time(|| data_vec.register_batches(&proj_kn, &batch_membership))?;
 
-    let result = data_vec.collapse_columns(&cells_to_samples, None, None, None)?;
-
-    dbg!(result.mu.posterior_mean());
-    dbg!(result.gamma.unwrap().posterior_mean());
-    dbg!(result.delta.unwrap().posterior_mean());
+    measure_time(|| data_vec.collapse_columns_as_assigned(None, None, None))?;
 
     measure_time(|| data_vec.remove_backend_file())?;
     Ok(())
