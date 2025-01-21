@@ -4,6 +4,8 @@ use rand::prelude::SliceRandom;
 use std::sync::{Arc, Mutex};
 
 pub const DEFAULT_BLOCK_SIZE: usize = 100;
+pub const DEFAULT_KNN: usize = 10;
+pub const DEFAULT_OPT_ITER: usize = 10;
 
 #[allow(dead_code)]
 pub type Mat = DMatrix<f32>;

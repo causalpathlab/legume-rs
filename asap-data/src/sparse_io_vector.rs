@@ -8,52 +8,52 @@ type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 #[allow(dead_code)]
 pub struct SparseIoVec {
     data_vec: Vec<Arc<SparseData>>,
-    cell_to_data: Vec<usize>,
-    data_to_cells: HashMap<usize, Vec<usize>>,
-    glob_to_loc: Vec<usize>,
+    col_to_data: Vec<usize>,
+    data_to_cols: HashMap<usize, Vec<usize>>,
+    col_glob_to_loc: Vec<usize>,
     offset: usize,
-    cell_to_group: Option<Vec<usize>>,
+    col_to_group: Option<Vec<usize>>,
     batch_knn_lookup: Option<Vec<ColumnDict<usize>>>,
-    cell_to_batch: Option<Vec<usize>>,
+    col_to_batch: Option<Vec<usize>>,
 }
 
 impl SparseIoVec {
     pub fn new() -> Self {
         Self {
             data_vec: vec![],
-            cell_to_data: vec![],
-            data_to_cells: HashMap::new(),
-            glob_to_loc: vec![],
+            col_to_data: vec![],
+            data_to_cols: HashMap::new(),
+            col_glob_to_loc: vec![],
             offset: 0,
-            cell_to_group: None,
+            col_to_group: None,
             batch_knn_lookup: None,
-            cell_to_batch: None,
+            col_to_batch: None,
         }
     }
 
     pub fn assign_groups(&mut self, cell_to_group: Vec<usize>) {
-        self.cell_to_group = Some(cell_to_group);
+        self.col_to_group = Some(cell_to_group);
     }
 
     pub fn take_groups(&self) -> Option<&Vec<usize>> {
-        self.cell_to_group.as_ref()
+        self.col_to_group.as_ref()
     }
 
     pub fn push(&mut self, data: Arc<SparseData>) -> anyhow::Result<()> {
         if let Some(ncol_data) = data.num_columns() {
-            debug_assert!(self.glob_to_loc.len() == self.offset);
-            debug_assert!(self.cell_to_data.len() == self.offset);
+            debug_assert!(self.col_glob_to_loc.len() == self.offset);
+            debug_assert!(self.col_to_data.len() == self.offset);
             let didx = self.data_vec.len();
-            self.data_to_cells.insert(didx, vec![]);
+            self.data_to_cols.insert(didx, vec![]);
             let data_to_cells = self
-                .data_to_cells
+                .data_to_cols
                 .get_mut(&didx)
                 .ok_or(anyhow::anyhow!("failed to take didx {}", didx))?;
 
             for loc in 0..ncol_data {
                 let glob = loc + self.offset;
-                self.glob_to_loc.push(loc);
-                self.cell_to_data.push(didx);
+                self.col_glob_to_loc.push(loc);
+                self.col_to_data.push(didx);
                 data_to_cells.push(glob);
             }
 
@@ -63,6 +63,14 @@ impl SparseIoVec {
             return Err(anyhow::anyhow!("data file has no columns"));
         }
         Ok(())
+    }
+
+    pub fn num_columns_by_data(&self) -> anyhow::Result<Vec<usize>> {
+        Ok(self
+            .data_vec
+            .iter()
+            .map(|d| d.num_columns().unwrap_or(0_usize))
+            .collect())
     }
 
     pub fn remove_backend_file(&mut self) -> anyhow::Result<()> {
@@ -95,7 +103,7 @@ impl SparseIoVec {
         Ok(ret)
     }
 
-    pub fn collect_cells_triplets<I>(
+    pub fn collect_columns_triplets<I>(
         &self,
         cells: I,
     ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)>
@@ -107,8 +115,8 @@ impl SparseIoVec {
         let mut ncol = 0;
         // Note: each cell is a global index
         for glob in cells {
-            let didx = self.cell_to_data[glob];
-            let loc = self.glob_to_loc[glob];
+            let didx = self.col_to_data[glob];
+            let loc = self.col_glob_to_loc[glob];
 
             let (loc_nrow, loc_ncol, loc_triplets) =
                 self.data_vec[didx].read_triplets_by_single_column(loc)?;
@@ -121,7 +129,7 @@ impl SparseIoVec {
         Ok((nrow, ncol, triplets))
     }
 
-    pub fn collect_matched_cells_triplets<I>(
+    pub fn collect_matched_columns_triplets<I>(
         &self,
         cells: I,
         target_batch: usize,
@@ -141,7 +149,7 @@ impl SparseIoVec {
             .ok_or(anyhow::anyhow!("no knn lookup"))?;
 
         let cell_to_batch = self
-            .cell_to_batch
+            .col_to_batch
             .as_ref()
             .ok_or(anyhow::anyhow!("no cell to batch"))?;
 
@@ -164,8 +172,8 @@ impl SparseIoVec {
                     if glob == glob_matched {
                         continue; // avoid identical cell pairs
                     }
-                    let didx = self.cell_to_data[glob_matched];
-                    let loc = self.glob_to_loc[glob_matched];
+                    let didx = self.col_to_data[glob_matched];
+                    let loc = self.col_glob_to_loc[glob_matched];
                     let (loc_nrow, loc_ncol, loc_triplets) =
                         self.data_vec[didx].read_triplets_by_single_column(loc)?;
 
@@ -180,39 +188,39 @@ impl SparseIoVec {
         Ok((nrow, ncol, triplets, source_cells))
     }
 
-    pub fn read_cells_ndarray<I>(&self, cells: I) -> anyhow::Result<ndarray::Array2<f32>>
+    pub fn read_columns_ndarray<I>(&self, cells: I) -> anyhow::Result<ndarray::Array2<f32>>
     where
         I: Iterator<Item = usize>,
     {
-        let (nrow, ncol, triplets) = self.collect_cells_triplets(cells)?;
+        let (nrow, ncol, triplets) = self.collect_columns_triplets(cells)?;
         ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
     }
 
-    pub fn read_cells_dmatrix<I>(&self, cells: I) -> anyhow::Result<nalgebra::DMatrix<f32>>
+    pub fn read_columns_dmatrix<I>(&self, cells: I) -> anyhow::Result<nalgebra::DMatrix<f32>>
     where
         I: Iterator<Item = usize>,
     {
-        let (nrow, ncol, triplets) = self.collect_cells_triplets(cells)?;
+        let (nrow, ncol, triplets) = self.collect_columns_triplets(cells)?;
         DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
     }
 
-    pub fn read_cells_csc<I>(&self, cells: I) -> anyhow::Result<CscMatrix<f32>>
+    pub fn read_columns_csc<I>(&self, cells: I) -> anyhow::Result<CscMatrix<f32>>
     where
         I: Iterator<Item = usize>,
     {
-        let (nrow, ncol, triplets) = self.collect_cells_triplets(cells)?;
+        let (nrow, ncol, triplets) = self.collect_columns_triplets(cells)?;
         nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
     }
 
-    pub fn read_cells_csr<I>(&self, cells: I) -> anyhow::Result<CsrMatrix<f32>>
+    pub fn read_columns_csr<I>(&self, cells: I) -> anyhow::Result<CsrMatrix<f32>>
     where
         I: Iterator<Item = usize>,
     {
-        let (nrow, ncol, triplets) = self.collect_cells_triplets(cells)?;
+        let (nrow, ncol, triplets) = self.collect_columns_triplets(cells)?;
         nalgebra_sparse::CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
     }
 
-    pub fn read_matched_cells_ndarray<I>(
+    pub fn read_matched_columns_ndarray<I>(
         &self,
         cells: I,
         target_batch: usize,
@@ -223,14 +231,14 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let (nrow, ncol, triplets, sources) =
-            self.collect_matched_cells_triplets(cells, target_batch, knn, skip_same_batch)?;
+            self.collect_matched_columns_triplets(cells, target_batch, knn, skip_same_batch)?;
         Ok((
             ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
             sources,
         ))
     }
 
-    pub fn read_matched_cells_dmatrix<I>(
+    pub fn read_matched_columns_dmatrix<I>(
         &self,
         cells: I,
         target_batch: usize,
@@ -241,14 +249,14 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let (nrow, ncol, triplets, sources) =
-            self.collect_matched_cells_triplets(cells, target_batch, knn, skip_same_batch)?;
+            self.collect_matched_columns_triplets(cells, target_batch, knn, skip_same_batch)?;
         Ok((
             DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
             sources,
         ))
     }
 
-    pub fn read_matched_cells_csc<I>(
+    pub fn read_matched_columns_csc<I>(
         &self,
         cells: I,
         target_batch: usize,
@@ -259,14 +267,14 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let (nrow, ncol, triplets, sources) =
-            self.collect_matched_cells_triplets(cells, target_batch, knn, skip_same_batch)?;
+            self.collect_matched_columns_triplets(cells, target_batch, knn, skip_same_batch)?;
         Ok((
             CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
             sources,
         ))
     }
 
-    pub fn read_matched_cells_csr<I>(
+    pub fn read_matched_columns_csr<I>(
         &self,
         cells: I,
         target_batch: usize,
@@ -277,7 +285,7 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let (nrow, ncol, triplets, sources) =
-            self.collect_matched_cells_triplets(cells, target_batch, knn, skip_same_batch)?;
+            self.collect_matched_columns_triplets(cells, target_batch, knn, skip_same_batch)?;
         Ok((
             CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
             sources,
@@ -365,7 +373,7 @@ impl SparseIoVec {
         }
 
         self.batch_knn_lookup = Some(dictionaries);
-        self.cell_to_batch = Some(cell_to_batch);
+        self.col_to_batch = Some(cell_to_batch);
         Ok(())
     }
 
@@ -378,7 +386,7 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let cell_to_batch = self
-            .cell_to_batch
+            .col_to_batch
             .as_ref()
             .expect("cell_to_batch not initialized");
         cells.into_iter().map(|c| cell_to_batch[c]).collect()
@@ -422,42 +430,3 @@ fn partition_by_membership(
     });
     pb_cells
 }
-
-// // TODO: separate out visitor patterns from random projection
-// ///
-// /// global index - across all data files
-// /// data index - different data file
-// /// batch index - batch/experiment membership
-// ///
-// pub trait MultiDataColumnReader {
-//     type Mat;
-
-//     type IndexIter: Iterator<Item = usize>;
-
-//     fn build_dictionaries_per_batch(
-//         &mut self,
-//         feature_matrix: &Self::Mat,
-//         batch_membership: Option<Vec<usize>>,
-//     ) -> anyhow::Result<()>;
-
-//     fn knn_columns_in_batch(
-//         &self,
-//         column: usize,
-//         batch_id: usize,
-//         knn: usize,         skip_same_batch: bool,
-//     ) -> anyhow::Result<Vec<usize>>;
-
-//     /// Read and instantiate a sub matrix taking columns by the shared indexing scheme
-//     ///
-//     /// global index -> data index (from which data to read)
-//     /// global index -> local index (using this to read the data)
-//     ///
-//     fn read_columns(&self, columns: Self::IndexIter) -> anyhow::Result<Self::Mat>;
-
-//     fn read_knn_columns_in_batch(
-//         &self,
-//         column: usize,
-//         batch_id: usize,
-//         knn: usize,         skip_same_batch: bool,
-//     ) -> anyhow::Result<Self::Mat>;
-// }

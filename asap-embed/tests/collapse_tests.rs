@@ -27,8 +27,8 @@ where
 fn random_collapse() -> anyhow::Result<()> {
     let sim_args = SimArgs {
         rows: 500,
-        cols: 1000,
-        factors: Some(3),
+        cols: 3000,
+        factors: Some(5),
         batches: Some(3),
         rseed: None,
     };
@@ -64,35 +64,28 @@ fn random_collapse() -> anyhow::Result<()> {
         .map(|x| x.parse::<usize>().unwrap())
         .collect::<Vec<usize>>();
 
-    let result = data_vec.project_columns(3, None)?;
+    // let result = data_vec.project_rows(3, None)?;
+    // dbg!(result.proj);
+
+    let result = data_vec.project_columns(5, None)?;
     let proj_kn = result.proj;
 
     measure_time(|| data_vec.assign_columns_to_samples(Some(&proj_kn), None))?;
 
     measure_time(|| data_vec.register_batches(&proj_kn, &batch_membership))?;
 
-    let result = measure_time(|| data_vec.collapse_columns_as_assigned(Some(100), None, None))?;
+    let result = measure_time(|| data_vec.collapse_columns(Some(100), None, None))?;
 
     measure_time(|| data_vec.remove_backend_file())?;
 
-    use textplots::{Chart, Plot, Shape};
-
     if let Some(delta) = result.delta {
+        let mut ln_batch_hat = delta.posterior_log_mean().clone();
+        ln_batch_hat.scale_columns_inplace();
 
-	let mut ln_batch_hat = delta.posterior_log_mean().clone();
-	ln_batch_hat.scale_columns_inplace();
+        // dbg!(&ln_batch_hat);
+        // dbg!(&ln_batch_mat);
 
-	// dbg!(&ln_batch_hat);
-	// dbg!(&ln_batch_mat);
-
-	dbg!(ln_batch_mat * &ln_batch_hat);
-
-	// let kk = ln_batch_mat.ncols();
-	// let ll = ln_batch_hat.ncols();
-	// for i in 0_usize..kk {
-	//     for j in 0_usize..ll {
-	//     }
-	// }
+        dbg!(ln_batch_mat * &ln_batch_hat);
     }
 
     Ok(())
