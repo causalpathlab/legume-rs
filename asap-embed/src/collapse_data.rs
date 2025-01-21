@@ -17,9 +17,6 @@ use matrix_param::traits::*;
 
 use std::collections::HashMap;
 
-pub const DEFAULT_KNN: usize = 10;
-pub const DEFAULT_OPT_ITER: usize = 100;
-
 #[allow(dead_code)]
 /// Given a feature/projection matrix (factor x cells), we assign each
 /// cell to a sample and return pseudobulk (collapsed) matrices
@@ -27,15 +24,16 @@ pub const DEFAULT_OPT_ITER: usize = 100;
 /// (1) Register batches if needed (2) collapse columns/cells into samples
 ///
 pub trait CollapsingOps {
+    ///
     /// Collapse columns/cells into samples as allocated by
-    /// `cell_to_sample` (`Vec<usize>`)
+    /// `assign_columns_to_samples`
     ///
     /// # Arguments
     /// * `cells_per_group` - number of cells per sample (None: no down sampling)
     /// * `knn` - number of nearest neighbors for building HNSW graph (default: 10)
     /// * `num_opt_iter` - number of optimization iterations (default: 100)
     ///
-    fn collapse_columns_as_assigned(
+    fn collapse_columns(
         &self,
         cells_per_group: Option<usize>,
         knn: Option<usize>,
@@ -88,15 +86,15 @@ impl CollapsingOps for SparseIoVec {
         self.register_batches_dmatrix(proj_kn, cell_to_batch.clone())
     }
 
-    ///
-    /// Collapse columns/cells into samples as allocated by `assign_columns_to_samples`
+    /// Collapse columns/cells into samples as allocated by
+    /// `assign_columns_to_samples`
     ///
     /// # Arguments
     /// * `cells_per_group` - number of cells per group (None: no down sampling)
     /// * `knn` - number of nearest neighbors for building HNSW graph (default: 10)
     /// * `num_opt_iter` - number of optimization iterations (default: 100)
     ///
-    fn collapse_columns_as_assigned(
+    fn collapse_columns(
         &self,
         cells_per_group: Option<usize>,
         knn: Option<usize>,
@@ -163,7 +161,7 @@ impl CollapsingOps for SparseIoVec {
             .for_each(|(&sample, cells)| {
                 let mut stat = arc_stat.lock().expect("failed to lock stat");
                 let mut yy = self
-                    .read_cells_csc(cells.iter().cloned())
+                    .read_columns_csc(cells.iter().cloned())
                     .expect("failed to read cells");
                 yy.normalize_columns_inplace();
 
@@ -199,7 +197,7 @@ impl CollapsingOps for SparseIoVec {
 
                 // 1. read source cells
                 let mut yy = self
-                    .read_cells_csc(cells.iter().cloned())
+                    .read_columns_csc(cells.iter().cloned())
                     .expect("failed to read cells");
                 yy.normalize_columns_inplace();
 
@@ -241,14 +239,14 @@ impl CollapsingOps for SparseIoVec {
                 let mut tot_ncells_matched = 0;
 
                 let mut yy = self
-                    .read_cells_dmatrix(cells.iter().cloned())
+                    .read_columns_dmatrix(cells.iter().cloned())
                     .expect("failed to read cells");
                 yy.normalize_columns_inplace();
 
                 for target_batch in 0..num_batches {
                     // match cells between source and target batches
                     let (_, ncol, triplets, source_cells_in_target) = self
-                        .collect_matched_cells_triplets(
+                        .collect_matched_columns_triplets(
                             cells.iter().cloned(),
                             target_batch,
                             knn,
@@ -370,10 +368,10 @@ fn optimize(
         // temporary denominator
         let mut denom_ds = Mat::zeros(num_genes, num_samples);
 
-        (0..num_iter).progress().for_each(|iter| {
+        (0..num_iter).progress().for_each(|_opt_iter| {
             #[cfg(debug_assertions)]
             {
-                println!("iteration: {}", &iter);
+                println!("iteration: {}", &_opt_iter);
             }
 
             // shared component (mu_ds)
