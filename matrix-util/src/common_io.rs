@@ -51,12 +51,12 @@ pub fn read_lines_of_words(
     // buffered reader
     let buf_reader: Box<dyn BufRead> = open_buf_reader(input_file)?;
 
-    fn parse(line: &String) -> Vec<Box<str>> {
+    fn parse(i: usize, line: &String) -> (usize, Vec<Box<str>>) {
         let words: Vec<Box<str>> = line
             .split_whitespace()
             .map(|x| x.to_owned().into_boxed_str())
             .collect();
-        words
+        (i, words)
     }
 
     fn is_not_comment_line(line: &String) -> bool {
@@ -74,26 +74,33 @@ pub fn read_lines_of_words(
 
     let n_skip;
     let hdr;
-    let lines;
 
     // parsing takes more time, so split them into parallel jobs
     // note: this will not make things sorted
-    if hdr_line < 0 {
+    let mut lines: Vec<(usize, Vec<Box<str>>)> = if hdr_line < 0 {
         hdr = Vec::<Box<str>>::new();
-        lines = lines_raw.iter().par_bridge().map(parse).collect();
+        lines_raw
+            .iter()
+            .enumerate()
+            .par_bridge()
+            .map(|(i, s)| parse(i, s))
+            .collect()
     } else {
         n_skip = hdr_line as usize;
         if lines_raw.len() < (n_skip + 1) {
             return Err(anyhow::anyhow!("not enough data"));
         }
-        hdr = parse(&lines_raw[n_skip]);
-        lines = lines_raw[(n_skip + 1)..]
+        hdr = parse(0, &lines_raw[n_skip]).1;
+        lines_raw[(n_skip + 1)..]
             .iter()
+            .enumerate()
             .par_bridge()
-            .map(parse)
-            .collect();
-    }
+            .map(|(i, s)| parse(i, s))
+            .collect()
+    };
 
+    lines.sort_by_key(|&(i, _)| i);
+    let lines = lines.into_iter().map(|(_, x)| x).collect();
     Ok((lines, hdr))
 }
 
@@ -230,7 +237,6 @@ pub fn create_temp_dir_file(suffix: &str) -> anyhow::Result<std::path::PathBuf> 
 pub fn remove_file(file: &str) -> anyhow::Result<()> {
     let path = Path::new(file);
     if path.exists() {
-        // dbg!("removing {}", path);
         if path.is_file() {
             std::fs::remove_file(path)?;
         } else {

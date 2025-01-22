@@ -55,6 +55,7 @@ impl SparseIoVec {
                 self.col_glob_to_loc.push(loc);
                 self.col_to_data.push(didx);
                 data_to_cells.push(glob);
+                debug_assert!(glob == self.col_to_data.len() - 1);
             }
 
             self.data_vec.push(data.clone());
@@ -122,7 +123,7 @@ impl SparseIoVec {
                 self.data_vec[didx].read_triplets_by_single_column(loc)?;
 
             nrow = nrow.max(loc_nrow);
-            triplets.extend(loc_triplets.iter().map(|(i, j, v)| (*i, *j + ncol, *v)));
+            triplets.extend(loc_triplets.iter().map(|&(i, j, v)| (i, j + ncol, v)));
             ncol += loc_ncol;
         }
 
@@ -178,7 +179,7 @@ impl SparseIoVec {
                         self.data_vec[didx].read_triplets_by_single_column(loc)?;
 
                     nrow = nrow.max(loc_nrow);
-                    triplets.extend(loc_triplets.iter().map(|(i, j, v)| (*i, *j + ncol, *v)));
+                    triplets.extend(loc_triplets.iter().map(|&(i, j, v)| (i, j + ncol, v)));
                     ncol += loc_ncol;
                     source_cells.push(glob);
                 }

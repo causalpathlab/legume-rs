@@ -1,6 +1,5 @@
 use asap_data::simulate::*;
 use asap_data::sparse_io::*;
-use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::SparseIoVec;
 use asap_data::sparse_matrix_zarr::SparseMtxData;
 use asap_embed::collapse_data::*;

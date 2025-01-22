@@ -2,12 +2,12 @@ use crate::common_io::{read_lines_of_words, write_lines};
 use crate::traits::IoOps;
 use ndarray::prelude::*;
 use rayon::prelude::*;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::str::FromStr;
 
 impl<T> IoOps for Array2<T>
 where
-    T: FromStr + Send,
+    T: FromStr + Send + Display,
     <T as FromStr>::Err: Debug,
 {
     type Scalar = T;
@@ -28,38 +28,45 @@ where
         let nrows = lines_of_words[0].len();
         let ncols = lines_of_words.len();
 
-        let data: Vec<T> = lines_of_words
-            .par_iter()
-            .map(|words| {
-                words
-                    .iter()
-                    .map(|v| v.parse::<T>().expect(""))
-                    .collect::<Vec<T>>()
+        let mut data = lines_of_words
+            .iter()
+            .enumerate()
+            .par_bridge()
+            .map(|(i, words)| {
+                (
+                    i,
+                    words
+                        .iter()
+                        .map(|v| v.parse::<T>().expect(""))
+                        .collect::<Vec<T>>(),
+                )
             })
+            .collect::<Vec<_>>();
+
+        data.sort_by_key(|&(i, _)| i);
+
+        let data = data
+            .into_iter()
+            .map(|(_, x)| x)
             .flatten()
-            .collect();
+            .collect::<Vec<_>>();
 
         Ok(Array2::from_shape_vec((nrows, ncols), data)?)
     }
-}
 
-#[allow(dead_code)]
-pub fn write_tsv<T: std::fmt::Display>(file: &str, data: &Array2<T>) -> anyhow::Result<()>
-where
-    T: serde::Serialize,
-{
-    let lines: Vec<Box<str>> = data
-        .rows()
-        .into_iter()
-        .map(|row| {
-            row.iter()
-                .map(|x| format!("{}", x))
-                .collect::<Vec<String>>()
-                .join("\t")
-                .into_boxed_str()
-        })
-        .collect();
-
-    write_lines(&lines, &file)?;
-    Ok(())
+    fn to_tsv(&self, tsv_file: &str) -> anyhow::Result<()> {
+        let lines: Vec<Box<str>> = self
+            .rows()
+            .into_iter()
+            .map(|row| {
+                row.iter()
+                    .map(|x| format!("{}", *x))
+                    .collect::<Vec<String>>()
+                    .join("\t")
+                    .into_boxed_str()
+            })
+            .collect();
+        write_lines(&lines, &tsv_file)?;
+        Ok(())
+    }
 }

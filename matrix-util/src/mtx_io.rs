@@ -78,11 +78,13 @@ pub fn read_mtx_triplets(
         return Err(anyhow::anyhow!("Failed to parse mtx header"));
     };
 
-    let mtx_triplets = mtx_data_lines
+    let mut mtx_triplets = mtx_data_lines
         .iter()
         .par_bridge()
         .filter_map(parse_row_col_val)
         .collect::<Vec<_>>();
 
+    mtx_triplets.sort_by_key(|&(row, _, _)| row);
+    mtx_triplets.sort_by_key(|&(_, col, _)| col);
     Ok((mtx_triplets, mtx_shape))
 }

@@ -27,6 +27,7 @@ ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
 special.workspace = true
 
+matrix-util = { path = "../matrix-util" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ndarray-linalg = { version = "0.16", default-features = false }
