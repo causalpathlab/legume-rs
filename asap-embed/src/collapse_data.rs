@@ -160,20 +160,25 @@ impl CollapsingOps for SparseIoVec {
             .progress_count(num_jobs)
             .for_each(|(&sample, cells)| {
                 let mut stat = arc_stat.lock().expect("failed to lock stat");
-                let mut yy = self
+                let yy = self
                     .read_columns_csc(cells.iter().cloned())
                     .expect("failed to read cells");
-                yy.normalize_columns_inplace();
 
                 for y_j in yy.col_iter() {
                     let rows = y_j.row_indices();
                     let vals = y_j.values();
                     for (&gene, &y) in rows.iter().zip(vals.iter()) {
-                        stat.size_s[sample] += 1_f32;
                         stat.ysum_ds[(gene, sample)] += y;
                     }
+                    stat.size_s[sample] += 1_f32; // each column is a sample
                 }
             });
+
+        // #[cfg(debug_assertions)]
+        // {
+        //     let stat = arc_stat.lock().expect("failed to lock stat");
+        //     dbg!(stat.size_s.sum());
+        // }
     }
 
     fn collect_batch_stat(
@@ -196,10 +201,9 @@ impl CollapsingOps for SparseIoVec {
                 let batches = self.get_batch_membership(cells.iter().cloned());
 
                 // 1. read source cells
-                let mut yy = self
+                let yy = self
                     .read_columns_csc(cells.iter().cloned())
                     .expect("failed to read cells");
-                yy.normalize_columns_inplace();
 
                 yy.col_iter().zip(batches.iter()).for_each(|(y_j, &b)| {
                     let rows = y_j.row_indices();
@@ -238,10 +242,9 @@ impl CollapsingOps for SparseIoVec {
                 let mut mean_square_distances = vec![];
                 let mut tot_ncells_matched = 0;
 
-                let mut yy = self
+                let yy = self
                     .read_columns_dmatrix(cells.iter().cloned())
                     .expect("failed to read cells");
-                yy.normalize_columns_inplace();
 
                 for target_batch in 0..num_batches {
                     // match cells between source and target batches
@@ -261,9 +264,8 @@ impl CollapsingOps for SparseIoVec {
                     );
 
                     // matched cells within this batch
-                    let mut zz = CscMatrix::<f32>::from_nonzero_triplets(num_genes, ncol, triplets)
+                    let zz = CscMatrix::<f32>::from_nonzero_triplets(num_genes, ncol, triplets)
                         .expect("failed to build z matrix");
-                    zz.normalize_columns_inplace();
 
                     let src_pos_in_target: Vec<usize> = source_cells_in_target
                         .iter()
@@ -309,13 +311,12 @@ impl CollapsingOps for SparseIoVec {
                 // a full set of y vectors needed for this sample //
                 ////////////////////////////////////////////////////
 
-                let mut zz_full = CscMatrix::from_nonzero_triplets(
+                let zz_full = CscMatrix::from_nonzero_triplets(
                     num_genes,
                     tot_ncells_matched,
                     matched_triplets,
                 )
                 .expect("failed to build y matrix");
-                zz_full.normalize_columns_inplace();
 
                 // 3. normalize distance for each source cell and
                 // take a weighted average of the matched vectors
