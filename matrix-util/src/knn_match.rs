@@ -142,7 +142,7 @@ where
 }
 
 #[derive(Clone, Debug)]
-/// a wrapper for Vec<f32>
+/// a wrapper for `Vec<f32>`
 pub struct VecPoint {
     pub data: Vec<f32>,
 }

@@ -1,21 +1,17 @@
 use crate::common::*;
 use crate::normalization::*;
 use asap_data::sparse_io_vector::SparseIoVec;
-use matrix_param::traits::Inference;
-use rayon::prelude::*;
-
 use indicatif::ParallelProgressIterator;
 use indicatif::ProgressIterator;
-use matrix_util::traits::MatOps;
-use std::sync::{Arc, Mutex};
-
+use matrix_param::dmatrix_gamma::*;
+use matrix_param::traits::Inference;
+use matrix_param::traits::*;
+use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::dmatrix_util::*;
 use matrix_util::traits::*;
-
-use matrix_param::dmatrix_gamma::*;
-use matrix_param::traits::*;
-
+use rayon::prelude::*;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[allow(dead_code)]
 /// Given a feature/projection matrix (factor x cells), we assign each
@@ -47,8 +43,9 @@ pub trait CollapsingOps {
     /// # Arguments
     /// * `proj_kn` - random projection matrix
     /// * `cell_to_batch` - map: cell -> batch
-    fn register_batches(&mut self, proj_kn: &Mat, cell_to_batch: &Vec<usize>)
-        -> anyhow::Result<()>;
+    fn register_batches<T>(&mut self, proj_kn: &Mat, cell_to_batch: &Vec<T>) -> anyhow::Result<()>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone;
 
     fn collect_basic_stat(
         &self,
@@ -78,12 +75,15 @@ impl CollapsingOps for SparseIoVec {
     /// # Arguments
     /// * `proj_kn` - random projection matrix
     /// * `cell_to_batch` - map: cell -> batch
-    fn register_batches(
-        &mut self,
-        proj_kn: &Mat,
-        cell_to_batch: &Vec<usize>,
-    ) -> anyhow::Result<()> {
-        self.register_batches_dmatrix(proj_kn, cell_to_batch.clone())
+    fn register_batches<T>(&mut self, proj_kn: &Mat, cell_to_batch: &Vec<T>) -> anyhow::Result<()>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone,
+    {
+        let kk = proj_kn.nrows();
+        let (_, _, mut q_nk) = proj_kn.rsvd(kk)?;
+        q_nk.scale_columns_inplace();
+        let proj_kn = q_nk.transpose();
+        self.register_batches_dmatrix(&proj_kn, &cell_to_batch)
     }
 
     /// Collapse columns/cells into samples as allocated by
@@ -214,6 +214,11 @@ impl CollapsingOps for SparseIoVec {
                     stat.n_bs[(b, sample)] += 1_f32;
                 });
             });
+        // #[cfg(debug_assertions)]
+        // {
+        //     let stat = arc_stat.lock().expect("failed to lock stat");
+        //     dbg!(stat.n_bs.sum());
+        // }
     }
 
     fn collect_matched_stat(
@@ -235,11 +240,11 @@ impl CollapsingOps for SparseIoVec {
             .for_each(|(&sample, cells)| {
                 let mut stat = arc_stat.lock().expect("failed to lock stat");
 
-                let positions: HashMap<_, _> =
-                    cells.iter().enumerate().map(|(i, c)| (c, i)).collect();
+                let positions: HashMap<usize, usize> =
+                    cells.iter().enumerate().map(|(i, &c)| (c, i)).collect();
                 let mut matched_triplets: Vec<(usize, usize, f32)> = vec![];
                 let mut source_columns: Vec<usize> = vec![];
-                let mut mean_square_distances = vec![];
+                let mut euclidean_distances = vec![];
                 let mut tot_ncells_matched = 0;
 
                 let yy = self
@@ -278,9 +283,9 @@ impl CollapsingOps for SparseIoVec {
 
                     let denom = zz.nrows() as f32;
 
-                    mean_square_distances.extend(
+                    euclidean_distances.extend(
                         // for each column of the matched matrix
-                        // MSE(j,k) = sum_g (y[g),j] - z[g,k])^2 / sum_g 1
+                        // RMSE(j,k) = sqrt( sum_g (y[g,j] - z[g,k])^2 / sum_g 1 )
                         zz.col_iter()
                             .zip(src_pos_in_target.iter())
                             .map(|(z_j, &j)| {
@@ -299,7 +304,7 @@ impl CollapsingOps for SparseIoVec {
                                     .zip(z_vals.iter())
                                     .map(|(&i, &z)| (z - y_j[i]) * (z - y_j[i]))
                                     .sum::<f32>();
-                                (y_tot - y_overlap + delta_overlap) / denom
+                                ((y_tot - y_overlap + delta_overlap) / denom).sqrt()
                             }),
                     );
 
@@ -332,7 +337,7 @@ impl CollapsingOps for SparseIoVec {
                 for (_, z_pos) in source_column_groups.iter() {
                     let weights = z_pos
                         .iter()
-                        .map(|&cell| mean_square_distances[cell])
+                        .map(|&cell| euclidean_distances[cell])
                         .normalized_exp(norm_target);
 
                     let denom = weights.iter().sum::<f32>();
@@ -370,10 +375,10 @@ fn optimize(
         let mut denom_ds = Mat::zeros(num_genes, num_samples);
 
         (0..num_iter).progress().for_each(|_opt_iter| {
-            #[cfg(debug_assertions)]
-            {
-                println!("iteration: {}", &_opt_iter);
-            }
+            // #[cfg(debug_assertions)]
+            // {
+            //     println!("iteration: {}", &_opt_iter);
+            // }
 
             // shared component (mu_ds)
             //
