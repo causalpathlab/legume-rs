@@ -92,7 +92,8 @@ impl RandProjOps for SparseIoVec {
                     .expect("failed to retrieve data");
 
                 xx_dm.normalize_columns_inplace();
-                let chunk = (xx_dm.transpose() * &basis_dk).transpose();
+                let mut chunk = (xx_dm.transpose() * &basis_dk).transpose();
+		chunk.scale_columns_inplace();
 
                 {
                     arc_proj_kn
