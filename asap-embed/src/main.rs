@@ -6,7 +6,10 @@ mod random_projection;
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
 use clap::{Args, Parser, Subcommand};
-use matrix_util::common_io::read_lines;
+use collapse_data::CollapsingOps;
+use matrix_param::traits::*;
+use matrix_util::common_io::{extension, read_lines};
+use random_projection::RandProjOps;
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
@@ -14,10 +17,15 @@ fn main() -> anyhow::Result<()> {
 
     match &cli.commands {
         Commands::CollapseColumns(args) => {
-            //
             // 1. push data files and collect batch membership
-            //
-            let backend = args.backend.clone().unwrap_or(SparseIoBackend::Zarr);
+            let file = args.data_files[0].as_ref();
+            let backend_from_first = match extension(file)?.to_string().as_str() {
+                "h5" => SparseIoBackend::HDF5,
+                "zarr" => SparseIoBackend::Zarr,
+                _ => SparseIoBackend::Zarr,
+            };
+
+            let backend = args.backend.clone().unwrap_or(backend_from_first);
 
             let mut data_vec = SparseIoVec::new();
             for data_file in args.data_files.iter() {
@@ -35,12 +43,12 @@ fn main() -> anyhow::Result<()> {
 
                 for batch_file in batch_files.iter() {
                     for s in read_lines(&batch_file)? {
-                        println!("batch file: {}", s);
                         if let Some(&id) = batch_name_to_id.get(&s) {
                             batch_membership.push(id);
                         } else {
-                            let nbatch = batch_name_to_id.len();
-                            batch_name_to_id.insert(s.clone(), nbatch);
+                            let new_id = batch_name_to_id.len();
+                            batch_name_to_id.insert(s.clone(), new_id);
+                            batch_membership.push(new_id);
                         }
                     }
                 }
@@ -52,14 +60,41 @@ fn main() -> anyhow::Result<()> {
             }
 
             if batch_membership.len() != data_vec.num_columns()? {
-                return Err(anyhow::anyhow!("# batch membership != # of columns"));
+                return Err(anyhow::anyhow!(
+                    "# batch membership {} != # of columns {}",
+                    batch_membership.len(),
+                    data_vec.num_columns()?
+                ));
             }
 
-            //
             // 2. randomly project the columns
-            //
+            let proj_res = data_vec.project_columns(args.proj_dim, args.block_size.clone())?;
+            proj_res
+                .basis
+                .to_tsv(&(args.out.to_string() + ".basis.gz"))?;
 
-            // do something
+            let proj_kn = proj_res.proj;
+            proj_kn.transpose().to_tsv(&(args.out.to_string() + ".proj.gz"))?;
+
+            data_vec.assign_columns_to_samples(Some(&proj_kn), None)?;
+
+            // 3. register batch membership
+            data_vec.register_batches(&proj_kn, &batch_membership)?;
+
+            dbg!(data_vec.num_batches());
+
+            // 4. final collapsing
+            let ret = data_vec.collapse_columns(args.down_sample, args.knn, args.iter_opt)?;
+
+            ret.mu.write_tsv(&(args.out.to_string() + ".mu"))?;
+
+            if let Some(delta) = &ret.delta {
+                delta.write_tsv(&(args.out.to_string() + ".delta"))?;
+            }
+
+            if let Some(gamma) = &ret.gamma {
+                gamma.write_tsv(&(args.out.to_string() + ".gamma"))?;
+            }
         }
     }
 
@@ -87,17 +122,42 @@ enum Commands {
 
 #[derive(Args)]
 pub struct RunCollapseArgs {
-    /// Data file -- either `.zarr` or `.h5`
+    /// Data files of either `.zarr` or `.h5` format. All the formats
+    /// should be identical. We can convert `.mtx` to `.zarr` or `.h5`
+    /// using `asap-data build`
+    #[arg(required = true)]
     data_files: Vec<Box<str>>,
 
+    /// Projection dimension
+    #[arg(long, short, required = true)]
+    proj_dim: usize,
+
+    /// #k-nearest neighbours within each batch
+    #[arg(long, default_value = "10")]
+    knn: Option<usize>,
+
+    /// #downsampling columns per each collapsed sample
+    #[arg(long, default_value = "100")]
+    down_sample: Option<usize>,
+
+    /// optimization iterations
+    #[arg(long, default_value = "10")]
+    iter_opt: Option<usize>,
+
+    /// Output header
+    #[arg(long, short, required = true)]
+    out: Box<str>,
+
     #[arg(long)]
+    /// Batch membership files. Each bach file should correspond to
+    /// each data file.
     batch_files: Option<Vec<Box<str>>>,
 
     /// Block_size for parallel processing
     #[arg(long, value_enum, default_value = "100")]
     block_size: Option<usize>,
 
-    /// backend to use (HDF5 or Zarr)
-    #[arg(short, long, value_enum, default_value = "Zarr")]
+    /// backend to use
+    #[arg(long, value_enum, default_value = "zarr")]
     backend: Option<SparseIoBackend>,
 }

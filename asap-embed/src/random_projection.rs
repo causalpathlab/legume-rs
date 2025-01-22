@@ -38,9 +38,9 @@ pub trait RandProjOps {
         block_size: Option<usize>,
     ) -> anyhow::Result<RandColProjOut>;
 
-    /// Create K x nrow projection by concatenating data across
-    /// rows and returns the random basis matrix `N` x `target_dim`
-    /// and the projection result `target_dim` x `D`
+    /// Create `target_dim` x `nrows`/`D` projection by concatenating data
+    /// across rows and returns the random basis matrix `ncols`/`N` x
+    /// `target_dim` and the projection result `target_dim` x `D`
     ///
     /// # Arguments
     /// * `target_dim`: target dimensionality
@@ -55,8 +55,12 @@ pub trait RandProjOps {
     /// Assign each column/cell to some group.
     ///
     /// # Arguments
+    ///
     /// * `proj_kn` - random projection matrix
-    /// * `num_features` - number of features if `proj_kn` provided
+    ///
+    /// * `num_features` - number of features. If `proj_kn` were not
+    ///    provided, we will generate a random projection matrix from
+    ///    `rnorm`.
     ///
     fn assign_columns_to_samples(
         &mut self,
@@ -66,6 +70,45 @@ pub trait RandProjOps {
 }
 
 impl RandProjOps for SparseIoVec {
+    fn project_columns(
+        &self,
+        target_dim: usize,
+        block_size: Option<usize>,
+    ) -> anyhow::Result<RandColProjOut> {
+        let nrows = self.num_rows()?;
+        let ncols = self.num_columns()?;
+        let block_size = block_size.unwrap_or(DEFAULT_BLOCK_SIZE);
+        let jobs = create_jobs(block_size, ncols);
+
+        let mut proj_kn = Mat::zeros(target_dim, ncols);
+        let arc_proj_kn = Arc::new(Mutex::new(&mut proj_kn));
+        let basis_dk = Mat::rnorm(nrows, target_dim);
+
+        jobs.par_iter()
+            .progress_count(jobs.len() as u64)
+            .for_each(|&(lb, ub)| {
+                let mut xx_dm = self
+                    .read_columns_csc(lb..ub)
+                    .expect("failed to retrieve data");
+
+                xx_dm.normalize_columns_inplace();
+                let chunk = (xx_dm.transpose() * &basis_dk).transpose();
+
+                {
+                    arc_proj_kn
+                        .lock()
+                        .expect("failed to lock proj")
+                        .columns_range_mut(lb..ub)
+                        .copy_from(&chunk);
+                }
+            });
+
+        Ok(RandColProjOut {
+            basis: basis_dk,
+            proj: proj_kn,
+        })
+    }
+
     fn project_rows(
         &self,
         target_dim: usize,
@@ -117,51 +160,14 @@ impl RandProjOps for SparseIoVec {
         })
     }
 
-    fn project_columns(
-        &self,
-        target_dim: usize,
-        block_size: Option<usize>,
-    ) -> anyhow::Result<RandColProjOut> {
-        let nrows = self.num_rows()?;
-        let ncols = self.num_columns()?;
-        let block_size = block_size.unwrap_or(DEFAULT_BLOCK_SIZE);
-        let jobs = create_jobs(block_size, ncols);
-
-        let mut proj_kn = Mat::zeros(target_dim, ncols);
-        let arc_proj_kn = Arc::new(Mutex::new(&mut proj_kn));
-        let basis_dk = Mat::rnorm(nrows, target_dim);
-
-        jobs.par_iter()
-            .progress_count(jobs.len() as u64)
-            .for_each(|&(lb, ub)| {
-                let mut xx_dm = self
-                    .read_columns_csc(lb..ub)
-                    .expect("failed to retrieve data");
-
-                xx_dm.normalize_columns_inplace();
-
-                let mut chunk = (xx_dm.transpose() * &basis_dk).transpose();
-                chunk.scale_columns_inplace();
-
-                {
-                    arc_proj_kn
-                        .lock()
-                        .expect("failed to lock proj")
-                        .columns_range_mut(lb..ub)
-                        .copy_from(&chunk);
-                }
-            });
-
-        Ok(RandColProjOut {
-            basis: basis_dk,
-            proj: proj_kn,
-        })
-    }
-
     /// Assign each column/cell to random sample by binary encoding
+    ///
     /// # Arguments
+    ///
     /// * `proj_kn` - random projection matrix
-    /// * `num_features` - number of features if `proj_kn` provided
+    ///
+    /// * `num_features` - number of features if `proj_kn` were not provided.
+    ///
     fn assign_columns_to_samples(
         &mut self,
         proj_kn: Option<&Mat>,

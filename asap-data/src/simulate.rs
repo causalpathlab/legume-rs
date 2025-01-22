@@ -1,7 +1,8 @@
-use candle_core::{Device, Tensor};
 use matrix_util::common_io::write_lines;
+use matrix_util::dmatrix_io::*;
+use matrix_util::dmatrix_util::*;
 use matrix_util::mtx_io::write_mtx_triplets;
-use matrix_util::tensor_io;
+use matrix_util::traits::*;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Gamma, Poisson, Uniform};
 
@@ -20,7 +21,7 @@ pub struct SimArgs {
 /// * `dict_file`: true dictionary file
 /// * `prop_file`: true proportion file
 /// * `ln_batch_file`: log batch effect file
-/// * `memb_file`: true batch membership file
+/// * `batch_file`: true batch membership file
 ///
 /// ```text
 /// Y(i,j) ~ Poisson( delta(i, B(j)) * sum_k beta(i,k) * theta(k,j) )
@@ -32,7 +33,7 @@ pub fn generate_factored_poisson_gamma_data_mtx(
     dict_file: &str,
     prop_file: &str,
     ln_batch_file: &str,
-    memb_file: &str,
+    batch_file: &str,
 ) -> anyhow::Result<()> {
     let nn = args.cols;
     let dd = args.rows;
@@ -40,9 +41,9 @@ pub fn generate_factored_poisson_gamma_data_mtx(
     let bb = args.batches.unwrap_or(1);
     let rseed = args.rseed.unwrap_or(42);
 
-    let mut rng = rand::rngs::StdRng::seed_from_u64(rseed);
-
     let threshold = 0.5_f32;
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(rseed);
 
     // 1. batch membership matrix
     let runif = Uniform::new(0, bb);
@@ -53,41 +54,30 @@ pub fn generate_factored_poisson_gamma_data_mtx(
         .map(|&x| Box::from(x.to_string()))
         .collect();
 
-    write_lines(&batch_out, memb_file)?;
-    println!("batch membership: {:?}", &memb_file);
+    write_lines(&batch_out, batch_file)?;
+    println!("batch membership: {:?}", &batch_file);
 
     // 2. batch effect matrix
-    let ln_delta = Tensor::randn(0_f32, 1_f32, (dd, bb), &Device::Cpu)?;
-    let mu = ln_delta.mean_keepdim(0)?;
-    let sig = ln_delta.var_keepdim(0)?.sqrt()?;
-    let ln_delta_db = ln_delta.broadcast_sub(&mu)?.broadcast_div(&sig)?;
-
+    let mut ln_delta_db = DMatrix::<f32>::rnorm(dd, bb);
+    ln_delta_db.scale_columns_inplace();
     println!("simulated batch effects");
 
     // 3. factorization model
-    let rgamma_beta = Gamma::new(1.0, 1.0 / (dd as f32))?;
+    let rgamma_beta = Gamma::new(kk as f32, 1_f32 / (dd as f32).sqrt())?;
+    let rvec = (0..(dd * kk))
+        .map(|_| rgamma_beta.sample(&mut rng))
+        .collect::<Vec<f32>>();
+    let beta_dk = DMatrix::<f32>::from_vec(dd, kk, rvec);
 
-    let beta_dk = Tensor::from_vec(
-        (0..(dd * kk))
-            .map(|_| rgamma_beta.sample(&mut rng))
-            .collect::<Vec<f32>>(),
-        (dd, kk),
-        &Device::Cpu,
-    )?;
+    let rgamma_theta = Gamma::new(kk as f32, 1_f32 / (nn as f32).sqrt())?;
+    let rvec = (0..(nn * kk))
+        .map(|_| rgamma_theta.sample(&mut rng))
+        .collect::<Vec<f32>>();
+    let theta_kn = DMatrix::<f32>::from_vec(kk, nn, rvec);
 
-    let rgamma_theta = Gamma::new(1.0, 1.0 / (kk as f32))?;
-
-    let theta_kn = Tensor::from_vec(
-        (0..(kk * nn))
-            .map(|_| rgamma_theta.sample(&mut rng))
-            .collect::<Vec<f32>>(),
-        (kk, nn),
-        &Device::Cpu,
-    )?;
-
-    tensor_io::write_tsv(&ln_batch_file, &ln_delta)?;
-    tensor_io::write_tsv(&dict_file, &beta_dk)?;
-    tensor_io::write_tsv(&prop_file, &theta_kn)?;
+    ln_delta_db.to_tsv(&ln_batch_file)?;
+    theta_kn.transpose().to_tsv(&prop_file)?;
+    beta_dk.to_tsv(&dict_file)?;
 
     println!(
         "wrote parameter files:\n{:?},\n{:?},\n{:?}",
@@ -95,34 +85,49 @@ pub fn generate_factored_poisson_gamma_data_mtx(
     );
 
     // 4. putting them all together
-    let mut triplets = vec![];
+    // let mut triplets = vec![];
+    let delta_db = ln_delta_db.map(|x| x.exp());
 
-    for j in 0..nn {
-        let b = batch_membership[j]; // batch index
+    let mut triplets = theta_kn
+        .column_iter()
+        .enumerate()
+        .par_bridge()
+        .map(|(j, theta_j)| {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(rseed + j as u64);
+            let b = batch_membership[j]; // batch index
+            let lambda_j = if bb > 2 {
+                (&beta_dk * &theta_j).component_mul(&delta_db.column(b))
+            } else {
+                &beta_dk * &theta_j
+            };
+            let scale = (dd as f32) / lambda_j.sum().sqrt();
 
-        let theta_j = theta_kn.narrow(1, j, 1)?.contiguous()?;
+            lambda_j
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &l_ij)| {
+                    let l_ij = l_ij * scale;
+                    let rpois = Poisson::new(l_ij).unwrap();
+                    let y_ij = rpois.sample(&mut rng);
+                    // let y_ij = l_ij.round(); //
+                    if y_ij > threshold {
+                        Some((i as u64, j as u64, y_ij))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .flatten()
+        .collect::<Vec<_>>();
 
-        let lambda_j = (ln_delta_db.narrow(1, b, 1)?.exp()?)
-            .mul(&beta_dk.matmul(&theta_j)?)?
-            .flatten_to(1)?;
+    println!(
+        "sampled Poisson data with {} non-zero elements",
+        triplets.len()
+    );
 
-        lambda_j
-            .to_vec1::<f32>()?
-            .iter()
-            .map(|&x| {
-                let rpois = Poisson::new(x).unwrap();
-                rpois.sample(&mut rng)
-            })
-            .enumerate()
-            .for_each(|(i, y_ij)| {
-                if y_ij > threshold {
-                    triplets.push((i as u64, j as u64, y_ij as f32));
-                }
-            });
-    }
-
-    // dbg!(&triplets);
+    triplets.sort_by_key(|&(row, _, _)| row);
+    triplets.sort_by_key(|&(_, col, _)| col);
     write_mtx_triplets(&triplets, dd, nn, &mtx_file)?;
-
     Ok(())
 }

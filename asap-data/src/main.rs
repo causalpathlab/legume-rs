@@ -76,8 +76,8 @@ pub struct RunBuildArgs {
     #[arg(short, long)]
     col: Option<Box<str>>,
 
-    /// Backend to use (HDF5 or Zarr), default: Zarr
-    #[arg(long, value_enum)]
+    /// Backend to use (`hdf5` or `zarr`)
+    #[arg(long, value_enum, default_value = "zarr")]
     backend: Option<SparseIoBackend>,
 
     /// Output file header: {output}.{backend}
@@ -90,20 +90,20 @@ pub struct RunSqueezeArgs {
     /// Data file -- either `.zarr` or `.h5`
     data_file: Box<str>,
 
-    /// Number of non-zero cutoff for rows (default: 0)
-    #[arg(short, long)]
+    /// Number of non-zero cutoff for rows
+    #[arg(short, long, default_value = "0")]
     row_nnz_cutoff: Option<usize>,
 
-    /// Number of non-zero cutoff for columns (default: 0)
-    #[arg(short, long)]
+    /// Number of non-zero cutoff for columns
+    #[arg(short, long, default_value = "0")]
     column_nnz_cutoff: Option<usize>,
 
-    /// Block_size for parallel processing (default: 100)
-    #[arg(long, value_enum)]
+    /// Block_size for parallel processing
+    #[arg(long, value_enum, default_value = "100")]
     block_size: Option<usize>,
 
-    /// backend to use (HDF5 or Zarr), default: Zarr
-    #[arg(short, long, value_enum)]
+    /// backend to use (hdf5 or zarr), default: zarr
+    #[arg(short, long, value_enum, default_value = "zarr")]
     backend: Option<SparseIoBackend>,
 }
 
@@ -112,12 +112,12 @@ pub struct RunStatArgs {
     /// Data file -- .zarr or .h5 file
     data_file: Box<str>,
 
-    /// backend to use (HDF5 or Zarr), default: Zarr
-    #[arg(short, long, value_enum)]
+    /// backend to use (`hdf5` or `zarr`)
+    #[arg(short, long, value_enum, default_value = "zarr")]
     backend: Option<SparseIoBackend>,
 
-    /// block_size, default: 100
-    #[arg(long, value_enum)]
+    /// block_size
+    #[arg(long, value_enum, default_value = "100")]
     block_size: Option<usize>,
 
     /// output file header
@@ -151,8 +151,8 @@ pub struct RunSimulateArgs {
     #[arg(long)]
     pub seed: Option<u64>,
 
-    /// backend to use (HDF5 or Zarr), default: Zarr
-    #[arg(long, value_enum)]
+    /// backend to use (`hdf5` or `zarr`)
+    #[arg(long, value_enum, default_value = "zarr")]
     backend: Option<SparseIoBackend>,
 }
 

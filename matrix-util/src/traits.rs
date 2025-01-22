@@ -57,4 +57,5 @@ pub trait IoOps {
     type Mat;
 
     fn from_tsv(tsv_file: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat>;
+    fn to_tsv(&self, tsv_file: &str) -> anyhow::Result<()>;
 }

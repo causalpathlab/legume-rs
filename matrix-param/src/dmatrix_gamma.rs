@@ -26,6 +26,10 @@ pub struct GammaMatrix {
     estimated_log_sd: DMatrix<f32>,
 }
 
+impl ParamIo for GammaMatrix {
+    type Mat = DMatrix<f32>;
+}
+
 impl TwoStatParam for GammaMatrix {
     type Mat = DMatrix<f32>;
     type Scalar = f32;
