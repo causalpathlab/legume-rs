@@ -31,8 +31,19 @@ pub trait SampleOps {
     type Mat;
     type Scalar;
 
+    /// Sample a matrix from a uniform distribution `U(0,1)`
     fn runif(dd: usize, nn: usize) -> Self::Mat;
+
+    /// Sample a matrix from a normal distribution `N(0,1)`
     fn rnorm(dd: usize, nn: usize) -> Self::Mat;
+
+    /// Sample a matrix from a gamma distribution with `param` is
+    /// `(shape α, scale θ)`
+    ///
+    /// $$f(x|\alpha,\theta) = \frac{\theta^{-\alpha}}{\Gamma(\alpha)} x^{\alpha - 1} e^{-x/\theta}$$
+    ///
+    /// Note: `rate = 1/scale` or $\beta = 1/\theta$
+    fn rgamma(dd: usize, nn: usize, param: (f32, f32)) -> Self::Mat;
 }
 
 /// Operations that involves multiple types

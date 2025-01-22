@@ -43,18 +43,19 @@ fn main() -> anyhow::Result<()> {
 
                 for batch_file in batch_files.iter() {
                     for s in read_lines(&batch_file)? {
-                        if let Some(&id) = batch_name_to_id.get(&s) {
-                            batch_membership.push(id);
-                        } else {
-                            let new_id = batch_name_to_id.len();
-                            batch_name_to_id.insert(s.clone(), new_id);
-                            batch_membership.push(new_id);
-                        }
+                        batch_membership.push(s.to_string());
+                        // if let Some(&id) = batch_name_to_id.get(&s) {
+                        //     batch_membership.push(id);
+                        // } else {
+                        //     let new_id = batch_name_to_id.len();
+                        //     batch_name_to_id.insert(s.clone(), new_id);
+                        //     batch_membership.push(new_id);
+                        // }
                     }
                 }
             } else {
                 for (id, &nn) in data_vec.num_columns_by_data()?.iter().enumerate() {
-                    batch_membership.extend(vec![id; nn]);
+                    batch_membership.extend(vec![id.to_string(); nn]);
                     batch_name_to_id.insert(id.to_string().into_boxed_str(), id);
                 }
             }
@@ -74,7 +75,15 @@ fn main() -> anyhow::Result<()> {
                 .to_tsv(&(args.out.to_string() + ".basis.gz"))?;
 
             let proj_kn = proj_res.proj;
-            proj_kn.transpose().to_tsv(&(args.out.to_string() + ".proj.gz"))?;
+
+            // let num_batches = data_vec.num_batches();
+            // if num_batches > 1 {
+            //     let mut proj_kb = DMatrix::<f32>::zeros(proj_kn.nrows(), num_batches);
+            // }
+
+            proj_kn
+                .transpose()
+                .to_tsv(&(args.out.to_string() + ".proj.gz"))?;
 
             data_vec.assign_columns_to_samples(Some(&proj_kn), None)?;
 
@@ -141,7 +150,7 @@ pub struct RunCollapseArgs {
     down_sample: Option<usize>,
 
     /// optimization iterations
-    #[arg(long, default_value = "10")]
+    #[arg(long, default_value = "100")]
     iter_opt: Option<usize>,
 
     /// Output header

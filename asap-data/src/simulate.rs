@@ -4,7 +4,7 @@ use matrix_util::dmatrix_util::*;
 use matrix_util::mtx_io::write_mtx_triplets;
 use matrix_util::traits::*;
 use rand::SeedableRng;
-use rand_distr::{Distribution, Gamma, Poisson, Uniform};
+use rand_distr::{Distribution, Poisson, Uniform};
 
 pub struct SimArgs {
     pub rows: usize,
@@ -63,17 +63,8 @@ pub fn generate_factored_poisson_gamma_data_mtx(
     println!("simulated batch effects");
 
     // 3. factorization model
-    let rgamma_beta = Gamma::new(kk as f32, 1_f32 / (dd as f32).sqrt())?;
-    let rvec = (0..(dd * kk))
-        .map(|_| rgamma_beta.sample(&mut rng))
-        .collect::<Vec<f32>>();
-    let beta_dk = DMatrix::<f32>::from_vec(dd, kk, rvec);
-
-    let rgamma_theta = Gamma::new(kk as f32, 1_f32 / (nn as f32).sqrt())?;
-    let rvec = (0..(nn * kk))
-        .map(|_| rgamma_theta.sample(&mut rng))
-        .collect::<Vec<f32>>();
-    let theta_kn = DMatrix::<f32>::from_vec(kk, nn, rvec);
+    let beta_dk = DMatrix::<f32>::rgamma(dd, kk, (1., 1.));
+    let theta_kn = DMatrix::<f32>::rgamma(kk, nn, (1., 1.));
 
     ln_delta_db.to_tsv(&ln_batch_file)?;
     theta_kn.transpose().to_tsv(&prop_file)?;
@@ -95,18 +86,18 @@ pub fn generate_factored_poisson_gamma_data_mtx(
         .map(|(j, theta_j)| {
             let mut rng = rand::rngs::StdRng::seed_from_u64(rseed + j as u64);
             let b = batch_membership[j]; // batch index
-            let lambda_j = if bb > 2 {
+            let lambda_j = if bb > 1 {
                 (&beta_dk * &theta_j).component_mul(&delta_db.column(b))
             } else {
                 &beta_dk * &theta_j
             };
-            let scale = (dd as f32) / lambda_j.sum().sqrt();
+            // let scale = (dd as f32) / lambda_j.sum().sqrt();
+            // let l_ij = l_ij * scale;
 
             lambda_j
                 .iter()
                 .enumerate()
                 .filter_map(|(i, &l_ij)| {
-                    let l_ij = l_ij * scale;
                     let rpois = Poisson::new(l_ij).unwrap();
                     let y_ij = rpois.sample(&mut rng);
                     // let y_ij = l_ij.round(); //

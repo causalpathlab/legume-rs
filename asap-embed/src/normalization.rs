@@ -22,9 +22,9 @@ pub trait NormalizeDistance: Iterator<Item = f32> + Sized {
         for _ in 0..max_iter {
             let lambda_old = lambda;
             if fval < 0.0 {
-                lambda *= 1.1; // total weight sum > target_exp_sum
+                lambda *= 2.0; // total weight sum > target_exp_sum
             } else {
-                lambda *= 0.9; // total weight sum < target_exp_sum
+                lambda *= 0.5; // total weight sum < target_exp_sum
             }
 
             let fval_new = target_exp_sum - dist.clone().exp_sum(lambda);

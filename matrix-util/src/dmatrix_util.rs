@@ -3,7 +3,7 @@ pub use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
 
 use num_traits::Float;
 pub use rand::{thread_rng, Rng};
-pub use rand_distr::{StandardNormal, Uniform};
+pub use rand_distr::{Distribution, Gamma, StandardNormal, Uniform};
 pub use rayon::prelude::*;
 
 use crate::traits::*;
@@ -89,6 +89,21 @@ where
             .into_par_iter()
             .map_init(thread_rng, |rng, _| {
                 let x: f32 = rng.sample(StandardNormal);
+                T::from(x).expect("failed to type")
+            })
+            .collect();
+
+        DMatrix::<T>::from_vec(nrow, ncol, rvec)
+    }
+
+    fn rgamma(nrow: usize, ncol: usize, param: (f32, f32)) -> Self::Mat {
+        let (shape, scale) = param;
+        let pdf = Gamma::new(shape, scale).unwrap();
+
+        let rvec = (0..(nrow * ncol))
+            .into_par_iter()
+            .map_init(thread_rng, |rng, _| {
+                let x: f32 = pdf.sample(rng);
                 T::from(x).expect("failed to type")
             })
             .collect();

@@ -1,6 +1,6 @@
 use crate::sparse_io::*;
 use matrix_util::knn_match::ColumnDict;
-use rand::prelude::SliceRandom;
+use matrix_util::utils::*;
 use std::sync::Arc;
 
 type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
@@ -293,88 +293,110 @@ impl SparseIoVec {
         ))
     }
 
-    pub fn register_batches_ndarray(
+    /// Register batch membership information along with the feature
+    /// matrix for quick look up operations.
+    ///
+    /// # Arguments
+    /// * `feature_matrix` - A feature matrix where each column corresponds to a cell.
+    /// * `batch_membership` - A vector of batch membership information for each cell.
+    pub fn register_batches_ndarray<T>(
         &mut self,
         feature_matrix: &ndarray::Array2<f32>,
-        batch_membership: Vec<usize>,
-    ) -> anyhow::Result<()> {
+        batch_membership: &Vec<T>,
+    ) -> anyhow::Result<()>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone,
+    {
         {
             debug_assert_eq!(batch_membership.len(), feature_matrix.ncols());
         }
-        let batches = partition_by_membership(&batch_membership, None);
-
-        let batch_names = batches.keys().cloned().collect::<Vec<usize>>();
-
-        let num_batch = batch_names
-            .iter()
-            .max()
-            .copied()
-            .ok_or(anyhow::anyhow!("unable to determine batch size"))?
-            + 1;
-
-        let dictionaries = (0..num_batch)
-            .map(|b| {
-                if let Some(batch_cells) = batches.get(&b) {
-                    let columns = batch_cells
-                        .iter()
-                        .map(|&c| feature_matrix.column(c))
-                        .collect::<Vec<_>>();
-                    ColumnDict::<usize>::from_ndarray_views(columns, batch_cells.clone())
-                } else {
-                    ColumnDict::<usize>::empty_ndarray_views()
-                }
-            })
-            .collect::<Vec<_>>();
-
-        self.batch_knn_lookup = Some(dictionaries);
-        Ok(())
-    }
-
-    pub fn register_batches_dmatrix(
-        &mut self,
-        feature_matrix: &nalgebra::DMatrix<f32>,
-        batch_membership: Vec<usize>,
-    ) -> anyhow::Result<()> {
-        {
-            debug_assert_eq!(batch_membership.len(), feature_matrix.ncols());
-        }
-
-        let batches = partition_by_membership(&batch_membership, None);
-        let batch_names = batches.keys().cloned().collect::<Vec<usize>>();
-
-        let num_batch = batch_names
-            .iter()
-            .max()
-            .copied()
-            .ok_or(anyhow::anyhow!("unable to determine batch size"))?
-            + 1;
-
-        let ntot = self.num_columns()?;
-        let mut dictionaries = vec![];
-        let mut cell_to_batch = vec![0; ntot];
-
-        for b in 0..num_batch {
-            if let Some(batch_cells) = batches.get(&b) {
+        self._register_batches(
+            feature_matrix,
+            batch_membership,
+            |feature_matrix, batch_cells| {
                 let columns = batch_cells
                     .iter()
                     .map(|&c| feature_matrix.column(c))
                     .collect::<Vec<_>>();
+                ColumnDict::<usize>::from_ndarray_views(columns, batch_cells.clone())
+            },
+        )
+    }
 
-                dictionaries.push(ColumnDict::<usize>::from_dvector_views(
-                    columns,
-                    batch_cells.clone(),
-                ));
-
-                for &j in batch_cells {
-                    cell_to_batch[j] = b;
-                }
-            } else {
-                dictionaries.push(ColumnDict::<usize>::empty_dvector_views());
-            }
+    /// Register batch membership information along with the feature
+    /// matrix for quick look up operations.
+    ///
+    /// # Arguments
+    /// * `feature_matrix` - A feature matrix where each column corresponds to a cell.
+    /// * `batch_membership` - A vector of batch membership information for each cell.
+    pub fn register_batches_dmatrix<T>(
+        &mut self,
+        feature_matrix: &nalgebra::DMatrix<f32>,
+        batch_membership: &Vec<T>,
+    ) -> anyhow::Result<()>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone,
+    {
+        {
+            debug_assert_eq!(batch_membership.len(), feature_matrix.ncols());
         }
 
+        self._register_batches(
+            feature_matrix,
+            batch_membership,
+            |feature_matrix, batch_cells| {
+                let columns = batch_cells
+                    .iter()
+                    .map(|&c| feature_matrix.column(c))
+                    .collect::<Vec<_>>();
+                ColumnDict::<usize>::from_dvector_views(columns, batch_cells.clone())
+            },
+        )
+    }
+
+    fn _register_batches<M, F, T>(
+        &mut self,
+        feature_matrix: &M,
+        batch_membership: &Vec<T>,
+        create_column_dict: F,
+    ) -> anyhow::Result<()>
+    where
+        M: Sync,
+        F: Fn(&M, &Vec<usize>) -> ColumnDict<usize> + Sync,
+        T: Sync + Send + std::hash::Hash + Eq + Clone,
+    {
+        let batches = partition_by_membership(&batch_membership, None);
+
+        let ntot = self.num_columns()?;
+        let mut col_to_batch = vec![0; ntot];
+
+        let mut idx_dict = batches
+            .iter()
+            .enumerate()
+            .par_bridge()
+            .map(|(batch_index, (_name, batch_cells))| {
+                (
+                    batch_index,
+                    create_column_dict(&feature_matrix, batch_cells),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        idx_dict.sort_by_key(|&(idx, _)| idx);
+
+        for (idx, dict) in idx_dict.iter() {
+            dict.names()
+                .iter()
+                .for_each(|&cell| col_to_batch[cell] = *idx);
+        }
+
+        let dictionaries = idx_dict
+            .into_iter()
+            .map(|(_, dict)| dict)
+            .collect::<Vec<_>>();
+
         self.batch_knn_lookup = Some(dictionaries);
-        self.col_to_batch = Some(cell_to_batch);
+        self.col_to_batch = Some(col_to_batch);
         Ok(())
     }
 
@@ -392,42 +414,4 @@ impl SparseIoVec {
             .expect("cell_to_batch not initialized");
         cells.into_iter().map(|c| cell_to_batch[c]).collect()
     }
-}
-
-fn partition_by_membership(
-    membership: &Vec<usize>,
-    nelem_per_group: Option<usize>,
-) -> HashMap<usize, Vec<usize>> {
-    // Take care of empty pseudobulk samples
-    let mut pb_position: HashMap<usize, usize> = HashMap::new();
-    {
-        let mut pos = 0_usize;
-        for k in membership {
-            if !pb_position.contains_key(k) {
-                pb_position.insert(*k, pos);
-                pos += 1;
-            }
-        }
-    }
-    // dbg!(&pb_position);
-
-    let mut pb_cells: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (cell, &k) in membership.iter().enumerate() {
-        let &s = pb_position.get(&k).expect("failed to get position");
-        pb_cells.entry(s).or_default().push(cell);
-    }
-
-    // Down sample cells if needed
-    pb_cells.par_iter_mut().for_each(|(_, cells)| {
-        let ncells = cells.len();
-        if let Some(ntarget) = nelem_per_group {
-            if ncells > ntarget {
-                let mut rng = rand::thread_rng();
-                cells.shuffle(&mut rng);
-                cells.truncate(ntarget);
-            }
-        }
-        // dbg!(cells.len());
-    });
-    pb_cells
 }
