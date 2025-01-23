@@ -9,7 +9,9 @@ use clap::{Args, Parser, Subcommand};
 use collapse_data::CollapsingOps;
 use matrix_param::traits::*;
 use matrix_util::common_io::{extension, read_lines};
+use matrix_util::traits::*;
 use random_projection::RandProjOps;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {

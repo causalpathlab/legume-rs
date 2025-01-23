@@ -1,12 +1,9 @@
 use crate::common::*;
-
-use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::SparseIoVec;
-
+use indicatif::ParallelProgressIterator;
 use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::dmatrix_util::*;
-
-use indicatif::ParallelProgressIterator;
+use matrix_util::traits::*;
 use std::sync::{Arc, Mutex};
 
 #[allow(dead_code)]
@@ -93,7 +90,7 @@ impl RandProjOps for SparseIoVec {
 
                 xx_dm.normalize_columns_inplace();
                 let mut chunk = (xx_dm.transpose() * &basis_dk).transpose();
-		chunk.scale_columns_inplace();
+                chunk.scale_columns_inplace();
 
                 {
                     arc_proj_kn

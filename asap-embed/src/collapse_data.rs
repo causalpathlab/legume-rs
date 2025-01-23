@@ -9,7 +9,6 @@ use matrix_param::traits::*;
 use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::dmatrix_util::*;
 use matrix_util::traits::*;
-use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -149,6 +148,8 @@ impl CollapsingOps for SparseIoVec {
         sample_to_cells: &HashMap<usize, Vec<usize>>,
         stat: &mut CollapsingStat,
     ) {
+        use rayon::prelude::*;
+
         let num_samples = sample_to_cells.len();
         let num_jobs = num_samples as u64;
         let arc_stat = Arc::new(Mutex::new(stat));
@@ -186,6 +187,8 @@ impl CollapsingOps for SparseIoVec {
         sample_to_cells: &HashMap<usize, Vec<usize>>,
         stat: &mut CollapsingStat,
     ) {
+        use rayon::prelude::*;
+
         let num_samples = sample_to_cells.len();
         let num_jobs = num_samples as u64;
         let arc_stat = Arc::new(Mutex::new(stat));
@@ -227,6 +230,8 @@ impl CollapsingOps for SparseIoVec {
         knn: usize,
         stat: &mut CollapsingStat,
     ) {
+        use rayon::prelude::*;
+
         let num_genes = self.num_rows().expect("failed to get num genes");
         let num_samples = sample_to_cells.len();
         let num_batches = self.num_batches();
