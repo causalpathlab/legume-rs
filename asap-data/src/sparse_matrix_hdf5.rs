@@ -1,5 +1,6 @@
 use crate::sparse_io::*;
 use hdf5::filters::blosc_set_nthreads;
+use log::info;
 use matrix_util::common_io::*;
 use matrix_util::mtx_io::*;
 use num_cpus;
@@ -50,7 +51,7 @@ impl SparseMtxData {
             Self::_num_columns(&hdf5_backend),
             Self::_num_nnz(&hdf5_backend),
         ) {
-            dbg!(nrow, ncol, nnz);
+            info!("#rows: {}, #columns: {}, #non-zeros: {}", nrow, ncol, nnz);
         } else {
             anyhow::bail!("Couldn't figure out the size of this sparse matrix data");
         }
@@ -84,22 +85,29 @@ impl SparseMtxData {
     ) -> anyhow::Result<Self> {
         // create an object
         let mut ret = match backend_file {
-            Some(backend_file) => Self::return_backend_file(backend_file)?,
+            Some(backend_file) => {
+                info!("backend file : {}", backend_file);
+                Self::return_backend_file(backend_file)?
+            }
             None => {
                 let backend_file = mtx_file.to_string() + ".h5";
+                info!("backend file : {}", backend_file);
                 Self::return_backend_file(backend_file.as_ref())?
             }
         };
 
         // populate data from mtx file
+        info!("importing mtx file by column");
         ret.import_mtx_file_by_col(mtx_file)?;
         ret.read_column_indptr()?;
 
         if Some(true) == index_by_row {
+            info!("importing mtx file by row");
             ret.import_mtx_file_by_row(mtx_file)?;
             ret.read_row_indptr()?;
         }
 
+        info!("created sparse backend from {}", mtx_file);
         Ok(ret)
     }
 
@@ -419,7 +427,7 @@ impl SparseMtxData {
         // Populate them into HDF5
         if self.backend.group("/by_row").is_err() {
             let root = self.backend.create_group("/by_row")?;
-            eprintln!("Group: {:?} created", root);
+            info!("Group: {:?} created", root);
         }
 
         {
@@ -473,7 +481,7 @@ impl SparseMtxData {
         // Populate them into HDF5
         if self.backend.group("/by_column").is_err() {
             let root = self.backend.create_group("/by_column")?;
-            eprintln!("Group: {:?} created", root);
+            info!("Group: {:?} created", root);
         }
 
         {
@@ -601,10 +609,10 @@ impl SparseIo for SparseMtxData {
                 }
             }
             buf.flush()?;
-            // println!(
-            //     "{}: {} rows, {} columns, {} non-zeros",
-            //     mtx_file, nrow, ncol, nnz
-            // );
+            info!(
+                "{}: {} rows, {} columns, {} non-zeros",
+                mtx_file, nrow, ncol, nnz
+            );
 
             Ok(())
         } else {

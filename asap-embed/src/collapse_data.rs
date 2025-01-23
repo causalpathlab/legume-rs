@@ -3,7 +3,7 @@ use crate::normalization::*;
 use asap_data::sparse_io_vector::SparseIoVec;
 use indicatif::ParallelProgressIterator;
 use indicatif::ProgressIterator;
-use log::info;
+use log::{info, warn};
 use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::Inference;
 use matrix_param::traits::*;
@@ -30,12 +30,14 @@ pub trait CollapsingOps {
     ///
     /// # Arguments
     /// * `cells_per_group` - number of cells per sample (None: no down sampling)
+    /// * `reference` - reference batch for counterfactual inference
     /// * `knn` - number of nearest neighbors for building HNSW graph (default: 10)
     /// * `num_opt_iter` - number of optimization iterations (default: 100)
     ///
     fn collapse_columns(
         &self,
         cells_per_group: Option<usize>,
+        reference: Option<Box<str>>,
         knn: Option<usize>,
         num_opt_iter: Option<usize>,
     ) -> anyhow::Result<CollapsingOut>;
@@ -49,7 +51,7 @@ pub trait CollapsingOps {
     /// * `cell_to_batch` - map: cell -> batch
     fn register_batches<T>(&mut self, proj_kn: &Mat, cell_to_batch: &Vec<T>) -> anyhow::Result<()>
     where
-        T: Sync + Send + std::hash::Hash + Eq + Clone;
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 
     fn collect_basic_stat(&self, sample_to_cells: &Vec<Vec<usize>>, stat: &mut CollapsingStat);
 
@@ -58,85 +60,108 @@ pub trait CollapsingOps {
     fn collect_matched_stat(
         &self,
         sample_to_cells: &Vec<Vec<usize>>,
+        reference_batches: Vec<usize>,
         knn: usize,
         stat: &mut CollapsingStat,
     );
 }
 
 impl CollapsingOps for SparseIoVec {
-    /// Register batch information and build a `HnswMap` object for
-    /// each batch for fast nearest neighbor search within each batch
-    /// and store them in the `SparseIoVec`
-    ///
-    /// # Arguments
-    /// * `proj_kn` - random projection matrix
-    /// * `cell_to_batch` - map: cell -> batch
+    //
     fn register_batches<T>(&mut self, proj_kn: &Mat, cell_to_batch: &Vec<T>) -> anyhow::Result<()>
     where
-        T: Sync + Send + std::hash::Hash + Eq + Clone,
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
         let kk = proj_kn.nrows();
+        info!("SVD on the projection matrix with k = {} ...", kk);
+
         let (_, _, mut q_nk) = proj_kn.rsvd(kk)?;
         q_nk.scale_columns_inplace();
         let proj_kn = q_nk.transpose();
-        self.register_batches_dmatrix(&proj_kn, &cell_to_batch)
+
+        info!("creating batch-specific HNSW maps ...");
+        self.register_batches_dmatrix(&proj_kn, &cell_to_batch)?;
+
+        info!(
+            "partitioned {} columns to {} batches",
+            self.num_columns()?,
+            self.num_batches()
+        );
+
+        Ok(())
     }
 
-    /// Collapse columns/cells into samples as allocated by
-    /// `assign_columns_to_samples`
-    ///
-    /// # Arguments
-    /// * `cells_per_group` - number of cells per group (None: no down sampling)
-    /// * `knn` - number of nearest neighbors for building HNSW graph (default: 10)
-    /// * `num_opt_iter` - number of optimization iterations (default: 100)
-    ///
     fn collapse_columns(
         &self,
-        cells_per_group: Option<usize>,
+        ncols_per_group: Option<usize>,
+        reference: Option<Box<str>>,
         knn: Option<usize>,
         num_opt_iter: Option<usize>,
     ) -> anyhow::Result<CollapsingOut> {
-        let cell_to_sample: &Vec<usize> = self.take_groups().ok_or(anyhow::anyhow!(
-            "The columns were not assigned before. Call `partition_columns`"
+        let col_to_group: &Vec<usize> = self.take_groups().ok_or(anyhow::anyhow!(
+            "The columns were not assigned before. Call `assign_columns_to_groups`"
         ))?;
 
-        let sample_to_cells: Vec<Vec<usize>> =
-            partition_by_membership(cell_to_sample, cells_per_group)
-                .into_values()
-                .collect();
+        let group_to_cols: Vec<Vec<usize>> = partition_by_membership(col_to_group, ncols_per_group)
+            .into_values()
+            .collect();
 
-        let num_genes = self.num_rows()?;
-        let num_samples = sample_to_cells.len();
+        let num_features = self.num_rows()?;
+        let num_groups = group_to_cols.len();
         let num_batches = self.num_batches();
 
-        let mut stat = CollapsingStat::new(num_genes, num_samples, num_batches);
+        let mut stat = CollapsingStat::new(num_features, num_groups, num_batches);
         // (&mut stat).clear();
         // let arc_stat = Arc::new(Mutex::new(&mut stat));
 
-        info!("basic statistics across {} samples", num_samples);
-        self.collect_basic_stat(&sample_to_cells, &mut stat);
+        info!("basic statistics across {} samples", num_groups);
+        self.collect_basic_stat(&group_to_cols, &mut stat);
 
         if num_batches > 1 {
             info!(
                 "batch-specific statistics across {} batches over {} samples",
-                num_batches, num_samples
+                num_batches, num_groups
             );
 
-            self.collect_batch_stat(&sample_to_cells, &mut stat);
+            self.collect_batch_stat(&group_to_cols, &mut stat);
 
             info!(
                 "counterfactual inference across {} batches over {} samples",
-                num_batches, num_samples,
+                num_batches, num_groups,
             );
 
             let knn = knn.unwrap_or(DEFAULT_KNN);
-            self.collect_matched_stat(&sample_to_cells, knn, &mut stat);
+
+            let batch_name_map = self
+                .batch_name_map()
+                .ok_or(anyhow::anyhow!("batch names are not registered"))?;
+
+            let reference_batches = match reference {
+                Some(ref_name) => {
+                    if let Some(ref_idx) = batch_name_map.get(&ref_name) {
+                        vec![*ref_idx]
+                    } else {
+                        warn!(
+                            "reference batch {} not found; so, use all the {} batches",
+                            ref_name, num_batches
+                        );
+                        (0..num_batches).collect()
+                    }
+                }
+                None => {
+                    warn!("using all the {} batches... (could be slow)", num_batches);
+                    (0..num_batches).collect()
+                }
+            };
+
+            self.collect_matched_stat(&group_to_cols, reference_batches, knn, &mut stat);
         } // if num_batches > 1
 
         /////////////////////////////
         // Resolve mean parameters //
         /////////////////////////////
 
+        info!("optimizing the mean parameters...");
         let (a0, b0) = (1_f32, 1_f32);
         optimize(&stat, (a0, b0), num_opt_iter.unwrap_or(DEFAULT_OPT_ITER))
     }
@@ -156,18 +181,20 @@ impl CollapsingOps for SparseIoVec {
             .par_bridge()
             .progress_count(num_jobs)
             .for_each(|(sample, cells)| {
-                let mut stat = arc_stat.lock().expect("failed to lock stat");
                 let yy = self
                     .read_columns_csc(cells.iter().cloned())
                     .expect("failed to read cells");
 
-                for y_j in yy.col_iter() {
-                    let rows = y_j.row_indices();
-                    let vals = y_j.values();
-                    for (&gene, &y) in rows.iter().zip(vals.iter()) {
-                        stat.ysum_ds[(gene, sample)] += y;
+                {
+                    let mut stat = arc_stat.lock().expect("failed to lock stat");
+                    for y_j in yy.col_iter() {
+                        let rows = y_j.row_indices();
+                        let vals = y_j.values();
+                        for (&gene, &y) in rows.iter().zip(vals.iter()) {
+                            stat.ysum_ds[(gene, sample)] += y;
+                        }
+                        stat.size_s[sample] += 1_f32; // each column is a sample
                     }
-                    stat.size_s[sample] += 1_f32; // each column is a sample
                 }
             });
 
@@ -193,23 +220,24 @@ impl CollapsingOps for SparseIoVec {
             .par_bridge()
             .progress_count(num_jobs)
             .for_each(|(sample, cells)| {
-                let mut stat = arc_stat.lock().expect("failed to lock stat");
-
                 let batches = self.get_batch_membership(cells.iter().cloned());
 
-                // 1. read source cells
                 let yy = self
                     .read_columns_csc(cells.iter().cloned())
                     .expect("failed to read cells");
 
-                yy.col_iter().zip(batches.iter()).for_each(|(y_j, &b)| {
-                    let rows = y_j.row_indices();
-                    let vals = y_j.values();
-                    for (&gene, &y) in rows.iter().zip(vals.iter()) {
-                        stat.ysum_db[(gene, b)] += y;
-                    }
-                    stat.n_bs[(b, sample)] += 1_f32;
-                });
+                {
+                    let mut stat = arc_stat.lock().expect("failed to lock stat");
+
+                    yy.col_iter().zip(batches.iter()).for_each(|(y_j, &b)| {
+                        let rows = y_j.row_indices();
+                        let vals = y_j.values();
+                        for (&gene, &y) in rows.iter().zip(vals.iter()) {
+                            stat.ysum_db[(gene, b)] += y;
+                        }
+                        stat.n_bs[(b, sample)] += 1_f32;
+                    });
+                }
             });
         #[cfg(debug_assertions)]
         {
@@ -221,6 +249,7 @@ impl CollapsingOps for SparseIoVec {
     fn collect_matched_stat(
         &self,
         sample_to_cells: &Vec<Vec<usize>>,
+        target_batches: Vec<usize>,
         knn: usize,
         stat: &mut CollapsingStat,
     ) {
@@ -228,7 +257,6 @@ impl CollapsingOps for SparseIoVec {
 
         let num_genes = self.num_rows().expect("failed to get num genes");
         let num_samples = sample_to_cells.len();
-        let num_batches = self.num_batches();
         let num_jobs = num_samples as u64;
         let arc_stat = Arc::new(Mutex::new(stat));
 
@@ -250,12 +278,12 @@ impl CollapsingOps for SparseIoVec {
                     .read_columns_dmatrix(cells.iter().cloned())
                     .expect("failed to read cells");
 
-                for target_batch in 0..num_batches {
+                for &target_b in target_batches.iter() {
                     // match cells between source and target batches
                     let (_, ncol, triplets, source_cells_in_target) = self
                         .collect_matched_columns_triplets(
                             cells.iter().cloned(),
-                            target_batch,
+                            target_b,
                             knn,
                             true,
                         )

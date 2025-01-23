@@ -18,6 +18,7 @@ pub struct SparseIoVec {
     col_to_group: Option<Vec<usize>>,
     batch_knn_lookup: Option<Vec<ColumnDict<usize>>>,
     col_to_batch: Option<Vec<usize>>,
+    batch_idx_to_name: Option<Vec<Box<str>>>,
 }
 
 impl SparseIoVec {
@@ -31,6 +32,7 @@ impl SparseIoVec {
             col_to_group: None,
             batch_knn_lookup: None,
             col_to_batch: None,
+            batch_idx_to_name: None,
         }
     }
 
@@ -308,7 +310,7 @@ impl SparseIoVec {
         batch_membership: &Vec<T>,
     ) -> anyhow::Result<()>
     where
-        T: Sync + Send + std::hash::Hash + Eq + Clone,
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
         {
             debug_assert_eq!(batch_membership.len(), feature_matrix.ncols());
@@ -338,7 +340,7 @@ impl SparseIoVec {
         batch_membership: &Vec<T>,
     ) -> anyhow::Result<()>
     where
-        T: Sync + Send + std::hash::Hash + Eq + Clone,
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
         {
             debug_assert_eq!(batch_membership.len(), feature_matrix.ncols());
@@ -366,41 +368,63 @@ impl SparseIoVec {
     where
         M: Sync,
         F: Fn(&M, &Vec<usize>) -> ColumnDict<usize> + Sync,
-        T: Sync + Send + std::hash::Hash + Eq + Clone,
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
         let batches = partition_by_membership(&batch_membership, None);
 
         let ntot = self.num_columns()?;
         let mut col_to_batch = vec![0; ntot];
 
-        let mut idx_dict = batches
+        let mut idx_name_dict = batches
             .iter()
             .enumerate()
             .par_bridge()
-            .map(|(batch_index, (_name, batch_cells))| {
+            .map(|(batch_index, (batch_name, batch_cells))| {
                 (
                     batch_index,
+                    batch_name.to_string().into_boxed_str(),
                     create_column_dict(&feature_matrix, batch_cells),
                 )
             })
             .collect::<Vec<_>>();
 
-        idx_dict.sort_by_key(|&(idx, _)| idx);
+        idx_name_dict.sort_by_key(|&(idx, _, _)| idx);
 
-        for (idx, dict) in idx_dict.iter() {
+        for (idx, _, dict) in idx_name_dict.iter() {
             dict.names()
                 .iter()
                 .for_each(|&cell| col_to_batch[cell] = *idx);
         }
 
-        let dictionaries = idx_dict
+        let batch_names = idx_name_dict
+            .iter()
+            .map(|(_, name, _)| name.clone())
+            .collect::<Vec<_>>();
+
+        let dictionaries = idx_name_dict
             .into_iter()
-            .map(|(_, dict)| dict)
+            .map(|(_, _, dict)| dict)
             .collect::<Vec<_>>();
 
         self.batch_knn_lookup = Some(dictionaries);
         self.col_to_batch = Some(col_to_batch);
+        self.batch_idx_to_name = Some(batch_names);
+
         Ok(())
+    }
+
+    pub fn batch_name_map(&self) -> Option<HashMap<Box<str>, usize>> {
+        if let Some(names) = &self.batch_idx_to_name {
+            Some(
+                names
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, name)| (name.clone(), idx))
+                    .collect::<HashMap<Box<str>, usize>>(),
+            )
+        } else {
+            None
+        }
     }
 
     pub fn num_batches(&self) -> usize {
