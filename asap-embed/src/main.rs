@@ -7,35 +7,47 @@ use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
 use clap::{Args, Parser, Subcommand};
 use collapse_data::CollapsingOps;
+use env_logger;
+use log::info;
 use matrix_param::traits::*;
 use matrix_util::common_io::{extension, read_lines};
 use matrix_util::traits::*;
 use random_projection::RandProjOps;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
+    env_logger::init();
+
     let cli = Cli::parse();
 
     match &cli.commands {
         Commands::CollapseColumns(args) => {
             // 1. push data files and collect batch membership
             let file = args.data_files[0].as_ref();
-            let backend_from_first = match extension(file)?.to_string().as_str() {
+            let backend = match extension(file)?.to_string().as_str() {
                 "h5" => SparseIoBackend::HDF5,
                 "zarr" => SparseIoBackend::Zarr,
                 _ => SparseIoBackend::Zarr,
             };
 
-            let backend = args.backend.clone().unwrap_or(backend_from_first);
-
             let mut data_vec = SparseIoVec::new();
             for data_file in args.data_files.iter() {
+                info!("Importing data file: {}", data_file);
+
+                match extension(&data_file)?.as_ref() {
+                    "zarr" => {
+                        assert_eq!(backend, SparseIoBackend::Zarr);
+                    }
+                    "h5" => {
+                        assert_eq!(backend, SparseIoBackend::HDF5);
+                    }
+                    _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
+                };
+
                 let data = open_sparse_matrix(&data_file, &backend)?;
                 data_vec.push(Arc::from(data))?;
             }
 
-            let mut batch_name_to_id = HashMap::new();
             let mut batch_membership = vec![];
 
             if let Some(batch_files) = &args.batch_files {
@@ -44,21 +56,14 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 for batch_file in batch_files.iter() {
+                    info!("Reading batch file: {}", batch_file);
                     for s in read_lines(&batch_file)? {
                         batch_membership.push(s.to_string());
-                        // if let Some(&id) = batch_name_to_id.get(&s) {
-                        //     batch_membership.push(id);
-                        // } else {
-                        //     let new_id = batch_name_to_id.len();
-                        //     batch_name_to_id.insert(s.clone(), new_id);
-                        //     batch_membership.push(new_id);
-                        // }
                     }
                 }
             } else {
                 for (id, &nn) in data_vec.num_columns_by_data()?.iter().enumerate() {
                     batch_membership.extend(vec![id.to_string(); nn]);
-                    batch_name_to_id.insert(id.to_string().into_boxed_str(), id);
                 }
             }
 
@@ -71,31 +76,34 @@ fn main() -> anyhow::Result<()> {
             }
 
             // 2. randomly project the columns
-            let proj_res = data_vec.project_columns(args.proj_dim, args.block_size.clone())?;
+            info!("random projection of data onto {} dims", args.proj_dim);
+            let proj_res =
+                data_vec.project_columns(args.proj_dim, Some(args.block_size.clone()))?;
             proj_res
                 .basis
                 .to_tsv(&(args.out.to_string() + ".basis.gz"))?;
 
             let proj_kn = proj_res.proj;
 
-            // let num_batches = data_vec.num_batches();
-            // if num_batches > 1 {
-            //     let mut proj_kb = DMatrix::<f32>::zeros(proj_kn.nrows(), num_batches);
-            // }
-
             proj_kn
                 .transpose()
                 .to_tsv(&(args.out.to_string() + ".proj.gz"))?;
 
-            data_vec.assign_columns_to_samples(Some(&proj_kn), None)?;
+            info!("assigning {} columns to samples...", proj_kn.ncols());
+
+            let nsamp = data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim))?;
+            info!("at most {} samples are assigned", nsamp);
 
             // 3. register batch membership
+            info!("registering batch-specific information");
             data_vec.register_batches(&proj_kn, &batch_membership)?;
 
-            dbg!(data_vec.num_batches());
-
             // 4. final collapsing
-            let ret = data_vec.collapse_columns(args.down_sample, args.knn, args.iter_opt)?;
+            info!("collapsing columns... into {} samples", nsamp);
+            let ret =
+                data_vec.collapse_columns(args.down_sample, Some(args.knn), Some(args.iter_opt))?;
+
+            info!("writing down the results...");
 
             ret.mu.write_tsv(&(args.out.to_string() + ".mu"))?;
 
@@ -106,6 +114,7 @@ fn main() -> anyhow::Result<()> {
             if let Some(gamma) = &ret.gamma {
                 gamma.write_tsv(&(args.out.to_string() + ".gamma"))?;
             }
+            info!("done");
         }
     }
 
@@ -143,17 +152,22 @@ pub struct RunCollapseArgs {
     #[arg(long, short, required = true)]
     proj_dim: usize,
 
+    /// Sorting dimension
+    #[arg(long, short, default_value = "10")]
+    sort_dim: usize,
+
     /// #k-nearest neighbours within each batch
     #[arg(long, default_value = "10")]
-    knn: Option<usize>,
+    knn: usize,
 
-    /// #downsampling columns per each collapsed sample
-    #[arg(long, default_value = "100")]
+    /// #downsampling columns per each collapsed sample. If None, no
+    /// downsampling.
+    #[arg(long)]
     down_sample: Option<usize>,
 
     /// optimization iterations
     #[arg(long, default_value = "100")]
-    iter_opt: Option<usize>,
+    iter_opt: usize,
 
     /// Output header
     #[arg(long, short, required = true)]
@@ -166,9 +180,5 @@ pub struct RunCollapseArgs {
 
     /// Block_size for parallel processing
     #[arg(long, value_enum, default_value = "100")]
-    block_size: Option<usize>,
-
-    /// backend to use
-    #[arg(long, value_enum, default_value = "zarr")]
-    backend: Option<SparseIoBackend>,
+    block_size: usize,
 }

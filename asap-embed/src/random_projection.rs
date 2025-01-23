@@ -49,21 +49,19 @@ pub trait RandProjOps {
         block_size: Option<usize>,
     ) -> anyhow::Result<RandRowProjOut>;
 
-    /// Assign each column/cell to some group.
+    /// Assign each column/cell to random sample by binary encoding
     ///
     /// # Arguments
     ///
-    /// * `proj_kn` - random projection matrix
+    /// * `proj_kn` - random projection matrix (feature x column/cell)
     ///
-    /// * `num_features` - number of features. If `proj_kn` were not
-    ///    provided, we will generate a random projection matrix from
-    ///    `rnorm`.
+    /// * `num_features` - number of top features (if None, use all of them)
     ///
     fn assign_columns_to_samples(
         &mut self,
-        proj_kn: Option<&Mat>,
+        proj_kn: &Mat,
         num_features: Option<usize>,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<usize>;
 }
 
 impl RandProjOps for SparseIoVec {
@@ -158,39 +156,30 @@ impl RandProjOps for SparseIoVec {
         })
     }
 
-    /// Assign each column/cell to random sample by binary encoding
+    /// Assign each column/cell to a sample by sorting through binary
+    /// encoding
     ///
     /// # Arguments
     ///
-    /// * `proj_kn` - random projection matrix
+    /// * `proj_kn` - random projection matrix (feature x column/cell)
     ///
-    /// * `num_features` - number of features if `proj_kn` were not provided.
+    /// * `num_features` - number of top features (if None, use all of them)
     ///
     fn assign_columns_to_samples(
         &mut self,
-        proj_kn: Option<&Mat>,
-        num_features: Option<usize>,
-    ) -> anyhow::Result<()> {
-        let proj_kn = match proj_kn {
-            Some(x) => x,
-            None => match num_features {
-                Some(kk) => &Mat::rnorm(kk, self.num_columns()?),
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "either `proj_kn` or  `num_features` should be provided"
-                    ))
-                }
-            },
-        };
-
-        let kk = proj_kn.nrows();
+        proj_kn: &Mat,
+        num_sorting_features: Option<usize>,
+    ) -> anyhow::Result<usize> {
         let nn = proj_kn.ncols();
-
         if nn != self.num_columns()? {
             return Err(anyhow::anyhow!("number of columns mismatch"));
         }
 
+        let target_kk = num_sorting_features.unwrap_or(proj_kn.nrows());
+        let kk = proj_kn.nrows().min(target_kk);
+
         let (_, _, mut q_nk) = proj_kn.rsvd(kk)?;
+
         q_nk.scale_columns_inplace();
 
         let mut binary_codes = DVector::<usize>::zeros(nn);
@@ -205,7 +194,8 @@ impl RandProjOps for SparseIoVec {
             binary_codes += q_nk.column(k).map(binary_shift);
         }
 
+        let max_group = binary_codes.max();
         self.assign_groups(binary_codes.data.as_vec().clone());
-        Ok(())
+        Ok(max_group + 1)
     }
 }

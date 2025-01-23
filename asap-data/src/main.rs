@@ -4,6 +4,9 @@ mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
 mod statistics;
 
+use env_logger;
+use log::info;
+
 use crate::sparse_io::*;
 use crate::statistics::RunningStatistics;
 use clap::{Args, Parser, Subcommand};
@@ -16,6 +19,8 @@ use std::sync::{Arc, Mutex};
 type SData = dyn SparseIo<IndexIter = Vec<usize>>;
 
 fn main() -> anyhow::Result<()> {
+    env_logger::init();
+
     let cli = Cli::parse();
 
     match &cli.commands {
@@ -79,7 +84,7 @@ pub struct RunBuildArgs {
 
     /// Backend to use (`hdf5` or `zarr`)
     #[arg(long, value_enum, default_value = "zarr")]
-    backend: Option<SparseIoBackend>,
+    backend: SparseIoBackend,
 
     /// Output file header: {output}.{backend}
     #[arg(short, long)]
@@ -93,19 +98,19 @@ pub struct RunSqueezeArgs {
 
     /// Number of non-zero cutoff for rows
     #[arg(short, long, default_value = "0")]
-    row_nnz_cutoff: Option<usize>,
+    row_nnz_cutoff: usize,
 
     /// Number of non-zero cutoff for columns
     #[arg(short, long, default_value = "0")]
-    column_nnz_cutoff: Option<usize>,
+    column_nnz_cutoff: usize,
 
     /// Block_size for parallel processing
     #[arg(long, value_enum, default_value = "100")]
-    block_size: Option<usize>,
+    block_size: usize,
 
     /// backend to use (hdf5 or zarr), default: zarr
     #[arg(short, long, value_enum, default_value = "zarr")]
-    backend: Option<SparseIoBackend>,
+    backend: SparseIoBackend,
 }
 
 #[derive(Args)]
@@ -115,11 +120,11 @@ pub struct RunStatArgs {
 
     /// backend to use (`hdf5` or `zarr`)
     #[arg(short, long, value_enum, default_value = "zarr")]
-    backend: Option<SparseIoBackend>,
+    backend: SparseIoBackend,
 
     /// block_size
     #[arg(long, value_enum, default_value = "100")]
-    block_size: Option<usize>,
+    block_size: usize,
 
     /// output file header
     #[arg(short, long)]
@@ -154,7 +159,7 @@ pub struct RunSimulateArgs {
 
     /// backend to use (`hdf5` or `zarr`)
     #[arg(long, value_enum, default_value = "zarr")]
-    backend: Option<SparseIoBackend>,
+    backend: SparseIoBackend,
 }
 
 /////////////////////
@@ -168,7 +173,7 @@ fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
     let row_file = args.row.as_ref();
     let col_file = args.col.as_ref();
 
-    let backend = args.backend.clone().unwrap_or(SparseIoBackend::Zarr);
+    let backend = args.backend.clone();
 
     let output = match args.output.clone() {
         Some(output) => output,
@@ -197,7 +202,7 @@ fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
     };
 
     if Path::new(&backend_file).exists() {
-        println!(
+        info!(
             "This existing backend file '{}' will be deleted",
             &backend_file
         );
@@ -234,8 +239,8 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     common_io::mkdir(&output)?;
 
     let input = cmd_args.data_file.clone();
-    let backend = cmd_args.backend.clone().unwrap_or(SparseIoBackend::Zarr);
-    let block_size = cmd_args.block_size.unwrap_or(100);
+    let backend = cmd_args.backend.clone();
+    let block_size = cmd_args.block_size;
 
     match common_io::extension(&input)?.as_ref() {
         "zarr" => {
@@ -263,11 +268,11 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
 
 fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
     let data_file = cmd_args.data_file.clone();
-    let row_nnz_cutoff = cmd_args.row_nnz_cutoff.unwrap_or(0);
-    let col_nnz_cutoff = cmd_args.column_nnz_cutoff.unwrap_or(0);
+    let row_nnz_cutoff = cmd_args.row_nnz_cutoff;
+    let col_nnz_cutoff = cmd_args.column_nnz_cutoff;
 
-    let block_size = cmd_args.block_size.unwrap_or(100);
-    let backend = cmd_args.backend.clone().unwrap_or(SparseIoBackend::Zarr);
+    let block_size = cmd_args.block_size;
+    let backend = cmd_args.backend.clone();
 
     match common_io::extension(&data_file)?.as_ref() {
         "zarr" => {
@@ -281,8 +286,8 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
 
     let mut data = open_sparse_matrix(&data_file, &backend)?;
 
-    println!(
-        "data: {} rows x {} columns",
+    info!(
+        "before squeeze -- data: {} rows x {} columns",
         data.num_rows().unwrap(),
         data.num_columns().unwrap()
     );
@@ -302,8 +307,8 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
 
         data.subset_columns_rows(Some(&col_idx), Some(&row_idx))?;
 
-        println!(
-            "data: {} rows x {} columns",
+        info!(
+            "after squeeze -- data: {} rows x {} columns",
             data.num_rows().unwrap(),
             data.num_columns().unwrap()
         );
@@ -316,7 +321,7 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
     common_io::mkdir(&output)?;
 
-    let backend = cmd_args.backend.clone().unwrap_or(SparseIoBackend::Zarr);
+    let backend = cmd_args.backend.clone();
 
     let backend_file = match backend {
         SparseIoBackend::HDF5 => output.to_string() + ".h5",
@@ -357,9 +362,11 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     )
     .expect("something went wrong in factored gamma");
 
-    println!("successfully generated factored Poisson-Gamma data");
+    info!("successfully generated factored Poisson-Gamma data");
 
     let mut data = create_sparse_mtx_file(&mtx_file, Some(&backend_file), Some(&backend))?;
+
+    info!("created sparse matrix file: {}", backend_file);
 
     let rows: Vec<Box<str>> = (1..(sim_args.rows + 1))
         .map(|i| i.to_string().into_boxed_str())
@@ -372,6 +379,7 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     data.register_row_names_vec(&rows);
     data.register_column_names_vec(&cols);
 
+    info!("done");
     Ok(())
 }
 
@@ -388,10 +396,19 @@ fn collect_row_column_stats(
     block_size: usize,
 ) -> anyhow::Result<(RunningStatistics<Ix1>, RunningStatistics<Ix1>)> {
     if let (Some(nrow), Some(ncol)) = (data.num_rows(), data.num_columns()) {
-        let arc_row_stat = Arc::new(Mutex::new(RunningStatistics::new(Ix1(nrow))));
-        let arc_col_stat = Arc::new(Mutex::new(RunningStatistics::new(Ix1(ncol))));
+        let mut row_stat = RunningStatistics::new(Ix1(nrow));
+        let mut col_stat = RunningStatistics::new(Ix1(ncol));
+
+        let arc_row_stat = Arc::new(Mutex::new(&mut row_stat));
+        let arc_col_stat = Arc::new(Mutex::new(&mut col_stat));
 
         let nblock = (ncol + block_size - 1) / block_size;
+
+        info!(
+            "collecting row and column statistics over {} blocks",
+            nblock
+        );
+
         let arc_data = Arc::new(Mutex::new(data));
 
         (0..nblock)
@@ -429,13 +446,7 @@ fn collect_row_column_stats(
                 }
             }); // end of jobs
 
-        let row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
-        let col_stat = arc_col_stat.lock().expect("failed to lock col_stat");
-
-        let ret_row = row_stat.clone();
-        let ret_col = col_stat.clone();
-
-        Ok((ret_row, ret_col))
+        Ok((row_stat, col_stat))
     } else {
         anyhow::bail!("No row/column info");
     }

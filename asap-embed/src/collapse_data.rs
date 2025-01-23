@@ -3,14 +3,19 @@ use crate::normalization::*;
 use asap_data::sparse_io_vector::SparseIoVec;
 use indicatif::ParallelProgressIterator;
 use indicatif::ProgressIterator;
+use log::info;
 use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::Inference;
 use matrix_param::traits::*;
 use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::dmatrix_util::*;
 use matrix_util::traits::*;
+use matrix_util::utils::partition_by_membership;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+#[cfg(debug_assertions)]
+use log::debug;
 
 #[allow(dead_code)]
 /// Given a feature/projection matrix (factor x cells), we assign each
@@ -115,18 +120,18 @@ impl CollapsingOps for SparseIoVec {
         // (&mut stat).clear();
         // let arc_stat = Arc::new(Mutex::new(&mut stat));
 
-        println!("basic statistics across {} samples", num_samples);
+        info!("basic statistics across {} samples", num_samples);
         self.collect_basic_stat(&sample_to_cells, &mut stat);
 
         if num_batches > 1 {
-            println!(
+            info!(
                 "batch-specific statistics across {} batches over {} samples",
                 num_batches, num_samples
             );
 
             self.collect_batch_stat(&sample_to_cells, &mut stat);
 
-            println!(
+            info!(
                 "counterfactual inference across {} batches over {} samples",
                 num_batches, num_samples,
             );
@@ -175,11 +180,11 @@ impl CollapsingOps for SparseIoVec {
                 }
             });
 
-        // #[cfg(debug_assertions)]
-        // {
-        //     let stat = arc_stat.lock().expect("failed to lock stat");
-        //     dbg!(stat.size_s.sum());
-        // }
+        #[cfg(debug_assertions)]
+        {
+            let stat = arc_stat.lock().expect("failed to lock stat");
+            debug!("size tot: {}", stat.size_s.sum());
+        }
     }
 
     fn collect_batch_stat(
@@ -217,11 +222,11 @@ impl CollapsingOps for SparseIoVec {
                     stat.n_bs[(b, sample)] += 1_f32;
                 });
             });
-        // #[cfg(debug_assertions)]
-        // {
-        //     let stat = arc_stat.lock().expect("failed to lock stat");
-        //     dbg!(stat.n_bs.sum());
-        // }
+        #[cfg(debug_assertions)]
+        {
+            let stat = arc_stat.lock().expect("failed to lock stat");
+            debug!("B x S {}", stat.n_bs.sum());
+        }
     }
 
     fn collect_matched_stat(
@@ -380,10 +385,10 @@ fn optimize(
         let mut denom_ds = Mat::zeros(num_genes, num_samples);
 
         (0..num_iter).progress().for_each(|_opt_iter| {
-            // #[cfg(debug_assertions)]
-            // {
-            //     println!("iteration: {}", &_opt_iter);
-            // }
+            #[cfg(debug_assertions)]
+            {
+                debug!("iteration: {}", &_opt_iter);
+            }
 
             // shared component (mu_ds)
             //
