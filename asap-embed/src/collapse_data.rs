@@ -51,21 +51,13 @@ pub trait CollapsingOps {
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone;
 
-    fn collect_basic_stat(
-        &self,
-        sample_to_cells: &HashMap<usize, Vec<usize>>,
-        stat: &mut CollapsingStat,
-    );
+    fn collect_basic_stat(&self, sample_to_cells: &Vec<Vec<usize>>, stat: &mut CollapsingStat);
 
-    fn collect_batch_stat(
-        &self,
-        sample_to_cells: &HashMap<usize, Vec<usize>>,
-        stat: &mut CollapsingStat,
-    );
+    fn collect_batch_stat(&self, sample_to_cells: &Vec<Vec<usize>>, stat: &mut CollapsingStat);
 
     fn collect_matched_stat(
         &self,
-        sample_to_cells: &HashMap<usize, Vec<usize>>,
+        sample_to_cells: &Vec<Vec<usize>>,
         knn: usize,
         stat: &mut CollapsingStat,
     );
@@ -104,13 +96,14 @@ impl CollapsingOps for SparseIoVec {
         knn: Option<usize>,
         num_opt_iter: Option<usize>,
     ) -> anyhow::Result<CollapsingOut> {
-        // Down sampling if needed
-
         let cell_to_sample: &Vec<usize> = self.take_groups().ok_or(anyhow::anyhow!(
             "The columns were not assigned before. Call `partition_columns`"
         ))?;
 
-        let sample_to_cells = partition_by_membership(cell_to_sample, cells_per_group);
+        let sample_to_cells: Vec<Vec<usize>> =
+            partition_by_membership(cell_to_sample, cells_per_group)
+                .into_values()
+                .collect();
 
         let num_genes = self.num_rows()?;
         let num_samples = sample_to_cells.len();
@@ -148,11 +141,7 @@ impl CollapsingOps for SparseIoVec {
         optimize(&stat, (a0, b0), num_opt_iter.unwrap_or(DEFAULT_OPT_ITER))
     }
 
-    fn collect_basic_stat(
-        &self,
-        sample_to_cells: &HashMap<usize, Vec<usize>>,
-        stat: &mut CollapsingStat,
-    ) {
+    fn collect_basic_stat(&self, sample_to_cells: &Vec<Vec<usize>>, stat: &mut CollapsingStat) {
         use rayon::prelude::*;
 
         let num_samples = sample_to_cells.len();
@@ -162,9 +151,11 @@ impl CollapsingOps for SparseIoVec {
         // ysum(g,s) = sum_j C(j,s) * Y(g,j)
         // size(s) = sum_j C(j,s)
         sample_to_cells
-            .par_iter()
+            .iter()
+            .enumerate()
+            .par_bridge()
             .progress_count(num_jobs)
-            .for_each(|(&sample, cells)| {
+            .for_each(|(sample, cells)| {
                 let mut stat = arc_stat.lock().expect("failed to lock stat");
                 let yy = self
                     .read_columns_csc(cells.iter().cloned())
@@ -187,11 +178,7 @@ impl CollapsingOps for SparseIoVec {
         }
     }
 
-    fn collect_batch_stat(
-        &self,
-        sample_to_cells: &HashMap<usize, Vec<usize>>,
-        stat: &mut CollapsingStat,
-    ) {
+    fn collect_batch_stat(&self, sample_to_cells: &Vec<Vec<usize>>, stat: &mut CollapsingStat) {
         use rayon::prelude::*;
 
         let num_samples = sample_to_cells.len();
@@ -201,9 +188,11 @@ impl CollapsingOps for SparseIoVec {
         // ysum(g,b) = sum_j sum_s C(j,s) * Y(g,j) * I(b,s)
         // n(b,s) = sum_j C(j,s) * I(b,s)
         sample_to_cells
-            .par_iter()
+            .iter()
+            .enumerate()
+            .par_bridge()
             .progress_count(num_jobs)
-            .for_each(|(&sample, cells)| {
+            .for_each(|(sample, cells)| {
                 let mut stat = arc_stat.lock().expect("failed to lock stat");
 
                 let batches = self.get_batch_membership(cells.iter().cloned());
@@ -231,7 +220,7 @@ impl CollapsingOps for SparseIoVec {
 
     fn collect_matched_stat(
         &self,
-        sample_to_cells: &HashMap<usize, Vec<usize>>,
+        sample_to_cells: &Vec<Vec<usize>>,
         knn: usize,
         stat: &mut CollapsingStat,
     ) {
@@ -245,9 +234,11 @@ impl CollapsingOps for SparseIoVec {
 
         // zsum(g,s) = sum_j C(j,s) * Z(g,j)
         sample_to_cells
-            .par_iter()
+            .iter()
+            .enumerate()
+            .par_bridge()
             .progress_count(num_jobs)
-            .for_each(|(&sample, cells)| {
+            .for_each(|(sample, cells)| {
                 let mut stat = arc_stat.lock().expect("failed to lock stat");
 
                 let positions: HashMap<usize, usize> =
