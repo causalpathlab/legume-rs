@@ -7,7 +7,6 @@ use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
 use clap::{Args, Parser, Subcommand};
 use collapse_data::CollapsingOps;
-use env_logger;
 use log::info;
 use matrix_param::traits::*;
 use matrix_util::common_io::{extension, read_lines};
@@ -17,7 +16,6 @@ use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
-
     let cli = Cli::parse();
 
     match &cli.commands {
@@ -100,11 +98,14 @@ fn main() -> anyhow::Result<()> {
 
             // 4. final collapsing
             info!("collapsing columns... into {} samples", nsamp);
-            let ret =
-                data_vec.collapse_columns(args.down_sample, Some(args.knn), Some(args.iter_opt))?;
+            let ret = data_vec.collapse_columns(
+                args.down_sample,
+                args.reference_batch.clone(),
+                Some(args.knn),
+                Some(args.iter_opt),
+            )?;
 
             info!("writing down the results...");
-
             ret.mu.write_tsv(&(args.out.to_string() + ".mu"))?;
 
             if let Some(delta) = &ret.delta {
@@ -148,16 +149,30 @@ pub struct RunCollapseArgs {
     #[arg(required = true)]
     data_files: Vec<Box<str>>,
 
-    /// Projection dimension
+    /// Random projection dimension to project the data.
     #[arg(long, short, required = true)]
     proj_dim: usize,
 
-    /// Sorting dimension
+    /// Output header
+    #[arg(long, short, required = true)]
+    out: Box<str>,
+
+    /// Top components for random binary sorting. With `k` provided,
+    /// the maximum number of collapsed samples is `2^k`.
     #[arg(long, short, default_value = "10")]
     sort_dim: usize,
 
+    /// Batch membership files. Each bach file should correspond to
+    /// each data file.
+    #[arg(long, short)]
+    batch_files: Option<Vec<Box<str>>>,
+
+    /// Reference batch name
+    #[arg(long, short)]
+    reference_batch: Option<Box<str>>,
+
     /// #k-nearest neighbours within each batch
-    #[arg(long, default_value = "10")]
+    #[arg(long, short, default_value = "10")]
     knn: usize,
 
     /// #downsampling columns per each collapsed sample. If None, no
@@ -168,15 +183,6 @@ pub struct RunCollapseArgs {
     /// optimization iterations
     #[arg(long, default_value = "100")]
     iter_opt: usize,
-
-    /// Output header
-    #[arg(long, short, required = true)]
-    out: Box<str>,
-
-    #[arg(long)]
-    /// Batch membership files. Each bach file should correspond to
-    /// each data file.
-    batch_files: Option<Vec<Box<str>>>,
 
     /// Block_size for parallel processing
     #[arg(long, value_enum, default_value = "100")]

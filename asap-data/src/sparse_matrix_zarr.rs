@@ -1,4 +1,5 @@
 use crate::sparse_io::*;
+use log::info;
 use matrix_util::common_io::*;
 use matrix_util::mtx_io::*;
 use rayon::prelude::*;
@@ -9,7 +10,6 @@ use zarrs::array::DataType;
 use zarrs::array_subset::ArraySubset;
 use zarrs::filesystem::FilesystemStore;
 use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
-
 const CHUNK_SIZE: usize = 1000;
 const MAX_ROW_NAME_IDX: usize = 3;
 const MAX_COLUMN_NAME_IDX: usize = 10;
@@ -53,7 +53,7 @@ impl SparseMtxData {
             Self::_num_columns(store.clone()),
             Self::_num_nnz(store.clone()),
         ) {
-            println!("#rows: {}, #columns: {}, #non-zeros: {}", nrow, ncol, nnz);
+            info!("#rows: {}, #columns: {}, #non-zeros: {}", nrow, ncol, nnz);
         } else {
             anyhow::bail!("Couldn't figure out the size of this sparse matrix data");
         }
@@ -86,22 +86,29 @@ impl SparseMtxData {
         index_by_row: Option<bool>,
     ) -> anyhow::Result<Self> {
         let mut ret = match backend_file {
-            Some(backend_file) => Self::return_backend_file(backend_file)?,
+            Some(backend_file) => {
+                info!("backend file : {}", backend_file);
+                Self::return_backend_file(backend_file)?
+            }
             None => {
                 let backend_file = mtx_file.to_string() + ".zarr";
+                info!("backend file : {}", backend_file);
                 Self::return_backend_file(&backend_file)?
             }
         };
 
         // populate data from mtx file
+        info!("importing mtx file by column");
         ret.import_mtx_file_by_col(mtx_file)?;
         ret.read_column_indptr()?;
 
         if Some(true) == index_by_row {
+            info!("importing mtx file by row");
             ret.import_mtx_file_by_row(mtx_file)?;
             ret.read_row_indptr()?;
         }
 
+        info!("created sparse backend from {}", mtx_file);
         Ok(ret)
     }
 
@@ -190,7 +197,7 @@ impl SparseMtxData {
     pub fn print_hierarchy(self: &Self) -> anyhow::Result<()> {
         let node = zarrs::node::Node::open(&self.store, "/")?;
         let tree = node.hierarchy_tree();
-        println!("hierarchy_tree:\n{}", tree);
+        info!("hierarchy_tree:\n{}", tree);
         Ok(())
     }
 
@@ -726,7 +733,7 @@ impl SparseIo for SparseMtxData {
 
             let (new_ncol, new_nrow) = (old2new_cols.len(), old2new_rows.len());
 
-            // println!("new_ncol: {}, new_nrow: {}", new_ncol, new_nrow);
+            info!("new_ncol: {}, new_nrow: {}", new_ncol, new_nrow);
 
             /////////////////////////////////////////////////////////
             // 1. Create remapped Mtx only taking a subset of rows //
