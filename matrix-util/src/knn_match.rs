@@ -1,4 +1,3 @@
-use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
@@ -105,7 +104,6 @@ where
 
         (0..nn)
             .into_par_iter()
-            .progress_count(nn as u64)
             .for_each(|j| {
                 arc_data_vec
                     .lock()
