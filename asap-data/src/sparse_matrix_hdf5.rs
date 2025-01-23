@@ -3,6 +3,7 @@ use hdf5::filters::blosc_set_nthreads;
 use matrix_util::common_io::*;
 use matrix_util::mtx_io::*;
 use num_cpus;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};

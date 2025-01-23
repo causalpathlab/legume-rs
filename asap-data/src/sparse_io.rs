@@ -2,14 +2,13 @@ use crate::sparse_matrix_hdf5;
 use crate::sparse_matrix_zarr;
 
 pub use candle_core::Tensor;
-pub use clap::ValueEnum;
-pub use matrix_util::traits::*;
+use clap::ValueEnum;
+use matrix_util::traits::*;
 pub use nalgebra::DMatrix;
 pub use nalgebra_sparse::{csc::CscMatrix, csr::CsrMatrix};
 pub use ndarray::prelude::*;
-pub use rayon::prelude::*;
-pub use std::collections::HashMap;
-pub use std::ops::Range;
+use std::collections::HashMap;
+use std::ops::Range;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]

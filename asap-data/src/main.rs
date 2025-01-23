@@ -8,6 +8,7 @@ use crate::sparse_io::*;
 use crate::statistics::RunningStatistics;
 use clap::{Args, Parser, Subcommand};
 use indicatif::ParallelProgressIterator;
+use rayon::prelude::*;
 // use indicatif::ProgressIterator;
 use matrix_util::*;
 use std::sync::{Arc, Mutex};

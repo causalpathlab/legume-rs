@@ -1,6 +1,9 @@
 use crate::sparse_io::*;
 use matrix_util::knn_match::ColumnDict;
+use matrix_util::traits::MatTriplets;
 use matrix_util::utils::*;
+use rayon::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;

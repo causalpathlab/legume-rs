@@ -1,6 +1,8 @@
 use asap_data::sparse_io::*;
 use nalgebra::{DMatrix, DVector};
 use rand::prelude::SliceRandom;
+use rayon::prelude::*;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 pub const DEFAULT_BLOCK_SIZE: usize = 100;
