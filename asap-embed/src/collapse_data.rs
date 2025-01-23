@@ -239,8 +239,6 @@ impl CollapsingOps for SparseIoVec {
             .par_bridge()
             .progress_count(num_jobs)
             .for_each(|(sample, cells)| {
-                let mut stat = arc_stat.lock().expect("failed to lock stat");
-
                 let positions: HashMap<usize, usize> =
                     cells.iter().enumerate().map(|(i, &c)| (c, i)).collect();
                 let mut matched_triplets: Vec<(usize, usize, f32)> = vec![];
@@ -330,27 +328,31 @@ impl CollapsingOps for SparseIoVec {
                 let norm_target = 2_f32.ln();
                 let source_column_groups = partition_by_membership(&source_columns, None);
 
-                ////////////////////////////////////////////////////////
-                // zhat[g,j]  =  sum_k w[j,k] * z[g,k] / sum_k w[j,k] //
-                // zsum[g,s]  =  sum_j zhat[g,j]                      //
-                ////////////////////////////////////////////////////////
+                {
+                    ////////////////////////////////////////////////////////
+                    // zhat[g,j]  =  sum_k w[j,k] * z[g,k] / sum_k w[j,k] //
+                    // zsum[g,s]  =  sum_j zhat[g,j]                      //
+                    ////////////////////////////////////////////////////////
 
-                for (_, z_pos) in source_column_groups.iter() {
-                    let weights = z_pos
-                        .iter()
-                        .map(|&cell| euclidean_distances[cell])
-                        .normalized_exp(norm_target);
+                    let mut stat = arc_stat.lock().expect("failed to lock stat");
 
-                    let denom = weights.iter().sum::<f32>();
+                    for (_, z_pos) in source_column_groups.iter() {
+                        let weights = z_pos
+                            .iter()
+                            .map(|&cell| euclidean_distances[cell])
+                            .normalized_exp(norm_target);
 
-                    z_pos.iter().zip(weights.iter()).for_each(|(&z_pos, &w)| {
-                        let z = zz_full.get_col(z_pos).unwrap();
-                        let z_rows = z.row_indices();
-                        let z_vals = z.values();
-                        z_rows.iter().zip(z_vals.iter()).for_each(|(&gene, &z)| {
-                            stat.zsum_ds[(gene, sample)] += z * w / denom;
+                        let denom = weights.iter().sum::<f32>();
+
+                        z_pos.iter().zip(weights.iter()).for_each(|(&z_pos, &w)| {
+                            let z = zz_full.get_col(z_pos).unwrap();
+                            let z_rows = z.row_indices();
+                            let z_vals = z.values();
+                            z_rows.iter().zip(z_vals.iter()).for_each(|(&gene, &z)| {
+                                stat.zsum_ds[(gene, sample)] += z * w / denom;
+                            });
                         });
-                    });
+                    }
                 }
             }); // for each sample
     }
