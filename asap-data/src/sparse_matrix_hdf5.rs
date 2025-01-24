@@ -5,9 +5,11 @@ use matrix_util::common_io::*;
 use std::ops::Range;
 use std::sync::Arc;
 
-const CHUNK_SIZE: usize = 1000;
 const MAX_ROW_NAME_IDX: usize = 3;
 const MAX_COLUMN_NAME_IDX: usize = 10;
+const NUM_CHUNKS: usize = 1000;
+const MIN_CHUNK_SIZE: usize = 1000;
+const COMPRESSION_LEVEL: u8 = 3;
 
 /// 10x-like cell-feature matrix with hdf5 (feature x cell)
 ///
@@ -29,7 +31,6 @@ const MAX_COLUMN_NAME_IDX: usize = 10;
 pub struct SparseMtxData {
     backend: Arc<hdf5::File>,
     file_name: String,
-    chunk_size: usize,
     max_row_name_idx: usize,
     max_column_name_idx: usize,
     by_column_indptr: Vec<u64>,
@@ -38,6 +39,22 @@ pub struct SparseMtxData {
 
 #[allow(dead_code)]
 impl SparseMtxData {
+    /// Create an empty new `SparseMtxData` with HDF5 file. If no
+    /// `backend_file` is provided, a temporary file will be created.
+    ///
+    /// * `backend_file`: HDF5 file to be associated with
+    pub fn new(backend_file: Option<&str>) -> anyhow::Result<Self> {
+        let ret = match backend_file {
+            Some(backend_file) => Self::register_backend_file(backend_file)?,
+            None => {
+                let backend_file = create_temp_dir_file(".h5")?;
+                let backend_file = backend_file.to_str().expect("to_str failed");
+                Self::register_backend_file(&backend_file)?
+            }
+        };
+        Ok(ret)
+    }
+
     /// Open existing `SparseMtxData` from a backend HDF5 file
     pub fn open(backend_file: &str) -> anyhow::Result<Self> {
         let hdf5_backend = hdf5::File::open(backend_file)?;
@@ -55,7 +72,6 @@ impl SparseMtxData {
         let mut ret = Self {
             backend: hdf5_backend.into(),
             file_name: backend_file.to_string(),
-            chunk_size: CHUNK_SIZE,
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
@@ -211,7 +227,6 @@ impl SparseMtxData {
         Ok(Self {
             backend: hdf5_backend.into(),
             file_name: hdf5_file.to_string(),
-            chunk_size: CHUNK_SIZE,
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
@@ -227,7 +242,6 @@ impl SparseIo for SparseMtxData {
     fn initialize_backend(&mut self) -> anyhow::Result<()> {
         self.remove_backend_file()?;
         self.backend = hdf5::File::create(&self.file_name)?.into();
-        self.chunk_size = CHUNK_SIZE;
         self.max_column_name_idx = MAX_COLUMN_NAME_IDX;
         self.max_row_name_idx = MAX_ROW_NAME_IDX;
         self.by_column_indptr = vec![];
@@ -411,7 +425,7 @@ impl SparseIo for SparseMtxData {
         let root = self.backend.group("/")?;
         root.new_dataset::<VarLenUnicode>()
             .shape(_names.len())
-            .chunk([self.chunk_size.min(_names.len())])
+            .chunk([_names.len()])
             .create(key)?
             .write(&_names)?;
 
@@ -432,7 +446,7 @@ impl SparseIo for SparseMtxData {
         let root = self.backend.group("/")?;
         root.new_dataset::<VarLenUnicode>()
             .shape(_names.len())
-            .chunk([self.chunk_size.min(_names.len())])
+            .chunk([_names.len()])
             .create(key)?
             .write(&_names)?;
 
@@ -633,24 +647,36 @@ impl SparseIo for SparseMtxData {
 
         let csr = self.backend.group("/by_row")?;
 
+        let nelem = csr_vals.len();
+        let nchunks = NUM_CHUNKS;
+        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
+
         csr.new_dataset::<f32>()
             .shape(csr_vals.len())
-            .chunk([self.chunk_size.min(csr_vals.len())])
-            .blosc_zstd(9, true)
+            .chunk([chunk_size])
+            .blosc_zstd(COMPRESSION_LEVEL, true)
             .create("data")?
             .write(&csr_vals)?;
 
+        let nelem = csr_rowptr.len();
+        let nchunks = NUM_CHUNKS;
+        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
+
         csr.new_dataset::<u64>()
             .shape(csr_rowptr.len())
-            .chunk([self.chunk_size.min(csr_rowptr.len())])
-            .blosc_zstd(9, true)
+            .chunk([chunk_size])
+            .blosc_zstd(COMPRESSION_LEVEL, true)
             .create("indptr")?
             .write(&csr_rowptr)?;
 
+        let nelem = csr_cols.len();
+        let nchunks = NUM_CHUNKS;
+        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
+
         csr.new_dataset::<u64>()
             .shape(csr_cols.len())
-            .chunk([self.chunk_size.min(csr_cols.len())])
-            .blosc_zstd(9, true)
+            .chunk([chunk_size])
+            .blosc_zstd(COMPRESSION_LEVEL, true)
             .create("indices")?
             .write(&csr_cols)?;
 
@@ -687,24 +713,36 @@ impl SparseIo for SparseMtxData {
 
         let csc = self.backend.group("/by_column")?;
 
+        let nelem = csc_vals.len();
+        let nchunks = NUM_CHUNKS;
+        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
+
         csc.new_dataset::<f32>()
             .shape(csc_vals.len())
-            .chunk([self.chunk_size.min(csc_vals.len())])
-            .blosc_zstd(9, true)
+            .chunk([chunk_size])
+            .blosc_zstd(COMPRESSION_LEVEL, true)
             .create("data")?
             .write(&csc_vals)?;
 
+        let nelem = csc_colptr.len();
+        let nchunks = NUM_CHUNKS;
+        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
+
         csc.new_dataset::<u64>()
             .shape(csc_colptr.len())
-            .chunk([self.chunk_size.min(csc_colptr.len())])
-            .blosc_zstd(9, true)
+            .chunk([chunk_size])
+            .blosc_zstd(COMPRESSION_LEVEL, true)
             .create("indptr")?
             .write(&csc_colptr)?;
 
+        let nelem = csc_rows.len();
+        let nchunks = NUM_CHUNKS;
+        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
+
         csc.new_dataset::<u64>()
             .shape(csc_rows.len())
-            .chunk([self.chunk_size.min(csc_rows.len())])
-            .blosc_zstd(9, true)
+            .chunk([chunk_size])
+            .blosc_zstd(COMPRESSION_LEVEL, true)
             .create("indices")?
             .write(&csc_rows)?;
 

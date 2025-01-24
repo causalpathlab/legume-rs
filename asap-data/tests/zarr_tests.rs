@@ -36,8 +36,8 @@ fn ndarray_dmatrix() -> anyhow::Result<()> {
     let raw_array = Array2::<f32>::runif(133, 373);
 
     let raw_matrix = ndarray_to_dmatrix(&raw_array);
-    let data1 = create_sparse_ndarray(&raw_array, None, None)?;
-    let data2 = create_sparse_dmatrix(&raw_matrix, None, None)?;
+    let data1 = create_sparse_from_ndarray(&raw_array, None, None)?;
+    let data2 = create_sparse_from_dmatrix(&raw_matrix, None, None)?;
 
     {
         let a = data1.read_columns_ndarray((0..data1.num_columns().unwrap()).collect())?;

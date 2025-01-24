@@ -1,3 +1,4 @@
+use log::info;
 use matrix_util::common_io::write_lines;
 use matrix_util::dmatrix_io::*;
 use matrix_util::dmatrix_util::*;
@@ -12,6 +13,14 @@ pub struct SimArgs {
     pub factors: Option<usize>,
     pub batches: Option<usize>,
     pub rseed: Option<u64>,
+}
+
+pub struct SimOut {
+    pub ln_delta_db: DMatrix<f32>,
+    pub beta_dk: DMatrix<f32>,
+    pub theta_kn: DMatrix<f32>,
+    pub batch_membership: Vec<usize>,
+    pub triplets: Vec<(u64, u64, f32)>,
 }
 
 #[allow(dead_code)]
@@ -35,6 +44,59 @@ pub fn generate_factored_poisson_gamma_data_mtx(
     ln_batch_file: &str,
     batch_file: &str,
 ) -> anyhow::Result<()> {
+    let sim = generate_factored_poisson_gamma_data(args);
+
+    let batch_out: Vec<Box<str>> = sim
+        .batch_membership
+        .iter()
+        .map(|&x| Box::from(x.to_string()))
+        .collect();
+
+    write_lines(&batch_out, batch_file)?;
+    info!("batch membership: {:?}", &batch_file);
+
+    sim.ln_delta_db.to_tsv(&ln_batch_file)?;
+    sim.theta_kn.transpose().to_tsv(&prop_file)?;
+    sim.beta_dk.to_tsv(&dict_file)?;
+
+    info!(
+        "wrote parameter files:\n{:?},\n{:?},\n{:?}",
+        &ln_batch_file, &dict_file, &prop_file
+    );
+
+    let mut triplets = sim.triplets;
+
+    info!(
+        "sampled Poisson data with {} non-zero elements",
+        triplets.len()
+    );
+
+    info!("sorting these triplets...");
+    triplets.sort_by_key(|&(row, _, _)| row);
+    triplets.sort_by_key(|&(_, col, _)| col);
+
+    info!("writing them down to {}", mtx_file);
+
+    let nn = args.cols;
+    let dd = args.rows;
+    write_mtx_triplets(&triplets, dd, nn, &mtx_file)?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+/// Generate a simulated dataset with a factored gamma model
+/// * `args`: SimulateArgs
+/// * `mtx_file`: output data mtx file (.gz recommended)
+/// * `dict_file`: true dictionary file
+/// * `prop_file`: true proportion file
+/// * `ln_batch_file`: log batch effect file
+/// * `batch_file`: true batch membership file
+///
+/// ```text
+/// Y(i,j) ~ Poisson( delta(i, B(j)) * sum_k beta(i,k) * theta(k,j) )
+/// ```
+///
+pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
     let nn = args.cols;
     let dd = args.rows;
     let kk = args.factors.unwrap_or(1);
@@ -49,37 +111,20 @@ pub fn generate_factored_poisson_gamma_data_mtx(
     let runif = Uniform::new(0, bb);
     let batch_membership: Vec<usize> = (0..nn).map(|_| runif.sample(&mut rng)).collect();
 
-    let batch_out: Vec<Box<str>> = batch_membership
-        .iter()
-        .map(|&x| Box::from(x.to_string()))
-        .collect();
-
-    write_lines(&batch_out, batch_file)?;
-    println!("batch membership: {:?}", &batch_file);
-
     // 2. batch effect matrix
     let mut ln_delta_db = DMatrix::<f32>::rnorm(dd, bb);
     ln_delta_db.scale_columns_inplace();
-    println!("simulated batch effects");
+    info!("simulated batch effects");
 
     // 3. factorization model
     let beta_dk = DMatrix::<f32>::rgamma(dd, kk, (1., 1.));
     let theta_kn = DMatrix::<f32>::rgamma(kk, nn, (1., 1.));
 
-    ln_delta_db.to_tsv(&ln_batch_file)?;
-    theta_kn.transpose().to_tsv(&prop_file)?;
-    beta_dk.to_tsv(&dict_file)?;
-
-    println!(
-        "wrote parameter files:\n{:?},\n{:?},\n{:?}",
-        &ln_batch_file, &dict_file, &prop_file
-    );
-
     // 4. putting them all together
     // let mut triplets = vec![];
     let delta_db = ln_delta_db.map(|x| x.exp());
 
-    let mut triplets = theta_kn
+    let triplets = theta_kn
         .column_iter()
         .enumerate()
         .par_bridge()
@@ -112,13 +157,16 @@ pub fn generate_factored_poisson_gamma_data_mtx(
         .flatten()
         .collect::<Vec<_>>();
 
-    println!(
+    info!(
         "sampled Poisson data with {} non-zero elements",
         triplets.len()
     );
 
-    triplets.sort_by_key(|&(row, _, _)| row);
-    triplets.sort_by_key(|&(_, col, _)| col);
-    write_mtx_triplets(&triplets, dd, nn, &mtx_file)?;
-    Ok(())
+    SimOut {
+        ln_delta_db,
+        beta_dk,
+        theta_kn,
+        batch_membership,
+        triplets,
+    }
 }

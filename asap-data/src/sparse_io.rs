@@ -42,11 +42,43 @@ pub fn open_sparse_matrix(
 }
 
 #[allow(dead_code)]
+/// Open a sparse matrix io (backend)
+/// * `backend_file`: file path to the sparse matrix
+/// * `backend`: backend type (HDF5 or Zarr)
+pub fn create_sparse_from_triplets(
+    triplets: Vec<(u64, u64, f32)>,
+    mtx_shape: (usize, usize, usize),
+    backend_file: Option<&str>,
+    backend: Option<&SparseIoBackend>,
+) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
+    let mut triplets: Vec<(u64, u64, f32)> = triplets.clone();
+
+    match backend {
+        Some(SparseIoBackend::Zarr) => {
+            let mut ret = Box::new(sparse_matrix_zarr::SparseMtxData::new(backend_file)?);
+            ret.record_mtx_shape(Some(mtx_shape))?;
+            ret.record_triplets_by_col(&mut triplets)?;
+            ret.record_triplets_by_row(&mut triplets)?;
+            Ok(ret)
+        }
+        Some(SparseIoBackend::HDF5) => {
+            let mut ret = Box::new(sparse_matrix_hdf5::SparseMtxData::new(backend_file)?);
+
+            ret.record_mtx_shape(Some(mtx_shape))?;
+            ret.record_triplets_by_col(&mut triplets)?;
+            ret.record_triplets_by_row(&mut triplets)?;
+            Ok(ret)
+        }
+        _ => return Err(anyhow::anyhow!("backend not supported")),
+    }
+}
+
+#[allow(dead_code)]
 /// Create a sparse matrix io (backend) with 10x mtx
 /// * `mtx_file`: file path to the 10x mtx
 /// * `backend_file`: file path to the sparse matrix
 /// * `backend`: backend type (HDF5 or Zarr)
-pub fn create_sparse_mtx_file(
+pub fn create_sparse_from_mtx_file(
     mtx_file: &str,
     backend_file: Option<&str>,
     backend: Option<&SparseIoBackend>,
@@ -68,7 +100,7 @@ pub fn create_sparse_mtx_file(
 /// * `data`: data matrix
 /// * `backend_file`: file path to the sparse matrix
 /// * `backend`: backend type (HDF5 or Zarr)
-pub fn create_sparse_ndarray(
+pub fn create_sparse_from_ndarray(
     data: &Array2<f32>,
     backend_file: Option<&str>,
     backend: Option<&SparseIoBackend>,
@@ -90,7 +122,7 @@ pub fn create_sparse_ndarray(
 /// * `data`: data matrix
 /// * `backend_file`: file path to the sparse matrix
 /// * `backend`: backend type (HDF5 or Zarr)
-pub fn create_sparse_dmatrix(
+pub fn create_sparse_from_dmatrix(
     data: &DMatrix<f32>,
     backend_file: Option<&str>,
     backend: Option<&SparseIoBackend>,
@@ -203,12 +235,11 @@ pub trait SparseIo: Sync + Send {
     /// * `mtx_file`: mtx file to be read into HDF5 backend
     fn import_mtx_file_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
-
-        self.record_mtx_shape(mtx_shape)?;
-
+        info!("read mtx file: {}", mtx_file);
         if mtx_triplets.len() == 0 {
             return Err(anyhow::anyhow!("No data in mtx file"));
         }
+        self.record_mtx_shape(mtx_shape)?;
         self.record_triplets_by_row(&mut mtx_triplets)
     }
 
@@ -216,7 +247,7 @@ pub trait SparseIo: Sync + Send {
     /// * `mtx_file`: mtx file to be read into HDF5 backend
     fn import_mtx_file_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
-
+        info!("read mtx file: {}", mtx_file);
         if mtx_triplets.len() == 0 {
             return Err(anyhow::anyhow!("No data in mtx file"));
         }

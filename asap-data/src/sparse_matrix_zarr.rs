@@ -8,9 +8,11 @@ use zarrs::array_subset::ArraySubset;
 use zarrs::filesystem::FilesystemStore;
 use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
 
-const CHUNK_SIZE: usize = 1000;
 const MAX_ROW_NAME_IDX: usize = 3;
 const MAX_COLUMN_NAME_IDX: usize = 10;
+const NUM_CHUNKS: usize = 1000;
+const MIN_CHUNK_SIZE: usize = 1000;
+const COMPRESSION_LEVEL: i32 = 3;
 
 /// 10x-like cell-feature matrix with `zarr` backend (feature x cell)
 ///
@@ -32,7 +34,6 @@ const MAX_COLUMN_NAME_IDX: usize = 10;
 pub struct SparseMtxData {
     pub store: Arc<dyn ZStorageTraits>,
     file_name: String,
-    chunk_size: usize,
     max_row_name_idx: usize,
     max_column_name_idx: usize,
     by_column_indptr: Vec<u64>,
@@ -41,6 +42,23 @@ pub struct SparseMtxData {
 
 #[allow(dead_code)]
 impl SparseMtxData {
+    /// Create an empty new `SparseMtxData` instance with a zarr
+    /// backend file If no `backend_file` is provided, a temporary
+    /// file will be created.
+    ///
+    /// * `backend_file` - Optional zarr backend file
+    pub fn new(zarr_file: Option<&str>) -> anyhow::Result<Self> {
+        let ret = match zarr_file {
+            Some(backend_file) => Self::register_backend_file(backend_file)?,
+            None => {
+                let backend_file = create_temp_dir_file(".zarr")?;
+                let backend_file = backend_file.to_str().expect("to_str failed");
+                Self::register_backend_file(&backend_file)?
+            }
+        };
+        Ok(ret)
+    }
+
     /// Create `SparseMtxData` instance from an existing zarr backend file
     /// * `zarr_file` - zarr backend file
     pub fn open(backend_file: &str) -> anyhow::Result<Self> {
@@ -59,7 +77,6 @@ impl SparseMtxData {
         let mut ret = Self {
             store: store.clone(),
             file_name: backend_file.to_string(),
-            chunk_size: CHUNK_SIZE,
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
@@ -185,7 +202,6 @@ impl SparseMtxData {
         Ok(Self {
             store: store.clone(),
             file_name: zarr_file.to_string(),
-            chunk_size: CHUNK_SIZE,
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
@@ -211,13 +227,15 @@ impl SparseMtxData {
         dt: DataType,
         vec: Vec<V>,
     ) -> anyhow::Result<()> {
-        use zarrs::array::codec::GzipCodec;
+        use zarrs::array::codec::ZstdCodec;
         use zarrs::array::ArrayBuilder;
         use zarrs::array::DataType;
         use zarrs::array::FillValue;
         // use zarrs::array::ZARR_NAN_F32;
 
-        let chunk_size = self.chunk_size.min(vec.len());
+        let nelem = vec.len();
+        let nchunks = NUM_CHUNKS;
+        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
 
         let fill = match dt {
             DataType::Float32 => FillValue::from(zarrs::array::ZARR_NAN_F32),
@@ -232,7 +250,7 @@ impl SparseMtxData {
             vec![chunk_size as u64].try_into()?, // chunk shape
             fill,                                //
         )
-        .bytes_to_bytes_codecs(vec![Arc::new(GzipCodec::new(5)?)])
+        .bytes_to_bytes_codecs(vec![Arc::new(ZstdCodec::new(COMPRESSION_LEVEL, false))])
         .build(self.store.clone(), key)?;
 
         let ntot = vec.len() as u64;
@@ -427,7 +445,6 @@ impl SparseIo for SparseMtxData {
 
         self.store = store.clone();
         self.file_name = zarr_file.to_string().clone();
-        self.chunk_size = CHUNK_SIZE;
         self.max_column_name_idx = MAX_COLUMN_NAME_IDX;
         self.max_row_name_idx = MAX_ROW_NAME_IDX;
         self.by_column_indptr = vec![];
