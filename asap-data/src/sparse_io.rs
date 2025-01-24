@@ -59,6 +59,8 @@ pub fn create_sparse_from_triplets(
             ret.record_mtx_shape(Some(mtx_shape))?;
             ret.record_triplets_by_col(&mut triplets)?;
             ret.record_triplets_by_row(&mut triplets)?;
+            ret.read_column_indptr()?;
+            ret.read_row_indptr()?;
             Ok(ret)
         }
         Some(SparseIoBackend::HDF5) => {
@@ -67,6 +69,8 @@ pub fn create_sparse_from_triplets(
             ret.record_mtx_shape(Some(mtx_shape))?;
             ret.record_triplets_by_col(&mut triplets)?;
             ret.record_triplets_by_row(&mut triplets)?;
+            ret.read_column_indptr()?;
+            ret.read_row_indptr()?;
             Ok(ret)
         }
         _ => return Err(anyhow::anyhow!("backend not supported")),
@@ -137,6 +141,17 @@ pub fn create_sparse_from_dmatrix(
             Some(true),
         )?)),
     }
+}
+
+/////////////////////
+// type conversion //
+/////////////////////
+
+#[allow(dead_code)]
+pub fn sparse_io_box_to_arc<T>(
+    boxed: Box<dyn SparseIo<IndexIter = T>>,
+) -> Arc<dyn SparseIo<IndexIter = T>> {
+    Arc::from(boxed)
 }
 
 #[allow(dead_code)]
