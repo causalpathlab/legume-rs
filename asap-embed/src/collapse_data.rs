@@ -474,6 +474,7 @@ fn optimize(
 
 /// output struct to make the model parameters more accessible
 #[allow(dead_code)]
+#[derive(Debug)]
 pub struct CollapsingOut {
     pub mu: GammaMatrix,
     pub gamma: Option<GammaMatrix>,

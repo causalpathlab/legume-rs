@@ -4,6 +4,7 @@ use crate::traits::*;
 use nalgebra::DMatrix;
 
 #[allow(dead_code)]
+#[derive(Debug)]
 pub struct GammaMatrix {
     num_rows: usize,
     num_columns: usize,

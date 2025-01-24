@@ -4,6 +4,7 @@ use matrix_util::traits::MatTriplets;
 use matrix_util::utils::*;
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::ops::Index;
 use std::sync::Arc;
 
 type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
@@ -21,6 +22,13 @@ pub struct SparseIoVec {
     batch_idx_to_name: Option<Vec<Box<str>>>,
 }
 
+impl Index<usize> for SparseIoVec {
+    type Output = Arc<SparseData>;
+    fn index(&self, idx: usize) -> &Self::Output {
+        &self.data_vec[idx]
+    }
+}
+
 impl SparseIoVec {
     pub fn new() -> Self {
         Self {
@@ -34,6 +42,10 @@ impl SparseIoVec {
             col_to_batch: None,
             batch_idx_to_name: None,
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.data_vec.len()
     }
 
     pub fn assign_groups(&mut self, cell_to_group: Vec<usize>) {
