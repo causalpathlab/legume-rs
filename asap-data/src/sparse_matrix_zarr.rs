@@ -1,15 +1,13 @@
 use crate::sparse_io::*;
 use log::info;
 use matrix_util::common_io::*;
-use matrix_util::mtx_io::*;
-use rayon::prelude::*;
-use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use zarrs::array::DataType;
 use zarrs::array_subset::ArraySubset;
 use zarrs::filesystem::FilesystemStore;
 use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
+
 const CHUNK_SIZE: usize = 1000;
 const MAX_ROW_NAME_IDX: usize = 3;
 const MAX_COLUMN_NAME_IDX: usize = 10;
@@ -88,12 +86,12 @@ impl SparseMtxData {
         let mut ret = match backend_file {
             Some(backend_file) => {
                 info!("backend file : {}", backend_file);
-                Self::return_backend_file(backend_file)?
+                Self::register_backend_file(backend_file)?
             }
             None => {
                 let backend_file = mtx_file.to_string() + ".zarr";
                 info!("backend file : {}", backend_file);
-                Self::return_backend_file(&backend_file)?
+                Self::register_backend_file(&backend_file)?
             }
         };
 
@@ -112,31 +110,6 @@ impl SparseMtxData {
         Ok(ret)
     }
 
-    /// Read mtx file and populate the data into zarr for faster row-by-row access
-    /// * `mtx_file`: mtx file to be read into zarr backend
-    fn import_mtx_file_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
-        let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
-
-        self.record_mtx_shape(mtx_shape)?;
-
-        if mtx_triplets.len() == 0 {
-            return Err(anyhow::anyhow!("No data in mtx file"));
-        }
-        self.record_triplets_by_row(&mut mtx_triplets)
-    }
-
-    /// Read mtx file and populate the data for faster column-by-column access
-    /// * `mtx_file`: mtx file to be read into zarr backend
-    fn import_mtx_file_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
-        let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
-
-        if mtx_triplets.len() == 0 {
-            return Err(anyhow::anyhow!("No data in mtx file"));
-        }
-        self.record_mtx_shape(mtx_shape)?;
-        self.record_triplets_by_col(&mut mtx_triplets)
-    }
-
     /// Create a new `SparseMtxData` instance from an `ndarray` array
     /// * `array` - 2D array to be added to the backend
     /// * `backend_file` - Optional zarr backend file
@@ -147,11 +120,11 @@ impl SparseMtxData {
         index_by_row: Option<bool>,
     ) -> anyhow::Result<Self> {
         let mut ret = match zarr_file {
-            Some(backend_file) => Self::return_backend_file(backend_file)?,
+            Some(backend_file) => Self::register_backend_file(backend_file)?,
             None => {
                 let backend_file = create_temp_dir_file(".zarr")?;
                 let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::return_backend_file(&backend_file)?
+                Self::register_backend_file(&backend_file)?
             }
         };
 
@@ -175,11 +148,11 @@ impl SparseMtxData {
         index_by_row: Option<bool>,
     ) -> anyhow::Result<Self> {
         let mut ret = match zarr_file {
-            Some(backend_file) => Self::return_backend_file(backend_file)?,
+            Some(backend_file) => Self::register_backend_file(backend_file)?,
             None => {
                 let backend_file = create_temp_dir_file(".zarr")?;
                 let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::return_backend_file(&backend_file)?
+                Self::register_backend_file(&backend_file)?
             }
         };
 
@@ -201,32 +174,8 @@ impl SparseMtxData {
         Ok(())
     }
 
-    /// Read row index pointers
-    pub fn read_row_indptr(self: &mut Self) -> anyhow::Result<()> {
-        use zarrs::array::Array;
-        let key = "/by_row/indptr";
-        if let Ok(indptr) = Array::open(self.store.clone(), key) {
-            let indptr_vec = indptr.retrieve_array_subset_elements::<u64>(&indptr.subset_all())?;
-            self.by_row_indptr.clear();
-            self.by_row_indptr.extend(indptr_vec);
-        }
-        Ok(())
-    }
-
-    /// Read column index pointers
-    pub fn read_column_indptr(self: &mut Self) -> anyhow::Result<()> {
-        use zarrs::array::Array as ZArray;
-        let key = "/by_column/indptr";
-        if let Ok(indptr) = ZArray::open(self.store.clone(), key) {
-            let indptr_vec = indptr.retrieve_array_subset_elements::<u64>(&indptr.subset_all())?;
-            self.by_column_indptr.clear();
-            self.by_column_indptr.extend(indptr_vec);
-        }
-        Ok(())
-    }
-
     /// Helper function to create a new zarr backend file
-    fn return_backend_file(zarr_file: &str) -> anyhow::Result<Self> {
+    fn register_backend_file(zarr_file: &str) -> anyhow::Result<Self> {
         // dbg!(zarr_file);
         use zarrs::group::GroupBuilder;
         let store = Arc::new(FilesystemStore::new(zarr_file)?);
@@ -244,257 +193,9 @@ impl SparseMtxData {
         })
     }
 
-    /// Helper function to create a new zarr backend file
-    fn initialize_backend(&mut self) -> anyhow::Result<()> {
-        use zarrs::group::GroupBuilder;
-
-        self.remove_backend_file()?;
-        let zarr_file = &self.file_name;
-        let store = Arc::new(FilesystemStore::new(zarr_file)?);
-        let root = GroupBuilder::new().build(store.clone(), "/")?;
-        root.store_metadata()?;
-
-        self.store = store.clone();
-        self.file_name = zarr_file.to_string().clone();
-        self.chunk_size = CHUNK_SIZE;
-        self.max_column_name_idx = MAX_COLUMN_NAME_IDX;
-        self.max_row_name_idx = MAX_ROW_NAME_IDX;
-        self.by_column_indptr = vec![];
-        self.by_row_indptr = vec![];
-
-        Ok(())
-    }
-
-    /////////////////////////////////
-    // `dmatrix` related functions //
-    /////////////////////////////////
-
-    /// Add dmatrix to zarr backend by row (CSR format)
-    /// * `array` - 2D array to be added to the backend
-    fn import_dmatrix_by_row(&mut self, matrix: &DMatrix<f32>) -> anyhow::Result<()> {
-        let (nrow, ncol) = matrix.shape();
-        let mut mtx_triplets = dmatrix_to_triplets(&matrix);
-        let mtx_shape = (nrow, ncol, mtx_triplets.len());
-        self.record_mtx_shape(Some(mtx_shape))?;
-        self.record_triplets_by_row(&mut mtx_triplets)
-    }
-
-    /// Add dmatrix to zarr backend by column (CSC format)
-    /// * `array` - 2D array to be added to the backend
-    fn import_dmatrix_by_col(&mut self, matrix: &DMatrix<f32>) -> anyhow::Result<()> {
-        let (nrow, ncol) = matrix.shape();
-        let mut mtx_triplets = dmatrix_to_triplets(&matrix);
-        let mtx_shape = (nrow, ncol, mtx_triplets.len());
-        self.record_mtx_shape(Some(mtx_shape))?;
-        self.record_triplets_by_col(&mut mtx_triplets)
-    }
-
-    /////////////////////////////////
-    // `ndarray` related functions //
-    /////////////////////////////////
-
-    /// Add ndarray to zarr backend by row (CSR format)
-    /// * `array` - 2D array to be added to the backend
-    fn import_ndarray_by_row(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
-        let nrow = array.shape()[0];
-        let ncol = array.shape()[1];
-
-        // dbg!("importing ndarray by row...");
-        let mut mtx_triplets = ndarray_to_triplets(&array);
-
-        let nnz = mtx_triplets.len();
-        let mtx_shape = (nrow, ncol, nnz);
-        self.record_mtx_shape(Some(mtx_shape))?;
-
-        // dbg!(format!("populated: {} elements", mtx_triplets.len()));
-
-        self.record_triplets_by_row(&mut mtx_triplets)
-    }
-
-    /// Add ndarray to zarr backend by column (CSC format)
-    /// * `array` - 2D array to be added to the backend
-    fn import_ndarray_by_col(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
-        let nrow = array.shape()[0];
-        let ncol = array.shape()[1];
-
-        // dbg!("importing ndarray by column...");
-        let mut mtx_triplets = ndarray_to_triplets(&array);
-
-        let nnz = mtx_triplets.len();
-        let mtx_shape = (nrow, ncol, nnz);
-        self.record_mtx_shape(Some(mtx_shape))?;
-
-        // dbg!(format!("populated: {} elements", mtx_triplets.len()));
-
-        self.record_triplets_by_col(&mut mtx_triplets)
-    }
-
-    //////////////
-    // triplets //
-    //////////////
-
-    /// Helper function to add triplets to zarr backend by row (CSR format)
-    fn record_triplets_by_row(
-        &mut self,
-        row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
-    ) -> anyhow::Result<()> {
-        debug_assert!(row_col_val_triplets.len() > 0);
-
-        row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
-        row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
-        // dbg!(&row_col_val_triplets);
-
-        let mut csr_rowptr = vec![];
-        let mut csr_cols = vec![];
-        let mut csr_vals = vec![];
-
-        let nrow = self.num_rows().expect("should have `nrow`");
-        let nnz = row_col_val_triplets.len();
-
-        // fill in rowptr 0 to the first row index
-        let first = row_col_val_triplets[0].0;
-        for _ in 0..first {
-            csr_rowptr.push(0);
-        }
-
-        // for the first row/triplet
-        csr_rowptr.push(0);
-        csr_cols.push(row_col_val_triplets[0].1);
-        csr_vals.push(row_col_val_triplets[0].2);
-
-        for i in 1..nnz {
-            let lb = row_col_val_triplets[i - 1].0;
-            let ub = row_col_val_triplets[i].0;
-            for _ in lb..ub {
-                csr_rowptr.push(i as u64);
-            }
-            csr_cols.push(row_col_val_triplets[i].1);
-            csr_vals.push(row_col_val_triplets[i].2);
-        }
-
-        // fill in the rest of the rowptr
-        let last = row_col_val_triplets[nnz - 1].0 as usize;
-        let m = nnz as u64;
-        for _ in last..nrow {
-            csr_rowptr.push(m);
-        }
-
-        self.record_csr_dataset_backend(&csr_cols, &csr_vals, &csr_rowptr)
-    }
-
-    /// Helper function to add triplets to HDF5 backend by column (CSC format)
-    fn record_triplets_by_col(
-        &mut self,
-        row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
-    ) -> anyhow::Result<()> {
-        debug_assert!(row_col_val_triplets.len() > 0);
-
-        row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
-        row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
-        // dbg!(&row_col_val_triplets);
-
-        let mut csc_colptr = vec![];
-        let mut csc_rows = vec![];
-        let mut csc_vals = vec![];
-
-        let ncol = self.num_columns().expect("should have `ncol`");
-        let nnz = row_col_val_triplets.len();
-
-        // fill in colptr 0 to the first column index
-        let first = row_col_val_triplets[0].1;
-        for _ in 0..first {
-            csc_colptr.push(0);
-        }
-
-        // for the first column/triplet
-        csc_colptr.push(0);
-        csc_rows.push(row_col_val_triplets[0].0);
-        csc_vals.push(row_col_val_triplets[0].2);
-
-        for i in 1..nnz {
-            let lb = row_col_val_triplets[i - 1].1;
-            let ub = row_col_val_triplets[i].1;
-            for _ in lb..ub {
-                csc_colptr.push(i as u64);
-            }
-            csc_rows.push(row_col_val_triplets[i].0 as u64);
-            csc_vals.push(row_col_val_triplets[i].2);
-        }
-
-        // fill in the rest of the colptr
-        let last = row_col_val_triplets[nnz - 1].1 as usize;
-        let m = nnz as u64;
-        for _ in last..ncol {
-            csc_colptr.push(m);
-        }
-        // dbg!(&csc_colptr);
-
-        self.record_csc_dataset_backend(&csc_rows, &csc_vals, &csc_colptr)
-    }
-
     //////////////////////
     // backend related  //
     //////////////////////
-
-    /// CSR data structure in Zarr backend
-    ///
-    /// ```text
-    ///     └── by_row
-    ///         ├── data
-    ///         ├── indices (column indices)
-    ///         └── isndptr (row pointers)
-    /// ```
-    fn record_csr_dataset_backend(
-        self: &mut Self,
-        csr_cols: &Vec<u64>,
-        csr_vals: &Vec<f32>,
-        csr_rowptr: &Vec<u64>,
-    ) -> anyhow::Result<()> {
-        // open or create the group "/by_row"
-        let key = "/by_row";
-        self._add_group(key)?;
-
-        let key = "/by_row/data";
-        self.new_filled_vector(key, DataType::Float32, csr_vals.clone())?;
-        let key = "/by_row/indices";
-        self.new_filled_vector(key, DataType::UInt64, csr_cols.clone())?;
-        let key = "/by_row/indptr";
-        self.new_filled_vector(key, DataType::UInt64, csr_rowptr.clone())?;
-
-        Ok(())
-    }
-
-    /// CSC data structure in Zarr backend
-    ///
-    /// ```text
-    /// Helper function to record the CSC dataset
-    ///     ├── by_column
-    ///     │   ├── data
-    ///     │   ├── indices (row indices)
-    ///     │   └── indptr (column pointers)
-    /// ```
-    fn record_csc_dataset_backend(
-        self: &mut Self,
-        csc_rows: &Vec<u64>,
-        csc_vals: &Vec<f32>,
-        csc_colptr: &Vec<u64>,
-    ) -> anyhow::Result<()> {
-        // open or create the group "/by_column"
-        let key = "/by_column";
-        self._add_group(key)?;
-
-        let key = "/by_column/data";
-        self.new_filled_vector(key, DataType::Float32, csc_vals.clone())?;
-        let key = "/by_column/indices";
-        // dbg!(key);
-        self.new_filled_vector(key, DataType::UInt64, csc_rows.clone())?;
-
-        let key = "/by_column/indptr";
-        // dbg!(key);
-        self.new_filled_vector(key, DataType::UInt64, csc_colptr.clone())?;
-
-        Ok(())
-    }
 
     /// Helper function to create a filled 1D array with the given
     /// data type and fill value. This is the most useful function to
@@ -590,36 +291,6 @@ impl SparseMtxData {
         Ok(data.retrieve_array_subset_elements::<V>(&subset)?)
     }
 
-    /// Helper function to keep the matrix shape
-    fn record_mtx_shape(
-        self: &mut Self,
-        mtx_shape: Option<(usize, usize, usize)>,
-    ) -> anyhow::Result<()> {
-        let check_set_attr = |attr_name: &str, value: usize| -> anyhow::Result<()> {
-            let old_value = Self::_get_group_attr::<usize>(self.store.clone(), "/", attr_name);
-            let new_value = serde_json::to_value(value)?;
-
-            match old_value {
-                Some(old_value) => {
-                    if old_value != new_value {
-                        return Err(anyhow::anyhow!("{} mismatch", attr_name));
-                    }
-                }
-                _ => {
-                    Self::_set_group_attr(self.store.clone(), "/", attr_name, &new_value)?;
-                }
-            }
-            Ok(())
-        };
-
-        if let Some((nrow, ncol, nnz)) = mtx_shape {
-            check_set_attr("nrow", nrow)?;
-            check_set_attr("ncol", ncol)?;
-            check_set_attr("nnz", nnz)?;
-        }
-        Ok(())
-    }
-
     /////////////////////////////
     // purely helper functions //
     /////////////////////////////
@@ -690,6 +361,81 @@ impl SparseMtxData {
 impl SparseIo for SparseMtxData {
     type IndexIter = Vec<usize>;
 
+    /// Read row index pointers
+    fn read_row_indptr(self: &mut Self) -> anyhow::Result<()> {
+        use zarrs::array::Array as Zarray;
+        let key = "/by_row/indptr";
+        if let Ok(indptr) = Zarray::open(self.store.clone(), key) {
+            let indptr_vec = indptr.retrieve_array_subset_elements::<u64>(&indptr.subset_all())?;
+            self.by_row_indptr.clear();
+            self.by_row_indptr.extend(indptr_vec);
+        }
+        Ok(())
+    }
+
+    /// Read column index pointers
+    fn read_column_indptr(self: &mut Self) -> anyhow::Result<()> {
+        use zarrs::array::Array as ZArray;
+        let key = "/by_column/indptr";
+        if let Ok(indptr) = ZArray::open(self.store.clone(), key) {
+            let indptr_vec = indptr.retrieve_array_subset_elements::<u64>(&indptr.subset_all())?;
+            self.by_column_indptr.clear();
+            self.by_column_indptr.extend(indptr_vec);
+        }
+        Ok(())
+    }
+
+    /// Helper function to keep the matrix shape
+    fn record_mtx_shape(
+        self: &mut Self,
+        mtx_shape: Option<(usize, usize, usize)>,
+    ) -> anyhow::Result<()> {
+        let check_set_attr = |attr_name: &str, value: usize| -> anyhow::Result<()> {
+            let old_value = Self::_get_group_attr::<usize>(self.store.clone(), "/", attr_name);
+            let new_value = serde_json::to_value(value)?;
+
+            match old_value {
+                Some(old_value) => {
+                    if old_value != new_value {
+                        return Err(anyhow::anyhow!("{} mismatch", attr_name));
+                    }
+                }
+                _ => {
+                    Self::_set_group_attr(self.store.clone(), "/", attr_name, &new_value)?;
+                }
+            }
+            Ok(())
+        };
+
+        if let Some((nrow, ncol, nnz)) = mtx_shape {
+            check_set_attr("nrow", nrow)?;
+            check_set_attr("ncol", ncol)?;
+            check_set_attr("nnz", nnz)?;
+        }
+        Ok(())
+    }
+
+    /// Helper function to create a new zarr backend file
+    fn initialize_backend(&mut self) -> anyhow::Result<()> {
+        use zarrs::group::GroupBuilder;
+
+        self.remove_backend_file()?;
+        let zarr_file = &self.file_name;
+        let store = Arc::new(FilesystemStore::new(zarr_file)?);
+        let root = GroupBuilder::new().build(store.clone(), "/")?;
+        root.store_metadata()?;
+
+        self.store = store.clone();
+        self.file_name = zarr_file.to_string().clone();
+        self.chunk_size = CHUNK_SIZE;
+        self.max_column_name_idx = MAX_COLUMN_NAME_IDX;
+        self.max_row_name_idx = MAX_ROW_NAME_IDX;
+        self.by_column_indptr = vec![];
+        self.by_row_indptr = vec![];
+
+        Ok(())
+    }
+
     /// Clean up the backend file
     fn remove_backend_file(&self) -> anyhow::Result<()> {
         let backend = std::path::Path::new(&self.file_name);
@@ -704,108 +450,9 @@ impl SparseIo for SparseMtxData {
         &self.file_name
     }
 
-    /// Subset the columns of the data and create a new backend file
-    /// * `columns`: if something, columns to be subsetted
-    /// * `rows`: if something, subset the rows
-    fn subset_columns_rows(
-        &mut self,
-        columns: Option<&Vec<usize>>,
-        rows: Option<&Vec<usize>>,
-    ) -> anyhow::Result<()> {
-        use zarrs::array_subset::ArraySubset;
-
-        if let (Some(ncol), Some(nrow), Some(nnz)) =
-            (self.num_columns(), self.num_rows(), self.num_non_zeros())
-        {
-            let (nrow_data, ncol_data, nnz) = (nrow as usize, ncol as usize, nnz as usize);
-
-            let backend_file = self.get_backend_file_name();
-
-            /////////////////////////////////////////////////
-            // 0. Create a mapping from old to new columns //
-            /////////////////////////////////////////////////
-
-            let (old2new_cols, new_col_names) =
-                take_subset_indices_names_if_needed(columns, Some(ncol_data), self.column_names()?);
-
-            let (old2new_rows, new_row_names) =
-                take_subset_indices_names_if_needed(rows, Some(nrow_data), self.row_names()?);
-
-            let (new_ncol, new_nrow) = (old2new_cols.len(), old2new_rows.len());
-
-            info!("new_ncol: {}, new_nrow: {}", new_ncol, new_nrow);
-
-            /////////////////////////////////////////////////////////
-            // 1. Create remapped Mtx only taking a subset of rows //
-            /////////////////////////////////////////////////////////
-
-            let (indptr, data, indices) = self.open_csc_triplets()?;
-            let indptr = indptr.retrieve_array_subset_elements::<u64>(&indptr.subset_all())?;
-            debug_assert!(indptr.len() == ncol_data + 1);
-
-            let arc_triplets = Arc::new(Mutex::new(vec![]));
-
-            old2new_cols.par_iter().for_each(|(&old_jj, &jj)| {
-                let mut triplets = arc_triplets.lock().expect("failed to lock triplets");
-                let (start, end) = (indptr[old_jj], indptr[old_jj + 1]);
-
-                let subset = ArraySubset::new_with_ranges(&[start..end]);
-                let data_slice = data
-                    .retrieve_array_subset_elements::<f32>(&subset)
-                    .expect("failed to retrieve data slice");
-                let indices_slice = indices
-                    .retrieve_array_subset_elements::<u64>(&subset)
-                    .expect("failed to retrieve indices slice");
-
-                for k in 0..(end - start) {
-                    let val = data_slice[k as usize];
-                    let ii = indices_slice[k as usize] as usize;
-                    if let Some(&ii) = old2new_rows.get(&ii) {
-                        triplets.push((ii as u64, jj as u64, val));
-                    }
-                }
-            });
-
-            /////////////////////////////////////
-            // 2. Remove previous backend file //
-            /////////////////////////////////////
-            self.remove_backend_file()?;
-            dbg!(&backend_file);
-
-            ///////////////////////////////
-            // 3. populate a new backend //
-            ///////////////////////////////
-            self.initialize_backend()?;
-
-            // populate data from mtx triplets
-            {
-                let mut row_col_val_triplets =
-                    arc_triplets.lock().expect("failed to lock triplets");
-
-                debug_assert!(row_col_val_triplets.len() <= nnz); // subset
-                let nnz = row_col_val_triplets.len();
-                let mtx_shape = (new_nrow, new_ncol, nnz);
-                self.record_mtx_shape(Some(mtx_shape))?;
-                self.record_triplets_by_col(&mut row_col_val_triplets)?;
-                self.record_triplets_by_row(&mut row_col_val_triplets)?;
-            }
-            self.read_column_indptr()?;
-            self.read_row_indptr()?;
-
-            self.register_row_names_vec(&new_row_names);
-            self.register_column_names_vec(&new_col_names);
-        } else {
-            return Err(anyhow::anyhow!("missing shape information"));
-        }
-
-        Ok(())
-    }
-
     /// Export the data to a mtx file. This will take time.
     /// * `mtx_file`: mtx file to be written
     fn to_mtx_file(&self, mtx_file: &str) -> anyhow::Result<()> {
-        use zarrs::array_subset::ArraySubset;
-
         if let (Some(ncol), Some(nrow), Some(nnz)) =
             (self.num_columns(), self.num_rows(), self.num_non_zeros())
         {
@@ -1121,78 +768,63 @@ impl SparseIo for SparseMtxData {
             ));
         }
     }
+    /// CSR data structure in Zarr backend
+    ///
+    /// ```text
+    ///     └── by_row
+    ///         ├── data
+    ///         ├── indices (column indices)
+    ///         └── isndptr (row pointers)
+    /// ```
+    fn record_csr_dataset_backend(
+        self: &mut Self,
+        csr_cols: &Vec<u64>,
+        csr_vals: &Vec<f32>,
+        csr_rowptr: &Vec<u64>,
+    ) -> anyhow::Result<()> {
+        // open or create the group "/by_row"
+        let key = "/by_row";
+        self._add_group(key)?;
 
-    /// Reposition rows in a new order specified by `remap`
-    /// * `row_names_order` - a vector of row names in the new order
-    fn reorder_rows(&mut self, row_names_order: &Vec<Box<str>>) -> anyhow::Result<()> {
-        let new_row_names = row_names_order.clone();
-        let new_col_names = self.column_names()?.clone();
-        let name2new = build_name2index_map(&new_row_names);
+        let key = "/by_row/data";
+        self.new_filled_vector(key, DataType::Float32, csr_vals.clone())?;
+        let key = "/by_row/indices";
+        self.new_filled_vector(key, DataType::UInt64, csr_cols.clone())?;
+        let key = "/by_row/indptr";
+        self.new_filled_vector(key, DataType::UInt64, csr_rowptr.clone())?;
 
-        let block_size = 100;
+        Ok(())
+    }
 
-        let old2new: HashMap<usize, usize> = self
-            .row_names()?
-            .into_par_iter()
-            .enumerate()
-            .filter_map(|(idx_old, name)| name2new.get(&name).map(|&idx_new| (idx_old, idx_new)))
-            .collect();
+    /// CSC data structure in Zarr backend
+    ///
+    /// ```text
+    /// Helper function to record the CSC dataset
+    ///     ├── by_column
+    ///     │   ├── data
+    ///     │   ├── indices (row indices)
+    ///     │   └── indptr (column pointers)
+    /// ```
+    fn record_csc_dataset_backend(
+        self: &mut Self,
+        csc_rows: &Vec<u64>,
+        csc_vals: &Vec<f32>,
+        csc_colptr: &Vec<u64>,
+    ) -> anyhow::Result<()> {
+        // open or create the group "/by_column"
+        let key = "/by_column";
+        self._add_group(key)?;
 
-        if let Some(ncol) = self.num_columns() {
-            /////////////////////////////////////////////////////
-            // 1. triplets after filtering and reordering rows //
-            /////////////////////////////////////////////////////
+        let key = "/by_column/data";
+        self.new_filled_vector(key, DataType::Float32, csc_vals.clone())?;
+        let key = "/by_column/indices";
+        // dbg!(key);
+        self.new_filled_vector(key, DataType::UInt64, csc_rows.clone())?;
 
-            let arc_triplets = Arc::new(Mutex::new(vec![]));
+        let key = "/by_column/indptr";
+        // dbg!(key);
+        self.new_filled_vector(key, DataType::UInt64, csc_colptr.clone())?;
 
-            let nblock = (ncol + block_size - 1) / block_size;
-
-            (0..nblock)
-                .into_par_iter()
-                .map(|b| {
-                    let lb: usize = b * block_size;
-                    let ub: usize = ((b + 1) * block_size).min(ncol);
-                    (lb, ub)
-                })
-                .for_each(|(lb, ub)| {
-                    let (_, _, _triplets_b) =
-                        self.read_triplets_by_columns((lb..ub).collect()).unwrap();
-                    let _triplets_b = _triplets_b.into_iter().filter_map(|(i, j, x)| {
-                        old2new.get(&i).map(|&i_new| (i_new as u64, j as u64, x))
-                    });
-                    let mut triplets = arc_triplets.lock().unwrap();
-                    triplets.extend(_triplets_b);
-                });
-
-            /////////////////////////////////////
-            // 2. Remove previous backend file //
-            /////////////////////////////////////
-            self.remove_backend_file()?;
-
-            ///////////////////////////////
-            // 3. populate a new backend //
-            ///////////////////////////////
-            self.initialize_backend()?;
-
-            // populate data from mtx triplets
-            {
-                let mut row_col_val_triplets =
-                    arc_triplets.lock().expect("failed to lock triplets");
-
-                let nnz = row_col_val_triplets.len();
-                debug_assert!(row_col_val_triplets.len() <= nnz); // subset
-                let new_nrow = new_row_names.len();
-                let mtx_shape = (new_nrow, ncol, nnz);
-                self.record_mtx_shape(Some(mtx_shape))?;
-                self.record_triplets_by_col(&mut row_col_val_triplets)?;
-                self.record_triplets_by_row(&mut row_col_val_triplets)?;
-            }
-            self.read_column_indptr()?;
-            self.read_row_indptr()?;
-
-            self.register_row_names_vec(&new_row_names);
-            self.register_column_names_vec(&new_col_names);
-        }
         Ok(())
     }
 }

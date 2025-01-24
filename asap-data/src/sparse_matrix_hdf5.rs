@@ -2,12 +2,8 @@ use crate::sparse_io::*;
 use hdf5::filters::blosc_set_nthreads;
 use log::info;
 use matrix_util::common_io::*;
-use matrix_util::mtx_io::*;
-use num_cpus;
-use rayon::prelude::*;
-use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 const CHUNK_SIZE: usize = 1000;
 const MAX_ROW_NAME_IDX: usize = 3;
@@ -87,12 +83,12 @@ impl SparseMtxData {
         let mut ret = match backend_file {
             Some(backend_file) => {
                 info!("backend file : {}", backend_file);
-                Self::return_backend_file(backend_file)?
+                Self::register_backend_file(backend_file)?
             }
             None => {
                 let backend_file = mtx_file.to_string() + ".h5";
                 info!("backend file : {}", backend_file);
-                Self::return_backend_file(backend_file.as_ref())?
+                Self::register_backend_file(backend_file.as_ref())?
             }
         };
 
@@ -111,31 +107,6 @@ impl SparseMtxData {
         Ok(ret)
     }
 
-    /// Read mtx file and populate the data into HDF5 for faster row-by-row access
-    /// * `mtx_file`: mtx file to be read into HDF5 backend
-    fn import_mtx_file_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
-        let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
-
-        self.record_mtx_shape(mtx_shape)?;
-
-        if mtx_triplets.len() == 0 {
-            return Err(anyhow::anyhow!("No data in mtx file"));
-        }
-        self.record_triplets_by_row(&mut mtx_triplets)
-    }
-
-    /// Read mtx file and populate the data into HDF5 for faster column-by-column access
-    /// * `mtx_file`: mtx file to be read into HDF5 backend
-    fn import_mtx_file_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
-        let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
-
-        if mtx_triplets.len() == 0 {
-            return Err(anyhow::anyhow!("No data in mtx file"));
-        }
-        self.record_mtx_shape(mtx_shape)?;
-        self.record_triplets_by_col(&mut mtx_triplets)
-    }
-
     /// Create a new `SparseMtxData` from ndarray with its backend
     /// HDF5 file. If no `backend_file` is provided, a temporary file
     /// will be created.
@@ -149,11 +120,11 @@ impl SparseMtxData {
         index_by_row: Option<bool>,
     ) -> anyhow::Result<Self> {
         let mut ret = match backend_file {
-            Some(backend_file) => Self::return_backend_file(backend_file)?,
+            Some(backend_file) => Self::register_backend_file(backend_file)?,
             None => {
                 let backend_file = create_temp_dir_file(".h5")?;
                 let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::return_backend_file(&backend_file)?
+                Self::register_backend_file(&backend_file)?
             }
         };
 
@@ -181,11 +152,11 @@ impl SparseMtxData {
         index_by_row: Option<bool>,
     ) -> anyhow::Result<Self> {
         let mut ret = match backend_file {
-            Some(backend_file) => Self::return_backend_file(backend_file)?,
+            Some(backend_file) => Self::register_backend_file(backend_file)?,
             None => {
                 let backend_file = create_temp_dir_file(".h5")?;
                 let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::return_backend_file(&backend_file)?
+                Self::register_backend_file(&backend_file)?
             }
         };
 
@@ -198,323 +169,6 @@ impl SparseMtxData {
         }
 
         Ok(ret)
-    }
-
-    /// Read column index pointers
-    pub fn read_column_indptr(self: &mut Self) -> anyhow::Result<()> {
-        if let Ok(by_column) = self.backend.group("/by_column") {
-            let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
-            self.by_column_indptr.clear();
-            self.by_column_indptr.extend(indptr);
-        }
-        Ok(())
-    }
-
-    /// Read row index pointers
-    pub fn read_row_indptr(self: &mut Self) -> anyhow::Result<()> {
-        if let Ok(by_row) = self.backend.group("/by_row") {
-            let indptr = by_row.dataset("indptr")?.read_1d::<u64>()?;
-            self.by_row_indptr.clear();
-            self.by_row_indptr.extend(indptr);
-        }
-        Ok(())
-    }
-
-    /// Associate sparse matrix data with a HDF5 file
-    /// * `hdf5_file`: HDF5 file to be associated with
-    fn return_backend_file(hdf5_file: &str) -> anyhow::Result<Self> {
-        let hdf5_backend = hdf5::File::create(hdf5_file)?;
-
-        Ok(Self {
-            backend: hdf5_backend.into(),
-            file_name: hdf5_file.to_string(),
-            chunk_size: CHUNK_SIZE,
-            max_row_name_idx: MAX_ROW_NAME_IDX,
-            max_column_name_idx: MAX_COLUMN_NAME_IDX,
-            by_column_indptr: vec![],
-            by_row_indptr: vec![],
-        })
-    }
-
-    /// Helper function to create a new backend file
-    fn initialize_backend(&mut self) -> anyhow::Result<()> {
-        self.remove_backend_file()?;
-        self.backend = hdf5::File::create(&self.file_name)?.into();
-        self.chunk_size = CHUNK_SIZE;
-        self.max_column_name_idx = MAX_COLUMN_NAME_IDX;
-        self.max_row_name_idx = MAX_ROW_NAME_IDX;
-        self.by_column_indptr = vec![];
-        self.by_row_indptr = vec![];
-
-        Ok(())
-    }
-
-    /////////////////////////////////
-    // `dmatrix` related functions //
-    /////////////////////////////////
-
-    /// Add dmatrix to HDF5 backend by row (CSR format)
-    /// * `array` - 2D array to be added to the backend
-    fn import_dmatrix_by_row(&mut self, matrix: &DMatrix<f32>) -> anyhow::Result<()> {
-        let (nrow, ncol) = matrix.shape();
-        let mut mtx_triplets = dmatrix_to_triplets(&matrix);
-        let mtx_shape = (nrow, ncol, mtx_triplets.len());
-        self.record_mtx_shape(Some(mtx_shape))?;
-        self.record_triplets_by_row(&mut mtx_triplets)
-    }
-
-    /// Add dmatrix to HDF5 backend by column (CSC format)
-    /// * `array` - 2D array to be added to the backend
-    fn import_dmatrix_by_col(&mut self, matrix: &DMatrix<f32>) -> anyhow::Result<()> {
-        let (nrow, ncol) = matrix.shape();
-        let mut mtx_triplets = dmatrix_to_triplets(&matrix);
-        let mtx_shape = (nrow, ncol, mtx_triplets.len());
-        self.record_mtx_shape(Some(mtx_shape))?;
-        self.record_triplets_by_col(&mut mtx_triplets)
-    }
-
-    /////////////////////////////////
-    // `ndarray` related functions //
-    /////////////////////////////////
-
-    /// Add ndarray to HDF5 backend by row (CSR format)
-    /// * `array`: ndarray to be added
-    fn import_ndarray_by_row(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
-        let nrow = array.shape()[0];
-        let ncol = array.shape()[1];
-
-        let mut mtx_triplets = ndarray_to_triplets(&array);
-        let nnz = mtx_triplets.len();
-
-        let mtx_shape = (nrow, ncol, nnz);
-        self.record_mtx_shape(Some(mtx_shape))?;
-        self.record_triplets_by_row(&mut mtx_triplets)
-    }
-
-    /// Add ndarray to HDF5 backend by column (CSC format)
-    /// * `array`: ndarray to be added
-    fn import_ndarray_by_col(&mut self, array: &Array2<f32>) -> anyhow::Result<()> {
-        let nrow = array.shape()[0];
-        let ncol = array.shape()[1];
-
-        let mut mtx_triplets = ndarray_to_triplets(&array);
-        let nnz = mtx_triplets.len();
-
-        let mtx_shape = (nrow, ncol, nnz);
-        self.record_mtx_shape(Some(mtx_shape))?;
-        self.record_triplets_by_col(&mut mtx_triplets)
-    }
-
-    //////////////
-    // triplets //
-    //////////////
-
-    /// Helper function to add triplets to HDF5 backend by row (CSR format)
-    fn record_triplets_by_row(
-        &mut self,
-        row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
-    ) -> anyhow::Result<()> {
-        debug_assert!(row_col_val_triplets.len() > 0);
-
-        row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
-        row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
-        // dbg!(&row_col_val_triplets);
-
-        let mut csr_rowptr = vec![];
-        let mut csr_cols = vec![];
-        let mut csr_vals = vec![];
-
-        let nrow = self.num_rows().expect("should have `nrow`");
-        let nnz = row_col_val_triplets.len();
-
-        // fill in rowptr 0 to the first row index
-        let first = row_col_val_triplets[0].0;
-        for _ in 0..first {
-            csr_rowptr.push(0);
-        }
-
-        // for the first row/triplet
-        csr_rowptr.push(0);
-        csr_cols.push(row_col_val_triplets[0].1);
-        csr_vals.push(row_col_val_triplets[0].2);
-
-        for i in 1..nnz {
-            let lb = row_col_val_triplets[i - 1].0;
-            let ub = row_col_val_triplets[i].0;
-            for _ in lb..ub {
-                csr_rowptr.push(i);
-            }
-            csr_cols.push(row_col_val_triplets[i].1);
-            csr_vals.push(row_col_val_triplets[i].2);
-        }
-
-        // fill in the rest of the rowptr
-        let last = row_col_val_triplets[nnz - 1].0 as usize;
-        for _ in last..nrow {
-            csr_rowptr.push(nnz);
-        }
-
-        self.record_csr_dataset_backend(&csr_cols, &csr_vals, &csr_rowptr)
-    }
-
-    /// Helper function to add triplets to HDF5 backend by column (CSC format)
-    fn record_triplets_by_col(
-        &mut self,
-        row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
-    ) -> anyhow::Result<()> {
-        debug_assert!(row_col_val_triplets.len() > 0);
-
-        row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
-        row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
-        // dbg!(&row_col_val_triplets);
-
-        let mut csc_colptr = vec![];
-        let mut csc_rows = vec![];
-        let mut csc_vals = vec![];
-
-        let ncol = self.num_columns().expect("should have `ncol`");
-        let nnz = row_col_val_triplets.len();
-
-        // fill in colptr 0 to the first column index
-        let first = row_col_val_triplets[0].1;
-        for _ in 0..first {
-            csc_colptr.push(0);
-        }
-
-        // for the first column/triplet
-        csc_colptr.push(0);
-        csc_rows.push(row_col_val_triplets[0].0);
-        csc_vals.push(row_col_val_triplets[0].2);
-
-        for i in 1..nnz {
-            let lb = row_col_val_triplets[i - 1].1;
-            let ub = row_col_val_triplets[i].1;
-            for _ in lb..ub {
-                csc_colptr.push(i);
-            }
-            csc_rows.push(row_col_val_triplets[i].0 as u64);
-            csc_vals.push(row_col_val_triplets[i].2);
-        }
-
-        // fill in the rest of the colptr
-        let last = row_col_val_triplets[nnz - 1].1 as usize;
-        for _ in last..ncol {
-            csc_colptr.push(nnz);
-        }
-        // dbg!(&csc_colptr);
-
-        self.record_csc_dataset_backend(&csc_rows, &csc_vals, &csc_colptr)
-    }
-
-    //////////////////////
-    // backend related  //
-    //////////////////////
-
-    /// Helper function to add CSR dataset to HDF5 backend
-    ///
-    /// ```text
-    ///     └── by_row
-    ///         ├── data
-    ///         ├── indices (column indices)
-    ///         └── isndptr (row pointers)
-    /// ```
-    fn record_csr_dataset_backend(
-        self: &mut Self,
-        csr_cols: &Vec<u64>,
-        csr_vals: &Vec<f32>,
-        csr_rowptr: &Vec<usize>,
-    ) -> anyhow::Result<()> {
-        // Populate them into HDF5
-        if self.backend.group("/by_row").is_err() {
-            let root = self.backend.create_group("/by_row")?;
-            info!("Group: {:?} created", root);
-        }
-
-        {
-            let num_threads = num_cpus::get(); // Gets the number of logical CPUs
-            blosc_set_nthreads(num_threads as u8); // Set the number of threads for Blosc
-        }
-
-        let csr = self.backend.group("/by_row")?;
-
-        csr.new_dataset::<f32>()
-            .shape(csr_vals.len())
-            .chunk([self.chunk_size.min(csr_vals.len())])
-            .blosc_zstd(9, true)
-            .create("data")?
-            .write(&csr_vals)?;
-
-        csr.new_dataset::<u64>()
-            .shape(csr_rowptr.len())
-            .chunk([self.chunk_size.min(csr_rowptr.len())])
-            .blosc_zstd(9, true)
-            .create("indptr")?
-            .write(&csr_rowptr)?;
-
-        csr.new_dataset::<u64>()
-            .shape(csr_cols.len())
-            .chunk([self.chunk_size.min(csr_cols.len())])
-            .blosc_zstd(9, true)
-            .create("indices")?
-            .write(&csr_cols)?;
-
-        self.backend.flush()?;
-
-        Ok(())
-    }
-
-    /// Helper function to add CSC dataset to HDF5 backend
-    ///
-    /// ```text
-    /// Helper function to record the CSC dataset
-    ///     ├── by_column
-    ///     │   ├── data
-    ///     │   ├── indices (row indices)
-    ///     │   └── indptr (column pointers)
-    /// ```
-    fn record_csc_dataset_backend(
-        self: &mut Self,
-        csc_rows: &Vec<u64>,
-        csc_vals: &Vec<f32>,
-        csc_colptr: &Vec<usize>,
-    ) -> anyhow::Result<()> {
-        // Populate them into HDF5
-        if self.backend.group("/by_column").is_err() {
-            let root = self.backend.create_group("/by_column")?;
-            info!("Group: {:?} created", root);
-        }
-
-        {
-            let num_threads = num_cpus::get(); // Gets the number of logical CPUs
-            blosc_set_nthreads(num_threads as u8); // Set the number of threads for Blosc
-        }
-
-        let csc = self.backend.group("/by_column")?;
-
-        csc.new_dataset::<f32>()
-            .shape(csc_vals.len())
-            .chunk([self.chunk_size.min(csc_vals.len())])
-            .blosc_zstd(9, true)
-            .create("data")?
-            .write(&csc_vals)?;
-
-        csc.new_dataset::<u64>()
-            .shape(csc_colptr.len())
-            .chunk([self.chunk_size.min(csc_colptr.len())])
-            .blosc_zstd(9, true)
-            .create("indptr")?
-            .write(&csc_colptr)?;
-
-        csc.new_dataset::<u64>()
-            .shape(csc_rows.len())
-            .chunk([self.chunk_size.min(csc_rows.len())])
-            .blosc_zstd(9, true)
-            .create("indices")?
-            .write(&csc_rows)?;
-
-        self.backend.flush()?;
-
-        Ok(())
     }
 
     /////////////////////////////
@@ -545,6 +199,43 @@ impl SparseMtxData {
         Ok(())
     }
 
+    //////////////////////
+    // backend related  //
+    //////////////////////
+
+    /// Associate sparse matrix data with a HDF5 file
+    /// * `hdf5_file`: HDF5 file to be associated with
+    fn register_backend_file(hdf5_file: &str) -> anyhow::Result<Self> {
+        let hdf5_backend = hdf5::File::create(hdf5_file)?;
+
+        Ok(Self {
+            backend: hdf5_backend.into(),
+            file_name: hdf5_file.to_string(),
+            chunk_size: CHUNK_SIZE,
+            max_row_name_idx: MAX_ROW_NAME_IDX,
+            max_column_name_idx: MAX_COLUMN_NAME_IDX,
+            by_column_indptr: vec![],
+            by_row_indptr: vec![],
+        })
+    }
+}
+
+impl SparseIo for SparseMtxData {
+    type IndexIter = Vec<usize>;
+
+    /// Helper function to create a new backend file
+    fn initialize_backend(&mut self) -> anyhow::Result<()> {
+        self.remove_backend_file()?;
+        self.backend = hdf5::File::create(&self.file_name)?.into();
+        self.chunk_size = CHUNK_SIZE;
+        self.max_column_name_idx = MAX_COLUMN_NAME_IDX;
+        self.max_row_name_idx = MAX_ROW_NAME_IDX;
+        self.by_column_indptr = vec![];
+        self.by_row_indptr = vec![];
+
+        Ok(())
+    }
+
     /// Record the shape of the mtx file into the HDF5 backend
     fn record_mtx_shape(
         self: &mut Self,
@@ -559,10 +250,26 @@ impl SparseMtxData {
 
         Ok(())
     }
-}
 
-impl SparseIo for SparseMtxData {
-    type IndexIter = Vec<usize>;
+    /// Read column index pointers
+    fn read_column_indptr(self: &mut Self) -> anyhow::Result<()> {
+        if let Ok(by_column) = self.backend.group("/by_column") {
+            let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
+            self.by_column_indptr.clear();
+            self.by_column_indptr.extend(indptr);
+        }
+        Ok(())
+    }
+
+    /// Read row index pointers
+    fn read_row_indptr(self: &mut Self) -> anyhow::Result<()> {
+        if let Ok(by_row) = self.backend.group("/by_row") {
+            let indptr = by_row.dataset("indptr")?.read_1d::<u64>()?;
+            self.by_row_indptr.clear();
+            self.by_row_indptr.extend(indptr);
+        }
+        Ok(())
+    }
 
     /// Remove backend file to free up disk space
     fn remove_backend_file(self: &Self) -> anyhow::Result<()> {
@@ -587,11 +294,10 @@ impl SparseIo for SparseMtxData {
         let data = by_column.dataset("data")?;
         let indices = by_column.dataset("indices")?;
 
-        let mut buf = open_buf_writer(mtx_file)?;
-
         if let (Some(ncol), Some(nrow), Some(nnz)) =
             (self.num_columns(), self.num_rows(), self.num_non_zeros())
         {
+            let mut buf = open_buf_writer(mtx_file)?;
             writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
             writeln!(buf, "{}\t{}\t{}", nrow, ncol, nnz)?;
 
@@ -620,100 +326,6 @@ impl SparseIo for SparseMtxData {
                 "Unable to figure out the size of the backend data"
             ));
         }
-    }
-
-    /// Select the columns of the data and create a new backend file
-    /// * `columns`: columns to be subsetted
-    /// * `rows`: if something, subset the rows
-    fn subset_columns_rows(
-        &mut self,
-        columns: Option<&Vec<usize>>,
-        rows: Option<&Vec<usize>>,
-    ) -> anyhow::Result<()> {
-        if let (Some(ncol), Some(nrow), Some(nnz)) =
-            (self.num_columns(), self.num_rows(), self.num_non_zeros())
-        {
-            let (nrow_data, ncol_data, nnz) = (nrow as usize, ncol as usize, nnz as usize);
-
-            let backend_file = self.get_backend_file_name();
-
-            /////////////////////////////////////////////////
-            // 0. Create a mapping from old to new columns //
-            /////////////////////////////////////////////////
-
-            let (old2new_cols, new_col_names) =
-                take_subset_indices_names_if_needed(columns, Some(ncol_data), self.column_names()?);
-
-            let (old2new_rows, new_row_names) =
-                take_subset_indices_names_if_needed(rows, Some(nrow_data), self.row_names()?);
-
-            let (new_ncol, new_nrow) = (old2new_cols.len(), old2new_rows.len());
-
-            /////////////////////////////////////////////////////////
-            // 1. Create remapped Mtx only taking a subset of rows //
-            /////////////////////////////////////////////////////////
-
-            let by_column = self.backend.group("/by_column")?;
-            let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
-            let data = by_column.dataset("data")?;
-            let indices = by_column.dataset("indices")?;
-            debug_assert!(indptr.len() == ncol_data + 1);
-
-            let arc_triplets = Arc::new(Mutex::new(vec![]));
-
-            old2new_cols.par_iter().for_each(|(&old_jj, &jj)| {
-                let mut triplets = arc_triplets.lock().expect("failed to lock triplets");
-
-                let (start, end) = (indptr[old_jj] as usize, indptr[old_jj + 1] as usize);
-                let data_slice = data
-                    .read_slice_1d::<f32, _>(start..end)
-                    .expect("data slice 1d");
-                let indices_slice = indices
-                    .read_slice_1d::<u64, _>(start..end)
-                    .expect("indices slice 1d");
-                // write them with 1-based indices
-                for k in 0..(end - start) {
-                    let val = data_slice[k as usize];
-                    let ii = indices_slice[k as usize] as usize;
-                    if let Some(&ii) = old2new_rows.get(&ii) {
-                        triplets.push((ii as u64, jj as u64, val));
-                    }
-                }
-            });
-
-            /////////////////////////////////////
-            // 2. Remove previous backend file //
-            /////////////////////////////////////
-            self.remove_backend_file()?;
-            dbg!(&backend_file);
-
-            ///////////////////////////////
-            // 3. populate a new backend //
-            ///////////////////////////////
-            self.initialize_backend()?;
-
-            // populate data from mtx triplets
-            {
-                let mut row_col_val_triplets =
-                    arc_triplets.lock().expect("failed to lock triplets");
-
-                debug_assert!(row_col_val_triplets.len() <= nnz); // subset
-                let nnz = row_col_val_triplets.len();
-                let mtx_shape = (new_nrow, new_ncol, nnz);
-                self.record_mtx_shape(Some(mtx_shape))?;
-                self.record_triplets_by_col(&mut row_col_val_triplets)?;
-                self.record_triplets_by_row(&mut row_col_val_triplets)?;
-            }
-            self.read_column_indptr()?;
-            self.read_row_indptr()?;
-
-            self.register_row_names_vec(&new_row_names);
-            self.register_column_names_vec(&new_col_names);
-        } else {
-            return Err(anyhow::anyhow!("missing shape information"));
-        }
-
-        Ok(())
     }
 
     /// Set row names for the matrix
@@ -994,77 +606,109 @@ impl SparseIo for SparseMtxData {
         }
     }
 
-    /// Reposition rows in a new order specified by `remap`
-    /// * `row_names_order` - a vector of row names in the new order
-    fn reorder_rows(&mut self, row_names_order: &Vec<Box<str>>) -> anyhow::Result<()> {
-        let new_row_names = row_names_order.clone();
-        let new_col_names = self.column_names()?.clone();
-        let name2new = build_name2index_map(&new_row_names);
-
-        let block_size = 100;
-
-        let old2new: HashMap<usize, usize> = self
-            .row_names()?
-            .into_par_iter()
-            .enumerate()
-            .filter_map(|(idx_old, name)| name2new.get(&name).map(|&idx_new| (idx_old, idx_new)))
-            .collect();
-
-        if let Some(ncol) = self.num_columns() {
-            /////////////////////////////////////////////////////
-            // 1. triplets after filtering and reordering rows //
-            /////////////////////////////////////////////////////
-
-            let arc_triplets = Arc::new(Mutex::new(vec![]));
-
-            let nblock = (ncol + block_size - 1) / block_size;
-
-            (0..nblock)
-                .into_par_iter()
-                .map(|b| {
-                    let lb: usize = b * block_size;
-                    let ub: usize = ((b + 1) * block_size).min(ncol);
-                    (lb, ub)
-                })
-                .for_each(|(lb, ub)| {
-                    let (_, _, _triplets_b) =
-                        self.read_triplets_by_columns((lb..ub).collect()).unwrap();
-                    let _triplets_b = _triplets_b.into_iter().filter_map(|(i, j, x)| {
-                        old2new.get(&i).map(|&i_new| (i_new as u64, j as u64, x))
-                    });
-                    let mut triplets = arc_triplets.lock().unwrap();
-                    triplets.extend(_triplets_b);
-                });
-
-            /////////////////////////////////////
-            // 2. Remove previous backend file //
-            /////////////////////////////////////
-            self.remove_backend_file()?;
-
-            ///////////////////////////////
-            // 3. populate a new backend //
-            ///////////////////////////////
-            self.initialize_backend()?;
-
-            // populate data from mtx triplets
-            {
-                let mut row_col_val_triplets =
-                    arc_triplets.lock().expect("failed to lock triplets");
-
-                let nnz = row_col_val_triplets.len();
-                debug_assert!(row_col_val_triplets.len() <= nnz); // subset
-                let new_nrow = new_row_names.len();
-                let mtx_shape = (new_nrow, ncol, nnz);
-                self.record_mtx_shape(Some(mtx_shape))?;
-                self.record_triplets_by_col(&mut row_col_val_triplets)?;
-                self.record_triplets_by_row(&mut row_col_val_triplets)?;
-            }
-            self.read_column_indptr()?;
-            self.read_row_indptr()?;
-
-            self.register_row_names_vec(&new_row_names);
-            self.register_column_names_vec(&new_col_names);
+    /// Helper function to add CSR dataset to HDF5 backend
+    ///
+    /// ```text
+    ///     └── by_row
+    ///         ├── data
+    ///         ├── indices (column indices)
+    ///         └── isndptr (row pointers)
+    /// ```
+    fn record_csr_dataset_backend(
+        self: &mut Self,
+        csr_cols: &Vec<u64>,
+        csr_vals: &Vec<f32>,
+        csr_rowptr: &Vec<u64>,
+    ) -> anyhow::Result<()> {
+        // Populate them into HDF5
+        if self.backend.group("/by_row").is_err() {
+            let root = self.backend.create_group("/by_row")?;
+            info!("Group: {:?} created", root);
         }
+
+        {
+            let num_threads = num_cpus::get(); // Gets the number of logical CPUs
+            blosc_set_nthreads(num_threads as u8); // Set the number of threads for Blosc
+        }
+
+        let csr = self.backend.group("/by_row")?;
+
+        csr.new_dataset::<f32>()
+            .shape(csr_vals.len())
+            .chunk([self.chunk_size.min(csr_vals.len())])
+            .blosc_zstd(9, true)
+            .create("data")?
+            .write(&csr_vals)?;
+
+        csr.new_dataset::<u64>()
+            .shape(csr_rowptr.len())
+            .chunk([self.chunk_size.min(csr_rowptr.len())])
+            .blosc_zstd(9, true)
+            .create("indptr")?
+            .write(&csr_rowptr)?;
+
+        csr.new_dataset::<u64>()
+            .shape(csr_cols.len())
+            .chunk([self.chunk_size.min(csr_cols.len())])
+            .blosc_zstd(9, true)
+            .create("indices")?
+            .write(&csr_cols)?;
+
+        self.backend.flush()?;
+
+        Ok(())
+    }
+
+    /// Helper function to add CSC dataset to HDF5 backend
+    ///
+    /// ```text
+    /// Helper function to record the CSC dataset
+    ///     ├── by_column
+    ///     │   ├── data
+    ///     │   ├── indices (row indices)
+    ///     │   └── indptr (column pointers)
+    /// ```
+    fn record_csc_dataset_backend(
+        self: &mut Self,
+        csc_rows: &Vec<u64>,
+        csc_vals: &Vec<f32>,
+        csc_colptr: &Vec<u64>,
+    ) -> anyhow::Result<()> {
+        // Populate them into HDF5
+        if self.backend.group("/by_column").is_err() {
+            let root = self.backend.create_group("/by_column")?;
+            info!("Group: {:?} created", root);
+        }
+
+        {
+            let num_threads = num_cpus::get(); // Gets the number of logical CPUs
+            blosc_set_nthreads(num_threads as u8); // Set the number of threads for Blosc
+        }
+
+        let csc = self.backend.group("/by_column")?;
+
+        csc.new_dataset::<f32>()
+            .shape(csc_vals.len())
+            .chunk([self.chunk_size.min(csc_vals.len())])
+            .blosc_zstd(9, true)
+            .create("data")?
+            .write(&csc_vals)?;
+
+        csc.new_dataset::<u64>()
+            .shape(csc_colptr.len())
+            .chunk([self.chunk_size.min(csc_colptr.len())])
+            .blosc_zstd(9, true)
+            .create("indptr")?
+            .write(&csc_colptr)?;
+
+        csc.new_dataset::<u64>()
+            .shape(csc_rows.len())
+            .chunk([self.chunk_size.min(csc_rows.len())])
+            .blosc_zstd(9, true)
+            .create("indices")?
+            .write(&csc_rows)?;
+
+        self.backend.flush()?;
 
         Ok(())
     }
