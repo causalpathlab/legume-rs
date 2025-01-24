@@ -4,16 +4,15 @@ mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
 mod statistics;
 
-use env_logger;
-use log::info;
-
 use crate::sparse_io::*;
 use crate::statistics::RunningStatistics;
 use clap::{Args, Parser, Subcommand};
+use env_logger;
 use indicatif::ParallelProgressIterator;
-use rayon::prelude::*;
-// use indicatif::ProgressIterator;
+use log::info;
+use matrix_util::traits::IoOps;
 use matrix_util::*;
+use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
 type SData = dyn SparseIo<IndexIter = Vec<usize>>;
@@ -209,7 +208,7 @@ fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
         common_io::remove_file(&backend_file)?;
     }
 
-    let mut data = create_sparse_mtx_file(&mtx_file, Some(&backend_file), Some(&backend))?;
+    let mut data = create_sparse_from_mtx_file(&mtx_file, Some(&backend_file), Some(&backend))?;
 
     if let Some(row_file) = row_file {
         data.register_row_names_file(row_file);
@@ -352,21 +351,35 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         rseed: cmd_args.seed,
     };
 
-    simulate::generate_factored_poisson_gamma_data_mtx(
-        &sim_args,
-        &mtx_file,
-        &dict_file,
-        &prop_file,
-        &ln_batch_file,
-        &memb_file,
-    )
-    .expect("something went wrong in factored gamma");
-
+    let sim = simulate::generate_factored_poisson_gamma_data(&sim_args);
     info!("successfully generated factored Poisson-Gamma data");
 
-    let mut data = create_sparse_mtx_file(&mtx_file, Some(&backend_file), Some(&backend))?;
+    let batch_out: Vec<Box<str>> = sim
+        .batch_membership
+        .iter()
+        .map(|&x| Box::from(x.to_string()))
+        .collect();
 
-    info!("created sparse matrix file: {}", backend_file);
+    common_io::write_lines(&batch_out, &memb_file)?;
+    info!("batch membership: {:?}", &memb_file);
+
+    sim.ln_delta_db.to_tsv(&ln_batch_file)?;
+    sim.theta_kn.transpose().to_tsv(&prop_file)?;
+    sim.beta_dk.to_tsv(&dict_file)?;
+
+    info!(
+        "wrote parameter files:\n{:?},\n{:?},\n{:?}",
+        &ln_batch_file, &dict_file, &prop_file
+    );
+
+    let mtx_shape = (sim_args.rows, sim_args.cols, sim.triplets.len());
+
+    info!("registering triplets ...");
+
+    let mut data =
+        create_sparse_from_triplets(sim.triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
+
+    info!("created sparse matrix: {}", backend_file);
 
     let rows: Vec<Box<str>> = (1..(sim_args.rows + 1))
         .map(|i| i.to_string().into_boxed_str())
