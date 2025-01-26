@@ -2,6 +2,7 @@ mod collapse_data;
 mod common;
 mod normalization;
 mod random_projection;
+mod candle_etm;
 
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;

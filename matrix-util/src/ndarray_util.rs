@@ -1,10 +1,9 @@
-pub use ndarray::prelude::*;
-pub use rand::{thread_rng, Rng};
-pub use rand_distr::{Distribution, Gamma, StandardNormal, Uniform};
-pub use rayon::prelude::*;
-
 use crate::traits::*;
+use ndarray::prelude::*;
 use num_traits::{Float, FromPrimitive};
+use rand::{thread_rng, Rng};
+use rand_distr::{Distribution, Gamma, StandardNormal, Uniform};
+use rayon::prelude::*;
 
 impl<T> SampleOps for ndarray::Array2<T>
 where

@@ -1,10 +1,10 @@
-pub use nalgebra::{DMatrix, DVector};
-pub use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
+use nalgebra::DMatrix;
+use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
 
 use num_traits::Float;
-pub use rand::{thread_rng, Rng};
-pub use rand_distr::{Distribution, Gamma, StandardNormal, Uniform};
-pub use rayon::prelude::*;
+use rand::{thread_rng, Rng};
+use rand_distr::{Distribution, Gamma, StandardNormal, Uniform};
+use rayon::prelude::*;
 
 use crate::traits::*;
 

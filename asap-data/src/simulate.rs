@@ -1,11 +1,11 @@
 use log::info;
 use matrix_util::common_io::write_lines;
 use matrix_util::dmatrix_io::*;
-use matrix_util::dmatrix_util::*;
 use matrix_util::mtx_io::write_mtx_triplets;
 use matrix_util::traits::*;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Poisson, Uniform};
+use rayon::prelude::*;
 
 pub struct SimArgs {
     pub rows: usize,
