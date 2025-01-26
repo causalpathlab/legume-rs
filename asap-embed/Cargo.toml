@@ -32,10 +32,14 @@ indicatif = { workspace = true }
 log = "0.4"
 env_logger = "0.11"
 
+
 [target.'cfg(target_os = "linux")'.dependencies]
-candle-core = { version = "0.8", features = ["cuda","cudarc","cudnn"] }
+candle-core = { version = "^0.8", features = ["cuda","cudarc","cudnn"] }
+candle-nn = { version = "^0.8", features = ["cuda"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { version = "0.8", features = ["metal","accelerate"] }
+candle-core = { version = "^0.8", features = ["metal","accelerate"] }
+candle-nn = { version = "^0.8", features = ["metal","accelerate"] }
 
 [dev-dependencies]
 textplots = { version = "0.8" }

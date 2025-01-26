@@ -2,8 +2,9 @@ use crate::common::*;
 use asap_data::sparse_io_vector::SparseIoVec;
 use indicatif::ParallelProgressIterator;
 use matrix_util::dmatrix_rsvd::RSVD;
-use matrix_util::dmatrix_util::*;
 use matrix_util::traits::*;
+use nalgebra::DVector;
+use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
 #[allow(dead_code)]
