@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 
-#[allow(dead_code)]
 pub struct SparseIoVec {
     data_vec: Vec<Arc<SparseData>>,
     col_to_data: Vec<usize>,

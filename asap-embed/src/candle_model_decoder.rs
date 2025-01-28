@@ -1,6 +1,6 @@
 use crate::candle_loss_functions::{gaussian_kl_loss, topic_likelihood};
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, sequential, BatchNorm, Linear, ModuleT, Sequential, VarBuilder};
+use candle_nn::{ops, Linear, ModuleT, Sequential, VarBuilder};
 
 /////////////////////
 // Decoder for ETM //
