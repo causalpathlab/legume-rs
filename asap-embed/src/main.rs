@@ -10,14 +10,24 @@ mod random_projection;
 
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
-use clap::Parser;
+use asap_embed::candle_data_loader::InMemoryData;
+use candle_inference::*;
+use clap::{Parser, ValueEnum};
 use collapse_data::CollapsingOps;
 use log::info;
-use matrix_param::traits::*;
+use matrix_param::traits::Inference;
 use matrix_util::common_io::{extension, read_lines};
 use matrix_util::traits::*;
 use random_projection::RandProjOps;
 use std::sync::Arc;
+
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+enum ComputeDevice {
+    Cpu,
+    Cuda,
+    Metal,
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about=None)]
@@ -44,7 +54,7 @@ struct EmbedArgs {
     out: Box<str>,
 
     /// Use top `S` components of projection. #samples < `2^S+1`.
-    #[arg(long, short, default_value = "10")]
+    #[arg(long, short, default_value_t = 10)]
     sort_dim: usize,
 
     /// Batch membership files. Each bach file should correspond to
@@ -57,7 +67,7 @@ struct EmbedArgs {
     reference_batch: Option<Box<str>>,
 
     /// #k-nearest neighbours within each batch
-    #[arg(long, short, default_value = "10")]
+    #[arg(long, short, default_value_t = 10)]
     knn: usize,
 
     /// #downsampling columns per each collapsed sample. If None, no
@@ -66,16 +76,24 @@ struct EmbedArgs {
     down_sample: Option<usize>,
 
     /// optimization iterations
-    #[arg(long, default_value = "100")]
+    #[arg(long, default_value_t = 100)]
     iter_opt: usize,
 
     /// Block_size for parallel processing
-    #[arg(long, value_enum, default_value = "100")]
+    #[arg(long, default_value_t = 100)]
     block_size: usize,
+
+    /// Number of latent topics
+    #[arg(long, default_value_t = 10)]
+    latent_topics: usize,
 
     /// ETM encoder layers
     #[arg(long, default_values_t = vec![128,16])]
     etm_layers: Vec<usize>,
+
+    /// Candle device
+    #[arg(value_enum, default_value = "cpu")]
+    device: ComputeDevice,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -109,28 +127,63 @@ fn main() -> anyhow::Result<()> {
 
     // 3. Collapsing columns
     info!("Collapsing columns... into {} samples", nsamp);
-    let ret = data_vec.collapse_columns(
+    let collapse_out = data_vec.collapse_columns(
         args.down_sample,
         args.reference_batch.clone(),
         Some(args.knn),
         Some(args.iter_opt),
     )?;
 
-    // 4. train
+    // 4. Train embedded topic model
+    let dev = match args.device {
+        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
+        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
+        _ => candle_core::Device::Cpu,
+    };
 
-    info!("writing down the results...");
-    ret.mu.write_tsv(&(args.out.to_string() + ".mu"))?;
+    let train_cofig = candle_inference::TrainingConfig {
+        learning_rate: 1e-3,
+        batch_size: 10,
+        num_epochs: 100,
+        device: dev,
+        verbose: true,
+    };
 
-    if let Some(delta) = &ret.delta {
-        delta.write_tsv(&(args.out.to_string() + ".delta"))?;
+    let parameters = candle_nn::VarMap::new();
+    let param_builder = candle_nn::VarBuilder::from_varmap(
+        &parameters,
+        candle_core::DType::F32,
+        &train_cofig.device,
+    );
+
+    {
+        let x_nd = collapse_out.mu.posterior_mean().transpose();
+        let (nn, dd) = x_nd.shape();
+        let data = data_loader(&x_nd)?;
+        let kk = args.latent_topics;
+        let layers = args.etm_layers;
+        let enc = candle_model_encoder::NonNegEncoder::new(dd, kk, &layers, param_builder.clone())?;
+        let dec = candle_model_decoder::ETMDecoder::new(dd, kk, param_builder.clone())?;
+        let vae = candle_inference::Vae::build(enc, dec, &parameters);
     }
 
-    if let Some(gamma) = &ret.gamma {
-        gamma.write_tsv(&(args.out.to_string() + ".gamma"))?;
-    }
+    // info!("writing down the results...");
+    // ret.mu.write_tsv(&(args.out.to_string() + ".mu"))?;
+
+    // if let Some(delta) = &ret.delta {
+    //     delta.write_tsv(&(args.out.to_string() + ".delta"))?;
+    // }
+
+    // if let Some(gamma) = &ret.gamma {
+    //     gamma.write_tsv(&(args.out.to_string() + ".gamma"))?;
+    // }
+
     info!("done");
-
     Ok(())
+}
+
+fn data_loader(data_dn: &DMatrix<f32>) -> candle_core::Result<InMemoryData> {
+    InMemoryData::from_dmatrix(&data_dn)
 }
 
 fn read_data_vec_membership(args: EmbedArgs) -> anyhow::Result<(SparseIoVec, Vec<Box<str>>)> {

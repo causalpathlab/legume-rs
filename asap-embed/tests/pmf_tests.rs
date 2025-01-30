@@ -10,6 +10,10 @@ use matrix_util::traits::SampleOps;
 
 #[test]
 fn pmf() -> anyhow::Result<()> {
+
+    std::env::set_var("RUST_LOG", "info");
+    env_logger::init();
+
     let dev = Device::new_metal(0)?;
 
     let dd = 10_usize;
@@ -26,8 +30,7 @@ fn pmf() -> anyhow::Result<()> {
 
     let x_nd = y.transpose(0, 1)?.to_device(&dev)?;
 
-    let mut data_loader = InMemoryData::from_tensor(&x_nd)?;
-    data_loader.shuffle_minibatch(10);
+
 
     ///////////////////
     // build a model //
@@ -42,16 +45,22 @@ fn pmf() -> anyhow::Result<()> {
 
     let mut vae = Vae::build(enc, dec, &vm);
 
-    vae.train(
-        data_loader,
+    let mut data_loader = InMemoryData::from_tensor(&x_nd)?;
+
+    let _llik = vae.train(
+        &mut data_loader,
         &topic_likelihood,
         TrainingConfig {
-            learning_rate: 1e-2,
+            learning_rate: 1e-3,
             batch_size: 10,
-            num_epochs: 10,
+            num_epochs: 100,
             device: dev,
+	    verbose: true,
         },
     )?;
+
+    // let x = llik.first();
+    // println!("llik: {:?}", llik);
 
     Ok(())
 }
