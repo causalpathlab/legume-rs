@@ -1,5 +1,5 @@
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, Linear, Module, VarBuilder};
+use candle_nn::{ops, Module, VarBuilder};
 
 pub trait DecoderModule {
     /// A decoder that spits out reconstruction
@@ -23,18 +23,67 @@ pub trait DecoderModule {
     fn dim_latent(&self) -> usize;
 }
 
+pub struct SoftmaxLinear {
+    weight: Tensor,
+}
+
+impl SoftmaxLinear {
+    pub fn new(weight: Tensor) -> Self {
+        Self { weight }
+    }
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
+    }
+}
+
+impl Module for SoftmaxLinear {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let w = match *x.dims() {
+            [b1, b2, _, _] => self.weight.broadcast_left((b1, b2))?.t()?,
+            [bsize, _, _] => self.weight.broadcast_left(bsize)?.t()?,
+            _ => self.weight.t()?,
+        };
+
+        let d = w.dims().len();
+        let logit_w = ops::log_softmax(&w, d - 1)?;
+        x.matmul(&logit_w.exp()?)
+    }
+}
+
+pub fn softmax_linear(
+    in_dim: usize,
+    out_dim: usize,
+    vb: candle_nn::VarBuilder,
+) -> Result<SoftmaxLinear> {
+    let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
+    let ws = vb.get_with_hints((out_dim, in_dim), "weight", init_ws)?;
+    Ok(SoftmaxLinear::new(ws))
+}
+
 #[allow(dead_code)]
 pub struct ETMDecoder {
     n_features: usize,
     n_topics: usize,
-    beta: Linear,
+    beta: SoftmaxLinear,
+}
+
+#[allow(dead_code)]
+impl ETMDecoder {
+    pub fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
+        let beta = softmax_linear(n_topics, n_features, vs.pp("dec.beta"))?;
+        Ok(Self {
+            n_features,
+            n_topics,
+            beta,
+        })
+    }
 }
 
 impl DecoderModule for ETMDecoder {
     fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
         let theta_nk = z_nk.exp()?;
-        let beta_kd = self.beta.forward(&theta_nk)?;
-        Ok(ops::log_softmax(&beta_kd, 1)?)
+        let hat_nd = self.beta.forward(&theta_nk)?;
+        Ok(ops::log_softmax(&hat_nd, 1)?)
     }
 
     fn forward_with_llik<LlikFn>(
@@ -59,17 +108,5 @@ impl DecoderModule for ETMDecoder {
 
     fn dim_latent(&self) -> usize {
         self.n_topics
-    }
-}
-
-#[allow(dead_code)]
-impl ETMDecoder {
-    pub fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
-        let beta = candle_nn::linear(n_topics, n_features, vs.pp("dec.beta"))?;
-        Ok(Self {
-            n_features,
-            n_topics,
-            beta,
-        })
     }
 }

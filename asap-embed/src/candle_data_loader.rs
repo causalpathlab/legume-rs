@@ -1,29 +1,18 @@
-use candle_core::{Device, Error, Result, Tensor};
+use candle_core::{Device, Error, Tensor};
 use nalgebra::DMatrix;
 use ndarray::Array2;
 use rand::prelude::SliceRandom;
 use rayon::prelude::*;
 
-/// A simple data loader for in-memory 2d matrix
-///
-/// # Example
-/// ```
-///
-/// ```
-pub struct InMemoryData {
-    data: Vec<Tensor>,
-    rows: Vec<usize>,
-    batches: Vec<Vec<usize>>,
-}
-
 pub trait DataLoader {
-    fn minibatch(&self, batch_idx: usize, target_device: &Device) -> Result<Tensor>;
+    fn shuffle_minibatch(&mut self, batch_size: usize);
+    fn minibatch(&self, batch_idx: usize, target_device: &Device) -> candle_core::Result<Tensor>;
     fn num_minibatch(&self) -> usize;
     fn size(&self) -> usize;
 }
 
 impl DataLoader for InMemoryData {
-    fn minibatch(&self, batch_idx: usize, target_device: &Device) -> Result<Tensor> {
+    fn minibatch(&self, batch_idx: usize, target_device: &Device) -> candle_core::Result<Tensor> {
         if let Some(samples) = self.batches.get(batch_idx) {
             let chunk: Vec<Tensor> = samples.into_iter().map(|&i| self.data[i].clone()).collect();
             Tensor::cat(&chunk, 0)?.to_device(target_device)
@@ -43,11 +32,8 @@ impl DataLoader for InMemoryData {
     fn size(&self) -> usize {
         self.data.len()
     }
-}
 
-#[allow(dead_code)]
-impl InMemoryData {
-    pub fn shuffle_minibatch(&mut self, batch_size: usize) {
+    fn shuffle_minibatch(&mut self, batch_size: usize) {
         use rand::distributions::{Distribution, Uniform};
 
         let mut rng = rand::thread_rng();
@@ -71,8 +57,22 @@ impl InMemoryData {
             })
             .collect::<Vec<Vec<usize>>>();
     }
+}
 
-    pub fn from_tensor(data: &Tensor) -> Result<Self> {
+
+
+///
+/// A simple data loader for in-memory 2d matrix
+///
+pub struct InMemoryData {
+    data: Vec<Tensor>,
+    rows: Vec<usize>,
+    batches: Vec<Vec<usize>>,
+}
+
+#[allow(dead_code)]
+impl InMemoryData {
+    pub fn from_tensor(data: &Tensor) -> candle_core::Result<Self> {
         let mut idx_data = (0..data.dims()[0])
             .map(|i| (i, data.narrow(0, i, 1).expect("").clone()))
             .collect::<Vec<_>>();
@@ -88,7 +88,7 @@ impl InMemoryData {
         })
     }
 
-    pub fn from_ndarray(data: &Array2<f32>) -> Result<Self> {
+    pub fn from_ndarray(data: &Array2<f32>) -> candle_core::Result<Self> {
         let mut idx_data = data
             .axis_iter(ndarray::Axis(0))
             .enumerate()
@@ -112,7 +112,7 @@ impl InMemoryData {
         })
     }
 
-    pub fn from_dmatrix(data: &DMatrix<f32>) -> Result<Self> {
+    pub fn from_dmatrix(data: &DMatrix<f32>) -> candle_core::Result<Self> {
         let mut idx_data = data
             .row_iter()
             .enumerate()
