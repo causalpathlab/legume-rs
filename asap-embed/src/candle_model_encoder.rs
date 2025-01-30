@@ -13,9 +13,10 @@ pub trait EncoderModuleT {
     /// * `z_nk` - latent inference (n x k)
     /// * `kl_loss_n` - KL loss (n x 1)
     fn forward_t(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)>;
+    fn dim_obs(&self) -> usize;
+    fn dim_latent(&self) -> usize;
 }
 
-#[allow(dead_code)]
 pub struct NonNegEncoder {
     n_features: usize,
     n_topics: usize,
@@ -25,7 +26,6 @@ pub struct NonNegEncoder {
     z_lnvar: Linear,
 }
 
-#[allow(dead_code)]
 impl EncoderModuleT for NonNegEncoder {
     fn forward_t(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
         let (z_mean_nk, z_lnvar_nk) = self.latent_params(x_nd, train)?;
@@ -35,18 +35,16 @@ impl EncoderModuleT for NonNegEncoder {
             gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?,
         ))
     }
-}
-
-#[allow(dead_code)]
-impl NonNegEncoder {
-    pub fn num_features(&self) -> usize {
+    fn dim_obs(&self) -> usize {
         self.n_features
     }
 
-    pub fn num_topics(&self) -> usize {
+    fn dim_latent(&self) -> usize {
         self.n_topics
     }
+}
 
+impl NonNegEncoder {
     pub fn batch_norm_input(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
         let x_log1p_nd = (x_nd + 1.)?.log()?;
         x_log1p_nd.normalize_axis(-1)?;
@@ -85,16 +83,13 @@ impl NonNegEncoder {
         vs: VarBuilder,
     ) -> Result<Self> {
         // (0) batch norm
-        let bn = candle_nn::batch_norm(
-            n_features,
-            candle_nn::BatchNormConfig {
-                eps: 1e-4,
-                remove_mean: true,
-                affine: true,
-                momentum: 0.1,
-            },
-            vs.pp("enc.bn"),
-        )?;
+        let config = candle_nn::BatchNormConfig {
+            eps: 1e-4,
+            remove_mean: true,
+            affine: true,
+            momentum: 0.1,
+        };
+        let bn = candle_nn::batch_norm(n_features, config, vs.pp("enc.bn"))?;
 
         // (1) data -> fc
         let mut fc = sequential::seq();

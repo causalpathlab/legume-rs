@@ -1,72 +1,90 @@
-use crate::candle_model_decoder::*;
-use crate::candle_model_encoder::*;
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::{ModuleT, VarBuilder, VarMap};
+use crate::candle_data_loader::*;
+use crate::candle_model_decoder::DecoderModule;
+use crate::candle_model_encoder::EncoderModuleT;
+use candle_core::{Device, Result, Tensor};
+use candle_nn::AdamW;
+use candle_nn::Optimizer;
+use indicatif::*;
 
-// use candle_nn::{AdamW, ModuleT, Optimizer, VarBuilder, VarMap};
-
-struct VAE<Enc: EncoderModuleT, Dec: ModuleT> {
+pub struct Vae<'a, Enc: EncoderModuleT, Dec: DecoderModule> {
     pub encoder: Enc,
     pub decoder: Dec,
+    pub variable_map: &'a candle_nn::VarMap,
 }
 
-pub fn train_vae_in_memory<Enc, Dec>(
-    data: &Tensor,
-    enc: Enc,
-    dec: Dec,
-    dev: Device,
-    learning_rate: f32,
-) where
+pub trait VaeT<'a, Enc: EncoderModuleT, Dec: DecoderModule> {
+    /// Train the VAE model
+    /// * `data` - data loader
+    /// * `llik` - log likelihood function
+    /// * `train_config` - training configuration
+    fn train<DataL, LlikFn>(
+        &mut self,
+        data: DataL,
+        llik: &LlikFn,
+        train_config: TrainingConfig,
+    ) -> Result<()>
+    where
+        DataL: DataLoader,
+        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>;
+
+    /// Build a VAE model
+    /// * `encoder` - encoder module
+    /// * `decoder` - decoder module
+    fn build(encoder: Enc, decoder: Dec, variable_map: &'a candle_nn::VarMap) -> Self;
+}
+
+impl<'a, Enc, Dec> VaeT<'a, Enc, Dec> for Vae<'a, Enc, Dec>
+where
     Enc: EncoderModuleT,
-    Dec: ModuleT,
+    Dec: DecoderModule,
 {
+    fn train<DataL, LlikFn>(
+        &mut self,
+        data: DataL,
+        llik: &LlikFn,
+        train_config: TrainingConfig,
+    ) -> Result<()>
+    where
+        DataL: DataLoader,
+        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
+    {
+        let device = train_config.device;
 
-    let vm = VarMap::new();
-    let vs = VarBuilder::from_varmap(&vm, DType::F32, &dev);
+        let mut adam = AdamW::new_lr(
+            self.variable_map.all_vars(),
+            train_config.learning_rate.into(),
+        )?;
 
-    let vae = VAE {
-        encoder: enc,
-        decoder: dec,
-    };
+        let pb = ProgressBar::new(train_config.num_epochs as u64);
+        for _ in 0..train_config.num_epochs {
+            for b in 0..data.num_minibatch() {
+                let x_nd = data.minibatch(b, &device)?;
+                let (z_nk, kl) = self.encoder.forward_t(&x_nd, true)?;
+                let (_, llik) = self.decoder.forward_with_llik(&z_nk, &x_nd, llik)?;
+                let loss = (kl - llik)?;
+                adam.backward_step(&loss)?;
+            }
+            pb.inc(1);
+        }
+	pb.finish_and_clear();
+        Ok(())
+    }
 
-    
+    fn build(encoder: Enc, decoder: Dec, variable_map: &'a candle_nn::VarMap) -> Self {
+        assert_eq!(encoder.dim_obs(), decoder.dim_obs());
+        assert_eq!(encoder.dim_latent(), decoder.dim_latent());
 
-    // let vm = VarMap::new();
-
-    // how should i handle data?
-
-    // todo: think about how to cancel out batch effects
+        Self {
+            encoder,
+            decoder,
+            variable_map,
+        }
+    }
 }
 
-// /////////////////////////
-// // Emedded Topic Model //
-// /////////////////////////
-
-// #[allow(dead_code)]
-// pub struct ETM {
-//     pub encoder: NonNegEncoder,
-//     pub decoder: ETMDecoder,
-// }
-
-// #[allow(dead_code)]
-// impl candle_nn::ModuleT for ETM {
-//     fn forward_t(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
-//         let z_nk = self.encoder.forward_t(x_nd, train)?;
-//         let logits_nd = self.decoder.forward_t(&z_nk, train)?;
-//         topic_likelihood(x_nd, &logits_nd)
-//     }
-// }
-
-// #[allow(dead_code)]
-// impl ETM {
-//     pub fn new(
-//         n_features: usize,
-//         n_topics: usize,
-//         enc_layers: &[usize],
-//         vs: VarBuilder,
-//     ) -> Result<Self> {
-//         let encoder = NonNegEncoder::new(n_features, n_topics, enc_layers, vs.clone())?;
-//         let decoder = ETMDecoder::new(n_features, n_topics, vs.clone())?;
-//         Ok(Self { encoder, decoder })
-//     }
-// }
+pub struct TrainingConfig {
+    pub learning_rate: f32,
+    pub batch_size: usize,
+    pub num_epochs: usize,
+    pub device: Device,
+}

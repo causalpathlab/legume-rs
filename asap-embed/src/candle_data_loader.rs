@@ -1,4 +1,4 @@
-use candle_core::{Device, Error, IndexOp, Result, Tensor};
+use candle_core::{Device, Error, Result, Tensor};
 use nalgebra::DMatrix;
 use ndarray::Array2;
 use rand::prelude::SliceRandom;
@@ -16,26 +16,46 @@ pub struct InMemoryData {
     batches: Vec<Vec<usize>>,
 }
 
-#[allow(dead_code)]
-impl InMemoryData {
-    pub fn minibatch(&self, batch_idx: usize, target_device: &Device) -> Result<Tensor> {
+pub trait DataLoader {
+    fn minibatch(&self, batch_idx: usize, target_device: &Device) -> Result<Tensor>;
+    fn num_minibatch(&self) -> usize;
+    fn size(&self) -> usize;
+}
+
+impl DataLoader for InMemoryData {
+    fn minibatch(&self, batch_idx: usize, target_device: &Device) -> Result<Tensor> {
         if let Some(samples) = self.batches.get(batch_idx) {
             let chunk: Vec<Tensor> = samples.into_iter().map(|&i| self.data[i].clone()).collect();
             Tensor::cat(&chunk, 0)?.to_device(target_device)
         } else {
-            Err(Error::Msg(format!("invalid batch index {}", batch_idx)))
+            Err(Error::Msg(format!(
+                "invalid index = {} vs. total # = {}",
+                batch_idx,
+                self.num_minibatch()
+            )))
         }
     }
 
+    fn num_minibatch(&self) -> usize {
+        self.batches.len()
+    }
+
+    fn size(&self) -> usize {
+        self.data.len()
+    }
+}
+
+#[allow(dead_code)]
+impl InMemoryData {
     pub fn shuffle_minibatch(&mut self, batch_size: usize) {
         use rand::distributions::{Distribution, Uniform};
 
         let mut rng = rand::thread_rng();
         self.rows.shuffle(&mut rng);
-        let nbatch = (self.len() + batch_size) / batch_size;
+        let nbatch = (self.size() + batch_size) / batch_size;
         let ntot = nbatch * batch_size;
 
-        let unif = Uniform::new(0, self.len());
+        let unif = Uniform::new(0, self.size());
 
         let indexes = (0..ntot)
             .into_par_iter()
@@ -50,14 +70,6 @@ impl InMemoryData {
                 (lb..ub).map(|i| indexes[i]).collect()
             })
             .collect::<Vec<Vec<usize>>>();
-    }
-
-    pub fn num_minibatch(&self) -> usize {
-        self.batches.len()
-    }
-
-    pub fn len(&self) -> usize {
-        self.data.len()
     }
 
     pub fn from_tensor(data: &Tensor) -> Result<Self> {
