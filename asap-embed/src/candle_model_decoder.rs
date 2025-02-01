@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Module, VarBuilder};
 
@@ -23,6 +25,10 @@ pub trait DecoderModule {
     fn dim_latent(&self) -> usize;
 }
 
+////////////////////////////////
+// Linear module with Softmax //
+////////////////////////////////
+
 pub struct SoftmaxLinear {
     weight: Tensor,
 }
@@ -44,8 +50,8 @@ impl Module for SoftmaxLinear {
             _ => self.weight.t()?,
         };
 
-        let d = w.dims().len();
-        let logit_w = ops::log_softmax(&w, d - 1)?;
+	// note: this is K x D
+        let logit_w = ops::log_softmax(&w, 0)?;
         x.matmul(&logit_w.exp()?)
     }
 }
@@ -60,30 +66,34 @@ pub fn softmax_linear(
     Ok(SoftmaxLinear::new(ws))
 }
 
-#[allow(dead_code)]
-pub struct ETMDecoder {
+/////////////////////////
+// Topic Model Decoder //
+/////////////////////////
+
+pub struct TopicDecoder {
     n_features: usize,
     n_topics: usize,
-    beta: SoftmaxLinear,
+    dictionary: SoftmaxLinear,
 }
 
-#[allow(dead_code)]
-impl ETMDecoder {
+impl TopicDecoder {
+    /// Will create a new ETM decoder with the following parameters:
+    /// * `dictionary.weight`
     pub fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
-        let beta = softmax_linear(n_topics, n_features, vs.pp("dec.beta"))?;
+        let dictionary = softmax_linear(n_topics, n_features, vs.pp("dictionary"))?;
         Ok(Self {
             n_features,
             n_topics,
-            beta,
+            dictionary,
         })
     }
 }
 
-impl DecoderModule for ETMDecoder {
+impl DecoderModule for TopicDecoder {
     fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
         let theta_nk = z_nk.exp()?;
-        let hat_nd = self.beta.forward(&theta_nk)?;
-        Ok(ops::log_softmax(&hat_nd, 1)?)
+        let prob_nd = self.dictionary.forward(&theta_nk)?;
+        ops::log_softmax(&prob_nd.log()?, 1)
     }
 
     fn forward_with_llik<LlikFn>(
@@ -95,11 +105,9 @@ impl DecoderModule for ETMDecoder {
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
-        let theta_nk = z_nk.exp()?;
-        let beta_kd = self.beta.forward(&theta_nk)?;
-        let x_hat_nd = ops::softmax(&beta_kd, 1)?;
-        let llik = llik(x_nd, &x_hat_nd)?;
-        Ok((x_hat_nd, llik))
+        let logits_nd = self.forward(z_nk)?;
+        let llik = llik(x_nd, &logits_nd)?;
+        Ok((logits_nd, llik))
     }
 
     fn dim_obs(&self) -> usize {
@@ -110,3 +118,9 @@ impl DecoderModule for ETMDecoder {
         self.n_topics
     }
 }
+
+////////////////////////////////////////
+// Topic Model with negative features //
+////////////////////////////////////////
+
+// pub struct 

@@ -8,9 +8,9 @@ use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::Inference;
 use matrix_param::traits::*;
 use matrix_util::dmatrix_rsvd::RSVD;
-use nalgebra_sparse::CscMatrix;
 use matrix_util::traits::*;
 use matrix_util::utils::partition_by_membership;
+use nalgebra_sparse::CscMatrix;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -37,7 +37,7 @@ pub trait CollapsingOps {
     fn collapse_columns(
         &self,
         cells_per_group: Option<usize>,
-        reference: Option<Box<str>>,
+        references: Option<Vec<Box<str>>>,
         knn: Option<usize>,
         num_opt_iter: Option<usize>,
     ) -> anyhow::Result<CollapsingOut>;
@@ -94,7 +94,7 @@ impl CollapsingOps for SparseIoVec {
     fn collapse_columns(
         &self,
         ncols_per_group: Option<usize>,
-        reference: Option<Box<str>>,
+        references: Option<Vec<Box<str>>>,
         knn: Option<usize>,
         num_opt_iter: Option<usize>,
     ) -> anyhow::Result<CollapsingOut> {
@@ -111,9 +111,6 @@ impl CollapsingOps for SparseIoVec {
         let num_batches = self.num_batches();
 
         let mut stat = CollapsingStat::new(num_features, num_groups, num_batches);
-        // (&mut stat).clear();
-        // let arc_stat = Arc::new(Mutex::new(&mut stat));
-
         info!("basic statistics across {} samples", num_groups);
         self.collect_basic_stat(&group_to_cols, &mut stat);
 
@@ -136,17 +133,18 @@ impl CollapsingOps for SparseIoVec {
                 .batch_name_map()
                 .ok_or(anyhow::anyhow!("batch names are not registered"))?;
 
-            let reference_batches = match reference {
-                Some(ref_name) => {
-                    if let Some(ref_idx) = batch_name_map.get(&ref_name) {
-                        vec![*ref_idx]
-                    } else {
-                        warn!(
-                            "reference batch {} not found; so, use all the {} batches",
-                            ref_name, num_batches
-                        );
-                        (0..num_batches).collect()
+            let reference_batches = match references {
+                Some(ref_names) => {
+                    let mut idx = vec![];
+                    for ref_name in &ref_names {
+                        if let Some(ref_idx) = batch_name_map.get(ref_name) {
+                            idx.push(*ref_idx);
+                        }
                     }
+                    if idx.len() == 0 {
+                        idx.extend(0..num_batches);
+                    }
+		    idx
                 }
                 None => {
                     warn!("using all the {} batches... (could be slow)", num_batches);

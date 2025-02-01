@@ -10,12 +10,16 @@ mod random_projection;
 
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
-use asap_embed::candle_data_loader::InMemoryData;
+use candle_data_loader::{InMemoryData, SparseIoVecData};
 use candle_inference::*;
+use candle_loss_functions::topic_likelihood;
+use candle_model_decoder::TopicDecoder;
+use candle_model_encoder::NonNegEncoder;
 use clap::{Parser, ValueEnum};
 use collapse_data::CollapsingOps;
 use log::info;
 use matrix_param::traits::Inference;
+// use matrix_param::traits::Inference;
 use matrix_util::common_io::{extension, read_lines};
 use matrix_util::traits::*;
 use random_projection::RandProjOps;
@@ -46,7 +50,7 @@ struct EmbedArgs {
     data_files: Vec<Box<str>>,
 
     /// Random projection dimension to project the data.
-    #[arg(long, short, required = true)]
+    #[arg(long, short, default_value_t = 30)]
     proj_dim: usize,
 
     /// Output header
@@ -57,14 +61,14 @@ struct EmbedArgs {
     #[arg(long, short, default_value_t = 10)]
     sort_dim: usize,
 
-    /// Batch membership files. Each bach file should correspond to
-    /// each data file.
+    /// Batch membership files (comma-separated names). Each bach file
+    /// should correspond to each data file.
     #[arg(long, short)]
     batch_files: Option<Vec<Box<str>>>,
 
-    /// Reference batch name
-    #[arg(long, short)]
-    reference_batch: Option<Box<str>>,
+    /// Reference batch name (comma-separated names)
+    #[arg(long)]
+    reference_batch: Option<Vec<Box<str>>>,
 
     /// #k-nearest neighbours within each batch
     #[arg(long, short, default_value_t = 10)]
@@ -84,21 +88,38 @@ struct EmbedArgs {
     block_size: usize,
 
     /// Number of latent topics
-    #[arg(long, default_value_t = 10)]
+    #[arg(short, long, default_value_t = 10)]
     latent_topics: usize,
 
-    /// ETM encoder layers
+    /// Encoder layers
     #[arg(long, default_values_t = vec![128,16])]
-    etm_layers: Vec<usize>,
+    encoder_layers: Vec<usize>,
+
+    #[arg(long, default_value_t = 1000)]
+    epochs: usize,
+
+    #[arg(long, default_value_t = 100)]
+    minibatch_size: usize,
+
+    #[arg(long, default_value_t = 1e-3)]
+    learning_rate: f32,
 
     /// Candle device
-    #[arg(value_enum, default_value = "cpu")]
+    #[arg(long, value_enum, default_value = "cpu")]
     device: ComputeDevice,
+
+    /// verbosity
+    #[arg(long, short, default_value_t = true)]
+    verbose: bool,
 }
 
 fn main() -> anyhow::Result<()> {
-    env_logger::init();
     let args = EmbedArgs::parse();
+
+    if args.verbose {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
 
     info!("Reading data files...");
     let (mut data_vec, batch_membership) = read_data_vec_membership(args.clone())?;
@@ -115,7 +136,6 @@ fn main() -> anyhow::Result<()> {
     proj_kn
         .transpose()
         .to_tsv(&(args.out.to_string() + ".proj.gz"))?;
-
     info!("Assigning {} columns to samples...", proj_kn.ncols());
 
     let nsamp = data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim))?;
@@ -135,37 +155,9 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     // 4. Train embedded topic model
-    let dev = match args.device {
-        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
-        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
-        _ => candle_core::Device::Cpu,
-    };
+    let (enc, dec, llik) = fit_topic_model(&collapse_out.mu.posterior_mean(), &args)?;
 
-    let train_cofig = candle_inference::TrainingConfig {
-        learning_rate: 1e-3,
-        batch_size: 10,
-        num_epochs: 100,
-        device: dev,
-        verbose: true,
-    };
-
-    let parameters = candle_nn::VarMap::new();
-    let param_builder = candle_nn::VarBuilder::from_varmap(
-        &parameters,
-        candle_core::DType::F32,
-        &train_cofig.device,
-    );
-
-    {
-        let x_nd = collapse_out.mu.posterior_mean().transpose();
-        let (nn, dd) = x_nd.shape();
-        let data = data_loader(&x_nd)?;
-        let kk = args.latent_topics;
-        let layers = args.etm_layers;
-        let enc = candle_model_encoder::NonNegEncoder::new(dd, kk, &layers, param_builder.clone())?;
-        let dec = candle_model_decoder::ETMDecoder::new(dd, kk, param_builder.clone())?;
-        let vae = candle_inference::Vae::build(enc, dec, &parameters);
-    }
+    // 5. Revisit the data to recover latent states
 
     // info!("writing down the results...");
     // ret.mu.write_tsv(&(args.out.to_string() + ".mu"))?;
@@ -182,8 +174,49 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn data_loader(data_dn: &DMatrix<f32>) -> candle_core::Result<InMemoryData> {
-    InMemoryData::from_dmatrix(&data_dn)
+fn fit_topic_model(
+    data_dn: &DMatrix<f32>,
+    args: &EmbedArgs,
+) -> anyhow::Result<(NonNegEncoder, TopicDecoder, Vec<f32>)> {
+    let dev = match args.device {
+        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
+        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
+        _ => candle_core::Device::Cpu,
+    };
+
+    let train_config = candle_inference::TrainingConfig {
+        learning_rate: args.learning_rate,
+        batch_size: args.minibatch_size,
+        num_epochs: args.epochs,
+        device: dev,
+        verbose: args.verbose,
+    };
+
+    let parameters = candle_nn::VarMap::new();
+    let param_builder = candle_nn::VarBuilder::from_varmap(
+        &parameters,
+        candle_core::DType::F32,
+        &train_config.device,
+    );
+
+    let x_nd = data_dn.transpose();
+    let mut data_loader = InMemoryData::from_dmatrix(&x_nd)?;
+    let (_, dd) = x_nd.shape();
+
+    let kk = args.latent_topics;
+
+    info!("Estimate {} topics", kk);
+    let enc = NonNegEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
+    let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
+
+    info!("Combined encoder and decoder");
+    let mut vae = candle_inference::Vae::build(&enc, &dec, &parameters);
+
+    info!("Start training...");
+    let llik = vae.train(&mut data_loader, &topic_likelihood, &train_config)?;
+    info!("End training {} epochs", train_config.num_epochs);
+
+    Ok((enc, dec, llik))
 }
 
 fn read_data_vec_membership(args: EmbedArgs) -> anyhow::Result<(SparseIoVec, Vec<Box<str>>)> {
