@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
 use std::ffi::OsStr;
@@ -11,7 +12,6 @@ use tempfile::tempdir;
 ///
 /// * `input_file` - file name--either gzipped or not
 ///
-#[allow(dead_code)]
 pub fn read_lines(input_file: &str) -> anyhow::Result<Vec<Box<str>>> {
     let buf: Box<dyn BufRead> = open_buf_reader(input_file)?;
     let mut lines = vec![];
@@ -27,7 +27,6 @@ pub fn read_lines(input_file: &str) -> anyhow::Result<Vec<Box<str>>> {
 /// * `lines` - vector of lines
 /// * `output_file` - file name--either gzipped or not
 ///
-#[allow(dead_code)]
 pub fn write_lines(lines: &Vec<Box<str>>, output_file: &str) -> anyhow::Result<()> {
     let mut buf: Box<dyn Write> = open_buf_writer(output_file)?;
     for l in lines {
@@ -43,7 +42,83 @@ pub fn write_lines(lines: &Vec<Box<str>>, output_file: &str) -> anyhow::Result<(
 /// * `input_file` - file name--either gzipped or not
 /// * `hdr_line` - location of a header line (-1 = no header line)
 ///
-#[allow(dead_code)]
+pub fn read_lines_of_types<T>(
+    input_file: &str,
+    hdr_line: i64,
+) -> anyhow::Result<(Vec<Vec<T>>, Vec<Box<str>>)>
+where
+    T: Send + std::str::FromStr + std::fmt::Display,
+    <T as std::str::FromStr>::Err: std::fmt::Debug,
+{
+    let buf_reader: Box<dyn BufRead> = open_buf_reader(input_file)?;
+
+    fn parse<T>(i: usize, line: &String) -> (usize, Vec<T>)
+    where
+        T: std::str::FromStr,
+        <T as std::str::FromStr>::Err: std::fmt::Debug,
+    {
+        (
+            i,
+            line.split_whitespace()
+                .map(|x| x.parse::<T>().expect("failed to parse"))
+                .collect(),
+        )
+    }
+
+    fn is_not_comment_line(line: &String) -> bool {
+        if line.starts_with('#') || line.starts_with('%') {
+            return false;
+        }
+        true
+    }
+
+    let lines_raw: Vec<String> = buf_reader
+        .lines()
+        .filter_map(|r| r.ok())
+        .filter(is_not_comment_line)
+        .collect();
+
+    let mut hdr: Vec<Box<str>> = vec![];
+
+    // parsing takes more time, so split them into parallel jobs
+    // note: this will not make things sorted
+    let mut lines: Vec<(usize, Vec<T>)> = if hdr_line < 0 {
+        lines_raw
+            .iter()
+            .enumerate()
+            .par_bridge()
+            .map(|(i, s)| parse(i, s))
+            .collect()
+    } else {
+        let n_skip = hdr_line as usize;
+        if lines_raw.len() < (n_skip + 1) {
+            return Err(anyhow::anyhow!("not enough data"));
+        }
+        hdr.extend(
+            lines_raw[n_skip]
+                .split_whitespace()
+                .map(|x| x.to_owned().into_boxed_str()),
+        );
+
+        lines_raw[(n_skip + 1)..]
+            .iter()
+            .enumerate()
+            .par_bridge()
+            .map(|(i, s)| parse(i, s))
+            .collect()
+    };
+
+    lines.sort_by_key(|&(i, _)| i);
+    let lines = lines.into_iter().map(|(_, x)| x).collect();
+    Ok((lines, hdr))
+}
+
+/// Read in each line by line, then parse each line into a vector or
+/// words.
+///
+/// * `input_file` - file name--either gzipped or not
+/// * `hdr_line` - location of a header line (-1 = no header line)
+///
 pub fn read_lines_of_words(
     input_file: &str,
     hdr_line: i64,
@@ -72,13 +147,11 @@ pub fn read_lines_of_words(
         .filter(is_not_comment_line)
         .collect();
 
-    let n_skip;
-    let hdr;
+    let mut hdr = vec![];
 
     // parsing takes more time, so split them into parallel jobs
     // note: this will not make things sorted
     let mut lines: Vec<(usize, Vec<Box<str>>)> = if hdr_line < 0 {
-        hdr = Vec::<Box<str>>::new();
         lines_raw
             .iter()
             .enumerate()
@@ -86,11 +159,11 @@ pub fn read_lines_of_words(
             .map(|(i, s)| parse(i, s))
             .collect()
     } else {
-        n_skip = hdr_line as usize;
+        let n_skip = hdr_line as usize;
         if lines_raw.len() < (n_skip + 1) {
             return Err(anyhow::anyhow!("not enough data"));
         }
-        hdr = parse(0, &lines_raw[n_skip]).1;
+        hdr.extend(parse(0, &lines_raw[n_skip]).1);
         lines_raw[(n_skip + 1)..]
             .iter()
             .enumerate()
@@ -104,7 +177,6 @@ pub fn read_lines_of_words(
     Ok((lines, hdr))
 }
 
-#[allow(dead_code)]
 /// Open a file for reading, and return a buffered reader
 /// * `input_file` - file name--either gzipped or not
 pub fn open_buf_reader(input_file: &str) -> anyhow::Result<Box<dyn BufRead>> {
@@ -126,7 +198,6 @@ pub fn open_buf_reader(input_file: &str) -> anyhow::Result<Box<dyn BufRead>> {
     }
 }
 
-#[allow(dead_code)]
 /// Open a file for writing, and return a buffered writer
 /// * `output_file` - file name--either gzipped or not
 pub fn open_buf_writer(output_file: &str) -> anyhow::Result<Box<dyn std::io::Write>> {
@@ -146,7 +217,6 @@ pub fn open_buf_writer(output_file: &str) -> anyhow::Result<Box<dyn std::io::Wri
     }
 }
 
-#[allow(dead_code)]
 /// Create a directory if needed
 /// * `file` - file name
 pub fn mkdir(file: &str) -> anyhow::Result<()> {
@@ -178,7 +248,6 @@ impl ToStr for OsStr {
     }
 }
 
-#[allow(dead_code)]
 /// Take the basename of a file
 /// * `file` - file name
 pub fn dir_base_ext(file: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<str>)> {
@@ -192,7 +261,6 @@ pub fn dir_base_ext(file: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<str>)
     }
 }
 
-#[allow(dead_code)]
 /// Take the basename of a file
 /// * `file` - file name
 pub fn basename(file: &str) -> anyhow::Result<Box<str>> {
@@ -204,7 +272,6 @@ pub fn basename(file: &str) -> anyhow::Result<Box<str>> {
     }
 }
 
-#[allow(dead_code)]
 /// Take the extension of a file
 /// * `file` - file name
 pub fn extension(file: &str) -> anyhow::Result<Box<str>> {
@@ -216,7 +283,6 @@ pub fn extension(file: &str) -> anyhow::Result<Box<str>> {
     }
 }
 
-#[allow(dead_code)]
 /// Create a temporary directory and suggest a file name
 /// * `suffix` - suffix of the file name
 pub fn create_temp_dir_file(suffix: &str) -> anyhow::Result<std::path::PathBuf> {
@@ -231,7 +297,6 @@ pub fn create_temp_dir_file(suffix: &str) -> anyhow::Result<std::path::PathBuf> 
     Ok(temp_file)
 }
 
-#[allow(dead_code)]
 /// Remove a file if it exists
 /// * `file` - file name
 pub fn remove_file(file: &str) -> anyhow::Result<()> {
@@ -246,7 +311,6 @@ pub fn remove_file(file: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 /// Remove a file if it exists
 /// * `files` - file name
 pub fn remove_all_files(files: &Vec<Box<str>>) -> anyhow::Result<()> {
