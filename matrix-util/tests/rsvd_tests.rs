@@ -1,9 +1,8 @@
 #[test]
 fn dmatrix_rsvd_test() -> anyhow::Result<()> {
     use matrix_util::dmatrix_rsvd::RSVD;
-    use matrix_util::dmatrix_util::*;
 
-    let mut xx = DMatrix::<f32>::zeros(8, 8);
+    let mut xx = nalgebra::DMatrix::<f32>::zeros(8, 8);
     xx.fill_with_identity();
 
     dbg!(&xx);
@@ -21,9 +20,8 @@ fn dmatrix_rsvd_test() -> anyhow::Result<()> {
 #[test]
 fn ndarray_rsvd_test() -> anyhow::Result<()> {
     use matrix_util::ndarray_rsvd::RSVD;
-    use matrix_util::ndarray_util::*;
 
-    let xx = Array2::<f32>::eye(8);
+    let xx = ndarray::Array2::<f32>::eye(8);
     dbg!(&xx);
 
     let svd = xx.rsvd(3)?;

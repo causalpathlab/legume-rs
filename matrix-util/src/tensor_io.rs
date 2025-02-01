@@ -1,29 +1,53 @@
-use crate::common_io::write_lines;
-use candle_core::Tensor;
+use crate::common_io::{read_lines_of_types, write_lines};
+use crate::traits::IoOps;
+use candle_core::{Device, Tensor};
 
-#[allow(dead_code)]
-pub fn write_tsv(file: &str, data: &Tensor) -> anyhow::Result<()> {
-    let dims = data.dims();
+impl IoOps for Tensor {
+    type Scalar = f32;
+    type Mat = Self;
 
-    if dims.len() != 2 {
-        return Err(anyhow::anyhow!("Expected 2 dimensions, got {}", dims.len()));
+    fn from_tsv(tsv_file: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat> {
+        let hdr_line = match skip {
+            Some(skip) => skip as i64,
+            None => -1, // no skipping
+        };
+
+        let (data, _) = read_lines_of_types::<f32>(tsv_file, hdr_line)?;
+
+        if data.len() == 0 {
+            return Err(anyhow::anyhow!("No data in file"));
+        }
+
+        let nrows = data[0].len();
+        let ncols = data.len();
+        let data = data.into_iter().flatten().collect::<Vec<_>>();
+
+        Ok(Tensor::from_vec(data, (nrows, ncols), &Device::Cpu)?)
     }
 
-    let lines: Vec<Box<str>> = (0..dims[0])
-        .map(|i| {
-            let row = data.narrow(0, i, 1).expect("failed to narrow in");
-            let flatten_row = row.flatten_to(1).expect("flatten");
-            let row_vec = flatten_row.to_vec1::<f32>().expect("to_vec1");
-            row_vec
-                .iter()
-                .map(|&x| format!("{}", x))
-                .collect::<Vec<_>>()
-                .join("\t")
-                .into_boxed_str()
-        })
-        .collect();
+    fn to_tsv(&self, tsv_file: &str) -> anyhow::Result<()> {
+        let dims = self.dims();
 
-    write_lines(&lines, &file)?;
+        if dims.len() != 2 {
+            return Err(anyhow::anyhow!("Expected 2 dimensions, got {}", dims.len()));
+        }
 
-    Ok(())
+        let lines: Vec<Box<str>> = (0..dims[0])
+            .map(|i| {
+                let row = self.narrow(0, i, 1).expect("failed to narrow in");
+                let flatten_row = row.flatten_to(1).expect("flatten");
+                let row_vec = flatten_row.to_vec1::<f32>().expect("to_vec1");
+                row_vec
+                    .iter()
+                    .map(|&x| format!("{}", x))
+                    .collect::<Vec<_>>()
+                    .join("\t")
+                    .into_boxed_str()
+            })
+            .collect();
+
+        write_lines(&lines, &tsv_file)?;
+
+        Ok(())
+    }
 }

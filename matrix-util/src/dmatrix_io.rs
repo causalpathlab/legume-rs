@@ -1,4 +1,4 @@
-use crate::common_io::{read_lines_of_words, write_lines};
+use crate::common_io::{read_lines_of_types, write_lines};
 use crate::traits::*;
 pub use nalgebra::{DMatrix, DVector};
 pub use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
@@ -20,37 +20,15 @@ where
             None => -1, // no skipping
         };
 
-        let (lines_of_words, _) = read_lines_of_words(tsv_file, hdr_line)?;
+        let (data, _) = read_lines_of_types::<T>(tsv_file, hdr_line)?;
 
-        if lines_of_words.len() == 0 {
+        if data.len() == 0 {
             return Err(anyhow::anyhow!("No data in file"));
         }
 
-        let nrows = lines_of_words[0].len();
-        let ncols = lines_of_words.len();
-
-        let mut data = lines_of_words
-            .iter()
-            .enumerate()
-            .par_bridge()
-            .map(|(i, words)| {
-                (
-                    i,
-                    words
-                        .iter()
-                        .map(|v| v.parse::<T>().expect(""))
-                        .collect::<Vec<T>>(),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        data.sort_by_key(|&(i, _)| i);
-
-        let data = data
-            .into_iter()
-            .map(|(_, x)| x)
-            .flatten()
-            .collect::<Vec<_>>();
+        let nrows = data[0].len();
+        let ncols = data.len();
+        let data = data.into_iter().flatten().collect::<Vec<_>>();
 
         Ok(DMatrix::<T>::from_row_iterator(
             nrows,
