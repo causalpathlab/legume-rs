@@ -8,8 +8,8 @@ use indicatif::{ProgressBar, ProgressDrawTarget};
 use log::info;
 
 pub struct Vae<'a, Enc: EncoderModuleT, Dec: DecoderModule> {
-    pub encoder: Enc,
-    pub decoder: Dec,
+    pub encoder: &'a Enc,
+    pub decoder: &'a Dec,
     pub variable_map: &'a candle_nn::VarMap,
 }
 
@@ -22,7 +22,7 @@ pub trait VaeT<'a, Enc: EncoderModuleT, Dec: DecoderModule> {
         &mut self,
         data: &mut DataL,
         llik: &LlikFn,
-        train_config: TrainingConfig,
+        train_config: &TrainingConfig,
     ) -> anyhow::Result<Vec<f32>>
     where
         DataL: DataLoader,
@@ -31,7 +31,7 @@ pub trait VaeT<'a, Enc: EncoderModuleT, Dec: DecoderModule> {
     /// Build a VAE model
     /// * `encoder` - encoder module
     /// * `decoder` - decoder module
-    fn build(encoder: Enc, decoder: Dec, variable_map: &'a candle_nn::VarMap) -> Self;
+    fn build(encoder: &'a Enc, decoder: &'a Dec, variable_map: &'a candle_nn::VarMap) -> Self;
 }
 
 impl<'a, Enc, Dec> VaeT<'a, Enc, Dec> for Vae<'a, Enc, Dec>
@@ -43,13 +43,13 @@ where
         &mut self,
         data: &mut DataL,
         llik_func: &LlikFn,
-        train_config: TrainingConfig,
+        train_config: &TrainingConfig,
     ) -> anyhow::Result<Vec<f32>>
     where
         DataL: DataLoader,
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
-        let device = train_config.device;
+        let device = &train_config.device;
         data.shuffle_minibatch(train_config.batch_size);
 
         let mut adam = AdamW::new_lr(
@@ -90,7 +90,7 @@ where
         Ok(llik_trace)
     }
 
-    fn build(encoder: Enc, decoder: Dec, variable_map: &'a candle_nn::VarMap) -> Self {
+    fn build(encoder: &'a Enc, decoder: &'a Dec, variable_map: &'a candle_nn::VarMap) -> Self {
         assert_eq!(encoder.dim_obs(), decoder.dim_obs());
         assert_eq!(encoder.dim_latent(), decoder.dim_latent());
 

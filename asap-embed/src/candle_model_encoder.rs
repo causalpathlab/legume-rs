@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::candle_loss_functions::gaussian_kl_loss;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, sequential, BatchNorm, Linear, ModuleT, Sequential, VarBuilder};
@@ -76,6 +78,12 @@ impl NonNegEncoder {
         }
     }
 
+    /// Will create a new non-negative encoder module
+    /// with these variables:
+    ///
+    /// * `nn.enc.fc.{}.weight` where {} is the layer index
+    /// * `nn.enc.z.mean.weight`
+    /// * `nn.enc.z.lnvar.weight`
     pub fn new(
         n_features: usize,
         n_topics: usize,
@@ -89,7 +97,7 @@ impl NonNegEncoder {
             affine: true,
             momentum: 0.1,
         };
-        let bn = candle_nn::batch_norm(n_features, config, vs.pp("enc.bn"))?;
+        let bn = candle_nn::batch_norm(n_features, config, vs.pp("nn.enc.bn"))?;
 
         // (1) data -> fc
         let mut fc = sequential::seq();
@@ -98,14 +106,15 @@ impl NonNegEncoder {
             fc = fc.add(candle_nn::linear(
                 prev_dim,
                 next_dim,
-                vs.pp(format!("enc.fc.{}", j)),
+                vs.pp(format!("nn.enc.fc.{}", j)),
             )?);
+            fc = fc.add(candle_nn::Activation::Relu);
             prev_dim = next_dim;
         }
 
         // (2) fc -> K
-        let z_mean = candle_nn::linear(prev_dim, n_topics, vs.pp("enc.z.mean"))?;
-        let z_lnvar = candle_nn::linear(prev_dim, n_topics, vs.pp("enc.z.lnvar"))?;
+        let z_mean = candle_nn::linear(prev_dim, n_topics, vs.pp("nn.enc.z.mean"))?;
+        let z_lnvar = candle_nn::linear(prev_dim, n_topics, vs.pp("nn.enc.z.lnvar"))?;
 
         Ok(Self {
             n_features,
