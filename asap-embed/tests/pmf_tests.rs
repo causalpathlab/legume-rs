@@ -48,7 +48,7 @@ fn pmf() -> anyhow::Result<()> {
     let _llik = vae.train(
         &mut data_loader,
         &topic_likelihood,
-        &TrainingConfig {
+        &TrainConfig {
             learning_rate: 5e-3,
             batch_size: 100,
             num_epochs: 1000,

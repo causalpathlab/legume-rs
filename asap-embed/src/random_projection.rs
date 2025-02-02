@@ -74,7 +74,7 @@ impl RandProjOps for SparseIoVec {
         let nrows = self.num_rows()?;
         let ncols = self.num_columns()?;
         let block_size = block_size.unwrap_or(DEFAULT_BLOCK_SIZE);
-        let jobs = create_jobs(block_size, ncols);
+        let jobs = create_jobs(ncols, block_size);
 
         let mut proj_kn = Mat::zeros(target_dim, ncols);
         let arc_proj_kn = Arc::new(Mutex::new(&mut proj_kn));
@@ -114,7 +114,7 @@ impl RandProjOps for SparseIoVec {
         let nrows = self.num_rows()?;
         let ncols = self.num_columns()?;
         let block_size = block_size.unwrap_or(DEFAULT_BLOCK_SIZE);
-        let jobs = create_jobs(block_size, ncols);
+        let jobs = create_jobs(ncols, block_size);
 
         let mut proj_kd = Mat::zeros(target_dim, nrows);
 

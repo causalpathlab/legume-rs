@@ -22,7 +22,7 @@ pub trait VaeT<'a, Enc: EncoderModuleT, Dec: DecoderModule> {
         &mut self,
         data: &mut DataL,
         llik: &LlikFn,
-        train_config: &TrainingConfig,
+        train_config: &TrainConfig,
     ) -> anyhow::Result<Vec<f32>>
     where
         DataL: DataLoader,
@@ -43,7 +43,7 @@ where
         &mut self,
         data: &mut DataL,
         llik_func: &LlikFn,
-        train_config: &TrainingConfig,
+        train_config: &TrainConfig,
     ) -> anyhow::Result<Vec<f32>>
     where
         DataL: DataLoader,
@@ -81,7 +81,7 @@ where
             if train_config.verbose {
                 info!(
                     "[{}] log-likelihood: {}",
-                    _epoch,
+                    _epoch + 1,
                     llik_trace.last().ok_or(anyhow::anyhow!("llik"))?
                 );
             }
@@ -102,7 +102,7 @@ where
     }
 }
 
-pub struct TrainingConfig {
+pub struct TrainConfig {
     pub learning_rate: f32,
     pub batch_size: usize,
     pub num_epochs: usize,

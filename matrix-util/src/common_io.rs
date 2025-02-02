@@ -1,4 +1,5 @@
-#[allow(dead_code)]
+#![allow(dead_code)]
+
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
 use std::ffi::OsStr;
@@ -36,6 +37,7 @@ pub fn write_lines(lines: &Vec<Box<str>>, output_file: &str) -> anyhow::Result<(
     Ok(())
 }
 
+///
 /// Read in each line by line, then parse each line into a vector or
 /// words.
 ///
@@ -113,6 +115,7 @@ where
     Ok((lines, hdr))
 }
 
+///
 /// Read in each line by line, then parse each line into a vector or
 /// words.
 ///
@@ -177,6 +180,7 @@ pub fn read_lines_of_words(
     Ok((lines, hdr))
 }
 
+///
 /// Open a file for reading, and return a buffered reader
 /// * `input_file` - file name--either gzipped or not
 pub fn open_buf_reader(input_file: &str) -> anyhow::Result<Box<dyn BufRead>> {
@@ -198,6 +202,7 @@ pub fn open_buf_reader(input_file: &str) -> anyhow::Result<Box<dyn BufRead>> {
     }
 }
 
+///
 /// Open a file for writing, and return a buffered writer
 /// * `output_file` - file name--either gzipped or not
 pub fn open_buf_writer(output_file: &str) -> anyhow::Result<Box<dyn std::io::Write>> {
@@ -217,8 +222,10 @@ pub fn open_buf_writer(output_file: &str) -> anyhow::Result<Box<dyn std::io::Wri
     }
 }
 
+///
 /// Create a directory if needed
 /// * `file` - file name
+///
 pub fn mkdir(file: &str) -> anyhow::Result<()> {
     let path = Path::new(file);
     let dir = path.parent().ok_or(anyhow::anyhow!("no parent"))?;
@@ -248,8 +255,10 @@ impl ToStr for OsStr {
     }
 }
 
+///
 /// Take the basename of a file
 /// * `file` - file name
+///
 pub fn dir_base_ext(file: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<str>)> {
     let path = Path::new(file);
 
@@ -261,8 +270,10 @@ pub fn dir_base_ext(file: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<str>)
     }
 }
 
+///
 /// Take the basename of a file
 /// * `file` - file name
+///
 pub fn basename(file: &str) -> anyhow::Result<Box<str>> {
     let path = Path::new(file);
     if let Some(base) = path.file_stem() {
@@ -272,8 +283,10 @@ pub fn basename(file: &str) -> anyhow::Result<Box<str>> {
     }
 }
 
+///
 /// Take the extension of a file
 /// * `file` - file name
+///
 pub fn extension(file: &str) -> anyhow::Result<Box<str>> {
     let path = Path::new(file);
     if let Some(ext) = path.extension() {
@@ -283,8 +296,10 @@ pub fn extension(file: &str) -> anyhow::Result<Box<str>> {
     }
 }
 
+///
 /// Create a temporary directory and suggest a file name
 /// * `suffix` - suffix of the file name
+///
 pub fn create_temp_dir_file(suffix: &str) -> anyhow::Result<std::path::PathBuf> {
     let temp_dir = tempdir()?.path().to_path_buf();
     std::fs::create_dir_all(&temp_dir)?;
@@ -297,8 +312,10 @@ pub fn create_temp_dir_file(suffix: &str) -> anyhow::Result<std::path::PathBuf> 
     Ok(temp_file)
 }
 
+///
 /// Remove a file if it exists
 /// * `file` - file name
+///
 pub fn remove_file(file: &str) -> anyhow::Result<()> {
     let path = Path::new(file);
     if path.exists() {
@@ -311,8 +328,10 @@ pub fn remove_file(file: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+///
 /// Remove a file if it exists
 /// * `files` - file name
+///
 pub fn remove_all_files(files: &Vec<Box<str>>) -> anyhow::Result<()> {
     for file in files {
         remove_file(&file)?;
