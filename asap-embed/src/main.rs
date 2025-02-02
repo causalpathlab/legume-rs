@@ -10,16 +10,18 @@ mod random_projection;
 
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
-use candle_data_loader::{InMemoryData, SparseIoVecData};
+use candle_data_loader::InMemoryData;
 use candle_inference::*;
 use candle_loss_functions::topic_likelihood;
 use candle_model_decoder::TopicDecoder;
+use candle_model_encoder::EncoderModuleT;
 use candle_model_encoder::NonNegEncoder;
 use clap::{Parser, ValueEnum};
 use collapse_data::CollapsingOps;
+use common::*;
+use indicatif::ProgressBar;
 use log::info;
 use matrix_param::traits::Inference;
-// use matrix_param::traits::Inference;
 use matrix_util::common_io::{extension, read_lines};
 use matrix_util::traits::*;
 use random_projection::RandProjOps;
@@ -142,8 +144,10 @@ fn main() -> anyhow::Result<()> {
     info!("at most {} samples are assigned", nsamp);
 
     // 2. Register batch membership
-    info!("Registering batch-specific information");
-    data_vec.register_batches(&proj_kn, &batch_membership)?;
+    if data_vec.num_batches() > 1 {
+        info!("Registering batch-specific information");
+        data_vec.register_batches(&proj_kn, &batch_membership)?;
+    }
 
     // 3. Collapsing columns
     info!("Collapsing columns... into {} samples", nsamp);
@@ -155,49 +159,74 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     // 4. Train embedded topic model
-    let (enc, dec, llik) = fit_topic_model(&collapse_out.mu.posterior_mean(), &args)?;
-
-    // 5. Revisit the data to recover latent states
-
-    // info!("writing down the results...");
-    // ret.mu.write_tsv(&(args.out.to_string() + ".mu"))?;
-
-    // if let Some(delta) = &ret.delta {
-    //     delta.write_tsv(&(args.out.to_string() + ".delta"))?;
-    // }
-
-    // if let Some(gamma) = &ret.gamma {
-    //     gamma.write_tsv(&(args.out.to_string() + ".gamma"))?;
-    // }
-
-    info!("done");
-    Ok(())
-}
-
-fn fit_topic_model(
-    data_dn: &DMatrix<f32>,
-    args: &EmbedArgs,
-) -> anyhow::Result<(NonNegEncoder, TopicDecoder, Vec<f32>)> {
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
         ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
         _ => candle_core::Device::Cpu,
     };
 
-    let train_config = candle_inference::TrainingConfig {
+    let train_config = candle_inference::TrainConfig {
         learning_rate: args.learning_rate,
         batch_size: args.minibatch_size,
         num_epochs: args.epochs,
-        device: dev,
+        device: dev.clone(),
         verbose: args.verbose,
     };
 
+    let (enc, _dec, llik) =
+        fit_topic_model(&collapse_out.mu.posterior_mean(), &args, &train_config)?;
+    let llik: Mat = Mat::from_row_iterator(llik.len(), 1, llik.into_iter());
+    llik.to_tsv(&(args.out.to_string() + ".llik.txt.gz"))?;
+
+    // 5. Revisit the data to recover latent states
+    info!("Encoding latent states for all...");
+    let z_nk = estimate_latent(&data_vec, &enc, &train_config)?;
+    z_nk.to_tsv(&(args.out.to_string() + ".logits.gz"))?;
+
+    info!("done");
+    Ok(())
+}
+
+fn estimate_latent(
+    data_vec: &SparseIoVec,
+    encoder: &NonNegEncoder,
+    train_config: &candle_inference::TrainConfig,
+) -> anyhow::Result<Tensor> {
+    let dev = &train_config.device;
+    let ntot = data_vec.num_columns()?;
+    let block_size = train_config.batch_size;
+
+    let jobs = create_jobs(ntot, block_size);
+    let njobs = jobs.len() as u64;
+
+    let pb = ProgressBar::new(njobs);
+
+    let mut chunks = vec![];
+
+    for &(lb, ub) in jobs.iter() {
+        if lb < ub {
+            let x_nd = data_vec
+                .read_columns_tensor(lb..ub)?
+                .transpose(0, 1)?
+                .to_device(&dev)?;
+            let (z_nk, _) = encoder.forward_t(&x_nd, false)?;
+            chunks.push(z_nk.to_device(&candle_core::Device::Cpu)?);
+        }
+        pb.inc(1);
+    }
+
+    Ok(Tensor::cat(&chunks, 0)?)
+}
+
+fn fit_topic_model(
+    data_dn: &DMatrix<f32>,
+    args: &EmbedArgs,
+    train_config: &candle_inference::TrainConfig,
+) -> anyhow::Result<(NonNegEncoder, TopicDecoder, Vec<f32>)> {
+    let dev = &train_config.device;
     let parameters = candle_nn::VarMap::new();
-    let param_builder = candle_nn::VarBuilder::from_varmap(
-        &parameters,
-        candle_core::DType::F32,
-        &train_config.device,
-    );
+    let param_builder =
+        candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
     let x_nd = data_dn.transpose();
     let mut data_loader = InMemoryData::from_dmatrix(&x_nd)?;

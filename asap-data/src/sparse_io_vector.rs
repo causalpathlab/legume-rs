@@ -237,6 +237,14 @@ impl SparseIoVec {
         nalgebra_sparse::CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
     }
 
+    pub fn read_columns_tensor<I>(&self, cells: I) -> anyhow::Result<Tensor>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let (nrow, ncol, triplets) = self.collect_columns_triplets(cells)?;
+        Ok(Tensor::from_nonzero_triplets(nrow, ncol, triplets)?)
+    }
+
     pub fn read_matched_columns_ndarray<I>(
         &self,
         cells: I,

@@ -1,4 +1,5 @@
-#[allow(dead_code)]
+#![allow(dead_code)]
+
 use asap_data::sparse_io_vector::*;
 use candle_core::{Device, Tensor};
 use matrix_util::traits::MatTriplets;
@@ -22,7 +23,6 @@ pub struct SparseIoVecData<'a> {
     minibatches: Minibatches,
 }
 
-#[allow(dead_code)]
 impl<'a> SparseIoVecData<'a> {
     pub fn new(data: &'a SparseIoVec) -> anyhow::Result<Self> {
         let samples = (0..data.num_columns()?).collect();

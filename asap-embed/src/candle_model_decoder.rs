@@ -50,7 +50,7 @@ impl Module for SoftmaxLinear {
             _ => self.weight.t()?,
         };
 
-	// note: this is K x D
+        // note: this is K x D
         let logit_w = ops::log_softmax(&w, 0)?;
         x.matmul(&logit_w.exp()?)
     }
@@ -123,4 +123,4 @@ impl DecoderModule for TopicDecoder {
 // Topic Model with negative features //
 ////////////////////////////////////////
 
-// pub struct 
+// pub struct

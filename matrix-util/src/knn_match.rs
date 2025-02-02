@@ -1,7 +1,7 @@
+use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
-use std::sync::{Arc, Mutex};
 
 /// A dictionary (HnswMap wrapper) for fast column look-up
 ///
@@ -99,17 +99,14 @@ where
             "Data and names must have the same length"
         );
 
-        let mut data_vec = vec![];
-        let arc_data_vec = Arc::new(Mutex::new(&mut data_vec));
-
-        (0..nn)
+        let mut idx_data_vec: Vec<(usize, VecPoint)> = (0..nn)
             .into_par_iter()
-            .for_each(|j| {
-                arc_data_vec
-                    .lock()
-                    .expect("unable to lock")
-                    .push(data[j].to_vp());
-            });
+            .progress_count(nn as u64)
+            .map(|j| (j, data[j].to_vp()))
+            .collect();
+
+        idx_data_vec.sort_by_key(|&(j, _)| j);
+        let data_vec: Vec<VecPoint> = idx_data_vec.into_iter().map(|(_, vp)| vp).collect();
 
         let mut name2index = HashMap::<T, usize>::new();
 
