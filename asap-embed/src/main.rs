@@ -111,7 +111,7 @@ struct EmbedArgs {
     device: ComputeDevice,
 
     /// verbosity
-    #[arg(long, short, default_value_t = true)]
+    #[arg(long, short)]
     verbose: bool,
 }
 
@@ -144,8 +144,8 @@ fn main() -> anyhow::Result<()> {
     info!("at most {} samples are assigned", nsamp);
 
     // 2. Register batch membership
-    if data_vec.num_batches() > 1 {
-        info!("Registering batch-specific information");
+    if args.batch_files.is_some() || batch_membership.len() > 0 {
+        info!("Registering batch information");
         data_vec.register_batches(&proj_kn, &batch_membership)?;
     }
 
@@ -157,6 +157,19 @@ fn main() -> anyhow::Result<()> {
         Some(args.knn),
         Some(args.iter_opt),
     )?;
+
+    collapse_out
+        .mu
+        .posterior_log_mean()
+        .to_tsv(&(args.out.to_string() + ".ln_mu.gz"))?;
+
+    if let Some(delta) = collapse_out.delta {
+        delta
+            .posterior_log_mean()
+            .to_tsv(&(args.out.to_string() + ".ln_delta.gz"))?;
+    }
+
+    info!("Wrote intermediate results");
 
     // 4. Train embedded topic model
     let dev = match args.device {
@@ -176,7 +189,7 @@ fn main() -> anyhow::Result<()> {
     let (enc, _dec, llik) =
         fit_topic_model(&collapse_out.mu.posterior_mean(), &args, &train_config)?;
     let llik: Mat = Mat::from_row_iterator(llik.len(), 1, llik.into_iter());
-    llik.to_tsv(&(args.out.to_string() + ".llik.txt.gz"))?;
+    llik.to_tsv(&(args.out.to_string() + ".llik.gz"))?;
 
     // 5. Revisit the data to recover latent states
     info!("Encoding latent states for all...");
