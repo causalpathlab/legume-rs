@@ -1,5 +1,3 @@
-use indicatif::ParallelProgressIterator;
-use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 
@@ -99,14 +97,7 @@ where
             "Data and names must have the same length"
         );
 
-        let mut idx_data_vec: Vec<(usize, VecPoint)> = (0..nn)
-            .into_par_iter()
-            .progress_count(nn as u64)
-            .map(|j| (j, data[j].to_vp()))
-            .collect();
-
-        idx_data_vec.sort_by_key(|&(j, _)| j);
-        let data_vec: Vec<VecPoint> = idx_data_vec.into_iter().map(|(_, vp)| vp).collect();
+        let data_vec: Vec<VecPoint> = (0..nn).into_iter().map(|j| data[j].to_vp()).collect();
 
         let mut name2index = HashMap::<T, usize>::new();
 
