@@ -48,9 +48,9 @@ impl EncoderModuleT for NonNegEncoder {
 
 impl NonNegEncoder {
     pub fn batch_norm_input(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
+        let eps = 1e-4;
         let x_log1p_nd = (x_nd + 1.)?.log()?;
-        x_log1p_nd.normalize_axis(-1)?;
-        let x_norm_nd = x_log1p_nd.broadcast_div(&x_log1p_nd.sum(0)?)?;
+        let x_norm_nd = x_log1p_nd.broadcast_div(&(x_log1p_nd.sum(0)? + eps)?)?;
         self.bn.forward_t(&x_norm_nd, train)
     }
 
@@ -94,7 +94,7 @@ impl NonNegEncoder {
         let config = candle_nn::BatchNormConfig {
             eps: 1e-4,
             remove_mean: true,
-            affine: true,
+            affine: false,
             momentum: 0.1,
         };
         let bn = candle_nn::batch_norm(n_features, config, vs.pp("nn.enc.bn"))?;
