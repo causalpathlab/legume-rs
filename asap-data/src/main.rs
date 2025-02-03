@@ -35,6 +35,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Squeeze(args) => {
             run_squeeze(args)?;
         }
+        Commands::Columns(args) => {
+            take_columns(args)?;
+        }
     }
 
     Ok(())
@@ -60,12 +63,32 @@ struct Cli {
 enum Commands {
     /// Build faster backend data from mtx
     Build(RunBuildArgs),
+    /// Take columns from the sparse matrix
+    Columns(TakeColumnsArgs),
     /// Filter out rows and columns (Q/C)
     Squeeze(RunSqueezeArgs),
     /// Take basic statistics from a sparse matrix
     Stat(RunStatArgs),
     /// Simulate a sparse matrix data
     Simulate(RunSimulateArgs),
+}
+
+#[derive(Args)]
+pub struct TakeColumnsArgs {
+    /// Data file -- either `.zarr` or `.h5`
+    data_file: Box<str>,
+
+    /// Column indices to take
+    #[arg(short, long)]
+    columns: Vec<usize>,
+
+    /// Output file
+    #[arg(short, long)]
+    output: Box<str>,
+
+    /// backend to use (`hdf5` or `zarr`)
+    #[arg(short, long, value_enum, default_value = "zarr")]
+    backend: SparseIoBackend,
 }
 
 #[derive(Args)]
@@ -164,6 +187,20 @@ pub struct RunSimulateArgs {
 /////////////////////
 // implementations //
 /////////////////////
+
+fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
+    use matrix_util::traits::IoOps;
+
+    let data_file = args.data_file.clone();
+    let columns = args.columns.clone();
+    let output = args.output.clone();
+    let backend = args.backend.clone();
+
+    let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
+    data.read_columns_ndarray(columns)?.to_tsv(&output)?;
+
+    Ok(())
+}
 
 fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
     use std::path::Path;

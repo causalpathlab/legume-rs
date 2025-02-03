@@ -186,15 +186,23 @@ fn main() -> anyhow::Result<()> {
         verbose: args.verbose,
     };
 
-    let (enc, _dec, llik) =
+    let (enc, dec, parameters, llik) =
         fit_topic_model(&collapse_out.mu.posterior_mean(), &args, &train_config)?;
     let llik: Mat = Mat::from_row_iterator(llik.len(), 1, llik.into_iter());
     llik.to_tsv(&(args.out.to_string() + ".llik.gz"))?;
 
+    dec.dictionary()
+        .weight()
+        .to_tsv(&(args.out.to_string() + ".logit_dict.gz"))?;
+
+    for var in parameters.all_vars() {
+        var.to_device(&dev)?;
+    }
+
     // 5. Revisit the data to recover latent states
     info!("Encoding latent states for all...");
     let z_nk = estimate_latent(&data_vec, &enc, &train_config)?;
-    z_nk.to_tsv(&(args.out.to_string() + ".logits.gz"))?;
+    z_nk.to_tsv(&(args.out.to_string() + ".latent.logit.gz"))?;
 
     info!("done");
     Ok(())
@@ -217,25 +225,26 @@ fn estimate_latent(
     let mut chunks = vec![];
 
     for &(lb, ub) in jobs.iter() {
-        if lb < ub {
-            let x_nd = data_vec
-                .read_columns_tensor(lb..ub)?
-                .transpose(0, 1)?
-                .to_device(&dev)?;
-            let (z_nk, _) = encoder.forward_t(&x_nd, false)?;
-            chunks.push(z_nk.to_device(&candle_core::Device::Cpu)?);
-        }
+        let x_nd = data_vec
+            .read_columns_tensor(lb..ub)?
+            .transpose(0, 1)?
+            .to_device(dev)?;
+        let (z_nk, _) = encoder.forward_t(&x_nd, false)?;
+
+        chunks.push(z_nk.to_device(&candle_core::Device::Cpu)?.clone());
         pb.inc(1);
     }
 
-    Ok(Tensor::cat(&chunks, 0)?)
+    let out = Tensor::cat(&chunks, 0)?;
+
+    Ok(out)
 }
 
 fn fit_topic_model(
     data_dn: &DMatrix<f32>,
     args: &EmbedArgs,
     train_config: &candle_inference::TrainConfig,
-) -> anyhow::Result<(NonNegEncoder, TopicDecoder, Vec<f32>)> {
+) -> anyhow::Result<(NonNegEncoder, TopicDecoder, candle_nn::VarMap, Vec<f32>)> {
     let dev = &train_config.device;
     let parameters = candle_nn::VarMap::new();
     let param_builder =
@@ -258,7 +267,7 @@ fn fit_topic_model(
     let llik = vae.train(&mut data_loader, &topic_likelihood, &train_config)?;
     info!("End training {} epochs", train_config.num_epochs);
 
-    Ok((enc, dec, llik))
+    Ok((enc, dec, parameters, llik))
 }
 
 fn read_data_vec_membership(args: EmbedArgs) -> anyhow::Result<(SparseIoVec, Vec<Box<str>>)> {

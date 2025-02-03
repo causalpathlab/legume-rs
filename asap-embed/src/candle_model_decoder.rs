@@ -87,6 +87,10 @@ impl TopicDecoder {
             dictionary,
         })
     }
+
+    pub fn dictionary(&self) -> &SoftmaxLinear {
+        &self.dictionary
+    }
 }
 
 impl DecoderModule for TopicDecoder {
