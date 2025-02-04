@@ -48,14 +48,14 @@ pub trait CollapsingOps {
     ///
     /// # Arguments
     /// * `proj_kn` - random projection matrix
-    /// * `cell_to_batch` - map: cell -> batch
-    fn register_batches<T>(&mut self, proj_kn: &Mat, cell_to_batch: &Vec<T>) -> anyhow::Result<()>
+    /// * `col_to_batch` - map: cell -> batch
+    fn register_batches<T>(&mut self, proj_kn: &Mat, col_to_batch: &Vec<T>) -> anyhow::Result<()>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 
-    fn collect_basic_stat(&self, sample_to_cells: &Vec<Vec<usize>>, stat: &mut CollapsingStat);
+    fn collect_basic_stat(&self, sample_to_cols: &Vec<Vec<usize>>, stat: &mut CollapsingStat);
 
-    fn collect_batch_stat(&self, sample_to_cells: &Vec<Vec<usize>>, stat: &mut CollapsingStat);
+    fn collect_batch_stat(&self, sample_to_cols: &Vec<Vec<usize>>, stat: &mut CollapsingStat);
 
     fn collect_matched_stat(
         &self,
@@ -68,19 +68,19 @@ pub trait CollapsingOps {
 
 impl CollapsingOps for SparseIoVec {
     //
-    fn register_batches<T>(&mut self, proj_kn: &Mat, cell_to_batch: &Vec<T>) -> anyhow::Result<()>
+    fn register_batches<T>(&mut self, proj_kn: &Mat, col_to_batch: &Vec<T>) -> anyhow::Result<()>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
         let kk = proj_kn.nrows();
-        info!("SVD on the projection matrix with k = {} ...", kk);
 
+        info!("SVD on the projection matrix with k = {} ...", kk);
         let (_, _, mut q_nk) = proj_kn.rsvd(kk)?;
         q_nk.scale_columns_inplace();
         let proj_kn = q_nk.transpose();
 
         info!("creating batch-specific HNSW maps ...");
-        self.register_batches_dmatrix(&proj_kn, &cell_to_batch)?;
+        self.register_batches_dmatrix(&proj_kn, &col_to_batch)?;
 
         info!(
             "partitioned {} columns to {} batches",
@@ -144,7 +144,7 @@ impl CollapsingOps for SparseIoVec {
                     if idx.len() == 0 {
                         idx.extend(0..num_batches);
                     }
-		    idx
+                    idx
                 }
                 None => {
                     warn!("using all the {} batches... (could be slow)", num_batches);

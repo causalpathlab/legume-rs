@@ -1,8 +1,10 @@
 use crate::common::*;
 use asap_data::sparse_io_vector::SparseIoVec;
 use indicatif::ParallelProgressIterator;
+use log::{info, warn};
 use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::traits::*;
+use matrix_util::utils::*;
 use nalgebra::DVector;
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
@@ -30,11 +32,14 @@ pub trait RandProjOps {
     /// * `target_dim`: target dimensionality
     /// * `block_size`: block size for parallel computation
     ///
-    fn project_columns(
+    fn project_columns<T>(
         &self,
         target_dim: usize,
         block_size: Option<usize>,
-    ) -> anyhow::Result<RandColProjOut>;
+        batch_membership: Option<&Vec<T>>,
+    ) -> anyhow::Result<RandColProjOut>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 
     /// Create `target_dim` x `nrows`/`D` projection by concatenating data
     /// across rows and returns the random basis matrix `ncols`/`N` x
@@ -66,11 +71,15 @@ pub trait RandProjOps {
 }
 
 impl RandProjOps for SparseIoVec {
-    fn project_columns(
+    fn project_columns<T>(
         &self,
         target_dim: usize,
         block_size: Option<usize>,
-    ) -> anyhow::Result<RandColProjOut> {
+        batch_membership: Option<&Vec<T>>,
+    ) -> anyhow::Result<RandColProjOut>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
         let nrows = self.num_rows()?;
         let ncols = self.num_columns()?;
         let block_size = block_size.unwrap_or(DEFAULT_BLOCK_SIZE);
@@ -88,8 +97,7 @@ impl RandProjOps for SparseIoVec {
                     .expect("failed to retrieve data");
 
                 xx_dm.normalize_columns_inplace();
-                let mut chunk = (xx_dm.transpose() * &basis_dk).transpose();
-                chunk.scale_columns_inplace();
+                let chunk = (xx_dm.transpose() * &basis_dk).transpose();
 
                 {
                     arc_proj_kn
@@ -99,6 +107,38 @@ impl RandProjOps for SparseIoVec {
                         .copy_from(&chunk);
                 }
             });
+
+        if let Some(col_to_batch) = batch_membership {
+            info!("adjusting batch biases ...");
+
+            if col_to_batch.len() == ncols {
+                let batches = partition_by_membership(col_to_batch, None);
+
+                for (_, cols) in batches.iter() {
+                    // columnwise processing is faster
+                    let x_t_rows: Vec<_> = cols
+                        .iter()
+                        .map(|&j| proj_kn.column(j).transpose().into_owned())
+                        .collect();
+
+                    let mut x_t: Mat = Mat::from_rows(&x_t_rows);
+                    x_t.centre_columns_inplace();
+                    let xx: Mat = x_t.transpose();
+
+                    cols.iter().zip(xx.column_iter()).for_each(|(&j, x_j)| {
+                        proj_kn.column_mut(j).copy_from(&x_j);
+                    });
+                }
+            } else {
+                warn!(
+                    "The batch membership size {} mismatches with the number of columns {} ...",
+                    col_to_batch.len(),
+                    ncols
+                );
+            }
+        }
+
+        proj_kn.scale_columns_inplace();
 
         Ok(RandColProjOut {
             basis: basis_dk,

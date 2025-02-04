@@ -183,6 +183,36 @@ where
         ret.scale_columns_inplace();
         ret
     }
+
+    fn centre_columns_inplace(&mut self) {
+        let ncol = self.ncols();
+
+        for j in 0..ncol {
+            if let Some(x_j) = self.get_col(j) {
+                let mut s0 = T::zero();
+                let mut s1 = T::zero();
+
+                for &x_ij in x_j.values() {
+                    s0 += T::one();
+                    s1 += x_ij;
+                }
+
+                let mu = s1 / s0.max(T::one());
+
+                if let Some(mut x_j) = self.get_col_mut(j) {
+                    for x_ij in x_j.values_mut() {
+                        *x_ij = *x_ij - mu;
+                    }
+                }
+            }
+        }
+    }
+
+    fn centre_columns(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.centre_columns_inplace();
+        ret
+    }
 }
 
 impl<T> MatOps for DMatrix<T>
@@ -215,9 +245,23 @@ where
             }
         }
     }
+
     fn scale_columns(&self) -> Self::Mat {
         let mut ret = self.clone();
         ret.scale_columns_inplace();
+        ret
+    }
+
+    fn centre_columns_inplace(&mut self) {
+        for mut xx_j in self.column_iter_mut() {
+            let mu = xx_j.mean();
+            xx_j.add_scalar_mut(-mu);
+        }
+    }
+
+    fn centre_columns(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.centre_columns_inplace();
         ret
     }
 }
