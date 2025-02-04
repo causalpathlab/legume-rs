@@ -94,6 +94,19 @@ where
             }
         }
     }
+    fn centre_columns(&self) -> Self::Mat {
+        let mut xx = self.clone();
+        xx.centre_columns_inplace();
+        xx
+    }
+
+    fn centre_columns_inplace(&mut self) {
+        let mu = self.mean_axis(Axis(0)).expect("mean failed");
+        let ncol = self.ncols();
+        for j in 0..ncol {
+            self.column_mut(j).mapv_inplace(|x| x - mu[j]);
+        }
+    }
 }
 
 impl<T> MatTriplets for ndarray::Array2<T>

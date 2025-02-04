@@ -128,7 +128,11 @@ fn main() -> anyhow::Result<()> {
 
     // 1. Randomly project the columns
     info!("Random projection of data onto {} dims", args.proj_dim);
-    let proj_res = data_vec.project_columns(args.proj_dim, Some(args.block_size.clone()))?;
+    let proj_res = data_vec.project_columns(
+        args.proj_dim,
+        Some(args.block_size.clone()),
+        Some(&batch_membership),
+    )?;
     proj_res
         .basis
         .to_tsv(&(args.out.to_string() + ".basis.gz"))?;
@@ -144,7 +148,7 @@ fn main() -> anyhow::Result<()> {
     info!("at most {} samples are assigned", nsamp);
 
     // 2. Register batch membership
-    if args.batch_files.is_some() || batch_membership.len() > 0 {
+    if args.batch_files.is_some() && batch_membership.len() > 0 {
         info!("Registering batch information");
         data_vec.register_batches(&proj_kn, &batch_membership)?;
     }

@@ -23,6 +23,8 @@ pub trait MatOps {
     fn normalize_columns(&self) -> Self::Mat;
     fn scale_columns_inplace(&mut self);
     fn scale_columns(&self) -> Self::Mat;
+    fn centre_columns_inplace(&mut self);
+    fn centre_columns(&self) -> Self::Mat;
 }
 
 /// Operations to sample random matrices, only works for
