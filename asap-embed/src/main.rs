@@ -206,7 +206,7 @@ fn main() -> anyhow::Result<()> {
     // 5. Revisit the data to recover latent states
     info!("Encoding latent states for all...");
     let z_nk = estimate_latent(&data_vec, &enc, &train_config)?;
-    z_nk.to_tsv(&(args.out.to_string() + ".latent.logit.gz"))?;
+    z_nk.to_tsv(&(args.out.to_string() + ".logit_latent.gz"))?;
 
     info!("done");
     Ok(())
