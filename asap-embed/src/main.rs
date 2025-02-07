@@ -225,7 +225,6 @@ fn estimate_latent(
     let njobs = jobs.len() as u64;
 
     let pb = ProgressBar::new(njobs);
-
     let mut chunks = vec![];
 
     for &(lb, ub) in jobs.iter() {

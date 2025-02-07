@@ -397,12 +397,14 @@ fn optimize(
     let num_samples = stat.num_samples();
     let num_batches = stat.num_batches();
     let mut mu_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
-    let mut gamma_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
-    let mut delta_param = GammaMatrix::new((num_genes, num_batches), a0, b0);
 
     if num_batches > 1 {
         // temporary denominator
         let mut denom_ds = Mat::zeros(num_genes, num_samples);
+
+        let mut mu_resid_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
+        let mut gamma_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
+        let mut delta_param = GammaMatrix::new((num_genes, num_batches), a0, b0);
 
         (0..num_iter).progress().for_each(|_opt_iter| {
             #[cfg(debug_assertions)]
@@ -454,8 +456,24 @@ fn optimize(
             delta_param.calibrate();
         });
 
+        // Just take the residuals of ysum
+        //
+        // y_sum_ds
+        // -----------------------
+        // mu_ds .* (1_d * size_s')
+        {
+            denom_ds = DVec::from_element(num_genes, 1_f32) * stat.size_s.transpose();
+
+            mu_resid_param.update_stat(
+                &stat.ysum_ds,
+                &denom_ds.component_mul(&mu_param.posterior_mean()),
+            );
+            mu_resid_param.calibrate();
+        };
+
         Ok(CollapsingOut {
             mu: mu_param,
+            mu_residual: Some(mu_resid_param),
             gamma: Some(gamma_param),
             delta: Some(delta_param),
         })
@@ -465,6 +483,7 @@ fn optimize(
         mu_param.calibrate();
         Ok(CollapsingOut {
             mu: mu_param,
+            mu_residual: None,
             gamma: None,
             delta: None,
         })
@@ -476,6 +495,7 @@ fn optimize(
 #[derive(Debug)]
 pub struct CollapsingOut {
     pub mu: GammaMatrix,
+    pub mu_residual: Option<GammaMatrix>,
     pub gamma: Option<GammaMatrix>,
     pub delta: Option<GammaMatrix>,
 }
