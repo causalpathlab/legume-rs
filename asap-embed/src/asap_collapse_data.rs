@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::asap_common::*;
 use crate::asap_normalization::*;
 use asap_data::sparse_io_vector::SparseIoVec;
@@ -17,7 +19,6 @@ use std::sync::{Arc, Mutex};
 #[cfg(debug_assertions)]
 use log::debug;
 
-#[allow(dead_code)]
 /// Given a feature/projection matrix (factor x cells), we assign each
 /// cell to a sample and return pseudobulk (collapsed) matrices
 ///
@@ -471,7 +472,7 @@ fn optimize(
 }
 
 /// output struct to make the model parameters more accessible
-#[allow(dead_code)]
+
 #[derive(Debug)]
 pub struct CollapsingOut {
     pub mu: GammaMatrix,
@@ -480,7 +481,7 @@ pub struct CollapsingOut {
 }
 
 /// a struct to hold the sufficient statistics for the model
-#[allow(dead_code)]
+
 pub struct CollapsingStat {
     pub ysum_ds: Mat, // observed sum within each sample
     pub zsum_ds: Mat, // counterfactual sum within each sample
@@ -499,22 +500,19 @@ impl CollapsingStat {
             n_bs: Mat::zeros(nbatch, nsample),
         }
     }
-    #[allow(dead_code)]
+
     pub fn num_genes(&self) -> usize {
         self.ysum_ds.nrows()
     }
 
-    #[allow(dead_code)]
     pub fn num_samples(&self) -> usize {
         self.ysum_ds.ncols()
     }
 
-    #[allow(dead_code)]
     pub fn num_batches(&self) -> usize {
         self.ysum_db.ncols()
     }
 
-    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.ysum_ds.fill(0_f32);
         self.zsum_ds.fill(0_f32);
