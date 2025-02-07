@@ -1,5 +1,5 @@
-use crate::common::*;
-use crate::normalization::*;
+use crate::asap_common::*;
+use crate::asap_normalization::*;
 use asap_data::sparse_io_vector::SparseIoVec;
 use indicatif::ParallelProgressIterator;
 use indicatif::ProgressIterator;
