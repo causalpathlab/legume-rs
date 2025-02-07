@@ -1,8 +1,8 @@
 use asap_data::simulate::*;
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::SparseIoVec;
-use asap_embed::collapse_data::*;
-use asap_embed::random_projection::*;
+use asap_embed::asap_collapse_data::*;
+use asap_embed::asap_random_projection::*;
 // use matrix_param::traits::Inference;
 // use matrix_util::traits::*;
 

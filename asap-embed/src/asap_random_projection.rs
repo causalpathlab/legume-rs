@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::asap_common::*;
 use asap_data::sparse_io_vector::SparseIoVec;
 use indicatif::ParallelProgressIterator;
@@ -9,19 +11,16 @@ use nalgebra::DVector;
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
-#[allow(dead_code)]
 pub struct RandColProjOut {
     pub basis: Mat,
     pub proj: Mat,
 }
 
-#[allow(dead_code)]
 pub struct RandRowProjOut {
     pub basis: Mat,
     pub proj: Mat,
 }
 
-#[allow(dead_code)]
 pub trait RandProjOps {
     ///
     /// Create K x ncol projection by concatenating data across
@@ -32,7 +31,22 @@ pub trait RandProjOps {
     /// * `target_dim`: target dimensionality
     /// * `block_size`: block size for parallel computation
     ///
-    fn project_columns<T>(
+    fn project_columns(
+        &self,
+        target_dim: usize,
+        block_size: Option<usize>,
+    ) -> anyhow::Result<RandColProjOut>;
+
+    ///
+    /// Create K x ncol projection by concatenating data across
+    /// columns and returns the random basis matrix `D` x `target_dim`
+    /// and the projection result `target_dim` x `N`
+    ///
+    /// # Arguments
+    /// * `target_dim`: target dimensionality
+    /// * `block_size`: block size for parallel computation
+    ///
+    fn project_columns_with_batch_correction<T>(
         &self,
         target_dim: usize,
         block_size: Option<usize>,
@@ -71,7 +85,15 @@ pub trait RandProjOps {
 }
 
 impl RandProjOps for SparseIoVec {
-    fn project_columns<T>(
+    fn project_columns(
+        &self,
+        target_dim: usize,
+        block_size: Option<usize>,
+    ) -> anyhow::Result<RandColProjOut> {
+        self.project_columns_with_batch_correction::<usize>(target_dim, block_size, None)
+    }
+
+    fn project_columns_with_batch_correction<T>(
         &self,
         target_dim: usize,
         block_size: Option<usize>,

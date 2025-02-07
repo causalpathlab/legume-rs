@@ -1,15 +1,18 @@
+mod asap_collapse_data;
+mod asap_common;
+mod asap_normalization;
+mod asap_random_projection;
 mod candle_data_loader;
 mod candle_inference;
 mod candle_loss_functions;
 mod candle_model_decoder;
 mod candle_model_encoder;
-mod collapse_data;
-mod common;
-mod normalization;
-mod random_projection;
 
+use asap_collapse_data::CollapsingOps;
+use asap_common::*;
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
+use asap_random_projection::RandProjOps;
 use candle_data_loader::InMemoryData;
 use candle_inference::*;
 use candle_loss_functions::topic_likelihood;
@@ -17,14 +20,11 @@ use candle_model_decoder::TopicDecoder;
 use candle_model_encoder::EncoderModuleT;
 use candle_model_encoder::NonNegEncoder;
 use clap::{Parser, ValueEnum};
-use collapse_data::CollapsingOps;
-use common::*;
 use indicatif::ProgressBar;
 use log::info;
 use matrix_param::traits::Inference;
 use matrix_util::common_io::{extension, read_lines};
 use matrix_util::traits::*;
-use random_projection::RandProjOps;
 use std::sync::Arc;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -128,7 +128,7 @@ fn main() -> anyhow::Result<()> {
 
     // 1. Randomly project the columns
     info!("Random projection of data onto {} dims", args.proj_dim);
-    let proj_res = data_vec.project_columns(
+    let proj_res = data_vec.project_columns_with_batch_correction(
         args.proj_dim,
         Some(args.block_size.clone()),
         Some(&batch_membership),
