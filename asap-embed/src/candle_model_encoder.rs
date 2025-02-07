@@ -3,6 +3,7 @@
 use crate::candle_loss_functions::gaussian_kl_loss;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, sequential, BatchNorm, Linear, ModuleT, Sequential, VarBuilder};
+use log::warn;
 
 pub trait EncoderModuleT {
     /// An encoder that spits out two results (latent inference, KL loss)
@@ -15,6 +16,24 @@ pub trait EncoderModuleT {
     /// * `z_nk` - latent inference (n x k)
     /// * `kl_loss_n` - KL loss (n x 1)
     fn forward_t(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)>;
+
+    /// An encoder that spits out two results (latent inference, KL loss)
+    ///
+    /// # Arguments
+    /// * `x1_nd` - foreground input data (n x d)
+    /// * `x0_nd` - background input data (n x d)
+    /// * `train` - whether to use dropout/batchnorm or not
+    ///
+    /// # Returns `(z_nk, kl_loss_n)`
+    /// * `z_nk` - latent inference (n x k)
+    /// * `kl_loss_n` - KL loss (n x 1)
+    fn adjusted_forward_t(
+        &self,
+        x1_nd: &Tensor,
+        x0_nd: &Tensor,
+        train: bool,
+    ) -> Result<(Tensor, Tensor)>;
+
     fn dim_obs(&self) -> usize;
     fn dim_latent(&self) -> usize;
 }
@@ -29,6 +48,15 @@ pub struct NonNegEncoder {
 }
 
 impl EncoderModuleT for NonNegEncoder {
+    fn adjusted_forward_t(
+        &self,
+        x1_nd: &Tensor,
+        _x0: &Tensor,
+        train: bool,
+    ) -> Result<(Tensor, Tensor)> {
+        todo!("z1 - z0");
+    }
+
     fn forward_t(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
         let (z_mean_nk, z_lnvar_nk) = self.latent_params(x_nd, train)?;
         let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
@@ -100,6 +128,12 @@ impl NonNegEncoder {
         let bn = candle_nn::batch_norm(n_features, config, vs.pp("nn.enc.bn"))?;
 
         // (1) data -> fc
+
+// use std::sync::{Arc, Mutex};
+// let sequential = Arc::new(Mutex::new(sequential::seq()));
+
+
+
         let mut fc = sequential::seq();
         let mut prev_dim = n_features;
         for (j, &next_dim) in layers.iter().enumerate() {
