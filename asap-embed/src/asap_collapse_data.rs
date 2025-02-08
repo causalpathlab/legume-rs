@@ -160,7 +160,7 @@ impl CollapsingOps for SparseIoVec {
         // Resolve mean parameters //
         /////////////////////////////
 
-        info!("optimizing the mean parameters...");
+        info!("optimizing mean parameters...");
         let (a0, b0) = (1_f32, 1_f32);
         optimize(&stat, (a0, b0), num_opt_iter.unwrap_or(DEFAULT_OPT_ITER))
     }

@@ -73,7 +73,7 @@ fn pmf() -> anyhow::Result<()> {
 
     let mut vae = Vae::build(&enc, &dec, &vm);
 
-    let mut data_loader = InMemoryData::from_tensor(&x_nd)?;
+    let mut data_loader = InMemoryData::from(&x_nd)?;
 
     let _llik = vae.train(
         &mut data_loader,

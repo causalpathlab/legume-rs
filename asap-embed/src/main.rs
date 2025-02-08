@@ -27,7 +27,7 @@ use matrix_param::traits::Inference;
 use matrix_util::common_io::{extension, read_lines};
 use matrix_util::traits::*;
 use rayon::prelude::*;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -112,6 +112,9 @@ struct EmbedArgs {
     #[arg(long, value_enum, default_value = "cpu")]
     device: ComputeDevice,
 
+    #[arg(long, short, default_value_t = 1)]
+    nround: usize,
+
     /// verbosity
     #[arg(long, short)]
     verbose: bool,
@@ -125,59 +128,6 @@ fn main() -> anyhow::Result<()> {
     }
     env_logger::init();
 
-    info!("Reading data files...");
-    let (mut data_vec, batch_membership) = read_data_vec_membership(args.clone())?;
-
-    // 1. Randomly project the columns
-    info!("Random projection of data onto {} dims", args.proj_dim);
-    let proj_res = data_vec.project_columns_with_batch_correction(
-        args.proj_dim,
-        Some(args.block_size.clone()),
-        Some(&batch_membership),
-    )?;
-    proj_res
-        .basis
-        .to_tsv(&(args.out.to_string() + ".basis.gz"))?;
-
-    let proj_kn = proj_res.proj;
-
-    proj_kn
-        .transpose()
-        .to_tsv(&(args.out.to_string() + ".proj.gz"))?;
-    info!("Assigning {} columns to samples...", proj_kn.ncols());
-
-    let nsamp = data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim))?;
-    info!("at most {} samples are assigned", nsamp);
-
-    // 2. Register batch membership
-    if args.batch_files.is_some() && batch_membership.len() > 0 {
-        info!("Registering batch information");
-        data_vec.register_batches(&proj_kn, &batch_membership)?;
-    }
-
-    // 3. Collapsing columns
-    info!("Collapsing columns... into {} samples", nsamp);
-    let collapse_out = data_vec.collapse_columns(
-        args.down_sample,
-        args.reference_batch.clone(),
-        Some(args.knn),
-        Some(args.iter_opt),
-    )?;
-
-    collapse_out
-        .mu
-        .posterior_log_mean()
-        .to_tsv(&(args.out.to_string() + ".ln_mu.gz"))?;
-
-    if let Some(delta) = collapse_out.delta {
-        delta
-            .posterior_log_mean()
-            .to_tsv(&(args.out.to_string() + ".ln_delta.gz"))?;
-    }
-
-    info!("Wrote intermediate results");
-
-    // 4. Train embedded topic model
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
         ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
@@ -192,23 +142,93 @@ fn main() -> anyhow::Result<()> {
         verbose: args.verbose,
     };
 
-    let (enc, dec, parameters, llik) =
-        fit_topic_model(&collapse_out.mu.posterior_mean(), &args, &train_config)?;
-    let llik: Mat = Mat::from_row_iterator(llik.len(), 1, llik.into_iter());
-    llik.to_tsv(&(args.out.to_string() + ".llik.gz"))?;
+    info!("Reading data files...");
+    let (mut data_vec, batch_membership) = read_data_vec_membership(args.clone())?;
 
-    dec.dictionary()
-        .weight()
-        .to_tsv(&(args.out.to_string() + ".logit_dict.gz"))?;
+    let dd = data_vec.num_rows()?;
+    let kk = args.latent_topics;
 
-    for var in parameters.all_vars() {
-        var.to_device(&dev)?;
+    let parameters = candle_nn::VarMap::new();
+    let param_builder =
+        candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
+
+    info!("Estimate {} topics", kk);
+    let enc = NonNegEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
+    let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
+
+    let mut vae = candle_inference::Vae::build(&enc, &dec, &parameters);
+
+    let nround = args.nround;
+    let mut llik_out = vec![];
+    for rr in 0..nround {
+        // 1. Randomly project the columns
+        info!("Random projection of data onto {} dims", args.proj_dim);
+        let proj_out = data_vec.project_columns_with_batch_correction(
+            args.proj_dim,
+            Some(args.block_size.clone()),
+            Some(&batch_membership),
+        )?;
+
+        let proj_kn = proj_out.proj;
+        info!("Assigning {} columns to samples...", proj_kn.ncols());
+
+        let nsamp = data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim))?;
+        info!("at most {} samples are assigned", nsamp);
+
+        // 2. Register batch membership
+        if args.batch_files.is_some() && batch_membership.len() > 0 {
+            info!("Registering batch information");
+            data_vec.register_batches(&proj_kn, &batch_membership)?;
+        }
+
+        // 3. Collapsing columns
+        info!("Collapsing columns... into {} samples", nsamp);
+        let collapse_out = data_vec.collapse_columns(
+            args.down_sample,
+            args.reference_batch.clone(),
+            Some(args.knn),
+            Some(args.iter_opt),
+        )?;
+
+        // 4. Train embedded topic model
+        info!("Start training, round {} ...", rr + 1);
+        let x1_nd = collapse_out.mu.posterior_mean().transpose().clone();
+
+        // let x0 = collapse_out.mu_residual.map(|x| x.posterior_mean().clone());
+
+        // let mut data_loader = match x0 {
+        //     Some(x0_dn) => {
+        //         let x0_nd = x0_dn.transpose();
+        //         InMemoryData::from_with_aux(&x1_nd, &x0_nd)?
+        //     }
+        //     None => InMemoryData::from(&x1_nd)?,
+        // };
+
+	let mut data_loader = InMemoryData::from(&x1_nd)?;
+
+        let llik = vae.train(&mut data_loader, &topic_likelihood, &train_config)?;
+        llik_out.extend(llik);
+        info!("End training {} epochs", train_config.num_epochs);
+
+        // 5. Revisit the data to recover latent states
+        for var in parameters.all_vars() {
+            var.to_device(&dev)?;
+        }
+
+        info!("Encoding latent states for all...");
+        let z_nk = estimate_latent(&data_vec, &enc, &train_config)?;
+
+	// todo: 
+
+        z_nk.to_tsv(&(args.out.to_string() + ".logit_latent.gz"))?;
+
+        dec.dictionary()
+            .weight()
+            .to_tsv(&(args.out.to_string() + ".logit_dict.gz"))?;
     }
 
-    // 5. Revisit the data to recover latent states
-    info!("Encoding latent states for all...");
-    let z_nk = estimate_latent(&data_vec, &enc, &train_config)?;
-    z_nk.to_tsv(&(args.out.to_string() + ".logit_latent.gz"))?;
+    let llik_out: Mat = Mat::from_row_iterator(llik_out.len(), 1, llik_out.into_iter());
+    llik_out.to_tsv(&(args.out.to_string() + ".llik.gz"))?;
 
     info!("done");
     Ok(())
@@ -230,6 +250,8 @@ fn estimate_latent(
     let jobs = create_jobs(ntot, block_size);
     let njobs = jobs.len() as u64;
 
+    let arc_enc = Arc::new(Mutex::new(encoder));
+
     let mut chunks = jobs
         .par_iter()
         .progress_count(njobs)
@@ -241,7 +263,9 @@ fn estimate_latent(
                 .expect("transpose")
                 .to_device(dev)
                 .expect("to dev");
-            let (z_nk, _) = encoder.forward_t(&x_nd, false).expect("forward");
+
+            let enc = arc_enc.lock().expect("lock");
+            let (z_nk, _) = enc.forward_t(&x_nd, false).expect("forward");
             (
                 lb,
                 z_nk.to_device(&candle_core::Device::Cpu).expect("to cpu"),
@@ -253,40 +277,6 @@ fn estimate_latent(
     let chunks = chunks.into_iter().map(|(_, z_nk)| z_nk).collect::<Vec<_>>();
     let out = Tensor::cat(&chunks, 0)?;
     Ok(out)
-}
-
-////////////////////////////////////////////////////////
-// Fit topic model using VAE on collapsed data matrix //
-////////////////////////////////////////////////////////
-
-fn fit_topic_model(
-    data_dn: &DMatrix<f32>,
-    args: &EmbedArgs,
-    train_config: &candle_inference::TrainConfig,
-) -> anyhow::Result<(NonNegEncoder, TopicDecoder, candle_nn::VarMap, Vec<f32>)> {
-    let dev = &train_config.device;
-    let parameters = candle_nn::VarMap::new();
-    let param_builder =
-        candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
-
-    let x_nd = data_dn.transpose();
-    let mut data_loader = InMemoryData::from_dmatrix(&x_nd)?;
-    let (_, dd) = x_nd.shape();
-
-    let kk = args.latent_topics;
-
-    info!("Estimate {} topics", kk);
-    let enc = NonNegEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
-    let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
-
-    info!("Combined encoder and decoder");
-    let mut vae = candle_inference::Vae::build(&enc, &dec, &parameters);
-
-    info!("Start training...");
-    let llik = vae.train(&mut data_loader, &topic_likelihood, &train_config)?;
-    info!("End training {} epochs", train_config.num_epochs);
-
-    Ok((enc, dec, parameters, llik))
 }
 
 //////////////////////////////////////////
