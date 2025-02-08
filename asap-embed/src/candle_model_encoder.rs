@@ -3,7 +3,7 @@
 use crate::candle_aux_layers::StackLayers;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, sequential, BatchNorm, Linear, ModuleT, Sequential, VarBuilder};
+use candle_nn::{ops, BatchNorm, Linear, ModuleT, VarBuilder};
 
 pub trait EncoderModuleT {
     /// An encoder that spits out two results (latent inference, KL loss)
@@ -30,7 +30,7 @@ pub trait EncoderModuleT {
     fn adjusted_forward_t(
         &self,
         x1_nd: &Tensor,
-        x0_nd: &Tensor,
+        x0_nd: Option<&Tensor>,
         train: bool,
     ) -> Result<(Tensor, Tensor)>;
 
@@ -51,10 +51,24 @@ impl EncoderModuleT for NonNegEncoder {
     fn adjusted_forward_t(
         &self,
         x1_nd: &Tensor,
-        _x0: &Tensor,
+        x0_nd: Option<&Tensor>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
-        todo!("z1 - z0");
+        if let Some(x0_nd) = x0_nd {
+            let (z1_mean_nk, z1_lnvar_nk) = self.latent_params(x1_nd, train)?;
+            let z1_nk = self.reparameterize(&z1_mean_nk, &z1_lnvar_nk, train)?;
+            let (z0_mean_nk, z0_lnvar_nk) = self.latent_params(x0_nd, train)?;
+            let z0_nk = self.reparameterize(&z0_mean_nk, &z0_lnvar_nk, train)?;
+            let z_nk = (&z1_nk - &z0_nk)?;
+
+            Ok((
+                ops::log_softmax(&z_nk, 1)?,
+                (gaussian_kl_loss(&z1_mean_nk, &z1_lnvar_nk)?
+                    + gaussian_kl_loss(&z0_mean_nk, &z0_lnvar_nk)?)?,
+            ))
+        } else {
+            self.forward_t(x1_nd, train)
+        }
     }
 
     fn forward_t(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {

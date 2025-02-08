@@ -8,12 +8,19 @@ use ndarray::Array2;
 use rand::prelude::SliceRandom;
 use rayon::prelude::*;
 
+/// `DataLoader` for minibatch learning
 pub trait DataLoader {
     fn minibatch(&self, batch_idx: usize, target_device: &Device) -> anyhow::Result<Tensor>;
+    fn minibatch_with_aux(
+        &self,
+        batch_idx: usize,
+        target_device: &Device,
+    ) -> anyhow::Result<(Tensor, Option<Tensor>)>;
     fn num_minibatch(&self) -> usize;
     fn shuffle_minibatch(&mut self, batch_size: usize);
 }
 
+////////////////////////////////////////////////////////////////
 ///
 /// A thin wrapper for `SparseIoVec`. Columns in `SparseIoVec` are
 /// treated as samples.
@@ -51,6 +58,14 @@ impl DataLoader for SparseIoVecData<'_> {
         }
     }
 
+    fn minibatch_with_aux(
+        &self,
+        _batch_idx: usize,
+        _target_device: &Device,
+    ) -> anyhow::Result<(Tensor, Option<Tensor>)> {
+        unimplemented!("SparseIoVecData")
+    }
+
     fn num_minibatch(&self) -> usize {
         self.minibatches.chunks.len()
     }
@@ -60,6 +75,7 @@ impl DataLoader for SparseIoVecData<'_> {
     }
 }
 
+////////////////////////////////////////////////////////////////
 ///
 /// A simple data loader for in-memory 2d matrix.  Each row will be
 /// considered as a feature vector. The number of samples is the
@@ -67,22 +83,21 @@ impl DataLoader for SparseIoVecData<'_> {
 ///
 pub struct InMemoryData {
     data: Vec<Tensor>,
+    aux_data: Option<Vec<Tensor>>,
     minibatches: Minibatches,
 }
 
-#[allow(dead_code)]
 impl InMemoryData {
-    pub fn from_tensor(data: &Tensor) -> anyhow::Result<Self> {
-        let mut idx_data = (0..data.dims()[0])
-            .map(|i| (i, data.narrow(0, i, 1).expect("").clone()))
-            .collect::<Vec<_>>();
-
-        idx_data.sort_by_key(|(i, _)| *i);
-        let rows = (0..idx_data.len()).collect();
-        let data = idx_data.into_iter().map(|(_, t)| t).collect();
+    pub fn from<D>(data: &D) -> anyhow::Result<Self>
+    where
+        D: RowsToTensorVec,
+    {
+        let data = data.rows_to_tensor_vec();
+        let rows = (0..data.len()).collect();
 
         Ok(InMemoryData {
             data,
+            aux_data: None,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -90,50 +105,19 @@ impl InMemoryData {
         })
     }
 
-    pub fn from_ndarray(data: &Array2<f32>) -> anyhow::Result<Self> {
-        let mut idx_data = data
-            .axis_iter(ndarray::Axis(0))
-            .enumerate()
-            .par_bridge()
-            .map(|(i, row)| {
-                let mut v = Tensor::from_iter(row.iter().map(|x| *x), &Device::Cpu)
-                    .expect("failed to create tensor");
-                v = v.reshape((1, row.len())).expect("failed to reshape");
-                (i, v)
-            })
-            .collect::<Vec<_>>();
+    pub fn from_with_aux<D>(data: &D, aux: &D) -> anyhow::Result<Self>
+    where
+        D: RowsToTensorVec,
+    {
+        let data = data.rows_to_tensor_vec();
+        let aux_data = aux.rows_to_tensor_vec();
+        let rows = (0..data.len()).collect();
 
-        idx_data.sort_by_key(|(i, _)| *i);
-        let rows = (0..idx_data.len()).collect();
-        let data = idx_data.into_iter().map(|(_, t)| t).collect();
+        debug_assert!(data.len() == aux_data.len());
 
         Ok(InMemoryData {
             data,
-            minibatches: Minibatches {
-                samples: rows,
-                chunks: vec![],
-            },
-        })
-    }
-
-    pub fn from_dmatrix(data: &DMatrix<f32>) -> anyhow::Result<Self> {
-        let mut idx_data = data
-            .row_iter()
-            .enumerate()
-            .par_bridge()
-            .map(|(i, row)| {
-                let mut v = Tensor::from_iter(row.iter().map(|x| *x), &Device::Cpu)
-                    .expect("failed to create tensor");
-                v = v.reshape((1, row.len())).expect("failed to reshape");
-                (i, v)
-            })
-            .collect::<Vec<_>>();
-
-        idx_data.sort_by_key(|(i, _)| *i);
-        let rows = (0..idx_data.len()).collect();
-        let data = idx_data.into_iter().map(|(_, t)| t).collect();
-        Ok(InMemoryData {
-            data,
+            aux_data: Some(aux_data),
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -156,6 +140,35 @@ impl DataLoader for InMemoryData {
         }
     }
 
+    fn minibatch_with_aux(
+        &self,
+        batch_idx: usize,
+        target_device: &Device,
+    ) -> anyhow::Result<(Tensor, Option<Tensor>)> {
+        if let Some(samples) = self.minibatches.chunks.get(batch_idx) {
+            let chunk: Vec<Tensor> = samples.into_iter().map(|&i| self.data[i].clone()).collect();
+            let data = Tensor::cat(&chunk, 0)?;
+
+            if let Some(ref aux_data) = self.aux_data {
+                let chunk: Vec<Tensor> =
+                    samples.into_iter().map(|&i| aux_data[i].clone()).collect();
+                let aux_data = Tensor::cat(&chunk, 0)?;
+                Ok((
+                    data.to_device(target_device)?,
+                    Some(aux_data.to_device(target_device)?),
+                ))
+            } else {
+                Ok((data.to_device(target_device)?, None))
+            }
+        } else {
+            Err(anyhow::anyhow!(
+                "invalid index = {} vs. total # = {}",
+                batch_idx,
+                self.num_minibatch()
+            ))
+        }
+    }
+
     fn num_minibatch(&self) -> usize {
         self.minibatches.chunks.len()
     }
@@ -165,9 +178,13 @@ impl DataLoader for InMemoryData {
     }
 }
 
+///
+/// A helper `struct` for shuffling and creating minibatch indexes;
+/// after `shuffle_minibatch` is called, `chunks` partition indexes.
+///
 pub struct Minibatches {
     samples: Vec<usize>,
-    chunks: Vec<Vec<usize>>,
+    pub chunks: Vec<Vec<usize>>,
 }
 
 impl Minibatches {
@@ -198,5 +215,61 @@ impl Minibatches {
 
     pub fn size(&self) -> usize {
         self.samples.len()
+    }
+}
+
+///
+/// Convert rows of a matrix to a vector of `Tensor`
+///
+pub trait RowsToTensorVec {
+    fn rows_to_tensor_vec(&self) -> Vec<Tensor>;
+}
+
+impl RowsToTensorVec for Array2<f32> {
+    fn rows_to_tensor_vec(&self) -> Vec<Tensor> {
+        let mut idx_data = self
+            .axis_iter(ndarray::Axis(0))
+            .enumerate()
+            .par_bridge()
+            .map(|(i, row)| {
+                let mut v = Tensor::from_iter(row.iter().map(|x| *x), &Device::Cpu)
+                    .expect("failed to create tensor");
+                v = v.reshape((1, row.len())).expect("failed to reshape");
+                (i, v)
+            })
+            .collect::<Vec<_>>();
+
+        idx_data.sort_by_key(|(i, _)| *i);
+        idx_data.into_iter().map(|(_, t)| t).collect()
+    }
+}
+
+impl RowsToTensorVec for DMatrix<f32> {
+    fn rows_to_tensor_vec(&self) -> Vec<Tensor> {
+        let mut idx_data = self
+            .row_iter()
+            .enumerate()
+            .par_bridge()
+            .map(|(i, row)| {
+                let mut v = Tensor::from_iter(row.iter().map(|x| *x), &Device::Cpu)
+                    .expect("failed to create tensor");
+                v = v.reshape((1, row.len())).expect("failed to reshape");
+                (i, v)
+            })
+            .collect::<Vec<_>>();
+
+        idx_data.sort_by_key(|(i, _)| *i);
+        idx_data.into_iter().map(|(_, t)| t).collect()
+    }
+}
+
+impl RowsToTensorVec for Tensor {
+    fn rows_to_tensor_vec(&self) -> Vec<Tensor> {
+        let mut idx_data = (0..self.dims()[0])
+            .map(|i| (i, self.narrow(0, i, 1).expect("").clone()))
+            .collect::<Vec<_>>();
+
+        idx_data.sort_by_key(|(i, _)| *i);
+        idx_data.into_iter().map(|(_, t)| t).collect()
     }
 }
