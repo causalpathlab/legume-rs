@@ -1,12 +1,42 @@
 // use asap_embed::candle_etm::*;
+use asap_embed::candle_aux_layers::*;
 use asap_embed::candle_data_loader::*;
 use asap_embed::candle_inference::*;
 use asap_embed::candle_loss_functions::*;
 use asap_embed::candle_model_decoder::*;
 use asap_embed::candle_model_encoder::*;
 use candle_core::{DType, Device, Tensor};
+use candle_nn::Module;
 use candle_nn::{VarBuilder, VarMap};
 use matrix_util::traits::SampleOps;
+
+#[test]
+fn aux_layer() -> anyhow::Result<()> {
+    let mut stack = StackLayers::<candle_nn::Linear>::new();
+
+    let vm = candle_nn::VarMap::new();
+    let vs = candle_nn::VarBuilder::from_varmap(&vm, DType::F32, &candle_core::Device::Cpu);
+
+    stack.push_with_act(
+        candle_nn::linear(5, 10, vs.pp("lin1"))?,
+        candle_nn::Activation::Relu,
+    );
+
+    stack.push_with_act(
+        candle_nn::linear(10, 5, vs.pp("lin2"))?,
+        candle_nn::Activation::Relu,
+    );
+
+    use rayon::prelude::*;
+
+    (0..10).into_par_iter().for_each(|_| {
+        let x = Tensor::rgamma(100, 5, (1.0, 1.0));
+        let y = stack.forward(&x).unwrap();
+        println!("{:?}", y);
+    });
+
+    Ok(())
+}
 
 #[test]
 fn pmf() -> anyhow::Result<()> {

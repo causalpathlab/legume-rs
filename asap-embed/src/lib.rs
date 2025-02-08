@@ -1,9 +1,10 @@
-pub mod candle_data_loader;
-pub mod candle_inference;
-pub mod candle_loss_functions;
-pub mod candle_model_encoder;
-pub mod candle_model_decoder;
 pub mod asap_collapse_data;
 pub mod asap_common;
 pub mod asap_normalization;
 pub mod asap_random_projection;
+pub mod candle_aux_layers;
+pub mod candle_data_loader;
+pub mod candle_inference;
+pub mod candle_loss_functions;
+pub mod candle_model_decoder;
+pub mod candle_model_encoder;
