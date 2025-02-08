@@ -68,10 +68,8 @@ where
         for _epoch in 0..train_config.num_epochs {
             let mut llik_tot = 0f32;
             for b in 0..data.num_minibatch() {
-                let (x_nd, x0_nd) = data.minibatch_with_aux(b, &device)?;
-                let (z_nk, kl) = self
-                    .encoder
-                    .adjusted_forward_t(&x_nd, x0_nd.as_ref(), true)?;
+                let x_nd = data.minibatch(b, &device)?;
+                let (z_nk, kl) = self.encoder.forward_t(&x_nd, true)?;
                 let (_, llik) = self.decoder.forward_with_llik(&z_nk, &x_nd, llik_func)?;
                 let loss = (kl - &llik)?.mean_all()?;
                 let llik_val = llik.mean_all()?.to_scalar::<f32>()?;
