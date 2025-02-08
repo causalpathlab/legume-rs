@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
+use crate::candle_aux_layers::StackLayers;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, sequential, BatchNorm, Linear, ModuleT, Sequential, VarBuilder};
-use log::warn;
 
 pub trait EncoderModuleT {
     /// An encoder that spits out two results (latent inference, KL loss)
@@ -42,7 +42,7 @@ pub struct NonNegEncoder {
     n_features: usize,
     n_topics: usize,
     bn: BatchNorm,
-    fc: Sequential,
+    fc: StackLayers<Linear>,
     z_mean: Linear,
     z_lnvar: Linear,
 }
@@ -128,21 +128,14 @@ impl NonNegEncoder {
         let bn = candle_nn::batch_norm(n_features, config, vs.pp("nn.enc.bn"))?;
 
         // (1) data -> fc
-
-// use std::sync::{Arc, Mutex};
-// let sequential = Arc::new(Mutex::new(sequential::seq()));
-
-
-
-        let mut fc = sequential::seq();
+        let mut fc = StackLayers::<Linear>::new();
         let mut prev_dim = n_features;
         for (j, &next_dim) in layers.iter().enumerate() {
-            fc = fc.add(candle_nn::linear(
-                prev_dim,
-                next_dim,
-                vs.pp(format!("nn.enc.fc.{}", j)),
-            )?);
-            fc = fc.add(candle_nn::Activation::Relu);
+            let _name = format!("nn.enc.fc.{}", j);
+            fc.push_with_act(
+                candle_nn::linear(prev_dim, next_dim, vs.pp(_name))?,
+                candle_nn::Activation::Relu,
+            );
             prev_dim = next_dim;
         }
 

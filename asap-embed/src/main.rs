@@ -2,6 +2,7 @@ mod asap_collapse_data;
 mod asap_common;
 mod asap_normalization;
 mod asap_random_projection;
+mod candle_aux_layers;
 mod candle_data_loader;
 mod candle_inference;
 mod candle_loss_functions;
@@ -20,11 +21,12 @@ use candle_model_decoder::TopicDecoder;
 use candle_model_encoder::EncoderModuleT;
 use candle_model_encoder::NonNegEncoder;
 use clap::{Parser, ValueEnum};
-use indicatif::ProgressBar;
+use indicatif::ParallelProgressIterator;
 use log::info;
 use matrix_param::traits::Inference;
 use matrix_util::common_io::{extension, read_lines};
 use matrix_util::traits::*;
+use rayon::prelude::*;
 use std::sync::Arc;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -212,6 +214,10 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+//////////////////////////////////////////////////////////
+// Just evaluate latent states based on the encoder net //
+//////////////////////////////////////////////////////////
+
 fn estimate_latent(
     data_vec: &SparseIoVec,
     encoder: &NonNegEncoder,
@@ -224,24 +230,34 @@ fn estimate_latent(
     let jobs = create_jobs(ntot, block_size);
     let njobs = jobs.len() as u64;
 
-    let pb = ProgressBar::new(njobs);
-    let mut chunks = vec![];
+    let mut chunks = jobs
+        .par_iter()
+        .progress_count(njobs)
+        .map(|&(lb, ub)| {
+            let x_nd = data_vec
+                .read_columns_tensor(lb..ub)
+                .expect("read columns")
+                .transpose(0, 1)
+                .expect("transpose")
+                .to_device(dev)
+                .expect("to dev");
+            let (z_nk, _) = encoder.forward_t(&x_nd, false).expect("forward");
+            (
+                lb,
+                z_nk.to_device(&candle_core::Device::Cpu).expect("to cpu"),
+            )
+        })
+        .collect::<Vec<_>>();
 
-    for &(lb, ub) in jobs.iter() {
-        let x_nd = data_vec
-            .read_columns_tensor(lb..ub)?
-            .transpose(0, 1)?
-            .to_device(dev)?;
-        let (z_nk, _) = encoder.forward_t(&x_nd, false)?;
-
-        chunks.push(z_nk.to_device(&candle_core::Device::Cpu)?.clone());
-        pb.inc(1);
-    }
-
+    chunks.sort_by_key(|&(lb, _)| lb);
+    let chunks = chunks.into_iter().map(|(_, z_nk)| z_nk).collect::<Vec<_>>();
     let out = Tensor::cat(&chunks, 0)?;
-
     Ok(out)
 }
+
+////////////////////////////////////////////////////////
+// Fit topic model using VAE on collapsed data matrix //
+////////////////////////////////////////////////////////
 
 fn fit_topic_model(
     data_dn: &DMatrix<f32>,
@@ -272,6 +288,10 @@ fn fit_topic_model(
 
     Ok((enc, dec, parameters, llik))
 }
+
+//////////////////////////////////////////
+// read data files and batch membership //
+//////////////////////////////////////////
 
 fn read_data_vec_membership(args: EmbedArgs) -> anyhow::Result<(SparseIoVec, Vec<Box<str>>)> {
     // push data files and collect batch membership
