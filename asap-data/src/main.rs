@@ -79,11 +79,11 @@ pub struct TakeColumnsArgs {
     data_file: Box<str>,
 
     /// Column indices to take
-    #[arg(short, long)]
+    #[arg(short, long, required = true)]
     columns: Vec<usize>,
 
     /// Output file
-    #[arg(short, long)]
+    #[arg(short, long, required = true)]
     output: Box<str>,
 
     /// backend to use (`hdf5` or `zarr`)

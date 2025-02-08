@@ -23,7 +23,9 @@ use candle_model_encoder::NonNegEncoder;
 use clap::{Parser, ValueEnum};
 use indicatif::ParallelProgressIterator;
 use log::info;
+use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::Inference;
+use matrix_param::traits::ParamIo;
 use matrix_util::common_io::{extension, read_lines};
 use matrix_util::traits::*;
 use rayon::prelude::*;
@@ -112,9 +114,6 @@ struct EmbedArgs {
     #[arg(long, value_enum, default_value = "cpu")]
     device: ComputeDevice,
 
-    #[arg(long, short, default_value_t = 1)]
-    nround: usize,
-
     /// verbosity
     #[arg(long, short)]
     verbose: bool,
@@ -158,76 +157,65 @@ fn main() -> anyhow::Result<()> {
 
     let mut vae = candle_inference::Vae::build(&enc, &dec, &parameters);
 
-    let nround = args.nround;
-    let mut llik_out = vec![];
-    for rr in 0..nround {
-        // 1. Randomly project the columns
-        info!("Random projection of data onto {} dims", args.proj_dim);
-        let proj_out = data_vec.project_columns_with_batch_correction(
-            args.proj_dim,
-            Some(args.block_size.clone()),
-            Some(&batch_membership),
-        )?;
+    // let nround = args.nround;
+    // let mut llik_out = vec![];
+    // for rr in 0..nround {
+    // 1. Randomly project the columns
+    info!("Random projection of data onto {} dims", args.proj_dim);
+    let proj_out = data_vec.project_columns_with_batch_correction(
+        args.proj_dim,
+        Some(args.block_size.clone()),
+        Some(&batch_membership),
+    )?;
 
-        let proj_kn = proj_out.proj;
-        info!("Assigning {} columns to samples...", proj_kn.ncols());
+    let proj_kn = proj_out.proj;
+    info!("Assigning {} columns to samples...", proj_kn.ncols());
 
-        let nsamp = data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim))?;
-        info!("at most {} samples are assigned", nsamp);
+    let nsamp = data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim))?;
+    info!("at most {} samples are assigned", nsamp);
 
-        // 2. Register batch membership
-        if args.batch_files.is_some() && batch_membership.len() > 0 {
-            info!("Registering batch information");
-            data_vec.register_batches(&proj_kn, &batch_membership)?;
-        }
-
-        // 3. Collapsing columns
-        info!("Collapsing columns... into {} samples", nsamp);
-        let collapse_out = data_vec.collapse_columns(
-            args.down_sample,
-            args.reference_batch.clone(),
-            Some(args.knn),
-            Some(args.iter_opt),
-        )?;
-
-        // 4. Train embedded topic model
-        info!("Start training, round {} ...", rr + 1);
-        let x1_nd = collapse_out.mu.posterior_mean().transpose().clone();
-
-        // let x0 = collapse_out.mu_residual.map(|x| x.posterior_mean().clone());
-
-        // let mut data_loader = match x0 {
-        //     Some(x0_dn) => {
-        //         let x0_nd = x0_dn.transpose();
-        //         InMemoryData::from_with_aux(&x1_nd, &x0_nd)?
-        //     }
-        //     None => InMemoryData::from(&x1_nd)?,
-        // };
-
-	let mut data_loader = InMemoryData::from(&x1_nd)?;
-
-        let llik = vae.train(&mut data_loader, &topic_likelihood, &train_config)?;
-        llik_out.extend(llik);
-        info!("End training {} epochs", train_config.num_epochs);
-
-        // 5. Revisit the data to recover latent states
-        for var in parameters.all_vars() {
-            var.to_device(&dev)?;
-        }
-
-        info!("Encoding latent states for all...");
-        let z_nk = estimate_latent(&data_vec, &enc, &train_config)?;
-
-	// todo: 
-
-        z_nk.to_tsv(&(args.out.to_string() + ".logit_latent.gz"))?;
-
-        dec.dictionary()
-            .weight()
-            .to_tsv(&(args.out.to_string() + ".logit_dict.gz"))?;
+    // 2. Register batch membership
+    if args.batch_files.is_some() && batch_membership.len() > 0 {
+        info!("Registering batch information");
+        data_vec.register_batches(&proj_kn, &batch_membership)?;
     }
 
-    let llik_out: Mat = Mat::from_row_iterator(llik_out.len(), 1, llik_out.into_iter());
+    // 3. Collapsing columns
+    info!("Collapsing columns... into {} samples", nsamp);
+    let collapse_out = data_vec.collapse_columns(
+        args.down_sample,
+        args.reference_batch.clone(),
+        Some(args.knn),
+        Some(args.iter_opt),
+    )?;
+
+    let delta = collapse_out.delta.as_ref();
+    if let Some(param) = delta {
+        param.write_tsv(&(args.out.to_string() + ".delta"))?;
+    }
+
+    // 4. Train embedded topic model on the foreground data x1
+    let x_nd = collapse_out.mu.posterior_mean().transpose().clone();
+    let mut data_loader = InMemoryData::from(&x_nd)?;
+
+    info!("Start training ...");
+    let llik = vae.train(&mut data_loader, &topic_likelihood, &train_config)?;
+    info!("Done with training {} epochs", train_config.num_epochs);
+
+    // 5. Revisit the data to recover latent states
+    info!("Encoding latent states for all...");
+    for var in parameters.all_vars() {
+        var.to_device(&dev)?;
+    }
+    let z_nk = estimate_latent(&data_vec, &enc, &train_config, delta)?;
+
+    z_nk.to_tsv(&(args.out.to_string() + ".logit_latent.gz"))?;
+
+    dec.dictionary()
+        .weight()
+        .to_tsv(&(args.out.to_string() + ".logit_dict.gz"))?;
+
+    let llik_out: Mat = Mat::from_row_iterator(llik.len(), 1, llik.into_iter());
     llik_out.to_tsv(&(args.out.to_string() + ".llik.gz"))?;
 
     info!("done");
@@ -242,6 +230,7 @@ fn estimate_latent(
     data_vec: &SparseIoVec,
     encoder: &NonNegEncoder,
     train_config: &candle_inference::TrainConfig,
+    delta: Option<&GammaMatrix>,
 ) -> anyhow::Result<Tensor> {
     let dev = &train_config.device;
     let ntot = data_vec.num_columns()?;
@@ -252,17 +241,28 @@ fn estimate_latent(
 
     let arc_enc = Arc::new(Mutex::new(encoder));
 
+    let delta = delta.map(|x| x.posterior_mean());
+
+    // todo: make *x /= d more stable
+
     let mut chunks = jobs
         .par_iter()
         .progress_count(njobs)
         .map(|&(lb, ub)| {
-            let x_nd = data_vec
-                .read_columns_tensor(lb..ub)
-                .expect("read columns")
-                .transpose(0, 1)
-                .expect("transpose")
-                .to_device(dev)
-                .expect("to dev");
+            let mut x_dn = data_vec.read_columns_dmatrix(lb..ub).expect("read columns");
+
+            if let Some(delta) = delta {
+                let batches = data_vec.get_batch_membership(lb..ub);
+                x_dn.column_iter_mut()
+                    .zip(batches)
+                    .for_each(|(mut x_j, b)| {
+                        let d_j = delta.column(b);
+                        x_j.zip_apply(&d_j, |x, d| *x /= d);
+                    });
+            }
+
+            let (d, n) = x_dn.shape();
+            let x_nd = Tensor::from_slice(x_dn.as_slice(), (n, d), dev).expect("tensor x_nd");
 
             let enc = arc_enc.lock().expect("lock");
             let (z_nk, _) = enc.forward_t(&x_nd, false).expect("forward");
