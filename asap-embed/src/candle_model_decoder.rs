@@ -122,9 +122,3 @@ impl DecoderModule for TopicDecoder {
         self.n_topics
     }
 }
-
-////////////////////////////////////////
-// Topic Model with negative features //
-////////////////////////////////////////
-
-// pub struct

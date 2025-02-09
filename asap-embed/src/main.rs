@@ -98,7 +98,7 @@ struct EmbedArgs {
     latent_topics: usize,
 
     /// Encoder layers
-    #[arg(long, default_values_t = vec![128,16])]
+    #[arg(long, default_values_t = vec![128,1024,128])]
     encoder_layers: Vec<usize>,
 
     #[arg(long, default_value_t = 1000)]
@@ -243,7 +243,7 @@ fn estimate_latent(
 
     let delta = delta.map(|x| x.posterior_mean());
 
-    // todo: make *x /= d more stable
+    let eps = 1e-4;
 
     let mut chunks = jobs
         .par_iter()
@@ -253,11 +253,15 @@ fn estimate_latent(
 
             if let Some(delta) = delta {
                 let batches = data_vec.get_batch_membership(lb..ub);
+
                 x_dn.column_iter_mut()
                     .zip(batches)
                     .for_each(|(mut x_j, b)| {
                         let d_j = delta.column(b);
-                        x_j.zip_apply(&d_j, |x, d| *x /= d);
+                        let xsum = x_j.sum();
+                        let dsum = d_j.sum();
+                        let scale = if dsum > 0.0 { xsum / dsum } else { 1.0 };
+                        x_j.zip_apply(&d_j, |x_ij, d_ij| *x_ij /= d_ij * scale + eps);
                     });
             }
 
