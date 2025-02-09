@@ -37,22 +37,19 @@ impl SoftmaxLinear {
     pub fn new(weight: Tensor) -> Self {
         Self { weight }
     }
-    pub fn weight(&self) -> &Tensor {
-        &self.weight
+    pub fn log_weight(&self) -> Result<Tensor> {
+        ops::log_softmax(&self.weight, 0)
     }
 }
 
 impl Module for SoftmaxLinear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let w = match *x.dims() {
-            [b1, b2, _, _] => self.weight.broadcast_left((b1, b2))?.t()?,
-            [bsize, _, _] => self.weight.broadcast_left(bsize)?.t()?,
-            _ => self.weight.t()?,
+        let log_w = match *x.dims() {
+            [b1, b2, _, _] => self.log_weight()?.broadcast_left((b1, b2))?.t()?,
+            [bsize, _, _] => self.log_weight()?.broadcast_left(bsize)?.t()?,
+            _ => self.log_weight()?.t()?,
         };
-
-        // note: this is K x D
-        let logit_w = ops::log_softmax(&w, 0)?;
-        x.matmul(&logit_w.exp()?)
+        x.matmul(&log_w.exp()?)
     }
 }
 
