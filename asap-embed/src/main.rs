@@ -212,7 +212,7 @@ fn main() -> anyhow::Result<()> {
     z_nk.to_tsv(&(args.out.to_string() + ".logit_latent.gz"))?;
 
     dec.dictionary()
-        .weight()
+        .log_weight()?
         .to_tsv(&(args.out.to_string() + ".logit_dict.gz"))?;
 
     let llik_out: Mat = Mat::from_row_iterator(llik.len(), 1, llik.into_iter());
