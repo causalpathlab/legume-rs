@@ -17,23 +17,6 @@ pub trait EncoderModuleT {
     /// * `kl_loss_n` - KL loss (n x 1)
     fn forward_t(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)>;
 
-    /// An encoder that spits out two results (latent inference, KL loss)
-    ///
-    /// # Arguments
-    /// * `x1_nd` - foreground input data (n x d)
-    /// * `x0_nd` - background input data (n x d)
-    /// * `train` - whether to use dropout/batchnorm or not
-    ///
-    /// # Returns `(z_nk, kl_loss_n)`
-    /// * `z_nk` - latent inference (n x k)
-    /// * `kl_loss_n` - KL loss (n x 1)
-    fn adjusted_forward_t(
-        &self,
-        x1_nd: &Tensor,
-        x0_nd: Option<&Tensor>,
-        train: bool,
-    ) -> Result<(Tensor, Tensor)>;
-
     fn dim_obs(&self) -> usize;
     fn dim_latent(&self) -> usize;
 }
@@ -48,29 +31,6 @@ pub struct NonNegEncoder {
 }
 
 impl EncoderModuleT for NonNegEncoder {
-    fn adjusted_forward_t(
-        &self,
-        x1_nd: &Tensor,
-        x0_nd: Option<&Tensor>,
-        train: bool,
-    ) -> Result<(Tensor, Tensor)> {
-        if let Some(x0_nd) = x0_nd {
-            let (z1_mean_nk, z1_lnvar_nk) = self.latent_params(x1_nd, train)?;
-            let z1_nk = self.reparameterize(&z1_mean_nk, &z1_lnvar_nk, train)?;
-            let (z0_mean_nk, z0_lnvar_nk) = self.latent_params(x0_nd, train)?;
-            let z0_nk = self.reparameterize(&z0_mean_nk, &z0_lnvar_nk, train)?;
-            let z_nk = (&z1_nk - &z0_nk)?;
-
-            Ok((
-                ops::log_softmax(&z_nk, 1)?,
-                (gaussian_kl_loss(&z1_mean_nk, &z1_lnvar_nk)?
-                    + gaussian_kl_loss(&z0_mean_nk, &z0_lnvar_nk)?)?,
-            ))
-        } else {
-            self.forward_t(x1_nd, train)
-        }
-    }
-
     fn forward_t(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
         let (z_mean_nk, z_lnvar_nk) = self.latent_params(x_nd, train)?;
         let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
@@ -91,9 +51,10 @@ impl EncoderModuleT for NonNegEncoder {
 impl NonNegEncoder {
     pub fn batch_norm_input(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
         let eps = 1e-4;
-        let x_log1p_nd = (x_nd + 1.)?.log()?;
-        let x_norm_nd = x_log1p_nd.broadcast_div(&(x_log1p_nd.sum(0)? + eps)?)?;
-        self.bn.forward_t(&x_norm_nd, train)
+        let depth = x_nd.dims()[0] as f64;
+        let x_norm_nd = x_nd.broadcast_div(&(x_nd.sum(0)? + eps)?)?;
+        let x_log1p_nd = ((x_norm_nd * depth)? + 1.)?.log()?;
+        self.bn.forward_t(&x_log1p_nd, train)
     }
 
     pub fn latent_params(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
