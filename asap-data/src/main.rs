@@ -38,6 +38,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Columns(args) => {
             take_columns(args)?;
         }
+        Commands::ReorderRows(args) => {
+            reorder_rows(args)?;
+        }
     }
 
     Ok(())
@@ -63,6 +66,8 @@ struct Cli {
 enum Commands {
     /// Build faster backend data from mtx
     Build(RunBuildArgs),
+    /// Reorder rows
+    ReorderRows(ReorderRowsArgs),
     /// Take columns from the sparse matrix
     Columns(TakeColumnsArgs),
     /// Filter out rows and columns (Q/C)
@@ -71,6 +76,20 @@ enum Commands {
     Stat(RunStatArgs),
     /// Simulate a sparse matrix data
     Simulate(RunSimulateArgs),
+}
+
+#[derive(Args)]
+pub struct ReorderRowsArgs {
+    /// Data file -- either `.zarr` or `.h5`
+    data_file: Box<str>,
+
+    /// Row/feature name file (name per each line; `.tsv.gz` or `.tsv`)
+    #[arg(short, long, required = true)]
+    row: Box<str>,
+
+    /// backend to use (`hdf5` or `zarr`)
+    #[arg(short, long, value_enum, default_value = "zarr")]
+    backend: SparseIoBackend,
 }
 
 #[derive(Args)]
@@ -187,6 +206,39 @@ pub struct RunSimulateArgs {
 /////////////////////
 // implementations //
 /////////////////////
+
+fn reorder_rows(args: &ReorderRowsArgs) -> anyhow::Result<()> {
+    let data_file = args.data_file.clone();
+
+    let row_file = args.row.clone();
+    let (_names, _) = common_io::read_lines_of_words(&row_file, -1)?;
+
+    let max_row_name_idx: usize = 3;
+    let name_columns = 0..max_row_name_idx;
+    let name_sep = "_";
+
+    let row_names_order: Vec<Box<str>> = _names
+        .iter()
+        .map(|x| {
+            let s = name_columns
+                .clone()
+                .into_iter()
+                .filter_map(|i| x.get(i))
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(name_sep)
+                .parse::<String>()
+                .expect("invalid name");
+            s.into_boxed_str()
+        })
+        .collect();
+
+    let backend = args.backend.clone();
+    let mut data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
+    data.reorder_rows(&row_names_order)?;
+
+    Ok(())
+}
 
 fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
     use matrix_util::traits::IoOps;
