@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::sparse_matrix_hdf5;
 use crate::sparse_matrix_zarr;
 
@@ -23,7 +25,6 @@ pub enum SparseIoBackend {
     HDF5,
 }
 
-#[allow(dead_code)]
 /// Open a sparse matrix io (backend)
 /// * `backend_file`: file path to the sparse matrix
 /// * `backend`: backend type (HDF5 or Zarr)
@@ -41,7 +42,6 @@ pub fn open_sparse_matrix(
     }
 }
 
-#[allow(dead_code)]
 /// Open a sparse matrix io (backend)
 /// * `backend_file`: file path to the sparse matrix
 /// * `backend`: backend type (HDF5 or Zarr)
@@ -77,7 +77,6 @@ pub fn create_sparse_from_triplets(
     }
 }
 
-#[allow(dead_code)]
 /// Create a sparse matrix io (backend) with 10x mtx
 /// * `mtx_file`: file path to the 10x mtx
 /// * `backend_file`: file path to the sparse matrix
@@ -99,7 +98,6 @@ pub fn create_sparse_from_mtx_file(
     }
 }
 
-#[allow(dead_code)]
 /// Create a sparse matrix io (backend) with dense `Array2`
 /// * `data`: data matrix
 /// * `backend_file`: file path to the sparse matrix
@@ -121,7 +119,6 @@ pub fn create_sparse_from_ndarray(
     }
 }
 
-#[allow(dead_code)]
 /// Create a sparse matrix io (backend) with dense `DMatrix`
 /// * `data`: data matrix
 /// * `backend_file`: file path to the sparse matrix
@@ -147,14 +144,12 @@ pub fn create_sparse_from_dmatrix(
 // type conversion //
 /////////////////////
 
-#[allow(dead_code)]
 pub fn sparse_io_box_to_arc<T>(
     boxed: Box<dyn SparseIo<IndexIter = T>>,
 ) -> Arc<dyn SparseIo<IndexIter = T>> {
     Arc::from(boxed)
 }
 
-#[allow(dead_code)]
 pub trait SparseIo: Sync + Send {
     type IndexIter: IntoIterator<Item = usize> + FromIterator<usize>;
 
@@ -781,7 +776,6 @@ pub trait SparseIo: Sync + Send {
 //     // iter.clone().into_iter().count()
 // }
 
-#[allow(dead_code)]
 pub fn build_name2index_map(_names: &Vec<Box<str>>) -> HashMap<Box<str>, usize> {
     _names
         .iter()
@@ -790,7 +784,6 @@ pub fn build_name2index_map(_names: &Vec<Box<str>>) -> HashMap<Box<str>, usize> 
         .collect()
 }
 
-#[allow(dead_code)]
 pub fn take_subset_indices_names(
     new_indices: &Vec<usize>,
     ntot: usize,
@@ -816,7 +809,6 @@ pub fn take_subset_indices_names(
     (old2new, new_names)
 }
 
-#[allow(dead_code)]
 pub fn take_subset_indices_names_if_needed(
     new_indices: Option<&Vec<usize>>,
     ntot: Option<usize>,
@@ -832,7 +824,6 @@ pub fn take_subset_indices_names_if_needed(
     }
 }
 
-#[allow(dead_code)]
 pub fn ndarray_to_triplets(array: &Array2<f32>) -> Vec<(u64, u64, f32)> {
     let eps = 1e-6;
     array
@@ -842,7 +833,6 @@ pub fn ndarray_to_triplets(array: &Array2<f32>) -> Vec<(u64, u64, f32)> {
         .collect::<Vec<(u64, u64, f32)>>()
 }
 
-#[allow(dead_code)]
 pub fn dmatrix_to_triplets(matrix: &DMatrix<f32>) -> Vec<(u64, u64, f32)> {
     let (nrow, _) = matrix.shape();
     let eps = 1e-6;
