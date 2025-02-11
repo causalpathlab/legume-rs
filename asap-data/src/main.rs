@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Columns(args) => {
             take_columns(args)?;
         }
-        Commands::ReorderRows(args) => {
+        Commands::RowsByName(args) => {
             reorder_rows(args)?;
         }
     }
@@ -67,7 +67,7 @@ enum Commands {
     /// Build faster backend data from mtx
     Build(RunBuildArgs),
     /// Reorder rows
-    ReorderRows(ReorderRowsArgs),
+    RowsByName(ReorderRowsArgs),
     /// Take columns from the sparse matrix
     Columns(TakeColumnsArgs),
     /// Filter out rows and columns (Q/C)
@@ -95,10 +95,11 @@ pub struct ReorderRowsArgs {
 #[derive(Args)]
 pub struct TakeColumnsArgs {
     /// Data file -- either `.zarr` or `.h5`
+    #[arg(short, long, required = true)]
     data_file: Box<str>,
 
-    /// Column indices to take
-    #[arg(short, long, required = true)]
+    /// Column indices to take: e.g., `0,1,2,3`
+    #[arg(short, long, required = true, value_delimiter = ',')]
     columns: Vec<usize>,
 
     /// Output file
@@ -213,9 +214,9 @@ fn reorder_rows(args: &ReorderRowsArgs) -> anyhow::Result<()> {
     let row_file = args.row.clone();
     let (_names, _) = common_io::read_lines_of_words(&row_file, -1)?;
 
-    let max_row_name_idx: usize = 3;
+    let max_row_name_idx: usize = MAX_ROW_NAME_IDX;
     let name_columns = 0..max_row_name_idx;
-    let name_sep = "_";
+    let name_sep = ROW_SEP;
 
     let row_names_order: Vec<Box<str>> = _names
         .iter()
