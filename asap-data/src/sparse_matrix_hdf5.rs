@@ -5,8 +5,6 @@ use matrix_util::common_io::*;
 use std::ops::Range;
 use std::sync::Arc;
 
-const MAX_ROW_NAME_IDX: usize = 3;
-const MAX_COLUMN_NAME_IDX: usize = 10;
 const NUM_CHUNKS: usize = 1000;
 const MIN_CHUNK_SIZE: usize = 1000;
 const COMPRESSION_LEVEL: u8 = 3;
@@ -345,8 +343,13 @@ impl SparseIo for SparseMtxData {
     /// Set row names for the matrix
     /// * `row_name_file`: a file each line contains row name words
     fn register_row_names_file(self: &mut Self, row_name_file: &str) {
-        self.register_names_file("/row_names", row_name_file, 0..self.max_row_name_idx, "_")
-            .expect("failed to add row names");
+        self.register_names_file(
+            "/row_names",
+            row_name_file,
+            0..self.max_row_name_idx,
+            ROW_SEP,
+        )
+        .expect("failed to add row names");
     }
 
     /// Set row names for the matrix
@@ -363,7 +366,7 @@ impl SparseIo for SparseMtxData {
             "/column_names",
             column_name_file,
             0..self.max_column_name_idx,
-            "@",
+            COLUMN_SEP,
         )
         .expect("failed to add column names");
     }
