@@ -13,6 +13,7 @@ use log::info;
 use matrix_util::traits::IoOps;
 use matrix_util::*;
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 type SData = dyn SparseIo<IndexIter = Vec<usize>>;
@@ -38,7 +39,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Columns(args) => {
             take_columns(args)?;
         }
-        Commands::RowsByName(args) => {
+        Commands::SortRows(args) => {
             reorder_rows(args)?;
         }
     }
@@ -66,11 +67,13 @@ struct Cli {
 enum Commands {
     /// Build faster backend data from mtx
     Build(RunBuildArgs),
-    /// Reorder rows
-    RowsByName(ReorderRowsArgs),
-    /// Take columns from the sparse matrix
+    /// Sort rows according to the order of row names specified in a
+    /// row name file
+    SortRows(SortRowsArgs),
+    /// Take columns from the sparse matrix and save it to an `output`
+    /// file as a dense matrix
     Columns(TakeColumnsArgs),
-    /// Filter out rows and columns (Q/C)
+    /// Filter out rows and columns by number of non-zeros (Q/C)
     Squeeze(RunSqueezeArgs),
     /// Take basic statistics from a sparse matrix
     Stat(RunStatArgs),
@@ -79,15 +82,15 @@ enum Commands {
 }
 
 #[derive(Args)]
-pub struct ReorderRowsArgs {
+pub struct SortRowsArgs {
     /// Data file -- either `.zarr` or `.h5`
     data_file: Box<str>,
 
     /// Row/feature name file (name per each line; `.tsv.gz` or `.tsv`)
     #[arg(short, long, required = true)]
-    row: Box<str>,
+    row_file: Box<str>,
 
-    /// backend to use (`hdf5` or `zarr`)
+    /// backend
     #[arg(short, long, value_enum, default_value = "zarr")]
     backend: SparseIoBackend,
 }
@@ -95,18 +98,21 @@ pub struct ReorderRowsArgs {
 #[derive(Args)]
 pub struct TakeColumnsArgs {
     /// Data file -- either `.zarr` or `.h5`
-    #[arg(short, long, required = true)]
     data_file: Box<str>,
 
     /// Column indices to take: e.g., `0,1,2,3`
-    #[arg(short, long, required = true, value_delimiter = ',')]
-    columns: Vec<usize>,
+    #[arg(short, long, value_delimiter = ',')]
+    columns: Option<Vec<usize>>,
+
+    /// Column name file where each line is a column name
+    #[arg(long)]
+    name_file: Option<Box<str>>,
 
     /// Output file
     #[arg(short, long, required = true)]
     output: Box<str>,
 
-    /// backend to use (`hdf5` or `zarr`)
+    /// backend
     #[arg(short, long, value_enum, default_value = "zarr")]
     backend: SparseIoBackend,
 }
@@ -124,7 +130,7 @@ pub struct RunBuildArgs {
     #[arg(short, long)]
     col: Option<Box<str>>,
 
-    /// Backend to use (`hdf5` or `zarr`)
+    /// backend
     #[arg(long, value_enum, default_value = "zarr")]
     backend: SparseIoBackend,
 
@@ -160,7 +166,7 @@ pub struct RunStatArgs {
     /// Data file -- .zarr or .h5 file
     data_file: Box<str>,
 
-    /// backend to use (`hdf5` or `zarr`)
+    /// backend
     #[arg(short, long, value_enum, default_value = "zarr")]
     backend: SparseIoBackend,
 
@@ -199,7 +205,7 @@ pub struct RunSimulateArgs {
     #[arg(long)]
     pub seed: Option<u64>,
 
-    /// backend to use (`hdf5` or `zarr`)
+    /// backend
     #[arg(long, value_enum, default_value = "zarr")]
     backend: SparseIoBackend,
 }
@@ -208,26 +214,20 @@ pub struct RunSimulateArgs {
 // implementations //
 /////////////////////
 
-fn reorder_rows(args: &ReorderRowsArgs) -> anyhow::Result<()> {
+fn reorder_rows(args: &SortRowsArgs) -> anyhow::Result<()> {
     let data_file = args.data_file.clone();
 
-    let row_file = args.row.clone();
+    let row_file = args.row_file.clone();
     let (_names, _) = common_io::read_lines_of_words(&row_file, -1)?;
-
-    let max_row_name_idx: usize = MAX_ROW_NAME_IDX;
-    let name_columns = 0..max_row_name_idx;
-    let name_sep = ROW_SEP;
 
     let row_names_order: Vec<Box<str>> = _names
         .iter()
         .map(|x| {
-            let s = name_columns
-                .clone()
-                .into_iter()
+            let s = (0..MAX_ROW_NAME_IDX)
                 .filter_map(|i| x.get(i))
                 .map(|x| x.to_string())
                 .collect::<Vec<_>>()
-                .join(name_sep)
+                .join(ROW_SEP)
                 .parse::<String>()
                 .expect("invalid name");
             s.into_boxed_str()
@@ -245,12 +245,49 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
     use matrix_util::traits::IoOps;
 
     let data_file = args.data_file.clone();
-    let columns = args.columns.clone();
-    let output = args.output.clone();
-    let backend = args.backend.clone();
 
-    let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
-    data.read_columns_ndarray(columns)?.to_tsv(&output)?;
+    let columns = args.columns.clone();
+    let column_name_file = args.name_file.clone();
+    let backend = args.backend.clone();
+    let output = args.output.clone();
+
+    if let Some(columns) = columns {
+        let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
+        data.read_columns_ndarray(columns)?.to_tsv(&output)?;
+    } else if let Some(column_file) = column_name_file {
+        let (_names, _) = common_io::read_lines_of_words(&column_file, -1)?;
+
+        let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
+        let col_names_map = data
+            .column_names()
+            .expect("column names not found in data file")
+            .iter()
+            .enumerate()
+            .map(|(i, x)| (x.clone(), i))
+            .collect::<HashMap<_, _>>();
+
+        let col_names_order = _names
+            .iter()
+            .map(|x| {
+                let s = (0..MAX_COLUMN_NAME_IDX)
+                    .filter_map(|i| x.get(i))
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(COLUMN_SEP)
+                    .parse::<String>()
+                    .expect("invalid name");
+                s.into_boxed_str()
+            })
+            .filter_map(|x| col_names_map.get(&x))
+            .collect::<Vec<_>>();
+
+        let columns: Vec<usize> = col_names_order.iter().map(|&x| x.clone()).collect();
+        data.read_columns_ndarray(columns)?.to_tsv(&output)?;
+    } else {
+        return Err(anyhow::anyhow!(
+            "either `columns` or `name_file` must be provided"
+        ));
+    }
 
     Ok(())
 }
