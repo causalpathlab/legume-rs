@@ -23,3 +23,14 @@ pub fn create_jobs(ntot: usize, block_size: usize) -> Vec<(usize, usize)> {
         })
         .collect::<Vec<_>>()
 }
+
+pub fn parse_comma_separated<T>(s: &str) -> Result<Vec<T>, T::Err>
+where
+    T: std::str::FromStr + std::fmt::Display,
+{
+    s.split(',').map(|x| x.parse::<T>()).collect()
+}
+
+pub fn parse_encoder_layers(s: &str) -> Result<Vec<usize>, <usize as std::str::FromStr>::Err> {
+    parse_comma_separated(s)
+}

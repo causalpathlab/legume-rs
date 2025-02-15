@@ -61,7 +61,7 @@ impl NonNegEncoder {
         let batch_nd = self.batch_norm_input(x_nd, train)?;
         let x_nl = self.fc.forward_t(&batch_nd, train)?;
         let z_mean_nk = self.z_mean.forward_t(&x_nl, train)?;
-        let z_lnvar_nk = self.z_lnvar.forward_t(&x_nl, train)?;
+        let z_lnvar_nk = self.z_lnvar.forward_t(&x_nl, train)?.clamp(-4., 4.)?;
         Ok((z_mean_nk, z_lnvar_nk))
     }
 
