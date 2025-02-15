@@ -69,11 +69,11 @@ struct EmbedArgs {
 
     /// Batch membership files (comma-separated names). Each bach file
     /// should correspond to each data file.
-    #[arg(long, short)]
+    #[arg(long, short, value_delimiter(','))]
     batch_files: Option<Vec<Box<str>>>,
 
     /// Reference batch name (comma-separated names)
-    #[arg(long)]
+    #[arg(long, value_delimiter(','))]
     reference_batch: Option<Vec<Box<str>>>,
 
     /// #k-nearest neighbours within each batch
@@ -98,7 +98,7 @@ struct EmbedArgs {
     latent_topics: usize,
 
     /// Encoder layers
-    #[arg(long, default_values_t = vec![128,1024,128])]
+    #[arg(long, value_delimiter(','), default_values_t = vec![128,1024,128])]
     encoder_layers: Vec<usize>,
 
     #[arg(long, default_value_t = 1000)]
@@ -143,6 +143,7 @@ fn main() -> anyhow::Result<()> {
 
     info!("Reading data files...");
     let (mut data_vec, batch_membership) = read_data_vec_membership(args.clone())?;
+    info!("Reference batches: {:?}", args.reference_batch);
 
     let dd = data_vec.num_rows()?;
     let kk = args.latent_topics;
@@ -152,6 +153,7 @@ fn main() -> anyhow::Result<()> {
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
     info!("Estimate {} topics", kk);
+    info!("Encoder layers: {:?}", args.encoder_layers);
     let enc = NonNegEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
     let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
 
