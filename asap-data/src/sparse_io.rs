@@ -10,8 +10,8 @@ pub use ndarray::prelude::*;
 
 pub const MAX_ROW_NAME_IDX: usize = 3;
 pub const MAX_COLUMN_NAME_IDX: usize = 10;
-pub const COLUMN_SEP: &str = "_";
-pub const ROW_SEP: &str = "@";
+pub const COLUMN_SEP: &str = "@";
+pub const ROW_SEP: &str = "_";
 
 use clap::ValueEnum;
 use indicatif::ParallelProgressIterator;

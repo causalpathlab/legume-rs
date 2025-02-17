@@ -6,9 +6,10 @@ mod statistics;
 
 use crate::sparse_io::*;
 use crate::statistics::RunningStatistics;
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use env_logger;
 use indicatif::ParallelProgressIterator;
+use indicatif::{ProgressBar, ProgressDrawTarget};
 use log::info;
 use matrix_util::traits::IoOps;
 use matrix_util::*;
@@ -33,6 +34,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Stat(args) => {
             run_stat(args)?;
         }
+        Commands::Statistics(args) => {
+            run_stat(args)?;
+        }
         Commands::Squeeze(args) => {
             run_squeeze(args)?;
         }
@@ -41,6 +45,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::SortRows(args) => {
             reorder_rows(args)?;
+        }
+        Commands::MergeMtx(args) => {
+            run_merge(args)?;
         }
     }
 
@@ -67,16 +74,26 @@ struct Cli {
 enum Commands {
     /// Build faster backend data from mtx
     Build(RunBuildArgs),
+
     /// Sort rows according to the order of row names specified in a
     /// row name file
     SortRows(SortRowsArgs),
+
     /// Take columns from the sparse matrix and save it to an `output`
     /// file as a dense matrix
     Columns(TakeColumnsArgs),
+
+    /// Merge multiple 10x `.mtx` files
+    MergeMtx(MergeMtxArgs),
+
     /// Filter out rows and columns by number of non-zeros (Q/C)
     Squeeze(RunSqueezeArgs),
+
     /// Take basic statistics from a sparse matrix
+    Statistics(RunStatArgs),
+    /// Simulate a sparse matrix data
     Stat(RunStatArgs),
+
     /// Simulate a sparse matrix data
     Simulate(RunSimulateArgs),
 }
@@ -137,6 +154,45 @@ pub struct RunBuildArgs {
     /// Output file header: {output}.{backend}
     #[arg(short, long)]
     output: Option<Box<str>>,
+}
+
+#[derive(Args)]
+pub struct MergeMtxArgs {
+    /// data file directories
+    #[arg(value_delimiter = ',', required = true)]
+    data_directories: Vec<Box<str>>,
+
+    /// backend
+    #[arg(long, value_enum, default_value = "zarr")]
+    backend: SparseIoBackend,
+
+    /// Output file header: {output}.{backend}
+    #[arg(short, long, required = true)]
+    output: Box<str>,
+
+    /// matrix file name
+    #[arg(short, long, default_value = "matrix.mtx")]
+    mtx_file_name: Box<str>,
+
+    /// feature/row file name
+    #[arg(short, long, default_value = "genes.tsv.gz")]
+    feature_file_name: Box<str>,
+
+    /// number of words to use for feature names
+    #[arg(long, default_value_t = 2)]
+    num_feature_name_words: usize,
+
+    /// barcode/column file name
+    #[arg(short, long, default_value = "barcodes.tsv.gz")]
+    barcode_file_name: Box<str>,
+
+    /// number of words to use for barcode names
+    #[arg(long, default_value_t = 5)]
+    num_barcode_name_words: usize,
+
+    /// verbose mode
+    #[arg(short, long, action = ArgAction::Count)]
+    verbose: u8,
 }
 
 #[derive(Args)]
@@ -214,26 +270,43 @@ pub struct RunSimulateArgs {
 // implementations //
 /////////////////////
 
-fn reorder_rows(args: &SortRowsArgs) -> anyhow::Result<()> {
-    let data_file = args.data_file.clone();
-
-    let row_file = args.row_file.clone();
+fn read_row_names(row_file: Box<str>, max_row_name_idx: usize) -> anyhow::Result<Vec<Box<str>>> {
     let (_names, _) = common_io::read_lines_of_words(&row_file, -1)?;
-
-    let row_names_order: Vec<Box<str>> = _names
-        .iter()
+    Ok(_names
+        .into_iter()
         .map(|x| {
-            let s = (0..MAX_ROW_NAME_IDX)
+            let s = (0..x.len().min(max_row_name_idx))
                 .filter_map(|i| x.get(i))
                 .map(|x| x.to_string())
                 .collect::<Vec<_>>()
                 .join(ROW_SEP)
                 .parse::<String>()
-                .expect("invalid name");
+                .expect("invalid row name");
             s.into_boxed_str()
         })
-        .collect();
+        .collect())
+}
 
+fn read_col_names(col_file: Box<str>, max_column_name_idx: usize) -> anyhow::Result<Vec<Box<str>>> {
+    let (_names, _) = common_io::read_lines_of_words(&col_file, -1)?;
+    Ok(_names
+        .into_iter()
+        .map(|x| {
+            let s = (0..x.len().min(max_column_name_idx))
+                .filter_map(|i| x.get(i))
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(COLUMN_SEP)
+                .parse::<String>()
+                .expect("invalid col name");
+            s.into_boxed_str()
+        })
+        .collect())
+}
+
+fn reorder_rows(args: &SortRowsArgs) -> anyhow::Result<()> {
+    let data_file = args.data_file.clone();
+    let row_names_order: Vec<Box<str>> = read_row_names(args.row_file.clone(), MAX_ROW_NAME_IDX)?;
     let backend = args.backend.clone();
     let mut data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
     data.reorder_rows(&row_names_order)?;
@@ -255,8 +328,7 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
         let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
         data.read_columns_ndarray(columns)?.to_tsv(&output)?;
     } else if let Some(column_file) = column_name_file {
-        let (_names, _) = common_io::read_lines_of_words(&column_file, -1)?;
-
+        let col_names = read_col_names(column_file, MAX_COLUMN_NAME_IDX)?;
         let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
         let col_names_map = data
             .column_names()
@@ -266,18 +338,8 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
             .map(|(i, x)| (x.clone(), i))
             .collect::<HashMap<_, _>>();
 
-        let col_names_order = _names
-            .iter()
-            .map(|x| {
-                let s = (0..MAX_COLUMN_NAME_IDX)
-                    .filter_map(|i| x.get(i))
-                    .map(|x| x.to_string())
-                    .collect::<Vec<_>>()
-                    .join(COLUMN_SEP)
-                    .parse::<String>()
-                    .expect("invalid name");
-                s.into_boxed_str()
-            })
+        let col_names_order = col_names
+            .into_iter()
             .filter_map(|x| col_names_map.get(&x))
             .collect::<Vec<_>>();
 
@@ -288,6 +350,213 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
             "either `columns` or `name_file` must be provided"
         ));
     }
+
+    Ok(())
+}
+
+fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
+    use std::path::Path;
+
+    let directories = args.data_directories.clone();
+
+    let mut mtx_files = vec![];
+    let mut row_files = vec![];
+    let mut col_files = vec![];
+    let mut batch_names = vec![];
+
+    for dir in directories.iter() {
+        let dir = dir.clone().into_string();
+
+        let mut sub_dir_vec = std::fs::read_dir(&dir)?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+
+        sub_dir_vec.sort_by_key(|entry| entry.file_name());
+
+        for sub in sub_dir_vec {
+            if let Some(sub_dir) = sub.path().to_str() {
+                let mut mtx: Option<Box<str>> = None;
+                let mut row: Option<Box<str>> = None;
+                let mut col: Option<Box<str>> = None;
+
+                if let Ok((_, base, _)) = common_io::dir_base_ext(&sub_dir) {
+                    let batch_name = Some(base);
+
+                    for x in std::fs::read_dir(&sub_dir)? {
+                        if let Some(_path) = x?.path().to_str() {
+                            let _path = _path.to_string();
+
+                            if _path.contains(args.mtx_file_name.as_ref()) {
+                                mtx = Some(_path.into_boxed_str());
+                            } else if _path.contains(args.feature_file_name.as_ref()) {
+                                row = Some(_path.into_boxed_str());
+                            } else if _path.contains(args.barcode_file_name.as_ref()) {
+                                col = Some(_path.into_boxed_str());
+                            }
+                        }
+                    }
+
+                    if let (Some(m), Some(r), Some(c), Some(b)) = (mtx, row, col, batch_name) {
+                        mtx_files.push(m);
+                        row_files.push(r);
+                        col_files.push(c);
+                        batch_names.push(b);
+                    }
+                }
+            }
+        }
+    }
+
+    let num_batches = batch_names.len();
+
+    info!("merging over {} batches ...", num_batches);
+
+    assert_eq!(num_batches, mtx_files.len());
+    assert_eq!(num_batches, row_files.len());
+    assert_eq!(num_batches, col_files.len());
+
+    if num_batches == 0 {
+        return Err(anyhow::anyhow!("No relevant files found"));
+    }
+
+    info!("Finding common rows/features ...");
+
+    let mut row_hash: HashMap<Box<str>, usize> = HashMap::new();
+
+    for i in 0..num_batches {
+        let row_names = read_row_names(row_files[i].clone(), args.num_feature_name_words)?;
+        for name in row_names.iter() {
+            let n = row_hash.entry(name.clone()).or_insert(0);
+            *n += 1;
+        }
+    }
+
+    let mut common_rows: Vec<Box<str>> = row_hash
+        .into_iter()
+        .filter_map(|(k, v)| {
+            if v == num_batches {
+                Some(k.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    common_rows.sort_by_key(|x| x.to_string());
+
+    let row_pos: HashMap<Box<str>, usize> = common_rows
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v.clone(), i))
+        .collect();
+
+    info!(
+        "Found {} common row/feature names across {} file sets",
+        row_pos.len(),
+        num_batches
+    );
+
+    info!("Elongating column/barcode names ...");
+
+    let column_names = col_files
+        .iter()
+        .zip(batch_names.iter())
+        .map(|(col_file, batch_name)| {
+            let col_names = read_col_names(col_file.clone(), args.num_barcode_name_words)
+                .expect(format!("").as_str());
+            col_names
+                .into_iter()
+                .map(|x| format!("{}{}{}", x, COLUMN_SEP, batch_name).into_boxed_str())
+                .collect::<Vec<_>>()
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+
+    info!("Found {} columns/barcodes ...", column_names.len());
+
+    info!("Renaming triplets...");
+
+    let mut renamed_triplets = vec![];
+    let mut offset = 0;
+    let mut nnz_tot = 0;
+
+    let pb = ProgressBar::new(num_batches as u64);
+
+    if args.verbose > 0 {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
+
+    for b in 0..num_batches {
+        let row_names = read_row_names(row_files[b].clone(), args.num_feature_name_words)?;
+
+        let (triplets, shape) = mtx_io::read_mtx_triplets(&mtx_files[b].clone())?;
+
+        if let Some((nrow, ncol, nnz)) = shape {
+            info!(
+                "{}: {} rows, {} columns, {} non-zeros",
+                &mtx_files[b], nrow, ncol, nnz
+            );
+
+            let triplets = triplets
+                .into_iter()
+                .filter_map(|(batch_i, batch_j, x_ij)| {
+                    if let Some(i) = row_pos.get(&row_names[batch_i as usize]) {
+                        let i = *i as u64;
+                        let j = batch_j + offset;
+                        Some((i, j, x_ij))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            nnz_tot += triplets.len();
+            renamed_triplets.extend(triplets);
+
+            let batch_col_names =
+                read_col_names(col_files[b].clone(), args.num_barcode_name_words)?;
+            let batch_name = batch_names[b].clone();
+
+            (0..ncol).into_iter().for_each(|batch_j| {
+                let loc = format!("{}{}{}", batch_col_names[batch_j], COLUMN_SEP, batch_name)
+                    .into_boxed_str();
+
+                let glob_j = offset as usize + batch_j;
+                let glob = column_names[glob_j as usize].clone();
+                assert_eq!(glob, loc);
+            });
+
+            offset += ncol as u64;
+            pb.inc(1);
+        }
+    }
+    pb.finish_and_clear();
+
+    let backend = args.backend.clone();
+    let output = args.output.clone();
+
+    let backend_file = match backend {
+        SparseIoBackend::HDF5 => format!("{}.h5", &output),
+        SparseIoBackend::Zarr => format!("{}.zarr", &output),
+    };
+
+    if Path::new(&backend_file).exists() {
+        info!(
+            "This existing backend file '{}' will be deleted",
+            &backend_file
+        );
+        common_io::remove_file(&backend_file)?;
+    }
+
+    let mut data = create_sparse_from_triplets(
+        renamed_triplets,
+        (row_pos.len(), offset as usize, nnz_tot),
+        Some(&backend_file),
+        Some(&backend),
+    )?;
+
+    data.register_row_names_vec(&common_rows);
+    data.register_column_names_vec(&column_names);
 
     Ok(())
 }
