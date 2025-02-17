@@ -154,6 +154,10 @@ pub struct RunBuildArgs {
     /// Output file header: {output}.{backend}
     #[arg(short, long)]
     output: Option<Box<str>>,
+
+    /// verbose mode
+    #[arg(short, long, action = ArgAction::Count)]
+    verbose: u8,
 }
 
 #[derive(Args)]
@@ -355,6 +359,11 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
 }
 
 fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
+    if args.verbose > 0 {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
+
     use std::path::Path;
 
     let directories = args.data_directories.clone();
@@ -562,6 +571,11 @@ fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
 }
 
 fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
+    if args.verbose > 0 {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
+
     use std::path::Path;
 
     let mtx_file = args.mtx.as_ref();
