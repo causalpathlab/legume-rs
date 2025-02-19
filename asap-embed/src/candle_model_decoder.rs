@@ -31,13 +31,14 @@ pub trait DecoderModule {
 
 pub struct SoftmaxLinear {
     weight: Tensor,
+    bias: Option<Tensor>,
 }
 
 impl SoftmaxLinear {
-    pub fn new(weight: Tensor) -> Self {
-        Self { weight }
+    pub fn new(weight: Tensor, bias: Option<Tensor>) -> Self {
+        Self { weight, bias }
     }
-    pub fn log_weight(&self) -> Result<Tensor> {
+    pub fn weight(&self) -> Result<Tensor> {
         ops::log_softmax(&self.weight, 0)
     }
 }
@@ -45,11 +46,15 @@ impl SoftmaxLinear {
 impl Module for SoftmaxLinear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let log_w = match *x.dims() {
-            [b1, b2, _, _] => self.log_weight()?.broadcast_left((b1, b2))?.t()?,
-            [bsize, _, _] => self.log_weight()?.broadcast_left(bsize)?.t()?,
-            _ => self.log_weight()?.t()?,
+            [b1, b2, _, _] => self.weight()?.broadcast_left((b1, b2))?.t()?,
+            [bsize, _, _] => self.weight()?.broadcast_left(bsize)?.t()?,
+            _ => self.weight()?.t()?,
         };
-        x.matmul(&log_w.exp()?)
+
+        match &self.bias {
+            None => x.matmul(&log_w.exp()?),
+            Some(bias) => x.matmul(&(log_w.broadcast_add(bias)?).exp()?),
+        }
     }
 }
 
@@ -60,7 +65,8 @@ pub fn softmax_linear(
 ) -> Result<SoftmaxLinear> {
     let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
     let ws = vb.get_with_hints((out_dim, in_dim), "weight", init_ws)?;
-    Ok(SoftmaxLinear::new(ws))
+    let bs = vb.get_with_hints((out_dim,), "bias", candle_nn::init::ZERO)?;
+    Ok(SoftmaxLinear::new(ws, Some(bs)))
 }
 
 /////////////////////////
@@ -94,7 +100,8 @@ impl DecoderModule for TopicDecoder {
     fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
         let theta_nk = z_nk.exp()?;
         let prob_nd = self.dictionary.forward(&theta_nk)?;
-        ops::log_softmax(&prob_nd.log()?, 1)
+        let log_prob_nd = prob_nd.log()?;
+        ops::log_softmax(&log_prob_nd, 1)
     }
 
     fn forward_with_llik<LlikFn>(

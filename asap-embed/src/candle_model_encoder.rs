@@ -51,7 +51,7 @@ impl EncoderModuleT for NonNegEncoder {
 impl NonNegEncoder {
     pub fn batch_norm_input(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
         let eps = 1e-4;
-        let depth = x_nd.dims()[0] as f64;
+        let depth = (x_nd.dims()[0] as f64).min(1e4);
         let x_norm_nd = x_nd.broadcast_div(&(x_nd.sum(0)? + eps)?)?;
         let x_log1p_nd = ((x_norm_nd * depth)? + 1.)?.log()?;
         self.bn.forward_t(&x_log1p_nd, train)
