@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use candle_core::{Result, Tensor};
 
 /// KL divergence loss between two Gaussian distributions
@@ -7,7 +9,6 @@ use candle_core::{Result, Tensor};
 /// * `z_mean` - mean of Gaussian distribution
 /// * `z_lnvar` - log variance of Gaussian distribution
 ///
-#[allow(dead_code)]
 pub fn gaussian_kl_loss(z_mean: &Tensor, z_lnvar: &Tensor) -> Result<Tensor> {
     let z_var = z_lnvar.exp()?;
     (z_var - 1. + z_mean.powf(2.)? - z_lnvar)?.sum(1)? * 0.5
@@ -20,7 +21,17 @@ pub fn gaussian_kl_loss(z_mean: &Tensor, z_lnvar: &Tensor) -> Result<Tensor> {
 /// * `x_nd` - data tensor (observed data)
 /// * `logits_nd` - logit tensor (reconstruction)
 ///
-#[allow(dead_code)]
 pub fn topic_likelihood(x_nd: &Tensor, logits_nd: &Tensor) -> Result<Tensor> {
     x_nd.mul(&logits_nd)?.sum(1)
+}
+
+/// Poisson log-likelihood of count-ish data
+///
+/// llik(i) = sum_w x(i,w) * log(rate(i,w)) - rate(i,w)
+///
+/// * `x_nd` - data tensor (observed data)
+/// * `rate_nd` - rate tensor (reconstruction)
+///
+pub fn poisson_likelihood(x_nd: &Tensor, rate_nd: &Tensor) -> Result<Tensor> {
+    x_nd.mul(&rate_nd.log()?)?.sub(&rate_nd)?.sum(1)
 }
