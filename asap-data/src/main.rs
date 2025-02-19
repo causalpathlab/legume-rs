@@ -362,7 +362,6 @@ fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
     if args.verbose > 0 {
         std::env::set_var("RUST_LOG", "info");
     }
-    env_logger::init();
 
     use std::path::Path;
 
@@ -376,6 +375,8 @@ fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
     for dir in directories.iter() {
         let dir = dir.clone().into_string();
 
+        info!("Searching subdir within: {}", &dir);
+
         let mut sub_dir_vec = std::fs::read_dir(&dir)?
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
@@ -388,24 +389,30 @@ fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
                 let mut row: Option<Box<str>> = None;
                 let mut col: Option<Box<str>> = None;
 
-                if let Ok((_, base, _)) = common_io::dir_base_ext(&sub_dir) {
+                if let Some(base) = Path::new(&sub_dir).file_stem() {
+                    let base = base.to_str().expect("invalid base name").to_string();
+                    info!("searching {} ...", &base);
+
                     let batch_name = Some(base);
 
                     for x in std::fs::read_dir(&sub_dir)? {
                         if let Some(_path) = x?.path().to_str() {
                             let _path = _path.to_string();
 
-                            if _path.contains(args.mtx_file_name.as_ref()) {
+                            info!("found: {}", &_path);
+
+                            if _path.ends_with(args.mtx_file_name.as_ref()) {
                                 mtx = Some(_path.into_boxed_str());
-                            } else if _path.contains(args.feature_file_name.as_ref()) {
+                            } else if _path.ends_with(args.feature_file_name.as_ref()) {
                                 row = Some(_path.into_boxed_str());
-                            } else if _path.contains(args.barcode_file_name.as_ref()) {
+                            } else if _path.ends_with(args.barcode_file_name.as_ref()) {
                                 col = Some(_path.into_boxed_str());
                             }
                         }
                     }
 
                     if let (Some(m), Some(r), Some(c), Some(b)) = (mtx, row, col, batch_name) {
+                        info!("found: {}, {}, {} for {}", &m, &r, &c, &b);
                         mtx_files.push(m);
                         row_files.push(r);
                         col_files.push(c);
@@ -574,7 +581,6 @@ fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
     if args.verbose > 0 {
         std::env::set_var("RUST_LOG", "info");
     }
-    env_logger::init();
 
     use std::path::Path;
 

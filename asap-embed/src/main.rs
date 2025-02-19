@@ -13,6 +13,7 @@ use asap_collapse_data::CollapsingOps;
 use asap_common::*;
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
+use asap_embed::candle_data_loader::RowsToTensorVec;
 use asap_random_projection::RandProjOps;
 use candle_data_loader::InMemoryData;
 use candle_inference::*;
@@ -27,6 +28,7 @@ use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::Inference;
 use matrix_param::traits::ParamIo;
 use matrix_util::common_io::{extension, read_lines};
+use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::traits::*;
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
@@ -98,7 +100,7 @@ struct EmbedArgs {
     latent_topics: usize,
 
     /// Encoder layers
-    #[arg(long, value_delimiter(','), default_values_t = vec![128,1024,128])]
+    #[arg(long, value_delimiter(','), default_values_t = vec![128,32,1024,32,128])]
     encoder_layers: Vec<usize>,
 
     #[arg(long, default_value_t = 1000)]
@@ -107,7 +109,7 @@ struct EmbedArgs {
     #[arg(long, default_value_t = 100)]
     minibatch_size: usize,
 
-    #[arg(long, default_value_t = 1e-3)]
+    #[arg(long, default_value_t = 1e-4)]
     learning_rate: f32,
 
     /// Candle device
@@ -133,31 +135,18 @@ fn main() -> anyhow::Result<()> {
         _ => candle_core::Device::Cpu,
     };
 
-    let train_config = candle_inference::TrainConfig {
-        learning_rate: args.learning_rate,
-        batch_size: args.minibatch_size,
-        num_epochs: args.epochs,
-        device: dev.clone(),
-        verbose: args.verbose,
-    };
-
     info!("Reading data files...");
     let (mut data_vec, batch_membership) = read_data_vec_membership(args.clone())?;
     info!("Reference batches: {:?}", args.reference_batch);
 
-    let dd = data_vec.num_rows()?;
+    // let dd = data_vec.num_rows()?;
     let kk = args.latent_topics;
-
     let parameters = candle_nn::VarMap::new();
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
     info!("Estimate {} topics", kk);
     info!("Encoder layers: {:?}", args.encoder_layers);
-    let enc = NonNegEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
-    let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
-
-    let mut vae = candle_inference::Vae::build(&enc, &dec, &parameters);
 
     // let nround = args.nround;
     // let mut llik_out = vec![];
@@ -172,6 +161,9 @@ fn main() -> anyhow::Result<()> {
 
     let proj_kn = proj_out.proj;
     info!("Assigning {} columns to samples...", proj_kn.ncols());
+    proj_kn
+        .transpose()
+        .to_tsv(&(args.out.to_string() + ".proj.gz"))?;
 
     let nsamp = data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim))?;
     info!("at most {} samples are assigned", nsamp);
@@ -191,16 +183,44 @@ fn main() -> anyhow::Result<()> {
         Some(args.iter_opt),
     )?;
 
+    collapse_out
+        .mu
+        .write_tsv(&(args.out.to_string() + ".collapsed"))?;
+
     let delta = collapse_out.delta.as_ref();
     if let Some(param) = delta {
         param.write_tsv(&(args.out.to_string() + ".delta"))?;
     }
 
+    info!("Reducing feature space by affine transformation..");
+    let affine_dl = reduce_features_to_modules(&collapse_out.mu.posterior_log_mean(), kk)?;
+
+    info!(
+        "reduced {} feature down to {}",
+        affine_dl.nrows(),
+        affine_dl.ncols()
+    );
+
+    affine_dl.to_tsv(&(args.out.to_string() + ".affine.gz"))?;
+
     // 4. Train embedded topic model on the foreground data x1
     let x_nd = collapse_out.mu.posterior_mean().transpose().clone();
-    let mut data_loader = InMemoryData::from(&x_nd)?;
+    let x_nl = x_nd * &affine_dl;
+
+    let mut data_loader = InMemoryData::from(&x_nl)?;
 
     info!("Start training ...");
+    let train_config = candle_inference::TrainConfig {
+        learning_rate: args.learning_rate,
+        batch_size: args.minibatch_size,
+        num_epochs: args.epochs,
+        device: dev.clone(),
+        verbose: args.verbose,
+    };
+    let ll = x_nl.ncols();
+    let enc = NonNegEncoder::new(ll, kk, &args.encoder_layers, param_builder.clone())?;
+    let dec = TopicDecoder::new(ll, kk, param_builder.clone())?;
+    let mut vae = candle_inference::Vae::build(&enc, &dec, &parameters);
     let llik = vae.train(&mut data_loader, &topic_likelihood, &train_config)?;
     info!("Done with training {} epochs", train_config.num_epochs);
 
@@ -209,19 +229,50 @@ fn main() -> anyhow::Result<()> {
     for var in parameters.all_vars() {
         var.to_device(&dev)?;
     }
-    let z_nk = estimate_latent(&data_vec, &enc, &train_config, delta)?;
-
+    let z_nk = estimate_latent(&data_vec, &enc, &train_config, delta, Some(&affine_dl))?;
     z_nk.to_tsv(&(args.out.to_string() + ".logit_latent.gz"))?;
 
-    dec.dictionary()
-        .log_weight()?
-        .to_tsv(&(args.out.to_string() + ".logit_dict.gz"))?;
+    // dec.dictionary()
+    //     .weight()?
+    //     .to_tsv(&(args.out.to_string() + ".logit_dict.gz"))?;
 
     let llik_out: Mat = Mat::from_row_iterator(llik.len(), 1, llik.into_iter());
     llik_out.to_tsv(&(args.out.to_string() + ".llik.gz"))?;
 
     info!("done");
     Ok(())
+}
+
+fn reduce_features_to_modules(x_dm: &DMatrix<f32>, kk: usize) -> anyhow::Result<Mat> {
+    let (mut row_dk, _, _) = x_dm.rsvd(kk)?;
+    row_dk.scale_columns_inplace();
+
+    let mut binary_codes = nalgebra::DVector::<usize>::zeros(row_dk.nrows());
+    for k in 0..kk {
+        let binary_shift = |x: f32| -> usize {
+            if x > 0.0 {
+                1 << k
+            } else {
+                0
+            }
+        };
+        binary_codes += row_dk.column(k).map(binary_shift);
+    }
+
+    let max_group = binary_codes.max();
+    let membership = binary_codes.data.as_vec().clone();
+
+    let mut z_dk = Mat::zeros(row_dk.nrows(), max_group + 1);
+
+    for (i, &k) in membership.iter().enumerate() {
+        z_dk[(i, k)] = 1.0;
+    }
+
+    // z_dk.row_iter_mut().for_each(|mut z_d| {
+    //     z_d /= z_d.sum().max(1.0);
+    // });
+
+    Ok(z_dk)
 }
 
 //////////////////////////////////////////////////////////
@@ -233,6 +284,7 @@ fn estimate_latent(
     encoder: &NonNegEncoder,
     train_config: &candle_inference::TrainConfig,
     delta: Option<&GammaMatrix>,
+    affine: Option<&Mat>,
 ) -> anyhow::Result<Tensor> {
     let dev = &train_config.device;
     let ntot = data_vec.num_columns()?;
@@ -246,6 +298,16 @@ fn estimate_latent(
     let delta = delta.map(|x| x.posterior_mean());
 
     let eps = 1e-4;
+
+    let affine_dl = match affine {
+        Some(affine) => Tensor::cat(&affine.rows_to_tensor_vec(), 0)?.to_device(dev)?,
+        _ => {
+            let dd = encoder.dim_obs();
+            let mut affine = Mat::zeros(dd, dd);
+            affine.fill_diagonal(1.);
+            Tensor::cat(&affine.rows_to_tensor_vec(), 0)?.to_device(dev)?
+        }
+    };
 
     let mut chunks = jobs
         .par_iter()
@@ -268,7 +330,10 @@ fn estimate_latent(
             }
 
             let (d, n) = x_dn.shape();
-            let x_nd = Tensor::from_slice(x_dn.as_slice(), (n, d), dev).expect("tensor x_nd");
+            let x_nd = Tensor::from_slice(x_dn.as_slice(), (n, d), dev)
+                .expect("tensor x_nd")
+                .matmul(&affine_dl)
+                .expect("affine transformation");
 
             let enc = arc_enc.lock().expect("lock");
             let (z_nk, _) = enc.forward_t(&x_nd, false).expect("forward");
