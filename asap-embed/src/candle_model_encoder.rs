@@ -2,35 +2,21 @@
 
 use crate::candle_aux_layers::StackLayers;
 use crate::candle_loss_functions::gaussian_kl_loss;
+use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, BatchNorm, Linear, ModuleT, VarBuilder};
 
-pub trait EncoderModuleT {
-    /// An encoder that spits out two results (latent inference, KL loss)
-    ///
-    /// # Arguments
-    /// * `x_nd` - input data (n x d)
-    /// * `train` - whether to use dropout/batchnorm or not
-    ///
-    /// # Returns `(z_nk, kl_loss_n)`
-    /// * `z_nk` - latent inference (n x k)
-    /// * `kl_loss_n` - KL loss (n x 1)
-    fn forward_t(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)>;
-
-    fn dim_obs(&self) -> usize;
-    fn dim_latent(&self) -> usize;
-}
-
-pub struct NonNegEncoder {
+pub struct LogSoftmaxEncoder {
     n_features: usize,
     n_topics: usize,
-    bn: BatchNorm,
+    bn_x: BatchNorm,
     fc: StackLayers<Linear>,
+    bn_z: BatchNorm,
     z_mean: Linear,
     z_lnvar: Linear,
 }
 
-impl EncoderModuleT for NonNegEncoder {
+impl EncoderModuleT for LogSoftmaxEncoder {
     fn forward_t(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
         let (z_mean_nk, z_lnvar_nk) = self.latent_params(x_nd, train)?;
         let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
@@ -48,20 +34,20 @@ impl EncoderModuleT for NonNegEncoder {
     }
 }
 
-impl NonNegEncoder {
-    pub fn batch_norm_input(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
-        let eps = 1e-4;
-        let depth = (x_nd.dims()[0] as f64).min(1e4);
-        let x_norm_nd = x_nd.broadcast_div(&(x_nd.sum(0)? + eps)?)?;
-        let x_log1p_nd = ((x_norm_nd * depth)? + 1.)?.log()?;
-        self.bn.forward_t(&x_log1p_nd, train)
+impl LogSoftmaxEncoder {
+    pub fn preprocess_input(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
+        let log1p_nd = (x_nd + 1.)?.log()?;
+        let x_n = log1p_nd.sum_keepdim(1)?;
+        let log1p_nd = (log1p_nd.broadcast_div(&x_n)? * 1e4)?;
+        self.bn_x.forward_t(&log1p_nd, train)
     }
 
     pub fn latent_params(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
-        let batch_nd = self.batch_norm_input(x_nd, train)?;
-        let x_nl = self.fc.forward_t(&batch_nd, train)?;
-        let z_mean_nk = self.z_mean.forward_t(&x_nl, train)?;
-        let z_lnvar_nk = self.z_lnvar.forward_t(&x_nl, train)?.clamp(-4., 4.)?;
+        let bn_nd = self.preprocess_input(x_nd, train)?;
+        let fc_nl = self.fc.forward_t(&bn_nd, train)?;
+        let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
+        let z_mean_nk = self.z_mean.forward_t(&bn_nl, train)?;
+        let z_lnvar_nk = self.z_lnvar.forward_t(&bn_nl, train)?.clamp(-8., 8.)?;
         Ok((z_mean_nk, z_lnvar_nk))
     }
 
@@ -93,14 +79,13 @@ impl NonNegEncoder {
         layers: &[usize],
         vs: VarBuilder,
     ) -> Result<Self> {
-        // (0) batch norm
         let config = candle_nn::BatchNormConfig {
             eps: 1e-4,
             remove_mean: true,
-            affine: false,
+            affine: true,
             momentum: 0.1,
         };
-        let bn = candle_nn::batch_norm(n_features, config, vs.pp("nn.enc.bn"))?;
+        let bn_x = candle_nn::batch_norm(n_features, config, vs.pp("nn.enc.bn_x"))?;
 
         // (1) data -> fc
         let mut fc = StackLayers::<Linear>::new();
@@ -114,6 +99,8 @@ impl NonNegEncoder {
             prev_dim = next_dim;
         }
 
+        let bn_z = candle_nn::batch_norm(prev_dim, config, vs.pp("nn.enc.bn_z"))?;
+
         // (2) fc -> K
         let z_mean = candle_nn::linear(prev_dim, n_topics, vs.pp("nn.enc.z.mean"))?;
         let z_lnvar = candle_nn::linear(prev_dim, n_topics, vs.pp("nn.enc.z.lnvar"))?;
@@ -121,8 +108,9 @@ impl NonNegEncoder {
         Ok(Self {
             n_features,
             n_topics,
-            bn,
+            bn_x,
             fc,
+            bn_z,
             z_mean,
             z_lnvar,
         })
