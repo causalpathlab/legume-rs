@@ -20,7 +20,6 @@ pub trait DataLoader {
     fn shuffle_minibatch(&mut self, batch_size: usize);
 }
 
-////////////////////////////////////////////////////////////////
 ///
 /// A thin wrapper for `SparseIoVec`. Columns in `SparseIoVec` are
 /// treated as samples.
@@ -75,7 +74,6 @@ impl DataLoader for SparseIoVecData<'_> {
     }
 }
 
-////////////////////////////////////////////////////////////////
 ///
 /// A simple data loader for in-memory 2d matrix.  Each row will be
 /// considered as a feature vector. The number of samples is the
