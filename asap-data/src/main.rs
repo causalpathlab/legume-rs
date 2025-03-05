@@ -162,7 +162,9 @@ pub struct RunBuildArgs {
 
 #[derive(Args)]
 pub struct MergeMtxArgs {
-    /// data file directories
+    /// Within each directory and sub-directories, it will search
+    /// `mtx_file_name`, `feature_file_name`, and `barcode_file_name`
+    /// to merge into one `backend` file.
     #[arg(value_delimiter = ',', required = true)]
     data_directories: Vec<Box<str>>,
 
@@ -170,11 +172,15 @@ pub struct MergeMtxArgs {
     #[arg(long, value_enum, default_value = "zarr")]
     backend: SparseIoBackend,
 
-    /// Output file header: {output}.{backend}
+    /// Output file header: {output}.{backend} and {output}.batch.gz
+    ///
+    /// The backend will contain everything.  But the batch assignment
+    /// information will be saved in a separate file and needed for
+    /// embedding steps later.
     #[arg(short, long, required = true)]
     output: Box<str>,
 
-    /// matrix file name
+    /// matrix file name (10x default is `matrix.mtx`).
     #[arg(short, long, default_value = "matrix.mtx")]
     mtx_file_name: Box<str>,
 
@@ -375,6 +381,40 @@ fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
     for dir in directories.iter() {
         let dir = dir.clone().into_string();
 
+        if let Some(base) = Path::new(&dir).file_stem() {
+            let base = base.to_str().expect("invalid base name").to_string();
+            info!("Searching relevant files within: {}", &base);
+            let batch_name = Some(base);
+
+            if let Ok(this_dir) = std::fs::read_dir(&dir) {
+                let mut mtx: Option<Box<str>> = None;
+                let mut row: Option<Box<str>> = None;
+                let mut col: Option<Box<str>> = None;
+
+                for x in this_dir {
+                    if let Some(_path) = x?.path().to_str() {
+                        let _path = _path.to_string();
+
+                        if _path.ends_with(args.mtx_file_name.as_ref()) {
+                            mtx = Some(_path.into_boxed_str());
+                        } else if _path.ends_with(args.feature_file_name.as_ref()) {
+                            row = Some(_path.into_boxed_str());
+                        } else if _path.ends_with(args.barcode_file_name.as_ref()) {
+                            col = Some(_path.into_boxed_str());
+                        }
+                    }
+                }
+
+                if let (Some(m), Some(r), Some(c), Some(b)) = (mtx, row, col, batch_name) {
+                    info!("Build {} from {}, {}, {} ", &b, &m, &r, &c);
+                    mtx_files.push(m);
+                    row_files.push(r);
+                    col_files.push(c);
+                    batch_names.push(b);
+                }
+            }
+        }
+
         info!("Searching subdir within: {}", &dir);
 
         let mut sub_dir_vec = std::fs::read_dir(&dir)?
@@ -395,24 +435,26 @@ fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
                     let batch_name = Some(base);
 
-                    for x in std::fs::read_dir(&sub_dir)? {
-                        if let Some(_path) = x?.path().to_str() {
-                            let _path = _path.to_string();
+                    if let Ok(sub_dir) = std::fs::read_dir(&sub_dir) {
+                        for x in sub_dir {
+                            if let Some(_path) = x?.path().to_str() {
+                                let _path = _path.to_string();
 
-                            info!("found: {}", &_path);
+                                info!("Found: {}", &_path);
 
-                            if _path.ends_with(args.mtx_file_name.as_ref()) {
-                                mtx = Some(_path.into_boxed_str());
-                            } else if _path.ends_with(args.feature_file_name.as_ref()) {
-                                row = Some(_path.into_boxed_str());
-                            } else if _path.ends_with(args.barcode_file_name.as_ref()) {
-                                col = Some(_path.into_boxed_str());
+                                if _path.ends_with(args.mtx_file_name.as_ref()) {
+                                    mtx = Some(_path.into_boxed_str());
+                                } else if _path.ends_with(args.feature_file_name.as_ref()) {
+                                    row = Some(_path.into_boxed_str());
+                                } else if _path.ends_with(args.barcode_file_name.as_ref()) {
+                                    col = Some(_path.into_boxed_str());
+                                }
                             }
                         }
                     }
 
                     if let (Some(m), Some(r), Some(c), Some(b)) = (mtx, row, col, batch_name) {
-                        info!("found: {}, {}, {} for {}", &m, &r, &c, &b);
+                        info!("Build {} from {}, {}, {} ", &b, &m, &r, &c);
                         mtx_files.push(m);
                         row_files.push(r);
                         col_files.push(c);
@@ -427,9 +469,9 @@ fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
     info!("merging over {} batches ...", num_batches);
 
-    assert_eq!(num_batches, mtx_files.len());
-    assert_eq!(num_batches, row_files.len());
-    assert_eq!(num_batches, col_files.len());
+    debug_assert_eq!(num_batches, mtx_files.len());
+    debug_assert_eq!(num_batches, row_files.len());
+    debug_assert_eq!(num_batches, col_files.len());
 
     if num_batches == 0 {
         return Err(anyhow::anyhow!("No relevant files found"));
@@ -474,19 +516,22 @@ fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
     info!("Elongating column/barcode names ...");
 
-    let column_names = col_files
-        .iter()
-        .zip(batch_names.iter())
-        .map(|(col_file, batch_name)| {
-            let col_names = read_col_names(col_file.clone(), args.num_barcode_name_words)
-                .expect(format!("").as_str());
-            col_names
+    let mut column_names = vec![];
+    let mut column_batch_names = vec![];
+
+    for (col_file, batch_name) in col_files.iter().zip(batch_names.iter()) {
+        let _names = read_col_names(col_file.clone(), args.num_barcode_name_words)
+            .expect(format!("").as_str());
+        let nn = _names.len();
+        column_names.extend(
+            _names
                 .into_iter()
                 .map(|x| format!("{}{}{}", x, COLUMN_SEP, batch_name).into_boxed_str())
-                .collect::<Vec<_>>()
-        })
-        .flatten()
-        .collect::<Vec<_>>();
+                .collect::<Vec<_>>(),
+        );
+
+        column_batch_names.extend(vec![batch_name.clone().into_boxed_str(); nn]);
+    }
 
     info!("Found {} columns/barcodes ...", column_names.len());
 
@@ -539,7 +584,7 @@ fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
                 let glob_j = offset as usize + batch_j;
                 let glob = column_names[glob_j as usize].clone();
-                assert_eq!(glob, loc);
+                debug_assert_eq!(glob, loc);
             });
 
             offset += ncol as u64;
@@ -548,8 +593,11 @@ fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
     }
     pb.finish_and_clear();
 
+    info!("Done with creating triplets from {} mtx files", num_batches);
+
     let backend = args.backend.clone();
     let output = args.output.clone();
+    let batch_memb_file = (output.to_string() + ".batch.gz").into_boxed_str();
 
     let backend_file = match backend {
         SparseIoBackend::HDF5 => format!("{}.h5", &output),
@@ -564,6 +612,9 @@ fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
         common_io::remove_file(&backend_file)?;
     }
 
+    common_io::write_lines(&column_batch_names, &batch_memb_file)?;
+    info!("Wrote batch membership file: {}", &batch_memb_file);
+
     let mut data = create_sparse_from_triplets(
         renamed_triplets,
         (row_pos.len(), offset as usize, nnz_tot),
@@ -573,6 +624,11 @@ fn run_merge(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
     data.register_row_names_vec(&common_rows);
     data.register_column_names_vec(&column_names);
+
+    info!(
+        "Successfully created a sparse backend file: {}",
+        &backend_file
+    );
 
     Ok(())
 }

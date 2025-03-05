@@ -172,10 +172,10 @@ fn main() -> anyhow::Result<()> {
 
     let enc = LogSoftmaxEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
 
-    // let nround = args.nround;
-    // let mut llik_out = vec![];
-    // for rr in 0..nround {
-    // 1. Randomly project the columns
+    /////////////////////////////////////
+    // 1. Randomly project the columns //
+    /////////////////////////////////////
+
     info!("Random projection of data onto {} dims", args.proj_dim);
     let proj_out = data_vec.project_columns_with_batch_correction(
         args.proj_dim,
@@ -189,13 +189,19 @@ fn main() -> anyhow::Result<()> {
     let nsamp = data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim))?;
     info!("at most {} samples are assigned", nsamp);
 
-    // 2. Register batch membership
+    //////////////////////////////////
+    // 2. Register batch membership //
+    //////////////////////////////////
+
     if args.batch_files.is_some() && batch_membership.len() > 0 {
         info!("Registering batch information");
         data_vec.register_batches(&proj_kn, &batch_membership)?;
     }
 
-    // 3. Collapsing columns
+    ///////////////////////////
+    // 3. Collapsing columns //
+    ///////////////////////////
+
     info!("Collapsing columns... into {} samples", nsamp);
     let collapse_out = data_vec.collapse_columns(
         args.down_sample,
@@ -209,8 +215,15 @@ fn main() -> anyhow::Result<()> {
         param.write_tsv(&(args.out.to_string() + ".delta"))?;
     }
 
-    // 4. Train embedded topic model on the foreground data x1
+    /////////////////////////////////////////////////////////
+    // 4. Train embedded topic model on the collapsed data //
+    /////////////////////////////////////////////////////////
+
     let x_nd = collapse_out.mu.posterior_mean().transpose().clone();
+
+    // todo: compress rows for truly high-dimensional embedding
+
+
     let mut data_loader = InMemoryData::from(&x_nd)?;
 
     info!("Start training ...");
@@ -219,18 +232,18 @@ fn main() -> anyhow::Result<()> {
         DecoderModel::Poisson => {
             let dec = PoissonDecoder::new(dd, kk, param_builder.clone())?;
             let mut vae = candle_inference::Vae::build(&enc, &dec, &parameters);
+            // dec.dictionary()
+            //     .weight()?
+            //     .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
             let _llik = vae.train(&mut data_loader, &poisson_likelihood, &train_config)?;
-            dec.dictionary()
-                .weight()?
-                .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
         }
         DecoderModel::Topic => {
             let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
             let mut vae = candle_inference::Vae::build(&enc, &dec, &parameters);
+            // dec.dictionary()
+            //     .weight()?
+            //     .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
             let _llik = vae.train(&mut data_loader, &topic_likelihood, &train_config)?;
-            dec.dictionary()
-                .weight()?
-                .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
         }
     }
 
