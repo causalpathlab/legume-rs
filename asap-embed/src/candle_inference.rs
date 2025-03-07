@@ -64,10 +64,19 @@ where
 
         data.shuffle_minibatch(train_config.batch_size);
 
+        let num_minbatches = data.num_minibatch();
+
+        let x_nd_vec = (0..num_minbatches)
+            .map(|b| {
+                data.minibatch(b, &device)
+                    .expect(format!("failed to preload minibatch #{}", b).as_str())
+            })
+            .collect::<Vec<_>>();
+
         for _epoch in 0..train_config.num_epochs {
             let mut llik_tot = 0f32;
             for b in 0..data.num_minibatch() {
-                let x_nd = data.minibatch(b, &device)?;
+                let x_nd = &x_nd_vec[b];
                 let (z_nk, kl) = self.encoder.forward_t(&x_nd, true)?;
                 let (_, llik) = self.decoder.forward_with_llik(&z_nk, &x_nd, llik_func)?;
                 let loss = (kl - &llik)?.sum_all()?;
