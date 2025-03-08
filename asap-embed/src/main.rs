@@ -5,12 +5,12 @@ mod asap_random_projection;
 mod candle_aux_layers;
 mod candle_aux_linear;
 mod candle_data_loader;
-mod candle_inference;
 mod candle_loss_functions;
 mod candle_model_encoder;
 mod candle_model_poisson;
 mod candle_model_topic;
 mod candle_model_traits;
+mod candle_vae_inference;
 
 use crate::candle_model_traits::*;
 use asap_collapse_data::CollapsingOps;
@@ -19,11 +19,11 @@ use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
 use asap_random_projection::RandProjOps;
 use candle_data_loader::InMemoryData;
-use candle_inference::*;
 use candle_loss_functions::*;
 use candle_model_encoder::*;
 use candle_model_poisson::*;
 use candle_model_topic::*;
+use candle_vae_inference::*;
 use clap::{Parser, ValueEnum};
 use indicatif::ParallelProgressIterator;
 use log::info;
@@ -31,6 +31,7 @@ use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::Inference;
 use matrix_param::traits::ParamIo;
 use matrix_util::common_io::{extension, read_lines};
+use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::traits::*;
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
@@ -109,8 +110,11 @@ struct EmbedArgs {
     latent_topics: usize,
 
     /// Encoder layers
-    #[arg(long, value_delimiter(','), default_values_t = vec![128,1024,128])]
+    #[arg(long, value_delimiter(','), default_values_t = vec![32,128,1024,128])]
     encoder_layers: Vec<usize>,
+
+    #[arg(long, default_value_t = 100)]
+    pretrain_epochs: usize,
 
     #[arg(long, default_value_t = 1000)]
     epochs: usize,
@@ -148,10 +152,11 @@ fn main() -> anyhow::Result<()> {
         _ => candle_core::Device::Cpu,
     };
 
-    let train_config = candle_inference::TrainConfig {
+    let train_config = candle_vae_inference::TrainConfig {
         learning_rate: args.learning_rate,
         batch_size: args.minibatch_size,
         num_epochs: args.epochs,
+        num_pretrain_epochs: args.pretrain_epochs,
         device: dev.clone(),
         verbose: args.verbose,
     };
@@ -169,8 +174,6 @@ fn main() -> anyhow::Result<()> {
 
     info!("Estimate {} topics", kk);
     info!("Encoder layers: {:?}", args.encoder_layers);
-
-    let enc = LogSoftmaxEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
 
     /////////////////////////////////////
     // 1. Randomly project the columns //
@@ -218,39 +221,70 @@ fn main() -> anyhow::Result<()> {
     /////////////////////////////////////////////////////////
     // 4. Train embedded topic model on the collapsed data //
     /////////////////////////////////////////////////////////
+    let enc = LogSoftmaxEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
 
     let x_nd = collapse_out.mu.posterior_mean().transpose().clone();
 
-    // todo: compress rows for truly high-dimensional embedding
+    let mut x_std_nd = x_nd.clone();
+    x_std_nd.scale_columns_inplace();
+    let (mut z_nk_init, _, _) = x_std_nd.rsvd(kk)?;
+    z_nk_init.scale_columns_inplace();
 
+    let mut data_loader = InMemoryData::from_with_aux(&x_nd, &z_nk_init)?;
 
-    let mut data_loader = InMemoryData::from(&x_nd)?;
+    let mut llik = vec![];
 
     info!("Start training ...");
+
+    use candle_vae_inference::Vae;
 
     match args.decoder_model {
         DecoderModel::Poisson => {
             let dec = PoissonDecoder::new(dd, kk, param_builder.clone())?;
-            let mut vae = candle_inference::Vae::build(&enc, &dec, &parameters);
-            // dec.dictionary()
-            //     .weight()?
-            //     .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
-            let _llik = vae.train(&mut data_loader, &poisson_likelihood, &train_config)?;
+            let mut vae = Vae::build(&enc, &dec, &parameters);
+
+            llik.extend(vae.pretrain_encoder(
+                &mut data_loader,
+                &gaussian_likelihood,
+                &train_config,
+            )?);
+
+            llik.extend(vae.train_encoder_decoder(
+                &mut data_loader,
+                &poisson_likelihood,
+                &train_config,
+            )?);
+
+            dec.dictionary()
+                .weight()?
+                .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
         }
+
         DecoderModel::Topic => {
             let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
-            let mut vae = candle_inference::Vae::build(&enc, &dec, &parameters);
-            // dec.dictionary()
-            //     .weight()?
-            //     .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
-            let _llik = vae.train(&mut data_loader, &topic_likelihood, &train_config)?;
+            let mut vae = Vae::build(&enc, &dec, &parameters);
+
+            llik.extend(vae.pretrain_encoder(
+                &mut data_loader,
+                &gaussian_likelihood,
+                &train_config,
+            )?);
+
+            llik.extend(vae.train_encoder_decoder(
+                &mut data_loader,
+                &topic_likelihood,
+                &train_config,
+            )?);
+
+            dec.dictionary()
+                .weight()?
+                .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
         }
     }
 
     info!("Done with training {} epochs", train_config.num_epochs);
-
-    // let llik_out: Mat = Mat::from_row_iterator(llik.len(), 1, llik.into_iter());
-    // llik_out.to_tsv(&(args.out.to_string() + ".llik.gz"))?;
+    Mat::from_row_iterator(llik.len(), 1, llik.into_iter())
+        .to_tsv(&(args.out.to_string() + ".llik.gz"))?;
 
     // 5. Revisit the data to recover latent states
     info!("Encoding latent states for all...");
@@ -258,9 +292,7 @@ fn main() -> anyhow::Result<()> {
         var.to_device(&dev)?;
     }
     let z_nk = estimate_latent(&data_vec, &enc, &train_config, delta)?;
-
     z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
-
     info!("done");
     Ok(())
 }
@@ -272,7 +304,7 @@ fn main() -> anyhow::Result<()> {
 fn estimate_latent(
     data_vec: &SparseIoVec,
     encoder: &LogSoftmaxEncoder,
-    train_config: &candle_inference::TrainConfig,
+    train_config: &candle_vae_inference::TrainConfig,
     delta: Option<&GammaMatrix>,
 ) -> anyhow::Result<Tensor> {
     let dev = &train_config.device;

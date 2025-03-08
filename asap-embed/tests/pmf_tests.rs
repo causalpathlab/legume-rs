@@ -1,7 +1,7 @@
 // use asap_embed::candle_etm::*;
 use asap_embed::candle_aux_layers::*;
 use asap_embed::candle_data_loader::*;
-use asap_embed::candle_inference::*;
+use asap_embed::candle_vae_inference::*;
 use asap_embed::candle_loss_functions::*;
 use asap_embed::candle_model_decoder::*;
 use asap_embed::candle_model_encoder::*;
