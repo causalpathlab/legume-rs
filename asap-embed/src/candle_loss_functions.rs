@@ -35,3 +35,14 @@ pub fn topic_likelihood(x_nd: &Tensor, logits_nd: &Tensor) -> Result<Tensor> {
 pub fn poisson_likelihood(x_nd: &Tensor, rate_nd: &Tensor) -> Result<Tensor> {
     x_nd.mul(&rate_nd.log()?)?.sub(&rate_nd)?.sum(1)
 }
+
+/// Gaussian log-likelihood of count-ish data
+///
+/// llik(i) = -0.5 * sum_w [ x(i,w) - xhat(i,w) ]^2
+///
+/// * `x_nd` - data tensor (observed data)
+/// * `rate_nd` - rate tensor (reconstruction)
+///
+pub fn gaussian_likelihood(x_nd: &Tensor, hat_nd: &Tensor) -> Result<Tensor> {
+    x_nd.sub(&hat_nd)?.powf(2.)?.sum(1)? * (-0.5)
+}
