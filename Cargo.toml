@@ -32,3 +32,4 @@ indicatif = { version = "0.17.9", features = ["rayon"] }
 asap-data = { path = "asap-data"}
 asap-embed = { path = "asap-embed" }
 matrix-util = { path = "matrix-util" }
+candle-util = { path = "candle-util" }

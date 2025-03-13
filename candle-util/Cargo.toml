@@ -1,17 +1,12 @@
 [package]
-name = "asap-embed"
+name = "candle-util"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "asap-embed"
-path = "src/main.rs"
-
 [dependencies]
+
 asap-data = { path = "../asap-data" }
-candle-util = { path = "../candle-util" }
 matrix-util = { path = "../matrix-util" }
-matrix-param = { path = "../matrix-param" }
 
 anyhow = { workspace = true }
 clap = { workspace = true }

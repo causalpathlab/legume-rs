@@ -2,32 +2,23 @@ mod asap_collapse_data;
 mod asap_common;
 mod asap_normalization;
 mod asap_random_projection;
-mod candle_aux_layers;
-mod candle_aux_linear;
-mod candle_data_loader;
-mod candle_loss_functions;
-mod candle_model_encoder;
-mod candle_model_poisson;
-mod candle_model_topic;
-mod candle_model_traits;
-mod candle_vae_inference;
 
-use crate::candle_model_traits::*;
 use asap_collapse_data::CollapsingOps;
 use asap_common::*;
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
 use asap_random_projection::RandProjOps;
-use candle_data_loader::InMemoryData;
-use candle_loss_functions::*;
-use candle_model_encoder::*;
-use candle_model_poisson::*;
-use candle_model_topic::*;
-use candle_vae_inference::*;
+use candle_util::candle_data_loader::InMemoryData;
+use candle_util::candle_loss_functions::*;
+use candle_util::candle_model_encoder::*;
+use candle_util::candle_model_poisson::*;
+use candle_util::candle_model_topic::*;
+use candle_util::candle_model_traits::*;
+use candle_util::candle_vae_inference;
+use candle_util::candle_vae_inference::*;
 use clap::{Parser, ValueEnum};
 use indicatif::ParallelProgressIterator;
 use log::info;
-use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::Inference;
 use matrix_param::traits::ParamIo;
 use matrix_util::common_io::{extension, read_lines};
@@ -291,6 +282,8 @@ fn main() -> anyhow::Result<()> {
     for var in parameters.all_vars() {
         var.to_device(&dev)?;
     }
+
+    let delta = delta.map(|x| x.posterior_mean());
     let z_nk = estimate_latent(&data_vec, &enc, &train_config, delta)?;
     z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
     info!("done");
@@ -301,12 +294,15 @@ fn main() -> anyhow::Result<()> {
 // Just evaluate latent states based on the encoder net //
 //////////////////////////////////////////////////////////
 
-fn estimate_latent(
+fn estimate_latent<Enc>(
     data_vec: &SparseIoVec,
-    encoder: &LogSoftmaxEncoder,
+    encoder: &Enc,
     train_config: &candle_vae_inference::TrainConfig,
-    delta: Option<&GammaMatrix>,
-) -> anyhow::Result<Tensor> {
+    delta: Option<&Mat>,
+) -> anyhow::Result<Tensor>
+where
+    Enc: EncoderModuleT + Send + Sync + 'static,
+{
     let dev = &train_config.device;
     let ntot = data_vec.num_columns()?;
     let block_size = train_config.batch_size;
@@ -315,8 +311,6 @@ fn estimate_latent(
     let njobs = jobs.len() as u64;
 
     let arc_enc = Arc::new(Mutex::new(encoder));
-
-    let delta = delta.map(|x| x.posterior_mean());
 
     let eps = 1e-4;
 

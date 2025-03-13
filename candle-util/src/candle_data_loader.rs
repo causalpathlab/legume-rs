@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
 use asap_data::sparse_io_vector::*;
-use candle_core::{Device, Tensor};
 use matrix_util::traits::MatTriplets;
+
+use candle_core::{Device, Tensor};
 use nalgebra::DMatrix;
 use ndarray::Array2;
 use rand::prelude::SliceRandom;
