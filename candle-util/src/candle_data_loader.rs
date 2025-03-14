@@ -188,18 +188,18 @@ pub struct Minibatches {
 
 impl Minibatches {
     pub fn shuffle_minibatch(&mut self, batch_size: usize) {
-        use rand::distributions::{Distribution, Uniform};
+        use rand_distr::{Distribution, Uniform};
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         self.samples.shuffle(&mut rng);
         let nbatch = (self.size() + batch_size) / batch_size;
         let ntot = nbatch * batch_size;
 
-        let unif = Uniform::new(0, self.size());
+        let unif = Uniform::new(0, self.size()).expect("unif [0 .. size)");
 
         let indexes = (0..ntot)
             .into_par_iter()
-            .map_init(rand::thread_rng, |rng, _| unif.sample(rng))
+            .map_init(rand::rng, |rng, _| unif.sample(rng))
             .collect::<Vec<usize>>();
 
         self.chunks = (0..nbatch)

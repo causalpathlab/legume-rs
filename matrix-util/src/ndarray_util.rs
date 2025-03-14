@@ -1,7 +1,7 @@
 use crate::traits::*;
 use ndarray::prelude::*;
 use num_traits::{Float, FromPrimitive};
-use rand::{thread_rng, Rng};
+use rand::Rng;
 use rand_distr::{Distribution, Gamma, StandardNormal, Uniform};
 use rayon::prelude::*;
 
@@ -13,11 +13,11 @@ where
     type Scalar = T;
 
     fn runif(dd: usize, nn: usize) -> Self::Mat {
-        let u01 = Uniform::new(0_f32, 1_f32);
+        let u01 = Uniform::new(0_f32, 1_f32).expect("failed to create uniform distribution");
 
         let rvec: Vec<T> = (0..(dd * nn))
             .into_par_iter()
-            .map_init(thread_rng, |rng, _| {
+            .map_init(rand::rng, |rng, _| {
                 let x = rng.sample(u01);
                 T::from(x).expect("failed to type")
             })
@@ -29,7 +29,7 @@ where
     fn rnorm(dd: usize, nn: usize) -> Self::Mat {
         let rvec = (0..(dd * nn))
             .into_par_iter()
-            .map_init(thread_rng, |rng, _| {
+            .map_init(rand::rng, |rng, _| {
                 let x: f32 = rng.sample(StandardNormal);
                 T::from(x).expect("failed to type")
             })
@@ -44,7 +44,7 @@ where
 
         let rvec = (0..(dd * nn))
             .into_par_iter()
-            .map_init(thread_rng, |rng, _| {
+            .map_init(rand::rng, |rng, _| {
                 let x: f32 = pdf.sample(rng);
                 T::from(x).expect("failed to type")
             })
