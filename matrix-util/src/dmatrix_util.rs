@@ -1,3 +1,4 @@
+use candle_core::WithDType;
 use nalgebra::DMatrix;
 use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
 
@@ -51,17 +52,24 @@ where
     }
 }
 
-// impl<T> AddAssignCscMatrix for DMatrix<T>
-// where
-//     T: Copy + AddAssign + Zero,
-// {
-//     fn add_assign(&mut self, rhs: &Self) {
-//         // for temp in rhs.iter() {}
-//         // for (i, j, x_ij) in rhs.iter() {
-//         //     self[(i, j)] += *x_ij;
-//         // }
-//     }
-// }
+impl<T> ConvertMatOps for DMatrix<T>
+where
+    T: nalgebra::RealField + Copy + candle_core::WithDType,
+{
+    type Mat = Self;
+    type Scalar = T;
+
+    fn from_tensor(tensor: &candle_core::Tensor) -> anyhow::Result<Self::Mat> {
+	if tensor.dims().len() != 2 {
+	    return Err(anyhow::anyhow!("expected 2D tensor"));
+	}
+
+	let nrows = tensor.dims()[0];
+	let ncols = tensor.dims()[1];
+	let data: Vec<T> = tensor.to_vec1()?;
+	Ok(Self::from_row_iterator(nrows, ncols, data.iter().cloned()))
+    }
+}
 
 impl<T> SampleOps for DMatrix<T>
 where
