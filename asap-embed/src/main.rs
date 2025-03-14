@@ -299,19 +299,19 @@ fn estimate_latent<Enc>(
     encoder: &Enc,
     train_config: &candle_vae_inference::TrainConfig,
     delta: Option<&Mat>,
-) -> anyhow::Result<Tensor>
+) -> anyhow::Result<Mat>
 where
     Enc: EncoderModuleT + Send + Sync + 'static,
 {
     let dev = &train_config.device;
     let ntot = data_vec.num_columns()?;
+    let kk = encoder.dim_latent();
+
     let block_size = train_config.batch_size;
 
     let jobs = create_jobs(ntot, block_size);
     let njobs = jobs.len() as u64;
-
     let arc_enc = Arc::new(Mutex::new(encoder));
-
     let eps = 1e-4;
 
     let mut chunks = jobs
@@ -339,17 +339,24 @@ where
 
             let enc = arc_enc.lock().expect("lock");
             let (z_nk, _) = enc.forward_t(&x_nd, false).expect("forward");
-            (
-                lb,
-                z_nk.to_device(&candle_core::Device::Cpu).expect("to cpu"),
-            )
+            let z_nk = z_nk.to_device(&candle_core::Device::Cpu).expect("to cpu");
+            (lb, Mat::from_tensor(&z_nk).expect("to mat"))
         })
         .collect::<Vec<_>>();
 
     chunks.sort_by_key(|&(lb, _)| lb);
     let chunks = chunks.into_iter().map(|(_, z_nk)| z_nk).collect::<Vec<_>>();
-    let out = Tensor::cat(&chunks, 0)?;
-    Ok(out)
+
+    let mut ret = Mat::zeros(ntot, kk);
+    {
+        let mut lb = 0;
+        for z in chunks {
+            let ub = lb + z.nrows();
+            ret.rows_range_mut(lb..ub).copy_from(&z);
+            lb = ub;
+        }
+    }
+    Ok(ret)
 }
 
 //////////////////////////////////////////
