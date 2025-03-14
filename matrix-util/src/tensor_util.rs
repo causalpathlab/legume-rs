@@ -1,6 +1,5 @@
 use crate::traits::*;
 use candle_core::{Device, Tensor};
-use rand::thread_rng;
 use rand_distr::{Distribution, Gamma};
 use rayon::prelude::*;
 
@@ -24,7 +23,7 @@ impl SampleOps for Tensor {
 
         let data_vec = (0..(nrow * ncol))
             .into_par_iter()
-            .map_init(thread_rng, |rng, _| pdf.sample(rng))
+            .map_init(rand::rng, |rng, _| pdf.sample(rng))
             .collect();
 
         Tensor::from_vec(data_vec, (nrow, ncol), &Device::Cpu)

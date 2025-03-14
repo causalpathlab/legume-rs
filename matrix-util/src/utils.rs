@@ -26,7 +26,7 @@ where
         let ncells = cells.len();
         if let Some(ntarget) = nelem_per_group {
             if ncells > ntarget {
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 cells.shuffle(&mut rng);
                 cells.truncate(ntarget);
             }

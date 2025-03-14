@@ -1,9 +1,8 @@
-use candle_core::WithDType;
 use nalgebra::DMatrix;
 use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
 
 use num_traits::Float;
-use rand::{thread_rng, Rng};
+use rand::Rng;
 use rand_distr::{Distribution, Gamma, StandardNormal, Uniform};
 use rayon::prelude::*;
 
@@ -60,14 +59,14 @@ where
     type Scalar = T;
 
     fn from_tensor(tensor: &candle_core::Tensor) -> anyhow::Result<Self::Mat> {
-	if tensor.dims().len() != 2 {
-	    return Err(anyhow::anyhow!("expected 2D tensor"));
-	}
+        if tensor.dims().len() != 2 {
+            return Err(anyhow::anyhow!("expected 2D tensor"));
+        }
 
-	let nrows = tensor.dims()[0];
-	let ncols = tensor.dims()[1];
-	let data: Vec<T> = tensor.to_vec1()?;
-	Ok(Self::from_row_iterator(nrows, ncols, data.iter().cloned()))
+        let nrows = tensor.dims()[0];
+        let ncols = tensor.dims()[1];
+        let data: Vec<T> = tensor.flatten_all()?.to_vec1()?;
+        Ok(Self::from_row_iterator(nrows, ncols, data.iter().cloned()))
     }
 }
 
@@ -79,11 +78,11 @@ where
     type Scalar = T;
 
     fn runif(nrow: usize, ncol: usize) -> Self::Mat {
-        let u01 = Uniform::<f32>::new(0., 1.);
+        let u01 = Uniform::<f32>::new(0., 1.).expect("failed to create uniform distribution");
 
         let rvec = (0..(nrow * ncol))
             .into_par_iter()
-            .map_init(thread_rng, |rng, _| {
+            .map_init(rand::rng, |rng, _| {
                 let x = rng.sample(u01);
                 T::from(x).expect("failed to type")
             })
@@ -95,7 +94,7 @@ where
     fn rnorm(nrow: usize, ncol: usize) -> Self::Mat {
         let rvec = (0..(nrow * ncol))
             .into_par_iter()
-            .map_init(thread_rng, |rng, _| {
+            .map_init(rand::rng, |rng, _| {
                 let x: f32 = rng.sample(StandardNormal);
                 T::from(x).expect("failed to type")
             })
@@ -110,7 +109,7 @@ where
 
         let rvec = (0..(nrow * ncol))
             .into_par_iter()
-            .map_init(thread_rng, |rng, _| {
+            .map_init(rand::rng, |rng, _| {
                 let x: f32 = pdf.sample(rng);
                 T::from(x).expect("failed to type")
             })

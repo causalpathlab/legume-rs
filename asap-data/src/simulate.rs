@@ -108,7 +108,7 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
     let mut rng = rand::rngs::StdRng::seed_from_u64(rseed);
 
     // 1. batch membership matrix
-    let runif = Uniform::new(0, bb);
+    let runif = Uniform::new(0, bb).expect("unif [0 .. bb)");
     let batch_membership: Vec<usize> = (0..nn).map(|_| runif.sample(&mut rng)).collect();
 
     // 2. batch effect matrix
