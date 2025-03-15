@@ -211,6 +211,16 @@ fn main() -> anyhow::Result<()> {
 
     let x_nd = collapse_out.mu.posterior_mean().transpose().clone();
 
+    info!(
+        "Collapsed: {} x {} -> {} x {}",
+        data_vec.num_columns()?,
+        data_vec.num_rows()?,
+        x_nd.nrows(),
+        x_nd.ncols()
+    );
+
+    let kk = args.latent_topics;
+
     let delta_bd = collapse_out.delta.as_ref();
 
     let (z_nk, beta_dk, llik) = match args.decoder_model {
@@ -239,7 +249,7 @@ fn main() -> anyhow::Result<()> {
                 &enc,
                 &dec,
                 &parameters,
-                &poisson_likelihood,
+                &topic_likelihood,
                 &train_config,
             )?
         }
@@ -261,13 +271,13 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_asap_embedding<Enc, Dec, LLikFn>(
-    collapsed_data_nd: Mat,
+    data_nd: Mat,
     batch_adjust: Option<&Mat>,
     full_data_vec: &SparseIoVec,
     encoder: &Enc,
     decoder: &Dec,
     parameters: &candle_nn::VarMap,
-    llik_func: &LLikFn,
+    log_likelihood_func: &LLikFn,
     train_config: &candle_vae_inference::TrainConfig,
 ) -> anyhow::Result<(Mat, Mat, Vec<f32>)>
 where
@@ -278,24 +288,38 @@ where
     use candle_vae_inference::Vae;
 
     let kk = encoder.dim_latent();
-    let mut x_std_nd = collapsed_data_nd.clone();
+
+    let mut x_std_nd = data_nd.clone();
     x_std_nd.scale_columns_inplace();
     let (mut z_nk_init, _, _) = x_std_nd.rsvd(kk)?;
     z_nk_init.scale_columns_inplace();
 
-    let mut collapsed_data_loader = InMemoryData::from_with_aux(&collapsed_data_nd, &z_nk_init)?;
+    let kk_init = z_nk_init.ncols();
+    if kk_init < kk {
+        info!("zero-padding {} columns...", kk - kk_init);
+        z_nk_init = z_nk_init.insert_columns(kk_init, kk - kk_init, 0.);
+    }
 
-    info!("Start training ...");
+    let mut data_loader = InMemoryData::from_with_aux(&data_nd, &z_nk_init)?;
 
     let mut vae = Vae::build(encoder, decoder, parameters);
 
-    vae.pretrain_encoder(
-        &mut collapsed_data_loader,
-        &gaussian_likelihood,
-        &train_config,
-    )?;
+    for var in parameters.all_vars() {
+        var.to_device(&train_config.device)?;
+    }
 
-    let llik = vae.train_encoder_decoder(&mut collapsed_data_loader, llik_func, &train_config)?;
+    info!(
+        "Start pre-training with z {} x {} ...",
+        z_nk_init.nrows(),
+        z_nk_init.ncols()
+    );
+
+    let _llik = vae.pretrain_encoder(&mut data_loader, &gaussian_likelihood, &train_config)?;
+
+    info!("Start full log-likelihood training ...");
+
+    let llik_trace =
+        vae.train_encoder_decoder(&mut data_loader, log_likelihood_func, &train_config)?;
 
     info!("Done with training {} epochs", train_config.num_epochs);
 
@@ -309,7 +333,7 @@ where
         .to_device(&candle_core::Device::Cpu)?;
     let beta_dk = Mat::from_tensor(&beta_dk)?;
 
-    Ok((z_nk, beta_dk, llik))
+    Ok((z_nk, beta_dk, llik_trace))
 }
 
 //////////////////////////////////////////////////////////

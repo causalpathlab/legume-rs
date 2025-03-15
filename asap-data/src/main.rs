@@ -106,10 +106,6 @@ pub struct SortRowsArgs {
     /// Row/feature name file (name per each line; `.tsv.gz` or `.tsv`)
     #[arg(short, long, required = true)]
     row_file: Box<str>,
-
-    /// backend
-    #[arg(short, long, value_enum, default_value = "zarr")]
-    backend: SparseIoBackend,
 }
 
 #[derive(Args)]
@@ -128,10 +124,6 @@ pub struct TakeColumnsArgs {
     /// Output file
     #[arg(short, long, required = true)]
     output: Box<str>,
-
-    /// backend
-    #[arg(short, long, value_enum, default_value = "zarr")]
-    backend: SparseIoBackend,
 }
 
 #[derive(Args)]
@@ -221,20 +213,12 @@ pub struct RunSqueezeArgs {
     /// Block_size for parallel processing
     #[arg(long, value_enum, default_value = "100")]
     block_size: usize,
-
-    /// backend to use (hdf5 or zarr), default: zarr
-    #[arg(short, long, value_enum, default_value = "zarr")]
-    backend: SparseIoBackend,
 }
 
 #[derive(Args)]
 pub struct RunStatArgs {
     /// Data file -- .zarr or .h5 file
     data_file: Box<str>,
-
-    /// backend
-    #[arg(short, long, value_enum, default_value = "zarr")]
-    backend: SparseIoBackend,
 
     /// block_size
     #[arg(long, value_enum, default_value = "100")]
@@ -317,7 +301,13 @@ fn read_col_names(col_file: Box<str>, max_column_name_idx: usize) -> anyhow::Res
 fn reorder_rows(args: &SortRowsArgs) -> anyhow::Result<()> {
     let data_file = args.data_file.clone();
     let row_names_order: Vec<Box<str>> = read_row_names(args.row_file.clone(), MAX_ROW_NAME_IDX)?;
-    let backend = args.backend.clone();
+
+    let backend = match common_io::extension(&data_file)?.as_ref() {
+        "zarr" => SparseIoBackend::Zarr,
+        "h5" => SparseIoBackend::HDF5,
+        _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
+    };
+
     let mut data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
     data.reorder_rows(&row_names_order)?;
 
@@ -331,7 +321,13 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
 
     let columns = args.columns.clone();
     let column_name_file = args.name_file.clone();
-    let backend = args.backend.clone();
+
+    let backend = match common_io::extension(&data_file)?.as_ref() {
+        "zarr" => SparseIoBackend::Zarr,
+        "h5" => SparseIoBackend::HDF5,
+        _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
+    };
+
     let output = args.output.clone();
 
     if let Some(columns) = columns {
@@ -710,7 +706,13 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     common_io::mkdir(&output)?;
 
     let input = cmd_args.data_file.clone();
-    let backend = cmd_args.backend.clone();
+
+    let backend = match common_io::extension(&input)?.as_ref() {
+        "zarr" => SparseIoBackend::Zarr,
+        "h5" => SparseIoBackend::HDF5,
+        _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
+    };
+
     let block_size = cmd_args.block_size;
 
     match common_io::extension(&input)?.as_ref() {
@@ -743,7 +745,12 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
     let col_nnz_cutoff = cmd_args.column_nnz_cutoff;
 
     let block_size = cmd_args.block_size;
-    let backend = cmd_args.backend.clone();
+
+    let backend = match common_io::extension(&data_file)?.as_ref() {
+        "zarr" => SparseIoBackend::Zarr,
+        "h5" => SparseIoBackend::HDF5,
+        _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
+    };
 
     match common_io::extension(&data_file)?.as_ref() {
         "zarr" => {
