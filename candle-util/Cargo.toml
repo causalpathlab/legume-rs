@@ -30,11 +30,11 @@ env_logger = "0.11"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["cuda","cudarc","cudnn"] }
-candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["cuda"] }
+candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-nn", features = ["cuda"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["metal","accelerate"] }
-candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["metal","accelerate"] }
+candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-nn", features = ["metal","accelerate"] }
 
 [dev-dependencies]
 textplots = { version = "0.8" }
