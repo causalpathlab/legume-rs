@@ -329,7 +329,6 @@ where
 
     let beta_dk = decoder
         .get_dictionary()?
-        .transpose(0, 1)?
         .to_device(&candle_core::Device::Cpu)?;
     let beta_dk = Mat::from_tensor(&beta_dk)?;
 
