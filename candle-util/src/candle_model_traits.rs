@@ -22,6 +22,9 @@ pub trait DecoderModule {
     /// A decoder that spits out reconstruction
     fn forward(&self, z_nk: &Tensor) -> Result<Tensor>;
 
+    /// Get a representative dictionary matrix
+    fn get_dictionary(&self) -> Result<Tensor>;
+
     /// A decoder that spits out reconstruction and log-likelihood
     /// * `z_nk` - latent states
     /// * `x_nd` - observed data to validate with

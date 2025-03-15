@@ -39,6 +39,10 @@ impl DecoderModule for TopicDecoder {
         ops::log_softmax(&prob_nd.log()?, 1)
     }
 
+    fn get_dictionary(&self) -> Result<Tensor> {
+	self.dictionary.weight()
+    }
+
     fn forward_with_llik<LlikFn>(
         &self,
         z_nk: &Tensor,

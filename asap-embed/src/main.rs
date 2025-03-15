@@ -30,8 +30,8 @@ use std::sync::{Arc, Mutex};
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
 enum DecoderModel {
-    Poisson,
     Topic,
+    Poisson,
 }
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -121,7 +121,7 @@ struct EmbedArgs {
     device: ComputeDevice,
 
     /// Candle device
-    #[arg(long, value_enum, default_value = "poisson")]
+    #[arg(long, value_enum, default_value = "topic")]
     decoder_model: DecoderModel,
 
     /// verbosity
@@ -158,10 +158,6 @@ fn main() -> anyhow::Result<()> {
 
     let dd = data_vec.num_rows()?;
     let kk = args.latent_topics;
-
-    let parameters = candle_nn::VarMap::new();
-    let param_builder =
-        candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
     info!("Estimate {} topics", kk);
     info!("Encoder layers: {:?}", args.encoder_layers);
@@ -204,90 +200,116 @@ fn main() -> anyhow::Result<()> {
         Some(args.iter_opt),
     )?;
 
-    let delta = collapse_out.delta.as_ref();
-    if let Some(param) = delta {
-        param.write_tsv(&(args.out.to_string() + ".delta"))?;
-    }
-
     /////////////////////////////////////////////////////////
     // 4. Train embedded topic model on the collapsed data //
     /////////////////////////////////////////////////////////
-    let enc = LogSoftmaxEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
+
+    let parameters = candle_nn::VarMap::new();
+    let dev = &train_config.device;
+    let param_builder =
+        candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
 
     let x_nd = collapse_out.mu.posterior_mean().transpose().clone();
 
-    let mut x_std_nd = x_nd.clone();
+    let delta_bd = collapse_out.delta.as_ref();
+
+    let (z_nk, beta_dk, llik) = match args.decoder_model {
+        DecoderModel::Poisson => {
+            let enc = LogSoftmaxEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
+            let dec = PoissonDecoder::new(dd, kk, param_builder.clone())?;
+            run_asap_embedding(
+                x_nd,
+                delta_bd.map(|x| x.posterior_mean()),
+                &data_vec,
+                &enc,
+                &dec,
+                &parameters,
+                &poisson_likelihood,
+                &train_config,
+            )?
+        }
+
+        DecoderModel::Topic => {
+            let enc = LogSoftmaxEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
+            let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
+            run_asap_embedding(
+                x_nd,
+                delta_bd.map(|x| x.posterior_mean()),
+                &data_vec,
+                &enc,
+                &dec,
+                &parameters,
+                &poisson_likelihood,
+                &train_config,
+            )?
+        }
+    };
+
+    Mat::from_row_iterator(llik.len(), 1, llik.into_iter())
+        .to_tsv(&(args.out.to_string() + ".llik.gz"))?;
+
+    z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
+
+    beta_dk.to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
+
+    if let Some(param) = delta_bd {
+        param.write_tsv(&(args.out.to_string() + ".delta.gz"))?;
+    }
+
+    info!("done");
+    Ok(())
+}
+
+fn run_asap_embedding<Enc, Dec, LLikFn>(
+    collapsed_data_nd: Mat,
+    batch_adjust: Option<&Mat>,
+    full_data_vec: &SparseIoVec,
+    encoder: &Enc,
+    decoder: &Dec,
+    parameters: &candle_nn::VarMap,
+    llik_func: &LLikFn,
+    train_config: &candle_vae_inference::TrainConfig,
+) -> anyhow::Result<(Mat, Mat, Vec<f32>)>
+where
+    Enc: EncoderModuleT + Send + Sync + 'static,
+    Dec: DecoderModule,
+    LLikFn: Fn(&Tensor, &Tensor) -> candle_core::Result<Tensor>,
+{
+    use candle_vae_inference::Vae;
+
+    let kk = encoder.dim_latent();
+    let mut x_std_nd = collapsed_data_nd.clone();
     x_std_nd.scale_columns_inplace();
     let (mut z_nk_init, _, _) = x_std_nd.rsvd(kk)?;
     z_nk_init.scale_columns_inplace();
 
-    let mut data_loader = InMemoryData::from_with_aux(&x_nd, &z_nk_init)?;
-
-    let mut llik = vec![];
+    let mut collapsed_data_loader = InMemoryData::from_with_aux(&collapsed_data_nd, &z_nk_init)?;
 
     info!("Start training ...");
 
-    use candle_vae_inference::Vae;
+    let mut vae = Vae::build(encoder, decoder, parameters);
 
-    match args.decoder_model {
-        DecoderModel::Poisson => {
-            let dec = PoissonDecoder::new(dd, kk, param_builder.clone())?;
-            let mut vae = Vae::build(&enc, &dec, &parameters);
+    vae.pretrain_encoder(
+        &mut collapsed_data_loader,
+        &gaussian_likelihood,
+        &train_config,
+    )?;
 
-            llik.extend(vae.pretrain_encoder(
-                &mut data_loader,
-                &gaussian_likelihood,
-                &train_config,
-            )?);
-
-            llik.extend(vae.train_encoder_decoder(
-                &mut data_loader,
-                &poisson_likelihood,
-                &train_config,
-            )?);
-
-            dec.dictionary()
-                .weight()?
-                .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
-        }
-
-        DecoderModel::Topic => {
-            let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
-            let mut vae = Vae::build(&enc, &dec, &parameters);
-
-            llik.extend(vae.pretrain_encoder(
-                &mut data_loader,
-                &gaussian_likelihood,
-                &train_config,
-            )?);
-
-            llik.extend(vae.train_encoder_decoder(
-                &mut data_loader,
-                &topic_likelihood,
-                &train_config,
-            )?);
-
-            dec.dictionary()
-                .weight()?
-                .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
-        }
-    }
+    let llik = vae.train_encoder_decoder(&mut collapsed_data_loader, llik_func, &train_config)?;
 
     info!("Done with training {} epochs", train_config.num_epochs);
-    Mat::from_row_iterator(llik.len(), 1, llik.into_iter())
-        .to_tsv(&(args.out.to_string() + ".llik.gz"))?;
 
-    // 5. Revisit the data to recover latent states
-    info!("Encoding latent states for all...");
-    for var in parameters.all_vars() {
-        var.to_device(&dev)?;
-    }
+    let z_nk = estimate_latent(&full_data_vec, encoder, &train_config, batch_adjust)?;
 
-    let delta = delta.map(|x| x.posterior_mean());
-    let z_nk = estimate_latent(&data_vec, &enc, &train_config, delta)?;
-    z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
-    info!("done");
-    Ok(())
+    info!("Done encoding latent states for all");
+
+    let beta_dk = decoder
+        .get_dictionary()?
+        .transpose(0, 1)?
+        .to_device(&candle_core::Device::Cpu)?;
+    let beta_dk = Mat::from_tensor(&beta_dk)?;
+
+    Ok((z_nk, beta_dk, llik))
 }
 
 //////////////////////////////////////////////////////////
