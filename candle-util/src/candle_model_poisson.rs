@@ -36,6 +36,10 @@ impl DecoderModule for PoissonDecoder {
         self.dictionary.forward(&theta_nk)
     }
 
+    fn get_dictionary(&self) -> Result<Tensor> {
+        self.dictionary.weight()
+    }
+
     fn forward_with_llik<LlikFn>(
         &self,
         z_nk: &Tensor,
