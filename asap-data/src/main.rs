@@ -86,7 +86,10 @@ enum Commands {
     /// Merge multiple 10x `.mtx` files
     MergeMtx(MergeMtxArgs),
 
-    /// Filter out rows and columns by number of non-zeros (Q/C)
+    /// Filter out rows and columns by number of non-zeros (Q/C).
+    /// This will overwrite the original file (by default).
+    /// Additionally, this will save the row/column indices that are
+    /// kept in the output file.
     Squeeze(RunSqueezeArgs),
 
     /// Take basic statistics from a sparse matrix
@@ -746,7 +749,9 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
 
     let block_size = cmd_args.block_size;
 
-    let backend = match common_io::extension(&data_file)?.as_ref() {
+    let ext = common_io::extension(&data_file)?;
+
+    let backend = match ext.as_ref() {
         "zarr" => SparseIoBackend::Zarr,
         "h5" => SparseIoBackend::HDF5,
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
@@ -790,6 +795,21 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
             data.num_rows().unwrap(),
             data.num_columns().unwrap()
         );
+
+        let hdr = data_file.replace(ext.as_ref(), "");
+        let row_idx_file = format!("{}row.idx.gz", hdr);
+        let col_idx_file = format!("{}col.idx.gz", hdr);
+
+        fn to_str_vec(v: &Vec<usize>) -> Vec<Box<str>> {
+            v.iter()
+                .map(|x| format!("{}", x).into_boxed_str())
+                .collect()
+        }
+
+        let col_idx = to_str_vec(&col_idx);
+        let row_idx = to_str_vec(&row_idx);
+        common_io::write_lines(&col_idx, &col_idx_file)?;
+        common_io::write_lines(&row_idx, &row_idx_file)?;
     }
 
     Ok(())
