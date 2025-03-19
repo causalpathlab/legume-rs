@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex};
 enum DecoderModel {
     Topic,
     Poisson,
+    Proj,
 }
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -43,18 +44,19 @@ enum ComputeDevice {
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(version, about, long_about=None)]
+#[command(name = "ASAP embedding", version, about, long_about, term_width = 80)]
+/// A quick embedding utility
 ///
-/// Embedding high-dimensional data (where each data point is a column
-/// vector) into a lower-dimensional space in three steps: (1)
-/// approximate collapsing to reduce sample size, (2) training an
-/// embedding model, and (3) recover latent states by revisiting the
-/// data.
+/// This command will embed high-dimensional data (where each data
+/// point is a column vector) into a lower-dimensional space in three
+/// steps: (1) approximate collapsing to reduce sample size, (2)
+/// training an embedding model, and (3) recover latent states by
+/// revisiting the data.
 ///
 struct EmbedArgs {
     /// Data files of either `.zarr` or `.h5` format. All the formats
-    /// should be identical. We can convert `.mtx` to `.zarr` or `.h5`
-    /// using `asap-data build`
+    /// in the given list should be identical. We can convert `.mtx`
+    /// to `.zarr` or `.h5` using `asap-data build` command.
     #[arg(required = true)]
     data_files: Vec<Box<str>>,
 
@@ -67,7 +69,7 @@ struct EmbedArgs {
     out: Box<str>,
 
     /// Use top `S` components of projection. #samples < `2^S+1`.
-    #[arg(long, short, default_value_t = 10)]
+    #[arg(long, short = 'd', default_value_t = 10)]
     sort_dim: usize,
 
     /// Batch membership files (comma-separated names). Each bach file
@@ -76,16 +78,16 @@ struct EmbedArgs {
     batch_files: Option<Vec<Box<str>>>,
 
     /// Reference batch name (comma-separated names)
-    #[arg(long, value_delimiter(','))]
+    #[arg(short = 'r', long, value_delimiter(','))]
     reference_batch: Option<Vec<Box<str>>>,
 
     /// #k-nearest neighbours within each batch
-    #[arg(long, short, default_value_t = 10)]
+    #[arg(long, short = 'n', default_value_t = 10)]
     knn: usize,
 
     /// #downsampling columns per each collapsed sample. If None, no
     /// downsampling.
-    #[arg(long)]
+    #[arg(long, short = 's')]
     down_sample: Option<usize>,
 
     /// optimization iterations
@@ -97,19 +99,22 @@ struct EmbedArgs {
     block_size: usize,
 
     /// Number of latent topics
-    #[arg(short, long, default_value_t = 10)]
+    #[arg(short = 'k', long, default_value_t = 10)]
     latent_topics: usize,
 
     /// Encoder layers
-    #[arg(long, value_delimiter(','), default_values_t = vec![32,128,1024,128])]
+    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![32,128,1024,128])]
     encoder_layers: Vec<usize>,
 
+    /// # pre-training epochs
     #[arg(long, default_value_t = 100)]
     pretrain_epochs: usize,
 
-    #[arg(long, default_value_t = 1000)]
+    /// # training epochs
+    #[arg(long, short = 'i', default_value_t = 1000)]
     epochs: usize,
 
+    /// Minibatch size
     #[arg(long, default_value_t = 100)]
     minibatch_size: usize,
 
@@ -120,9 +125,14 @@ struct EmbedArgs {
     #[arg(long, value_enum, default_value = "cpu")]
     device: ComputeDevice,
 
-    /// Candle device
-    #[arg(long, value_enum, default_value = "topic")]
+    /// Decodeer model: topic (softmax) model, poisson MF, or nystrom
+    /// projection
+    #[arg(long, short = 'm', value_enum, default_value = "topic")]
     decoder_model: DecoderModel,
+
+    /// Save intermediate projection results
+    #[arg(long)]
+    save_intermediate: bool,
 
     /// verbosity
     #[arg(long, short)]
@@ -160,7 +170,10 @@ fn main() -> anyhow::Result<()> {
     let kk = args.latent_topics;
 
     info!("Estimate {} topics", kk);
-    info!("Encoder layers: {:?}", args.encoder_layers);
+
+    if args.decoder_model != DecoderModel::Proj {
+        info!("Encoder layers: {:?}", args.encoder_layers);
+    }
 
     /////////////////////////////////////
     // 1. Randomly project the columns //
@@ -175,6 +188,12 @@ fn main() -> anyhow::Result<()> {
 
     let proj_kn = proj_out.proj;
     info!("Assigning {} columns to samples...", proj_kn.ncols());
+
+    if args.save_intermediate {
+        proj_kn
+            .transpose()
+            .to_tsv(&(args.out.to_string() + ".rp.gz"))?;
+    }
 
     let nsamp = data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim))?;
     info!("at most {} samples are assigned", nsamp);
@@ -253,10 +272,20 @@ fn main() -> anyhow::Result<()> {
                 &train_config,
             )?
         }
+
+        _ => run_nystrom_proj(
+            collapse_out.mu.posterior_log_mean().clone(),
+            delta_bd.map(|x| x.posterior_mean()),
+            &data_vec,
+            args.latent_topics,
+            Some(args.block_size.clone()),
+        )?,
     };
 
-    Mat::from_row_iterator(llik.len(), 1, llik.into_iter())
-        .to_tsv(&(args.out.to_string() + ".llik.gz"))?;
+    if llik.len() > 0 {
+        Mat::from_row_iterator(llik.len(), 1, llik.into_iter())
+            .to_tsv(&(args.out.to_string() + ".llik.gz"))?;
+    }
 
     z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
 
@@ -268,6 +297,97 @@ fn main() -> anyhow::Result<()> {
 
     info!("done");
     Ok(())
+}
+
+fn run_nystrom_proj(
+    xx_dn: Mat,
+    delta: Option<&Mat>,
+    full_data_vec: &SparseIoVec,
+    rank: usize,
+    block_size: Option<usize>,
+) -> anyhow::Result<(Mat, Mat, Vec<f32>)> {
+    let mut xx_dn = xx_dn.clone();
+    xx_dn.scale_columns_inplace();
+    let (uu_dk, _, _) = xx_dn.rsvd(rank)?;
+
+    let eps = 1e-8;
+    let xdepth = 1e4;
+
+    // let mut proj_dk = uu_dk.clone();
+    // let safe_dd = dd.map(|x| x + eps);
+    // proj_dk.row_iter_mut().for_each(|mut u| {
+    //     u.component_div_assign(&safe_dd.transpose());
+    // });
+
+    info!(
+        "Constructed {} x {} projection matrix",
+        uu_dk.nrows(),
+        uu_dk.ncols()
+    );
+
+    let ntot = full_data_vec.num_columns()?;
+    let kk = rank;
+    let block_size = block_size.unwrap_or(100);
+
+    let jobs = create_jobs(ntot, block_size);
+    let njobs = jobs.len() as u64;
+
+    info!("Visiting {} blocks ...", njobs);
+
+    let mut chunks = jobs
+        .par_iter()
+        .progress_count(njobs)
+        .map(|&(lb, ub)| {
+            let mut x_dn = full_data_vec
+                .read_columns_dmatrix(lb..ub)
+                .expect("read columns");
+
+            x_dn.column_iter_mut().for_each(|mut x_j| {
+                let xsum = x_j.sum();
+                if xsum > 0.0 {
+                    x_j.scale_mut(xdepth / xsum);
+                }
+            });
+
+            if let Some(delta) = delta {
+                let batches = full_data_vec.get_batch_membership(lb..ub);
+
+                x_dn.column_iter_mut()
+                    .zip(batches)
+                    .for_each(|(mut x_j, b)| {
+                        let d_j = delta.column(b);
+                        let xsum = x_j.sum();
+                        let dsum = d_j.sum();
+                        let scale = if dsum > 0.0 { xsum / dsum } else { 1.0 };
+                        x_j.zip_apply(&d_j, |x_ij, d_ij| *x_ij /= d_ij * scale + eps);
+                    });
+            }
+
+            let mut log_x_dn = x_dn.map(|x| (x + 0.5).log2());
+            log_x_dn.centre_columns_inplace();
+
+            let z_nk = log_x_dn.transpose() * &uu_dk;
+            (lb, z_nk)
+        })
+        .collect::<Vec<_>>();
+
+    chunks.sort_by_key(|&(lb, _)| lb);
+    let chunks = chunks.into_iter().map(|(_, z_nk)| z_nk).collect::<Vec<_>>();
+
+    info!("Done {} projections ...", njobs);
+
+    let mut z_nk = Mat::zeros(ntot, kk);
+
+    {
+        let mut lb = 0;
+        for z in chunks {
+            let ub = lb + z.nrows();
+            z_nk.rows_range_mut(lb..ub).copy_from(&z);
+            lb = ub;
+        }
+    }
+
+    Ok((z_nk, uu_dk, vec![]))
 }
 
 fn run_asap_embedding<Enc, Dec, LLikFn>(
