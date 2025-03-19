@@ -1,14 +1,13 @@
 #![allow(dead_code)]
 
 use asap_data::sparse_io::*;
-use nalgebra::{DMatrix, DVector};
 
 pub const DEFAULT_BLOCK_SIZE: usize = 100;
 pub const DEFAULT_KNN: usize = 10;
 pub const DEFAULT_OPT_ITER: usize = 100;
 
-pub type Mat = DMatrix<f32>;
-pub type DVec = DVector<f32>;
+pub type Mat = nalgebra::DMatrix<f32>;
+pub type DVec = nalgebra::DVector<f32>;
 
 pub type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 
