@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use candle_core::{Module, Result, Tensor};
-use candle_nn::Activation;
+use candle_core::{Result, Tensor};
+use candle_nn::{Activation, Module};
 
 /// build a stack of alternating `M` and `A` layers
 pub struct StackLayers<M>
