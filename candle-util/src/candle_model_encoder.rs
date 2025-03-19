@@ -43,11 +43,22 @@ impl LogSoftmaxEncoder {
     }
 
     pub fn latent_params(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
+        let min_mean = -(self.n_features as f64).sqrt(); // stabilize
+        let max_mean = (self.n_features as f64).sqrt(); // mean
+        let min_lv = -8.; // and log variance
+        let max_lv = 8.; //
+
         let bn_nd = self.preprocess_input(x_nd, train)?;
         let fc_nl = self.fc.forward_t(&bn_nd, train)?;
         let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
-        let z_mean_nk = self.z_mean.forward_t(&bn_nl, train)?;
-        let z_lnvar_nk = self.z_lnvar.forward_t(&bn_nl, train)?.clamp(-8., 8.)?;
+        let z_mean_nk = self
+            .z_mean
+            .forward_t(&bn_nl, train)?
+            .clamp(min_mean, max_mean)?;
+        let z_lnvar_nk = self
+            .z_lnvar
+            .forward_t(&bn_nl, train)?
+            .clamp(min_lv, max_lv)?;
         Ok((z_mean_nk, z_lnvar_nk))
     }
 
