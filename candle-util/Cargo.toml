@@ -28,13 +28,19 @@ indicatif = { workspace = true }
 log = "0.4"
 env_logger = "0.11"
 
+# candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["cuda","cudarc","cudnn"] }
+# candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-nn", features = ["cuda"] }
+
+# candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["metal","accelerate"] }
+# candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-nn", features = ["metal","accelerate"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
-candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["cuda","cudarc","cudnn"] }
-candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-nn", features = ["cuda"] }
+candle-core = {  version = "0.8.4", features = ["cuda","cudarc","cudnn"] }
+candle-nn = {  version = "0.8.4", features = ["cuda"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["metal","accelerate"] }
-candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-nn", features = ["metal","accelerate"] }
+candle-core = {  version = "0.8.4", features = ["metal","accelerate"] }
+candle-nn = {  version = "0.8.4", features = ["metal","accelerate"] }
 
 [dev-dependencies]
 textplots = { version = "0.8" }

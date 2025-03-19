@@ -3,4 +3,44 @@ name = "asap-network"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "asap-network"
+path = "src/main.rs"
+
 [dependencies]
+asap-data = { path = "../asap-data" }
+candle-util = { path = "../candle-util" }
+matrix-util = { path = "../matrix-util" }
+matrix-param = { path = "../matrix-param" }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+flate2 = { workspace = true }
+num_cpus = { workspace = true }
+rayon = { workspace = true }
+tempfile = { workspace = true }
+rand = { workspace = true }
+ndarray = { workspace = true }
+ndarray-rand = { workspace = true }
+rand_distr = { workspace = true }
+nalgebra = { workspace = true }
+nalgebra-sparse = { workspace = true }
+approx = { workspace = true }
+
+instant-distance = { workspace = true }
+special = { workspace = true }
+indicatif = { workspace = true }
+log = "0.4"
+env_logger = "0.11"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+candle-core = {  version = "0.8.4", features = ["cuda","cudarc","cudnn"] }
+candle-nn = {  version = "0.8.4", features = ["cuda"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = {  version = "0.8.4", features = ["metal","accelerate"] }
+candle-nn = {  version = "0.8.4", features = ["metal","accelerate"] }
+
+[dev-dependencies]
+textplots = { version = "0.8" }
+

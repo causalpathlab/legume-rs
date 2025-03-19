@@ -1,31 +1,36 @@
 mod asap_collapse_data;
-mod asap_common;
+mod asap_embed_common;
 mod asap_normalization;
 mod asap_random_projection;
 
-use asap_collapse_data::CollapsingOps;
-use asap_common::*;
-use asap_data::sparse_io::*;
-use asap_data::sparse_io_vector::*;
-use asap_random_projection::RandProjOps;
-use candle_util::candle_data_loader::InMemoryData;
-use candle_util::candle_loss_functions::*;
-use candle_util::candle_model_encoder::*;
-use candle_util::candle_model_poisson::*;
-use candle_util::candle_model_topic::*;
-use candle_util::candle_model_traits::*;
-use candle_util::candle_vae_inference;
-use candle_util::candle_vae_inference::*;
-use clap::{Parser, ValueEnum};
-use indicatif::ParallelProgressIterator;
 use log::info;
+
 use matrix_param::traits::Inference;
 use matrix_param::traits::ParamIo;
 use matrix_util::common_io::{extension, read_lines};
 use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::traits::*;
+
+use asap_embed_common::*;
+
+use asap_collapse_data::CollapsingOps;
+use asap_data::sparse_io::*;
+use asap_data::sparse_io_vector::*;
+use asap_random_projection::RandProjOps;
+
+use candle_util::candle_data_loader::*;
+use candle_util::candle_loss_functions::*;
+use candle_util::candle_model_encoder::*;
+use candle_util::candle_model_poisson::*;
+use candle_util::candle_model_topic::*;
+use candle_util::candle_model_traits::*;
+use candle_util::candle_vae_inference::*;
+
+use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
+
+use indicatif::ParallelProgressIterator;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -153,7 +158,7 @@ fn main() -> anyhow::Result<()> {
         _ => candle_core::Device::Cpu,
     };
 
-    let train_config = candle_vae_inference::TrainConfig {
+    let train_config = TrainConfig {
         learning_rate: args.learning_rate,
         batch_size: args.minibatch_size,
         num_epochs: args.epochs,
@@ -398,15 +403,13 @@ fn run_asap_embedding<Enc, Dec, LLikFn>(
     decoder: &Dec,
     parameters: &candle_nn::VarMap,
     log_likelihood_func: &LLikFn,
-    train_config: &candle_vae_inference::TrainConfig,
+    train_config: &TrainConfig,
 ) -> anyhow::Result<(Mat, Mat, Vec<f32>)>
 where
     Enc: EncoderModuleT + Send + Sync + 'static,
     Dec: DecoderModule,
     LLikFn: Fn(&Tensor, &Tensor) -> candle_core::Result<Tensor>,
 {
-    use candle_vae_inference::Vae;
-
     let kk = encoder.dim_latent();
 
     let mut x_std_nd = data_nd.clone();
@@ -443,7 +446,7 @@ where
 
     info!("Done with training {} epochs", train_config.num_epochs);
 
-    let z_nk = estimate_latent(&full_data_vec, encoder, &train_config, batch_adjust)?;
+    let z_nk = estimate_latent_by_encoder(&full_data_vec, encoder, &train_config, batch_adjust)?;
 
     info!("Done encoding latent states for all");
 
@@ -455,14 +458,10 @@ where
     Ok((z_nk, beta_dk, llik_trace))
 }
 
-//////////////////////////////////////////////////////////
-// Just evaluate latent states based on the encoder net //
-//////////////////////////////////////////////////////////
-
-fn estimate_latent<Enc>(
+fn estimate_latent_by_encoder<Enc>(
     data_vec: &SparseIoVec,
     encoder: &Enc,
-    train_config: &candle_vae_inference::TrainConfig,
+    train_config: &TrainConfig,
     delta: Option<&Mat>,
 ) -> anyhow::Result<Mat>
 where
