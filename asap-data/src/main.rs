@@ -34,6 +34,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Stat(args) => {
             run_stat(args)?;
         }
+        Commands::Info(args) => {
+            show_info(args)?;
+        }
         Commands::Statistics(args) => {
             run_stat(args)?;
         }
@@ -104,6 +107,9 @@ enum Commands {
 
     /// Filter out rows and columns by number of non-zeros (will overwrite).
     Squeeze(RunSqueezeArgs),
+
+    /// Show basic information of a sparse matrix
+    Info(InfoArgs),
 
     /// Take basic statistics from a sparse matrix
     Statistics(RunStatArgs),
@@ -247,6 +253,16 @@ pub struct RunStatArgs {
 
     /// output file header
     #[arg(short, long)]
+    output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct InfoArgs {
+    /// Data file -- .zarr or .h5 file
+    data_file: Box<str>,
+
+    /// output file header
+    #[arg(short, long, default_value = "")]
     output: Box<str>,
 }
 
@@ -717,6 +733,38 @@ fn run_build(args: &RunBuildArgs) -> anyhow::Result<()> {
                 (1..(ncol + 1)).map(|i| format!("{}", i).into()).collect();
             data.register_column_names_vec(&col_names);
         }
+    }
+
+    Ok(())
+}
+
+fn show_info(cmd_args: &InfoArgs) -> anyhow::Result<()> {
+    let output = cmd_args.output.clone();
+    let input = cmd_args.data_file.clone();
+
+    let backend = match common_io::extension(&input)?.as_ref() {
+        "zarr" => SparseIoBackend::Zarr,
+        "h5" => SparseIoBackend::HDF5,
+        _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
+    };
+
+    let data: Box<SData> = open_sparse_matrix(&input, &backend.clone())?;
+
+    if let (Some(nrow), Some(ncol), Some(nnz)) =
+        (data.num_rows(), data.num_columns(), data.num_non_zeros())
+    {
+        println!("number_of_rows:\t{}", nrow);
+        println!("number_of_columns:\t{}", ncol);
+        println!("number_of_nonzeros:\t{}", nnz);
+    }
+
+    if output.len() > 0 {
+        use common_io::{mkdir, write_lines};
+        mkdir(&output)?;
+        let row_names = data.row_names()?;
+        let col_names = data.column_names()?;
+        write_lines(&row_names, &(output.to_string() + ".rows.gz"))?;
+        write_lines(&col_names, &(output.to_string() + ".columns.gz"))?;
     }
 
     Ok(())
