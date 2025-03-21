@@ -37,8 +37,10 @@ impl TwoStatParam for GammaMatrix {
 
     /// New Poisson-Gamma parameter matrix
     ///
+    /// ```text
     /// x[i,j] ~ Poisson(lambda[i,j])
     /// lambda[i,j] ~ Gamma(a0, b0)
+    /// ```
     ///
     /// #Arguments
     /// * `dims` - dimensions of the matrix (num of rows, num of columns)
