@@ -27,7 +27,7 @@ impl RSVD for Mat {
 /// Randomized SVD
 ///
 /// Implement Alg 4.4 of Halko et al. (2009)
-/// Modified from https://github.com/kazuotani14/RandomizedSvd
+/// Modified from <https://github.com/kazuotani14/RandomizedSvd>
 ///
 pub struct RandomizedSVD {
     max_rank: usize,
