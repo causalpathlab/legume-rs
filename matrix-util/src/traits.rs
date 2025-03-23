@@ -79,6 +79,15 @@ pub trait IoOps {
     type Scalar;
     type Mat;
 
-    fn from_tsv(tsv_file: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat>;
-    fn to_tsv(&self, tsv_file: &str) -> anyhow::Result<()>;
+    fn read_file_delim(file: &str, delim: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat>;
+
+    fn from_tsv(tsv_file: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat> {
+        Self::read_file_delim(tsv_file, "\t", skip)
+    }
+
+    fn write_file_delim(&self, file: &str, delim: &str) -> anyhow::Result<()>;
+
+    fn to_tsv(&self, tsv_file: &str) -> anyhow::Result<()> {
+        self.write_file_delim(tsv_file, "\t")
+    }
 }
