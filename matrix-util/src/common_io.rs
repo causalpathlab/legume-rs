@@ -42,10 +42,12 @@ pub fn write_lines(lines: &Vec<Box<str>>, output_file: &str) -> anyhow::Result<(
 /// words.
 ///
 /// * `input_file` - file name--either gzipped or not
+/// * `delim` - delimiter
 /// * `hdr_line` - location of a header line (-1 = no header line)
 ///
 pub fn read_lines_of_types<T>(
     input_file: &str,
+    delim: &str,
     hdr_line: i64,
 ) -> anyhow::Result<(Vec<Vec<T>>, Vec<Box<str>>)>
 where
@@ -54,14 +56,14 @@ where
 {
     let buf_reader: Box<dyn BufRead> = open_buf_reader(input_file)?;
 
-    fn parse<T>(i: usize, line: &String) -> (usize, Vec<T>)
+    fn parse<T>(i: usize, line: &String, delim: &str) -> (usize, Vec<T>)
     where
         T: std::str::FromStr,
         <T as std::str::FromStr>::Err: std::fmt::Debug,
     {
         (
             i,
-            line.split_whitespace()
+            line.split(&delim)
                 .map(|x| x.parse::<T>().expect("failed to parse"))
                 .collect(),
         )
@@ -89,7 +91,7 @@ where
             .iter()
             .enumerate()
             .par_bridge()
-            .map(|(i, s)| parse(i, s))
+            .map(|(i, s)| parse(i, s, &delim))
             .collect()
     } else {
         let n_skip = hdr_line as usize;
@@ -98,7 +100,7 @@ where
         }
         hdr.extend(
             lines_raw[n_skip]
-                .split_whitespace()
+                .split(&delim)
                 .map(|x| x.to_owned().into_boxed_str()),
         );
 
@@ -106,7 +108,7 @@ where
             .iter()
             .enumerate()
             .par_bridge()
-            .map(|(i, s)| parse(i, s))
+            .map(|(i, s)| parse(i, s, &delim))
             .collect()
     };
 

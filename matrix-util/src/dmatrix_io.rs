@@ -14,13 +14,17 @@ where
     type Scalar = T;
     type Mat = Self;
 
-    fn from_tsv(tsv_file: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat> {
+    fn read_file_delim(
+        tsv_file: &str,
+        delim: &str,
+        skip: Option<usize>,
+    ) -> anyhow::Result<Self::Mat> {
         let hdr_line = match skip {
             Some(skip) => skip as i64,
             None => -1, // no skipping
         };
 
-        let (data, _) = read_lines_of_types::<T>(tsv_file, hdr_line)?;
+        let (data, _) = read_lines_of_types::<T>(tsv_file, delim, hdr_line)?;
 
         if data.len() == 0 {
             return Err(anyhow::anyhow!("No data in file"));
@@ -36,7 +40,8 @@ where
             data.into_iter(),
         ))
     }
-    fn to_tsv(&self, tsv_file: &str) -> anyhow::Result<()> {
+
+    fn write_file_delim(&self, tsv_file: &str, delim: &str) -> anyhow::Result<()> {
         // par_iter() or par_bridge() will
         // mess up the order of the rows
         let mut lines = self
@@ -49,7 +54,7 @@ where
                     .enumerate()
                     .map(|(_, x)| format!("{}", *x))
                     .collect::<Vec<String>>()
-                    .join("\t")
+                    .join(delim)
                     .into_boxed_str();
                 (i, line)
             })

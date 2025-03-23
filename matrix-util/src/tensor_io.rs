@@ -6,13 +6,17 @@ impl IoOps for Tensor {
     type Scalar = f32;
     type Mat = Self;
 
-    fn from_tsv(tsv_file: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat> {
+    fn read_file_delim(
+        tsv_file: &str,
+        delim: &str,
+        skip: Option<usize>,
+    ) -> anyhow::Result<Self::Mat> {
         let hdr_line = match skip {
             Some(skip) => skip as i64,
             None => -1, // no skipping
         };
 
-        let (data, _) = read_lines_of_types::<f32>(tsv_file, hdr_line)?;
+        let (data, _) = read_lines_of_types::<f32>(tsv_file, delim, hdr_line)?;
 
         if data.len() == 0 {
             return Err(anyhow::anyhow!("No data in file"));
@@ -25,7 +29,7 @@ impl IoOps for Tensor {
         Ok(Tensor::from_vec(data, (nrows, ncols), &Device::Cpu)?)
     }
 
-    fn to_tsv(&self, tsv_file: &str) -> anyhow::Result<()> {
+    fn write_file_delim(&self, file: &str, delim: &str) -> anyhow::Result<()> {
         let dims = self.dims();
 
         if dims.len() != 2 {
@@ -41,12 +45,12 @@ impl IoOps for Tensor {
                     .iter()
                     .map(|&x| format!("{}", x))
                     .collect::<Vec<_>>()
-                    .join("\t")
+                    .join(delim)
                     .into_boxed_str()
             })
             .collect();
 
-        write_lines(&lines, &tsv_file)?;
+        write_lines(&lines, &file)?;
 
         Ok(())
     }
