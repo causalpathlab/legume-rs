@@ -23,3 +23,8 @@ Cargo.lock
 # Emacs backups
 *.*~
 *~
+
+# other stuff
+temp*
+.DS_Store
+.Rhistory
