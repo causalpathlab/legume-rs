@@ -1,8 +1,11 @@
+mod simulate;
+
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
 use clap::{Parser, ValueEnum};
 use log::info;
 use matrix_util::knn_match::*;
+
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "SRT network", version, about, long_about, term_width = 80)]
@@ -81,10 +84,17 @@ struct SRTNetworkArgs {
 struct SRT {}
 
 fn build_coordinate_map(args: &SRTNetworkArgs) -> anyhow::Result<()> {
+
+
     // args.coord_file;
 
     // let (cell_names, coords) = read_coordinate_file(&args.coord_file)?;
     // Ok((cell_names, coords))
+
+
+
+
+
     todo!("");
 }
 
@@ -116,9 +126,11 @@ fn main() -> anyhow::Result<()> {
     //
     // for each pair (i -> j)
     //
-    // x(:,i), neighbours of i
-    // x(:,j), neighbours of j
+    // x(:,i), neighbours of i, weights
+    // x(:,j), neighbours of j, weights
     //
+
+
 
     info!("");
 
