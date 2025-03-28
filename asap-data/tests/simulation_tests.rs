@@ -1,16 +1,22 @@
 use asap_data::simulate::*;
-use asap_data::sparse_matrix_hdf5::SparseMtxData;
+use asap_data::sparse_io::*;
 
 #[test]
 fn sparse_matrix_simulation_and_loading() -> anyhow::Result<()> {
-    let args = SimulateArgs {
+    let args = SimArgs {
         rows: 10,
         cols: 15,
-        factors: Some(2),
-        batches: Some(2),
+        factors: None,
+        batches: None,
+        rseed: None,
     };
 
-    generate_factored_gamma_data(args)?;
+    let _out = generate_factored_poisson_gamma_data(&args);
+
+    let mtx_shape = (args.rows, args.cols, _out.triplets.len());
+
+    let _data =
+        create_sparse_from_triplets(_out.triplets, mtx_shape, None, None)?;
 
     Ok(())
 }
