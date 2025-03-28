@@ -59,15 +59,6 @@ pub fn create_sparse_from_triplets(
     let mut triplets: Vec<(u64, u64, f32)> = triplets.clone();
 
     match backend {
-        Some(SparseIoBackend::Zarr) => {
-            let mut ret = Box::new(sparse_matrix_zarr::SparseMtxData::new(backend_file)?);
-            ret.record_mtx_shape(Some(mtx_shape))?;
-            ret.record_triplets_by_col(&mut triplets)?;
-            ret.record_triplets_by_row(&mut triplets)?;
-            ret.read_column_indptr()?;
-            ret.read_row_indptr()?;
-            Ok(ret)
-        }
         Some(SparseIoBackend::HDF5) => {
             let mut ret = Box::new(sparse_matrix_hdf5::SparseMtxData::new(backend_file)?);
 
@@ -78,7 +69,16 @@ pub fn create_sparse_from_triplets(
             ret.read_row_indptr()?;
             Ok(ret)
         }
-        _ => return Err(anyhow::anyhow!("backend not supported")),
+
+        Some(SparseIoBackend::Zarr) | _ => {
+            let mut ret = Box::new(sparse_matrix_zarr::SparseMtxData::new(backend_file)?);
+            ret.record_mtx_shape(Some(mtx_shape))?;
+            ret.record_triplets_by_col(&mut triplets)?;
+            ret.record_triplets_by_row(&mut triplets)?;
+            ret.read_column_indptr()?;
+            ret.read_row_indptr()?;
+            Ok(ret)
+        }
     }
 }
 
