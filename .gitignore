@@ -28,3 +28,8 @@ Cargo.lock
 temp*
 .DS_Store
 .Rhistory
+
+# intermediate files
+*.csv
+*.zarr
+*.h5
