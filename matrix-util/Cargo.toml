@@ -33,7 +33,7 @@ indicatif = { workspace = true }
 # candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["cuda","cudarc","cudnn"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-ndarray-linalg = { version = "0.16", default-features = false }
+ndarray-linalg = { version = "0.17", default-features = false }
 blas-src = { version = "0.8", features = ["accelerate"] }
 candle-core = {  version = "0.8.4", features = ["metal","accelerate"] }
 

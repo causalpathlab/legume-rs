@@ -15,8 +15,9 @@ fn sparse_matrix_simulation_and_loading() -> anyhow::Result<()> {
 
     let mtx_shape = (args.rows, args.cols, _out.triplets.len());
 
-    let _data =
-        create_sparse_from_triplets(_out.triplets, mtx_shape, None, None)?;
+    let _data = create_sparse_from_triplets(_out.triplets, mtx_shape, None, None)?;
+
+    _data.remove_backend_file()?;
 
     Ok(())
 }

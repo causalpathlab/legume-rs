@@ -32,6 +32,73 @@ fn tensor_to_ndarray(tensor: Tensor) -> Array2<f32> {
 }
 
 #[test]
+fn temp_array_zarrs() -> anyhow::Result<()> {
+    use ndarray::prelude::*;
+    use std::sync::Arc;
+    use zarrs::array::codec::ZstdCodec;
+    use zarrs::{
+        array::{DataType, FillValue},
+        array_subset::ArraySubset,
+        storage::store,
+    };
+    let COMPRESSION_LEVEL = 5;
+
+    use std::fs::File;
+
+    let backend_file = create_temp_dir_file(".zarr")?;
+    let temp_filename = backend_file.to_str().expect("to_str failed");
+
+    let mut store = Arc::new(zarrs::filesystem::FilesystemStore::new(&temp_filename)?);
+
+    // Create the root group
+    zarrs::group::GroupBuilder::new()
+        .build(store.clone(), "/")?
+        .store_metadata()?;
+
+    // Create an array
+    let array_path = "/group/array";
+    let array = zarrs::array::ArrayBuilder::new(
+        vec![10, 10],                                // array shape
+        DataType::Float32,                           // f32
+        vec![3, 3].try_into()?,                      // regular chunk shape
+        FillValue::from(zarrs::array::ZARR_NAN_F32), // nan
+    )
+    // .bytes_to_bytes_codecs(vec![Arc::new(ZstdCodec::new(COMPRESSION_LEVEL, false))])
+    .dimension_names(["y", "x"].into())
+    .build(store.clone(), array_path)?;
+
+    // Write array metadata to store
+    array.store_metadata()?;
+
+    println!(
+        "Metadata:\n{}\n",
+        serde_json::to_string_pretty(&array.metadata()).unwrap()
+    );
+
+    let subset_all = array.subset_all();
+    let data_all = array.retrieve_array_subset_ndarray::<f32>(&subset_all)?;
+
+    println!("ndarray::ArrayD:\n{data_all}");
+
+    let chunk = array![[1. as f32, 2., 3.], [4., 5., 6.], [7., 8., 9.]];
+    let chunk = chunk.into_iter().collect::<Vec<_>>();
+
+    array.store_chunk_elements(&[0,0], &chunk)?;
+    array.store_chunk_elements(&[0,1], &chunk)?;
+    array.store_chunk_elements(&[0,2], &chunk)?;
+    array.store_chunk_elements(&[0,3], &chunk)?;
+
+    let chunk = array![[1. as f32, 2., 3.], [4., 5., 6.], [7., 8., 9.]];
+    array.store_array_subset_ndarray(&[1,0], chunk)?;
+
+
+    let data_all = array.retrieve_array_subset_ndarray::<f32>(&subset_all)?;
+    println!("ndarray::ArrayD:\n{data_all}");
+
+    Ok(())
+}
+
+#[test]
 fn ndarray_dmatrix() -> anyhow::Result<()> {
     let raw_array = Array2::<f32>::runif(133, 373);
 
