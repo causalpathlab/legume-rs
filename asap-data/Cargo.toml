@@ -18,7 +18,7 @@ rayon = { workspace = true }
 
 hdf5 = { package = "hdf5-metno", version = "0.9", features = ["blosc"] }
 libz-sys = { version = "1.1", features = ["libc"], default-features = false }
-zarrs = { version = "0.19", features = ["gzip"] }
+zarrs = { version = "0.19" }
 
 tempfile = { workspace = true }
 rand = { workspace = true }

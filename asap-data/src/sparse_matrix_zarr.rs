@@ -1,6 +1,7 @@
 use crate::sparse_io::*;
 use log::info;
 use matrix_util::common_io::*;
+use rand_distr::num_traits::FromPrimitive;
 use std::ops::Range;
 use std::sync::Arc;
 use zarrs::array::DataType;
@@ -211,6 +212,59 @@ impl SparseMtxData {
     // backend related  //
     //////////////////////
 
+    /// Helper function to create a filled array(s) with the given
+    /// data type and fill value. This is the most useful function to
+    /// create a vector like data.
+    ///
+    /// * `key` - the key name
+    /// * `dt` - the data type among `DataType`
+    /// * `data` - `ndarray` to be stored
+    ///
+    fn new_filled_ndarray<V, S, D>(
+        self: &mut Self,
+        key: &str,
+        dt: DataType,
+        data: ndarray::ArrayBase<S, D>,
+    ) -> anyhow::Result<()>
+    where
+        V: zarrs::array::Element + Default + Clone,
+        S: ndarray::Data<Elem = V> + Clone,
+        D: ndarray::Dimension + ndarray::RemoveAxis,
+    {
+        use zarrs::array::codec::ZstdCodec;
+        use zarrs::array::ArrayBuilder;
+        use zarrs::array::DataType;
+        use zarrs::array::FillValue;
+
+        let fill = match dt {
+            DataType::Float32 => FillValue::from(zarrs::array::ZARR_NAN_F32),
+            DataType::UInt64 => FillValue::from(0u64),
+            DataType::String => FillValue::from(""),
+            _ => FillValue::from(0),
+        };
+
+        let nchunks = NUM_CHUNKS;
+        let array_shape: Vec<u64> = data.shape().iter().map(|&x| x as u64).collect();
+        let chunk_size: Vec<u64> = data
+            .shape()
+            .iter()
+            .map(|&d| (d / nchunks).max(MIN_CHUNK_SIZE).min(d) as u64)
+            .collect();
+
+        let array = ArrayBuilder::new(
+            array_shape,            // array shape
+            dt.into(),              // data type
+            chunk_size.try_into()?, // chunk shape
+            fill,                   //
+        )
+        .bytes_to_bytes_codecs(vec![Arc::new(ZstdCodec::new(COMPRESSION_LEVEL, false))])
+        .build(self.store.clone(), key)?;
+
+        array.store_array_subset_ndarray(array.subset_all().start(), data.to_owned())?;
+        array.store_metadata()?;
+        Ok(())
+    }
+
     /// Helper function to create a filled 1D array with the given
     /// data type and fill value. This is the most useful function to
     /// create a vector like data.
@@ -219,12 +273,15 @@ impl SparseMtxData {
     /// * `dt` - the data type among `DataType`
     /// * `vec` - the vector to be stored
     ///
-    fn new_filled_vector<V: zarrs::array::Element>(
+    fn new_filled_vector<V>(
         self: &mut Self,
         key: &str,
         dt: DataType,
         vec: Vec<V>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<()>
+    where
+        V: zarrs::array::Element,
+    {
         use zarrs::array::codec::ZstdCodec;
         use zarrs::array::ArrayBuilder;
         use zarrs::array::DataType;
@@ -251,12 +308,12 @@ impl SparseMtxData {
         .bytes_to_bytes_codecs(vec![Arc::new(ZstdCodec::new(COMPRESSION_LEVEL, false))])
         .build(self.store.clone(), key)?;
 
+        array.store_metadata()?;
+
         let ntot = vec.len() as u64;
         let subset = ArraySubset::new_with_ranges(&[0..ntot]);
         array.store_array_subset_elements(&subset, &vec)?;
 
-        // array.store_array_subset_ndarray(&[0], Array::from_vec(vec))?;
-        array.store_metadata()?;
         Ok(())
     }
 
