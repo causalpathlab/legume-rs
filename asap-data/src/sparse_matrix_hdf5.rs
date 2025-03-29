@@ -657,7 +657,7 @@ impl SparseIo for SparseMtxData {
         csr.new_dataset::<f32>()
             .shape(csr_vals.len())
             .chunk([chunk_size])
-            .blosc_zstd(COMPRESSION_LEVEL, true)
+            .blosc_blosclz(COMPRESSION_LEVEL, true)
             .create("data")?
             .write(&csr_vals)?;
 
@@ -668,7 +668,7 @@ impl SparseIo for SparseMtxData {
         csr.new_dataset::<u64>()
             .shape(csr_rowptr.len())
             .chunk([chunk_size])
-            .blosc_zstd(COMPRESSION_LEVEL, true)
+            .blosc_blosclz(COMPRESSION_LEVEL, true)
             .create("indptr")?
             .write(&csr_rowptr)?;
 
@@ -679,7 +679,7 @@ impl SparseIo for SparseMtxData {
         csr.new_dataset::<u64>()
             .shape(csr_cols.len())
             .chunk([chunk_size])
-            .blosc_zstd(COMPRESSION_LEVEL, true)
+            .blosc_blosclz(COMPRESSION_LEVEL, true)
             .create("indices")?
             .write(&csr_cols)?;
 
@@ -723,7 +723,7 @@ impl SparseIo for SparseMtxData {
         csc.new_dataset::<f32>()
             .shape(csc_vals.len())
             .chunk([chunk_size])
-            .blosc_zstd(COMPRESSION_LEVEL, true)
+            .blosc_blosclz(COMPRESSION_LEVEL, true)
             .create("data")?
             .write(&csc_vals)?;
 
@@ -734,7 +734,7 @@ impl SparseIo for SparseMtxData {
         csc.new_dataset::<u64>()
             .shape(csc_colptr.len())
             .chunk([chunk_size])
-            .blosc_zstd(COMPRESSION_LEVEL, true)
+            .blosc_blosclz(COMPRESSION_LEVEL, true)
             .create("indptr")?
             .write(&csc_colptr)?;
 
@@ -745,7 +745,7 @@ impl SparseIo for SparseMtxData {
         csc.new_dataset::<u64>()
             .shape(csc_rows.len())
             .chunk([chunk_size])
-            .blosc_zstd(COMPRESSION_LEVEL, true)
+            .blosc_blosclz(COMPRESSION_LEVEL, true)
             .create("indices")?
             .write(&csc_rows)?;
 
