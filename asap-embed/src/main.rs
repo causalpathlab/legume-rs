@@ -247,7 +247,11 @@ fn main() -> anyhow::Result<()> {
 
     let delta_bd = collapse_out.delta.as_ref();
 
-    let (z_nk, beta_dk, llik) = match args.decoder_model {
+    let (
+        z_nk,    // latent (cell x factor)
+        beta_dk, // model parameters (gene x factor)
+        llik,    // log-likelihood vector
+    ) = match args.decoder_model {
         DecoderModel::Poisson => {
             let enc = LogSoftmaxEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
             let dec = PoissonDecoder::new(dd, kk, param_builder.clone())?;
