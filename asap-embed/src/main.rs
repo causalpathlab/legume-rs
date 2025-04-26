@@ -108,11 +108,11 @@ struct EmbedArgs {
     latent_topics: usize,
 
     /// Encoder layers
-    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![32,128,1024,128])]
+    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
     encoder_layers: Vec<usize>,
 
     /// # pre-training epochs
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 10)]
     pretrain_epochs: usize,
 
     /// # training epochs
@@ -245,7 +245,8 @@ fn main() -> anyhow::Result<()> {
 
     let kk = args.latent_topics;
 
-    let delta_bd = collapse_out.delta.as_ref();
+    let delta_db = collapse_out.delta.as_ref();
+    let mu_residual_dn = collapse_out.mu_residual.as_ref();
 
     let (
         z_nk,    // latent (cell x factor)
@@ -257,7 +258,10 @@ fn main() -> anyhow::Result<()> {
             let dec = PoissonDecoder::new(dd, kk, param_builder.clone())?;
             run_asap_embedding(
                 x_nd,
-                delta_bd.map(|x| x.posterior_mean()),
+                delta_db.map(|x| x.posterior_mean()),
+                mu_residual_dn
+                    .map(|x| x.posterior_mean().transpose())
+                    .as_ref(),
                 &data_vec,
                 &enc,
                 &dec,
@@ -272,7 +276,10 @@ fn main() -> anyhow::Result<()> {
             let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
             run_asap_embedding(
                 x_nd,
-                delta_bd.map(|x| x.posterior_mean()),
+                delta_db.map(|x| x.posterior_mean()),
+                mu_residual_dn
+                    .map(|x| x.posterior_mean().transpose())
+                    .as_ref(),
                 &data_vec,
                 &enc,
                 &dec,
@@ -284,7 +291,7 @@ fn main() -> anyhow::Result<()> {
 
         _ => run_nystrom_proj(
             collapse_out.mu.posterior_log_mean().clone(),
-            delta_bd.map(|x| x.posterior_mean()),
+            delta_db.map(|x| x.posterior_mean()),
             &data_vec,
             args.latent_topics,
             Some(args.block_size.clone()),
@@ -300,7 +307,7 @@ fn main() -> anyhow::Result<()> {
 
     beta_dk.to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
 
-    if let Some(param) = delta_bd {
+    if let Some(param) = delta_db {
         param.write_tsv(&(args.out.to_string() + ".delta.gz"))?;
     }
 
@@ -308,30 +315,38 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Nystrom projection for fast latent representation
+///
+/// # Arguments
+/// * `xx_dn` - feature x sample matrix
+/// * `delta_db` - feature x batch batch effect matrix
+/// * `full_data_vec` - full sparse data vector
+/// * `rank` - matrix factorization rank
+/// * `block_size` - online learning block size
+///
+/// # Returns
+/// * (`z_nk`, `u_dk`, `vec![]`)
+/// * `z_nk` - sample x factor latent representation matrix
+/// * `u_dk` - feature x factor dictionary matrix
+///
 fn run_nystrom_proj(
     xx_dn: Mat,
-    delta: Option<&Mat>,
+    delta_db: Option<&Mat>,
     full_data_vec: &SparseIoVec,
     rank: usize,
     block_size: Option<usize>,
 ) -> anyhow::Result<(Mat, Mat, Vec<f32>)> {
     let mut xx_dn = xx_dn.clone();
     xx_dn.scale_columns_inplace();
-    let (uu_dk, _, _) = xx_dn.rsvd(rank)?;
+    let (u_dk, _, _) = xx_dn.rsvd(rank)?;
 
     let eps = 1e-8;
     let xdepth = 1e4;
 
-    // let mut proj_dk = uu_dk.clone();
-    // let safe_dd = dd.map(|x| x + eps);
-    // proj_dk.row_iter_mut().for_each(|mut u| {
-    //     u.component_div_assign(&safe_dd.transpose());
-    // });
-
     info!(
         "Constructed {} x {} projection matrix",
-        uu_dk.nrows(),
-        uu_dk.ncols()
+        u_dk.nrows(),
+        u_dk.ncols()
     );
 
     let ntot = full_data_vec.num_columns()?;
@@ -358,13 +373,13 @@ fn run_nystrom_proj(
                 }
             });
 
-            if let Some(delta) = delta {
+            if let Some(delta_db) = delta_db {
                 let batches = full_data_vec.get_batch_membership(lb..ub);
 
                 x_dn.column_iter_mut()
                     .zip(batches)
                     .for_each(|(mut x_j, b)| {
-                        let d_j = delta.column(b);
+                        let d_j = delta_db.column(b);
                         let xsum = x_j.sum();
                         let dsum = d_j.sum();
                         let scale = if dsum > 0.0 { xsum / dsum } else { 1.0 };
@@ -375,7 +390,7 @@ fn run_nystrom_proj(
             let mut log_x_dn = x_dn.map(|x| (x + 0.5).log2());
             log_x_dn.centre_columns_inplace();
 
-            let z_nk = log_x_dn.transpose() * &uu_dk;
+            let z_nk = log_x_dn.transpose() * &u_dk;
             (lb, z_nk)
         })
         .collect::<Vec<_>>();
@@ -396,12 +411,32 @@ fn run_nystrom_proj(
         }
     }
 
-    Ok((z_nk, uu_dk, vec![]))
+    Ok((z_nk, u_dk, vec![]))
 }
 
+/// Train an autoencoder model on collapsed data and evaluate latent
+/// mapping by the fixed encoder model.
+///
+/// # Arguments
+/// * `data_nd` - sample x feature collapsed data matrix
+/// * `residual_nd` - sample x feature residual data matrix
+/// * `delta_db` - feature x batch batch effect matrix
+/// * `full_data_vec` - full sparse data vector
+/// * `encoder` - encoder model
+/// * `decoder` - decoder model
+/// * `log_likelihood_func` - log-likelihood function
+/// * `train_config` - training configuration
+///
+/// # Returns
+/// * (`z_nk`, `beta_dk`, `llik`)
+/// * `z_nk` - sample x factor latent representation matrix
+/// * `beta_dk` - feature x factor dictionary matrix
+/// * `llik` - log-likelihood trace vector
+///
 fn run_asap_embedding<Enc, Dec, LLikFn>(
     data_nd: Mat,
-    batch_adjust: Option<&Mat>,
+    residual_nd: Option<&Mat>,
+    delta_db: Option<&Mat>,
     full_data_vec: &SparseIoVec,
     encoder: &Enc,
     decoder: &Dec,
@@ -445,14 +480,21 @@ where
 
     info!("Start full log-likelihood training ...");
 
+    let null_nd = match residual_nd {
+        Some(residual_nd) => residual_nd.clone(),
+        None => Mat::from_element(data_nd.nrows(), data_nd.ncols(), 1.),
+    };
+
+    let mut data_loader = InMemoryData::from_with_aux(&data_nd, &null_nd)?;
+
     let llik_trace =
         vae.train_encoder_decoder(&mut data_loader, log_likelihood_func, &train_config)?;
 
     info!("Done with training {} epochs", train_config.num_epochs);
 
-    let z_nk = estimate_latent_by_encoder(&full_data_vec, encoder, &train_config, batch_adjust)?;
+    let z_nk = evaluate_latent_by_encoder(&full_data_vec, encoder, &train_config, delta_db)?;
 
-    info!("Done encoding latent states for all");
+    info!("Finished encoding latent states for all");
 
     let beta_dk = decoder
         .get_dictionary()?
@@ -462,11 +504,18 @@ where
     Ok((z_nk, beta_dk, llik_trace))
 }
 
-fn estimate_latent_by_encoder<Enc>(
+/// Evaluate latent representation with the trained encoder network
+///
+/// #Arguments
+/// * `data_vec` - full data vector
+/// * `encoder` - encoder network
+/// * `train_config` - training configuration
+/// * `delta_db` - batch effect matrix (feature x batch)
+fn evaluate_latent_by_encoder<Enc>(
     data_vec: &SparseIoVec,
     encoder: &Enc,
     train_config: &TrainConfig,
-    delta: Option<&Mat>,
+    delta_db: Option<&Mat>,
 ) -> anyhow::Result<Mat>
 where
     Enc: EncoderModuleT + Send + Sync + 'static,
@@ -488,13 +537,13 @@ where
         .map(|&(lb, ub)| {
             let mut x_dn = data_vec.read_columns_dmatrix(lb..ub).expect("read columns");
 
-            if let Some(delta) = delta {
+            if let Some(delta_db) = delta_db {
                 let batches = data_vec.get_batch_membership(lb..ub);
 
                 x_dn.column_iter_mut()
                     .zip(batches)
                     .for_each(|(mut x_j, b)| {
-                        let d_j = delta.column(b);
+                        let d_j = delta_db.column(b);
                         let xsum = x_j.sum();
                         let dsum = d_j.sum();
                         let scale = if dsum > 0.0 { xsum / dsum } else { 1.0 };
