@@ -18,6 +18,22 @@ pub struct LogSoftmaxEncoder {
 }
 
 impl EncoderModuleT for LogSoftmaxEncoder {
+    fn forward_with_null_t(
+        &self,
+        x_nd: &Tensor,
+        x0_nd: &Tensor,
+        train: bool,
+    ) -> Result<(Tensor, Tensor)> {
+	// todo: use x0_nd
+        let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params(x_nd, train)?;
+        let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
+
+        Ok((
+            ops::log_softmax(&z_nk, 1)?,
+            gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?,
+        ))
+    }
+
     fn forward_t(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
         let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params(x_nd, train)?;
         let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;

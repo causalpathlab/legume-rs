@@ -108,7 +108,7 @@ struct EmbedArgs {
     latent_topics: usize,
 
     /// Encoder layers
-    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
+    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![50,1000,50])]
     encoder_layers: Vec<usize>,
 
     /// # pre-training epochs
@@ -258,10 +258,10 @@ fn main() -> anyhow::Result<()> {
             let dec = PoissonDecoder::new(dd, kk, param_builder.clone())?;
             run_asap_embedding(
                 x_nd,
-                delta_db.map(|x| x.posterior_mean()),
                 mu_residual_dn
                     .map(|x| x.posterior_mean().transpose())
                     .as_ref(),
+                delta_db.map(|x| x.posterior_mean()),
                 &data_vec,
                 &enc,
                 &dec,
@@ -276,10 +276,10 @@ fn main() -> anyhow::Result<()> {
             let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
             run_asap_embedding(
                 x_nd,
-                delta_db.map(|x| x.posterior_mean()),
                 mu_residual_dn
                     .map(|x| x.posterior_mean().transpose())
                     .as_ref(),
+                delta_db.map(|x| x.posterior_mean()),
                 &data_vec,
                 &enc,
                 &dec,
