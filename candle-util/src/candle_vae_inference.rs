@@ -220,9 +220,9 @@ where
 
         let num_minbatches = data.num_minibatch();
 
-        let x_nd_vec = (0..num_minbatches)
+        let x_nd_x0_nk_vec = (0..num_minbatches)
             .map(|b| {
-                data.minibatch(b, &device)
+                data.minibatch_with_aux(b, &device)
                     .expect(format!("failed to preload minibatch #{}", b).as_str())
             })
             .collect::<Vec<_>>();
@@ -230,8 +230,11 @@ where
         for _epoch in 0..train_config.num_epochs {
             let mut llik_tot = 0f32;
             for b in 0..data.num_minibatch() {
-                let x_nd = &x_nd_vec[b];
-                let (z_nk, kl) = self.encoder.forward_t(&x_nd, true)?;
+                let (x_nd, _x0_nd) = &x_nd_x0_nk_vec[b];
+                let (z_nk, kl) = match _x0_nd {
+                    Some(x0_nd) => self.encoder.forward_with_null_t(&x_nd, &x0_nd, true)?,
+                    None => self.encoder.forward_t(&x_nd, true)?,
+                };
                 let (_, llik) = self.decoder.forward_with_llik(&z_nk, &x_nd, llik_func)?;
                 let loss = (kl - &llik)?.mean_all()?;
                 adam.backward_step(&loss)?;
