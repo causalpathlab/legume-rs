@@ -16,7 +16,7 @@ pub struct Vae<'a, Enc: EncoderModuleT, Dec: DecoderModule> {
 
 pub trait VaeT<'a, Enc: EncoderModuleT, Dec: DecoderModule> {
     /// Train the VAE model
-    /// * `data` - data loader
+    /// * `data` - data loader should have `minibatch_data_aux`
     /// * `llik` - log likelihood function
     /// * `train_config` - training configuration
     fn train_encoder_decoder<DataL, LlikFn>(
@@ -29,8 +29,11 @@ pub trait VaeT<'a, Enc: EncoderModuleT, Dec: DecoderModule> {
         DataL: DataLoader,
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>;
 
-    /// Pretrain the encoder module
-    /// with pseudo latent output
+    /// Pretrain the encoder module with pseudo latent output
+    ///
+    /// * `data` - data loader should have `minibatch_data_aux_output`
+    /// * `llik` - log likelihood function
+    /// * `train_config` - training configuration
     fn pretrain_encoder<DataL, LlikFn>(
         &mut self,
         data: &mut DataL,
@@ -41,8 +44,10 @@ pub trait VaeT<'a, Enc: EncoderModuleT, Dec: DecoderModule> {
         DataL: DataLoader,
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>;
 
-    /// Pretrain the encoder module
-    /// with pseudo latent input
+    /// Pretrain the encoder module with pseudo latent input
+    /// * `data` - data loader should have `minibatch_data_aux`
+    /// * `llik` - log likelihood function
+    /// * `train_config` - training configuration
     fn pretrain_decoder<DataL, LlikFn>(
         &mut self,
         data: &mut DataL,
@@ -98,7 +103,7 @@ where
 
         let x_nd_z_nk_vec = (0..num_minbatches)
             .map(|b| {
-                data.minibatch_with_aux(b, &device)
+                data.minibatch_data_aux(b, &device)
                     .expect(format!("failed to preload minibatch #{}", b).as_str())
             })
             .collect::<Vec<_>>();
@@ -158,9 +163,9 @@ where
 
         let num_minbatches = data.num_minibatch();
 
-        let x_nd_z_nk_vec = (0..num_minbatches)
+        let data_aux_out_vec = (0..num_minbatches)
             .map(|b| {
-                data.minibatch_with_aux(b, &device)
+                data.minibatch_data_aux_output(b, &device)
                     .expect(format!("failed to preload minibatch #{}", b).as_str())
             })
             .collect::<Vec<_>>();
@@ -168,9 +173,13 @@ where
         for _epoch in 0..train_config.num_pretrain_epochs {
             let mut llik_tot = 0f32;
             for b in 0..data.num_minibatch() {
-                let (x, z) = &x_nd_z_nk_vec[b];
+                let (x, x0, z) = &data_aux_out_vec[b];
                 if let Some(z_target) = z {
-                    let (z_hat, kl) = self.encoder.forward_t(&x, true)?;
+                    // let (z_hat, kl) = self.encoder.forward_t(&x, true)?;
+                    let (z_hat, kl) = match x0 {
+                        Some(x0) => self.encoder.forward_with_null_t(&x, &x0, true)?,
+                        None => self.encoder.forward_t(&x, true)?,
+                    };
                     let llik = llik(&z_hat, z_target)?;
                     let loss = (kl - &llik)?.mean_all()?;
                     let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
@@ -220,9 +229,9 @@ where
 
         let num_minbatches = data.num_minibatch();
 
-        let x_nd_x0_nk_vec = (0..num_minbatches)
+        let data_aux_vec = (0..num_minbatches)
             .map(|b| {
-                data.minibatch_with_aux(b, &device)
+                data.minibatch_data_aux(b, &device)
                     .expect(format!("failed to preload minibatch #{}", b).as_str())
             })
             .collect::<Vec<_>>();
@@ -230,7 +239,7 @@ where
         for _epoch in 0..train_config.num_epochs {
             let mut llik_tot = 0f32;
             for b in 0..data.num_minibatch() {
-                let (x_nd, _x0_nd) = &x_nd_x0_nk_vec[b];
+                let (x_nd, _x0_nd) = &data_aux_vec[b];
                 let (z_nk, kl) = match _x0_nd {
                     Some(x0_nd) => self.encoder.forward_with_null_t(&x_nd, &x0_nd, true)?,
                     None => self.encoder.forward_t(&x_nd, true)?,

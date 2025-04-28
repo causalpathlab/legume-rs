@@ -19,7 +19,7 @@ use asap_data::sparse_io_vector::*;
 use asap_random_projection::RandProjOps;
 
 use candle_util::candle_data_loader::*;
-use candle_util::candle_loss_functions::*;
+use candle_util::candle_loss_functions as loss_func;
 use candle_util::candle_model_encoder::*;
 use candle_util::candle_model_poisson::*;
 use candle_util::candle_model_topic::*;
@@ -108,11 +108,15 @@ struct EmbedArgs {
     latent_topics: usize,
 
     /// Encoder layers
-    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![50,1000,50])]
+    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![32,256,32])]
     encoder_layers: Vec<usize>,
 
+    /// Intensity levels for frequency embedding
+    #[arg(long, default_value_t = 5000)]
+    vocab_size: usize,
+
     /// # pre-training epochs
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 0)]
     pretrain_epochs: usize,
 
     /// # training epochs
@@ -130,8 +134,7 @@ struct EmbedArgs {
     #[arg(long, value_enum, default_value = "cpu")]
     device: ComputeDevice,
 
-    /// Decodeer model: topic (softmax) model, poisson MF, or nystrom
-    /// projection
+    /// Choose a decoder model
     #[arg(long, short = 'm', value_enum, default_value = "topic")]
     decoder_model: DecoderModel,
 
@@ -233,46 +236,32 @@ fn main() -> anyhow::Result<()> {
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
 
-    let x_nd = collapse_out.mu.posterior_mean().transpose().clone();
-
-    info!(
-        "Collapsed: {} x {} -> {} x {}",
-        data_vec.num_columns()?,
-        data_vec.num_rows()?,
-        x_nd.nrows(),
-        x_nd.ncols()
-    );
-
     let kk = args.latent_topics;
 
     let delta_db = collapse_out.delta.as_ref();
     let mu_residual_dn = collapse_out.mu_residual.as_ref();
+
+    let x_nd = match collapse_out.mu_adjusted {
+        Some(adj) => adj.posterior_mean().clone(),
+        None => collapse_out.mu_observed.posterior_mean().clone(),
+    }
+    .transpose();
+
+    let n_vocab = args.vocab_size;
 
     let (
         z_nk,    // latent (cell x factor)
         beta_dk, // model parameters (gene x factor)
         llik,    // log-likelihood vector
     ) = match args.decoder_model {
-        DecoderModel::Poisson => {
-            let enc = LogSoftmaxEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
-            let dec = PoissonDecoder::new(dd, kk, param_builder.clone())?;
-            run_asap_embedding(
-                x_nd,
-                mu_residual_dn
-                    .map(|x| x.posterior_mean().transpose())
-                    .as_ref(),
-                delta_db.map(|x| x.posterior_mean()),
-                &data_vec,
-                &enc,
-                &dec,
-                &parameters,
-                &poisson_likelihood,
-                &train_config,
-            )?
-        }
-
         DecoderModel::Topic => {
-            let enc = LogSoftmaxEncoder::new(dd, kk, &args.encoder_layers, param_builder.clone())?;
+            let enc = LogSoftmaxEncoder::new(
+                dd,
+                kk,
+                n_vocab,
+                &args.encoder_layers,
+                param_builder.clone(),
+            )?;
             let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
             run_asap_embedding(
                 x_nd,
@@ -284,13 +273,37 @@ fn main() -> anyhow::Result<()> {
                 &enc,
                 &dec,
                 &parameters,
-                &topic_likelihood,
+                &loss_func::topic_likelihood,
+                &train_config,
+            )?
+        }
+
+        DecoderModel::Poisson => {
+            let enc = LogSoftmaxEncoder::new(
+                dd,
+                kk,
+                n_vocab,
+                &args.encoder_layers,
+                param_builder.clone(),
+            )?;
+            let dec = PoissonDecoder::new(dd, kk, param_builder.clone())?;
+            run_asap_embedding(
+                x_nd,
+                mu_residual_dn
+                    .map(|x| x.posterior_mean().transpose())
+                    .as_ref(),
+                delta_db.map(|x| x.posterior_mean()),
+                &data_vec,
+                &enc,
+                &dec,
+                &parameters,
+                &loss_func::poisson_likelihood,
                 &train_config,
             )?
         }
 
         _ => run_nystrom_proj(
-            collapse_out.mu.posterior_log_mean().clone(),
+            x_nd,
             delta_db.map(|x| x.posterior_mean()),
             &data_vec,
             args.latent_topics,
@@ -376,6 +389,9 @@ fn run_nystrom_proj(
             if let Some(delta_db) = delta_db {
                 let batches = full_data_vec.get_batch_membership(lb..ub);
 
+                // This will (a) estimate scaling parameter for each
+                // cell and (b) adjust the raw expression data with
+                // delta
                 x_dn.column_iter_mut()
                     .zip(batches)
                     .for_each(|(mut x_j, b)| {
@@ -462,30 +478,38 @@ where
         z_nk_init = z_nk_init.insert_columns(kk_init, kk - kk_init, 0.);
     }
 
-    let mut data_loader = InMemoryData::from_with_aux(&data_nd, &z_nk_init)?;
-
     let mut vae = Vae::build(encoder, decoder, parameters);
 
     for var in parameters.all_vars() {
         var.to_device(&train_config.device)?;
     }
 
+    if train_config.num_pretrain_epochs > 0 {
+        info!(
+            "Start pre-training with z {} x {} ...",
+            z_nk_init.nrows(),
+            z_nk_init.ncols()
+        );
+
+        let mut data_loader = InMemoryData::from_with_output(&data_nd, &z_nk_init)?;
+
+        let _llik = vae.pretrain_encoder(
+            &mut data_loader,
+            &loss_func::gaussian_likelihood,
+            &train_config,
+        )?;
+    }
+
     info!(
-        "Start pre-training with z {} x {} ...",
-        z_nk_init.nrows(),
-        z_nk_init.ncols()
+        "Start training on the collapsed data {} x {} ...",
+        data_nd.nrows(),
+        data_nd.ncols()
     );
 
-    let _llik = vae.pretrain_encoder(&mut data_loader, &gaussian_likelihood, &train_config)?;
-
-    info!("Start full log-likelihood training ...");
-
-    let null_nd = match residual_nd {
-        Some(residual_nd) => residual_nd.clone(),
-        None => Mat::from_element(data_nd.nrows(), data_nd.ncols(), 1.),
+    let mut data_loader = match residual_nd {
+        Some(residual_nd) => InMemoryData::from_with_aux(&data_nd, &residual_nd)?,
+        None => InMemoryData::from(&data_nd)?,
     };
-
-    let mut data_loader = InMemoryData::from_with_aux(&data_nd, &null_nd)?;
 
     let llik_trace =
         vae.train_encoder_decoder(&mut data_loader, log_likelihood_func, &train_config)?;
@@ -529,33 +553,43 @@ where
     let jobs = create_jobs(ntot, block_size);
     let njobs = jobs.len() as u64;
     let arc_enc = Arc::new(Mutex::new(encoder));
-    let eps = 1e-4;
+    // let eps = 1e-4;
 
     let mut chunks = jobs
         .par_iter()
         .progress_count(njobs)
         .map(|&(lb, ub)| {
-            let mut x_dn = data_vec.read_columns_dmatrix(lb..ub).expect("read columns");
-
-            if let Some(delta_db) = delta_db {
-                let batches = data_vec.get_batch_membership(lb..ub);
-
-                x_dn.column_iter_mut()
-                    .zip(batches)
-                    .for_each(|(mut x_j, b)| {
-                        let d_j = delta_db.column(b);
-                        let xsum = x_j.sum();
-                        let dsum = d_j.sum();
-                        let scale = if dsum > 0.0 { xsum / dsum } else { 1.0 };
-                        x_j.zip_apply(&d_j, |x_ij, d_ij| *x_ij /= d_ij * scale + eps);
-                    });
-            }
+            let x_dn = data_vec.read_columns_dmatrix(lb..ub).expect("read columns");
 
             let (d, n) = x_dn.shape();
+            // Note: x_dn.as_slice() will take values in the column-major order
+            // However, Tensor::from_slice will take them in the row-major order
             let x_nd = Tensor::from_slice(x_dn.as_slice(), (n, d), dev).expect("tensor x_nd");
+            let enc = arc_enc.lock().expect("enc lock");
 
-            let enc = arc_enc.lock().expect("lock");
-            let (z_nk, _) = enc.forward_t(&x_nd, false).expect("forward");
+            let z_nk = match delta_db {
+                Some(delta_db) => {
+                    let b = delta_db.ncols();
+                    let delta_bd = Tensor::from_slice(delta_db.as_slice(), (b, d), dev)
+                        .expect("tensor delta_bd");
+
+                    let batches = data_vec
+                        .get_batch_membership(lb..ub)
+                        .into_iter()
+                        .map(|x| x as u32);
+
+                    let batches = Tensor::from_iter(batches.clone(), dev).unwrap();
+                    let x0_nd = delta_bd.index_select(&batches, 0).expect("expand delta_bd");
+                    let (z_nk, _) = enc
+                        .forward_with_null_t(&x_nd, &x0_nd, false)
+                        .expect("forward");
+                    z_nk
+                }
+                None => {
+                    let (z_nk, _) = enc.forward_t(&x_nd, false).expect("forward");
+                    z_nk
+                }
+            };
             let z_nk = z_nk.to_device(&candle_core::Device::Cpu).expect("to cpu");
             (lb, Mat::from_tensor(&z_nk).expect("to mat"))
         })
