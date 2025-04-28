@@ -68,7 +68,7 @@ where
 
         let x_nd_vec = (0..num_minbatches)
             .map(|b| {
-                data.minibatch(b, &device)
+                data.minibatch_data(b, &device)
                     .expect(format!("failed to preload minibatch #{}", b).as_str())
             })
             .collect::<Vec<_>>();

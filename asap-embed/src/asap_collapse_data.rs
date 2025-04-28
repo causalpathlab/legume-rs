@@ -402,6 +402,7 @@ fn optimize(
         // temporary denominator
         let mut denom_ds = Mat::zeros(num_genes, num_samples);
 
+        let mut mu_adj_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
         let mut mu_resid_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
         let mut gamma_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
         let mut delta_param = GammaMatrix::new((num_genes, num_batches), a0, b0);
@@ -427,10 +428,10 @@ fn optimize(
             });
             denom_ds += delta_db * &stat.n_bs;
 
-            mu_param.update_stat(&(&stat.ysum_ds + &stat.zsum_ds), &denom_ds);
-            mu_param.calibrate();
+            mu_adj_param.update_stat(&(&stat.ysum_ds + &stat.zsum_ds), &denom_ds);
+            mu_adj_param.calibrate();
 
-            let mu_ds = mu_param.posterior_mean();
+            let mu_ds = mu_adj_param.posterior_mean();
 
             // z-specific component (gamma_ds)
             //
@@ -466,13 +467,21 @@ fn optimize(
 
             mu_resid_param.update_stat(
                 &stat.ysum_ds,
-                &denom_ds.component_mul(&mu_param.posterior_mean()),
+                &denom_ds.component_mul(&mu_adj_param.posterior_mean()),
             );
             mu_resid_param.calibrate();
         };
 
+	// Take the observed mean
+        {
+            let denom_ds: Mat = DVec::from_element(num_genes, 1_f32) * stat.size_s.transpose();
+            mu_param.update_stat(&stat.ysum_ds, &denom_ds);
+            mu_param.calibrate();
+        };
+
         Ok(CollapsingOut {
-            mu: mu_param,
+            mu_observed: mu_param,
+            mu_adjusted: Some(mu_adj_param),
             mu_residual: Some(mu_resid_param),
             gamma: Some(gamma_param),
             delta: Some(delta_param),
@@ -482,7 +491,8 @@ fn optimize(
         mu_param.update_stat(&stat.ysum_ds, &denom_ds);
         mu_param.calibrate();
         Ok(CollapsingOut {
-            mu: mu_param,
+            mu_observed: mu_param,
+            mu_adjusted: None,
             mu_residual: None,
             gamma: None,
             delta: None,
@@ -494,7 +504,8 @@ fn optimize(
 
 #[derive(Debug)]
 pub struct CollapsingOut {
-    pub mu: GammaMatrix,
+    pub mu_observed: GammaMatrix,
+    pub mu_adjusted: Option<GammaMatrix>,
     pub mu_residual: Option<GammaMatrix>,
     pub gamma: Option<GammaMatrix>,
     pub delta: Option<GammaMatrix>,

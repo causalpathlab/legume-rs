@@ -11,12 +11,22 @@ use rayon::prelude::*;
 
 /// `DataLoader` for minibatch learning
 pub trait DataLoader {
-    fn minibatch(&self, batch_idx: usize, target_device: &Device) -> anyhow::Result<Tensor>;
-    fn minibatch_with_aux(
+    fn minibatch_data(&self, batch_idx: usize, target_device: &Device) -> anyhow::Result<Tensor>;
+    fn minibatch_data_aux(
         &self,
         batch_idx: usize,
         target_device: &Device,
     ) -> anyhow::Result<(Tensor, Option<Tensor>)>;
+    fn minibatch_data_output(
+        &self,
+        batch_idx: usize,
+        target_device: &Device,
+    ) -> anyhow::Result<(Tensor, Option<Tensor>)>;
+    fn minibatch_data_aux_output(
+        &self,
+        batch_idx: usize,
+        target_device: &Device,
+    ) -> anyhow::Result<(Tensor, Option<Tensor>, Option<Tensor>)>;
     fn num_minibatch(&self) -> usize;
     fn shuffle_minibatch(&mut self, batch_size: usize);
 }
@@ -44,7 +54,7 @@ impl<'a> SparseIoVecData<'a> {
 }
 
 impl DataLoader for SparseIoVecData<'_> {
-    fn minibatch(&self, batch_idx: usize, target_device: &Device) -> anyhow::Result<Tensor> {
+    fn minibatch_data(&self, batch_idx: usize, target_device: &Device) -> anyhow::Result<Tensor> {
         if let Some(cols) = self.minibatches.chunks.get(batch_idx) {
             let (dd, nn, triplets) = self.data.collect_columns_triplets(cols.iter().cloned())?;
             let ret = Tensor::from_nonzero_triplets(dd, nn, triplets)?.transpose(0, 1)?;
@@ -58,11 +68,27 @@ impl DataLoader for SparseIoVecData<'_> {
         }
     }
 
-    fn minibatch_with_aux(
+    fn minibatch_data_aux(
         &self,
         _batch_idx: usize,
         _target_device: &Device,
     ) -> anyhow::Result<(Tensor, Option<Tensor>)> {
+        unimplemented!("SparseIoVecData")
+    }
+
+    fn minibatch_data_output(
+        &self,
+        _batch_idx: usize,
+        _target_device: &Device,
+    ) -> anyhow::Result<(Tensor, Option<Tensor>)> {
+        unimplemented!("SparseIoVecData")
+    }
+
+    fn minibatch_data_aux_output(
+        &self,
+        _batch_idx: usize,
+        _target_device: &Device,
+    ) -> anyhow::Result<(Tensor, Option<Tensor>, Option<Tensor>)> {
         unimplemented!("SparseIoVecData")
     }
 
@@ -83,10 +109,14 @@ impl DataLoader for SparseIoVecData<'_> {
 pub struct InMemoryData {
     data: Vec<Tensor>,
     aux_data: Option<Vec<Tensor>>,
+    output_data: Option<Vec<Tensor>>,
     minibatches: Minibatches,
 }
 
 impl InMemoryData {
+    ///
+    /// Create a data loader with the main data tensor `data`
+    ///
     pub fn from<D>(data: &D) -> anyhow::Result<Self>
     where
         D: RowsToTensorVec,
@@ -97,6 +127,7 @@ impl InMemoryData {
         Ok(InMemoryData {
             data,
             aux_data: None,
+            output_data: None,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -104,6 +135,9 @@ impl InMemoryData {
         })
     }
 
+    /// Create a data loader with the main `data` and auxiliary
+    /// data `aux`
+    ///
     pub fn from_with_aux<D>(data: &D, aux: &D) -> anyhow::Result<Self>
     where
         D: RowsToTensorVec,
@@ -117,6 +151,53 @@ impl InMemoryData {
         Ok(InMemoryData {
             data,
             aux_data: Some(aux_data),
+            output_data: None,
+            minibatches: Minibatches {
+                samples: rows,
+                chunks: vec![],
+            },
+        })
+    }
+
+    /// Create a data loader with the main `data` and output `out`
+    ///
+    pub fn from_with_output<D>(data: &D, out: &D) -> anyhow::Result<Self>
+    where
+        D: RowsToTensorVec,
+    {
+        let data = data.rows_to_tensor_vec();
+        let out_data = out.rows_to_tensor_vec();
+        let rows = (0..data.len()).collect();
+
+        debug_assert!(data.len() == out_data.len());
+
+        Ok(InMemoryData {
+            data,
+            aux_data: None,
+            output_data: Some(out_data),
+            minibatches: Minibatches {
+                samples: rows,
+                chunks: vec![],
+            },
+        })
+    }
+    /// Create a data loader with the main `data` and output `out`
+    ///
+    pub fn from_with_aux_output<D>(data: &D, aux: &D, out: &D) -> anyhow::Result<Self>
+    where
+        D: RowsToTensorVec,
+    {
+        let data = data.rows_to_tensor_vec();
+        let aux_data = aux.rows_to_tensor_vec();
+        let out_data = out.rows_to_tensor_vec();
+        let rows = (0..data.len()).collect();
+
+        debug_assert!(data.len() == out_data.len());
+
+        Ok(InMemoryData {
+            data,
+            aux_data: Some(aux_data),
+            output_data: Some(out_data),
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -126,7 +207,7 @@ impl InMemoryData {
 }
 
 impl DataLoader for InMemoryData {
-    fn minibatch(&self, batch_idx: usize, target_device: &Device) -> anyhow::Result<Tensor> {
+    fn minibatch_data(&self, batch_idx: usize, target_device: &Device) -> anyhow::Result<Tensor> {
         if let Some(samples) = self.minibatches.chunks.get(batch_idx) {
             let chunk: Vec<Tensor> = samples.into_iter().map(|&i| self.data[i].clone()).collect();
             Ok(Tensor::cat(&chunk, 0)?.to_device(target_device)?)
@@ -139,7 +220,7 @@ impl DataLoader for InMemoryData {
         }
     }
 
-    fn minibatch_with_aux(
+    fn minibatch_data_output(
         &self,
         batch_idx: usize,
         target_device: &Device,
@@ -148,7 +229,73 @@ impl DataLoader for InMemoryData {
             let chunk: Vec<Tensor> = samples.into_iter().map(|&i| self.data[i].clone()).collect();
             let data = Tensor::cat(&chunk, 0)?;
 
-            if let Some(ref aux_data) = self.aux_data {
+            if let Some(out_data) = self.output_data.as_ref() {
+                let chunk: Vec<Tensor> =
+                    samples.into_iter().map(|&i| out_data[i].clone()).collect();
+                let out_data = Tensor::cat(&chunk, 0)?;
+                Ok((
+                    data.to_device(target_device)?,
+                    Some(out_data.to_device(target_device)?),
+                ))
+            } else {
+                Ok((data.to_device(target_device)?, None))
+            }
+        } else {
+            Err(anyhow::anyhow!(
+                "invalid index = {} vs. total # = {}",
+                batch_idx,
+                self.num_minibatch()
+            ))
+        }
+    }
+
+    fn minibatch_data_aux_output(
+        &self,
+        batch_idx: usize,
+        target_device: &Device,
+    ) -> anyhow::Result<(Tensor, Option<Tensor>, Option<Tensor>)> {
+        if let Some(samples) = self.minibatches.chunks.get(batch_idx) {
+            let chunk: Vec<Tensor> = samples.into_iter().map(|&i| self.data[i].clone()).collect();
+            let data = Tensor::cat(&chunk, 0)?;
+
+            let out_data = self.output_data.as_ref().map(|out_data| {
+                let chunk: Vec<Tensor> =
+                    samples.into_iter().map(|&i| out_data[i].clone()).collect();
+                Tensor::cat(&chunk, 0)
+                    .expect("out data cat")
+                    .to_device(target_device)
+                    .expect("out data cat")
+            });
+
+            let aux_data = self.aux_data.as_ref().map(|aux_data| {
+                let chunk: Vec<Tensor> =
+                    samples.into_iter().map(|&i| aux_data[i].clone()).collect();
+                Tensor::cat(&chunk, 0)
+                    .expect("aux data cat")
+                    .to_device(target_device)
+                    .expect("aux data cat")
+            });
+
+            Ok((data.to_device(target_device)?, aux_data, out_data))
+        } else {
+            Err(anyhow::anyhow!(
+                "invalid index = {} vs. total # = {}",
+                batch_idx,
+                self.num_minibatch()
+            ))
+        }
+    }
+
+    fn minibatch_data_aux(
+        &self,
+        batch_idx: usize,
+        target_device: &Device,
+    ) -> anyhow::Result<(Tensor, Option<Tensor>)> {
+        if let Some(samples) = self.minibatches.chunks.get(batch_idx) {
+            let chunk: Vec<Tensor> = samples.into_iter().map(|&i| self.data[i].clone()).collect();
+            let data = Tensor::cat(&chunk, 0)?;
+
+            if let Some(aux_data) = self.aux_data.as_ref() {
                 let chunk: Vec<Tensor> =
                     samples.into_iter().map(|&i| aux_data[i].clone()).collect();
                 let aux_data = Tensor::cat(&chunk, 0)?;
