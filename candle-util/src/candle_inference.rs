@@ -62,7 +62,7 @@ where
 
         let mut llik_trace = vec![];
 
-        data.shuffle_minibatch(train_config.batch_size);
+        data.shuffle_minibatch(train_config.batch_size)?;
 
         let num_minbatches = data.num_minibatch();
 

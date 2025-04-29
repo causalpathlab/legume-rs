@@ -28,7 +28,7 @@ pub trait DataLoader {
         target_device: &Device,
     ) -> anyhow::Result<(Tensor, Option<Tensor>, Option<Tensor>)>;
     fn num_minibatch(&self) -> usize;
-    fn shuffle_minibatch(&mut self, batch_size: usize);
+    fn shuffle_minibatch(&mut self, batch_size: usize) -> anyhow::Result<()>;
 }
 
 ///
@@ -96,8 +96,9 @@ impl DataLoader for SparseIoVecData<'_> {
         self.minibatches.chunks.len()
     }
 
-    fn shuffle_minibatch(&mut self, batch_size: usize) {
+    fn shuffle_minibatch(&mut self, batch_size: usize) -> anyhow::Result<()> {
         self.minibatches.shuffle_minibatch(batch_size);
+        Ok(())
     }
 }
 
@@ -110,6 +111,11 @@ pub struct InMemoryData {
     data: Vec<Tensor>,
     aux_data: Option<Vec<Tensor>>,
     output_data: Option<Vec<Tensor>>,
+
+    shuffled_data: Option<Vec<Tensor>>,
+    shuffled_aux_data: Option<Vec<Tensor>>,
+    shuffled_output_data: Option<Vec<Tensor>>,
+
     minibatches: Minibatches,
 }
 
@@ -128,6 +134,9 @@ impl InMemoryData {
             data,
             aux_data: None,
             output_data: None,
+            shuffled_data: None,
+            shuffled_aux_data: None,
+            shuffled_output_data: None,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -152,6 +161,9 @@ impl InMemoryData {
             data,
             aux_data: Some(aux_data),
             output_data: None,
+            shuffled_data: None,
+            shuffled_aux_data: None,
+            shuffled_output_data: None,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -175,6 +187,9 @@ impl InMemoryData {
             data,
             aux_data: None,
             output_data: Some(out_data),
+            shuffled_data: None,
+            shuffled_aux_data: None,
+            shuffled_output_data: None,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -198,6 +213,9 @@ impl InMemoryData {
             data,
             aux_data: Some(aux_data),
             output_data: Some(out_data),
+            shuffled_data: None,
+            shuffled_aux_data: None,
+            shuffled_output_data: None,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -206,17 +224,96 @@ impl InMemoryData {
     }
 }
 
-impl DataLoader for InMemoryData {
-    fn minibatch_data(&self, batch_idx: usize, target_device: &Device) -> anyhow::Result<Tensor> {
-        if let Some(samples) = self.minibatches.chunks.get(batch_idx) {
-            let chunk: Vec<Tensor> = samples.into_iter().map(|&i| self.data[i].clone()).collect();
-            Ok(Tensor::cat(&chunk, 0)?.to_device(target_device)?)
-        } else {
+fn take_shuffled(
+    batch_idx: usize,
+    target_device: &Device,
+    data_vec: Option<&Vec<Tensor>>,
+) -> anyhow::Result<Option<Tensor>> {
+    if let Some(data_vec) = data_vec {
+        if data_vec.len() <= batch_idx {
             Err(anyhow::anyhow!(
                 "invalid index = {} vs. total # = {}",
                 batch_idx,
-                self.num_minibatch()
+                data_vec.len()
             ))
+        } else {
+            Ok(Some(data_vec[batch_idx].to_device(target_device)?))
+        }
+    } else {
+        // if the data vector doesn't exist
+        Ok(None)
+    }
+}
+
+impl DataLoader for InMemoryData {
+    fn shuffle_minibatch(&mut self, batch_size: usize) -> anyhow::Result<()> {
+        /////////////////////
+        // shuffle indexes //
+        /////////////////////
+
+        self.minibatches.shuffle_minibatch(batch_size);
+
+        self.shuffled_data = Some(vec![]);
+
+        if self.aux_data.is_some() {
+            self.shuffled_aux_data = Some(vec![]);
+        }
+
+        if self.output_data.is_some() {
+            self.shuffled_output_data = Some(vec![]);
+        }
+
+        ///////////////////////////////////
+        // preload all the shuffled data //
+        ///////////////////////////////////
+
+        for batch_idx in 0..self.num_minibatch() {
+            if let Some(samples) = self.minibatches.chunks.get(batch_idx) {
+                {
+                    let chunk: Vec<Tensor> =
+                        samples.into_iter().map(|&i| self.data[i].clone()).collect();
+
+                    if let Some(shuffled_data) = &mut self.shuffled_data {
+                        let x = Tensor::cat(&chunk, 0)?;
+                        shuffled_data.push(x);
+                    }
+                }
+                if let Some(out_data) = self.output_data.as_ref() {
+                    let chunk: Vec<Tensor> =
+                        samples.into_iter().map(|&i| out_data[i].clone()).collect();
+
+                    if let Some(shuffled_data) = &mut self.shuffled_output_data {
+                        let x = Tensor::cat(&chunk, 0)?;
+                        shuffled_data.push(x);
+                    }
+                }
+
+                if let Some(aux_data) = self.aux_data.as_ref() {
+                    let chunk: Vec<Tensor> =
+                        samples.into_iter().map(|&i| aux_data[i].clone()).collect();
+
+                    if let Some(shuffled_data) = &mut self.shuffled_aux_data {
+                        let x = Tensor::cat(&chunk, 0)?;
+                        shuffled_data.push(x);
+                    }
+                }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "invalid index = {} vs. total # = {}",
+                    batch_idx,
+                    self.num_minibatch()
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn minibatch_data(&self, batch_idx: usize, target_device: &Device) -> anyhow::Result<Tensor> {
+        if let Some(data) = take_shuffled(batch_idx, target_device, self.shuffled_data.as_ref())? {
+            Ok(data)
+        } else {
+            Err(anyhow::anyhow!("need to shuffle data"))
         }
     }
 
@@ -225,27 +322,12 @@ impl DataLoader for InMemoryData {
         batch_idx: usize,
         target_device: &Device,
     ) -> anyhow::Result<(Tensor, Option<Tensor>)> {
-        if let Some(samples) = self.minibatches.chunks.get(batch_idx) {
-            let chunk: Vec<Tensor> = samples.into_iter().map(|&i| self.data[i].clone()).collect();
-            let data = Tensor::cat(&chunk, 0)?;
-
-            if let Some(out_data) = self.output_data.as_ref() {
-                let chunk: Vec<Tensor> =
-                    samples.into_iter().map(|&i| out_data[i].clone()).collect();
-                let out_data = Tensor::cat(&chunk, 0)?;
-                Ok((
-                    data.to_device(target_device)?,
-                    Some(out_data.to_device(target_device)?),
-                ))
-            } else {
-                Ok((data.to_device(target_device)?, None))
-            }
+        if let Some(data) = take_shuffled(batch_idx, target_device, self.shuffled_data.as_ref())? {
+            let output =
+                take_shuffled(batch_idx, target_device, self.shuffled_output_data.as_ref())?;
+            Ok((data, output))
         } else {
-            Err(anyhow::anyhow!(
-                "invalid index = {} vs. total # = {}",
-                batch_idx,
-                self.num_minibatch()
-            ))
+            Err(anyhow::anyhow!("need to shuffle data"))
         }
     }
 
@@ -254,35 +336,13 @@ impl DataLoader for InMemoryData {
         batch_idx: usize,
         target_device: &Device,
     ) -> anyhow::Result<(Tensor, Option<Tensor>, Option<Tensor>)> {
-        if let Some(samples) = self.minibatches.chunks.get(batch_idx) {
-            let chunk: Vec<Tensor> = samples.into_iter().map(|&i| self.data[i].clone()).collect();
-            let data = Tensor::cat(&chunk, 0)?;
-
-            let out_data = self.output_data.as_ref().map(|out_data| {
-                let chunk: Vec<Tensor> =
-                    samples.into_iter().map(|&i| out_data[i].clone()).collect();
-                Tensor::cat(&chunk, 0)
-                    .expect("out data cat")
-                    .to_device(target_device)
-                    .expect("out data cat")
-            });
-
-            let aux_data = self.aux_data.as_ref().map(|aux_data| {
-                let chunk: Vec<Tensor> =
-                    samples.into_iter().map(|&i| aux_data[i].clone()).collect();
-                Tensor::cat(&chunk, 0)
-                    .expect("aux data cat")
-                    .to_device(target_device)
-                    .expect("aux data cat")
-            });
-
-            Ok((data.to_device(target_device)?, aux_data, out_data))
+        if let Some(data) = take_shuffled(batch_idx, target_device, self.shuffled_data.as_ref())? {
+            let output =
+                take_shuffled(batch_idx, target_device, self.shuffled_output_data.as_ref())?;
+            let aux = take_shuffled(batch_idx, target_device, self.shuffled_aux_data.as_ref())?;
+            Ok((data, aux, output))
         } else {
-            Err(anyhow::anyhow!(
-                "invalid index = {} vs. total # = {}",
-                batch_idx,
-                self.num_minibatch()
-            ))
+            Err(anyhow::anyhow!("need to shuffle data"))
         }
     }
 
@@ -291,36 +351,16 @@ impl DataLoader for InMemoryData {
         batch_idx: usize,
         target_device: &Device,
     ) -> anyhow::Result<(Tensor, Option<Tensor>)> {
-        if let Some(samples) = self.minibatches.chunks.get(batch_idx) {
-            let chunk: Vec<Tensor> = samples.into_iter().map(|&i| self.data[i].clone()).collect();
-            let data = Tensor::cat(&chunk, 0)?;
-
-            if let Some(aux_data) = self.aux_data.as_ref() {
-                let chunk: Vec<Tensor> =
-                    samples.into_iter().map(|&i| aux_data[i].clone()).collect();
-                let aux_data = Tensor::cat(&chunk, 0)?;
-                Ok((
-                    data.to_device(target_device)?,
-                    Some(aux_data.to_device(target_device)?),
-                ))
-            } else {
-                Ok((data.to_device(target_device)?, None))
-            }
+        if let Some(data) = take_shuffled(batch_idx, target_device, self.shuffled_data.as_ref())? {
+            let aux = take_shuffled(batch_idx, target_device, self.shuffled_aux_data.as_ref())?;
+            Ok((data, aux))
         } else {
-            Err(anyhow::anyhow!(
-                "invalid index = {} vs. total # = {}",
-                batch_idx,
-                self.num_minibatch()
-            ))
+            Err(anyhow::anyhow!("need to shuffle data"))
         }
     }
 
     fn num_minibatch(&self) -> usize {
         self.minibatches.chunks.len()
-    }
-
-    fn shuffle_minibatch(&mut self, batch_size: usize) {
-        self.minibatches.shuffle_minibatch(batch_size);
     }
 }
 

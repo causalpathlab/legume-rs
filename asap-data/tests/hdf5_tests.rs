@@ -149,9 +149,10 @@ fn simulate() -> anyhow::Result<()> {
     let sim_args = SimArgs {
         rows: 7,
         cols: 11,
-	depth: 100,
+        depth: 100,
         factors: 1,
         batches: 1,
+        overdisp: 1.,
         rseed: 1,
     };
 

@@ -13,6 +13,7 @@ pub struct SimArgs {
     pub depth: usize,
     pub factors: usize,
     pub batches: usize,
+    pub overdisp: f32,
     pub rseed: u64,
 }
 
@@ -104,6 +105,7 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
     let bb = args.batches;
     let nnz = args.depth;
     let rseed = args.rseed;
+    let overdisp = args.overdisp;
 
     let threshold = 0.5_f32;
 
@@ -119,8 +121,11 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
     info!("simulated batch effects");
 
     // 3. factorization model
-    let beta_dk = DMatrix::<f32>::rgamma(dd, kk, (1., 1.));
-    let theta_kn = DMatrix::<f32>::rgamma(kk, nn, (1., 1.));
+    let (a, b) = (1. / overdisp, (dd as f32).sqrt() * overdisp);
+    let beta_dk = DMatrix::<f32>::rgamma(dd, kk, (a, b));
+
+    let (a, b) = (1. / overdisp, (nn as f32).sqrt() * overdisp);
+    let theta_kn = DMatrix::<f32>::rgamma(kk, nn, (a, b));
 
     // 4. putting them all together
     // let mut triplets = vec![];
@@ -133,6 +138,7 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
         .map(|(j, theta_j)| {
             let mut rng = rand::rngs::StdRng::seed_from_u64(rseed + j as u64);
             let b = batch_membership[j]; // batch index
+
             let lambda_j = if bb > 1 {
                 (&beta_dk * &theta_j).component_mul(&delta_db.column(b))
             } else {

@@ -9,6 +9,7 @@ fn sparse_matrix_simulation_and_loading() -> anyhow::Result<()> {
         depth: 100,
         factors: 1,
         batches: 1,
+	overdisp: 1.,
         rseed: 42,
     };
 

@@ -195,6 +195,7 @@ fn simulate() -> anyhow::Result<()> {
         depth: 100,
         factors: 1,
         batches: 3,
+	overdisp: 1.,
         rseed: 42,
     };
 
