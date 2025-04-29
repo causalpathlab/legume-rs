@@ -10,9 +10,10 @@ use rayon::prelude::*;
 pub struct SimArgs {
     pub rows: usize,
     pub cols: usize,
-    pub factors: Option<usize>,
-    pub batches: Option<usize>,
-    pub rseed: Option<u64>,
+    pub depth: usize,
+    pub factors: usize,
+    pub batches: usize,
+    pub rseed: u64,
 }
 
 pub struct SimOut {
@@ -99,9 +100,10 @@ pub fn generate_factored_poisson_gamma_data_mtx(
 pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
     let nn = args.cols;
     let dd = args.rows;
-    let kk = args.factors.unwrap_or(1);
-    let bb = args.batches.unwrap_or(1);
-    let rseed = args.rseed.unwrap_or(42);
+    let kk = args.factors;
+    let bb = args.batches;
+    let nnz = args.depth;
+    let rseed = args.rseed;
 
     let threshold = 0.5_f32;
 
@@ -136,16 +138,16 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
             } else {
                 &beta_dk * &theta_j
             };
-            // let scale = (dd as f32) / lambda_j.sum().sqrt();
-            // let l_ij = l_ij * scale;
+
+            let tot = lambda_j.sum();
+            let scale = (nnz as f32) / tot;
 
             lambda_j
                 .iter()
                 .enumerate()
                 .filter_map(|(i, &l_ij)| {
-                    let rpois = Poisson::new(l_ij).unwrap();
+                    let rpois = Poisson::new(l_ij * scale).expect("poisson sample error");
                     let y_ij = rpois.sample(&mut rng);
-                    // let y_ij = l_ij.round(); //
                     if y_ij > threshold {
                         Some((i as u64, j as u64, y_ij))
                     } else {

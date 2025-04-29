@@ -6,9 +6,10 @@ fn sparse_matrix_simulation_and_loading() -> anyhow::Result<()> {
     let args = SimArgs {
         rows: 10,
         cols: 15,
-        factors: None,
-        batches: None,
-        rseed: None,
+        depth: 100,
+        factors: 1,
+        batches: 1,
+        rseed: 42,
     };
 
     let _out = generate_factored_poisson_gamma_data(&args);

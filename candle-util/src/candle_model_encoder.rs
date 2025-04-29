@@ -4,7 +4,7 @@ use crate::candle_aux_layers::StackLayers;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, BatchNorm, Embedding, Linear, ModuleT, VarBuilder};
+use candle_nn::{BatchNorm, Embedding, Linear, ModuleT, VarBuilder, ops};
 
 pub struct LogSoftmaxEncoder {
     n_features: usize,
@@ -91,7 +91,7 @@ impl LogSoftmaxEncoder {
             // log(x0), but we worry less about how to tune the
             // parameter beta.
             // Note2: `relu` can slow down training...
-            return (emb_ndd - emb0_ndd)?.sum(k - 1);
+            return emb_ndd.sum(k - 1)? - emb0_ndd.sum(k - 1)?;
         } else {
             return emb_ndd.sum(k - 1);
         }
@@ -153,12 +153,14 @@ impl LogSoftmaxEncoder {
     /// * `n_features` - the number of features
     /// * `n_topics` - the number of topics (latent factors)
     /// * `n_vocab` - the size of intensity vocabulary
+    /// * `d_emb` - vocabulary embedding dim
     /// * `layers` - fully connected layers, each with the dim
     /// * `vs` - variable builder
     pub fn new(
         n_features: usize,
         n_topics: usize,
         n_vocab: usize,
+        d_emb: usize,
         layers: &[usize],
         vs: VarBuilder,
     ) -> Result<Self> {
@@ -170,8 +172,6 @@ impl LogSoftmaxEncoder {
         };
 
         debug_assert!(layers.len() > 0);
-
-        let d_emb = layers[0];
 
         let emb_x = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_x"))?;
 

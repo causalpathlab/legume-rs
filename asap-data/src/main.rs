@@ -276,21 +276,29 @@ pub struct RunSimulateArgs {
     #[arg(short, long)]
     pub cols: usize,
 
+    /// depth per column
+    #[arg(short, long, default_value_t = 10000)]
+    pub depth: usize,
+
     /// number of factors
-    #[arg(short, long)]
-    pub factors: Option<usize>,
+    #[arg(short, long, default_value_t = 1)]
+    pub factors: usize,
 
     /// number of batches
-    #[arg(short, long)]
-    pub batches: Option<usize>,
+    #[arg(short, long, default_value_t = 1)]
+    pub batches: usize,
 
     /// output file header: {output}.{backend}
     #[arg(short, long)]
     output: Box<str>,
 
     /// random seed
-    #[arg(long)]
-    pub seed: Option<u64>,
+    #[arg(long, default_value_t = 42)]
+    pub rseed: u64,
+
+    /// save mtx
+    #[arg(long, default_value_t = false)]
+    pub save_mtx: bool,
 
     /// backend
     #[arg(long, value_enum, default_value = "zarr")]
@@ -893,6 +901,9 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     };
 
     let mtx_file = output.to_string() + ".mtx.gz";
+    let row_file = output.to_string() + ".rows.gz";
+    let col_file = output.to_string() + ".cols.gz";
+
     let dict_file = mtx_file.replace(".mtx.gz", ".dict.gz");
     let prop_file = mtx_file.replace(".mtx.gz", ".prop.gz");
     let memb_file = mtx_file.replace(".mtx.gz", ".memb.gz");
@@ -911,9 +922,10 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     let sim_args = simulate::SimArgs {
         rows: cmd_args.rows,
         cols: cmd_args.cols,
+        depth: cmd_args.depth,
         factors: cmd_args.factors,
         batches: cmd_args.batches,
-        rseed: cmd_args.seed,
+        rseed: cmd_args.rseed,
     };
 
     let sim = simulate::generate_factored_poisson_gamma_data(&sim_args);
@@ -939,13 +951,6 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
 
     let mtx_shape = (sim_args.rows, sim_args.cols, sim.triplets.len());
 
-    info!("registering triplets ...");
-
-    let mut data =
-        create_sparse_from_triplets(sim.triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
-
-    info!("created sparse matrix: {}", backend_file);
-
     let rows: Vec<Box<str>> = (1..(sim_args.rows + 1))
         .map(|i| i.to_string().into_boxed_str())
         .collect();
@@ -953,6 +958,28 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     let cols: Vec<Box<str>> = (1..(sim_args.cols + 1))
         .map(|i| i.to_string().into_boxed_str())
         .collect();
+
+    if cmd_args.save_mtx {
+        let mut triplets = sim.triplets.clone();
+        triplets.sort_by_key(|&(row, _, _)| row);
+        triplets.sort_by_key(|&(_, col, _)| col);
+
+        mtx_io::write_mtx_triplets(&triplets, sim_args.rows, sim_args.cols, &mtx_file)?;
+        common_io::write_lines(&rows, &row_file)?;
+        common_io::write_lines(&cols, &col_file)?;
+
+        info!(
+            "save mtx, row, and column files:\n{}\n{}\n{}",
+            mtx_file, row_file, col_file
+        );
+    }
+
+    info!("registering triplets ...");
+
+    let mut data =
+        create_sparse_from_triplets(sim.triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
+
+    info!("created sparse matrix: {}", backend_file);
 
     data.register_row_names_vec(&rows);
     data.register_column_names_vec(&cols);

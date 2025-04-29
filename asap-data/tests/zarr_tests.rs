@@ -35,20 +35,17 @@ fn tensor_to_ndarray(tensor: Tensor) -> Array2<f32> {
 fn temp_array_zarrs() -> anyhow::Result<()> {
     use ndarray::prelude::*;
     use std::sync::Arc;
-    use zarrs::array::codec::ZstdCodec;
-    use zarrs::{
-        array::{DataType, FillValue},
-        array_subset::ArraySubset,
-        storage::store,
-    };
-    let COMPRESSION_LEVEL = 5;
-
-    use std::fs::File;
+    // use zarrs::array::codec::ZstdCodec;
+    // array_subset::ArraySubset,
+    // storage::store,
+    // let COMPRESSION_LEVEL = 5;
+    // use std::fs::File;
+    use zarrs::array::{DataType, FillValue};
 
     let backend_file = create_temp_dir_file(".zarr")?;
     let temp_filename = backend_file.to_str().expect("to_str failed");
 
-    let mut store = Arc::new(zarrs::filesystem::FilesystemStore::new(&temp_filename)?);
+    let store = Arc::new(zarrs::filesystem::FilesystemStore::new(&temp_filename)?);
 
     // Create the root group
     zarrs::group::GroupBuilder::new()
@@ -83,14 +80,13 @@ fn temp_array_zarrs() -> anyhow::Result<()> {
     let chunk = array![[1. as f32, 2., 3.], [4., 5., 6.], [7., 8., 9.]];
     let chunk = chunk.into_iter().collect::<Vec<_>>();
 
-    array.store_chunk_elements(&[0,0], &chunk)?;
-    array.store_chunk_elements(&[0,1], &chunk)?;
-    array.store_chunk_elements(&[0,2], &chunk)?;
-    array.store_chunk_elements(&[0,3], &chunk)?;
+    array.store_chunk_elements(&[0, 0], &chunk)?;
+    array.store_chunk_elements(&[0, 1], &chunk)?;
+    array.store_chunk_elements(&[0, 2], &chunk)?;
+    array.store_chunk_elements(&[0, 3], &chunk)?;
 
     let chunk = array![[1. as f32, 2., 3.], [4., 5., 6.], [7., 8., 9.]];
-    array.store_array_subset_ndarray(&[1,0], chunk)?;
-
+    array.store_array_subset_ndarray(&[1, 0], chunk)?;
 
     let data_all = array.retrieve_array_subset_ndarray::<f32>(&subset_all)?;
     println!("ndarray::ArrayD:\n{data_all}");
@@ -196,9 +192,10 @@ fn simulate() -> anyhow::Result<()> {
     let sim_args = SimArgs {
         rows: 7,
         cols: 133,
-        factors: None,
-        batches: Some(3),
-        rseed: None,
+        depth: 100,
+        factors: 1,
+        batches: 3,
+        rseed: 42,
     };
 
     let mtx_file = create_temp_dir_file(".mtx.gz")?;
