@@ -149,9 +149,10 @@ fn simulate() -> anyhow::Result<()> {
     let sim_args = SimArgs {
         rows: 7,
         cols: 11,
-        factors: None,
-        batches: None,
-        rseed: None,
+	depth: 100,
+        factors: 1,
+        batches: 1,
+        rseed: 1,
     };
 
     let mtx_file = create_temp_dir_file(".mtx.gz")?;
