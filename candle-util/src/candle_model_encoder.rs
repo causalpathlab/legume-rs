@@ -12,6 +12,7 @@ pub struct LogSoftmaxEncoder {
     n_vocab: usize,
     d_emb: usize,
     emb_x: Embedding,
+    emb_logx: Embedding,
     fc: StackLayers<Linear>,
     bn_z: BatchNorm,
     z_mean: Linear,
@@ -52,11 +53,18 @@ impl EncoderModuleT for LogSoftmaxEncoder {
 }
 
 impl LogSoftmaxEncoder {
-    ///
-    /// embedding matrix
-    ///
-    pub fn get_embedding_matrix(&self) -> Tensor {
-        self.emb_x.embeddings().clone()
+    fn discretize_whitened_tensor(&self, x_nd: &Tensor) -> Result<Tensor> {
+        use candle_core::DType::U32;
+
+        let n_vocab = self.n_vocab as f64;
+        let d = x_nd.dims().len();
+        let min_val = x_nd.min_keepdim(d - 1)?;
+        let max_val = x_nd.max_keepdim(d - 1)?;
+        let div_val = ((max_val - &min_val)? + 1.)?;
+
+        let x_nd = x_nd.broadcast_sub(&min_val)?.broadcast_div(&div_val)?;
+
+        (x_nd * n_vocab)?.floor()?.to_dtype(U32)
     }
 
     pub fn preprocess_input(
@@ -69,24 +77,23 @@ impl LogSoftmaxEncoder {
         debug_assert!(x_nd.min_all()?.to_scalar::<f32>()? >= 0_f32);
 
         // 1. Discretize data after log1p transformation
-        let n_vocab = self.n_vocab as f64;
-
-        let log1p_nd = (x_nd + 1.)?.log()?;
-        let x_n = log1p_nd.sum_keepdim(1)?;
-        let log1p_nd =
-            (log1p_nd.broadcast_div(&x_n)? * n_vocab)?.to_dtype(candle_core::DType::U8)?;
+        let int_x_nd = self.discretize_whitened_tensor(&x_nd)?;
+        let logx_nd = (x_nd + 1.)?.log()?;
+        let int_logx_nd = self.discretize_whitened_tensor(&logx_nd)?;
 
         // 2. log1p intensity embedding: n x d -> n x d x d
-        let emb_ndd = self.emb_x.forward_t(&log1p_nd, train)?;
+        let emb_ndd = (self.emb_x.forward_t(&int_x_nd, train)?
+            + self.emb_logx.forward_t(&int_logx_nd, train)?)?;
         let k = emb_ndd.dims().len();
 
         if let Some(x0_nd) = x0_nd {
-            let log1p0_nd = (x0_nd + 1.)?.log()?;
-            let x0_n = log1p0_nd.sum_keepdim(1)?;
-            let log1p0_nd =
-                (log1p0_nd.broadcast_div(&x0_n)? * n_vocab)?.to_dtype(candle_core::DType::U8)?;
+            let int_x0_nd = self.discretize_whitened_tensor(&x0_nd)?;
+            let logx0_nd = (x0_nd + 1.)?.log()?;
+            let int_logx0_nd = self.discretize_whitened_tensor(&logx0_nd)?;
 
-            let emb0_ndd = self.emb_x.forward_t(&log1p0_nd, train)?;
+            let emb0_ndd = (self.emb_x.forward_t(&int_x0_nd, train)?
+                + self.emb_logx.forward_t(&int_logx0_nd, train)?)?;
+
             // Note: This will work almost like log(x) - beta *
             // log(x0), but we worry less about how to tune the
             // parameter beta.
@@ -174,6 +181,7 @@ impl LogSoftmaxEncoder {
         debug_assert!(layers.len() > 0);
 
         let emb_x = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_x"))?;
+        let emb_logx = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_logx"))?;
 
         // (1) data -> fc
         let mut fc = StackLayers::<Linear>::new();
@@ -199,6 +207,7 @@ impl LogSoftmaxEncoder {
             n_vocab,
             d_emb,
             emb_x,
+            emb_logx,
             fc,
             bn_z,
             z_mean,

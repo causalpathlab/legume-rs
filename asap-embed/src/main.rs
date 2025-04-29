@@ -66,7 +66,7 @@ struct EmbedArgs {
     data_files: Vec<Box<str>>,
 
     /// Random projection dimension to project the data.
-    #[arg(long, short, default_value_t = 30)]
+    #[arg(long, short = 'p', default_value_t = 30)]
     proj_dim: usize,
 
     /// Output header
@@ -108,7 +108,7 @@ struct EmbedArgs {
     latent_topics: usize,
 
     /// Encoder layers
-    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![32,256,32])]
+    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
     encoder_layers: Vec<usize>,
 
     /// Intensity levels for frequency embedding
@@ -116,10 +116,10 @@ struct EmbedArgs {
     vocab_size: usize,
 
     /// Intensity embedding dimension
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 5)]
     vocab_emb: usize,
 
-    /// # pre-training epochs
+    /// # pre-training epochs with an encoder-only model
     #[arg(long, default_value_t = 0)]
     pretrain_epochs: usize,
 
@@ -176,7 +176,9 @@ fn main() -> anyhow::Result<()> {
     info!("Reading data files...");
 
     let (mut data_vec, batch_membership) = read_data_vec_membership(args.clone())?;
-    info!("Reference batches: {:?}", args.reference_batch);
+    if let Some(reference_vec) = args.reference_batch.as_ref() {
+        info!("Reference batches: {:?}", reference_vec);
+    }
 
     let dd = data_vec.num_rows()?;
     let kk = args.latent_topics;
@@ -191,9 +193,11 @@ fn main() -> anyhow::Result<()> {
     // 1. Randomly project the columns //
     /////////////////////////////////////
 
-    info!("Random projection of data onto {} dims", args.proj_dim);
+    let proj_dim = args.proj_dim.max(kk);
+
+    info!("Random projection of data onto {} dims", proj_dim);
     let proj_out = data_vec.project_columns_with_batch_correction(
-        args.proj_dim,
+        proj_dim,
         Some(args.block_size.clone()),
         Some(&batch_membership),
     )?;
@@ -242,82 +246,95 @@ fn main() -> anyhow::Result<()> {
 
     let kk = args.latent_topics;
 
+    let raw_dn = &collapse_out.mu_observed;
     let delta_db = collapse_out.delta.as_ref();
-
-    let x_dn = match collapse_out.mu_adjusted {
-        Some(adj) => adj.posterior_mean().clone(),
-        None => collapse_out.mu_observed.posterior_mean().clone(),
-    };
+    let adj_dn = collapse_out.mu_adjusted.as_ref();
+    let resid_dn = collapse_out.mu_residual.as_ref();
 
     let n_vocab = args.vocab_size;
     let d_vocab_emb = args.vocab_emb;
 
-    let (
-        z_nk,    // latent (cell x factor)
-        beta_dk, // model parameters (gene x factor)
-        llik,    // log-likelihood vector
-    ) = match args.decoder_model {
-        DecoderModel::Topic => {
-            let enc = LogSoftmaxEncoder::new(
-                dd,
-                kk,
-                n_vocab,
-                d_vocab_emb,
-                &args.encoder_layers,
-                param_builder.clone(),
-            )?;
-            let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
-            run_asap_embedding(
-                x_dn.transpose(),
-                delta_db.map(|x| x.posterior_mean()),
-                &data_vec,
-                &enc,
-                &dec,
-                &parameters,
-                &loss_func::topic_likelihood,
-                &train_config,
-            )?
-        }
+    let (latent_nk, dictionary_dk, latent_direct_nk, log_likelihood_trace) =
+        match args.decoder_model {
+            DecoderModel::Topic => {
+                let enc = LogSoftmaxEncoder::new(
+                    dd,
+                    kk,
+                    n_vocab,
+                    d_vocab_emb,
+                    &args.encoder_layers,
+                    param_builder.clone(),
+                )?;
+                let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
+                run_asap_embedding(
+                    &raw_dn.posterior_mean().transpose().clone(),
+                    adj_dn.map(|x| x.posterior_mean().transpose()).as_ref(),
+                    resid_dn.map(|x| x.posterior_mean().transpose()).as_ref(),
+                    delta_db.map(|x| x.posterior_mean()),
+                    &data_vec,
+                    &enc,
+                    &dec,
+                    &parameters,
+                    &loss_func::topic_likelihood,
+                    &train_config,
+                )?
+            }
 
-        DecoderModel::Poisson => {
-            let enc = LogSoftmaxEncoder::new(
-                dd,
-                kk,
-                n_vocab,
-                d_vocab_emb,
-                &args.encoder_layers,
-                param_builder.clone(),
-            )?;
-            let dec = PoissonDecoder::new(dd, kk, param_builder.clone())?;
-            run_asap_embedding(
-                x_dn.transpose(),
-                delta_db.map(|x| x.posterior_mean()),
-                &data_vec,
-                &enc,
-                &dec,
-                &parameters,
-                &loss_func::poisson_likelihood,
-                &train_config,
-            )?
-        }
+            DecoderModel::Poisson => {
+                let enc = LogSoftmaxEncoder::new(
+                    dd,
+                    kk,
+                    n_vocab,
+                    d_vocab_emb,
+                    &args.encoder_layers,
+                    param_builder.clone(),
+                )?;
+                let dec = PoissonDecoder::new(dd, kk, param_builder.clone())?;
+                run_asap_embedding(
+                    &raw_dn.posterior_mean().transpose().clone(),
+                    adj_dn.map(|x| x.posterior_mean().transpose()).as_ref(),
+                    resid_dn.map(|x| x.posterior_mean().transpose()).as_ref(),
+                    delta_db.map(|x| x.posterior_mean()),
+                    &data_vec,
+                    &enc,
+                    &dec,
+                    &parameters,
+                    &loss_func::topic_likelihood,
+                    &train_config,
+                )?
+            }
+            _ => {
+                let x_dn = match collapse_out.mu_adjusted.as_ref() {
+                    Some(adj) => adj,
+                    None => &collapse_out.mu_observed,
+                };
 
-        _ => run_nystrom_proj(
-            x_dn,
-            delta_db.map(|x| x.posterior_mean()),
-            &data_vec,
-            args.latent_topics,
-            Some(args.block_size.clone()),
-        )?,
-    };
+                run_nystrom_proj(
+                    x_dn.posterior_log_mean().clone(),
+                    delta_db.map(|x| x.posterior_mean()),
+                    &data_vec,
+                    args.latent_topics,
+                    Some(args.block_size.clone()),
+                )?
+            }
+        };
 
-    if llik.len() > 0 {
-        Mat::from_row_iterator(llik.len(), 1, llik.into_iter())
-            .to_tsv(&(args.out.to_string() + ".llik.gz"))?;
+    if let Some(log_likelihood_trace) = log_likelihood_trace {
+        Mat::from_row_iterator(
+            log_likelihood_trace.len(),
+            1,
+            log_likelihood_trace.into_iter(),
+        )
+        .to_tsv(&(args.out.to_string() + ".llik.gz"))?;
     }
 
-    z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
+    latent_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
 
-    beta_dk.to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
+    if let Some(latent_nk) = latent_direct_nk {
+        latent_nk.to_tsv(&(args.out.to_string() + ".latent.direct.gz"))?;
+    }
+
+    dictionary_dk.to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
 
     if let Some(param) = delta_db {
         param.write_tsv(&(args.out.to_string() + ".delta.gz"))?;
@@ -342,15 +359,17 @@ fn main() -> anyhow::Result<()> {
 /// * `u_dk` - feature x factor dictionary matrix
 ///
 fn run_nystrom_proj(
-    xx_dn: Mat,
+    log_xx_dn: Mat,
     delta_db: Option<&Mat>,
     full_data_vec: &SparseIoVec,
     rank: usize,
     block_size: Option<usize>,
-) -> anyhow::Result<(Mat, Mat, Vec<f32>)> {
-    let mut xx_dn = xx_dn.clone();
-    xx_dn.scale_columns_inplace();
-    let (u_dk, _, _) = xx_dn.rsvd(rank)?;
+) -> anyhow::Result<(Mat, Mat, Option<Mat>, Option<Vec<f32>>)> {
+    let mut log_xx_dn = log_xx_dn.clone();
+
+    log_xx_dn.scale_columns_inplace();
+
+    let (u_dk, _, _) = log_xx_dn.rsvd(rank)?;
 
     let eps = 1e-8;
     let xdepth = 1e4;
@@ -403,7 +422,7 @@ fn run_nystrom_proj(
             }
 
             let mut log_x_dn = x_dn.map(|x| (x + 0.5).log2());
-            log_x_dn.centre_columns_inplace();
+            log_x_dn.scale_columns_inplace();
 
             let z_nk = log_x_dn.transpose() * &u_dk;
             (lb, z_nk)
@@ -426,7 +445,7 @@ fn run_nystrom_proj(
         }
     }
 
-    Ok((z_nk, u_dk, vec![]))
+    Ok((z_nk, u_dk, None, None))
 }
 
 /// Train an autoencoder model on collapsed data and evaluate latent
@@ -448,7 +467,9 @@ fn run_nystrom_proj(
 /// * `llik` - log-likelihood trace vector
 ///
 fn run_asap_embedding<Enc, Dec, LLikFn>(
-    data_nd: Mat,
+    raw_data_nd: &Mat,
+    adj_data_nd: Option<&Mat>,
+    residual_data_nd: Option<&Mat>,
     delta_db: Option<&Mat>,
     full_data_vec: &SparseIoVec,
     encoder: &Enc,
@@ -456,15 +477,21 @@ fn run_asap_embedding<Enc, Dec, LLikFn>(
     parameters: &candle_nn::VarMap,
     log_likelihood_func: &LLikFn,
     train_config: &TrainConfig,
-) -> anyhow::Result<(Mat, Mat, Vec<f32>)>
+) -> anyhow::Result<(Mat, Mat, Option<Mat>, Option<Vec<f32>>)>
 where
     Enc: EncoderModuleT + Send + Sync + 'static,
-    Dec: DecoderModule,
-    LLikFn: Fn(&Tensor, &Tensor) -> candle_core::Result<Tensor>,
+    Dec: DecoderModule + Send + Sync + 'static,
+    LLikFn: Fn(&Tensor, &Tensor) -> candle_core::Result<Tensor> + Sync + Send,
 {
     let kk = encoder.dim_latent();
 
-    let mut x_std_nd = data_nd.clone();
+    let mut x_std_nd = match adj_data_nd {
+        Some(adj_data_nd) => adj_data_nd,
+        None => raw_data_nd,
+    }
+    .map(|x| (x + 0.5).log2())
+    .clone();
+
     x_std_nd.scale_columns_inplace();
     let (mut z_nk_init, _, _) = x_std_nd.rsvd(kk)?;
     z_nk_init.scale_columns_inplace();
@@ -488,7 +515,10 @@ where
             z_nk_init.ncols()
         );
 
-        let mut data_loader = InMemoryData::from_with_output(&data_nd, &z_nk_init)?;
+        let mut data_loader = match adj_data_nd {
+            Some(data_nd) => InMemoryData::from_with_output(data_nd, &z_nk_init)?,
+            None => InMemoryData::from_with_output(raw_data_nd, &z_nk_init)?,
+        };
 
         let _llik = vae.pretrain_encoder(
             &mut data_loader,
@@ -497,20 +527,22 @@ where
         )?;
     }
 
-    info!(
-        "Start training on the collapsed data {} x {} ...",
-        data_nd.nrows(),
-        data_nd.ncols()
-    );
-
-    let mut data_loader = InMemoryData::from(&data_nd)?;
+    let mut data_loader = if let (Some(target_nd), Some(null_nd)) = (adj_data_nd, residual_data_nd)
+    {
+        InMemoryData::from_with_aux_output(raw_data_nd, null_nd, target_nd)?
+    } else {
+        InMemoryData::from(raw_data_nd)?
+    };
 
     let llik_trace =
         vae.train_encoder_decoder(&mut data_loader, log_likelihood_func, &train_config)?;
 
     info!("Done with training {} epochs", train_config.num_epochs);
 
-    let z_nk = evaluate_latent_by_encoder(&full_data_vec, encoder, &train_config, delta_db)?;
+    let z_nk = evaluate_latent_by_encoder(&full_data_vec, encoder, &train_config, delta_db, false)?;
+
+    let z_direct_nk =
+        evaluate_latent_by_encoder(&full_data_vec, encoder, &train_config, delta_db, true)?;
 
     info!("Finished encoding latent states for all");
 
@@ -519,7 +551,7 @@ where
         .to_device(&candle_core::Device::Cpu)?;
     let beta_dk = Mat::from_tensor(&beta_dk)?;
 
-    Ok((z_nk, beta_dk, llik_trace))
+    Ok((z_nk, beta_dk, Some(z_direct_nk), Some(llik_trace)))
 }
 
 /// Evaluate latent representation with the trained encoder network
@@ -534,6 +566,7 @@ fn evaluate_latent_by_encoder<Enc>(
     encoder: &Enc,
     train_config: &TrainConfig,
     delta_db: Option<&Mat>,
+    direct_adjustment: bool,
 ) -> anyhow::Result<Mat>
 where
     Enc: EncoderModuleT + Send + Sync + 'static,
@@ -547,58 +580,71 @@ where
     let jobs = create_jobs(ntot, block_size);
     let njobs = jobs.len() as u64;
     let arc_enc = Arc::new(Mutex::new(encoder));
-    let eps = 1e-4;
 
     let mut chunks = jobs
         .par_iter()
         .progress_count(njobs)
         .map(|&(lb, ub)| {
-            let mut x_dn = data_vec.read_columns_dmatrix(lb..ub).expect("read columns");
-            let (d, n) = x_dn.shape();
-
             let enc = arc_enc.lock().expect("enc lock");
 
             let z_nk = match delta_db {
                 Some(delta_db) => {
-                    let batches = data_vec.get_batch_membership(lb..ub);
+                    let (z_nk, _) = if direct_adjustment {
+                        let mut x_dn = data_vec.read_columns_dmatrix(lb..ub).expect("read columns");
+                        let (d, n) = x_dn.shape();
 
-                    // This will (a) estimate scaling parameter for each
-                    // cell and (b) adjust the raw expression data with
-                    // delta
-                    x_dn.column_iter_mut()
-                        .zip(batches)
-                        .for_each(|(mut x_j, b)| {
-                            let d_j = delta_db.column(b);
-                            let xsum = x_j.sum();
-                            let dsum = d_j.sum();
-                            let scale = if dsum > 0.0 { xsum / dsum } else { 1.0 };
-                            x_j.zip_apply(&d_j, |x_ij, d_ij| *x_ij /= d_ij * scale + eps);
-                        });
+                        let batches = data_vec.get_batch_membership(lb..ub);
 
-                    // Note: x_dn.as_slice() will take values in the column-major order
-                    // However, Tensor::from_slice will take them in the row-major order
-                    let x_nd =
-                        Tensor::from_slice(x_dn.as_slice(), (n, d), dev).expect("tensor x_nd");
+                        // This will (a) estimate scaling parameter for each
+                        // cell and (b) adjust the raw expression data with
+                        // delta
+                        let eps = 1e-4;
+                        x_dn.column_iter_mut()
+                            .zip(batches)
+                            .for_each(|(mut x_j, b)| {
+                                let d_j = delta_db.column(b);
+                                let xsum = x_j.sum();
+                                let dsum = d_j.sum();
+                                let scale = if dsum > 0.0 { xsum / dsum } else { 1.0 };
+                                x_j.zip_apply(&d_j, |x_ij, d_ij| *x_ij /= d_ij * scale + eps);
+                            });
 
-                    let (z_nk, _) = enc.forward_t(&x_nd, false).expect("forward");
+                        // Note: x_dn.as_slice() will take values in the column-major order
+                        // However, Tensor::from_slice will take them in the row-major order
+                        let x_nd =
+                            Tensor::from_slice(x_dn.as_slice(), (n, d), dev).expect("tensor x_nd");
 
-                    // let b = delta_db.ncols();
-                    // let delta_bd = Tensor::from_slice(delta_db.as_slice(), (b, d), dev)
-                    //     .expect("tensor delta_bd");
+                        enc.forward_t(&x_nd, false).expect("forward")
+                    } else {
+                        let x_dn = data_vec.read_columns_dmatrix(lb..ub).expect("read columns");
+                        let (d, n) = x_dn.shape();
 
-                    // let batches = data_vec
-                    //     .get_batch_membership(lb..ub)
-                    //     .into_iter()
-                    //     .map(|x| x as u32);
+                        // Note: x_dn.as_slice() will take values in the column-major order
+                        // However, Tensor::from_slice will take them in the row-major order
+                        let x_nd =
+                            Tensor::from_slice(x_dn.as_slice(), (n, d), dev).expect("tensor x_nd");
 
-                    // let batches = Tensor::from_iter(batches.clone(), dev).unwrap();
-                    // let x0_nd = delta_bd.index_select(&batches, 0).expect("expand delta_bd");
-                    // let (z_nk, _) = enc
-                    //     .forward_with_null_t(&x_nd, &x0_nd, false)
-                    //     .expect("forward");
+                        let b = delta_db.ncols();
+                        let delta_bd = Tensor::from_slice(delta_db.as_slice(), (b, d), dev)
+                            .expect("tensor delta_bd");
+
+                        let batches = data_vec
+                            .get_batch_membership(lb..ub)
+                            .into_iter()
+                            .map(|x| x as u32);
+
+                        let batches = Tensor::from_iter(batches.clone(), dev).unwrap();
+                        let x0_nd = delta_bd.index_select(&batches, 0).expect("expand delta_bd");
+                        enc.forward_with_null_t(&x_nd, &x0_nd, false)
+                            .expect("forward")
+                    };
                     z_nk
                 }
                 None => {
+                    // simple forward pass without batch adjustment
+                    let x_dn = data_vec.read_columns_dmatrix(lb..ub).expect("read columns");
+                    let (d, n) = x_dn.shape();
+
                     // Note: x_dn.as_slice() will take values in the column-major order
                     // However, Tensor::from_slice will take them in the row-major order
                     let x_nd =

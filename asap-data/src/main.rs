@@ -292,6 +292,10 @@ pub struct RunSimulateArgs {
     #[arg(short, long)]
     output: Box<str>,
 
+    /// overdispersion
+    #[arg(long, default_value_t = 10.)]
+    pub overdisp: f32,
+
     /// random seed
     #[arg(long, default_value_t = 42)]
     pub rseed: u64,
@@ -925,6 +929,7 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         depth: cmd_args.depth,
         factors: cmd_args.factors,
         batches: cmd_args.batches,
+        overdisp: cmd_args.overdisp,
         rseed: cmd_args.rseed,
     };
 
