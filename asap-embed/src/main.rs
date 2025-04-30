@@ -110,11 +110,11 @@ struct EmbedArgs {
     encoder_layers: Vec<usize>,
 
     /// Intensity levels for frequency embedding
-    #[arg(long, default_value_t = 5000)]
+    #[arg(long, default_value_t = 10)]
     vocab_size: usize,
 
     /// Intensity embedding dimension
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = 10)]
     vocab_emb: usize,
 
     /// # pre-training epochs with an encoder-only model
@@ -137,7 +137,7 @@ struct EmbedArgs {
     device: ComputeDevice,
 
     /// Choose a decoder model
-    #[arg(long, short = 'm', value_enum, default_value = "topic")]
+    #[arg(long = "model", short = 'm', value_enum, default_value = "topic")]
     decoder_model: DecoderModel,
 
     /// Save intermediate projection results
