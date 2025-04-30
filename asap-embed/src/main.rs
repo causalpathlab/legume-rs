@@ -21,7 +21,6 @@ use asap_random_projection::RandProjOps;
 use candle_util::candle_data_loader::*;
 use candle_util::candle_loss_functions as loss_func;
 use candle_util::candle_model_encoder::*;
-use candle_util::candle_model_poisson::*;
 use candle_util::candle_model_topic::*;
 use candle_util::candle_model_traits::*;
 use candle_util::candle_vae_inference::*;
@@ -36,7 +35,6 @@ use indicatif::ParallelProgressIterator;
 #[clap(rename_all = "lowercase")]
 enum DecoderModel {
     Topic,
-    Poisson,
     Proj,
 }
 
@@ -280,29 +278,6 @@ fn main() -> anyhow::Result<()> {
                 )?
             }
 
-            DecoderModel::Poisson => {
-                let enc = LogSoftmaxEncoder::new(
-                    dd,
-                    kk,
-                    n_vocab,
-                    d_vocab_emb,
-                    &args.encoder_layers,
-                    param_builder.clone(),
-                )?;
-                let dec = PoissonDecoder::new(dd, kk, param_builder.clone())?;
-                run_asap_embedding(
-                    &raw_dn.posterior_mean().transpose().clone(),
-                    adj_dn.map(|x| x.posterior_mean().transpose()).as_ref(),
-                    resid_dn.map(|x| x.posterior_mean().transpose()).as_ref(),
-                    delta_db.map(|x| x.posterior_mean()),
-                    &data_vec,
-                    &enc,
-                    &dec,
-                    &parameters,
-                    &loss_func::topic_likelihood,
-                    &train_config,
-                )?
-            }
             _ => {
                 let x_dn = match collapse_out.mu_adjusted.as_ref() {
                     Some(adj) => adj,

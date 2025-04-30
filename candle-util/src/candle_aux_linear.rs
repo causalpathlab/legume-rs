@@ -13,7 +13,6 @@ pub struct NonNegLinear {
     out_dim: usize,
     log_weight_dk: Tensor,
     bias_d: Option<Tensor>,
-    bias_k: Option<Tensor>,
 }
 
 impl NonNegLinear {
@@ -22,14 +21,12 @@ impl NonNegLinear {
         out_dim: usize,
         log_weight_dk: Tensor,
         bias_d: Option<Tensor>,
-        bias_k: Option<Tensor>,
     ) -> Self {
         Self {
             in_dim,
             out_dim,
             log_weight_dk,
             bias_d,
-            bias_k,
         }
     }
 
@@ -47,26 +44,15 @@ pub fn non_neg_linear(
     out_dim: usize,
     vb: candle_nn::VarBuilder,
 ) -> Result<NonNegLinear> {
-    let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
-    let ws = vb.get_with_hints((out_dim, in_dim), "weight", init_ws)?;
+    // let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
+    let ws = vb.get_with_hints((out_dim, in_dim), "weight", candle_nn::init::ZERO)?;
     let bs_d = vb.get_with_hints((1, out_dim), "bias.d", candle_nn::init::ZERO)?;
-    let bs_k = vb.get_with_hints((in_dim, 1), "bias.k", candle_nn::init::ZERO)?;
 
-    Ok(NonNegLinear::new(
-        in_dim,
-        out_dim,
-        ws,
-        Some(bs_d),
-        Some(bs_k),
-    ))
+    Ok(NonNegLinear::new(in_dim, out_dim, ws, Some(bs_d)))
 }
 
 impl Module for NonNegLinear {
     fn forward(&self, h_nk: &Tensor) -> Result<Tensor> {
-        let n_max = (self.out_dim as f64).log2().min(10.0);
-        let max_log_rate = n_max;
-        let min_log_rate = -n_max;
-
         let log_w_kd = match *h_nk.dims() {
             [b1, b2, _, _] => self.log_weight_dk.broadcast_left((b1, b2))?.t()?,
             [bsize, _, _] => self.log_weight_dk.broadcast_left(bsize)?.t()?,
@@ -78,16 +64,10 @@ impl Module for NonNegLinear {
             Some(bias) => log_w_kd.broadcast_add(&bias)?,
         };
 
-        let log_w_kd = match &self.bias_k {
-            None => log_w_kd.clamp(min_log_rate, max_log_rate)?,
-            Some(bias) => log_w_kd
-                .broadcast_add(&bias)?
-                .clamp(min_log_rate, max_log_rate)?,
-        };
+        let eps = 1e-4;
+        let w_kd = (log_w_kd.relu()? + eps)?;
 
-        let log_w_kd = log_w_kd.clamp(min_log_rate, max_log_rate)?;
-
-        h_nk.matmul(&log_w_kd.exp()?)
+        h_nk.matmul(&w_kd)
     }
 }
 
