@@ -298,7 +298,7 @@ impl CollapsingOps for SparseIoVec {
                     let zz = CscMatrix::<f32>::from_nonzero_triplets(num_genes, ncol, triplets)
                         .expect("failed to build z matrix");
 
-                    let src_pos_in_target: Vec<usize> = source_cells_in_target
+                    let matched_possition_in_target: Vec<usize> = source_cells_in_target
                         .iter()
                         .map(|c| {
                             *positions
@@ -307,34 +307,13 @@ impl CollapsingOps for SparseIoVec {
                         })
                         .collect();
 
-                    let denom = zz.nrows() as f32;
+                    euclidean_distances.extend(compute_euclidean_distance(
+                        &zz,
+                        &yy,
+                        &matched_possition_in_target,
+                    ));
 
-                    euclidean_distances.extend(
-                        // for each column of the matched matrix
-                        // RMSE(j,k) = sqrt( sum_g (y[g,j] - z[g,k])^2 / sum_g 1 )
-                        zz.col_iter()
-                            .zip(src_pos_in_target.iter())
-                            .map(|(z_j, &j)| {
-                                // source column/cell
-                                let y_j = yy.column(j);
-                                // matched/target column/cell
-                                let z_rows = z_j.row_indices();
-                                let z_vals = z_j.values();
-
-                                let y_tot = y_j.map(|x| x * x).sum();
-                                // to avoid double counting
-                                let y_overlap =
-                                    z_rows.iter().map(|&i| y_j[i] * y_j[i]).sum::<f32>();
-                                let delta_overlap = z_rows
-                                    .iter()
-                                    .zip(z_vals.iter())
-                                    .map(|(&i, &z)| (z - y_j[i]) * (z - y_j[i]))
-                                    .sum::<f32>();
-                                ((y_tot - y_overlap + delta_overlap) / denom).sqrt()
-                            }),
-                    );
-
-                    source_columns.extend(src_pos_in_target);
+                    source_columns.extend(matched_possition_in_target);
                     tot_ncells_matched += ncol;
                 } // for each target batch of step 2.
 
@@ -472,7 +451,7 @@ fn optimize(
             mu_resid_param.calibrate();
         };
 
-	// Take the observed mean
+        // Take the observed mean
         {
             let denom_ds: Mat = DVec::from_element(num_genes, 1_f32) * stat.size_s.transpose();
             mu_param.update_stat(&stat.ysum_ds, &denom_ds);
