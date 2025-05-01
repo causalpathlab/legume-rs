@@ -1,6 +1,6 @@
 [workspace]
 
-members = ["asap-data", "asap-embed", "matrix-util", "matrix-param", "asap-srt"]
+members = ["asap-data", "asap-embed", "matrix-util", "matrix-param", "asap-srt", "cocoa-diff"]
 resolver = "2"
 
 [workspace.dependencies]
