@@ -2,8 +2,8 @@
 
 use crate::asap_embed_common::*;
 use crate::asap_normalization::*;
+use crate::asap_visitors::*;
 use asap_data::sparse_io_vector::SparseIoVec;
-use indicatif::ParallelProgressIterator;
 use indicatif::ProgressIterator;
 use log::{info, warn};
 use matrix_param::dmatrix_gamma::*;
@@ -54,9 +54,17 @@ pub trait CollapsingOps {
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 
-    fn collect_basic_stat(&self, sample_to_cols: &Vec<Vec<usize>>, stat: &mut CollapsingStat);
+    fn collect_basic_stat(
+        &self,
+        sample_to_cols: &Vec<Vec<usize>>,
+        stat: &mut CollapsingStat,
+    ) -> anyhow::Result<()>;
 
-    fn collect_batch_stat(&self, sample_to_cols: &Vec<Vec<usize>>, stat: &mut CollapsingStat);
+    fn collect_batch_stat(
+        &self,
+        sample_to_cols: &Vec<Vec<usize>>,
+        stat: &mut CollapsingStat,
+    ) -> anyhow::Result<()>;
 
     fn collect_matched_stat(
         &self,
@@ -64,7 +72,7 @@ pub trait CollapsingOps {
         reference_batches: Vec<usize>,
         knn: usize,
         stat: &mut CollapsingStat,
-    );
+    ) -> anyhow::Result<()>;
 }
 
 impl CollapsingOps for SparseIoVec {
@@ -113,7 +121,7 @@ impl CollapsingOps for SparseIoVec {
 
         let mut stat = CollapsingStat::new(num_features, num_groups, num_batches);
         info!("basic statistics across {} samples", num_groups);
-        self.collect_basic_stat(&group_to_cols, &mut stat);
+        self.collect_basic_stat(&group_to_cols, &mut stat)?;
 
         if num_batches > 1 {
             info!(
@@ -121,7 +129,7 @@ impl CollapsingOps for SparseIoVec {
                 num_batches, num_groups
             );
 
-            self.collect_batch_stat(&group_to_cols, &mut stat);
+            self.collect_batch_stat(&group_to_cols, &mut stat)?;
 
             info!(
                 "counterfactual inference across {} batches over {} samples",
@@ -153,7 +161,7 @@ impl CollapsingOps for SparseIoVec {
                 }
             };
 
-            self.collect_matched_stat(&group_to_cols, reference_batches, knn, &mut stat);
+            self.collect_matched_stat(&group_to_cols, reference_batches, knn, &mut stat)?;
         } // if num_batches > 1
 
         /////////////////////////////
@@ -165,84 +173,61 @@ impl CollapsingOps for SparseIoVec {
         optimize(&stat, (a0, b0), num_opt_iter.unwrap_or(DEFAULT_OPT_ITER))
     }
 
-    fn collect_basic_stat(&self, sample_to_cells: &Vec<Vec<usize>>, stat: &mut CollapsingStat) {
-        use rayon::prelude::*;
-
-        let num_samples = sample_to_cells.len();
-        let num_jobs = num_samples as u64;
-        let arc_stat = Arc::new(Mutex::new(stat));
-
-        // ysum(g,s) = sum_j C(j,s) * Y(g,j)
-        // size(s) = sum_j C(j,s)
-        sample_to_cells
-            .iter()
-            .enumerate()
-            .par_bridge()
-            .progress_count(num_jobs)
-            .for_each(|(sample, cells)| {
+    fn collect_basic_stat(
+        &self,
+        sample_to_cells: &Vec<Vec<usize>>,
+        stat: &mut CollapsingStat,
+    ) -> anyhow::Result<()> {
+        let count_basic =
+            |sample: usize, cells: &Vec<usize>, arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
                 let yy = self
                     .read_columns_csc(cells.iter().cloned())
                     .expect("failed to read cells");
 
-                {
-                    let mut stat = arc_stat.lock().expect("failed to lock stat");
-                    for y_j in yy.col_iter() {
-                        let rows = y_j.row_indices();
-                        let vals = y_j.values();
-                        for (&gene, &y) in rows.iter().zip(vals.iter()) {
-                            stat.ysum_ds[(gene, sample)] += y;
-                        }
-                        stat.size_s[sample] += 1_f32; // each column is a sample
-                    }
-                }
-            });
+                let mut stat = arc_stat.lock().expect("lock stat");
 
-        #[cfg(debug_assertions)]
-        {
-            let stat = arc_stat.lock().expect("failed to lock stat");
-            debug!("size tot: {}", stat.size_s.sum());
-        }
+                for y_j in yy.col_iter() {
+                    let rows = y_j.row_indices();
+                    let vals = y_j.values();
+                    for (&gene, &y) in rows.iter().zip(vals.iter()) {
+                        stat.ysum_ds[(gene, sample)] += y;
+                    }
+                    stat.size_s[sample] += 1_f32; // each column is a sample
+                }
+            };
+
+        self.visit_column_samples(&sample_to_cells, &count_basic, stat)
     }
 
-    fn collect_batch_stat(&self, sample_to_cells: &Vec<Vec<usize>>, stat: &mut CollapsingStat) {
-        use rayon::prelude::*;
+    fn collect_batch_stat(
+        &self,
+        sample_to_cells: &Vec<Vec<usize>>,
+        stat: &mut CollapsingStat,
+    ) -> anyhow::Result<()> {
+        let count_batch = |sample: usize,
+                           cells_in_sample: &Vec<usize>,
+                           arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
+            let yy = self
+                .read_columns_csc(cells_in_sample.iter().cloned())
+                .expect("failed to read cells");
 
-        let num_samples = sample_to_cells.len();
-        let num_jobs = num_samples as u64;
-        let arc_stat = Arc::new(Mutex::new(stat));
+            // cells_in_sample: sample s -> cell j
+            // batches: cell j -> batch b
+            let batches = self.get_batch_membership(cells_in_sample.iter().cloned());
 
-        // ysum(g,b) = sum_j sum_s C(j,s) * Y(g,j) * I(b,s)
-        // n(b,s) = sum_j C(j,s) * I(b,s)
-        sample_to_cells
-            .iter()
-            .enumerate()
-            .par_bridge()
-            .progress_count(num_jobs)
-            .for_each(|(sample, cells)| {
-                let batches = self.get_batch_membership(cells.iter().cloned());
+            let mut stat = arc_stat.lock().expect("lock stat");
 
-                let yy = self
-                    .read_columns_csc(cells.iter().cloned())
-                    .expect("failed to read cells");
-
-                {
-                    let mut stat = arc_stat.lock().expect("failed to lock stat");
-
-                    yy.col_iter().zip(batches.iter()).for_each(|(y_j, &b)| {
-                        let rows = y_j.row_indices();
-                        let vals = y_j.values();
-                        for (&gene, &y) in rows.iter().zip(vals.iter()) {
-                            stat.ysum_db[(gene, b)] += y;
-                        }
-                        stat.n_bs[(b, sample)] += 1_f32;
-                    });
+            yy.col_iter().zip(batches.iter()).for_each(|(y_j, &b)| {
+                let rows = y_j.row_indices();
+                let vals = y_j.values();
+                for (&gene, &y) in rows.iter().zip(vals.iter()) {
+                    stat.ysum_db[(gene, b)] += y;
                 }
+                stat.n_bs[(b, sample)] += 1_f32;
             });
-        #[cfg(debug_assertions)]
-        {
-            let stat = arc_stat.lock().expect("failed to lock stat");
-            debug!("B x S {}", stat.n_bs.sum());
-        }
+        };
+
+        self.visit_column_samples(&sample_to_cells, &count_batch, stat)
     }
 
     fn collect_matched_stat(
@@ -251,21 +236,11 @@ impl CollapsingOps for SparseIoVec {
         target_batches: Vec<usize>,
         knn: usize,
         stat: &mut CollapsingStat,
-    ) {
-        use rayon::prelude::*;
+    ) -> anyhow::Result<()> {
+        let count_matched =
+            |sample: usize, cells: &Vec<usize>, arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
+                let num_genes = self.num_rows().expect("failed to get num genes");
 
-        let num_genes = self.num_rows().expect("failed to get num genes");
-        let num_samples = sample_to_cells.len();
-        let num_jobs = num_samples as u64;
-        let arc_stat = Arc::new(Mutex::new(stat));
-
-        // zsum(g,s) = sum_j C(j,s) * Z(g,j)
-        sample_to_cells
-            .iter()
-            .enumerate()
-            .par_bridge()
-            .progress_count(num_jobs)
-            .for_each(|(sample, cells)| {
                 let positions: HashMap<usize, usize> =
                     cells.iter().enumerate().map(|(i, &c)| (c, i)).collect();
                 let mut matched_triplets: Vec<(usize, usize, f32)> = vec![];
@@ -328,39 +303,39 @@ impl CollapsingOps for SparseIoVec {
                 )
                 .expect("failed to build y matrix");
 
-                // 3. normalize distance for each source cell and
-                // take a weighted average of the matched vectors
-                // using this weight vector
+                // Normalize distance for each source cell and take a
+                // weighted average of the matched vectors using this
+                // weight vector
                 let norm_target = 2_f32.ln();
                 let source_column_groups = partition_by_membership(&source_columns, None);
 
-                {
-                    ////////////////////////////////////////////////////////
-                    // zhat[g,j]  =  sum_k w[j,k] * z[g,k] / sum_k w[j,k] //
-                    // zsum[g,s]  =  sum_j zhat[g,j]                      //
-                    ////////////////////////////////////////////////////////
+                ////////////////////////////////////////////////////////
+                // zhat[g,j]  =  sum_k w[j,k] * z[g,k] / sum_k w[j,k] //
+                // zsum[g,s]  =  sum_j zhat[g,j]                      //
+                ////////////////////////////////////////////////////////
 
-                    let mut stat = arc_stat.lock().expect("failed to lock stat");
+                let mut stat = arc_stat.lock().expect("lock stat");
 
-                    for (_, z_pos) in source_column_groups.iter() {
-                        let weights = z_pos
-                            .iter()
-                            .map(|&cell| euclidean_distances[cell])
-                            .normalized_exp(norm_target);
+                for (_, z_pos) in source_column_groups.iter() {
+                    let weights = z_pos
+                        .iter()
+                        .map(|&cell| euclidean_distances[cell])
+                        .normalized_exp(norm_target);
 
-                        let denom = weights.iter().sum::<f32>();
+                    let denom = weights.iter().sum::<f32>();
 
-                        z_pos.iter().zip(weights.iter()).for_each(|(&z_pos, &w)| {
-                            let z = zz_full.get_col(z_pos).unwrap();
-                            let z_rows = z.row_indices();
-                            let z_vals = z.values();
-                            z_rows.iter().zip(z_vals.iter()).for_each(|(&gene, &z)| {
-                                stat.zsum_ds[(gene, sample)] += z * w / denom;
-                            });
+                    z_pos.iter().zip(weights.iter()).for_each(|(&z_pos, &w)| {
+                        let z = zz_full.get_col(z_pos).unwrap();
+                        let z_rows = z.row_indices();
+                        let z_vals = z.values();
+                        z_rows.iter().zip(z_vals.iter()).for_each(|(&gene, &z)| {
+                            stat.zsum_ds[(gene, sample)] += z * w / denom;
                         });
-                    }
+                    });
                 }
-            }); // for each sample
+            };
+
+        self.visit_column_samples(&sample_to_cells, &count_matched, stat)
     }
 }
 
