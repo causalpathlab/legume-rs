@@ -114,7 +114,7 @@ struct EmbedArgs {
     vocab_size: usize,
 
     /// Intensity embedding dimension
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 3)]
     vocab_emb: usize,
 
     /// # pre-training epochs with an encoder-only model
