@@ -33,3 +33,4 @@ temp*
 *.csv
 *.zarr
 *.h5
+*.gz

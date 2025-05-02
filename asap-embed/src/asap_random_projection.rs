@@ -109,7 +109,7 @@ impl RandProjOps for SparseIoVec {
 
         let basis_dk = Mat::rnorm(nrows, target_dim);
 
-        self.visit_csc_column_jobs(jobs, &visit_rand_proj_columnwise, &basis_dk, &mut proj_kn)?;
+        self.visit_csc_data_by_jobs(jobs, &visit_rand_proj_columnwise, &basis_dk, &mut proj_kn)?;
 
         if let Some(col_to_batch) = batch_membership {
             info!("adjusting batch biases ...");

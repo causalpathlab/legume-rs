@@ -178,25 +178,27 @@ impl CollapsingOps for SparseIoVec {
         sample_to_cells: &Vec<Vec<usize>>,
         stat: &mut CollapsingStat,
     ) -> anyhow::Result<()> {
-        let count_basic =
-            |sample: usize, cells: &Vec<usize>, arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
-                let yy = self
-                    .read_columns_csc(cells.iter().cloned())
-                    .expect("failed to read cells");
+        let count_basic = |sample: usize,
+                           cells: &Vec<usize>,
+                           _: &EmptyParam,
+                           arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
+            let yy = self
+                .read_columns_csc(cells.iter().cloned())
+                .expect("failed to read cells");
 
-                let mut stat = arc_stat.lock().expect("lock stat");
+            let mut stat = arc_stat.lock().expect("lock stat");
 
-                for y_j in yy.col_iter() {
-                    let rows = y_j.row_indices();
-                    let vals = y_j.values();
-                    for (&gene, &y) in rows.iter().zip(vals.iter()) {
-                        stat.ysum_ds[(gene, sample)] += y;
-                    }
-                    stat.size_s[sample] += 1_f32; // each column is a sample
+            for y_j in yy.col_iter() {
+                let rows = y_j.row_indices();
+                let vals = y_j.values();
+                for (&gene, &y) in rows.iter().zip(vals.iter()) {
+                    stat.ysum_ds[(gene, sample)] += y;
                 }
-            };
+                stat.size_s[sample] += 1_f32; // each column is a sample
+            }
+        };
 
-        self.visit_column_samples(&sample_to_cells, &count_basic, stat)
+        self.visit_column_by_samples(&sample_to_cells, &count_basic, &EmptyParam {}, stat)
     }
 
     fn collect_batch_stat(
@@ -206,6 +208,7 @@ impl CollapsingOps for SparseIoVec {
     ) -> anyhow::Result<()> {
         let count_batch = |sample: usize,
                            cells_in_sample: &Vec<usize>,
+                           _: &EmptyParam,
                            arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
             let yy = self
                 .read_columns_csc(cells_in_sample.iter().cloned())
@@ -227,7 +230,7 @@ impl CollapsingOps for SparseIoVec {
             });
         };
 
-        self.visit_column_samples(&sample_to_cells, &count_batch, stat)
+        self.visit_column_by_samples(&sample_to_cells, &count_batch, &EmptyParam {}, stat)
     }
 
     fn collect_matched_stat(
@@ -238,7 +241,10 @@ impl CollapsingOps for SparseIoVec {
         stat: &mut CollapsingStat,
     ) -> anyhow::Result<()> {
         let count_matched =
-            |sample: usize, cells: &Vec<usize>, arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
+            |sample: usize,
+             cells: &Vec<usize>,
+             _: &EmptyParam,
+             arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
                 let num_genes = self.num_rows().expect("failed to get num genes");
 
                 let positions: HashMap<usize, usize> =
@@ -293,7 +299,7 @@ impl CollapsingOps for SparseIoVec {
                 } // for each target batch of step 2.
 
                 ////////////////////////////////////////////////////
-                // a full set of y vectors needed for this sample //
+                // a full set of z vectors needed for this sample //
                 ////////////////////////////////////////////////////
 
                 let zz_full = CscMatrix::from_nonzero_triplets(
@@ -335,7 +341,7 @@ impl CollapsingOps for SparseIoVec {
                 }
             };
 
-        self.visit_column_samples(&sample_to_cells, &count_matched, stat)
+        self.visit_column_by_samples(&sample_to_cells, &count_matched, &EmptyParam {}, stat)
     }
 }
 
@@ -506,3 +512,5 @@ impl CollapsingStat {
         self.n_bs.fill(0_f32);
     }
 }
+
+struct EmptyParam {}

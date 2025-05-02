@@ -9,12 +9,12 @@ mod asap_visitors;
 use log::info;
 
 use matrix_param::traits::Inference;
-use matrix_param::traits::ParamIo;
 use matrix_util::common_io::{extension, read_lines};
 use matrix_util::traits::*;
 
 use asap_embed_common::*;
 use asap_routines_latent_representation::*;
+use asap_routines_post_process::*;
 
 use asap_collapse_data::CollapsingOps;
 use asap_data::sparse_io::*;
@@ -24,6 +24,7 @@ use asap_random_projection::RandProjOps;
 use candle_util::candle_loss_functions as loss_func;
 use candle_util::candle_model_encoder::*;
 use candle_util::candle_model_topic::*;
+use candle_util::candle_model_traits::DecoderModule;
 use candle_util::candle_vae_inference::*;
 
 use clap::{Parser, ValueEnum};
@@ -234,11 +235,37 @@ fn main() -> anyhow::Result<()> {
 
     // todo: decide whether to write out adjusted data or not
 
-    // todo: separate out
+    // todo: separate out routines
 
     /////////////////////////////////////////////////////////
     // 4. Train embedded topic model on the collapsed data //
     /////////////////////////////////////////////////////////
+
+    let delta_db = collapse_out.delta.as_ref();
+
+    if args.decoder_model == DecoderModel::Proj {
+        let x_dn = match collapse_out.mu_adjusted.as_ref() {
+            Some(adj) => adj,
+            None => &collapse_out.mu_observed,
+        };
+
+        let nystrom_out = do_nystrom_proj(
+            x_dn.posterior_log_mean().clone(),
+            delta_db.map(|x| x.posterior_mean()),
+            &data_vec,
+            args.latent_topics,
+            Some(args.block_size.clone()),
+        )?;
+
+        nystrom_out
+            .latent_nk
+            .to_tsv(&(args.out.to_string() + ".latent.gz"))?;
+        nystrom_out
+            .dictionary_dk
+            .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
+
+        return Ok(());
+    }
 
     let parameters = candle_nn::VarMap::new();
     let dev = &train_config.device;
@@ -246,76 +273,57 @@ fn main() -> anyhow::Result<()> {
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
 
     let kk = args.latent_topics;
-
     let raw_dn = &collapse_out.mu_observed;
-    let delta_db = collapse_out.delta.as_ref();
+
     let adj_dn = collapse_out.mu_adjusted.as_ref();
     let resid_dn = collapse_out.mu_residual.as_ref();
 
     let n_vocab = args.vocab_size;
     let d_vocab_emb = args.vocab_emb;
 
-    let (latent_nk, dictionary_dk, latent_direct_nk, log_likelihood_trace) =
-        match args.decoder_model {
-            DecoderModel::Topic => {
-                let enc = LogSoftmaxEncoder::new(
-                    dd,
-                    kk,
-                    n_vocab,
-                    d_vocab_emb,
-                    &args.encoder_layers,
-                    param_builder.clone(),
-                )?;
-                let dec = TopicDecoder::new(dd, kk, param_builder.clone())?;
-                train_encoder_decoder(
-                    &raw_dn.posterior_mean().transpose().clone(),
-                    adj_dn.map(|x| x.posterior_mean().transpose()).as_ref(),
-                    resid_dn.map(|x| x.posterior_mean().transpose()).as_ref(),
-                    delta_db.map(|x| x.posterior_mean()),
-                    &data_vec,
-                    &enc,
-                    &dec,
-                    &parameters,
-                    &loss_func::topic_likelihood,
-                    &train_config,
-                )?
-            }
+    let encoder = LogSoftmaxEncoder::new(
+        dd,
+        kk,
+        n_vocab,
+        d_vocab_emb,
+        &args.encoder_layers,
+        param_builder.clone(),
+    )?;
 
-            _ => {
-                let x_dn = match collapse_out.mu_adjusted.as_ref() {
-                    Some(adj) => adj,
-                    None => &collapse_out.mu_observed,
-                };
+    let _log_likelihood = match args.decoder_model {
+        DecoderModel::Topic => {
+            let decoder = TopicDecoder::new(dd, kk, param_builder.clone())?;
+            let llik = train_encoder_decoder(
+                &raw_dn.posterior_mean().transpose().clone(),
+                adj_dn.map(|x| x.posterior_mean().transpose()).as_ref(),
+                resid_dn.map(|x| x.posterior_mean().transpose()).as_ref(),
+                &encoder,
+                &decoder,
+                &parameters,
+                &loss_func::topic_likelihood,
+                &train_config,
+            )?;
+            let beta_dk = decoder
+                .get_dictionary()?
+                .to_device(&candle_core::Device::Cpu)?;
+            let beta_dk = Mat::from_tensor(&beta_dk)?;
+            beta_dk.to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
+            llik
+        }
 
-                do_nystrom_proj(
-                    x_dn.posterior_log_mean().clone(),
-                    delta_db.map(|x| x.posterior_mean()),
-                    &data_vec,
-                    args.latent_topics,
-                    Some(args.block_size.clone()),
-                )?
-            }
-        };
+        _ => {
+            unimplemented!("This decoder model is not yet implemented");
+        }
+    };
 
-    if let Some(log_likelihood_trace) = log_likelihood_trace {
-        Mat::from_row_iterator(
-            log_likelihood_trace.len(),
-            1,
-            log_likelihood_trace.into_iter(),
-        )
-        .to_tsv(&(args.out.to_string() + ".llik.gz"))?;
-    }
+    let delta_db = delta_db.map(|x| x.posterior_mean().transpose());
 
-    latent_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
+    let z_nk = evaluate_latent_by_encoder(&data_vec, &encoder, &train_config, delta_db.as_ref())?;
 
-    if let Some(latent_nk) = latent_direct_nk {
-        latent_nk.to_tsv(&(args.out.to_string() + ".latent.direct.gz"))?;
-    }
+    z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
 
-    dictionary_dk.to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
-
-    if let Some(param) = delta_db {
-        param.write_tsv(&(args.out.to_string() + ".delta.gz"))?;
+    if let Some(delta_db) = delta_db {
+        delta_db.to_tsv(&(args.out.to_string() + ".delta.gz"))?;
     }
 
     info!("done");

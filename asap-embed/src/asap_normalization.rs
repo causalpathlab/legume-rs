@@ -1,5 +1,29 @@
 use crate::asap_embed_common::*;
 
+pub trait AdjustByDivisionOp {
+    fn adjust_by_division(&mut self, denom_db: &Mat, batches: &Vec<usize>);
+}
+
+impl AdjustByDivisionOp for CscMat {
+    fn adjust_by_division(&mut self, denom_db: &Mat, batches: &Vec<usize>) {
+        let eps: f32 = 1e-4;
+
+        self.col_iter_mut().zip(batches).for_each(|(mut x_j, &b)| {
+            let d_j = denom_db.column(b);
+            let dsum: f32 = d_j.sum();
+            let xsum: f32 = x_j.values().iter().sum();
+            let scale: f32 = if dsum > 0.0 { xsum / dsum } else { 1.0 };
+
+            x_j.values_mut()
+                .iter_mut()
+                .zip(&d_j)
+                .for_each(|(x_ij, &d_ij)| {
+                    *x_ij /= d_ij * scale + eps;
+                });
+        });
+    }
+}
+
 /// For each column of the matched matrix
 /// RMSE(j,k) = sqrt( sum_g (target[g,j] - source[g,k])^2 / sum_g 1 )
 pub fn compute_euclidean_distance(
