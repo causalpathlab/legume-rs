@@ -276,15 +276,20 @@ where
                         .mean_all()
                         .expect("average");
 
-                    let mut adam = arc_adam.lock().expect("adam lock");
-                    adam.backward_step(&loss).expect("adam backward");
                     let llik_val = llik
                         .sum_all()
                         .expect("llik sum")
                         .to_scalar::<f32>()
                         .expect("llik to scalar");
-                    let mut llik_tot = arc_llik_tot.lock().expect("llik lock");
-                    *llik_tot += llik_val;
+
+                    {
+                        let mut adam = arc_adam.lock().expect("adam lock");
+                        adam.backward_step(&loss).expect("adam backward");
+                    }
+                    {
+                        let mut llik_tot = arc_llik_tot.lock().expect("llik lock");
+                        *llik_tot += llik_val;
+                    }
                 });
 
                 {
