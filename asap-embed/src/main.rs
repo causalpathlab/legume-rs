@@ -316,9 +316,9 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    let delta_db = delta_db.map(|x| x.posterior_mean().transpose());
+    let delta_db = delta_db.map(|x| x.posterior_mean());
 
-    let z_nk = evaluate_latent_by_encoder(&data_vec, &encoder, &train_config, delta_db.as_ref())?;
+    let z_nk = evaluate_latent_by_encoder(&data_vec, &encoder, &train_config, delta_db)?;
 
     z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
 
