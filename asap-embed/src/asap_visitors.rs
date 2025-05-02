@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
 pub trait VisitColumnsOps {
-    fn visit_csc_column_jobs<Visitor, SharedIn, SharedOut>(
+    fn visit_csc_data_by_jobs<Visitor, SharedIn, SharedOut>(
         &self,
         jobs: Vec<(usize, usize)>,
         visitor: &Visitor,
@@ -19,19 +19,33 @@ pub trait VisitColumnsOps {
         SharedIn: Sync + Send,
         SharedOut: Sync + Send;
 
-    fn visit_column_samples<Visitor, SharedOut>(
+    fn visit_columns_by_jobs<Visitor, SharedIn, SharedOut>(
         &self,
-        sample_to_cells: &Vec<Vec<usize>>,
+        jobs: Vec<(usize, usize)>,
         visitor: &Visitor,
+        shared_in: &SharedIn,
         shared_out: &mut SharedOut,
     ) -> anyhow::Result<()>
     where
-        Visitor: Fn(usize, &Vec<usize>, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
+        Visitor: Fn((usize, usize), &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
+        SharedIn: Sync + Send,
+        SharedOut: Sync + Send;
+
+    fn visit_column_by_samples<Visitor, SharedIn, SharedOut>(
+        &self,
+        sample_to_cells: &Vec<Vec<usize>>,
+        visitor: &Visitor,
+        shared_in: &SharedIn,
+        shared_out: &mut SharedOut,
+    ) -> anyhow::Result<()>
+    where
+        Visitor: Fn(usize, &Vec<usize>, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
+        SharedIn: Sync + Send,
         SharedOut: Sync + Send;
 }
 
 impl VisitColumnsOps for SparseIoVec {
-    fn visit_csc_column_jobs<Visitor, SharedIn, SharedOut>(
+    fn visit_csc_data_by_jobs<Visitor, SharedIn, SharedOut>(
         &self,
         jobs: Vec<(usize, usize)>,
         visitor: &Visitor,
@@ -61,14 +75,39 @@ impl VisitColumnsOps for SparseIoVec {
         Ok(())
     }
 
-    fn visit_column_samples<Visitor, SharedOut>(
+    fn visit_columns_by_jobs<Visitor, SharedIn, SharedOut>(
+        &self,
+        jobs: Vec<(usize, usize)>,
+        visitor: &Visitor,
+        shared_in: &SharedIn,
+        shared_out: &mut SharedOut,
+    ) -> anyhow::Result<()>
+    where
+        Visitor: Fn((usize, usize), &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
+        SharedIn: Sync + Send,
+        SharedOut: Sync + Send,
+    {
+        let arc_shared_out = Arc::new(Mutex::new(shared_out));
+
+        jobs.par_iter()
+            .progress_count(jobs.len() as u64)
+            .for_each(|&(lb, ub)| {
+                visitor((lb, ub), &self, &shared_in, arc_shared_out.clone());
+            });
+
+        Ok(())
+    }
+
+    fn visit_column_by_samples<Visitor, SharedIn, SharedOut>(
         &self,
         sample_to_cells: &Vec<Vec<usize>>,
         visitor: &Visitor,
+        shared_in: &SharedIn,
         shared_data: &mut SharedOut,
     ) -> anyhow::Result<()>
     where
-        Visitor: Fn(usize, &Vec<usize>, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
+        Visitor: Fn(usize, &Vec<usize>, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
+        SharedIn: Sync + Send,
         SharedOut: Sync + Send,
     {
         let arc_shared_data = Arc::new(Mutex::new(shared_data));
@@ -81,7 +120,7 @@ impl VisitColumnsOps for SparseIoVec {
             .par_bridge()
             .progress_count(num_jobs)
             .for_each(|(sample, cells)| {
-                visitor(sample, &cells, arc_shared_data.clone());
+                visitor(sample, &cells, shared_in, arc_shared_data.clone());
             });
 
         Ok(())
