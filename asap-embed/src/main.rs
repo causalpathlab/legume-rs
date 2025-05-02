@@ -273,6 +273,9 @@ fn main() -> anyhow::Result<()> {
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
 
     let kk = args.latent_topics;
+
+    // todo: choose top variables?
+
     let raw_dn = &collapse_out.mu_observed;
 
     let adj_dn = collapse_out.mu_adjusted.as_ref();
@@ -280,6 +283,8 @@ fn main() -> anyhow::Result<()> {
 
     let n_vocab = args.vocab_size;
     let d_vocab_emb = args.vocab_emb;
+
+    // todo: in and out can have different number of features
 
     let encoder = LogSoftmaxEncoder::new(
         dd,
