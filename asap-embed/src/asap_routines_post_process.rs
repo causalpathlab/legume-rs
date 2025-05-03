@@ -72,11 +72,13 @@ pub fn triplets_adjusted_by_batch(
 /// #Arguments
 /// * `data_vec` - full data vector
 /// * `encoder` - encoder network
+/// * `aggregate_rows` - `d x m` aggregate
 /// * `train_config` - training configuration
 /// * `delta_db` - batch effect matrix (feature x batch)
 pub fn evaluate_latent_by_encoder<Enc>(
     data_vec: &SparseIoVec,
     encoder: &Enc,
+    aggregate_rows: &Mat,
     train_config: &TrainConfig,
     delta_db: Option<&Mat>,
 ) -> anyhow::Result<Mat>
@@ -93,6 +95,8 @@ where
     let njobs = jobs.len() as u64;
     let arc_enc = Arc::new(Mutex::new(encoder));
 
+    let aggregate = aggregate_rows.to_tensor(dev)?;
+
     let mut chunks = jobs
         .par_iter()
         .progress_count(njobs)
@@ -101,42 +105,50 @@ where
 
             let z_nk = match delta_db {
                 Some(delta_db) => {
-                    let x_dn = data_vec.read_columns_dmatrix(lb..ub).expect("read columns");
-                    let (d, n) = x_dn.shape();
-
-                    // Note: x_dn.as_slice() will take values in the column-major order
-                    // However, Tensor::from_slice will take them in the row-major order
-                    let x_nd =
-                        Tensor::from_slice(x_dn.as_slice(), (n, d), dev).expect("tensor x_nd");
-
-                    let b = delta_db.ncols();
-                    let delta_bd = Tensor::from_slice(delta_db.as_slice(), (b, d), dev)
-                        .expect("tensor delta_bd");
-
                     let batches = data_vec
                         .get_batch_membership(lb..ub)
                         .into_iter()
                         .map(|x| x as u32);
 
+                    let x_nd = data_vec
+                        .read_columns_dmatrix(lb..ub)
+                        .expect("read columns")
+                        .to_tensor(dev)
+                        .expect("x")
+                        .transpose(0, 1)
+                        .expect("transpose x_dn -> x_nd");
+
+                    let x_nm = x_nd.matmul(&aggregate).expect("x aggregate");
+
+                    let delta_bd = delta_db
+                        .to_tensor(dev)
+                        .expect("delta")
+                        .transpose(0, 1)
+                        .expect("transpose delta_db -> delta_bd");
+
+                    let delta_bm = delta_bd.matmul(&aggregate).expect("delta aggregate");
+
                     let batches = Tensor::from_iter(batches.clone(), dev).unwrap();
-                    let x0_nd = delta_bd.index_select(&batches, 0).expect("expand delta_bd");
+                    let x0_nm = delta_bm.index_select(&batches, 0).expect("expand delta_bd");
                     let (z_nk, _) = enc
-                        .forward_with_null_t(&x_nd, &x0_nd, false)
+                        .forward_with_null_t(&x_nm, &x0_nm, false)
                         .expect("forward");
 
                     z_nk
                 }
                 None => {
                     // simple forward pass without batch adjustment
-                    let x_dn = data_vec.read_columns_dmatrix(lb..ub).expect("read columns");
-                    let (d, n) = x_dn.shape();
+                    let x_nd = data_vec
+                        .read_columns_dmatrix(lb..ub)
+                        .expect("read columns")
+                        .to_tensor(dev)
+                        .expect("x")
+                        .transpose(0, 1)
+                        .expect("transpose x_dn -> x_nd");
 
-                    // Note: x_dn.as_slice() will take values in the column-major order
-                    // However, Tensor::from_slice will take them in the row-major order
-                    let x_nd =
-                        Tensor::from_slice(x_dn.as_slice(), (n, d), dev).expect("tensor x_nd");
+                    let x_nm = x_nd.matmul(&aggregate).expect("x aggregate");
 
-                    let (z_nk, _) = enc.forward_t(&x_nd, false).expect("forward");
+                    let (z_nk, _) = enc.forward_t(&x_nm, false).expect("forward");
                     z_nk
                 }
             };

@@ -68,6 +68,15 @@ where
         let data: Vec<T> = tensor.flatten_all()?.to_vec1()?;
         Ok(Self::from_row_iterator(nrows, ncols, data.iter().cloned()))
     }
+
+    fn to_tensor(&self, dev: &candle_core::Device) -> anyhow::Result<candle_core::Tensor> {
+        use candle_core::Tensor;
+        // Note: x.as_slice() will take values in the column-major order
+        // However, Tensor::from_slice will take them in the row-major order
+        let nrow = self.nrows();
+        let ncol = self.ncols();
+        Ok(Tensor::from_slice(self.as_slice(), (ncol, nrow), dev)?.transpose(0, 1)?)
+    }
 }
 
 impl<T> SampleOps for DMatrix<T>

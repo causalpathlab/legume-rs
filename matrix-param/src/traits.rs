@@ -38,7 +38,7 @@ pub trait TwoStatParam {
 pub trait ParamIo: Inference {
     type Mat: IoOps;
 
-    fn write_tsv(&self, header: &str) -> anyhow::Result<()> {
+    fn to_tsv(&self, header: &str) -> anyhow::Result<()> {
         self.posterior_log_mean()
             .to_tsv(&(header.to_string() + ".log_mean.gz"))?;
 
