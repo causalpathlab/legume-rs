@@ -7,7 +7,7 @@ mod asap_routines_post_process;
 mod asap_visitors;
 
 use log::info;
-use matrix_param::traits::Inference;
+use matrix_param::traits::{Inference, ParamIo};
 use matrix_util::common_io::{extension, read_lines, remove_file};
 use matrix_util::traits::*;
 
@@ -101,7 +101,10 @@ struct EmbedArgs {
 
     /// Number of latent topics
     #[arg(short = 'k', long, default_value_t = 10)]
-    latent_topics: usize,
+    n_latent_topics: usize,
+
+    #[arg(long, default_value_t = 1000)]
+    n_row_modules: usize,
 
     /// Encoder layers
     #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
@@ -188,7 +191,7 @@ fn main() -> anyhow::Result<()> {
     // 1. Randomly project the columns //
     /////////////////////////////////////
 
-    let proj_dim = args.proj_dim.max(args.latent_topics);
+    let proj_dim = args.proj_dim.max(args.n_latent_topics);
 
     info!("Random projection of data onto {} dims", proj_dim);
     let proj_out = data_vec.project_columns_with_batch_correction(
@@ -262,6 +265,22 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    if args.save_intermediate {
+        info!("Saving intermediate results...");
+        collapse_out
+            .mu_observed
+            .write_tsv(&(args.out.to_string() + ".collapsed.observed"))?;
+        info!("Wrote {}", args.out.to_string() + ".collapsed.observed");
+        if let Some(param) = collapse_out.mu_adjusted.as_ref() {
+            param.write_tsv(&(args.out.to_string() + ".collapsed.adjusted"))?;
+            info!("Wrote {}", args.out.to_string() + ".collapsed.adjusted");
+        }
+        if let Some(param) = collapse_out.mu_residual.as_ref() {
+            param.write_tsv(&(args.out.to_string() + ".collapsed.residual"))?;
+            info!("Wrote {}", args.out.to_string() + ".collapsed.residual");
+        }
+    }
+
     /////////////////////////////////////////////////////////
     // 4. Train embedded topic model on the collapsed data //
     /////////////////////////////////////////////////////////
@@ -276,7 +295,7 @@ fn main() -> anyhow::Result<()> {
             x_dn.posterior_log_mean().clone(),
             delta_db.map(|x| x.posterior_mean()),
             &data_vec,
-            args.latent_topics,
+            args.n_latent_topics,
             Some(args.block_size.clone()),
         )?;
 
@@ -287,6 +306,7 @@ fn main() -> anyhow::Result<()> {
             .dictionary_dk
             .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
 
+        info!("Done");
         return Ok(());
     }
 
@@ -295,7 +315,7 @@ fn main() -> anyhow::Result<()> {
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
 
-    let n_topics = args.latent_topics;
+    let n_topics = args.n_latent_topics;
 
     let mixed_dn = &collapse_out.mu_observed;
     let clean_dn = collapse_out.mu_adjusted.as_ref();
