@@ -7,12 +7,10 @@ mod asap_routines_post_process;
 mod asap_visitors;
 
 use log::info;
-
 use matrix_param::traits::Inference;
-use matrix_util::common_io::{extension, read_lines};
+use matrix_util::common_io::{extension, read_lines, remove_file};
 use matrix_util::traits::*;
 
-use asap_embed_common::*;
 use asap_routines_latent_representation::*;
 use asap_routines_post_process::*;
 
@@ -144,6 +142,10 @@ struct EmbedArgs {
     #[arg(long)]
     save_intermediate: bool,
 
+    /// Save batch-adjusted data
+    #[arg(long)]
+    save_adjusted: bool,
+
     /// verbosity
     #[arg(long, short)]
     verbose: bool,
@@ -178,11 +180,6 @@ fn main() -> anyhow::Result<()> {
         info!("Reference batches: {:?}", reference_vec);
     }
 
-    let dd = data_vec.num_rows()?;
-    let kk = args.latent_topics;
-
-    info!("Estimate {} topics", kk);
-
     if args.decoder_model != DecoderModel::Proj {
         info!("Encoder layers: {:?}", args.encoder_layers);
     }
@@ -191,7 +188,7 @@ fn main() -> anyhow::Result<()> {
     // 1. Randomly project the columns //
     /////////////////////////////////////
 
-    let proj_dim = args.proj_dim.max(kk);
+    let proj_dim = args.proj_dim.max(args.latent_topics);
 
     info!("Random projection of data onto {} dims", proj_dim);
     let proj_out = data_vec.project_columns_with_batch_correction(
@@ -233,15 +230,41 @@ fn main() -> anyhow::Result<()> {
         Some(args.iter_opt),
     )?;
 
-    // todo: decide whether to write out adjusted data or not
+    let delta_db = collapse_out.delta.as_ref();
 
-    // todo: separate out routines
+    if let Some(delta_db) = delta_db.map(|x| x.posterior_mean()) {
+        if args.save_adjusted {
+            info!("Generating batch-adjusted data...");
+
+            let triplets = triplets_adjusted_by_batch(&data_vec, delta_db)?;
+
+            let mtx_shape = (
+                data_vec.num_rows()?,
+                data_vec.num_columns()?,
+                triplets.len(),
+            );
+
+            let backend_file = args.out.to_string() + ".adjusted.zarr";
+            let backend = SparseIoBackend::Zarr;
+            remove_file(&backend_file)?;
+
+            let mut adjusted_data = create_sparse_from_triplets(
+                triplets,
+                mtx_shape,
+                Some(&backend_file),
+                Some(&backend),
+            )?;
+
+            adjusted_data.register_row_names_vec(&data_vec.row_names()?);
+            adjusted_data.register_column_names_vec(&data_vec.column_names()?);
+
+            info!("Batch-adjusted backend: {}", backend_file);
+        }
+    }
 
     /////////////////////////////////////////////////////////
     // 4. Train embedded topic model on the collapsed data //
     /////////////////////////////////////////////////////////
-
-    let delta_db = collapse_out.delta.as_ref();
 
     if args.decoder_model == DecoderModel::Proj {
         let x_dn = match collapse_out.mu_adjusted.as_ref() {
@@ -272,23 +295,32 @@ fn main() -> anyhow::Result<()> {
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
 
-    let kk = args.latent_topics;
+    let n_topics = args.latent_topics;
+
+    let mixed_dn = &collapse_out.mu_observed;
+    let clean_dn = collapse_out.mu_adjusted.as_ref();
+    let batch_dn = collapse_out.mu_residual.as_ref();
+
+    let mixed_nd = mixed_dn.posterior_mean().transpose().clone();
+    let clean_nd = clean_dn.map(|x| x.posterior_mean().transpose());
+    let batch_nd = batch_dn.map(|x| x.posterior_mean().transpose());
 
     // todo: choose top variables?
-
-    let raw_dn = &collapse_out.mu_observed;
-
-    let adj_dn = collapse_out.mu_adjusted.as_ref();
-    let resid_dn = collapse_out.mu_residual.as_ref();
 
     let n_vocab = args.vocab_size;
     let d_vocab_emb = args.vocab_emb;
 
     // todo: in and out can have different number of features
 
+    let n_features_encoder = mixed_nd.ncols();
+    let n_features_decoder = match clean_nd.as_ref() {
+        Some(clean_nd) => clean_nd.ncols(),
+        _ => n_features_encoder,
+    };
+
     let encoder = LogSoftmaxEncoder::new(
-        dd,
-        kk,
+        n_features_encoder,
+        n_topics,
         n_vocab,
         d_vocab_emb,
         &args.encoder_layers,
@@ -297,22 +329,23 @@ fn main() -> anyhow::Result<()> {
 
     let _log_likelihood = match args.decoder_model {
         DecoderModel::Topic => {
-            let decoder = TopicDecoder::new(dd, kk, param_builder.clone())?;
+            let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
+
             let llik = train_encoder_decoder(
-                &raw_dn.posterior_mean().transpose().clone(),
-                adj_dn.map(|x| x.posterior_mean().transpose()).as_ref(),
-                resid_dn.map(|x| x.posterior_mean().transpose()).as_ref(),
+                &mixed_nd,
+                clean_nd.as_ref(),
+                batch_nd.as_ref(),
                 &encoder,
                 &decoder,
                 &parameters,
                 &loss_func::topic_likelihood,
                 &train_config,
             )?;
-            let beta_dk = decoder
+            decoder
                 .get_dictionary()?
-                .to_device(&candle_core::Device::Cpu)?;
-            let beta_dk = Mat::from_tensor(&beta_dk)?;
-            beta_dk.to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
+                .to_device(&candle_core::Device::Cpu)?
+                .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
+
             llik
         }
 

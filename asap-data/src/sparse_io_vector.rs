@@ -1,4 +1,5 @@
 use crate::sparse_io::*;
+use log::info;
 use matrix_util::knn_match::ColumnDict;
 use matrix_util::traits::MatTriplets;
 use matrix_util::utils::*;
@@ -15,6 +16,8 @@ pub struct SparseIoVec {
     data_to_cols: HashMap<usize, Vec<usize>>,
     col_glob_to_loc: Vec<usize>,
     offset: usize,
+    row_name_position: HashMap<Box<str>, usize>,
+    column_names_with_batch: Vec<Box<str>>,
     col_to_group: Option<Vec<usize>>,
     batch_knn_lookup: Option<Vec<ColumnDict<usize>>>,
     col_to_batch: Option<Vec<usize>>,
@@ -36,6 +39,8 @@ impl SparseIoVec {
             data_to_cols: HashMap::new(),
             col_glob_to_loc: vec![],
             offset: 0,
+            row_name_position: HashMap::new(),
+            column_names_with_batch: vec![],
             col_to_group: None,
             batch_knn_lookup: None,
             col_to_batch: None,
@@ -73,9 +78,34 @@ impl SparseIoVec {
                 data_to_cells.push(glob);
                 debug_assert!(glob == self.col_to_data.len() - 1);
             }
+            info!("Extending column names...");
+
+            let batch_tag = COLUMN_SEP.to_string() + &didx.to_string();
+            self.column_names_with_batch.extend(
+                data.column_names()?
+                    .into_iter()
+                    .map(|x| (x.to_string() + &batch_tag).into_boxed_str())
+                    .collect::<Vec<_>>(),
+            );
+            info!("Checking row names...");
+
+            for (data_row_pos, row) in data.row_names()?.iter().enumerate() {
+                let glob_row_pos = self
+                    .row_name_position
+                    .entry(row.clone())
+                    .or_insert(data_row_pos);
+                if *glob_row_pos != data_row_pos {
+                    return Err(anyhow::anyhow!(
+                        "Row names mismatched: {} vs. {}",
+                        *glob_row_pos,
+                        data_row_pos
+                    ));
+                }
+            }
 
             self.data_vec.push(data.clone());
             self.offset += ncol_data;
+            info!("{} columns", self.offset);
         } else {
             return Err(anyhow::anyhow!("data file has no columns"));
         }
@@ -459,5 +489,23 @@ impl SparseIoVec {
             .as_ref()
             .expect("cell_to_batch not initialized");
         cells.into_iter().map(|c| cell_to_batch[c]).collect()
+    }
+
+    pub fn column_names(&self) -> anyhow::Result<Vec<Box<str>>> {
+        debug_assert_eq!(self.num_columns()?, self.column_names_with_batch.len());
+        Ok(self.column_names_with_batch.clone())
+    }
+
+    pub fn row_names(&self) -> anyhow::Result<Vec<Box<str>>> {
+        let ntot = self.num_rows()?;
+        debug_assert_eq!(ntot, self.row_name_position.len());
+        let mut ret = vec![Box::from(""); ntot];
+        for (row, &index) in &self.row_name_position {
+            debug_assert!(index < ntot);
+            if index < ntot {
+                ret[index] = row.clone();
+            }
+        }
+        Ok(ret)
     }
 }
