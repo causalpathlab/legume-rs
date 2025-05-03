@@ -6,8 +6,10 @@ mod asap_routines_latent_representation;
 mod asap_routines_post_process;
 mod asap_visitors;
 
+use asap_embed::asap_random_projection::*;
+use asap_embed_common::*;
 use log::info;
-use matrix_param::traits::{Inference, ParamIo};
+use matrix_param::traits::{Inference, ParamIo, TwoStatParam};
 use matrix_util::common_io::{extension, read_lines, remove_file};
 use matrix_util::traits::*;
 
@@ -19,9 +21,9 @@ use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
 use asap_random_projection::RandProjOps;
 
+use candle_util::candle_decoder_topic::*;
+use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_loss_functions as loss_func;
-use candle_util::candle_model_encoder::*;
-use candle_util::candle_model_topic::*;
 use candle_util::candle_model_traits::DecoderModule;
 use candle_util::candle_vae_inference::*;
 
@@ -103,7 +105,7 @@ struct EmbedArgs {
     #[arg(short = 'k', long, default_value_t = 10)]
     n_latent_topics: usize,
 
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, default_value_t = 500)]
     n_row_modules: usize,
 
     /// Encoder layers
@@ -115,7 +117,7 @@ struct EmbedArgs {
     vocab_size: usize,
 
     /// Intensity embedding dimension
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 5)]
     vocab_emb: usize,
 
     /// # pre-training epochs with an encoder-only model
@@ -269,14 +271,14 @@ fn main() -> anyhow::Result<()> {
         info!("Saving intermediate results...");
         collapse_out
             .mu_observed
-            .write_tsv(&(args.out.to_string() + ".collapsed.observed"))?;
+            .to_tsv(&(args.out.to_string() + ".collapsed.observed"))?;
         info!("Wrote {}", args.out.to_string() + ".collapsed.observed");
         if let Some(param) = collapse_out.mu_adjusted.as_ref() {
-            param.write_tsv(&(args.out.to_string() + ".collapsed.adjusted"))?;
+            param.to_tsv(&(args.out.to_string() + ".collapsed.adjusted"))?;
             info!("Wrote {}", args.out.to_string() + ".collapsed.adjusted");
         }
         if let Some(param) = collapse_out.mu_residual.as_ref() {
-            param.write_tsv(&(args.out.to_string() + ".collapsed.residual"))?;
+            param.to_tsv(&(args.out.to_string() + ".collapsed.residual"))?;
             info!("Wrote {}", args.out.to_string() + ".collapsed.residual");
         }
     }
@@ -310,27 +312,43 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let n_topics = args.n_latent_topics;
+    let n_vocab = args.vocab_size;
+    let d_vocab_emb = args.vocab_emb;
+
+    let aggregate_rows = if collapse_out.mu_observed.nrows() > args.n_row_modules {
+        let log_x_nd = match collapse_out.mu_adjusted.as_ref() {
+            Some(x) => x.posterior_log_mean().transpose().clone(),
+            _ => collapse_out
+                .mu_observed
+                .posterior_log_mean()
+                .transpose()
+                .clone(),
+        };
+        let kk = (args.n_row_modules as f32).log2().ceil() as usize + 1;
+        info!("affine transformation: {} -> {}", log_x_nd.ncols(), kk);
+        row_membership_matrix(binary_sort_columns(&log_x_nd, kk)?)
+    } else {
+        let d = collapse_out.mu_observed.nrows();
+        Mat::identity(d, d)
+    };
+
     let parameters = candle_nn::VarMap::new();
     let dev = &train_config.device;
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
 
-    let n_topics = args.n_latent_topics;
-
     let mixed_dn = &collapse_out.mu_observed;
     let clean_dn = collapse_out.mu_adjusted.as_ref();
     let batch_dn = collapse_out.mu_residual.as_ref();
 
-    let mixed_nd = mixed_dn.posterior_mean().transpose().clone();
-    let clean_nd = clean_dn.map(|x| x.posterior_mean().transpose());
-    let batch_nd = batch_dn.map(|x| x.posterior_mean().transpose());
+    let mixed_nd = mixed_dn.posterior_mean().transpose().clone() * &aggregate_rows;
+    let clean_nd = clean_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
+    let batch_nd = batch_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
 
-    // todo: choose top variables?
-
-    let n_vocab = args.vocab_size;
-    let d_vocab_emb = args.vocab_emb;
-
-    // todo: in and out can have different number of features
+    ///////////////////////////////////////////////////
+    // training variational autoencoder architecture //
+    ///////////////////////////////////////////////////
 
     let n_features_encoder = mixed_nd.ncols();
     let n_features_decoder = match clean_nd.as_ref() {
@@ -375,11 +393,14 @@ fn main() -> anyhow::Result<()> {
     };
 
     let delta_db = delta_db.map(|x| x.posterior_mean());
-
-    let z_nk = evaluate_latent_by_encoder(&data_vec, &encoder, &train_config, delta_db)?;
-
+    let z_nk = evaluate_latent_by_encoder(
+        &data_vec,
+        &encoder,
+        &aggregate_rows,
+        &train_config,
+        delta_db,
+    )?;
     z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
-
     if let Some(delta_db) = delta_db {
         delta_db.to_tsv(&(args.out.to_string() + ".delta.gz"))?;
     }

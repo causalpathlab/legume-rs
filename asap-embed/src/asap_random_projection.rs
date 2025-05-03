@@ -169,26 +169,40 @@ impl RandProjOps for SparseIoVec {
         }
 
         let target_kk = num_sorting_features.unwrap_or(proj_kn.nrows());
-        let kk = proj_kn.nrows().min(target_kk);
+        let kk = proj_kn.nrows().min(target_kk).min(nn);
 
-        let (_, _, mut q_nk) = proj_kn.rsvd(kk)?;
-
-        q_nk.scale_columns_inplace();
-
-        let mut binary_codes = DVector::<usize>::zeros(nn);
-        for k in 0..kk {
-            let binary_shift = |x: f32| -> usize {
-                if x > 0.0 {
-                    1 << k
-                } else {
-                    0
-                }
-            };
-            binary_codes += q_nk.column(k).map(binary_shift);
-        }
-
-        let max_group = binary_codes.max();
-        self.assign_groups(binary_codes.data.as_vec().clone());
+        let binary_codes = binary_sort_columns(proj_kn, kk)?;
+        let max_group = *binary_codes
+            .iter()
+            .max()
+            .ok_or(anyhow::anyhow!("unable to determine max element"))?;
+        self.assign_groups(binary_codes);
         Ok(max_group + 1)
     }
+}
+
+/// Binarize the projection matrix and assign columns to some groups
+///
+/// # Arguments
+/// * `proj_kn` - random projection matrix (feature x column/cell)
+/// * `kk` - number of features
+pub fn binary_sort_columns(proj_kn: &Mat, kk: usize) -> anyhow::Result<Vec<usize>> {
+    // SVD to spread out the points
+    let nn = proj_kn.ncols();
+    let (_, _, mut q_nk) = proj_kn.rsvd(kk)?;
+    q_nk.scale_columns_inplace();
+
+    let mut binary_codes = DVector::<usize>::zeros(nn);
+    for k in 0..kk {
+        let binary_shift = |x: f32| -> usize {
+            if x > 0.0 {
+                1 << k
+            } else {
+                0
+            }
+        };
+        binary_codes += q_nk.column(k).map(binary_shift);
+    }
+
+    Ok(binary_codes.data.as_vec().clone())
 }

@@ -1,6 +1,7 @@
+use candle_core::Device;
 use candle_core::Tensor;
 
-/// Convert to and from triplets
+/// Convert to and from the vector of triplets
 pub trait MatTriplets {
     type Mat;
     type Scalar;
@@ -16,12 +17,13 @@ pub trait MatTriplets {
     ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, Self::Scalar)>)>;
 }
 
-/// Normalize or scale columns
+/// Reading off from `Tensor`
 pub trait ConvertMatOps {
     type Mat;
     type Scalar;
 
     fn from_tensor(_: &Tensor) -> anyhow::Result<Self::Mat>;
+    fn to_tensor(&self, dev: &Device) -> anyhow::Result<Tensor>;
 }
 
 /// Normalize or scale columns
