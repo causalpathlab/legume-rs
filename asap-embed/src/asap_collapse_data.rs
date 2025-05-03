@@ -180,7 +180,7 @@ impl CollapsingOps for SparseIoVec {
     ) -> anyhow::Result<()> {
         let count_basic = |sample: usize,
                            cells: &Vec<usize>,
-                           _: &EmptyParam,
+                           _: &EmptyArg,
                            arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
             let yy = self
                 .read_columns_csc(cells.iter().cloned())
@@ -198,7 +198,7 @@ impl CollapsingOps for SparseIoVec {
             }
         };
 
-        self.visit_column_by_samples(&sample_to_cells, &count_basic, &EmptyParam {}, stat)
+        self.visit_column_by_samples(&sample_to_cells, &count_basic, &EmptyArg {}, stat)
     }
 
     fn collect_batch_stat(
@@ -208,7 +208,7 @@ impl CollapsingOps for SparseIoVec {
     ) -> anyhow::Result<()> {
         let count_batch = |sample: usize,
                            cells_in_sample: &Vec<usize>,
-                           _: &EmptyParam,
+                           _: &EmptyArg,
                            arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
             let yy = self
                 .read_columns_csc(cells_in_sample.iter().cloned())
@@ -230,7 +230,7 @@ impl CollapsingOps for SparseIoVec {
             });
         };
 
-        self.visit_column_by_samples(&sample_to_cells, &count_batch, &EmptyParam {}, stat)
+        self.visit_column_by_samples(&sample_to_cells, &count_batch, &EmptyArg {}, stat)
     }
 
     fn collect_matched_stat(
@@ -243,7 +243,7 @@ impl CollapsingOps for SparseIoVec {
         let count_matched =
             |sample: usize,
              cells: &Vec<usize>,
-             _: &EmptyParam,
+             _: &EmptyArg,
              arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
                 let num_genes = self.num_rows().expect("failed to get num genes");
 
@@ -341,7 +341,7 @@ impl CollapsingOps for SparseIoVec {
                 }
             };
 
-        self.visit_column_by_samples(&sample_to_cells, &count_matched, &EmptyParam {}, stat)
+        self.visit_column_by_samples(&sample_to_cells, &count_matched, &EmptyArg {}, stat)
     }
 }
 
@@ -512,5 +512,3 @@ impl CollapsingStat {
         self.n_bs.fill(0_f32);
     }
 }
-
-struct EmptyParam {}

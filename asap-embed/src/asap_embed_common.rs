@@ -34,3 +34,5 @@ where
 pub fn parse_encoder_layers(s: &str) -> Result<Vec<usize>, <usize as std::str::FromStr>::Err> {
     parse_comma_separated(s)
 }
+
+pub struct EmptyArg {}

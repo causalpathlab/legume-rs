@@ -1,5 +1,6 @@
 use crate::asap_embed_common::*;
-
+use crate::asap_normalization::*;
+use crate::asap_visitors::VisitColumnsOps;
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
 
@@ -12,6 +13,59 @@ use std::sync::{Arc, Mutex};
 
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
+
+fn visit_data_to_adjust(
+    job: (usize, usize),
+    full_data_vec: &SparseIoVec,
+    delta_db: &Mat,
+    triplets: Arc<Mutex<&mut Vec<(u64, u64, f32)>>>,
+) {
+    let (lb, ub) = job;
+    let batches = full_data_vec.get_batch_membership(lb..ub);
+
+    let mut x_dn = full_data_vec
+        .read_columns_csc(lb..ub)
+        .expect("read columns");
+
+    x_dn.adjust_by_division(&delta_db, &batches);
+
+    let new_triplets = x_dn
+        .triplet_iter()
+        .filter_map(|(i, j, &x_ij)| {
+            let x_ij = x_ij.round();
+            if x_ij < 1_f32 {
+                None
+            } else {
+                Some((i as u64, (j + lb) as u64, x_ij))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut triplets = triplets.lock().expect("lock triplets");
+    triplets.extend(new_triplets);
+}
+
+/// Adjust the original data by eliminating batch effects `delta_db`
+/// (`d x b`) from each column. We will directly call
+/// `get_batch_membership` in `data_vec`.
+///
+/// # Arguments
+/// * `data_vec` - sparse data vector
+/// * `delta_db` - row/feature by batch average effect matrix
+///
+/// # Returns
+/// * `triplets` - we can feed this vector to create a new backend
+pub fn triplets_adjusted_by_batch(
+    data_vec: &SparseIoVec,
+    delta_db: &Mat,
+) -> anyhow::Result<Vec<(u64, u64, f32)>> {
+    let mut triplets = vec![];
+    let ntot = data_vec.num_columns()?;
+    let block_size = DEFAULT_BLOCK_SIZE;
+    let jobs = create_jobs(ntot, block_size);
+    data_vec.visit_columns_by_jobs(jobs, &visit_data_to_adjust, &delta_db, &mut triplets)?;
+    Ok(triplets)
+}
 
 /// Evaluate latent representation with the trained encoder network
 ///
