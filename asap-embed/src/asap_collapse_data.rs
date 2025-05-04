@@ -2,7 +2,7 @@
 
 use crate::asap_embed_common::*;
 use crate::asap_normalization::*;
-use crate::asap_visitors::*;
+use asap_data::sparse_data_visitors::*;
 use asap_data::sparse_io_vector::SparseIoVec;
 use indicatif::ProgressIterator;
 use log::{info, warn};

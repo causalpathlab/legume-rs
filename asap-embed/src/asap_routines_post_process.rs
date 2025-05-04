@@ -1,6 +1,6 @@
 use crate::asap_embed_common::*;
 use crate::asap_normalization::*;
-use crate::asap_visitors::VisitColumnsOps;
+use asap_data::sparse_data_visitors::VisitColumnsOps;
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
 
@@ -60,10 +60,7 @@ pub fn triplets_adjusted_by_batch(
     delta_db: &Mat,
 ) -> anyhow::Result<Vec<(u64, u64, f32)>> {
     let mut triplets = vec![];
-    let ntot = data_vec.num_columns()?;
-    let block_size = DEFAULT_BLOCK_SIZE;
-    let jobs = create_jobs(ntot, block_size);
-    data_vec.visit_columns_by_jobs(jobs, &visit_data_to_adjust, &delta_db, &mut triplets)?;
+    data_vec.visit_columns_by_jobs(&visit_data_to_adjust, &delta_db, &mut triplets, None)?;
     Ok(triplets)
 }
 

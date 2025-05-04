@@ -4,7 +4,6 @@ mod asap_normalization;
 mod asap_random_projection;
 mod asap_routines_latent_representation;
 mod asap_routines_post_process;
-mod asap_visitors;
 
 use asap_embed::asap_random_projection::*;
 use asap_embed_common::*;
