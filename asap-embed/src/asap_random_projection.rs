@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
 use crate::asap_embed_common::*;
-use crate::asap_visitors::*;
+use asap_data::sparse_data_visitors::*;
 use asap_data::sparse_io_vector::SparseIoVec;
+use std::sync::{Arc, Mutex};
 
 use log::{info, warn};
 use matrix_util::dmatrix_rsvd::RSVD;
@@ -72,14 +73,20 @@ pub trait RandProjOps {
 /// column-wise visitor for random projection
 fn visit_rand_proj_columnwise(
     job: (usize, usize),
-    xx_dm: &CscMat,
+    data_vec: &SparseIoVec,
     basis_dk: &Mat,
-    proj_kn: &mut Mat,
+    arc_proj_kn: Arc<Mutex<&mut Mat>>,
 ) {
     let (lb, ub) = job;
-    let xx_dm = xx_dm.normalize_columns();
+    let mut xx_dm = data_vec.read_columns_csc(lb..ub).unwrap();
+    xx_dm.normalize_columns_inplace();
     let chunk = (xx_dm.transpose() * basis_dk).transpose();
-    proj_kn.columns_range_mut(lb..ub).copy_from(&chunk);
+
+    arc_proj_kn
+        .lock()
+        .unwrap()
+        .columns_range_mut(lb..ub)
+        .copy_from(&chunk);
 }
 
 impl RandProjOps for SparseIoVec {
@@ -102,14 +109,17 @@ impl RandProjOps for SparseIoVec {
     {
         let nrows = self.num_rows()?;
         let ncols = self.num_columns()?;
-        let block_size = block_size.unwrap_or(DEFAULT_BLOCK_SIZE);
-        let jobs = create_jobs(ncols, block_size);
 
         let mut proj_kn = Mat::zeros(target_dim, ncols);
 
         let basis_dk = Mat::rnorm(nrows, target_dim);
 
-        self.visit_csc_data_by_jobs(jobs, &visit_rand_proj_columnwise, &basis_dk, &mut proj_kn)?;
+        self.visit_columns_by_jobs(
+            &visit_rand_proj_columnwise,
+            &basis_dk,
+            &mut proj_kn,
+            block_size,
+        )?;
 
         if let Some(col_to_batch) = batch_membership {
             info!("adjusting batch biases ...");

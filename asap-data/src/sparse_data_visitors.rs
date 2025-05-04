@@ -1,30 +1,19 @@
 #![allow(dead_code)]
-use crate::asap_embed_common::*;
-use asap_data::sparse_io_vector::SparseIoVec;
+use crate::sparse_io_vector::SparseIoVec;
 use indicatif::ParallelProgressIterator;
 
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
-pub trait VisitColumnsOps {
-    fn visit_csc_data_by_jobs<Visitor, SharedIn, SharedOut>(
-        &self,
-        jobs: Vec<(usize, usize)>,
-        visitor: &Visitor,
-        shared_in: &SharedIn,
-        shared_out: &mut SharedOut,
-    ) -> anyhow::Result<()>
-    where
-        Visitor: Fn((usize, usize), &CscMat, &SharedIn, &mut SharedOut) + Sync + Send,
-        SharedIn: Sync + Send,
-        SharedOut: Sync + Send;
+const DEFAULT_BLOCK_SIZE: usize = 100;
 
+pub trait VisitColumnsOps {
     fn visit_columns_by_jobs<Visitor, SharedIn, SharedOut>(
         &self,
-        jobs: Vec<(usize, usize)>,
         visitor: &Visitor,
         shared_in: &SharedIn,
         shared_out: &mut SharedOut,
+        block_size: Option<usize>,
     ) -> anyhow::Result<()>
     where
         Visitor: Fn((usize, usize), &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
@@ -45,48 +34,22 @@ pub trait VisitColumnsOps {
 }
 
 impl VisitColumnsOps for SparseIoVec {
-    fn visit_csc_data_by_jobs<Visitor, SharedIn, SharedOut>(
-        &self,
-        jobs: Vec<(usize, usize)>,
-        visitor: &Visitor,
-        shared_in: &SharedIn,
-        shared_out: &mut SharedOut,
-    ) -> anyhow::Result<()>
-    where
-        Visitor: Fn((usize, usize), &CscMat, &SharedIn, &mut SharedOut) + Sync + Send,
-        SharedIn: Sync + Send,
-        SharedOut: Sync + Send,
-    {
-        let arc_shared_out = Arc::new(Mutex::new(shared_out));
-
-        jobs.par_iter()
-            .progress_count(jobs.len() as u64)
-            .for_each(|&(lb, ub)| {
-                let xx_dm = self
-                    .read_columns_csc(lb..ub)
-                    .expect("failed to retrieve data");
-
-                let mut shared_job_out = arc_shared_out
-                    .lock()
-                    .expect("failed to lock shared mutable data");
-                visitor((lb, ub), &xx_dm, &shared_in, &mut shared_job_out);
-            });
-
-        Ok(())
-    }
-
     fn visit_columns_by_jobs<Visitor, SharedIn, SharedOut>(
         &self,
-        jobs: Vec<(usize, usize)>,
         visitor: &Visitor,
         shared_in: &SharedIn,
         shared_out: &mut SharedOut,
+        block_size: Option<usize>,
     ) -> anyhow::Result<()>
     where
         Visitor: Fn((usize, usize), &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
         SharedIn: Sync + Send,
         SharedOut: Sync + Send,
     {
+        let block_size = block_size.unwrap_or(DEFAULT_BLOCK_SIZE);
+        let ntot = self.num_columns()?;
+        let jobs = create_jobs(ntot, block_size);
+
         let arc_shared_out = Arc::new(Mutex::new(shared_out));
 
         jobs.par_iter()
@@ -125,4 +88,16 @@ impl VisitColumnsOps for SparseIoVec {
 
         Ok(())
     }
+}
+
+fn create_jobs(ntot: usize, block_size: usize) -> Vec<(usize, usize)> {
+    let nblock = (ntot + block_size - 1) / block_size;
+
+    (0..nblock)
+        .map(|block| {
+            let lb: usize = block * block_size;
+            let ub: usize = ((block + 1) * block_size).min(ntot);
+            (lb, ub)
+        })
+        .collect::<Vec<_>>()
 }

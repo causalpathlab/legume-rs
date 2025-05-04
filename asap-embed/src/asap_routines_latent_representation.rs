@@ -1,6 +1,6 @@
 use crate::asap_embed_common::*;
 use crate::asap_normalization::*;
-use crate::asap_visitors::VisitColumnsOps;
+use asap_data::sparse_data_visitors::VisitColumnsOps;
 
 use log::info;
 
@@ -92,12 +92,6 @@ pub fn do_nystrom_proj(
 
     let ntot = full_data_vec.num_columns()?;
     let kk = rank;
-    let block_size = block_size.unwrap_or(100);
-
-    let jobs = create_jobs(ntot, block_size);
-    let njobs = jobs.len() as u64;
-
-    info!("Visiting {} blocks ...", njobs);
 
     let nystrom_param = NystromParam {
         dictionary_dk: &u_dk,
@@ -107,15 +101,13 @@ pub fn do_nystrom_proj(
     let mut proj_kn = Mat::zeros(kk, ntot);
 
     full_data_vec.visit_columns_by_jobs(
-        jobs,
         &visit_nystrom_proj_columnwise,
         &nystrom_param,
         &mut proj_kn,
+        block_size,
     )?;
 
     let z_nk = proj_kn.transpose();
-
-    info!("Done {} projections ...", njobs);
 
     Ok(NystromOut {
         dictionary_dk: u_dk,
