@@ -38,6 +38,24 @@ pub fn write_lines(lines: &Vec<Box<str>>, output_file: &str) -> anyhow::Result<(
 }
 
 ///
+/// Write every line into the output_file
+///
+/// * `lines` - vector of lines
+/// * `output_file` - file name--either gzipped or not
+///
+pub fn write_types<T>(lines: &Vec<T>, output_file: &str) -> anyhow::Result<()>
+where
+    T: std::str::FromStr + std::fmt::Display,
+{
+    let mut buf: Box<dyn Write> = open_buf_writer(output_file)?;
+    for x in lines.iter() {
+        writeln!(buf, "{}", x.to_string())?;
+    }
+    buf.flush()?;
+    Ok(())
+}
+
+///
 /// Read in each line by line, then parse each line into a vector or
 /// words.
 ///

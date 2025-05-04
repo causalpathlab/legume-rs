@@ -97,7 +97,7 @@ enum Commands {
     /// Build faster backend data from `mtx`
     FromMtx(FromMtxArgs),
 
-    /// Migrate `h5ad`
+    /// Migrate from `h5ad`'s `csr_matrix` data
     FromH5ad(FromH5adArgs),
 
     /// Sort rows according to the order of row names specified in a
@@ -183,10 +183,12 @@ pub struct FromMtxArgs {
 
 #[derive(Args, Debug)]
 pub struct FromH5adArgs {
-    /// `hdf5`/`h5` file in the `h5ad` format. We will look for
-    /// triplets: (a) values `/X/data` (b) indices `/X/indices` (c)
-    /// indptr `/X/indptr` (2) rows/genes/features `/var` (3)
-    /// columns/cells/samples `/obs/_index`
+    /// `hdf5`/`h5` file in the `h5ad` format. This function will look
+    /// for `csr_matrix` triplets: (a) data/values `/X/data` (b)
+    /// indices `/X/indices` (c) pointers `/X/indptr`. Additionally,
+    /// if rows/genes/features `/var` and columns/cells/samples
+    /// `/obs/_index` are available, they will be included. However,
+    /// other items in `obs` and `obsm` will be ignored.
     h5_file: Box<str>,
 
     /// backend for the output file
@@ -815,15 +817,7 @@ fn run_build_from_h5ad(cmd_args: &FromH5adArgs) -> anyhow::Result<()> {
     let output = match cmd_args.output.clone() {
         Some(output) => output,
         None => {
-            let (dir, mut base, ext) = common_io::dir_base_ext(&data_file)?;
-
-            if base.ends_with(".mtx") && ext.ends_with("gz") {
-                base = base
-                    .into_string()
-                    .trim_end_matches(".mtx")
-                    .to_string()
-                    .into_boxed_str();
-            }
+            let (dir, base, _ext) = common_io::dir_base_ext(&data_file)?;
 
             match (dir.len(), base.len()) {
                 (0, 0) => format!("./").into_boxed_str(),
