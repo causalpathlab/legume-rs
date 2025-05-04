@@ -10,7 +10,7 @@ use asap_embed::asap_random_projection::*;
 use asap_embed_common::*;
 use log::info;
 use matrix_param::traits::{Inference, ParamIo, TwoStatParam};
-use matrix_util::common_io::{extension, read_lines, remove_file};
+use matrix_util::common_io::{extension, read_lines, remove_file, write_types};
 use matrix_util::traits::*;
 
 use asap_routines_latent_representation::*;
@@ -365,7 +365,7 @@ fn main() -> anyhow::Result<()> {
         param_builder.clone(),
     )?;
 
-    let _log_likelihood = match args.decoder_model {
+    let log_likelihood = match args.decoder_model {
         DecoderModel::Topic => {
             let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
@@ -391,6 +391,8 @@ fn main() -> anyhow::Result<()> {
             unimplemented!("This decoder model is not yet implemented");
         }
     };
+
+    write_types::<f32>(&log_likelihood, &(args.out.to_string() + ".llik.gz"))?;
 
     let delta_db = delta_db.map(|x| x.posterior_mean());
     let z_nk = evaluate_latent_by_encoder(
