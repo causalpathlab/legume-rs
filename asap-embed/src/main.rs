@@ -234,9 +234,9 @@ fn main() -> anyhow::Result<()> {
         Some(args.iter_opt),
     )?;
 
-    let delta_db = collapse_out.delta.as_ref();
+    let batch_db = collapse_out.delta.as_ref();
 
-    if let Some(delta_db) = delta_db.map(|x| x.posterior_mean()) {
+    if let Some(delta_db) = batch_db.map(|x| x.posterior_mean()) {
         if args.save_adjusted {
             info!("Generating batch-adjusted data...");
 
@@ -294,7 +294,7 @@ fn main() -> anyhow::Result<()> {
 
         let nystrom_out = do_nystrom_proj(
             x_dn.posterior_log_mean().clone(),
-            delta_db.map(|x| x.posterior_mean()),
+            batch_db.map(|x| x.posterior_mean()),
             &data_vec,
             args.n_latent_topics,
             Some(args.block_size.clone()),
@@ -325,7 +325,11 @@ fn main() -> anyhow::Result<()> {
                 .clone(),
         };
         let kk = (args.n_row_modules as f32).log2().ceil() as usize + 1;
-        info!("affine transformation: {} -> {}", log_x_nd.ncols(), kk);
+        info!(
+            "affine transformation: {} -> {}",
+            log_x_nd.ncols(),
+            args.n_row_modules
+        );
         row_membership_matrix(binary_sort_columns(&log_x_nd, kk)?)
     } else {
         let d = collapse_out.mu_observed.nrows();
@@ -393,7 +397,7 @@ fn main() -> anyhow::Result<()> {
 
     write_types::<f32>(&log_likelihood, &(args.out.to_string() + ".llik.gz"))?;
 
-    let delta_db = delta_db.map(|x| x.posterior_mean());
+    let delta_db = batch_db.map(|x| x.posterior_mean());
     let z_nk = evaluate_latent_by_encoder(
         &data_vec,
         &encoder,
@@ -402,8 +406,8 @@ fn main() -> anyhow::Result<()> {
         delta_db,
     )?;
     z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
-    if let Some(delta_db) = delta_db {
-        delta_db.to_tsv(&(args.out.to_string() + ".delta.gz"))?;
+    if let Some(batch_db) = batch_db {
+        batch_db.to_tsv(&(args.out.to_string() + ".delta"))?;
     }
 
     info!("done");

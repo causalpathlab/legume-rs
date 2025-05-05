@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 asap-data = { path = "../asap-data" }
+asap-embed = { path = "../asap-embed" }
 matrix-util = { path = "../matrix-util" }
 matrix-param = { path = "../matrix-param" }
 

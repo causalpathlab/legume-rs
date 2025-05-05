@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use asap_data::sparse_io_vector::*;
-use matrix_util::traits::MatTriplets;
 
 use candle_core::{Device, Tensor};
 use nalgebra::DMatrix;
@@ -56,9 +55,11 @@ impl<'a> SparseIoVecData<'a> {
 impl DataLoader for SparseIoVecData<'_> {
     fn minibatch_data(&self, batch_idx: usize, target_device: &Device) -> anyhow::Result<Tensor> {
         if let Some(cols) = self.minibatches.chunks.get(batch_idx) {
-            let (dd, nn, triplets) = self.data.collect_columns_triplets(cols.iter().cloned())?;
-            let ret = Tensor::from_nonzero_triplets(dd, nn, triplets)?.transpose(0, 1)?;
-            Ok(ret.to_device(target_device)?)
+            Ok(self
+                .data
+                .read_columns_tensor(cols.iter().cloned())?
+                .transpose(0, 1)?
+                .to_device(target_device)?)
         } else {
             Err(anyhow::anyhow!(
                 "invalid index = {} vs. total # = {}",

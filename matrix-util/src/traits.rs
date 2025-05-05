@@ -60,6 +60,18 @@ pub trait SampleOps {
     fn rgamma(dd: usize, nn: usize, param: (f32, f32)) -> Self::Mat;
 }
 
+pub trait DistanceOps {
+    type Scalar;
+    type Other;
+
+    /// A vector of Euclidean distances between sources and targets
+    fn euclidean_distance_matched_columns(
+        &self,
+        target_mat: &Self::Other,
+        target_columns: &Vec<usize>,
+    ) -> anyhow::Result<Vec<Self::Scalar>>;
+}
+
 /// Operations that involves multiple types
 pub trait CompositeOps {
     type Scalar;

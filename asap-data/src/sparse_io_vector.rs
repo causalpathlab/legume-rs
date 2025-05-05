@@ -1,7 +1,7 @@
 use crate::sparse_io::*;
 use log::info;
 use matrix_util::knn_match::ColumnDict;
-use matrix_util::traits::MatTriplets;
+use matrix_util::traits::*;
 use matrix_util::utils::*;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -150,10 +150,14 @@ impl SparseIoVec {
         Ok(ret)
     }
 
-    pub fn collect_columns_triplets<I>(
+    ////////////////////
+    // access columns //
+    ////////////////////
+
+    pub fn columns_triplets<I>(
         &self,
         cells: I,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)>
+    ) -> anyhow::Result<((usize, usize), Vec<(usize, usize, f32)>)>
     where
         I: Iterator<Item = usize>,
     {
@@ -173,16 +177,77 @@ impl SparseIoVec {
             ncol += loc_ncol;
         }
 
-        Ok((nrow, ncol, triplets))
+        Ok(((nrow, ncol), triplets))
     }
 
-    pub fn collect_matched_columns_triplets<I>(
+    pub fn read_columns_ndarray<I>(&self, cells: I) -> anyhow::Result<ndarray::Array2<f32>>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets) = self.columns_triplets(cells)?;
+        ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+    }
+
+    pub fn read_columns_dmatrix<I>(&self, cells: I) -> anyhow::Result<nalgebra::DMatrix<f32>>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets) = self.columns_triplets(cells)?;
+        DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+    }
+
+    pub fn read_columns_csc<I>(&self, cells: I) -> anyhow::Result<CscMatrix<f32>>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets) = self.columns_triplets(cells)?;
+        nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+    }
+
+    pub fn read_columns_csr<I>(&self, cells: I) -> anyhow::Result<CsrMatrix<f32>>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets) = self.columns_triplets(cells)?;
+        nalgebra_sparse::CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+    }
+
+    pub fn read_columns_tensor<I>(&self, cells: I) -> anyhow::Result<Tensor>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets) = self.columns_triplets(cells)?;
+        Ok(Tensor::from_nonzero_triplets(nrow, ncol, triplets)?)
+    }
+
+    /////////////////////
+    // matched columns //
+    /////////////////////
+
+    /// Take columns matched with the given `cells` on a specific
+    /// target batch
+    ///
+    /// # Arguments
+    /// * `cells` - global column indices
+    /// * `target_batch` - a batch for targeted kNN search
+    /// * `knn` - k-nearest neighbours
+    /// * `skip_same_batch` - skip the same batch
+    ///
+    /// # Returns
+    /// * shape - (nrows, ncols)
+    /// * triplets
+    /// * distances
+    pub fn matched_columns_triplets_on_target_batch<I>(
         &self,
         cells: I,
         target_batch: usize,
         knn: usize,
         skip_same_batch: bool,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>, Vec<usize>)>
+    ) -> anyhow::Result<(
+        (usize, usize),
+        Vec<(usize, usize, f32)>,
+        (Vec<usize>, Vec<usize>),
+    )>
     where
         I: Iterator<Item = usize>,
     {
@@ -202,9 +267,10 @@ impl SparseIoVec {
 
         debug_assert!(target_batch < self.num_batches());
 
-        let mut source_cells = vec![];
+        let mut source_columns = vec![];
+        let mut source_positions = vec![];
 
-        for glob in cells {
+        for (idx, glob) in cells.enumerate() {
             let source_batch = cell_to_batch[glob]; // this cell's batch
 
             if skip_same_batch && source_batch == target_batch {
@@ -227,123 +293,200 @@ impl SparseIoVec {
                     nrow = nrow.max(loc_nrow);
                     triplets.extend(loc_triplets.iter().map(|&(i, j, v)| (i, j + ncol, v)));
                     ncol += loc_ncol;
-                    source_cells.push(glob);
+                    source_columns.push(glob);
+                    source_positions.push(idx);
                 }
             }
         }
 
-        Ok((nrow, ncol, triplets, source_cells))
+        Ok(((nrow, ncol), triplets, (source_columns, source_positions)))
     }
 
-    pub fn read_columns_ndarray<I>(&self, cells: I) -> anyhow::Result<ndarray::Array2<f32>>
-    where
-        I: Iterator<Item = usize>,
-    {
-        let (nrow, ncol, triplets) = self.collect_columns_triplets(cells)?;
-        ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
-    }
-
-    pub fn read_columns_dmatrix<I>(&self, cells: I) -> anyhow::Result<nalgebra::DMatrix<f32>>
-    where
-        I: Iterator<Item = usize>,
-    {
-        let (nrow, ncol, triplets) = self.collect_columns_triplets(cells)?;
-        DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
-    }
-
-    pub fn read_columns_csc<I>(&self, cells: I) -> anyhow::Result<CscMatrix<f32>>
-    where
-        I: Iterator<Item = usize>,
-    {
-        let (nrow, ncol, triplets) = self.collect_columns_triplets(cells)?;
-        nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
-    }
-
-    pub fn read_columns_csr<I>(&self, cells: I) -> anyhow::Result<CsrMatrix<f32>>
-    where
-        I: Iterator<Item = usize>,
-    {
-        let (nrow, ncol, triplets) = self.collect_columns_triplets(cells)?;
-        nalgebra_sparse::CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
-    }
-
-    pub fn read_columns_tensor<I>(&self, cells: I) -> anyhow::Result<Tensor>
-    where
-        I: Iterator<Item = usize>,
-    {
-        let (nrow, ncol, triplets) = self.collect_columns_triplets(cells)?;
-        Ok(Tensor::from_nonzero_triplets(nrow, ncol, triplets)?)
-    }
-
-    pub fn read_matched_columns_ndarray<I>(
+    /// Take columns matched with the given `cells`
+    ///
+    /// # Arguments
+    /// * `cells` - global column indices
+    /// * `target_batches` - the batches for targeted kNN search
+    /// * `knn` - k-nearest neighbours
+    /// * `skip_same_batch` - skip the same batch
+    ///
+    /// # Returns
+    /// * shape - (nrows, ncols)
+    /// * triplets - a vector of triplets
+    /// * `source_columns` - a vector of the source columns
+    /// * distance - a vector of distances between the matched columns
+    pub fn matched_columns_triplets<I>(
         &self,
         cells: I,
-        target_batch: usize,
+        target_batches: &Vec<usize>,
         knn: usize,
         skip_same_batch: bool,
-    ) -> anyhow::Result<(ndarray::Array2<f32>, Vec<usize>)>
+    ) -> anyhow::Result<(
+        (usize, usize),
+        Vec<(usize, usize, f32)>,
+        Vec<usize>, // source positions
+        Vec<f32>,   // distances
+    )>
     where
         I: Iterator<Item = usize>,
     {
-        let (nrow, ncol, triplets, sources) =
-            self.collect_matched_columns_triplets(cells, target_batch, knn, skip_same_batch)?;
-        Ok((
-            ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
-            sources,
-        ))
+        let cells: Vec<usize> = cells.collect();
+        let y1 = self.read_columns_csc(cells.iter().cloned())?;
+
+        let mut matched_triplets: Vec<(usize, usize, f32)> = vec![];
+        let mut euclidean_distances: Vec<f32> = vec![];
+        let mut tot_ncells_matched: usize = 0;
+        let mut source_columns: Vec<usize> = vec![];
+
+        for &target_b in target_batches.iter() {
+            let (shape, triplets, sources) = self.matched_columns_triplets_on_target_batch(
+                cells.iter().cloned(),
+                target_b,
+                knn,
+                skip_same_batch,
+            )?;
+
+            matched_triplets.extend(
+                triplets
+                    .iter()
+                    .map(|(i, j, z_ij)| (*i, *j + tot_ncells_matched, *z_ij)),
+            );
+
+            // Temporarily construct y0 and compute distances between the matched columns
+            let y0 = CscMatrix::<f32>::from_nonzero_triplets(shape.0, shape.1, triplets)?;
+            let y0_pos = &sources.1;
+            euclidean_distances.extend(y0.euclidean_distance_matched_columns(&y1, y0_pos)?);
+
+            tot_ncells_matched += shape.1;
+            source_columns.extend(sources.0);
+        }
+
+        let shape = (y1.nrows(), tot_ncells_matched);
+
+        Ok((shape, matched_triplets, source_columns, euclidean_distances))
     }
 
-    pub fn read_matched_columns_dmatrix<I>(
-        &self,
-        cells: I,
-        target_batch: usize,
-        knn: usize,
-        skip_same_batch: bool,
-    ) -> anyhow::Result<(nalgebra::DMatrix<f32>, Vec<usize>)>
-    where
-        I: Iterator<Item = usize>,
-    {
-        let (nrow, ncol, triplets, sources) =
-            self.collect_matched_columns_triplets(cells, target_batch, knn, skip_same_batch)?;
-        Ok((
-            DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
-            sources,
-        ))
-    }
-
+    /// Take columns matched with the given `cells`
+    ///
+    /// # Arguments
+    /// * `cells` - global column indices
+    /// * `target_batches` - the batches for targeted kNN search
+    /// * `knn` - k-nearest neighbours
+    /// * `skip_same_batch` - skip the same batch
+    ///
+    /// # Returns
+    /// * the knn-matched matrix
+    /// * `source_columns` - a vector of the source columns
+    /// * a vector of distances between the matched columns
     pub fn read_matched_columns_csc<I>(
         &self,
         cells: I,
-        target_batch: usize,
+        target_batches: &Vec<usize>,
         knn: usize,
         skip_same_batch: bool,
-    ) -> anyhow::Result<(CscMatrix<f32>, Vec<usize>)>
+    ) -> anyhow::Result<(CscMatrix<f32>, Vec<usize>, Vec<f32>)>
     where
         I: Iterator<Item = usize>,
     {
-        let (nrow, ncol, triplets, sources) =
-            self.collect_matched_columns_triplets(cells, target_batch, knn, skip_same_batch)?;
+        let ((nrow, ncol), triplets, source_columns, distances) =
+            self.matched_columns_triplets(cells, target_batches, knn, skip_same_batch)?;
         Ok((
             CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
-            sources,
+            source_columns,
+            distances,
         ))
     }
 
+    /// Take columns matched with the given `cells`
+    ///
+    /// # Arguments
+    /// * `cells` - global column indices
+    /// * `target_batches` - the batches for targeted kNN search
+    /// * `knn` - k-nearest neighbours
+    /// * `skip_same_batch` - skip the same batch
+    ///
+    /// # Returns
+    /// * the knn-matched matrix
+    /// * `source_columns` - a vector of the source columns
+    /// * distances - a vector of distances between the matched columns
     pub fn read_matched_columns_csr<I>(
         &self,
         cells: I,
-        target_batch: usize,
+        target_batches: &Vec<usize>,
         knn: usize,
         skip_same_batch: bool,
-    ) -> anyhow::Result<(CsrMatrix<f32>, Vec<usize>)>
+    ) -> anyhow::Result<(CsrMatrix<f32>, Vec<usize>, Vec<f32>)>
     where
         I: Iterator<Item = usize>,
     {
-        let (nrow, ncol, triplets, sources) =
-            self.collect_matched_columns_triplets(cells, target_batch, knn, skip_same_batch)?;
+        let ((nrow, ncol), triplets, source_columns, distances) =
+            self.matched_columns_triplets(cells, target_batches, knn, skip_same_batch)?;
         Ok((
             CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
-            sources,
+            source_columns,
+            distances,
+        ))
+    }
+
+    /// Take columns matched with the given `cells`
+    ///
+    /// # Arguments
+    /// * `cells` - global column indices
+    /// * `target_batches` - the batches for targeted kNN search
+    /// * `knn` - k-nearest neighbours
+    /// * `skip_same_batch` - skip the same batch
+    ///
+    /// # Returns
+    /// * the knn-matched matrix
+    /// * `source_columns` - a vector of the source columns
+    /// * distances - a vector of distances between the matched columns
+    pub fn read_matched_columns_ndarray<I>(
+        &self,
+        cells: I,
+        target_batches: &Vec<usize>,
+        knn: usize,
+        skip_same_batch: bool,
+    ) -> anyhow::Result<(ndarray::Array2<f32>, Vec<usize>, Vec<f32>)>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets, source_columns, distances) =
+            self.matched_columns_triplets(cells, target_batches, knn, skip_same_batch)?;
+        Ok((
+            ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            source_columns,
+            distances,
+        ))
+    }
+
+    /// Take columns matched with the given `cells`
+    ///
+    /// # Arguments
+    /// * `cells` - global column indices
+    /// * `target_batches` - the batches for targeted kNN search
+    /// * `knn` - k-nearest neighbours
+    /// * `skip_same_batch` - skip the same batch
+    ///
+    /// # Returns
+    /// * the knn-matched matrix
+    /// * `source_columns` - a vector of the source columns
+    /// * distances - a vector of distances between the matched columns
+    pub fn read_matched_columns_dmatrix<I>(
+        &self,
+        cells: I,
+        target_batches: &Vec<usize>,
+        knn: usize,
+        skip_same_batch: bool,
+    ) -> anyhow::Result<(nalgebra::DMatrix<f32>, Vec<usize>, Vec<f32>)>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets, source_columns, distances) =
+            self.matched_columns_triplets(cells, target_batches, knn, skip_same_batch)?;
+        Ok((
+            DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            source_columns,
+            distances,
         ))
     }
 
