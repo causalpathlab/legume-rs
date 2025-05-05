@@ -28,7 +28,7 @@ pub trait VisitColumnsOps {
         shared_out: &mut SharedOut,
     ) -> anyhow::Result<()>
     where
-        Visitor: Fn(usize, &Vec<usize>, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
+        Visitor: Fn(usize, &Vec<usize>, &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
         SharedIn: Sync + Send,
         SharedOut: Sync + Send;
 }
@@ -69,7 +69,7 @@ impl VisitColumnsOps for SparseIoVec {
         shared_data: &mut SharedOut,
     ) -> anyhow::Result<()>
     where
-        Visitor: Fn(usize, &Vec<usize>, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
+        Visitor: Fn(usize, &Vec<usize>, &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
         SharedIn: Sync + Send,
         SharedOut: Sync + Send,
     {
@@ -83,7 +83,7 @@ impl VisitColumnsOps for SparseIoVec {
             .par_bridge()
             .progress_count(num_jobs)
             .for_each(|(sample, cells)| {
-                visitor(sample, &cells, shared_in, arc_shared_data.clone());
+                visitor(sample, &cells, &self, shared_in, arc_shared_data.clone());
             });
 
         Ok(())

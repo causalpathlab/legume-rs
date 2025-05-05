@@ -12,8 +12,6 @@ use matrix_param::traits::*;
 use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::traits::*;
 use matrix_util::utils::partition_by_membership;
-use nalgebra_sparse::CscMatrix;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 #[cfg(debug_assertions)]
@@ -168,7 +166,7 @@ impl CollapsingOps for SparseIoVec {
         // Resolve mean parameters //
         /////////////////////////////
 
-        info!("optimizing mean parameters...");
+        info!("optimizing the collapsed parameters...");
         let (a0, b0) = (1_f32, 1_f32);
         optimize(&stat, (a0, b0), num_opt_iter.unwrap_or(DEFAULT_OPT_ITER))
     }
@@ -180,9 +178,10 @@ impl CollapsingOps for SparseIoVec {
     ) -> anyhow::Result<()> {
         let count_basic = |sample: usize,
                            cells: &Vec<usize>,
+                           data_vec: &SparseIoVec,
                            _: &EmptyArg,
                            arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
-            let yy = self
+            let yy = data_vec
                 .read_columns_csc(cells.iter().cloned())
                 .expect("failed to read cells");
 
@@ -208,15 +207,16 @@ impl CollapsingOps for SparseIoVec {
     ) -> anyhow::Result<()> {
         let count_batch = |sample: usize,
                            cells_in_sample: &Vec<usize>,
+                           data_vec: &SparseIoVec,
                            _: &EmptyArg,
                            arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
-            let yy = self
+            let yy = data_vec
                 .read_columns_csc(cells_in_sample.iter().cloned())
                 .expect("failed to read cells");
 
             // cells_in_sample: sample s -> cell j
             // batches: cell j -> batch b
-            let batches = self.get_batch_membership(cells_in_sample.iter().cloned());
+            let batches = data_vec.get_batch_membership(cells_in_sample.iter().cloned());
 
             let mut stat = arc_stat.lock().expect("lock stat");
 
@@ -243,71 +243,12 @@ impl CollapsingOps for SparseIoVec {
         let count_matched =
             |sample: usize,
              cells: &Vec<usize>,
+             data_vec: &SparseIoVec,
              _: &EmptyArg,
              arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
-                let num_genes = self.num_rows().expect("failed to get num genes");
-
-                let positions: HashMap<usize, usize> =
-                    cells.iter().enumerate().map(|(i, &c)| (c, i)).collect();
-                let mut matched_triplets: Vec<(usize, usize, f32)> = vec![];
-                let mut source_columns: Vec<usize> = vec![];
-                let mut euclidean_distances = vec![];
-                let mut tot_ncells_matched = 0;
-
-                let yy = self
-                    .read_columns_dmatrix(cells.iter().cloned())
-                    .expect("failed to read cells");
-
-                for &target_b in target_batches.iter() {
-                    // match cells between source and target batches
-                    let (_, ncol, triplets, source_cells_in_target) = self
-                        .collect_matched_columns_triplets(
-                            cells.iter().cloned(),
-                            target_b,
-                            knn,
-                            true,
-                        )
-                        .expect("failed to read matched cells");
-
-                    matched_triplets.extend(
-                        triplets
-                            .iter()
-                            .map(|(i, j, z_ij)| (*i, *j + tot_ncells_matched, *z_ij)),
-                    );
-
-                    // matched cells within this batch
-                    let zz = CscMatrix::<f32>::from_nonzero_triplets(num_genes, ncol, triplets)
-                        .expect("failed to build z matrix");
-
-                    let matched_possition_in_target: Vec<usize> = source_cells_in_target
-                        .iter()
-                        .map(|c| {
-                            *positions
-                                .get(&c)
-                                .expect("failed to identify the source position")
-                        })
-                        .collect();
-
-                    euclidean_distances.extend(compute_euclidean_distance(
-                        &zz,
-                        &yy,
-                        &matched_possition_in_target,
-                    ));
-
-                    source_columns.extend(matched_possition_in_target);
-                    tot_ncells_matched += ncol;
-                } // for each target batch of step 2.
-
-                ////////////////////////////////////////////////////
-                // a full set of z vectors needed for this sample //
-                ////////////////////////////////////////////////////
-
-                let zz_full = CscMatrix::from_nonzero_triplets(
-                    num_genes,
-                    tot_ncells_matched,
-                    matched_triplets,
-                )
-                .expect("failed to build y matrix");
+                let (y0_matched, source_columns, euclidean_distances) = data_vec
+                    .read_matched_columns_csc(cells.iter().cloned(), &target_batches, knn, true)
+                    .expect("take matching results across batches");
 
                 // Normalize distance for each source cell and take a
                 // weighted average of the matched vectors using this
@@ -322,19 +263,19 @@ impl CollapsingOps for SparseIoVec {
 
                 let mut stat = arc_stat.lock().expect("lock stat");
 
-                for (_, z_pos) in source_column_groups.iter() {
-                    let weights = z_pos
+                for (_, y0_pos) in source_column_groups.iter() {
+                    let weights = y0_pos
                         .iter()
                         .map(|&cell| euclidean_distances[cell])
                         .normalized_exp(norm_target);
 
                     let denom = weights.iter().sum::<f32>();
 
-                    z_pos.iter().zip(weights.iter()).for_each(|(&z_pos, &w)| {
-                        let z = zz_full.get_col(z_pos).unwrap();
-                        let z_rows = z.row_indices();
-                        let z_vals = z.values();
-                        z_rows.iter().zip(z_vals.iter()).for_each(|(&gene, &z)| {
+                    y0_pos.iter().zip(weights.iter()).for_each(|(&k, &w)| {
+                        let y0 = y0_matched.get_col(k).unwrap();
+                        let y0_rows = y0.row_indices();
+                        let y0_vals = y0.values();
+                        y0_rows.iter().zip(y0_vals.iter()).for_each(|(&gene, &z)| {
                             stat.zsum_ds[(gene, sample)] += z * w / denom;
                         });
                     });
@@ -461,7 +402,6 @@ fn optimize(
 }
 
 /// output struct to make the model parameters more accessible
-
 #[derive(Debug)]
 pub struct CollapsingOut {
     pub mu_observed: GammaMatrix,
@@ -472,7 +412,6 @@ pub struct CollapsingOut {
 }
 
 /// a struct to hold the sufficient statistics for the model
-
 pub struct CollapsingStat {
     pub ysum_ds: Mat, // observed sum within each sample
     pub zsum_ds: Mat, // counterfactual sum within each sample

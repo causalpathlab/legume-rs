@@ -8,6 +8,64 @@ use rayon::prelude::*;
 
 use crate::traits::*;
 
+impl<T> DistanceOps for CscMatrix<T>
+where
+    T: nalgebra::RealField + Copy + std::iter::Sum<T>,
+{
+    type Scalar = T;
+    type Other = CscMatrix<T>;
+
+    fn euclidean_distance_matched_columns(
+        &self,
+        other: &Self::Other,
+        matched_columns: &Vec<usize>,
+    ) -> anyhow::Result<Vec<Self::Scalar>> {
+        if matched_columns.len() != self.ncols() {
+            return Err(anyhow::anyhow!("`matched_columns` maps: self -> other"));
+        }
+
+        let ret: Vec<Self::Scalar> = self
+            .col_iter()
+            .zip(matched_columns.iter())
+            .map(|(src_col, &tgt_pos)| {
+                let tgt_col = other.col(tgt_pos);
+
+                let nn = src_col.nrows();
+                let denom = T::from_usize(nn).unwrap_or(T::one());
+
+                let idx_src = src_col.row_indices();
+                let idx_tgt = tgt_col.row_indices();
+                let val_src = src_col.values();
+                let val_tgt = tgt_col.values();
+
+                // sum_g (src[g] - tgt[g])^2 / sum_g 1
+                // sum_g tgt[g]^2 + sum_g src[g]^2 - 2 sum_g tgt[g] * src[g]
+                let mut s: usize = 0;
+                let mut t: usize = 0;
+
+                let tgt_sq_sum = val_tgt.iter().map(|&x| x * x).sum::<T>();
+                let src_sq_sum = val_src.iter().map(|&x| x * x).sum::<T>();
+                let mut overlap = T::zero();
+                while s < idx_src.len() && t < idx_tgt.len() {
+                    if idx_src[s] == idx_tgt[t] {
+                        overlap += val_src[s] * val_tgt[t];
+                        s += 1;
+                        t += 1;
+                    } else if idx_src[s] < idx_tgt[t] {
+                        s += 1;
+                    } else {
+                        t += 1;
+                    }
+                }
+
+                ((src_sq_sum + tgt_sq_sum - overlap - overlap) / denom).sqrt()
+            })
+            .collect();
+
+        Ok(ret)
+    }
+}
+
 impl<T> CompositeOps for DMatrix<T>
 where
     T: nalgebra::RealField + Copy,
