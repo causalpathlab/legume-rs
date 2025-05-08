@@ -21,6 +21,7 @@ pub struct SparseIoVec {
     col_to_group: Option<Vec<usize>>,
     batch_knn_lookup: Option<Vec<ColumnDict<usize>>>,
     col_to_batch: Option<Vec<usize>>,
+    batch_to_cols: Option<Vec<Vec<usize>>>,
     batch_idx_to_name: Option<Vec<Box<str>>>,
 }
 
@@ -44,6 +45,7 @@ impl SparseIoVec {
             col_to_group: None,
             batch_knn_lookup: None,
             col_to_batch: None,
+            batch_to_cols: None,
             batch_idx_to_name: None,
         }
     }
@@ -237,7 +239,7 @@ impl SparseIoVec {
     /// * shape - (nrows, ncols)
     /// * triplets
     /// * distances
-    pub fn matched_columns_triplets_on_target_batch<I>(
+    fn matched_columns_triplets_on_target_batch<I>(
         &self,
         cells: I,
         target_batch: usize,
@@ -575,31 +577,31 @@ impl SparseIoVec {
                 (
                     batch_index,
                     batch_name.to_string().into_boxed_str(),
+                    batch_cells.clone(),
                     create_column_dict(&feature_matrix, batch_cells),
                 )
             })
             .collect::<Vec<_>>();
 
-        idx_name_dict.sort_by_key(|&(idx, _, _)| idx);
+        idx_name_dict.sort_by_key(|&(idx, _, _, _)| idx);
 
-        for (idx, _, dict) in idx_name_dict.iter() {
+        let mut batch_names = vec![];
+        let mut batch_to_cols = vec![];
+        let mut dictionaries = vec![];
+
+        for (idx, name, cols, dict) in idx_name_dict.into_iter() {
             dict.names()
                 .iter()
-                .for_each(|&cell| col_to_batch[cell] = *idx);
+                .for_each(|&cell| col_to_batch[cell] = idx);
+
+            batch_names.push(name);
+            batch_to_cols.push(cols);
+            dictionaries.push(dict);
         }
-
-        let batch_names = idx_name_dict
-            .iter()
-            .map(|(_, name, _)| name.clone())
-            .collect::<Vec<_>>();
-
-        let dictionaries = idx_name_dict
-            .into_iter()
-            .map(|(_, _, dict)| dict)
-            .collect::<Vec<_>>();
 
         self.batch_knn_lookup = Some(dictionaries);
         self.col_to_batch = Some(col_to_batch);
+        self.batch_to_cols = Some(batch_to_cols);
         self.batch_idx_to_name = Some(batch_names);
 
         Ok(())
@@ -621,6 +623,22 @@ impl SparseIoVec {
 
     pub fn num_batches(&self) -> usize {
         self.batch_knn_lookup.as_ref().map_or(0, |v| v.len())
+    }
+
+    pub fn batch_names(&self) -> Option<Vec<Box<str>>> {
+        if let Some(names) = &self.batch_idx_to_name {
+            Some(names.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn batch_to_columns(&self, batch: usize) -> Option<&Vec<usize>> {
+        if let Some(batch_to_cols) = &self.batch_to_cols {
+            Some(&batch_to_cols[batch])
+        } else {
+            None
+        }
     }
 
     pub fn get_batch_membership<I>(&self, cells: I) -> Vec<usize>
