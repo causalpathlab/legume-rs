@@ -1,10 +1,10 @@
 [package]
-name = "cocoa-diff"
+name = "cocoa"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "asap-diff"
+name = "cocoa"
 path = "src/main.rs"
 
 [dependencies]
