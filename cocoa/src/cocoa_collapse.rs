@@ -7,36 +7,15 @@ use matrix_util::utils::partition_by_membership;
 use std::sync::{Arc, Mutex};
 
 pub struct CocoaCollapseIn<'a> {
-    n_genes: usize,
-    n_samples: usize,
-    n_topics: usize,
-    knn: usize,
-    n_opt_iter: Option<usize>,
-    hyper_param: Option<(f32, f32)>,
+    pub n_genes: usize,
+    pub n_samples: usize,
+    pub n_topics: usize,
+    pub knn: usize,
+    pub n_opt_iter: Option<usize>,
+    pub hyper_param: Option<(f32, f32)>,
     pub cell_topic_nk: Mat,                   // cell x cell type topic
     pub sample_to_cells: &'a Vec<Vec<usize>>, // cells within samples
     pub sample_to_exposure: &'a Vec<usize>,   // exposure assignment
-}
-
-impl<'a> CocoaCollapseIn<'a> {
-    pub fn num_genes(&self) -> usize {
-        self.n_genes
-    }
-    pub fn num_samples(&self) -> usize {
-        self.n_samples
-    }
-    pub fn num_topics(&self) -> usize {
-        self.n_topics
-    }
-    pub fn knn(&self) -> usize {
-        self.knn
-    }
-    pub fn n_opt(&self) -> Option<usize> {
-        self.n_opt_iter
-    }
-    pub fn hyper_parameters(&self) -> Option<(f32, f32)> {
-        self.hyper_param
-    }
 }
 
 pub trait CocoaCollapseOps {
@@ -45,10 +24,10 @@ pub trait CocoaCollapseOps {
 
 impl CocoaCollapseOps for SparseIoVec {
     fn collect_stat<'a>(&self, cocoa_input: &CocoaCollapseIn<'a>) -> anyhow::Result<CocoaStat<'a>> {
-        let n_genes = cocoa_input.num_genes();
+        let n_genes = cocoa_input.n_genes;
         let n_cells = self.num_columns()?;
-        let n_topics = cocoa_input.num_topics();
-        let n_samples = cocoa_input.num_samples();
+        let n_topics = cocoa_input.n_topics;
+        let n_samples = cocoa_input.n_samples;
 
         assert_eq!(n_samples, self.num_batches());
         assert_eq!(n_cells, self.num_columns()?);
@@ -62,8 +41,8 @@ impl CocoaCollapseOps for SparseIoVec {
             n_genes,
             n_topics,
             exposures,
-            cocoa_input.n_opt(),
-            cocoa_input.hyper_parameters(),
+            cocoa_input.n_opt_iter,
+            cocoa_input.hyper_param,
         );
 
         self.visit_column_by_samples(
@@ -84,10 +63,10 @@ fn collect_stat_each_sample(
     input: &CocoaCollapseIn,
     arc_stat: Arc<Mutex<&mut CocoaStat>>,
 ) {
-    debug_assert_eq!(data.num_rows().expect("data # features"), input.num_genes());
-    debug_assert_eq!(input.num_genes(), data.num_batches());
+    debug_assert_eq!(data.num_rows().expect("data # features"), input.n_genes);
+    debug_assert_eq!(input.n_genes, data.num_batches());
 
-    let kk = input.num_topics();
+    let kk = input.n_topics;
     let mut z_nk = Mat::zeros(cells.len(), kk);
 
     for &j in cells.iter() {
@@ -106,12 +85,12 @@ fn collect_stat_each_sample(
 
     let my_exposure = input.sample_to_exposure[this_sample];
 
-    let target_samples: Vec<usize> = (0..input.num_samples())
+    let target_samples: Vec<usize> = (0..input.n_samples)
         .filter(|&s| input.sample_to_exposure[s] != my_exposure)
         .collect();
 
     let (y0_matched_dm, matched, distances) = data
-        .read_matched_columns_csc(cells.iter().cloned(), &target_samples, input.knn(), true)
+        .read_matched_columns_csc(cells.iter().cloned(), &target_samples, input.knn, true)
         .expect("read y0 cells");
 
     // sum_j (sum_a y0[g,a] * w[j,a]) * z[j,k] * ind[j,s]
@@ -140,7 +119,7 @@ fn collect_stat_each_sample(
 
     // update global statistics
     let mut stat = arc_stat.lock().expect("lock stat");
-    for k in 0..input.num_topics() {
+    for k in 0..input.n_topics {
         let mut y1_k_s = stat.y1_stat(k).column_mut(this_sample);
         y1_k_s += &y1_dk.column(k);
         let mut y0_k_s = stat.y0_stat(k).column_mut(this_sample);

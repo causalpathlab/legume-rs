@@ -65,6 +65,14 @@ impl<'a> CocoaStat<'a> {
         &mut self.size_s_vec[k]
     }
 
+    pub fn estimate_parameters(&self) -> anyhow::Result<Vec<CocoaGammaOut>> {
+        let mut ret = vec![];
+        for k in 0..self.n_topics {
+            ret.push(self.optimize_each_topic(k)?);
+        }
+        Ok(ret)
+    }
+
     pub fn optimize_each_topic(&self, k: usize) -> anyhow::Result<CocoaGammaOut> {
         let size_s = &self.size_s_vec[k];
         let y1_ds = &self.y1_sum_ds_vec[k];

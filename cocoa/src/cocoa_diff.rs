@@ -1,13 +1,10 @@
 use crate::cocoa_collapse::*;
 use crate::cocoa_common::*;
-use crate::cocoa_stat::*;
 
-pub use log::info;
-pub use matrix_util::common_io::{
-    extension, read_lines, read_lines_of_words, remove_file, write_types,
-};
-// pub use matrix_util::utils::partition_by_membership;
 pub use clap::Parser;
+pub use log::info;
+pub use matrix_util::common_io::{extension, read_lines, read_lines_of_words};
+use matrix_util::traits::IoOps;
 pub use std::sync::Arc;
 
 use std::collections::HashMap;
@@ -32,7 +29,7 @@ pub struct DiffArgs {
 
     /// Latent topic assignment file
     #[arg(long, short)]
-    topic_assignment_file: Box<str>,
+    topic_assignment_file: Option<Box<str>>,
 
     /// #k-nearest neighbours within each condition
     #[arg(long, short = 'n', default_value_t = 10)]
@@ -46,6 +43,18 @@ pub struct DiffArgs {
     #[arg(long, default_value_t = 100)]
     block_size: usize,
 
+    /// number of iterations for optimization
+    #[arg(long)]
+    num_opt_iter: Option<usize>,
+
+    /// hyperparameter a0 in Gamma(a0,b0)
+    #[arg(long, default_value_t = 1.0)]
+    a0: f32,
+
+    /// hyperparameter b0 in Gamma(a0,b0)
+    #[arg(long, default_value_t = 1.0)]
+    b0: f32,
+
     /// Output header
     #[arg(long, short, required = true)]
     out: Box<str>,
@@ -55,27 +64,44 @@ pub struct DiffArgs {
     verbose: bool,
 }
 
+/// Run CoCoA differential analysis
 pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
-    info!("Reading data files...");
-    let mut data = read_input_data(args.clone())?;
+    let data = read_input_data(args.clone())?;
 
-    // let n_samples = data.sparse_data.num_batches();
+    let sample_to_cells = (0..data.sparse_data.num_batches())
+        .map(|b| data.sparse_data.batch_to_columns(b).unwrap().clone())
+        .collect::<Vec<_>>();
 
-    // let cocoa_input = &CocoaCollapseIn{
-    // 	n_genes: data.sparse_data.num_rows(),
-    // 	n_samples: data.sparse_data.num_batches(),
-    // };
+    let n_topics = data.cell_topic.ncols();
 
-    // data.sparse_data.collect_stat(cocoa_input);
+    let cocoa_input = &CocoaCollapseIn {
+        n_genes: data.sparse_data.num_rows()?,
+        n_samples: data.sparse_data.num_batches(),
+        n_topics,
+        knn: args.knn,
+        n_opt_iter: args.num_opt_iter,
+        hyper_param: Some((args.a0, args.b0)),
+        cell_topic_nk: data.cell_topic,
+        sample_to_cells: &sample_to_cells,
+        sample_to_exposure: &data.sample_to_exposure,
+    };
 
-    // data.file_data.batch_to_columns(batch);
+    let cocoa_stat = data.sparse_data.collect_stat(cocoa_input)?;
 
+    let parameters = cocoa_stat.estimate_parameters()?;
+
+    let out_dir = args.out.to_string() + "/";
+
+    // for k in 0..n_topics {
+    //     let out = cocoa_stat.optimize_each_topic(k)?;
+    // }
     Ok(())
 }
 
 struct DiffData {
     sparse_data: SparseIoVec,
     sample_to_exposure: Vec<usize>,
+    cell_topic: Mat,
 }
 
 fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
@@ -171,8 +197,27 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
         sample_to_exposure.len()
     );
 
+    let cell_topic = match args.topic_assignment_file.as_ref() {
+        Some(file) => {
+            info!("cell topic data {}", file);
+            Mat::from_tsv(file, None)?
+        }
+        None => {
+            info!("ignoring cell types");
+            Mat::from_element(sparse_data.num_columns()?, 1, 1.0)
+        }
+    };
+
+    if cell_topic.nrows() != sparse_data.num_columns()? {
+        return Err(anyhow::anyhow!(
+            "topic assignment matrix should be a tab-separated file with {} rows",
+            sparse_data.num_columns()?
+        ));
+    }
+
     Ok(DiffData {
         sparse_data,
         sample_to_exposure,
+        cell_topic,
     })
 }

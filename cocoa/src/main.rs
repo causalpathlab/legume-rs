@@ -1,19 +1,12 @@
+mod cocoa_collapse;
 mod cocoa_common;
 mod cocoa_diff;
-mod cocoa_collapse;
 mod cocoa_stat;
 mod simulate;
 
-use crate::cocoa_common::*;
 use crate::cocoa_diff::*;
 
-use matrix_param::traits::{Inference, ParamIo, TwoStatParam};
-use matrix_util::common_io::{
-    extension, read_lines, read_lines_of_words, remove_file, write_types,
-};
-use matrix_util::traits::*;
-
-use clap::{Subcommand, ValueEnum};
+use clap::Subcommand;
 
 ///
 #[derive(Parser, Debug)]
@@ -36,7 +29,7 @@ fn main() -> anyhow::Result<()> {
 
     match &cli.commands {
         Commands::Diff(args) => {
-            //
+            run_cocoa_diff(args.clone())?;
         }
     }
 
