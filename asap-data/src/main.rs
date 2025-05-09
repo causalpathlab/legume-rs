@@ -879,11 +879,11 @@ fn run_build_from_h5ad(cmd_args: &FromH5adArgs) -> anyhow::Result<()> {
     info!("Opened {}", data_file.clone());
 
     let group_name = &cmd_args.data_group_name.to_string();
-    let data_name = &cmd_args.data_name.to_string();
-    let indices_name = &cmd_args.indices_name.to_string();
-    let indptr_name = &cmd_args.indptr_name.to_string();
-    let row_name = &cmd_args.row_name.to_string();
-    let column_name = &cmd_args.column_name.to_string();
+    let data_name = &cmd_args.data_field.to_string();
+    let indices_name = &cmd_args.indices_field.to_string();
+    let indptr_name = &cmd_args.indptr_field.to_string();
+    let row_name = &cmd_args.row_name_field.to_string();
+    let column_name = &cmd_args.column_name_field.to_string();
 
     if let Ok(data) = file.group(group_name) {
         if let (Ok(values), Ok(indices), Ok(indptr)) = (
