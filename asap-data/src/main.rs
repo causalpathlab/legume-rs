@@ -100,7 +100,7 @@ enum Commands {
     /// Build faster backend data from `mtx`
     FromMtx(FromMtxArgs),
 
-    /// Migrate from `h5ad`'s `csr_matrix` data
+    /// Build from `h5ad`'s `csr_matrix` data
     FromH5ad(FromH5adArgs),
 
     /// List items in `h5ad` file
@@ -194,12 +194,13 @@ pub struct ListH5adArgs {
 
 #[derive(Args, Debug)]
 pub struct FromH5adArgs {
-    /// `hdf5`/`h5` file in the `h5ad` format. This function will look
-    /// for `csr_matrix` triplets: (a) data/values `/X/data` (b)
-    /// indices `/X/indices` (c) pointers `/X/indptr`. Additionally,
-    /// if rows/genes/features `/var` and columns/cells/samples
-    /// `/obs/_index` are available, they will be included. However,
-    /// other items in `obs` and `obsm` will be ignored.
+    /// `hdf5`/`h5` file in the `h5ad` format (used in `scanpy` and
+    /// `cellxgene`). This function will look for `csr_matrix`
+    /// triplets: (a) data/values `/X/data` (b) indices `/X/indices`
+    /// (c) pointers `/X/indptr`. Additionally, if rows/genes/features
+    /// `/var` and columns/cells/samples `/obs/_index` are available,
+    /// they will be included. However, other items in `obs` and
+    /// `obsm` will be ignored.
     h5_file: Box<str>,
 
     /// backend for the output file
@@ -210,29 +211,29 @@ pub struct FromH5adArgs {
     #[arg(short, long)]
     output: Option<Box<str>>,
 
-    /// The group for triplets
+    /// group name for sparse data triplets
     #[arg(short = 'x', long, default_value = "X")]
     data_group_name: Box<str>,
 
     /// triplet values
     #[arg(short = 'd', long, default_value = "data")]
-    data_name: Box<str>,
+    data_field: Box<str>,
 
     /// indices values
     #[arg(short = 'i', long, default_value = "indices")]
-    indices_name: Box<str>,
+    indices_field: Box<str>,
 
     /// indptr values
     #[arg(short = 'p', long, default_value = "indptr")]
-    indptr_name: Box<str>,
+    indptr_field: Box<str>,
 
-    /// row names
+    /// group/dataset name for rows/genes/features
     #[arg(short = 'r', long, default_value = "var")]
-    row_name: Box<str>,
+    row_name_field: Box<str>,
 
-    /// column names
+    /// group/dataset name for columns/cells
     #[arg(short = 'c', long, default_value = "obs/_index")]
-    column_name: Box<str>,
+    column_name_field: Box<str>,
 
     /// verbose mode
     #[arg(short, long, action = ArgAction::Count)]
