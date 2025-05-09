@@ -28,6 +28,9 @@ fn main() -> anyhow::Result<()> {
         Commands::FromMtx(args) => {
             run_build_from_mtx(args)?;
         }
+        Commands::ListH5ad(args) => {
+            list_h5ad(args)?;
+        }
         Commands::FromH5ad(args) => {
             run_build_from_h5ad(args)?;
         }
@@ -99,6 +102,9 @@ enum Commands {
 
     /// Migrate from `h5ad`'s `csr_matrix` data
     FromH5ad(FromH5adArgs),
+
+    /// List items in `h5ad` file
+    ListH5ad(ListH5adArgs),
 
     /// Sort rows according to the order of row names specified in a
     /// row name file
@@ -179,6 +185,11 @@ pub struct FromMtxArgs {
     /// verbose mode
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
+}
+
+#[derive(Args, Debug)]
+pub struct ListH5adArgs {
+    h5_file: Box<str>,
 }
 
 #[derive(Args, Debug)]
@@ -803,6 +814,29 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn list_h5ad(cmd_args: &ListH5adArgs) -> anyhow::Result<()> {
+    let data_file = cmd_args.h5_file.clone();
+    let file = hdf5::File::open(data_file.to_string())?;
+    info!("Opened {}", data_file.clone());
+
+    fn list_group(group: &hdf5::Group, indent: usize) -> hdf5::Result<()> {
+        for member in group.member_names()? {
+            println!("{:indent$}{}", "", member, indent = indent);
+
+            if let Ok(obj) = group.group(&member) {
+                if let Ok(subgroup) = obj.as_group() {
+                    list_group(&subgroup, indent + 2)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    list_group(&file, 0)?;
+
+    Ok(())
+}
+
 fn run_build_from_h5ad(cmd_args: &FromH5adArgs) -> anyhow::Result<()> {
     if cmd_args.verbose > 0 {
         std::env::set_var("RUST_LOG", "info");
@@ -858,12 +892,12 @@ fn run_build_from_h5ad(cmd_args: &FromH5adArgs) -> anyhow::Result<()> {
         ) {
             use rayon::prelude::*;
             let indptr = indptr.read_1d::<usize>()?.to_vec();
-            let nrows = indptr.len() - 1;
+            let ncols = indptr.len() - 1;
 
             let mut triplets = vec![];
             let arc_triplets = Arc::new(Mutex::new(&mut triplets));
 
-            (0..nrows).into_par_iter().for_each(|h5ad_row| {
+            (0..ncols).into_par_iter().for_each(|h5ad_row| {
                 let j = h5ad_row as u64;
                 let start = indptr[h5ad_row];
                 let end = indptr[h5ad_row + 1];
@@ -885,8 +919,10 @@ fn run_build_from_h5ad(cmd_args: &FromH5adArgs) -> anyhow::Result<()> {
                     .extend(triplets_slice);
             });
 
-            let ncols = triplets.iter().map(|&(_, j, _)| j).max().unwrap_or(0_u64) as usize + 1;
+            let nrows = triplets.iter().map(|&(i, _, _)| i).max().unwrap_or(0_u64) as usize + 1;
             let nnz = triplets.len();
+
+            info!("Read {} non-zero elements", nnz);
 
             let row_names: Vec<Box<str>> = match file.dataset(row_name) {
                 Ok(rows) => rows
@@ -894,7 +930,10 @@ fn run_build_from_h5ad(cmd_args: &FromH5adArgs) -> anyhow::Result<()> {
                     .iter()
                     .map(|x| x.to_string().into_boxed_str())
                     .collect(),
-                _ => (0..nrows).map(|x| x.to_string().into_boxed_str()).collect(),
+                _ => {
+                    info!("row (feature) names not found");
+                    (0..nrows).map(|x| x.to_string().into_boxed_str()).collect()
+                }
             };
 
             assert_eq!(nrows, row_names.len());
@@ -905,7 +944,10 @@ fn run_build_from_h5ad(cmd_args: &FromH5adArgs) -> anyhow::Result<()> {
                     .iter()
                     .map(|x| x.to_string().into_boxed_str())
                     .collect(),
-                _ => (0..ncols).map(|x| x.to_string().into_boxed_str()).collect(),
+                _ => {
+                    info!("column (cell) names not found");
+                    (0..ncols).map(|x| x.to_string().into_boxed_str()).collect()
+                }
             };
 
             assert_eq!(ncols, column_names.len());
