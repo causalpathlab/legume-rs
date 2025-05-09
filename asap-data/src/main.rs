@@ -198,9 +198,9 @@ pub struct FromH5adArgs {
     /// `cellxgene`). This function will look for `csr_matrix`
     /// triplets: (a) data/values `/X/data` (b) indices `/X/indices`
     /// (c) pointers `/X/indptr`. Additionally, if rows/genes/features
-    /// `/var` and columns/cells/samples `/obs/_index` are available,
-    /// they will be included. However, other items in `obs` and
-    /// `obsm` will be ignored.
+    /// `/var/_index` and columns/cells/samples `/obs/_index` are
+    /// available, they will be included. However, other items in
+    /// `obs` and `obsm` will be ignored.
     h5_file: Box<str>,
 
     /// backend for the output file
@@ -228,7 +228,7 @@ pub struct FromH5adArgs {
     indptr_field: Box<str>,
 
     /// group/dataset name for rows/genes/features
-    #[arg(short = 'r', long, default_value = "var")]
+    #[arg(short = 'r', long, default_value = "var/_index")]
     row_name_field: Box<str>,
 
     /// group/dataset name for columns/cells
