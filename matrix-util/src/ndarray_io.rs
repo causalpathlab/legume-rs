@@ -28,8 +28,8 @@ where
             return Err(anyhow::anyhow!("No data in file"));
         }
 
-        let nrows = data[0].len();
-        let ncols = data.len();
+        let ncols = data[0].len();
+        let nrows = data.len();
         let data = data.into_iter().flatten().collect::<Vec<_>>();
 
         Ok(Array2::from_shape_vec((nrows, ncols), data)?)

@@ -1,8 +1,10 @@
-use crate::cocoa_collapse::*;
-use crate::cocoa_common::*;
+use crate::alg_collapse::*;
+use crate::common::*;
 
 pub use clap::Parser;
-pub use log::info;
+pub use log::{info, warn};
+use matrix_param::traits::Inference;
+use matrix_param::traits::ParamIo;
 pub use matrix_util::common_io::{extension, read_lines, read_lines_of_words};
 use matrix_util::traits::IoOps;
 pub use std::sync::Arc;
@@ -12,22 +14,22 @@ use std::collections::HashSet;
 
 #[derive(Parser, Debug, Clone)]
 pub struct DiffArgs {
-    /// Data files of either `.zarr` or `.h5` format. All the formats
+    /// data files of either `.zarr` or `.h5` format. All the formats
     /// in the given list should be identical. We can convert `.mtx`
     /// to `.zarr` or `.h5` using `asap-data build` command.
     #[arg(required = true)]
     data_files: Vec<Box<str>>,
 
-    /// Sample membership files (comma-separated names). Each bach
+    /// sample membership files (comma-separated names). Each bach
     /// file should match with each data file.
     #[arg(long, short, value_delimiter(','))]
     sample_files: Vec<Box<str>>,
 
-    /// Each line corresponds to (1) sample name and (2) exposure name
+    /// each line corresponds to (1) sample name and (2) exposure name
     #[arg(long, short)]
     exposure_assignment_file: Box<str>,
 
-    /// Latent topic assignment file
+    /// latent topic assignment file
     #[arg(long, short)]
     topic_assignment_file: Option<Box<str>>,
 
@@ -35,11 +37,11 @@ pub struct DiffArgs {
     #[arg(long, short = 'n', default_value_t = 10)]
     knn: usize,
 
-    /// Random projection dimension to project the data.
-    #[arg(long, short = 'p', default_value_t = 30)]
+    /// projection dimension to account for confounding factors.
+    #[arg(long, short = 'p', default_value_t = 10)]
     proj_dim: usize,
 
-    /// Block_size for parallel processing
+    /// block_size for parallel processing
     #[arg(long, default_value_t = 100)]
     block_size: usize,
 
@@ -55,7 +57,7 @@ pub struct DiffArgs {
     #[arg(long, default_value_t = 1.0)]
     b0: f32,
 
-    /// Output header
+    /// output header
     #[arg(long, short, required = true)]
     out: Box<str>,
 
@@ -66,18 +68,21 @@ pub struct DiffArgs {
 
 /// Run CoCoA differential analysis
 pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
-    let data = read_input_data(args.clone())?;
+    let mut data = read_input_data(args.clone())?;
+    let exposure_names = data.exposure_names;
+
+    data.cell_topic
+        .row_iter_mut()
+        .for_each(|mut r| r.unscale_mut(r.sum()));
 
     let sample_to_cells = (0..data.sparse_data.num_batches())
         .map(|b| data.sparse_data.batch_to_columns(b).unwrap().clone())
         .collect::<Vec<_>>();
 
-    let n_topics = data.cell_topic.ncols();
-
     let cocoa_input = &CocoaCollapseIn {
         n_genes: data.sparse_data.num_rows()?,
         n_samples: data.sparse_data.num_batches(),
-        n_topics,
+        n_topics: data.cell_topic.ncols(),
         knn: args.knn,
         n_opt_iter: args.num_opt_iter,
         hyper_param: Some((args.a0, args.b0)),
@@ -86,21 +91,35 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         sample_to_exposure: &data.sample_to_exposure,
     };
 
+    info!("Collecting statistics...");
     let cocoa_stat = data.sparse_data.collect_stat(cocoa_input)?;
 
+    info!("Optimizing parameters...");
     let parameters = cocoa_stat.estimate_parameters()?;
 
-    let out_dir = args.out.to_string() + "/";
+    for param in parameters.iter() {
+        let tau = &param.exposure;
+
+        // gene <tab> exposure <tab> log mean <tab> log sd
+        tau.posterior_log_mean();
+        tau.posterior_log_sd();
+
+        // let x = &param.exposure.to_tsv(header);
+    }
+
+    // let out_dir = args.out.to_string() + "/";
 
     // for k in 0..n_topics {
     //     let out = cocoa_stat.optimize_each_topic(k)?;
     // }
+    info!("Done");
     Ok(())
 }
 
 struct DiffData {
     sparse_data: SparseIoVec,
     sample_to_exposure: Vec<usize>,
+    exposure_names: Vec<Box<str>>,
     cell_topic: Mat,
 }
 
@@ -120,7 +139,7 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
         return Err(anyhow::anyhow!("# sample files != # of data files"));
     }
 
-    let (exposure, _) = read_lines_of_words(&args.exposure_assignment_file, 0)?;
+    let (exposure, _) = read_lines_of_words(&args.exposure_assignment_file, -1)?;
 
     let sample_to_exposure: HashMap<_, _> = exposure
         .into_iter()
@@ -138,6 +157,12 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
         .collect();
 
     let n_exposure = exposure_id.len();
+    let mut exposure_names = vec![String::from("").into_boxed_str(); n_exposure];
+    for (x, &id) in exposure_id.iter() {
+        if id < n_exposure {
+            exposure_names[id] = x.clone();
+        }
+    }
     info!("{} exposure groups", n_exposure);
 
     let mut sparse_data = SparseIoVec::new();
@@ -159,7 +184,7 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
         let this_data = open_sparse_matrix(&this_data_file, &backend)?;
         let this_data_samples = read_lines(&sample_file)?;
 
-        if this_data_samples.len() != sparse_data.num_columns().unwrap_or(0) {
+        if this_data_samples.len() != this_data.num_columns().unwrap_or(0) {
             return Err(anyhow::anyhow!(
                 "{} and {} don't match",
                 sample_file,
@@ -174,12 +199,15 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
 
     let proj_out = sparse_data.project_columns(args.proj_dim, Some(args.block_size))?;
     let proj_kn = &proj_out.proj;
-
     sparse_data.register_batches(proj_kn, &cell_to_sample)?;
 
     let samples = sparse_data
         .batch_names()
         .ok_or(anyhow::anyhow!("empty sample name in sparse data"))?;
+
+    // for (s, e) in sample_to_exposure.iter() {
+    //     info!("Assign sample {} to exposure {}", s, e);
+    // }
 
     let sample_to_exposure: Vec<usize> = samples
         .iter()
@@ -187,6 +215,7 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
             if let Some(exposure) = sample_to_exposure.get(s) {
                 exposure_id[exposure]
             } else {
+                warn!("No exposure was assigned for sample {}, but it's kept for controlling confounders.", s);
                 n_exposure
             }
         })
@@ -210,7 +239,8 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
 
     if cell_topic.nrows() != sparse_data.num_columns()? {
         return Err(anyhow::anyhow!(
-            "topic assignment matrix should be a tab-separated file with {} rows",
+            "topic assignment matrix {} vs {} rows",
+            cell_topic.nrows(),
             sparse_data.num_columns()?
         ));
     }
@@ -218,6 +248,7 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
     Ok(DiffData {
         sparse_data,
         sample_to_exposure,
+        exposure_names,
         cell_topic,
     })
 }

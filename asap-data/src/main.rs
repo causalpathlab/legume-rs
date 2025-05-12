@@ -335,23 +335,23 @@ pub struct InfoArgs {
 pub struct RunSimulateArgs {
     /// number of rows
     #[arg(short, long)]
-    pub rows: usize,
+    rows: usize,
 
     /// number of columns
     #[arg(short, long)]
-    pub cols: usize,
+    cols: usize,
 
     /// depth per column
     #[arg(short, long, default_value_t = 10000)]
-    pub depth: usize,
+    depth: usize,
 
     /// number of factors
     #[arg(short, long, default_value_t = 1)]
-    pub factors: usize,
+    factors: usize,
 
     /// number of batches
     #[arg(short, long, default_value_t = 1)]
-    pub batches: usize,
+    batches: usize,
 
     /// output file header: {output}.{backend}
     #[arg(short, long)]
@@ -359,15 +359,15 @@ pub struct RunSimulateArgs {
 
     /// overdispersion
     #[arg(long, default_value_t = 10.)]
-    pub overdisp: f32,
+    overdisp: f32,
 
     /// random seed
     #[arg(long, default_value_t = 42)]
-    pub rseed: u64,
+    rseed: u64,
 
     /// save mtx
     #[arg(long, default_value_t = false)]
-    pub save_mtx: bool,
+    save_mtx: bool,
 
     /// backend
     #[arg(long, value_enum, default_value = "zarr")]
@@ -1177,11 +1177,11 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
 
     let mtx_shape = (sim_args.rows, sim_args.cols, sim.triplets.len());
 
-    let rows: Vec<Box<str>> = (1..(sim_args.rows + 1))
+    let rows: Vec<Box<str>> = (0..cmd_args.rows)
         .map(|i| i.to_string().into_boxed_str())
         .collect();
 
-    let cols: Vec<Box<str>> = (1..(sim_args.cols + 1))
+    let cols: Vec<Box<str>> = (0..cmd_args.cols)
         .map(|i| i.to_string().into_boxed_str())
         .collect();
 

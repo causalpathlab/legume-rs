@@ -1,4 +1,4 @@
-use crate::cocoa_common::*;
+use crate::common::*;
 use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::Inference;
 use matrix_param::traits::*;
@@ -84,11 +84,21 @@ impl<'a> CocoaStat<'a> {
         debug_assert_eq!(y1_ds.nrows(), y0_ds.nrows());
 
         let n_exposures = self.n_exposures;
+
+        let sample_to_exposure: Vec<_> = self
+            .sample_to_exposure
+            .into_iter()
+            .enumerate()
+            .filter_map(|(s, &x)| if x < n_exposures { Some((s, x)) } else { None })
+            .collect();
+
         let mut y1_dx = Mat::zeros(y1_ds.nrows(), n_exposures);
 
-        for (s, &x) in self.sample_to_exposure.iter().enumerate() {
-            let mut y = y1_dx.column_mut(x);
-            y += &y1_ds.column(s);
+        for &(s, x) in sample_to_exposure.iter() {
+            if x < y1_dx.ncols() {
+                let mut y = y1_dx.column_mut(x);
+                y += &y1_ds.column(s);
+            }
         }
 
         // model 1: sum_s ( y[g,s] * log(mu[g,s] * tau[g,x(s)]) - n[s] * mu[g,s] * tau[g,x(s)] )
@@ -110,12 +120,11 @@ impl<'a> CocoaStat<'a> {
             //             size[s] * tau[g,x(s)] + size[s]
             let tau_dx = tau_param_dx.posterior_mean();
 
-            for (s, &x) in self.sample_to_exposure.iter().enumerate() {
+            for &(s, x) in sample_to_exposure.iter() {
                 denom_ds
                     .column_mut(s)
                     .copy_from(&tau_dx.column(x).scale(size_s[s]).add_scalar(size_s[s]));
             }
-
             mu_param_ds.update_stat(&(y1_ds + y0_ds), &denom_ds);
             mu_param_ds.calibrate();
 
@@ -125,15 +134,15 @@ impl<'a> CocoaStat<'a> {
             //             sum_s mu[g,s] I{x(s)=x} * n[s]
             let mu_ds = mu_param_ds.posterior_mean();
 
-            for (s, &x) in self.sample_to_exposure.iter().enumerate() {
+            for &(s, x) in sample_to_exposure.iter() {
                 denom_dx
                     .column_mut(x)
                     .copy_from(&mu_ds.column(s).scale(size_s[s]));
             }
-
             tau_param_dx.update_stat(&y1_dx, &denom_dx);
             tau_param_dx.calibrate();
         }
+
         Ok(CocoaGammaOut {
             shared: mu_param_ds,
             exposure: tau_param_dx,
