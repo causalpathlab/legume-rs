@@ -1,3 +1,4 @@
+use indicatif::ParallelProgressIterator;
 use log::info;
 use matrix_util::common_io::write_lines;
 use matrix_util::dmatrix_io::*;
@@ -135,6 +136,7 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
         .column_iter()
         .enumerate()
         .par_bridge()
+        .progress_count(nn as u64)
         .map(|(j, theta_j)| {
             let mut rng = rand::rngs::StdRng::seed_from_u64(rseed + j as u64);
             let b = batch_membership[j]; // batch index

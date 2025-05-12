@@ -1,10 +1,11 @@
-mod cocoa_collapse;
-mod cocoa_common;
-mod cocoa_diff;
-mod cocoa_stat;
-mod simulate;
+mod alg_collapse;
+mod common;
+mod run_diff;
+mod stat;
+mod run_sim;
 
-use crate::cocoa_diff::*;
+use crate::run_diff::*;
+use crate::run_sim::*;
 
 use clap::Subcommand;
 
@@ -20,6 +21,9 @@ struct Cli {
 enum Commands {
     /// Differential expression analysis
     Diff(DiffArgs),
+
+    /// Simulate differential expression data
+    Simulate(SimArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -31,6 +35,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Diff(args) => {
             run_cocoa_diff(args.clone())?;
         }
+        Commands::Simulate(args) => {
+	    run_diff_data(args.clone())?;
+	}
     }
 
     Ok(())

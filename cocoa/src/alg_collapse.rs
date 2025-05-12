@@ -1,5 +1,5 @@
-use crate::cocoa_common::*;
-use crate::cocoa_stat::*;
+use crate::common::*;
+use crate::stat::*;
 
 use asap_embed::asap_normalization::NormalizeDistance;
 use matrix_util::utils::partition_by_membership;
@@ -63,15 +63,20 @@ fn collect_stat_each_sample(
     input: &CocoaCollapseIn,
     arc_stat: Arc<Mutex<&mut CocoaStat>>,
 ) {
-    debug_assert_eq!(data.num_rows().expect("data # features"), input.n_genes);
-    debug_assert_eq!(input.n_genes, data.num_batches());
+    assert_eq!(data.num_rows().expect("data # features"), input.n_genes);
+    assert_eq!(input.n_samples, data.num_batches());
 
     let kk = input.n_topics;
-    let mut z_nk = Mat::zeros(cells.len(), kk);
 
-    for &j in cells.iter() {
-        let mut z_n = z_nk.row_mut(j);
-        z_n.copy_from(&input.cell_topic_nk.row(j));
+    // let mut z_nk = Mat::zeros(cells.len(), kk);
+    // for (i, &j) in cells.iter().enumerate() {
+    //     let mut z_n = z_nk.row_mut(i);
+    //     z_n.copy_from(&input.cell_topic_nk.row(j));
+    // }
+
+    let mut size_k = DVec::zeros(kk);
+    for y1_col in cells.iter().cloned() {
+        size_k += input.cell_topic_nk.row(y1_col).transpose();
     }
 
     let y1_dn = data
@@ -79,31 +84,47 @@ fn collect_stat_each_sample(
         .expect("read y1 cells");
 
     // sum_j y1[g,j] * z[j,k] * ind[j,s]
-    let y1_dk = y1_dn * &z_nk;
+    let mut y1_dk = Mat::zeros(y1_dn.nrows(), kk);
+    y1_dn
+        .col_iter()
+        .zip(cells.iter().cloned())
+        .for_each(|(y, y1_col)| {
+            let z_k = &input.cell_topic_nk.row(y1_col);
+
+            let y_rows = y.row_indices();
+            let y_vals = y.values();
+
+            y_rows.iter().zip(y_vals.iter()).for_each(|(&g, &y_gj)| {
+                for (k, &z_jk) in z_k.iter().enumerate() {
+                    y1_dk[(g, k)] += z_jk * y_gj;
+                }
+            })
+        });
 
     let mut y0_dk = Mat::zeros(y1_dk.nrows(), y1_dk.ncols());
 
-    let my_exposure = input.sample_to_exposure[this_sample];
+    let this_exposure = input.sample_to_exposure[this_sample];
 
-    let target_samples: Vec<usize> = (0..input.n_samples)
-        .filter(|&s| input.sample_to_exposure[s] != my_exposure)
+    let control_samples: Vec<usize> = (0..input.n_samples)
+        .filter(|&s| input.sample_to_exposure[s] != this_exposure)
         .collect();
 
     let (y0_matched_dm, matched, distances) = data
-        .read_matched_columns_csc(cells.iter().cloned(), &target_samples, input.knn, true)
+        .read_matched_columns_csc(cells.iter().cloned(), &control_samples, input.knn, true)
         .expect("read y0 cells");
 
     // sum_j (sum_a y0[g,a] * w[j,a]) * z[j,k] * ind[j,s]
     let y1_to_y0 = partition_by_membership(&matched, None);
-    let target_exp_sum = 2_f32.ln();
+    let target_exponential_sum = 2_f32.ln();
+
     for (y1_col, y0_cols) in y1_to_y0 {
         let weights = y0_cols
             .iter()
             .map(|&j| distances[j])
-            .normalized_exp(target_exp_sum);
+            .normalized_exp(target_exponential_sum);
         let denom = weights.iter().sum::<f32>();
 
-        let z_k = &z_nk.row(y1_col);
+        let z_k = &input.cell_topic_nk.row(y1_col);
 
         y0_cols.iter().zip(weights.iter()).for_each(|(&a, &w_j)| {
             let y0_a = y0_matched_dm.get_col(a).unwrap();
@@ -124,6 +145,6 @@ fn collect_stat_each_sample(
         y1_k_s += &y1_dk.column(k);
         let mut y0_k_s = stat.y0_stat(k).column_mut(this_sample);
         y0_k_s += &y0_dk.column(k);
-        stat.size_stat(k)[this_sample] += &z_nk.column(k).sum();
+        stat.size_stat(k)[this_sample] += size_k[k];
     }
 }
