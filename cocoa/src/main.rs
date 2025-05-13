@@ -1,8 +1,9 @@
 mod alg_collapse;
 mod common;
 mod run_diff;
-mod stat;
 mod run_sim;
+mod stat;
+mod util;
 
 use crate::run_diff::*;
 use crate::run_sim::*;
@@ -36,8 +37,8 @@ fn main() -> anyhow::Result<()> {
             run_cocoa_diff(args.clone())?;
         }
         Commands::Simulate(args) => {
-	    run_diff_data(args.clone())?;
-	}
+            run_diff_data(args.clone())?;
+        }
     }
 
     Ok(())

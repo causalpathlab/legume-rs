@@ -30,7 +30,13 @@ num-traits = "0.2.19"
 instant-distance = "0.6"
 indicatif = { version = "0.17.9", features = ["rayon"] }
 
+parquet = { version = "55" }
+env_logger = { version = "0.11" }
+log = { version = "0.4" }
+
 asap-data = { path = "asap-data"}
 asap-embed = { path = "asap-embed" }
 matrix-util = { path = "matrix-util" }
 candle-util = { path = "candle-util" }
+
+

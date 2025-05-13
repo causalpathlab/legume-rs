@@ -1,5 +1,5 @@
 use crate::common::*;
-use matrix_param::dmatrix_gamma::*;
+use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::Inference;
 use matrix_param::traits::*;
 
