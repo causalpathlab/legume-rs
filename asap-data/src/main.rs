@@ -1,9 +1,11 @@
+mod misc;
 mod simulate;
 mod sparse_io;
 mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
 mod statistics;
 
+use crate::misc::*;
 use crate::sparse_io::*;
 use crate::statistics::RunningStatistics;
 use clap::{ArgAction, Args, Parser, Subcommand};
@@ -28,11 +30,14 @@ fn main() -> anyhow::Result<()> {
         Commands::FromMtx(args) => {
             run_build_from_mtx(args)?;
         }
-        Commands::ListH5ad(args) => {
-            list_h5ad(args)?;
+        Commands::ListH5(args) => {
+            list_h5(args)?;
         }
         Commands::FromH5ad(args) => {
-            run_build_from_h5ad(args)?;
+            run_build_from_h5_triplets(args)?;
+        }
+        Commands::FromH5(args) => {
+            run_build_from_h5_triplets(args)?;
         }
         Commands::Simulate(args) => {
             run_simulate(args)?;
@@ -100,11 +105,14 @@ enum Commands {
     /// Build faster backend data from `mtx`
     FromMtx(FromMtxArgs),
 
-    /// Build from `h5ad`'s `csr_matrix` data
-    FromH5ad(FromH5adArgs),
+    /// Build from H5AD's `csr_matrix` data
+    FromH5ad(FromH5Args),
 
-    /// List items in `h5ad` file
-    ListH5ad(ListH5adArgs),
+    /// Build from `csr_matrix` data in `h5`
+    FromH5(FromH5Args),
+
+    /// List items in `h5` file
+    ListH5(ListH5Args),
 
     /// Sort rows according to the order of row names specified in a
     /// row name file
@@ -188,19 +196,57 @@ pub struct FromMtxArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct ListH5adArgs {
+pub struct ListH5Args {
     h5_file: Box<str>,
 }
 
 #[derive(Args, Debug)]
-pub struct FromH5adArgs {
-    /// `hdf5`/`h5` file in the `h5ad` format (used in `scanpy` and
-    /// `cellxgene`). This function will look for `csr_matrix`
-    /// triplets: (a) data/values `/X/data` (b) indices `/X/indices`
-    /// (c) pointers `/X/indptr`. Additionally, if rows/genes/features
-    /// `/var/_index` and columns/cells/samples `/obs/_index` are
-    /// available, they will be included. However, other items in
-    /// `obs` and `obsm` will be ignored.
+pub struct FromH5Args {
+    /// `h5` file where triplets of sparse matrix data were stored
+    /// (10X genomics or H5AD).
+    h5_file: Box<str>,
+
+    /// backend for the output file
+    #[arg(long, value_enum, default_value = "zarr")]
+    backend: SparseIoBackend,
+
+    /// Output file header: {output}.{backend}
+    #[arg(short, long)]
+    output: Option<Box<str>>,
+
+    /// group name for sparse data triplets (check out them by `list-h5` subcommand)
+    #[arg(short = 'x', long, default_value = "matrix")]
+    data_group_name: Box<str>,
+
+    /// triplet values, X(i,j) value itself
+    #[arg(short = 'd', long, default_value = "data")]
+    data_field: Box<str>,
+
+    /// indices: row indices for CSC, column indices for CSR
+    #[arg(short = 'i', long, default_value = "indices")]
+    indices_field: Box<str>,
+
+    /// indptr: column pointers for CSC, row pointers for CSR
+    #[arg(short = 'p', long, default_value = "indptr")]
+    indptr_field: Box<str>,
+
+    /// group/dataset name for rows/genes/features
+    #[arg(short = 'r', long, default_value = "matrix/features/id")]
+    row_name_field: Box<str>,
+
+    /// group/dataset name for columns/cells
+    #[arg(short = 'c', long, default_value = "matrix/barcodes")]
+    column_name_field: Box<str>,
+
+    /// verbose mode
+    #[arg(short, long, action = ArgAction::Count)]
+    verbose: u8,
+}
+
+#[derive(Args, Debug)]
+pub struct FromH5CSCArgs {
+    /// `h5` file where data were stored in CSC forammt ( in 10X
+    /// genomics). This function will look for `csc_matrix` triplets.
     h5_file: Box<str>,
 
     /// backend for the output file
@@ -212,7 +258,7 @@ pub struct FromH5adArgs {
     output: Option<Box<str>>,
 
     /// group name for sparse data triplets
-    #[arg(short = 'x', long, default_value = "X")]
+    #[arg(short = 'x', long, default_value = "matrix")]
     data_group_name: Box<str>,
 
     /// triplet values
@@ -228,11 +274,11 @@ pub struct FromH5adArgs {
     indptr_field: Box<str>,
 
     /// group/dataset name for rows/genes/features
-    #[arg(short = 'r', long, default_value = "var/_index")]
+    #[arg(short = 'r', long, default_value = "matrix/features/id")]
     row_name_field: Box<str>,
 
     /// group/dataset name for columns/cells
-    #[arg(short = 'c', long, default_value = "obs/_index")]
+    #[arg(short = 'c', long, default_value = "matrix/barcodes")]
     column_name_field: Box<str>,
 
     /// verbose mode
@@ -815,7 +861,7 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn list_h5ad(cmd_args: &ListH5adArgs) -> anyhow::Result<()> {
+fn list_h5(cmd_args: &ListH5Args) -> anyhow::Result<()> {
     let data_file = cmd_args.h5_file.clone();
     let file = hdf5::File::open(data_file.to_string())?;
     info!("Opened {}", data_file.clone());
@@ -838,7 +884,65 @@ fn list_h5ad(cmd_args: &ListH5adArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_build_from_h5ad(cmd_args: &FromH5adArgs) -> anyhow::Result<()> {
+fn read_triplets_from_h5(
+    root: &hdf5::Group,
+    data_name: &str,
+    indices_name: &str,
+    indptr_name: &str,
+) -> anyhow::Result<(Vec<(u64, u64, f32)>, (usize, usize, usize))> {
+    if let (Ok(values), Ok(indices), Ok(indptr)) = (
+        root.dataset(data_name),
+        root.dataset(indices_name),
+        root.dataset(indptr_name),
+    ) {
+        use rayon::prelude::*;
+        let indptr = indptr.read_1d::<usize>()?.to_vec();
+        let nvectors = indptr.len() - 1;
+
+        info!("Collecting triplets over {} data points...", nvectors);
+
+        let mut triplets = vec![];
+        let arc_triplets = Arc::new(Mutex::new(&mut triplets));
+
+        let full_values = values.read_1d::<f32>()?.to_vec();
+        let full_indices = indices.read_1d::<u64>()?.to_vec();
+
+        (0..nvectors)
+            .into_par_iter()
+            .progress_count(nvectors as u64)
+            .for_each(|_idx| {
+                let j = _idx as u64;
+                let start = indptr[_idx];
+                let end = indptr[_idx + 1];
+                let values_slice = &full_values[start..end];
+                let indices_slice = &full_indices[start..end];
+
+                // let values_slice = values.read_slice_1d::<f32, _>(start..end).expect("values");
+                // let indices_slice = indices
+                //     .read_slice_1d::<u64, _>(start..end)
+                //     .expect("indices");
+
+                // Note: h5ad treats cells as rows, but we treat cells as columns
+                let triplets_slice: Vec<(u64, u64, f32)> = indices_slice
+                    .iter()
+                    .zip(values_slice.iter())
+                    .map(|(&i, &x_ij)| (i, j, x_ij))
+                    .collect();
+
+                arc_triplets
+                    .lock()
+                    .expect("failed to lock triplets")
+                    .extend(triplets_slice);
+            });
+        let nfeatures = triplets.iter().map(|&(i, _, _)| i).max().unwrap_or(0_u64) as usize + 1;
+        let nnz = triplets.len();
+        Ok((triplets, (nfeatures, nvectors, nnz)))
+    } else {
+        Err(anyhow::anyhow!("cannot read triplets"))
+    }
+}
+
+fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
     if cmd_args.verbose > 0 {
         std::env::set_var("RUST_LOG", "info");
     }
@@ -846,9 +950,7 @@ fn run_build_from_h5ad(cmd_args: &FromH5adArgs) -> anyhow::Result<()> {
     use std::path::Path;
 
     let data_file = cmd_args.h5_file.clone();
-
     let backend = cmd_args.backend.clone();
-
     let output = match cmd_args.output.clone() {
         Some(output) => output,
         None => {
@@ -886,84 +988,42 @@ fn run_build_from_h5ad(cmd_args: &FromH5adArgs) -> anyhow::Result<()> {
     let column_name = &cmd_args.column_name_field.to_string();
 
     if let Ok(data) = file.group(group_name) {
-        if let (Ok(values), Ok(indices), Ok(indptr)) = (
-            data.dataset(data_name),
-            data.dataset(indices_name),
-            data.dataset(indptr_name),
-        ) {
-            use rayon::prelude::*;
-            let indptr = indptr.read_1d::<usize>()?.to_vec();
-            let ncols = indptr.len() - 1;
+        let (triplets, mtx_shape) =
+            read_triplets_from_h5(&data, data_name, indices_name, indptr_name)?;
 
-            let mut triplets = vec![];
-            let arc_triplets = Arc::new(Mutex::new(&mut triplets));
+        let (nrows, ncols, nnz) = mtx_shape;
+        info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
 
-            (0..ncols).into_par_iter().for_each(|h5ad_row| {
-                let j = h5ad_row as u64;
-                let start = indptr[h5ad_row];
-                let end = indptr[h5ad_row + 1];
-                let values_slice = values.read_slice_1d::<f32, _>(start..end).expect("values");
-                let indices_slice = indices
-                    .read_slice_1d::<u64, _>(start..end)
-                    .expect("indices");
+        let row_names: Vec<Box<str>> = match file.dataset(row_name) {
+            Ok(rows) => read_hdf5_strings(rows)?,
+            _ => {
+                info!("row (feature) names not found");
+                (0..nrows).map(|x| x.to_string().into_boxed_str()).collect()
+            }
+        };
+        info!("Read {} row names", row_names.len());
+        assert_eq!(nrows, row_names.len());
 
-                // Note: h5ad treats cells as rows, but we treat cells as columns
-                let triplets_slice: Vec<(u64, u64, f32)> = indices_slice
-                    .iter()
-                    .zip(values_slice.iter())
-                    .map(|(&i, &x_ij)| (i, j, x_ij))
-                    .collect();
+        let column_names: Vec<Box<str>> = match file.dataset(column_name) {
+            Ok(columns) => read_hdf5_strings(columns)?,
+            _ => {
+                info!("column (cell) names not found");
+                (0..ncols).map(|x| x.to_string().into_boxed_str()).collect()
+            }
+        };
+        info!("Read {} column names", column_names.len());
+        assert_eq!(ncols, column_names.len());
 
-                arc_triplets
-                    .lock()
-                    .expect("failed to lock triplets")
-                    .extend(triplets_slice);
-            });
-
-            let nrows = triplets.iter().map(|&(i, _, _)| i).max().unwrap_or(0_u64) as usize + 1;
-            let nnz = triplets.len();
-
-            info!("Read {} non-zero elements", nnz);
-
-            let row_names: Vec<Box<str>> = match file.dataset(row_name) {
-                Ok(rows) => rows
-                    .read_1d::<hdf5::types::VarLenUnicode>()?
-                    .iter()
-                    .map(|x| x.to_string().into_boxed_str())
-                    .collect(),
-                _ => {
-                    info!("row (feature) names not found");
-                    (0..nrows).map(|x| x.to_string().into_boxed_str()).collect()
-                }
-            };
-
-            assert_eq!(nrows, row_names.len());
-
-            let column_names: Vec<Box<str>> = match file.dataset(column_name) {
-                Ok(columns) => columns
-                    .read_1d::<hdf5::types::VarLenUnicode>()?
-                    .iter()
-                    .map(|x| x.to_string().into_boxed_str())
-                    .collect(),
-                _ => {
-                    info!("column (cell) names not found");
-                    (0..ncols).map(|x| x.to_string().into_boxed_str()).collect()
-                }
-            };
-
-            assert_eq!(ncols, column_names.len());
-
-            let mut out = create_sparse_from_triplets(
-                triplets,
-                (nrows, ncols, nnz),
-                Some(&backend_file),
-                Some(&backend),
-            )?;
-            info!("created sparse matrix: {}", backend_file);
-            out.register_row_names_vec(&row_names);
-            out.register_column_names_vec(&column_names);
-            info!("done");
-        }
+        let mut out = create_sparse_from_triplets(
+            triplets,
+            (nrows, ncols, nnz),
+            Some(&backend_file),
+            Some(&backend),
+        )?;
+        info!("created sparse matrix: {}", backend_file);
+        out.register_row_names_vec(&row_names);
+        out.register_column_names_vec(&column_names);
+        info!("done");
     } else {
         return Err(anyhow::anyhow!("data group `{}` is missing", group_name));
     }

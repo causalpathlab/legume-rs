@@ -1,10 +1,10 @@
 use crate::alg_collapse::*;
 use crate::common::*;
+use crate::util::*;
 
 pub use clap::Parser;
 pub use log::{info, warn};
 use matrix_param::traits::Inference;
-use matrix_param::traits::ParamIo;
 pub use matrix_util::common_io::{extension, read_lines, read_lines_of_words};
 use matrix_util::traits::IoOps;
 pub use std::sync::Arc;
@@ -69,11 +69,17 @@ pub struct DiffArgs {
 /// Run CoCoA differential analysis
 pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     let mut data = read_input_data(args.clone())?;
-    let exposure_names = data.exposure_names;
 
+    info!("normalizing cell topic proportion");
     data.cell_topic
         .row_iter_mut()
         .for_each(|mut r| r.unscale_mut(r.sum()));
+
+    info!("exposure names:");
+    let exposure_names = data.exposure_names;
+    for x in exposure_names.iter() {
+        info!("{}", x);
+    }
 
     let sample_to_cells = (0..data.sparse_data.num_batches())
         .map(|b| data.sparse_data.batch_to_columns(b).unwrap().clone())
@@ -108,10 +114,10 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     }
 
     // let out_dir = args.out.to_string() + "/";
-
     // for k in 0..n_topics {
     //     let out = cocoa_stat.optimize_each_topic(k)?;
     // }
+
     info!("Done");
     Ok(())
 }
