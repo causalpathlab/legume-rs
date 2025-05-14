@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 
-const NUM_CHUNKS: usize = 1000;
-const MIN_CHUNK_SIZE: usize = 1000;
-const COMPRESSION_LEVEL: u8 = 3;
+const NUM_CHUNKS: usize = 10_000;
+const MIN_CHUNK_SIZE: usize = 8192;
+const COMPRESSION_LEVEL: u8 = 5;
 
 /// 10x-like cell-feature matrix with hdf5 (feature x cell)
 ///
