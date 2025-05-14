@@ -5,6 +5,8 @@ use matrix_util::common_io::*;
 use std::ops::Range;
 use std::sync::Arc;
 
+use anyhow::anyhow;
+
 const NUM_CHUNKS: usize = 1000;
 const MIN_CHUNK_SIZE: usize = 1000;
 const COMPRESSION_LEVEL: u8 = 3;
@@ -33,6 +35,8 @@ pub struct SparseMtxData {
     max_column_name_idx: usize,
     by_column_indptr: Vec<u64>,
     by_row_indptr: Vec<u64>,
+    by_column_indicies: Option<Vec<u64>>,
+    by_column_data: Option<Vec<f32>>,
 }
 
 #[allow(dead_code)]
@@ -74,6 +78,8 @@ impl SparseMtxData {
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
             by_row_indptr: vec![],
+            by_column_indicies: None,
+            by_column_data: None,
         };
 
         ret.read_column_indptr()?;
@@ -208,7 +214,7 @@ impl SparseMtxData {
                 .create(attr_name)?
                 .write_scalar(&value)?;
         } else if self.backend.attr(attr_name)?.read_scalar::<usize>()? != value {
-            return Err(anyhow::anyhow!(format!("{} mismatch", attr_name)));
+            return Err(anyhow!(format!("{} mismatch", attr_name)));
         }
         Ok(())
     }
@@ -229,6 +235,8 @@ impl SparseMtxData {
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
             by_row_indptr: vec![],
+            by_column_indicies: None,
+            by_column_data: None,
         })
     }
 }
@@ -283,6 +291,21 @@ impl SparseIo for SparseMtxData {
         Ok(())
     }
 
+    fn preload_columns(self: &mut Self) -> anyhow::Result<()> {
+        let by_column = self.backend.group("/by_column")?;
+        let data = by_column.dataset("data")?.read_1d::<f32>()?.to_vec();
+        let indices = by_column.dataset("indices")?.read_1d::<u64>()?.to_vec();
+
+        self.by_column_data = Some(data);
+        self.by_column_indicies = Some(indices);
+        Ok(())
+    }
+
+    fn clean_preloaded_columns(self: &mut Self) {
+        self.by_column_data = None;
+        self.by_column_indicies = None;
+    }
+
     /// Remove backend file to free up disk space
     fn remove_backend_file(self: &Self) -> anyhow::Result<()> {
         let backend = std::path::Path::new(&self.file_name);
@@ -334,9 +357,7 @@ impl SparseIo for SparseMtxData {
 
             Ok(())
         } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
+            return Err(anyhow!("Unable to figure out the size of the backend data"));
         }
     }
 
@@ -487,39 +508,52 @@ impl SparseIo for SparseMtxData {
         debug_assert!(self.by_column_indptr.len() > 0);
 
         let indptr = &self.by_column_indptr;
-        let data = by_column.dataset("data")?;
-        let indices = by_column.dataset("indices")?;
+        debug_assert!((j_data + 1) < indptr.len());
 
-        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
+        let nrow = self
+            .num_rows()
+            .ok_or(anyhow!("can't figure out the number of rows"))?;
+
+        if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indicies) {
+            let ncol_out = 1;
+            let jj = 0;
+
+            // [start, end)
+            let start = indptr[j_data] as usize;
+            let end = indptr[j_data + 1] as usize;
+            let ret: Vec<(usize, usize, f32)> = indices[start..end]
+                .iter()
+                .zip(data[start..end].iter())
+                .map(|(&ii, &x_ij)| (ii as usize, jj as usize, x_ij))
+                .collect();
+            Ok((nrow, ncol_out, ret))
+        } else {
+            let data = by_column.dataset("data")?;
+            let indices = by_column.dataset("indices")?;
+
             let mut ret = Vec::new();
             let ncol_out = 1;
             let jj = 0;
 
-            if j_data < ncol {
-                debug_assert!((j_data + 1) < indptr.len());
+            debug_assert!((j_data + 1) < indptr.len());
 
-                // [start, end)
-                let start = indptr[j_data] as usize;
-                let end = indptr[j_data + 1] as usize;
+            // [start, end)
+            let start = indptr[j_data] as usize;
+            let end = indptr[j_data + 1] as usize;
 
-                if start < end {
-                    let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
-                    let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+            if start < end {
+                let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
+                let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
 
-                    for k in 0..(end - start) {
-                        let x_ij = data_slice[k];
-                        let ii = indices_slice[k] as usize;
-                        debug_assert!(ii < nrow);
-                        ret.push((ii, jj, x_ij));
-                    }
+                for k in 0..(end - start) {
+                    let x_ij = data_slice[k];
+                    let ii = indices_slice[k] as usize;
+                    debug_assert!(ii < nrow);
+                    ret.push((ii, jj, x_ij));
                 }
             }
 
             Ok((nrow, ncol_out, ret))
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
         }
     }
 
@@ -535,21 +569,59 @@ impl SparseIo for SparseMtxData {
         let by_column = self.backend.group("/by_column")?;
 
         debug_assert!(self.by_column_indptr.len() > 0);
-        // let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
 
         let indptr = &self.by_column_indptr;
-        let data = by_column.dataset("data")?;
-        let indices = by_column.dataset("indices")?;
 
         let columns_vec = columns.into_iter().collect::<Vec<usize>>();
 
-        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
-            let mut ret = Vec::new();
+        let nrow = self
+            .num_rows()
+            .ok_or(anyhow!("can't figure out the number of rows"))?;
+
+        let ncol = self
+            .num_columns()
+            .ok_or(anyhow!("can't figure out the number of columns"))?;
+
+        let min_start = columns_vec
+            .iter()
+            .map(|&j_data| indptr[j_data])
+            .min()
+            .unwrap_or(0);
+
+        let max_end = columns_vec
+            .iter()
+            .map(|&j_data| indptr[j_data + 1])
+            .max()
+            .unwrap_or(0);
+
+        if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indicies) {
             let ncol_out = columns_vec.len();
+
+            let mut ret: Vec<(usize, usize, f32)> =
+                Vec::with_capacity((max_end - min_start).max(0) as usize);
+
             for (jj, &j_data) in columns_vec.iter().enumerate() {
                 if j_data < ncol {
-                    debug_assert!((j_data + 1) < indptr.len());
+                    let start = indptr[j_data] as usize;
+                    let end = indptr[j_data + 1] as usize;
+                    for (&ii, &x_ij) in indices[start..end].iter().zip(data[start..end].iter()) {
+                        ret.push((ii as usize, jj as usize, x_ij));
+                    }
+                }
+            }
 
+            Ok((nrow, ncol_out, ret))
+        } else {
+            let data = by_column.dataset("data")?;
+            let indices = by_column.dataset("indices")?;
+
+            let ncol_out = columns_vec.len();
+
+            let mut ret: Vec<(usize, usize, f32)> =
+                Vec::with_capacity((max_end - min_start).max(0) as usize);
+
+            for (jj, &j_data) in columns_vec.iter().enumerate() {
+                if j_data < ncol {
                     // [start, end)
                     let start = indptr[j_data] as usize;
                     let end = indptr[j_data + 1] as usize;
@@ -568,10 +640,6 @@ impl SparseIo for SparseMtxData {
                 }
             }
             Ok((nrow, ncol_out, ret))
-        } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
         }
     }
 
@@ -617,9 +685,7 @@ impl SparseIo for SparseMtxData {
             }
             Ok((nrow_out, ncol, ret))
         } else {
-            return Err(anyhow::anyhow!(
-                "Unable to figure out the size of the backend data"
-            ));
+            return Err(anyhow!("Unable to figure out the size of the backend data"));
         }
     }
 

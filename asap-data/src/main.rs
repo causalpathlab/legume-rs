@@ -348,6 +348,10 @@ pub struct RunSqueezeArgs {
     #[arg(short, long, default_value = "0")]
     column_nnz_cutoff: usize,
 
+    /// ondisk data only
+    #[arg(long, default_value_t = false)]
+    ondisk_data: bool,
+
     /// Block_size for parallel processing
     #[arg(long, value_enum, default_value = "100")]
     block_size: usize,
@@ -361,6 +365,10 @@ pub struct RunStatArgs {
     /// block_size
     #[arg(long, value_enum, default_value = "100")]
     block_size: usize,
+
+    /// ondisk data only
+    #[arg(long, default_value_t = false)]
+    ondisk_data: bool,
 
     /// output file header
     #[arg(short, long)]
@@ -1087,11 +1095,15 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
     }
 
-    let data: Box<SData> = open_sparse_matrix(&input, &backend.clone())?;
+    let mut data: Box<SData> = open_sparse_matrix(&input, &backend.clone())?;
+    if !cmd_args.ondisk_data {
+        data.preload_columns()?;
+    }
+
     let row_names = data.row_names()?;
     let col_names = data.column_names()?;
 
-    if let Ok((row_stat, col_stat)) = collect_row_column_stats(&data, block_size) {
+    if let Ok((row_stat, col_stat)) = collect_row_column_stats(&mut data, block_size) {
         let row_stat_file = format!("{}.row.stat.gz", output);
         let col_stat_file = format!("{}.col.stat.gz", output);
         row_stat.save(&row_stat_file, &row_names, "\t")?;
@@ -1127,6 +1139,9 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
     }
 
     let mut data = open_sparse_matrix(&data_file, &backend)?;
+    if !cmd_args.ondisk_data {
+        data.preload_columns()?;
+    }
 
     info!(
         "before squeeze -- data: {} rows x {} columns",
@@ -1300,8 +1315,6 @@ fn collect_row_column_stats(
             nblock
         );
 
-        let arc_data = Arc::new(Mutex::new(data));
-
         (0..nblock)
             .into_par_iter()
             .progress_count(nblock as u64)
@@ -1311,10 +1324,10 @@ fn collect_row_column_stats(
                 (lb, ub)
             })
             .for_each(|(lb, ub)| {
-                let data_b = arc_data.lock().expect("failed to lock data");
+                // let data_b = arc_data.lock().expect("failed to lock data");
 
                 // This could be inefficient since we are populating a dense matrix
-                let xx_b = data_b.read_columns_ndarray((lb..ub).collect()).unwrap();
+                let xx_b = data.read_columns_ndarray((lb..ub).collect()).unwrap();
 
                 // accumulate rows' statistics
                 {
