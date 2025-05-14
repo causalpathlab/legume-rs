@@ -150,6 +150,10 @@ struct EmbedArgs {
     #[arg(long)]
     save_adjusted: bool,
 
+    /// ondisk data only
+    #[arg(long, default_value_t = false)]
+    ondisk_data: bool,
+
     /// verbosity
     #[arg(long, short)]
     verbose: bool,
@@ -441,7 +445,14 @@ fn read_data_vec_membership(args: EmbedArgs) -> anyhow::Result<(SparseIoVec, Vec
             _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
         };
 
-        let data = open_sparse_matrix(&data_file, &backend)?;
+        let data = if !args.ondisk_data {
+            open_sparse_matrix(&data_file, &backend)?
+        } else {
+            let mut ret = open_sparse_matrix(&data_file, &backend)?;
+            ret.preload_columns()?;
+            ret
+        };
+
         data_vec.push(Arc::from(data))?;
     }
 

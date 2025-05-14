@@ -301,6 +301,8 @@ impl SparseIoVec {
             }
         }
 
+        let nrow = nrow.max(self.num_rows()?); // handle empty results
+
         Ok(((nrow, ncol), triplets, (source_columns, source_positions)))
     }
 

@@ -535,6 +535,7 @@ pub trait SparseIo: Sync + Send {
             return Err(anyhow::anyhow!("missing shape information"));
         }
 
+        self.clean_preloaded_columns();
         Ok(())
     }
 
@@ -619,6 +620,7 @@ pub trait SparseIo: Sync + Send {
             info!("registered new data to {}", self.get_backend_file_name());
         }
 
+        self.clean_preloaded_columns();
         Ok(())
     }
     // fn reorder_rows(&mut self, row_names_order: &Vec<Box<str>>) -> anyhow::Result<()>;
@@ -763,6 +765,10 @@ pub trait SparseIo: Sync + Send {
     fn read_row_indptr(self: &mut Self) -> anyhow::Result<()>;
 
     fn read_column_indptr(self: &mut Self) -> anyhow::Result<()>;
+
+    fn preload_columns(self: &mut Self) -> anyhow::Result<()>;
+
+    fn clean_preloaded_columns(self: &mut Self);
 
     /// Backend file name
     fn get_backend_file_name(&self) -> &str;

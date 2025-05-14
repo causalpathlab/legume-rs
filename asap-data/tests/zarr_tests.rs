@@ -99,8 +99,11 @@ fn ndarray_dmatrix() -> anyhow::Result<()> {
     let raw_array = Array2::<f32>::runif(133, 373);
 
     let raw_matrix = ndarray_to_dmatrix(&raw_array);
-    let data1 = create_sparse_from_ndarray(&raw_array, None, None)?;
-    let data2 = create_sparse_from_dmatrix(&raw_matrix, None, None)?;
+    let mut data1 = create_sparse_from_ndarray(&raw_array, None, None)?;
+    let mut data2 = create_sparse_from_dmatrix(&raw_matrix, None, None)?;
+
+    data1.preload_columns()?;
+    data2.preload_columns()?;
 
     {
         let a = data1.read_columns_ndarray((0..data1.num_columns().unwrap()).collect())?;
@@ -135,6 +138,8 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
         data.register_row_names_vec(&rows);
         data.print_hierarchy()?;
 
+        data.preload_columns()?;
+
         {
             let cols = [9, 111, 11, 1, 2, 7, 3];
             let a = xx.select(Axis(1), &cols);
@@ -161,6 +166,8 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
         {
             let a = xx.select(Axis(1), &[9, 500, 10, 11, 1, 2, 3]);
             data.subset_columns_rows(Some(&vec![9, 500, 10, 11, 1, 2, 3]), None)?;
+            data.preload_columns()?;
+
             let b = data.read_columns_ndarray((0..data.num_columns().unwrap()).collect())?;
             debug_assert_eq!(a, b);
             let a = xx.select(Axis(1), &[9, 500, 10, 11, 1, 2, 3]);
@@ -172,11 +179,14 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
 
             // check with this, also checking zero padding
             data.subset_columns_rows(None, Some(&vec![1, 7, 16]))?;
+            data.preload_columns()?;
+
             let new_row_names = vec!["16", "7", "1", "9"]
                 .into_iter()
                 .map(|x| x.to_string().into_boxed_str())
                 .collect();
             data.reorder_rows(&new_row_names)?;
+            data.preload_columns()?;
 
             let b = data.read_columns_ndarray((0..data.num_columns().unwrap()).collect())?;
 
@@ -195,7 +205,7 @@ fn simulate() -> anyhow::Result<()> {
         depth: 100,
         factors: 1,
         batches: 3,
-	overdisp: 1.,
+        overdisp: 1.,
         rseed: 42,
     };
 
