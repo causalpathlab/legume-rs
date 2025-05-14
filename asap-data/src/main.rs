@@ -190,6 +190,10 @@ pub struct FromMtxArgs {
     #[arg(short, long)]
     output: Option<Box<str>>,
 
+    /// squeeze
+    #[arg(long, default_value_t = false)]
+    do_squeeze: bool,
+
     /// verbose mode
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
@@ -238,48 +242,9 @@ pub struct FromH5Args {
     #[arg(short = 'c', long, default_value = "matrix/barcodes")]
     column_name_field: Box<str>,
 
-    /// verbose mode
-    #[arg(short, long, action = ArgAction::Count)]
-    verbose: u8,
-}
-
-#[derive(Args, Debug)]
-pub struct FromH5CSCArgs {
-    /// `h5` file where data were stored in CSC forammt ( in 10X
-    /// genomics). This function will look for `csc_matrix` triplets.
-    h5_file: Box<str>,
-
-    /// backend for the output file
-    #[arg(long, value_enum, default_value = "zarr")]
-    backend: SparseIoBackend,
-
-    /// Output file header: {output}.{backend}
-    #[arg(short, long)]
-    output: Option<Box<str>>,
-
-    /// group name for sparse data triplets
-    #[arg(short = 'x', long, default_value = "matrix")]
-    data_group_name: Box<str>,
-
-    /// triplet values
-    #[arg(short = 'd', long, default_value = "data")]
-    data_field: Box<str>,
-
-    /// indices values
-    #[arg(short = 'i', long, default_value = "indices")]
-    indices_field: Box<str>,
-
-    /// indptr values
-    #[arg(short = 'p', long, default_value = "indptr")]
-    indptr_field: Box<str>,
-
-    /// group/dataset name for rows/genes/features
-    #[arg(short = 'r', long, default_value = "matrix/features/id")]
-    row_name_field: Box<str>,
-
-    /// group/dataset name for columns/cells
-    #[arg(short = 'c', long, default_value = "matrix/barcodes")]
-    column_name_field: Box<str>,
+    /// squeeze
+    #[arg(long, default_value_t = false)]
+    do_squeeze: bool,
 
     /// verbose mode
     #[arg(short, long, action = ArgAction::Count)]
@@ -325,6 +290,10 @@ pub struct MergeMtxArgs {
     /// number of words to use for barcode names
     #[arg(long, default_value_t = 5)]
     num_barcode_name_words: usize,
+
+    /// squeeze
+    #[arg(long, default_value_t = false)]
+    do_squeeze: bool,
 
     /// verbose mode
     #[arg(short, long, action = ArgAction::Count)]
@@ -794,6 +763,19 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
         &backend_file
     );
 
+    if args.do_squeeze {
+        info!("Squeeze the backend data {}", &backend_file);
+        let squeeze_args = RunSqueezeArgs {
+            data_file: backend_file.into_boxed_str(),
+            row_nnz_cutoff: 0,
+            column_nnz_cutoff: 0,
+            ondisk_data: true,
+            block_size: 100,
+        };
+
+        run_squeeze(&squeeze_args)?;
+    }
+
     Ok(())
 }
 
@@ -864,6 +846,18 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
                 (1..(ncol + 1)).map(|i| format!("{}", i).into()).collect();
             data.register_column_names_vec(&col_names);
         }
+    }
+
+    if args.do_squeeze {
+        let squeeze_args = RunSqueezeArgs {
+            data_file: backend_file.into_boxed_str(),
+            row_nnz_cutoff: 0,
+            column_nnz_cutoff: 0,
+            ondisk_data: true,
+            block_size: 100,
+        };
+
+        run_squeeze(&squeeze_args)?;
     }
 
     Ok(())
@@ -1034,6 +1028,19 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
         info!("done");
     } else {
         return Err(anyhow::anyhow!("data group `{}` is missing", group_name));
+    }
+
+    if cmd_args.do_squeeze {
+        info!("Squeeze the backend data {}", &backend_file);
+        let squeeze_args = RunSqueezeArgs {
+            data_file: backend_file.into_boxed_str(),
+            row_nnz_cutoff: 0,
+            column_nnz_cutoff: 0,
+            ondisk_data: true,
+            block_size: 100,
+        };
+
+        run_squeeze(&squeeze_args)?;
     }
 
     Ok(())
