@@ -5,7 +5,7 @@ use crate::asap_normalization::*;
 use asap_data::sparse_data_visitors::*;
 use asap_data::sparse_io_vector::SparseIoVec;
 use indicatif::ProgressIterator;
-use log::{info, warn};
+use log::info;
 use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::Inference;
 use matrix_param::traits::*;
@@ -36,8 +36,8 @@ pub trait CollapsingOps {
     fn collapse_columns(
         &self,
         cells_per_group: Option<usize>,
-        references: Option<Vec<Box<str>>>,
-        knn: Option<usize>,
+        knn_batches: Option<usize>,
+        knn_cells: Option<usize>,
         num_opt_iter: Option<usize>,
     ) -> anyhow::Result<CollapsingOut>;
 
@@ -67,8 +67,8 @@ pub trait CollapsingOps {
     fn collect_matched_stat(
         &self,
         sample_to_cells: &Vec<Vec<usize>>,
-        reference_batches: Vec<usize>,
-        knn: usize,
+        knn_batches: usize,
+        knn_cells: usize,
         stat: &mut CollapsingStat,
     ) -> anyhow::Result<()>;
 }
@@ -112,8 +112,8 @@ impl CollapsingOps for SparseIoVec {
     fn collapse_columns(
         &self,
         ncols_per_group: Option<usize>,
-        references: Option<Vec<Box<str>>>,
-        knn: Option<usize>,
+        knn_batches: Option<usize>,
+        knn_cells: Option<usize>,
         num_opt_iter: Option<usize>,
     ) -> anyhow::Result<CollapsingOut> {
         let col_to_group: &Vec<usize> = self.take_groups().ok_or(anyhow::anyhow!(
@@ -145,32 +145,33 @@ impl CollapsingOps for SparseIoVec {
                 num_batches, num_groups,
             );
 
-            let knn = knn.unwrap_or(DEFAULT_KNN);
+            let knn_batches = knn_batches.unwrap_or(2);
+            let knn_cells = knn_cells.unwrap_or(DEFAULT_KNN);
 
-            let batch_name_map = self
-                .batch_name_map()
-                .ok_or(anyhow::anyhow!("batch names are not registered"))?;
+            // let batch_name_map = self
+            //     .batch_name_map()
+            //     .ok_or(anyhow::anyhow!("batch names are not registered"))?;
 
-            let reference_batches = match references {
-                Some(ref_names) => {
-                    let mut idx = vec![];
-                    for ref_name in &ref_names {
-                        if let Some(ref_idx) = batch_name_map.get(ref_name) {
-                            idx.push(*ref_idx);
-                        }
-                    }
-                    if idx.len() == 0 {
-                        idx.extend(0..num_batches);
-                    }
-                    idx
-                }
-                None => {
-                    warn!("using all the {} batches... (could be slow)", num_batches);
-                    (0..num_batches).collect()
-                }
-            };
+            // let reference_batches = match references {
+            //     Some(ref_names) => {
+            //         let mut idx = vec![];
+            //         for ref_name in &ref_names {
+            //             if let Some(ref_idx) = batch_name_map.get(ref_name) {
+            //                 idx.push(*ref_idx);
+            //             }
+            //         }
+            //         if idx.len() == 0 {
+            //             idx.extend(0..num_batches);
+            //         }
+            //         idx
+            //     }
+            //     None => {
+            //         warn!("using all the {} batches... (could be slow)", num_batches);
+            //         (0..num_batches).collect()
+            //     }
+            // };
 
-            self.collect_matched_stat(&group_to_cols, reference_batches, knn, &mut stat)?;
+            self.collect_matched_stat(&group_to_cols, knn_batches, knn_cells, &mut stat)?;
         } // if num_batches > 1
 
         /////////////////////////////
@@ -247,8 +248,8 @@ impl CollapsingOps for SparseIoVec {
     fn collect_matched_stat(
         &self,
         sample_to_cells: &Vec<Vec<usize>>,
-        target_batches: Vec<usize>,
-        knn: usize,
+        knn_batches: usize,
+        knn_cells: usize,
         stat: &mut CollapsingStat,
     ) -> anyhow::Result<()> {
         let count_matched =
@@ -258,8 +259,18 @@ impl CollapsingOps for SparseIoVec {
              _: &EmptyArg,
              arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
                 let (y0_matched, source_columns, euclidean_distances) = data_vec
-                    .read_matched_columns_csc(cells.iter().cloned(), &target_batches, knn, true)
-                    .expect("take matching results across batches");
+                    .read_neighbouring_columns_csc(
+                        cells.iter().cloned(),
+                        knn_batches,
+                        knn_cells,
+                        true,
+                    )
+                    .expect("take neighbouring cells across batches");
+
+                // // find matched cells
+                // let (y0_matched, source_columns, euclidean_distances) = data_vec
+                //     .read_matched_columns_csc(cells.iter().cloned(), &target_batches, knn, true)
+                //     .expect("take matching results across batches");
 
                 // Normalize distance for each source cell and take a
                 // weighted average of the matched vectors using this

@@ -37,6 +37,39 @@ where
         <ColumnDict<T> as ColumnDictOps<T, nalgebra::DVectorView<f32>>>::empty()
     }
 
+    /// k-nearest neighbour match by name within the same dictionary
+    /// to return a Vec of names
+    ///
+    /// * `query_name` - the name of the column to match
+    /// * `knn` - the number of nearest neighbours to return
+    ///
+    pub fn match_by_name(
+        &self,
+        query_name: &T,
+        knn: usize,
+    ) -> anyhow::Result<(Vec<T>, Vec<f32>)> {
+        use instant_distance::Search;
+
+        let nquery = knn.min(self.data_vec.len());
+
+        if let Some(self_idx) = self.name2index.get(query_name) {
+            let query = &self.data_vec[*self_idx];
+            let mut search = Search::default();
+            let knn_iter = self.dict.search(query, &mut search).take(nquery);
+            let mut points = Vec::with_capacity(nquery);
+            let mut distances = Vec::with_capacity(nquery);
+            for v in knn_iter {
+                let vv = v.value;
+                let dd = v.distance;
+                points.push(vv.clone());
+                distances.push(dd);
+            }
+            Ok((points, distances))
+        } else {
+            return Err(anyhow::anyhow!("name {} not found", query_name));
+        }
+    }
+
     /// k-nearest neighbour match by name against another dictionary
     /// to return a Vec of names in the other dictionary
     ///

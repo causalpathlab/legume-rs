@@ -1,4 +1,5 @@
 use crate::sparse_io::*;
+
 use log::info;
 use matrix_util::knn_match::ColumnDict;
 use matrix_util::traits::*;
@@ -23,6 +24,7 @@ pub struct SparseIoVec {
     col_to_batch: Option<Vec<usize>>,
     batch_to_cols: Option<Vec<Vec<usize>>>,
     batch_idx_to_name: Option<Vec<Box<str>>>,
+    between_batch_proximity: Option<Vec<Vec<usize>>>,
 }
 
 impl Index<usize> for SparseIoVec {
@@ -47,6 +49,7 @@ impl SparseIoVec {
             col_to_batch: None,
             batch_to_cols: None,
             batch_idx_to_name: None,
+            between_batch_proximity: None,
         }
     }
 
@@ -239,7 +242,7 @@ impl SparseIoVec {
     /// * shape - (nrows, ncols)
     /// * triplets
     /// * distances
-    fn matched_columns_triplets_on_target_batch<I>(
+    fn matched_columns_triplets_on_one_target<I>(
         &self,
         cells: I,
         target_batch: usize,
@@ -321,13 +324,12 @@ impl SparseIoVec {
             distances,
         ))
     }
-
     /// Take columns matched with the given `cells`
     ///
     /// # Arguments
     /// * `cells` - global column indices
     /// * `target_batches` - the batches for targeted kNN search
-    /// * `knn` - k-nearest neighbours
+    /// * `knn_columns` - k-nearest neighbours of columns
     /// * `skip_same_batch` - skip the same batch
     ///
     /// # Returns
@@ -339,7 +341,7 @@ impl SparseIoVec {
         &self,
         cells: I,
         target_batches: &Vec<usize>,
-        knn: usize,
+        knn_columns: usize,
         skip_same_batch: bool,
     ) -> anyhow::Result<(
         (usize, usize),
@@ -351,12 +353,11 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let cells: Vec<usize> = cells.collect();
-        // let y1 = self.read_columns_csc(cells.iter().cloned())?;
 
         let nrows = self.num_rows()?;
         let nbatches = self.num_batches();
         let ncols = cells.len();
-        let approx_ncols = ncols * knn * nbatches;
+        let approx_ncols = ncols * knn_columns * nbatches;
 
         let mut matched_triplets: Vec<(usize, usize, f32)> = vec![];
         let mut euclidean_distances: Vec<f32> = Vec::with_capacity(approx_ncols);
@@ -365,10 +366,10 @@ impl SparseIoVec {
 
         for &target_b in target_batches.iter() {
             let (shape, triplets, sources, distances) = self
-                .matched_columns_triplets_on_target_batch(
+                .matched_columns_triplets_on_one_target(
                     cells.iter().cloned(),
                     target_b,
-                    knn,
+                    knn_columns,
                     skip_same_batch,
                 )?;
 
@@ -378,11 +379,6 @@ impl SparseIoVec {
                     .map(|(i, j, z_ij)| (*i, *j + tot_ncells_matched, *z_ij)),
             );
 
-            // Temporarily construct y0 and compute distances between the matched columns
-            // let y0 = CscMatrix::<f32>::from_nonzero_triplets(shape.0, shape.1, triplets)?;
-            // let y0_pos = &sources.1;
-            // euclidean_distances.extend(y0.euclidean_distance_matched_columns(&y1, y0_pos)?);
-
             euclidean_distances.extend(distances);
             tot_ncells_matched += shape.1;
             source_columns.extend(sources.0);
@@ -391,6 +387,194 @@ impl SparseIoVec {
         let shape = (nrows, tot_ncells_matched);
 
         Ok((shape, matched_triplets, source_columns, euclidean_distances))
+    }
+
+    /// Take columns with the neighbourhood of given `cells`
+    ///
+    /// # Arguments
+    /// * `cells` - global column indices
+    /// * `knn_batches` - k-nearest neighbour batches
+    /// * `knn_columns` - k-nearest neighbour columns
+    /// * `skip_same_batch` - skip the same batch
+    ///
+    /// # Returns
+    /// * shape - (nrows, ncols)
+    /// * triplets
+    /// * distances
+    pub fn neighbouring_columns_triplets<I>(
+        &self,
+        cells: I,
+        knn_batches: usize,
+        knn_columns: usize,
+        skip_same_batch: bool,
+    ) -> anyhow::Result<(
+        (usize, usize),
+        Vec<(usize, usize, f32)>,
+        Vec<usize>, // source positions
+        Vec<f32>,
+    )>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let lookups = self
+            .batch_knn_lookup
+            .as_ref()
+            .ok_or(anyhow::anyhow!("no knn lookup"))?;
+
+        let cell_to_batch = self
+            .col_to_batch
+            .as_ref()
+            .ok_or(anyhow::anyhow!("no cell to batch"))?;
+
+        let approx_ncol = knn_columns * knn_batches;
+
+        let nrow = self.num_rows()?;
+        let mut ncol = 0;
+        let mut triplets = Vec::with_capacity(approx_ncol * nrow);
+
+        let mut distances = Vec::with_capacity(approx_ncol);
+        let mut source_columns = Vec::with_capacity(approx_ncol);
+        // let mut source_positions = Vec::with_capacity(approx_ncol);
+
+        let nbatches = self.num_batches();
+
+        for glob in cells {
+            let source_batch = cell_to_batch[glob]; // this cell's batch
+            let neighbouring_batches: Vec<usize> = match self.between_batch_proximity.as_ref() {
+                Some(prox) => prox[source_batch]
+                    .iter()
+                    .map(|&x| x)
+                    .take(knn_batches.min(nbatches))
+                    .collect(),
+                _ => (0..nbatches).collect(),
+            };
+
+            for target_batch in neighbouring_batches {
+                if skip_same_batch && source_batch == target_batch {
+                    continue; // skip cells in the same batch
+                }
+
+                if let (Some(source_lookup), Some(target_lookup)) =
+                    (lookups.get(source_batch), lookups.get(target_batch))
+                {
+                    let (matched, matched_distances) =
+                        source_lookup.match_against_by_name(&glob, knn_columns, &target_lookup)?;
+                    for (glob_matched, dist) in
+                        matched.into_iter().zip(matched_distances.into_iter())
+                    {
+                        if glob == glob_matched {
+                            continue; // avoid identical cell pairs
+                        }
+                        let didx = self.col_to_data[glob_matched];
+                        let loc = self.col_glob_to_loc[glob_matched];
+                        let (_, loc_ncol, loc_triplets) =
+                            self.data_vec[didx].read_triplets_by_single_column(loc)?;
+
+                        triplets.extend(loc_triplets.iter().map(|&(i, j, v)| (i, j + ncol, v)));
+                        ncol += loc_ncol;
+                        source_columns.push(glob);
+                        // source_positions.push(idx);
+                        distances.push(dist);
+                    }
+                }
+            }
+        }
+
+        Ok(((nrow, ncol), triplets, source_columns, distances))
+    }
+
+    /// Take columns within the neighbourhood of given `cells`
+    ///
+    /// # Arguments
+    /// * `cells` - global column indices
+    /// * `target_batches` - the batches for targeted kNN search
+    /// * `knn_batches` - k-nearest neighbour batches
+    /// * `knn_columns` - k-nearest neighbour columns
+    /// * `skip_same_batch` - skip the same batch
+    ///
+    /// # Returns
+    /// * the knn-matched matrix
+    /// * `source_columns` - a vector of the source columns
+    /// * a vector of distances between the matched columns
+    pub fn read_neighbouring_columns_csc<I>(
+        &self,
+        cells: I,
+        knn_batches: usize,
+        knn_columns: usize,
+        skip_same_batch: bool,
+    ) -> anyhow::Result<(CscMatrix<f32>, Vec<usize>, Vec<f32>)>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets, source_columns, distances) =
+            self.neighbouring_columns_triplets(cells, knn_batches, knn_columns, skip_same_batch)?;
+        Ok((
+            CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            source_columns,
+            distances,
+        ))
+    }
+
+    /// Take columns neighbouring with the given `cells`
+    ///
+    /// # Arguments
+    /// * `cells` - global column indices
+    /// * `target_batches` - the batches for targeted kNN search
+    /// * `knn` - k-nearest neighbours
+    /// * `skip_same_batch` - skip the same batch
+    ///
+    /// # Returns
+    /// * the knn-neighbouring matrix
+    /// * `source_columns` - a vector of the source columns
+    /// * distances - a vector of distances between the neighbouring columns
+    pub fn read_neighbouring_columns_ndarray<I>(
+        &self,
+        cells: I,
+        knn_batches: usize,
+        knn_columns: usize,
+        skip_same_batch: bool,
+    ) -> anyhow::Result<(ndarray::Array2<f32>, Vec<usize>, Vec<f32>)>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets, source_columns, distances) =
+            self.neighbouring_columns_triplets(cells, knn_batches, knn_columns, skip_same_batch)?;
+        Ok((
+            ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            source_columns,
+            distances,
+        ))
+    }
+
+    /// Take columns neighbouring with the given `cells`
+    ///
+    /// # Arguments
+    /// * `cells` - global column indices
+    /// * `target_batches` - the batches for targeted kNN search
+    /// * `knn` - k-nearest neighbours
+    /// * `skip_same_batch` - skip the same batch
+    ///
+    /// # Returns
+    /// * the knn-neighbouring matrix
+    /// * `source_columns` - a vector of the source columns
+    /// * distances - a vector of distances between the neighbouring columns
+    pub fn read_neighbouring_columns_dmatrix<I>(
+        &self,
+        cells: I,
+        knn_batches: usize,
+        knn_columns: usize,
+        skip_same_batch: bool,
+    ) -> anyhow::Result<(nalgebra::DMatrix<f32>, Vec<usize>, Vec<f32>)>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets, source_columns, distances) =
+            self.neighbouring_columns_triplets(cells, knn_batches, knn_columns, skip_same_batch)?;
+        Ok((
+            DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            source_columns,
+            distances,
+        ))
     }
 
     /// Take columns matched with the given `cells`
@@ -419,37 +603,6 @@ impl SparseIoVec {
             self.matched_columns_triplets(cells, target_batches, knn, skip_same_batch)?;
         Ok((
             CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
-            source_columns,
-            distances,
-        ))
-    }
-
-    /// Take columns matched with the given `cells`
-    ///
-    /// # Arguments
-    /// * `cells` - global column indices
-    /// * `target_batches` - the batches for targeted kNN search
-    /// * `knn` - k-nearest neighbours
-    /// * `skip_same_batch` - skip the same batch
-    ///
-    /// # Returns
-    /// * the knn-matched matrix
-    /// * `source_columns` - a vector of the source columns
-    /// * distances - a vector of distances between the matched columns
-    pub fn read_matched_columns_csr<I>(
-        &self,
-        cells: I,
-        target_batches: &Vec<usize>,
-        knn: usize,
-        skip_same_batch: bool,
-    ) -> anyhow::Result<(CsrMatrix<f32>, Vec<usize>, Vec<f32>)>
-    where
-        I: Iterator<Item = usize>,
-    {
-        let ((nrow, ncol), triplets, source_columns, distances) =
-            self.matched_columns_triplets(cells, target_batches, knn, skip_same_batch)?;
-        Ok((
-            CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
             source_columns,
             distances,
         ))
@@ -628,6 +781,67 @@ impl SparseIoVec {
         self.col_to_batch = Some(col_to_batch);
         self.batch_to_cols = Some(batch_to_cols);
         self.batch_idx_to_name = Some(batch_names);
+
+        if self.num_batches() > 2 {
+            self.sort_batch_proximity()?;
+        }
+
+        Ok(())
+    }
+
+    fn sort_batch_proximity(&mut self) -> anyhow::Result<()> {
+        let lookups = self
+            .batch_knn_lookup
+            .as_ref()
+            .ok_or(anyhow::anyhow!("no knn lookup"))?;
+
+        use nalgebra::DMatrix;
+
+        info!("retrieving batch-specific lookups");
+        let batch_data = lookups
+            .iter()
+            .map(|dict| {
+                let data: Vec<f32> = dict
+                    .data_vec
+                    .iter()
+                    .map(|x| x.data.clone())
+                    .flatten()
+                    .collect();
+                let ncols = dict.data_vec.len();
+                let nrows = data.len() / ncols;
+                DMatrix::from_vec(nrows, ncols, data)
+                    .column_mean()
+                    .data
+                    .as_vec()
+                    .clone()
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+
+        let ncols = self.num_batches();
+        let nrows = batch_data.len() / ncols;
+        let batch_features = DMatrix::<f32>::from_vec(nrows, ncols, batch_data);
+
+        info!(
+            "built feature matrix across batches: {} x {}",
+            batch_features.nrows(),
+            batch_features.ncols()
+        );
+
+        let nbatches = self.num_batches();
+        let batches = (0..nbatches).collect();
+
+        let dict = ColumnDict::<usize>::from_dvector_views(
+            batch_features.column_iter().collect(),
+            batches,
+        );
+
+        let mut ret = Vec::with_capacity(nbatches);
+        for b in 0..nbatches {
+            let (others, _) = dict.match_by_name(&b, nbatches)?;
+            ret.push(others);
+        }
+        self.between_batch_proximity = Some(ret);
 
         Ok(())
     }
