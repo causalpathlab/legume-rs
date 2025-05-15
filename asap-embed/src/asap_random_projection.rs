@@ -153,6 +153,17 @@ impl RandProjOps for SparseIoVec {
 
         proj_kn.scale_columns_inplace();
 
+        let (lb, ub) = (-4., 4.);
+        info!(
+            "Clamping values within [{}, {}] after standardization",
+            lb, ub
+        );
+        proj_kn.scale_columns_inplace();
+        proj_kn.iter_mut().for_each(|x| {
+            *x = x.clamp(lb, ub);
+        });
+        proj_kn.scale_columns_inplace();
+
         Ok(RandColProjOut {
             basis: basis_dk,
             proj: proj_kn,
