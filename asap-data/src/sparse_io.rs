@@ -444,7 +444,7 @@ pub trait SparseIo: Sync + Send {
             let (old2new_rows, new_row_names) =
                 take_subset_indices_names_if_needed(rows, Some(nrow_data), self.row_names()?);
 
-            let (new_ncol, new_nrow) = (old2new_cols.len(), old2new_rows.len());
+            let (new_ncol, new_nrow) = (new_col_names.len(), new_row_names.len());
 
             /////////////////////////////////////////////////////////
             // 1. Create remapped Mtx only taking a subset of rows //

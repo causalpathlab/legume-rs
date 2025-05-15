@@ -105,13 +105,13 @@ enum Commands {
     /// Build faster backend data from `mtx`
     FromMtx(FromMtxArgs),
 
-    /// Build from H5AD's `csr_matrix` data
+    /// Build a backend from triplets in `h5`
     FromH5ad(FromH5Args),
 
-    /// Build from `csr_matrix` data in `h5`
+    /// Build a backend from triplets in `h5`
     FromH5(FromH5Args),
 
-    /// List items in `h5` file
+    /// List what are included in `h5` file
     ListH5(ListH5Args),
 
     /// Sort rows according to the order of row names specified in a
@@ -317,10 +317,6 @@ pub struct RunSqueezeArgs {
     #[arg(short, long, default_value = "0")]
     column_nnz_cutoff: usize,
 
-    /// ondisk data only
-    #[arg(long, default_value_t = false)]
-    ondisk_data: bool,
-
     /// Block_size for parallel processing
     #[arg(long, value_enum, default_value = "100")]
     block_size: usize,
@@ -334,10 +330,6 @@ pub struct RunStatArgs {
     /// block_size
     #[arg(long, value_enum, default_value = "100")]
     block_size: usize,
-
-    /// ondisk data only
-    #[arg(long, default_value_t = false)]
-    ondisk_data: bool,
 
     /// output file header
     #[arg(short, long)]
@@ -769,7 +761,6 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
             data_file: backend_file.into_boxed_str(),
             row_nnz_cutoff: 0,
             column_nnz_cutoff: 0,
-            ondisk_data: true,
             block_size: 100,
         };
 
@@ -853,7 +844,6 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
             data_file: backend_file.into_boxed_str(),
             row_nnz_cutoff: 0,
             column_nnz_cutoff: 0,
-            ondisk_data: true,
             block_size: 100,
         };
 
@@ -1036,7 +1026,6 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
             data_file: backend_file.into_boxed_str(),
             row_nnz_cutoff: 0,
             column_nnz_cutoff: 0,
-            ondisk_data: true,
             block_size: 100,
         };
 
@@ -1102,15 +1091,12 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
     }
 
-    let mut data: Box<SData> = open_sparse_matrix(&input, &backend.clone())?;
-    if !cmd_args.ondisk_data {
-        data.preload_columns()?;
-    }
+    let data: Box<SData> = open_sparse_matrix(&input, &backend.clone())?;
 
     let row_names = data.row_names()?;
     let col_names = data.column_names()?;
 
-    if let Ok((row_stat, col_stat)) = collect_row_column_stats(&mut data, block_size) {
+    if let Ok((row_stat, col_stat)) = collect_row_column_stats(&data, block_size) {
         let row_stat_file = format!("{}.row.stat.gz", output);
         let col_stat_file = format!("{}.col.stat.gz", output);
         row_stat.save(&row_stat_file, &row_names, "\t")?;
@@ -1146,9 +1132,7 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
     }
 
     let mut data = open_sparse_matrix(&data_file, &backend)?;
-    if !cmd_args.ondisk_data {
-        data.preload_columns()?;
-    }
+    data.preload_columns()?;
 
     info!(
         "before squeeze -- data: {} rows x {} columns",

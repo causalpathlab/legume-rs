@@ -82,9 +82,20 @@ impl CollapsingOps for SparseIoVec {
         let kk = proj_kn.nrows();
 
         info!("SVD on the projection matrix with k = {} ...", kk);
-        let (_, _, mut q_nk) = proj_kn.rsvd(kk)?;
-        q_nk.scale_columns_inplace();
-        let proj_kn = q_nk.transpose();
+        let (_, _, q_nk) = proj_kn.rsvd(kk)?;
+
+        let mut proj_kn = q_nk.transpose();
+
+        let (lb, ub) = (-4., 4.);
+        info!(
+            "Clamping values within [{}, {}] after standardization",
+            lb, ub
+        );
+        proj_kn.scale_columns_inplace();
+        proj_kn.iter_mut().for_each(|x| {
+            *x = x.clamp(lb, ub);
+        });
+        proj_kn.scale_columns_inplace();
 
         info!("creating batch-specific HNSW maps ...");
         self.register_batches_dmatrix(&proj_kn, &col_to_batch)?;

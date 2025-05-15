@@ -249,14 +249,11 @@ impl SparseIoVec {
         (usize, usize),
         Vec<(usize, usize, f32)>,
         (Vec<usize>, Vec<usize>),
+        Vec<f32>,
     )>
     where
-        I: Iterator<Item = usize>,
+        I: Iterator<Item = usize> + Clone,
     {
-        let mut triplets = vec![];
-        let mut nrow = 0;
-        let mut ncol = 0;
-
         let lookups = self
             .batch_knn_lookup
             .as_ref()
@@ -267,10 +264,25 @@ impl SparseIoVec {
             .as_ref()
             .ok_or(anyhow::anyhow!("no cell to batch"))?;
 
+        let mut approx_ncol = 0;
+        for glob in cells.clone() {
+            let source_batch = cell_to_batch[glob]; // this cell's batch
+
+            if skip_same_batch && source_batch == target_batch {
+                continue; // skip cells in the same batch
+            }
+            approx_ncol += knn;
+        }
+
         debug_assert!(target_batch < self.num_batches());
 
-        let mut source_columns = vec![];
-        let mut source_positions = vec![];
+        let nrow = self.num_rows()?;
+        let mut ncol = 0;
+        let mut triplets = Vec::with_capacity(approx_ncol * nrow);
+
+        let mut distances = Vec::with_capacity(approx_ncol);
+        let mut source_columns = Vec::with_capacity(approx_ncol);
+        let mut source_positions = Vec::with_capacity(approx_ncol);
 
         for (idx, glob) in cells.enumerate() {
             let source_batch = cell_to_batch[glob]; // this cell's batch
@@ -282,28 +294,32 @@ impl SparseIoVec {
             if let (Some(source_lookup), Some(target_lookup)) =
                 (lookups.get(source_batch), lookups.get(target_batch))
             {
-                let matched = source_lookup.match_against_by_name(&glob, knn, &target_lookup)?;
-                for glob_matched in matched {
+                let (matched, matched_distances) =
+                    source_lookup.match_against_by_name(&glob, knn, &target_lookup)?;
+                for (glob_matched, dist) in matched.into_iter().zip(matched_distances.into_iter()) {
                     if glob == glob_matched {
                         continue; // avoid identical cell pairs
                     }
                     let didx = self.col_to_data[glob_matched];
                     let loc = self.col_glob_to_loc[glob_matched];
-                    let (loc_nrow, loc_ncol, loc_triplets) =
+                    let (_, loc_ncol, loc_triplets) =
                         self.data_vec[didx].read_triplets_by_single_column(loc)?;
 
-                    nrow = nrow.max(loc_nrow);
                     triplets.extend(loc_triplets.iter().map(|&(i, j, v)| (i, j + ncol, v)));
                     ncol += loc_ncol;
                     source_columns.push(glob);
                     source_positions.push(idx);
+                    distances.push(dist);
                 }
             }
         }
 
-        let nrow = nrow.max(self.num_rows()?); // handle empty results
-
-        Ok(((nrow, ncol), triplets, (source_columns, source_positions)))
+        Ok((
+            (nrow, ncol),
+            triplets,
+            (source_columns, source_positions),
+            distances,
+        ))
     }
 
     /// Take columns matched with the given `cells`
@@ -335,20 +351,26 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let cells: Vec<usize> = cells.collect();
-        let y1 = self.read_columns_csc(cells.iter().cloned())?;
+        // let y1 = self.read_columns_csc(cells.iter().cloned())?;
+
+        let nrows = self.num_rows()?;
+        let nbatches = self.num_batches();
+        let ncols = cells.len();
+        let approx_ncols = ncols * knn * nbatches;
 
         let mut matched_triplets: Vec<(usize, usize, f32)> = vec![];
-        let mut euclidean_distances: Vec<f32> = vec![];
+        let mut euclidean_distances: Vec<f32> = Vec::with_capacity(approx_ncols);
+        let mut source_columns: Vec<usize> = Vec::with_capacity(approx_ncols);
         let mut tot_ncells_matched: usize = 0;
-        let mut source_columns: Vec<usize> = vec![];
 
         for &target_b in target_batches.iter() {
-            let (shape, triplets, sources) = self.matched_columns_triplets_on_target_batch(
-                cells.iter().cloned(),
-                target_b,
-                knn,
-                skip_same_batch,
-            )?;
+            let (shape, triplets, sources, distances) = self
+                .matched_columns_triplets_on_target_batch(
+                    cells.iter().cloned(),
+                    target_b,
+                    knn,
+                    skip_same_batch,
+                )?;
 
             matched_triplets.extend(
                 triplets
@@ -357,15 +379,16 @@ impl SparseIoVec {
             );
 
             // Temporarily construct y0 and compute distances between the matched columns
-            let y0 = CscMatrix::<f32>::from_nonzero_triplets(shape.0, shape.1, triplets)?;
-            let y0_pos = &sources.1;
-            euclidean_distances.extend(y0.euclidean_distance_matched_columns(&y1, y0_pos)?);
+            // let y0 = CscMatrix::<f32>::from_nonzero_triplets(shape.0, shape.1, triplets)?;
+            // let y0_pos = &sources.1;
+            // euclidean_distances.extend(y0.euclidean_distance_matched_columns(&y1, y0_pos)?);
 
+            euclidean_distances.extend(distances);
             tot_ncells_matched += shape.1;
             source_columns.extend(sources.0);
         }
 
-        let shape = (y1.nrows(), tot_ncells_matched);
+        let shape = (nrows, tot_ncells_matched);
 
         Ok((shape, matched_triplets, source_columns, euclidean_distances))
     }

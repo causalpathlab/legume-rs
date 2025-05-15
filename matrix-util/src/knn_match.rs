@@ -49,7 +49,7 @@ where
         query_name: &T,
         knn: usize,
         against: &Self,
-    ) -> anyhow::Result<Vec<T>> {
+    ) -> anyhow::Result<(Vec<T>, Vec<f32>)> {
         use instant_distance::Search;
 
         let nquery = knn.min(against.data_vec.len());
@@ -58,12 +58,15 @@ where
             let query = &self.data_vec[*self_idx];
             let mut search = Search::default();
             let knn_iter = against.dict.search(query, &mut search).take(nquery);
-            let mut ret = vec![];
+            let mut points = Vec::with_capacity(nquery);
+            let mut distances = Vec::with_capacity(nquery);
             for v in knn_iter {
                 let vv = v.value;
-                ret.push(vv.clone());
+                let dd = v.distance;
+                points.push(vv.clone());
+                distances.push(dd);
             }
-            Ok(ret)
+            Ok((points, distances))
         } else {
             return Err(anyhow::anyhow!("name {} not found", query_name));
         }
@@ -160,12 +163,12 @@ impl MakeVecPoint for ndarray::ArrayView1<'_, f32> {
 }
 
 impl instant_distance::Point for VecPoint {
-    // fn from
+    /// Euclidean distance
     fn distance(&self, other: &Self) -> f32 {
         self.data
             .iter()
             .zip(other.data.iter())
-            .map(|(x, y)| (x - y) * (x - y))
+            .map(|(&x, &y)| (x - y) * (x - y))
             .sum::<f32>()
             .sqrt()
     }
