@@ -126,7 +126,6 @@ impl RandProjOps for SparseIoVec {
 
             if col_to_batch.len() == ncols {
                 let batches = partition_by_membership(col_to_batch, None);
-
                 for (_, cols) in batches.iter() {
                     // columnwise processing is faster
                     let x_t_rows: Vec<_> = cols

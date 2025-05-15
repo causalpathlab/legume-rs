@@ -63,7 +63,7 @@ struct EmbedArgs {
     data_files: Vec<Box<str>>,
 
     /// Random projection dimension to project the data.
-    #[arg(long, short = 'p', default_value_t = 30)]
+    #[arg(long, short = 'p', default_value_t = 50)]
     proj_dim: usize,
 
     /// Output header
@@ -74,18 +74,22 @@ struct EmbedArgs {
     #[arg(long, short = 'd', default_value_t = 10)]
     sort_dim: usize,
 
-    /// Batch membership files (comma-separated names). Each bach file
+    /// batch membership files (comma-separated names). Each bach file
     /// should correspond to each data file.
     #[arg(long, short, value_delimiter(','))]
     batch_files: Option<Vec<Box<str>>>,
 
-    /// Reference batch name (comma-separated names)
+    /// reference batch name (comma-separated names)
     #[arg(short = 'r', long, value_delimiter(','))]
     reference_batch: Option<Vec<Box<str>>>,
 
     /// #k-nearest neighbours within each batch
-    #[arg(long, short = 'n', default_value_t = 10)]
-    knn: usize,
+    #[arg(long, default_value_t = 3)]
+    knn_batches: usize,
+
+    /// #k-nearest neighbours within each batch
+    #[arg(long, default_value_t = 10)]
+    knn_cells: usize,
 
     /// #downsampling columns per each collapsed sample. If None, no
     /// downsampling.
@@ -93,29 +97,29 @@ struct EmbedArgs {
     down_sample: Option<usize>,
 
     /// optimization iterations
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 15)]
     iter_opt: usize,
 
-    /// Block_size for parallel processing
+    /// block_size (# columns) for parallel processing
     #[arg(long, default_value_t = 100)]
     block_size: usize,
 
-    /// Number of latent topics
+    /// number of latent topics
     #[arg(short = 'k', long, default_value_t = 10)]
     n_latent_topics: usize,
 
     #[arg(long, default_value_t = 500)]
     n_row_modules: usize,
 
-    /// Encoder layers
+    /// encoder layers
     #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
     encoder_layers: Vec<usize>,
 
-    /// Intensity levels for frequency embedding
+    /// intensity levels for frequency embedding
     #[arg(long, default_value_t = 10)]
     vocab_size: usize,
 
-    /// Intensity embedding dimension
+    /// intensity embedding dimension
     #[arg(long, default_value_t = 5)]
     vocab_emb: usize,
 
@@ -134,19 +138,19 @@ struct EmbedArgs {
     #[arg(long, default_value_t = 1e-3)]
     learning_rate: f32,
 
-    /// Candle device
+    /// candle device
     #[arg(long, value_enum, default_value = "cpu")]
     device: ComputeDevice,
 
-    /// Choose a decoder model
+    /// choose a decoder model
     #[arg(long = "model", short = 'm', value_enum, default_value = "topic")]
     decoder_model: DecoderModel,
 
-    /// Save intermediate projection results
+    /// save intermediate projection results
     #[arg(long)]
     save_intermediate: bool,
 
-    /// Save batch-adjusted data
+    /// save batch-adjusted data
     #[arg(long)]
     save_adjusted: bool,
 
@@ -229,8 +233,8 @@ fn main() -> anyhow::Result<()> {
     info!("Collapsing columns... into {} samples", nsamp);
     let collapse_out = data_vec.collapse_columns(
         args.down_sample,
-        args.reference_batch.clone(),
-        Some(args.knn),
+        Some(args.knn_batches),
+        Some(args.knn_cells),
         Some(args.iter_opt),
     )?;
 
