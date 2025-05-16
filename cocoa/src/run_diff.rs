@@ -5,6 +5,7 @@ use crate::util::*;
 pub use clap::Parser;
 pub use log::{info, warn};
 use matrix_param::traits::Inference;
+use matrix_util::common_io;
 pub use matrix_util::common_io::{extension, read_lines, read_lines_of_words};
 use matrix_util::traits::IoOps;
 pub use std::sync::Arc;
@@ -57,7 +58,7 @@ pub struct DiffArgs {
     #[arg(long, default_value_t = 1.0)]
     b0: f32,
 
-    /// output header
+    /// output directory
     #[arg(long, short, required = true)]
     out: Box<str>,
 
@@ -70,6 +71,8 @@ pub struct DiffArgs {
 pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     let mut data = read_input_data(args.clone())?;
 
+    common_io::mkdir(&args.out)?;
+
     info!("normalizing cell topic proportion");
     data.cell_topic
         .row_iter_mut()
@@ -81,9 +84,13 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         info!("{}", x);
     }
 
+    let gene_names = data.sparse_data.row_names()?;
+
     let sample_to_cells = (0..data.sparse_data.num_batches())
         .map(|b| data.sparse_data.batch_to_columns(b).unwrap().clone())
         .collect::<Vec<_>>();
+
+
 
     let cocoa_input = &CocoaCollapseIn {
         n_genes: data.sparse_data.num_rows()?,
@@ -103,20 +110,11 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     info!("Optimizing parameters...");
     let parameters = cocoa_stat.estimate_parameters()?;
 
-    for param in parameters.iter() {
+    for (k, param) in parameters.iter().enumerate() {
         let tau = &param.exposure;
-
-        // gene <tab> exposure <tab> log mean <tab> log sd
-        tau.posterior_log_mean();
-        tau.posterior_log_sd();
-
-        // let x = &param.exposure.to_tsv(header);
+        let outfile = format!("{}/tau_{}.gz", args.out, k);
+	tau.to_summary_stat_tsv(gene_names.clone(), exposure_names.clone(), &outfile)?;
     }
-
-    // let out_dir = args.out.to_string() + "/";
-    // for k in 0..n_topics {
-    //     let out = cocoa_stat.optimize_each_topic(k)?;
-    // }
 
     info!("Done");
     Ok(())
