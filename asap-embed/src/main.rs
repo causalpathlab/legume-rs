@@ -355,8 +355,10 @@ fn main() -> anyhow::Result<()> {
     let batch_dn = collapse_out.mu_residual.as_ref();
 
     let mixed_nd = mixed_dn.posterior_mean().transpose().clone() * &aggregate_rows;
-    let clean_nd = clean_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
     let batch_nd = batch_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
+
+    // todo: we should maintain the dimensionality in decoder model
+    let clean_nd = clean_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
 
     ///////////////////////////////////////////////////
     // training variational autoencoder architecture //
@@ -391,10 +393,14 @@ fn main() -> anyhow::Result<()> {
                 &loss_func::topic_likelihood,
                 &train_config,
             )?;
-            decoder
+
+            let beta = decoder
                 .get_dictionary()?
-                .to_device(&candle_core::Device::Cpu)?
-                .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
+                .to_device(&candle_core::Device::Cpu)?;
+
+            let beta = &aggregate_rows * Mat::from_tensor(&beta)?;
+
+            beta.to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
 
             llik
         }
