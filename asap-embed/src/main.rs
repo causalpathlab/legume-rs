@@ -108,7 +108,7 @@ struct EmbedArgs {
     #[arg(short = 'k', long, default_value_t = 10)]
     n_latent_topics: usize,
 
-    #[arg(long, default_value_t = 500)]
+    #[arg(long, default_value_t = 1000)]
     n_row_modules: usize,
 
     /// encoder layers
