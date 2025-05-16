@@ -9,7 +9,7 @@ use asap_embed::asap_random_projection::*;
 use asap_embed_common::*;
 use log::info;
 use matrix_param::traits::{Inference, ParamIo, TwoStatParam};
-use matrix_util::common_io::{extension, read_lines, remove_file, write_types};
+use matrix_util::common_io::{extension, read_lines, remove_file, write_lines, write_types};
 use matrix_util::traits::*;
 
 use asap_routines_latent_representation::*;
@@ -46,7 +46,7 @@ enum ComputeDevice {
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "ASAP embedding", version, about, long_about, term_width = 80)]
+#[command(name = "Embedding ASAP", version, about, long_about, term_width = 80)]
 /// A quick embedding utility
 ///
 /// This command will embed high-dimensional data (where each data
@@ -285,6 +285,11 @@ fn main() -> anyhow::Result<()> {
             info!("Wrote {}", args.out.to_string() + ".collapsed.residual");
         }
     }
+
+    let row_names = data_vec.row_names()?;
+    let col_names = data_vec.column_names()?;
+    write_lines(&row_names, &(args.out.to_string() + ".rows.gz"))?;
+    write_lines(&col_names, &(args.out.to_string() + ".cols.gz"))?;
 
     /////////////////////////////////////////////////////////
     // 4. Train embedded topic model on the collapsed data //
