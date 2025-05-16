@@ -4,7 +4,7 @@ use crate::util::*;
 
 pub use clap::Parser;
 pub use log::{info, warn};
-use matrix_param::traits::Inference;
+
 use matrix_util::common_io;
 pub use matrix_util::common_io::{extension, read_lines, read_lines_of_words};
 use matrix_util::traits::IoOps;
@@ -90,8 +90,6 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         .map(|b| data.sparse_data.batch_to_columns(b).unwrap().clone())
         .collect::<Vec<_>>();
 
-
-
     let cocoa_input = &CocoaCollapseIn {
         n_genes: data.sparse_data.num_rows()?,
         n_samples: data.sparse_data.num_batches(),
@@ -113,7 +111,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     for (k, param) in parameters.iter().enumerate() {
         let tau = &param.exposure;
         let outfile = format!("{}/tau_{}.gz", args.out, k);
-	tau.to_summary_stat_tsv(gene_names.clone(), exposure_names.clone(), &outfile)?;
+        tau.to_summary_stat_tsv(gene_names.clone(), exposure_names.clone(), &outfile)?;
     }
 
     info!("Done");
