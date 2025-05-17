@@ -1,14 +1,16 @@
 [package]
-name = "asap-srt"
+name = "asap-senna"
 version = "0.1.0"
 edition = "2021"
+description = "Spatially Embedded Nearest Neighbourhood Analysis"
 
 [[bin]]
-name = "asap-srt"
+name = "senna"
 path = "src/main.rs"
 
 [dependencies]
 asap-data = { path = "../asap-data" }
+asap-alg = { path = "../asap-alg" }
 matrix-util = { path = "../matrix-util" }
 matrix-param = { path = "../matrix-param" }
 
