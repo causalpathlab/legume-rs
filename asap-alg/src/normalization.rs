@@ -1,11 +1,9 @@
-use crate::asap_embed_common::*;
-
 pub trait AdjustByDivisionOp {
-    fn adjust_by_division(&mut self, denom_db: &Mat, batches: &Vec<usize>);
+    fn adjust_by_division(&mut self, denom_db: &nalgebra::DMatrix<f32>, batches: &Vec<usize>);
 }
 
-impl AdjustByDivisionOp for CscMat {
-    fn adjust_by_division(&mut self, denom_db: &Mat, batches: &Vec<usize>) {
+impl AdjustByDivisionOp for nalgebra_sparse::CscMatrix<f32> {
+    fn adjust_by_division(&mut self, denom_db: &nalgebra::DMatrix<f32>, batches: &Vec<usize>) {
         let eps: f32 = 1e-4;
 
         self.col_iter_mut().zip(batches).for_each(|(mut x_j, &b)| {

@@ -1,15 +1,10 @@
 [package]
-name = "asap-embed"
+name = "asap-alg"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "asap-embed"
-path = "src/main.rs"
-
 [dependencies]
 asap-data = { path = "../asap-data" }
-asap-alg = { path = "../asap-alg" }
 candle-util = { path = "../candle-util" }
 matrix-util = { path = "../matrix-util" }
 matrix-param = { path = "../matrix-param" }

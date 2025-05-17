@@ -1,12 +1,9 @@
-mod asap_collapse_data;
-mod asap_embed_common;
-mod asap_normalization;
-mod asap_random_projection;
 mod asap_routines_latent_representation;
 mod asap_routines_post_process;
+mod embed_common;
 
-use asap_embed::asap_random_projection::*;
-use asap_embed_common::*;
+use asap_alg::random_projection::*;
+use embed_common::*;
 use log::info;
 use matrix_param::traits::{Inference, ParamIo, TwoStatParam};
 use matrix_util::common_io::{extension, read_lines, remove_file, write_lines, write_types};
@@ -15,10 +12,10 @@ use matrix_util::traits::*;
 use asap_routines_latent_representation::*;
 use asap_routines_post_process::*;
 
-use asap_collapse_data::CollapsingOps;
+use asap_alg::collapse_data::CollapsingOps;
+use asap_alg::random_projection::RandProjOps;
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
-use asap_random_projection::RandProjOps;
 
 use candle_util::candle_decoder_topic::*;
 use candle_util::candle_encoder_softmax::*;

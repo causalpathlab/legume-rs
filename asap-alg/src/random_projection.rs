@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use crate::asap_embed_common::*;
 use asap_data::sparse_data_visitors::*;
 use asap_data::sparse_io_vector::SparseIoVec;
 use std::sync::{Arc, Mutex};
@@ -12,13 +11,13 @@ use matrix_util::utils::*;
 use nalgebra::DVector;
 
 pub struct RandColProjOut {
-    pub basis: Mat,
-    pub proj: Mat,
+    pub basis: nalgebra::DMatrix<f32>,
+    pub proj: nalgebra::DMatrix<f32>,
 }
 
 pub struct RandRowProjOut {
-    pub basis: Mat,
-    pub proj: Mat,
+    pub basis: nalgebra::DMatrix<f32>,
+    pub proj: nalgebra::DMatrix<f32>,
 }
 
 pub trait RandProjOps {
@@ -65,7 +64,7 @@ pub trait RandProjOps {
     ///
     fn assign_columns_to_samples(
         &mut self,
-        proj_kn: &Mat,
+        proj_kn: &nalgebra::DMatrix<f32>,
         num_features: Option<usize>,
     ) -> anyhow::Result<usize>;
 }
@@ -74,8 +73,8 @@ pub trait RandProjOps {
 fn visit_rand_proj_columnwise(
     job: (usize, usize),
     data_vec: &SparseIoVec,
-    basis_dk: &Mat,
-    arc_proj_kn: Arc<Mutex<&mut Mat>>,
+    basis_dk: &nalgebra::DMatrix<f32>,
+    arc_proj_kn: Arc<Mutex<&mut nalgebra::DMatrix<f32>>>,
 ) {
     let (lb, ub) = job;
     let mut xx_dm = data_vec.read_columns_csc(lb..ub).unwrap();
@@ -110,9 +109,9 @@ impl RandProjOps for SparseIoVec {
         let nrows = self.num_rows()?;
         let ncols = self.num_columns()?;
 
-        let mut proj_kn = Mat::zeros(target_dim, ncols);
+        let mut proj_kn = nalgebra::DMatrix::<f32>::zeros(target_dim, ncols);
 
-        let basis_dk = Mat::rnorm(nrows, target_dim);
+        let basis_dk = nalgebra::DMatrix::<f32>::rnorm(nrows, target_dim);
 
         self.visit_columns_by_jobs(
             &visit_rand_proj_columnwise,
@@ -133,9 +132,10 @@ impl RandProjOps for SparseIoVec {
                         .map(|&j| proj_kn.column(j).transpose().into_owned())
                         .collect();
 
-                    let mut x_t: Mat = Mat::from_rows(&x_t_rows);
+                    let mut x_t: nalgebra::DMatrix<f32> =
+                        nalgebra::DMatrix::<f32>::from_rows(&x_t_rows);
                     x_t.centre_columns_inplace();
-                    let xx: Mat = x_t.transpose();
+                    let xx: nalgebra::DMatrix<f32> = x_t.transpose();
 
                     cols.iter().zip(xx.column_iter()).for_each(|(&j, x_j)| {
                         proj_kn.column_mut(j).copy_from(&x_j);
@@ -180,7 +180,7 @@ impl RandProjOps for SparseIoVec {
     ///
     fn assign_columns_to_samples(
         &mut self,
-        proj_kn: &Mat,
+        proj_kn: &nalgebra::DMatrix<f32>,
         num_sorting_features: Option<usize>,
     ) -> anyhow::Result<usize> {
         let nn = proj_kn.ncols();
@@ -206,7 +206,10 @@ impl RandProjOps for SparseIoVec {
 /// # Arguments
 /// * `proj_kn` - random projection matrix (feature x column/cell)
 /// * `kk` - number of features
-pub fn binary_sort_columns(proj_kn: &Mat, kk: usize) -> anyhow::Result<Vec<usize>> {
+pub fn binary_sort_columns(
+    proj_kn: &nalgebra::DMatrix<f32>,
+    kk: usize,
+) -> anyhow::Result<Vec<usize>> {
     // SVD to spread out the points
     let nn = proj_kn.ncols();
     let (_, _, mut q_nk) = proj_kn.rsvd(kk)?;
