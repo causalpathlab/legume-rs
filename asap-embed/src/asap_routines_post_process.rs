@@ -1,5 +1,6 @@
-use crate::asap_embed_common::*;
-use crate::asap_normalization::*;
+use crate::embed_common::*;
+
+use asap_alg::normalization::*;
 use asap_data::sparse_data_visitors::VisitColumnsOps;
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;

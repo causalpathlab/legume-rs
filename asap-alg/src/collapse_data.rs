@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
-use crate::asap_embed_common::*;
-use crate::asap_normalization::*;
+use crate::normalization::NormalizeDistance;
 use asap_data::sparse_data_visitors::*;
 use asap_data::sparse_io_vector::SparseIoVec;
 use indicatif::ProgressIterator;
@@ -13,6 +12,11 @@ use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::traits::*;
 use matrix_util::utils::partition_by_membership;
 use std::sync::{Arc, Mutex};
+
+pub const DEFAULT_KNN: usize = 10;
+pub const DEFAULT_OPT_ITER: usize = 100;
+
+pub struct EmptyArg {}
 
 #[cfg(debug_assertions)]
 use log::debug;
@@ -48,7 +52,11 @@ pub trait CollapsingOps {
     /// # Arguments
     /// * `proj_kn` - random projection matrix
     /// * `col_to_batch` - map: cell -> batch
-    fn register_batches<T>(&mut self, proj_kn: &Mat, col_to_batch: &Vec<T>) -> anyhow::Result<()>
+    fn register_batches<T>(
+        &mut self,
+        proj_kn: &nalgebra::DMatrix<f32>,
+        col_to_batch: &Vec<T>,
+    ) -> anyhow::Result<()>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 
@@ -75,7 +83,11 @@ pub trait CollapsingOps {
 
 impl CollapsingOps for SparseIoVec {
     //
-    fn register_batches<T>(&mut self, proj_kn: &Mat, col_to_batch: &Vec<T>) -> anyhow::Result<()>
+    fn register_batches<T>(
+        &mut self,
+        proj_kn: &nalgebra::DMatrix<f32>,
+        col_to_batch: &Vec<T>,
+    ) -> anyhow::Result<()>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
@@ -323,7 +335,7 @@ fn optimize(
 
     if num_batches > 1 {
         // temporary denominator
-        let mut denom_ds = Mat::zeros(num_genes, num_samples);
+        let mut denom_ds = nalgebra::DMatrix::<f32>::zeros(num_genes, num_samples);
 
         let mut mu_adj_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
         let mut mu_resid_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
@@ -386,7 +398,8 @@ fn optimize(
         // -----------------------
         // mu_ds .* (1_d * size_s')
         {
-            denom_ds = DVec::from_element(num_genes, 1_f32) * stat.size_s.transpose();
+            denom_ds =
+                nalgebra::DVector::<f32>::from_element(num_genes, 1_f32) * stat.size_s.transpose();
 
             mu_resid_param.update_stat(
                 &stat.ysum_ds,
@@ -397,7 +410,8 @@ fn optimize(
 
         // Take the observed mean
         {
-            let denom_ds: Mat = DVec::from_element(num_genes, 1_f32) * stat.size_s.transpose();
+            let denom_ds: nalgebra::DMatrix<f32> =
+                nalgebra::DVector::<f32>::from_element(num_genes, 1_f32) * stat.size_s.transpose();
             mu_param.update_stat(&stat.ysum_ds, &denom_ds);
             mu_param.calibrate();
         };
@@ -410,7 +424,8 @@ fn optimize(
             delta: Some(delta_param),
         })
     } else {
-        let denom_ds: Mat = DVec::from_element(num_genes, 1_f32) * stat.size_s.transpose();
+        let denom_ds: nalgebra::DMatrix<f32> =
+            nalgebra::DVector::<f32>::from_element(num_genes, 1_f32) * stat.size_s.transpose();
         mu_param.update_stat(&stat.ysum_ds, &denom_ds);
         mu_param.calibrate();
         Ok(CollapsingOut {
@@ -435,21 +450,21 @@ pub struct CollapsingOut {
 
 /// a struct to hold the sufficient statistics for the model
 pub struct CollapsingStat {
-    pub ysum_ds: Mat, // observed sum within each sample
-    pub zsum_ds: Mat, // counterfactual sum within each sample
-    pub size_s: DVec, // sample s size
-    pub ysum_db: Mat, // divergence numerator
-    pub n_bs: Mat,    // batch-specific sample size
+    pub ysum_ds: nalgebra::DMatrix<f32>, // observed sum within each sample
+    pub zsum_ds: nalgebra::DMatrix<f32>, // counterfactual sum within each sample
+    pub size_s: nalgebra::DVector<f32>,  // sample s size
+    pub ysum_db: nalgebra::DMatrix<f32>, // divergence numerator
+    pub n_bs: nalgebra::DMatrix<f32>,    // batch-specific sample size
 }
 
 impl CollapsingStat {
     pub fn new(ngene: usize, nsample: usize, nbatch: usize) -> Self {
         Self {
-            ysum_ds: Mat::zeros(ngene, nsample),
-            zsum_ds: Mat::zeros(ngene, nsample),
-            size_s: DVec::zeros(nsample),
-            ysum_db: Mat::zeros(ngene, nbatch),
-            n_bs: Mat::zeros(nbatch, nsample),
+            ysum_ds: nalgebra::DMatrix::<f32>::zeros(ngene, nsample),
+            zsum_ds: nalgebra::DMatrix::<f32>::zeros(ngene, nsample),
+            size_s: nalgebra::DVector::<f32>::zeros(nsample),
+            ysum_db: nalgebra::DMatrix::<f32>::zeros(ngene, nbatch),
+            n_bs: nalgebra::DMatrix::<f32>::zeros(nbatch, nsample),
         }
     }
 

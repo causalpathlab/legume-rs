@@ -1,7 +1,7 @@
 use crate::common::*;
 use crate::stat::*;
 
-use asap_embed::asap_normalization::NormalizeDistance;
+use asap_alg::normalization::NormalizeDistance;
 use matrix_util::utils::partition_by_membership;
 
 use std::sync::{Arc, Mutex};

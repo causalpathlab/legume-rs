@@ -1,4 +1,4 @@
-mod alg_collapse;
+mod collapse_data;
 mod common;
 mod run_diff;
 mod run_sim;

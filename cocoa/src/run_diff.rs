@@ -1,6 +1,9 @@
-use crate::alg_collapse::*;
+use crate::collapse_data::*;
 use crate::common::*;
 use crate::util::*;
+
+use asap_alg::collapse_data::CollapsingOps;
+use asap_alg::random_projection::RandProjOps;
 
 pub use clap::Parser;
 pub use log::{info, warn};
@@ -126,9 +129,6 @@ struct DiffData {
 }
 
 fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
-    use asap_embed::asap_collapse_data::CollapsingOps;
-    use asap_embed::asap_random_projection::RandProjOps;
-
     // push data files and collect batch membership
     let file = args.data_files[0].as_ref();
     let backend = match extension(file)?.to_string().as_str() {
