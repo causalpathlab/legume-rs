@@ -79,10 +79,6 @@ struct EmbedArgs {
     #[arg(long, short, value_delimiter(','))]
     batch_files: Option<Vec<Box<str>>>,
 
-    /// reference batch name (comma-separated names)
-    #[arg(short = 'r', long, value_delimiter(','))]
-    reference_batch: Option<Vec<Box<str>>>,
-
     /// #k-nearest neighbours within each batch
     #[arg(long, default_value_t = 3)]
     knn_batches: usize,
@@ -108,7 +104,8 @@ struct EmbedArgs {
     #[arg(short = 'k', long, default_value_t = 10)]
     n_latent_topics: usize,
 
-    #[arg(long, default_value_t = 1000)]
+    /// targeted number of row feature modules
+    #[arg(short = 'r', long, default_value_t = 1000)]
     n_row_modules: usize,
 
     /// encoder layers
@@ -116,11 +113,11 @@ struct EmbedArgs {
     encoder_layers: Vec<usize>,
 
     /// intensity levels for frequency embedding
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 100)]
     vocab_size: usize,
 
     /// intensity embedding dimension
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = 3)]
     vocab_emb: usize,
 
     /// # pre-training epochs with an encoder-only model
@@ -184,9 +181,6 @@ fn main() -> anyhow::Result<()> {
     info!("Reading data files...");
 
     let (mut data_vec, batch_membership) = read_data_vec_membership(args.clone())?;
-    if let Some(reference_vec) = args.reference_batch.as_ref() {
-        info!("Reference batches: {:?}", reference_vec);
-    }
 
     if args.decoder_model != DecoderModel::Proj {
         info!("Encoder layers: {:?}", args.encoder_layers);
@@ -354,21 +348,22 @@ fn main() -> anyhow::Result<()> {
     let clean_dn = collapse_out.mu_adjusted.as_ref();
     let batch_dn = collapse_out.mu_residual.as_ref();
 
-    let mixed_nd = mixed_dn.posterior_mean().transpose().clone() * &aggregate_rows;
-    let batch_nd = batch_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
+    // encoder input can be modularized
+    let input_nm = mixed_dn.posterior_mean().transpose().clone() * &aggregate_rows;
+    let batch_nm = batch_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
 
-    // todo: we should maintain the dimensionality in decoder model
-    let clean_nd = clean_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
+    // output decoder should maintain the original dimension
+    let output_nd = match clean_dn {
+        Some(x) => x.posterior_mean().transpose().clone(),
+        _ => mixed_dn.posterior_mean().transpose().clone(),
+    };
 
     ///////////////////////////////////////////////////
     // training variational autoencoder architecture //
     ///////////////////////////////////////////////////
 
-    let n_features_encoder = mixed_nd.ncols();
-    let n_features_decoder = match clean_nd.as_ref() {
-        Some(clean_nd) => clean_nd.ncols(),
-        _ => n_features_encoder,
-    };
+    let n_features_encoder = input_nm.ncols();
+    let n_features_decoder = output_nd.ncols();
 
     let encoder = LogSoftmaxEncoder::new(
         n_features_encoder,
@@ -381,12 +376,16 @@ fn main() -> anyhow::Result<()> {
 
     let log_likelihood = match args.decoder_model {
         DecoderModel::Topic => {
+            info!(
+                "input: {} -> encoder -> decoder -> output: {}",
+                n_features_encoder, n_features_decoder
+            );
             let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
             let llik = train_encoder_decoder(
-                &mixed_nd,
-                clean_nd.as_ref(),
-                batch_nd.as_ref(),
+                &input_nm,
+                Some(&output_nd),
+                batch_nm.as_ref(),
                 &encoder,
                 &decoder,
                 &parameters,
@@ -394,13 +393,10 @@ fn main() -> anyhow::Result<()> {
                 &train_config,
             )?;
 
-            let beta = decoder
+            decoder
                 .get_dictionary()?
-                .to_device(&candle_core::Device::Cpu)?;
-
-            let beta = &aggregate_rows * Mat::from_tensor(&beta)?;
-
-            beta.to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
+                .to_device(&candle_core::Device::Cpu)?
+                .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
 
             llik
         }

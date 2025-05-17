@@ -330,7 +330,6 @@ where
     }
 
     fn build(encoder: &'a Enc, decoder: &'a Dec, variable_map: &'a candle_nn::VarMap) -> Self {
-        assert_eq!(encoder.dim_obs(), decoder.dim_obs());
         assert_eq!(encoder.dim_latent(), decoder.dim_latent());
 
         Self {
