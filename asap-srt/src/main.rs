@@ -1,12 +1,16 @@
 mod simulate;
 mod srt_common;
 
+use log::info;
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
+
 use srt_common::*;
 
 use asap_data::sparse_io_vector::*;
-use log::info;
 use matrix_param::traits::ParamIo;
 use matrix_util::common_io::{extension, read_lines, write_lines};
+use matrix_util::dmatrix_util::{concatenate_horizontal, concatenate_vertical};
 use matrix_util::traits::*;
 use matrix_util::utils::partition_by_membership;
 
@@ -153,7 +157,8 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     info!("Collapsing coordinates into {} samples", nsamp);
-    let mut collapsed_coords = Mat::zeros(nsamp, coord_map.ncols());
+
+    let mut collapsed_coords = Mat::zeros(nsamp, coord_map.ncols() * data_vec.num_batches());
 
     partition_by_membership(data_vec.samples_assigned()?, None)
         .into_iter()
@@ -179,6 +184,42 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn append_batch_coordinate<T>(coords: &Mat, batch_membership: &Vec<T>) -> anyhow::Result<Mat>
+where
+    T: Sync + Send + Clone + Eq + std::hash::Hash,
+{
+    if coords.nrows() != batch_membership.len() {
+        return Err(anyhow::anyhow!("incompatible batch membership"));
+    }
+
+    let minval = coords.min();
+    let maxval = coords.max();
+    let width = (maxval - minval).max(1.);
+
+    let uniq_batches = batch_membership.iter().collect::<HashSet<_>>();
+
+    let batch_index = uniq_batches
+        .into_iter()
+        .enumerate()
+        .map(|(k, v)| (v, k))
+        .collect::<HashMap<_, _>>();
+
+    let batch_coord = batch_membership
+        .iter()
+        .map(|k| {
+            let b = batch_index[k];
+            width * (b as f32)
+        })
+        .collect::<Vec<_>>();
+
+    let bb = Mat::from_vec(coords.nrows(), 1, batch_coord);
+
+    Ok(concatenate_horizontal(vec![coords.clone(), bb])?)
+}
+
+///
+/// each position vector (1 x d) `*` random_proj (d x r)
+///
 fn positional_projection<T>(
     coords: &Mat,
     batch_membership: &Vec<T>,
@@ -261,14 +302,11 @@ fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str
 
     for coord_file in args.coord_files.iter() {
         info!("Reading coordinate file: {}", coord_file);
-        coord_vec.push(Mat::read_file_delim(
-            coord_file,
-            vec!['\t', ',', ' '],
-            None,
-        )?);
+        let coord = Mat::read_file_delim(coord_file, vec!['\t', ',', ' '], None)?;
+        coord_vec.push(coord);
     }
 
-    let coord_nk = matrix_util::dmatrix_util::vcat(coord_vec)?;
+    let coord_nk = concatenate_vertical(coord_vec)?;
 
     // check batch membership
     let mut batch_membership = Vec::with_capacity(data_vec.len());
@@ -297,6 +335,16 @@ fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str
             data_vec.num_columns()?
         ));
     }
+
+    // use batch index as another coordinate
+    let uniq_batches = batch_membership.par_iter().collect::<HashSet<_>>();
+    let n_batches = uniq_batches.len();
+    let coord_nk = if n_batches > 1 {
+        info!("attaching {} batch index coordinate(s)", n_batches);
+        append_batch_coordinate(&coord_nk, &batch_membership)?
+    } else {
+        coord_nk
+    };
 
     Ok((data_vec, coord_nk, batch_membership))
 }
