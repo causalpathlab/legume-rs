@@ -1,4 +1,4 @@
-use crate::common_io::{read_lines_of_types, write_lines};
+use crate::common_io::{Delimiter, read_lines_of_types, write_lines};
 use crate::traits::*;
 pub use nalgebra::{DMatrix, DVector};
 pub use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
@@ -16,7 +16,7 @@ where
 
     fn read_file_delim(
         tsv_file: &str,
-        delim: &str,
+        delim: impl Into<Delimiter>,
         skip: Option<usize>,
     ) -> anyhow::Result<Self::Mat> {
         let hdr_line = match skip {

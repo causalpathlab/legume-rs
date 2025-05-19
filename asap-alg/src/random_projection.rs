@@ -67,6 +67,9 @@ pub trait RandProjOps {
         proj_kn: &nalgebra::DMatrix<f32>,
         num_features: Option<usize>,
     ) -> anyhow::Result<usize>;
+
+    /// Take samples assigned
+    fn samples_assigned(&self) -> anyhow::Result<&Vec<usize>>;
 }
 
 /// column-wise visitor for random projection
@@ -89,6 +92,11 @@ fn visit_rand_proj_columnwise(
 }
 
 impl RandProjOps for SparseIoVec {
+    fn samples_assigned(&self) -> anyhow::Result<&Vec<usize>> {
+        self.take_groups()
+            .ok_or(anyhow::anyhow!("unable to find sample information"))
+    }
+
     fn project_columns(
         &self,
         target_dim: usize,
@@ -217,13 +225,7 @@ pub fn binary_sort_columns(
 
     let mut binary_codes = DVector::<usize>::zeros(nn);
     for k in 0..kk {
-        let binary_shift = |x: f32| -> usize {
-            if x > 0.0 {
-                1 << k
-            } else {
-                0
-            }
-        };
+        let binary_shift = |x: f32| -> usize { if x > 0.0 { 1 << k } else { 0 } };
         binary_codes += q_nk.column(k).map(binary_shift);
     }
 

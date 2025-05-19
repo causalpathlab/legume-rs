@@ -2,6 +2,8 @@
 
 use asap_data::sparse_io::*;
 
+pub use std::sync::Arc;
+
 pub const DEFAULT_BLOCK_SIZE: usize = 100;
 pub const DEFAULT_KNN: usize = 10;
 pub const DEFAULT_OPT_ITER: usize = 100;

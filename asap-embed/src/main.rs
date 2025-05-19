@@ -25,8 +25,6 @@ use candle_util::candle_vae_inference::*;
 
 use clap::{Parser, ValueEnum};
 
-use std::sync::Arc;
-
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
 enum DecoderModel {
@@ -464,7 +462,7 @@ fn read_data_vec_membership(args: EmbedArgs) -> anyhow::Result<(SparseIoVec, Vec
     }
 
     // check batch membership
-    let mut batch_membership = vec![];
+    let mut batch_membership = Vec::with_capacity(data_vec.len());
 
     if let Some(batch_files) = &args.batch_files {
         if batch_files.len() != args.data_files.len() {

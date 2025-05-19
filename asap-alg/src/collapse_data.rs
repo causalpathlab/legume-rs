@@ -160,29 +160,6 @@ impl CollapsingOps for SparseIoVec {
             let knn_batches = knn_batches.unwrap_or(2);
             let knn_cells = knn_cells.unwrap_or(DEFAULT_KNN);
 
-            // let batch_name_map = self
-            //     .batch_name_map()
-            //     .ok_or(anyhow::anyhow!("batch names are not registered"))?;
-
-            // let reference_batches = match references {
-            //     Some(ref_names) => {
-            //         let mut idx = vec![];
-            //         for ref_name in &ref_names {
-            //             if let Some(ref_idx) = batch_name_map.get(ref_name) {
-            //                 idx.push(*ref_idx);
-            //             }
-            //         }
-            //         if idx.len() == 0 {
-            //             idx.extend(0..num_batches);
-            //         }
-            //         idx
-            //     }
-            //     None => {
-            //         warn!("using all the {} batches... (could be slow)", num_batches);
-            //         (0..num_batches).collect()
-            //     }
-            // };
-
             self.collect_matched_stat(&group_to_cols, knn_batches, knn_cells, &mut stat)?;
         } // if num_batches > 1
 

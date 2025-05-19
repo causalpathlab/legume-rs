@@ -13,6 +13,7 @@ asap-data = { path = "../asap-data" }
 asap-alg = { path = "../asap-alg" }
 matrix-util = { path = "../matrix-util" }
 matrix-param = { path = "../matrix-param" }
+candle-util = { path = "../candle-util" }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
@@ -33,3 +34,15 @@ special = { workspace = true }
 indicatif = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["cuda","cudarc","cudnn"] }
+candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-nn", features = ["cuda"] }
+# candle-core = {  version = "0.8.4", features = ["cuda","cudarc","cudnn"] }
+# candle-nn = {  version = "0.8.4", features = ["cuda"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["metal","accelerate"] }
+candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-nn", features = ["metal","accelerate"] }
+# candle-core = {  version = "0.8.4", features = ["metal","accelerate"] }
+# candle-nn = {  version = "0.8.4", features = ["metal","accelerate"] }
