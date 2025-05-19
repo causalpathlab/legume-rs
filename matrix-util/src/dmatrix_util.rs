@@ -8,10 +8,14 @@ use rayon::prelude::*;
 
 use crate::traits::*;
 
-pub fn vcat<T>(matrices: Vec<DMatrix<T>>) -> anyhow::Result<DMatrix<T>>
+pub fn concatenate_vertical<T>(matrices: Vec<DMatrix<T>>) -> anyhow::Result<DMatrix<T>>
 where
     T: nalgebra::RealField,
 {
+    if matrices.is_empty() {
+        anyhow::bail!("empty in concatenate_vertical");
+    }
+
     let ncols = matrices[0].ncols();
     assert!(
         matrices.iter().all(|m| m.ncols() == ncols),
@@ -24,6 +28,28 @@ where
         .collect::<Vec<_>>();
 
     Ok(DMatrix::from_rows(&rows))
+}
+
+pub fn concatenate_horizontal<T>(matrices: Vec<DMatrix<T>>) -> anyhow::Result<DMatrix<T>>
+where
+    T: nalgebra::RealField,
+{
+    if matrices.is_empty() {
+        anyhow::bail!("empty in concatenate_horizontal");
+    }
+
+    let nrows = matrices[0].nrows();
+    assert!(
+        matrices.iter().all(|m| m.nrows() == nrows),
+        "should have the same number of rows"
+    );
+
+    let cols = matrices
+        .iter()
+        .flat_map(|m| m.column_iter().map(|col| col.into_owned()))
+        .collect::<Vec<_>>();
+
+    Ok(DMatrix::from_columns(&cols))
 }
 
 impl<T> DistanceOps for CscMatrix<T>
