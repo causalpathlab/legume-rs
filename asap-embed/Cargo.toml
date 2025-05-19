@@ -45,6 +45,3 @@ candle-core = {  git = "https://github.com/huggingface/candle.git", package = "c
 candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-nn", features = ["metal","accelerate"] }
 # candle-core = {  version = "0.8.4", features = ["metal","accelerate"] }
 # candle-nn = {  version = "0.8.4", features = ["metal","accelerate"] }
-
-[dev-dependencies]
-textplots = { version = "0.8" }

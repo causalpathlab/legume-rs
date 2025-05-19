@@ -1,3 +1,4 @@
+use crate::common_io::Delimiter;
 use candle_core::Device;
 use candle_core::Tensor;
 
@@ -93,7 +94,11 @@ pub trait IoOps {
     type Scalar;
     type Mat;
 
-    fn read_file_delim(file: &str, delim: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat>;
+    fn read_file_delim(
+        file: &str,
+        delim: impl Into<Delimiter>,
+        skip: Option<usize>,
+    ) -> anyhow::Result<Self::Mat>;
 
     fn from_tsv(tsv_file: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat> {
         Self::read_file_delim(tsv_file, "\t", skip)

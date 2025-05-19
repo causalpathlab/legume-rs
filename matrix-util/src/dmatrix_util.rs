@@ -8,6 +8,24 @@ use rayon::prelude::*;
 
 use crate::traits::*;
 
+pub fn vcat<T>(matrices: Vec<DMatrix<T>>) -> anyhow::Result<DMatrix<T>>
+where
+    T: nalgebra::RealField,
+{
+    let ncols = matrices[0].ncols();
+    assert!(
+        matrices.iter().all(|m| m.ncols() == ncols),
+        "should have the same number of columns"
+    );
+
+    let rows = matrices
+        .iter()
+        .flat_map(|m| m.row_iter().map(|row| row.into_owned()))
+        .collect::<Vec<_>>();
+
+    Ok(DMatrix::from_rows(&rows))
+}
+
 impl<T> DistanceOps for CscMatrix<T>
 where
     T: nalgebra::RealField + Copy + std::iter::Sum<T>,

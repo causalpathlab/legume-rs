@@ -1,4 +1,4 @@
-use crate::common_io::{read_lines_of_types, write_lines};
+use crate::common_io::{Delimiter, read_lines_of_types, write_lines};
 use crate::traits::IoOps;
 use ndarray::prelude::*;
 use std::fmt::{Debug, Display};
@@ -14,7 +14,7 @@ where
 
     fn read_file_delim(
         tsv_file: &str,
-        delim: &str,
+        delim: impl Into<Delimiter>,
         skip: Option<usize>,
     ) -> anyhow::Result<Self::Mat> {
         let hdr_line = match skip {

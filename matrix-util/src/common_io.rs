@@ -8,6 +8,24 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use tempfile::tempdir;
 
+/// Define a Delimiter enum to handle both &str and Vec<char>
+pub enum Delimiter {
+    Str(String),
+    Chars(Vec<char>),
+}
+
+impl From<&str> for Delimiter {
+    fn from(s: &str) -> Self {
+        Delimiter::Str(s.to_string())
+    }
+}
+
+impl From<Vec<char>> for Delimiter {
+    fn from(chars: Vec<char>) -> Self {
+        Delimiter::Chars(chars)
+    }
+}
+
 ///
 /// Read every line of the input_file into memory
 ///
@@ -65,7 +83,7 @@ where
 ///
 pub fn read_lines_of_types<T>(
     input_file: &str,
-    delim: &str,
+    delim: impl Into<Delimiter>,
     hdr_line: i64,
 ) -> anyhow::Result<(Vec<Vec<T>>, Vec<Box<str>>)>
 where
@@ -74,14 +92,20 @@ where
 {
     let buf_reader: Box<dyn BufRead> = open_buf_reader(input_file)?;
 
-    fn parse<T>(i: usize, line: &String, delim: &str) -> (usize, Vec<T>)
+    fn parse<T>(i: usize, line: &String, delim: &Delimiter) -> (usize, Vec<T>)
     where
         T: std::str::FromStr,
         <T as std::str::FromStr>::Err: std::fmt::Debug,
     {
+        let parts = match delim {
+            Delimiter::Str(s) => line.split(s).collect::<Vec<&str>>(),
+            Delimiter::Chars(chars) => line.split(chars.as_slice()).collect::<Vec<&str>>(),
+        };
+
         (
             i,
-            line.split(&delim)
+            parts
+                .into_iter()
                 .map(|x| x.parse::<T>().expect("failed to parse"))
                 .collect(),
         )
@@ -94,6 +118,8 @@ where
         true
     }
 
+    let delim = delim.into(); // Convert the input delimiter into the Delimiter enum
+
     let lines_raw: Vec<String> = buf_reader
         .lines()
         .filter_map(|r| r.ok())
@@ -102,8 +128,8 @@ where
 
     let mut hdr: Vec<Box<str>> = vec![];
 
-    // parsing takes more time, so split them into parallel jobs
-    // note: this will not make things sorted
+    // Parsing takes more time, so split them into parallel jobs
+    // Note: this will not make things sorted
     let mut lines: Vec<(usize, Vec<T>)> = if hdr_line < 0 {
         lines_raw
             .iter()
@@ -116,11 +142,17 @@ where
         if lines_raw.len() < (n_skip + 1) {
             return Err(anyhow::anyhow!("not enough data"));
         }
-        hdr.extend(
-            lines_raw[n_skip]
-                .split(&delim)
-                .map(|x| x.to_owned().into_boxed_str()),
-        );
+
+        hdr.extend(match &delim {
+            Delimiter::Str(s) => lines_raw[n_skip]
+                .split(s.as_str())
+                .map(|x| x.to_owned().into_boxed_str())
+                .collect::<Vec<_>>(),
+            Delimiter::Chars(chars) => lines_raw[n_skip]
+                .split(chars.as_slice())
+                .map(|x| x.to_owned().into_boxed_str())
+                .collect::<Vec<_>>(),
+        });
 
         lines_raw[(n_skip + 1)..]
             .iter()
