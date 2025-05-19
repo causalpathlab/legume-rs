@@ -153,19 +153,17 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     info!("Collapsing coordinates into {} samples", nsamp);
-    let mut collapsed_coords = Mat::zeros(coord_map.ncols(), nsamp);
+    let mut collapsed_coords = Mat::zeros(nsamp, coord_map.ncols());
 
     partition_by_membership(data_vec.samples_assigned()?, None)
         .into_iter()
         .for_each(|(s, cells)| {
             collapsed_coords
-                .column_mut(s)
-                .copy_from(&coord_map.select_rows(&cells).row_mean().transpose())
+                .row_mut(s)
+                .copy_from(&coord_map.select_rows(&cells).row_mean())
         });
 
-    collapsed_coords
-        .transpose()
-        .to_tsv(&(args.out.to_string() + ".collapsed.coords.gz"))?;
+    collapsed_coords.to_tsv(&(args.out.to_string() + ".collapsed.coords.gz"))?;
 
     let batch_db = collapse_out.delta.as_ref();
 
