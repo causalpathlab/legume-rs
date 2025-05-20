@@ -7,11 +7,14 @@ pub trait MatTriplets {
     type Mat;
     type Scalar;
 
-    fn from_nonzero_triplets(
+    fn from_nonzero_triplets<I>(
         nrow: usize,
         ncol: usize,
-        triplets: Vec<(usize, usize, Self::Scalar)>,
-    ) -> anyhow::Result<Self::Mat>;
+        triplets: Vec<(I, I, Self::Scalar)>,
+    ) -> anyhow::Result<Self::Mat>
+    where
+        I: TryInto<usize> + Copy,
+        <I as TryInto<usize>>::Error: std::fmt::Debug;
 
     fn to_nonzero_triplets(
         &self,
