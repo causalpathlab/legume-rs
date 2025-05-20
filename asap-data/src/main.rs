@@ -57,6 +57,12 @@ fn main() -> anyhow::Result<()> {
         Commands::Columns(args) => {
             take_columns(args)?;
         }
+        Commands::ColumnNames(args) => {
+            take_column_names(args)?;
+        }
+        Commands::RowNames(args) => {
+            take_row_names(args)?;
+        }
         Commands::SubsetColumns(args) => {
             subset_columns(args)?;
         }
@@ -125,6 +131,12 @@ enum Commands {
     /// file as a dense matrix for a quick examination
     Columns(TakeColumnsArgs),
 
+    /// List column names
+    ColumnNames(TakeColumnNamesArgs),
+
+    /// List row names
+    RowNames(TakeRowNamesArgs),
+
     /// Take columns from the sparse matrix and create a new sparse matrix backend.
     SubsetColumns(SubsetColumnsArgs),
 
@@ -166,15 +178,35 @@ pub struct TakeColumnsArgs {
     data_file: Box<str>,
 
     /// column indices to take: e.g., `0,1,2,3`
-    #[arg(short, long, value_delimiter = ',')]
-    columns: Option<Vec<usize>>,
+    #[arg(short = 'i', long, value_delimiter = ',')]
+    column_indices: Option<Vec<usize>>,
 
     /// column name file where each line is a column name
-    #[arg(long)]
+    #[arg(short = 'f', long)]
     name_file: Option<Box<str>>,
 
     /// output file
-    #[arg(short, long, required = true)]
+    #[arg(short, long, default_value = "stdout")]
+    output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct TakeColumnNamesArgs {
+    /// data file -- either `.zarr` or `.h5`
+    data_file: Box<str>,
+
+    /// output file
+    #[arg(short, long, default_value = "stdout")]
+    output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct TakeRowNamesArgs {
+    /// data file -- either `.zarr` or `.h5`
+    data_file: Box<str>,
+
+    /// output file
+    #[arg(short, long, default_value = "stdout")]
     output: Box<str>,
 }
 
@@ -184,11 +216,11 @@ pub struct SubsetColumnsArgs {
     data_file: Box<str>,
 
     /// column indices to take: e.g., `0,1,2,3`
-    #[arg(short, long, value_delimiter = ',')]
-    columns: Option<Vec<usize>>,
+    #[arg(short = 'i', long, value_delimiter = ',')]
+    column_indices: Option<Vec<usize>>,
 
     /// column name file where each line is a column name
-    #[arg(long)]
+    #[arg(short = 'f', long)]
     name_file: Option<Box<str>>,
 
     /// squeeze
@@ -480,7 +512,7 @@ fn reorder_rows(args: &SortRowsArgs) -> anyhow::Result<()> {
 fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
     let data_file = args.data_file.clone();
 
-    let columns = args.columns.clone();
+    let columns_indices = args.column_indices.clone();
     let column_name_file = args.name_file.clone();
 
     let backend = match common_io::extension(&data_file)?.as_ref() {
@@ -496,9 +528,9 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
     let row_names = data.row_names()?;
     let cols = data.column_names()?;
 
-    let ((nrow, ncol, triplets), col_names) = if let Some(columns) = columns {
-        let col_names = columns.iter().map(|&x| cols[x].clone()).collect::<Vec<_>>();
-        (data.read_triplets_by_columns(columns.clone())?, col_names)
+    let ((nrow, ncol, triplets), col_names) = if let Some(idx) = columns_indices {
+        let col_names = idx.iter().map(|&x| cols[x].clone()).collect::<Vec<_>>();
+        (data.read_triplets_by_columns(idx.clone())?, col_names)
     } else if let Some(column_file) = column_name_file {
         let col_names = read_col_names(column_file, MAX_COLUMN_NAME_IDX)?;
         let col_names_map = data
@@ -519,7 +551,7 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
         (data.read_triplets_by_columns(columns)?, col_names)
     } else {
         return Err(anyhow::anyhow!(
-            "either `columns` or `name_file` must be provided"
+            "either `column-indices` or `name-file` must be provided"
         ));
     };
 
@@ -567,7 +599,7 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
 fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
     let data_file = args.data_file.clone();
 
-    let columns = args.columns.clone();
+    let columns = args.column_indices.clone();
     let column_name_file = args.name_file.clone();
 
     let backend = match common_io::extension(&data_file)?.as_ref() {
@@ -601,7 +633,7 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
         data.read_columns_ndarray(columns)?.to_tsv(&output)?;
     } else {
         return Err(anyhow::anyhow!(
-            "either `columns` or `name_file` must be provided"
+            "either `column-indices` or `name-file` must be provided"
         ));
     }
 
@@ -1148,6 +1180,45 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn take_column_names(cmd_args: &TakeColumnNamesArgs) -> anyhow::Result<()> {
+    use common_io::write_lines;
+
+    let output = cmd_args.output.clone();
+    let input = cmd_args.data_file.clone();
+
+    let backend = match common_io::extension(&input)?.as_ref() {
+        "zarr" => SparseIoBackend::Zarr,
+        "h5" => SparseIoBackend::HDF5,
+        _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
+    };
+
+    let data: Box<SData> = open_sparse_matrix(&input, &backend.clone())?;
+    let col_names = data.column_names()?;
+    write_lines(&col_names, &output)?;
+
+    Ok(())
+}
+
+fn take_row_names(cmd_args: &TakeRowNamesArgs) -> anyhow::Result<()> {
+    use common_io::write_lines;
+
+    let output = cmd_args.output.clone();
+    let input = cmd_args.data_file.clone();
+
+    let backend = match common_io::extension(&input)?.as_ref() {
+        "zarr" => SparseIoBackend::Zarr,
+        "h5" => SparseIoBackend::HDF5,
+        _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
+    };
+
+    let data: Box<SData> = open_sparse_matrix(&input, &backend.clone())?;
+
+    let row_names = data.row_names()?;
+    write_lines(&row_names, &output)?;
+
+    Ok(())
+}
+
 fn show_info(cmd_args: &InfoArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
     let input = cmd_args.data_file.clone();
@@ -1226,15 +1297,15 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
 
     let block_size = cmd_args.block_size;
 
-    let ext = common_io::extension(&data_file)?;
+    use common_io::extension as file_ext;
 
-    let backend = match ext.as_ref() {
+    let backend = match file_ext(&data_file)?.as_ref() {
         "zarr" => SparseIoBackend::Zarr,
         "h5" => SparseIoBackend::HDF5,
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
     };
 
-    match common_io::extension(&data_file)?.as_ref() {
+    match file_ext(&data_file)?.as_ref() {
         "zarr" => {
             assert_eq!(backend, SparseIoBackend::Zarr);
         }
@@ -1274,7 +1345,7 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
             data.num_columns().unwrap()
         );
 
-        let hdr = data_file.replace(ext.as_ref(), "");
+        let hdr = data_file.replace(file_ext(&data_file)?.as_ref(), "");
         let row_idx_file = format!("{}row.idx.gz", hdr);
         let col_idx_file = format!("{}col.idx.gz", hdr);
 
