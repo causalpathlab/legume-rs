@@ -112,4 +112,8 @@ pub trait IoOps {
     fn to_tsv(&self, tsv_file: &str) -> anyhow::Result<()> {
         self.write_file_delim(tsv_file, "\t")
     }
+
+    fn to_csv(&self, csv_file: &str) -> anyhow::Result<()> {
+        self.write_file_delim(csv_file, ",")
+    }
 }

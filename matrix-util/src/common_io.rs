@@ -47,12 +47,7 @@ pub fn read_lines(input_file: &str) -> anyhow::Result<Vec<Box<str>>> {
 /// * `output_file` - file name--either gzipped or not
 ///
 pub fn write_lines(lines: &Vec<Box<str>>, output_file: &str) -> anyhow::Result<()> {
-    let mut buf: Box<dyn Write> = open_buf_writer(output_file)?;
-    for l in lines {
-        writeln!(buf, "{}", l)?;
-    }
-    buf.flush()?;
-    Ok(())
+    write_types(lines, output_file)
 }
 
 ///
@@ -63,11 +58,17 @@ pub fn write_lines(lines: &Vec<Box<str>>, output_file: &str) -> anyhow::Result<(
 ///
 pub fn write_types<T>(lines: &Vec<T>, output_file: &str) -> anyhow::Result<()>
 where
-    T: std::str::FromStr + std::fmt::Display,
+    T: std::fmt::Display,
 {
-    let mut buf: Box<dyn Write> = open_buf_writer(output_file)?;
-    for x in lines.iter() {
-        writeln!(buf, "{}", x.to_string())?;
+    let mut buf = open_buf_writer(output_file)?;
+    for line in lines {
+        if let Err(e) = writeln!(buf, "{}", line) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                return Ok(());
+            } else {
+                return Err(anyhow::anyhow!("unexpected error: {}", e));
+            }
+        }
     }
     buf.flush()?;
     Ok(())
@@ -258,6 +259,15 @@ pub fn open_buf_reader(input_file: &str) -> anyhow::Result<Box<dyn BufRead>> {
 /// Open a file for writing, and return a buffered writer
 /// * `output_file` - file name--either gzipped or not
 pub fn open_buf_writer(output_file: &str) -> anyhow::Result<Box<dyn std::io::Write>> {
+    // we can simply override with stdout
+    if output_file.eq_ignore_ascii_case("stdout") {
+        return Ok(Box::new(std::io::BufWriter::new(std::io::stdout())));
+    }
+
+    if output_file.eq_ignore_ascii_case("stderr") {
+        return Ok(Box::new(std::io::BufWriter::new(std::io::stderr())));
+    }
+
     // take a look at the extension
     let ext = Path::new(output_file).extension().and_then(|x| x.to_str());
     match ext {

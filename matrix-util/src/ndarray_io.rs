@@ -35,7 +35,7 @@ where
         Ok(Array2::from_shape_vec((nrows, ncols), data)?)
     }
 
-    fn write_file_delim(&self, tsv_file: &str, delim: &str) -> anyhow::Result<()> {
+    fn write_file_delim(&self, out_file: &str, delim: &str) -> anyhow::Result<()> {
         let lines: Vec<Box<str>> = self
             .rows()
             .into_iter()
@@ -47,7 +47,7 @@ where
                     .into_boxed_str()
             })
             .collect();
-        write_lines(&lines, &tsv_file)?;
+        write_lines(&lines, &out_file)?;
         Ok(())
     }
 }
