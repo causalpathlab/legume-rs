@@ -503,7 +503,7 @@ impl SparseIo for SparseMtxData {
     fn read_triplets_by_single_column(
         &self,
         j_data: usize,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)> {
+    ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
         let by_column = self.backend.group("/by_column")?;
         debug_assert!(self.by_column_indptr.len() > 0);
 
@@ -521,10 +521,10 @@ impl SparseIo for SparseMtxData {
             // [start, end)
             let start = indptr[j_data] as usize;
             let end = indptr[j_data + 1] as usize;
-            let ret: Vec<(usize, usize, f32)> = indices[start..end]
+            let ret: Vec<(u64, u64, f32)> = indices[start..end]
                 .iter()
                 .zip(data[start..end].iter())
-                .map(|(&ii, &x_ij)| (ii as usize, jj as usize, x_ij))
+                .map(|(&ii, &x_ij)| (ii, jj, x_ij))
                 .collect();
             Ok((nrow, ncol_out, ret))
         } else {
@@ -547,8 +547,8 @@ impl SparseIo for SparseMtxData {
 
                 for k in 0..(end - start) {
                     let x_ij = data_slice[k];
-                    let ii = indices_slice[k] as usize;
-                    debug_assert!(ii < nrow);
+                    let ii = indices_slice[k];
+                    debug_assert!((ii as usize) < nrow);
                     ret.push((ii, jj, x_ij));
                 }
             }
@@ -563,7 +563,7 @@ impl SparseIo for SparseMtxData {
     fn read_triplets_by_columns(
         &self,
         columns: Self::IndexIter,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)> {
+    ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
         // need to open backend again?
         // let backend = hdf5::File::open(&self.file_name)?;
         let by_column = self.backend.group("/by_column")?;
@@ -597,15 +597,16 @@ impl SparseIo for SparseMtxData {
         if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indicies) {
             let ncol_out = columns_vec.len();
 
-            let mut ret: Vec<(usize, usize, f32)> =
+            let mut ret: Vec<(u64, u64, f32)> =
                 Vec::with_capacity((max_end - min_start).max(0) as usize);
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
+                let jj = jj as u64;
                 if j_data < ncol {
                     let start = indptr[j_data] as usize;
                     let end = indptr[j_data + 1] as usize;
                     for (&ii, &x_ij) in indices[start..end].iter().zip(data[start..end].iter()) {
-                        ret.push((ii as usize, jj as usize, x_ij));
+                        ret.push((ii, jj, x_ij));
                     }
                 }
             }
@@ -617,10 +618,11 @@ impl SparseIo for SparseMtxData {
 
             let ncol_out = columns_vec.len();
 
-            let mut ret: Vec<(usize, usize, f32)> =
+            let mut ret: Vec<(u64, u64, f32)> =
                 Vec::with_capacity((max_end - min_start).max(0) as usize);
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
+                let jj = jj as u64;
                 if j_data < ncol {
                     // [start, end)
                     let start = indptr[j_data] as usize;
@@ -632,8 +634,8 @@ impl SparseIo for SparseMtxData {
 
                         for k in 0..(end - start) {
                             let x_ij = data_slice[k];
-                            let ii = indices_slice[k] as usize;
-                            debug_assert!(ii < nrow);
+                            let ii = indices_slice[k];
+                            debug_assert!((ii as usize) < nrow);
                             ret.push((ii, jj, x_ij));
                         }
                     }
@@ -649,7 +651,7 @@ impl SparseIo for SparseMtxData {
     fn read_triplets_by_rows(
         &self,
         rows: Self::IndexIter,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)> {
+    ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
         // need to open backend again?
         // let backend = hdf5::File::open(&self.file_name)?;
         let by_row = self.backend.group("/by_row")?;
@@ -664,6 +666,7 @@ impl SparseIo for SparseMtxData {
             let mut ret = Vec::new();
             let nrow_out = rows_vec.len();
             for (ii, &i_data) in rows_vec.iter().enumerate() {
+                let ii = ii as u64;
                 if i_data < nrow {
                     debug_assert!((i_data + 1) < indptr.len());
 
@@ -676,8 +679,8 @@ impl SparseIo for SparseMtxData {
 
                         for k in 0..(end - start) {
                             let x_ij = data_slice[k];
-                            let jj = indices_slice[k] as usize;
-                            debug_assert!(jj < ncol);
+                            let jj = indices_slice[k];
+                            debug_assert!((jj as usize) < ncol);
                             ret.push((ii, jj, x_ij));
                         }
                     }

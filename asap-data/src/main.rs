@@ -57,6 +57,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Columns(args) => {
             take_columns(args)?;
         }
+        Commands::SubsetColumns(args) => {
+            subset_columns(args)?;
+        }
         Commands::SortRows(args) => {
             reorder_rows(args)?;
         }
@@ -119,16 +122,21 @@ enum Commands {
     SortRows(SortRowsArgs),
 
     /// Take columns from the sparse matrix and save it to an `output`
-    /// file as a dense matrix
+    /// file as a dense matrix for a quick examination
     Columns(TakeColumnsArgs),
 
-    /// Merge multiple 10x `.mtx` files
+    /// Take columns from the sparse matrix and create a new sparse matrix backend.
+    SubsetColumns(SubsetColumnsArgs),
+
+    /// Merge multiple 10x `.mtx` files into one fileset
     MergeMtx(MergeMtxArgs),
 
-    /// Filter out rows and columns by number of non-zeros (will overwrite).
+    /// Squeeze out rows and columns with too few non-zeros. It will
+    /// overwrite the original (be careful) and save the indices kept.
     Squeeze(RunSqueezeArgs),
 
-    /// Show basic information of a sparse matrix
+    /// Show basic information of a sparse matrix. If output header is
+    /// provided, row and column names will be saved.
     Info(InfoArgs),
 
     /// Take basic statistics from a sparse matrix
@@ -137,7 +145,8 @@ enum Commands {
     /// Take basic statistics from a sparse matrix (same as `statistics`)
     Stat(RunStatArgs),
 
-    /// Simulate a sparse matrix data
+    /// Simulate data with batch effects.
+    /// `Y[i,j] ~ delta[i,B(j)] * sum_k beta[i,k] * theta[j,k]`
     Simulate(RunSimulateArgs),
 }
 
@@ -153,32 +162,54 @@ pub struct SortRowsArgs {
 
 #[derive(Args, Debug)]
 pub struct TakeColumnsArgs {
-    /// Data file -- either `.zarr` or `.h5`
+    /// data file -- either `.zarr` or `.h5`
     data_file: Box<str>,
 
-    /// Column indices to take: e.g., `0,1,2,3`
+    /// column indices to take: e.g., `0,1,2,3`
     #[arg(short, long, value_delimiter = ',')]
     columns: Option<Vec<usize>>,
 
-    /// Column name file where each line is a column name
+    /// column name file where each line is a column name
     #[arg(long)]
     name_file: Option<Box<str>>,
 
-    /// Output file
+    /// output file
+    #[arg(short, long, required = true)]
+    output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct SubsetColumnsArgs {
+    /// data file -- either `.zarr` or `.h5`
+    data_file: Box<str>,
+
+    /// column indices to take: e.g., `0,1,2,3`
+    #[arg(short, long, value_delimiter = ',')]
+    columns: Option<Vec<usize>>,
+
+    /// column name file where each line is a column name
+    #[arg(long)]
+    name_file: Option<Box<str>>,
+
+    /// squeeze
+    #[arg(long, default_value_t = false)]
+    do_squeeze: bool,
+
+    /// output file
     #[arg(short, long, required = true)]
     output: Box<str>,
 }
 
 #[derive(Args, Debug)]
 pub struct FromMtxArgs {
-    /// Matrix Market formatted data file (`.mtx.gz` or `.mtx`)
+    /// matrix market-formatted data file (`.mtx.gz` or `.mtx`)
     mtx: Box<str>,
 
-    /// Row/feature name file (name per each line; `.tsv.gz` or `.tsv`)
+    /// row/feature name file (name per each line; `.tsv.gz` or `.tsv`)
     #[arg(short, long)]
     row: Option<Box<str>>,
 
-    /// Column/cell/barcode file (name per each line; `.tsv.gz` or `.tsv`)
+    /// column/cell/barcode file (name per each line; `.tsv.gz` or `.tsv`)
     #[arg(short, long)]
     col: Option<Box<str>>,
 
@@ -186,7 +217,7 @@ pub struct FromMtxArgs {
     #[arg(long, value_enum, default_value = "zarr")]
     backend: SparseIoBackend,
 
-    /// Output file header: {output}.{backend}
+    /// output file header: {output}.{backend}
     #[arg(short, long)]
     output: Option<Box<str>>,
 
@@ -214,7 +245,7 @@ pub struct FromH5Args {
     #[arg(long, value_enum, default_value = "zarr")]
     backend: SparseIoBackend,
 
-    /// Output file header: {output}.{backend}
+    /// output file header: {output}.{backend}
     #[arg(short, long)]
     output: Option<Box<str>>,
 
@@ -251,6 +282,7 @@ pub struct FromH5Args {
     verbose: u8,
 }
 
+/// Merge multiple .mtx file sets into one sparse backend file.
 #[derive(Args, Debug)]
 pub struct MergeMtxArgs {
     /// Within each directory and sub-directories, it will search
@@ -263,7 +295,7 @@ pub struct MergeMtxArgs {
     #[arg(long, value_enum, default_value = "zarr")]
     backend: SparseIoBackend,
 
-    /// Output file header: {output}.{backend} and {output}.batch.gz
+    /// output file header: {output}.{backend} and {output}.batch.gz
     ///
     /// The backend will contain everything.  But the batch assignment
     /// information will be saved in a separate file and needed for
@@ -306,25 +338,26 @@ pub struct MergeMtxArgs {
 #[derive(Args, Debug)]
 #[command(about)]
 pub struct RunSqueezeArgs {
-    /// Data file -- either `.zarr` or `.h5`
+    /// data file -- either `.zarr` or `.h5`
     data_file: Box<str>,
 
-    /// Number of non-zero cutoff for rows
+    /// number of non-zero cutoff for rows
     #[arg(short, long, default_value = "0")]
     row_nnz_cutoff: usize,
 
-    /// Number of non-zero cutoff for columns
+    /// number of non-zero cutoff for columns
     #[arg(short, long, default_value = "0")]
     column_nnz_cutoff: usize,
 
-    /// Block_size for parallel processing
+    /// block_size for parallel processing
     #[arg(long, value_enum, default_value = "100")]
     block_size: usize,
 }
 
+/// Generate row-wise and column-wise basic statistics.
 #[derive(Args, Debug)]
 pub struct RunStatArgs {
-    /// Data file -- .zarr or .h5 file
+    /// data file -- .zarr or .h5 file
     data_file: Box<str>,
 
     /// block_size
@@ -336,12 +369,13 @@ pub struct RunStatArgs {
     output: Box<str>,
 }
 
+/// A quick information of the underlying matrix of a backend file.
 #[derive(Args, Debug)]
 pub struct InfoArgs {
-    /// Data file -- .zarr or .h5 file
+    /// data file -- .zarr or .h5 file
     data_file: Box<str>,
 
-    /// output file header
+    /// file header for {output}.{rows.gz,columns.gz}
     #[arg(short, long, default_value = "")]
     output: Box<str>,
 }
@@ -443,9 +477,7 @@ fn reorder_rows(args: &SortRowsArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
-    use matrix_util::traits::IoOps;
-
+fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
     let data_file = args.data_file.clone();
 
     let columns = args.columns.clone();
@@ -459,12 +491,99 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
 
     let output = args.output.clone();
 
+    let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
+
+    let row_names = data.row_names()?;
+    let cols = data.column_names()?;
+
+    let ((nrow, ncol, triplets), col_names) = if let Some(columns) = columns {
+        let col_names = columns.iter().map(|&x| cols[x].clone()).collect::<Vec<_>>();
+        (data.read_triplets_by_columns(columns.clone())?, col_names)
+    } else if let Some(column_file) = column_name_file {
+        let col_names = read_col_names(column_file, MAX_COLUMN_NAME_IDX)?;
+        let col_names_map = data
+            .column_names()
+            .expect("column names not found in data file")
+            .iter()
+            .enumerate()
+            .map(|(i, x)| (x.clone(), i))
+            .collect::<HashMap<_, _>>();
+
+        let col_names_order = col_names
+            .into_iter()
+            .filter_map(|x| col_names_map.get(&x))
+            .collect::<Vec<_>>();
+
+        let columns: Vec<usize> = col_names_order.iter().map(|&x| x.clone()).collect();
+        let col_names = columns.iter().map(|&x| cols[x].clone()).collect::<Vec<_>>();
+        (data.read_triplets_by_columns(columns)?, col_names)
+    } else {
+        return Err(anyhow::anyhow!(
+            "either `columns` or `name_file` must be provided"
+        ));
+    };
+
+    let backend_file = match backend {
+        SparseIoBackend::HDF5 => format!("{}.h5", &output),
+        SparseIoBackend::Zarr => format!("{}.zarr", &output),
+    };
+
+    let mtx_shape = (nrow, ncol, triplets.len());
+
+    if std::path::Path::new(&backend_file).exists() {
+        info!(
+            "This existing backend file '{}' will be deleted",
+            &backend_file
+        );
+        common_io::remove_file(&backend_file)?;
+    }
+
+    let mut data =
+        create_sparse_from_triplets(triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
+
+    data.register_row_names_vec(&row_names);
+    data.register_column_names_vec(&col_names);
+
+    info!(
+        "Successfully created a sparse backend file: {}",
+        &backend_file
+    );
+
+    if args.do_squeeze {
+        info!("Squeeze the backend data {}", &backend_file);
+        let squeeze_args = RunSqueezeArgs {
+            data_file: backend_file.into_boxed_str(),
+            row_nnz_cutoff: 0,
+            column_nnz_cutoff: 0,
+            block_size: 100,
+        };
+
+        run_squeeze(&squeeze_args)?;
+    }
+
+    Ok(())
+}
+
+fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
+    let data_file = args.data_file.clone();
+
+    let columns = args.columns.clone();
+    let column_name_file = args.name_file.clone();
+
+    let backend = match common_io::extension(&data_file)?.as_ref() {
+        "zarr" => SparseIoBackend::Zarr,
+        "h5" => SparseIoBackend::HDF5,
+        _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
+    };
+
+    let output = args.output.clone();
+
+    let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
+
     if let Some(columns) = columns {
-        let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
         data.read_columns_ndarray(columns)?.to_tsv(&output)?;
     } else if let Some(column_file) = column_name_file {
         let col_names = read_col_names(column_file, MAX_COLUMN_NAME_IDX)?;
-        let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
         let col_names_map = data
             .column_names()
             .expect("column names not found in data file")
@@ -494,8 +613,6 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
         std::env::set_var("RUST_LOG", "info");
     }
 
-    use std::path::Path;
-
     let directories = args.data_directories.clone();
 
     let mut mtx_files = vec![];
@@ -506,7 +623,7 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
     for dir in directories.iter() {
         let dir = dir.clone().into_string();
 
-        if let Some(base) = Path::new(&dir).file_stem() {
+        if let Some(base) = std::path::Path::new(&dir).file_stem() {
             let base = base.to_str().expect("invalid base name").to_string();
             info!("Searching relevant files within: {}", &base);
             let batch_name = Some(base);
@@ -554,7 +671,7 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
                 let mut row: Option<Box<str>> = None;
                 let mut col: Option<Box<str>> = None;
 
-                if let Some(base) = Path::new(&sub_dir).file_stem() {
+                if let Some(base) = std::path::Path::new(&sub_dir).file_stem() {
                     let base = base.to_str().expect("invalid base name").to_string();
                     info!("searching {} ...", &base);
 
@@ -729,7 +846,7 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
         SparseIoBackend::Zarr => format!("{}.zarr", &output),
     };
 
-    if Path::new(&backend_file).exists() {
+    if std::path::Path::new(&backend_file).exists() {
         info!(
             "This existing backend file '{}' will be deleted",
             &backend_file
@@ -775,8 +892,6 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
         std::env::set_var("RUST_LOG", "info");
     }
 
-    use std::path::Path;
-
     let mtx_file = args.mtx.as_ref();
     let row_file = args.row.as_ref();
     let col_file = args.col.as_ref();
@@ -809,7 +924,7 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
         SparseIoBackend::Zarr => format!("{}.zarr", &output),
     };
 
-    if Path::new(&backend_file).exists() {
+    if std::path::Path::new(&backend_file).exists() {
         info!(
             "This existing backend file '{}' will be deleted",
             &backend_file
@@ -939,8 +1054,6 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
         std::env::set_var("RUST_LOG", "info");
     }
 
-    use std::path::Path;
-
     let data_file = cmd_args.h5_file.clone();
     let backend = cmd_args.backend.clone();
     let output = match cmd_args.output.clone() {
@@ -961,7 +1074,7 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
         SparseIoBackend::Zarr => format!("{}.zarr", &output),
     };
 
-    if Path::new(&backend_file).exists() {
+    if std::path::Path::new(&backend_file).exists() {
         info!(
             "This existing backend file '{}' will be deleted",
             &backend_file

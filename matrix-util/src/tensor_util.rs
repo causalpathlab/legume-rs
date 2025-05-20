@@ -34,13 +34,20 @@ impl SampleOps for Tensor {
 impl MatTriplets for Tensor {
     type Mat = Self;
     type Scalar = f32;
-    fn from_nonzero_triplets(
+
+    fn from_nonzero_triplets<I>(
         nrow: usize,
         ncol: usize,
-        triplets: Vec<(usize, usize, Self::Scalar)>,
-    ) -> anyhow::Result<Self::Mat> {
+        triplets: Vec<(I, I, Self::Scalar)>,
+    ) -> anyhow::Result<Self::Mat>
+    where
+        I: TryInto<usize> + Copy,
+        <I as TryInto<usize>>::Error: std::fmt::Debug,
+    {
         let mut data = vec![0_f32; ncol * nrow];
         for (ii, jj, x_ij) in triplets {
+            let ii: usize = ii.try_into().expect("failed to convert index ii");
+            let jj: usize = jj.try_into().expect("failed to convert index jj");
             data[ii * ncol + jj] = x_ij;
         }
         Ok(Tensor::from_vec(data, (nrow, ncol), &Device::Cpu)?)

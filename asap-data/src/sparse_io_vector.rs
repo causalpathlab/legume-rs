@@ -162,13 +162,13 @@ impl SparseIoVec {
     pub fn columns_triplets<I>(
         &self,
         cells: I,
-    ) -> anyhow::Result<((usize, usize), Vec<(usize, usize, f32)>)>
+    ) -> anyhow::Result<((usize, usize), Vec<(u64, u64, f32)>)>
     where
         I: Iterator<Item = usize>,
     {
         let mut triplets = vec![];
-        let mut nrow = 0;
-        let mut ncol = 0;
+        let mut nrow = 0_usize;
+        let mut ncol = 0_usize;
         // Note: each cell is a global index
         for glob in cells {
             let didx = self.col_to_data[glob];
@@ -178,7 +178,11 @@ impl SparseIoVec {
                 self.data_vec[didx].read_triplets_by_single_column(loc)?;
 
             nrow = nrow.max(loc_nrow);
-            triplets.extend(loc_triplets.iter().map(|&(i, j, v)| (i, j + ncol, v)));
+            triplets.extend(
+                loc_triplets
+                    .iter()
+                    .map(|&(i, j, v)| (i, j + (ncol as u64), v)),
+            );
             ncol += loc_ncol;
         }
 
@@ -250,7 +254,7 @@ impl SparseIoVec {
         skip_same_batch: bool,
     ) -> anyhow::Result<(
         (usize, usize),
-        Vec<(usize, usize, f32)>,
+        Vec<(u64, u64, f32)>,
         (Vec<usize>, Vec<usize>),
         Vec<f32>,
     )>
@@ -308,7 +312,11 @@ impl SparseIoVec {
                     let (_, loc_ncol, loc_triplets) =
                         self.data_vec[didx].read_triplets_by_single_column(loc)?;
 
-                    triplets.extend(loc_triplets.iter().map(|&(i, j, v)| (i, j + ncol, v)));
+                    triplets.extend(
+                        loc_triplets
+                            .iter()
+                            .map(|&(i, j, v)| (i, j + (ncol as u64), v)),
+                    );
                     ncol += loc_ncol;
                     source_columns.push(glob);
                     source_positions.push(idx);
@@ -345,7 +353,7 @@ impl SparseIoVec {
         skip_same_batch: bool,
     ) -> anyhow::Result<(
         (usize, usize),
-        Vec<(usize, usize, f32)>,
+        Vec<(u64, u64, f32)>,
         Vec<usize>, // source positions
         Vec<f32>,   // distances
     )>
@@ -359,7 +367,7 @@ impl SparseIoVec {
         let ncols = cells.len();
         let approx_ncols = ncols * knn_columns * nbatches;
 
-        let mut matched_triplets: Vec<(usize, usize, f32)> = vec![];
+        let mut matched_triplets: Vec<(u64, u64, f32)> = vec![];
         let mut euclidean_distances: Vec<f32> = Vec::with_capacity(approx_ncols);
         let mut source_columns: Vec<usize> = Vec::with_capacity(approx_ncols);
         let mut tot_ncells_matched: usize = 0;
@@ -376,7 +384,7 @@ impl SparseIoVec {
             matched_triplets.extend(
                 triplets
                     .iter()
-                    .map(|(i, j, z_ij)| (*i, *j + tot_ncells_matched, *z_ij)),
+                    .map(|(i, j, z_ij)| (*i, *j + (tot_ncells_matched as u64), *z_ij)),
             );
 
             euclidean_distances.extend(distances);
@@ -409,7 +417,7 @@ impl SparseIoVec {
         skip_same_batch: bool,
     ) -> anyhow::Result<(
         (usize, usize),
-        Vec<(usize, usize, f32)>,
+        Vec<(u64, u64, f32)>,
         Vec<usize>, // source positions
         Vec<f32>,
     )>
@@ -429,7 +437,7 @@ impl SparseIoVec {
         let approx_ncol = knn_columns * knn_batches;
 
         let nrow = self.num_rows()?;
-        let mut ncol = 0;
+        let mut ncol = 0_usize;
         let mut triplets = Vec::with_capacity(approx_ncol * nrow);
 
         let mut distances = Vec::with_capacity(approx_ncol);
@@ -470,7 +478,11 @@ impl SparseIoVec {
                         let (_, loc_ncol, loc_triplets) =
                             self.data_vec[didx].read_triplets_by_single_column(loc)?;
 
-                        triplets.extend(loc_triplets.iter().map(|&(i, j, v)| (i, j + ncol, v)));
+                        triplets.extend(
+                            loc_triplets
+                                .iter()
+                                .map(|&(i, j, v)| (i, j + (ncol as u64), v)),
+                        );
                         ncol += loc_ncol;
                         source_columns.push(glob);
                         // source_positions.push(idx);

@@ -167,7 +167,7 @@ pub trait SparseIo: Sync + Send {
     ///
     fn read_columns_ndarray(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
         let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
-        Array2::<f32>::from_nonzero_triplets(nrow, ncol as usize, triplets)
+        Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
     }
 
     /// Read columns within the range and return dense `candle_core::Tensor`
@@ -344,7 +344,7 @@ pub trait SparseIo: Sync + Send {
     fn read_triplets_by_rows(
         &self,
         rows: Self::IndexIter,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)>;
+    ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)>;
 
     /// Read columns within the range and return a vector of triplets (row, col, value)
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
@@ -352,7 +352,7 @@ pub trait SparseIo: Sync + Send {
     fn read_triplets_by_columns(
         &self,
         columns: Self::IndexIter,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)>;
+    ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)>;
 
     /// Read columns within the range and return a vector of triplets (row, col, value)
     /// * `col` : usize
@@ -360,7 +360,7 @@ pub trait SparseIo: Sync + Send {
     fn read_triplets_by_single_column(
         &self,
         col: usize,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)>;
+    ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)>;
 
     /// Export the data to a mtx file. This will take time.
     /// * `mtx_file`: mtx file to be written
@@ -460,8 +460,8 @@ pub trait SparseIo: Sync + Send {
                 .into_par_iter()
                 .progress_count(nblock as u64)
                 .map(|b| {
-                    let lb: usize = b * block_size;
-                    let ub: usize = ((b + 1) * block_size).min(ncol);
+                    let lb: u64 = (b * block_size) as u64;
+                    let ub: u64 = ((b + 1) * block_size).min(ncol) as u64;
                     (lb, ub)
                 })
                 .for_each(|(lb, ub)| {
@@ -478,13 +478,11 @@ pub trait SparseIo: Sync + Send {
                         })
                         .for_each(|(j, j_new)| {
                             let (_, _, _triplets_j) = self
-                                .read_triplets_by_single_column(j)
+                                .read_triplets_by_single_column(j as usize)
                                 .expect("failed to read a single column");
 
                             record.extend(_triplets_j.into_iter().filter_map(|(i, _, x)| {
-                                old2new_rows
-                                    .get(&i)
-                                    .map(|&i_new| (i_new as u64, j_new as u64, x))
+                                old2new_rows.get(&i).map(|&i_new| (i_new, j_new, x))
                             }));
                         });
                     {
@@ -548,11 +546,15 @@ pub trait SparseIo: Sync + Send {
 
         let block_size = 100;
 
-        let old2new: HashMap<usize, usize> = self
+        let old2new: HashMap<u64, u64> = self
             .row_names()?
             .into_par_iter()
             .enumerate()
-            .filter_map(|(idx_old, name)| name2new.get(&name).map(|&idx_new| (idx_old, idx_new)))
+            .filter_map(|(idx_old, name)| {
+                name2new
+                    .get(&name)
+                    .map(|&idx_new| (idx_old as u64, idx_new as u64))
+            })
             .collect();
 
         if let Some(ncol) = self.num_columns() {
@@ -570,16 +572,17 @@ pub trait SparseIo: Sync + Send {
                 .into_par_iter()
                 .progress_count(nblock as u64)
                 .map(|b| {
-                    let lb: usize = b * block_size;
-                    let ub: usize = ((b + 1) * block_size).min(ncol);
+                    let lb = (b * block_size) as u64;
+                    let ub = ((b + 1) * block_size).min(ncol) as u64;
                     (lb, ub)
                 })
                 .for_each(|(lb, ub)| {
+                    let (lb, ub) = (lb as usize, ub as usize);
                     let (_, _, _triplets_b) =
                         self.read_triplets_by_columns((lb..ub).collect()).unwrap();
-                    let _triplets_b = _triplets_b.into_iter().filter_map(|(i, j, x)| {
-                        old2new.get(&i).map(|&i_new| (i_new as u64, j as u64, x))
-                    });
+                    let _triplets_b = _triplets_b
+                        .into_iter()
+                        .filter_map(|(i, j, x)| old2new.get(&i).map(|&i_new| (i_new, j, x)));
                     {
                         let mut triplets = arc_triplets.lock().unwrap();
                         triplets.extend(_triplets_b);
@@ -799,14 +802,14 @@ pub fn take_subset_indices_names(
     new_indices: &Vec<usize>,
     ntot: usize,
     old_names: Vec<Box<str>>,
-) -> (HashMap<usize, usize>, Vec<Box<str>>) {
-    let mut old2new: HashMap<usize, usize> = HashMap::new();
+) -> (HashMap<u64, u64>, Vec<Box<str>>) {
+    let mut old2new: HashMap<u64, u64> = HashMap::new();
     let mut new2old = vec![];
     debug_assert!(ntot == old_names.len());
-    let mut k = 0_usize;
+    let mut k = 0_u64;
     for idx in new_indices.iter() {
         if *idx < ntot {
-            old2new.insert(*idx, k);
+            old2new.insert(*idx as u64, k);
             new2old.push(*idx);
             k += 1;
         }
@@ -824,13 +827,15 @@ pub fn take_subset_indices_names_if_needed(
     new_indices: Option<&Vec<usize>>,
     ntot: Option<usize>,
     old_names: Vec<Box<str>>,
-) -> (HashMap<usize, usize>, Vec<Box<str>>) {
+) -> (HashMap<u64, u64>, Vec<Box<str>>) {
     let ntot = ntot.unwrap_or(old_names.len());
     if let Some(new_indices) = new_indices {
         take_subset_indices_names(new_indices, ntot, old_names)
     } else {
         let names = old_names;
-        let identity = (0..ntot).zip(0..ntot).collect::<HashMap<usize, usize>>();
+        let identity = (0..(ntot as u64))
+            .zip(0..(ntot as u64))
+            .collect::<HashMap<u64, u64>>();
         (identity, names)
     }
 }

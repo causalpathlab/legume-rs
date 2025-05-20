@@ -707,7 +707,7 @@ impl SparseIo for SparseMtxData {
     fn read_triplets_by_single_column(
         &self,
         j_data: usize,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)> {
+    ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
         use zarrs::array::Array as ZArray;
         use zarrs::array_subset::ArraySubset;
 
@@ -730,10 +730,10 @@ impl SparseIo for SparseMtxData {
             // [start, end)
             let start = indptr[j_data] as usize;
             let end = indptr[j_data + 1] as usize;
-            let ret: Vec<(usize, usize, f32)> = indices[start..end]
+            let ret: Vec<(u64, u64, f32)> = indices[start..end]
                 .iter()
                 .zip(data[start..end].iter())
-                .map(|(&ii, &x_ij)| (ii as usize, jj as usize, x_ij))
+                .map(|(&ii, &x_ij)| (ii, jj, x_ij))
                 .collect();
 
             Ok((nrow, ncol_out, ret))
@@ -750,8 +750,7 @@ impl SparseIo for SparseMtxData {
             let start = indptr[j_data];
             let end = indptr[j_data + 1];
 
-            let mut ret: Vec<(usize, usize, f32)> =
-                Vec::with_capacity((end - start).max(0) as usize);
+            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((end - start).max(0) as usize);
 
             if start < end {
                 let subset = ArraySubset::new_with_ranges(&[start..end]);
@@ -761,8 +760,8 @@ impl SparseIo for SparseMtxData {
 
                 for k in 0..(end - start) {
                     let x_ij = data_slice[k as usize];
-                    let ii = indices_slice[k as usize] as usize;
-                    debug_assert!(ii < nrow);
+                    let ii = indices_slice[k as usize];
+                    debug_assert!((ii as usize) < nrow);
                     ret.push((ii, jj, x_ij));
                 }
             }
@@ -777,7 +776,7 @@ impl SparseIo for SparseMtxData {
     fn read_triplets_by_columns(
         self: &Self,
         columns: Self::IndexIter,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)> {
+    ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
         use zarrs::array::Array as ZArray;
         use zarrs::array_subset::ArraySubset;
 
@@ -810,14 +809,15 @@ impl SparseIo for SparseMtxData {
         if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indicies) {
             let ncol_out = columns_vec.len();
 
-            let mut ret: Vec<(usize, usize, f32)> =
+            let mut ret: Vec<(u64, u64, f32)> =
                 Vec::with_capacity((max_end - min_start).max(0) as usize);
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
+                let jj = jj as u64;
                 let start = indptr[j_data] as usize;
                 let end = indptr[j_data + 1] as usize;
                 for (&ii, &x_ij) in indices[start..end].iter().zip(data[start..end].iter()) {
-                    ret.push((ii as usize, jj as usize, x_ij));
+                    ret.push((ii, jj, x_ij));
                 }
             }
 
@@ -830,10 +830,11 @@ impl SparseIo for SparseMtxData {
 
             let ncol_out = columns_vec.len();
 
-            let mut ret: Vec<(usize, usize, f32)> =
+            let mut ret: Vec<(u64, u64, f32)> =
                 Vec::with_capacity((max_end - min_start).max(0) as usize);
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
+                let jj = jj as u64;
                 if j_data < ncol {
                     // [start, end)
                     let start = indptr[j_data];
@@ -848,8 +849,8 @@ impl SparseIo for SparseMtxData {
 
                         for k in 0..(end - start) {
                             let x_ij = data_slice[k as usize];
-                            let ii = indices_slice[k as usize] as usize;
-                            debug_assert!(ii < nrow);
+                            let ii = indices_slice[k as usize];
+                            debug_assert!((ii as usize) < nrow);
                             ret.push((ii, jj, x_ij));
                         }
                     }
@@ -865,7 +866,7 @@ impl SparseIo for SparseMtxData {
     fn read_triplets_by_rows(
         &self,
         rows: Self::IndexIter,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, f32)>)> {
+    ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
         use zarrs::array::Array as ZArray;
         use zarrs::array_subset::ArraySubset;
 
@@ -873,7 +874,7 @@ impl SparseIo for SparseMtxData {
         let indptr = &self.by_row_indptr;
         debug_assert!(indptr.len() > self.num_rows().unwrap_or(0));
 
-        let rows_vec = rows.into_iter().collect::<Vec<usize>>();
+        let rows_vec = rows.into_iter().collect::<Vec<_>>();
 
         let key = "/by_row/data";
         let data = ZArray::open(self.store.clone(), key)?;
@@ -896,10 +897,11 @@ impl SparseIo for SparseMtxData {
                 .max()
                 .unwrap_or(0);
 
-            let mut ret: Vec<(usize, usize, f32)> =
+            let mut ret: Vec<(u64, u64, f32)> =
                 Vec::with_capacity((max_end - min_start).max(0) as usize);
 
             for (ii, &i_data) in rows_vec.iter().enumerate() {
+                let ii = ii as u64;
                 if i_data < nrow {
                     debug_assert!((i_data + 1) < indptr.len());
 
@@ -915,8 +917,8 @@ impl SparseIo for SparseMtxData {
 
                         for k in 0..(end - start) {
                             let x_ij = data_slice[k as usize];
-                            let jj = indices_slice[k as usize] as usize;
-                            debug_assert!(jj < ncol);
+                            let jj = indices_slice[k as usize];
+                            debug_assert!((jj as usize) < ncol);
                             ret.push((ii, jj, x_ij));
                         }
                     }
