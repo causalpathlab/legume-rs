@@ -6,4 +6,6 @@ pub mod candle_decoder_topic;
 pub mod candle_encoder_softmax;
 pub mod candle_loss_functions;
 pub mod candle_model_traits;
+pub mod candle_spatial_model_traits;
+pub mod candle_spatial_encoder_softmax;
 pub mod candle_vae_inference;

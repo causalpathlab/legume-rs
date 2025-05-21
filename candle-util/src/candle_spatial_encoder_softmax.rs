@@ -1,59 +1,71 @@
 #![allow(dead_code)]
 
-use crate::candle_aux_layers::StackLayers;
+use crate::candle_aux_linear::softmax_linear;
 use crate::candle_loss_functions::gaussian_kl_loss;
-use crate::candle_model_traits::*;
+use crate::candle_spatial_model_traits::*;
+use crate::{candle_aux_layers::StackLayers, candle_aux_linear::SoftmaxLinear};
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, BatchNorm, Embedding, Linear, ModuleT, VarBuilder};
 
-pub struct LogSoftmaxEncoder {
+pub struct SpatialLogSoftmaxEncoder {
     n_features: usize,
     n_topics: usize,
+    n_coords: usize,
     n_vocab: usize,
+    max_coord: f64,
     d_emb: usize,
-    emb_x: Embedding,
-    emb_logx: Embedding,
+    emb_x: Embedding,    // data embedding
+    emb_logx: Embedding, // log data embedding
+    emb_s: Embedding,    // spatial embedding
+    coord_mapping: SoftmaxLinear,
     fc: StackLayers<Linear>,
     bn_z: BatchNorm,
     z_mean: Linear,
     z_lnvar: Linear,
 }
 
-impl EncoderModuleT for LogSoftmaxEncoder {
+impl SpatialEncoderModuleT for SpatialLogSoftmaxEncoder {
+    fn forward_t(&self, x_nd: &Tensor, s_nc: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
+        let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params(x_nd, s_nc, None, train)?;
+        let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
+
+        Ok((
+            ops::log_softmax(&z_nk, 1)?,
+            gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?,
+        ))
+    }
+
     fn forward_with_null_t(
         &self,
         x_nd: &Tensor,
+        s_nc: &Tensor,
         x0_nd: &Tensor,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
-        let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params(x_nd, Some(x0_nd), train)?;
-        let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
-
-        Ok((
-            ops::log_softmax(&z_nk, 1)?,
-            gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?,
-        ))
-    }
-
-    fn forward_t(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
-        let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params(x_nd, None, train)?;
+        let (z_mean_nk, z_lnvar_nk) =
+            self.latent_gaussian_params(x_nd, s_nc, Some(x0_nd), train)?;
         let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
         Ok((
             ops::log_softmax(&z_nk, 1)?,
             gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?,
         ))
-    }
-    fn dim_obs(&self) -> usize {
-        self.n_features
     }
 
     fn dim_latent(&self) -> usize {
         self.n_topics
     }
+
+    fn dim_obs(&self) -> usize {
+        self.n_features
+    }
+
+    fn dim_spatial(&self) -> usize {
+        self.n_coords
+    }
 }
 
-impl LogSoftmaxEncoder {
-    fn discretize_whitened_tensor(&self, x_nd: &Tensor) -> Result<Tensor> {
+impl SpatialLogSoftmaxEncoder {
+    fn discretize_whitened_data(&self, x_nd: &Tensor) -> Result<Tensor> {
         use candle_core::DType::U32;
 
         let n_vocab = self.n_vocab as f64;
@@ -67,9 +79,19 @@ impl LogSoftmaxEncoder {
         (x_nd * n_vocab)?.floor()?.to_dtype(U32)
     }
 
-    pub fn preprocess_input(
+    fn discretize_coords(&self, s_nc: &Tensor) -> Result<Tensor> {
+        use candle_core::DType::U32;
+
+        let n_vocab = self.n_vocab as f64;
+        let div_val = self.max_coord;
+
+        ((s_nc / div_val)? * n_vocab)?.floor()?.to_dtype(U32)
+    }
+
+    pub fn preprocess_input_data(
         &self,
         x_nd: &Tensor,
+        s_nc: &Tensor,
         x0_nd: Option<&Tensor>,
         train: bool,
     ) -> Result<Tensor> {
@@ -77,61 +99,38 @@ impl LogSoftmaxEncoder {
         debug_assert!(x_nd.min_all()?.to_scalar::<f32>()? >= 0_f32);
 
         // 1. Discretize data after log1p transformation
-        let int_x_nd = self.discretize_whitened_tensor(&x_nd)?;
+        let int_x_nd = self.discretize_whitened_data(&x_nd)?;
         let logx_nd = (x_nd + 1.)?.log()?;
-        let int_logx_nd = self.discretize_whitened_tensor(&logx_nd)?;
+        let int_logx_nd = self.discretize_whitened_data(&logx_nd)?;
 
         // 2. log1p intensity embedding: n x d -> n x d x d
         let emb_ndd = (self.emb_x.forward_t(&int_x_nd, train)?
             + self.emb_logx.forward_t(&int_logx_nd, train)?)?;
         let k = emb_ndd.dims().len();
 
-        if let Some(x0_nd) = x0_nd {
-            let int_x0_nd = self.discretize_whitened_tensor(&x0_nd)?;
+        let x_pooled_nd = if let Some(x0_nd) = x0_nd {
+            let int_x0_nd = self.discretize_whitened_data(&x0_nd)?;
             let logx0_nd = (x0_nd + 1.)?.log()?;
-            let int_logx0_nd = self.discretize_whitened_tensor(&logx0_nd)?;
+            let int_logx0_nd = self.discretize_whitened_data(&logx0_nd)?;
 
             let emb0_ndd = (self.emb_x.forward_t(&int_x0_nd, train)?
                 + self.emb_logx.forward_t(&int_logx0_nd, train)?)?;
 
-            // Note: Works almost like log(x) - beta * log(x0), but we
-            // worry less about how to tune the parameter beta.
-	    //
-	    // We could also do:
-            // return emb_ndd.sum(k - 1)? - emb0_ndd.sum(k - 1)?;
-
-            return (emb_ndd - &emb0_ndd)?.sum(k - 1);
+            // Note: Works like log(x) - beta * log(x0), but we worry
+            // less about how to tune the parameter beta.
+            (emb_ndd - &emb0_ndd)?.sum(k - 1)?
         } else {
-            return emb_ndd.sum(k - 1);
-        }
-    }
+            emb_ndd.sum(k - 1)?
+        };
 
-    ///
-    /// Evaluate latent Gaussian parameters: mu and log_var
-    /// z ~ (mu(x), log_var(x))
-    pub fn latent_gaussian_params(
-        &self,
-        x_nd: &Tensor,
-        x0_nd: Option<&Tensor>,
-        train: bool,
-    ) -> Result<(Tensor, Tensor)> {
-        let min_mean = -(self.n_features as f64).sqrt(); // stabilize
-        let max_mean = (self.n_features as f64).sqrt(); // mean
-        let min_lv = -8.; // and log variance
-        let max_lv = 8.; //
+        // 3. spatial embedding
+        let int_s_nc = self.discretize_coords(&s_nc)?;
+        let emb_s = self.emb_s.forward_t(&int_s_nc, train)?;
+        let k = emb_s.dims().len();
+        let emb_s_nc = emb_s.sum(k - 1)?;
+        let emb_s_nd = self.coord_mapping.forward_t(&emb_s_nc, train)?;
 
-        let bn_nd = self.preprocess_input(x_nd, x0_nd, train)?;
-        let fc_nl = self.fc.forward_t(&bn_nd, train)?;
-        let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
-        let z_mean_nk = self
-            .z_mean
-            .forward_t(&bn_nl, train)?
-            .clamp(min_mean, max_mean)?;
-        let z_lnvar_nk = self
-            .z_lnvar
-            .forward_t(&bn_nl, train)?
-            .clamp(min_lv, max_lv)?;
-        Ok((z_mean_nk, z_lnvar_nk))
+        x_pooled_nd * &emb_s_nd
     }
 
     ///
@@ -148,6 +147,35 @@ impl LogSoftmaxEncoder {
         } else {
             Ok(z_mean.clone())
         }
+    }
+
+    ///
+    /// Evaluate latent Gaussian parameters: mu and log_var
+    /// z ~ (mu(x), log_var(x))
+    pub fn latent_gaussian_params(
+        &self,
+        x_nd: &Tensor,
+        s_nc: &Tensor,
+        x0_nd: Option<&Tensor>,
+        train: bool,
+    ) -> Result<(Tensor, Tensor)> {
+        let min_mean = -(self.n_features as f64).sqrt(); // stabilize
+        let max_mean = (self.n_features as f64).sqrt(); // mean
+        let min_lv = -8.; // and log variance
+        let max_lv = 8.; //
+
+        let bn_nd = self.preprocess_input_data(x_nd, s_nc, x0_nd, train)?;
+        let fc_nl = self.fc.forward_t(&bn_nd, train)?;
+        let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
+        let z_mean_nk = self
+            .z_mean
+            .forward_t(&bn_nl, train)?
+            .clamp(min_mean, max_mean)?;
+        let z_lnvar_nk = self
+            .z_lnvar
+            .forward_t(&bn_nl, train)?
+            .clamp(min_lv, max_lv)?;
+        Ok((z_mean_nk, z_lnvar_nk))
     }
 
     /// Will create a new non-negative encoder module
@@ -168,7 +196,9 @@ impl LogSoftmaxEncoder {
     pub fn new(
         n_features: usize,
         n_topics: usize,
+        n_coords: usize,
         n_vocab: usize,
+        max_coord: f64,
         d_emb: usize,
         layers: &[usize],
         vs: VarBuilder,
@@ -184,6 +214,8 @@ impl LogSoftmaxEncoder {
 
         let emb_x = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_x"))?;
         let emb_logx = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_logx"))?;
+        let emb_s = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_s"))?;
+        let coord_mapping = softmax_linear(n_coords, n_features, vs.pp("coordinate.mapping"))?;
 
         // (1) data -> fc
         let mut fc = StackLayers::<Linear>::new();
@@ -206,10 +238,14 @@ impl LogSoftmaxEncoder {
         Ok(Self {
             n_features,
             n_topics,
+            n_coords,
             n_vocab,
+            max_coord,
             d_emb,
             emb_x,
             emb_logx,
+            emb_s,
+            coord_mapping,
             fc,
             bn_z,
             z_mean,
