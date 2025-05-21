@@ -37,19 +37,4 @@ pub fn parse_encoder_layers(s: &str) -> Result<Vec<usize>, <usize as std::str::F
     parse_comma_separated(s)
 }
 
-pub fn row_membership_matrix(row_membership: Vec<usize>) -> Mat {
-    let mtot = match row_membership.iter().max() {
-        Some(&m) => m + 1,
-        _ => 1,
-    };
-
-    let mut ret_dm = Mat::zeros(row_membership.len(), mtot);
-
-    for (i, k) in row_membership.into_iter().enumerate() {
-        ret_dm[(i, k)] += 1_f32;
-    }
-
-    ret_dm
-}
-
 pub struct EmptyArg {}

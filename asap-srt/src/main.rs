@@ -8,21 +8,21 @@ use std::collections::{HashMap, HashSet};
 use srt_common::*;
 
 use asap_data::sparse_io_vector::*;
-use matrix_param::traits::ParamIo;
+use matrix_param::traits::{Inference, ParamIo, TwoStatParam};
 use matrix_util::common_io::{extension, read_lines, write_lines};
-use matrix_util::dmatrix_util::{concatenate_horizontal, concatenate_vertical};
+use matrix_util::dmatrix_util::*;
 use matrix_util::traits::*;
 use matrix_util::utils::partition_by_membership;
 
 use asap_alg::collapse_data::CollapsingOps;
-use asap_alg::random_projection::RandProjOps;
+use asap_alg::random_projection::*;
 use asap_data::sparse_io::*;
 
 // use candle_util::candle_decoder_topic::*;
 // use candle_util::candle_encoder_softmax::*;
 // use candle_util::candle_loss_functions as loss_func;
 // use candle_util::candle_model_traits::DecoderModule;
-// use candle_util::candle_vae_inference::*;
+use candle_util::candle_vae_inference::*;
 
 use clap::{Parser, ValueEnum};
 
@@ -94,6 +94,41 @@ struct SRTArgs {
     #[arg(short = 'k', long, default_value_t = 10)]
     n_latent_topics: usize,
 
+    /// targeted number of row feature modules
+    #[arg(short = 'r', long, default_value_t = 1000)]
+    n_row_modules: usize,
+
+    /// encoder layers
+    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
+    encoder_layers: Vec<usize>,
+
+    /// intensity levels for frequency embedding
+    #[arg(long, default_value_t = 100)]
+    vocab_size: usize,
+
+    /// intensity embedding dimension
+    #[arg(long, default_value_t = 3)]
+    vocab_emb: usize,
+
+    /// # pre-training epochs with an encoder-only model
+    #[arg(long, default_value_t = 0)]
+    pretrain_epochs: usize,
+
+    /// # training epochs
+    #[arg(long, short = 'i', default_value_t = 1000)]
+    epochs: usize,
+
+    /// Minibatch size
+    #[arg(long, default_value_t = 100)]
+    minibatch_size: usize,
+
+    #[arg(long, default_value_t = 1e-3)]
+    learning_rate: f32,
+
+    /// candle device
+    #[arg(long, value_enum, default_value = "cpu")]
+    device: ComputeDevice,
+
     /// verbosity
     #[arg(long, short)]
     verbose: bool,
@@ -105,6 +140,7 @@ fn main() -> anyhow::Result<()> {
     if args.verbose {
         std::env::set_var("RUST_LOG", "info");
     }
+    env_logger::init();
 
     info!("Reading data files...");
 
@@ -133,7 +169,8 @@ fn main() -> anyhow::Result<()> {
     let proj_kn = proj_out.proj + coord_kn;
 
     info!("Assigning {} columns to samples...", proj_kn.ncols());
-    let nsamp = data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim))?;
+    let nsamp =
+        data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim), args.down_sample)?;
 
     //////////////////////////////////
     // 2. Register batch membership //
@@ -150,22 +187,26 @@ fn main() -> anyhow::Result<()> {
 
     info!("Collapsing data columns... into {} samples", nsamp);
     let collapse_out = data_vec.collapse_columns(
-        args.down_sample,
         Some(args.knn_batches),
         Some(args.knn_cells),
         Some(args.iter_opt),
     )?;
 
+    let group_to_cols = data_vec.take_grouped_columns().ok_or(anyhow::anyhow!(
+        "The columns were not assigned before. Call `assign_columns_to_groups`"
+    ))?;
+
     info!("Collapsing coordinates into {} samples", nsamp);
 
-    let mut collapsed_coords = Mat::zeros(nsamp, coord_map.ncols() * data_vec.num_batches());
+    let mut collapsed_coords = Mat::zeros(group_to_cols.len(), coord_map.ncols());
 
-    partition_by_membership(data_vec.samples_assigned()?, None)
+    group_to_cols
         .into_iter()
+        .enumerate()
         .for_each(|(s, cells)| {
             collapsed_coords
                 .row_mut(s)
-                .copy_from(&coord_map.select_rows(&cells).row_mean())
+                .copy_from(&coord_map.select_rows(cells).row_mean())
         });
 
     collapsed_coords.to_tsv(&(args.out.to_string() + ".collapsed.coords.gz"))?;
@@ -181,6 +222,75 @@ fn main() -> anyhow::Result<()> {
     write_lines(&row_names, &(args.out.to_string() + ".rows.gz"))?;
     write_lines(&col_names, &(args.out.to_string() + ".cols.gz"))?;
 
+    /////////////////////////////////////////////////////////
+    // 4. Train embedded topic model on the collapsed data //
+    /////////////////////////////////////////////////////////
+
+    let n_topics = args.n_latent_topics;
+    let n_vocab = args.vocab_size;
+    let d_vocab_emb = args.vocab_emb;
+
+    let aggregate_rows = if collapse_out.mu_observed.nrows() > args.n_row_modules {
+        let log_x_nd = match collapse_out.mu_adjusted.as_ref() {
+            Some(x) => x.posterior_log_mean().transpose().clone(),
+            _ => collapse_out
+                .mu_observed
+                .posterior_log_mean()
+                .transpose()
+                .clone(),
+        };
+        let kk = (args.n_row_modules as f32).log2().ceil() as usize + 1;
+        info!(
+            "affine transformation: {} -> {}",
+            log_x_nd.ncols(),
+            args.n_row_modules
+        );
+        row_membership_matrix(binary_sort_columns(&log_x_nd, kk)?)?
+    } else {
+        let d = collapse_out.mu_observed.nrows();
+        Mat::identity(d, d)
+    };
+
+    let mixed_dn = &collapse_out.mu_observed;
+    let clean_dn = collapse_out.mu_adjusted.as_ref();
+    let batch_dn = collapse_out.mu_residual.as_ref();
+
+    // encoder input can be modularized
+    let input_nm = mixed_dn.posterior_mean().transpose().clone() * &aggregate_rows;
+    let batch_nm = batch_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
+
+    // output decoder should maintain the original dimension
+    let output_nd = match clean_dn {
+        Some(x) => x.posterior_mean().transpose().clone(),
+        _ => mixed_dn.posterior_mean().transpose().clone(),
+    };
+
+    let n_features_encoder = input_nm.ncols();
+    let n_features_decoder = output_nd.ncols();
+
+    let parameters = candle_nn::VarMap::new();
+
+    let dev = match args.device {
+        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
+        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
+        _ => candle_core::Device::Cpu,
+    };
+
+    let train_config = TrainConfig {
+        learning_rate: args.learning_rate,
+        batch_size: args.minibatch_size,
+        num_epochs: args.epochs,
+        num_pretrain_epochs: args.pretrain_epochs,
+        device: dev.clone(),
+        verbose: args.verbose,
+    };
+
+    let dev = &train_config.device;
+
+    let param_builder =
+        candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
+
+    info!("done");
     Ok(())
 }
 

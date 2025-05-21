@@ -66,6 +66,7 @@ pub trait RandProjOps {
         &mut self,
         proj_kn: &nalgebra::DMatrix<f32>,
         num_features: Option<usize>,
+        ncols_per_group: Option<usize>,
     ) -> anyhow::Result<usize>;
 
     /// Take samples assigned
@@ -190,6 +191,7 @@ impl RandProjOps for SparseIoVec {
         &mut self,
         proj_kn: &nalgebra::DMatrix<f32>,
         num_sorting_features: Option<usize>,
+        ncols_per_group: Option<usize>,
     ) -> anyhow::Result<usize> {
         let nn = proj_kn.ncols();
         if nn != self.num_columns()? {
@@ -204,7 +206,7 @@ impl RandProjOps for SparseIoVec {
             .iter()
             .max()
             .ok_or(anyhow::anyhow!("unable to determine max element"))?;
-        self.assign_groups(binary_codes);
+        self.assign_groups(binary_codes, ncols_per_group);
         Ok(max_group + 1)
     }
 }
@@ -225,7 +227,13 @@ pub fn binary_sort_columns(
 
     let mut binary_codes = DVector::<usize>::zeros(nn);
     for k in 0..kk {
-        let binary_shift = |x: f32| -> usize { if x > 0.0 { 1 << k } else { 0 } };
+        let binary_shift = |x: f32| -> usize {
+            if x > 0.0 {
+                1 << k
+            } else {
+                0
+            }
+        };
         binary_codes += q_nk.column(k).map(binary_shift);
     }
 

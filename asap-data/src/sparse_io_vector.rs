@@ -20,6 +20,7 @@ pub struct SparseIoVec {
     row_name_position: HashMap<Box<str>, usize>,
     column_names_with_batch: Vec<Box<str>>,
     col_to_group: Option<Vec<usize>>,
+    group_to_cols: Option<Vec<Vec<usize>>>,
     batch_knn_lookup: Option<Vec<ColumnDict<usize>>>,
     col_to_batch: Option<Vec<usize>>,
     batch_to_cols: Option<Vec<Vec<usize>>>,
@@ -45,6 +46,7 @@ impl SparseIoVec {
             row_name_position: HashMap::new(),
             column_names_with_batch: vec![],
             col_to_group: None,
+            group_to_cols: None,
             batch_knn_lookup: None,
             col_to_batch: None,
             batch_to_cols: None,
@@ -57,8 +59,17 @@ impl SparseIoVec {
         self.data_vec.len()
     }
 
-    pub fn assign_groups(&mut self, cell_to_group: Vec<usize>) {
+    pub fn assign_groups(&mut self, cell_to_group: Vec<usize>, ncells_per_group: Option<usize>) {
+        self.group_to_cols = Some(
+            partition_by_membership(&cell_to_group, ncells_per_group)
+                .into_values()
+                .collect(),
+        );
         self.col_to_group = Some(cell_to_group);
+    }
+
+    pub fn take_grouped_columns(&self) -> Option<&Vec<Vec<usize>>> {
+        self.group_to_cols.as_ref()
     }
 
     pub fn take_groups(&self) -> Option<&Vec<usize>> {
