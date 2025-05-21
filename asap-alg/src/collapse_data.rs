@@ -39,7 +39,6 @@ pub trait CollapsingOps {
     ///
     fn collapse_columns(
         &self,
-        cells_per_group: Option<usize>,
         knn_batches: Option<usize>,
         knn_cells: Option<usize>,
         num_opt_iter: Option<usize>,
@@ -123,18 +122,13 @@ impl CollapsingOps for SparseIoVec {
 
     fn collapse_columns(
         &self,
-        ncols_per_group: Option<usize>,
         knn_batches: Option<usize>,
         knn_cells: Option<usize>,
         num_opt_iter: Option<usize>,
     ) -> anyhow::Result<CollapsingOut> {
-        let col_to_group: &Vec<usize> = self.take_groups().ok_or(anyhow::anyhow!(
+        let group_to_cols = self.take_grouped_columns().ok_or(anyhow::anyhow!(
             "The columns were not assigned before. Call `assign_columns_to_groups`"
         ))?;
-
-        let group_to_cols: Vec<Vec<usize>> = partition_by_membership(col_to_group, ncols_per_group)
-            .into_values()
-            .collect();
 
         let num_features = self.num_rows()?;
         let num_groups = group_to_cols.len();

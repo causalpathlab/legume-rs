@@ -7,6 +7,7 @@ use embed_common::*;
 use log::info;
 use matrix_param::traits::{Inference, ParamIo, TwoStatParam};
 use matrix_util::common_io::{extension, read_lines, remove_file, write_lines, write_types};
+use matrix_util::dmatrix_util::row_membership_matrix;
 use matrix_util::traits::*;
 
 use asap_routines_latent_representation::*;
@@ -203,7 +204,8 @@ fn main() -> anyhow::Result<()> {
             .to_tsv(&(args.out.to_string() + ".rp.gz"))?;
     }
 
-    let nsamp = data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim))?;
+    let nsamp =
+        data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim), args.down_sample)?;
     info!("at most {} samples are assigned", nsamp);
 
     //////////////////////////////////
@@ -221,7 +223,6 @@ fn main() -> anyhow::Result<()> {
 
     info!("Collapsing columns... into {} samples", nsamp);
     let collapse_out = data_vec.collapse_columns(
-        args.down_sample,
         Some(args.knn_batches),
         Some(args.knn_cells),
         Some(args.iter_opt),
@@ -328,7 +329,7 @@ fn main() -> anyhow::Result<()> {
             log_x_nd.ncols(),
             args.n_row_modules
         );
-        row_membership_matrix(binary_sort_columns(&log_x_nd, kk)?)
+        row_membership_matrix(binary_sort_columns(&log_x_nd, kk)?)?
     } else {
         let d = collapse_out.mu_observed.nrows();
         Mat::identity(d, d)

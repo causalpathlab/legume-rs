@@ -52,6 +52,24 @@ where
     Ok(DMatrix::from_columns(&cols))
 }
 
+pub fn row_membership_matrix<T>(row_membership: Vec<usize>) -> anyhow::Result<DMatrix<T>>
+where
+    T: nalgebra::RealField + Copy,
+{
+    let mtot = match row_membership.iter().max() {
+        Some(&m) => m + 1,
+        _ => 1,
+    };
+
+    let mut ret_dm = DMatrix::zeros(row_membership.len(), mtot);
+    let oneval = T::from_f32(1.).ok_or(anyhow::anyhow!("cannot find 1 value"))?;
+    for (i, k) in row_membership.into_iter().enumerate() {
+        ret_dm[(i, k)] += oneval;
+    }
+
+    Ok(ret_dm)
+}
+
 impl<T> DistanceOps for CscMatrix<T>
 where
     T: nalgebra::RealField + Copy + std::iter::Sum<T>,
