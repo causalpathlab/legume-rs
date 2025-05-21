@@ -129,6 +129,10 @@ struct SRTArgs {
     #[arg(long, value_enum, default_value = "cpu")]
     device: ComputeDevice,
 
+    /// exclude spatial information
+    #[arg(long, default_value_t = false)]
+    exclude_spatial_info: bool,
+
     /// verbosity
     #[arg(long, short)]
     verbose: bool,
@@ -152,13 +156,6 @@ fn main() -> anyhow::Result<()> {
 
     let proj_dim = args.proj_dim.max(args.n_latent_topics);
 
-    info!(
-        "Random projection of spatial coordinates onto {} dims",
-        proj_dim
-    );
-
-    let coord_kn = positional_projection(&coord_map, &batch_membership, proj_dim)?;
-
     info!("Random projection of data onto {} dims", proj_dim);
     let proj_out = data_vec.project_columns_with_batch_correction(
         proj_dim,
@@ -166,7 +163,17 @@ fn main() -> anyhow::Result<()> {
         Some(&batch_membership),
     )?;
 
-    let proj_kn = proj_out.proj + coord_kn;
+    let proj_kn = if args.exclude_spatial_info {
+        info!("excluding spatial information in the initial random projection");
+        proj_out.proj
+    } else {
+        info!(
+            "Random projection of spatial coordinates onto {} dims",
+            proj_dim
+        );
+        let coord_kn = positional_projection(&coord_map, &batch_membership, proj_dim)?;
+        proj_out.proj + coord_kn
+    };
 
     info!("Assigning {} columns to samples...", proj_kn.ncols());
     let nsamp =
@@ -361,8 +368,16 @@ where
         });
     }
 
+    let (lb, ub) = (-4., 4.);
     ret.scale_columns_inplace();
 
+    if ret.max() > ub || ret.min() < lb {
+        info!("Clamping values [{}, {}] after standardization", lb, ub);
+        ret.iter_mut().for_each(|x| {
+            *x = x.clamp(lb, ub);
+        });
+        ret.scale_columns_inplace();
+    }
     Ok(ret)
 }
 
