@@ -1,5 +1,7 @@
 mod simulate;
 mod srt_common;
+mod srt_routines_latent_representation;
+mod srt_routines_post_process;
 
 use log::info;
 use rayon::prelude::*;
@@ -7,9 +9,12 @@ use std::collections::{HashMap, HashSet};
 
 use srt_common::*;
 
+use srt_routines_latent_representation::*;
+use srt_routines_post_process::*;
+
 use asap_data::sparse_io_vector::*;
 use matrix_param::traits::{Inference, ParamIo, TwoStatParam};
-use matrix_util::common_io::{extension, read_lines, write_lines};
+use matrix_util::common_io::{extension, read_lines, write_lines, write_types};
 use matrix_util::dmatrix_util::*;
 use matrix_util::traits::*;
 use matrix_util::utils::partition_by_membership;
@@ -18,11 +23,11 @@ use asap_alg::collapse_data::CollapsingOps;
 use asap_alg::random_projection::*;
 use asap_data::sparse_io::*;
 
-// use candle_util::candle_decoder_topic::*;
-// use candle_util::candle_encoder_softmax::*;
-// use candle_util::candle_loss_functions as loss_func;
-// use candle_util::candle_model_traits::DecoderModule;
-use candle_util::candle_vae_inference::*;
+use candle_util::candle_decoder_topic::*;
+use candle_util::candle_inference::TrainConfig;
+use candle_util::candle_loss_functions as loss_func;
+use candle_util::candle_model_traits::DecoderModule;
+use candle_util::candle_spatial_encoder_softmax::*;
 
 use clap::{Parser, ValueEnum};
 
@@ -109,10 +114,6 @@ struct SRTArgs {
     /// intensity embedding dimension
     #[arg(long, default_value_t = 3)]
     vocab_emb: usize,
-
-    /// # pre-training epochs with an encoder-only model
-    #[arg(long, default_value_t = 0)]
-    pretrain_epochs: usize,
 
     /// # training epochs
     #[arg(long, short = 'i', default_value_t = 1000)]
@@ -248,7 +249,7 @@ fn main() -> anyhow::Result<()> {
         };
         let kk = (args.n_row_modules as f32).log2().ceil() as usize + 1;
         info!(
-            "affine transformation: {} -> {}",
+            "reduce data features: {} -> {}",
             log_x_nd.ncols(),
             args.n_row_modules
         );
@@ -264,16 +265,17 @@ fn main() -> anyhow::Result<()> {
 
     // encoder input can be modularized
     let input_nm = mixed_dn.posterior_mean().transpose().clone() * &aggregate_rows;
+
     let batch_nm = batch_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
+
+    // additional spatial coordinates
+    let spatial_nc = collapsed_coords;
 
     // output decoder should maintain the original dimension
     let output_nd = match clean_dn {
         Some(x) => x.posterior_mean().transpose().clone(),
         _ => mixed_dn.posterior_mean().transpose().clone(),
     };
-
-    let n_features_encoder = input_nm.ncols();
-    let n_features_decoder = output_nd.ncols();
 
     let parameters = candle_nn::VarMap::new();
 
@@ -287,7 +289,7 @@ fn main() -> anyhow::Result<()> {
         learning_rate: args.learning_rate,
         batch_size: args.minibatch_size,
         num_epochs: args.epochs,
-        num_pretrain_epochs: args.pretrain_epochs,
+        num_pretrain_epochs: 0,
         device: dev.clone(),
         verbose: args.verbose,
     };
@@ -296,6 +298,67 @@ fn main() -> anyhow::Result<()> {
 
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
+
+    ///////////////////////////////////////////////////
+    // training variational autoencoder architecture //
+    ///////////////////////////////////////////////////
+
+    let n_features_encoder = input_nm.ncols();
+    let n_coords = spatial_nc.ncols();
+    let max_coord = spatial_nc.max();
+    let n_features_decoder = output_nd.ncols();
+
+    let encoder = SpatialLogSoftmaxEncoder::new(
+        n_features_encoder,
+        n_topics,
+        n_coords,
+        n_vocab,
+        max_coord.into(),
+        d_vocab_emb,
+        &args.encoder_layers,
+        param_builder.clone(),
+    )?;
+
+    info!(
+        "input: {} -> encoder -> decoder -> output: {}",
+        n_features_encoder, n_features_decoder
+    );
+
+    let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
+
+    let log_likelihood = train_encoder_decoder(
+        &input_nm,
+        &output_nd,
+        &spatial_nc,
+        batch_nm.as_ref(),
+        &encoder,
+        &decoder,
+        &parameters,
+        &loss_func::topic_likelihood,
+        &train_config,
+    )?;
+
+    write_types::<f32>(&log_likelihood, &(args.out.to_string() + ".llik.gz"))?;
+
+    decoder
+        .get_dictionary()?
+        .to_device(&candle_core::Device::Cpu)?
+        .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
+
+    let delta_db = batch_db.map(|x| x.posterior_mean());
+
+    let z_nk = evaluate_latent_by_encoder(
+        &data_vec,
+        &coord_map,
+        &encoder,
+        &aggregate_rows,
+        &train_config,
+        delta_db,
+    )?;
+    z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
+    if let Some(batch_db) = batch_db {
+        batch_db.to_tsv(&(args.out.to_string() + ".delta"))?;
+    }
 
     info!("done");
     Ok(())

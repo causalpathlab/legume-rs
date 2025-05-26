@@ -2,7 +2,8 @@
 
 use crate::candle_data_loader::*;
 use crate::candle_inference::TrainConfig;
-use crate::candle_model_traits::{DecoderModule, EncoderModuleT};
+use crate::candle_model_traits::DecoderModule;
+use crate::candle_spatial_model_traits::SpatialEncoderModuleT;
 
 use candle_core::{Result, Tensor};
 use candle_nn::AdamW;
@@ -11,9 +12,9 @@ use indicatif::{ProgressBar, ProgressDrawTarget};
 use log::info;
 use rayon::prelude::*;
 
-pub struct Vae<'a, Enc, Dec>
+pub struct SpatialVae<'a, Enc, Dec>
 where
-    Enc: EncoderModuleT + Send + Sync + 'static,
+    Enc: SpatialEncoderModuleT + Send + Sync + 'static,
     Dec: DecoderModule + Send + Sync + 'static,
 {
     pub encoder: &'a Enc,
@@ -21,9 +22,9 @@ where
     pub variable_map: &'a candle_nn::VarMap,
 }
 
-pub trait VaeT<'a, Enc, Dec>
+pub trait SpatialVaeT<'a, Enc, Dec>
 where
-    Enc: EncoderModuleT + Send + Sync + 'static,
+    Enc: SpatialEncoderModuleT + Send + Sync + 'static,
     Dec: DecoderModule + Send + Sync + 'static,
 {
     /// Train the VAE model
@@ -61,75 +62,19 @@ where
     fn build(encoder: &'a Enc, decoder: &'a Dec, variable_map: &'a candle_nn::VarMap) -> Self;
 }
 
-impl<'a, Enc, Dec> VaeT<'a, Enc, Dec> for Vae<'a, Enc, Dec>
+impl<'a, Enc, Dec> SpatialVaeT<'a, Enc, Dec> for SpatialVae<'a, Enc, Dec>
 where
-    Enc: EncoderModuleT + Send + Sync + 'static,
+    Enc: SpatialEncoderModuleT + Send + Sync + 'static,
     Dec: DecoderModule + Send + Sync + 'static,
 {
-    fn pretrain_encoder<DataL, LlikFn>(
-        &mut self,
-        data: &mut DataL,
-        llik: &LlikFn,
-        train_config: &TrainConfig,
-    ) -> anyhow::Result<Vec<f32>>
-    where
-        DataL: DataLoader,
-        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
-    {
-        let device = &train_config.device;
-        let mut adam = AdamW::new_lr(
-            self.variable_map.all_vars(),
-            train_config.learning_rate.into(),
-        )?;
+    fn build(encoder: &'a Enc, decoder: &'a Dec, variable_map: &'a candle_nn::VarMap) -> Self {
+        assert_eq!(encoder.dim_latent(), decoder.dim_latent());
 
-        let pb = ProgressBar::new(train_config.num_pretrain_epochs as u64);
-
-        if train_config.verbose {
-            pb.set_draw_target(ProgressDrawTarget::hidden());
+        Self {
+            encoder,
+            decoder,
+            variable_map,
         }
-
-        let mut llik_trace = vec![];
-
-        data.shuffle_minibatch(train_config.batch_size)?;
-
-        let num_minbatches = data.num_minibatch();
-
-        let data_aux_out_vec = (0..num_minbatches)
-            .map(|b| {
-                data.minibatch_data(b, &device)
-                    .expect(format!("failed to preload minibatch #{}", b).as_str())
-            })
-            .collect::<Vec<_>>();
-
-        for _epoch in 0..train_config.num_pretrain_epochs {
-            let mut llik_tot = 0f32;
-            for b in 0..data.num_minibatch() {
-                let x = data_aux_out_vec[b].input.as_ref();
-                let x0 = data_aux_out_vec[b].input_null.as_ref();
-                let z = data_aux_out_vec[b].output.as_ref();
-
-                if let Some(z_target) = z {
-                    let (z_hat, kl) = self.encoder.forward_t(x, x0, true)?;
-
-                    let llik = llik(&z_hat, z_target)?;
-                    let loss = (kl - &llik)?.mean_all()?;
-                    let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
-                    llik_tot += llik_val;
-                    adam.backward_step(&loss)?;
-                }
-            }
-            pb.inc(1);
-            llik_trace.push(llik_tot / data.num_minibatch() as f32);
-            if train_config.verbose {
-                info!(
-                    "[{}] log-likelihood: {}",
-                    _epoch + 1,
-                    llik_trace.last().ok_or(anyhow::anyhow!("llik"))?
-                );
-            }
-        }
-        pb.finish_and_clear();
-        Ok(llik_trace)
     }
 
     fn train_encoder_decoder<DataL, LlikFn>(
@@ -178,17 +123,19 @@ where
                     let mut llik_tot = arc_llik_tot.lock().expect("llik lock");
                     *llik_tot = 0_f32;
                 }
+
                 data_aux_vec.par_iter().for_each(|minibatch_data| {
-                    let (x_nd, x0_nd, y_nd) = (
+                    let (x_nd, s_nc, x0_nd, y_nd) = (
                         minibatch_data.input.as_ref(),
+                        minibatch_data.coordinate.as_ref(),
                         minibatch_data.input_null.as_ref(),
                         minibatch_data.output.as_ref(),
                     );
 
                     let (z_nk, kl) = self
                         .encoder
-                        .forward_t(x_nd, x0_nd, true)
-                        .expect("enc x and x0");
+                        .forward_t(x_nd, s_nc, x0_nd, true)
+                        .expect("enc x, s, x0");
 
                     let (_, llik) = match y_nd {
                         Some(y_nd) => self
@@ -235,25 +182,33 @@ where
                         llik_trace.last().ok_or(anyhow::anyhow!("llik"))?
                     );
                 }
-            } // each epoch
+            }
         } else {
             for _epoch in 0..train_config.num_epochs {
                 let mut llik_tot = 0f32;
                 for b in 0..data.num_minibatch() {
                     let minibatch_data = &data_aux_vec[b];
 
-                    let (x_nd, x0_nd, y_nd) = (
+                    let (x_nd, s_nc, x0_nd, y_nd) = (
                         minibatch_data.input.as_ref(),
+                        minibatch_data.coordinate.as_ref(),
                         minibatch_data.input_null.as_ref(),
                         minibatch_data.output.as_ref(),
                     );
 
-                    let (z_nk, kl) = self.encoder.forward_t(x_nd, x0_nd, true)?;
+                    let (z_nk, kl) = self.encoder.forward_t(x_nd, s_nc, x0_nd, true)?;
 
                     let (_, llik) = match y_nd {
-                        Some(y_nd) => self.decoder.forward_with_llik(&z_nk, y_nd, llik_func)?,
-                        None => self.decoder.forward_with_llik(&z_nk, x_nd, llik_func)?,
+                        Some(y_nd) => self
+                            .decoder
+                            .forward_with_llik(&z_nk, y_nd, llik_func)
+                            .expect("dec vs. y"),
+                        None => self
+                            .decoder
+                            .forward_with_llik(&z_nk, x_nd, llik_func)
+                            .expect("dec vs. x"),
                     };
+
                     let loss = (kl - &llik)?.mean_all()?;
                     adam.backward_step(&loss)?;
                     let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
@@ -261,7 +216,6 @@ where
                 }
                 llik_trace.push(llik_tot / data.num_minibatch() as f32);
                 pb.inc(1);
-
                 if train_config.verbose {
                     info!(
                         "[{}] log-likelihood: {}",
@@ -269,20 +223,79 @@ where
                         llik_trace.last().ok_or(anyhow::anyhow!("llik"))?
                     );
                 }
-            } // each epoch
+            }
         }
-
         pb.finish_and_clear();
         Ok(llik_trace)
     }
 
-    fn build(encoder: &'a Enc, decoder: &'a Dec, variable_map: &'a candle_nn::VarMap) -> Self {
-        assert_eq!(encoder.dim_latent(), decoder.dim_latent());
+    fn pretrain_encoder<DataL, LlikFn>(
+        &mut self,
+        data: &mut DataL,
+        llik: &LlikFn,
+        train_config: &TrainConfig,
+    ) -> anyhow::Result<Vec<f32>>
+    where
+        DataL: DataLoader,
+        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
+    {
+        let device = &train_config.device;
+        let mut adam = AdamW::new_lr(
+            self.variable_map.all_vars(),
+            train_config.learning_rate.into(),
+        )?;
 
-        Self {
-            encoder,
-            decoder,
-            variable_map,
+        let pb = ProgressBar::new(train_config.num_epochs as u64);
+
+        if train_config.verbose {
+            pb.set_draw_target(ProgressDrawTarget::hidden());
         }
+
+        let mut llik_trace = vec![];
+
+        data.shuffle_minibatch(train_config.batch_size)?;
+
+        let num_minbatches = data.num_minibatch();
+
+        let data_aux_out_vec = (0..num_minbatches)
+            .map(|b| {
+                data.minibatch_data(b, &device)
+                    .expect(format!("failed to preload minibatch #{}", b).as_str())
+            })
+            .collect::<Vec<_>>();
+
+        for _epoch in 0..train_config.num_pretrain_epochs {
+            let mut llik_tot = 0f32;
+            for b in 0..data.num_minibatch() {
+                let minibatch_data = &data_aux_out_vec[b];
+
+                let (x_nd, s_nc, x0_nd, z_nk) = (
+                    minibatch_data.input.as_ref(),
+                    minibatch_data.coordinate.as_ref(),
+                    minibatch_data.input_null.as_ref(),
+                    minibatch_data.output.as_ref(),
+                );
+
+                if let Some(z_target_nk) = z_nk {
+                    let (z_hat_nk, kl) = self.encoder.forward_t(x_nd, s_nc, x0_nd, true)?;
+                    let llik = llik(&z_hat_nk, z_target_nk)?;
+                    let loss = (kl - &llik)?.mean_all()?;
+                    let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
+                    llik_tot += llik_val;
+                    adam.backward_step(&loss)?;
+                }
+            }
+            pb.inc(1);
+            llik_trace.push(llik_tot / data.num_minibatch() as f32);
+            if train_config.verbose {
+                info!(
+                    "[{}] log-likelihood: {}",
+                    _epoch + 1,
+                    llik_trace.last().ok_or(anyhow::anyhow!("llik"))?
+                );
+            }
+        }
+        pb.finish_and_clear();
+        Ok(llik_trace)
     }
 }

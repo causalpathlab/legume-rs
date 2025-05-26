@@ -20,13 +20,13 @@ pub struct LogSoftmaxEncoder {
 }
 
 impl EncoderModuleT for LogSoftmaxEncoder {
-    fn forward_with_null_t(
+    fn forward_t(
         &self,
         x_nd: &Tensor,
-        x0_nd: &Tensor,
+        x0_nd: Option<&Tensor>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
-        let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params(x_nd, Some(x0_nd), train)?;
+        let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params(x_nd, x0_nd, train)?;
         let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
 
         Ok((
@@ -35,14 +35,6 @@ impl EncoderModuleT for LogSoftmaxEncoder {
         ))
     }
 
-    fn forward_t(&self, x_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
-        let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params(x_nd, None, train)?;
-        let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
-        Ok((
-            ops::log_softmax(&z_nk, 1)?,
-            gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?,
-        ))
-    }
     fn dim_obs(&self) -> usize {
         self.n_features
     }
@@ -96,8 +88,8 @@ impl LogSoftmaxEncoder {
 
             // Note: Works almost like log(x) - beta * log(x0), but we
             // worry less about how to tune the parameter beta.
-	    //
-	    // We could also do:
+            //
+            // We could also do:
             // return emb_ndd.sum(k - 1)? - emb0_ndd.sum(k - 1)?;
 
             return (emb_ndd - &emb0_ndd)?.sum(k - 1);

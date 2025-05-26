@@ -1,87 +1,35 @@
-use crate::embed_common::*;
+use crate::srt_common::*;
 
-use asap_alg::normalization::*;
-use asap_data::sparse_data_visitors::VisitColumnsOps;
 use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
 
-use matrix_util::traits::*;
-
 use candle_util::candle_inference::TrainConfig;
-use candle_util::candle_model_traits::*;
-
-use std::sync::{Arc, Mutex};
-
+use candle_util::candle_spatial_model_traits::SpatialEncoderModuleT;
 use indicatif::ParallelProgressIterator;
+use matrix_util::traits::ConvertMatOps;
 use rayon::prelude::*;
 
-fn visit_data_to_adjust(
-    job: (usize, usize),
-    full_data_vec: &SparseIoVec,
-    delta_db: &Mat,
-    triplets: Arc<Mutex<&mut Vec<(u64, u64, f32)>>>,
-) {
-    let (lb, ub) = job;
-    let batches = full_data_vec.get_batch_membership(lb..ub);
-
-    let mut x_dn = full_data_vec
-        .read_columns_csc(lb..ub)
-        .expect("read columns");
-
-    x_dn.adjust_by_division(&delta_db, &batches);
-
-    let new_triplets = x_dn
-        .triplet_iter()
-        .filter_map(|(i, j, &x_ij)| {
-            let x_ij = x_ij.round();
-            if x_ij < 1_f32 {
-                None
-            } else {
-                Some((i as u64, (j + lb) as u64, x_ij))
-            }
-        })
-        .collect::<Vec<_>>();
-
-    let mut triplets = triplets.lock().expect("lock triplets");
-    triplets.extend(new_triplets);
-}
-
-/// Adjust the original data by eliminating batch effects `delta_db`
-/// (`d x b`) from each column. We will directly call
-/// `get_batch_membership` in `data_vec`.
-///
-/// # Arguments
-/// * `data_vec` - sparse data vector
-/// * `delta_db` - row/feature by batch average effect matrix
-///
-/// # Returns
-/// * `triplets` - we can feed this vector to create a new backend
-pub fn triplets_adjusted_by_batch(
-    data_vec: &SparseIoVec,
-    delta_db: &Mat,
-) -> anyhow::Result<Vec<(u64, u64, f32)>> {
-    let mut triplets = vec![];
-    data_vec.visit_columns_by_jobs(&visit_data_to_adjust, &delta_db, &mut triplets, None)?;
-    Ok(triplets)
-}
+use std::sync::{Arc, Mutex};
 
 /// Evaluate latent representation with the trained encoder network
 ///
 /// #Arguments
 /// * `data_vec` - full data vector
+/// * `coord_map` - full spatial coordinates
 /// * `encoder` - encoder network
 /// * `aggregate_rows` - `d x m` aggregate
 /// * `train_config` - training configuration
 /// * `delta_db` - batch effect matrix (feature x batch)
 pub fn evaluate_latent_by_encoder<Enc>(
     data_vec: &SparseIoVec,
+    coord_map: &Mat,
     encoder: &Enc,
     aggregate_rows: &Mat,
     train_config: &TrainConfig,
     delta_db: Option<&Mat>,
 ) -> anyhow::Result<Mat>
 where
-    Enc: EncoderModuleT + Send + Sync + 'static,
+    Enc: SpatialEncoderModuleT + Send + Sync + 'static,
 {
     let dev = &train_config.device;
     let ntot = data_vec.num_columns()?;
@@ -121,6 +69,9 @@ where
                 delta_bm.index_select(&batches, 0).expect("expand delta")
             });
 
+            let s_nc: Mat = coord_map.rows_range(lb..ub).into();
+            let s_nc = s_nc.to_tensor(dev).expect("spatial nxc");
+
             let x_nd = data_vec
                 .read_columns_dmatrix(lb..ub)
                 .expect("read columns")
@@ -132,8 +83,8 @@ where
             let x_nm = x_nd.matmul(&aggregate).expect("x aggregate");
 
             let (z_nk, _) = enc
-                .forward_t(&x_nm, x0_nm.as_ref(), false)
-                .expect("forward");
+                .forward_t(&x_nm, Some(&s_nc), x0_nm.as_ref(), false)
+                .expect("");
 
             let z_nk = z_nk.to_device(&candle_core::Device::Cpu).expect("to cpu");
             (lb, Mat::from_tensor(&z_nk).expect("to mat"))

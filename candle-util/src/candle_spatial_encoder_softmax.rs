@@ -25,25 +25,14 @@ pub struct SpatialLogSoftmaxEncoder {
 }
 
 impl SpatialEncoderModuleT for SpatialLogSoftmaxEncoder {
-    fn forward_t(&self, x_nd: &Tensor, s_nc: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
-        let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params(x_nd, s_nc, None, train)?;
-        let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
-
-        Ok((
-            ops::log_softmax(&z_nk, 1)?,
-            gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?,
-        ))
-    }
-
-    fn forward_with_null_t(
+    fn forward_t(
         &self,
         x_nd: &Tensor,
-        s_nc: &Tensor,
-        x0_nd: &Tensor,
+        s_nc: Option<&Tensor>,
+        x0_nd: Option<&Tensor>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
-        let (z_mean_nk, z_lnvar_nk) =
-            self.latent_gaussian_params(x_nd, s_nc, Some(x0_nd), train)?;
+        let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params(x_nd, s_nc, x0_nd, train)?;
         let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
         Ok((
             ops::log_softmax(&z_nk, 1)?,
@@ -91,7 +80,7 @@ impl SpatialLogSoftmaxEncoder {
     pub fn preprocess_input_data(
         &self,
         x_nd: &Tensor,
-        s_nc: &Tensor,
+        s_nc: Option<&Tensor>,
         x0_nd: Option<&Tensor>,
         train: bool,
     ) -> Result<Tensor> {
@@ -124,13 +113,17 @@ impl SpatialLogSoftmaxEncoder {
         };
 
         // 3. spatial embedding
-        let int_s_nc = self.discretize_coords(&s_nc)?;
-        let emb_s = self.emb_s.forward_t(&int_s_nc, train)?;
-        let k = emb_s.dims().len();
-        let emb_s_nc = emb_s.sum(k - 1)?;
-        let emb_s_nd = self.coord_mapping.forward_t(&emb_s_nc, train)?;
+        if let Some(s_nc) = s_nc {
+            let int_s_nc = self.discretize_coords(&s_nc)?;
+            let emb_s = self.emb_s.forward_t(&int_s_nc, train)?;
+            let k = emb_s.dims().len();
+            let emb_s_nc = emb_s.sum(k - 1)?;
+            let emb_s_nd = self.coord_mapping.forward_t(&emb_s_nc, train)?;
 
-        x_pooled_nd * &emb_s_nd
+            x_pooled_nd * &emb_s_nd
+        } else {
+            Ok(x_pooled_nd)
+        }
     }
 
     ///
@@ -155,7 +148,7 @@ impl SpatialLogSoftmaxEncoder {
     pub fn latent_gaussian_params(
         &self,
         x_nd: &Tensor,
-        s_nc: &Tensor,
+        s_nc: Option<&Tensor>,
         x0_nd: Option<&Tensor>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {

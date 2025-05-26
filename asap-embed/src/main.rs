@@ -20,9 +20,9 @@ use asap_data::sparse_io_vector::*;
 
 use candle_util::candle_decoder_topic::*;
 use candle_util::candle_encoder_softmax::*;
+use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_loss_functions as loss_func;
 use candle_util::candle_model_traits::DecoderModule;
-use candle_util::candle_vae_inference::*;
 
 use clap::{Parser, ValueEnum};
 
@@ -116,10 +116,6 @@ struct EmbedArgs {
     #[arg(long, default_value_t = 3)]
     vocab_emb: usize,
 
-    /// # pre-training epochs with an encoder-only model
-    #[arg(long, default_value_t = 0)]
-    pretrain_epochs: usize,
-
     /// # training epochs
     #[arg(long, short = 'i', default_value_t = 1000)]
     epochs: usize,
@@ -170,7 +166,7 @@ fn main() -> anyhow::Result<()> {
         learning_rate: args.learning_rate,
         batch_size: args.minibatch_size,
         num_epochs: args.epochs,
-        num_pretrain_epochs: args.pretrain_epochs,
+        num_pretrain_epochs: 0,
         device: dev.clone(),
         verbose: args.verbose,
     };
@@ -325,7 +321,7 @@ fn main() -> anyhow::Result<()> {
         };
         let kk = (args.n_row_modules as f32).log2().ceil() as usize + 1;
         info!(
-            "affine transformation: {} -> {}",
+            "reduce data features: {} -> {}",
             log_x_nd.ncols(),
             args.n_row_modules
         );
@@ -380,7 +376,7 @@ fn main() -> anyhow::Result<()> {
 
             let llik = train_encoder_decoder(
                 &input_nm,
-                Some(&output_nd),
+                &output_nd,
                 batch_nm.as_ref(),
                 &encoder,
                 &decoder,
