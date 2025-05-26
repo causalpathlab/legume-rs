@@ -2,16 +2,15 @@ use crate::embed_common::*;
 use asap_alg::normalization::*;
 use asap_data::sparse_data_visitors::VisitColumnsOps;
 
-use log::{info, warn};
+use log::info;
 
 use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::traits::*;
 
-use asap_data::sparse_io::*;
 use asap_data::sparse_io_vector::*;
 
 use candle_util::candle_data_loader::*;
-use candle_util::candle_loss_functions as loss_func;
+use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_model_traits::*;
 use candle_util::candle_vae_inference::*;
 
@@ -134,9 +133,9 @@ pub fn do_nystrom_proj(
 /// * `llik` - log-likelihood trace vector
 ///
 pub fn train_encoder_decoder<Enc, Dec, LLikFn>(
-    raw_data_nm: &Mat,
-    adj_data_nd: Option<&Mat>,
-    residual_data_nm: Option<&Mat>,
+    input_data_nm: &Mat,
+    adjusted_data_nd: &Mat,
+    null_data_nm: Option<&Mat>,
     encoder: &Enc,
     decoder: &Dec,
     parameters: &candle_nn::VarMap,
@@ -146,73 +145,33 @@ pub fn train_encoder_decoder<Enc, Dec, LLikFn>(
 where
     Enc: EncoderModuleT + Send + Sync + 'static,
     Dec: DecoderModule + Send + Sync + 'static,
-    LLikFn: Fn(&Tensor, &Tensor) -> candle_core::Result<Tensor> + Sync + Send,
+    LLikFn: Fn(&candle_core::Tensor, &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor>
+        + Sync
+        + Send,
 {
-    let kk = encoder.dim_latent();
-
-    let mut x_std_nd = match adj_data_nd {
-        Some(adj_data_nd) => adj_data_nd,
-        None => raw_data_nm,
-    }
-    .map(|x| (x + 0.5).log2())
-    .clone();
-
-    x_std_nd.scale_columns_inplace();
-    let (mut z_nk_init, _, _) = x_std_nd.rsvd(kk)?;
-    z_nk_init.scale_columns_inplace();
-
-    let kk_init = z_nk_init.ncols();
-    if kk_init < kk {
-        info!("zero-padding {} columns...", kk - kk_init);
-        z_nk_init = z_nk_init.insert_columns(kk_init, kk - kk_init, 0.);
-    }
-
     let mut vae = Vae::build(encoder, decoder, parameters);
 
     for var in parameters.all_vars() {
         var.to_device(&train_config.device)?;
     }
 
-    if train_config.num_pretrain_epochs > 0 {
-        info!(
-            "Start pre-training with z {} x {} ...",
-            z_nk_init.nrows(),
-            z_nk_init.ncols()
-        );
-
-        let mut data_loader = match adj_data_nd {
-            Some(data_nd) => InMemoryData::from_with_output(data_nd, &z_nk_init)?,
-            None => InMemoryData::from_with_output(raw_data_nm, &z_nk_init)?,
-        };
-
-        let _llik = vae.pretrain_encoder(
-            &mut data_loader,
-            &loss_func::gaussian_likelihood,
-            &train_config,
-        )?;
-    }
-
-    let mut data_loader = match (adj_data_nd, residual_data_nm) {
-        (Some(target_nd), Some(null_nm)) => {
+    let mut data_loader = match null_data_nm {
+        Some(null_nm) => {
             info!(
                 "data loader with [{}, {}] -> [{}]",
-                raw_data_nm.ncols(),
+                input_data_nm.ncols(),
                 null_nm.ncols(),
-                target_nd.ncols()
+                adjusted_data_nd.ncols()
             );
-            InMemoryData::from_with_aux_output(raw_data_nm, null_nm, target_nd)?
-        }
-        (Some(target_nd), None) => {
-            info!(
-                "data loader with [{}] -> [{}]",
-                raw_data_nm.ncols(),
-                target_nd.ncols()
-            );
-            InMemoryData::from_with_output(raw_data_nm, target_nd)?
+            InMemoryData::new_with_null_output(input_data_nm, null_nm, adjusted_data_nd)?
         }
         _ => {
-            warn!("The dimension of dictionary may ");
-            InMemoryData::from(raw_data_nm)?
+            info!(
+                "data loader with [{}] -> [{}]",
+                input_data_nm.ncols(),
+                adjusted_data_nd.ncols()
+            );
+            InMemoryData::new_with_output(input_data_nm, adjusted_data_nd)?
         }
     };
 
