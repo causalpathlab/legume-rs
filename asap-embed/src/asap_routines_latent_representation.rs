@@ -1,20 +1,16 @@
+use log::info;
+use std::sync::{Arc, Mutex};
+
 use crate::embed_common::*;
+
 use asap_alg::normalization::*;
 use asap_data::sparse_data_visitors::VisitColumnsOps;
-
-use log::info;
-
-use matrix_util::dmatrix_rsvd::RSVD;
-use matrix_util::traits::*;
-
 use asap_data::sparse_io_vector::*;
-
 use candle_util::candle_data_loader::*;
 use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_model_traits::*;
 use candle_util::candle_vae_inference::*;
-
-use std::sync::{Arc, Mutex};
+use matrix_util::traits::*;
 
 fn visit_nystrom_proj_columnwise(
     job: (usize, usize),

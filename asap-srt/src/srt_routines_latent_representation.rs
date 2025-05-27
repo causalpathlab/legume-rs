@@ -10,8 +10,8 @@ use log::info;
 
 pub fn train_encoder_decoder<Enc, Dec, LLikFn>(
     input_data_nm: &Mat,
-    adjusted_data_nd: &Mat,
-    spatial_data_nc: &Mat,
+    target_data_nd: &Mat,
+    spatial_data_nc: Option<&Mat>,
     null_data_nm: Option<&Mat>,
     encoder: &Enc,
     decoder: &Dec,
@@ -38,22 +38,32 @@ where
                 "data loader with [{}, {}] -> [{}]",
                 input_data_nm.ncols(),
                 null_nm.ncols(),
-                adjusted_data_nd.ncols()
+                target_data_nd.ncols()
             );
-            InMemoryData::new_with_coord_null_output(
-                input_data_nm,
-                null_nm,
-                spatial_data_nc,
-                adjusted_data_nd,
-            )?
+
+            match spatial_data_nc {
+                Some(spatial_nc) => InMemoryData::new_with_coord_null_output(
+                    input_data_nm,
+                    null_nm,
+                    spatial_nc,
+                    target_data_nd,
+                )?,
+                _ => InMemoryData::new_with_null_output(input_data_nm, null_nm, target_data_nd)?,
+            }
         }
-        _ => {
+        None => {
             info!(
                 "data loader with [{}] -> [{}]",
                 input_data_nm.ncols(),
-                adjusted_data_nd.ncols()
+                target_data_nd.ncols()
             );
-            InMemoryData::new_with_coord_output(input_data_nm, spatial_data_nc, adjusted_data_nd)?
+
+            match spatial_data_nc {
+                Some(spatial_nc) => {
+                    InMemoryData::new_with_coord_output(input_data_nm, spatial_nc, target_data_nd)?
+                }
+                _ => InMemoryData::new_with_output(input_data_nm, target_data_nd)?,
+            }
         }
     };
 

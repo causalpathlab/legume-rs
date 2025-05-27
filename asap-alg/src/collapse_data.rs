@@ -8,7 +8,6 @@ use log::info;
 use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::Inference;
 use matrix_param::traits::*;
-use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::traits::*;
 use matrix_util::utils::partition_by_membership;
 use std::sync::{Arc, Mutex};

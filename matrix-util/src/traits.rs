@@ -2,6 +2,16 @@ use crate::common_io::Delimiter;
 use candle_core::Device;
 use candle_core::Tensor;
 
+/// some linear algebra routines
+pub trait RandomizedAlgs {
+    type InMat;
+    type OutMat;
+    type DVec;
+    type Scalar;
+
+    fn rsvd(&self, max_rank: usize) -> anyhow::Result<(Self::OutMat, Self::DVec, Self::OutMat)>;
+}
+
 /// Convert to and from the vector of triplets
 pub trait MatTriplets {
     type Mat;

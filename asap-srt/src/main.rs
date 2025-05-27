@@ -151,6 +151,9 @@ fn main() -> anyhow::Result<()> {
 
     let (mut data_vec, coord_map, batch_membership) = read_data_vec(args.clone())?;
 
+    let min_coord = coord_map.min().max(0_f32);
+    let max_coord = coord_map.max() + 1_f32;
+
     //////////////////////////////////////////
     // 1. Randomly project the data columns //
     //////////////////////////////////////////
@@ -179,6 +182,9 @@ fn main() -> anyhow::Result<()> {
     info!("Assigning {} columns to samples...", proj_kn.ncols());
     let nsamp =
         data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim), args.down_sample)?;
+
+    // todo: spectral mapping
+
 
     //////////////////////////////////
     // 2. Register batch membership //
@@ -268,8 +274,10 @@ fn main() -> anyhow::Result<()> {
 
     let batch_nm = batch_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
 
-    // additional spatial coordinates
-    let spatial_nc = collapsed_coords;
+    // spatial coordinate information
+    let spatial_nc = (!args.exclude_spatial_info).then(|| collapsed_coords);
+
+    let coord_map = (!args.exclude_spatial_info).then(|| coord_map);
 
     // output decoder should maintain the original dimension
     let output_nd = match clean_dn {
@@ -304,8 +312,8 @@ fn main() -> anyhow::Result<()> {
     ///////////////////////////////////////////////////
 
     let n_features_encoder = input_nm.ncols();
-    let n_coords = spatial_nc.ncols();
-    let max_coord = spatial_nc.max();
+    let n_coords = spatial_nc.as_ref().map_or(1, |nc| nc.ncols());
+
     let n_features_decoder = output_nd.ncols();
 
     let encoder = SpatialLogSoftmaxEncoder::new(
@@ -313,6 +321,7 @@ fn main() -> anyhow::Result<()> {
         n_topics,
         n_coords,
         n_vocab,
+        min_coord.into(),
         max_coord.into(),
         d_vocab_emb,
         &args.encoder_layers,
@@ -329,7 +338,7 @@ fn main() -> anyhow::Result<()> {
     let log_likelihood = train_encoder_decoder(
         &input_nm,
         &output_nd,
-        &spatial_nc,
+        spatial_nc.as_ref(),
         batch_nm.as_ref(),
         &encoder,
         &decoder,
@@ -349,10 +358,10 @@ fn main() -> anyhow::Result<()> {
 
     let z_nk = evaluate_latent_by_encoder(
         &data_vec,
-        &coord_map,
         &encoder,
         &aggregate_rows,
         &train_config,
+        coord_map.as_ref(),
         delta_db,
     )?;
     z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
@@ -362,86 +371,6 @@ fn main() -> anyhow::Result<()> {
 
     info!("done");
     Ok(())
-}
-
-fn append_batch_coordinate<T>(coords: &Mat, batch_membership: &Vec<T>) -> anyhow::Result<Mat>
-where
-    T: Sync + Send + Clone + Eq + std::hash::Hash,
-{
-    if coords.nrows() != batch_membership.len() {
-        return Err(anyhow::anyhow!("incompatible batch membership"));
-    }
-
-    let minval = coords.min();
-    let maxval = coords.max();
-    let width = (maxval - minval).max(1.);
-
-    let uniq_batches = batch_membership.iter().collect::<HashSet<_>>();
-
-    let batch_index = uniq_batches
-        .into_iter()
-        .enumerate()
-        .map(|(k, v)| (v, k))
-        .collect::<HashMap<_, _>>();
-
-    let batch_coord = batch_membership
-        .iter()
-        .map(|k| {
-            let b = batch_index[k];
-            width * (b as f32)
-        })
-        .collect::<Vec<_>>();
-
-    let bb = Mat::from_vec(coords.nrows(), 1, batch_coord);
-
-    Ok(concatenate_horizontal(vec![coords.clone(), bb])?)
-}
-
-///
-/// each position vector (1 x d) `*` random_proj (d x r)
-///
-fn positional_projection<T>(
-    coords: &Mat,
-    batch_membership: &Vec<T>,
-    d: usize,
-) -> anyhow::Result<Mat>
-where
-    T: Sync + Send + Clone + Eq + std::hash::Hash,
-{
-    if coords.nrows() != batch_membership.len() {
-        return Err(anyhow::anyhow!("incompatible batch membership"));
-    }
-
-    let maxval = coords.max();
-    let minval = coords.min();
-    let coords = coords
-        .map(|x| (x - minval) / (maxval - minval + 1.))
-        .transpose();
-
-    let batches = partition_by_membership(batch_membership, None);
-
-    let mut ret = Mat::zeros(d, coords.ncols());
-
-    for (_b, points) in batches.into_iter() {
-        let rand_proj = Mat::rnorm(d, coords.nrows());
-
-        points.into_iter().for_each(|p| {
-            ret.column_mut(p)
-                .copy_from(&(&rand_proj * coords.column(p)));
-        });
-    }
-
-    let (lb, ub) = (-4., 4.);
-    ret.scale_columns_inplace();
-
-    if ret.max() > ub || ret.min() < lb {
-        info!("Clamping values [{}, {}] after standardization", lb, ub);
-        ret.iter_mut().for_each(|x| {
-            *x = x.clamp(lb, ub);
-        });
-        ret.scale_columns_inplace();
-    }
-    Ok(ret)
 }
 
 fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str>>)> {
@@ -535,4 +464,84 @@ fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str
     };
 
     Ok((data_vec, coord_nk, batch_membership))
+}
+
+fn append_batch_coordinate<T>(coords: &Mat, batch_membership: &Vec<T>) -> anyhow::Result<Mat>
+where
+    T: Sync + Send + Clone + Eq + std::hash::Hash,
+{
+    if coords.nrows() != batch_membership.len() {
+        return Err(anyhow::anyhow!("incompatible batch membership"));
+    }
+
+    let minval = coords.min();
+    let maxval = coords.max();
+    let width = (maxval - minval).max(1.);
+
+    let uniq_batches = batch_membership.iter().collect::<HashSet<_>>();
+
+    let batch_index = uniq_batches
+        .into_iter()
+        .enumerate()
+        .map(|(k, v)| (v, k))
+        .collect::<HashMap<_, _>>();
+
+    let batch_coord = batch_membership
+        .iter()
+        .map(|k| {
+            let b = batch_index[k];
+            width * (b as f32)
+        })
+        .collect::<Vec<_>>();
+
+    let bb = Mat::from_vec(coords.nrows(), 1, batch_coord);
+
+    Ok(concatenate_horizontal(vec![coords.clone(), bb])?)
+}
+
+///
+/// each position vector (1 x d) `*` random_proj (d x r)
+///
+fn positional_projection<T>(
+    coords: &Mat,
+    batch_membership: &Vec<T>,
+    d: usize,
+) -> anyhow::Result<Mat>
+where
+    T: Sync + Send + Clone + Eq + std::hash::Hash,
+{
+    if coords.nrows() != batch_membership.len() {
+        return Err(anyhow::anyhow!("incompatible batch membership"));
+    }
+
+    let maxval = coords.max();
+    let minval = coords.min();
+    let coords = coords
+        .map(|x| (x - minval) / (maxval - minval + 1.))
+        .transpose();
+
+    let batches = partition_by_membership(batch_membership, None);
+
+    let mut ret = Mat::zeros(d, coords.ncols());
+
+    for (_b, points) in batches.into_iter() {
+        let rand_proj = Mat::rnorm(d, coords.nrows());
+
+        points.into_iter().for_each(|p| {
+            ret.column_mut(p)
+                .copy_from(&(&rand_proj * coords.column(p)));
+        });
+    }
+
+    let (lb, ub) = (-4., 4.);
+    ret.scale_columns_inplace();
+
+    if ret.max() > ub || ret.min() < lb {
+        info!("Clamping values [{}, {}] after standardization", lb, ub);
+        ret.iter_mut().for_each(|x| {
+            *x = x.clamp(lb, ub);
+        });
+        ret.scale_columns_inplace();
+    }
+    Ok(ret)
 }

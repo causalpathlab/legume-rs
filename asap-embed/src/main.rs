@@ -192,7 +192,7 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     let proj_kn = proj_out.proj;
-    info!("Assigning {} columns to samples...", proj_kn.ncols());
+    info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
 
     if args.save_intermediate {
         proj_kn
@@ -202,6 +202,7 @@ fn main() -> anyhow::Result<()> {
 
     let nsamp =
         data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim), args.down_sample)?;
+
     info!("at most {} samples are assigned", nsamp);
 
     //////////////////////////////////

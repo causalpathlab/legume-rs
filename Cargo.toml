@@ -16,7 +16,7 @@ rand = "0.9"
 rand_distr = "0.5.1"
 
 ndarray = { version = "0.16.1", features = ["rayon","serde","approx","blas"]}
-
+ndarray-linalg = "0.17"
 ndarray-rand = "0.15"
 approx = "0.5.1"
 special = "0.11.3"
