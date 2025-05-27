@@ -22,10 +22,10 @@ use std::sync::{Arc, Mutex};
 /// * `delta_db` - batch effect matrix (feature x batch)
 pub fn evaluate_latent_by_encoder<Enc>(
     data_vec: &SparseIoVec,
-    coord_map: &Mat,
     encoder: &Enc,
     aggregate_rows: &Mat,
     train_config: &TrainConfig,
+    coord_map: Option<&Mat>,
     delta_db: Option<&Mat>,
 ) -> anyhow::Result<Mat>
 where
@@ -69,8 +69,10 @@ where
                 delta_bm.index_select(&batches, 0).expect("expand delta")
             });
 
-            let s_nc: Mat = coord_map.rows_range(lb..ub).into();
-            let s_nc = s_nc.to_tensor(dev).expect("spatial nxc");
+            let s_nc = coord_map.map(|x| {
+                let s_nc: Mat = x.rows_range(lb..ub).into();
+                s_nc.to_tensor(dev).expect("spatial n x c")
+            });
 
             let x_nd = data_vec
                 .read_columns_dmatrix(lb..ub)
@@ -83,7 +85,7 @@ where
             let x_nm = x_nd.matmul(&aggregate).expect("x aggregate");
 
             let (z_nk, _) = enc
-                .forward_t(&x_nm, Some(&s_nc), x0_nm.as_ref(), false)
+                .forward_t(&x_nm, s_nc.as_ref(), x0_nm.as_ref(), false)
                 .expect("");
 
             let z_nk = z_nk.to_device(&candle_core::Device::Cpu).expect("to cpu");

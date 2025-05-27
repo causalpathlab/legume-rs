@@ -5,7 +5,6 @@ use asap_data::sparse_io_vector::SparseIoVec;
 use std::sync::{Arc, Mutex};
 
 use log::{info, warn};
-use matrix_util::dmatrix_rsvd::RSVD;
 use matrix_util::traits::*;
 use matrix_util::utils::*;
 use nalgebra::DVector;

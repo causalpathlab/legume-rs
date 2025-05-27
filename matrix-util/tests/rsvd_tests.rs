@@ -1,11 +1,33 @@
 #[test]
 fn dmatrix_rsvd_test() -> anyhow::Result<()> {
-    use matrix_util::dmatrix_rsvd::RSVD;
+    use matrix_util::traits::*;
 
     let mut xx = nalgebra::DMatrix::<f32>::zeros(8, 8);
     xx.fill_with_identity();
 
     dbg!(&xx);
+
+    let svd = xx.rsvd(3)?;
+
+    dbg!(&svd);
+
+    dbg!(svd.0.transpose() * &svd.0);
+    dbg!(svd.2.transpose() * &svd.2);
+
+    Ok(())
+}
+
+#[test]
+fn dmatrix_csc_rsvd_test() -> anyhow::Result<()> {
+    use matrix_util::traits::*;
+
+    let mut xx = nalgebra::DMatrix::<f32>::zeros(8, 8);
+    xx.fill_with_identity();
+    dbg!(&xx);
+
+    let (nrows, ncols, triplets) = xx.to_nonzero_triplets()?;
+
+    let xx = nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(nrows, ncols, triplets)?;
 
     let svd = xx.rsvd(3)?;
 

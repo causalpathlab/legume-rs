@@ -1,8 +1,9 @@
-extern crate ndarray;
-extern crate ndarray_linalg;
-use crate::traits::SampleOps;
+use crate::traits::*;
 use ndarray::{s, Array1, Array2};
-use ndarray_linalg::{QR, SVD};
+use ndarray_linalg::qr::QR;
+use ndarray_linalg::svd::SVD;
+
+use num_traits::{Float, FromPrimitive};
 
 type Mat = Array2<f32>;
 type Vec = Array1<f32>;
@@ -24,47 +25,88 @@ impl RSVD for Mat {
     }
 }
 
+impl<T> RandomizedAlgs for Array2<T>
+where
+    T: ndarray::ScalarOperand
+        + ndarray_linalg::Scalar<Real = T>
+        + ndarray_linalg::Lapack
+        + Float
+        + FromPrimitive
+        + Send,
+{
+    type InMat = Array2<T>;
+    type OutMat = Array2<T>;
+    type DVec = Array1<T>;
+    type Scalar = T;
+    fn rsvd(&self, max_rank: usize) -> anyhow::Result<(Self::OutMat, Self::DVec, Self::OutMat)> {
+        let default_iter = 5_usize;
+        let mut rsvd = RandomizedSVD::<T>::new(max_rank, default_iter);
+        rsvd.compute(&self)?;
+        Ok((
+            rsvd.matrix_u().clone(),
+            rsvd.singular_values().clone(),
+            rsvd.matrix_v().clone(),
+        ))
+    }
+}
+
 /// Randomized SVD
 ///
 /// Implement Alg 4.4 of Halko et al. (2009)
 /// Modified from <https://github.com/kazuotani14/RandomizedSvd>
 ///
-pub struct RandomizedSVD {
+pub struct RandomizedSVD<T>
+where
+    T: ndarray::ScalarOperand
+        + ndarray_linalg::Scalar<Real = T>
+        + ndarray_linalg::Lapack
+        + Float
+        + FromPrimitive
+        + Send,
+{
     max_rank: usize,
     iter: usize,
-    u_vectors: Mat,
-    singular_values: Vec,
-    v_vectors: Mat,
-    qq: Mat,
+    u_vectors: Array2<T>,
+    singular_values: Array1<T>,
+    v_vectors: Array2<T>,
+    qq: Array2<T>,
     verbose: bool,
 }
 
-impl RandomizedSVD {
+impl<T> RandomizedSVD<T>
+where
+    T: ndarray::ScalarOperand
+        + ndarray_linalg::Scalar<Real = T>
+        + ndarray_linalg::Lapack
+        + Float
+        + FromPrimitive
+        + Send,
+{
     pub fn new(max_rank: usize, iter: usize) -> Self {
         Self {
             max_rank,
             iter,
-            u_vectors: Mat::zeros((0, 0)),
-            singular_values: Vec::zeros(0),
-            v_vectors: Mat::zeros((0, 0)),
-            qq: Mat::zeros((0, 0)),
+            u_vectors: Array2::<T>::zeros((0, 0)),
+            singular_values: Array1::<T>::zeros(0),
+            v_vectors: Array2::<T>::zeros((0, 0)),
+            qq: Array2::<T>::zeros((0, 0)),
             verbose: false,
         }
     }
 
-    pub fn matrix_u(&self) -> &Mat {
+    pub fn matrix_u(&self) -> &Array2<T> {
         &self.u_vectors
     }
 
-    pub fn matrix_v(&self) -> &Mat {
+    pub fn matrix_v(&self) -> &Array2<T> {
         &self.v_vectors
     }
 
-    pub fn singular_values(&self) -> &Vec {
+    pub fn singular_values(&self) -> &Array1<T> {
         &self.singular_values
     }
 
-    pub fn compute(&mut self, xx: &Mat) -> anyhow::Result<()> {
+    pub fn compute(&mut self, xx: &Array2<T>) -> anyhow::Result<()> {
         let nr = xx.nrows();
         let nc = xx.ncols();
 
@@ -78,7 +120,7 @@ impl RandomizedSVD {
 
         debug_assert!(rank > 0, "Must be at least rank = 1");
 
-        self.qq = Mat::zeros((nr, rank + oversample));
+        self.qq = Array2::<T>::zeros((nr, rank + oversample));
         self.rand_subspace_iteration(xx, rank + oversample)?;
 
         let rank = rank.min(self.qq.ncols());
@@ -115,15 +157,16 @@ impl RandomizedSVD {
     // Find an orthonormal matrix qq whose range approximates the range of xx
     fn rand_subspace_iteration(
         &mut self,
-        xx: &Mat,
+        xx: &Array2<T>,
         rank_and_oversample: usize,
     ) -> anyhow::Result<()> {
         let nr = xx.nrows();
         let nc = xx.ncols();
 
-        let mut ll = Mat::zeros((nr, rank_and_oversample));
+        let mut ll = Array2::<T>::zeros((nr, rank_and_oversample));
 
-        let mut qq = Mat::runif(nc, rank_and_oversample);
+        let zero = T::from(0.).expect("no zero found");
+        let mut qq = Array2::<T>::runif(nc, rank_and_oversample);
 
         for i in 0..self.iter {
             if self.verbose {
@@ -131,11 +174,11 @@ impl RandomizedSVD {
             }
 
             let lu1 = xx.dot(&qq);
-            ll.fill(0.0);
+            ll.fill(zero);
             ll.slice_mut(s![..nr, ..rank_and_oversample]).assign(&lu1);
 
             let lu2 = xx.t().dot(&ll);
-            qq.fill(0.0);
+            qq.fill(zero);
             qq.slice_mut(s![..nc, ..rank_and_oversample]).assign(&lu2);
 
             if self.verbose {
@@ -144,6 +187,7 @@ impl RandomizedSVD {
         }
 
         let (qr_q, _) = xx.dot(&qq).qr().unwrap();
+
         let kk = rank_and_oversample.min(qr_q.ncols());
         self.qq = qr_q.slice(s![.., 0..kk]).to_owned();
 
