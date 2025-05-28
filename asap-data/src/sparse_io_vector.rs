@@ -365,7 +365,7 @@ impl SparseIoVec {
     pub fn matched_columns_triplets<I>(
         &self,
         cells: I,
-        target_batches: &Vec<usize>,
+        target_batches: &[usize],
         knn_columns: usize,
         skip_same_batch: bool,
     ) -> anyhow::Result<(
@@ -467,7 +467,8 @@ impl SparseIoVec {
             let source_batch = cell_to_batch[glob]; // this cell's batch
             let neighbouring_batches: Vec<usize> = match self.between_batch_proximity.as_ref() {
                 Some(prox) => prox[source_batch]
-                    .iter().copied()
+                    .iter()
+                    .copied()
                     .take(knn_batches.min(nbatches))
                     .collect(),
                 _ => (0..nbatches).collect(),
@@ -481,8 +482,11 @@ impl SparseIoVec {
                 if let (Some(source_lookup), Some(target_lookup)) =
                     (lookups.get(source_batch), lookups.get(target_batch))
                 {
-                    let (matched, matched_distances) =
-                        source_lookup.search_by_query_name_against(&glob, knn_columns, target_lookup)?;
+                    let (matched, matched_distances) = source_lookup.search_by_query_name_against(
+                        &glob,
+                        knn_columns,
+                        target_lookup,
+                    )?;
                     for (glob_matched, dist) in
                         matched.into_iter().zip(matched_distances.into_iter())
                     {
@@ -620,7 +624,7 @@ impl SparseIoVec {
     pub fn read_matched_columns_csc<I>(
         &self,
         cells: I,
-        target_batches: &Vec<usize>,
+        target_batches: &[usize],
         knn: usize,
         skip_same_batch: bool,
     ) -> anyhow::Result<(CscMatrix<f32>, Vec<usize>, Vec<f32>)>
@@ -651,7 +655,7 @@ impl SparseIoVec {
     pub fn read_matched_columns_ndarray<I>(
         &self,
         cells: I,
-        target_batches: &Vec<usize>,
+        target_batches: &[usize],
         knn: usize,
         skip_same_batch: bool,
     ) -> anyhow::Result<(ndarray::Array2<f32>, Vec<usize>, Vec<f32>)>
@@ -682,7 +686,7 @@ impl SparseIoVec {
     pub fn read_matched_columns_dmatrix<I>(
         &self,
         cells: I,
-        target_batches: &Vec<usize>,
+        target_batches: &[usize],
         knn: usize,
         skip_same_batch: bool,
     ) -> anyhow::Result<(nalgebra::DMatrix<f32>, Vec<usize>, Vec<f32>)>
@@ -829,11 +833,7 @@ impl SparseIoVec {
         let batch_data = lookups
             .iter()
             .flat_map(|dict| {
-                let data: Vec<f32> = dict
-                    .data_vec
-                    .iter()
-                    .flat_map(|x| x.data.clone())
-                    .collect();
+                let data: Vec<f32> = dict.data_vec.iter().flat_map(|x| x.data.clone()).collect();
                 let ncols = dict.data_vec.len();
                 let nrows = data.len() / ncols;
                 DMatrix::from_vec(nrows, ncols, data)
@@ -873,11 +873,13 @@ impl SparseIoVec {
     }
 
     pub fn batch_name_map(&self) -> Option<HashMap<Box<str>, usize>> {
-        self.batch_idx_to_name.as_ref().map(|names| names
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, name)| (name.clone(), idx))
-                    .collect::<HashMap<Box<str>, usize>>())
+        self.batch_idx_to_name.as_ref().map(|names| {
+            names
+                .iter()
+                .enumerate()
+                .map(|(idx, name)| (name.clone(), idx))
+                .collect::<HashMap<Box<str>, usize>>()
+        })
     }
 
     pub fn num_batches(&self) -> usize {
