@@ -51,7 +51,7 @@ impl SparseMtxData {
             None => {
                 let backend_file = create_temp_dir_file(".h5")?;
                 let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::register_backend_file(&backend_file)?
+                Self::register_backend_file(backend_file)?
             }
         };
         Ok(ret)
@@ -144,15 +144,15 @@ impl SparseMtxData {
             None => {
                 let backend_file = create_temp_dir_file(".h5")?;
                 let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::register_backend_file(&backend_file)?
+                Self::register_backend_file(backend_file)?
             }
         };
 
-        ret.import_ndarray_by_col(&array)?; // populate data from mtx file
+        ret.import_ndarray_by_col(array)?; // populate data from mtx file
         ret.read_column_indptr()?; // reload column indptr
 
         if Some(true) == index_by_row {
-            ret.import_ndarray_by_row(&array)?; //
+            ret.import_ndarray_by_row(array)?; //
             ret.read_row_indptr()?; //
         }
 
@@ -176,15 +176,15 @@ impl SparseMtxData {
             None => {
                 let backend_file = create_temp_dir_file(".h5")?;
                 let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::register_backend_file(&backend_file)?
+                Self::register_backend_file(backend_file)?
             }
         };
 
-        ret.import_dmatrix_by_col(&matrix)?; // populate data from mtx file
+        ret.import_dmatrix_by_col(matrix)?; // populate data from mtx file
         ret.read_column_indptr()?; // reload column indptr
 
         if Some(true) == index_by_row {
-            ret.import_dmatrix_by_row(&matrix)?; //
+            ret.import_dmatrix_by_row(matrix)?; //
             ret.read_row_indptr()?; //
         }
 
@@ -307,7 +307,7 @@ impl SparseIo for SparseMtxData {
     fn remove_backend_file(&self) -> anyhow::Result<()> {
         let backend = std::path::Path::new(&self.file_name);
         if backend.exists() {
-            std::fs::remove_file(&backend)?;
+            std::fs::remove_file(backend)?;
         }
         Ok(())
     }
@@ -354,7 +354,7 @@ impl SparseIo for SparseMtxData {
 
             Ok(())
         } else {
-            return Err(anyhow!("Unable to figure out the size of the backend data"));
+            Err(anyhow!("Unable to figure out the size of the backend data"))
         }
     }
 
@@ -502,7 +502,7 @@ impl SparseIo for SparseMtxData {
         j_data: usize,
     ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
         let by_column = self.backend.group("/by_column")?;
-        debug_assert!(self.by_column_indptr.len() > 0);
+        debug_assert!(!self.by_column_indptr.is_empty());
 
         let indptr = &self.by_column_indptr;
         debug_assert!((j_data + 1) < indptr.len());
@@ -565,7 +565,7 @@ impl SparseIo for SparseMtxData {
         // let backend = hdf5::File::open(&self.file_name)?;
         let by_column = self.backend.group("/by_column")?;
 
-        debug_assert!(self.by_column_indptr.len() > 0);
+        debug_assert!(!self.by_column_indptr.is_empty());
 
         let indptr = &self.by_column_indptr;
 
@@ -595,7 +595,7 @@ impl SparseIo for SparseMtxData {
             let ncol_out = columns_vec.len();
 
             let mut ret: Vec<(u64, u64, f32)> =
-                Vec::with_capacity((max_end - min_start).max(0) as usize);
+                Vec::with_capacity((max_end - min_start) as usize);
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
                 let jj = jj as u64;
@@ -616,7 +616,7 @@ impl SparseIo for SparseMtxData {
             let ncol_out = columns_vec.len();
 
             let mut ret: Vec<(u64, u64, f32)> =
-                Vec::with_capacity((max_end - min_start).max(0) as usize);
+                Vec::with_capacity((max_end - min_start) as usize);
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
                 let jj = jj as u64;
@@ -652,7 +652,7 @@ impl SparseIo for SparseMtxData {
         // need to open backend again?
         // let backend = hdf5::File::open(&self.file_name)?;
         let by_row = self.backend.group("/by_row")?;
-        debug_assert!(self.by_row_indptr.len() > 0);
+        debug_assert!(!self.by_row_indptr.is_empty());
         let indptr = &self.by_row_indptr;
         let data = by_row.dataset("data")?;
         let indices = by_row.dataset("indices")?;
@@ -685,7 +685,7 @@ impl SparseIo for SparseMtxData {
             }
             Ok((nrow_out, ncol, ret))
         } else {
-            return Err(anyhow!("Unable to figure out the size of the backend data"));
+            Err(anyhow!("Unable to figure out the size of the backend data"))
         }
     }
 

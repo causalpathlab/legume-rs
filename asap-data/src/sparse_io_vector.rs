@@ -35,6 +35,12 @@ impl Index<usize> for SparseIoVec {
     }
 }
 
+impl Default for SparseIoVec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SparseIoVec {
     pub fn new() -> Self {
         Self {
@@ -237,7 +243,7 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let ((nrow, ncol), triplets) = self.columns_triplets(cells)?;
-        Ok(Tensor::from_nonzero_triplets(nrow, ncol, triplets)?)
+        Tensor::from_nonzero_triplets(nrow, ncol, triplets)
     }
 
     /////////////////////
@@ -313,7 +319,7 @@ impl SparseIoVec {
                 (lookups.get(source_batch), lookups.get(target_batch))
             {
                 let (matched, matched_distances) =
-                    source_lookup.search_by_query_name_against(&glob, knn, &target_lookup)?;
+                    source_lookup.search_by_query_name_against(&glob, knn, target_lookup)?;
                 for (glob_matched, dist) in matched.into_iter().zip(matched_distances.into_iter()) {
                     if glob == glob_matched {
                         continue; // avoid identical cell pairs
@@ -461,8 +467,7 @@ impl SparseIoVec {
             let source_batch = cell_to_batch[glob]; // this cell's batch
             let neighbouring_batches: Vec<usize> = match self.between_batch_proximity.as_ref() {
                 Some(prox) => prox[source_batch]
-                    .iter()
-                    .map(|&x| x)
+                    .iter().copied()
                     .take(knn_batches.min(nbatches))
                     .collect(),
                 _ => (0..nbatches).collect(),
@@ -477,7 +482,7 @@ impl SparseIoVec {
                     (lookups.get(source_batch), lookups.get(target_batch))
                 {
                     let (matched, matched_distances) =
-                        source_lookup.search_by_query_name_against(&glob, knn_columns, &target_lookup)?;
+                        source_lookup.search_by_query_name_against(&glob, knn_columns, target_lookup)?;
                     for (glob_matched, dist) in
                         matched.into_iter().zip(matched_distances.into_iter())
                     {
@@ -765,7 +770,7 @@ impl SparseIoVec {
         F: Fn(&M, &Vec<usize>) -> ColumnDict<usize> + Sync,
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
-        let batches = partition_by_membership(&batch_membership, None);
+        let batches = partition_by_membership(batch_membership, None);
 
         let ntot = self.num_columns()?;
         let mut col_to_batch = vec![0; ntot];
@@ -779,7 +784,7 @@ impl SparseIoVec {
                     batch_index,
                     batch_name.to_string().into_boxed_str(),
                     batch_cells.clone(),
-                    create_column_dict(&feature_matrix, batch_cells),
+                    create_column_dict(feature_matrix, batch_cells),
                 )
             })
             .collect::<Vec<_>>();
@@ -823,12 +828,11 @@ impl SparseIoVec {
         info!("retrieving batch-specific lookups");
         let batch_data = lookups
             .iter()
-            .map(|dict| {
+            .flat_map(|dict| {
                 let data: Vec<f32> = dict
                     .data_vec
                     .iter()
-                    .map(|x| x.data.clone())
-                    .flatten()
+                    .flat_map(|x| x.data.clone())
                     .collect();
                 let ncols = dict.data_vec.len();
                 let nrows = data.len() / ncols;
@@ -838,7 +842,6 @@ impl SparseIoVec {
                     .as_vec()
                     .clone()
             })
-            .flatten()
             .collect::<Vec<_>>();
 
         let ncols = self.num_batches();
@@ -870,17 +873,11 @@ impl SparseIoVec {
     }
 
     pub fn batch_name_map(&self) -> Option<HashMap<Box<str>, usize>> {
-        if let Some(names) = &self.batch_idx_to_name {
-            Some(
-                names
+        self.batch_idx_to_name.as_ref().map(|names| names
                     .iter()
                     .enumerate()
                     .map(|(idx, name)| (name.clone(), idx))
-                    .collect::<HashMap<Box<str>, usize>>(),
-            )
-        } else {
-            None
-        }
+                    .collect::<HashMap<Box<str>, usize>>())
     }
 
     pub fn num_batches(&self) -> usize {
@@ -888,11 +885,7 @@ impl SparseIoVec {
     }
 
     pub fn batch_names(&self) -> Option<Vec<Box<str>>> {
-        if let Some(names) = &self.batch_idx_to_name {
-            Some(names.clone())
-        } else {
-            None
-        }
+        self.batch_idx_to_name.clone()
     }
 
     pub fn batch_to_columns(&self, batch: usize) -> Option<&Vec<usize>> {

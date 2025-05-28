@@ -55,7 +55,7 @@ impl SparseMtxData {
             None => {
                 let backend_file = create_temp_dir_file(".zarr")?;
                 let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::register_backend_file(&backend_file)?
+                Self::register_backend_file(backend_file)?
             }
         };
         Ok(ret)
@@ -145,15 +145,15 @@ impl SparseMtxData {
             None => {
                 let backend_file = create_temp_dir_file(".zarr")?;
                 let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::register_backend_file(&backend_file)?
+                Self::register_backend_file(backend_file)?
             }
         };
 
-        ret.import_ndarray_by_col(&array)?; // for column-wise
+        ret.import_ndarray_by_col(array)?; // for column-wise
         ret.read_column_indptr()?; // pointers
 
         if Some(true) == index_by_row {
-            ret.import_ndarray_by_row(&array)?;
+            ret.import_ndarray_by_row(array)?;
             ret.read_row_indptr()?;
         }
         Ok(ret)
@@ -173,15 +173,15 @@ impl SparseMtxData {
             None => {
                 let backend_file = create_temp_dir_file(".zarr")?;
                 let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::register_backend_file(&backend_file)?
+                Self::register_backend_file(backend_file)?
             }
         };
 
-        ret.import_dmatrix_by_col(&matrix)?; // for column-wise
+        ret.import_dmatrix_by_col(matrix)?; // for column-wise
         ret.read_column_indptr()?; // pointers
 
         if Some(true) == index_by_row {
-            ret.import_dmatrix_by_row(&matrix)?;
+            ret.import_dmatrix_by_row(matrix)?;
             ret.read_row_indptr()?;
         }
         Ok(ret)
@@ -260,7 +260,7 @@ impl SparseMtxData {
 
         let array = ArrayBuilder::new(
             array_shape,            // array shape
-            dt.into(),              // data type
+            dt,              // data type
             chunk_size.try_into()?, // chunk shape
             fill,                   //
         )
@@ -303,7 +303,7 @@ impl SparseMtxData {
 
         let array = ArrayBuilder::new(
             vec![vec.len() as u64],              // array shape
-            dt.into(),                           // data type
+            dt,                           // data type
             vec![chunk_size as u64].try_into()?, // chunk shape
             fill,                                //
         )
@@ -546,7 +546,7 @@ impl SparseIo for SparseMtxData {
         if let (Some(ncol), Some(nrow), Some(nnz)) =
             (self.num_columns(), self.num_rows(), self.num_non_zeros())
         {
-            let (nrow, ncol, nnz) = (nrow as usize, ncol as usize, nnz as usize);
+            let (nrow, ncol, nnz) = (nrow, ncol, nnz);
 
             let mut buf = open_buf_writer(mtx_file)?;
             writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
@@ -572,7 +572,7 @@ impl SparseIo for SparseMtxData {
             buf.flush()?;
             Ok(())
         } else {
-            return Err(anyhow!("Unable to figure out the size of the backend data"));
+            Err(anyhow!("Unable to figure out the size of the backend data"))
         }
     }
 
@@ -700,7 +700,7 @@ impl SparseIo for SparseMtxData {
         use zarrs::array::Array as ZArray;
         use zarrs::array_subset::ArraySubset;
 
-        debug_assert!(self.by_column_indptr.len() > 0); // pre-loaded
+        debug_assert!(!self.by_column_indptr.is_empty()); // pre-loaded
         debug_assert!(j_data < self.num_columns().unwrap_or(0)); //
 
         let indptr = &self.by_column_indptr;
@@ -739,7 +739,7 @@ impl SparseIo for SparseMtxData {
             let start = indptr[j_data];
             let end = indptr[j_data + 1];
 
-            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((end - start).max(0) as usize);
+            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((end - start) as usize);
 
             if start < end {
                 let subset = ArraySubset::new_with_ranges(&[start..end]);
@@ -769,7 +769,7 @@ impl SparseIo for SparseMtxData {
         use zarrs::array::Array as ZArray;
         use zarrs::array_subset::ArraySubset;
 
-        debug_assert!(self.by_column_indptr.len() > 0);
+        debug_assert!(!self.by_column_indptr.is_empty());
         let indptr = &self.by_column_indptr;
         let columns_vec = columns.into_iter().collect::<Vec<usize>>();
 
@@ -799,7 +799,7 @@ impl SparseIo for SparseMtxData {
             let ncol_out = columns_vec.len();
 
             let mut ret: Vec<(u64, u64, f32)> =
-                Vec::with_capacity((max_end - min_start).max(0) as usize);
+                Vec::with_capacity((max_end - min_start) as usize);
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
                 let jj = jj as u64;
@@ -820,7 +820,7 @@ impl SparseIo for SparseMtxData {
             let ncol_out = columns_vec.len();
 
             let mut ret: Vec<(u64, u64, f32)> =
-                Vec::with_capacity((max_end - min_start).max(0) as usize);
+                Vec::with_capacity((max_end - min_start) as usize);
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
                 let jj = jj as u64;
@@ -859,7 +859,7 @@ impl SparseIo for SparseMtxData {
         use zarrs::array::Array as ZArray;
         use zarrs::array_subset::ArraySubset;
 
-        debug_assert!(self.by_row_indptr.len() > 0);
+        debug_assert!(!self.by_row_indptr.is_empty());
         let indptr = &self.by_row_indptr;
         debug_assert!(indptr.len() > self.num_rows().unwrap_or(0));
 
@@ -872,7 +872,7 @@ impl SparseIo for SparseMtxData {
 
         if let (Some(nrow), Some(ncol)) = (self.num_rows(), self.num_columns()) {
             let nrow_out = rows_vec.len();
-            let ncol = ncol as usize;
+            let ncol = ncol;
 
             let min_start = rows_vec
                 .iter()
@@ -887,7 +887,7 @@ impl SparseIo for SparseMtxData {
                 .unwrap_or(0);
 
             let mut ret: Vec<(u64, u64, f32)> =
-                Vec::with_capacity((max_end - min_start).max(0) as usize);
+                Vec::with_capacity((max_end - min_start) as usize);
 
             for (ii, &i_data) in rows_vec.iter().enumerate() {
                 let ii = ii as u64;
@@ -915,7 +915,7 @@ impl SparseIo for SparseMtxData {
             }
             Ok((nrow_out, ncol, ret))
         } else {
-            return Err(anyhow!("Unable to figure out the size of the backend data"));
+            Err(anyhow!("Unable to figure out the size of the backend data"))
         }
     }
     /// CSR data structure in Zarr backend
