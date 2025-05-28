@@ -313,7 +313,7 @@ impl SparseIoVec {
                 (lookups.get(source_batch), lookups.get(target_batch))
             {
                 let (matched, matched_distances) =
-                    source_lookup.match_against_by_name(&glob, knn, &target_lookup)?;
+                    source_lookup.search_by_query_name_against(&glob, knn, &target_lookup)?;
                 for (glob_matched, dist) in matched.into_iter().zip(matched_distances.into_iter()) {
                     if glob == glob_matched {
                         continue; // avoid identical cell pairs
@@ -477,7 +477,7 @@ impl SparseIoVec {
                     (lookups.get(source_batch), lookups.get(target_batch))
                 {
                     let (matched, matched_distances) =
-                        source_lookup.match_against_by_name(&glob, knn_columns, &target_lookup)?;
+                        source_lookup.search_by_query_name_against(&glob, knn_columns, &target_lookup)?;
                     for (glob_matched, dist) in
                         matched.into_iter().zip(matched_distances.into_iter())
                     {
@@ -861,7 +861,7 @@ impl SparseIoVec {
 
         let mut ret = Vec::with_capacity(nbatches);
         for b in 0..nbatches {
-            let (others, _) = dict.match_by_name(&b, nbatches)?;
+            let (others, _) = dict.search_by_query_name(&b, nbatches, false)?;
             ret.push(others);
         }
         self.between_batch_proximity = Some(ret);

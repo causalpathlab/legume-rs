@@ -58,13 +58,13 @@ pub fn generate_factored_poisson_gamma_data_mtx(
     write_lines(&batch_out, batch_file)?;
     info!("batch membership: {:?}", &batch_file);
 
-    sim.ln_delta_db.to_tsv(&ln_batch_file)?;
-    sim.theta_kn.transpose().to_tsv(&prop_file)?;
-    sim.beta_dk.to_tsv(&dict_file)?;
+    sim.ln_delta_db.to_tsv(ln_batch_file)?;
+    sim.theta_kn.transpose().to_tsv(prop_file)?;
+    sim.beta_dk.to_tsv(dict_file)?;
 
     info!(
         "wrote parameter files:\n{:?},\n{:?},\n{:?}",
-        &ln_batch_file, &dict_file, &prop_file
+        ln_batch_file, &dict_file, &prop_file
     );
 
     let mut triplets = sim.triplets;
@@ -82,7 +82,7 @@ pub fn generate_factored_poisson_gamma_data_mtx(
 
     let nn = args.cols;
     let dd = args.rows;
-    write_mtx_triplets(&triplets, dd, nn, &mtx_file)?;
+    write_mtx_triplets(&triplets, dd, nn, mtx_file)?;
     Ok(())
 }
 
@@ -142,9 +142,9 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
             let b = batch_membership[j]; // batch index
 
             let lambda_j = if bb > 1 {
-                (&beta_dk * &theta_j).component_mul(&delta_db.column(b))
+                (&beta_dk * theta_j).component_mul(&delta_db.column(b))
             } else {
-                &beta_dk * &theta_j
+                &beta_dk * theta_j
             };
 
             let tot = lambda_j.sum();

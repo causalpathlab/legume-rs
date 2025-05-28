@@ -10,7 +10,7 @@ pub type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 pub use std::sync::Arc;
 
 pub fn create_jobs(ntot: usize, block_size: usize) -> Vec<(usize, usize)> {
-    let nblock = (ntot + block_size - 1) / block_size;
+    let nblock = ntot.div_ceil(block_size);
 
     (0..nblock)
         .map(|block| {

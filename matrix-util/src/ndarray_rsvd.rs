@@ -5,26 +5,6 @@ use ndarray_linalg::svd::SVD;
 
 use num_traits::{Float, FromPrimitive};
 
-type Mat = Array2<f32>;
-type Vec = Array1<f32>;
-
-pub trait RSVD {
-    fn rsvd(&self, rank: usize) -> anyhow::Result<(Mat, Vec, Mat)>;
-}
-
-impl RSVD for Mat {
-    fn rsvd(&self, rank: usize) -> anyhow::Result<(Mat, Vec, Mat)> {
-        let default_iter = 5;
-        let mut rsvd = RandomizedSVD::new(rank, default_iter);
-        rsvd.compute(&self)?;
-        Ok((
-            rsvd.matrix_u().clone(),
-            rsvd.singular_values().clone(),
-            rsvd.matrix_v().clone(),
-        ))
-    }
-}
-
 impl<T> RandomizedAlgs for Array2<T>
 where
     T: ndarray::ScalarOperand
@@ -41,7 +21,7 @@ where
     fn rsvd(&self, max_rank: usize) -> anyhow::Result<(Self::OutMat, Self::DVec, Self::OutMat)> {
         let default_iter = 5_usize;
         let mut rsvd = RandomizedSVD::<T>::new(max_rank, default_iter);
-        rsvd.compute(&self)?;
+        rsvd.compute(self)?;
         Ok((
             rsvd.matrix_u().clone(),
             rsvd.singular_values().clone(),

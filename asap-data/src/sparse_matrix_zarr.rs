@@ -188,7 +188,7 @@ impl SparseMtxData {
     }
 
     /// Show the hierarchy of the zarr store
-    pub fn print_hierarchy(self: &Self) -> anyhow::Result<()> {
+    pub fn print_hierarchy(&self) -> anyhow::Result<()> {
         let node = zarrs::node::Node::open(&self.store, "/")?;
         let tree = node.hierarchy_tree();
         info!("hierarchy_tree:\n{}", tree);
@@ -228,7 +228,7 @@ impl SparseMtxData {
     /// * `data` - `ndarray` to be stored
     ///
     fn new_filled_ndarray<V, S, D>(
-        self: &mut Self,
+        &mut self,
         key: &str,
         dt: DataType,
         data: ndarray::ArrayBase<S, D>,
@@ -280,12 +280,7 @@ impl SparseMtxData {
     /// * `dt` - the data type among `DataType`
     /// * `vec` - the vector to be stored
     ///
-    fn new_filled_vector<V>(
-        self: &mut Self,
-        key: &str,
-        dt: DataType,
-        vec: Vec<V>,
-    ) -> anyhow::Result<()>
+    fn new_filled_vector<V>(&mut self, key: &str, dt: DataType, vec: Vec<V>) -> anyhow::Result<()>
     where
         V: zarrs::array::Element,
     {
@@ -324,10 +319,7 @@ impl SparseMtxData {
         Ok(())
     }
 
-    fn _open_vector(
-        self: &Self,
-        key: &str,
-    ) -> anyhow::Result<zarrs::array::Array<dyn ZStorageTraits>> {
+    fn _open_vector(&self, key: &str) -> anyhow::Result<zarrs::array::Array<dyn ZStorageTraits>> {
         use zarrs::array::Array as ZArray;
         let ret = ZArray::open(self.store.clone(), key)?;
         Ok(ret)
@@ -361,7 +353,7 @@ impl SparseMtxData {
         ))
     }
 
-    fn _retrieve_vector<V>(self: &Self, key: &str) -> anyhow::Result<Vec<V>>
+    fn _retrieve_vector<V>(&self, key: &str) -> anyhow::Result<Vec<V>>
     where
         V: zarrs::array::ElementOwned,
     {
@@ -423,7 +415,7 @@ impl SparseMtxData {
         Self::_get_group_attr::<usize>(store.clone(), "/", "ncol")
     }
     /// Helper function to add a group in `self.store`
-    fn _add_group(self: &mut Self, group_name: &str) -> anyhow::Result<()> {
+    fn _add_group(&mut self, group_name: &str) -> anyhow::Result<()> {
         use zarrs::group::Group;
 
         if Group::open(self.store.clone(), group_name).is_err() {
@@ -442,7 +434,7 @@ impl SparseIo for SparseMtxData {
     type IndexIter = Vec<usize>;
 
     /// Read row index pointers
-    fn read_row_indptr(self: &mut Self) -> anyhow::Result<()> {
+    fn read_row_indptr(&mut self) -> anyhow::Result<()> {
         use zarrs::array::Array as Zarray;
         let key = "/by_row/indptr";
         if let Ok(indptr) = Zarray::open(self.store.clone(), key) {
@@ -454,7 +446,7 @@ impl SparseIo for SparseMtxData {
     }
 
     /// Read column index pointers
-    fn read_column_indptr(self: &mut Self) -> anyhow::Result<()> {
+    fn read_column_indptr(&mut self) -> anyhow::Result<()> {
         use zarrs::array::Array as ZArray;
         let key = "/by_column/indptr";
         if let Ok(indptr) = ZArray::open(self.store.clone(), key) {
@@ -465,13 +457,13 @@ impl SparseIo for SparseMtxData {
         Ok(())
     }
 
-    fn clean_preloaded_columns(self: &mut Self) {
+    fn clean_preloaded_columns(&mut self) {
         self.by_column_data = None;
         self.by_column_indicies = None;
     }
 
     /// preload columns' values and indices
-    fn preload_columns(self: &mut Self) -> anyhow::Result<()> {
+    fn preload_columns(&mut self) -> anyhow::Result<()> {
         use zarrs::array::Array as ZArray;
 
         let key = "/by_column/data";
@@ -488,10 +480,7 @@ impl SparseIo for SparseMtxData {
     }
 
     /// Helper function to keep the matrix shape
-    fn record_mtx_shape(
-        self: &mut Self,
-        mtx_shape: Option<(usize, usize, usize)>,
-    ) -> anyhow::Result<()> {
+    fn record_mtx_shape(&mut self, mtx_shape: Option<(usize, usize, usize)>) -> anyhow::Result<()> {
         let check_set_attr = |attr_name: &str, value: usize| -> anyhow::Result<()> {
             let old_value = Self::_get_group_attr::<usize>(self.store.clone(), "/", attr_name);
             let new_value = serde_json::to_value(value)?;
@@ -547,7 +536,7 @@ impl SparseIo for SparseMtxData {
     }
 
     /// Access file name of the zarr backend
-    fn get_backend_file_name(self: &Self) -> &str {
+    fn get_backend_file_name(&self) -> &str {
         &self.file_name
     }
 
@@ -589,7 +578,7 @@ impl SparseIo for SparseMtxData {
 
     /// Set row names for the matrix
     /// * `row_name_file`: a file each line contains row name words
-    fn register_row_names_file(self: &mut Self, row_name_file: &str) {
+    fn register_row_names_file(&mut self, row_name_file: &str) {
         self.register_names_file(
             "/row_names",
             row_name_file,
@@ -601,14 +590,14 @@ impl SparseIo for SparseMtxData {
 
     /// Set row names for the matrix
     /// * `rows`: a vector of row names
-    fn register_row_names_vec(&mut self, rows: &Vec<Box<str>>) {
+    fn register_row_names_vec(&mut self, rows: &[Box<str>]) {
         self.register_names_vec("/row_names", rows)
             .expect("failed to add row names");
     }
 
     /// Set column names for the matrix
     /// * `column_name_file`: a file each line contains column name words
-    fn register_column_names_file(self: &mut Self, column_name_file: &str) {
+    fn register_column_names_file(&mut self, column_name_file: &str) {
         self.register_names_file(
             "/column_names",
             column_name_file,
@@ -620,23 +609,23 @@ impl SparseIo for SparseMtxData {
 
     /// Set column names for the matrix
     /// * `columns`: a vector of column names
-    fn register_column_names_vec(&mut self, columns: &Vec<Box<str>>) {
+    fn register_column_names_vec(&mut self, columns: &[Box<str>]) {
         self.register_names_vec("/column_names", columns)
             .expect("failed to add column names");
     }
 
     /// Number of rows in the matrix
-    fn num_rows(self: &Self) -> Option<usize> {
+    fn num_rows(&self) -> Option<usize> {
         Self::_num_rows(self.store.clone())
     }
 
     /// Number of columns in the matrix
-    fn num_columns(self: &Self) -> Option<usize> {
+    fn num_columns(&self) -> Option<usize> {
         Self::_num_columns(self.store.clone())
     }
 
     /// Number of non-zero elements in the matrix
-    fn num_non_zeros(self: &Self) -> Option<usize> {
+    fn num_non_zeros(&self) -> Option<usize> {
         Self::_num_nnz(self.store.clone())
     }
 
@@ -646,7 +635,7 @@ impl SparseIo for SparseMtxData {
     /// * `name_columns`: range of columns to be used for name
     /// * `name_sep`: separator for name columns
     fn register_names_file(
-        self: &mut Self,
+        &mut self,
         key: &str,
         name_file: &str,
         name_columns: Range<usize>,
@@ -677,7 +666,7 @@ impl SparseIo for SparseMtxData {
     /// Add arbitrary names (a vector of strings)
     /// * `group_name`: group name
     /// * `names`: a file each line contains name words
-    fn register_names_vec(&mut self, key: &str, names: &Vec<Box<str>>) -> anyhow::Result<()> {
+    fn register_names_vec(&mut self, key: &str, names: &[Box<str>]) -> anyhow::Result<()> {
         let _names = names.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         self.new_filled_vector(key, DataType::String, _names)?;
         Ok(())
@@ -774,7 +763,7 @@ impl SparseIo for SparseMtxData {
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
     fn read_triplets_by_columns(
-        self: &Self,
+        &self,
         columns: Self::IndexIter,
     ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
         use zarrs::array::Array as ZArray;
@@ -938,7 +927,7 @@ impl SparseIo for SparseMtxData {
     ///         └── isndptr (row pointers)
     /// ```
     fn record_csr_dataset_backend(
-        self: &mut Self,
+        &mut self,
         csr_cols: &Vec<u64>,
         csr_vals: &Vec<f32>,
         csr_rowptr: &Vec<u64>,
@@ -967,7 +956,7 @@ impl SparseIo for SparseMtxData {
     ///     │   └── indptr (column pointers)
     /// ```
     fn record_csc_dataset_backend(
-        self: &mut Self,
+        &mut self,
         csc_rows: &Vec<u64>,
         csc_vals: &Vec<f32>,
         csc_colptr: &Vec<u64>,

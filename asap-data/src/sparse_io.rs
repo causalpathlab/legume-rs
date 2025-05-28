@@ -39,10 +39,10 @@ pub fn open_sparse_matrix(
 ) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
     match backend {
         SparseIoBackend::Zarr => Ok(Box::new(sparse_matrix_zarr::SparseMtxData::open(
-            &backend_file,
+            backend_file,
         )?)),
         SparseIoBackend::HDF5 => Ok(Box::new(sparse_matrix_hdf5::SparseMtxData::open(
-            &backend_file,
+            backend_file,
         )?)),
     }
 }
@@ -165,7 +165,7 @@ pub trait SparseIo: Sync + Send {
     /// Read columns within the range and return dense `ndarray::Array2`
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_columns_ndarray(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
+    fn read_columns_ndarray(&self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
         let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
         Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
     }
@@ -173,7 +173,7 @@ pub trait SparseIo: Sync + Send {
     /// Read columns within the range and return dense `candle_core::Tensor`
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_columns_tensor(self: &Self, columns: Self::IndexIter) -> anyhow::Result<Tensor> {
+    fn read_columns_tensor(&self, columns: Self::IndexIter) -> anyhow::Result<Tensor> {
         let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
         Tensor::from_nonzero_triplets(nrow, ncol, triplets)
     }
@@ -181,7 +181,7 @@ pub trait SparseIo: Sync + Send {
     /// Read columns within the range and return dense `nalgebrea::DMatrix`
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_columns_dmatrix(self: &Self, columns: Self::IndexIter) -> anyhow::Result<DMatrix<f32>> {
+    fn read_columns_dmatrix(&self, columns: Self::IndexIter) -> anyhow::Result<DMatrix<f32>> {
         let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
         DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
     }
@@ -213,7 +213,7 @@ pub trait SparseIo: Sync + Send {
     /// Read rows within the range and return dense `candle_core::Tensor`
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
-    fn read_rows_tensor(self: &Self, rows: Self::IndexIter) -> anyhow::Result<Tensor> {
+    fn read_rows_tensor(&self, rows: Self::IndexIter) -> anyhow::Result<Tensor> {
         let (nrow, ncol, triplets) = self.read_triplets_by_rows(rows)?;
         Tensor::from_nonzero_triplets(nrow, ncol, triplets)
     }
@@ -248,7 +248,7 @@ pub trait SparseIo: Sync + Send {
 
     /// Read mtx file and populate the data into HDF5 for faster row-by-row access
     /// * `mtx_file`: mtx file to be read into HDF5 backend
-    fn import_mtx_file_by_row(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
+    fn import_mtx_file_by_row(&mut self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
         info!("read mtx file: {}", mtx_file);
         if mtx_triplets.len() == 0 {
@@ -260,7 +260,7 @@ pub trait SparseIo: Sync + Send {
 
     /// Read mtx file and populate the data into HDF5 for faster column-by-column access
     /// * `mtx_file`: mtx file to be read into HDF5 backend
-    fn import_mtx_file_by_col(self: &mut Self, mtx_file: &str) -> anyhow::Result<()> {
+    fn import_mtx_file_by_col(&mut self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
         info!("read mtx file: {}", mtx_file);
         if mtx_triplets.len() == 0 {
@@ -278,7 +278,7 @@ pub trait SparseIo: Sync + Send {
     /// * `array` - 2D array to be added to the backend
     fn import_dmatrix_by_row(&mut self, matrix: &DMatrix<f32>) -> anyhow::Result<()> {
         let (nrow, ncol) = matrix.shape();
-        let mut mtx_triplets = dmatrix_to_triplets(&matrix);
+        let mut mtx_triplets = dmatrix_to_triplets(matrix);
         let mtx_shape = (nrow, ncol, mtx_triplets.len());
         self.record_mtx_shape(Some(mtx_shape))?;
         self.record_triplets_by_row(&mut mtx_triplets)
@@ -288,7 +288,7 @@ pub trait SparseIo: Sync + Send {
     /// * `array` - 2D array to be added to the backend
     fn import_dmatrix_by_col(&mut self, matrix: &DMatrix<f32>) -> anyhow::Result<()> {
         let (nrow, ncol) = matrix.shape();
-        let mut mtx_triplets = dmatrix_to_triplets(&matrix);
+        let mut mtx_triplets = dmatrix_to_triplets(matrix);
         let mtx_shape = (nrow, ncol, mtx_triplets.len());
         self.record_mtx_shape(Some(mtx_shape))?;
         self.record_triplets_by_col(&mut mtx_triplets)
@@ -305,7 +305,7 @@ pub trait SparseIo: Sync + Send {
         let ncol = array.shape()[1];
 
         // dbg!("importing ndarray by row...");
-        let mut mtx_triplets = ndarray_to_triplets(&array);
+        let mut mtx_triplets = ndarray_to_triplets(array);
 
         let nnz = mtx_triplets.len();
         let mtx_shape = (nrow, ncol, nnz);
@@ -323,7 +323,7 @@ pub trait SparseIo: Sync + Send {
         let ncol = array.shape()[1];
 
         // dbg!("importing ndarray by column...");
-        let mut mtx_triplets = ndarray_to_triplets(&array);
+        let mut mtx_triplets = ndarray_to_triplets(array);
 
         let nnz = mtx_triplets.len();
         let mtx_shape = (nrow, ncol, nnz);
@@ -385,11 +385,11 @@ pub trait SparseIo: Sync + Send {
 
     /// Set row names for the matrix
     /// * `rows`: a vector of row names
-    fn register_row_names_vec(&mut self, rows: &Vec<Box<str>>);
+    fn register_row_names_vec(&mut self, rows: &[Box<str>]);
 
     /// Set column names for the matrix
     /// * `columns`: a vector of column names
-    fn register_column_names_vec(&mut self, columns: &Vec<Box<str>>);
+    fn register_column_names_vec(&mut self, columns: &[Box<str>]);
 
     /// Add arbitrary names (a vector of strings)
     /// * `group_name`: group name
@@ -407,7 +407,7 @@ pub trait SparseIo: Sync + Send {
     /// Add arbitrary names (a vector of strings)
     /// * `group_name`: group name
     /// * `names`: a file each line contains name words
-    fn register_names_vec(&mut self, key: &str, names: &Vec<Box<str>>) -> anyhow::Result<()>;
+    fn register_names_vec(&mut self, key: &str, names: &[Box<str>]) -> anyhow::Result<()>;
 
     fn row_names(&self) -> anyhow::Result<Vec<Box<str>>>;
 
@@ -432,7 +432,7 @@ pub trait SparseIo: Sync + Send {
         if let (Some(ncol), Some(nrow), Some(nnz)) =
             (self.num_columns(), self.num_rows(), self.num_non_zeros())
         {
-            let (nrow_data, ncol_data, nnz) = (nrow as usize, ncol as usize, nnz as usize);
+            let (nrow_data, ncol_data, nnz) = (nrow, ncol, nnz);
 
             //////////////////////////////////////////////////////
             // 0. Create a mapping from old to new columns/rows //
@@ -468,7 +468,6 @@ pub trait SparseIo: Sync + Send {
                     let mut record = vec![];
 
                     (lb..ub)
-                        .into_iter()
                         .filter_map(|j| {
                             if let Some(&j_new) = old2new_cols.get(&j) {
                                 Some((j, j_new))
@@ -539,10 +538,9 @@ pub trait SparseIo: Sync + Send {
 
     /// Reposition rows in a new order specified by `remap`
     /// * `row_names_order` - a vector of row names in the new order
-    fn reorder_rows(&mut self, row_names_order: &Vec<Box<str>>) -> anyhow::Result<()> {
-        let new_row_names = row_names_order.clone();
+    fn reorder_rows(&mut self, row_names_order: &[Box<str>]) -> anyhow::Result<()> {
         let new_col_names = self.column_names()?.clone();
-        let name2new = build_name2index_map(&new_row_names);
+        let name2new = build_name2index_map(row_names_order);
 
         let block_size = 100;
 
@@ -606,7 +604,7 @@ pub trait SparseIo: Sync + Send {
 
                 let nnz = row_col_val_triplets.len();
                 debug_assert!(row_col_val_triplets.len() <= nnz); // subset
-                let new_nrow = new_row_names.len();
+                let new_nrow = row_names_order.len();
                 let mtx_shape = (new_nrow, ncol, nnz);
 
                 info!("sorting triplets ...");
@@ -618,7 +616,7 @@ pub trait SparseIo: Sync + Send {
             self.read_column_indptr()?;
             self.read_row_indptr()?;
 
-            self.register_row_names_vec(&new_row_names);
+            self.register_row_names_vec(&row_names_order);
             self.register_column_names_vec(&new_col_names);
             info!("registered new data to {}", self.get_backend_file_name());
         }
@@ -626,7 +624,7 @@ pub trait SparseIo: Sync + Send {
         self.clean_preloaded_columns();
         Ok(())
     }
-    // fn reorder_rows(&mut self, row_names_order: &Vec<Box<str>>) -> anyhow::Result<()>;
+    // fn reorder_rows(&mut self, row_names_order: &[Box<str>]) -> anyhow::Result<()>;
 
     /// Remove backend file
     fn remove_backend_file(&self) -> anyhow::Result<()>;
@@ -634,10 +632,7 @@ pub trait SparseIo: Sync + Send {
     /// Initialize backend
     fn initialize_backend(&mut self) -> anyhow::Result<()>;
 
-    fn record_mtx_shape(
-        self: &mut Self,
-        mtx_shape: Option<(usize, usize, usize)>,
-    ) -> anyhow::Result<()>;
+    fn record_mtx_shape(&mut self, mtx_shape: Option<(usize, usize, usize)>) -> anyhow::Result<()>;
 
     /// Helper function to add triplets to zarr backend by row (CSR format)
     fn record_triplets_by_row(
@@ -657,10 +652,11 @@ pub trait SparseIo: Sync + Send {
         let nnz = row_col_val_triplets.len();
 
         // fill in rowptr 0 to the first row index
-        let first = row_col_val_triplets[0].0;
-        for _ in 0..first {
-            csr_rowptr.push(0);
-        }
+        let first = row_col_val_triplets[0].0 as usize;
+        csr_rowptr.resize(first, 0);
+        // for _ in 0..first {
+        //     csr_rowptr.push(0);
+        // }
 
         // for the first row/triplet
         csr_rowptr.push(0);
@@ -704,10 +700,11 @@ pub trait SparseIo: Sync + Send {
         let nnz = row_col_val_triplets.len();
 
         // fill in colptr 0 to the first column index
-        let first = row_col_val_triplets[0].1;
-        for _ in 0..first {
-            csc_colptr.push(0);
-        }
+        let first = row_col_val_triplets[0].1 as usize;
+        csc_colptr.resize(first, 0);
+        // for _ in 0..first {
+        //     csc_colptr.push(0);
+        // }
 
         // for the first column/triplet
         csc_colptr.push(0);
@@ -743,7 +740,7 @@ pub trait SparseIo: Sync + Send {
     ///         └── isndptr (row pointers)
     /// ```
     fn record_csr_dataset_backend(
-        self: &mut Self,
+        &mut self,
         csr_cols: &Vec<u64>,
         csr_vals: &Vec<f32>,
         csr_rowptr: &Vec<u64>,
@@ -759,19 +756,19 @@ pub trait SparseIo: Sync + Send {
     ///     │   └── indptr (column pointers)
     /// ```
     fn record_csc_dataset_backend(
-        self: &mut Self,
+        &mut self,
         csc_rows: &Vec<u64>,
         csc_vals: &Vec<f32>,
         csc_colptr: &Vec<u64>,
     ) -> anyhow::Result<()>;
 
-    fn read_row_indptr(self: &mut Self) -> anyhow::Result<()>;
+    fn read_row_indptr(&mut self) -> anyhow::Result<()>;
 
-    fn read_column_indptr(self: &mut Self) -> anyhow::Result<()>;
+    fn read_column_indptr(&mut self) -> anyhow::Result<()>;
 
-    fn preload_columns(self: &mut Self) -> anyhow::Result<()>;
+    fn preload_columns(&mut self) -> anyhow::Result<()>;
 
-    fn clean_preloaded_columns(self: &mut Self);
+    fn clean_preloaded_columns(&mut self);
 
     /// Backend file name
     fn get_backend_file_name(&self) -> &str;
@@ -790,7 +787,7 @@ pub trait SparseIo: Sync + Send {
 //     // iter.clone().into_iter().count()
 // }
 
-pub fn build_name2index_map(_names: &Vec<Box<str>>) -> HashMap<Box<str>, usize> {
+pub fn build_name2index_map(_names: &[Box<str>]) -> HashMap<Box<str>, usize> {
     _names
         .iter()
         .enumerate()

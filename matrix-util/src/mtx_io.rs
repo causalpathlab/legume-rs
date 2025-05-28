@@ -44,7 +44,7 @@ pub fn read_mtx_triplets(
     let (mtx_data_lines, mtx_data_hdr) = read_lines_of_words(mtx_file, mtx_hdr_position)?;
 
     // Convert a triplet of strings to a triplet of usize, usize, f32
-    fn parse_row_col_val(triplet: &Vec<Box<str>>) -> Option<(u64, u64, f32)> {
+    fn parse_row_col_val(triplet: &[Box<str>]) -> Option<(u64, u64, f32)> {
         if triplet.len() != 3 {
             return None;
         }
@@ -81,7 +81,7 @@ pub fn read_mtx_triplets(
     let mut mtx_triplets = mtx_data_lines
         .iter()
         .par_bridge()
-        .filter_map(parse_row_col_val)
+        .filter_map(|x| parse_row_col_val(x))
         .collect::<Vec<_>>();
 
     mtx_triplets.sort_by_key(|&(row, _, _)| row);

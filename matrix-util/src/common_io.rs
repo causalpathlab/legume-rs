@@ -93,7 +93,7 @@ where
 {
     let buf_reader: Box<dyn BufRead> = open_buf_reader(input_file)?;
 
-    fn parse<T>(i: usize, line: &String, delim: &Delimiter) -> (usize, Vec<T>)
+    fn parse<T>(i: usize, line: &str, delim: &Delimiter) -> (usize, Vec<T>)
     where
         T: std::str::FromStr,
         <T as std::str::FromStr>::Err: std::fmt::Debug,
@@ -123,7 +123,7 @@ where
 
     let lines_raw: Vec<String> = buf_reader
         .lines()
-        .filter_map(|r| r.ok())
+        .map_while(Result::ok)
         .filter(is_not_comment_line)
         .collect();
 
@@ -182,7 +182,7 @@ pub fn read_lines_of_words(
     // buffered reader
     let buf_reader: Box<dyn BufRead> = open_buf_reader(input_file)?;
 
-    fn parse(i: usize, line: &String) -> (usize, Vec<Box<str>>) {
+    fn parse(i: usize, line: &str) -> (usize, Vec<Box<str>>) {
         let words: Vec<Box<str>> = line
             .split_whitespace()
             .map(|x| x.to_owned().into_boxed_str())
@@ -199,7 +199,7 @@ pub fn read_lines_of_words(
 
     let lines_raw: Vec<String> = buf_reader
         .lines()
-        .filter_map(|r| r.ok())
+        .map_while(Result::ok)
         .filter(is_not_comment_line)
         .collect();
 
@@ -328,7 +328,7 @@ pub fn dir_base_ext(file: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<str>)
     {
         Ok((dir.to_box_str(), base.to_box_str(), ext.to_box_str()))
     } else {
-        return Err(anyhow::anyhow!("no file stem"));
+        Err(anyhow::anyhow!("no file stem"))
     }
 }
 
@@ -341,7 +341,7 @@ pub fn basename(file: &str) -> anyhow::Result<Box<str>> {
     if let Some(base) = path.file_stem() {
         Ok(base.to_box_str())
     } else {
-        return Err(anyhow::anyhow!("no file stem"));
+        Err(anyhow::anyhow!("no file stem"))
     }
 }
 
@@ -354,7 +354,7 @@ pub fn extension(file: &str) -> anyhow::Result<Box<str>> {
     if let Some(ext) = path.extension() {
         Ok(ext.to_box_str())
     } else {
-        return Err(anyhow::anyhow!("failed to extract extension"));
+        Err(anyhow::anyhow!("failed to extract extension"))
     }
 }
 
@@ -396,7 +396,7 @@ pub fn remove_file(file: &str) -> anyhow::Result<()> {
 ///
 pub fn remove_all_files(files: &Vec<Box<str>>) -> anyhow::Result<()> {
     for file in files {
-        remove_file(&file)?;
+        remove_file(file)?;
     }
     Ok(())
 }

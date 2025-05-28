@@ -41,7 +41,7 @@ fn dmatrix_csc_rsvd_test() -> anyhow::Result<()> {
 
 #[test]
 fn ndarray_rsvd_test() -> anyhow::Result<()> {
-    use matrix_util::ndarray_rsvd::RSVD;
+    use matrix_util::traits::*;
 
     let xx = ndarray::Array2::<f32>::eye(8);
     dbg!(&xx);

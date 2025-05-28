@@ -18,7 +18,7 @@ impl IoOps for Tensor {
 
         let (data, _) = read_lines_of_types::<f32>(tsv_file, delim, hdr_line)?;
 
-        if data.len() == 0 {
+        if data.is_empty() {
             return Err(anyhow::anyhow!("No data in file"));
         }
 
@@ -50,7 +50,7 @@ impl IoOps for Tensor {
             })
             .collect();
 
-        write_lines(&lines, &file)?;
+        write_lines(&lines, file)?;
 
         Ok(())
     }

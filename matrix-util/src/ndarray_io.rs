@@ -24,7 +24,7 @@ where
 
         let (data, _) = read_lines_of_types::<T>(tsv_file, delim, hdr_line)?;
 
-        if data.len() == 0 {
+        if data.is_empty() {
             return Err(anyhow::anyhow!("No data in file"));
         }
 
@@ -47,7 +47,7 @@ where
                     .into_boxed_str()
             })
             .collect();
-        write_lines(&lines, &out_file)?;
+        write_lines(&lines, out_file)?;
         Ok(())
     }
 }
