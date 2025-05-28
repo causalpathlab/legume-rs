@@ -280,7 +280,7 @@ impl SparseMtxData {
     /// * `dt` - the data type among `DataType`
     /// * `vec` - the vector to be stored
     ///
-    fn new_filled_vector<V>(&mut self, key: &str, dt: DataType, vec: Vec<V>) -> anyhow::Result<()>
+    fn new_filled_vector<V>(&mut self, key: &str, dt: DataType, vec: &[V]) -> anyhow::Result<()>
     where
         V: zarrs::array::Element,
     {
@@ -314,7 +314,7 @@ impl SparseMtxData {
 
         let ntot = vec.len() as u64;
         let subset = ArraySubset::new_with_ranges(&[0..ntot]);
-        array.store_array_subset_elements(&subset, &vec)?;
+        array.store_array_subset_elements(&subset, vec)?;
 
         Ok(())
     }
@@ -359,6 +359,7 @@ impl SparseMtxData {
     {
         let data = self._open_vector(key)?;
         let ntot = data.shape()[0];
+
         let subset = ArraySubset::new_with_ranges(&[0..ntot]);
         Ok(data.retrieve_array_subset_elements::<V>(&subset)?)
     }
@@ -659,7 +660,7 @@ impl SparseIo for SparseMtxData {
             })
             .collect();
 
-        self.new_filled_vector(key, DataType::String, _names)?;
+        self.new_filled_vector(key, DataType::String, &_names)?;
         Ok(())
     }
 
@@ -668,7 +669,7 @@ impl SparseIo for SparseMtxData {
     /// * `names`: a file each line contains name words
     fn register_names_vec(&mut self, key: &str, names: &[Box<str>]) -> anyhow::Result<()> {
         let _names = names.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        self.new_filled_vector(key, DataType::String, _names)?;
+        self.new_filled_vector(key, DataType::String, &_names)?;
         Ok(())
     }
 
@@ -924,20 +925,20 @@ impl SparseIo for SparseMtxData {
     /// ```
     fn record_csr_dataset_backend(
         &mut self,
-        csr_cols: &Vec<u64>,
-        csr_vals: &Vec<f32>,
-        csr_rowptr: &Vec<u64>,
+        csr_cols: &[u64],
+        csr_vals: &[f32],
+        csr_rowptr: &[u64],
     ) -> anyhow::Result<()> {
         // open or create the group "/by_row"
         let key = "/by_row";
         self._add_group(key)?;
 
         let key = "/by_row/data";
-        self.new_filled_vector(key, DataType::Float32, csr_vals.clone())?;
+        self.new_filled_vector(key, DataType::Float32, csr_vals)?;
         let key = "/by_row/indices";
-        self.new_filled_vector(key, DataType::UInt64, csr_cols.clone())?;
+        self.new_filled_vector(key, DataType::UInt64, csr_cols)?;
         let key = "/by_row/indptr";
-        self.new_filled_vector(key, DataType::UInt64, csr_rowptr.clone())?;
+        self.new_filled_vector(key, DataType::UInt64, csr_rowptr)?;
 
         Ok(())
     }
@@ -953,23 +954,23 @@ impl SparseIo for SparseMtxData {
     /// ```
     fn record_csc_dataset_backend(
         &mut self,
-        csc_rows: &Vec<u64>,
-        csc_vals: &Vec<f32>,
-        csc_colptr: &Vec<u64>,
+        csc_rows: &[u64],
+        csc_vals: &[f32],
+        csc_colptr: &[u64],
     ) -> anyhow::Result<()> {
         // open or create the group "/by_column"
         let key = "/by_column";
         self._add_group(key)?;
 
         let key = "/by_column/data";
-        self.new_filled_vector(key, DataType::Float32, csc_vals.clone())?;
+        self.new_filled_vector(key, DataType::Float32, csc_vals)?;
         let key = "/by_column/indices";
         // dbg!(key);
-        self.new_filled_vector(key, DataType::UInt64, csc_rows.clone())?;
+        self.new_filled_vector(key, DataType::UInt64, csc_rows)?;
 
         let key = "/by_column/indptr";
         // dbg!(key);
-        self.new_filled_vector(key, DataType::UInt64, csc_colptr.clone())?;
+        self.new_filled_vector(key, DataType::UInt64, csc_colptr)?;
 
         Ok(())
     }

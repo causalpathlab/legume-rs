@@ -1272,7 +1272,7 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     let row_names = data.row_names()?;
     let col_names = data.column_names()?;
 
-    if let Ok((row_stat, col_stat)) = collect_row_column_stats(&data, block_size) {
+    if let Ok((row_stat, col_stat)) = collect_row_column_stats(data.as_ref(), block_size) {
         let row_stat_file = format!("{}.row.stat.gz", output);
         let col_stat_file = format!("{}.col.stat.gz", output);
         row_stat.save(&row_stat_file, &row_names, "\t")?;
@@ -1316,7 +1316,7 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         data.num_columns().unwrap()
     );
 
-    if let Ok((row_stat, col_stat)) = collect_row_column_stats(&data, block_size) {
+    if let Ok((row_stat, col_stat)) = collect_row_column_stats(data.as_ref(), block_size) {
         fn nnz_index(nnz: &[f32], cutoff: usize) -> Vec<usize> {
             nnz.iter()
                 .enumerate()
@@ -1465,7 +1465,7 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
 /// * block_size - block size for parallel computation
 ///
 fn collect_row_column_stats(
-    data: &Box<SData>,
+    data: &SData,
     block_size: usize,
 ) -> anyhow::Result<(RunningStatistics<Ix1>, RunningStatistics<Ix1>)> {
     if let (Some(nrow), Some(ncol)) = (data.num_rows(), data.num_columns()) {

@@ -741,9 +741,9 @@ pub trait SparseIo: Sync + Send {
     /// ```
     fn record_csr_dataset_backend(
         &mut self,
-        csr_cols: &Vec<u64>,
-        csr_vals: &Vec<f32>,
-        csr_rowptr: &Vec<u64>,
+        csr_cols: &[u64],
+        csr_vals: &[f32],
+        csr_rowptr: &[u64],
     ) -> anyhow::Result<()>;
 
     /// Helper function to add CSC dataset to HDF5 backend
@@ -757,9 +757,9 @@ pub trait SparseIo: Sync + Send {
     /// ```
     fn record_csc_dataset_backend(
         &mut self,
-        csc_rows: &Vec<u64>,
-        csc_vals: &Vec<f32>,
-        csc_colptr: &Vec<u64>,
+        csc_rows: &[u64],
+        csc_vals: &[f32],
+        csc_colptr: &[u64],
     ) -> anyhow::Result<()>;
 
     fn read_row_indptr(&mut self) -> anyhow::Result<()>;
@@ -796,7 +796,7 @@ pub fn build_name2index_map(_names: &[Box<str>]) -> HashMap<Box<str>, usize> {
 }
 
 pub fn take_subset_indices_names(
-    new_indices: &Vec<usize>,
+    new_indices: &[usize],
     ntot: usize,
     old_names: Vec<Box<str>>,
 ) -> (HashMap<u64, u64>, Vec<Box<str>>) {
