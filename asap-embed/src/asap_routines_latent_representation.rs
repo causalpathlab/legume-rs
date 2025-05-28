@@ -30,7 +30,7 @@ fn visit_nystrom_proj_columnwise(
 
     if let Some(delta_db) = delta_db {
         let batches = full_data_vec.get_batch_membership(lb..ub);
-        x_dn.adjust_by_division(&delta_db, &batches);
+        x_dn.adjust_by_division(delta_db, &batches);
     }
 
     x_dn.values_mut().iter_mut().for_each(|x| {
@@ -172,7 +172,7 @@ where
     };
 
     let llik_trace =
-        vae.train_encoder_decoder(&mut data_loader, log_likelihood_func, &train_config)?;
+        vae.train_encoder_decoder(&mut data_loader, log_likelihood_func, train_config)?;
 
     info!("Done with training {} epochs", train_config.num_epochs);
 

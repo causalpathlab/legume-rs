@@ -28,7 +28,7 @@ fn visit_data_to_adjust(
         .read_columns_csc(lb..ub)
         .expect("read columns");
 
-    x_dn.adjust_by_division(&delta_db, &batches);
+    x_dn.adjust_by_division(delta_db, &batches);
 
     let new_triplets = x_dn
         .triplet_iter()
@@ -61,7 +61,7 @@ pub fn triplets_adjusted_by_batch(
     delta_db: &Mat,
 ) -> anyhow::Result<Vec<(u64, u64, f32)>> {
     let mut triplets = vec![];
-    data_vec.visit_columns_by_jobs(&visit_data_to_adjust, &delta_db, &mut triplets, None)?;
+    data_vec.visit_columns_by_jobs(&visit_data_to_adjust, delta_db, &mut triplets, None)?;
     Ok(triplets)
 }
 

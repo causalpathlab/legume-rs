@@ -187,7 +187,7 @@ fn main() -> anyhow::Result<()> {
     info!("Random projection of data onto {} dims", proj_dim);
     let proj_out = data_vec.project_columns_with_batch_correction(
         proj_dim,
-        Some(args.block_size.clone()),
+        Some(args.block_size),
         Some(&batch_membership),
     )?;
 
@@ -209,7 +209,7 @@ fn main() -> anyhow::Result<()> {
     // 2. Register batch membership //
     //////////////////////////////////
 
-    if args.batch_files.is_some() && batch_membership.len() > 0 {
+    if args.batch_files.is_some() && !batch_membership.is_empty() {
         info!("Registering batch information");
         data_vec.register_batches(&proj_kn, &batch_membership)?;
     }
@@ -293,7 +293,7 @@ fn main() -> anyhow::Result<()> {
             batch_db.map(|x| x.posterior_mean()),
             &data_vec,
             args.n_latent_topics,
-            Some(args.block_size.clone()),
+            Some(args.block_size),
         )?;
 
         nystrom_out
@@ -435,7 +435,7 @@ fn read_data_vec_membership(args: EmbedArgs) -> anyhow::Result<(SparseIoVec, Vec
     for data_file in args.data_files.iter() {
         info!("Importing data file: {}", data_file);
 
-        match extension(&data_file)?.as_ref() {
+        match extension(data_file)?.as_ref() {
             "zarr" => {
                 assert_eq!(backend, SparseIoBackend::Zarr);
             }
@@ -445,7 +445,7 @@ fn read_data_vec_membership(args: EmbedArgs) -> anyhow::Result<(SparseIoVec, Vec
             _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
         };
 
-        let data = open_sparse_matrix(&data_file, &backend)?;
+        let data = open_sparse_matrix(data_file, &backend)?;
         data_vec.push(Arc::from(data))?;
     }
 
@@ -469,7 +469,7 @@ fn read_data_vec_membership(args: EmbedArgs) -> anyhow::Result<(SparseIoVec, Vec
 
         for batch_file in batch_files.iter() {
             info!("Reading batch file: {}", batch_file);
-            for s in read_lines(&batch_file)? {
+            for s in read_lines(batch_file)? {
                 batch_membership.push(s.to_string().into_boxed_str());
             }
         }
