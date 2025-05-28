@@ -142,7 +142,7 @@ where
             svd_vt.transpose().columns(0, rank).into_owned(),
         ));
     }
-    return Err(anyhow::anyhow!("randomized SVD failed"));
+    Err(anyhow::anyhow!("randomized SVD failed"))
 }
 
 impl<T> RandomizedAlgs for DMatrix<T>

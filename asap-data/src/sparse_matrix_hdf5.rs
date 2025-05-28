@@ -207,7 +207,7 @@ impl SparseMtxData {
         file.attr("nnz").ok()?.read_scalar().ok()
     }
 
-    fn set_attrs(self: &mut Self, attr_name: &str, value: usize) -> anyhow::Result<()> {
+    fn set_attrs(&mut self, attr_name: &str, value: usize) -> anyhow::Result<()> {
         if self.backend.attr(attr_name).is_err() {
             self.backend
                 .new_attr::<usize>()
@@ -257,10 +257,7 @@ impl SparseIo for SparseMtxData {
     }
 
     /// Record the shape of the mtx file into the HDF5 backend
-    fn record_mtx_shape(
-        self: &mut Self,
-        mtx_shape: Option<(usize, usize, usize)>,
-    ) -> anyhow::Result<()> {
+    fn record_mtx_shape(&mut self, mtx_shape: Option<(usize, usize, usize)>) -> anyhow::Result<()> {
         if let Some((nrow, ncol, nnz)) = mtx_shape {
             self.set_attrs("nrow", nrow)?;
             self.set_attrs("ncol", ncol)?;
@@ -272,7 +269,7 @@ impl SparseIo for SparseMtxData {
     }
 
     /// Read column index pointers
-    fn read_column_indptr(self: &mut Self) -> anyhow::Result<()> {
+    fn read_column_indptr(&mut self) -> anyhow::Result<()> {
         if let Ok(by_column) = self.backend.group("/by_column") {
             let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
             self.by_column_indptr.clear();
@@ -282,7 +279,7 @@ impl SparseIo for SparseMtxData {
     }
 
     /// Read row index pointers
-    fn read_row_indptr(self: &mut Self) -> anyhow::Result<()> {
+    fn read_row_indptr(&mut self) -> anyhow::Result<()> {
         if let Ok(by_row) = self.backend.group("/by_row") {
             let indptr = by_row.dataset("indptr")?.read_1d::<u64>()?;
             self.by_row_indptr.clear();
@@ -291,7 +288,7 @@ impl SparseIo for SparseMtxData {
         Ok(())
     }
 
-    fn preload_columns(self: &mut Self) -> anyhow::Result<()> {
+    fn preload_columns(&mut self) -> anyhow::Result<()> {
         let by_column = self.backend.group("/by_column")?;
         let data = by_column.dataset("data")?.read_1d::<f32>()?.to_vec();
         let indices = by_column.dataset("indices")?.read_1d::<u64>()?.to_vec();
@@ -301,13 +298,13 @@ impl SparseIo for SparseMtxData {
         Ok(())
     }
 
-    fn clean_preloaded_columns(self: &mut Self) {
+    fn clean_preloaded_columns(&mut self) {
         self.by_column_data = None;
         self.by_column_indicies = None;
     }
 
     /// Remove backend file to free up disk space
-    fn remove_backend_file(self: &Self) -> anyhow::Result<()> {
+    fn remove_backend_file(&self) -> anyhow::Result<()> {
         let backend = std::path::Path::new(&self.file_name);
         if backend.exists() {
             std::fs::remove_file(&backend)?;
@@ -316,7 +313,7 @@ impl SparseIo for SparseMtxData {
     }
 
     /// Access file name of the hdf5 backend file
-    fn get_backend_file_name(self: &Self) -> &str {
+    fn get_backend_file_name(&self) -> &str {
         &self.file_name
     }
 
@@ -363,7 +360,7 @@ impl SparseIo for SparseMtxData {
 
     /// Set row names for the matrix
     /// * `row_name_file`: a file each line contains row name words
-    fn register_row_names_file(self: &mut Self, row_name_file: &str) {
+    fn register_row_names_file(&mut self, row_name_file: &str) {
         self.register_names_file(
             "/row_names",
             row_name_file,
@@ -375,14 +372,14 @@ impl SparseIo for SparseMtxData {
 
     /// Set row names for the matrix
     /// * `rows`: a vector of row names
-    fn register_row_names_vec(&mut self, rows: &Vec<Box<str>>) {
+    fn register_row_names_vec(&mut self, rows: &[Box<str>]) {
         self.register_names_vec("/row_names", rows)
             .expect("failed to add row names");
     }
 
     /// Set column names for the matrix
     /// * `column_name_file`: a file each line contains column name words
-    fn register_column_names_file(self: &mut Self, column_name_file: &str) {
+    fn register_column_names_file(&mut self, column_name_file: &str) {
         self.register_names_file(
             "/column_names",
             column_name_file,
@@ -394,23 +391,23 @@ impl SparseIo for SparseMtxData {
 
     /// Set column names for the matrix
     /// * `columns`: a vector of column names
-    fn register_column_names_vec(&mut self, columns: &Vec<Box<str>>) {
+    fn register_column_names_vec(&mut self, columns: &[Box<str>]) {
         self.register_names_vec("/column_names", columns)
             .expect("failed to add column names");
     }
 
     /// Number of rows in the underlying data matrix
-    fn num_rows(self: &Self) -> Option<usize> {
+    fn num_rows(&self) -> Option<usize> {
         Self::_num_rows(&self.backend)
     }
 
     /// Number of columns in the underlying data matrix
-    fn num_columns(self: &Self) -> Option<usize> {
+    fn num_columns(&self) -> Option<usize> {
         Self::_num_columns(&self.backend)
     }
 
     /// Number of non-zero elements
-    fn num_non_zeros(self: &Self) -> Option<usize> {
+    fn num_non_zeros(&self) -> Option<usize> {
         Self::_num_nnz(&self.backend)
     }
 
@@ -420,7 +417,7 @@ impl SparseIo for SparseMtxData {
     /// * `name_columns`: range of columns to be used for name
     /// * `name_sep`: separator for name columns
     fn register_names_file(
-        self: &mut Self,
+        &mut self,
         key: &str,
         name_file: &str,
         name_columns: Range<usize>,
@@ -459,7 +456,7 @@ impl SparseIo for SparseMtxData {
     /// Add arbitrary names (a vector of strings)
     /// * `group_name`: group name
     /// * `names`: a file each line contains name words
-    fn register_names_vec(&mut self, key: &str, names: &Vec<Box<str>>) -> anyhow::Result<()> {
+    fn register_names_vec(&mut self, key: &str, names: &[Box<str>]) -> anyhow::Result<()> {
         use hdf5::types::VarLenUnicode;
 
         let _names: Vec<VarLenUnicode> = names
@@ -701,7 +698,7 @@ impl SparseIo for SparseMtxData {
     ///         └── isndptr (row pointers)
     /// ```
     fn record_csr_dataset_backend(
-        self: &mut Self,
+        &mut self,
         csr_cols: &Vec<u64>,
         csr_vals: &Vec<f32>,
         csr_rowptr: &Vec<u64>,
@@ -767,7 +764,7 @@ impl SparseIo for SparseMtxData {
     ///     │   └── indptr (column pointers)
     /// ```
     fn record_csc_dataset_backend(
-        self: &mut Self,
+        &mut self,
         csc_rows: &Vec<u64>,
         csc_vals: &Vec<f32>,
         csc_colptr: &Vec<u64>,

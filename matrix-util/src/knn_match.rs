@@ -11,7 +11,7 @@ pub struct ColumnDict<T> {
 
 impl<T> ColumnDict<T>
 where
-    T: Clone + Eq + std::hash::Hash + Debug + Display,
+    T: Clone + Eq + std::hash::Hash + Debug + Display + std::cmp::PartialEq,
 {
     pub fn names(&self) -> &Vec<T> {
         &self.dict.values
@@ -29,8 +29,8 @@ where
         )
     }
 
-    pub fn empty_ndarray_views<'a>() -> Self {
-        <ColumnDict<T> as ColumnDictOps<T, ndarray::ArrayView1<'a, f32>>>::empty()
+    pub fn empty_ndarray_views() -> Self {
+        <ColumnDict<T> as ColumnDictOps<T, ndarray::ArrayView1<f32>>>::empty()
     }
 
     pub fn empty_dvector_views() -> Self {
@@ -43,10 +43,22 @@ where
     /// * `query_name` - the name of the column to match
     /// * `knn` - the number of nearest neighbours to return
     ///
-    pub fn match_by_name(
+    pub fn search_others(&self, query_name: &T, knn: usize) -> anyhow::Result<(Vec<T>, Vec<f32>)> {
+        self.search_by_query_name(query_name, knn, true)
+    }
+
+    /// k-nearest neighbour match by name within the same dictionary
+    /// to return a Vec of names
+    ///
+    /// * `query_name` - the name of the column to match
+    /// * `knn` - the number of nearest neighbours to return
+    /// * `exclude_same` - exclude the same query name
+    ///
+    pub fn search_by_query_name(
         &self,
         query_name: &T,
         knn: usize,
+        exclude_same: bool,
     ) -> anyhow::Result<(Vec<T>, Vec<f32>)> {
         use instant_distance::Search;
 
@@ -54,19 +66,23 @@ where
 
         if let Some(self_idx) = self.name2index.get(query_name) {
             let query = &self.data_vec[*self_idx];
+
             let mut search = Search::default();
             let knn_iter = self.dict.search(query, &mut search).take(nquery);
             let mut points = Vec::with_capacity(nquery);
             let mut distances = Vec::with_capacity(nquery);
             for v in knn_iter {
                 let vv = v.value;
+                if exclude_same && vv == query_name {
+                    continue;
+                }
                 let dd = v.distance;
                 points.push(vv.clone());
                 distances.push(dd);
             }
             Ok((points, distances))
         } else {
-            return Err(anyhow::anyhow!("name {} not found", query_name));
+            Err(anyhow::anyhow!("name {} not found", query_name))
         }
     }
 
@@ -77,7 +93,7 @@ where
     /// * `knn` - the number of nearest neighbours to return
     /// * `against` - the dictionary to match against
     ///
-    pub fn match_against_by_name(
+    pub fn search_by_query_name_against(
         &self,
         query_name: &T,
         knn: usize,
@@ -101,17 +117,17 @@ where
             }
             Ok((points, distances))
         } else {
-            return Err(anyhow::anyhow!("name {} not found", query_name));
+            Err(anyhow::anyhow!("name {} not found", query_name))
         }
     }
 }
 
-pub trait ColumnDictOps<'a, T, V> {
+pub trait ColumnDictOps<T, V> {
     fn empty() -> Self;
     fn from_column_views(data: Vec<V>, names: Vec<T>) -> Self;
 }
 
-impl<'a, T, V> ColumnDictOps<'a, T, V> for ColumnDict<T>
+impl<T, V> ColumnDictOps<T, V> for ColumnDict<T>
 where
     T: Clone + Eq + std::hash::Hash + Debug + Display,
     V: Sync + MakeVecPoint,
@@ -133,7 +149,7 @@ where
             "Data and names must have the same length"
         );
 
-        let data_vec: Vec<VecPoint> = (0..nn).into_iter().map(|j| data[j].to_vp()).collect();
+        let data_vec: Vec<VecPoint> = (0..nn).map(|j| data[j].to_vp()).collect();
 
         let mut name2index = HashMap::<T, usize>::new();
 

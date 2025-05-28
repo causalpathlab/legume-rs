@@ -184,7 +184,7 @@ fn random_ndarray_subset() -> anyhow::Result<()> {
             let new_row_names = vec!["16", "7", "1", "9"]
                 .into_iter()
                 .map(|x| x.to_string().into_boxed_str())
-                .collect();
+                .collect::<Vec<_>>();
             data.reorder_rows(&new_row_names)?;
             data.preload_columns()?;
 

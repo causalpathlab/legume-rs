@@ -68,7 +68,7 @@ where
     };
 
     let llik_trace =
-        vae.train_encoder_decoder(&mut data_loader, log_likelihood_func, &train_config)?;
+        vae.train_encoder_decoder(&mut data_loader, log_likelihood_func, train_config)?;
 
     info!("Done with training {} epochs", train_config.num_epochs);
 

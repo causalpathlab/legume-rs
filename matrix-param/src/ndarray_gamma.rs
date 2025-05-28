@@ -69,7 +69,7 @@ impl TwoStatParam for GammaMatrix {
 
     fn update_stat(&mut self, add_a: &Self::Mat, add_b: &Self::Mat) {
         self.reset_stat();
-        self.add_stat(&add_a, &add_b);
+        self.add_stat(add_a, add_b);
     }
 
     fn update_stat_col(&mut self, add_a: &Self::Mat, add_b: &Self::Mat, k: usize) {
@@ -130,8 +130,7 @@ impl Inference for GammaMatrix {
     }
     fn map_calibrate_log_mean(&mut self) {
         use special::Gamma;
-        self.estimated_log_mean =
-            &self.a_stat.mapv(|a| Gamma::digamma(a)) - &self.b_stat.mapv(|b| b.ln());
+        self.estimated_log_mean = &self.a_stat.mapv(Gamma::digamma) - &self.b_stat.mapv(|b| b.ln());
     }
     fn map_calibrate_log_sd(&mut self) {
         self.estimated_log_sd = self.a_stat.mapv(|a| -> f32 {

@@ -82,7 +82,7 @@ pub trait DistanceOps {
     fn euclidean_distance_matched_columns(
         &self,
         target_mat: &Self::Other,
-        target_columns: &Vec<usize>,
+        target_columns: &[usize],
     ) -> anyhow::Result<Vec<Self::Scalar>>;
 }
 

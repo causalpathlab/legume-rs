@@ -1,4 +1,4 @@
-use crate::common_io::{Delimiter, read_lines_of_types, write_lines};
+use crate::common_io::{read_lines_of_types, write_lines, Delimiter};
 use crate::traits::*;
 pub use nalgebra::{DMatrix, DVector};
 pub use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
@@ -26,7 +26,7 @@ where
 
         let (data, _) = read_lines_of_types::<T>(tsv_file, delim, hdr_line)?;
 
-        if data.len() == 0 {
+        if data.is_empty() {
             return Err(anyhow::anyhow!("No data in file"));
         }
 
@@ -34,11 +34,7 @@ where
         let nrows = data.len();
         let data = data.into_iter().flatten().collect::<Vec<_>>();
 
-        Ok(DMatrix::<T>::from_row_iterator(
-            nrows,
-            ncols,
-            data.into_iter(),
-        ))
+        Ok(DMatrix::<T>::from_row_iterator(nrows, ncols, data))
     }
 
     fn write_file_delim(&self, tsv_file: &str, delim: &str) -> anyhow::Result<()> {
@@ -51,8 +47,7 @@ where
             .map(|(i, row)| {
                 let line = row
                     .iter()
-                    .enumerate()
-                    .map(|(_, x)| format!("{}", *x))
+                    .map(|x| format!("{}", *x))
                     .collect::<Vec<String>>()
                     .join(delim)
                     .into_boxed_str();
@@ -62,7 +57,7 @@ where
 
         lines.sort_by_key(|&(i, _)| i);
         let lines = lines.into_iter().map(|(_, line)| line).collect::<Vec<_>>();
-        write_lines(&lines, &tsv_file)?;
+        write_lines(&lines, tsv_file)?;
         Ok(())
     }
 }

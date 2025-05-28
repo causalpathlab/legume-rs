@@ -80,7 +80,7 @@ where
     fn euclidean_distance_matched_columns(
         &self,
         other: &Self::Other,
-        matched_columns: &Vec<usize>,
+        matched_columns: &[usize],
     ) -> anyhow::Result<Vec<Self::Scalar>> {
         if matched_columns.len() != self.ncols() {
             return Err(anyhow::anyhow!("`matched_columns` maps: self -> other"));
@@ -306,7 +306,7 @@ where
                         }
                     } else {
                         for x_ij in x_j.values_mut() {
-                            *x_ij = *x_ij - mu;
+                            *x_ij -= mu;
                         }
                     }
                 }
@@ -337,7 +337,7 @@ where
 
                 if let Some(mut x_j) = self.get_col_mut(j) {
                     for x_ij in x_j.values_mut() {
-                        *x_ij = *x_ij - mu;
+                        *x_ij -= mu;
                     }
                 }
             }

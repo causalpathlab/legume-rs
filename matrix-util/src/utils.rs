@@ -10,7 +10,7 @@ use std::hash::Hash;
 /// # Returns
 /// A hashmap: cluster/group name -> indexes of the elements
 pub fn partition_by_membership<T>(
-    membership: &Vec<T>,
+    membership: &[T],
     nelem_per_group: Option<usize>,
 ) -> HashMap<T, Vec<usize>>
 where

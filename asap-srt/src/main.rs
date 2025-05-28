@@ -2,26 +2,23 @@ mod simulate;
 mod srt_common;
 mod srt_routines_latent_representation;
 mod srt_routines_post_process;
+mod srt_routines_pre_process;
 
 use log::info;
-use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
 
 use srt_common::*;
+use srt_routines_pre_process::*;
 
 use srt_routines_latent_representation::*;
 use srt_routines_post_process::*;
 
-use asap_data::sparse_io_vector::*;
 use matrix_param::traits::{Inference, ParamIo, TwoStatParam};
-use matrix_util::common_io::{extension, read_lines, write_lines, write_types};
+use matrix_util::common_io::{write_lines, write_types};
 use matrix_util::dmatrix_util::*;
 use matrix_util::traits::*;
-use matrix_util::utils::partition_by_membership;
 
 use asap_alg::collapse_data::CollapsingOps;
 use asap_alg::random_projection::*;
-use asap_data::sparse_io::*;
 
 use candle_util::candle_decoder_topic::*;
 use candle_util::candle_inference::TrainConfig;
@@ -73,6 +70,14 @@ struct SRTArgs {
     /// #k-nearest neighbours within each batch
     #[arg(long, default_value_t = 10)]
     knn_cells: usize,
+
+    /// #k-nearest neighbours for spectral embedding for spatial coordinates
+    #[arg(long, default_value_t = 10)]
+    knn_spatial: usize,
+
+    /// maximum rank for spectral embedding for spatial coordinates
+    #[arg(long, default_value_t = 10)]
+    rank_spatial: usize,
 
     /// #downsampling columns per each collapsed sample. If None, no
     /// downsampling.
@@ -154,6 +159,16 @@ fn main() -> anyhow::Result<()> {
     let min_coord = coord_map.min().max(0_f32);
     let max_coord = coord_map.max() + 1_f32;
 
+    info!(
+        "spectral embedding of {}-dimensional coordinates",
+        coord_map.ncols()
+    );
+    let coord_spectral =
+        spectral_network_embedding(&coord_map, args.knn_spatial, args.rank_spatial)?
+            .scale_columns();
+
+    coord_spectral.to_tsv(&(args.out.to_string() + ".coordinate.spectral.gz"))?;
+
     //////////////////////////////////////////
     // 1. Randomly project the data columns //
     //////////////////////////////////////////
@@ -163,7 +178,7 @@ fn main() -> anyhow::Result<()> {
     info!("Random projection of data onto {} dims", proj_dim);
     let proj_out = data_vec.project_columns_with_batch_correction(
         proj_dim,
-        Some(args.block_size.clone()),
+        Some(args.block_size),
         Some(&batch_membership),
     )?;
 
@@ -175,7 +190,10 @@ fn main() -> anyhow::Result<()> {
             "Random projection of spatial coordinates onto {} dims",
             proj_dim
         );
-        let coord_kn = positional_projection(&coord_map, &batch_membership, proj_dim)?;
+
+        let coord_kn =
+            spectral_network_embedding(&coord_map, args.knn_spatial, proj_dim)?.scale_columns();
+
         proj_out.proj + coord_kn
     };
 
@@ -183,14 +201,11 @@ fn main() -> anyhow::Result<()> {
     let nsamp =
         data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim), args.down_sample)?;
 
-    // todo: spectral mapping
-
-
     //////////////////////////////////
     // 2. Register batch membership //
     //////////////////////////////////
 
-    if args.batch_files.is_some() && batch_membership.len() > 0 {
+    if args.batch_files.is_some() && !batch_membership.is_empty() {
         info!("Registering batch information");
         data_vec.register_batches(&proj_kn, &batch_membership)?;
     }
@@ -215,7 +230,7 @@ fn main() -> anyhow::Result<()> {
     let mut collapsed_coords = Mat::zeros(group_to_cols.len(), coord_map.ncols());
 
     group_to_cols
-        .into_iter()
+        .iter()
         .enumerate()
         .for_each(|(s, cells)| {
             collapsed_coords
@@ -275,9 +290,9 @@ fn main() -> anyhow::Result<()> {
     let batch_nm = batch_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
 
     // spatial coordinate information
-    let spatial_nc = (!args.exclude_spatial_info).then(|| collapsed_coords);
+    let spatial_nc = (!args.exclude_spatial_info).then_some(collapsed_coords);
 
-    let coord_map = (!args.exclude_spatial_info).then(|| coord_map);
+    let coord_map = (!args.exclude_spatial_info).then_some(coord_map);
 
     // output decoder should maintain the original dimension
     let output_nd = match clean_dn {
@@ -371,177 +386,4 @@ fn main() -> anyhow::Result<()> {
 
     info!("done");
     Ok(())
-}
-
-fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str>>)> {
-    // push data files and collect batch membership
-    let file = args.data_files[0].as_ref();
-    let backend = match extension(file)?.to_string().as_str() {
-        "h5" => SparseIoBackend::HDF5,
-        "zarr" => SparseIoBackend::Zarr,
-        _ => SparseIoBackend::Zarr,
-    };
-
-    if args.coord_files.len() != args.data_files.len() {
-        return Err(anyhow::anyhow!("# coordinate files != # of data files"));
-    }
-
-    let mut data_vec = SparseIoVec::new();
-
-    for data_file in args.data_files.iter() {
-        info!("Importing data file: {}", data_file);
-
-        match extension(&data_file)?.as_ref() {
-            "zarr" => {
-                assert_eq!(backend, SparseIoBackend::Zarr);
-            }
-            "h5" => {
-                assert_eq!(backend, SparseIoBackend::HDF5);
-            }
-            _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
-        };
-
-        let data = open_sparse_matrix(&data_file, &backend)?;
-        data_vec.push(Arc::from(data))?;
-    }
-
-    // check if row names are the same
-    let row_names = data_vec[0].row_names()?;
-
-    for j in 1..data_vec.len() {
-        let row_names_j = data_vec[j].row_names()?;
-        if row_names != row_names_j {
-            return Err(anyhow::anyhow!("Row names are not the same"));
-        }
-    }
-
-    let mut coord_vec = Vec::with_capacity(args.coord_files.len());
-
-    for coord_file in args.coord_files.iter() {
-        info!("Reading coordinate file: {}", coord_file);
-        let coord = Mat::read_file_delim(coord_file, vec!['\t', ',', ' '], None)?;
-        coord_vec.push(coord);
-    }
-
-    let coord_nk = concatenate_vertical(coord_vec)?;
-
-    // check batch membership
-    let mut batch_membership = Vec::with_capacity(data_vec.len());
-
-    if let Some(batch_files) = &args.batch_files {
-        if batch_files.len() != args.data_files.len() {
-            return Err(anyhow::anyhow!("# batch files != # of data files"));
-        }
-
-        for batch_file in batch_files.iter() {
-            info!("Reading batch file: {}", batch_file);
-            for s in read_lines(&batch_file)? {
-                batch_membership.push(s.to_string().into_boxed_str());
-            }
-        }
-    } else {
-        for (id, &nn) in data_vec.num_columns_by_data()?.iter().enumerate() {
-            batch_membership.extend(vec![id.to_string().into_boxed_str(); nn]);
-        }
-    }
-
-    if batch_membership.len() != data_vec.num_columns()? {
-        return Err(anyhow::anyhow!(
-            "# batch membership {} != # of columns {}",
-            batch_membership.len(),
-            data_vec.num_columns()?
-        ));
-    }
-
-    // use batch index as another coordinate
-    let uniq_batches = batch_membership.par_iter().collect::<HashSet<_>>();
-    let n_batches = uniq_batches.len();
-    let coord_nk = if n_batches > 1 {
-        info!("attaching {} batch index coordinate(s)", n_batches);
-        append_batch_coordinate(&coord_nk, &batch_membership)?
-    } else {
-        coord_nk
-    };
-
-    Ok((data_vec, coord_nk, batch_membership))
-}
-
-fn append_batch_coordinate<T>(coords: &Mat, batch_membership: &Vec<T>) -> anyhow::Result<Mat>
-where
-    T: Sync + Send + Clone + Eq + std::hash::Hash,
-{
-    if coords.nrows() != batch_membership.len() {
-        return Err(anyhow::anyhow!("incompatible batch membership"));
-    }
-
-    let minval = coords.min();
-    let maxval = coords.max();
-    let width = (maxval - minval).max(1.);
-
-    let uniq_batches = batch_membership.iter().collect::<HashSet<_>>();
-
-    let batch_index = uniq_batches
-        .into_iter()
-        .enumerate()
-        .map(|(k, v)| (v, k))
-        .collect::<HashMap<_, _>>();
-
-    let batch_coord = batch_membership
-        .iter()
-        .map(|k| {
-            let b = batch_index[k];
-            width * (b as f32)
-        })
-        .collect::<Vec<_>>();
-
-    let bb = Mat::from_vec(coords.nrows(), 1, batch_coord);
-
-    Ok(concatenate_horizontal(vec![coords.clone(), bb])?)
-}
-
-///
-/// each position vector (1 x d) `*` random_proj (d x r)
-///
-fn positional_projection<T>(
-    coords: &Mat,
-    batch_membership: &Vec<T>,
-    d: usize,
-) -> anyhow::Result<Mat>
-where
-    T: Sync + Send + Clone + Eq + std::hash::Hash,
-{
-    if coords.nrows() != batch_membership.len() {
-        return Err(anyhow::anyhow!("incompatible batch membership"));
-    }
-
-    let maxval = coords.max();
-    let minval = coords.min();
-    let coords = coords
-        .map(|x| (x - minval) / (maxval - minval + 1.))
-        .transpose();
-
-    let batches = partition_by_membership(batch_membership, None);
-
-    let mut ret = Mat::zeros(d, coords.ncols());
-
-    for (_b, points) in batches.into_iter() {
-        let rand_proj = Mat::rnorm(d, coords.nrows());
-
-        points.into_iter().for_each(|p| {
-            ret.column_mut(p)
-                .copy_from(&(&rand_proj * coords.column(p)));
-        });
-    }
-
-    let (lb, ub) = (-4., 4.);
-    ret.scale_columns_inplace();
-
-    if ret.max() > ub || ret.min() < lb {
-        info!("Clamping values [{}, {}] after standardization", lb, ub);
-        ret.iter_mut().for_each(|x| {
-            *x = x.clamp(lb, ub);
-        });
-        ret.scale_columns_inplace();
-    }
-    Ok(ret)
 }
