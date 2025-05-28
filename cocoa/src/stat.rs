@@ -87,7 +87,7 @@ impl<'a> CocoaStat<'a> {
 
         let sample_to_exposure: Vec<_> = self
             .sample_to_exposure
-            .into_iter()
+            .iter()
             .enumerate()
             .filter_map(|(s, &x)| if x < n_exposures { Some((s, x)) } else { None })
             .collect();
