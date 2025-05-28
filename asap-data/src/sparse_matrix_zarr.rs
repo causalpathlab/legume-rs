@@ -260,7 +260,7 @@ impl SparseMtxData {
 
         let array = ArrayBuilder::new(
             array_shape,            // array shape
-            dt,              // data type
+            dt,                     // data type
             chunk_size.try_into()?, // chunk shape
             fill,                   //
         )
@@ -303,7 +303,7 @@ impl SparseMtxData {
 
         let array = ArrayBuilder::new(
             vec![vec.len() as u64],              // array shape
-            dt,                           // data type
+            dt,                                  // data type
             vec![chunk_size as u64].try_into()?, // chunk shape
             fill,                                //
         )
@@ -798,8 +798,7 @@ impl SparseIo for SparseMtxData {
         if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indicies) {
             let ncol_out = columns_vec.len();
 
-            let mut ret: Vec<(u64, u64, f32)> =
-                Vec::with_capacity((max_end - min_start) as usize);
+            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((max_end - min_start) as usize);
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
                 let jj = jj as u64;
@@ -819,8 +818,7 @@ impl SparseIo for SparseMtxData {
 
             let ncol_out = columns_vec.len();
 
-            let mut ret: Vec<(u64, u64, f32)> =
-                Vec::with_capacity((max_end - min_start) as usize);
+            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((max_end - min_start) as usize);
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
                 let jj = jj as u64;
@@ -872,7 +870,6 @@ impl SparseIo for SparseMtxData {
 
         if let (Some(nrow), Some(ncol)) = (self.num_rows(), self.num_columns()) {
             let nrow_out = rows_vec.len();
-            let ncol = ncol;
 
             let min_start = rows_vec
                 .iter()
@@ -886,8 +883,7 @@ impl SparseIo for SparseMtxData {
                 .max()
                 .unwrap_or(0);
 
-            let mut ret: Vec<(u64, u64, f32)> =
-                Vec::with_capacity((max_end - min_start) as usize);
+            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((max_end - min_start) as usize);
 
             for (ii, &i_data) in rows_vec.iter().enumerate() {
                 let ii = ii as u64;
