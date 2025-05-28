@@ -711,7 +711,7 @@ impl SparseIoVec {
     pub fn register_batches_ndarray<T>(
         &mut self,
         feature_matrix: &ndarray::Array2<f32>,
-        batch_membership: &Vec<T>,
+        batch_membership: &[T],
     ) -> anyhow::Result<()>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
@@ -741,7 +741,7 @@ impl SparseIoVec {
     pub fn register_batches_dmatrix<T>(
         &mut self,
         feature_matrix: &nalgebra::DMatrix<f32>,
-        batch_membership: &Vec<T>,
+        batch_membership: &[T],
     ) -> anyhow::Result<()>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
@@ -766,7 +766,7 @@ impl SparseIoVec {
     fn _register_batches<M, F, T>(
         &mut self,
         feature_matrix: &M,
-        batch_membership: &Vec<T>,
+        batch_membership: &[T],
         create_column_dict: F,
     ) -> anyhow::Result<()>
     where
