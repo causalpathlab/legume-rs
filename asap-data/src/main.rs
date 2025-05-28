@@ -754,8 +754,8 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
     let mut row_hash: HashMap<Box<str>, usize> = HashMap::new();
 
-    for i in 0..num_batches {
-        let row_names = read_row_names(row_files[i].clone(), args.num_feature_name_words)?;
+    for row_file in row_files.iter() {
+        let row_names = read_row_names(row_file.clone(), args.num_feature_name_words)?;
         for name in row_names.iter() {
             let n = row_hash.entry(name.clone()).or_insert(0);
             *n += 1;
