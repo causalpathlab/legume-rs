@@ -1317,7 +1317,7 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
     );
 
     if let Ok((row_stat, col_stat)) = collect_row_column_stats(&data, block_size) {
-        fn nnz_index(nnz: &Vec<f32>, cutoff: usize) -> Vec<usize> {
+        fn nnz_index(nnz: &[f32], cutoff: usize) -> Vec<usize> {
             nnz.iter()
                 .enumerate()
                 .filter_map(|(i, &x)| if (x as usize) > cutoff { Some(i) } else { None })
@@ -1341,7 +1341,7 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         let row_idx_file = format!("{}row.idx.gz", hdr);
         let col_idx_file = format!("{}col.idx.gz", hdr);
 
-        fn to_str_vec(v: &Vec<usize>) -> Vec<Box<str>> {
+        fn to_str_vec(v: &[usize]) -> Vec<Box<str>> {
             v.iter()
                 .map(|x| format!("{}", x).into_boxed_str())
                 .collect()
