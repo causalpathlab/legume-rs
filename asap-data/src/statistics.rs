@@ -98,8 +98,8 @@ where
     pub fn variance(&self) -> ArrayBase<OwnedRepr<f32>, S> {
         let mean = self.mean();
         let nn = &self.s0.mapv(Self::_add_pseudo_count);
-        let variance = &self.s2 / nn - &mean * &mean;
-        variance
+        
+        &self.s2 / nn - &mean * &mean
     }
 
     /// Standard deviation
@@ -148,7 +148,7 @@ where
     /// * `filename` - The name of the file to save the statistics to
     /// * `names` - The names of the statistics
     pub fn save(&self, filename: &str, names: &Vec<Box<str>>, sep: &str) -> anyhow::Result<()> {
-        let out = self.to_string_vec(&names, &sep)?;
+        let out = self.to_string_vec(names, sep)?;
         write_lines(&out, filename)?;
         Ok(())
     }
@@ -160,9 +160,9 @@ where
             );
         }
 
-        let nnz_: Vec<Box<str>> = to_string_vec(&self.count_positives(), &sep);
-        let mu_: Vec<Box<str>> = to_string_vec(&self.mean(), &sep);
-        let sig_: Vec<Box<str>> = to_string_vec(&self.std(), &sep);
+        let nnz_: Vec<Box<str>> = to_string_vec(&self.count_positives(), sep);
+        let mu_: Vec<Box<str>> = to_string_vec(&self.mean(), sep);
+        let sig_: Vec<Box<str>> = to_string_vec(&self.std(), sep);
         let out: Vec<Box<str>> = (0..self.shape()[0])
             .map(|i| {
                 format!(

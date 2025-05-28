@@ -55,7 +55,7 @@ impl VisitColumnsOps for SparseIoVec {
         jobs.par_iter()
             .progress_count(jobs.len() as u64)
             .for_each(|&(lb, ub)| {
-                visitor((lb, ub), &self, &shared_in, arc_shared_out.clone());
+                visitor((lb, ub), self, shared_in, arc_shared_out.clone());
             });
 
         Ok(())
@@ -83,7 +83,7 @@ impl VisitColumnsOps for SparseIoVec {
             .par_bridge()
             .progress_count(num_jobs)
             .for_each(|(sample, cells)| {
-                visitor(sample, &cells, &self, shared_in, arc_shared_data.clone());
+                visitor(sample, cells, self, shared_in, arc_shared_data.clone());
             });
 
         Ok(())
@@ -91,7 +91,7 @@ impl VisitColumnsOps for SparseIoVec {
 }
 
 fn create_jobs(ntot: usize, block_size: usize) -> Vec<(usize, usize)> {
-    let nblock = (ntot + block_size - 1) / block_size;
+    let nblock = ntot.div_ceil(block_size);
 
     (0..nblock)
         .map(|block| {

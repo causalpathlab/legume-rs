@@ -251,7 +251,7 @@ pub trait SparseIo: Sync + Send {
     fn import_mtx_file_by_row(&mut self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
         info!("read mtx file: {}", mtx_file);
-        if mtx_triplets.len() == 0 {
+        if mtx_triplets.is_empty() {
             return Err(anyhow::anyhow!("No data in mtx file"));
         }
         self.record_mtx_shape(mtx_shape)?;
@@ -263,7 +263,7 @@ pub trait SparseIo: Sync + Send {
     fn import_mtx_file_by_col(&mut self, mtx_file: &str) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
         info!("read mtx file: {}", mtx_file);
-        if mtx_triplets.len() == 0 {
+        if mtx_triplets.is_empty() {
             return Err(anyhow::anyhow!("No data in mtx file"));
         }
         self.record_mtx_shape(mtx_shape)?;
@@ -452,7 +452,7 @@ pub trait SparseIo: Sync + Send {
 
             let arc_triplets = Arc::new(Mutex::new(vec![]));
             let block_size = 100;
-            let nblock = (ncol_data + block_size - 1) / block_size;
+            let nblock = ncol_data.div_ceil(block_size);
 
             info!("remapping triplets ...");
 
@@ -562,7 +562,7 @@ pub trait SparseIo: Sync + Send {
 
             let arc_triplets = Arc::new(Mutex::new(vec![]));
 
-            let nblock = (ncol + block_size - 1) / block_size;
+            let nblock = ncol.div_ceil(block_size);
 
             info!("remapping triplets ...");
 
@@ -616,7 +616,7 @@ pub trait SparseIo: Sync + Send {
             self.read_column_indptr()?;
             self.read_row_indptr()?;
 
-            self.register_row_names_vec(&row_names_order);
+            self.register_row_names_vec(row_names_order);
             self.register_column_names_vec(&new_col_names);
             info!("registered new data to {}", self.get_backend_file_name());
         }
@@ -639,7 +639,7 @@ pub trait SparseIo: Sync + Send {
         &mut self,
         row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
     ) -> anyhow::Result<()> {
-        debug_assert!(row_col_val_triplets.len() > 0);
+        debug_assert!(!row_col_val_triplets.is_empty());
 
         row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
         row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
@@ -686,7 +686,7 @@ pub trait SparseIo: Sync + Send {
         &mut self,
         row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
     ) -> anyhow::Result<()> {
-        debug_assert!(row_col_val_triplets.len() > 0);
+        debug_assert!(!row_col_val_triplets.is_empty());
 
         row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
         row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
@@ -717,7 +717,7 @@ pub trait SparseIo: Sync + Send {
             for _ in lb..ub {
                 csc_colptr.push(i as u64);
             }
-            csc_rows.push(row_col_val_triplets[i].0 as u64);
+            csc_rows.push(row_col_val_triplets[i].0);
             csc_vals.push(row_col_val_triplets[i].2);
         }
 

@@ -9,7 +9,6 @@ use crate::misc::*;
 use crate::sparse_io::*;
 use crate::statistics::RunningStatistics;
 use clap::{ArgAction, Args, Parser, Subcommand};
-use env_logger;
 use indicatif::ParallelProgressIterator;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use log::info;
@@ -546,7 +545,7 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
             .filter_map(|x| col_names_map.get(&x))
             .collect::<Vec<_>>();
 
-        let columns: Vec<usize> = col_names_order.iter().map(|&x| x.clone()).collect();
+        let columns: Vec<usize> = col_names_order.iter().map(|&x| *x).collect();
         let col_names = columns.iter().map(|&x| cols[x].clone()).collect::<Vec<_>>();
         (data.read_triplets_by_columns(columns)?, col_names)
     } else {
@@ -629,7 +628,7 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
             .filter_map(|x| col_names_map.get(&x))
             .collect::<Vec<_>>();
 
-        let columns: Vec<usize> = col_names_order.iter().map(|&x| x.clone()).collect();
+        let columns: Vec<usize> = col_names_order.iter().map(|&x| *x).collect();
         data.read_columns_ndarray(columns)?.to_tsv(&output)?;
     } else {
         return Err(anyhow::anyhow!(
@@ -709,7 +708,7 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
                     let batch_name = Some(base);
 
-                    if let Ok(sub_dir) = std::fs::read_dir(&sub_dir) {
+                    if let Ok(sub_dir) = std::fs::read_dir(sub_dir) {
                         for x in sub_dir {
                             if let Some(_path) = x?.path().to_str() {
                                 let _path = _path.to_string();
@@ -794,8 +793,7 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
     let mut column_batch_names = vec![];
 
     for (col_file, batch_name) in col_files.iter().zip(batch_names.iter()) {
-        let _names = read_col_names(col_file.clone(), args.num_barcode_name_words)
-            .expect(format!("").as_str());
+        let _names = read_col_names(col_file.clone(), args.num_barcode_name_words)?;
         let nn = _names.len();
         column_names.extend(
             _names
@@ -852,12 +850,12 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
                 read_col_names(col_files[b].clone(), args.num_barcode_name_words)?;
             let batch_name = batch_names[b].clone();
 
-            (0..ncol).into_iter().for_each(|batch_j| {
+            (0..ncol).for_each(|batch_j| {
                 let loc = format!("{}{}{}", batch_col_names[batch_j], COLUMN_SEP, batch_name)
                     .into_boxed_str();
 
                 let glob_j = offset as usize + batch_j;
-                let glob = column_names[glob_j as usize].clone();
+                let glob = column_names[glob_j].clone();
                 debug_assert_eq!(glob, loc);
             });
 
@@ -944,7 +942,7 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
             }
 
             match (dir.len(), base.len()) {
-                (0, 0) => format!("./").into_boxed_str(),
+                (0, 0) => "./".to_string().into_boxed_str(),
                 (0, _) => format!("./{}", base).into_boxed_str(),
                 _ => format!("{}/{}", dir, base).into_boxed_str(),
             }
@@ -964,26 +962,20 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
         common_io::remove_file(&backend_file)?;
     }
 
-    let mut data = create_sparse_from_mtx_file(&mtx_file, Some(&backend_file), Some(&backend))?;
+    let mut data = create_sparse_from_mtx_file(mtx_file, Some(&backend_file), Some(&backend))?;
 
     if let Some(row_file) = row_file {
         data.register_row_names_file(row_file);
-    } else {
-        if let Some(nrow) = data.num_rows() {
-            let row_names: Vec<Box<str>> =
-                (1..(nrow + 1)).map(|i| format!("{}", i).into()).collect();
-            data.register_row_names_vec(&row_names);
-        }
+    } else if let Some(nrow) = data.num_rows() {
+        let row_names: Vec<Box<str>> = (1..(nrow + 1)).map(|i| format!("{}", i).into()).collect();
+        data.register_row_names_vec(&row_names);
     }
 
     if let Some(col_file) = col_file {
         data.register_column_names_file(col_file);
-    } else {
-        if let Some(ncol) = data.num_columns() {
-            let col_names: Vec<Box<str>> =
-                (1..(ncol + 1)).map(|i| format!("{}", i).into()).collect();
-            data.register_column_names_vec(&col_names);
-        }
+    } else if let Some(ncol) = data.num_columns() {
+        let col_names: Vec<Box<str>> = (1..(ncol + 1)).map(|i| format!("{}", i).into()).collect();
+        data.register_column_names_vec(&col_names);
     }
 
     if args.do_squeeze {
@@ -1094,7 +1086,7 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
             let (dir, base, _ext) = common_io::dir_base_ext(&data_file)?;
 
             match (dir.len(), base.len()) {
-                (0, 0) => format!("./").into_boxed_str(),
+                (0, 0) => "./".to_string().into_boxed_str(),
                 (0, _) => format!("./{}", base).into_boxed_str(),
                 _ => format!("{}/{}", dir, base).into_boxed_str(),
             }
@@ -1483,7 +1475,7 @@ fn collect_row_column_stats(
         let arc_row_stat = Arc::new(Mutex::new(&mut row_stat));
         let arc_col_stat = Arc::new(Mutex::new(&mut col_stat));
 
-        let nblock = (ncol + block_size - 1) / block_size;
+        let nblock = ncol.div_ceil(block_size);
 
         info!(
             "collecting row and column statistics over {} blocks",
