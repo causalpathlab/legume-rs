@@ -1,8 +1,7 @@
 use crate::traits::*;
-use ndarray::{s, Array1, Array2};
-use ndarray_linalg::qr::QR;
-use ndarray_linalg::svd::SVD;
 
+use ndarray::{s, Array1, Array2};
+use ndarray_linalg::{QR, SVDDC};
 use num_traits::{Float, FromPrimitive};
 
 impl<T> RandomizedAlgs for Array2<T>
@@ -19,8 +18,8 @@ where
     type DVec = Array1<T>;
     type Scalar = T;
     fn rsvd(&self, max_rank: usize) -> anyhow::Result<(Self::OutMat, Self::DVec, Self::OutMat)> {
-        let default_iter = 5_usize;
-        let mut rsvd = RandomizedSVD::<T>::new(max_rank, default_iter);
+        // let default_iter = 5_usize;
+        let mut rsvd = RandomizedSVD::<T>::new(max_rank);
         rsvd.compute(self)?;
         Ok((
             rsvd.matrix_u().clone(),
@@ -45,7 +44,7 @@ where
         + Send,
 {
     max_rank: usize,
-    iter: usize,
+    // iter: usize,
     u_vectors: Array2<T>,
     singular_values: Array1<T>,
     v_vectors: Array2<T>,
@@ -62,10 +61,10 @@ where
         + FromPrimitive
         + Send,
 {
-    pub fn new(max_rank: usize, iter: usize) -> Self {
+    pub fn new(max_rank: usize) -> Self {
         Self {
             max_rank,
-            iter,
+            // iter,
             u_vectors: Array2::<T>::zeros((0, 0)),
             singular_values: Array1::<T>::zeros(0),
             v_vectors: Array2::<T>::zeros((0, 0)),
@@ -112,7 +111,9 @@ where
             eprintln!("Final svd on [{} x {}]", bb.nrows(), bb.ncols());
         }
 
-        if let (Some(svd_u), singular_values, Some(svd_vt)) = bb.svd(true, true)? {
+        if let (Some(svd_u), singular_values, Some(svd_vt)) =
+            bb.svddc(ndarray_linalg::JobSvd::Some)?
+        {
             if self.verbose {
                 eprintln!("Construct U, D, V");
             }
@@ -140,31 +141,34 @@ where
         xx: &Array2<T>,
         rank_and_oversample: usize,
     ) -> anyhow::Result<()> {
-        let nr = xx.nrows();
         let nc = xx.ncols();
+        let qq = Array2::<T>::runif(nc, rank_and_oversample);
 
-        let mut ll = Array2::<T>::zeros((nr, rank_and_oversample));
+        // let nr = xx.nrows();
+        // let mut ll = Array2::<T>::zeros((nr, rank_and_oversample));
+        // let zero = T::from(0.).expect("no zero found");
+        // let one = T::from(1.).expect("no one found");
+        // let mut qq = Array2::<T>::runif(nc, rank_and_oversample)
 
-        let zero = T::from(0.).expect("no zero found");
-        let mut qq = Array2::<T>::runif(nc, rank_and_oversample);
+        // for i in 0..self.iter {
+        //     if self.verbose {
+        //         eprintln!("[Start] LU iteration {:>10}", i + 1);
+        //     }
 
-        for i in 0..self.iter {
-            if self.verbose {
-                eprintln!("[Start] LU iteration {:>10}", i + 1);
-            }
+        //     let lu1 = xx.dot(&qq);
+        //     ll.fill(zero);
+        //     ll.diag_mut().fill(one);
+        //     ll.slice_mut(s![..nr, ..rank_and_oversample]).assign(&lu1);
 
-            let lu1 = xx.dot(&qq);
-            ll.fill(zero);
-            ll.slice_mut(s![..nr, ..rank_and_oversample]).assign(&lu1);
+        //     let lu2 = xx.t().dot(&ll);
+        //     qq.fill(zero);
+        //     qq.diag_mut().fill(one);
+        //     qq.slice_mut(s![..nc, ..rank_and_oversample]).assign(&lu2);
 
-            let lu2 = xx.t().dot(&ll);
-            qq.fill(zero);
-            qq.slice_mut(s![..nc, ..rank_and_oversample]).assign(&lu2);
-
-            if self.verbose {
-                eprintln!("[Done] LU iteration {:>10}", i + 1);
-            }
-        }
+        //     if self.verbose {
+        //         eprintln!("[Done] LU iteration {:>10}", i + 1);
+        //     }
+        // }
 
         let (qr_q, _) = xx.dot(&qq).qr().unwrap();
 
