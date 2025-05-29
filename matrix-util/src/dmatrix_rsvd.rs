@@ -1,4 +1,5 @@
 use crate::traits::*;
+use nalgebra::LU;
 use nalgebra::{DMatrix, DVector};
 use nalgebra_sparse::{csc::CscMatrix, csr::CsrMatrix};
 
@@ -65,38 +66,38 @@ where
     }
 }
 
-fn _subspace_iteration<T, D>(
-    xx: &D,
-    rank_and_oversample: usize,
-    iter: Option<usize>,
-) -> anyhow::Result<DMatrix<T>>
+fn _subspace_iteration<T, D>(xx: &D, rank_and_oversample: usize) -> anyhow::Result<DMatrix<T>>
 where
     T: nalgebra::RealField + num_traits::Float + Copy,
     D: IntoDense<DMatrix<T>>,
 {
-    let iter = iter.unwrap_or(5); // five should be enough
-    let nr = xx.num_rows();
     let nc = xx.num_columns();
 
+    let max_iter = 5; // five should be enough
+    let nr = xx.num_rows();
     let mut ll = DMatrix::<T>::zeros(nr, rank_and_oversample);
     let mut qq = DMatrix::<T>::runif(nc, rank_and_oversample);
     let zero = T::from(0.).expect("no zero found");
 
-    for _i in 0..iter {
+    for _i in 0..max_iter {
         let lu1 = xx.matmul(&qq);
+        let lu1 = LU::new(lu1);
         ll.fill(zero);
         ll.fill_with_identity();
         ll.view_mut((0, 0), (nr, rank_and_oversample))
             .lower_triangle()
-            .copy_from(&lu1);
+            .copy_from(&lu1.l());
 
         let lu2 = xx.transpose_matmul(&ll);
+        let lu2 = LU::new(lu2);
         qq.fill(zero);
         qq.fill_with_identity();
         qq.view_mut((0, 0), (nc, rank_and_oversample))
             .lower_triangle()
-            .copy_from(&lu2);
+            .copy_from(&lu2.l());
     }
+
+    // let qq = DMatrix::<T>::runif(nc, rank_and_oversample);
 
     let qr_q = xx.matmul(&qq).qr().q();
     let kk = rank_and_oversample.min(qr_q.ncols());
@@ -126,7 +127,7 @@ where
 
     debug_assert!(rank > 0, "Must be at least rank = 1");
 
-    let qq = _subspace_iteration(xx, rank + oversample, None)?;
+    let qq = _subspace_iteration(xx, rank + oversample)?;
     let rank = rank.min(qq.ncols());
 
     let qq = qq.columns(0, rank).into_owned();

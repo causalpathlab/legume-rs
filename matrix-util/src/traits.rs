@@ -78,12 +78,23 @@ pub trait DistanceOps {
     type Scalar;
     type Other;
 
-    /// A vector of Euclidean distances between sources and targets
-    fn euclidean_distance_matched_columns(
+    /// A vector of Euclidean distances between sources and targets `other`
+    ///
+    /// * `other` - other data matrix
+    fn euclidean_distance(
         &self,
-        target_mat: &Self::Other,
-        target_columns: &[usize],
-    ) -> anyhow::Result<Vec<Self::Scalar>>;
+        other: &Self::Other,
+    ) -> anyhow::Result<Vec<(usize, usize, Self::Scalar)>>;
+
+    /// A vector of Euclidean distances between sources and targets `other`
+    ///
+    /// * `other` - other data matrix
+    /// * `select_columns_in_other` - specific columns
+    fn euclidean_distance_on_select_columns(
+        &self,
+        other: &Self::Other,
+        select_columns_in_other: &[usize],
+    ) -> anyhow::Result<Vec<(usize, usize, Self::Scalar)>>;
 }
 
 /// Operations that involves multiple types

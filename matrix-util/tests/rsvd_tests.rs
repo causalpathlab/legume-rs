@@ -1,3 +1,5 @@
+use ndarray::Array2;
+
 #[test]
 fn dmatrix_rsvd_test() -> anyhow::Result<()> {
     use matrix_util::traits::*;
@@ -40,6 +42,24 @@ fn dmatrix_csc_rsvd_test() -> anyhow::Result<()> {
 }
 
 #[test]
+fn dmatrix_rsvd_test2() -> anyhow::Result<()> {
+    use matrix_util::traits::*;
+    let x = nalgebra::DMatrix::<f32>::rnorm(100, 50);
+
+    let svd = x.rsvd(3)?;
+    let mut identity = nalgebra::DMatrix::<f32>::zeros(3, 3);
+    identity.fill_with_identity();
+
+    let eye = svd.0.transpose() * svd.0;
+    approx::assert_abs_diff_eq!(eye, identity, epsilon = 1e-4);
+
+    let eye = svd.2.transpose() * svd.2;
+    approx::assert_abs_diff_eq!(eye, identity, epsilon = 1e-4);
+
+    Ok(())
+}
+
+#[test]
 fn ndarray_rsvd_test() -> anyhow::Result<()> {
     use matrix_util::traits::*;
 
@@ -52,6 +72,26 @@ fn ndarray_rsvd_test() -> anyhow::Result<()> {
 
     dbg!(svd.0.t().dot(&svd.0));
     dbg!(svd.2.t().dot(&svd.2));
+
+    Ok(())
+}
+
+#[test]
+fn ndarray_rsvd_test2() -> anyhow::Result<()> {
+    use matrix_util::traits::*;
+
+    let xx = ndarray::Array2::<f32>::rnorm(10, 8);
+
+    let svd = xx.rsvd(5)?;
+
+    let mut identity = Array2::zeros((5, 5));
+    identity.diag_mut().fill(1.);
+
+    let eye = svd.0.t().dot(&svd.0);
+    approx::assert_abs_diff_eq!(eye, identity, epsilon = 1e-4);
+
+    let eye = svd.2.t().dot(&svd.2);
+    approx::assert_abs_diff_eq!(eye, identity, epsilon = 1e-4);
 
     Ok(())
 }

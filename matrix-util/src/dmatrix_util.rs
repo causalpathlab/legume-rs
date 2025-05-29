@@ -70,6 +70,66 @@ where
     Ok(ret_dm)
 }
 
+fn csc_euclidean_distance_on_select_columns<T>(
+    lhs: &CscMatrix<T>,
+    rhs: &CscMatrix<T>,
+    select_columns_in_rhs: Option<&[usize]>,
+) -> anyhow::Result<Vec<(usize, usize, T)>>
+where
+    T: nalgebra::RealField + Copy + std::iter::Sum<T>,
+{
+    let all_rhs = (0..rhs.ncols()).collect::<Vec<_>>();
+    let select_columns_in_rhs = select_columns_in_rhs.unwrap_or(all_rhs.as_slice());
+
+    if select_columns_in_rhs.len() != rhs.ncols() {
+        return Err(anyhow::anyhow!(
+            "found mismatches in `select_columns` maps: lhs -> rhs"
+        ));
+    }
+
+    let ret: Vec<(usize, usize, T)> = lhs
+        .col_iter()
+        .enumerate()
+        .zip(select_columns_in_rhs.into_iter())
+        .map(|((src_pos, src_col), &tgt_pos)| {
+            let tgt_col = rhs.col(tgt_pos);
+
+            let nn = src_col.nrows();
+            let denom = T::from_usize(nn).unwrap_or(T::one());
+
+            let idx_src = src_col.row_indices();
+            let idx_tgt = tgt_col.row_indices();
+            let val_src = src_col.values();
+            let val_tgt = tgt_col.values();
+
+            // sum_g (src[g] - tgt[g])^2 / sum_g 1
+            // sum_g tgt[g]^2 + sum_g src[g]^2 - 2 sum_g tgt[g] * src[g]
+            let mut s: usize = 0;
+            let mut t: usize = 0;
+
+            let tgt_sq_sum = val_tgt.iter().map(|&x| x * x).sum::<T>();
+            let src_sq_sum = val_src.iter().map(|&x| x * x).sum::<T>();
+            let mut overlap = T::zero();
+            while s < idx_src.len() && t < idx_tgt.len() {
+                if idx_src[s] == idx_tgt[t] {
+                    overlap += val_src[s] * val_tgt[t];
+                    s += 1;
+                    t += 1;
+                } else if idx_src[s] < idx_tgt[t] {
+                    s += 1;
+                } else {
+                    t += 1;
+                }
+            }
+
+            let dist = ((src_sq_sum + tgt_sq_sum - overlap - overlap) / denom).sqrt();
+            (src_pos, tgt_pos, dist)
+        })
+        .collect();
+
+    Ok(ret)
+}
+
 impl<T> DistanceOps for CscMatrix<T>
 where
     T: nalgebra::RealField + Copy + std::iter::Sum<T>,
@@ -77,54 +137,19 @@ where
     type Scalar = T;
     type Other = CscMatrix<T>;
 
-    fn euclidean_distance_matched_columns(
+    fn euclidean_distance(
         &self,
         other: &Self::Other,
-        matched_columns: &[usize],
-    ) -> anyhow::Result<Vec<Self::Scalar>> {
-        if matched_columns.len() != self.ncols() {
-            return Err(anyhow::anyhow!("`matched_columns` maps: self -> other"));
-        }
+    ) -> anyhow::Result<Vec<(usize, usize, Self::Scalar)>> {
+        csc_euclidean_distance_on_select_columns(&self, other, None)
+    }
 
-        let ret: Vec<Self::Scalar> = self
-            .col_iter()
-            .zip(matched_columns.iter())
-            .map(|(src_col, &tgt_pos)| {
-                let tgt_col = other.col(tgt_pos);
-
-                let nn = src_col.nrows();
-                let denom = T::from_usize(nn).unwrap_or(T::one());
-
-                let idx_src = src_col.row_indices();
-                let idx_tgt = tgt_col.row_indices();
-                let val_src = src_col.values();
-                let val_tgt = tgt_col.values();
-
-                // sum_g (src[g] - tgt[g])^2 / sum_g 1
-                // sum_g tgt[g]^2 + sum_g src[g]^2 - 2 sum_g tgt[g] * src[g]
-                let mut s: usize = 0;
-                let mut t: usize = 0;
-
-                let tgt_sq_sum = val_tgt.iter().map(|&x| x * x).sum::<T>();
-                let src_sq_sum = val_src.iter().map(|&x| x * x).sum::<T>();
-                let mut overlap = T::zero();
-                while s < idx_src.len() && t < idx_tgt.len() {
-                    if idx_src[s] == idx_tgt[t] {
-                        overlap += val_src[s] * val_tgt[t];
-                        s += 1;
-                        t += 1;
-                    } else if idx_src[s] < idx_tgt[t] {
-                        s += 1;
-                    } else {
-                        t += 1;
-                    }
-                }
-
-                ((src_sq_sum + tgt_sq_sum - overlap - overlap) / denom).sqrt()
-            })
-            .collect();
-
-        Ok(ret)
+    fn euclidean_distance_on_select_columns(
+        &self,
+        other: &Self::Other,
+        select_columns_in_other: &[usize],
+    ) -> anyhow::Result<Vec<(usize, usize, Self::Scalar)>> {
+        csc_euclidean_distance_on_select_columns(&self, other, Some(select_columns_in_other))
     }
 }
 
