@@ -1,6 +1,7 @@
 // #![allow(dead_code)]
 
 use crate::srt_common::*;
+use candle_util::candle_data_loader::generate_minibatch_intervals;
 
 pub struct PairsWithBounds<'a> {
     pub lb: usize,
@@ -13,63 +14,6 @@ pub struct PairsWithIndices<'a> {
     pub pairs: &'a Vec<(usize, usize)>,
 }
 
-pub trait VisitColumnPairsOps {
-    fn visit_column_pairs_by_block<Visitor, SharedIn, SharedOut>(
-        &self,
-        all_pairs: &[(usize, usize)],
-        visitor: &Visitor,
-        shared_in: &SharedIn,
-        shared_out: &mut SharedOut,
-        block_size: Option<usize>,
-    ) -> anyhow::Result<()>
-    where
-        Visitor: Fn(PairsWithBounds, &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) -> anyhow::Result<()>
-            + Sync
-            + Send,
-        SharedIn: Sync + Send,
-        SharedOut: Sync + Send;
-}
-
-impl VisitColumnPairsOps for SparseIoVec {
-    fn visit_column_pairs_by_block<Visitor, SharedIn, SharedOut>(
-        &self,
-        all_pairs: &[(usize, usize)],
-        visitor: &Visitor,
-        shared_in: &SharedIn,
-        shared_out: &mut SharedOut,
-        block_size: Option<usize>,
-    ) -> anyhow::Result<()>
-    where
-        Visitor: Fn(PairsWithBounds, &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) -> anyhow::Result<()>
-            + Sync
-            + Send,
-        SharedIn: Sync + Send,
-        SharedOut: Sync + Send,
-    {
-        let ntot = all_pairs.len();
-        let jobs = create_jobs(ntot, block_size);
-
-        let arc_shared_out = Arc::new(Mutex::new(shared_out));
-
-        jobs.par_iter()
-            .progress_count(jobs.len() as u64)
-            .map(|&(lb, ub)| -> anyhow::Result<()> {
-                let pairs_per_job = &all_pairs[lb..ub];
-                visitor(
-                    PairsWithBounds {
-                        lb,
-                        ub,
-                        pairs: pairs_per_job,
-                    },
-                    self,
-                    shared_in,
-                    arc_shared_out.clone(),
-                )
-            })
-            .collect::<anyhow::Result<()>>()
-    }
-}
-
 pub struct SrtCellPairs<'a> {
     pub data: &'a SparseIoVec,
     pub coordinates: &'a Mat,
@@ -80,6 +24,11 @@ pub struct SrtCellPairs<'a> {
 }
 
 impl<'a> SrtCellPairs<'a> {
+    /// number of pairs
+    pub fn num_pairs(&self) -> usize {
+        self.pairs.len()
+    }
+
     ///
     /// Take average position of these cell pairs
     ///
@@ -102,10 +51,50 @@ impl<'a> SrtCellPairs<'a> {
         (left, right)
     }
 
-    // todo:
-    // pub fn visit_pairs_by_block<Visitor, 
-    //
-    
+    /// visit cell pairs by regular-sized block
+    pub fn visit_pairs_by_block<Visitor, SharedIn, SharedOut>(
+        &self,
+        visitor: &Visitor,
+        shared_in: &SharedIn,
+        shared_out: &mut SharedOut,
+        block_size: usize,
+    ) -> anyhow::Result<()>
+    where
+        Visitor: Fn(
+                PairsWithBounds,
+                &SrtCellPairs,
+                &SharedIn,
+                Arc<Mutex<&mut SharedOut>>,
+            ) -> anyhow::Result<()>
+            + Sync
+            + Send,
+        SharedIn: Sync + Send,
+        SharedOut: Sync + Send,
+    {
+        let all_pairs = &self.pairs;
+        let ntot = all_pairs.len();
+        let jobs = generate_minibatch_intervals(ntot, block_size);
+        let arc_shared_out = Arc::new(Mutex::new(shared_out));
+
+        jobs.par_iter()
+            .progress_count(jobs.len() as u64)
+            .map(|&(lb, ub)| -> anyhow::Result<()> {
+                let pairs_per_job = &all_pairs[lb..ub];
+                visitor(
+                    PairsWithBounds {
+                        lb,
+                        ub,
+                        pairs: pairs_per_job,
+                    },
+                    &self,
+                    shared_in,
+                    arc_shared_out.clone(),
+                )
+            })
+            .collect::<anyhow::Result<()>>()
+    }
+
+    /// visit cell pairs by sample
     pub fn visit_pairs_by_sample<Visitor, SharedOut>(
         &self,
         visitor: &Visitor,

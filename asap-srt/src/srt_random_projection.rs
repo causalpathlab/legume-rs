@@ -8,7 +8,7 @@ pub trait SrtRandProjOps {
     fn random_projection(
         &self,
         target_dim: usize,
-        block_size: Option<usize>,
+        block_size: usize,
     ) -> anyhow::Result<SrtRandProjOut>;
 
     fn assign_pairs_to_samples(
@@ -66,12 +66,12 @@ impl<'a> SrtRandProjOps for SrtCellPairs<'a> {
     fn random_projection(
         &self,
         target_dim: usize,
-        block_size: Option<usize>,
+        block_size: usize,
     ) -> anyhow::Result<SrtRandProjOut> {
         let nn = self.pairs.len();
 
         // 1. just to have projection results
-        let col_proj = self.data.project_columns(target_dim, block_size)?;
+        let col_proj = self.data.project_columns(target_dim, None)?;
 
         // 2. simply copy them down based on pairs
         let mut ret = SrtRandProjOut {
@@ -79,8 +79,7 @@ impl<'a> SrtRandProjOps for SrtCellPairs<'a> {
             right: Mat::zeros(target_dim, nn),
         };
 
-        self.data.visit_column_pairs_by_block(
-            &self.pairs,
+        self.visit_pairs_by_block(
             &random_project_pairs_visitor,
             &col_proj,
             &mut ret,
@@ -95,7 +94,7 @@ impl<'a> SrtRandProjOps for SrtCellPairs<'a> {
 
 fn random_project_pairs_visitor(
     pairs_with_bounds: PairsWithBounds,
-    _data: &SparseIoVec,
+    _data: &SrtCellPairs,
     column_proj: &RandColProjOut,
     arc_pair_proj: Arc<Mutex<&mut SrtRandProjOut>>,
 ) -> anyhow::Result<()> {
