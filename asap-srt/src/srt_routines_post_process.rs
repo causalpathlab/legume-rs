@@ -7,6 +7,7 @@ pub trait SrtLatentStatePairsOps {
     fn evaluate_latent_states<Enc>(
         &self,
         encoder: &Enc,
+        aggregate_rows: &Mat,
         train_config: &TrainConfig,
         block_size: usize,
     ) -> anyhow::Result<MatchedEncoderLatent>
@@ -18,6 +19,7 @@ impl<'a> SrtLatentStatePairsOps for SrtCellPairs<'a> {
     fn evaluate_latent_states<Enc>(
         &self,
         encoder: &Enc,
+        aggregate_features: &Mat,
         train_config: &TrainConfig,
         block_size: usize,
     ) -> anyhow::Result<MatchedEncoderLatent>
@@ -28,7 +30,7 @@ impl<'a> SrtLatentStatePairsOps for SrtCellPairs<'a> {
         let mut latent_vec = Vec::with_capacity(njobs);
         self.visit_pairs_by_block(
             &evaluate_latent_state_visitor,
-            &(encoder, train_config),
+            &(encoder, aggregate_features, train_config),
             &mut latent_vec,
             block_size,
         )?;
@@ -45,30 +47,20 @@ impl<'a> SrtLatentStatePairsOps for SrtCellPairs<'a> {
 fn evaluate_latent_state_visitor<Enc>(
     job: PairsWithBounds,
     data: &SrtCellPairs,
-    encoder_config: &(&Enc, &TrainConfig),
+    encoder_aggregate_config: &(&Enc, &Mat, &TrainConfig),
     latent_vec: Arc<Mutex<&mut Vec<(usize, MatchedEncoderLatent)>>>,
 ) -> anyhow::Result<()>
 where
     Enc: MatchedEncoderModuleT + Send + Sync + 'static,
 {
-    let (encoder, config) = *encoder_config;
+    let (encoder, aggregate_features, config) = *encoder_aggregate_config;
     let dev = &config.device;
-
     let left = job.pairs.into_iter().map(|&(i, _)| i);
     let right = job.pairs.into_iter().map(|&(_, j)| j);
 
-    let y_left = data
-        .data
-        .read_columns_dmatrix(left)?
-        .transpose()
-        .to_tensor(dev)?;
-    let y_right = data
-        .data
-        .read_columns_dmatrix(right)?
-        .transpose()
-        .to_tensor(dev)?;
-
-    let latent = encoder.forward_t(&y_left, &y_right, false)?;
+    let y_left = data.data.read_columns_dmatrix(left)?.transpose() * aggregate_features;
+    let y_right = data.data.read_columns_dmatrix(right)?.transpose() * aggregate_features;
+    let latent = encoder.forward_t(&y_left.to_tensor(dev)?, &y_right.to_tensor(dev)?, false)?;
     latent_vec
         .lock()
         .expect("latent vec lock")

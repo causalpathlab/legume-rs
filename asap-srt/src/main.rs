@@ -146,11 +146,6 @@ fn main() -> anyhow::Result<()> {
 
     let (data, coordinates, _) = read_data_vec(args.clone())?;
 
-    // if args.batch_files.is_some() && !batch_membership.is_empty() {
-    //     info!("Registering batch information");
-    //     data_vec.register_batches(&proj_kn, &batch_membership)?;
-    // }
-
     let row_names = data.row_names()?;
     let col_names = data.column_names()?;
     write_lines(&row_names, &(args.out.to_string() + ".rows.gz"))?;
@@ -286,11 +281,25 @@ fn main() -> anyhow::Result<()> {
     csv_gz_out(&latent.right, &args.out, "collapsed.latent.right")?;
     csv_gz_out(&decoder.get_dictionary()?, &args.out, "dictionary")?;
 
-    let latent = srt_cell_pairs.evaluate_latent_states(&encoder, &train_config, args.block_size)?;
+    let latent = srt_cell_pairs.evaluate_latent_states(
+        &encoder,
+        &aggregate_rows,
+        &train_config,
+        args.block_size,
+    )?;
 
     csv_gz_out(&latent.average, &args.out, "latent")?;
     csv_gz_out(&latent.left, &args.out, "latent.left")?;
     csv_gz_out(&latent.right, &args.out, "latent.right")?;
+
+    let (_left, _right) = srt_cell_pairs.all_pairs_positions()?;
+
+    concatenate_horizontal(&[_left, _right])?
+        .to_csv(&(args.out.to_string() + ".coord.pairs.csv.gz"))?;
+
+    //////////////////////////////////////////////
+    // calibrate the spot/cell-level propensity //
+    //////////////////////////////////////////////
 
     info!("done");
     Ok(())

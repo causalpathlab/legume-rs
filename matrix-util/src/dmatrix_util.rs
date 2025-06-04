@@ -1,4 +1,4 @@
-use nalgebra::DMatrix;
+use nalgebra::{DMatrix, Matrix};
 use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
 
 use num_traits::Float;
@@ -8,9 +8,13 @@ use rayon::prelude::*;
 
 use crate::traits::*;
 
-pub fn concatenate_vertical<T>(matrices: &[DMatrix<T>]) -> anyhow::Result<DMatrix<T>>
+pub fn concatenate_vertical<T, D, S>(
+    matrices: &[Matrix<T, D, nalgebra::Dyn, S>],
+) -> anyhow::Result<DMatrix<T>>
 where
     T: nalgebra::RealField,
+    D: nalgebra::Dim,
+    S: nalgebra::RawStorage<T, D, nalgebra::Dyn>,
 {
     if matrices.is_empty() {
         anyhow::bail!("empty in concatenate_vertical");
@@ -30,9 +34,13 @@ where
     Ok(DMatrix::from_rows(&rows))
 }
 
-pub fn concatenate_horizontal<T>(matrices: &[DMatrix<T>]) -> anyhow::Result<DMatrix<T>>
+pub fn concatenate_horizontal<T, D, S>(
+    matrices: &[Matrix<T, nalgebra::Dyn, D, S>],
+) -> anyhow::Result<DMatrix<T>>
 where
     T: nalgebra::RealField,
+    D: nalgebra::Dim,
+    S: nalgebra::RawStorage<T, nalgebra::Dyn, D>,
 {
     if matrices.is_empty() {
         anyhow::bail!("empty in concatenate_horizontal");
