@@ -30,7 +30,28 @@ impl<'a> SrtCellPairs<'a> {
     }
 
     ///
-    /// Take average position of these cell pairs
+    /// Take all pairs' positions
+    ///
+    /// returns `(left_coordinates, right_coordinates)`
+    ///
+    pub fn all_pairs_positions(&self) -> anyhow::Result<(Mat, Mat)> {
+        let left = self
+            .pairs
+            .iter()
+            .map(|&(i, _)| self.coordinates.row(i))
+            .collect::<Vec<_>>();
+        let right = self
+            .pairs
+            .iter()
+            .map(|&(_, j)| self.coordinates.row(j))
+            .collect::<Vec<_>>();
+        Ok((concatenate_vertical(&left)?, concatenate_vertical(&right)?))
+    }
+
+    ///
+    /// Take average position of these cell pairs (indices)
+    ///
+    /// returns `(left_coordinate, right_coordinate)`
     ///
     pub fn average_position(&self, select_pair_indices: &[usize]) -> (DVec, DVec) {
         let mut left = DVec::zeros(self.coordinates.ncols());

@@ -39,9 +39,15 @@ where
     let llik_trace =
         vae.train_encoder_decoder(&mut data_loader, log_likelihood_func, train_config)?;
 
-    info!("Done with training {} epochs", train_config.num_epochs);
+    info!(
+        "Done with training over {} epochs using {} samples",
+        train_config.num_epochs,
+        data_loader.num_data()
+    );
 
     let latent = encoder.evaluate(&data_loader, train_config)?;
+
+    info!("Evaluated the latent states of the training data");
 
     Ok((llik_trace, latent))
 }
