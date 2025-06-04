@@ -8,6 +8,7 @@ mod srt_routines_post_process;
 mod srt_routines_pre_process;
 
 use srt_routines_latent_representation::*;
+use srt_routines_post_process::SrtLatentStatePairsOps;
 use srt_routines_pre_process::*;
 // use srt_routines_post_process::*;
 
@@ -166,7 +167,7 @@ fn main() -> anyhow::Result<()> {
     // 2. Randomly project the pairs of cells //
     ////////////////////////////////////////////
 
-    let proj_out = srt_cell_pairs.random_projection(args.proj_dim, Some(args.block_size))?;
+    let proj_out = srt_cell_pairs.random_projection(args.proj_dim, args.block_size)?;
 
     srt_cell_pairs.assign_pairs_to_samples(
         &proj_out,
@@ -285,19 +286,12 @@ fn main() -> anyhow::Result<()> {
     csv_gz_out(&latent.right, &args.out, "collapsed.latent.right")?;
     csv_gz_out(&decoder.get_dictionary()?, &args.out, "dictionary")?;
 
-    // let z_nk = evaluate_latent_by_encoder(
-    //     &data_vec,
-    //     &encoder,
-    //     &aggregate_rows,
-    //     &train_config,
-    //     coord_map.as_ref(),
-    //     delta_db,
-    // )?;
-    // z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
-    // if let Some(batch_db) = batch_db {
-    //     batch_db.to_tsv(&(args.out.to_string() + ".delta"))?;
-    // }
+    let latent = srt_cell_pairs.evaluate_latent_states(&encoder, &train_config, args.block_size)?;
 
-    // info!("done");
+    csv_gz_out(&latent.average, &args.out, "latent")?;
+    csv_gz_out(&latent.left, &args.out, "latent.left")?;
+    csv_gz_out(&latent.right, &args.out, "latent.right")?;
+
+    info!("done");
     Ok(())
 }

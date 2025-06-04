@@ -327,7 +327,7 @@ impl MatchedEncoderEvaluateOps for MatchedLogSoftmaxEncoder {
     }
 }
 
-trait MatchedEncoderLatentVecOps {
+pub trait MatchedEncoderLatentVecOps {
     fn concatenate(&self) -> anyhow::Result<MatchedEncoderLatent>;
 }
 

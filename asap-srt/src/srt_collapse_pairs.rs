@@ -115,27 +115,27 @@ impl SrtCollapsedStat {
 	let mut centre_param_ds = GammaMatrix::new((self.nrows(), self.ncols()), a0, b0);
 
 
-	// E[left(g,j)] = μ(g,s) * α(g,s)
-	// E[right(g,j)] = μ(g,s) * β(g,s)
-
+	// left(g,j) ~ Poisson[ μ(g,s) * α(g,s) ]
+	// right(g,j) ~ Poisson[ μ(g,s) * β(g,s) ]
+	//
 	// L = sum_j left(g,j) * log[ μ(g,s) * α(g,s) ] - n(s) * μ(g,s) * α(g,s)
 	//   = left_sum(g,s) * log[ μ(g,s) * α(g,s) ] - n(s) * μ(g,s) * α(g,s)
-
+	//
 	// R = sum_j right(g,j) * log[ μ(g,s) * β(g,s) ]- n(s) * μ(g,s) * β(g,s)
 	//   = right_sum(g,s) * log[ μ(g,s) * β(g,s) ] - n(s) * μ(g,s) * β(g,s)
-	
-	
+	//
 	//           left_sum(g,s) + right_sum(g,s)
 	// μ(g,s) = ---------------------------------
 	//            n(s) * [ α(g,s) + β(g,s) ]
-
+	//
 	//           left_sum(g,s)
 	// α(g,s) = -----------------
 	//            n(s) * μ(g,s)
-
+	//
 	//           right_sum(g,s)
 	// β(g,s) = -----------------
 	//            n(s) * μ(g,s)
+
 
 
 
