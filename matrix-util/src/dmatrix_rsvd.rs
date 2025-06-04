@@ -71,9 +71,9 @@ where
     T: nalgebra::RealField + num_traits::Float + Copy,
     D: IntoDense<DMatrix<T>>,
 {
-    let nc = xx.num_columns();
-
     let max_iter = 5; // five should be enough
+
+    let nc = xx.num_columns();
     let nr = xx.num_rows();
     let mut ll = DMatrix::<T>::zeros(nr, rank_and_oversample);
     let mut qq = DMatrix::<T>::runif(nc, rank_and_oversample);
@@ -82,19 +82,25 @@ where
     for _i in 0..max_iter {
         let lu1 = xx.matmul(&qq);
         let lu1 = LU::new(lu1);
+        let lu1 = lu1.l();
+
+        // note: LU may shrink the matrix
         ll.fill(zero);
         ll.fill_with_identity();
-        ll.view_mut((0, 0), (nr, rank_and_oversample))
+        ll.view_mut((0, 0), (nr, rank_and_oversample.min(lu1.ncols())))
             .lower_triangle()
-            .copy_from(&lu1.l());
+            .copy_from(&lu1);
 
         let lu2 = xx.transpose_matmul(&ll);
         let lu2 = LU::new(lu2);
+        let lu2 = lu2.l();
+
+        // note: LU may shrink the matrix
         qq.fill(zero);
         qq.fill_with_identity();
-        qq.view_mut((0, 0), (nc, rank_and_oversample))
+        qq.view_mut((0, 0), (nc, rank_and_oversample.min(lu2.ncols())))
             .lower_triangle()
-            .copy_from(&lu2.l());
+            .copy_from(&lu2);
     }
 
     // let qq = DMatrix::<T>::runif(nc, rank_and_oversample);
@@ -134,6 +140,7 @@ where
 
     // let bb = qq.transpose() * xx
     let bb = xx.transpose_matmul(&qq).transpose();
+
     let svd = bb.svd(true, true);
 
     if let (Some(svd_u), Some(svd_vt)) = (svd.u, svd.v_t) {

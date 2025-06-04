@@ -45,9 +45,9 @@ impl CocoaCollapseOps for SparseIoVec {
             cocoa_input.hyper_param,
         );
 
-        self.visit_column_by_samples(
+        self.visit_columns_by_sample(
             cocoa_input.sample_to_cells,
-            &collect_stat_each_sample,
+            &collect_stat_visitor,
             cocoa_input,
             &mut cocoa_stat,
         )?;
@@ -56,13 +56,13 @@ impl CocoaCollapseOps for SparseIoVec {
     }
 }
 
-fn collect_stat_each_sample(
+fn collect_stat_visitor(
     this_sample: usize,
     cells: &Vec<usize>,
     data: &SparseIoVec,
     input: &CocoaCollapseIn,
     arc_stat: Arc<Mutex<&mut CocoaStat>>,
-) {
+) -> anyhow::Result<()> {
     assert_eq!(data.num_rows().expect("data # features"), input.n_genes);
     assert_eq!(input.n_samples, data.num_batches());
 
@@ -79,9 +79,7 @@ fn collect_stat_each_sample(
         size_k += input.cell_topic_nk.row(y1_col).transpose();
     }
 
-    let y1_dn = data
-        .read_columns_csc(cells.iter().cloned())
-        .expect("read y1 cells");
+    let y1_dn = data.read_columns_csc(cells.iter().cloned())?;
 
     // sum_j y1[g,j] * z[j,k] * ind[j,s]
     let mut y1_dk = Mat::zeros(y1_dn.nrows(), kk);
@@ -109,9 +107,8 @@ fn collect_stat_each_sample(
         .filter(|&s| input.sample_to_exposure[s] != this_exposure)
         .collect();
 
-    let (y0_matched_dm, matched, distances) = data
-        .read_matched_columns_csc(cells.iter().cloned(), &control_samples, input.knn, true)
-        .expect("read y0 cells");
+    let (y0_matched_dm, matched, distances) =
+        data.read_matched_columns_csc(cells.iter().cloned(), &control_samples, input.knn, true)?;
 
     // sum_j (sum_a y0[g,a] * w[j,a]) * z[j,k] * ind[j,s]
     let y1_to_y0 = partition_by_membership(&matched, None);
@@ -127,7 +124,7 @@ fn collect_stat_each_sample(
         let z_k = &input.cell_topic_nk.row(y1_col);
 
         y0_cols.iter().zip(weights.iter()).for_each(|(&a, &w_j)| {
-            let y0_a = y0_matched_dm.get_col(a).unwrap();
+            let y0_a = y0_matched_dm.get_col(a).expect("cell a");
             let y0_rows = y0_a.row_indices();
             let y0_vals = y0_a.values();
             y0_rows.iter().zip(y0_vals.iter()).for_each(|(&g, &y0_gj)| {
@@ -147,4 +144,6 @@ fn collect_stat_each_sample(
         y0_k_s += &y0_dk.column(k);
         stat.size_stat(k)[this_sample] += size_k[k];
     }
+
+    Ok(())
 }

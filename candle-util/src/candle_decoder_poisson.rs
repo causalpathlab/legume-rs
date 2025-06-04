@@ -30,7 +30,7 @@ impl PoissonDecoder {
     }
 }
 
-impl DecoderModule for PoissonDecoder {
+impl DecoderModuleT for PoissonDecoder {
     fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
         let theta_nk = z_nk.exp()?;
         self.dictionary.forward(&theta_nk)

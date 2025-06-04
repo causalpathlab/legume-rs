@@ -32,15 +32,16 @@ impl TopicDecoder {
     }
 }
 
-impl DecoderModule for TopicDecoder {
+impl DecoderModuleT for TopicDecoder {
     fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
         let theta_nk = z_nk.exp()?;
         let prob_nd = self.dictionary.forward(&theta_nk)?;
-        ops::log_softmax(&prob_nd.log()?, 1)
+	let eps = 1e-4;
+        ops::log_softmax(&(prob_nd + eps)?.log()?, 1)
     }
 
     fn get_dictionary(&self) -> Result<Tensor> {
-	self.dictionary.weight()
+        self.dictionary.weight()
     }
 
     fn forward_with_llik<LlikFn>(

@@ -4,7 +4,7 @@ mod embed_common;
 
 use asap_alg::random_projection::*;
 use embed_common::*;
-use log::info;
+
 use matrix_param::traits::{Inference, ParamIo, TwoStatParam};
 use matrix_util::common_io::{extension, read_lines, remove_file, write_lines, write_types};
 use matrix_util::dmatrix_util::row_membership_matrix;
@@ -15,14 +15,12 @@ use asap_routines_post_process::*;
 
 use asap_alg::collapse_data::CollapsingOps;
 use asap_alg::random_projection::RandProjOps;
-use asap_data::sparse_io::*;
-use asap_data::sparse_io_vector::*;
 
 use candle_util::candle_decoder_topic::*;
 use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_loss_functions as loss_func;
-use candle_util::candle_model_traits::DecoderModule;
+use candle_util::candle_model_traits::DecoderModuleT;
 
 use clap::{Parser, ValueEnum};
 

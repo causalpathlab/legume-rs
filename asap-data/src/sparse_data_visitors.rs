@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 const DEFAULT_BLOCK_SIZE: usize = 100;
 
 pub trait VisitColumnsOps {
-    fn visit_columns_by_jobs<Visitor, SharedIn, SharedOut>(
+    fn visit_columns_by_block<Visitor, SharedIn, SharedOut>(
         &self,
         visitor: &Visitor,
         shared_in: &SharedIn,
@@ -16,11 +16,13 @@ pub trait VisitColumnsOps {
         block_size: Option<usize>,
     ) -> anyhow::Result<()>
     where
-        Visitor: Fn((usize, usize), &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
+        Visitor: Fn((usize, usize), &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) -> anyhow::Result<()>
+            + Sync
+            + Send,
         SharedIn: Sync + Send,
         SharedOut: Sync + Send;
 
-    fn visit_column_by_samples<Visitor, SharedIn, SharedOut>(
+    fn visit_columns_by_sample<Visitor, SharedIn, SharedOut>(
         &self,
         sample_to_cells: &Vec<Vec<usize>>,
         visitor: &Visitor,
@@ -28,13 +30,21 @@ pub trait VisitColumnsOps {
         shared_out: &mut SharedOut,
     ) -> anyhow::Result<()>
     where
-        Visitor: Fn(usize, &Vec<usize>, &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
+        Visitor: Fn(
+                usize,
+                &Vec<usize>,
+                &Self,
+                &SharedIn,
+                Arc<Mutex<&mut SharedOut>>,
+            ) -> anyhow::Result<()>
+            + Sync
+            + Send,
         SharedIn: Sync + Send,
         SharedOut: Sync + Send;
 }
 
 impl VisitColumnsOps for SparseIoVec {
-    fn visit_columns_by_jobs<Visitor, SharedIn, SharedOut>(
+    fn visit_columns_by_block<Visitor, SharedIn, SharedOut>(
         &self,
         visitor: &Visitor,
         shared_in: &SharedIn,
@@ -42,11 +52,12 @@ impl VisitColumnsOps for SparseIoVec {
         block_size: Option<usize>,
     ) -> anyhow::Result<()>
     where
-        Visitor: Fn((usize, usize), &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
+        Visitor: Fn((usize, usize), &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) -> anyhow::Result<()>
+            + Sync
+            + Send,
         SharedIn: Sync + Send,
         SharedOut: Sync + Send,
     {
-        let block_size = block_size.unwrap_or(DEFAULT_BLOCK_SIZE);
         let ntot = self.num_columns()?;
         let jobs = create_jobs(ntot, block_size);
 
@@ -54,14 +65,11 @@ impl VisitColumnsOps for SparseIoVec {
 
         jobs.par_iter()
             .progress_count(jobs.len() as u64)
-            .for_each(|&(lb, ub)| {
-                visitor((lb, ub), self, shared_in, arc_shared_out.clone());
-            });
-
-        Ok(())
+            .map(|&(lb, ub)| visitor((lb, ub), self, shared_in, arc_shared_out.clone()))
+            .collect()
     }
 
-    fn visit_column_by_samples<Visitor, SharedIn, SharedOut>(
+    fn visit_columns_by_sample<Visitor, SharedIn, SharedOut>(
         &self,
         sample_to_cells: &Vec<Vec<usize>>,
         visitor: &Visitor,
@@ -69,7 +77,15 @@ impl VisitColumnsOps for SparseIoVec {
         shared_data: &mut SharedOut,
     ) -> anyhow::Result<()>
     where
-        Visitor: Fn(usize, &Vec<usize>, &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) + Sync + Send,
+        Visitor: Fn(
+                usize,
+                &Vec<usize>,
+                &Self,
+                &SharedIn,
+                Arc<Mutex<&mut SharedOut>>,
+            ) -> anyhow::Result<()>
+            + Sync
+            + Send,
         SharedIn: Sync + Send,
         SharedOut: Sync + Send,
     {
@@ -82,17 +98,14 @@ impl VisitColumnsOps for SparseIoVec {
             .enumerate()
             .par_bridge()
             .progress_count(num_jobs)
-            .for_each(|(sample, cells)| {
-                visitor(sample, cells, self, shared_in, arc_shared_data.clone());
-            });
-
-        Ok(())
+            .map(|(sample, cells)| visitor(sample, cells, self, shared_in, arc_shared_data.clone()))
+            .collect()
     }
 }
 
-fn create_jobs(ntot: usize, block_size: usize) -> Vec<(usize, usize)> {
+pub fn create_jobs(ntot: usize, block_size: Option<usize>) -> Vec<(usize, usize)> {
+    let block_size = block_size.unwrap_or(DEFAULT_BLOCK_SIZE);
     let nblock = ntot.div_ceil(block_size);
-
     (0..nblock)
         .map(|block| {
             let lb: usize = block * block_size;

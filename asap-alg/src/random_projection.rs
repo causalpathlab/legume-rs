@@ -73,22 +73,21 @@ pub trait RandProjOps {
 }
 
 /// column-wise visitor for random projection
-fn visit_rand_proj_columnwise(
+fn project_columns_visitor(
     job: (usize, usize),
     data_vec: &SparseIoVec,
     basis_dk: &nalgebra::DMatrix<f32>,
     arc_proj_kn: Arc<Mutex<&mut nalgebra::DMatrix<f32>>>,
-) {
+) -> anyhow::Result<()> {
     let (lb, ub) = job;
-    let mut xx_dm = data_vec.read_columns_csc(lb..ub).unwrap();
+    let mut xx_dm = data_vec.read_columns_csc(lb..ub)?;
     xx_dm.normalize_columns_inplace();
     let chunk = (xx_dm.transpose() * basis_dk).transpose();
 
-    arc_proj_kn
-        .lock()
-        .unwrap()
-        .columns_range_mut(lb..ub)
-        .copy_from(&chunk);
+    let mut proj_kn = arc_proj_kn.lock().expect("proj_kn lock");
+    proj_kn.columns_range_mut(lb..ub).copy_from(&chunk);
+
+    Ok(())
 }
 
 impl RandProjOps for SparseIoVec {
@@ -121,8 +120,8 @@ impl RandProjOps for SparseIoVec {
 
         let basis_dk = nalgebra::DMatrix::<f32>::rnorm(nrows, target_dim);
 
-        self.visit_columns_by_jobs(
-            &visit_rand_proj_columnwise,
+        self.visit_columns_by_block(
+            &project_columns_visitor,
             &basis_dk,
             &mut proj_kn,
             block_size,

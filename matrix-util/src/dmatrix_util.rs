@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 use crate::traits::*;
 
-pub fn concatenate_vertical<T>(matrices: Vec<DMatrix<T>>) -> anyhow::Result<DMatrix<T>>
+pub fn concatenate_vertical<T>(matrices: &[DMatrix<T>]) -> anyhow::Result<DMatrix<T>>
 where
     T: nalgebra::RealField,
 {
@@ -30,7 +30,7 @@ where
     Ok(DMatrix::from_rows(&rows))
 }
 
-pub fn concatenate_horizontal<T>(matrices: Vec<DMatrix<T>>) -> anyhow::Result<DMatrix<T>>
+pub fn concatenate_horizontal<T>(matrices: &[DMatrix<T>]) -> anyhow::Result<DMatrix<T>>
 where
     T: nalgebra::RealField,
 {

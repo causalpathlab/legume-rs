@@ -1,118 +1,7 @@
-#![allow(dead_code)]
+// #![allow(dead_code)]
 
 use crate::srt_common::*;
 use crate::SRTArgs;
-
-use indicatif::ParallelProgressIterator;
-use log::info;
-
-use asap_alg::normalization::NormalizeDistance;
-use asap_data::sparse_io::SparseIoBackend;
-use asap_data::sparse_io::*;
-use asap_data::sparse_io_vector::*;
-
-use matrix_util::common_io::{extension, read_lines};
-use matrix_util::dmatrix_util::*;
-use matrix_util::knn_match::ColumnDict;
-use matrix_util::traits::*;
-use matrix_util::utils::partition_by_membership;
-use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
-
-///
-///
-///
-pub fn spectral_network_embedding(
-    coordinates_nc: &Mat,
-    knn: usize,
-    max_rank: usize,
-) -> anyhow::Result<Mat> {
-    let nn = coordinates_nc.nrows();
-
-    let points = coordinates_nc.transpose();
-
-    let points = points.column_iter().collect::<Vec<_>>();
-
-    let names = (0..nn).collect::<Vec<_>>();
-
-    let dict = ColumnDict::from_dvector_views(points, names);
-
-    let target_exp_sum = 2_f32.ln();
-    let nquery = (knn + 1).min(nn);
-
-    let triplets = (0..nn)
-        .par_bridge()
-        .progress_count(nn as u64)
-        .map(|i| {
-            let (neighbours, distances) = dict
-                .search_others(&i, nquery)
-                .expect("failed to search k-nearest neighbours");
-
-            let weights = distances.into_iter().normalized_exp(target_exp_sum);
-
-            neighbours
-                .iter()
-                .zip(weights)
-                .filter_map(|(&j, w_ij)| if i == j { None } else { Some((i, j, w_ij)) })
-                .collect::<Vec<_>>()
-        })
-        .flatten()
-        .collect::<Vec<_>>();
-
-    let adj = CscMat::from_nonzero_triplets(nn, nn, triplets)?;
-    let adj_t = adj.transpose();
-    let adj = adj * 0.5 + adj_t * 0.5;
-    let (ret, _, _) = adj.rsvd(max_rank.min(nn))?;
-
-    Ok(ret)
-}
-
-///
-/// each position vector (1 x d) `*` random_proj (d x r)
-///
-pub fn positional_projection<T>(
-    coords: &Mat,
-    batch_membership: &Vec<T>,
-    d: usize,
-) -> anyhow::Result<Mat>
-where
-    T: Sync + Send + Clone + Eq + std::hash::Hash,
-{
-    if coords.nrows() != batch_membership.len() {
-        return Err(anyhow::anyhow!("incompatible batch membership"));
-    }
-
-    let maxval = coords.max();
-    let minval = coords.min();
-    let coords = coords
-        .map(|x| (x - minval) / (maxval - minval + 1.))
-        .transpose();
-
-    let batches = partition_by_membership(batch_membership, None);
-
-    let mut ret = Mat::zeros(d, coords.ncols());
-
-    for (_b, points) in batches.into_iter() {
-        let rand_proj = Mat::rnorm(d, coords.nrows());
-
-        points.into_iter().for_each(|p| {
-            ret.column_mut(p)
-                .copy_from(&(&rand_proj * coords.column(p)));
-        });
-    }
-
-    let (lb, ub) = (-4., 4.);
-    ret.scale_columns_inplace();
-
-    if ret.max() > ub || ret.min() < lb {
-        info!("Clamping values [{}, {}] after standardization", lb, ub);
-        ret.iter_mut().for_each(|x| {
-            *x = x.clamp(lb, ub);
-        });
-        ret.scale_columns_inplace();
-    }
-    Ok(ret)
-}
 
 pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str>>)> {
     // push data files and collect batch membership
@@ -164,7 +53,7 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
         coord_vec.push(coord);
     }
 
-    let coord_nk = concatenate_vertical(coord_vec)?;
+    let coord_nk = concatenate_vertical(&coord_vec)?;
 
     // check batch membership
     let mut batch_membership = Vec::with_capacity(data_vec.len());
@@ -204,6 +93,12 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
         coord_nk
     };
 
+    info!(
+        "Read {} x {} coordinates",
+        coord_nk.nrows(),
+        coord_nk.ncols()
+    );
+
     Ok((data_vec, coord_nk, batch_membership))
 }
 
@@ -237,5 +132,5 @@ where
 
     let bb = Mat::from_vec(coords.nrows(), 1, batch_coord);
 
-    concatenate_horizontal(vec![coords.clone(), bb])
+    concatenate_horizontal(&[coords.clone(), bb])
 }

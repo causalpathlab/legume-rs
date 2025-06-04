@@ -2,7 +2,7 @@
 
 use crate::candle_data_loader::*;
 use crate::candle_inference::TrainConfig;
-use crate::candle_model_traits::{DecoderModule, EncoderModuleT};
+use crate::candle_model_traits::{DecoderModuleT, EncoderModuleT};
 
 use candle_core::{Result, Tensor};
 use candle_nn::AdamW;
@@ -14,7 +14,7 @@ use rayon::prelude::*;
 pub struct Vae<'a, Enc, Dec>
 where
     Enc: EncoderModuleT + Send + Sync + 'static,
-    Dec: DecoderModule + Send + Sync + 'static,
+    Dec: DecoderModuleT + Send + Sync + 'static,
 {
     pub encoder: &'a Enc,
     pub decoder: &'a Dec,
@@ -24,7 +24,7 @@ where
 pub trait VaeT<'a, Enc, Dec>
 where
     Enc: EncoderModuleT + Send + Sync + 'static,
-    Dec: DecoderModule + Send + Sync + 'static,
+    Dec: DecoderModuleT + Send + Sync + 'static,
 {
     /// Train the VAE model
     /// * `data` - data loader should have `minibatch_data`
@@ -64,7 +64,7 @@ where
 impl<'a, Enc, Dec> VaeT<'a, Enc, Dec> for Vae<'a, Enc, Dec>
 where
     Enc: EncoderModuleT + Send + Sync + 'static,
-    Dec: DecoderModule + Send + Sync + 'static,
+    Dec: DecoderModuleT + Send + Sync + 'static,
 {
     fn pretrain_encoder<DataL, LlikFn>(
         &mut self,
@@ -96,7 +96,7 @@ where
 
         let data_aux_out_vec = (0..num_minbatches)
             .map(|b| {
-                data.minibatch_data(b, &device)
+                data.minibatch_shuffled(b, &device)
                     .expect(format!("failed to preload minibatch #{}", b).as_str())
             })
             .collect::<Vec<_>>();
@@ -162,7 +162,7 @@ where
 
         let data_aux_vec = (0..num_minbatches)
             .map(|b| {
-                data.minibatch_data(b, &device)
+                data.minibatch_shuffled(b, &device)
                     .expect(format!("failed to preload minibatch #{}", b).as_str())
             })
             .collect::<Vec<_>>();
