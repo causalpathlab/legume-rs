@@ -1,7 +1,5 @@
-#![allow(dead_code)]
+// #![allow(dead_code)]
 
-// use crate::candle_aux_linear::softmax_linear;
-// candle_aux_linear::SoftmaxLinear
 use crate::candle_aux_layers::StackLayers;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_spatial_model_traits::*;
@@ -15,18 +13,19 @@ pub struct SpatialLogSoftmaxEncoder {
     n_vocab: usize,
     min_coord: f64,
     max_coord: f64,
-    d_emb: usize,
+    // d_emb: usize,
     emb_x: Embedding,    // data embedding
     emb_logx: Embedding, // log data embedding
-    emb_s: Embedding,    // spatial embedding
-    coord_mapping: Linear,
+    // emb_s: Embedding,    // spatial embedding
+    // coord_mapping: Linear,
+    coord_expander: Linear,
     fc: StackLayers<Linear>,
     bn_z: BatchNorm,
-    bn_spatial_z: BatchNorm,
+    // bn_spatial_z: BatchNorm,
     z_mean: Linear,
     z_lnvar: Linear,
-    z_spatial_mean: Linear,
-    z_spatial_lnvar: Linear,
+    // z_spatial_mean: Linear,
+    // z_spatial_lnvar: Linear,
 }
 
 impl SpatialEncoderModuleT for SpatialLogSoftmaxEncoder {
@@ -96,7 +95,7 @@ impl SpatialLogSoftmaxEncoder {
 
         let emb_x = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_x"))?;
         let emb_logx = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_logx"))?;
-        let emb_s = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_s"))?;
+        // let emb_s = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_s"))?;
 
         // (1) data -> fc
         let mut fc = StackLayers::<Linear>::new();
@@ -110,18 +109,20 @@ impl SpatialLogSoftmaxEncoder {
             prev_dim = next_dim;
         }
 
-        let coord_mapping = candle_nn::linear(n_coords, prev_dim, vs.pp("coordinate.mapping"))?;
+        let coord_expander = candle_nn::linear(n_coords, d_emb, vs.pp("coordinate.expander"))?;
+
+        // let coord_mapping = candle_nn::linear(n_coords, prev_dim, vs.pp("coordinate.mapping"))?;
 
         let bn_z = candle_nn::batch_norm(prev_dim, bn_config, vs.pp("nn.enc.bn_z"))?;
-        let bn_spatial_z =
-            candle_nn::batch_norm(prev_dim, bn_config, vs.pp("nn.enc.bn_z_spatial"))?;
+        // let bn_spatial_z =
+        //     candle_nn::batch_norm(prev_dim, bn_config, vs.pp("nn.enc.bn_z_spatial"))?;
 
         // (2) fc -> K
         let z_mean = candle_nn::linear(prev_dim, n_topics, vs.pp("nn.enc.z.mean"))?;
         let z_lnvar = candle_nn::linear(prev_dim, n_topics, vs.pp("nn.enc.z.lnvar"))?;
-        let z_spatial_mean = candle_nn::linear(prev_dim, n_topics, vs.pp("nn.enc.z.spatial.mean"))?;
-        let z_spatial_lnvar =
-            candle_nn::linear(prev_dim, n_topics, vs.pp("nn.enc.z.spatial.lnvar"))?;
+        // let z_spatial_mean = candle_nn::linear(prev_dim, n_topics, vs.pp("nn.enc.z.spatial.mean"))?;
+        // let z_spatial_lnvar =
+        //     candle_nn::linear(prev_dim, n_topics, vs.pp("nn.enc.z.spatial.lnvar"))?;
 
         Ok(Self {
             n_features,
@@ -130,18 +131,19 @@ impl SpatialLogSoftmaxEncoder {
             n_vocab,
             min_coord,
             max_coord,
-            d_emb,
+            // d_emb,
             emb_x,
             emb_logx,
-            emb_s,
-            coord_mapping,
+            // emb_s,
+            // coord_mapping,
+            coord_expander,
             fc,
             bn_z,
-            bn_spatial_z,
+            // bn_spatial_z,
             z_mean,
             z_lnvar,
-            z_spatial_mean,
-            z_spatial_lnvar,
+            // z_spatial_mean,
+            // z_spatial_lnvar,
         })
     }
 
@@ -159,15 +161,13 @@ impl SpatialLogSoftmaxEncoder {
         (x_nd * n_vocab)?.floor()?.to_dtype(U32)
     }
 
-    fn discretize_coords(&self, s_nc: &Tensor) -> Result<Tensor> {
-        use candle_core::DType::U32;
-
-        let n_vocab = self.n_vocab as f64;
-        let div_val = self.max_coord;
-        let s_nc = s_nc.clamp(self.min_coord, self.max_coord)?;
-
-        ((s_nc / div_val)? * n_vocab)?.floor()?.to_dtype(U32)
-    }
+    // fn discretize_coords(&self, s_nc: &Tensor) -> Result<Tensor> {
+    //     use candle_core::DType::U32;
+    //     let n_vocab = self.n_vocab as f64;
+    //     let div_val = self.max_coord;
+    //     let s_nc = s_nc.clamp(self.min_coord, self.max_coord)?;
+    //     ((s_nc / div_val)? * n_vocab)?.floor()?.to_dtype(U32)
+    // }
 
     pub fn preprocess_input_data(
         &self,
@@ -175,7 +175,7 @@ impl SpatialLogSoftmaxEncoder {
         s_nc: Option<&Tensor>,
         x0_nd: Option<&Tensor>,
         train: bool,
-    ) -> Result<(Tensor, Option<Tensor>)> {
+    ) -> Result<Tensor> {
         debug_assert_eq!(x_nd.dims().len(), 2);
         debug_assert!(x_nd.min_all()?.to_scalar::<f32>()? >= 0_f32);
 
@@ -184,36 +184,45 @@ impl SpatialLogSoftmaxEncoder {
         let logx_nd = (x_nd + 1.)?.log()?;
         let int_logx_nd = self.discretize_whitened_data(&logx_nd)?;
 
-        // 2. log1p intensity embedding: n x d -> n x d x d
-        let emb_ndd = (self.emb_x.forward_t(&int_x_nd, train)?
+        // 2. log1p intensity embedding: n x d -> n x d x k
+        // Note: Works like log(x) - beta * log(x0), but we worry
+        // less about how to tune the parameter beta.
+        let emb_ndk = (self.emb_x.forward_t(&int_x_nd, train)?
             + self.emb_logx.forward_t(&int_logx_nd, train)?)?;
-        let k = emb_ndd.dims().len();
 
-        let x_pooled_nd = if let Some(x0_nd) = x0_nd {
-            let int_x0_nd = self.discretize_whitened_data(&x0_nd)?;
-            let logx0_nd = (x0_nd + 1.)?.log()?;
-            let int_logx0_nd = self.discretize_whitened_data(&logx0_nd)?;
+        let pool_embedding = |emb_ndk: &Tensor, s_nc: Option<&Tensor>| -> Result<Tensor> {
+            let last_dim = emb_ndk.dims().len() - 1;
 
-            let emb0_ndd = (self.emb_x.forward_t(&int_x0_nd, train)?
-                + self.emb_logx.forward_t(&int_logx0_nd, train)?)?;
+            if let Some(s_nc) = s_nc {
+                // aggregate the last embedding dimension by the
+                // importance weights learned from spatial coordinates
+                let div = (self.max_coord - self.min_coord).max(1.);
+                let s_nc = ((s_nc - self.min_coord)? / div)?;
 
-            // Note: Works like log(x) - beta * log(x0), but we worry
-            // less about how to tune the parameter beta.
-            (emb_ndd - &emb0_ndd)?.sum(k - 1)?
-        } else {
-            emb_ndd.sum(k - 1)?
+                let agg_nd = self.coord_expander.forward_t(&s_nc, train)?;
+
+                let agg_n1d = agg_nd.unsqueeze(1)?;
+
+                // let agg_n1d = ops::log_softmax(&agg_nd, 1)?.exp()?.unsqueeze(1)?;
+
+                emb_ndk.broadcast_add(&agg_n1d)?.sum(last_dim)
+            } else {
+                emb_ndk.sum(last_dim)
+            }
         };
 
-        // 3. spatial embedding
-        if let Some(s_nc) = s_nc {
-            let int_nc = self.discretize_coords(&s_nc)?;
-            let emb_ncd = self.emb_s.forward_t(&int_nc, train)?;
-            let k = emb_ncd.dims().len();
-            let emb_nc = emb_ncd.sum(k - 1)?;
+        match x0_nd {
+            Some(x0_nd) => {
+                let int_x0_nd = self.discretize_whitened_data(&x0_nd)?;
+                let logx0_nd = (x0_nd + 1.)?.log()?;
+                let int_logx0_nd = self.discretize_whitened_data(&logx0_nd)?;
 
-            Ok((x_pooled_nd, Some(emb_nc)))
-        } else {
-            Ok((x_pooled_nd, None))
+                let emb0_ndk = (self.emb_x.forward_t(&int_x0_nd, train)?
+                    + self.emb_logx.forward_t(&int_logx0_nd, train)?)?;
+
+                pool_embedding(&(emb_ndk - &emb0_ndk)?, s_nc)
+            }
+            None => pool_embedding(&emb_ndk, s_nc),
         }
     }
 
@@ -248,7 +257,7 @@ impl SpatialLogSoftmaxEncoder {
         let min_lv = -8.; // and log variance
         let max_lv = 8.; //
 
-        let (bn_nd, s_nc) = self.preprocess_input_data(x_nd, s_nc, x0_nd, train)?;
+        let bn_nd = self.preprocess_input_data(x_nd, s_nc, x0_nd, train)?;
 
         let fc_nl = self.fc.forward_t(&bn_nd, train)?;
 
@@ -263,25 +272,27 @@ impl SpatialLogSoftmaxEncoder {
             .forward_t(&bn_nl, train)?
             .clamp(min_lv, max_lv)?;
 
-        if let Some(s_nc) = s_nc {
-            let s_nl = self.coord_mapping.forward_t(&s_nc, train)?;
-            let bn_nl = self.bn_spatial_z.forward_t(&s_nl, train)?;
+        Ok((z_mean_nk, z_lnvar_nk))
 
-            let z_spatial_mean_nk = self
-                .z_spatial_mean
-                .forward_t(&bn_nl, train)?
-                .clamp(min_mean, max_mean)?;
-            let z_spatial_lnvar_nk = self
-                .z_spatial_lnvar
-                .forward_t(&bn_nl, train)?
-                .clamp(min_lv, max_lv)?;
+        // if let Some(s_nc) = s_nc {
+        //     let s_nl = self.coord_mapping.forward_t(&s_nc, train)?;
+        //     let bn_nl = self.bn_spatial_z.forward_t(&s_nl, train)?;
 
-            Ok((
-                (z_mean_nk + z_spatial_mean_nk)?,
-                (z_lnvar_nk + z_spatial_lnvar_nk)?,
-            ))
-        } else {
-            Ok((z_mean_nk, z_lnvar_nk))
-        }
+        //     let z_spatial_mean_nk = self
+        //         .z_spatial_mean
+        //         .forward_t(&bn_nl, train)?
+        //         .clamp(min_mean, max_mean)?;
+        //     let z_spatial_lnvar_nk = self
+        //         .z_spatial_lnvar
+        //         .forward_t(&bn_nl, train)?
+        //         .clamp(min_lv, max_lv)?;
+
+        //     Ok((
+        //         (z_mean_nk + z_spatial_mean_nk)?,
+        //         (z_lnvar_nk + z_spatial_lnvar_nk)?,
+        //     ))
+        // } else {
+
+        // }
     }
 }

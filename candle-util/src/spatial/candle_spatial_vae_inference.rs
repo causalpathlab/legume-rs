@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+// #![allow(dead_code)]
 
 use crate::candle_data_loader::*;
 use crate::candle_inference::TrainConfig;
@@ -127,7 +127,7 @@ where
                 data_aux_vec.par_iter().for_each(|minibatch_data| {
                     let (x_nd, s_nc, x0_nd, y_nd) = (
                         minibatch_data.input.as_ref(),
-                        minibatch_data.coordinate.as_ref(),
+                        minibatch_data.input_matched.as_ref(),
                         minibatch_data.input_null.as_ref(),
                         minibatch_data.output.as_ref(),
                     );
@@ -191,7 +191,7 @@ where
 
                     let (x_nd, s_nc, x0_nd, y_nd) = (
                         minibatch_data.input.as_ref(),
-                        minibatch_data.coordinate.as_ref(),
+                        minibatch_data.input_matched.as_ref(),
                         minibatch_data.input_null.as_ref(),
                         minibatch_data.output.as_ref(),
                     );
@@ -271,7 +271,7 @@ where
 
                 let (x_nd, s_nc, x0_nd, z_nk) = (
                     minibatch_data.input.as_ref(),
-                    minibatch_data.coordinate.as_ref(),
+                    minibatch_data.input_matched.as_ref(),
                     minibatch_data.input_null.as_ref(),
                     minibatch_data.output.as_ref(),
                 );

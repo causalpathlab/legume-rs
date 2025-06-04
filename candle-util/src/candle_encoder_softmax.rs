@@ -10,7 +10,6 @@ pub struct LogSoftmaxEncoder {
     n_features: usize,
     n_topics: usize,
     n_vocab: usize,
-    d_emb: usize,
     emb_x: Embedding,
     emb_logx: Embedding,
     fc: StackLayers<Linear>,
@@ -59,7 +58,7 @@ impl LogSoftmaxEncoder {
         (x_nd * n_vocab)?.floor()?.to_dtype(U32)
     }
 
-    pub fn preprocess_input(
+    fn preprocess_input(
         &self,
         x_nd: &Tensor,
         x0_nd: Option<&Tensor>,
@@ -68,15 +67,16 @@ impl LogSoftmaxEncoder {
         debug_assert_eq!(x_nd.dims().len(), 2);
         debug_assert!(x_nd.min_all()?.to_scalar::<f32>()? >= 0_f32);
 
-        // 1. Discretize data after log1p transformation
+        // 1. Discretize data
         let int_x_nd = self.discretize_whitened_tensor(&x_nd)?;
         let logx_nd = (x_nd + 1.)?.log()?;
         let int_logx_nd = self.discretize_whitened_tensor(&logx_nd)?;
 
-        // 2. log1p intensity embedding: n x d -> n x d x d
+        // 2. log1p intensity embedding: n x d -> n x d x k
         let emb_ndd = (self.emb_x.forward_t(&int_x_nd, train)?
             + self.emb_logx.forward_t(&int_logx_nd, train)?)?;
-        let k = emb_ndd.dims().len();
+
+        let last_dim = emb_ndd.dims().len();
 
         if let Some(x0_nd) = x0_nd {
             let int_x0_nd = self.discretize_whitened_tensor(&x0_nd)?;
@@ -91,17 +91,16 @@ impl LogSoftmaxEncoder {
             //
             // We could also do:
             // return emb_ndd.sum(k - 1)? - emb0_ndd.sum(k - 1)?;
-
-            return (emb_ndd - &emb0_ndd)?.sum(k - 1);
+            (emb_ndd - &emb0_ndd)?.sum(last_dim - 1)
         } else {
-            return emb_ndd.sum(k - 1);
+            emb_ndd.sum(last_dim - 1)
         }
     }
 
     ///
     /// Evaluate latent Gaussian parameters: mu and log_var
     /// z ~ (mu(x), log_var(x))
-    pub fn latent_gaussian_params(
+    fn latent_gaussian_params(
         &self,
         x_nd: &Tensor,
         x0_nd: Option<&Tensor>,
@@ -133,7 +132,7 @@ impl LogSoftmaxEncoder {
     /// # Arguments
     /// * `z_mean` - mean of Gaussian distribution
     /// * `z_lnvar` - log variance of Gaussian distribution
-    pub fn reparameterize(&self, z_mean: &Tensor, z_lnvar: &Tensor, train: bool) -> Result<Tensor> {
+    fn reparameterize(&self, z_mean: &Tensor, z_lnvar: &Tensor, train: bool) -> Result<Tensor> {
         if train {
             let eps = Tensor::randn_like(&z_mean, 0., 1.)?;
             z_mean + (z_lnvar * 0.5)?.exp()? * eps
@@ -199,7 +198,6 @@ impl LogSoftmaxEncoder {
             n_features,
             n_topics,
             n_vocab,
-            d_emb,
             emb_x,
             emb_logx,
             fc,

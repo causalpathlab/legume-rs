@@ -1,32 +1,25 @@
 mod simulate;
+mod srt_cell_pairs;
+mod srt_collapse_pairs;
 mod srt_common;
+mod srt_random_projection;
 mod srt_routines_latent_representation;
 mod srt_routines_post_process;
 mod srt_routines_pre_process;
 
-use log::info;
-
-use srt_common::*;
-use srt_routines_pre_process::*;
-
 use srt_routines_latent_representation::*;
-use srt_routines_post_process::*;
+use srt_routines_pre_process::*;
+// use srt_routines_post_process::*;
 
-use matrix_param::traits::{Inference, ParamIo, TwoStatParam};
-use matrix_util::common_io::{write_lines, write_types};
-use matrix_util::dmatrix_util::*;
-use matrix_util::traits::*;
+use asap_alg::random_projection::binary_sort_columns;
 
-use asap_alg::collapse_data::CollapsingOps;
-use asap_alg::random_projection::*;
-
-use candle_util::candle_decoder_topic::*;
-use candle_util::candle_inference::TrainConfig;
-use candle_util::candle_loss_functions as loss_func;
-use candle_util::candle_model_traits::DecoderModule;
-use candle_util::candle_spatial_encoder_softmax::*;
+use matrix_param::traits::{Inference, TwoStatParam};
+use srt_cell_pairs::SrtCellPairs;
+use srt_collapse_pairs::SrtCollapsePairsOps;
+use srt_common::*;
 
 use clap::{Parser, ValueEnum};
+use srt_random_projection::SrtRandProjOps;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -63,6 +56,10 @@ struct SRTArgs {
     #[arg(long, short = 'p', default_value_t = 50)]
     proj_dim: usize,
 
+    /// Use top `S` components of projection. #samples < `2^S+1`.
+    #[arg(long, short = 'd', default_value_t = 10)]
+    sort_dim: usize,
+
     /// #k-nearest neighbours within each batch
     #[arg(long, default_value_t = 3)]
     knn_batches: usize,
@@ -91,10 +88,6 @@ struct SRTArgs {
     /// Output header
     #[arg(long, short, required = true)]
     out: Box<str>,
-
-    /// Use top `S` components of projection. #samples < `2^S+1`.
-    #[arg(long, short = 'd', default_value_t = 10)]
-    sort_dim: usize,
 
     /// Block_size for parallel processing
     #[arg(long, default_value_t = 100)]
@@ -135,10 +128,6 @@ struct SRTArgs {
     #[arg(long, value_enum, default_value = "cpu")]
     device: ComputeDevice,
 
-    /// exclude spatial information
-    #[arg(long, default_value_t = false)]
-    exclude_spatial_info: bool,
-
     /// verbosity
     #[arg(long, short)]
     verbose: bool,
@@ -154,153 +143,84 @@ fn main() -> anyhow::Result<()> {
 
     info!("Reading data files...");
 
-    let (mut data_vec, coord_map, batch_membership) = read_data_vec(args.clone())?;
+    let (data, coordinates, _) = read_data_vec(args.clone())?;
 
-    let min_coord = coord_map.min().max(0_f32);
-    let max_coord = coord_map.max() + 1_f32;
+    // if args.batch_files.is_some() && !batch_membership.is_empty() {
+    //     info!("Registering batch information");
+    //     data_vec.register_batches(&proj_kn, &batch_membership)?;
+    // }
 
-    info!(
-        "spectral embedding of {}-dimensional coordinates",
-        coord_map.ncols()
-    );
-    let coord_spectral =
-        spectral_network_embedding(&coord_map, args.knn_spatial, args.rank_spatial)?
-            .scale_columns();
-
-    coord_spectral.to_tsv(&(args.out.to_string() + ".coordinate.spectral.gz"))?;
-
-    //////////////////////////////////////////
-    // 1. Randomly project the data columns //
-    //////////////////////////////////////////
-
-    let proj_dim = args.proj_dim.max(args.n_latent_topics);
-
-    info!("Random projection of data onto {} dims", proj_dim);
-    let proj_out = data_vec.project_columns_with_batch_correction(
-        proj_dim,
-        Some(args.block_size),
-        Some(&batch_membership),
-    )?;
-
-    let proj_kn = if args.exclude_spatial_info {
-        info!("excluding spatial information in the initial random projection");
-        proj_out.proj
-    } else {
-        info!(
-            "Random projection of spatial coordinates onto {} dims",
-            proj_dim
-        );
-
-        let coord_kn =
-            spectral_network_embedding(&coord_map, args.knn_spatial, proj_dim)?.scale_columns();
-
-        proj_out.proj + coord_kn
-    };
-
-    info!("Assigning {} columns to samples...", proj_kn.ncols());
-    let nsamp =
-        data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim), args.down_sample)?;
-
-    //////////////////////////////////
-    // 2. Register batch membership //
-    //////////////////////////////////
-
-    if args.batch_files.is_some() && !batch_membership.is_empty() {
-        info!("Registering batch information");
-        data_vec.register_batches(&proj_kn, &batch_membership)?;
-    }
-
-    ///////////////////////////
-    // 3. Collapsing columns //
-    ///////////////////////////
-
-    info!("Collapsing data columns... into {} samples", nsamp);
-    let collapse_out = data_vec.collapse_columns(
-        Some(args.knn_batches),
-        Some(args.knn_cells),
-        Some(args.iter_opt),
-    )?;
-
-    let group_to_cols = data_vec.take_grouped_columns().ok_or(anyhow::anyhow!(
-        "The columns were not assigned before. Call `assign_columns_to_groups`"
-    ))?;
-
-    info!("Collapsing coordinates into {} samples", nsamp);
-
-    let mut collapsed_coords = Mat::zeros(group_to_cols.len(), coord_map.ncols());
-
-    group_to_cols
-        .iter()
-        .enumerate()
-        .for_each(|(s, cells)| {
-            collapsed_coords
-                .row_mut(s)
-                .copy_from(&coord_map.select_rows(cells).row_mean())
-        });
-
-    collapsed_coords.to_tsv(&(args.out.to_string() + ".collapsed.coords.gz"))?;
-
-    let batch_db = collapse_out.delta.as_ref();
-
-    if let Some(batch_db) = batch_db {
-        batch_db.to_tsv(&(args.out.to_string() + ".delta"))?;
-    }
-
-    let row_names = data_vec.row_names()?;
-    let col_names = data_vec.column_names()?;
+    let row_names = data.row_names()?;
+    let col_names = data.column_names()?;
     write_lines(&row_names, &(args.out.to_string() + ".rows.gz"))?;
     write_lines(&col_names, &(args.out.to_string() + ".cols.gz"))?;
 
+    //////////////////////////////////////////////////
+    // 1. Take pairs of spatially interacting cells //
+    //////////////////////////////////////////////////
+
+    let mut srt_cell_pairs =
+        SrtCellPairs::new(&data, &coordinates, args.knn_spatial, Some(args.block_size))?;
+
+    ////////////////////////////////////////////
+    // 2. Randomly project the pairs of cells //
+    ////////////////////////////////////////////
+
+    let proj_out = srt_cell_pairs.random_projection(args.proj_dim, Some(args.block_size))?;
+
+    srt_cell_pairs.assign_pairs_to_samples(
+        &proj_out,
+        Some(args.sort_dim),
+        args.down_sample.clone(),
+    )?;
+
+    ///////////////////////////////////////////////
+    // 3. Collapse these cell pairs into samples //
+    ///////////////////////////////////////////////
+
+    let collapsed = srt_cell_pairs.collapse_pairs()?;
+    let params = collapsed.optimize()?;
+
+    concatenate_vertical(&[collapsed.left_coordinates, collapsed.right_coordinates])?
+        .transpose()
+        .to_csv(&(args.out.to_string() + ".collapsed.coord.pairs.csv.gz"))?;
+
+    /////////////////////////////////////////////////
+    // 4. Collapse rows/genes/features to speed up //
+    /////////////////////////////////////////////////
+
+    let aggregate_rows = if params.left.nrows() > args.n_row_modules {
+        let log_x_md = concatenate_vertical(&[
+            params.left.posterior_log_mean().transpose().clone(),
+            params.right.posterior_log_mean().transpose().clone(),
+        ])?;
+        let kk = (args.n_row_modules as f32).log2().ceil() as usize + 1;
+        info!(
+            "approximately reduce data features: {} -> {}",
+            log_x_md.ncols(),
+            args.n_row_modules
+        );
+        row_membership_matrix(binary_sort_columns(&log_x_md, kk)?)?
+    } else {
+        let d = params.left.nrows();
+        Mat::identity(d, d)
+    };
+
     /////////////////////////////////////////////////////////
-    // 4. Train embedded topic model on the collapsed data //
+    // 5. Train embedded topic model on the collapsed data //
     /////////////////////////////////////////////////////////
 
     let n_topics = args.n_latent_topics;
     let n_vocab = args.vocab_size;
     let d_vocab_emb = args.vocab_emb;
 
-    let aggregate_rows = if collapse_out.mu_observed.nrows() > args.n_row_modules {
-        let log_x_nd = match collapse_out.mu_adjusted.as_ref() {
-            Some(x) => x.posterior_log_mean().transpose().clone(),
-            _ => collapse_out
-                .mu_observed
-                .posterior_log_mean()
-                .transpose()
-                .clone(),
-        };
-        let kk = (args.n_row_modules as f32).log2().ceil() as usize + 1;
-        info!(
-            "reduce data features: {} -> {}",
-            log_x_nd.ncols(),
-            args.n_row_modules
-        );
-        row_membership_matrix(binary_sort_columns(&log_x_nd, kk)?)?
-    } else {
-        let d = collapse_out.mu_observed.nrows();
-        Mat::identity(d, d)
-    };
-
-    let mixed_dn = &collapse_out.mu_observed;
-    let clean_dn = collapse_out.mu_adjusted.as_ref();
-    let batch_dn = collapse_out.mu_residual.as_ref();
-
     // encoder input can be modularized
-    let input_nm = mixed_dn.posterior_mean().transpose().clone() * &aggregate_rows;
-
-    let batch_nm = batch_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
-
-    // spatial coordinate information
-    let spatial_nc = (!args.exclude_spatial_info).then_some(collapsed_coords);
-
-    let coord_map = (!args.exclude_spatial_info).then_some(coord_map);
+    let input_nm = params.left.posterior_mean().transpose().clone() * &aggregate_rows;
+    let input_matched_nm = params.right.posterior_mean().transpose().clone() * &aggregate_rows;
 
     // output decoder should maintain the original dimension
-    let output_nd = match clean_dn {
-        Some(x) => x.posterior_mean().transpose().clone(),
-        _ => mixed_dn.posterior_mean().transpose().clone(),
-    };
-
-    let parameters = candle_nn::VarMap::new();
+    let output_nd = params.left.posterior_mean().transpose();
+    let output_matched_nd = params.right.posterior_mean().transpose();
 
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
@@ -317,8 +237,8 @@ fn main() -> anyhow::Result<()> {
         verbose: args.verbose,
     };
 
+    let parameters = candle_nn::VarMap::new();
     let dev = &train_config.device;
-
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
 
@@ -327,34 +247,30 @@ fn main() -> anyhow::Result<()> {
     ///////////////////////////////////////////////////
 
     let n_features_encoder = input_nm.ncols();
-    let n_coords = spatial_nc.as_ref().map_or(1, |nc| nc.ncols());
 
-    let n_features_decoder = output_nd.ncols();
-
-    let encoder = SpatialLogSoftmaxEncoder::new(
+    let encoder = MatchedLogSoftmaxEncoder::new(
         n_features_encoder,
         n_topics,
-        n_coords,
         n_vocab,
-        min_coord.into(),
-        max_coord.into(),
         d_vocab_emb,
         &args.encoder_layers,
         param_builder.clone(),
     )?;
+
+    let n_features_decoder = output_nd.ncols();
+
+    let decoder = MatchedTopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
     info!(
         "input: {} -> encoder -> decoder -> output: {}",
         n_features_encoder, n_features_decoder
     );
 
-    let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
-
-    let log_likelihood = train_encoder_decoder(
+    let (log_likelihood, latent) = train_encoder_decoder(
         &input_nm,
+        &input_matched_nm,
         &output_nd,
-        spatial_nc.as_ref(),
-        batch_nm.as_ref(),
+        &output_matched_nd,
         &encoder,
         &decoder,
         &parameters,
@@ -364,26 +280,24 @@ fn main() -> anyhow::Result<()> {
 
     write_types::<f32>(&log_likelihood, &(args.out.to_string() + ".llik.gz"))?;
 
-    decoder
-        .get_dictionary()?
-        .to_device(&candle_core::Device::Cpu)?
-        .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
+    csv_gz_out(&latent.average, &args.out, "collapsed.latent")?;
+    csv_gz_out(&latent.left, &args.out, "collapsed.latent.left")?;
+    csv_gz_out(&latent.right, &args.out, "collapsed.latent.right")?;
+    csv_gz_out(&decoder.get_dictionary()?, &args.out, "dictionary")?;
 
-    let delta_db = batch_db.map(|x| x.posterior_mean());
+    // let z_nk = evaluate_latent_by_encoder(
+    //     &data_vec,
+    //     &encoder,
+    //     &aggregate_rows,
+    //     &train_config,
+    //     coord_map.as_ref(),
+    //     delta_db,
+    // )?;
+    // z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
+    // if let Some(batch_db) = batch_db {
+    //     batch_db.to_tsv(&(args.out.to_string() + ".delta"))?;
+    // }
 
-    let z_nk = evaluate_latent_by_encoder(
-        &data_vec,
-        &encoder,
-        &aggregate_rows,
-        &train_config,
-        coord_map.as_ref(),
-        delta_db,
-    )?;
-    z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
-    if let Some(batch_db) = batch_db {
-        batch_db.to_tsv(&(args.out.to_string() + ".delta"))?;
-    }
-
-    info!("done");
+    // info!("done");
     Ok(())
 }

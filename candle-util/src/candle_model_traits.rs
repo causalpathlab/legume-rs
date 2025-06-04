@@ -25,7 +25,7 @@ pub trait EncoderModuleT {
     fn dim_latent(&self) -> usize;
 }
 
-pub trait DecoderModule {
+pub trait DecoderModuleT {
     /// A decoder that spits out reconstruction
     fn forward(&self, z_nk: &Tensor) -> Result<Tensor>;
 
@@ -42,6 +42,62 @@ pub trait DecoderModule {
         x_nd: &Tensor,
         llik: &LlikFn,
     ) -> Result<(Tensor, Tensor)>
+    where
+        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>;
+
+    fn dim_obs(&self) -> usize;
+
+    fn dim_latent(&self) -> usize;
+}
+
+pub struct MatchedEncoderLatent {
+    pub left: Tensor,
+    pub right: Tensor,
+    pub average: Tensor,
+    pub kl_div: Tensor,
+}
+
+pub trait MatchedEncoderModuleT {
+    /// An encoder that spits out two results (latent inference, KL loss)
+    ///
+    /// # Arguments
+    /// * `x_nd` - input data (n x d)
+    /// * `x0_nd` - null or matched data (n x d)
+    /// * `train` - whether to use dropout/batchnorm or not
+    ///
+    /// # Returns `DiffEncoderLatent`
+    ///
+    fn forward_t(&self, x_nd: &Tensor, x0_nd: &Tensor, train: bool)
+        -> Result<MatchedEncoderLatent>;
+
+    fn dim_obs(&self) -> usize;
+
+    fn dim_latent(&self) -> usize;
+}
+
+pub struct MatchedDecoderRecon {
+    pub left: Tensor,
+    pub right: Tensor,
+}
+
+pub trait MatchedDecoderModuleT {
+    /// A decoder that spits out reconstruction
+    fn forward(&self, latent: &MatchedEncoderLatent) -> Result<(Tensor, Tensor)>;
+
+    /// Get a representative dictionary matrix
+    fn get_dictionary(&self) -> Result<Tensor>;
+
+    /// A decoder that spits out reconstruction and log-likelihood
+    /// * `latent` - latent states by `DiffEncoderModuleT`
+    /// * `x_nd` - observed data to validate with
+    /// * `x0_nd` - matched data to validate with
+    /// * `llik` - fn (observed, reconstruction) -> log-likelihood
+    fn forward_with_llik<LlikFn>(
+        &self,
+        latent: &MatchedEncoderLatent,
+        x_nd_pair: (&Tensor, &Tensor),
+        llik: &LlikFn,
+    ) -> Result<(MatchedDecoderRecon, Tensor)>
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>;
 

@@ -2,31 +2,25 @@ use crate::embed_common::*;
 
 use asap_alg::normalization::*;
 use asap_data::sparse_data_visitors::VisitColumnsOps;
-use asap_data::sparse_io::*;
-use asap_data::sparse_io_vector::*;
 
 use matrix_util::traits::*;
 
 use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_model_traits::*;
 
-use std::sync::{Arc, Mutex};
-
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
 
-fn visit_data_to_adjust(
+fn adjust_triplets_visitor(
     job: (usize, usize),
     full_data_vec: &SparseIoVec,
     delta_db: &Mat,
     triplets: Arc<Mutex<&mut Vec<(u64, u64, f32)>>>,
-) {
+) -> anyhow::Result<()> {
     let (lb, ub) = job;
     let batches = full_data_vec.get_batch_membership(lb..ub);
 
-    let mut x_dn = full_data_vec
-        .read_columns_csc(lb..ub)
-        .expect("read columns");
+    let mut x_dn = full_data_vec.read_columns_csc(lb..ub)?;
 
     x_dn.adjust_by_division(delta_db, &batches);
 
@@ -44,6 +38,7 @@ fn visit_data_to_adjust(
 
     let mut triplets = triplets.lock().expect("lock triplets");
     triplets.extend(new_triplets);
+    Ok(())
 }
 
 /// Adjust the original data by eliminating batch effects `delta_db`
@@ -61,7 +56,7 @@ pub fn triplets_adjusted_by_batch(
     delta_db: &Mat,
 ) -> anyhow::Result<Vec<(u64, u64, f32)>> {
     let mut triplets = vec![];
-    data_vec.visit_columns_by_jobs(&visit_data_to_adjust, delta_db, &mut triplets, None)?;
+    data_vec.visit_columns_by_block(&adjust_triplets_visitor, delta_db, &mut triplets, None)?;
     Ok(triplets)
 }
 
@@ -89,7 +84,7 @@ where
 
     let block_size = train_config.batch_size;
 
-    let jobs = create_jobs(ntot, block_size);
+    let jobs = create_jobs(ntot, Some(block_size));
     let njobs = jobs.len() as u64;
     let arc_enc = Arc::new(Mutex::new(encoder));
 
@@ -108,7 +103,7 @@ where
     let mut chunks = jobs
         .par_iter()
         .progress_count(njobs)
-        .map(|&(lb, ub)| {
+        .map(|&(lb, ub)| -> anyhow::Result<(usize, Mat)> {
             let enc = arc_enc.lock().expect("enc lock");
 
             let x0_nm = delta_bm.as_ref().map(|delta_bm| {
@@ -122,22 +117,16 @@ where
             });
 
             let x_nd = data_vec
-                .read_columns_dmatrix(lb..ub)
-                .expect("read columns")
-                .to_tensor(dev)
-                .expect("x")
-                .transpose(0, 1)
-                .expect("transpose x_dn -> x_nd");
+                .read_columns_dmatrix(lb..ub)?
+                .to_tensor(dev)?
+                .transpose(0, 1)?;
 
-            let x_nm = x_nd.matmul(&aggregate).expect("x aggregate");
-
-            let (z_nk, _) = enc
-                .forward_t(&x_nm, x0_nm.as_ref(), false)
-                .expect("forward");
-
-            let z_nk = z_nk.to_device(&candle_core::Device::Cpu).expect("to cpu");
-            (lb, Mat::from_tensor(&z_nk).expect("to mat"))
+            let x_nm = x_nd.matmul(&aggregate)?;
+            let (z_nk, _) = enc.forward_t(&x_nm, x0_nm.as_ref(), false)?;
+            let z_nk = z_nk.to_device(&candle_core::Device::Cpu)?;
+            Ok((lb, Mat::from_tensor(&z_nk).expect("to mat")))
         })
+        .filter_map(Result::ok)
         .collect::<Vec<_>>();
 
     chunks.sort_by_key(|&(lb, _)| lb);

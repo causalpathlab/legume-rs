@@ -1,30 +1,25 @@
-use log::info;
-use std::sync::{Arc, Mutex};
-
 use crate::embed_common::*;
 
 use asap_alg::normalization::*;
 use asap_data::sparse_data_visitors::VisitColumnsOps;
-use asap_data::sparse_io_vector::*;
+
 use candle_util::candle_data_loader::*;
 use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_model_traits::*;
 use candle_util::candle_vae_inference::*;
 use matrix_util::traits::*;
 
-fn visit_nystrom_proj_columnwise(
+fn nystrom_proj_visitor(
     job: (usize, usize),
     full_data_vec: &SparseIoVec,
     proj_basis: &NystromParam,
     arc_proj_kn: Arc<Mutex<&mut Mat>>,
-) {
+) -> anyhow::Result<()> {
     let (lb, ub) = job;
     let u_dk = proj_basis.dictionary_dk;
     let delta_db = proj_basis.batch_db;
 
-    let mut x_dn = full_data_vec
-        .read_columns_csc(lb..ub)
-        .expect("read columns");
+    let mut x_dn = full_data_vec.read_columns_csc(lb..ub)?;
 
     x_dn.normalize_columns_inplace();
 
@@ -44,6 +39,7 @@ fn visit_nystrom_proj_columnwise(
     let mut proj_kn = arc_proj_kn.lock().expect("lock proj in nystrom");
 
     proj_kn.columns_range_mut(lb..ub).copy_from(&chunk);
+    Ok(())
 }
 
 struct NystromParam<'a> {
@@ -95,8 +91,8 @@ pub fn do_nystrom_proj(
 
     let mut proj_kn = Mat::zeros(kk, ntot);
 
-    full_data_vec.visit_columns_by_jobs(
-        &visit_nystrom_proj_columnwise,
+    full_data_vec.visit_columns_by_block(
+        &nystrom_proj_visitor,
         &nystrom_param,
         &mut proj_kn,
         block_size,
@@ -140,7 +136,7 @@ pub fn train_encoder_decoder<Enc, Dec, LLikFn>(
 ) -> anyhow::Result<Vec<f32>>
 where
     Enc: EncoderModuleT + Send + Sync + 'static,
-    Dec: DecoderModule + Send + Sync + 'static,
+    Dec: DecoderModuleT + Send + Sync + 'static,
     LLikFn: Fn(&candle_core::Tensor, &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor>
         + Sync
         + Send,
@@ -159,7 +155,7 @@ where
                 null_nm.ncols(),
                 adjusted_data_nd.ncols()
             );
-            InMemoryData::new_with_null_output(input_data_nm, null_nm, adjusted_data_nd)?
+            InMemoryData::new_with_null_input_and_output(input_data_nm, null_nm, adjusted_data_nd)?
         }
         _ => {
             info!(
@@ -167,7 +163,7 @@ where
                 input_data_nm.ncols(),
                 adjusted_data_nd.ncols()
             );
-            InMemoryData::new_with_output(input_data_nm, adjusted_data_nd)?
+            InMemoryData::new_with_input_and_output(input_data_nm, adjusted_data_nd)?
         }
     };
 

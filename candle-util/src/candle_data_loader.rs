@@ -1,27 +1,46 @@
 #![allow(dead_code)]
 
-// use asap_data::sparse_io_vector::*;
-
 use candle_core::{Device, Tensor};
 use nalgebra::DMatrix;
 use ndarray::Array2;
 use rand::prelude::SliceRandom;
 use rayon::prelude::*;
 
+pub fn generate_minibatch_intervals(ntot: usize, batch_size: usize) -> Vec<(usize, usize)> {
+    let num_batches = ntot.div_ceil(batch_size);
+    (0..num_batches)
+        .map(|b| {
+            let lb: usize = b * batch_size;
+            let ub: usize = ((b + 1) * batch_size).min(ntot);
+            (lb, ub)
+        })
+        .collect::<Vec<_>>()
+}
+
 pub struct MinibatchData {
     pub input: Tensor,
     pub input_null: Option<Tensor>,
-    pub coordinate: Option<Tensor>,
+    pub input_matched: Option<Tensor>,
     pub output: Option<Tensor>,
+    pub output_matched: Option<Tensor>,
 }
 
 /// `DataLoader` for minibatch learning
 pub trait DataLoader {
-    fn minibatch_data(
+    fn minibatch_shuffled(
         &self,
         batch_idx: usize,
         target_device: &Device,
     ) -> anyhow::Result<MinibatchData>;
+
+    fn minibatch_ordered(
+        &self,
+        lb: usize,
+        ub: usize,
+        target_device: &Device,
+    ) -> anyhow::Result<MinibatchData>;
+
+    fn num_data(&self) -> usize;
 
     fn num_minibatch(&self) -> usize;
 
@@ -35,14 +54,16 @@ pub trait DataLoader {
 ///
 pub struct InMemoryData {
     input_data: Vec<Tensor>,
-    null_data: Option<Vec<Tensor>>,
-    coordinate_data: Option<Vec<Tensor>>,
+    input_null_data: Option<Vec<Tensor>>,
+    input_matched_data: Option<Vec<Tensor>>,
     output_data: Option<Vec<Tensor>>,
+    output_matched_data: Option<Vec<Tensor>>,
 
     shuffled_input_data: Option<Vec<Tensor>>,
     shuffled_input_null_data: Option<Vec<Tensor>>,
-    shuffled_coordinate_data: Option<Vec<Tensor>>,
+    shuffled_input_matched_data: Option<Vec<Tensor>>,
     shuffled_output_data: Option<Vec<Tensor>>,
+    shuffled_output_matched_data: Option<Vec<Tensor>>,
 
     minibatches: Minibatches,
 }
@@ -51,22 +72,24 @@ impl InMemoryData {
     ///
     /// Create a data loader with the main data tensor `data`
     ///
-    pub fn new<D>(data: &D) -> anyhow::Result<Self>
+    pub fn from<D>(data: &D) -> anyhow::Result<Self>
     where
         D: RowsToTensorVec,
     {
-        let data = data.rows_to_tensor_vec();
-        let rows = (0..data.len()).collect();
+        let input_data = data.rows_to_tensor_vec();
+        let rows = (0..input_data.len()).collect();
 
         Ok(InMemoryData {
-            input_data: data,
-            null_data: None,
-            coordinate_data: None,
+            input_data,
+            input_null_data: None,
+            input_matched_data: None,
             output_data: None,
+            output_matched_data: None,
             shuffled_input_data: None,
             shuffled_input_null_data: None,
-            shuffled_coordinate_data: None,
+            shuffled_input_matched_data: None,
             shuffled_output_data: None,
+            shuffled_output_matched_data: None,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -77,25 +100,27 @@ impl InMemoryData {
     /// Create a data loader with the main `data` and auxiliary
     /// data `aux`
     ///
-    pub fn new_with_null<D>(data: &D, null_data: &D) -> anyhow::Result<Self>
+    pub fn new_with_null_input<D>(data: &D, null_data: &D) -> anyhow::Result<Self>
     where
         D: RowsToTensorVec,
     {
-        let data = data.rows_to_tensor_vec();
-        let null_data = null_data.rows_to_tensor_vec();
-        let rows = (0..data.len()).collect();
+        let input_data = data.rows_to_tensor_vec();
+        let input_null_data = null_data.rows_to_tensor_vec();
+        let rows = (0..input_data.len()).collect();
 
-        debug_assert!(data.len() == null_data.len());
+        debug_assert!(input_data.len() == input_null_data.len());
 
         Ok(InMemoryData {
-            input_data: data,
-            null_data: Some(null_data),
-            coordinate_data: None,
+            input_data,
+            input_null_data: Some(input_null_data),
+            input_matched_data: None,
             output_data: None,
+            output_matched_data: None,
             shuffled_input_data: None,
             shuffled_input_null_data: None,
-            shuffled_coordinate_data: None,
+            shuffled_input_matched_data: None,
             shuffled_output_data: None,
+            shuffled_output_matched_data: None,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -106,25 +131,27 @@ impl InMemoryData {
     ///
     /// Create a data loader with the main `data` and output `out`
     ///
-    pub fn new_with_output<D>(data: &D, out: &D) -> anyhow::Result<Self>
+    pub fn new_with_input_and_output<D>(data: &D, out: &D) -> anyhow::Result<Self>
     where
         D: RowsToTensorVec,
     {
-        let data = data.rows_to_tensor_vec();
-        let out_data = out.rows_to_tensor_vec();
-        let rows = (0..data.len()).collect();
+        let input_data = data.rows_to_tensor_vec();
+        let output_data = out.rows_to_tensor_vec();
+        let rows = (0..input_data.len()).collect();
 
-        debug_assert!(data.len() == out_data.len());
+        debug_assert!(input_data.len() == output_data.len());
 
         Ok(InMemoryData {
-            input_data: data,
-            null_data: None,
-            coordinate_data: None,
-            output_data: Some(out_data),
+            input_data,
+            input_null_data: None,
+            input_matched_data: None,
+            output_data: Some(output_data),
+            output_matched_data: None,
             shuffled_input_data: None,
             shuffled_input_null_data: None,
-            shuffled_coordinate_data: None,
+            shuffled_input_matched_data: None,
             shuffled_output_data: None,
+            shuffled_output_matched_data: None,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -135,92 +162,106 @@ impl InMemoryData {
     ///
     /// Create a data loader with the main `data` and output `out`
     ///
-    pub fn new_with_null_output<D>(data: &D, null_data: &D, out: &D) -> anyhow::Result<Self>
-    where
-        D: RowsToTensorVec,
-    {
-        let data = data.rows_to_tensor_vec();
-        let aux_data = null_data.rows_to_tensor_vec();
-        let out_data = out.rows_to_tensor_vec();
-        let rows = (0..data.len()).collect();
-
-        debug_assert!(data.len() == out_data.len());
-
-        Ok(InMemoryData {
-            input_data: data,
-            null_data: Some(aux_data),
-            coordinate_data: None,
-            output_data: Some(out_data),
-            shuffled_input_data: None,
-            shuffled_input_null_data: None,
-            shuffled_coordinate_data: None,
-            shuffled_output_data: None,
-            minibatches: Minibatches {
-                samples: rows,
-                chunks: vec![],
-            },
-        })
-    }
-
-    ///
-    /// Create a data loader with the main `data` and output `out`
-    ///
-    pub fn new_with_coord_output<D>(data: &D, coord_data: &D, out: &D) -> anyhow::Result<Self>
-    where
-        D: RowsToTensorVec,
-    {
-        let data = data.rows_to_tensor_vec();
-        let coord_data = coord_data.rows_to_tensor_vec();
-        let out_data = out.rows_to_tensor_vec();
-        let rows = (0..data.len()).collect();
-
-        debug_assert!(data.len() == out_data.len());
-
-        Ok(InMemoryData {
-            input_data: data,
-            null_data: None,
-            coordinate_data: Some(coord_data),
-            output_data: Some(out_data),
-            shuffled_input_data: None,
-            shuffled_input_null_data: None,
-            shuffled_coordinate_data: None,
-            shuffled_output_data: None,
-            minibatches: Minibatches {
-                samples: rows,
-                chunks: vec![],
-            },
-        })
-    }
-
-    /// Create a data loader with the main `data` (both observed and
-    /// null) and output `out`
-    ///
-    pub fn new_with_coord_null_output<D>(
-        data: &D,
-        coord_data: &D,
-        null_data: &D,
-        out: &D,
+    pub fn new_with_null_input_and_output<D>(
+        input: &D,
+        null_input: &D,
+        output: &D,
     ) -> anyhow::Result<Self>
     where
         D: RowsToTensorVec,
     {
-        let data = data.rows_to_tensor_vec();
-        let null_data = null_data.rows_to_tensor_vec();
-        let coord_data = coord_data.rows_to_tensor_vec();
-        let out_data = out.rows_to_tensor_vec();
-        let rows = (0..data.len()).collect();
+        let input_data = input.rows_to_tensor_vec();
+        let input_null_data = null_input.rows_to_tensor_vec();
+        let output_data = output.rows_to_tensor_vec();
+        let rows = (0..input_data.len()).collect();
 
-        debug_assert!(data.len() == out_data.len());
+        debug_assert!(input_data.len() == output_data.len());
 
         Ok(InMemoryData {
-            input_data: data,
-            null_data: Some(null_data),
-            coordinate_data: Some(coord_data),
-            output_data: Some(out_data),
+            input_data,
+            input_null_data: Some(input_null_data),
+            input_matched_data: None,
+            output_data: Some(output_data),
+            output_matched_data: None,
             shuffled_input_data: None,
             shuffled_input_null_data: None,
-            shuffled_coordinate_data: None,
+            shuffled_input_matched_data: None,
             shuffled_output_data: None,
+            shuffled_output_matched_data: None,
+            minibatches: Minibatches {
+                samples: rows,
+                chunks: vec![],
+            },
+        })
+    }
+
+    ///
+    /// Create a data loader with the main `data` and output `out`
+    ///
+    pub fn new_with_matched_input_and_output<D>(
+        input: &D,
+        input_matched: &D,
+        output: &D,
+    ) -> anyhow::Result<Self>
+    where
+        D: RowsToTensorVec,
+    {
+        let input_data = input.rows_to_tensor_vec();
+        let input_matched_data = input_matched.rows_to_tensor_vec();
+        let output_data = output.rows_to_tensor_vec();
+        let rows = (0..input_data.len()).collect();
+
+        debug_assert!(input_data.len() == output_data.len());
+
+        Ok(InMemoryData {
+            input_data,
+            input_null_data: None,
+            input_matched_data: Some(input_matched_data),
+            output_data: Some(output_data),
+            output_matched_data: None,
+            shuffled_input_data: None,
+            shuffled_input_null_data: None,
+            shuffled_input_matched_data: None,
+            shuffled_output_data: None,
+            shuffled_output_matched_data: None,
+            minibatches: Minibatches {
+                samples: rows,
+                chunks: vec![],
+            },
+        })
+    }
+
+    ///
+    /// Create a data loader with the main `data` and output `out`
+    ///
+    pub fn new_with_matched_input_and_matched_output<D>(
+        input: &D,
+        input_matched: &D,
+        out: &D,
+        out_matched: &D,
+    ) -> anyhow::Result<Self>
+    where
+        D: RowsToTensorVec,
+    {
+        let input_data = input.rows_to_tensor_vec();
+        let input_matched_data = input_matched.rows_to_tensor_vec();
+        let output_data = out.rows_to_tensor_vec();
+        let output_matched_data = out_matched.rows_to_tensor_vec();
+        let rows = (0..input_data.len()).collect();
+
+        debug_assert!(input_data.len() == output_data.len());
+
+        Ok(InMemoryData {
+            input_data,
+            input_null_data: None,
+            input_matched_data: Some(input_matched_data),
+            output_data: Some(output_data),
+            output_matched_data: Some(output_matched_data),
+            shuffled_input_data: None,
+            shuffled_input_null_data: None,
+            shuffled_input_matched_data: None,
+            shuffled_output_data: None,
+            shuffled_output_matched_data: None,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -230,7 +271,32 @@ impl InMemoryData {
 }
 
 impl DataLoader for InMemoryData {
-    fn minibatch_data(
+    fn minibatch_ordered(
+        &self,
+        lb: usize,
+        ub: usize,
+        target_device: &Device,
+    ) -> anyhow::Result<MinibatchData> {
+        if let Some(input) = take_lb_ub(lb, ub, target_device, Some(&self.input_data))? {
+            let output = take_lb_ub(lb, ub, target_device, self.output_data.as_ref())?;
+            let output_matched =
+                take_lb_ub(lb, ub, target_device, self.output_matched_data.as_ref())?;
+            let input_matched =
+                take_lb_ub(lb, ub, target_device, self.input_matched_data.as_ref())?;
+            let input_null = take_lb_ub(lb, ub, target_device, self.input_null_data.as_ref())?;
+            Ok(MinibatchData {
+                input,
+                input_null,
+                input_matched,
+                output,
+                output_matched,
+            })
+        } else {
+            Err(anyhow::anyhow!("no input data"))
+        }
+    }
+
+    fn minibatch_shuffled(
         &self,
         batch_idx: usize,
         target_device: &Device,
@@ -240,26 +306,39 @@ impl DataLoader for InMemoryData {
         {
             let output =
                 take_shuffled(batch_idx, target_device, self.shuffled_output_data.as_ref())?;
+
+            let output_matched = take_shuffled(
+                batch_idx,
+                target_device,
+                self.shuffled_output_matched_data.as_ref(),
+            )?;
+
             let input_null = take_shuffled(
                 batch_idx,
                 target_device,
                 self.shuffled_input_null_data.as_ref(),
             )?;
-            let coordinate = take_shuffled(
+
+            let input_matched = take_shuffled(
                 batch_idx,
                 target_device,
-                self.shuffled_coordinate_data.as_ref(),
+                self.shuffled_input_matched_data.as_ref(),
             )?;
 
             Ok(MinibatchData {
                 input,
                 input_null,
-                coordinate,
+                input_matched,
                 output,
+                output_matched,
             })
         } else {
             Err(anyhow::anyhow!("need to shuffle data"))
         }
+    }
+
+    fn num_data(&self) -> usize {
+        self.minibatches.samples.len()
     }
 
     fn num_minibatch(&self) -> usize {
@@ -275,12 +354,20 @@ impl DataLoader for InMemoryData {
 
         self.shuffled_input_data = Some(vec![]);
 
-        if self.null_data.is_some() {
+        if self.input_null_data.is_some() {
             self.shuffled_input_null_data = Some(vec![]);
+        }
+
+        if self.input_matched_data.is_some() {
+            self.shuffled_input_matched_data = Some(vec![]);
         }
 
         if self.output_data.is_some() {
             self.shuffled_output_data = Some(vec![]);
+        }
+
+        if self.output_matched_data.is_some() {
+            self.shuffled_output_matched_data = Some(vec![]);
         }
 
         ///////////////////////////////////
@@ -289,48 +376,32 @@ impl DataLoader for InMemoryData {
 
         for batch_idx in 0..self.num_minibatch() {
             if let Some(samples) = self.minibatches.chunks.get(batch_idx) {
-                {
-                    let chunk: Vec<Tensor> = samples
-                        .into_iter()
-                        .map(|&i| self.input_data[i].clone())
-                        .collect();
+                copy_shuffled(
+                    &samples,
+                    Some(&self.input_data),
+                    self.shuffled_input_data.as_mut(),
+                )?;
+                copy_shuffled(
+                    &samples,
+                    self.input_matched_data.as_ref(),
+                    self.shuffled_input_matched_data.as_mut(),
+                )?;
 
-                    if let Some(shuffled_data) = &mut self.shuffled_input_data {
-                        let x = Tensor::cat(&chunk, 0)?;
-                        shuffled_data.push(x);
-                    }
-                }
-                if let Some(out_data) = self.output_data.as_ref() {
-                    let chunk: Vec<Tensor> =
-                        samples.into_iter().map(|&i| out_data[i].clone()).collect();
-
-                    if let Some(shuffled_data) = &mut self.shuffled_output_data {
-                        let x = Tensor::cat(&chunk, 0)?;
-                        shuffled_data.push(x);
-                    }
-                }
-
-                if let Some(null_data) = self.null_data.as_ref() {
-                    let chunk: Vec<Tensor> =
-                        samples.into_iter().map(|&i| null_data[i].clone()).collect();
-
-                    if let Some(shuffled_data) = &mut self.shuffled_input_null_data {
-                        let x = Tensor::cat(&chunk, 0)?;
-                        shuffled_data.push(x);
-                    }
-                }
-
-                if let Some(coord_data) = self.coordinate_data.as_ref() {
-                    let chunk: Vec<Tensor> = samples
-                        .into_iter()
-                        .map(|&i| coord_data[i].clone())
-                        .collect();
-
-                    if let Some(shuffled_data) = &mut self.shuffled_coordinate_data {
-                        let x = Tensor::cat(&chunk, 0)?;
-                        shuffled_data.push(x);
-                    }
-                }
+                copy_shuffled(
+                    &samples,
+                    self.output_data.as_ref(),
+                    self.shuffled_output_data.as_mut(),
+                )?;
+                copy_shuffled(
+                    &samples,
+                    self.output_matched_data.as_ref(),
+                    self.shuffled_output_matched_data.as_mut(),
+                )?;
+                copy_shuffled(
+                    &samples,
+                    self.input_null_data.as_ref(),
+                    self.shuffled_input_null_data.as_mut(),
+                )?;
             } else {
                 return Err(anyhow::anyhow!(
                     "invalid index = {} vs. total # = {}",
@@ -342,6 +413,48 @@ impl DataLoader for InMemoryData {
 
         Ok(())
     }
+}
+
+fn take_lb_ub(
+    lb: usize,
+    ub: usize,
+    target_device: &Device,
+    data_vec: Option<&Vec<Tensor>>,
+) -> anyhow::Result<Option<Tensor>> {
+    if let Some(data_vec) = data_vec {
+        if lb > ub || ub > data_vec.len() {
+            return Err(anyhow::anyhow!(
+                "check lb {}, ub {} vs. ntot {}",
+                lb,
+                ub,
+                data_vec.len()
+            ));
+        }
+        if lb == ub {
+            return Ok(None);
+        }
+
+        let chunk = Tensor::cat(
+            &(lb..ub).map(|i| data_vec[i].clone()).collect::<Vec<_>>(),
+            0,
+        )?;
+        Ok(Some(chunk.to_device(target_device)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn copy_shuffled(
+    samples: &[usize],
+    data: Option<&Vec<Tensor>>,
+    shuffled_data: Option<&mut Vec<Tensor>>,
+) -> anyhow::Result<()> {
+    if let (Some(data), Some(shuffled)) = (data, shuffled_data) {
+        let chunk: Vec<Tensor> = samples.iter().map(|&i| data[i].clone()).collect();
+        let x = Tensor::cat(&chunk, 0)?;
+        shuffled.push(x);
+    }
+    Ok(())
 }
 
 fn take_shuffled(
@@ -380,6 +493,7 @@ impl Minibatches {
 
         let mut rng = rand::rng();
         self.samples.shuffle(&mut rng);
+
         let nbatch = (self.size() + batch_size) / batch_size;
         let ntot = nbatch * batch_size;
 
@@ -461,6 +575,7 @@ impl RowsToTensorVec for Tensor {
     }
 }
 
+// use asap_data::sparse_io_vector::*;
 // ///
 // /// A thin wrapper for `SparseIoVec`. Columns in `SparseIoVec` are
 // /// treated as samples.

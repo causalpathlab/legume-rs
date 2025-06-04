@@ -41,7 +41,7 @@ pub trait CollapsingOps {
         knn_batches: Option<usize>,
         knn_cells: Option<usize>,
         num_opt_iter: Option<usize>,
-    ) -> anyhow::Result<CollapsingOut>;
+    ) -> anyhow::Result<CollapsedOut>;
 
     /// Register batch information and build a `HnswMap` object for
     /// each batch for fast nearest neighbor search within each batch
@@ -61,13 +61,13 @@ pub trait CollapsingOps {
     fn collect_basic_stat(
         &self,
         sample_to_cols: &Vec<Vec<usize>>,
-        stat: &mut CollapsingStat,
+        stat: &mut CollapsedStat,
     ) -> anyhow::Result<()>;
 
     fn collect_batch_stat(
         &self,
         sample_to_cols: &Vec<Vec<usize>>,
-        stat: &mut CollapsingStat,
+        stat: &mut CollapsedStat,
     ) -> anyhow::Result<()>;
 
     fn collect_matched_stat(
@@ -75,7 +75,7 @@ pub trait CollapsingOps {
         sample_to_cells: &Vec<Vec<usize>>,
         knn_batches: usize,
         knn_cells: usize,
-        stat: &mut CollapsingStat,
+        stat: &mut CollapsedStat,
     ) -> anyhow::Result<()>;
 }
 
@@ -124,7 +124,7 @@ impl CollapsingOps for SparseIoVec {
         knn_batches: Option<usize>,
         knn_cells: Option<usize>,
         num_opt_iter: Option<usize>,
-    ) -> anyhow::Result<CollapsingOut> {
+    ) -> anyhow::Result<CollapsedOut> {
         let group_to_cols = self.take_grouped_columns().ok_or(anyhow::anyhow!(
             "The columns were not assigned before. Call `assign_columns_to_groups`"
         ))?;
@@ -133,7 +133,7 @@ impl CollapsingOps for SparseIoVec {
         let num_groups = group_to_cols.len();
         let num_batches = self.num_batches();
 
-        let mut stat = CollapsingStat::new(num_features, num_groups, num_batches);
+        let mut stat = CollapsedStat::new(num_features, num_groups, num_batches);
         info!("basic statistics across {} samples", num_groups);
         self.collect_basic_stat(&group_to_cols, &mut stat)?;
 
@@ -168,63 +168,27 @@ impl CollapsingOps for SparseIoVec {
     fn collect_basic_stat(
         &self,
         sample_to_cells: &Vec<Vec<usize>>,
-        stat: &mut CollapsingStat,
+        stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
-        let count_basic = |sample: usize,
-                           cells: &Vec<usize>,
-                           data_vec: &SparseIoVec,
-                           _: &EmptyArg,
-                           arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
-            let yy = data_vec
-                .read_columns_csc(cells.iter().cloned())
-                .expect("failed to read cells");
-
-            let mut stat = arc_stat.lock().expect("lock stat");
-
-            for y_j in yy.col_iter() {
-                let rows = y_j.row_indices();
-                let vals = y_j.values();
-                for (&gene, &y) in rows.iter().zip(vals.iter()) {
-                    stat.ysum_ds[(gene, sample)] += y;
-                }
-                stat.size_s[sample] += 1_f32; // each column is a sample
-            }
-        };
-
-        self.visit_column_by_samples(&sample_to_cells, &count_basic, &EmptyArg {}, stat)
+        self.visit_columns_by_sample(
+            &sample_to_cells,
+            &collect_basic_stat_visitor,
+            &EmptyArg {},
+            stat,
+        )
     }
 
     fn collect_batch_stat(
         &self,
         sample_to_cells: &Vec<Vec<usize>>,
-        stat: &mut CollapsingStat,
+        stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
-        let count_batch = |sample: usize,
-                           cells_in_sample: &Vec<usize>,
-                           data_vec: &SparseIoVec,
-                           _: &EmptyArg,
-                           arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
-            let yy = data_vec
-                .read_columns_csc(cells_in_sample.iter().cloned())
-                .expect("failed to read cells");
-
-            // cells_in_sample: sample s -> cell j
-            // batches: cell j -> batch b
-            let batches = data_vec.get_batch_membership(cells_in_sample.iter().cloned());
-
-            let mut stat = arc_stat.lock().expect("lock stat");
-
-            yy.col_iter().zip(batches.iter()).for_each(|(y_j, &b)| {
-                let rows = y_j.row_indices();
-                let vals = y_j.values();
-                for (&gene, &y) in rows.iter().zip(vals.iter()) {
-                    stat.ysum_db[(gene, b)] += y;
-                }
-                stat.n_bs[(b, sample)] += 1_f32;
-            });
-        };
-
-        self.visit_column_by_samples(&sample_to_cells, &count_batch, &EmptyArg {}, stat)
+        self.visit_columns_by_sample(
+            &sample_to_cells,
+            &collect_batch_stat_visitor,
+            &EmptyArg {},
+            stat,
+        )
     }
 
     fn collect_matched_stat(
@@ -232,71 +196,126 @@ impl CollapsingOps for SparseIoVec {
         sample_to_cells: &Vec<Vec<usize>>,
         knn_batches: usize,
         knn_cells: usize,
-        stat: &mut CollapsingStat,
+        stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
-        let count_matched =
-            |sample: usize,
-             cells: &Vec<usize>,
-             data_vec: &SparseIoVec,
-             _: &EmptyArg,
-             arc_stat: Arc<Mutex<&mut CollapsingStat>>| {
-                let (y0_matched, source_columns, euclidean_distances) = data_vec
-                    .read_neighbouring_columns_csc(
-                        cells.iter().cloned(),
-                        knn_batches,
-                        knn_cells,
-                        true,
-                    )
-                    .expect("take neighbouring cells across batches");
-
-                // // find matched cells
-                // let (y0_matched, source_columns, euclidean_distances) = data_vec
-                //     .read_matched_columns_csc(cells.iter().cloned(), &target_batches, knn, true)
-                //     .expect("take matching results across batches");
-
-                // Normalize distance for each source cell and take a
-                // weighted average of the matched vectors using this
-                // weight vector
-                let norm_target = 2_f32.ln();
-                let source_column_groups = partition_by_membership(&source_columns, None);
-
-                ////////////////////////////////////////////////////////
-                // zhat[g,j]  =  sum_k w[j,k] * z[g,k] / sum_k w[j,k] //
-                // zsum[g,s]  =  sum_j zhat[g,j]                      //
-                ////////////////////////////////////////////////////////
-
-                let mut stat = arc_stat.lock().expect("lock stat");
-
-                for (_, y0_pos) in source_column_groups.iter() {
-                    let weights = y0_pos
-                        .iter()
-                        .map(|&cell| euclidean_distances[cell])
-                        .normalized_exp(norm_target);
-
-                    let denom = weights.iter().sum::<f32>();
-
-                    y0_pos.iter().zip(weights.iter()).for_each(|(&k, &w)| {
-                        let y0 = y0_matched.get_col(k).unwrap();
-                        let y0_rows = y0.row_indices();
-                        let y0_vals = y0.values();
-                        y0_rows.iter().zip(y0_vals.iter()).for_each(|(&gene, &z)| {
-                            stat.zsum_ds[(gene, sample)] += z * w / denom;
-                        });
-                    });
-                }
-            };
-
-        self.visit_column_by_samples(&sample_to_cells, &count_matched, &EmptyArg {}, stat)
+        self.visit_columns_by_sample(
+            &sample_to_cells,
+            &collect_matched_stat_visitor,
+            &KnnParams {
+                knn_batches,
+                knn_cells,
+            },
+            stat,
+        )
     }
+}
+
+struct KnnParams {
+    knn_batches: usize,
+    knn_cells: usize,
+}
+
+fn collect_matched_stat_visitor(
+    sample: usize,
+    cells: &Vec<usize>,
+    data_vec: &SparseIoVec,
+    knn_params: &KnnParams,
+    arc_stat: Arc<Mutex<&mut CollapsedStat>>,
+) -> anyhow::Result<()> {
+    let knn_batches = knn_params.knn_batches;
+    let knn_cells = knn_params.knn_cells;
+
+    let (y0_matched, source_columns, euclidean_distances) = data_vec
+        .read_neighbouring_columns_csc(cells.iter().cloned(), knn_batches, knn_cells, true)?;
+
+    // Normalize distance for each source cell and take a
+    // weighted average of the matched vectors using this
+    // weight vector
+    let norm_target = 2_f32.ln();
+    let source_column_groups = partition_by_membership(&source_columns, None);
+
+    ////////////////////////////////////////////////////////
+    // zhat[g,j]  =  sum_k w[j,k] * z[g,k] / sum_k w[j,k] //
+    // zsum[g,s]  =  sum_j zhat[g,j]                      //
+    ////////////////////////////////////////////////////////
+
+    let mut stat = arc_stat.lock().expect("lock stat");
+
+    for (_, y0_pos) in source_column_groups.iter() {
+        let weights = y0_pos
+            .iter()
+            .map(|&cell| euclidean_distances[cell])
+            .normalized_exp(norm_target);
+
+        let denom = weights.iter().sum::<f32>();
+
+        y0_pos.iter().zip(weights.iter()).for_each(|(&k, &w)| {
+            let y0 = y0_matched.get_col(k).expect("k missing");
+            let y0_rows = y0.row_indices();
+            let y0_vals = y0.values();
+            y0_rows.iter().zip(y0_vals.iter()).for_each(|(&gene, &z)| {
+                stat.zsum_ds[(gene, sample)] += z * w / denom;
+            });
+        });
+    }
+    Ok(())
+}
+
+fn collect_basic_stat_visitor(
+    sample: usize,
+    cells: &Vec<usize>,
+    data_vec: &SparseIoVec,
+    _: &EmptyArg,
+    arc_stat: Arc<Mutex<&mut CollapsedStat>>,
+) -> anyhow::Result<()> {
+    let yy = data_vec.read_columns_csc(cells.iter().cloned())?;
+
+    let mut stat = arc_stat.lock().expect("lock stat");
+
+    for y_j in yy.col_iter() {
+        let rows = y_j.row_indices();
+        let vals = y_j.values();
+        for (&gene, &y) in rows.iter().zip(vals.iter()) {
+            stat.ysum_ds[(gene, sample)] += y;
+        }
+        stat.size_s[sample] += 1_f32; // each column is a sample
+    }
+    Ok(())
+}
+
+fn collect_batch_stat_visitor(
+    sample: usize,
+    cells_in_sample: &Vec<usize>,
+    data_vec: &SparseIoVec,
+    _: &EmptyArg,
+    arc_stat: Arc<Mutex<&mut CollapsedStat>>,
+) -> anyhow::Result<()> {
+    let yy = data_vec.read_columns_csc(cells_in_sample.iter().cloned())?;
+
+    // cells_in_sample: sample s -> cell j
+    // batches: cell j -> batch b
+    let batches = data_vec.get_batch_membership(cells_in_sample.iter().cloned());
+
+    let mut stat = arc_stat.lock().expect("lock stat");
+
+    yy.col_iter().zip(batches.iter()).for_each(|(y_j, &b)| {
+        let rows = y_j.row_indices();
+        let vals = y_j.values();
+        for (&gene, &y) in rows.iter().zip(vals.iter()) {
+            stat.ysum_db[(gene, b)] += y;
+        }
+        stat.n_bs[(b, sample)] += 1_f32;
+    });
+    Ok(())
 }
 
 /// Optimize the mean parameters for three Gamma distributions
 ///
 fn optimize(
-    stat: &CollapsingStat,
+    stat: &CollapsedStat,
     hyper: (f32, f32),
     num_iter: usize,
-) -> anyhow::Result<CollapsingOut> {
+) -> anyhow::Result<CollapsedOut> {
     let (a0, b0) = hyper;
     let num_genes = stat.num_genes();
     let num_samples = stat.num_samples();
@@ -386,7 +405,7 @@ fn optimize(
             mu_param.calibrate();
         };
 
-        Ok(CollapsingOut {
+        Ok(CollapsedOut {
             mu_observed: mu_param,
             mu_adjusted: Some(mu_adj_param),
             mu_residual: Some(mu_resid_param),
@@ -398,7 +417,7 @@ fn optimize(
             nalgebra::DVector::<f32>::from_element(num_genes, 1_f32) * stat.size_s.transpose();
         mu_param.update_stat(&stat.ysum_ds, &denom_ds);
         mu_param.calibrate();
-        Ok(CollapsingOut {
+        Ok(CollapsedOut {
             mu_observed: mu_param,
             mu_adjusted: None,
             mu_residual: None,
@@ -410,7 +429,7 @@ fn optimize(
 
 /// output struct to make the model parameters more accessible
 #[derive(Debug)]
-pub struct CollapsingOut {
+pub struct CollapsedOut {
     pub mu_observed: GammaMatrix,
     pub mu_adjusted: Option<GammaMatrix>,
     pub mu_residual: Option<GammaMatrix>,
@@ -419,7 +438,7 @@ pub struct CollapsingOut {
 }
 
 /// a struct to hold the sufficient statistics for the model
-pub struct CollapsingStat {
+pub struct CollapsedStat {
     pub ysum_ds: nalgebra::DMatrix<f32>, // observed sum within each sample
     pub zsum_ds: nalgebra::DMatrix<f32>, // counterfactual sum within each sample
     pub size_s: nalgebra::DVector<f32>,  // sample s size
@@ -427,7 +446,7 @@ pub struct CollapsingStat {
     pub n_bs: nalgebra::DMatrix<f32>,    // batch-specific sample size
 }
 
-impl CollapsingStat {
+impl CollapsedStat {
     pub fn new(ngene: usize, nsample: usize, nbatch: usize) -> Self {
         Self {
             ysum_ds: nalgebra::DMatrix::<f32>::zeros(ngene, nsample),
