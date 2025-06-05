@@ -22,7 +22,7 @@ pub fn gaussian_kl_loss(z_mean: &Tensor, z_lnvar: &Tensor) -> Result<Tensor> {
 /// * `logits_nd` - logit tensor (reconstruction)
 ///
 pub fn topic_likelihood(x_nd: &Tensor, logits_nd: &Tensor) -> Result<Tensor> {
-    x_nd.mul(&logits_nd)?.sum(1)
+    x_nd.mul(logits_nd)?.sum(1)
 }
 
 /// Poisson log-likelihood of count-ish data
@@ -44,5 +44,5 @@ pub fn poisson_likelihood(x_nd: &Tensor, rate_nd: &Tensor) -> Result<Tensor> {
 /// * `rate_nd` - rate tensor (reconstruction)
 ///
 pub fn gaussian_likelihood(x_nd: &Tensor, hat_nd: &Tensor) -> Result<Tensor> {
-    x_nd.sub(&hat_nd)?.powf(2.)?.sum(1)? * (-0.5)
+    x_nd.sub(hat_nd)?.powf(2.)?.sum(1)? * (-0.5)
 }

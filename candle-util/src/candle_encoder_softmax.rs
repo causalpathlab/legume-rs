@@ -4,7 +4,7 @@ use crate::candle_aux_layers::StackLayers;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, BatchNorm, Embedding, Linear, ModuleT, VarBuilder};
+use candle_nn::{BatchNorm, Embedding, Linear, ModuleT, VarBuilder, ops};
 
 pub struct LogSoftmaxEncoder {
     n_features: usize,
@@ -79,7 +79,7 @@ impl LogSoftmaxEncoder {
         let last_dim = emb_ndd.dims().len();
 
         if let Some(x0_nd) = x0_nd {
-            let int_x0_nd = self.discretize_whitened_tensor(&x0_nd)?;
+            let int_x0_nd = self.discretize_whitened_tensor(x0_nd)?;
             let logx0_nd = (x0_nd + 1.)?.log()?;
             let int_logx0_nd = self.discretize_whitened_tensor(&logx0_nd)?;
 
@@ -134,7 +134,7 @@ impl LogSoftmaxEncoder {
     /// * `z_lnvar` - log variance of Gaussian distribution
     fn reparameterize(&self, z_mean: &Tensor, z_lnvar: &Tensor, train: bool) -> Result<Tensor> {
         if train {
-            let eps = Tensor::randn_like(&z_mean, 0., 1.)?;
+            let eps = Tensor::randn_like(z_mean, 0., 1.)?;
             z_mean + (z_lnvar * 0.5)?.exp()? * eps
         } else {
             Ok(z_mean.clone())
@@ -171,7 +171,7 @@ impl LogSoftmaxEncoder {
             momentum: 0.1,
         };
 
-        debug_assert!(layers.len() > 0);
+        debug_assert!(!layers.is_empty());
 
         let emb_x = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_x"))?;
         let emb_logx = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_logx"))?;

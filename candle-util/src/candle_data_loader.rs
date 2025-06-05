@@ -244,28 +244,28 @@ impl DataLoader for InMemoryData {
         for batch_idx in 0..self.num_minibatch() {
             if let Some(samples) = self.minibatches.chunks.get(batch_idx) {
                 copy_shuffled(
-                    &samples,
+                    samples,
                     Some(&self.input_data),
                     self.shuffled_input_data.as_mut(),
                 )?;
                 copy_shuffled(
-                    &samples,
+                    samples,
                     self.input_matched_data.as_ref(),
                     self.shuffled_input_matched_data.as_mut(),
                 )?;
 
                 copy_shuffled(
-                    &samples,
+                    samples,
                     self.output_data.as_ref(),
                     self.shuffled_output_data.as_mut(),
                 )?;
                 copy_shuffled(
-                    &samples,
+                    samples,
                     self.output_matched_data.as_ref(),
                     self.shuffled_output_matched_data.as_mut(),
                 )?;
                 copy_shuffled(
-                    &samples,
+                    samples,
                     self.input_null_data.as_ref(),
                     self.shuffled_input_null_data.as_mut(),
                 )?;
@@ -400,7 +400,7 @@ impl RowsToTensorVec for Array2<f32> {
             .enumerate()
             .par_bridge()
             .map(|(i, row)| {
-                let mut v = Tensor::from_iter(row.iter().map(|x| *x), &Device::Cpu)
+                let mut v = Tensor::from_iter(row.iter().copied(), &Device::Cpu)
                     .expect("failed to create tensor");
                 v = v.reshape((1, row.len())).expect("failed to reshape");
                 (i, v)
@@ -419,7 +419,7 @@ impl RowsToTensorVec for DMatrix<f32> {
             .enumerate()
             .par_bridge()
             .map(|(i, row)| {
-                let mut v = Tensor::from_iter(row.iter().map(|x| *x), &Device::Cpu)
+                let mut v = Tensor::from_iter(row.iter().copied(), &Device::Cpu)
                     .expect("failed to create tensor");
                 v = v.reshape((1, row.len())).expect("failed to reshape");
                 (i, v)
