@@ -109,23 +109,43 @@ where
                 data_vec
                     .par_iter()
                     .try_for_each(|minibatch_data| -> anyhow::Result<()> {
-                        let input_nm = minibatch_data.input.as_ref();
-                        let input_matched_nm = minibatch_data
+                        let input_left_nm = minibatch_data.input.as_ref();
+                        let input_right_nm = minibatch_data
                             .input_matched
                             .as_ref()
                             .ok_or(anyhow::anyhow!("need input matched"))?;
-                        let output_nd = minibatch_data
+                        let output_left_nd = minibatch_data
                             .output
                             .as_ref()
                             .ok_or(anyhow::anyhow!("need output"))?;
+                        let output_right_nd = minibatch_data
+                            .output_matched
+                            .as_ref()
+                            .ok_or(anyhow::anyhow!("need output matched"))?;
+                        let output_centre_nd = minibatch_data
+                            .output_null
+                            .as_ref()
+                            .ok_or(anyhow::anyhow!("need output null"))?;
 
-                        let latent = self.encoder.forward_t(input_nm, input_matched_nm, true)?;
+                        let latent = self.encoder.forward_t(
+                            MatchedEncoderData {
+                                left: input_left_nm,
+                                right: input_right_nm,
+                            },
+                            true,
+                        )?;
                         let kl = &latent.kl_div;
+
                         let (_, llik) = self.decoder.forward_with_llik(
                             &latent,
-                            (output_nd, output_nd),
+                            MatchedDecoderData {
+                                left: output_left_nd,
+                                right: output_right_nd,
+                                centre: output_centre_nd,
+                            },
                             llik_func,
                         )?;
+
                         let loss = (kl - &llik)?.mean_all()?;
                         let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
                         {
@@ -159,26 +179,40 @@ where
                 for b in 0..data.num_minibatch() {
                     let minibatch_data = &data_vec[b];
 
-                    let input_nm = minibatch_data.input.as_ref();
-                    let input_matched_nm = minibatch_data
+                    let input_left_nm = minibatch_data.input.as_ref();
+                    let input_right_nm = minibatch_data
                         .input_matched
                         .as_ref()
                         .ok_or(anyhow::anyhow!("need input matched"))?;
-                    let output_nd = minibatch_data
+                    let output_left_nd = minibatch_data
                         .output
                         .as_ref()
                         .ok_or(anyhow::anyhow!("need output"))?;
-                    let output_matched_nd = minibatch_data
+                    let output_right_nd = minibatch_data
                         .output_matched
                         .as_ref()
                         .ok_or(anyhow::anyhow!("need output matched"))?;
+                    let output_centre_nd = minibatch_data
+                        .output_null
+                        .as_ref()
+                        .ok_or(anyhow::anyhow!("need output null"))?;
 
-                    let latent = self.encoder.forward_t(input_nm, input_matched_nm, true)?;
+                    let latent = self.encoder.forward_t(
+                        MatchedEncoderData {
+                            left: input_left_nm,
+                            right: input_right_nm,
+                        },
+                        true,
+                    )?;
                     let kl = &latent.kl_div;
 
                     let (_, llik) = self.decoder.forward_with_llik(
                         &latent,
-                        (&output_nd, &output_matched_nd),
+                        MatchedDecoderData {
+                            left: output_left_nd,
+                            right: output_right_nd,
+                            centre: output_centre_nd,
+                        },
                         llik_func,
                     )?;
 

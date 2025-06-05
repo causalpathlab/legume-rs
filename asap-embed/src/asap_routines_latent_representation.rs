@@ -155,7 +155,15 @@ where
                 null_nm.ncols(),
                 adjusted_data_nd.ncols()
             );
-            InMemoryData::new_with_null_input_and_output(input_data_nm, null_nm, adjusted_data_nd)?
+
+            InMemoryData::from(DataLoaderArgs {
+                input: input_data_nm,
+                input_null: Some(null_nm),
+                input_matched: None,
+                output: Some(adjusted_data_nd),
+                output_null: None,
+                output_matched: None,
+            })?
         }
         _ => {
             info!(
@@ -163,7 +171,15 @@ where
                 input_data_nm.ncols(),
                 adjusted_data_nd.ncols()
             );
-            InMemoryData::new_with_input_and_output(input_data_nm, adjusted_data_nd)?
+
+            InMemoryData::from(DataLoaderArgs {
+                input: input_data_nm,
+                input_null: None,
+                input_matched: None,
+                output: Some(adjusted_data_nd),
+                output_null: None,
+                output_matched: None,
+            })?
         }
     };
 

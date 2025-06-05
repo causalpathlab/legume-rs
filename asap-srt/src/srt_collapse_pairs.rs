@@ -9,6 +9,7 @@ use matrix_param::traits::TwoStatParam;
 pub struct SrtCollapsedParameters {
     pub left: GammaMatrix,
     pub right: GammaMatrix,
+    pub centre: GammaMatrix,
 }
 
 pub struct SrtCollapsedStat {
@@ -101,54 +102,78 @@ impl SrtCollapsedStat {
         self.n_cols
     }
 
-    pub fn optimize(&self) -> anyhow::Result<SrtCollapsedParameters> {
-        let mut denom_ds = Mat::zeros(self.nrows(), self.ncols());
-        let size_s = &self.size_s.transpose();
-        denom_ds.row_iter_mut().for_each(|mut row| {
-            row.copy_from(size_s);
-        });
-
-        let (a0, b0) = (1_f32, 1_f32);
+    /// optimize two Poisson probabilities
+    /// `left(g,j) ~ Poisson[ μ(g,s) * α(g,s) ]`
+    /// `right(g,j) ~ Poisson[ μ(g,s) * β(g,s) ]`
+    pub fn optimize(
+        &self,
+        max_iter_opt: usize,
+        hyper_param: Option<(f32, f32)>,
+    ) -> anyhow::Result<SrtCollapsedParameters> {
+        let (a0, b0) = hyper_param.unwrap_or((1_f32, 1_f32));
 
         let mut left_param_ds = GammaMatrix::new((self.nrows(), self.ncols()), a0, b0);
         let mut right_param_ds = GammaMatrix::new((self.nrows(), self.ncols()), a0, b0);
-	let mut centre_param_ds = GammaMatrix::new((self.nrows(), self.ncols()), a0, b0);
+        let mut centre_param_ds = GammaMatrix::new((self.nrows(), self.ncols()), a0, b0);
 
+        // (1 x s) sample size vector
+        let size_s = &self.size_s.transpose();
 
-	// left(g,j) ~ Poisson[ μ(g,s) * α(g,s) ]
-	// right(g,j) ~ Poisson[ μ(g,s) * β(g,s) ]
-	//
-	// L = sum_j left(g,j) * log[ μ(g,s) * α(g,s) ] - n(s) * μ(g,s) * α(g,s)
-	//   = left_sum(g,s) * log[ μ(g,s) * α(g,s) ] - n(s) * μ(g,s) * α(g,s)
-	//
-	// R = sum_j right(g,j) * log[ μ(g,s) * β(g,s) ]- n(s) * μ(g,s) * β(g,s)
-	//   = right_sum(g,s) * log[ μ(g,s) * β(g,s) ] - n(s) * μ(g,s) * β(g,s)
-	//
-	//           left_sum(g,s) + right_sum(g,s)
-	// μ(g,s) = ---------------------------------
-	//            n(s) * [ α(g,s) + β(g,s) ]
-	//
-	//           left_sum(g,s)
-	// α(g,s) = -----------------
-	//            n(s) * μ(g,s)
-	//
-	//           right_sum(g,s)
-	// β(g,s) = -----------------
-	//            n(s) * μ(g,s)
+        //
+        // L = sum_j left(g,j) * log[ μ(g,s) * α(g,s) ] - n(s) * μ(g,s) * α(g,s)
+        //   = left_sum(g,s) * log[ μ(g,s) * α(g,s) ] - n(s) * μ(g,s) * α(g,s)
+        //
+        // R = sum_j right(g,j) * log[ μ(g,s) * β(g,s) ]- n(s) * μ(g,s) * β(g,s)
+        //   = right_sum(g,s) * log[ μ(g,s) * β(g,s) ] - n(s) * μ(g,s) * β(g,s)
+        //
 
+        let mut denom_ds = Mat::zeros(self.nrows(), self.ncols());
 
+        for _iter in 0..max_iter_opt {
+            //           left_sum(g,s) + right_sum(g,s)
+            // μ(g,s) = ---------------------------------
+            //            n(s) * [ α(g,s) + β(g,s) ]
+            //
 
+            denom_ds.fill(0.0);
+            denom_ds += left_param_ds.posterior_mean();
+            denom_ds += right_param_ds.posterior_mean();
 
-        left_param_ds.update_stat(&self.left_data_sum_ds, &denom_ds);
-        left_param_ds.calibrate();
+            denom_ds.row_iter_mut().for_each(|mut row| {
+                row.component_mul_assign(size_s);
+            });
 
+            centre_param_ds.update_stat(
+                &(&self.left_data_sum_ds + &self.right_data_sum_ds),
+                &denom_ds,
+            );
+            centre_param_ds.calibrate();
 
-        right_param_ds.update_stat(&self.right_data_sum_ds, &denom_ds);
-        right_param_ds.calibrate();
+            //           left_sum(g,s)
+            // α(g,s) = -----------------
+            //            n(s) * μ(g,s)
+
+            denom_ds.fill(0.0);
+            denom_ds += centre_param_ds.posterior_mean();
+            denom_ds.row_iter_mut().for_each(|mut row| {
+                row.component_mul_assign(size_s);
+            });
+
+            left_param_ds.update_stat(&self.left_data_sum_ds, &denom_ds);
+            left_param_ds.calibrate();
+
+            //           right_sum(g,s)
+            // β(g,s) = -----------------
+            //            n(s) * μ(g,s)
+
+            right_param_ds.update_stat(&self.right_data_sum_ds, &denom_ds);
+            right_param_ds.calibrate();
+        }
 
         Ok(SrtCollapsedParameters {
             left: left_param_ds,
             right: right_param_ds,
+            centre: centre_param_ds,
         })
     }
 }
