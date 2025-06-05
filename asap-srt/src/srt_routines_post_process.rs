@@ -60,7 +60,13 @@ where
 
     let y_left = data.data.read_columns_dmatrix(left)?.transpose() * aggregate_features;
     let y_right = data.data.read_columns_dmatrix(right)?.transpose() * aggregate_features;
-    let latent = encoder.forward_t(&y_left.to_tensor(dev)?, &y_right.to_tensor(dev)?, false)?;
+    let latent = encoder.forward_t(
+        MatchedEncoderData {
+            left: &y_left.to_tensor(dev)?,
+            right: &y_right.to_tensor(dev)?,
+        },
+        false,
+    )?;
     latent_vec
         .lock()
         .expect("latent vec lock")
