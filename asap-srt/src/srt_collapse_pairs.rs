@@ -2,6 +2,7 @@
 
 use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
+use indicatif::ProgressIterator;
 use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::Inference;
 use matrix_param::traits::TwoStatParam;
@@ -129,7 +130,10 @@ impl SrtCollapsedStat {
 
         let mut denom_ds = Mat::zeros(self.nrows(), self.ncols());
 
-        for _iter in 0..max_iter_opt {
+        info!("Optimizing Poisson-Gamma parameters");
+
+        (0..max_iter_opt).progress().for_each(|_opt_iter| {
+            // for _iter in 0..max_iter_opt {
             //           left_sum(g,s) + right_sum(g,s)
             // μ(g,s) = ---------------------------------
             //            n(s) * [ α(g,s) + β(g,s) ]
@@ -168,7 +172,7 @@ impl SrtCollapsedStat {
 
             right_param_ds.update_stat(&self.right_data_sum_ds, &denom_ds);
             right_param_ds.calibrate();
-        }
+        });
 
         Ok(SrtCollapsedParameters {
             left: left_param_ds,
