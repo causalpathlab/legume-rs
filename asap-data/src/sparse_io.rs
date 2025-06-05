@@ -639,7 +639,7 @@ pub trait SparseIo: Sync + Send {
         &mut self,
         row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
     ) -> anyhow::Result<()> {
-        debug_assert!(!row_col_val_triplets.is_empty());
+        assert!(!row_col_val_triplets.is_empty());
 
         row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
         row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
@@ -686,7 +686,7 @@ pub trait SparseIo: Sync + Send {
         &mut self,
         row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
     ) -> anyhow::Result<()> {
-        debug_assert!(!row_col_val_triplets.is_empty());
+        assert!(!row_col_val_triplets.is_empty());
 
         row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
         row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
