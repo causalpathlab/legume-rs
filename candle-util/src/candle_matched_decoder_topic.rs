@@ -49,12 +49,10 @@ impl MatchedDecoderModuleT for MatchedTopicDecoder {
 
         let recon_left_nd = ops::log_softmax(&(shared_nd.log()? + left_delta_nd.log()?)?, 1)?;
         let recon_right_nd = ops::log_softmax(&(shared_nd.log()? + right_delta_nd.log()?)?, 1)?;
-        let recon_centre_nd = ops::log_softmax(&shared_nd.log()?, 1)?;
 
         Ok(MatchedDecoderRecon {
             left: recon_left_nd,
             right: recon_right_nd,
-            centre: recon_centre_nd,
         })
     }
 
@@ -68,8 +66,7 @@ impl MatchedDecoderModuleT for MatchedTopicDecoder {
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
         let recon = self.forward(latent)?;
-        let llik = ((llik(x_data.left, &recon.left)? + llik(x_data.right, &recon.right))?
-            + llik(x_data.centre, &recon.centre))?;
+        let llik = (llik(x_data.left, &recon.left)? + llik(x_data.right, &recon.right))?;
         Ok((recon, llik))
     }
 
