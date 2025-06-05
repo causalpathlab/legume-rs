@@ -7,6 +7,7 @@ mod srt_routines_latent_representation;
 mod srt_routines_post_process;
 mod srt_routines_pre_process;
 
+use candle_util::candle_data_loader::DataLoaderArgs;
 use srt_routines_latent_representation::*;
 use srt_routines_post_process::SrtLatentStatePairsOps;
 use srt_routines_pre_process::*;
@@ -175,7 +176,7 @@ fn main() -> anyhow::Result<()> {
     ///////////////////////////////////////////////
 
     let collapsed = srt_cell_pairs.collapse_pairs()?;
-    let params = collapsed.optimize()?;
+    let params = collapsed.optimize(args.iter_opt, None)?;
 
     concatenate_vertical(&[collapsed.left_coordinates, collapsed.right_coordinates])?
         .transpose()
@@ -211,12 +212,13 @@ fn main() -> anyhow::Result<()> {
     let d_vocab_emb = args.vocab_emb;
 
     // encoder input can be modularized
-    let input_nm = params.left.posterior_mean().transpose().clone() * &aggregate_rows;
-    let input_matched_nm = params.right.posterior_mean().transpose().clone() * &aggregate_rows;
+    let input_left_nm = params.left.posterior_mean().transpose() * &aggregate_rows;
+    let input_right_nm = params.right.posterior_mean().transpose() * &aggregate_rows;
 
     // output decoder should maintain the original dimension
-    let output_nd = params.left.posterior_mean().transpose();
-    let output_matched_nd = params.right.posterior_mean().transpose();
+    let output_left_nd = params.left.posterior_mean().transpose();
+    let output_right_nd = params.right.posterior_mean().transpose();
+    let output_centre_nd = params.centre.posterior_mean().transpose();
 
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
@@ -238,11 +240,11 @@ fn main() -> anyhow::Result<()> {
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
 
-    ///////////////////////////////////////////////////
-    // training variational autoencoder architecture //
-    ///////////////////////////////////////////////////
+    //////////////
+    // training //
+    //////////////
 
-    let n_features_encoder = input_nm.ncols();
+    let n_features_encoder = input_left_nm.ncols();
 
     let encoder = MatchedLogSoftmaxEncoder::new(
         n_features_encoder,
@@ -253,7 +255,7 @@ fn main() -> anyhow::Result<()> {
         param_builder.clone(),
     )?;
 
-    let n_features_decoder = output_nd.ncols();
+    let n_features_decoder = output_left_nd.ncols();
 
     let decoder = MatchedTopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
@@ -262,11 +264,17 @@ fn main() -> anyhow::Result<()> {
         n_features_encoder, n_features_decoder
     );
 
-    let (log_likelihood, latent) = train_encoder_decoder(
-        &input_nm,
-        &input_matched_nm,
-        &output_nd,
-        &output_matched_nd,
+    let train_data = DataLoaderArgs {
+        input: &input_left_nm,
+        input_null: None,
+        input_matched: Some(&input_right_nm),
+        output: Some(&output_left_nd),
+        output_null: Some(&output_centre_nd),
+        output_matched: Some(&output_right_nd),
+    };
+
+    let (log_likelihood, latent) = train_left_right_vae(
+        train_data,
         &encoder,
         &decoder,
         &parameters,
@@ -296,10 +304,6 @@ fn main() -> anyhow::Result<()> {
 
     concatenate_horizontal(&[_left, _right])?
         .to_csv(&(args.out.to_string() + ".coord.pairs.csv.gz"))?;
-
-    //////////////////////////////////////////////
-    // calibrate the spot/cell-level propensity //
-    //////////////////////////////////////////////
 
     info!("done");
     Ok(())

@@ -3,7 +3,7 @@
 use crate::candle_aux_linear::*;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, Module, VarBuilder};
+use candle_nn::{Module, VarBuilder, ops};
 
 //////////////////////////////////////
 // Differential Topic Model Decoder //
@@ -37,7 +37,7 @@ impl MatchedDecoderModuleT for MatchedTopicDecoder {
         self.dictionary.weight()
     }
 
-    fn forward(&self, latent: &MatchedEncoderLatent) -> Result<(Tensor, Tensor)> {
+    fn forward(&self, latent: &MatchedEncoderLatent) -> Result<MatchedDecoderRecon> {
         let theta_average_nk = latent.average.exp()?;
         let theta_left_nk = latent.left.exp()?;
         let theta_right_nk = latent.right.exp()?;
@@ -49,28 +49,28 @@ impl MatchedDecoderModuleT for MatchedTopicDecoder {
 
         let recon_left_nd = ops::log_softmax(&(shared_nd.log()? + left_delta_nd.log()?)?, 1)?;
         let recon_right_nd = ops::log_softmax(&(shared_nd.log()? + right_delta_nd.log()?)?, 1)?;
-        Ok((recon_left_nd, recon_right_nd))
+        let recon_centre_nd = ops::log_softmax(&shared_nd, 1)?;
+
+        Ok(MatchedDecoderRecon {
+            left: recon_left_nd,
+            right: recon_right_nd,
+            centre: recon_centre_nd,
+        })
     }
 
     fn forward_with_llik<LlikFn>(
         &self,
         latent: &MatchedEncoderLatent,
-        x_nd_pair: (&Tensor, &Tensor),
+        x_data: MatchedDecoderData,
         llik: &LlikFn,
     ) -> Result<(MatchedDecoderRecon, Tensor)>
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
-        let (x_left_nd, x_right_nd) = x_nd_pair;
-        let (r_left_nd, r_right_nd) = self.forward(latent)?;
-        let llik = (llik(x_left_nd, &r_left_nd)? + llik(x_right_nd, &r_right_nd))?;
-        Ok((
-            MatchedDecoderRecon {
-                left: r_left_nd,
-                right: r_right_nd,
-            },
-            llik,
-        ))
+        let recon = self.forward(latent)?;
+        let llik = ((llik(x_data.left, &recon.left)? + llik(x_data.right, &recon.right))?
+            + llik(x_data.centre, &recon.centre))?;
+        Ok((recon, llik))
     }
 
     fn dim_obs(&self) -> usize {

@@ -5,11 +5,8 @@ use candle_util::candle_matched_vae_inference::*;
 
 use log::info;
 
-pub fn train_encoder_decoder<Enc, Dec, LLikFn>(
-    input_nm: &Mat,
-    input_matched_nm: &Mat,
-    output_nd: &Mat,
-    output_matched_nd: &Mat,
+pub fn train_left_right_vae<D, Enc, Dec, LLikFn>(
+    data: DataLoaderArgs<'_, D>,
     encoder: &Enc,
     decoder: &Dec,
     parameters: &candle_nn::VarMap,
@@ -17,18 +14,14 @@ pub fn train_encoder_decoder<Enc, Dec, LLikFn>(
     train_config: &TrainConfig,
 ) -> anyhow::Result<(Vec<f32>, MatchedEncoderLatent)>
 where
+    D: RowsToTensorVec,
     Enc: MatchedEncoderModuleT + MatchedEncoderEvaluateOps + Send + Sync + 'static,
     Dec: MatchedDecoderModuleT + Send + Sync + 'static,
     LLikFn: Fn(&candle_core::Tensor, &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor>
         + Sync
         + Send,
 {
-    let mut data_loader = InMemoryData::new_with_matched_input_and_matched_output(
-        input_nm,
-        input_matched_nm,
-        output_nd,
-        output_matched_nd,
-    )?;
+    let mut data_loader = InMemoryData::from(data)?;
 
     let mut vae = MatchedVae::build(encoder, decoder, parameters);
 

@@ -22,6 +22,7 @@ pub struct MinibatchData {
     pub input_null: Option<Tensor>,
     pub input_matched: Option<Tensor>,
     pub output: Option<Tensor>,
+    pub output_null: Option<Tensor>,
     pub output_matched: Option<Tensor>,
 }
 
@@ -56,211 +57,67 @@ pub struct InMemoryData {
     input_data: Vec<Tensor>,
     input_null_data: Option<Vec<Tensor>>,
     input_matched_data: Option<Vec<Tensor>>,
+
     output_data: Option<Vec<Tensor>>,
+    output_null_data: Option<Vec<Tensor>>,
     output_matched_data: Option<Vec<Tensor>>,
 
     shuffled_input_data: Option<Vec<Tensor>>,
     shuffled_input_null_data: Option<Vec<Tensor>>,
     shuffled_input_matched_data: Option<Vec<Tensor>>,
+
     shuffled_output_data: Option<Vec<Tensor>>,
+    shuffled_output_null_data: Option<Vec<Tensor>>,
     shuffled_output_matched_data: Option<Vec<Tensor>>,
 
     minibatches: Minibatches,
 }
 
+pub struct DataLoaderArgs<'a, D>
+where
+    D: RowsToTensorVec,
+{
+    pub input: &'a D,
+    pub input_null: Option<&'a D>,
+    pub input_matched: Option<&'a D>,
+    pub output: Option<&'a D>,
+    pub output_null: Option<&'a D>,
+    pub output_matched: Option<&'a D>,
+}
+
 impl InMemoryData {
-    ///
-    /// Create a data loader with the main data tensor `data`
-    ///
-    pub fn from<D>(data: &D) -> anyhow::Result<Self>
+    pub fn from<D>(args: DataLoaderArgs<'_, D>) -> anyhow::Result<Self>
     where
         D: RowsToTensorVec,
     {
-        let input_data = data.rows_to_tensor_vec();
-        let rows = (0..input_data.len()).collect();
+        let input = args.input;
+        let input_null = args.input_null;
+        let input_matched = args.input_matched;
+        let output = args.output;
+        let output_null = args.output_null;
+        let output_matched = args.output_matched;
 
-        Ok(InMemoryData {
-            input_data,
-            input_null_data: None,
-            input_matched_data: None,
-            output_data: None,
-            output_matched_data: None,
-            shuffled_input_data: None,
-            shuffled_input_null_data: None,
-            shuffled_input_matched_data: None,
-            shuffled_output_data: None,
-            shuffled_output_matched_data: None,
-            minibatches: Minibatches {
-                samples: rows,
-                chunks: vec![],
-            },
-        })
-    }
-
-    /// Create a data loader with the main `data` and auxiliary
-    /// data `aux`
-    ///
-    pub fn new_with_null_input<D>(data: &D, null_data: &D) -> anyhow::Result<Self>
-    where
-        D: RowsToTensorVec,
-    {
-        let input_data = data.rows_to_tensor_vec();
-        let input_null_data = null_data.rows_to_tensor_vec();
-        let rows = (0..input_data.len()).collect();
-
-        debug_assert!(input_data.len() == input_null_data.len());
-
-        Ok(InMemoryData {
-            input_data,
-            input_null_data: Some(input_null_data),
-            input_matched_data: None,
-            output_data: None,
-            output_matched_data: None,
-            shuffled_input_data: None,
-            shuffled_input_null_data: None,
-            shuffled_input_matched_data: None,
-            shuffled_output_data: None,
-            shuffled_output_matched_data: None,
-            minibatches: Minibatches {
-                samples: rows,
-                chunks: vec![],
-            },
-        })
-    }
-
-    ///
-    /// Create a data loader with the main `data` and output `out`
-    ///
-    pub fn new_with_input_and_output<D>(data: &D, out: &D) -> anyhow::Result<Self>
-    where
-        D: RowsToTensorVec,
-    {
-        let input_data = data.rows_to_tensor_vec();
-        let output_data = out.rows_to_tensor_vec();
-        let rows = (0..input_data.len()).collect();
-
-        debug_assert!(input_data.len() == output_data.len());
-
-        Ok(InMemoryData {
-            input_data,
-            input_null_data: None,
-            input_matched_data: None,
-            output_data: Some(output_data),
-            output_matched_data: None,
-            shuffled_input_data: None,
-            shuffled_input_null_data: None,
-            shuffled_input_matched_data: None,
-            shuffled_output_data: None,
-            shuffled_output_matched_data: None,
-            minibatches: Minibatches {
-                samples: rows,
-                chunks: vec![],
-            },
-        })
-    }
-
-    ///
-    /// Create a data loader with the main `data` and output `out`
-    ///
-    pub fn new_with_null_input_and_output<D>(
-        input: &D,
-        null_input: &D,
-        output: &D,
-    ) -> anyhow::Result<Self>
-    where
-        D: RowsToTensorVec,
-    {
         let input_data = input.rows_to_tensor_vec();
-        let input_null_data = null_input.rows_to_tensor_vec();
-        let output_data = output.rows_to_tensor_vec();
-        let rows = (0..input_data.len()).collect();
+        let input_null_data = input_null.map(|x| x.rows_to_tensor_vec());
+        let input_matched_data = input_matched.map(|x| x.rows_to_tensor_vec());
+        let output_data = output.map(|x| x.rows_to_tensor_vec());
+        let output_null_data = output_null.map(|x| x.rows_to_tensor_vec());
+        let output_matched_data = output_matched.map(|x| x.rows_to_tensor_vec());
 
-        debug_assert!(input_data.len() == output_data.len());
+        let rows = (0..input_data.len()).collect();
 
         Ok(InMemoryData {
             input_data,
-            input_null_data: Some(input_null_data),
-            input_matched_data: None,
-            output_data: Some(output_data),
-            output_matched_data: None,
+            input_null_data,
+            input_matched_data,
+            output_data,
+            output_null_data,
+            output_matched_data,
             shuffled_input_data: None,
             shuffled_input_null_data: None,
             shuffled_input_matched_data: None,
             shuffled_output_data: None,
-            shuffled_output_matched_data: None,
-            minibatches: Minibatches {
-                samples: rows,
-                chunks: vec![],
-            },
-        })
-    }
-
-    ///
-    /// Create a data loader with the main `data` and output `out`
-    ///
-    pub fn new_with_matched_input_and_output<D>(
-        input: &D,
-        input_matched: &D,
-        output: &D,
-    ) -> anyhow::Result<Self>
-    where
-        D: RowsToTensorVec,
-    {
-        let input_data = input.rows_to_tensor_vec();
-        let input_matched_data = input_matched.rows_to_tensor_vec();
-        let output_data = output.rows_to_tensor_vec();
-        let rows = (0..input_data.len()).collect();
-
-        debug_assert!(input_data.len() == output_data.len());
-
-        Ok(InMemoryData {
-            input_data,
-            input_null_data: None,
-            input_matched_data: Some(input_matched_data),
-            output_data: Some(output_data),
-            output_matched_data: None,
-            shuffled_input_data: None,
-            shuffled_input_null_data: None,
-            shuffled_input_matched_data: None,
-            shuffled_output_data: None,
-            shuffled_output_matched_data: None,
-            minibatches: Minibatches {
-                samples: rows,
-                chunks: vec![],
-            },
-        })
-    }
-
-    ///
-    /// Create a data loader with the main `data` and output `out`
-    ///
-    pub fn new_with_matched_input_and_matched_output<D>(
-        input: &D,
-        input_matched: &D,
-        out: &D,
-        out_matched: &D,
-    ) -> anyhow::Result<Self>
-    where
-        D: RowsToTensorVec,
-    {
-        let input_data = input.rows_to_tensor_vec();
-        let input_matched_data = input_matched.rows_to_tensor_vec();
-        let output_data = out.rows_to_tensor_vec();
-        let output_matched_data = out_matched.rows_to_tensor_vec();
-        let rows = (0..input_data.len()).collect();
-
-        debug_assert!(input_data.len() == output_data.len());
-
-        Ok(InMemoryData {
-            input_data,
-            input_null_data: None,
-            input_matched_data: Some(input_matched_data),
-            output_data: Some(output_data),
-            output_matched_data: Some(output_matched_data),
-            shuffled_input_data: None,
-            shuffled_input_null_data: None,
-            shuffled_input_matched_data: None,
-            shuffled_output_data: None,
+            shuffled_output_null_data: None,
             shuffled_output_matched_data: None,
             minibatches: Minibatches {
                 samples: rows,
@@ -279,8 +136,10 @@ impl DataLoader for InMemoryData {
     ) -> anyhow::Result<MinibatchData> {
         if let Some(input) = take_lb_ub(lb, ub, target_device, Some(&self.input_data))? {
             let output = take_lb_ub(lb, ub, target_device, self.output_data.as_ref())?;
+            let output_null = take_lb_ub(lb, ub, target_device, self.output_null_data.as_ref())?;
             let output_matched =
                 take_lb_ub(lb, ub, target_device, self.output_matched_data.as_ref())?;
+
             let input_matched =
                 take_lb_ub(lb, ub, target_device, self.input_matched_data.as_ref())?;
             let input_null = take_lb_ub(lb, ub, target_device, self.input_null_data.as_ref())?;
@@ -289,6 +148,7 @@ impl DataLoader for InMemoryData {
                 input_null,
                 input_matched,
                 output,
+                output_null,
                 output_matched,
             })
         } else {
@@ -313,6 +173,12 @@ impl DataLoader for InMemoryData {
                 self.shuffled_output_matched_data.as_ref(),
             )?;
 
+            let output_null = take_shuffled(
+                batch_idx,
+                target_device,
+                self.shuffled_output_null_data.as_ref(),
+            )?;
+
             let input_null = take_shuffled(
                 batch_idx,
                 target_device,
@@ -330,6 +196,7 @@ impl DataLoader for InMemoryData {
                 input_null,
                 input_matched,
                 output,
+                output_null,
                 output_matched,
             })
         } else {

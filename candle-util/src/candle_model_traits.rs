@@ -57,18 +57,20 @@ pub struct MatchedEncoderLatent {
     pub kl_div: Tensor,
 }
 
+pub struct MatchedEncoderData<'a> {
+    pub left: &'a Tensor,
+    pub right: &'a Tensor,
+}
+
+pub struct MatchedDecoderData<'a> {
+    pub left: &'a Tensor,
+    pub right: &'a Tensor,
+    pub centre: &'a Tensor,
+}
+
 pub trait MatchedEncoderModuleT {
     /// An encoder that spits out two results (latent inference, KL loss)
-    ///
-    /// # Arguments
-    /// * `x_nd` - input data (n x d)
-    /// * `x0_nd` - null or matched data (n x d)
-    /// * `train` - whether to use dropout/batchnorm or not
-    ///
-    /// # Returns `DiffEncoderLatent`
-    ///
-    fn forward_t(&self, x_nd: &Tensor, x0_nd: &Tensor, train: bool)
-        -> Result<MatchedEncoderLatent>;
+    fn forward_t(&self, data: MatchedEncoderData, train: bool) -> Result<MatchedEncoderLatent>;
 
     fn dim_obs(&self) -> usize;
 
@@ -78,11 +80,12 @@ pub trait MatchedEncoderModuleT {
 pub struct MatchedDecoderRecon {
     pub left: Tensor,
     pub right: Tensor,
+    pub centre: Tensor,
 }
 
 pub trait MatchedDecoderModuleT {
     /// A decoder that spits out reconstruction
-    fn forward(&self, latent: &MatchedEncoderLatent) -> Result<(Tensor, Tensor)>;
+    fn forward(&self, latent: &MatchedEncoderLatent) -> Result<MatchedDecoderRecon>;
 
     /// Get a representative dictionary matrix
     fn get_dictionary(&self) -> Result<Tensor>;
@@ -95,7 +98,7 @@ pub trait MatchedDecoderModuleT {
     fn forward_with_llik<LlikFn>(
         &self,
         latent: &MatchedEncoderLatent,
-        x_nd_pair: (&Tensor, &Tensor),
+        x_nd_pair: MatchedDecoderData,
         llik: &LlikFn,
     ) -> Result<(MatchedDecoderRecon, Tensor)>
     where

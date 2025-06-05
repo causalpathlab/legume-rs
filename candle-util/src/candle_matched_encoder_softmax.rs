@@ -7,7 +7,7 @@ use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
 
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, BatchNorm, Embedding, Linear, ModuleT, VarBuilder};
+use candle_nn::{BatchNorm, Embedding, Linear, ModuleT, VarBuilder, ops};
 
 pub struct MatchedLogSoftmaxEncoder {
     n_features: usize,
@@ -36,9 +36,8 @@ impl MatchedEncoderModuleT for MatchedLogSoftmaxEncoder {
     /// 2. a classification result to determine which mode is more feasible
     /// 3. kl-divergence
     ///
-    fn forward_t(&self, x_nd: &Tensor, y_nd: &Tensor, train: bool) -> Result<MatchedEncoderLatent> {
-        let embeded = self.preprocess_pairs(&x_nd, &y_nd, train)?;
-
+    fn forward_t(&self, data: MatchedEncoderData, train: bool) -> Result<MatchedEncoderLatent> {
+        let embeded = self.preprocess_pairs(data.left, data.right, train)?;
         let (left, left_lnvar) = self.encoding_left(&embeded.left, train)?;
         let (right, right_lnvar) = self.encoding_right(&embeded.right, train)?;
         let (avg, avg_lnvar) = self.encoding_average(&embeded.average, train)?;
@@ -47,9 +46,9 @@ impl MatchedEncoderModuleT for MatchedLogSoftmaxEncoder {
             + gaussian_kl_loss(&right, &right_lnvar)?)?
             + gaussian_kl_loss(&avg, &avg_lnvar)?)?;
 
-	let z_average = self.reparameterize(&avg, &avg_lnvar, train)?;
-	let z_left = self.reparameterize(&left, &left_lnvar, train)?;
-	let z_right = self.reparameterize(&right, &right_lnvar, train)?;
+        let z_average = self.reparameterize(&avg, &avg_lnvar, train)?;
+        let z_left = self.reparameterize(&left, &left_lnvar, train)?;
+        let z_right = self.reparameterize(&right, &right_lnvar, train)?;
 
         let left = ops::log_softmax(&z_left, 1)?;
         let right = ops::log_softmax(&z_right, 1)?;
@@ -320,7 +319,13 @@ impl MatchedEncoderEvaluateOps for MatchedLogSoftmaxEncoder {
                 .as_ref()
                 .ok_or(anyhow::anyhow!("need input matched"))?;
 
-            let latent = self.forward_t(input_nm, input_matched_nm, false)?;
+            let latent = self.forward_t(
+                MatchedEncoderData {
+                    left: input_nm,
+                    right: input_matched_nm,
+                },
+                false,
+            )?;
             ret.push(latent);
         }
         ret.concatenate()
