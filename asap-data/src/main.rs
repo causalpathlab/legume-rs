@@ -528,10 +528,19 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
     let cols = data.column_names()?;
 
     let ((nrow, ncol, triplets), col_names) = if let Some(idx) = columns_indices {
+        if idx.is_empty() {
+            return Err(anyhow::anyhow!("Empty index"));
+        }
+
         let col_names = idx.iter().map(|&x| cols[x].clone()).collect::<Vec<_>>();
         (data.read_triplets_by_columns(idx.clone())?, col_names)
     } else if let Some(column_file) = column_name_file {
         let col_names = read_col_names(column_file, MAX_COLUMN_NAME_IDX)?;
+
+        if col_names.is_empty() {
+            return Err(anyhow::anyhow!("Empty column file"));
+        }
+
         let col_names_map = data
             .column_names()
             .expect("column names not found in data file")
@@ -547,6 +556,11 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
 
         let columns: Vec<usize> = col_names_order.iter().map(|&x| *x).collect();
         let col_names = columns.iter().map(|&x| cols[x].clone()).collect::<Vec<_>>();
+
+        if columns.is_empty() {
+            return Err(anyhow::anyhow!("Found empty columns"));
+        }
+
         (data.read_triplets_by_columns(columns)?, col_names)
     } else {
         return Err(anyhow::anyhow!(
