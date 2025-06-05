@@ -122,10 +122,6 @@ where
                             .output_matched
                             .as_ref()
                             .ok_or(anyhow::anyhow!("need output matched"))?;
-                        let output_centre_nd = minibatch_data
-                            .output_null
-                            .as_ref()
-                            .ok_or(anyhow::anyhow!("need output null"))?;
 
                         let latent = self.encoder.forward_t(
                             MatchedEncoderData {
@@ -141,7 +137,6 @@ where
                             MatchedDecoderData {
                                 left: output_left_nd,
                                 right: output_right_nd,
-                                centre: output_centre_nd,
                             },
                             llik_func,
                         )?;
@@ -192,10 +187,6 @@ where
                         .output_matched
                         .as_ref()
                         .ok_or(anyhow::anyhow!("need output matched"))?;
-                    let output_centre_nd = minibatch_data
-                        .output_null
-                        .as_ref()
-                        .ok_or(anyhow::anyhow!("need output null"))?;
 
                     let latent = self.encoder.forward_t(
                         MatchedEncoderData {
@@ -211,7 +202,6 @@ where
                         MatchedDecoderData {
                             left: output_left_nd,
                             right: output_right_nd,
-                            centre: output_centre_nd,
                         },
                         llik_func,
                     )?;

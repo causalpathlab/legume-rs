@@ -65,7 +65,6 @@ pub struct MatchedEncoderData<'a> {
 pub struct MatchedDecoderData<'a> {
     pub left: &'a Tensor,
     pub right: &'a Tensor,
-    pub centre: &'a Tensor,
 }
 
 pub trait MatchedEncoderModuleT {
@@ -80,7 +79,6 @@ pub trait MatchedEncoderModuleT {
 pub struct MatchedDecoderRecon {
     pub left: Tensor,
     pub right: Tensor,
-    pub centre: Tensor,
 }
 
 pub trait MatchedDecoderModuleT {

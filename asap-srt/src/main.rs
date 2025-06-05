@@ -176,7 +176,7 @@ fn main() -> anyhow::Result<()> {
     ///////////////////////////////////////////////
 
     let collapsed = srt_cell_pairs.collapse_pairs()?;
-    let params = collapsed.optimize(args.iter_opt, None)?;
+    let params = collapsed.optimize(None)?;
 
     concatenate_vertical(&[collapsed.left_coordinates, collapsed.right_coordinates])?
         .transpose()
@@ -218,7 +218,6 @@ fn main() -> anyhow::Result<()> {
     // output decoder should maintain the original dimension
     let output_left_nd = params.left.posterior_mean().transpose();
     let output_right_nd = params.right.posterior_mean().transpose();
-    let output_centre_nd = params.centre.posterior_mean().transpose();
 
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
@@ -269,7 +268,7 @@ fn main() -> anyhow::Result<()> {
         input_null: None,
         input_matched: Some(&input_right_nm),
         output: Some(&output_left_nd),
-        output_null: Some(&output_centre_nd),
+        output_null: None,
         output_matched: Some(&output_right_nd),
     };
 
