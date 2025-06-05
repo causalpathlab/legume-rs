@@ -281,7 +281,7 @@ impl MatchedLogSoftmaxEncoder {
     /// * `z_lnvar` - log variance of Gaussian distribution
     fn reparameterize(&self, z_mean: &Tensor, z_lnvar: &Tensor, train: bool) -> Result<Tensor> {
         if train {
-            let eps = Tensor::randn_like(&z_mean, 0., 1.)?;
+            let eps = Tensor::randn_like(z_mean, 0., 1.)?;
             z_mean + (z_lnvar * 0.5)?.exp()? * eps
         } else {
             Ok(z_mean.clone())

@@ -103,10 +103,11 @@ where
 
         for _epoch in 0..train_config.num_pretrain_epochs {
             let mut llik_tot = 0f32;
-            for b in 0..data.num_minibatch() {
-                let x = data_aux_out_vec[b].input.as_ref();
-                let x0 = data_aux_out_vec[b].input_null.as_ref();
-                let z = data_aux_out_vec[b].output.as_ref();
+
+            for mb in data_aux_out_vec.iter().take(data.num_minibatch()) {
+                let x = mb.input.as_ref();
+                let x0 = mb.input_null.as_ref();
+                let z = mb.output.as_ref();
 
                 if let Some(z_target) = z {
                     let (z_hat, kl) = self.encoder.forward_t(x, x0, true)?;
@@ -239,9 +240,8 @@ where
         } else {
             for _epoch in 0..train_config.num_epochs {
                 let mut llik_tot = 0f32;
-                for b in 0..data.num_minibatch() {
-                    let minibatch_data = &data_aux_vec[b];
 
+                for minibatch_data in data_aux_vec.iter().take(data.num_minibatch()) {
                     let (x_nd, x0_nd, y_nd) = (
                         minibatch_data.input.as_ref(),
                         minibatch_data.input_null.as_ref(),
