@@ -233,6 +233,10 @@ impl DataLoader for InMemoryData {
             self.shuffled_output_data = Some(vec![]);
         }
 
+        if self.output_null_data.is_some() {
+            self.shuffled_output_null_data = Some(vec![]);
+        }
+
         if self.output_matched_data.is_some() {
             self.shuffled_output_matched_data = Some(vec![]);
         }
@@ -253,6 +257,11 @@ impl DataLoader for InMemoryData {
                     self.input_matched_data.as_ref(),
                     self.shuffled_input_matched_data.as_mut(),
                 )?;
+                copy_shuffled(
+                    samples,
+                    self.input_null_data.as_ref(),
+                    self.shuffled_input_null_data.as_mut(),
+                )?;
 
                 copy_shuffled(
                     samples,
@@ -266,8 +275,8 @@ impl DataLoader for InMemoryData {
                 )?;
                 copy_shuffled(
                     samples,
-                    self.input_null_data.as_ref(),
-                    self.shuffled_input_null_data.as_mut(),
+                    self.output_null_data.as_ref(),
+                    self.shuffled_output_null_data.as_mut(),
                 )?;
             } else {
                 return Err(anyhow::anyhow!(
