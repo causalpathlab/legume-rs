@@ -120,11 +120,11 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         let outfile = format!("{}/tau_{}.summary.tsv.gz", args.out, k);
         tau.to_summary_stat_tsv(gene_names.clone(), exposure_names.clone(), &outfile)?;
 
-        let tsv_file = format!("{}/mu_{}.tsv.gz", args.out, k);
-	param.shared.posterior_log_mean().to_tsv(&tsv_file)?;
+        let tsv_header = format!("{}/mu_{}", args.out, k);
+	param.shared.to_tsv(&tsv_header)?;
 
-        let tsv_file = format!("{}/delta_{}.tsv.gz", args.out, k);
-	param.residual.posterior_log_mean().to_tsv(&tsv_file)?;
+        let tsv_header = format!("{}/delta_{}", args.out, k);
+	param.residual.to_tsv(&tsv_header)?;
     }
 
     info!("Done");
