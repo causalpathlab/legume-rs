@@ -17,8 +17,8 @@ pub struct CocoaStat<'a> {
 
 fn num_categories(sample_to_exposure: &Vec<usize>) -> usize {
     match sample_to_exposure.iter().max() {
-        Some(&sz) => sz,
-        _ => 0,
+        Some(&sz) => sz + 1,
+        _ => 1,
     }
 }
 
@@ -122,7 +122,7 @@ impl<'a> CocoaStat<'a> {
             // mu[g,s] = --------------------------------
             //             size[s] * tau[g,x(s)] + size[s]
             let tau_dx = tau_param_dx.posterior_mean();
-
+            denom_ds.fill(0.);
             for &(s, x) in sample_to_exposure.iter() {
                 denom_ds
                     .column_mut(s)
@@ -137,14 +137,16 @@ impl<'a> CocoaStat<'a> {
             //             sum_s mu[g,s] I{x(s)=x} * n[s]
             let mu_ds = mu_param_ds.posterior_mean();
 
+            denom_dx.fill(0.);
             for &(s, x) in sample_to_exposure.iter() {
-                denom_dx
-                    .column_mut(x)
-                    .copy_from(&mu_ds.column(s).scale(size_s[s]));
+                let mut denom = denom_dx.column_mut(x);
+                denom += &mu_ds.column(s).scale(size_s[s]);
             }
             tau_param_dx.update_stat(&y1_dx, &denom_dx);
             tau_param_dx.calibrate();
         }
+
+        info!("finished optimization");
 
         // 3. Calibrate sample-specific residual
         //               y1[g,s]
@@ -152,8 +154,8 @@ impl<'a> CocoaStat<'a> {
         //               size[s] * mu[g,s]
         {
             denom_ds.copy_from(mu_param_ds.posterior_mean());
-            denom_ds.column_iter_mut().for_each(|mut d_s| {
-                d_s.component_mul_assign(&size_s);
+            denom_ds.row_iter_mut().for_each(|mut dd| {
+                dd.component_mul_assign(&size_s.transpose());
             });
             delta_param_ds.update_stat(&y1_ds, &denom_ds);
             delta_param_ds.calibrate();

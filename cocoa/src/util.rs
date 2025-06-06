@@ -1,3 +1,5 @@
+// use crate::common::*;
+
 use matrix_param::{
     dmatrix_gamma::GammaMatrix,
     traits::{Inference, TwoStatParam},
@@ -20,6 +22,7 @@ impl CocoaOut for GammaMatrix {
         column_names: Vec<Box<str>>,
         outfile: &str,
     ) -> anyhow::Result<()> {
+        // info!("linearize {} x {}", self.nrows(), self.ncols());
         let mean = self.posterior_mean();
         let sd = self.posterior_sd();
         let log_mean = self.posterior_log_mean();

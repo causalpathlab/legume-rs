@@ -8,7 +8,7 @@ use matrix_util::common_io::{mkdir, write_lines, write_types};
 use matrix_util::mtx_io;
 use matrix_util::traits::{IoOps, MatOps, SampleOps};
 use rand::SeedableRng;
-use rand_distr::{weighted::WeightedIndex, Distribution, Normal, Poisson, Uniform};
+use rand_distr::{Distribution, Normal, Poisson, Uniform, weighted::WeightedIndex};
 
 use rayon::prelude::*;
 
@@ -65,9 +65,18 @@ pub struct SimArgs {
     /// Output header
     #[arg(long, short, required = true)]
     out: Box<str>,
+
+    /// verbosity
+    #[arg(long, short)]
+    verbose: bool,
 }
 
 pub fn run_sim_diff_data(args: SimArgs) -> anyhow::Result<()> {
+    if args.verbose {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
+
     info!("Simulating triplets...");
     let sim_out = generate_diff_data(&args)?;
     info!("Successfully simulated");
