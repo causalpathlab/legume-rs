@@ -124,9 +124,8 @@ impl<'a> CocoaStat<'a> {
             let tau_dx = tau_param_dx.posterior_mean();
             denom_ds.fill(0.);
             for &(s, x) in sample_to_exposure.iter() {
-                denom_ds
-                    .column_mut(s)
-                    .copy_from(&tau_dx.column(x).scale(size_s[s]).add_scalar(size_s[s]));
+                let mut denom = denom_ds.column_mut(s);
+                denom += &tau_dx.column(x).scale(size_s[s]).add_scalar(size_s[s]);
             }
             mu_param_ds.update_stat(&(y1_ds + y0_ds), &denom_ds);
             mu_param_ds.calibrate();
