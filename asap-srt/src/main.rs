@@ -1,4 +1,3 @@
-mod simulate;
 mod srt_cell_pairs;
 mod srt_collapse_pairs;
 mod srt_common;
@@ -180,7 +179,7 @@ fn main() -> anyhow::Result<()> {
 
     concatenate_vertical(&[collapsed.left_coordinates, collapsed.right_coordinates])?
         .transpose()
-        .to_csv(&(args.out.to_string() + ".collapsed.coord.pairs.csv.gz"))?;
+        .to_tsv(&(args.out.to_string() + ".collapsed.coord.pairs.tsv.gz"))?;
 
     /////////////////////////////////////////////////
     // 4. Collapse rows/genes/features to speed up //
@@ -283,10 +282,10 @@ fn main() -> anyhow::Result<()> {
 
     write_types::<f32>(&log_likelihood, &(args.out.to_string() + ".llik.gz"))?;
 
-    csv_gz_out(&latent.average, &args.out, "collapsed.latent")?;
-    csv_gz_out(&latent.left, &args.out, "collapsed.latent.left")?;
-    csv_gz_out(&latent.right, &args.out, "collapsed.latent.right")?;
-    csv_gz_out(&decoder.get_dictionary()?, &args.out, "dictionary")?;
+    tsv_gz_out(&latent.average, &args.out, "collapsed.latent")?;
+    tsv_gz_out(&latent.left, &args.out, "collapsed.latent.left")?;
+    tsv_gz_out(&latent.right, &args.out, "collapsed.latent.right")?;
+    tsv_gz_out(&decoder.get_dictionary()?, &args.out, "dictionary")?;
 
     let latent = srt_cell_pairs.evaluate_latent_states(
         &encoder,
@@ -295,14 +294,14 @@ fn main() -> anyhow::Result<()> {
         args.block_size,
     )?;
 
-    csv_gz_out(&latent.average, &args.out, "latent")?;
-    csv_gz_out(&latent.left, &args.out, "latent.left")?;
-    csv_gz_out(&latent.right, &args.out, "latent.right")?;
+    tsv_gz_out(&latent.average, &args.out, "latent")?;
+    tsv_gz_out(&latent.left, &args.out, "latent.left")?;
+    tsv_gz_out(&latent.right, &args.out, "latent.right")?;
 
     let (_left, _right) = srt_cell_pairs.all_pairs_positions()?;
 
     concatenate_horizontal(&[_left, _right])?
-        .to_csv(&(args.out.to_string() + ".coord.pairs.csv.gz"))?;
+        .to_tsv(&(args.out.to_string() + ".coord.pairs.tsv.gz"))?;
 
     info!("done");
     Ok(())

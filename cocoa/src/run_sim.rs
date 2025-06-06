@@ -67,7 +67,7 @@ pub struct SimArgs {
     out: Box<str>,
 }
 
-pub fn run_diff_data(args: SimArgs) -> anyhow::Result<()> {
+pub fn run_sim_diff_data(args: SimArgs) -> anyhow::Result<()> {
     info!("Simulating triplets...");
     let sim_out = generate_diff_data(&args)?;
     info!("Successfully simulated");

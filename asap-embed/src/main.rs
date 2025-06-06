@@ -296,10 +296,10 @@ fn main() -> anyhow::Result<()> {
 
         nystrom_out
             .latent_nk
-            .to_tsv(&(args.out.to_string() + ".latent.gz"))?;
+            .to_tsv(&(args.out.to_string() + ".latent.tsv.gz"))?;
         nystrom_out
             .dictionary_dk
-            .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
+            .to_tsv(&(args.out.to_string() + ".dictionary.tsv.gz"))?;
 
         info!("Done");
         return Ok(());
@@ -387,7 +387,7 @@ fn main() -> anyhow::Result<()> {
             decoder
                 .get_dictionary()?
                 .to_device(&candle_core::Device::Cpu)?
-                .to_tsv(&(args.out.to_string() + ".dictionary.gz"))?;
+                .to_tsv(&(args.out.to_string() + ".dictionary.tsv.gz"))?;
 
             llik
         }
@@ -407,7 +407,7 @@ fn main() -> anyhow::Result<()> {
         &train_config,
         delta_db,
     )?;
-    z_nk.to_tsv(&(args.out.to_string() + ".latent.gz"))?;
+    z_nk.to_tsv(&(args.out.to_string() + ".latent.tsv.gz"))?;
     if let Some(batch_db) = batch_db {
         batch_db.to_tsv(&(args.out.to_string() + ".delta"))?;
     }

@@ -24,6 +24,7 @@ fn num_categories(sample_to_exposure: &Vec<usize>) -> usize {
 
 pub struct CocoaGammaOut {
     pub shared: GammaMatrix,
+    pub residual: GammaMatrix,
     pub exposure: GammaMatrix,
 }
 
@@ -110,6 +111,8 @@ impl<'a> CocoaStat<'a> {
 
         let mut mu_param_ds = GammaMatrix::new((n_genes, n_samples), self.a0, self.b0);
         let mut tau_param_dx = GammaMatrix::new((n_genes, n_exposures), self.a0, self.b0);
+        let mut delta_param_ds = GammaMatrix::new((n_genes, n_samples), self.a0, self.b0);
+
         let mut denom_ds = Mat::zeros(n_genes, n_samples);
         let mut denom_dx = Mat::zeros(n_genes, n_exposures);
 
@@ -143,8 +146,22 @@ impl<'a> CocoaStat<'a> {
             tau_param_dx.calibrate();
         }
 
+        // 3. Calibrate sample-specific residual
+        //               y1[g,s]
+        // delta[g,s] = --------------------------------
+        //               size[s] * mu[g,s]
+        {
+            denom_ds.copy_from(mu_param_ds.posterior_mean());
+            denom_ds.column_iter_mut().for_each(|mut d_s| {
+                d_s.component_mul_assign(&size_s);
+            });
+            delta_param_ds.update_stat(&y1_ds, &denom_ds);
+            delta_param_ds.calibrate();
+        }
+
         Ok(CocoaGammaOut {
             shared: mu_param_ds,
+            residual: delta_param_ds,
             exposure: tau_param_dx,
         })
     }
