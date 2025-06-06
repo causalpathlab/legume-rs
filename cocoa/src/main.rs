@@ -10,7 +10,6 @@ use crate::run_sim::*;
 
 use clap::Subcommand;
 
-///
 #[derive(Parser, Debug)]
 #[command(version, about, long_about)]
 struct Cli {
@@ -37,7 +36,7 @@ fn main() -> anyhow::Result<()> {
             run_cocoa_diff(args.clone())?;
         }
         Commands::Simulate(args) => {
-            run_diff_data(args.clone())?;
+            run_sim_diff_data(args.clone())?;
         }
     }
 

@@ -27,8 +27,8 @@ pub use candle_util::candle_matched_decoder_topic::*;
 pub use candle_util::candle_matched_encoder_softmax::*;
 pub use candle_util::candle_model_traits::*;
 
-/// a quick wrapper for gzipped csv out: `{header}.{file_name}.csv.gz`
-pub fn csv_gz_out(data: &Tensor, header: &str, file_name: &str) -> anyhow::Result<()> {
-    let csv_file = header.to_string() + "." + file_name + ".csv.gz";
-    data.to_device(&candle_core::Device::Cpu)?.to_csv(&csv_file)
+/// a quick wrapper for gzipped tsv out: `{header}.{file_name}.tsv.gz`
+pub fn tsv_gz_out(data: &Tensor, header: &str, file_name: &str) -> anyhow::Result<()> {
+    let tsv_file = header.to_string() + "." + file_name + ".tsv.gz";
+    data.to_device(&candle_core::Device::Cpu)?.to_tsv(&tsv_file)
 }

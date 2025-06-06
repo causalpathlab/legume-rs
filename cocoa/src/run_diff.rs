@@ -8,8 +8,11 @@ use asap_alg::random_projection::RandProjOps;
 pub use clap::Parser;
 pub use log::{info, warn};
 
+use matrix_param::traits::Inference;
+use matrix_param::traits::ParamIo;
 use matrix_util::common_io;
 pub use matrix_util::common_io::{extension, read_lines, read_lines_of_words};
+use matrix_util::dmatrix_util::concatenate_vertical;
 use matrix_util::traits::IoOps;
 pub use std::sync::Arc;
 
@@ -24,18 +27,19 @@ pub struct DiffArgs {
     #[arg(required = true)]
     data_files: Vec<Box<str>>,
 
-    /// sample membership files (comma-separated names). Each bach
+    /// sample membership files (comma-separated file names). Each sample
     /// file should match with each data file.
     #[arg(long, short, value_delimiter(','))]
     sample_files: Vec<Box<str>>,
 
+    /// latent topic assignment files (comma-separated file names)
+    /// Each topic file should match with each data file or None.
+    #[arg(long, short, value_delimiter(','))]
+    topic_assignment_files: Option<Vec<Box<str>>>,
+
     /// each line corresponds to (1) sample name and (2) exposure name
     #[arg(long, short)]
     exposure_assignment_file: Box<str>,
-
-    /// latent topic assignment file
-    #[arg(long, short)]
-    topic_assignment_file: Option<Box<str>>,
 
     /// #k-nearest neighbours within each condition
     #[arg(long, short = 'n', default_value_t = 10)]
@@ -113,8 +117,14 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
 
     for (k, param) in parameters.iter().enumerate() {
         let tau = &param.exposure;
-        let outfile = format!("{}/tau_{}.gz", args.out, k);
+        let outfile = format!("{}/tau_{}.summary.tsv.gz", args.out, k);
         tau.to_summary_stat_tsv(gene_names.clone(), exposure_names.clone(), &outfile)?;
+
+        let tsv_file = format!("{}/mu_{}.tsv.gz", args.out, k);
+	param.shared.posterior_log_mean().to_tsv(&tsv_file)?;
+
+        let tsv_file = format!("{}/delta_{}.tsv.gz", args.out, k);
+	param.residual.posterior_log_mean().to_tsv(&tsv_file)?;
     }
 
     info!("Done");
@@ -169,8 +179,18 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
 
     let mut sparse_data = SparseIoVec::new();
     let mut cell_to_sample = vec![];
+    let mut topic_vec = vec![];
 
-    for (this_data_file, sample_file) in args.data_files.into_iter().zip(args.sample_files) {
+    let data_files = args.data_files;
+    let sample_files = args.sample_files;
+    let topic_files = match args.topic_assignment_files {
+        Some(vec) => vec.into_iter().map(Some).collect(),
+        None => Vec::new(),
+    };
+
+    for ((this_data_file, sample_file), topic_file) in
+        data_files.into_iter().zip(sample_files).zip(topic_files)
+    {
         info!("Importing: {}, {}", this_data_file, sample_file);
 
         match extension(&this_data_file)?.as_ref() {
@@ -184,9 +204,15 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
         };
 
         let this_data = open_sparse_matrix(&this_data_file, &backend)?;
-        let this_data_samples = read_lines(&sample_file)?;
+        let ndata = this_data.num_columns().unwrap_or(0);
 
-        if this_data_samples.len() != this_data.num_columns().unwrap_or(0) {
+        let this_sample = read_lines(&sample_file)?;
+        let this_topic = match topic_file.as_ref() {
+            Some(_file) => Mat::from_tsv(_file, None)?,
+            None => Mat::from_element(ndata, 1, 1.0),
+        };
+
+        if this_sample.len() != ndata || this_topic.nrows() != ndata {
             return Err(anyhow::anyhow!(
                 "{} and {} don't match",
                 sample_file,
@@ -194,10 +220,13 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
             ));
         }
 
-        cell_to_sample.extend(this_data_samples);
+        cell_to_sample.extend(this_sample);
         sparse_data.push(Arc::from(this_data))?;
+        topic_vec.push(this_topic);
     }
     info!("Total {} data sets combined", sparse_data.len());
+
+    let cell_topic = concatenate_vertical(topic_vec.as_slice())?;
 
     let proj_out = sparse_data.project_columns(args.proj_dim, Some(args.block_size))?;
     let proj_kn = &proj_out.proj;
@@ -206,10 +235,6 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
     let samples = sparse_data
         .batch_names()
         .ok_or(anyhow::anyhow!("empty sample name in sparse data"))?;
-
-    // for (s, e) in sample_to_exposure.iter() {
-    //     info!("Assign sample {} to exposure {}", s, e);
-    // }
 
     let sample_to_exposure: Vec<usize> = samples
         .iter()
@@ -227,25 +252,6 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
         "Found {} samples with exposure assignments",
         sample_to_exposure.len()
     );
-
-    let cell_topic = match args.topic_assignment_file.as_ref() {
-        Some(file) => {
-            info!("cell topic data {}", file);
-            Mat::from_tsv(file, None)?
-        }
-        None => {
-            info!("ignoring cell types");
-            Mat::from_element(sparse_data.num_columns()?, 1, 1.0)
-        }
-    };
-
-    if cell_topic.nrows() != sparse_data.num_columns()? {
-        return Err(anyhow::anyhow!(
-            "topic assignment matrix {} vs {} rows",
-            cell_topic.nrows(),
-            sparse_data.num_columns()?
-        ));
-    }
 
     Ok(DiffData {
         sparse_data,
