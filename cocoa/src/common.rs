@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub use log::{info, warn};
+
 pub use asap_data::sparse_data_visitors::*;
 pub use asap_data::sparse_io::*;
 pub use asap_data::sparse_io_vector::SparseIoVec;

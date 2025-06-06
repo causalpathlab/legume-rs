@@ -6,7 +6,6 @@ use asap_alg::collapse_data::CollapsingOps;
 use asap_alg::random_projection::RandProjOps;
 
 pub use clap::Parser;
-pub use log::{info, warn};
 
 use matrix_param::traits::ParamIo;
 use matrix_util::common_io;
@@ -75,14 +74,19 @@ pub struct DiffArgs {
 
 /// Run CoCoA differential analysis
 pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
+    if args.verbose {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
+
     let mut data = read_input_data(args.clone())?;
 
-    common_io::mkdir(&args.out)?;
-
-    info!("normalizing cell topic proportion");
-    data.cell_topic
-        .row_iter_mut()
-        .for_each(|mut r| r.unscale_mut(r.sum()));
+    if data.cell_topic.ncols() > 1 {
+        info!("normalizing cell topic proportion");
+        data.cell_topic
+            .row_iter_mut()
+            .for_each(|mut r| r.unscale_mut(r.sum()));
+    }
 
     info!("exposure names:");
     let exposure_names = data.exposure_names;
@@ -114,9 +118,11 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     info!("Optimizing parameters...");
     let parameters = cocoa_stat.estimate_parameters()?;
 
+    info!("Writing down the estimates...");
     for (k, param) in parameters.iter().enumerate() {
         let tau = &param.exposure;
         let outfile = format!("{}/tau_{}.summary.tsv.gz", args.out, k);
+        common_io::mkdir(&outfile)?;
         tau.to_summary_stat_tsv(gene_names.clone(), exposure_names.clone(), &outfile)?;
 
         let tsv_header = format!("{}/mu_{}", args.out, k);
@@ -184,7 +190,7 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
     let sample_files = args.sample_files;
     let topic_files = match args.topic_assignment_files {
         Some(vec) => vec.into_iter().map(Some).collect(),
-        None => Vec::new(),
+        None => vec![None; data_files.len()],
     };
 
     for ((this_data_file, sample_file), topic_file) in
