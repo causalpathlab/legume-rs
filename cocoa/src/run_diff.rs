@@ -8,7 +8,6 @@ use asap_alg::random_projection::RandProjOps;
 pub use clap::Parser;
 pub use log::{info, warn};
 
-use matrix_param::traits::Inference;
 use matrix_param::traits::ParamIo;
 use matrix_util::common_io;
 pub use matrix_util::common_io::{extension, read_lines, read_lines_of_words};
@@ -121,10 +120,10 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         tau.to_summary_stat_tsv(gene_names.clone(), exposure_names.clone(), &outfile)?;
 
         let tsv_header = format!("{}/mu_{}", args.out, k);
-	param.shared.to_tsv(&tsv_header)?;
+        param.shared.to_tsv(&tsv_header)?;
 
         let tsv_header = format!("{}/delta_{}", args.out, k);
-	param.residual.to_tsv(&tsv_header)?;
+        param.residual.to_tsv(&tsv_header)?;
     }
 
     info!("Done");
