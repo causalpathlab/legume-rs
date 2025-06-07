@@ -1,10 +1,13 @@
 // #![allow(dead_code)]
 use crate::common::*;
 
+use std::collections::HashSet;
+
 pub use clap::Parser;
 use indicatif::ParallelProgressIterator;
 use log::info;
 use matrix_util::common_io::{mkdir, write_lines, write_types};
+use matrix_util::dmatrix_util::concatenate_horizontal;
 use matrix_util::mtx_io;
 use matrix_util::traits::{IoOps, MatOps, SampleOps};
 use rand::SeedableRng;
@@ -69,6 +72,86 @@ pub struct SimArgs {
     /// verbosity
     #[arg(long, short)]
     verbose: bool,
+}
+
+struct GlmSimulator {
+    n_indv: usize,
+    n_covar: usize,
+    n_exp_cat: usize,
+    n_genes: usize,
+    n_causal_genes: usize,
+    pve_exposure: f32,
+    pve_gene: f32,
+    rseed: u64,
+}
+
+impl GlmSimulator {
+    fn generate_individual_glm(&self) -> anyhow::Result<Mat> {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(self.rseed);
+
+        // 1. Generate confounding factors
+        let w_nk = Mat::rnorm(self.n_indv, self.n_covar);
+
+        // 2. Generate multinomial exposure assignment (sample x gene)
+        // A(i,c) ~ multinomial( sum W(i,k) * effect(k,c) + eps )
+        let effect_kc = Mat::rnorm(self.n_covar, self.n_exp_cat);
+
+        let logits_nc = Mat::rnorm(self.n_indv, self.n_exp_cat) * (1. - self.pve_exposure)
+            + (w_nk * effect_kc).scale_columns() * self.pve_exposure;
+
+        let assignment_n = sample_logits_each_row(logits_nc, &mut rng)?;
+
+        // 3. Sample generalized linear model
+        let runif = Uniform::new(0, self.n_genes)?;
+        let causal_genes: HashSet<usize> = (0..self.n_causal_genes)
+            .map(|_| runif.sample(&mut rng))
+            .collect();
+
+        let mut data: Vec<(usize, Mat)> = (0..self.n_genes)
+            .into_par_iter()
+            .map(|g| {
+                let eps_n = Mat::rnorm(1, self.n_indv);
+
+                if causal_genes.contains(&g) {
+                    let effect_c = Mat::rnorm(1, self.n_exp_cat);
+                    let ret_n = Mat::from_iterator(
+                        1,
+                        self.n_indv,
+                        assignment_n.iter().map(|&c| effect_c[c]),
+                    );
+                    let mu = ret_n.mean();
+                    let sig = ret_n.variance().sqrt().max(1e-8);
+                    let ret = ret_n.map(|x| (x - mu) / sig * self.pve_gene)
+                        + eps_n * (1. - self.pve_gene);
+                    (g, ret)
+                } else {
+                    (g, eps_n)
+                }
+            })
+            .collect();
+
+        data.sort_by_key(|&(g, _)| g);
+        let data_mn = data
+            .into_iter()
+            .map(|(_, x)| x.row(0).into_owned())
+            .collect::<Vec<_>>();
+        Ok(Mat::from_rows(&data_mn))
+    }
+
+    fn generate_triplets(&self, ln_delta_mn: Mat) -> anyhow::Result<()> {
+
+	let n_indv = ln_delta_mn.ncols();
+	assert_eq!(n_indv, self.n_indv);
+
+	// for each individual, sample n_cells_per_indv cells
+	//
+	// y(g,j) ~ sum_t beta(g,t) theta(j,t) * delta(g,N(j))
+	// ln y = ln[sum_t beta(g,t) theta(j,t)] * pve_t
+	//        + ln_delta * pve_i
+	//        + eps * (1- pve_t - pve_i)
+
+        Ok(())
+    }
 }
 
 pub fn run_sim_diff_data(args: SimArgs) -> anyhow::Result<()> {
@@ -181,6 +264,9 @@ pub struct SimOut {
 }
 
 /// Generate
+///
+/// 1. generate individual level data
+///
 ///
 /// ```text
 /// Y(g,j) ~ Poisson{ sum_t delta(g,t,S(j)) * beta(g,t) * theta(j,t) }
