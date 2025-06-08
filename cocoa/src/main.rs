@@ -22,7 +22,9 @@ enum Commands {
     /// Differential expression analysis
     Diff(DiffArgs),
 
-    /// Simulate differential expression data
+    /// Simulate differential expression data with one cell type.
+    /// ``
+    ///
     Simulate(SimArgs),
 }
 
