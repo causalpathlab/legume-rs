@@ -2,6 +2,7 @@ use crate::common::*;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::Inference;
 use matrix_param::traits::*;
+use matrix_util::traits::MatOps;
 
 pub struct CocoaStat<'a> {
     y1_sum_ds_vec: Vec<Mat>,            // cell type topic x gene x sample
@@ -76,8 +77,17 @@ impl<'a> CocoaStat<'a> {
 
     pub fn optimize_each_topic(&self, k: usize) -> anyhow::Result<CocoaGammaOut> {
         let size_s = &self.size_s_vec[k];
-        let y1_ds = &self.y1_sum_ds_vec[k];
-        let y0_ds = &self.y0_sum_ds_vec[k];
+
+        let n_genes = self.y1_sum_ds_vec[k].nrows();
+
+        let y1_ds = self.y1_sum_ds_vec[k]
+            .normalize_columns()
+            .scale(n_genes as f32);
+        let y0_ds = self.y0_sum_ds_vec[k]
+            .normalize_columns()
+            .scale(n_genes as f32);
+
+        let y10_ds = &y1_ds + &y0_ds;
 
         debug_assert_eq!(size_s.nrows(), self.sample_to_exposure.len());
         debug_assert_eq!(size_s.nrows(), y1_ds.ncols());
@@ -94,16 +104,19 @@ impl<'a> CocoaStat<'a> {
             .collect();
 
         let mut y1_dx = Mat::zeros(y1_ds.nrows(), n_exposures);
+        let mut y0_dx = Mat::zeros(y0_ds.nrows(), n_exposures);
 
         for &(s, x) in sample_to_exposure.iter() {
             if x < y1_dx.ncols() {
                 let mut y = y1_dx.column_mut(x);
                 y += &y1_ds.column(s);
+                let mut y0 = y0_dx.column_mut(x);
+                y0 += &y0_ds.column(s);
             }
         }
 
-        // model 1: sum_s ( y[g,s] * log(mu[g,s] * tau[g,x(s)]) - n[s] * mu[g,s] * tau[g,x(s)] )
-        // model 2: sum_s ( y0[g,s] * log(mu[g,s]) - n[s] * mu[g,s] )
+        // model 1: sum_s ( y[g,s] * log(μ[g,s] * τ[g,x(s)]) - n[s] * μ[g,s] * τ[g,x(s)] )
+        // model 2: sum_s ( y0[g,s] * log(μ[g,s] * γ[g,x(s)]) - n[s] * μ[g,s] * γ[g,x(s)] )
 
         let n_genes = y1_ds.nrows();
         let n_samples = y1_ds.ncols();
@@ -111,29 +124,40 @@ impl<'a> CocoaStat<'a> {
 
         let mut mu_param_ds = GammaMatrix::new((n_genes, n_samples), self.a0, self.b0);
         let mut tau_param_dx = GammaMatrix::new((n_genes, n_exposures), self.a0, self.b0);
-        let mut delta_param_ds = GammaMatrix::new((n_genes, n_samples), self.a0, self.b0);
+        let mut gamma_param_dx = GammaMatrix::new((n_genes, n_exposures), self.a0, self.b0);
+
+        // let mut gamma_param_ds = GammaMatrix::new((n_genes, n_samples), self.a0, self.b0);
+        mu_param_ds.calibrate();
+        tau_param_dx.calibrate();
+        gamma_param_dx.calibrate();
+        // gamma_param_ds.calibrate();
 
         let mut denom_ds = Mat::zeros(n_genes, n_samples);
         let mut denom_dx = Mat::zeros(n_genes, n_exposures);
 
         for _iter in 0..self.n_opt_iter {
             // 1. sample-specific component
-            //             y1[g,s]               + y0[g,s]
-            // mu[g,s] = --------------------------------
-            //             size[s] * tau[g,x(s)] + size[s]
+            //           y1[g,s]             + y0[g,s]
+            // μ[g,s] = ----------------------------------------
+            //           size[s] * τ[g,x(s)] + size[s] * γ[g,s]
+            let gamma_dx = gamma_param_dx.posterior_mean();
             let tau_dx = tau_param_dx.posterior_mean();
+            // let gamma_ds = gamma_param_ds.posterior_mean();
             denom_ds.fill(0.);
             for &(s, x) in sample_to_exposure.iter() {
                 let mut denom = denom_ds.column_mut(s);
-                denom += &tau_dx.column(x).scale(size_s[s]).add_scalar(size_s[s]);
+
+                denom += &tau_dx.column(x).scale(size_s[s]);
+                denom += &gamma_dx.column(x).scale(size_s[s]);
+                // denom += &gamma_ds.column(s).scale(size_s[s]);
             }
-            mu_param_ds.update_stat(&(y1_ds + y0_ds), &denom_ds);
+            mu_param_ds.update_stat(&y10_ds, &denom_ds);
             mu_param_ds.calibrate();
 
             // 2. shared exposure component
-            //             y1[g,x]
-            // tau[g,x] = --------------------------------
-            //             sum_s mu[g,s] I{x(s)=x} * n[s]
+            //           y1[g,x]
+            // τ[g,x] = -------------------------------
+            //           sum_s μ[g,s] I{x(s)=x} * n[s]
             let mu_ds = mu_param_ds.posterior_mean();
 
             denom_dx.fill(0.);
@@ -143,26 +167,19 @@ impl<'a> CocoaStat<'a> {
             }
             tau_param_dx.update_stat(&y1_dx, &denom_dx);
             tau_param_dx.calibrate();
+
+            // 3. null exposure component
+            //           y0[g,x]
+            // γ[g,x] = -----------------------------
+            //           sum_s μ[g,s] I{x(s)=x} n[s]
+            gamma_param_dx.update_stat(&y0_dx, &denom_dx);
         }
 
         info!("finished optimization");
 
-        // 3. Calibrate sample-specific residual
-        //               y1[g,s]
-        // delta[g,s] = --------------------------------
-        //               size[s] * mu[g,s]
-        {
-            denom_ds.copy_from(mu_param_ds.posterior_mean());
-            denom_ds.row_iter_mut().for_each(|mut dd| {
-                dd.component_mul_assign(&size_s.transpose());
-            });
-            delta_param_ds.update_stat(&y1_ds, &denom_ds);
-            delta_param_ds.calibrate();
-        }
-
         Ok(CocoaGammaOut {
             shared: mu_param_ds,
-            residual: delta_param_ds,
+            residual: gamma_param_dx,
             exposure: tau_param_dx,
         })
     }

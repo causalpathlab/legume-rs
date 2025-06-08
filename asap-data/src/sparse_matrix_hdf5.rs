@@ -594,8 +594,7 @@ impl SparseIo for SparseMtxData {
         if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indicies) {
             let ncol_out = columns_vec.len();
 
-            let mut ret: Vec<(u64, u64, f32)> =
-                Vec::with_capacity((max_end - min_start) as usize);
+            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((max_end - min_start) as usize);
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
                 let jj = jj as u64;
@@ -615,8 +614,7 @@ impl SparseIo for SparseMtxData {
 
             let ncol_out = columns_vec.len();
 
-            let mut ret: Vec<(u64, u64, f32)> =
-                Vec::with_capacity((max_end - min_start) as usize);
+            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((max_end - min_start) as usize);
 
             for (jj, &j_data) in columns_vec.iter().enumerate() {
                 let jj = jj as u64;
@@ -705,8 +703,8 @@ impl SparseIo for SparseMtxData {
     ) -> anyhow::Result<()> {
         // Populate them into HDF5
         if self.backend.group("/by_row").is_err() {
-            let root = self.backend.create_group("/by_row")?;
-            info!("Group: {:?} created", root);
+            let _root = self.backend.create_group("/by_row")?;
+            // info!("Group: {:?} created", root);
         }
 
         {
@@ -771,8 +769,8 @@ impl SparseIo for SparseMtxData {
     ) -> anyhow::Result<()> {
         // Populate them into HDF5
         if self.backend.group("/by_column").is_err() {
-            let root = self.backend.create_group("/by_column")?;
-            info!("Group: {:?} created", root);
+            let _root = self.backend.create_group("/by_column")?;
+            // info!("Group: {:?} created", root);
         }
 
         {
