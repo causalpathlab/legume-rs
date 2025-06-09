@@ -276,6 +276,13 @@ fn main() -> anyhow::Result<()> {
     write_lines(&row_names, &(args.out.to_string() + ".rows.gz"))?;
     write_lines(&col_names, &(args.out.to_string() + ".cols.gz"))?;
 
+    if let Some(batch_db) = batch_db {
+        batch_db.to_tsv(&(args.out.to_string() + ".delta"))?;
+        if let Some(names) = data_vec.batch_names() {
+            write_lines(&names, &(args.out.to_string() + ".delta.columns.gz"))?;
+        }
+    }
+
     /////////////////////////////////////////////////////////
     // 4. Train embedded topic model on the collapsed data //
     /////////////////////////////////////////////////////////
@@ -408,9 +415,6 @@ fn main() -> anyhow::Result<()> {
         delta_db,
     )?;
     z_nk.to_tsv(&(args.out.to_string() + ".latent.tsv.gz"))?;
-    if let Some(batch_db) = batch_db {
-        batch_db.to_tsv(&(args.out.to_string() + ".delta"))?;
-    }
 
     info!("done");
     Ok(())
