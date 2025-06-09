@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use indicatif::ParallelProgressIterator;
 use log::info;
 use matrix_util::common_io::write_lines;
@@ -26,7 +28,6 @@ pub struct SimOut {
     pub triplets: Vec<(u64, u64, f32)>,
 }
 
-#[allow(dead_code)]
 /// Generate a simulated dataset with a factored gamma model
 /// * `args`: SimulateArgs
 /// * `mtx_file`: output data mtx file (.gz recommended)
@@ -86,7 +87,6 @@ pub fn generate_factored_poisson_gamma_data_mtx(
     Ok(())
 }
 
-#[allow(dead_code)]
 /// Generate a simulated dataset with a factored gamma model
 /// * `args`: SimulateArgs
 /// * `mtx_file`: output data mtx file (.gz recommended)

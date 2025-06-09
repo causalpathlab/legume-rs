@@ -114,7 +114,7 @@ impl GlmSimulator {
                 if causal_genes.contains_key(&g) {
                     let (_cat, assign) = causal_genes.get(&g).expect("should have assignment");
 
-                    let ret = assign * self.pve_gene
+                    let ret = assign * self.pve_gene.max(0.).sqrt()
                         + covar_n * self.pve_covar.sqrt()
                         + eps_n * (1. - self.pve_gene - self.pve_covar).max(0.).sqrt();
                     (g, ret)
