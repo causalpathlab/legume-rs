@@ -5,7 +5,8 @@ mod embed_common;
 use asap_alg::random_projection::*;
 use embed_common::*;
 
-use matrix_param::traits::{Inference, ParamIo, TwoStatParam};
+use matrix_param::io::ParamIo;
+use matrix_param::traits::{Inference, TwoStatParam};
 use matrix_util::common_io::{extension, read_lines, remove_file, write_lines, write_types};
 use matrix_util::dmatrix_util::row_membership_matrix;
 use matrix_util::traits::*;
@@ -253,18 +254,30 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    let rows = data_vec.row_names()?;
+
     if args.save_intermediate {
         info!("Saving intermediate results...");
-        collapse_out
-            .mu_observed
-            .to_tsv(&(args.out.to_string() + ".collapsed.observed"))?;
+        collapse_out.mu_observed.to_parquet(
+            Some(&rows),
+            None,
+            &(args.out.to_string() + ".collapsed.observed.parquet"),
+        )?;
         info!("Wrote {}", args.out.to_string() + ".collapsed.observed");
         if let Some(param) = collapse_out.mu_adjusted.as_ref() {
-            param.to_tsv(&(args.out.to_string() + ".collapsed.adjusted"))?;
+            param.to_parquet(
+                Some(&rows),
+                None,
+                &(args.out.to_string() + ".collapsed.adjusted.parquet"),
+            )?;
             info!("Wrote {}", args.out.to_string() + ".collapsed.adjusted");
         }
         if let Some(param) = collapse_out.mu_residual.as_ref() {
-            param.to_tsv(&(args.out.to_string() + ".collapsed.residual"))?;
+            param.to_parquet(
+                Some(&rows),
+                None,
+                &(args.out.to_string() + ".collapsed.residual.parquet"),
+            )?;
             info!("Wrote {}", args.out.to_string() + ".collapsed.residual");
         }
     }
@@ -275,10 +288,9 @@ fn main() -> anyhow::Result<()> {
     write_lines(&col_names, &(args.out.to_string() + ".cols.gz"))?;
 
     if let Some(batch_db) = batch_db {
-        batch_db.to_tsv(&(args.out.to_string() + ".delta"))?;
-        if let Some(names) = data_vec.batch_names() {
-            write_lines(&names, &(args.out.to_string() + ".delta.columns.gz"))?;
-        }
+        let outfile = args.out.to_string() + ".delta.parqueet";
+        let batch_names = data_vec.batch_names();
+        batch_db.to_parquet(Some(&row_names), batch_names.as_deref(), &outfile)?;
     }
 
     /////////////////////////////////////////////////////////

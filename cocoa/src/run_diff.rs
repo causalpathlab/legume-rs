@@ -4,9 +4,7 @@ use crate::randomly_partition_data::*;
 
 pub use clap::Parser;
 
-use matrix_param::io::ParamIo;
-// use matrix_param::io::ParamIo;
-use matrix_util::common_io;
+use matrix_param::io::*;
 pub use matrix_util::common_io::{extension, read_lines, read_lines_of_words};
 use matrix_util::dmatrix_util::concatenate_vertical;
 use matrix_util::traits::IoOps;
@@ -130,21 +128,36 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     info!("Writing down the estimates...");
     let gene_names = data.sparse_data.row_names()?;
 
-    for (k, param) in parameters.iter().enumerate() {
-        let outfile = format!("{}/tau_{}.parquet", args.out, k);
-        common_io::mkdir(&outfile)?;
-        param
-            .exposure
-            .to_parquet(Some(&gene_names), Some(&indv_names), &outfile)?;
+    let mut tau = Vec::with_capacity(parameters.len());
+    let mut shared = Vec::with_capacity(parameters.len());
+    let mut residual = Vec::with_capacity(parameters.len());
 
-        let outfile = format!("{}/shared_{}.parquet", args.out, k);
-        param.shared.to_parquet(Some(&gene_names), None, &outfile)?;
-
-        let outfile = format!("{}/matched_{}.parquet", args.out, k);
-        param
-            .residual
-            .to_parquet(Some(&gene_names), None, &outfile)?;
+    for param in parameters.into_iter() {
+        tau.push(param.exposure);
+        shared.push(param.shared);
+        residual.push(param.residual);
     }
+
+    to_parquet(
+        &tau,
+        Some(&gene_names),
+        Some(&indv_names),
+        &format!("{}.effect.parquet", args.out),
+    )?;
+
+    to_parquet(
+        &shared,
+        Some(&gene_names),
+        None,
+        &format!("{}.pb.shared.parquet", args.out),
+    )?;
+
+    to_parquet(
+        &residual,
+        Some(&gene_names),
+        None,
+        &format!("{}.pb.residual.parquet", args.out),
+    )?;
 
     info!("Done");
     Ok(())
