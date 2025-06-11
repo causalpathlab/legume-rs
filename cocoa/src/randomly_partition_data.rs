@@ -1,6 +1,4 @@
 use crate::common::*;
-use crate::stat::*;
-use crate::DiffArgs;
 
 use asap_alg::collapse_data::CollapsingOps;
 use asap_alg::random_projection::RandProjOps;

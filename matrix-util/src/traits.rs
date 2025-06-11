@@ -138,3 +138,11 @@ pub trait IoOps {
         self.write_file_delim(csv_file, ",")
     }
 }
+
+/// melt a matrix
+pub trait MeltOps {
+    type Scalar;
+    type Mat;
+    fn melt_with_indexes(&self) -> (Vec<Self::Scalar>, Vec<Vec<usize>>);
+    fn melt(&self) -> Vec<Self::Scalar>;
+}

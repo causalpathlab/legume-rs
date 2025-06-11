@@ -1,10 +1,10 @@
-use matrix_util::traits::IoOps;
+use matrix_util::traits::{IoOps, MeltOps};
 
 pub trait TwoStatInference: Inference + TwoStatParam {}
 
 pub trait Inference {
-    type Mat: IoOps;
-    type Scalar;
+    type Mat: IoOps + MeltOps;
+    type Scalar: Into<f32>;
 
     fn posterior_mean(&self) -> &Self::Mat;
     fn posterior_sd(&self) -> &Self::Mat;
@@ -32,25 +32,4 @@ pub trait TwoStatParam {
 
     fn nrows(&self) -> usize;
     fn ncols(&self) -> usize;
-}
-
-/// consolidated input and output
-pub trait ParamIo: Inference {
-    type Mat: IoOps;
-
-    fn to_tsv(&self, header: &str) -> anyhow::Result<()> {
-        self.posterior_log_mean()
-            .to_tsv(&(header.to_string() + ".log_mean.gz"))?;
-
-        self.posterior_log_sd()
-            .to_tsv(&(header.to_string() + ".log_sd.gz"))?;
-
-        self.posterior_mean()
-            .to_tsv(&(header.to_string() + ".mean.gz"))?;
-
-        self.posterior_sd()
-            .to_tsv(&(header.to_string() + ".sd.gz"))?;
-
-        Ok(())
-    }
 }

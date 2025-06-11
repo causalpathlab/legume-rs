@@ -161,6 +161,41 @@ where
     }
 }
 
+impl<T> MeltOps for DMatrix<T>
+where
+    T: nalgebra::RealField + Copy,
+{
+    type Scalar = T;
+    type Mat = Self;
+    fn melt_with_indexes(&self) -> (Vec<Self::Scalar>, Vec<Vec<usize>>) {
+        let nelem = self.nrows() * self.ncols();
+
+        let mut idx: Vec<Vec<usize>> = vec![Vec::with_capacity(nelem), Vec::with_capacity(nelem)];
+        let mut val: Vec<Self::Scalar> = Vec::with_capacity(nelem);
+
+        for r in 0..self.nrows() {
+            for c in 0..self.ncols() {
+                idx[0].push(r);
+                idx[1].push(c);
+                val.push(self[(r, c)]);
+            }
+        }
+
+        (val, idx)
+    }
+
+    fn melt(&self) -> Vec<Self::Scalar> {
+        let nelem = self.len();
+        let mut val: Vec<Self::Scalar> = Vec::with_capacity(nelem);
+        for r in 0..self.nrows() {
+            for c in 0..self.ncols() {
+                val.push(self[(r, c)]);
+            }
+        }
+        val
+    }
+}
+
 impl<T> CompositeOps for DMatrix<T>
 where
     T: nalgebra::RealField + Copy,

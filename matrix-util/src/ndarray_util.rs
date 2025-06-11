@@ -159,3 +159,33 @@ where
         }
     }
 }
+
+impl<T> MeltOps for ndarray::Array2<T>
+where
+    T: Float + FromPrimitive,
+{
+    type Mat = Self;
+    type Scalar = T;
+
+    fn melt(&self) -> Vec<Self::Scalar> {
+        let nelem = self.shape().iter().product();
+
+        let mut val: Vec<Self::Scalar> = Vec::with_capacity(nelem);
+        for (_ij, &x) in self.indexed_iter() {
+            val.push(x);
+        }
+        val
+    }
+
+    fn melt_with_indexes(&self) -> (Vec<Self::Scalar>, Vec<Vec<usize>>) {
+        let nelem = self.len();
+        let mut idx: Vec<Vec<usize>> = vec![Vec::with_capacity(nelem); self.ndim()];
+        let mut val: Vec<Self::Scalar> = Vec::with_capacity(nelem);
+        for (ij, &x) in self.indexed_iter() {
+            val.push(x);
+            idx[0].push(ij.0);
+            idx[1].push(ij.1);
+        }
+        (val, idx)
+    }
+}
