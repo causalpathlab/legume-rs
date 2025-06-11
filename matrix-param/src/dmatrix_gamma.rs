@@ -1,9 +1,11 @@
+#![allow(dead_code)]
+
 extern crate special;
 
+use crate::io::*;
 use crate::traits::*;
 use nalgebra::DMatrix;
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct GammaMatrix {
     num_rows: usize,

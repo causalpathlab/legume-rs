@@ -4,7 +4,6 @@ mod randomly_partition_data;
 mod run_diff;
 mod run_sim;
 mod stat;
-mod util;
 
 use crate::run_diff::*;
 use crate::run_sim::*;

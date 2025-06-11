@@ -1,14 +1,11 @@
 use crate::collapse_data::*;
 use crate::common::*;
 use crate::randomly_partition_data::*;
-use crate::util::*;
-
-use asap_alg::collapse_data::CollapsingOps;
-use asap_alg::random_projection::RandProjOps;
 
 pub use clap::Parser;
 
-use matrix_param::traits::ParamIo;
+use matrix_param::io::ParamIo;
+// use matrix_param::io::ParamIo;
 use matrix_util::common_io;
 pub use matrix_util::common_io::{extension, read_lines, read_lines_of_words};
 use matrix_util::dmatrix_util::concatenate_vertical;
@@ -89,8 +86,6 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
             .for_each(|mut r| r.unscale_mut(r.sum()));
     }
 
-
-
     info!("Assign cells to pseudobulk samples to calibrate the null distribution");
 
     data.sparse_data.assign_pseudobulk_individuals(
@@ -136,14 +131,19 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     let gene_names = data.sparse_data.row_names()?;
 
     for (k, param) in parameters.iter().enumerate() {
-        let tau = &param.exposure;
-        let outfile = format!("{}/tau_{}.summary.tsv.gz", args.out, k);
+        let outfile = format!("{}/tau_{}.parquet", args.out, k);
         common_io::mkdir(&outfile)?;
-        tau.to_summary_stat_tsv(gene_names.clone(), indv_names.clone(), &outfile)?;
-        // let tsv_header = format!("{}/mu_{}", args.out, k);
-        // param.shared.to_tsv(&tsv_header)?;
-        // let tsv_header = format!("{}/delta_{}", args.out, k);
-        // param.residual.to_tsv(&tsv_header)?;
+        param
+            .exposure
+            .to_parquet(Some(&gene_names), Some(&indv_names), &outfile)?;
+
+        let outfile = format!("{}/shared_{}.parquet", args.out, k);
+        param.shared.to_parquet(Some(&gene_names), None, &outfile)?;
+
+        let outfile = format!("{}/matched_{}.parquet", args.out, k);
+        param
+            .residual
+            .to_parquet(Some(&gene_names), None, &outfile)?;
     }
 
     info!("Done");
@@ -156,7 +156,6 @@ struct ArgInputData {
     cell_topic: Mat,
     indv_to_exposure: HashMap<Box<str>, Box<str>>,
     exposure_id: HashMap<Box<str>, usize>,
-    exposure_name: Vec<Box<str>>,
 }
 
 fn parse_arg_input_data(args: DiffArgs) -> anyhow::Result<ArgInputData> {
@@ -249,36 +248,11 @@ fn parse_arg_input_data(args: DiffArgs) -> anyhow::Result<ArgInputData> {
 
     let cell_topic = concatenate_vertical(topic_vec.as_slice())?;
 
-    // let proj_kn = &proj_out.proj;
-    // sparse_data.register_batches(proj_kn, &cell_to_sample)?;
-
-    // let samples = sparse_data
-    //     .batch_names()
-    //     .ok_or(anyhow::anyhow!("empty sample name in sparse data"))?;
-
-    // let sample_to_exposure: Vec<usize> = samples
-    //     .iter()
-    //     .map(|s| {
-    //         if let Some(exposure) = sample_to_exposure.get(s) {
-    //             exposure_id[exposure]
-    //         } else {
-    //             warn!("No exposure was assigned for sample {}, but it's kept for controlling confounders.", s);
-    //             n_exposure
-    //         }
-    //     })
-    //     .collect();
-
-    // info!(
-    //     "Found {} samples with exposure assignments",
-    //     sample_to_exposure.len()
-    // );
-
     Ok(ArgInputData {
         sparse_data,
         cell_to_indv,
         cell_topic,
         indv_to_exposure,
         exposure_id,
-        exposure_name,
     })
 }

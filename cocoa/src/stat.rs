@@ -16,13 +16,6 @@ pub struct CocoaStat {
     b0: f32,                 // hyper parameters
 }
 
-fn num_categories(sample_to_exposure: &Vec<usize>) -> usize {
-    match sample_to_exposure.iter().max() {
-        Some(&sz) => sz + 1,
-        _ => 1,
-    }
-}
-
 pub struct CocoaGammaOut {
     pub shared: GammaMatrix,
     pub residual: GammaMatrix,
