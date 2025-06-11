@@ -16,6 +16,8 @@ pub trait Inference {
     fn map_calibrate_sd(&mut self);
     fn map_calibrate_log_mean(&mut self);
     fn map_calibrate_log_sd(&mut self);
+
+    fn len(&self) -> usize;
 }
 
 /// A parameter matrix with two types of statistics

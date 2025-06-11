@@ -143,4 +143,8 @@ impl Inference for GammaMatrix {
             }
         });
     }
+
+    fn len(&self) -> usize {
+        self.num_rows * self.num_columns
+    }
 }
