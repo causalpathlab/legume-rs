@@ -82,6 +82,10 @@ impl SparseIoVec {
         self.col_to_group.as_ref()
     }
 
+    pub fn num_groups(&self) -> usize {
+        self.group_to_cols.as_ref().map(|x| x.len()).unwrap_or(0)
+    }
+
     pub fn push(&mut self, data: Arc<SparseData>) -> anyhow::Result<()> {
         if let Some(ncol_data) = data.num_columns() {
             debug_assert!(self.col_glob_to_loc.len() == self.offset);
@@ -432,6 +436,7 @@ impl SparseIoVec {
         knn_batches: usize,
         knn_columns: usize,
         skip_same_batch: bool,
+        skip_batches: Option<&[usize]>,
     ) -> anyhow::Result<(
         (usize, usize),
         Vec<(u64, u64, f32)>,
@@ -465,20 +470,21 @@ impl SparseIoVec {
 
         for glob in cells {
             let source_batch = cell_to_batch[glob]; // this cell's batch
-            let neighbouring_batches: Vec<usize> = match self.between_batch_proximity.as_ref() {
-                Some(prox) => prox[source_batch]
-                    .iter()
-                    .copied()
-                    .take(knn_batches.min(nbatches))
-                    .collect(),
+
+            let _batches: Vec<usize> = match self.between_batch_proximity.as_ref() {
+                Some(prox) => prox[source_batch].iter().copied().collect(),
                 _ => (0..nbatches).collect(),
             };
 
-            for target_batch in neighbouring_batches {
-                if skip_same_batch && source_batch == target_batch {
-                    continue; // skip cells in the same batch
-                }
+            let neighbouring_batches: Vec<usize> = _batches
+                .into_iter()
+                .filter(|&batch| {
+                    skip_batches.map_or(true, |skip| !skip.contains(&batch))
+                        && (!skip_same_batch || batch != source_batch)
+                })
+                .collect();
 
+            for target_batch in neighbouring_batches {
                 if let (Some(source_lookup), Some(target_lookup)) =
                     (lookups.get(source_batch), lookups.get(target_batch))
                 {
@@ -534,12 +540,19 @@ impl SparseIoVec {
         knn_batches: usize,
         knn_columns: usize,
         skip_same_batch: bool,
+        skip_batches: Option<&[usize]>,
     ) -> anyhow::Result<(CscMatrix<f32>, Vec<usize>, Vec<f32>)>
     where
         I: Iterator<Item = usize>,
     {
-        let ((nrow, ncol), triplets, source_columns, distances) =
-            self.neighbouring_columns_triplets(cells, knn_batches, knn_columns, skip_same_batch)?;
+        let ((nrow, ncol), triplets, source_columns, distances) = self
+            .neighbouring_columns_triplets(
+                cells,
+                knn_batches,
+                knn_columns,
+                skip_same_batch,
+                skip_batches,
+            )?;
         Ok((
             CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
             source_columns,
@@ -565,12 +578,19 @@ impl SparseIoVec {
         knn_batches: usize,
         knn_columns: usize,
         skip_same_batch: bool,
+        skip_batches: Option<&[usize]>,
     ) -> anyhow::Result<(ndarray::Array2<f32>, Vec<usize>, Vec<f32>)>
     where
         I: Iterator<Item = usize>,
     {
-        let ((nrow, ncol), triplets, source_columns, distances) =
-            self.neighbouring_columns_triplets(cells, knn_batches, knn_columns, skip_same_batch)?;
+        let ((nrow, ncol), triplets, source_columns, distances) = self
+            .neighbouring_columns_triplets(
+                cells,
+                knn_batches,
+                knn_columns,
+                skip_same_batch,
+                skip_batches,
+            )?;
         Ok((
             ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
             source_columns,
@@ -596,12 +616,19 @@ impl SparseIoVec {
         knn_batches: usize,
         knn_columns: usize,
         skip_same_batch: bool,
+        skip_batches: Option<&[usize]>,
     ) -> anyhow::Result<(nalgebra::DMatrix<f32>, Vec<usize>, Vec<f32>)>
     where
         I: Iterator<Item = usize>,
     {
-        let ((nrow, ncol), triplets, source_columns, distances) =
-            self.neighbouring_columns_triplets(cells, knn_batches, knn_columns, skip_same_batch)?;
+        let ((nrow, ncol), triplets, source_columns, distances) = self
+            .neighbouring_columns_triplets(
+                cells,
+                knn_batches,
+                knn_columns,
+                skip_same_batch,
+                skip_batches,
+            )?;
         Ok((
             DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
             source_columns,

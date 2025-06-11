@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use tempfile::tempdir;
 
-/// Define a Delimiter enum to handle both &str and Vec<char>
+/// Define a Delimiter enum to handle both &str and `Vec<char>`
 pub enum Delimiter {
     Str(String),
     Chars(Vec<char>),

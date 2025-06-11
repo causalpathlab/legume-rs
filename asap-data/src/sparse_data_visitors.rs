@@ -22,9 +22,9 @@ pub trait VisitColumnsOps {
         SharedIn: Sync + Send,
         SharedOut: Sync + Send;
 
-    fn visit_columns_by_sample<Visitor, SharedIn, SharedOut>(
+    fn visit_columns_by_group<Visitor, SharedIn, SharedOut>(
         &self,
-        sample_to_cells: &Vec<Vec<usize>>,
+        groups_to_cells: &[Vec<usize>],
         visitor: &Visitor,
         shared_in: &SharedIn,
         shared_out: &mut SharedOut,
@@ -69,9 +69,9 @@ impl VisitColumnsOps for SparseIoVec {
             .collect()
     }
 
-    fn visit_columns_by_sample<Visitor, SharedIn, SharedOut>(
+    fn visit_columns_by_group<Visitor, SharedIn, SharedOut>(
         &self,
-        sample_to_cells: &Vec<Vec<usize>>,
+        groups_to_cells: &[Vec<usize>],
         visitor: &Visitor,
         shared_in: &SharedIn,
         shared_data: &mut SharedOut,
@@ -90,10 +90,10 @@ impl VisitColumnsOps for SparseIoVec {
         SharedOut: Sync + Send,
     {
         let arc_shared_data = Arc::new(Mutex::new(shared_data));
-        let num_samples = sample_to_cells.len();
+        let num_samples = groups_to_cells.len();
         let num_jobs = num_samples as u64;
 
-        sample_to_cells
+        groups_to_cells
             .iter()
             .enumerate()
             .par_bridge()

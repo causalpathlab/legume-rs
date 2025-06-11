@@ -48,12 +48,12 @@ pub trait RandProjOps {
         &self,
         target_dim: usize,
         block_size: Option<usize>,
-        batch_membership: Option<&Vec<T>>,
+        batch_membership: Option<&[T]>,
     ) -> anyhow::Result<RandColProjOut>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 
-    /// Assign each column/cell to random sample by binary encoding
+    /// Assign each column/cell to random group by binary encoding
     ///
     /// # Arguments
     ///
@@ -61,7 +61,7 @@ pub trait RandProjOps {
     ///
     /// * `num_features` - number of top features (if None, use all of them)
     ///
-    fn assign_columns_to_samples(
+    fn partition_columns_to_groups(
         &mut self,
         proj_kn: &nalgebra::DMatrix<f32>,
         num_features: Option<usize>,
@@ -69,7 +69,7 @@ pub trait RandProjOps {
     ) -> anyhow::Result<usize>;
 
     /// Take samples assigned
-    fn samples_assigned(&self) -> anyhow::Result<&Vec<usize>>;
+    fn groups_assigned(&self) -> anyhow::Result<&Vec<usize>>;
 }
 
 /// column-wise visitor for random projection
@@ -91,7 +91,7 @@ fn project_columns_visitor(
 }
 
 impl RandProjOps for SparseIoVec {
-    fn samples_assigned(&self) -> anyhow::Result<&Vec<usize>> {
+    fn groups_assigned(&self) -> anyhow::Result<&Vec<usize>> {
         self.take_groups()
             .ok_or(anyhow::anyhow!("unable to find sample information"))
     }
@@ -108,7 +108,7 @@ impl RandProjOps for SparseIoVec {
         &self,
         target_dim: usize,
         block_size: Option<usize>,
-        batch_membership: Option<&Vec<T>>,
+        batch_membership: Option<&[T]>,
     ) -> anyhow::Result<RandColProjOut>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
@@ -182,7 +182,7 @@ impl RandProjOps for SparseIoVec {
     ///
     /// * `num_features` - number of top features (if None, use all of them)
     ///
-    fn assign_columns_to_samples(
+    fn partition_columns_to_groups(
         &mut self,
         proj_kn: &nalgebra::DMatrix<f32>,
         num_sorting_features: Option<usize>,

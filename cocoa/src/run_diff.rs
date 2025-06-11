@@ -1,5 +1,6 @@
 use crate::collapse_data::*;
 use crate::common::*;
+use crate::randomly_partition_data::*;
 use crate::util::*;
 
 use asap_alg::collapse_data::CollapsingOps;
@@ -25,17 +26,17 @@ pub struct DiffArgs {
     #[arg(required = true)]
     data_files: Vec<Box<str>>,
 
-    /// sample membership files (comma-separated file names). Each sample
-    /// file should match with each data file.
+    /// individual membership files (comma-separated file names). Each
+    /// individual membership file should match with each data file.
     #[arg(long, short, value_delimiter(','))]
-    sample_files: Vec<Box<str>>,
+    indv_files: Vec<Box<str>>,
 
     /// latent topic assignment files (comma-separated file names)
     /// Each topic file should match with each data file or None.
     #[arg(long, short, value_delimiter(','))]
     topic_assignment_files: Option<Vec<Box<str>>>,
 
-    /// each line corresponds to (1) sample name and (2) exposure name
+    /// each line corresponds to (1) individual name and (2) exposure name
     #[arg(long, short)]
     exposure_assignment_file: Box<str>,
 
@@ -79,7 +80,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     }
     env_logger::init();
 
-    let mut data = read_input_data(args.clone())?;
+    let mut data = parse_arg_input_data(args.clone())?;
 
     if data.cell_topic.ncols() > 1 {
         info!("normalizing cell topic proportion");
@@ -88,28 +89,41 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
             .for_each(|mut r| r.unscale_mut(r.sum()));
     }
 
-    info!("exposure names:");
-    let exposure_names = data.exposure_names;
-    for x in exposure_names.iter() {
-        info!("{}", x);
-    }
 
-    let gene_names = data.sparse_data.row_names()?;
 
-    let sample_to_cells = (0..data.sparse_data.num_batches())
-        .map(|b| data.sparse_data.batch_to_columns(b).unwrap().clone())
-        .collect::<Vec<_>>();
+    info!("Assign cells to pseudobulk samples to calibrate the null distribution");
+
+    data.sparse_data.assign_pseudobulk_individuals(
+        args.proj_dim,
+        args.block_size,
+        &data.cell_to_indv,
+    )?;
+
+    let indv_names = data.sparse_data.batch_names().unwrap();
+    let indv_to_exposure = data.indv_to_exposure;
+    let exposure_id = data.exposure_id;
+    let n_exposure = exposure_id.len();
+
+    let exposure_assignment: Vec<usize> = indv_names
+        .iter()
+        .map(|indv| {
+            if let Some(exposure) = indv_to_exposure.get(indv) {
+                exposure_id[exposure]
+            } else {
+                warn!("No exposure was assigned for sample {}, but it's kept for controlling confounders.", indv);
+                n_exposure
+            }
+        })
+        .collect();
 
     let cocoa_input = &CocoaCollapseIn {
         n_genes: data.sparse_data.num_rows()?,
-        n_samples: data.sparse_data.num_batches(),
         n_topics: data.cell_topic.ncols(),
         knn: args.knn,
         n_opt_iter: args.num_opt_iter,
         hyper_param: Some((args.a0, args.b0)),
         cell_topic_nk: data.cell_topic,
-        sample_to_cells: &sample_to_cells,
-        sample_to_exposure: &data.sample_to_exposure,
+        exposure_assignment: &exposure_assignment,
     };
 
     info!("Collecting statistics...");
@@ -119,31 +133,33 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     let parameters = cocoa_stat.estimate_parameters()?;
 
     info!("Writing down the estimates...");
+    let gene_names = data.sparse_data.row_names()?;
+
     for (k, param) in parameters.iter().enumerate() {
         let tau = &param.exposure;
         let outfile = format!("{}/tau_{}.summary.tsv.gz", args.out, k);
         common_io::mkdir(&outfile)?;
-        tau.to_summary_stat_tsv(gene_names.clone(), exposure_names.clone(), &outfile)?;
-
-        let tsv_header = format!("{}/mu_{}", args.out, k);
-        param.shared.to_tsv(&tsv_header)?;
-
-        let tsv_header = format!("{}/delta_{}", args.out, k);
-        param.residual.to_tsv(&tsv_header)?;
+        tau.to_summary_stat_tsv(gene_names.clone(), indv_names.clone(), &outfile)?;
+        // let tsv_header = format!("{}/mu_{}", args.out, k);
+        // param.shared.to_tsv(&tsv_header)?;
+        // let tsv_header = format!("{}/delta_{}", args.out, k);
+        // param.residual.to_tsv(&tsv_header)?;
     }
 
     info!("Done");
     Ok(())
 }
 
-struct DiffData {
+struct ArgInputData {
     sparse_data: SparseIoVec,
-    sample_to_exposure: Vec<usize>,
-    exposure_names: Vec<Box<str>>,
+    cell_to_indv: Vec<Box<str>>,
     cell_topic: Mat,
+    indv_to_exposure: HashMap<Box<str>, Box<str>>,
+    exposure_id: HashMap<Box<str>, usize>,
+    exposure_name: Vec<Box<str>>,
 }
 
-fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
+fn parse_arg_input_data(args: DiffArgs) -> anyhow::Result<ArgInputData> {
     // push data files and collect batch membership
     let file = args.data_files[0].as_ref();
     let backend = match extension(file)?.to_string().as_str() {
@@ -152,19 +168,19 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
         _ => SparseIoBackend::Zarr,
     };
 
-    if args.sample_files.len() != args.data_files.len() {
+    if args.indv_files.len() != args.data_files.len() {
         return Err(anyhow::anyhow!("# sample files != # of data files"));
     }
 
     let (exposure, _) = read_lines_of_words(&args.exposure_assignment_file, -1)?;
 
-    let sample_to_exposure: HashMap<_, _> = exposure
+    let indv_to_exposure = exposure
         .into_iter()
         .filter(|w| w.len() > 1)
         .map(|w| (w[0].clone(), w[1].clone()))
-        .collect();
+        .collect::<HashMap<_, _>>();
 
-    let exposure_id: HashMap<_, usize> = sample_to_exposure
+    let exposure_id: HashMap<_, usize> = indv_to_exposure
         .values()
         .cloned()
         .collect::<HashSet<_>>()
@@ -174,29 +190,29 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
         .collect();
 
     let n_exposure = exposure_id.len();
-    let mut exposure_names = vec![String::from("").into_boxed_str(); n_exposure];
+    let mut exposure_name = vec![String::from("").into_boxed_str(); n_exposure];
     for (x, &id) in exposure_id.iter() {
         if id < n_exposure {
-            exposure_names[id] = x.clone();
+            exposure_name[id] = x.clone();
         }
     }
     info!("{} exposure groups", n_exposure);
 
     let mut sparse_data = SparseIoVec::new();
-    let mut cell_to_sample = vec![];
+    let mut cell_to_indv = vec![];
     let mut topic_vec = vec![];
 
     let data_files = args.data_files;
-    let sample_files = args.sample_files;
+    let indv_files = args.indv_files;
     let topic_files = match args.topic_assignment_files {
         Some(vec) => vec.into_iter().map(Some).collect(),
         None => vec![None; data_files.len()],
     };
 
-    for ((this_data_file, sample_file), topic_file) in
-        data_files.into_iter().zip(sample_files).zip(topic_files)
+    for ((this_data_file, indv_file), topic_file) in
+        data_files.into_iter().zip(indv_files).zip(topic_files)
     {
-        info!("Importing: {}, {}", this_data_file, sample_file);
+        info!("Importing: {}, {}", this_data_file, indv_file);
 
         match extension(&this_data_file)?.as_ref() {
             "zarr" => {
@@ -211,21 +227,21 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
         let this_data = open_sparse_matrix(&this_data_file, &backend)?;
         let ndata = this_data.num_columns().unwrap_or(0);
 
-        let this_sample = read_lines(&sample_file)?;
+        let this_indv = read_lines(&indv_file)?;
         let this_topic = match topic_file.as_ref() {
             Some(_file) => Mat::from_tsv(_file, None)?,
             None => Mat::from_element(ndata, 1, 1.0),
         };
 
-        if this_sample.len() != ndata || this_topic.nrows() != ndata {
+        if this_indv.len() != ndata || this_topic.nrows() != ndata {
             return Err(anyhow::anyhow!(
                 "{} and {} don't match",
-                sample_file,
+                indv_file,
                 this_data_file,
             ));
         }
 
-        cell_to_sample.extend(this_sample);
+        cell_to_indv.extend(this_indv);
         sparse_data.push(Arc::from(this_data))?;
         topic_vec.push(this_topic);
     }
@@ -233,35 +249,36 @@ fn read_input_data(args: DiffArgs) -> anyhow::Result<DiffData> {
 
     let cell_topic = concatenate_vertical(topic_vec.as_slice())?;
 
-    let proj_out = sparse_data.project_columns(args.proj_dim, Some(args.block_size))?;
-    let proj_kn = &proj_out.proj;
-    sparse_data.register_batches(proj_kn, &cell_to_sample)?;
+    // let proj_kn = &proj_out.proj;
+    // sparse_data.register_batches(proj_kn, &cell_to_sample)?;
 
-    let samples = sparse_data
-        .batch_names()
-        .ok_or(anyhow::anyhow!("empty sample name in sparse data"))?;
+    // let samples = sparse_data
+    //     .batch_names()
+    //     .ok_or(anyhow::anyhow!("empty sample name in sparse data"))?;
 
-    let sample_to_exposure: Vec<usize> = samples
-        .iter()
-        .map(|s| {
-            if let Some(exposure) = sample_to_exposure.get(s) {
-                exposure_id[exposure]
-            } else {
-                warn!("No exposure was assigned for sample {}, but it's kept for controlling confounders.", s);
-                n_exposure
-            }
-        })
-        .collect();
+    // let sample_to_exposure: Vec<usize> = samples
+    //     .iter()
+    //     .map(|s| {
+    //         if let Some(exposure) = sample_to_exposure.get(s) {
+    //             exposure_id[exposure]
+    //         } else {
+    //             warn!("No exposure was assigned for sample {}, but it's kept for controlling confounders.", s);
+    //             n_exposure
+    //         }
+    //     })
+    //     .collect();
 
-    info!(
-        "Found {} samples with exposure assignments",
-        sample_to_exposure.len()
-    );
+    // info!(
+    //     "Found {} samples with exposure assignments",
+    //     sample_to_exposure.len()
+    // );
 
-    Ok(DiffData {
+    Ok(ArgInputData {
         sparse_data,
-        sample_to_exposure,
-        exposure_names,
+        cell_to_indv,
         cell_topic,
+        indv_to_exposure,
+        exposure_id,
+        exposure_name,
     })
 }
