@@ -50,17 +50,17 @@ pub trait CollapsingOps {
     /// # Arguments
     /// * `proj_kn` - random projection matrix
     /// * `col_to_batch` - map: cell -> batch
-    fn register_batches<T>(
+    fn build_hnsw_per_batch<T>(
         &mut self,
         proj_kn: &nalgebra::DMatrix<f32>,
-        col_to_batch: &Vec<T>,
+        col_to_batch: &[T],
     ) -> anyhow::Result<()>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 
     fn collect_basic_stat(
         &self,
-        sample_to_cols: &Vec<Vec<usize>>,
+        sample_to_cols: &[Vec<usize>],
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()>;
 
@@ -80,11 +80,10 @@ pub trait CollapsingOps {
 }
 
 impl CollapsingOps for SparseIoVec {
-    //
-    fn register_batches<T>(
+    fn build_hnsw_per_batch<T>(
         &mut self,
         proj_kn: &nalgebra::DMatrix<f32>,
-        col_to_batch: &Vec<T>,
+        col_to_batch: &[T],
     ) -> anyhow::Result<()>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
@@ -134,7 +133,7 @@ impl CollapsingOps for SparseIoVec {
         let num_batches = self.num_batches();
 
         let mut stat = CollapsedStat::new(num_features, num_groups, num_batches);
-        info!("basic statistics across {} samples", num_groups);
+        info!("basic statistics across {} groups", num_groups);
         self.collect_basic_stat(&group_to_cols, &mut stat)?;
 
         if num_batches > 1 {
@@ -167,10 +166,10 @@ impl CollapsingOps for SparseIoVec {
 
     fn collect_basic_stat(
         &self,
-        sample_to_cells: &Vec<Vec<usize>>,
+        sample_to_cells: &[Vec<usize>],
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
-        self.visit_columns_by_sample(
+        self.visit_columns_by_group(
             &sample_to_cells,
             &collect_basic_stat_visitor,
             &EmptyArg {},
@@ -183,7 +182,7 @@ impl CollapsingOps for SparseIoVec {
         sample_to_cells: &Vec<Vec<usize>>,
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
-        self.visit_columns_by_sample(
+        self.visit_columns_by_group(
             &sample_to_cells,
             &collect_batch_stat_visitor,
             &EmptyArg {},
@@ -198,7 +197,7 @@ impl CollapsingOps for SparseIoVec {
         knn_cells: usize,
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
-        self.visit_columns_by_sample(
+        self.visit_columns_by_group(
             &sample_to_cells,
             &collect_matched_stat_visitor,
             &KnnParams {
@@ -226,7 +225,7 @@ fn collect_matched_stat_visitor(
     let knn_cells = knn_params.knn_cells;
 
     let (y0_matched, source_columns, euclidean_distances) = data_vec
-        .read_neighbouring_columns_csc(cells.iter().cloned(), knn_batches, knn_cells, true)?;
+        .read_neighbouring_columns_csc(cells.iter().cloned(), knn_batches, knn_cells, true, None)?;
 
     // Normalize distance for each source cell and take a
     // weighted average of the matched vectors using this

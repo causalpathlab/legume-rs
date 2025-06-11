@@ -1,5 +1,6 @@
 mod collapse_data;
 mod common;
+mod randomly_partition_data;
 mod run_diff;
 mod run_sim;
 mod stat;

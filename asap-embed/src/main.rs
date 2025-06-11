@@ -199,9 +199,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let nsamp =
-        data_vec.assign_columns_to_samples(&proj_kn, Some(args.sort_dim), args.down_sample)?;
-
-    info!("at most {} samples are assigned", nsamp);
+        data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
 
     //////////////////////////////////
     // 2. Register batch membership //
@@ -209,14 +207,14 @@ fn main() -> anyhow::Result<()> {
 
     if args.batch_files.is_some() && !batch_membership.is_empty() {
         info!("Registering batch information");
-        data_vec.register_batches(&proj_kn, &batch_membership)?;
+        data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
     }
 
     ///////////////////////////
     // 3. Collapsing columns //
     ///////////////////////////
 
-    info!("Collapsing columns... into {} samples", nsamp);
+    info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
     let collapse_out = data_vec.collapse_columns(
         Some(args.knn_batches),
         Some(args.knn_cells),
