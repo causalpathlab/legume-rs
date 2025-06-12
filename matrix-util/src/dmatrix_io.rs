@@ -1,4 +1,5 @@
 use crate::common_io::{read_lines_of_types, write_lines, Delimiter};
+use crate::parquet::*;
 use crate::traits::*;
 pub use nalgebra::{DMatrix, DVector};
 pub use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
@@ -10,6 +11,7 @@ impl<T> IoOps for DMatrix<T>
 where
     T: nalgebra::RealField + FromStr + Display + Copy,
     <T as FromStr>::Err: Debug,
+    f32: From<T>,
 {
     type Scalar = T;
     type Mat = Self;
@@ -58,6 +60,47 @@ where
         lines.sort_by_key(|&(i, _)| i);
         let lines = lines.into_iter().map(|(_, line)| line).collect::<Vec<_>>();
         write_lines(&lines, tsv_file)?;
+        Ok(())
+    }
+
+    fn to_parquet(
+        &self,
+        row_names: Option<&[Box<str>]>,
+        column_names: Option<&[Box<str>]>,
+        file_path: &str,
+    ) -> anyhow::Result<()> {
+        use parquet::data_type::{ByteArrayType, FloatType};
+
+        let (nrows, ncols) = (self.nrows(), self.ncols());
+
+        let writer = ParquetWriter::new(file_path, (nrows, ncols), (row_names, column_names))?;
+        let row_names = writer.row_names_vec();
+
+        if row_names.len() != nrows {
+            return Err(anyhow::anyhow!("row names don't match"));
+        }
+
+        let mut writer = writer.open()?;
+        let mut row_group_writer = writer.next_row_group()?;
+
+        if let Some(mut column_writer) = row_group_writer.next_column()? {
+            let typed_writer = column_writer.typed::<ByteArrayType>();
+            typed_writer.write_batch(&row_names, None, None)?;
+            column_writer.close()?;
+        }
+
+        for j in 0..ncols {
+            let data_j: Vec<f32> = self.column(j).iter().map(|&x| x.into()).collect();
+
+            if let Some(mut column_writer) = row_group_writer.next_column()? {
+                let typed_writer = column_writer.typed::<FloatType>();
+                typed_writer.write_batch(&data_j, None, None)?;
+                column_writer.close()?;
+            }
+        }
+
+        row_group_writer.close()?;
+        writer.close()?;
         Ok(())
     }
 }

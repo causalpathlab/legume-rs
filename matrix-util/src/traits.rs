@@ -137,6 +137,13 @@ pub trait IoOps {
     fn to_csv(&self, csv_file: &str) -> anyhow::Result<()> {
         self.write_file_delim(csv_file, ",")
     }
+
+    fn to_parquet(
+        &self,
+        row_names: Option<&[Box<str>]>,
+        column_names: Option<&[Box<str>]>,
+        file_path: &str,
+    ) -> anyhow::Result<()>;
 }
 
 /// melt a matrix
