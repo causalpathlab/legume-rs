@@ -17,6 +17,7 @@ pub struct SimArgs {
     pub factors: usize,
     pub batches: usize,
     pub overdisp: f32,
+    pub pve_batch: f32,
     pub rseed: u64,
 }
 
@@ -107,8 +108,9 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
     let nnz = args.depth;
     let rseed = args.rseed;
     let overdisp = args.overdisp;
-
+    let pve_batch = args.pve_batch;
     let threshold = 0.5_f32;
+    let eps = 1e-8;
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(rseed);
 
@@ -119,18 +121,28 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
     // 2. batch effect matrix
     let mut ln_delta_db = DMatrix::<f32>::rnorm(dd, bb);
     ln_delta_db.scale_columns_inplace();
+    ln_delta_db *= pve_batch.sqrt().max(0.).min(1.);
+    let mut ln_null_d = DMatrix::<f32>::rnorm(dd, 1);
+    ln_null_d.scale_columns_inplace();
+    ln_null_d *= (1.0 - pve_batch).sqrt().max(0.).min(1.);
+
+    for col in 0..ln_delta_db.ncols() {
+        let mut ln_delta_d = ln_delta_db.column_mut(col);
+        ln_delta_d += &ln_null_d.column(0);
+    }
+
+    let delta_db = ln_delta_db.map(|x| x.exp());
     info!("simulated batch effects");
 
     // 3. factorization model
-    let (a, b) = (1. / overdisp, (dd as f32).sqrt() * overdisp);
+    let (a, b) = (1. / overdisp, (kk as f32).sqrt() * overdisp);
     let beta_dk = DMatrix::<f32>::rgamma(dd, kk, (a, b));
 
-    let (a, b) = (1. / overdisp, (nn as f32).sqrt() * overdisp);
+    let (a, b) = (1. / overdisp, (kk as f32).sqrt() * overdisp);
     let theta_kn = DMatrix::<f32>::rgamma(kk, nn, (a, b));
 
     // 4. putting them all together
     // let mut triplets = vec![];
-    let delta_db = ln_delta_db.map(|x| x.exp());
 
     let triplets = theta_kn
         .column_iter()
@@ -154,10 +166,14 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, &l_ij)| {
-                    let rpois = Poisson::new(l_ij * scale).expect("poisson sample error");
-                    let y_ij = rpois.sample(&mut rng);
-                    if y_ij > threshold {
-                        Some((i as u64, j as u64, y_ij))
+                    let l_ij = (l_ij * scale).max(eps);
+                    if let Ok(rpois) = Poisson::new(l_ij) {
+                        let y_ij = rpois.sample(&mut rng);
+                        if y_ij > threshold {
+                            Some((i as u64, j as u64, y_ij))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }

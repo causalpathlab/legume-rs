@@ -156,8 +156,10 @@ enum Commands {
     /// Take basic statistics from a sparse matrix (same as `statistics`)
     Stat(RunStatArgs),
 
-    /// Simulate data with batch effects.
-    /// `Y[i,j] ~ delta[i,B(j)] * sum_k beta[i,k] * theta[j,k]`
+    /// Simulate Poisson factorization data with batch effects:
+    /// `Y(i,j) ~ δ(i,B(j)) sum_k β(i,k) * θ(j,k)` where the β and θ
+    /// parameters are sampled from Gamma, and the batch effect
+    /// `ln(δ)` has a batch assignment `B(j)` and random noise.
     Simulate(RunSimulateArgs),
 }
 
@@ -413,19 +415,19 @@ pub struct InfoArgs {
 
 #[derive(Args, Debug)]
 pub struct RunSimulateArgs {
-    /// number of rows
+    /// number of rows/genes/features
     #[arg(short, long)]
     rows: usize,
 
-    /// number of columns
+    /// number of columns/cells
     #[arg(short, long)]
     cols: usize,
 
-    /// depth per column
-    #[arg(short, long, default_value_t = 10000)]
+    /// depth per column--how many non-zero genes expected per cell?
+    #[arg(short, long, default_value_t = 1000)]
     depth: usize,
 
-    /// number of factors
+    /// number of factors--number of cell types/topics/states, etc.
     #[arg(short, long, default_value_t = 1)]
     factors: usize,
 
@@ -433,12 +435,22 @@ pub struct RunSimulateArgs {
     #[arg(short, long, default_value_t = 1)]
     batches: usize,
 
+    /// proportion of variance explained by batch effects. This
+    /// parameter will take effect when there are two or more batches.
+    #[arg(long, default_value_t = 1.0)]
+    pve_batch: f32,
+
     /// output file header: {output}.{backend}
     #[arg(short, long)]
     output: Box<str>,
 
-    /// overdispersion
-    #[arg(long, default_value_t = 10.)]
+    /// Set overdispersion `φ` parameter for `β ~ Gamma(1/φ, K*φ)` and
+    /// `θ ~ Gamma(1/φ, K*φ)`. Here, the mean of both `β` and `θ` will
+    /// be K. A high value, e.g., `φ>10`, would cause strong
+    /// influences from `βθ` factorization. On the other hand, a small
+    /// value, e.g., `φ<5`, would significantly weaken the
+    /// factorization. So, `φ=10` seems right.
+    #[arg(long, default_value_t = 10.0)]
     overdisp: f32,
 
     /// random seed
@@ -1407,6 +1419,7 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         factors: cmd_args.factors,
         batches: cmd_args.batches,
         overdisp: cmd_args.overdisp,
+        pve_batch: cmd_args.pve_batch,
         rseed: cmd_args.rseed,
     };
 
