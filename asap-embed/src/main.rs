@@ -7,7 +7,7 @@ use embed_common::*;
 
 use matrix_param::io::ParamIo;
 use matrix_param::traits::{Inference, TwoStatParam};
-use matrix_util::common_io::{extension, read_lines, remove_file, write_lines, write_types};
+use matrix_util::common_io::{extension, read_lines, remove_file, write_types};
 use matrix_util::dmatrix_util::row_membership_matrix;
 use matrix_util::traits::*;
 
@@ -194,9 +194,12 @@ fn main() -> anyhow::Result<()> {
     info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
 
     if args.save_intermediate {
-        proj_kn
-            .transpose()
-            .to_tsv(&(args.out.to_string() + ".rp.gz"))?;
+        let cell_names = data_vec.column_names()?;
+        proj_kn.transpose().to_parquet(
+            Some(&cell_names),
+            None,
+            &(args.out.to_string() + ".randproj.parquet"),
+        )?;
     }
 
     let nsamp =
@@ -282,15 +285,11 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let row_names = data_vec.row_names()?;
-    let col_names = data_vec.column_names()?;
-    write_lines(&row_names, &(args.out.to_string() + ".rows.gz"))?;
-    write_lines(&col_names, &(args.out.to_string() + ".cols.gz"))?;
-
     if let Some(batch_db) = batch_db {
-        let outfile = args.out.to_string() + ".delta.parqueet";
+        let outfile = args.out.to_string() + ".delta.parquet";
         let batch_names = data_vec.batch_names();
-        batch_db.to_parquet(Some(&row_names), batch_names.as_deref(), &outfile)?;
+        let gene_names = data_vec.row_names()?;
+        batch_db.to_parquet(Some(&gene_names), batch_names.as_deref(), &outfile)?;
     }
 
     /////////////////////////////////////////////////////////
@@ -311,12 +310,20 @@ fn main() -> anyhow::Result<()> {
             Some(args.block_size),
         )?;
 
-        nystrom_out
-            .latent_nk
-            .to_tsv(&(args.out.to_string() + ".latent.tsv.gz"))?;
-        nystrom_out
-            .dictionary_dk
-            .to_tsv(&(args.out.to_string() + ".dictionary.tsv.gz"))?;
+        let cell_names = data_vec.column_names()?;
+        let gene_names = data_vec.row_names()?;
+
+        nystrom_out.latent_nk.to_parquet(
+            Some(&cell_names),
+            None,
+            &(args.out.to_string() + ".latent.parquet"),
+        )?;
+
+        nystrom_out.dictionary_dk.to_parquet(
+            Some(&gene_names),
+            None,
+            &(args.out.to_string() + ".dictionary.parquet"),
+        )?;
 
         info!("Done");
         return Ok(());
@@ -401,10 +408,16 @@ fn main() -> anyhow::Result<()> {
                 &train_config,
             )?;
 
+            let gene_names = data_vec.row_names()?;
+
             decoder
                 .get_dictionary()?
                 .to_device(&candle_core::Device::Cpu)?
-                .to_tsv(&(args.out.to_string() + ".dictionary.tsv.gz"))?;
+                .to_parquet(
+                    Some(&gene_names),
+                    None,
+                    &(args.out.to_string() + ".dictionary.parquet"),
+                )?;
 
             llik
         }
@@ -424,7 +437,14 @@ fn main() -> anyhow::Result<()> {
         &train_config,
         delta_db,
     )?;
-    z_nk.to_tsv(&(args.out.to_string() + ".latent.tsv.gz"))?;
+
+    let cell_names = data_vec.column_names()?;
+
+    z_nk.to_parquet(
+        Some(&cell_names),
+        None,
+        &(args.out.to_string() + ".latent.parquet"),
+    )?;
 
     info!("done");
     Ok(())
