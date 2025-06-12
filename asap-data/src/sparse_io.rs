@@ -70,7 +70,7 @@ pub fn create_sparse_from_triplets(
             Ok(ret)
         }
 
-        Some(SparseIoBackend::Zarr) | _ => {
+        Some(SparseIoBackend::Zarr) | None => {
             let mut ret = Box::new(sparse_matrix_zarr::SparseMtxData::new(backend_file)?);
             ret.record_mtx_shape(Some(mtx_shape))?;
             ret.record_triplets_by_col(&mut triplets)?;
@@ -95,11 +95,10 @@ pub fn create_sparse_from_mtx_file(
         Some(SparseIoBackend::HDF5) => Ok(Box::new(
             sparse_matrix_hdf5::SparseMtxData::from_mtx_file(mtx_file, backend_file, Some(true))?,
         )),
-        _ => Ok(Box::new(sparse_matrix_zarr::SparseMtxData::from_mtx_file(
-            mtx_file,
-            backend_file,
-            Some(true),
-        )?)),
+
+        Some(SparseIoBackend::Zarr) | None => Ok(Box::new(
+            sparse_matrix_zarr::SparseMtxData::from_mtx_file(mtx_file, backend_file, Some(true))?,
+        )),
     }
 }
 
@@ -116,11 +115,10 @@ pub fn create_sparse_from_ndarray(
         Some(SparseIoBackend::HDF5) => Ok(Box::new(
             sparse_matrix_hdf5::SparseMtxData::from_ndarray(data, backend_file, Some(true))?,
         )),
-        _ => Ok(Box::new(sparse_matrix_zarr::SparseMtxData::from_ndarray(
-            data,
-            backend_file,
-            Some(true),
-        )?)),
+
+        Some(SparseIoBackend::Zarr) | None => Ok(Box::new(
+            sparse_matrix_zarr::SparseMtxData::from_ndarray(data, backend_file, Some(true))?,
+        )),
     }
 }
 
@@ -137,11 +135,10 @@ pub fn create_sparse_from_dmatrix(
         Some(SparseIoBackend::HDF5) => Ok(Box::new(
             sparse_matrix_hdf5::SparseMtxData::from_dmatrix(data, backend_file, Some(true))?,
         )),
-        _ => Ok(Box::new(sparse_matrix_zarr::SparseMtxData::from_dmatrix(
-            data,
-            backend_file,
-            Some(true),
-        )?)),
+
+        Some(SparseIoBackend::Zarr) | None => Ok(Box::new(
+            sparse_matrix_zarr::SparseMtxData::from_dmatrix(data, backend_file, Some(true))?,
+        )),
     }
 }
 

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 
-const NUM_CHUNKS: usize = 10_000;
+const NUM_CHUNKS: usize = 1000;
 const MIN_CHUNK_SIZE: usize = 8192;
 const COMPRESSION_LEVEL: u8 = 5;
 
