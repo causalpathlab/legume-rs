@@ -1,4 +1,5 @@
-use crate::common_io::{Delimiter, read_lines_of_types, write_lines};
+use crate::common_io::{read_lines_of_types, write_lines, Delimiter};
+use crate::parquet::*;
 use crate::traits::IoOps;
 use ndarray::prelude::*;
 use std::fmt::{Debug, Display};
@@ -6,7 +7,7 @@ use std::str::FromStr;
 
 impl<T> IoOps for Array2<T>
 where
-    T: FromStr + Send + Display,
+    T: FromStr + Send + Display + Clone + Into<f32>,
     <T as FromStr>::Err: Debug,
 {
     type Scalar = T;
@@ -48,6 +49,50 @@ where
             })
             .collect();
         write_lines(&lines, out_file)?;
+        Ok(())
+    }
+    fn to_parquet(
+        &self,
+        row_names: Option<&[Box<str>]>,
+        column_names: Option<&[Box<str>]>,
+        file_path: &str,
+    ) -> anyhow::Result<()> {
+        use parquet::data_type::{ByteArrayType, FloatType};
+
+        let (nrows, ncols) = (self.nrows(), self.ncols());
+
+        let writer = ParquetWriter::new(file_path, (nrows, ncols), (row_names, column_names))?;
+        let row_names = writer.row_names_vec();
+
+        if row_names.len() != nrows {
+            return Err(anyhow::anyhow!("row names don't match"));
+        }
+
+        let mut writer = writer.open()?;
+        let mut row_group_writer = writer.next_row_group()?;
+
+        if let Some(mut column_writer) = row_group_writer.next_column()? {
+            let typed_writer = column_writer.typed::<ByteArrayType>();
+            typed_writer.write_batch(&row_names, None, None)?;
+            column_writer.close()?;
+        }
+
+        for j in 0..ncols {
+            let data_j = self
+                .column(j)
+                .to_vec()
+                .into_iter()
+                .map(|x| x.into())
+                .collect::<Vec<f32>>();
+            if let Some(mut column_writer) = row_group_writer.next_column()? {
+                let typed_writer = column_writer.typed::<FloatType>();
+                typed_writer.write_batch(data_j.as_slice(), None, None)?;
+                column_writer.close()?;
+            }
+        }
+
+        row_group_writer.close()?;
+        writer.close()?;
         Ok(())
     }
 }
