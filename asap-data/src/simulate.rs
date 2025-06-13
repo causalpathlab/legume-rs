@@ -121,10 +121,10 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
     // 2. batch effect matrix
     let mut ln_delta_db = DMatrix::<f32>::rnorm(dd, bb);
     ln_delta_db.scale_columns_inplace();
-    ln_delta_db *= pve_batch.sqrt().max(0.).min(1.);
+    ln_delta_db *= pve_batch.max(0.).min(1.).sqrt();
     let mut ln_null_d = DMatrix::<f32>::rnorm(dd, 1);
     ln_null_d.scale_columns_inplace();
-    ln_null_d *= (1.0 - pve_batch).sqrt().max(0.).min(1.);
+    ln_null_d *= (1.0 - pve_batch).max(0.).min(1.).sqrt();
 
     for col in 0..ln_delta_db.ncols() {
         let mut ln_delta_d = ln_delta_db.column_mut(col);

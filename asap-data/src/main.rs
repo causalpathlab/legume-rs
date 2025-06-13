@@ -186,7 +186,7 @@ pub struct TakeColumnsArgs {
     #[arg(short = 'f', long)]
     name_file: Option<Box<str>>,
 
-    /// output file
+    /// output `parquet` file
     #[arg(short, long, default_value = "stdout")]
     output: Box<str>,
 }
@@ -636,14 +636,28 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
     let output = args.output.clone();
 
     let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
+    let row_names = data.row_names()?;
 
     if let Some(columns) = columns {
-        data.read_columns_ndarray(columns)?.to_tsv(&output)?;
+        let n_columns = data.num_columns().unwrap_or(0);
+        let columns: Vec<usize> = columns.into_iter().filter(|&i| i < n_columns).collect();
+
+        if columns.is_empty() {
+            return Err(anyhow::anyhow!("invalid indexes"));
+        }
+
+        let _names = data.column_names()?;
+        let column_names: Vec<Box<str>> = columns.iter().map(|&i| _names[i].clone()).collect();
+
+        data.read_columns_ndarray(columns)?.to_parquet(
+            Some(&row_names),
+            Some(&column_names),
+            &output,
+        )?;
     } else if let Some(column_file) = column_name_file {
         let col_names = read_col_names(column_file, MAX_COLUMN_NAME_IDX)?;
         let col_names_map = data
-            .column_names()
-            .expect("column names not found in data file")
+            .column_names()?
             .iter()
             .enumerate()
             .map(|(i, x)| (x.clone(), i))
@@ -655,7 +669,15 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
             .collect::<Vec<_>>();
 
         let columns: Vec<usize> = col_names_order.iter().map(|&x| *x).collect();
-        data.read_columns_ndarray(columns)?.to_tsv(&output)?;
+
+        let _names = data.column_names()?;
+        let column_names: Vec<Box<str>> = columns.iter().map(|&i| _names[i].clone()).collect();
+
+        data.read_columns_ndarray(columns)?.to_parquet(
+            Some(&row_names),
+            Some(&column_names),
+            &output,
+        )?;
     } else {
         return Err(anyhow::anyhow!(
             "either `column-indices` or `name-file` must be provided"
@@ -1397,17 +1419,17 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     let row_file = output.to_string() + ".rows.gz";
     let col_file = output.to_string() + ".cols.gz";
 
-    let dict_file = mtx_file.replace(".mtx.gz", ".dict.gz");
-    let prop_file = mtx_file.replace(".mtx.gz", ".prop.gz");
-    let memb_file = mtx_file.replace(".mtx.gz", ".memb.gz");
-    let ln_batch_file = mtx_file.replace(".mtx.gz", ".ln_batch.gz");
+    let dict_file = mtx_file.replace(".mtx.gz", ".dict.parquet");
+    let prop_file = mtx_file.replace(".mtx.gz", ".prop.parquet");
+    let batch_memb_file = mtx_file.replace(".mtx.gz", ".batch.gz");
+    let ln_batch_file = mtx_file.replace(".mtx.gz", ".ln_batch.parquet");
 
     common_io::remove_all_files(&vec![
         backend_file.clone().into_boxed_str(),
         mtx_file.clone().into_boxed_str(),
         dict_file.clone().into_boxed_str(),
         prop_file.clone().into_boxed_str(),
-        memb_file.clone().into_boxed_str(),
+        batch_memb_file.clone().into_boxed_str(),
         ln_batch_file.clone().into_boxed_str(),
     ])
     .expect("failed to clean up existing output files");
@@ -1432,17 +1454,8 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         .map(|&x| Box::from(x.to_string()))
         .collect();
 
-    common_io::write_lines(&batch_out, &memb_file)?;
-    info!("batch membership: {:?}", &memb_file);
-
-    sim.ln_delta_db.to_tsv(&ln_batch_file)?;
-    sim.theta_kn.transpose().to_tsv(&prop_file)?;
-    sim.beta_dk.to_tsv(&dict_file)?;
-
-    info!(
-        "wrote parameter files:\n{:?},\n{:?},\n{:?}",
-        &ln_batch_file, &dict_file, &prop_file
-    );
+    common_io::write_lines(&batch_out, &batch_memb_file)?;
+    info!("batch membership: {:?}", &batch_memb_file);
 
     let mtx_shape = (sim_args.rows, sim_args.cols, sim.triplets.len());
 
@@ -1453,6 +1466,18 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     let cols: Vec<Box<str>> = (0..cmd_args.cols)
         .map(|i| i.to_string().into_boxed_str())
         .collect();
+
+    sim.ln_delta_db
+        .to_parquet(Some(&rows), None, &ln_batch_file)?;
+    sim.theta_kn
+        .transpose()
+        .to_parquet(Some(&cols), None, &prop_file)?;
+    sim.beta_dk.to_parquet(Some(&rows), None, &dict_file)?;
+
+    info!(
+        "wrote parameter files:\n{:?},\n{:?},\n{:?}",
+        &ln_batch_file, &dict_file, &prop_file
+    );
 
     if cmd_args.save_mtx {
         let mut triplets = sim.triplets.clone();
