@@ -1,7 +1,8 @@
 // #![allow(dead_code)]
 
-use crate::srt_common::*;
 use crate::SRTArgs;
+use crate::srt_common::*;
+use matrix_util::common_io::extension as file_ext;
 
 pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str>>)> {
     // push data files and collect batch membership
@@ -47,9 +48,67 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
 
     let mut coord_vec = Vec::with_capacity(args.coord_files.len());
 
-    for coord_file in args.coord_files.iter() {
+    for (i, coord_file) in args.coord_files.iter().enumerate() {
         info!("Reading coordinate file: {}", coord_file);
-        let coord = Mat::read_file_delim(coord_file, vec!['\t', ',', ' '], None)?;
+
+        let coord = match file_ext(&coord_file)?.as_ref() {
+            ".parquet" => {
+                let cell_names = data_vec[i].column_names()?;
+
+                let (coord_cell_names, _, data) = Mat::from_parquet_with_indices(
+                    &coord_file,
+                    Some(0),
+                    Some(&args.coord_columns),
+                )?;
+
+                if cell_names.len() != coord_cell_names.len() {
+                    return Err(anyhow::anyhow!(
+                        "the number of cell names differ between {} vs. {}",
+                        args.data_files[i],
+                        coord_file
+                    ));
+                }
+
+                if cell_names == coord_cell_names {
+                    data
+                } else {
+                    let coord_index_map: HashMap<&Box<str>, usize> = coord_cell_names
+                        .iter()
+                        .enumerate()
+                        .map(|(index, name)| (name, index))
+                        .collect();
+
+                    let reordered_indices: Vec<usize> = cell_names
+                        .iter()
+                        .map(|name| {
+                            coord_index_map
+                                .get(name)
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "cell_name '{}' not found in coord_cell_names",
+                                        name
+                                    )
+                                })
+                                .map(|&index| index)
+                        })
+                        .collect::<anyhow::Result<_>>()?;
+
+                    // let reordered_coord_cell_names: Vec<Box<str>> = reordered_indices
+                    //     .iter()
+                    //     .map(|&index| coord_cell_names[index].clone())
+                    //     .collect();
+
+                    concatenate_vertical(
+                        &reordered_indices
+                            .iter()
+                            .map(|&index| data.row(index))
+                            .collect::<Vec<_>>(),
+                    )?
+                }
+            }
+            _ => Mat::read_file_delim(coord_file, vec!['\t', ',', ' '], None)?,
+        };
+
         coord_vec.push(coord);
     }
 
@@ -102,7 +161,7 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
     Ok((data_vec, coord_nk, batch_membership))
 }
 
-pub fn append_batch_coordinate<T>(coords: &Mat, batch_membership: &Vec<T>) -> anyhow::Result<Mat>
+fn append_batch_coordinate<T>(coords: &Mat, batch_membership: &Vec<T>) -> anyhow::Result<Mat>
 where
     T: Sync + Send + Clone + Eq + std::hash::Hash,
 {

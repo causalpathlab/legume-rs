@@ -6,6 +6,7 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::file::writer::SerializedFileWriter;
 use parquet::record::RowAccessor;
 use parquet::schema::types::Type;
+use std::collections::HashSet;
 use std::fs::File;
 use std::sync::Arc;
 
@@ -16,40 +17,68 @@ pub struct ParquetReader {
 }
 
 impl ParquetReader {
-    pub fn new(file_path: &str, row_name_index: Option<usize>) -> anyhow::Result<Self> {
+    pub fn new(
+        file_path: &str,
+        row_name_index: Option<usize>,
+        select_columns_index: Option<&[usize]>,
+    ) -> anyhow::Result<Self> {
         let row_name_index = row_name_index.unwrap_or(0);
 
         let file = File::open(file_path).expect("Failed to open file");
         let reader = SerializedFileReader::new(file).expect("Failed to create Parquet reader");
         let metadata = reader.metadata();
         let nrows = metadata.file_metadata().num_rows() as usize;
+
         let fields = metadata.file_metadata().schema().get_fields();
-        let ncols = fields.len() - 1;
 
-        let mut row_iter = reader.get_row_iter(None)?;
+        let select_columns: HashSet<usize> = match select_columns_index {
+            Some(select) => select.iter().map(|&x| x).collect(),
+            _ => (0..fields.len()).collect(),
+        };
 
-        let mut row_names: Vec<Box<str>> = Vec::with_capacity(nrows);
-        let mut row_major_data: Vec<f64> = Vec::with_capacity(nrows * ncols);
-        let column_names: Vec<Box<str>> = fields
+        let select_indices: Vec<usize> = fields
             .iter()
             .enumerate()
             .filter_map(|(j, f)| {
-                if j != row_name_index {
-                    Some(f.name().to_string().into_boxed_str())
+                if select_columns.contains(&j) && j != row_name_index {
+                    match f.get_physical_type() {
+                        parquet::basic::Type::FLOAT | parquet::basic::Type::DOUBLE => Some(j),
+                        _ => None,
+                    }
                 } else {
                     None
                 }
             })
             .collect();
 
+        if select_indices.is_empty() {
+            return Err(anyhow::anyhow!("no available columns"));
+        }
+
+        let ncols = select_indices.len();
+
+        let column_names: Vec<Box<str>> = select_indices
+            .iter()
+            .map(|&j| fields[j].name().to_string().into_boxed_str())
+            .collect();
+
+        let mut row_iter = reader.get_row_iter(None)?;
+        let mut row_names: Vec<Box<str>> = Vec::with_capacity(nrows);
+        let mut row_major_data: Vec<f64> = Vec::with_capacity(nrows * ncols);
+
         while let Some(record) = row_iter.next() {
             let row = record?;
             row_names.push(row.get_string(row_name_index)?.clone().into_boxed_str());
-            row_major_data.extend(
-                (0..fields.len())
-                    .filter(|&j| j != row_name_index)
-                    .map(|j| row.get_double(j).expect("double")),
+
+            let numbers: anyhow::Result<Vec<f64>> = select_indices.iter().try_fold(
+                Vec::with_capacity(fields.len() - 1),
+                |mut acc, &j| {
+                    acc.push(row.get_double(j)?);
+                    Ok(acc)
+                },
             );
+
+            row_major_data.extend(numbers?);
         }
 
         Ok(Self {

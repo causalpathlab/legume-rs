@@ -18,7 +18,7 @@ pub struct SparseIoVec {
     col_glob_to_loc: Vec<usize>,
     offset: usize,
     row_name_position: HashMap<Box<str>, usize>,
-    column_names_with_batch: Vec<Box<str>>,
+    column_names_with_data_tag: Vec<Box<str>>,
     col_to_group: Option<Vec<usize>>,
     group_to_cols: Option<Vec<Vec<usize>>>,
     batch_knn_lookup: Option<Vec<ColumnDict<usize>>>,
@@ -50,7 +50,7 @@ impl SparseIoVec {
             col_glob_to_loc: vec![],
             offset: 0,
             row_name_position: HashMap::new(),
-            column_names_with_batch: vec![],
+            column_names_with_data_tag: vec![],
             col_to_group: None,
             group_to_cols: None,
             batch_knn_lookup: None,
@@ -106,11 +106,11 @@ impl SparseIoVec {
             }
             info!("Extending column names...");
 
-            let batch_tag = COLUMN_SEP.to_string() + &didx.to_string();
-            self.column_names_with_batch.extend(
+            let data_tag = COLUMN_SEP.to_string() + &didx.to_string();
+            self.column_names_with_data_tag.extend(
                 data.column_names()?
                     .into_iter()
-                    .map(|x| (x.to_string() + &batch_tag).into_boxed_str())
+                    .map(|x| (x.to_string() + &data_tag).into_boxed_str())
                     .collect::<Vec<_>>(),
             );
             info!("Checking row names...");
@@ -937,8 +937,8 @@ impl SparseIoVec {
     }
 
     pub fn column_names(&self) -> anyhow::Result<Vec<Box<str>>> {
-        debug_assert_eq!(self.num_columns()?, self.column_names_with_batch.len());
-        Ok(self.column_names_with_batch.clone())
+        debug_assert_eq!(self.num_columns()?, self.column_names_with_data_tag.len());
+        Ok(self.column_names_with_data_tag.clone())
     }
 
     pub fn row_names(&self) -> anyhow::Result<Vec<Box<str>>> {
