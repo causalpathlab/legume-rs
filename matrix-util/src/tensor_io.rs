@@ -2,6 +2,7 @@ use crate::common_io::{read_lines_of_types, write_lines, Delimiter};
 use crate::parquet::*;
 use crate::traits::IoOps;
 use candle_core::{Device, Tensor};
+use parquet::data_type::{ByteArrayType, DoubleType};
 
 impl IoOps for Tensor {
     type Scalar = f32;
@@ -62,8 +63,6 @@ impl IoOps for Tensor {
         column_names: Option<&[Box<str>]>,
         file_path: &str,
     ) -> anyhow::Result<()> {
-        use parquet::data_type::{ByteArrayType, FloatType};
-
         let dims = self.dims();
 
         if dims.len() != 2 {
@@ -89,9 +88,9 @@ impl IoOps for Tensor {
         }
 
         for j in 0..ncols {
-            let data_j = self.narrow(1, j, 1)?.flatten_all()?.to_vec1::<f32>()?;
+            let data_j = self.narrow(1, j, 1)?.flatten_all()?.to_vec1::<f64>()?;
             if let Some(mut column_writer) = row_group_writer.next_column()? {
-                let typed_writer = column_writer.typed::<FloatType>();
+                let typed_writer = column_writer.typed::<DoubleType>();
                 typed_writer.write_batch(&data_j, None, None)?;
                 column_writer.close()?;
             }
@@ -99,5 +98,24 @@ impl IoOps for Tensor {
         row_group_writer.close()?;
         writer.close()?;
         Ok(())
+    }
+
+    fn from_parquet(file_path: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
+        let parquet = ParquetReader::new(file_path, None)?;
+
+        let nrows = parquet.row_names.len();
+        let ncols = parquet.column_names.len();
+
+        let data: Vec<f32> = parquet
+            .row_major_data
+            .into_iter()
+            .map(|x| x as f32)
+            .collect();
+
+        Ok((
+            parquet.row_names,
+            parquet.column_names,
+            Tensor::from_vec(data, (nrows, ncols), &Device::Cpu)?,
+        ))
     }
 }

@@ -144,6 +144,8 @@ pub trait IoOps {
         column_names: Option<&[Box<str>]>,
         file_path: &str,
     ) -> anyhow::Result<()>;
+
+    fn from_parquet(file_path: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)>;
 }
 
 /// melt a matrix

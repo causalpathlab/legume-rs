@@ -146,10 +146,7 @@ fn main() -> anyhow::Result<()> {
 
     let (data, coordinates, _) = read_data_vec(args.clone())?;
 
-    let row_names = data.row_names()?;
-    let col_names = data.column_names()?;
-    write_lines(&row_names, &(args.out.to_string() + ".rows.gz"))?;
-    write_lines(&col_names, &(args.out.to_string() + ".cols.gz"))?;
+    let gene_names = data.row_names()?;
 
     //////////////////////////////////////////////////
     // 1. Take pairs of spatially interacting cells //
@@ -177,9 +174,21 @@ fn main() -> anyhow::Result<()> {
     let collapsed = srt_cell_pairs.collapse_pairs()?;
     let params = collapsed.optimize(None)?;
 
+    let coordinate_column_names: Vec<Box<str>> = (1..=collapsed.left_coordinates.ncols())
+        .map(|x| format!("left_{}", x).into_boxed_str())
+        .chain(
+            (1..=collapsed.right_coordinates.ncols())
+                .map(|x| format!("right_{}", x).into_boxed_str()),
+        )
+        .collect();
+
     concatenate_vertical(&[collapsed.left_coordinates, collapsed.right_coordinates])?
         .transpose()
-        .to_tsv(&(args.out.to_string() + ".collapsed.coord.pairs.tsv.gz"))?;
+        .to_parquet(
+            None,
+            Some(&coordinate_column_names),
+            &(args.out.to_string() + ".collapsed_coord_pairs.parquet"),
+        )?;
 
     /////////////////////////////////////////////////
     // 4. Collapse rows/genes/features to speed up //
@@ -282,10 +291,17 @@ fn main() -> anyhow::Result<()> {
 
     write_types::<f32>(&log_likelihood, &(args.out.to_string() + ".llik.gz"))?;
 
-    tsv_gz_out(&latent.average, &args.out, "collapsed.latent")?;
-    tsv_gz_out(&latent.left, &args.out, "collapsed.latent.left")?;
-    tsv_gz_out(&latent.right, &args.out, "collapsed.latent.right")?;
-    tsv_gz_out(&decoder.get_dictionary()?, &args.out, "dictionary")?;
+    tensor_parquet_out(&latent.average, &args.out, "collapsed_latent")?;
+    tensor_parquet_out(&latent.left, &args.out, "collapsed_latent_left")?;
+    tensor_parquet_out(&latent.right, &args.out, "collapsed_latent_right")?;
+
+    named_tensor_parquet_out(
+        &decoder.get_dictionary()?,
+        Some(&gene_names),
+        None,
+        &args.out,
+        "dictionary",
+    )?;
 
     let latent = srt_cell_pairs.evaluate_latent_states(
         &encoder,
@@ -294,14 +310,17 @@ fn main() -> anyhow::Result<()> {
         args.block_size,
     )?;
 
-    tsv_gz_out(&latent.average, &args.out, "latent")?;
-    tsv_gz_out(&latent.left, &args.out, "latent.left")?;
-    tsv_gz_out(&latent.right, &args.out, "latent.right")?;
+    tensor_parquet_out(&latent.average, &args.out, "latent")?;
+    tensor_parquet_out(&latent.left, &args.out, "latent_left")?;
+    tensor_parquet_out(&latent.right, &args.out, "latent_right")?;
 
     let (_left, _right) = srt_cell_pairs.all_pairs_positions()?;
 
-    concatenate_horizontal(&[_left, _right])?
-        .to_tsv(&(args.out.to_string() + ".coord.pairs.tsv.gz"))?;
+    concatenate_horizontal(&[_left, _right])?.to_parquet(
+        None,
+        Some(&coordinate_column_names),
+        &(args.out.to_string() + ".coord_pairs.parquet"),
+    )?;
 
     info!("done");
     Ok(())

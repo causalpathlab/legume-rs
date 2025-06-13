@@ -2,12 +2,13 @@ use crate::common_io::{read_lines_of_types, write_lines, Delimiter};
 use crate::parquet::*;
 use crate::traits::IoOps;
 use ndarray::prelude::*;
+use parquet::data_type::{ByteArrayType, DoubleType};
 use std::fmt::{Debug, Display};
 use std::str::FromStr;
 
 impl<T> IoOps for Array2<T>
 where
-    T: FromStr + Send + Display + Clone + Into<f32>,
+    T: FromStr + Send + Display + Clone + Into<f64> + num_traits::FromPrimitive,
     <T as FromStr>::Err: Debug,
 {
     type Scalar = T;
@@ -57,8 +58,6 @@ where
         column_names: Option<&[Box<str>]>,
         file_path: &str,
     ) -> anyhow::Result<()> {
-        use parquet::data_type::{ByteArrayType, FloatType};
-
         let (nrows, ncols) = (self.nrows(), self.ncols());
 
         let writer = ParquetWriter::new(file_path, (nrows, ncols), (row_names, column_names))?;
@@ -83,9 +82,9 @@ where
                 .to_vec()
                 .into_iter()
                 .map(|x| x.into())
-                .collect::<Vec<f32>>();
+                .collect::<Vec<f64>>();
             if let Some(mut column_writer) = row_group_writer.next_column()? {
-                let typed_writer = column_writer.typed::<FloatType>();
+                let typed_writer = column_writer.typed::<DoubleType>();
                 typed_writer.write_batch(data_j.as_slice(), None, None)?;
                 column_writer.close()?;
             }
@@ -94,5 +93,24 @@ where
         row_group_writer.close()?;
         writer.close()?;
         Ok(())
+    }
+
+    fn from_parquet(file_path: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
+        let parquet = ParquetReader::new(file_path, None)?;
+
+        let nrows = parquet.row_names.len();
+        let ncols = parquet.column_names.len();
+
+        let data: Vec<T> = parquet
+            .row_major_data
+            .into_iter()
+            .map(|x| T::from_f64(x).unwrap())
+            .collect();
+
+        Ok((
+            parquet.row_names,
+            parquet.column_names,
+            Array2::from_shape_vec((nrows, ncols), data)?,
+        ))
     }
 }

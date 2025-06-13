@@ -3,6 +3,7 @@ use crate::parquet::*;
 use crate::traits::*;
 pub use nalgebra::{DMatrix, DVector};
 pub use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
+use parquet::data_type::{ByteArrayType, DoubleType};
 use rayon::prelude::*;
 use std::fmt::{Debug, Display};
 use std::str::FromStr;
@@ -12,6 +13,7 @@ where
     T: nalgebra::RealField + FromStr + Display + Copy,
     <T as FromStr>::Err: Debug,
     f32: From<T>,
+    f64: From<T>,
 {
     type Scalar = T;
     type Mat = Self;
@@ -69,8 +71,6 @@ where
         column_names: Option<&[Box<str>]>,
         file_path: &str,
     ) -> anyhow::Result<()> {
-        use parquet::data_type::{ByteArrayType, FloatType};
-
         let (nrows, ncols) = (self.nrows(), self.ncols());
 
         let writer = ParquetWriter::new(file_path, (nrows, ncols), (row_names, column_names))?;
@@ -90,10 +90,10 @@ where
         }
 
         for j in 0..ncols {
-            let data_j: Vec<f32> = self.column(j).iter().map(|&x| x.into()).collect();
+            let data_j: Vec<f64> = self.column(j).iter().map(|&x| x.into()).collect();
 
             if let Some(mut column_writer) = row_group_writer.next_column()? {
-                let typed_writer = column_writer.typed::<FloatType>();
+                let typed_writer = column_writer.typed::<DoubleType>();
                 typed_writer.write_batch(&data_j, None, None)?;
                 column_writer.close()?;
             }
@@ -102,5 +102,24 @@ where
         row_group_writer.close()?;
         writer.close()?;
         Ok(())
+    }
+
+    fn from_parquet(file_path: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
+        let parquet = ParquetReader::new(file_path, None)?;
+
+        let data: Vec<T> = parquet
+            .row_major_data
+            .into_iter()
+            .map(|x| T::from_f64(x).unwrap())
+            .collect();
+
+        let nrows = parquet.row_names.len();
+        let ncols = parquet.column_names.len();
+
+        Ok((
+            parquet.row_names,
+            parquet.column_names,
+            DMatrix::<T>::from_row_iterator(nrows, ncols, data.into_iter()),
+        ))
     }
 }
