@@ -1,4 +1,4 @@
-use crate::common_io::{Delimiter, read_lines_of_types, write_lines};
+use crate::common_io::{read_lines_of_types, write_lines, Delimiter};
 use crate::parquet::*;
 use crate::traits::IoOps;
 use candle_core::{Device, Tensor};
@@ -87,8 +87,11 @@ impl IoOps for Tensor {
             column_writer.close()?;
         }
 
+        let tensor = self.to_dtype(candle_core::DType::F64)?;
+
         for j in 0..ncols {
-            let data_j = self.narrow(1, j, 1)?.flatten_all()?.to_vec1::<f64>()?;
+            let data_j = tensor.narrow(1, j, 1)?.flatten_all()?.to_vec1::<f64>()?;
+
             if let Some(mut column_writer) = row_group_writer.next_column()? {
                 let typed_writer = column_writer.typed::<DoubleType>();
                 typed_writer.write_batch(&data_j, None, None)?;

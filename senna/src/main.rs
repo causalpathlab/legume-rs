@@ -178,10 +178,10 @@ fn main() -> anyhow::Result<()> {
     let collapsed = srt_cell_pairs.collapse_pairs()?;
     let params = collapsed.optimize(None)?;
 
-    let coordinate_column_names: Vec<Box<str>> = (1..=collapsed.left_coordinates.ncols())
+    let coordinate_column_names: Vec<Box<str>> = (1..=collapsed.left_coordinates.nrows())
         .map(|x| format!("left_{}", x).into_boxed_str())
         .chain(
-            (1..=collapsed.right_coordinates.ncols())
+            (1..=collapsed.right_coordinates.nrows())
                 .map(|x| format!("right_{}", x).into_boxed_str()),
         )
         .collect();

@@ -34,3 +34,4 @@ temp*
 *.zarr
 *.h5
 *.gz
+*.parquet
