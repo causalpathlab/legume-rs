@@ -1,4 +1,4 @@
-use crate::common_io::{read_lines_of_types, write_lines, Delimiter};
+use crate::common_io::{Delimiter, read_lines_of_types, write_lines};
 use crate::parquet::*;
 use crate::traits::*;
 pub use nalgebra::{DMatrix, DVector};
@@ -12,7 +12,6 @@ impl<T> IoOps for DMatrix<T>
 where
     T: nalgebra::RealField + FromStr + Display + Copy,
     <T as FromStr>::Err: Debug,
-    f32: From<T>,
     f64: From<T>,
 {
     type Scalar = T;
@@ -104,8 +103,12 @@ where
         Ok(())
     }
 
-    fn from_parquet(file_path: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
-        let parquet = ParquetReader::new(file_path, None)?;
+    fn from_parquet_with_indices(
+        file_path: &str,
+        row_index: Option<usize>,
+        column_indices: Option<&[usize]>,
+    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
+        let parquet = ParquetReader::new(file_path, row_index, column_indices)?;
 
         let data: Vec<T> = parquet
             .row_major_data

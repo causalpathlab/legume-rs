@@ -43,10 +43,14 @@ struct SRTArgs {
     data_files: Vec<Box<str>>,
 
     /// An auxiliary cell coordinate file. Each coordinate file should
-    /// correspond to each data file. Each line contains x, y, ...
+    /// correspond to each data file. Each line contains barcode, x, y, ...
     /// coordinates. We could include more columns.
     #[arg(long = "coord", short = 'c', required = true, value_delimiter(','))]
     coord_files: Vec<Box<str>>,
+
+    /// which columns of cell coordinate files (0-based indexing)?
+    #[arg(long = "coord_columns", value_delimiter(','), default_value = "3,4")]
+    coord_columns: Vec<usize>,
 
     /// batch membership files (comma-separated names). Each bach file
     /// should correspond to each data file.

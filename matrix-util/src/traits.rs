@@ -145,7 +145,21 @@ pub trait IoOps {
         file_path: &str,
     ) -> anyhow::Result<()>;
 
-    fn from_parquet(file_path: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)>;
+    /// Read a real-valued numeric matrix with the default row
+    /// index(0) and all the other available columns
+    ///
+    fn from_parquet(file_path: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
+        Self::from_parquet_with_indices(file_path, None, None)
+    }
+
+    /// Read a real-valued numeric matrix from the parquet file.  We
+    /// can specify the row name column index and desired column
+    /// indices.
+    fn from_parquet_with_indices(
+        file_path: &str,
+        row_name_index: Option<usize>,
+        column_indices: Option<&[usize]>,
+    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)>;
 }
 
 /// melt a matrix
