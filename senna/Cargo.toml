@@ -1,5 +1,5 @@
 [package]
-name = "asap-senna"
+name = "senna"
 version = "0.1.0"
 edition = "2021"
 description = "Spatially Embedded Nearest Neighbourhood Analysis"
