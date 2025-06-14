@@ -60,10 +60,11 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
                 info!("parsing coordinate file: {}", &coord_file);
 
                 let (coord_cell_names, _, data) = match ext.as_ref() {
-                    "parquet" => Mat::from_parquet_with_indices(
+                    "parquet" => Mat::from_parquet_with_indices_names(
                         &coord_file,
                         Some(0),
                         Some(&args.coord_columns),
+                        Some(&args.coord_column_names),
                     )?,
                     _ => Mat::read_data(
                         &coord_file,
@@ -71,7 +72,7 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
                         Some(0),
                         Some(0),
                         Some(&args.coord_columns),
-                        None,
+                        Some(&args.coord_column_names),
                     )?,
                 };
 
