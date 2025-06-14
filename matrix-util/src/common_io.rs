@@ -193,6 +193,35 @@ pub fn read_lines_of_words(
 }
 
 ///
+/// Specialized function to read lines and parse them into a vector of words.
+///
+/// * `input_file` - file name--either gzipped or not
+/// * `hdr_line` - location of a header line (-1 = no header line)
+///
+pub fn read_lines_of_words_delim(
+    input_file: &str,
+    delim: impl Into<Delimiter>,
+    hdr_line: i64,
+) -> anyhow::Result<(Vec<Vec<Box<str>>>, Vec<Box<str>>)> {
+    let delim = delim.into(); // Convert the input delimiter into the Delimiter enum
+
+    let parse_fn = move |line: &str| -> Vec<Box<str>> {
+        match &delim {
+            Delimiter::Str(s) => line
+                .split(s.as_str())
+                .map(|x| x.to_owned().into_boxed_str())
+                .collect(),
+            Delimiter::Chars(chars) => line
+                .split(chars.as_slice())
+                .map(|x| x.to_owned().into_boxed_str())
+                .collect(),
+        }
+    };
+
+    read_lines_generic(input_file, hdr_line, parse_fn)
+}
+
+///
 /// Open a file for reading, and return a buffered reader
 /// * `input_file` - file name--either gzipped or not
 pub fn open_buf_reader(input_file: &str) -> anyhow::Result<Box<dyn BufRead>> {

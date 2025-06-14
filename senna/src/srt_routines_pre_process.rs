@@ -2,7 +2,6 @@
 
 use crate::SRTArgs;
 use crate::srt_common::*;
-use matrix_util::common_io;
 use matrix_util::common_io::extension as file_ext;
 
 pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str>>)> {
@@ -54,13 +53,27 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
 
         let cell_names = data_vec[i].column_names()?;
 
-        let coord = match file_ext(&coord_file)?.as_ref() {
-            "parquet" => {
-                let (coord_cell_names, _, data) = Mat::from_parquet_with_indices(
-                    &coord_file,
-                    Some(0),
-                    Some(&args.coord_columns),
-                )?;
+        let ext = file_ext(&coord_file)?;
+
+        let coord = match ext.as_ref() {
+            "parquet" | "csv.gz" => {
+                info!("parsing coordinate file: {}", &coord_file);
+
+                let (coord_cell_names, _, data) = match ext.as_ref() {
+                    "parquet" => Mat::from_parquet_with_indices(
+                        &coord_file,
+                        Some(0),
+                        Some(&args.coord_columns),
+                    )?,
+                    _ => Mat::read_data(
+                        &coord_file,
+                        vec!['\t', ',', ' '],
+                        Some(0),
+                        Some(0),
+                        Some(&args.coord_columns),
+                        None,
+                    )?,
+                };
 
                 if cell_names.len() != coord_cell_names.len() {
                     return Err(anyhow::anyhow!(
@@ -102,12 +115,6 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
                     )?
                 }
             }
-
-            // "csv.gz" => {
-            //     // parsing tissue_positions.csv.gz with row names and column names
-            //     // let
-            //     // common_io::read_lines_of_words(coord_file, 0)
-            // }
 
             _ => Mat::read_file_delim(coord_file, vec!['\t', ',', ' '], None)?,
         };
