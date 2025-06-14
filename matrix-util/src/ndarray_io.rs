@@ -14,6 +14,26 @@ where
     type Scalar = T;
     type Mat = Self;
 
+    fn read_data(
+        file_path: &str,
+        skip: Option<usize>,
+        row_name_index: Option<usize>,
+        column_indices: Option<&[usize]>,
+        column_names: Option<&[Box<str>]>,
+    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
+        let (rows, cols, data) = Self::read_names_and_data_with_indices_names(
+            file_path,
+            skip,
+            row_name_index,
+            column_indices,
+            column_names,
+        )?;
+
+        let nrows = rows.len();
+        let ncols = cols.len();
+        Ok((rows, cols, Array2::from_shape_vec((nrows, ncols), data)?))
+    }
+
     fn read_file_delim(
         tsv_file: &str,
         delim: impl Into<Delimiter>,
@@ -95,12 +115,13 @@ where
         Ok(())
     }
 
-    fn from_parquet_with_indices(
+    fn from_parquet_with_indices_names(
         file_path: &str,
-        row_index: Option<usize>,
+        row_name_index: Option<usize>,
         column_indices: Option<&[usize]>,
+        column_names: Option<&[Box<str>]>,
     ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
-        let parquet = ParquetReader::new(file_path, row_index, column_indices)?;
+        let parquet = ParquetReader::new(file_path, row_name_index, column_indices, column_names)?;
 
         let nrows = parquet.row_names.len();
         let ncols = parquet.column_names.len();

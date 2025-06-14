@@ -119,13 +119,105 @@ pub trait IoOps {
     type Mat;
 
     fn read_file_delim(
-        file: &str,
+        file_path: &str,
         delim: impl Into<Delimiter>,
         skip: Option<usize>,
     ) -> anyhow::Result<Self::Mat>;
 
+    ///
+    /// * `file_path` - data file name
+    /// * `skip` - header line (0-based)
+    /// * `row_name_index` - column index (0-based) corresponds to row name
+    /// * `column_indices` - column indices (0-based) to include
+    /// * `column_names` - column names to include
+    /// 
+    fn read_data(
+        file_path: &str,
+        skip: Option<usize>,
+        row_name_index: Option<usize>,
+        column_indices: Option<&[usize]>,
+        column_names: Option<&[Box<str>]>,
+    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)>;
+
+    fn read_names_and_data_with_indices_names(
+        file_path: &str,
+        skip: Option<usize>,
+        row_name_index: Option<usize>,
+        column_indices: Option<&[usize]>,
+        column_names: Option<&[Box<str>]>,
+    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Vec<Self::Scalar>)>
+    where
+        Self::Scalar: std::str::FromStr,
+        <Self::Scalar as std::str::FromStr>::Err: std::fmt::Debug,
+    {
+        let hdr_line = match skip {
+            Some(skip) => skip as i64,
+            None => -1, // no skipping
+        };
+
+        let (lines, hdr) = crate::common_io::read_lines_of_words(file_path, hdr_line)?;
+
+        let mut relevant_indices: Vec<usize> = vec![];
+
+        if let Some(indices) = column_indices {
+            relevant_indices.extend(indices.iter().copied());
+        }
+
+        if let Some(names) = column_names {
+            let name_indices: Vec<usize> = hdr
+                .iter()
+                .enumerate()
+                .filter_map(|(i, name)| {
+                    if names.iter().any(|n| n == name) {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            relevant_indices.extend(name_indices);
+        }
+        relevant_indices.sort_unstable();
+        relevant_indices.dedup();
+
+        let row_names: Vec<Box<str>> = match row_name_index {
+            Some(row_name_index) => lines
+                .iter()
+                .map(|words| words[row_name_index].clone())
+                .collect(),
+            _ => (0..lines.len())
+                .map(|x| x.to_string().into_boxed_str())
+                .collect(),
+        };
+
+        let column_names: Vec<Box<str>> = if hdr.is_empty() {
+            (0..lines[0].len())
+                .map(|x| x.to_string().into_boxed_str())
+                .collect()
+        } else {
+            (0..lines[0].len()).map(|j| hdr[j].clone()).collect()
+        };
+
+        let data: Vec<Vec<Self::Scalar>> = lines
+            .iter()
+            .map(|words| {
+                relevant_indices
+                    .iter()
+                    .map(|&i| words[i].parse::<Self::Scalar>().expect("failed to parse"))
+                    .collect()
+            })
+            .collect();
+
+        let data = data.into_iter().flatten().collect::<Vec<_>>();
+        Ok((row_names, column_names, data))
+    }
+
     fn from_tsv(tsv_file: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat> {
         Self::read_file_delim(tsv_file, "\t", skip)
+    }
+
+    fn from_csv(csv_file: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat> {
+        Self::read_file_delim(csv_file, ",", skip)
     }
 
     fn write_file_delim(&self, file: &str, delim: &str) -> anyhow::Result<()>;
@@ -152,13 +244,43 @@ pub trait IoOps {
         Self::from_parquet_with_indices(file_path, None, None)
     }
 
-    /// Read a real-valued numeric matrix from the parquet file.  We
-    /// can specify the row name column index and desired column
-    /// indices.
+    /// Read a real-valued numeric matrix from the parquet file. We
+    /// can specify row name index. We can specify the row name column
+    /// index and desired column indices.
+    /// * `row_name_index` - column index (0-based) corresponds to row name
+    /// * `column_indices` - column indices (0-based) to include
     fn from_parquet_with_indices(
         file_path: &str,
         row_name_index: Option<usize>,
         column_indices: Option<&[usize]>,
+    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
+        Self::from_parquet_with_indices_names(file_path, row_name_index, column_indices, None)
+    }
+
+    /// Read a real-valued numeric matrix from the parquet file.  We
+    /// can specify row name index.  We can specify the row name
+    /// column index and desired column names.
+    /// * `row_name_index` - column index (0-based) corresponds to row name
+    /// * `column_names` - column names to include
+    fn from_parquet_with_names(
+        file_path: &str,
+        row_name_index: Option<usize>,
+        column_names: Option<&[Box<str>]>,
+    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
+        Self::from_parquet_with_indices_names(file_path, row_name_index, None, column_names)
+    }
+
+    /// Read a real-valued numeric matrix from the parquet file.  We
+    /// can specify row name index.  We can specify the row name
+    /// column index and desired column indices and names.
+    /// * `row_name_index` - column index (0-based) corresponds to row name
+    /// * `column_indices` - column indices (0-based) to include
+    /// * `column_names` - column names to include
+    fn from_parquet_with_indices_names(
+        file_path: &str,
+        row_name_index: Option<usize>,
+        column_indices: Option<&[usize]>,
+        column_names: Option<&[Box<str>]>,
     ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)>;
 }
 
