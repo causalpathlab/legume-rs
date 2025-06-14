@@ -638,7 +638,7 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
     let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
     let row_names = data.row_names()?;
 
-    if let Some(columns) = columns {
+    let (data, column_names) = if let Some(columns) = columns {
         let n_columns = data.num_columns().unwrap_or(0);
         let columns: Vec<usize> = columns.into_iter().filter(|&i| i < n_columns).collect();
 
@@ -649,11 +649,7 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
         let _names = data.column_names()?;
         let column_names: Vec<Box<str>> = columns.iter().map(|&i| _names[i].clone()).collect();
 
-        data.read_columns_ndarray(columns)?.to_parquet(
-            Some(&row_names),
-            Some(&column_names),
-            &output,
-        )?;
+        (data.read_columns_ndarray(columns)?, column_names)
     } else if let Some(column_file) = column_name_file {
         let col_names = read_col_names(column_file, MAX_COLUMN_NAME_IDX)?;
         let col_names_map = data
@@ -673,16 +669,21 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
         let _names = data.column_names()?;
         let column_names: Vec<Box<str>> = columns.iter().map(|&i| _names[i].clone()).collect();
 
-        data.read_columns_ndarray(columns)?.to_parquet(
-            Some(&row_names),
-            Some(&column_names),
-            &output,
-        )?;
+        (data.read_columns_ndarray(columns)?, column_names)
     } else {
         return Err(anyhow::anyhow!(
             "either `column-indices` or `name-file` must be provided"
         ));
+    };
+
+    if let Ok(ext) = common_io::extension(&output) {
+        if ext.as_ref() == "parquet" {
+            data.to_parquet(Some(&row_names), Some(&column_names), &output)?;
+            return Ok(());
+        }
     }
+
+    data.to_tsv(&output)?;
 
     Ok(())
 }

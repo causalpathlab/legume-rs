@@ -76,17 +76,12 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
                     )?,
                 };
 
-                if cell_names.len() != coord_cell_names.len() {
-                    return Err(anyhow::anyhow!(
-                        "the number of cell names differ between {} vs. {}",
-                        args.data_files[i],
-                        coord_file
-                    ));
-                }
-
                 if cell_names == coord_cell_names {
                     data
                 } else {
+
+		    info!("reordering coordinate information");
+		    
                     let coord_index_map: HashMap<&Box<str>, usize> = coord_cell_names
                         .iter()
                         .enumerate()
