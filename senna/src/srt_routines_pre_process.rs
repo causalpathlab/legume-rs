@@ -2,6 +2,7 @@
 
 use crate::SRTArgs;
 use crate::srt_common::*;
+use matrix_util::common_io;
 use matrix_util::common_io::extension as file_ext;
 
 pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str>>)> {
@@ -51,10 +52,10 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
     for (i, coord_file) in args.coord_files.iter().enumerate() {
         info!("Reading coordinate file: {}", coord_file);
 
-        let coord = match file_ext(&coord_file)?.as_ref() {
-            ".parquet" => {
-                let cell_names = data_vec[i].column_names()?;
+        let cell_names = data_vec[i].column_names()?;
 
+        let coord = match file_ext(&coord_file)?.as_ref() {
+            "parquet" => {
                 let (coord_cell_names, _, data) = Mat::from_parquet_with_indices(
                     &coord_file,
                     Some(0),
@@ -93,11 +94,6 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
                         })
                         .collect::<anyhow::Result<_>>()?;
 
-                    // let reordered_coord_cell_names: Vec<Box<str>> = reordered_indices
-                    //     .iter()
-                    //     .map(|&index| coord_cell_names[index].clone())
-                    //     .collect();
-
                     concatenate_vertical(
                         &reordered_indices
                             .iter()
@@ -106,6 +102,13 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
                     )?
                 }
             }
+
+            // "csv.gz" => {
+            //     // parsing tissue_positions.csv.gz with row names and column names
+            //     // let
+            //     // common_io::read_lines_of_words(coord_file, 0)
+            // }
+
             _ => Mat::read_file_delim(coord_file, vec!['\t', ',', ' '], None)?,
         };
 

@@ -21,6 +21,7 @@ impl ParquetReader {
         file_path: &str,
         row_name_index: Option<usize>,
         select_columns_index: Option<&[usize]>,
+        select_columns_names: Option<&[Box<str>]>,
     ) -> anyhow::Result<Self> {
         let row_name_index = row_name_index.unwrap_or(0);
 
@@ -31,9 +32,31 @@ impl ParquetReader {
 
         let fields = metadata.file_metadata().schema().get_fields();
 
-        let select_columns: HashSet<usize> = match select_columns_index {
-            Some(select) => select.iter().map(|&x| x).collect(),
-            _ => (0..fields.len()).collect(),
+        let select_columns: HashSet<usize> = {
+            let mut indices = HashSet::new();
+
+            // Add indices from `select_columns_index` if provided
+            if let Some(select) = select_columns_index {
+                indices.extend(select.iter().copied());
+            }
+
+            // Add indices from `select_columns_names` if provided
+            if let Some(names) = select_columns_names {
+                indices.extend(fields.iter().enumerate().filter_map(|(j, f)| {
+                    if names.iter().any(|name| name.as_ref() == f.name()) {
+                        Some(j)
+                    } else {
+                        None
+                    }
+                }));
+            }
+
+            // Default to all columns if neither is provided
+            if indices.is_empty() {
+                (0..fields.len()).collect()
+            } else {
+                indices
+            }
         };
 
         let select_indices: Vec<usize> = fields

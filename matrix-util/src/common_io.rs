@@ -75,120 +75,21 @@ where
 }
 
 ///
-/// Read in each line by line, then parse each line into a vector or
-/// words.
+/// Generic function to read lines and parse them into a vector of words or types.
 ///
 /// * `input_file` - file name--either gzipped or not
-/// * `delim` - delimiter
 /// * `hdr_line` - location of a header line (-1 = no header line)
+/// * `parse_fn` - function to parse each line into the desired type
 ///
-pub fn read_lines_of_types<T>(
+pub fn read_lines_generic<T>(
     input_file: &str,
-    delim: impl Into<Delimiter>,
     hdr_line: i64,
+    parse_fn: impl Fn(&str) -> Vec<T> + Sync,
 ) -> anyhow::Result<(Vec<Vec<T>>, Vec<Box<str>>)>
 where
-    T: Send + std::str::FromStr + std::fmt::Display,
-    <T as std::str::FromStr>::Err: std::fmt::Debug,
+    T: Send,
 {
     let buf_reader: Box<dyn BufRead> = open_buf_reader(input_file)?;
-
-    fn parse<T>(i: usize, line: &str, delim: &Delimiter) -> (usize, Vec<T>)
-    where
-        T: std::str::FromStr,
-        <T as std::str::FromStr>::Err: std::fmt::Debug,
-    {
-        let parts = match delim {
-            Delimiter::Str(s) => line.split(s).collect::<Vec<&str>>(),
-            Delimiter::Chars(chars) => line.split(chars.as_slice()).collect::<Vec<&str>>(),
-        };
-
-        (
-            i,
-            parts
-                .into_iter()
-                .map(|x| x.parse::<T>().expect("failed to parse"))
-                .collect(),
-        )
-    }
-
-    fn is_not_comment_line(line: &String) -> bool {
-        if line.starts_with('#') || line.starts_with('%') {
-            return false;
-        }
-        true
-    }
-
-    let delim = delim.into(); // Convert the input delimiter into the Delimiter enum
-
-    let lines_raw: Vec<String> = buf_reader
-        .lines()
-        .map_while(Result::ok)
-        .filter(is_not_comment_line)
-        .collect();
-
-    let mut hdr: Vec<Box<str>> = vec![];
-
-    // Parsing takes more time, so split them into parallel jobs
-    // Note: this will not make things sorted
-    let mut lines: Vec<(usize, Vec<T>)> = if hdr_line < 0 {
-        lines_raw
-            .iter()
-            .enumerate()
-            .par_bridge()
-            .map(|(i, s)| parse(i, s, &delim))
-            .collect()
-    } else {
-        let n_skip = hdr_line as usize;
-        if lines_raw.len() < (n_skip + 1) {
-            return Err(anyhow::anyhow!("not enough data"));
-        }
-
-        hdr.extend(match &delim {
-            Delimiter::Str(s) => lines_raw[n_skip]
-                .split(s.as_str())
-                .map(|x| x.to_owned().into_boxed_str())
-                .collect::<Vec<_>>(),
-            Delimiter::Chars(chars) => lines_raw[n_skip]
-                .split(chars.as_slice())
-                .map(|x| x.to_owned().into_boxed_str())
-                .collect::<Vec<_>>(),
-        });
-
-        lines_raw[(n_skip + 1)..]
-            .iter()
-            .enumerate()
-            .par_bridge()
-            .map(|(i, s)| parse(i, s, &delim))
-            .collect()
-    };
-
-    lines.sort_by_key(|&(i, _)| i);
-    let lines = lines.into_iter().map(|(_, x)| x).collect();
-    Ok((lines, hdr))
-}
-
-///
-/// Read in each line by line, then parse each line into a vector or
-/// words.
-///
-/// * `input_file` - file name--either gzipped or not
-/// * `hdr_line` - location of a header line (-1 = no header line)
-///
-pub fn read_lines_of_words(
-    input_file: &str,
-    hdr_line: i64,
-) -> anyhow::Result<(Vec<Vec<Box<str>>>, Vec<Box<str>>)> {
-    // buffered reader
-    let buf_reader: Box<dyn BufRead> = open_buf_reader(input_file)?;
-
-    fn parse(i: usize, line: &str) -> (usize, Vec<Box<str>>) {
-        let words: Vec<Box<str>> = line
-            .split_whitespace()
-            .map(|x| x.to_owned().into_boxed_str())
-            .collect();
-        (i, words)
-    }
 
     fn is_not_comment_line(line: &String) -> bool {
         if line.starts_with('#') || line.starts_with('%') {
@@ -205,32 +106,90 @@ pub fn read_lines_of_words(
 
     let mut hdr = vec![];
 
-    // parsing takes more time, so split them into parallel jobs
-    // note: this will not make things sorted
-    let mut lines: Vec<(usize, Vec<Box<str>>)> = if hdr_line < 0 {
+    // Parsing takes more time, so split them into parallel jobs
+    let mut lines: Vec<(usize, Vec<T>)> = if hdr_line < 0 {
         lines_raw
             .iter()
             .enumerate()
             .par_bridge()
-            .map(|(i, s)| parse(i, s))
+            .map(|(i, s)| (i, parse_fn(s)))
             .collect()
     } else {
         let n_skip = hdr_line as usize;
         if lines_raw.len() < (n_skip + 1) {
             return Err(anyhow::anyhow!("not enough data"));
         }
-        hdr.extend(parse(0, &lines_raw[n_skip]).1);
+
+        hdr.extend(
+            lines_raw[n_skip]
+                .split_whitespace()
+                .map(|x| x.to_owned().into_boxed_str())
+                .collect::<Vec<_>>(),
+        );
+
         lines_raw[(n_skip + 1)..]
             .iter()
             .enumerate()
             .par_bridge()
-            .map(|(i, s)| parse(i, s))
+            .map(|(i, s)| (i, parse_fn(s)))
             .collect()
     };
 
     lines.sort_by_key(|&(i, _)| i);
     let lines = lines.into_iter().map(|(_, x)| x).collect();
     Ok((lines, hdr))
+}
+
+///
+/// Specialized function to read lines and parse them into a vector of types.
+///
+/// * `input_file` - file name--either gzipped or not
+/// * `delim` - delimiter
+/// * `hdr_line` - location of a header line (-1 = no header line)
+///
+pub fn read_lines_of_types<T>(
+    input_file: &str,
+    delim: impl Into<Delimiter>,
+    hdr_line: i64,
+) -> anyhow::Result<(Vec<Vec<T>>, Vec<Box<str>>)>
+where
+    T: Send + std::str::FromStr + std::fmt::Display,
+    <T as std::str::FromStr>::Err: std::fmt::Debug,
+{
+    let delim = delim.into(); // Convert the input delimiter into the Delimiter enum
+
+    let parse_fn = move |line: &str| -> Vec<T> {
+        match &delim {
+            Delimiter::Str(s) => line
+                .split(s.as_str())
+                .map(|x| x.parse::<T>().expect("failed to parse"))
+                .collect(),
+            Delimiter::Chars(chars) => line
+                .split(chars.as_slice())
+                .map(|x| x.parse::<T>().expect("failed to parse"))
+                .collect(),
+        }
+    };
+    read_lines_generic(input_file, hdr_line, parse_fn)
+}
+
+///
+/// Specialized function to read lines and parse them into a vector of words.
+///
+/// * `input_file` - file name--either gzipped or not
+/// * `hdr_line` - location of a header line (-1 = no header line)
+///
+pub fn read_lines_of_words(
+    input_file: &str,
+    hdr_line: i64,
+) -> anyhow::Result<(Vec<Vec<Box<str>>>, Vec<Box<str>>)> {
+    let parse_fn = |line: &str| -> Vec<Box<str>> {
+        line.split_whitespace()
+            .map(|x| x.to_owned().into_boxed_str())
+            .collect()
+    };
+
+    read_lines_generic(input_file, hdr_line, parse_fn)
 }
 
 ///
