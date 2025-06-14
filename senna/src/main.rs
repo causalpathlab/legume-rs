@@ -49,11 +49,12 @@ struct SRTArgs {
     coord_files: Vec<Box<str>>,
 
     /// which columns of cell coordinate files (0-based indexing)?
-    #[arg(value_delimiter(','), default_value = "3,4")]
-    coord_columns: Vec<usize>,
+    #[arg(long = "coord_column_indices", value_delimiter(','))]
+    coord_columns: Option<Vec<usize>>,
 
     /// which columns of cell coordinate files (0-based indexing)?
     #[arg(
+        long = "coord_column_names",
         value_delimiter(','),
         default_value = "pxl_row_in_fullres,pxl_col_in_fullres"
     )]
