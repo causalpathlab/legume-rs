@@ -59,20 +59,25 @@ impl ParquetReader {
             }
         };
 
-        let select_indices: Vec<usize> = fields
+        let select_indices = fields
             .iter()
             .enumerate()
             .filter_map(|(j, f)| {
                 if select_columns.contains(&j) && j != row_name_index {
-                    match f.get_physical_type() {
-                        parquet::basic::Type::FLOAT | parquet::basic::Type::DOUBLE => Some(j),
+                    let tt = f.get_physical_type();
+
+                    match tt {
+                        parquet::basic::Type::FLOAT
+                        | parquet::basic::Type::DOUBLE
+                        | parquet::basic::Type::INT32
+                        | parquet::basic::Type::INT64 => Some((tt, j)),
                         _ => None,
                     }
                 } else {
                     None
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         if select_indices.is_empty() {
             return Err(anyhow::anyhow!("no available columns"));
@@ -82,7 +87,7 @@ impl ParquetReader {
 
         let column_names: Vec<Box<str>> = select_indices
             .iter()
-            .map(|&j| fields[j].name().to_string().into_boxed_str())
+            .map(|&(_, j)| fields[j].name().to_string().into_boxed_str())
             .collect();
 
         let mut row_iter = reader.get_row_iter(None)?;
@@ -95,8 +100,19 @@ impl ParquetReader {
 
             let numbers: anyhow::Result<Vec<f64>> = select_indices.iter().try_fold(
                 Vec::with_capacity(fields.len() - 1),
-                |mut acc, &j| {
-                    acc.push(row.get_double(j)?);
+                |mut acc, &(tt, j)| {
+                    let x = match tt {
+                        parquet::basic::Type::FLOAT | parquet::basic::Type::DOUBLE => {
+                            row.get_double(j)?
+                        }
+                        parquet::basic::Type::INT32 | parquet::basic::Type::INT64 => {
+                            row.get_int(j)? as f64
+                        }
+                        _ => {
+                            unimplemented!("we just support integer and float/double for now")
+                        }
+                    };
+                    acc.push(x);
                     Ok(acc)
                 },
             );
