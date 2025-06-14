@@ -1,7 +1,7 @@
 // #![allow(dead_code)]
 
-use crate::SRTArgs;
 use crate::srt_common::*;
+use crate::SRTArgs;
 use matrix_util::common_io::extension as file_ext;
 
 pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str>>)> {
@@ -63,7 +63,7 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
                     "parquet" => Mat::from_parquet_with_indices_names(
                         &coord_file,
                         Some(0),
-                        Some(&args.coord_columns),
+                        args.coord_columns.as_deref(),
                         Some(&args.coord_column_names),
                     )?,
                     _ => Mat::read_data(
@@ -71,7 +71,7 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
                         vec!['\t', ',', ' '],
                         Some(0),
                         Some(0),
-                        Some(&args.coord_columns),
+                        args.coord_columns.as_deref(),
                         Some(&args.coord_column_names),
                     )?,
                 };
