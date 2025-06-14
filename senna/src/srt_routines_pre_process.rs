@@ -56,7 +56,7 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
         let ext = file_ext(&coord_file)?;
 
         let coord = match ext.as_ref() {
-            "parquet" | "csv.gz" => {
+            "parquet" | "csv.gz" | "tsv.gz" | "txt.gz" => {
                 info!("parsing coordinate file: {}", &coord_file);
 
                 let (coord_cell_names, _, data) = match ext.as_ref() {
