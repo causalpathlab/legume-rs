@@ -10,6 +10,7 @@ impl IoOps for Tensor {
 
     fn read_data(
         file_path: &str,
+        delim: impl Into<Delimiter>,
         skip: Option<usize>,
         row_name_index: Option<usize>,
         column_indices: Option<&[usize]>,
@@ -17,6 +18,7 @@ impl IoOps for Tensor {
     ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
         let (rows, cols, data) = Self::read_names_and_data_with_indices_names(
             file_path,
+            delim,
             skip,
             row_name_index,
             column_indices,

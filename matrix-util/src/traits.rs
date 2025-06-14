@@ -130,9 +130,10 @@ pub trait IoOps {
     /// * `row_name_index` - column index (0-based) corresponds to row name
     /// * `column_indices` - column indices (0-based) to include
     /// * `column_names` - column names to include
-    /// 
+    ///
     fn read_data(
         file_path: &str,
+        delim: impl Into<Delimiter>,
         skip: Option<usize>,
         row_name_index: Option<usize>,
         column_indices: Option<&[usize]>,
@@ -141,6 +142,7 @@ pub trait IoOps {
 
     fn read_names_and_data_with_indices_names(
         file_path: &str,
+        delim: impl Into<Delimiter>,
         skip: Option<usize>,
         row_name_index: Option<usize>,
         column_indices: Option<&[usize]>,
@@ -155,7 +157,7 @@ pub trait IoOps {
             None => -1, // no skipping
         };
 
-        let (lines, hdr) = crate::common_io::read_lines_of_words(file_path, hdr_line)?;
+        let (lines, hdr) = crate::common_io::read_lines_of_words_delim(file_path, delim, hdr_line)?;
 
         let mut relevant_indices: Vec<usize> = vec![];
 
