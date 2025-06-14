@@ -49,8 +49,15 @@ struct SRTArgs {
     coord_files: Vec<Box<str>>,
 
     /// which columns of cell coordinate files (0-based indexing)?
-    #[arg(long = "coord_columns", value_delimiter(','), default_value = "3,4")]
+    #[arg(value_delimiter(','), default_value = "3,4")]
     coord_columns: Vec<usize>,
+
+    /// which columns of cell coordinate files (0-based indexing)?
+    #[arg(
+        value_delimiter(','),
+        default_value = "pxl_row_in_fullres,pxl_col_in_fullres"
+    )]
+    coord_column_names: Vec<Box<str>>,
 
     /// batch membership files (comma-separated names). Each bach file
     /// should correspond to each data file.
