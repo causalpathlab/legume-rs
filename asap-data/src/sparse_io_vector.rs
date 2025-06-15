@@ -88,7 +88,11 @@ impl SparseIoVec {
         self.group_to_cols.as_ref().map(|x| x.len()).unwrap_or(0)
     }
 
-    pub fn push(&mut self, data: Arc<SparseData>) -> anyhow::Result<()> {
+    pub fn push(
+        &mut self,
+        data: Arc<SparseData>,
+        data_name: Option<Box<str>>,
+    ) -> anyhow::Result<()> {
         if let Some(ncol_data) = data.num_columns() {
             debug_assert!(self.col_glob_to_loc.len() == self.offset);
             debug_assert!(self.col_to_data.len() == self.offset);
@@ -108,7 +112,11 @@ impl SparseIoVec {
             }
             info!("Extending column names...");
 
-            let data_tag = COLUMN_SEP.to_string() + &didx.to_string();
+            let data_tag = match data_name {
+                Some(x) => COLUMN_SEP.to_string() + x.as_ref(),
+                _ => COLUMN_SEP.to_string() + &didx.to_string(),
+            };
+
             self.column_names_with_data_tag.extend(
                 data.column_names()?
                     .into_iter()

@@ -17,6 +17,7 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use indicatif::ParallelProgressIterator;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use log::info;
+use matrix_util::common_io::basename;
 use matrix_util::traits::IoOps;
 use matrix_util::*;
 
@@ -1333,7 +1334,8 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
         };
 
         let this_data = open_sparse_matrix(data_file, &backend)?;
-        data.push(Arc::from(this_data))?;
+        let data_name = basename(data_file)?;
+        data.push(Arc::from(this_data), Some(data_name))?;
     }
 
     match cmd_args.stat_dim {
@@ -1423,7 +1425,8 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
     );
 
     let mut data_vec = SparseIoVec::new();
-    data_vec.push(Arc::from(data))?;
+    let data_name = basename(&data_file)?;
+    data_vec.push(Arc::from(data), Some(data_name))?;
 
     let row_stat = collect_row_stat(&data_vec, cmd_args.block_size)?;
     let col_stat = collect_column_stat(&data_vec, cmd_args.block_size)?;

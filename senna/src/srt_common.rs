@@ -9,7 +9,7 @@ pub use asap_data::sparse_data_visitors::*;
 pub use asap_data::sparse_io::*;
 pub use asap_data::sparse_io_vector::*;
 
-pub use matrix_util::common_io::{extension, read_lines, write_types};
+pub use matrix_util::common_io::{extension, read_lines, write_types, basename};
 pub use matrix_util::dmatrix_util::*;
 pub use matrix_util::knn_match::ColumnDict;
 pub use matrix_util::traits::*;
