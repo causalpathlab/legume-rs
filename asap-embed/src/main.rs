@@ -77,13 +77,17 @@ struct EmbedArgs {
     #[arg(long, default_value_t = false)]
     ignore_batch_effects: bool,
 
-    /// #k-nearest neighbours within each batch
+    /// #k-nearest neighbours batches
     #[arg(long, default_value_t = 3)]
     knn_batches: usize,
 
     /// #k-nearest neighbours within each batch
     #[arg(long, default_value_t = 10)]
     knn_cells: usize,
+
+    /// reference batch names
+    #[arg(long, value_delimiter(','))]
+    reference_batches: Option<Vec<Box<str>>>,
 
     /// #downsampling columns per each collapsed sample. If None, no
     /// downsampling.
@@ -137,8 +141,12 @@ struct EmbedArgs {
     #[arg(long = "model", short = 'm', value_enum, default_value = "topic")]
     decoder_model: DecoderModel,
 
+    /// preload all the columns data
+    #[arg(long, default_value_t = false)]
+    preload_data: bool,
+
     /// save intermediate projection results
-    #[arg(long)]
+    #[arg(long, default_value_t = false)]
     save_intermediate: bool,
 
     /// save batch-adjusted data
@@ -223,10 +231,13 @@ fn main() -> anyhow::Result<()> {
     // 3. Collapsing columns //
     ///////////////////////////
 
+    let reference = args.reference_batches.as_ref().map(|x| x.as_slice());
+
     info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
     let collapse_out = data_vec.collapse_columns(
         Some(args.knn_batches),
         Some(args.knn_cells),
+        reference,
         Some(args.iter_opt),
     )?;
 
@@ -482,7 +493,12 @@ fn read_data_vec_membership(args: EmbedArgs) -> anyhow::Result<(SparseIoVec, Vec
             _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
         };
 
-        let data = open_sparse_matrix(data_file, &backend)?;
+        let mut data = open_sparse_matrix(data_file, &backend)?;
+
+        if args.preload_data {
+            data.preload_columns()?;
+        }
+
         let data_name = basename(data_file)?;
         data_vec.push(Arc::from(data), Some(data_name))?;
     }

@@ -4,7 +4,7 @@ use crate::normalization::NormalizeDistance;
 use asap_data::sparse_data_visitors::*;
 use asap_data::sparse_io_vector::SparseIoVec;
 use indicatif::ProgressIterator;
-use log::info;
+use log::{info, warn};
 use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::Inference;
 use matrix_param::traits::*;
@@ -32,14 +32,16 @@ pub trait CollapsingOps {
     ///
     /// # Arguments
     /// * `cells_per_group` - number of cells per sample (None: no down sampling)
+    /// * `knn_batches` - number of nearest neighbour batches
+    /// * `knn_cells` - number of nearest neighbors for building HNSW (default: 10)
     /// * `reference` - reference batch for counterfactual inference
-    /// * `knn` - number of nearest neighbors for building HNSW graph (default: 10)
     /// * `num_opt_iter` - number of optimization iterations (default: 100)
     ///
     fn collapse_columns(
         &self,
         knn_batches: Option<usize>,
         knn_cells: Option<usize>,
+        reference_batch_names: Option<&[Box<str>]>,
         num_opt_iter: Option<usize>,
     ) -> anyhow::Result<CollapsedOut>;
 
@@ -75,6 +77,7 @@ pub trait CollapsingOps {
         sample_to_cells: &Vec<Vec<usize>>,
         knn_batches: usize,
         knn_cells: usize,
+        reference_indices: Option<&[usize]>,
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()>;
 }
@@ -122,6 +125,7 @@ impl CollapsingOps for SparseIoVec {
         &self,
         knn_batches: Option<usize>,
         knn_cells: Option<usize>,
+        reference_batch_names: Option<&[Box<str>]>,
         num_opt_iter: Option<usize>,
     ) -> anyhow::Result<CollapsedOut> {
         let group_to_cols = self.take_grouped_columns().ok_or(anyhow::anyhow!(
@@ -142,6 +146,41 @@ impl CollapsingOps for SparseIoVec {
                 num_batches, num_groups
             );
 
+            let batch_name_map = self
+                .batch_name_map()
+                .ok_or(anyhow::anyhow!("unable to read batch names"))?;
+
+            let reference_indices = reference_batch_names.map(|x| {
+                x.iter()
+                    .filter_map(|b| batch_name_map.get(b))
+                    .into_iter()
+                    .map(|&b| b)
+                    .collect::<Vec<_>>()
+            });
+
+            if let Some(r) = reference_indices.as_ref() {
+                if r.is_empty() {
+                    let ref_names = reference_batch_names
+                        .unwrap()
+                        .iter()
+                        .map(|x| x.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+
+                    let bat_names = self
+                        .batch_names()
+                        .unwrap()
+                        .iter()
+                        .map(|x| x.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+
+                    warn!("{} vs. {}", ref_names, bat_names);
+
+                    return Err(anyhow::anyhow!("no reference batch names matched!"));
+                }
+            }
+
             self.collect_batch_stat(&group_to_cols, &mut stat)?;
 
             info!(
@@ -152,7 +191,13 @@ impl CollapsingOps for SparseIoVec {
             let knn_batches = knn_batches.unwrap_or(2);
             let knn_cells = knn_cells.unwrap_or(DEFAULT_KNN);
 
-            self.collect_matched_stat(&group_to_cols, knn_batches, knn_cells, &mut stat)?;
+            self.collect_matched_stat(
+                &group_to_cols,
+                knn_batches,
+                knn_cells,
+                reference_indices.as_deref(),
+                &mut stat,
+            )?;
         } // if num_batches > 1
 
         /////////////////////////////
@@ -195,6 +240,7 @@ impl CollapsingOps for SparseIoVec {
         sample_to_cells: &Vec<Vec<usize>>,
         knn_batches: usize,
         knn_cells: usize,
+        reference_indices: Option<&[usize]>,
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
         self.visit_columns_by_group(
@@ -203,15 +249,17 @@ impl CollapsingOps for SparseIoVec {
             &KnnParams {
                 knn_batches,
                 knn_cells,
+                reference_indices,
             },
             stat,
         )
     }
 }
 
-struct KnnParams {
+struct KnnParams<'a> {
     knn_batches: usize,
     knn_cells: usize,
+    reference_indices: Option<&'a [usize]>,
 }
 
 fn collect_matched_stat_visitor(
@@ -224,8 +272,21 @@ fn collect_matched_stat_visitor(
     let knn_batches = knn_params.knn_batches;
     let knn_cells = knn_params.knn_cells;
 
-    let (y0_matched, source_columns, euclidean_distances) = data_vec
-        .read_neighbouring_columns_csc(cells.iter().cloned(), knn_batches, knn_cells, true, None)?;
+    let (y0_matched, source_columns, euclidean_distances) = match knn_params.reference_indices {
+        Some(target_indices) => data_vec.read_matched_columns_csc(
+            cells.iter().cloned(),
+            target_indices,
+            knn_cells,
+            true,
+        )?,
+        None => data_vec.read_neighbouring_columns_csc(
+            cells.iter().cloned(),
+            knn_batches,
+            knn_cells,
+            true,
+            None,
+        )?,
+    };
 
     // Normalize distance for each source cell and take a
     // weighted average of the matched vectors using this
