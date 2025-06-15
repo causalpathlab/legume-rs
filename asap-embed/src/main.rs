@@ -7,7 +7,7 @@ use embed_common::*;
 
 use matrix_param::io::ParamIo;
 use matrix_param::traits::{Inference, TwoStatParam};
-use matrix_util::common_io::{extension, read_lines, remove_file, write_types};
+use matrix_util::common_io::{self, extension, read_lines, remove_file, write_types};
 use matrix_util::dmatrix_util::row_membership_matrix;
 use matrix_util::traits::*;
 
@@ -73,6 +73,9 @@ struct EmbedArgs {
     /// should correspond to each data file.
     #[arg(long, short, value_delimiter(','))]
     batch_files: Option<Vec<Box<str>>>,
+
+    #[arg(long, default_value_t = false)]
+    ignore_batch_effects: bool,
 
     /// #k-nearest neighbours within each batch
     #[arg(long, default_value_t = 3)]
@@ -209,9 +212,11 @@ fn main() -> anyhow::Result<()> {
     // 2. Register batch membership //
     //////////////////////////////////
 
-    if args.batch_files.is_some() && !batch_membership.is_empty() {
-        info!("Registering batch information");
-        data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
+    if !args.ignore_batch_effects {
+        if !batch_membership.is_empty() {
+            info!("Registering batch information");
+            data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
+        }
     }
 
     ///////////////////////////
@@ -507,7 +512,9 @@ fn read_data_vec_membership(args: EmbedArgs) -> anyhow::Result<(SparseIoVec, Vec
         }
     } else {
         for (id, &nn) in data_vec.num_columns_by_data()?.iter().enumerate() {
-            batch_membership.extend(vec![id.to_string().into_boxed_str(); nn]);
+            let data_file = args.data_files[id].clone();
+            let (_dir, base, _ext) = common_io::dir_base_ext(&data_file)?;
+            batch_membership.extend(vec![base; nn]);
         }
     }
 
