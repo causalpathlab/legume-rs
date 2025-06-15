@@ -5,6 +5,7 @@ use crate::randomly_partition_data::*;
 pub use clap::Parser;
 
 use matrix_param::io::*;
+use matrix_util::common_io::basename;
 pub use matrix_util::common_io::{extension, read_lines, read_lines_of_words};
 use matrix_util::dmatrix_util::concatenate_vertical;
 use matrix_util::traits::IoOps;
@@ -254,7 +255,8 @@ fn parse_arg_input_data(args: DiffArgs) -> anyhow::Result<ArgInputData> {
         }
 
         cell_to_indv.extend(this_indv);
-        sparse_data.push(Arc::from(this_data))?;
+        let data_name = basename(&this_data_file)?;
+        sparse_data.push(Arc::from(this_data), Some(data_name))?;
         topic_vec.push(this_topic);
     }
     info!("Total {} data sets combined", sparse_data.len());

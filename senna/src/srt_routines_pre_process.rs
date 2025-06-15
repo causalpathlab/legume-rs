@@ -2,7 +2,6 @@
 
 use crate::SRTArgs;
 use crate::srt_common::*;
-use matrix_util::common_io::extension as file_ext;
 
 pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str>>)> {
     // push data files and collect batch membership
@@ -28,8 +27,9 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
             _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
         };
 
+	let data_name = basename(data_file)?;
         let data = open_sparse_matrix(data_file, &backend)?;
-        data_vec.push(Arc::from(data))?;
+        data_vec.push(Arc::from(data), Some(data_name))?;
     }
 
     // check if row names are the same across data
@@ -46,7 +46,7 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
 
     for (i, coord_file) in args.coord_files.iter().enumerate() {
         info!("Reading coordinate file: {}", coord_file);
-        let ext = file_ext(&coord_file)?;
+        let ext = extension(&coord_file)?;
 
         let (coord_cell_names, _names, data) = match ext.as_ref() {
             "parquet" => Mat::from_parquet_with_indices_names(

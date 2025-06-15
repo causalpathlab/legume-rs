@@ -7,7 +7,7 @@ use embed_common::*;
 
 use matrix_param::io::ParamIo;
 use matrix_param::traits::{Inference, TwoStatParam};
-use matrix_util::common_io::{self, extension, read_lines, remove_file, write_types};
+use matrix_util::common_io::{self, basename, extension, read_lines, remove_file, write_types};
 use matrix_util::dmatrix_util::row_membership_matrix;
 use matrix_util::traits::*;
 
@@ -483,7 +483,8 @@ fn read_data_vec_membership(args: EmbedArgs) -> anyhow::Result<(SparseIoVec, Vec
         };
 
         let data = open_sparse_matrix(data_file, &backend)?;
-        data_vec.push(Arc::from(data))?;
+        let data_name = basename(data_file)?;
+        data_vec.push(Arc::from(data), Some(data_name))?;
     }
 
     // check if row names are the same
