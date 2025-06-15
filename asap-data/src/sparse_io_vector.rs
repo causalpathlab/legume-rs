@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::sparse_io::*;
 
 use log::info;

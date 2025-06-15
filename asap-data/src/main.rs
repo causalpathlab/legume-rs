@@ -1,24 +1,27 @@
 mod misc;
 mod simulate;
+mod sparse_data_visitors;
 mod sparse_io;
+mod sparse_io_vector;
 mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
 mod statistics;
 
 use crate::misc::*;
+use crate::sparse_data_visitors::*;
 use crate::sparse_io::*;
+use crate::sparse_io_vector::*;
 use crate::statistics::RunningStatistics;
-use clap::{ArgAction, Args, Parser, Subcommand};
+
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use indicatif::ParallelProgressIterator;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use log::info;
 use matrix_util::traits::IoOps;
 use matrix_util::*;
-use rayon::prelude::*;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-
-type SData = dyn SparseIo<IndexIter = Vec<usize>>;
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -383,22 +386,36 @@ pub struct RunSqueezeArgs {
     column_nnz_cutoff: usize,
 
     /// block_size for parallel processing
-    #[arg(long, value_enum, default_value = "100")]
+    #[arg(long, default_value = "100")]
     block_size: usize,
+}
+
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+enum StatDim {
+    Row,
+    Column,
 }
 
 /// Generate row-wise and column-wise basic statistics.
 #[derive(Args, Debug)]
 pub struct RunStatArgs {
-    /// data file -- .zarr or .h5 file
-    data_file: Box<str>,
+    /// Data files of either `.zarr` or `.h5` format. All the formats
+    /// in the given list should be identical. We can convert `.mtx`
+    /// to `.zarr` or `.h5` using `asap-data build` command.
+    #[arg(required = true)]
+    data_files: Vec<Box<str>>,
+
+    /// statistics over `row` or `column`
+    #[arg(short, long, value_enum)]
+    stat_dim: StatDim,
 
     /// block_size
     #[arg(long, value_enum, default_value = "100")]
     block_size: usize,
 
-    /// output file header
-    #[arg(short, long)]
+    /// output statistics file
+    #[arg(short, long, default_value = "stdout")]
     output: Box<str>,
 }
 
@@ -514,7 +531,7 @@ fn reorder_rows(args: &SortRowsArgs) -> anyhow::Result<()> {
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
     };
 
-    let mut data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
+    let mut data = open_sparse_matrix(&data_file, &backend.clone())?;
     data.reorder_rows(&row_names_order)?;
 
     Ok(())
@@ -534,7 +551,7 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
 
     let output = args.output.clone();
 
-    let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
+    let data = open_sparse_matrix(&data_file, &backend.clone())?;
 
     let row_names = data.row_names()?;
     let cols = data.column_names()?;
@@ -635,7 +652,7 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
 
     let output = args.output.clone();
 
-    let data: Box<SData> = open_sparse_matrix(&data_file, &backend.clone())?;
+    let data = open_sparse_matrix(&data_file, &backend.clone())?;
     let row_names = data.row_names()?;
 
     let (data, column_names) = if let Some(columns) = columns {
@@ -1233,7 +1250,7 @@ fn take_column_names(cmd_args: &TakeColumnNamesArgs) -> anyhow::Result<()> {
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
     };
 
-    let data: Box<SData> = open_sparse_matrix(&input, &backend.clone())?;
+    let data = open_sparse_matrix(&input, &backend.clone())?;
     let col_names = data.column_names()?;
     write_lines(&col_names, &output)?;
 
@@ -1252,7 +1269,7 @@ fn take_row_names(cmd_args: &TakeRowNamesArgs) -> anyhow::Result<()> {
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
     };
 
-    let data: Box<SData> = open_sparse_matrix(&input, &backend.clone())?;
+    let data = open_sparse_matrix(&input, &backend.clone())?;
 
     let row_names = data.row_names()?;
     write_lines(&row_names, &output)?;
@@ -1270,7 +1287,7 @@ fn show_info(cmd_args: &InfoArgs) -> anyhow::Result<()> {
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
     };
 
-    let data: Box<SData> = open_sparse_matrix(&input, &backend.clone())?;
+    let data = open_sparse_matrix(&input, &backend.clone())?;
 
     if let (Some(nrow), Some(ncol), Some(nnz)) =
         (data.num_rows(), data.num_columns(), data.num_non_zeros())
@@ -1296,47 +1313,88 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
     common_io::mkdir(&output)?;
 
-    let input = cmd_args.data_file.clone();
-
-    let backend = match common_io::extension(&input)?.as_ref() {
-        "zarr" => SparseIoBackend::Zarr,
+    let file = cmd_args.data_files[0].as_ref();
+    let backend = match common_io::extension(file)?.to_string().as_str() {
         "h5" => SparseIoBackend::HDF5,
-        _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
+        "zarr" => SparseIoBackend::Zarr,
+        _ => return Err(anyhow::anyhow!("Unknown file format: {}", file)),
     };
 
-    let block_size = cmd_args.block_size;
+    let mut data = SparseIoVec::new();
+    for data_file in cmd_args.data_files.iter() {
+        match common_io::extension(data_file)?.as_ref() {
+            "zarr" => {
+                assert_eq!(backend, SparseIoBackend::Zarr);
+            }
+            "h5" => {
+                assert_eq!(backend, SparseIoBackend::HDF5);
+            }
+            _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
+        };
 
-    match common_io::extension(&input)?.as_ref() {
-        "zarr" => {
-            assert_eq!(backend, SparseIoBackend::Zarr);
-        }
-        "h5" => {
-            assert_eq!(backend, SparseIoBackend::HDF5);
-        }
-        _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
+        let this_data = open_sparse_matrix(data_file, &backend)?;
+        data.push(Arc::from(this_data))?;
     }
 
-    let data: Box<SData> = open_sparse_matrix(&input, &backend.clone())?;
+    match cmd_args.stat_dim {
+        StatDim::Row => {
+            let mut row_stat = RunningStatistics::new(Ix1(data.num_rows()?));
+            data.visit_columns_by_block(
+                &row_stat_visitor,
+                &EmptyArgs {},
+                &mut row_stat,
+                Some(cmd_args.block_size),
+            )?;
 
-    let row_names = data.row_names()?;
-    let col_names = data.column_names()?;
-
-    if let Ok((row_stat, col_stat)) = collect_row_column_stats(data.as_ref(), block_size) {
-        let row_stat_file = format!("{}.row.stat.gz", output);
-        let col_stat_file = format!("{}.col.stat.gz", output);
-        row_stat.save(&row_stat_file, &row_names, "\t")?;
-        col_stat.save(&col_stat_file, &col_names, "\t")?;
-    }
+            row_stat.save(&cmd_args.output, &data.row_names()?, "\t")?;
+        }
+        StatDim::Column => {
+            let mut col_stat = RunningStatistics::new(Ix1(data.num_columns()?));
+            data.visit_columns_by_block(
+                &col_stat_visitor,
+                &EmptyArgs {},
+                &mut col_stat,
+                Some(cmd_args.block_size),
+            )?;
+            col_stat.save(&cmd_args.output, &data.column_names()?, "\t")?;
+        }
+    };
 
     Ok(())
+}
+
+fn collect_row_stat(
+    data: &SparseIoVec,
+    block_size: usize,
+) -> anyhow::Result<RunningStatistics<Ix1>> {
+    let mut row_stat = RunningStatistics::new(Ix1(data.num_rows()?));
+    data.visit_columns_by_block(
+        &row_stat_visitor,
+        &EmptyArgs {},
+        &mut row_stat,
+        Some(block_size),
+    )?;
+    Ok(row_stat)
+}
+
+fn collect_column_stat(
+    data: &SparseIoVec,
+    block_size: usize,
+) -> anyhow::Result<RunningStatistics<Ix1>> {
+    let mut col_stat = RunningStatistics::new(Ix1(data.num_rows()?));
+    data.visit_columns_by_block(
+        &col_stat_visitor,
+        &EmptyArgs {},
+        &mut col_stat,
+        Some(block_size),
+    )?;
+    Ok(col_stat)
 }
 
 fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
     let data_file = cmd_args.data_file.clone();
     let row_nnz_cutoff = cmd_args.row_nnz_cutoff;
     let col_nnz_cutoff = cmd_args.column_nnz_cutoff;
-
-    let block_size = cmd_args.block_size;
 
     use common_io::extension as file_ext;
 
@@ -1356,8 +1414,7 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
     }
 
-    let mut data = open_sparse_matrix(&data_file, &backend)?;
-    data.preload_columns()?;
+    let data = open_sparse_matrix(&data_file, &backend)?;
 
     info!(
         "before squeeze -- data: {} rows x {} columns",
@@ -1365,42 +1422,49 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         data.num_columns().unwrap()
     );
 
-    if let Ok((row_stat, col_stat)) = collect_row_column_stats(data.as_ref(), block_size) {
-        fn nnz_index(nnz: &[f32], cutoff: usize) -> Vec<usize> {
-            nnz.iter()
-                .enumerate()
-                .filter_map(|(i, &x)| if (x as usize) > cutoff { Some(i) } else { None })
-                .collect()
-        }
+    let mut data_vec = SparseIoVec::new();
+    data_vec.push(Arc::from(data))?;
 
-        let row_nnz_vec = row_stat.count_positives().to_vec();
-        let row_idx = nnz_index(&row_nnz_vec, row_nnz_cutoff);
-        let col_nnz_vec = col_stat.count_positives().to_vec();
-        let col_idx = nnz_index(&col_nnz_vec.to_vec(), col_nnz_cutoff);
+    let row_stat = collect_row_stat(&data_vec, cmd_args.block_size)?;
+    let col_stat = collect_column_stat(&data_vec, cmd_args.block_size)?;
 
-        data.subset_columns_rows(Some(&col_idx), Some(&row_idx))?;
+    let mut data = open_sparse_matrix(&data_file, &backend)?;
+    data.preload_columns()?;
 
-        info!(
-            "after squeeze -- data: {} rows x {} columns",
-            data.num_rows().unwrap(),
-            data.num_columns().unwrap()
-        );
-
-        let hdr = data_file.replace(file_ext(&data_file)?.as_ref(), "");
-        let row_idx_file = format!("{}row.idx.gz", hdr);
-        let col_idx_file = format!("{}col.idx.gz", hdr);
-
-        fn to_str_vec(v: &[usize]) -> Vec<Box<str>> {
-            v.iter()
-                .map(|x| format!("{}", x).into_boxed_str())
-                .collect()
-        }
-
-        let col_idx = to_str_vec(&col_idx);
-        let row_idx = to_str_vec(&row_idx);
-        common_io::write_lines(&col_idx, &col_idx_file)?;
-        common_io::write_lines(&row_idx, &row_idx_file)?;
+    fn nnz_index(nnz: &[f32], cutoff: usize) -> Vec<usize> {
+        nnz.iter()
+            .enumerate()
+            .filter_map(|(i, &x)| if (x as usize) > cutoff { Some(i) } else { None })
+            .collect()
     }
+
+    let row_nnz_vec = row_stat.count_positives().to_vec();
+    let row_idx = nnz_index(&row_nnz_vec, row_nnz_cutoff);
+    let col_nnz_vec = col_stat.count_positives().to_vec();
+    let col_idx = nnz_index(&col_nnz_vec.to_vec(), col_nnz_cutoff);
+
+    data.subset_columns_rows(Some(&col_idx), Some(&row_idx))?;
+
+    info!(
+        "after squeeze -- data: {} rows x {} columns",
+        data.num_rows().unwrap(),
+        data.num_columns().unwrap()
+    );
+
+    let hdr = data_file.replace(file_ext(&data_file)?.as_ref(), "");
+    let row_idx_file = format!("{}row.idx.gz", hdr);
+    let col_idx_file = format!("{}col.idx.gz", hdr);
+
+    fn to_str_vec(v: &[usize]) -> Vec<Box<str>> {
+        v.iter()
+            .map(|x| format!("{}", x).into_boxed_str())
+            .collect()
+    }
+
+    let col_idx = to_str_vec(&col_idx);
+    let row_idx = to_str_vec(&row_idx);
+    common_io::write_lines(&col_idx, &col_idx_file)?;
+    common_io::write_lines(&row_idx, &row_idx_file)?;
 
     Ok(())
 }
@@ -1509,69 +1573,40 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Collect row and column statistics returns (row_stat, col_stat)
-/// - row_stat: mean, variance, min, max
-/// - col_stat: mean, variance, min, max
-///
-/// # Arguments
-/// * data - sparse matrix data
-/// * block_size - block size for parallel computation
-///
-fn collect_row_column_stats(
-    data: &SData,
-    block_size: usize,
-) -> anyhow::Result<(RunningStatistics<Ix1>, RunningStatistics<Ix1>)> {
-    if let (Some(nrow), Some(ncol)) = (data.num_rows(), data.num_columns()) {
-        let mut row_stat = RunningStatistics::new(Ix1(nrow));
-        let mut col_stat = RunningStatistics::new(Ix1(ncol));
+struct EmptyArgs {}
 
-        let arc_row_stat = Arc::new(Mutex::new(&mut row_stat));
-        let arc_col_stat = Arc::new(Mutex::new(&mut col_stat));
+fn row_stat_visitor(
+    job: (usize, usize),
+    data: &SparseIoVec,
+    _: &EmptyArgs,
+    arc_stat: Arc<Mutex<&mut RunningStatistics<Ix1>>>,
+) -> anyhow::Result<()> {
+    let (lb, ub) = job;
+    let xx = data.read_columns_ndarray(lb..ub)?;
 
-        let nblock = ncol.div_ceil(block_size);
-
-        info!(
-            "collecting row and column statistics over {} blocks",
-            nblock
-        );
-
-        (0..nblock)
-            .into_par_iter()
-            .progress_count(nblock as u64)
-            .map(|b| {
-                let lb: usize = b * block_size;
-                let ub: usize = ((b + 1) * block_size).min(ncol);
-                (lb, ub)
-            })
-            .for_each(|(lb, ub)| {
-                // let data_b = arc_data.lock().expect("failed to lock data");
-
-                // This could be inefficient since we are populating a dense matrix
-                let xx_b = data.read_columns_ndarray((lb..ub).collect()).unwrap();
-
-                // accumulate rows' statistics
-                {
-                    let mut row_stat = arc_row_stat.lock().expect("failed to lock row_stat");
-                    for x in xx_b.axis_iter(Axis(1)) {
-                        row_stat.add(&x);
-                    }
-                }
-
-                // accumulate columns' statistics
-                {
-                    let mut col_stat = arc_col_stat.lock().expect("failed to lock col_stat");
-
-                    for x in xx_b.axis_iter(Axis(0)) {
-                        for j in lb..ub {
-                            let i = j - lb;
-                            col_stat.add_element(&[j], x[i]);
-                        }
-                    }
-                }
-            }); // end of jobs
-
-        Ok((row_stat, col_stat))
-    } else {
-        anyhow::bail!("No row/column info");
+    let mut stat = arc_stat.lock().expect("failed to lock row_stat");
+    for x in xx.axis_iter(Axis(1)) {
+        stat.add(&x);
     }
+    Ok(())
+}
+
+fn col_stat_visitor(
+    job: (usize, usize),
+    data: &SparseIoVec,
+    _: &EmptyArgs,
+    arc_stat: Arc<Mutex<&mut RunningStatistics<Ix1>>>,
+) -> anyhow::Result<()> {
+    let (lb, ub) = job;
+    let xx = data.read_columns_ndarray(lb..ub)?;
+    let mut stat = arc_stat.lock().expect("failed to lock row_stat");
+
+    for x in xx.axis_iter(Axis(0)) {
+        for j in lb..ub {
+            let i = j - lb;
+            stat.add_element(&[j], x[i]);
+        }
+    }
+
+    Ok(())
 }

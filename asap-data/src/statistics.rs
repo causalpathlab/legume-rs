@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use matrix_util::common_io::write_lines;
 use ndarray::{ArrayBase, Axis, Data, Dimension, NdIndex, OwnedRepr, RemoveAxis};
 
@@ -18,7 +20,6 @@ where
     s2: ArrayBase<OwnedRepr<f32>, S>,
 }
 
-#[allow(dead_code)]
 impl<S> RunningStatistics<S>
 where
     S: Dimension + RemoveAxis,
@@ -98,7 +99,7 @@ where
     pub fn variance(&self) -> ArrayBase<OwnedRepr<f32>, S> {
         let mean = self.mean();
         let nn = &self.s0.mapv(Self::_add_pseudo_count);
-        
+
         &self.s2 / nn - &mean * &mean
     }
 
