@@ -73,16 +73,8 @@ struct SRTArgs {
     #[arg(long, short = 'd', default_value_t = 10)]
     sort_dim: usize,
 
-    /// #k-nearest neighbours within each batch
-    #[arg(long, default_value_t = 3)]
-    knn_batches: usize,
-
-    /// #k-nearest neighbours within each batch
-    #[arg(long, default_value_t = 10)]
-    knn_cells: usize,
-
     /// #k-nearest neighbours for spectral embedding for spatial coordinates
-    #[arg(long, default_value_t = 10)]
+    #[arg(short = 'k', long, default_value_t = 10)]
     knn_spatial: usize,
 
     /// maximum rank for spectral embedding for spatial coordinates
@@ -107,7 +99,7 @@ struct SRTArgs {
     block_size: usize,
 
     /// number of latent topics
-    #[arg(short = 'k', long, default_value_t = 10)]
+    #[arg(short = 't', long, default_value_t = 10)]
     n_latent_topics: usize,
 
     /// targeted number of row feature modules

@@ -1,7 +1,7 @@
 // #![allow(dead_code)]
 
-use crate::srt_common::*;
 use crate::SRTArgs;
+use crate::srt_common::*;
 use matrix_util::common_io::extension as file_ext;
 
 pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str>>)> {
@@ -12,10 +12,6 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
         "zarr" => SparseIoBackend::Zarr,
         _ => SparseIoBackend::Zarr,
     };
-
-    if args.coord_files.len() != args.data_files.len() {
-        return Err(anyhow::anyhow!("# coordinate files != # of data files"));
-    }
 
     let mut data_vec = SparseIoVec::new();
 
@@ -36,7 +32,7 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
         data_vec.push(Arc::from(data))?;
     }
 
-    // check if row names are the same
+    // check if row names are the same across data
     let row_names = data_vec[0].row_names()?;
 
     for j in 1..data_vec.len() {
@@ -50,72 +46,58 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
 
     for (i, coord_file) in args.coord_files.iter().enumerate() {
         info!("Reading coordinate file: {}", coord_file);
-
-        let cell_names = data_vec[i].column_names()?;
-
         let ext = file_ext(&coord_file)?;
 
-        let coord = match ext.as_ref() {
-            "parquet" | "csv.gz" | "tsv.gz" | "txt.gz" => {
-                info!("parsing coordinate file: {}", &coord_file);
+        let (coord_cell_names, _names, data) = match ext.as_ref() {
+            "parquet" => Mat::from_parquet_with_indices_names(
+                &coord_file,
+                Some(0),
+                args.coord_columns.as_deref(),
+                Some(&args.coord_column_names),
+            )?,
 
-                let (coord_cell_names, _, data) = match ext.as_ref() {
-                    "parquet" => Mat::from_parquet_with_indices_names(
-                        &coord_file,
-                        Some(0),
-                        args.coord_columns.as_deref(),
-                        Some(&args.coord_column_names),
-                    )?,
-                    _ => Mat::read_data(
-                        &coord_file,
-                        vec!['\t', ',', ' '],
-                        Some(0),
-                        Some(0),
-                        args.coord_columns.as_deref(),
-                        Some(&args.coord_column_names),
-                    )?,
-                };
-
-                if cell_names == coord_cell_names {
-                    data
-                } else {
-
-		    info!("reordering coordinate information");
-		    
-                    let coord_index_map: HashMap<&Box<str>, usize> = coord_cell_names
-                        .iter()
-                        .enumerate()
-                        .map(|(index, name)| (name, index))
-                        .collect();
-
-                    let reordered_indices: Vec<usize> = cell_names
-                        .iter()
-                        .map(|name| {
-                            coord_index_map
-                                .get(name)
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!(
-                                        "cell_name '{}' not found in coord_cell_names",
-                                        name
-                                    )
-                                })
-                                .map(|&index| index)
-                        })
-                        .collect::<anyhow::Result<_>>()?;
-
-                    concatenate_vertical(
-                        &reordered_indices
-                            .iter()
-                            .map(|&index| data.row(index))
-                            .collect::<Vec<_>>(),
-                    )?
-                }
-            }
-
-            _ => Mat::read_file_delim(coord_file, vec!['\t', ',', ' '], None)?,
+            _ => Mat::read_data(
+                &coord_file,
+                vec!['\t', ',', ' '],
+                Some(0),
+                Some(0),
+                args.coord_columns.as_deref(),
+                Some(&args.coord_column_names),
+            )?,
         };
 
-        coord_vec.push(coord);
+        let data_cell_names = data_vec[i].column_names()?;
+
+        if data_cell_names == coord_cell_names {
+            coord_vec.push(data);
+        } else {
+            info!("reordering coordinate information");
+
+            let coord_index_map: HashMap<&Box<str>, usize> = coord_cell_names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (name, index))
+                .collect();
+
+            let reordered_indices: Vec<usize> = data_cell_names
+                .iter()
+                .map(|name| {
+                    coord_index_map
+                        .get(name)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("cell '{}' not found in the file {}", name, coord_file)
+                        })
+                        .map(|&index| index)
+                })
+                .collect::<anyhow::Result<_>>()?;
+
+            coord_vec.push(concatenate_vertical(
+                &reordered_indices
+                    .iter()
+                    .map(|&index| data.row(index))
+                    .collect::<Vec<_>>(),
+            )?);
+        }
     }
 
     let coord_nk = concatenate_vertical(&coord_vec)?;
