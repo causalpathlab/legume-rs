@@ -133,6 +133,10 @@ struct SRTArgs {
     #[arg(long, value_enum, default_value = "cpu")]
     device: ComputeDevice,
 
+    /// preload all the columns data
+    #[arg(long, default_value_t = false)]
+    preload_data: bool,
+
     /// verbosity
     #[arg(long, short)]
     verbose: bool,

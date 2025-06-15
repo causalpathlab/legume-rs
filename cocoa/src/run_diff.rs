@@ -64,6 +64,10 @@ pub struct DiffArgs {
     #[arg(long, short, required = true)]
     out: Box<str>,
 
+    /// preload all the columns data
+    #[arg(long, default_value_t = false)]
+    preload_data: bool,
+
     /// verbosity
     #[arg(long, short)]
     verbose: bool,
@@ -237,7 +241,12 @@ fn parse_arg_input_data(args: DiffArgs) -> anyhow::Result<ArgInputData> {
             _ => return Err(anyhow::anyhow!("Unknown file format: {}", this_data_file)),
         };
 
-        let this_data = open_sparse_matrix(&this_data_file, &backend)?;
+        let mut this_data = open_sparse_matrix(&this_data_file, &backend)?;
+
+        if args.preload_data {
+            this_data.preload_columns()?;
+        }
+
         let ndata = this_data.num_columns().unwrap_or(0);
 
         let this_indv = read_lines(&indv_file)?;
