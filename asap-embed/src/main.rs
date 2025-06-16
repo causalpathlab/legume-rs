@@ -103,11 +103,11 @@ struct EmbedArgs {
     block_size: usize,
 
     /// number of latent topics
-    #[arg(short = 'k', long, default_value_t = 10)]
+    #[arg(short = 't', long, default_value_t = 10)]
     n_latent_topics: usize,
 
     /// targeted number of row feature modules
-    #[arg(short = 'r', long, default_value_t = 1000)]
+    #[arg(short = 'r', long, default_value_t = 500)]
     n_row_modules: usize,
 
     /// encoder layers
