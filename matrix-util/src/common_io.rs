@@ -84,6 +84,7 @@ where
 pub fn read_lines_generic<T>(
     input_file: &str,
     hdr_line: i64,
+    parse_header_fn: impl Fn(&str) -> Vec<Box<str>> + Sync,
     parse_fn: impl Fn(&str) -> Vec<T> + Sync,
 ) -> anyhow::Result<(Vec<Vec<T>>, Vec<Box<str>>)>
 where
@@ -120,12 +121,7 @@ where
             return Err(anyhow::anyhow!("not enough data"));
         }
 
-        hdr.extend(
-            lines_raw[n_skip]
-                .split_whitespace()
-                .map(|x| x.to_owned().into_boxed_str())
-                .collect::<Vec<_>>(),
-        );
+        hdr.extend(parse_header_fn(&lines_raw[n_skip]));
 
         lines_raw[(n_skip + 1)..]
             .iter()
@@ -170,7 +166,14 @@ where
                 .collect(),
         }
     };
-    read_lines_generic(input_file, hdr_line, parse_fn)
+
+    let parse_header_fn = |line: &str| -> Vec<Box<str>> {
+        line.split_whitespace()
+            .map(|x| x.to_owned().into_boxed_str())
+            .collect()
+    };
+
+    read_lines_generic(input_file, hdr_line, parse_header_fn, parse_fn)
 }
 
 ///
@@ -189,13 +192,14 @@ pub fn read_lines_of_words(
             .collect()
     };
 
-    read_lines_generic(input_file, hdr_line, parse_fn)
+    read_lines_generic(input_file, hdr_line, parse_fn, parse_fn)
 }
 
 ///
 /// Specialized function to read lines and parse them into a vector of words.
 ///
 /// * `input_file` - file name--either gzipped or not
+/// * `delim` - delimiter
 /// * `hdr_line` - location of a header line (-1 = no header line)
 ///
 pub fn read_lines_of_words_delim(
@@ -205,7 +209,7 @@ pub fn read_lines_of_words_delim(
 ) -> anyhow::Result<(Vec<Vec<Box<str>>>, Vec<Box<str>>)> {
     let delim = delim.into(); // Convert the input delimiter into the Delimiter enum
 
-    let parse_fn = move |line: &str| -> Vec<Box<str>> {
+    let parse_fn = |line: &str| -> Vec<Box<str>> {
         match &delim {
             Delimiter::Str(s) => line
                 .split(s.as_str())
@@ -218,7 +222,7 @@ pub fn read_lines_of_words_delim(
         }
     };
 
-    read_lines_generic(input_file, hdr_line, parse_fn)
+    read_lines_generic(input_file, hdr_line, parse_fn, parse_fn)
 }
 
 ///

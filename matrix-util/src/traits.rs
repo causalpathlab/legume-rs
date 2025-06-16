@@ -193,11 +193,12 @@ pub trait IoOps {
         };
 
         let column_names: Vec<Box<str>> = if hdr.is_empty() {
-            (0..lines[0].len())
+            relevant_indices
+                .iter()
                 .map(|x| x.to_string().into_boxed_str())
                 .collect()
         } else {
-            (0..lines[0].len()).map(|j| hdr[j].clone()).collect()
+            relevant_indices.iter().map(|&j| hdr[j].clone()).collect()
         };
 
         let data: Vec<Vec<Self::Scalar>> = lines
@@ -211,6 +212,7 @@ pub trait IoOps {
             .collect();
 
         let data = data.into_iter().flatten().collect::<Vec<_>>();
+
         Ok((row_names, column_names, data))
     }
 
