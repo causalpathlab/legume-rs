@@ -103,7 +103,7 @@ struct SRTArgs {
     n_latent_topics: usize,
 
     /// targeted number of row feature modules
-    #[arg(short = 'r', long, default_value_t = 1000)]
+    #[arg(short = 'r', long, default_value_t = 500)]
     n_row_modules: usize,
 
     /// encoder layers
