@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Single-cell Embedding with Nearest Neighbourhood Adjustment"
 
 [[bin]]
 name = "senna"

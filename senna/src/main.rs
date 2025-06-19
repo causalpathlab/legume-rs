@@ -41,7 +41,7 @@ enum ComputeDevice {
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "Embedding ASAP", version, about, long_about, term_width = 80)]
+#[command(name = "Single-cell Embedding with Nearest Neighbourhood Adjustment", version, about, long_about, term_width = 80)]
 /// A quick embedding utility
 ///
 /// This command will embed high-dimensional data (where each data
