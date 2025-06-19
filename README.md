@@ -1,4 +1,6 @@
-# ASAP (Annotating Single-cell data matrix by Approximate Pseudo-bulk projection) ecosystem
+# `legume-rs`: Library for Expedited Genomics data analysis with Unified Matching steps in Rust ecosystem 
+
+- previously: ASAP (Analysis of Single-cell data matrix by Approximate Pseudo-bulk projection) 
 
 The goal of ASAP framework:
 
@@ -13,6 +15,8 @@ The goal of ASAP framework:
 
 ```sh
 cargo install --path asap-data
-cargo install --path asap-embed
+cargo install --path senna
+cargo install --path cocoa
+cargo install --path pinto
 ```
 

@@ -15,7 +15,7 @@ resolver = "2"
 [workspace.package]
 license = "MIT"
 authors = ["Yongjin Park <ypp@stat.ubc.ca>"]
-description = "Analysis of Single-cell data with Approximate Pseudobulk in Rust"
+description = "Library for Expedited Genomics data analysis with Unified Matching steps in Rust"
 edition = "2021"
 version = "0.1.1"
 
