@@ -4,7 +4,7 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Counterfactual Confounder Analysis"
+description = "Counterfactual Confounder Adjustment"
 
 [[bin]]
 name = "cocoa"
@@ -13,7 +13,6 @@ path = "src/main.rs"
 [dependencies]
 asap-data = { path = "../asap-data" }
 asap-alg = { path = "../asap-alg" }
-asap-embed = { path = "../asap-embed" }
 matrix-util = { path = "../matrix-util" }
 matrix-param = { path = "../matrix-param" }
 

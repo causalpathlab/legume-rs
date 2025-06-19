@@ -4,7 +4,6 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Spatially Embedded Nearest Neighbourhood Analysis"
 
 [[bin]]
 name = "senna"
@@ -13,9 +12,9 @@ path = "src/main.rs"
 [dependencies]
 asap-data = { path = "../asap-data" }
 asap-alg = { path = "../asap-alg" }
+candle-util = { path = "../candle-util" }
 matrix-util = { path = "../matrix-util" }
 matrix-param = { path = "../matrix-param" }
-candle-util = { path = "../candle-util" }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
@@ -34,5 +33,5 @@ approx = { workspace = true }
 instant-distance = { workspace = true }
 special = { workspace = true }
 indicatif = { workspace = true }
-log = { workspace = true }
 env_logger = { workspace = true }
+log = { workspace = true }
