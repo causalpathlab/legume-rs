@@ -1,6 +1,8 @@
 use crate::common_io::Delimiter;
-use candle_core::Device;
-use candle_core::Tensor;
+
+pub use candle_util::candle_core;
+
+use candle_core::{Device, Tensor};
 
 /// some linear algebra routines
 pub trait RandomizedAlgs {

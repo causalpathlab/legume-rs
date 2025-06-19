@@ -1,8 +1,11 @@
-use crate::common_io::{Delimiter, read_lines_of_types, write_lines};
+use crate::common_io::{read_lines_of_types, write_lines, Delimiter};
 use crate::parquet::*;
 use crate::traits::IoOps;
-use candle_core::{Device, Tensor};
+
 use parquet::data_type::{ByteArrayType, DoubleType};
+
+use candle_core::{Device, Tensor};
+use candle_util::candle_core;
 
 impl IoOps for Tensor {
     type Scalar = f32;
