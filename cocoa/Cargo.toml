@@ -1,7 +1,10 @@
 [package]
 name = "cocoa"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Counterfactual Confounder Analysis"
 
 [[bin]]
 name = "cocoa"

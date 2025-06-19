@@ -7,7 +7,7 @@ pub mod mtx_io;
 pub mod ndarray_io;
 pub mod ndarray_rsvd;
 pub mod ndarray_util;
-mod parquet;
+pub mod parquet;
 pub mod tensor_io;
 pub mod tensor_util;
 pub mod traits;
