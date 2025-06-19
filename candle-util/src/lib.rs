@@ -11,3 +11,7 @@ pub mod candle_matched_encoder_softmax;
 pub mod candle_matched_vae_inference;
 pub mod candle_model_traits;
 pub mod candle_vae_inference;
+
+pub use candle_core;
+pub use candle_nn;
+

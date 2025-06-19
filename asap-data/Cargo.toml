@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 matrix-util = { path = "../matrix-util" }
+candle-util = { path = "../candle-util" }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
@@ -38,13 +39,3 @@ instant-distance = { workspace = true }
 indicatif = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["cuda","cudarc","cudnn"] }
-# candle-core = {  version = "0.8.4", features = ["cuda","cudarc","cudnn"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["metal","accelerate"] }
-# candle-core = {  version = "0.8.4", features = ["metal","accelerate"] }
-
-[dev-dependencies]

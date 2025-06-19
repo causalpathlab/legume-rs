@@ -9,7 +9,7 @@ pub use asap_data::sparse_data_visitors::*;
 pub use asap_data::sparse_io::*;
 pub use asap_data::sparse_io_vector::*;
 
-pub use matrix_util::common_io::{extension, read_lines, write_types, basename};
+pub use matrix_util::common_io::{basename, extension, read_lines, write_types};
 pub use matrix_util::dmatrix_util::*;
 pub use matrix_util::knn_match::ColumnDict;
 pub use matrix_util::traits::*;
@@ -26,6 +26,7 @@ pub use candle_util::candle_loss_functions as loss_func;
 pub use candle_util::candle_matched_decoder_topic::*;
 pub use candle_util::candle_matched_encoder_softmax::*;
 pub use candle_util::candle_model_traits::*;
+pub use candle_util::{candle_core, candle_nn};
 
 /// a quick wrapper for gzipped tsv out: `{header}.{file_name}.tsv.gz`
 pub fn tsv_gz_out(data: &Tensor, header: &str, file_name: &str) -> anyhow::Result<()> {

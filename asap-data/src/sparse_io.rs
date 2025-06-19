@@ -3,7 +3,7 @@
 use crate::sparse_matrix_hdf5;
 use crate::sparse_matrix_zarr;
 
-pub use candle_core::Tensor;
+pub use candle_util::candle_core::Tensor;
 pub use nalgebra::DMatrix;
 pub use nalgebra_sparse::{csc::CscMatrix, csr::CsrMatrix};
 pub use ndarray::prelude::*;

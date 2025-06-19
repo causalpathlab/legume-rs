@@ -1,9 +1,12 @@
 [package]
 name = "matrix-util"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
+candle-util = { path = "../candle-util/" }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
@@ -30,15 +33,3 @@ ndarray-rand = { workspace = true }
 instant-distance = { workspace = true }
 indicatif = { workspace = true }
 parquet = { workspace = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-ndarray-linalg = { version = "0.17", default-features = false }
-blas-src = { version = "0.11", features = ["accelerate"] }
-candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["metal","accelerate"] }
-# candle-core = {  version = "0.8.4", features = ["metal","accelerate"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-ndarray-linalg = { version = "0.17", features = ["openblas"] }
-openblas-src = { version = "0.10" }
-candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["cuda","cudarc","cudnn"] }
-# candle-core = {  version = "0.8.4", features = ["cuda","cudarc","cudnn"] }

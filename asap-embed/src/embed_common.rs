@@ -15,3 +15,5 @@ pub type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 pub use asap_data::sparse_data_visitors::*;
 pub use asap_data::sparse_io::*;
 pub use asap_data::sparse_io_vector::*;
+
+pub use candle_util::{candle_core, candle_nn};
