@@ -31,8 +31,8 @@ impl From<Vec<char>> for Delimiter {
 ///
 /// * `input_file` - file name--either gzipped or not
 ///
-pub fn read_lines(input_file: &str) -> anyhow::Result<Vec<Box<str>>> {
-    let buf: Box<dyn BufRead> = open_buf_reader(input_file)?;
+pub fn read_lines(input_file_path: &str) -> anyhow::Result<Vec<Box<str>>> {
+    let buf: Box<dyn BufRead> = open_buf_reader(input_file_path)?;
     let mut lines = vec![];
     for x in buf.lines() {
         lines.push(x?.into_boxed_str());
@@ -46,8 +46,8 @@ pub fn read_lines(input_file: &str) -> anyhow::Result<Vec<Box<str>>> {
 /// * `lines` - vector of lines
 /// * `output_file` - file name--either gzipped or not
 ///
-pub fn write_lines(lines: &Vec<Box<str>>, output_file: &str) -> anyhow::Result<()> {
-    write_types(lines, output_file)
+pub fn write_lines(lines: &Vec<Box<str>>, output_file_path: &str) -> anyhow::Result<()> {
+    write_types(lines, output_file_path)
 }
 
 ///
@@ -56,11 +56,11 @@ pub fn write_lines(lines: &Vec<Box<str>>, output_file: &str) -> anyhow::Result<(
 /// * `lines` - vector of lines
 /// * `output_file` - file name--either gzipped or not
 ///
-pub fn write_types<T>(lines: &Vec<T>, output_file: &str) -> anyhow::Result<()>
+pub fn write_types<T>(lines: &Vec<T>, output_file_path: &str) -> anyhow::Result<()>
 where
     T: std::fmt::Display,
 {
-    let mut buf = open_buf_writer(output_file)?;
+    let mut buf = open_buf_writer(output_file_path)?;
     for line in lines {
         if let Err(e) = writeln!(buf, "{}", line) {
             if e.kind() == std::io::ErrorKind::BrokenPipe {
@@ -81,7 +81,7 @@ where
 /// * `hdr_line` - location of a header line (-1 = no header line)
 /// * `parse_fn` - function to parse each line into the desired type
 ///
-pub fn read_lines_generic<T>(
+pub fn read_lines_of_words_generic<T>(
     input_file: &str,
     hdr_line: i64,
     parse_header_fn: impl Fn(&str) -> Vec<Box<str>> + Sync,
@@ -173,7 +173,7 @@ where
             .collect()
     };
 
-    read_lines_generic(input_file, hdr_line, parse_header_fn, parse_fn)
+    read_lines_of_words_generic(input_file, hdr_line, parse_header_fn, parse_fn)
 }
 
 ///
@@ -192,7 +192,7 @@ pub fn read_lines_of_words(
             .collect()
     };
 
-    read_lines_generic(input_file, hdr_line, parse_fn, parse_fn)
+    read_lines_of_words_generic(input_file, hdr_line, parse_fn, parse_fn)
 }
 
 ///
@@ -222,7 +222,7 @@ pub fn read_lines_of_words_delim(
         }
     };
 
-    read_lines_generic(input_file, hdr_line, parse_fn, parse_fn)
+    read_lines_of_words_generic(input_file, hdr_line, parse_fn, parse_fn)
 }
 
 ///
@@ -288,11 +288,11 @@ pub fn mkdir(file: &str) -> anyhow::Result<()> {
 }
 
 trait ToStr {
-    fn to_box_str(&self) -> Box<str>;
+    fn into_box_str(&self) -> Box<str>;
 }
 
 impl ToStr for Path {
-    fn to_box_str(&self) -> Box<str> {
+    fn into_box_str(&self) -> Box<str> {
         self.to_str()
             .expect("failed to convert to string")
             .to_string()
@@ -301,7 +301,7 @@ impl ToStr for Path {
 }
 
 impl ToStr for OsStr {
-    fn to_box_str(&self) -> Box<str> {
+    fn into_box_str(&self) -> Box<str> {
         self.to_str()
             .expect("failed to convert to string")
             .to_string()
@@ -313,14 +313,14 @@ impl ToStr for OsStr {
 /// Take the basename of a file
 /// * `file` - file name
 ///
-pub fn dir_base_ext(file: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<str>)> {
-    let path = Path::new(file);
+pub fn dir_base_ext(file_path: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<str>)> {
+    let path = Path::new(file_path);
 
     if let (Some(dir), Some(base), Some(ext)) = (path.parent(), path.file_stem(), path.extension())
     {
-        Ok((dir.to_box_str(), base.to_box_str(), ext.to_box_str()))
+        Ok((dir.into_box_str(), base.into_box_str(), ext.into_box_str()))
     } else {
-        Err(anyhow::anyhow!("no file stem"))
+        Err(anyhow::anyhow!("fail to parse dir, base, ext: {}", file_path))
     }
 }
 
@@ -331,7 +331,7 @@ pub fn dir_base_ext(file: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<str>)
 pub fn basename(file: &str) -> anyhow::Result<Box<str>> {
     let path = Path::new(file);
     if let Some(base) = path.file_stem() {
-        Ok(base.to_box_str())
+        Ok(base.into_box_str())
     } else {
         Err(anyhow::anyhow!("no file stem"))
     }
@@ -344,7 +344,7 @@ pub fn basename(file: &str) -> anyhow::Result<Box<str>> {
 pub fn extension(file: &str) -> anyhow::Result<Box<str>> {
     let path = Path::new(file);
     if let Some(ext) = path.extension() {
-        Ok(ext.to_box_str())
+        Ok(ext.into_box_str())
     } else {
         Err(anyhow::anyhow!("failed to extract extension"))
     }

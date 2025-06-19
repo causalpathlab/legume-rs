@@ -3,6 +3,13 @@
 members = ["asap-data", "asap-embed", "matrix-util", "matrix-param", "asap-alg", "senna", "cocoa"]
 resolver = "2"
 
+[workspace.package]
+license = "MIT"
+authors = ["Yongjin Park <ypp@stat.ubc.ca>"]
+description = "Analysis of Single-cell data with Approximate Pseudobulk in Rust"
+edition = "2021"
+version = "0.1.1"
+
 [workspace.dependencies]
 
 anyhow = "1.0"
