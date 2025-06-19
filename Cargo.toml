@@ -1,6 +1,15 @@
 [workspace]
 
-members = ["asap-data", "asap-embed", "matrix-util", "matrix-param", "asap-alg", "senna", "cocoa"]
+members = [
+	"asap-data",
+	"asap-alg",
+	"matrix-util",
+	"matrix-param",
+	"senna",
+	"pinto",
+	"cocoa"
+	]
+
 resolver = "2"
 
 [workspace.package]
@@ -42,8 +51,8 @@ env_logger = { version = "0.11" }
 log = { version = "0.4" }
 
 asap-data = { path = "asap-data"}
-asap-embed = { path = "asap-embed" }
 matrix-util = { path = "matrix-util" }
 candle-util = { path = "candle-util" }
-
-
+senna = { path = "senna" }
+pinto = { path = "pinto" }
+cocoa = { path = "cocoa" }
