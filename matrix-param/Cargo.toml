@@ -31,4 +31,4 @@ special.workspace = true
 
 parquet = { workspace = true }
 
-matrix-util = { path = "../matrix-util" }
+matrix-util = { workspace = true }
