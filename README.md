@@ -14,7 +14,7 @@ The goal of ASAP framework:
 ## Installation
 
 ```sh
-cargo install --path asap-data # a general sparse data utility
+cargo install --path data-beans # utility functions for sparse data management
 
 cargo install --path senna # single-cell embedding with nearest neighbourhood adjustment
 
