@@ -1,5 +1,5 @@
 [package]
-name = "asap-alg"
+name = "data-beans-alg"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ version.workspace = true
 description = "random projection and collapsing routines"
 
 [dependencies]
-asap-data = { workspace = true }
+data-beans = { workspace = true }
 candle-util = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }

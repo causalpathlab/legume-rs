@@ -2,9 +2,9 @@
 
 pub use log::{info, warn};
 
-pub use asap_data::sparse_data_visitors::*;
-pub use asap_data::sparse_io::*;
-pub use asap_data::sparse_io_vector::SparseIoVec;
+pub use data_beans::sparse_data_visitors::*;
+pub use data_beans::sparse_io::*;
+pub use data_beans::sparse_io_vector::SparseIoVec;
 
 pub type Mat = nalgebra::DMatrix<f32>;
 pub type DVec = nalgebra::DVector<f32>;

@@ -11,7 +11,7 @@ use srt_routines_latent_representation::*;
 use srt_routines_post_process::SrtLatentStatePairsOps;
 use srt_routines_pre_process::*;
 
-use asap_alg::random_projection::binary_sort_columns;
+use data_beans_alg::random_projection::binary_sort_columns;
 
 use matrix_param::traits::{Inference, TwoStatParam};
 use srt_cell_pairs::SrtCellPairs;
@@ -37,7 +37,7 @@ enum ComputeDevice {
 struct SRTArgs {
     /// Data files of either `.zarr` or `.h5` format. All the formats
     /// in the given list should be identical. We can convert `.mtx`
-    /// to `.zarr` or `.h5` using `asap-data build` command.
+    /// to `.zarr` or `.h5` using `data-beans from-mtx` command.
     #[arg(required = true, value_delimiter(','))]
     data_files: Vec<Box<str>>,
 

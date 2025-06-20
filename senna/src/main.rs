@@ -2,7 +2,6 @@ mod embed_common;
 mod routines_latent_representation;
 mod routines_post_process;
 
-use asap_alg::random_projection::*;
 use embed_common::*;
 
 use matrix_param::io::ParamIo;
@@ -14,8 +13,8 @@ use matrix_util::traits::*;
 use routines_latent_representation::*;
 use routines_post_process::*;
 
-use asap_alg::collapse_data::CollapsingOps;
-use asap_alg::random_projection::RandProjOps;
+use data_beans_alg::collapse_data::*;
+use data_beans_alg::random_projection::*;
 
 use candle_util::candle_decoder_topic::*;
 use candle_util::candle_encoder_softmax::*;

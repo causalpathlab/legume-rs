@@ -14,9 +14,12 @@ The goal of ASAP framework:
 ## Installation
 
 ```sh
-cargo install --path asap-data
-cargo install --path senna
-cargo install --path cocoa
-cargo install --path pinto
+cargo install --path asap-data # a general sparse data utility
+
+cargo install --path senna # single-cell embedding with nearest neighbourhood adjustment
+
+cargo install --path pinto # probably interacting cell pairs
+
+cargo install --path cocoa-diff # counterfactual confounder adjustment
 ```
 
