@@ -1,7 +1,7 @@
 use crate::common::*;
 
-use asap_alg::collapse_data::CollapsingOps;
-use asap_alg::random_projection::RandProjOps;
+use data_beans_alg::collapse_data::CollapsingOps;
+use data_beans_alg::random_projection::RandProjOps;
 
 pub trait RandPartitionOps {
     fn assign_pseudobulk_individuals<T>(

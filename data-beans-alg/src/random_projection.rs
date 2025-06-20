@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use asap_data::sparse_data_visitors::*;
-use asap_data::sparse_io_vector::SparseIoVec;
+use data_beans::sparse_data_visitors::*;
+use data_beans::sparse_io_vector::SparseIoVec;
 use std::sync::{Arc, Mutex};
 
 use log::{info, warn};

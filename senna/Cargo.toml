@@ -11,8 +11,8 @@ name = "senna"
 path = "src/main.rs"
 
 [dependencies]
-asap-data = { workspace = true }
-asap-alg = { workspace = true }
+data-beans = { workspace = true }
+data-beans-alg = { workspace = true }
 candle-util = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }

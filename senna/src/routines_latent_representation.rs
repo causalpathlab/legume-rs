@@ -1,7 +1,7 @@
 use crate::embed_common::*;
 
-use asap_alg::normalization::*;
-use asap_data::sparse_data_visitors::VisitColumnsOps;
+use data_beans_alg::normalization::*;
+use data_beans::sparse_data_visitors::VisitColumnsOps;
 
 use candle_util::candle_data_loader::*;
 use candle_util::candle_inference::TrainConfig;

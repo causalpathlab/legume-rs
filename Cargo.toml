@@ -1,8 +1,8 @@
 [workspace]
 
 members = [
-	"asap-data",
-	"asap-alg",
+	"data-beans",
+	"data-beans-alg",
 	"matrix-util",
 	"matrix-param",
 	"senna",
@@ -52,8 +52,8 @@ parquet = { version = "55" }
 env_logger = { version = "0.11" }
 log = { version = "0.4" }
 
-asap-data = { path = "asap-data"}
-asap-alg = { path = "asap-alg"}
+data-beans = { path = "data-beans"}
+data-beans-alg = { path = "data-beans-alg"}
 matrix-param = { path = "matrix-param" }
 matrix-util = { path = "matrix-util" }
 candle-util = { path = "candle-util" }
