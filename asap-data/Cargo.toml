@@ -8,10 +8,11 @@ license.workspace = true
 [[bin]]
 name = "asap-data"
 path = "src/main.rs"
+description = "data structure for the analysis of single cell data by approximate random projection"
 
 [dependencies]
-matrix-util = { path = "../matrix-util" }
-candle-util = { path = "../candle-util" }
+matrix-util = { workspace = true }
+candle-util = { workspace = true }
 
 anyhow = { workspace = true }
 clap = { workspace = true }

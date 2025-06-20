@@ -1,6 +1,6 @@
-mod asap_routines_latent_representation;
-mod asap_routines_post_process;
 mod embed_common;
+mod routines_latent_representation;
+mod routines_post_process;
 
 use asap_alg::random_projection::*;
 use embed_common::*;
@@ -11,8 +11,8 @@ use matrix_util::common_io::{self, basename, extension, read_lines, remove_file,
 use matrix_util::dmatrix_util::row_membership_matrix;
 use matrix_util::traits::*;
 
-use asap_routines_latent_representation::*;
-use asap_routines_post_process::*;
+use routines_latent_representation::*;
+use routines_post_process::*;
 
 use asap_alg::collapse_data::CollapsingOps;
 use asap_alg::random_projection::RandProjOps;
@@ -41,7 +41,13 @@ enum ComputeDevice {
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "Single-cell Embedding with Nearest Neighbourhood Adjustment", version, about, long_about, term_width = 80)]
+#[command(
+    name = "Single-cell Embedding with Nearest Neighbourhood Adjustment",
+    version,
+    about,
+    long_about,
+    term_width = 80
+)]
 /// A quick embedding utility
 ///
 /// This command will embed high-dimensional data (where each data

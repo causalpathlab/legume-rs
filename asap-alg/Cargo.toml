@@ -1,15 +1,16 @@
 [package]
 name = "asap-alg"
-version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+version.workspace = true
+description = "random projection and collapsing routines"
 
 [dependencies]
-asap-data = { path = "../asap-data" }
-candle-util = { path = "../candle-util" }
-matrix-util = { path = "../matrix-util" }
-matrix-param = { path = "../matrix-param" }
+asap-data = { workspace = true }
+candle-util = { workspace = true }
+matrix-util = { workspace = true }
+matrix-param = { workspace = true }
 
 anyhow = { workspace = true }
 clap = { workspace = true }

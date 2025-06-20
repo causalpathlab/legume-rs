@@ -4,18 +4,18 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Single-cell Embedding with Nearest Neighbourhood Adjustment"
+description = "Single-cell data Embedding with Nearest Neighbourhood Adjustment"
 
 [[bin]]
 name = "senna"
 path = "src/main.rs"
 
 [dependencies]
-asap-data = { path = "../asap-data" }
-asap-alg = { path = "../asap-alg" }
-candle-util = { path = "../candle-util" }
-matrix-util = { path = "../matrix-util" }
-matrix-param = { path = "../matrix-param" }
+asap-data = { workspace = true }
+asap-alg = { workspace = true }
+candle-util = { workspace = true }
+matrix-util = { workspace = true }
+matrix-param = { workspace = true }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
