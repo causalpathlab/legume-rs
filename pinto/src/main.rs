@@ -30,7 +30,7 @@ enum ComputeDevice {
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "senna", version, about, long_about, term_width = 80)]
+#[command(version, about, long_about, term_width = 80)]
 ///
 /// Embedding spatially resolved transcriptomic (SRT) data.
 ///
