@@ -68,10 +68,14 @@ pub struct SvdArgs {
 }
 
 pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
+    // 1. Read the data with batch membership
+
     let (mut data_vec, batch_membership) = read_data_vec_membership(ReadArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
     })?;
+
+    // 2. Random projection
 
     let proj_dim = args.proj_dim.max(args.n_latent_topics);
 
@@ -94,6 +98,8 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         }
     }
 
+    // 3. Batch-adjusted collapsing (pseudobulk)
+
     let reference = args.reference_batches.as_ref().map(|x| x.as_slice());
 
     info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
@@ -103,6 +109,8 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         reference,
         Some(args.iter_opt),
     )?;
+
+    // 4. batch-adjusted data
 
     let batch_db = collapse_out.delta.as_ref();
 
@@ -142,6 +150,8 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         let gene_names = data_vec.row_names()?;
         batch_db.to_parquet(Some(&gene_names), batch_names.as_deref(), &outfile)?;
     }
+
+    // 5. Nystrom projection
 
     let x_dn = match collapse_out.mu_adjusted.as_ref() {
         Some(adj) => adj,
