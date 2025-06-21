@@ -121,10 +121,14 @@ pub struct TopicArgs {
 }
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
+    // 1. Read the data with batch membership
+
     let (mut data_vec, batch_membership) = read_data_vec_membership(ReadArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
     })?;
+
+    // 2. Random projection
 
     let proj_dim = args.proj_dim.max(args.n_latent_topics);
 
@@ -147,6 +151,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         }
     }
 
+    // 3. Batch-adjusted collapsing (pseudobulk)
+
     let reference = args.reference_batches.as_ref().map(|x| x.as_slice());
 
     info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
@@ -167,7 +173,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     }
 
     // 4. Train embedded topic model on the collapsed data
-
     let n_topics = args.n_latent_topics;
     let n_vocab = args.vocab_size;
     let d_vocab_emb = args.vocab_emb;
