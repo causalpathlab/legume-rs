@@ -17,3 +17,14 @@ pub use data_beans::sparse_io::*;
 pub use data_beans::sparse_io_vector::*;
 
 pub use candle_util::{candle_core, candle_nn};
+
+pub use clap::{Args, Parser, Subcommand, ValueEnum};
+
+pub use matrix_param::io::ParamIo;
+pub use matrix_param::traits::{Inference, TwoStatParam};
+pub use matrix_util::common_io::{remove_file, write_types};
+pub use matrix_util::dmatrix_util::row_membership_matrix;
+pub use matrix_util::traits::*;
+
+pub use data_beans_alg::collapse_data::*;
+pub use data_beans_alg::random_projection::*;

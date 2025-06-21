@@ -8,7 +8,6 @@ license.workspace = true
 [[bin]]
 name = "data-beans"
 path = "src/main.rs"
-description = "data structure for basic extraction and approximate neighbourhood search"
 
 [dependencies]
 matrix-util = { workspace = true }

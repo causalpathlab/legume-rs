@@ -1,13 +1,12 @@
 use crate::embed_common::*;
 
-use data_beans_alg::normalization::*;
 use data_beans::sparse_data_visitors::VisitColumnsOps;
+use data_beans_alg::normalization::*;
 
 use candle_util::candle_data_loader::*;
 use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_model_traits::*;
 use candle_util::candle_vae_inference::*;
-use matrix_util::traits::*;
 
 fn nystrom_proj_visitor(
     job: (usize, usize),
