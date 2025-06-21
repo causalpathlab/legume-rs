@@ -3,8 +3,6 @@ use crate::embed_common::*;
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 use data_beans_alg::normalization::*;
 
-use matrix_util::traits::*;
-
 use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_model_traits::*;
 
