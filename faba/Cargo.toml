@@ -1,5 +1,5 @@
 [package]
-name = "data-beans"
+name = "faba"
 license.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -9,36 +9,41 @@ edition.workspace = true
 version.workspace = true
 
 [[bin]]
-name = "data-beans"
+name = "faba"
 path = "src/main.rs"
 
 [dependencies]
+data-beans = { workspace = true }
+data-beans-alg = { workspace = true }
 matrix-util = { workspace = true }
-candle-util = { workspace = true }
+matrix-param = { workspace = true }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
 flate2 = { workspace = true }
 num_cpus = { workspace = true }
 rayon = { workspace = true }
-
-hdf5 = { package = "hdf5-metno", version = "0.10", features = ["blosc"] }
-libz-sys = { version = "1.1", features = ["libc"], default-features = false }
-zarrs = { version = "0.21" }
-
 tempfile = { workspace = true }
 rand = { workspace = true }
 ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
 rand_distr = { workspace = true }
-approx = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-
 nalgebra = { workspace = true }
 nalgebra-sparse = { workspace = true }
+approx = { workspace = true }
 
 instant-distance = { workspace = true }
+special = { workspace = true }
 indicatif = { workspace = true }
-env_logger = { workspace = true }
 log = { workspace = true }
+env_logger = { workspace = true }
+
+features = "0.10.0"
+futures = "0.3.31"
+
+noodles = { version = "0.99.0", features = ["bam","gff","bgzf","sam","async"] }
+bstr = "1.12.0"
+noodles-core = "0.17.0"
+bio = "2.3.0"
+statrs = "0.18.0"
+num-traits.workspace = true

@@ -7,8 +7,8 @@ members = [
 	"matrix-param",
 	"senna",
 	"pinto",
-	"cocoa-diff"
-	]
+	"cocoa-diff",
+	"faba"]
 
 resolver = "3"
 
@@ -61,3 +61,4 @@ candle-util = { path = "candle-util" }
 senna = { path = "senna" }
 pinto = { path = "pinto" }
 cocoa-diff = { path = "cocoa-diff" }
+faba = { path = "faba" }
