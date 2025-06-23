@@ -1,10 +1,12 @@
 [package]
 name = "pinto"
-version.workspace = true
-authors.workspace = true
-edition.workspace = true
 license.workspace = true
-description = "Probably Interacting Neighbourhood analysis by Topic modelling"
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+version.workspace = true
 
 [[bin]]
 name = "pinto"
