@@ -11,19 +11,21 @@ use sam::alignment::record::data::field::tag::Tag as SamTag;
 
 use std::collections::{HashMap, HashSet};
 
-pub const CB: SamTag = SamTag::new(b'C', b'B');
-// pub const UB: SamTag = SamTag::new(b'U', b'B');
+pub const CELL_BARCODE_TAG: SamTag = SamTag::new(b'C', b'B');
+pub const UMI_BARCODE_TAG: SamTag = SamTag::new(b'U', b'B');
 
-pub struct DnaBaseStatMap {
+pub struct DnaBaseFreqMap {
     position_to_statsitic_with_sample: HashMap<usize, HashMap<SamSampleName, DnaBaseCount>>,
+    sample_to_position_to_statistic: HashMap<SamSampleName, HashMap<usize, DnaBaseCount>>,
     samples: HashSet<SamSampleName>,
     positions: HashSet<usize>,
 }
 
-impl DnaBaseStatMap {
+impl DnaBaseFreqMap {
     pub fn new() -> Self {
         Self {
             position_to_statsitic_with_sample: HashMap::new(),
+            sample_to_position_to_statistic: HashMap::new(),
             samples: HashSet::new(),
             positions: HashSet::new(),
         }
@@ -55,8 +57,17 @@ impl DnaBaseStatMap {
         Ok(())
     }
 
+    pub fn frequency_per_sample(
+        &self,
+        k: &SamSampleName,
+    ) -> anyhow::Result<&HashMap<usize, DnaBaseCount>> {
+        self.sample_to_position_to_statistic
+            .get(k)
+            .ok_or(anyhow::anyhow!("unable to find this sample: '{}'", k))
+    }
+
     /// Statistics combined by position
-    pub fn combine_statistic_by_position(&self) -> HashMap<usize, DnaBaseCount> {
+    pub fn marginal_frequency_by_position(&self) -> HashMap<usize, DnaBaseCount> {
         let mut ret: HashMap<usize, DnaBaseCount> =
             HashMap::with_capacity(self.position_to_statsitic_with_sample.len());
 
@@ -80,7 +91,7 @@ impl DnaBaseStatMap {
         self.samples.iter().collect()
     }
 
-    pub fn statistic_at(
+    pub fn frequency_at(
         &self,
         pos: &usize,
     ) -> anyhow::Result<&HashMap<SamSampleName, DnaBaseCount>> {
@@ -101,7 +112,7 @@ impl DnaBaseStatMap {
     {
         let aux_data = record.data();
 
-        let sample_name = match aux_data.get(&CB) {
+        let sample_name = match aux_data.get(&CELL_BARCODE_TAG) {
             Some(Ok(v)) => sam_sample_name(v)?,
             _ => SamSampleName::Combined,
         };
@@ -119,6 +130,11 @@ impl DnaBaseStatMap {
         //     self.umis.insert(umi_name.clone());
         // }
 
+        let freq_map_for_this_sample = self
+            .sample_to_position_to_statistic
+            .entry(sample_name.clone())
+            .or_insert_with(HashMap::new);
+
         if let Some(Ok(pos)) = record.alignment_start() {
             let pos = pos.get();
             let sequence = record.sequence();
@@ -128,6 +144,12 @@ impl DnaBaseStatMap {
                 if !self.positions.contains(&genome_pos) {
                     self.positions.insert(genome_pos);
                 }
+
+                let freq = freq_map_for_this_sample
+                    .entry(genome_pos)
+                    .or_insert_with(DnaBaseCount::new);
+
+                freq.add(Dna::from_byte(b), 1);
 
                 // let freq = self
                 //     .position_to_statistic

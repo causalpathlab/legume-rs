@@ -131,7 +131,12 @@ where
             .collect()
     };
 
-    lines.sort_by_key(|&(i, _)| i);
+    if lines.len() > 100_000 {
+        lines.par_sort_by_key(|&(i, _)| i);
+    } else {
+        lines.sort_by_key(|&(i, _)| i);
+    }
+
     let lines = lines.into_iter().map(|(_, x)| x).collect();
     Ok((lines, hdr))
 }
@@ -320,7 +325,10 @@ pub fn dir_base_ext(file_path: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<
     {
         Ok((dir.into_box_str(), base.into_box_str(), ext.into_box_str()))
     } else {
-        Err(anyhow::anyhow!("fail to parse dir, base, ext: {}", file_path))
+        Err(anyhow::anyhow!(
+            "fail to parse dir, base, ext: {}",
+            file_path
+        ))
     }
 }
 
