@@ -1,7 +1,7 @@
 mod common;
 mod data;
-mod run_dartseq_count;
 mod hypothesis_tests;
+mod run_dartseq_count;
 mod util;
 
 // use crate::data::sifter::*;

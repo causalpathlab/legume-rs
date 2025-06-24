@@ -82,7 +82,7 @@ impl DnaBaseFreqMap {
 
     /// sorted genomic positions
     pub fn sorted_positions(&self) -> Vec<usize> {
-        let mut ret = self.positions.iter().map(|&x| x).collect::<Vec<_>>();
+        let mut ret = self.positions.iter().copied().collect::<Vec<_>>();
         ret.sort();
         ret
     }
@@ -133,7 +133,7 @@ impl DnaBaseFreqMap {
         let freq_map_for_this_sample = self
             .sample_to_position_to_statistic
             .entry(sample_name.clone())
-            .or_insert_with(HashMap::new);
+            .or_default();
 
         if let Some(Ok(pos)) = record.alignment_start() {
             let pos = pos.get();
@@ -160,7 +160,7 @@ impl DnaBaseFreqMap {
                 let freq_map = self
                     .position_to_statsitic_with_sample
                     .entry(genome_pos)
-                    .or_insert_with(HashMap::new);
+                    .or_default();
 
                 let freq = freq_map
                     .entry(sample_name.clone())
