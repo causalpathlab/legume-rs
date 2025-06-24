@@ -33,7 +33,7 @@ pub fn create_bam_jobs(
     let mut reader: Box<dyn sam::alignment::io::Read<_>> = Box::new(bam::io::Reader::from(
         bgzf::io::MultithreadedReader::with_worker_count(
             num_threads,
-            std::fs::File::open(&bam_file_name)?,
+            std::fs::File::open(bam_file_name)?,
         ),
     ));
 

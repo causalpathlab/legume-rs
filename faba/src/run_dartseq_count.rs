@@ -1,5 +1,3 @@
-use data_beans::sparse_io::create_sparse_from_triplets;
-
 use crate::common::*;
 use crate::data::alignment::SamSampleName;
 use crate::data::dna::Dna;
@@ -49,7 +47,7 @@ pub struct CountDartSeqArgs {
 /// quantify m6A β values
 ///
 pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
-    if args.wt_bam_files.len() < 1 || args.mut_bam_files.len() < 1 {
+    if args.wt_bam_files.is_empty() || args.mut_bam_files.is_empty() {
         return Err(anyhow::anyhow!("need matching pairs of bam files"));
     }
 
@@ -58,11 +56,11 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
     }
 
     for x in args.wt_bam_files.iter() {
-        check_bam_index(&x, None)?;
+        check_bam_index(x, None)?;
     }
 
     for x in args.mut_bam_files.iter() {
-        check_bam_index(&x, None)?;
+        check_bam_index(x, None)?;
     }
 
     let bam_file = args.wt_bam_files[0].as_ref();
@@ -172,22 +170,18 @@ fn find_c2u_site(
     let mut mut_freq_map = DnaBaseFreqMap::new();
 
     for wt_file in args.wt_bam_files.iter() {
-        wt_freq_map.update_bam_region(&wt_file, &region)?;
+        wt_freq_map.update_bam_region(wt_file, &region)?;
     }
 
     for mut_file in args.mut_bam_files.iter() {
-        mut_freq_map.update_bam_region(&mut_file, &region)?;
+        mut_freq_map.update_bam_region(mut_file, &region)?;
     }
 
     // 2. find AC/T patterns: Using mutant statistics as null
     // distribution, it will keep possible C->U edit positions.
     let mut_pos_to_freq = mut_freq_map.marginal_frequency_by_position();
     let positions = wt_freq_map.sorted_positions();
-    let samples: Vec<SamSampleName> = wt_freq_map
-        .samples()
-        .into_iter()
-        .map(|x| x.clone())
-        .collect();
+    let samples: Vec<SamSampleName> = wt_freq_map.samples().into_iter().cloned().collect();
 
     let mut c2u_positions = Vec::with_capacity(positions.len());
 
@@ -276,14 +270,14 @@ fn collect_m6a_variant(
 
     if let Ok(a_stat) = wt_stat_map.frequency_at(&m6apos) {
         let mut a_count = DnaBaseCount::new();
-        for (_, counts) in a_stat {
+        for counts in a_stat.values() {
             a_count += counts;
         }
 
         let major = a_count.most_frequent();
 
         if major.0 == Dna::A && major.1 >= args.min_coverage {
-            let c2u_stat = wt_stat_map.frequency_at(&c2u_pos)?;
+            let c2u_stat = wt_stat_map.frequency_at(c2u_pos)?;
 
             for (s, counts) in c2u_stat {
                 let n_c = counts.get(Some(Dna::C)) as f32;
