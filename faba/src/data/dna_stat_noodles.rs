@@ -176,8 +176,10 @@ impl DnaBaseFreqMap {
                 .or_default()
         };
 
-        if let Some(Ok(pos)) = record.alignment_start() {
-            let pos = pos.get();
+        if let (Some(Ok(start_pos)), Some(Ok(end_pos))) =
+            (record.alignment_start(), record.alignment_end())
+        {
+            let pos = start_pos.get();
 
             let sequence = record.sequence();
             let cigar = record.cigar();
@@ -189,7 +191,7 @@ impl DnaBaseFreqMap {
 
             for op in cigar.iter().filter_map(Result::ok) {
                 match op.kind() {
-                    OpKind::Match => {
+                    OpKind::Match | OpKind::SequenceMatch | OpKind::SequenceMismatch => {
                         for _i in 0..op.len() {
                             if let Some(b) = sequence.get(read_pos) {
                                 let base = Dna::from_byte(b);
@@ -217,21 +219,15 @@ impl DnaBaseFreqMap {
                                     .entry(sample_name.clone())
                                     .or_insert_with(DnaBaseCount::new);
                                 freq.add(base.clone(), 1);
-
-                                read_pos += 1;
-                                genome_pos += 1;
                             }
+                            read_pos += 1;
+                            genome_pos += 1;
                         }
                     }
-
-                    OpKind::SequenceMismatch => {
+                    OpKind::Insertion => {
+                        // if read_pos > 0 {
                         read_pos += op.len();
-                        genome_pos += op.len();
-                    }
-                    OpKind::Insertion | OpKind::SoftClip => {
-                        if read_pos > 0 {
-                            read_pos += op.len();
-                        }
+                        // }
                     }
                     OpKind::Deletion | OpKind::Skip => {
                         // after see some alignment
@@ -243,14 +239,17 @@ impl DnaBaseFreqMap {
                 }
             }
 
+            // let sequence = record.sequence();
+            // let start_pos = start_pos.get();
             // for (i, b) in sequence.iter().enumerate() {
-            //     let genome_pos = i + pos;
+            //     let genome_pos = i + start_pos;
+            //     let base = Dna::from_byte(b);
 
-            //     let base = if is_reverse {
-            //         Dna::from_byte_complement(b)
-            //     } else {
-            //         Dna::from_byte(b)
-            //     };
+            //     // let base = if is_reverse {
+            //     //     Dna::from_byte_complement(b)
+            //     // } else {
+            //     //     Dna::from_byte(b)
+            //     // };
 
             //     if !self.positions.contains(&genome_pos) {
             //         self.positions.insert(genome_pos);

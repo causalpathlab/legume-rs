@@ -12,13 +12,34 @@
 
 
 ```{sh}
+# RUST_LOG=info faba count-dart-seq -w test_data/WT_Soma_Ctrl1_Apc.bam -m test_data/Mettl3KO_Soma_Ctrl1_Apc.bam --min-coverage 1 --min-conversion 1 --pvalue-cutoff 1
+
 cargo install --path .
+RUST_LOG=info faba count-dart-seq -w test_data/WT_Soma_Ctrl2_Apc.bam -m test_data/Mettl3KO_Soma_Ctrl2_Apc.bam --min-coverage 10 --min-conversion 10 --pvalue-cutoff .05
 
-RUST_LOG=info faba count-dart-seq -w test_data/WT_Soma_Ctrl1_Apc.bam -m test_data/Mettl3KO_Soma_Ctrl1_Apc.bam --min-coverage 1 --min-conversion 1 --pvalue-cutoff 1
+region=chr18:34318506-34318509
 
-RUST_LOG=info faba count-dart-seq -w test_data/WT_Soma_Ctrl2_Apc.bam -m test_data/Mettl3KO_Soma_Ctrl2_Apc.bam --min-coverage 1 --min-conversion 1 --pvalue-cutoff .05
+region=chr18:34315903-34315906
 
-RUST_LOG=info faba count-dart-seq -w test_data/WT_Soma_Ctrl1_Apc.bam,test_data/WT_Soma_Ctrl2_Apc.bam -m test_data/Mettl3KO_Soma_Ctrl1_Apc.bam,test_data/Mettl3KO_Soma_Ctrl2_Apc.bam --min-coverage 1 --min-conversion 1 --pvalue-cutoff 1
+region=chr18:34268336-34268339
+
+region=chr18:34314803-34314806
+
+region=chr18:34317497-34317500
+
+region=chr18:34317749-34317752
+
+samtools mpileup test_data/WT_Soma_Ctrl2_Apc.bam -r $region | \
+	awk '{ delete freq; for (i=1; i<=length($5); i++) {char=substr($5,i,1); if (char ~ /[ATGCatgc]/) freq[char]++}; printf $1 FS $2 FS $3 FS $4; for(j in freq) { printf FS j ":" freq[j] } printf "\n"}'
+
+samtools mpileup test_data/Mettl3KO_Soma_Ctrl2_Apc.bam -r $region | \
+	awk '{ delete freq; for (i=1; i<=length($5); i++) {char=substr($5,i,1); if (char ~ /[ATGCatgc]/) freq[char]++}; printf $1 FS $2 FS $3 FS $4; for(j in freq) { printf FS j ":" freq[j] } printf "\n"}'
+
+
+
+
+
+RUST_LOG=info faba count-dart-seq -w test_data/WT_Soma_Ctrl1_Apc.bam,test_data/WT_Soma_Ctrl2_Apc.bam -m test_data/Mettl3KO_Soma_Ctrl1_Apc.bam,test_data/Mettl3KO_Soma_Ctrl2_Apc.bam --min-coverage 10 --min-conversion 10 --pvalue-cutoff 1
 
 # ../target/debug/faba count-dart-seq -w test_data/WT_Soma_Ctrl1_Apc.bam,test_data/WT_Soma_Ctrl2_Apc.bam -m test_data/Mettl3KO_Soma_Ctrl1_Apc.bam,test_data/Mettl3KO_Soma_Ctrl2_Apc.bam
 
