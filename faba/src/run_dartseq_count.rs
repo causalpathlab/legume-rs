@@ -145,7 +145,7 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
 struct ChrM6aC2u {
     chr: Box<str>,
     m6a_pos: usize,
-    c2u_pos: usize,
+    conversion_pos: usize,
     direction: Direction,
 }
 
@@ -186,34 +186,33 @@ fn find_c2u_site(
     // Find forward: "A/G" "A" "C", reverse: "C" "A" "A/G"
     let mut chr_m6a_c2u_positions: Vec<ChrM6aC2u> = Vec::with_capacity(positions.len());
 
-    let c_to_u_binomial_test = |wt_freq: Option<&DnaBaseCount>,
-                                mut_freq: Option<&DnaBaseCount>|
+    let binomial_test = |wt_freq: Option<&DnaBaseCount>,
+                         mut_freq: Option<&DnaBaseCount>,
+                         failure: Dna,
+                         success: Dna|
      -> bool {
         match (wt_freq, mut_freq) {
             (Some(wt_freq), Some(mut_freq)) => {
-                let (wt_n_c, wt_n_t) = (wt_freq.get(Some(Dna::C)), wt_freq.get(Some(Dna::T)));
-                let (mut_n_c, mut_n_t) = (mut_freq.get(Some(Dna::C)), mut_freq.get(Some(Dna::T)));
-                let (ntot, ntot_mut) = (wt_n_c + wt_n_t, mut_n_c + mut_n_t);
+                let (wt_n_failure, wt_n_success) = (
+                    wt_freq.get(Some(failure.clone())),
+                    wt_freq.get(Some(success.clone())),
+                );
+                let (mut_n_failure, mut_n_success) = (
+                    mut_freq.get(Some(failure.clone())),
+                    mut_freq.get(Some(success.clone())),
+                );
+                let (ntot, ntot_mut) = (wt_n_failure + wt_n_success, mut_n_failure + mut_n_success);
 
-                if wt_n_t > args.min_conversion
+                if wt_n_success > args.min_conversion
                     && ntot > args.min_coverage
                     && ntot_mut > args.min_coverage
                 {
                     let pv_greater = BinomTest {
-                        expected: (mut_n_c, mut_n_t),
-                        observed: (wt_n_c, wt_n_t),
+                        expected: (mut_n_failure, mut_n_success),
+                        observed: (wt_n_failure, wt_n_success),
                     }
                     .pvalue_greater()
                     .unwrap_or(1.0);
-
-                    // let pv_less = BinomTest {
-                    //     expected: (mut_n_c, mut_n_t),
-                    //     observed: (wt_n_c, wt_n_t),
-                    // }
-                    // .pvalue_less()
-                    // .unwrap_or(1.0);
-                    // let pv = (pv_greater.min(pv_less) * 2.0).min(1.0);
-
                     return pv_greater < args.pvalue_cutoff;
                 } else {
                     false
@@ -222,6 +221,15 @@ fn find_c2u_site(
             _ => false,
         }
     };
+
+    let c_to_u_binomial_test = |wt_freq: Option<&DnaBaseCount>,
+                                mut_freq: Option<&DnaBaseCount>|
+     -> bool { binomial_test(wt_freq, mut_freq, Dna::C, Dna::T) };
+
+    let complement_binomial_test =
+        |wt_freq: Option<&DnaBaseCount>, mut_freq: Option<&DnaBaseCount>| -> bool {
+            binomial_test(wt_freq, mut_freq, Dna::G, Dna::A)
+        };
 
     // search forward RAC patterns
     let forward_sweep_wt_pos_freq = |wt_pos_to_freq: &HashMap<usize, DnaBaseCount>,
@@ -260,7 +268,7 @@ fn find_c2u_site(
                     ret.push(ChrM6aC2u {
                         chr: chr.into(),
                         m6a_pos: second,
-                        c2u_pos: third,
+                        conversion_pos: third,
                         direction: Direction::Forward,
                     });
                 }
@@ -283,11 +291,11 @@ fn find_c2u_site(
                 continue;
             }
 
-            // !s.is_mono_allelic() || s.most_frequent().0 != Dna::A
-
             if wt_pos_to_freq
                 .get(&second)
-                .map(|s| s.most_frequent().0 != Dna::A)
+                // .map(|s| s.most_frequent().0 != Dna::A)
+                // complement seq
+                .map(|s| s.most_frequent().0 != Dna::T)
                 .unwrap_or(true)
             {
                 continue;
@@ -297,15 +305,18 @@ fn find_c2u_site(
             let third_biallele = wt_pos_to_freq.get(&third).map(|r| r.bi_allelic_stat());
             if third_biallele
                 .map(|ba| {
-                    (ba.a1 == Dna::A && ba.a2 == Dna::G) || (ba.a1 == Dna::G && ba.a2 == Dna::A)
+                    // (ba.a1 == Dna::A && ba.a2 == Dna::G) || (ba.a1 == Dna::G && ba.a2 == Dna::A)
+                    // complement sequence
+                    (ba.a1 == Dna::T && ba.a2 == Dna::C) || (ba.a1 == Dna::C && ba.a2 == Dna::T)
                 })
                 .unwrap_or(false)
             {
-                if c_to_u_binomial_test(wt_pos_to_freq.get(&first), mut_pos_to_freq.get(&first)) {
+                if complement_binomial_test(wt_pos_to_freq.get(&first), mut_pos_to_freq.get(&first))
+                {
                     ret.push(ChrM6aC2u {
                         chr: chr.into(),
                         m6a_pos: second,
-                        c2u_pos: first,
+                        conversion_pos: first,
                         direction: Direction::Backward,
                     });
                 }
@@ -362,7 +373,7 @@ fn collect_m6a_stat(
 ) -> anyhow::Result<Vec<(SamSampleName, Interval<M6aData>)>> {
     let mut stat_map = DnaBaseFreqMap::new();
     let m6apos = chr_m6a_c2u.m6a_pos;
-    let c2upos = chr_m6a_c2u.c2u_pos;
+    let c2upos = chr_m6a_c2u.conversion_pos;
     let chr = chr_m6a_c2u.chr.as_ref();
 
     let lb = m6apos.min(c2upos);
@@ -378,6 +389,16 @@ fn collect_m6a_stat(
     let c2u_stat = match dir {
         Direction::Forward => stat_map.forward_frequency_at(&c2upos),
         Direction::Backward => stat_map.reverse_frequency_at(&c2upos),
+    };
+
+    let unmethylated_base = match dir {
+        Direction::Forward => Dna::C,
+        Direction::Backward => Dna::G,
+    };
+
+    let methylated_base = match dir {
+        Direction::Forward => Dna::T,
+        Direction::Backward => Dna::A,
     };
 
     // let before = match dir {
@@ -408,8 +429,8 @@ fn collect_m6a_stat(
     if let Some(c2u_stat) = c2u_stat {
         for (s, counts) in c2u_stat {
             let meth_data = M6aData {
-                methylated: counts.get(Some(Dna::T)),
-                unmethylated: counts.get(Some(Dna::C)),
+                methylated: counts.get(Some(methylated_base.clone())),
+                unmethylated: counts.get(Some(unmethylated_base.clone())),
             };
 
             ret.push((

@@ -180,48 +180,110 @@ impl DnaBaseFreqMap {
             let pos = pos.get();
 
             let sequence = record.sequence();
+            let cigar = record.cigar();
 
-            for (i, b) in sequence.iter().enumerate() {
-                let genome_pos = i + pos;
+            use sam::alignment::record::cigar::op::Kind as OpKind;
 
-                let base = if is_reverse {
-                    Dna::from_byte_complement(b)
-                } else {
-                    Dna::from_byte(b)
-                };
+            let mut genome_pos = pos;
+            let mut read_pos = 0;
 
-                if !self.positions.contains(&genome_pos) {
-                    self.positions.insert(genome_pos);
+            for op in cigar.iter().filter_map(Result::ok) {
+                match op.kind() {
+                    OpKind::Match => {
+                        for _i in 0..op.len() {
+                            if let Some(b) = sequence.get(read_pos) {
+                                let base = Dna::from_byte(b);
+
+                                if !self.positions.contains(&(genome_pos)) {
+                                    self.positions.insert(genome_pos);
+                                }
+
+                                let freq = freq_map_for_this_sample
+                                    .entry(genome_pos)
+                                    .or_insert_with(DnaBaseCount::new);
+
+                                freq.add(base.clone(), 1);
+
+                                let freq_map = if is_reverse {
+                                    self.position_to_statsitic_with_sample_reverse
+                                        .entry(genome_pos)
+                                        .or_default()
+                                } else {
+                                    self.position_to_statsitic_with_sample_forward
+                                        .entry(genome_pos)
+                                        .or_default()
+                                };
+                                let freq = freq_map
+                                    .entry(sample_name.clone())
+                                    .or_insert_with(DnaBaseCount::new);
+                                freq.add(base.clone(), 1);
+
+                                read_pos += 1;
+                                genome_pos += 1;
+                            }
+                        }
+                    }
+
+                    OpKind::SequenceMismatch => {
+                        read_pos += op.len();
+                        genome_pos += op.len();
+                    }
+                    OpKind::Insertion | OpKind::SoftClip => {
+                        if read_pos > 0 {
+                            read_pos += op.len();
+                        }
+                    }
+                    OpKind::Deletion | OpKind::Skip => {
+                        // after see some alignment
+                        if read_pos > 0 {
+                            genome_pos += op.len();
+                        }
+                    }
+                    _ => {}
                 }
-
-                let freq = freq_map_for_this_sample
-                    .entry(genome_pos)
-                    .or_insert_with(DnaBaseCount::new);
-
-                freq.add(base.clone(), 1);
-
-                // let freq = self
-                //     .position_to_statistic
-                //     .entry(genome_pos)
-                //     .or_insert_with(DnaBaseCount::new);
-                // freq.add(base, 1);
-
-                let freq_map = if is_reverse {
-                    self.position_to_statsitic_with_sample_reverse
-                        .entry(genome_pos)
-                        .or_default()
-                } else {
-                    self.position_to_statsitic_with_sample_forward
-                        .entry(genome_pos)
-                        .or_default()
-                };
-
-                let freq = freq_map
-                    .entry(sample_name.clone())
-                    .or_insert_with(DnaBaseCount::new);
-
-                freq.add(base.clone(), 1);
             }
+
+            // for (i, b) in sequence.iter().enumerate() {
+            //     let genome_pos = i + pos;
+
+            //     let base = if is_reverse {
+            //         Dna::from_byte_complement(b)
+            //     } else {
+            //         Dna::from_byte(b)
+            //     };
+
+            //     if !self.positions.contains(&genome_pos) {
+            //         self.positions.insert(genome_pos);
+            //     }
+
+            //     let freq = freq_map_for_this_sample
+            //         .entry(genome_pos)
+            //         .or_insert_with(DnaBaseCount::new);
+
+            //     freq.add(base.clone(), 1);
+
+            //     // let freq = self
+            //     //     .position_to_statistic
+            //     //     .entry(genome_pos)
+            //     //     .or_insert_with(DnaBaseCount::new);
+            //     // freq.add(base, 1);
+
+            //     let freq_map = if is_reverse {
+            //         self.position_to_statsitic_with_sample_reverse
+            //             .entry(genome_pos)
+            //             .or_default()
+            //     } else {
+            //         self.position_to_statsitic_with_sample_forward
+            //             .entry(genome_pos)
+            //             .or_default()
+            //     };
+
+            //     let freq = freq_map
+            //         .entry(sample_name.clone())
+            //         .or_insert_with(DnaBaseCount::new);
+
+            //     freq.add(base.clone(), 1);
+            // }
         }
 
         Ok(())
