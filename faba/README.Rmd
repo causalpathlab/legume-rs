@@ -4,7 +4,7 @@
 ```{sh}
 cargo install --path .
 
-RUST_LOG=info faba count-dart-seq -w test_data/WT_Soma_Ctrl1_Apc.bam,test_data/WT_Soma_Ctrl2_Apc.bam -m test_data/Mettl3KO_Soma_Ctrl1_Apc.bam,test_data/Mettl3KO_Soma_Ctrl2_Apc.bam --min-conversion 10 --min-coverage 10
+RUST_LOG=info faba count-dart-seq -w test_data/WT_Soma_Ctrl1_Apc.bam,test_data/WT_Soma_Ctrl2_Apc.bam -m test_data/Mettl3KO_Soma_Ctrl1_Apc.bam,test_data/Mettl3KO_Soma_Ctrl2_Apc.bam --min-coverage 1 --min-conversion 1 --pvalue-cutoff 1
 
 # ../target/debug/faba count-dart-seq -w test_data/WT_Soma_Ctrl1_Apc.bam,test_data/WT_Soma_Ctrl2_Apc.bam -m test_data/Mettl3KO_Soma_Ctrl1_Apc.bam,test_data/Mettl3KO_Soma_Ctrl2_Apc.bam
 

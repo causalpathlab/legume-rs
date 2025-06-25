@@ -18,6 +18,14 @@ impl Dna {
             _ => None, // Handle invalid bases
         }
     }
+    pub fn from_byte_complement(b: u8) -> Option<Dna> {
+        Dna::from_byte(b).map(|b| match b {
+            Dna::A => Dna::T,
+            Dna::C => Dna::G,
+            Dna::G => Dna::C,
+            Dna::T => Dna::A,
+        })
+    }
 }
 
 pub struct BiAllele {
@@ -79,16 +87,22 @@ impl DnaBaseCount {
     pub fn most_frequent(&self) -> &(Dna, usize) {
         self.data
             .iter()
-            .max_by(|x, y| x.1.partial_cmp(&y.1).unwrap())
+            .max_by(|&x, &y| x.1.partial_cmp(&y.1).unwrap())
             .unwrap()
+    }
+
+    pub fn is_mono_allelic(&self) -> bool {
+        let mfa = self.most_frequent();
+        let tot = self.data.iter().map(|&(_, x)| x).sum::<usize>();
+        tot == mfa.1
     }
 
     pub fn second_most_frequent(&self) -> &(Dna, usize) {
         let mfa = self.most_frequent();
         self.data
             .iter()
-            .filter(|s| s.0 != mfa.0)
-            .max_by(|x, y| x.1.partial_cmp(&y.1).unwrap())
+            .filter(|&s| s.0 != mfa.0)
+            .max_by(|&x, &y| x.1.partial_cmp(&y.1).unwrap())
             .unwrap()
     }
 
@@ -97,8 +111,8 @@ impl DnaBaseCount {
         let snd = self
             .data
             .iter()
-            .filter(|s| s.0 != fst.0)
-            .max_by(|x, y| x.1.partial_cmp(&y.1).unwrap())
+            .filter(|&s| s.0 != fst.0)
+            .max_by(|&x, &y| x.1.partial_cmp(&y.1).unwrap())
             .unwrap();
 
         BiAllele {
