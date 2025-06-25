@@ -15,8 +15,10 @@ pub const CELL_BARCODE_TAG: SamTag = SamTag::new(b'C', b'B');
 pub const UMI_BARCODE_TAG: SamTag = SamTag::new(b'U', b'B');
 
 pub struct DnaBaseFreqMap {
-    position_to_statsitic_with_sample: HashMap<usize, HashMap<SamSampleName, DnaBaseCount>>,
-    sample_to_position_to_statistic: HashMap<SamSampleName, HashMap<usize, DnaBaseCount>>,
+    position_to_statsitic_with_sample_forward: HashMap<usize, HashMap<SamSampleName, DnaBaseCount>>,
+    sample_to_position_to_statistic_forward: HashMap<SamSampleName, HashMap<usize, DnaBaseCount>>,
+    position_to_statsitic_with_sample_reverse: HashMap<usize, HashMap<SamSampleName, DnaBaseCount>>,
+    sample_to_position_to_statistic_reverse: HashMap<SamSampleName, HashMap<usize, DnaBaseCount>>,
     samples: HashSet<SamSampleName>,
     positions: HashSet<usize>,
 }
@@ -24,8 +26,10 @@ pub struct DnaBaseFreqMap {
 impl DnaBaseFreqMap {
     pub fn new() -> Self {
         Self {
-            position_to_statsitic_with_sample: HashMap::new(),
-            sample_to_position_to_statistic: HashMap::new(),
+            position_to_statsitic_with_sample_forward: HashMap::new(),
+            sample_to_position_to_statistic_forward: HashMap::new(),
+            position_to_statsitic_with_sample_reverse: HashMap::new(),
+            sample_to_position_to_statistic_reverse: HashMap::new(),
             samples: HashSet::new(),
             positions: HashSet::new(),
         }
@@ -57,21 +61,39 @@ impl DnaBaseFreqMap {
         Ok(())
     }
 
-    pub fn frequency_per_sample(
+    pub fn forward_frequency_per_sample(
         &self,
         k: &SamSampleName,
-    ) -> anyhow::Result<&HashMap<usize, DnaBaseCount>> {
-        self.sample_to_position_to_statistic
-            .get(k)
-            .ok_or(anyhow::anyhow!("unable to find this sample: '{}'", k))
+    ) -> Option<&HashMap<usize, DnaBaseCount>> {
+        self.sample_to_position_to_statistic_forward.get(k)
+    }
+
+    pub fn reverse_frequency_per_sample(
+        &self,
+        k: &SamSampleName,
+    ) -> Option<&HashMap<usize, DnaBaseCount>> {
+        self.sample_to_position_to_statistic_reverse.get(k)
     }
 
     /// Statistics combined by position
-    pub fn marginal_frequency_by_position(&self) -> HashMap<usize, DnaBaseCount> {
+    pub fn forward_marginal_frequency_by_position(&self) -> HashMap<usize, DnaBaseCount> {
         let mut ret: HashMap<usize, DnaBaseCount> =
-            HashMap::with_capacity(self.position_to_statsitic_with_sample.len());
+            HashMap::with_capacity(self.position_to_statsitic_with_sample_forward.len());
 
-        for (pos, freq_map) in self.position_to_statsitic_with_sample.iter() {
+        for (pos, freq_map) in self.position_to_statsitic_with_sample_forward.iter() {
+            let accum = ret.entry(*pos).or_insert_with(DnaBaseCount::new);
+            for (_, freq) in freq_map.iter() {
+                *accum += freq;
+            }
+        }
+        ret
+    }
+
+    pub fn reverse_marginal_frequency_by_position(&self) -> HashMap<usize, DnaBaseCount> {
+        let mut ret: HashMap<usize, DnaBaseCount> =
+            HashMap::with_capacity(self.position_to_statsitic_with_sample_reverse.len());
+
+        for (pos, freq_map) in self.position_to_statsitic_with_sample_reverse.iter() {
             let accum = ret.entry(*pos).or_insert_with(DnaBaseCount::new);
             for (_, freq) in freq_map.iter() {
                 *accum += freq;
@@ -84,6 +106,7 @@ impl DnaBaseFreqMap {
     pub fn sorted_positions(&self) -> Vec<usize> {
         let mut ret = self.positions.iter().copied().collect::<Vec<_>>();
         ret.sort();
+        ret.dedup();
         ret
     }
 
@@ -91,13 +114,18 @@ impl DnaBaseFreqMap {
         self.samples.iter().collect()
     }
 
-    pub fn frequency_at(
+    pub fn forward_frequency_at(
         &self,
         pos: &usize,
-    ) -> anyhow::Result<&HashMap<SamSampleName, DnaBaseCount>> {
-        self.position_to_statsitic_with_sample
-            .get(pos)
-            .ok_or(anyhow::anyhow!("missing"))
+    ) -> Option<&HashMap<SamSampleName, DnaBaseCount>> {
+        self.position_to_statsitic_with_sample_forward.get(pos)
+    }
+
+    pub fn reverse_frequency_at(
+        &self,
+        pos: &usize,
+    ) -> Option<&HashMap<SamSampleName, DnaBaseCount>> {
+        self.position_to_statsitic_with_sample_reverse.get(pos)
     }
 
     // pub fn umis(&self) -> Vec<&SamUmiName> {
@@ -130,16 +158,37 @@ impl DnaBaseFreqMap {
         //     self.umis.insert(umi_name.clone());
         // }
 
-        let freq_map_for_this_sample = self
-            .sample_to_position_to_statistic
-            .entry(sample_name.clone())
-            .or_default();
+        let flags = record.flags()?;
+
+        if flags.is_duplicate() || flags.is_unmapped() || flags.is_qc_fail() {
+            return Ok(());
+        }
+
+        let is_reverse = flags.is_reverse_complemented();
+
+        let freq_map_for_this_sample = if is_reverse {
+            self.sample_to_position_to_statistic_reverse
+                .entry(sample_name.clone())
+                .or_default()
+        } else {
+            self.sample_to_position_to_statistic_forward
+                .entry(sample_name.clone())
+                .or_default()
+        };
 
         if let Some(Ok(pos)) = record.alignment_start() {
             let pos = pos.get();
+
             let sequence = record.sequence();
+
             for (i, b) in sequence.iter().enumerate() {
                 let genome_pos = i + pos;
+
+                let base = if is_reverse {
+                    Dna::from_byte_complement(b)
+                } else {
+                    Dna::from_byte(b)
+                };
 
                 if !self.positions.contains(&genome_pos) {
                     self.positions.insert(genome_pos);
@@ -149,24 +198,29 @@ impl DnaBaseFreqMap {
                     .entry(genome_pos)
                     .or_insert_with(DnaBaseCount::new);
 
-                freq.add(Dna::from_byte(b), 1);
+                freq.add(base.clone(), 1);
 
                 // let freq = self
                 //     .position_to_statistic
                 //     .entry(genome_pos)
                 //     .or_insert_with(DnaBaseCount::new);
-                // freq.add(Dna::from_byte(b), 1);
+                // freq.add(base, 1);
 
-                let freq_map = self
-                    .position_to_statsitic_with_sample
-                    .entry(genome_pos)
-                    .or_default();
+                let freq_map = if is_reverse {
+                    self.position_to_statsitic_with_sample_reverse
+                        .entry(genome_pos)
+                        .or_default()
+                } else {
+                    self.position_to_statsitic_with_sample_forward
+                        .entry(genome_pos)
+                        .or_default()
+                };
 
                 let freq = freq_map
                     .entry(sample_name.clone())
                     .or_insert_with(DnaBaseCount::new);
 
-                freq.add(Dna::from_byte(b), 1);
+                freq.add(base.clone(), 1);
             }
         }
 

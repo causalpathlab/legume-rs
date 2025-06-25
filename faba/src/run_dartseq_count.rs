@@ -6,6 +6,8 @@ use crate::data::dna_stat::*;
 use crate::data::util::*;
 use crate::hypothesis_tests::BinomTest;
 
+use coitrees::Interval;
+use coitrees::IntervalTree;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Args, Debug)]
@@ -64,7 +66,8 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
     }
 
     let bam_file = args.wt_bam_files[0].as_ref();
-    let jobs = create_bam_jobs(bam_file, Some(args.block_size))?;
+    // we add +/- 2bp to capture RAC patterns in the left and right boundaries
+    let jobs = create_bam_jobs(bam_file, Some(args.block_size), Some(2))?;
 
     ////////////////////////////////////////
     // 1. figure out potential edit sites //
@@ -76,93 +79,88 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
         .map(|(chr, lb, ub)| -> anyhow::Result<_> { find_c2u_site(args, chr.as_ref(), lb, ub) })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let mut c2u_sites = Vec::with_capacity(c2u_sites_samples.len());
+    let mut c2u_stratified_by_chr: HashMap<Box<str>, Vec<ChrM6aC2u>> = HashMap::new();
     let mut samples = HashSet::new();
 
     for (c2u, sam) in c2u_sites_samples {
-        c2u_sites.extend(c2u);
+        for x in c2u {
+            let sites = c2u_stratified_by_chr.entry(x.chr.clone()).or_default();
+            sites.push(x);
+        }
         samples.extend(sam.into_iter());
     }
-
-    // mapping sample name -> index
-    let sample_index = samples
-        .iter()
-        .enumerate()
-        .map(|(i, x)| (x, i))
-        .collect::<HashMap<_, _>>();
-
-    info!("Found {} samples", sample_index.len());
-
-    c2u_sites.dedup();
-    c2u_sites.par_sort();
-
-    info!("Found {} C->U sites", c2u_sites.len());
 
     ///////////////////////////////////
     // 2. collect all the statistics //
     ///////////////////////////////////
 
-    let mut bed_data = c2u_sites
-        .par_iter()
-        .map(|(chr, c2u_pos)| -> anyhow::Result<Vec<_>> { collect_m6a_variant(args, chr, c2u_pos) })
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let mut sample_chr_to_coitree: HashMap<(SamSampleName, Box<str>), coitrees::COITree<_, usize>> =
+        HashMap::new();
 
-    ///////////////////////////////////////////////////////////
-    // 3. Sort BED and rename/index genomic features&samples //
-    ///////////////////////////////////////////////////////////
-
-    info!("sorting {} edit statistics...", &bed_data.len());
-    fn compare_chr_pos(a: &(&str, usize), b: &(&str, usize)) -> std::cmp::Ordering {
-        let chr_cmp = a.0.cmp(b.0);
-        if chr_cmp == std::cmp::Ordering::Equal {
-            a.1.cmp(&b.1)
-        } else {
-            chr_cmp
-        }
-    }
-    if bed_data.len() > 100_000 {
-        bed_data.par_sort_by(|a, b| compare_chr_pos(&(a.0.as_ref(), a.1), &(b.0.as_ref(), b.1)));
-    } else {
-        bed_data.sort_by(|a, b| compare_chr_pos(&(a.0.as_ref(), a.1), &(b.0.as_ref(), b.1)));
-    }
-
-    let edit_sites = c2u_sites
-        .iter()
-        .map(|(chr, pos)| (chr.clone(), *pos - 1))
-        .collect::<Vec<_>>();
-
-    let edit_site_index = edit_sites
-        .iter()
-        .enumerate()
-        .map(|(i, chr_pos)| (chr_pos.clone(), i))
-        .collect::<HashMap<_, _>>();
-
-    if let Some(resolution) = args.resolution {
-        info!("reducing bp resolution");
-        for (chr, pos) in edit_sites {
-            let k = pos.div_ceil(resolution);
+    for (_, c2u_vec) in c2u_stratified_by_chr.iter() {
+        for x in c2u_vec {
+            println!("{:?}", x);
         }
     }
 
-    // bed_data.into_iter().map()
+    for (chr, c2u_vec) in c2u_stratified_by_chr {
+        let sample_intervals = c2u_vec
+            .iter()
+            .map(|x| collect_m6a_stat(args, x))
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
 
-    // tood: write out
+        let mut sample_to_intervals: HashMap<SamSampleName, Vec<Interval<_>>> = HashMap::new();
+
+        for (s, interv) in sample_intervals {
+            sample_to_intervals.entry(s).or_default().push(interv);
+        }
+
+        for (s, interv) in sample_to_intervals {
+            let tree: coitrees::COITree<_, usize> = coitrees::COITree::new(&interv);
+            let k = (s, chr.clone());
+            sample_chr_to_coitree.entry(k).or_insert(tree);
+        }
+    }
+
+    /////////////////////////////////////
+    // 3. Aggregate them into triplets //
+    /////////////////////////////////////
+
+    for ((s, chr), tree) in sample_chr_to_coitree.iter() {
+        for x in tree.into_iter() {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                chr, x.first, x.last, s, x.metadata.methylated, x.metadata.unmethylated
+            );
+        }
+    }
 
     Ok(())
 }
 
-//////////////////////////////////////////////////////////////////////
-// Step 1: Find variable C2U sites searching over all the BAM files //
-//////////////////////////////////////////////////////////////////////
+#[derive(PartialEq, Eq, PartialOrd, Ord, std::fmt::Debug)]
+struct ChrM6aC2u {
+    chr: Box<str>,
+    m6a_pos: usize,
+    c2u_pos: usize,
+    direction: Direction,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, std::fmt::Debug)]
+enum Direction {
+    Forward,
+    Backward,
+}
+
 fn find_c2u_site(
     args: &CountDartSeqArgs,
     chr: &str,
     lb: &usize,
     ub: &usize,
-) -> anyhow::Result<(Vec<(Box<str>, usize)>, Vec<SamSampleName>)> {
+) -> anyhow::Result<(Vec<ChrM6aC2u>, Vec<SamSampleName>)> {
     let region = format!("{}:{}-{}", chr, (*lb).max(1), *ub).into_boxed_str();
 
     // 1. sweep each pair bam files to find variable sites
@@ -177,118 +175,251 @@ fn find_c2u_site(
         mut_freq_map.update_bam_region(mut_file, &region)?;
     }
 
+    let positions = wt_freq_map.sorted_positions();
+
+    if positions.len() < 3 {
+        return Ok((vec![], vec![]));
+    }
+
     // 2. find AC/T patterns: Using mutant statistics as null
     // distribution, it will keep possible C->U edit positions.
-    let mut_pos_to_freq = mut_freq_map.marginal_frequency_by_position();
-    let positions = wt_freq_map.sorted_positions();
+    // Find forward: "A/G" "A" "C", reverse: "C" "A" "A/G"
+    let mut chr_m6a_c2u_positions: Vec<ChrM6aC2u> = Vec::with_capacity(positions.len());
+
+    let c_to_u_binomial_test = |wt_freq: Option<&DnaBaseCount>,
+                                mut_freq: Option<&DnaBaseCount>|
+     -> bool {
+        match (wt_freq, mut_freq) {
+            (Some(wt_freq), Some(mut_freq)) => {
+                let (wt_n_c, wt_n_t) = (wt_freq.get(Some(Dna::C)), wt_freq.get(Some(Dna::T)));
+                let (mut_n_c, mut_n_t) = (mut_freq.get(Some(Dna::C)), mut_freq.get(Some(Dna::T)));
+                let (ntot, ntot_mut) = (wt_n_c + wt_n_t, mut_n_c + mut_n_t);
+
+                if wt_n_t > args.min_conversion
+                    && ntot > args.min_coverage
+                    && ntot_mut > args.min_coverage
+                {
+                    let pv_greater = BinomTest {
+                        expected: (mut_n_c, mut_n_t),
+                        observed: (wt_n_c, wt_n_t),
+                    }
+                    .pvalue_greater()
+                    .unwrap_or(1.0);
+
+                    // let pv_less = BinomTest {
+                    //     expected: (mut_n_c, mut_n_t),
+                    //     observed: (wt_n_c, wt_n_t),
+                    // }
+                    // .pvalue_less()
+                    // .unwrap_or(1.0);
+                    // let pv = (pv_greater.min(pv_less) * 2.0).min(1.0);
+
+                    return pv_greater < args.pvalue_cutoff;
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    };
+
+    // search forward RAC patterns
+    let forward_sweep_wt_pos_freq = |wt_pos_to_freq: &HashMap<usize, DnaBaseCount>,
+                                     mut_pos_to_freq: &HashMap<usize, DnaBaseCount>|
+     -> Vec<ChrM6aC2u> {
+        let mut ret = vec![];
+        for j in 2..positions.len() {
+            let first = positions[j - 2];
+            let second = positions[j - 1];
+            let third = positions[j];
+
+            if third - first != 2 {
+                continue;
+            }
+
+            // !s.is_mono_allelic() || s.most_frequent().0 != Dna::A
+
+            if wt_pos_to_freq
+                .get(&second)
+                .map(|s| s.most_frequent().0 != Dna::A)
+                .unwrap_or(true)
+            {
+                continue;
+            }
+
+            // R = A/G
+            let first_biallele = wt_pos_to_freq.get(&first).map(|r| r.bi_allelic_stat());
+
+            if first_biallele
+                .map(|ba| {
+                    (ba.a1 == Dna::A && ba.a2 == Dna::G) || (ba.a1 == Dna::G && ba.a2 == Dna::A)
+                })
+                .unwrap_or(false)
+            {
+                if c_to_u_binomial_test(wt_pos_to_freq.get(&third), mut_pos_to_freq.get(&third)) {
+                    ret.push(ChrM6aC2u {
+                        chr: chr.into(),
+                        m6a_pos: second,
+                        c2u_pos: third,
+                        direction: Direction::Forward,
+                    });
+                }
+            }
+        }
+        ret
+    };
+
+    // search reverse CAR patterns
+    let reverse_sweep_wt_pos_freq = |wt_pos_to_freq: &HashMap<usize, DnaBaseCount>,
+                                     mut_pos_to_freq: &HashMap<usize, DnaBaseCount>|
+     -> Vec<ChrM6aC2u> {
+        let mut ret = vec![];
+        for j in 0..(positions.len() - 2) {
+            let first = positions[j];
+            let second = positions[j + 1];
+            let third = positions[j + 2];
+
+            if third - first != 2 {
+                continue;
+            }
+
+            // !s.is_mono_allelic() || s.most_frequent().0 != Dna::A
+
+            if wt_pos_to_freq
+                .get(&second)
+                .map(|s| s.most_frequent().0 != Dna::A)
+                .unwrap_or(true)
+            {
+                continue;
+            }
+
+            // R = A/G
+            let third_biallele = wt_pos_to_freq.get(&third).map(|r| r.bi_allelic_stat());
+            if third_biallele
+                .map(|ba| {
+                    (ba.a1 == Dna::A && ba.a2 == Dna::G) || (ba.a1 == Dna::G && ba.a2 == Dna::A)
+                })
+                .unwrap_or(false)
+            {
+                if c_to_u_binomial_test(wt_pos_to_freq.get(&first), mut_pos_to_freq.get(&first)) {
+                    ret.push(ChrM6aC2u {
+                        chr: chr.into(),
+                        m6a_pos: second,
+                        c2u_pos: first,
+                        direction: Direction::Backward,
+                    });
+                }
+            }
+        }
+        ret
+    };
+
     let samples: Vec<SamSampleName> = wt_freq_map.samples().into_iter().cloned().collect();
 
-    let mut c2u_positions = Vec::with_capacity(positions.len());
-
     for s in samples.iter() {
-        let wt_pos_to_freq = wt_freq_map.frequency_per_sample(s)?;
+        if let (Some(_wt), Some(_mut)) = (
+            wt_freq_map.forward_frequency_per_sample(s),
+            mut_freq_map.forward_frequency_per_sample(s),
+        ) {
+            chr_m6a_c2u_positions.extend(forward_sweep_wt_pos_freq(_wt, _mut));
+        }
 
-        if positions.len() > 2 {
-            // first position
-            let mut prev = positions[0];
-            let mut prev_n_a = wt_pos_to_freq[&prev].get(Some(Dna::A));
-
-            // following positions: A followed by C or T
-            for curr in positions[1..].iter() {
-                if let (Some(wt_freq), Some(mut_freq)) =
-                    (wt_pos_to_freq.get(curr), mut_pos_to_freq.get(curr))
-                {
-                    if *curr == (prev + 1) && prev_n_a > 0 {
-                        let wt_n_c = wt_freq.get(Some(Dna::C));
-                        let wt_n_t = wt_freq.get(Some(Dna::T));
-                        let mut_n_c = mut_freq.get(Some(Dna::C));
-                        let mut_n_t = mut_freq.get(Some(Dna::T));
-
-                        let ntot = wt_n_c + wt_n_t;
-                        let ntot_mut = mut_n_c + mut_n_t;
-
-                        if wt_n_t > args.min_conversion
-                            && ntot > args.min_coverage
-                            && ntot_mut > args.min_coverage
-                        {
-                            let pv = BinomTest {
-                                expected: (mut_n_c, mut_n_t),
-                                observed: (wt_n_c, wt_n_t),
-                            }
-                            .pvalue_greater()?;
-                            if pv < args.pvalue_cutoff {
-                                c2u_positions.push(*curr);
-                            }
-                        }
-                    }
-                };
-                // - keeping track of the previous #A
-                // - we will only consider when A is the most frequent
-                prev_n_a = wt_pos_to_freq
-                    .get(curr)
-                    .and_then(|x| {
-                        let major = x.most_frequent();
-                        (major.0 == Dna::A).then_some(major.1)
-                    })
-                    .unwrap_or(0);
-
-                prev = *curr;
-            }
+        if let (Some(_wt), Some(_mut)) = (
+            wt_freq_map.reverse_frequency_per_sample(s),
+            mut_freq_map.reverse_frequency_per_sample(s),
+        ) {
+            chr_m6a_c2u_positions.extend(reverse_sweep_wt_pos_freq(_wt, _mut));
         }
     }
 
-    let chr_c2u_positions: Vec<(Box<str>, usize)> =
-        c2u_positions.into_iter().map(|x| (chr.into(), x)).collect();
+    let wt_pos_to_freq = wt_freq_map.forward_marginal_frequency_by_position();
+    let mut_pos_to_freq = mut_freq_map.forward_marginal_frequency_by_position();
+    chr_m6a_c2u_positions.extend(forward_sweep_wt_pos_freq(&wt_pos_to_freq, &mut_pos_to_freq));
 
-    Ok((chr_c2u_positions, samples))
+    let wt_pos_to_freq = wt_freq_map.reverse_marginal_frequency_by_position();
+    let mut_pos_to_freq = mut_freq_map.reverse_marginal_frequency_by_position();
+    chr_m6a_c2u_positions.extend(reverse_sweep_wt_pos_freq(&wt_pos_to_freq, &mut_pos_to_freq));
+
+    chr_m6a_c2u_positions.sort();
+    chr_m6a_c2u_positions.dedup();
+
+    Ok((chr_m6a_c2u_positions, samples))
 }
 
 ///////////////////////////////////////////////////////////////////
 // Step 2: revisit possible C2U positions and collect m6A sites, //
 // locations and samples.                                        //
 ///////////////////////////////////////////////////////////////////
-fn collect_m6a_variant(
+#[derive(Clone, Copy, Default)]
+struct M6aData {
+    methylated: usize,
+    unmethylated: usize,
+}
+
+fn collect_m6a_stat(
     args: &CountDartSeqArgs,
-    chr: &str,
-    c2u_pos: &usize,
-) -> anyhow::Result<Vec<(Box<str>, usize, SamSampleName, f32, f32)>> {
-    let mut wt_stat_map = DnaBaseFreqMap::new();
-    let c2upos = *c2u_pos;
-    let m6apos = (c2upos - 1).max(1);
+    chr_m6a_c2u: &ChrM6aC2u,
+) -> anyhow::Result<Vec<(SamSampleName, Interval<M6aData>)>> {
+    let mut stat_map = DnaBaseFreqMap::new();
+    let m6apos = chr_m6a_c2u.m6a_pos;
+    let c2upos = chr_m6a_c2u.c2u_pos;
+    let chr = chr_m6a_c2u.chr.as_ref();
 
-    // let row_index = edit_site_index
-    //     .get(&(chr.clone(), m6apos))
-    //     .ok_or(anyhow::anyhow!("edit site not found"))?;
+    let lb = m6apos.min(c2upos);
+    let ub = c2upos.max(m6apos);
+    let region = format!("{}:{}-{}", chr, lb, ub).into_boxed_str();
 
-    let region = format!("{}:{}-{}", chr, m6apos, c2upos).into_boxed_str();
-
-    for wt_file in args.wt_bam_files.iter() {
-        wt_stat_map.update_bam_region(wt_file.as_ref(), &region)?;
+    for _file in args.wt_bam_files.iter() {
+        stat_map.update_bam_region(_file.as_ref(), &region)?;
     }
+
+    let dir = &chr_m6a_c2u.direction;
+
+    let c2u_stat = match dir {
+        Direction::Forward => stat_map.forward_frequency_at(&c2upos),
+        Direction::Backward => stat_map.reverse_frequency_at(&c2upos),
+    };
+
+    // let before = match dir {
+    //     Direction::Forward => stat_map.forward_frequency_at(&(m6apos - 1)),
+    //     Direction::Backward => stat_map.reverse_frequency_at(&(m6apos + 1)),
+    // }
+    // .unwrap();
+
+    // let after = match dir {
+    //     Direction::Forward => stat_map.forward_frequency_at(&(m6apos + 1)),
+    //     Direction::Backward => stat_map.reverse_frequency_at(&(m6apos - 1)),
+    // }
+    // .unwrap();
+
+    // for (_, x) in before {
+    //     println!("before: {:?}", x);
+    // }
+
+    // for (_, x) in after {
+    //     println!("after: {:?}", x);
+    // }
+
+    // todo: we can reduce resolution
+    // args.resolution;
 
     let mut ret = vec![];
 
-    if let Ok(a_stat) = wt_stat_map.frequency_at(&m6apos) {
-        let mut a_count = DnaBaseCount::new();
-        for counts in a_stat.values() {
-            a_count += counts;
-        }
+    if let Some(c2u_stat) = c2u_stat {
+        for (s, counts) in c2u_stat {
+            let meth_data = M6aData {
+                methylated: counts.get(Some(Dna::T)),
+                unmethylated: counts.get(Some(Dna::C)),
+            };
 
-        let major = a_count.most_frequent();
-
-        if major.0 == Dna::A && major.1 >= args.min_coverage {
-            let c2u_stat = wt_stat_map.frequency_at(c2u_pos)?;
-
-            for (s, counts) in c2u_stat {
-                let n_c = counts.get(Some(Dna::C)) as f32;
-                let n_t = counts.get(Some(Dna::T)) as f32;
-
-                // let col_index = sample_index
-                //     .get(s)
-                //     .ok_or(anyhow::anyhow!("sample name not found"))?;
-
-                ret.push((chr.into(), m6apos, s.clone(), n_c, n_t));
-            }
+            ret.push((
+                s.clone(),
+                Interval {
+                    first: lb as i32,
+                    last: ub as i32,
+                    metadata: meth_data,
+                },
+            ));
         }
     }
 

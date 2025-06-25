@@ -47,3 +47,4 @@ noodles-core = "0.17.0"
 bio = "2.3.0"
 statrs = "0.18.0"
 num-traits.workspace = true
+coitrees = "0.4.0"

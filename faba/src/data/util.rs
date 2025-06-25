@@ -1,4 +1,4 @@
-const DEFAULT_BLOCK_SIZE: usize = 10_000;
+const DEFAULT_BLOCK_SIZE: usize = 100_000;
 
 use noodles::{bam, bgzf, sam};
 
@@ -23,10 +23,12 @@ pub fn check_bam_index(bam_file_name: &str, idx_file_name: Option<&str>) -> anyh
 ///
 /// * `bam_file_name` - BAM file name
 /// * `block_size` - each job's size
+/// * `overlap` - overlap to the left and right
 ///
 pub fn create_bam_jobs(
     bam_file_name: &str,
     block_size: Option<usize>,
+    overlap: Option<usize>,
 ) -> anyhow::Result<Vec<(Box<str>, usize, usize)>> {
     let num_threads = std::thread::available_parallelism()?;
 
@@ -38,6 +40,7 @@ pub fn create_bam_jobs(
     ));
 
     let block_size = block_size.unwrap_or(DEFAULT_BLOCK_SIZE);
+    let overlap = overlap.unwrap_or(0);
 
     let header = reader.read_alignment_header()?;
     let mut ret = Vec::with_capacity(header.reference_sequences().len());
@@ -48,8 +51,14 @@ pub fn create_bam_jobs(
 
         let jobs = (0..nblock)
             .map(|block| {
-                let lb = block * block_size;
-                let ub = ((block + 1) * block_size).min(max_size);
+                let lb = if block * block_size > overlap {
+                    block * block_size - overlap
+                } else {
+                    block * block_size
+                };
+
+                let ub = ((block + 1) * block_size + overlap).min(max_size);
+
                 (name.to_string().into(), lb, ub)
             })
             .collect::<Vec<_>>();
