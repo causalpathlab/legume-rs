@@ -2,8 +2,8 @@ use crate::common::*;
 use crate::data::alignment::SamSampleName;
 use crate::data::dna::Dna;
 use crate::data::dna::DnaBaseCount;
-use crate::data::dna_stat::*;
-use crate::data::util::*;
+use crate::data::dna_stat_htslib::*;
+use crate::data::util_htslib::*;
 use crate::hypothesis_tests::BinomTest;
 
 use coitrees::Interval;
@@ -73,9 +73,11 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
     // 1. figure out potential edit sites //
     ////////////////////////////////////////
 
+    let njobs = jobs.len();
     let c2u_sites_samples = jobs
-        .par_iter()
-        .progress_count(jobs.len() as u64)
+        .into_iter()
+        .par_bridge()
+        .progress_count(njobs as u64)
         .map(|(chr, lb, ub)| -> anyhow::Result<_> { find_c2u_site(args, chr.as_ref(), lb, ub) })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
@@ -96,12 +98,6 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
 
     let mut sample_chr_to_coitree: HashMap<(SamSampleName, Box<str>), coitrees::COITree<_, usize>> =
         HashMap::new();
-
-    for (_, c2u_vec) in c2u_stratified_by_chr.iter() {
-        for x in c2u_vec {
-            println!("{:?}", x);
-        }
-    }
 
     for (chr, c2u_vec) in c2u_stratified_by_chr {
         let sample_intervals = c2u_vec
@@ -144,8 +140,8 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
 #[derive(PartialEq, Eq, PartialOrd, Ord, std::fmt::Debug)]
 struct ChrM6aC2u {
     chr: Box<str>,
-    m6a_pos: usize,
-    conversion_pos: usize,
+    m6a_pos: i64,
+    conversion_pos: i64,
     direction: Direction,
 }
 
@@ -158,28 +154,22 @@ enum Direction {
 fn find_c2u_site(
     args: &CountDartSeqArgs,
     chr: &str,
-    lb: &usize,
-    ub: &usize,
+    lb: i64,
+    ub: i64,
 ) -> anyhow::Result<(Vec<ChrM6aC2u>, Vec<SamSampleName>)> {
-    let region = format!("{}:{}-{}", chr, (*lb).max(1), *ub).into_boxed_str();
-
     // 1. sweep each pair bam files to find variable sites
     let mut wt_freq_map = DnaBaseFreqMap::new();
     let mut mut_freq_map = DnaBaseFreqMap::new();
 
     for wt_file in args.wt_bam_files.iter() {
-        wt_freq_map.update_bam_region(wt_file, &region)?;
+        wt_freq_map.update_bam_region(wt_file, (chr, lb, ub))?;
     }
 
     for mut_file in args.mut_bam_files.iter() {
-        mut_freq_map.update_bam_region(mut_file, &region)?;
+        mut_freq_map.update_bam_region(mut_file, (chr, lb, ub))?;
     }
 
     let positions = wt_freq_map.sorted_positions();
-
-    if positions.len() < 3 {
-        return Ok((vec![], vec![]));
-    }
 
     // 2. find AC/T patterns: Using mutant statistics as null
     // distribution, it will keep possible C->U edit positions.
@@ -203,9 +193,9 @@ fn find_c2u_site(
                 );
                 let (ntot, ntot_mut) = (wt_n_failure + wt_n_success, mut_n_failure + mut_n_success);
 
-                if wt_n_success > args.min_conversion
-                    && ntot > args.min_coverage
-                    && ntot_mut > args.min_coverage
+                if ntot >= args.min_coverage
+                    && ntot_mut >= args.min_coverage
+                    && wt_n_success >= args.min_conversion
                 {
                     let pv_greater = BinomTest {
                         expected: (mut_n_failure, mut_n_success),
@@ -232,8 +222,8 @@ fn find_c2u_site(
         };
 
     // search forward RAC patterns
-    let forward_sweep_wt_pos_freq = |wt_pos_to_freq: &HashMap<usize, DnaBaseCount>,
-                                     mut_pos_to_freq: &HashMap<usize, DnaBaseCount>|
+    let forward_sweep_wt_pos_freq = |wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
+                                     mut_pos_to_freq: &HashMap<i64, DnaBaseCount>|
      -> Vec<ChrM6aC2u> {
         let mut ret = vec![];
         for j in 2..positions.len() {
@@ -256,14 +246,15 @@ fn find_c2u_site(
             }
 
             // R = A/G
-            let first_biallele = wt_pos_to_freq.get(&first).map(|r| r.bi_allelic_stat());
-
-            if first_biallele
-                .map(|ba| {
-                    (ba.a1 == Dna::A && ba.a2 == Dna::G) || (ba.a1 == Dna::G && ba.a2 == Dna::A)
+            let is_first_r = wt_pos_to_freq
+                .get(&first)
+                .map(|r| {
+                    let major = &r.most_frequent().0;
+                    major == &Dna::A || major == &Dna::G
                 })
-                .unwrap_or(false)
-            {
+                .unwrap_or(false);
+
+            if is_first_r {
                 if c_to_u_binomial_test(wt_pos_to_freq.get(&third), mut_pos_to_freq.get(&third)) {
                     ret.push(ChrM6aC2u {
                         chr: chr.into(),
@@ -278,8 +269,8 @@ fn find_c2u_site(
     };
 
     // search reverse CAR patterns
-    let reverse_sweep_wt_pos_freq = |wt_pos_to_freq: &HashMap<usize, DnaBaseCount>,
-                                     mut_pos_to_freq: &HashMap<usize, DnaBaseCount>|
+    let reverse_sweep_wt_pos_freq = |wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
+                                     mut_pos_to_freq: &HashMap<i64, DnaBaseCount>|
      -> Vec<ChrM6aC2u> {
         let mut ret = vec![];
         for j in 0..(positions.len() - 2) {
@@ -301,16 +292,16 @@ fn find_c2u_site(
                 continue;
             }
 
-            // R = A/G
-            let third_biallele = wt_pos_to_freq.get(&third).map(|r| r.bi_allelic_stat());
-            if third_biallele
-                .map(|ba| {
-                    // (ba.a1 == Dna::A && ba.a2 == Dna::G) || (ba.a1 == Dna::G && ba.a2 == Dna::A)
-                    // complement sequence
-                    (ba.a1 == Dna::T && ba.a2 == Dna::C) || (ba.a1 == Dna::C && ba.a2 == Dna::T)
+            // R = A/G <=> T/C (complement)
+            let is_first_r = wt_pos_to_freq
+                .get(&first)
+                .map(|r| {
+                    let major = &r.most_frequent().0;
+                    major == &Dna::T || major == &Dna::C
                 })
-                .unwrap_or(false)
-            {
+                .unwrap_or(false);
+
+            if is_first_r {
                 if complement_binomial_test(wt_pos_to_freq.get(&first), mut_pos_to_freq.get(&first))
                 {
                     ret.push(ChrM6aC2u {
@@ -324,6 +315,10 @@ fn find_c2u_site(
         }
         ret
     };
+
+    if positions.len() < 3 {
+        return Ok((vec![], vec![]));
+    }
 
     let samples: Vec<SamSampleName> = wt_freq_map.samples().into_iter().cloned().collect();
 
@@ -372,16 +367,15 @@ fn collect_m6a_stat(
     chr_m6a_c2u: &ChrM6aC2u,
 ) -> anyhow::Result<Vec<(SamSampleName, Interval<M6aData>)>> {
     let mut stat_map = DnaBaseFreqMap::new();
-    let m6apos = chr_m6a_c2u.m6a_pos;
-    let c2upos = chr_m6a_c2u.conversion_pos;
+    let m6apos = chr_m6a_c2u.m6a_pos as i64;
+    let c2upos = chr_m6a_c2u.conversion_pos as i64;
     let chr = chr_m6a_c2u.chr.as_ref();
 
-    let lb = m6apos.min(c2upos);
-    let ub = c2upos.max(m6apos);
-    let region = format!("{}:{}-{}", chr, lb, ub).into_boxed_str();
+    let lb = m6apos.min(c2upos) as i64;
+    let ub = c2upos.max(m6apos) as i64;
 
     for _file in args.wt_bam_files.iter() {
-        stat_map.update_bam_region(_file.as_ref(), &region)?;
+        stat_map.update_bam_region(_file.as_ref(), (chr, lb, ub))?;
     }
 
     let dir = &chr_m6a_c2u.direction;
