@@ -278,6 +278,10 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     write_types::<f32>(&llik, &(args.out.to_string() + ".llik.gz"))?;
 
+    /////////////////////////////////////////////////////
+    // evaluate latent states while adjusting the bias //
+    /////////////////////////////////////////////////////
+
     let delta_db = batch_db.map(|x| x.posterior_mean());
     let z_nk = evaluate_latent_by_encoder(
         &data_vec,

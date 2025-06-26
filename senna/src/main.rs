@@ -1,4 +1,5 @@
 mod embed_common;
+mod fit_deconv;
 mod fit_svd;
 mod fit_topic;
 mod routines_latent_representation;
@@ -7,6 +8,7 @@ mod routines_pre_process;
 
 use embed_common::*;
 
+use fit_deconv::*;
 use fit_svd::*;
 use fit_topic::*;
 
@@ -28,6 +30,7 @@ struct Cli {
 enum Commands {
     Svd(SvdArgs),
     Topic(TopicArgs),
+    Deconv(DeconvArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -41,6 +44,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Topic(args) => {
             fit_topic_model(args)?;
+        }
+        Commands::Deconv(args) => {
+            fit_deconv(args)?;
         }
     }
 
