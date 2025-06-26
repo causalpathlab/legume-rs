@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
 enum FeatureType {
-    BetaValue,
+    Beta,
     Methylated,
     Unmethylated,
 }
@@ -486,7 +486,7 @@ fn format_data_triplets(
         let col_idx = sample_indices[&s] as u64;
 
         let value = match args.feature_type {
-            FeatureType::BetaValue => {
+            FeatureType::Beta => {
                 let tot = (dat.methylated + dat.unmethylated) as f32;
                 let beta = (dat.methylated as f32) / tot.max(1.);
                 beta
