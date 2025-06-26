@@ -1,0 +1,11 @@
+[package]
+name = "chickpea"
+license.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+version.workspace = true
+
+[dependencies]

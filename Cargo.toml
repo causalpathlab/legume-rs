@@ -8,7 +8,7 @@ members = [
 	"senna",
 	"pinto",
 	"cocoa-diff",
-	"faba"]
+	"faba", "chickpea"]
 
 resolver = "3"
 
