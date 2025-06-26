@@ -1384,7 +1384,7 @@ fn collect_column_stat(
     data: &SparseIoVec,
     block_size: usize,
 ) -> anyhow::Result<RunningStatistics<Ix1>> {
-    let mut col_stat = RunningStatistics::new(Ix1(data.num_rows()?));
+    let mut col_stat = RunningStatistics::new(Ix1(data.num_columns()?));
     data.visit_columns_by_block(
         &col_stat_visitor,
         &EmptyArgs {},
