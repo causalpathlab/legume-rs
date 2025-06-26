@@ -20,6 +20,7 @@ use log::info;
 use matrix_util::common_io::basename;
 use matrix_util::traits::IoOps;
 use matrix_util::*;
+use rayon::prelude::*;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -1549,8 +1550,8 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
 
     if cmd_args.save_mtx {
         let mut triplets = sim.triplets.clone();
-        triplets.sort_by_key(|&(row, _, _)| row);
-        triplets.sort_by_key(|&(_, col, _)| col);
+        triplets.par_sort_by_key(|&(row, _, _)| row);
+        triplets.par_sort_by_key(|&(_, col, _)| col);
 
         mtx_io::write_mtx_triplets(&triplets, sim_args.rows, sim_args.cols, &mtx_file)?;
         common_io::write_lines(&rows, &row_file)?;
