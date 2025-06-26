@@ -7,11 +7,19 @@ use crate::data::methylation::*;
 use crate::data::util_htslib::*;
 use crate::hypothesis_tests::BinomTest;
 
+use clap::ValueEnum;
 use data_beans::sparse_io::*;
 use matrix_util::common_io::*;
 use matrix_util::mtx_io::*;
-
 use std::collections::{HashMap, HashSet};
+
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+enum FeatureType {
+    BetaValue,
+    Methylated,
+    Unmethylated,
+}
 
 #[derive(Args, Debug)]
 pub struct CountDartSeqArgs {
@@ -46,6 +54,10 @@ pub struct CountDartSeqArgs {
     /// save .mtx file along with row and column names
     #[arg(long, default_value_t = false)]
     save_mtx: bool,
+
+    /// feature type
+    #[arg(long, value_enum, default_value = "beta")]
+    feature_type: FeatureType,
 
     /// output `data-beans` file (with `.h5` or `.zarr` ext)
     #[arg(short, long, default_value = "temp.h5")]
@@ -120,7 +132,8 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
         *accum += dat;
     }
 
-    let (mut triplets, row_names, col_names) = beta_value_triplets(triplets.into_iter().collect());
+    let (mut triplets, row_names, col_names) =
+        format_data_triplets(triplets.into_iter().collect(), args);
 
     if args.save_mtx {
         let ext = extension(&args.out_file)?;
@@ -434,8 +447,9 @@ fn collect_m6a_stat(
     Ok(ret)
 }
 
-fn beta_value_triplets(
+fn format_data_triplets(
     triplets: Vec<((SamSampleName, MethylationKey), MethylationData)>,
+    args: &CountDartSeqArgs,
 ) -> (Vec<(u64, u64, f32)>, Vec<Box<str>>, Vec<Box<str>>) {
     // identify unique samples and sites
     let mut unique_samples = HashSet::new();
@@ -470,9 +484,19 @@ fn beta_value_triplets(
     for ((s, k), dat) in triplets {
         let row_idx = site_indices[&k] as u64;
         let col_idx = sample_indices[&s] as u64;
-        let tot = (dat.methylated + dat.unmethylated) as f32;
-        let beta = (dat.methylated as f32) / tot.max(1.);
-        relabeled_triplets.push((row_idx, col_idx, beta));
+
+        let value = match args.feature_type {
+            FeatureType::BetaValue => {
+                let tot = (dat.methylated + dat.unmethylated) as f32;
+                let beta = (dat.methylated as f32) / tot.max(1.);
+                beta
+            }
+            FeatureType::Methylated => dat.methylated as f32,
+
+            FeatureType::Unmethylated => dat.unmethylated as f32,
+        };
+
+        relabeled_triplets.push((row_idx, col_idx, value));
     }
 
     let mut samples = vec!["".into(); sample_indices.len()];
