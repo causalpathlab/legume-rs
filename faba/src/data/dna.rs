@@ -11,10 +11,10 @@ pub enum Dna {
 impl Dna {
     pub fn from_byte(b: u8) -> Option<Dna> {
         match b {
-            b'A' | b'a' => Some(Dna::A),
-            b'T' | b't' => Some(Dna::T),
-            b'G' | b'g' => Some(Dna::G),
-            b'C' | b'c' => Some(Dna::C),
+            b'A' => Some(Dna::A),
+            b'T' => Some(Dna::T),
+            b'G' => Some(Dna::G),
+            b'C' => Some(Dna::C),
             _ => None, // Handle invalid bases
         }
     }

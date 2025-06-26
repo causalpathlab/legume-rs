@@ -638,8 +638,8 @@ pub trait SparseIo: Sync + Send {
     ) -> anyhow::Result<()> {
         assert!(!row_col_val_triplets.is_empty());
 
-        row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
-        row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
+        row_col_val_triplets.par_sort_by_key(|&(_, col, _)| col);
+        row_col_val_triplets.par_sort_by_key(|&(row, _, _)| row);
 
         let mut csr_rowptr = vec![];
         let mut csr_cols = vec![];
@@ -685,8 +685,8 @@ pub trait SparseIo: Sync + Send {
     ) -> anyhow::Result<()> {
         assert!(!row_col_val_triplets.is_empty());
 
-        row_col_val_triplets.sort_by_key(|&(row, _, _)| row);
-        row_col_val_triplets.sort_by_key(|&(_, col, _)| col);
+        row_col_val_triplets.par_sort_by_key(|&(row, _, _)| row);
+        row_col_val_triplets.par_sort_by_key(|&(_, col, _)| col);
         // dbg!(&row_col_val_triplets);
 
         let mut csc_colptr: Vec<u64> = vec![];

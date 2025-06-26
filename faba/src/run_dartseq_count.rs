@@ -1,13 +1,16 @@
 use crate::common::*;
-use crate::data::alignment::SamSampleName;
+use crate::data::alignment::*;
 use crate::data::dna::Dna;
 use crate::data::dna::DnaBaseCount;
 use crate::data::dna_stat_htslib::*;
+use crate::data::methylation::*;
 use crate::data::util_htslib::*;
 use crate::hypothesis_tests::BinomTest;
 
-use coitrees::Interval;
-use coitrees::IntervalTree;
+use data_beans::sparse_io::*;
+use matrix_util::common_io::*;
+use matrix_util::mtx_io::*;
+
 use std::collections::{HashMap, HashSet};
 
 #[derive(Args, Debug)]
@@ -40,8 +43,12 @@ pub struct CountDartSeqArgs {
     #[arg(short, long, default_value_t = 0.05)]
     pvalue_cutoff: f64,
 
-    /// output file
-    #[arg(short, long, default_value = "output.h5")]
+    /// save .mtx file along with row and column names
+    #[arg(long, default_value_t = false)]
+    save_mtx: bool,
+
+    /// output `data-beans` file (with `.h5` or `.zarr` ext)
+    #[arg(short, long, default_value = "temp.h5")]
     out_file: Box<str>,
 }
 
@@ -74,89 +81,95 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
     ////////////////////////////////////////
 
     let njobs = jobs.len();
-    let c2u_sites_samples = jobs
+    info!("Searching possible edit sites over {} blocks", njobs);
+    let sites: Vec<_> = jobs
         .into_iter()
         .par_bridge()
         .progress_count(njobs as u64)
-        .map(|(chr, lb, ub)| -> anyhow::Result<_> { find_c2u_site(args, chr.as_ref(), lb, ub) })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    let mut c2u_stratified_by_chr: HashMap<Box<str>, Vec<ChrM6aC2u>> = HashMap::new();
-    let mut samples = HashSet::new();
-
-    for (c2u, sam) in c2u_sites_samples {
-        for x in c2u {
-            let sites = c2u_stratified_by_chr.entry(x.chr.clone()).or_default();
-            sites.push(x);
-        }
-        samples.extend(sam.into_iter());
-    }
+        .map(|(chr, lb, ub)| find_methylated_site(args, chr.as_ref(), lb, ub))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     ///////////////////////////////////
     // 2. collect all the statistics //
     ///////////////////////////////////
 
-    let mut sample_chr_to_coitree: HashMap<(SamSampleName, Box<str>), coitrees::COITree<_, usize>> =
-        HashMap::new();
-
-    for (chr, c2u_vec) in c2u_stratified_by_chr {
-        let sample_intervals = c2u_vec
-            .iter()
-            .map(|x| collect_m6a_stat(args, x))
-            .collect::<anyhow::Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-
-        let mut sample_to_intervals: HashMap<SamSampleName, Vec<Interval<_>>> = HashMap::new();
-
-        for (s, interv) in sample_intervals {
-            sample_to_intervals.entry(s).or_default().push(interv);
-        }
-
-        for (s, interv) in sample_to_intervals {
-            let tree: coitrees::COITree<_, usize> = coitrees::COITree::new(&interv);
-            let k = (s, chr.clone());
-            sample_chr_to_coitree.entry(k).or_insert(tree);
-        }
-    }
+    let nsites = sites.len() as u64;
+    info!("collecting statistics over {} sites...", nsites);
+    let stats = sites
+        .into_iter()
+        .par_bridge()
+        .progress_count(nsites)
+        .map(|x| collect_m6a_stat(args, &x))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
 
     /////////////////////////////////////
     // 3. Aggregate them into triplets //
     /////////////////////////////////////
 
-    for ((s, chr), tree) in sample_chr_to_coitree.iter() {
-        for x in tree.into_iter() {
-            println!(
-                "{}\t{}\t{}\t{}\t{}\t{}",
-                chr, x.first, x.last, s, x.metadata.methylated, x.metadata.unmethylated
-            );
-        }
+    info!("β value triplets...");
+    let mut triplets: HashMap<(SamSampleName, MethylationKey), MethylationData> = HashMap::new();
+
+    for (s, k, dat) in stats {
+        let accum = triplets.entry((s, k)).or_default();
+        *accum += dat;
     }
 
+    let (mut triplets, row_names, col_names) = beta_value_triplets(triplets.into_iter().collect());
+
+    if args.save_mtx {
+        let ext = extension(&args.out_file)?;
+        let mtx_file = args.out_file.replace(ext.as_ref(), "mtx.gz");
+        let row_file = args.out_file.replace(ext.as_ref(), "rows.gz");
+        let col_file = args.out_file.replace(ext.as_ref(), "columns.gz");
+        let nrow = row_names.len();
+        let ncol = col_names.len();
+        triplets.par_sort_by_key(|&(row, _, _)| row);
+        triplets.par_sort_by_key(|&(_, col, _)| col);
+        write_mtx_triplets(&triplets, nrow, ncol, &mtx_file)?;
+        write_lines(&row_names, &row_file)?;
+        write_lines(&col_names, &col_file)?;
+    }
+
+    /////////////////////////////
+    // 4. construct data beans //
+    /////////////////////////////
+    let backend = match extension(&args.out_file)?.as_ref() {
+        "h5" => SparseIoBackend::HDF5,
+        "zarr" => SparseIoBackend::Zarr,
+        _ => SparseIoBackend::Zarr,
+    };
+
+    let mtx_shape = (row_names.len(), col_names.len(), triplets.len());
+
+    let mut data =
+        create_sparse_from_triplets(triplets, mtx_shape, Some(&args.out_file), Some(&backend))?;
+    data.register_column_names_vec(&col_names);
+    data.register_row_names_vec(&row_names);
+
+    info!("done");
     Ok(())
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, std::fmt::Debug)]
-struct ChrM6aC2u {
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
+struct MethylatedSite {
     chr: Box<str>,
     m6a_pos: i64,
     conversion_pos: i64,
     direction: Direction,
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, std::fmt::Debug)]
-enum Direction {
-    Forward,
-    Backward,
-}
-
-fn find_c2u_site(
+fn find_methylated_site(
     args: &CountDartSeqArgs,
     chr: &str,
     lb: i64,
     ub: i64,
-) -> anyhow::Result<(Vec<ChrM6aC2u>, Vec<SamSampleName>)> {
+) -> anyhow::Result<Vec<MethylatedSite>> {
     // 1. sweep each pair bam files to find variable sites
     let mut wt_freq_map = DnaBaseFreqMap::new();
     let mut mut_freq_map = DnaBaseFreqMap::new();
@@ -174,7 +187,7 @@ fn find_c2u_site(
     // 2. find AC/T patterns: Using mutant statistics as null
     // distribution, it will keep possible C->U edit positions.
     // Find forward: "A/G" "A" "C", reverse: "C" "A" "A/G"
-    let mut chr_m6a_c2u_positions: Vec<ChrM6aC2u> = Vec::with_capacity(positions.len());
+    let mut chr_m6a_c2u_positions: Vec<MethylatedSite> = Vec::with_capacity(positions.len());
 
     let binomial_test = |wt_freq: Option<&DnaBaseCount>,
                          mut_freq: Option<&DnaBaseCount>,
@@ -224,7 +237,7 @@ fn find_c2u_site(
     // search forward RAC patterns
     let forward_sweep_wt_pos_freq = |wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
                                      mut_pos_to_freq: &HashMap<i64, DnaBaseCount>|
-     -> Vec<ChrM6aC2u> {
+     -> Vec<MethylatedSite> {
         let mut ret = vec![];
         for j in 2..positions.len() {
             let first = positions[j - 2];
@@ -256,7 +269,7 @@ fn find_c2u_site(
 
             if is_first_r {
                 if c_to_u_binomial_test(wt_pos_to_freq.get(&third), mut_pos_to_freq.get(&third)) {
-                    ret.push(ChrM6aC2u {
+                    ret.push(MethylatedSite {
                         chr: chr.into(),
                         m6a_pos: second,
                         conversion_pos: third,
@@ -271,7 +284,7 @@ fn find_c2u_site(
     // search reverse CAR patterns
     let reverse_sweep_wt_pos_freq = |wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
                                      mut_pos_to_freq: &HashMap<i64, DnaBaseCount>|
-     -> Vec<ChrM6aC2u> {
+     -> Vec<MethylatedSite> {
         let mut ret = vec![];
         for j in 0..(positions.len() - 2) {
             let first = positions[j];
@@ -282,10 +295,9 @@ fn find_c2u_site(
                 continue;
             }
 
+            // A <=> T (complement)
             if wt_pos_to_freq
                 .get(&second)
-                // .map(|s| s.most_frequent().0 != Dna::A)
-                // complement seq
                 .map(|s| s.most_frequent().0 != Dna::T)
                 .unwrap_or(true)
             {
@@ -304,7 +316,7 @@ fn find_c2u_site(
             if is_first_r {
                 if complement_binomial_test(wt_pos_to_freq.get(&first), mut_pos_to_freq.get(&first))
                 {
-                    ret.push(ChrM6aC2u {
+                    ret.push(MethylatedSite {
                         chr: chr.into(),
                         m6a_pos: second,
                         conversion_pos: first,
@@ -317,7 +329,7 @@ fn find_c2u_site(
     };
 
     if positions.len() < 3 {
-        return Ok((vec![], vec![]));
+        return Ok(vec![]);
     }
 
     let samples: Vec<SamSampleName> = wt_freq_map.samples().into_iter().cloned().collect();
@@ -349,30 +361,25 @@ fn find_c2u_site(
     chr_m6a_c2u_positions.sort();
     chr_m6a_c2u_positions.dedup();
 
-    Ok((chr_m6a_c2u_positions, samples))
+    Ok(chr_m6a_c2u_positions)
 }
 
 ///////////////////////////////////////////////////////////////////
 // Step 2: revisit possible C2U positions and collect m6A sites, //
 // locations and samples.                                        //
 ///////////////////////////////////////////////////////////////////
-#[derive(Clone, Copy, Default)]
-struct M6aData {
-    methylated: usize,
-    unmethylated: usize,
-}
 
 fn collect_m6a_stat(
     args: &CountDartSeqArgs,
-    chr_m6a_c2u: &ChrM6aC2u,
-) -> anyhow::Result<Vec<(SamSampleName, Interval<M6aData>)>> {
+    chr_m6a_c2u: &MethylatedSite,
+) -> anyhow::Result<Vec<(SamSampleName, MethylationKey, MethylationData)>> {
     let mut stat_map = DnaBaseFreqMap::new();
-    let m6apos = chr_m6a_c2u.m6a_pos as i64;
-    let c2upos = chr_m6a_c2u.conversion_pos as i64;
+    let m6apos = chr_m6a_c2u.m6a_pos;
+    let c2upos = chr_m6a_c2u.conversion_pos;
     let chr = chr_m6a_c2u.chr.as_ref();
 
-    let lb = m6apos.min(c2upos) as i64;
-    let ub = c2upos.max(m6apos) as i64;
+    let lb = m6apos.min(c2upos);
+    let ub = c2upos.max(m6apos);
 
     for _file in args.wt_bam_files.iter() {
         stat_map.update_bam_region(_file.as_ref(), (chr, lb, ub))?;
@@ -380,7 +387,7 @@ fn collect_m6a_stat(
 
     let dir = &chr_m6a_c2u.direction;
 
-    let c2u_stat = match dir {
+    let methylation_stat = match dir {
         Direction::Forward => stat_map.forward_frequency_at(&c2upos),
         Direction::Backward => stat_map.reverse_frequency_at(&c2upos),
     };
@@ -395,48 +402,88 @@ fn collect_m6a_stat(
         Direction::Backward => Dna::A,
     };
 
-    // let before = match dir {
-    //     Direction::Forward => stat_map.forward_frequency_at(&(m6apos - 1)),
-    //     Direction::Backward => stat_map.reverse_frequency_at(&(m6apos + 1)),
-    // }
-    // .unwrap();
-
-    // let after = match dir {
-    //     Direction::Forward => stat_map.forward_frequency_at(&(m6apos + 1)),
-    //     Direction::Backward => stat_map.reverse_frequency_at(&(m6apos - 1)),
-    // }
-    // .unwrap();
-
-    // for (_, x) in before {
-    //     println!("before: {:?}", x);
-    // }
-
-    // for (_, x) in after {
-    //     println!("after: {:?}", x);
-    // }
-
-    // todo: we can reduce resolution
-    // args.resolution;
+    let (lb, ub) = if let Some(r) = args.resolution {
+        (
+            (m6apos as usize) / r * r + 1,
+            (m6apos as usize).div_ceil(r) * r,
+        )
+    } else {
+        (m6apos as usize, m6apos as usize + 1)
+    };
 
     let mut ret = vec![];
 
-    if let Some(c2u_stat) = c2u_stat {
-        for (s, counts) in c2u_stat {
-            let meth_data = M6aData {
-                methylated: counts.get(Some(methylated_base.clone())),
-                unmethylated: counts.get(Some(unmethylated_base.clone())),
-            };
-
+    if let Some(meth_stat) = methylation_stat {
+        for (s, counts) in meth_stat {
             ret.push((
                 s.clone(),
-                Interval {
-                    first: lb as i32,
-                    last: ub as i32,
-                    metadata: meth_data,
+                MethylationKey {
+                    chr: chr.into(),
+                    lb,
+                    ub,
+                    dir: dir.clone(),
+                },
+                MethylationData {
+                    methylated: counts.get(Some(methylated_base.clone())),
+                    unmethylated: counts.get(Some(unmethylated_base.clone())),
                 },
             ));
         }
     }
 
     Ok(ret)
+}
+
+fn beta_value_triplets(
+    triplets: Vec<((SamSampleName, MethylationKey), MethylationData)>,
+) -> (Vec<(u64, u64, f32)>, Vec<Box<str>>, Vec<Box<str>>) {
+    // identify unique samples and sites
+    let mut unique_samples = HashSet::new();
+    let mut unique_sites = HashSet::new();
+
+    for ((s, k), _) in &triplets {
+        unique_samples.insert(s.clone());
+        unique_sites.insert(k.clone());
+    }
+
+    // assign indices to samples and sites
+    let mut unique_samples = unique_samples.into_iter().collect::<Vec<_>>();
+    unique_samples.sort();
+
+    let sample_indices: HashMap<SamSampleName, usize> = unique_samples
+        .into_iter()
+        .enumerate()
+        .map(|(i, sample)| (sample, i))
+        .collect();
+
+    let mut unique_sites = unique_sites.into_iter().collect::<Vec<_>>();
+    unique_sites.par_sort();
+
+    let site_indices: HashMap<MethylationKey, usize> = unique_sites
+        .into_iter()
+        .enumerate()
+        .map(|(i, site)| (site, i))
+        .collect();
+
+    // relabel triplets with indices
+    let mut relabeled_triplets = Vec::with_capacity(triplets.len());
+    for ((s, k), dat) in triplets {
+        let row_idx = site_indices[&k] as u64;
+        let col_idx = sample_indices[&s] as u64;
+        let tot = (dat.methylated + dat.unmethylated) as f32;
+        let beta = (dat.methylated as f32) / tot.max(1.);
+        relabeled_triplets.push((row_idx, col_idx, beta));
+    }
+
+    let mut samples = vec!["".into(); sample_indices.len()];
+    for (k, j) in sample_indices {
+        samples[j] = k.to_string().into_boxed_str();
+    }
+
+    let mut sites = vec!["".into(); site_indices.len()];
+    for (k, j) in site_indices {
+        sites[j] = k.to_string().into_boxed_str();
+    }
+
+    (relabeled_triplets, sites, samples)
 }
