@@ -35,3 +35,7 @@ temp*
 *.h5
 *.gz
 *.parquet
+
+# avoid saving too big files
+*.bam
+*.bam.bai

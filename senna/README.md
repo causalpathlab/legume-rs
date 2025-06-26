@@ -2,5 +2,7 @@
 
 TODO:
 
+* [ ] Streamline deconvolution process
+
 * [ ] Other decoder models
 
