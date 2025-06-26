@@ -1,0 +1,6 @@
+# Chromatin Interaction Clusters by Knotting Paired Expression and Accessibility data
+
+TODO: 
+
+* [ ] The goal is to identify regulatory modules 
+
