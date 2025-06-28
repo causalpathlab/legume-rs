@@ -3,7 +3,7 @@ mod data;
 mod hypothesis_tests;
 mod run_dartseq_count;
 mod run_read_depth;
-mod util;
+mod dartseq_sifter;
 
 use crate::common::*;
 use run_dartseq_count::*;
