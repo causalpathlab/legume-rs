@@ -53,7 +53,7 @@ impl DnaBaseCount {
         }
     }
 
-    pub fn set(&mut self, b: Option<Dna>, val: usize) {
+    pub fn set(&mut self, b: Option<&Dna>, val: usize) {
         if let Some(base) = b {
             match base {
                 Dna::A => self.data[0].1 = val,
@@ -64,7 +64,7 @@ impl DnaBaseCount {
         }
     }
 
-    pub fn add(&mut self, b: Option<Dna>, val: usize) {
+    pub fn add(&mut self, b: Option<&Dna>, val: usize) {
         if let Some(base) = b {
             match base {
                 Dna::A => self.data[0].1 += val,
@@ -75,7 +75,7 @@ impl DnaBaseCount {
         }
     }
 
-    pub fn get(&self, b: Option<Dna>) -> usize {
+    pub fn get(&self, b: Option<&Dna>) -> usize {
         match b {
             Some(Dna::A) => self.data[0].1,
             Some(Dna::T) => self.data[1].1,
@@ -129,9 +129,9 @@ use std::ops::AddAssign;
 
 impl AddAssign<&DnaBaseCount> for DnaBaseCount {
     fn add_assign(&mut self, other: &Self) {
-        self.add(Some(Dna::A), other.get(Some(Dna::A)));
-        self.add(Some(Dna::T), other.get(Some(Dna::T)));
-        self.add(Some(Dna::G), other.get(Some(Dna::G)));
-        self.add(Some(Dna::C), other.get(Some(Dna::C)));
+        self.add(Some(&Dna::A), other.get(Some(&Dna::A)));
+        self.add(Some(&Dna::T), other.get(Some(&Dna::T)));
+        self.add(Some(&Dna::G), other.get(Some(&Dna::G)));
+        self.add(Some(&Dna::C), other.get(Some(&Dna::C)));
     }
 }
