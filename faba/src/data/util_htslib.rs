@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 const DEFAULT_BLOCK_SIZE: usize = 100_000;
 
 use rust_htslib::bam::{self, Read};

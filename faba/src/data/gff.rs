@@ -4,8 +4,8 @@ use crate::data::sam::Strand;
 
 use matrix_util::common_io::read_lines_of_words_delim;
 use rayon::prelude::*;
-use std::collections::hash_map::Iter;
 use std::collections::HashMap;
+use std::collections::hash_map::Iter;
 
 /// Ignore ENSEMBL version: `ENSGXXXXXXXXXXX.X_X` to `ENSGXXXXXXXXXXX`
 pub fn parse_ensembl_id(ensembl_name: &str) -> Option<&str> {
@@ -43,12 +43,25 @@ impl GffRecordMap {
     pub fn from(file_path: &str, feature_type: Option<&FeatureType>) -> anyhow::Result<Self> {
         let (lines_of_words, _) = read_lines_of_words_delim(file_path, "\t", -1)?;
 
-        let records: HashMap<GeneId, GffRecord> = lines_of_words
+        let mut records: HashMap<GeneId, GffRecord> = HashMap::new();
+
+        let parsed_records = lines_of_words
             .into_iter()
             .par_bridge()
             .filter_map(|x| parse_gff(x, feature_type))
-            .map(|x| (x.gene_id.clone(), x))
-            .collect();
+            .collect::<Vec<_>>();
+
+        for new_rec in parsed_records.iter() {
+            let gene_id = &new_rec.gene_id;
+            if records.contains_key(gene_id) {
+                if let Some(rec) = records.get_mut(&gene_id) {
+                    rec.start = rec.start.min(new_rec.start);
+                    rec.stop = rec.stop.max(new_rec.stop);
+                }
+            } else {
+                records.insert(gene_id.clone(), new_rec.clone());
+            }
+        }
 
         Ok(Self { records })
     }
@@ -200,6 +213,7 @@ impl From<GeneSymbol> for Box<str> {
 }
 
 /// GFF record
+#[derive(Clone)]
 pub struct GffRecord {
     pub seqname: Box<str>,         // sequence name
     pub feature_type: FeatureType, // may need gene only
@@ -256,7 +270,7 @@ pub fn parse_gff(
     }
 
     for attr in words[8].split(&[';']) {
-        let mut kv = attr.split(&[' ', ':']);
+        let mut kv = attr.split(&[' ', ':', '=']);
 
         match (trim(kv.next()), trim(kv.next())) {
             (Some("gene_id"), Some(id)) => {
