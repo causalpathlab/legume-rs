@@ -1603,7 +1603,7 @@ fn col_stat_visitor(
 ) -> anyhow::Result<()> {
     let (lb, ub) = job;
     let xx = data.read_columns_ndarray(lb..ub)?;
-    let mut stat = arc_stat.lock().expect("failed to lock row_stat");
+    let mut stat = arc_stat.lock().expect("failed to lock col_stat");
 
     for x in xx.axis_iter(Axis(0)) {
         for j in lb..ub {

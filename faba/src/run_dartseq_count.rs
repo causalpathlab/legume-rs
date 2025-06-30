@@ -1,7 +1,7 @@
 use crate::common::*;
 use crate::dartseq_sifter::*;
 use crate::data::dna::Dna;
-use crate::data::dna::DnaBaseCount;
+
 use crate::data::dna_stat_htslib::*;
 use crate::data::gff::*;
 use crate::data::methylation::*;
@@ -10,8 +10,7 @@ use crate::data::sam::*;
 use crate::data::util_htslib::*;
 
 use data_beans::sparse_io::*;
-use matrix_util::common_io::*;
-use matrix_util::mtx_io::*;
+use matrix_util::common_io::remove_file;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Args, Debug)]
@@ -65,16 +64,20 @@ pub struct CountDartSeqArgs {
     keep_unnamed_tag: bool,
 
     /// gene feature type (gene, transcript, exon, utr)
-    #[arg(long)]
-    gene_feature_type: Option<Box<str>>,
+    #[arg(long, default_value = "gene")]
+    gene_feature_type: Box<str>,
 
     /// output value type
     #[arg(short = 't', long, value_enum, default_value = "methylated")]
     output_value_type: MethFeatureType,
 
-    /// output `data-beans` file (with `.h5` or `.zarr` ext)
-    #[arg(short, long, default_value = "temp.h5")]
-    out_file: Box<str>,
+    /// backend for the output file
+    #[arg(long, value_enum, default_value = "zarr")]
+    backend: SparseIoBackend,
+
+    /// output header for `data-beans` files
+    #[arg(short, long, required = true)]
+    output: Box<str>,
 }
 
 /// Count possibly methylated A positions in DART-seq bam files to
@@ -97,12 +100,11 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
         check_bam_index(x, None)?;
     }
 
-    let gene_feature_type: Option<FeatureType> =
-        args.gene_feature_type.clone().map(|x| x.as_ref().into());
+    let gene_feature_type: FeatureType = args.gene_feature_type.as_ref().into();
 
     info!("parsing GFF file: {}", args.gff_file);
 
-    let gff_map = GffRecordMap::from(args.gff_file.as_ref(), gene_feature_type.as_ref())?;
+    let gff_map = GffRecordMap::from(args.gff_file.as_ref(), Some(&gene_feature_type))?;
 
     info!("found {} features", gff_map.len(),);
 
@@ -112,6 +114,7 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
 
     let njobs = gff_map.len();
     info!("Searching possible edit sites over {} blocks", njobs);
+
     let sites = gff_map
         .records()
         .into_iter()
@@ -145,60 +148,79 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
     // 3. Aggregate them into triplets //
     /////////////////////////////////////
 
-    info!("aggregating {} value triplets...", args.output_value_type);
+    let backend = args.backend.clone();
 
-    // aggregate over gene-level
-    let mut gene_level_data: HashMap<(GeneId, CellBarcode), MethylationData> = HashMap::new();
+    info!(
+        "aggregating {} value triplets over {} stats...",
+        args.output_value_type,
+        stats.len()
+    );
 
-    for (cb, k, dat) in stats {
-        let gene = k.gene;
-        let accum = gene_level_data.entry((gene, cb)).or_default();
-        *accum += dat;
+    {
+        // aggregate over gene-level
+        let mut gene_level_data: HashMap<(GeneId, CellBarcode), MethylationData> = HashMap::new();
+
+        for (cb, k, dat) in stats.iter() {
+            let gene = k.gene.clone();
+            let cell = cb.clone();
+            let accum = gene_level_data.entry((gene, cell)).or_default();
+            accum.add_assign(dat);
+        }
+
+        let (triplets, row_names, col_names) = format_data_triplets(gene_level_data, args);
+
+        let mtx_shape = (row_names.len(), col_names.len(), triplets.len());
+
+        let output = args.output.clone();
+        let backend_file = match backend {
+            SparseIoBackend::HDF5 => format!("{}_gene.h5", &output),
+            SparseIoBackend::Zarr => format!("{}_gene.zarr", &output),
+        };
+
+        remove_file(&backend_file)?;
+
+        let mut data =
+            create_sparse_from_triplets(triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
+        data.register_column_names_vec(&col_names);
+        data.register_row_names_vec(&row_names);
     }
 
-    // let mut triplets: HashMap<(CellGene, MethylationKey), MethylationData> = HashMap::new();
+    {
+        let mut site_level_data: HashMap<(MethylationKey, CellBarcode), MethylationData> =
+            HashMap::new();
 
-    // for (s, k, dat) in stats {
-    //     let accum = triplets.entry((s, k)).or_default();
-    //     *accum += dat;
-    // }
+        for (cb, k, dat) in stats.iter() {
+            let site = k.clone();
+            let cell = cb.clone();
+            let accum = site_level_data.entry((site, cell)).or_default();
+            accum.add_assign(dat);
+        }
 
-    // let (mut triplets, row_names, col_names) =
-    //     format_data_triplets(triplets.into_iter().collect(), args);
+        let (triplets, row_names, col_names) = format_data_triplets(site_level_data, args);
 
-    // if args.save_mtx {
-    //     let ext = extension(&args.out_file)?;
-    //     let mtx_file = args.out_file.replace(ext.as_ref(), "mtx.gz");
-    //     let row_file = args.out_file.replace(ext.as_ref(), "rows.gz");
-    //     let col_file = args.out_file.replace(ext.as_ref(), "columns.gz");
-    //     let nrow = row_names.len();
-    //     let ncol = col_names.len();
-    //     triplets.par_sort_by_key(|&(row, _, _)| row);
-    //     triplets.par_sort_by_key(|&(_, col, _)| col);
-    //     write_mtx_triplets(&triplets, nrow, ncol, &mtx_file)?;
-    //     write_lines(&row_names, &row_file)?;
-    //     write_lines(&col_names, &col_file)?;
-    // }
+        let mtx_shape = (row_names.len(), col_names.len(), triplets.len());
 
-    // /////////////////////////////
-    // // 4. construct data-beans //
-    // /////////////////////////////
-    // let backend = match extension(&args.out_file)?.as_ref() {
-    //     "h5" => SparseIoBackend::HDF5,
-    //     "zarr" => SparseIoBackend::Zarr,
-    //     _ => SparseIoBackend::Zarr,
-    // };
+        let output = args.output.clone();
+        let backend_file = match backend {
+            SparseIoBackend::HDF5 => format!("{}_site.h5", &output),
+            SparseIoBackend::Zarr => format!("{}_site.zarr", &output),
+        };
 
-    // let mtx_shape = (row_names.len(), col_names.len(), triplets.len());
+        remove_file(&backend_file)?;
 
-    // let mut data =
-    //     create_sparse_from_triplets(triplets, mtx_shape, Some(&args.out_file), Some(&backend))?;
-    // data.register_column_names_vec(&col_names);
-    // data.register_row_names_vec(&row_names);
+        let mut data =
+            create_sparse_from_triplets(triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
+        data.register_column_names_vec(&col_names);
+        data.register_row_names_vec(&row_names);
+    }
 
     info!("done");
     Ok(())
 }
+
+////////////////////////////////////////////////
+// Step 1: find possibly methylated positions //
+////////////////////////////////////////////////
 
 fn find_methylated_sites_in_gene(
     rec: &GffRecord,
@@ -319,68 +341,67 @@ fn collect_m6a_stat(
     Ok(ret)
 }
 
-// fn format_data_triplets(
-//     triplets: Vec<((CellBarcode, MethylationKey), MethylationData)>,
-//     args: &CountDartSeqArgs,
-// ) -> (Vec<(u64, u64, f32)>, Vec<Box<str>>, Vec<Box<str>>) {
-//     // identify unique samples and sites
-//     let mut unique_cells = HashSet::new();
-//     let mut unique_sites = HashSet::new();
+fn format_data_triplets<Feat>(
+    pair_to_data: HashMap<(Feat, CellBarcode), MethylationData>,
+    args: &CountDartSeqArgs,
+) -> (Vec<(u64, u64, f32)>, Vec<Box<str>>, Vec<Box<str>>)
+where
+    Feat: std::hash::Hash + std::cmp::Eq + std::cmp::Ord + Clone + Send + ToString,
+{
+    // identify unique samples and sites
+    let mut unique_cells = HashSet::new();
+    let mut unique_sites = HashSet::new();
 
-//     for ((cb, k), _) in &triplets {
-//         unique_cells.insert(cb.clone());
-//         unique_sites.insert(k.clone());
-//     }
+    for (k, cb) in pair_to_data.keys() {
+        unique_sites.insert(k.clone());
+        unique_cells.insert(cb.clone());
+    }
 
-//     // assign indices to cells
-//     let mut unique_cells = unique_cells.into_iter().collect::<Vec<_>>();
-//     unique_cells.sort();
+    let mut unique_cells = unique_cells.into_iter().collect::<Vec<_>>();
+    unique_cells.sort();
+    let cell_to_index: HashMap<CellBarcode, usize> = unique_cells
+        .into_iter()
+        .enumerate()
+        .map(|(i, sample)| (sample, i))
+        .collect();
 
-//     let cell_to_index: HashMap<CellBarcode, usize> = unique_cells
-//         .into_iter()
-//         .enumerate()
-//         .map(|(i, sample)| (sample, i))
-//         .collect();
+    let mut unique_features = unique_sites.into_iter().collect::<Vec<_>>();
+    unique_features.par_sort();
 
-//     // assign unique indices to gene site pairs
-//     let mut unique_sites = unique_sites.into_iter().collect::<Vec<_>>();
-//     unique_sites.par_sort();
+    let feature_to_index: HashMap<Feat, usize> = unique_features
+        .into_iter()
+        .enumerate()
+        .map(|(i, site)| (site, i))
+        .collect();
 
-//     let site_indices: HashMap<MethylationKey, usize> = unique_sites
-//         .into_iter()
-//         .enumerate()
-//         .map(|(i, site)| (site, i))
-//         .collect();
+    // relabel triplets with indices
+    let mut relabeled_triplets = Vec::with_capacity(pair_to_data.len());
+    for ((k, cb), dat) in pair_to_data {
+        let row_idx = feature_to_index[&k] as u64;
+        let col_idx = cell_to_index[&cb] as u64;
 
-//     // // relabel triplets with indices
-//     // let mut relabeled_triplets = Vec::with_capacity(triplets.len());
-//     // for ((s, k), dat) in triplets {
-//     //     let row_idx = site_indices[&k] as u64;
-//     //     let col_idx = sample_indices[&s] as u64;
+        let value = match args.output_value_type {
+            MethFeatureType::Beta => {
+                let tot = (dat.methylated + dat.unmethylated) as f32;
+                let beta = (dat.methylated as f32) / tot.max(1.);
+                beta
+            }
+            MethFeatureType::Methylated => dat.methylated as f32,
+            MethFeatureType::Unmethylated => dat.unmethylated as f32,
+        };
 
-//     //     let value = match args.feature_type {
-//     //         MethFeatureType::Beta => {
-//     //             let tot = (dat.methylated + dat.unmethylated) as f32;
-//     //             let beta = (dat.methylated as f32) / tot.max(1.);
-//     //             beta
-//     //         }
-//     //         MethFeatureType::Methylated => dat.methylated as f32,
+        relabeled_triplets.push((row_idx, col_idx, value));
+    }
 
-//     //         MethFeatureType::Unmethylated => dat.unmethylated as f32,
-//     //     };
+    let mut cells = vec!["".into(); cell_to_index.len()];
+    for (k, j) in cell_to_index {
+        cells[j] = k.to_string().into_boxed_str();
+    }
 
-//     //     relabeled_triplets.push((row_idx, col_idx, value));
-//     // }
+    let mut features = vec!["".into(); feature_to_index.len()];
+    for (k, j) in feature_to_index {
+        features[j] = k.to_string().into_boxed_str();
+    }
 
-//     // let mut samples = vec!["".into(); sample_indices.len()];
-//     // for (k, j) in sample_indices {
-//     //     samples[j] = k.to_string().into_boxed_str();
-//     // }
-
-//     // let mut sites = vec!["".into(); site_indices.len()];
-//     // for (k, j) in site_indices {
-//     //     sites[j] = k.to_string().into_boxed_str();
-//     // }
-
-//     // (relabeled_triplets, sites, samples)
-// }
+    (relabeled_triplets, features, cells)
+}

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub use crate::data::gff::GeneId as Gene;
 use std::collections::HashMap;
 

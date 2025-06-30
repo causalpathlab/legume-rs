@@ -1,7 +1,8 @@
+#![allow(dead_code)]
+
 use crate::data::positions::*;
 use clap::ValueEnum;
 use std::hash::Hash;
-use std::ops::{Add, AddAssign};
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -35,31 +36,32 @@ pub struct MethylationKey {
     pub gene: Gene,
 }
 
-#[derive(Default)]
 pub struct MethylationData {
     pub methylated: usize,
     pub unmethylated: usize,
 }
 
-impl Add for MethylationData {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self {
+impl Default for MethylationData {
+    fn default() -> Self {
         Self {
-            methylated: self.methylated + other.methylated,
-            unmethylated: self.unmethylated + other.unmethylated,
+            methylated: 0,
+            unmethylated: 0,
         }
     }
 }
 
-impl AddAssign for MethylationData {
-    fn add_assign(&mut self, other: Self) {
+pub trait UpdateMethData {
+    fn add_assign(&mut self, other: &Self);
+}
+
+impl UpdateMethData for MethylationData {
+    fn add_assign(&mut self, other: &Self) {
         self.methylated += other.methylated;
         self.unmethylated += other.unmethylated;
     }
 }
 
-/// display sample names
+/// display methylation site name
 impl std::fmt::Display for MethylationKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}-{}@{}", self.chr, self.lb, self.ub, self.gene)
