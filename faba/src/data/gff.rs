@@ -53,6 +53,7 @@ impl GffRecordMap {
 
         for new_rec in parsed_records.iter() {
             let gene_id = &new_rec.gene_id;
+
             if records.contains_key(gene_id) {
                 if let Some(rec) = records.get_mut(&gene_id) {
                     rec.start = rec.start.min(new_rec.start);
@@ -64,6 +65,23 @@ impl GffRecordMap {
         }
 
         Ok(Self { records })
+    }
+
+    pub fn count_gene_types(&self) -> HashMap<GeneType, usize> {
+        let mut gene_type_counts = HashMap::new();
+
+        for record in self.records.values() {
+            *gene_type_counts
+                .entry(record.gene_type.clone())
+                .or_insert(0) += 1;
+        }
+
+        gene_type_counts
+    }
+
+    pub fn subset(&mut self, target_gene_type: GeneType) {
+        self.records
+            .retain(|_, rec| rec.gene_type == target_gene_type);
     }
 
     /// Create a new empty `GffRecordMap`
@@ -180,6 +198,35 @@ pub enum GeneSymbol {
     Missing,
 }
 
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone)]
+pub enum GeneType {
+    CodingGene,
+    PseudoGene,
+    LincRNA,
+    SnRNA,
+    NonCoding,
+}
+
+impl Into<GeneType> for Box<str> {
+    fn into(self) -> GeneType {
+        self.as_ref().into()
+    }
+}
+
+impl Into<GeneType> for &str {
+    fn into(self) -> GeneType {
+        match self {
+            "protein_coding" => GeneType::CodingGene,
+            "pseudogene" => GeneType::PseudoGene,
+            "lncRNA" => GeneType::LincRNA,
+            "snRNA" => GeneType::SnRNA,
+            _ if self.ends_with("pseudogene") => GeneType::PseudoGene,
+            _ if self.ends_with("coding") => GeneType::CodingGene,
+            _ => GeneType::NonCoding,
+        }
+    }
+}
+
 impl std::fmt::Display for GeneId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let x: Box<str> = self.clone().into();
@@ -222,6 +269,7 @@ pub struct GffRecord {
     pub strand: Strand,
     pub gene_id: GeneId,
     pub gene_name: GeneSymbol,
+    pub gene_type: GeneType,
 }
 
 /// parse a GFF line to a record
@@ -258,6 +306,7 @@ pub fn parse_gff(
 
     let mut gene_id = GeneId::Missing;
     let mut gene_name = GeneSymbol::Missing;
+    let mut gene_type = GeneType::NonCoding;
 
     fn trim(x: Option<&str>) -> Option<&str> {
         x.map(|s| {
@@ -281,6 +330,9 @@ pub fn parse_gff(
             (Some("gene_name"), Some(name)) => {
                 gene_name = GeneSymbol::Symbol(name.into());
             }
+            (Some("gene_type"), Some(gtype)) => {
+                gene_type = gtype.into();
+            }
             _ => {}
         }
     }
@@ -293,5 +345,6 @@ pub fn parse_gff(
         strand,
         gene_id,
         gene_name,
+        gene_type,
     })
 }

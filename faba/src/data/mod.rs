@@ -1,7 +1,10 @@
-pub mod sam;
 pub mod dna;
-pub mod dna_stat_htslib;
+pub mod dna_stat_map;
+pub mod dna_stat_traits;
 pub mod gff;
 pub mod methylation;
 pub mod positions;
+pub mod read_depth_map;
+pub mod sam;
 pub mod util_htslib;
+pub mod visitors_htslib;
