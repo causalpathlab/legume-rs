@@ -1,8 +1,8 @@
 use crate::common::*;
 use crate::dartseq_sifter::*;
 use crate::data::dna::Dna;
-
-use crate::data::dna_stat_htslib::*;
+use crate::data::dna_stat_map::*;
+use crate::data::dna_stat_traits::*;
 use crate::data::gff::*;
 use crate::data::methylation::*;
 use crate::data::positions::*;
@@ -16,15 +16,15 @@ use std::collections::{HashMap, HashSet};
 #[derive(Args, Debug)]
 pub struct CountDartSeqArgs {
     /// Observed (WT) `.bam` files where `C->U` (`C->T`) conversions happen
-    #[arg(short, long, value_delimiter = ',', required = true)]
+    #[arg(short = 'w', long = "wt", value_delimiter = ',', required = true)]
     wt_bam_files: Vec<Box<str>>,
 
     /// Control (MUT) `.bam` files where `C->U` (`C->T`) conversion is disrupted
-    #[arg(short, long, value_delimiter = ',', required = true)]
+    #[arg(short = 'm', long = "mut", value_delimiter = ',', required = true)]
     mut_bam_files: Vec<Box<str>>,
 
     /// Gene annotation (`GFF`) file
-    #[arg(short, long, required = true)]
+    #[arg(short = 'g', long = "gff", required = true)]
     gff_file: Box<str>,
 
     /// block size for parallelism (bp)
@@ -55,17 +55,16 @@ pub struct CountDartSeqArgs {
     #[arg(short, long, default_value_t = 0.05)]
     pvalue_cutoff: f64,
 
-    /// save .mtx file along with row and column names
-    #[arg(long, default_value_t = false)]
-    save_mtx: bool,
-
-    /// keep unnamed cell/sample barcode
-    #[arg(long, default_value_t = false)]
-    keep_unnamed_tag: bool,
-
-    /// gene feature type (gene, transcript, exon, utr)
+    // /// save .mtx file along with row and column names
+    // #[arg(long, default_value_t = false)]
+    // save_mtx: bool,
+    /// feature type (gene, transcript, exon, utr)
     #[arg(long, default_value = "gene")]
-    gene_feature_type: Box<str>,
+    record_feature_type: Box<str>,
+
+    /// gene type (protein_coding, pseudogene, lncRNA)
+    #[arg(long, default_value = "protein_coding")]
+    gene_type: Box<str>,
 
     /// output value type
     #[arg(short = 't', long, value_enum, default_value = "methylated")]
@@ -100,13 +99,18 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
         check_bam_index(x, None)?;
     }
 
-    let gene_feature_type: FeatureType = args.gene_feature_type.as_ref().into();
+    let record_feature_type: FeatureType = args.record_feature_type.as_ref().into();
 
     info!("parsing GFF file: {}", args.gff_file);
 
-    let gff_map = GffRecordMap::from(args.gff_file.as_ref(), Some(&gene_feature_type))?;
+    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref(), Some(&record_feature_type))?;
+    gff_map.subset(args.gene_type.clone().into());
 
     info!("found {} features", gff_map.len(),);
+
+    if gff_map.is_empty() {
+        return Ok(());
+    }
 
     ////////////////////////////////////////
     // 1. figure out potential edit sites //
@@ -157,35 +161,6 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
     );
 
     {
-        // aggregate over gene-level
-        let mut gene_level_data: HashMap<(GeneId, CellBarcode), MethylationData> = HashMap::new();
-
-        for (cb, k, dat) in stats.iter() {
-            let gene = k.gene.clone();
-            let cell = cb.clone();
-            let accum = gene_level_data.entry((gene, cell)).or_default();
-            accum.add_assign(dat);
-        }
-
-        let (triplets, row_names, col_names) = format_data_triplets(gene_level_data, args);
-
-        let mtx_shape = (row_names.len(), col_names.len(), triplets.len());
-
-        let output = args.output.clone();
-        let backend_file = match backend {
-            SparseIoBackend::HDF5 => format!("{}_gene.h5", &output),
-            SparseIoBackend::Zarr => format!("{}_gene.zarr", &output),
-        };
-
-        remove_file(&backend_file)?;
-
-        let mut data =
-            create_sparse_from_triplets(triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
-        data.register_column_names_vec(&col_names);
-        data.register_row_names_vec(&row_names);
-    }
-
-    {
         let mut site_level_data: HashMap<(MethylationKey, CellBarcode), MethylationData> =
             HashMap::new();
 
@@ -214,6 +189,35 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
         data.register_row_names_vec(&row_names);
     }
 
+    {
+        // aggregate over gene-level
+        let mut gene_level_data: HashMap<(GeneId, CellBarcode), MethylationData> = HashMap::new();
+
+        for (cb, k, dat) in stats.iter() {
+            let gene = k.gene.clone();
+            let cell = cb.clone();
+            let accum = gene_level_data.entry((gene, cell)).or_default();
+            accum.add_assign(dat);
+        }
+
+        let (triplets, row_names, col_names) = format_data_triplets(gene_level_data, args);
+
+        let mtx_shape = (row_names.len(), col_names.len(), triplets.len());
+
+        let output = args.output.clone();
+        let backend_file = match backend {
+            SparseIoBackend::HDF5 => format!("{}_gene.h5", &output),
+            SparseIoBackend::Zarr => format!("{}_gene.zarr", &output),
+        };
+
+        remove_file(&backend_file)?;
+
+        let mut data =
+            create_sparse_from_triplets(triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
+        data.register_column_names_vec(&col_names);
+        data.register_row_names_vec(&row_names);
+    }
+
     info!("done");
     Ok(())
 }
@@ -227,21 +231,19 @@ fn find_methylated_sites_in_gene(
     args: &CountDartSeqArgs,
 ) -> anyhow::Result<Vec<MethylatedSite>> {
     let chr = rec.seqname.clone();
-    let lb = rec.start;
-    let ub = rec.stop;
     let strand = rec.strand.clone();
     let gene_id = rec.gene_id.clone();
 
     // 1. sweep each pair bam files to find variable sites
-    let mut wt_freq_map = DnaBaseFreqMap::new(&args.cell_barcode_tag, &args.gene_barcode_tag);
-    let mut mut_freq_map = DnaBaseFreqMap::new(&args.cell_barcode_tag, &args.gene_barcode_tag);
+    let mut wt_freq_map = DnaBaseFreqMap::new(&args.cell_barcode_tag);
+    let mut mut_freq_map = DnaBaseFreqMap::new(&args.cell_barcode_tag);
 
     for wt_file in args.wt_bam_files.iter() {
-        wt_freq_map.update_by_gene_in_bam(wt_file, &gene_id, (chr.as_ref(), lb, ub))?;
+        wt_freq_map.update_bam_by_gene(wt_file, rec, &args.gene_barcode_tag)?;
     }
 
     for mut_file in args.mut_bam_files.iter() {
-        mut_freq_map.update_by_gene_in_bam(mut_file, &gene_id, (chr.as_ref(), lb, ub))?;
+        mut_freq_map.update_bam_by_gene(mut_file, rec, &args.gene_barcode_tag)?;
     }
 
     // 2. find AC/T patterns: Using mutant statistics as null
@@ -258,8 +260,8 @@ fn find_methylated_sites_in_gene(
     let positions = wt_freq_map.sorted_positions();
 
     if positions.len() >= 3 {
-        let wt_freq = wt_freq_map.marginal_frequency_by_position();
-        let mut_freq = mut_freq_map.marginal_frequency_by_position();
+        let wt_freq = wt_freq_map.marginal_frequency_map();
+        let mut_freq = mut_freq_map.marginal_frequency_map();
 
         match &strand {
             Strand::Forward => {
@@ -283,7 +285,7 @@ fn collect_m6a_stat(
     args: &CountDartSeqArgs,
     chr_m6a_c2u: &MethylatedSite,
 ) -> anyhow::Result<Vec<(CellBarcode, MethylationKey, MethylationData)>> {
-    let mut stat_map = DnaBaseFreqMap::new(&args.cell_barcode_tag, &args.gene_barcode_tag);
+    let mut stat_map = DnaBaseFreqMap::new(&args.cell_barcode_tag);
     let m6apos = chr_m6a_c2u.m6a_pos;
     let c2upos = chr_m6a_c2u.conversion_pos;
     let chr = chr_m6a_c2u.seqname.as_ref();
@@ -294,10 +296,10 @@ fn collect_m6a_stat(
     let ub = c2upos.max(m6apos);
 
     for _file in args.wt_bam_files.iter() {
-        stat_map.update_by_region_in_bam(_file.as_ref(), (chr, lb, ub))?;
+        stat_map.update_bam_by_region(_file.as_ref(), (chr, lb, ub))?;
     }
 
-    let methylation_stat = stat_map.frequency_at(c2upos);
+    let methylation_stat = stat_map.stratified_frequency_at(c2upos);
 
     let unmethylated_base = match strand {
         Strand::Forward => Dna::C,
@@ -322,19 +324,24 @@ fn collect_m6a_stat(
 
     if let Some(meth_stat) = methylation_stat {
         for (s, counts) in meth_stat {
-            ret.push((
-                s.clone(),
-                MethylationKey {
-                    chr: chr.into(),
-                    lb,
-                    ub,
-                    gene: gene.clone(),
-                },
-                MethylationData {
-                    methylated: counts.get(Some(&methylated_base)),
-                    unmethylated: counts.get(Some(&unmethylated_base)),
-                },
-            ));
+            let methylated = counts.get(Some(&methylated_base));
+            let unmethylated = counts.get(Some(&unmethylated_base));
+
+            if (s != &CellBarcode::Missing) && (methylated > 0) {
+                ret.push((
+                    s.clone(),
+                    MethylationKey {
+                        chr: chr.into(),
+                        lb,
+                        ub,
+                        gene: gene.clone(),
+                    },
+                    MethylationData {
+                        methylated,
+                        unmethylated,
+                    },
+                ));
+            }
         }
     }
 
