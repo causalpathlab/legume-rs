@@ -759,16 +759,23 @@ pub trait SparseIo: Sync + Send {
         csc_colptr: &[u64],
     ) -> anyhow::Result<()>;
 
+    /// preload row index pointers
     fn read_row_indptr(&mut self) -> anyhow::Result<()>;
 
+    /// preload column index pointers
     fn read_column_indptr(&mut self) -> anyhow::Result<()>;
 
+    /// preload all the columns for faster processing
     fn preload_columns(&mut self) -> anyhow::Result<()>;
 
+    /// unload the memory
     fn clean_preloaded_columns(&mut self);
 
-    /// Backend file name
+    /// backend file name
     fn get_backend_file_name(&self) -> &str;
+
+    /// backend file type
+    fn backend_type(&self) -> SparseIoBackend;
 }
 
 //////////////////////

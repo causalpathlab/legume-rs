@@ -16,7 +16,7 @@ pub enum UmiBarcode {
 }
 
 /// forward vs. backward(reverse) alignment reads
-#[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 pub enum Strand {
     Forward,
     Backward,

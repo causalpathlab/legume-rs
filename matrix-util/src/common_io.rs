@@ -26,6 +26,18 @@ impl From<Vec<char>> for Delimiter {
     }
 }
 
+impl From<&[char]> for Delimiter {
+    fn from(chars: &[char]) -> Self {
+        Delimiter::Chars(chars.to_vec())
+    }
+}
+
+impl<const N: usize> From<&[char; N]> for Delimiter {
+    fn from(chars: &[char; N]) -> Self {
+        Delimiter::Chars(chars.to_vec())
+    }
+}
+
 ///
 /// Read every line of the input_file into memory
 ///
