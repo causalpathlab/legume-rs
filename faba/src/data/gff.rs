@@ -4,8 +4,8 @@ use crate::data::sam::Strand;
 
 use matrix_util::common_io::read_lines_of_words_delim;
 use rayon::prelude::*;
-use std::collections::HashMap;
 use std::collections::hash_map::Iter;
+use std::collections::HashMap;
 
 /// Ignore ENSEMBL version: `ENSGXXXXXXXXXXX.X_X` to `ENSGXXXXXXXXXXX`
 pub fn parse_ensembl_id(ensembl_name: &str) -> Option<&str> {
@@ -41,7 +41,7 @@ impl<'a> Iterator for GffRecordMapIter<'a> {
 
 impl GffRecordMap {
     pub fn from(file_path: &str, feature_type: Option<&FeatureType>) -> anyhow::Result<Self> {
-        let (lines_of_words, _) = read_lines_of_words_delim(file_path, "\t", -1)?;
+        let (lines_of_words, _) = read_lines_of_words_delim(file_path, &['\t', ','], -1)?;
 
         let mut records: HashMap<GeneId, GffRecord> = HashMap::new();
 
@@ -260,7 +260,7 @@ impl From<GeneSymbol> for Box<str> {
 }
 
 /// GFF record
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GffRecord {
     pub seqname: Box<str>,         // sequence name
     pub feature_type: FeatureType, // may need gene only
@@ -279,7 +279,7 @@ pub fn parse_gff(
     words: Vec<Box<str>>,
     target_feature_type: Option<&FeatureType>,
 ) -> Option<GffRecord> {
-    const SEP_ATTR: char = ':';
+    const SPLIT_SEP: char = ';';
     const NUM_FIELDS: usize = 9;
 
     if words.len() != NUM_FIELDS {
@@ -318,7 +318,7 @@ pub fn parse_gff(
         })
     }
 
-    for attr in words[8].split(&[';']) {
+    for attr in words[8].split(SPLIT_SEP).map(|s| s.trim()) {
         let mut kv = attr.split(&[' ', ':', '=']);
 
         match (trim(kv.next()), trim(kv.next())) {

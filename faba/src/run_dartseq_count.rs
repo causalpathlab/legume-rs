@@ -63,11 +63,11 @@ pub struct DartSeqCountArgs {
     gene_type: Box<str>,
 
     /// number of non-zero cutoff for rows/features
-    #[arg(short, long, default_value_t = 100)]
+    #[arg(long, default_value_t = 10)]
     row_nnz_cutoff: usize,
 
     /// number of non-zero cutoff for columns/cells
-    #[arg(short, long, default_value_t = 100)]
+    #[arg(long, default_value_t = 10)]
     column_nnz_cutoff: usize,
 
     /// output value type
@@ -220,7 +220,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         data.register_row_names_vec(&row_names);
         if args.row_nnz_cutoff > 0 || args.column_nnz_cutoff > 0 {
             squeeze_by_nnz(
-                data,
+                &data,
                 SqueezeCutoffs {
                     row: args.row_nnz_cutoff,
                     column: args.column_nnz_cutoff,
@@ -264,7 +264,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         data.register_row_names_vec(&row_names);
         if args.row_nnz_cutoff > 0 || args.column_nnz_cutoff > 0 {
             squeeze_by_nnz(
-                data,
+                &data,
                 SqueezeCutoffs {
                     row: args.row_nnz_cutoff,
                     column: args.column_nnz_cutoff,

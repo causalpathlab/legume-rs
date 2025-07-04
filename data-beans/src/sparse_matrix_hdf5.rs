@@ -317,6 +317,10 @@ impl SparseIo for SparseMtxData {
         &self.file_name
     }
 
+    fn backend_type(&self) -> SparseIoBackend {
+	SparseIoBackend::HDF5
+    }
+
     /// Export the data to a mtx file. This will take time.
     /// * `mtx_file`: mtx file to be written
     fn to_mtx_file(&self, mtx_file: &str) -> anyhow::Result<()> {

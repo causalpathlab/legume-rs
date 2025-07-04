@@ -42,11 +42,11 @@ pub struct ReadDepthArgs {
     gene_type: Box<str>,
 
     /// number of non-zero cutoff for rows/genes
-    #[arg(short, long, default_value_t = 100)]
+    #[arg(short, long, default_value_t = 10)]
     row_nnz_cutoff: usize,
 
     /// number of non-zero cutoff for columns/cells
-    #[arg(short, long, default_value_t = 100)]
+    #[arg(short, long, default_value_t = 10)]
     column_nnz_cutoff: usize,
 
     /// backend for the output file
@@ -111,7 +111,7 @@ pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
                 // define segments as specified by the resolution parameter
                 let start = *lb as usize;
                 let stop = *ub as usize;
-                let segment_size = (stop - start).div_ceil(args.resolution_kb * 1000);
+                let segment_size = args.resolution_kb * 1000;
 
                 // now count them all
                 let mut ret = vec![];
@@ -157,19 +157,30 @@ pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
     data.register_column_names_vec(&col_names);
     data.register_row_names_vec(&row_names);
 
+    info!(
+        "built the data with {} x {}",
+        data.as_ref()
+            .num_rows()
+            .ok_or(anyhow::anyhow!("unknown number of rows"))?,
+        data.as_ref()
+            .num_columns()
+            .ok_or(anyhow::anyhow!("unknown number of columns"))?
+    );
+
+    let block_size = 100;
     if args.row_nnz_cutoff > 0 || args.column_nnz_cutoff > 0 {
         info!("final Q/C to remove excessive zeros");
-
         squeeze_by_nnz(
-            data,
+            &data,
             SqueezeCutoffs {
                 row: args.row_nnz_cutoff,
                 column: args.column_nnz_cutoff,
             },
-            1000,
+            block_size,
         )?;
     }
 
+    info!("done");
     Ok(())
 }
 

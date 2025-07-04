@@ -13,30 +13,38 @@ pub struct SqueezeCutoffs {
     pub row: usize,
     pub column: usize,
 }
+
 pub fn squeeze_by_nnz(
-    mut data: Box<dyn SparseIo<IndexIter = Vec<usize>>>,
+    data: &Box<dyn SparseIo<IndexIter = Vec<usize>>>,
     cutoffs: SqueezeCutoffs,
     block_size: usize,
 ) -> anyhow::Result<()> {
     let col_stat = collect_column_stat(data.as_ref(), block_size)?;
     let row_stat = collect_row_stat(data.as_ref(), block_size)?;
+
+    let file = data.get_backend_file_name();
+    let backend = data.backend_type();
+
+    let mut data = open_sparse_matrix(file, &backend)?;
     data.preload_columns()?;
 
-    fn nnz_index(nnz: &[f32], cutoff: usize) -> Vec<usize> {
-        nnz.iter()
+    fn nnz_index(nnz: &[f32], cutoff: usize) -> Option<Vec<usize>> {
+        let ret: Vec<usize> = nnz
+            .iter()
             .enumerate()
-            .filter_map(|(i, &x)| if (x as usize) > cutoff { Some(i) } else { None })
-            .collect()
+            .filter(|&(_, &x)| (x as usize) >= cutoff)
+            .map(|(i, _)| i)
+            .collect();
+
+        (!ret.is_empty()).then_some(ret)
     }
 
     let row_nnz_vec = row_stat.count_positives().to_vec();
-    let row_idx = nnz_index(&row_nnz_vec, cutoffs.row);
     let col_nnz_vec = col_stat.count_positives().to_vec();
+    let row_idx = nnz_index(&row_nnz_vec, cutoffs.row);
     let col_idx = nnz_index(&col_nnz_vec.to_vec(), cutoffs.column);
 
-    data.subset_columns_rows(Some(&col_idx), Some(&row_idx))?;
-
-    Ok(())
+    data.subset_columns_rows(col_idx.as_ref(), row_idx.as_ref())
 }
 
 /// collect row-wise sufficient statistics for Q/C

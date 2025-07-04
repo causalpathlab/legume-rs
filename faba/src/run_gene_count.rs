@@ -37,11 +37,11 @@ pub struct GeneCountArgs {
     gene_type: Box<str>,
 
     /// number of non-zero cutoff for rows/genes
-    #[arg(short, long, default_value_t = 100)]
+    #[arg(short, long, default_value_t = 10)]
     row_nnz_cutoff: usize,
 
     /// number of non-zero cutoff for columns/cells
-    #[arg(short, long, default_value_t = 100)]
+    #[arg(short, long, default_value_t = 10)]
     column_nnz_cutoff: usize,
 
     /// backend for the output file
@@ -114,7 +114,7 @@ pub fn run_gene_count(args: &GeneCountArgs) -> anyhow::Result<()> {
 
     if args.row_nnz_cutoff > 0 || args.column_nnz_cutoff > 0 {
         squeeze_by_nnz(
-            data,
+            &data,
             SqueezeCutoffs {
                 row: args.row_nnz_cutoff,
                 column: args.column_nnz_cutoff,

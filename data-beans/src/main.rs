@@ -1398,25 +1398,9 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         data.num_columns().unwrap()
     );
 
-    let row_stat = collect_row_stat(data.as_ref(), cmd_args.block_size)?;
-    let col_stat = collect_column_stat(data.as_ref(), cmd_args.block_size)?;
+    squeeze_by_nnz(&data, SqueezeCutoffs{ row: row_nnz_cutoff, column: col_nnz_cutoff}, cmd_args.block_size)?;
 
-    let mut data = open_sparse_matrix(&data_file, &backend)?;
-    data.preload_columns()?;
-
-    fn nnz_index(nnz: &[f32], cutoff: usize) -> Vec<usize> {
-        nnz.iter()
-            .enumerate()
-            .filter_map(|(i, &x)| if (x as usize) > cutoff { Some(i) } else { None })
-            .collect()
-    }
-
-    let row_nnz_vec = row_stat.count_positives().to_vec();
-    let row_idx = nnz_index(&row_nnz_vec, row_nnz_cutoff);
-    let col_nnz_vec = col_stat.count_positives().to_vec();
-    let col_idx = nnz_index(&col_nnz_vec.to_vec(), col_nnz_cutoff);
-
-    data.subset_columns_rows(Some(&col_idx), Some(&row_idx))?;
+    let data = open_sparse_matrix(&data_file, &backend)?;    
 
     info!(
         "after squeeze -- data: {} rows x {} columns",
