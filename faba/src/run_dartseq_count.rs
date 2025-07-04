@@ -3,18 +3,17 @@ use crate::dartseq_sifter::*;
 use crate::data::dna::Dna;
 use crate::data::dna_stat_map::*;
 use crate::data::dna_stat_traits::*;
-use crate::data::gff::*;
 use crate::data::methylation::*;
 use crate::data::positions::*;
-use crate::data::sam::*;
 use crate::data::util_htslib::*;
 
+use data_beans::qc::*;
 use data_beans::sparse_io::*;
+use fnv::FnvHashMap as HashMap;
 use matrix_util::common_io::remove_file;
-use std::collections::{HashMap, HashSet};
 
 #[derive(Args, Debug)]
-pub struct CountDartSeqArgs {
+pub struct DartSeqCountArgs {
     /// Observed (WT) `.bam` files where `C->U` (`C->T`) conversions happen
     #[arg(short = 'w', long = "wt", value_delimiter = ',', required = true)]
     wt_bam_files: Vec<Box<str>>,
@@ -55,16 +54,21 @@ pub struct CountDartSeqArgs {
     #[arg(short, long, default_value_t = 0.05)]
     pvalue_cutoff: f64,
 
-    // /// save .mtx file along with row and column names
-    // #[arg(long, default_value_t = false)]
-    // save_mtx: bool,
-    /// feature type (gene, transcript, exon, utr)
+    /// bam record type (gene, transcript, exon, utr)
     #[arg(long, default_value = "gene")]
-    record_feature_type: Box<str>,
+    record_type: Box<str>,
 
     /// gene type (protein_coding, pseudogene, lncRNA)
     #[arg(long, default_value = "protein_coding")]
     gene_type: Box<str>,
+
+    /// number of non-zero cutoff for rows/features
+    #[arg(short, long, default_value_t = 100)]
+    row_nnz_cutoff: usize,
+
+    /// number of non-zero cutoff for columns/cells
+    #[arg(short, long, default_value_t = 100)]
+    column_nnz_cutoff: usize,
 
     /// output value type
     #[arg(short = 't', long, value_enum, default_value = "methylated")]
@@ -82,9 +86,9 @@ pub struct CountDartSeqArgs {
 /// Count possibly methylated A positions in DART-seq bam files to
 /// quantify m6A β values
 ///
-pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
+pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     if args.wt_bam_files.is_empty() || args.mut_bam_files.is_empty() {
-        return Err(anyhow::anyhow!("need matching pairs of bam files"));
+        return Err(anyhow::anyhow!("need pairs of bam files"));
     }
 
     if args.wt_bam_files.is_empty() || args.mut_bam_files.is_empty() {
@@ -99,7 +103,7 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
         check_bam_index(x, None)?;
     }
 
-    let record_feature_type: FeatureType = args.record_feature_type.as_ref().into();
+    let record_feature_type: FeatureType = args.record_type.as_ref().into();
 
     info!("parsing GFF file: {}", args.gff_file);
 
@@ -109,6 +113,7 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
     info!("found {} features", gff_map.len(),);
 
     if gff_map.is_empty() {
+        info!("empty gff map");
         return Ok(());
     }
 
@@ -131,6 +136,11 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
         .filter(|x| x.gene_id != Gene::Missing)
         .collect::<Vec<_>>();
 
+    if sites.is_empty() {
+        info!("no sites found");
+        return Ok(());
+    }
+
     ///////////////////////////////////
     // 2. collect all the statistics //
     ///////////////////////////////////
@@ -142,11 +152,16 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
         .into_iter()
         .par_bridge()
         .progress_count(nsites)
-        .map(|x| collect_m6a_stat(args, &x))
+        .map(|x| collect_m6a_stat(args, &gff_map, &x))
         .collect::<anyhow::Result<Vec<_>>>()?
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
+
+    if stats.is_empty() {
+        info!("empty stats");
+        return Ok(());
+    }
 
     /////////////////////////////////////
     // 3. Aggregate them into triplets //
@@ -155,14 +170,26 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
     let backend = args.backend.clone();
 
     info!(
-        "aggregating {} value triplets over {} stats...",
+        "aggregating the '{}' triplets over {} stats...",
         args.output_value_type,
         stats.len()
     );
 
+    let take_value = |dat: &MethylationData| -> f32 {
+        match args.output_value_type {
+            MethFeatureType::Beta => {
+                let tot = (dat.methylated + dat.unmethylated) as f32;
+                let beta = (dat.methylated as f32) / tot.max(1.);
+                beta
+            }
+            MethFeatureType::Methylated => dat.methylated as f32,
+            MethFeatureType::Unmethylated => dat.unmethylated as f32,
+        }
+    };
+
     {
-        let mut site_level_data: HashMap<(MethylationKey, CellBarcode), MethylationData> =
-            HashMap::new();
+        let mut site_level_data: HashMap<(BedWithGene, CellBarcode), MethylationData> =
+            HashMap::default();
 
         for (cb, k, dat) in stats.iter() {
             let site = k.clone();
@@ -171,10 +198,14 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
             accum.add_assign(dat);
         }
 
-        let (triplets, row_names, col_names) = format_data_triplets(site_level_data, args);
+        let site_level_data = site_level_data
+            .into_iter()
+            .map(|((s, c), v)| (c, s, take_value(&v)))
+            .collect::<Vec<_>>();
+
+        let (triplets, row_names, col_names) = format_data_triplets(site_level_data);
 
         let mtx_shape = (row_names.len(), col_names.len(), triplets.len());
-
         let output = args.output.clone();
         let backend_file = match backend {
             SparseIoBackend::HDF5 => format!("{}_site.h5", &output),
@@ -187,11 +218,22 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
             create_sparse_from_triplets(triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
         data.register_column_names_vec(&col_names);
         data.register_row_names_vec(&row_names);
+        if args.row_nnz_cutoff > 0 || args.column_nnz_cutoff > 0 {
+            squeeze_by_nnz(
+                data,
+                SqueezeCutoffs {
+                    row: args.row_nnz_cutoff,
+                    column: args.column_nnz_cutoff,
+                },
+                args.block_size,
+            )?;
+        }
     }
 
     {
         // aggregate over gene-level
-        let mut gene_level_data: HashMap<(GeneId, CellBarcode), MethylationData> = HashMap::new();
+        let mut gene_level_data: HashMap<(GeneId, CellBarcode), MethylationData> =
+            HashMap::default();
 
         for (cb, k, dat) in stats.iter() {
             let gene = k.gene.clone();
@@ -200,10 +242,14 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
             accum.add_assign(dat);
         }
 
-        let (triplets, row_names, col_names) = format_data_triplets(gene_level_data, args);
+        let gene_level_data = gene_level_data
+            .into_iter()
+            .map(|((s, c), v)| (c, s, take_value(&v)))
+            .collect::<Vec<_>>();
+
+        let (triplets, row_names, col_names) = format_data_triplets(gene_level_data);
 
         let mtx_shape = (row_names.len(), col_names.len(), triplets.len());
-
         let output = args.output.clone();
         let backend_file = match backend {
             SparseIoBackend::HDF5 => format!("{}_gene.h5", &output),
@@ -216,6 +262,16 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
             create_sparse_from_triplets(triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
         data.register_column_names_vec(&col_names);
         data.register_row_names_vec(&row_names);
+        if args.row_nnz_cutoff > 0 || args.column_nnz_cutoff > 0 {
+            squeeze_by_nnz(
+                data,
+                SqueezeCutoffs {
+                    row: args.row_nnz_cutoff,
+                    column: args.column_nnz_cutoff,
+                },
+                args.block_size,
+            )?;
+        }
     }
 
     info!("done");
@@ -228,7 +284,7 @@ pub fn run_count_dartseq(args: &CountDartSeqArgs) -> anyhow::Result<()> {
 
 fn find_methylated_sites_in_gene(
     rec: &GffRecord,
-    args: &CountDartSeqArgs,
+    args: &DartSeqCountArgs,
 ) -> anyhow::Result<Vec<MethylatedSite>> {
     let chr = rec.seqname.clone();
     let strand = rec.strand.clone();
@@ -282,9 +338,10 @@ fn find_methylated_sites_in_gene(
 ///////////////////////////////////////////////////////////////////
 
 fn collect_m6a_stat(
-    args: &CountDartSeqArgs,
+    args: &DartSeqCountArgs,
+    gff_map: &GffRecordMap,
     chr_m6a_c2u: &MethylatedSite,
-) -> anyhow::Result<Vec<(CellBarcode, MethylationKey, MethylationData)>> {
+) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
     let mut stat_map = DnaBaseFreqMap::new(&args.cell_barcode_tag);
     let m6apos = chr_m6a_c2u.m6a_pos;
     let c2upos = chr_m6a_c2u.conversion_pos;
@@ -295,8 +352,14 @@ fn collect_m6a_stat(
     let lb = m6apos.min(c2upos);
     let ub = c2upos.max(m6apos);
 
-    for _file in args.wt_bam_files.iter() {
-        stat_map.update_bam_by_region(_file.as_ref(), (chr, lb, ub))?;
+    // need to read bam files with the matching gene contexts
+    if let Some(gff_record) = gff_map.get(gene) {
+        let mut gff = gff_record.clone();
+        gff.start = (lb - 1).max(0); // padding
+        gff.stop = ub + 1; // padding
+        for _file in args.wt_bam_files.iter() {
+            stat_map.update_bam_by_gene(_file, &gff, &args.gene_barcode_tag)?;
+        }
     }
 
     let methylation_stat = stat_map.stratified_frequency_at(c2upos);
@@ -330,10 +393,10 @@ fn collect_m6a_stat(
             if (s != &CellBarcode::Missing) && (methylated > 0) {
                 ret.push((
                     s.clone(),
-                    MethylationKey {
+                    BedWithGene {
                         chr: chr.into(),
-                        lb,
-                        ub,
+                        start: lb,
+                        stop: ub,
                         gene: gene.clone(),
                     },
                     MethylationData {
@@ -343,72 +406,9 @@ fn collect_m6a_stat(
                 ));
             }
         }
-    }
+    } //  else {
+    //     panic!("");
+    // }
 
     Ok(ret)
-}
-
-fn format_data_triplets<Feat>(
-    pair_to_data: HashMap<(Feat, CellBarcode), MethylationData>,
-    args: &CountDartSeqArgs,
-) -> (Vec<(u64, u64, f32)>, Vec<Box<str>>, Vec<Box<str>>)
-where
-    Feat: std::hash::Hash + std::cmp::Eq + std::cmp::Ord + Clone + Send + ToString,
-{
-    // identify unique samples and sites
-    let mut unique_cells = HashSet::new();
-    let mut unique_sites = HashSet::new();
-
-    for (k, cb) in pair_to_data.keys() {
-        unique_sites.insert(k.clone());
-        unique_cells.insert(cb.clone());
-    }
-
-    let mut unique_cells = unique_cells.into_iter().collect::<Vec<_>>();
-    unique_cells.sort();
-    let cell_to_index: HashMap<CellBarcode, usize> = unique_cells
-        .into_iter()
-        .enumerate()
-        .map(|(i, sample)| (sample, i))
-        .collect();
-
-    let mut unique_features = unique_sites.into_iter().collect::<Vec<_>>();
-    unique_features.par_sort();
-
-    let feature_to_index: HashMap<Feat, usize> = unique_features
-        .into_iter()
-        .enumerate()
-        .map(|(i, site)| (site, i))
-        .collect();
-
-    // relabel triplets with indices
-    let mut relabeled_triplets = Vec::with_capacity(pair_to_data.len());
-    for ((k, cb), dat) in pair_to_data {
-        let row_idx = feature_to_index[&k] as u64;
-        let col_idx = cell_to_index[&cb] as u64;
-
-        let value = match args.output_value_type {
-            MethFeatureType::Beta => {
-                let tot = (dat.methylated + dat.unmethylated) as f32;
-                let beta = (dat.methylated as f32) / tot.max(1.);
-                beta
-            }
-            MethFeatureType::Methylated => dat.methylated as f32,
-            MethFeatureType::Unmethylated => dat.unmethylated as f32,
-        };
-
-        relabeled_triplets.push((row_idx, col_idx, value));
-    }
-
-    let mut cells = vec!["".into(); cell_to_index.len()];
-    for (k, j) in cell_to_index {
-        cells[j] = k.to_string().into_boxed_str();
-    }
-
-    let mut features = vec!["".into(); feature_to_index.len()];
-    for (k, j) in feature_to_index {
-        features[j] = k.to_string().into_boxed_str();
-    }
-
-    (relabeled_triplets, features, cells)
 }

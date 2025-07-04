@@ -1,7 +1,7 @@
 #![allow(dead_code)]
+
 use crate::sparse_io_vector::SparseIoVec;
 use indicatif::ParallelProgressIterator;
-
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
@@ -74,7 +74,7 @@ impl VisitColumnsOps for SparseIoVec {
         groups_to_cells: &[Vec<usize>],
         visitor: &Visitor,
         shared_in: &SharedIn,
-        shared_data: &mut SharedOut,
+        shared_out: &mut SharedOut,
     ) -> anyhow::Result<()>
     where
         Visitor: Fn(
@@ -89,7 +89,7 @@ impl VisitColumnsOps for SparseIoVec {
         SharedIn: Sync + Send,
         SharedOut: Sync + Send,
     {
-        let arc_shared_data = Arc::new(Mutex::new(shared_data));
+        let arc_shared_out = Arc::new(Mutex::new(shared_out));
         let num_samples = groups_to_cells.len();
         let num_jobs = num_samples as u64;
 
@@ -98,7 +98,7 @@ impl VisitColumnsOps for SparseIoVec {
             .enumerate()
             .par_bridge()
             .progress_count(num_jobs)
-            .map(|(sample, cells)| visitor(sample, cells, self, shared_in, arc_shared_data.clone()))
+            .map(|(sample, cells)| visitor(sample, cells, self, shared_in, arc_shared_out.clone()))
             .collect()
     }
 }

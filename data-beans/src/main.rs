@@ -1,17 +1,16 @@
 mod misc;
+mod qc;
 mod simulate;
 mod sparse_data_visitors;
 mod sparse_io;
 mod sparse_io_vector;
 mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
-mod statistics;
 
 use crate::misc::*;
-use crate::sparse_data_visitors::*;
+use crate::qc::*;
 use crate::sparse_io::*;
 use crate::sparse_io_vector::*;
-use crate::statistics::RunningStatistics;
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use indicatif::ParallelProgressIterator;
@@ -161,10 +160,8 @@ enum Commands {
     /// Take basic statistics from a sparse matrix (same as `statistics`)
     Stat(RunStatArgs),
 
-    /// Simulate Poisson factorization data with batch effects:
-    /// `Y(i,j) ~ δ(i,B(j)) sum_k β(i,k) * θ(j,k)` where the β and θ
-    /// parameters are sampled from Gamma, and the batch effect
-    /// `ln(δ)` has a batch assignment `B(j)` and random noise.
+    /// For `Y(i,j) ~ δ(i,B(j)) Σ β(i,k) θ(j,k)`, where β,θ ~ Gamma;
+    /// `B(j)` = batch for a cell `j`; `ln δ` ~ Normal
     Simulate(RunSimulateArgs),
 }
 
@@ -1322,76 +1319,52 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", file)),
     };
 
-    let mut data = SparseIoVec::new();
-    for data_file in cmd_args.data_files.iter() {
-        match common_io::extension(data_file)?.as_ref() {
-            "zarr" => {
-                assert_eq!(backend, SparseIoBackend::Zarr);
-            }
-            "h5" => {
-                assert_eq!(backend, SparseIoBackend::HDF5);
-            }
-            _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
-        };
+    if cmd_args.data_files.len() == 1 {
+        let backend_file = cmd_args.data_files[0].as_ref();
+        let data = open_sparse_matrix(backend_file, &backend)?;
 
-        let this_data = open_sparse_matrix(data_file, &backend)?;
-        let data_name = basename(data_file)?;
-        data.push(Arc::from(this_data), Some(data_name))?;
+        match cmd_args.stat_dim {
+            StatDim::Row => {
+                let row_stat = collect_row_stat(data.as_ref(), cmd_args.block_size)?;
+                row_stat.save(&cmd_args.output, &data.row_names()?, "\t")?;
+            }
+            StatDim::Column => {
+                let col_stat = collect_column_stat(data.as_ref(), cmd_args.block_size)?;
+                col_stat.save(&cmd_args.output, &data.column_names()?, "\t")?;
+            }
+        }
+    } else {
+        let mut data = SparseIoVec::new();
+        for data_file in cmd_args.data_files.iter() {
+            match common_io::extension(data_file)?.as_ref() {
+                "zarr" => {
+                    assert_eq!(backend, SparseIoBackend::Zarr);
+                }
+                "h5" => {
+                    assert_eq!(backend, SparseIoBackend::HDF5);
+                }
+                _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
+            };
+
+            let this_data = open_sparse_matrix(data_file, &backend)?;
+            let data_name = basename(data_file)?;
+            data.push(Arc::from(this_data), Some(data_name))?;
+        }
+
+        match cmd_args.stat_dim {
+            StatDim::Row => {
+                let row_stat = collect_row_stat_across_vec(&data, cmd_args.block_size)?;
+                row_stat.save(&cmd_args.output, &data.row_names()?, "\t")?;
+            }
+            StatDim::Column => {
+                let col_stat = collect_column_stat_across_vec(&data, cmd_args.block_size)?;
+
+                col_stat.save(&cmd_args.output, &data.column_names()?, "\t")?;
+            }
+        };
     }
 
-    match cmd_args.stat_dim {
-        StatDim::Row => {
-            let mut row_stat = RunningStatistics::new(Ix1(data.num_rows()?));
-            data.visit_columns_by_block(
-                &row_stat_visitor,
-                &EmptyArgs {},
-                &mut row_stat,
-                Some(cmd_args.block_size),
-            )?;
-
-            row_stat.save(&cmd_args.output, &data.row_names()?, "\t")?;
-        }
-        StatDim::Column => {
-            let mut col_stat = RunningStatistics::new(Ix1(data.num_columns()?));
-            data.visit_columns_by_block(
-                &col_stat_visitor,
-                &EmptyArgs {},
-                &mut col_stat,
-                Some(cmd_args.block_size),
-            )?;
-            col_stat.save(&cmd_args.output, &data.column_names()?, "\t")?;
-        }
-    };
-
     Ok(())
-}
-
-fn collect_row_stat(
-    data: &SparseIoVec,
-    block_size: usize,
-) -> anyhow::Result<RunningStatistics<Ix1>> {
-    let mut row_stat = RunningStatistics::new(Ix1(data.num_rows()?));
-    data.visit_columns_by_block(
-        &row_stat_visitor,
-        &EmptyArgs {},
-        &mut row_stat,
-        Some(block_size),
-    )?;
-    Ok(row_stat)
-}
-
-fn collect_column_stat(
-    data: &SparseIoVec,
-    block_size: usize,
-) -> anyhow::Result<RunningStatistics<Ix1>> {
-    let mut col_stat = RunningStatistics::new(Ix1(data.num_columns()?));
-    data.visit_columns_by_block(
-        &col_stat_visitor,
-        &EmptyArgs {},
-        &mut col_stat,
-        Some(block_size),
-    )?;
-    Ok(col_stat)
 }
 
 fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
@@ -1425,12 +1398,8 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         data.num_columns().unwrap()
     );
 
-    let mut data_vec = SparseIoVec::new();
-    let data_name = basename(&data_file)?;
-    data_vec.push(Arc::from(data), Some(data_name))?;
-
-    let row_stat = collect_row_stat(&data_vec, cmd_args.block_size)?;
-    let col_stat = collect_column_stat(&data_vec, cmd_args.block_size)?;
+    let row_stat = collect_row_stat(data.as_ref(), cmd_args.block_size)?;
+    let col_stat = collect_column_stat(data.as_ref(), cmd_args.block_size)?;
 
     let mut data = open_sparse_matrix(&data_file, &backend)?;
     data.preload_columns()?;
@@ -1454,21 +1423,6 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         data.num_rows().unwrap(),
         data.num_columns().unwrap()
     );
-
-    let hdr = data_file.replace(file_ext(&data_file)?.as_ref(), "");
-    let row_idx_file = format!("{}row.idx.gz", hdr);
-    let col_idx_file = format!("{}col.idx.gz", hdr);
-
-    fn to_str_vec(v: &[usize]) -> Vec<Box<str>> {
-        v.iter()
-            .map(|x| format!("{}", x).into_boxed_str())
-            .collect()
-    }
-
-    let col_idx = to_str_vec(&col_idx);
-    let row_idx = to_str_vec(&row_idx);
-    common_io::write_lines(&col_idx, &col_idx_file)?;
-    common_io::write_lines(&row_idx, &row_idx_file)?;
 
     Ok(())
 }
@@ -1574,43 +1528,5 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     data.register_column_names_vec(&cols);
 
     info!("done");
-    Ok(())
-}
-
-struct EmptyArgs {}
-
-fn row_stat_visitor(
-    job: (usize, usize),
-    data: &SparseIoVec,
-    _: &EmptyArgs,
-    arc_stat: Arc<Mutex<&mut RunningStatistics<Ix1>>>,
-) -> anyhow::Result<()> {
-    let (lb, ub) = job;
-    let xx = data.read_columns_ndarray(lb..ub)?;
-
-    let mut stat = arc_stat.lock().expect("failed to lock row_stat");
-    for x in xx.axis_iter(Axis(1)) {
-        stat.add(&x);
-    }
-    Ok(())
-}
-
-fn col_stat_visitor(
-    job: (usize, usize),
-    data: &SparseIoVec,
-    _: &EmptyArgs,
-    arc_stat: Arc<Mutex<&mut RunningStatistics<Ix1>>>,
-) -> anyhow::Result<()> {
-    let (lb, ub) = job;
-    let xx = data.read_columns_ndarray(lb..ub)?;
-    let mut stat = arc_stat.lock().expect("failed to lock col_stat");
-
-    for x in xx.axis_iter(Axis(0)) {
-        for j in lb..ub {
-            let i = j - lb;
-            stat.add_element(&[j], x[i]);
-        }
-    }
-
     Ok(())
 }

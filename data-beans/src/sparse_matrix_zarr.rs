@@ -238,10 +238,10 @@ impl SparseMtxData {
         S: ndarray::Data<Elem = V> + Clone,
         D: ndarray::Dimension + ndarray::RemoveAxis,
     {
-        use zarrs::array::codec::ZstdCodec;
         use zarrs::array::ArrayBuilder;
         use zarrs::array::DataType;
         use zarrs::array::FillValue;
+        use zarrs::array::codec::ZstdCodec;
 
         let fill = match dt {
             DataType::Float32 => FillValue::from(zarrs::array::ZARR_NAN_F32),
@@ -284,10 +284,10 @@ impl SparseMtxData {
     where
         V: zarrs::array::Element,
     {
-        use zarrs::array::codec::ZstdCodec;
         use zarrs::array::ArrayBuilder;
         use zarrs::array::DataType;
         use zarrs::array::FillValue;
+        use zarrs::array::codec::ZstdCodec;
         // use zarrs::array::ZARR_NAN_F32;
 
         let nelem = vec.len();

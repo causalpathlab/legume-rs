@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use matrix_util::common_io::write_lines;
+use crate::common_io::write_lines;
 use ndarray::{ArrayBase, Axis, Data, Dimension, NdIndex, OwnedRepr, RemoveAxis};
 
 /// A container to keep track of sufficient statistics of an arbitrary
@@ -117,19 +117,11 @@ where
     //////////////////////
 
     fn _finite(x: f32) -> f32 {
-        if x.is_finite() {
-            x
-        } else {
-            0_f32
-        }
+        if x.is_finite() { x } else { 0_f32 }
     }
 
     fn _is_finite(x: f32) -> f32 {
-        if x.is_finite() {
-            1_f32
-        } else {
-            0_f32
-        }
+        if x.is_finite() { 1_f32 } else { 0_f32 }
     }
 
     fn _is_positive(x: f32) -> f32 {

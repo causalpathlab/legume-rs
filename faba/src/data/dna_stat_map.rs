@@ -6,7 +6,10 @@ use crate::data::sam::*;
 use crate::data::visitors_htslib::*;
 
 use rust_htslib::bam::{self, ext::BamRecordExtensions, record::Aux};
-use std::collections::{HashMap, HashSet};
+
+pub use fnv::{FnvHashMap as HashMap, FnvHashSet as HashSet};
+
+// pub use std::collections::{HashMap, HashSet};
 
 pub struct DnaBaseFreqMap<'a> {
     position_to_count_with_cell: HashMap<i64, HashMap<CellBarcode, DnaBaseCount>>,
@@ -18,7 +21,7 @@ pub struct DnaBaseFreqMap<'a> {
 impl<'a> VisitWithBamOps for DnaBaseFreqMap<'a> {}
 
 impl<'a> DnaStatMap for DnaBaseFreqMap<'a> {
-    fn add_bam_record(&mut self, bam_record: bam::Record, lb: i64, ub: i64) {
+    fn add_bam_record(&mut self, bam_record: bam::Record) {
         let cell_barcode = match bam_record.aux(&self.cell_barcode_tag) {
             Ok(Aux::String(barcode)) => CellBarcode::Barcode(barcode.into()),
             _ => CellBarcode::Missing,
@@ -41,17 +44,11 @@ impl<'a> DnaStatMap for DnaBaseFreqMap<'a> {
 
         // Note: these are zero-based positions
         for [rpos, gpos] in bam_record.aligned_pairs() {
-            let (r, g, v) = (rpos as usize, gpos as usize, gpos - lb);
-
-            if g < (lb as usize) || g >= (ub as usize) || v < 0 {
-                continue;
-            }
-
-            let base = Dna::from_byte(seq[r]);
+            let base = Dna::from_byte(seq[rpos as usize]);
             let genome_pos = gpos + 1; // 1-based position
 
             if !self.positions.contains(&genome_pos) {
-                self.positions.insert(genome_pos.clone());
+                self.positions.insert(genome_pos);
             }
 
             let freq_map = self
@@ -81,9 +78,9 @@ impl<'a> DnaStatMap for DnaBaseFreqMap<'a> {
 impl<'a> DnaBaseFreqMap<'a> {
     pub fn new(cell_barcode_tag: &'a str) -> Self {
         Self {
-            position_to_count_with_cell: HashMap::new(),
-            cells: HashSet::new(),
-            positions: HashSet::new(),
+            position_to_count_with_cell: HashMap::default(),
+            cells: HashSet::default(),
+            positions: HashSet::default(),
             cell_barcode_tag: cell_barcode_tag.as_bytes(),
         }
     }
@@ -96,8 +93,7 @@ impl<'a> DnaBaseFreqMap<'a> {
 
     /// frequency map by position across all the cells
     pub fn marginal_frequency_map(&self) -> HashMap<i64, DnaBaseCount> {
-        let mut ret: HashMap<i64, DnaBaseCount> =
-            HashMap::with_capacity(self.position_to_count_with_cell.len());
+        let mut ret: HashMap<i64, DnaBaseCount> = HashMap::default();
 
         for (&pos, freq_map) in self.position_to_count_with_cell.iter() {
             let accum = ret.entry(pos).or_insert_with(DnaBaseCount::new);
