@@ -7,9 +7,9 @@ use crate::data::methylation::*;
 use crate::data::positions::*;
 use crate::data::util_htslib::*;
 
+use dashmap::DashMap as HashMap;
 use data_beans::qc::*;
 use data_beans::sparse_io::*;
-use fnv::FnvHashMap as HashMap;
 use matrix_util::common_io::remove_file;
 
 #[derive(Args, Debug)]
@@ -26,9 +26,9 @@ pub struct DartSeqCountArgs {
     #[arg(short = 'g', long = "gff", required = true)]
     gff_file: Box<str>,
 
-    /// block size for parallelism (bp)
-    #[arg(short = 'b', long, default_value_t = 100_000)]
-    block_size: usize,
+    /// resolution (in kb)
+    #[arg(short = 'r', long)]
+    resolution_kb: Option<f32>,
 
     /// (10x) cell/sample barcode tag. [See here](`https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam`)
     #[arg(long, default_value = "CB")]
@@ -37,10 +37,6 @@ pub struct DartSeqCountArgs {
     /// gene barcode tag. [See here](`https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam`)
     #[arg(long, default_value = "GX")]
     gene_barcode_tag: Box<str>,
-
-    /// resolution (bp)
-    #[arg(short = 'r', long)]
-    resolution: Option<usize>,
 
     /// minimum number of total reads per site
     #[arg(long, default_value_t = 3)]
@@ -73,6 +69,10 @@ pub struct DartSeqCountArgs {
     /// output value type
     #[arg(short = 't', long, value_enum, default_value = "methylated")]
     output_value_type: MethFeatureType,
+
+    /// output value type
+    #[arg(long, default_value_t = false)]
+    gene_level_output: bool,
 
     /// backend for the output file
     #[arg(long, value_enum, default_value = "zarr")]
@@ -187,60 +187,27 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         }
     };
 
-    {
-        let mut site_level_data: HashMap<(BedWithGene, CellBarcode), MethylationData> =
-            HashMap::default();
+    let backend_file = match backend {
+        SparseIoBackend::HDF5 => format!("{}.h5", &args.output),
+        SparseIoBackend::Zarr => format!("{}.zarr", &args.output),
+    };
+    remove_file(&backend_file)?;
 
-        for (cb, k, dat) in stats.iter() {
-            let site = k.clone();
-            let cell = cb.clone();
-            let accum = site_level_data.entry((site, cell)).or_default();
-            accum.add_assign(dat);
-        }
+    let data = if args.gene_level_output {
+        info!("combining them into gene-level data");
 
-        let site_level_data = site_level_data
-            .into_iter()
-            .map(|((s, c), v)| (c, s, take_value(&v)))
-            .collect::<Vec<_>>();
+        let gene_level_data: HashMap<(GeneId, CellBarcode), MethylationData> = HashMap::default();
 
-        let (triplets, row_names, col_names) = format_data_triplets(site_level_data);
-
-        let mtx_shape = (row_names.len(), col_names.len(), triplets.len());
-        let output = args.output.clone();
-        let backend_file = match backend {
-            SparseIoBackend::HDF5 => format!("{}_site.h5", &output),
-            SparseIoBackend::Zarr => format!("{}_site.zarr", &output),
-        };
-
-        remove_file(&backend_file)?;
-
-        let mut data =
-            create_sparse_from_triplets(triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
-        data.register_column_names_vec(&col_names);
-        data.register_row_names_vec(&row_names);
-        if args.row_nnz_cutoff > 0 || args.column_nnz_cutoff > 0 {
-            squeeze_by_nnz(
-                &data,
-                SqueezeCutoffs {
-                    row: args.row_nnz_cutoff,
-                    column: args.column_nnz_cutoff,
-                },
-                args.block_size,
-            )?;
-        }
-    }
-
-    {
-        // aggregate over gene-level
-        let mut gene_level_data: HashMap<(GeneId, CellBarcode), MethylationData> =
-            HashMap::default();
-
-        for (cb, k, dat) in stats.iter() {
+        stats.par_iter().for_each(|(cb, k, dat)| {
             let gene = k.gene.clone();
             let cell = cb.clone();
-            let accum = gene_level_data.entry((gene, cell)).or_default();
-            accum.add_assign(dat);
-        }
+            gene_level_data
+                .entry((gene, cell))
+                .or_default()
+                .add_assign(dat);
+        });
+
+        info!("found {} gene x cell pairs", gene_level_data.len());
 
         let gene_level_data = gene_level_data
             .into_iter()
@@ -250,28 +217,55 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         let (triplets, row_names, col_names) = format_data_triplets(gene_level_data);
 
         let mtx_shape = (row_names.len(), col_names.len(), triplets.len());
-        let output = args.output.clone();
-        let backend_file = match backend {
-            SparseIoBackend::HDF5 => format!("{}_gene.h5", &output),
-            SparseIoBackend::Zarr => format!("{}_gene.zarr", &output),
-        };
+        let mut data =
+            create_sparse_from_triplets(triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
+        data.register_column_names_vec(&col_names);
+        data.register_row_names_vec(&row_names);
 
-        remove_file(&backend_file)?;
+        data
+    } else {
+        let site_level_data: HashMap<(BedWithGene, CellBarcode), MethylationData> =
+            HashMap::default();
+
+        info!("combining them into site/segment-level data");
+
+        stats.par_iter().for_each(|(cb, k, dat)| {
+            let site = k.clone();
+            let cell = cb.clone();
+            let key = (site, cell);
+            site_level_data.entry(key).or_default().add_assign(dat);
+        });
+
+        info!("found {} gene x cell pairs", site_level_data.len());
+
+        let site_level_data = site_level_data
+            .into_iter()
+            .map(|((s, c), v)| (c, s, take_value(&v)))
+            .collect::<Vec<_>>();
+
+        let (triplets, row_names, col_names) = format_data_triplets(site_level_data);
+
+        let mtx_shape = (row_names.len(), col_names.len(), triplets.len());
 
         let mut data =
             create_sparse_from_triplets(triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
         data.register_column_names_vec(&col_names);
         data.register_row_names_vec(&row_names);
-        if args.row_nnz_cutoff > 0 || args.column_nnz_cutoff > 0 {
-            squeeze_by_nnz(
-                &data,
-                SqueezeCutoffs {
-                    row: args.row_nnz_cutoff,
-                    column: args.column_nnz_cutoff,
-                },
-                args.block_size,
-            )?;
-        }
+
+        data
+    };
+
+    if args.row_nnz_cutoff > 0 || args.column_nnz_cutoff > 0 {
+        info!("final Q/C to remove excessive zeros");
+        let block_size = 100;
+        squeeze_by_nnz(
+            &data,
+            SqueezeCutoffs {
+                row: args.row_nnz_cutoff,
+                column: args.column_nnz_cutoff,
+            },
+            block_size,
+        )?;
     }
 
     info!("done");
@@ -374,7 +368,8 @@ fn collect_m6a_stat(
         Strand::Backward => Dna::A,
     };
 
-    let (lb, ub) = if let Some(r) = args.resolution {
+    let (lb, ub) = if let Some(r) = args.resolution_kb {
+        let r = (r * 1000.0) as usize;
         (
             ((m6apos as usize) / r * r + 1) as i64,
             ((m6apos as usize).div_ceil(r) * r) as i64,
@@ -407,8 +402,8 @@ fn collect_m6a_stat(
             }
         }
     } //  else {
-    //     panic!("");
-    // }
+      //     panic!("");
+      // }
 
     Ok(ret)
 }
