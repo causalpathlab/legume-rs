@@ -171,7 +171,7 @@ pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
         info!("final Q/C to remove excessive zeros");
         let block_size = 100;
         squeeze_by_nnz(
-            &data,
+            data.as_ref(),
             SqueezeCutoffs {
                 row: args.row_nnz_cutoff,
                 column: args.column_nnz_cutoff,
@@ -189,7 +189,7 @@ struct ReadCoverage<'a> {
     cell_barcode_tag: &'a str,
 }
 
-impl<'a> VisitWithBamOps for ReadCoverage<'a> {}
+impl VisitWithBamOps for ReadCoverage<'_> {}
 
 impl<'a> ReadCoverage<'a> {
     fn new(cell_barcode_tag: &'a str) -> Self {
@@ -215,7 +215,7 @@ impl<'a> ReadCoverage<'a> {
     }
 
     fn update(&mut self, chr: &str, bam_record: bam::Record) {
-        let cell_barcode = match bam_record.aux(&self.cell_barcode_tag.as_bytes()) {
+        let cell_barcode = match bam_record.aux(self.cell_barcode_tag.as_bytes()) {
             Ok(Aux::String(barcode)) => CellBarcode::Barcode(barcode.into()),
             _ => CellBarcode::Missing,
         };

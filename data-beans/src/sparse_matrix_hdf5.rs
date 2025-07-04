@@ -318,7 +318,7 @@ impl SparseIo for SparseMtxData {
     }
 
     fn backend_type(&self) -> SparseIoBackend {
-	SparseIoBackend::HDF5
+        SparseIoBackend::HDF5
     }
 
     /// Export the data to a mtx file. This will take time.
@@ -429,10 +429,8 @@ impl SparseIo for SparseMtxData {
     ) -> anyhow::Result<()> {
         use hdf5::types::VarLenUnicode;
 
-        let (_names, _) = read_lines_of_words(name_file, -1)?;
-
+        let _names = read_lines_of_words(name_file, -1)?.lines;
         let name_columns = name_columns.clone().collect::<Vec<_>>();
-
         let _names: Vec<VarLenUnicode> = _names
             .iter()
             .map(|x| {

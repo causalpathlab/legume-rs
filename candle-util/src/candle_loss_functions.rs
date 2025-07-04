@@ -33,7 +33,7 @@ pub fn topic_likelihood(x_nd: &Tensor, logits_nd: &Tensor) -> Result<Tensor> {
 /// * `rate_nd` - rate tensor (reconstruction)
 ///
 pub fn poisson_likelihood(x_nd: &Tensor, rate_nd: &Tensor) -> Result<Tensor> {
-    x_nd.mul(&rate_nd.log()?)?.sub(&rate_nd)?.sum(1)
+    x_nd.mul(&rate_nd.log()?)?.sub(rate_nd)?.sum(1)
 }
 
 /// Gaussian log-likelihood of count-ish data

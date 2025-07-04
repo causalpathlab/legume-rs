@@ -482,14 +482,14 @@ impl SparseIoVec {
             let source_batch = cell_to_batch[glob]; // this cell's batch
 
             let _batches: Vec<usize> = match self.between_batch_proximity.as_ref() {
-                Some(prox) => prox[source_batch].iter().copied().collect(),
+                Some(prox) => prox[source_batch].to_vec(),
                 _ => (0..nbatches).collect(),
             };
 
             let neighbouring_batches: Vec<usize> = _batches
                 .into_iter()
                 .filter(|&batch| {
-                    skip_batches.map_or(true, |skip| !skip.contains(&batch))
+                    skip_batches.is_none_or(|skip| !skip.contains(&batch))
                         && (!skip_same_batch || batch != source_batch)
                 })
                 .collect();

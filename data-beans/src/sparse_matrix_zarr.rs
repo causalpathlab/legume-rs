@@ -66,12 +66,12 @@ impl SparseMtxData {
     pub fn open(backend_file: &str) -> anyhow::Result<Self> {
         let store = Arc::new(FilesystemStore::new(backend_file)?);
 
-        if let (Some(nrow), Some(ncol), Some(nnz)) = (
+        if let (Some(_nrow), Some(_ncol), Some(_nnz)) = (
             Self::_num_rows(store.clone()),
             Self::_num_columns(store.clone()),
             Self::_num_nnz(store.clone()),
         ) {
-            info!("#rows: {}, #columns: {}, #non-zeros: {}", nrow, ncol, nnz);
+            // info!("#rows: {}, #columns: {}, #non-zeros: {}", _nrow, _ncol, _nnz);
         } else {
             anyhow::bail!("Couldn't figure out the size of this sparse matrix data");
         }
@@ -646,10 +646,8 @@ impl SparseIo for SparseMtxData {
         name_columns: Range<usize>,
         name_sep: &str,
     ) -> anyhow::Result<()> {
-        let (_names, _) = read_lines_of_words(name_file, -1)?;
-
+        let _names = read_lines_of_words(name_file, -1)?.lines;
         let name_columns = name_columns.clone().collect::<Vec<_>>();
-
         let _names: Vec<String> = _names
             .iter()
             .map(|x| {

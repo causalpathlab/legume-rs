@@ -24,7 +24,6 @@ pub trait VisitWithBamOps {
 
         let bam_records: Vec<bam::Record> = bam_reader
             .records()
-            .into_iter()
             .filter_map(Result::ok)
             .filter(|rec| !rec.is_duplicate())
             .collect();
@@ -59,7 +58,6 @@ pub trait VisitWithBamOps {
 
         let bam_records: Vec<bam::Record> = bam_reader
             .records()
-            .into_iter()
             .filter_map(Result::ok)
             .filter(|rec| !rec.is_duplicate())
             .collect();

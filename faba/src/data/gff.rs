@@ -41,7 +41,7 @@ impl<'a> Iterator for GffRecordMapIter<'a> {
 
 impl GffRecordMap {
     pub fn from(file_path: &str, feature_type: Option<&FeatureType>) -> anyhow::Result<Self> {
-        let (lines_of_words, _) = read_lines_of_words_delim(file_path, &['\t', ','], -1)?;
+        let lines_of_words = read_lines_of_words_delim(file_path, &['\t', ','], -1)?.lines;
 
         let mut records: HashMap<GeneId, GffRecord> = HashMap::new();
 
@@ -55,7 +55,7 @@ impl GffRecordMap {
             let gene_id = &new_rec.gene_id;
 
             if records.contains_key(gene_id) {
-                if let Some(rec) = records.get_mut(&gene_id) {
+                if let Some(rec) = records.get_mut(gene_id) {
                     rec.start = rec.start.min(new_rec.start);
                     rec.stop = rec.stop.max(new_rec.stop);
                 }
@@ -149,9 +149,9 @@ pub enum FeatureType {
     Other,
 }
 
-impl Into<FeatureType> for &str {
-    fn into(self) -> FeatureType {
-        match self.as_ref() {
+impl From<&str> for FeatureType {
+    fn from(val: &str) -> Self {
+        match val {
             "gene" | "Gene" => FeatureType::Gene,
             "transcript" | "mRNA" => FeatureType::Transcript,
             "exon" => FeatureType::Exon,
@@ -207,21 +207,21 @@ pub enum GeneType {
     NonCoding,
 }
 
-impl Into<GeneType> for Box<str> {
-    fn into(self) -> GeneType {
-        self.as_ref().into()
+impl From<Box<str>> for GeneType {
+    fn from(val: Box<str>) -> Self {
+        val.as_ref().into()
     }
 }
 
-impl Into<GeneType> for &str {
-    fn into(self) -> GeneType {
-        match self {
+impl From<&str> for GeneType {
+    fn from(val: &str) -> Self {
+        match val {
             "protein_coding" => GeneType::CodingGene,
             "pseudogene" => GeneType::PseudoGene,
             "lncRNA" => GeneType::LincRNA,
             "snRNA" => GeneType::SnRNA,
-            _ if self.ends_with("pseudogene") => GeneType::PseudoGene,
-            _ if self.ends_with("coding") => GeneType::CodingGene,
+            _ if val.ends_with("pseudogene") => GeneType::PseudoGene,
+            _ if val.ends_with("coding") => GeneType::CodingGene,
             _ => GeneType::NonCoding,
         }
     }

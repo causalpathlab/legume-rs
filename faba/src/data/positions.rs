@@ -39,7 +39,7 @@ pub trait Stratify {
 impl Stratify for Vec<&SiteInGene> {
     fn stratify_by_gene(&self) -> HashMap<Gene, Vec<SiteInGene>> {
         let mut ret: HashMap<Gene, Vec<SiteInGene>> = HashMap::new();
-        for &sg in self.into_iter() {
+        for &sg in self.iter() {
             ret.entry(sg.gene.clone()).or_default().push(sg.clone());
         }
         for sites in ret.values_mut() {

@@ -50,3 +50,12 @@ where
         self.activation_layers.push(None);
     }
 }
+
+impl<M> Default for StackLayers<M>
+where
+    M: Module,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}

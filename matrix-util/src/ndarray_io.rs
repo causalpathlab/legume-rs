@@ -1,4 +1,4 @@
-use crate::common_io::{Delimiter, read_lines_of_types, write_lines};
+use crate::common_io::{read_lines_of_types, write_lines, Delimiter};
 use crate::parquet::*;
 use crate::traits::IoOps;
 use ndarray::prelude::*;
@@ -46,7 +46,7 @@ where
             None => -1, // no skipping
         };
 
-        let (data, _) = read_lines_of_types::<T>(tsv_file, delim, hdr_line)?;
+        let data = read_lines_of_types::<T>(tsv_file, delim, hdr_line)?.lines;
 
         if data.is_empty() {
             return Err(anyhow::anyhow!("No data in file"));

@@ -76,7 +76,7 @@ impl CocoaCollapseOps for SparseIoVec {
 
 fn collect_indv_stat_visitor(
     this_sample: usize, // pseudo bulk sample
-    cells: &Vec<usize>, // cells within this pseudo bulk sample
+    cells: &[usize],    // cells within this pseudo bulk sample
     data: &SparseIoVec,
     input: &CocoaCollapseIn,
     arc_stat: Arc<Mutex<&mut CocoaStat>>,
@@ -108,7 +108,7 @@ fn collect_indv_stat_visitor(
 
 fn collect_matched_stat_visitor(
     this_sample: usize, // pseudo bulk sample
-    cells: &Vec<usize>, // cells within this pseudo bulk sample
+    cells: &[usize],    // cells within this pseudo bulk sample
     data: &SparseIoVec,
     input: &CocoaCollapseIn,
     arc_stat: Arc<Mutex<&mut CocoaStat>>,
@@ -170,7 +170,7 @@ fn collect_matched_stat_visitor(
 
 fn collect_basic_stat_visitor(
     this_sample: usize,
-    cells: &Vec<usize>,
+    cells: &[usize],
     data: &SparseIoVec,
     input: &CocoaCollapseIn,
     arc_stat: Arc<Mutex<&mut CocoaStat>>,

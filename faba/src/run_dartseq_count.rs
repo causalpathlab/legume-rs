@@ -78,6 +78,10 @@ pub struct DartSeqCountArgs {
     #[arg(long, value_enum, default_value = "zarr")]
     backend: SparseIoBackend,
 
+    /// include reads missing gene and cell barcode
+    #[arg(long, default_value_t = false)]
+    include_missing_barcode: bool,
+
     /// output header for `data-beans` files
     #[arg(short, long, required = true)]
     output: Box<str>,
@@ -133,7 +137,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         .collect::<anyhow::Result<Vec<_>>>()?
         .into_iter()
         .flatten()
-        .filter(|x| x.gene_id != Gene::Missing)
+        .filter(|x| args.include_missing_barcode || x.gene_id != Gene::Missing)
         .collect::<Vec<_>>();
 
     if sites.is_empty() {
@@ -179,8 +183,8 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         match args.output_value_type {
             MethFeatureType::Beta => {
                 let tot = (dat.methylated + dat.unmethylated) as f32;
-                let beta = (dat.methylated as f32) / tot.max(1.);
-                beta
+
+                (dat.methylated as f32) / tot.max(1.)
             }
             MethFeatureType::Methylated => dat.methylated as f32,
             MethFeatureType::Unmethylated => dat.unmethylated as f32,
@@ -207,7 +211,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
                 .add_assign(dat);
         });
 
-        info!("found {} gene x cell pairs", gene_level_data.len());
+        info!("found {} gene-cell pairs", gene_level_data.len());
 
         let gene_level_data = gene_level_data
             .into_iter()
@@ -236,7 +240,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             site_level_data.entry(key).or_default().add_assign(dat);
         });
 
-        info!("found {} gene x cell pairs", site_level_data.len());
+        info!("found {} site-cell pairs", site_level_data.len());
 
         let site_level_data = site_level_data
             .into_iter()
@@ -259,7 +263,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         info!("final Q/C to remove excessive zeros");
         let block_size = 100;
         squeeze_by_nnz(
-            &data,
+            data.as_ref(),
             SqueezeCutoffs {
                 row: args.row_nnz_cutoff,
                 column: args.column_nnz_cutoff,
@@ -385,7 +389,7 @@ fn collect_m6a_stat(
             let methylated = counts.get(Some(&methylated_base));
             let unmethylated = counts.get(Some(&unmethylated_base));
 
-            if (s != &CellBarcode::Missing) && (methylated > 0) {
+            if (args.include_missing_barcode || s != &CellBarcode::Missing) && methylated > 0 {
                 ret.push((
                     s.clone(),
                     BedWithGene {
@@ -401,9 +405,7 @@ fn collect_m6a_stat(
                 ));
             }
         }
-    } //  else {
-      //     panic!("");
-      // }
+    }
 
     Ok(ret)
 }

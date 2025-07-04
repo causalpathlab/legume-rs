@@ -27,19 +27,12 @@ impl std::fmt::Display for MethFeatureType {
     }
 }
 
+#[derive(Default)]
 pub struct MethylationData {
     pub methylated: usize,
     pub unmethylated: usize,
 }
 
-impl Default for MethylationData {
-    fn default() -> Self {
-        Self {
-            methylated: 0,
-            unmethylated: 0,
-        }
-    }
-}
 
 pub trait UpdateMethData {
     fn add_assign(&mut self, other: &Self);

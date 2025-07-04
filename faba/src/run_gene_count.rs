@@ -94,7 +94,7 @@ pub fn run_gene_count(args: &GeneCountArgs) -> anyhow::Result<()> {
         .into_iter()
         .par_bridge()
         .progress_count(njobs)
-        .map(|x| count_read_per_gene(args, &x))
+        .map(|x| count_read_per_gene(args, x))
         .collect::<anyhow::Result<Vec<_>>>()?
         .into_iter()
         .flatten()
@@ -119,7 +119,7 @@ pub fn run_gene_count(args: &GeneCountArgs) -> anyhow::Result<()> {
 
     if args.row_nnz_cutoff > 0 || args.column_nnz_cutoff > 0 {
         squeeze_by_nnz(
-            &data,
+            data.as_ref(),
             SqueezeCutoffs {
                 row: args.row_nnz_cutoff,
                 column: args.column_nnz_cutoff,
@@ -159,7 +159,7 @@ struct ReadCounter<'a> {
     cell_barcode_tag: &'a str,
 }
 
-impl<'a> VisitWithBamOps for ReadCounter<'a> {}
+impl VisitWithBamOps for ReadCounter<'_> {}
 
 impl<'a> ReadCounter<'a> {
     fn new(cell_barcode_tag: &'a str) -> Self {
@@ -186,7 +186,7 @@ impl<'a> ReadCounter<'a> {
         };
 
         if gene_id_found == gff_record.gene_id {
-            let cell_barcode = match bam_record.aux(&self.cell_barcode_tag.as_bytes()) {
+            let cell_barcode = match bam_record.aux(self.cell_barcode_tag.as_bytes()) {
                 Ok(Aux::String(barcode)) => CellBarcode::Barcode(barcode.into()),
                 _ => CellBarcode::Missing,
             };

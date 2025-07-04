@@ -30,13 +30,7 @@ pub trait VisitColumnsOps {
         shared_out: &mut SharedOut,
     ) -> anyhow::Result<()>
     where
-        Visitor: Fn(
-                usize,
-                &Vec<usize>,
-                &Self,
-                &SharedIn,
-                Arc<Mutex<&mut SharedOut>>,
-            ) -> anyhow::Result<()>
+        Visitor: Fn(usize, &[usize], &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) -> anyhow::Result<()>
             + Sync
             + Send,
         SharedIn: Sync + Send,
@@ -77,13 +71,7 @@ impl VisitColumnsOps for SparseIoVec {
         shared_out: &mut SharedOut,
     ) -> anyhow::Result<()>
     where
-        Visitor: Fn(
-                usize,
-                &Vec<usize>,
-                &Self,
-                &SharedIn,
-                Arc<Mutex<&mut SharedOut>>,
-            ) -> anyhow::Result<()>
+        Visitor: Fn(usize, &[usize], &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) -> anyhow::Result<()>
             + Sync
             + Send,
         SharedIn: Sync + Send,

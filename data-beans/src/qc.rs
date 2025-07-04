@@ -15,12 +15,12 @@ pub struct SqueezeCutoffs {
 }
 
 pub fn squeeze_by_nnz(
-    data: &Box<dyn SparseIo<IndexIter = Vec<usize>>>,
+    data: &dyn SparseIo<IndexIter = Vec<usize>>,
     cutoffs: SqueezeCutoffs,
     block_size: usize,
 ) -> anyhow::Result<()> {
-    let col_stat = collect_column_stat(data.as_ref(), block_size)?;
-    let row_stat = collect_row_stat(data.as_ref(), block_size)?;
+    let col_stat = collect_column_stat(data, block_size)?;
+    let row_stat = collect_row_stat(data, block_size)?;
 
     let file = data.get_backend_file_name();
     let backend = data.backend_type();

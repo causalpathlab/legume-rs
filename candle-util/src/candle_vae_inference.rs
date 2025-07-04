@@ -96,7 +96,7 @@ where
 
         let data_aux_out_vec = (0..num_minbatches)
             .map(|b| {
-                data.minibatch_shuffled(b, &device)
+                data.minibatch_shuffled(b, device)
                     .expect(format!("failed to preload minibatch #{}", b).as_str())
             })
             .collect::<Vec<_>>();

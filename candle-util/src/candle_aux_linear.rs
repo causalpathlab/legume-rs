@@ -61,7 +61,7 @@ impl Module for NonNegLinear {
 
         let log_w_kd = match &self.bias_d {
             None => log_w_kd,
-            Some(bias) => log_w_kd.broadcast_add(&bias)?,
+            Some(bias) => log_w_kd.broadcast_add(bias)?,
         };
 
         let eps = 1e-4;
@@ -99,7 +99,7 @@ impl Module for SoftmaxLinear {
         };
         match &self.bias {
             None => h_nk.matmul(&log_w_kd.exp()?),
-            Some(bias) => h_nk.matmul(&log_w_kd.broadcast_add(&bias)?.exp()?),
+            Some(bias) => h_nk.matmul(&log_w_kd.broadcast_add(bias)?.exp()?),
         }
     }
 }

@@ -86,6 +86,11 @@ where
     Ok(())
 }
 
+pub struct ReadLinesOut<T: Send> {
+    pub lines: Vec<Vec<T>>,
+    pub header: Vec<Box<str>>,
+}
+
 ///
 /// Generic function to read lines and parse them into a vector of words or types.
 ///
@@ -98,26 +103,27 @@ pub fn read_lines_of_words_generic<T>(
     hdr_line: i64,
     parse_header_fn: impl Fn(&str) -> Vec<Box<str>> + Sync,
     parse_fn: impl Fn(&str) -> Vec<T> + Sync,
-) -> anyhow::Result<(Vec<Vec<T>>, Vec<Box<str>>)>
+) -> anyhow::Result<ReadLinesOut<T>>
 where
     T: Send,
 {
     let buf_reader: Box<dyn BufRead> = open_buf_reader(input_file)?;
 
-    fn is_not_comment_line(line: &String) -> bool {
+    fn is_not_comment_line(line: &str) -> bool {
         if line.starts_with('#') || line.starts_with('%') {
             return false;
         }
         true
     }
 
-    let lines_raw: Vec<String> = buf_reader
+    let lines_raw: Vec<Box<str>> = buf_reader
         .lines()
         .map_while(Result::ok)
-        .filter(is_not_comment_line)
+        .map(|x| x.into_boxed_str())
+        .filter(|x| is_not_comment_line(x.as_ref()))
         .collect();
 
-    let mut hdr = vec![];
+    let mut header = vec![];
 
     // Parsing takes more time, so split them into parallel jobs
     let mut lines: Vec<(usize, Vec<T>)> = if hdr_line < 0 {
@@ -133,7 +139,7 @@ where
             return Err(anyhow::anyhow!("not enough data"));
         }
 
-        hdr.extend(parse_header_fn(&lines_raw[n_skip]));
+        header.extend(parse_header_fn(&lines_raw[n_skip]));
 
         lines_raw[(n_skip + 1)..]
             .iter()
@@ -150,7 +156,7 @@ where
     }
 
     let lines = lines.into_iter().map(|(_, x)| x).collect();
-    Ok((lines, hdr))
+    Ok(ReadLinesOut { lines, header })
 }
 
 ///
@@ -164,7 +170,7 @@ pub fn read_lines_of_types<T>(
     input_file: &str,
     delim: impl Into<Delimiter>,
     hdr_line: i64,
-) -> anyhow::Result<(Vec<Vec<T>>, Vec<Box<str>>)>
+) -> anyhow::Result<ReadLinesOut<T>>
 where
     T: Send + std::str::FromStr + std::fmt::Display,
     <T as std::str::FromStr>::Err: std::fmt::Debug,
@@ -202,7 +208,7 @@ where
 pub fn read_lines_of_words(
     input_file: &str,
     hdr_line: i64,
-) -> anyhow::Result<(Vec<Vec<Box<str>>>, Vec<Box<str>>)> {
+) -> anyhow::Result<ReadLinesOut<Box<str>>> {
     let parse_fn = |line: &str| -> Vec<Box<str>> {
         line.split_whitespace()
             .map(|x| x.to_owned().into_boxed_str())
@@ -223,7 +229,7 @@ pub fn read_lines_of_words_delim(
     input_file: &str,
     delim: impl Into<Delimiter>,
     hdr_line: i64,
-) -> anyhow::Result<(Vec<Vec<Box<str>>>, Vec<Box<str>>)> {
+) -> anyhow::Result<ReadLinesOut<Box<str>>> {
     let delim = delim.into(); // Convert the input delimiter into the Delimiter enum
 
     let parse_fn = |line: &str| -> Vec<Box<str>> {
@@ -305,11 +311,11 @@ pub fn mkdir(file: &str) -> anyhow::Result<()> {
 }
 
 trait ToStr {
-    fn into_box_str(&self) -> Box<str>;
+    fn into_boxed_str(&self) -> Box<str>;
 }
 
 impl ToStr for Path {
-    fn into_box_str(&self) -> Box<str> {
+    fn into_boxed_str(&self) -> Box<str> {
         self.to_str()
             .expect("failed to convert to string")
             .to_string()
@@ -318,7 +324,7 @@ impl ToStr for Path {
 }
 
 impl ToStr for OsStr {
-    fn into_box_str(&self) -> Box<str> {
+    fn into_boxed_str(&self) -> Box<str> {
         self.to_str()
             .expect("failed to convert to string")
             .to_string()
@@ -335,7 +341,11 @@ pub fn dir_base_ext(file_path: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<
 
     if let (Some(dir), Some(base), Some(ext)) = (path.parent(), path.file_stem(), path.extension())
     {
-        Ok((dir.into_box_str(), base.into_box_str(), ext.into_box_str()))
+        Ok((
+            dir.into_boxed_str(),
+            base.into_boxed_str(),
+            ext.into_boxed_str(),
+        ))
     } else {
         Err(anyhow::anyhow!(
             "fail to parse dir, base, ext: {}",
@@ -351,7 +361,7 @@ pub fn dir_base_ext(file_path: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<
 pub fn basename(file: &str) -> anyhow::Result<Box<str>> {
     let path = Path::new(file);
     if let Some(base) = path.file_stem() {
-        Ok(base.into_box_str())
+        Ok(base.into_boxed_str())
     } else {
         Err(anyhow::anyhow!("no file stem"))
     }
@@ -364,7 +374,7 @@ pub fn basename(file: &str) -> anyhow::Result<Box<str>> {
 pub fn extension(file: &str) -> anyhow::Result<Box<str>> {
     let path = Path::new(file);
     if let Some(ext) = path.extension() {
-        Ok(ext.into_box_str())
+        Ok(ext.into_boxed_str())
     } else {
         Err(anyhow::anyhow!("failed to extract extension"))
     }

@@ -250,10 +250,10 @@ impl MatchedLogSoftmaxEncoder {
         train: bool,
     ) -> Result<Preprocessed> {
         // 1. Discretize data after log1p transformation
-        let left_x_nd = self.discretize_whitened_tensor(&left_nd)?;
+        let left_x_nd = self.discretize_whitened_tensor(left_nd)?;
         let left_logx_nd = self.discretize_whitened_tensor(&(left_nd + 1.)?.log()?)?;
 
-        let right_x_nd = self.discretize_whitened_tensor(&right_nd)?;
+        let right_x_nd = self.discretize_whitened_tensor(right_nd)?;
         let right_logx_nd = self.discretize_whitened_tensor(&(right_nd + 1.)?.log()?)?;
 
         let last_dim = 2_usize;
