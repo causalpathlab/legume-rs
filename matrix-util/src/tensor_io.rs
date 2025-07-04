@@ -47,7 +47,7 @@ impl IoOps for Tensor {
             None => -1, // no skipping
         };
 
-        let (data, _) = read_lines_of_types::<f32>(tsv_file, delim, hdr_line)?;
+        let data = read_lines_of_types::<f32>(tsv_file, delim, hdr_line)?.lines;
 
         if data.is_empty() {
             return Err(anyhow::anyhow!("No data in file"));
@@ -112,7 +112,7 @@ impl IoOps for Tensor {
 
         if let Some(mut column_writer) = row_group_writer.next_column()? {
             let typed_writer = column_writer.typed::<ByteArrayType>();
-            typed_writer.write_batch(&row_names, None, None)?;
+            typed_writer.write_batch(row_names, None, None)?;
             column_writer.close()?;
         }
 

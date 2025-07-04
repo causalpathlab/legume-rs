@@ -11,6 +11,7 @@ use run_dartseq_count::*;
 use run_gene_count::*;
 use run_read_depth::*;
 
+/// Feature statistics Accumulator for Base-pair-level Analysis
 #[derive(Parser, Debug)]
 #[command(version, about, long_about, term_width = 80)]
 struct Cli {

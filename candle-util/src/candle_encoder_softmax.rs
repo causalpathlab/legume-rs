@@ -4,7 +4,7 @@ use crate::candle_aux_layers::StackLayers;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{BatchNorm, Embedding, Linear, ModuleT, VarBuilder, ops};
+use candle_nn::{ops, BatchNorm, Embedding, Linear, ModuleT, VarBuilder};
 
 pub struct LogSoftmaxEncoder {
     n_features: usize,
@@ -68,7 +68,7 @@ impl LogSoftmaxEncoder {
         debug_assert!(x_nd.min_all()?.to_scalar::<f32>()? >= 0_f32);
 
         // 1. Discretize data
-        let int_x_nd = self.discretize_whitened_tensor(&x_nd)?;
+        let int_x_nd = self.discretize_whitened_tensor(x_nd)?;
         let logx_nd = (x_nd + 1.)?.log()?;
         let int_logx_nd = self.discretize_whitened_tensor(&logx_nd)?;
 

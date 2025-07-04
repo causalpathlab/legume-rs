@@ -189,7 +189,7 @@ fn parse_arg_input_data(args: DiffArgs) -> anyhow::Result<ArgInputData> {
         return Err(anyhow::anyhow!("# sample files != # of data files"));
     }
 
-    let (exposure, _) = read_lines_of_words(&args.exposure_assignment_file, -1)?;
+    let exposure = read_lines_of_words(&args.exposure_assignment_file, -1)?.lines;
 
     let indv_to_exposure = exposure
         .into_iter()

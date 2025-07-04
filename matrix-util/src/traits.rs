@@ -1,4 +1,4 @@
-use crate::common_io::Delimiter;
+use crate::common_io::{Delimiter, ReadLinesOut};
 
 pub use candle_util::candle_core;
 
@@ -159,7 +159,8 @@ pub trait IoOps {
             None => -1, // no skipping
         };
 
-        let (lines, hdr) = crate::common_io::read_lines_of_words_delim(file_path, delim, hdr_line)?;
+        let ReadLinesOut { lines, header } =
+            crate::common_io::read_lines_of_words_delim(file_path, delim, hdr_line)?;
 
         let mut relevant_indices: Vec<usize> = vec![];
 
@@ -168,7 +169,7 @@ pub trait IoOps {
         }
 
         if let Some(names) = column_names {
-            let name_indices: Vec<usize> = hdr
+            let name_indices: Vec<usize> = header
                 .iter()
                 .enumerate()
                 .filter_map(|(i, name)| {
@@ -194,13 +195,16 @@ pub trait IoOps {
                 .collect(),
         };
 
-        let column_names: Vec<Box<str>> = if hdr.is_empty() {
+        let column_names: Vec<Box<str>> = if header.is_empty() {
             relevant_indices
                 .iter()
                 .map(|x| x.to_string().into_boxed_str())
                 .collect()
         } else {
-            relevant_indices.iter().map(|&j| hdr[j].clone()).collect()
+            relevant_indices
+                .iter()
+                .map(|&j| header[j].clone())
+                .collect()
         };
 
         let data: Vec<Vec<Self::Scalar>> = lines

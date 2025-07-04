@@ -91,7 +91,7 @@ where
 
         let data_vec = (0..num_minbatches)
             .map(|b| {
-                data.minibatch_shuffled(b, &device)
+                data.minibatch_shuffled(b, device)
                     .expect(format!("failed to preload minibatch #{}", b).as_str())
             })
             .collect::<Vec<_>>();
@@ -171,9 +171,8 @@ where
         } else {
             for _epoch in 0..train_config.num_epochs {
                 let mut llik_tot = 0f32;
-                for b in 0..data.num_minibatch() {
-                    let minibatch_data = &data_vec[b];
 
+                for minibatch_data in &data_vec {
                     let input_left_nm = minibatch_data.input.as_ref();
                     let input_right_nm = minibatch_data
                         .input_matched

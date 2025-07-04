@@ -13,6 +13,17 @@ pub trait DnaStatMap: VisitWithBamOps {
 
     /// update DNA count statistics using the information within this region
     /// * `bam_file_path` - file path
+    /// * `region` - Bed
+    fn update_bam_by_region(&mut self, bam_file_path: &str, region: &Bed) -> anyhow::Result<()> {
+        self.visit_bam_by_region(bam_file_path, region, &Self::update_visitor_by_region)
+    }
+
+    fn update_visitor_by_region(&mut self, _chr: &str, bam_record: bam::Record) {
+        self.add_bam_record(bam_record);
+    }
+
+    /// update DNA count statistics using the information within this region
+    /// * `bam_file_path` - file path
     /// * `gff_record` - `GffRecord` read from an annotation file
     fn update_bam_by_gene(
         &mut self,
@@ -26,17 +37,6 @@ pub trait DnaStatMap: VisitWithBamOps {
             gene_barcode_tag,
             &Self::update_visitor_by_gene,
         )
-    }
-
-    /// update DNA count statistics using the information within this region
-    /// * `bam_file_path` - file path
-    /// * `region` - Bed
-    fn update_bam_by_region(&mut self, bam_file_path: &str, region: &Bed) -> anyhow::Result<()> {
-        self.visit_bam_by_region(bam_file_path, region, &Self::update_visitor_by_region)
-    }
-
-    fn update_visitor_by_region(&mut self, _chr: &str, bam_record: bam::Record) {
-        self.add_bam_record(bam_record);
     }
 
     fn update_visitor_by_gene(

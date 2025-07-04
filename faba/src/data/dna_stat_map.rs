@@ -18,11 +18,11 @@ pub struct DnaBaseFreqMap<'a> {
     cell_barcode_tag: &'a [u8],
 }
 
-impl<'a> VisitWithBamOps for DnaBaseFreqMap<'a> {}
+impl VisitWithBamOps for DnaBaseFreqMap<'_> {}
 
-impl<'a> DnaStatMap for DnaBaseFreqMap<'a> {
+impl DnaStatMap for DnaBaseFreqMap<'_> {
     fn add_bam_record(&mut self, bam_record: bam::Record) {
-        let cell_barcode = match bam_record.aux(&self.cell_barcode_tag) {
+        let cell_barcode = match bam_record.aux(self.cell_barcode_tag) {
             Ok(Aux::String(barcode)) => CellBarcode::Barcode(barcode.into()),
             _ => CellBarcode::Missing,
         };

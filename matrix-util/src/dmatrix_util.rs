@@ -98,7 +98,7 @@ where
     let ret: Vec<(usize, usize, T)> = lhs
         .col_iter()
         .enumerate()
-        .zip(select_columns_in_rhs.into_iter())
+        .zip(select_columns_in_rhs)
         .map(|((src_pos, src_col), &tgt_pos)| {
             let tgt_col = rhs.col(tgt_pos);
 

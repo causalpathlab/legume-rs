@@ -8,14 +8,15 @@ members = [
 	"senna",
 	"pinto",
 	"cocoa-diff",
-	"faba", "chickpea"]
+	"faba",
+	"chickpea"]
 
 resolver = "3"
 
 [workspace.package]
 license = "MIT"
 authors = ["Yongjin Park <ypp@stat.ubc.ca>"]
-description = "Library for Expedited Genomics data analysis with Unified ML models in Rust"
+description = "Library for Expedited Genomics data analysis with Unsupervised Machine learning Estimators in Rust"
 repository = "https://github.com/causalpathlab/legume-rs"
 homepage = "https://github.com/causalpathlab/legume-rs"
 edition = "2021"
@@ -46,7 +47,7 @@ nalgebra-sparse = "0.10"
 num-traits = "0.2.19"
 
 instant-distance = "0.6"
-indicatif = { version = "0.17.9", features = ["rayon"] }
+indicatif = { version = "^0.18", features = ["rayon"] }
 
 parquet = { version = "55" }
 env_logger = { version = "0.11" }

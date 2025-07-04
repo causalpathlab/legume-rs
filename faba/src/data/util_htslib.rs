@@ -44,7 +44,7 @@ pub fn create_bam_jobs(
     overlap: Option<usize>,
 ) -> anyhow::Result<Vec<(Box<str>, i64, i64)>> {
     let br = bam::Reader::from_path(bam_file_name)
-        .expect(&format!("failed to initialize BAM file: {}", bam_file_name));
+        .unwrap_or_else(|_| panic!("failed to initialize BAM file: {}", bam_file_name));
 
     let hdr = br.header();
 

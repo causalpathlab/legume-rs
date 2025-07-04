@@ -487,7 +487,7 @@ pub struct RunSimulateArgs {
 /////////////////////
 
 fn read_row_names(row_file: Box<str>, max_row_name_idx: usize) -> anyhow::Result<Vec<Box<str>>> {
-    let (_names, _) = common_io::read_lines_of_words(&row_file, -1)?;
+    let _names = common_io::read_lines_of_words(&row_file, -1)?.lines;
     Ok(_names
         .into_iter()
         .map(|x| {
@@ -504,7 +504,7 @@ fn read_row_names(row_file: Box<str>, max_row_name_idx: usize) -> anyhow::Result
 }
 
 fn read_col_names(col_file: Box<str>, max_column_name_idx: usize) -> anyhow::Result<Vec<Box<str>>> {
-    let (_names, _) = common_io::read_lines_of_words(&col_file, -1)?;
+    let _names = common_io::read_lines_of_words(&col_file, -1)?.lines;
     Ok(_names
         .into_iter()
         .map(|x| {
@@ -1398,9 +1398,16 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         data.num_columns().unwrap()
     );
 
-    squeeze_by_nnz(&data, SqueezeCutoffs{ row: row_nnz_cutoff, column: col_nnz_cutoff}, cmd_args.block_size)?;
+    squeeze_by_nnz(
+        data.as_ref(),
+        SqueezeCutoffs {
+            row: row_nnz_cutoff,
+            column: col_nnz_cutoff,
+        },
+        cmd_args.block_size,
+    )?;
 
-    let data = open_sparse_matrix(&data_file, &backend)?;    
+    let data = open_sparse_matrix(&data_file, &backend)?;
 
     info!(
         "after squeeze -- data: {} rows x {} columns",

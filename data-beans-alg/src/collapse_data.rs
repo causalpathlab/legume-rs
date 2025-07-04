@@ -68,13 +68,13 @@ pub trait CollapsingOps {
 
     fn collect_batch_stat(
         &self,
-        sample_to_cols: &Vec<Vec<usize>>,
+        sample_to_cols: &[Vec<usize>],
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()>;
 
     fn collect_matched_stat(
         &self,
-        sample_to_cells: &Vec<Vec<usize>>,
+        sample_to_cells: &[Vec<usize>],
         knn_batches: usize,
         knn_cells: usize,
         reference_indices: Option<&[usize]>,
@@ -110,7 +110,7 @@ impl CollapsingOps for SparseIoVec {
         proj_kn.scale_columns_inplace();
 
         info!("creating batch-specific HNSW maps ...");
-        self.register_batches_dmatrix(&proj_kn, &col_to_batch)?;
+        self.register_batches_dmatrix(&proj_kn, col_to_batch)?;
 
         info!(
             "partitioned {} columns to {} batches",
@@ -138,7 +138,7 @@ impl CollapsingOps for SparseIoVec {
 
         let mut stat = CollapsedStat::new(num_features, num_groups, num_batches);
         info!("basic statistics across {} groups", num_groups);
-        self.collect_basic_stat(&group_to_cols, &mut stat)?;
+        self.collect_basic_stat(group_to_cols, &mut stat)?;
 
         if num_batches > 1 {
             info!(
@@ -152,9 +152,7 @@ impl CollapsingOps for SparseIoVec {
 
             let reference_indices = reference_batch_names.map(|x| {
                 x.iter()
-                    .filter_map(|b| batch_name_map.get(b))
-                    .into_iter()
-                    .map(|&b| b)
+                    .filter_map(|b| batch_name_map.get(b)).copied()
                     .collect::<Vec<_>>()
             });
 
@@ -181,7 +179,7 @@ impl CollapsingOps for SparseIoVec {
                 }
             }
 
-            self.collect_batch_stat(&group_to_cols, &mut stat)?;
+            self.collect_batch_stat(group_to_cols, &mut stat)?;
 
             info!(
                 "counterfactual inference across {} batches over {} samples",
@@ -192,7 +190,7 @@ impl CollapsingOps for SparseIoVec {
             let knn_cells = knn_cells.unwrap_or(DEFAULT_KNN);
 
             self.collect_matched_stat(
-                &group_to_cols,
+                group_to_cols,
                 knn_batches,
                 knn_cells,
                 reference_indices.as_deref(),
@@ -215,7 +213,7 @@ impl CollapsingOps for SparseIoVec {
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
         self.visit_columns_by_group(
-            &sample_to_cells,
+            sample_to_cells,
             &collect_basic_stat_visitor,
             &EmptyArg {},
             stat,
@@ -224,11 +222,11 @@ impl CollapsingOps for SparseIoVec {
 
     fn collect_batch_stat(
         &self,
-        sample_to_cells: &Vec<Vec<usize>>,
+        sample_to_cells: &[Vec<usize>],
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
         self.visit_columns_by_group(
-            &sample_to_cells,
+            sample_to_cells,
             &collect_batch_stat_visitor,
             &EmptyArg {},
             stat,
@@ -237,14 +235,14 @@ impl CollapsingOps for SparseIoVec {
 
     fn collect_matched_stat(
         &self,
-        sample_to_cells: &Vec<Vec<usize>>,
+        sample_to_cells: &[Vec<usize>],
         knn_batches: usize,
         knn_cells: usize,
         reference_indices: Option<&[usize]>,
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
         self.visit_columns_by_group(
-            &sample_to_cells,
+            sample_to_cells,
             &collect_matched_stat_visitor,
             &KnnParams {
                 knn_batches,
@@ -264,7 +262,7 @@ struct KnnParams<'a> {
 
 fn collect_matched_stat_visitor(
     sample: usize,
-    cells: &Vec<usize>,
+    cells: &[usize],
     data_vec: &SparseIoVec,
     knn_params: &KnnParams,
     arc_stat: Arc<Mutex<&mut CollapsedStat>>,
@@ -323,7 +321,7 @@ fn collect_matched_stat_visitor(
 
 fn collect_basic_stat_visitor(
     sample: usize,
-    cells: &Vec<usize>,
+    cells: &[usize],
     data_vec: &SparseIoVec,
     _: &EmptyArg,
     arc_stat: Arc<Mutex<&mut CollapsedStat>>,
@@ -345,7 +343,7 @@ fn collect_basic_stat_visitor(
 
 fn collect_batch_stat_visitor(
     sample: usize,
-    cells_in_sample: &Vec<usize>,
+    cells_in_sample: &[usize],
     data_vec: &SparseIoVec,
     _: &EmptyArg,
     arc_stat: Arc<Mutex<&mut CollapsedStat>>,
@@ -452,7 +450,7 @@ fn optimize(
 
             mu_resid_param.update_stat(
                 &stat.ysum_ds,
-                &denom_ds.component_mul(&mu_adj_param.posterior_mean()),
+                &denom_ds.component_mul(mu_adj_param.posterior_mean()),
             );
             mu_resid_param.calibrate();
         };

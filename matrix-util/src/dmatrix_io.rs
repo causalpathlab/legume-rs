@@ -1,4 +1,4 @@
-use crate::common_io::{Delimiter, read_lines_of_types, write_lines};
+use crate::common_io::{read_lines_of_types, write_lines, Delimiter};
 use crate::parquet::*;
 use crate::traits::*;
 pub use nalgebra::{DMatrix, DVector};
@@ -53,7 +53,7 @@ where
             None => -1, // no skipping
         };
 
-        let (data, _) = read_lines_of_types::<T>(tsv_file, delim, hdr_line)?;
+        let data = read_lines_of_types::<T>(tsv_file, delim, hdr_line)?.lines;
 
         if data.is_empty() {
             return Err(anyhow::anyhow!("No data in file"));
@@ -149,7 +149,7 @@ where
         Ok((
             parquet.row_names,
             parquet.column_names,
-            DMatrix::<T>::from_row_iterator(nrows, ncols, data.into_iter()),
+            DMatrix::<T>::from_row_iterator(nrows, ncols, data),
         ))
     }
 }

@@ -31,8 +31,8 @@ impl DartSeqSifter {
     pub fn forward_sweep(
         &mut self,
         positions: &Vec<i64>,
-        wt_freq_map: &HashMap<i64, DnaBaseCount>,
-        mut_freq_map: &HashMap<i64, DnaBaseCount>,
+        wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
+        mut_pos_to_freq: &HashMap<i64, DnaBaseCount>,
     ) {
         for j in 2..positions.len() {
             let first = positions[j - 2];
@@ -47,16 +47,34 @@ impl DartSeqSifter {
             let conv_site = positions[j];
 
             // to make sure the second position is A
-            let is_m6a_a = wt_freq_map
+            let is_wt_m6a_a = wt_pos_to_freq
                 .get(&m6a_site)
                 .map(|s| s.most_frequent().0 == Dna::A)
                 .unwrap_or(false);
-            if !is_m6a_a {
+            if !is_wt_m6a_a {
+                continue;
+            }
+
+            let is_mut_m6a_a = mut_pos_to_freq
+                .get(&m6a_site)
+                .map(|s| s.most_frequent().0 == Dna::A)
+                .unwrap_or(false);
+            if !is_mut_m6a_a {
+                continue;
+            }
+
+            // to ensure mutant's conversion site is mostly C
+            let is_mut_c = mut_pos_to_freq
+                .get(&conv_site)
+                .map(|s| s.most_frequent().0 == Dna::C)
+                .unwrap_or(false);
+
+            if !is_mut_c {
                 continue;
             }
 
             // test R = A/G for the first position
-            let is_r_site_valid = wt_freq_map
+            let is_wt_r_site_valid = wt_pos_to_freq
                 .get(&r_site)
                 .map(|r| {
                     let major = &r.most_frequent().0;
@@ -64,9 +82,17 @@ impl DartSeqSifter {
                 })
                 .unwrap_or(false);
 
-            if is_r_site_valid {
-                let wt_conv = wt_freq_map.get(&conv_site);
-                let mut_conv = mut_freq_map.get(&conv_site);
+            let is_mut_r_site_valid = mut_pos_to_freq
+                .get(&r_site)
+                .map(|r| {
+                    let major = &r.most_frequent().0;
+                    major == &Dna::A || major == &Dna::G
+                })
+                .unwrap_or(false);
+
+            if is_wt_r_site_valid && is_mut_r_site_valid {
+                let wt_conv = wt_pos_to_freq.get(&conv_site);
+                let mut_conv = mut_pos_to_freq.get(&conv_site);
                 let pv = self
                     .binomial_test_pvalue(wt_conv, mut_conv, &Dna::C, &Dna::T)
                     .unwrap_or(1.0);
@@ -103,21 +129,39 @@ impl DartSeqSifter {
                 continue;
             }
 
-            let conv_site = positions[j];
-            let m6a_site = positions[j + 1];
             let r_site = positions[j + 2];
+            let m6a_site = positions[j + 1];
+            let conv_site = positions[j];
 
             // A <=> T (complement)
-            let is_m6a_t = wt_pos_to_freq
+            let is_wt_m6a_t = wt_pos_to_freq
                 .get(&m6a_site)
                 .map(|s| s.most_frequent().0 == Dna::T)
                 .unwrap_or(false);
-            if !is_m6a_t {
+            if !is_wt_m6a_t {
+                continue;
+            }
+
+            let is_mut_m6a_t = mut_pos_to_freq
+                .get(&m6a_site)
+                .map(|s| s.most_frequent().0 == Dna::T)
+                .unwrap_or(false);
+            if !is_mut_m6a_t {
+                continue;
+            }
+
+            // mutant's conversion site should be mostly G (C <=> G)
+            let is_mut_g = mut_pos_to_freq
+                .get(&conv_site)
+                .map(|s| s.most_frequent().0 == Dna::G)
+                .unwrap_or(false);
+
+            if !is_mut_g {
                 continue;
             }
 
             // R = A/G <=> T/C (complement)
-            let is_r_site_valid = wt_pos_to_freq
+            let is_wt_r_site_valid = wt_pos_to_freq
                 .get(&r_site)
                 .map(|r| {
                     let major = &r.most_frequent().0;
@@ -125,10 +169,17 @@ impl DartSeqSifter {
                 })
                 .unwrap_or(false);
 
-            if is_r_site_valid {
+            let is_mut_r_site_valid = mut_pos_to_freq
+                .get(&r_site)
+                .map(|r| {
+                    let major = &r.most_frequent().0;
+                    major == &Dna::T || major == &Dna::C
+                })
+                .unwrap_or(false);
+
+            if is_wt_r_site_valid && is_mut_r_site_valid {
                 let wt_conv = wt_pos_to_freq.get(&conv_site);
                 let mut_conv = mut_pos_to_freq.get(&conv_site);
-
                 let pv = self
                     .binomial_test_pvalue(wt_conv, mut_conv, &Dna::G, &Dna::A)
                     .unwrap_or(1.0);
