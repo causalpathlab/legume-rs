@@ -6,6 +6,7 @@ pub mod knn_match;
 pub mod mtx_io;
 pub mod ndarray_io;
 pub mod ndarray_rsvd;
+pub mod ndarray_stat;
 pub mod ndarray_util;
 pub mod parquet;
 pub mod tensor_io;

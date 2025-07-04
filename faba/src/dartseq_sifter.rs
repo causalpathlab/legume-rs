@@ -1,10 +1,9 @@
 use crate::data::dna::Dna;
 use crate::data::dna::DnaBaseCount;
+use crate::data::dna_stat_map::HashMap;
 use crate::data::positions::*;
 use crate::data::sam::*;
 use crate::hypothesis_tests::BinomTest;
-
-use std::collections::HashMap;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct MethylatedSite {

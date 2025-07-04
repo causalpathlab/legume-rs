@@ -1,3 +1,4 @@
+pub mod bed;
 pub mod dna;
 pub mod dna_stat_map;
 pub mod dna_stat_traits;
