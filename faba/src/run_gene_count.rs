@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::common::*;
 use crate::data::util_htslib::*;
 use crate::data::visitors_htslib::*;
@@ -9,6 +7,8 @@ use data_beans::sparse_io::*;
 
 use matrix_util::common_io::remove_file;
 use rust_htslib::bam::{self, record::Aux};
+
+use fnv::FnvHashMap as HashMap;
 
 #[derive(Args, Debug)]
 pub struct GeneCountArgs {
@@ -65,6 +65,11 @@ pub fn run_gene_count(args: &GeneCountArgs) -> anyhow::Result<()> {
 
     for x in args.bam_files.iter() {
         check_bam_index(x, None)?;
+    }
+
+    info!("data files:");
+    for x in args.bam_files.iter() {
+        info!("{}", x);
     }
 
     let backend = args.backend.clone();

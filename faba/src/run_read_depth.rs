@@ -19,7 +19,7 @@ pub struct ReadDepthArgs {
 
     /// resolution (in kb)
     #[arg(short = 'r', long, required = true)]
-    resolution_kb: usize,
+    resolution_kb: f32,
 
     /// block size for parallelism (in mb)
     #[arg(short = 'b', long, default_value_t = 1)]
@@ -61,7 +61,7 @@ pub struct ReadDepthArgs {
 /// Count read depth
 ///
 pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
-    if args.resolution_kb * 1000 > args.block_size_mb * 1000_000 {
+    if (args.resolution_kb * 1000.0) as usize > args.block_size_mb * 1000_000 {
         return Err(anyhow::anyhow!(
             "resolution should be smaller than the block size"
         ));
@@ -111,7 +111,7 @@ pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
                 // define segments as specified by the resolution parameter
                 let start = *lb as usize;
                 let stop = *ub as usize;
-                let segment_size = args.resolution_kb * 1000;
+                let segment_size = (args.resolution_kb * 1000.0) as usize;
 
                 // now count them all
                 let mut ret = vec![];
@@ -167,9 +167,9 @@ pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
             .ok_or(anyhow::anyhow!("unknown number of columns"))?
     );
 
-    let block_size = 100;
     if args.row_nnz_cutoff > 0 || args.column_nnz_cutoff > 0 {
         info!("final Q/C to remove excessive zeros");
+        let block_size = 100;
         squeeze_by_nnz(
             &data,
             SqueezeCutoffs {
