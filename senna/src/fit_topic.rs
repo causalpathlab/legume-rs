@@ -72,9 +72,9 @@ pub struct TopicArgs {
     #[arg(short = 't', long, default_value_t = 10)]
     n_latent_topics: usize,
 
-    /// targeted number of row feature modules
-    #[arg(short = 'r', long, default_value_t = 500)]
-    n_row_modules: usize,
+    /// to reduce row features (#gene modules ~ 2^r)
+    #[arg(short = 'r', long, default_value_t = 10)]
+    n_row_proj_dim: usize,
 
     /// encoder layers
     #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
@@ -92,6 +92,10 @@ pub struct TopicArgs {
     #[arg(long, short = 'i', default_value_t = 1000)]
     epochs: usize,
 
+    /// # data jitter during the training
+    #[arg(long, short = 'j', default_value_t = 10)]
+    num_jitter: usize,
+
     /// Minibatch size
     #[arg(long, default_value_t = 100)]
     minibatch_size: usize,
@@ -107,14 +111,6 @@ pub struct TopicArgs {
     #[arg(long, default_value_t = false)]
     preload_data: bool,
 
-    /// save intermediate projection results
-    #[arg(long, default_value_t = false)]
-    save_intermediate: bool,
-
-    /// save batch-adjusted data
-    #[arg(long)]
-    save_adjusted: bool,
-
     /// verbosity
     #[arg(long, short)]
     verbose: bool,
@@ -122,14 +118,48 @@ pub struct TopicArgs {
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     // 1. Read the data with batch membership
-
     let (mut data_vec, batch_membership) = read_data_vec_membership(ReadArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
     })?;
 
-    // 2. Random projection
+    let n_topics = args.n_latent_topics;
+    let n_vocab = args.vocab_size;
+    let d_vocab_emb = args.vocab_emb;
 
+    let n_features_decoder = data_vec.num_rows()?;
+    let aggregate_kk = args
+        .n_row_proj_dim
+        .clamp(1, n_features_decoder.ilog2() as usize);
+    let n_features_encoder = max_binary_code(aggregate_kk) + 1;
+
+    let dev = match args.device {
+        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
+        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
+        _ => candle_core::Device::Cpu,
+    };
+
+    let parameters = candle_nn::VarMap::new();
+    let param_builder =
+        candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
+
+    let encoder = LogSoftmaxEncoder::new(
+        n_features_encoder,
+        n_topics,
+        n_vocab,
+        d_vocab_emb,
+        &args.encoder_layers,
+        param_builder.clone(),
+    )?;
+
+    let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
+
+    info!(
+        "input: {} -> encoder -> decoder -> output: {}",
+        n_features_encoder, n_features_decoder
+    );
+
+    // 2. Random projection
     let proj_dim = args.proj_dim.max(args.n_latent_topics);
 
     let proj_out = data_vec.project_columns_with_batch_correction(
@@ -152,7 +182,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     }
 
     // 3. Batch-adjusted collapsing (pseudobulk)
-
     let reference = args.reference_batches.as_ref().map(|x| x.as_slice());
 
     info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
@@ -173,97 +202,61 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     }
 
     // 4. Train embedded topic model on the collapsed data
-    let n_topics = args.n_latent_topics;
-    let n_vocab = args.vocab_size;
-    let d_vocab_emb = args.vocab_emb;
+    let mixed_dn = &collapse_out.mu_observed;
+    let clean_dn = collapse_out.mu_adjusted.as_ref();
+    let batch_dn = collapse_out.mu_residual.as_ref();
 
-    let aggregate_rows = if collapse_out.mu_observed.nrows() > args.n_row_modules {
-        let log_x_nd = match collapse_out.mu_adjusted.as_ref() {
-            Some(x) => x.posterior_log_mean().transpose().clone(),
-            _ => collapse_out
-                .mu_observed
-                .posterior_log_mean()
-                .transpose()
-                .clone(),
-        };
-        let kk = (args.n_row_modules as f32).log2().ceil() as usize + 1;
-        info!(
-            "reduce data features: {} -> {}",
-            log_x_nd.ncols(),
-            args.n_row_modules
-        );
-        row_membership_matrix(binary_sort_columns(&log_x_nd, kk)?)?
-    } else {
-        let d = collapse_out.mu_observed.nrows();
-        Mat::identity(d, d)
-    };
+    let aggregate_rows = build_row_aggregator(&collapse_out, n_features_encoder)?;
 
-    let dev = match args.device {
-        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
-        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
-        _ => candle_core::Device::Cpu,
-    };
+    let n_jitter = args.num_jitter;
 
     let train_config = TrainConfig {
         learning_rate: args.learning_rate,
         batch_size: args.minibatch_size,
-        num_epochs: args.epochs,
+        num_epochs: args.epochs.div_ceil(n_jitter),
         num_pretrain_epochs: 0,
         device: dev.clone(),
         verbose: args.verbose,
     };
 
-    let parameters = candle_nn::VarMap::new();
-    let dev = &train_config.device;
-    let param_builder =
-        candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
+    let mut llik = Vec::with_capacity(args.epochs);
 
-    let mixed_dn = &collapse_out.mu_observed;
-    let clean_dn = collapse_out.mu_adjusted.as_ref();
-    let batch_dn = collapse_out.mu_residual.as_ref();
+    for r in 0..n_jitter {
+        info!("posterior sampling...");
 
-    // encoder input can be modularized
-    let input_nm = mixed_dn.posterior_mean().transpose().clone() * &aggregate_rows;
-    let batch_nm = batch_dn.map(|x| x.posterior_mean().transpose().clone() * &aggregate_rows);
+        // encoder input can be modularized
+        let input_nm = mixed_dn.posterior_sample()?.transpose() * &aggregate_rows;
 
-    // output decoder should maintain the original dimension
-    let output_nd = match clean_dn {
-        Some(x) => x.posterior_mean().transpose().clone(),
-        _ => mixed_dn.posterior_mean().transpose().clone(),
-    };
+        let batch_nm = match batch_dn {
+            Some(x) => Some(x.posterior_sample()?.transpose() * &aggregate_rows),
+            None => None,
+        };
 
-    ///////////////////////////////////////////////////
-    // training variational autoencoder architecture //
-    ///////////////////////////////////////////////////
+        // output decoder should maintain the original dimension
+        let output_nd = match clean_dn {
+            Some(x) => x.posterior_sample()?.transpose(),
+            _ => mixed_dn.posterior_sample()?.transpose(),
+        };
 
-    let n_features_encoder = input_nm.ncols();
-    let n_features_decoder = output_nd.ncols();
+        info!("optimization...");
 
-    let encoder = LogSoftmaxEncoder::new(
-        n_features_encoder,
-        n_topics,
-        n_vocab,
-        d_vocab_emb,
-        &args.encoder_layers,
-        param_builder.clone(),
-    )?;
+        let _llik = train_encoder_decoder(
+            &input_nm,
+            &output_nd,
+            batch_nm.as_ref(),
+            &encoder,
+            &decoder,
+            &parameters,
+            &loss_func::topic_likelihood,
+            &train_config,
+        )?;
 
-    info!(
-        "input: {} -> encoder -> decoder -> output: {}",
-        n_features_encoder, n_features_decoder
-    );
-    let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
+        if let Some(llik_val) = _llik.last() {
+            info!("log-likelihood [{}] {}", r + 1, llik_val);
+        }
 
-    let llik = train_encoder_decoder(
-        &input_nm,
-        &output_nd,
-        batch_nm.as_ref(),
-        &encoder,
-        &decoder,
-        &parameters,
-        &loss_func::topic_likelihood,
-        &train_config,
-    )?;
+        llik.extend(_llik);
+    }
 
     let gene_names = data_vec.row_names()?;
 
@@ -300,4 +293,46 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     )?;
 
     Ok(())
+}
+
+fn build_row_aggregator(
+    collapse_out: &CollapsedOut,
+    n_features_encoder: usize,
+) -> anyhow::Result<Mat> {
+    if collapse_out.mu_observed.nrows() > n_features_encoder {
+        let log_x_nd = collapse_out.mu_adjusted.as_ref().map_or_else(
+            || {
+                collapse_out
+                    .mu_observed
+                    .posterior_log_mean()
+                    .transpose()
+                    .clone()
+            },
+            |x| x.posterior_log_mean().transpose().clone(),
+        );
+
+        let kk = n_features_encoder.ilog2() as usize;
+        info!(
+            "reduce data features: {} -> {}",
+            log_x_nd.ncols(),
+            n_features_encoder,
+        );
+
+        let membership = row_membership_matrix(binary_sort_columns(&log_x_nd, kk)?)?;
+
+        if membership.ncols() != n_features_encoder {
+            let d_available = membership.ncols().min(n_features_encoder);
+            let mut ret = Mat::zeros(membership.nrows(), n_features_encoder);
+            ret.columns_range_mut(0..d_available)
+                .copy_from(&membership.columns_range(0..d_available));
+            Ok(ret)
+        } else {
+            Ok(membership)
+        }
+    } else {
+        Ok(Mat::identity(
+            collapse_out.mu_observed.nrows(),
+            n_features_encoder,
+        ))
+    }
 }

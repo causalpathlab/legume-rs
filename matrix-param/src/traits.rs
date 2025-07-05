@@ -11,13 +11,13 @@ pub trait Inference {
     fn posterior_log_mean(&self) -> &Self::Mat;
     fn posterior_log_sd(&self) -> &Self::Mat;
 
+    fn posterior_sample(&self) -> anyhow::Result<Self::Mat>;
+
     fn calibrate(&mut self);
     fn map_calibrate_mean(&mut self);
     fn map_calibrate_sd(&mut self);
     fn map_calibrate_log_mean(&mut self);
     fn map_calibrate_log_sd(&mut self);
-
-    fn len(&self) -> usize;
 }
 
 /// A parameter matrix with two types of statistics
@@ -34,4 +34,5 @@ pub trait TwoStatParam {
 
     fn nrows(&self) -> usize;
     fn ncols(&self) -> usize;
+    fn len(&self) -> usize;
 }

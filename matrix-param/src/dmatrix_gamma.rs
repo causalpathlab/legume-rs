@@ -5,6 +5,7 @@ extern crate special;
 use crate::io::*;
 use crate::traits::*;
 use nalgebra::DMatrix;
+use rayon::prelude::*;
 
 #[derive(Debug)]
 pub struct GammaMatrix {
@@ -76,8 +77,13 @@ impl TwoStatParam for GammaMatrix {
     fn nrows(&self) -> usize {
         self.num_rows
     }
+
     fn ncols(&self) -> usize {
         self.num_columns
+    }
+
+    fn len(&self) -> usize {
+        self.num_rows * self.num_columns
     }
 }
 
@@ -99,6 +105,26 @@ impl Inference for GammaMatrix {
 
     fn posterior_log_sd(&self) -> &Self::Mat {
         &self.estimated_log_sd
+    }
+
+    fn posterior_sample(&self) -> anyhow::Result<Self::Mat> {
+        use rand_distr::{Distribution, Gamma};
+        let eps = 1e-8;
+
+        let sampled = self
+            .a_stat
+            .as_slice()
+            .par_iter()
+            .zip(self.b_stat.as_slice().par_iter())
+            .map_init(rand::rng, |rng, (&a, &b)| -> anyhow::Result<f32> {
+                let shape = a + eps;
+                let scale = (b + eps).recip();
+                let pdf = Gamma::new(shape, scale)?;
+                Ok(pdf.sample(rng))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        Ok(Self::Mat::from_vec(self.nrows(), self.ncols(), sampled))
     }
 
     fn calibrate(&mut self) {
@@ -128,9 +154,5 @@ impl Inference for GammaMatrix {
                 0.0
             }
         });
-    }
-
-    fn len(&self) -> usize {
-        self.num_rows * self.num_columns
     }
 }

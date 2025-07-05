@@ -7,7 +7,7 @@ license.workspace = true
 description = "Counterfactual Confounder Adjustment for Differential Analysis"
 
 [[bin]]
-name = "cocoa-bin"
+name = "cocoa"
 path = "src/main.rs"
 
 [dependencies]

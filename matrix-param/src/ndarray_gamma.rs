@@ -3,6 +3,7 @@ extern crate special;
 use crate::io::*;
 use crate::traits::*;
 use ndarray::prelude::*;
+use rayon::prelude::*;
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -94,6 +95,10 @@ impl TwoStatParam for GammaMatrix {
     fn ncols(&self) -> usize {
         self.num_columns
     }
+
+    fn len(&self) -> usize {
+        self.num_rows * self.num_columns
+    }
 }
 
 impl Inference for GammaMatrix {
@@ -114,6 +119,36 @@ impl Inference for GammaMatrix {
 
     fn posterior_log_sd(&self) -> &Self::Mat {
         &self.estimated_log_sd
+    }
+
+    fn posterior_sample(&self) -> anyhow::Result<Self::Mat> {
+        use rand_distr::{Distribution, Gamma};
+        let eps = 1e-8;
+
+        let a_slice = self
+            .a_stat
+            .as_slice()
+            .ok_or(anyhow::anyhow!("failed to take slice on a_stat"))?;
+        let b_slice = self
+            .b_stat
+            .as_slice()
+            .ok_or(anyhow::anyhow!("failed to take slice on b_stat"))?;
+
+        let sampled = a_slice
+            .par_iter()
+            .zip(b_slice.par_iter())
+            .map_init(rand::rng, |rng, (&a, &b)| -> anyhow::Result<f32> {
+                let shape = a + eps;
+                let scale = (b + eps).recip();
+                let pdf = Gamma::new(shape, scale)?;
+                Ok(pdf.sample(rng))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        Ok(Self::Mat::from_shape_vec(
+            (self.nrows(), self.ncols()),
+            sampled,
+        )?)
     }
 
     fn calibrate(&mut self) {
@@ -142,9 +177,5 @@ impl Inference for GammaMatrix {
                 0.0
             }
         });
-    }
-
-    fn len(&self) -> usize {
-        self.num_rows * self.num_columns
     }
 }

@@ -234,3 +234,8 @@ pub fn binary_sort_columns(
 
     Ok(binary_codes.data.as_vec().clone())
 }
+
+/// maximum binary code (binary shifting)
+pub fn max_binary_code(kk: usize) -> usize {
+    (1 << kk) - 1
+}

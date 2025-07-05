@@ -1,6 +1,24 @@
 use ndarray::Array2;
 
 #[test]
+fn order_test() {
+    use ndarray::{arr2, Array2};
+    // Create a 2x3 array
+    let array = arr2(&[[1, 2, 3], [4, 5, 6]]);
+
+    // Convert to a slice
+    let slice = array.as_slice().unwrap();
+    println!("Slice: {:?}", slice);
+
+    // Reconstruct the array from the slice
+    let reconstructed = Array2::from_shape_vec((2, 3), slice.to_vec()).unwrap();
+    println!("Reconstructed array:\n{:?}", reconstructed);
+
+    // Check if the original and reconstructed arrays are equal
+    assert_eq!(array, reconstructed);
+}
+
+#[test]
 fn dmatrix_rsvd_test() -> anyhow::Result<()> {
     use matrix_util::traits::*;
 
