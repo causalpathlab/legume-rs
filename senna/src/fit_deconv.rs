@@ -41,6 +41,16 @@ pub struct DeconvArgs {
 }
 
 pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
+    // use sc data as reference features?
+
+    // 1. read_data_vec_membership(args)
+    // 2. random projection
+    // 3. deconvolution by matching neighbours
+
+    // the question is about how we get training data
+    // a. how to address uncertainty? include variation?
+    // b. how to adjust bias between the reference and target data?
+
     unimplemented!("take both bulk and single cell data");
     Ok(())
 }
