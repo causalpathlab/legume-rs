@@ -87,6 +87,9 @@ fn project_columns_visitor(
 ) -> anyhow::Result<()> {
     let (lb, ub) = job;
     let mut xx_dm = data_vec.read_columns_csc(lb..ub)?;
+    for x in xx_dm.values_mut() {
+        *x = x.ln_1p();
+    }
     xx_dm.normalize_columns_inplace();
     let chunk = (xx_dm.transpose() * basis_dk).transpose();
 
@@ -228,13 +231,7 @@ pub fn binary_sort_columns(
 
     let mut binary_codes = DVector::<usize>::zeros(nn);
     for k in 0..kk {
-        let binary_shift = |x: f32| -> usize {
-            if x > 0.0 {
-                1 << k
-            } else {
-                0
-            }
-        };
+        let binary_shift = |x: f32| -> usize { if x > 0.0 { 1 << k } else { 0 } };
         binary_codes += q_nk.column(k).map(binary_shift);
     }
 
