@@ -5,4 +5,5 @@ pub struct TrainConfig {
     pub num_pretrain_epochs: usize,
     pub device: candle_core::Device,
     pub verbose: bool,
+    pub show_progress: bool,
 }

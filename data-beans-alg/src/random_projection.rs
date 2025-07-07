@@ -29,6 +29,9 @@ pub trait RandProjOps {
     /// * `target_dim`: target dimensionality
     /// * `block_size`: block size for parallel computation
     ///
+    /// # Output
+    /// * `basis`: `D x K` random basis matrix
+    /// * `proj`: `K x N` projection results
     fn project_columns(
         &self,
         target_dim: usize,
@@ -44,6 +47,9 @@ pub trait RandProjOps {
     /// * `target_dim`: target dimensionality
     /// * `block_size`: block size for parallel computation
     ///
+    /// # Output
+    /// * `basis`: `D x K` random basis matrix
+    /// * `proj`: `K x N` projection results
     fn project_columns_with_batch_correction<T>(
         &self,
         target_dim: usize,

@@ -92,9 +92,9 @@ pub struct TopicArgs {
     #[arg(long, short = 'i', default_value_t = 1000)]
     epochs: usize,
 
-    /// # data jitter during the training
-    #[arg(long, short = 'j', default_value_t = 10)]
-    num_jitter: usize,
+    /// data jitter interval
+    #[arg(long, short = 'j', default_value_t = 5)]
+    jitter_interval: usize,
 
     /// Minibatch size
     #[arg(long, default_value_t = 100)]
@@ -118,7 +118,10 @@ pub struct TopicArgs {
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     // 1. Read the data with batch membership
-    let (mut data_vec, batch_membership) = read_data_vec_membership(ReadArgs {
+    let SparseDataWithBatch {
+        data: mut data_vec,
+        batch: batch_membership,
+    } = read_sparse_data_with_membership(ReadArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
     })?;
@@ -175,10 +178,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
 
     if !args.ignore_batch_effects {
-        if !batch_membership.is_empty() {
-            info!("Registering batch information");
-            data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
-        }
+        info!("Registering batch information");
+        data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
     }
 
     // 3. Batch-adjusted collapsing (pseudobulk)
@@ -208,55 +209,28 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     let aggregate_rows = build_row_aggregator(&collapse_out, n_features_encoder)?;
 
-    let n_jitter = args.num_jitter;
-
     let train_config = TrainConfig {
         learning_rate: args.learning_rate,
         batch_size: args.minibatch_size,
-        num_epochs: args.epochs.div_ceil(n_jitter),
+        num_epochs: args.epochs,
         num_pretrain_epochs: 0,
         device: dev.clone(),
         verbose: args.verbose,
+        show_progress: true,
     };
 
-    let mut llik = Vec::with_capacity(args.epochs);
-
-    for r in 0..n_jitter {
-        info!("posterior sampling...");
-
-        // encoder input can be modularized
-        let input_nm = mixed_dn.posterior_sample()?.transpose() * &aggregate_rows;
-
-        let batch_nm = match batch_dn {
-            Some(x) => Some(x.posterior_sample()?.transpose() * &aggregate_rows),
-            None => None,
-        };
-
-        // output decoder should maintain the original dimension
-        let output_nd = match clean_dn {
-            Some(x) => x.posterior_sample()?.transpose(),
-            _ => mixed_dn.posterior_sample()?.transpose(),
-        };
-
-        info!("optimization...");
-
-        let _llik = train_encoder_decoder(
-            &input_nm,
-            &output_nd,
-            batch_nm.as_ref(),
-            &encoder,
-            &decoder,
-            &parameters,
-            &loss_func::topic_likelihood,
-            &train_config,
-        )?;
-
-        if let Some(llik_val) = _llik.last() {
-            info!("log-likelihood [{}] {}", r + 1, llik_val);
-        }
-
-        llik.extend(_llik);
-    }
+    let llik = train_encoder_decoder_stochastic(
+        mixed_dn,
+        batch_dn,
+        clean_dn,
+        &aggregate_rows,
+        &encoder,
+        &decoder,
+        &parameters,
+        &loss_func::topic_likelihood,
+        &train_config,
+        args.jitter_interval,
+    )?;
 
     let gene_names = data_vec.row_names()?;
 
@@ -269,7 +243,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             &(args.out.to_string() + ".dictionary.parquet"),
         )?;
 
-    write_types::<f32>(&llik, &(args.out.to_string() + ".llik.gz"))?;
+    write_types::<f32>(&llik, &(args.out.to_string() + ".log_likelihood.gz"))?;
 
     /////////////////////////////////////////////////////
     // evaluate latent states while adjusting the bias //

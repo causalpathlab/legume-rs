@@ -9,7 +9,12 @@ pub struct ReadArgs {
     pub batch_files: Option<Vec<Box<str>>>,
 }
 
-pub fn read_data_vec_membership(args: ReadArgs) -> anyhow::Result<(SparseIoVec, Vec<Box<str>>)> {
+pub struct SparseDataWithBatch {
+    pub data: SparseIoVec,
+    pub batch: Vec<Box<str>>,
+}
+
+pub fn read_sparse_data_with_membership(args: ReadArgs) -> anyhow::Result<SparseDataWithBatch> {
     // push data files and collect batch membership
     let file = args.data_files[0].as_ref();
     let backend = match extension(file)?.to_string().as_str() {
@@ -77,5 +82,8 @@ pub fn read_data_vec_membership(args: ReadArgs) -> anyhow::Result<(SparseIoVec, 
         ));
     }
 
-    Ok((data_vec, batch_membership))
+    Ok(SparseDataWithBatch {
+        data: data_vec,
+        batch: batch_membership,
+    })
 }

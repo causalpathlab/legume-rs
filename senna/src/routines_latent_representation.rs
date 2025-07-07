@@ -7,6 +7,9 @@ use candle_util::candle_data_loader::*;
 use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_model_traits::*;
 use candle_util::candle_vae_inference::*;
+use indicatif::{ProgressBar, ProgressDrawTarget};
+
+use matrix_param::dmatrix_gamma::GammaMatrix;
 
 fn nystrom_proj_visitor(
     job: (usize, usize),
@@ -125,8 +128,8 @@ pub fn do_nystrom_proj(
 ///
 pub fn train_encoder_decoder<Enc, Dec, LLikFn>(
     input_data_nm: &Mat,
-    adjusted_data_nd: &Mat,
     null_data_nm: Option<&Mat>,
+    adjusted_data_nd: &Mat,
     encoder: &Enc,
     decoder: &Dec,
     parameters: &candle_nn::VarMap,
@@ -190,6 +193,120 @@ where
         train_config.num_epochs,
         data_loader.num_data()
     );
+
+    Ok(llik_trace)
+}
+
+/// Train an autoencoder model on collapsed data and evaluate latent
+/// mapping by the fixed encoder model.
+///
+/// # Arguments
+/// * `mixed_dn` - raw data, feature x sample
+/// * `batch_dn` - batch effect, feature x sample
+/// * `clean_dn` - clean feature x sample
+/// * `aggregate_dm` - row aggregator for input
+/// * `encoder` - encoder model: `m -> k`
+/// * `decoder` - decoder model: `k -> d`
+/// * `log_likelihood_func` - log-likelihood function
+/// * `train_config` - training configuration
+/// * `jitter` - jitter interval
+///
+/// # Returns
+/// * (`z_nk`, `beta_dk`, `llik`)
+/// * `z_nk` - sample x factor latent representation matrix
+/// * `beta_dk` - feature x factor dictionary matrix
+/// * `llik` - log-likelihood trace vector
+///
+pub fn train_encoder_decoder_stochastic<Enc, Dec, LLikFn>(
+    mixed_dn: &GammaMatrix,
+    batch_dn: Option<&GammaMatrix>,
+    clean_dn: Option<&GammaMatrix>,
+    aggregate_dm: &Mat,
+    encoder: &Enc,
+    decoder: &Dec,
+    parameters: &candle_nn::VarMap,
+    log_likelihood_func: &LLikFn,
+    train_config: &TrainConfig,
+    jitter: usize,
+) -> anyhow::Result<Vec<f32>>
+where
+    Enc: EncoderModuleT + Send + Sync + 'static,
+    Dec: DecoderModuleT + Send + Sync + 'static,
+    LLikFn: Fn(&candle_core::Tensor, &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor>
+        + Sync
+        + Send,
+{
+    let mut vae = Vae::build(encoder, decoder, parameters);
+
+    for var in parameters.all_vars() {
+        var.to_device(&train_config.device)?;
+    }
+
+    let mut llik_trace = vec![];
+
+    let sub_train_config = TrainConfig {
+        learning_rate: train_config.learning_rate, // override
+        batch_size: train_config.batch_size,       // train
+        num_epochs: jitter,                        // config
+        num_pretrain_epochs: 0,                    //
+        device: train_config.device.clone(),       //
+        verbose: false,
+        show_progress: false,
+    };
+
+    let pb = ProgressBar::new(train_config.num_epochs as u64);
+
+    if !train_config.show_progress || train_config.verbose {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
+
+    for epoch in (0..train_config.num_epochs).step_by(jitter) {
+        let input_nm = mixed_dn.posterior_sample()?.transpose() * aggregate_dm;
+
+        let batch_nm = match batch_dn {
+            Some(x) => Some(x.posterior_sample()?.transpose() * aggregate_dm),
+            _ => None,
+        };
+
+        let output_nd = match clean_dn {
+            Some(x) => x.posterior_sample()?.transpose(),
+            _ => mixed_dn.posterior_sample()?.transpose(),
+        };
+
+        let mut data_loader = match batch_nm {
+            Some(batch_nm) => InMemoryData::from(DataLoaderArgs {
+                input: &input_nm,
+                input_null: Some(&batch_nm),
+                input_matched: None,
+                output: Some(&output_nd),
+                output_null: None,
+                output_matched: None,
+            })?,
+            _ => InMemoryData::from(DataLoaderArgs {
+                input: &input_nm,
+                input_null: None,
+                input_matched: None,
+                output: Some(&output_nd),
+                output_null: None,
+                output_matched: None,
+            })?,
+        };
+
+        let llik =
+            vae.train_encoder_decoder(&mut data_loader, log_likelihood_func, &sub_train_config)?;
+
+        llik_trace.extend(llik);
+        pb.inc(jitter as u64);
+
+        if train_config.verbose {
+            info!(
+                "[{}] log-likelihood: {}",
+                epoch + 1,
+                llik_trace.last().ok_or(anyhow::anyhow!("llik"))?
+            );
+        }
+    }
+    pb.finish_and_clear();
 
     Ok(llik_trace)
 }

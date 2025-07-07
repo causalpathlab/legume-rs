@@ -69,14 +69,15 @@ pub struct SvdArgs {
 
 pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     // 1. Read the data with batch membership
-
-    let (mut data_vec, batch_membership) = read_data_vec_membership(ReadArgs {
+    let SparseDataWithBatch {
+        data: mut data_vec,
+        batch: batch_membership,
+    } = read_sparse_data_with_membership(ReadArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
     })?;
 
     // 2. Random projection
-
     let proj_dim = args.proj_dim.max(args.n_latent_topics);
 
     let proj_out = data_vec.project_columns_with_batch_correction(
@@ -99,7 +100,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     }
 
     // 3. Batch-adjusted collapsing (pseudobulk)
-
     let reference = args.reference_batches.as_ref().map(|x| x.as_slice());
 
     info!("Collapsing columns into {} pseudobulk samples ...", nsamp);

@@ -1,5 +1,5 @@
-use asap_data::simulate::*;
-use asap_data::sparse_io::*;
+use data_beans::simulate::*;
+use data_beans::sparse_io::*;
 
 #[test]
 fn sparse_matrix_simulation_and_loading() -> anyhow::Result<()> {
@@ -9,7 +9,8 @@ fn sparse_matrix_simulation_and_loading() -> anyhow::Result<()> {
         depth: 100,
         factors: 1,
         batches: 1,
-	overdisp: 1.,
+        overdisp: 1.,
+        pve_batch: 1.,
         rseed: 42,
     };
 

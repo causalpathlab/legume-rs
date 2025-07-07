@@ -11,6 +11,13 @@ pub trait RandomizedAlgs {
     type DVec;
     type Scalar;
 
+    /// randomized singular value decomposition
+    /// # input
+    /// * `X` - `n x d` matrix
+    /// # output
+    /// * `U` - `n x k`
+    /// * `D` - `k x 1`
+    /// * `V` - `d x k`
     fn rsvd(&self, max_rank: usize) -> anyhow::Result<(Self::OutMat, Self::DVec, Self::OutMat)>;
 }
 

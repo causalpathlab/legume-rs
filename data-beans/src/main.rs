@@ -1296,7 +1296,7 @@ fn show_info(cmd_args: &InfoArgs) -> anyhow::Result<()> {
         println!("number_of_nonzeros:\t{}", nnz);
     }
 
-    if output.len() > 0 {
+    if !output.is_empty() {
         use common_io::{mkdir, write_lines};
         mkdir(&output)?;
         let row_names = data.row_names()?;

@@ -84,7 +84,7 @@ where
 
         let pb = ProgressBar::new(train_config.num_pretrain_epochs as u64);
 
-        if train_config.verbose {
+        if !train_config.show_progress || train_config.verbose {
             pb.set_draw_target(ProgressDrawTarget::hidden());
         }
 
@@ -151,7 +151,7 @@ where
 
         let pb = ProgressBar::new(train_config.num_epochs as u64);
 
-        if train_config.verbose {
+        if !train_config.show_progress || train_config.verbose {
             pb.set_draw_target(ProgressDrawTarget::hidden());
         }
 

@@ -1,6 +1,6 @@
-use asap_data::simulate::*;
-use asap_data::sparse_io::*;
-use asap_data::sparse_matrix_zarr::SparseMtxData;
+use data_beans::simulate::*;
+use data_beans::sparse_io::*;
+use data_beans::sparse_matrix_zarr::SparseMtxData;
 use matrix_util::common_io::{create_temp_dir_file, read_lines};
 use matrix_util::traits::SampleOps;
 
@@ -45,7 +45,7 @@ fn temp_array_zarrs() -> anyhow::Result<()> {
     let backend_file = create_temp_dir_file(".zarr")?;
     let temp_filename = backend_file.to_str().expect("to_str failed");
 
-    let store = Arc::new(zarrs::filesystem::FilesystemStore::new(&temp_filename)?);
+    let store = Arc::new(zarrs::filesystem::FilesystemStore::new(temp_filename)?);
 
     // Create the root group
     zarrs::group::GroupBuilder::new()
@@ -77,7 +77,7 @@ fn temp_array_zarrs() -> anyhow::Result<()> {
 
     println!("ndarray::ArrayD:\n{data_all}");
 
-    let chunk = array![[1. as f32, 2., 3.], [4., 5., 6.], [7., 8., 9.]];
+    let chunk = array![[1_f32, 2., 3.], [4., 5., 6.], [7., 8., 9.]];
     let chunk = chunk.into_iter().collect::<Vec<_>>();
 
     array.store_chunk_elements(&[0, 0], &chunk)?;
@@ -85,7 +85,7 @@ fn temp_array_zarrs() -> anyhow::Result<()> {
     array.store_chunk_elements(&[0, 2], &chunk)?;
     array.store_chunk_elements(&[0, 3], &chunk)?;
 
-    let chunk = array![[1. as f32, 2., 3.], [4., 5., 6.], [7., 8., 9.]];
+    let chunk = array![[1_f32, 2., 3.], [4., 5., 6.], [7., 8., 9.]];
     array.store_array_subset_ndarray(&[1, 0], chunk)?;
 
     let data_all = array.retrieve_array_subset_ndarray::<f32>(&subset_all)?;
@@ -206,6 +206,7 @@ fn simulate() -> anyhow::Result<()> {
         factors: 1,
         batches: 3,
         overdisp: 1.,
+	pve_batch: 1.,
         rseed: 42,
     };
 
