@@ -156,7 +156,7 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
 }
 
 trait Impute {
-    fn impute_by_knn(
+    fn predict_by_knn(
         &self,
         sc_data_vec: &SparseIoVec,
         rand_proj: &RandColProjOut,
@@ -165,7 +165,7 @@ trait Impute {
 }
 
 impl Impute for Mat {
-    fn impute_by_knn(
+    fn predict_by_knn(
         &self,
         sc_data_vec: &SparseIoVec,
         rand_proj: &RandColProjOut,
@@ -174,7 +174,9 @@ impl Impute for Mat {
         let mut imputed_dm = Mat::zeros(self.nrows(), self.ncols());
 
         let basis_dk = &rand_proj.basis;
-        let mut bulk_km = basis_dk.transpose() * self;
+
+        let ln_x = self.map(|x| x.ln_1p()).normalize_columns();
+        let mut bulk_km = basis_dk.transpose() * &ln_x;
         bulk_km.scale_columns_inplace();
 
         let norm_target = 2_f32.ln();
