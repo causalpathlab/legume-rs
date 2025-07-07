@@ -37,6 +37,14 @@ where
         <ColumnDict<T> as ColumnDictOps<T, nalgebra::DVectorView<f32>>>::empty()
     }
 
+    pub fn dim(&self) -> Option<usize> {
+        if self.data_vec.len() > 0 {
+            Some(self.data_vec[0].len())
+        } else {
+            None
+        }
+    }
+
     /// k-nearest neighbour match by name within the same dictionary
     /// to return a Vec of names
     ///
@@ -86,6 +94,39 @@ where
         }
     }
 
+    /// k-nearest neighbour match by name within the same dictionary
+    /// to return a Vec of names
+    ///
+    /// * `query` - query data `VecPoint`
+    /// * `knn` - the number of nearest neighbours to return
+    ///
+    pub fn search_by_query_data(
+        &self,
+        query: &VecPoint,
+        knn: usize,
+    ) -> anyhow::Result<(Vec<T>, Vec<f32>)> {
+        use instant_distance::Search;
+
+        if self.dim().unwrap_or(0) != query.len() {
+            return Err(anyhow::anyhow!("query's dim does not match"));
+        }
+
+        let nquery = knn.min(self.data_vec.len());
+
+        let mut search = Search::default();
+        let knn_iter = self.dict.search(query, &mut search).take(nquery);
+        let mut points = Vec::with_capacity(nquery);
+        let mut distances = Vec::with_capacity(nquery);
+        for v in knn_iter {
+            let vv = v.value;
+            let dd = v.distance;
+            points.push(vv.clone());
+            distances.push(dd);
+        }
+
+        Ok((points, distances))
+    }
+
     /// k-nearest neighbour match by name against another dictionary
     /// to return a Vec of names in the other dictionary
     ///
@@ -93,7 +134,7 @@ where
     /// * `knn` - the number of nearest neighbours to return
     /// * `against` - the dictionary to match against
     ///
-    pub fn search_by_query_name_against(
+    pub fn match_by_query_name_against(
         &self,
         query_name: &T,
         knn: usize,
@@ -183,6 +224,12 @@ where
 /// a wrapper for `Vec<f32>`
 pub struct VecPoint {
     pub data: Vec<f32>,
+}
+
+impl VecPoint {
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
 }
 
 pub trait MakeVecPoint {
