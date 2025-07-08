@@ -4,6 +4,10 @@ use crate::routines_post_process::*;
 use crate::routines_pre_process::*;
 
 use data_beans_alg::normalization::NormalizeDistance;
+use matrix_util::knn_match::ColumnDict;
+use matrix_util::knn_match::MakeVecPoint;
+use rayon::iter::ParallelBridge;
+use rayon::iter::ParallelIterator;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -123,7 +127,7 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
 
     // 1. Read sc data with batch membership
     let SparseDataWithBatch {
-        data: mut sc_data_vec,
+        data: mut sc_data,
         batch: batch_membership,
     } = read_sparse_data_with_membership(ReadArgs {
         data_files: args.sc_data_files.clone(),
@@ -132,21 +136,17 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
 
     // 2. Random projection
     let proj_dim = args.proj_dim.max(args.n_latent_topics);
+    let rand_proj = sc_data.project_columns(proj_dim, Some(args.block_size))?;
+    let proj_kn = rand_proj.proj.scale_columns();
+    // info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
 
-    let proj_out = sc_data_vec.project_columns_with_batch_correction(
-        proj_dim,
-        Some(args.block_size),
-        Some(&batch_membership),
-    )?;
+    info!("Registering batch information...");
+    // sc_data.assign_batch_membership_by_nearest_bulk(bulk, rand_proj)?;
 
-    let proj_kn = proj_out.proj.scale_columns();
-    info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
+    let n_pb_samples =
+        sc_data.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
 
-    let nsamp =
-        sc_data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
-
-    info!("Registering batch information");
-    sc_data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
+    // sc_data.collapse_columns(knn_batches, knn_cells, reference_batch_names, num_opt_iter)
 
     // for each bulk sample
     // - find k-nearest neighbour cells across all the pseudobulk samples
@@ -155,7 +155,56 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-trait Impute {
+trait KnnWithBulk {
+    /// assign column's batch membership based on the nearest
+    /// neighbour found in bulk columns
+    fn assign_batch_membership_by_nearest_bulk(
+        &mut self,
+        bulk: &Mat,
+        rand_proj: &RandColProjOut,
+    ) -> anyhow::Result<()>;
+}
+
+impl KnnWithBulk for SparseIoVec {
+    fn assign_batch_membership_by_nearest_bulk(
+        &mut self,
+        bulk: &Mat,
+        rand_proj: &RandColProjOut,
+    ) -> anyhow::Result<()> {
+        let proj_kn = rand_proj.proj.scale_columns();
+        info!("Sc Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
+
+        let basis_dk = &rand_proj.basis;
+        let ln_x = bulk.map(|x| x.ln_1p()).normalize_columns();
+        let mut bulk_km = basis_dk.transpose() * &ln_x;
+        bulk_km.scale_columns_inplace();
+        info!("Bulk Proj: {} x {} ...", bulk_km.nrows(), bulk.ncols());
+
+        let bulk_samples = (0..bulk_km.ncols()).collect();
+        let columns = (0..bulk_km.ncols()).map(|j| bulk_km.column(j)).collect();
+        let dict = ColumnDict::from_dvector_views(columns, bulk_samples);
+
+        let batch_membership = proj_kn
+            .column_iter()
+            .par_bridge()
+            .map(|x| -> anyhow::Result<usize> {
+                let query = x.to_vp();
+                let search = dict.search_by_query_data(&query, 1)?;
+
+                if search.0.is_empty() {
+                    return Err(anyhow::anyhow!("failed to find the nearest bulk sample"));
+                }
+
+                Ok(search.0[0])
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        self.register_batches_dmatrix(&proj_kn, &batch_membership)?;
+        Ok(())
+    }
+}
+
+trait InteractWithScData {
     fn predict_by_knn(
         &self,
         sc_data_vec: &SparseIoVec,
@@ -164,7 +213,7 @@ trait Impute {
     ) -> anyhow::Result<Mat>;
 }
 
-impl Impute for Mat {
+impl InteractWithScData for Mat {
     fn predict_by_knn(
         &self,
         sc_data_vec: &SparseIoVec,

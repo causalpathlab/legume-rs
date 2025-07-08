@@ -246,6 +246,7 @@ fn main() -> anyhow::Result<()> {
         num_epochs: args.epochs,
         num_pretrain_epochs: 0,
         device: dev.clone(),
+        show_progress: true,
         verbose: args.verbose,
     };
 

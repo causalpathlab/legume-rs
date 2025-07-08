@@ -33,3 +33,4 @@ ndarray-rand = { workspace = true }
 instant-distance = { workspace = true }
 indicatif = { workspace = true }
 parquet = { workspace = true }
+fnv = "1.0.7"

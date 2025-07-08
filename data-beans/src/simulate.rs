@@ -2,10 +2,10 @@
 
 use indicatif::ParallelProgressIterator;
 use log::info;
-use matrix_util::common_io::write_lines;
 use matrix_util::dmatrix_io::*;
 use matrix_util::mtx_io::write_mtx_triplets;
 use matrix_util::traits::*;
+use matrix_util::{common_io::write_lines, dmatrix_util::row_membership_matrix};
 use rand::SeedableRng;
 use rand_distr::{Distribution, Poisson, Uniform};
 use rayon::prelude::*;
@@ -17,6 +17,7 @@ pub struct SimArgs {
     pub factors: usize,
     pub batches: usize,
     pub overdisp: f32,
+    pub pve_topic: f32,
     pub pve_batch: f32,
     pub rseed: u64,
 }
@@ -49,7 +50,7 @@ pub fn generate_factored_poisson_gamma_data_mtx(
     ln_batch_file: &str,
     batch_file: &str,
 ) -> anyhow::Result<()> {
-    let sim = generate_factored_poisson_gamma_data(args);
+    let sim = generate_factored_poisson_gamma_data(args)?;
 
     let batch_out: Vec<Box<str>> = sim
         .batch_membership
@@ -100,7 +101,7 @@ pub fn generate_factored_poisson_gamma_data_mtx(
 /// Y(i,j) ~ Poisson( delta(i, B(j)) * sum_k beta(i,k) * theta(k,j) )
 /// ```
 ///
-pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
+pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<SimOut> {
     let nn = args.cols;
     let dd = args.rows;
     let kk = args.factors;
@@ -108,7 +109,8 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
     let nnz = args.depth;
     let rseed = args.rseed;
     let overdisp = args.overdisp;
-    let pve_batch = args.pve_batch;
+    let pve_topic = args.pve_topic.clamp(0., 1.);
+    let pve_batch = args.pve_batch.clamp(0., 1.);
     let threshold = 0.5_f32;
     let eps = 1e-8;
 
@@ -136,10 +138,30 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
 
     // 3. factorization model
     let (a, b) = (1. / overdisp, (kk as f32).sqrt() * overdisp);
-    let beta_dk = DMatrix::<f32>::rgamma(dd, kk, (a, b));
+    let mut beta_dk = DMatrix::<f32>::rgamma(dd, kk, (a, b));
 
-    let (a, b) = (1. / overdisp, (kk as f32).sqrt() * overdisp);
-    let theta_kn = DMatrix::<f32>::rgamma(kk, nn, (a, b));
+    if kk > 1 && pve_topic < 1. {
+        let beta_null = DMatrix::<f32>::rgamma(dd, 1, (a, b)).scale(1.0 - pve_topic);
+        for k in 0..kk {
+            let x = beta_dk.column(k).scale(pve_topic) + &beta_null;
+            beta_dk.column_mut(k).copy_from(&x);
+        }
+    }
+
+    let runif = Uniform::new(0, kk)?;
+    let k_membership: Vec<usize> = (0..nn).map(|_| runif.sample(&mut rng)).collect();
+
+    let mut theta_kn: DMatrix<f32> = row_membership_matrix(k_membership)?.transpose();
+
+    if kk > 1 && pve_topic < 1. {
+        let denom = (kk - 1) as f32;
+        let p_background = (1.0 - pve_topic) / denom;
+        let theta_null = DMatrix::<f32>::from_element(kk, nn, p_background);
+        theta_kn = (theta_kn * pve_topic) + theta_null;
+    }
+
+    // let (a, b) = (1. / overdisp, (kk as f32).sqrt() * overdisp);
+    // let theta_kn = DMatrix::<f32>::rgamma(kk, nn, (a, b));
 
     // 4. putting them all together
     // let mut triplets = vec![];
@@ -188,11 +210,11 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> SimOut {
         triplets.len()
     );
 
-    SimOut {
+    Ok(SimOut {
         ln_delta_db,
         beta_dk,
         theta_kn,
         batch_membership,
         triplets,
-    }
+    })
 }

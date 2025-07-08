@@ -35,7 +35,6 @@ impl CocoaCollapseOps for SparseIoVec {
         assert_eq!(n_cells, cocoa_input.cell_topic_nk.nrows());
         assert_eq!(n_topics, cocoa_input.cell_topic_nk.ncols());
 
-        // let exposures = cocoa_input.exposure_assignment;
         let n_samples = pb_samples.len();
 
         let mut cocoa_stat = CocoaStat::new(
@@ -49,26 +48,9 @@ impl CocoaCollapseOps for SparseIoVec {
             cocoa_input.hyper_param,
         );
 
-        self.visit_columns_by_group(
-            pb_samples,
-            &collect_basic_stat_visitor,
-            cocoa_input,
-            &mut cocoa_stat,
-        )?;
-
-        self.visit_columns_by_group(
-            pb_samples,
-            &collect_indv_stat_visitor,
-            cocoa_input,
-            &mut cocoa_stat,
-        )?;
-
-        self.visit_columns_by_group(
-            pb_samples,
-            &collect_matched_stat_visitor,
-            cocoa_input,
-            &mut cocoa_stat,
-        )?;
+        self.visit_columns_by_group(&collect_basic_stat_visitor, cocoa_input, &mut cocoa_stat)?;
+        self.visit_columns_by_group(&collect_indv_stat_visitor, cocoa_input, &mut cocoa_stat)?;
+        self.visit_columns_by_group(&collect_matched_stat_visitor, cocoa_input, &mut cocoa_stat)?;
 
         Ok(cocoa_stat)
     }

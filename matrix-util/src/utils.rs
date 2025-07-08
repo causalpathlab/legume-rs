@@ -1,6 +1,6 @@
+use fnv::FnvHashMap as HashMap;
 use rand::prelude::SliceRandom;
 use rayon::prelude::*;
-use std::collections::HashMap;
 use std::hash::Hash;
 
 /// partition membership vector into groups of indexes
@@ -16,7 +16,7 @@ pub fn partition_by_membership<T>(
 where
     T: Eq + Hash + Clone + Send + Sync,
 {
-    let mut pb_elems: HashMap<T, Vec<usize>> = HashMap::new();
+    let mut pb_elems: HashMap<T, Vec<usize>> = HashMap::default();
     for (cell, k) in membership.iter().enumerate() {
         pb_elems.entry(k.clone()).or_default().push(cell);
     }

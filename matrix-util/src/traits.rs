@@ -13,11 +13,11 @@ pub trait RandomizedAlgs {
 
     /// randomized singular value decomposition
     /// # input
-    /// * `X` - `n x d` matrix
+    /// * `X`: `n x d` matrix
     /// # output
-    /// * `U` - `n x k`
-    /// * `D` - `k x 1`
-    /// * `V` - `d x k`
+    /// * `U`: `n x k`
+    /// * `D`: `k x 1`
+    /// * `V`: `d x k`
     fn rsvd(&self, max_rank: usize) -> anyhow::Result<(Self::OutMat, Self::DVec, Self::OutMat)>;
 }
 
@@ -89,7 +89,7 @@ pub trait DistanceOps {
 
     /// A vector of Euclidean distances between sources and targets `other`
     ///
-    /// * `other` - other data matrix
+    /// * `other`: other data matrix
     fn euclidean_distance(
         &self,
         other: &Self::Other,
@@ -97,8 +97,8 @@ pub trait DistanceOps {
 
     /// A vector of Euclidean distances between sources and targets `other`
     ///
-    /// * `other` - other data matrix
-    /// * `select_columns_in_other` - specific columns
+    /// * `other`: other data matrix
+    /// * `select_columns_in_other`: specific columns
     fn euclidean_distance_on_select_columns(
         &self,
         other: &Self::Other,
@@ -113,12 +113,12 @@ pub trait CompositeOps {
     type Other;
 
     /// `self[:,col] += other[:,col]`
-    /// * `other` - `CscMatrix`
-    /// * `col` - column index
+    /// * `other`: `CscMatrix`
+    /// * `col`: column index
     fn add_assign_column(&mut self, other: &Self::Other, col: usize);
 
     /// `self += other`
-    /// * `other` - `CscMatrix`
+    /// * `other`: `CscMatrix`
     fn add_assign(&mut self, other: &Self::Other);
 }
 
@@ -133,26 +133,28 @@ pub trait IoOps {
         skip: Option<usize>,
     ) -> anyhow::Result<Self::Mat>;
 
+    /// Read the data matrix with row and column names
     ///
-    /// * `file_path` - data file name
-    /// * `skip` - header line (0-based)
-    /// * `row_name_index` - column index (0-based) corresponds to row name
-    /// * `column_indices` - column indices (0-based) to include
-    /// * `column_names` - column names to include
+    /// * `file_path`: data file name
+    /// * `delim`: delimiter (`char` vector or string)
+    /// * `header_row`: header line (0-based)
+    /// * `row_name_column_index`: column index (0-based) corresponds to row name
+    /// * `select_column_indices`: column indices (0-based) to include
+    /// * `select_column_names`: column names to include
     ///
     fn read_data(
         file_path: &str,
         delim: impl Into<Delimiter>,
-        skip: Option<usize>,
-        row_name_index: Option<usize>,
-        column_indices: Option<&[usize]>,
-        column_names: Option<&[Box<str>]>,
-    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)>;
+        header_row: Option<usize>,
+        row_name_column_index: Option<usize>,
+        select_column_indices: Option<&[usize]>,
+        select_column_names: Option<&[Box<str>]>,
+    ) -> anyhow::Result<MatWithNames<Self::Mat>>;
 
-    fn read_names_and_data_with_indices_names(
+    fn read_data_vec_with_indices_names(
         file_path: &str,
         delim: impl Into<Delimiter>,
-        skip: Option<usize>,
+        header_line: Option<usize>,
         row_name_index: Option<usize>,
         column_indices: Option<&[usize]>,
         column_names: Option<&[Box<str>]>,
@@ -161,7 +163,7 @@ pub trait IoOps {
         Self::Scalar: std::str::FromStr,
         <Self::Scalar as std::str::FromStr>::Err: std::fmt::Debug,
     {
-        let hdr_line = match skip {
+        let hdr_line = match header_line {
             Some(skip) => skip as i64,
             None => -1, // no skipping
         };
@@ -229,24 +231,37 @@ pub trait IoOps {
         Ok((row_names, column_names, data))
     }
 
+    /// Read a `tsv` file while skipping until the header row
     fn from_tsv(tsv_file: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat> {
         Self::read_file_delim(tsv_file, "\t", skip)
     }
 
+    /// Read a `csv` file while skipping until the header row
     fn from_csv(csv_file: &str, skip: Option<usize>) -> anyhow::Result<Self::Mat> {
         Self::read_file_delim(csv_file, ",", skip)
     }
 
+    /// write the matrix down to a file with delimiter
+    /// * `file_path`: output file path
+    /// * `delim`: separation character or string
     fn write_file_delim(&self, file: &str, delim: &str) -> anyhow::Result<()>;
 
+    /// write the matrix down to a tsv file
+    /// * `file_path`: output file path
     fn to_tsv(&self, tsv_file: &str) -> anyhow::Result<()> {
         self.write_file_delim(tsv_file, "\t")
     }
 
+    /// write the matrix down to a csv file
+    /// * `file_path`: output file path
     fn to_csv(&self, csv_file: &str) -> anyhow::Result<()> {
         self.write_file_delim(csv_file, ",")
     }
 
+    /// write the matrix down to parquet
+    /// * `row_names`: if `None`, just add `[0, n)` numbers.
+    /// * `column_names`: if `None`, just add `[0, n)` numbers.
+    /// * `file_path`: output file path
     fn to_parquet(
         &self,
         row_names: Option<&[Box<str>]>,
@@ -257,48 +272,55 @@ pub trait IoOps {
     /// Read a real-valued numeric matrix with the default row
     /// index(0) and all the other available columns
     ///
-    fn from_parquet(file_path: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
+    fn from_parquet(file_path: &str) -> anyhow::Result<MatWithNames<Self::Mat>> {
         Self::from_parquet_with_indices(file_path, None, None)
     }
 
     /// Read a real-valued numeric matrix from the parquet file. We
     /// can specify row name index. We can specify the row name column
     /// index and desired column indices.
-    /// * `row_name_index` - column index (0-based) corresponds to row name
-    /// * `column_indices` - column indices (0-based) to include
+    /// * `row_name_index`: column index (0-based) corresponds to row name
+    /// * `column_indices`: column indices (0-based) to include
     fn from_parquet_with_indices(
         file_path: &str,
         row_name_index: Option<usize>,
         column_indices: Option<&[usize]>,
-    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
+    ) -> anyhow::Result<MatWithNames<Self::Mat>> {
         Self::from_parquet_with_indices_names(file_path, row_name_index, column_indices, None)
     }
 
     /// Read a real-valued numeric matrix from the parquet file.  We
     /// can specify row name index.  We can specify the row name
     /// column index and desired column names.
-    /// * `row_name_index` - column index (0-based) corresponds to row name
-    /// * `column_names` - column names to include
+    /// * `row_name_index`: column index (0-based) corresponds to row name
+    /// * `column_names`: column names to include
     fn from_parquet_with_names(
         file_path: &str,
         row_name_index: Option<usize>,
         column_names: Option<&[Box<str>]>,
-    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
+    ) -> anyhow::Result<MatWithNames<Self::Mat>> {
         Self::from_parquet_with_indices_names(file_path, row_name_index, None, column_names)
     }
 
     /// Read a real-valued numeric matrix from the parquet file.  We
     /// can specify row name index.  We can specify the row name
     /// column index and desired column indices and names.
-    /// * `row_name_index` - column index (0-based) corresponds to row name
-    /// * `column_indices` - column indices (0-based) to include
-    /// * `column_names` - column names to include
+    /// * `row_name_index`: column index (0-based) corresponds to row name
+    /// * `column_indices`: column indices (0-based) to include
+    /// * `column_names`: column names to include
     fn from_parquet_with_indices_names(
         file_path: &str,
         row_name_index: Option<usize>,
         column_indices: Option<&[usize]>,
         column_names: Option<&[Box<str>]>,
-    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)>;
+    ) -> anyhow::Result<MatWithNames<Self::Mat>>;
+}
+
+/// intput data matrix `mat` with `rows` and `cols`
+pub struct MatWithNames<M> {
+    pub rows: Vec<Box<str>>,
+    pub cols: Vec<Box<str>>,
+    pub mat: M,
 }
 
 /// melt a matrix

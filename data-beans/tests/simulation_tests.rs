@@ -10,11 +10,12 @@ fn sparse_matrix_simulation_and_loading() -> anyhow::Result<()> {
         factors: 1,
         batches: 1,
         overdisp: 1.,
+        pve_topic: 1.,
         pve_batch: 1.,
         rseed: 42,
     };
 
-    let _out = generate_factored_poisson_gamma_data(&args);
+    let _out = generate_factored_poisson_gamma_data(&args)?;
 
     let mtx_shape = (args.rows, args.cols, _out.triplets.len());
 
