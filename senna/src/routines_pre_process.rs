@@ -23,6 +23,9 @@ pub fn read_sparse_data_with_membership(args: ReadArgs) -> anyhow::Result<Sparse
         _ => SparseIoBackend::Zarr,
     };
 
+    // to avoid duplicate barcodes in the column names
+    let attach_data_name = args.data_files.len() > 1;
+
     let mut data_vec = SparseIoVec::new();
     for data_file in args.data_files.iter() {
         info!("Importing data file: {}", data_file);
@@ -38,8 +41,8 @@ pub fn read_sparse_data_with_membership(args: ReadArgs) -> anyhow::Result<Sparse
         };
 
         let data = open_sparse_matrix(data_file, &backend)?;
-        let data_name = basename(data_file)?;
-        data_vec.push(Arc::from(data), Some(data_name))?;
+        let data_name = attach_data_name.then(|| basename(data_file)).transpose()?;
+        data_vec.push(Arc::from(data), data_name)?;
     }
 
     // check if row names are the same

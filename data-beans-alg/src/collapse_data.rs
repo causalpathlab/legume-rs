@@ -61,21 +61,18 @@ pub trait CollapsingOps {
 
     fn collect_basic_stat(
         &self,
-        sample_to_cols: &[Vec<usize>],
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()>;
 
     fn collect_batch_stat(
         &self,
-        sample_to_cols: &[Vec<usize>],
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()>;
 
     fn collect_matched_stat(
         &self,
-        sample_to_cells: &[Vec<usize>],
         knn_batches: usize,
-        knn_cells: usize,
+        knn_cols: usize,
         reference_indices: Option<&[usize]>,
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()>;
@@ -119,7 +116,7 @@ impl CollapsingOps for SparseIoVec {
 
         let mut stat = CollapsedStat::new(num_features, num_groups, num_batches);
         info!("basic statistics across {} groups", num_groups);
-        self.collect_basic_stat(group_to_cols, &mut stat)?;
+        self.collect_basic_stat(&mut stat)?;
 
         if num_batches > 1 {
             info!(
@@ -161,7 +158,7 @@ impl CollapsingOps for SparseIoVec {
                 }
             }
 
-            self.collect_batch_stat(group_to_cols, &mut stat)?;
+            self.collect_batch_stat(&mut stat)?;
 
             info!(
                 "counterfactual inference across {} batches over {} samples",
@@ -172,7 +169,6 @@ impl CollapsingOps for SparseIoVec {
             let knn_cells = knn_cells.unwrap_or(DEFAULT_KNN);
 
             self.collect_matched_stat(
-                group_to_cols,
                 knn_batches,
                 knn_cells,
                 reference_indices.as_deref(),
@@ -191,11 +187,9 @@ impl CollapsingOps for SparseIoVec {
 
     fn collect_basic_stat(
         &self,
-        sample_to_cells: &[Vec<usize>],
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
         self.visit_columns_by_group(
-            sample_to_cells,
             &collect_basic_stat_visitor,
             &EmptyArg {},
             stat,
@@ -204,11 +198,9 @@ impl CollapsingOps for SparseIoVec {
 
     fn collect_batch_stat(
         &self,
-        sample_to_cells: &[Vec<usize>],
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
         self.visit_columns_by_group(
-            sample_to_cells,
             &collect_batch_stat_visitor,
             &EmptyArg {},
             stat,
@@ -217,14 +209,12 @@ impl CollapsingOps for SparseIoVec {
 
     fn collect_matched_stat(
         &self,
-        sample_to_cells: &[Vec<usize>],
         knn_batches: usize,
         knn_cells: usize,
         reference_indices: Option<&[usize]>,
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
         self.visit_columns_by_group(
-            sample_to_cells,
             &collect_matched_stat_visitor,
             &KnnParams {
                 knn_batches,

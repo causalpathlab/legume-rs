@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex};
 const DEFAULT_BLOCK_SIZE: usize = 100;
 
 pub trait VisitColumnsOps {
+    /// visit all the columns by sequential blocks.  The visitor
+    /// function should take (a) `(lb, ub)` (b) `&Self` (c)
+    /// `&SharedIn` (d) `Arc::new(Mutex::new(&mut SharedOut)`
     fn visit_columns_by_block<Visitor, SharedIn, SharedOut>(
         &self,
         visitor: &Visitor,
@@ -22,9 +25,12 @@ pub trait VisitColumnsOps {
         SharedIn: Sync + Send,
         SharedOut: Sync + Send;
 
+    /// visit all the columns by predefined groups assigned by
+    /// `self.assign_groups`. The visitor function should take (a)
+    /// `group_index` (b) `&[columns_in_the_group]` (c) `&Self` (d)
+    /// `&SharedIn` (e) `Arc::new(Mutex::new(&mut SharedOut)`
     fn visit_columns_by_group<Visitor, SharedIn, SharedOut>(
         &self,
-        groups_to_cells: &[Vec<usize>],
         visitor: &Visitor,
         shared_in: &SharedIn,
         shared_out: &mut SharedOut,
@@ -65,7 +71,6 @@ impl VisitColumnsOps for SparseIoVec {
 
     fn visit_columns_by_group<Visitor, SharedIn, SharedOut>(
         &self,
-        groups_to_cells: &[Vec<usize>],
         visitor: &Visitor,
         shared_in: &SharedIn,
         shared_out: &mut SharedOut,
@@ -77,11 +82,15 @@ impl VisitColumnsOps for SparseIoVec {
         SharedIn: Sync + Send,
         SharedOut: Sync + Send,
     {
+        let group_to_cols = self.take_grouped_columns().ok_or(anyhow::anyhow!(
+            "The columns were not assigned before. Call `assign_groups`"
+        ))?;
+
         let arc_shared_out = Arc::new(Mutex::new(shared_out));
-        let num_samples = groups_to_cells.len();
+        let num_samples = group_to_cols.len();
         let num_jobs = num_samples as u64;
 
-        groups_to_cells
+        group_to_cols
             .iter()
             .enumerate()
             .par_bridge()

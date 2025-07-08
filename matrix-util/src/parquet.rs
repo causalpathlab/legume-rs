@@ -17,6 +17,14 @@ pub struct ParquetReader {
 }
 
 impl ParquetReader {
+    /// Create a new parquet reader for a matrix with row and column
+    /// names.
+    ///
+    /// * `row_name_index`: if `None`, the column `0` will be so.
+    ///
+    /// * `select_column_index`: if `None`, use all the other columns
+    ///
+    /// * `select_column_names`: if `None`, use all the other columns
     pub fn new(
         file_path: &str,
         row_name_index: Option<usize>,
@@ -136,6 +144,15 @@ pub struct ParquetWriter {
 }
 
 impl ParquetWriter {
+    /// Create a new parquet writer for a matrix with row and column
+    /// names.
+    ///
+    /// * `file_path`: output file path
+    ///
+    /// * `shape`: number of rows and columns
+    ///
+    /// * `names`: for row and column names, respectively; if `None`, just add `[0, n)` numbers.
+    ///
     pub fn new(
         file_path: &str,
         shape: (usize, usize),

@@ -153,7 +153,8 @@ fn simulate() -> anyhow::Result<()> {
         factors: 1,
         batches: 1,
         overdisp: 1.,
-	pve_batch: 1.,
+        pve_topic: 1.,
+        pve_batch: 1.,
         rseed: 1,
     };
 

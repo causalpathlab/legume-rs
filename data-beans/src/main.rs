@@ -451,6 +451,10 @@ pub struct RunSimulateArgs {
     #[arg(short, long, default_value_t = 1)]
     batches: usize,
 
+    /// proportion of variance explained by topics (cell types).
+    #[arg(long, default_value_t = 1.0)]
+    pve_topic: f32,
+
     /// proportion of variance explained by batch effects. This
     /// parameter will take effect when there are two or more batches.
     #[arg(long, default_value_t = 1.0)]
@@ -1455,11 +1459,12 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         factors: cmd_args.factors,
         batches: cmd_args.batches,
         overdisp: cmd_args.overdisp,
+        pve_topic: cmd_args.pve_topic,
         pve_batch: cmd_args.pve_batch,
         rseed: cmd_args.rseed,
     };
 
-    let sim = simulate::generate_factored_poisson_gamma_data(&sim_args);
+    let sim = simulate::generate_factored_poisson_gamma_data(&sim_args)?;
     info!("successfully generated factored Poisson-Gamma data");
 
     let batch_out: Vec<Box<str>> = sim

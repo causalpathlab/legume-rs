@@ -96,6 +96,12 @@ impl SparseIoVec {
         self.group_to_cols.as_ref().map(|x| x.len()).unwrap_or(0)
     }
 
+    /// push new sparse data
+    ///
+    /// * `data`: `Arc` to `SparseIo`
+    ///
+    /// * `data_name`: data name to avoid duplicate barcodes
+    ///
     pub fn push(
         &mut self,
         data: Arc<SparseData>,
@@ -122,7 +128,7 @@ impl SparseIoVec {
 
             let data_tag = match data_name {
                 Some(x) => COLUMN_SEP.to_string() + x.as_ref(),
-                _ => COLUMN_SEP.to_string() + &didx.to_string(),
+                _ => "".to_string(),
             };
 
             self.column_names_with_data_tag.extend(

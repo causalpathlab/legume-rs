@@ -1,6 +1,6 @@
 use crate::common_io::{read_lines_of_types, write_lines, Delimiter};
 use crate::parquet::*;
-use crate::traits::IoOps;
+use crate::traits::*;
 
 use parquet::data_type::{ByteArrayType, DoubleType};
 
@@ -18,8 +18,8 @@ impl IoOps for Tensor {
         row_name_index: Option<usize>,
         column_indices: Option<&[usize]>,
         column_names: Option<&[Box<str>]>,
-    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
-        let (rows, cols, data) = Self::read_names_and_data_with_indices_names(
+    ) -> anyhow::Result<MatWithNames<Self::Mat>> {
+        let (rows, cols, data) = Self::read_data_vec_with_indices_names(
             file_path,
             delim,
             skip,
@@ -30,11 +30,11 @@ impl IoOps for Tensor {
 
         let nrows = rows.len();
         let ncols = cols.len();
-        Ok((
+        Ok(MatWithNames {
             rows,
             cols,
-            Tensor::from_vec(data, (nrows, ncols), &Device::Cpu)?,
-        ))
+            mat: Tensor::from_vec(data, (nrows, ncols), &Device::Cpu)?,
+        })
     }
 
     fn read_file_delim(
@@ -137,7 +137,7 @@ impl IoOps for Tensor {
         row_name_index: Option<usize>,
         column_indices: Option<&[usize]>,
         column_names: Option<&[Box<str>]>,
-    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
+    ) -> anyhow::Result<MatWithNames<Self>> {
         let parquet = ParquetReader::new(file_path, row_name_index, column_indices, column_names)?;
 
         let nrows = parquet.row_names.len();
@@ -149,10 +149,10 @@ impl IoOps for Tensor {
             .map(|x| x as f32)
             .collect();
 
-        Ok((
-            parquet.row_names,
-            parquet.column_names,
-            Tensor::from_vec(data, (nrows, ncols), &Device::Cpu)?,
-        ))
+        Ok(MatWithNames {
+            rows: parquet.row_names,
+            cols: parquet.column_names,
+            mat: Tensor::from_vec(data, (nrows, ncols), &Device::Cpu)?,
+        })
     }
 }

@@ -1,7 +1,7 @@
 // #![allow(dead_code)]
 
-use crate::SRTArgs;
 use crate::srt_common::*;
+use crate::SRTArgs;
 
 pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str>>)> {
     // push data files and collect batch membership
@@ -53,17 +53,20 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
         info!("Reading coordinate file: {}", coord_file);
         let ext = extension(&coord_file)?;
 
-        let (coord_cell_names, _names, data) = match ext.as_ref() {
+        let MatWithNames {
+            rows: coord_cell_names,
+            cols: _names,
+            mat: data,
+        } = match ext.as_ref() {
             "parquet" => Mat::from_parquet_with_indices_names(
                 &coord_file,
                 Some(0),
                 args.coord_columns.as_deref(),
                 Some(&args.coord_column_names),
             )?,
-
             _ => Mat::read_data(
                 &coord_file,
-                vec!['\t', ',', ' '],
+                &['\t', ',', ' '],
                 Some(0),
                 Some(0),
                 args.coord_columns.as_deref(),

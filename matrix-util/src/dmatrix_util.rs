@@ -60,16 +60,20 @@ where
     Ok(DMatrix::from_columns(&cols))
 }
 
+/// Generate one-hot membership matrix (`row x K`) where the number of
+/// rows corresponds to the length of the membership vector and the
+/// `K` corresponds to the maximum membership value + 1.
+/// 
 pub fn row_membership_matrix<T>(row_membership: Vec<usize>) -> anyhow::Result<DMatrix<T>>
 where
     T: nalgebra::RealField + Copy,
 {
-    let mtot = match row_membership.iter().max() {
+    let kk = match row_membership.iter().max() {
         Some(&m) => m + 1,
         _ => 1,
     };
 
-    let mut ret_dm = DMatrix::zeros(row_membership.len(), mtot);
+    let mut ret_dm = DMatrix::zeros(row_membership.len(), kk);
     let oneval = T::from_f32(1.).ok_or(anyhow::anyhow!("cannot find 1 value"))?;
     for (i, k) in row_membership.into_iter().enumerate() {
         ret_dm[(i, k)] += oneval;

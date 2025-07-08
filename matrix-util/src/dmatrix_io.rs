@@ -24,8 +24,8 @@ where
         row_name_index: Option<usize>,
         column_indices: Option<&[usize]>,
         column_names: Option<&[Box<str>]>,
-    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
-        let (rows, cols, data) = Self::read_names_and_data_with_indices_names(
+    ) -> anyhow::Result<MatWithNames<Self::Mat>> {
+        let (rows, cols, data) = Self::read_data_vec_with_indices_names(
             file_path,
             delim,
             skip,
@@ -36,11 +36,11 @@ where
 
         let nrows = rows.len();
         let ncols = cols.len();
-        Ok((
+        Ok(MatWithNames {
             rows,
             cols,
-            DMatrix::<T>::from_row_iterator(nrows, ncols, data),
-        ))
+            mat: DMatrix::<T>::from_row_iterator(nrows, ncols, data),
+        })
     }
 
     fn read_file_delim(
@@ -134,7 +134,7 @@ where
         row_name_index: Option<usize>,
         column_indices: Option<&[usize]>,
         column_names: Option<&[Box<str>]>,
-    ) -> anyhow::Result<(Vec<Box<str>>, Vec<Box<str>>, Self::Mat)> {
+    ) -> anyhow::Result<MatWithNames<Self>> {
         let parquet = ParquetReader::new(file_path, row_name_index, column_indices, column_names)?;
 
         let data: Vec<T> = parquet
@@ -146,10 +146,10 @@ where
         let nrows = parquet.row_names.len();
         let ncols = parquet.column_names.len();
 
-        Ok((
-            parquet.row_names,
-            parquet.column_names,
-            DMatrix::<T>::from_row_iterator(nrows, ncols, data),
-        ))
+        Ok(MatWithNames {
+            rows: parquet.row_names,
+            cols: parquet.column_names,
+            mat: DMatrix::<T>::from_row_iterator(nrows, ncols, data),
+        })
     }
 }
