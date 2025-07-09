@@ -4,10 +4,9 @@ use crate::routines_post_process::*;
 use crate::routines_pre_process::*;
 
 use data_beans_alg::normalization::NormalizeDistance;
-use matrix_util::knn_match::ColumnDict;
-use matrix_util::knn_match::MakeVecPoint;
-use rayon::iter::ParallelBridge;
-use rayon::iter::ParallelIterator;
+use matrix_util::common_io::extension;
+use matrix_util::knn_match::*;
+use rayon::prelude::*;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -117,6 +116,18 @@ pub struct DeconvArgs {
 pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
     // use sc data as reference features?
 
+    // read bulk data
+    for bulk_file in args.bulk_data_files.iter() {
+        let MatWithNames {
+            rows: genes,
+            cols: samples,
+            mat: bulk_mat,
+        } = match extension(bulk_file.as_ref())?.as_ref() {
+            "parquet" => Mat::from_parquet(bulk_file.as_ref())?,
+            _ => Mat::read_data(bulk_file.as_ref(), &['\t', ','], None, Some(0), None, None)?,
+        };
+    }
+
     // 1. read_data_vec_membership(args)
     // 2. random projection
     // 3. deconvolution by matching neighbours
@@ -128,7 +139,7 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
     // 1. Read sc data with batch membership
     let SparseDataWithBatch {
         data: mut sc_data,
-        batch: batch_membership,
+        batch: _,
     } = read_sparse_data_with_membership(ReadArgs {
         data_files: args.sc_data_files.clone(),
         batch_files: args.batch_files.clone(),
