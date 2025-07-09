@@ -5,10 +5,9 @@ use indicatif::ParallelProgressIterator;
 use matrix_util::common_io::extension;
 use matrix_util::dmatrix_util::concatenate_horizontal;
 use matrix_util::utils::partition_by_membership;
-use rand_distr::Distribution;
+use rand::distr::{Distribution, weighted::WeightedIndex};
 use rayon::prelude::*;
 
-use rand::distr::Uniform;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -43,7 +42,7 @@ pub struct SimDeconvArgs {
 pub fn sim_deconv(args: &SimDeconvArgs) -> anyhow::Result<()> {
     // 1. read sc data and topic proportion file
     let SparseDataWithBatch {
-        data: mut sc_data,
+        data: sc_data,
         batch: _,
     } = read_sparse_data_with_membership(ReadArgs {
         data_files: args.sc_data_files.clone(),
@@ -67,25 +66,21 @@ pub fn sim_deconv(args: &SimDeconvArgs) -> anyhow::Result<()> {
         .collect::<HashMap<_, _>>();
 
     let max_k = topic_mat.ncols();
-    let runif_k = Uniform::new(0, max_k)?;
     let sc_data_cells = sc_data.column_names()?;
-
-    let rng = StdRng::seed_from_u64(args.rseed);
 
     let cell_to_topic = sc_data_cells
         .par_iter()
-        .map_init(
-            || rng.clone(), // Clone the RNG for each thread
-            |local_rng, sc| {
-                if let Some(pos) = topic_cells.get(sc) {
-                    let theta = topic_mat.row(*pos.value());
-                    runif_k.sample(local_rng) // Use the thread-local RNG
-                } else {
-                    max_k
-                }
-            },
-        )
-        .collect::<Vec<_>>();
+        .enumerate()
+        .map(|(i, sc)| -> anyhow::Result<usize> {
+            if let Some(pos) = topic_cells.get(sc) {
+                let mut rng = StdRng::seed_from_u64(args.rseed + (i as u64));
+                let dist = WeightedIndex::new(topic_mat.row(*pos.value()))?;
+                Ok(dist.sample(&mut rng))
+            } else {
+                Ok(max_k)
+            }
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     let topic_to_cells = partition_by_membership(&cell_to_topic, None);
 
