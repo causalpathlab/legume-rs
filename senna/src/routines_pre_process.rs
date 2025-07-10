@@ -51,7 +51,9 @@ pub fn read_sparse_data_with_membership(args: ReadArgs) -> anyhow::Result<Sparse
     for j in 1..data_vec.len() {
         let row_names_j = data_vec[j].row_names()?;
         if row_names != row_names_j {
-            return Err(anyhow::anyhow!("Row names are not the same"));
+            return Err(anyhow::anyhow!(
+                "Row names are not the same. Consider using `data-beans sort-rows` to make sure that the row names are consistent across data sets."
+            ));
         }
     }
 

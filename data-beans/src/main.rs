@@ -451,7 +451,8 @@ pub struct RunSimulateArgs {
     #[arg(short, long, default_value_t = 1)]
     batches: usize,
 
-    /// proportion of variance explained by topics (cell types).
+    /// proportion of variance explained by topic membership on the
+    /// `θ` parameter.
     #[arg(long, default_value_t = 1.0)]
     pve_topic: f32,
 
@@ -464,12 +465,12 @@ pub struct RunSimulateArgs {
     #[arg(short, long)]
     output: Box<str>,
 
-    /// Set overdispersion `φ` parameter for `β ~ Gamma(1/φ, K*φ)` and
-    /// `θ ~ Gamma(1/φ, K*φ)`. Here, the mean of both `β` and `θ` will
-    /// be K. A high value, e.g., `φ>10`, would cause strong
-    /// influences from `βθ` factorization. On the other hand, a small
-    /// value, e.g., `φ<5`, would significantly weaken the
-    /// factorization. So, `φ=10` seems right.
+    /// Set the overdispersion `φ` parameter for `β ~ Gamma(1/φ,
+    /// K*φ)`.  Here, the mean of `β` will be K. A high value, e.g.,
+    /// `φ>10`, would cause strong influences from `βθ`
+    /// factorization. On the other hand, a small value, e.g., `φ<5`,
+    /// would significantly weaken the factorization. So, `φ=10` seems
+    /// right.
     #[arg(long, default_value_t = 10.0)]
     overdisp: f32,
 

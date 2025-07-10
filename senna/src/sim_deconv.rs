@@ -68,6 +68,8 @@ pub fn sim_deconv(args: &SimDeconvArgs) -> anyhow::Result<()> {
     let max_k = topic_mat.ncols();
     let sc_data_cells = sc_data.column_names()?;
 
+    info!("sampling cell to topic assignment...");
+
     let cell_to_topic = sc_data_cells
         .par_iter()
         .enumerate()
@@ -86,7 +88,7 @@ pub fn sim_deconv(args: &SimDeconvArgs) -> anyhow::Result<()> {
 
     let n_bulk_samples = args.bulk_samples;
 
-    info!("simulating convoluted data matrix");
+    info!("simulating convoluted (bulk) data matrix...");
 
     let mut out_ds = Mat::zeros(sc_data.num_rows()?, n_bulk_samples);
     let arc_conv = Arc::new(Mutex::new(&mut out_ds));

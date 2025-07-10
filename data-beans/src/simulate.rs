@@ -141,9 +141,10 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
     let mut beta_dk = DMatrix::<f32>::rgamma(dd, kk, (a, b));
 
     if kk > 1 && pve_topic < 1. {
-        let beta_null = DMatrix::<f32>::rgamma(dd, 1, (a, b)).scale(1.0 - pve_topic);
+        let beta_null =
+            DMatrix::<f32>::rgamma(dd, 1, (a, b)).scale((1.0 - pve_topic).clamp(0., 1.).sqrt());
         for k in 0..kk {
-            let x = beta_dk.column(k).scale(pve_topic) + &beta_null;
+            let x = beta_dk.column(k).scale(pve_topic.clamp(0., 1.).sqrt()) + &beta_null;
             beta_dk.column_mut(k).copy_from(&x);
         }
     }
