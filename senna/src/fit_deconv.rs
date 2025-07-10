@@ -3,8 +3,10 @@ use crate::routines_latent_representation::*;
 use crate::routines_post_process::*;
 use crate::routines_pre_process::*;
 
+use dashmap::DashMap as HashMap;
 use data_beans_alg::normalization::NormalizeDistance;
 use matrix_util::common_io::extension;
+use matrix_util::dmatrix_util::concatenate_horizontal;
 use matrix_util::knn_match::*;
 use rayon::prelude::*;
 
@@ -45,11 +47,11 @@ pub struct DeconvArgs {
     batch_files: Option<Vec<Box<str>>>,
 
     /// #k-nearest neighbours batches
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 10)]
     knn_batches: usize,
 
     /// #k-nearest neighbours within each batch
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 50)]
     knn_cells: usize,
 
     /// reference batch names
@@ -113,56 +115,145 @@ pub struct DeconvArgs {
     verbose: bool,
 }
 
-pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
-    // use sc data as reference features?
+struct BulkDataOut {
+    genes: Vec<Box<str>>,
+    samples: Vec<Box<str>>,
+    data: Mat,
+}
 
-    // read bulk data
-    for bulk_file in args.bulk_data_files.iter() {
+fn read_bulk_data_consistent_with_sc(
+    bulk_data_files: &[Box<str>],
+    sc_data: &SparseIoVec,
+) -> anyhow::Result<BulkDataOut> {
+    let genes = sc_data.row_names()?;
+    let gene_to_position: HashMap<Box<str>, usize> = genes
+        .iter()
+        .enumerate()
+        .map(|(i, x)| (x.clone(), i))
+        .collect();
+
+    let ngenes = gene_to_position.len();
+    info!("use {} genes as common features", ngenes);
+
+    let mut samples = vec![];
+    let mut bulk_data_vec = vec![];
+
+    for bulk_file in bulk_data_files {
         let MatWithNames {
-            rows: genes,
-            cols: samples,
-            mat: bulk_mat,
+            rows: raw_genes,
+            cols: raw_samples,
+            mat: raw_ds,
         } = match extension(bulk_file.as_ref())?.as_ref() {
             "parquet" => Mat::from_parquet(bulk_file.as_ref())?,
             _ => Mat::read_data(bulk_file.as_ref(), &['\t', ','], None, Some(0), None, None)?,
         };
+
+        let ncols = raw_samples.len();
+
+        let mut padded_ds = Mat::zeros(ngenes, ncols);
+        for (i, g) in raw_genes.iter().enumerate() {
+            if let Some(r) = gene_to_position.get(g) {
+                padded_ds.row_mut(*r.value()).copy_from(&raw_ds.row(i));
+            }
+        }
+
+        samples.extend(raw_samples);
+        bulk_data_vec.push(padded_ds);
     }
+    let bulk_data = concatenate_horizontal(&bulk_data_vec)?;
 
-    // 1. read_data_vec_membership(args)
-    // 2. random projection
-    // 3. deconvolution by matching neighbours
+    info!(
+        "Read bulk data {} genes x {} samples",
+        ngenes,
+        samples.len()
+    );
+    Ok(BulkDataOut {
+        genes,
+        samples,
+        data: bulk_data,
+    })
+}
 
-    // the question is about how we get training data
-    // a. how to address uncertainty? include variation?
-    // b. how to adjust bias between the reference and target data?
-
+pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
+    info!("Opening single-cell data files...");
     // 1. Read sc data with batch membership
     let SparseDataWithBatch {
         data: mut sc_data,
-        batch: _,
+        batch: sc_batch,
     } = read_sparse_data_with_membership(ReadArgs {
         data_files: args.sc_data_files.clone(),
         batch_files: args.batch_files.clone(),
     })?;
 
-    // 2. Random projection
+    // 2. Read bulk data
+    info!("Reading in bulk data files...");
+    let BulkDataOut {
+        genes: bulk_genes,
+        samples: bulk_samples,
+        data: y1,
+    } = read_bulk_data_consistent_with_sc(&args.bulk_data_files, &sc_data)?;
+
+    if bulk_genes != sc_data.row_names()? {
+        return Err(anyhow::anyhow!(
+            "bulk and sc data gene names should
+        match"
+        ));
+    }
+
+    info!("Finding a shared basis matrix for random projection...");
     let proj_dim = args.proj_dim.max(args.n_latent_topics);
-    let rand_proj = sc_data.project_columns(proj_dim, Some(args.block_size))?;
-    let proj_kn = rand_proj.proj.scale_columns();
-    // info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
+    let rand_proj = sc_data.project_columns_with_batch_correction(
+        proj_dim,
+        Some(args.block_size),
+        Some(sc_batch.as_ref()),
+    )?;
 
     info!("Registering batch information...");
-    // sc_data.assign_batch_membership_by_nearest_bulk(bulk, rand_proj)?;
+    let proj_kn = rand_proj.proj.scale_columns();
+    sc_data.register_batches_dmatrix(&proj_kn, &sc_batch)?;
 
-    let n_pb_samples =
-        sc_data.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
+    info!("Characterize batch effects within the sc data");
+
+    // sc_data.collapse_columns(knn_batches, knn_cells, reference_batch_names, num_opt_iter);
+
+    // use this δ to adjust in the following imputation steps
+
+
+
+
+    info!("Check how much we can regress the bulk on the sc data");
+    let y0 = y1.predict_by_knn(&sc_data, &rand_proj, args.knn_cells)?;
+
+    // identify y1 ~ mu * delta
+    // identify y0 ~ mu * tau
+
+    // 
+
+
+    info!("Identify sc bias");
+
+    // identify x1 ~ gamma * tau
+    // identify x0 ~ gamma * eta
+    sc_data.assign_batch_membership_by_nearest_bulk(&y0, &rand_proj)?;
+
+
+
+
+    // the question is about how we get training data
+    // a. how to address uncertainty? include variation?
+    // b. how to adjust bias between the reference and target data?
+
+
+
+    // let n_pb_samples =
+    //     sc_data.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
 
     // sc_data.collapse_columns(knn_batches, knn_cells, reference_batch_names, num_opt_iter)
 
     // for each bulk sample
     // - find k-nearest neighbour cells across all the pseudobulk samples
 
-    unimplemented!("take both bulk and single cell data");
+    info!("Done");
     Ok(())
 }
 
