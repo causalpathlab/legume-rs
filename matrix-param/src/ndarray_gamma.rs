@@ -6,7 +6,7 @@ use ndarray::prelude::*;
 use rayon::prelude::*;
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GammaMatrix {
     num_rows: usize,
     num_columns: usize,

@@ -5,6 +5,7 @@ use crate::routines_pre_process::*;
 
 use dashmap::DashMap as HashMap;
 use data_beans_alg::normalization::NormalizeDistance;
+use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_util::common_io::extension;
 use matrix_util::dmatrix_util::concatenate_horizontal;
 use matrix_util::knn_match::*;
@@ -20,8 +21,8 @@ enum ComputeDevice {
 
 #[derive(Args, Debug)]
 pub struct DeconvArgs {
-    /// single-cell data files (`zarr` or `h5`)
-    #[arg(required = true)]
+    /// single-cell data (`.zarr` or `.h5`)
+    #[arg(short = 's', long, value_delimiter = ',', required = true)]
     sc_data_files: Vec<Box<str>>,
 
     /// bulk data files (`.parquet`, `.tsv.gz`, `.csv.gz`)
@@ -51,8 +52,12 @@ pub struct DeconvArgs {
     knn_batches: usize,
 
     /// #k-nearest neighbours within each batch
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 10)]
     knn_cells: usize,
+
+    /// #k-nearest neighbours within each bulk
+    #[arg(long, default_value_t = 50)]
+    knn_bulk: usize,
 
     /// reference batch names
     #[arg(long, value_delimiter(','))]
@@ -190,14 +195,11 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
     let BulkDataOut {
         genes: bulk_genes,
         samples: bulk_samples,
-        data: y1,
+        data: bulk_data,
     } = read_bulk_data_consistent_with_sc(&args.bulk_data_files, &sc_data)?;
 
     if bulk_genes != sc_data.row_names()? {
-        return Err(anyhow::anyhow!(
-            "bulk and sc data gene names should
-        match"
-        ));
+        return Err(anyhow::anyhow!("bulk and sc data gene names should match"));
     }
 
     info!("Finding a shared basis matrix for random projection...");
@@ -208,42 +210,111 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
         Some(sc_batch.as_ref()),
     )?;
 
-    info!("Registering batch information...");
-    let proj_kn = rand_proj.proj.scale_columns();
-    sc_data.register_batches_dmatrix(&proj_kn, &sc_batch)?;
+    info!("Characterizing potential biases by matching with the bulk data...");
+    sc_data.assign_batch_membership_by_nearest_bulk(&bulk_data, &rand_proj)?;
 
-    info!("Characterize batch effects within the sc data");
+    let bulk_to_cells = (0..sc_data.num_batches())
+        .map(|b| sc_data.batch_to_columns(b).unwrap_or_default().clone())
+        .collect::<Vec<_>>();
 
-    // sc_data.collapse_columns(knn_batches, knn_cells, reference_batch_names, num_opt_iter);
+    let nsamp =
+        sc_data.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
 
-    // use this δ to adjust in the following imputation steps
+    info!("Establish pseudoublk data for comparison against the observed bulk data");
+    let collapsed = sc_data.collapse_columns(
+        Some(args.knn_batches),
+        Some(args.knn_cells),
+        args.reference_batches.as_deref(),
+        Some(args.iter_opt),
+    )?;
+
+    let bulk_yhat = bulk_data.predict_from_collapsed_data(&collapsed, args.knn_bulk)?;
+
+    // todo: bootstrap bulk data imputed by single cell data
 
 
 
+    // E[Y] ~ μ δ
+    // E[Y.hat] ~ μ
+
+    //     Σ Y + Σ Y.hat
+    // μ = -------------
+    //     n (δ + 1)
+    
+    //     Σ Y 
+    // δ = ----
+    //     n μ
+
+    
+
+    // train on sc data
+    // There are two types of additional factors present in bulk data
+    //
+    // (1) multiplicative bias, inconsistency in technology, platform, etc. gene-level difference
+    //
+    // (2) additive bias due to cell types missing in reference data, cell type level difference
+    //
+
+    // If we train two types of bulk data (pseudobulk and observed
+    // bulk), the second type of missingness can be inferred by
+    // looking at the cell types/topics only present in the actual
+    // bulk data.
+
+    // The first type of bias factors can be uncovered Y vs. Y hat
+
+    // jointly train... we need to pick up common beta
+    // [x.mixed, x.resid] -> z -> x.clean
+    //
+    // oversample bulk data and simulate? yes, both y.enclosed and y.residual
+    // y.clean -> z, y.resid -> Δ, (z + Δ) -> y.hat?
+    //
+
+    // the goal is to find a new topic?
+    // GOAL: missing celltype!!!!
+    //
+
+    // let proj_kn = rand_proj.proj.scale_columns();
+    // sc_data.register_batches_dmatrix(&proj_kn, &sc_batch)?;
+
+    // // train
+    // let mixed_dn = &collapsed.mu_observed;
+    // let clean_dn = collapsed.mu_adjusted.as_ref();
+    // let batch_dn = collapsed.mu_residual.as_ref();
+
+    // let delta = collapsed.delta.clone();
+
+    // let bulk_yhat = bulk_data.predict_from_sparse_data(&sc_data, &rand_proj, args.knn_bulk)?;
 
     info!("Check how much we can regress the bulk on the sc data");
-    let y0 = y1.predict_by_knn(&sc_data, &rand_proj, args.knn_cells)?;
+
+    // let mut mu = GammaMatrix::new((bulk_data.nrows(), bulk_data.ncols()), 1.0, 1.0);
+
+    // mu.update_stat(update_a, update_b);
 
     // identify y1 ~ mu * delta
     // identify y0 ~ mu * tau
 
-    // 
-
-
     info!("Identify sc bias");
+
+    // should pair up
+    // for each
 
     // identify x1 ~ gamma * tau
     // identify x0 ~ gamma * eta
-    sc_data.assign_batch_membership_by_nearest_bulk(&y0, &rand_proj)?;
 
+    // let collapsed = sc_data.collapse_columns(
+    //     Some(args.knn_batches),
+    //     Some(args.knn_cells),
+    //     args.reference_batches.as_deref(),
+    //     Some(args.iter_opt),
+    // )?;
+    // let bulk_yhat = bulk_data.predict_from_collapsed_data(&collapsed, args.knn_bulk)?;
 
-
+    // sc_data.collapse_columns(knn_batches, knn_cells, reference_batch_names, num_opt_iter)
 
     // the question is about how we get training data
     // a. how to address uncertainty? include variation?
     // b. how to adjust bias between the reference and target data?
-
-
 
     // let n_pb_samples =
     //     sc_data.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
@@ -307,28 +378,108 @@ impl KnnWithBulk for SparseIoVec {
 }
 
 trait InteractWithScData {
-    fn predict_by_knn(
+    fn predict_from_collapsed_data(
+        &self,
+        collapsed: &CollapsedOut,
+        knn: usize,
+    ) -> anyhow::Result<Self>
+    where
+        Self: Sized;
+
+    fn predict_from_sparse_data(
         &self,
         sc_data_vec: &SparseIoVec,
         rand_proj: &RandColProjOut,
         knn: usize,
-    ) -> anyhow::Result<Mat>;
+    ) -> anyhow::Result<Self>
+    where
+        Self: Sized;
+
+    fn bootstrap_from_sparse_data(
+        &self,
+        sc_data_vec: &SparseIoVec,
+        rand_proj: &RandColProjOut,
+        knn: usize,
+    ) -> anyhow::Result<Self>
+    where
+        Self: Sized;
 }
 
 impl InteractWithScData for Mat {
-    fn predict_by_knn(
+    fn predict_from_collapsed_data(
+        &self,
+        collapsed: &CollapsedOut,
+        knn: usize,
+    ) -> anyhow::Result<Self> {
+        let pb = &collapsed.mu_observed;
+        let max_rank = pb.nrows().min(pb.ncols());
+
+        let basis_dk = pb
+            .posterior_log_mean()
+            .scale_columns()
+            .rsvd(max_rank)?
+            .0
+            .scale_columns()
+            .map(|x| x.clamp(-4., 4.))
+            .scale_columns();
+
+        let ln_x = self.map(|x| x.ln_1p()).normalize_columns();
+        let bulk_km = (basis_dk.transpose() * &ln_x).scale_columns();
+
+        let n_sample = 10;
+
+        let mut stoch_data = vec![];
+        let mut stoch_proj_vec = vec![];
+
+        for s in 0..n_sample {
+            let _x_dm = match collapsed.mu_adjusted.as_ref() {
+                Some(x) => x.posterior_sample(),
+                _ => collapsed.mu_observed.posterior_sample(),
+            }?;
+            let _ln_x_dm = _x_dm.map(|x| x.ln_1p()).normalize_columns();
+            stoch_proj_vec.push((basis_dk.transpose() * &_ln_x_dm).scale_columns());
+            stoch_data.push(_x_dm);
+        }
+
+        let stoch_dm = concatenate_horizontal(&stoch_data)?;
+        let stoch_km = concatenate_horizontal(&stoch_proj_vec)?;
+        let stoch_names = (0..stoch_km.ncols()).collect();
+
+        let dict = ColumnDict::from_dmatrix(stoch_km, stoch_names);
+
+        let norm_target = 2_f32.ln();
+
+        let imputed = bulk_km
+            .column_iter()
+            .enumerate()
+            .map(|(i, query)| -> anyhow::Result<DVec> {
+                let (neighbours, distances) = dict.search_by_query_data(&query.to_vp(), knn)?;
+
+                let weights = distances.into_iter().normalized_exp(norm_target);
+                let denom = weights.iter().sum::<f32>().max(1e-8);
+                let mut ret = DVec::zeros(self.nrows());
+                for (j, w) in neighbours.into_iter().zip(weights) {
+                    ret += stoch_dm.column(j) * w / denom;
+                }
+                Ok(ret)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        concatenate_horizontal(&imputed)
+    }
+
+    fn predict_from_sparse_data(
         &self,
         sc_data_vec: &SparseIoVec,
         rand_proj: &RandColProjOut,
         knn: usize,
-    ) -> anyhow::Result<Mat> {
+    ) -> anyhow::Result<Self> {
         let mut imputed_dm = Mat::zeros(self.nrows(), self.ncols());
 
         let basis_dk = &rand_proj.basis;
 
         let ln_x = self.map(|x| x.ln_1p()).normalize_columns();
-        let mut bulk_km = basis_dk.transpose() * &ln_x;
-        bulk_km.scale_columns_inplace();
+        let bulk_km = (basis_dk.transpose() * &ln_x).scale_columns();
 
         let norm_target = 2_f32.ln();
 
@@ -341,5 +492,16 @@ impl InteractWithScData for Mat {
             imputed_dm.column_mut(i).copy_from(&(y * weights));
         }
         Ok(imputed_dm)
+    }
+
+    fn bootstrap_from_sparse_data(
+        &self,
+        sc_data_vec: &SparseIoVec,
+        rand_proj: &RandColProjOut,
+        knn: usize,
+    ) -> anyhow::Result<Self>
+    where
+        Self: Sized {
+	todo!("");
     }
 }

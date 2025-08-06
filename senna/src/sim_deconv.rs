@@ -5,7 +5,7 @@ use indicatif::ParallelProgressIterator;
 use matrix_util::common_io::extension;
 use matrix_util::dmatrix_util::concatenate_horizontal;
 use matrix_util::utils::partition_by_membership;
-use rand::distr::{Distribution, weighted::WeightedIndex};
+use rand::distr::{weighted::WeightedIndex, Distribution};
 use rayon::prelude::*;
 
 use rand::rngs::StdRng;
@@ -87,11 +87,14 @@ pub fn sim_deconv(args: &SimDeconvArgs) -> anyhow::Result<()> {
     let topic_to_cells = partition_by_membership(&cell_to_topic, None);
 
     let n_bulk_samples = args.bulk_samples;
+    let n_genes = sc_data.num_rows()?;
 
     info!("simulating convoluted (bulk) data matrix...");
 
-    let mut out_ds = Mat::zeros(sc_data.num_rows()?, n_bulk_samples);
-    let arc_conv = Arc::new(Mutex::new(&mut out_ds));
+    let mut conv_ds = Mat::zeros(n_genes, n_bulk_samples);
+    let arc_conv = Arc::new(Mutex::new(&mut conv_ds));
+
+    // 1. randomly mix cells from different topics
     let fractions = (0..n_bulk_samples)
         .par_bridge()
         .progress_count(n_bulk_samples as u64)
@@ -119,8 +122,8 @@ pub fn sim_deconv(args: &SimDeconvArgs) -> anyhow::Result<()> {
             if n_s > 0 {
                 let x =
                     sc_data.read_columns_csc(cells_s.into_iter())? * DVec::from_element(n_s, 1.);
-                let mut convoluted = arc_conv.lock().expect("lock");
-                convoluted.column_mut(s).copy_from(&x);
+                let mut _conv = arc_conv.lock().expect("lock");
+                _conv.column_mut(s).copy_from(&x);
             }
 
             let frac = ncells_s.unscale(ncells_s.sum().max(1.0));
@@ -128,10 +131,16 @@ pub fn sim_deconv(args: &SimDeconvArgs) -> anyhow::Result<()> {
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
+    // 2. introduce individual/sample-specific bias factors
+    let ln_delta_ds = Mat::rnorm(n_genes, n_bulk_samples).scale_columns();
+
+    // if cell type factors are confounded with δ?
+
     let fractions_kn = concatenate_horizontal(&fractions)?;
 
     let frac_file = args.output.to_string() + ".fractions.parquet";
     let bulk_file = args.output.to_string() + ".bulk.parquet";
+
     let genes = sc_data.row_names()?;
     let samples = (0..args.bulk_samples)
         .map(|x| x.to_string().into_boxed_str())
@@ -140,7 +149,8 @@ pub fn sim_deconv(args: &SimDeconvArgs) -> anyhow::Result<()> {
     fractions_kn
         .transpose()
         .to_parquet(Some(&samples), Some(&topic_names), &frac_file)?;
-    out_ds.to_parquet(Some(genes.as_ref()), Some(&samples), &bulk_file)?;
+
+    conv_ds.to_parquet(Some(genes.as_ref()), Some(&samples), &bulk_file)?;
 
     info!("done");
     Ok(())

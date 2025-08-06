@@ -3,38 +3,47 @@ use std::fmt::{Debug, Display};
 
 /// A dictionary (HnswMap wrapper) for fast column look-up
 ///
-pub struct ColumnDict<T> {
-    pub dict: instant_distance::HnswMap<VecPoint, T>,
+pub struct ColumnDict<K> {
+    pub dict: instant_distance::HnswMap<VecPoint, K>,
     pub data_vec: Vec<VecPoint>,
-    pub name2index: HashMap<T, usize>,
+    pub name2index: HashMap<K, usize>,
 }
 
-impl<T> ColumnDict<T>
+impl<K> ColumnDict<K>
 where
-    T: Clone + Eq + std::hash::Hash + Debug + Display + std::cmp::PartialEq,
+    K: Clone + Eq + std::hash::Hash + Debug + Display + std::cmp::PartialEq,
 {
-    pub fn names(&self) -> &Vec<T> {
+    pub fn names(&self) -> &Vec<K> {
         &self.dict.values
     }
 
-    pub fn from_ndarray_views<'a>(data: Vec<ndarray::ArrayView1<'a, f32>>, names: Vec<T>) -> Self {
-        <ColumnDict<T> as ColumnDictOps<T, ndarray::ArrayView1<'a, f32>>>::from_column_views(
+    pub fn from_ndarray_views<'a>(data: Vec<ndarray::ArrayView1<'a, f32>>, names: Vec<K>) -> Self {
+        <ColumnDict<K> as ColumnDictOps<K, ndarray::ArrayView1<'a, f32>>>::from_column_views(
             data, names,
         )
     }
 
-    pub fn from_dvector_views(data: Vec<nalgebra::DVectorView<f32>>, names: Vec<T>) -> Self {
-        <ColumnDict<T> as ColumnDictOps<T, nalgebra::DVectorView<f32>>>::from_column_views(
+    pub fn from_ndarray(data: ndarray::Array2<f32>, names: Vec<K>) -> Self {
+        let views: Vec<_> = data.outer_iter().collect();
+        Self::from_ndarray_views(views, names)
+    }
+
+    pub fn from_dvector_views(data: Vec<nalgebra::DVectorView<f32>>, names: Vec<K>) -> Self {
+        <ColumnDict<K> as ColumnDictOps<K, nalgebra::DVectorView<f32>>>::from_column_views(
             data, names,
         )
+    }
+
+    pub fn from_dmatrix(data: nalgebra::DMatrix<f32>, names: Vec<K>) -> Self {
+        Self::from_dvector_views(data.column_iter().collect(), names)
     }
 
     pub fn empty_ndarray_views() -> Self {
-        <ColumnDict<T> as ColumnDictOps<T, ndarray::ArrayView1<f32>>>::empty()
+        <ColumnDict<K> as ColumnDictOps<K, ndarray::ArrayView1<f32>>>::empty()
     }
 
     pub fn empty_dvector_views() -> Self {
-        <ColumnDict<T> as ColumnDictOps<T, nalgebra::DVectorView<f32>>>::empty()
+        <ColumnDict<K> as ColumnDictOps<K, nalgebra::DVectorView<f32>>>::empty()
     }
 
     pub fn dim(&self) -> Option<usize> {
@@ -51,7 +60,7 @@ where
     /// * `query_name` - the name of the column to match
     /// * `knn` - the number of nearest neighbours to return
     ///
-    pub fn search_others(&self, query_name: &T, knn: usize) -> anyhow::Result<(Vec<T>, Vec<f32>)> {
+    pub fn search_others(&self, query_name: &K, knn: usize) -> anyhow::Result<(Vec<K>, Vec<f32>)> {
         self.search_by_query_name(query_name, knn, true)
     }
 
@@ -64,10 +73,10 @@ where
     ///
     pub fn search_by_query_name(
         &self,
-        query_name: &T,
+        query_name: &K,
         knn: usize,
         exclude_same: bool,
-    ) -> anyhow::Result<(Vec<T>, Vec<f32>)> {
+    ) -> anyhow::Result<(Vec<K>, Vec<f32>)> {
         use instant_distance::Search;
 
         let nquery = knn.min(self.data_vec.len());
@@ -104,7 +113,7 @@ where
         &self,
         query: &VecPoint,
         knn: usize,
-    ) -> anyhow::Result<(Vec<T>, Vec<f32>)> {
+    ) -> anyhow::Result<(Vec<K>, Vec<f32>)> {
         use instant_distance::Search;
 
         if self.dim().unwrap_or(0) != query.len() {
@@ -136,10 +145,10 @@ where
     ///
     pub fn match_by_query_name_against(
         &self,
-        query_name: &T,
+        query_name: &K,
         knn: usize,
         against: &Self,
-    ) -> anyhow::Result<(Vec<T>, Vec<f32>)> {
+    ) -> anyhow::Result<(Vec<K>, Vec<f32>)> {
         use instant_distance::Search;
 
         let nquery = knn.min(against.data_vec.len());
@@ -163,9 +172,9 @@ where
     }
 }
 
-pub trait ColumnDictOps<T, V> {
+pub trait ColumnDictOps<K, V> {
     fn empty() -> Self;
-    fn from_column_views(data: Vec<V>, names: Vec<T>) -> Self;
+    fn from_column_views(data: Vec<V>, names: Vec<K>) -> Self;
 }
 
 impl<T, V> ColumnDictOps<T, V> for ColumnDict<T>

@@ -7,7 +7,7 @@ use crate::traits::*;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GammaMatrix {
     num_rows: usize,
     num_columns: usize,
