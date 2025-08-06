@@ -186,14 +186,14 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let reference = args.reference_batches.as_ref().map(|x| x.as_slice());
 
     info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
-    let collapse_out = data_vec.collapse_columns(
+    let collapsed = data_vec.collapse_columns(
         Some(args.knn_batches),
         Some(args.knn_cells),
         reference,
         Some(args.iter_opt),
     )?;
 
-    let batch_db = collapse_out.delta.as_ref();
+    let batch_db = collapsed.delta.as_ref();
 
     if let Some(batch_db) = batch_db {
         let outfile = args.out.to_string() + ".delta.parquet";
@@ -203,11 +203,11 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     }
 
     // 4. Train embedded topic model on the collapsed data
-    let mixed_dn = &collapse_out.mu_observed;
-    let clean_dn = collapse_out.mu_adjusted.as_ref();
-    let batch_dn = collapse_out.mu_residual.as_ref();
+    let mixed_dn = &collapsed.mu_observed;
+    let clean_dn = collapsed.mu_adjusted.as_ref();
+    let batch_dn = collapsed.mu_residual.as_ref();
 
-    let aggregate_rows = build_row_aggregator(&collapse_out, n_features_encoder)?;
+    let aggregator = build_row_aggregator(&collapsed, n_features_encoder)?;
 
     let train_config = TrainConfig {
         learning_rate: args.learning_rate,
@@ -223,7 +223,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         mixed_dn,
         batch_dn,
         clean_dn,
-        &aggregate_rows,
+        &aggregator,
         &encoder,
         &decoder,
         &parameters,
@@ -250,13 +250,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     /////////////////////////////////////////////////////
 
     let delta_db = batch_db.map(|x| x.posterior_mean());
-    let z_nk = evaluate_latent_by_encoder(
-        &data_vec,
-        &encoder,
-        &aggregate_rows,
-        &train_config,
-        delta_db,
-    )?;
+    let z_nk =
+        evaluate_latent_by_encoder(&data_vec, &encoder, &aggregator, &train_config, delta_db)?;
 
     let cell_names = data_vec.column_names()?;
 
@@ -267,46 +262,4 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     )?;
 
     Ok(())
-}
-
-fn build_row_aggregator(
-    collapse_out: &CollapsedOut,
-    n_features_encoder: usize,
-) -> anyhow::Result<Mat> {
-    if collapse_out.mu_observed.nrows() > n_features_encoder {
-        let log_x_nd = collapse_out.mu_adjusted.as_ref().map_or_else(
-            || {
-                collapse_out
-                    .mu_observed
-                    .posterior_log_mean()
-                    .transpose()
-                    .clone()
-            },
-            |x| x.posterior_log_mean().transpose().clone(),
-        );
-
-        let kk = n_features_encoder.ilog2() as usize;
-        info!(
-            "reduce data features: {} -> {}",
-            log_x_nd.ncols(),
-            n_features_encoder,
-        );
-
-        let membership = row_membership_matrix(binary_sort_columns(&log_x_nd, kk)?)?;
-
-        if membership.ncols() != n_features_encoder {
-            let d_available = membership.ncols().min(n_features_encoder);
-            let mut ret = Mat::zeros(membership.nrows(), n_features_encoder);
-            ret.columns_range_mut(0..d_available)
-                .copy_from(&membership.columns_range(0..d_available));
-            Ok(ret)
-        } else {
-            Ok(membership)
-        }
-    } else {
-        Ok(Mat::identity(
-            collapse_out.mu_observed.nrows(),
-            n_features_encoder,
-        ))
-    }
 }

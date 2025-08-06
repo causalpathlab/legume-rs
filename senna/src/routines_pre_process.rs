@@ -92,3 +92,44 @@ pub fn read_sparse_data_with_membership(args: ReadArgs) -> anyhow::Result<Sparse
         batch: batch_membership,
     })
 }
+
+/// Build an affine transformation matrix that will help reduce
+/// dimensions in training
+///
+/// * `collapsed`: data matrices derived from collapsing operations
+/// * `target_size`: targeting size
+pub fn build_row_aggregator(collapsed: &CollapsedOut, target_size: usize) -> anyhow::Result<Mat> {
+    if collapsed.mu_observed.nrows() > target_size {
+        let log_x_nd = collapsed.mu_adjusted.as_ref().map_or_else(
+            || {
+                collapsed
+                    .mu_observed
+                    .posterior_log_mean()
+                    .transpose()
+                    .clone()
+            },
+            |x| x.posterior_log_mean().transpose().clone(),
+        );
+
+        let kk = target_size.ilog2() as usize;
+        info!(
+            "reduce data features: {} -> {}",
+            log_x_nd.ncols(),
+            target_size,
+        );
+
+        let membership = row_membership_matrix(binary_sort_columns(&log_x_nd, kk)?)?;
+
+        if membership.ncols() != target_size {
+            let d_available = membership.ncols().min(target_size);
+            let mut ret = Mat::zeros(membership.nrows(), target_size);
+            ret.columns_range_mut(0..d_available)
+                .copy_from(&membership.columns_range(0..d_available));
+            Ok(ret)
+        } else {
+            Ok(membership)
+        }
+    } else {
+        Ok(Mat::identity(collapsed.mu_observed.nrows(), target_size))
+    }
+}
