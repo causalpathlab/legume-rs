@@ -1,5 +1,3 @@
-// #![allow(dead_code)]
-
 use crate::srt_common::*;
 use crate::SRTArgs;
 
@@ -95,7 +93,7 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
                         .ok_or_else(|| {
                             anyhow::anyhow!("cell '{}' not found in the file {}", name, coord_file)
                         })
-                        .map(|&index| index)
+                        .map(|item| *item.value())
                 })
                 .collect::<anyhow::Result<_>>()?;
 
@@ -139,7 +137,7 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
     }
 
     // use batch index as another coordinate
-    let uniq_batches = batch_membership.par_iter().collect::<HashSet<_>>();
+    let uniq_batches = batch_membership.par_iter().cloned().collect::<HashSet<_>>();
     let n_batches = uniq_batches.len();
     let coord_nk = if n_batches > 1 {
         info!("attaching {} batch index coordinate(s)", n_batches);
@@ -180,7 +178,7 @@ where
     let batch_coord = batch_membership
         .iter()
         .map(|k| {
-            let b = batch_index[k];
+            let b = *batch_index.get(k).unwrap();
             width * (b as f32)
         })
         .collect::<Vec<_>>();

@@ -5,14 +5,12 @@ mod fit_topic;
 mod routines_latent_representation;
 mod routines_post_process;
 mod routines_pre_process;
-mod sim_deconv;
 
 use embed_common::*;
 
 use fit_deconv::*;
 use fit_svd::*;
 use fit_topic::*;
-use sim_deconv::*;
 
 /// Single cell embedding routines with nearest neighbourhood-based
 /// adjustment
@@ -36,8 +34,6 @@ enum Commands {
     Topic(TopicArgs),
     /// deconvolve bulk data with single cell reference data
     Deconv(DeconvArgs),
-    /// simulate deconvolution data
-    SimDeconv(SimDeconvArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -54,9 +50,6 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Deconv(args) => {
             fit_deconv(args)?;
-        }
-        Commands::SimDeconv(args) => {
-            sim_deconv(args)?;
         }
     }
 

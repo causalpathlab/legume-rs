@@ -372,6 +372,7 @@ impl SparseIoVec {
             distances,
         })
     }
+
     /// Take columns matched with the given `cells`
     ///
     /// # Arguments

@@ -45,7 +45,7 @@ impl<'a> SrtLatentStatePairsOps for SrtCellPairs<'a> {
 }
 
 fn evaluate_latent_state_visitor<Enc>(
-    job: PairsWithBounds,
+    bound: (usize, usize),
     data: &SrtCellPairs,
     encoder_aggregate_config: &(&Enc, &Mat, &TrainConfig),
     latent_vec: Arc<Mutex<&mut Vec<(usize, MatchedEncoderLatent)>>>,
@@ -55,22 +55,31 @@ where
 {
     let (encoder, aggregate_features, config) = *encoder_aggregate_config;
     let dev = &config.device;
-    let left = job.pairs.into_iter().map(|&(i, _)| i);
-    let right = job.pairs.into_iter().map(|&(_, j)| j);
+
+    let (lb, ub) = bound;
+    let pairs = &data.pairs[lb..ub];
+    let left = pairs.into_iter().map(|pp| pp.left);
+    let right = pairs.into_iter().map(|pp| pp.right);
 
     let y_left = data.data.read_columns_dmatrix(left)?.transpose() * aggregate_features;
     let y_right = data.data.read_columns_dmatrix(right)?.transpose() * aggregate_features;
-    let latent = encoder.forward_t(
-        MatchedEncoderData {
-            left: &y_left.to_tensor(dev)?,
-            right: &y_right.to_tensor(dev)?,
-        },
-        false,
-    )?;
-    latent_vec
-        .lock()
-        .expect("latent vec lock")
-        .push((job.lb, latent));
+
+    // todo: 
+    // let pairs_neighbours = &data.pairs_neighbours[lb..ub];
+
+    unimplemented!("");
+
+    // let latent = encoder.forward_t(
+    //     MatchedEncoderData {
+    //         marginal_left: &y_left.to_tensor(dev)?,
+    //         marginal_right: &y_right.to_tensor(dev)?,
+    //     },
+    //     false,
+    // )?;
+    // latent_vec
+    //     .lock()
+    //     .expect("latent vec lock")
+    //     .push((lb, latent));
 
     Ok(())
 }

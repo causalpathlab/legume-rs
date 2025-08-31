@@ -1,6 +1,7 @@
 mod misc;
 mod qc;
 mod simulate;
+mod simulate_deconv;
 mod sparse_data_visitors;
 mod sparse_io;
 mod sparse_io_vector;
@@ -20,6 +21,8 @@ use matrix_util::common_io::basename;
 use matrix_util::traits::IoOps;
 use matrix_util::*;
 use rayon::prelude::*;
+use simulate_deconv::generate_convoluted_data;
+use simulate_deconv::SimConvArgs;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -44,6 +47,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Simulate(args) => {
             run_simulate(args)?;
+        }
+        Commands::SimulateConv(args) => {
+            generate_convoluted_data(args)?;
         }
         Commands::Stat(args) => {
             run_stat(args)?;
@@ -160,9 +166,12 @@ enum Commands {
     /// Take basic statistics from a sparse matrix (same as `statistics`)
     Stat(RunStatArgs),
 
-    /// For `Y(i,j) ~ δ(i,B(j)) Σ β(i,k) θ(j,k)`, where β,θ ~ Gamma;
-    /// `B(j)` = batch for a cell `j`; `ln δ` ~ Normal
+    /// `Y(i,j) ~ δ(i,B(j)) Σ β(i,k) θ(j,k)` with β,θ ~ Gamma topic;
+    /// `B(j)`=batch; `ln δ`~N(0,1)
     Simulate(RunSimulateArgs),
+
+    /// Simulate convoluted data matrix from sparse single cell data
+    SimulateConv(SimConvArgs),
 }
 
 #[derive(Args, Debug)]

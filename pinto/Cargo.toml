@@ -38,3 +38,4 @@ special = { workspace = true }
 indicatif = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+dashmap = { workspace = true }

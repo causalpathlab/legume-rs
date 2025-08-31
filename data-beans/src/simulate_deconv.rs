@@ -1,9 +1,15 @@
-use crate::embed_common::*;
-use crate::routines_pre_process::*;
+use clap::Args;
+use log::info;
+use nalgebra::DVector;
+use std::sync::{Arc, Mutex};
+
 use dashmap::DashMap as HashMap;
 use indicatif::ParallelProgressIterator;
+
+use data_beans::sparse_io::*;
 use matrix_util::common_io::extension;
 use matrix_util::dmatrix_util::concatenate_horizontal;
+use matrix_util::traits::*;
 use matrix_util::utils::partition_by_membership;
 use rand::distr::{weighted::WeightedIndex, Distribution};
 use rayon::prelude::*;
@@ -12,10 +18,10 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 #[derive(Args, Debug)]
-pub struct SimDeconvArgs {
+pub struct SimConvArgs {
     /// single-cell data (`.zarr` or `.h5`)
-    #[arg(short = 's', long, value_delimiter = ',', required = true)]
-    sc_data_files: Vec<Box<str>>,
+    #[arg(short = 's', long, required = true)]
+    sc_data_file: Box<str>,
 
     /// topic matrix with the first column corresponds to cell
     /// barcodes (`.parquet`, `.tsv.gz`, `.csv.gz`)
@@ -39,15 +45,16 @@ pub struct SimDeconvArgs {
     output: Box<str>,
 }
 
-pub fn sim_deconv(args: &SimDeconvArgs) -> anyhow::Result<()> {
+pub fn generate_convoluted_data(args: &SimConvArgs) -> anyhow::Result<()> {
+    type Mat = DMatrix<f32>;
+    type DVec = DVector<f32>;
+
     // 1. read sc data and topic proportion file
-    let SparseDataWithBatch {
-        data: sc_data,
-        batch: _,
-    } = read_sparse_data_with_membership(ReadArgs {
-        data_files: args.sc_data_files.clone(),
-        batch_files: None,
-    })?;
+    let sc_data = match extension(&args.sc_data_file)?.to_string().as_ref() {
+        "h5" => open_sparse_matrix(&args.sc_data_file, &SparseIoBackend::HDF5),
+        "zarr" => open_sparse_matrix(&args.sc_data_file, &SparseIoBackend::Zarr),
+        _ => panic!(""),
+    }?;
 
     let MatWithNames {
         rows: cells,
@@ -87,7 +94,9 @@ pub fn sim_deconv(args: &SimDeconvArgs) -> anyhow::Result<()> {
     let topic_to_cells = partition_by_membership(&cell_to_topic, None);
 
     let n_bulk_samples = args.bulk_samples;
-    let n_genes = sc_data.num_rows()?;
+    let n_genes = sc_data
+        .num_rows()
+        .ok_or(anyhow::anyhow!("unknown # rows"))?;
 
     info!("simulating convoluted (bulk) data matrix...");
 
@@ -120,8 +129,7 @@ pub fn sim_deconv(args: &SimDeconvArgs) -> anyhow::Result<()> {
 
             let n_s = cells_s.len();
             if n_s > 0 {
-                let x =
-                    sc_data.read_columns_csc(cells_s.into_iter())? * DVec::from_element(n_s, 1.);
+                let x = sc_data.read_columns_csc(cells_s)? * DVec::from_element(n_s, 1.);
                 let mut _conv = arc_conv.lock().expect("lock");
                 _conv.column_mut(s).copy_from(&x);
             }
@@ -132,8 +140,7 @@ pub fn sim_deconv(args: &SimDeconvArgs) -> anyhow::Result<()> {
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     // 2. introduce individual/sample-specific bias factors
-    let ln_delta_ds = Mat::rnorm(n_genes, n_bulk_samples).scale_columns();
-
+    // let ln_delta_ds = Mat::rnorm(n_genes, n_bulk_samples).scale_columns();
     // if cell type factors are confounded with δ?
 
     let fractions_kn = concatenate_horizontal(&fractions)?;

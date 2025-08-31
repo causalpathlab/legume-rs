@@ -33,10 +33,6 @@ impl NonNegLinear {
     pub fn weight(&self) -> Result<Tensor> {
         Ok(self.log_weight_dk.clone())
     }
-
-    // pub fn bias(&self) -> Option<&Tensor> {
-    //     self.bias_d.as_ref()
-    // }
 }
 
 pub fn non_neg_linear(
@@ -88,19 +84,24 @@ impl SoftmaxLinear {
     pub fn weight(&self) -> Result<Tensor> {
         ops::log_softmax(&self.weight, 0)
     }
+
+    pub fn biased_weight(&self) -> Result<Tensor> {
+        match &self.bias {
+            Some(bias) => ops::log_softmax(&self.weight.broadcast_add(bias)?, 0),
+            _ => ops::log_softmax(&self.weight, 0),
+        }
+    }
 }
 
 impl Module for SoftmaxLinear {
     fn forward(&self, h_nk: &Tensor) -> Result<Tensor> {
         let log_w_kd = match *h_nk.dims() {
-            [b1, b2, _, _] => self.weight()?.broadcast_left((b1, b2))?.t()?,
-            [bsize, _, _] => self.weight()?.broadcast_left(bsize)?.t()?,
-            _ => self.weight()?.t()?,
+            [b1, b2, _, _] => self.biased_weight()?.broadcast_left((b1, b2))?.t()?,
+            [bsize, _, _] => self.biased_weight()?.broadcast_left(bsize)?.t()?,
+            _ => self.biased_weight()?.t()?,
         };
-        match &self.bias {
-            None => h_nk.matmul(&log_w_kd.exp()?),
-            Some(bias) => h_nk.matmul(&log_w_kd.broadcast_add(bias)?.exp()?),
-        }
+
+        h_nk.matmul(&log_w_kd.exp()?)
     }
 }
 
@@ -111,7 +112,7 @@ pub fn softmax_linear(
 ) -> Result<SoftmaxLinear> {
     let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
     let ws = vb.get_with_hints((out_dim, in_dim), "weight", init_ws)?;
-    let bs = vb.get_with_hints(out_dim, "bias", candle_nn::init::ZERO)?;
+    let bs = vb.get_with_hints((out_dim, 1), "bias", candle_nn::init::ZERO)?;
 
     Ok(SoftmaxLinear::new(ws, Some(bs)))
 }

@@ -49,17 +49,28 @@ pub trait ConvertMatOps {
     fn to_tensor(&self, dev: &Device) -> anyhow::Result<Tensor>;
 }
 
-/// Normalize or scale columns
+/// normalize, sum_to_one, scale, and centre columns
 pub trait MatOps {
     type Mat;
     type Scalar;
 
+    fn sum_to_one_columns_inplace(&mut self);
+    fn sum_to_one_columns(&self) -> Self::Mat;
+    fn normalize_exp_logits_columns_inplace(&mut self);
+    fn normalize_exp_logits_columns(&self) -> Self::Mat;
     fn normalize_columns_inplace(&mut self);
     fn normalize_columns(&self) -> Self::Mat;
     fn scale_columns_inplace(&mut self);
     fn scale_columns(&self) -> Self::Mat;
     fn centre_columns_inplace(&mut self);
     fn centre_columns(&self) -> Self::Mat;
+}
+
+pub trait MatElemOps {
+    type Mat;
+    type Scalar;
+    fn log1p_inplace(&mut self);
+    fn log1p(&self) -> Self::Mat;
 }
 
 /// Operations to sample random matrices, only works for

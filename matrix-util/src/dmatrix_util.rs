@@ -63,7 +63,7 @@ where
 /// Generate one-hot membership matrix (`row x K`) where the number of
 /// rows corresponds to the length of the membership vector and the
 /// `K` corresponds to the maximum membership value + 1.
-/// 
+///
 pub fn row_membership_matrix<T>(row_membership: Vec<usize>) -> anyhow::Result<DMatrix<T>>
 where
     T: nalgebra::RealField + Copy,
@@ -99,11 +99,10 @@ where
         ));
     }
 
-    let ret: Vec<(usize, usize, T)> = lhs
-        .col_iter()
-        .enumerate()
-        .zip(select_columns_in_rhs)
-        .map(|((src_pos, src_col), &tgt_pos)| {
+    let mut ret = Vec::with_capacity(select_columns_in_rhs.len() * lhs.ncols());
+
+    for (src_pos, src_col) in lhs.col_iter().enumerate() {
+        for &tgt_pos in select_columns_in_rhs {
             let tgt_col = rhs.col(tgt_pos);
 
             let nn = src_col.nrows();
@@ -135,9 +134,10 @@ where
             }
 
             let dist = ((src_sq_sum + tgt_sq_sum - overlap - overlap) / denom).sqrt();
-            (src_pos, tgt_pos, dist)
-        })
-        .collect();
+
+            ret.push((src_pos, tgt_pos, dist));
+        }
+    }
 
     Ok(ret)
 }
@@ -320,12 +320,87 @@ where
     }
 }
 
+impl<T> MatElemOps for CscMatrix<T>
+where
+    T: nalgebra::RealField + Copy,
+{
+    type Mat = Self;
+    type Scalar = T;
+
+    fn log1p_inplace(&mut self) {
+        for x in self.values_mut() {
+            *x = (*x).ln_1p();
+        }
+    }
+
+    fn log1p(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.log1p_inplace();
+        ret
+    }
+}
+
 impl<T> MatOps for CscMatrix<T>
 where
     T: nalgebra::RealField + Copy,
 {
     type Mat = Self;
     type Scalar = T;
+
+    fn normalize_exp_logits_columns_inplace(&mut self) {
+        let ncol = self.ncols();
+
+        for j in 0..ncol {
+            if let Some(log_j) = self.get_col(j) {
+                let mut xmax = T::zero();
+                for &logx_ij in log_j.values() {
+                    xmax = xmax.min(logx_ij);
+                }
+
+                let mut denom = T::zero();
+                for &logx_ij in log_j.values() {
+                    denom += (logx_ij - xmax).exp();
+                }
+
+                if let Some(mut x_j) = self.get_col_mut(j) {
+                    for x_ij in x_j.values_mut() {
+                        *x_ij = (xmax - *x_ij) / denom;
+                    }
+                }
+            }
+        }
+    }
+
+    fn normalize_exp_logits_columns(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.normalize_exp_logits_columns_inplace();
+        ret
+    }
+
+    fn sum_to_one_columns_inplace(&mut self) {
+        let ncol = self.ncols();
+
+        for j in 0..ncol {
+            if let Some(x_j) = self.get_col(j) {
+                let mut denom = T::zero();
+                for &x_ij in x_j.values() {
+                    denom += x_ij.abs();
+                }
+
+                if let Some(mut x_j) = self.get_col_mut(j) {
+                    for x_ij in x_j.values_mut() {
+                        *x_ij /= denom;
+                    }
+                }
+            }
+        }
+    }
+
+    fn sum_to_one_columns(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.sum_to_one_columns_inplace();
+        ret
+    }
 
     fn normalize_columns_inplace(&mut self) {
         let ncol = self.ncols();
@@ -430,9 +505,37 @@ where
     type Mat = Self;
     type Scalar = T;
 
+    fn normalize_exp_logits_columns_inplace(&mut self) {
+        for mut x_j in self.column_iter_mut() {
+            let log_max = x_j.max();
+            let denom = x_j.map(|l| (l - log_max.clone()).exp()).sum();
+            x_j.iter_mut()
+                .for_each(|l| *l = (l.clone() - log_max.clone()).exp() / denom.clone());
+        }
+    }
+
+    fn normalize_exp_logits_columns(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.normalize_exp_logits_columns_inplace();
+        ret
+    }
+
+    fn sum_to_one_columns_inplace(&mut self) {
+        for mut xx_j in self.column_iter_mut() {
+            let denom = xx_j.sum();
+            xx_j /= denom;
+        }
+    }
+
+    fn sum_to_one_columns(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.sum_to_one_columns_inplace();
+        ret
+    }
+
     fn normalize_columns_inplace(&mut self) {
         for mut xx_j in self.column_iter_mut() {
-            let denom = xx_j.norm().max(T::one());
+            let denom = xx_j.norm();
             xx_j /= denom;
         }
     }
