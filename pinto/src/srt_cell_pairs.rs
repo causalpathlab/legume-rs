@@ -1,26 +1,25 @@
-// #![allow(dead_code)]
-
 use crate::srt_common::*;
 use candle_util::candle_data_loader::generate_minibatch_intervals;
 
-pub struct PairsWithBounds<'a> {
-    pub lb: usize,
-    pub ub: usize,
-    pub pairs: &'a [(usize, usize)],
-}
-
-pub struct PairsWithIndices<'a> {
-    pub indices: &'a Vec<usize>,
-    pub pairs: &'a Vec<(usize, usize)>,
+pub struct Pair {
+    pub left: usize,
+    pub right: usize,
 }
 
 pub struct SrtCellPairs<'a> {
     pub data: &'a SparseIoVec,
     pub coordinates: &'a Mat,
-    pub pairs: Vec<(usize, usize)>,
+    pub pairs: Vec<Pair>,
+    pub pairs_neighbours: Vec<PairsNeighbours>,
     pub distances: Vec<f32>,
     pub pair_to_sample: Option<Vec<usize>>,
     pub sample_to_pair: Option<Vec<Vec<usize>>>,
+}
+
+pub struct PairsNeighbours {
+    pub shared: Vec<usize>,
+    pub left_only: Vec<usize>,
+    pub right_only: Vec<usize>,
 }
 
 impl<'a> SrtCellPairs<'a> {
@@ -38,12 +37,12 @@ impl<'a> SrtCellPairs<'a> {
         let left = self
             .pairs
             .iter()
-            .map(|&(i, _)| self.coordinates.row(i))
+            .map(|pp| self.coordinates.row(pp.left))
             .collect::<Vec<_>>();
         let right = self
             .pairs
             .iter()
-            .map(|&(_, j)| self.coordinates.row(j))
+            .map(|pp| self.coordinates.row(pp.right))
             .collect::<Vec<_>>();
         Ok((concatenate_vertical(&left)?, concatenate_vertical(&right)?))
     }
@@ -61,9 +60,9 @@ impl<'a> SrtCellPairs<'a> {
         select_pair_indices
             .into_iter()
             .filter_map(|&pp| self.pairs.get(pp))
-            .for_each(|&(l, r)| {
-                left += self.coordinates.row(l).transpose();
-                right += self.coordinates.row(r).transpose();
+            .for_each(|pp| {
+                left += self.coordinates.row(pp.left).transpose();
+                right += self.coordinates.row(pp.right).transpose();
                 npairs += 1.;
             });
 
@@ -73,6 +72,12 @@ impl<'a> SrtCellPairs<'a> {
     }
 
     /// visit cell pairs by regular-sized block
+    ///
+    /// A visitor function takes
+    /// - `(lb,ub)` `(usize,usize)`
+    /// - data itself
+    /// - `shared_input`
+    /// - `shared_out` (`Arc(Mutex())`)
     pub fn visit_pairs_by_block<Visitor, SharedIn, SharedOut>(
         &self,
         visitor: &Visitor,
@@ -82,7 +87,7 @@ impl<'a> SrtCellPairs<'a> {
     ) -> anyhow::Result<()>
     where
         Visitor: Fn(
-                PairsWithBounds,
+                (usize, usize),
                 &SrtCellPairs,
                 &SharedIn,
                 Arc<Mutex<&mut SharedOut>>,
@@ -100,34 +105,25 @@ impl<'a> SrtCellPairs<'a> {
         jobs.par_iter()
             .progress_count(jobs.len() as u64)
             .map(|&(lb, ub)| -> anyhow::Result<()> {
-                let pairs_per_job = &all_pairs[lb..ub];
-                visitor(
-                    PairsWithBounds {
-                        lb,
-                        ub,
-                        pairs: pairs_per_job,
-                    },
-                    &self,
-                    shared_in,
-                    arc_shared_out.clone(),
-                )
+                visitor((lb, ub), &self, shared_in, arc_shared_out.clone())
             })
             .collect::<anyhow::Result<()>>()
     }
 
     /// visit cell pairs by sample
+    ///
+    /// A visitor function takes
+    /// - `pair_id` `&[usize]`
+    /// - data itself
+    /// - `sample_id`
+    /// - `shared_out` (`Arc(Mutex())`)
     pub fn visit_pairs_by_sample<Visitor, SharedOut>(
         &self,
         visitor: &Visitor,
         shared_out: &mut SharedOut,
     ) -> anyhow::Result<()>
     where
-        Visitor: Fn(
-                PairsWithIndices,
-                &SrtCellPairs,
-                usize,
-                Arc<Mutex<&mut SharedOut>>,
-            ) -> anyhow::Result<()>
+        Visitor: Fn(&[usize], &SrtCellPairs, usize, Arc<Mutex<&mut SharedOut>>) -> anyhow::Result<()>
             + Sync
             + Send,
         SharedOut: Sync + Send,
@@ -135,24 +131,11 @@ impl<'a> SrtCellPairs<'a> {
         if let Some(sample_to_pair) = self.sample_to_pair.as_ref() {
             let arc_shared_out = Arc::new(Mutex::new(shared_out));
             let num_samples = sample_to_pair.len();
-            let all_pairs = &self.pairs;
             sample_to_pair
                 .into_par_iter()
                 .enumerate()
                 .progress_count(num_samples as u64)
-                .map(|(sample, indices)| {
-                    let pairs = &indices
-                        .into_iter()
-                        .filter_map(|&i| all_pairs.get(i).cloned())
-                        .collect::<Vec<_>>();
-
-                    visitor(
-                        PairsWithIndices { indices, pairs },
-                        &self,
-                        sample,
-                        arc_shared_out.clone(),
-                    )
-                })
+                .map(|(sample, indices)| visitor(&indices, &self, sample, arc_shared_out.clone()))
                 .collect()
         } else {
             Err(anyhow::anyhow!("no sample was assigned"))
@@ -176,7 +159,7 @@ impl<'a> SrtCellPairs<'a> {
     /// Create a thin wrapper for cell pairs
     ///
     /// * `data` - sparse matrix data vector
-    /// * `coordinates` - n x 2 or n x 3 spatial coordinates
+    /// * `coordinates` - n x 2 or n x 3 or more spatial coordinates
     /// * `knn` - k-nearest neighbours
     /// * `block_size` block size for parallel processing
     ///
@@ -205,7 +188,7 @@ impl<'a> SrtCellPairs<'a> {
         let triplets = jobs
             .into_par_iter()
             .progress_count(njobs)
-            .map(|(lb, ub)| -> anyhow::Result<Vec<(usize, usize, f32)>> {
+            .map(|(lb, ub)| -> anyhow::Result<Vec<((usize, usize), f32)>> {
                 let mut ret = Vec::with_capacity((ub - lb) * nquery);
 
                 for i in lb..ub {
@@ -214,7 +197,7 @@ impl<'a> SrtCellPairs<'a> {
                         _indices
                             .into_iter()
                             .zip(_distances)
-                            .map(|(j, d_ij)| (i, j, d_ij))
+                            .map(|(j, d_ij)| ((i, j), d_ij))
                             .collect::<Vec<_>>(),
                     );
                 }
@@ -225,22 +208,148 @@ impl<'a> SrtCellPairs<'a> {
             .collect::<Vec<_>>()
             .into_iter()
             .flatten()
-            .collect::<Vec<_>>();
+            .collect::<HashMap<_, _>>();
+
+        info!("{} triplets by spatial kNN matching", triplets.len());
 
         if triplets.len() < 1 {
             return Err(anyhow::anyhow!("empty triplets"));
         }
 
-        info!("{} triplets for spatial kNN matching", triplets.len());
+        let keys = triplets
+            .iter()
+            .map(|entry| *entry.key())
+            .collect::<Vec<_>>();
 
-        let pairs = triplets.iter().map(|&(i, j, _)| (i, j)).collect::<Vec<_>>();
-        let distances = triplets.iter().map(|&(_, _, d)| d).collect::<Vec<_>>();
+        let mut triplets = keys
+            .into_par_iter()
+            .filter_map(|(i, j)| {
+                // if the reciprocal key (j, i) exists
+                if triplets.contains_key(&(j, i)) {
+                    if let Some(x) = triplets.get(&(j, i)) {
+                        if i < j {
+                            return Some(((i, j), *x.value()));
+                        } else if j < i {
+                            return Some(((j, i), *x.value()));
+                        }
+                    }
+                }
+                None
+            })
+            .collect::<Vec<_>>();
+
+        triplets.par_sort_by_key(|&(ij, _)| ij);
+        triplets.dedup();
+        info!("{} triplets after reciprocal matching", triplets.len());
+
+        // construct sparse network backbone
+        use nalgebra_sparse::{CooMatrix, CscMatrix};
+
+        let n = data.num_columns()?;
+        let mut coo = CooMatrix::new(n, n);
+        for &((i, j), v) in triplets.iter() {
+            coo.push(i, j, v);
+            coo.push(j, i, v);
+        }
+
+        let graph = CscMatrix::from(&coo);
+
+        info!("compiling the list of neighbouring cells for all the pairs");
+        let neighbours = |i: usize| -> HashSet<usize> {
+            graph
+                .get_col(i)
+                .unwrap()
+                .row_indices()
+                .iter()
+                .cloned()
+                .collect()
+        };
+
+        let triplets_with_neighbours = triplets
+            .into_iter()
+            .par_bridge()
+            .filter_map(
+                |((i, j), v)| -> Option<((usize, usize), f32, PairsNeighbours)> {
+                    let n_i = neighbours(i);
+                    let n_j = neighbours(j);
+                    n_i.remove(&j);
+                    n_j.remove(&i);
+
+                    let s_ij = n_i
+                        .iter()
+                        .filter_map(|x| {
+                            if n_j.contains(x.key()) {
+                                Some(*x)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
+                    let d_i = n_i
+                        .iter()
+                        .filter_map(|x| {
+                            if !n_j.contains(x.key()) {
+                                Some(*x)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
+                    let d_j = n_j
+                        .iter()
+                        .filter_map(|x| {
+                            if !n_i.contains(x.key()) {
+                                Some(*x)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
+                    if d_i.is_empty() || d_j.is_empty() || s_ij.is_empty() {
+                        return None;
+                    }
+
+                    Some((
+                        (i, j),
+                        v,
+                        PairsNeighbours {
+                            shared: s_ij,
+                            left_only: d_i,
+                            right_only: d_j,
+                        },
+                    ))
+                },
+            )
+            .collect::<Vec<_>>();
+
+        if triplets_with_neighbours.len() < 1 {
+            return Err(anyhow::anyhow!(
+                "unable to extract two types of neighbours (increase `--knn-spatial`)"
+            ));
+        }
+
+        let pairs = triplets_with_neighbours
+            .iter()
+            .map(|&((i, j), _, _)| Pair { left: i, right: j })
+            .collect::<Vec<_>>();
+        let distances = triplets_with_neighbours
+            .iter()
+            .map(|&(_, x, _)| x)
+            .collect::<Vec<_>>();
+        let pairs_neighbours = triplets_with_neighbours
+            .into_iter()
+            .map(|(_, _, x)| x)
+            .collect::<Vec<_>>();
 
         Ok(SrtCellPairs {
             data,
             coordinates,
             pairs,
             distances,
+            pairs_neighbours,
             pair_to_sample: None,
             sample_to_pair: None,
         })

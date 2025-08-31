@@ -9,6 +9,8 @@ use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_util::common_io::extension;
 use matrix_util::dmatrix_util::concatenate_horizontal;
 use matrix_util::knn_match::*;
+use ndarray_rand::rand::seq::IteratorRandom;
+use ndarray_rand::rand::thread_rng;
 use rayon::prelude::*;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -46,6 +48,9 @@ pub struct DeconvArgs {
     /// should correspond to each data file.
     #[arg(long, short, value_delimiter(','))]
     batch_files: Option<Vec<Box<str>>>,
+
+    #[arg(long, default_value_t = false)]
+    ignore_batch_effects: bool,
 
     /// #k-nearest neighbours batches
     #[arg(long, default_value_t = 10)]
@@ -126,6 +131,10 @@ struct BulkDataOut {
     data: Mat,
 }
 
+/// a helper function to read bulk data with the matching row names
+/// * `bulk_data_files` - bulk file names
+/// * `sc_data` - opened `SparseIoVec`
+///
 fn read_bulk_data_consistent_with_sc(
     bulk_data_files: &[Box<str>],
     sc_data: &SparseIoVec,
@@ -179,6 +188,8 @@ fn read_bulk_data_consistent_with_sc(
     })
 }
 
+/// a master function to perform the deconvolution of bulk data files
+///
 pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
     info!("Opening single-cell data files...");
     // 1. Read sc data with batch membership
@@ -210,17 +221,17 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
         Some(sc_batch.as_ref()),
     )?;
 
-    info!("Characterizing potential biases by matching with the bulk data...");
-    sc_data.assign_batch_membership_by_nearest_bulk(&bulk_data, &rand_proj)?;
-
-    let bulk_to_cells = (0..sc_data.num_batches())
-        .map(|b| sc_data.batch_to_columns(b).unwrap_or_default().clone())
-        .collect::<Vec<_>>();
+    info!("Constructing PB in the sc data...");
+    let proj_kn = rand_proj.proj.scale_columns();
 
     let nsamp =
         sc_data.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
 
-    info!("Establish pseudoublk data for comparison against the observed bulk data");
+    if !args.ignore_batch_effects {
+        info!("Registering batch information");
+        sc_data.build_hnsw_per_batch(&proj_kn, &sc_batch)?;
+    }
+
     let collapsed = sc_data.collapse_columns(
         Some(args.knn_batches),
         Some(args.knn_cells),
@@ -228,11 +239,19 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
         Some(args.iter_opt),
     )?;
 
-    let bulk_yhat = bulk_data.predict_from_collapsed_data(&collapsed, args.knn_bulk)?;
+    // data 1: use collapsed
+    // collapsed.mu_observed;
+    // collapsed.mu_residual;
+    // collapsed.mu_adjusted;
+
+    // data 2: bulk projected
+    // let bulk_yhat =
+
+    // bulk_data.predict_from_collapsed_data(&collapsed, args.knn_bulk)?;
 
     // todo: bootstrap bulk data imputed by single cell data
 
-
+    let bulk_yhat = bulk_data.predict_from_collapsed_data(&collapsed, args.knn_bulk)?;
 
     // E[Y] ~ μ δ
     // E[Y.hat] ~ μ
@@ -240,12 +259,14 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
     //     Σ Y + Σ Y.hat
     // μ = -------------
     //     n (δ + 1)
-    
-    //     Σ Y 
+
+    //     Σ Y
     // δ = ----
     //     n μ
 
-    
+    // let bulk_to_cells = (0..sc_data.num_batches())
+    //     .map(|b| sc_data.batch_to_columns(b).unwrap_or_default().clone())
+    //     .collect::<Vec<_>>();
 
     // train on sc data
     // There are two types of additional factors present in bulk data
@@ -308,8 +329,8 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
     //     args.reference_batches.as_deref(),
     //     Some(args.iter_opt),
     // )?;
-    // let bulk_yhat = bulk_data.predict_from_collapsed_data(&collapsed, args.knn_bulk)?;
 
+    // let bulk_yhat = bulk_data.predict_from_collapsed_data(&collapsed, args.knn_bulk)?;
     // sc_data.collapse_columns(knn_batches, knn_cells, reference_batch_names, num_opt_iter)
 
     // the question is about how we get training data
@@ -326,55 +347,6 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
 
     info!("Done");
     Ok(())
-}
-
-trait KnnWithBulk {
-    /// assign column's batch membership based on the nearest
-    /// neighbour found in bulk columns
-    fn assign_batch_membership_by_nearest_bulk(
-        &mut self,
-        bulk: &Mat,
-        rand_proj: &RandColProjOut,
-    ) -> anyhow::Result<()>;
-}
-
-impl KnnWithBulk for SparseIoVec {
-    fn assign_batch_membership_by_nearest_bulk(
-        &mut self,
-        bulk: &Mat,
-        rand_proj: &RandColProjOut,
-    ) -> anyhow::Result<()> {
-        let proj_kn = rand_proj.proj.scale_columns();
-        info!("Sc Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
-
-        let basis_dk = &rand_proj.basis;
-        let ln_x = bulk.map(|x| x.ln_1p()).normalize_columns();
-        let mut bulk_km = basis_dk.transpose() * &ln_x;
-        bulk_km.scale_columns_inplace();
-        info!("Bulk Proj: {} x {} ...", bulk_km.nrows(), bulk.ncols());
-
-        let bulk_samples = (0..bulk_km.ncols()).collect();
-        let columns = (0..bulk_km.ncols()).map(|j| bulk_km.column(j)).collect();
-        let dict = ColumnDict::from_dvector_views(columns, bulk_samples);
-
-        let batch_membership = proj_kn
-            .column_iter()
-            .par_bridge()
-            .map(|x| -> anyhow::Result<usize> {
-                let query = x.to_vp();
-                let search = dict.search_by_query_data(&query, 1)?;
-
-                if search.0.is_empty() {
-                    return Err(anyhow::anyhow!("failed to find the nearest bulk sample"));
-                }
-
-                Ok(search.0[0])
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-
-        self.register_batches_dmatrix(&proj_kn, &batch_membership)?;
-        Ok(())
-    }
 }
 
 trait InteractWithScData {
@@ -423,49 +395,58 @@ impl InteractWithScData for Mat {
             .map(|x| x.clamp(-4., 4.))
             .scale_columns();
 
-        let ln_x = self.map(|x| x.ln_1p()).normalize_columns();
+        let ln_x = self.map(|x| x.ln_1p()).scale_columns();
         let bulk_km = (basis_dk.transpose() * &ln_x).scale_columns();
 
-        let n_sample = 10;
+        todo!("need bootstrap");
 
-        let mut stoch_data = vec![];
-        let mut stoch_proj_vec = vec![];
+        // bootstrap pb data
 
-        for s in 0..n_sample {
-            let _x_dm = match collapsed.mu_adjusted.as_ref() {
-                Some(x) => x.posterior_sample(),
-                _ => collapsed.mu_observed.posterior_sample(),
-            }?;
-            let _ln_x_dm = _x_dm.map(|x| x.ln_1p()).normalize_columns();
-            stoch_proj_vec.push((basis_dk.transpose() * &_ln_x_dm).scale_columns());
-            stoch_data.push(_x_dm);
-        }
+        // let mut stoch_data_vec = vec![];
 
-        let stoch_dm = concatenate_horizontal(&stoch_data)?;
-        let stoch_km = concatenate_horizontal(&stoch_proj_vec)?;
-        let stoch_names = (0..stoch_km.ncols()).collect();
+        // let nboot = 100;
+        // let n_pb_cols = pb.ncols();
+        // let pb_columns = 0..n_pb_cols;
 
-        let dict = ColumnDict::from_dmatrix(stoch_km, stoch_names);
+        // let mut rng = thread_rng();
 
-        let norm_target = 2_f32.ln();
+        // for _ in 0..n_pb_cols {
+        //     if let Some(s) = pb_columns.choose(&mut rng) {
+        //         let _x_d = match collapsed.mu_adjusted.as_ref() {
+        //             Some(x) => x.posterior_sample(),
+        //             _ => collapsed.mu_observed.posterior_sample(),
+        //         }?
+        //         .column(s);
 
-        let imputed = bulk_km
-            .column_iter()
-            .enumerate()
-            .map(|(i, query)| -> anyhow::Result<DVec> {
-                let (neighbours, distances) = dict.search_by_query_data(&query.to_vp(), knn)?;
+        //         stoch_data_vec.push(_x_d);
+        //     }
+        // }
 
-                let weights = distances.into_iter().normalized_exp(norm_target);
-                let denom = weights.iter().sum::<f32>().max(1e-8);
-                let mut ret = DVec::zeros(self.nrows());
-                for (j, w) in neighbours.into_iter().zip(weights) {
-                    ret += stoch_dm.column(j) * w / denom;
-                }
-                Ok(ret)
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        // let stoch_data_dm = concatenate_horizontal(&stoch_data_vec)?;
+        // let stoch_ln_dm = stoch_data_dm.map(|x| x.ln_1p()).scale_columns();
+        // let stoch_proj_km = (basis_dk.transpose() * &stoch_ln_dm).scale_columns();
 
-        concatenate_horizontal(&imputed)
+        // let column_names = (0..stoch_proj_km.ncols()).collect();
+        // let dict = ColumnDict::from_dmatrix(stoch_proj_km, column_names);
+        // let norm_target = 2_f32.ln();
+
+        // let imputed = bulk_km
+        //     .column_iter()
+        //     .enumerate()
+        //     .map(|(i, query)| -> anyhow::Result<DVec> {
+        //         let (neighbours, distances) = dict.search_by_query_data(&query.to_vp(), knn)?;
+
+        //         let weights = distances.into_iter().normalized_exp(norm_target);
+        //         let denom = weights.iter().sum::<f32>().max(1e-8);
+        //         let mut ret = DVec::zeros(self.nrows());
+        //         for (j, w) in neighbours.into_iter().zip(weights) {
+        //             ret += stoch_data_dm.column(j) * w / denom;
+        //         }
+        //         Ok(ret)
+        //     })
+        //     .collect::<anyhow::Result<Vec<_>>>()?;
+
+        // concatenate_horizontal(&imputed)
     }
 
     fn predict_from_sparse_data(
@@ -501,7 +482,57 @@ impl InteractWithScData for Mat {
         knn: usize,
     ) -> anyhow::Result<Self>
     where
-        Self: Sized {
-	todo!("");
+        Self: Sized,
+    {
+        todo!("");
     }
 }
+
+// trait ScKnnWithBulk {
+//     /// assign column's batch membership based on the nearest
+//     /// neighbour found in bulk columns
+//     fn assign_batch_membership_by_nearest_bulk(
+//         &mut self,
+//         bulk: &Mat,
+//         rand_proj: &RandColProjOut,
+//     ) -> anyhow::Result<()>;
+// }
+
+// impl ScKnnWithBulk for SparseIoVec {
+//     fn assign_batch_membership_by_nearest_bulk(
+//         &mut self,
+//         bulk: &Mat,
+//         rand_proj: &RandColProjOut,
+//     ) -> anyhow::Result<()> {
+//         let proj_kn = rand_proj.proj.scale_columns();
+//         info!("Sc Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
+
+//         let basis_dk = &rand_proj.basis;
+//         let ln_x = bulk.map(|x| x.ln_1p()).normalize_columns();
+//         let mut bulk_km = basis_dk.transpose() * &ln_x;
+//         bulk_km.scale_columns_inplace();
+//         info!("Bulk Proj: {} x {} ...", bulk_km.nrows(), bulk.ncols());
+
+//         let bulk_samples = (0..bulk_km.ncols()).collect();
+//         let columns = (0..bulk_km.ncols()).map(|j| bulk_km.column(j)).collect();
+//         let dict = ColumnDict::from_dvector_views(columns, bulk_samples);
+
+//         let batch_membership = proj_kn
+//             .column_iter()
+//             .par_bridge()
+//             .map(|x| -> anyhow::Result<usize> {
+//                 let query = x.to_vp();
+//                 let search = dict.search_by_query_data(&query, 1)?;
+
+//                 if search.0.is_empty() {
+//                     return Err(anyhow::anyhow!("failed to find the nearest bulk sample"));
+//                 }
+
+//                 Ok(search.0[0])
+//             })
+//             .collect::<anyhow::Result<Vec<_>>>()?;
+
+//         self.register_batches_dmatrix(&proj_kn, &batch_membership)?;
+//         Ok(())
+//     }
+// }

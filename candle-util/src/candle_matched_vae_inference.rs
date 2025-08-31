@@ -1,7 +1,5 @@
-// #![allow(dead_code)]
-
-use crate::candle_data_loader::*;
 use crate::candle_inference::TrainConfig;
+use crate::candle_matched_data_loader::*;
 use crate::candle_model_traits::*;
 
 use candle_core::{Result, Tensor};
@@ -108,35 +106,32 @@ where
                 }
                 data_vec
                     .par_iter()
-                    .try_for_each(|minibatch_data| -> anyhow::Result<()> {
-                        let input_left_nm = minibatch_data.input.as_ref();
-                        let input_right_nm = minibatch_data
-                            .input_matched
-                            .as_ref()
-                            .ok_or(anyhow::anyhow!("need input matched"))?;
-                        let output_left_nd = minibatch_data
-                            .output
-                            .as_ref()
-                            .ok_or(anyhow::anyhow!("need output"))?;
-                        let output_right_nd = minibatch_data
-                            .output_matched
-                            .as_ref()
-                            .ok_or(anyhow::anyhow!("need output matched"))?;
-
+                    .try_for_each(|mb| -> anyhow::Result<()> {
                         let latent = self.encoder.forward_t(
                             MatchedEncoderData {
-                                left: input_left_nm,
-                                right: input_right_nm,
+                                marginal_left: mb.input_marginal_left.as_ref(),
+                                marginal_right: mb.input_marginal_right.as_ref(),
+                                neigh_left: mb.input_neigh_left.as_ref(),
+                                neigh_right: mb.input_neigh_right.as_ref(),
                             },
                             true,
                         )?;
+
                         let kl = &latent.kl_div;
 
                         let (_, llik) = self.decoder.forward_with_llik(
                             &latent,
                             MatchedDecoderData {
-                                left: output_left_nd,
-                                right: output_right_nd,
+                                marginal_left: mb
+                                    .output_marginal_left
+                                    .as_ref()
+                                    .ok_or(anyhow::anyhow!("need output left"))?,
+                                marginal_right: mb
+                                    .output_marginal_right
+                                    .as_ref()
+                                    .ok_or(anyhow::anyhow!("need output right"))?,
+                                border_left: mb.output_border_left.as_ref(),
+                                border_right: mb.output_border_right.as_ref(),
                             },
                             llik_func,
                         )?;
@@ -172,25 +167,13 @@ where
             for _epoch in 0..train_config.num_epochs {
                 let mut llik_tot = 0f32;
 
-                for minibatch_data in &data_vec {
-                    let input_left_nm = minibatch_data.input.as_ref();
-                    let input_right_nm = minibatch_data
-                        .input_matched
-                        .as_ref()
-                        .ok_or(anyhow::anyhow!("need input matched"))?;
-                    let output_left_nd = minibatch_data
-                        .output
-                        .as_ref()
-                        .ok_or(anyhow::anyhow!("need output"))?;
-                    let output_right_nd = minibatch_data
-                        .output_matched
-                        .as_ref()
-                        .ok_or(anyhow::anyhow!("need output matched"))?;
-
+                for mb in &data_vec {
                     let latent = self.encoder.forward_t(
                         MatchedEncoderData {
-                            left: input_left_nm,
-                            right: input_right_nm,
+                            marginal_left: mb.input_marginal_left.as_ref(),
+                            marginal_right: mb.input_marginal_right.as_ref(),
+                            neigh_left: mb.input_neigh_left.as_ref(),
+                            neigh_right: mb.input_neigh_right.as_ref(),
                         },
                         true,
                     )?;
@@ -199,8 +182,16 @@ where
                     let (_, llik) = self.decoder.forward_with_llik(
                         &latent,
                         MatchedDecoderData {
-                            left: output_left_nd,
-                            right: output_right_nd,
+                            marginal_left: mb
+                                .output_marginal_left
+                                .as_ref()
+                                .ok_or(anyhow::anyhow!("need output left"))?,
+                            marginal_right: mb
+                                .output_marginal_right
+                                .as_ref()
+                                .ok_or(anyhow::anyhow!("need output right"))?,
+                            border_left: mb.output_border_left.as_ref(),
+                            border_right: mb.output_border_right.as_ref(),
                         },
                         llik_func,
                     )?;

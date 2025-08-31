@@ -1,6 +1,6 @@
 use crate::srt_common::*;
 
-use candle_util::candle_data_loader::*;
+use candle_util::candle_matched_data_loader::*;
 use candle_util::candle_matched_vae_inference::*;
 
 use log::info;

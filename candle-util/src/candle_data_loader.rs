@@ -20,10 +20,8 @@ pub fn generate_minibatch_intervals(ntot: usize, batch_size: usize) -> Vec<(usiz
 pub struct MinibatchData {
     pub input: Tensor,
     pub input_null: Option<Tensor>,
-    pub input_matched: Option<Tensor>,
     pub output: Option<Tensor>,
     pub output_null: Option<Tensor>,
-    pub output_matched: Option<Tensor>,
 }
 
 /// `DataLoader` for minibatch learning
@@ -56,19 +54,15 @@ pub trait DataLoader {
 pub struct InMemoryData {
     input_data: Vec<Tensor>,
     input_null_data: Option<Vec<Tensor>>,
-    input_matched_data: Option<Vec<Tensor>>,
 
     output_data: Option<Vec<Tensor>>,
     output_null_data: Option<Vec<Tensor>>,
-    output_matched_data: Option<Vec<Tensor>>,
 
     shuffled_input_data: Option<Vec<Tensor>>,
     shuffled_input_null_data: Option<Vec<Tensor>>,
-    shuffled_input_matched_data: Option<Vec<Tensor>>,
 
     shuffled_output_data: Option<Vec<Tensor>>,
     shuffled_output_null_data: Option<Vec<Tensor>>,
-    shuffled_output_matched_data: Option<Vec<Tensor>>,
 
     minibatches: Minibatches,
 }
@@ -79,10 +73,8 @@ where
 {
     pub input: &'a D,
     pub input_null: Option<&'a D>,
-    pub input_matched: Option<&'a D>,
     pub output: Option<&'a D>,
     pub output_null: Option<&'a D>,
-    pub output_matched: Option<&'a D>,
 }
 
 impl InMemoryData {
@@ -92,33 +84,25 @@ impl InMemoryData {
     {
         let input = args.input;
         let input_null = args.input_null;
-        let input_matched = args.input_matched;
         let output = args.output;
         let output_null = args.output_null;
-        let output_matched = args.output_matched;
 
         let input_data = input.rows_to_tensor_vec();
         let input_null_data = input_null.map(|x| x.rows_to_tensor_vec());
-        let input_matched_data = input_matched.map(|x| x.rows_to_tensor_vec());
         let output_data = output.map(|x| x.rows_to_tensor_vec());
         let output_null_data = output_null.map(|x| x.rows_to_tensor_vec());
-        let output_matched_data = output_matched.map(|x| x.rows_to_tensor_vec());
 
         let rows = (0..input_data.len()).collect();
 
         Ok(InMemoryData {
             input_data,
             input_null_data,
-            input_matched_data,
             output_data,
             output_null_data,
-            output_matched_data,
             shuffled_input_data: None,
             shuffled_input_null_data: None,
-            shuffled_input_matched_data: None,
             shuffled_output_data: None,
             shuffled_output_null_data: None,
-            shuffled_output_matched_data: None,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -137,19 +121,13 @@ impl DataLoader for InMemoryData {
         if let Some(input) = take_lb_ub(lb, ub, target_device, Some(&self.input_data))? {
             let output = take_lb_ub(lb, ub, target_device, self.output_data.as_ref())?;
             let output_null = take_lb_ub(lb, ub, target_device, self.output_null_data.as_ref())?;
-            let output_matched =
-                take_lb_ub(lb, ub, target_device, self.output_matched_data.as_ref())?;
 
-            let input_matched =
-                take_lb_ub(lb, ub, target_device, self.input_matched_data.as_ref())?;
             let input_null = take_lb_ub(lb, ub, target_device, self.input_null_data.as_ref())?;
             Ok(MinibatchData {
                 input,
                 input_null,
-                input_matched,
                 output,
                 output_null,
-                output_matched,
             })
         } else {
             Err(anyhow::anyhow!("no input data"))
@@ -167,12 +145,6 @@ impl DataLoader for InMemoryData {
             let output =
                 take_shuffled(batch_idx, target_device, self.shuffled_output_data.as_ref())?;
 
-            let output_matched = take_shuffled(
-                batch_idx,
-                target_device,
-                self.shuffled_output_matched_data.as_ref(),
-            )?;
-
             let output_null = take_shuffled(
                 batch_idx,
                 target_device,
@@ -185,19 +157,11 @@ impl DataLoader for InMemoryData {
                 self.shuffled_input_null_data.as_ref(),
             )?;
 
-            let input_matched = take_shuffled(
-                batch_idx,
-                target_device,
-                self.shuffled_input_matched_data.as_ref(),
-            )?;
-
             Ok(MinibatchData {
                 input,
                 input_null,
-                input_matched,
                 output,
                 output_null,
-                output_matched,
             })
         } else {
             Err(anyhow::anyhow!("need to shuffle data"))
@@ -225,20 +189,12 @@ impl DataLoader for InMemoryData {
             self.shuffled_input_null_data = Some(vec![]);
         }
 
-        if self.input_matched_data.is_some() {
-            self.shuffled_input_matched_data = Some(vec![]);
-        }
-
         if self.output_data.is_some() {
             self.shuffled_output_data = Some(vec![]);
         }
 
         if self.output_null_data.is_some() {
             self.shuffled_output_null_data = Some(vec![]);
-        }
-
-        if self.output_matched_data.is_some() {
-            self.shuffled_output_matched_data = Some(vec![]);
         }
 
         ///////////////////////////////////
@@ -254,11 +210,6 @@ impl DataLoader for InMemoryData {
                 )?;
                 copy_shuffled(
                     samples,
-                    self.input_matched_data.as_ref(),
-                    self.shuffled_input_matched_data.as_mut(),
-                )?;
-                copy_shuffled(
-                    samples,
                     self.input_null_data.as_ref(),
                     self.shuffled_input_null_data.as_mut(),
                 )?;
@@ -267,11 +218,6 @@ impl DataLoader for InMemoryData {
                     samples,
                     self.output_data.as_ref(),
                     self.shuffled_output_data.as_mut(),
-                )?;
-                copy_shuffled(
-                    samples,
-                    self.output_matched_data.as_ref(),
-                    self.shuffled_output_matched_data.as_mut(),
                 )?;
                 copy_shuffled(
                     samples,

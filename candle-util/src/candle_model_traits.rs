@@ -50,21 +50,18 @@ pub trait DecoderModuleT {
     fn dim_latent(&self) -> usize;
 }
 
-pub struct MatchedEncoderLatent {
-    pub left: Tensor,
-    pub right: Tensor,
-    pub average: Tensor,
-    pub kl_div: Tensor,
-}
-
 pub struct MatchedEncoderData<'a> {
-    pub left: &'a Tensor,
-    pub right: &'a Tensor,
+    pub marginal_left: &'a Tensor,
+    pub marginal_right: &'a Tensor,
+    pub neigh_left: Option<&'a Tensor>,
+    pub neigh_right: Option<&'a Tensor>,
 }
 
 pub struct MatchedDecoderData<'a> {
-    pub left: &'a Tensor,
-    pub right: &'a Tensor,
+    pub marginal_left: &'a Tensor,
+    pub marginal_right: &'a Tensor,
+    pub border_left: Option<&'a Tensor>,
+    pub border_right: Option<&'a Tensor>,
 }
 
 pub trait MatchedEncoderModuleT {
@@ -76,9 +73,15 @@ pub trait MatchedEncoderModuleT {
     fn dim_latent(&self) -> usize;
 }
 
+pub struct MatchedEncoderLatent {
+    pub marginal: Tensor,
+    pub border: Tensor,
+    pub kl_div: Tensor,
+}
+
 pub struct MatchedDecoderRecon {
-    pub left: Tensor,
-    pub right: Tensor,
+    pub marginal: Tensor,
+    pub border: Tensor,
 }
 
 pub trait MatchedDecoderModuleT {

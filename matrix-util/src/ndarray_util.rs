@@ -61,6 +61,35 @@ where
     type Mat = Self;
     type Scalar = T;
 
+    fn normalize_exp_logits_columns(&self) -> Self::Mat {
+        let mut xx = self.clone();
+        xx.normalize_exp_logits_columns_inplace();
+        xx
+    }
+
+    fn normalize_exp_logits_columns_inplace(&mut self) {
+        for j in 0..self.ncols() {
+            let mut x_j = self.column_mut(j);
+            let log_max = x_j.iter().cloned().reduce(T::max).unwrap_or(T::zero());
+            let denom = x_j.mapv(|l| (l - log_max).exp()).sum();
+            x_j.mapv_inplace(|x| x / denom);
+        }
+    }
+
+    fn sum_to_one_columns(&self) -> Self::Mat {
+        let mut xx = self.clone();
+        xx.sum_to_one_columns_inplace();
+        xx
+    }
+
+    fn sum_to_one_columns_inplace(&mut self) {
+        for j in 0..self.ncols() {
+            let mut x_j = self.column_mut(j);
+            let denom = x_j.mapv(|x| x.abs()).sum();
+            x_j.mapv_inplace(|x| x / denom);
+        }
+    }
+
     fn normalize_columns(&self) -> Self::Mat {
         let mut xx = self.clone();
         xx.normalize_columns_inplace();
@@ -70,7 +99,7 @@ where
     fn normalize_columns_inplace(&mut self) {
         for j in 0..self.ncols() {
             let mut x_j = self.column_mut(j);
-            let denom = x_j.mapv(|x| x * x).sum().max(T::one()).sqrt();
+            let denom = x_j.mapv(|x| x * x).sum().sqrt();
             x_j.mapv_inplace(|x| x / denom);
         }
     }

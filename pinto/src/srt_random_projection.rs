@@ -93,17 +93,15 @@ impl<'a> SrtRandProjOps for SrtCellPairs<'a> {
 }
 
 fn random_project_pairs_visitor(
-    pairs_with_bounds: PairsWithBounds,
-    _data: &SrtCellPairs,
+    bound: (usize, usize),
+    data: &SrtCellPairs,
     column_proj: &RandColProjOut,
     arc_pair_proj: Arc<Mutex<&mut SrtRandProjOut>>,
 ) -> anyhow::Result<()> {
-    let lb = pairs_with_bounds.lb;
-    let ub = pairs_with_bounds.ub;
-    let pairs = pairs_with_bounds.pairs;
-
-    let left = pairs.into_iter().map(|&(i, _)| i);
-    let right = pairs.into_iter().map(|&(_, j)| j);
+    let (lb, ub) = bound;
+    let pairs = &data.pairs[lb..ub];
+    let left = pairs.into_iter().map(|pp| pp.left);
+    let right = pairs.into_iter().map(|pp| pp.right);
 
     let mut proj = arc_pair_proj.lock().expect("lock proj");
 
@@ -121,43 +119,3 @@ fn random_project_pairs_visitor(
 
     Ok(())
 }
-
-// ///
-// /// each position vector (1 x d) `*` random_proj (d x r)
-// ///
-// fn positional_projection<T>(
-//     coords: &Mat,
-//     batch_membership: &Vec<T>,
-//     d: usize,
-// ) -> anyhow::Result<Mat>
-// where
-//     T: Sync + Send + Clone + Eq + std::hash::Hash,
-// {
-//     if coords.nrows() != batch_membership.len() {
-//         return Err(anyhow::anyhow!("incompatible batch membership"));
-//     }
-//     let maxval = coords.max();
-//     let minval = coords.min();
-//     let coords = coords
-//         .map(|x| (x - minval) / (maxval - minval + 1.))
-//         .transpose();
-//     let batches = partition_by_membership(batch_membership, None);
-//     let mut ret = Mat::zeros(d, coords.ncols());
-//     for (_b, points) in batches.into_iter() {
-//         let rand_proj = Mat::rnorm(d, coords.nrows());
-//         points.into_iter().for_each(|p| {
-//             ret.column_mut(p)
-//                 .copy_from(&(&rand_proj * coords.column(p)));
-//         });
-//     }
-//     let (lb, ub) = (-4., 4.);
-//     ret.scale_columns_inplace();
-//     if ret.max() > ub || ret.min() < lb {
-//         info!("Clamping values [{}, {}] after standardization", lb, ub);
-//         ret.iter_mut().for_each(|x| {
-//             *x = x.clamp(lb, ub);
-//         });
-//         ret.scale_columns_inplace();
-//     }
-//     Ok(ret)
-// }

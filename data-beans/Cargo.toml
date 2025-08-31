@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 matrix-util = { workspace = true }
+matrix-param = { workspace = true }
 candle-util = { workspace = true }
 
 anyhow = { workspace = true }
@@ -42,3 +43,5 @@ instant-distance = { workspace = true }
 indicatif = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
+dashmap = { workspace = true }
+

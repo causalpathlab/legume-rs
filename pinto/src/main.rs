@@ -6,14 +6,17 @@ mod srt_routines_latent_representation;
 mod srt_routines_post_process;
 mod srt_routines_pre_process;
 
-use candle_util::candle_data_loader::DataLoaderArgs;
+use candle_util::candle_matched_data_loader::DataLoaderArgs;
 use srt_routines_latent_representation::*;
 use srt_routines_post_process::SrtLatentStatePairsOps;
 use srt_routines_pre_process::*;
 
 use data_beans_alg::random_projection::binary_sort_columns;
 
-use matrix_param::traits::{Inference, TwoStatParam};
+use matrix_param::{
+    io::ParamIo,
+    traits::{Inference, TwoStatParam},
+};
 use srt_cell_pairs::SrtCellPairs;
 use srt_collapse_pairs::SrtCollapsePairsOps;
 use srt_common::*;
@@ -76,9 +79,13 @@ struct SRTArgs {
     #[arg(short = 'k', long, default_value_t = 10)]
     knn_spatial: usize,
 
-    /// maximum rank for spectral embedding for spatial coordinates
+    /// #k-nearest neighbours batches
+    #[arg(long, default_value_t = 3)]
+    knn_batches: usize,
+
+    /// #k-nearest neighbours within each batch
     #[arg(long, default_value_t = 10)]
-    rank_spatial: usize,
+    knn_cells: usize,
 
     /// #downsampling columns per each collapsed sample. If None, no
     /// downsampling.
@@ -106,7 +113,7 @@ struct SRTArgs {
     n_row_modules: usize,
 
     /// encoder layers
-    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
+    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,128,128])]
     encoder_layers: Vec<usize>,
 
     /// intensity levels for frequency embedding
@@ -151,7 +158,7 @@ fn main() -> anyhow::Result<()> {
 
     info!("Reading data files...");
 
-    let (data, coordinates, _) = read_data_vec(args.clone())?;
+    let (data, coordinates, batch_membership) = read_data_vec(args.clone())?;
 
     let gene_names = data.row_names()?;
 
@@ -159,6 +166,7 @@ fn main() -> anyhow::Result<()> {
     // 1. Take pairs of spatially interacting cells //
     //////////////////////////////////////////////////
 
+    info!("Constructing spatial nearest neighbourhood graphs");
     let mut srt_cell_pairs =
         SrtCellPairs::new(&data, &coordinates, args.knn_spatial, Some(args.block_size))?;
 
@@ -179,7 +187,7 @@ fn main() -> anyhow::Result<()> {
     ///////////////////////////////////////////////
 
     let collapsed = srt_cell_pairs.collapse_pairs()?;
-    let params = collapsed.optimize(None)?;
+    let params = collapsed.optimize(None, Some(args.iter_opt))?;
 
     let coordinate_column_names: Vec<Box<str>> = (1..=collapsed.left_coordinates.nrows())
         .map(|x| format!("left_{}", x).into_boxed_str())
@@ -205,12 +213,23 @@ fn main() -> anyhow::Result<()> {
         let log_x_md = concatenate_vertical(&[
             params.left.posterior_log_mean().transpose().clone(),
             params.right.posterior_log_mean().transpose().clone(),
+            params
+                .left_boundary
+                .posterior_log_mean()
+                .transpose()
+                .clone(),
+            params
+                .right_boundary
+                .posterior_log_mean()
+                .transpose()
+                .clone(),
         ])?;
-        let kk = (args.n_row_modules as f32).log2().ceil() as usize + 1;
+
+        let kk = args.n_row_modules.ilog2().max(1) as usize;
         info!(
             "approximately reduce data features: {} -> {}",
             log_x_md.ncols(),
-            args.n_row_modules
+            2_i32.pow(kk as u32)
         );
         row_membership_matrix(binary_sort_columns(&log_x_md, kk)?)?
     } else {
@@ -221,18 +240,6 @@ fn main() -> anyhow::Result<()> {
     /////////////////////////////////////////////////////////
     // 5. Train embedded topic model on the collapsed data //
     /////////////////////////////////////////////////////////
-
-    let n_topics = args.n_latent_topics;
-    let n_vocab = args.vocab_size;
-    let d_vocab_emb = args.vocab_emb;
-
-    // encoder input can be modularized
-    let input_left_nm = params.left.posterior_mean().transpose() * &aggregate_rows;
-    let input_right_nm = params.right.posterior_mean().transpose() * &aggregate_rows;
-
-    // output decoder should maintain the original dimension
-    let output_left_nd = params.left.posterior_mean().transpose();
-    let output_right_nd = params.right.posterior_mean().transpose();
 
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
@@ -250,6 +257,35 @@ fn main() -> anyhow::Result<()> {
         verbose: args.verbose,
     };
 
+    let n_topics = args.n_latent_topics;
+    let n_vocab = args.vocab_size;
+    let d_vocab_emb = args.vocab_emb;
+
+    // encoder input can be modularized
+    let marg_left_nm = params.left.posterior_mean().transpose() * &aggregate_rows;
+    let marg_right_nm = params.right.posterior_mean().transpose() * &aggregate_rows;
+
+    let neigh_left_nm = params.left_neigh.posterior_mean().transpose() * &aggregate_rows;
+    let neigh_right_nm = params.right_neigh.posterior_mean().transpose() * &aggregate_rows;
+
+    // output decoder should maintain the original dimension
+    let marg_left_nd = params.left.posterior_mean().transpose();
+    let marg_right_nd = params.right.posterior_mean().transpose();
+
+    let border_left_nd = params.left_boundary.posterior_mean().transpose();
+    let border_right_nd = params.right_boundary.posterior_mean().transpose();
+
+    let train_data = DataLoaderArgs {
+        input_marginal_left: &marg_left_nm,
+        input_marginal_right: &marg_right_nm,
+        input_neigh_left: Some(&neigh_left_nm),
+        input_neigh_right: Some(&neigh_right_nm),
+        output_marginal_left: Some(&marg_left_nd),
+        output_marginal_right: Some(&marg_right_nd),
+        output_border_left: Some(&border_left_nd),
+        output_border_right: Some(&border_right_nd),
+    };
+
     let parameters = candle_nn::VarMap::new();
     let dev = &train_config.device;
     let param_builder =
@@ -259,7 +295,7 @@ fn main() -> anyhow::Result<()> {
     // training //
     //////////////
 
-    let n_features_encoder = input_left_nm.ncols();
+    let n_features_encoder = marg_left_nm.ncols();
 
     let encoder = MatchedLogSoftmaxEncoder::new(
         n_features_encoder,
@@ -270,7 +306,7 @@ fn main() -> anyhow::Result<()> {
         param_builder.clone(),
     )?;
 
-    let n_features_decoder = output_left_nd.ncols();
+    let n_features_decoder = marg_left_nd.ncols();
 
     let decoder = MatchedTopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
@@ -278,15 +314,6 @@ fn main() -> anyhow::Result<()> {
         "input: {} -> encoder -> decoder -> output: {}",
         n_features_encoder, n_features_decoder
     );
-
-    let train_data = DataLoaderArgs {
-        input: &input_left_nm,
-        input_null: None,
-        input_matched: Some(&input_right_nm),
-        output: Some(&output_left_nd),
-        output_null: None,
-        output_matched: Some(&output_right_nd),
-    };
 
     let (log_likelihood, latent) = train_left_right_vae(
         train_data,
@@ -299,9 +326,8 @@ fn main() -> anyhow::Result<()> {
 
     write_types::<f32>(&log_likelihood, &(args.out.to_string() + ".llik.gz"))?;
 
-    tensor_parquet_out(&latent.average, &args.out, "collapsed_latent")?;
-    tensor_parquet_out(&latent.left, &args.out, "collapsed_latent_left")?;
-    tensor_parquet_out(&latent.right, &args.out, "collapsed_latent_right")?;
+    tensor_parquet_out(&latent.marginal, &args.out, "collapsed_latent_marginal")?;
+    tensor_parquet_out(&latent.border, &args.out, "collapsed_latent_border")?;
 
     named_tensor_parquet_out(
         &decoder.get_dictionary()?,
@@ -318,9 +344,8 @@ fn main() -> anyhow::Result<()> {
         args.block_size,
     )?;
 
-    tensor_parquet_out(&latent.average, &args.out, "latent")?;
-    tensor_parquet_out(&latent.left, &args.out, "latent_left")?;
-    tensor_parquet_out(&latent.right, &args.out, "latent_right")?;
+    tensor_parquet_out(&latent.marginal, &args.out, "latent_marginal")?;
+    tensor_parquet_out(&latent.border, &args.out, "latent_border")?;
 
     let (_left, _right) = srt_cell_pairs.all_pairs_positions()?;
 
