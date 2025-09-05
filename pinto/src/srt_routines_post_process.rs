@@ -61,25 +61,59 @@ where
     let left = pairs.into_iter().map(|pp| pp.left);
     let right = pairs.into_iter().map(|pp| pp.right);
 
-    let y_left = data.data.read_columns_dmatrix(left)?.transpose() * aggregate_features;
-    let y_right = data.data.read_columns_dmatrix(right)?.transpose() * aggregate_features;
+    let y_left = data.data.read_columns_csc(left)?.transpose() * aggregate_features;
+    let y_right = data.data.read_columns_csc(right)?.transpose() * aggregate_features;
 
-    // todo: 
-    // let pairs_neighbours = &data.pairs_neighbours[lb..ub];
+    ////////////////////////////////////////////////////
+    // imputation by neighbours and update statistics //
+    ////////////////////////////////////////////////////
 
-    unimplemented!("");
+    let pairs_neighbours = &data.pairs_neighbours[lb..ub];
 
-    // let latent = encoder.forward_t(
-    //     MatchedEncoderData {
-    //         marginal_left: &y_left.to_tensor(dev)?,
-    //         marginal_right: &y_right.to_tensor(dev)?,
-    //     },
-    //     false,
-    // )?;
-    // latent_vec
-    //     .lock()
-    //     .expect("latent vec lock")
-    //     .push((lb, latent));
+    let y_delta_left = pairs_neighbours
+        .iter()
+        .enumerate()
+        .map(|(j, n)| -> anyhow::Result<Mat> {
+            let left = pairs[j].left;
+
+            let mut y_dm = data.data.read_columns_csc(std::iter::once(left))?;
+            let y_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
+            let y_hat_dm = impute_with_neighbours(&y_dm, &y_neigh_dm)?;
+            y_dm.adjust_by_division_inplace(&y_hat_dm);
+            Ok(y_dm.transpose() * aggregate_features)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let y_delta_right = pairs_neighbours
+        .iter()
+        .enumerate()
+        .map(|(j, n)| -> anyhow::Result<Mat> {
+            let right = pairs[j].right;
+
+            let mut y_dm = data.data.read_columns_csc(std::iter::once(right))?;
+            let y_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
+            let y_hat_dm = impute_with_neighbours(&y_dm, &y_neigh_dm)?;
+            y_dm.adjust_by_division_inplace(&y_hat_dm);
+            Ok(y_dm.transpose() * aggregate_features)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let delta_left = concatenate_vertical(&y_delta_left)?.to_tensor(dev)?;
+    let delta_right = concatenate_vertical(&y_delta_right)?.to_tensor(dev)?;
+
+    let data = MatchedEncoderData {
+        marginal_left: &y_left.to_tensor(dev)?,
+        marginal_right: &y_right.to_tensor(dev)?,
+        delta_left: Some(&delta_left),
+        delta_right: Some(&delta_right),
+    };
+
+    let latent = encoder.forward_t(data, false)?;
+
+    latent_vec
+        .lock()
+        .expect("latent vec lock")
+        .push((lb, latent));
 
     Ok(())
 }

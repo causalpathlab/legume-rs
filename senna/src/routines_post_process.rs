@@ -20,7 +20,7 @@ fn adjust_triplets_visitor(
 
     let mut x_dn = full_data_vec.read_columns_csc(lb..ub)?;
 
-    x_dn.adjust_by_division(delta_db, &batches);
+    x_dn.adjust_by_division_of_selected_inplace(delta_db, &batches);
 
     let new_triplets = x_dn
         .triplet_iter()

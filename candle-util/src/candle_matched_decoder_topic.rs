@@ -61,11 +61,11 @@ impl MatchedDecoderModuleT for MatchedTopicDecoder {
         let (xm_l, xm_r) = (x_data.marginal_left, x_data.marginal_right);
 
         let llik_val = if let (Some(xb_l), Some(xb_r)) = (x_data.border_left, x_data.border_right) {
-            (llik(xm_l, &recon.marginal)? + llik(xm_r, &recon.marginal)?)?
-                + (&llik(xb_l, &recon.border)? + &llik(xb_r, &recon.border)?)?
+            llik(xb_l, &recon.border)// ? + llik(xb_r, &recon.border)?
+            // (llik(xm_l, &recon.marginal)? + llik(xm_r, &recon.marginal)?)?
+            //     + (&llik(xb_l, &recon.border)? + &llik(xb_r, &recon.border)?)?
         } else {
-            llik(x_data.marginal_left, &recon.marginal)?
-                + llik(x_data.marginal_right, &recon.marginal)?
+            llik(xm_l, &recon.marginal)? + llik(xm_r, &recon.marginal)?
         }?;
 
         Ok((recon, llik_val))

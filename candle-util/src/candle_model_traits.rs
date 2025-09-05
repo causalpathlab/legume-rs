@@ -53,8 +53,8 @@ pub trait DecoderModuleT {
 pub struct MatchedEncoderData<'a> {
     pub marginal_left: &'a Tensor,
     pub marginal_right: &'a Tensor,
-    pub neigh_left: Option<&'a Tensor>,
-    pub neigh_right: Option<&'a Tensor>,
+    pub delta_left: Option<&'a Tensor>,
+    pub delta_right: Option<&'a Tensor>,
 }
 
 pub struct MatchedDecoderData<'a> {

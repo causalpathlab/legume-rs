@@ -17,20 +17,20 @@ pub struct MatchedLogSoftmaxEncoder {
     emb_logx: Embedding,
     fc_left_marginal: StackLayers<Linear>,
     fc_right_marginal: StackLayers<Linear>,
-    fc_left_border: StackLayers<Linear>,
-    fc_right_border: StackLayers<Linear>,
+    fc_left_delta: StackLayers<Linear>,
+    fc_right_delta: StackLayers<Linear>,
     bn_left_marginal: BatchNorm,
     bn_right_marginal: BatchNorm,
-    bn_left_border: BatchNorm,
-    bn_right_border: BatchNorm,
+    bn_left_delta: BatchNorm,
+    bn_right_delta: BatchNorm,
     z_left_mean: Linear,
     z_left_lnvar: Linear,
     z_right_mean: Linear,
     z_right_lnvar: Linear,
-    z_left_border_mean: Linear,
-    z_left_border_lnvar: Linear,
-    z_right_border_mean: Linear,
-    z_right_border_lnvar: Linear,
+    z_left_delta_mean: Linear,
+    z_left_delta_lnvar: Linear,
+    z_right_delta_mean: Linear,
+    z_right_delta_lnvar: Linear,
 }
 
 impl MatchedEncoderModuleT for MatchedLogSoftmaxEncoder {
@@ -41,9 +41,15 @@ impl MatchedEncoderModuleT for MatchedLogSoftmaxEncoder {
     /// 3. kl-divergence
     ///
     fn forward_t(&self, data: MatchedEncoderData, train: bool) -> Result<MatchedEncoderLatent> {
+
+	// shared (i,j) encoder -> z shared -> x(i) + x(j)
+
+	// delta x (i) -> z delta(i) -> delta x(i)
+
+
         // adjust the marginal with the opposite (border values)
-        let xb_l = self.preprocess(data.marginal_left, data.neigh_right, train)?;
-        let xb_r = self.preprocess(data.marginal_right, data.neigh_left, train)?;
+        let xb_l = self.preprocess(data.marginal_left, data.delta_right, train)?;
+        let xb_r = self.preprocess(data.marginal_right, data.delta_left, train)?;
 
         // just the marginal as they are
         let x_l = self.preprocess(data.marginal_left, None, train)?;
@@ -60,16 +66,19 @@ impl MatchedEncoderModuleT for MatchedLogSoftmaxEncoder {
         let kl_left_border = gaussian_kl_loss(&left_border_mean, &left_border_lnvar)?;
         let kl_right_border = gaussian_kl_loss(&right_border_mean, &right_border_lnvar)?;
 
-        let kl_div = (kl_left + kl_right + kl_left_border + kl_right_border)?;
+        let kl_div = kl_left_border;
+        // let kl_div = (kl_left + kl_right + kl_left_border + kl_right_border)?;
 
-        let z_left = (self.reparameterize(&left_mean, &left_lnvar, train)? * 0.5)?;
+        // let z_left = (self.reparameterize(&left_mean, &left_lnvar, train)? * 0.5)?;
         let z_right = (self.reparameterize(&right_mean, &right_lnvar, train)? * 0.5)?;
         let z_left_border =
             (self.reparameterize(&left_border_mean, &left_border_lnvar, train)? * 0.5)?;
         let z_right_border =
             (self.reparameterize(&right_border_mean, &right_border_lnvar, train)? * 0.5)?;
 
-        let border = ops::log_softmax(&(z_left_border + z_right_border)?, 1)?;
+        // let border = ops::log_softmax(&(z_left_border + z_right_border)?, 1)?;
+        let z_left = self.reparameterize(&left_mean, &left_lnvar, train)?;
+        let border = ops::log_softmax(&z_left_border, 1)?;
         let marginal = ops::log_softmax(&(z_left + z_right)?, 1)?;
 
         Ok(MatchedEncoderLatent {
@@ -187,20 +196,20 @@ impl MatchedLogSoftmaxEncoder {
             emb_logx,
             fc_left_marginal,
             fc_right_marginal,
-            fc_left_border,
-            fc_right_border,
+            fc_left_delta: fc_left_border,
+            fc_right_delta: fc_right_border,
             bn_left_marginal,
             bn_right_marginal,
-            bn_left_border,
-            bn_right_border,
+            bn_left_delta: bn_left_border,
+            bn_right_delta: bn_right_border,
             z_left_mean,
             z_left_lnvar,
             z_right_mean,
             z_right_lnvar,
-            z_left_border_mean,
-            z_left_border_lnvar,
-            z_right_border_mean,
-            z_right_border_lnvar,
+            z_left_delta_mean: z_left_border_mean,
+            z_left_delta_lnvar: z_left_border_lnvar,
+            z_right_delta_mean: z_right_border_mean,
+            z_right_delta_lnvar: z_right_border_lnvar,
         })
     }
 
@@ -255,10 +264,10 @@ impl MatchedLogSoftmaxEncoder {
     fn encoding_left_boundary(&self, emb_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
         self._encoding(
             emb_nd,
-            &self.fc_left_border,
-            &self.bn_left_border,
-            &self.z_left_border_mean,
-            &self.z_left_border_lnvar,
+            &self.fc_left_delta,
+            &self.bn_left_delta,
+            &self.z_left_delta_mean,
+            &self.z_left_delta_lnvar,
             train,
         )
     }
@@ -266,10 +275,10 @@ impl MatchedLogSoftmaxEncoder {
     fn encoding_right_boundary(&self, emb_nd: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
         self._encoding(
             emb_nd,
-            &self.fc_right_border,
-            &self.bn_right_border,
-            &self.z_right_border_mean,
-            &self.z_right_border_lnvar,
+            &self.fc_right_delta,
+            &self.bn_right_delta,
+            &self.z_right_delta_mean,
+            &self.z_right_delta_lnvar,
             train,
         )
     }
@@ -349,8 +358,8 @@ impl MatchedEncoderEvaluateOps for MatchedLogSoftmaxEncoder {
                 MatchedEncoderData {
                     marginal_left: mb.input_marginal_left.as_ref(),
                     marginal_right: mb.input_marginal_right.as_ref(),
-                    neigh_left: mb.input_neigh_left.as_ref(),
-                    neigh_right: mb.input_neigh_right.as_ref(),
+                    delta_left: mb.input_delta_left.as_ref(),
+                    delta_right: mb.input_delta_right.as_ref(),
                 },
                 false,
             )?;

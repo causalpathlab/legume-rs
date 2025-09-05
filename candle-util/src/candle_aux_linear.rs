@@ -112,7 +112,7 @@ pub fn softmax_linear(
 ) -> Result<SoftmaxLinear> {
     let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
     let ws = vb.get_with_hints((out_dim, in_dim), "weight", init_ws)?;
-    let bs = vb.get_with_hints((out_dim, 1), "bias", candle_nn::init::ZERO)?;
-
-    Ok(SoftmaxLinear::new(ws, Some(bs)))
+    // let bs = vb.get_with_hints((out_dim, 1), "bias", candle_nn::init::ZERO)?;
+    // Ok(SoftmaxLinear::new(ws, Some(bs)))
+    Ok(SoftmaxLinear::new(ws, None))
 }
