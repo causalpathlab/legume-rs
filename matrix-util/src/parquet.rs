@@ -10,6 +10,19 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::sync::Arc;
 
+/// get field names by peeking into `file_path`
+pub fn peek_parquet_field_names(file_path: &str) -> anyhow::Result<Vec<Box<str>>> {
+    let file = File::open(file_path)?;
+    let reader = SerializedFileReader::new(file)?;
+    let metadata = reader.metadata();
+    let fields = metadata.file_metadata().schema().get_fields();
+
+    Ok(fields
+        .into_iter()
+        .map(|f| f.name().to_string().into_boxed_str())
+        .collect())
+}
+
 pub struct ParquetReader {
     pub row_major_data: Vec<f64>,
     pub row_names: Vec<Box<str>>,
@@ -33,8 +46,8 @@ impl ParquetReader {
     ) -> anyhow::Result<Self> {
         let row_name_index = row_name_index.unwrap_or(0);
 
-        let file = File::open(file_path).expect("Failed to open file");
-        let reader = SerializedFileReader::new(file).expect("Failed to create Parquet reader");
+        let file = File::open(file_path)?;
+        let reader = SerializedFileReader::new(file)?;
         let metadata = reader.metadata();
         let nrows = metadata.file_metadata().num_rows() as usize;
 

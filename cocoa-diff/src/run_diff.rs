@@ -6,9 +6,12 @@ pub use clap::Parser;
 
 use matrix_param::io::*;
 use matrix_util::common_io::basename;
-pub use matrix_util::common_io::{extension, read_lines, read_lines_of_words};
+use matrix_util::common_io::ReadLinesOut;
+use matrix_util::common_io::{extension, read_lines_of_words_delim};
 use matrix_util::dmatrix_util::concatenate_vertical;
+use matrix_util::parquet::peek_parquet_field_names;
 use matrix_util::traits::IoOps;
+use matrix_util::traits::MatWithNames;
 pub use std::sync::Arc;
 
 use std::collections::HashMap;
@@ -23,17 +26,24 @@ pub struct DiffArgs {
     data_files: Vec<Box<str>>,
 
     /// individual membership files (comma-separated file names). Each
-    /// individual membership file should match with each data file.
-    #[arg(long, short, value_delimiter(','))]
+    /// line in each file can specify individual ID or cell and
+    /// individual ID pair.
+    #[arg(long, short = 'i', value_delimiter(','))]
     indv_files: Vec<Box<str>>,
 
     /// latent topic assignment files (comma-separated file names)
-    /// Each topic file should match with each data file or None.
-    #[arg(long, short, value_delimiter(','))]
+    /// Each line in each file can specify topic name or cell and
+    /// topic name pair.
+    #[arg(long, short = 't', value_delimiter(','))]
     topic_assignment_files: Option<Vec<Box<str>>>,
 
+    /// latent topic proportion files (comma-separated file names)
+    /// Each file contains a full `cell x topic` matrix.
+    #[arg(long, short = 'r', value_delimiter(','))]
+    topic_proportion_files: Option<Vec<Box<str>>>,
+
     /// each line corresponds to (1) individual name and (2) exposure name
-    #[arg(long, short)]
+    #[arg(long, short = 'e')]
     exposure_assignment_file: Box<str>,
 
     /// #k-nearest neighbours within each condition
@@ -172,6 +182,7 @@ struct ArgInputData {
     sparse_data: SparseIoVec,
     cell_to_indv: Vec<Box<str>>,
     cell_topic: Mat,
+    sorted_topic_names: Vec<Box<str>>,
     indv_to_exposure: HashMap<Box<str>, Box<str>>,
     exposure_id: HashMap<Box<str>, usize>,
 }
@@ -189,7 +200,8 @@ fn parse_arg_input_data(args: DiffArgs) -> anyhow::Result<ArgInputData> {
         return Err(anyhow::anyhow!("# sample files != # of data files"));
     }
 
-    let exposure = read_lines_of_words(&args.exposure_assignment_file, -1)?.lines;
+    let exposure =
+        read_lines_of_words_delim(&args.exposure_assignment_file, &['\t', ',', ' '], -1)?.lines;
 
     let indv_to_exposure = exposure
         .into_iter()
@@ -215,21 +227,67 @@ fn parse_arg_input_data(args: DiffArgs) -> anyhow::Result<ArgInputData> {
     }
     info!("{} exposure groups", n_exposure);
 
-    let mut sparse_data = SparseIoVec::new();
-    let mut cell_to_indv = vec![];
-    let mut topic_vec = vec![];
-
     let data_files = args.data_files;
     let indv_files = args.indv_files;
-    let topic_files = match args.topic_assignment_files {
+    let topic_assignment_files = match args.topic_assignment_files {
+        Some(vec) => vec.into_iter().map(Some).collect(),
+        None => vec![None; data_files.len()],
+    };
+    let topic_proportion_files = match args.topic_proportion_files {
         Some(vec) => vec.into_iter().map(Some).collect(),
         None => vec![None; data_files.len()],
     };
 
-    for ((this_data_file, indv_file), topic_file) in
-        data_files.into_iter().zip(indv_files).zip(topic_files)
+    info!("Looking into the topic files...");
+
+    let mut topic_names = HashSet::<Box<str>>::new();
+
+    for (a_file, p_file) in topic_assignment_files
+        .iter()
+        .zip(topic_proportion_files.iter())
     {
-        info!("Importing: {}, {}", this_data_file, indv_file);
+        if let Some(a_file) = a_file {
+            let _names = read_lines_of_words_delim(a_file.as_ref(), &['\t', ',', ' '], -1)?
+                .lines
+                .iter()
+                .filter_map(|line| (line.len() > 1).then(|| line[1].clone()))
+                .collect::<HashSet<_>>();
+            for _x in _names {
+                topic_names.insert(_x);
+            }
+        }
+
+        if let Some(p_file) = p_file {
+            let ext = extension(p_file)?;
+            if ext.as_ref() == "parquet" {
+                let _names = peek_parquet_field_names(p_file)?;
+                for _x in _names {
+                    topic_names.insert(_x);
+                }
+            }
+        }
+    }
+
+    let mut sorted_topic_names: Vec<Box<str>> = topic_names.into_iter().collect();
+    sorted_topic_names.sort();
+
+    let topic_names: HashMap<Box<str>, usize> = sorted_topic_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.clone(), index))
+        .collect();
+
+    info!("Found {} topics", topic_names.len());
+
+    let mut topic_vec = vec![];
+
+    let mut sparse_data = SparseIoVec::new();
+    let mut cell_to_indv = vec![];
+
+    for (f, this_data_file) in data_files.iter().enumerate() {
+        let this_indv_file = indv_files[f].clone();
+
+        info!("Importing: {}, {}", this_data_file, this_indv_file);
 
         match extension(&this_data_file)?.as_ref() {
             "zarr" => {
@@ -249,25 +307,104 @@ fn parse_arg_input_data(args: DiffArgs) -> anyhow::Result<ArgInputData> {
 
         let ndata = this_data.num_columns().unwrap_or(0);
 
-        let this_indv = read_lines(&indv_file)?;
-        let this_topic = match topic_file.as_ref() {
-            Some(_file) => Mat::from_tsv(_file, None)?,
-            None => Mat::from_element(ndata, 1, 1.0),
+        let this_indv = read_lines_of_words_delim(&this_indv_file, &['\t', ',', ' '], -1)?.lines;
+
+        if this_indv.is_empty() {
+            return Err(anyhow::anyhow!(
+                "empty assignment file: {}",
+                &this_indv_file
+            ));
+        }
+
+        let this_indv: Vec<Box<str>> = match this_indv[0].len() {
+            1 => this_indv.into_iter().map(|w| w[0].clone()).collect(),
+            _ => {
+                let cell_to_indv: HashMap<_, _> = this_indv
+                    .into_iter()
+                    .filter_map(|w| (w.len() > 1).then(|| (w[0].clone(), w[1].clone())))
+                    .collect();
+
+                let missing = "NA".to_string().into_boxed_str();
+
+                this_data
+                    .column_names()?
+                    .iter()
+                    .map(|c| {
+                        cell_to_indv
+                            .get(c)
+                            .cloned()
+                            .unwrap_or_else(|| missing.clone())
+                    })
+                    .collect()
+            }
         };
 
-        if this_indv.len() != ndata || this_topic.nrows() != ndata {
+        if this_indv.len() != ndata {
             return Err(anyhow::anyhow!(
                 "{} and {} don't match",
-                indv_file,
+                this_indv_file,
                 this_data_file,
             ));
         }
 
-        cell_to_indv.extend(this_indv);
+        let topic_a_file = &topic_assignment_files[f];
+        let topic_p_file = &topic_proportion_files[f];
+
+        let mut this_topic = if topic_names.is_empty() {
+            Mat::from_element(ndata, 1, 1.0)
+        } else {
+            Mat::zeros(ndata, topic_names.len())
+        };
+
+        let cells_to_rows = this_data
+            .column_names()?
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| (x, i))
+            .collect::<HashMap<_, _>>();
+
+        if let Some(a_file) = topic_a_file {
+            info!("importing topic information from {}", a_file);
+
+            let ReadLinesOut { lines, header: _ } =
+                read_lines_of_words_delim(a_file.as_ref(), &['\t', ',', ' '], -1)?;
+
+            for words in lines {
+                if words.len() > 1 {
+                    if let Some(&r) = cells_to_rows.get(&words[0]) {
+                        if let Some(&c) = topic_names.get(&words[1]) {
+                            this_topic[(r, c)] = 1.0;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(p_file) = topic_p_file {
+            let ext = extension(p_file)?;
+            if ext.as_ref() == "parquet" {
+                info!("importing topic information from {}", p_file);
+
+                let MatWithNames { mat, rows, cols } = Mat::from_parquet(&p_file)?;
+
+                for j in 0..mat.ncols() {
+                    if let Some(&c) = topic_names.get(&cols[j]) {
+                        for i in 0..mat.nrows() {
+                            if let Some(&r) = cells_to_rows.get(&rows[i]) {
+                                this_topic[(r, c)] = mat[(i, j)];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let data_name = basename(&this_data_file)?;
         sparse_data.push(Arc::from(this_data), Some(data_name))?;
+        cell_to_indv.extend(this_indv);
         topic_vec.push(this_topic);
     }
+
     info!("Total {} data sets combined", sparse_data.len());
 
     let cell_topic = concatenate_vertical(topic_vec.as_slice())?;
@@ -276,6 +413,7 @@ fn parse_arg_input_data(args: DiffArgs) -> anyhow::Result<ArgInputData> {
         sparse_data,
         cell_to_indv,
         cell_topic,
+        sorted_topic_names,
         indv_to_exposure,
         exposure_id,
     })

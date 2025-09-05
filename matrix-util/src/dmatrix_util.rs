@@ -60,6 +60,146 @@ where
     Ok(DMatrix::from_columns(&cols))
 }
 
+impl<T> AdjustByDivisionOp<nalgebra_sparse::CscMatrix<T>, T> for nalgebra_sparse::CscMatrix<T>
+where
+    T: nalgebra::RealField + Copy + std::iter::Sum<T>,
+{
+    fn adjust_by_division_inplace(&mut self, denom: &nalgebra_sparse::CscMatrix<T>) {
+        self.col_iter_mut()
+            .zip(denom.col_iter())
+            .for_each(|(mut x_j, d_j)| {
+                let dsum = d_j.values().iter().copied().sum::<T>();
+                let xsum = x_j.values().iter().copied().sum::<T>();
+                let scale = if dsum > T::zero() {
+                    xsum / dsum
+                } else {
+                    T::one()
+                };
+
+                let (x_rows, x_values) = x_j.rows_and_values_mut();
+
+                let mut d_j_values = vec![T::zero(); x_rows.len()];
+
+                x_rows.iter().enumerate().for_each(|(idx, &i)| {
+                    if let Some(pos) = d_j.row_indices().iter().position(|&d_i| d_i == i) {
+                        d_j_values[idx] = d_j.values()[pos];
+                    }
+                });
+
+                x_values
+                    .iter_mut()
+                    .zip(d_j_values)
+                    .for_each(|(x_ij, d_ij)| {
+                        if d_ij > T::zero() {
+                            *x_ij /= d_ij * scale;
+                        }
+                    });
+            });
+    }
+
+    fn adjust_by_division_of_selected_inplace(
+        &mut self,
+        denom_db: &nalgebra_sparse::CscMatrix<T>,
+        batches: &[usize],
+    ) {
+        self.col_iter_mut().zip(batches).for_each(|(mut x_j, &b)| {
+            let d_j = denom_db.col(b);
+
+            let dsum = d_j.values().iter().copied().sum::<T>();
+            let xsum = x_j.values().iter().copied().sum::<T>();
+            let scale = if dsum > T::zero() {
+                xsum / dsum
+            } else {
+                T::one()
+            };
+
+            let (x_rows, x_values) = x_j.rows_and_values_mut();
+
+            let mut d_j_values = vec![T::zero(); x_rows.len()];
+
+            x_rows.iter().enumerate().for_each(|(idx, &i)| {
+                if let Some(pos) = d_j.row_indices().iter().position(|&d_i| d_i == i) {
+                    d_j_values[idx] = d_j.values()[pos];
+                }
+            });
+
+            x_values
+                .iter_mut()
+                .zip(d_j_values)
+                .for_each(|(x_ij, d_ij)| {
+                    if d_ij > T::zero() {
+                        *x_ij /= d_ij * scale;
+                    }
+                });
+        });
+    }
+}
+
+impl<T> AdjustByDivisionOp<nalgebra::DMatrix<T>, T> for nalgebra_sparse::CscMatrix<T>
+where
+    T: nalgebra::RealField + Copy + std::iter::Sum<T>,
+{
+    fn adjust_by_division_of_selected_inplace(
+        &mut self,
+        denom_db: &nalgebra::DMatrix<T>,
+        batches: &[usize],
+    ) {
+        self.col_iter_mut().zip(batches).for_each(|(mut x_j, &b)| {
+            let d_j = x_j
+                .row_indices()
+                .iter()
+                .map(|&i| denom_db[(i, b)])
+                .collect::<Vec<_>>();
+
+            let dsum = d_j.iter().map(|&x| x).sum::<T>();
+            let xsum = x_j.values().iter().map(|&x| x).sum::<T>();
+            let scale = if dsum > T::zero() {
+                xsum / dsum
+            } else {
+                T::one()
+            };
+
+            x_j.values_mut()
+                .iter_mut()
+                .zip(d_j)
+                .for_each(|(x_ij, d_ij)| {
+                    if d_ij > T::zero() {
+                        *x_ij /= d_ij * scale;
+                    }
+                });
+        });
+    }
+
+    fn adjust_by_division_inplace(&mut self, denom: &nalgebra::DMatrix<T>) {
+        self.col_iter_mut()
+            .zip(denom.column_iter())
+            .for_each(|(mut x_j, d_j)| {
+                let d_j = x_j
+                    .row_indices()
+                    .iter()
+                    .map(|&i| d_j[i])
+                    .collect::<Vec<_>>();
+
+                let dsum = d_j.iter().map(|&x| x).sum::<T>();
+                let xsum = x_j.values().iter().map(|&x| x).sum::<T>();
+                let scale = if dsum > T::zero() {
+                    xsum / dsum
+                } else {
+                    T::one()
+                };
+
+                x_j.values_mut()
+                    .iter_mut()
+                    .zip(d_j)
+                    .for_each(|(x_ij, d_ij)| {
+                        if d_ij > T::zero() {
+                            *x_ij /= d_ij * scale;
+                        }
+                    });
+            });
+    }
+}
+
 /// Generate one-hot membership matrix (`row x K`) where the number of
 /// rows corresponds to the length of the membership vector and the
 /// `K` corresponds to the maximum membership value + 1.
@@ -352,19 +492,19 @@ where
 
         for j in 0..ncol {
             if let Some(log_j) = self.get_col(j) {
-                let mut xmax = T::zero();
+                let mut log_max = log_j.values()[0];
                 for &logx_ij in log_j.values() {
-                    xmax = xmax.min(logx_ij);
+                    log_max = log_max.min(logx_ij);
                 }
 
                 let mut denom = T::zero();
                 for &logx_ij in log_j.values() {
-                    denom += (logx_ij - xmax).exp();
+                    denom += (logx_ij - log_max).exp();
                 }
 
-                if let Some(mut x_j) = self.get_col_mut(j) {
-                    for x_ij in x_j.values_mut() {
-                        *x_ij = (xmax - *x_ij) / denom;
+                if let Some(mut log_j) = self.get_col_mut(j) {
+                    for x_ij in log_j.values_mut() {
+                        *x_ij = (*x_ij - log_max).exp() / denom;
                     }
                 }
             }
