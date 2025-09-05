@@ -109,7 +109,7 @@ struct SRTArgs {
     n_latent_topics: usize,
 
     /// targeted number of row feature modules
-    #[arg(short = 'r', long, default_value_t = 500)]
+    #[arg(short = 'r', long, default_value_t = 512)]
     n_row_modules: usize,
 
     /// encoder layers
@@ -117,11 +117,11 @@ struct SRTArgs {
     encoder_layers: Vec<usize>,
 
     /// intensity levels for frequency embedding
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 20)]
     vocab_size: usize,
 
     /// intensity embedding dimension
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 10)]
     vocab_emb: usize,
 
     /// # training epochs
@@ -158,7 +158,7 @@ fn main() -> anyhow::Result<()> {
 
     info!("Reading data files...");
 
-    let (data, coordinates, batch_membership) = read_data_vec(args.clone())?;
+    let (data, coordinates, _batch) = read_data_vec(args.clone())?;
 
     let gene_names = data.row_names()?;
 
@@ -187,7 +187,7 @@ fn main() -> anyhow::Result<()> {
     ///////////////////////////////////////////////
 
     let collapsed = srt_cell_pairs.collapse_pairs()?;
-    let params = collapsed.optimize(None, Some(args.iter_opt))?;
+    let params = collapsed.optimize(None)?;
 
     let coordinate_column_names: Vec<Box<str>> = (1..=collapsed.left_coordinates.nrows())
         .map(|x| format!("left_{}", x).into_boxed_str())
@@ -213,16 +213,8 @@ fn main() -> anyhow::Result<()> {
         let log_x_md = concatenate_vertical(&[
             params.left.posterior_log_mean().transpose().clone(),
             params.right.posterior_log_mean().transpose().clone(),
-            params
-                .left_boundary
-                .posterior_log_mean()
-                .transpose()
-                .clone(),
-            params
-                .right_boundary
-                .posterior_log_mean()
-                .transpose()
-                .clone(),
+            params.left_delta.posterior_log_mean().transpose().clone(),
+            params.right_delta.posterior_log_mean().transpose().clone(),
         ])?;
 
         let kk = args.n_row_modules.ilog2().max(1) as usize;
@@ -265,25 +257,25 @@ fn main() -> anyhow::Result<()> {
     let marg_left_nm = params.left.posterior_mean().transpose() * &aggregate_rows;
     let marg_right_nm = params.right.posterior_mean().transpose() * &aggregate_rows;
 
-    let neigh_left_nm = params.left_neigh.posterior_mean().transpose() * &aggregate_rows;
-    let neigh_right_nm = params.right_neigh.posterior_mean().transpose() * &aggregate_rows;
+    let delta_left_nm = params.left_delta.posterior_mean().transpose() * &aggregate_rows;
+    let delta_right_nm = params.right_delta.posterior_mean().transpose() * &aggregate_rows;
 
     // output decoder should maintain the original dimension
     let marg_left_nd = params.left.posterior_mean().transpose();
     let marg_right_nd = params.right.posterior_mean().transpose();
 
-    let border_left_nd = params.left_boundary.posterior_mean().transpose();
-    let border_right_nd = params.right_boundary.posterior_mean().transpose();
+    let delta_left_nd = params.left_delta.posterior_mean().transpose();
+    let delta_right_nd = params.right_delta.posterior_mean().transpose();
 
     let train_data = DataLoaderArgs {
         input_marginal_left: &marg_left_nm,
         input_marginal_right: &marg_right_nm,
-        input_neigh_left: Some(&neigh_left_nm),
-        input_neigh_right: Some(&neigh_right_nm),
+        input_delta_left: Some(&delta_left_nm),
+        input_delta_right: Some(&delta_right_nm),
         output_marginal_left: Some(&marg_left_nd),
         output_marginal_right: Some(&marg_right_nd),
-        output_border_left: Some(&border_left_nd),
-        output_border_right: Some(&border_right_nd),
+        output_delta_left: Some(&delta_left_nd),
+        output_delta_right: Some(&delta_right_nd),
     };
 
     let parameters = candle_nn::VarMap::new();

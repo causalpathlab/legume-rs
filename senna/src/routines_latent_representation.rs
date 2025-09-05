@@ -27,7 +27,7 @@ fn nystrom_proj_visitor(
 
     if let Some(delta_db) = delta_db {
         let batches = full_data_vec.get_batch_membership(lb..ub);
-        x_dn.adjust_by_division(delta_db, &batches);
+        x_dn.adjust_by_division_of_selected_inplace(delta_db, &batches);
     }
 
     x_dn.values_mut().iter_mut().for_each(|x| {

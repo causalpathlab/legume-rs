@@ -9,12 +9,12 @@ use rayon::prelude::*;
 pub struct MinibatchData {
     pub input_marginal_left: Tensor,
     pub input_marginal_right: Tensor,
-    pub input_neigh_left: Option<Tensor>,
-    pub input_neigh_right: Option<Tensor>,
+    pub input_delta_left: Option<Tensor>,
+    pub input_delta_right: Option<Tensor>,
     pub output_marginal_left: Option<Tensor>,
     pub output_marginal_right: Option<Tensor>,
-    pub output_border_left: Option<Tensor>,
-    pub output_border_right: Option<Tensor>,
+    pub output_delta_left: Option<Tensor>,
+    pub output_delta_right: Option<Tensor>,
 }
 
 /// `DataLoader` for minibatch learning
@@ -79,12 +79,12 @@ where
 {
     pub input_marginal_left: &'a D,
     pub input_marginal_right: &'a D,
-    pub input_neigh_left: Option<&'a D>,
-    pub input_neigh_right: Option<&'a D>,
+    pub input_delta_left: Option<&'a D>,
+    pub input_delta_right: Option<&'a D>,
     pub output_marginal_left: Option<&'a D>,
     pub output_marginal_right: Option<&'a D>,
-    pub output_border_left: Option<&'a D>,
-    pub output_border_right: Option<&'a D>,
+    pub output_delta_left: Option<&'a D>,
+    pub output_delta_right: Option<&'a D>,
 }
 
 impl InMemoryData {
@@ -95,14 +95,14 @@ impl InMemoryData {
         let input_marginal_left = args.input_marginal_left.rows_to_tensor_vec();
         let input_marginal_right = args.input_marginal_right.rows_to_tensor_vec();
 
-        let input_neigh_left = args.input_neigh_left.map(|x| x.rows_to_tensor_vec());
-        let input_neigh_right = args.input_neigh_right.map(|x| x.rows_to_tensor_vec());
+        let input_neigh_left = args.input_delta_left.map(|x| x.rows_to_tensor_vec());
+        let input_neigh_right = args.input_delta_right.map(|x| x.rows_to_tensor_vec());
 
         let output_marginal_left = args.output_marginal_left.map(|x| x.rows_to_tensor_vec());
         let output_marginal_right = args.output_marginal_right.map(|x| x.rows_to_tensor_vec());
 
-        let output_border_left = args.output_border_left.map(|x| x.rows_to_tensor_vec());
-        let output_border_right = args.output_border_right.map(|x| x.rows_to_tensor_vec());
+        let output_border_left = args.output_delta_left.map(|x| x.rows_to_tensor_vec());
+        let output_border_right = args.output_delta_right.map(|x| x.rows_to_tensor_vec());
 
         let nsamples = input_marginal_left.len();
 
@@ -162,12 +162,12 @@ impl DataLoader for InMemoryData {
             Ok(MinibatchData {
                 input_marginal_left,
                 input_marginal_right,
-                input_neigh_left,
-                input_neigh_right,
+                input_delta_left: input_neigh_left,
+                input_delta_right: input_neigh_right,
                 output_marginal_left,
                 output_marginal_right,
-                output_border_left,
-                output_border_right,
+                output_delta_left: output_border_left,
+                output_delta_right: output_border_right,
             })
         } else {
             Err(anyhow::anyhow!("no input data"))
@@ -230,12 +230,12 @@ impl DataLoader for InMemoryData {
             Ok(MinibatchData {
                 input_marginal_left,
                 input_marginal_right,
-                input_neigh_left,
-                input_neigh_right,
+                input_delta_left: input_neigh_left,
+                input_delta_right: input_neigh_right,
                 output_marginal_left,
                 output_marginal_right,
-                output_border_left,
-                output_border_right,
+                output_delta_left: output_border_left,
+                output_delta_right: output_border_right,
             })
         } else {
             Err(anyhow::anyhow!("need to shuffle data"))

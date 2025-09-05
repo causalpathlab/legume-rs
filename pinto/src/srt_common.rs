@@ -31,8 +31,9 @@ pub use candle_util::candle_matched_encoder_softmax::*;
 pub use candle_util::candle_model_traits::*;
 pub use candle_util::{candle_core, candle_nn};
 
-/// impute `y` matrix by its neighbours `y_neigh`
-pub fn impute_with_neighbours(y: CscMat, y_neigh: CscMat) -> anyhow::Result<CscMat> {
+/// Impute `y` matrix by its neighbours `y_neigh` Here, we calculate
+/// Euclidean distances after log1p transformation.
+pub fn impute_with_neighbours(y: &CscMat, y_neigh: &CscMat) -> anyhow::Result<CscMat> {
     let mut log1p_y = y.clone();
     log1p_y.log1p_inplace();
     log1p_y.scale_columns_inplace();

@@ -111,8 +111,8 @@ where
                             MatchedEncoderData {
                                 marginal_left: mb.input_marginal_left.as_ref(),
                                 marginal_right: mb.input_marginal_right.as_ref(),
-                                neigh_left: mb.input_neigh_left.as_ref(),
-                                neigh_right: mb.input_neigh_right.as_ref(),
+                                delta_left: mb.input_delta_left.as_ref(),
+                                delta_right: mb.input_delta_right.as_ref(),
                             },
                             true,
                         )?;
@@ -130,8 +130,8 @@ where
                                     .output_marginal_right
                                     .as_ref()
                                     .ok_or(anyhow::anyhow!("need output right"))?,
-                                border_left: mb.output_border_left.as_ref(),
-                                border_right: mb.output_border_right.as_ref(),
+                                border_left: mb.output_delta_left.as_ref(),
+                                border_right: mb.output_delta_right.as_ref(),
                             },
                             llik_func,
                         )?;
@@ -172,8 +172,8 @@ where
                         MatchedEncoderData {
                             marginal_left: mb.input_marginal_left.as_ref(),
                             marginal_right: mb.input_marginal_right.as_ref(),
-                            neigh_left: mb.input_neigh_left.as_ref(),
-                            neigh_right: mb.input_neigh_right.as_ref(),
+                            delta_left: mb.input_delta_left.as_ref(),
+                            delta_right: mb.input_delta_right.as_ref(),
                         },
                         true,
                     )?;
@@ -190,8 +190,8 @@ where
                                 .output_marginal_right
                                 .as_ref()
                                 .ok_or(anyhow::anyhow!("need output right"))?,
-                            border_left: mb.output_border_left.as_ref(),
-                            border_right: mb.output_border_right.as_ref(),
+                            border_left: mb.output_delta_left.as_ref(),
+                            border_right: mb.output_delta_right.as_ref(),
                         },
                         llik_func,
                     )?;
