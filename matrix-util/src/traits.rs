@@ -54,16 +54,54 @@ pub trait MatOps {
     type Mat;
     type Scalar;
 
+    /// make each column sum to 1
     fn sum_to_one_columns_inplace(&mut self);
+    /// make each column sum to 1
     fn sum_to_one_columns(&self) -> Self::Mat;
+
+    /// normalize logits after taking exp `(log-sum-exp)`
     fn normalize_exp_logits_columns_inplace(&mut self);
+    /// normalize logits after taking exp `(log-sum-exp)`
     fn normalize_exp_logits_columns(&self) -> Self::Mat;
+
+    /// vector norm for each column
     fn normalize_columns_inplace(&mut self);
+    /// vector norm for each column
     fn normalize_columns(&self) -> Self::Mat;
+
+    /// standardization for each column
     fn scale_columns_inplace(&mut self);
+    /// standardization for each column
     fn scale_columns(&self) -> Self::Mat;
+
+    /// centering for each column
     fn centre_columns_inplace(&mut self);
+    /// centering for each column
     fn centre_columns(&self) -> Self::Mat;
+}
+
+pub trait AdjustByDivisionOp<Other, Scalar> {
+    /// Adjust each column with the column of the matching batch index
+    ///
+    /// Assume: `Y[g] ~ Poisson(X[g] * λ)`
+    /// (1) Estimate the λ parameter by taking overall ratio, namely,
+    /// `λ = Σ Y[g] / Σ X[g]`
+    ///
+    /// (2) Take the residual (in the log space)
+    /// `ln Y[g] - ln (λ X[g])` or `Y[g]/λX[g]` if `X[g] > 0`
+    /// otherwise, do nothing
+    fn adjust_by_division_of_selected_inplace(&mut self, denom_db: &Other, batches: &[usize]);
+
+    /// adjust each column with the corresponding column of the denom
+    ///
+    /// Assume: `Y[g] ~ Poisson(X[g] * λ)`
+    /// (1) Estimate the λ parameter by taking overall ratio, namely,
+    /// `λ = Σ Y[g] / Σ X[g]`
+    ///
+    /// (2) Take the residual (in the log space)
+    /// `ln Y[g] - ln (λ X[g])` or `Y[g]/λX[g]` if `X[g] > 0`
+    /// otherwise, do nothing
+    fn adjust_by_division_inplace(&mut self, denom: &Other);
 }
 
 pub trait MatElemOps {
