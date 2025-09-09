@@ -100,6 +100,7 @@ impl CocoaStat {
         let mut ret = vec![];
         for k in 0..self.n_topics {
             ret.push(self.optimize_each_topic(k)?);
+            info!("finished optimization {}/{}", k + 1, self.n_topics);
         }
         Ok(ret)
     }
@@ -169,8 +170,6 @@ impl CocoaStat {
             tau_param_di.update_stat(&y1_di, &denom_di);
             tau_param_di.calibrate();
         });
-
-        info!("finished optimization");
 
         Ok(CocoaGammaOut {
             shared: mu_param_dp,

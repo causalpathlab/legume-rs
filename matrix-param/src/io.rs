@@ -165,15 +165,36 @@ where
     }
 }
 
+/// Write down a vector of matrix parameters into one parquet file.
+///
+/// * `parameters`: a vector of row x column parameters (factors)
+/// * `row_names`: a vector of row names
+/// * `column_names`: a vector of column names
+/// * `factor_names`: a vector of factor names
+/// * `file_path`
 pub fn to_parquet<Param: Inference>(
     parameters: &[Param],
     row_names: Option<&[Box<str>]>,
     column_names: Option<&[Box<str>]>,
+    factor_names: Option<&[Box<str>]>,
     file_path: &str,
 ) -> anyhow::Result<()>
 where
     f32: From<<<Param as Inference>::Mat as MeltOps>::Scalar>,
 {
+    let factor_names: Vec<Box<str>> = match factor_names {
+        Some(x) => x.iter().cloned().collect(),
+        _ => (0..parameters.len())
+            .map(|x| x.to_string().into_boxed_str())
+            .collect(),
+    };
+
+    if factor_names.len() != parameters.len() {
+        return Err(anyhow::anyhow!(
+            "number of the parameters and factor names should match"
+        ));
+    }
+
     // define schema
     let fields = vec![
         ("row", ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
@@ -217,6 +238,8 @@ where
     for (factor_idx, param) in parameters.iter().enumerate() {
         let (mean, idx) = param.posterior_mean().melt_with_indexes();
 
+        let factor_name = factor_names[factor_idx].clone();
+
         let sd = param
             .posterior_sd()
             .melt()
@@ -238,7 +261,7 @@ where
             .map(|x| x.into())
             .collect::<Vec<f32>>();
 
-        let factor_label = ByteArray::from(factor_idx.to_string().as_bytes());
+        let factor_label = ByteArray::from(factor_name.as_bytes());
 
         let rows = idx[0]
             .iter()
