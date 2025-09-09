@@ -97,13 +97,15 @@ fn collect_matched_stat_visitor(
 ) -> anyhow::Result<()> {
     assert_eq!(data.num_rows().expect("data # features"), input.n_genes);
 
-    let knn = input.knn;
     let mut y0_dk = Mat::zeros(input.n_genes, input.n_topics);
 
     // break down cells into batch assignment groups
     let indv_vec = data.get_batch_membership(cells.iter().cloned());
     let indv_to_cells = partition_by_membership(&indv_vec, None);
     let n_indv = data.num_batches();
+
+    let knn_batches = n_indv;
+    let knn_cells = input.knn;
 
     for (indv_index, indv_cells) in indv_to_cells {
         ///////////////////////////////////////////////
@@ -116,8 +118,13 @@ fn collect_matched_stat_visitor(
             .collect();
 
         let i_cells = indv_cells.into_iter().map(|j| cells[j]);
-        let (y0_mat, matched, distances) =
-            data.read_neighbouring_columns_csc(i_cells, knn, knn, true, Some(&same_exposure))?;
+        let (y0_mat, matched, distances) = data.read_neighbouring_columns_csc(
+            i_cells,
+            knn_batches,
+            knn_cells,
+            true,
+            Some(&same_exposure),
+        )?;
 
         // sum_j (sum_a y0[g,a] * w[j,a]) * z[j,k] * ind[j,s]
         let y1_to_y0 = partition_by_membership(&matched, None);

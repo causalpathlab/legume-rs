@@ -111,6 +111,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     let indv_to_exposure = data.indv_to_exposure;
     let exposure_id = data.exposure_id;
     let n_exposure = exposure_id.len();
+    let topic_names = data.sorted_topic_names;
 
     let exposure_assignment: Vec<usize> = indv_names
         .iter()
@@ -120,6 +121,17 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
             } else {
                 warn!("No exposure was assigned for sample {}, but it's kept for controlling confounders.", indv);
                 n_exposure
+            }
+        })
+        .collect();
+
+    let indv_exposure_names: Vec<Box<str>> = indv_names
+        .iter()
+        .map(|indv| {
+            if let Some(exposure) = indv_to_exposure.get(indv) {
+                (indv.to_string() + "_" + exposure).into()
+            } else {
+                indv.to_string().into()
             }
         })
         .collect();
@@ -156,23 +168,27 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     to_parquet(
         &tau,
         Some(&gene_names),
-        Some(&indv_names),
+        Some(&indv_exposure_names),
+        Some(&topic_names),
         &format!("{}.effect.parquet", args.out),
     )?;
 
-    to_parquet(
-        &shared,
-        Some(&gene_names),
-        None,
-        &format!("{}.pb.shared.parquet", args.out),
-    )?;
+    // these can take too much space...
+    // to_parquet(
+    //     &shared,
+    //     Some(&gene_names),
+    //     None,
+    // 	Some(&topic_names),
+    //     &format!("{}.pb.shared.parquet", args.out),
+    // )?;
 
-    to_parquet(
-        &residual,
-        Some(&gene_names),
-        None,
-        &format!("{}.pb.residual.parquet", args.out),
-    )?;
+    // to_parquet(
+    //     &residual,
+    //     Some(&gene_names),
+    //     None,
+    // 	Some(&topic_names),
+    //     &format!("{}.pb.residual.parquet", args.out),
+    // )?;
 
     info!("Done");
     Ok(())

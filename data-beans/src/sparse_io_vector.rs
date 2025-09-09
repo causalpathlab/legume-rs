@@ -498,10 +498,8 @@ impl SparseIoVec {
 
             let neighbouring_batches: Vec<usize> = _batches
                 .into_iter()
-                .filter(|&batch| {
-                    skip_batches.is_none_or(|skip| !skip.contains(&batch))
-                        && (!skip_same_batch || batch != source_batch)
-                })
+                .filter(|&batch| skip_batches.is_none_or(|skip| !skip.contains(&batch)))
+                .filter(|&batch| !skip_same_batch || batch != source_batch)
                 .collect();
 
             for target_batch in neighbouring_batches {
