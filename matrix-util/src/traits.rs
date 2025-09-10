@@ -186,7 +186,7 @@ pub trait IoOps {
     ///
     /// * `file_path`: data file name
     /// * `delim`: delimiter (`char` vector or string)
-    /// * `header_row`: header line (0-based)
+    /// * `header_row`: header line (0-based); `None` will find no header
     /// * `row_name_column_index`: column index (0-based) corresponds to row name
     /// * `select_column_indices`: column indices (0-based) to include
     /// * `select_column_names`: column names to include
