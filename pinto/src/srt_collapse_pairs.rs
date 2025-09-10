@@ -105,12 +105,12 @@ fn collect_pair_stat_visitor(
         .map(|(j, &n)| -> anyhow::Result<CscMat> {
             let left = pairs[j].left;
 
-            let mut y_dm = data.data.read_columns_csc(std::iter::once(left))?;
+            let mut y_d1 = data.data.read_columns_csc(std::iter::once(left))?;
             let y_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
-            let y_hat_dm = impute_with_neighbours(&y_dm, &y_neigh_dm)?;
-            y_dm.adjust_by_division_inplace(&y_hat_dm);
+            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_neigh_dm)?;
+            y_d1.adjust_by_division_inplace(&y_hat_d1);
 
-            Ok(y_dm)
+            Ok(y_d1)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
@@ -134,12 +134,12 @@ fn collect_pair_stat_visitor(
         .map(|(j, &n)| -> anyhow::Result<CscMat> {
             let right = pairs[j].right;
 
-            let mut y_dm = data.data.read_columns_csc(std::iter::once(right))?;
+            let mut y_d1 = data.data.read_columns_csc(std::iter::once(right))?;
             let y_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
-            let y_hat_dm = impute_with_neighbours(&y_dm, &y_neigh_dm)?;
-            y_dm.adjust_by_division_inplace(&y_hat_dm);
+            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_neigh_dm)?;
+            y_d1.adjust_by_division_inplace(&y_hat_d1);
 
-            Ok(y_dm)
+            Ok(y_d1)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
@@ -194,14 +194,10 @@ impl SrtCollapsedStat {
         let mut left_delta_ds = GammaMatrix::new(shape, a0, b0);
         let mut right_delta_ds = GammaMatrix::new(shape, a0, b0);
 
-        // let mut shared_neigh_ds = GammaMatrix::new(shape, a0, b0);
-        // let mut left_neigh_ds = GammaMatrix::new(shape, a0, b0);
-        // let mut right_neigh_ds = GammaMatrix::new(shape, a0, b0);
-
         let size_s = &self.size_s.transpose();
         let sample_size_ds = Mat::from_rows(&vec![size_s.clone(); shape.0]);
 
-        info!("Calibrating marginal statistics");
+        info!("Calibrating statistics");
 
         left_raw_ds.update_stat(&self.left_sum_ds, &sample_size_ds);
         left_raw_ds.calibrate();
@@ -212,7 +208,7 @@ impl SrtCollapsedStat {
         right_delta_ds.update_stat(&self.right_delta_sum_ds, &sample_size_ds);
         right_delta_ds.calibrate();
 
-        info!("Done: optimization of collapsed statistics");
+        info!("Resolved collapsed statistics");
 
         Ok(SrtCollapsedParameters {
             left: left_raw_ds,

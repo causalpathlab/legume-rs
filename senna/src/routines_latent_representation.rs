@@ -161,10 +161,8 @@ where
             InMemoryData::from(DataLoaderArgs {
                 input: input_data_nm,
                 input_null: Some(null_nm),
-                input_matched: None,
                 output: Some(adjusted_data_nd),
                 output_null: None,
-                output_matched: None,
             })?
         }
         _ => {
@@ -177,10 +175,8 @@ where
             InMemoryData::from(DataLoaderArgs {
                 input: input_data_nm,
                 input_null: None,
-                input_matched: None,
                 output: Some(adjusted_data_nd),
                 output_null: None,
-                output_matched: None,
             })?
         }
     };
@@ -277,18 +273,14 @@ where
             Some(batch_nm) => InMemoryData::from(DataLoaderArgs {
                 input: &input_nm,
                 input_null: Some(&batch_nm),
-                input_matched: None,
                 output: Some(&output_nd),
                 output_null: None,
-                output_matched: None,
             })?,
             _ => InMemoryData::from(DataLoaderArgs {
                 input: &input_nm,
                 input_null: None,
-                input_matched: None,
                 output: Some(&output_nd),
                 output_null: None,
-                output_matched: None,
             })?,
         };
 

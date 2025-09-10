@@ -1,4 +1,6 @@
-# Probably Interacting Neighbourhood analysis by Topic model
+# Proximity-based Interaction Network analysis to dissect Tissue Organization
+
+
 
 TODO:
 

@@ -17,7 +17,6 @@ pub struct SrtCellPairs<'a> {
 }
 
 pub struct PairsNeighbours {
-    pub shared: Vec<usize>,
     pub left_only: Vec<usize>,
     pub right_only: Vec<usize>,
 }
@@ -26,6 +25,45 @@ impl<'a> SrtCellPairs<'a> {
     /// number of pairs
     pub fn num_pairs(&self) -> usize {
         self.pairs.len()
+    }
+
+    /// Write all the coordinate pairs into `.parquet` file
+    /// * `file_path`: destination file name (try to include a recognizable extension in the end, e.g., `.parquet`)
+    /// * `coordinate_names`: column names for the left (`left_{}`) and right (`right_{}`) where each `{}` will be replaced with the corresponding column name
+    pub fn to_parquet(
+        &self,
+        file_path: &str,
+        coordinate_names: Option<Vec<Box<str>>>,
+    ) -> anyhow::Result<()> {
+        let (left, right) = self.all_pairs_positions()?;
+
+        let coordinate_names = coordinate_names.unwrap_or(
+            (0..self.num_coordinates())
+                .map(|x| x.to_string().into_boxed_str())
+                .collect(),
+        );
+
+        if coordinate_names.len() != self.num_coordinates() {
+            return Err(anyhow::anyhow!("invalid coordinate names"));
+        }
+
+        let paired_column_names = coordinate_names
+            .iter()
+            .map(|x| format!("left_{}", x).into_boxed_str())
+            .chain(
+                coordinate_names
+                    .iter()
+                    .map(|x| format!("right_{}", x).into_boxed_str()),
+            )
+            .collect::<Vec<_>>();
+
+        concatenate_horizontal(&[left, right])?.to_parquet(
+            None,
+            Some(&paired_column_names),
+            file_path,
+        )?;
+
+        Ok(())
     }
 
     ///
@@ -269,16 +307,17 @@ impl<'a> SrtCellPairs<'a> {
             .into_iter()
             .par_bridge()
             .filter_map(
-                |((i, j), v)| -> Option<((usize, usize), f32, PairsNeighbours)> {
-                    let n_i = neighbours(i);
-                    let n_j = neighbours(j);
-                    n_i.remove(&j);
-                    n_j.remove(&i);
+                |((left, right), v)| -> Option<((usize, usize), f32, PairsNeighbours)> {
+                    let n_left = neighbours(left);
+                    let n_right = neighbours(right);
+                    // remove left-right edge
+                    n_left.remove(&right);
+                    n_right.remove(&left);
 
-                    let s_ij = n_i
+                    let s_ij = n_left
                         .iter()
                         .filter_map(|x| {
-                            if n_j.contains(x.key()) {
+                            if n_right.contains(x.key()) {
                                 Some(*x)
                             } else {
                                 None
@@ -286,10 +325,14 @@ impl<'a> SrtCellPairs<'a> {
                         })
                         .collect::<Vec<_>>();
 
-                    let d_i = n_i
+                    // add self-loop
+                    n_left.insert(left);
+                    n_right.insert(right);
+
+                    let left_only = n_left
                         .iter()
                         .filter_map(|x| {
-                            if !n_j.contains(x.key()) {
+                            if !n_right.contains(x.key()) && !s_ij.contains(x.key()) {
                                 Some(*x)
                             } else {
                                 None
@@ -297,10 +340,10 @@ impl<'a> SrtCellPairs<'a> {
                         })
                         .collect::<Vec<_>>();
 
-                    let d_j = n_j
+                    let right_only = n_right
                         .iter()
                         .filter_map(|x| {
-                            if !n_i.contains(x.key()) {
+                            if !n_left.contains(x.key()) && !s_ij.contains(x.key()) {
                                 Some(*x)
                             } else {
                                 None
@@ -308,17 +351,16 @@ impl<'a> SrtCellPairs<'a> {
                         })
                         .collect::<Vec<_>>();
 
-                    if d_i.is_empty() || d_j.is_empty() || s_ij.is_empty() {
+                    if left_only.is_empty() || right_only.is_empty() {
                         return None;
                     }
 
                     Some((
-                        (i, j),
+                        (left, right),
                         v,
                         PairsNeighbours {
-                            shared: s_ij,
-                            left_only: d_i,
-                            right_only: d_j,
+                            left_only,
+                            right_only,
                         },
                     ))
                 },

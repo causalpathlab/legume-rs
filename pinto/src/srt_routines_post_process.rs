@@ -3,7 +3,7 @@ use crate::{srt_cell_pairs::*, srt_common::*};
 use candle_util::candle_inference::TrainConfig;
 use matrix_util::traits::ConvertMatOps;
 
-pub trait SrtLatentStatePairsOps {
+pub trait SrtLatentTopicOps {
     fn evaluate_latent_states<Enc>(
         &self,
         encoder: &Enc,
@@ -15,7 +15,7 @@ pub trait SrtLatentStatePairsOps {
         Enc: MatchedEncoderModuleT + Send + Sync + 'static;
 }
 
-impl<'a> SrtLatentStatePairsOps for SrtCellPairs<'a> {
+impl<'a> SrtLatentTopicOps for SrtCellPairs<'a> {
     fn evaluate_latent_states<Enc>(
         &self,
         encoder: &Enc,
@@ -76,11 +76,11 @@ where
         .map(|(j, n)| -> anyhow::Result<Mat> {
             let left = pairs[j].left;
 
-            let mut y_dm = data.data.read_columns_csc(std::iter::once(left))?;
+            let mut y_d1 = data.data.read_columns_csc(std::iter::once(left))?;
             let y_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
-            let y_hat_dm = impute_with_neighbours(&y_dm, &y_neigh_dm)?;
-            y_dm.adjust_by_division_inplace(&y_hat_dm);
-            Ok(y_dm.transpose() * aggregate_features)
+            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_neigh_dm)?;
+            y_d1.adjust_by_division_inplace(&y_hat_d1);
+            Ok(y_d1.transpose() * aggregate_features)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
@@ -90,11 +90,11 @@ where
         .map(|(j, n)| -> anyhow::Result<Mat> {
             let right = pairs[j].right;
 
-            let mut y_dm = data.data.read_columns_csc(std::iter::once(right))?;
+            let mut y_d1 = data.data.read_columns_csc(std::iter::once(right))?;
             let y_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
-            let y_hat_dm = impute_with_neighbours(&y_dm, &y_neigh_dm)?;
-            y_dm.adjust_by_division_inplace(&y_hat_dm);
-            Ok(y_dm.transpose() * aggregate_features)
+            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_neigh_dm)?;
+            y_d1.adjust_by_division_inplace(&y_hat_d1);
+            Ok(y_d1.transpose() * aggregate_features)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 

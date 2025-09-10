@@ -1,7 +1,22 @@
 use crate::srt_common::*;
-use crate::SRTArgs;
 
-pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box<str>>)> {
+pub struct SRTReadArgs {
+    pub data_files: Vec<Box<str>>,
+    pub coord_files: Vec<Box<str>>,
+    pub preload_data: bool,
+    pub coord_columns: Vec<usize>,
+    pub coord_column_names: Vec<Box<str>>,
+    pub batch_files: Option<Vec<Box<str>>>,
+}
+
+pub struct SRTData {
+    pub data: SparseIoVec,
+    pub coordinates: Mat,
+    pub coordinate_names: Vec<Box<str>>,
+    pub batches: Vec<Box<str>>,
+}
+
+pub fn read_data_vec(args: SRTReadArgs) -> anyhow::Result<SRTData> {
     // push data files and collect batch membership
     let file = args.data_files[0].as_ref();
     let backend = match extension(file)?.to_string().as_str() {
@@ -47,32 +62,44 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
 
     let mut coord_vec = Vec::with_capacity(args.coord_files.len());
 
+    let mut coord_column_names = vec![];
+
     for (i, coord_file) in args.coord_files.iter().enumerate() {
         info!("Reading coordinate file: {}", coord_file);
         let ext = extension(&coord_file)?;
 
         let MatWithNames {
             rows: coord_cell_names,
-            cols: _names,
+            cols: column_names,
             mat: data,
         } = match ext.as_ref() {
             "parquet" => Mat::from_parquet_with_indices_names(
                 &coord_file,
                 Some(0),
-                args.coord_columns.as_deref(),
+                Some(&args.coord_columns),
                 Some(&args.coord_column_names),
             )?,
             _ => Mat::read_data(
                 &coord_file,
                 &['\t', ',', ' '],
+                None,
                 Some(0),
-                Some(0),
-                args.coord_columns.as_deref(),
+                Some(&args.coord_columns),
                 Some(&args.coord_column_names),
             )?,
         };
 
         let data_cell_names = data_vec[i].column_names()?;
+
+        if coord_column_names.is_empty() {
+            coord_column_names.extend(column_names);
+        } else {
+            if coord_column_names != column_names {
+                return Err(anyhow::anyhow!(
+                    "coordinate column names do not match with each other"
+                ));
+            }
+        }
 
         if data_cell_names == coord_cell_names {
             coord_vec.push(data);
@@ -108,7 +135,7 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
 
     let coord_nk = concatenate_vertical(&coord_vec)?;
 
-    // check batch membership
+    // will incorporate batch label as an additional coordinate
     let mut batch_membership = Vec::with_capacity(data_vec.len());
 
     if let Some(batch_files) = &args.batch_files {
@@ -123,6 +150,7 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
             }
         }
     } else {
+        info!("Each data file will be considered a different batch.");
         for (id, &nn) in data_vec.num_columns_by_data()?.iter().enumerate() {
             batch_membership.extend(vec![id.to_string().into_boxed_str(); nn]);
         }
@@ -152,7 +180,12 @@ pub fn read_data_vec(args: SRTArgs) -> anyhow::Result<(SparseIoVec, Mat, Vec<Box
         coord_nk.ncols()
     );
 
-    Ok((data_vec, coord_nk, batch_membership))
+    Ok(SRTData {
+        data: data_vec,
+        coordinates: coord_nk,
+        coordinate_names: coord_column_names,
+        batches: batch_membership,
+    })
 }
 
 fn append_batch_coordinate<T>(coords: &Mat, batch_membership: &Vec<T>) -> anyhow::Result<Mat>

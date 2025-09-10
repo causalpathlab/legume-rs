@@ -117,6 +117,10 @@ pub struct TopicArgs {
 }
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
+    if args.verbose {
+        std::env::set_var("RUST_LOG", "info");
+    }
+
     // 1. Read the data with batch membership
     let SparseDataWithBatch {
         data: mut data_vec,
