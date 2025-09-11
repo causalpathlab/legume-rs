@@ -7,7 +7,7 @@ use crate::candle_matched_data_loader::*;
 use crate::candle_model_traits::*;
 
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, BatchNorm, Embedding, Linear, ModuleT, VarBuilder};
+use candle_nn::{BatchNorm, Embedding, Linear, ModuleT, VarBuilder, ops};
 
 pub struct MatchedLogSoftmaxEncoder {
     n_features: usize,
@@ -41,11 +41,9 @@ impl MatchedEncoderModuleT for MatchedLogSoftmaxEncoder {
     /// 3. kl-divergence
     ///
     fn forward_t(&self, data: MatchedEncoderData, train: bool) -> Result<MatchedEncoderLatent> {
+        // shared (i,j) encoder -> z shared -> x(i) + x(j)
 
-	// shared (i,j) encoder -> z shared -> x(i) + x(j)
-
-	// delta x (i) -> z delta(i) -> delta x(i)
-
+        // delta x (i) -> z delta(i) -> delta x(i)
 
         // adjust the marginal with the opposite (border values)
         let xb_l = self.preprocess(data.marginal_left, data.delta_right, train)?;
@@ -327,6 +325,15 @@ impl MatchedLogSoftmaxEncoder {
             Ok(z_mean.clone())
         }
     }
+}
+
+pub struct MatchedLogSoftmaxEncoderArgs<'a> {
+    pub n_features: usize,
+    pub n_topics: usize,
+    pub n_modules: usize,
+    pub n_vocab: usize,
+    pub d_vocab_emb: usize,
+    pub layers: &'a [usize],
 }
 
 pub trait MatchedEncoderEvaluateOps {
