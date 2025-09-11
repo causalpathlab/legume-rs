@@ -1,15 +1,15 @@
-#![allow(dead_code)]
-
-use crate::candle_aux_layers::StackLayers;
+use crate::candle_aux_layers::*;
+use crate::candle_aux_linear::*;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, BatchNorm, Embedding, Linear, ModuleT, VarBuilder};
+use candle_nn::{BatchNorm, Embedding, Linear, Module, ModuleT, VarBuilder, ops};
 
 pub struct LogSoftmaxEncoder {
     n_features: usize,
     n_topics: usize,
     n_vocab: usize,
+    feature_module: AggregateLinear,
     emb_x: Embedding,
     emb_logx: Embedding,
     fc: StackLayers<Linear>,
@@ -47,15 +47,29 @@ impl LogSoftmaxEncoder {
     fn discretize_whitened_tensor(&self, x_nd: &Tensor) -> Result<Tensor> {
         use candle_core::DType::U32;
 
+        let eps = 1e-4;
         let n_vocab = self.n_vocab as f64;
         let d = x_nd.dims().len();
         let min_val = x_nd.min_keepdim(d - 1)?;
         let max_val = x_nd.max_keepdim(d - 1)?;
-        let div_val = ((max_val - &min_val)? + 1.)?;
+        let div_val = ((max_val - &min_val)? + eps)?;
 
         let x_nd = x_nd.broadcast_sub(&min_val)?.broadcast_div(&div_val)?;
 
         (x_nd * n_vocab)?.floor()?.to_dtype(U32)
+    }
+
+    fn composite_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
+        let int_x_nd = self.discretize_whitened_tensor(x_nd)?;
+        let logx_nd = (x_nd + 1.)?.log()?;
+        let int_logx_nd = self.discretize_whitened_tensor(&logx_nd)?;
+
+        self.emb_x.forward_t(&int_x_nd, train)? + self.emb_logx.forward_t(&int_logx_nd, train)?
+    }
+
+    fn modularized_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
+        let x_nm = self.feature_module.forward(x_nd)?;
+        self.composite_embedding(&x_nm, train)
     }
 
     fn preprocess_input(
@@ -67,30 +81,11 @@ impl LogSoftmaxEncoder {
         debug_assert_eq!(x_nd.dims().len(), 2);
         debug_assert!(x_nd.min_all()?.to_scalar::<f32>()? >= 0_f32);
 
-        // 1. Discretize data
-        let int_x_nd = self.discretize_whitened_tensor(x_nd)?;
-        let logx_nd = (x_nd + 1.)?.log()?;
-        let int_logx_nd = self.discretize_whitened_tensor(&logx_nd)?;
-
-        // 2. log1p intensity embedding: n x d -> n x d x k
-        let emb_ndd = (self.emb_x.forward_t(&int_x_nd, train)?
-            + self.emb_logx.forward_t(&int_logx_nd, train)?)?;
-
+        let emb_ndd = self.modularized_embedding(x_nd, train)?;
         let last_dim = emb_ndd.dims().len();
 
         if let Some(x0_nd) = x0_nd {
-            let int_x0_nd = self.discretize_whitened_tensor(x0_nd)?;
-            let logx0_nd = (x0_nd + 1.)?.log()?;
-            let int_logx0_nd = self.discretize_whitened_tensor(&logx0_nd)?;
-
-            let emb0_ndd = (self.emb_x.forward_t(&int_x0_nd, train)?
-                + self.emb_logx.forward_t(&int_logx0_nd, train)?)?;
-
-            // Note: Works almost like log(x) - beta * log(x0), but we
-            // worry less about how to tune the parameter beta.
-            //
-            // We could also do:
-            // return emb_ndd.sum(k - 1)? - emb0_ndd.sum(k - 1)?;
+            let emb0_ndd = self.modularized_embedding(x0_nd, train)?;
             (emb_ndd - &emb0_ndd)?.sum(last_dim - 1)
         } else {
             emb_ndd.sum(last_dim - 1)
@@ -173,12 +168,16 @@ impl LogSoftmaxEncoder {
 
         debug_assert!(!layers.is_empty());
 
+        let n_modules = layers[0];
+        let feature_module = aggregate_linear(n_features, n_modules, vs.pp("feature.module"))?;
+
         let emb_x = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_x"))?;
         let emb_logx = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_logx"))?;
 
         // (1) data -> fc
         let mut fc = StackLayers::<Linear>::new();
-        let mut prev_dim = n_features;
+        let mut prev_dim = n_modules;
+        // let mut prev_dim = n_features;
         for (j, &next_dim) in layers.iter().enumerate() {
             let _name = format!("nn.enc.fc.{}", j);
             fc.push_with_act(
@@ -198,6 +197,7 @@ impl LogSoftmaxEncoder {
             n_features,
             n_topics,
             n_vocab,
+            feature_module,
             emb_x,
             emb_logx,
             fc,

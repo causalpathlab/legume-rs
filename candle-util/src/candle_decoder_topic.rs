@@ -3,7 +3,7 @@
 use crate::candle_aux_linear::*;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, Module, VarBuilder};
+use candle_nn::{Module, VarBuilder};
 
 /////////////////////////
 // Topic Model Decoder //
@@ -34,10 +34,15 @@ impl TopicDecoder {
 
 impl DecoderModuleT for TopicDecoder {
     fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
+        let eps = 1e-4;
         let theta_nk = z_nk.exp()?;
         let prob_nd = self.dictionary.forward(&theta_nk)?;
-	let eps = 1e-4;
-        ops::log_softmax(&(prob_nd + eps)?.log()?, 1)
+        (prob_nd + eps)?.log()
+        // the following is exact... but there is sacrifice in speed
+        // candle_nn::ops::log_softmax(&(prob_nd + eps)?.log()?, 1)
+        // perhaps, we should consider memory alignment?
+        // let prob_dn = self.dictionary.forward(&theta_nk)?.t()?;
+        // candle_nn::ops::log_softmax(&(prob_dn + eps)?.log()?, 0)?.t()
     }
 
     fn get_dictionary(&self) -> Result<Tensor> {

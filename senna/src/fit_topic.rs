@@ -72,10 +72,9 @@ pub struct TopicArgs {
     #[arg(short = 't', long, default_value_t = 10)]
     n_latent_topics: usize,
 
-    /// to reduce row features (#gene modules ~ 2^r)
-    #[arg(short = 'r', long, default_value_t = 10)]
-    n_row_proj_dim: usize,
-
+    // /// to reduce row features (#gene modules ~ 2^r)
+    // #[arg(short = 'r', long, default_value_t = 10)]
+    // n_row_proj_dim: usize,
     /// encoder layers
     #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
     encoder_layers: Vec<usize>,
@@ -135,10 +134,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let d_vocab_emb = args.vocab_emb;
 
     let n_features_decoder = data_vec.num_rows()?;
-    let aggregate_kk = args
-        .n_row_proj_dim
-        .clamp(1, n_features_decoder.ilog2() as usize);
-    let n_features_encoder = max_binary_code(aggregate_kk) + 1;
+    let n_features_encoder = data_vec.num_rows()?;
 
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
@@ -211,7 +207,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let clean_dn = collapsed.mu_adjusted.as_ref();
     let batch_dn = collapsed.mu_residual.as_ref();
 
-    let aggregator = build_row_aggregator(&collapsed, n_features_encoder)?;
+    // let aggregator = build_row_aggregator(&collapsed, n_features_encoder)?;
 
     let train_config = TrainConfig {
         learning_rate: args.learning_rate,
@@ -227,7 +223,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         mixed_dn,
         batch_dn,
         clean_dn,
-        &aggregator,
         &encoder,
         &decoder,
         &parameters,
@@ -254,8 +249,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     /////////////////////////////////////////////////////
 
     let delta_db = batch_db.map(|x| x.posterior_mean());
-    let z_nk =
-        evaluate_latent_by_encoder(&data_vec, &encoder, &aggregator, &train_config, delta_db)?;
+    let z_nk = evaluate_latent_by_encoder(&data_vec, &encoder, &train_config, delta_db)?;
 
     let cell_names = data_vec.column_names()?;
 

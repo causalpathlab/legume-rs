@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, Module};
+use candle_nn::{Module, ops};
 
 /////////////////////////////////////////////
 // Linear module with non-negative weights //
@@ -67,28 +67,63 @@ impl Module for NonNegLinear {
     }
 }
 
+///////////////////////
+// Linear Aggregator //
+///////////////////////
+
+#[derive(Clone, Debug)]
+pub struct AggregateLinear {
+    weight_dk: Tensor,
+}
+
+impl AggregateLinear {
+    pub fn membership(&self) -> Result<Tensor> {
+        ops::log_softmax(&self.weight_dk, 1)?.exp()
+    }
+}
+
+impl Module for AggregateLinear {
+    fn forward(&self, x_nd: &Tensor) -> Result<Tensor> {
+        let c_dk = self.membership()?;
+        x_nd.matmul(&c_dk)
+    }
+}
+
+/// aggregate `X[n,d]` into `Y[n, k] = X[n, d] * C[d, k]` where `Σ_k
+/// C[d,k] = 1` to capture each feature's membership
+pub fn aggregate_linear(
+    in_dim: usize,
+    out_dim: usize,
+    vb: candle_nn::VarBuilder,
+) -> Result<AggregateLinear> {
+    let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
+    let weight_dk = vb.get_with_hints((in_dim, out_dim), "logits", init_ws)?;
+
+    Ok(AggregateLinear { weight_dk })
+}
+
 ////////////////////////////////
 // Linear module with Softmax //
 ////////////////////////////////
 
 #[derive(Clone, Debug)]
 pub struct SoftmaxLinear {
-    weight: Tensor,
-    bias: Option<Tensor>,
+    weight_dk: Tensor,
+    bias_d1: Option<Tensor>,
 }
 
 impl SoftmaxLinear {
-    pub fn new(weight: Tensor, bias: Option<Tensor>) -> Self {
-        Self { weight, bias }
+    pub fn new(weight_dk: Tensor, bias_d1: Option<Tensor>) -> Self {
+        Self { weight_dk, bias_d1 }
     }
     pub fn weight(&self) -> Result<Tensor> {
-        ops::log_softmax(&self.weight, 0)
+        ops::log_softmax(&self.weight_dk, 0)
     }
 
     pub fn biased_weight(&self) -> Result<Tensor> {
-        match &self.bias {
-            Some(bias) => ops::log_softmax(&self.weight.broadcast_add(bias)?, 0),
-            _ => ops::log_softmax(&self.weight, 0),
+        match &self.bias_d1 {
+            Some(bias) => ops::log_softmax(&self.weight_dk.broadcast_add(bias)?, 0),
+            _ => ops::log_softmax(&self.weight_dk, 0),
         }
     }
 }
@@ -105,14 +140,17 @@ impl Module for SoftmaxLinear {
     }
 }
 
+/// create a softmax linear layer
+/// `output_nd <- input_nk * t(β_dk)`
+/// where
+/// `Σ_j β_jk = 1` for all `k`
 pub fn softmax_linear(
     in_dim: usize,
     out_dim: usize,
     vb: candle_nn::VarBuilder,
 ) -> Result<SoftmaxLinear> {
     let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
-    let ws = vb.get_with_hints((out_dim, in_dim), "weight", init_ws)?;
-    // let bs = vb.get_with_hints((out_dim, 1), "bias", candle_nn::init::ZERO)?;
-    // Ok(SoftmaxLinear::new(ws, Some(bs)))
-    Ok(SoftmaxLinear::new(ws, None))
+    let ws_dk = vb.get_with_hints((out_dim, in_dim), "logits", init_ws)?;
+    let b_d1 = vb.get_with_hints((out_dim, 1), "logit_bias", candle_nn::init::ZERO)?;
+    Ok(SoftmaxLinear::new(ws_dk, Some(b_d1)))
 }
