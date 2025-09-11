@@ -72,9 +72,11 @@ pub struct TopicArgs {
     #[arg(short = 't', long, default_value_t = 10)]
     n_latent_topics: usize,
 
-    // /// to reduce row features (#gene modules ~ 2^r)
-    // #[arg(short = 'r', long, default_value_t = 10)]
-    // n_row_proj_dim: usize,
+    /// number of modules of the features in the encoder model.
+    /// If not specified, `encoder_layers[0]` will be used.
+    #[arg(short = 'm', long)]
+    feature_modules: Option<usize>,
+
     /// encoder layers
     #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
     encoder_layers: Vec<usize>,
@@ -129,39 +131,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         batch_files: args.batch_files.clone(),
     })?;
 
-    let n_topics = args.n_latent_topics;
-    let n_vocab = args.vocab_size;
-    let d_vocab_emb = args.vocab_emb;
-
-    let n_features_decoder = data_vec.num_rows()?;
-    let n_features_encoder = data_vec.num_rows()?;
-
-    let dev = match args.device {
-        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
-        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
-        _ => candle_core::Device::Cpu,
-    };
-
-    let parameters = candle_nn::VarMap::new();
-    let param_builder =
-        candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
-
-    let encoder = LogSoftmaxEncoder::new(
-        n_features_encoder,
-        n_topics,
-        n_vocab,
-        d_vocab_emb,
-        &args.encoder_layers,
-        param_builder.clone(),
-    )?;
-
-    let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
-
-    info!(
-        "input: {} -> encoder -> decoder -> output: {}",
-        n_features_encoder, n_features_decoder
-    );
-
     // 2. Random projection
     let proj_dim = args.proj_dim.max(args.n_latent_topics);
 
@@ -207,7 +176,42 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let clean_dn = collapsed.mu_adjusted.as_ref();
     let batch_dn = collapsed.mu_residual.as_ref();
 
-    // let aggregator = build_row_aggregator(&collapsed, n_features_encoder)?;
+    let n_topics = args.n_latent_topics;
+    let n_vocab = args.vocab_size;
+    let d_vocab_emb = args.vocab_emb;
+    let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
+
+    let n_features_decoder = data_vec.num_rows()?;
+    let n_features_encoder = data_vec.num_rows()?;
+
+    let dev = match args.device {
+        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
+        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
+        _ => candle_core::Device::Cpu,
+    };
+
+    let parameters = candle_nn::VarMap::new();
+    let param_builder =
+        candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
+
+    let encoder = LogSoftmaxEncoder::new(
+        LogSoftmaxEncoderArgs {
+            n_features: n_features_encoder,
+            n_topics,
+            n_modules,
+            n_vocab,
+            d_vocab_emb,
+            layers: &args.encoder_layers,
+        },
+        param_builder.clone(),
+    )?;
+
+    let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
+
+    info!(
+        "input: {} -> encoder -> decoder -> output: {}",
+        n_features_encoder, n_features_decoder
+    );
 
     let train_config = TrainConfig {
         learning_rate: args.learning_rate,
@@ -218,6 +222,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         verbose: args.verbose,
         show_progress: true,
     };
+
+    info!("Set up training data");
 
     let llik = train_encoder_decoder_stochastic(
         mixed_dn,
@@ -230,6 +236,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         &train_config,
         args.jitter_interval,
     )?;
+
+    info!("Writing down the model parameters");
 
     let gene_names = data_vec.row_names()?;
 
@@ -244,9 +252,20 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     write_types::<f32>(&llik, &(args.out.to_string() + ".log_likelihood.gz"))?;
 
+    encoder
+        .feature_module_membership()?
+        .to_device(&candle_core::Device::Cpu)?
+        .to_parquet(
+            Some(&gene_names),
+            None,
+            &(args.out.to_string() + ".feature_module.parquet"),
+        )?;
+
     /////////////////////////////////////////////////////
     // evaluate latent states while adjusting the bias //
     /////////////////////////////////////////////////////
+
+    info!("Writing down the latent states");
 
     let delta_db = batch_db.map(|x| x.posterior_mean());
     let z_nk = evaluate_latent_by_encoder(&data_vec, &encoder, &train_config, delta_db)?;
@@ -259,5 +278,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         &(args.out.to_string() + ".latent.parquet"),
     )?;
 
+    info!("Done");
     Ok(())
 }

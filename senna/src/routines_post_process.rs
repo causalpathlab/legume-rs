@@ -1,7 +1,6 @@
 use crate::embed_common::*;
 
 use data_beans::sparse_data_visitors::VisitColumnsOps;
-use data_beans_alg::normalization::*;
 
 use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_model_traits::*;
@@ -96,8 +95,6 @@ where
         .par_iter()
         .progress_count(njobs)
         .map(|&(lb, ub)| -> anyhow::Result<(usize, Mat)> {
-            let enc = arc_enc.lock().expect("enc lock");
-
             let x0_nd = delta_bd.as_ref().map(|delta_bm| {
                 let batches = data_vec
                     .get_batch_membership(lb..ub)
@@ -113,6 +110,7 @@ where
                 .to_tensor(dev)?
                 .transpose(0, 1)?;
 
+            let enc = arc_enc.lock().expect("enc lock");
             let (z_nk, _) = enc.forward_t(&x_nd, x0_nd.as_ref(), false)?;
             let z_nk = z_nk.to_device(&candle_core::Device::Cpu)?;
             Ok((lb, Mat::from_tensor(&z_nk).expect("to mat")))

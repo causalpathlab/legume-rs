@@ -9,6 +9,7 @@ pub struct LogSoftmaxEncoder {
     n_features: usize,
     n_topics: usize,
     n_vocab: usize,
+    n_modules: usize,
     feature_module: AggregateLinear,
     emb_x: Embedding,
     emb_logx: Embedding,
@@ -44,6 +45,10 @@ impl EncoderModuleT for LogSoftmaxEncoder {
 }
 
 impl LogSoftmaxEncoder {
+    pub fn num_feature_modules(&self) -> usize {
+        self.n_modules
+    }
+
     fn discretize_whitened_tensor(&self, x_nd: &Tensor) -> Result<Tensor> {
         use candle_core::DType::U32;
 
@@ -70,6 +75,10 @@ impl LogSoftmaxEncoder {
     fn modularized_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
         let x_nm = self.feature_module.forward(x_nd)?;
         self.composite_embedding(&x_nm, train)
+    }
+
+    pub fn feature_module_membership(&self) -> Result<Tensor> {
+        self.feature_module.membership()
     }
 
     fn preprocess_input(
@@ -151,14 +160,7 @@ impl LogSoftmaxEncoder {
     /// * `d_emb` - vocabulary embedding dim
     /// * `layers` - fully connected layers, each with the dim
     /// * `vs` - variable builder
-    pub fn new(
-        n_features: usize,
-        n_topics: usize,
-        n_vocab: usize,
-        d_emb: usize,
-        layers: &[usize],
-        vs: VarBuilder,
-    ) -> Result<Self> {
+    pub fn new(args: LogSoftmaxEncoderArgs, vs: VarBuilder) -> Result<Self> {
         let bn_config = candle_nn::BatchNormConfig {
             eps: 1e-4,
             remove_mean: true,
@@ -166,19 +168,20 @@ impl LogSoftmaxEncoder {
             momentum: 0.1,
         };
 
-        debug_assert!(!layers.is_empty());
+        debug_assert!(!args.layers.is_empty());
 
-        let n_modules = layers[0];
-        let feature_module = aggregate_linear(n_features, n_modules, vs.pp("feature.module"))?;
+        let feature_module =
+            aggregate_linear(args.n_features, args.n_modules, vs.pp("feature.module"))?;
 
-        let emb_x = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_x"))?;
-        let emb_logx = candle_nn::embedding(n_vocab, d_emb, vs.pp("nn.embed_logx"))?;
+        let emb_x = candle_nn::embedding(args.n_vocab, args.d_vocab_emb, vs.pp("nn.embed_x"))?;
+        let emb_logx =
+            candle_nn::embedding(args.n_vocab, args.d_vocab_emb, vs.pp("nn.embed_logx"))?;
 
         // (1) data -> fc
         let mut fc = StackLayers::<Linear>::new();
-        let mut prev_dim = n_modules;
+        let mut prev_dim = args.n_modules;
         // let mut prev_dim = n_features;
-        for (j, &next_dim) in layers.iter().enumerate() {
+        for (j, &next_dim) in args.layers.iter().enumerate() {
             let _name = format!("nn.enc.fc.{}", j);
             fc.push_with_act(
                 candle_nn::linear(prev_dim, next_dim, vs.pp(_name))?,
@@ -190,13 +193,14 @@ impl LogSoftmaxEncoder {
         let bn_z = candle_nn::batch_norm(prev_dim, bn_config, vs.pp("nn.enc.bn_z"))?;
 
         // (2) fc -> K
-        let z_mean = candle_nn::linear(prev_dim, n_topics, vs.pp("nn.enc.z.mean"))?;
-        let z_lnvar = candle_nn::linear(prev_dim, n_topics, vs.pp("nn.enc.z.lnvar"))?;
+        let z_mean = candle_nn::linear(prev_dim, args.n_topics, vs.pp("nn.enc.z.mean"))?;
+        let z_lnvar = candle_nn::linear(prev_dim, args.n_topics, vs.pp("nn.enc.z.lnvar"))?;
 
         Ok(Self {
-            n_features,
-            n_topics,
-            n_vocab,
+            n_features: args.n_features,
+            n_topics: args.n_topics,
+            n_vocab: args.n_vocab,
+            n_modules: args.n_modules,
             feature_module,
             emb_x,
             emb_logx,
@@ -206,4 +210,13 @@ impl LogSoftmaxEncoder {
             z_lnvar,
         })
     }
+}
+
+pub struct LogSoftmaxEncoderArgs<'a> {
+    pub n_features: usize,
+    pub n_topics: usize,
+    pub n_modules: usize,
+    pub n_vocab: usize,
+    pub d_vocab_emb: usize,
+    pub layers: &'a [usize],
 }
