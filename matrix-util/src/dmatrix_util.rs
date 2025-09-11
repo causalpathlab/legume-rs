@@ -8,6 +8,42 @@ use rayon::prelude::*;
 
 use crate::traits::*;
 
+pub fn subset_columns<T, D, S>(
+    matrix: &Matrix<T, nalgebra::Dyn, D, S>,
+    indices: &[usize],
+) -> anyhow::Result<DMatrix<T>>
+where
+    T: nalgebra::RealField,
+    D: nalgebra::Dim,
+    S: nalgebra::RawStorage<T, nalgebra::Dyn, D>,
+{
+    let cols = indices
+        .into_iter()
+        .map(|&j| matrix.column(j))
+        .collect::<Vec<_>>();
+
+    concatenate_horizontal(&cols)
+}
+
+pub fn assign_columns<T, D, S, R>(
+    source: &Matrix<T, nalgebra::Dyn, D, S>,
+    indices: &[usize],
+    target: &mut Matrix<T, nalgebra::Dyn, D, R>,
+) where
+    T: nalgebra::RealField,
+    D: nalgebra::Dim,
+    S: nalgebra::RawStorage<T, nalgebra::Dyn, D>,
+    R: nalgebra::RawStorageMut<T, nalgebra::Dyn, D>,
+{
+    indices
+        .iter()
+        .zip(source.column_iter())
+        .for_each(|(&j, x_j)| {
+            target.column_mut(j).copy_from(&x_j);
+        });
+}
+
+/// concatenate matrices or row vectors vertically
 pub fn concatenate_vertical<T, D, S>(
     matrices: &[Matrix<T, D, nalgebra::Dyn, S>],
 ) -> anyhow::Result<DMatrix<T>>
@@ -34,6 +70,7 @@ where
     Ok(DMatrix::from_rows(&rows))
 }
 
+/// concatenate matrices or column vectors horizontally
 pub fn concatenate_horizontal<T, D, S>(
     matrices: &[Matrix<T, nalgebra::Dyn, D, S>],
 ) -> anyhow::Result<DMatrix<T>>

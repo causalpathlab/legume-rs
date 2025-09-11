@@ -5,11 +5,14 @@ use crate::srt_common::*;
 use data_beans_alg::random_projection::*;
 
 pub trait SrtRandProjOps {
-    fn random_projection(
+    fn random_projection<T>(
         &self,
         target_dim: usize,
         block_size: usize,
-    ) -> anyhow::Result<SrtRandProjOut>;
+        batch_membership: Option<&[T]>,
+    ) -> anyhow::Result<SrtRandProjOut>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 
     fn assign_pairs_to_samples(
         &mut self,
@@ -79,17 +82,22 @@ impl<'a> SrtRandProjOps for SrtCellPairs<'a> {
         Ok(max_group + 1)
     }
 
-    fn random_projection(
+    fn random_projection<T>(
         &self,
         target_dim: usize,
         block_size: usize,
-    ) -> anyhow::Result<SrtRandProjOut> {
+        batch_membership: Option<&[T]>,
+    ) -> anyhow::Result<SrtRandProjOut>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
         let nn = self.pairs.len();
 
         // 1. random projection basis
         let nrows = self.data.num_rows()?;
         let basis_dk = Mat::rnorm(nrows, target_dim);
 
+        // 2. visit the pairs with the projected basis
         let mut ret = SrtRandProjOut {
             left: Mat::zeros(target_dim, nn),
             right: Mat::zeros(target_dim, nn),
@@ -105,6 +113,35 @@ impl<'a> SrtRandProjOps for SrtCellPairs<'a> {
         )?;
 
         info!("successfully projected {} pairs", self.len());
+
+        fn adjust_batch(mat: &mut Mat, indices: &[usize]) -> anyhow::Result<()> {
+            let xx_left_delta = subset_columns(&mat, &indices)?
+                .transpose()
+                .centre_columns()
+                .transpose();
+            assign_columns(&xx_left_delta, &indices, mat);
+            Ok(())
+        }
+
+        if let Some(col_to_batch) = batch_membership {
+            info!("adjusting batch biases ...");
+            if col_to_batch.len() == self.data.num_columns()? {
+                let batches = partition_by_membership(col_to_batch, None);
+
+                for (_, cols) in batches.iter() {
+                    let left_cols = cols.iter().map(|&j| self.pairs[j].left).collect::<Vec<_>>();
+                    let right_cols = cols
+                        .iter()
+                        .map(|&j| self.pairs[j].right)
+                        .collect::<Vec<_>>();
+
+                    adjust_batch(&mut ret.left, &left_cols)?;
+                    adjust_batch(&mut ret.left_delta, &left_cols)?;
+                    adjust_batch(&mut ret.right, &right_cols)?;
+                    adjust_batch(&mut ret.right_delta, &right_cols)?;
+                }
+            }
+        }
 
         Ok(ret)
     }
@@ -140,47 +177,47 @@ fn random_project_pairs_visitor(
     y_right_km.centre_columns_inplace();
 
     // adjust the left by the neighbours of the right
-    let y_delta_left_km = pairs_neighbours
+    let y_delta_left = pairs_neighbours
         .iter()
         .enumerate()
         .map(|(j, n)| -> anyhow::Result<Mat> {
             let left = pairs[j].left;
 
-            let mut y_dm = data.data.read_columns_csc(std::iter::once(left))?;
-            let y_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
-            let y_hat_dm = impute_with_neighbours(&y_dm, &y_neigh_dm)?;
+            let mut y_d1 = data.data.read_columns_csc(std::iter::once(left))?;
+            let y_right_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
+            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_right_neigh_dm)?;
 
-            y_dm.adjust_by_division_inplace(&y_hat_dm);
-            y_dm.log1p_inplace();
-            y_dm.normalize_columns_inplace();
+            y_d1.adjust_by_division_inplace(&y_hat_d1);
+            y_d1.log1p_inplace();
+            y_d1.normalize_columns_inplace();
 
-            Ok((y_dm.transpose() * basis_dk).transpose())
+            Ok((y_d1.transpose() * basis_dk).transpose())
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let mut y_delta_left_km = concatenate_horizontal(&y_delta_left_km)?;
+    let mut y_delta_left_km = concatenate_horizontal(&y_delta_left)?;
     y_delta_left_km.centre_columns_inplace();
 
     // adjust the right by the neighbours of the left
-    let y_delta_right_km = pairs_neighbours
+    let y_delta_right = pairs_neighbours
         .iter()
         .enumerate()
         .map(|(j, n)| -> anyhow::Result<Mat> {
             let right = pairs[j].right;
 
-            let mut y_dm = data.data.read_columns_csc(std::iter::once(right))?;
-            let y_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
-            let y_hat_dm = impute_with_neighbours(&y_dm, &y_neigh_dm)?;
+            let mut y_d1 = data.data.read_columns_csc(std::iter::once(right))?;
+            let y_left_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
+            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_left_neigh_dm)?;
 
-            y_dm.adjust_by_division_inplace(&y_hat_dm);
-            y_dm.log1p_inplace();
-            y_dm.normalize_columns_inplace();
+            y_d1.adjust_by_division_inplace(&y_hat_d1);
+            y_d1.log1p_inplace();
+            y_d1.normalize_columns_inplace();
 
-            Ok((y_dm.transpose() * basis_dk).transpose())
+            Ok((y_d1.transpose() * basis_dk).transpose())
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let mut y_delta_right_km = concatenate_horizontal(&y_delta_right_km)?;
+    let mut y_delta_right_km = concatenate_horizontal(&y_delta_right)?;
     y_delta_right_km.centre_columns_inplace();
 
     let mut proj = arc_pair_proj.lock().expect("lock proj");

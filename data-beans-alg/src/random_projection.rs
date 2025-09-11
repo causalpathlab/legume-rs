@@ -2,6 +2,8 @@
 
 use data_beans::sparse_data_visitors::*;
 use data_beans::sparse_io_vector::SparseIoVec;
+use matrix_util::dmatrix_util::assign_columns;
+use matrix_util::dmatrix_util::subset_columns;
 use std::sync::{Arc, Mutex};
 
 use log::{info, warn};
@@ -142,20 +144,11 @@ impl RandProjOps for SparseIoVec {
             if col_to_batch.len() == ncols {
                 let batches = partition_by_membership(col_to_batch, None);
                 for (_, cols) in batches.iter() {
-                    // columnwise processing is faster
-                    let x_t_rows: Vec<_> = cols
-                        .iter()
-                        .map(|&j| proj_kn.column(j).transpose().into_owned())
-                        .collect();
-
-                    let mut x_t: nalgebra::DMatrix<f32> =
-                        nalgebra::DMatrix::<f32>::from_rows(&x_t_rows);
-                    x_t.centre_columns_inplace();
-                    let xx: nalgebra::DMatrix<f32> = x_t.transpose();
-
-                    cols.iter().zip(xx.column_iter()).for_each(|(&j, x_j)| {
-                        proj_kn.column_mut(j).copy_from(&x_j);
-                    });
+                    let xx = subset_columns(&proj_kn, cols)?
+                        .transpose() // n x k
+                        .centre_columns() // adjust the mean
+                        .transpose(); // k x n
+                    assign_columns(&xx, cols, &mut proj_kn);
                 }
             } else {
                 warn!(

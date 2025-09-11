@@ -96,6 +96,8 @@ pub struct SrtSvdArgs {
     verbose: bool,
 }
 
+/// Fits SVD and write down the dictionary matrix and pair-level
+/// latent states.
 pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
     if args.verbose {
         std::env::set_var("RUST_LOG", "info");
@@ -123,7 +125,8 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
     let mut srt_cell_pairs =
         SrtCellPairs::new(&data, &coordinates, args.knn_spatial, Some(args.block_size))?;
 
-    let proj_out = srt_cell_pairs.random_projection(args.proj_dim, args.block_size)?;
+    let proj_out =
+        srt_cell_pairs.random_projection(args.proj_dim, args.block_size, Some(&batches))?;
 
     srt_cell_pairs.assign_pairs_to_samples(
         &proj_out,
@@ -150,7 +153,6 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
         params.right.posterior_log_mean().clone(),
     ])?
     .scale_columns();
-
 
     let (dictionary_marginal_dk, _, _) = log_x_marginal_d2m.rsvd(args.n_latent_topics)?;
 

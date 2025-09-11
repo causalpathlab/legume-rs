@@ -170,7 +170,8 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     // 2. Randomly project the pairs of cells //
     ////////////////////////////////////////////
 
-    let proj_out = srt_cell_pairs.random_projection(args.proj_dim, args.block_size)?;
+    let proj_out =
+        srt_cell_pairs.random_projection(args.proj_dim, args.block_size, Some(&batches))?;
 
     srt_cell_pairs.assign_pairs_to_samples(
         &proj_out,
