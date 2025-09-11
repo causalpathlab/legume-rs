@@ -63,13 +63,11 @@ pub fn triplets_adjusted_by_batch(
 /// #Arguments
 /// * `data_vec` - full data vector
 /// * `encoder` - encoder network
-/// * `aggregate_rows` - `d x m` aggregate
 /// * `train_config` - training configuration
 /// * `delta_db` - batch effect matrix (feature x batch)
 pub fn evaluate_latent_by_encoder<Enc>(
     data_vec: &SparseIoVec,
     encoder: &Enc,
-    aggregate_rows: &Mat,
     train_config: &TrainConfig,
     delta_db: Option<&Mat>,
 ) -> anyhow::Result<Mat>
@@ -86,16 +84,12 @@ where
     let njobs = jobs.len() as u64;
     let arc_enc = Arc::new(Mutex::new(encoder));
 
-    let aggregate = aggregate_rows.to_tensor(dev)?;
-
-    let delta_bm = delta_db.map(|delta_db| {
+    let delta_bd = delta_db.map(|delta_db| {
         delta_db
             .to_tensor(dev)
             .expect("delta to tensor")
             .transpose(0, 1)
             .expect("transpose")
-            .matmul(&aggregate)
-            .expect("delta bm")
     });
 
     let mut chunks = jobs
@@ -104,7 +98,7 @@ where
         .map(|&(lb, ub)| -> anyhow::Result<(usize, Mat)> {
             let enc = arc_enc.lock().expect("enc lock");
 
-            let x0_nm = delta_bm.as_ref().map(|delta_bm| {
+            let x0_nd = delta_bd.as_ref().map(|delta_bm| {
                 let batches = data_vec
                     .get_batch_membership(lb..ub)
                     .into_iter()
@@ -119,8 +113,7 @@ where
                 .to_tensor(dev)?
                 .transpose(0, 1)?;
 
-            let x_nm = x_nd.matmul(&aggregate)?;
-            let (z_nk, _) = enc.forward_t(&x_nm, x0_nm.as_ref(), false)?;
+            let (z_nk, _) = enc.forward_t(&x_nd, x0_nd.as_ref(), false)?;
             let z_nk = z_nk.to_device(&candle_core::Device::Cpu)?;
             Ok((lb, Mat::from_tensor(&z_nk).expect("to mat")))
         })
