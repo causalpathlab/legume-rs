@@ -59,35 +59,7 @@ fn collect_pair_stat_visitor(
     let y_left = data.data.read_columns_csc(left)?;
     let y_right = data.data.read_columns_csc(right)?;
 
-    {
-        let mut stat = arc_stat.lock().expect("lock stat");
-
-        for y_j in y_left.col_iter() {
-            let rows = y_j.row_indices();
-            let vals = y_j.values();
-            for (&gene, &y) in rows.iter().zip(vals.iter()) {
-                stat.left_sum_ds[(gene, sample)] += y;
-            }
-        }
-
-        for y_j in y_right.col_iter() {
-            let rows = y_j.row_indices();
-            let vals = y_j.values();
-            for (&gene, &y) in rows.iter().zip(vals.iter()) {
-                stat.right_sum_ds[(gene, sample)] += y;
-            }
-        }
-
-        let (left_coord, right_coord) = data.average_position(&indices);
-
-        stat.left_coordinates
-            .column_mut(sample)
-            .copy_from(&left_coord);
-
-        stat.right_coordinates
-            .column_mut(sample)
-            .copy_from(&right_coord);
-    }
+    let (left_coord, right_coord) = data.average_position(&indices);
 
     ////////////////////////////////////////////////////
     // imputation by neighbours and update statistics //
@@ -106,26 +78,13 @@ fn collect_pair_stat_visitor(
             let left = pairs[j].left;
 
             let mut y_d1 = data.data.read_columns_csc(std::iter::once(left))?;
-            let y_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
-            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_neigh_dm)?;
+            let y_right_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
+            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_right_neigh_dm)?;
             y_d1.adjust_by_division_inplace(&y_hat_d1);
 
             Ok(y_d1)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-
-    {
-        let mut stat = arc_stat.lock().expect("lock stat");
-        for yy in y_delta_left {
-            for y_j in yy.col_iter() {
-                let rows = y_j.row_indices();
-                let vals = y_j.values();
-                for (&gene, &y) in rows.iter().zip(vals.iter()) {
-                    stat.left_delta_sum_ds[(gene, sample)] += y;
-                }
-            }
-        }
-    }
 
     // adjust the right by the neighbours of the left
     let y_delta_right = pairs_neighbours
@@ -135,8 +94,8 @@ fn collect_pair_stat_visitor(
             let right = pairs[j].right;
 
             let mut y_d1 = data.data.read_columns_csc(std::iter::once(right))?;
-            let y_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
-            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_neigh_dm)?;
+            let y_left_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
+            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_left_neigh_dm)?;
             y_d1.adjust_by_division_inplace(&y_hat_d1);
 
             Ok(y_d1)
@@ -145,6 +104,53 @@ fn collect_pair_stat_visitor(
 
     {
         let mut stat = arc_stat.lock().expect("lock stat");
+
+        //////////////////////////////////////////
+        // update the left and right statistics //
+        //////////////////////////////////////////
+
+        for y_j in y_left.col_iter() {
+            let rows = y_j.row_indices();
+            let vals = y_j.values();
+            for (&gene, &y) in rows.iter().zip(vals.iter()) {
+                stat.left_sum_ds[(gene, sample)] += y;
+            }
+        }
+
+        for y_j in y_right.col_iter() {
+            let rows = y_j.row_indices();
+            let vals = y_j.values();
+            for (&gene, &y) in rows.iter().zip(vals.iter()) {
+                stat.right_sum_ds[(gene, sample)] += y;
+            }
+        }
+
+        ////////////////////////////////////////////
+        // keeping track of the average positions //
+        ////////////////////////////////////////////
+
+        stat.left_coordinates
+            .column_mut(sample)
+            .copy_from(&left_coord);
+
+        stat.right_coordinates
+            .column_mut(sample)
+            .copy_from(&right_coord);
+
+        ////////////////////////////////////////////////
+        // update the left and right delta statistics //
+        ////////////////////////////////////////////////
+
+        for yy in y_delta_left {
+            for y_j in yy.col_iter() {
+                let rows = y_j.row_indices();
+                let vals = y_j.values();
+                for (&gene, &y) in rows.iter().zip(vals.iter()) {
+                    stat.left_delta_sum_ds[(gene, sample)] += y;
+                }
+            }
+        }
+
         for yy in y_delta_right {
             for y_j in yy.col_iter() {
                 let rows = y_j.row_indices();
