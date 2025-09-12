@@ -2,16 +2,9 @@ use crate::srt_cell_pairs::SrtCellPairs;
 use crate::srt_collapse_pairs::*;
 use crate::srt_common::*;
 use crate::srt_random_projection::*;
-use crate::srt_routines_latent_representation::*;
-use crate::srt_routines_post_process::*;
 use crate::srt_routines_pre_process::*;
-use candle_util::candle_matched_data_loader::DataLoaderArgs;
-use clap::{Parser, ValueEnum};
-use data_beans_alg::random_projection::*;
-use matrix_param::{
-    io::ParamIo,
-    traits::{Inference, TwoStatParam},
-};
+use clap::Parser;
+use matrix_param::traits::*;
 
 #[derive(Parser, Debug, Clone)]
 ///
@@ -72,9 +65,6 @@ pub struct SrtSvdArgs {
     #[arg(long, short = 's')]
     down_sample: Option<usize>,
 
-    // /// optimization iterations
-    // #[arg(long, default_value_t = 15)]
-    // iter_opt: usize,
     /// Output header
     #[arg(long, short, required = true)]
     out: Box<str>,
@@ -134,44 +124,32 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
         args.down_sample.clone(),
     )?;
 
-    info!("Collecting cell pairs...");
+    info!("Collecting summary statistics across cell pairs...");
     let collapsed = srt_cell_pairs.collapse_pairs()?;
     let params = collapsed.optimize(None)?;
 
     info!("Randomized SVD on the Δ matrix");
-
-    let log_x_delta_d2m = concatenate_horizontal(&[
+    let training_dm = concatenate_horizontal(&[
         params.left_delta.posterior_log_mean().clone(),
         params.right_delta.posterior_log_mean().clone(),
     ])?
     .scale_columns();
 
-    // todo: delta is the most informative...
-
-    let log_x_marginal_d2m = concatenate_horizontal(&[
-        params.left.posterior_log_mean().clone(),
-        params.right.posterior_log_mean().clone(),
-    ])?
-    .scale_columns();
-
-    let (dictionary_marginal_dk, _, _) = log_x_marginal_d2m.rsvd(args.n_latent_topics)?;
-
-    let (dictionary_delta_dk, _, _) = log_x_delta_d2m.rsvd(args.n_latent_topics)?;
+    let (u_dk, s_k, _) = training_dm.rsvd(args.n_latent_topics)?;
+    let eps = 1e-8;
+    let sinv_k = DVec::from_iterator(s_k.len(), s_k.iter().map(|&s| 1.0 / (s + eps)));
 
     info!("Nystrom projection...");
-    let nystrom_param = NystromParam {
-        dictionary_marginal_dk: &dictionary_delta_dk,
-        dictionary_delta_dk: &dictionary_marginal_dk,
-    };
-
     let mut nystrom_proj = NystromProj {
         marginal_kn: Mat::zeros(args.n_latent_topics, srt_cell_pairs.num_pairs()),
         delta_kn: Mat::zeros(args.n_latent_topics, srt_cell_pairs.num_pairs()),
     };
 
+    let basis_dk = &u_dk * Mat::from_diagonal(&sinv_k);
+
     srt_cell_pairs.visit_pairs_by_block(
         &nystrom_proj_visitor,
-        &nystrom_param,
+        &basis_dk,
         &mut nystrom_proj,
         args.block_size,
     )?;
@@ -185,22 +163,12 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
         &(args.out.to_string() + ".latent_delta.parquet"),
     )?;
 
-    latent_marginal_nk.to_parquet(
-        None,
-        None,
-        &(args.out.to_string() + ".latent_marginal.parquet"),
-    )?;
+    latent_marginal_nk.to_parquet(None, None, &(args.out.to_string() + ".latent.parquet"))?;
 
-    dictionary_marginal_dk.to_parquet(
+    u_dk.to_parquet(
         Some(&gene_names),
         None,
-        &(args.out.to_string() + ".dictionary_marginal.parquet"),
-    )?;
-
-    dictionary_delta_dk.to_parquet(
-        Some(&gene_names),
-        None,
-        &(args.out.to_string() + ".dictionary_delta.parquet"),
+        &(args.out.to_string() + ".dictionary.parquet"),
     )?;
 
     srt_cell_pairs.to_parquet(
@@ -212,11 +180,6 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-struct NystromParam<'a> {
-    dictionary_marginal_dk: &'a Mat,
-    dictionary_delta_dk: &'a Mat,
-}
-
 struct NystromProj {
     marginal_kn: Mat,
     delta_kn: Mat,
@@ -225,32 +188,28 @@ struct NystromProj {
 fn nystrom_proj_visitor(
     bound: (usize, usize),
     data: &SrtCellPairs,
-    proj_basis: &NystromParam,
+    basis_dk: &Mat,
     arc_proj: Arc<Mutex<&mut NystromProj>>,
 ) -> anyhow::Result<()> {
-    let marginal_dk = proj_basis.dictionary_marginal_dk;
-    let delta_dk = proj_basis.dictionary_delta_dk;
-
     let (lb, ub) = bound;
     let pairs = &data.pairs[lb..ub];
     let left = pairs.into_iter().map(|pp| pp.left);
     let right = pairs.into_iter().map(|pp| pp.right);
 
-    // todo: we can feed delta here?
     let y_left_nk = data
         .data
         .read_columns_csc(left)?
         .log1p()
         .scale_columns()
         .transpose()
-        * delta_dk;
+        * basis_dk;
     let y_right_nk = data
         .data
         .read_columns_csc(right)?
         .log1p()
         .scale_columns()
         .transpose()
-        * delta_dk;
+        * basis_dk;
 
     let marginal_kn = (y_left_nk.scale(0.5) + y_right_nk.scale(0.5)).transpose();
 
@@ -270,8 +229,8 @@ fn nystrom_proj_visitor(
             let y_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
             let y_hat_d1 = impute_with_neighbours(&y_d1, &y_neigh_dm)?;
             y_d1.adjust_by_division_inplace(&y_hat_d1);
-            // todo: we are applying marginal dk
-            Ok(y_d1.log1p().scale_columns().transpose() * delta_dk)
+
+            Ok(y_d1.log1p().scale_columns().transpose() * basis_dk)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
@@ -285,8 +244,8 @@ fn nystrom_proj_visitor(
             let y_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
             let y_hat_d1 = impute_with_neighbours(&y_d1, &y_neigh_dm)?;
             y_d1.adjust_by_division_inplace(&y_hat_d1);
-            // todo: we are applying marginal dk?
-            Ok(y_d1.log1p().scale_columns().transpose() * delta_dk)
+
+            Ok(y_d1.log1p().scale_columns().transpose() * basis_dk)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
