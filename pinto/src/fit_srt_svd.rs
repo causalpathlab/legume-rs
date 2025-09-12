@@ -52,14 +52,6 @@ pub struct SrtSvdArgs {
     #[arg(short = 'k', long, default_value_t = 10)]
     knn_spatial: usize,
 
-    /// #k-nearest neighbours batches
-    #[arg(long, default_value_t = 3)]
-    knn_batches: usize,
-
-    /// #k-nearest neighbours within each batch
-    #[arg(long, default_value_t = 10)]
-    knn_cells: usize,
-
     /// #downsampling columns per each collapsed sample. If None, no
     /// downsampling.
     #[arg(long, short = 's')]
