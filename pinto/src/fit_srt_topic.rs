@@ -1,4 +1,4 @@
-use crate::srt_cell_pairs::SrtCellPairs;
+use crate::srt_cell_pairs::*;
 use crate::srt_collapse_pairs::*;
 use crate::srt_common::*;
 use crate::srt_random_projection::*;
@@ -50,6 +50,10 @@ pub struct SrtTopicArgs {
     )]
     coord_column_names: Vec<Box<str>>,
 
+    /// Coordinate embedding dimension
+    #[arg(long, default_value_t = 256)]
+    coord_emb: usize,
+
     /// batch membership files (comma-separated names). Each bach file
     /// should correspond to each data file.
     #[arg(long, short = 'b', value_delimiter(','))]
@@ -67,22 +71,11 @@ pub struct SrtTopicArgs {
     #[arg(short = 'k', long, default_value_t = 10)]
     knn_spatial: usize,
 
-    /// #k-nearest neighbours batches
-    #[arg(long, default_value_t = 3)]
-    knn_batches: usize,
-
-    /// #k-nearest neighbours within each batch
-    #[arg(long, default_value_t = 10)]
-    knn_cells: usize,
-
     /// #downsampling columns per each collapsed sample. If None, no
     /// downsampling.
     #[arg(long, short = 's')]
     down_sample: Option<usize>,
 
-    // /// optimization iterations
-    // #[arg(long, default_value_t = 15)]
-    // iter_opt: usize,
     /// Output header
     #[arg(long, short, required = true)]
     out: Box<str>,
@@ -163,8 +156,15 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     //////////////////////////////////////////////////
 
     info!("Constructing spatial nearest neighbourhood graphs");
-    let mut srt_cell_pairs =
-        SrtCellPairs::new(&data, &coordinates, args.knn_spatial, Some(args.block_size))?;
+    let mut srt_cell_pairs = SrtCellPairs::new(
+        &data,
+        &coordinates,
+        SrtCellPairsArgs {
+            knn: args.knn_spatial,
+            coordinate_emb_dim: args.coord_emb_dim,
+            block_size: args.block_size,
+        },
+    )?;
 
     ////////////////////////////////////////////
     // 2. Randomly project the pairs of cells //
@@ -185,30 +185,6 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
 
     let collapsed = srt_cell_pairs.collapse_pairs()?;
     let params = collapsed.optimize(None)?;
-
-    /////////////////////////////////////////////////
-    // 4. Collapse rows/genes/features to speed up //
-    /////////////////////////////////////////////////
-
-    let aggregate_rows = if params.left.nrows() > args.n_row_modules {
-        let log_x_md = concatenate_vertical(&[
-            params.left.posterior_log_mean().transpose().clone(),
-            params.right.posterior_log_mean().transpose().clone(),
-            params.left_delta.posterior_log_mean().transpose().clone(),
-            params.right_delta.posterior_log_mean().transpose().clone(),
-        ])?;
-
-        let kk = args.n_row_modules.ilog2().max(1) as usize;
-        info!(
-            "approximately reduce data features: {} -> {}",
-            log_x_md.ncols(),
-            2_i32.pow(kk as u32)
-        );
-        row_membership_matrix(binary_sort_columns(&log_x_md, kk)?)?
-    } else {
-        let d = params.left.nrows();
-        Mat::identity(d, d)
-    };
 
     /////////////////////////////////////////////////////////
     // 5. Train embedded topic model on the collapsed data //
@@ -234,14 +210,6 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     let n_vocab = args.vocab_size;
     let d_vocab_emb = args.vocab_emb;
 
-    // encoder input can be modularized
-    let marg_left_nm = params.left.posterior_mean().transpose() * &aggregate_rows;
-    let marg_right_nm = params.right.posterior_mean().transpose() * &aggregate_rows;
-
-    let delta_left_nm = params.left_delta.posterior_mean().transpose() * &aggregate_rows;
-    let delta_right_nm = params.right_delta.posterior_mean().transpose() * &aggregate_rows;
-
-    // output decoder should maintain the original dimension
     let marg_left_nd = params.left.posterior_mean().transpose();
     let marg_right_nd = params.right.posterior_mean().transpose();
 
@@ -249,10 +217,10 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     let delta_right_nd = params.right_delta.posterior_mean().transpose();
 
     let train_data = DataLoaderArgs {
-        input_marginal_left: &marg_left_nm,
-        input_marginal_right: &marg_right_nm,
-        input_delta_left: Some(&delta_left_nm),
-        input_delta_right: Some(&delta_right_nm),
+        input_marginal_left: &marg_left_nd,
+        input_marginal_right: &marg_right_nd,
+        input_delta_left: Some(&delta_left_nd),
+        input_delta_right: Some(&delta_right_nd),
         output_marginal_left: Some(&marg_left_nd),
         output_marginal_right: Some(&marg_right_nd),
         output_delta_left: Some(&delta_left_nd),
@@ -268,7 +236,7 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     // training //
     //////////////
 
-    let n_features_encoder = marg_left_nm.ncols();
+    let n_features_encoder = marg_left_nd.ncols();
 
     let encoder = MatchedLogSoftmaxEncoder::new(
         n_features_encoder,
@@ -310,20 +278,19 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         "dictionary",
     )?;
 
-    let latent = srt_cell_pairs.evaluate_latent_states(
-        &encoder,
-        &aggregate_rows,
-        &train_config,
-        args.block_size,
-    )?;
+    // let latent = srt_cell_pairs.evaluate_latent_states(
+    //     &encoder,
+    //     &train_config,
+    //     args.block_size,
+    // )?;
 
-    tensor_parquet_out(&latent.marginal, &args.out, "latent_marginal")?;
-    tensor_parquet_out(&latent.border, &args.out, "latent_border")?;
-    srt_cell_pairs.to_parquet(
-        &(args.out.to_string() + ".coord_pairs.parquet"),
-        Some(coordinate_names),
-    )?;
+    // tensor_parquet_out(&latent.marginal, &args.out, "latent_marginal")?;
+    // tensor_parquet_out(&latent.border, &args.out, "latent_border")?;
+    // srt_cell_pairs.to_parquet(
+    //     &(args.out.to_string() + ".coord_pairs.parquet"),
+    //     Some(coordinate_names),
+    // )?;
 
-    info!("done");
+    // info!("done");
     Ok(())
 }

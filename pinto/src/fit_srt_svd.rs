@@ -1,4 +1,4 @@
-use crate::srt_cell_pairs::SrtCellPairs;
+use crate::srt_cell_pairs::*;
 use crate::srt_collapse_pairs::*;
 use crate::srt_common::*;
 use crate::srt_random_projection::*;
@@ -34,6 +34,10 @@ pub struct SrtSvdArgs {
         default_value = "pxl_row_in_fullres,pxl_col_in_fullres"
     )]
     coord_column_names: Vec<Box<str>>,
+
+    /// Coordinate embedding dimension
+    #[arg(long, default_value_t = 256)]
+    coord_emb: usize,
 
     /// batch membership files (comma-separated names). Each bach file
     /// should correspond to each data file.
@@ -104,8 +108,15 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
     let gene_names = data.row_names()?;
 
     info!("Constructing spatial nearest neighbourhood graphs");
-    let mut srt_cell_pairs =
-        SrtCellPairs::new(&data, &coordinates, args.knn_spatial, Some(args.block_size))?;
+    let mut srt_cell_pairs = SrtCellPairs::new(
+        &data,
+        &coordinates,
+        SrtCellPairsArgs {
+            knn: args.knn_spatial,
+            coordinate_emb_dim: args.coord_emb_dim,
+            block_size: args.block_size,
+        },
+    )?;
 
     let proj_out =
         srt_cell_pairs.random_projection(args.proj_dim, args.block_size, Some(&batches))?;
@@ -165,7 +176,12 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
 
     srt_cell_pairs.to_parquet(
         &(args.out.to_string() + ".coord_pairs.parquet"),
-        Some(coordinate_names),
+        Some(coordinate_names.clone()),
+    )?;
+
+    collapsed.to_parquet(
+        &(args.out.to_string() + ".collapsed_pairs.parquet"),
+        Some(coordinate_names.clone()),
     )?;
 
     info!("Done");

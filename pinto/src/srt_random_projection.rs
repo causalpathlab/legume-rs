@@ -54,7 +54,8 @@ impl<'a> SrtRandProjOps for SrtCellPairs<'a> {
             return Err(anyhow::anyhow!("number of columns mismatch"));
         }
 
-        let distances = Mat::from_column_slice(mm, 1, &self.distances)
+        let embedding_kn = self
+            .coordinate_embedding_pairs()?
             .scale_columns()
             .transpose();
 
@@ -63,7 +64,7 @@ impl<'a> SrtRandProjOps for SrtCellPairs<'a> {
             proj.right.clone(),
             proj.left_delta.clone(),
             proj.right_delta.clone(),
-            distances,
+            embedding_kn,
         ])?;
 
         let target_kk = num_sorting_features.unwrap_or(proj_kn.nrows());

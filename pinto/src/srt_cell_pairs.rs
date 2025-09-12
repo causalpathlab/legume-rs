@@ -11,6 +11,7 @@ pub struct SrtCellPairs<'a> {
     pub coordinates: &'a Mat,
     pub pairs: Vec<Pair>,
     pub pairs_neighbours: Vec<PairsNeighbours>,
+    pub coordinate_embedding: Mat,
     pub distances: Vec<f32>,
     pub pair_to_sample: Option<Vec<usize>>,
     pub sample_to_pair: Option<Vec<Vec<usize>>>,
@@ -19,6 +20,12 @@ pub struct SrtCellPairs<'a> {
 pub struct PairsNeighbours {
     pub left_only: Vec<usize>,
     pub right_only: Vec<usize>,
+}
+
+pub struct SrtCellPairsArgs {
+    pub knn: usize,
+    pub coordinate_emb_dim: usize,
+    pub block_size: usize,
 }
 
 impl<'a> SrtCellPairs<'a> {
@@ -47,7 +54,7 @@ impl<'a> SrtCellPairs<'a> {
             return Err(anyhow::anyhow!("invalid coordinate names"));
         }
 
-        let paired_column_names = coordinate_names
+        let mut column_names = coordinate_names
             .iter()
             .map(|x| format!("left_{}", x).into_boxed_str())
             .chain(
@@ -57,9 +64,13 @@ impl<'a> SrtCellPairs<'a> {
             )
             .collect::<Vec<_>>();
 
-        concatenate_horizontal(&[left, right])?.to_parquet(
+        column_names.push("distance".to_string().into_boxed_str());
+
+        let distance = Mat::from_column_slice(self.num_pairs(), 1, &self.distances);
+
+        concatenate_horizontal(&[left, right, distance])?.to_parquet(
             None,
-            Some(&paired_column_names),
+            Some(&column_names),
             file_path,
         )?;
 
@@ -107,6 +118,38 @@ impl<'a> SrtCellPairs<'a> {
         left /= npairs;
         right /= npairs;
         (left, right)
+    }
+
+    pub fn average_coordinate_embedding(&self, select_pair_indices: &[usize]) -> (DVec, DVec) {
+        let d_emb = self.coordinate_embedding.ncols();
+        let mut left = DVec::zeros(d_emb);
+        let mut right = DVec::zeros(d_emb);
+        let mut npairs = 0_f32;
+
+        select_pair_indices
+            .into_iter()
+            .filter_map(|&pp| self.pairs.get(pp))
+            .for_each(|pp| {
+                left += self.coordinate_embedding.row(pp.left).transpose();
+                right += self.coordinate_embedding.row(pp.right).transpose();
+                npairs += 1.;
+            });
+        left /= npairs;
+        right /= npairs;
+        (left, right)
+    }
+
+    /// put together coordinate embedding results for all the pairs
+    pub fn coordinate_embedding_pairs(&self) -> anyhow::Result<Mat> {
+        concatenate_vertical(
+            &self
+                .pairs
+                .iter()
+                .map(|pp| {
+                    self.coordinate_embedding.row(pp.left) + self.coordinate_embedding.row(pp.right)
+                })
+                .collect::<Vec<_>>(),
+        )
     }
 
     /// visit cell pairs by regular-sized block
@@ -184,6 +227,10 @@ impl<'a> SrtCellPairs<'a> {
         self.coordinates.ncols()
     }
 
+    pub fn num_coordinate_embedding(&self) -> usize {
+        self.coordinate_embedding.ncols()
+    }
+
     pub fn num_samples(&self) -> anyhow::Result<usize> {
         let sample_to_pair = self
             .sample_to_pair
@@ -204,8 +251,7 @@ impl<'a> SrtCellPairs<'a> {
     pub fn new(
         data: &'a SparseIoVec,
         coordinates: &'a Mat,
-        knn: usize,
-        block_size: Option<usize>,
+        args: SrtCellPairsArgs,
     ) -> anyhow::Result<SrtCellPairs<'a>> {
         let nn = coordinates.nrows();
 
@@ -218,10 +264,14 @@ impl<'a> SrtCellPairs<'a> {
         let names = (0..nn).collect::<Vec<_>>();
 
         let dict = ColumnDict::from_dvector_views(points, names);
-        let nquery = (knn + 1).min(nn).max(2);
+        let nquery = (args.knn + 1).min(nn).max(2);
 
-        let jobs = create_jobs(nn, block_size);
+        let jobs = create_jobs(nn, Some(args.block_size));
         let njobs = jobs.len() as u64;
+
+        /////////////////////////////////////////////////////////////////
+        // step 1: searching nearest neighbours in spatial coordinates //
+        /////////////////////////////////////////////////////////////////
 
         let triplets = jobs
             .into_par_iter()
@@ -280,7 +330,10 @@ impl<'a> SrtCellPairs<'a> {
         triplets.dedup();
         info!("{} triplets after reciprocal matching", triplets.len());
 
-        // construct sparse network backbone
+        ///////////////////////////////////////////////
+        // step 2: construct sparse network backbone //
+        ///////////////////////////////////////////////
+
         use nalgebra_sparse::{CooMatrix, CscMatrix};
 
         let n = data.num_columns()?;
@@ -302,6 +355,10 @@ impl<'a> SrtCellPairs<'a> {
                 .cloned()
                 .collect()
         };
+
+        //////////////////////////////////////////////////////////////////////////
+        // step 3: compile disjoint set of neighbours for each left-right pair  //
+        //////////////////////////////////////////////////////////////////////////
 
         let triplets_with_neighbours = triplets
             .into_iter()
@@ -373,6 +430,13 @@ impl<'a> SrtCellPairs<'a> {
             ));
         }
 
+        /////////////////////////////////////////////
+        // step 5: precompute positional embedding //
+        /////////////////////////////////////////////
+
+        let coordinate_embedding =
+            coordinates.positional_embedding_columns(args.coordinate_emb_dim)?;
+
         let pairs = triplets_with_neighbours
             .iter()
             .map(|&((i, j), _, _)| Pair { left: i, right: j })
@@ -390,6 +454,7 @@ impl<'a> SrtCellPairs<'a> {
             data,
             coordinates,
             pairs,
+            coordinate_embedding,
             distances,
             pairs_neighbours,
             pair_to_sample: None,

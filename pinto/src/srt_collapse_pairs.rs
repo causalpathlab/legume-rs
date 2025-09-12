@@ -13,6 +13,8 @@ pub struct SrtCollapsedStat {
     pub size_s: DVec,
     pub left_coordinates: Mat,
     pub right_coordinates: Mat,
+    pub left_coord_emb: Mat,
+    pub right_coord_emb: Mat,
     n_rows: usize,
     n_cols: usize,
 }
@@ -20,8 +22,6 @@ pub struct SrtCollapsedStat {
 pub struct SrtCollapsedParameters {
     pub left: GammaMatrix,
     pub right: GammaMatrix,
-    // pub left_neigh: GammaMatrix,
-    // pub right_neigh: GammaMatrix,
     pub left_delta: GammaMatrix,
     pub right_delta: GammaMatrix,
 }
@@ -35,6 +35,7 @@ impl<'a> SrtCollapsePairsOps for SrtCellPairs<'a> {
         let mut srt_stat = SrtCollapsedStat::new(
             self.data.num_rows()?,
             self.num_coordinates(),
+            self.num_coordinate_embedding(),
             self.num_samples()?,
         );
         self.visit_pairs_by_sample(&collect_pair_stat_visitor, &mut srt_stat)?;
@@ -60,6 +61,7 @@ fn collect_pair_stat_visitor(
     let y_right = data.data.read_columns_csc(right)?;
 
     let (left_coord, right_coord) = data.average_position(&indices);
+    let (left_coord_emb, right_coord_emb) = data.average_coordinate_embedding(&indices);
 
     ////////////////////////////////////////////////////
     // imputation by neighbours and update statistics //
@@ -137,6 +139,14 @@ fn collect_pair_stat_visitor(
             .column_mut(sample)
             .copy_from(&right_coord);
 
+        stat.left_coord_emb
+            .column_mut(sample)
+            .copy_from(&left_coord_emb);
+
+        stat.right_coord_emb
+            .column_mut(sample)
+            .copy_from(&right_coord_emb);
+
         ////////////////////////////////////////////////
         // update the left and right delta statistics //
         ////////////////////////////////////////////////
@@ -166,7 +176,7 @@ fn collect_pair_stat_visitor(
 }
 
 impl SrtCollapsedStat {
-    pub fn new(dd: usize, nc: usize, ss: usize) -> Self {
+    pub fn new(dd: usize, nc: usize, ne: usize, ss: usize) -> Self {
         Self {
             left_sum_ds: Mat::zeros(dd, ss),
             left_delta_sum_ds: Mat::zeros(dd, ss),
@@ -175,6 +185,8 @@ impl SrtCollapsedStat {
             size_s: DVec::zeros(ss),
             left_coordinates: Mat::zeros(nc, ss),
             right_coordinates: Mat::zeros(nc, ss),
+            left_coord_emb: Mat::zeros(ne, ss),
+            right_coord_emb: Mat::zeros(ne, ss),
             n_rows: dd,
             n_cols: ss,
         }
@@ -184,6 +196,49 @@ impl SrtCollapsedStat {
     }
     pub fn ncols(&self) -> usize {
         self.n_cols
+    }
+
+    pub fn num_coordinates(&self) -> usize {
+        self.left_coordinates.nrows()
+    }
+
+    pub fn num_coordinate_embedding(&self) -> usize {
+        self.left_coord_emb.nrows()
+    }
+
+    /// Write all the coordinate pairs into `.parquet` file
+    /// * `file_path`: destination file name (try to include a recognizable extension in the end, e.g., `.parquet`)
+    /// * `coordinate_names`: column names for the left (`left_{}`) and right (`right_{}`) where each `{}` will be replaced with the corresponding column name
+    pub fn to_parquet(
+        &self,
+        file_path: &str,
+        coordinate_names: Option<Vec<Box<str>>>,
+    ) -> anyhow::Result<()> {
+        let left = self.left_coordinates.transpose();
+        let right = self.right_coordinates.transpose();
+        let coordinate_names = coordinate_names.unwrap_or(
+            (0..self.num_coordinates())
+                .map(|x| x.to_string().into_boxed_str())
+                .collect(),
+        );
+
+        if coordinate_names.len() != self.num_coordinates() {
+            return Err(anyhow::anyhow!("invalid coordinate names"));
+        }
+
+        let column_names = coordinate_names
+            .iter()
+            .map(|x| format!("left_{}", x).into_boxed_str())
+            .chain(
+                coordinate_names
+                    .iter()
+                    .map(|x| format!("right_{}", x).into_boxed_str()),
+            )
+            .collect::<Vec<_>>();
+
+        concatenate_horizontal(&[left, right])?.to_parquet(None, Some(&column_names), file_path)?;
+
+        Ok(())
     }
 
     /// Optimize Poisson-Gamma probabilities
