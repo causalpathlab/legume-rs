@@ -1,4 +1,4 @@
-use nalgebra::{DMatrix, Matrix};
+use nalgebra::{ComplexField, DMatrix, Matrix};
 use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
 
 use num_traits::Float;
@@ -374,6 +374,44 @@ where
             }
         }
         val
+    }
+}
+
+impl<T> EncodingOps for DMatrix<T>
+where
+    T: nalgebra::RealField + Float,
+    f32: From<T>,
+{
+    type Scalar = T;
+    type Mat = Self;
+
+    fn positional_embedding_columns(&self, emb_dim: usize) -> anyhow::Result<Self::Mat> {
+        let ncols = self.ncols();
+
+        let ncodes_per_col = emb_dim * 2;
+
+        let mut output = Self::zeros(self.nrows(), ncols * ncodes_per_col);
+
+        for j in 0..ncols {
+            let x_j = self.column(j);
+
+            for i in 0..emb_dim {
+                let power = T::from(2.0 * i as f32 / emb_dim as f32).unwrap();
+                let denom = T::from(10000_f32.powf(f32::from(power))).unwrap();
+
+                let column_data = if i % 2 == 0 {
+                    x_j.map(|x_ij| ComplexField::sin(x_ij / denom))
+                } else {
+                    x_j.map(|x_ij| ComplexField::cos(x_ij / denom))
+                };
+
+                // Assign the computed column to the output matrix
+                output
+                    .column_mut(j * ncodes_per_col + i)
+                    .copy_from(&column_data);
+            }
+        }
+        Ok(output)
     }
 }
 

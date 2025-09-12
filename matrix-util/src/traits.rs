@@ -155,6 +155,24 @@ pub trait DistanceOps {
     ) -> anyhow::Result<Vec<(usize, usize, Self::Scalar)>>;
 }
 
+pub trait EncodingOps
+where
+    Self: Sized,
+{
+    type Mat;
+    type Scalar;
+
+    /// Sinusoidal Positional Encoding
+    /// * `emb_dim` - embedding dimension, say `d`
+    /// * returns each column's embedding results (row x 2d)
+    ///
+    /// for each element r of each column c:
+    ///  ret[r, 2i] = sin(x[r,c]/10000^(2i/d))
+    ///  ret[r, 2i + 1] = cos(x[r,c]/10000^(2i/d))
+    /// where i in [0, d/2-1]
+    fn positional_embedding_columns(&self, emb_dim: usize) -> anyhow::Result<Self::Mat>;
+}
+
 /// Operations that involves multiple types
 pub trait CompositeOps {
     type Scalar;
