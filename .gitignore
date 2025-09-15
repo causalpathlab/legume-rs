@@ -39,3 +39,4 @@ temp*
 # avoid saving too big files
 *.bam
 *.bam.bai
+*.zip
