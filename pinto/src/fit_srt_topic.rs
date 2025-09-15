@@ -161,7 +161,7 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         &coordinates,
         SrtCellPairsArgs {
             knn: args.knn_spatial,
-            coordinate_emb_dim: args.coord_emb_dim,
+            coordinate_emb_dim: args.coord_emb,
             block_size: args.block_size,
         },
     )?;

@@ -113,7 +113,7 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
         &coordinates,
         SrtCellPairsArgs {
             knn: args.knn_spatial,
-            coordinate_emb_dim: args.coord_emb_dim,
+            coordinate_emb_dim: args.coord_emb,
             block_size: args.block_size,
         },
     )?;
