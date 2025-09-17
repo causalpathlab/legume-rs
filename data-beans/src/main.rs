@@ -7,14 +7,16 @@ mod sparse_io;
 mod sparse_io_vector;
 mod sparse_matrix_hdf5;
 mod sparse_matrix_zarr;
+mod sparse_util;
 
 use crate::misc::*;
 use crate::qc::*;
 use crate::sparse_io::*;
 use crate::sparse_io_vector::*;
+use crate::sparse_util::*;
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
-use indicatif::ParallelProgressIterator;
+use common_io::*;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use log::info;
 use matrix_util::common_io::basename;
@@ -23,9 +25,10 @@ use matrix_util::*;
 use rayon::prelude::*;
 use simulate_deconv::generate_convoluted_data;
 use simulate_deconv::SimConvArgs;
+use tempfile::TempDir;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -38,6 +41,12 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::ListH5(args) => {
             list_h5(args)?;
+        }
+        Commands::ListZarr(args) => {
+            list_zarr(args)?;
+        }
+        Commands::FromZarr(args) => {
+            run_build_from_zarr_triplets(args)?;
         }
         Commands::FromH5ad(args) => {
             run_build_from_h5_triplets(args)?;
@@ -129,8 +138,14 @@ enum Commands {
     /// Build a backend from triplets in `h5`
     FromH5(FromH5Args),
 
+    /// Build a backend from triplets in `zarr`
+    FromZarr(FromZarrArgs),
+
     /// List what are included in `h5` file
     ListH5(ListH5Args),
+
+    /// List what are included in `zarr` file
+    ListZarr(ListZarrArgs),
 
     /// Sort rows according to the order of row names specified in a
     /// row name file
@@ -280,6 +295,11 @@ pub struct ListH5Args {
 }
 
 #[derive(Args, Debug)]
+pub struct ListZarrArgs {
+    zarr_file: Box<str>,
+}
+
+#[derive(Args, Debug)]
 pub struct FromH5Args {
     /// `h5` file where triplets of sparse matrix data were stored
     /// (10X genomics or H5AD).
@@ -295,7 +315,7 @@ pub struct FromH5Args {
 
     /// group name for sparse data triplets (check out them by `list-h5` subcommand)
     #[arg(short = 'x', long, default_value = "matrix")]
-    data_group_name: Box<str>,
+    root_group_name: Box<str>,
 
     /// triplet values, X(i,j) value itself
     #[arg(short = 'd', long, default_value = "data")]
@@ -308,6 +328,57 @@ pub struct FromH5Args {
     /// indptr: column pointers for CSC, row pointers for CSR
     #[arg(short = 'p', long, default_value = "indptr")]
     indptr_field: Box<str>,
+
+    /// is it about row or column indices?
+    #[arg(short = 't', value_enum, default_value = "column")]
+    pointer_type: IndexPointerType,
+
+    /// group/dataset name for rows/genes/features
+    #[arg(short = 'r', long, default_value = "matrix/features/id")]
+    row_name_field: Box<str>,
+
+    /// group/dataset name for columns/cells
+    #[arg(short = 'c', long, default_value = "matrix/barcodes")]
+    column_name_field: Box<str>,
+
+    /// squeeze
+    #[arg(long, default_value_t = false)]
+    do_squeeze: bool,
+
+    /// verbose mode
+    #[arg(short, long, action = ArgAction::Count)]
+    verbose: u8,
+}
+
+#[derive(Args, Debug)]
+pub struct FromZarrArgs {
+    /// `zarr` file where triplets of sparse matrix data were stored
+    /// (10X Genomics Cell Ranger or Space Ranger).
+    zarr_file: Box<str>,
+
+    /// backend for the output file
+    #[arg(long, value_enum, default_value = "zarr")]
+    backend: SparseIoBackend,
+
+    /// output file header: {output}.{backend}
+    #[arg(short, long)]
+    output: Option<Box<str>>,
+
+    /// triplet values (check out them by `list-zarr` subcommand)
+    #[arg(short = 'd', long, default_value = "data")]
+    data_field: Box<str>,
+
+    /// indices: row indices for CSC, column indices for CSR
+    #[arg(short = 'i', long, default_value = "indices")]
+    indices_field: Box<str>,
+
+    /// indptr: column pointers for CSC, row pointers for CSR
+    #[arg(short = 'p', long, default_value = "indptr")]
+    indptr_field: Box<str>,
+
+    /// is it about row or column indices?
+    #[arg(short = 't', value_enum, default_value = "column")]
+    pointer_type: IndexPointerType,
 
     /// group/dataset name for rows/genes/features
     #[arg(short = 'r', long, default_value = "matrix/features/id")]
@@ -1071,6 +1142,46 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn list_zarr(cmd_args: &ListZarrArgs) -> anyhow::Result<()> {
+    let ext = common_io::extension(&cmd_args.zarr_file)?;
+
+    match ext.to_string().as_ref() {
+        "zarr" => {
+            info!(".zarr file: {}", cmd_args.zarr_file.as_ref());
+            use zarrs::config::MetadataRetrieveVersion;
+            use zarrs::filesystem::FilesystemStore;
+            use zarrs::node::Node;
+
+            let store = Arc::new(FilesystemStore::new(cmd_args.zarr_file.as_ref())?);
+            let node = Node::open_opt(&store, "/", &MetadataRetrieveVersion::Default).unwrap();
+            let tree = node.hierarchy_tree();
+            println!("hierarchy_tree:\n{}", tree);
+        }
+        "zip" => {
+            info!("zipped .zarr file: {}", cmd_args.zarr_file.as_ref());
+            use zip::ZipArchive;
+
+            let file = std::fs::File::open(cmd_args.zarr_file.as_ref())?;
+            let reader = std::io::BufReader::new(file);
+
+            let mut archive = ZipArchive::new(reader)?;
+
+            for i in 0..archive.len() {
+                let file = archive.by_index(i)?;
+                println!("{}", file.name());
+                // if file.is_dir() {
+                //     println!("{}", file.name());
+                // }
+            }
+        }
+        _ => {
+            info!("unknown extension '{}'", ext);
+        }
+    };
+
+    Ok(())
+}
+
 fn list_h5(cmd_args: &ListH5Args) -> anyhow::Result<()> {
     let data_file = cmd_args.h5_file.clone();
     let file = hdf5::File::open(data_file.to_string())?;
@@ -1094,62 +1205,102 @@ fn list_h5(cmd_args: &ListH5Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_triplets_from_h5(
-    root: &hdf5::Group,
-    data_name: &str,
-    indices_name: &str,
-    indptr_name: &str,
-) -> anyhow::Result<(Vec<(u64, u64, f32)>, (usize, usize, usize))> {
-    if let (Ok(values), Ok(indices), Ok(indptr)) = (
-        root.dataset(data_name),
-        root.dataset(indices_name),
-        root.dataset(indptr_name),
-    ) {
-        use rayon::prelude::*;
-        let indptr = indptr.read_1d::<usize>()?.to_vec();
-        let nvectors = indptr.len() - 1;
-
-        info!("Collecting triplets over {} data points...", nvectors);
-
-        let mut triplets = vec![];
-        let arc_triplets = Arc::new(Mutex::new(&mut triplets));
-
-        let full_values = values.read_1d::<f32>()?.to_vec();
-        let full_indices = indices.read_1d::<u64>()?.to_vec();
-
-        (0..nvectors)
-            .into_par_iter()
-            .progress_count(nvectors as u64)
-            .for_each(|_idx| {
-                let j = _idx as u64;
-                let start = indptr[_idx];
-                let end = indptr[_idx + 1];
-                let values_slice = &full_values[start..end];
-                let indices_slice = &full_indices[start..end];
-
-                // let values_slice = values.read_slice_1d::<f32, _>(start..end).expect("values");
-                // let indices_slice = indices
-                //     .read_slice_1d::<u64, _>(start..end)
-                //     .expect("indices");
-
-                // Note: h5ad treats cells as rows, but we treat cells as columns
-                let triplets_slice: Vec<(u64, u64, f32)> = indices_slice
-                    .iter()
-                    .zip(values_slice.iter())
-                    .map(|(&i, &x_ij)| (i, j, x_ij))
-                    .collect();
-
-                arc_triplets
-                    .lock()
-                    .expect("failed to lock triplets")
-                    .extend(triplets_slice);
-            });
-        let nfeatures = triplets.iter().map(|&(i, _, _)| i).max().unwrap_or(0_u64) as usize + 1;
-        let nnz = triplets.len();
-        Ok((triplets, (nfeatures, nvectors, nnz)))
-    } else {
-        Err(anyhow::anyhow!("cannot read triplets"))
+fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
+    if args.verbose > 0 {
+        std::env::set_var("RUST_LOG", "info");
     }
+
+    let file_path = args.zarr_file.clone();
+    let backend = args.backend.clone();
+    let output = match args.output.clone() {
+        Some(output) => output,
+        None => {
+            let (dir, base, _ext) = common_io::dir_base_ext(&file_path)?;
+
+            match (dir.len(), base.len()) {
+                (0, 0) => "./".to_string().into_boxed_str(),
+                (0, _) => format!("./{}", base).into_boxed_str(),
+                _ => format!("{}/{}", dir, base).into_boxed_str(),
+            }
+        }
+    };
+
+    let backend_file = match backend {
+        SparseIoBackend::HDF5 => format!("{}.h5", &output),
+        SparseIoBackend::Zarr => format!("{}.zarr", &output),
+    };
+
+    if std::path::Path::new(&backend_file).exists() {
+        info!(
+            "This existing backend file '{}' will be deleted",
+            &backend_file
+        );
+        common_io::remove_file(&backend_file)?;
+    }
+
+    let (_dir, base, ext) = dir_base_ext(&file_path)?;
+
+    let temp_dir = TempDir::new()?; // should be kept outside
+
+    let store = if ext.as_ref() == "zip" {
+        let temp_path = std::path::PathBuf::from(temp_dir.path());
+        let temp_zarr = format!("{}/{}", temp_path.to_str().unwrap(), base);
+        // let temp_zarr = format!("{}/{}", dir, base);
+        unzip_dir(&file_path, Some(temp_zarr.as_ref()))?;
+        info!("Unzipped to {}", temp_zarr);
+        Arc::new(zarrs::filesystem::FilesystemStore::new(temp_zarr)?)
+    } else {
+        info!("Store at {}", file_path);
+        Arc::new(zarrs::filesystem::FilesystemStore::new(file_path.as_ref())?)
+    };
+
+    let indices: Vec<u64> = read_zarr_array(store.clone(), args.indices_field.as_ref())?;
+    let indptr: Vec<u64> = read_zarr_array(store.clone(), args.indptr_field.as_ref())?;
+    let values: Vec<f32> = read_zarr_array(store.clone(), args.data_field.as_ref())?;
+    info!("Read the arrays");
+
+    let CooTripletsShape { triplets, shape } = ValuesIndicesPointers {
+        values: &values,
+        indices: &indices,
+        indptr: &indptr,
+    }
+    .into_coo(args.pointer_type.clone())?;
+
+    let TripletsShape { nrows, ncols, nnz } = shape;
+    info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
+
+    let row_names = read_zarr_strings(store.clone(), args.row_name_field.as_ref())
+        .unwrap_or_else(|_| (0..nrows).map(|x| x.to_string().into_boxed_str()).collect());
+    assert_eq!(nrows, row_names.len());
+
+    let column_names = read_zarr_strings(store.clone(), args.column_name_field.as_ref())
+        .unwrap_or_else(|_| (0..ncols).map(|x| x.to_string().into_boxed_str()).collect());
+    assert_eq!(ncols, column_names.len());
+
+    let mut out = create_sparse_from_triplets(
+        triplets,
+        (nrows, ncols, nnz),
+        Some(&backend_file),
+        Some(&backend),
+    )?;
+    info!("created sparse matrix: {}", backend_file);
+    out.register_row_names_vec(&row_names);
+    out.register_column_names_vec(&column_names);
+
+    if args.do_squeeze {
+        info!("Squeeze the backend data {}", &backend_file);
+        let squeeze_args = RunSqueezeArgs {
+            data_file: backend_file.into_boxed_str(),
+            row_nnz_cutoff: 0,
+            column_nnz_cutoff: 0,
+            block_size: 100,
+        };
+
+        run_squeeze(&squeeze_args)?;
+    }
+
+    info!("done");
+    Ok(())
 }
 
 fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
@@ -1186,23 +1337,29 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
     }
 
     let file = hdf5::File::open(data_file.to_string())?;
-    info!("Opened {}", data_file.clone());
+    info!("Opened data file: {}", data_file.clone());
 
-    let group_name = &cmd_args.data_group_name.to_string();
-    let data_name = &cmd_args.data_field.to_string();
-    let indices_name = &cmd_args.indices_field.to_string();
-    let indptr_name = &cmd_args.indptr_field.to_string();
-    let row_name = &cmd_args.row_name_field.to_string();
-    let column_name = &cmd_args.column_name_field.to_string();
+    if let Ok(root) = file.group(&cmd_args.root_group_name.to_string()) {
+        // Read triplets with the shape information
+        let CooTripletsShape { triplets, shape } = if let (Ok(values), Ok(indices), Ok(indptr)) = (
+            root.dataset(&cmd_args.data_field.to_string()),
+            root.dataset(&cmd_args.indices_field.to_string()),
+            root.dataset(&cmd_args.indptr_field.to_string()),
+        ) {
+            ValuesIndicesPointers {
+                values: &values.read_1d::<f32>()?.to_vec(),
+                indices: &indices.read_1d::<u64>()?.to_vec(),
+                indptr: &indptr.read_1d::<u64>()?.to_vec(),
+            }
+            .into_coo(cmd_args.pointer_type.clone())?
+        } else {
+            return Err(anyhow::anyhow!("unable to read triplets"));
+        };
 
-    if let Ok(data) = file.group(group_name) {
-        let (triplets, mtx_shape) =
-            read_triplets_from_h5(&data, data_name, indices_name, indptr_name)?;
-
-        let (nrows, ncols, nnz) = mtx_shape;
+        let TripletsShape { nrows, ncols, nnz } = shape;
         info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
 
-        let row_names: Vec<Box<str>> = match file.dataset(row_name) {
+        let row_names: Vec<Box<str>> = match file.dataset(cmd_args.row_name_field.as_ref()) {
             Ok(rows) => read_hdf5_strings(rows)?,
             _ => {
                 info!("row (feature) names not found");
@@ -1212,7 +1369,7 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
         info!("Read {} row names", row_names.len());
         assert_eq!(nrows, row_names.len());
 
-        let column_names: Vec<Box<str>> = match file.dataset(column_name) {
+        let column_names: Vec<Box<str>> = match file.dataset(cmd_args.column_name_field.as_ref()) {
             Ok(columns) => read_hdf5_strings(columns)?,
             _ => {
                 info!("column (cell) names not found");
@@ -1231,9 +1388,11 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
         info!("created sparse matrix: {}", backend_file);
         out.register_row_names_vec(&row_names);
         out.register_column_names_vec(&column_names);
-        info!("done");
     } else {
-        return Err(anyhow::anyhow!("data group `{}` is missing", group_name));
+        return Err(anyhow::anyhow!(
+            "unable to identify data with the specified root group name: {}",
+            cmd_args.root_group_name
+        ));
     }
 
     if cmd_args.do_squeeze {
@@ -1247,7 +1406,7 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
 
         run_squeeze(&squeeze_args)?;
     }
-
+    info!("done");
     Ok(())
 }
 
@@ -1327,7 +1486,7 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     common_io::mkdir(&output)?;
 
     let file = cmd_args.data_files[0].as_ref();
-    let backend = match common_io::extension(file)?.to_string().as_str() {
+    let backend = match common_io::extension(file)?.as_ref() {
         "h5" => SparseIoBackend::HDF5,
         "zarr" => SparseIoBackend::Zarr,
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", file)),
@@ -1536,3 +1695,22 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     info!("done");
     Ok(())
 }
+
+// {
+//     let group = zarrs::group::Group::open_opt(
+//         store.clone(),
+//         "/",
+//         &zarrs::config::MetadataRetrieveVersion::Default,
+//     )?;
+//     let group = group.to_v3();
+//     group.store_metadata()?;
+//     group.erase_metadata_opt(zarrs::config::MetadataEraseVersion::V2)?;
+//     let node = zarrs::node::Node::open_opt(
+//         &store,
+//         "/",
+//         &zarrs::config::MetadataRetrieveVersion::Default,
+//     )
+//     .unwrap();
+//     let tree = node.hierarchy_tree();
+//     println!("hierarchy_tree:\n{}", tree);
+// }
