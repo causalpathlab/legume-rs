@@ -1,0 +1,26 @@
+
+
+```{sh compile_or_install_if_needed}
+cargo install --path .
+cargo install --path ../data-beans
+```
+
+```{sh download_10x_data}
+curl -O https://cf.10xgenomics.com/samples/xenium/2.0.0/Xenium_V1_human_Pancreas_FFPE/Xenium_V1_human_Pancreas_FFPE_outs.zip
+mkdir -p temp
+unzip Xenium_V1_human_Pancreas_FFPE_outs.zip -d ./temp
+unzip temp/cell_feature_matrix.zarr.zip -d ./temp/cell_feature_matrix.zarr
+```
+
+
+```{sh}
+cargo install --path ../data-beans
+
+data-beans from-zarr temp/cell_feature_matrix.zarr -o temp7 --do-squeeze --backend hdf5 -d /cell_features/data -i /cell_features/indices -p /cell_features/indptr
+
+[ -d temp/cell_feature_matrix.zarr ] && rm -rf temp/cell_feature_matrix.zarr
+# tree temp/cell_feature_matrix.zarr
+
+data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --do-squeeze --backend hdf5 -d /cell_features/data -i /cell_features/indices -p /cell_features/indptr -t row
+
+```

@@ -332,8 +332,37 @@ impl ToStr for OsStr {
     }
 }
 
+/// Unzip `zip_path` into the `extract_path` If `extract_path` is
+/// `None`, just use a current directory.
+/// * Returns `extract_path`
+pub fn unzip_dir(zip_path: &str, extract_path: Option<&str>) -> anyhow::Result<Box<str>> {
+    let zip_file = std::fs::File::open(&zip_path)?;
+    let mut archive = zip::ZipArchive::new(zip_file)?;
+
+    let extract_path = extract_path
+        .map(|x| std::path::PathBuf::from(x))
+        .unwrap_or(std::env::current_dir()?);
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let out_path = extract_path.join(file.name());
+        // println!("{}", out_path.to_str().unwrap());
+        if file.is_dir() {
+            std::fs::create_dir_all(&out_path)?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut outfile = std::fs::File::create(&out_path)?;
+            std::io::copy(&mut file, &mut outfile)?;
+        }
+    }
+
+    Ok(extract_path.into_boxed_str())
+}
+
 ///
-/// Take the basename of a file
+/// Take the parent directory, basename, and extension of a file
 /// * `file` - file name
 ///
 pub fn dir_base_ext(file_path: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<str>)> {
