@@ -3,10 +3,11 @@ use hdf5::types::FixedUnicode;
 use hdf5::types::TypeDescriptor;
 use hdf5::types::VarLenUnicode;
 
+use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
 
 /// update a v2 zarrs array to the v3 one
 pub fn update_zarr_to_v3(
-    store: std::sync::Arc<zarrs::filesystem::FilesystemStore>,
+    store: std::sync::Arc<dyn ZStorageTraits>, // zarrs::filesystem::FilesystemStore
     key_name: &str,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
@@ -33,8 +34,8 @@ pub fn update_zarr_to_v3(
 /// read numeric vector from zarr storage `store`
 /// * `store` - filesystem storage
 /// * `key_name` - key name
-pub fn read_zarr_array<T>(
-    store: std::sync::Arc<zarrs::filesystem::FilesystemStore>,
+pub fn read_zarr_numerics<T>(
+    store: std::sync::Arc<dyn ZStorageTraits>, // zarrs::filesystem::FilesystemStore
     key_name: &str,
 ) -> anyhow::Result<Vec<T>>
 where
@@ -44,6 +45,7 @@ where
     use zarrs::config::MetadataRetrieveVersion;
 
     update_zarr_to_v3(store.clone(), key_name)?;
+
     let arr = ZArray::open_opt(store.clone(), key_name, &MetadataRetrieveVersion::Default)?;
 
     use zarrs::array::data_type::DataType;
@@ -74,6 +76,53 @@ where
     Ok(ret)
 }
 
+/// Extract `attr_name` attribute from `group_name` group
+pub fn read_zarr_attr<V>(
+    store: std::sync::Arc<dyn ZStorageTraits>,
+    key_name: &str,
+) -> anyhow::Result<V>
+where
+    V: serde::de::DeserializeOwned,
+{
+    use anyhow::Context;
+    use zarrs::config::MetadataRetrieveVersion;
+
+    fn parse_key_name(key_name: &str) -> (Box<str>, Box<str>) {
+        let trimmed = key_name.strip_prefix('/').unwrap_or(key_name);
+        match trimmed.rsplit_once('/') {
+            Some((left, right)) => (
+                format!("/{}", left).into_boxed_str(),
+                right.to_string().into_boxed_str(),
+            ),
+            None => (
+                "/".to_string().into_boxed_str(),
+                trimmed.to_string().into_boxed_str(),
+            ), // No "/" in the string
+        }
+    }
+
+    let (group_name, attr_name) = parse_key_name(key_name);
+
+    let group = zarrs::group::Group::open_opt(
+        store,
+        group_name.as_ref(),
+        &MetadataRetrieveVersion::Default,
+    )
+    .with_context(|| format!("Failed to open group '{}'", group_name))?;
+
+    let attr_value = group
+        .attributes()
+        .get(attr_name.as_ref())
+        .with_context(|| {
+            format!(
+                "Attribute '{}' not found in group '{}'",
+                attr_name, group_name
+            )
+        })?;
+
+    Ok(serde_json::from_value(attr_value.clone())?)
+}
+
 pub fn read_zarr_strings(
     store: std::sync::Arc<zarrs::filesystem::FilesystemStore>,
     key_name: &str,
@@ -89,7 +138,6 @@ pub fn read_zarr_strings(
         .map(|x| x.into_boxed_str())
         .collect())
 }
-
 
 /// Read strings from `HDF5` dataset
 pub fn read_hdf5_strings(data: hdf5::dataset::Dataset) -> anyhow::Result<Vec<Box<str>>> {
