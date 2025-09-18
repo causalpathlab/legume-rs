@@ -21,6 +21,46 @@ data-beans from-zarr temp/cell_feature_matrix.zarr -o temp7 --do-squeeze --backe
 [ -d temp/cell_feature_matrix.zarr ] && rm -rf temp/cell_feature_matrix.zarr
 # tree temp/cell_feature_matrix.zarr
 
-data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --do-squeeze --backend hdf5 -d /cell_features/data -i /cell_features/indices -p /cell_features/indptr -t row
+data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --backend hdf5
+data-beans info temp7.h5
 
+data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --backend hdf5 -d /cell_features/data -i /cell_features/indices -p /cell_features/indptr --pointer-type row
+
+data-beans list-h5 temp/cell_feature_matrix.h5
+
+data-beans from-h5 temp/cell_feature_matrix.h5 -o temp5 --backend hdf5
+data-beans info temp5.h5
+
+data-beans stat --stat-dim row temp5.h5
+
+data-beans from-mtx temp/cell_feature_matrix/matrix.mtx.gz -r temp/cell_feature_matrix/features.tsv.gz -c temp/cell_feature_matrix/barcodes.tsv.gz -o temp4
+
+data-beans stat --stat-dim row temp4.zarr
+
+```
+
+
+```{python}
+import zarr
+import numpy as np
+
+zarr_data = zarr.open("temp/cell_feature_matrix.zarr", mode = "r")
+
+zarr.tree(zarr_data)
+
+
+
+indptr = zarr_data["cell_features/indptr"]
+indices = zarr_data["cell_features/indices"]
+values = zarr_data["cell_features/data"]
+cell_id = zarr_data["cell_features/cell_id"]
+
+indptr[-1]
+indptr[:10]
+indices.shape
+values.shape
+
+
+np.min(indptr)
+np.max(indptr)
 ```

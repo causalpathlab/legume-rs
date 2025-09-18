@@ -313,32 +313,40 @@ pub struct FromH5Args {
     #[arg(short, long)]
     output: Option<Box<str>>,
 
-    /// group name for sparse data triplets (check out them by `list-h5` subcommand)
+    /// root group name for sparse data triplets (check out `list-h5`)
     #[arg(short = 'x', long, default_value = "matrix")]
     root_group_name: Box<str>,
 
-    /// triplet values, X(i,j) value itself
+    /// triplet values, X(i,j) value (under the root)
     #[arg(short = 'd', long, default_value = "data")]
     data_field: Box<str>,
 
-    /// indices: row indices for CSC, column indices for CSR
+    /// indices: row indices for CSC, column indices for CSR (under the root)
     #[arg(short = 'i', long, default_value = "indices")]
     indices_field: Box<str>,
 
-    /// indptr: column pointers for CSC, row pointers for CSR
+    /// indptr: column pointers for CSC, row pointers for CSR (under the root)
     #[arg(short = 'p', long, default_value = "indptr")]
     indptr_field: Box<str>,
 
-    /// is it about row or column indices?
-    #[arg(short = 't', value_enum, default_value = "column")]
+    /// is it about row (gene) or column (cell) indices?
+    #[arg(short = 't', long, value_enum, default_value = "column")]
     pointer_type: IndexPointerType,
 
-    /// group/dataset name for rows/genes/features
-    #[arg(short = 'r', long, default_value = "matrix/features/id")]
+    /// group/dataset name for rows/genes/features (under the root)
+    #[arg(short = 'r', long, default_value = "features/id")]
     row_name_field: Box<str>,
 
-    /// group/dataset name for columns/cells
-    #[arg(short = 'c', long, default_value = "matrix/barcodes")]
+    /// group/dataset name for rows/genes/features (under the root)
+    #[arg(short = 'f', long, default_value = "features/feature_type")]
+    row_type_field: Box<str>,
+
+    /// select row type (as long as the type contains)
+    #[arg(long, default_value = "gene")]
+    select_row_type: Box<str>,
+
+    /// group/dataset name for columns/cells (under the root)
+    #[arg(short = 'c', long, default_value = "barcodes")]
     column_name_field: Box<str>,
 
     /// squeeze
@@ -353,7 +361,7 @@ pub struct FromH5Args {
 #[derive(Args, Debug)]
 pub struct FromZarrArgs {
     /// `zarr` file where triplets of sparse matrix data were stored
-    /// (10X Genomics Cell Ranger or Space Ranger).
+    /// (e.g., 10X Genomics Xenium's `cell_feature_matrix.zarr.zip`).
     zarr_file: Box<str>,
 
     /// backend for the output file
@@ -365,27 +373,35 @@ pub struct FromZarrArgs {
     output: Option<Box<str>>,
 
     /// triplet values (check out them by `list-zarr` subcommand)
-    #[arg(short = 'd', long, default_value = "data")]
+    #[arg(short = 'd', long, default_value = "/cell_features/data")]
     data_field: Box<str>,
 
     /// indices: row indices for CSC, column indices for CSR
-    #[arg(short = 'i', long, default_value = "indices")]
+    #[arg(short = 'i', long, default_value = "/cell_features/indices")]
     indices_field: Box<str>,
 
     /// indptr: column pointers for CSC, row pointers for CSR
-    #[arg(short = 'p', long, default_value = "indptr")]
+    #[arg(short = 'p', long, default_value = "/cell_features/indptr")]
     indptr_field: Box<str>,
 
-    /// is it about row or column indices?
-    #[arg(short = 't', value_enum, default_value = "column")]
+    /// do pointers keep track of `row` (gene) or `column` (cell) indices?
+    #[arg(short = 't', long, value_enum, default_value = "row")]
     pointer_type: IndexPointerType,
 
     /// group/dataset name for rows/genes/features
-    #[arg(short = 'r', long, default_value = "matrix/features/id")]
+    #[arg(short = 'r', long, default_value = "/cell_features/feature_ids")]
     row_name_field: Box<str>,
 
+    /// group/dataset name for rows/genes/features
+    #[arg(short = 'f', long, default_value = "/cell_features/feature_types")]
+    row_type_field: Box<str>,
+
+    /// select row type
+    #[arg(long, default_value = "gene")]
+    select_row_type: Box<str>,
+
     /// group/dataset name for columns/cells
-    #[arg(short = 'c', long, default_value = "matrix/barcodes")]
+    #[arg(short = 'c', long, default_value = "/cell_features/cell_id")]
     column_name_field: Box<str>,
 
     /// squeeze
@@ -1254,9 +1270,9 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         Arc::new(zarrs::filesystem::FilesystemStore::new(file_path.as_ref())?)
     };
 
-    let indices: Vec<u64> = read_zarr_array(store.clone(), args.indices_field.as_ref())?;
-    let indptr: Vec<u64> = read_zarr_array(store.clone(), args.indptr_field.as_ref())?;
-    let values: Vec<f32> = read_zarr_array(store.clone(), args.data_field.as_ref())?;
+    let indices: Vec<u64> = read_zarr_numerics(store.clone(), args.indices_field.as_ref())?;
+    let indptr: Vec<u64> = read_zarr_numerics(store.clone(), args.indptr_field.as_ref())?;
+    let values: Vec<f32> = read_zarr_numerics(store.clone(), args.data_field.as_ref())?;
     info!("Read the arrays");
 
     let CooTripletsShape { triplets, shape } = ValuesIndicesPointers {
@@ -1269,11 +1285,33 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     let TripletsShape { nrows, ncols, nnz } = shape;
     info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
 
-    let row_names = read_zarr_strings(store.clone(), args.row_name_field.as_ref())
+    let row_names = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_name_field)
+        .or_else(|_| read_zarr_strings(store.clone(), args.row_name_field.as_ref()))
         .unwrap_or_else(|_| (0..nrows).map(|x| x.to_string().into_boxed_str()).collect());
     assert_eq!(nrows, row_names.len());
 
-    let column_names = read_zarr_strings(store.clone(), args.column_name_field.as_ref())
+    let row_types = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_type_field)
+        .or_else(|_| read_zarr_strings(store.clone(), args.row_name_field.as_ref()))
+        .unwrap_or_else(|_| vec![args.select_row_type.clone(); nrows]);
+    assert_eq!(nrows, row_types.len());
+
+    let select_pattern = args.select_row_type.to_lowercase();
+    let select_rows = row_types
+        .iter()
+        .enumerate()
+        .filter_map(|(i, x)| {
+            if x.to_lowercase().contains(&select_pattern) {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    // todo: parse /cell_features/cell_id
+    // https://www.10xgenomics.com/support/software/xenium-onboard-analysis/3.4/advanced/xoa-output-zarr#cellID
+    let column_names = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.column_name_field)
+        .or_else(|_| read_zarr_strings(store.clone(), args.column_name_field.as_ref()))
         .unwrap_or_else(|_| (0..ncols).map(|x| x.to_string().into_boxed_str()).collect());
     assert_eq!(ncols, column_names.len());
 
@@ -1286,6 +1324,11 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     info!("created sparse matrix: {}", backend_file);
     out.register_row_names_vec(&row_names);
     out.register_column_names_vec(&column_names);
+
+    if select_rows.len() < nrows {
+        info!("filtering in features of `{}` type", args.select_row_type);
+        out.subset_columns_rows(None, Some(&select_rows))?;
+    }
 
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
@@ -1303,14 +1346,14 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
-    if cmd_args.verbose > 0 {
+fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
+    if args.verbose > 0 {
         std::env::set_var("RUST_LOG", "info");
     }
 
-    let data_file = cmd_args.h5_file.clone();
-    let backend = cmd_args.backend.clone();
-    let output = match cmd_args.output.clone() {
+    let data_file = args.h5_file.clone();
+    let backend = args.backend.clone();
+    let output = match args.output.clone() {
         Some(output) => output,
         None => {
             let (dir, base, _ext) = common_io::dir_base_ext(&data_file)?;
@@ -1339,19 +1382,19 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
     let file = hdf5::File::open(data_file.to_string())?;
     info!("Opened data file: {}", data_file.clone());
 
-    if let Ok(root) = file.group(&cmd_args.root_group_name.to_string()) {
+    if let Ok(root) = file.group(args.root_group_name.as_ref()) {
         // Read triplets with the shape information
         let CooTripletsShape { triplets, shape } = if let (Ok(values), Ok(indices), Ok(indptr)) = (
-            root.dataset(&cmd_args.data_field.to_string()),
-            root.dataset(&cmd_args.indices_field.to_string()),
-            root.dataset(&cmd_args.indptr_field.to_string()),
+            root.dataset(args.data_field.as_ref()),
+            root.dataset(args.indices_field.as_ref()),
+            root.dataset(args.indptr_field.as_ref()),
         ) {
             ValuesIndicesPointers {
                 values: &values.read_1d::<f32>()?.to_vec(),
                 indices: &indices.read_1d::<u64>()?.to_vec(),
                 indptr: &indptr.read_1d::<u64>()?.to_vec(),
             }
-            .into_coo(cmd_args.pointer_type.clone())?
+            .into_coo(args.pointer_type.clone())?
         } else {
             return Err(anyhow::anyhow!("unable to read triplets"));
         };
@@ -1359,7 +1402,7 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
         let TripletsShape { nrows, ncols, nnz } = shape;
         info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
 
-        let row_names: Vec<Box<str>> = match file.dataset(cmd_args.row_name_field.as_ref()) {
+        let row_names: Vec<Box<str>> = match root.dataset(args.row_name_field.as_ref()) {
             Ok(rows) => read_hdf5_strings(rows)?,
             _ => {
                 info!("row (feature) names not found");
@@ -1369,7 +1412,16 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
         info!("Read {} row names", row_names.len());
         assert_eq!(nrows, row_names.len());
 
-        let column_names: Vec<Box<str>> = match file.dataset(cmd_args.column_name_field.as_ref()) {
+        let row_types: Vec<Box<str>> = match root.dataset(args.row_type_field.as_ref()) {
+            Ok(rows) => read_hdf5_strings(rows)?,
+            _ => {
+                info!("use all the types");
+                vec![args.select_row_type.clone(); nrows]
+            }
+        };
+        assert_eq!(nrows, row_types.len());
+
+        let column_names: Vec<Box<str>> = match root.dataset(args.column_name_field.as_ref()) {
             Ok(columns) => read_hdf5_strings(columns)?,
             _ => {
                 info!("column (cell) names not found");
@@ -1388,14 +1440,32 @@ fn run_build_from_h5_triplets(cmd_args: &FromH5Args) -> anyhow::Result<()> {
         info!("created sparse matrix: {}", backend_file);
         out.register_row_names_vec(&row_names);
         out.register_column_names_vec(&column_names);
+
+        let select_pattern = args.select_row_type.to_lowercase();
+        let select_rows = row_types
+            .iter()
+            .enumerate()
+            .filter_map(|(i, x)| {
+                if x.to_lowercase().contains(&select_pattern) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if select_rows.len() < nrows {
+            info!("filtering in features of `{}` type", args.select_row_type);
+            out.subset_columns_rows(None, Some(&select_rows))?;
+        }
     } else {
         return Err(anyhow::anyhow!(
             "unable to identify data with the specified root group name: {}",
-            cmd_args.root_group_name
+            args.root_group_name
         ));
     }
 
-    if cmd_args.do_squeeze {
+    if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
             data_file: backend_file.into_boxed_str(),

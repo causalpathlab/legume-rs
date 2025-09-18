@@ -259,10 +259,10 @@ impl SparseMtxData {
             .collect();
 
         let array = ArrayBuilder::new(
-            array_shape,            // array shape
-            dt,                     // data type
-            chunk_size.try_into()?, // chunk shape
-            fill,                   //
+            array_shape, // array shape
+            chunk_size,  // chunk shape
+            dt,          // data type
+            fill,        //
         )
         .bytes_to_bytes_codecs(vec![Arc::new(ZstdCodec::new(COMPRESSION_LEVEL, false))])
         .build(self.store.clone(), key)?;
@@ -302,10 +302,10 @@ impl SparseMtxData {
         };
 
         let array = ArrayBuilder::new(
-            vec![vec.len() as u64],              // array shape
-            dt,                                  // data type
-            vec![chunk_size as u64].try_into()?, // chunk shape
-            fill,                                //
+            vec![vec.len() as u64],  // array shape
+            vec![chunk_size as u64], // chunk shape
+            dt,                      // data type
+            fill,                    //
         )
         .bytes_to_bytes_codecs(vec![Arc::new(ZstdCodec::new(COMPRESSION_LEVEL, false))])
         .build(self.store.clone(), key)?;
