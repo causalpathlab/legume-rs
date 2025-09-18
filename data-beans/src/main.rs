@@ -392,15 +392,15 @@ pub struct FromZarrArgs {
     #[arg(short = 'r', long, default_value = "/cell_features/feature_ids")]
     row_name_field: Box<str>,
 
-    /// group/dataset name for rows/genes/features
+    /// rows/genes/features field
     #[arg(short = 'f', long, default_value = "/cell_features/feature_types")]
     row_type_field: Box<str>,
 
-    /// select row type
+    /// select row type (check if it is contained)
     #[arg(long, default_value = "gene")]
     select_row_type: Box<str>,
 
-    /// group/dataset name for columns/cells
+    /// columns/cells field; will first attempt xenium's Cell ID format mapping
     #[arg(short = 'c', long, default_value = "/cell_features/cell_id")]
     column_name_field: Box<str>,
 
@@ -1308,11 +1308,11 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         })
         .collect::<Vec<_>>();
 
-    // todo: parse /cell_features/cell_id
-    // https://www.10xgenomics.com/support/software/xenium-onboard-analysis/3.4/advanced/xoa-output-zarr#cellID
-    let column_names = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.column_name_field)
-        .or_else(|_| read_zarr_strings(store.clone(), args.column_name_field.as_ref()))
-        .unwrap_or_else(|_| (0..ncols).map(|x| x.to_string().into_boxed_str()).collect());
+    let column_names =
+        parse_10x_cell_id(read_zarr_ndarray::<u32>(store.clone(), &args.column_name_field)?.view())
+            .or_else(|_| read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.column_name_field))
+            .or_else(|_| read_zarr_strings(store.clone(), args.column_name_field.as_ref()))
+            .unwrap_or_else(|_| (0..ncols).map(|x| x.to_string().into_boxed_str()).collect());
     assert_eq!(ncols, column_names.len());
 
     let mut out = create_sparse_from_triplets(

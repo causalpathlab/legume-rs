@@ -23,6 +23,8 @@ data-beans from-zarr temp/cell_feature_matrix.zarr -o temp7 --do-squeeze --backe
 
 data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --backend hdf5
 data-beans info temp7.h5
+data-beans column-names temp7.h5 | head
+
 
 data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --backend hdf5 -d /cell_features/data -i /cell_features/indices -p /cell_features/indptr --pointer-type row
 
