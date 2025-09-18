@@ -31,6 +31,81 @@ pub fn update_zarr_to_v3(
     Ok(())
 }
 
+/// 10x xenium's n x 2 `cell_id` array into a vector of string codes
+/// see [here](https://www.10xgenomics.com/support/software/xenium-onboard-analysis/3.4/advanced/xoa-output-zarr#cellID)
+pub fn parse_10x_cell_id(
+    input: ndarray::ArrayView<u32, ndarray::IxDyn>,
+) -> anyhow::Result<Vec<Box<str>>> {
+    if input.ndim() != 2 || input.shape()[1] != 2 {
+        return Err(anyhow::anyhow!("Must be 2D with shape [N, 2]"));
+    }
+
+    // Precomputed lookup table for hex-to-shifted conversion
+    let mut lookup = [None; 256];
+    for (i, ch) in "0123456789abcdef".chars().enumerate() {
+        lookup[ch as usize] = Some(
+            [
+                'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p',
+            ][i],
+        );
+    }
+    input
+        .outer_iter()
+        .map(|row| -> anyhow::Result<Box<str>> {
+            let barcode: String = format!("{:08x}", row[0])
+                .chars()
+                .map(|ch| {
+                    lookup[ch as usize].ok_or_else(|| anyhow::anyhow!("invalid hex char: {}", ch))
+                })
+                .collect::<anyhow::Result<String>>()?;
+            Ok(format!("{}-{}", barcode, row[1]).into_boxed_str())
+        })
+        .collect()
+}
+
+/// read a full ndarray from zarr storage `store`
+/// * `store` - filesystem storage
+/// * `key_name` - key name
+pub fn read_zarr_ndarray<T>(
+    store: std::sync::Arc<dyn ZStorageTraits>, // zarrs::filesystem::FilesystemStore
+    key_name: &str,
+) -> anyhow::Result<ndarray::ArrayD<T>>
+where
+    T: zarrs::array::ElementOwned + num_traits::FromPrimitive,
+{
+    use zarrs::array::Array as ZArray;
+    use zarrs::config::MetadataRetrieveVersion;
+
+    update_zarr_to_v3(store.clone(), key_name)?;
+
+    let arr = ZArray::open_opt(store.clone(), key_name, &MetadataRetrieveVersion::Default)?;
+
+    use zarrs::array::data_type::DataType;
+    match arr.data_type() {
+        DataType::Float32 => {
+            let array: ndarray::ArrayD<f32> =
+                arr.retrieve_array_subset_ndarray::<f32>(&arr.subset_all())?;
+            Ok(array.mapv(|x| T::from_f32(x).unwrap()))
+        }
+        DataType::Float64 => {
+            let array: ndarray::ArrayD<f64> =
+                arr.retrieve_array_subset_ndarray::<f64>(&arr.subset_all())?;
+            Ok(array.mapv(|x| T::from_f64(x).unwrap()))
+        }
+        DataType::UInt32 => {
+            let array: ndarray::ArrayD<u32> =
+                arr.retrieve_array_subset_ndarray::<u32>(&arr.subset_all())?;
+            Ok(array.mapv(|x| T::from_u32(x).unwrap()))
+        }
+        DataType::UInt64 => {
+            let array: ndarray::ArrayD<u64> =
+                arr.retrieve_array_subset_ndarray::<u64>(&arr.subset_all())?;
+            Ok(array.mapv(|x| T::from_u64(x).unwrap()))
+        }
+        _ => Err(anyhow::anyhow!("not supported data type")),
+    }
+}
+
 /// read numeric vector from zarr storage `store`
 /// * `store` - filesystem storage
 /// * `key_name` - key name

@@ -60,8 +60,3 @@ data-beans-alg = { path = "data-beans-alg"}
 matrix-param = { path = "matrix-param" }
 matrix-util = { path = "matrix-util" }
 candle-util = { path = "candle-util" }
-
-senna = { path = "senna" }
-pinto = { path = "pinto" }
-cocoa-diff = { path = "cocoa-diff" }
-faba = { path = "faba" }
