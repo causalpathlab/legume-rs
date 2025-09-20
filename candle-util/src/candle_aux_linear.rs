@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use candle_core::{Result, Tensor};
-use candle_nn::{Module, ops};
+use candle_nn::{ops, Module};
 
 /////////////////////////////////////////////
 // Linear module with non-negative weights //
@@ -107,12 +107,12 @@ pub fn aggregate_linear(
 ////////////////////////////////
 
 #[derive(Clone, Debug)]
-pub struct SoftmaxLinear {
+pub struct LogSoftmaxLinear {
     weight_dk: Tensor,
     bias_d1: Option<Tensor>,
 }
 
-impl SoftmaxLinear {
+impl LogSoftmaxLinear {
     pub fn new(weight_dk: Tensor, bias_d1: Option<Tensor>) -> Self {
         Self { weight_dk, bias_d1 }
     }
@@ -128,29 +128,34 @@ impl SoftmaxLinear {
     }
 }
 
-impl Module for SoftmaxLinear {
+impl Module for LogSoftmaxLinear {
     fn forward(&self, h_nk: &Tensor) -> Result<Tensor> {
         let log_w_kd = match *h_nk.dims() {
             [b1, b2, _, _] => self.biased_weight()?.broadcast_left((b1, b2))?.t()?,
             [bsize, _, _] => self.biased_weight()?.broadcast_left(bsize)?.t()?,
             _ => self.biased_weight()?.t()?,
         };
-
-        h_nk.matmul(&log_w_kd.exp()?)
+        let eps = 1e-8;
+        (h_nk.matmul(&log_w_kd.exp()?)? + eps)?.log()
+        // the following is exact... but there is sacrifice in speed
+        // candle_nn::ops::log_softmax(&(prob_nd + eps)?.log()?, 1)
+        // perhaps, we should consider memory alignment?
+        // let prob_dn = self.dictionary.forward(&theta_nk)?.t()?;
+        // candle_nn::ops::log_softmax(&(prob_dn + eps)?.log()?, 0)?.t()
     }
 }
 
 /// create a softmax linear layer
-/// `output_nd <- input_nk * t(β_dk)`
+/// `output_nd <- log( input_nk * t(β_dk) )`
 /// where
 /// `Σ_j β_jk = 1` for all `k`
-pub fn softmax_linear(
+pub fn log_softmax_linear(
     in_dim: usize,
     out_dim: usize,
     vb: candle_nn::VarBuilder,
-) -> Result<SoftmaxLinear> {
+) -> Result<LogSoftmaxLinear> {
     let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
     let ws_dk = vb.get_with_hints((out_dim, in_dim), "logits", init_ws)?;
     let b_d1 = vb.get_with_hints((out_dim, 1), "logit_bias", candle_nn::init::ZERO)?;
-    Ok(SoftmaxLinear::new(ws_dk, Some(b_d1)))
+    Ok(LogSoftmaxLinear::new(ws_dk, Some(b_d1)))
 }

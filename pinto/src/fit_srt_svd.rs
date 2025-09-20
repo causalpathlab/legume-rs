@@ -1,8 +1,8 @@
 use crate::srt_cell_pairs::*;
 use crate::srt_collapse_pairs::*;
 use crate::srt_common::*;
+use crate::srt_input::*;
 use crate::srt_random_projection::*;
-use crate::srt_routines_pre_process::*;
 use clap::Parser;
 use matrix_param::traits::*;
 
@@ -143,30 +143,20 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
     let sinv_k = DVec::from_iterator(s_k.len(), s_k.iter().map(|&s| 1.0 / (s + eps)));
 
     info!("Nystrom projection...");
-    let mut nystrom_proj = NystromProj {
-        marginal_kn: Mat::zeros(args.n_latent_topics, srt_cell_pairs.num_pairs()),
-        delta_kn: Mat::zeros(args.n_latent_topics, srt_cell_pairs.num_pairs()),
-    };
+    let mut proj_kn = Mat::zeros(args.n_latent_topics, srt_cell_pairs.num_pairs());
 
     let basis_dk = &u_dk * Mat::from_diagonal(&sinv_k);
 
     srt_cell_pairs.visit_pairs_by_block(
         &nystrom_proj_visitor,
         &basis_dk,
-        &mut nystrom_proj,
+        &mut proj_kn,
         args.block_size,
     )?;
 
-    let latent_marginal_nk = nystrom_proj.marginal_kn.transpose();
-    let latent_delta_nk = nystrom_proj.delta_kn.transpose();
-
-    latent_delta_nk.to_parquet(
-        None,
-        None,
-        &(args.out.to_string() + ".latent_delta.parquet"),
-    )?;
-
-    latent_marginal_nk.to_parquet(None, None, &(args.out.to_string() + ".latent.parquet"))?;
+    proj_kn
+        .transpose()
+        .to_parquet(None, None, &(args.out.to_string() + ".latent.parquet"))?;
 
     u_dk.to_parquet(
         Some(&gene_names),
@@ -184,20 +174,19 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
         Some(coordinate_names.clone()),
     )?;
 
+    todo!("perform clustering");
+
+    todo!("cell-level propensity");
+
     info!("Done");
     Ok(())
-}
-
-struct NystromProj {
-    marginal_kn: Mat,
-    delta_kn: Mat,
 }
 
 fn nystrom_proj_visitor(
     bound: (usize, usize),
     data: &SrtCellPairs,
     basis_dk: &Mat,
-    arc_proj: Arc<Mutex<&mut NystromProj>>,
+    arc_proj_kn: Arc<Mutex<&mut Mat>>,
 ) -> anyhow::Result<()> {
     let (lb, ub) = bound;
     let pairs = &data.pairs[lb..ub];
@@ -219,56 +208,11 @@ fn nystrom_proj_visitor(
         .transpose()
         * basis_dk;
 
-    let marginal_kn = (y_left_nk.scale(0.5) + y_right_nk.scale(0.5)).transpose();
+    let chunk_kn = (y_left_nk.scale(0.5) + y_right_nk.scale(0.5)).transpose();
 
-    ////////////////////////////////////////////////////
-    // imputation by neighbours and update statistics //
-    ////////////////////////////////////////////////////
+    let mut proj_kn = arc_proj_kn.lock().expect("lock proj in nystrom");
 
-    let pairs_neighbours = &data.pairs_neighbours[lb..ub];
-
-    let y_delta_left = pairs_neighbours
-        .iter()
-        .enumerate()
-        .map(|(j, n)| -> anyhow::Result<Mat> {
-            let left = pairs[j].left;
-
-            let mut y_d1 = data.data.read_columns_csc(std::iter::once(left))?;
-            let y_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
-            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_neigh_dm)?;
-            y_d1.adjust_by_division_inplace(&y_hat_d1);
-
-            Ok(y_d1.log1p().scale_columns().transpose() * basis_dk)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    let y_delta_right = pairs_neighbours
-        .iter()
-        .enumerate()
-        .map(|(j, n)| -> anyhow::Result<Mat> {
-            let right = pairs[j].right;
-
-            let mut y_d1 = data.data.read_columns_csc(std::iter::once(right))?;
-            let y_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
-            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_neigh_dm)?;
-            y_d1.adjust_by_division_inplace(&y_hat_d1);
-
-            Ok(y_d1.log1p().scale_columns().transpose() * basis_dk)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    let y_delta_left_nk = concatenate_vertical(&y_delta_left)?;
-
-    let y_delta_right_nk = concatenate_vertical(&y_delta_right)?;
-
-    let delta_kn = (y_delta_left_nk.scale(0.5) + y_delta_right_nk.scale(0.5)).transpose();
-
-    let mut proj = arc_proj.lock().expect("lock proj in nystrom");
-
-    proj.marginal_kn
-        .columns_range_mut(lb..ub)
-        .copy_from(&marginal_kn);
-    proj.delta_kn.columns_range_mut(lb..ub).copy_from(&delta_kn);
+    proj_kn.columns_range_mut(lb..ub).copy_from(&chunk_kn);
 
     Ok(())
 }

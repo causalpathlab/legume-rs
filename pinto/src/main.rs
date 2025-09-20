@@ -3,10 +3,8 @@ mod fit_srt_topic;
 mod srt_cell_pairs;
 mod srt_collapse_pairs;
 mod srt_common;
+mod srt_input;
 mod srt_random_projection;
-mod srt_routines_latent_representation;
-mod srt_routines_post_process;
-mod srt_routines_pre_process;
 
 use fit_srt_svd::*;
 use fit_srt_topic::*;

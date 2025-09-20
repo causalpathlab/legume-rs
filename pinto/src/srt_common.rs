@@ -24,10 +24,11 @@ pub use dashmap::DashSet as HashSet;
 
 pub use std::sync::{Arc, Mutex};
 
+pub use candle_util::candle_data_loader_util::*;
 pub use candle_util::candle_inference::*;
 pub use candle_util::candle_loss_functions as loss_func;
 pub use candle_util::candle_matched_decoder_topic::*;
-pub use candle_util::candle_matched_encoder_softmax::*;
+pub use candle_util::candle_matched_encoder::*;
 pub use candle_util::candle_model_traits::*;
 pub use candle_util::{candle_core, candle_nn};
 

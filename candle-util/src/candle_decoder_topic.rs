@@ -12,14 +12,14 @@ use candle_nn::{Module, VarBuilder};
 pub struct TopicDecoder {
     n_features: usize,
     n_topics: usize,
-    dictionary: SoftmaxLinear,
+    dictionary: LogSoftmaxLinear,
 }
 
 impl TopicDecoder {
     /// Will create a new ETM decoder with the following parameters:
     /// * `dictionary.weight`
     pub fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
-        let dictionary = softmax_linear(n_topics, n_features, vs.pp("dictionary"))?;
+        let dictionary = log_softmax_linear(n_topics, n_features, vs.pp("dictionary"))?;
         Ok(Self {
             n_features,
             n_topics,
@@ -27,22 +27,15 @@ impl TopicDecoder {
         })
     }
 
-    pub fn dictionary(&self) -> &SoftmaxLinear {
+    pub fn dictionary(&self) -> &LogSoftmaxLinear {
         &self.dictionary
     }
 }
 
 impl DecoderModuleT for TopicDecoder {
     fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
-        let eps = 1e-4;
         let theta_nk = z_nk.exp()?;
-        let prob_nd = self.dictionary.forward(&theta_nk)?;
-        (prob_nd + eps)?.log()
-        // the following is exact... but there is sacrifice in speed
-        // candle_nn::ops::log_softmax(&(prob_nd + eps)?.log()?, 1)
-        // perhaps, we should consider memory alignment?
-        // let prob_dn = self.dictionary.forward(&theta_nk)?.t()?;
-        // candle_nn::ops::log_softmax(&(prob_dn + eps)?.log()?, 0)?.t()
+        self.dictionary.forward(&theta_nk)
     }
 
     fn get_dictionary(&self) -> Result<Tensor> {

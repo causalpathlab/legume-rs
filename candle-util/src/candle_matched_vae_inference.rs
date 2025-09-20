@@ -109,29 +109,27 @@ where
                     .try_for_each(|mb| -> anyhow::Result<()> {
                         let latent = self.encoder.forward_t(
                             MatchedEncoderData {
-                                marginal_left: mb.input_marginal_left.as_ref(),
-                                marginal_right: mb.input_marginal_right.as_ref(),
-                                delta_left: mb.input_delta_left.as_ref(),
-                                delta_right: mb.input_delta_right.as_ref(),
+                                left: mb.input_left.as_ref(),
+                                right: mb.input_right.as_ref(),
+                                aux_left: mb.input_aux_left.as_ref(),
+                                aux_right: mb.input_aux_right.as_ref(),
                             },
                             true,
                         )?;
 
-                        let kl = &latent.kl_div;
+                        let kl = &latent.kl;
 
                         let (_, llik) = self.decoder.forward_with_llik(
                             &latent,
                             MatchedDecoderData {
-                                marginal_left: mb
-                                    .output_marginal_left
+                                left: mb
+                                    .output_left
                                     .as_ref()
                                     .ok_or(anyhow::anyhow!("need output left"))?,
-                                marginal_right: mb
-                                    .output_marginal_right
+                                right: mb
+                                    .output_right
                                     .as_ref()
                                     .ok_or(anyhow::anyhow!("need output right"))?,
-                                border_left: mb.output_delta_left.as_ref(),
-                                border_right: mb.output_delta_right.as_ref(),
                             },
                             llik_func,
                         )?;
@@ -170,28 +168,26 @@ where
                 for mb in &data_vec {
                     let latent = self.encoder.forward_t(
                         MatchedEncoderData {
-                            marginal_left: mb.input_marginal_left.as_ref(),
-                            marginal_right: mb.input_marginal_right.as_ref(),
-                            delta_left: mb.input_delta_left.as_ref(),
-                            delta_right: mb.input_delta_right.as_ref(),
+                            left: mb.input_left.as_ref(),
+                            right: mb.input_right.as_ref(),
+                            aux_left: mb.input_aux_left.as_ref(),
+                            aux_right: mb.input_aux_right.as_ref(),
                         },
                         true,
                     )?;
-                    let kl = &latent.kl_div;
+                    let kl = &latent.kl;
 
                     let (_, llik) = self.decoder.forward_with_llik(
                         &latent,
                         MatchedDecoderData {
-                            marginal_left: mb
-                                .output_marginal_left
+                            left: mb
+                                .output_left
                                 .as_ref()
                                 .ok_or(anyhow::anyhow!("need output left"))?,
-                            marginal_right: mb
-                                .output_marginal_right
+                            right: mb
+                                .output_right
                                 .as_ref()
                                 .ok_or(anyhow::anyhow!("need output right"))?,
-                            border_left: mb.output_delta_left.as_ref(),
-                            border_right: mb.output_delta_right.as_ref(),
                         },
                         llik_func,
                     )?;

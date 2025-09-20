@@ -1,5 +1,5 @@
 use crate::srt_common::*;
-use candle_util::candle_data_loader::generate_minibatch_intervals;
+use matrix_util::utils::generate_minibatch_intervals;
 
 pub struct Pair {
     pub left: usize,
