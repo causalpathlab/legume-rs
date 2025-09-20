@@ -3,7 +3,7 @@ use crate::candle_aux_linear::*;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{BatchNorm, Embedding, Linear, Module, ModuleT, VarBuilder, ops};
+use candle_nn::{ops, BatchNorm, Embedding, Linear, Module, ModuleT, VarBuilder};
 
 pub struct LogSoftmaxEncoder {
     n_features: usize,
@@ -54,7 +54,7 @@ impl LogSoftmaxEncoder {
 
         let eps = 1e-4;
         let n_vocab = self.n_vocab as f64;
-        let d = x_nd.dims().len();
+        let d = x_nd.rank();
         let min_val = x_nd.min_keepdim(d - 1)?;
         let max_val = x_nd.max_keepdim(d - 1)?;
         let div_val = ((max_val - &min_val)? + eps)?;
@@ -72,7 +72,7 @@ impl LogSoftmaxEncoder {
         self.emb_x.forward_t(&int_x_nd, train)? + self.emb_logx.forward_t(&int_logx_nd, train)?
     }
 
-    fn modularized_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
+    fn modularized_composite_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
         let x_nm = self.feature_module.forward(x_nd)?;
         self.composite_embedding(&x_nm, train)
     }
@@ -90,14 +90,14 @@ impl LogSoftmaxEncoder {
         debug_assert_eq!(x_nd.dims().len(), 2);
         debug_assert!(x_nd.min_all()?.to_scalar::<f32>()? >= 0_f32);
 
-        let emb_ndd = self.modularized_embedding(x_nd, train)?;
-        let last_dim = emb_ndd.dims().len();
+        let emb_nmk = self.modularized_composite_embedding(x_nd, train)?;
+        let last_dim = emb_nmk.rank();
 
         if let Some(x0_nd) = x0_nd {
-            let emb0_ndd = self.modularized_embedding(x0_nd, train)?;
-            (emb_ndd - &emb0_ndd)?.sum(last_dim - 1)
+            let emb0_nmk = self.modularized_composite_embedding(x0_nd, train)?;
+            (emb_nmk - &emb0_nmk)?.mean(last_dim - 1)
         } else {
-            emb_ndd.sum(last_dim - 1)
+            emb_nmk.mean(last_dim - 1)
         }
     }
 
@@ -115,8 +115,8 @@ impl LogSoftmaxEncoder {
         let min_lv = -8.; // and log variance
         let max_lv = 8.; //
 
-        let bn_nd = self.preprocess_input(x_nd, x0_nd, train)?;
-        let fc_nl = self.fc.forward_t(&bn_nd, train)?;
+        let xx_nm = self.preprocess_input(x_nd, x0_nd, train)?;
+        let fc_nl = self.fc.forward_t(&xx_nm, train)?;
         let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
         let z_mean_nk = self
             .z_mean

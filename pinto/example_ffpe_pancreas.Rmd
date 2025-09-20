@@ -42,27 +42,10 @@ data-beans stat --stat-dim row temp4.zarr
 ```
 
 
-```{python}
-import zarr
-import numpy as np
+```{r}
 
-zarr_data = zarr.open("temp/cell_feature_matrix.zarr", mode = "r")
+head(arrow::read_parquet("temp/cells.parquet"))
 
-zarr.tree(zarr_data)
-
-
-
-indptr = zarr_data["cell_features/indptr"]
-indices = zarr_data["cell_features/indices"]
-values = zarr_data["cell_features/data"]
-cell_id = zarr_data["cell_features/cell_id"]
-
-indptr[-1]
-indptr[:10]
-indices.shape
-values.shape
-
-
-np.min(indptr)
-np.max(indptr)
 ```
+
+

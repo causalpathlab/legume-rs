@@ -2,12 +2,14 @@ use crate::srt_cell_pairs::*;
 use crate::srt_collapse_pairs::*;
 use crate::srt_common::*;
 use crate::srt_random_projection::*;
-use crate::srt_routines_latent_representation::*;
-use crate::srt_routines_post_process::*;
-use crate::srt_routines_pre_process::*;
-use candle_util::candle_matched_data_loader::DataLoaderArgs;
+
+use crate::srt_input::*;
+
+use candle_util::candle_inference::*;
+use candle_util::candle_matched_data_loader::*;
+use candle_util::candle_matched_vae_inference::*;
 use clap::{Parser, ValueEnum};
-use data_beans_alg::random_projection::*;
+
 use matrix_param::{
     io::ParamIo,
     traits::{Inference, TwoStatParam},
@@ -183,11 +185,12 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     // 3. Collapse these cell pairs into samples //
     ///////////////////////////////////////////////
 
+    info!("Collecting summary statistics across cell pairs...");
     let collapsed = srt_cell_pairs.collapse_pairs()?;
     let params = collapsed.optimize(None)?;
 
     /////////////////////////////////////////////////////////
-    // 5. Train embedded topic model on the collapsed data //
+    // 4. Train embedded topic model on the collapsed data //
     /////////////////////////////////////////////////////////
 
     let dev = match args.device {
@@ -206,26 +209,25 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         verbose: args.verbose,
     };
 
-    let n_topics = args.n_latent_topics;
-    let n_vocab = args.vocab_size;
-    let d_vocab_emb = args.vocab_emb;
+    let input_left_nd = params.left.posterior_mean().transpose();
+    let input_right_nd = params.right.posterior_mean().transpose();
 
-    let marg_left_nd = params.left.posterior_mean().transpose();
-    let marg_right_nd = params.right.posterior_mean().transpose();
+    let aux_left_nc = collapsed.left_coord_emb.transpose();
+    let aux_right_nc = &collapsed.right_coord_emb.transpose();
 
-    let delta_left_nd = params.left_delta.posterior_mean().transpose();
-    let delta_right_nd = params.right_delta.posterior_mean().transpose();
+    let output_left_nd = params.left_delta.posterior_mean().transpose();
+    let output_right_nd = params.right_delta.posterior_mean().transpose();
 
     let train_data = DataLoaderArgs {
-        input_marginal_left: &marg_left_nd,
-        input_marginal_right: &marg_right_nd,
-        input_delta_left: Some(&delta_left_nd),
-        input_delta_right: Some(&delta_right_nd),
-        output_marginal_left: Some(&marg_left_nd),
-        output_marginal_right: Some(&marg_right_nd),
-        output_delta_left: Some(&delta_left_nd),
-        output_delta_right: Some(&delta_right_nd),
+        input_left: &input_left_nd,
+        input_right: &input_right_nd,
+        input_aux_left: Some(&aux_left_nc),
+        input_aux_right: Some(&aux_right_nc),
+        output_left: Some(&output_left_nd),
+        output_right: Some(&output_right_nd),
     };
+
+    info!("constructed training data");
 
     let parameters = candle_nn::VarMap::new();
     let dev = &train_config.device;
@@ -236,27 +238,32 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     // training //
     //////////////
 
-    let n_features_encoder = marg_left_nd.ncols();
-
-    let encoder = MatchedLogSoftmaxEncoder::new(
-        n_features_encoder,
-        n_topics,
-        n_vocab,
-        d_vocab_emb,
-        &args.encoder_layers,
+    let encoder = MatchedEncoder::new(
+        MatchedEncoderArg {
+            dim_feature: input_left_nd.ncols(),
+            dim_latent: args.n_latent_topics,
+            dim_coord: aux_left_nc.ncols(),
+            n_vocab_emb: args.vocab_size,
+            dim_emb: args.coord_emb,
+            num_feature_modules: args.n_row_modules,
+            layers: &args.encoder_layers,
+        },
         param_builder.clone(),
     )?;
 
-    let n_features_decoder = marg_left_nd.ncols();
-
-    let decoder = MatchedTopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
+    let decoder = MatchedTopicDecoder::new(
+        output_left_nd.ncols(),
+        args.n_latent_topics,
+        param_builder.clone(),
+    )?;
 
     info!(
-        "input: {} -> encoder -> decoder -> output: {}",
-        n_features_encoder, n_features_decoder
+        "built the model: {} -> .. -> {}",
+        input_left_nd.ncols(),
+        output_left_nd.ncols()
     );
 
-    let (log_likelihood, latent) = train_left_right_vae(
+    let (log_likelihood, latent) = train_encoder_decoder(
         train_data,
         &encoder,
         &decoder,
@@ -265,18 +272,18 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         &train_config,
     )?;
 
-    write_types::<f32>(&log_likelihood, &(args.out.to_string() + ".llik.gz"))?;
+    // write_types::<f32>(&log_likelihood, &(args.out.to_string() + ".llik.gz"))?;
 
-    tensor_parquet_out(&latent.marginal, &args.out, "collapsed_latent_marginal")?;
-    tensor_parquet_out(&latent.border, &args.out, "collapsed_latent_border")?;
+    // tensor_parquet_out(&latent.marginal, &args.out, "collapsed_latent_marginal")?;
+    // tensor_parquet_out(&latent.border, &args.out, "collapsed_latent_border")?;
 
-    named_tensor_parquet_out(
-        &decoder.get_dictionary()?,
-        Some(&gene_names),
-        None,
-        &args.out,
-        "dictionary",
-    )?;
+    // named_tensor_parquet_out(
+    //     &decoder.get_dictionary()?,
+    //     Some(&gene_names),
+    //     None,
+    //     &args.out,
+    //     "dictionary",
+    // )?;
 
     // let latent = srt_cell_pairs.evaluate_latent_states(
     //     &encoder,
@@ -293,4 +300,225 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
 
     // info!("done");
     Ok(())
+}
+
+fn train_encoder_decoder<D, Enc, Dec, LLikFn>(
+    data: DataLoaderArgs<'_, D>,
+    encoder: &Enc,
+    decoder: &Dec,
+    parameters: &candle_nn::VarMap,
+    log_likelihood_func: &LLikFn,
+    train_config: &TrainConfig,
+) -> anyhow::Result<(Vec<f32>, MatchedEncoderLatent)>
+where
+    D: RowsToTensorVec,
+    Enc: MatchedEncoderModuleT + Send + Sync + 'static,
+    Dec: MatchedDecoderModuleT + Send + Sync + 'static,
+    LLikFn: Fn(&candle_core::Tensor, &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor>
+        + Sync
+        + Send,
+{
+    let mut data_loader = InMemoryData::from(data)?;
+
+    let mut vae = MatchedVae::build(encoder, decoder, parameters);
+
+    for var in parameters.all_vars() {
+        var.to_device(&train_config.device)?;
+    }
+
+    let llik_trace =
+        vae.train_encoder_decoder(&mut data_loader, log_likelihood_func, train_config)?;
+
+    info!(
+        "Done with training over {} epochs using {} samples",
+        train_config.num_epochs,
+        data_loader.num_data()
+    );
+
+    unimplemented!("");
+    // let latent = encoder.evaluate(&data_loader, train_config)?;
+    // info!("Evaluated the latent states of the training data");
+    // Ok((llik_trace, latent))
+}
+
+pub trait SrtLatentTopicOps {
+    fn evaluate_latent_states<Enc>(
+        &self,
+        encoder: &Enc,
+        train_config: &TrainConfig,
+        block_size: usize,
+    ) -> anyhow::Result<MatchedEncoderLatent>
+    where
+        Enc: MatchedEncoderModuleT + Send + Sync + 'static;
+}
+
+impl<'a> SrtLatentTopicOps for SrtCellPairs<'a> {
+    fn evaluate_latent_states<Enc>(
+        &self,
+        encoder: &Enc,
+        train_config: &TrainConfig,
+        block_size: usize,
+    ) -> anyhow::Result<MatchedEncoderLatent>
+    where
+        Enc: MatchedEncoderModuleT + Send + Sync + 'static,
+    {
+        let njobs = self.num_pairs().div_ceil(block_size);
+        let mut latent_vec = Vec::with_capacity(njobs);
+        self.visit_pairs_by_block(
+            &evaluate_latent_state_visitor,
+            &(encoder, train_config),
+            &mut latent_vec,
+            block_size,
+        )?;
+
+        latent_vec.sort_by_key(|&(lb, _)| lb);
+        latent_vec
+            .into_iter()
+            .map(|(_, x)| x)
+            .collect::<Vec<_>>()
+            .concatenate()
+    }
+}
+
+fn evaluate_latent_state_visitor<Enc>(
+    bound: (usize, usize),
+    data: &SrtCellPairs,
+    encoder_config: &(&Enc, &TrainConfig),
+    latent_vec: Arc<Mutex<&mut Vec<(usize, MatchedEncoderLatent)>>>,
+) -> anyhow::Result<()>
+where
+    Enc: MatchedEncoderModuleT + Send + Sync + 'static,
+{
+    let (encoder, config) = *encoder_config;
+    let dev = &config.device;
+
+    let (lb, ub) = bound;
+    let pairs = &data.pairs[lb..ub];
+    let left = pairs.into_iter().map(|pp| pp.left);
+    let right = pairs.into_iter().map(|pp| pp.right);
+
+    let y_left = data.data.read_columns_csc(left)?.transpose();
+    let y_right = data.data.read_columns_csc(right)?.transpose();
+
+    ////////////////////////////////////////////////////
+    // imputation by neighbours and update statistics //
+    ////////////////////////////////////////////////////
+
+    let pairs_neighbours = &data.pairs_neighbours[lb..ub];
+
+    unimplemented!("");
+
+    // let y_delta_left = pairs_neighbours
+    //     .iter()
+    //     .enumerate()
+    //     .map(|(j, n)| -> anyhow::Result<Mat> {
+    //         let left = pairs[j].left;
+
+    //         let mut y_d1 = data.data.read_columns_csc(std::iter::once(left))?;
+    //         let y_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
+    //         let y_hat_d1 = impute_with_neighbours(&y_d1, &y_neigh_dm)?;
+    //         y_d1.adjust_by_division_inplace(&y_hat_d1);
+    //         Ok(y_d1.transpose())
+    //     })
+    //     .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // let y_delta_right = pairs_neighbours
+    //     .iter()
+    //     .enumerate()
+    //     .map(|(j, n)| -> anyhow::Result<Mat> {
+    //         let right = pairs[j].right;
+
+    //         let mut y_d1 = data.data.read_columns_csc(std::iter::once(right))?;
+    //         let y_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
+    //         let y_hat_d1 = impute_with_neighbours(&y_d1, &y_neigh_dm)?;
+    //         y_d1.adjust_by_division_inplace(&y_hat_d1);
+    //         Ok(y_d1.transpose())
+    //     })
+    //     .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // let delta_left = concatenate_vertical(&y_delta_left)?.to_tensor(dev)?;
+    // let delta_right = concatenate_vertical(&y_delta_right)?.to_tensor(dev)?;
+
+    // let data = MatchedEncoderData {
+    //     marginal_left: &y_left.to_tensor(dev)?,
+    //     marginal_right: &y_right.to_tensor(dev)?,
+    //     delta_left: Some(&delta_left),
+    //     delta_right: Some(&delta_right),
+    // };
+
+    // let latent = encoder.forward_t(data, false)?;
+
+    // latent_vec
+    //     .lock()
+    //     .expect("latent vec lock")
+    //     .push((lb, latent));
+
+    Ok(())
+}
+
+// pub trait MatchedEncoderEvaluateOps {
+//     fn evaluate<DataL: DataLoader>(
+//         &self,
+//         data: &DataL,
+//         train_config: &TrainConfig,
+//     ) -> anyhow::Result<MatchedEncoderLatent>;
+// }
+
+// impl MatchedEncoderEvaluateOps for MatchedLogSoftmaxEncoder {
+//     fn evaluate<DataL: DataLoader>(
+//         &self,
+//         data: &DataL,
+//         train_config: &TrainConfig,
+//     ) -> anyhow::Result<MatchedEncoderLatent> {
+//         let device = &train_config.device;
+//         let ntot = data.num_data();
+//         let batch_size = train_config.batch_size;
+//         let jobs = generate_minibatch_intervals(ntot, batch_size);
+//         let num_jobs = jobs.len();
+
+//         let mut ret = Vec::with_capacity(num_jobs);
+
+//         for (lb, ub) in jobs {
+//             let mb = data.minibatch_ordered(lb, ub, device)?;
+
+//             let latent = self.forward_t(
+//                 MatchedEncoderData {
+//                     left: mb.input_left.as_ref(),
+//                     right: mb.input_right.as_ref(),
+//                     aux_left: mb.input_aux_left.as_ref(),
+//                     aux_right: mb.input_aux_right.as_ref(),
+//                 },
+//                 false,
+//             )?;
+//             ret.push(latent);
+//         }
+//         ret.concatenate()
+//     }
+// }
+
+pub trait MatchedEncoderLatentVecOps {
+    fn concatenate(&self) -> anyhow::Result<MatchedEncoderLatent>;
+}
+
+impl MatchedEncoderLatentVecOps for Vec<MatchedEncoderLatent> {
+    fn concatenate(&self) -> anyhow::Result<MatchedEncoderLatent> {
+        unimplemented!("");
+        // // Collect references to tensors for each field
+        // let marginal: Vec<&Tensor> = self.iter().map(|latent| &latent.marginal).collect();
+        // let border: Vec<&Tensor> = self.iter().map(|latent| &latent.border).collect();
+
+        // let kl_divs: Vec<&Tensor> = self.iter().map(|latent| &latent.kl_div).collect();
+
+        // // Concatenate tensors along dimension 0
+        // let marginal = Tensor::cat(&marginal, 0)?;
+        // let border = Tensor::cat(&border, 0)?;
+        // let kl_div = Tensor::cat(&kl_divs, 0)?;
+
+        // // Return the concatenated MatchedEncoderLatent
+        // Ok(MatchedEncoderLatent {
+        //     marginal,
+        //     border,
+        //     kl_div,
+        // })
+    }
 }

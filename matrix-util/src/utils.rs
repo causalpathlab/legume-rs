@@ -35,3 +35,17 @@ where
     });
     pb_elems
 }
+
+/// Generate minibatch intervals
+/// * `ntot` - number of total samples
+/// * `batch_size` - the size of each batch
+pub fn generate_minibatch_intervals(ntot: usize, batch_size: usize) -> Vec<(usize, usize)> {
+    let num_batches = ntot.div_ceil(batch_size);
+    (0..num_batches)
+        .map(|b| {
+            let lb: usize = b * batch_size;
+            let ub: usize = ((b + 1) * batch_size).min(ntot);
+            (lb, ub)
+        })
+        .collect::<Vec<_>>()
+}

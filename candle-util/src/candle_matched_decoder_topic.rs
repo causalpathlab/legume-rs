@@ -3,7 +3,7 @@
 use crate::candle_aux_linear::*;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{Module, VarBuilder};
+use candle_nn::{ops, Module, VarBuilder};
 
 //////////////////////////////////////
 // Differential Topic Model Decoder //
@@ -12,14 +12,14 @@ use candle_nn::{Module, VarBuilder};
 pub struct MatchedTopicDecoder {
     n_features: usize,
     n_topics: usize,
-    dictionary: SoftmaxLinear,
+    dictionary: LogSoftmaxLinear,
 }
 
 impl MatchedTopicDecoder {
     /// Will create a new ETM decoder with the following parameters:
     /// * `dictionary.weight`
     pub fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
-        let dictionary = softmax_linear(n_topics, n_features, vs.pp("dictionary"))?;
+        let dictionary = log_softmax_linear(n_topics, n_features, vs.pp("dictionary"))?;
         Ok(Self {
             n_features,
             n_topics,
@@ -27,7 +27,7 @@ impl MatchedTopicDecoder {
         })
     }
 
-    pub fn dictionary(&self) -> &SoftmaxLinear {
+    pub fn dictionary(&self) -> &LogSoftmaxLinear {
         &self.dictionary
     }
 }
@@ -38,35 +38,24 @@ impl MatchedDecoderModuleT for MatchedTopicDecoder {
     }
 
     fn forward(&self, latent: &MatchedEncoderLatent) -> Result<MatchedDecoderRecon> {
-        let theta_marginal = latent.marginal.exp()?;
-        let theta_border = latent.border.exp()?;
-
-        let marginal = self.dictionary.forward(&theta_marginal)?.log()?;
-        let border = self.dictionary.forward(&theta_border)?.log()?;
-
-        Ok(MatchedDecoderRecon { marginal, border })
+        let theta_left = ops::log_softmax(&latent.z_left, latent.z_left.rank() - 1)?;
+        let theta_right = ops::log_softmax(&latent.z_right, latent.z_right.rank() - 1)?;
+        let x_left = self.dictionary.forward(&theta_left)?;
+        let x_right = self.dictionary.forward(&theta_right)?;
+        Ok(MatchedDecoderRecon { x_left, x_right })
     }
 
     fn forward_with_llik<LlikFn>(
         &self,
         latent: &MatchedEncoderLatent,
-        x_data: MatchedDecoderData,
+        data: MatchedDecoderData,
         llik: &LlikFn,
     ) -> Result<(MatchedDecoderRecon, Tensor)>
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
         let recon = self.forward(latent)?;
-
-        let (xm_l, xm_r) = (x_data.marginal_left, x_data.marginal_right);
-
-        let llik_val = if let (Some(xb_l), Some(xb_r)) = (x_data.border_left, x_data.border_right) {
-            llik(xb_l, &recon.border)// ? + llik(xb_r, &recon.border)?
-            // (llik(xm_l, &recon.marginal)? + llik(xm_r, &recon.marginal)?)?
-            //     + (&llik(xb_l, &recon.border)? + &llik(xb_r, &recon.border)?)?
-        } else {
-            llik(xm_l, &recon.marginal)? + llik(xm_r, &recon.marginal)?
-        }?;
+        let llik_val = llik(data.left, &recon.x_left)?.add(&llik(data.right, &recon.x_right)?)?;
 
         Ok((recon, llik_val))
     }

@@ -51,17 +51,15 @@ pub trait DecoderModuleT {
 }
 
 pub struct MatchedEncoderData<'a> {
-    pub marginal_left: &'a Tensor,
-    pub marginal_right: &'a Tensor,
-    pub delta_left: Option<&'a Tensor>,
-    pub delta_right: Option<&'a Tensor>,
+    pub left: &'a Tensor,
+    pub right: &'a Tensor,
+    pub aux_left: Option<&'a Tensor>,
+    pub aux_right: Option<&'a Tensor>,
 }
 
 pub struct MatchedDecoderData<'a> {
-    pub marginal_left: &'a Tensor,
-    pub marginal_right: &'a Tensor,
-    pub border_left: Option<&'a Tensor>,
-    pub border_right: Option<&'a Tensor>,
+    pub left: &'a Tensor,
+    pub right: &'a Tensor,
 }
 
 pub trait MatchedEncoderModuleT {
@@ -74,14 +72,14 @@ pub trait MatchedEncoderModuleT {
 }
 
 pub struct MatchedEncoderLatent {
-    pub marginal: Tensor,
-    pub border: Tensor,
-    pub kl_div: Tensor,
+    pub z_left: Tensor,
+    pub z_right: Tensor,
+    pub kl: Tensor,
 }
 
 pub struct MatchedDecoderRecon {
-    pub marginal: Tensor,
-    pub border: Tensor,
+    pub x_left: Tensor,
+    pub x_right: Tensor,
 }
 
 pub trait MatchedDecoderModuleT {
@@ -99,7 +97,7 @@ pub trait MatchedDecoderModuleT {
     fn forward_with_llik<LlikFn>(
         &self,
         latent: &MatchedEncoderLatent,
-        x_nd_pair: MatchedDecoderData,
+        x_pair: MatchedDecoderData,
         llik: &LlikFn,
     ) -> Result<(MatchedDecoderRecon, Tensor)>
     where
