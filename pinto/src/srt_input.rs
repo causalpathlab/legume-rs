@@ -25,6 +25,9 @@ pub fn read_data_vec(args: SRTReadArgs) -> anyhow::Result<SRTData> {
         _ => SparseIoBackend::Zarr,
     };
 
+    // to avoid duplicate barcodes in the column names
+    let attach_data_name = args.data_files.len() > 1;
+
     let mut data_vec = SparseIoVec::new();
 
     for data_file in args.data_files.iter() {
@@ -40,14 +43,14 @@ pub fn read_data_vec(args: SRTReadArgs) -> anyhow::Result<SRTData> {
             _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
         };
 
-        let data_name = basename(data_file)?;
         let mut data = open_sparse_matrix(data_file, &backend)?;
+        let data_name = attach_data_name.then(|| basename(data_file)).transpose()?;
 
         if args.preload_data {
             data.preload_columns()?;
         }
 
-        data_vec.push(Arc::from(data), Some(data_name))?;
+        data_vec.push(Arc::from(data), data_name)?;
     }
 
     // check if row names are the same across data

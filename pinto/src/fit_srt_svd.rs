@@ -25,12 +25,12 @@ pub struct SrtSvdArgs {
     coord_files: Vec<Box<str>>,
 
     /// Indicate the cell coordinate columns in the `coord` files (comma separated)
-    #[arg(long = "coord_column_indices", value_delimiter(','))]
+    #[arg(long = "coord-column-indices", value_delimiter(','))]
     coord_columns: Option<Vec<usize>>,
 
     /// The columns names in the `coord` files (comma separated)
     #[arg(
-        long = "coord_column_names",
+        long = "coord-column-names",
         value_delimiter(','),
         default_value = "pxl_row_in_fullres,pxl_col_in_fullres"
     )]

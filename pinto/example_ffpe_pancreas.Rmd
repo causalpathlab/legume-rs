@@ -17,37 +17,38 @@ fi
 [ -f temp7.h5 ] || data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --backend hdf5
 ```
 
+```{sh run_pinto_svd}
+pinto svd temp7.h5 -c temp/cells.parquet --coord-column-names x_centroid,y_centroid -o temp7 --preload-data
+```
 
-```{sh}
-data-beans from-zarr temp/cell_feature_matrix.zarr -o temp7 --do-squeeze --backend hdf5 -d /cell_features/data -i /cell_features/indices -p /cell_features/indptr
+```{r}
+library(dplyr)
+library(data.table)
+library(ggplot2)
 
-[ -d temp/cell_feature_matrix.zarr ] && rm -rf temp/cell_feature_matrix.zarr
-# tree temp/cell_feature_matrix.zarr
+.dt <- arrow::read_parquet("temp/cells.parquet") %>% as.data.table
+.prop <- arrow::read_parquet("temp7.propensity.parquet") %>%
+    as.data.table %>%
+    melt(id.vars = "row") %>%
+    rename(cell_id = row)
 
+.dt.show <- .prop %>%
+    left_join(.dt[, .(cell_id, x_centroid, y_centroid, total_counts)]) %>%
+    na.omit() %>%
+    filter(value > .5)
 
-data-beans info temp7.h5
-data-beans column-names temp7.h5 | head
-
-
-data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --backend hdf5 -d /cell_features/data -i /cell_features/indices -p /cell_features/indptr --pointer-type row
-
-data-beans list-h5 temp/cell_feature_matrix.h5
-
-data-beans from-h5 temp/cell_feature_matrix.h5 -o temp5 --backend hdf5
-data-beans info temp5.h5
-
-data-beans stat --stat-dim row temp5.h5
-
-data-beans from-mtx temp/cell_feature_matrix/matrix.mtx.gz -r temp/cell_feature_matrix/features.tsv.gz -c temp/cell_feature_matrix/barcodes.tsv.gz -o temp4
-
-data-beans stat --stat-dim row temp4.zarr
+ggplot(.dt.show[sample(.N)],
+       aes(x_centroid, y_centroid, fill=variable, size=value)) +
+    theme_void() +
+    geom_point(stroke=0.1,pch=21,colour="gray") +
+    scale_fill_brewer(palette="Paired", guide="none") +
+    scale_size_continuous(range=c(0,1.5), guide="none")
 
 ```
 
 
 ```{r}
 
-head(arrow::read_parquet("temp/cells.parquet"))
 
 ```
 
