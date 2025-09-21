@@ -175,7 +175,7 @@ impl<'a> SrtCellPairs<'a> {
             ) -> anyhow::Result<()>
             + Sync
             + Send,
-        SharedIn: Sync + Send,
+        SharedIn: Sync + Send + ?Sized,
         SharedOut: Sync + Send,
     {
         let all_pairs = &self.pairs;

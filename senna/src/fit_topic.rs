@@ -82,11 +82,11 @@ pub struct TopicArgs {
     encoder_layers: Vec<usize>,
 
     /// intensity levels for frequency embedding
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 10)]
     vocab_size: usize,
 
     /// intensity embedding dimension
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 10)]
     vocab_emb: usize,
 
     /// # training epochs

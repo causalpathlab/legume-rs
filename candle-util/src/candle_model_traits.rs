@@ -72,9 +72,8 @@ pub trait MatchedEncoderModuleT {
 }
 
 pub struct MatchedEncoderLatent {
-    pub z_left: Tensor,
-    pub z_right: Tensor,
-    pub kl: Tensor,
+    pub logits_theta: Tensor,
+    pub kl_div: Tensor,
 }
 
 pub struct MatchedDecoderRecon {
@@ -84,22 +83,18 @@ pub struct MatchedDecoderRecon {
 
 pub trait MatchedDecoderModuleT {
     /// A decoder that spits out reconstruction
-    fn forward(&self, latent: &MatchedEncoderLatent) -> Result<MatchedDecoderRecon>;
+    fn forward(&self, latent: &MatchedEncoderLatent) -> Result<Tensor>;
 
     /// Get a representative dictionary matrix
     fn get_dictionary(&self) -> Result<Tensor>;
 
     /// A decoder that spits out reconstruction and log-likelihood
-    /// * `latent` - latent states by `DiffEncoderModuleT`
-    /// * `x_nd` - observed data to validate with
-    /// * `x0_nd` - matched data to validate with
-    /// * `llik` - fn (observed, reconstruction) -> log-likelihood
     fn forward_with_llik<LlikFn>(
         &self,
         latent: &MatchedEncoderLatent,
         x_pair: MatchedDecoderData,
         llik: &LlikFn,
-    ) -> Result<(MatchedDecoderRecon, Tensor)>
+    ) -> Result<(Tensor, Tensor)>
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>;
 

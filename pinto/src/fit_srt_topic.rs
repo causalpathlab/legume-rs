@@ -1,14 +1,15 @@
 use crate::srt_cell_pairs::*;
 use crate::srt_collapse_pairs::*;
 use crate::srt_common::*;
-use crate::srt_random_projection::*;
-
 use crate::srt_input::*;
+use crate::srt_random_projection::*;
 
 use candle_util::candle_inference::*;
 use candle_util::candle_matched_data_loader::*;
 use candle_util::candle_matched_vae_inference::*;
 use clap::{Parser, ValueEnum};
+
+use indicatif::{ProgressBar, ProgressDrawTarget};
 
 use matrix_param::{
     io::ParamIo,
@@ -53,7 +54,7 @@ pub struct SrtTopicArgs {
     coord_column_names: Vec<Box<str>>,
 
     /// Coordinate embedding dimension
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = 64)]
     coord_emb: usize,
 
     /// batch membership files (comma-separated names). Each bach file
@@ -91,7 +92,7 @@ pub struct SrtTopicArgs {
     n_latent_topics: usize,
 
     /// targeted number of row feature modules (to speed up)
-    #[arg(short = 'r', long, default_value_t = 512)]
+    #[arg(short = 'r', long, default_value_t = 128)]
     n_row_modules: usize,
 
     /// encoder layers
@@ -99,7 +100,7 @@ pub struct SrtTopicArgs {
     encoder_layers: Vec<usize>,
 
     /// intensity levels for frequency embedding
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 10)]
     vocab_size: usize,
 
     /// intensity embedding dimension
@@ -109,6 +110,10 @@ pub struct SrtTopicArgs {
     /// # training epochs
     #[arg(long, short = 'i', default_value_t = 1000)]
     epochs: usize,
+
+    /// data jitter interval
+    #[arg(long, short = 'j', default_value_t = 5)]
+    jitter_interval: usize,
 
     /// Minibatch size
     #[arg(long, default_value_t = 100)]
@@ -187,7 +192,6 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
 
     info!("Collecting summary statistics across cell pairs...");
     let collapsed = srt_cell_pairs.collapse_pairs()?;
-    let params = collapsed.optimize(None)?;
 
     /////////////////////////////////////////////////////////
     // 4. Train embedded topic model on the collapsed data //
@@ -209,26 +213,6 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         verbose: args.verbose,
     };
 
-    let input_left_nd = params.left.posterior_mean().transpose();
-    let input_right_nd = params.right.posterior_mean().transpose();
-
-    let aux_left_nc = collapsed.left_coord_emb.transpose();
-    let aux_right_nc = &collapsed.right_coord_emb.transpose();
-
-    let output_left_nd = params.left_delta.posterior_mean().transpose();
-    let output_right_nd = params.right_delta.posterior_mean().transpose();
-
-    let train_data = DataLoaderArgs {
-        input_left: &input_left_nd,
-        input_right: &input_right_nd,
-        input_aux_left: Some(&aux_left_nc),
-        input_aux_right: Some(&aux_right_nc),
-        output_left: Some(&output_left_nd),
-        output_right: Some(&output_right_nd),
-    };
-
-    info!("constructed training data");
-
     let parameters = candle_nn::VarMap::new();
     let dev = &train_config.device;
     let param_builder =
@@ -240,9 +224,9 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
 
     let encoder = MatchedEncoder::new(
         MatchedEncoderArg {
-            dim_feature: input_left_nd.ncols(),
+            dim_feature: collapsed.nrows(),
             dim_latent: args.n_latent_topics,
-            dim_coord: aux_left_nc.ncols(),
+            dim_coord: collapsed.num_coordinate_embedding(),
             n_vocab_emb: args.vocab_size,
             dim_emb: args.coord_emb,
             num_feature_modules: args.n_row_modules,
@@ -252,27 +236,21 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     )?;
 
     let decoder = MatchedTopicDecoder::new(
-        output_left_nd.ncols(),
+        collapsed.nrows(),
         args.n_latent_topics,
         param_builder.clone(),
     )?;
 
-    info!(
-        "built the model: {} -> .. -> {}",
-        input_left_nd.ncols(),
-        output_left_nd.ncols()
-    );
-
-    let (log_likelihood, latent) = train_encoder_decoder(
-        train_data,
+    let log_likelihood = train_encoder_decoder_stochastic(
+        &collapsed,
         &encoder,
         &decoder,
         &parameters,
-        &loss_func::topic_likelihood,
         &train_config,
+        args.jitter_interval,
     )?;
 
-    // write_types::<f32>(&log_likelihood, &(args.out.to_string() + ".llik.gz"))?;
+    write_types::<f32>(&log_likelihood, &(args.out.to_string() + ".llik.gz"))?;
 
     // tensor_parquet_out(&latent.marginal, &args.out, "collapsed_latent_marginal")?;
     // tensor_parquet_out(&latent.border, &args.out, "collapsed_latent_border")?;
@@ -302,43 +280,90 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn train_encoder_decoder<D, Enc, Dec, LLikFn>(
-    data: DataLoaderArgs<'_, D>,
+fn train_encoder_decoder_stochastic<Enc, Dec>(
+    collapsed: &SrtCollapsedStat,
     encoder: &Enc,
     decoder: &Dec,
     parameters: &candle_nn::VarMap,
-    log_likelihood_func: &LLikFn,
     train_config: &TrainConfig,
-) -> anyhow::Result<(Vec<f32>, MatchedEncoderLatent)>
+    jitter: usize,
+) -> anyhow::Result<Vec<f32>>
 where
-    D: RowsToTensorVec,
     Enc: MatchedEncoderModuleT + Send + Sync + 'static,
     Dec: MatchedDecoderModuleT + Send + Sync + 'static,
-    LLikFn: Fn(&candle_core::Tensor, &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor>
-        + Sync
-        + Send,
 {
-    let mut data_loader = InMemoryData::from(data)?;
+    let full_data = collapsed.optimize(None)?;
 
     let mut vae = MatchedVae::build(encoder, decoder, parameters);
+
+    if train_config.verbose {
+        info!("Built the VAE model");
+    }
 
     for var in parameters.all_vars() {
         var.to_device(&train_config.device)?;
     }
 
-    let llik_trace =
-        vae.train_encoder_decoder(&mut data_loader, log_likelihood_func, train_config)?;
+    let mut llik_trace = vec![];
 
-    info!(
-        "Done with training over {} epochs using {} samples",
-        train_config.num_epochs,
-        data_loader.num_data()
-    );
+    let sub_train_config = TrainConfig {
+        learning_rate: train_config.learning_rate, // override
+        batch_size: train_config.batch_size,       // train
+        num_epochs: jitter,                        // config
+        num_pretrain_epochs: 0,                    //
+        device: train_config.device.clone(),       //
+        verbose: false,
+        show_progress: false,
+    };
 
-    unimplemented!("");
-    // let latent = encoder.evaluate(&data_loader, train_config)?;
-    // info!("Evaluated the latent states of the training data");
-    // Ok((llik_trace, latent))
+    let pb = ProgressBar::new(train_config.num_epochs as u64);
+
+    if !train_config.show_progress || train_config.verbose {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
+
+    let aux_left_nc = collapsed.left_coord_emb.transpose();
+    let aux_right_nc = &collapsed.right_coord_emb.transpose();
+
+    for epoch in (0..train_config.num_epochs).step_by(jitter) {
+        let input_left_nd = full_data.left.posterior_sample()?.transpose();
+        let input_right_nd = full_data.right.posterior_sample()?.transpose();
+
+        let output_left_nd = full_data.left_delta.posterior_sample()?.transpose();
+        let output_right_nd = full_data.right_delta.posterior_sample()?.transpose();
+
+        let mut data_loader = InMemoryData::from(DataLoaderArgs {
+            input_left: &input_left_nd,
+            input_right: &input_right_nd,
+            input_aux_left: Some(&aux_left_nc),
+            input_aux_right: Some(&aux_right_nc),
+            output_left: Some(&output_left_nd),
+            output_right: Some(&output_right_nd),
+        })?;
+
+        let llik = vae.train_encoder_decoder(
+            &mut data_loader,
+            &loss_func::topic_likelihood,
+            &sub_train_config,
+        )?;
+        llik_trace.extend(llik);
+        pb.inc(jitter as u64);
+
+        if train_config.verbose {
+            info!(
+                "[{}] log-likelihood: {}",
+                epoch + 1,
+                llik_trace.last().ok_or(anyhow::anyhow!("llik"))?
+            );
+        }
+    }
+    pb.finish_and_clear();
+
+    if train_config.verbose {
+        info!("Finished {} epochs", train_config.num_epochs);
+    }
+
+    Ok(llik_trace)
 }
 
 pub trait SrtLatentTopicOps {

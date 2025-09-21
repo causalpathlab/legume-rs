@@ -599,12 +599,13 @@ where
             if let Some(x_j) = self.get_col(j) {
                 let mut denom = T::zero();
                 for &x_ij in x_j.values() {
-                    denom += x_ij.abs();
+                    denom += x_ij;
                 }
-
                 if let Some(mut x_j) = self.get_col_mut(j) {
-                    for x_ij in x_j.values_mut() {
-                        *x_ij /= denom;
+                    if denom > T::zero() {
+                        for x_ij in x_j.values_mut() {
+                            *x_ij /= denom;
+                        }
                     }
                 }
             }

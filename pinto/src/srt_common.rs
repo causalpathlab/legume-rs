@@ -24,13 +24,37 @@ pub use dashmap::DashSet as HashSet;
 
 pub use std::sync::{Arc, Mutex};
 
-pub use candle_util::candle_data_loader_util::*;
-pub use candle_util::candle_inference::*;
 pub use candle_util::candle_loss_functions as loss_func;
 pub use candle_util::candle_matched_decoder_topic::*;
 pub use candle_util::candle_matched_encoder::*;
 pub use candle_util::candle_model_traits::*;
 pub use candle_util::{candle_core, candle_nn};
+
+pub struct KmeansArgs {
+    pub num_clusters: usize,
+    pub max_iter: usize,
+}
+
+pub trait Kmeans {
+    /// do k-means clustering of columns
+    fn kmeans_columns(&self, args: KmeansArgs) -> Vec<usize>;
+}
+
+impl<T> Kmeans for DMatrix<T>
+where
+    T: Clone + Sync + Send,
+    Vec<T>: clustering::Elem,
+{
+    fn kmeans_columns(&self, args: KmeansArgs) -> Vec<usize> {
+        let data: Vec<Vec<T>> = self
+            .column_iter()
+            .map(|x| -> Vec<T> { x.iter().cloned().collect() })
+            .collect();
+
+        let clust = clustering::kmeans(args.num_clusters, &data, args.max_iter);
+        clust.membership
+    }
+}
 
 /// Impute `y` matrix by its neighbours `y_neigh` Here, we calculate
 /// Euclidean distances after log1p transformation.

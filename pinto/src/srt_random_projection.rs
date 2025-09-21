@@ -29,7 +29,7 @@ pub struct SrtRandProjOut {
     pub right_delta: Mat,
 }
 
-impl<'a> SrtRandProjOps for SrtCellPairs<'a> {
+impl SrtRandProjOps for SrtCellPairs<'_> {
     fn assign_pairs_to_samples(
         &mut self,
         proj: &SrtRandProjOut,

@@ -7,7 +7,6 @@ use candle_nn::AdamW;
 use candle_nn::Optimizer;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use log::info;
-use rayon::prelude::*;
 
 pub struct MatchedVae<'a, Enc, Dec>
 where
@@ -94,121 +93,53 @@ where
             })
             .collect::<Vec<_>>();
 
-        if train_config.device.is_cpu() {
-            use std::sync::{Arc, Mutex};
-            let arc_adam = Arc::new(Mutex::new(&mut adam));
-            let arc_llik_tot = Arc::new(Mutex::new(0_f32));
+        for _epoch in 0..train_config.num_epochs {
+            let mut llik_tot = 0f32;
 
-            for _epoch in 0..train_config.num_epochs {
-                {
-                    let mut llik_tot = arc_llik_tot.lock().expect("llik lock");
-                    *llik_tot = 0_f32;
-                }
-                data_vec
-                    .par_iter()
-                    .try_for_each(|mb| -> anyhow::Result<()> {
-                        let latent = self.encoder.forward_t(
-                            MatchedEncoderData {
-                                left: mb.input_left.as_ref(),
-                                right: mb.input_right.as_ref(),
-                                aux_left: mb.input_aux_left.as_ref(),
-                                aux_right: mb.input_aux_right.as_ref(),
-                            },
-                            true,
-                        )?;
+            for mb in &data_vec {
+                let latent = self.encoder.forward_t(
+                    MatchedEncoderData {
+                        left: mb.input_left.as_ref(),
+                        right: mb.input_right.as_ref(),
+                        aux_left: mb.input_aux_left.as_ref(),
+                        aux_right: mb.input_aux_right.as_ref(),
+                    },
+                    true,
+                )?;
+                let kl = &latent.kl_div;
 
-                        let kl = &latent.kl;
+                let (_, llik) = self.decoder.forward_with_llik(
+                    &latent,
+                    MatchedDecoderData {
+                        left: mb
+                            .output_left
+                            .as_ref()
+                            .ok_or(anyhow::anyhow!("need output left"))?,
+                        right: mb
+                            .output_right
+                            .as_ref()
+                            .ok_or(anyhow::anyhow!("need output right"))?,
+                    },
+                    llik_func,
+                )?;
 
-                        let (_, llik) = self.decoder.forward_with_llik(
-                            &latent,
-                            MatchedDecoderData {
-                                left: mb
-                                    .output_left
-                                    .as_ref()
-                                    .ok_or(anyhow::anyhow!("need output left"))?,
-                                right: mb
-                                    .output_right
-                                    .as_ref()
-                                    .ok_or(anyhow::anyhow!("need output right"))?,
-                            },
-                            llik_func,
-                        )?;
-
-                        let loss = (kl - &llik)?.mean_all()?;
-                        let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
-                        {
-                            let mut adam = arc_adam.lock().expect("adam lock");
-                            adam.backward_step(&loss)?;
-                        }
-                        {
-                            let mut llik_tot = arc_llik_tot.lock().expect("llik lock");
-                            *llik_tot += llik_val;
-                        }
-                        Ok(())
-                    })?;
-
-                {
-                    let llik_tot = arc_llik_tot.lock().expect("llik lock");
-                    llik_trace.push(*llik_tot / data.num_minibatch() as f32);
-                }
-
-                if train_config.verbose {
-                    info!(
-                        "[{}] log-likelihood: {}",
-                        _epoch + 1,
-                        llik_trace.last().ok_or(anyhow::anyhow!("llik"))?
-                    );
-                }
-                pb.inc(1);
+                let loss = (kl - &llik)?.mean_all()?;
+                adam.backward_step(&loss)?;
+                let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
+                llik_tot += llik_val;
             }
-        } else {
-            for _epoch in 0..train_config.num_epochs {
-                let mut llik_tot = 0f32;
-
-                for mb in &data_vec {
-                    let latent = self.encoder.forward_t(
-                        MatchedEncoderData {
-                            left: mb.input_left.as_ref(),
-                            right: mb.input_right.as_ref(),
-                            aux_left: mb.input_aux_left.as_ref(),
-                            aux_right: mb.input_aux_right.as_ref(),
-                        },
-                        true,
-                    )?;
-                    let kl = &latent.kl;
-
-                    let (_, llik) = self.decoder.forward_with_llik(
-                        &latent,
-                        MatchedDecoderData {
-                            left: mb
-                                .output_left
-                                .as_ref()
-                                .ok_or(anyhow::anyhow!("need output left"))?,
-                            right: mb
-                                .output_right
-                                .as_ref()
-                                .ok_or(anyhow::anyhow!("need output right"))?,
-                        },
-                        llik_func,
-                    )?;
-
-                    let loss = (kl - &llik)?.mean_all()?;
-                    adam.backward_step(&loss)?;
-                    let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
-                    llik_tot += llik_val;
-                }
-                llik_trace.push(llik_tot / data.num_minibatch() as f32);
-                pb.inc(1);
-                if train_config.verbose {
-                    info!(
-                        "[{}] log-likelihood: {}",
-                        _epoch + 1,
-                        llik_trace.last().ok_or(anyhow::anyhow!("llik"))?
-                    );
-                }
+            llik_trace.push(llik_tot / data.num_minibatch() as f32);
+            pb.inc(1);
+            if train_config.verbose {
+                info!(
+                    "[{}] log-likelihood: {}",
+                    _epoch + 1,
+                    llik_trace.last().ok_or(anyhow::anyhow!("llik"))?
+                );
             }
-            pb.finish_and_clear();
         }
+        pb.finish_and_clear();
+
         Ok(llik_trace)
     }
 }

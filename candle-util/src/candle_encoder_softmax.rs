@@ -11,6 +11,8 @@ pub struct LogSoftmaxEncoder {
     n_vocab: usize,
     n_modules: usize,
     feature_module: AggregateLinear,
+    // emb_x: RankEmbedding,
+    // emb_logx: RankEmbedding,
     emb_x: Embedding,
     emb_logx: Embedding,
     fc: StackLayers<Linear>,
@@ -50,25 +52,23 @@ impl LogSoftmaxEncoder {
     }
 
     fn discretize_whitened_tensor(&self, x_nd: &Tensor) -> Result<Tensor> {
-        use candle_core::DType::U32;
-
-        let eps = 1e-4;
         let n_vocab = self.n_vocab as f64;
         let d = x_nd.rank();
         let min_val = x_nd.min_keepdim(d - 1)?;
         let max_val = x_nd.max_keepdim(d - 1)?;
-        let div_val = ((max_val - &min_val)? + eps)?;
+        let div_val = ((max_val - &min_val)? + 1.0)?;
 
         let x_nd = x_nd.broadcast_sub(&min_val)?.broadcast_div(&div_val)?;
 
-        (x_nd * n_vocab)?.floor()?.to_dtype(U32)
+        Ok((x_nd * n_vocab)?
+            .floor()?
+            .to_dtype(candle_core::DType::U8)?)
     }
 
     fn composite_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
         let int_x_nd = self.discretize_whitened_tensor(x_nd)?;
         let logx_nd = (x_nd + 1.)?.log()?;
         let int_logx_nd = self.discretize_whitened_tensor(&logx_nd)?;
-
         self.emb_x.forward_t(&int_x_nd, train)? + self.emb_logx.forward_t(&int_logx_nd, train)?
     }
 
@@ -176,6 +176,9 @@ impl LogSoftmaxEncoder {
         let emb_x = candle_nn::embedding(args.n_vocab, args.d_vocab_emb, vs.pp("nn.embed_x"))?;
         let emb_logx =
             candle_nn::embedding(args.n_vocab, args.d_vocab_emb, vs.pp("nn.embed_logx"))?;
+
+        // let emb_x = rank_embedding(args.n_vocab, args.d_vocab_emb, vs.pp("nn.embed_x"))?;
+        // let emb_logx = rank_embedding(args.n_vocab, args.d_vocab_emb, vs.pp("nn.embed_logx"))?;
 
         // (1) data -> fc
         let mut fc = StackLayers::<Linear>::new();

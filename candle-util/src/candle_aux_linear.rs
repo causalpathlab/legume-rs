@@ -135,7 +135,7 @@ impl Module for LogSoftmaxLinear {
             [bsize, _, _] => self.biased_weight()?.broadcast_left(bsize)?.t()?,
             _ => self.biased_weight()?.t()?,
         };
-        let eps = 1e-8;
+        let eps = 1e-4;
         (h_nk.matmul(&log_w_kd.exp()?)? + eps)?.log()
         // the following is exact... but there is sacrifice in speed
         // candle_nn::ops::log_softmax(&(prob_nd + eps)?.log()?, 1)
