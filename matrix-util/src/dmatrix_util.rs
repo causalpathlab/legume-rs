@@ -486,6 +486,38 @@ where
     }
 }
 
+impl<T> ConvertMatOps for CscMatrix<T>
+where
+    T: nalgebra::RealField + Copy + candle_core::WithDType,
+{
+    type Mat = Self;
+    type Scalar = T;
+    fn from_tensor(tensor: &candle_core::Tensor) -> anyhow::Result<Self::Mat> {
+        if tensor.dims().len() != 2 {
+            return Err(anyhow::anyhow!("expected 2D tensor"));
+        }
+
+        let nrows = tensor.dims()[0];
+        let ncols = tensor.dims()[1];
+        let data: Vec<T> = tensor.flatten_all()?.to_vec1()?;
+
+        let dense_matrix = DMatrix::from_row_iterator(nrows, ncols, data.iter().cloned());
+        let csc_matrix = CscMatrix::from(&dense_matrix);
+
+        Ok(csc_matrix)
+    }
+
+    fn to_tensor(&self, dev: &candle_core::Device) -> anyhow::Result<candle_core::Tensor> {
+        use candle_core::Tensor;
+        let dense_matrix = DMatrix::from(self);
+        let nrow = dense_matrix.nrows();
+        let ncol = dense_matrix.ncols();
+        // Note: x.as_slice() will take values in the column-major order
+        // However, Tensor::from_slice will take them in the row-major order
+        Ok(Tensor::from_slice(dense_matrix.as_slice(), (ncol, nrow), dev)?.transpose(0, 1)?)
+    }
+}
+
 impl<T> SampleOps for DMatrix<T>
 where
     T: nalgebra::RealField + Float,
