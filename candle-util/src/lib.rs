@@ -1,5 +1,6 @@
 pub mod candle_aux_layers;
 pub mod candle_aux_linear;
+pub mod candle_aux_module;
 pub mod candle_data_loader;
 pub mod candle_data_loader_util;
 pub mod candle_decoder_poisson;

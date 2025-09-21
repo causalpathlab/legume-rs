@@ -3,6 +3,7 @@ use crate::srt_collapse_pairs::*;
 use crate::srt_common::*;
 use crate::srt_input::*;
 use crate::srt_random_projection::*;
+use crate::srt_vertex_propensity::SrtVertPropOps;
 use clap::Parser;
 use matrix_param::traits::*;
 
@@ -73,6 +74,14 @@ pub struct SrtSvdArgs {
     #[arg(short = 't', long, default_value_t = 10)]
     n_latent_topics: usize,
 
+    /// number of (edge) clusters
+    #[arg(long)]
+    n_edge_clusters: Option<usize>,
+
+    /// number of (edge) clusters
+    #[arg(long, default_value_t = 100)]
+    maxiter_clustering: usize,
+
     /// preload all the columns data
     #[arg(long, default_value_t = false)]
     preload_data: bool,
@@ -106,6 +115,7 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
     })?;
 
     let gene_names = data.row_names()?;
+    let cell_names = data.column_names()?;
 
     info!("Constructing spatial nearest neighbourhood graphs");
     let mut srt_cell_pairs = SrtCellPairs::new(
@@ -174,9 +184,22 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
         Some(coordinate_names.clone()),
     )?;
 
-    todo!("perform clustering");
+    info!("clustering edges");
+    let num_clusters = args.n_edge_clusters.unwrap_or(args.n_latent_topics);
 
-    todo!("cell-level propensity");
+    let edge_membership = proj_kn.kmeans_columns(KmeansArgs {
+        num_clusters,
+        max_iter: args.maxiter_clustering,
+    });
+
+    info!("calibrating propensity");
+    let prop_kn = srt_cell_pairs.vertex_propensity(&edge_membership, args.block_size)?;
+
+    prop_kn.transpose().to_parquet(
+        Some(&cell_names),
+        None,
+        &(args.out.to_string() + ".propensity.parquet"),
+    )?;
 
     info!("Done");
     Ok(())

@@ -5,6 +5,7 @@ mod srt_collapse_pairs;
 mod srt_common;
 mod srt_input;
 mod srt_random_projection;
+mod srt_vertex_propensity;
 
 use fit_srt_svd::*;
 use fit_srt_topic::*;

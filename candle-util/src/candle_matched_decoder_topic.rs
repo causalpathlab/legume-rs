@@ -3,7 +3,7 @@
 use crate::candle_aux_linear::*;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, Module, VarBuilder};
+use candle_nn::{Module, VarBuilder};
 
 //////////////////////////////////////
 // Differential Topic Model Decoder //
@@ -37,12 +37,8 @@ impl MatchedDecoderModuleT for MatchedTopicDecoder {
         self.dictionary.weight()
     }
 
-    fn forward(&self, latent: &MatchedEncoderLatent) -> Result<MatchedDecoderRecon> {
-        let theta_left = ops::log_softmax(&latent.z_left, latent.z_left.rank() - 1)?;
-        let theta_right = ops::log_softmax(&latent.z_right, latent.z_right.rank() - 1)?;
-        let x_left = self.dictionary.forward(&theta_left)?;
-        let x_right = self.dictionary.forward(&theta_right)?;
-        Ok(MatchedDecoderRecon { x_left, x_right })
+    fn forward(&self, latent: &MatchedEncoderLatent) -> Result<Tensor> {
+        self.dictionary.forward(&latent.logits_theta.exp()?)
     }
 
     fn forward_with_llik<LlikFn>(
@@ -50,13 +46,13 @@ impl MatchedDecoderModuleT for MatchedTopicDecoder {
         latent: &MatchedEncoderLatent,
         data: MatchedDecoderData,
         llik: &LlikFn,
-    ) -> Result<(MatchedDecoderRecon, Tensor)>
+    ) -> Result<(Tensor, Tensor)>
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
         let recon = self.forward(latent)?;
-        let llik_val = llik(data.left, &recon.x_left)?.add(&llik(data.right, &recon.x_right)?)?;
-
+        // let llik_val = llik(&data.left.add(data.right)?, &recon)?;
+        let llik_val = llik(data.left, &recon)?.add(&llik(data.right, &recon)?)?;
         Ok((recon, llik_val))
     }
 
