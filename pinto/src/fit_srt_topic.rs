@@ -3,6 +3,7 @@ use crate::srt_collapse_pairs::*;
 use crate::srt_common::*;
 use crate::srt_input::*;
 use crate::srt_random_projection::*;
+use crate::srt_vertex_propensity::*;
 
 use candle_util::candle_inference::*;
 use candle_util::candle_matched_data_loader::*;
@@ -165,6 +166,7 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     })?;
 
     let gene_names = data.row_names()?;
+    let cell_names = data.column_names()?;
 
     //////////////////////////////////////////////////
     // 1. Take pairs of spatially interacting cells //
@@ -263,28 +265,42 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     // tensor_parquet_out(&latent.marginal, &args.out, "collapsed_latent_marginal")?;
     // tensor_parquet_out(&latent.border, &args.out, "collapsed_latent_border")?;
 
-    // named_tensor_parquet_out(
-    //     &decoder.get_dictionary()?,
-    //     Some(&gene_names),
-    //     None,
-    //     &args.out,
-    //     "dictionary",
-    // )?;
+    named_tensor_parquet_out(
+        &decoder.dictionary().weight()?,
+        Some(&gene_names),
+        None,
+        &args.out,
+        "dictionary",
+    )?;
 
-    // let latent = srt_cell_pairs.evaluate_latent_states(
-    //     &encoder,
-    //     &train_config,
-    //     args.block_size,
-    // )?;
+    let latent = srt_cell_pairs.evaluate_latent_states(&encoder, &train_config, args.block_size)?;
 
-    // tensor_parquet_out(&latent.marginal, &args.out, "latent_marginal")?;
-    // tensor_parquet_out(&latent.border, &args.out, "latent_border")?;
-    // srt_cell_pairs.to_parquet(
-    //     &(args.out.to_string() + ".coord_pairs.parquet"),
-    //     Some(coordinate_names),
-    // )?;
+    tensor_parquet_out(&latent.logits_theta, &args.out, "latent")?;
+    srt_cell_pairs.to_parquet(
+        &(args.out.to_string() + ".coord_pairs.parquet"),
+        Some(coordinate_names),
+    )?;
 
-    // info!("done");
+    let proj_kn = Mat::from_tensor(&latent.logits_theta)?.transpose();
+
+    info!("clustering edges");
+    let num_clusters = args.n_edge_clusters.unwrap_or(args.n_latent_topics);
+
+    let edge_membership = proj_kn.kmeans_columns(KmeansArgs {
+        num_clusters,
+        max_iter: args.maxiter_clustering,
+    });
+
+    info!("calibrating propensity");
+    let prop_kn = srt_cell_pairs.vertex_propensity(&edge_membership, args.block_size)?;
+
+    prop_kn.transpose().to_parquet(
+        Some(&cell_names),
+        None,
+        &(args.out.to_string() + ".propensity.parquet"),
+    )?;
+
+    info!("done");
     Ok(())
 }
 
@@ -374,44 +390,44 @@ where
     Ok(llik_trace)
 }
 
-// pub trait SrtLatentTopicOps {
-//     fn evaluate_latent_states<Enc>(
-//         &self,
-//         encoder: &Enc,
-//         train_config: &TrainConfig,
-//         block_size: usize,
-//     ) -> anyhow::Result<MatchedEncoderLatent>
-//     where
-//         Enc: MatchedEncoderModuleT + Send + Sync + 'static;
-// }
+pub trait SrtLatentTopicOps {
+    fn evaluate_latent_states<Enc>(
+        &self,
+        encoder: &Enc,
+        train_config: &TrainConfig,
+        block_size: usize,
+    ) -> anyhow::Result<MatchedEncoderLatent>
+    where
+        Enc: MatchedEncoderModuleT + Send + Sync + 'static;
+}
 
-// impl<'a> SrtLatentTopicOps for SrtCellPairs<'a> {
-//     fn evaluate_latent_states<Enc>(
-//         &self,
-//         encoder: &Enc,
-//         train_config: &TrainConfig,
-//         block_size: usize,
-//     ) -> anyhow::Result<MatchedEncoderLatent>
-//     where
-//         Enc: MatchedEncoderModuleT + Send + Sync + 'static,
-//     {
-//         let njobs = self.num_pairs().div_ceil(block_size);
-//         let mut latent_vec = Vec::with_capacity(njobs);
-//         self.visit_pairs_by_block(
-//             &evaluate_latent_state_visitor,
-//             &(encoder, train_config),
-//             &mut latent_vec,
-//             block_size,
-//         )?;
+impl<'a> SrtLatentTopicOps for SrtCellPairs<'a> {
+    fn evaluate_latent_states<Enc>(
+        &self,
+        encoder: &Enc,
+        train_config: &TrainConfig,
+        block_size: usize,
+    ) -> anyhow::Result<MatchedEncoderLatent>
+    where
+        Enc: MatchedEncoderModuleT + Send + Sync + 'static,
+    {
+        let njobs = self.num_pairs().div_ceil(block_size);
+        let mut latent_vec = Vec::with_capacity(njobs);
+        self.visit_pairs_by_block(
+            &evaluate_latent_state_visitor,
+            &(encoder, train_config),
+            &mut latent_vec,
+            block_size,
+        )?;
 
-//         latent_vec.sort_by_key(|&(lb, _)| lb);
-//         latent_vec
-//             .into_iter()
-//             .map(|(_, x)| x)
-//             .collect::<Vec<_>>()
-//             .concatenate()
-//     }
-// }
+        latent_vec.sort_by_key(|&(lb, _)| lb);
+        latent_vec
+            .into_iter()
+            .map(|(_, x)| x)
+            .collect::<Vec<_>>()
+            .concatenate()
+    }
+}
 
 fn evaluate_latent_state_visitor<Enc>(
     bound: (usize, usize),
@@ -430,46 +446,73 @@ where
     let left = pairs.into_iter().map(|pp| pp.left);
     let right = pairs.into_iter().map(|pp| pp.right);
 
-    let y_left = data.data.read_columns_dmatrix(left)?.transpose();
+    let y_left = data
+        .data
+        .read_columns_dmatrix(left)?
+        .transpose()
+        .to_tensor(dev)?;
 
-    y_left.to_tensor(dev)?;
+    let y_right = data
+        .data
+        .read_columns_dmatrix(right)?
+        .transpose()
+        .to_tensor(dev)?;
 
-    // let y_left = data.data.read_columns_csc(left)?.transpose();
-    let y_right = data.data.read_columns_csc(right)?.transpose();
+    let aux_left = concatenate_vertical(
+        &pairs
+            .into_iter()
+            .map(|j| data.coordinate_embedding.row(j.left))
+            .collect::<Vec<_>>(),
+    )?
+    .to_tensor(dev)?;
 
+    let aux_right = concatenate_vertical(
+        &pairs
+            .into_iter()
+            .map(|j| data.coordinate_embedding.row(j.right))
+            .collect::<Vec<_>>(),
+    )?
+    .to_tensor(dev)?;
 
+    let latent = encoder.forward_t(
+        MatchedEncoderData {
+            left: &y_left,
+            right: &y_right,
+            aux_left: Some(&aux_left),
+            aux_right: Some(&aux_right),
+        },
+        false,
+    )?;
 
-    ////////////////////////////////////////////////////
-    // imputation by neighbours and update statistics //
-    ////////////////////////////////////////////////////
-
-    let pairs_neighbours = &data.pairs_neighbours[lb..ub];
-
-    // y_left.to_tens
-
-
-    // MatchedEncoderData{
-    // 	left: y_left.to_ten
-
-// encoder.forward_t(data, train)
-
-    // let data = MatchedEncoderData {
-    //     marginal_left: &y_left.to_tensor(dev)?,
-    //     marginal_right: &y_right.to_tensor(dev)?,
-    //     delta_left: Some(&delta_left),
-    //     delta_right: Some(&delta_right),
-    // };
-
-    // let latent = encoder.forward_t(data, false)?;
-
-    // latent_vec
-    //     .lock()
-    //     .expect("latent vec lock")
-    //     .push((lb, latent));
-
-    unimplemented!("");
+    latent_vec
+        .lock()
+        .expect("latent vec lock")
+        .push((lb, latent));
 
     Ok(())
+}
+
+pub trait MatchedEncoderLatentVecOps {
+    fn concatenate(&self) -> anyhow::Result<MatchedEncoderLatent>;
+}
+
+impl MatchedEncoderLatentVecOps for Vec<MatchedEncoderLatent> {
+    fn concatenate(&self) -> anyhow::Result<MatchedEncoderLatent> {
+        // Collect references to tensors for each field
+        let logits_theta: Vec<&Tensor> = self.iter().map(|latent| &latent.logits_theta).collect();
+
+        let kl_divs: Vec<&Tensor> = self.iter().map(|latent| &latent.kl_div).collect();
+
+        // Concatenate tensors along dimension 0
+        let logits_theta = Tensor::cat(&logits_theta, 0)?;
+        let kl_div = Tensor::cat(&kl_divs, 0)?;
+
+        // Return the concatenated MatchedEncoderLatent
+        Ok(MatchedEncoderLatent {
+            logits_theta,
+            kl_div,
+        })
+    }
 }
 
 // pub trait MatchedEncoderEvaluateOps {
@@ -511,30 +554,3 @@ where
 //         ret.concatenate()
 //     }
 // }
-
-pub trait MatchedEncoderLatentVecOps {
-    fn concatenate(&self) -> anyhow::Result<MatchedEncoderLatent>;
-}
-
-impl MatchedEncoderLatentVecOps for Vec<MatchedEncoderLatent> {
-    fn concatenate(&self) -> anyhow::Result<MatchedEncoderLatent> {
-        unimplemented!("");
-        // // Collect references to tensors for each field
-        // let marginal: Vec<&Tensor> = self.iter().map(|latent| &latent.marginal).collect();
-        // let border: Vec<&Tensor> = self.iter().map(|latent| &latent.border).collect();
-
-        // let kl_divs: Vec<&Tensor> = self.iter().map(|latent| &latent.kl_div).collect();
-
-        // // Concatenate tensors along dimension 0
-        // let marginal = Tensor::cat(&marginal, 0)?;
-        // let border = Tensor::cat(&border, 0)?;
-        // let kl_div = Tensor::cat(&kl_divs, 0)?;
-
-        // // Return the concatenated MatchedEncoderLatent
-        // Ok(MatchedEncoderLatent {
-        //     marginal,
-        //     border,
-        //     kl_div,
-        // })
-    }
-}

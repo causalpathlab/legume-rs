@@ -3,7 +3,7 @@ use crate::srt_collapse_pairs::*;
 use crate::srt_common::*;
 use crate::srt_input::*;
 use crate::srt_random_projection::*;
-use crate::srt_vertex_propensity::SrtVertPropOps;
+use crate::srt_vertex_propensity::*;
 use clap::Parser;
 use matrix_param::traits::*;
 
