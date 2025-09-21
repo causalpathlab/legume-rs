@@ -6,22 +6,25 @@ cargo install --path ../data-beans
 ```
 
 ```{sh download_10x_data}
-curl -O https://cf.10xgenomics.com/samples/xenium/2.0.0/Xenium_V1_human_Pancreas_FFPE/Xenium_V1_human_Pancreas_FFPE_outs.zip
-mkdir -p temp
-unzip Xenium_V1_human_Pancreas_FFPE_outs.zip -d ./temp
-unzip temp/cell_feature_matrix.zarr.zip -d ./temp/cell_feature_matrix.zarr
+[ -f Xenium_V1_human_Pancreas_FFPE_outs.zip ] || \
+	curl -O https://cf.10xgenomics.com/samples/xenium/2.0.0/Xenium_V1_human_Pancreas_FFPE/Xenium_V1_human_Pancreas_FFPE_outs.zip
+if ! [ -d temp ] ; then
+	mkdir -p temp
+	unzip Xenium_V1_human_Pancreas_FFPE_outs.zip -d ./temp
+fi
+
+## create temporary files
+[ -f temp7.h5 ] || data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --backend hdf5
 ```
 
 
 ```{sh}
-cargo install --path ../data-beans
-
 data-beans from-zarr temp/cell_feature_matrix.zarr -o temp7 --do-squeeze --backend hdf5 -d /cell_features/data -i /cell_features/indices -p /cell_features/indptr
 
 [ -d temp/cell_feature_matrix.zarr ] && rm -rf temp/cell_feature_matrix.zarr
 # tree temp/cell_feature_matrix.zarr
 
-data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --backend hdf5
+
 data-beans info temp7.h5
 data-beans column-names temp7.h5 | head
 
