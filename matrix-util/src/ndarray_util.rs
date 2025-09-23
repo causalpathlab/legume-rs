@@ -218,3 +218,32 @@ where
         (val, idx)
     }
 }
+
+impl<T> CandleDataLoaderOps for ndarray::Array2<T>
+where
+    T: Float + FromPrimitive + candle_core::WithDType,
+{
+    type Mat = Self;
+    type Scalar = T;
+
+    // fn transpose(&self) -> Self::Mat {
+    //     self.t().to_owned()
+    // }
+
+    fn rows_to_tensor_vec(&self) -> Vec<candle_core::Tensor> {
+        let mut idx_data = self
+            .axis_iter(ndarray::Axis(0))
+            .enumerate()
+            .map(|(i, row)| {
+                let mut v =
+                    candle_core::Tensor::from_iter(row.iter().copied(), &candle_core::Device::Cpu)
+                        .expect("failed to create tensor");
+                v = v.reshape((1, row.len())).expect("failed to reshape");
+                (i, v)
+            })
+            .collect::<Vec<_>>();
+
+        idx_data.sort_by_key(|(i, _)| *i);
+        idx_data.into_iter().map(|(_, t)| t).collect()
+    }
+}

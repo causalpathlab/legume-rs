@@ -1,64 +1,7 @@
+use anyhow::anyhow;
 use candle_core::{Device, Tensor};
-use nalgebra::DMatrix;
-use ndarray::Array2;
 use rand::prelude::SliceRandom;
 use rayon::prelude::*;
-
-///
-/// Convert rows of a matrix to a vector of `Tensor`
-///
-pub trait RowsToTensorVec {
-    fn rows_to_tensor_vec(&self) -> Vec<Tensor>;
-}
-
-impl RowsToTensorVec for Array2<f32> {
-    fn rows_to_tensor_vec(&self) -> Vec<Tensor> {
-        let mut idx_data = self
-            .axis_iter(ndarray::Axis(0))
-            .enumerate()
-            .par_bridge()
-            .map(|(i, row)| {
-                let mut v = Tensor::from_iter(row.iter().copied(), &Device::Cpu)
-                    .expect("failed to create tensor");
-                v = v.reshape((1, row.len())).expect("failed to reshape");
-                (i, v)
-            })
-            .collect::<Vec<_>>();
-
-        idx_data.sort_by_key(|(i, _)| *i);
-        idx_data.into_iter().map(|(_, t)| t).collect()
-    }
-}
-
-impl RowsToTensorVec for DMatrix<f32> {
-    fn rows_to_tensor_vec(&self) -> Vec<Tensor> {
-        let mut idx_data = self
-            .row_iter()
-            .enumerate()
-            .par_bridge()
-            .map(|(i, row)| {
-                let mut v = Tensor::from_iter(row.iter().copied(), &Device::Cpu)
-                    .expect("failed to create tensor");
-                v = v.reshape((1, row.len())).expect("failed to reshape");
-                (i, v)
-            })
-            .collect::<Vec<_>>();
-
-        idx_data.sort_by_key(|(i, _)| *i);
-        idx_data.into_iter().map(|(_, t)| t).collect()
-    }
-}
-
-impl RowsToTensorVec for Tensor {
-    fn rows_to_tensor_vec(&self) -> Vec<Tensor> {
-        let mut idx_data = (0..self.dims()[0])
-            .map(|i| (i, self.narrow(0, i, 1).expect("").clone()))
-            .collect::<Vec<_>>();
-
-        idx_data.sort_by_key(|(i, _)| *i);
-        idx_data.into_iter().map(|(_, t)| t).collect()
-    }
-}
 
 ///
 /// A helper `struct` for shuffling and creating minibatch indexes;
@@ -98,5 +41,68 @@ impl Minibatches {
 
     pub fn size(&self) -> usize {
         self.samples.len()
+    }
+}
+
+pub fn take_lb_ub(
+    lb: usize,
+    ub: usize,
+    target_device: &Device,
+    data_vec: Option<&Vec<Tensor>>,
+) -> anyhow::Result<Option<Tensor>> {
+    if let Some(data_vec) = data_vec {
+        if lb > ub || ub > data_vec.len() {
+            return Err(anyhow!(
+                "check lb {}, ub {} vs. ntot {}",
+                lb,
+                ub,
+                data_vec.len()
+            ));
+        }
+        if lb == ub {
+            return Ok(None);
+        }
+
+        let chunk = Tensor::cat(
+            &(lb..ub).map(|i| data_vec[i].clone()).collect::<Vec<_>>(),
+            0,
+        )?;
+        Ok(Some(chunk.to_device(target_device)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn copy_shuffled(
+    samples: &[usize],
+    data: Option<&Vec<Tensor>>,
+    shuffled_data: Option<&mut Vec<Tensor>>,
+) -> anyhow::Result<()> {
+    if let (Some(data), Some(shuffled)) = (data, shuffled_data) {
+        let chunk: Vec<Tensor> = samples.iter().map(|&i| data[i].clone()).collect();
+        let x = Tensor::cat(&chunk, 0)?;
+        shuffled.push(x);
+    }
+    Ok(())
+}
+
+pub fn take_shuffled(
+    batch_idx: usize,
+    target_device: &Device,
+    data_vec: Option<&Vec<Tensor>>,
+) -> anyhow::Result<Option<Tensor>> {
+    if let Some(data_vec) = data_vec {
+        if data_vec.len() <= batch_idx {
+            Err(anyhow!(
+                "invalid index = {} vs. total # = {}",
+                batch_idx,
+                data_vec.len()
+            ))
+        } else {
+            Ok(Some(data_vec[batch_idx].to_device(target_device)?))
+        }
+    } else {
+        // if the data vector doesn't exist
+        Ok(None)
     }
 }

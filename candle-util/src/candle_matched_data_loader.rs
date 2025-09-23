@@ -1,6 +1,7 @@
 use crate::candle_data_loader_util::*;
 use anyhow::{anyhow, Context};
 use candle_core::{Device, Tensor};
+use matrix_util::traits::CandleDataLoaderOps;
 
 pub struct MinibatchData {
     pub input_left: Tensor,
@@ -9,6 +10,8 @@ pub struct MinibatchData {
     pub input_aux_right: Option<Tensor>,
     pub output_left: Option<Tensor>,
     pub output_right: Option<Tensor>,
+    pub output_delta_left: Option<Tensor>,
+    pub output_delta_right: Option<Tensor>,
 }
 
 /// `DataLoader` for minibatch learning
@@ -48,6 +51,9 @@ pub struct InMemoryData {
     output_left: Option<Vec<Tensor>>,
     output_right: Option<Vec<Tensor>>,
 
+    output_delta_left: Option<Vec<Tensor>>,
+    output_delta_right: Option<Vec<Tensor>>,
+
     shuffled_input_left: Option<Vec<Tensor>>,
     shuffled_input_right: Option<Vec<Tensor>>,
 
@@ -57,13 +63,16 @@ pub struct InMemoryData {
     shuffled_output_left: Option<Vec<Tensor>>,
     shuffled_output_right: Option<Vec<Tensor>>,
 
+    shuffled_output_delta_left: Option<Vec<Tensor>>,
+    shuffled_output_delta_right: Option<Vec<Tensor>>,
+
     minibatches: Minibatches,
 }
 
 /// Just a wrapper to prevent arguments from being swapped
 pub struct DataLoaderArgs<'a, D>
 where
-    D: RowsToTensorVec,
+    D: CandleDataLoaderOps,
 {
     pub input_left: &'a D,
     pub input_right: &'a D,
@@ -71,12 +80,14 @@ where
     pub input_aux_right: Option<&'a D>,
     pub output_left: Option<&'a D>,
     pub output_right: Option<&'a D>,
+    pub output_delta_left: Option<&'a D>,
+    pub output_delta_right: Option<&'a D>,
 }
 
 impl InMemoryData {
     pub fn from<D>(args: DataLoaderArgs<'_, D>) -> anyhow::Result<Self>
     where
-        D: RowsToTensorVec,
+        D: CandleDataLoaderOps,
     {
         let input_left = args.input_left.rows_to_tensor_vec();
         let input_right = args.input_right.rows_to_tensor_vec();
@@ -86,6 +97,9 @@ impl InMemoryData {
 
         let output_left = args.output_left.map(|x| x.rows_to_tensor_vec());
         let output_right = args.output_right.map(|x| x.rows_to_tensor_vec());
+
+        let output_delta_left = args.output_delta_left.map(|x| x.rows_to_tensor_vec());
+        let output_delta_right = args.output_delta_right.map(|x| x.rows_to_tensor_vec());
 
         let nsamples = input_left.len();
 
@@ -98,12 +112,16 @@ impl InMemoryData {
             input_aux_right,
             output_left,
             output_right,
+            output_delta_left,
+            output_delta_right,
             shuffled_input_left: None,
             shuffled_input_right: None,
             shuffled_input_aux_left: None,
             shuffled_input_aux_right: None,
             shuffled_output_left: None,
             shuffled_output_right: None,
+            shuffled_output_delta_left: None,
+            shuffled_output_delta_right: None,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -129,6 +147,11 @@ impl DataLoader for InMemoryData {
             let output_left = take_lb_ub(lb, ub, target_device, self.output_left.as_ref())?;
             let output_right = take_lb_ub(lb, ub, target_device, self.output_right.as_ref())?;
 
+            let output_delta_left =
+                take_lb_ub(lb, ub, target_device, self.output_delta_left.as_ref())?;
+            let output_delta_right =
+                take_lb_ub(lb, ub, target_device, self.output_delta_right.as_ref())?;
+
             Ok(MinibatchData {
                 input_left,
                 input_right,
@@ -136,6 +159,8 @@ impl DataLoader for InMemoryData {
                 input_aux_right,
                 output_left,
                 output_right,
+                output_delta_left,
+                output_delta_right,
             })
         } else {
             Err(anyhow!("no input data"))
@@ -160,6 +185,18 @@ impl DataLoader for InMemoryData {
                 self.shuffled_output_right.as_ref(),
             )?;
 
+            let output_delta_left = take_shuffled(
+                batch_idx,
+                target_device,
+                self.shuffled_output_delta_left.as_ref(),
+            )?;
+
+            let output_delta_right = take_shuffled(
+                batch_idx,
+                target_device,
+                self.shuffled_output_delta_right.as_ref(),
+            )?;
+
             let input_aux_left = take_shuffled(
                 batch_idx,
                 target_device,
@@ -179,6 +216,8 @@ impl DataLoader for InMemoryData {
                 input_aux_right,
                 output_left,
                 output_right,
+                output_delta_left,
+                output_delta_right,
             })
         } else {
             Err(anyhow!("need to shuffle data"))
@@ -218,6 +257,14 @@ impl DataLoader for InMemoryData {
 
         if self.output_right.is_some() {
             self.shuffled_output_right = Some(vec![]);
+        }
+
+        if self.output_delta_left.is_some() {
+            self.shuffled_output_delta_left = Some(vec![]);
+        }
+
+        if self.output_delta_right.is_some() {
+            self.shuffled_output_delta_right = Some(vec![]);
         }
 
         ///////////////////////////////////
@@ -264,6 +311,19 @@ impl DataLoader for InMemoryData {
                     self.shuffled_output_right.as_mut(),
                 )
                 .context("out right")?;
+
+                copy_shuffled(
+                    samples,
+                    self.output_delta_left.as_ref(),
+                    self.shuffled_output_delta_left.as_mut(),
+                )
+                .context("out delta left")?;
+                copy_shuffled(
+                    samples,
+                    self.output_delta_right.as_ref(),
+                    self.shuffled_output_delta_right.as_mut(),
+                )
+                .context("out delta right")?;
             } else {
                 return Err(anyhow!(
                     "invalid index = {} vs. total # = {}",
@@ -274,68 +334,5 @@ impl DataLoader for InMemoryData {
         }
 
         Ok(())
-    }
-}
-
-fn take_lb_ub(
-    lb: usize,
-    ub: usize,
-    target_device: &Device,
-    data_vec: Option<&Vec<Tensor>>,
-) -> anyhow::Result<Option<Tensor>> {
-    if let Some(data_vec) = data_vec {
-        if lb > ub || ub > data_vec.len() {
-            return Err(anyhow!(
-                "check lb {}, ub {} vs. ntot {}",
-                lb,
-                ub,
-                data_vec.len()
-            ));
-        }
-        if lb == ub {
-            return Ok(None);
-        }
-
-        let chunk = Tensor::cat(
-            &(lb..ub).map(|i| data_vec[i].clone()).collect::<Vec<_>>(),
-            0,
-        )?;
-        Ok(Some(chunk.to_device(target_device)?))
-    } else {
-        Ok(None)
-    }
-}
-
-fn copy_shuffled(
-    samples: &[usize],
-    data: Option<&Vec<Tensor>>,
-    shuffled_data: Option<&mut Vec<Tensor>>,
-) -> anyhow::Result<()> {
-    if let (Some(data), Some(shuffled)) = (data, shuffled_data) {
-        let chunk: Vec<Tensor> = samples.iter().map(|&i| data[i].clone()).collect();
-        let x = Tensor::cat(&chunk, 0)?;
-        shuffled.push(x);
-    }
-    Ok(())
-}
-
-fn take_shuffled(
-    batch_idx: usize,
-    target_device: &Device,
-    data_vec: Option<&Vec<Tensor>>,
-) -> anyhow::Result<Option<Tensor>> {
-    if let Some(data_vec) = data_vec {
-        if data_vec.len() <= batch_idx {
-            Err(anyhow!(
-                "invalid index = {} vs. total # = {}",
-                batch_idx,
-                data_vec.len()
-            ))
-        } else {
-            Ok(Some(data_vec[batch_idx].to_device(target_device)?))
-        }
-    } else {
-        // if the data vector doesn't exist
-        Ok(None)
     }
 }

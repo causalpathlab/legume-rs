@@ -2,12 +2,11 @@ mod embed_common;
 mod fit_deconv;
 mod fit_svd;
 mod fit_topic;
-mod routines_latent_representation;
+
 mod routines_post_process;
 mod routines_pre_process;
 
 use embed_common::*;
-
 use fit_deconv::*;
 use fit_svd::*;
 use fit_topic::*;

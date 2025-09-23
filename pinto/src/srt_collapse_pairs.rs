@@ -2,7 +2,6 @@ use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
 
 use matrix_param::dmatrix_gamma::*;
-use matrix_param::traits::Inference;
 use matrix_param::traits::TwoStatParam;
 
 pub struct SrtCollapsedStat {
@@ -24,6 +23,8 @@ pub struct SrtCollapsedParameters {
     pub right: GammaMatrix,
     pub left_delta: GammaMatrix,
     pub right_delta: GammaMatrix,
+    // pub left_resid: GammaMatrix,
+    // pub right_resid: GammaMatrix,
 }
 
 pub trait SrtCollapsePairsOps {
@@ -260,6 +261,8 @@ impl SrtCollapsedStat {
 
         info!("Calibrating statistics");
 
+        // take marginal statistics
+
         left_raw_ds.update_stat(&self.left_sum_ds, &sample_size_ds);
         left_raw_ds.calibrate();
         right_raw_ds.update_stat(&self.right_sum_ds, &sample_size_ds);
@@ -269,6 +272,23 @@ impl SrtCollapsedStat {
         right_delta_ds.update_stat(&self.right_delta_sum_ds, &sample_size_ds);
         right_delta_ds.calibrate();
 
+        // Just take the residuals
+        //
+        // sum_ds
+        // -----------------------
+        // delta_ds .* (size_ds)
+        // let take_residual = |sum_ds: &Mat, delta_ds: &GammaMatrix| -> GammaMatrix {
+        //     let mut ret = GammaMatrix::new(shape, a0, b0);
+        //     ret.update_stat(
+        //         sum_ds,
+        //         &sample_size_ds.component_mul(delta_ds.posterior_mean()),
+        //     );
+        //     ret
+        // };
+
+        // let left_resid_ds = take_residual(&self.left_sum_ds, &left_delta_ds);
+        // let right_resid_ds = take_residual(&self.right_sum_ds, &right_delta_ds);
+
         info!("Resolved collapsed statistics");
 
         Ok(SrtCollapsedParameters {
@@ -276,6 +296,8 @@ impl SrtCollapsedStat {
             right: right_raw_ds,
             left_delta: left_delta_ds,
             right_delta: right_delta_ds,
+            // left_resid: left_resid_ds,
+            // right_resid: right_resid_ds,
         })
     }
 }

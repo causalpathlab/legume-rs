@@ -12,8 +12,8 @@ use log::info;
 
 pub struct Vae<'a, Enc, Dec>
 where
-    Enc: EncoderModuleT + Send + Sync + 'static,
-    Dec: DecoderModuleT + Send + Sync + 'static,
+    Enc: EncoderModuleT,
+    Dec: DecoderModuleT,
 {
     pub encoder: &'a Enc,
     pub decoder: &'a Dec,
@@ -22,8 +22,8 @@ where
 
 pub trait VaeT<'a, Enc, Dec>
 where
-    Enc: EncoderModuleT + Send + Sync + 'static,
-    Dec: DecoderModuleT + Send + Sync + 'static,
+    Enc: EncoderModuleT,
+    Dec: DecoderModuleT,
 {
     /// Train the VAE model
     /// * `data` - data loader should have `minibatch_data`
@@ -37,7 +37,7 @@ where
     ) -> anyhow::Result<Vec<f32>>
     where
         DataL: DataLoader,
-        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor> + Sync + Send;
+        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>;
 
     /// Pretrain the encoder module with pseudo latent output
     ///
@@ -62,8 +62,8 @@ where
 
 impl<'a, Enc, Dec> VaeT<'a, Enc, Dec> for Vae<'a, Enc, Dec>
 where
-    Enc: EncoderModuleT + Send + Sync + 'static,
-    Dec: DecoderModuleT + Send + Sync + 'static,
+    Enc: EncoderModuleT,
+    Dec: DecoderModuleT,
 {
     fn pretrain_encoder<DataL, LlikFn>(
         &mut self,
@@ -140,7 +140,7 @@ where
     ) -> anyhow::Result<Vec<f32>>
     where
         DataL: DataLoader,
-        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor> + Sync + Send,
+        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
         let device = &train_config.device;
         let mut adam = AdamW::new_lr(

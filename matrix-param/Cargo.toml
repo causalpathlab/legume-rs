@@ -32,3 +32,15 @@ special.workspace = true
 parquet = { workspace = true }
 
 matrix-util = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["cuda","cudarc","cudnn"] }
+# candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-nn", features = ["cuda"] }
+candle-core = {  version = "0.9.1", features = ["cuda","cudarc","cudnn"] }
+candle-nn = {  version = "0.9.1", features = ["cuda"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["metal","accelerate"] }
+# candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-nn", features = ["metal","accelerate"] }
+candle-core = {  version = "0.9.1", features = ["metal","accelerate"] }
+candle-nn = {  version = "0.9.1", features = ["metal","accelerate"] }

@@ -62,7 +62,8 @@ impl LogSoftmaxEncoder {
 
         Ok((x_nd * n_vocab)?
             .floor()?
-            .to_dtype(candle_core::DType::U8)?)
+            .clamp(0.0, n_vocab - 1.0)?
+            .to_dtype(candle_core::DType::U32)?)
     }
 
     fn composite_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
@@ -73,6 +74,8 @@ impl LogSoftmaxEncoder {
     }
 
     fn modularized_composite_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
+        // let denom_n1 = x_nd.sum_keepdim(x_nd.rank() - 1)?;
+        // let x_nd = (x_nd.broadcast_div(&denom_n1)? * 1e4)?;
         let x_nm = self.feature_module.forward(x_nd)?;
         self.composite_embedding(&x_nm, train)
     }

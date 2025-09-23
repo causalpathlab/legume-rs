@@ -12,7 +12,7 @@ use candle_nn::{Module, VarBuilder};
 pub struct TopicDecoder {
     n_features: usize,
     n_topics: usize,
-    dictionary: LogSoftmaxLinear,
+    dictionary: SoftmaxLinear,
 }
 
 impl TopicDecoder {
@@ -27,7 +27,7 @@ impl TopicDecoder {
         })
     }
 
-    pub fn dictionary(&self) -> &LogSoftmaxLinear {
+    pub fn dictionary(&self) -> &SoftmaxLinear {
         &self.dictionary
     }
 }

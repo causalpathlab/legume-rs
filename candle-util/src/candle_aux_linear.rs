@@ -107,12 +107,12 @@ pub fn aggregate_linear(
 ////////////////////////////////
 
 #[derive(Clone, Debug)]
-pub struct LogSoftmaxLinear {
+pub struct SoftmaxLinear {
     weight_dk: Tensor,
     bias_d1: Option<Tensor>,
 }
 
-impl LogSoftmaxLinear {
+impl SoftmaxLinear {
     pub fn new(weight_dk: Tensor, bias_d1: Option<Tensor>) -> Self {
         Self { weight_dk, bias_d1 }
     }
@@ -128,15 +128,14 @@ impl LogSoftmaxLinear {
     }
 }
 
-impl Module for LogSoftmaxLinear {
+impl Module for SoftmaxLinear {
     fn forward(&self, h_nk: &Tensor) -> Result<Tensor> {
         let log_w_kd = match *h_nk.dims() {
             [b1, b2, _, _] => self.biased_weight()?.broadcast_left((b1, b2))?.t()?,
             [bsize, _, _] => self.biased_weight()?.broadcast_left(bsize)?.t()?,
             _ => self.biased_weight()?.t()?,
         };
-        let eps = 1e-4;
-        (h_nk.matmul(&log_w_kd.exp()?)? + eps)?.log()
+        h_nk.matmul(&log_w_kd.exp()?)
         // the following is exact... but there is sacrifice in speed
         // candle_nn::ops::log_softmax(&(prob_nd + eps)?.log()?, 1)
         // perhaps, we should consider memory alignment?
@@ -153,9 +152,9 @@ pub fn log_softmax_linear(
     in_dim: usize,
     out_dim: usize,
     vb: candle_nn::VarBuilder,
-) -> Result<LogSoftmaxLinear> {
+) -> Result<SoftmaxLinear> {
     let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
     let ws_dk = vb.get_with_hints((out_dim, in_dim), "logits", init_ws)?;
     let b_d1 = vb.get_with_hints((out_dim, 1), "logit_bias", candle_nn::init::ZERO)?;
-    Ok(LogSoftmaxLinear::new(ws_dk, Some(b_d1)))
+    Ok(SoftmaxLinear::new(ws_dk, Some(b_d1)))
 }

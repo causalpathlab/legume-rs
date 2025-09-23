@@ -1,7 +1,4 @@
 use crate::common_io::{Delimiter, ReadLinesOut};
-
-pub use candle_util::candle_core;
-
 use candle_core::{Device, Tensor};
 
 /// some linear algebra routines
@@ -390,10 +387,20 @@ pub struct MatWithNames<M> {
     pub mat: M,
 }
 
-/// melt a matrix
 pub trait MeltOps {
     type Scalar;
     type Mat;
+    /// melt a matrix with indices
     fn melt_with_indexes(&self) -> (Vec<Self::Scalar>, Vec<Vec<usize>>);
+    /// melt a matrix
     fn melt(&self) -> Vec<Self::Scalar>;
+}
+
+pub trait CandleDataLoaderOps {
+    type Scalar;
+    type Mat;
+    // /// unify transpose
+    // fn transpose(&self) -> Self::Mat;
+    /// take each row vector as a sample
+    fn rows_to_tensor_vec(&self) -> Vec<Tensor>;
 }
