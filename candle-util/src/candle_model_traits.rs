@@ -60,6 +60,8 @@ pub struct MatchedEncoderData<'a> {
 pub struct MatchedDecoderData<'a> {
     pub left: &'a Tensor,
     pub right: &'a Tensor,
+    pub delta_left: Option<&'a Tensor>,
+    pub delta_right: Option<&'a Tensor>,
 }
 
 pub trait MatchedEncoderModuleT {

@@ -27,6 +27,9 @@ indicatif = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 
+matrix-util = { workspace = true }
+matrix-param = { workspace = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["cuda","cudarc","cudnn"] }
 # candle-nn = {  git = "https://github.com/huggingface/candle.git", package = "candle-nn", features = ["cuda"] }

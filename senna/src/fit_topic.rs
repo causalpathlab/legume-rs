@@ -1,13 +1,15 @@
 use crate::embed_common::*;
-use crate::routines_latent_representation::*;
 use crate::routines_post_process::*;
 use crate::routines_pre_process::*;
 
+use candle_util::candle_data_loader::*;
 use candle_util::candle_decoder_topic::*;
 use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_loss_functions as loss_func;
 use candle_util::candle_model_traits::DecoderModuleT;
+use candle_util::candle_vae_inference::*;
+use indicatif::{ProgressBar, ProgressDrawTarget};
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -172,10 +174,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     }
 
     // 4. Train embedded topic model on the collapsed data
-    let mixed_dn = &collapsed.mu_observed;
-    let clean_dn = collapsed.mu_adjusted.as_ref();
-    let batch_dn = collapsed.mu_residual.as_ref();
-
     let n_topics = args.n_latent_topics;
     let n_vocab = args.vocab_size;
     let d_vocab_emb = args.vocab_emb;
@@ -213,7 +211,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         n_features_encoder, n_features_decoder
     );
 
-    let train_config = TrainConfig {
+    let mut train_config = TrainConfig {
         learning_rate: args.learning_rate,
         batch_size: args.minibatch_size,
         num_epochs: args.epochs,
@@ -225,17 +223,63 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     info!("Set up training data");
 
-    let llik = train_encoder_decoder_stochastic(
-        mixed_dn,
-        batch_dn,
-        clean_dn,
-        &encoder,
-        &decoder,
-        &parameters,
-        &loss_func::topic_likelihood,
-        &train_config,
-        args.jitter_interval,
-    )?;
+    let pb = ProgressBar::new(train_config.num_epochs as u64);
+
+    if !train_config.show_progress || train_config.verbose {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
+
+    let mut vae = Vae::build(&encoder, &decoder, &parameters);
+    let mut log_likelihoods = Vec::with_capacity(train_config.num_epochs);
+
+    for epoch in (0..args.epochs).step_by(args.jitter_interval) {
+        let mixed_nd = collapsed.mu_observed.posterior_sample()?.transpose();
+        let clean_nd = collapsed.mu_adjusted.as_ref().map(|x| {
+            let ret: Mat = x.posterior_sample().unwrap();
+            ret.transpose()
+        });
+
+        let batch_nd = collapsed.mu_residual.as_ref().map(|x| {
+            let ret: Mat = x.posterior_sample().unwrap();
+            ret.transpose()
+        });
+
+        let mut data_loader = InMemoryData::from(InMemoryArgs {
+            input: &mixed_nd,
+            input_null: batch_nd.as_ref(),
+            output: clean_nd.as_ref(),
+            output_null: None,
+        })?;
+
+        data_loader.shuffle_minibatch(args.block_size)?;
+
+        train_config.verbose = false;
+        train_config.show_progress = args.verbose;
+        train_config.num_epochs = args.jitter_interval;
+
+        let llik = vae.train_encoder_decoder(
+            &mut data_loader,
+            &loss_func::topic_likelihood,
+            &train_config,
+        )?;
+
+        log_likelihoods.extend(llik);
+        pb.inc(args.jitter_interval as u64);
+
+        if args.verbose {
+            info!(
+                "[{}] log-likelihood: {}",
+                epoch + args.jitter_interval,
+                log_likelihoods.last().ok_or(anyhow::anyhow!("llik"))?
+            );
+        }
+    }
+
+    pb.finish_and_clear();
+
+    if train_config.verbose {
+        info!("Finished {} epochs", train_config.num_epochs);
+    }
 
     info!("Writing down the model parameters");
 
@@ -250,7 +294,10 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             &(args.out.to_string() + ".dictionary.parquet"),
         )?;
 
-    write_types::<f32>(&llik, &(args.out.to_string() + ".log_likelihood.gz"))?;
+    write_types::<f32>(
+        &log_likelihoods,
+        &(args.out.to_string() + ".log_likelihood.gz"),
+    )?;
 
     encoder
         .feature_module_membership()?

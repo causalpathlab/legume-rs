@@ -74,16 +74,44 @@ impl TwoStatParam for GammaMatrix {
             .copy_from(&update_b.map(|x| x + self.b0));
     }
 
-    fn nrows(&self) -> usize {
-        self.num_rows
-    }
+    // fn nrows(&self) -> usize {
+    //     self.num_rows
+    // }
 
-    fn ncols(&self) -> usize {
-        self.num_columns
-    }
+    // fn ncols(&self) -> usize {
+    //     self.num_columns
+    // }
 
-    fn len(&self) -> usize {
-        self.num_rows * self.num_columns
+    // fn len(&self) -> usize {
+    //     self.num_rows * self.num_columns
+    // }
+    fn calibrate(&mut self) {
+        self.map_calibrate_mean();
+        self.map_calibrate_log_mean();
+        self.map_calibrate_sd();
+        self.map_calibrate_log_sd();
+    }
+    fn map_calibrate_mean(&mut self) {
+        self.estimated_mean = self.a_stat.zip_map(&self.b_stat, |a, b| a / b);
+    }
+    fn map_calibrate_sd(&mut self) {
+        self.estimated_sd = self.a_stat.zip_map(&self.b_stat, |a, b| a.sqrt() / b);
+    }
+    fn map_calibrate_log_mean(&mut self) {
+        use special::Gamma;
+        self.estimated_log_mean = self
+            .a_stat
+            .zip_map(&self.b_stat, |a, b| a.digamma() - b.ln());
+    }
+    fn map_calibrate_log_sd(&mut self) {
+        self.estimated_log_sd = self.a_stat.map(|a| -> f32 {
+            if a > 1.0 {
+                1.0 / (a - 1.0).sqrt()
+            } else {
+                // this is actually not true
+                0.0
+            }
+        });
     }
 }
 
@@ -127,32 +155,11 @@ impl Inference for GammaMatrix {
         Ok(Self::Mat::from_vec(self.nrows(), self.ncols(), sampled))
     }
 
-    fn calibrate(&mut self) {
-        self.map_calibrate_mean();
-        self.map_calibrate_log_mean();
-        self.map_calibrate_sd();
-        self.map_calibrate_log_sd();
+    fn nrows(&self) -> usize {
+        self.num_rows
     }
-    fn map_calibrate_mean(&mut self) {
-        self.estimated_mean = self.a_stat.zip_map(&self.b_stat, |a, b| a / b);
-    }
-    fn map_calibrate_sd(&mut self) {
-        self.estimated_sd = self.a_stat.zip_map(&self.b_stat, |a, b| a.sqrt() / b);
-    }
-    fn map_calibrate_log_mean(&mut self) {
-        use special::Gamma;
-        self.estimated_log_mean = self
-            .a_stat
-            .zip_map(&self.b_stat, |a, b| a.digamma() - b.ln());
-    }
-    fn map_calibrate_log_sd(&mut self) {
-        self.estimated_log_sd = self.a_stat.map(|a| -> f32 {
-            if a > 1.0 {
-                1.0 / (a - 1.0).sqrt()
-            } else {
-                // this is actually not true
-                0.0
-            }
-        });
+
+    fn ncols(&self) -> usize {
+        self.num_columns
     }
 }

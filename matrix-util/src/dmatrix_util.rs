@@ -983,3 +983,33 @@ where
         }
     }
 }
+
+impl<T> CandleDataLoaderOps for DMatrix<T>
+where
+    T: nalgebra::RealField + Copy + candle_core::WithDType,
+{
+    type Scalar = T;
+    type Mat = Self;
+
+    // fn transpose(&self) -> Self::Mat {
+    //     self.transpose()
+    // }
+
+    fn rows_to_tensor_vec(&self) -> Vec<candle_core::Tensor> {
+        let mut idx_data = self
+            .row_iter()
+            .enumerate()
+            .par_bridge()
+            .map(|(i, row)| {
+                let mut v =
+                    candle_core::Tensor::from_iter(row.iter().copied(), &candle_core::Device::Cpu)
+                        .expect("failed to create tensor");
+                v = v.reshape((1, row.len())).expect("failed to reshape");
+                (i, v)
+            })
+            .collect::<Vec<_>>();
+
+        idx_data.sort_by_key(|(i, _)| *i);
+        idx_data.into_iter().map(|(_, t)| t).collect()
+    }
+}

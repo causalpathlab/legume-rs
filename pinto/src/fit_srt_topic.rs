@@ -5,17 +5,18 @@ use crate::srt_input::*;
 use crate::srt_random_projection::*;
 use crate::srt_vertex_propensity::*;
 
-use candle_util::candle_inference::*;
 use candle_util::candle_matched_data_loader::*;
+use candle_util::candle_matched_decoder_topic::*;
+use candle_util::candle_matched_encoder::*;
 use candle_util::candle_matched_vae_inference::*;
+
 use clap::{Parser, ValueEnum};
 
-use indicatif::{ProgressBar, ProgressDrawTarget};
+use candle_util::candle_inference::TrainConfig;
+use candle_util::candle_loss_functions as loss_func;
 
-use matrix_param::{
-    io::ParamIo,
-    traits::{Inference, TwoStatParam},
-};
+use matrix_param::traits::Inference;
+use matrix_util::utils::*;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -92,6 +93,11 @@ pub struct SrtTopicArgs {
     #[arg(short = 't', long, default_value_t = 10)]
     n_latent_topics: usize,
 
+    /// number of modules of the features in the encoder model.
+    /// If not specified, `encoder_layers[0]` will be used.
+    #[arg(short = 'm', long)]
+    feature_modules: Option<usize>,
+
     /// number of (edge) clusters
     #[arg(long)]
     n_edge_clusters: Option<usize>,
@@ -100,16 +106,12 @@ pub struct SrtTopicArgs {
     #[arg(long, default_value_t = 100)]
     maxiter_clustering: usize,
 
-    /// targeted number of row feature modules (to speed up)
-    #[arg(short = 'r', long, default_value_t = 128)]
-    n_row_modules: usize,
-
     /// encoder layers
     #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,128,128])]
     encoder_layers: Vec<usize>,
 
     /// intensity levels for frequency embedding
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 100)]
     vocab_size: usize,
 
     /// intensity embedding dimension
@@ -202,6 +204,7 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
 
     info!("Collecting summary statistics across cell pairs...");
     let collapsed = srt_cell_pairs.collapse_pairs()?;
+    let training_data = collapsed.optimize(None)?;
 
     /////////////////////////////////////////////////////////
     // 4. Train embedded topic model on the collapsed data //
@@ -228,10 +231,6 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
 
-    //////////////
-    // training //
-    //////////////
-
     let encoder = MatchedEncoder::new(
         MatchedEncoderArg {
             dim_feature: collapsed.nrows(),
@@ -239,7 +238,7 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
             dim_coord: collapsed.num_coordinate_embedding(),
             n_vocab_emb: args.vocab_size,
             dim_emb: args.coord_emb,
-            num_feature_modules: args.n_row_modules,
+            num_feature_modules: args.feature_modules.unwrap_or(args.encoder_layers[0]),
             layers: &args.encoder_layers,
         },
         param_builder.clone(),
@@ -251,19 +250,53 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         param_builder.clone(),
     )?;
 
-    let log_likelihood = train_encoder_decoder_stochastic(
-        &collapsed,
-        &encoder,
-        &decoder,
-        &parameters,
+    //////////////
+    // training //
+    //////////////
+
+    let mut vae = MatchedVae::build(&encoder, &decoder, &parameters);
+
+    let aux_left_nc = collapsed.left_coord_emb.transpose();
+    let aux_right_nc = &collapsed.right_coord_emb.transpose();
+
+    let mixed_left_nd = training_data.left.posterior_mean().transpose();
+    let mixed_right_nd = training_data.right.posterior_mean().transpose();
+
+    let delta_left_nd = training_data.left_delta.posterior_mean().transpose();
+    let delta_right_nd = training_data.right_delta.posterior_mean().transpose();
+
+    let mut data_loader = InMemoryData::from(DataLoaderArgs {
+        input_left: &mixed_left_nd,
+        input_right: &mixed_right_nd,
+        input_aux_left: Some(&aux_left_nc),
+        input_aux_right: Some(&aux_right_nc),
+        output_left: Some(&mixed_left_nd),
+        output_right: Some(&mixed_right_nd),
+        output_delta_left: Some(&delta_left_nd),
+        output_delta_right: Some(&delta_right_nd),
+    })?;
+
+    info!("Set up training data");
+
+    let log_likelihoods = vae.train_encoder_decoder(
+        &mut data_loader,
+        &loss_func::topic_likelihood,
         &train_config,
-        args.jitter_interval,
     )?;
 
-    write_types::<f32>(&log_likelihood, &(args.out.to_string() + ".llik.gz"))?;
+    if train_config.verbose {
+        info!("Finished {} epochs", train_config.num_epochs);
+    }
 
-    // tensor_parquet_out(&latent.marginal, &args.out, "collapsed_latent_marginal")?;
-    // tensor_parquet_out(&latent.border, &args.out, "collapsed_latent_border")?;
+    info!("Writing down the model parameters");
+
+    write_types::<f32>(
+        &log_likelihoods,
+        &(args.out.to_string() + ".log_likelihood.gz"),
+    )?;
+
+    let latent = encoder.evaluate(&data_loader, &train_config)?;
+    tensor_parquet_out(&latent.logits_theta, &args.out, "collapsed_latent")?;
 
     named_tensor_parquet_out(
         &decoder.dictionary().weight()?,
@@ -273,17 +306,24 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         "dictionary",
     )?;
 
-    let latent = srt_cell_pairs.evaluate_latent_states(&encoder, &train_config, args.block_size)?;
+    named_tensor_parquet_out(
+        &decoder.dictionary_delta().weight()?,
+        Some(&gene_names),
+        None,
+        &args.out,
+        "dictionary_delta",
+    )?;
 
-    tensor_parquet_out(&latent.logits_theta, &args.out, "latent")?;
+    let latent = srt_cell_pairs.evaluate_latent_states(&encoder, &train_config, args.block_size)?;
+    latent.to_parquet(None, None, &(args.out.to_string() + ".latent.parquet"))?;
+
     srt_cell_pairs.to_parquet(
         &(args.out.to_string() + ".coord_pairs.parquet"),
         Some(coordinate_names),
     )?;
 
-    let proj_kn = Mat::from_tensor(&latent.logits_theta)?.transpose();
-
     info!("clustering edges");
+    let proj_kn = latent.map(|x| x.exp()).transpose();
     let num_clusters = args.n_edge_clusters.unwrap_or(args.n_latent_topics);
 
     let edge_membership = proj_kn.kmeans_columns(KmeansArgs {
@@ -304,99 +344,13 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn train_encoder_decoder_stochastic<Enc, Dec>(
-    collapsed: &SrtCollapsedStat,
-    encoder: &Enc,
-    decoder: &Dec,
-    parameters: &candle_nn::VarMap,
-    train_config: &TrainConfig,
-    jitter: usize,
-) -> anyhow::Result<Vec<f32>>
-where
-    Enc: MatchedEncoderModuleT + Send + Sync + 'static,
-    Dec: MatchedDecoderModuleT + Send + Sync + 'static,
-{
-    let full_data = collapsed.optimize(None)?;
-
-    let mut vae = MatchedVae::build(encoder, decoder, parameters);
-
-    if train_config.verbose {
-        info!("Built the VAE model");
-    }
-
-    for var in parameters.all_vars() {
-        var.to_device(&train_config.device)?;
-    }
-
-    let mut llik_trace = vec![];
-
-    let sub_train_config = TrainConfig {
-        learning_rate: train_config.learning_rate, // override
-        batch_size: train_config.batch_size,       // train
-        num_epochs: jitter,                        // config
-        num_pretrain_epochs: 0,                    //
-        device: train_config.device.clone(),       //
-        verbose: false,
-        show_progress: false,
-    };
-
-    let pb = ProgressBar::new(train_config.num_epochs as u64);
-
-    if !train_config.show_progress || train_config.verbose {
-        pb.set_draw_target(ProgressDrawTarget::hidden());
-    }
-
-    let aux_left_nc = collapsed.left_coord_emb.transpose();
-    let aux_right_nc = &collapsed.right_coord_emb.transpose();
-
-    for epoch in (0..train_config.num_epochs).step_by(jitter) {
-        let input_left_nd = full_data.left.posterior_sample()?.transpose();
-        let input_right_nd = full_data.right.posterior_sample()?.transpose();
-
-        let output_left_nd = full_data.left_delta.posterior_sample()?.transpose();
-        let output_right_nd = full_data.right_delta.posterior_sample()?.transpose();
-
-        let mut data_loader = InMemoryData::from(DataLoaderArgs {
-            input_left: &input_left_nd,
-            input_right: &input_right_nd,
-            input_aux_left: Some(&aux_left_nc),
-            input_aux_right: Some(&aux_right_nc),
-            output_left: Some(&output_left_nd),
-            output_right: Some(&output_right_nd),
-        })?;
-
-        let llik = vae.train_encoder_decoder(
-            &mut data_loader,
-            &loss_func::topic_likelihood,
-            &sub_train_config,
-        )?;
-        llik_trace.extend(llik);
-        pb.inc(jitter as u64);
-
-        if train_config.verbose {
-            info!(
-                "[{}] log-likelihood: {}",
-                epoch + 1,
-                llik_trace.last().ok_or(anyhow::anyhow!("llik"))?
-            );
-        }
-    }
-    pb.finish_and_clear();
-
-    if train_config.verbose {
-        info!("Finished {} epochs", train_config.num_epochs);
-    }
-
-    Ok(llik_trace)
-}
-
 pub trait SrtLatentTopicOps {
     fn evaluate_latent_states<Enc>(
         &self,
         encoder: &Enc,
         train_config: &TrainConfig,
         block_size: usize,
-    ) -> anyhow::Result<MatchedEncoderLatent>
+    ) -> anyhow::Result<Mat>
     where
         Enc: MatchedEncoderModuleT + Send + Sync + 'static;
 }
@@ -407,7 +361,7 @@ impl<'a> SrtLatentTopicOps for SrtCellPairs<'a> {
         encoder: &Enc,
         train_config: &TrainConfig,
         block_size: usize,
-    ) -> anyhow::Result<MatchedEncoderLatent>
+    ) -> anyhow::Result<Mat>
     where
         Enc: MatchedEncoderModuleT + Send + Sync + 'static,
     {
@@ -421,11 +375,7 @@ impl<'a> SrtLatentTopicOps for SrtCellPairs<'a> {
         )?;
 
         latent_vec.sort_by_key(|&(lb, _)| lb);
-        latent_vec
-            .into_iter()
-            .map(|(_, x)| x)
-            .collect::<Vec<_>>()
-            .concatenate()
+        concatenate_vertical(&latent_vec.into_iter().map(|(_, x)| x).collect::<Vec<_>>())
     }
 }
 
@@ -433,7 +383,7 @@ fn evaluate_latent_state_visitor<Enc>(
     bound: (usize, usize),
     data: &SrtCellPairs,
     encoder_config: &(&Enc, &TrainConfig),
-    latent_vec: Arc<Mutex<&mut Vec<(usize, MatchedEncoderLatent)>>>,
+    latent_vec: Arc<Mutex<&mut Vec<(usize, Mat)>>>,
 ) -> anyhow::Result<()>
 where
     Enc: MatchedEncoderModuleT + Send + Sync + 'static,
@@ -457,6 +407,46 @@ where
         .read_columns_dmatrix(right)?
         .transpose()
         .to_tensor(dev)?;
+
+    ////////////////////////////////////////////////////
+    // imputation by neighbours and update statistics //
+    ////////////////////////////////////////////////////
+
+    // let pairs_neighbours = (lb..ub)
+    //     .map(|j| data.pairs_neighbours.get(j).unwrap())
+    //     .collect::<Vec<_>>();
+
+    // // adjust the left by the neighbours of the right
+    // let y_delta_left = pairs_neighbours
+    //     .iter()
+    //     .enumerate()
+    //     .map(|(j, &n)| -> anyhow::Result<Tensor> {
+    //         let left = pairs[j].left;
+
+    //         let mut y_d1 = data.data.read_columns_csc(std::iter::once(left))?;
+    //         let y_right_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
+    //         let y_hat_d1 = impute_with_neighbours(&y_d1, &y_right_neigh_dm)?;
+    //         y_d1.adjust_by_division_inplace(&y_hat_d1);
+    //         y_d1.transpose().to_tensor(dev)
+    //     })
+    //     .collect::<anyhow::Result<Vec<_>>>()?;
+    // let y_delta_left = Tensor::cat(&y_delta_left, 0)?;
+
+    // // adjust the right by the neighbours of the left
+    // let y_delta_right = pairs_neighbours
+    //     .iter()
+    //     .enumerate()
+    //     .map(|(j, &n)| -> anyhow::Result<Tensor> {
+    //         let right = pairs[j].right;
+
+    //         let mut y_d1 = data.data.read_columns_csc(std::iter::once(right))?;
+    //         let y_left_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
+    //         let y_hat_d1 = impute_with_neighbours(&y_d1, &y_left_neigh_dm)?;
+    //         y_d1.adjust_by_division_inplace(&y_hat_d1);
+    //         y_d1.transpose().to_tensor(dev)
+    //     })
+    //     .collect::<anyhow::Result<Vec<_>>>()?;
+    // let y_delta_right = Tensor::cat(&y_delta_right, 0)?;
 
     let aux_left = concatenate_vertical(
         &pairs
@@ -486,8 +476,8 @@ where
 
     latent_vec
         .lock()
-        .expect("latent vec lock")
-        .push((lb, latent));
+        .expect("lock")
+        .push((lb, Mat::from_tensor(&latent.logits_theta)?));
 
     Ok(())
 }
@@ -515,42 +505,42 @@ impl MatchedEncoderLatentVecOps for Vec<MatchedEncoderLatent> {
     }
 }
 
-// pub trait MatchedEncoderEvaluateOps {
-//     fn evaluate<DataL: DataLoader>(
-//         &self,
-//         data: &DataL,
-//         train_config: &TrainConfig,
-//     ) -> anyhow::Result<MatchedEncoderLatent>;
-// }
+pub trait MatchedEncoderEvaluateOps {
+    fn evaluate<DataL: DataLoader>(
+        &self,
+        data: &DataL,
+        train_config: &TrainConfig,
+    ) -> anyhow::Result<MatchedEncoderLatent>;
+}
 
-// impl MatchedEncoderEvaluateOps for MatchedLogSoftmaxEncoder {
-//     fn evaluate<DataL: DataLoader>(
-//         &self,
-//         data: &DataL,
-//         train_config: &TrainConfig,
-//     ) -> anyhow::Result<MatchedEncoderLatent> {
-//         let device = &train_config.device;
-//         let ntot = data.num_data();
-//         let batch_size = train_config.batch_size;
-//         let jobs = generate_minibatch_intervals(ntot, batch_size);
-//         let num_jobs = jobs.len();
+impl MatchedEncoderEvaluateOps for MatchedEncoder {
+    fn evaluate<DataL: DataLoader>(
+        &self,
+        data_loader: &DataL,
+        train_config: &TrainConfig,
+    ) -> anyhow::Result<MatchedEncoderLatent> {
+        let device = &train_config.device;
+        let ntot = data_loader.num_data();
+        let batch_size = train_config.batch_size;
+        let jobs = generate_minibatch_intervals(ntot, batch_size);
+        let num_jobs = jobs.len();
 
-//         let mut ret = Vec::with_capacity(num_jobs);
+        let mut ret = Vec::with_capacity(num_jobs);
 
-//         for (lb, ub) in jobs {
-//             let mb = data.minibatch_ordered(lb, ub, device)?;
+        for (lb, ub) in jobs {
+            let mb = data_loader.minibatch_ordered(lb, ub, device)?;
 
-//             let latent = self.forward_t(
-//                 MatchedEncoderData {
-//                     left: mb.input_left.as_ref(),
-//                     right: mb.input_right.as_ref(),
-//                     aux_left: mb.input_aux_left.as_ref(),
-//                     aux_right: mb.input_aux_right.as_ref(),
-//                 },
-//                 false,
-//             )?;
-//             ret.push(latent);
-//         }
-//         ret.concatenate()
-//     }
-// }
+            let latent = self.forward_t(
+                MatchedEncoderData {
+                    left: mb.input_left.as_ref(),
+                    right: mb.input_right.as_ref(),
+                    aux_left: mb.input_aux_left.as_ref(),
+                    aux_right: mb.input_aux_right.as_ref(),
+                },
+                false,
+            )?;
+            ret.push(latent);
+        }
+        ret.concatenate()
+    }
+}

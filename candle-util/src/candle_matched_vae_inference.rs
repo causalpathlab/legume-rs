@@ -10,8 +10,8 @@ use log::info;
 
 pub struct MatchedVae<'a, Enc, Dec>
 where
-    Enc: MatchedEncoderModuleT + Send + Sync + 'static,
-    Dec: MatchedDecoderModuleT + Send + Sync + 'static,
+    Enc: MatchedEncoderModuleT,
+    Dec: MatchedDecoderModuleT,
 {
     pub encoder: &'a Enc,
     pub decoder: &'a Dec,
@@ -20,8 +20,8 @@ where
 
 pub trait DiffVaeT<'a, Enc, Dec>
 where
-    Enc: MatchedEncoderModuleT + Send + Sync + 'static,
-    Dec: MatchedDecoderModuleT + Send + Sync + 'static,
+    Enc: MatchedEncoderModuleT,
+    Dec: MatchedDecoderModuleT,
 {
     /// Train the VAE model
     /// * `data` - data loader should have `minibatch_data`
@@ -45,8 +45,8 @@ where
 
 impl<'a, Enc, Dec> DiffVaeT<'a, Enc, Dec> for MatchedVae<'a, Enc, Dec>
 where
-    Enc: MatchedEncoderModuleT + Send + Sync + 'static,
-    Dec: MatchedDecoderModuleT + Send + Sync + 'static,
+    Enc: MatchedEncoderModuleT,
+    Dec: MatchedDecoderModuleT,
 {
     fn build(encoder: &'a Enc, decoder: &'a Dec, variable_map: &'a candle_nn::VarMap) -> Self {
         assert_eq!(encoder.dim_latent(), decoder.dim_latent());
@@ -119,6 +119,8 @@ where
                             .output_right
                             .as_ref()
                             .ok_or(anyhow::anyhow!("need output right"))?,
+                        delta_left: mb.output_delta_left.as_ref(),
+                        delta_right: mb.output_delta_right.as_ref(),
                     },
                     llik_func,
                 )?;

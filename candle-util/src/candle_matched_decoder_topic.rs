@@ -12,7 +12,8 @@ use candle_nn::{Module, VarBuilder};
 pub struct MatchedTopicDecoder {
     n_features: usize,
     n_topics: usize,
-    dictionary: LogSoftmaxLinear,
+    dictionary: SoftmaxLinear,
+    dictionary_delta: SoftmaxLinear,
 }
 
 impl MatchedTopicDecoder {
@@ -20,15 +21,20 @@ impl MatchedTopicDecoder {
     /// * `dictionary.weight`
     pub fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
         let dictionary = log_softmax_linear(n_topics, n_features, vs.pp("dictionary"))?;
+        let dictionary_delta = log_softmax_linear(n_topics, n_features, vs.pp("dictionary.delta"))?;
         Ok(Self {
             n_features,
             n_topics,
             dictionary,
+            dictionary_delta,
         })
     }
 
-    pub fn dictionary(&self) -> &LogSoftmaxLinear {
+    pub fn dictionary(&self) -> &SoftmaxLinear {
         &self.dictionary
+    }
+    pub fn dictionary_delta(&self) -> &SoftmaxLinear {
+        &self.dictionary_delta
     }
 }
 
@@ -50,10 +56,22 @@ impl MatchedDecoderModuleT for MatchedTopicDecoder {
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
-        let recon = self.forward(latent)?;
-        // let llik_val = llik(&data.left.add(data.right)?, &recon)?;
-        let llik_val = llik(data.left, &recon)?.add(&llik(data.right, &recon)?)?;
-        Ok((recon, llik_val))
+        if let (Some(delta_left), Some(delta_right)) = (data.delta_left, data.delta_right) {
+            let recon = self.dictionary().forward(&latent.logits_theta.exp()?)?;
+            let recon_delta = self
+                .dictionary_delta()
+                .forward(&latent.logits_theta.exp()?)?;
+            let llik_val = llik(&data.left, &recon)?
+                .add(&llik(&data.right, &recon)?)?
+                .add(&llik(&delta_left, &recon_delta)?)?
+                .add(&llik(&delta_right, &recon_delta)?)?;
+
+            Ok((recon, llik_val))
+        } else {
+            let recon = self.forward(latent)?;
+            let llik_val = llik(&data.left, &recon)?.add(&llik(&data.right, &recon)?)?;
+            Ok((recon, llik_val))
+        }
     }
 
     fn dim_obs(&self) -> usize {

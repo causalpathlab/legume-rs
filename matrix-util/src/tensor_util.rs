@@ -74,3 +74,14 @@ impl MatTriplets for Tensor {
         }
     }
 }
+
+// impl CandleDataLoaderOps for Tensor {
+//     fn rows_to_tensor_vec(&self) -> Vec<Tensor> {
+//         let mut idx_data = (0..self.dims()[0])
+//             .map(|i| (i, self.narrow(0, i, 1).expect("").clone()))
+//             .collect::<Vec<_>>();
+
+//         idx_data.sort_by_key(|(i, _)| *i);
+//         idx_data.into_iter().map(|(_, t)| t).collect()
+//     }
+// }

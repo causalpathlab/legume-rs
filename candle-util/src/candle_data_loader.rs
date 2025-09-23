@@ -1,5 +1,8 @@
 use crate::candle_data_loader_util::*;
+
 use candle_core::{Device, Tensor};
+
+use matrix_util::traits::CandleDataLoaderOps;
 
 pub struct MinibatchData {
     pub input: Tensor,
@@ -51,9 +54,9 @@ pub struct InMemoryData {
     minibatches: Minibatches,
 }
 
-pub struct DataLoaderArgs<'a, D>
+pub struct InMemoryArgs<'a, D>
 where
-    D: RowsToTensorVec,
+    D: CandleDataLoaderOps,
 {
     pub input: &'a D,
     pub input_null: Option<&'a D>,
@@ -62,9 +65,9 @@ where
 }
 
 impl InMemoryData {
-    pub fn from<D>(args: DataLoaderArgs<'_, D>) -> anyhow::Result<Self>
+    pub fn from<D>(args: InMemoryArgs<D>) -> anyhow::Result<Self>
     where
-        D: RowsToTensorVec,
+        D: CandleDataLoaderOps,
     {
         let input = args.input;
         let input_null = args.input_null;
@@ -218,69 +221,6 @@ impl DataLoader for InMemoryData {
         }
 
         Ok(())
-    }
-}
-
-fn take_lb_ub(
-    lb: usize,
-    ub: usize,
-    target_device: &Device,
-    data_vec: Option<&Vec<Tensor>>,
-) -> anyhow::Result<Option<Tensor>> {
-    if let Some(data_vec) = data_vec {
-        if lb > ub || ub > data_vec.len() {
-            return Err(anyhow::anyhow!(
-                "check lb {}, ub {} vs. ntot {}",
-                lb,
-                ub,
-                data_vec.len()
-            ));
-        }
-        if lb == ub {
-            return Ok(None);
-        }
-
-        let chunk = Tensor::cat(
-            &(lb..ub).map(|i| data_vec[i].clone()).collect::<Vec<_>>(),
-            0,
-        )?;
-        Ok(Some(chunk.to_device(target_device)?))
-    } else {
-        Ok(None)
-    }
-}
-
-fn copy_shuffled(
-    samples: &[usize],
-    data: Option<&Vec<Tensor>>,
-    shuffled_data: Option<&mut Vec<Tensor>>,
-) -> anyhow::Result<()> {
-    if let (Some(data), Some(shuffled)) = (data, shuffled_data) {
-        let chunk: Vec<Tensor> = samples.iter().map(|&i| data[i].clone()).collect();
-        let x = Tensor::cat(&chunk, 0)?;
-        shuffled.push(x);
-    }
-    Ok(())
-}
-
-fn take_shuffled(
-    batch_idx: usize,
-    target_device: &Device,
-    data_vec: Option<&Vec<Tensor>>,
-) -> anyhow::Result<Option<Tensor>> {
-    if let Some(data_vec) = data_vec {
-        if data_vec.len() <= batch_idx {
-            Err(anyhow::anyhow!(
-                "invalid index = {} vs. total # = {}",
-                batch_idx,
-                data_vec.len()
-            ))
-        } else {
-            Ok(Some(data_vec[batch_idx].to_device(target_device)?))
-        }
-    } else {
-        // if the data vector doesn't exist
-        Ok(None)
     }
 }
 
