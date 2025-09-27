@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::embed_common::*;
 use matrix_util::common_io::{self, basename, extension, read_lines};
 

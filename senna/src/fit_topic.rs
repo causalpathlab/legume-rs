@@ -173,7 +173,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         batch_db.to_parquet(Some(&gene_names), batch_names.as_deref(), &outfile)?;
     }
 
-    // 4. Train embedded topic model on the collapsed data
+    // 4. Train topic model on the collapsed data
     let n_topics = args.n_latent_topics;
     let n_vocab = args.vocab_size;
     let d_vocab_emb = args.vocab_emb;
@@ -250,8 +250,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             output: clean_nd.as_ref(),
             output_null: None,
         })?;
-
-        data_loader.shuffle_minibatch(args.block_size)?;
 
         train_config.verbose = false;
         train_config.show_progress = args.verbose;
