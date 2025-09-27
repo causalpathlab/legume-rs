@@ -18,27 +18,64 @@ fi
 ```
 
 ```{sh run_pinto_svd}
-pinto svd temp7.h5 -c temp/cells.parquet --coord-column-names x_centroid,y_centroid -o temp7 --preload-data
+cargo install --path .
+
+pinto svd temp7.h5 -c temp/cells.parquet --coord-column-names x_centroid,y_centroid -o temp7 --preload-data -t 10
+
+pinto propensity --latent-data-file temp7.latent.parquet --coord-pair-file temp7.coord_pairs.parquet -k 8 -o temp7
 ```
+
+```{r}
+.dt <-
+    arrow::read_parquet("temp7.collapsed_pairs.parquet") %>%
+    as.data.table
+
+quartz()
+ggplot(.dt, aes(left_x_centroid, left_y_centroid, xend=right_x_centroid, yend=right_y_centroid)) +
+    scale_y_reverse() +
+    theme_void() +
+    geom_point(stroke=0) +
+    geom_segment()
+```
+
+```{sh}
+cargo install --path ../senna
+senna topic temp7.h5 -o temp_senna -t 10
+
+```
+
 
 ```{r}
 library(dplyr)
 library(data.table)
 library(ggplot2)
 
+.pairs <- arrow::read_parquet("temp7.coord_pairs.parquet")
+
 .dt <- arrow::read_parquet("temp/cells.parquet") %>% as.data.table
+
 .prop <- arrow::read_parquet("temp7.propensity.parquet") %>%
     as.data.table %>%
     melt(id.vars = "row") %>%
+    na.omit() %>% 
     rename(cell_id = row)
+
+.latent <- arrow::read_parquet("temp7.latent.parquet")
+
+## .prop <- arrow::read_parquet("temp_senna.latent.parquet") %>%
+##     as.data.table %>%
+##     melt(id.vars = "row") %>%
+##     dplyr::mutate(value = exp(value)) %>% 
+##     dplyr::rename(cell_id = row)
 
 .dt.show <- .prop %>%
     left_join(.dt[, .(cell_id, x_centroid, y_centroid, total_counts)]) %>%
-    na.omit() %>%
-    filter(value > .5)
+    na.omit()
 
-ggplot(.dt.show[sample(.N)],
-       aes(x_centroid, y_centroid, colour=variable, size=value)) +
+quartz()
+ggplot(.dt.show[sample(.N)][value < .5],
+       aes(x_centroid, y_centroid, colour=variable, size=1 - value)) +
+    ## facet_wrap(~variable, nrow=2) +
     scale_y_reverse() +
     theme_void() +
     geom_point(stroke=0) +

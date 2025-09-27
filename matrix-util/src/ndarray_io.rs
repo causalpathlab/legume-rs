@@ -2,13 +2,19 @@ use crate::common_io::{read_lines_of_types, write_lines, Delimiter};
 use crate::parquet::*;
 use crate::traits::*;
 use ndarray::prelude::*;
-use parquet::data_type::{ByteArrayType, DoubleType};
 use std::fmt::{Debug, Display};
 use std::str::FromStr;
 
 impl<T> IoOps for Array2<T>
 where
-    T: FromStr + Send + Display + Clone + Into<f64> + num_traits::FromPrimitive,
+    T: FromStr
+        + Send
+        + Display
+        + Clone
+        + Into<f64>
+        + num_traits::FromPrimitive
+        + num_traits::ToPrimitive
+        + 'static,
     <T as FromStr>::Err: Debug,
 {
     type Scalar = T;
@@ -86,34 +92,19 @@ where
     ) -> anyhow::Result<()> {
         let (nrows, ncols) = (self.nrows(), self.ncols());
 
-        let writer = ParquetWriter::new(file_path, (nrows, ncols), (row_names, column_names))?;
+        let writer =
+            ParquetWriter::new(file_path, (nrows, ncols), (row_names, column_names), None)?;
         let row_names = writer.row_names_vec();
 
         if row_names.len() != nrows {
             return Err(anyhow::anyhow!("row names don't match"));
         }
 
-        let mut writer = writer.open()?;
+        let mut writer = writer.get_writer()?;
         let mut row_group_writer = writer.next_row_group()?;
-
-        if let Some(mut column_writer) = row_group_writer.next_column()? {
-            let typed_writer = column_writer.typed::<ByteArrayType>();
-            typed_writer.write_batch(&row_names, None, None)?;
-            column_writer.close()?;
-        }
-
+        parquet_add_bytearray(&mut row_group_writer, &row_names)?;
         for j in 0..ncols {
-            let data_j = self
-                .column(j)
-                .to_vec()
-                .into_iter()
-                .map(|x| x.into())
-                .collect::<Vec<f64>>();
-            if let Some(mut column_writer) = row_group_writer.next_column()? {
-                let typed_writer = column_writer.typed::<DoubleType>();
-                typed_writer.write_batch(data_j.as_slice(), None, None)?;
-                column_writer.close()?;
-            }
+            parquet_add_numeric_column(&mut row_group_writer, &self.column(j).to_vec())?;
         }
 
         row_group_writer.close()?;

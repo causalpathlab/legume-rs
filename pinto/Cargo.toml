@@ -18,6 +18,7 @@ data-beans-alg = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
 candle-util = { workspace = true }
+parquet = { workspace = true }
 
 anyhow = { workspace = true }
 clap = { workspace = true }

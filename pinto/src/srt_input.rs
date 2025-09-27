@@ -16,7 +16,45 @@ pub struct SRTData {
     pub batches: Vec<Box<str>>,
 }
 
-pub fn read_data_vec(args: SRTReadArgs) -> anyhow::Result<SRTData> {
+pub fn read_expr_data(data_files: &Vec<Box<str>>) -> anyhow::Result<SparseIoVec> {
+    if data_files.is_empty() {
+        return Err(anyhow::anyhow!("empty data files"));
+    }
+
+    let file = data_files[0].as_ref();
+    let backend = match extension(file)?.to_string().as_str() {
+        "h5" => SparseIoBackend::HDF5,
+        "zarr" => SparseIoBackend::Zarr,
+        _ => SparseIoBackend::Zarr,
+    };
+    // to avoid duplicate barcodes in the column names
+    let attach_data_name = data_files.len() > 1;
+
+    let mut data_vec = SparseIoVec::new();
+
+    for data_file in data_files.iter() {
+        info!("Importing data file: {}", data_file);
+
+        match extension(data_file)?.as_ref() {
+            "zarr" => {
+                assert_eq!(backend, SparseIoBackend::Zarr);
+            }
+            "h5" => {
+                assert_eq!(backend, SparseIoBackend::HDF5);
+            }
+            _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
+        };
+
+        let data = open_sparse_matrix(data_file, &backend)?;
+        let data_name = attach_data_name.then(|| basename(data_file)).transpose()?;
+
+        data_vec.push(Arc::from(data), data_name)?;
+    }
+
+    Ok(data_vec)
+}
+
+pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> {
     // push data files and collect batch membership
     let file = args.data_files[0].as_ref();
     let backend = match extension(file)?.to_string().as_str() {

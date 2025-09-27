@@ -15,14 +15,14 @@ pub struct MatchedEncoder {
     emb_x: Embedding,
     emb_logx: Embedding,
     coord_proj: Linear,
-    fc_expr: StackLayers<Linear>,
-    fc_coord: StackLayers<Linear>,
-    bn_expr: BatchNorm,
-    bn_coord: BatchNorm,
-    z_expr_mean: Linear,
-    z_expr_lnvar: Linear,
-    z_coord_mean: Linear,
-    z_coord_lnvar: Linear,
+    fc_left_expr: StackLayers<Linear>,
+    fc_right_expr: StackLayers<Linear>,
+    bn_left_expr: BatchNorm,
+    bn_right_expr: BatchNorm,
+    z_left_expr_mean: Linear,
+    z_left_expr_lnvar: Linear,
+    z_right_expr_mean: Linear,
+    z_right_expr_lnvar: Linear,
 }
 
 impl MatchedEncoderModuleT for MatchedEncoder {
@@ -32,46 +32,43 @@ impl MatchedEncoderModuleT for MatchedEncoder {
     /// 2. kl-divergence
     ///
     fn forward_t(&self, data: MatchedEncoderData, train: bool) -> Result<MatchedEncoderLatent> {
-        let latent_states_with_coordinates = |value_nm: &Tensor,
-                                              coord_nc: Option<&Tensor>|
-         -> Result<(Tensor, Tensor)> {
-            if let Some(coord_nc) = coord_nc {
-                let (z_expr_mean_nk, z_expr_lnvar_nk) =
-                    self.latent_gaussian_params_expr(value_nm, train)?;
-
-                let proj_nm = self.coord_proj.forward_t(coord_nc, train)?;
-                let (z_coord_mean_nk, z_coord_lnvar_nk) =
-                    self.latent_gaussian_params_coord(&proj_nm, train)?;
-
-                let z = self
-                    .reparameterize(&z_expr_mean_nk, &z_expr_lnvar_nk, train)?
-                    .add(&self.reparameterize(&z_coord_mean_nk, &z_coord_lnvar_nk, train)?)?;
-                let kl = gaussian_kl_loss(&z_expr_mean_nk, &z_expr_lnvar_nk)?
-                    .add(&gaussian_kl_loss(&z_coord_mean_nk, &z_coord_lnvar_nk)?)?;
-
-                Ok((z, kl))
-            } else {
-                let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params_expr(value_nm, train)?;
-
-                let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
-                let kl = gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?;
-                Ok((z_nk, kl))
-            }
-        };
-
         let left_nmk = self.modularized_value_embedding(data.left, train)?;
         let right_nmk = self.modularized_value_embedding(data.right, train)?;
-        let left_nm = left_nmk.sum(left_nmk.rank() - 1)?;
-        let right_nm = right_nmk.sum(right_nmk.rank() - 1)?;
 
-        let (z_left_nk, kl_left) = latent_states_with_coordinates(&left_nm, data.aux_left)?;
-        let (z_right_nk, kl_right) = latent_states_with_coordinates(&right_nm, data.aux_right)?;
+        let left_nm = match data.aux_left {
+            Some(coord_nc) => left_nmk
+                .sum(left_nmk.rank() - 1)?
+                .add(&self.coord_proj.forward(coord_nc)?),
+            _ => left_nmk.sum(left_nmk.rank() - 1),
+        }?;
+
+        let right_nm = match data.aux_right {
+            Some(coord_nc) => right_nmk
+                .sum(right_nmk.rank() - 1)?
+                .add(&self.coord_proj.forward(coord_nc)?),
+            _ => right_nmk.sum(right_nmk.rank() - 1),
+        }?;
+
+        let (z_left_mean_nk, z_left_lnvar_nk) =
+            self.latent_gaussian_params_left_expr(&left_nm, train)?;
+
+        let z_left_nk = self.reparameterize(&z_left_mean_nk, &z_left_lnvar_nk, train)?;
+
+        let (z_right_mean_nk, z_right_lnvar_nk) =
+            self.latent_gaussian_params_right_expr(&right_nm, train)?;
+
+        let z_right_nk = self.reparameterize(&z_right_mean_nk, &z_right_lnvar_nk, train)?;
+
+        let kl_left = gaussian_kl_loss(&z_left_mean_nk, &z_left_lnvar_nk)?;
+        let kl_right = gaussian_kl_loss(&z_right_mean_nk, &z_right_lnvar_nk)?;
 
         let kl_div = kl_left.add(&kl_right)?;
-        let logits_theta = ops::log_softmax(&z_left_nk.add(&z_right_nk)?, z_left_nk.rank() - 1)?;
+        let logits_theta_left = ops::log_softmax(&z_left_nk, z_left_nk.rank() - 1)?;
+        let logits_theta_right = ops::log_softmax(&z_right_nk, z_right_nk.rank() - 1)?;
 
         Ok(MatchedEncoderLatent {
-            logits_theta,
+            logits_theta_left,
+            logits_theta_right,
             kl_div,
         })
     }
@@ -101,33 +98,34 @@ impl MatchedEncoder {
     /// * input: `x_nd` - `n x d` tensor
     /// * output: `emb_nmk` - `n x m x k` embedding results
     fn modularized_value_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
-        let x_nm = self.feature_module.forward(x_nd)?;
+        let denom_n1 = x_nd.sum_keepdim(x_nd.rank() - 1)?;
+        let x_nd = (x_nd.broadcast_div(&denom_n1)? * 1e4)?;
+        let x_nm = self.feature_module.forward(&x_nd)?;
         Ok(self.value_embedding(&x_nm, train)?.detach())
     }
 
     fn value_embedding(&self, x: &Tensor, train: bool) -> Result<Tensor> {
-        let logx = self.discretize_whitened_tensor(&(x + 1e-4)?.log()?)?;
-        let x = self.discretize_whitened_tensor(x)?;
+        let int_x_nd = self.discretize_whitened_tensor(x)?;
+        let logx_nd = (x + 1.)?.log()?;
+        let int_logx_nd = self.discretize_whitened_tensor(&logx_nd)?;
         self.emb_x
-            .forward_t(&x, train)?
-            .add(&self.emb_logx.forward_t(&logx, train)?)
+            .forward_t(&int_x_nd, train)?
+            .add(&self.emb_logx.forward_t(&int_logx_nd, train)?)
     }
 
     fn discretize_whitened_tensor(&self, x_nd: &Tensor) -> Result<Tensor> {
-        let eps = 1e-4;
         let n_vocab = self.n_vocab as f64;
         let d = x_nd.rank();
-
         let min_val = x_nd.min_keepdim(d - 1)?;
         let max_val = x_nd.max_keepdim(d - 1)?;
-        let div_val = ((max_val - &min_val)? + eps)?;
+        let div_val = ((max_val - &min_val)? + 1.0)?;
 
         let x_nd = x_nd.broadcast_sub(&min_val)?.broadcast_div(&div_val)?;
 
         Ok((x_nd * n_vocab)?
             .floor()?
-            .to_dtype(candle_core::DType::U8)?
-            .detach())
+            .clamp(0.0, n_vocab - 1.0)?
+            .to_dtype(candle_core::DType::U32)?)
     }
 
     pub fn new(args: MatchedEncoderArg, vs: VarBuilder) -> Result<Self> {
@@ -157,35 +155,35 @@ impl MatchedEncoder {
         )?;
 
         // (1) data -> fc
-        let mut fc_expr = StackLayers::<Linear>::new();
-        let mut fc_coord = StackLayers::<Linear>::new();
+        let mut fc_left_expr = StackLayers::<Linear>::new();
+        let mut fc_right_expr = StackLayers::<Linear>::new();
 
         let mut prev_dim = args.num_feature_modules;
         for (j, &next_dim) in args.layers.iter().enumerate() {
             let _name = format!("nn.enc.fc.left.{}", j);
-            fc_expr.push_with_act(
+            fc_left_expr.push_with_act(
                 candle_nn::linear(prev_dim, next_dim, vs.pp(_name))?,
                 candle_nn::Activation::Relu,
             );
-            let _name = format!("nn.enc.fc.coord.{}", j);
-            fc_coord.push_with_act(
+            let _name = format!("nn.enc.fc.right.{}", j);
+            fc_right_expr.push_with_act(
                 candle_nn::linear(prev_dim, next_dim, vs.pp(_name))?,
                 candle_nn::Activation::Relu,
             );
             prev_dim = next_dim;
         }
 
-        let bn_expr = candle_nn::batch_norm(prev_dim, bn_config, vs.pp("nn.enc.bn.left"))?;
-        let bn_coord = candle_nn::batch_norm(prev_dim, bn_config, vs.pp("nn.enc.bn.coord"))?;
+        let bn_left_expr = candle_nn::batch_norm(prev_dim, bn_config, vs.pp("nn.enc.bn.left"))?;
+        let bn_right_expr = candle_nn::batch_norm(prev_dim, bn_config, vs.pp("nn.enc.bn.coord"))?;
 
         // (2) fc -> K
-        let z_expr_mean =
+        let z_left_expr_mean =
             candle_nn::linear(prev_dim, args.dim_latent, vs.pp("nn.enc.left.z.mean"))?;
-        let z_expr_lnvar =
+        let z_left_expr_lnvar =
             candle_nn::linear(prev_dim, args.dim_latent, vs.pp("nn.enc.left.z.lnvar"))?;
-        let z_coord_mean =
+        let z_right_expr_mean =
             candle_nn::linear(prev_dim, args.dim_latent, vs.pp("nn.enc.coord.z.mean"))?;
-        let z_coord_lnvar =
+        let z_right_expr_lnvar =
             candle_nn::linear(prev_dim, args.dim_latent, vs.pp("nn.enc.coord.z.lnvar"))?;
 
         Ok(Self {
@@ -196,14 +194,14 @@ impl MatchedEncoder {
             emb_x,
             emb_logx,
             coord_proj,
-            fc_expr,
-            fc_coord,
-            bn_expr,
-            bn_coord,
-            z_expr_mean,
-            z_expr_lnvar,
-            z_coord_mean,
-            z_coord_lnvar,
+            fc_left_expr,
+            fc_right_expr,
+            bn_left_expr,
+            bn_right_expr,
+            z_left_expr_mean,
+            z_left_expr_lnvar,
+            z_right_expr_mean,
+            z_right_expr_lnvar,
         })
     }
 
@@ -233,32 +231,32 @@ impl MatchedEncoder {
         Ok((z_mean_nk, z_lnvar_nk))
     }
 
-    fn latent_gaussian_params_expr(
+    fn latent_gaussian_params_left_expr(
         &self,
         emb_nm: &Tensor,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
         self.latent_gaussian_params(
             emb_nm,
-            &self.fc_expr,
-            &self.bn_expr,
-            &self.z_expr_mean,
-            &self.z_expr_lnvar,
+            &self.fc_left_expr,
+            &self.bn_left_expr,
+            &self.z_left_expr_mean,
+            &self.z_left_expr_lnvar,
             train,
         )
     }
 
-    fn latent_gaussian_params_coord(
+    fn latent_gaussian_params_right_expr(
         &self,
         proj_nm: &Tensor,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
         self.latent_gaussian_params(
             proj_nm,
-            &self.fc_coord,
-            &self.bn_coord,
-            &self.z_coord_mean,
-            &self.z_coord_lnvar,
+            &self.fc_right_expr,
+            &self.bn_right_expr,
+            &self.z_right_expr_mean,
+            &self.z_right_expr_lnvar,
             train,
         )
     }

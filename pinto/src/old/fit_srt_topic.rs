@@ -206,6 +206,17 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     let collapsed = srt_cell_pairs.collapse_pairs()?;
     let training_data = collapsed.optimize(None)?;
 
+    collapsed.to_parquet(
+        &(args.out.to_string() + ".collapsed_pairs.parquet"),
+        Some(coordinate_names.clone()),
+    )?;
+
+    // let training_dm = concatenate_horizontal(&[
+    //     params.left_delta.posterior_log_mean().clone(),
+    //     params.right_delta.posterior_log_mean().clone(),
+    // ])?
+    // .scale_columns();
+
     /////////////////////////////////////////////////////////
     // 4. Train embedded topic model on the collapsed data //
     /////////////////////////////////////////////////////////
@@ -256,8 +267,8 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
 
     let mut vae = MatchedVae::build(&encoder, &decoder, &parameters);
 
-    let aux_left_nc = collapsed.left_coord_emb.transpose();
-    let aux_right_nc = &collapsed.right_coord_emb.transpose();
+    // let aux_left_nc = collapsed.left_coord_emb.transpose();
+    // let aux_right_nc = &collapsed.right_coord_emb.transpose();
 
     let mixed_left_nd = training_data.left.posterior_mean().transpose();
     let mixed_right_nd = training_data.right.posterior_mean().transpose();
@@ -268,12 +279,12 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     let mut data_loader = InMemoryData::from(DataLoaderArgs {
         input_left: &mixed_left_nd,
         input_right: &mixed_right_nd,
-        input_aux_left: Some(&aux_left_nc),
-        input_aux_right: Some(&aux_right_nc),
-        output_left: Some(&mixed_left_nd),
-        output_right: Some(&mixed_right_nd),
-        output_delta_left: Some(&delta_left_nd),
-        output_delta_right: Some(&delta_right_nd),
+        input_aux_left: None,  // Some(&aux_left_nc),
+        input_aux_right: None, // Some(&aux_right_nc),
+        output_left: Some(&delta_left_nd),
+        output_right: Some(&delta_right_nd),
+        output_delta_left: None,  // Some(&delta_left_nd),
+        output_delta_right: None, // Some(&delta_right_nd),
     })?;
 
     info!("Set up training data");
@@ -296,7 +307,16 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     )?;
 
     let latent = encoder.evaluate(&data_loader, &train_config)?;
-    tensor_parquet_out(&latent.logits_theta, &args.out, "collapsed_latent")?;
+    tensor_parquet_out(
+        &latent.logits_theta_left,
+        &args.out,
+        "collapsed_latent_left",
+    )?;
+    tensor_parquet_out(
+        &latent.logits_theta_right,
+        &args.out,
+        "collapsed_latent_right",
+    )?;
 
     named_tensor_parquet_out(
         &decoder.dictionary().weight()?,
@@ -412,41 +432,41 @@ where
     // imputation by neighbours and update statistics //
     ////////////////////////////////////////////////////
 
-    // let pairs_neighbours = (lb..ub)
-    //     .map(|j| data.pairs_neighbours.get(j).unwrap())
-    //     .collect::<Vec<_>>();
+    let pairs_neighbours = (lb..ub)
+        .map(|j| data.pairs_neighbours.get(j).unwrap())
+        .collect::<Vec<_>>();
 
-    // // adjust the left by the neighbours of the right
-    // let y_delta_left = pairs_neighbours
-    //     .iter()
-    //     .enumerate()
-    //     .map(|(j, &n)| -> anyhow::Result<Tensor> {
-    //         let left = pairs[j].left;
+    // adjust the left by the neighbours of the right
+    let y_delta_left = pairs_neighbours
+        .iter()
+        .enumerate()
+        .map(|(j, &n)| -> anyhow::Result<Tensor> {
+            let left = pairs[j].left;
 
-    //         let mut y_d1 = data.data.read_columns_csc(std::iter::once(left))?;
-    //         let y_right_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
-    //         let y_hat_d1 = impute_with_neighbours(&y_d1, &y_right_neigh_dm)?;
-    //         y_d1.adjust_by_division_inplace(&y_hat_d1);
-    //         y_d1.transpose().to_tensor(dev)
-    //     })
-    //     .collect::<anyhow::Result<Vec<_>>>()?;
-    // let y_delta_left = Tensor::cat(&y_delta_left, 0)?;
+            let mut y_d1 = data.data.read_columns_csc(std::iter::once(left))?;
+            let y_right_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
+            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_right_neigh_dm)?;
+            y_d1.adjust_by_division_inplace(&y_hat_d1);
+            y_d1.transpose().to_tensor(dev)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let y_delta_left = Tensor::cat(&y_delta_left, 0)?;
 
-    // // adjust the right by the neighbours of the left
-    // let y_delta_right = pairs_neighbours
-    //     .iter()
-    //     .enumerate()
-    //     .map(|(j, &n)| -> anyhow::Result<Tensor> {
-    //         let right = pairs[j].right;
+    // adjust the right by the neighbours of the left
+    let y_delta_right = pairs_neighbours
+        .iter()
+        .enumerate()
+        .map(|(j, &n)| -> anyhow::Result<Tensor> {
+            let right = pairs[j].right;
 
-    //         let mut y_d1 = data.data.read_columns_csc(std::iter::once(right))?;
-    //         let y_left_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
-    //         let y_hat_d1 = impute_with_neighbours(&y_d1, &y_left_neigh_dm)?;
-    //         y_d1.adjust_by_division_inplace(&y_hat_d1);
-    //         y_d1.transpose().to_tensor(dev)
-    //     })
-    //     .collect::<anyhow::Result<Vec<_>>>()?;
-    // let y_delta_right = Tensor::cat(&y_delta_right, 0)?;
+            let mut y_d1 = data.data.read_columns_csc(std::iter::once(right))?;
+            let y_left_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
+            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_left_neigh_dm)?;
+            y_d1.adjust_by_division_inplace(&y_hat_d1);
+            y_d1.transpose().to_tensor(dev)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let y_delta_right = Tensor::cat(&y_delta_right, 0)?;
 
     let aux_left = concatenate_vertical(
         &pairs
@@ -468,16 +488,32 @@ where
         MatchedEncoderData {
             left: &y_left,
             right: &y_right,
-            aux_left: Some(&aux_left),
-            aux_right: Some(&aux_right),
+            aux_left: None,
+            aux_right: None,
+            // aux_left: Some(&aux_left),
+            // aux_right: Some(&aux_right),
         },
         false,
+    )?;
+
+    // let logits_theta = candle_nn::ops::log_softmax(
+    //     &latent
+    //         .logits_theta_left
+    //         .exp()?
+    //         .add(&latent.logits_theta_right.exp()?)?
+    //         .log()?,
+    //     latent.logits_theta_left.rank() - 1,
+    // )?;
+
+    let logits_theta = candle_nn::ops::log_softmax(
+        &latent.logits_theta_left.add(&latent.logits_theta_right)?,
+        latent.logits_theta_left.rank() - 1,
     )?;
 
     latent_vec
         .lock()
         .expect("lock")
-        .push((lb, Mat::from_tensor(&latent.logits_theta)?));
+        .push((lb, Mat::from_tensor(&logits_theta)?));
 
     Ok(())
 }
@@ -489,17 +525,28 @@ pub trait MatchedEncoderLatentVecOps {
 impl MatchedEncoderLatentVecOps for Vec<MatchedEncoderLatent> {
     fn concatenate(&self) -> anyhow::Result<MatchedEncoderLatent> {
         // Collect references to tensors for each field
-        let logits_theta: Vec<&Tensor> = self.iter().map(|latent| &latent.logits_theta).collect();
+        let logits_theta_left: Vec<&Tensor> = self
+            .iter()
+            .map(|latent| &latent.logits_theta_left)
+            .collect();
+
+        let logits_theta_right: Vec<&Tensor> = self
+            .iter()
+            .map(|latent| &latent.logits_theta_right)
+            .collect();
 
         let kl_divs: Vec<&Tensor> = self.iter().map(|latent| &latent.kl_div).collect();
 
         // Concatenate tensors along dimension 0
-        let logits_theta = Tensor::cat(&logits_theta, 0)?;
+        let logits_theta_left = Tensor::cat(&logits_theta_left, 0)?;
+        let logits_theta_right = Tensor::cat(&logits_theta_right, 0)?;
+
         let kl_div = Tensor::cat(&kl_divs, 0)?;
 
         // Return the concatenated MatchedEncoderLatent
         Ok(MatchedEncoderLatent {
-            logits_theta,
+            logits_theta_left,
+            logits_theta_right,
             kl_div,
         })
     }
@@ -534,8 +581,8 @@ impl MatchedEncoderEvaluateOps for MatchedEncoder {
                 MatchedEncoderData {
                     left: mb.input_left.as_ref(),
                     right: mb.input_right.as_ref(),
-                    aux_left: mb.input_aux_left.as_ref(),
-                    aux_right: mb.input_aux_right.as_ref(),
+                    aux_left: None,  // mb.input_aux_left.as_ref(),
+                    aux_right: None, // mb.input_aux_right.as_ref(),
                 },
                 false,
             )?;

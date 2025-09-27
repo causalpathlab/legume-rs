@@ -123,6 +123,27 @@ where
             }
         }
     }
+
+    fn scale_rows_inplace(&mut self) {
+        let mu = self.mean_axis(Axis(1)).expect("mean failed");
+        let sig = self.std_axis(Axis(1), T::zero());
+        let nrow = self.nrows();
+
+        for i in 0..nrow {
+            if sig[i] > T::zero() {
+                self.row_mut(i).mapv_inplace(|x| (x - mu[i]) / sig[i]);
+            } else {
+                self.row_mut(i).mapv_inplace(|x| x - mu[i]);
+            }
+        }
+    }
+
+    fn scale_rows(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.scale_rows_inplace();
+        ret
+    }
+
     fn centre_columns(&self) -> Self::Mat {
         let mut xx = self.clone();
         xx.centre_columns_inplace();

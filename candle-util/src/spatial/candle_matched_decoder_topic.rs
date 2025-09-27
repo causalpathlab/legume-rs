@@ -43,8 +43,11 @@ impl MatchedDecoderModuleT for MatchedTopicDecoder {
         self.dictionary.weight()
     }
 
-    fn forward(&self, latent: &MatchedEncoderLatent) -> Result<Tensor> {
-        self.dictionary.forward(&latent.logits_theta.exp()?)
+    fn forward(&self, latent: &MatchedEncoderLatent) -> Result<MatchedDecoderRecon> {
+        Ok(MatchedDecoderRecon {
+            x_left: self.dictionary.forward(&latent.logits_theta_left.exp()?)?,
+            x_right: self.dictionary.forward(&latent.logits_theta_left.exp()?)?,
+        })
     }
 
     fn forward_with_llik<LlikFn>(
@@ -52,24 +55,37 @@ impl MatchedDecoderModuleT for MatchedTopicDecoder {
         latent: &MatchedEncoderLatent,
         data: MatchedDecoderData,
         llik: &LlikFn,
-    ) -> Result<(Tensor, Tensor)>
+    ) -> Result<(MatchedDecoderRecon, Tensor)>
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
         if let (Some(delta_left), Some(delta_right)) = (data.delta_left, data.delta_right) {
-            let recon = self.dictionary().forward(&latent.logits_theta.exp()?)?;
-            let recon_delta = self
-                .dictionary_delta()
-                .forward(&latent.logits_theta.exp()?)?;
-            let llik_val = llik(&data.left, &recon)?
-                .add(&llik(&data.right, &recon)?)?
-                .add(&llik(&delta_left, &recon_delta)?)?
-                .add(&llik(&delta_right, &recon_delta)?)?;
+            let x_left = self
+                .dictionary_delta
+                .forward(&latent.logits_theta_left.exp()?)?;
+            let x_right = self
+                .dictionary_delta
+                .forward(&latent.logits_theta_left.exp()?)?;
 
+            let llik_val = llik(&delta_left, &x_left)?.add(&llik(&delta_right, &x_right)?)?;
+
+            // // let recon = self.dictionary().forward(&latent.logits_theta.exp()?)?;
+            // // let recon_delta = self
+            // //     .dictionary_delta()
+            // //     .forward(&latent.logits_theta.exp()?)?;
+            // let llik_val = llik(&data.left, &recon)?
+            //     .add(&llik(&data.right, &recon)?)?
+            //     .add(&llik(&delta_left, &recon_delta)?)?
+            //     .add(&llik(&delta_right, &recon_delta)?)?;
+            // Ok((recon, llik_val))
+            let recon = self.forward(latent)?;
+            // let llik_val =
+            //     llik(&data.left, &recon.x_left)?.add(&llik(&data.right, &recon.x_right)?)?;
             Ok((recon, llik_val))
         } else {
             let recon = self.forward(latent)?;
-            let llik_val = llik(&data.left, &recon)?.add(&llik(&data.right, &recon)?)?;
+            let llik_val =
+                llik(&data.left, &recon.x_left)?.add(&llik(&data.right, &recon.x_right)?)?;
             Ok((recon, llik_val))
         }
     }

@@ -709,9 +709,62 @@ where
         }
     }
 
+    fn scale_rows_inplace(&mut self) {
+        let nrow = self.nrows();
+        let ncol = self.ncols();
+        let mut s0 = vec![T::zero(); nrow];
+        let mut s1 = vec![T::zero(); nrow];
+        let mut s2 = vec![T::zero(); nrow];
+
+        for j in 0..ncol {
+            if let Some(x_j) = self.get_col(j) {
+                for (&x_ij, &i) in x_j.values().iter().zip(x_j.row_indices()) {
+                    s0[i] += T::one();
+                    s1[i] += x_ij;
+                    s2[i] += x_ij * x_ij;
+                }
+            }
+        }
+
+        let mu = s1
+            .into_iter()
+            .zip(s0.iter())
+            .map(|(x, &n)| x / n.max(T::one()))
+            .collect::<Vec<_>>();
+
+        let sig = s2
+            .into_iter()
+            .zip(mu.iter())
+            .zip(s0.iter())
+            .map(|((s2, &mu), &s0)| (s2 / s0.max(T::one()) - mu * mu).sqrt())
+            .collect::<Vec<_>>();
+
+        for j in 0..ncol {
+            if let Some(mut x_j) = self.get_col_mut(j) {
+                let (rows, values) = x_j.rows_and_values_mut();
+
+                for (&i, x_ij) in rows.iter().zip(values) {
+                    let mu_i = mu[i];
+                    let sig_i = sig[i];
+                    if sig_i > T::zero() {
+                        *x_ij = (*x_ij - mu_i) / sig_i;
+                    } else {
+                        *x_ij -= mu_i;
+                    }
+                }
+            }
+        }
+    }
+
     fn scale_columns(&self) -> Self::Mat {
         let mut ret = self.clone();
         ret.scale_columns_inplace();
+        ret
+    }
+
+    fn scale_rows(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.scale_rows_inplace();
         ret
     }
 
@@ -805,9 +858,26 @@ where
         }
     }
 
+    fn scale_rows_inplace(&mut self) {
+        for mut xx_i in self.row_iter_mut() {
+            let mu = xx_i.mean();
+            let sig = xx_i.variance().sqrt();
+            xx_i.add_scalar_mut(-mu);
+            if sig > T::zero() {
+                xx_i /= sig;
+            }
+        }
+    }
+
     fn scale_columns(&self) -> Self::Mat {
         let mut ret = self.clone();
         ret.scale_columns_inplace();
+        ret
+    }
+
+    fn scale_rows(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.scale_rows_inplace();
         ret
     }
 
