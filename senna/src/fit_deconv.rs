@@ -2,15 +2,20 @@ use crate::embed_common::*;
 use crate::routines_post_process::*;
 use crate::routines_pre_process::*;
 
+use candle_util::candle_model_traits::EncoderModuleT;
 use dashmap::DashMap as HashMap;
 use data_beans_alg::normalization::NormalizeDistance;
-use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_util::common_io::extension;
 use matrix_util::dmatrix_util::concatenate_horizontal;
-use matrix_util::knn_match::*;
-use ndarray_rand::rand::seq::IteratorRandom;
-use ndarray_rand::rand::thread_rng;
-use rayon::prelude::*;
+
+use candle_util::candle_data_loader::*;
+use candle_util::candle_decoder_topic::*;
+use candle_util::candle_encoder_softmax::*;
+use candle_util::candle_inference::TrainConfig;
+use candle_util::candle_loss_functions as loss_func;
+use candle_util::candle_model_traits::DecoderModuleT;
+use candle_util::candle_vae_inference::*;
+use indicatif::{ProgressBar, ProgressDrawTarget};
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -28,7 +33,7 @@ pub struct DeconvArgs {
 
     /// bulk data files (`.parquet`, `.tsv.gz`, `.csv.gz`)
     /// where the first column corresponds to gene names
-    #[arg(short, long, required = true)]
+    #[arg(short = 'x', long, required = true)]
     bulk_data_files: Vec<Box<str>>,
 
     /// random projection dimension to project the data.
@@ -47,9 +52,6 @@ pub struct DeconvArgs {
     /// should correspond to each data file.
     #[arg(long, short, value_delimiter(','))]
     batch_files: Option<Vec<Box<str>>>,
-
-    #[arg(long, default_value_t = false)]
-    ignore_batch_effects: bool,
 
     /// #k-nearest neighbours batches
     #[arg(long, default_value_t = 10)]
@@ -84,6 +86,11 @@ pub struct DeconvArgs {
     #[arg(short = 't', long, default_value_t = 10)]
     n_latent_topics: usize,
 
+    /// number of modules of the features in the encoder model.
+    /// If not specified, `encoder_layers[0]` will be used.
+    #[arg(short = 'm', long)]
+    feature_modules: Option<usize>,
+
     /// to reduce row features (#gene modules ~ 2^r)
     #[arg(short = 'r', long, default_value_t = 10)]
     n_row_proj_dim: usize,
@@ -104,9 +111,9 @@ pub struct DeconvArgs {
     #[arg(long, short = 'i', default_value_t = 1000)]
     epochs: usize,
 
-    /// # data jitter during the training
-    #[arg(long, short = 'j', default_value_t = 10)]
-    num_jitter: usize,
+    /// data jitter interval
+    #[arg(long, short = 'j', default_value_t = 5)]
+    jitter_interval: usize,
 
     /// Minibatch size
     #[arg(long, default_value_t = 100)]
@@ -220,318 +227,261 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
         Some(sc_batch.as_ref()),
     )?;
 
-    info!("Constructing PB in the sc data...");
     let proj_kn = rand_proj.proj.scale_columns();
 
     let nsamp =
         sc_data.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
 
-    if !args.ignore_batch_effects {
-        info!("Registering batch information");
-        sc_data.build_hnsw_per_batch(&proj_kn, &sc_batch)?;
-    }
+    info!("Registering batch information");
+    sc_data.build_hnsw_per_batch(&proj_kn, &sc_batch)?;
 
-    let collapsed = sc_data.collapse_columns(
+    // 3. Batch-adjusted collapsing (pseudobulk)
+    info!("Constructing PB in the sc data... into {} samples", nsamp);
+    let collapsed_sc = sc_data.collapse_columns(
         Some(args.knn_batches),
         Some(args.knn_cells),
         args.reference_batches.as_deref(),
         Some(args.iter_opt),
     )?;
 
-    // data 1: use collapsed
-    // collapsed.mu_observed;
-    // collapsed.mu_residual;
-    // collapsed.mu_adjusted;
+    let bias_db = collapsed_sc
+        .delta
+        .as_ref()
+        .map(|x| x.posterior_mean().clone());
+    let bulk_dm =
+        sc_data.project_onto_bulk(&bulk_data, &rand_proj, bias_db.as_ref(), args.knn_cells)?;
 
-    // data 2: bulk projected
-    // let bulk_yhat =
+    // 4. Train topic model on the collapsed data
+    let n_topics = args.n_latent_topics;
+    let n_vocab = args.vocab_size;
+    let d_vocab_emb = args.vocab_emb;
+    let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
 
-    // bulk_data.predict_from_collapsed_data(&collapsed, args.knn_bulk)?;
+    let n_features_decoder = sc_data.num_rows()?;
+    let n_features_encoder = sc_data.num_rows()?;
 
-    // todo: bootstrap bulk data imputed by single cell data
+    let dev = match args.device {
+        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
+        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
+        _ => candle_core::Device::Cpu,
+    };
 
-    let bulk_yhat = bulk_data.predict_from_collapsed_data(&collapsed, args.knn_bulk)?;
+    let parameters = candle_nn::VarMap::new();
+    let param_builder =
+        candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
-    // E[Y] ~ μ δ
-    // E[Y.hat] ~ μ
+    let encoder = LogSoftmaxEncoder::new(
+        LogSoftmaxEncoderArgs {
+            n_features: n_features_encoder,
+            n_topics,
+            n_modules,
+            n_vocab,
+            d_vocab_emb,
+            layers: &args.encoder_layers,
+        },
+        param_builder.clone(),
+    )?;
 
-    //     Σ Y + Σ Y.hat
-    // μ = -------------
-    //     n (δ + 1)
+    let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
-    //     Σ Y
-    // δ = ----
-    //     n μ
+    info!(
+        "input: {} -> encoder -> decoder -> output: {}",
+        n_features_encoder, n_features_decoder
+    );
 
-    // let bulk_to_cells = (0..sc_data.num_batches())
-    //     .map(|b| sc_data.batch_to_columns(b).unwrap_or_default().clone())
-    //     .collect::<Vec<_>>();
+    let mut train_config = TrainConfig {
+        learning_rate: args.learning_rate,
+        batch_size: args.minibatch_size,
+        num_epochs: args.epochs,
+        num_pretrain_epochs: 0,
+        device: dev.clone(),
+        verbose: args.verbose,
+        show_progress: true,
+    };
 
-    // train on sc data
-    // There are two types of additional factors present in bulk data
-    //
-    // (1) multiplicative bias, inconsistency in technology, platform, etc. gene-level difference
-    //
-    // (2) additive bias due to cell types missing in reference data, cell type level difference
-    //
+    info!("Set up training data");
 
-    // If we train two types of bulk data (pseudobulk and observed
-    // bulk), the second type of missingness can be inferred by
-    // looking at the cell types/topics only present in the actual
-    // bulk data.
+    let pb = ProgressBar::new(train_config.num_epochs as u64);
 
-    // The first type of bias factors can be uncovered Y vs. Y hat
+    if !train_config.show_progress || train_config.verbose {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
 
-    // jointly train... we need to pick up common beta
-    // [x.mixed, x.resid] -> z -> x.clean
-    //
-    // oversample bulk data and simulate? yes, both y.enclosed and y.residual
-    // y.clean -> z, y.resid -> Δ, (z + Δ) -> y.hat?
-    //
+    let mut vae = Vae::build(&encoder, &decoder, &parameters);
+    let mut llik_sc = Vec::with_capacity(train_config.num_epochs);
+    let mut llik_bulk = Vec::with_capacity(train_config.num_epochs);
 
-    // the goal is to find a new topic?
-    // GOAL: missing celltype!!!!
-    //
+    for epoch in (0..args.epochs).step_by(args.jitter_interval) {
+        // training with stochastic sc data
 
-    // let proj_kn = rand_proj.proj.scale_columns();
-    // sc_data.register_batches_dmatrix(&proj_kn, &sc_batch)?;
+        let mixed_nd = collapsed_sc.mu_observed.posterior_sample()?.transpose();
+        let clean_nd = collapsed_sc.mu_adjusted.as_ref().map(|x| {
+            let ret: Mat = x.posterior_sample().unwrap();
+            ret.transpose()
+        });
 
-    // // train
-    // let mixed_dn = &collapsed.mu_observed;
-    // let clean_dn = collapsed.mu_adjusted.as_ref();
-    // let batch_dn = collapsed.mu_residual.as_ref();
+        let batch_nd = collapsed_sc.mu_residual.as_ref().map(|x| {
+            let ret: Mat = x.posterior_sample().unwrap();
+            ret.transpose()
+        });
 
-    // let delta = collapsed.delta.clone();
+        let mut data_loader = InMemoryData::from(InMemoryArgs {
+            input: &mixed_nd,
+            input_null: batch_nd.as_ref(),
+            output: clean_nd.as_ref(),
+            output_null: None,
+        })?;
 
-    // let bulk_yhat = bulk_data.predict_from_sparse_data(&sc_data, &rand_proj, args.knn_bulk)?;
+        data_loader.shuffle_minibatch(args.block_size)?;
 
-    info!("Check how much we can regress the bulk on the sc data");
+        train_config.verbose = false;
+        train_config.show_progress = args.verbose;
+        train_config.num_epochs = args.jitter_interval;
 
-    // let mut mu = GammaMatrix::new((bulk_data.nrows(), bulk_data.ncols()), 1.0, 1.0);
+        let llik = vae.train_encoder_decoder(
+            &mut data_loader,
+            &loss_func::topic_likelihood,
+            &train_config,
+        )?;
 
-    // mu.update_stat(update_a, update_b);
+        llik_sc.extend(llik);
 
-    // identify y1 ~ mu * delta
-    // identify y0 ~ mu * tau
+        // training with bulk data
+        let mut bulk_data_loader = InMemoryData::from(InMemoryArgs {
+            input: &bulk_dm.transpose(),
+            input_null: None,
+            output: None,
+            output_null: None,
+        })?;
 
-    info!("Identify sc bias");
+        train_config.verbose = false;
+        train_config.show_progress = args.verbose;
+        train_config.num_epochs = args.jitter_interval;
 
-    // should pair up
-    // for each
+        let llik = vae.train_encoder_decoder(
+            &mut bulk_data_loader,
+            &loss_func::topic_likelihood,
+            &train_config,
+        )?;
 
-    // identify x1 ~ gamma * tau
-    // identify x0 ~ gamma * eta
+        llik_bulk.extend(llik);
 
-    // let collapsed = sc_data.collapse_columns(
-    //     Some(args.knn_batches),
-    //     Some(args.knn_cells),
-    //     args.reference_batches.as_deref(),
-    //     Some(args.iter_opt),
-    // )?;
+        pb.inc(args.jitter_interval as u64);
 
-    // let bulk_yhat = bulk_data.predict_from_collapsed_data(&collapsed, args.knn_bulk)?;
-    // sc_data.collapse_columns(knn_batches, knn_cells, reference_batch_names, num_opt_iter)
+        if args.verbose {
+            info!(
+                "[{}] log-likelihood: {} {}",
+                epoch + args.jitter_interval,
+                llik_sc.last().ok_or(anyhow::anyhow!("llik"))?,
+                llik_bulk.last().ok_or(anyhow::anyhow!("llik bulk"))?,
+            );
+        }
+    }
 
-    // the question is about how we get training data
-    // a. how to address uncertainty? include variation?
-    // b. how to adjust bias between the reference and target data?
+    pb.finish_and_clear();
 
-    // let n_pb_samples =
-    //     sc_data.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
+    if train_config.verbose {
+        info!("Finished {} epochs", train_config.num_epochs);
+    }
 
-    // sc_data.collapse_columns(knn_batches, knn_cells, reference_batch_names, num_opt_iter)
+    info!("Writing down the model parameters");
 
-    // for each bulk sample
-    // - find k-nearest neighbour cells across all the pseudobulk samples
+    let gene_names = sc_data.row_names()?;
+
+    decoder
+        .get_dictionary()?
+        .to_device(&candle_core::Device::Cpu)?
+        .to_parquet(
+            Some(&gene_names),
+            None,
+            &(args.out.to_string() + ".dictionary.parquet"),
+        )?;
+
+    write_types::<f32>(&llik_sc, &(args.out.to_string() + ".log_likelihood.gz"))?;
+
+    write_types::<f32>(
+        &llik_bulk,
+        &(args.out.to_string() + ".log_likelihood_bulk.gz"),
+    )?;
+
+    encoder
+        .feature_module_membership()?
+        .to_device(&candle_core::Device::Cpu)?
+        .to_parquet(
+            Some(&gene_names),
+            None,
+            &(args.out.to_string() + ".feature_module.parquet"),
+        )?;
+
+    /////////////////////////////////////////////////////
+    // evaluate latent states while adjusting the bias //
+    /////////////////////////////////////////////////////
+
+    info!("Writing down the latent states");
+
+    let z_nk = evaluate_latent_by_encoder(&sc_data, &encoder, &train_config, bias_db.as_ref())?;
+
+    let cell_names = sc_data.column_names()?;
+
+    z_nk.to_parquet(
+        Some(&cell_names),
+        None,
+        &(args.out.to_string() + ".latent.parquet"),
+    )?;
+
+    let x_md = bulk_dm.transpose().to_tensor(&dev)?;
+    let (z_mk, _) = encoder.forward_t(&x_md, None, false)?;
+    let z_mk = Mat::from_tensor(&z_mk)?;
+
+    z_mk.to_parquet(
+        Some(&bulk_samples),
+        None,
+        &(args.out.to_string() + ".deconv.parquet"),
+    )?;
 
     info!("Done");
     Ok(())
 }
 
-trait InteractWithScData {
-    fn predict_from_collapsed_data(
+trait ProjectOntoBulk {
+    fn project_onto_bulk(
         &self,
-        collapsed: &CollapsedOut,
-        knn: usize,
-    ) -> anyhow::Result<Self>
-    where
-        Self: Sized;
-
-    fn predict_from_sparse_data(
-        &self,
-        sc_data_vec: &SparseIoVec,
+        target: &Mat,
         rand_proj: &RandColProjOut,
+        bias_db: Option<&Mat>,
         knn: usize,
-    ) -> anyhow::Result<Self>
-    where
-        Self: Sized;
-
-    fn bootstrap_from_sparse_data(
-        &self,
-        sc_data_vec: &SparseIoVec,
-        rand_proj: &RandColProjOut,
-        knn: usize,
-    ) -> anyhow::Result<Self>
-    where
-        Self: Sized;
+    ) -> anyhow::Result<Mat>;
 }
 
-impl InteractWithScData for Mat {
-    fn predict_from_collapsed_data(
+impl ProjectOntoBulk for SparseIoVec {
+    fn project_onto_bulk(
         &self,
-        collapsed: &CollapsedOut,
-        knn: usize,
-    ) -> anyhow::Result<Self> {
-        let pb = &collapsed.mu_observed;
-        let max_rank = pb.nrows().min(pb.ncols());
-
-        let basis_dk = pb
-            .posterior_log_mean()
-            .scale_columns()
-            .rsvd(max_rank)?
-            .0
-            .scale_columns()
-            .map(|x| x.clamp(-4., 4.))
-            .scale_columns();
-
-        let ln_x = self.map(|x| x.ln_1p()).scale_columns();
-        let bulk_km = (basis_dk.transpose() * &ln_x).scale_columns();
-
-        todo!("need bootstrap");
-
-        // bootstrap pb data
-
-        // let mut stoch_data_vec = vec![];
-
-        // let nboot = 100;
-        // let n_pb_cols = pb.ncols();
-        // let pb_columns = 0..n_pb_cols;
-
-        // let mut rng = thread_rng();
-
-        // for _ in 0..n_pb_cols {
-        //     if let Some(s) = pb_columns.choose(&mut rng) {
-        //         let _x_d = match collapsed.mu_adjusted.as_ref() {
-        //             Some(x) => x.posterior_sample(),
-        //             _ => collapsed.mu_observed.posterior_sample(),
-        //         }?
-        //         .column(s);
-
-        //         stoch_data_vec.push(_x_d);
-        //     }
-        // }
-
-        // let stoch_data_dm = concatenate_horizontal(&stoch_data_vec)?;
-        // let stoch_ln_dm = stoch_data_dm.map(|x| x.ln_1p()).scale_columns();
-        // let stoch_proj_km = (basis_dk.transpose() * &stoch_ln_dm).scale_columns();
-
-        // let column_names = (0..stoch_proj_km.ncols()).collect();
-        // let dict = ColumnDict::from_dmatrix(stoch_proj_km, column_names);
-        // let norm_target = 2_f32.ln();
-
-        // let imputed = bulk_km
-        //     .column_iter()
-        //     .enumerate()
-        //     .map(|(i, query)| -> anyhow::Result<DVec> {
-        //         let (neighbours, distances) = dict.search_by_query_data(&query.to_vp(), knn)?;
-
-        //         let weights = distances.into_iter().normalized_exp(norm_target);
-        //         let denom = weights.iter().sum::<f32>().max(1e-8);
-        //         let mut ret = DVec::zeros(self.nrows());
-        //         for (j, w) in neighbours.into_iter().zip(weights) {
-        //             ret += stoch_data_dm.column(j) * w / denom;
-        //         }
-        //         Ok(ret)
-        //     })
-        //     .collect::<anyhow::Result<Vec<_>>>()?;
-
-        // concatenate_horizontal(&imputed)
-    }
-
-    fn predict_from_sparse_data(
-        &self,
-        sc_data_vec: &SparseIoVec,
+        target: &Mat,
         rand_proj: &RandColProjOut,
+        bias_db: Option<&Mat>,
         knn: usize,
-    ) -> anyhow::Result<Self> {
-        let mut imputed_dm = Mat::zeros(self.nrows(), self.ncols());
-
+    ) -> anyhow::Result<Mat> {
         let basis_dk = &rand_proj.basis;
-
-        let ln_x = self.map(|x| x.ln_1p()).normalize_columns();
+        let ln_x = target.map(|x| x.ln_1p()).normalize_columns();
         let bulk_km = (basis_dk.transpose() * &ln_x).scale_columns();
-
         let norm_target = 2_f32.ln();
 
+        let mut imputed_dm = Mat::zeros(target.nrows(), target.ncols());
+
         for (i, query) in bulk_km.column_iter().enumerate() {
-            let (y, _, distances) = sc_data_vec.query_columns_by_data_csc(query, knn)?;
+            let (mut y, cells, distances) = self.query_columns_by_data_csc(query, knn)?;
 
             let weights = distances.into_iter().normalized_exp(norm_target);
             let denom = weights.iter().sum::<f32>().max(1e-8);
             let weights = DVec::from_vec(weights).unscale(denom);
+
+            if let Some(denom_db) = bias_db {
+                let batches = self.get_batch_membership(cells.into_iter());
+                y.adjust_by_division_of_selected_inplace(denom_db, &batches);
+            }
             imputed_dm.column_mut(i).copy_from(&(y * weights));
         }
+
         Ok(imputed_dm)
     }
-
-    fn bootstrap_from_sparse_data(
-        &self,
-        sc_data_vec: &SparseIoVec,
-        rand_proj: &RandColProjOut,
-        knn: usize,
-    ) -> anyhow::Result<Self>
-    where
-        Self: Sized,
-    {
-        todo!("");
-    }
 }
-
-// trait ScKnnWithBulk {
-//     /// assign column's batch membership based on the nearest
-//     /// neighbour found in bulk columns
-//     fn assign_batch_membership_by_nearest_bulk(
-//         &mut self,
-//         bulk: &Mat,
-//         rand_proj: &RandColProjOut,
-//     ) -> anyhow::Result<()>;
-// }
-
-// impl ScKnnWithBulk for SparseIoVec {
-//     fn assign_batch_membership_by_nearest_bulk(
-//         &mut self,
-//         bulk: &Mat,
-//         rand_proj: &RandColProjOut,
-//     ) -> anyhow::Result<()> {
-//         let proj_kn = rand_proj.proj.scale_columns();
-//         info!("Sc Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
-
-//         let basis_dk = &rand_proj.basis;
-//         let ln_x = bulk.map(|x| x.ln_1p()).normalize_columns();
-//         let mut bulk_km = basis_dk.transpose() * &ln_x;
-//         bulk_km.scale_columns_inplace();
-//         info!("Bulk Proj: {} x {} ...", bulk_km.nrows(), bulk.ncols());
-
-//         let bulk_samples = (0..bulk_km.ncols()).collect();
-//         let columns = (0..bulk_km.ncols()).map(|j| bulk_km.column(j)).collect();
-//         let dict = ColumnDict::from_dvector_views(columns, bulk_samples);
-
-//         let batch_membership = proj_kn
-//             .column_iter()
-//             .par_bridge()
-//             .map(|x| -> anyhow::Result<usize> {
-//                 let query = x.to_vp();
-//                 let search = dict.search_by_query_data(&query, 1)?;
-
-//                 if search.0.is_empty() {
-//                     return Err(anyhow::anyhow!("failed to find the nearest bulk sample"));
-//                 }
-
-//                 Ok(search.0[0])
-//             })
-//             .collect::<anyhow::Result<Vec<_>>>()?;
-
-//         self.register_batches_dmatrix(&proj_kn, &batch_membership)?;
-//         Ok(())
-//     }
-// }
