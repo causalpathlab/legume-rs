@@ -14,15 +14,15 @@ if ! [ -d temp ] ; then
 fi
 
 ## create temporary files
-[ -f temp7.h5 ] || data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --backend hdf5
+[ -f temp7.h5 ] || data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --backend hdf5	
 ```
 
 ```{sh run_pinto_svd}
 cargo install --path .
 
-pinto svd temp7.h5 -c temp/cells.parquet --coord-column-names x_centroid,y_centroid -o temp7 --preload-data -t 10
+RUST_LOG=info pinto svd temp7.h5 -c temp/cells.parquet --coord-column-names x_centroid,y_centroid -o temp7 --preload-data -t 10
 
-pinto propensity --latent-data-file temp7.latent.parquet --coord-pair-file temp7.coord_pairs.parquet -k 8 -o temp7
+RUST_LOG=info pinto propensity -z temp7.latent.parquet -e temp7.coord_pairs.parquet -d temp7.h5 -k 6 -o temp7
 ```
 
 ```{r}
@@ -50,6 +50,10 @@ library(dplyr)
 library(data.table)
 library(ggplot2)
 
+.genes <- arrow::read_parquet("temp7.genes.parquet")
+
+as.data.table(.genes)[order(`log_mean`, decreasing=T), head(.SD, 5), by = .(column)]
+
 .pairs <- arrow::read_parquet("temp7.coord_pairs.parquet")
 
 .dt <- arrow::read_parquet("temp/cells.parquet") %>% as.data.table
@@ -73,14 +77,14 @@ library(ggplot2)
     na.omit()
 
 quartz()
-ggplot(.dt.show[sample(.N)][value < .5],
-       aes(x_centroid, y_centroid, colour=variable, size=1 - value)) +
-    ## facet_wrap(~variable, nrow=2) +
+ggplot(.dt.show[sample(.N)][value > .5],
+       aes(x_centroid, y_centroid, colour=variable, size=value)) +
+    facet_wrap(~variable, nrow=2) +
     scale_y_reverse() +
     theme_void() +
     geom_point(stroke=0) +
     scale_colour_brewer(palette="Paired", guide="none") +
-    scale_size_continuous(range=c(0,1.5), guide="none")
+    scale_size_continuous(range=c(0,2), guide="none")
 
 ```
 

@@ -23,8 +23,8 @@ use matrix_util::common_io::basename;
 use matrix_util::traits::IoOps;
 use matrix_util::*;
 use rayon::prelude::*;
-use simulate_deconv::generate_convoluted_data;
 use simulate_deconv::SimConvArgs;
+use simulate_deconv::generate_convoluted_data;
 use tempfile::TempDir;
 
 use std::collections::HashMap;
@@ -345,6 +345,10 @@ pub struct FromH5Args {
     #[arg(long, default_value = "gene")]
     select_row_type: Box<str>,
 
+    /// remove row type (check if it is contained)
+    #[arg(long, default_value = "aggregate")]
+    remove_row_type: Box<str>,
+
     /// group/dataset name for columns/cells (under the root)
     #[arg(short = 'c', long, default_value = "barcodes")]
     column_name_field: Box<str>,
@@ -399,6 +403,10 @@ pub struct FromZarrArgs {
     /// select row type (check if it is contained)
     #[arg(long, default_value = "gene")]
     select_row_type: Box<str>,
+
+    /// remove row type (check if it is contained)
+    #[arg(long, default_value = "aggregate")]
+    remove_row_type: Box<str>,
 
     /// columns/cells field; will first attempt xenium's Cell ID format mapping
     #[arg(short = 'c', long, default_value = "/cell_features/cell_id")]
@@ -1296,11 +1304,14 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     assert_eq!(nrows, row_types.len());
 
     let select_pattern = args.select_row_type.to_lowercase();
+    let remove_pattern = args.remove_row_type.to_lowercase();
     let select_rows = row_types
         .iter()
         .enumerate()
         .filter_map(|(i, x)| {
-            if x.to_lowercase().contains(&select_pattern) {
+            if x.to_lowercase().contains(&select_pattern)
+                && !x.to_lowercase().contains(&remove_pattern)
+            {
                 Some(i)
             } else {
                 None
@@ -1442,11 +1453,14 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
         out.register_column_names_vec(&column_names);
 
         let select_pattern = args.select_row_type.to_lowercase();
+        let remove_pattern = args.remove_row_type.to_lowercase();
         let select_rows = row_types
             .iter()
             .enumerate()
             .filter_map(|(i, x)| {
-                if x.to_lowercase().contains(&select_pattern) {
+                if x.to_lowercase().contains(&select_pattern)
+                    && !x.to_lowercase().contains(&remove_pattern)
+                {
                     Some(i)
                 } else {
                     None
