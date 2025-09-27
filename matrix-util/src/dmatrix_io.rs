@@ -3,16 +3,26 @@ use crate::parquet::*;
 use crate::traits::*;
 pub use nalgebra::{DMatrix, DVector};
 pub use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
-use parquet::data_type::{ByteArrayType, DoubleType};
-use rayon::prelude::*;
+use num_traits::*;
+use parquet::basic::Type as ParquetType;
+use std::any::TypeId;
+
 use std::fmt::{Debug, Display};
 use std::str::FromStr;
 
+use num_traits::ToPrimitive;
+
 impl<T> IoOps for DMatrix<T>
 where
-    T: nalgebra::RealField + FromStr + Display + Copy,
+    T: PartialOrd
+        + FromPrimitive
+        + ToPrimitive
+        + nalgebra::Scalar
+        + Send
+        + FromStr
+        + Display
+        + Copy,
     <T as FromStr>::Err: Debug,
-    f64: From<T>,
 {
     type Scalar = T;
     type Mat = Self;
@@ -69,10 +79,9 @@ where
     fn write_file_delim(&self, tsv_file: &str, delim: &str) -> anyhow::Result<()> {
         // par_iter() or par_bridge() will
         // mess up the order of the rows
-        let mut lines = self
+        let lines = self
             .row_iter()
             .enumerate()
-            .par_bridge()
             .map(|(i, row)| {
                 let line = row
                     .iter()
@@ -84,7 +93,6 @@ where
             })
             .collect::<Vec<_>>();
 
-        lines.sort_by_key(|&(i, _)| i);
         let lines = lines.into_iter().map(|(_, line)| line).collect::<Vec<_>>();
         write_lines(&lines, tsv_file)?;
         Ok(())
@@ -98,30 +106,46 @@ where
     ) -> anyhow::Result<()> {
         let (nrows, ncols) = (self.nrows(), self.ncols());
 
-        let writer = ParquetWriter::new(file_path, (nrows, ncols), (row_names, column_names))?;
+        let parquet_type = if TypeId::of::<T>() == TypeId::of::<f64>() {
+            ParquetType::DOUBLE
+        } else if TypeId::of::<T>() == TypeId::of::<f32>() {
+            ParquetType::FLOAT
+        } else if TypeId::of::<T>() == TypeId::of::<i32>()
+            || TypeId::of::<T>() == TypeId::of::<u32>()
+            || TypeId::of::<T>() == TypeId::of::<usize>()
+        {
+            ParquetType::INT32
+        } else if TypeId::of::<T>() == TypeId::of::<i64>()
+            || TypeId::of::<T>() == TypeId::of::<u64>()
+        {
+            ParquetType::INT64
+        } else {
+            return Err(anyhow::anyhow!("Unsupported data type"));
+        };
+
+        let column_types = vec![parquet_type; ncols];
+
+        let writer = ParquetWriter::new(
+            file_path,
+            (nrows, ncols),
+            (row_names, column_names),
+            Some(&column_types),
+        )?;
         let row_names = writer.row_names_vec();
 
         if row_names.len() != nrows {
             return Err(anyhow::anyhow!("row names don't match"));
         }
 
-        let mut writer = writer.open()?;
+        let mut writer = writer.get_writer()?;
         let mut row_group_writer = writer.next_row_group()?;
-
-        if let Some(mut column_writer) = row_group_writer.next_column()? {
-            let typed_writer = column_writer.typed::<ByteArrayType>();
-            typed_writer.write_batch(&row_names, None, None)?;
-            column_writer.close()?;
-        }
+        parquet_add_bytearray(&mut row_group_writer, &row_names)?;
 
         for j in 0..ncols {
-            let data_j: Vec<f64> = self.column(j).iter().map(|&x| x.into()).collect();
-
-            if let Some(mut column_writer) = row_group_writer.next_column()? {
-                let typed_writer = column_writer.typed::<DoubleType>();
-                typed_writer.write_batch(&data_j, None, None)?;
-                column_writer.close()?;
-            }
+            parquet_add_numeric_column(
+                &mut row_group_writer,
+                &self.column(j).iter().copied().collect::<Vec<_>>(),
+            )?;
         }
 
         row_group_writer.close()?;

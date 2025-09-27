@@ -18,13 +18,14 @@ pub struct SrtCollapsedStat {
     n_cols: usize,
 }
 
+#[allow(unused)]
 pub struct SrtCollapsedParameters {
     pub left: GammaMatrix,
     pub right: GammaMatrix,
     pub left_delta: GammaMatrix,
     pub right_delta: GammaMatrix,
-    // pub left_resid: GammaMatrix,
-    // pub right_resid: GammaMatrix,
+    pub left_resid: GammaMatrix,
+    pub right_resid: GammaMatrix,
 }
 
 pub trait SrtCollapsePairsOps {
@@ -176,6 +177,7 @@ fn collect_pair_stat_visitor(
     Ok(())
 }
 
+#[allow(unused)]
 impl SrtCollapsedStat {
     pub fn new(dd: usize, nc: usize, ne: usize, ss: usize) -> Self {
         Self {
@@ -277,17 +279,19 @@ impl SrtCollapsedStat {
         // sum_ds
         // -----------------------
         // delta_ds .* (size_ds)
-        // let take_residual = |sum_ds: &Mat, delta_ds: &GammaMatrix| -> GammaMatrix {
-        //     let mut ret = GammaMatrix::new(shape, a0, b0);
-        //     ret.update_stat(
-        //         sum_ds,
-        //         &sample_size_ds.component_mul(delta_ds.posterior_mean()),
-        //     );
-        //     ret
-        // };
 
-        // let left_resid_ds = take_residual(&self.left_sum_ds, &left_delta_ds);
-        // let right_resid_ds = take_residual(&self.right_sum_ds, &right_delta_ds);
+        let take_residual = |sum_ds: &Mat, delta_ds: &GammaMatrix| -> GammaMatrix {
+            use matrix_param::traits::Inference;
+            let mut ret = GammaMatrix::new(shape, a0, b0);
+            ret.update_stat(
+                sum_ds,
+                &sample_size_ds.component_mul(delta_ds.posterior_mean()),
+            );
+            ret
+        };
+
+        let left_resid_ds = take_residual(&self.left_sum_ds, &left_delta_ds);
+        let right_resid_ds = take_residual(&self.right_sum_ds, &right_delta_ds);
 
         info!("Resolved collapsed statistics");
 
@@ -296,8 +300,8 @@ impl SrtCollapsedStat {
             right: right_raw_ds,
             left_delta: left_delta_ds,
             right_delta: right_delta_ds,
-            // left_resid: left_resid_ds,
-            // right_resid: right_resid_ds,
+            left_resid: left_resid_ds,
+            right_resid: right_resid_ds,
         })
     }
 }

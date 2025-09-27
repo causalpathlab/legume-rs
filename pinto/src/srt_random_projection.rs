@@ -60,8 +60,6 @@ impl SrtRandProjOps for SrtCellPairs<'_> {
             .transpose();
 
         let proj_kn = concatenate_vertical(&[
-            proj.left.clone(),
-            proj.right.clone(),
             proj.left_delta.clone(),
             proj.right_delta.clone(),
             embedding_kn,
@@ -125,10 +123,10 @@ impl SrtRandProjOps for SrtCellPairs<'_> {
         }
 
         if let Some(col_to_batch) = batch_membership {
-            info!("adjusting batch biases ...");
-            if col_to_batch.len() == self.data.num_columns()? {
-                let batches = partition_by_membership(col_to_batch, None);
+            let batches = partition_by_membership(col_to_batch, None);
 
+            if col_to_batch.len() == self.data.num_columns()? && batches.len() > 1 {
+                info!("adjusting batch biases ...");
                 for (_, cols) in batches.iter() {
                     let left_cols = cols.iter().map(|&j| self.pairs[j].left).collect::<Vec<_>>();
                     let right_cols = cols
@@ -141,8 +139,14 @@ impl SrtRandProjOps for SrtCellPairs<'_> {
                     adjust_batch(&mut ret.right, &right_cols)?;
                     adjust_batch(&mut ret.right_delta, &right_cols)?;
                 }
+                info!("done with adjusting batch biases");
             }
         }
+
+        ret.left.scale_rows_inplace();
+        ret.right.scale_rows_inplace();
+        ret.left_delta.scale_rows_inplace();
+        ret.right_delta.scale_rows_inplace();
 
         Ok(ret)
     }

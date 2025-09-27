@@ -217,6 +217,13 @@ pub fn binary_sort_columns(
     proj_kn: &nalgebra::DMatrix<f32>,
     kk: usize,
 ) -> anyhow::Result<Vec<usize>> {
+    // // standardization again to make sure that each coordinates is treated equally
+    // let proj_nk = proj_kn.transpose().scale_columns();
+    // let nn = proj_kn.ncols();
+    // // SVD to spread out the points
+    // let (mut q_nk, _, _) = proj_nk.rsvd(kk)?;
+    // q_nk.scale_columns_inplace();
+
     // SVD to spread out the points
     let nn = proj_kn.ncols();
     let (_, _, mut q_nk) = proj_kn.rsvd(kk)?;
@@ -224,7 +231,13 @@ pub fn binary_sort_columns(
 
     let mut binary_codes = DVector::<usize>::zeros(nn);
     for k in 0..kk {
-        let binary_shift = |x: f32| -> usize { if x > 0.0 { 1 << k } else { 0 } };
+        let binary_shift = |x: f32| -> usize {
+            if x > 0.0 {
+                1 << k
+            } else {
+                0
+            }
+        };
         binary_codes += q_nk.column(k).map(binary_shift);
     }
 

@@ -3,7 +3,7 @@ use crate::srt_collapse_pairs::*;
 use crate::srt_common::*;
 use crate::srt_input::*;
 use crate::srt_random_projection::*;
-use crate::srt_vertex_propensity::*;
+
 use clap::Parser;
 use matrix_param::traits::*;
 
@@ -74,14 +74,6 @@ pub struct SrtSvdArgs {
     #[arg(short = 't', long, default_value_t = 10)]
     n_latent_topics: usize,
 
-    /// number of (edge) clusters
-    #[arg(long)]
-    n_edge_clusters: Option<usize>,
-
-    /// number of (edge) clusters
-    #[arg(long, default_value_t = 100)]
-    maxiter_clustering: usize,
-
     /// preload all the columns data
     #[arg(long, default_value_t = false)]
     preload_data: bool,
@@ -105,7 +97,7 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
         coordinates,
         coordinate_names,
         batches,
-    } = read_data_vec(SRTReadArgs {
+    } = read_data_with_coordinates(SRTReadArgs {
         data_files: args.data_files.clone(),
         coord_files: args.coord_files.clone(),
         preload_data: args.preload_data,
@@ -115,7 +107,6 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
     })?;
 
     let gene_names = data.row_names()?;
-    let cell_names = data.column_names()?;
 
     info!("Constructing spatial nearest neighbourhood graphs");
     let mut srt_cell_pairs = SrtCellPairs::new(
@@ -128,6 +119,11 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
         },
     )?;
 
+    srt_cell_pairs.to_parquet(
+        &(args.out.to_string() + ".coord_pairs.parquet"),
+        Some(coordinate_names.clone()),
+    )?;
+
     let proj_out =
         srt_cell_pairs.random_projection(args.proj_dim, args.block_size, Some(&batches))?;
 
@@ -138,13 +134,20 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
     )?;
 
     info!("Collecting summary statistics across cell pairs...");
-    let collapsed = srt_cell_pairs.collapse_pairs()?;
-    let params = collapsed.optimize(None)?;
+    let collapsed_data = srt_cell_pairs.collapse_pairs()?;
+    let collapsed_params = collapsed_data.optimize(None)?;
 
-    info!("Randomized SVD on the Δ matrix");
+    collapsed_data.to_parquet(
+        &(args.out.to_string() + ".collapsed_pairs.parquet"),
+        Some(coordinate_names.clone()),
+    )?;
+
+    info!("Randomized SVD ...");
     let training_dm = concatenate_horizontal(&[
-        params.left_delta.posterior_log_mean().clone(),
-        params.right_delta.posterior_log_mean().clone(),
+        collapsed_params.left_delta.posterior_log_mean().clone(),
+        collapsed_params.right_delta.posterior_log_mean().clone(),
+        collapsed_params.left_resid.posterior_log_mean().clone(),
+        collapsed_params.right_resid.posterior_log_mean().clone(),
     ])?
     .scale_columns();
 
@@ -172,33 +175,6 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
         Some(&gene_names),
         None,
         &(args.out.to_string() + ".dictionary.parquet"),
-    )?;
-
-    srt_cell_pairs.to_parquet(
-        &(args.out.to_string() + ".coord_pairs.parquet"),
-        Some(coordinate_names.clone()),
-    )?;
-
-    collapsed.to_parquet(
-        &(args.out.to_string() + ".collapsed_pairs.parquet"),
-        Some(coordinate_names.clone()),
-    )?;
-
-    info!("clustering edges");
-    let num_clusters = args.n_edge_clusters.unwrap_or(args.n_latent_topics);
-
-    let edge_membership = proj_kn.kmeans_columns(KmeansArgs {
-        num_clusters,
-        max_iter: args.maxiter_clustering,
-    });
-
-    info!("calibrating propensity");
-    let prop_kn = srt_cell_pairs.vertex_propensity(&edge_membership, args.block_size)?;
-
-    prop_kn.transpose().to_parquet(
-        Some(&cell_names),
-        None,
-        &(args.out.to_string() + ".propensity.parquet"),
     )?;
 
     info!("Done");

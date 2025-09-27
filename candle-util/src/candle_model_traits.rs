@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use candle_core::{Result, Tensor};
 
 pub trait EncoderModuleT {
@@ -74,7 +72,8 @@ pub trait MatchedEncoderModuleT {
 }
 
 pub struct MatchedEncoderLatent {
-    pub logits_theta: Tensor,
+    pub logits_theta_left: Tensor,
+    pub logits_theta_right: Tensor,
     pub kl_div: Tensor,
 }
 
@@ -85,7 +84,7 @@ pub struct MatchedDecoderRecon {
 
 pub trait MatchedDecoderModuleT {
     /// A decoder that spits out reconstruction
-    fn forward(&self, latent: &MatchedEncoderLatent) -> Result<Tensor>;
+    fn forward(&self, latent: &MatchedEncoderLatent) -> Result<MatchedDecoderRecon>;
 
     /// Get a representative dictionary matrix
     fn get_dictionary(&self) -> Result<Tensor>;
@@ -96,7 +95,7 @@ pub trait MatchedDecoderModuleT {
         latent: &MatchedEncoderLatent,
         x_pair: MatchedDecoderData,
         llik: &LlikFn,
-    ) -> Result<(Tensor, Tensor)>
+    ) -> Result<(MatchedDecoderRecon, Tensor)>
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>;
 

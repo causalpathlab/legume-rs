@@ -1,10 +1,8 @@
 use crate::srt_common::*;
+use matrix_util::parquet::*;
 use matrix_util::utils::generate_minibatch_intervals;
 
-pub struct Pair {
-    pub left: usize,
-    pub right: usize,
-}
+use parquet::basic::Type as ParquetType;
 
 pub struct SrtCellPairs<'a> {
     pub data: &'a SparseIoVec,
@@ -42,8 +40,6 @@ impl<'a> SrtCellPairs<'a> {
         file_path: &str,
         coordinate_names: Option<Vec<Box<str>>>,
     ) -> anyhow::Result<()> {
-        let (left, right) = self.all_pairs_positions()?;
-
         let coordinate_names = coordinate_names.unwrap_or(
             (0..self.num_coordinates())
                 .map(|x| x.to_string().into_boxed_str())
@@ -54,26 +50,91 @@ impl<'a> SrtCellPairs<'a> {
             return Err(anyhow::anyhow!("invalid coordinate names"));
         }
 
-        let mut column_names = coordinate_names
-            .iter()
-            .map(|x| format!("left_{}", x).into_boxed_str())
-            .chain(
-                coordinate_names
-                    .iter()
-                    .map(|x| format!("right_{}", x).into_boxed_str()),
-            )
-            .collect::<Vec<_>>();
+        let mut column_names = vec![];
+        let mut column_types = vec![];
 
+        // 1. left data column names
+        column_names.push(format!("left_cell").into_boxed_str());
+        column_types.push(ParquetType::BYTE_ARRAY);
+
+        // 2. right data column names
+        column_names.push(format!("right_cell").into_boxed_str());
+        column_types.push(ParquetType::BYTE_ARRAY);
+
+        // 3. left coordinate names
+        for x in coordinate_names.iter() {
+            column_names.push(format!("left_{}", x).into_boxed_str());
+            column_types.push(ParquetType::FLOAT);
+        }
+
+        // 4. right coordinate names
+        for x in coordinate_names.iter() {
+            column_names.push(format!("right_{}", x).into_boxed_str());
+            column_types.push(ParquetType::FLOAT);
+        }
+
+        // 5. distance
         column_names.push("distance".to_string().into_boxed_str());
+        column_types.push(ParquetType::FLOAT);
 
-        let distance = Mat::from_column_slice(self.num_pairs(), 1, &self.distances);
+        //////////////////////////////////////
+        // write them down column by column //
+        //////////////////////////////////////
 
-        concatenate_horizontal(&[left, right, distance])?.to_parquet(
-            None,
-            Some(&column_names),
+        let shape = (self.num_pairs(), column_names.len());
+
+        let writer = ParquetWriter::new(
             file_path,
+            shape,
+            (None, Some(&column_names)),
+            Some(&column_types),
+        )?;
+        let row_names = writer.row_names_vec();
+
+        let mut writer = writer.get_writer()?;
+        let mut row_group_writer = writer.next_row_group()?;
+
+        // 0. row names
+        parquet_add_bytearray(&mut row_group_writer, &row_names)?;
+
+        let cell_names = self.data.column_names()?;
+        // 1. left column names
+        parquet_add_string_column(
+            &mut row_group_writer,
+            &self
+                .pairs
+                .iter()
+                .map(|pp| cell_names[pp.left].clone())
+                .collect::<Vec<_>>(),
         )?;
 
+        // 2. right column names
+        parquet_add_string_column(
+            &mut row_group_writer,
+            &self
+                .pairs
+                .iter()
+                .map(|pp| cell_names[pp.right].clone())
+                .collect::<Vec<_>>(),
+        )?;
+
+        let (left_coord, right_coord) = self.all_pairs_positions()?;
+
+        // 3. left coordinates
+        for coord in left_coord.iter() {
+            parquet_add_numeric_column(&mut row_group_writer, coord)?;
+        }
+
+        // 4. right coordinates
+        for coord in right_coord.iter() {
+            parquet_add_numeric_column(&mut row_group_writer, coord)?;
+        }
+
+        // 5. distances
+        parquet_add_numeric_column(&mut row_group_writer, &self.distances)?;
+
+        row_group_writer.close()?;
+        writer.close()?;
         Ok(())
     }
 
@@ -82,18 +143,19 @@ impl<'a> SrtCellPairs<'a> {
     ///
     /// returns `(left_coordinates, right_coordinates)`
     ///
-    pub fn all_pairs_positions(&self) -> anyhow::Result<(Mat, Mat)> {
-        let left = self
-            .pairs
-            .iter()
-            .map(|pp| self.coordinates.row(pp.left))
-            .collect::<Vec<_>>();
-        let right = self
-            .pairs
-            .iter()
-            .map(|pp| self.coordinates.row(pp.right))
-            .collect::<Vec<_>>();
-        Ok((concatenate_vertical(&left)?, concatenate_vertical(&right)?))
+    pub fn all_pairs_positions(&self) -> anyhow::Result<(Vec<Vec<f32>>, Vec<Vec<f32>>)> {
+        let left: Vec<Vec<f32>> = self
+            .coordinates
+            .column_iter()
+            .map(|coord_vec| self.pairs.iter().map(|pp| coord_vec[pp.left]).collect())
+            .collect();
+        let right: Vec<Vec<f32>> = self
+            .coordinates
+            .column_iter()
+            .map(|coord_vec| self.pairs.iter().map(|pp| coord_vec[pp.right]).collect())
+            .collect();
+
+        Ok((left, right))
     }
 
     ///

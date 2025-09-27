@@ -71,6 +71,11 @@ pub trait MatOps {
     /// standardization for each column
     fn scale_columns(&self) -> Self::Mat;
 
+    /// standardization for each row
+    fn scale_rows_inplace(&mut self);
+    /// standardization for each row
+    fn scale_rows(&self) -> Self::Mat;
+
     /// centering for each column
     fn centre_columns_inplace(&mut self);
     /// centering for each column

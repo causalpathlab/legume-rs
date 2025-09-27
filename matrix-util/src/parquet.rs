@@ -1,11 +1,13 @@
 use parquet::basic::Type as ParquetType;
 use parquet::basic::{Compression, ConvertedType, ZstdLevel};
 use parquet::data_type::ByteArray;
+use parquet::data_type::{ByteArrayType, DoubleType, FloatType, Int32Type, Int64Type};
 use parquet::file::properties::WriterProperties;
 use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::file::writer::SerializedFileWriter;
+use parquet::file::writer::{SerializedFileWriter, SerializedRowGroupWriter};
 use parquet::record::RowAccessor;
-use parquet::schema::types::Type;
+use parquet::schema::types::Type as SchemaType;
+use std::any::TypeId;
 use std::collections::HashSet;
 use std::fs::File;
 use std::sync::Arc;
@@ -123,9 +125,8 @@ impl ParquetReader {
                 Vec::with_capacity(fields.len() - 1),
                 |mut acc, &(tt, j)| {
                     let x = match tt {
-                        parquet::basic::Type::FLOAT | parquet::basic::Type::DOUBLE => {
-                            row.get_double(j)?
-                        }
+                        parquet::basic::Type::DOUBLE => row.get_double(j)?,
+                        parquet::basic::Type::FLOAT => row.get_float(j)? as f64,
                         parquet::basic::Type::INT32 | parquet::basic::Type::INT64 => {
                             row.get_int(j)? as f64
                         }
@@ -151,9 +152,9 @@ impl ParquetReader {
 
 pub struct ParquetWriter {
     file: std::fs::File,
-    schema: Arc<Type>,
+    schema: Arc<SchemaType>,
     writer_properties: Arc<WriterProperties>,
-    pub row_names: Vec<ByteArray>,
+    row_names: Vec<ByteArray>,
 }
 
 impl ParquetWriter {
@@ -170,11 +171,12 @@ impl ParquetWriter {
         file_path: &str,
         shape: (usize, usize),
         names: (Option<&[Box<str>]>, Option<&[Box<str>]>),
+        column_types: Option<&[ParquetType]>,
     ) -> anyhow::Result<Self> {
         let (nrows, ncols) = shape;
         let (row_names, column_names) = names;
 
-        let schema = build_columns_schema(ncols, column_names)?;
+        let schema = build_columns_schema(ncols, column_names, column_types)?;
 
         let file = std::fs::File::create(file_path)?;
 
@@ -207,7 +209,7 @@ impl ParquetWriter {
         &self.row_names
     }
 
-    pub fn open(&self) -> anyhow::Result<SerializedFileWriter<File>> {
+    pub fn get_writer(&self) -> anyhow::Result<SerializedFileWriter<File>> {
         Ok(SerializedFileWriter::new(
             self.file.try_clone()?,
             self.schema.clone(),
@@ -216,10 +218,97 @@ impl ParquetWriter {
     }
 }
 
+/// write down a string vector of `Box<str>` to `row_group_writer` by creating a
+/// new `column_writer`
+pub fn parquet_add_bytearray<'a>(
+    row_group_writer: &mut SerializedRowGroupWriter<'a, File>,
+    data: &[ByteArray],
+) -> anyhow::Result<()> {
+    if let Some(mut column_writer) = row_group_writer.next_column()? {
+        let typed_writer = column_writer.typed::<ByteArrayType>();
+        typed_writer.write_batch(&data, None, None)?;
+        column_writer.close()?;
+    }
+
+    Ok(())
+}
+
+/// write down a string vector of `Box<str>` to `row_group_writer` by creating a
+/// new `column_writer`
+pub fn parquet_add_string_column<'a>(
+    row_group_writer: &mut SerializedRowGroupWriter<'a, File>,
+    data: &[Box<str>],
+) -> anyhow::Result<()> {
+    let data_bytearray = data
+        .iter()
+        .map(|x| ByteArray::from(x.as_ref()))
+        .collect::<Vec<_>>();
+
+    parquet_add_bytearray(row_group_writer, &data_bytearray)?;
+    Ok(())
+}
+
+/// write down a numeric vector to `row_group_writer` by creating a
+/// new `column_writer`
+pub fn parquet_add_numeric_column<'a, T: 'static + num_traits::ToPrimitive>(
+    row_group_writer: &mut SerializedRowGroupWriter<'a, File>,
+    data: &[T],
+) -> anyhow::Result<()> {
+    if TypeId::of::<T>() == TypeId::of::<f64>() {
+        if let Some(mut column_writer) = row_group_writer.next_column()? {
+            let typed_writer = column_writer.typed::<DoubleType>();
+            let data: Vec<f64> = data
+                .iter()
+                .map(|x| x.to_f64().expect("Failed to convert to f64"))
+                .collect();
+            typed_writer.write_batch(&data, None, None)?;
+            column_writer.close()?;
+        }
+    } else if TypeId::of::<T>() == TypeId::of::<f32>() {
+        if let Some(mut column_writer) = row_group_writer.next_column()? {
+            let typed_writer = column_writer.typed::<FloatType>();
+            let data: Vec<f32> = data
+                .iter()
+                .map(|x| x.to_f32().expect("Failed to convert to f32"))
+                .collect();
+            typed_writer.write_batch(&data, None, None)?;
+            column_writer.close()?;
+        }
+    } else if TypeId::of::<T>() == TypeId::of::<i32>()
+        || TypeId::of::<T>() == TypeId::of::<u32>()
+        || TypeId::of::<T>() == TypeId::of::<usize>()
+    {
+        if let Some(mut column_writer) = row_group_writer.next_column()? {
+            let typed_writer = column_writer.typed::<Int32Type>();
+            let data: Vec<i32> = data
+                .iter()
+                .map(|x| x.to_i32().expect("Failed to convert to i32"))
+                .collect();
+            typed_writer.write_batch(&data, None, None)?;
+            column_writer.close()?;
+        }
+    } else if TypeId::of::<T>() == TypeId::of::<i64>() || TypeId::of::<T>() == TypeId::of::<u64>() {
+        if let Some(mut column_writer) = row_group_writer.next_column()? {
+            let typed_writer = column_writer.typed::<Int64Type>();
+            let data: Vec<i64> = data
+                .iter()
+                .map(|x| x.to_i64().expect("Failed to convert to i64"))
+                .collect();
+            typed_writer.write_batch(&data, None, None)?;
+            column_writer.close()?;
+        }
+    } else {
+        return Err(anyhow::anyhow!("Unsupported data type"));
+    }
+
+    Ok(())
+}
+
 fn build_columns_schema(
     ncols: usize,
     column_names: Option<&[Box<str>]>,
-) -> anyhow::Result<Arc<Type>> {
+    column_types: Option<&[ParquetType]>,
+) -> anyhow::Result<Arc<SchemaType>> {
     if let Some(column_names) = column_names {
         if column_names.len() != ncols {
             return Err(anyhow::anyhow!(
@@ -231,7 +320,7 @@ fn build_columns_schema(
     }
 
     let mut fields = vec![Arc::new(
-        Type::primitive_type_builder("row", ParquetType::BYTE_ARRAY)
+        SchemaType::primitive_type_builder("row", ParquetType::BYTE_ARRAY)
             .with_repetition(parquet::basic::Repetition::REQUIRED)
             .with_converted_type(ConvertedType::UTF8)
             .build()
@@ -239,20 +328,32 @@ fn build_columns_schema(
     )];
 
     let _column_names: Vec<Box<str>> = (0..ncols).map(|x| x.to_string().into_boxed_str()).collect();
+    let _column_types = (0..ncols).map(|_x| ParquetType::FLOAT).collect::<Vec<_>>();
 
     let column_names: &[Box<str>] = column_names.unwrap_or(&_column_names);
+    let column_types: &[ParquetType] = column_types.unwrap_or(&_column_types);
 
-    for column_name in column_names {
-        fields.push(Arc::new(
-            Type::primitive_type_builder(column_name, ParquetType::DOUBLE)
-                .with_repetition(parquet::basic::Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        ));
+    for (column_name, &column_type) in column_names.iter().zip(column_types) {
+        if column_type == ParquetType::BYTE_ARRAY {
+            fields.push(Arc::new(
+                SchemaType::primitive_type_builder(column_name, column_type)
+                    .with_repetition(parquet::basic::Repetition::REQUIRED)
+                    .with_converted_type(ConvertedType::UTF8)
+                    .build()
+                    .unwrap(),
+            ));
+        } else {
+            fields.push(Arc::new(
+                SchemaType::primitive_type_builder(column_name, column_type)
+                    .with_repetition(parquet::basic::Repetition::REQUIRED)
+                    .build()
+                    .unwrap(),
+            ));
+        }
     }
 
     let schema = Arc::new(
-        Type::group_type_builder("2dMatrix")
+        SchemaType::group_type_builder("2dMatrix")
             .with_fields(fields)
             .build()?,
     );
