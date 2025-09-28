@@ -3,7 +3,7 @@ use crate::candle_aux_linear::*;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, BatchNorm, Embedding, Linear, Module, ModuleT, VarBuilder};
+use candle_nn::{BatchNorm, Embedding, Linear, Module, ModuleT, VarBuilder, ops};
 
 pub struct LogSoftmaxEncoder {
     n_features: usize,
@@ -11,8 +11,6 @@ pub struct LogSoftmaxEncoder {
     n_vocab: usize,
     n_modules: usize,
     feature_module: AggregateLinear,
-    // emb_x: RankEmbedding,
-    // emb_logx: RankEmbedding,
     emb_x: Embedding,
     emb_logx: Embedding,
     fc: StackLayers<Linear>,
@@ -74,9 +72,11 @@ impl LogSoftmaxEncoder {
     }
 
     fn modularized_composite_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
-        // let denom_n1 = x_nd.sum_keepdim(x_nd.rank() - 1)?;
-        // let x_nd = (x_nd.broadcast_div(&denom_n1)? * 1e4)?;
-        let x_nm = self.feature_module.forward(x_nd)?;
+        // This is important to make every data points to have the same scale
+        let denom_n1 = x_nd.sum_keepdim(x_nd.rank() - 1)?;
+        let x_nd = (x_nd.broadcast_div(&denom_n1)? * (self.n_features as f64))?;
+        // group features into modules
+        let x_nm = self.feature_module.forward(&x_nd)?;
         self.composite_embedding(&x_nm, train)
     }
 
