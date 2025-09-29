@@ -5,6 +5,7 @@ members = [
 	"data-beans-alg",
 	"matrix-util",
 	"matrix-param",
+	"mcmc-util",
 	"senna",
 	"pinto",
 	"cocoa-diff",
@@ -60,3 +61,4 @@ data-beans-alg = { path = "data-beans-alg"}
 matrix-param = { path = "matrix-param" }
 matrix-util = { path = "matrix-util" }
 candle-util = { path = "candle-util" }
+mcmc-util = { path = "mcmc-util" }
