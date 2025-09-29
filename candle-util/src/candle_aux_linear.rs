@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, Module};
+use candle_nn::{Module, ops};
 
 /////////////////////////////////////////////
 // Linear module with non-negative weights //
@@ -135,6 +135,7 @@ impl Module for SoftmaxLinear {
             [bsize, _, _] => self.biased_weight()?.broadcast_left(bsize)?.t()?,
             _ => self.biased_weight()?.t()?,
         };
+
         h_nk.matmul(&log_w_kd.exp()?)
         // the following is exact... but there is sacrifice in speed
         // candle_nn::ops::log_softmax(&(prob_nd + eps)?.log()?, 1)

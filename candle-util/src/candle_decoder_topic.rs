@@ -13,17 +13,23 @@ pub struct TopicDecoder {
     n_features: usize,
     n_topics: usize,
     dictionary: SoftmaxLinear,
+    mask: Tensor,
 }
 
 impl TopicDecoder {
-    /// Will create a new ETM decoder with the following parameters:
+    /// Will create a new topic model decoder with the following parameters:
     /// * `dictionary.weight`
     pub fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
         let dictionary = log_softmax_linear(n_topics, n_features, vs.pp("dictionary"))?;
+
+        let mask = Tensor::tril2(n_topics, vs.dtype(), vs.device())?;
+        let mask = mask.sub(&Tensor::eye(n_topics, vs.dtype(), vs.device())?)?;
+
         Ok(Self {
             n_features,
             n_topics,
             dictionary,
+            mask,
         })
     }
 
@@ -52,7 +58,14 @@ impl DecoderModuleT for TopicDecoder {
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
         let logits_nd = self.forward(z_nk)?;
-        let llik = llik(x_nd, &logits_nd)?;
+
+        // penalize self regression likelihood
+        let logits_weight_dk = self.dictionary.weight()?;
+        let weight_dk = logits_weight_dk.exp()?;
+        let llik_kk = weight_dk.transpose(0, 1)?.matmul(&logits_weight_dk)?;
+        let penalty = self.mask.mul(&llik_kk)?.sum_all()?;
+        let llik = llik(x_nd, &logits_nd)?.broadcast_sub(&penalty)?;
+
         Ok((logits_nd, llik))
     }
 
