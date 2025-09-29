@@ -1,0 +1,37 @@
+[package]
+name = "mcmc-util"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+flate2 = { workspace = true }
+num_cpus = { workspace = true }
+rayon = { workspace = true }
+tempfile = { workspace = true }
+
+rand = { workspace = true }
+rand_distr = { workspace = true }
+
+nalgebra = { workspace = true }
+nalgebra-sparse = { workspace = true }
+num-traits = { workspace = true }
+
+approx = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+
+ndarray = { workspace = true }
+ndarray-linalg = { workspace = true }
+ndarray-rand = { workspace = true }
+
+instant-distance = { workspace = true }
+indicatif = { workspace = true }
+parquet = { workspace = true }
+matrix-util = { workspace = true }
+
+fnv = "1.0.7"
+zip = "5.1.1"

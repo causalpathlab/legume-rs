@@ -1,5 +1,5 @@
 mod embed_common;
-mod fit_deconv;
+mod fit_deconv_reg;
 mod fit_svd;
 mod fit_topic;
 
@@ -7,7 +7,7 @@ mod routines_post_process;
 mod routines_pre_process;
 
 use embed_common::*;
-use fit_deconv::*;
+use fit_deconv_reg::*;
 use fit_svd::*;
 use fit_topic::*;
 
@@ -31,8 +31,8 @@ enum Commands {
     Svd(SvdArgs),
     /// embedding by fitting a topic model
     Topic(TopicArgs),
-    /// deconvolve bulk data with single cell reference data
-    Deconv(DeconvArgs),
+    /// deconvolve bulk data with single cell reference dictionary
+    DeconvReg(DeconvRegArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -47,8 +47,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Topic(args) => {
             fit_topic_model(args)?;
         }
-        Commands::Deconv(args) => {
-            fit_deconv(args)?;
+        Commands::DeconvReg(args) => {
+            fit_deconv_reg(args)?;
         }
     }
 
