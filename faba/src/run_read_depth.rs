@@ -2,10 +2,6 @@ use crate::common::*;
 use crate::data::bed::*;
 use crate::data::util_htslib::*;
 use crate::data::visitors_htslib::*;
-
-use data_beans::qc::*;
-use data_beans::sparse_io::*;
-use matrix_util::common_io::remove_file;
 use rust_htslib::bam::{self, record::Aux};
 
 use coitrees::{COITree, Interval, IntervalTree};
@@ -140,45 +136,19 @@ pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
         "constructing backend data with {} segments",
         segment_stats.len()
     );
-    let (triplets, row_names, col_names) = format_data_triplets(segment_stats);
 
-    let mtx_shape = (row_names.len(), col_names.len(), triplets.len());
     let output = args.output.clone();
     let backend_file = match backend {
         SparseIoBackend::HDF5 => format!("{}.h5", &output),
         SparseIoBackend::Zarr => format!("{}.zarr", &output),
     };
 
-    remove_file(&backend_file)?;
-
-    let mut data =
-        create_sparse_from_triplets(triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
-
-    data.register_column_names_vec(&col_names);
-    data.register_row_names_vec(&row_names);
-
-    info!(
-        "built the data with {} x {}",
-        data.as_ref()
-            .num_rows()
-            .ok_or(anyhow::anyhow!("unknown number of rows"))?,
-        data.as_ref()
-            .num_columns()
-            .ok_or(anyhow::anyhow!("unknown number of columns"))?
-    );
-
-    if args.row_nnz_cutoff > 0 || args.column_nnz_cutoff > 0 {
-        info!("final Q/C to remove excessive zeros");
-        let block_size = 100;
-        squeeze_by_nnz(
-            data.as_ref(),
-            SqueezeCutoffs {
-                row: args.row_nnz_cutoff,
-                column: args.column_nnz_cutoff,
-            },
-            block_size,
-        )?;
-    }
+    format_data_triplets(segment_stats)
+        .to_backend(&backend_file)?
+        .qc(SqueezeCutoffs {
+            row: args.row_nnz_cutoff,
+            column: args.column_nnz_cutoff,
+        })?;
 
     info!("done");
     Ok(())

@@ -403,7 +403,7 @@ pub fn run_sim_diff_data(args: SimArgs) -> anyhow::Result<()> {
     }
 
     let mut data = create_sparse_from_triplets(
-        sim_out.triplets,
+        &sim_out.triplets,
         mtx_shape,
         Some(&backend_file),
         Some(&backend),

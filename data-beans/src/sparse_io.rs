@@ -51,7 +51,7 @@ pub fn open_sparse_matrix(
 /// * `backend_file`: file path to the sparse matrix
 /// * `backend`: backend type (HDF5 or Zarr)
 pub fn create_sparse_from_triplets(
-    triplets: Vec<(u64, u64, f32)>,
+    triplets: &Vec<(u64, u64, f32)>,
     mtx_shape: (usize, usize, usize),
     backend_file: Option<&str>,
     backend: Option<&SparseIoBackend>,
