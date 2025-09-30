@@ -1,26 +1,23 @@
-#![allow(unused)]
-
-pub use matrix_util::common_io as io;
-
-pub use clap::{ArgAction, Args, Parser, Subcommand};
-pub use env_logger;
-
-pub use log::info;
-pub use std::path::Path;
-pub use std::sync::{Arc, Mutex};
-pub use std::thread;
-
-pub use indicatif::ParallelProgressIterator;
-pub use rayon::prelude::*;
-
 pub use crate::data::gff::*;
 pub use crate::data::sam::*;
+pub use clap::{Args, Parser, Subcommand};
+pub use data_beans::qc::*;
+pub use data_beans::sparse_io::*;
+pub use env_logger;
+pub use indicatif::ParallelProgressIterator;
+pub use log::info;
+pub use matrix_util::common_io::*;
+pub use rayon::prelude::*;
 
 use fnv::{FnvHashMap, FnvHashSet};
 
-pub fn format_data_triplets<Feat, Val>(
-    stats: Vec<(CellBarcode, Feat, Val)>,
-) -> (Vec<(u64, u64, f32)>, Vec<Box<str>>, Vec<Box<str>>)
+pub struct TripletsRowsCols {
+    pub triplets: Vec<(u64, u64, f32)>,
+    pub rows: Vec<Box<str>>,
+    pub cols: Vec<Box<str>>,
+}
+
+pub fn format_data_triplets<Feat, Val>(stats: Vec<(CellBarcode, Feat, Val)>) -> TripletsRowsCols
 where
     Feat: std::hash::Hash + std::cmp::Eq + std::cmp::Ord + Clone + Send + ToString,
     Val: Into<f32>,
@@ -29,13 +26,14 @@ where
     let mut unique_cells = FnvHashSet::default();
     let mut unique_features = FnvHashSet::default();
 
-    for (cb, g, _) in stats.iter() {
-        unique_features.insert(g.clone());
+    for (cb, f, _) in stats.iter() {
+        unique_features.insert(f.clone());
         unique_cells.insert(cb.clone());
     }
 
     let mut unique_cells = unique_cells.into_iter().collect::<Vec<_>>();
-    unique_cells.sort();
+    unique_cells.par_sort();
+
     let cell_to_index: FnvHashMap<CellBarcode, usize> = unique_cells
         .into_iter()
         .enumerate()
@@ -48,7 +46,7 @@ where
     let feature_to_index: FnvHashMap<Feat, usize> = unique_features
         .into_iter()
         .enumerate()
-        .map(|(i, site)| (site, i))
+        .map(|(i, f)| (f, i))
         .collect();
 
     // relabel triplets with indices
@@ -69,5 +67,56 @@ where
         features[j] = k.to_string().into_boxed_str();
     }
 
-    (relabeled_triplets, features, cells)
+    TripletsRowsCols {
+        triplets: relabeled_triplets,
+        rows: features,
+        cols: cells,
+    }
+}
+
+pub trait ToBackend {
+    fn to_backend(
+        &self,
+        file_path: &str,
+    ) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>>;
+}
+
+impl ToBackend for TripletsRowsCols {
+    fn to_backend(
+        &self,
+        file_path: &str,
+    ) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
+        let backend = match extension(file_path)?.as_ref() {
+            "zarr" => SparseIoBackend::Zarr,
+            "h5" => SparseIoBackend::HDF5,
+            _ => return Err(anyhow::anyhow!("unknown backend type")),
+        };
+
+        let row_names = &self.rows;
+        let col_names = &self.cols;
+        let triplets = &self.triplets;
+
+        let mtx_shape = (row_names.len(), col_names.len(), triplets.len());
+
+        remove_file(file_path)?;
+
+        let mut data =
+            create_sparse_from_triplets(triplets, mtx_shape, Some(file_path), Some(&backend))?;
+        data.register_column_names_vec(&col_names);
+        data.register_row_names_vec(&row_names);
+
+        Ok(data)
+    }
+}
+
+pub trait BackendQc {
+    fn qc(&self, cutoffs: SqueezeCutoffs) -> anyhow::Result<()>;
+}
+
+impl BackendQc for Box<dyn SparseIo<IndexIter = Vec<usize>>> {
+    fn qc(&self, cutoffs: SqueezeCutoffs) -> anyhow::Result<()> {
+        info!("final Q/C to remove excessive zeros");
+        let block_size = 100;
+        squeeze_by_nnz(self.as_ref(), cutoffs, block_size)
+    }
 }

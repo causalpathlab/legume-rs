@@ -131,7 +131,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             remove_file(&backend_file)?;
 
             let mut adjusted_data = create_sparse_from_triplets(
-                triplets,
+                &triplets,
                 mtx_shape,
                 Some(&backend_file),
                 Some(&backend),

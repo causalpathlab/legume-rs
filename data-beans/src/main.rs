@@ -23,8 +23,8 @@ use matrix_util::common_io::basename;
 use matrix_util::traits::IoOps;
 use matrix_util::*;
 use rayon::prelude::*;
-use simulate_deconv::SimConvArgs;
 use simulate_deconv::generate_convoluted_data;
+use simulate_deconv::SimConvArgs;
 use tempfile::TempDir;
 
 use std::collections::HashMap;
@@ -721,7 +721,7 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
     }
 
     let mut data =
-        create_sparse_from_triplets(triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
+        create_sparse_from_triplets(&triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
 
     data.register_row_names_vec(&row_names);
     data.register_column_names_vec(&col_names);
@@ -1062,7 +1062,7 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
     info!("Wrote batch membership file: {}", &batch_memb_file);
 
     let mut data = create_sparse_from_triplets(
-        renamed_triplets,
+        &renamed_triplets,
         (row_pos.len(), offset as usize, nnz_tot),
         Some(&backend_file),
         Some(&backend),
@@ -1327,7 +1327,7 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     assert_eq!(ncols, column_names.len());
 
     let mut out = create_sparse_from_triplets(
-        triplets,
+        &triplets,
         (nrows, ncols, nnz),
         Some(&backend_file),
         Some(&backend),
@@ -1443,7 +1443,7 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
         assert_eq!(ncols, column_names.len());
 
         let mut out = create_sparse_from_triplets(
-            triplets,
+            &triplets,
             (nrows, ncols, nnz),
             Some(&backend_file),
             Some(&backend),
@@ -1768,8 +1768,12 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
 
     info!("registering triplets ...");
 
-    let mut data =
-        create_sparse_from_triplets(sim.triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
+    let mut data = create_sparse_from_triplets(
+        &sim.triplets,
+        mtx_shape,
+        Some(&backend_file),
+        Some(&backend),
+    )?;
 
     info!("created sparse matrix: {}", backend_file);
 

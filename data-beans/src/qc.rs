@@ -9,11 +9,13 @@ use matrix_util::ndarray_stat::RunningStatistics;
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
+#[derive(Clone)]
 pub struct SqueezeCutoffs {
     pub row: usize,
     pub column: usize,
 }
 
+/// squeeze out rows and columns with excessive zero values
 pub fn squeeze_by_nnz(
     data: &dyn SparseIo<IndexIter = Vec<usize>>,
     cutoffs: SqueezeCutoffs,
