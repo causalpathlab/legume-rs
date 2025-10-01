@@ -254,6 +254,14 @@ pub struct SubsetColumnsArgs {
     #[arg(long, default_value_t = false)]
     do_squeeze: bool,
 
+    /// minimum number of non-zero cutoff for rows
+    #[arg(short, long, default_value_t = 1)]
+    row_nnz_cutoff: usize,
+
+    /// minimum number of non-zero cutoff for columns
+    #[arg(short, long, default_value_t = 1)]
+    column_nnz_cutoff: usize,
+
     /// output file
     #[arg(short, long, required = true)]
     output: Box<str>,
@@ -283,6 +291,14 @@ pub struct FromMtxArgs {
     /// squeeze
     #[arg(long, default_value_t = false)]
     do_squeeze: bool,
+
+    /// minimum number of non-zero cutoff for rows
+    #[arg(short, long, default_value_t = 1)]
+    row_nnz_cutoff: usize,
+
+    /// minimum number of non-zero cutoff for columns
+    #[arg(short, long, default_value_t = 1)]
+    column_nnz_cutoff: usize,
 
     /// verbose mode
     #[arg(short, long, action = ArgAction::Count)]
@@ -357,6 +373,14 @@ pub struct FromH5Args {
     #[arg(long, default_value_t = false)]
     do_squeeze: bool,
 
+    /// minimum number of non-zero cutoff for rows
+    #[arg(short, long, default_value_t = 1)]
+    row_nnz_cutoff: usize,
+
+    /// minimum number of non-zero cutoff for columns
+    #[arg(short, long, default_value_t = 1)]
+    column_nnz_cutoff: usize,
+
     /// verbose mode
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
@@ -416,6 +440,14 @@ pub struct FromZarrArgs {
     #[arg(long, default_value_t = false)]
     do_squeeze: bool,
 
+    /// minimum number of non-zero cutoff for rows
+    #[arg(short, long, default_value_t = 1)]
+    row_nnz_cutoff: usize,
+
+    /// minimum number of non-zero cutoff for columns
+    #[arg(short, long, default_value_t = 1)]
+    column_nnz_cutoff: usize,
+
     /// verbose mode
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
@@ -465,6 +497,14 @@ pub struct MergeMtxArgs {
     /// squeeze
     #[arg(long, default_value_t = false)]
     do_squeeze: bool,
+
+    /// minimum number of non-zero cutoff for rows
+    #[arg(short, long, default_value_t = 1)]
+    row_nnz_cutoff: usize,
+
+    /// minimum number of non-zero cutoff for columns
+    #[arg(short, long, default_value_t = 1)]
+    column_nnz_cutoff: usize,
 
     /// verbose mode
     #[arg(short, long, action = ArgAction::Count)]
@@ -735,8 +775,8 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
             data_file: backend_file.into_boxed_str(),
-            row_nnz_cutoff: 0,
-            column_nnz_cutoff: 0,
+            row_nnz_cutoff: args.row_nnz_cutoff,
+            column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
         };
 
@@ -1080,8 +1120,8 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
             data_file: backend_file.into_boxed_str(),
-            row_nnz_cutoff: 0,
-            column_nnz_cutoff: 0,
+            row_nnz_cutoff: args.row_nnz_cutoff,
+            column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
         };
 
@@ -1155,8 +1195,8 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
     if args.do_squeeze {
         let squeeze_args = RunSqueezeArgs {
             data_file: backend_file.into_boxed_str(),
-            row_nnz_cutoff: 0,
-            column_nnz_cutoff: 0,
+            row_nnz_cutoff: args.row_nnz_cutoff,
+            column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
         };
 
@@ -1358,8 +1398,8 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
             data_file: backend_file.into_boxed_str(),
-            row_nnz_cutoff: 0,
-            column_nnz_cutoff: 0,
+            row_nnz_cutoff: args.row_nnz_cutoff,
+            column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
         };
 
@@ -1511,8 +1551,8 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
             data_file: backend_file.into_boxed_str(),
-            row_nnz_cutoff: 0,
-            column_nnz_cutoff: 0,
+            row_nnz_cutoff: args.row_nnz_cutoff,
+            column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
         };
 
