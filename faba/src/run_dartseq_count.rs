@@ -3,6 +3,8 @@ use crate::dartseq_sifter::*;
 use crate::data::dna::Dna;
 use crate::data::dna_stat_map::*;
 use crate::data::dna_stat_traits::*;
+use crate::data::gff::FeatureType as GffFeatureType;
+use crate::data::gff::GeneType as GffGeneType;
 use crate::data::methylation::*;
 use crate::data::positions::*;
 use crate::data::util_htslib::*;
@@ -47,13 +49,13 @@ pub struct DartSeqCountArgs {
     #[arg(short, long, default_value_t = 0.05)]
     pvalue_cutoff: f64,
 
-    /// bam record type (gene, transcript, exon, utr)
-    #[arg(long, default_value = "gene")]
-    record_type: Box<str>,
+    /// selectively choose bam record type (gene, transcript, exon, utr)
+    #[arg(long, value_enum)]
+    record_type: Option<GffFeatureType>,
 
     /// gene type (protein_coding, pseudogene, lncRNA)
-    #[arg(long, default_value = "protein_coding")]
-    gene_type: Box<str>,
+    #[arg(long, value_enum)]
+    gene_type: Option<GffGeneType>,
 
     /// number of non-zero cutoff for rows/features
     #[arg(long, default_value_t = 10)]
@@ -67,12 +69,8 @@ pub struct DartSeqCountArgs {
     #[arg(short = 't', long, value_enum, default_value = "methylated")]
     output_value_type: MethFeatureType,
 
-    /// output value type
-    #[arg(long, default_value_t = false)]
-    gene_level_output: bool,
-
     /// backend for the output file
-    #[arg(long, value_enum, default_value = "zarr")]
+    #[arg(long, value_enum, default_value = "hdf5")]
     backend: SparseIoBackend,
 
     /// include reads missing gene and cell barcode
@@ -108,12 +106,13 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         check_bam_index(x, None)?;
     }
 
-    let record_feature_type: FeatureType = args.record_type.as_ref().into();
-
     info!("parsing GFF file: {}", args.gff_file);
 
-    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref(), Some(&record_feature_type))?;
-    gff_map.subset(args.gene_type.clone().into());
+    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref(), args.record_type.as_ref())?;
+
+    if let Some(gene_type) = args.gene_type.clone() {
+        gff_map.subset(gene_type);
+    }
 
     info!("found {} features", gff_map.len(),);
 
@@ -159,11 +158,6 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // if needed output full statistics as bed format
-    if args.output_bed_file {
-        // todo:
-    }
-
     /////////////////////////////////////
     // 3. Aggregate them into triplets //
     /////////////////////////////////////
@@ -195,27 +189,33 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         }
         .into_boxed_str()
     };
+    let bed_file =
+        |name: &str| -> Box<str> { format!("{}.{}.bed.gz", &args.output, name).into_boxed_str() };
 
     let cutoffs = SqueezeCutoffs {
         row: args.row_nnz_cutoff,
         column: args.column_nnz_cutoff,
     };
 
-    summarize_stats(&wt_stats, gene_key, take_value)
-        .to_backend(backend_file("wt.gene").as_ref())?
-        .qc(cutoffs.clone())?;
+    if args.output_bed_file {
+        // todo:
+    } else {
+        summarize_stats(&wt_stats, gene_key, take_value)
+            .to_backend(backend_file("wt.gene").as_ref())?
+            .qc(cutoffs.clone())?;
 
-    summarize_stats(&mut_stats, gene_key, take_value)
-        .to_backend(backend_file("mut.gene").as_ref())?
-        .qc(cutoffs.clone())?;
+        summarize_stats(&mut_stats, gene_key, take_value)
+            .to_backend(backend_file("mut.gene").as_ref())?
+            .qc(cutoffs.clone())?;
 
-    summarize_stats(&wt_stats, site_key, take_value)
-        .to_backend(backend_file("wt.site").as_ref())?
-        .qc(cutoffs.clone())?;
+        summarize_stats(&wt_stats, site_key, take_value)
+            .to_backend(backend_file("wt.site").as_ref())?
+            .qc(cutoffs.clone())?;
 
-    summarize_stats(&mut_stats, site_key, take_value)
-        .to_backend(backend_file("mut.site").as_ref())?
-        .qc(cutoffs.clone())?;
+        summarize_stats(&mut_stats, site_key, take_value)
+            .to_backend(backend_file("mut.site").as_ref())?
+            .qc(cutoffs.clone())?;
+    }
 
     info!("done");
     Ok(())
@@ -362,6 +362,7 @@ fn estimate_m6a_stat(
                         start: lb,
                         stop: ub,
                         gene: gene.clone(),
+                        strand: strand.clone(),
                     },
                     MethylationData {
                         methylated,
