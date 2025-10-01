@@ -1293,14 +1293,22 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     let TripletsShape { nrows, ncols, nnz } = shape;
     info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
 
-    let row_names = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_name_field)
+    let mut row_names = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_name_field)
         .or_else(|_| read_zarr_strings(store.clone(), args.row_name_field.as_ref()))
         .unwrap_or_else(|_| (0..nrows).map(|x| x.to_string().into_boxed_str()).collect());
+    if nrows < row_names.len() {
+        info!("data doesn't contain all the rows");
+        row_names.truncate(nrows);
+    }
     assert_eq!(nrows, row_names.len());
 
-    let row_types = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_type_field)
+    let mut row_types = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_type_field)
         .or_else(|_| read_zarr_strings(store.clone(), args.row_name_field.as_ref()))
         .unwrap_or_else(|_| vec![args.select_row_type.clone(); nrows]);
+    if nrows < row_types.len() {
+        info!("data doesn't contain all the rows");
+        row_types.truncate(nrows);
+    }
     assert_eq!(nrows, row_types.len());
 
     let select_pattern = args.select_row_type.to_lowercase();
@@ -1319,11 +1327,16 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         })
         .collect::<Vec<_>>();
 
-    let column_names =
+    let mut column_names =
         parse_10x_cell_id(read_zarr_ndarray::<u32>(store.clone(), &args.column_name_field)?.view())
             .or_else(|_| read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.column_name_field))
             .or_else(|_| read_zarr_strings(store.clone(), args.column_name_field.as_ref()))
             .unwrap_or_else(|_| (0..ncols).map(|x| x.to_string().into_boxed_str()).collect());
+
+    if ncols < column_names.len() {
+        info!("data doesn't contain all the columns");
+        column_names.truncate(ncols);
+    }
     assert_eq!(ncols, column_names.len());
 
     let mut out = create_sparse_from_triplets(
@@ -1413,7 +1426,7 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
         let TripletsShape { nrows, ncols, nnz } = shape;
         info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
 
-        let row_names: Vec<Box<str>> = match root.dataset(args.row_name_field.as_ref()) {
+        let mut row_names: Vec<Box<str>> = match root.dataset(args.row_name_field.as_ref()) {
             Ok(rows) => read_hdf5_strings(rows)?,
             _ => {
                 info!("row (feature) names not found");
@@ -1421,18 +1434,28 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
             }
         };
         info!("Read {} row names", row_names.len());
-        assert_eq!(nrows, row_names.len());
+        if nrows < row_names.len() {
+            info!("data doesn't contain all the rows");
+            row_names.truncate(nrows);
+        }
 
-        let row_types: Vec<Box<str>> = match root.dataset(args.row_type_field.as_ref()) {
+        let mut row_types: Vec<Box<str>> = match root.dataset(args.row_type_field.as_ref()) {
             Ok(rows) => read_hdf5_strings(rows)?,
             _ => {
                 info!("use all the types");
                 vec![args.select_row_type.clone(); nrows]
             }
         };
+
+        if nrows < row_types.len() {
+            info!("data doesn't contain all the rows");
+            row_types.truncate(nrows);
+        }
+
+        assert_eq!(nrows, row_names.len());
         assert_eq!(nrows, row_types.len());
 
-        let column_names: Vec<Box<str>> = match root.dataset(args.column_name_field.as_ref()) {
+        let mut column_names: Vec<Box<str>> = match root.dataset(args.column_name_field.as_ref()) {
             Ok(columns) => read_hdf5_strings(columns)?,
             _ => {
                 info!("column (cell) names not found");
@@ -1440,6 +1463,11 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
             }
         };
         info!("Read {} column names", column_names.len());
+
+        if ncols < column_names.len() {
+            info!("data doesn't contain all the columns");
+            column_names.truncate(ncols);
+        }
         assert_eq!(ncols, column_names.len());
 
         let mut out = create_sparse_from_triplets(
