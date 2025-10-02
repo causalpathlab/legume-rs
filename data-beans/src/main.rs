@@ -19,15 +19,15 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use common_io::*;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use log::info;
-use matrix_util::common_io::basename;
 use matrix_util::traits::IoOps;
 use matrix_util::*;
 use rayon::prelude::*;
-use simulate_deconv::SimConvArgs;
 use simulate_deconv::generate_convoluted_data;
+use simulate_deconv::SimConvArgs;
 use tempfile::TempDir;
 
 use std::collections::HashMap;
+
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
@@ -640,7 +640,7 @@ pub struct RunSimulateArgs {
 /////////////////////
 
 fn read_row_names(row_file: Box<str>, max_row_name_idx: usize) -> anyhow::Result<Vec<Box<str>>> {
-    let _names = common_io::read_lines_of_words(&row_file, -1)?.lines;
+    let _names = read_lines_of_words(&row_file, -1)?.lines;
     Ok(_names
         .into_iter()
         .map(|x| {
@@ -657,7 +657,7 @@ fn read_row_names(row_file: Box<str>, max_row_name_idx: usize) -> anyhow::Result
 }
 
 fn read_col_names(col_file: Box<str>, max_column_name_idx: usize) -> anyhow::Result<Vec<Box<str>>> {
-    let _names = common_io::read_lines_of_words(&col_file, -1)?.lines;
+    let _names = read_lines_of_words(&col_file, -1)?.lines;
     Ok(_names
         .into_iter()
         .map(|x| {
@@ -677,7 +677,7 @@ fn reorder_rows(args: &SortRowsArgs) -> anyhow::Result<()> {
     let data_file = args.data_file.clone();
     let row_names_order: Vec<Box<str>> = read_row_names(args.row_file.clone(), MAX_ROW_NAME_IDX)?;
 
-    let backend = match common_io::extension(&data_file)?.as_ref() {
+    let backend = match extension(&data_file)?.as_ref() {
         "zarr" => SparseIoBackend::Zarr,
         "h5" => SparseIoBackend::HDF5,
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
@@ -695,33 +695,34 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
     let columns_indices = args.column_indices.clone();
     let column_name_file = args.name_file.clone();
 
-    let backend = match common_io::extension(&data_file)?.as_ref() {
+    let backend = match extension(&data_file)?.as_ref() {
         "zarr" => SparseIoBackend::Zarr,
         "h5" => SparseIoBackend::HDF5,
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
     };
 
     let output = args.output.clone();
+    let backend_file = match backend {
+        SparseIoBackend::HDF5 => output.to_string() + ".h5",
+        SparseIoBackend::Zarr => output.to_string() + ".zarr",
+    };
 
-    let data = open_sparse_matrix(&data_file, &backend.clone())?;
+    if let Some(out_dir) = dirname(&backend_file) {
+        mkdir(&out_dir)?;
+    }
 
-    let row_names = data.row_names()?;
-    let cols = data.column_names()?;
+    recursive_copy(&data_file, &backend_file)?;
+    info!("copied the existing data file {}", data_file);
 
-    let ((nrow, ncol, triplets), col_names) = if let Some(idx) = columns_indices {
-        if idx.is_empty() {
-            return Err(anyhow::anyhow!("Empty index"));
-        }
+    let mut data = open_sparse_matrix(&backend_file, &backend.clone())?;
 
-        let col_names = idx.iter().map(|&x| cols[x].clone()).collect::<Vec<_>>();
-        (data.read_triplets_by_columns(idx.clone())?, col_names)
+    let selected_columns = if let Some(idx) = columns_indices {
+        idx
     } else if let Some(column_file) = column_name_file {
         let col_names = read_col_names(column_file, MAX_COLUMN_NAME_IDX)?;
-
         if col_names.is_empty() {
             return Err(anyhow::anyhow!("Empty column file"));
         }
-
         let col_names_map = data
             .column_names()
             .expect("column names not found in data file")
@@ -735,55 +736,27 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
             .filter_map(|x| col_names_map.get(&x))
             .collect::<Vec<_>>();
 
-        let columns: Vec<usize> = col_names_order.iter().map(|&x| *x).collect();
-        let col_names = columns.iter().map(|&x| cols[x].clone()).collect::<Vec<_>>();
-
-        if columns.is_empty() {
+        let idx: Vec<usize> = col_names_order.iter().map(|&x| *x).collect();
+        if idx.is_empty() {
             return Err(anyhow::anyhow!("Found empty columns"));
         }
-
-        (data.read_triplets_by_columns(columns)?, col_names)
+        idx
     } else {
         return Err(anyhow::anyhow!(
             "either `column-indices` or `name-file` must be provided"
         ));
     };
 
-    let backend_file = match backend {
-        SparseIoBackend::HDF5 => format!("{}.h5", &output),
-        SparseIoBackend::Zarr => format!("{}.zarr", &output),
-    };
-
-    let mtx_shape = (nrow, ncol, triplets.len());
-
-    if std::path::Path::new(&backend_file).exists() {
-        info!(
-            "This existing backend file '{}' will be deleted",
-            &backend_file
-        );
-        common_io::remove_file(&backend_file)?;
-    }
-
-    let mut data =
-        create_sparse_from_triplets(&triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
-
-    data.register_row_names_vec(&row_names);
-    data.register_column_names_vec(&col_names);
-
-    info!(
-        "Successfully created a sparse backend file: {}",
-        &backend_file
-    );
+    data.subset_columns_rows(Some(&selected_columns), None)?;
 
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
-            data_file: backend_file.into_boxed_str(),
+            data_file: backend_file.into(),
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
         };
-
         run_squeeze(&squeeze_args)?;
     }
 
@@ -796,7 +769,7 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
     let columns = args.column_indices.clone();
     let column_name_file = args.name_file.clone();
 
-    let backend = match common_io::extension(&data_file)?.as_ref() {
+    let backend = match extension(&data_file)?.as_ref() {
         "zarr" => SparseIoBackend::Zarr,
         "h5" => SparseIoBackend::HDF5,
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
@@ -845,7 +818,7 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
         ));
     };
 
-    if let Ok(ext) = common_io::extension(&output) {
+    if let Ok(ext) = extension(&output) {
         if ext.as_ref() == "parquet" {
             data.to_parquet(Some(&row_names), Some(&column_names), &output)?;
             return Ok(());
@@ -1099,10 +1072,10 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
             "This existing backend file '{}' will be deleted",
             &backend_file
         );
-        common_io::remove_file(&backend_file)?;
+        remove_file(&backend_file)?;
     }
 
-    common_io::write_lines(&column_batch_names, &batch_memb_file)?;
+    write_lines(&column_batch_names, &batch_memb_file)?;
     info!("Wrote batch membership file: {}", &batch_memb_file);
 
     let mut data = create_sparse_from_triplets(
@@ -1149,7 +1122,7 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
     let output = match args.output.clone() {
         Some(output) => output,
         None => {
-            let (dir, mut base, ext) = common_io::dir_base_ext(mtx_file)?;
+            let (dir, mut base, ext) = dir_base_ext(mtx_file)?;
 
             if base.ends_with(".mtx") && ext.ends_with("gz") {
                 base = base
@@ -1177,7 +1150,7 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
             "This existing backend file '{}' will be deleted",
             &backend_file
         );
-        common_io::remove_file(&backend_file)?;
+        remove_file(&backend_file)?;
     }
 
     let mut data = create_sparse_from_mtx_file(mtx_file, Some(&backend_file), Some(&backend))?;
@@ -1211,7 +1184,7 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
 }
 
 fn list_zarr(cmd_args: &ListZarrArgs) -> anyhow::Result<()> {
-    let ext = common_io::extension(&cmd_args.zarr_file)?;
+    let ext = extension(&cmd_args.zarr_file)?;
 
     match ext.to_string().as_ref() {
         "zarr" => {
@@ -1283,7 +1256,7 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     let output = match args.output.clone() {
         Some(output) => output,
         None => {
-            let (dir, base, _ext) = common_io::dir_base_ext(&file_path)?;
+            let (dir, base, _ext) = dir_base_ext(&file_path)?;
 
             match (dir.len(), base.len()) {
                 (0, 0) => "./".to_string().into_boxed_str(),
@@ -1303,7 +1276,7 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
             "This existing backend file '{}' will be deleted",
             &backend_file
         );
-        common_io::remove_file(&backend_file)?;
+        remove_file(&backend_file)?;
     }
 
     let (_dir, base, ext) = dir_base_ext(&file_path)?;
@@ -1424,7 +1397,7 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
     let output = match args.output.clone() {
         Some(output) => output,
         None => {
-            let (dir, base, _ext) = common_io::dir_base_ext(&data_file)?;
+            let (dir, base, _ext) = dir_base_ext(&data_file)?;
 
             match (dir.len(), base.len()) {
                 (0, 0) => "./".to_string().into_boxed_str(),
@@ -1444,7 +1417,7 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
             "This existing backend file '{}' will be deleted",
             &backend_file
         );
-        common_io::remove_file(&backend_file)?;
+        remove_file(&backend_file)?;
     }
 
     let file = hdf5::File::open(data_file.to_string())?;
@@ -1567,12 +1540,12 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
 }
 
 fn take_column_names(cmd_args: &TakeColumnNamesArgs) -> anyhow::Result<()> {
-    use common_io::write_lines;
+    use write_lines;
 
     let output = cmd_args.output.clone();
     let input = cmd_args.data_file.clone();
 
-    let backend = match common_io::extension(&input)?.as_ref() {
+    let backend = match extension(&input)?.as_ref() {
         "zarr" => SparseIoBackend::Zarr,
         "h5" => SparseIoBackend::HDF5,
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
@@ -1586,12 +1559,12 @@ fn take_column_names(cmd_args: &TakeColumnNamesArgs) -> anyhow::Result<()> {
 }
 
 fn take_row_names(cmd_args: &TakeRowNamesArgs) -> anyhow::Result<()> {
-    use common_io::write_lines;
+    use write_lines;
 
     let output = cmd_args.output.clone();
     let input = cmd_args.data_file.clone();
 
-    let backend = match common_io::extension(&input)?.as_ref() {
+    let backend = match extension(&input)?.as_ref() {
         "zarr" => SparseIoBackend::Zarr,
         "h5" => SparseIoBackend::HDF5,
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
@@ -1609,7 +1582,7 @@ fn show_info(cmd_args: &InfoArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
     let input = cmd_args.data_file.clone();
 
-    let backend = match common_io::extension(&input)?.as_ref() {
+    let backend = match extension(&input)?.as_ref() {
         "zarr" => SparseIoBackend::Zarr,
         "h5" => SparseIoBackend::HDF5,
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
@@ -1626,7 +1599,7 @@ fn show_info(cmd_args: &InfoArgs) -> anyhow::Result<()> {
     }
 
     if !output.is_empty() {
-        use common_io::{mkdir, write_lines};
+        use {mkdir, write_lines};
         mkdir(&output)?;
         let row_names = data.row_names()?;
         let col_names = data.column_names()?;
@@ -1639,10 +1612,10 @@ fn show_info(cmd_args: &InfoArgs) -> anyhow::Result<()> {
 
 fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
-    common_io::mkdir(&output)?;
+    mkdir(&output)?;
 
     let file = cmd_args.data_files[0].as_ref();
-    let backend = match common_io::extension(file)?.as_ref() {
+    let backend = match extension(file)?.as_ref() {
         "h5" => SparseIoBackend::HDF5,
         "zarr" => SparseIoBackend::Zarr,
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", file)),
@@ -1653,7 +1626,7 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
 
     let mut data = SparseIoVec::new();
     for data_file in cmd_args.data_files.iter() {
-        match common_io::extension(data_file)?.as_ref() {
+        match extension(data_file)?.as_ref() {
             "zarr" => {
                 assert_eq!(backend, SparseIoBackend::Zarr);
             }
@@ -1705,7 +1678,7 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
     let row_nnz_cutoff = cmd_args.row_nnz_cutoff;
     let col_nnz_cutoff = cmd_args.column_nnz_cutoff;
 
-    use common_io::extension as file_ext;
+    use extension as file_ext;
 
     let backend = match file_ext(&data_file)?.as_ref() {
         "zarr" => SparseIoBackend::Zarr,
@@ -1753,7 +1726,7 @@ fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
 
 fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
-    common_io::mkdir(&output)?;
+    mkdir(&output)?;
 
     let backend = cmd_args.backend.clone();
 
@@ -1771,7 +1744,7 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     let batch_memb_file = mtx_file.replace(".mtx.gz", ".batch.gz");
     let ln_batch_file = mtx_file.replace(".mtx.gz", ".ln_batch.parquet");
 
-    common_io::remove_all_files(&vec![
+    remove_all_files(&vec![
         backend_file.clone().into_boxed_str(),
         mtx_file.clone().into_boxed_str(),
         dict_file.clone().into_boxed_str(),
@@ -1802,7 +1775,7 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         .map(|&x| Box::from(x.to_string()))
         .collect();
 
-    common_io::write_lines(&batch_out, &batch_memb_file)?;
+    write_lines(&batch_out, &batch_memb_file)?;
     info!("batch membership: {:?}", &batch_memb_file);
 
     let mtx_shape = (sim_args.rows, sim_args.cols, sim.triplets.len());
@@ -1833,8 +1806,8 @@ fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         triplets.par_sort_by_key(|&(_, col, _)| col);
 
         mtx_io::write_mtx_triplets(&triplets, sim_args.rows, sim_args.cols, &mtx_file)?;
-        common_io::write_lines(&rows, &row_file)?;
-        common_io::write_lines(&cols, &col_file)?;
+        write_lines(&rows, &row_file)?;
+        write_lines(&cols, &col_file)?;
 
         info!(
             "save mtx, row, and column files:\n{}\n{}\n{}",
