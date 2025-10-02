@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::sparse_data_visitors::*;
 use crate::sparse_io::*;
 use crate::sparse_io_vector::*;
@@ -96,15 +94,18 @@ pub fn collect_row_stat(
 
 /// collect column-wise sufficient statistics for Q/C
 /// * `data` - `SparseIoVec` across many data matrices
+/// * `select_rows` - selected row indices
 /// * `block_size` - parallel block size
 pub fn collect_column_stat_across_vec(
     data: &SparseIoVec,
+    select_rows: Option<&[usize]>,
     block_size: usize,
 ) -> anyhow::Result<RunningStatistics<Ix1>> {
     let mut col_stat = RunningStatistics::new(Ix1(data.num_columns()?));
+
     data.visit_columns_by_block(
-        &col_stat_vec_visitor,
-        &EmptyArgs {},
+        &col_stat_selected_rows_visitor,
+        select_rows.unwrap_or(&[]),
         &mut col_stat,
         Some(block_size),
     )?;
@@ -160,20 +161,27 @@ fn row_stat_vec_visitor(
     Ok(())
 }
 
-fn col_stat_vec_visitor(
+fn col_stat_selected_rows_visitor(
     job: (usize, usize),
     data: &SparseIoVec,
-    _: &EmptyArgs,
+    select_row_indices: &[usize],
     arc_stat: Arc<Mutex<&mut RunningStatistics<Ix1>>>,
 ) -> anyhow::Result<()> {
     let (lb, ub) = job;
-    let xx = data.read_columns_ndarray(lb..ub)?;
+
+    let xx = if select_row_indices.is_empty() {
+        data.read_columns_ndarray(lb..ub)?
+    } else {
+        data.read_columns_ndarray(lb..ub)?
+            .select(Axis(0), select_row_indices)
+    };
+
     let mut stat = arc_stat.lock().expect("failed to lock col_stat");
 
     for x in xx.axis_iter(Axis(0)) {
-        for j in lb..ub {
-            let i = j - lb;
-            stat.add_element(&[j], x[i]);
+        for target_column_index in lb..ub {
+            let source_column_index = target_column_index - lb;
+            stat.add_element(&[target_column_index], x[source_column_index]);
         }
     }
 

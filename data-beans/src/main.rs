@@ -23,8 +23,8 @@ use matrix_util::common_io::basename;
 use matrix_util::traits::IoOps;
 use matrix_util::*;
 use rayon::prelude::*;
-use simulate_deconv::generate_convoluted_data;
 use simulate_deconv::SimConvArgs;
+use simulate_deconv::generate_convoluted_data;
 use tempfile::TempDir;
 
 use std::collections::HashMap;
@@ -60,13 +60,13 @@ fn main() -> anyhow::Result<()> {
         Commands::SimulateConv(args) => {
             generate_convoluted_data(args)?;
         }
-        Commands::Stat(args) => {
-            run_stat(args)?;
-        }
         Commands::Info(args) => {
             show_info(args)?;
         }
         Commands::Statistics(args) => {
+            run_stat(args)?;
+        }
+        Commands::Stat(args) => {
             run_stat(args)?;
         }
         Commands::Squeeze(args) => {
@@ -178,7 +178,7 @@ enum Commands {
     /// Take basic statistics from a sparse matrix
     Statistics(RunStatArgs),
 
-    /// Take basic statistics from a sparse matrix (same as `statistics`)
+    /// An alias of `statistics`
     Stat(RunStatArgs),
 
     /// `Y(i,j) ~ δ(i,B(j)) Σ β(i,k) θ(j,k)` with β,θ ~ Gamma topic;
@@ -552,6 +552,10 @@ pub struct RunStatArgs {
     /// statistics over `row` or `column`
     #[arg(short, long, value_enum)]
     stat_dim: StatDim,
+
+    /// row/feature name pattern for `column` stat accumulation
+    #[arg(short, long)]
+    row_name_pattern: Option<Box<str>>,
 
     /// block_size
     #[arg(long, value_enum, default_value = "100")]
@@ -1644,50 +1648,51 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", file)),
     };
 
-    if cmd_args.data_files.len() == 1 {
-        let backend_file = cmd_args.data_files[0].as_ref();
-        let data = open_sparse_matrix(backend_file, &backend)?;
-
-        match cmd_args.stat_dim {
-            StatDim::Row => {
-                let row_stat = collect_row_stat(data.as_ref(), cmd_args.block_size)?;
-                row_stat.save(&cmd_args.output, &data.row_names()?, "\t")?;
+    let mut data = SparseIoVec::new();
+    for data_file in cmd_args.data_files.iter() {
+        match common_io::extension(data_file)?.as_ref() {
+            "zarr" => {
+                assert_eq!(backend, SparseIoBackend::Zarr);
             }
-            StatDim::Column => {
-                let col_stat = collect_column_stat(data.as_ref(), cmd_args.block_size)?;
-                col_stat.save(&cmd_args.output, &data.column_names()?, "\t")?;
+            "h5" => {
+                assert_eq!(backend, SparseIoBackend::HDF5);
             }
-        }
-    } else {
-        let mut data = SparseIoVec::new();
-        for data_file in cmd_args.data_files.iter() {
-            match common_io::extension(data_file)?.as_ref() {
-                "zarr" => {
-                    assert_eq!(backend, SparseIoBackend::Zarr);
-                }
-                "h5" => {
-                    assert_eq!(backend, SparseIoBackend::HDF5);
-                }
-                _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
-            };
-
-            let this_data = open_sparse_matrix(data_file, &backend)?;
-            let data_name = basename(data_file)?;
-            data.push(Arc::from(this_data), Some(data_name))?;
-        }
-
-        match cmd_args.stat_dim {
-            StatDim::Row => {
-                let row_stat = collect_row_stat_across_vec(&data, cmd_args.block_size)?;
-                row_stat.save(&cmd_args.output, &data.row_names()?, "\t")?;
-            }
-            StatDim::Column => {
-                let col_stat = collect_column_stat_across_vec(&data, cmd_args.block_size)?;
-
-                col_stat.save(&cmd_args.output, &data.column_names()?, "\t")?;
-            }
+            _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
         };
+
+        let this_data = open_sparse_matrix(data_file, &backend)?;
+        let data_name = basename(data_file)?;
+        data.push(Arc::from(this_data), Some(data_name))?;
     }
+
+    match cmd_args.stat_dim {
+        StatDim::Row => {
+            let row_stat = collect_row_stat_across_vec(&data, cmd_args.block_size)?;
+            row_stat.save(&cmd_args.output, &data.row_names()?, "\t")?;
+        }
+        StatDim::Column => {
+            let select_rows = cmd_args.row_name_pattern.as_ref().map(|x| {
+                let select_pattern = x.to_lowercase();
+                data.row_names()
+                    .expect("couldn't get the row names")
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, x)| {
+                        if x.to_lowercase().contains(&select_pattern) {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+            let col_stat =
+                collect_column_stat_across_vec(&data, select_rows.as_deref(), cmd_args.block_size)?;
+
+            col_stat.save(&cmd_args.output, &data.column_names()?, "\t")?;
+        }
+    };
 
     Ok(())
 }
