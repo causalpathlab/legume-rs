@@ -3,7 +3,7 @@
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
 use std::ffi::OsStr;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use tempfile::tempdir;
@@ -305,16 +305,15 @@ pub fn open_buf_writer(output_file: &str) -> anyhow::Result<Box<dyn std::io::Wri
 ///
 pub fn mkdir(file: &str) -> anyhow::Result<()> {
     let path = Path::new(file);
-    let dir = path.parent().ok_or(anyhow::anyhow!("no parent"))?;
-    std::fs::create_dir_all(dir)?;
+    std::fs::create_dir_all(path)?;
     Ok(())
 }
 
-trait ToStr {
+pub trait PathOsToStr {
     fn into_boxed_str(&self) -> Box<str>;
 }
 
-impl ToStr for Path {
+impl PathOsToStr for Path {
     fn into_boxed_str(&self) -> Box<str> {
         self.to_str()
             .expect("failed to convert to string")
@@ -323,13 +322,49 @@ impl ToStr for Path {
     }
 }
 
-impl ToStr for OsStr {
+impl PathOsToStr for OsStr {
     fn into_boxed_str(&self) -> Box<str> {
         self.to_str()
             .expect("failed to convert to string")
             .to_string()
             .into_boxed_str()
     }
+}
+
+/// more general file/directory copy function
+pub fn recursive_copy(src_path: &str, dst_path: &str) -> anyhow::Result<()> {
+    let src = Path::new(src_path);
+    let dst = Path::new(dst_path);
+
+    if src.is_dir() {
+        mkdir(dst_path)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            if let (Some(src_path), Some(dst_path)) =
+                (entry.path().to_str(), dst.join(entry.file_name()).to_str())
+            {
+                let file_type = entry.file_type()?;
+                if file_type.is_dir() {
+                    recursive_copy(src_path, dst_path)?;
+                } else if file_type.is_file() {
+                    fs::copy(src_path, dst_path)?;
+                }
+            }
+        }
+    } else if src.is_file() {
+        if let Some(dir) = dirname(dst_path).as_deref() {
+            mkdir(dir)?;
+        }
+        std::fs::copy(src, dst)?;
+    } else if src.is_symlink() {
+        if let Ok(abs_src) = std::fs::read_link(src) {
+            if let Some(abs_src_path) = abs_src.to_str() {
+                recursive_copy(abs_src_path, dst_path)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Unzip `zip_path` into the `extract_path` If `extract_path` is
@@ -361,6 +396,11 @@ pub fn unzip_dir(zip_path: &str, extract_path: Option<&str>) -> anyhow::Result<B
     Ok(extract_path.into_boxed_str())
 }
 
+/// just get the directory (parent) name
+pub fn dirname(file_path: &str) -> Option<Box<str>> {
+    Path::new(file_path).parent().map(|x| x.into_boxed_str())
+}
+
 ///
 /// Take the parent directory, basename, and extension of a file
 /// * `file` - file name
@@ -368,19 +408,20 @@ pub fn unzip_dir(zip_path: &str, extract_path: Option<&str>) -> anyhow::Result<B
 pub fn dir_base_ext(file_path: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<str>)> {
     let path = Path::new(file_path);
 
-    if let (Some(dir), Some(base), Some(ext)) = (path.parent(), path.file_stem(), path.extension())
-    {
-        Ok((
-            dir.into_boxed_str(),
-            base.into_boxed_str(),
-            ext.into_boxed_str(),
-        ))
-    } else {
-        Err(anyhow::anyhow!(
-            "fail to parse dir, base, ext: {}",
-            file_path
-        ))
-    }
+    let dir = path
+        .parent()
+        .map_or(".".to_string().into_boxed_str(), |x| x.into_boxed_str());
+
+    let ext = path
+        .extension()
+        .map_or("".to_string().into_boxed_str(), |x| x.into_boxed_str());
+
+    let base = path
+        .file_stem()
+        .map(|x| x.into_boxed_str())
+        .ok_or(anyhow::anyhow!("failed to find base here: {}", file_path))?;
+
+    Ok((dir, base, ext))
 }
 
 ///
