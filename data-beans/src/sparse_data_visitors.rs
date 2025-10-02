@@ -22,7 +22,7 @@ pub trait VisitColumnsOps {
         Visitor: Fn((usize, usize), &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) -> anyhow::Result<()>
             + Sync
             + Send,
-        SharedIn: Sync + Send,
+        SharedIn: Sync + Send + ?Sized,
         SharedOut: Sync + Send;
 
     /// visit all the columns by predefined groups assigned by
@@ -39,7 +39,7 @@ pub trait VisitColumnsOps {
         Visitor: Fn(usize, &[usize], &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) -> anyhow::Result<()>
             + Sync
             + Send,
-        SharedIn: Sync + Send,
+        SharedIn: Sync + Send + ?Sized,
         SharedOut: Sync + Send;
 }
 
@@ -55,7 +55,7 @@ impl VisitColumnsOps for SparseIoVec {
         Visitor: Fn((usize, usize), &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) -> anyhow::Result<()>
             + Sync
             + Send,
-        SharedIn: Sync + Send,
+        SharedIn: Sync + Send + ?Sized,
         SharedOut: Sync + Send,
     {
         let ntot = self.num_columns()?;
@@ -79,7 +79,7 @@ impl VisitColumnsOps for SparseIoVec {
         Visitor: Fn(usize, &[usize], &Self, &SharedIn, Arc<Mutex<&mut SharedOut>>) -> anyhow::Result<()>
             + Sync
             + Send,
-        SharedIn: Sync + Send,
+        SharedIn: Sync + Send + ?Sized,
         SharedOut: Sync + Send,
     {
         let group_to_cols = self.take_grouped_columns().ok_or(anyhow::anyhow!(
