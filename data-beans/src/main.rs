@@ -553,7 +553,7 @@ pub struct RunStatArgs {
     #[arg(short, long, value_enum)]
     stat_dim: StatDim,
 
-    /// row/feature name pattern for `column` stat accumulation
+    /// row name pattern for `column` stat accumulation
     #[arg(short, long)]
     row_name_pattern: Option<Box<str>>,
 
@@ -1648,6 +1648,9 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", file)),
     };
 
+    // to avoid duplicate barcodes in the column names
+    let attach_data_name = cmd_args.data_files.len() > 1;
+
     let mut data = SparseIoVec::new();
     for data_file in cmd_args.data_files.iter() {
         match common_io::extension(data_file)?.as_ref() {
@@ -1661,8 +1664,8 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
         };
 
         let this_data = open_sparse_matrix(data_file, &backend)?;
-        let data_name = basename(data_file)?;
-        data.push(Arc::from(this_data), Some(data_name))?;
+        let data_name = attach_data_name.then(|| basename(data_file)).transpose()?;
+        data.push(Arc::from(this_data), data_name)?;
     }
 
     match cmd_args.stat_dim {
