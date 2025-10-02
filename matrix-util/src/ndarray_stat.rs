@@ -154,13 +154,14 @@ where
         }
 
         let nnz_: Vec<Box<str>> = to_string_vec(&self.count_positives(), sep);
+        let tot_ = to_string_vec(&self.s1, sep);
         let mu_: Vec<Box<str>> = to_string_vec(&self.mean(), sep);
         let sig_: Vec<Box<str>> = to_string_vec(&self.std(), sep);
         let out: Vec<Box<str>> = (0..self.shape()[0])
             .map(|i| {
                 format!(
-                    "{}{}{}{}{}{}{}",
-                    names[i], sep, nnz_[i], sep, mu_[i], sep, sig_[i]
+                    "{}{}{}{}{}{}{}{}{}",
+                    names[i], sep, nnz_[i], sep, tot_[i], sep, mu_[i], sep, sig_[i]
                 )
                 .into_boxed_str()
             })
