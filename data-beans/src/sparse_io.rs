@@ -572,12 +572,15 @@ pub trait SparseIo: Sync + Send {
                     (lb, ub)
                 })
                 .for_each(|(lb, ub)| {
-                    let (lb, ub) = (lb as usize, ub as usize);
-                    let (_, _, _triplets_b) =
-                        self.read_triplets_by_columns((lb..ub).collect()).unwrap();
-                    let _triplets_b = _triplets_b
-                        .into_iter()
-                        .filter_map(|(i, j, x)| old2new.get(&i).map(|&i_new| (i_new, j, x)));
+                    let (_, _, _triplets_b) = self
+                        .read_triplets_by_columns(((lb as usize)..(ub as usize)).collect())
+                        .unwrap();
+
+                    let _triplets_b = _triplets_b.into_iter().filter_map(|(i, j_loc, x)| {
+                        let j_glob = j_loc + lb;
+                        old2new.get(&i).map(|&i_new| (i_new, j_glob, x))
+                    });
+
                     {
                         let mut triplets = arc_triplets.lock().unwrap();
                         triplets.extend(_triplets_b);
