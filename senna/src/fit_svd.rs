@@ -191,7 +191,8 @@ fn nystrom_proj_visitor(
     arc_proj_kn: Arc<Mutex<&mut Mat>>,
 ) -> anyhow::Result<()> {
     let (lb, ub) = job;
-    let u_dk = proj_basis.dictionary_dk;
+    // let proj_dk = proj_basis.dictionary_dk;
+    let basis_dk = proj_basis.basis_dk;
     let delta_db = proj_basis.batch_db;
 
     let mut x_dn = full_data_vec.read_columns_csc(lb..ub)?;
@@ -209,7 +210,7 @@ fn nystrom_proj_visitor(
 
     x_dn.scale_columns_inplace();
 
-    let chunk = (x_dn.transpose() * u_dk).transpose();
+    let chunk = (x_dn.transpose() * basis_dk).transpose();
 
     let mut proj_kn = arc_proj_kn.lock().expect("lock proj in nystrom");
 
@@ -217,8 +218,10 @@ fn nystrom_proj_visitor(
     Ok(())
 }
 
+#[allow(dead_code)]
 struct NystromParam<'a> {
     dictionary_dk: &'a Mat,
+    basis_dk: &'a Mat,
     batch_db: Option<&'a Mat>,
 }
 
@@ -248,7 +251,10 @@ fn do_nystrom_proj(
 
     log_xx_dn.scale_columns_inplace();
 
-    let (u_dk, _, _) = log_xx_dn.rsvd(rank)?;
+    let (u_dk, s_k, _) = log_xx_dn.rsvd(rank)?;
+    let eps = 1e-8;
+    let sinv_k = DVec::from_iterator(s_k.len(), s_k.iter().map(|&s| 1.0 / (s + eps)));
+    let basis_dk = &u_dk * Mat::from_diagonal(&sinv_k);
 
     info!(
         "Constructed {} x {} projection matrix",
@@ -261,6 +267,7 @@ fn do_nystrom_proj(
 
     let nystrom_param = NystromParam {
         dictionary_dk: &u_dk,
+        basis_dk: &basis_dk,
         batch_db: delta_db,
     };
 
