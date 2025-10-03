@@ -3,7 +3,7 @@
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
 use std::ffi::OsStr;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use tempfile::tempdir;
@@ -284,7 +284,9 @@ pub fn open_buf_writer(output_file: &str) -> anyhow::Result<Box<dyn std::io::Wri
     }
 
     // take a look at the extension
-    let ext = Path::new(output_file).extension().and_then(|x| x.to_str());
+    let output_file = Path::new(output_file);
+    let ext = output_file.extension().and_then(|x| x.to_str());
+
     match ext {
         Some("gz") => {
             let output_file = File::create(output_file)?;
@@ -347,7 +349,7 @@ pub fn recursive_copy(src_path: &str, dst_path: &str) -> anyhow::Result<()> {
                 if file_type.is_dir() {
                     recursive_copy(src_path, dst_path)?;
                 } else if file_type.is_file() {
-                    fs::copy(src_path, dst_path)?;
+                    std::fs::copy(src_path, dst_path)?;
                 }
             }
         }

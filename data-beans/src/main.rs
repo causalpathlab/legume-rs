@@ -1612,7 +1612,7 @@ fn show_info(cmd_args: &InfoArgs) -> anyhow::Result<()> {
 
 fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
-    mkdir(&output)?;
+    dirname(&output).as_deref().map(mkdir).transpose()?;
 
     let file = cmd_args.data_files[0].as_ref();
     let backend = match extension(file)?.as_ref() {
@@ -1644,6 +1644,7 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     match cmd_args.stat_dim {
         StatDim::Row => {
             let row_stat = collect_row_stat_across_vec(&data, cmd_args.block_size)?;
+
             row_stat.save(&cmd_args.output, &data.row_names()?, "\t")?;
         }
         StatDim::Column => {
