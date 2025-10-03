@@ -22,8 +22,8 @@ use log::info;
 use matrix_util::traits::IoOps;
 use matrix_util::*;
 use rayon::prelude::*;
-use simulate_deconv::generate_convoluted_data;
 use simulate_deconv::SimConvArgs;
+use simulate_deconv::generate_convoluted_data;
 use tempfile::TempDir;
 
 use std::collections::HashMap;
@@ -84,7 +84,7 @@ fn main() -> anyhow::Result<()> {
         Commands::SubsetColumns(args) => {
             subset_columns(args)?;
         }
-        Commands::SortRows(args) => {
+        Commands::ReorderRows(args) => {
             reorder_rows(args)?;
         }
         Commands::MergeMtx(args) => {
@@ -149,7 +149,7 @@ enum Commands {
 
     /// Sort rows according to the order of row names specified in a
     /// row name file
-    SortRows(SortRowsArgs),
+    ReorderRows(ReorderRowsArgs),
 
     /// Take columns from the sparse matrix and save it to an `output`
     /// file as a dense matrix for a quick examination
@@ -190,13 +190,17 @@ enum Commands {
 }
 
 #[derive(Args, Debug)]
-pub struct SortRowsArgs {
+pub struct ReorderRowsArgs {
     /// Data file -- either `.zarr` or `.h5`
     data_file: Box<str>,
 
     /// Row/feature name file (name per each line; `.tsv.gz` or `.tsv`)
     #[arg(short, long, required = true)]
     row_file: Box<str>,
+
+    /// output header
+    #[arg(short, long, required = true)]
+    output: Box<str>,
 }
 
 #[derive(Args, Debug)]
@@ -673,7 +677,7 @@ fn read_col_names(col_file: Box<str>, max_column_name_idx: usize) -> anyhow::Res
         .collect())
 }
 
-fn reorder_rows(args: &SortRowsArgs) -> anyhow::Result<()> {
+fn reorder_rows(args: &ReorderRowsArgs) -> anyhow::Result<()> {
     let data_file = args.data_file.clone();
     let row_names_order: Vec<Box<str>> = read_row_names(args.row_file.clone(), MAX_ROW_NAME_IDX)?;
 
@@ -683,9 +687,23 @@ fn reorder_rows(args: &SortRowsArgs) -> anyhow::Result<()> {
         _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
     };
 
-    let mut data = open_sparse_matrix(&data_file, &backend.clone())?;
+    let output = args.output.clone();
+    let backend_file = match backend {
+        SparseIoBackend::HDF5 => output.to_string() + ".h5",
+        SparseIoBackend::Zarr => output.to_string() + ".zarr",
+    };
+
+    if let Some(out_dir) = dirname(&backend_file) {
+        mkdir(&out_dir)?;
+    }
+
+    recursive_copy(&data_file, &backend_file)?;
+    info!("copied the existing data file {}", data_file);
+
+    let mut data = open_sparse_matrix(&backend_file, &backend.clone())?;
     data.reorder_rows(&row_names_order)?;
 
+    info!("done");
     Ok(())
 }
 
@@ -760,6 +778,7 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
         run_squeeze(&squeeze_args)?;
     }
 
+    info!("done");
     Ok(())
 }
 
@@ -1105,6 +1124,7 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
         run_squeeze(&squeeze_args)?;
     }
 
+    info!("done");
     Ok(())
 }
 
@@ -1180,6 +1200,7 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
         run_squeeze(&squeeze_args)?;
     }
 
+    info!("done");
     Ok(())
 }
 
