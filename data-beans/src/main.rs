@@ -1117,7 +1117,7 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
-            data_file: backend_file.into_boxed_str(),
+            data_file: backend_file.clone().into_boxed_str(),
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
@@ -1127,6 +1127,7 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
     }
 
     // do the batch mapping at the end
+    let data = open_sparse_matrix(&backend_file, &backend)?;
     let default_batch = basename(&args.output)?;
     let column_batch_names = data
         .column_names()?
