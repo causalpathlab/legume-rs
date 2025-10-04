@@ -1094,9 +1094,6 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
         remove_file(&backend_file)?;
     }
 
-    write_lines(&column_batch_names, &batch_memb_file)?;
-    info!("Wrote batch membership file: {}", &batch_memb_file);
-
     let mut data = create_sparse_from_triplets(
         &renamed_triplets,
         (row_pos.len(), offset as usize, nnz_tot),
@@ -1112,6 +1109,11 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
         &backend_file
     );
 
+    let batch_map = column_names
+        .into_iter()
+        .zip(column_batch_names)
+        .collect::<HashMap<_, _>>();
+
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
@@ -1123,6 +1125,16 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
         run_squeeze(&squeeze_args)?;
     }
+
+    // do the batch mapping at the end
+    let default_batch = basename(&args.output)?;
+    let column_batch_names = data
+        .column_names()?
+        .iter()
+        .map(|k| batch_map.get(k).unwrap_or(&default_batch).clone())
+        .collect::<Vec<_>>();
+
+    write_lines(&column_batch_names, &batch_memb_file)?;
 
     info!("done");
     Ok(())
