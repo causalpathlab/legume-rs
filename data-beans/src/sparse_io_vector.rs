@@ -124,7 +124,6 @@ impl SparseIoVec {
                 data_to_cells.push(glob);
                 debug_assert!(glob == self.col_to_data.len() - 1);
             }
-            info!("Extending column names...");
 
             let data_tag = match data_name {
                 Some(x) => COLUMN_SEP.to_string() + x.as_ref(),
@@ -137,8 +136,8 @@ impl SparseIoVec {
                     .map(|x| (x.to_string() + &data_tag).into_boxed_str())
                     .collect::<Vec<_>>(),
             );
-            info!("Checking row names...");
 
+            info!("Checking row names...");
             for (data_row_pos, row) in data.row_names()?.iter().enumerate() {
                 let glob_row_pos = self
                     .row_name_position
@@ -155,7 +154,7 @@ impl SparseIoVec {
 
             self.data_vec.push(data.clone());
             self.offset += ncol_data;
-            info!("{} columns", self.offset);
+            info!("Added {} columns", self.offset);
         } else {
             return Err(anyhow::anyhow!("data file has no columns"));
         }
