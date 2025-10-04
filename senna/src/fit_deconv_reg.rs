@@ -28,6 +28,10 @@ pub struct DeconvRegArgs {
     #[arg(long, short, value_delimiter(','))]
     batch_files: Option<Vec<Box<str>>>,
 
+    /// preload all the single-cell columns data
+    #[arg(long, default_value_t = false)]
+    preload_data: bool,
+
     /// output header
     #[arg(long, short, required = true)]
     out: Box<str>,
@@ -122,6 +126,7 @@ pub fn fit_deconv_reg(args: &DeconvRegArgs) -> anyhow::Result<()> {
         } = read_sparse_data_with_membership(ReadArgs {
             data_files: sc_data_files.clone(),
             batch_files: args.batch_files.clone(),
+            preload: args.preload_data,
         })?;
 
         info!("Read single-cell data files");

@@ -58,6 +58,10 @@ pub struct SvdArgs {
     #[arg(short = 't', long, default_value_t = 10)]
     n_latent_topics: usize,
 
+    /// preload all the columns data
+    #[arg(long, default_value_t = false)]
+    preload_data: bool,
+
     /// save batch-adjusted data
     #[arg(long)]
     save_adjusted: bool,
@@ -75,6 +79,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     } = read_sparse_data_with_membership(ReadArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
+	preload: args.preload_data,
     })?;
 
     // 2. Random projection

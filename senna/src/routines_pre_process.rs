@@ -8,6 +8,7 @@ use matrix_util::common_io::{self, basename, extension, read_lines};
 pub struct ReadArgs {
     pub data_files: Vec<Box<str>>,
     pub batch_files: Option<Vec<Box<str>>>,
+    pub preload: bool,
 }
 
 pub struct SparseDataWithBatch {
@@ -41,7 +42,12 @@ pub fn read_sparse_data_with_membership(args: ReadArgs) -> anyhow::Result<Sparse
             _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
         };
 
-        let data = open_sparse_matrix(data_file, &backend)?;
+        let mut data = open_sparse_matrix(data_file, &backend)?;
+
+        if args.preload {
+            data.preload_columns()?;
+        }
+
         let data_name = attach_data_name.then(|| basename(data_file)).transpose()?;
         data_vec.push(Arc::from(data), data_name)?;
     }

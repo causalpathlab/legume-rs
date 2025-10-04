@@ -131,6 +131,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     } = read_sparse_data_with_membership(ReadArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
+	preload: args.preload_data,
     })?;
 
     // 2. Random projection
