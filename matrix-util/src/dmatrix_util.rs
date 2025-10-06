@@ -650,6 +650,33 @@ where
         ret
     }
 
+    fn sum_to_one_rows(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.sum_to_one_rows_inplace();
+        ret
+    }
+
+    fn sum_to_one_rows_inplace(&mut self) {
+        let nrow = self.nrows();
+        let mut denom = vec![T::zero(); nrow];
+
+        for col in self.col_iter() {
+            col.row_indices()
+                .iter()
+                .zip(col.values().iter())
+                .for_each(|(&i, &x_ij)| {
+                    denom[i] += x_ij;
+                });
+        }
+
+        for mut col in self.col_iter_mut() {
+            let (row_indices, values) = col.rows_and_values_mut();
+            row_indices.iter().zip(values).for_each(|(&i, x_ij)| {
+                *x_ij /= denom[i];
+            });
+        }
+    }
+
     fn normalize_columns_inplace(&mut self) {
         let ncol = self.ncols();
 
@@ -822,15 +849,23 @@ where
     }
 
     fn sum_to_one_columns_inplace(&mut self) {
-        for mut xx_j in self.column_iter_mut() {
-            let denom = xx_j.sum();
-            xx_j /= denom;
-        }
+        self.column_iter_mut()
+            .for_each(|mut c| c.unscale_mut(c.sum()));
     }
 
     fn sum_to_one_columns(&self) -> Self::Mat {
         let mut ret = self.clone();
         ret.sum_to_one_columns_inplace();
+        ret
+    }
+
+    fn sum_to_one_rows_inplace(&mut self) {
+        self.row_iter_mut().for_each(|mut r| r.unscale_mut(r.sum()));
+    }
+
+    fn sum_to_one_rows(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.sum_to_one_rows_inplace();
         ret
     }
 

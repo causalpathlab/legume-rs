@@ -90,6 +90,20 @@ where
         }
     }
 
+    fn sum_to_one_rows(&self) -> Self::Mat {
+        let mut xx = self.clone();
+        xx.sum_to_one_rows_inplace();
+        xx
+    }
+
+    fn sum_to_one_rows_inplace(&mut self) {
+        for i in 0..self.nrows() {
+            let mut x_i = self.row_mut(i);
+            let denom = x_i.mapv(|x| x.abs()).sum();
+            x_i.mapv_inplace(|x| x / denom);
+        }
+    }
+
     fn normalize_columns(&self) -> Self::Mat {
         let mut xx = self.clone();
         xx.normalize_columns_inplace();
