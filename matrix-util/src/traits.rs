@@ -56,6 +56,11 @@ pub trait MatOps {
     /// make each column sum to 1
     fn sum_to_one_columns(&self) -> Self::Mat;
 
+    /// make each row sum to 1
+    fn sum_to_one_rows_inplace(&mut self);
+    /// make each row sum to 1
+    fn sum_to_one_rows(&self) -> Self::Mat;
+
     /// normalize logits after taking exp `(log-sum-exp)`
     fn normalize_exp_logits_columns_inplace(&mut self);
     /// normalize logits after taking exp `(log-sum-exp)`

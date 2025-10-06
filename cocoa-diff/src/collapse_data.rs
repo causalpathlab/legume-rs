@@ -16,11 +16,17 @@ pub struct CocoaCollapseIn<'a> {
 }
 
 pub trait CocoaCollapseOps {
-    fn collect_stat<'a>(&self, cocoa_input: &CocoaCollapseIn<'a>) -> anyhow::Result<CocoaStat>;
+    fn collect_cocoa_stat<'a>(
+        &self,
+        cocoa_input: &CocoaCollapseIn<'a>,
+    ) -> anyhow::Result<CocoaStat>;
 }
 
 impl CocoaCollapseOps for SparseIoVec {
-    fn collect_stat<'a>(&self, cocoa_input: &CocoaCollapseIn<'a>) -> anyhow::Result<CocoaStat> {
+    fn collect_cocoa_stat<'a>(
+        &self,
+        cocoa_input: &CocoaCollapseIn<'a>,
+    ) -> anyhow::Result<CocoaStat> {
         let n_genes = cocoa_input.n_genes;
         let n_topics = cocoa_input.n_topics;
         let n_cells = self.num_columns()?;
@@ -48,7 +54,9 @@ impl CocoaCollapseOps for SparseIoVec {
             cocoa_input.hyper_param,
         );
 
+        info!("pseudobulk data per individual and per topic (cell type)");
         self.visit_columns_by_group(&collect_basic_stat_visitor, cocoa_input, &mut cocoa_stat)?;
+        info!("sum per individual");
         self.visit_columns_by_group(&collect_indv_stat_visitor, cocoa_input, &mut cocoa_stat)?;
         self.visit_columns_by_group(&collect_matched_stat_visitor, cocoa_input, &mut cocoa_stat)?;
 
