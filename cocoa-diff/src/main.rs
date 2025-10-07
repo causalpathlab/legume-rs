@@ -1,4 +1,4 @@
-mod collapse_data;
+mod collapse_cocoa_data;
 mod common;
 mod input;
 mod randomly_partition_data;
@@ -7,8 +7,6 @@ mod run_diff;
 mod run_sim;
 mod stat;
 
-use crate::common::*;
-use crate::run_collapse::*;
 use crate::run_diff::*;
 use crate::run_sim::*;
 
@@ -23,11 +21,13 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Differential expression analysis with pseudobulk
+    /// Differential expression analysis with pseudobulk (Park & Kellis, 2020)
     Diff(DiffArgs),
 
     /// Simulate differential expression data with one cell type.
     Simulate(SimArgs),
+
+
 }
 
 fn main() -> anyhow::Result<()> {
