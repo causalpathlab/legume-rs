@@ -1,10 +1,18 @@
 use crate::common::*;
+use clap::ValueEnum;
 use matrix_util::common_io::*;
 use matrix_util::dmatrix_util::*;
 use matrix_util::parquet::*;
 use matrix_util::traits::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+pub enum TopicValue {
+    Prob,
+    Logit,
+}
 
 pub struct InputDataArgs {
     pub data_files: Vec<Box<str>>,
@@ -13,6 +21,7 @@ pub struct InputDataArgs {
     pub topic_proportion_files: Option<Vec<Box<str>>>,
     pub exposure_assignment_file: Option<Box<str>>,
     pub preload_data: bool,
+    pub topic_value: TopicValue,
 }
 
 pub struct InputData {
@@ -51,11 +60,23 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
         .zip(topic_proportion_files.iter())
     {
         if let Some(a_file) = a_file {
+            // cell and topic per line
             let _names = read_lines_of_words_delim(a_file.as_ref(), &['\t', ',', ' '], -1)?
                 .lines
                 .iter()
                 .filter_map(|line| (line.len() > 1).then(|| line[1].clone()))
                 .collect::<HashSet<_>>();
+            for _x in _names {
+                topic_names.insert(_x);
+            }
+
+            // just topic per line
+            let _names = read_lines_of_words_delim(a_file.as_ref(), &['\t', ',', ' '], -1)?
+                .lines
+                .iter()
+                .filter_map(|line| (line.len() == 1).then(|| line[0].clone()))
+                .collect::<HashSet<_>>();
+
             for _x in _names {
                 topic_names.insert(_x);
             }
@@ -170,12 +191,16 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
             let ReadLinesOut { lines, header: _ } =
                 read_lines_of_words_delim(a_file.as_ref(), &['\t', ',', ' '], -1)?;
 
-            for words in lines {
+            for (i, words) in lines.iter().enumerate() {
                 if words.len() > 1 {
                     if let Some(&r) = cells_to_rows.get(&words[0]) {
                         if let Some(&c) = topic_names.get(&words[1]) {
                             this_topic[(r, c)] = 1.0;
                         }
+                    }
+                } else if words.len() == 1 {
+                    if let Some(&c) = topic_names.get(&words[0]) {
+                        this_topic[(i, c)] = 1.0;
                     }
                 }
             }
@@ -192,7 +217,10 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
                     if let Some(&c) = topic_names.get(&cols[j]) {
                         for i in 0..mat.nrows() {
                             if let Some(&r) = cells_to_rows.get(&rows[i]) {
-                                this_topic[(r, c)] = mat[(i, j)];
+                                match args.topic_value {
+                                    TopicValue::Logit => this_topic[(r, c)] = mat[(i, j)].exp(),
+                                    TopicValue::Prob => this_topic[(r, c)] = mat[(i, j)],
+                                };
                             }
                         }
                     }

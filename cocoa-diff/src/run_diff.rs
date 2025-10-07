@@ -1,22 +1,11 @@
-use crate::collapse_data::*;
+use crate::collapse_cocoa_data::*;
 use crate::common::*;
 use crate::input::*;
 use crate::randomly_partition_data::*;
 
-use matrix_param::io::*;
-use matrix_util::common_io::basename;
-use matrix_util::common_io::ReadLinesOut;
-use matrix_util::common_io::{extension, read_lines_of_words_delim};
-use matrix_util::dmatrix_util::concatenate_vertical;
-use matrix_util::parquet::peek_parquet_field_names;
-use matrix_util::traits::IoOps;
-use matrix_util::traits::MatOps;
-use matrix_util::traits::MatWithNames;
-
 use clap::Parser;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::sync::Arc;
+use matrix_param::io::*;
+use matrix_util::traits::MatOps;
 
 #[derive(Parser, Debug, Clone)]
 pub struct DiffArgs {
@@ -42,6 +31,10 @@ pub struct DiffArgs {
     /// Each file contains a full `cell x topic` matrix.
     #[arg(long, short = 'r', value_delimiter(','))]
     topic_proportion_files: Option<Vec<Box<str>>>,
+
+    /// is topic proportion matrix of probability?
+    #[arg(long, default_value = "logit")]
+    topic_proportion_value: TopicValue,
 
     /// each line corresponds to (1) individual name and (2) exposure name
     #[arg(long, short = 'e')]
@@ -98,6 +91,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         topic_proportion_files: args.topic_proportion_files,
         exposure_assignment_file: Some(args.exposure_assignment_file),
         preload_data: args.preload_data,
+        topic_value: args.topic_proportion_value,
     })?;
 
     if data.cell_topic.ncols() > 1 {
