@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::f64::INFINITY;
+
 use crate::candle_aux_linear::*;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
@@ -23,7 +25,7 @@ impl TopicDecoder {
         let dictionary = log_softmax_linear(n_topics, n_features, vs.pp("dictionary"))?;
 
         let mask = Tensor::tril2(n_topics, vs.dtype(), vs.device())?;
-        let mask = mask.sub(&Tensor::eye(n_topics, vs.dtype(), vs.device())?)?;
+        // let mask = mask.sub(&Tensor::eye(n_topics, vs.dtype(), vs.device())?)?;
 
         Ok(Self {
             n_features,
@@ -60,12 +62,13 @@ impl DecoderModuleT for TopicDecoder {
         let logits_nd = self.forward(z_nk)?;
 
         // penalize self regression likelihood
-        let logits_weight_dk = self.dictionary.weight()?;
-        let weight_dk = logits_weight_dk.exp()?;
-        let llik_kk = weight_dk.transpose(0, 1)?.matmul(&logits_weight_dk)?;
-        let penalty = self.mask.mul(&llik_kk)?.sum_all()?;
-        let llik = llik(x_nd, &logits_nd)?.broadcast_sub(&penalty)?;
-
+        // let eps = 1e-8;
+        // let logits_weight_dk = self.dictionary.weight()?;
+        // let weight_dk = logits_weight_dk.exp()?.clamp(eps, INFINITY)?;
+        // let llik_kk = weight_dk.transpose(0, 1)?.matmul(&logits_weight_dk)?;
+        // let penalty = self.mask.mul(&llik_kk)?.sum_all()?;
+        // let llik = llik(x_nd, &logits_nd)?.broadcast_sub(&penalty)?;
+        let llik = llik(x_nd, &logits_nd)?;
         Ok((logits_nd, llik))
     }
 
