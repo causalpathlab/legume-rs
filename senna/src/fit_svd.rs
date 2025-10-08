@@ -72,6 +72,11 @@ pub struct SvdArgs {
 }
 
 pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
+    if args.verbose {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
+
     // 1. Read the data with batch membership
     let SparseDataWithBatch {
         data: mut data_vec,
