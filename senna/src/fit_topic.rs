@@ -123,6 +123,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     if args.verbose {
         std::env::set_var("RUST_LOG", "info");
     }
+    env_logger::init();
 
     // 1. Read the data with batch membership
     let SparseDataWithBatch {
@@ -131,7 +132,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     } = read_sparse_data_with_membership(ReadArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
-	preload: args.preload_data,
+        preload: args.preload_data,
     })?;
 
     // 2. Random projection
