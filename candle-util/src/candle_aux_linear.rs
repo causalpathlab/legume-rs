@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use candle_core::{Result, Tensor};
-use candle_nn::{Module, ops};
+use candle_nn::{ops, Module};
 
 /////////////////////////////////////////////
 // Linear module with non-negative weights //
@@ -78,7 +78,7 @@ pub struct AggregateLinear {
 
 impl AggregateLinear {
     pub fn membership(&self) -> Result<Tensor> {
-        ops::log_softmax(&self.weight_dk, 1)?.exp()
+        ops::log_softmax(&self.weight_dk, self.weight_dk.rank() - 1)?.exp()
     }
 }
 
@@ -89,8 +89,8 @@ impl Module for AggregateLinear {
     }
 }
 
-/// aggregate `X[n,d]` into `Y[n, k] = X[n, d] * C[d, k]` where `Σ_k
-/// C[d,k] = 1` to capture each feature's membership
+/// aggregate `X[n,d]` into `Y[n, k] = X[n, d] * C[d, k]` where we
+/// hope to have each feature to belong to a small number of modules `{k}`
 pub fn aggregate_linear(
     in_dim: usize,
     out_dim: usize,
@@ -98,7 +98,6 @@ pub fn aggregate_linear(
 ) -> Result<AggregateLinear> {
     let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
     let weight_dk = vb.get_with_hints((in_dim, out_dim), "logits", init_ws)?;
-
     Ok(AggregateLinear { weight_dk })
 }
 
