@@ -281,6 +281,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         info!("Finished {} epochs", train_config.num_epochs);
     }
 
+    // evaluate_latent_by_encoder(data_vec, encoder, train_config, delta_db)
+
     info!("Writing down the model parameters");
 
     let gene_names = data_vec.row_names()?;
@@ -299,14 +301,14 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         &(args.out.to_string() + ".log_likelihood.gz"),
     )?;
 
-    encoder
-        .feature_module_membership()?
-        .to_device(&candle_core::Device::Cpu)?
-        .to_parquet(
-            Some(&gene_names),
-            None,
-            &(args.out.to_string() + ".feature_module.parquet"),
-        )?;
+    // encoder
+    //     .feature_module_membership()?
+    //     .to_device(&candle_core::Device::Cpu)?
+    //     .to_parquet(
+    //         Some(&gene_names),
+    //         None,
+    //         &(args.out.to_string() + ".feature_module.parquet"),
+    //     )?;
 
     /////////////////////////////////////////////////////
     // evaluate latent states while adjusting the bias //

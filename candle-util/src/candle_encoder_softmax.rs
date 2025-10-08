@@ -1,9 +1,10 @@
 use crate::candle_aux_layers::*;
 use crate::candle_aux_linear::*;
+// use crate::candle_aux_module::*;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{BatchNorm, Embedding, Linear, Module, ModuleT, VarBuilder, ops};
+use candle_nn::{ops, BatchNorm, Embedding, Linear, Module, ModuleT, VarBuilder};
 
 pub struct LogSoftmaxEncoder {
     n_features: usize,
@@ -11,6 +12,7 @@ pub struct LogSoftmaxEncoder {
     n_vocab: usize,
     n_modules: usize,
     feature_module: AggregateLinear,
+    // feature_module_embedding: AggregateEmbedding,
     emb_x: Embedding,
     emb_logx: Embedding,
     fc: StackLayers<Linear>,
@@ -58,9 +60,8 @@ impl LogSoftmaxEncoder {
 
         let x_nd = x_nd.broadcast_sub(&min_val)?.broadcast_div(&div_val)?;
 
-        Ok((x_nd * n_vocab)?
+        Ok((x_nd * (n_vocab - 1.0))?
             .floor()?
-            .clamp(0.0, n_vocab - 1.0)?
             .to_dtype(candle_core::DType::U32)?)
     }
 
@@ -72,6 +73,8 @@ impl LogSoftmaxEncoder {
     }
 
     fn modularized_composite_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
+        // self.feature_module_embedding.forward(x_nd) // ?;
+
         // This is important to make every data points to have the same scale
         let denom_n1 = x_nd.sum_keepdim(x_nd.rank() - 1)?;
         let x_nd = (x_nd.broadcast_div(&denom_n1)? * (self.n_features as f64))?;
@@ -163,7 +166,7 @@ impl LogSoftmaxEncoder {
     /// * `d_emb` - vocabulary embedding dim
     /// * `layers` - fully connected layers, each with the dim
     /// * `vs` - variable builder
-    pub fn new(args: LogSoftmaxEncoderArgs, vs: VarBuilder) -> Result<Self> {
+    pub fn new(args: LogSoftmaxEncoderArgs, vb: VarBuilder) -> Result<Self> {
         let bn_config = candle_nn::BatchNormConfig {
             eps: 1e-4,
             remove_mean: true,
@@ -174,14 +177,19 @@ impl LogSoftmaxEncoder {
         debug_assert!(!args.layers.is_empty());
 
         let feature_module =
-            aggregate_linear(args.n_features, args.n_modules, vs.pp("feature.module"))?;
+            aggregate_linear(args.n_features, args.n_modules, vb.pp("feature.module"))?;
 
-        let emb_x = candle_nn::embedding(args.n_vocab, args.d_vocab_emb, vs.pp("nn.embed_x"))?;
+        // let feature_module_embedding = aggregate_embedding(
+        //     args.n_features,
+        //     args.n_modules,
+        //     args.d_vocab_emb,
+        //     args.n_vocab,
+        //     vb.pp("feature.module.embedding"),
+        // )?;
+
+        let emb_x = candle_nn::embedding(args.n_vocab, args.d_vocab_emb, vb.pp("nn.embed_x"))?;
         let emb_logx =
-            candle_nn::embedding(args.n_vocab, args.d_vocab_emb, vs.pp("nn.embed_logx"))?;
-
-        // let emb_x = rank_embedding(args.n_vocab, args.d_vocab_emb, vs.pp("nn.embed_x"))?;
-        // let emb_logx = rank_embedding(args.n_vocab, args.d_vocab_emb, vs.pp("nn.embed_logx"))?;
+            candle_nn::embedding(args.n_vocab, args.d_vocab_emb, vb.pp("nn.embed_logx"))?;
 
         // (1) data -> fc
         let mut fc = StackLayers::<Linear>::new();
@@ -190,17 +198,17 @@ impl LogSoftmaxEncoder {
         for (j, &next_dim) in args.layers.iter().enumerate() {
             let _name = format!("nn.enc.fc.{}", j);
             fc.push_with_act(
-                candle_nn::linear(prev_dim, next_dim, vs.pp(_name))?,
+                candle_nn::linear(prev_dim, next_dim, vb.pp(_name))?,
                 candle_nn::Activation::Relu,
             );
             prev_dim = next_dim;
         }
 
-        let bn_z = candle_nn::batch_norm(prev_dim, bn_config, vs.pp("nn.enc.bn_z"))?;
+        let bn_z = candle_nn::batch_norm(prev_dim, bn_config, vb.pp("nn.enc.bn_z"))?;
 
         // (2) fc -> K
-        let z_mean = candle_nn::linear(prev_dim, args.n_topics, vs.pp("nn.enc.z.mean"))?;
-        let z_lnvar = candle_nn::linear(prev_dim, args.n_topics, vs.pp("nn.enc.z.lnvar"))?;
+        let z_mean = candle_nn::linear(prev_dim, args.n_topics, vb.pp("nn.enc.z.mean"))?;
+        let z_lnvar = candle_nn::linear(prev_dim, args.n_topics, vb.pp("nn.enc.z.lnvar"))?;
 
         Ok(Self {
             n_features: args.n_features,
@@ -208,6 +216,7 @@ impl LogSoftmaxEncoder {
             n_vocab: args.n_vocab,
             n_modules: args.n_modules,
             feature_module,
+            // feature_module_embedding,
             emb_x,
             emb_logx,
             fc,

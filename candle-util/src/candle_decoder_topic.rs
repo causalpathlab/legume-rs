@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 
-use std::f64::INFINITY;
-
 use crate::candle_aux_linear::*;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
@@ -62,6 +60,7 @@ impl DecoderModuleT for TopicDecoder {
         let logits_nd = self.forward(z_nk)?;
 
         // penalize self regression likelihood
+        // use std::f64::INFINITY;
         // let eps = 1e-8;
         // let logits_weight_dk = self.dictionary.weight()?;
         // let weight_dk = logits_weight_dk.exp()?.clamp(eps, INFINITY)?;
