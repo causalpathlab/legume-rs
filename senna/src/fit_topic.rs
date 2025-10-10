@@ -42,8 +42,17 @@ pub struct TopicArgs {
     #[arg(long, short, value_delimiter(','))]
     batch_files: Option<Vec<Box<str>>>,
 
+    /// ignore batch adjustment
     #[arg(long, default_value_t = false)]
     ignore_batch_effects: bool,
+
+    /// warm start from the previous projection (`cell x k`)
+    #[arg(short = 'w', long = "warm-start")]
+    warm_start_proj_file: Option<Box<str>>,
+
+    /// column sum normalization scale (will only affect decoder)
+    #[arg(short = 'c', long, default_value_t = 1e4)]
+    column_sum_norm: f32,
 
     /// #k-nearest neighbours batches
     #[arg(long, default_value_t = 3)]
@@ -125,38 +134,63 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     }
     env_logger::init();
 
+    let reference = args.reference_batches.as_deref();
+
     // 1. Read the data with batch membership
     let SparseDataWithBatch {
         data: mut data_vec,
         batch: batch_membership,
+        nbatch,
     } = read_sparse_data_with_membership(ReadArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
         preload: args.preload_data,
     })?;
 
-    // 2. Random projection
-    let proj_dim = args.proj_dim.max(args.n_latent_topics);
+    // 2. Take projection results by warm start or projecting it again
+    let proj_kn = if let Some(proj_file) = args.warm_start_proj_file.as_deref() {
+        use matrix_util::common_io::*;
+        let ext = extension(proj_file)?;
 
-    let proj_out = data_vec.project_columns_with_batch_correction(
-        proj_dim,
-        Some(args.block_size),
-        Some(&batch_membership),
-    )?;
+        let MatWithNames {
+            rows: cell_names,
+            cols: _,
+            mat: proj_nk,
+        } = match ext.as_ref() {
+            "parquet" => Mat::from_parquet_with_row_names(&proj_file, Some(0))?,
+            _ => Mat::read_data_with_names(&proj_file, &['\t', ',', ' '], Some(0), Some(0))?,
+        };
 
-    let proj_kn = proj_out.proj;
+        if data_vec.column_names()? != cell_names {
+            return Err(anyhow::anyhow!(
+                "warm start projection rows don't match with the data"
+            ));
+        }
+
+        proj_nk.transpose()
+    } else {
+        let proj_dim = args.proj_dim.max(args.n_latent_topics);
+
+        let proj_out = data_vec.project_columns_with_batch_correction(
+            proj_dim,
+            Some(args.block_size),
+            Some(&batch_membership),
+        )?;
+
+        proj_out.proj
+    };
+
     info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
 
+    // 3. Batch-adjusted collapsing (pseudobulk)
+    // assign pseudobulk samples by proj_kn
     let nsamp =
         data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
 
-    if !args.ignore_batch_effects {
+    if !args.ignore_batch_effects && nbatch > 1 {
         info!("Registering batch information");
         data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
     }
-
-    // 3. Batch-adjusted collapsing (pseudobulk)
-    let reference = args.reference_batches.as_ref().map(|x| x.as_slice());
 
     info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
     let collapsed = data_vec.collapse_columns(
@@ -235,9 +269,17 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let mut log_likelihoods = Vec::with_capacity(train_config.num_epochs);
 
     for epoch in (0..args.epochs).step_by(args.jitter_interval) {
-        let mixed_nd = collapsed.mu_observed.posterior_sample()?.transpose();
+        let mixed_nd = collapsed
+            .mu_observed
+            .posterior_sample()?
+            .sum_to_one_columns()
+            .scale(args.column_sum_norm)
+            .transpose();
+
         let clean_nd = collapsed.mu_adjusted.as_ref().map(|x| {
-            let ret: Mat = x.posterior_sample().unwrap();
+            let mut ret: Mat = x.posterior_sample().unwrap();
+            ret.sum_to_one_columns_inplace();
+            ret.scale_mut(args.column_sum_norm);
             ret.transpose()
         });
 
@@ -280,8 +322,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     if train_config.verbose {
         info!("Finished {} epochs", train_config.num_epochs);
     }
-
-    // evaluate_latent_by_encoder(data_vec, encoder, train_config, delta_db)
 
     info!("Writing down the model parameters");
 

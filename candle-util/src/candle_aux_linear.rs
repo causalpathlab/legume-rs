@@ -78,7 +78,10 @@ pub struct AggregateLinear {
 
 impl AggregateLinear {
     pub fn membership(&self) -> Result<Tensor> {
-        ops::log_softmax(&self.weight_dk, self.weight_dk.rank() - 1)?.exp()
+        // ops::log_softmax(&self.weight_dk, self.weight_dk.rank() - 1)?.exp()
+        // self.weight_dk.relu()
+        let eps = 1e-8;
+        (ops::sigmoid(&self.weight_dk)? * (1.0 - eps))? + eps
     }
 }
 
@@ -107,22 +110,26 @@ pub fn aggregate_linear(
 
 #[derive(Clone, Debug)]
 pub struct SoftmaxLinear {
-    weight_dk: Tensor,
-    bias_d1: Option<Tensor>,
+    weight_kd: Tensor,
+    bias_1d: Option<Tensor>,
 }
 
 impl SoftmaxLinear {
-    pub fn new(weight_dk: Tensor, bias_d1: Option<Tensor>) -> Self {
-        Self { weight_dk, bias_d1 }
-    }
-    pub fn weight(&self) -> Result<Tensor> {
-        ops::log_softmax(&self.weight_dk, 0)
+    pub fn new(weight_kd: Tensor, bias_1d: Option<Tensor>) -> Self {
+        Self { weight_kd, bias_1d }
     }
 
-    pub fn biased_weight(&self) -> Result<Tensor> {
-        match &self.bias_d1 {
-            Some(bias) => ops::log_softmax(&self.weight_dk.broadcast_add(bias)?, 0),
-            _ => ops::log_softmax(&self.weight_dk, 0),
+    pub fn weight_dk(&self) -> Result<Tensor> {
+        ops::log_softmax(&self.weight_kd, self.weight_kd.rank() - 1)?.transpose(0, 1)
+    }
+
+    fn biased_weight_kd(&self) -> Result<Tensor> {
+        match &self.bias_1d {
+            Some(bias) => ops::log_softmax(
+                &self.weight_kd.broadcast_add(bias)?,
+                self.weight_kd.rank() - 1,
+            ),
+            _ => ops::log_softmax(&self.weight_kd, self.weight_kd.rank() - 1),
         }
     }
 }
@@ -130,9 +137,9 @@ impl SoftmaxLinear {
 impl Module for SoftmaxLinear {
     fn forward(&self, h_nk: &Tensor) -> Result<Tensor> {
         let log_w_kd = match *h_nk.dims() {
-            [b1, b2, _, _] => self.biased_weight()?.broadcast_left((b1, b2))?.t()?,
-            [bsize, _, _] => self.biased_weight()?.broadcast_left(bsize)?.t()?,
-            _ => self.biased_weight()?.t()?,
+            [b1, b2, _, _] => self.biased_weight_kd()?.broadcast_left((b1, b2))?,
+            [bsize, _, _] => self.biased_weight_kd()?.broadcast_left(bsize)?,
+            _ => self.biased_weight_kd()?,
         };
 
         h_nk.matmul(&log_w_kd.exp()?)
@@ -154,7 +161,25 @@ pub fn log_softmax_linear(
     vb: candle_nn::VarBuilder,
 ) -> Result<SoftmaxLinear> {
     let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
-    let ws_dk = vb.get_with_hints((out_dim, in_dim), "logits", init_ws)?;
-    let b_d1 = vb.get_with_hints((out_dim, 1), "logit_bias", candle_nn::init::ZERO)?;
-    Ok(SoftmaxLinear::new(ws_dk, Some(b_d1)))
+    let ws_kd = vb.get_with_hints((in_dim, out_dim), "logits", init_ws)?;
+    let b_1d = vb.get_with_hints((1, out_dim), "logit_bias", candle_nn::init::ZERO)?;
+    Ok(SoftmaxLinear::new(ws_kd, Some(b_1d)))
 }
+
+/// create a softmax linear layer
+/// `output_nd <- log( input_nk * t(β_dk) )`
+/// where
+/// `Σ_j β_jk = 1` for all `k`
+pub fn log_softmax_linear_nobias(
+    in_dim: usize,
+    out_dim: usize,
+    vb: candle_nn::VarBuilder,
+) -> Result<SoftmaxLinear> {
+    let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
+    let ws_dk = vb.get_with_hints((out_dim, in_dim), "logits", init_ws)?;
+    Ok(SoftmaxLinear::new(ws_dk, None))
+}
+
+/////////////////////////
+// modularized softmax //
+/////////////////////////

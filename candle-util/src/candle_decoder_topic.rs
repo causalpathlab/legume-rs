@@ -13,7 +13,6 @@ pub struct TopicDecoder {
     n_features: usize,
     n_topics: usize,
     dictionary: SoftmaxLinear,
-    mask: Tensor,
 }
 
 impl TopicDecoder {
@@ -22,14 +21,10 @@ impl TopicDecoder {
     pub fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
         let dictionary = log_softmax_linear(n_topics, n_features, vs.pp("dictionary"))?;
 
-        let mask = Tensor::tril2(n_topics, vs.dtype(), vs.device())?;
-        // let mask = mask.sub(&Tensor::eye(n_topics, vs.dtype(), vs.device())?)?;
-
         Ok(Self {
             n_features,
             n_topics,
             dictionary,
-            mask,
         })
     }
 
@@ -45,7 +40,7 @@ impl DecoderModuleT for TopicDecoder {
     }
 
     fn get_dictionary(&self) -> Result<Tensor> {
-        self.dictionary.weight()
+        self.dictionary.weight_dk()
     }
 
     fn forward_with_llik<LlikFn>(
