@@ -132,6 +132,7 @@ pub fn fit_deconv_reg(args: &DeconvRegArgs) -> anyhow::Result<()> {
         let SparseDataWithBatch {
             data: sc_data,
             batch: _batch,
+            nbatch: _nbatch,
         } = read_sparse_data_with_membership(ReadArgs {
             data_files: sc_data_files.clone(),
             batch_files: args.batch_files.clone(),

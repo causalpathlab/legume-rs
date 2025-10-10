@@ -116,18 +116,15 @@ impl LogSoftmaxEncoder {
         x0_nd: Option<&Tensor>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
-        let min_mean = -(self.n_features as f64).sqrt(); // stabilize
-        let max_mean = (self.n_features as f64).sqrt(); // mean
-        let min_lv = -8.; // and log variance
-        let max_lv = 8.; //
+        // let min_mean = -(self.n_features as f64).sqrt(); // stabilize
+        // let max_mean = (self.n_features as f64).sqrt(); // mean
+        let min_lv = -10.; // and log variance
+        let max_lv = 10.; //
 
         let xx_nm = self.preprocess_input(x_nd, x0_nd, train)?;
         let fc_nl = self.fc.forward_t(&xx_nm, train)?;
         let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
-        let z_mean_nk = self
-            .z_mean
-            .forward_t(&bn_nl, train)?
-            .clamp(min_mean, max_mean)?;
+        let z_mean_nk = self.z_mean.forward_t(&bn_nl, train)?;
         let z_lnvar_nk = self
             .z_lnvar
             .forward_t(&bn_nl, train)?

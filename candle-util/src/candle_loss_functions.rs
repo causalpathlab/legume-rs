@@ -24,9 +24,10 @@ pub fn gaussian_kl_loss(z_mean: &Tensor, z_lnvar: &Tensor) -> Result<Tensor> {
 /// * `recon_nd` - probability tensor (reconstruction)
 ///
 pub fn topic_likelihood(x_nd: &Tensor, recon_nd: &Tensor) -> Result<Tensor> {
-    let log_recon_nd = recon_nd
-        .gt(0.0)?
-        .where_cond(&recon_nd.log()?, &Tensor::zeros_like(&recon_nd)?)?;
+    let eps = 1e-8;
+    let log_recon_nd = (recon_nd + eps)?.log()?;
+    // .gt(0.0)?
+    // .where_cond(&recon_nd.log()?, &Tensor::zeros_like(&recon_nd)?)?;
 
     x_nd.clamp(0.0, f64::INFINITY)?
         .mul(&log_recon_nd)?

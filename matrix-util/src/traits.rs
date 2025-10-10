@@ -225,6 +225,22 @@ pub trait IoOps {
         select_column_names: Option<&[Box<str>]>,
     ) -> anyhow::Result<MatWithNames<Self::Mat>>;
 
+    /// Read the data matrix with row and column names
+    ///
+    /// * `file_path`: data file name
+    /// * `delim`: delimiter (`char` vector or string)
+    /// * `header_row`: header line (0-based); `None` will find no header
+    /// * `header_column`: column index (0-based) corresponds to row name
+    ///
+    fn read_data_with_names(
+        file_path: &str,
+        delim: impl Into<Delimiter>,
+        header_row: Option<usize>,
+        header_column: Option<usize>,
+    ) -> anyhow::Result<MatWithNames<Self::Mat>> {
+        Self::read_data(file_path, delim, header_row, header_column, None, None)
+    }
+
     fn read_data_vec_with_indices_names(
         file_path: &str,
         delim: impl Into<Delimiter>,
@@ -348,6 +364,17 @@ pub trait IoOps {
     ///
     fn from_parquet(file_path: &str) -> anyhow::Result<MatWithNames<Self::Mat>> {
         Self::from_parquet_with_indices(file_path, None, None)
+    }
+
+    /// Read a real-valued numeric matrix from the parquet file. We
+    /// can specify row name index. We can specify the row name column
+    /// index and desired column indices.
+    /// * `row_name_index`: column index (0-based) corresponds to row name
+    fn from_parquet_with_row_names(
+        file_path: &str,
+        row_name_index: Option<usize>,
+    ) -> anyhow::Result<MatWithNames<Self::Mat>> {
+        Self::from_parquet_with_indices_names(file_path, row_name_index, None, None)
     }
 
     /// Read a real-valued numeric matrix from the parquet file. We

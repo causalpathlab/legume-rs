@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 use crate::embed_common::*;
+use dashmap::DashSet as HashSet;
 use matrix_util::common_io::{self, basename, extension, read_lines};
 
 //////////////////////////////////////////
@@ -14,6 +15,7 @@ pub struct ReadArgs {
 pub struct SparseDataWithBatch {
     pub data: SparseIoVec,
     pub batch: Vec<Box<str>>,
+    pub nbatch: usize,
 }
 
 pub fn read_sparse_data_with_membership(args: ReadArgs) -> anyhow::Result<SparseDataWithBatch> {
@@ -94,9 +96,13 @@ pub fn read_sparse_data_with_membership(args: ReadArgs) -> anyhow::Result<Sparse
         ));
     }
 
+    let batch_hash: HashSet<Box<str>> = batch_membership.iter().cloned().collect();
+    let nbatch = batch_hash.len();
+
     Ok(SparseDataWithBatch {
         data: data_vec,
         batch: batch_membership,
+        nbatch,
     })
 }
 

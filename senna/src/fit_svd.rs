@@ -81,10 +81,11 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     let SparseDataWithBatch {
         data: mut data_vec,
         batch: batch_membership,
+        nbatch,
     } = read_sparse_data_with_membership(ReadArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
-	preload: args.preload_data,
+        preload: args.preload_data,
     })?;
 
     // 2. Random projection
@@ -102,11 +103,9 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     let nsamp =
         data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
 
-    if !args.ignore_batch_effects {
-        if !batch_membership.is_empty() {
-            info!("Registering batch information");
-            data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
-        }
+    if !args.ignore_batch_effects && nbatch > 1 {
+        info!("Registering batch information");
+        data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
     }
 
     // 3. Batch-adjusted collapsing (pseudobulk)
