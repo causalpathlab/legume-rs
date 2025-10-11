@@ -3,6 +3,7 @@ mod fit_srt_svd;
 mod srt_cell_pairs;
 mod srt_collapse_pairs;
 mod srt_common;
+mod srt_estimate_batch_effects;
 mod srt_input;
 mod srt_random_projection;
 

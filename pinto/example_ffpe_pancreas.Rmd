@@ -26,6 +26,8 @@ RUST_LOG=info pinto propensity -z temp7.latent.parquet -e temp7.coord_pairs.parq
 ```
 
 ```{r}
+library(dplyr)
+library(data.table)
 .dt <-
     arrow::read_parquet("temp7.collapsed_pairs.parquet") %>%
     as.data.table

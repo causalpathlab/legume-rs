@@ -1,6 +1,8 @@
 use crate::srt_cell_pairs::*;
 use crate::srt_collapse_pairs::*;
 use crate::srt_common::*;
+use crate::srt_estimate_batch_effects::EstimateBatchArgs;
+use crate::srt_estimate_batch_effects::estimate_batch;
 use crate::srt_input::*;
 use crate::srt_random_projection::*;
 
@@ -57,6 +59,14 @@ pub struct SrtSvdArgs {
     #[arg(short = 'k', long, default_value_t = 10)]
     knn_spatial: usize,
 
+    /// #k-nearest neighbours batches
+    #[arg(long, default_value_t = 10)]
+    knn_batches: usize,
+
+    /// #k-nearest neighbours within each batch
+    #[arg(long, default_value_t = 10)]
+    knn_cells: usize,
+
     /// #downsampling columns per each collapsed sample. If None, no
     /// downsampling.
     #[arg(long, short = 's')]
@@ -93,10 +103,10 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
     info!("Reading data files...");
 
     let SRTData {
-        data,
+        data: mut data_vec,
         coordinates,
         coordinate_names,
-        batches,
+        batches: batch_membership,
     } = read_data_with_coordinates(SRTReadArgs {
         data_files: args.data_files.clone(),
         coord_files: args.coord_files.clone(),
@@ -106,11 +116,25 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
         batch_files: args.batch_files.clone(),
     })?;
 
-    let gene_names = data.row_names()?;
+    let gene_names = data_vec.row_names()?;
+
+    // 0. identify gene-level batch effects
+    let batch_effects = estimate_batch(
+        &mut data_vec,
+        batch_membership.as_ref(),
+        EstimateBatchArgs {
+            proj_dim: args.proj_dim,
+            sort_dim: args.sort_dim,
+            block_size: args.block_size,
+            knn_batches: args.knn_batches,
+            knn_cells: args.knn_cells,
+            down_sample: args.down_sample,
+        },
+    )?;
 
     info!("Constructing spatial nearest neighbourhood graphs");
     let mut srt_cell_pairs = SrtCellPairs::new(
-        &data,
+        &data_vec,
         &coordinates,
         SrtCellPairsArgs {
             knn: args.knn_spatial,
@@ -124,8 +148,11 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
         Some(coordinate_names.clone()),
     )?;
 
-    let proj_out =
-        srt_cell_pairs.random_projection(args.proj_dim, args.block_size, Some(&batches))?;
+    let proj_out = srt_cell_pairs.random_projection(
+        args.proj_dim,
+        args.block_size,
+        Some(&batch_membership),
+    )?;
 
     srt_cell_pairs.assign_pairs_to_samples(
         &proj_out,
@@ -134,7 +161,8 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
     )?;
 
     info!("Collecting summary statistics across cell pairs...");
-    let collapsed_data = srt_cell_pairs.collapse_pairs()?;
+    let batch_db = batch_effects.map(|x| x.posterior_mean().clone());
+    let collapsed_data = srt_cell_pairs.collapse_pairs(batch_db.as_ref())?;
     let collapsed_params = collapsed_data.optimize(None)?;
 
     collapsed_data.to_parquet(
@@ -162,7 +190,10 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
 
     srt_cell_pairs.visit_pairs_by_block(
         &nystrom_proj_visitor,
-        &basis_dk,
+        &BasisWithBatch {
+            basis_dk: &basis_dk,
+            batch_effect: batch_db.as_ref(),
+        },
         &mut proj_kn,
         args.block_size,
     )?;
@@ -181,31 +212,40 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct BasisWithBatch<'a> {
+    basis_dk: &'a Mat,
+    batch_effect: Option<&'a Mat>,
+}
+
 fn nystrom_proj_visitor(
     bound: (usize, usize),
     data: &SrtCellPairs,
-    basis_dk: &Mat,
+    basis_with_batch: &BasisWithBatch,
     arc_proj_kn: Arc<Mutex<&mut Mat>>,
 ) -> anyhow::Result<()> {
+    let basis_dk = basis_with_batch.basis_dk;
+    let batch_effect = basis_with_batch.batch_effect;
+
     let (lb, ub) = bound;
     let pairs = &data.pairs[lb..ub];
-    let left = pairs.into_iter().map(|pp| pp.left);
-    let right = pairs.into_iter().map(|pp| pp.right);
+    let left = pairs.iter().map(|pp| pp.left);
+    let right = pairs.iter().map(|pp| pp.right);
 
-    let y_left_nk = data
-        .data
-        .read_columns_csc(left)?
-        .log1p()
-        .scale_columns()
-        .transpose()
-        * basis_dk;
-    let y_right_nk = data
-        .data
-        .read_columns_csc(right)?
-        .log1p()
-        .scale_columns()
-        .transpose()
-        * basis_dk;
+    let mut y_left_dn = data.data.read_columns_csc(left)?;
+    let mut y_right_dn = data.data.read_columns_csc(right)?;
+
+    // batch adjustment if needed
+    if let Some(delta_db) = batch_effect {
+        let left = pairs.iter().map(|x| x.left);
+        let right = pairs.iter().map(|x| x.right);
+        let left_batches = data.data.get_batch_membership(left);
+        y_left_dn.adjust_by_division_of_selected_inplace(delta_db, &left_batches);
+        let right_batches = data.data.get_batch_membership(right);
+        y_right_dn.adjust_by_division_of_selected_inplace(delta_db, &right_batches);
+    }
+
+    let y_left_nk = y_left_dn.log1p().scale_columns().transpose() * basis_dk;
+    let y_right_nk = y_right_dn.log1p().scale_columns().transpose() * basis_dk;
 
     let chunk_kn = (y_left_nk.scale(0.5) + y_right_nk.scale(0.5)).transpose();
 

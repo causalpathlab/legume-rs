@@ -260,15 +260,23 @@ impl<'a> SrtCellPairs<'a> {
     /// - data itself
     /// - `sample_id`
     /// - `shared_out` (`Arc(Mutex())`)
-    pub fn visit_pairs_by_sample<Visitor, SharedOut>(
+    pub fn visit_pairs_by_sample<Visitor, SharedIn, SharedOut>(
         &self,
         visitor: &Visitor,
+        shared_in: &SharedIn,
         shared_out: &mut SharedOut,
     ) -> anyhow::Result<()>
     where
-        Visitor: Fn(&[usize], &SrtCellPairs, usize, Arc<Mutex<&mut SharedOut>>) -> anyhow::Result<()>
+        Visitor: Fn(
+                &[usize],
+                &SrtCellPairs,
+                usize,
+                &SharedIn,
+                Arc<Mutex<&mut SharedOut>>,
+            ) -> anyhow::Result<()>
             + Sync
             + Send,
+        SharedIn: Sync + Send + ?Sized,
         SharedOut: Sync + Send,
     {
         if let Some(sample_to_pair) = self.sample_to_pair.as_ref() {
@@ -278,7 +286,9 @@ impl<'a> SrtCellPairs<'a> {
                 .into_par_iter()
                 .enumerate()
                 .progress_count(num_samples as u64)
-                .map(|(sample, indices)| visitor(&indices, &self, sample, arc_shared_out.clone()))
+                .map(|(sample, indices)| {
+                    visitor(&indices, &self, sample, shared_in, arc_shared_out.clone())
+                })
                 .collect()
         } else {
             Err(anyhow::anyhow!("no sample was assigned"))
