@@ -169,6 +169,7 @@ fn random_project_pairs_visitor(
         .read_columns_csc(left)?
         .log1p()
         .normalize_columns();
+
     let log_y_right_dm = data
         .data
         .read_columns_csc(right)?

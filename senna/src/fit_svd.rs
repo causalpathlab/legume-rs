@@ -30,7 +30,7 @@ pub struct SvdArgs {
     ignore_batch_effects: bool,
 
     /// #k-nearest neighbours batches
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 10)]
     knn_batches: usize,
 
     /// #k-nearest neighbours within each batch
@@ -120,7 +120,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     )?;
 
     // 4. batch-adjusted data
-
     let batch_db = collapse_out.delta.as_ref();
 
     if let Some(delta_db) = batch_db.map(|x| x.posterior_mean()) {
@@ -213,10 +212,7 @@ fn nystrom_proj_visitor(
         x_dn.adjust_by_division_of_selected_inplace(delta_db, &batches);
     }
 
-    x_dn.values_mut().iter_mut().for_each(|x| {
-        *x = (*x + 1.).ln();
-    });
-
+    x_dn.log1p_inplace();
     x_dn.scale_columns_inplace();
 
     let chunk = (x_dn.transpose() * basis_dk).transpose();

@@ -29,18 +29,22 @@ pub struct SrtCollapsedParameters {
 }
 
 pub trait SrtCollapsePairsOps {
-    fn collapse_pairs(&self) -> anyhow::Result<SrtCollapsedStat>;
+    fn collapse_pairs<'b>(&self, batch_effect: Option<&'b Mat>)
+    -> anyhow::Result<SrtCollapsedStat>;
 }
 
 impl<'a> SrtCollapsePairsOps for SrtCellPairs<'a> {
-    fn collapse_pairs(&self) -> anyhow::Result<SrtCollapsedStat> {
+    fn collapse_pairs<'b>(
+        &self,
+        batch_effect: Option<&'b Mat>,
+    ) -> anyhow::Result<SrtCollapsedStat> {
         let mut srt_stat = SrtCollapsedStat::new(
             self.data.num_rows()?,
             self.num_coordinates(),
             self.num_coordinate_embedding(),
             self.num_samples()?,
         );
-        self.visit_pairs_by_sample(&collect_pair_stat_visitor, &mut srt_stat)?;
+        self.visit_pairs_by_sample(&collect_pair_stat_visitor, &batch_effect, &mut srt_stat)?;
         Ok(srt_stat)
     }
 }
@@ -49,6 +53,7 @@ fn collect_pair_stat_visitor(
     indices: &[usize],
     data: &SrtCellPairs,
     sample: usize,
+    batch_effect: &Option<&Mat>,
     arc_stat: Arc<Mutex<&mut SrtCollapsedStat>>,
 ) -> anyhow::Result<()> {
     let pairs = indices
@@ -59,8 +64,18 @@ fn collect_pair_stat_visitor(
     let left = pairs.iter().map(|&x| x.left);
     let right = pairs.iter().map(|&x| x.right);
 
-    let y_left = data.data.read_columns_csc(left)?;
-    let y_right = data.data.read_columns_csc(right)?;
+    let mut y_left = data.data.read_columns_csc(left)?;
+    let mut y_right = data.data.read_columns_csc(right)?;
+
+    // batch adjustment if needed
+    if let Some(delta_db) = *batch_effect {
+        let left = pairs.iter().map(|&x| x.left);
+        let right = pairs.iter().map(|&x| x.right);
+        let left_batches = data.data.get_batch_membership(left);
+        y_left.adjust_by_division_of_selected_inplace(delta_db, &left_batches);
+        let right_batches = data.data.get_batch_membership(right);
+        y_right.adjust_by_division_of_selected_inplace(delta_db, &right_batches);
+    }
 
     let (left_coord, right_coord) = data.average_position(&indices);
     let (left_coord_emb, right_coord_emb) = data.average_coordinate_embedding(&indices);
@@ -75,7 +90,7 @@ fn collect_pair_stat_visitor(
         .collect::<Vec<_>>();
 
     // adjust the left by the neighbours of the right
-    let y_delta_left = pairs_neighbours
+    let mut y_delta_left = pairs_neighbours
         .iter()
         .enumerate()
         .map(|(j, &n)| -> anyhow::Result<CscMat> {
@@ -91,7 +106,7 @@ fn collect_pair_stat_visitor(
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     // adjust the right by the neighbours of the left
-    let y_delta_right = pairs_neighbours
+    let mut y_delta_right = pairs_neighbours
         .iter()
         .enumerate()
         .map(|(j, &n)| -> anyhow::Result<CscMat> {
@@ -105,6 +120,28 @@ fn collect_pair_stat_visitor(
             Ok(y_d1)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // batch adjustment if needed
+    if let Some(delta_db) = *batch_effect {
+        let left = pairs.iter().map(|&x| x.left);
+        let right = pairs.iter().map(|&x| x.right);
+        let left_batches = data.data.get_batch_membership(left);
+        let right_batches = data.data.get_batch_membership(right);
+
+        y_delta_left
+            .iter_mut()
+            .zip(left_batches)
+            .for_each(|(y_d, b)| {
+                y_d.adjust_by_division_of_selected_inplace(delta_db, &[b]);
+            });
+
+        y_delta_right
+            .iter_mut()
+            .zip(right_batches)
+            .for_each(|(y_d, b)| {
+                y_d.adjust_by_division_of_selected_inplace(delta_db, &[b]);
+            });
+    }
 
     {
         let mut stat = arc_stat.lock().expect("lock stat");
