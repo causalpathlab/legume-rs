@@ -209,7 +209,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         batch_db.to_parquet(Some(&gene_names), batch_names.as_deref(), &outfile)?;
     }
 
-    // 4. Train topic model on the collapsed data
+    // 4. Train a topic model on the collapsed data
     let n_topics = args.n_latent_topics;
     let n_vocab = args.vocab_size;
     let d_vocab_emb = args.vocab_emb;
@@ -257,8 +257,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         show_progress: true,
     };
 
-    info!("Set up training data");
-
     let pb = ProgressBar::new(train_config.num_epochs as u64);
 
     if !train_config.show_progress || train_config.verbose {
@@ -267,6 +265,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     let mut vae = Vae::build(&encoder, &decoder, &parameters);
     let mut log_likelihoods = Vec::with_capacity(train_config.num_epochs);
+
+    info!("Start training VAE...");
 
     for epoch in (0..args.epochs).step_by(args.jitter_interval) {
         let mixed_nd = collapsed

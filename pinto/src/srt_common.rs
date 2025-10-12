@@ -24,7 +24,7 @@ pub use dashmap::DashSet as HashSet;
 
 pub use std::sync::{Arc, Mutex};
 
-pub use candle_util::candle_core;
+pub use candle_util::{candle_core, candle_nn};
 
 pub struct Pair {
     pub left: usize,

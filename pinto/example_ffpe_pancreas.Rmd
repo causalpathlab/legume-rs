@@ -14,7 +14,7 @@ if ! [ -d temp ] ; then
 fi
 
 ## create temporary files
-[ -f temp7.h5 ] || data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --backend hdf5	
+[ -f temp7.h5 ] || data-beans from-zarr temp/cell_feature_matrix.zarr.zip -o temp7 --backend hdf5
 ```
 
 ```{sh run_pinto_svd}
@@ -23,21 +23,42 @@ cargo install --path .
 RUST_LOG=info pinto svd temp7.h5 -c temp/cells.parquet --coord-column-names x_centroid,y_centroid -o temp7 --preload-data -t 10
 
 RUST_LOG=info pinto propensity -z temp7.latent.parquet -e temp7.coord_pairs.parquet -d temp7.h5 -k 6 -o temp7
+
+cargo install --path .
+
+RUST_LOG=info pinto topic temp7.h5 -c temp/cells.parquet --coord-column-names x_centroid,y_centroid -o temp7 --preload-data -t 10 -v
+
+RUST_LOG=info pinto propensity -z temp7.latent.parquet -e temp7.coord_pairs.parquet -d temp7.h5 -k 6 -o temp7
 ```
 
 ```{r}
 library(dplyr)
 library(data.table)
-.dt <-
-    arrow::read_parquet("temp7.collapsed_pairs.parquet") %>%
-    as.data.table
+library(ggplot2)
 
-quartz()
-ggplot(.dt, aes(left_x_centroid, left_y_centroid, xend=right_x_centroid, yend=right_y_centroid)) +
-    scale_y_reverse() +
+## .dt <-
+##     arrow::read_parquet("temp7.collapsed_pairs.parquet") %>%
+##     as.data.table
+
+## ggplot(.dt, aes(left_x_centroid, left_y_centroid, xend=right_x_centroid, yend=right_y_centroid)) +
+##     scale_y_reverse() +
+##     theme_void() +
+##     geom_point(stroke=0) +
+##     geom_segment()
+
+## plot(readLines("temp7.log_likelihood.gz"),type="l")
+
+.pq <- arrow::read_parquet("temp7.latent.parquet")[,-1]
+
+## hist(apply(t(.pq), 2, which.max))
+
+.pairs <- as.data.table(arrow::read_parquet("temp7.coord_pairs.parquet"))
+.pairs[, k:= apply(t(.pq), 2, which.max)]
+
+ggplot(.pairs, aes(left_x_centroid, left_y_centroid, colour=as.factor(k))) +
     theme_void() +
-    geom_point(stroke=0) +
-    geom_segment()
+    facet_wrap(~k, nrow=2) +
+    geom_point(stroke=0, size=.5)
 ```
 
 ```{sh}
@@ -63,7 +84,7 @@ as.data.table(.genes)[order(`log_mean`, decreasing=T), head(.SD, 5), by = .(colu
 .prop <- arrow::read_parquet("temp7.propensity.parquet") %>%
     as.data.table %>%
     melt(id.vars = "row") %>%
-    na.omit() %>% 
+    na.omit() %>%
     rename(cell_id = row)
 
 .latent <- arrow::read_parquet("temp7.latent.parquet")
@@ -71,20 +92,20 @@ as.data.table(.genes)[order(`log_mean`, decreasing=T), head(.SD, 5), by = .(colu
 ## .prop <- arrow::read_parquet("temp_senna.latent.parquet") %>%
 ##     as.data.table %>%
 ##     melt(id.vars = "row") %>%
-##     dplyr::mutate(value = exp(value)) %>% 
+##     dplyr::mutate(value = exp(value)) %>%
 ##     dplyr::rename(cell_id = row)
 
 .dt.show <- .prop %>%
     left_join(.dt[, .(cell_id, x_centroid, y_centroid, total_counts)]) %>%
     na.omit()
 
-quartz()
+
 ggplot(.dt.show[sample(.N)][value > .5],
        aes(x_centroid, y_centroid, colour=variable, size=value)) +
     facet_wrap(~variable, nrow=2) +
     scale_y_reverse() +
     theme_void() +
-    geom_point(stroke=0) +
+    geom_point(stroke=0, size=.5) +
     scale_colour_brewer(palette="Paired", guide="none") +
     scale_size_continuous(range=c(0,2), guide="none")
 
@@ -95,5 +116,3 @@ ggplot(.dt.show[sample(.N)][value > .5],
 
 
 ```
-
-

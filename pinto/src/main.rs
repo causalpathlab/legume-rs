@@ -1,5 +1,6 @@
 mod fit_srt_propensity;
 mod fit_srt_svd;
+mod fit_srt_topic;
 mod srt_cell_pairs;
 mod srt_collapse_pairs;
 mod srt_common;
@@ -9,6 +10,7 @@ mod srt_random_projection;
 
 use fit_srt_propensity::*;
 use fit_srt_svd::*;
+use fit_srt_topic::*;
 
 use clap::{Parser, Subcommand};
 
@@ -32,6 +34,8 @@ enum Commands {
     Svd(SrtSvdArgs),
     /// Estimate vertex propensity with clustering
     Propensity(SrtPropensityArgs),
+    /// by topic modelling
+    Topic(SrtTopicArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -45,6 +49,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Propensity(args) => {
             fit_srt_propensity(args)?;
+        }
+        Commands::Topic(args) => {
+            fit_srt_topic(args)?;
         }
     }
 
