@@ -6,6 +6,7 @@ use matrix_util::dmatrix_io::*;
 use matrix_util::mtx_io::write_mtx_triplets;
 use matrix_util::traits::*;
 use matrix_util::{common_io::write_lines, dmatrix_util::row_membership_matrix};
+use nalgebra::ComplexField;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Poisson, Uniform};
 use rayon::prelude::*;
@@ -141,8 +142,8 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
     let mut beta_dk = DMatrix::<f32>::rgamma(dd, kk, (a, b));
 
     if kk > 1 && pve_topic < 1. {
-        let beta_null =
-            DMatrix::<f32>::rgamma(dd, 1, (a, b)).scale((1.0 - pve_topic).clamp(0., 1.).sqrt());
+        let beta_null = DMatrix::<f32>::rgamma(dd, 1, (a, b))
+            .scale((1.0 - pve_topic).clamp(0., 1.).unscale(kk as f32).sqrt());
         for k in 0..kk {
             let x = beta_dk.column(k).scale(pve_topic.clamp(0., 1.).sqrt()) + &beta_null;
             beta_dk.column_mut(k).copy_from(&x);
