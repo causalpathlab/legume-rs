@@ -210,6 +210,7 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
     let n_batches = uniq_batches.len();
     let coord_nk = if n_batches > 1 {
         info!("attaching {} batch index coordinate(s)", n_batches);
+        coord_column_names.push("batch".to_string().into_boxed_str());
         append_batch_coordinate(&coord_nk, &batch_membership)?
     } else {
         coord_nk
