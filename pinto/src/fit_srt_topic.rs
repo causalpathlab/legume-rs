@@ -56,6 +56,10 @@ pub struct SrtTopicArgs {
     )]
     coord_column_names: Vec<Box<str>>,
 
+    /// header row in the coordinate information (feed 0 if the first line writes column names)
+    #[arg(long)]
+    coord_header_row: Option<usize>,
+
     /// Coordinate embedding dimension
     #[arg(long, default_value_t = 256)]
     coord_emb: usize,
@@ -64,6 +68,10 @@ pub struct SrtTopicArgs {
     /// should correspond to each data file.
     #[arg(long, short = 'b', value_delimiter(','))]
     batch_files: Option<Vec<Box<str>>>,
+
+    /// ignore batch adjustment
+    #[arg(long, default_value_t = false)]
+    ignore_batch_effects: bool,
 
     /// Random projection dimension to project the data.
     #[arg(long, short = 'p', default_value_t = 50)]
@@ -172,6 +180,7 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         coord_columns: args.coord_columns.clone().unwrap_or_default(),
         coord_column_names: args.coord_column_names.clone(),
         batch_files: args.batch_files.clone(),
+        header_in_coord: args.coord_header_row,
     })?;
 
     let gene_names = data_vec.row_names()?;

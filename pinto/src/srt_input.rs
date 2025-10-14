@@ -7,6 +7,7 @@ pub struct SRTReadArgs {
     pub coord_columns: Vec<usize>,
     pub coord_column_names: Vec<Box<str>>,
     pub batch_files: Option<Vec<Box<str>>>,
+    pub header_in_coord: Option<usize>,
 }
 
 pub struct SRTData {
@@ -123,7 +124,7 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
             _ => Mat::read_data(
                 &coord_file,
                 &['\t', ',', ' '],
-                None,
+                args.header_in_coord,
                 Some(0),
                 Some(&args.coord_columns),
                 Some(&args.coord_column_names),

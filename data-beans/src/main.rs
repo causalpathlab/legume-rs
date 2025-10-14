@@ -259,11 +259,11 @@ pub struct SubsetColumnsArgs {
     do_squeeze: bool,
 
     /// minimum number of non-zero cutoff for rows
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1)]
     row_nnz_cutoff: usize,
 
     /// minimum number of non-zero cutoff for columns
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1)]
     column_nnz_cutoff: usize,
 
     /// output file
@@ -297,11 +297,11 @@ pub struct FromMtxArgs {
     do_squeeze: bool,
 
     /// minimum number of non-zero cutoff for rows
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1)]
     row_nnz_cutoff: usize,
 
     /// minimum number of non-zero cutoff for columns
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1)]
     column_nnz_cutoff: usize,
 
     /// verbose mode
@@ -378,11 +378,11 @@ pub struct FromH5Args {
     do_squeeze: bool,
 
     /// minimum number of non-zero cutoff for rows
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1)]
     row_nnz_cutoff: usize,
 
     /// minimum number of non-zero cutoff for columns
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1)]
     column_nnz_cutoff: usize,
 
     /// verbose mode
@@ -445,11 +445,11 @@ pub struct FromZarrArgs {
     do_squeeze: bool,
 
     /// minimum number of non-zero cutoff for rows
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1)]
     row_nnz_cutoff: usize,
 
     /// minimum number of non-zero cutoff for columns
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1)]
     column_nnz_cutoff: usize,
 
     /// verbose mode
@@ -503,11 +503,11 @@ pub struct MergeMtxArgs {
     do_squeeze: bool,
 
     /// minimum number of non-zero cutoff for rows
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1)]
     row_nnz_cutoff: usize,
 
     /// minimum number of non-zero cutoff for columns
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1)]
     column_nnz_cutoff: usize,
 
     /// verbose mode
