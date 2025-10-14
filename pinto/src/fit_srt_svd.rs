@@ -39,6 +39,10 @@ pub struct SrtSvdArgs {
     )]
     coord_column_names: Vec<Box<str>>,
 
+    /// header row in the coordinate information (feed 0 if the first line writes column names)
+    #[arg(long)]
+    coord_header_row: Option<usize>,
+
     /// Coordinate embedding dimension
     #[arg(long, default_value_t = 256)]
     coord_emb: usize,
@@ -115,6 +119,7 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
         coord_columns: args.coord_columns.clone().unwrap_or_default(),
         coord_column_names: args.coord_column_names.clone(),
         batch_files: args.batch_files.clone(),
+        header_in_coord: args.coord_header_row,
     })?;
 
     let gene_names = data_vec.row_names()?;
