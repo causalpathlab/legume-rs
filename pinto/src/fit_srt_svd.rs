@@ -1,12 +1,13 @@
 use crate::srt_cell_pairs::*;
 use crate::srt_collapse_pairs::*;
 use crate::srt_common::*;
-use crate::srt_estimate_batch_effects::EstimateBatchArgs;
 use crate::srt_estimate_batch_effects::estimate_batch;
+use crate::srt_estimate_batch_effects::EstimateBatchArgs;
 use crate::srt_input::*;
 use crate::srt_random_projection::*;
 
 use clap::Parser;
+use matrix_param::io::ParamIo;
 use matrix_param::traits::*;
 
 #[derive(Parser, Debug, Clone)]
@@ -119,6 +120,8 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
     let gene_names = data_vec.row_names()?;
 
     // 0. identify gene-level batch effects
+    info!("checking potential batch effects...");
+
     let batch_effects = estimate_batch(
         &mut data_vec,
         batch_membership.as_ref(),
@@ -131,6 +134,13 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
             down_sample: args.down_sample,
         },
     )?;
+
+    if let Some(batch_db) = batch_effects.as_ref() {
+        let outfile = args.out.to_string() + ".delta.parquet";
+        let batch_names = data_vec.batch_names();
+        let gene_names = data_vec.row_names()?;
+        batch_db.to_parquet(Some(&gene_names), batch_names.as_deref(), &outfile)?;
+    }
 
     info!("Constructing spatial nearest neighbourhood graphs");
     let mut srt_cell_pairs = SrtCellPairs::new(
