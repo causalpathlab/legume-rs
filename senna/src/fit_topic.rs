@@ -4,7 +4,8 @@ use crate::routines_pre_process::*;
 
 use candle_util::candle_data_loader::*;
 use candle_util::candle_decoder_topic::*;
-use candle_util::candle_encoder_softmax::*;
+// use candle_util::candle_encoder_softmax::*;
+use candle_util::candle_encoder_softmax_iaf::*;
 use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_loss_functions as loss_func;
 use candle_util::candle_model_traits::DecoderModuleT;
@@ -91,6 +92,10 @@ pub struct TopicArgs {
     /// encoder layers
     #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
     encoder_layers: Vec<usize>,
+
+    /// number of inverse autoregressive flow transformations
+    #[arg(long, default_value_t = 0)]
+    iaf_trans: usize,
 
     /// intensity levels for frequency embedding
     #[arg(long, default_value_t = 10)]
@@ -228,14 +233,15 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
-    let encoder = LogSoftmaxEncoder::new(
-        LogSoftmaxEncoderArgs {
+    let encoder = LogSoftmaxIAFEncoder::new(
+        LogSoftmaxIAFEncoderArgs {
             n_features: n_features_encoder,
             n_topics,
             n_modules,
             n_vocab,
             d_vocab_emb,
             layers: &args.encoder_layers,
+            n_transforms: args.iaf_trans,
         },
         param_builder.clone(),
     )?;
