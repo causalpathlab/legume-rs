@@ -74,15 +74,15 @@ where
     }
 }
 
-pub trait ToBed {
-    fn to_bed(&self, file_path: &str) -> anyhow::Result<()>;
-}
+// pub trait ToBed {
+//     fn to_bed(&self, file_path: &str) -> anyhow::Result<()>;
+// }
 
-impl ToBed for TripletsRowsCols {
-    fn to_bed(&self, file_path: &str) -> anyhow::Result<()> {
-	unimplemented!("");
-    }
-}
+// impl ToBed for TripletsRowsCols {
+//     fn to_bed(&self, file_path: &str) -> anyhow::Result<()> {
+// 	unimplemented!("");
+//     }
+// }
 
 pub trait ToBackend {
     fn to_backend(
