@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use crate::common::*;
 use crate::dartseq_sifter::*;
 use crate::data::dna::Dna;
@@ -150,6 +152,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     ///////////////////////////////////
 
     info!("collecting statistics over {} sites...", sites.len());
+
     let wt_stats = gather_m6a_stats(&sites, args, &gff_map, &args.wt_bam_files)?;
     let mut_stats = gather_m6a_stats(&sites, args, &gff_map, &args.mut_bam_files)?;
 
@@ -189,6 +192,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         }
         .into_boxed_str()
     };
+
     let bed_file =
         |name: &str| -> Box<str> { format!("{}.{}.bed.gz", &args.output, name).into_boxed_str() };
 
@@ -198,18 +202,19 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     };
 
     if args.output_bed_file {
-        // todo:
+        write_bed(&mut wt_stats.clone(), &bed_file("wt"))?;
+        write_bed(&mut mut_stats.clone(), &bed_file("mut"))?;
     } else {
         summarize_stats(&wt_stats, gene_key, take_value)
             .to_backend(backend_file("wt.gene").as_ref())?
             .qc(cutoffs.clone())?;
 
-        summarize_stats(&mut_stats, gene_key, take_value)
-            .to_backend(backend_file("mut.gene").as_ref())?
-            .qc(cutoffs.clone())?;
-
         summarize_stats(&wt_stats, site_key, take_value)
             .to_backend(backend_file("wt.site").as_ref())?
+            .qc(cutoffs.clone())?;
+
+        summarize_stats(&mut_stats, gene_key, take_value)
+            .to_backend(backend_file("mut.gene").as_ref())?
             .qc(cutoffs.clone())?;
 
         summarize_stats(&mut_stats, site_key, take_value)
@@ -286,15 +291,49 @@ fn gather_m6a_stats(
     gff_map: &GffRecordMap,
     bam_files: &[Box<str>],
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
-    Ok(sites
-        .iter()
-        .par_bridge()
-        .progress_count(sites.len() as u64)
-        .map(|x| estimate_m6a_stat(args, bam_files, &gff_map, &x))
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>())
+    let mut ret = vec![];
+
+    fn add_suffix(cb: &CellBarcode, k: &str) -> CellBarcode {
+        match cb {
+            CellBarcode::Barcode(s) => {
+                let new_barcode = format!("{}@{}", s, k);
+                CellBarcode::Barcode(new_barcode.into_boxed_str())
+            }
+            CellBarcode::Missing => CellBarcode::Missing,
+        }
+    }
+
+    for bam_file in bam_files {
+        info!("gathering data on {}", bam_file);
+        let data = sites
+            .iter()
+            .par_bridge()
+            .progress_count(sites.len() as u64)
+            .map(|x| estimate_m6a_stat(args, &[bam_file.clone()], &gff_map, &x))
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
+        if bam_files.len() > 1 {
+            let batch_name = basename(&bam_file)?;
+            let ndata = data.len();
+            info!("adding suffix \"{}\" over {} data", &batch_name, ndata);
+            ret.extend(
+                data.into_par_iter()
+                    .progress_count(ndata as u64)
+                    .map(|(cb, bg, md)| {
+                        let cb = add_suffix(&cb, &batch_name);
+                        (cb, bg, md)
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        } else {
+            ret.extend(data);
+        }
+    }
+
+    Ok(ret)
 }
 
 fn estimate_m6a_stat(
@@ -350,13 +389,13 @@ fn estimate_m6a_stat(
     let mut ret = vec![];
 
     if let Some(meth_stat) = methylation_stat {
-        for (s, counts) in meth_stat {
+        for (cb, counts) in meth_stat {
             let methylated = counts.get(Some(&methylated_base));
             let unmethylated = counts.get(Some(&unmethylated_base));
 
-            if (args.include_missing_barcode || s != &CellBarcode::Missing) && methylated > 0 {
+            if (args.include_missing_barcode || cb != &CellBarcode::Missing) && methylated > 0 {
                 ret.push((
-                    s.clone(),
+                    cb.clone(),
                     BedWithGene {
                         chr: chr.into(),
                         start: lb,
@@ -402,4 +441,39 @@ where
         .collect::<Vec<_>>();
 
     format_data_triplets(combined_data)
+}
+
+fn write_bed(
+    stats: &mut [(CellBarcode, BedWithGene, MethylationData)],
+    file_path: &str,
+) -> anyhow::Result<()> {
+    stats.par_sort_by(|a, b| a.1.cmp(&b.1));
+
+    let lines = stats
+        .into_iter()
+        .map(|(cb, bg, data)| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                bg.chr,
+                bg.start,
+                bg.stop,
+                bg.strand,
+                bg.gene,
+                data.methylated,
+                data.unmethylated,
+                cb
+            )
+            .into_boxed_str()
+        })
+        .collect::<Vec<_>>();
+
+    use rust_htslib::bgzf::Writer as BWriter;
+
+    let mut writer = BWriter::from_path(file_path)?;
+    for l in lines {
+        writer.write_all(l.as_bytes())?;
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()?;
+    Ok(())
 }
