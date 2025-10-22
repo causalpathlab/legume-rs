@@ -96,15 +96,13 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("need pairs of bam files"));
     }
 
-    if args.wt_bam_files.is_empty() || args.mut_bam_files.is_empty() {
-        return Err(anyhow::anyhow!("empty bam files"));
-    }
-
     for x in args.wt_bam_files.iter() {
+        info!("checking .bai file for {}...", x);
         check_bam_index(x, None)?;
     }
 
     for x in args.mut_bam_files.iter() {
+        info!("checking .bai file for {}...", x);
         check_bam_index(x, None)?;
     }
 
