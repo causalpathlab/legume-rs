@@ -170,6 +170,9 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         }
     };
 
+    // todo: motif output
+    // collect_frequencies_nearby
+
     // let bed_file =
     //     |name: &str| -> Box<str> { format!("{}.{}.bed.gz", &args.output, name).into_boxed_str() };
 
@@ -282,7 +285,7 @@ fn find_methylated_sites_in_gene(
             min_coverage: args.min_coverage,
             min_conversion: args.min_conversion,
             max_pvalue_cutoff: args.pvalue_cutoff,
-            candidate_sites: vec![],
+            candidate_sites: Vec::with_capacity(positions.len()),
         };
 
         // gather background frequency map
@@ -305,9 +308,11 @@ fn find_methylated_sites_in_gene(
         };
 
         let mut ret = sifter.candidate_sites;
-        ret.sort();
-        ret.dedup();
-        arc_gene_sites.insert(gene_id, ret);
+        if !ret.is_empty() {
+            ret.sort();
+            ret.dedup();
+            arc_gene_sites.insert(gene_id, ret);
+        }
     }
     Ok(())
 }
@@ -349,6 +354,11 @@ fn gather_m6a_stats(
         .map_err(|_| anyhow::anyhow!("failed to release stats"))?
         .into_inner()?;
     Ok(stats)
+}
+
+fn collect_frequencies_nearby(gene_sites: &HashMap<GeneId, Vec<MethylatedSite>>) {
+
+    // todo
 }
 
 fn estimate_m6a_stat(
