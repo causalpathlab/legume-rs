@@ -1,21 +1,17 @@
 use crate::data::dna::Dna;
 use crate::data::dna::DnaBaseCount;
 use crate::data::dna_stat_map::HashMap;
-use crate::data::positions::*;
 use crate::data::sam::*;
 use crate::hypothesis_tests::BinomTest;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 pub struct MethylatedSite {
-    // pub seqname: Box<str>,
-    // pub gene_id: Gene,
     pub m6a_pos: i64,
     pub conversion_pos: i64,
     pub strand: Strand,
 }
 
 pub struct DartSeqSifter {
-    pub gene_id: Gene,
     pub min_coverage: usize,
     pub min_conversion: usize,
     pub max_pvalue_cutoff: f64,

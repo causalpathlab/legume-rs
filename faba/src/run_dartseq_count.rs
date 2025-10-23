@@ -6,10 +6,10 @@ use crate::data::dna_stat_traits::*;
 use crate::data::gff::FeatureType as GffFeatureType;
 use crate::data::gff::GeneType as GffGeneType;
 use crate::data::methylation::*;
-// use crate::data::positions::*;
 use crate::data::util_htslib::*;
 
 use dashmap::DashMap as HashMap;
+use rayon::ThreadPoolBuilder;
 use std::sync::{Arc, Mutex};
 
 #[derive(Args, Debug)]
@@ -57,6 +57,10 @@ pub struct DartSeqCountArgs {
     /// gene type (protein_coding, pseudogene, lncRNA)
     #[arg(long, value_enum)]
     gene_type: Option<GffGeneType>,
+
+    /// maximum number of threads
+    #[arg(long, default_value_t = 16)]
+    max_threads: usize,
 
     /// number of non-zero cutoff for rows/features
     #[arg(long, default_value_t = 10)]
@@ -109,6 +113,10 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         check_bam_index(x, None)?;
     }
 
+    ThreadPoolBuilder::new()
+        .num_threads(args.max_threads)
+        .build_global()?;
+
     info!("parsing GFF file: {}", args.gff_file);
 
     let mut gff_map = GffRecordMap::from(args.gff_file.as_ref(), args.record_type.as_ref())?;
@@ -131,7 +139,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     let njobs = gff_map.len();
     info!("Searching possible edit sites over {} blocks", njobs);
 
-    let arc_sites = Arc::new(Mutex::new(vec![]));
+    let arc_gene_sites = Arc::new(HashMap::<GeneId, Vec<MethylatedSite>>::default());
 
     gff_map
         .records()
@@ -139,19 +147,17 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         .par_bridge()
         .progress_count(njobs as u64)
         .for_each(|rec| {
-            find_methylated_sites_in_gene(rec, args, arc_sites.clone())
+            find_methylated_sites_in_gene(rec, args, arc_gene_sites.clone())
                 .expect("failed in find_methylated_sites")
         });
 
-    let sites = Arc::try_unwrap(arc_sites)
-        .expect("Arc still has multiple owners")
-        .into_inner()
-        .expect("Mutex cannot be locked");
-
-    if sites.is_empty() {
+    if arc_gene_sites.is_empty() {
         info!("no sites found");
         return Ok(());
     }
+
+    let gene_sites = Arc::try_unwrap(arc_gene_sites)
+        .map_err(|_| anyhow::anyhow!("failed to release gene_sites"))?;
 
     let take_value = |dat: &MethylationData| -> f32 {
         match args.output_value_type {
@@ -164,8 +170,8 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         }
     };
 
-    let bed_file =
-        |name: &str| -> Box<str> { format!("{}.{}.bed.gz", &args.output, name).into_boxed_str() };
+    // let bed_file =
+    //     |name: &str| -> Box<str> { format!("{}.{}.bed.gz", &args.output, name).into_boxed_str() };
 
     let gene_key = |x: &BedWithGene| -> GeneId { x.gene.clone() };
     let site_key = |x: &BedWithGene| -> BedWithGene { x.clone() };
@@ -184,67 +190,65 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         column: args.column_nnz_cutoff,
     };
 
-    // for bam_file in args.wt_bam_files.iter() {
-    //     info!(
-    //         "collecting data over {} sites from {} ...",
-    //         sites.len(),
-    //         bam_file
-    //     );
-    //     // 2. collect all the statistics
-    //     let stats = gather_m6a_stats(&sites, args, &gff_map, &bam_file)?;
+    let mut genes = HashSet::<Box<str>>::default();
+    let mut sites = HashSet::<Box<str>>::default();
+    let mut gene_data_files = vec![];
+    let mut site_data_files = vec![];
 
-    //     if stats.is_empty() {
-    //         info!("no record found in {}", bam_file);
-    //         continue;
-    //     }
-    //     // 3. Aggregate them into triplets
-    //     info!(
-    //         "aggregating the '{}' triplets over {} stats...",
-    //         args.output_value_type,
-    //         stats.len()
-    //     );
+    for bam_file in args.wt_bam_files.iter() {
+        ////////////////////////////
+        // collect the statistics //
+        ////////////////////////////
 
-    //     let batch_name = basename(&bam_file)?;
+        info!(
+            "collecting data over {} sites from {} ...",
+            gene_sites.iter().map(|x| x.value().len()).sum::<usize>(),
+            bam_file
+        );
 
-    //     if args.output_bed_file {
-    //         write_bed(&mut stats.clone(), &bed_file(&batch_name))?;
-    //     } else {
-    //         summarize_stats(&stats, gene_key, take_value)
-    //             .to_backend(&backend_file(&(batch_name.to_string() + "_gene")))?
-    //             .qc(cutoffs.clone())?;
-    //         summarize_stats(&stats, site_key, take_value)
-    //             .to_backend(&backend_file(&(batch_name.to_string() + "_site")))?
-    //             .qc(cutoffs.clone())?;
-    //     }
-    // }
+        let stats = gather_m6a_stats(&gene_sites, args, &gff_map, &bam_file)?;
 
-    // let mut_stats = gather_m6a_stats(&sites, args, &gff_map, &args.mut_bam_files)?;
+        //////////////////////////////////
+        // Aggregate them into triplets //
+        //////////////////////////////////
 
-    // if wt_stats.is_empty() {
-    //     info!("empty stats");
-    //     return Ok(());
-    // }
+        info!(
+            "aggregating the '{}' triplets over {} stats...",
+            args.output_value_type,
+            stats.len()
+        );
 
-    // if args.output_bed_file {
-    //     write_bed(&mut wt_stats.clone(), &bed_file("wt"))?;
-    //     write_bed(&mut mut_stats.clone(), &bed_file("mut"))?;
-    // } else {
-    //     todo!("add suffix to barcodes after gathering them into gene or site level");
+        let batch_name = basename(&bam_file)?;
+        let gene_data_file = backend_file(&format!("gene_{}", batch_name));
+        let triplets = summarize_stats(&stats, gene_key, take_value);
+        let data = triplets.to_backend(&gene_data_file)?;
+        data.qc(cutoffs.clone())?;
+        genes.extend(data.row_names()?);
+        info!("created gene-level data: {}", &gene_data_file);
+        gene_data_files.push(gene_data_file);
 
-    //     todo!("generate backend for each bam file separately");
+        let site_data_file = backend_file(&format!("site_{}", batch_name));
+        let triplets = summarize_stats(&stats, site_key, take_value);
+        let data = triplets.to_backend(&site_data_file)?;
+        data.qc(cutoffs.clone())?;
+        sites.extend(data.row_names()?);
+        info!("created site-level data: {}", &site_data_file);
+        site_data_files.push(site_data_file);
+    }
 
-    //     summarize_stats(&wt_stats, site_key, take_value)
-    //         .to_backend(backend_file("wt.site").as_ref())?
-    //         .qc(cutoffs.clone())?;
+    let mut genes_sorted = genes.into_iter().collect::<Vec<_>>();
+    genes_sorted.sort();
 
-    //     summarize_stats(&mut_stats, gene_key, take_value)
-    //         .to_backend(backend_file("mut.gene").as_ref())?
-    //         .qc(cutoffs.clone())?;
+    for data_file in gene_data_files {
+        open_sparse_matrix(&data_file, &backend)?.reorder_rows(&genes_sorted)?;
+    }
 
-    //     summarize_stats(&mut_stats, site_key, take_value)
-    //         .to_backend(backend_file("mut.site").as_ref())?
-    //         .qc(cutoffs.clone())?;
-    // }
+    let mut sites_sorted = sites.into_iter().collect::<Vec<_>>();
+    sites_sorted.sort();
+
+    for data_file in site_data_files {
+        open_sparse_matrix(&data_file, &backend)?.reorder_rows(&sites_sorted)?;
+    }
 
     info!("done");
     Ok(())
@@ -257,7 +261,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 fn find_methylated_sites_in_gene(
     rec: &GffRecord,
     args: &DartSeqCountArgs,
-    arc_sites: Arc<Mutex<Vec<MethylatedSite>>>,
+    arc_gene_sites: Arc<HashMap<GeneId, Vec<MethylatedSite>>>,
 ) -> anyhow::Result<()> {
     let strand = rec.strand.clone();
     let gene_id = rec.gene_id.clone();
@@ -275,7 +279,6 @@ fn find_methylated_sites_in_gene(
         // 2. find AC/T patterns: Using mutant statistics as null
         // distribution, it will keep possible C->U edit positions.
         let mut sifter = DartSeqSifter {
-            gene_id: gene_id.clone(),
             min_coverage: args.min_coverage,
             min_conversion: args.min_conversion,
             max_pvalue_cutoff: args.pvalue_cutoff,
@@ -304,9 +307,7 @@ fn find_methylated_sites_in_gene(
         let mut ret = sifter.candidate_sites;
         ret.sort();
         ret.dedup();
-
-        let mut sites = arc_sites.lock().expect("failed to lock");
-        sites.extend(ret);
+        arc_gene_sites.insert(gene_id, ret);
     }
     Ok(())
 }
@@ -317,171 +318,145 @@ fn find_methylated_sites_in_gene(
 ///////////////////////////////////////////////////////////////////
 
 fn gather_m6a_stats(
-    sites: &[MethylatedSite],
+    gene_sites: &HashMap<GeneId, Vec<MethylatedSite>>,
     args: &DartSeqCountArgs,
     gff_map: &GffRecordMap,
     bam_file: &str,
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
+    let ndata = gene_sites.iter().map(|x| x.value().len()).sum::<usize>();
 
-    unimplemented!("");
+    let arc_ret = Arc::new(Mutex::new(Vec::with_capacity(ndata)));
 
-    // Ok(sites
-    //     .iter()
-    //     .par_bridge()
-    //     .progress_count(sites.len() as u64)
-    //     .map(|x| estimate_m6a_stat(args, bam_file, &gff_map, &x))
-    //     .collect::<anyhow::Result<Vec<_>>>()?
-    //     .into_iter()
-    //     .flatten()
-    //     .collect::<Vec<_>>())
+    gene_sites
+        .into_iter()
+        .par_bridge()
+        .progress_count(gene_sites.len() as u64)
+        .for_each(|gs| {
+            let gene = gs.key();
+            let sites = gs.value();
 
-    // // todo: return Vec<Vec<_>>
+            let mut ret = Vec::with_capacity(sites.len());
+            for x in sites {
+                ret.extend(
+                    estimate_m6a_stat(args, bam_file, &gff_map, gene, x)
+                        .expect("failed to collect stat"),
+                );
+            }
+            arc_ret.lock().expect("lock").extend(ret);
+        });
 
-    // let mut ret = vec![];
-
-    // fn add_suffix(cb: &CellBarcode, k: &str) -> CellBarcode {
-    //     match cb {
-    //         CellBarcode::Barcode(s) => {
-    //             let new_barcode = format!("{}@{}", s, k);
-    //             CellBarcode::Barcode(new_barcode.into_boxed_str())
-    //         }
-    //         CellBarcode::Missing => CellBarcode::Missing,
-    //     }
-    // }
-    // for bam_file in bam_files {
-    // info!("gathering data on {}", bam_file);
-
-    // if bam_files.len() > 1 {
-    //     let batch_name = basename(&bam_file)?;
-    //     let ndata = data.len();
-    //     info!("adding suffix \"{}\" over {} data", &batch_name, ndata);
-    //     ret.extend(
-    //         data.into_par_iter()
-    //             .progress_count(ndata as u64)
-    //             .map(|(cb, bg, md)| {
-    //                 let cb = add_suffix(&cb, &batch_name);
-    //                 (cb, bg, md)
-    //             })
-    //             .collect::<Vec<_>>(),
-    //     );
-    // } else {
-    //     ret.extend(data);
-    // }
-    // }
-    // Ok(ret)
+    let stats = Arc::try_unwrap(arc_ret)
+        .map_err(|_| anyhow::anyhow!("failed to release stats"))?
+        .into_inner()?;
+    Ok(stats)
 }
 
-// fn estimate_m6a_stat(
-//     args: &DartSeqCountArgs,
-//     bam_file: &str,
-//     gff_map: &GffRecordMap,
-//     chr_m6a_c2u: &MethylatedSite,
-// ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
-//     let mut stat_map = DnaBaseFreqMap::new(&args.cell_barcode_tag);
-//     let m6apos = chr_m6a_c2u.m6a_pos;
-//     let c2upos = chr_m6a_c2u.conversion_pos;
-//     let strand = &chr_m6a_c2u.strand;
+fn estimate_m6a_stat(
+    args: &DartSeqCountArgs,
+    bam_file: &str,
+    gff_map: &GffRecordMap,
+    gene: &GeneId,
+    m6a_c2u: &MethylatedSite,
+) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
+    let mut stat_map = DnaBaseFreqMap::new(&args.cell_barcode_tag);
+    let m6apos = m6a_c2u.m6a_pos;
+    let c2upos = m6a_c2u.conversion_pos;
+    let strand = &m6a_c2u.strand;
 
-//     // let gene = &chr_m6a_c2u.gene_id;
+    let lb = m6apos.min(c2upos);
+    let ub = c2upos.max(m6apos);
 
-//     let lb = m6apos.min(c2upos);
-//     let ub = c2upos.max(m6apos);
+    // need to read bam files with the matching gene contexts
+    let gff_record = gff_map
+        .get(gene)
+        .ok_or(anyhow::anyhow!("unable to find this gene"))?;
 
-//     // need to read bam files with the matching gene contexts
-//     let gff_record = gff_map
-//         .get(gene)
-//         .ok_or(anyhow::anyhow!("unable to find this gene"))?;
+    let mut gff = gff_record.clone();
+    gff.start = (lb - 1).max(0); // padding
+    gff.stop = ub + 1; // padding
+    stat_map.update_bam_by_gene(bam_file, &gff, &args.gene_barcode_tag)?;
 
-//     let mut gff = gff_record.clone();
-//     gff.start = (lb - 1).max(0); // padding
-//     gff.stop = ub + 1; // padding
-//     stat_map.update_bam_by_gene(bam_file, &gff, &args.gene_barcode_tag)?;
-//     // for _file in bam_files.iter() {
-//     //     stat_map.update_bam_by_gene(_file, &gff, &args.gene_barcode_tag)?;
-//     // }
+    let chr = gff.seqname.as_ref();
+    let methylation_stat = stat_map.stratified_frequency_at(c2upos);
 
-//     let chr = gff.seqname.as_ref();
+    let unmethylated_base = match strand {
+        Strand::Forward => Dna::C,
+        Strand::Backward => Dna::G,
+    };
 
-//     let methylation_stat = stat_map.stratified_frequency_at(c2upos);
+    let methylated_base = match strand {
+        Strand::Forward => Dna::T,
+        Strand::Backward => Dna::A,
+    };
 
-//     let unmethylated_base = match strand {
-//         Strand::Forward => Dna::C,
-//         Strand::Backward => Dna::G,
-//     };
+    let (lb, ub) = if let Some(r) = args.resolution_kb {
+        // report reduced kb resolution
+        let r = (r * 1000.0) as usize;
+        (
+            ((m6apos as usize) / r * r + 1) as i64,
+            ((m6apos as usize).div_ceil(r) * r) as i64,
+        )
+    } else {
+        // report bp resolution
+        (m6apos, m6apos + 1)
+    };
 
-//     let methylated_base = match strand {
-//         Strand::Forward => Dna::T,
-//         Strand::Backward => Dna::A,
-//     };
+    let mut ret = vec![];
 
-//     let (lb, ub) = if let Some(r) = args.resolution_kb {
-//         // report reduced kb resolution
-//         let r = (r * 1000.0) as usize;
-//         (
-//             ((m6apos as usize) / r * r + 1) as i64,
-//             ((m6apos as usize).div_ceil(r) * r) as i64,
-//         )
-//     } else {
-//         // report bp resolution
-//         (m6apos, m6apos + 1)
-//     };
+    if let Some(meth_stat) = methylation_stat {
+        for (cb, counts) in meth_stat {
+            let methylated = counts.get(Some(&methylated_base));
+            let unmethylated = counts.get(Some(&unmethylated_base));
 
-//     let mut ret = vec![];
+            if (args.include_missing_barcode || cb != &CellBarcode::Missing) && methylated > 0 {
+                ret.push((
+                    cb.clone(),
+                    BedWithGene {
+                        chr: chr.into(),
+                        start: lb,
+                        stop: ub,
+                        gene: gene.clone(),
+                        strand: strand.clone(),
+                    },
+                    MethylationData {
+                        methylated,
+                        unmethylated,
+                    },
+                ));
+            }
+        }
+    }
 
-//     if let Some(meth_stat) = methylation_stat {
-//         for (cb, counts) in meth_stat {
-//             let methylated = counts.get(Some(&methylated_base));
-//             let unmethylated = counts.get(Some(&unmethylated_base));
-
-//             if (args.include_missing_barcode || cb != &CellBarcode::Missing) && methylated > 0 {
-//                 ret.push((
-//                     cb.clone(),
-//                     BedWithGene {
-//                         chr: chr.into(),
-//                         start: lb,
-//                         stop: ub,
-//                         gene: gene.clone(),
-//                         strand: strand.clone(),
-//                     },
-//                     MethylationData {
-//                         methylated,
-//                         unmethylated,
-//                     },
-//                 ));
-//             }
-//         }
-//     }
-
-//     Ok(ret)
-// }
+    Ok(ret)
+}
 
 //////////////////////////////////////////////////////////
 // Step 3: repackaging them into desired output formats //
 //////////////////////////////////////////////////////////
 
-// fn summarize_stats<F, V, T>(
-//     stats: &[(CellBarcode, BedWithGene, MethylationData)],
-//     feature_key_func: F,
-//     value_func: V,
-// ) -> TripletsRowsCols
-// where
-//     F: Fn(&BedWithGene) -> T + Send + Sync,
-//     T: Clone + Send + Sync + ToString + std::hash::Hash + std::cmp::Eq + std::cmp::Ord,
-//     V: Fn(&MethylationData) -> f32,
-// {
-//     let combined_data: HashMap<(CellBarcode, T), MethylationData> = HashMap::default();
-//     stats.par_iter().for_each(|(cb, k, dat)| {
-//         let key = (cb.clone(), feature_key_func(k));
-//         combined_data.entry(key).or_default().add_assign(dat);
-//     });
+fn summarize_stats<F, V, T>(
+    stats: &[(CellBarcode, BedWithGene, MethylationData)],
+    feature_key_func: F,
+    value_func: V,
+) -> TripletsRowsCols
+where
+    F: Fn(&BedWithGene) -> T + Send + Sync,
+    T: Clone + Send + Sync + ToString + std::hash::Hash + std::cmp::Eq + std::cmp::Ord,
+    V: Fn(&MethylationData) -> f32,
+{
+    let combined_data: HashMap<(CellBarcode, T), MethylationData> = HashMap::default();
+    stats.par_iter().for_each(|(cb, k, dat)| {
+        let key = (cb.clone(), feature_key_func(k));
+        combined_data.entry(key).or_default().add_assign(dat);
+    });
 
-//     let combined_data = combined_data
-//         .into_iter()
-//         .map(|((c, k), v)| (c, k, value_func(&v)))
-//         .collect::<Vec<_>>();
+    let combined_data = combined_data
+        .into_iter()
+        .map(|((c, k), v)| (c, k, value_func(&v)))
+        .collect::<Vec<_>>();
 
-//     format_data_triplets(combined_data)
-// }
+    format_data_triplets(combined_data)
+}
 
 // fn write_bed(
 //     stats: &mut [(CellBarcode, BedWithGene, MethylationData)],
