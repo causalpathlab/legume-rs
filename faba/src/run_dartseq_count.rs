@@ -1,5 +1,3 @@
-use std::io::Write;
-
 use crate::common::*;
 use crate::dartseq_sifter::*;
 use crate::data::dna::Dna;
@@ -79,6 +77,10 @@ pub struct DartSeqCountArgs {
     #[arg(long, default_value_t = false)]
     include_missing_barcode: bool,
 
+    /// output mut signals
+    #[arg(long, default_value_t = false)]
+    output_mut: bool,
+
     /// output bed file
     #[arg(long, default_value_t = false)]
     output_bed_file: bool,
@@ -121,9 +123,9 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    ////////////////////////////////////////
-    // 1. figure out potential edit sites //
-    ////////////////////////////////////////
+    /////////////////////////////////////
+    // figure out potential edit sites //
+    /////////////////////////////////////
 
     let njobs = gff_map.len();
     info!("Searching possible edit sites over {} blocks", njobs);
@@ -145,30 +147,6 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    ///////////////////////////////////
-    // 2. collect all the statistics //
-    ///////////////////////////////////
-
-    info!("collecting statistics over {} sites...", sites.len());
-
-    let wt_stats = gather_m6a_stats(&sites, args, &gff_map, &args.wt_bam_files)?;
-    let mut_stats = gather_m6a_stats(&sites, args, &gff_map, &args.mut_bam_files)?;
-
-    if wt_stats.is_empty() {
-        info!("empty stats");
-        return Ok(());
-    }
-
-    /////////////////////////////////////
-    // 3. Aggregate them into triplets //
-    /////////////////////////////////////
-
-    info!(
-        "aggregating the '{}' triplets over {} stats...",
-        args.output_value_type,
-        wt_stats.len()
-    );
-
     let take_value = |dat: &MethylationData| -> f32 {
         match args.output_value_type {
             MethFeatureType::Beta => {
@@ -180,8 +158,12 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         }
     };
 
+    let bed_file =
+        |name: &str| -> Box<str> { format!("{}.{}.bed.gz", &args.output, name).into_boxed_str() };
+
     let gene_key = |x: &BedWithGene| -> GeneId { x.gene.clone() };
     let site_key = |x: &BedWithGene| -> BedWithGene { x.clone() };
+
     let backend = args.backend.clone();
     let backend_file = |name: &str| -> Box<str> {
         match backend {
@@ -191,34 +173,72 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         .into_boxed_str()
     };
 
-    let bed_file =
-        |name: &str| -> Box<str> { format!("{}.{}.bed.gz", &args.output, name).into_boxed_str() };
-
     let cutoffs = SqueezeCutoffs {
         row: args.row_nnz_cutoff,
         column: args.column_nnz_cutoff,
     };
 
-    if args.output_bed_file {
-        write_bed(&mut wt_stats.clone(), &bed_file("wt"))?;
-        write_bed(&mut mut_stats.clone(), &bed_file("mut"))?;
-    } else {
-        summarize_stats(&wt_stats, gene_key, take_value)
-            .to_backend(backend_file("wt.gene").as_ref())?
-            .qc(cutoffs.clone())?;
+    for bam_file in args.wt_bam_files.iter() {
+        info!(
+            "collecting data over {} sites from {} ...",
+            sites.len(),
+            bam_file
+        );
+        // 2. collect all the statistics
+        let stats = gather_m6a_stats(&sites, args, &gff_map, &bam_file)?;
 
-        summarize_stats(&wt_stats, site_key, take_value)
-            .to_backend(backend_file("wt.site").as_ref())?
-            .qc(cutoffs.clone())?;
+        if stats.is_empty() {
+            info!("no record found in {}", bam_file);
+            continue;
+        }
+        // 3. Aggregate them into triplets
+        info!(
+            "aggregating the '{}' triplets over {} stats...",
+            args.output_value_type,
+            stats.len()
+        );
 
-        summarize_stats(&mut_stats, gene_key, take_value)
-            .to_backend(backend_file("mut.gene").as_ref())?
-            .qc(cutoffs.clone())?;
+        let batch_name = basename(&bam_file)?;
 
-        summarize_stats(&mut_stats, site_key, take_value)
-            .to_backend(backend_file("mut.site").as_ref())?
-            .qc(cutoffs.clone())?;
+        if args.output_bed_file {
+            write_bed(&mut stats.clone(), &bed_file(&batch_name))?;
+        } else {
+            summarize_stats(&stats, gene_key, take_value)
+                .to_backend(&backend_file(&(batch_name.to_string() + "_gene")))?
+                .qc(cutoffs.clone())?;
+            summarize_stats(&stats, site_key, take_value)
+                .to_backend(&backend_file(&(batch_name.to_string() + "_site")))?
+                .qc(cutoffs.clone())?;
+        }
     }
+
+    // let mut_stats = gather_m6a_stats(&sites, args, &gff_map, &args.mut_bam_files)?;
+
+    // if wt_stats.is_empty() {
+    //     info!("empty stats");
+    //     return Ok(());
+    // }
+
+    // if args.output_bed_file {
+    //     write_bed(&mut wt_stats.clone(), &bed_file("wt"))?;
+    //     write_bed(&mut mut_stats.clone(), &bed_file("mut"))?;
+    // } else {
+    //     todo!("add suffix to barcodes after gathering them into gene or site level");
+
+    //     todo!("generate backend for each bam file separately");
+
+    //     summarize_stats(&wt_stats, site_key, take_value)
+    //         .to_backend(backend_file("wt.site").as_ref())?
+    //         .qc(cutoffs.clone())?;
+
+    //     summarize_stats(&mut_stats, gene_key, take_value)
+    //         .to_backend(backend_file("mut.gene").as_ref())?
+    //         .qc(cutoffs.clone())?;
+
+    //     summarize_stats(&mut_stats, site_key, take_value)
+    //         .to_backend(backend_file("mut.site").as_ref())?
+    //         .qc(cutoffs.clone())?;
+    // }
 
     info!("done");
     Ok(())
@@ -238,30 +258,32 @@ fn find_methylated_sites_in_gene(
 
     // 1. sweep each pair bam files to find variable sites
     let mut wt_freq_map = DnaBaseFreqMap::new(&args.cell_barcode_tag);
-    let mut mut_freq_map = DnaBaseFreqMap::new(&args.cell_barcode_tag);
 
     for wt_file in args.wt_bam_files.iter() {
         wt_freq_map.update_bam_by_gene(wt_file, rec, &args.gene_barcode_tag)?;
     }
 
-    for mut_file in args.mut_bam_files.iter() {
-        mut_freq_map.update_bam_by_gene(mut_file, rec, &args.gene_barcode_tag)?;
-    }
-
-    // 2. find AC/T patterns: Using mutant statistics as null
-    // distribution, it will keep possible C->U edit positions.
-    let mut sifter = DartSeqSifter {
-        seqname: chr,
-        gene_id: gene_id.clone(),
-        min_coverage: args.min_coverage,
-        min_conversion: args.min_conversion,
-        max_pvalue_cutoff: args.pvalue_cutoff,
-        candidate_sites: vec![],
-    };
-
     let positions = wt_freq_map.sorted_positions();
 
     if positions.len() >= 3 {
+        // 2. find AC/T patterns: Using mutant statistics as null
+        // distribution, it will keep possible C->U edit positions.
+        let mut sifter = DartSeqSifter {
+            seqname: chr,
+            gene_id: gene_id.clone(),
+            min_coverage: args.min_coverage,
+            min_conversion: args.min_conversion,
+            max_pvalue_cutoff: args.pvalue_cutoff,
+            candidate_sites: vec![],
+        };
+
+        // gather background frequency map
+        let mut mut_freq_map = DnaBaseFreqMap::new(&args.cell_barcode_tag);
+
+        for mut_file in args.mut_bam_files.iter() {
+            mut_freq_map.update_bam_by_gene(mut_file, rec, &args.gene_barcode_tag)?;
+        }
+
         let wt_freq = wt_freq_map.marginal_frequency_map();
         let mut_freq = mut_freq_map.marginal_frequency_map();
 
@@ -273,9 +295,14 @@ fn find_methylated_sites_in_gene(
                 sifter.backward_sweep(&positions, &wt_freq, &mut_freq);
             }
         };
-    }
 
-    Ok(sifter.candidate_sites)
+        let mut ret = sifter.candidate_sites;
+        ret.sort();
+        ret.dedup();
+        Ok(ret)
+    } else {
+        Ok(vec![])
+    }
 }
 
 ///////////////////////////////////////////////////////////////////
@@ -287,56 +314,57 @@ fn gather_m6a_stats(
     sites: &[MethylatedSite],
     args: &DartSeqCountArgs,
     gff_map: &GffRecordMap,
-    bam_files: &[Box<str>],
+    bam_file: &str,
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
-    let mut ret = vec![];
+    Ok(sites
+        .iter()
+        .par_bridge()
+        .progress_count(sites.len() as u64)
+        .map(|x| estimate_m6a_stat(args, bam_file, &gff_map, &x))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>())
 
-    fn add_suffix(cb: &CellBarcode, k: &str) -> CellBarcode {
-        match cb {
-            CellBarcode::Barcode(s) => {
-                let new_barcode = format!("{}@{}", s, k);
-                CellBarcode::Barcode(new_barcode.into_boxed_str())
-            }
-            CellBarcode::Missing => CellBarcode::Missing,
-        }
-    }
+    // // todo: return Vec<Vec<_>>
 
-    for bam_file in bam_files {
-        info!("gathering data on {}", bam_file);
-        let data = sites
-            .iter()
-            .par_bridge()
-            .progress_count(sites.len() as u64)
-            .map(|x| estimate_m6a_stat(args, &[bam_file.clone()], &gff_map, &x))
-            .collect::<anyhow::Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+    // let mut ret = vec![];
 
-        if bam_files.len() > 1 {
-            let batch_name = basename(&bam_file)?;
-            let ndata = data.len();
-            info!("adding suffix \"{}\" over {} data", &batch_name, ndata);
-            ret.extend(
-                data.into_par_iter()
-                    .progress_count(ndata as u64)
-                    .map(|(cb, bg, md)| {
-                        let cb = add_suffix(&cb, &batch_name);
-                        (cb, bg, md)
-                    })
-                    .collect::<Vec<_>>(),
-            );
-        } else {
-            ret.extend(data);
-        }
-    }
+    // fn add_suffix(cb: &CellBarcode, k: &str) -> CellBarcode {
+    //     match cb {
+    //         CellBarcode::Barcode(s) => {
+    //             let new_barcode = format!("{}@{}", s, k);
+    //             CellBarcode::Barcode(new_barcode.into_boxed_str())
+    //         }
+    //         CellBarcode::Missing => CellBarcode::Missing,
+    //     }
+    // }
+    // for bam_file in bam_files {
+    // info!("gathering data on {}", bam_file);
 
-    Ok(ret)
+    // if bam_files.len() > 1 {
+    //     let batch_name = basename(&bam_file)?;
+    //     let ndata = data.len();
+    //     info!("adding suffix \"{}\" over {} data", &batch_name, ndata);
+    //     ret.extend(
+    //         data.into_par_iter()
+    //             .progress_count(ndata as u64)
+    //             .map(|(cb, bg, md)| {
+    //                 let cb = add_suffix(&cb, &batch_name);
+    //                 (cb, bg, md)
+    //             })
+    //             .collect::<Vec<_>>(),
+    //     );
+    // } else {
+    //     ret.extend(data);
+    // }
+    // }
+    // Ok(ret)
 }
 
 fn estimate_m6a_stat(
     args: &DartSeqCountArgs,
-    bam_files: &[Box<str>],
+    bam_file: &str,
     gff_map: &GffRecordMap,
     chr_m6a_c2u: &MethylatedSite,
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
@@ -355,9 +383,10 @@ fn estimate_m6a_stat(
         let mut gff = gff_record.clone();
         gff.start = (lb - 1).max(0); // padding
         gff.stop = ub + 1; // padding
-        for _file in bam_files.iter() {
-            stat_map.update_bam_by_gene(_file, &gff, &args.gene_barcode_tag)?;
-        }
+        stat_map.update_bam_by_gene(bam_file, &gff, &args.gene_barcode_tag)?;
+        // for _file in bam_files.iter() {
+        //     stat_map.update_bam_by_gene(_file, &gff, &args.gene_barcode_tag)?;
+        // }
     }
 
     let methylation_stat = stat_map.stratified_frequency_at(c2upos);
@@ -445,6 +474,8 @@ fn write_bed(
     stats: &mut [(CellBarcode, BedWithGene, MethylationData)],
     file_path: &str,
 ) -> anyhow::Result<()> {
+    use std::io::Write;
+
     stats.par_sort_by(|a, b| a.1.cmp(&b.1));
 
     let lines = stats
