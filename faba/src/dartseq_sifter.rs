@@ -7,15 +7,14 @@ use crate::hypothesis_tests::BinomTest;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 pub struct MethylatedSite {
-    pub seqname: Box<str>,
-    pub gene_id: Gene,
+    // pub seqname: Box<str>,
+    // pub gene_id: Gene,
     pub m6a_pos: i64,
     pub conversion_pos: i64,
     pub strand: Strand,
 }
 
 pub struct DartSeqSifter {
-    pub seqname: Box<str>,
     pub gene_id: Gene,
     pub min_coverage: usize,
     pub min_conversion: usize,
@@ -99,8 +98,8 @@ impl DartSeqSifter {
 
                 if pv < self.max_pvalue_cutoff {
                     let meth = MethylatedSite {
-                        seqname: self.seqname.clone(),
-                        gene_id: self.gene_id.clone(),
+                        // seqname: self.seqname.clone(),
+                        // gene_id: self.gene_id.clone(),
                         m6a_pos: m6a_site,
                         conversion_pos: conv_site,
                         strand: Strand::Forward,
@@ -186,8 +185,8 @@ impl DartSeqSifter {
 
                 if pv < self.max_pvalue_cutoff {
                     let meth = MethylatedSite {
-                        seqname: self.seqname.clone(),
-                        gene_id: self.gene_id.clone(),
+                        // seqname: self.seqname.clone(),
+                        // gene_id: self.gene_id.clone(),
                         m6a_pos: m6a_site,
                         conversion_pos: conv_site,
                         strand: Strand::Backward,
