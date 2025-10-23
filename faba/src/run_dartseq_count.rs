@@ -6,10 +6,11 @@ use crate::data::dna_stat_traits::*;
 use crate::data::gff::FeatureType as GffFeatureType;
 use crate::data::gff::GeneType as GffGeneType;
 use crate::data::methylation::*;
-use crate::data::positions::*;
+// use crate::data::positions::*;
 use crate::data::util_htslib::*;
 
 use dashmap::DashMap as HashMap;
+use std::sync::{Arc, Mutex};
 
 #[derive(Args, Debug)]
 pub struct DartSeqCountArgs {
@@ -130,17 +131,22 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     let njobs = gff_map.len();
     info!("Searching possible edit sites over {} blocks", njobs);
 
-    let sites = gff_map
+    let arc_sites = Arc::new(Mutex::new(vec![]));
+
+    gff_map
         .records()
         .into_iter()
         .par_bridge()
         .progress_count(njobs as u64)
-        .map(|rec| find_methylated_sites_in_gene(rec, args))
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .filter(|x| args.include_missing_barcode || x.gene_id != Gene::Missing)
-        .collect::<Vec<_>>();
+        .for_each(|rec| {
+            find_methylated_sites_in_gene(rec, args, arc_sites.clone())
+                .expect("failed in find_methylated_sites")
+        });
+
+    let sites = Arc::try_unwrap(arc_sites)
+        .expect("Arc still has multiple owners")
+        .into_inner()
+        .expect("Mutex cannot be locked");
 
     if sites.is_empty() {
         info!("no sites found");
@@ -251,7 +257,8 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 fn find_methylated_sites_in_gene(
     rec: &GffRecord,
     args: &DartSeqCountArgs,
-) -> anyhow::Result<Vec<MethylatedSite>> {
+    arc_sites: Arc<Mutex<Vec<MethylatedSite>>>,
+) -> anyhow::Result<()> {
     let chr = rec.seqname.clone();
     let strand = rec.strand.clone();
     let gene_id = rec.gene_id.clone();
@@ -289,20 +296,21 @@ fn find_methylated_sites_in_gene(
 
         match &strand {
             Strand::Forward => {
-                sifter.forward_sweep(&positions, &wt_freq, &mut_freq);
+                sifter.forward_rac_sweep(&positions, &wt_freq, &mut_freq);
             }
             Strand::Backward => {
-                sifter.backward_sweep(&positions, &wt_freq, &mut_freq);
+                sifter.backward_car_sweep(&positions, &wt_freq, &mut_freq);
             }
         };
 
         let mut ret = sifter.candidate_sites;
         ret.sort();
         ret.dedup();
-        Ok(ret)
-    } else {
-        Ok(vec![])
+
+        let mut sites = arc_sites.lock().expect("failed to lock");
+        sites.extend(ret);
     }
+    Ok(())
 }
 
 ///////////////////////////////////////////////////////////////////
