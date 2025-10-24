@@ -3,7 +3,6 @@
 use crate::data::bed::Bed;
 use crate::data::gff::*;
 use crate::data::positions::*;
-use crate::data::sam::*;
 use crate::data::visitors_htslib::*;
 
 use rust_htslib::bam::{self, record::Aux};
@@ -59,9 +58,6 @@ pub trait DnaStatMap: VisitWithBamOps {
             self.add_bam_record(bam_record);
         }
     }
-
-    /// output cell barcodes found
-    fn cells(&self) -> Vec<&CellBarcode>;
 
     /// output sorted genomic positions
     fn sorted_positions(&self) -> Vec<i64>;

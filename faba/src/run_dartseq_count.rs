@@ -9,6 +9,7 @@ use crate::data::methylation::*;
 use crate::data::util_htslib::*;
 
 use dashmap::DashMap as HashMap;
+use dashmap::DashSet as HashSet;
 use rayon::ThreadPoolBuilder;
 use std::sync::{Arc, Mutex};
 
@@ -270,7 +271,7 @@ fn find_methylated_sites_in_gene(
     let gene_id = rec.gene_id.clone();
 
     // 1. sweep each pair bam files to find variable sites
-    let mut wt_freq_map = DnaBaseFreqMap::new(&args.cell_barcode_tag);
+    let mut wt_freq_map = DnaBaseFreqMap::new();
 
     for wt_file in args.wt_bam_files.iter() {
         wt_freq_map.update_bam_by_gene(wt_file, rec, &args.gene_barcode_tag)?;
@@ -289,14 +290,18 @@ fn find_methylated_sites_in_gene(
         };
 
         // gather background frequency map
-        let mut mut_freq_map = DnaBaseFreqMap::new(&args.cell_barcode_tag);
+        let mut mut_freq_map = DnaBaseFreqMap::new_with_cell_barcode(&args.cell_barcode_tag);
 
         for mut_file in args.mut_bam_files.iter() {
             mut_freq_map.update_bam_by_gene(mut_file, rec, &args.gene_barcode_tag)?;
         }
 
-        let wt_freq = wt_freq_map.marginal_frequency_map();
-        let mut_freq = mut_freq_map.marginal_frequency_map();
+        let wt_freq = wt_freq_map
+            .marginal_frequency_map()
+            .ok_or(anyhow::anyhow!("failed to count wt freq"))?;
+        let mut_freq = mut_freq_map
+            .marginal_frequency_map()
+            .ok_or(anyhow::anyhow!("failed to count mut freq"))?;
 
         match &strand {
             Strand::Forward => {
@@ -307,7 +312,7 @@ fn find_methylated_sites_in_gene(
             }
         };
 
-        let mut ret = sifter.candidate_sites;
+        let mut ret = sifter.candidate_sites.clone();
         if !ret.is_empty() {
             ret.sort();
             ret.dedup();
@@ -368,7 +373,7 @@ fn estimate_m6a_stat(
     gene: &GeneId,
     m6a_c2u: &MethylatedSite,
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
-    let mut stat_map = DnaBaseFreqMap::new(&args.cell_barcode_tag);
+    let mut stat_map = DnaBaseFreqMap::new_with_cell_barcode(&args.cell_barcode_tag);
     let m6apos = m6a_c2u.m6a_pos;
     let c2upos = m6a_c2u.conversion_pos;
     let strand = &m6a_c2u.strand;
