@@ -290,7 +290,7 @@ fn find_methylated_sites_in_gene(
         };
 
         // gather background frequency map
-        let mut mut_freq_map = DnaBaseFreqMap::new_with_cell_barcode(&args.cell_barcode_tag);
+        let mut mut_freq_map = DnaBaseFreqMap::new();
 
         for mut_file in args.mut_bam_files.iter() {
             mut_freq_map.update_bam_by_gene(mut_file, rec, &args.gene_barcode_tag)?;
