@@ -45,10 +45,6 @@ impl DnaStatMap for ReadDepthMap<'_> {
         }
     }
 
-    fn cells(&self) -> Vec<&CellBarcode> {
-        self.cells.iter().collect()
-    }
-
     fn sorted_positions(&self) -> Vec<i64> {
         let mut ret = self.positions.iter().copied().collect::<Vec<_>>();
         ret.sort();

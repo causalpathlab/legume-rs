@@ -7,100 +7,92 @@ use crate::data::visitors_htslib::*;
 
 use rust_htslib::bam::{self, ext::BamRecordExtensions, record::Aux};
 
-pub use fnv::{FnvHashMap as HashMap, FnvHashSet as HashSet};
+pub use fnv::FnvHashMap as HashMap;
 
-// pub use std::collections::{HashMap, HashSet};
-
-pub struct DnaBaseFreqMap<'a> {
-    position_to_count_with_cell: HashMap<i64, HashMap<CellBarcode, DnaBaseCount>>,
-    cells: HashSet<CellBarcode>,
-    positions: HashSet<i64>,
-    cell_barcode_tag: &'a [u8],
+pub struct DnaBaseFreqMap {
+    position_to_count_with_cell: Option<HashMap<i64, HashMap<CellBarcode, DnaBaseCount>>>,
+    position_to_count: Option<HashMap<i64, DnaBaseCount>>,
+    cell_barcode_tag: Option<Vec<u8>>,
 }
 
-impl VisitWithBamOps for DnaBaseFreqMap<'_> {}
+impl VisitWithBamOps for DnaBaseFreqMap {}
 
-impl DnaStatMap for DnaBaseFreqMap<'_> {
+impl DnaStatMap for DnaBaseFreqMap {
     fn add_bam_record(&mut self, bam_record: bam::Record) {
-        let cell_barcode = match bam_record.aux(self.cell_barcode_tag) {
-            Ok(Aux::String(barcode)) => CellBarcode::Barcode(barcode.into()),
-            _ => CellBarcode::Missing,
-        };
-
-        if !self.cells.contains(&cell_barcode) {
-            self.cells.insert(cell_barcode.clone());
-        }
-
-        // From `https://samtools.github.io/hts-specs/SAMv1.pdf`
-        //
-        // All mapped segments in alignment lines are represented on the
-        // forward genomic strand. For segments that have been mapped to the
-        // reverse strand, the recorded SEQ is reverse complemented from the
-        // original unmapped sequence and CIGAR, QUAL, and strand-sensitive
-        // optional fields are reversed and thus recorded consistently with
-        // the sequence bases as represented.
-
         let seq = bam_record.seq().as_bytes();
 
-        // Note: these are zero-based positions
-        for [rpos, gpos] in bam_record.aligned_pairs() {
-            let base = Dna::from_byte(seq[rpos as usize]);
-            let genome_pos = gpos + 1; // 1-based position
+        // keeping records with cell barcode information
+        if let (Some(tag), Some(map)) = (
+            &self.cell_barcode_tag,
+            &mut self.position_to_count_with_cell,
+        ) {
+            let cell_barcode = match bam_record.aux(tag) {
+                Ok(Aux::String(barcode)) => CellBarcode::Barcode(barcode.into()),
+                _ => CellBarcode::Missing,
+            };
 
-            if !self.positions.contains(&genome_pos) {
-                self.positions.insert(genome_pos);
+            for [rpos, gpos] in bam_record.aligned_pairs() {
+                let base = Dna::from_byte(seq[rpos as usize]);
+                let genome_pos = gpos + 1;
+
+                let freq_map = map.entry(genome_pos).or_default();
+
+                let freq = freq_map
+                    .entry(cell_barcode.clone())
+                    .or_insert_with(DnaBaseCount::new);
+                freq.add(base.as_ref(), 1);
             }
-
-            let freq_map = self
-                .position_to_count_with_cell
-                .entry(genome_pos)
-                .or_default();
-
-            let freq = freq_map
-                .entry(cell_barcode.clone())
-                .or_insert_with(DnaBaseCount::new);
-            freq.add(base.as_ref(), 1);
         }
-    }
 
-    fn cells(&self) -> Vec<&CellBarcode> {
-        self.cells.iter().collect()
+        // just keeping the marginal frequencies
+        if let Some(map) = &mut self.position_to_count {
+            for [rpos, gpos] in bam_record.aligned_pairs() {
+                let base = Dna::from_byte(seq[rpos as usize]);
+                let genome_pos = gpos + 1;
+                let freq = map.entry(genome_pos).or_insert_with(DnaBaseCount::new);
+                freq.add(base.as_ref(), 1);
+            }
+        }
     }
 
     fn sorted_positions(&self) -> Vec<i64> {
-        let mut ret = self.positions.iter().copied().collect::<Vec<_>>();
+        let mut ret = if let Some(map) = &self.position_to_count {
+            map.keys().copied().collect::<Vec<_>>()
+        } else if let Some(map) = &self.position_to_count_with_cell {
+            map.keys().copied().collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
         ret.sort();
         ret.dedup();
         ret
     }
 }
 
-impl<'a> DnaBaseFreqMap<'a> {
-    pub fn new(cell_barcode_tag: &'a str) -> Self {
+impl DnaBaseFreqMap {
+    pub fn new_with_cell_barcode(cell_barcode_tag: &str) -> Self {
         Self {
-            position_to_count_with_cell: HashMap::default(),
-            cells: HashSet::default(),
-            positions: HashSet::default(),
-            cell_barcode_tag: cell_barcode_tag.as_bytes(),
+            position_to_count_with_cell: Some(HashMap::default()),
+            position_to_count: None,
+            cell_barcode_tag: Some(cell_barcode_tag.as_bytes().to_vec()),
         }
     }
 
-    /// picking on base-pair frequency at a particular `pos`
-    /// stratified by cell barcodes
+    pub fn new() -> Self {
+        Self {
+            position_to_count_with_cell: None,
+            position_to_count: Some(HashMap::default()),
+            cell_barcode_tag: None,
+        }
+    }
+
     pub fn stratified_frequency_at(&self, pos: i64) -> Option<&HashMap<CellBarcode, DnaBaseCount>> {
-        self.position_to_count_with_cell.get(&pos)
+        self.position_to_count_with_cell
+            .as_ref()
+            .and_then(|map| map.get(&pos))
     }
 
-    /// frequency map by position across all the cells
-    pub fn marginal_frequency_map(&self) -> HashMap<i64, DnaBaseCount> {
-        let mut ret: HashMap<i64, DnaBaseCount> = HashMap::default();
-
-        for (&pos, freq_map) in self.position_to_count_with_cell.iter() {
-            let accum = ret.entry(pos).or_insert_with(DnaBaseCount::new);
-            for (_, freq) in freq_map.iter() {
-                *accum += freq;
-            }
-        }
-        ret
+    pub fn marginal_frequency_map(&self) -> Option<&HashMap<i64, DnaBaseCount>> {
+        self.position_to_count.as_ref()
     }
 }
