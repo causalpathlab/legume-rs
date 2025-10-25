@@ -5,11 +5,13 @@ mod hypothesis_tests;
 mod run_dartseq_count;
 mod run_gene_count;
 mod run_read_depth;
+mod scan_pwm;
 
 use crate::common::*;
 use run_dartseq_count::*;
 use run_gene_count::*;
 use run_read_depth::*;
+use scan_pwm::*;
 
 /// Feature statistics Accumulator for Base-pair-level Analysis
 #[derive(Parser, Debug)]

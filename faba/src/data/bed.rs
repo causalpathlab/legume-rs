@@ -1,7 +1,6 @@
 use crate::data::gff::GeneId;
 use crate::data::sam::Strand;
 use std::hash::Hash;
-// use coitrees::
 
 #[derive(Hash, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BedWithGene {

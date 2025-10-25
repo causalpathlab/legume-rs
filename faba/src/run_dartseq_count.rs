@@ -1,6 +1,7 @@
 use crate::common::*;
 use crate::dartseq_sifter::*;
 use crate::data::dna::Dna;
+
 use crate::data::dna_stat_map::*;
 use crate::data::dna_stat_traits::*;
 use crate::data::gff::FeatureType as GffFeatureType;
@@ -171,12 +172,6 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         }
     };
 
-    // todo: motif output
-    // collect_frequencies_nearby
-
-    // let bed_file =
-    //     |name: &str| -> Box<str> { format!("{}.{}.bed.gz", &args.output, name).into_boxed_str() };
-
     let gene_key = |x: &BedWithGene| -> GeneId { x.gene.clone() };
     let site_key = |x: &BedWithGene| -> BedWithGene { x.clone() };
 
@@ -200,6 +195,8 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     let mut site_data_files = vec![];
 
     for bam_file in args.wt_bam_files.iter() {
+        let batch_name = basename(&bam_file)?;
+
         ////////////////////////////
         // collect the statistics //
         ////////////////////////////
@@ -210,50 +207,56 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             bam_file
         );
 
-        let stats = gather_m6a_stats(&gene_sites, args, &gff_map, &bam_file)?;
+        let mut stats = gather_m6a_stats(&gene_sites, args, &gff_map, &bam_file)?;
 
-        //////////////////////////////////
-        // Aggregate them into triplets //
-        //////////////////////////////////
+        if args.output_bed_file {
+            let bed_file = format!("{}_{}.bed.gz", args.output, batch_name);
+            info!("writing down stats to the bed file: {}", &bed_file);
+            write_bed(&mut stats, &bed_file)?;
+        } else {
+            //////////////////////////////////
+            // Aggregate them into triplets //
+            //////////////////////////////////
 
-        info!(
-            "aggregating the '{}' triplets over {} stats...",
-            args.output_value_type,
-            stats.len()
-        );
+            info!(
+                "aggregating the '{}' triplets over {} stats...",
+                args.output_value_type,
+                stats.len()
+            );
 
-        let batch_name = basename(&bam_file)?;
-        let gene_data_file = backend_file(&format!("gene_{}", batch_name));
-        let triplets = summarize_stats(&stats, gene_key, take_value);
-        let data = triplets.to_backend(&gene_data_file)?;
-        data.qc(cutoffs.clone())?;
-        genes.extend(data.row_names()?);
-        info!("created gene-level data: {}", &gene_data_file);
-        gene_data_files.push(gene_data_file);
+            let gene_data_file = backend_file(&format!("gene_{}", batch_name));
+            let triplets = summarize_stats(&stats, gene_key, take_value);
+            let data = triplets.to_backend(&gene_data_file)?;
+            data.qc(cutoffs.clone())?;
+            genes.extend(data.row_names()?);
+            info!("created gene-level data: {}", &gene_data_file);
+            gene_data_files.push(gene_data_file);
 
-        let site_data_file = backend_file(&format!("site_{}", batch_name));
-        let triplets = summarize_stats(&stats, site_key, take_value);
-        let data = triplets.to_backend(&site_data_file)?;
-        data.qc(cutoffs.clone())?;
-        sites.extend(data.row_names()?);
-        info!("created site-level data: {}", &site_data_file);
-        site_data_files.push(site_data_file);
+            let site_data_file = backend_file(&format!("site_{}", batch_name));
+            let triplets = summarize_stats(&stats, site_key, take_value);
+            let data = triplets.to_backend(&site_data_file)?;
+            data.qc(cutoffs.clone())?;
+            sites.extend(data.row_names()?);
+            info!("created site-level data: {}", &site_data_file);
+            site_data_files.push(site_data_file);
+        }
     }
 
-    let mut genes_sorted = genes.into_iter().collect::<Vec<_>>();
-    genes_sorted.sort();
+    if !args.output_bed_file {
+        let mut genes_sorted = genes.into_iter().collect::<Vec<_>>();
+        genes_sorted.sort();
 
-    for data_file in gene_data_files {
-        open_sparse_matrix(&data_file, &backend)?.reorder_rows(&genes_sorted)?;
+        for data_file in gene_data_files {
+            open_sparse_matrix(&data_file, &backend)?.reorder_rows(&genes_sorted)?;
+        }
+
+        let mut sites_sorted = sites.into_iter().collect::<Vec<_>>();
+        sites_sorted.sort();
+
+        for data_file in site_data_files {
+            open_sparse_matrix(&data_file, &backend)?.reorder_rows(&sites_sorted)?;
+        }
     }
-
-    let mut sites_sorted = sites.into_iter().collect::<Vec<_>>();
-    sites_sorted.sort();
-
-    for data_file in site_data_files {
-        open_sparse_matrix(&data_file, &backend)?.reorder_rows(&sites_sorted)?;
-    }
-
     info!("done");
     Ok(())
 }
@@ -267,8 +270,8 @@ fn find_methylated_sites_in_gene(
     args: &DartSeqCountArgs,
     arc_gene_sites: Arc<HashMap<GeneId, Vec<MethylatedSite>>>,
 ) -> anyhow::Result<()> {
-    let strand = rec.strand.clone();
     let gene_id = rec.gene_id.clone();
+    let strand = &rec.strand;
 
     // 1. sweep each pair bam files to find variable sites
     let mut wt_freq_map = DnaBaseFreqMap::new();
@@ -344,15 +347,15 @@ fn gather_m6a_stats(
         .for_each(|gs| {
             let gene = gs.key();
             let sites = gs.value();
-
-            let mut ret = Vec::with_capacity(sites.len());
-            for x in sites {
-                ret.extend(
-                    estimate_m6a_stat(args, bam_file, &gff_map, gene, x)
-                        .expect("failed to collect stat"),
-                );
+            if let Some(gff) = gff_map.get(gene) {
+                let mut ret = Vec::with_capacity(sites.len());
+                for x in sites {
+                    ret.extend(
+                        estimate_m6a_stat(args, bam_file, &gff, x).expect("failed to collect stat"),
+                    );
+                }
+                arc_ret.lock().expect("lock").extend(ret);
             }
-            arc_ret.lock().expect("lock").extend(ret);
         });
 
     let stats = Arc::try_unwrap(arc_ret)
@@ -361,37 +364,30 @@ fn gather_m6a_stats(
     Ok(stats)
 }
 
-fn collect_frequencies_nearby(gene_sites: &HashMap<GeneId, Vec<MethylatedSite>>) {
-
-    // todo
-}
-
 fn estimate_m6a_stat(
     args: &DartSeqCountArgs,
     bam_file: &str,
-    gff_map: &GffRecordMap,
-    gene: &GeneId,
+    gff_record: &GffRecord,
     m6a_c2u: &MethylatedSite,
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
     let mut stat_map = DnaBaseFreqMap::new_with_cell_barcode(&args.cell_barcode_tag);
     let m6apos = m6a_c2u.m6a_pos;
     let c2upos = m6a_c2u.conversion_pos;
-    let strand = &m6a_c2u.strand;
 
     let lb = m6apos.min(c2upos);
     let ub = c2upos.max(m6apos);
 
     // need to read bam files with the matching gene contexts
-    let gff_record = gff_map
-        .get(gene)
-        .ok_or(anyhow::anyhow!("unable to find this gene"))?;
-
+    // but read just what we need
     let mut gff = gff_record.clone();
     gff.start = (lb - 1).max(0); // padding
     gff.stop = ub + 1; // padding
     stat_map.update_bam_by_gene(bam_file, &gff, &args.gene_barcode_tag)?;
 
+    let gene = gff.gene_id;
     let chr = gff.seqname.as_ref();
+    let strand = &gff.strand;
+
     let methylation_stat = stat_map.stratified_frequency_at(c2upos);
 
     let unmethylated_base = match strand {
@@ -408,7 +404,7 @@ fn estimate_m6a_stat(
         // report reduced kb resolution
         let r = (r * 1000.0) as usize;
         (
-            ((m6apos as usize) / r * r + 1) as i64,
+            ((m6apos as usize) / r * r) as i64,
             ((m6apos as usize).div_ceil(r) * r) as i64,
         )
     } else {
@@ -473,39 +469,39 @@ where
     format_data_triplets(combined_data)
 }
 
-// fn write_bed(
-//     stats: &mut [(CellBarcode, BedWithGene, MethylationData)],
-//     file_path: &str,
-// ) -> anyhow::Result<()> {
-//     use std::io::Write;
+fn write_bed(
+    stats: &mut [(CellBarcode, BedWithGene, MethylationData)],
+    file_path: &str,
+) -> anyhow::Result<()> {
+    use std::io::Write;
 
-//     stats.par_sort_by(|a, b| a.1.cmp(&b.1));
+    stats.par_sort_by(|a, b| a.1.cmp(&b.1));
 
-//     let lines = stats
-//         .into_iter()
-//         .map(|(cb, bg, data)| {
-//             format!(
-//                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-//                 bg.chr,
-//                 bg.start,
-//                 bg.stop,
-//                 bg.strand,
-//                 bg.gene,
-//                 data.methylated,
-//                 data.unmethylated,
-//                 cb
-//             )
-//             .into_boxed_str()
-//         })
-//         .collect::<Vec<_>>();
+    let lines = stats
+        .into_iter()
+        .map(|(cb, bg, data)| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                bg.chr,
+                bg.start,
+                bg.stop,
+                bg.strand,
+                bg.gene,
+                data.methylated,
+                data.unmethylated,
+                cb
+            )
+            .into_boxed_str()
+        })
+        .collect::<Vec<_>>();
 
-//     use rust_htslib::bgzf::Writer as BWriter;
+    use rust_htslib::bgzf::Writer as BWriter;
 
-//     let mut writer = BWriter::from_path(file_path)?;
-//     for l in lines {
-//         writer.write_all(l.as_bytes())?;
-//         writer.write_all(b"\n")?;
-//     }
-//     writer.flush()?;
-//     Ok(())
-// }
+    let mut writer = BWriter::from_path(file_path)?;
+    for l in lines {
+        writer.write_all(l.as_bytes())?;
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()?;
+    Ok(())
+}
