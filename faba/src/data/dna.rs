@@ -41,6 +41,12 @@ pub struct DnaBaseCount {
     data: [(Dna, usize); 4],
 }
 
+impl Default for DnaBaseCount {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DnaBaseCount {
     pub fn new() -> Self {
         DnaBaseCount {

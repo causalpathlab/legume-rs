@@ -1,14 +1,13 @@
 use crate::data::dna::Dna;
 use crate::data::dna::DnaBaseCount;
 use crate::data::dna_stat_map::HashMap;
-use crate::data::sam::*;
 use crate::hypothesis_tests::BinomTest;
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug, Hash)]
 pub struct MethylatedSite {
     pub m6a_pos: i64,
     pub conversion_pos: i64,
-    pub strand: Strand,
+    // pub strand: Strand,
 }
 
 pub struct DartSeqSifter {
@@ -98,7 +97,7 @@ impl DartSeqSifter {
                         // gene_id: self.gene_id.clone(),
                         m6a_pos: m6a_site,
                         conversion_pos: conv_site,
-                        strand: Strand::Forward,
+                        // strand: Strand::Forward,
                     };
                     self.candidate_sites.push(meth);
                 }
@@ -185,7 +184,7 @@ impl DartSeqSifter {
                         // gene_id: self.gene_id.clone(),
                         m6a_pos: m6a_site,
                         conversion_pos: conv_site,
-                        strand: Strand::Backward,
+                        // strand: Strand::Backward,
                     };
                     self.candidate_sites.push(meth);
                 }
