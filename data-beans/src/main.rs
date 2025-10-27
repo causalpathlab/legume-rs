@@ -17,13 +17,15 @@ use crate::sparse_util::*;
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use common_io::*;
+use data_beans::sparse_data_visitors::create_jobs;
+use indicatif::ParallelProgressIterator;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use log::info;
 use matrix_util::traits::IoOps;
 use matrix_util::*;
 use rayon::prelude::*;
-use simulate_deconv::SimConvArgs;
 use simulate_deconv::generate_convoluted_data;
+use simulate_deconv::SimConvArgs;
 use tempfile::TempDir;
 
 use std::collections::HashMap;
@@ -89,6 +91,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::MergeMtx(args) => {
             run_merge_mtx(args)?;
+        }
+        Commands::Merge(args) => {
+            run_merge_backend(args)?;
         }
     }
 
@@ -166,6 +171,9 @@ enum Commands {
 
     /// Merge multiple 10x `.mtx` files into one fileset
     MergeMtx(MergeMtxArgs),
+
+    /// Merge multiple backend file(sets) into one
+    Merge(MergeBackendArgs),
 
     /// Squeeze out rows and columns with too few non-zeros. It will
     /// overwrite the original (be careful) and save the indices kept.
@@ -451,6 +459,46 @@ pub struct FromZarrArgs {
     /// minimum number of non-zero cutoff for columns
     #[arg(long, default_value_t = 1)]
     column_nnz_cutoff: usize,
+
+    /// verbose mode
+    #[arg(short, long, action = ArgAction::Count)]
+    verbose: u8,
+}
+
+/// Merge multiple sets into one sparse backend file.
+#[derive(Args, Debug)]
+pub struct MergeBackendArgs {
+    /// Data files
+    #[arg(required = true)]
+    data_files: Vec<Box<str>>,
+
+    /// backend
+    #[arg(long, value_enum, default_value = "zarr")]
+    backend: SparseIoBackend,
+
+    /// output file header: {output}.{backend} and {output}.batch.gz
+    ///
+    /// The backend will contain everything.  But the batch assignment
+    /// information will be saved in a separate file and needed for
+    /// embedding steps later.
+    #[arg(short, long, required = true)]
+    output: Box<str>,
+
+    /// squeeze
+    #[arg(long, default_value_t = false)]
+    do_squeeze: bool,
+
+    /// minimum number of non-zero cutoff for rows
+    #[arg(long, default_value_t = 1)]
+    row_nnz_cutoff: usize,
+
+    /// minimum number of non-zero cutoff for columns
+    #[arg(long, default_value_t = 1)]
+    column_nnz_cutoff: usize,
+
+    /// block_size for parallel processing
+    #[arg(long, default_value = "100")]
+    block_size: usize,
 
     /// verbose mode
     #[arg(short, long, action = ArgAction::Count)]
@@ -846,6 +894,149 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
 
     data.to_tsv(&output)?;
 
+    Ok(())
+}
+
+fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
+    if args.data_files.len() <= 1 {
+        info!("no need to merge one file");
+        return Ok(());
+    }
+
+    if args.verbose > 0 {
+        std::env::set_var("RUST_LOG", "info");
+    }
+
+    let num_batches = args.data_files.len();
+    info!("merging over {} batches ...", num_batches);
+
+    let mut row_names = vec![];
+    let mut column_names = vec![];
+    let mut column_batch_names = vec![];
+    let mut triplets = vec![];
+
+    let mut ntot = 0;
+    for data_file in args.data_files.iter() {
+        info!("Importing data file: {}", data_file);
+
+        let backend = match extension(data_file)?.to_string().as_str() {
+            "h5" => SparseIoBackend::HDF5,
+            "zarr" => SparseIoBackend::Zarr,
+            _ => SparseIoBackend::Zarr,
+        };
+
+        let mut data = open_sparse_matrix(data_file, &backend)?;
+        data.preload_columns()?;
+
+        if row_names.is_empty() {
+            row_names = data.row_names()?;
+        } else {
+            info!("checking if the row names are consistent");
+            assert_eq!(row_names, data.row_names()?);
+        }
+
+        if let Some(ntot_curr) = data.num_columns() {
+            // 1. read triplets
+            let jobs = create_jobs(ntot_curr, Some(args.block_size));
+            let triplets_curr = jobs
+                .par_iter()
+                .progress_count(jobs.len() as u64)
+                .filter_map(|(lb, ub)| {
+                    if let Ok((_, _, triplets)) =
+                        data.read_triplets_by_columns((*lb..*ub).collect())
+                    {
+                        let offset = (*lb + ntot) as u64;
+                        Some(
+                            triplets
+                                .iter()
+                                .map(|&(i, j, x_ij)| (i, j + offset, x_ij))
+                                .collect::<Vec<_>>(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+
+            let _names = data.column_names()?;
+            let batch_name = basename(data_file)?;
+            column_names.extend(
+                _names
+                    .into_iter()
+                    .map(|x| format!("{}{}{}", x, COLUMN_SEP, batch_name).into_boxed_str())
+                    .collect::<Vec<_>>(),
+            );
+
+            triplets.extend(triplets_curr);
+            column_batch_names.extend(vec![batch_name.clone(); ntot_curr]);
+            ntot += ntot_curr;
+        }
+    }
+
+    info!("Found {} columns/barcodes ...", column_names.len());
+
+    let backend = args.backend.clone();
+    let output = args.output.clone();
+    let batch_memb_file = (output.to_string() + ".batch.gz").into_boxed_str();
+
+    let backend_file = match backend {
+        SparseIoBackend::HDF5 => format!("{}.h5", &output),
+        SparseIoBackend::Zarr => format!("{}.zarr", &output),
+    };
+
+    if std::path::Path::new(&backend_file).exists() {
+        info!(
+            "This existing backend file '{}' will be deleted",
+            &backend_file
+        );
+        remove_file(&backend_file)?;
+    }
+
+    let mut data = create_sparse_from_triplets(
+        &triplets,
+        (row_names.len(), column_names.len(), triplets.len()),
+        Some(&backend_file),
+        Some(&backend),
+    )?;
+
+    data.register_row_names_vec(&row_names);
+    data.register_column_names_vec(&column_names);
+
+    info!(
+        "Successfully created a sparse backend file: {}",
+        &backend_file
+    );
+
+    let batch_map = column_names
+        .into_iter()
+        .zip(column_batch_names)
+        .collect::<HashMap<_, _>>();
+
+    if args.do_squeeze {
+        info!("Squeeze the backend data {}", &backend_file);
+        let squeeze_args = RunSqueezeArgs {
+            data_file: backend_file.clone().into_boxed_str(),
+            row_nnz_cutoff: args.row_nnz_cutoff,
+            column_nnz_cutoff: args.column_nnz_cutoff,
+            block_size: args.block_size,
+        };
+
+        run_squeeze(&squeeze_args)?;
+    }
+
+    // do the batch mapping at the end
+    let data = open_sparse_matrix(&backend_file, &backend)?;
+    let default_batch = basename(&args.output)?;
+    let column_batch_names = data
+        .column_names()?
+        .iter()
+        .map(|k| batch_map.get(k).unwrap_or(&default_batch).clone())
+        .collect::<Vec<_>>();
+
+    write_lines(&column_batch_names, &batch_memb_file)?;
+
+    info!("done");
     Ok(())
 }
 
