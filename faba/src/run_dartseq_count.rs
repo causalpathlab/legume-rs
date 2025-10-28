@@ -77,7 +77,7 @@ pub struct DartSeqCountArgs {
     output_value_type: MethFeatureType,
 
     /// backend for the output file
-    #[arg(long, value_enum, default_value = "hdf5")]
+    #[arg(long, value_enum, default_value = "zarr")]
     backend: SparseIoBackend,
 
     /// include reads missing gene and cell barcode
@@ -86,15 +86,44 @@ pub struct DartSeqCountArgs {
 
     /// output mut signals
     #[arg(long, default_value_t = false)]
-    output_mut: bool,
+    output_null_data: bool,
 
     /// output bed file
     #[arg(long, default_value_t = false)]
     output_bed_file: bool,
 
+    /// output mut file
+    #[arg(long, default_value_t = false)]
+    output_mut_file: bool,
+
     /// output header for `data-beans` files
     #[arg(short, long, required = true)]
     output: Box<str>,
+}
+
+fn uniq_batch_names(bam_files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
+    let batch_names: Vec<Box<str>> = bam_files
+        .iter()
+        .map(|x| basename(x))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let n_bam_files = bam_files.len();
+    let n_uniq_bam_files = bam_files.iter().cloned().collect::<HashSet<_>>().len();
+    let n_batches = batch_names.iter().cloned().collect::<HashSet<_>>().len();
+
+    Ok(
+        if n_batches == n_bam_files && n_batches == n_uniq_bam_files {
+            batch_names
+        } else {
+            info!("bam file (base) names are not unique");
+
+            batch_names
+                .iter()
+                .enumerate()
+                .map(|(i, x)| format!("{}_{}", x, i).into_boxed_str())
+                .collect()
+        },
+    )
 }
 
 /// Count possibly methylated A positions in DART-seq bam files to
@@ -104,6 +133,9 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     if args.wt_bam_files.is_empty() || args.mut_bam_files.is_empty() {
         return Err(anyhow::anyhow!("need pairs of bam files"));
     }
+
+    let wt_batch_names = uniq_batch_names(&args.wt_bam_files)?;
+    let mut_batch_names = uniq_batch_names(&args.mut_bam_files)?;
 
     for x in args.wt_bam_files.iter() {
         info!("checking .bai file for {}...", x);
@@ -191,12 +223,13 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 
     let mut genes = HashSet::<Box<str>>::default();
     let mut sites = HashSet::<Box<str>>::default();
-    let mut gene_data_files = vec![];
-    let mut site_data_files = vec![];
+    let mut gene_data_files: Vec<Box<str>> = vec![];
+    let mut site_data_files: Vec<Box<str>> = vec![];
 
-    for bam_file in args.wt_bam_files.iter() {
-        let batch_name = basename(&bam_file)?;
+    let mut null_gene_data_files: Vec<Box<str>> = vec![];
+    let mut null_site_data_files: Vec<Box<str>> = vec![];
 
+    for (bam_file, batch_name) in args.wt_bam_files.iter().zip(wt_batch_names) {
         ////////////////////////////
         // collect the statistics //
         ////////////////////////////
@@ -242,6 +275,37 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         }
     }
 
+    if args.output_null_data {
+        info!("output null data");
+        for (bam_file, batch_name) in args.mut_bam_files.iter().zip(mut_batch_names) {
+            ////////////////////////////
+            // collect the statistics //
+            ////////////////////////////
+
+            let stats = gather_m6a_stats(&gene_sites, args, &gff_map, &bam_file)?;
+
+            //////////////////////////////////
+            // Aggregate them into triplets //
+            //////////////////////////////////
+
+            let gene_data_file = backend_file(&format!("gene_{}", batch_name));
+            let triplets = summarize_stats(&stats, gene_key, take_value);
+            let data = triplets.to_backend(&gene_data_file)?;
+            data.qc(cutoffs.clone())?;
+            genes.extend(data.row_names()?);
+            info!("created gene-level data: {}", &gene_data_file);
+            null_gene_data_files.push(gene_data_file);
+
+            let site_data_file = backend_file(&format!("site_{}", batch_name));
+            let triplets = summarize_stats(&stats, site_key, take_value);
+            let data = triplets.to_backend(&site_data_file)?;
+            data.qc(cutoffs.clone())?;
+            sites.extend(data.row_names()?);
+            info!("created site-level data: {}", &site_data_file);
+            null_site_data_files.push(site_data_file);
+        }
+    }
+
     if !args.output_bed_file {
         let mut genes_sorted = genes.into_iter().collect::<Vec<_>>();
         genes_sorted.sort();
@@ -250,11 +314,23 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             open_sparse_matrix(&data_file, &backend)?.reorder_rows(&genes_sorted)?;
         }
 
+        if args.output_null_data {
+            for data_file in null_gene_data_files {
+                open_sparse_matrix(&data_file, &backend)?.reorder_rows(&genes_sorted)?;
+            }
+        }
+
         let mut sites_sorted = sites.into_iter().collect::<Vec<_>>();
         sites_sorted.sort();
 
         for data_file in site_data_files {
             open_sparse_matrix(&data_file, &backend)?.reorder_rows(&sites_sorted)?;
+        }
+
+        if args.output_null_data {
+            for data_file in null_site_data_files {
+                open_sparse_matrix(&data_file, &backend)?.reorder_rows(&sites_sorted)?;
+            }
         }
     }
     info!("done");
@@ -273,7 +349,9 @@ fn find_methylated_sites_in_gene(
     let gene_id = rec.gene_id.clone();
     let strand = &rec.strand;
 
-    // 1. sweep each pair bam files to find variable sites
+    ///////////////////////////////////////////////////////
+    // 1. sweep all the bam files to find variable sites //
+    ///////////////////////////////////////////////////////
     let mut wt_freq_map = DnaBaseFreqMap::new();
 
     for wt_file in args.wt_bam_files.iter() {

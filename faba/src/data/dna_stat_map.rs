@@ -90,7 +90,7 @@ impl DnaStatMap for DnaBaseFreqMap {
 impl DnaBaseFreqMap {
     /// empty frequency map, keeping track of cell barcodes
     ///
-    /// * `cell_barcode_tag` - cell barcode word, e.g., "CX"
+    /// * `cell_barcode_tag` - tag word, e.g., "CB" in 10x
     pub fn new_with_cell_barcode(cell_barcode_tag: &str) -> Self {
         Self {
             position_to_count_with_cell: Some(HashMap::default()),

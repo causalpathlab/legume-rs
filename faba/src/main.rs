@@ -11,7 +11,7 @@ use crate::common::*;
 use run_dartseq_count::*;
 use run_gene_count::*;
 use run_read_depth::*;
-use scan_pwm::*;
+// use scan_pwm::*; not ready yet
 
 /// Feature statistics Accumulator for Base-pair-level Analysis
 #[derive(Parser, Debug)]
