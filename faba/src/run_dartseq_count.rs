@@ -308,10 +308,10 @@ fn find_methylated_sites_in_gene(
 
         match &strand {
             Strand::Forward => {
-                sifter.forward_rac_sweep(&positions, &wt_freq, &mut_freq);
+                sifter.forward_sweep(&positions, &wt_freq, &mut_freq);
             }
             Strand::Backward => {
-                sifter.backward_car_sweep(&positions, &wt_freq, &mut_freq);
+                sifter.backward_sweep(&positions, &wt_freq, &mut_freq);
             }
         };
 
@@ -388,17 +388,27 @@ fn estimate_m6a_stat(
     let chr = gff.seqname.as_ref();
     let strand = &gff.strand;
 
-    let methylation_stat = stat_map.stratified_frequency_at(c2upos);
-
-    let unmethylated_base = match strand {
+    let unmutated_base = match strand {
         Strand::Forward => Dna::C,
         Strand::Backward => Dna::G,
     };
 
-    let methylated_base = match strand {
+    let mutated_base = match strand {
         Strand::Forward => Dna::T,
         Strand::Backward => Dna::A,
     };
+
+    // set the anchor position for m6A
+    match strand {
+        Strand::Forward => {
+            stat_map.set_anchor_position(m6apos, Dna::A);
+        }
+        Strand::Backward => {
+            stat_map.set_anchor_position(m6apos, Dna::T);
+        }
+    };
+
+    let methylation_stat = stat_map.stratified_frequency_at(c2upos);
 
     let (lb, ub) = if let Some(r) = args.resolution_kb {
         // report reduced kb resolution
@@ -416,8 +426,8 @@ fn estimate_m6a_stat(
 
     if let Some(meth_stat) = methylation_stat {
         for (cb, counts) in meth_stat {
-            let methylated = counts.get(Some(&methylated_base));
-            let unmethylated = counts.get(Some(&unmethylated_base));
+            let methylated = counts.get(Some(&mutated_base));
+            let unmethylated = counts.get(Some(&unmutated_base));
 
             if (args.include_missing_barcode || cb != &CellBarcode::Missing) && methylated > 0 {
                 ret.push((

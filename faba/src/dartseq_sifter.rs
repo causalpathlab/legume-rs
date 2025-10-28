@@ -22,7 +22,7 @@ impl DartSeqSifter {
     /// * first: `R=A/G`
     /// * second: `A`
     /// * third: `C->T`
-    pub fn forward_rac_sweep(
+    pub fn forward_sweep(
         &mut self,
         positions: &Vec<i64>,
         wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
@@ -109,7 +109,7 @@ impl DartSeqSifter {
     /// * conversion site: first `C->T <=> G->A`
     /// * m6A site: second `A <=> T`
     /// * R site: third `(G/A) <=> (C/T)`
-    pub fn backward_car_sweep(
+    pub fn backward_sweep(
         &mut self,
         positions: &Vec<i64>,
         wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
