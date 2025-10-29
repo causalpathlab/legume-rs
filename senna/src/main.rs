@@ -2,9 +2,7 @@ mod embed_common;
 mod fit_deconv_reg;
 mod fit_svd;
 mod fit_topic;
-
-mod routines_post_process;
-mod routines_pre_process;
+mod senna_input;
 
 use embed_common::*;
 use fit_deconv_reg::*;

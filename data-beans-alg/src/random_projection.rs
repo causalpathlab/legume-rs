@@ -76,8 +76,8 @@ pub trait RandProjOps {
         ncols_per_group: Option<usize>,
     ) -> anyhow::Result<usize>;
 
-    /// Take samples assigned
-    fn groups_assigned(&self) -> anyhow::Result<&Vec<usize>>;
+    // Take samples assigned
+    // fn groups_assigned(&self) -> anyhow::Result<&Vec<usize>>;
 }
 
 /// column-wise visitor for random projection
@@ -102,10 +102,10 @@ fn project_columns_visitor(
 }
 
 impl RandProjOps for SparseIoVec {
-    fn groups_assigned(&self) -> anyhow::Result<&Vec<usize>> {
-        self.take_groups()
-            .ok_or(anyhow::anyhow!("unable to find sample information"))
-    }
+    // fn groups_assigned(&self) -> anyhow::Result<&Vec<usize>> {
+    //     self.take_groups()
+    //         .ok_or(anyhow::anyhow!("unable to find sample information"))
+    // }
 
     fn project_columns(
         &self,

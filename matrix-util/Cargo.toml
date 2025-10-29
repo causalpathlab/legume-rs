@@ -31,7 +31,7 @@ ndarray-rand = { workspace = true }
 instant-distance = { workspace = true }
 indicatif = { workspace = true }
 parquet = { workspace = true }
-fnv = "1.0.7"
+fnv = { workspace = true }
 zip = "5.1.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
