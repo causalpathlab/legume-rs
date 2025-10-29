@@ -1,9 +1,13 @@
 use crate::embed_common::*;
-use crate::routines_post_process::*;
-use crate::routines_pre_process::*;
+use crate::senna_input::*;
 
+use candle_core::Device;
 use candle_util::candle_data_loader::*;
 use candle_util::candle_decoder_topic::*;
+use candle_util::candle_model_traits::*;
+use indicatif::ParallelProgressIterator;
+use rayon::prelude::*;
+
 // use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_encoder_softmax_iaf::*;
 use candle_util::candle_inference::TrainConfig;
@@ -18,6 +22,13 @@ enum ComputeDevice {
     Cpu,
     Cuda,
     Metal,
+}
+
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+enum AdjMethod {
+    Batch,
+    Residual,
 }
 
 #[derive(Args, Debug)]
@@ -67,13 +78,12 @@ pub struct TopicArgs {
     #[arg(long, value_delimiter(','))]
     reference_batches: Option<Vec<Box<str>>>,
 
-    /// #downsampling columns per each collapsed sample. If None, no
-    /// downsampling.
-    #[arg(long, short = 's')]
-    down_sample: Option<usize>,
-
+    // /// #downsampling columns per each collapsed sample. If None, no
+    // /// downsampling.
+    // #[arg(long, short = 's')]
+    // down_sample: Option<usize>,
     /// optimization iterations
-    #[arg(long, default_value_t = 15)]
+    #[arg(long, default_value_t = 30)]
     iter_opt: usize,
 
     /// block_size (# columns) for parallel processing
@@ -123,6 +133,10 @@ pub struct TopicArgs {
     /// candle device
     #[arg(long, value_enum, default_value = "cpu")]
     device: ComputeDevice,
+
+    /// adjust by batch or residual
+    #[arg(long, value_enum, default_value = "residual")]
+    adj_method: AdjMethod,
 
     /// preload all the columns data
     #[arg(long, default_value_t = false)]
@@ -189,8 +203,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     // 3. Batch-adjusted collapsing (pseudobulk)
     // assign pseudobulk samples by proj_kn
-    let nsamp =
-        data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
+    let nsamp = data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
 
     if !args.ignore_batch_effects && nbatch > 1 {
         info!("Registering batch information");
@@ -362,8 +375,18 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     info!("Writing down the latent states");
 
-    let delta_db = batch_db.map(|x| x.posterior_mean());
-    let z_nk = evaluate_latent_by_encoder(&data_vec, &encoder, &train_config, delta_db)?;
+    // let delta = match &args.adj_method {
+    //     AdjMethod::Batch => collapsed.delta.map(|x| x.posterior_mean().clone()),
+    //     AdjMethod::Residual => collapsed.mu_residual.map(|x| x.posterior_mean().clone()),
+    // };
+
+    let z_nk = evaluate_latent_by_encoder(
+        &data_vec,
+        &encoder,
+        &train_config,
+        &collapsed,
+        &args.adj_method,
+    )?;
 
     let cell_names = data_vec.column_names()?;
 
@@ -375,4 +398,135 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     info!("Done");
     Ok(())
+}
+
+/// Evaluate latent representation with the trained encoder network
+///
+/// #Arguments
+/// * `data_vec` - full data vector
+/// * `encoder` - encoder network
+/// * `train_config` - training configuration
+/// * `delta_db` - batch effect matrix (feature x batch)
+fn evaluate_latent_by_encoder<Enc>(
+    data_vec: &SparseIoVec,
+    encoder: &Enc,
+    train_config: &TrainConfig,
+    collapsed: &CollapsedOut,
+    adj_method: &AdjMethod,
+) -> anyhow::Result<Mat>
+where
+    Enc: EncoderModuleT + Send + Sync,
+{
+    let dev = &train_config.device;
+    let ntot = data_vec.num_columns()?;
+    let kk = encoder.dim_latent();
+
+    let block_size = train_config.batch_size;
+
+    let jobs = create_jobs(ntot, Some(block_size));
+    let njobs = jobs.len() as u64;
+    let arc_enc = Arc::new(encoder);
+
+    let delta = match adj_method {
+        AdjMethod::Batch => collapsed.delta.as_ref().map(|x| x.posterior_mean().clone()),
+        AdjMethod::Residual => collapsed
+            .mu_residual
+            .as_ref()
+            .map(|x| x.posterior_mean().clone()),
+    }
+    .map(|delta_db| {
+        delta_db
+            .to_tensor(dev)
+            .expect("delta to tensor")
+            .transpose(0, 1)
+            .expect("transpose")
+    });
+
+    let mut chunks = jobs
+        .par_iter()
+        .progress_count(njobs)
+        .map(|&block| match adj_method {
+            AdjMethod::Residual => {
+                evaluate_with_residuals(block, data_vec, arc_enc.clone(), dev, delta.as_ref())
+            }
+            AdjMethod::Batch => {
+                evalulate_with_batch(block, data_vec, arc_enc.clone(), dev, delta.as_ref())
+            }
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    chunks.sort_by_key(|&(lb, _)| lb);
+    let chunks = chunks.into_iter().map(|(_, z_nk)| z_nk).collect::<Vec<_>>();
+
+    let mut ret = Mat::zeros(ntot, kk);
+    {
+        let mut lb = 0;
+        for z in chunks {
+            let ub = lb + z.nrows();
+            ret.rows_range_mut(lb..ub).copy_from(&z);
+            lb = ub;
+        }
+    }
+    Ok(ret)
+}
+
+fn evalulate_with_batch<Enc>(
+    block: (usize, usize),
+    data_vec: &SparseIoVec,
+    encoder: Arc<&Enc>,
+    dev: &Device,
+    delta_bd: Option<&Tensor>,
+) -> anyhow::Result<(usize, Mat)>
+where
+    Enc: EncoderModuleT,
+{
+    let (lb, ub) = block;
+    let x0_nd = delta_bd.map(|delta_bm| {
+        let batches = data_vec
+            .get_batch_membership(lb..ub)
+            .into_iter()
+            .map(|x| x as u32);
+        let batches = Tensor::from_iter(batches.clone(), dev).unwrap();
+        delta_bm.index_select(&batches, 0).expect("expand delta")
+    });
+
+    let x_nd = data_vec
+        .read_columns_dmatrix(lb..ub)?
+        .to_tensor(dev)?
+        .transpose(0, 1)?;
+
+    let (z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
+    let z_nk = z_nk.to_device(&candle_core::Device::Cpu)?;
+    Ok((lb, Mat::from_tensor(&z_nk).expect("to mat")))
+}
+
+fn evaluate_with_residuals<Enc>(
+    block: (usize, usize),
+    data_vec: &SparseIoVec,
+    encoder: Arc<&Enc>,
+    dev: &Device,
+    delta_bp: Option<&Tensor>,
+) -> anyhow::Result<(usize, Mat)>
+where
+    Enc: EncoderModuleT,
+{
+    let (lb, ub) = block;
+    let x0_nd = delta_bp.map(|delta_bm| {
+        let groups = data_vec
+            .get_group_membership(lb..ub)
+            .expect("failed to get group membership")
+            .into_iter()
+            .map(|x| x as u32);
+        let groups = Tensor::from_iter(groups.clone(), dev).unwrap();
+        delta_bm.index_select(&groups, 0).expect("expand delta")
+    });
+
+    let x_nd = data_vec
+        .read_columns_dmatrix(lb..ub)?
+        .to_tensor(dev)?
+        .transpose(0, 1)?;
+
+    let (z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
+    let z_nk = z_nk.to_device(&candle_core::Device::Cpu)?;
+    Ok((lb, Mat::from_tensor(&z_nk).expect("to mat")))
 }

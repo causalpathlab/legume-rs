@@ -48,6 +48,7 @@ nalgebra-sparse = "0.10"
 num-traits = "0.2.19"
 
 dashmap = { version = "6.1.0", features = ["rayon"] }
+fnv = { version = "1.0.7" }
 
 instant-distance = "0.6"
 indicatif = { version = "^0.18", features = ["rayon"] }

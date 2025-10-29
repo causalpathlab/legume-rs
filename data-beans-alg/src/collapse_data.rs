@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use crate::normalization::NormalizeDistance;
 use data_beans::sparse_data_visitors::*;
 use data_beans::sparse_io_vector::SparseIoVec;
 use indicatif::ProgressIterator;
@@ -8,8 +7,11 @@ use log::{info, warn};
 use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::Inference;
 use matrix_param::traits::*;
-use matrix_util::utils::partition_by_membership;
+use matrix_util::traits::*;
 use std::sync::{Arc, Mutex};
+
+use fnv::FnvHashMap as HashMap;
+type CscMat = nalgebra_sparse::CscMatrix<f32>;
 
 pub const DEFAULT_KNN: usize = 10;
 pub const DEFAULT_OPT_ITER: usize = 100;
@@ -59,15 +61,9 @@ pub trait CollapsingOps {
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 
-    fn collect_basic_stat(
-        &self,
-        stat: &mut CollapsedStat,
-    ) -> anyhow::Result<()>;
+    fn collect_basic_stat(&self, stat: &mut CollapsedStat) -> anyhow::Result<()>;
 
-    fn collect_batch_stat(
-        &self,
-        stat: &mut CollapsedStat,
-    ) -> anyhow::Result<()>;
+    fn collect_batch_stat(&self, stat: &mut CollapsedStat) -> anyhow::Result<()>;
 
     fn collect_matched_stat(
         &self,
@@ -185,26 +181,12 @@ impl CollapsingOps for SparseIoVec {
         optimize(&stat, (a0, b0), num_opt_iter.unwrap_or(DEFAULT_OPT_ITER))
     }
 
-    fn collect_basic_stat(
-        &self,
-        stat: &mut CollapsedStat,
-    ) -> anyhow::Result<()> {
-        self.visit_columns_by_group(
-            &collect_basic_stat_visitor,
-            &EmptyArg {},
-            stat,
-        )
+    fn collect_basic_stat(&self, stat: &mut CollapsedStat) -> anyhow::Result<()> {
+        self.visit_columns_by_group(&collect_basic_stat_visitor, &EmptyArg {}, stat)
     }
 
-    fn collect_batch_stat(
-        &self,
-        stat: &mut CollapsedStat,
-    ) -> anyhow::Result<()> {
-        self.visit_columns_by_group(
-            &collect_batch_stat_visitor,
-            &EmptyArg {},
-            stat,
-        )
+    fn collect_batch_stat(&self, stat: &mut CollapsedStat) -> anyhow::Result<()> {
+        self.visit_columns_by_group(&collect_batch_stat_visitor, &EmptyArg {}, stat)
     }
 
     fn collect_matched_stat(
@@ -258,36 +240,83 @@ fn collect_matched_stat_visitor(
         )?,
     };
 
-    // Normalize distance for each source cell and take a
-    // weighted average of the matched vectors using this
-    // weight vector
-    let norm_target = 2_f32.ln();
-    let source_column_groups = partition_by_membership(&source_columns, None);
+    let mut y1 = data_vec.read_columns_csc(cells.iter().cloned())?;
+
+    let y1_pos: HashMap<_, _> = cells
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, p)| (p, i))
+        .collect();
+
+    let d_triplets = source_columns
+        .iter()
+        .zip(euclidean_distances.iter())
+        .enumerate()
+        .map(|(t, (&s, &d))| (t, y1_pos[&s], d))
+        .collect::<Vec<_>>();
 
     ////////////////////////////////////////////////////////
     // zhat[g,j]  =  sum_k w[j,k] * z[g,k] / sum_k w[j,k] //
     // zsum[g,s]  =  sum_j zhat[g,j]                      //
     ////////////////////////////////////////////////////////
 
+    // Normalize distance for each source cell and take a
+    // weighted average of the matched vectors using this
+    // weight vector
+
+    let dd = CscMat::from_nonzero_triplets(y0_matched.ncols(), y1.ncols(), d_triplets)?;
+    let ww = (-dd).normalize_exp_logits_columns();
+
+    let y1_hat = &y0_matched * ww;
+    y1.adjust_by_division_inplace(&y1_hat);
+
     let mut stat = arc_stat.lock().expect("lock stat");
 
-    for (_, y0_pos) in source_column_groups.iter() {
-        let weights = y0_pos
-            .iter()
-            .map(|&cell| euclidean_distances[cell])
-            .normalized_exp(norm_target);
-
-        let denom = weights.iter().sum::<f32>();
-
-        y0_pos.iter().zip(weights.iter()).for_each(|(&k, &w)| {
-            let y0 = y0_matched.get_col(k).expect("k missing");
-            let y0_rows = y0.row_indices();
-            let y0_vals = y0.values();
-            y0_rows.iter().zip(y0_vals.iter()).for_each(|(&gene, &z)| {
-                stat.zsum_ds[(gene, sample)] += z * w / denom;
-            });
-        });
+    for y_j in y1_hat.col_iter() {
+        let rows = y_j.row_indices();
+        let vals = y_j.values();
+        for (&gene, &y) in rows.iter().zip(vals.iter()) {
+            stat.imputed_sum_ds[(gene, sample)] += y;
+        }
     }
+
+    for y_j in y1.col_iter() {
+        let rows = y_j.row_indices();
+        let vals = y_j.values();
+        for (&gene, &y) in rows.iter().zip(vals.iter()) {
+            stat.residual_sum_ds[(gene, sample)] += y;
+        }
+    }
+
+    // let norm_target = 2_f32.ln();
+    // let source_column_groups = partition_by_membership(&source_columns, None);
+
+    // ////////////////////////////////////////////////////////
+    // // zhat[g,j]  =  sum_k w[j,k] * z[g,k] / sum_k w[j,k] //
+    // // zsum[g,s]  =  sum_j zhat[g,j]                      //
+    // ////////////////////////////////////////////////////////
+
+    // let mut stat = arc_stat.lock().expect("lock stat");
+
+    // for (_, y0_pos) in source_column_groups.iter() {
+    //     let weights = y0_pos
+    //         .iter()
+    //         .map(|&cell| euclidean_distances[cell])
+    //         .normalized_exp(norm_target);
+
+    //     let denom = weights.iter().sum::<f32>();
+
+    //     y0_pos.iter().zip(weights.iter()).for_each(|(&k, &w)| {
+    //         let y0 = y0_matched.get_col(k).expect("k missing");
+    //         let y0_rows = y0.row_indices();
+    //         let y0_vals = y0.values();
+    //         y0_rows.iter().zip(y0_vals.iter()).for_each(|(&gene, &z)| {
+    //             stat.imputed_sum_ds[(gene, sample)] += z * w / denom;
+    //         });
+    //     });
+    // }
+
     Ok(())
 }
 
@@ -306,7 +335,7 @@ fn collect_basic_stat_visitor(
         let rows = y_j.row_indices();
         let vals = y_j.values();
         for (&gene, &y) in rows.iter().zip(vals.iter()) {
-            stat.ysum_ds[(gene, sample)] += y;
+            stat.observed_sum_ds[(gene, sample)] += y;
         }
         stat.size_s[sample] += 1_f32; // each column is a sample
     }
@@ -332,7 +361,7 @@ fn collect_batch_stat_visitor(
         let rows = y_j.row_indices();
         let vals = y_j.values();
         for (&gene, &y) in rows.iter().zip(vals.iter()) {
-            stat.ysum_db[(gene, b)] += y;
+            stat.observed_sum_db[(gene, b)] += y;
         }
         stat.n_bs[(b, sample)] += 1_f32;
     });
@@ -356,10 +385,30 @@ fn optimize(
         // temporary denominator
         let mut denom_ds = nalgebra::DMatrix::<f32>::zeros(num_genes, num_samples);
 
+        // parameters
         let mut mu_adj_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
         let mut mu_resid_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
         let mut gamma_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
         let mut delta_param = GammaMatrix::new((num_genes, num_batches), a0, b0);
+
+        ////////////////////////////////////
+        // E[y_resid] = E[μ_resid]        //
+        //       E[y] = E[μ_resid] * E[μ] //
+        //   E[y_hat] = E[γ] * E[μ]       //
+        //   E[y_bat] = E[δ] * E[μ]       //
+        ////////////////////////////////////
+
+        //            residual_sum_ds
+        // μ_resid = -----------------
+        //            1_d * size_s'
+
+        {
+            denom_ds.row_iter_mut().for_each(|mut row| {
+                row += &stat.size_s.transpose();
+            });
+            mu_resid_param.update_stat(&stat.residual_sum_ds, &denom_ds);
+            mu_resid_param.calibrate();
+        };
 
         (0..num_iter).progress().for_each(|_opt_iter| {
             #[cfg(debug_assertions)]
@@ -367,71 +416,99 @@ fn optimize(
                 debug!("iteration: {}", &_opt_iter);
             }
 
-            // shared component (mu_ds)
-            //
-            // y_sum_ds + z_sum_ds
-            // -----------------------------------------
-            // sum_b delta_db * n_bs + gamma_ds .* size_s
-
+            let resid_ds = mu_resid_param.posterior_mean();
             let gamma_ds = gamma_param.posterior_mean();
-            let delta_db = delta_param.posterior_mean();
 
-            denom_ds.copy_from(gamma_ds);
+            //      observed_ds + imputed_sum_ds
+            // μ = ---------------------------------
+            //      (μ_resid + γ) .* (1_d * size_s')
+
+            denom_ds.copy_from(&(resid_ds + gamma_ds));
             denom_ds.row_iter_mut().for_each(|mut row| {
                 row.component_mul_assign(&stat.size_s.transpose());
             });
-            denom_ds += delta_db * &stat.n_bs;
 
-            mu_adj_param.update_stat(&(&stat.ysum_ds + &stat.zsum_ds), &denom_ds);
+            mu_adj_param.update_stat(&(&stat.observed_sum_ds + &stat.imputed_sum_ds), &denom_ds);
             mu_adj_param.calibrate();
 
             let mu_ds = mu_adj_param.posterior_mean();
 
-            // z-specific component (gamma_ds)
-            //
-            // z_sum_ds
-            // -----------------------------------
-            // mu_ds .* size_s
+            //      imputed_sum_ds
+            // γ = ---------------------
+            //      μ .* (1_d * size_s')
 
             denom_ds.copy_from(mu_ds);
             denom_ds.row_iter_mut().for_each(|mut row| {
                 row.component_mul_assign(&stat.size_s.transpose());
             });
-
-            gamma_param.update_stat(&stat.zsum_ds, &denom_ds);
+            gamma_param.update_stat(&stat.imputed_sum_ds, &denom_ds);
             gamma_param.calibrate();
-
-            // batch-specific effect (delta_db)
-            //
-            // y_sum_db
-            // ---------------------
-            // sum_s mu_ds * n_bs
-
-            delta_param.update_stat(&stat.ysum_db, &(mu_ds * &stat.n_bs.transpose()));
-            delta_param.calibrate();
         });
 
-        // Just take the residuals of ysum
-        //
-        // y_sum_ds
-        // -----------------------
-        // mu_ds .* (1_d * size_s')
+        //      observed_db
+        // δ = ---------------------
+        //      μ * size_bs'
         {
-            denom_ds =
-                nalgebra::DVector::<f32>::from_element(num_genes, 1_f32) * stat.size_s.transpose();
+            let mu_ds = mu_adj_param.posterior_mean();
+            delta_param.update_stat(&stat.observed_sum_db, &(mu_ds * &stat.n_bs.transpose()));
+            delta_param.calibrate();
+        }
 
-            mu_resid_param.update_stat(
-                &stat.ysum_ds,
-                &denom_ds.component_mul(mu_adj_param.posterior_mean()),
-            );
-            mu_resid_param.calibrate();
-        };
+        // (0..num_iter).progress().for_each(|_opt_iter| {
+        //     #[cfg(debug_assertions)]
+        //     {
+        //         debug!("iteration: {}", &_opt_iter);
+        //     }
+        //
+        //     // shared component (mu_ds)
+        //     //
+        //     // y_sum_ds + z_sum_ds
+        //     // -----------------------------------------
+        //     // sum_b delta_db * n_bs + gamma_ds .* size_s
+        //
+        //     let gamma_ds = gamma_param.posterior_mean();
+        //     let delta_db = delta_param.posterior_mean();
+        //
+        //     denom_ds.copy_from(gamma_ds);
+        //     denom_ds.row_iter_mut().for_each(|mut row| {
+        //         row.component_mul_assign(&stat.size_s.transpose());
+        //     });
+        //     denom_ds += delta_db * &stat.n_bs;
+        //
+        //     mu_adj_param.update_stat(&(&stat.observed_sum_ds + &stat.imputed_sum_ds), &denom_ds);
+        //     mu_adj_param.calibrate();
+        //
+        //     let mu_ds = mu_adj_param.posterior_mean();
+        //
+        //     // z-specific component (gamma_ds)
+        //     //
+        //     // z_sum_ds
+        //     // -----------------------------------
+        //     // mu_ds .* size_s
+        //
+        //     denom_ds.copy_from(mu_ds);
+        //     denom_ds.row_iter_mut().for_each(|mut row| {
+        //         row.component_mul_assign(&stat.size_s.transpose());
+        //     });
+        //
+        //     gamma_param.update_stat(&stat.imputed_sum_ds, &denom_ds);
+        //     gamma_param.calibrate();
+        //
+        //     // batch-specific effect (delta_db)
+        //     //
+        //     // y_sum_db
+        //     // ---------------------
+        //     // sum_s mu_ds * n_bs
+        //
+        //     delta_param.update_stat(&stat.observed_sum_db, &(mu_ds * &stat.n_bs.transpose()));
+        //     delta_param.calibrate();
+        // });
 
         // Take the observed mean
         {
             let denom_ds: nalgebra::DMatrix<f32> =
                 nalgebra::DVector::<f32>::from_element(num_genes, 1_f32) * stat.size_s.transpose();
-            mu_param.update_stat(&stat.ysum_ds, &denom_ds);
+            mu_param.update_stat(&stat.observed_sum_ds, &denom_ds);
             mu_param.calibrate();
         };
 
@@ -445,7 +522,7 @@ fn optimize(
     } else {
         let denom_ds: nalgebra::DMatrix<f32> =
             nalgebra::DVector::<f32>::from_element(num_genes, 1_f32) * stat.size_s.transpose();
-        mu_param.update_stat(&stat.ysum_ds, &denom_ds);
+        mu_param.update_stat(&stat.observed_sum_ds, &denom_ds);
         mu_param.calibrate();
         Ok(CollapsedOut {
             mu_observed: mu_param,
@@ -469,40 +546,43 @@ pub struct CollapsedOut {
 
 /// a struct to hold the sufficient statistics for the model
 pub struct CollapsedStat {
-    pub ysum_ds: nalgebra::DMatrix<f32>, // observed sum within each sample
-    pub zsum_ds: nalgebra::DMatrix<f32>, // counterfactual sum within each sample
-    pub size_s: nalgebra::DVector<f32>,  // sample s size
-    pub ysum_db: nalgebra::DMatrix<f32>, // divergence numerator
-    pub n_bs: nalgebra::DMatrix<f32>,    // batch-specific sample size
+    pub observed_sum_ds: nalgebra::DMatrix<f32>, // observed sum within each sample
+    pub imputed_sum_ds: nalgebra::DMatrix<f32>,  // counterfactual sum within each sample
+    pub residual_sum_ds: nalgebra::DMatrix<f32>, // residual sum within each sample
+    pub size_s: nalgebra::DVector<f32>,          // sample s size
+    pub observed_sum_db: nalgebra::DMatrix<f32>, // divergence numerator
+    pub n_bs: nalgebra::DMatrix<f32>,            // batch-specific sample size
 }
 
 impl CollapsedStat {
     pub fn new(ngene: usize, nsample: usize, nbatch: usize) -> Self {
         Self {
-            ysum_ds: nalgebra::DMatrix::<f32>::zeros(ngene, nsample),
-            zsum_ds: nalgebra::DMatrix::<f32>::zeros(ngene, nsample),
+            observed_sum_ds: nalgebra::DMatrix::<f32>::zeros(ngene, nsample),
+            imputed_sum_ds: nalgebra::DMatrix::<f32>::zeros(ngene, nsample),
+            residual_sum_ds: nalgebra::DMatrix::<f32>::zeros(ngene, nsample),
             size_s: nalgebra::DVector::<f32>::zeros(nsample),
-            ysum_db: nalgebra::DMatrix::<f32>::zeros(ngene, nbatch),
+            observed_sum_db: nalgebra::DMatrix::<f32>::zeros(ngene, nbatch),
             n_bs: nalgebra::DMatrix::<f32>::zeros(nbatch, nsample),
         }
     }
 
     pub fn num_genes(&self) -> usize {
-        self.ysum_ds.nrows()
+        self.observed_sum_ds.nrows()
     }
 
     pub fn num_samples(&self) -> usize {
-        self.ysum_ds.ncols()
+        self.observed_sum_ds.ncols()
     }
 
     pub fn num_batches(&self) -> usize {
-        self.ysum_db.ncols()
+        self.observed_sum_db.ncols()
     }
 
     pub fn clear(&mut self) {
-        self.ysum_ds.fill(0_f32);
-        self.zsum_ds.fill(0_f32);
-        self.ysum_db.fill(0_f32);
+        self.observed_sum_ds.fill(0_f32);
+        self.imputed_sum_ds.fill(0_f32);
+        self.residual_sum_ds.fill(0_f32);
+        self.observed_sum_db.fill(0_f32);
         self.size_s.fill(0_f32);
         self.n_bs.fill(0_f32);
     }

@@ -1,6 +1,5 @@
 use crate::embed_common::*;
-use crate::routines_post_process::*;
-use crate::routines_pre_process::*;
+use crate::senna_input::*;
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 
 #[derive(Args, Debug)]
@@ -29,6 +28,10 @@ pub struct SvdArgs {
     #[arg(long, default_value_t = false)]
     ignore_batch_effects: bool,
 
+    /// warm start from the previous projection (`cell x k`)
+    #[arg(short = 'w', long = "warm-start")]
+    warm_start_proj_file: Option<Box<str>>,
+
     /// #k-nearest neighbours batches
     #[arg(long, default_value_t = 10)]
     knn_batches: usize,
@@ -41,13 +44,12 @@ pub struct SvdArgs {
     #[arg(long, value_delimiter(','))]
     reference_batches: Option<Vec<Box<str>>>,
 
-    /// #downsampling columns per each collapsed sample. If None, no
-    /// downsampling.
-    #[arg(long, short = 's')]
-    down_sample: Option<usize>,
-
+    // /// #downsampling columns per each collapsed sample. If None, no
+    // /// downsampling.
+    // #[arg(long, short = 's')]
+    // down_sample: Option<usize>,
     /// optimization iterations
-    #[arg(long, default_value_t = 15)]
+    #[arg(long, default_value_t = 30)]
     iter_opt: usize,
 
     /// block_size (# columns) for parallel processing
@@ -89,19 +91,41 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     })?;
 
     // 2. Random projection
-    let proj_dim = args.proj_dim.max(args.n_latent_topics);
+    let proj_kn = if let Some(proj_file) = args.warm_start_proj_file.as_deref() {
+        use matrix_util::common_io::*;
+        let ext = extension(proj_file)?;
 
-    let proj_out = data_vec.project_columns_with_batch_correction(
-        proj_dim,
-        Some(args.block_size),
-        Some(&batch_membership),
-    )?;
+        let MatWithNames {
+            rows: cell_names,
+            cols: _,
+            mat: proj_nk,
+        } = match ext.as_ref() {
+            "parquet" => Mat::from_parquet_with_row_names(&proj_file, Some(0))?,
+            _ => Mat::read_data_with_names(&proj_file, &['\t', ',', ' '], Some(0), Some(0))?,
+        };
 
-    let proj_kn = proj_out.proj;
+        if data_vec.column_names()? != cell_names {
+            return Err(anyhow::anyhow!(
+                "warm start projection rows don't match with the data"
+            ));
+        }
+
+        proj_nk.transpose()
+    } else {
+        let proj_dim = args.proj_dim.max(args.n_latent_topics);
+
+        let proj_out = data_vec.project_columns_with_batch_correction(
+            proj_dim,
+            Some(args.block_size),
+            Some(&batch_membership),
+        )?;
+
+        proj_out.proj
+    };
+
     info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
 
-    let nsamp =
-        data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
+    let nsamp = data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
 
     if !args.ignore_batch_effects && nbatch > 1 {
         info!("Registering batch information");
@@ -120,13 +144,15 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     )?;
 
     // 4. batch-adjusted data
-    let batch_db = collapse_out.delta.as_ref();
+    let batch_dp = collapse_out.mu_residual.as_ref();
 
-    if let Some(delta_db) = batch_db.map(|x| x.posterior_mean()) {
+    if let Some(delta_dp) = batch_dp.map(|x| x.posterior_mean()) {
+        info!("{} x {}", delta_dp.nrows(), delta_dp.ncols());
+
         if args.save_adjusted {
             info!("Generating batch-adjusted data...");
 
-            let triplets = triplets_adjusted_by_batch(&data_vec, delta_db)?;
+            let triplets = triplets_adjusted_by_pseudobulk(&data_vec, delta_dp)?;
 
             let mtx_shape = (
                 data_vec.num_rows()?,
@@ -152,7 +178,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         }
     }
 
-    if let Some(batch_db) = batch_db {
+    if let Some(batch_db) = collapse_out.delta {
         let outfile = args.out.to_string() + ".delta.parquet";
         let batch_names = data_vec.batch_names();
         let gene_names = data_vec.row_names()?;
@@ -160,7 +186,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     }
 
     // 5. Nystrom projection
-
     let x_dn = match collapse_out.mu_adjusted.as_ref() {
         Some(adj) => adj,
         None => &collapse_out.mu_observed,
@@ -168,7 +193,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
 
     let nystrom_out = do_nystrom_proj(
         x_dn.posterior_log_mean().clone(),
-        batch_db.map(|x| x.posterior_mean()),
+        batch_dp.map(|x| x.posterior_mean()),
         &data_vec,
         args.n_latent_topics,
         Some(args.block_size),
@@ -192,42 +217,11 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn nystrom_proj_visitor(
-    job: (usize, usize),
-    full_data_vec: &SparseIoVec,
-    proj_basis: &NystromParam,
-    arc_proj_kn: Arc<Mutex<&mut Mat>>,
-) -> anyhow::Result<()> {
-    let (lb, ub) = job;
-    // let proj_dk = proj_basis.dictionary_dk;
-    let basis_dk = proj_basis.basis_dk;
-    let delta_db = proj_basis.batch_db;
-
-    let mut x_dn = full_data_vec.read_columns_csc(lb..ub)?;
-
-    x_dn.normalize_columns_inplace();
-
-    if let Some(delta_db) = delta_db {
-        let batches = full_data_vec.get_batch_membership(lb..ub);
-        x_dn.adjust_by_division_of_selected_inplace(delta_db, &batches);
-    }
-
-    x_dn.log1p_inplace();
-    x_dn.scale_columns_inplace();
-
-    let chunk = (x_dn.transpose() * basis_dk).transpose();
-
-    let mut proj_kn = arc_proj_kn.lock().expect("lock proj in nystrom");
-
-    proj_kn.columns_range_mut(lb..ub).copy_from(&chunk);
-    Ok(())
-}
-
 #[allow(dead_code)]
 struct NystromParam<'a> {
     dictionary_dk: &'a Mat,
     basis_dk: &'a Mat,
-    batch_db: Option<&'a Mat>,
+    delta_dp: Option<&'a Mat>,
 }
 
 pub struct NystromOut {
@@ -247,7 +241,7 @@ pub struct NystromOut {
 ///
 fn do_nystrom_proj(
     log_xx_dn: Mat,
-    delta_db: Option<&Mat>,
+    delta_dp: Option<&Mat>,
     full_data_vec: &SparseIoVec,
     rank: usize,
     block_size: Option<usize>,
@@ -273,7 +267,7 @@ fn do_nystrom_proj(
     let nystrom_param = NystromParam {
         dictionary_dk: &u_dk,
         basis_dk: &basis_dk,
-        batch_db: delta_db,
+        delta_dp,
     };
 
     let mut proj_kn = Mat::zeros(kk, ntot);
@@ -291,4 +285,84 @@ fn do_nystrom_proj(
         dictionary_dk: u_dk,
         latent_nk: z_nk,
     })
+}
+
+fn nystrom_proj_visitor(
+    job: (usize, usize),
+    full_data_vec: &SparseIoVec,
+    proj_basis: &NystromParam,
+    arc_proj_kn: Arc<Mutex<&mut Mat>>,
+) -> anyhow::Result<()> {
+    let (lb, ub) = job;
+    // let proj_dk = proj_basis.dictionary_dk;
+    let basis_dk = proj_basis.basis_dk;
+    let delta_dp = proj_basis.delta_dp;
+
+    let mut x_dn = full_data_vec.read_columns_csc(lb..ub)?;
+
+    x_dn.normalize_columns_inplace();
+
+    if let Some(delta_dp) = delta_dp {
+        let pseudobulk = full_data_vec.get_group_membership(lb..ub)?;
+        x_dn.adjust_by_division_of_selected_inplace(delta_dp, &pseudobulk);
+    }
+
+    x_dn.log1p_inplace();
+    x_dn.scale_columns_inplace();
+
+    let chunk = (x_dn.transpose() * basis_dk).transpose();
+
+    let mut proj_kn = arc_proj_kn.lock().expect("lock proj in nystrom");
+
+    proj_kn.columns_range_mut(lb..ub).copy_from(&chunk);
+    Ok(())
+}
+
+/// Adjust the original data by eliminating batch effects `delta_db`
+/// (`d x b`) from each column. We will directly call
+/// `get_batch_membership` in `data_vec`.
+///
+/// # Arguments
+/// * `data_vec` - sparse data vector
+/// * `delta_dp` - row/feature by pseudobulk average effect matrix
+///
+/// # Returns
+/// * `triplets` - we can feed this vector to create a new backend
+fn triplets_adjusted_by_pseudobulk(
+    data_vec: &SparseIoVec,
+    delta_dp: &Mat,
+) -> anyhow::Result<Vec<(u64, u64, f32)>> {
+    let mut triplets = vec![];
+    data_vec.visit_columns_by_block(&adjust_triplets_visitor, delta_dp, &mut triplets, None)?;
+    Ok(triplets)
+}
+
+fn adjust_triplets_visitor(
+    job: (usize, usize),
+    full_data_vec: &SparseIoVec,
+    delta_dp: &Mat,
+    triplets: Arc<Mutex<&mut Vec<(u64, u64, f32)>>>,
+) -> anyhow::Result<()> {
+    let (lb, ub) = job;
+
+    let pbs = full_data_vec.get_group_membership(lb..ub)?;
+    let mut x_dn = full_data_vec.read_columns_csc(lb..ub)?;
+
+    x_dn.adjust_by_division_of_selected_inplace(delta_dp, &pbs);
+
+    let new_triplets = x_dn
+        .triplet_iter()
+        .filter_map(|(i, j, &x_ij)| {
+            let x_ij = x_ij.round();
+            if x_ij < 1_f32 {
+                None
+            } else {
+                Some((i as u64, (j + lb) as u64, x_ij))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut triplets = triplets.lock().expect("lock triplets");
+    triplets.extend(new_triplets);
+    Ok(())
 }

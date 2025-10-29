@@ -22,7 +22,7 @@ pub struct SparseIoVec {
     offset: usize,
     row_name_position: HashMap<Box<str>, usize>,
     column_names_with_data_tag: Vec<Box<str>>,
-    col_to_group: Option<Vec<usize>>,
+    col_to_group: Option<HashMap<usize, usize>>,
     group_to_cols: Option<Vec<Vec<usize>>>,
     batch_knn_lookup: Option<Vec<ColumnDict<usize>>>,
     col_to_batch: Option<Vec<usize>>,
@@ -76,20 +76,47 @@ impl SparseIoVec {
     }
 
     pub fn assign_groups(&mut self, cell_to_group: Vec<usize>, ncells_per_group: Option<usize>) {
-        self.group_to_cols = Some(
-            partition_by_membership(&cell_to_group, ncells_per_group)
-                .into_values()
-                .collect(),
-        );
-        self.col_to_group = Some(cell_to_group);
+        let group_to_cols: Vec<Vec<_>> = partition_by_membership(&cell_to_group, ncells_per_group)
+            .into_values()
+            .collect();
+
+        let col_to_group: HashMap<_, _> = group_to_cols
+            .iter()
+            .enumerate()
+            .flat_map(|(g, cols)| cols.iter().map(|&j| (j, g)).collect::<Vec<_>>())
+            .collect();
+
+        self.group_to_cols = Some(group_to_cols);
+        self.col_to_group = Some(col_to_group);
     }
 
     pub fn take_grouped_columns(&self) -> Option<&Vec<Vec<usize>>> {
         self.group_to_cols.as_ref()
     }
 
-    pub fn take_groups(&self) -> Option<&Vec<usize>> {
-        self.col_to_group.as_ref()
+    // pub fn take_groups(&self) -> Option<&Vec<usize>> {
+    //     self.col_to_group.as_ref()
+    // }
+
+    pub fn get_group_membership<I>(&self, cells: I) -> anyhow::Result<Vec<usize>>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let cell_to_group = self
+            .col_to_group
+            .as_ref()
+            .expect("groups were not assigned");
+
+        let mut ret = vec![];
+        for j in cells {
+            if let Some(k) = cell_to_group.get(&j) {
+                ret.push(*k);
+            } else {
+                return Err(anyhow::anyhow!("missing group membership"));
+            }
+        }
+
+        Ok(ret)
     }
 
     pub fn num_groups(&self) -> usize {
