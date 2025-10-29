@@ -25,10 +25,6 @@ pub struct ReadDepthArgs {
     #[arg(long, default_value = "CB")]
     cell_barcode_tag: Box<str>,
 
-    /// gene barcode tag. [See here](`https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam`)
-    #[arg(long, default_value = "GX")]
-    gene_barcode_tag: Box<str>,
-
     /// bam record type (gene, transcript, exon, utr)
     #[arg(long, default_value = "gene")]
     record_type: Box<str>,
