@@ -73,7 +73,7 @@ pub struct DartSeqCountArgs {
     column_nnz_cutoff: usize,
 
     /// output value type
-    #[arg(short = 't', long, value_enum, default_value = "methylated")]
+    #[arg(short = 't', long, value_enum, default_value = "beta")]
     output_value_type: MethFeatureType,
 
     /// backend for the output file
