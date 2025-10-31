@@ -77,6 +77,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Columns(args) => {
             take_columns(args)?;
         }
+        Commands::Rows(args) => {
+            take_rows(args)?;
+        }
         Commands::ColumnNames(args) => {
             take_column_names(args)?;
         }
@@ -160,6 +163,12 @@ enum Commands {
     /// file as a dense matrix for a quick examination
     Columns(TakeColumnsArgs),
 
+    /// Take rows from the sparse matrix and save it to an `output`
+    /// file as a dense matrix for a quick examination.  For
+    /// convenience, it will output a transposed (`column x
+    /// selected_row`) matrix.
+    Rows(TakeRowsArgs),
+
     /// List column names
     ColumnNames(TakeColumnNamesArgs),
 
@@ -221,6 +230,24 @@ pub struct TakeColumnsArgs {
     column_indices: Option<Vec<usize>>,
 
     /// column name file where each line is a column name
+    #[arg(short = 'f', long)]
+    name_file: Option<Box<str>>,
+
+    /// output `parquet` file
+    #[arg(short, long, default_value = "stdout")]
+    output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct TakeRowsArgs {
+    /// data file -- either `.zarr` or `.h5`
+    data_file: Box<str>,
+
+    /// row indices to take: e.g., `0,1,2,3`
+    #[arg(short = 'i', long, value_delimiter = ',')]
+    row_indices: Option<Vec<usize>>,
+
+    /// row name file where each line is a row name
     #[arg(short = 'f', long)]
     name_file: Option<Box<str>>,
 
@@ -894,6 +921,74 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
 
     data.to_tsv(&output)?;
 
+    Ok(())
+}
+
+fn take_rows(args: &TakeRowsArgs) -> anyhow::Result<()> {
+    let data_file = args.data_file.clone();
+
+    let rows = args.row_indices.clone();
+    let row_name_file = args.name_file.clone();
+
+    let backend = match extension(&data_file)?.as_ref() {
+        "zarr" => SparseIoBackend::Zarr,
+        "h5" => SparseIoBackend::HDF5,
+        _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
+    };
+
+    let output = args.output.clone();
+
+    let data_backend = open_sparse_matrix(&data_file, &backend.clone())?;
+
+    let (data, row_names) = if let Some(rows) = rows {
+        let n_rows = data_backend.num_rows().unwrap_or(0);
+        let rows: Vec<usize> = rows.into_iter().filter(|&i| i < n_rows).collect();
+
+        if rows.is_empty() {
+            return Err(anyhow::anyhow!("invalid indexes"));
+        }
+
+        let _names = data_backend.row_names()?;
+        let row_names: Vec<Box<str>> = rows.iter().map(|&i| _names[i].clone()).collect();
+
+        (data_backend.read_rows_ndarray(rows)?, row_names)
+    } else if let Some(row_name_file) = row_name_file {
+        let col_names = read_col_names(row_name_file, MAX_ROW_NAME_IDX)?;
+        let col_names_map = data_backend
+            .row_names()?
+            .iter()
+            .enumerate()
+            .map(|(i, x)| (x.clone(), i))
+            .collect::<HashMap<_, _>>();
+
+        let col_names_order = col_names
+            .into_iter()
+            .filter_map(|x| col_names_map.get(&x))
+            .collect::<Vec<_>>();
+
+        let rows: Vec<usize> = col_names_order.iter().map(|&x| *x).collect();
+
+        let _names = data_backend.row_names()?;
+        let row_names: Vec<Box<str>> = rows.iter().map(|&i| _names[i].clone()).collect();
+
+        (data_backend.read_rows_ndarray(rows)?, row_names)
+    } else {
+        return Err(anyhow::anyhow!(
+            "either `row-indices` or `name-file` must be provided"
+        ));
+    };
+
+    let data_t = data.t().to_owned();
+
+    if let Ok(ext) = extension(&output) {
+        if ext.as_ref() == "parquet" {
+            let column_names = data_backend.column_names()?;
+            data_t.to_parquet(Some(&column_names), Some(&row_names), &output)?;
+            return Ok(());
+        }
+    }
+
+    data_t.to_tsv(&output)?;
     Ok(())
 }
 
