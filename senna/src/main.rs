@@ -2,12 +2,14 @@ mod embed_common;
 mod fit_deconv_reg;
 mod fit_svd;
 mod fit_topic;
+mod fit_joint_topic;
 mod senna_input;
 
 use embed_common::*;
 use fit_deconv_reg::*;
 use fit_svd::*;
 use fit_topic::*;
+use fit_joint_topic::*;
 
 /// Single cell embedding routines with nearest neighbourhood-based
 /// adjustment
