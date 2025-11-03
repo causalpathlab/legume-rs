@@ -1,7 +1,10 @@
 #![allow(dead_code)]
 
-use crate::common_io::write_lines;
-use ndarray::{ArrayBase, Axis, Data, Dimension, NdIndex, OwnedRepr, RemoveAxis};
+use crate::{
+    common_io::{extension, write_lines},
+    traits::IoOps,
+};
+use ndarray::{stack, ArrayBase, Axis, Data, Dimension, NdIndex, OwnedRepr, RemoveAxis};
 
 /// A container to keep track of sufficient statistics of an arbitrary
 /// shape `ndarray`
@@ -117,11 +120,19 @@ where
     //////////////////////
 
     fn _finite(x: f32) -> f32 {
-        if x.is_finite() { x } else { 0_f32 }
+        if x.is_finite() {
+            x
+        } else {
+            0_f32
+        }
     }
 
     fn _is_finite(x: f32) -> f32 {
-        if x.is_finite() { 1_f32 } else { 0_f32 }
+        if x.is_finite() {
+            1_f32
+        } else {
+            0_f32
+        }
     }
 
     fn _is_positive(x: f32) -> f32 {
@@ -141,8 +152,42 @@ where
     /// * `filename` - The name of the file to save the statistics to
     /// * `names` - The names of the statistics
     pub fn save(&self, filename: &str, names: &Vec<Box<str>>, sep: &str) -> anyhow::Result<()> {
-        let out = self.to_string_vec(names, sep)?;
-        write_lines(&out, filename)?;
+        match extension(filename)?.as_ref() {
+            "parquet" => {
+                let nnz = &self.count_positives();
+                let tot = &self.s1;
+                let mu = &self.mean();
+                let sig = &self.std();
+
+                let n = nnz.len();
+                let nnz_col = nnz.clone().into_shape_with_order((n,)).unwrap();
+                let tot_col = tot.clone().into_shape_with_order((n,)).unwrap();
+                let mu_col = mu.clone().into_shape_with_order((n,)).unwrap();
+                let sig_col = sig.clone().into_shape_with_order((n,)).unwrap();
+
+                let stacked = stack(
+                    Axis(1),
+                    &[
+                        nnz_col.view(),
+                        tot_col.view(),
+                        mu_col.view(),
+                        sig_col.view(),
+                    ],
+                )
+                .unwrap();
+
+                let column_names: Vec<Box<str>> = vec!["nnz", "tot", "mu", "sig"]
+                    .into_iter()
+                    .map(|s| s.into())
+                    .collect();
+
+                stacked.to_parquet(Some(&names), Some(&column_names), filename)?;
+            }
+            _ => {
+                write_lines(&self.to_string_vec(names, sep)?, filename)?;
+            }
+        };
+
         Ok(())
     }
 
