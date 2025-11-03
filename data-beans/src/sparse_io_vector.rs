@@ -2,13 +2,13 @@
 
 use crate::sparse_io::*;
 
+use fnv::FnvHashMap as HashMap;
 use log::info;
 use matrix_util::knn_match::ColumnDict;
 use matrix_util::knn_match::MakeVecPoint;
 use matrix_util::traits::*;
 use matrix_util::utils::*;
 use rayon::prelude::*;
-use std::collections::HashMap;
 use std::ops::Index;
 use std::sync::Arc;
 
@@ -46,20 +46,22 @@ impl Index<usize> for SparseIoVec {
 }
 
 impl Default for SparseIoVec {
+    /// an empty sparse io vector for horizontal data integration
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl SparseIoVec {
+    /// an empty sparse io vector for horizontal data integration
     pub fn new() -> Self {
         Self {
             data_vec: vec![],
             col_to_data: vec![],
-            data_to_cols: HashMap::new(),
+            data_to_cols: HashMap::default(),
             col_glob_to_loc: vec![],
             offset: 0,
-            row_name_position: HashMap::new(),
+            row_name_position: HashMap::default(),
             column_names_with_data_tag: vec![],
             col_to_group: None,
             group_to_cols: None,
@@ -71,14 +73,25 @@ impl SparseIoVec {
         }
     }
 
+    /// number of data sets
     pub fn len(&self) -> usize {
         self.data_vec.len()
     }
 
-    pub fn assign_groups(&mut self, cell_to_group: Vec<usize>, ncells_per_group: Option<usize>) {
-        let group_to_cols: Vec<Vec<_>> = partition_by_membership(&cell_to_group, ncells_per_group)
-            .into_values()
-            .collect();
+    /// Assign columns to groups
+    ///
+    /// * `column_to_group` - column to group membership
+    /// * `ncolumns_per_group` - number of columns per group. `None`: assign all the columns to the groups; `Some(x)`: limit the maximum number of columns per group to at most `x`.
+    ///
+    pub fn assign_groups(
+        &mut self,
+        column_to_group: Vec<usize>,
+        ncolumns_per_group: Option<usize>,
+    ) {
+        let group_to_cols: Vec<Vec<_>> =
+            partition_by_membership(&column_to_group, ncolumns_per_group)
+                .into_values()
+                .collect();
 
         let col_to_group: HashMap<_, _> = group_to_cols
             .iter()
@@ -90,6 +103,7 @@ impl SparseIoVec {
         self.col_to_group = Some(col_to_group);
     }
 
+    /// Take a vector of columns where each vector corresponds to a set
     pub fn take_grouped_columns(&self) -> Option<&Vec<Vec<usize>>> {
         self.group_to_cols.as_ref()
     }
@@ -98,6 +112,9 @@ impl SparseIoVec {
     //     self.col_to_group.as_ref()
     // }
 
+    /// Recall the `cells` group assignment; Note that this can be
+    /// differ from the original vector used in `assign_groups` as we
+    /// can have different number of columns and groups.
     pub fn get_group_membership<I>(&self, cells: I) -> anyhow::Result<Vec<usize>>
     where
         I: Iterator<Item = usize>,
@@ -119,6 +136,7 @@ impl SparseIoVec {
         Ok(ret)
     }
 
+    /// number of groups
     pub fn num_groups(&self) -> usize {
         self.group_to_cols.as_ref().map(|x| x.len()).unwrap_or(0)
     }

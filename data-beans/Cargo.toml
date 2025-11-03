@@ -25,7 +25,7 @@ rayon = { workspace = true }
 
 hdf5 = { package = "hdf5-metno", version = "0.10", features = ["blosc"] }
 libz-sys = { version = "1.1", features = ["libc"], default-features = false }
-zarrs = "0.22"
+zarrs = { version = "0.22.6" }
 
 tempfile = { workspace = true }
 rand = { workspace = true }
@@ -44,4 +44,5 @@ indicatif = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 dashmap = { workspace = true }
-zip = "5.1.1"
+fnv = { workspace = true }
+zip = { workspace = true }

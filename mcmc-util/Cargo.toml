@@ -24,14 +24,10 @@ approx = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 
-ndarray = { workspace = true }
-ndarray-linalg = { workspace = true }
-ndarray-rand = { workspace = true }
-
 instant-distance = { workspace = true }
 indicatif = { workspace = true }
 parquet = { workspace = true }
 matrix-util = { workspace = true }
 
-fnv = "1.0.7"
-zip = "5.1.1"
+fnv = { workspace = true }
+# zip = "5.1.1"

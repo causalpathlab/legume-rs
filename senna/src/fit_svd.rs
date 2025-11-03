@@ -84,7 +84,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         data: mut data_vec,
         batch: batch_membership,
         nbatch,
-    } = read_sparse_data_with_membership(ReadArgs {
+    } = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
         preload: args.preload_data,

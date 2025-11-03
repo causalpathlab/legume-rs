@@ -1,5 +1,3 @@
-use ndarray::Array2;
-
 #[test]
 fn order_test() {
     use ndarray::{arr2, Array2};
@@ -73,68 +71,6 @@ fn dmatrix_rsvd_test2() -> anyhow::Result<()> {
 
     let eye = svd.2.transpose() * svd.2;
     approx::assert_abs_diff_eq!(eye, identity, epsilon = 1e-4);
-
-    Ok(())
-}
-
-#[test]
-fn ndarray_rsvd_test() -> anyhow::Result<()> {
-    use matrix_util::traits::*;
-
-    let xx = ndarray::Array2::<f32>::eye(8);
-    dbg!(&xx);
-
-    let svd = xx.rsvd(3)?;
-
-    dbg!(&svd);
-
-    dbg!(svd.0.t().dot(&svd.0));
-    dbg!(svd.2.t().dot(&svd.2));
-
-    Ok(())
-}
-
-#[test]
-fn ndarray_rsvd_test2() -> anyhow::Result<()> {
-    use matrix_util::traits::*;
-
-    let xx = ndarray::Array2::<f32>::rnorm(10, 8);
-
-    let svd = xx.rsvd(5)?;
-
-    let mut identity = Array2::zeros((5, 5));
-    identity.diag_mut().fill(1.);
-
-    let eye = svd.0.t().dot(&svd.0);
-    approx::assert_abs_diff_eq!(eye, identity, epsilon = 1e-4);
-
-    let eye = svd.2.t().dot(&svd.2);
-    approx::assert_abs_diff_eq!(eye, identity, epsilon = 1e-4);
-
-    Ok(())
-}
-
-#[test]
-fn ndarray_test() -> anyhow::Result<()> {
-    use ndarray::prelude::*;
-
-    // Define two matrices
-    let a = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
-    let b = array![[9.0, 8.0, 7.0], [6.0, 5.0, 4.0], [3.0, 2.0, 1.0]];
-
-    // Perform matrix multiplication
-    let c = a.dot(&b);
-
-    // Print the result
-    println!("Matrix A:\n{}", a);
-    println!("Matrix B:\n{}", b);
-    println!("Matrix C = (A * B):\n{}", c);
-
-    // Expected result
-    let expected = array![[30.0, 24.0, 18.0], [84.0, 69.0, 54.0], [138.0, 114.0, 90.0]];
-
-    // Verify the result
-    assert_eq!(c, expected);
 
     Ok(())
 }

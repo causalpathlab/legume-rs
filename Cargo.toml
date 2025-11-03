@@ -35,16 +35,16 @@ tempfile = "3.2"
 rand = "0.9"
 rand_distr = "0.5.1"
 
-ndarray = { version = "0.16.1", features = ["rayon","serde","approx","blas"]}
-ndarray-linalg = "0.17"
-ndarray-rand = "0.15"
+ndarray = { version = "0.17.1", features = ["rayon","serde","approx","blas"]}
+ndarray-rand = { version = "0.15" }
+
 approx = "0.5.1"
 special = "0.11.3"
 serde_json = "1.0"
 serde = "1.0"
 
-nalgebra = "0.33"
-nalgebra-sparse = "0.10"
+nalgebra = { version = "0.34" }
+nalgebra-sparse = { version = "0.11" }
 num-traits = "0.2.19"
 
 dashmap = { version = "6.1.0", features = ["rayon"] }
@@ -53,9 +53,10 @@ fnv = { version = "1.0.7" }
 instant-distance = "0.6"
 indicatif = { version = "^0.18", features = ["rayon"] }
 
-parquet = { version = "55" }
+parquet = { version = "57" }
 env_logger = { version = "0.11" }
 log = { version = "0.4" }
+zip = { version = "6" }
 
 data-beans = { path = "data-beans"}
 data-beans-alg = { path = "data-beans-alg"}
