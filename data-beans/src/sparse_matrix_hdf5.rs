@@ -1,3 +1,5 @@
+// #![allow(dead_code)]
+
 use crate::sparse_io::*;
 use hdf5::filters::blosc_set_nthreads;
 use log::info;
@@ -39,7 +41,6 @@ pub struct SparseMtxData {
     by_column_data: Option<Vec<f32>>,
 }
 
-#[allow(dead_code)]
 impl SparseMtxData {
     /// Create an empty new `SparseMtxData` with HDF5 file. If no
     /// `backend_file` is provided, a temporary file will be created.

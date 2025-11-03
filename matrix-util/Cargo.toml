@@ -25,14 +25,13 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 
 ndarray = { workspace = true }
-ndarray-linalg = { workspace = true }
 ndarray-rand = { workspace = true }
 
 instant-distance = { workspace = true }
 indicatif = { workspace = true }
 parquet = { workspace = true }
 fnv = { workspace = true }
-zip = "5.1.1"
+zip = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["cuda","cudarc","cudnn"] }

@@ -6,7 +6,7 @@ use matrix_util::common_io::{self, basename, extension, read_lines};
 //////////////////////////////////////////
 // read data files and batch membership //
 //////////////////////////////////////////
-pub struct ReadArgs {
+pub struct ReadSharedRowsArgs {
     pub data_files: Vec<Box<str>>,
     pub batch_files: Option<Vec<Box<str>>>,
     pub preload: bool,
@@ -18,15 +18,7 @@ pub struct SparseDataWithBatch {
     pub nbatch: usize,
 }
 
-pub fn read_sparse_data_with_membership(args: ReadArgs) -> anyhow::Result<SparseDataWithBatch> {
-    // push data files and collect batch membership
-    let file = args.data_files[0].as_ref();
-    let backend = match extension(file)?.to_string().as_str() {
-        "h5" => SparseIoBackend::HDF5,
-        "zarr" => SparseIoBackend::Zarr,
-        _ => SparseIoBackend::Zarr,
-    };
-
+pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<SparseDataWithBatch> {
     // to avoid duplicate barcodes in the column names
     let attach_data_name = args.data_files.len() > 1;
 
@@ -34,14 +26,10 @@ pub fn read_sparse_data_with_membership(args: ReadArgs) -> anyhow::Result<Sparse
     for data_file in args.data_files.iter() {
         info!("Importing data file: {}", data_file);
 
-        match extension(data_file)?.as_ref() {
-            "zarr" => {
-                assert_eq!(backend, SparseIoBackend::Zarr);
-            }
-            "h5" => {
-                assert_eq!(backend, SparseIoBackend::HDF5);
-            }
-            _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
+        let backend = match extension(data_file)?.to_string().as_str() {
+            "h5" => SparseIoBackend::HDF5,
+            "zarr" => SparseIoBackend::Zarr,
+            _ => return Err(anyhow::anyhow!("unknown backend file {}", data_file)),
         };
 
         let mut data = open_sparse_matrix(data_file, &backend)?;

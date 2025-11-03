@@ -1,7 +1,8 @@
 use crate::traits::*;
 
-use ndarray::{s, Array1, Array2};
+use ndarray::{s, Array1, Array2, Dimension, Ix2};
 use ndarray_linalg::{QR, SVDDC};
+
 use num_traits::{Float, FromPrimitive};
 
 impl<T> RandomizedAlgs for Array2<T>
@@ -105,14 +106,18 @@ where
         let rank = rank.min(self.qq.ncols());
         self.qq = self.qq.slice(s![.., 0..rank]).to_owned();
 
-        let bb = self.qq.t().dot(xx);
+        let bb: Array2<T> = self.qq.t().dot(xx).into_dimensionality::<Ix2>()?;
+
+	use ndarray_linalg::JobSvd;
+	use ndarray_linalg::svddc::*;
+	use ndarray_linalg::svd::*;
 
         if self.verbose {
             eprintln!("Final svd on [{} x {}]", bb.nrows(), bb.ncols());
         }
 
         if let (Some(svd_u), singular_values, Some(svd_vt)) =
-            bb.svddc(ndarray_linalg::JobSvd::Some)?
+            bb.svddc(JobSvd::Some)?
         {
             if self.verbose {
                 eprintln!("Construct U, D, V");

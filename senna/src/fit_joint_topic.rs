@@ -8,13 +8,34 @@ use candle_util::candle_model_traits::*;
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
 
-// use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_encoder_softmax_iaf::*;
 use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_loss_functions as loss_func;
 use candle_util::candle_model_traits::DecoderModuleT;
 use candle_util::candle_vae_inference::*;
 use indicatif::{ProgressBar, ProgressDrawTarget};
+
+pub struct ReadSharedColumnsArgs {
+    pub data_files: Vec<Box<str>>,
+    pub batch_files: Option<Vec<Box<str>>>,
+    pub preload: bool,
+}
+
+
+pub fn read_data_on_shared_columns(args: ReadSharedColumnsArgs) {
+
+// use matrix_util::common_io::{self, basename, extension, read_lines};
+
+    // let file = args.data_files[0].as_ref();
+    // let backend = match extension(file)?.to_string().as_str() {
+    //     "h5" => SparseIoBackend::HDF5,
+    //     "zarr" => SparseIoBackend::Zarr,
+    //     _ => SparseIoBackend::Zarr,
+    // };
+
+
+
+}
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -41,9 +62,9 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     }
     env_logger::init();
 
-    // 1. 
+    // 1.
 
-    // 2. 
+    // 2.
 
     Ok(())
 }
