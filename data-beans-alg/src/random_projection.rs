@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
 use data_beans::sparse_data_visitors::*;
+use data_beans::sparse_io_stack::SparseIoStack;
 use data_beans::sparse_io_vector::SparseIoVec;
-use matrix_util::dmatrix_util::assign_columns;
-use matrix_util::dmatrix_util::subset_columns;
+use matrix_util::dmatrix_util::*;
 use std::sync::{Arc, Mutex};
 
 use log::{info, warn};
@@ -101,12 +101,91 @@ fn project_columns_visitor(
     Ok(())
 }
 
-impl RandProjOps for SparseIoVec {
-    // fn groups_assigned(&self) -> anyhow::Result<&Vec<usize>> {
-    //     self.take_groups()
-    //         .ok_or(anyhow::anyhow!("unable to find sample information"))
-    // }
+impl RandProjOps for SparseIoStack {
+    fn project_columns(
+        &self,
+        target_dim: usize,
+        block_size: Option<usize>,
+    ) -> anyhow::Result<RandColProjOut> {
+        self.project_columns_with_batch_correction::<usize>(target_dim, block_size, None)
+    }
 
+    fn project_columns_with_batch_correction<T>(
+        &self,
+        target_dim: usize,
+        block_size: Option<usize>,
+        batch_membership: Option<&[T]>,
+    ) -> anyhow::Result<RandColProjOut>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
+        let ncols = self.num_columns()?;
+        let batch_membership = batch_membership.map(|x| x.get(0..ncols)).flatten();
+
+        let proj_vec = self
+            .stack
+            .iter()
+            .map(|data_vec| -> anyhow::Result<_> {
+                data_vec.project_columns_with_batch_correction(
+                    target_dim,
+                    block_size.clone(),
+                    batch_membership.clone(),
+                )
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let basis = concatenate_vertical(
+            &proj_vec
+                .iter()
+                .map(|x| {
+                    // info!("{} x {}", x.basis.nrows(), x.basis.ncols());
+                    x.basis.to_owned()
+                })
+                .collect::<Vec<_>>(),
+        )?;
+
+        let proj = concatenate_vertical(
+            &proj_vec
+                .iter()
+                .map(|x| {
+                    // info!("{} x {}", x.proj.nrows(), x.proj.ncols());
+                    x.proj.to_owned()
+                })
+                .collect::<Vec<_>>(),
+        )?;
+
+        Ok(RandColProjOut { basis, proj })
+    }
+
+    fn partition_columns_to_groups(
+        &mut self,
+        proj_kn: &nalgebra::DMatrix<f32>,
+        num_sorting_features: Option<usize>,
+        ncols_per_group: Option<usize>,
+    ) -> anyhow::Result<usize> {
+        let nn = proj_kn.ncols();
+        if nn != self.num_columns()? {
+            return Err(anyhow::anyhow!("number of columns mismatch"));
+        }
+
+        let target_kk = num_sorting_features.unwrap_or(proj_kn.nrows());
+        let kk = proj_kn.nrows().min(target_kk).min(nn);
+
+        let binary_codes = binary_sort_columns(proj_kn, kk)?;
+        let max_group = *binary_codes
+            .iter()
+            .max()
+            .ok_or(anyhow::anyhow!("unable to determine max element"))?;
+
+        for x in self.stack.iter_mut() {
+            x.assign_groups(binary_codes.clone(), ncols_per_group);
+        }
+
+        Ok(max_group + 1)
+    }
+}
+
+impl RandProjOps for SparseIoVec {
     fn project_columns(
         &self,
         target_dim: usize,
@@ -163,7 +242,7 @@ impl RandProjOps for SparseIoVec {
         proj_kn.scale_columns_inplace();
 
         if proj_kn.max() > ub || proj_kn.min() < lb {
-            info!("Clamping values [{}, {}] after standardization", lb, ub);
+            // info!("Clamping values [{}, {}] after standardization", lb, ub);
             proj_kn.iter_mut().for_each(|x| {
                 *x = x.clamp(lb, ub);
             });

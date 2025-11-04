@@ -1,15 +1,17 @@
 mod embed_common;
 mod fit_deconv_reg;
+mod fit_joint_svd;
+mod fit_joint_topic;
 mod fit_svd;
 mod fit_topic;
-mod fit_joint_topic;
 mod senna_input;
 
 use embed_common::*;
 use fit_deconv_reg::*;
+use fit_joint_svd::*;
+use fit_joint_topic::*;
 use fit_svd::*;
 use fit_topic::*;
-use fit_joint_topic::*;
 
 /// Single cell embedding routines with nearest neighbourhood-based
 /// adjustment
@@ -29,8 +31,16 @@ struct Cli {
 enum Commands {
     /// embedding by randomized singular value decomposition
     Svd(SvdArgs),
+
     /// embedding by fitting a topic model
     Topic(TopicArgs),
+
+    /// embedding by randomized singular value decomposition
+    JointSvd(JointSvdArgs),
+
+    /// embedding by randomized singular value decomposition
+    JointTopic(JointTopicArgs),
+
     /// deconvolve bulk data with single cell reference dictionary
     DeconvReg(DeconvRegArgs),
 }
@@ -44,6 +54,12 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Topic(args) => {
             fit_topic_model(args)?;
+        }
+        Commands::JointTopic(args) => {
+            fit_joint_topic_model(args)?;
+        }
+        Commands::JointSvd(args) => {
+            fit_joint_svd(args)?;
         }
         Commands::DeconvReg(args) => {
             fit_deconv_reg(args)?;
