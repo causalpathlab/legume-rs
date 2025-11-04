@@ -78,10 +78,6 @@ pub struct TopicArgs {
     #[arg(long, value_delimiter(','))]
     reference_batches: Option<Vec<Box<str>>>,
 
-    // /// #downsampling columns per each collapsed sample. If None, no
-    // /// downsampling.
-    // #[arg(long, short = 's')]
-    // down_sample: Option<usize>,
     /// optimization iterations
     #[arg(long, default_value_t = 30)]
     iter_opt: usize,
@@ -96,7 +92,7 @@ pub struct TopicArgs {
 
     /// number of modules of the features in the encoder model.
     /// If not specified, `encoder_layers[0]` will be used.
-    #[arg(short = 'm', long)]
+    #[arg(short = 'f', long)]
     feature_modules: Option<usize>,
 
     /// encoder layers

@@ -44,10 +44,6 @@ pub struct SvdArgs {
     #[arg(long, value_delimiter(','))]
     reference_batches: Option<Vec<Box<str>>>,
 
-    // /// #downsampling columns per each collapsed sample. If None, no
-    // /// downsampling.
-    // #[arg(long, short = 's')]
-    // down_sample: Option<usize>,
     /// optimization iterations
     #[arg(long, default_value_t = 30)]
     iter_opt: usize,
@@ -224,7 +220,7 @@ struct NystromParam<'a> {
     delta_dp: Option<&'a Mat>,
 }
 
-pub struct NystromOut {
+struct NystromOut {
     pub dictionary_dk: Mat,
     pub latent_nk: Mat,
 }
