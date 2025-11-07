@@ -752,7 +752,7 @@ impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
         gene_gff_map: &HashMap<GeneId, GffRecord>,
         nbins: usize,
     ) -> Vec<usize> {
-        let mut ret = vec![0; nbins];
+        let mut ret = vec![0; nbins + 1];
         for x in self.iter() {
             let g = x.key();
             let sites = x.value();
@@ -769,9 +769,8 @@ impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
                             Strand::Forward => (s.m6a_pos - lb) as usize,
                             Strand::Backward => (ub - s.m6a_pos) as usize,
                         } * nbins)
-                            .div_ceil(length + 1);
-
-                        ret[(rel_pos - 1).max(0)] += 1;
+                            .div(length + 1);
+                        ret[rel_pos] += 1;
                     }
                 }
             }
