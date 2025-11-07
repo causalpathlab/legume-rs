@@ -752,7 +752,7 @@ impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
         gene_gff_map: &HashMap<GeneId, GffRecord>,
         nbins: usize,
     ) -> Vec<usize> {
-        let mut ret = vec![0; nbins];
+        let mut ret = vec![0; nbins + 1];
         for x in self.iter() {
             let g = x.key();
             let sites = x.value();
