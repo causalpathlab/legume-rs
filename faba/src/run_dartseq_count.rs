@@ -771,7 +771,7 @@ impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
                         } * nbins)
                             .div_ceil(length + 1);
 
-                        ret[rel_pos] += 1;
+                        ret[(rel_pos - 1).max(0)] += 1;
                     }
                 }
             }
