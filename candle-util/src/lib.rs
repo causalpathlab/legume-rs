@@ -5,6 +5,7 @@ pub mod candle_data_loader;
 pub mod candle_data_loader_util;
 pub mod candle_decoder_poisson;
 pub mod candle_decoder_topic;
+pub mod candle_encoder_multimodal_softmax;
 pub mod candle_encoder_softmax;
 pub mod candle_encoder_softmax_iaf;
 pub mod candle_inference;

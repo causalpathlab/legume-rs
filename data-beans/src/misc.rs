@@ -3,6 +3,7 @@ use hdf5::types::FixedUnicode;
 use hdf5::types::TypeDescriptor;
 use hdf5::types::VarLenUnicode;
 
+use rand_distr::num_traits;
 use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
 
 /// update a v2 zarrs array to the v3 one
@@ -220,23 +221,45 @@ pub fn read_hdf5_strings(data: hdf5::dataset::Dataset) -> anyhow::Result<Vec<Box
     let desc = dtype.to_descriptor()?;
 
     let ret: Vec<Box<str>> = match desc {
-        TypeDescriptor::VarLenUnicode => ndarray_into_box_str(&data.read_1d::<VarLenUnicode>()?),
+        TypeDescriptor::VarLenUnicode => data
+            .read_1d::<VarLenUnicode>()?
+            .map(|x| x.to_string().into_boxed_str())
+            .into_iter()
+            .collect(),
         TypeDescriptor::FixedAscii(n) => {
             if n < 24 {
-                ndarray_into_box_str(&data.read_1d::<FixedAscii<24>>()?)
+                data.read_1d::<FixedAscii<24>>()?
+                    .map(|x| x.to_string().into_boxed_str())
+                    .into_iter()
+                    .collect()
             } else if n < 128 {
-                ndarray_into_box_str(&data.read_1d::<FixedAscii<128>>()?)
+                data.read_1d::<FixedAscii<128>>()?
+                    .map(|x| x.to_string().into_boxed_str())
+                    .into_iter()
+                    .collect()
             } else {
-                ndarray_into_box_str(&data.read_1d::<FixedAscii<1024>>()?)
+                data.read_1d::<FixedAscii<1024>>()?
+                    .map(|x| x.to_string().into_boxed_str())
+                    .into_iter()
+                    .collect()
             }
         }
         TypeDescriptor::FixedUnicode(n) => {
             if n < 24 {
-                ndarray_into_box_str(&data.read_1d::<FixedUnicode<24>>()?)
+                data.read_1d::<FixedUnicode<24>>()?
+                    .map(|x| x.to_string().into_boxed_str())
+                    .into_iter()
+                    .collect()
             } else if n < 128 {
-                ndarray_into_box_str(&data.read_1d::<FixedUnicode<128>>()?)
+                data.read_1d::<FixedUnicode<128>>()?
+                    .map(|x| x.to_string().into_boxed_str())
+                    .into_iter()
+                    .collect()
             } else {
-                ndarray_into_box_str(&data.read_1d::<FixedUnicode<1024>>()?)
+                data.read_1d::<FixedUnicode<1024>>()?
+                    .map(|x| x.to_string().into_boxed_str())
+                    .into_iter()
+                    .collect()
             }
         }
         _ => {
@@ -247,15 +270,13 @@ pub fn read_hdf5_strings(data: hdf5::dataset::Dataset) -> anyhow::Result<Vec<Box
     Ok(ret)
 }
 
-use ndarray::{ArrayBase, Data, Dim, RawData};
-use rand_distr::num_traits;
-
-fn ndarray_into_box_str<T, U>(data: &ArrayBase<T, Dim<[usize; 1]>>) -> Vec<Box<str>>
-where
-    T: RawData<Elem = U> + Data,
-    U: ToString,
-{
-    data.into_iter()
-        .map(|x| x.to_string().into_boxed_str())
-        .collect()
-}
+// ndarray v0.17 issue
+// use ndarray::Array1;
+// fn ndarray_into_box_str<T, U, S>(data: Array1<T>) -> Vec<Box<str>>
+// where
+//     T: RawData<Elem = U> + Data + ToString,
+// {
+//     data.into_iter()
+//         .map(|x| x.to_string().into_boxed_str())
+//         .collect()
+// }

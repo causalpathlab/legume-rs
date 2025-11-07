@@ -152,7 +152,7 @@ where
     /// * `filename` - The name of the file to save the statistics to
     /// * `names` - The names of the statistics
     pub fn save(&self, filename: &str, names: &Vec<Box<str>>, sep: &str) -> anyhow::Result<()> {
-        match extension(filename)?.as_ref() {
+        match extension(filename).unwrap_or(Box::from("")).as_ref() {
             "parquet" => {
                 let nnz = &self.count_positives();
                 let tot = &self.s1;

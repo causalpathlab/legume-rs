@@ -64,11 +64,9 @@ pub fn run_gene_count(args: &GeneCountArgs) -> anyhow::Result<()> {
     }
 
     let backend = args.backend.clone();
-
-    let record_feature_type: FeatureType = args.record_type.as_ref().into();
     info!("parsing GFF file: {}", args.gff_file);
 
-    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref(), Some(&record_feature_type))?;
+    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
     gff_map.subset(args.gene_type.clone().into());
     info!("found {} features", gff_map.len(),);
 
@@ -82,8 +80,7 @@ pub fn run_gene_count(args: &GeneCountArgs) -> anyhow::Result<()> {
 
     let gene_level_stats = gff_map
         .records()
-        .into_iter()
-        .par_bridge()
+        .par_iter()
         .progress_count(njobs)
         .map(|x| count_read_per_gene(args, x))
         .collect::<anyhow::Result<Vec<_>>>()?
