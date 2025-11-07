@@ -35,7 +35,7 @@ tempfile = "3.2"
 rand = "0.9"
 rand_distr = "0.5.1"
 
-ndarray = { version = "0.17.1", features = ["rayon","serde","approx","blas"]}
+ndarray = { version = "0.16", features = ["rayon","serde","approx","blas"]}
 ndarray-rand = { version = "0.15" }
 
 approx = "0.5.1"

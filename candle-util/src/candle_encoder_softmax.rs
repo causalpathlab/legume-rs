@@ -35,10 +35,6 @@ impl EncoderModuleT for LogSoftmaxEncoder {
         ))
     }
 
-    fn dim_obs(&self) -> usize {
-        self.n_features
-    }
-
     fn dim_latent(&self) -> usize {
         self.n_topics
     }

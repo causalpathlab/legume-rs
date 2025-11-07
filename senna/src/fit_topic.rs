@@ -371,11 +371,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     info!("Writing down the latent states");
 
-    // let delta = match &args.adj_method {
-    //     AdjMethod::Batch => collapsed.delta.map(|x| x.posterior_mean().clone()),
-    //     AdjMethod::Residual => collapsed.mu_residual.map(|x| x.posterior_mean().clone()),
-    // };
-
     let z_nk = evaluate_latent_by_encoder(
         &data_vec,
         &encoder,

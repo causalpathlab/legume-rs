@@ -5,7 +5,9 @@ use crate::data::sam::*;
 use crate::data::visitors_htslib::*;
 
 use rust_htslib::bam::{self, ext::BamRecordExtensions, record::Aux};
-use std::collections::{HashMap, HashSet};
+
+use fnv::FnvHashMap as HashMap;
+use fnv::FnvHashSet as HashSet;
 
 pub struct ReadDepthMap<'a> {
     position_to_depth_with_cell: HashMap<i64, HashMap<CellBarcode, usize>>,
@@ -54,11 +56,11 @@ impl DnaStatMap for ReadDepthMap<'_> {
 }
 
 impl<'a> ReadDepthMap<'a> {
-    pub fn new(cell_barcode_tag: &'a str) -> Self {
+    pub fn new_with_cell_barcode(cell_barcode_tag: &'a str) -> Self {
         Self {
-            position_to_depth_with_cell: HashMap::new(),
-            cells: HashSet::new(),
-            positions: HashSet::new(),
+            position_to_depth_with_cell: HashMap::default(),
+            cells: HashSet::default(),
+            positions: HashSet::default(),
             cell_barcode_tag: cell_barcode_tag.as_bytes(),
         }
     }

@@ -28,10 +28,6 @@ impl EncoderModuleT for LogSoftmaxIAFEncoder {
         Ok((ops::log_softmax(&z_nk, z_nk.rank() - 1)?, kl))
     }
 
-    fn dim_obs(&self) -> usize {
-        self.n_features
-    }
-
     fn dim_latent(&self) -> usize {
         self.n_topics
     }

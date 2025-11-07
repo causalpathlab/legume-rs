@@ -11,7 +11,9 @@ use crate::data::util_htslib::*;
 
 use dashmap::DashMap as HashMap;
 use dashmap::DashSet as HashSet;
+use matrix_util::common_io;
 use rayon::ThreadPoolBuilder;
+use std::ops::Div;
 use std::sync::{Arc, Mutex};
 
 #[derive(Args, Debug)]
@@ -31,6 +33,14 @@ pub struct DartSeqCountArgs {
     /// resolution (in kb)
     #[arg(short = 'r', long)]
     resolution_kb: Option<f32>,
+
+    /// (approximate) number of bins in histogram
+    #[arg(short = 'b', long, default_value_t = 100)]
+    num_bins_histogram: usize,
+
+    /// (approximate) number of bins in histogram
+    #[arg(long, default_value_t = 40)]
+    histogram_print_width: usize,
 
     /// (10x) cell/sample barcode tag. [See here](`https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam`)
     #[arg(long, default_value = "CB")]
@@ -134,9 +144,6 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("need pairs of bam files"));
     }
 
-    let wt_batch_names = uniq_batch_names(&args.wt_bam_files)?;
-    let mut_batch_names = uniq_batch_names(&args.mut_bam_files)?;
-
     for x in args.wt_bam_files.iter() {
         info!("checking .bai file for {}...", x);
         check_bam_index(x, None)?;
@@ -153,13 +160,15 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 
     info!("parsing GFF file: {}", args.gff_file);
 
-    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref(), args.record_type.as_ref())?;
+    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
 
     if let Some(gene_type) = args.gene_type.clone() {
         gff_map.subset(gene_type);
     }
 
-    info!("found {} features", gff_map.len(),);
+    // gff_map.add_padding(1000);
+
+    info!("found {} genes", gff_map.len(),);
 
     if gff_map.is_empty() {
         info!("empty gff map");
@@ -177,8 +186,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 
     gff_map
         .records()
-        .into_iter()
-        .par_bridge()
+        .par_iter()
         .progress_count(njobs as u64)
         .for_each(|rec| {
             find_methylated_sites_in_gene(rec, args, arc_gene_sites.clone())
@@ -193,6 +201,24 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     let gene_sites = Arc::try_unwrap(arc_gene_sites)
         .map_err(|_| anyhow::anyhow!("failed to release gene_sites"))?;
 
+    let ndata = gene_sites.iter().map(|x| x.value().len()).sum::<usize>();
+    info!("Found {} m6A sites", ndata);
+
+    ////////////////////////////////
+    // output marginal statistics //
+    ////////////////////////////////
+
+    let gene_feature_count =
+        gene_sites.count_gene_features(&args.gff_file, args.num_bins_histogram)?;
+
+    gene_feature_count.print(args.histogram_print_width);
+
+    gene_feature_count.to_tsv(&format!("{}.gene_feature_count.tsv", args.output))?;
+
+    //////////////////////////
+    // Take cell level data //
+    //////////////////////////
+
     let take_value = |dat: &MethylationData| -> f32 {
         match args.output_value_type {
             MethFeatureType::Beta => {
@@ -204,8 +230,15 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         }
     };
 
-    let gene_key = |x: &BedWithGene| -> GeneId { x.gene.clone() };
-    let site_key = |x: &BedWithGene| -> BedWithGene { x.clone() };
+    let gene_key = |x: &BedWithGene| -> Box<str> {
+        gff_map
+            .get(&x.gene)
+            .map(|gff| format!("{}_{}", gff.gene_id, gff.gene_name))
+            .unwrap_or(format!("{}", x.gene))
+            .into_boxed_str()
+    };
+
+    let site_key = |x: &BedWithGene| -> Box<str> { x.to_string().into_boxed_str() };
 
     let backend = args.backend.clone();
     let backend_file = |name: &str| -> Box<str> {
@@ -228,6 +261,9 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 
     let mut null_gene_data_files: Vec<Box<str>> = vec![];
     let mut null_site_data_files: Vec<Box<str>> = vec![];
+
+    let wt_batch_names = uniq_batch_names(&args.wt_bam_files)?;
+    let mut_batch_names = uniq_batch_names(&args.mut_bam_files)?;
 
     for (bam_file, batch_name) in args.wt_bam_files.iter().zip(wt_batch_names) {
         ////////////////////////////
@@ -342,12 +378,12 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 ////////////////////////////////////////////////
 
 fn find_methylated_sites_in_gene(
-    rec: &GffRecord,
+    gff_record: &GffRecord,
     args: &DartSeqCountArgs,
     arc_gene_sites: Arc<HashMap<GeneId, Vec<MethylatedSite>>>,
 ) -> anyhow::Result<()> {
-    let gene_id = rec.gene_id.clone();
-    let strand = &rec.strand;
+    let gene_id = gff_record.gene_id.clone();
+    let strand = &gff_record.strand;
 
     ///////////////////////////////////////////////////////
     // 1. sweep all the bam files to find variable sites //
@@ -355,7 +391,7 @@ fn find_methylated_sites_in_gene(
     let mut wt_freq_map = DnaBaseFreqMap::new();
 
     for wt_file in args.wt_bam_files.iter() {
-        wt_freq_map.update_bam_by_gene(wt_file, rec, &args.gene_barcode_tag)?;
+        wt_freq_map.update_bam_by_gene(wt_file, gff_record, &args.gene_barcode_tag)?;
     }
 
     let positions = wt_freq_map.sorted_positions();
@@ -374,7 +410,7 @@ fn find_methylated_sites_in_gene(
         let mut mut_freq_map = DnaBaseFreqMap::new();
 
         for mut_file in args.mut_bam_files.iter() {
-            mut_freq_map.update_bam_by_gene(mut_file, rec, &args.gene_barcode_tag)?;
+            mut_freq_map.update_bam_by_gene(mut_file, gff_record, &args.gene_barcode_tag)?;
         }
 
         let wt_freq = wt_freq_map
@@ -592,4 +628,154 @@ fn write_bed(
     }
     writer.flush()?;
     Ok(())
+}
+
+/////////////////////
+// other utilities //
+/////////////////////
+
+struct GeneFeatureCount {
+    five_prime: Vec<usize>,
+    cds: Vec<usize>,
+    three_prime: Vec<usize>,
+}
+
+impl GeneFeatureCount {
+    fn print(&self, max_width: usize) {
+        let nmax = self
+            .five_prime
+            .iter()
+            .chain(self.cds.iter())
+            .chain(self.three_prime.iter())
+            .max()
+            .unwrap();
+
+        let scale = nmax.div_ceil(max_width);
+
+        fn print_row(label: &str, data: &[usize], scale: usize, max_width: usize) {
+            for &n in data {
+                let n1 = n.div_ceil(scale);
+                let n0 = max_width.saturating_sub(n1);
+                eprintln!(
+                    "{:<6}{}{} {}",
+                    label,
+                    vec!["*"; n1].join(""),
+                    vec![" "; n0].join(""),
+                    n
+                );
+            }
+        }
+
+        print_row("5'UTR", &self.five_prime, scale, max_width);
+        print_row("CDS", &self.cds, scale, max_width);
+        print_row("3'UTR", &self.three_prime, scale, max_width);
+    }
+
+    fn to_tsv(&self, file_path: &str) -> anyhow::Result<()> {
+        fn into_boxed_str(label: &str, data: &[usize]) -> Vec<Box<str>> {
+            data.iter()
+                .enumerate()
+                .map(|(i, &n)| format!("{}\t{}\t{}", label, i, n).into_boxed_str())
+                .collect()
+        }
+
+        let mut writer = common_io::open_buf_writer(file_path)?;
+
+        for l in into_boxed_str("5UTR", &self.five_prime) {
+            writer.write_all(l.as_bytes())?;
+            writer.write_all(b"\n")?;
+        }
+
+        for l in into_boxed_str("CDS", &self.cds) {
+            writer.write_all(l.as_bytes())?;
+            writer.write_all(b"\n")?;
+        }
+
+        for l in into_boxed_str("3UTR", &self.three_prime) {
+            writer.write_all(l.as_bytes())?;
+            writer.write_all(b"\n")?;
+        }
+
+        writer.flush()?;
+        Ok(())
+    }
+}
+
+trait Histogram {
+    fn count_on_feature_map(
+        &self,
+        feature_map: &HashMap<GeneId, GffRecord>,
+        nbins: usize,
+    ) -> Vec<usize>;
+
+    fn count_gene_features(&self, gff_file: &str, nbins: usize)
+        -> anyhow::Result<GeneFeatureCount>;
+}
+
+impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
+    fn count_gene_features(
+        &self,
+        gff_file: &str,
+        nbins: usize,
+    ) -> anyhow::Result<GeneFeatureCount> {
+        let gff_records = read_gff_record_vec(gff_file)?;
+
+        let UTRMap {
+            five_prime,
+            three_prime,
+        } = build_utr_map(&gff_records)?;
+
+        let cds = build_gene_map(&gff_records, Some(&FeatureType::CDS))?;
+
+        let n_five_prime = five_prime.take_max_length();
+        let n_cds = cds.take_max_length();
+        let n_three_prime = three_prime.take_max_length();
+        let ntot = n_five_prime + n_cds + n_three_prime;
+
+        let nbins_five_prime = n_five_prime as usize * nbins / ntot as usize;
+        let nbins_cds = n_cds as usize * nbins / ntot as usize;
+        let nbins_three_prime = n_three_prime as usize * nbins / ntot as usize;
+
+        let five_prime = self.count_on_feature_map(&five_prime, nbins_five_prime);
+        let cds = self.count_on_feature_map(&cds, nbins_cds);
+        let three_prime = self.count_on_feature_map(&three_prime, nbins_three_prime);
+
+        Ok(GeneFeatureCount {
+            five_prime,
+            cds,
+            three_prime,
+        })
+    }
+
+    fn count_on_feature_map(
+        &self,
+        gene_gff_map: &HashMap<GeneId, GffRecord>,
+        nbins: usize,
+    ) -> Vec<usize> {
+        let mut ret = vec![0; nbins];
+        for x in self.iter() {
+            let g = x.key();
+            let sites = x.value();
+
+            if let Some(gff) = gene_gff_map.get(&g) {
+                let lb = gff.start; // 1-based
+                let ub = gff.stop; // 1-based
+                let length = (ub - lb).max(1) as usize;
+
+                // relative position with respect to (lb and ub)
+                for s in sites.iter() {
+                    if s.m6a_pos <= ub && s.m6a_pos >= lb {
+                        let rel_pos = (match gff.strand {
+                            Strand::Forward => (s.m6a_pos - lb) as usize,
+                            Strand::Backward => (ub - s.m6a_pos) as usize,
+                        } * nbins)
+                            .div(length);
+
+                        ret[rel_pos] += 1;
+                    }
+                }
+            }
+        }
+        ret
+    }
 }
