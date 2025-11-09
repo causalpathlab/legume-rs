@@ -35,7 +35,7 @@ pub trait MultimodalEncoderModuleT {
     fn forward_t(
         &self,
         x_nd_vec: &[Tensor],
-        x0_nd_vec: Option<&[Tensor]>,
+        x0_nd_vec: &[Option<Tensor>],
         train: bool,
     ) -> Result<(Tensor, Tensor)>;
 
@@ -63,6 +63,31 @@ pub trait DecoderModuleT {
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>;
 
     fn dim_obs(&self) -> usize;
+
+    fn dim_latent(&self) -> usize;
+}
+
+pub trait MultimodalDecoderModuleT {
+    /// A decoder that spits out reconstruction
+    fn forward(&self, z_nk: &Tensor) -> Result<Vec<Tensor>>;
+
+    /// Get a representative dictionary matrix
+    fn get_dictionary(&self) -> Result<Vec<Tensor>>;
+
+    /// A decoder that spits out reconstruction and log-likelihood
+    /// * `z_nk` - latent states
+    /// * `x_nd` - observed data to validate with
+    /// * `llik` - fn (observed, reconstruction) -> log-likelihood
+    fn forward_with_llik<LlikFn>(
+        &self,
+        z_nk: &Tensor,
+        x_nd: &[Tensor],
+        llik: &LlikFn,
+    ) -> Result<(Vec<Tensor>, Tensor)>
+    where
+        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>;
+
+    fn dim_obs(&self) -> &[usize];
 
     fn dim_latent(&self) -> usize;
 }

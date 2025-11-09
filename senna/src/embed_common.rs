@@ -23,7 +23,7 @@ pub use clap::{Args, Parser, Subcommand, ValueEnum};
 
 pub use matrix_param::io::ParamIo;
 pub use matrix_param::traits::{Inference, TwoStatParam};
-pub use matrix_util::common_io::{remove_file, write_types};
+pub use matrix_util::common_io::remove_file;
 pub use matrix_util::traits::*;
 
 pub use data_beans_alg::collapse_data::*;

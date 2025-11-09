@@ -35,7 +35,7 @@ pub struct DartSeqCountArgs {
     resolution_kb: Option<f32>,
 
     /// (approximate) number of bins in histogram
-    #[arg(short = 'b', long, default_value_t = 100)]
+    #[arg(short = 'b', long, default_value_t = 77)]
     num_bins_histogram: usize,
 
     /// (approximate) number of bins in histogram
