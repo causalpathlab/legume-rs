@@ -23,7 +23,7 @@ impl MultimodalEncoderModuleT for LogSoftmaxMultimodalEncoder {
     fn forward_t(
         &self,
         x_nd_vec: &[Tensor],
-        x0_nd_vec: Option<&[Tensor]>,
+        x0_nd_vec: &[Option<Tensor>],
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
         let (z_nk, kl) = self.latent_gaussian_with_kl(x_nd_vec, x0_nd_vec, train)?;
@@ -36,14 +36,6 @@ impl MultimodalEncoderModuleT for LogSoftmaxMultimodalEncoder {
 }
 
 impl LogSoftmaxMultimodalEncoder {
-    // pub fn num_feature_modules(&self) -> usize {
-    //     self.n_modules
-    // }
-
-    // pub fn feature_module_membership(&self) -> Result<Tensor> {
-    //     self.feature_module.membership()
-    // }
-
     fn discretize_whitened_tensor(&self, x_nd: &Tensor) -> Result<Tensor> {
         let n_vocab = self.n_vocab as f64;
         let d = x_nd.rank();
@@ -60,55 +52,43 @@ impl LogSoftmaxMultimodalEncoder {
 
     fn modularized_composite_embedding(
         &self,
-        x_nd_vec: &[Tensor],
+        x_nd: &Tensor,
+        m: usize,
         train: bool,
-    ) -> Result<Vec<Tensor>> {
-        x_nd_vec
-            .into_iter()
-            .enumerate()
-            .map(|(m, x_nd)| -> Result<Tensor> {
-                // This is important to make every data points to have the same scale
-                let denom_n1 = x_nd.sum_keepdim(x_nd.rank() - 1)?;
-                let x_nd = (x_nd.broadcast_div(&denom_n1)? * (self.n_features[m] as f64))?;
-                // group features into modules
-                let x_nm = self.feature_module[m].forward(&x_nd)?;
-                // combine two types of embedding results
-                let int_x_nm = self.discretize_whitened_tensor(&x_nm)?;
-                let logx_nm = (x_nm + 1.)?.log()?;
-                let int_logx_nm = self.discretize_whitened_tensor(&logx_nm)?;
-                self.emb_x[m].forward_t(&int_x_nm, train)?
-                    + self.emb_logx[m].forward_t(&int_logx_nm, train)?
-            })
-            .collect()
+    ) -> Result<Tensor> {
+        // This is important to make every data points to have the same scale
+        let denom_n1 = x_nd.sum_keepdim(x_nd.rank() - 1)?;
+        let x_nd = (x_nd.broadcast_div(&denom_n1)? * (self.n_features[m] as f64))?;
+        // group features into modules
+        let x_nm = self.feature_module[m].forward(&x_nd)?;
+        // combine two types of embedding results
+        let int_x_nm = self.discretize_whitened_tensor(&x_nm)?;
+        let logx_nm = (x_nm + 1.)?.log()?;
+        let int_logx_nm = self.discretize_whitened_tensor(&logx_nm)?;
+        self.emb_x[m].forward_t(&int_x_nm, train)? + self.emb_logx[m].forward_t(&int_logx_nm, train)
     }
 
     fn preprocess_input(
         &self,
         x_nd_vec: &[Tensor],
-        x0_nd_vec: Option<&[Tensor]>,
+        x0_nd_vec: &[Option<Tensor>],
         train: bool,
     ) -> Result<Vec<Tensor>> {
-        let emb_nmk_vec = self.modularized_composite_embedding(x_nd_vec, train)?;
-
-        if let Some(x0_nd_vec) = x0_nd_vec {
-            let emb0_nmk_vec = self.modularized_composite_embedding(x0_nd_vec, train)?;
-            emb_nmk_vec
-                .into_iter()
-                .zip(emb0_nmk_vec)
-                .map(|(emb_nmk, emb0_nmk)| {
-                    let last_dim = emb_nmk.rank();
+        x_nd_vec
+            .iter()
+            .zip(x0_nd_vec)
+            .enumerate()
+            .map(|(m, (x_nd, x0_nd))| {
+                let emb_nmk = self.modularized_composite_embedding(x_nd, m, train)?;
+                let last_dim = emb_nmk.rank();
+                if let Some(x0_nd) = x0_nd {
+                    let emb0_nmk = self.modularized_composite_embedding(x0_nd, m, train)?;
                     (emb_nmk - &emb0_nmk)?.mean(last_dim - 1)
-                })
-                .collect::<Result<Vec<Tensor>>>()
-        } else {
-            emb_nmk_vec
-                .into_iter()
-                .map(|emb_nmk| {
-                    let last_dim = emb_nmk.rank();
+                } else {
                     emb_nmk.mean(last_dim - 1)
-                })
-                .collect::<Result<Vec<Tensor>>>()
-        }
+                }
+            })
+            .collect()
     }
 
     ///
@@ -119,7 +99,7 @@ impl LogSoftmaxMultimodalEncoder {
     fn latent_gaussian_with_kl(
         &self,
         x_nd_vec: &[Tensor],
-        x0_nd_vec: Option<&[Tensor]>,
+        x0_nd_vec: &[Option<Tensor>],
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
         let hh_vec = self

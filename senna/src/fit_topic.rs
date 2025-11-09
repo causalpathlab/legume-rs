@@ -2,18 +2,17 @@ use crate::embed_common::*;
 use crate::senna_input::*;
 
 use candle_core::Device;
+use candle_nn::AdamW;
+use candle_nn::Optimizer;
 use candle_util::candle_data_loader::*;
 use candle_util::candle_decoder_topic::*;
+use candle_util::candle_loss_functions::topic_likelihood;
 use candle_util::candle_model_traits::*;
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
 
-// use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_encoder_softmax_iaf::*;
-use candle_util::candle_inference::TrainConfig;
-use candle_util::candle_loss_functions as loss_func;
 use candle_util::candle_model_traits::DecoderModuleT;
-use candle_util::candle_vae_inference::*;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -262,24 +261,109 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         n_features_encoder, n_features_decoder
     );
 
-    let mut train_config = TrainConfig {
-        learning_rate: args.learning_rate,
-        batch_size: args.minibatch_size,
-        num_epochs: args.epochs,
-        num_pretrain_epochs: 0,
-        device: dev.clone(),
-        verbose: args.verbose,
-        show_progress: true,
+    let scores = train_encoder_decoder(&collapsed, &encoder, &decoder, &parameters, &args)?;
+
+    info!("Writing down the model parameters");
+
+    let gene_names = data_vec.row_names()?;
+
+    decoder
+        .get_dictionary()?
+        .to_device(&candle_core::Device::Cpu)?
+        .to_parquet(
+            Some(&gene_names),
+            None,
+            &(args.out.to_string() + ".dictionary.parquet"),
+        )?;
+
+    scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
+
+    // encoder
+    //     .feature_module_membership()?
+    //     .to_device(&candle_core::Device::Cpu)?
+    //     .to_parquet(
+    //         Some(&gene_names),
+    //         None,
+    //         &(args.out.to_string() + ".feature_module.parquet"),
+    //     )?;
+
+    /////////////////////////////////////////////////////
+    // evaluate latent states while adjusting the bias //
+    /////////////////////////////////////////////////////
+
+    info!("Writing down the latent states");
+
+    let z_nk = evaluate_latent_by_encoder(&data_vec, &encoder, &collapsed, &args)?;
+
+    let cell_names = data_vec.column_names()?;
+
+    z_nk.to_parquet(
+        Some(&cell_names),
+        None,
+        &(args.out.to_string() + ".latent.parquet"),
+    )?;
+
+    info!("Done");
+    Ok(())
+}
+
+///////////////////////
+// training routines //
+///////////////////////
+
+struct TrainScores {
+    llik: Vec<f32>,
+    kl: Vec<f32>,
+}
+
+impl TrainScores {
+    fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
+        let mat = Mat::from_columns(&[
+            DVec::from_vec(self.llik.clone()),
+            DVec::from_vec(self.kl.clone()),
+        ]);
+
+        let score_types = vec![
+            "log_likelihood".to_string().into_boxed_str(),
+            "kl_divergence".to_string().into_boxed_str(),
+        ];
+
+        let epochs: Vec<Box<str>> = (0..mat.nrows())
+            .into_iter()
+            .map(|x| (x + 1).to_string().into_boxed_str())
+            .collect();
+
+        mat.to_parquet(Some(&epochs), Some(&score_types), file_path)
+    }
+}
+
+fn train_encoder_decoder<Enc, Dec>(
+    collapsed: &CollapsedOut,
+    encoder: &Enc,
+    decoder: &Dec,
+    parameters: &candle_nn::VarMap,
+    args: &TopicArgs,
+) -> anyhow::Result<TrainScores>
+where
+    Enc: EncoderModuleT,
+    Dec: DecoderModuleT,
+{
+    let dev = match args.device {
+        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
+        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
+        _ => candle_core::Device::Cpu,
     };
 
-    let pb = ProgressBar::new(train_config.num_epochs as u64);
+    let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate as f64)?;
 
-    if !train_config.show_progress || train_config.verbose {
+    let pb = ProgressBar::new(args.epochs as u64);
+
+    if args.verbose {
         pb.set_draw_target(ProgressDrawTarget::hidden());
     }
 
-    let mut vae = Vae::build(&encoder, &decoder, &parameters);
-    let mut log_likelihoods = Vec::with_capacity(train_config.num_epochs);
+    let mut llik_trace = Vec::with_capacity(args.epochs);
+    let mut kl_trace = Vec::with_capacity(args.epochs);
 
     info!("Start training VAE...");
 
@@ -310,124 +394,78 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             output_null: None,
         })?;
 
-        train_config.verbose = false;
-        train_config.show_progress = args.verbose;
-        train_config.num_epochs = args.jitter_interval;
+        data_loader.shuffle_minibatch(args.minibatch_size)?;
 
-        let llik = vae.train_encoder_decoder(
-            &mut data_loader,
-            &loss_func::topic_likelihood,
-            &train_config,
-        )?;
+        for jitter in 0..args.jitter_interval {
+            let mut llik_tot = 0f32;
+            let mut kl_tot = 0f32;
 
-        log_likelihoods.extend(llik);
-        pb.inc(args.jitter_interval as u64);
+            for b in 0..data_loader.num_minibatch() {
+                let mb = data_loader.minibatch_shuffled(b, &dev)?;
+                let (z_nk, kl) = encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
+                let y_nd = mb.output.unwrap_or(mb.input);
+                let (_, llik) = decoder.forward_with_llik(&z_nk, &y_nd, &topic_likelihood)?;
 
-        if args.verbose {
-            info!(
-                "[{}] log-likelihood: {}",
-                epoch + args.jitter_interval,
-                log_likelihoods.last().ok_or(anyhow::anyhow!("llik"))?
-            );
+                let loss = (&kl - &llik)?.mean_all()?;
+                adam.backward_step(&loss)?;
+
+                let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
+                let kl_val = kl.sum_all()?.to_scalar::<f32>()?;
+                llik_tot += llik_val;
+                kl_tot += kl_val;
+            }
+
+            kl_trace.push(kl_tot / data_loader.num_minibatch() as f32);
+            llik_trace.push(llik_tot / data_loader.num_minibatch() as f32);
+
+            pb.inc(1);
+
+            if args.verbose {
+                info!("[{}][{}] {} {}", epoch, jitter, llik_tot, kl_tot);
+            }
         }
     }
-
     pb.finish_and_clear();
 
-    if train_config.verbose {
-        info!("Finished {} epochs", train_config.num_epochs);
-    }
-
-    info!("Writing down the model parameters");
-
-    let gene_names = data_vec.row_names()?;
-
-    decoder
-        .get_dictionary()?
-        .to_device(&candle_core::Device::Cpu)?
-        .to_parquet(
-            Some(&gene_names),
-            None,
-            &(args.out.to_string() + ".dictionary.parquet"),
-        )?;
-
-    write_types::<f32>(
-        &log_likelihoods,
-        &(args.out.to_string() + ".log_likelihood.gz"),
-    )?;
-
-    // encoder
-    //     .feature_module_membership()?
-    //     .to_device(&candle_core::Device::Cpu)?
-    //     .to_parquet(
-    //         Some(&gene_names),
-    //         None,
-    //         &(args.out.to_string() + ".feature_module.parquet"),
-    //     )?;
-
-    /////////////////////////////////////////////////////
-    // evaluate latent states while adjusting the bias //
-    /////////////////////////////////////////////////////
-
-    info!("Writing down the latent states");
-
-    let z_nk = evaluate_latent_by_encoder(
-        &data_vec,
-        &encoder,
-        &train_config,
-        &collapsed,
-        &args.adj_method,
-    )?;
-
-    let cell_names = data_vec.column_names()?;
-
-    z_nk.to_parquet(
-        Some(&cell_names),
-        None,
-        &(args.out.to_string() + ".latent.parquet"),
-    )?;
-
-    info!("Done");
-    Ok(())
+    info!("done model training");
+    Ok(TrainScores {
+        llik: llik_trace,
+        kl: kl_trace,
+    })
 }
 
-/// Evaluate latent representation with the trained encoder network
-///
-/// #Arguments
-/// * `data_vec` - full data vector
-/// * `encoder` - encoder network
-/// * `train_config` - training configuration
-/// * `delta_db` - batch effect matrix (feature x batch)
 fn evaluate_latent_by_encoder<Enc>(
     data_vec: &SparseIoVec,
     encoder: &Enc,
-    train_config: &TrainConfig,
     collapsed: &CollapsedOut,
-    adj_method: &AdjMethod,
+    args: &TopicArgs,
 ) -> anyhow::Result<Mat>
 where
     Enc: EncoderModuleT + Send + Sync,
 {
-    let dev = &train_config.device;
+    let dev = match args.device {
+        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
+        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
+        _ => candle_core::Device::Cpu,
+    };
+
     let ntot = data_vec.num_columns()?;
     let kk = encoder.dim_latent();
 
-    let block_size = train_config.batch_size;
+    let block_size = args.minibatch_size;
 
     let jobs = create_jobs(ntot, Some(block_size));
     let njobs = jobs.len() as u64;
     let arc_enc = Arc::new(encoder);
 
-    let delta = match adj_method {
-        AdjMethod::Batch => collapsed.delta.as_ref().map(|x| x.posterior_mean().clone()),
-        AdjMethod::Residual => collapsed
-            .mu_residual
-            .as_ref()
-            .map(|x| x.posterior_mean().clone()),
+    let delta = match args.adj_method {
+        AdjMethod::Batch => collapsed.delta.as_ref(),
+        AdjMethod::Residual => collapsed.mu_residual.as_ref(),
     }
+    .map(|x| x.posterior_mean().clone())
     .map(|delta_db| {
         delta_db
-            .to_tensor(dev)
+            .to_tensor(&dev)
             .expect("delta to tensor")
             .transpose(0, 1)
             .expect("transpose")
@@ -436,17 +474,17 @@ where
     let mut chunks = jobs
         .par_iter()
         .progress_count(njobs)
-        .map(|&block| match adj_method {
+        .map(|&block| match args.adj_method {
             AdjMethod::Residual => {
-                evaluate_with_residuals(block, data_vec, arc_enc.clone(), dev, delta.as_ref())
+                evaluate_with_residuals(block, data_vec, arc_enc.clone(), &dev, delta.as_ref())
             }
             AdjMethod::Batch => {
-                evalulate_with_batch(block, data_vec, arc_enc.clone(), dev, delta.as_ref())
+                evalulate_with_batch(block, data_vec, arc_enc.clone(), &dev, delta.as_ref())
             }
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    chunks.sort_by_key(|&(lb, _)| lb);
+    chunks.par_sort_by_key(|&(lb, _)| lb);
     let chunks = chunks.into_iter().map(|(_, z_nk)| z_nk).collect::<Vec<_>>();
 
     let mut ret = Mat::zeros(ntot, kk);
@@ -477,18 +515,18 @@ where
             .get_batch_membership(lb..ub)
             .into_iter()
             .map(|x| x as u32);
-        let batches = Tensor::from_iter(batches.clone(), dev).unwrap();
+        let batches = Tensor::from_iter(batches, dev).unwrap();
         delta_bm.index_select(&batches, 0).expect("expand delta")
     });
 
     let x_nd = data_vec
-        .read_columns_dmatrix(lb..ub)?
-        .to_tensor(dev)?
+        .read_columns_tensor(lb..ub)?
+        .to_device(dev)?
         .transpose(0, 1)?;
 
     let (z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
     let z_nk = z_nk.to_device(&candle_core::Device::Cpu)?;
-    Ok((lb, Mat::from_tensor(&z_nk).expect("to mat")))
+    Ok((lb, Mat::from_tensor(&z_nk)?))
 }
 
 fn evaluate_with_residuals<Enc>(
@@ -508,16 +546,16 @@ where
             .expect("failed to get group membership")
             .into_iter()
             .map(|x| x as u32);
-        let groups = Tensor::from_iter(groups.clone(), dev).unwrap();
+        let groups = Tensor::from_iter(groups, dev).unwrap();
         delta_bm.index_select(&groups, 0).expect("expand delta")
     });
 
     let x_nd = data_vec
-        .read_columns_dmatrix(lb..ub)?
-        .to_tensor(dev)?
+        .read_columns_tensor(lb..ub)?
+        .to_device(dev)?
         .transpose(0, 1)?;
 
     let (z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
     let z_nk = z_nk.to_device(&candle_core::Device::Cpu)?;
-    Ok((lb, Mat::from_tensor(&z_nk).expect("to mat")))
+    Ok((lb, Mat::from_tensor(&z_nk)?))
 }
