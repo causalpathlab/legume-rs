@@ -184,7 +184,10 @@ where
                 stacked.to_parquet(Some(&names), Some(&column_names), filename)?;
             }
             _ => {
-                write_lines(&self.to_string_vec(names, sep)?, filename)?;
+                let mut out = self.to_string_vec(names, sep)?;
+                let header = format!("#name{}nnz{}tot{}mu{}sig", sep, sep, sep, sep);
+                out.insert(0, header.into_boxed_str());
+                write_lines(&out, filename)?;
             }
         };
 
@@ -202,6 +205,7 @@ where
         let tot_ = to_string_vec(&self.s1, sep);
         let mu_: Vec<Box<str>> = to_string_vec(&self.mean(), sep);
         let sig_: Vec<Box<str>> = to_string_vec(&self.std(), sep);
+
         let out: Vec<Box<str>> = (0..self.shape()[0])
             .map(|i| {
                 format!(

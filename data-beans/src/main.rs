@@ -640,7 +640,7 @@ pub struct RunStatArgs {
     #[arg(long, value_enum, default_value = "100")]
     block_size: usize,
 
-    /// output statistics file
+    /// Output statistics file. We can provide ".parquet" file, too.
     #[arg(short, long, default_value = "stdout")]
     output: Box<str>,
 }
