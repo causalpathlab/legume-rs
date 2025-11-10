@@ -4,8 +4,11 @@ use crate::sparse_io_vector::*;
 
 use indicatif::ParallelProgressIterator;
 use matrix_util::ndarray_stat::RunningStatistics;
+use matrix_util::utils::partition_by_membership;
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
+
+use fnv::FnvHashMap as HashMap;
 
 #[derive(Clone)]
 pub struct SqueezeCutoffs {
@@ -49,7 +52,7 @@ pub fn squeeze_by_nnz(
 
 /// collect row-wise sufficient statistics for Q/C
 /// * `data` - `SparseIoVec` across many data matrices
-/// * `block_size` - parallel block size
+/// * `block_size` - a block size for each parallelized job
 pub fn collect_row_stat_across_vec(
     data: &SparseIoVec,
     block_size: usize,
@@ -64,9 +67,54 @@ pub fn collect_row_stat_across_vec(
     Ok(row_stat)
 }
 
+/// collect row statistics for each group of columns
+/// * `data` - `SparseIo`
+/// * `column_membership` - a hashmap assign columns to groups
+/// * `block_size` - a block size for each parallelized job
+pub fn collect_stratified_row_stat_across_vec(
+    data: &SparseIoVec,
+    column_membership: &HashMap<Box<str>, Box<str>>,
+    block_size: usize,
+) -> anyhow::Result<(Vec<Box<str>>, Vec<RunningStatistics<Ix1>>)> {
+    let column_names = data.column_names()?;
+    let default = "".to_string().into_boxed_str();
+    let membership = column_names
+        .into_iter()
+        .map(|k| column_membership.get(&k).unwrap_or(&default).clone())
+        .collect::<Vec<_>>();
+
+    let partitions = partition_by_membership(&membership, None);
+    let mut group_names = Vec::with_capacity(partitions.len());
+    let mut group_stats = Vec::with_capacity(partitions.len());
+
+    for (k, cols) in partitions {
+        let jobs = create_jobs(cols.len(), Some(block_size));
+        let mut row_stat = RunningStatistics::new(Ix1(data.num_rows()?));
+        let arc_stat = Arc::new(Mutex::new(&mut row_stat));
+
+        jobs.par_iter()
+            .progress_count(jobs.len() as u64)
+            .for_each(|&(lb, ub)| {
+                let cols_sub = cols[lb..ub].iter().cloned();
+                let xx = data
+                    .read_columns_ndarray(cols_sub)
+                    .expect("failed to read data");
+                let mut stat = arc_stat.lock().expect("failed to lock row_stat");
+                for x in xx.axis_iter(Axis(1)) {
+                    stat.add(&x);
+                }
+            });
+
+        group_names.push(k);
+        group_stats.push(row_stat);
+    }
+
+    Ok((group_names, group_stats))
+}
+
 /// collect row-wise sufficient statistics for Q/C
 /// * `data` - `SparseIo`
-/// * `block_size` - parallel block size
+/// * `block_size` - a block size for each parallelized job
 pub fn collect_row_stat(
     data: &dyn SparseIo<IndexIter = Vec<usize>>,
     block_size: usize,
@@ -95,7 +143,7 @@ pub fn collect_row_stat(
 /// collect column-wise sufficient statistics for Q/C
 /// * `data` - `SparseIoVec` across many data matrices
 /// * `select_rows` - selected row indices
-/// * `block_size` - parallel block size
+/// * `block_size` - a block size for each parallelized job
 pub fn collect_column_stat_across_vec(
     data: &SparseIoVec,
     select_rows: Option<&[usize]>,
@@ -114,7 +162,7 @@ pub fn collect_column_stat_across_vec(
 
 /// collect row-wise sufficient statistics for Q/C
 /// * `data` - `SparseIo`
-/// * `block_size` - parallel block size
+/// * `block_size` - a block size for each parallelized job
 pub fn collect_column_stat(
     data: &dyn SparseIo<IndexIter = Vec<usize>>,
     block_size: usize,

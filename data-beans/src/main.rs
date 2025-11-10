@@ -28,8 +28,7 @@ use simulate_deconv::generate_convoluted_data;
 use simulate_deconv::SimConvArgs;
 use tempfile::TempDir;
 
-use std::collections::HashMap;
-
+use fnv::FnvHashMap as HashMap;
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
@@ -192,7 +191,10 @@ enum Commands {
     /// provided, row and column names will be saved.
     Info(InfoArgs),
 
-    /// Take basic statistics from a sparse matrix
+    /// Take basic statistics from a sparse matrix. The output file
+    /// will contain columns of (1) `nnz` - number of non-zero
+    /// elements (2) `tot` - total sum, (3) `mu` - average `μ`, (4)
+    /// `sig` - standard deviation `σ`.
     Statistics(RunStatArgs),
 
     /// An alias of `statistics`
@@ -635,6 +637,10 @@ pub struct RunStatArgs {
     /// row name pattern for `column` stat accumulation
     #[arg(short, long)]
     row_name_pattern: Option<Box<str>>,
+
+    /// column group membership file for `row` stat accumulation
+    #[arg(short = 'g', long)]
+    column_group_file: Option<Box<str>>,
 
     /// block_size
     #[arg(long, value_enum, default_value = "100")]
@@ -1248,7 +1254,7 @@ fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
     info!("Finding common rows/features ...");
 
-    let mut row_hash: HashMap<Box<str>, usize> = HashMap::new();
+    let mut row_hash: HashMap<Box<str>, usize> = HashMap::default();
 
     for row_file in row_files.iter() {
         let row_names = read_row_names(row_file.clone(), args.num_feature_name_words)?;
@@ -1963,6 +1969,56 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
 
     match cmd_args.stat_dim {
         StatDim::Row => {
+            if let Some(column_group_file) = &cmd_args.column_group_file {
+                let ReadLinesOut { lines, header: _ } =
+                    read_lines_of_words(&column_group_file, -1)?;
+                if lines.is_empty() {
+                    return Err(anyhow::anyhow!("empty group membership file"));
+                }
+
+                let cols = data.column_names()?;
+
+                let column_membership = if lines[0].len() == 1 && lines.len() == cols.len() {
+                    cols.into_iter()
+                        .zip(lines)
+                        .map(|(c, v)| (c, v[0].clone()))
+                        .collect::<HashMap<_, _>>()
+                } else {
+                    lines
+                        .into_iter()
+                        .map(|v| (v[0].clone(), v[1].clone()))
+                        .collect::<HashMap<_, _>>()
+                };
+
+                let (group_names, group_stats) = collect_stratified_row_stat_across_vec(
+                    &data,
+                    &column_membership,
+                    cmd_args.block_size,
+                )?;
+
+                for (g, row_stat) in group_names.into_iter().zip(group_stats) {
+                    let (dir, base, ext) = dir_base_ext(&cmd_args.output)?;
+
+                    if cmd_args.output.eq_ignore_ascii_case("stdout") {
+                        let out = row_stat
+                            .to_string_vec(&data.row_names()?, "\t")?
+                            .into_iter()
+                            .map(|s| format!("{}\t{}", g, s).into_boxed_str())
+                            .collect();
+                        write_lines(&out, &cmd_args.output)?;
+                    } else {
+                        let out_file = if dir.len() > 0 {
+                            format!("{}/{}.{}.{}", dir, base, g, ext)
+                        } else {
+                            format!("{}.{}.{}", base, g, ext)
+                        };
+
+                        info!("writing out: {}", out_file);
+                        row_stat.save(&out_file, &data.row_names()?, "\t")?;
+                    }
+                }
+            }
+
             let row_stat = collect_row_stat_across_vec(&data, cmd_args.block_size)?;
 
             row_stat.save(&cmd_args.output, &data.row_names()?, "\t")?;
