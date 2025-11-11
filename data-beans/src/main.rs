@@ -88,6 +88,9 @@ fn main() -> anyhow::Result<()> {
         Commands::SubsetColumns(args) => {
             subset_columns(args)?;
         }
+        Commands::AlignColumns(args) => {
+            align_columns(args)?;
+        }
         Commands::ReorderRows(args) => {
             reorder_rows(args)?;
         }
@@ -176,6 +179,9 @@ enum Commands {
 
     /// Take columns from the sparse matrix and create a new sparse matrix backend.
     SubsetColumns(SubsetColumnsArgs),
+
+    /// Align column names for multimodal data
+    AlignColumns(AlignColumnsArgs),
 
     /// Merge multiple 10x `.mtx` files into one fileset
     MergeMtx(MergeMtxArgs),
@@ -306,6 +312,21 @@ pub struct SubsetColumnsArgs {
     /// output file
     #[arg(short, long, required = true)]
     output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct AlignColumnsArgs {
+    /// data file -- either `.zarr` or `.h5`
+    #[arg(required = true)]
+    data_files: Vec<Box<str>>,
+
+    /// Data types (treating them as different rows)
+    #[arg(short = 'r', long, required = true)]
+    num_data_types: usize,
+
+    /// output directory
+    #[arg(short, long, required = true)]
+    output_directory: Box<str>,
 }
 
 #[derive(Args, Debug)]
@@ -785,6 +806,17 @@ fn reorder_rows(args: &ReorderRowsArgs) -> anyhow::Result<()> {
     data.reorder_rows(&row_names_order)?;
 
     info!("done");
+    Ok(())
+}
+
+fn align_columns(args: &AlignColumnsArgs) -> anyhow::Result<()> {
+
+
+
+    // 1. figure out common names for each column
+
+    // args.num_data_types;
+
     Ok(())
 }
 
