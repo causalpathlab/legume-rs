@@ -88,8 +88,8 @@ fn main() -> anyhow::Result<()> {
         Commands::SubsetColumns(args) => {
             subset_columns(args)?;
         }
-        Commands::AlignColumns(args) => {
-            align_columns(args)?;
+        Commands::AlignData(args) => {
+            align_backends(args)?;
         }
         Commands::ReorderRows(args) => {
             reorder_rows(args)?;
@@ -181,7 +181,7 @@ enum Commands {
     SubsetColumns(SubsetColumnsArgs),
 
     /// Align column names for multimodal data
-    AlignColumns(AlignColumnsArgs),
+    AlignData(AlignDataArgs),
 
     /// Merge multiple 10x `.mtx` files into one fileset
     MergeMtx(MergeMtxArgs),
@@ -315,7 +315,7 @@ pub struct SubsetColumnsArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct AlignColumnsArgs {
+pub struct AlignDataArgs {
     /// data file -- either `.zarr` or `.h5`
     #[arg(required = true)]
     data_files: Vec<Box<str>>,
@@ -809,13 +809,149 @@ fn reorder_rows(args: &ReorderRowsArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn align_columns(args: &AlignColumnsArgs) -> anyhow::Result<()> {
+fn align_backends(args: &AlignDataArgs) -> anyhow::Result<()> {
+    let n_data = args.data_files.len();
+    let n_data_columns = n_data.div_ceil(args.num_data_types);
+    let n_expected = n_data_columns * args.num_data_types;
 
+    if n_expected != n_data {
+        return Err(anyhow::anyhow!(format!(
+            "Should be multiple of {}: actual data files {} < expected {}",
+            args.num_data_types, n_data, n_expected
+        )));
+    }
 
+    let n_data_rows = n_expected.div_ceil(n_data_columns);
 
-    // 1. figure out common names for each column
+    let mut full_data_vec = args
+        .data_files
+        .iter()
+        .enumerate()
+        .map(|(i, _file)| -> anyhow::Result<_> {
+            let ext = extension(_file)?;
+            let backend = match ext.as_ref() {
+                "zarr" => SparseIoBackend::Zarr,
+                "h5" => SparseIoBackend::HDF5,
+                _ => return Err(anyhow::anyhow!("Unknown file format: {}", _file)),
+            };
 
-    // args.num_data_types;
+            let base = basename(&_file)?;
+
+            let data_col_id = i % n_data_rows + 1;
+            let data_row_id = i / n_data_rows + 1;
+
+            let dst_path = format!(
+                "{}/{}_{}_{}.{}",
+                args.output_directory, data_row_id, data_col_id, base, ext
+            );
+            recursive_copy(&_file, &dst_path)?;
+            open_sparse_matrix(&dst_path, &backend)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // identify common rows
+    let mut shared_rows = vec![];
+    for r in 0..n_data_rows {
+        let data_set_idx: Vec<usize> = (r * n_data_columns..(r + 1) * n_data_columns).collect();
+
+        let fully_shared = data_set_idx.len();
+        let mut shared: HashMap<Box<str>, usize> = HashMap::default();
+        for &di in data_set_idx.iter() {
+            for v in full_data_vec[di].row_names()? {
+                let count = shared.entry(v).or_default();
+                *count += 1;
+            }
+        }
+
+        let mut shared: Vec<Box<str>> = shared
+            .into_iter()
+            .filter_map(|(v, n)| if n == fully_shared { Some(v) } else { None })
+            .collect();
+
+        info!(
+            "found {} shared rows/features on the data type {}",
+            shared.len(),
+            r
+        );
+
+        if shared.is_empty() {
+            return Err(anyhow::anyhow!("no features are shared"));
+        }
+
+        shared.par_sort();
+        shared_rows.push(shared);
+    }
+
+    for data_col in 0..n_data_columns {
+        info!("aligning on the data column {}", data_col);
+
+        // 0. subset of data sets
+        let data_set_idx: Vec<usize> = (data_col..n_data).step_by(n_data_columns).collect();
+
+        let subset_data_vec = data_set_idx
+            .iter()
+            .map(|&di| &full_data_vec[di])
+            .collect::<Vec<_>>();
+
+        // 1. figure out shared names for each column
+        let fully_shared = data_set_idx.len();
+        let mut shared: HashMap<Box<str>, usize> = HashMap::default();
+        for &d in subset_data_vec.iter() {
+            for v in d.column_names()? {
+                let count = shared.entry(v).or_default();
+                *count += 1;
+            }
+        }
+
+        let mut shared: Vec<Box<str>> = shared
+            .into_iter()
+            .filter_map(|(v, n)| if n == fully_shared { Some(v) } else { None })
+            .collect();
+
+        info!("found {} shared columns", shared.len());
+
+        if shared.is_empty() {
+            for &di in data_set_idx.iter() {
+                let data = &mut full_data_vec[di];
+                info!(
+                    "remove this unaligned backend: {}",
+                    data.get_backend_file_name()
+                );
+                data.remove_backend_file()?;
+            }
+            continue;
+        }
+
+        shared.par_sort();
+
+        // 2. subset columns
+        for (r, &di) in data_set_idx.iter().enumerate() {
+            let data = &mut full_data_vec[di];
+
+            let pos: HashMap<Box<str>, usize> = data
+                .column_names()?
+                .into_iter()
+                .enumerate()
+                .map(|(i, x)| (x, i))
+                .collect();
+            let columns: Vec<usize> = shared.iter().map(|x| pos[x]).collect();
+
+            let pos: HashMap<Box<str>, usize> = data
+                .row_names()?
+                .into_iter()
+                .enumerate()
+                .map(|(i, x)| (x, i))
+                .collect();
+            let rows: Vec<usize> = shared_rows[r].iter().map(|x| pos[x]).collect();
+            data.subset_columns_rows(Some(&columns), Some(&rows))?;
+        }
+
+        info!(
+            "done on the data column {}/{}",
+            data_col + 1,
+            n_data_columns
+        );
+    }
 
     Ok(())
 }
