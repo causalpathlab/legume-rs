@@ -7,7 +7,8 @@ use crate::hypothesis_tests::BinomTest;
 pub struct MethylatedSite {
     pub m6a_pos: i64,
     pub conversion_pos: i64,
-    // pub strand: Strand,
+    pub wt_freq: DnaBaseCount,
+    pub mut_freq: DnaBaseCount,
 }
 
 pub struct DartSeqSifter {
@@ -91,15 +92,16 @@ impl DartSeqSifter {
                     .binomial_test_pvalue(wt_conv, mut_conv, &Dna::C, &Dna::T)
                     .unwrap_or(1.0);
 
-                if pv < self.max_pvalue_cutoff {
-                    let meth = MethylatedSite {
-                        // seqname: self.seqname.clone(),
-                        // gene_id: self.gene_id.clone(),
-                        m6a_pos: m6a_site,
-                        conversion_pos: conv_site,
-                        // strand: Strand::Forward,
-                    };
-                    self.candidate_sites.push(meth);
+                if let (Some(wt_freq), Some(mut_freq)) = (wt_conv, mut_conv) {
+                    if pv < self.max_pvalue_cutoff {
+                        let meth = MethylatedSite {
+                            m6a_pos: m6a_site,
+                            conversion_pos: conv_site,
+                            wt_freq: wt_freq.clone(),
+                            mut_freq: mut_freq.clone(),
+                        };
+                        self.candidate_sites.push(meth);
+                    }
                 }
             }
         }
@@ -178,15 +180,16 @@ impl DartSeqSifter {
                     .binomial_test_pvalue(wt_conv, mut_conv, &Dna::G, &Dna::A)
                     .unwrap_or(1.0);
 
-                if pv < self.max_pvalue_cutoff {
-                    let meth = MethylatedSite {
-                        // seqname: self.seqname.clone(),
-                        // gene_id: self.gene_id.clone(),
-                        m6a_pos: m6a_site,
-                        conversion_pos: conv_site,
-                        // strand: Strand::Backward,
-                    };
-                    self.candidate_sites.push(meth);
+                if let (Some(wt_freq), Some(mut_freq)) = (wt_conv, mut_conv) {
+                    if pv < self.max_pvalue_cutoff {
+                        let meth = MethylatedSite {
+                            m6a_pos: m6a_site,
+                            conversion_pos: conv_site,
+                            wt_freq: wt_freq.clone(),
+                            mut_freq: mut_freq.clone(),
+                        };
+                        self.candidate_sites.push(meth);
+                    }
                 }
             }
         }

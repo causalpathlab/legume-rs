@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Clone, Ord, Hash)]
 pub enum Dna {
     A,
     T,
@@ -36,7 +36,7 @@ pub struct BiAllele {
     pub n2: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct DnaBaseCount {
     data: [(Dna, usize); 4],
 }
