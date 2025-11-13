@@ -35,12 +35,8 @@ pub struct DartSeqCountArgs {
     resolution_kb: Option<f32>,
 
     /// #bins for genomic locations in histogram
-    #[arg(long = "genome-bins", default_value_t = 77)]
+    #[arg(long = "genome-bins", default_value_t = 57)]
     num_genomic_bins_histogram: usize,
-
-    /// #bins for methylation beta-values in histogram
-    #[arg(long = "meth-bins", default_value_t = 3)]
-    num_meth_bins_histogram: usize,
 
     /// (approximate) number of bins in histogram
     #[arg(long, default_value_t = 40)]
@@ -58,12 +54,16 @@ pub struct DartSeqCountArgs {
     #[arg(long, default_value_t = 3)]
     min_coverage: usize,
 
-    /// minimum number of reads at `C->U` edit events
-    #[arg(long, default_value_t = 3)]
-    min_conversion: usize,
+    /// minimum frequency of `C->U` on an edit site
+    #[arg(long = "min-wt-maf", default_value_t = 0.01)]
+    min_methylation_maf: f64,
+
+    /// maximum allele frequency `C->U` on the mutant
+    #[arg(long = "max-mut-maf", default_value_t = 0.01)]
+    max_background_maf: f64,
 
     /// maximum detection p-value cutoff
-    #[arg(short, long, default_value_t = 0.05)]
+    #[arg(short, long, default_value_t = 0.01)]
     pvalue_cutoff: f64,
 
     /// selectively choose bam record type (gene, transcript, exon, utr)
@@ -216,15 +216,12 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     // output marginal statistics //
     ////////////////////////////////
 
-    let gene_feature_count = gene_sites.count_gene_features(
-        &args.gff_file,
-        args.num_genomic_bins_histogram,
-        args.num_meth_bins_histogram,
-    )?;
+    let gene_feature_count =
+        gene_sites.count_gene_features(&args.gff_file, args.num_genomic_bins_histogram)?;
 
     gene_feature_count.print(args.histogram_print_width);
 
-    // gene_feature_count.to_tsv(&format!("{}.gene_feature_count.tsv", args.output))?;
+    gene_feature_count.to_tsv(&format!("{}.gene_feature_count.tsv.gz", args.output))?;
 
     //////////////////////////
     // Take cell level data //
@@ -412,8 +409,9 @@ fn find_methylated_sites_in_gene(
         // distribution, it will keep possible C->U edit positions.
         let mut sifter = DartSeqSifter {
             min_coverage: args.min_coverage,
-            min_conversion: args.min_conversion,
+            min_meth_cutoff: args.min_methylation_maf,
             max_pvalue_cutoff: args.pvalue_cutoff,
+            max_mutant_cutoff: args.max_background_maf,
             candidate_sites: Vec::with_capacity(positions.len()),
         };
 
@@ -646,14 +644,14 @@ fn write_bed(
 /////////////////////
 
 struct GeneFeatureCount {
-    five_prime: HashMap<(usize, usize), Vec<usize>>,
-    cds: HashMap<(usize, usize), Vec<usize>>,
-    three_prime: HashMap<(usize, usize), Vec<usize>>,
+    five_prime: HashMap<MethBin, Vec<usize>>,
+    cds: HashMap<MethBin, Vec<usize>>,
+    three_prime: HashMap<MethBin, Vec<usize>>,
 }
 
 impl GeneFeatureCount {
-    fn get_meth_bins(&self) -> Vec<(usize, usize)> {
-        let mut meth_bins: Vec<(usize, usize)> = self
+    fn get_meth_bins(&self) -> Vec<MethBin> {
+        let mut meth_bins: Vec<MethBin> = self
             .cds
             .iter()
             .map(|x| x.key().clone())
@@ -666,7 +664,7 @@ impl GeneFeatureCount {
         meth_bins
     }
 
-    fn max_count(map: &HashMap<(usize, usize), Vec<usize>>, k: &(usize, usize)) -> usize {
+    fn max_count(map: &HashMap<MethBin, Vec<usize>>, k: &MethBin) -> usize {
         map.get(k)
             .and_then(|v| v.iter().cloned().max())
             .unwrap_or(0)
@@ -690,7 +688,7 @@ impl GeneFeatureCount {
         let meth_bins = self.get_meth_bins();
 
         for k in &meth_bins {
-            eprintln!("WT: {},  MUT: {}", k.0, k.1);
+            eprintln!("{}", k);
 
             let nmax = [
                 GeneFeatureCount::max_count(&self.cds, &k),
@@ -716,37 +714,43 @@ impl GeneFeatureCount {
     }
 
     fn to_tsv(&self, file_path: &str) -> anyhow::Result<()> {
-        let meth_bins = self.get_meth_bins();
-
-        fn into_boxed_str(label: &str, meth_bin: (usize, usize), data: &[usize]) -> Vec<Box<str>> {
+        fn into_boxed_str(label: &str, meth_bin: &MethBin, data: &[usize]) -> Vec<Box<str>> {
             data.iter()
                 .enumerate()
-                .map(|(i, &n)| {
-                    format!("{}\t{}\t{}\t{}\t{}", label, i, meth_bin.0, meth_bin.1, n).into_boxed_str()
-                })
+                .map(|(i, &n)| format!("{}\t{}\t{}\t{}", label, i, meth_bin, n).into_boxed_str())
                 .collect()
         }
 
-        unimplemented!("");
+        let mut writer = common_io::open_buf_writer(file_path)?;
 
-        // let mut writer = common_io::open_buf_writer(file_path)?;
+        writer.write_all(
+            b"#feature\tgenomic_bin\t-log10MAF(methylated)\t-log10MAF(background)\tcount\n",
+        )?;
 
-        // for l in into_boxed_str("5UTR", &self.five_prime) {
-        //     writer.write_all(l.as_bytes())?;
-        //     writer.write_all(b"\n")?;
-        // }
+        let meth_bins = self.get_meth_bins();
 
-        // for l in into_boxed_str("CDS", &self.cds) {
-        //     writer.write_all(l.as_bytes())?;
-        //     writer.write_all(b"\n")?;
-        // }
+        for k in &meth_bins {
+            if let Some(data) = self.five_prime.get(k) {
+                for l in into_boxed_str("5UTR", k, data.value()) {
+                    writer.write_all(l.as_bytes())?;
+                    writer.write_all(b"\n")?;
+                }
+            }
+            if let Some(data) = self.three_prime.get(k) {
+                for l in into_boxed_str("3UTR", k, data.value()) {
+                    writer.write_all(l.as_bytes())?;
+                    writer.write_all(b"\n")?;
+                }
+            }
+            if let Some(data) = self.cds.get(k) {
+                for l in into_boxed_str("CDS", k, data.value()) {
+                    writer.write_all(l.as_bytes())?;
+                    writer.write_all(b"\n")?;
+                }
+            }
+        }
 
-        // for l in into_boxed_str("3UTR", &self.three_prime) {
-        //     writer.write_all(l.as_bytes())?;
-        //     writer.write_all(b"\n")?;
-        // }
-
-        // writer.flush()?;
+        writer.flush()?;
         Ok(())
     }
 }
@@ -756,14 +760,12 @@ trait Histogram {
         &self,
         feature_map: &HashMap<GeneId, GffRecord>,
         n_genomic_bins: usize,
-        n_meth_bins: usize,
-    ) -> HashMap<(usize, usize), Vec<usize>>;
+    ) -> HashMap<MethBin, Vec<usize>>;
 
     fn count_gene_features(
         &self,
         gff_file: &str,
         n_genomic_bins: usize,
-        n_meth_bins: usize,
     ) -> anyhow::Result<GeneFeatureCount>;
 }
 
@@ -772,7 +774,6 @@ impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
         &self,
         gff_file: &str,
         n_genomic_bins: usize,
-        n_meth_bins: usize,
     ) -> anyhow::Result<GeneFeatureCount> {
         let gff_records = read_gff_record_vec(gff_file)?;
 
@@ -792,9 +793,9 @@ impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
         let nbins_cds = n_cds as usize * n_genomic_bins / ntot as usize;
         let nbins_three_prime = n_three_prime as usize * n_genomic_bins / ntot as usize;
 
-        let five_prime = self.count_on_feature_map(&five_prime, nbins_five_prime, n_meth_bins);
-        let cds = self.count_on_feature_map(&cds, nbins_cds, n_meth_bins);
-        let three_prime = self.count_on_feature_map(&three_prime, nbins_three_prime, n_meth_bins);
+        let five_prime = self.count_on_feature_map(&five_prime, nbins_five_prime);
+        let cds = self.count_on_feature_map(&cds, nbins_cds);
+        let three_prime = self.count_on_feature_map(&three_prime, nbins_three_prime);
 
         Ok(GeneFeatureCount {
             five_prime,
@@ -807,28 +808,7 @@ impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
         &self,
         gene_gff_map: &HashMap<GeneId, GffRecord>,
         n_genomic_bins: usize,
-        n_meth_bins: usize,
-    ) -> HashMap<(usize, usize), Vec<usize>> {
-        fn forward_meth_bin(s: &MethylatedSite, bins: usize) -> (usize, usize) {
-            let unmeth = s.wt_freq.get(Some(&Dna::C));
-            let meth = s.wt_freq.get(Some(&Dna::T));
-            let wt_beta = (meth * bins).div_ceil((meth + unmeth).max(1));
-            let unmeth = s.mut_freq.get(Some(&Dna::C));
-            let meth = s.mut_freq.get(Some(&Dna::T));
-            let mut_beta = (meth * bins).div_ceil((meth + unmeth).max(1));
-            (wt_beta, mut_beta)
-        }
-
-        fn backward_meth_bin(s: &MethylatedSite, bins: usize) -> (usize, usize) {
-            let unmeth = s.wt_freq.get(Some(&Dna::G));
-            let meth = s.wt_freq.get(Some(&Dna::A));
-            let wt_beta = (meth * bins).div_ceil((meth + unmeth).max(1));
-            let unmeth = s.mut_freq.get(Some(&Dna::G));
-            let meth = s.mut_freq.get(Some(&Dna::A));
-            let mut_beta = (meth * bins).div_ceil((meth + unmeth).max(1));
-            (wt_beta, mut_beta)
-        }
-
+    ) -> HashMap<MethBin, Vec<usize>> {
         let ret = HashMap::new();
 
         self.iter().for_each(|x| {
@@ -842,11 +822,7 @@ impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
 
                 for s in sites.iter() {
                     if s.m6a_pos < ub && s.m6a_pos >= lb {
-                        // discretized beta
-                        let beta_bin = match gff.strand {
-                            Strand::Forward => forward_meth_bin(s, n_meth_bins),
-                            Strand::Backward => backward_meth_bin(s, n_meth_bins),
-                        };
+                        let beta_bin = MethBin::from(s, &gff.strand);
 
                         let mut entry = ret.entry(beta_bin).or_insert(vec![0; n_genomic_bins + 1]);
                         let genomic = entry.value_mut();
@@ -865,5 +841,52 @@ impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
         });
 
         ret
+    }
+}
+
+#[derive(Eq, Hash, PartialEq, PartialOrd, Ord, Clone)]
+struct MethBin {
+    neg_log10_p_wt: usize,
+    neg_log10_p_mut: usize,
+}
+
+impl MethBin {
+    fn from(s: &MethylatedSite, strand: &Strand) -> Self {
+        let pmin = 1e-4;
+        let (wt_unmeth, wt_meth, mut_unmeth, mut_meth) = match strand {
+            Strand::Forward => (
+                s.wt_freq.get(Some(&Dna::C)) as f32,
+                s.wt_freq.get(Some(&Dna::T)) as f32,
+                s.mut_freq.get(Some(&Dna::C)) as f32,
+                s.mut_freq.get(Some(&Dna::T)) as f32,
+            ),
+            Strand::Backward => (
+                s.wt_freq.get(Some(&Dna::G)) as f32,
+                s.wt_freq.get(Some(&Dna::A)) as f32,
+                s.mut_freq.get(Some(&Dna::G)) as f32,
+                s.mut_freq.get(Some(&Dna::A)) as f32,
+            ),
+        };
+
+        Self {
+            neg_log10_p_wt: Self::neg_log10_beta(wt_meth, wt_unmeth, pmin),
+            neg_log10_p_mut: Self::neg_log10_beta(mut_meth, mut_unmeth, pmin),
+        }
+    }
+
+    fn neg_log10_beta(meth: f32, unmeth: f32, pmin: f32) -> usize {
+        (-(meth / (unmeth + meth).max(1.0)).max(pmin).log10()) as usize
+    }
+}
+
+impl From<MethBin> for Box<str> {
+    fn from(meth_bin: MethBin) -> Self {
+        format!("{}\t{}", meth_bin.neg_log10_p_wt, meth_bin.neg_log10_p_mut).into_boxed_str()
+    }
+}
+
+impl std::fmt::Display for MethBin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}\t{}", self.neg_log10_p_wt, self.neg_log10_p_mut)
     }
 }

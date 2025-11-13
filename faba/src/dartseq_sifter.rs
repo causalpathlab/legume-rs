@@ -13,8 +13,9 @@ pub struct MethylatedSite {
 
 pub struct DartSeqSifter {
     pub min_coverage: usize,
-    pub min_conversion: usize,
+    pub min_meth_cutoff: f64,
     pub max_pvalue_cutoff: f64,
+    pub max_mutant_cutoff: f64,
     pub candidate_sites: Vec<MethylatedSite>,
 }
 
@@ -212,11 +213,16 @@ impl DartSeqSifter {
                     mut_freq.get(Some(failure_base)),
                     mut_freq.get(Some(success_base)),
                 );
-                let (ntot, ntot_mut) = (wt_n_failure + wt_n_success, mut_n_failure + mut_n_success);
+                let (ntot_wt, ntot_mut) =
+                    (wt_n_failure + wt_n_success, mut_n_failure + mut_n_success);
 
-                if ntot >= self.min_coverage
+                let p_wt = wt_n_success as f64 / ntot_wt as f64;
+                let p_mut = mut_n_success as f64 / ntot_mut as f64;
+
+                if ntot_wt >= self.min_coverage
                     && ntot_mut >= self.min_coverage
-                    && wt_n_success >= self.min_conversion
+                    && p_wt >= self.min_meth_cutoff
+                    && p_mut < self.max_mutant_cutoff
                 {
                     let pv_greater = BinomTest {
                         expected: (mut_n_failure, mut_n_success),
