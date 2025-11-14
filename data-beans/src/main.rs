@@ -413,8 +413,12 @@ pub struct FromH5Args {
     #[arg(short = 't', long, value_enum, default_value = "column")]
     pointer_type: IndexPointerType,
 
-    /// group/dataset name for rows/genes/features (under the root)
+    /// group/dataset id for rows/genes/features (under the root)
     #[arg(short = 'r', long, default_value = "features/id")]
+    row_id_field: Box<str>,
+
+    /// group/dataset name for rows/genes/features (under the root)
+    #[arg(short = 'n', long, default_value = "features/name")]
     row_name_field: Box<str>,
 
     /// group/dataset name for rows/genes/features (under the root)
@@ -480,8 +484,12 @@ pub struct FromZarrArgs {
     #[arg(short = 't', long, value_enum, default_value = "row")]
     pointer_type: IndexPointerType,
 
-    /// group/dataset name for rows/genes/features
+    /// group/dataset id for rows/genes/features
     #[arg(short = 'r', long, default_value = "/cell_features/feature_ids")]
+    row_id_field: Box<str>,
+
+    /// group/dataset name for rows/genes/features
+    #[arg(short = 'n', long, default_value = "/cell_features/feature_keys")]
     row_name_field: Box<str>,
 
     /// rows/genes/features field
@@ -1806,17 +1814,43 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     let TripletsShape { nrows, ncols, nnz } = shape;
     info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
 
-    let mut row_names = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_name_field)
-        .or_else(|_| read_zarr_strings(store.clone(), args.row_name_field.as_ref()))
+    let mut row_ids = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_id_field)
+        .or_else(|_| read_zarr_strings(store.clone(), args.row_id_field.as_ref()))
         .unwrap_or_else(|_| (0..nrows).map(|x| x.to_string().into_boxed_str()).collect());
+
+    let mut row_names = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_name_field)
+        .or_else(|_| read_zarr_strings(store.clone(), args.row_id_field.as_ref()))
+        .unwrap_or_else(|_| (0..nrows).map(|x| x.to_string().into_boxed_str()).collect());
+
+    info!("Read {} row names", row_ids.len());
+    if nrows < row_ids.len() {
+        info!("data doesn't contain all the row IDs");
+        row_ids.truncate(nrows);
+    }
+
     if nrows < row_names.len() {
-        info!("data doesn't contain all the rows");
+        info!("data doesn't contain all the row names");
         row_names.truncate(nrows);
     }
+
+    assert_eq!(nrows, row_ids.len());
     assert_eq!(nrows, row_names.len());
 
+    // have composite row names
+    let row_ids: Vec<Box<str>> = row_ids
+        .into_iter()
+        .zip(row_names)
+        .map(|(id, name)| {
+            if name.len() > 0 {
+                format!("{}_{}", id, name).into_boxed_str()
+            } else {
+                id
+            }
+        })
+        .collect();
+
     let mut row_types = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_type_field)
-        .or_else(|_| read_zarr_strings(store.clone(), args.row_name_field.as_ref()))
+        .or_else(|_| read_zarr_strings(store.clone(), args.row_id_field.as_ref()))
         .unwrap_or_else(|_| vec![args.select_row_type.clone(); nrows]);
     if nrows < row_types.len() {
         info!("data doesn't contain all the rows");
@@ -1859,7 +1893,7 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         Some(&backend),
     )?;
     info!("created sparse matrix: {}", backend_file);
-    out.register_row_names_vec(&row_names);
+    out.register_row_names_vec(&row_ids);
     out.register_column_names_vec(&column_names);
 
     if select_rows.len() < nrows {
@@ -1939,18 +1973,48 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
         let TripletsShape { nrows, ncols, nnz } = shape;
         info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
 
+        let mut row_ids: Vec<Box<str>> = match root.dataset(args.row_id_field.as_ref()) {
+            Ok(rows) => read_hdf5_strings(rows)?,
+            _ => {
+                info!("row (feature) IDs not found");
+                (0..nrows).map(|x| x.to_string().into_boxed_str()).collect()
+            }
+        };
+
         let mut row_names: Vec<Box<str>> = match root.dataset(args.row_name_field.as_ref()) {
             Ok(rows) => read_hdf5_strings(rows)?,
             _ => {
                 info!("row (feature) names not found");
-                (0..nrows).map(|x| x.to_string().into_boxed_str()).collect()
+                vec![Box::from(""); nrows]
             }
         };
-        info!("Read {} row names", row_names.len());
+
+        info!("Read {} row names", row_ids.len());
+        if nrows < row_ids.len() {
+            info!("data doesn't contain all the row IDs");
+            row_ids.truncate(nrows);
+        }
+
         if nrows < row_names.len() {
-            info!("data doesn't contain all the rows");
+            info!("data doesn't contain all the row names");
             row_names.truncate(nrows);
         }
+
+        assert_eq!(nrows, row_ids.len());
+        assert_eq!(nrows, row_names.len());
+
+        // have composite row names
+        let row_ids: Vec<Box<str>> = row_ids
+            .into_iter()
+            .zip(row_names)
+            .map(|(id, name)| {
+                if name.len() > 0 {
+                    format!("{}_{}", id, name).into_boxed_str()
+                } else {
+                    id
+                }
+            })
+            .collect();
 
         let mut row_types: Vec<Box<str>> = match root.dataset(args.row_type_field.as_ref()) {
             Ok(rows) => read_hdf5_strings(rows)?,
@@ -1961,11 +2025,10 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
         };
 
         if nrows < row_types.len() {
-            info!("data doesn't contain all the rows");
+            info!("data doesn't contain all the row types");
             row_types.truncate(nrows);
         }
 
-        assert_eq!(nrows, row_names.len());
         assert_eq!(nrows, row_types.len());
 
         let mut column_names: Vec<Box<str>> = match root.dataset(args.column_name_field.as_ref()) {
@@ -1990,7 +2053,7 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
             Some(&backend),
         )?;
         info!("created sparse matrix: {}", backend_file);
-        out.register_row_names_vec(&row_names);
+        out.register_row_names_vec(&row_ids);
         out.register_column_names_vec(&column_names);
 
         let select_pattern = args.select_row_type.to_lowercase();
