@@ -1,5 +1,3 @@
-use core::f32;
-
 use crate::embed_common::*;
 use crate::senna_input::*;
 

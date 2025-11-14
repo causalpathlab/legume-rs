@@ -5,6 +5,7 @@ mod fit_joint_topic;
 mod fit_svd;
 mod fit_topic;
 mod senna_input;
+mod annotate_topic;
 
 use embed_common::*;
 use fit_deconv_reg::*;
@@ -12,6 +13,7 @@ use fit_joint_svd::*;
 use fit_joint_topic::*;
 use fit_svd::*;
 use fit_topic::*;
+use annotate_topic::*;
 
 /// Single cell embedding routines with nearest neighbourhood-based
 /// adjustment
