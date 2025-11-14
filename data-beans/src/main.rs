@@ -180,7 +180,9 @@ enum Commands {
     /// Take columns from the sparse matrix and create a new sparse matrix backend.
     SubsetColumns(SubsetColumnsArgs),
 
-    /// Align column names for multimodal data
+    /// To ensure that column names are aligned for multimodal
+    /// analysis. We will only keep columns and rows matched across
+    /// files. 1st row:`D(1,1) - D(1,2)`, 2nd row: `D(2,1) - D(2,2)`
     AlignData(AlignDataArgs),
 
     /// Merge multiple 10x `.mtx` files into one fileset
@@ -837,13 +839,13 @@ fn align_backends(args: &AlignDataArgs) -> anyhow::Result<()> {
 
             let base = basename(&_file)?;
 
-            let data_col_id = i % n_data_rows + 1;
-            let data_row_id = i / n_data_rows + 1;
-
+            let data_col_id = i % n_data_columns + 1;
+            let data_row_id = i / n_data_columns + 1;
             let dst_path = format!(
                 "{}/{}_{}_{}.{}",
                 args.output_directory, data_row_id, data_col_id, base, ext
             );
+            info!("renaming files for easier sorting: {}", dst_path);
             recursive_copy(&_file, &dst_path)?;
             open_sparse_matrix(&dst_path, &backend)
         })
