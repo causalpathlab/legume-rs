@@ -87,7 +87,7 @@ impl CollapsingOps for SparseIoVec {
         self.register_batches_dmatrix(&proj_kn, col_to_batch)?;
 
         info!(
-            "partitioned {} columns to {} batches",
+            "found {} columns across {} batches",
             self.num_columns()?,
             self.num_batches()
         );
