@@ -30,105 +30,265 @@ enum AdjMethod {
 
 #[derive(Args, Debug)]
 pub struct JointTopicArgs {
-    /// Data files
-    #[arg(required = true)]
+    #[arg(
+        required = true,
+        help = "Data files",
+        long_help = "Data files to be processed.\n\
+		     Each file should be specified as a path.\n\
+		     Multiple files can be provided."
+    )]
     data_files: Vec<Box<str>>,
 
-    /// Data modalities
-    #[arg(short = 'm', long, required = true)]
+    #[arg(
+        short = 'm',
+        long = "modalities",
+        help = "Data modalities",
+        long_help = "We will treat the provided data files as\n\
+		     a table of data sets in a row-major order.\n\
+		     This number of modalities will determine \n\
+		     how many different data types are assumed,\n\
+		     or the number of rows in the data table.",
+        required = true
+    )]
     num_modalities: usize,
 
-    /// Output header
-    #[arg(long, short, required = true)]
+    #[arg(
+        long,
+        short,
+        required = true,
+        help = "Output header",
+        long_help = "Output header for results.\n\
+		     Specify the output file or prefix for generated files:\n\
+		     - {out}.delta.parquet\n\
+		     - {out}.dictionary.parquet\n\
+		     - {out}.latent.parquet\n"
+    )]
     out: Box<str>,
 
-    /// batch membership files (comma-separated names). Each bach file
-    /// should correspond to each data file.
-    #[arg(long, short, value_delimiter(','))]
-    batch_files: Option<Vec<Box<str>>>,
-
-    /// Random projection dimension to project the data.
-    #[arg(long, short = 'p', default_value_t = 50)]
+    #[arg(
+        long,
+        short = 'p',
+        default_value_t = 50,
+        help = "Random projection dimension.",
+        long_help = "Random projection dimension to project the data.\n\
+		     Controls the dimensionality of the random projection step."
+    )]
     proj_dim: usize,
 
-    /// Use top `S` components of projection. #samples < `2^S+1`.
-    #[arg(long, short = 'd', default_value_t = 10)]
+    #[arg(
+        long,
+        short = 'd',
+        default_value_t = 10,
+        help = "Top {d} components of projection.",
+        long_help = "Use top {d} components of projection.\n\
+		     Number of samples will be less than `2^{d}+1`."
+    )]
     sort_dim: usize,
 
-    /// column sum normalization scale (will only affect decoder)
-    #[arg(short = 'c', long, default_value_t = 1e4)]
+    #[arg(
+        long,
+        short,
+        value_delimiter(','),
+        help = "Batch membership files.",
+        long_help = "Batch membership files (comma-separated names).\n\
+		     Each batch file should correspond to each data file.\n\
+		     Example: batch1.csv,batch2.csv"
+    )]
+    batch_files: Option<Vec<Box<str>>>,
+
+    #[arg(
+        short = 'c',
+        long,
+        default_value_t = 1e4,
+        help = "Column sum normalization scale.",
+        long_help = "Column sum normalization scale (affects decoder only).\n\
+		     Adjusts normalization of columns in the decoder."
+    )]
     column_sum_norm: f32,
 
-    /// #k-nearest neighbours batches
-    #[arg(long, default_value_t = 3)]
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "Number of k-nearest neighbour batches.",
+        long_help = "Number of k-nearest neighbour batches.\n\
+		     Controls the number of batches considered \n\
+		     for nearest neighbour search."
+    )]
     knn_batches: usize,
 
-    /// #k-nearest neighbours within each batch
-    #[arg(long, default_value_t = 10)]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Number of k-nearest neighbours within each batch.",
+        long_help = "Number of k-nearest neighbours within each batch.\n\
+		     Controls the number of cells considered \n\
+		     for nearest neighbour search within each batch."
+    )]
     knn_cells: usize,
 
-    /// optimization iterations
-    #[arg(long, default_value_t = 30)]
+    #[arg(
+        long,
+        default_value_t = 30,
+        help = "Optimization iterations.",
+        long_help = "Number of optimization iterations.\n\
+		     Controls the number of steps for model optimization."
+    )]
     iter_opt: usize,
 
-    /// block_size (# columns) for parallel processing
-    #[arg(long, default_value_t = 100)]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Block size for parallel processing.",
+        long_help = "Block size (number of columns) for parallel processing.\n\
+		     Controls the granularity of parallel computation."
+    )]
     block_size: usize,
 
-    /// number of latent topics
-    #[arg(short = 't', long, default_value_t = 10)]
+    #[arg(
+        short = 't',
+        long,
+        default_value_t = 10,
+        help = "Number of latent topics.",
+        long_help = "Number of latent topics.\n\
+		     Controls the dimensionality of the latent topic space."
+    )]
     n_latent_topics: usize,
 
-    /// number of modules of the features in the encoder model.
-    /// If not specified, `encoder_layers[0]` will be used.
-    #[arg(short = 'f', long)]
+    #[arg(
+        short = 'f',
+        long,
+        help = "Number of feature modules.",
+        long_help = "Number of modules of the features in the encoder model.\n\
+		     If not specified, encoder_layers[0] will be used. \n\
+		     Giving the number of features modules smaller than that of features,\n\
+		     we can expedite model training while not loosing too much of accuracy,\n\
+		     as many features are redundant and frequently dropped out.\n\n\
+		     We will assume the same number of feature modules for all data types.\n"
+    )]
     feature_modules: Option<usize>,
 
-    /// encoder layers
-    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
+    #[arg(
+        long,
+        short = 'e',
+        value_delimiter(','),
+        default_values_t = vec![128, 1024, 128],
+        help = "Encoder layers.",
+        long_help = "Encoder layers (comma-separated).\n\
+		     Specify the size of each layer in the encoder model.\n\
+		     Example: 128,1024,128"
+    )]
     encoder_layers: Vec<usize>,
 
-    /// number of inverse autoregressive flow transformations
-    #[arg(long, default_value_t = 0)]
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Number of inverse autoregressive flow transformations.",
+        long_help = "Number of inverse autoregressive flow transformations.\n\
+		     Controls the number of flow steps in the model."
+    )]
     iaf_trans: usize,
 
-    /// intensity levels for frequency embedding
-    #[arg(long, default_value_t = 10)]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Intensity levels for frequency embedding.",
+        long_help = "Intensity levels for frequency embedding.\n\
+		     Controls the vocabulary size for intensity embedding."
+    )]
     vocab_size: usize,
 
-    /// intensity embedding dimension
-    #[arg(long, default_value_t = 10)]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Intensity embedding dimension.",
+        long_help = "Intensity embedding dimension.\n\
+		     Controls the size of the embedding for intensity levels."
+    )]
     vocab_emb: usize,
 
-    /// # training epochs
-    #[arg(long, short = 'i', default_value_t = 1000)]
+    #[arg(
+        long,
+        short = 'i',
+        default_value_t = 1000,
+        help = "Number of training epochs.",
+        long_help = "Number of training epochs.\n\
+		     Controls how many times the model is trained over the data."
+    )]
     epochs: usize,
 
-    /// data jitter interval
-    #[arg(long, short = 'j', default_value_t = 5)]
+    #[arg(
+        long,
+        short = 'j',
+        default_value_t = 5,
+        help = "Data jitter interval.",
+        long_help = "Data jitter interval.\n\
+		     Controls the interval for adding jitter to the collapsed data\n\
+		     by posterior resampling during VAE training."
+    )]
     jitter_interval: usize,
 
-    /// Minibatch size
-    #[arg(long, default_value_t = 100)]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Minibatch size.",
+        long_help = "Minibatch size for training.\n\
+		     Controls the number of samples per training batch."
+    )]
     minibatch_size: usize,
 
-    #[arg(long, default_value_t = 1e-3)]
+    #[arg(
+        long,
+        default_value_t = 1e-3,
+        help = "Learning rate.",
+        long_help = "Learning rate for optimization.\n\
+		     Controls the step size for parameter updates."
+    )]
     learning_rate: f32,
 
-    /// candle device
-    #[arg(long, value_enum, default_value = "cpu")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "cpu",
+        help = "Candle device.",
+        long_help = "Candle device to use for computation.\n\
+		     Options: cpu, cuda, metal."
+    )]
     device: ComputeDevice,
 
-    /// adjust by batch or residual
-    #[arg(long, value_enum, default_value = "residual")]
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "A device for cuda.",
+        long_help = "For cuda or meta, we may want to choose a different device."
+    )]
+    device_no: usize,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "residual",
+        help = "Adjustment method.",
+        long_help = "Adjust by batch or residual.\n\
+		     Choose the method for batch adjustment."
+    )]
     adj_method: AdjMethod,
 
-    /// preload all the columns data
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Preload all columns data.",
+        long_help = "Preload all the columns data into memory.\n\
+		     Improves performance for large datasets."
+    )]
     preload_data: bool,
 
-    /// verbosity
-    #[arg(long, short)]
+    #[arg(
+        long,
+        short,
+        help = "Verbosity.",
+        long_help = "Enable verbose output.\n\
+		     Prints additional information during execution."
+    )]
     verbose: bool,
 }
 
@@ -195,8 +355,8 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
 
     let dev = match args.device {
-        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
-        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
+        ComputeDevice::Metal => candle_core::Device::new_metal(args.device_no)?,
+        ComputeDevice::Cuda => candle_core::Device::new_cuda(args.device_no)?,
         _ => candle_core::Device::Cpu,
     };
 
