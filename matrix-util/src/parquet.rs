@@ -52,7 +52,6 @@ impl ParquetReader {
         let reader = SerializedFileReader::new(file)?;
         let metadata = reader.metadata();
         let nrows = metadata.file_metadata().num_rows() as usize;
-
         let fields = metadata.file_metadata().schema().get_fields();
 
         let select_columns: HashSet<usize> = {
@@ -88,7 +87,6 @@ impl ParquetReader {
             .filter_map(|(j, f)| {
                 if select_columns.contains(&j) && j != row_name_index {
                     let tt = f.get_physical_type();
-
                     match tt {
                         parquet::basic::Type::FLOAT
                         | parquet::basic::Type::DOUBLE
