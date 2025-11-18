@@ -184,9 +184,8 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
 
     // 2. full predict annotations
     let aa_annot_topic = Mat::from_tensor(&model.log_pip()?.exp()?)?;
-    let topic_annot = (&aa_annot_topic * topic_nt.transpose())
-        .normalize_columns()
-        .transpose();
+    let topic_tn = topic_nt.map(|x| x.exp()).transpose().normalize_columns();
+    let topic_annot = (&aa_annot_topic * topic_tn).normalize_columns().transpose();
 
     aa_annot_topic.to_parquet(Some(&annot_names), Some(&topic_names), &annot_topic_file)?;
     topic_annot.to_parquet(Some(&cell_names), Some(&annot_names), &cell_annot_file)?;
