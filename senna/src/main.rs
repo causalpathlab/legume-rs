@@ -1,3 +1,5 @@
+mod annotate_topic;
+mod deconv;
 mod embed_common;
 mod fit_deconv_reg;
 mod fit_joint_svd;
@@ -5,25 +7,23 @@ mod fit_joint_topic;
 mod fit_svd;
 mod fit_topic;
 mod senna_input;
-mod annotate_topic;
 
+use annotate_topic::*;
 use embed_common::*;
 use fit_deconv_reg::*;
 use fit_joint_svd::*;
 use fit_joint_topic::*;
 use fit_svd::*;
 use fit_topic::*;
-use annotate_topic::*;
 
-/// Single cell embedding routines with nearest neighbourhood-based
-/// adjustment
-///
-/// Data files of either `.zarr` or `.h5` format. All the formats in
-/// the given list should be identical. We can convert `.mtx` to
-/// `.zarr` or `.h5` using `data-beans from-mtx` or similar commands.
-///
 #[derive(Parser, Debug)]
-#[command(version, about, long_about, term_width = 80)]
+#[command(
+    version,
+    about = "SENNA",
+    long_about = "Stochastic data Embedding with Nearest Neighbourhood Adjustment\n\
+		  Data files of either `.zarr` or `.h5` format. \n\
+		  We can convert `.mtx` to `.zarr` or `.h5` using `data-beans from-mtx`"
+)]
 struct Cli {
     #[command(subcommand)]
     commands: Commands,
@@ -31,16 +31,49 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// embedding by randomized singular value decomposition
+    #[command(
+        about = "Embedding data by singular value decomposition.",
+        long_about = "Estimate Nystrom projection (SVD) in the three stages: \n\
+		      (1) Collapse sparse data while adjusting batch effects\n\
+		      (2) Estimate an orthogonal basis matrix\n\
+		      (3) Project the original data onto the basis vectors.\n"
+    )]
     Svd(SvdArgs),
 
-    /// embedding by fitting a topic model
+    #[command(
+        about = "Embedding data by topic modelling.",
+        long_about = "Estimate a probabilistic topic model in the three stages: \n\
+		      (1) Collapse sparse data while adjusting batch effects\n\
+		      (2) Estimate encoder-decoder architecture via SGD\n\
+		      (3) Estimate latent states on the original data.\n"
+    )]
     Topic(TopicArgs),
 
-    /// embedding by randomized singular value decomposition
+    #[command(
+        about = "Annotate the dictionary and latent topics using marker features.",
+        long_about = "Annotate what each topic would mean using marker features/genes.\n\
+		      For each topic, we regress a feature vector of the dictionary\n\
+		      on the marker gene membership matrix (a design matrix)\n\
+		      to estimate the probability of assigning cell/group types.\n"
+    )]
+    AnnotateTopic(AnnotateTopicArgs),
+
+    #[command(
+        about = "Embedding data by singular value decomposition on multiple data types.",
+        long_about = "Estimate Nystrom projection (SVD) in the three stages: \n\
+		      (1) Collapse sparse data while adjusting batch effects\n\
+		      (2) Estimate an orthogonal basis matrix\n\
+		      (3) Project the original data onto the basis vectors.\n"
+    )]
     JointSvd(JointSvdArgs),
 
-    /// embedding by randomized singular value decomposition
+    #[command(
+        about = "Embedding data by topic modelling on multiple data types.",
+        long_about = "Estimate a probabilistic topic model in the three stages: \n\
+		      (1) Collapse sparse data while adjusting batch effects\n\
+		      (2) Estimate encoder-decoder architecture via SGD\n\
+		      (3) Estimate latent states on the original data.\n"
+    )]
     JointTopic(JointTopicArgs),
 
     /// deconvolve bulk data with single cell reference dictionary
@@ -59,6 +92,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::JointTopic(args) => {
             fit_joint_topic_model(args)?;
+        }
+        Commands::AnnotateTopic(args) => {
+            annotate_topics(args)?;
         }
         Commands::JointSvd(args) => {
             fit_joint_svd(args)?;

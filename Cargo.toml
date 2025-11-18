@@ -58,6 +58,9 @@ env_logger = { version = "0.11" }
 log = { version = "0.4" }
 zip = { version = "6" }
 
+statrs = { version = "0.18" }
+coitrees = { version = "0.4" }
+
 data-beans = { path = "data-beans"}
 data-beans-alg = { path = "data-beans-alg"}
 matrix-param = { path = "matrix-param" }

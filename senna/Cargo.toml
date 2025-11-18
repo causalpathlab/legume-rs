@@ -39,4 +39,5 @@ indicatif = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 dashmap = { workspace = true }
-
+fnv = { workspace=true }
+statrs = { workspace = true }
