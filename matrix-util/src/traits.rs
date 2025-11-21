@@ -26,15 +26,19 @@ pub trait MatTriplets {
     fn from_nonzero_triplets<I>(
         nrow: usize,
         ncol: usize,
-        triplets: Vec<(I, I, Self::Scalar)>,
+        triplets: &[(I, I, Self::Scalar)],
     ) -> anyhow::Result<Self::Mat>
     where
         I: TryInto<usize> + Copy,
         <I as TryInto<usize>>::Error: std::fmt::Debug;
 
-    fn to_nonzero_triplets(
-        &self,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, Self::Scalar)>)>;
+    fn to_nonzero_triplets(&self) -> anyhow::Result<NRowNColTriplets<Self::Scalar>>;
+}
+
+pub struct NRowNColTriplets<Scalar> {
+    pub nrow: usize,
+    pub ncol: usize,
+    pub triplets: Vec<(usize, usize, Scalar)>,
 }
 
 /// Reading off from `Tensor`

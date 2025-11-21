@@ -267,13 +267,13 @@ fn build_annotation_matrix(
                 None
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
 
     let nrow = row_names.len();
     let ncol = id_to_celltypes.len();
 
     // gene x annotation group
-    let membership_ga = Mat::from_nonzero_triplets(nrow, ncol, triplets)?;
+    let membership_ga = Mat::from_nonzero_triplets(nrow, ncol, &triplets)?;
 
     // remove potential ' '
     let annot_names = id_to_celltypes

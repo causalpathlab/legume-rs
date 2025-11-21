@@ -25,6 +25,23 @@ where
     concatenate_horizontal(&cols)
 }
 
+pub fn subset_rows<T, D, S>(
+    matrix: &Matrix<T, D, nalgebra::Dyn, S>,
+    indices: &[usize],
+) -> anyhow::Result<DMatrix<T>>
+where
+    T: nalgebra::RealField,
+    D: nalgebra::Dim,
+    S: nalgebra::RawStorage<T, D, nalgebra::Dyn>,
+{
+    let rows = indices
+        .into_iter()
+        .map(|&j| matrix.row(j))
+        .collect::<Vec<_>>();
+
+    concatenate_vertical(&rows)
+}
+
 pub fn assign_columns<T, D, S, R>(
     source: &Matrix<T, nalgebra::Dyn, D, S>,
     indices: &[usize],
@@ -944,14 +961,14 @@ where
     fn from_nonzero_triplets<I>(
         nrow: usize,
         ncol: usize,
-        triplets: Vec<(I, I, Self::Scalar)>,
+        triplets: &[(I, I, T)],
     ) -> anyhow::Result<Self::Mat>
     where
         I: TryInto<usize> + Copy,
         <I as TryInto<usize>>::Error: std::fmt::Debug,
     {
         let mut data = vec![T::zero(); ncol * nrow];
-        for (ii, jj, x_ij) in triplets {
+        for &(ii, jj, x_ij) in triplets {
             let ii: usize = ii.try_into().expect("failed to convert index ii");
             let jj: usize = jj.try_into().expect("failed to convert index jj");
             data[ii * ncol + jj] = x_ij;
@@ -959,9 +976,7 @@ where
         Ok(DMatrix::from_row_slice(nrow, ncol, &data))
     }
 
-    fn to_nonzero_triplets(
-        &self,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, Self::Scalar)>)> {
+    fn to_nonzero_triplets(&self) -> anyhow::Result<NRowNColTriplets<Self::Scalar>> {
         if let Some(eps) = T::from(1e-6) {
             let nrow = self.nrows();
             let ncol = self.ncols();
@@ -974,7 +989,11 @@ where
                     }
                 }
             }
-            Ok((nrow, ncol, triplets))
+            Ok(NRowNColTriplets {
+                nrow,
+                ncol,
+                triplets,
+            })
         } else {
             anyhow::bail!("eps is not defined")
         }
@@ -991,23 +1010,21 @@ where
     fn from_nonzero_triplets<I>(
         nrow: usize,
         ncol: usize,
-        triplets: Vec<(I, I, Self::Scalar)>,
+        triplets: &[(I, I, Self::Scalar)],
     ) -> anyhow::Result<Self::Mat>
     where
         I: TryInto<usize> + Copy,
         <I as TryInto<usize>>::Error: std::fmt::Debug,
     {
         let mut coo = CooMatrix::<T>::new(nrow, ncol);
-        for (ii, jj, x_ij) in triplets {
+        for &(ii, jj, x_ij) in triplets {
             let ii: usize = ii.try_into().expect("failed to convert index ii");
             let jj: usize = jj.try_into().expect("failed to convert index jj");
             coo.push(ii, jj, x_ij);
         }
         Ok(CsrMatrix::from(&coo))
     }
-    fn to_nonzero_triplets(
-        &self,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, Self::Scalar)>)> {
+    fn to_nonzero_triplets(&self) -> anyhow::Result<NRowNColTriplets<Self::Scalar>> {
         if let Some(eps) = T::from(1e-6) {
             let nrow = self.nrows();
             let ncol = self.ncols();
@@ -1028,7 +1045,11 @@ where
                 }
             }
 
-            Ok((nrow, ncol, triplets))
+            Ok(NRowNColTriplets {
+                nrow,
+                ncol,
+                triplets,
+            })
         } else {
             anyhow::bail!("eps is not defined")
         }
@@ -1045,14 +1066,14 @@ where
     fn from_nonzero_triplets<I>(
         nrow: usize,
         ncol: usize,
-        triplets: Vec<(I, I, Self::Scalar)>,
+        triplets: &[(I, I, Self::Scalar)],
     ) -> anyhow::Result<Self::Mat>
     where
         I: TryInto<usize> + Copy,
         <I as TryInto<usize>>::Error: std::fmt::Debug,
     {
         let mut coo = CooMatrix::<T>::new(nrow, ncol);
-        for (ii, jj, x_ij) in triplets {
+        for &(ii, jj, x_ij) in triplets {
             let ii: usize = ii.try_into().expect("failed to convert index ii");
             let jj: usize = jj.try_into().expect("failed to convert index jj");
             coo.push(ii, jj, x_ij);
@@ -1060,9 +1081,7 @@ where
         Ok(CscMatrix::from(&coo))
     }
 
-    fn to_nonzero_triplets(
-        &self,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, Self::Scalar)>)> {
+    fn to_nonzero_triplets(&self) -> anyhow::Result<NRowNColTriplets<Self::Scalar>> {
         if let Some(eps) = T::from(1e-6) {
             let nrow = self.nrows();
             let ncol = self.ncols();
@@ -1082,7 +1101,11 @@ where
                 }
             }
 
-            Ok((nrow, ncol, triplets))
+            Ok(NRowNColTriplets {
+                nrow,
+                ncol,
+                triplets,
+            })
         } else {
             anyhow::bail!("eps is not defined")
         }

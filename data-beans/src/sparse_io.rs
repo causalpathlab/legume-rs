@@ -164,7 +164,7 @@ pub trait SparseIo: Sync + Send {
     ///
     fn read_columns_ndarray(&self, columns: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
         let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
-        Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+        Array2::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     /// Read columns within the range and return dense `candle_core::Tensor`
@@ -172,7 +172,7 @@ pub trait SparseIo: Sync + Send {
     ///
     fn read_columns_tensor(&self, columns: Self::IndexIter) -> anyhow::Result<Tensor> {
         let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
-        Tensor::from_nonzero_triplets(nrow, ncol, triplets)
+        Tensor::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     /// Read columns within the range and return dense `nalgebrea::DMatrix`
@@ -180,7 +180,7 @@ pub trait SparseIo: Sync + Send {
     ///
     fn read_columns_dmatrix(&self, columns: Self::IndexIter) -> anyhow::Result<DMatrix<f32>> {
         let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
-        DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+        DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     /// Read columns within the range and return sparse `CsrMatrix`
@@ -188,7 +188,7 @@ pub trait SparseIo: Sync + Send {
     ///
     fn read_columns_csr(&self, columns: Self::IndexIter) -> anyhow::Result<CsrMatrix<f32>> {
         let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
-        CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+        CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     /// Read columns within the range and return sparse `CsrMatrix`
@@ -196,7 +196,7 @@ pub trait SparseIo: Sync + Send {
     ///
     fn read_columns_csc(&self, columns: Self::IndexIter) -> anyhow::Result<CscMatrix<f32>> {
         let (nrow, ncol, triplets) = self.read_triplets_by_columns(columns)?;
-        CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+        CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     /// Read rows within the range and return dense `ndarray::Array2`
@@ -204,7 +204,7 @@ pub trait SparseIo: Sync + Send {
     ///
     fn read_rows_ndarray(&self, rows: Self::IndexIter) -> anyhow::Result<Array2<f32>> {
         let (nrow, ncol, triplets) = self.read_triplets_by_rows(rows)?;
-        Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+        Array2::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     /// Read rows within the range and return dense `candle_core::Tensor`
@@ -212,7 +212,7 @@ pub trait SparseIo: Sync + Send {
     ///
     fn read_rows_tensor(&self, rows: Self::IndexIter) -> anyhow::Result<Tensor> {
         let (nrow, ncol, triplets) = self.read_triplets_by_rows(rows)?;
-        Tensor::from_nonzero_triplets(nrow, ncol, triplets)
+        Tensor::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     /// Read rows within the range and return dense `nalgebra::DMatrix`
@@ -220,7 +220,7 @@ pub trait SparseIo: Sync + Send {
     ///
     fn read_rows_dmatrix(&self, rows: Self::IndexIter) -> anyhow::Result<DMatrix<f32>> {
         let (nrow, ncol, triplets) = self.read_triplets_by_rows(rows)?;
-        DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+        DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     /// Read rows within the range and return sparse `CsrMatrix`
@@ -228,7 +228,7 @@ pub trait SparseIo: Sync + Send {
     ///
     fn read_rows_csr(&self, rows: Self::IndexIter) -> anyhow::Result<CsrMatrix<f32>> {
         let (nrow, ncol, triplets) = self.read_triplets_by_rows(rows)?;
-        CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+        CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     /// Read rows within the range and return sparse `CscMatrix`
@@ -236,7 +236,7 @@ pub trait SparseIo: Sync + Send {
     ///
     fn read_rows_csc(&self, rows: Self::IndexIter) -> anyhow::Result<CscMatrix<f32>> {
         let (nrow, ncol, triplets) = self.read_triplets_by_rows(rows)?;
-        CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+        CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     /////////////////////////////
