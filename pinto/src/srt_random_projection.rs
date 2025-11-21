@@ -114,11 +114,11 @@ impl SrtRandProjOps for SrtCellPairs<'_> {
         info!("successfully projected {} pairs", self.len());
 
         fn adjust_batch(mat: &mut Mat, indices: &[usize]) -> anyhow::Result<()> {
-            let xx_left_delta = subset_columns(&mat, &indices)?
+            let xx_left_delta = subset_columns(&mat, indices.iter().cloned())?
                 .transpose()
                 .centre_columns()
                 .transpose();
-            assign_columns(&xx_left_delta, &indices, mat);
+            assign_columns(&xx_left_delta, indices.iter().cloned(), mat);
             Ok(())
         }
 

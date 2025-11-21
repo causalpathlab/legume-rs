@@ -223,11 +223,11 @@ impl RandProjOps for SparseIoVec {
             if col_to_batch.len() == ncols {
                 let batches = partition_by_membership(col_to_batch, None);
                 for (_, cols) in batches.iter() {
-                    let xx = subset_columns(&proj_kn, cols)?
+                    let xx = subset_columns(&proj_kn, cols.iter().cloned())?
                         .transpose() // n x k
                         .centre_columns() // adjust the mean
                         .transpose(); // k x n
-                    assign_columns(&xx, cols, &mut proj_kn);
+                    assign_columns(&xx, cols.iter().cloned(), &mut proj_kn);
                 }
             } else {
                 warn!(
