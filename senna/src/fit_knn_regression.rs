@@ -180,7 +180,7 @@ pub fn fit_knn_regression(args: &KnnImputeArgs) -> anyhow::Result<()> {
     let n_common_rows = x_row_index.len();
     let basis_dk = Mat::rnorm(n_common_rows, args.proj_dim);
 
-    let _y_proj_kn = project_columns(
+    let y_proj_kn = project_columns(
         &mut y_data,
         &y_batch_membership,
         &BasisOnSubsetRows {
@@ -198,6 +198,20 @@ pub fn fit_knn_regression(args: &KnnImputeArgs) -> anyhow::Result<()> {
         },
     )?;
 
+    let n_y = y_data.num_columns()?;
+    let n_x = x_data.num_columns()?;
+    let n_tot = n_x + n_y;
+
+    info!("randomized SVD on the projected data");
+    let mut combined_kn = concatenate_horizontal(&[x_proj_kn, y_proj_kn])?;
+    combined_kn.scale_columns_inplace();
+    let (_, _, rsvd_vt) = combined_kn.rsvd(args.proj_dim)?;
+    let mut rsvd_v = rsvd_vt.transpose();
+    rsvd_v.scale_columns_inplace();
+    let x_proj_kn = subset_columns(&rsvd_v, 0..n_x)?;
+    let y_proj_kn = subset_columns(&rsvd_v, n_x..n_tot)?;
+    y_data.register_batches_dmatrix(&y_proj_kn, &y_batch_membership)?;
+
     //////////////////////////////////////////////
     // 4. Counterfactual Y for each column of X //
     //////////////////////////////////////////////
@@ -205,7 +219,6 @@ pub fn fit_knn_regression(args: &KnnImputeArgs) -> anyhow::Result<()> {
     let x_column_names = x_data.column_names()?;
     let y_row_names = y_data.row_names()?;
     let nnz_y = y_data.num_non_zeros()?;
-    let n_y = y_data.num_columns()?;
     let avg_y = nnz_y.div_ceil(n_y).max(1);
 
     info!("Counterfactual prediction of Y for each column of X");
@@ -317,14 +330,12 @@ fn project_columns(
     let batches = partition_by_membership(batch_membership, None);
 
     for (_, cols) in batches.iter() {
-        let xx = subset_columns(&proj_kn, cols)?
+        let xx = subset_columns(&proj_kn, cols.iter().cloned())?
             .transpose() // n x k
             .centre_columns() // adjust the mean
             .transpose(); // k x n
-        assign_columns(&xx, cols, &mut proj_kn);
+        assign_columns(&xx, cols.iter().cloned(), &mut proj_kn);
     }
-
-    data.register_batches_dmatrix(&proj_kn, batch_membership)?;
 
     Ok(proj_kn)
 }

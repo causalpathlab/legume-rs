@@ -8,54 +8,57 @@ use rayon::prelude::*;
 
 use crate::traits::*;
 
-pub fn subset_columns<T, D, S>(
+pub fn subset_columns<T, D, S, I>(
     matrix: &Matrix<T, nalgebra::Dyn, D, S>,
-    indices: &[usize],
+    indices: I,
 ) -> anyhow::Result<DMatrix<T>>
 where
     T: nalgebra::RealField,
     D: nalgebra::Dim,
     S: nalgebra::RawStorage<T, nalgebra::Dyn, D>,
+    I: IntoIterator<Item = usize>,
 {
     let cols = indices
         .into_iter()
-        .map(|&j| matrix.column(j))
+        .map(|j| matrix.column(j))
         .collect::<Vec<_>>();
 
     concatenate_horizontal(&cols)
 }
 
-pub fn subset_rows<T, D, S>(
+pub fn subset_rows<T, D, S, I>(
     matrix: &Matrix<T, D, nalgebra::Dyn, S>,
-    indices: &[usize],
+    indices: I,
 ) -> anyhow::Result<DMatrix<T>>
 where
     T: nalgebra::RealField,
     D: nalgebra::Dim,
     S: nalgebra::RawStorage<T, D, nalgebra::Dyn>,
+    I: IntoIterator<Item = usize>,
 {
     let rows = indices
         .into_iter()
-        .map(|&j| matrix.row(j))
+        .map(|j| matrix.row(j))
         .collect::<Vec<_>>();
 
     concatenate_vertical(&rows)
 }
 
-pub fn assign_columns<T, D, S, R>(
+pub fn assign_columns<T, D, S, R, I>(
     source: &Matrix<T, nalgebra::Dyn, D, S>,
-    indices: &[usize],
+    indices: I,
     target: &mut Matrix<T, nalgebra::Dyn, D, R>,
 ) where
     T: nalgebra::RealField,
     D: nalgebra::Dim,
     S: nalgebra::RawStorage<T, nalgebra::Dyn, D>,
     R: nalgebra::RawStorageMut<T, nalgebra::Dyn, D>,
+    I: IntoIterator<Item = usize>,
 {
     indices
-        .iter()
+        .into_iter()
         .zip(source.column_iter())
-        .for_each(|(&j, x_j)| {
+        .for_each(|(j, x_j)| {
             target.column_mut(j).copy_from(&x_j);
         });
 }
