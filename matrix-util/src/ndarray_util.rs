@@ -183,14 +183,14 @@ where
     fn from_nonzero_triplets<I>(
         nrow: usize,
         ncol: usize,
-        triplets: Vec<(I, I, Self::Scalar)>,
+        triplets: &[(I, I, T)],
     ) -> anyhow::Result<Self::Mat>
     where
         I: TryInto<usize> + Copy,
         <I as TryInto<usize>>::Error: std::fmt::Debug,
     {
         let mut array = ndarray::Array2::<T>::zeros((nrow, ncol));
-        for (ii, jj, x_ij) in triplets {
+        for &(ii, jj, x_ij) in triplets {
             let ii: usize = ii.try_into().expect("failed to convert index ii");
             let jj: usize = jj.try_into().expect("failed to convert index jj");
             array[(ii, jj)] = x_ij;
@@ -198,15 +198,14 @@ where
         Ok(array)
     }
 
-    fn to_nonzero_triplets(
-        &self,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, Self::Scalar)>)> {
+    fn to_nonzero_triplets(&self) -> anyhow::Result<NRowNColTriplets<Self::Scalar>> {
         if let Some(eps) = T::from(1e-6) {
-            let (rows, cols) = self.dim();
-            Ok((
-                rows,
-                cols,
-                self.indexed_iter()
+            let (nrow, ncol) = self.dim();
+            Ok(NRowNColTriplets {
+                nrow,
+                ncol,
+                triplets: self
+                    .indexed_iter()
                     .filter_map(
                         |((i, j), &x)| {
                             if x.abs() > eps {
@@ -217,7 +216,7 @@ where
                         },
                     )
                     .collect(),
-            ))
+            })
         } else {
             anyhow::bail!("eps is not defined")
         }

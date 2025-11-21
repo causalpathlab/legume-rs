@@ -108,9 +108,20 @@ impl SparseIoVec {
         self.group_to_cols.as_ref()
     }
 
-    // pub fn take_groups(&self) -> Option<&Vec<usize>> {
-    //     self.col_to_group.as_ref()
-    // }
+    /// Take a vector of backend file and corresponding column indices
+    pub fn take_backend_columns(&self) -> Vec<(Box<str>, Vec<usize>)> {
+        self.data_to_cols
+            .iter()
+            .filter_map(|(&didx, cols)| {
+                if let Some(arc_data) = self.data_vec.get(didx) {
+                    let k = arc_data.get_backend_file_name();
+                    Some((Box::<str>::from(k), cols.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 
     /// Recall the `cells` group assignment; Note that this can be
     /// differ from the original vector used in `assign_groups` as we
@@ -232,6 +243,17 @@ impl SparseIoVec {
         Ok(ret)
     }
 
+    pub fn num_non_zeros(&self) -> anyhow::Result<usize> {
+        let mut ret = 0;
+        for dat in self.data_vec.iter() {
+            let nnz = dat
+                .num_non_zeros()
+                .ok_or(anyhow::anyhow!("can't figure out the number of non-zeros"))?;
+            ret += nnz;
+        }
+        Ok(ret)
+    }
+
     /// total number of columns across all data files
     pub fn num_columns(&self) -> anyhow::Result<usize> {
         let mut ret = 0;
@@ -283,7 +305,7 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let ((nrow, ncol), triplets) = self.columns_triplets(cells)?;
-        ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+        ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     pub fn read_columns_dmatrix<I>(&self, cells: I) -> anyhow::Result<nalgebra::DMatrix<f32>>
@@ -291,7 +313,7 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let ((nrow, ncol), triplets) = self.columns_triplets(cells)?;
-        DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+        DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     pub fn read_columns_csc<I>(&self, cells: I) -> anyhow::Result<CscMatrix<f32>>
@@ -299,7 +321,7 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let ((nrow, ncol), triplets) = self.columns_triplets(cells)?;
-        nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+        nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     pub fn read_columns_csr<I>(&self, cells: I) -> anyhow::Result<CsrMatrix<f32>>
@@ -307,7 +329,7 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let ((nrow, ncol), triplets) = self.columns_triplets(cells)?;
-        nalgebra_sparse::CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)
+        nalgebra_sparse::CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     pub fn read_columns_tensor<I>(&self, cells: I) -> anyhow::Result<Tensor>
@@ -315,7 +337,7 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let ((nrow, ncol), triplets) = self.columns_triplets(cells)?;
-        Tensor::from_nonzero_triplets(nrow, ncol, triplets)
+        Tensor::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
     /////////////////////
@@ -676,7 +698,7 @@ impl SparseIoVec {
         )?;
 
         Ok((
-            CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)?,
             source_columns,
             distances,
         ))
@@ -718,7 +740,7 @@ impl SparseIoVec {
             skip_batches,
         )?;
         Ok((
-            ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)?,
             source_columns,
             distances,
         ))
@@ -760,7 +782,7 @@ impl SparseIoVec {
             skip_batches,
         )?;
         Ok((
-            DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)?,
             source_columns,
             distances,
         ))
@@ -795,7 +817,7 @@ impl SparseIoVec {
             distances,
         } = self.matched_columns_triplets(cells, target_batches, knn, skip_same_batch)?;
         Ok((
-            CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)?,
             source_columns,
             distances,
         ))
@@ -831,7 +853,7 @@ impl SparseIoVec {
         } = self.matched_columns_triplets(cells, target_batches, knn, skip_same_batch)?;
 
         Ok((
-            ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)?,
             source_columns,
             distances,
         ))
@@ -867,7 +889,7 @@ impl SparseIoVec {
         } = self.matched_columns_triplets(cells, target_batches, knn, skip_same_batch)?;
 
         Ok((
-            DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)?,
             source_columns,
             distances,
         ))
@@ -899,7 +921,7 @@ impl SparseIoVec {
         } = self.query_columns_by_data_triplets(query, knn_per_batch)?;
 
         Ok((
-            CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)?,
             source_columns,
             distances,
         ))
@@ -931,7 +953,7 @@ impl SparseIoVec {
         } = self.query_columns_by_data_triplets(query, knn_per_batch)?;
 
         Ok((
-            ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)?,
             source_columns,
             distances,
         ))
@@ -963,7 +985,7 @@ impl SparseIoVec {
         } = self.query_columns_by_data_triplets(query, knn_per_batch)?;
 
         Ok((
-            DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, triplets)?,
+            DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)?,
             source_columns,
             distances,
         ))

@@ -249,11 +249,11 @@ fn collect_matched_stat_visitor(
         .map(|(i, p)| (p, i))
         .collect();
 
-    let d_triplets = source_columns
+    let neg_distance_triplets = source_columns
         .iter()
         .zip(euclidean_distances.iter())
         .enumerate()
-        .map(|(t, (&s, &d))| (t, y1_pos[&s], d))
+        .map(|(t, (&s, &d))| (t, y1_pos[&s], -d))
         .collect::<Vec<_>>();
 
     ////////////////////////////////////////////////////////
@@ -264,9 +264,12 @@ fn collect_matched_stat_visitor(
     // Normalize distance for each source cell and take a
     // weighted average of the matched vectors using this
     // weight vector
-
-    let dd = CscMat::from_nonzero_triplets(y0_matched.ncols(), y1.ncols(), d_triplets)?;
-    let ww = (-dd).normalize_exp_logits_columns();
+    let ww = CscMat::from_nonzero_triplets(
+        y0_matched.ncols(),
+        y1.ncols(),
+        neg_distance_triplets.as_ref(),
+    )?
+    .normalize_exp_logits_columns();
 
     let y1_hat = &y0_matched * ww;
     y1.adjust_by_division_inplace(&y1_hat);

@@ -38,14 +38,14 @@ impl MatTriplets for Tensor {
     fn from_nonzero_triplets<I>(
         nrow: usize,
         ncol: usize,
-        triplets: Vec<(I, I, Self::Scalar)>,
+        triplets: &[(I, I, Self::Scalar)],
     ) -> anyhow::Result<Self::Mat>
     where
         I: TryInto<usize> + Copy,
         <I as TryInto<usize>>::Error: std::fmt::Debug,
     {
         let mut data = vec![0_f32; ncol * nrow];
-        for (ii, jj, x_ij) in triplets {
+        for &(ii, jj, x_ij) in triplets {
             let ii: usize = ii.try_into().expect("failed to convert index ii");
             let jj: usize = jj.try_into().expect("failed to convert index jj");
             data[ii * ncol + jj] = x_ij;
@@ -53,9 +53,7 @@ impl MatTriplets for Tensor {
         Ok(Tensor::from_vec(data, (nrow, ncol), &Device::Cpu)?)
     }
 
-    fn to_nonzero_triplets(
-        &self,
-    ) -> anyhow::Result<(usize, usize, Vec<(usize, usize, Self::Scalar)>)> {
+    fn to_nonzero_triplets(&self) -> anyhow::Result<NRowNColTriplets<Self::Scalar>> {
         if let Ok((nrow, ncol)) = self.dims2() {
             let eps = 1e-6;
             let mut ret = vec![];
@@ -68,7 +66,11 @@ impl MatTriplets for Tensor {
                 }
             }
 
-            Ok((nrow, ncol, ret))
+            Ok(NRowNColTriplets {
+                nrow,
+                ncol,
+                triplets: ret,
+            })
         } else {
             anyhow::bail!("not a 2D Tensor");
         }

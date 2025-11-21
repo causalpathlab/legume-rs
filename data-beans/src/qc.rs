@@ -3,6 +3,7 @@ use crate::sparse_io::*;
 use crate::sparse_io_vector::*;
 
 use indicatif::ParallelProgressIterator;
+use log::warn;
 use matrix_util::ndarray_stat::RunningStatistics;
 use matrix_util::utils::partition_by_membership;
 use rayon::prelude::*;
@@ -45,7 +46,23 @@ pub fn squeeze_by_nnz(
     let row_nnz_vec = row_stat.count_positives().to_vec();
     let col_nnz_vec = col_stat.count_positives().to_vec();
     let row_idx = nnz_index(&row_nnz_vec, cutoffs.row);
-    let col_idx = nnz_index(&col_nnz_vec.to_vec(), cutoffs.column);
+    let col_idx = nnz_index(&col_nnz_vec, cutoffs.column);
+
+    if row_idx.is_none() {
+        warn!(
+            "No rows can be kept with this cutoff {}\n\
+	       We will stop squeezing on the rows.",
+            cutoffs.row
+        );
+    }
+
+    if col_idx.is_none() {
+        warn!(
+            "No columns can be kept with this cutoff {}\n\
+	       We will stop squeezing on the columns.",
+            cutoffs.column
+        );
+    }
 
     data.subset_columns_rows(col_idx.as_ref(), row_idx.as_ref())
 }

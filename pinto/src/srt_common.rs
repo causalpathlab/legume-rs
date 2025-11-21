@@ -72,7 +72,7 @@ pub fn impute_with_neighbours(y: &CscMat, y_neigh: &CscMat) -> anyhow::Result<Cs
     let dd = CscMat::from_nonzero_triplets(
         y_neigh.ncols(),
         y.ncols(),
-        log1p_y_neigh.euclidean_distance(&log1p_y)?,
+        &log1p_y_neigh.euclidean_distance(&log1p_y)?,
     )?;
 
     let ww = (-dd).normalize_exp_logits_columns();

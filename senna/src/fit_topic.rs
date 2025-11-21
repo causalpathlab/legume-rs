@@ -58,7 +58,7 @@ pub struct TopicArgs {
         long,
         short = 'p',
         default_value_t = 50,
-        help = "Random projection dimension.",
+        help = "Random projection dimension",
         long_help = "Random projection dimension to project the data.\n\
 		     Controls the dimensionality of the random projection step."
     )]
@@ -68,7 +68,7 @@ pub struct TopicArgs {
         long,
         short = 'd',
         default_value_t = 10,
-        help = "Top {d} components of projection.",
+        help = "Top {d} components of projection",
         long_help = "Use top {d} components of projection.\n\
 		     Number of samples will be less than `2^{d}+1`."
     )]
@@ -78,7 +78,7 @@ pub struct TopicArgs {
         long,
         short,
         value_delimiter(','),
-        help = "Batch membership files.",
+        help = "Batch membership files",
         long_help = "Batch membership files (comma-separated names).\n\
 		     Each batch file should correspond to each data file.\n\
 		     Example: batch1.csv,batch2.csv"
@@ -88,7 +88,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Ignore batch adjustment.",
+        help = "Ignore batch adjustment",
         long_help = "Ignore batch adjustment.\n\
 		     Disables batch effect correction during processing."
     )]
@@ -97,7 +97,7 @@ pub struct TopicArgs {
     #[arg(
         short = 'w',
         long = "warm-start",
-        help = "Warm start projection file.",
+        help = "Warm start projection file",
         long_help = "Warm start from the previous projection (cell x k).\n\
 		     Provide a file to initialize the projection."
     )]
@@ -107,7 +107,7 @@ pub struct TopicArgs {
         short = 'c',
         long,
         default_value_t = 1e4,
-        help = "Column sum normalization scale.",
+        help = "Column sum normalization scale",
         long_help = "Column sum normalization scale (affects decoder only).\n\
 		     Adjusts normalization of columns in the decoder."
     )]
@@ -116,7 +116,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 3,
-        help = "Number of k-nearest neighbour batches.",
+        help = "Number of k-nearest neighbour batches",
         long_help = "Number of k-nearest neighbour batches.\n\
 		     Controls the number of batches considered \n\
 		     for nearest neighbour search."
@@ -126,7 +126,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 10,
-        help = "Number of k-nearest neighbours within each batch.",
+        help = "Number of k-nearest neighbours within each batch",
         long_help = "Number of k-nearest neighbours within each batch.\n\
 		     Controls the number of cells considered \n\
 		     for nearest neighbour search within each batch."
@@ -136,7 +136,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         value_delimiter(','),
-        help = "Reference batch names.",
+        help = "Reference batch names",
         long_help = "Reference batch names (comma-separated).\n\
 		     Specify batches to be used as reference during adjustment."
     )]
@@ -145,7 +145,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 30,
-        help = "Optimization iterations.",
+        help = "Optimization iterations",
         long_help = "Number of optimization iterations.\n\
 		     Controls the number of steps for model optimization."
     )]
@@ -154,7 +154,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 100,
-        help = "Block size for parallel processing.",
+        help = "Block size for parallel processing",
         long_help = "Block size (number of columns) for parallel processing.\n\
 		     Controls the granularity of parallel computation."
     )]
@@ -164,7 +164,7 @@ pub struct TopicArgs {
         short = 't',
         long,
         default_value_t = 10,
-        help = "Number of latent topics.",
+        help = "Number of latent topics",
         long_help = "Number of latent topics.\n\
 		     Controls the dimensionality of the latent topic space."
     )]
@@ -173,7 +173,7 @@ pub struct TopicArgs {
     #[arg(
         short = 'f',
         long,
-        help = "Number of feature modules.",
+        help = "Number of feature modules",
         long_help = "Number of modules of the features in the encoder model.\n\
 		     If not specified, encoder_layers[0] will be used. \n\
 		     Giving the number of features modules smaller than that of features,\n\
@@ -187,7 +187,7 @@ pub struct TopicArgs {
         short = 'e',
         value_delimiter(','),
         default_values_t = vec![128, 1024, 128],
-        help = "Encoder layers.",
+        help = "Encoder layers",
         long_help = "Encoder layers (comma-separated).\n\
 		     Specify the size of each layer in the encoder model.\n\
 		     Example: 128,1024,128"
@@ -197,7 +197,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "Number of inverse autoregressive flow transformations.",
+        help = "Number of inverse autoregressive flow transformations",
         long_help = "Number of inverse autoregressive flow transformations.\n\
 		     Controls the number of flow steps in the model."
     )]
@@ -206,7 +206,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 10,
-        help = "Intensity levels for frequency embedding.",
+        help = "Intensity levels for frequency embedding",
         long_help = "Intensity levels for frequency embedding.\n\
 		     Controls the vocabulary size for intensity embedding."
     )]
@@ -215,7 +215,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 10,
-        help = "Intensity embedding dimension.",
+        help = "Intensity embedding dimension",
         long_help = "Intensity embedding dimension.\n\
 		     Controls the size of the embedding for intensity levels."
     )]
@@ -225,7 +225,7 @@ pub struct TopicArgs {
         long,
         short = 'i',
         default_value_t = 1000,
-        help = "Number of training epochs.",
+        help = "Number of training epochs",
         long_help = "Number of training epochs.\n\
 		     Controls how many times the model is trained over the data."
     )]
@@ -235,7 +235,7 @@ pub struct TopicArgs {
         long,
         short = 'j',
         default_value_t = 5,
-        help = "Data jitter interval.",
+        help = "Data jitter interval",
         long_help = "Data jitter interval.\n\
 		     Controls the interval for adding jitter to the collapsed data\n\
 		     by posterior resampling during VAE training."
@@ -245,7 +245,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 100,
-        help = "Minibatch size.",
+        help = "Minibatch size",
         long_help = "Minibatch size for training.\n\
 		     Controls the number of samples per training batch."
     )]
@@ -254,7 +254,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 1e-3,
-        help = "Learning rate.",
+        help = "Learning rate",
         long_help = "Learning rate for optimization.\n\
 		     Controls the step size for parameter updates."
     )]
@@ -264,7 +264,7 @@ pub struct TopicArgs {
         long,
         value_enum,
         default_value = "cpu",
-        help = "Candle device.",
+        help = "Candle device",
         long_help = "Candle device to use for computation.\n\
 		     Options: cpu, cuda, metal."
     )]
@@ -273,7 +273,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "A device for cuda.",
+        help = "A device for cuda",
         long_help = "For cuda or meta, we may want to choose a different device."
     )]
     device_no: usize,
@@ -282,7 +282,7 @@ pub struct TopicArgs {
         long,
         value_enum,
         default_value = "residual",
-        help = "Adjustment method.",
+        help = "Adjustment method",
         long_help = "Adjust by batch or residual.\n\
 		     Choose the method for batch adjustment."
     )]
@@ -291,7 +291,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Preload all columns data.",
+        help = "Preload all columns data",
         long_help = "Preload all the columns data into memory.\n\
 		     Improves performance for large datasets."
     )]
@@ -300,7 +300,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         short,
-        help = "Verbosity.",
+        help = "Verbosity",
         long_help = "Enable verbose output.\n\
 		     Prints additional information during execution."
     )]
