@@ -53,7 +53,7 @@ pub struct KnnImputeArgs {
         help = "Batch membership files for Y data",
         long_help = "Batch membership files (comma-separated names).\n\
 		     Each batch file should correspond to each data file.\n\
-		     Example: batch1.csv,batch2.csv"
+		     Example: batch1.gz,batch2.gz"
     )]
     y_batch_files: Option<Vec<Box<str>>>,
 
@@ -63,9 +63,13 @@ pub struct KnnImputeArgs {
         required = true,
         help = "Output header",
         long_help = "Output header for the imputed files of Y data:\n\
-		     - `{out}.{basename}.{backend}`\n\
+		     \n\
+		     `{out}_by_{basename}.{backend}`\n\
+		     \n\
 		     where `{basename}` and `{backend}` will be\n\
-		     inferred from `x-data` to have the same backend.\n"
+		     inferred from `x-data` to have the same backend.\n\
+		     If there are more backend files for `x-data`,\n\
+		     a unique index will be added to distinguish them."
     )]
     out: Box<str>,
 
@@ -221,10 +225,12 @@ pub fn fit_knn_regression(args: &KnnImputeArgs) -> anyhow::Result<()> {
     let nnz_y = y_data.num_non_zeros()?;
     let avg_y = nnz_y.div_ceil(n_y).max(1);
 
-    info!("Counterfactual prediction of Y for each column of X");
+    let x_backend_cols = x_data.take_backend_columns();
+    let n_out = x_backend_cols.len();
 
-    for (didx, (x_backend_file, x_columns)) in x_data.take_backend_columns().into_iter().enumerate()
-    {
+    info!("Prediction of Y for each backend of X (N={})", n_out);
+
+    for (didx, (x_backend_file, x_columns)) in x_backend_cols.into_iter().enumerate() {
         let ext = extension(&x_backend_file)?;
         let base = basename(&x_backend_file)?;
         let backend = match ext.as_ref() {
@@ -233,7 +239,11 @@ pub fn fit_knn_regression(args: &KnnImputeArgs) -> anyhow::Result<()> {
             _ => return Err(anyhow::anyhow!("Unknown file format: {}", x_backend_file)),
         };
 
-        let output_file = format!("{}.{}_{}.{}", args.out, didx, base, ext);
+        let output_file = if n_out > 1 {
+            format!("{}.{}_by_{}.{}", args.out, didx, base, ext)
+        } else {
+            format!("{}_by_{}.{}", args.out, base, ext)
+        };
 
         if std::path::Path::new(&output_file).exists() {
             info!(
