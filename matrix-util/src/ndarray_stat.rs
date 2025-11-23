@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    common_io::{extension, write_lines},
+    common_io::{file_ext, write_lines},
     traits::IoOps,
 };
 use ndarray::{stack, ArrayBase, Axis, Data, Dimension, NdIndex, OwnedRepr, RemoveAxis};
@@ -152,7 +152,7 @@ where
     /// * `filename` - The name of the file to save the statistics to
     /// * `names` - The names of the statistics
     pub fn save(&self, filename: &str, names: &Vec<Box<str>>, sep: &str) -> anyhow::Result<()> {
-        match extension(filename).unwrap_or(Box::from("")).as_ref() {
+        match file_ext(filename).unwrap_or(Box::from("")).as_ref() {
             "parquet" => {
                 let nnz = &self.count_positives();
                 let tot = &self.s1;

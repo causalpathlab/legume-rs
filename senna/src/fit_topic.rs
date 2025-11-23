@@ -329,7 +329,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     // 2. Take projection results by warm start or projecting it again
     let proj_kn = if let Some(proj_file) = args.warm_start_proj_file.as_deref() {
         use matrix_util::common_io::*;
-        let ext = extension(proj_file)?;
+        let ext = file_ext(proj_file)?;
 
         let MatWithNames {
             rows: cell_names,

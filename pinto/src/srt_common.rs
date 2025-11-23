@@ -9,7 +9,7 @@ pub use data_beans::sparse_data_visitors::*;
 pub use data_beans::sparse_io::*;
 pub use data_beans::sparse_io_vector::*;
 
-pub use matrix_util::common_io::{basename, extension, read_lines};
+pub use matrix_util::common_io::{basename, file_ext, read_lines};
 pub use matrix_util::dmatrix_util::*;
 pub use matrix_util::knn_match::ColumnDict;
 pub use matrix_util::traits::*;

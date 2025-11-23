@@ -426,7 +426,7 @@ pub struct FromMtxArgs {
 
     /// output file header: {output}.{backend}
     #[arg(short, long)]
-    output: Option<Box<str>>,
+    output: Box<str>,
 
     /// squeeze
     #[arg(long, default_value_t = false)]
@@ -477,10 +477,12 @@ pub struct FromH5Args {
     #[arg(
         short,
         long,
-        help = "Output file header",
-        long_help = "Specify the output file header. The output will be named as {output}.{backend}."
+        help = "Output file header or name",
+        long_help = "Specify the output file header. \n\
+		     The output will be named as {output}.{backend}.\n\
+		     Redundant {backend} names will be ignored."
     )]
-    output: Option<Box<str>>,
+    output: Box<str>,
 
     #[arg(
         short = 'x',
@@ -643,11 +645,12 @@ pub struct FromZarrArgs {
     #[arg(
         short,
         long,
-        help = "Output file header",
+        help = "Output file header or name",
         long_help = "Specify the output file header. \n\
-		     The output will be named as {output}.{backend}."
+		     The output will be named as {output}.{backend}.\n\
+		     Redundant {backend} names will be ignored."
     )]
-    output: Option<Box<str>>,
+    output: Box<str>,
 
     #[arg(
         short = 'd',
@@ -1235,29 +1238,19 @@ fn read_col_names(col_file: Box<str>, max_column_name_idx: usize) -> anyhow::Res
 }
 
 fn reorder_rows(args: &ReorderRowsArgs) -> anyhow::Result<()> {
-    let data_file = args.data_file.clone();
     let row_names_order: Vec<Box<str>> = read_row_names(args.row_file.clone(), MAX_ROW_NAME_IDX)?;
 
-    let backend = match extension(&data_file)?.as_ref() {
-        "zarr" => SparseIoBackend::Zarr,
-        "h5" => SparseIoBackend::HDF5,
-        _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
-    };
+    let (backend, data_file) = resolve_backend_file(&args.data_file, None)?;
+    let (_, output_file) = resolve_backend_file(&args.output, Some(backend.clone()))?;
 
-    let output = args.output.clone();
-    let backend_file = match backend {
-        SparseIoBackend::HDF5 => output.to_string() + ".h5",
-        SparseIoBackend::Zarr => output.to_string() + ".zarr",
-    };
-
-    if let Some(out_dir) = dirname(&backend_file) {
+    if let Some(out_dir) = dirname(&output_file) {
         mkdir(&out_dir)?;
     }
 
-    recursive_copy(&data_file, &backend_file)?;
+    recursive_copy(&data_file, &output_file)?;
     info!("copied the existing data file {}", data_file);
 
-    let mut data = open_sparse_matrix(&backend_file, &backend.clone())?;
+    let mut data = open_sparse_matrix(&output_file, &backend)?;
     data.reorder_rows(&row_names_order)?;
 
     info!("done");
@@ -1282,15 +1275,9 @@ fn align_backends(args: &AlignDataArgs) -> anyhow::Result<()> {
         .data_files
         .iter()
         .enumerate()
-        .map(|(i, _file)| -> anyhow::Result<_> {
-            let ext = extension(_file)?;
-            let backend = match ext.as_ref() {
-                "zarr" => SparseIoBackend::Zarr,
-                "h5" => SparseIoBackend::HDF5,
-                _ => return Err(anyhow::anyhow!("Unknown file format: {}", _file)),
-            };
-
-            let base = basename(&_file)?;
+        .map(|(i, a_file)| -> anyhow::Result<_> {
+            let ext = file_ext(a_file)?;
+            let base = basename(a_file)?;
 
             let data_col_id = i % n_data_columns + 1;
             let data_row_id = i / n_data_columns + 1;
@@ -1299,8 +1286,9 @@ fn align_backends(args: &AlignDataArgs) -> anyhow::Result<()> {
                 args.output_directory, data_row_id, data_col_id, base, ext
             );
             info!("renaming files for easier sorting: {}", dst_path);
-            recursive_copy(&_file, &dst_path)?;
-            open_sparse_matrix(&dst_path, &backend)
+            recursive_copy(&a_file, &dst_path)?;
+            let (backend, a_copied_file) = resolve_backend_file(&dst_path, None)?;
+            open_sparse_matrix(&a_copied_file, &backend)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
@@ -1412,31 +1400,21 @@ fn align_backends(args: &AlignDataArgs) -> anyhow::Result<()> {
 }
 
 fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
-    let data_file = args.data_file.clone();
-
     let columns_indices = args.column_indices.clone();
     let column_name_file = args.name_file.clone();
 
-    let backend = match extension(&data_file)?.as_ref() {
-        "zarr" => SparseIoBackend::Zarr,
-        "h5" => SparseIoBackend::HDF5,
-        _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
-    };
+    let (backend, data_file) = resolve_backend_file(&args.data_file, None)?;
 
-    let output = args.output.clone();
-    let backend_file = match backend {
-        SparseIoBackend::HDF5 => output.to_string() + ".h5",
-        SparseIoBackend::Zarr => output.to_string() + ".zarr",
-    };
+    let (_, output_file) = resolve_backend_file(&args.output, Some(backend.clone()))?;
 
-    if let Some(out_dir) = dirname(&backend_file) {
+    if let Some(out_dir) = dirname(&output_file) {
         mkdir(&out_dir)?;
     }
 
-    recursive_copy(&data_file, &backend_file)?;
+    recursive_copy(&data_file, &output_file)?;
     info!("copied the existing data file {}", data_file);
 
-    let mut data = open_sparse_matrix(&backend_file, &backend.clone())?;
+    let mut data = open_sparse_matrix(&output_file, &backend)?;
 
     let selected_columns = if let Some(idx) = columns_indices {
         idx
@@ -1472,9 +1450,9 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
     data.subset_columns_rows(Some(&selected_columns), None)?;
 
     if args.do_squeeze {
-        info!("Squeeze the backend data {}", &backend_file);
+        info!("Squeeze the backend data {}", &output_file);
         let squeeze_args = RunSqueezeArgs {
-            data_file: backend_file.into(),
+            data_file: output_file.into(),
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
@@ -1487,20 +1465,14 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
 }
 
 fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
-    let data_file = args.data_file.clone();
-
     let columns = args.column_indices.clone();
     let column_name_file = args.name_file.clone();
 
-    let backend = match extension(&data_file)?.as_ref() {
-        "zarr" => SparseIoBackend::Zarr,
-        "h5" => SparseIoBackend::HDF5,
-        _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
-    };
+    let (backend, data_file) = resolve_backend_file(&args.data_file, None)?;
 
     let output = args.output.clone();
 
-    let data = open_sparse_matrix(&data_file, &backend.clone())?;
+    let data = open_sparse_matrix(&data_file, &backend)?;
     let row_names = data.row_names()?;
 
     let (data, column_names) = if let Some(columns) = columns {
@@ -1541,7 +1513,7 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
         ));
     };
 
-    if let Ok(ext) = extension(&output) {
+    if let Ok(ext) = file_ext(&output) {
         if ext.as_ref() == "parquet" {
             data.to_parquet(Some(&row_names), Some(&column_names), &output)?;
             return Ok(());
@@ -1554,20 +1526,14 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
 }
 
 fn take_rows(args: &TakeRowsArgs) -> anyhow::Result<()> {
-    let data_file = args.data_file.clone();
-
     let rows = args.row_indices.clone();
     let row_name_file = args.name_file.clone();
 
-    let backend = match extension(&data_file)?.as_ref() {
-        "zarr" => SparseIoBackend::Zarr,
-        "h5" => SparseIoBackend::HDF5,
-        _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
-    };
+    let (backend, data_file) = resolve_backend_file(&args.data_file, None)?;
 
     let output = args.output.clone();
 
-    let data_backend = open_sparse_matrix(&data_file, &backend.clone())?;
+    let data_backend = open_sparse_matrix(&data_file, &backend)?;
 
     let (data, row_names) = if let Some(rows) = rows {
         let n_rows = data_backend.num_rows().unwrap_or(0);
@@ -1609,7 +1575,7 @@ fn take_rows(args: &TakeRowsArgs) -> anyhow::Result<()> {
 
     let data_t = data.t().to_owned();
 
-    if let Ok(ext) = extension(&output) {
+    if let Ok(ext) = file_ext(&output) {
         if ext.as_ref() == "parquet" {
             let column_names = data_backend.column_names()?;
             data_t.to_parquet(Some(&column_names), Some(&row_names), &output)?;
@@ -1643,7 +1609,7 @@ fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     for data_file in args.data_files.iter() {
         info!("Importing data file: {}", data_file);
 
-        let backend = match extension(data_file)?.to_string().as_str() {
+        let backend = match file_ext(data_file)?.to_string().as_str() {
             "h5" => SparseIoBackend::HDF5,
             "zarr" => SparseIoBackend::Zarr,
             _ => SparseIoBackend::Zarr,
@@ -1700,16 +1666,9 @@ fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
 
     info!("Found {} columns/barcodes ...", column_names.len());
 
-    let backend = args.backend.clone();
-    let output = args.output.clone();
-    let batch_memb_file = (output.to_string() + ".batch.gz").into_boxed_str();
+    let (backend, backend_file) = resolve_backend_file(&args.output, Some(args.backend.clone()))?;
 
-    let backend_file = match backend {
-        SparseIoBackend::HDF5 => format!("{}.h5", &output),
-        SparseIoBackend::Zarr => format!("{}.zarr", &output),
-    };
-
-    if std::path::Path::new(&backend_file).exists() {
+    if std::path::Path::new(backend_file.as_ref()).exists() {
         info!(
             "This existing backend file '{}' will be deleted",
             &backend_file
@@ -1740,7 +1699,7 @@ fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
-            data_file: backend_file.clone().into_boxed_str(),
+            data_file: backend_file.clone(),
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: args.block_size,
@@ -1750,6 +1709,7 @@ fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     }
 
     // do the batch mapping at the end
+    let batch_memb_file = format!("{}.batch.gz", args.output);
     let data = open_sparse_matrix(&backend_file, &backend)?;
     let default_batch = basename(&args.output)?;
     let column_batch_names = data
@@ -2065,35 +2025,9 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
     let row_file = args.row.as_ref();
     let col_file = args.col.as_ref();
 
-    let backend = args.backend.clone();
+    let (backend, backend_file) = resolve_backend_file(&args.output, Some(args.backend.clone()))?;
 
-    let output = match args.output.clone() {
-        Some(output) => output,
-        None => {
-            let (dir, mut base, ext) = dir_base_ext(mtx_file)?;
-
-            if base.ends_with(".mtx") && ext.ends_with("gz") {
-                base = base
-                    .into_string()
-                    .trim_end_matches(".mtx")
-                    .to_string()
-                    .into_boxed_str();
-            }
-
-            match (dir.len(), base.len()) {
-                (0, 0) => "./".to_string().into_boxed_str(),
-                (0, _) => format!("./{}", base).into_boxed_str(),
-                _ => format!("{}/{}", dir, base).into_boxed_str(),
-            }
-        }
-    };
-
-    let backend_file = match backend {
-        SparseIoBackend::HDF5 => format!("{}.h5", &output),
-        SparseIoBackend::Zarr => format!("{}.zarr", &output),
-    };
-
-    if std::path::Path::new(&backend_file).exists() {
+    if std::path::Path::new(backend_file.as_ref()).exists() {
         info!(
             "This existing backend file '{}' will be deleted",
             &backend_file
@@ -2119,7 +2053,7 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
 
     if args.do_squeeze {
         let squeeze_args = RunSqueezeArgs {
-            data_file: backend_file.into_boxed_str(),
+            data_file: backend_file.clone(),
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
@@ -2133,7 +2067,7 @@ fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
 }
 
 fn list_zarr(cmd_args: &ListZarrArgs) -> anyhow::Result<()> {
-    let ext = extension(&cmd_args.zarr_file)?;
+    let ext = file_ext(&cmd_args.zarr_file)?;
 
     match ext.to_string().as_ref() {
         "zarr" => {
@@ -2200,27 +2134,11 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         std::env::set_var("RUST_LOG", "info");
     }
 
-    let file_path = args.zarr_file.clone();
-    let backend = args.backend.clone();
-    let output = match args.output.clone() {
-        Some(output) => output,
-        None => {
-            let (dir, base, _ext) = dir_base_ext(&file_path)?;
+    let source_zarr_file_path = args.zarr_file.clone();
 
-            match (dir.len(), base.len()) {
-                (0, 0) => "./".to_string().into_boxed_str(),
-                (0, _) => format!("./{}", base).into_boxed_str(),
-                _ => format!("{}/{}", dir, base).into_boxed_str(),
-            }
-        }
-    };
+    let (backend, backend_file) = resolve_backend_file(&args.output, Some(args.backend.clone()))?;
 
-    let backend_file = match backend {
-        SparseIoBackend::HDF5 => format!("{}.h5", &output),
-        SparseIoBackend::Zarr => format!("{}.zarr", &output),
-    };
-
-    if std::path::Path::new(&backend_file).exists() {
+    if std::path::Path::new(backend_file.as_ref()).exists() {
         info!(
             "This existing backend file '{}' will be deleted",
             &backend_file
@@ -2228,7 +2146,7 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         remove_file(&backend_file)?;
     }
 
-    let (_dir, base, ext) = dir_base_ext(&file_path)?;
+    let (_dir, base, ext) = dir_base_ext(&source_zarr_file_path)?;
 
     let temp_dir = TempDir::new()?; // should be kept outside
 
@@ -2236,12 +2154,14 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         let temp_path = std::path::PathBuf::from(temp_dir.path());
         let temp_zarr = format!("{}/{}", temp_path.to_str().unwrap(), base);
         // let temp_zarr = format!("{}/{}", dir, base);
-        unzip_dir(&file_path, Some(temp_zarr.as_ref()))?;
+        unzip_dir(&source_zarr_file_path, Some(temp_zarr.as_ref()))?;
         info!("Unzipped to {}", temp_zarr);
         Arc::new(zarrs::filesystem::FilesystemStore::new(temp_zarr)?)
     } else {
-        info!("Store at {}", file_path);
-        Arc::new(zarrs::filesystem::FilesystemStore::new(file_path.as_ref())?)
+        info!("Store at {}", source_zarr_file_path);
+        Arc::new(zarrs::filesystem::FilesystemStore::new(
+            source_zarr_file_path.as_ref(),
+        )?)
     };
 
     let indices: Vec<u64> = read_zarr_numerics(store.clone(), args.indices_field.as_ref())?;
@@ -2349,7 +2269,7 @@ fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
-            data_file: backend_file.into_boxed_str(),
+            data_file: backend_file.clone(),
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
@@ -2367,27 +2287,11 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
         std::env::set_var("RUST_LOG", "info");
     }
 
-    let data_file = args.h5_file.clone();
-    let backend = args.backend.clone();
-    let output = match args.output.clone() {
-        Some(output) => output,
-        None => {
-            let (dir, base, _ext) = dir_base_ext(&data_file)?;
+    let h5_source_file = args.h5_file.clone();
 
-            match (dir.len(), base.len()) {
-                (0, 0) => "./".to_string().into_boxed_str(),
-                (0, _) => format!("./{}", base).into_boxed_str(),
-                _ => format!("{}/{}", dir, base).into_boxed_str(),
-            }
-        }
-    };
+    let (backend, backend_file) = resolve_backend_file(&args.output, Some(args.backend.clone()))?;
 
-    let backend_file = match backend {
-        SparseIoBackend::HDF5 => format!("{}.h5", &output),
-        SparseIoBackend::Zarr => format!("{}.zarr", &output),
-    };
-
-    if std::path::Path::new(&backend_file).exists() {
+    if std::path::Path::new(backend_file.as_ref()).exists() {
         info!(
             "This existing backend file '{}' will be deleted",
             &backend_file
@@ -2395,8 +2299,8 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
         remove_file(&backend_file)?;
     }
 
-    let file = hdf5::File::open(data_file.to_string())?;
-    info!("Opened data file: {}", data_file.clone());
+    let file = hdf5::File::open(h5_source_file.to_string())?;
+    info!("Opened data file: {}", h5_source_file.clone());
 
     if let Ok(root) = file.group(args.root_group_name.as_ref()) {
         // Read triplets with the shape information
@@ -2531,7 +2435,7 @@ fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
-            data_file: backend_file.into_boxed_str(),
+            data_file: backend_file.clone(),
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
@@ -2547,15 +2451,8 @@ fn take_column_names(cmd_args: &TakeColumnNamesArgs) -> anyhow::Result<()> {
     use write_lines;
 
     let output = cmd_args.output.clone();
-    let input = cmd_args.data_file.clone();
-
-    let backend = match extension(&input)?.as_ref() {
-        "zarr" => SparseIoBackend::Zarr,
-        "h5" => SparseIoBackend::HDF5,
-        _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
-    };
-
-    let data = open_sparse_matrix(&input, &backend.clone())?;
+    let (backend, input) = resolve_backend_file(&cmd_args.data_file, None)?;
+    let data = open_sparse_matrix(&input, &backend)?;
     let col_names = data.column_names()?;
     write_lines(&col_names, &output)?;
 
@@ -2566,15 +2463,8 @@ fn take_row_names(cmd_args: &TakeRowNamesArgs) -> anyhow::Result<()> {
     use write_lines;
 
     let output = cmd_args.output.clone();
-    let input = cmd_args.data_file.clone();
-
-    let backend = match extension(&input)?.as_ref() {
-        "zarr" => SparseIoBackend::Zarr,
-        "h5" => SparseIoBackend::HDF5,
-        _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
-    };
-
-    let data = open_sparse_matrix(&input, &backend.clone())?;
+    let (backend, input) = resolve_backend_file(&cmd_args.data_file, None)?;
+    let data = open_sparse_matrix(&input, &backend)?;
 
     let row_names = data.row_names()?;
     write_lines(&row_names, &output)?;
@@ -2584,15 +2474,10 @@ fn take_row_names(cmd_args: &TakeRowNamesArgs) -> anyhow::Result<()> {
 
 fn show_info(cmd_args: &InfoArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
-    let input = cmd_args.data_file.clone();
 
-    let backend = match extension(&input)?.as_ref() {
-        "zarr" => SparseIoBackend::Zarr,
-        "h5" => SparseIoBackend::HDF5,
-        _ => return Err(anyhow::anyhow!("Unknown file format: {}", input)),
-    };
+    let (backend, input) = resolve_backend_file(&cmd_args.data_file, None)?;
 
-    let data = open_sparse_matrix(&input, &backend.clone())?;
+    let data = open_sparse_matrix(&input, &backend)?;
 
     if let (Some(nrow), Some(ncol), Some(nnz)) =
         (data.num_rows(), data.num_columns(), data.num_non_zeros())
@@ -2618,30 +2503,15 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
     dirname(&output).as_deref().map(mkdir).transpose()?;
 
-    let file = cmd_args.data_files[0].as_ref();
-    let backend = match extension(file)?.as_ref() {
-        "h5" => SparseIoBackend::HDF5,
-        "zarr" => SparseIoBackend::Zarr,
-        _ => return Err(anyhow::anyhow!("Unknown file format: {}", file)),
-    };
-
     // to avoid duplicate barcodes in the column names
     let attach_data_name = cmd_args.data_files.len() > 1;
 
     let mut data = SparseIoVec::new();
     for data_file in cmd_args.data_files.iter() {
-        match extension(data_file)?.as_ref() {
-            "zarr" => {
-                assert_eq!(backend, SparseIoBackend::Zarr);
-            }
-            "h5" => {
-                assert_eq!(backend, SparseIoBackend::HDF5);
-            }
-            _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
-        };
+        let (backend, data_file) = resolve_backend_file(&data_file, None)?;
 
-        let this_data = open_sparse_matrix(data_file, &backend)?;
-        let data_name = attach_data_name.then(|| basename(data_file)).transpose()?;
+        let this_data = open_sparse_matrix(&data_file, &backend)?;
+        let data_name = attach_data_name.then(|| basename(&data_file)).transpose()?;
         data.push(Arc::from(this_data), data_name)?;
     }
 
@@ -2729,27 +2599,9 @@ fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
 }
 
 fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
-    let data_file = cmd_args.data_file.clone();
+    let (backend, data_file) = resolve_backend_file(&cmd_args.data_file, None)?;
     let row_nnz_cutoff = cmd_args.row_nnz_cutoff;
     let col_nnz_cutoff = cmd_args.column_nnz_cutoff;
-
-    use extension as file_ext;
-
-    let backend = match file_ext(&data_file)?.as_ref() {
-        "zarr" => SparseIoBackend::Zarr,
-        "h5" => SparseIoBackend::HDF5,
-        _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
-    };
-
-    match file_ext(&data_file)?.as_ref() {
-        "zarr" => {
-            assert_eq!(backend, SparseIoBackend::Zarr);
-        }
-        "h5" => {
-            assert_eq!(backend, SparseIoBackend::HDF5);
-        }
-        _ => return Err(anyhow::anyhow!("Unknown file format: {}", data_file)),
-    }
 
     let data = open_sparse_matrix(&data_file, &backend)?;
 

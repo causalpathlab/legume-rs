@@ -50,16 +50,20 @@ pub fn squeeze_by_nnz(
 
     if row_idx.is_none() {
         warn!(
-            "No rows can be kept with this cutoff {}\n\
-	       We will stop squeezing on the rows.",
+            "No rows can be kept with this cutoff {}!\n\
+	     \n\
+	     We will stop squeezing on the rows.\n\
+	     \n",
             cutoffs.row
         );
     }
 
     if col_idx.is_none() {
         warn!(
-            "No columns can be kept with this cutoff {}\n\
-	       We will stop squeezing on the columns.",
+            "No columns can be kept with this cutoff {}!\n\
+	     \n\
+	     We will stop squeezing on the columns.\n\
+	     \n",
             cutoffs.column
         );
     }

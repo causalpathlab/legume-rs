@@ -99,7 +99,7 @@ pub struct KnnImputeArgs {
 
     #[arg(
         long,
-        default_value_t = 1e-2,
+        default_value_t = 0.5,
         help = "Cutoff value to determine zero imputation",
         long_help = "Cutoff value to determine zero imputation."
     )]
@@ -231,7 +231,7 @@ pub fn fit_knn_regression(args: &KnnImputeArgs) -> anyhow::Result<()> {
     info!("Prediction of Y for each backend of X (N={})", n_out);
 
     for (didx, (x_backend_file, x_columns)) in x_backend_cols.into_iter().enumerate() {
-        let ext = extension(&x_backend_file)?;
+        let ext = file_ext(&x_backend_file)?;
         let base = basename(&x_backend_file)?;
         let backend = match ext.as_ref() {
             "zarr" => SparseIoBackend::Zarr,
