@@ -443,7 +443,7 @@ pub fn basename(file: &str) -> anyhow::Result<Box<str>> {
 /// Take the extension of a file
 /// * `file` - file name
 ///
-pub fn extension(file: &str) -> anyhow::Result<Box<str>> {
+pub fn file_ext(file: &str) -> anyhow::Result<Box<str>> {
     let path = Path::new(file);
     if let Some(ext) = path.extension() {
         Ok(ext.into_boxed_str())

@@ -96,7 +96,7 @@ impl ToBackend for TripletsRowsCols {
         &self,
         file_path: &str,
     ) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
-        let backend = match extension(file_path)?.as_ref() {
+        let backend = match file_ext(file_path)?.as_ref() {
             "zarr" => SparseIoBackend::Zarr,
             "h5" => SparseIoBackend::HDF5,
             _ => return Err(anyhow::anyhow!("unknown backend type")),

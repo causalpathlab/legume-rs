@@ -83,7 +83,7 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
         }
 
         if let Some(p_file) = p_file {
-            let ext = extension(p_file)?;
+            let ext = file_ext(p_file)?;
             if ext.as_ref() == "parquet" {
                 let _names = peek_parquet_field_names(p_file)?;
                 for _x in _names {
@@ -117,7 +117,7 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
 
         info!("Importing: {}, {:?}", this_data_file, this_indv_file);
 
-        let backend = match extension(this_data_file)?.to_string().as_str() {
+        let backend = match file_ext(this_data_file)?.to_string().as_str() {
             "h5" => SparseIoBackend::HDF5,
             "zarr" => SparseIoBackend::Zarr,
             _ => {
@@ -207,7 +207,7 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
         }
 
         if let Some(p_file) = topic_p_file {
-            let ext = extension(p_file)?;
+            let ext = file_ext(p_file)?;
             if ext.as_ref() == "parquet" {
                 info!("importing topic information from {}", p_file);
 

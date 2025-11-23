@@ -23,7 +23,7 @@ pub fn read_expr_data(data_files: &Vec<Box<str>>) -> anyhow::Result<SparseIoVec>
     }
 
     let file = data_files[0].as_ref();
-    let backend = match extension(file)?.to_string().as_str() {
+    let backend = match file_ext(file)?.to_string().as_str() {
         "h5" => SparseIoBackend::HDF5,
         "zarr" => SparseIoBackend::Zarr,
         _ => SparseIoBackend::Zarr,
@@ -36,7 +36,7 @@ pub fn read_expr_data(data_files: &Vec<Box<str>>) -> anyhow::Result<SparseIoVec>
     for data_file in data_files.iter() {
         info!("Importing data file: {}", data_file);
 
-        match extension(data_file)?.as_ref() {
+        match file_ext(data_file)?.as_ref() {
             "zarr" => {
                 assert_eq!(backend, SparseIoBackend::Zarr);
             }
@@ -58,7 +58,7 @@ pub fn read_expr_data(data_files: &Vec<Box<str>>) -> anyhow::Result<SparseIoVec>
 pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> {
     // push data files and collect batch membership
     let file = args.data_files[0].as_ref();
-    let backend = match extension(file)?.to_string().as_str() {
+    let backend = match file_ext(file)?.to_string().as_str() {
         "h5" => SparseIoBackend::HDF5,
         "zarr" => SparseIoBackend::Zarr,
         _ => SparseIoBackend::Zarr,
@@ -72,7 +72,7 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
     for data_file in args.data_files.iter() {
         info!("Importing data file: {}", data_file);
 
-        match extension(data_file)?.as_ref() {
+        match file_ext(data_file)?.as_ref() {
             "zarr" => {
                 assert_eq!(backend, SparseIoBackend::Zarr);
             }
@@ -108,7 +108,7 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
 
     for (i, coord_file) in args.coord_files.iter().enumerate() {
         info!("Reading coordinate file: {}", coord_file);
-        let ext = extension(&coord_file)?;
+        let ext = file_ext(&coord_file)?;
 
         let MatWithNames {
             rows: coord_cell_names,

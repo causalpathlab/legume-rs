@@ -7,7 +7,7 @@ use dashmap::DashMap as HashMap;
 use indicatif::ParallelProgressIterator;
 
 use data_beans::sparse_io::*;
-use matrix_util::common_io::extension;
+use matrix_util::common_io::file_ext;
 use matrix_util::dmatrix_util::concatenate_horizontal;
 use matrix_util::traits::*;
 use matrix_util::utils::partition_by_membership;
@@ -50,7 +50,7 @@ pub fn generate_convoluted_data(args: &SimConvArgs) -> anyhow::Result<()> {
     type DVec = DVector<f32>;
 
     // 1. read sc data and topic proportion file
-    let sc_data = match extension(&args.sc_data_file)?.to_string().as_ref() {
+    let sc_data = match file_ext(&args.sc_data_file)?.to_string().as_ref() {
         "h5" => open_sparse_matrix(&args.sc_data_file, &SparseIoBackend::HDF5),
         "zarr" => open_sparse_matrix(&args.sc_data_file, &SparseIoBackend::Zarr),
         _ => panic!(""),
@@ -60,7 +60,7 @@ pub fn generate_convoluted_data(args: &SimConvArgs) -> anyhow::Result<()> {
         rows: cells,
         cols: topic_names,
         mat: topic_mat,
-    } = match extension(&args.topic_file)?.as_ref() {
+    } = match file_ext(&args.topic_file)?.as_ref() {
         "parquet" => Mat::from_parquet(&args.topic_file)?,
         _ => Mat::read_data(&args.topic_file, &['\t', ','], None, Some(0), None, None)?,
     };

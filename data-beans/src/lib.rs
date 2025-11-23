@@ -1,3 +1,4 @@
+pub mod misc; //miscellaneous helper functions
 pub mod qc; // functions needed to perform quality control
 pub mod simulate; // helper function for simulation
 pub mod sparse_data_visitors; // visitor

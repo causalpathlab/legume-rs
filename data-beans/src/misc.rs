@@ -6,6 +6,65 @@ use hdf5::types::VarLenUnicode;
 use rand_distr::num_traits;
 use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
 
+use crate::sparse_io::*;
+
+/// Resolve the backend type and the corresponding file path
+///
+/// If you want to decide the backend by the file name:
+/// `resolve_backend_file(&data_file_path, None)`
+/// If you want to check/revise output backend file name:
+/// `resolve_backend_file(&output_header, Some(backend))`
+///
+/// If there were an extension string in the output_header,
+/// we will change the backend to accommodate the backend type
+/// implicated by the file name.
+///
+pub fn resolve_backend_file(
+    file_path: &str,
+    backend: Option<SparseIoBackend>,
+) -> anyhow::Result<(SparseIoBackend, Box<str>)> {
+    use matrix_util::common_io::file_ext;
+    let ext = file_ext(file_path).unwrap_or(Box::<str>::from(""));
+
+    if let Some(backend) = backend {
+        let mut resolved_backend = backend;
+        let mut backend_file = file_path.to_string();
+
+        // if needed, change the backend to match with the file extension
+        match ext.as_ref() {
+            "zarr" => {
+                resolved_backend = SparseIoBackend::Zarr;
+            }
+            "h5" => {
+                resolved_backend = SparseIoBackend::HDF5;
+            }
+            _ => {
+                // there is no extension
+                backend_file = match resolved_backend {
+                    SparseIoBackend::HDF5 => format!("{}.h5", file_path),
+                    SparseIoBackend::Zarr => format!("{}.zarr", file_path),
+                }
+            }
+        };
+
+        Ok((resolved_backend, backend_file.into_boxed_str()))
+    } else {
+        // backend has to be inferred
+        let resolved_backend = match ext.as_ref() {
+            "zarr" => SparseIoBackend::Zarr,
+            "h5" => SparseIoBackend::HDF5,
+            _ => return Err(anyhow::anyhow!("Unknown file format: {}", file_path)),
+        };
+
+        let backend_file = match resolved_backend {
+            SparseIoBackend::HDF5 => format!("{}", file_path),
+            SparseIoBackend::Zarr => format!("{}", file_path),
+        };
+
+        Ok((resolved_backend, backend_file.into_boxed_str()))
+    }
+}
+
 /// update a v2 zarrs array to the v3 one
 pub fn update_zarr_to_v3(
     store: std::sync::Arc<dyn ZStorageTraits>, // zarrs::filesystem::FilesystemStore

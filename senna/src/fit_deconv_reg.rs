@@ -46,7 +46,7 @@ struct BulkDataOut {
 }
 
 fn read_mat(file_path: &str) -> anyhow::Result<MatWithNames<Mat>> {
-    Ok(match extension(file_path)?.as_ref() {
+    Ok(match file_ext(file_path)?.as_ref() {
         "parquet" => Mat::from_parquet(file_path)?,
         _ => Mat::read_data(file_path, &['\t', ','], None, Some(0), None, None)?,
     })
