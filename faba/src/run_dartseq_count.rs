@@ -18,100 +18,229 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Args, Debug)]
 pub struct DartSeqCountArgs {
-    /// Observed (WT) `.bam` files where `C->U` (`C->T`) conversions happen
-    #[arg(short = 'w', long = "wt", value_delimiter = ',', required = true)]
+    #[arg(
+        short = 'w',
+        long = "wt",
+        value_delimiter = ',',
+        required = true,
+        help = "Observed (wild-type) BAM files.",
+        long_help = "Comma-separated list of observed (wild-type) BAM files. \n\
+		       These files contain C->U (C->T) conversions, \n\
+		       representing the editing events in the wild-type sample. \n\
+		       Example: file1.bam,file2.bam"
+    )]
     wt_bam_files: Vec<Box<str>>,
 
-    /// Control (MUT) `.bam` files where `C->U` (`C->T`) conversion is disrupted
-    #[arg(short = 'm', long = "mut", value_delimiter = ',', required = true)]
+    #[arg(
+        short = 'm',
+        long = "mut",
+        value_delimiter = ',',
+        required = true,
+        help = "Background/control (mutant) BAM files.",
+        long_help = "Comma-separated list of control (mutant) BAM files. \n\
+		     These files are used to calibrate background mutation rates \n\
+		     to identify disrupted C->U (C->T) conversions in the mutant sample. \n\
+		     Example: mut1.bam,mut2.bam"
+    )]
     mut_bam_files: Vec<Box<str>>,
 
-    /// Gene annotation (`GFF`) file
-    #[arg(short = 'g', long = "gff", required = true)]
+    #[arg(
+        short = 'g',
+        long = "gff",
+        required = true,
+        help = "Gene annotation (`GFF`) file",
+        long_help = "Path to the gene annotation file in GFF format. \n\
+		     This file provides genomic feature information required for analysis. \n\
+		     Example: genes.gff"
+    )]
     gff_file: Box<str>,
 
-    /// resolution (in kb)
-    #[arg(short = 'r', long)]
+    #[arg(
+        short = 'r',
+        long,
+        help = "resolution (in kb)",
+        long_help = "Resolution for binning in kilobases (kb). \n\
+		     Determines the size of bins for genomic location histograms. \n\
+		     Example: 1.0"
+    )]
     resolution_kb: Option<f32>,
 
-    /// #bins for genomic locations in histogram
-    #[arg(long = "genome-bins", default_value_t = 57)]
+    #[arg(
+        long = "genome-bins",
+        default_value_t = 57,
+        help = "#bins for genomic locations in histogram",
+        long_help = "Number of bins for genomic locations in the histogram. \n\
+		     Controls the granularity of the histogram across the genome."
+    )]
     num_genomic_bins_histogram: usize,
 
-    /// (approximate) number of bins in histogram
-    #[arg(long, default_value_t = 40)]
+    #[arg(
+        long = "print_width",
+        default_value_t = 40,
+        help = "#bins in histogram when printing on the screen",
+        long_help = "Approximate number of bins in the output histogram. \n\
+		     Adjusts the print width for visualization."
+    )]
     histogram_print_width: usize,
 
-    /// (10x) cell/sample barcode tag. [See here](`https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam`)
-    #[arg(long, default_value = "CB")]
+    #[arg(
+        long,
+        default_value = "CB",
+        help = "Cell barcode tag",
+        long_help = "Cell barcode tag used for cell/sample identification in 10x Genomics BAM files. \n\
+		     [See here](https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam)"
+    )]
     cell_barcode_tag: Box<str>,
 
-    /// gene barcode tag. [See here](`https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam`)
-    #[arg(long, default_value = "GX")]
+    #[arg(
+        long,
+        default_value = "GX",
+        help = "Gene barcode tag",
+        long_help = "Barcode tag used for gene identification in 10x Genomics BAM files.\n\
+		    [See here](`https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam`)"
+    )]
     gene_barcode_tag: Box<str>,
 
-    /// minimum number of total reads per site
-    #[arg(long, default_value_t = 3)]
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "minimum number of total reads per site",
+        long_help = "Minimum number of total reads required per site for inclusion in the analysis. \n\
+		     Filters out low-coverage sites."
+    )]
     min_coverage: usize,
 
-    /// minimum frequency of `C->U` on an edit site
-    #[arg(long = "min-wt-maf", default_value_t = 0.01)]
+    #[arg(
+        long = "min-wt-maf",
+        default_value_t = 0.01,
+        help = "Minimum frequency of `C->U` in an edit site on the wild type",
+        long_help = "Minimum frequency of C->U conversion at an edit site in the wild-type sample. \n\
+		     Used to filter out low-frequency events."
+    )]
     min_methylation_maf: f64,
 
-    /// maximum allele frequency `C->U` on the mutant
-    #[arg(long = "max-mut-maf", default_value_t = 0.01)]
+    #[arg(
+        long = "max-mut-maf",
+        default_value_t = 0.01,
+        help = "Maximum frequency `C->U` on the mutant",
+        long_help = "Maximum frequency of C->U conversion at an edit site in the mutant sample. \n\
+		     Used to filter out background events."
+    )]
     max_background_maf: f64,
 
-    /// maximum detection p-value cutoff
-    #[arg(short, long, default_value_t = 0.01)]
+    #[arg(
+        short,
+        long,
+        default_value_t = 0.01,
+        help = "Maximum detection p-value cutoff",
+        long_help = "Maximum p-value cutoff for detection. \n\
+		     Sites with p-values above this threshold will be excluded."
+    )]
     pvalue_cutoff: f64,
 
-    /// selectively choose bam record type (gene, transcript, exon, utr)
-    #[arg(long, value_enum)]
+    #[arg(
+        long,
+        value_enum,
+        help = "Bam record type (gene, transcript, exon, utr)",
+        long_help = "Selectively choose BAM record type for analysis. \n\
+		     Options include gene, transcript, exon, or UTR."
+    )]
     record_type: Option<GffFeatureType>,
 
-    /// gene type (protein_coding, pseudogene, lncRNA)
-    #[arg(long, value_enum)]
+    #[arg(
+        long,
+        value_enum,
+        help = "Gene type (protein_coding, pseudogene, lncRNA)",
+        long_help = "Filter analysis by gene type. \n\
+		     Options include protein_coding, pseudogene, or lncRNA."
+    )]
     gene_type: Option<GffGeneType>,
 
-    /// maximum number of threads
-    #[arg(long, default_value_t = 16)]
+    #[arg(
+        long,
+        default_value_t = 16,
+        help = "Maximum number of threads",
+        long_help = "Maximum number of threads to use for parallel processing. \n\
+		     Choose the right number in HPC environments."
+    )]
     max_threads: usize,
 
-    /// number of non-zero cutoff for rows/features
-    #[arg(long, default_value_t = 10)]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Number of non-zero cutoff for rows/features",
+        long_help = "Minimum number of non-zero entries required for rows/features to be included in the output."
+    )]
     row_nnz_cutoff: usize,
 
-    /// number of non-zero cutoff for columns/cells
-    #[arg(long, default_value_t = 10)]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Minimum number of non-zero entries for the columns/cells",
+        long_help = "Minimum number of non-zero entries required for columns/cells to be included in the output."
+    )]
     column_nnz_cutoff: usize,
 
-    /// output value type
-    #[arg(short = 't', long, value_enum, default_value = "beta")]
+    #[arg(
+        short = 't',
+        long,
+        value_enum,
+        default_value = "beta",
+        help = "Type of output value to report",
+        long_help = "Type of output value to report. Options include beta, count, or other supported types."
+    )]
     output_value_type: MethFeatureType,
 
-    /// backend for the output file
-    #[arg(long, value_enum, default_value = "zarr")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "zarr",
+        help = "Backend format for the output file",
+        long_help = "Backend format for the output file. Options include zarr, hdf5, or other supported sparse IO backends."
+    )]
     backend: SparseIoBackend,
 
-    /// include reads missing gene and cell barcode
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Include reads w/o barcode info",
+        long_help = "Include reads that are missing gene and cell barcode information in the analysis."
+    )]
     include_missing_barcode: bool,
 
-    /// output mut signals
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Output mutant signals",
+        long_help = "Output mutant signals (null data) in addition to wild-type signals."
+    )]
     output_null_data: bool,
 
-    /// output bed file
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Output results in BED",
+        long_help = "Output results in BED file format for genomic intervals."
+    )]
     output_bed_file: bool,
 
-    /// output mut file
-    #[arg(long, default_value_t = false)]
-    output_mut_file: bool,
+    #[arg(
+        long = "gene-level",
+        default_value_t = false,
+        help = "Output results at a gene level (default: a site level)",
+        long_help = "Output results at a gene level (default: a site level).\n\
+		     The counts will be aggregated within a gene."
+    )]
+    gene_level_output: bool,
 
-    /// output header for `data-beans` files
-    #[arg(short, long, required = true)]
+    #[arg(
+        short,
+        long,
+        required = true,
+        help = "Output header for `data-beans` files",
+        long_help = "Output header for the output files. \n\
+		     This file will contain the results in the selected format."
+    )]
     output: Box<str>,
 }
 
@@ -301,21 +430,23 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
                 stats.len()
             );
 
-            let gene_data_file = backend_file(&format!("gene_{}", batch_name));
-            let triplets = summarize_stats(&stats, gene_key, take_value);
-            let data = triplets.to_backend(&gene_data_file)?;
-            data.qc(cutoffs.clone())?;
-            genes.extend(data.row_names()?);
-            info!("created gene-level data: {}", &gene_data_file);
-            gene_data_files.push(gene_data_file);
-
-            let site_data_file = backend_file(&format!("site_{}", batch_name));
-            let triplets = summarize_stats(&stats, site_key, take_value);
-            let data = triplets.to_backend(&site_data_file)?;
-            data.qc(cutoffs.clone())?;
-            sites.extend(data.row_names()?);
-            info!("created site-level data: {}", &site_data_file);
-            site_data_files.push(site_data_file);
+            if args.gene_level_output {
+                let gene_data_file = backend_file(&format!("{}", batch_name));
+                let triplets = summarize_stats(&stats, gene_key, take_value);
+                let data = triplets.to_backend(&gene_data_file)?;
+                data.qc(cutoffs.clone())?;
+                genes.extend(data.row_names()?);
+                info!("created gene-level data: {}", &gene_data_file);
+                gene_data_files.push(gene_data_file);
+            } else {
+                let site_data_file = backend_file(&format!("{}", batch_name));
+                let triplets = summarize_stats(&stats, site_key, take_value);
+                let data = triplets.to_backend(&site_data_file)?;
+                data.qc(cutoffs.clone())?;
+                sites.extend(data.row_names()?);
+                info!("created site-level data: {}", &site_data_file);
+                site_data_files.push(site_data_file);
+            }
         }
     }
 
@@ -331,22 +462,23 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             //////////////////////////////////
             // Aggregate them into triplets //
             //////////////////////////////////
-
-            let gene_data_file = backend_file(&format!("gene_{}", batch_name));
-            let triplets = summarize_stats(&stats, gene_key, take_value);
-            let data = triplets.to_backend(&gene_data_file)?;
-            data.qc(cutoffs.clone())?;
-            genes.extend(data.row_names()?);
-            info!("created gene-level data: {}", &gene_data_file);
-            null_gene_data_files.push(gene_data_file);
-
-            let site_data_file = backend_file(&format!("site_{}", batch_name));
-            let triplets = summarize_stats(&stats, site_key, take_value);
-            let data = triplets.to_backend(&site_data_file)?;
-            data.qc(cutoffs.clone())?;
-            sites.extend(data.row_names()?);
-            info!("created site-level data: {}", &site_data_file);
-            null_site_data_files.push(site_data_file);
+            if args.gene_level_output {
+                let gene_data_file = backend_file(&format!("{}", batch_name));
+                let triplets = summarize_stats(&stats, gene_key, take_value);
+                let data = triplets.to_backend(&gene_data_file)?;
+                data.qc(cutoffs.clone())?;
+                genes.extend(data.row_names()?);
+                info!("created gene-level data: {}", &gene_data_file);
+                null_gene_data_files.push(gene_data_file);
+            } else {
+                let site_data_file = backend_file(&format!("{}", batch_name));
+                let triplets = summarize_stats(&stats, site_key, take_value);
+                let data = triplets.to_backend(&site_data_file)?;
+                data.qc(cutoffs.clone())?;
+                sites.extend(data.row_names()?);
+                info!("created site-level data: {}", &site_data_file);
+                null_site_data_files.push(site_data_file);
+            }
         }
     }
 
