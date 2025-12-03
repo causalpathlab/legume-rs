@@ -5,61 +5,146 @@ use matrix_util::dmatrix_util::concatenate_vertical;
 
 #[derive(Args, Debug)]
 pub struct JointSvdArgs {
-    /// Data files
-    #[arg(required = true)]
+    #[arg(
+        required = true,
+        help = "Data files",
+        long_help = "Data files to be processed.\n\
+		     Each file should be specified as a path.\n\
+		     Multiple files can be provided."
+    )]
     data_files: Vec<Box<str>>,
 
-    /// Data modalities
-    #[arg(short = 'm', long, required = true)]
+    #[arg(
+        short = 'm',
+        long = "modalities",
+        help = "Data modalities",
+        long_help = "We will treat the provided data files as\n\
+		     a table of data sets in a row-major order.\n\
+		     This number of modalities will determine \n\
+		     how many different data types are assumed,\n\
+		     or the number of rows in the data table.",
+        required = true
+    )]
     num_modalities: usize,
 
-    /// Output header
-    #[arg(long, short, required = true)]
+    #[arg(
+        long,
+        short,
+        required = true,
+        help = "Output header",
+        long_help = "Output header for results.\n\
+		     Specify the output file or prefix for generated files:\n\
+		     - {out}.delta.parquet\n\
+		     - {out}.dictionary.parquet\n\
+		     - {out}.latent.parquet\n"
+    )]
     out: Box<str>,
 
-    /// batch membership files (comma-separated names). Each bach file
-    /// should correspond to each data file.
-    #[arg(long, short, value_delimiter(','))]
-    batch_files: Option<Vec<Box<str>>>,
-
-    /// Random projection dimension to project the data.
-    #[arg(long, short = 'p', default_value_t = 50)]
+    #[arg(
+        long,
+        short = 'p',
+        default_value_t = 50,
+        help = "Random projection dimension.",
+        long_help = "Random projection dimension to project the data.\n\
+		     Controls the dimensionality of the random projection step."
+    )]
     proj_dim: usize,
 
-    /// Use top `S` components of projection. #samples < `2^S+1`.
-    #[arg(long, short = 'd', default_value_t = 10)]
+    #[arg(
+        long,
+        short = 'd',
+        default_value_t = 10,
+        help = "Top {d} components of projection.",
+        long_help = "Use top {d} components of projection.\n\
+		     Number of samples will be less than `2^{d}+1`."
+    )]
     sort_dim: usize,
 
-    /// column sum normalization scale (will only affect decoder)
-    #[arg(short = 'c', long, default_value_t = 1e4)]
+    #[arg(
+        long,
+        short,
+        value_delimiter(','),
+        help = "Batch membership files.",
+        long_help = "Batch membership files (comma-separated names).\n\
+		     Each batch file should correspond to each data file.\n\
+		     Example: batch1.csv,batch2.csv"
+    )]
+    batch_files: Option<Vec<Box<str>>>,
+
+    #[arg(
+        short = 'c',
+        long,
+        default_value_t = 1e4,
+        help = "Column sum normalization scale.",
+        long_help = "Column sum normalization scale (affects decoder only).\n\
+		     Adjusts normalization of columns in the decoder."
+    )]
     column_sum_norm: f32,
 
-    /// #k-nearest neighbours batches
-    #[arg(long, default_value_t = 3)]
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "Number of k-nearest neighbour batches.",
+        long_help = "Number of k-nearest neighbour batches.\n\
+		     Controls the number of batches considered \n\
+		     for nearest neighbour search."
+    )]
     knn_batches: usize,
 
-    /// #k-nearest neighbours within each batch
-    #[arg(long, default_value_t = 10)]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Number of k-nearest neighbours within each batch.",
+        long_help = "Number of k-nearest neighbours within each batch.\n\
+		     Controls the number of cells considered \n\
+		     for nearest neighbour search within each batch."
+    )]
     knn_cells: usize,
 
-    /// optimization iterations
-    #[arg(long, default_value_t = 30)]
+    #[arg(
+        long,
+        default_value_t = 30,
+        help = "Optimization iterations.",
+        long_help = "Number of optimization iterations.\n\
+		     Controls the number of steps for model optimization."
+    )]
     iter_opt: usize,
 
-    /// block_size (# columns) for parallel processing
-    #[arg(long, default_value_t = 100)]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Block size for parallel processing.",
+        long_help = "Block size (number of columns) for parallel processing.\n\
+		     Controls the granularity of parallel computation."
+    )]
     block_size: usize,
 
-    /// number of latent topics
-    #[arg(short = 't', long, default_value_t = 10)]
+    #[arg(
+        short = 't',
+        long,
+        default_value_t = 10,
+        help = "Number of latent topics.",
+        long_help = "Number of latent topics.\n\
+		     Controls the dimensionality of the latent topic space."
+    )]
     n_latent_topics: usize,
 
-    /// preload all the columns data
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Preload all columns data.",
+        long_help = "Preload all the columns data into memory.\n\
+		     Improves performance for large datasets."
+    )]
     preload_data: bool,
 
-    /// verbosity
-    #[arg(long, short)]
+    #[arg(
+        long,
+        short,
+        help = "Verbosity.",
+        long_help = "Enable verbose output.\n\
+		     Prints additional information during execution."
+    )]
     verbose: bool,
 }
 

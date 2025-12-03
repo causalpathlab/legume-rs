@@ -4,68 +4,157 @@ use data_beans::sparse_data_visitors::VisitColumnsOps;
 
 #[derive(Args, Debug)]
 pub struct SvdArgs {
-    /// Data files
-    #[arg(required = true)]
+    #[arg(
+        required = true,
+        help = "Data files",
+        long_help = "Data files to be processed.\n\
+		     Each file should be specified as a path.\n\
+		     Multiple files can be provided."
+    )]
     data_files: Vec<Box<str>>,
 
-    /// Random projection dimension to project the data.
-    #[arg(long, short = 'p', default_value_t = 50)]
-    proj_dim: usize,
-
-    /// Output header
-    #[arg(long, short, required = true)]
+    #[arg(
+        long,
+        short,
+        required = true,
+        help = "Output header",
+        long_help = "Output header for results.\n\
+		     Specify the output file or prefix for generated files:\n\
+		     - {out}.delta.parquet\n\
+		     - {out}.dictionary.parquet\n\
+		     - {out}.latent.parquet\n"
+    )]
     out: Box<str>,
 
-    /// Use top `S` components of projection. #samples < `2^S+1`.
-    #[arg(long, short = 'd', default_value_t = 10)]
+    #[arg(
+        long,
+        short = 'p',
+        default_value_t = 50,
+        help = "Random projection dimension",
+        long_help = "Random projection dimension to project the data.\n\
+		     Controls the dimensionality of the random projection step."
+    )]
+    proj_dim: usize,
+
+    #[arg(
+        long,
+        short = 'd',
+        default_value_t = 10,
+        help = "Top {d} components of projection",
+        long_help = "Use top {d} components of projection.\n\
+		     Number of samples will be less than `2^{d}+1`."
+    )]
     sort_dim: usize,
 
-    /// batch membership files (comma-separated names). Each bach file
-    /// should correspond to each data file.
-    #[arg(long, short, value_delimiter(','))]
+    #[arg(
+        long,
+        short,
+        value_delimiter(','),
+        help = "Batch membership files",
+        long_help = "Batch membership files (comma-separated names).\n\
+		     Each batch file should correspond to each data file.\n\
+		     Example: batch1.csv,batch2.csv"
+    )]
     batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Ignore batch adjustment",
+        long_help = "Ignore batch adjustment.\n\
+		     Disables batch effect correction during processing."
+    )]
     ignore_batch_effects: bool,
 
-    /// warm start from the previous projection (`cell x k`)
-    #[arg(short = 'w', long = "warm-start")]
+    #[arg(
+        short = 'w',
+        long = "warm-start",
+        help = "Warm start projection file",
+        long_help = "Warm start from the previous projection (cell x k).\n\
+		     Provide a file to initialize the projection."
+    )]
     warm_start_proj_file: Option<Box<str>>,
 
-    /// #k-nearest neighbours batches
-    #[arg(long, default_value_t = 10)]
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "Number of k-nearest neighbour batches",
+        long_help = "Number of k-nearest neighbour batches.\n\
+		     Controls the number of batches considered \n\
+		     for nearest neighbour search."
+    )]
     knn_batches: usize,
 
-    /// #k-nearest neighbours within each batch
-    #[arg(long, default_value_t = 10)]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Number of k-nearest neighbours within each batch",
+        long_help = "Number of k-nearest neighbours within each batch.\n\
+		     Controls the number of cells considered \n\
+		     for nearest neighbour search within each batch."
+    )]
     knn_cells: usize,
 
-    /// reference batch names
-    #[arg(long, value_delimiter(','))]
+    #[arg(
+        long,
+        value_delimiter(','),
+        help = "Reference batch names",
+        long_help = "Reference batch names (comma-separated).\n\
+		     Specify batches to be used as reference during adjustment."
+    )]
     reference_batches: Option<Vec<Box<str>>>,
 
-    /// optimization iterations
-    #[arg(long, default_value_t = 30)]
+    #[arg(
+        long,
+        default_value_t = 30,
+        help = "Optimization iterations",
+        long_help = "Number of optimization iterations.\n\
+		     Controls the number of steps for model optimization."
+    )]
     iter_opt: usize,
 
-    /// block_size (# columns) for parallel processing
-    #[arg(long, default_value_t = 100)]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Block size for parallel processing",
+        long_help = "Block size (number of columns) for parallel processing.\n\
+		     Controls the granularity of parallel computation."
+    )]
     block_size: usize,
 
-    /// number of latent topics
-    #[arg(short = 't', long, default_value_t = 10)]
+    #[arg(
+        short = 't',
+        long,
+        default_value_t = 10,
+        help = "Number of latent topics",
+        long_help = "Number of latent topics.\n\
+		     Controls the dimensionality of the latent topic space."
+    )]
     n_latent_topics: usize,
 
-    /// preload all the columns data
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Preload all columns data",
+        long_help = "Preload all the columns data into memory.\n\
+		     Improves performance for large datasets."
+    )]
     preload_data: bool,
 
-    /// save batch-adjusted data
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Save batch-adjusted data",
+        long_help = "If set, save the batch-adjusted data creating a new backend."
+    )]
     save_adjusted: bool,
 
-    /// verbosity
-    #[arg(long, short)]
+    #[arg(
+        long,
+        short,
+        help = "Verbosity",
+        long_help = "Enable verbose output.\n\
+		     Prints additional information during execution."
+    )]
     verbose: bool,
 }
 
