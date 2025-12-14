@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub use clap::Parser;
 pub use log::{info, warn};
 
 pub use data_beans::sparse_data_visitors::*;
@@ -12,4 +13,3 @@ pub type CscMat = nalgebra_sparse::CscMatrix<f32>;
 pub type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 
 pub struct EmptyArg {}
-
