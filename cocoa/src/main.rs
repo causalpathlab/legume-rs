@@ -5,10 +5,12 @@ mod randomly_partition_data;
 mod run_collapse;
 mod run_diff;
 mod run_sim;
+mod run_sim_collider;
 mod stat;
 
 use crate::run_diff::*;
 use crate::run_sim::*;
+use crate::run_sim_collider::*;
 
 use clap::{Parser, Subcommand};
 
@@ -26,8 +28,6 @@ enum Commands {
 
     /// Simulate differential expression data with one cell type.
     Simulate(SimArgs),
-
-
 }
 
 fn main() -> anyhow::Result<()> {

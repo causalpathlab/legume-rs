@@ -236,64 +236,123 @@ impl GlmSimulator {
 
 #[derive(Parser, Debug, Clone)]
 pub struct SimArgs {
-    /// number of genes
-    #[arg(short = 'r', long)]
+    #[arg(
+        short = 'r',
+        required = true,
+        help = "number of genes",
+        long_help = "Number of genes"
+    )]
     n_genes: usize,
 
-    /// number of cells. It can have more or less number of cells.
-    #[arg(short = 'c', long)]
+    #[arg(
+        short = 'c',
+        required = true,
+        help = "number of cells",
+        long_help = "Number of cells. It can have more or less number of cells."
+    )]
     n_cells: usize,
 
-    /// number of causal genes per cell type
-    #[arg(short = 'a', long)]
+    #[arg(
+        short = 'a',
+        required = true,
+        help = "number of causal genes per cell type",
+        long_help = "Number of causal genes per cell type"
+    )]
     n_causal_genes: usize,
 
-    /// number of covariates
-    #[arg(long, default_value_t = 1)]
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "number of covariates",
+        long_help = "Number of covariates"
+    )]
     n_covariates: usize,
 
-    /// number of samples/individuals per exposure group
-    #[arg(long, default_value_t = 5)]
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "number of samples/individuals per exposure group",
+        long_help = "Number of samples/individuals per exposure group"
+    )]
     n_samples_per_exposure: usize,
 
-    /// number of exposure groups
-    #[arg(short, long, default_value_t = 2)]
+    #[arg(
+        short,
+        long,
+        default_value_t = 2,
+        help = "number of exposure groups",
+        long_help = "Number of exposure groups"
+    )]
     n_exposure: usize,
 
-    /// proportion of variance explained by confounding to exposure
-    #[arg(long, default_value_t = 0.5)]
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "proportion of variance explained by confounding to exposure",
+        long_help = "Proportion of variance explained by confounding to exposure"
+    )]
     pve_covar_exposure: f32,
 
-    /// proportion of expression variance explained by causal exposure
-    #[arg(long, default_value_t = 0.3)]
+    #[arg(
+        long,
+        default_value_t = 0.3,
+        help = "proportion of expression variance explained by causal exposure",
+        long_help = "Proportion of expression variance explained by causal exposure"
+    )]
     pve_exposure_gene: f32,
 
-    /// proportion of expression variance explained by covariates
-    #[arg(long, default_value_t = 0.5)]
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "proportion of expression variance explained by covariates",
+        long_help = "Proportion of expression variance explained by covariates"
+    )]
     pve_covar_gene: f32,
 
-    /// hyperparameter for gamma distribution
-    #[arg(long, value_delimiter = ',', default_value = "1.0,1.0")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "1.0,1.0",
+        help = "hyperparameter for gamma distribution",
+        long_help = "Hyperparameter for gamma distribution"
+    )]
     gamma_hyperparam: Vec<f32>,
 
-    /// random seed
-    #[arg(long, default_value_t = 42)]
+    #[arg(
+        long,
+        default_value_t = 42,
+        help = "random seed",
+        long_help = "Random seed"
+    )]
     rseed: u64,
 
-    /// backend
-    #[arg(long, value_enum, default_value = "zarr")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "zarr",
+        help = "backend",
+        long_help = "Backend"
+    )]
     backend: SparseIoBackend,
 
-    /// save mtx
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "save mtx",
+        long_help = "Save mtx"
+    )]
     save_mtx: bool,
 
-    /// Output header
-    #[arg(long, short, required = true)]
+    #[arg(
+        long,
+        short,
+        required = true,
+        help = "Output header",
+        long_help = "Output header"
+    )]
     out: Box<str>,
 
-    /// verbosity
-    #[arg(long, short)]
+    #[arg(long, short, help = "verbosity", long_help = "Verbosity")]
     verbose: bool,
 }
 
