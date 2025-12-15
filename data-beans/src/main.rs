@@ -1046,7 +1046,7 @@ pub struct RunStatArgs {
         help = "Column group membership file for row statistics",
         long_help = "Provide a file that defines column group membership \n\
 		     when accumulating statistics over rows. \n\
-		     This allows for group-wise analysis."
+		     This provides statistics computed for group-wise analysis."
     )]
     column_group_file: Option<Box<str>>,
 

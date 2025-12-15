@@ -2,47 +2,105 @@ use crate::collapse_cocoa_data::*;
 use crate::common::*;
 use crate::input::*;
 
-use data_beans_alg::collapse_data::CollapsingOps;
-
 use clap::Parser;
+use data_beans_alg::collapse_data::CollapsingOps;
+use matrix_param::dmatrix_gamma::GammaMatrix;
+use matrix_param::io::ParamIo;
+use matrix_param::traits::TwoStatParam;
+use matrix_util::dmatrix_util::concatenate_horizontal;
+use matrix_util::dmatrix_util::concatenate_vertical;
+use matrix_util::dmatrix_util::subset_rows;
+use std::sync::{Arc, Mutex};
 
 #[derive(Parser, Debug, Clone)]
 pub struct CollapseArgs {
-    /// data files of either `.zarr` or `.h5` format. All the formats
-    /// in the given list should be identical. We can convert `.mtx`
-    /// to `.zarr` or `.h5` using `data-beans` command.
-    #[arg(required = true)]
+    #[arg(
+        required = true,
+        help = "Data files of either `.zarr` `.h` format",
+        long_help = "Data files of either `.zarr` or `.h5` format. \n\
+		     All the formats in the given list should be identical. \n\
+		     You can convert `.mtx` to `.zarr` or `.h5` using the `data-beans`"
+    )]
     data_files: Vec<Box<str>>,
 
-    /// latent topic assignment files (comma-separated file names)
-    /// Each line in each file can specify topic name or cell and
-    /// topic name pair.
-    #[arg(long, short = 't', value_delimiter(','))]
+    #[arg(
+        short = 't',
+        long = "topic-assignment-files",
+        value_delimiter = ',',
+        help = "Latent topic assignment file names (comma-separated).",
+        long_help = "Latent topic assignment files (comma-separated file names). \n\
+		     Each line in each file can specify:\n\
+		     * just topic name or \n\
+		     * (1) cell and (2) topic name pair."
+    )]
     topic_assignment_files: Option<Vec<Box<str>>>,
 
-    /// latent topic proportion files (comma-separated file names)
-    /// Each file contains a full `cell x topic` matrix.
-    #[arg(long, short = 'r', value_delimiter(','))]
+    #[arg(
+        short = 'r',
+        long = "topic-proportion-files",
+        value_delimiter = ',',
+        help = "Latent topic proportion file names (comma-separated).",
+        long_help = "Latent topic proportion files (comma-separated file names). \n\
+		     Each file contains a full `cell x topic` matrix."
+    )]
     topic_proportion_files: Option<Vec<Box<str>>>,
 
-    /// is topic proportion matrix of probability?
-    #[arg(long, default_value = "logit")]
+    #[arg(
+        long = "topic-proportion-value",
+        default_value = "logit",
+        help = "Is topic proportion matrix of probability?",
+        long_help = "Specify if the topic proportion matrix is of probability type. \n\
+		     Default is `logit`-valued."
+    )]
     topic_proportion_value: TopicValue,
 
-    /// block_size for parallel processing
-    #[arg(long, default_value_t = 100)]
+    #[arg(
+        long = "block-size",
+        default_value_t = 100,
+        help = "Block size for parallel processing.",
+        long_help = "Block size for parallel processing."
+    )]
     block_size: usize,
 
-    /// output directory
-    #[arg(long, short, required = true)]
+    #[arg(
+        long = "a0",
+        default_value_t = 1.0,
+        help = "Hyperparameter a0 in Gamma(a0, b0).",
+        long_help = "Hyperparameter a0 in Gamma(a0, b0)."
+    )]
+    a0: f32,
+
+    #[arg(
+        long = "b0",
+        default_value_t = 1.0,
+        help = "Hyperparameter b0 in Gamma(a0, b0).",
+        long_help = "Hyperparameter b0 in Gamma(a0, b0)."
+    )]
+    b0: f32,
+
+    #[arg(
+        short,
+        long = "out",
+        required = true,
+        help = "Output file name.",
+        long_help = "Output file name."
+    )]
     out: Box<str>,
 
-    /// preload all the columns data
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long = "preload-data",
+        default_value_t = false,
+        help = "Preload all the columns data.",
+        long_help = "Preload all the columns data."
+    )]
     preload_data: bool,
 
-    /// verbosity
-    #[arg(long, short)]
+    #[arg(
+        short,
+        long = "verbose",
+        help = "Verbosity.",
+        long_help = "Increase output verbosity."
+    )]
     verbose: bool,
 }
 
@@ -52,7 +110,8 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
     }
     env_logger::init();
 
-    let mut data = read_input_data(InputDataArgs {
+    // read data without `indv` and `exposure`
+    let data = read_input_data(InputDataArgs {
         data_files: args.data_files,
         indv_files: None,
         topic_assignment_files: args.topic_assignment_files,
@@ -62,40 +121,59 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
         topic_value: args.topic_proportion_value,
     })?;
 
+    // we want to report topic specific gene expressions
 
+    let cell_topic = &data.cell_topic;
+    let ngenes = data.sparse_data.num_rows()?;
+    let ntopics = cell_topic.ncols();
+
+    let mut topic_stat = TopicStat {
+        count_gene_topic: Mat::zeros(ngenes, ntopics),
+        count_topic: DVec::zeros(ntopics),
+    };
+
+    data.sparse_data.visit_columns_by_block(
+        &collect_topic_stat_visitor,
+        &cell_topic,
+        &mut topic_stat,
+        Some(args.block_size),
+    )?;
+
+    let mut gamma = GammaMatrix::new((ngenes, ntopics), args.a0, args.b0);
+    gamma.update_stat(
+        &topic_stat.count_gene_topic,
+        &concatenate_horizontal(&vec![topic_stat.count_topic; ngenes])?.transpose(),
+    );
+    gamma.calibrate();
+
+    let gene_names = data.sparse_data.row_names()?;
+    let out_file = format!("{}.parquet", args.out.replace(".parquet", ""));
+    gamma.to_parquet(Some(&gene_names), None, &out_file)?;
 
     Ok(())
 }
 
-// struct ArgInputData {
-//     sparse_data: SparseIoVec,
-//     cell_to_indv: Vec<Box<str>>,
-//     cell_topic: Mat,
-//     // sorted_topic_names: Vec<Box<str>>,
-//     // indv_to_exposure: HashMap<Box<str>, Box<str>>,
-//     // exposure_id: HashMap<Box<str>, usize>,
-// }
+struct TopicStat {
+    count_gene_topic: Mat,
+    count_topic: DVec,
+}
 
-// fn parse_arg_input_data(args: CollapseArgs) -> anyhow::Result<ArgInputData> {
-//     use matrix_util::common_io::*;
+fn collect_topic_stat_visitor(
+    bound: (usize, usize),
+    data: &SparseIoVec,
+    cell_topic_nk: &Mat,
+    arc_stat: Arc<Mutex<&mut TopicStat>>,
+) -> anyhow::Result<()> {
+    let (lb, ub) = bound;
 
-//     // push data files and collect batch membership
-//     let file = args.data_files[0].as_ref();
-//     let backend = match extension(file)?.to_string().as_str() {
-//         "h5" => SparseIoBackend::HDF5,
-//         "zarr" => SparseIoBackend::Zarr,
-//         _ => {
-//             return Err(anyhow::anyhow!("unknown backend"));
-//         }
-//     };
+    let y_gn = data.read_columns_csc(lb..ub)?;
+    let z_nk = subset_rows(cell_topic_nk, lb..ub)?;
 
-//     let data_files = args.data_files;
+    let z_k = z_nk.row_sum().transpose();
+    let y_gk = y_gn * z_nk;
 
-//     let mut sparse_data = SparseIoVec::new();
-
-//     for (f, this_data_file) in data_files.iter().enumerate() {
-
-//     }
-
-//     unimplemented!("");
-// }
+    let mut stat = arc_stat.lock().expect("lock");
+    stat.count_gene_topic += y_gk;
+    stat.count_topic += z_k;
+    Ok(())
+}

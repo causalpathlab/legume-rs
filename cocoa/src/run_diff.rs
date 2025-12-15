@@ -9,75 +9,146 @@ use matrix_util::traits::MatOps;
 
 #[derive(Parser, Debug, Clone)]
 pub struct DiffArgs {
-    /// data files of either `.zarr` or `.h5` format. All the formats
-    /// in the given list should be identical. We can convert `.mtx`
-    /// to `.zarr` or `.h5` using `data-beans` command.
-    #[arg(required = true)]
+    #[arg(
+        required = true,
+        help = "Data files of either `.zarr` `.h` format",
+        long_help = "Data files of either `.zarr` or `.h5` format. \n\
+		     All the formats in the given list should be identical. \n\
+		     You can convert `.mtx` to `.zarr` or `.h5` using the `data-beans`"
+    )]
     data_files: Vec<Box<str>>,
 
-    /// individual membership files (comma-separated file names). Each
-    /// line in each file can specify individual ID or cell and
-    /// individual ID pair.
-    #[arg(long, short = 'i', value_delimiter(','))]
+    #[arg(
+        short = 'i',
+        long = "indv-files",
+        value_delimiter = ',',
+        help = "Individual membership file names (comma-separated).",
+        long_help = "Individual membership files (comma-separated file names). \n\
+		     Each line in each file can specify: \n\
+		     * just  individual ID or\n\
+		     * (1) Cell and (2) individual ID pair."
+    )]
     indv_files: Vec<Box<str>>,
 
-    /// latent topic assignment files (comma-separated file names)
-    /// Each line in each file can specify topic name or cell and
-    /// topic name pair.
-    #[arg(long, short = 't', value_delimiter(','))]
+    #[arg(
+        short = 't',
+        long = "topic-assignment-files",
+        value_delimiter = ',',
+        help = "Latent topic assignment file names (comma-separated).",
+        long_help = "Latent topic assignment files (comma-separated file names). \n\
+		     Each line in each file can specify:\n\
+		     * just topic name or \n\
+		     * (1) cell and (2) topic name pair."
+    )]
     topic_assignment_files: Option<Vec<Box<str>>>,
 
-    /// latent topic proportion files (comma-separated file names)
-    /// Each file contains a full `cell x topic` matrix.
-    #[arg(long, short = 'r', value_delimiter(','))]
+    #[arg(
+        short = 'r',
+        long = "topic-proportion-files",
+        value_delimiter = ',',
+        help = "Latent topic proportion file names (comma-separated).",
+        long_help = "Latent topic proportion files (comma-separated file names). \n\
+		     Each file contains a full `cell x topic` matrix."
+    )]
     topic_proportion_files: Option<Vec<Box<str>>>,
 
-    /// is topic proportion matrix of probability?
-    #[arg(long, default_value = "logit")]
+    #[arg(
+        long = "topic-proportion-value",
+        default_value = "logit",
+        help = "Is topic proportion matrix of probability?",
+        long_help = "Specify if the topic proportion matrix is of probability type. \n\
+		     Default is `logit`-valued."
+    )]
     topic_proportion_value: TopicValue,
 
-    /// each line corresponds to (1) individual name and (2) exposure name
-    #[arg(long, short = 'e')]
+    #[arg(
+        short = 'e',
+        long = "exposure-assignment-file",
+        help = "Exposure assignment file.",
+        long_help = "Each line corresponds to: \n\
+		     (1) individual name and (2) exposure name."
+    )]
     exposure_assignment_file: Box<str>,
 
-    /// #k-nearest neighbours within each condition
-    #[arg(long, short = 'n', default_value_t = 10)]
+    #[arg(
+        short = 'n',
+        long = "knn",
+        default_value_t = 10,
+        help = "Number of k-nearest neighbours within each condition.",
+        long_help = "Specify the number of k-nearest neighbours within each condition."
+    )]
     knn: usize,
 
-    /// projection dimension to account for confounding factors.
-    #[arg(long, short = 'p', default_value_t = 10)]
+    #[arg(
+        short = 'p',
+        long = "proj-dim",
+        default_value_t = 10,
+        help = "Projection dimension to account for confounding factors.",
+        long_help = "Projection dimension to account for confounding factors."
+    )]
     proj_dim: usize,
 
-    /// block_size for parallel processing
-    #[arg(long, default_value_t = 100)]
+    #[arg(
+        long = "block-size",
+        default_value_t = 100,
+        help = "Block size for parallel processing.",
+        long_help = "Block size for parallel processing."
+    )]
     block_size: usize,
 
-    /// number of iterations for optimization
-    #[arg(long)]
+    #[arg(
+        long = "num-opt-iter",
+        help = "Number of iterations for optimization.",
+        long_help = "Number of iterations for optimization."
+    )]
     num_opt_iter: Option<usize>,
 
-    /// hyperparameter a0 in Gamma(a0,b0)
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(
+        long = "a0",
+        default_value_t = 1.0,
+        help = "Hyperparameter a0 in Gamma(a0, b0).",
+        long_help = "Hyperparameter a0 in Gamma(a0, b0)."
+    )]
     a0: f32,
 
-    /// hyperparameter b0 in Gamma(a0,b0)
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(
+        long = "b0",
+        default_value_t = 1.0,
+        help = "Hyperparameter b0 in Gamma(a0, b0).",
+        long_help = "Hyperparameter b0 in Gamma(a0, b0)."
+    )]
     b0: f32,
 
-    /// output directory
-    #[arg(long, short, required = true)]
+    #[arg(
+        short,
+        long = "out",
+        required = true,
+        help = "Output directory.",
+        long_help = "Output directory."
+    )]
     out: Box<str>,
 
-    /// preload all the columns data
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long = "preload-data",
+        default_value_t = false,
+        help = "Preload all the columns data.",
+        long_help = "Preload all the columns data."
+    )]
     preload_data: bool,
 
-    /// verbosity
-    #[arg(long, short)]
+    #[arg(
+        short,
+        long = "verbose",
+        help = "Verbosity.",
+        long_help = "Increase output verbosity."
+    )]
     verbose: bool,
 }
 
-/// Run CoCoA differential analysis
+/////////////////////////////////////
+// Run CoCoA differential analysis //
+/////////////////////////////////////
+
 pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     if args.verbose {
         std::env::set_var("RUST_LOG", "info");
