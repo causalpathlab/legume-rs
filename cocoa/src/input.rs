@@ -151,6 +151,7 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
         let this_indv: Vec<Box<str>> = match this_indv[0].len() {
             1 => this_indv.into_iter().map(|w| w[0].clone()).collect(),
             _ => {
+		// cell and individual pairs
                 let cell_to_indv: HashMap<_, _> = this_indv
                     .into_iter()
                     .filter_map(|w| (w.len() > 1).then(|| (w[0].clone(), w[1].clone())))
