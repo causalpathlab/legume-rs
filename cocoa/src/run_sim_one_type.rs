@@ -356,7 +356,7 @@ pub struct SimArgs {
     verbose: bool,
 }
 
-pub fn run_sim_diff_data(args: SimArgs) -> anyhow::Result<()> {
+pub fn run_sim_one_type_data(args: SimArgs) -> anyhow::Result<()> {
     if args.verbose {
         std::env::set_var("RUST_LOG", "info");
     }

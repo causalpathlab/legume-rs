@@ -18,3 +18,10 @@ pub struct SimColliderArgs {
     )]
     n_cells: usize,
 }
+
+fn run_sim_collider_data(args: &SimColliderArgs) -> anyhow::Result<()> {
+
+    unimplemented!("");
+
+    Ok(())
+}

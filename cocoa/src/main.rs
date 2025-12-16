@@ -4,14 +4,14 @@ mod input;
 mod randomly_partition_data;
 mod run_collapse;
 mod run_diff;
-mod run_sim;
 mod run_sim_collider;
+mod run_sim_one_type;
 mod stat;
 
 use crate::run_collapse::*;
 use crate::run_diff::*;
-use crate::run_sim::*;
 use crate::run_sim_collider::*;
+use crate::run_sim_one_type::*;
 
 use clap::{Parser, Subcommand};
 
@@ -49,7 +49,7 @@ enum Commands {
         long_about = "Simulate expression data with one cell type.\n\
 		      \n"
     )]
-    Simulate(SimArgs),
+    SimulateOne(SimArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -62,8 +62,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Collapse(args) => {
             run_collapse(args.clone())?;
         }
-        Commands::Simulate(args) => {
-            run_sim_diff_data(args.clone())?;
+        Commands::SimulateOne(args) => {
+            run_sim_one_type_data(args.clone())?;
         }
     }
 

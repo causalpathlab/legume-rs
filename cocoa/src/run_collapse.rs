@@ -1,14 +1,12 @@
-use crate::collapse_cocoa_data::*;
 use crate::common::*;
 use crate::input::*;
 
 use clap::Parser;
-use data_beans_alg::collapse_data::CollapsingOps;
+
 use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::io::ParamIo;
 use matrix_param::traits::TwoStatParam;
 use matrix_util::dmatrix_util::concatenate_horizontal;
-use matrix_util::dmatrix_util::concatenate_vertical;
 use matrix_util::dmatrix_util::subset_rows;
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +20,18 @@ pub struct CollapseArgs {
 		     You can convert `.mtx` to `.zarr` or `.h5` using the `data-beans`"
     )]
     data_files: Vec<Box<str>>,
+
+    #[arg(
+        short = 'i',
+        long,
+        value_delimiter = ',',
+        help = "Individual membership file names (comma-separated).",
+        long_help = "Individual membership files (comma-separated file names). \n\
+		     Each line in each file can specify: \n\
+		     * just  individual ID or\n\
+		     * (1) Cell and (2) individual ID pair."
+    )]
+    indv_files: Option<Vec<Box<str>>>,
 
     #[arg(
         short = 't',
@@ -112,14 +122,21 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
 
     // read data without `indv` and `exposure`
     let data = read_input_data(InputDataArgs {
-        data_files: args.data_files,
-        indv_files: None,
+        data_files: args.data_files.clone(),
+        indv_files: args.indv_files.clone(),
         topic_assignment_files: args.topic_assignment_files,
         topic_proportion_files: args.topic_proportion_files,
         exposure_assignment_file: None,
         preload_data: args.preload_data,
         topic_value: args.topic_proportion_value,
     })?;
+
+    // indv and cell
+
+    // todo : {indv}_{cell_type} index?
+
+
+
 
     // we want to report topic specific gene expressions
 
