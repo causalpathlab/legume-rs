@@ -20,8 +20,9 @@ pub struct DiffArgs {
 
     #[arg(
         short = 'i',
-        long = "indv-files",
+        long,
         value_delimiter = ',',
+        required = true,
         help = "Individual membership file names (comma-separated).",
         long_help = "Individual membership files (comma-separated file names). \n\
 		     Each line in each file can specify: \n\
@@ -29,6 +30,16 @@ pub struct DiffArgs {
 		     * (1) Cell and (2) individual ID pair."
     )]
     indv_files: Vec<Box<str>>,
+
+    #[arg(
+        short = 'e',
+        long,
+        required = true,
+        help = "Exposure assignment file.",
+        long_help = "Each line corresponds to: \n\
+		     (1) individual name and (2) exposure name."
+    )]
+    exposure_assignment_file: Box<str>,
 
     #[arg(
         short = 't',
@@ -44,7 +55,7 @@ pub struct DiffArgs {
 
     #[arg(
         short = 'r',
-        long = "topic-proportion-files",
+        long,
         value_delimiter = ',',
         help = "Latent topic proportion file names (comma-separated).",
         long_help = "Latent topic proportion files (comma-separated file names). \n\
@@ -53,7 +64,7 @@ pub struct DiffArgs {
     topic_proportion_files: Option<Vec<Box<str>>>,
 
     #[arg(
-        long = "topic-proportion-value",
+        long,
         default_value = "logit",
         help = "Is topic proportion matrix of probability?",
         long_help = "Specify if the topic proportion matrix is of probability type. \n\
@@ -62,17 +73,8 @@ pub struct DiffArgs {
     topic_proportion_value: TopicValue,
 
     #[arg(
-        short = 'e',
-        long = "exposure-assignment-file",
-        help = "Exposure assignment file.",
-        long_help = "Each line corresponds to: \n\
-		     (1) individual name and (2) exposure name."
-    )]
-    exposure_assignment_file: Box<str>,
-
-    #[arg(
         short = 'n',
-        long = "knn",
+        long,
         default_value_t = 10,
         help = "Number of k-nearest neighbours within each condition.",
         long_help = "Specify the number of k-nearest neighbours within each condition."
@@ -81,7 +83,7 @@ pub struct DiffArgs {
 
     #[arg(
         short = 'p',
-        long = "proj-dim",
+        long,
         default_value_t = 10,
         help = "Projection dimension to account for confounding factors.",
         long_help = "Projection dimension to account for confounding factors."
@@ -89,7 +91,7 @@ pub struct DiffArgs {
     proj_dim: usize,
 
     #[arg(
-        long = "block-size",
+        long,
         default_value_t = 100,
         help = "Block size for parallel processing.",
         long_help = "Block size for parallel processing."
@@ -97,14 +99,14 @@ pub struct DiffArgs {
     block_size: usize,
 
     #[arg(
-        long = "num-opt-iter",
+        long,
         help = "Number of iterations for optimization.",
         long_help = "Number of iterations for optimization."
     )]
     num_opt_iter: Option<usize>,
 
     #[arg(
-        long = "a0",
+        long,
         default_value_t = 1.0,
         help = "Hyperparameter a0 in Gamma(a0, b0).",
         long_help = "Hyperparameter a0 in Gamma(a0, b0)."
@@ -112,7 +114,7 @@ pub struct DiffArgs {
     a0: f32,
 
     #[arg(
-        long = "b0",
+        long,
         default_value_t = 1.0,
         help = "Hyperparameter b0 in Gamma(a0, b0).",
         long_help = "Hyperparameter b0 in Gamma(a0, b0)."
@@ -121,7 +123,7 @@ pub struct DiffArgs {
 
     #[arg(
         short,
-        long = "out",
+        long,
         required = true,
         help = "Output directory.",
         long_help = "Output directory."
@@ -129,7 +131,7 @@ pub struct DiffArgs {
     out: Box<str>,
 
     #[arg(
-        long = "preload-data",
+        long,
         default_value_t = false,
         help = "Preload all the columns data.",
         long_help = "Preload all the columns data."
@@ -138,7 +140,7 @@ pub struct DiffArgs {
 
     #[arg(
         short,
-        long = "verbose",
+        long,
         help = "Verbosity.",
         long_help = "Increase output verbosity."
     )]
