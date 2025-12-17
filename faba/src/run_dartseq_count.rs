@@ -60,7 +60,7 @@ pub struct DartSeqCountArgs {
         long,
         help = "resolution (in kb)",
         long_help = "Resolution for binning in kilobases (kb). \n\
-		     Determines the size of bins for genomic location histograms. \n\
+		     Determines the size of site-level reports. \n\
 		     Example: 1.0"
     )]
     resolution_kb: Option<f32>,
@@ -237,8 +237,8 @@ pub struct DartSeqCountArgs {
         short,
         long,
         required = true,
-        help = "Output header for `data-beans` files",
-        long_help = "Output header for the output files. \n\
+        help = "Output directory",
+        long_help = "Output directory for the output files. \n\
 		     This file will contain the results in the selected format."
     )]
     output: Box<str>,
@@ -273,6 +273,9 @@ fn uniq_batch_names(bam_files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
 /// quantify m6A β values
 ///
 pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
+    // create output directory
+    mkdir(&args.output)?;
+
     let max_threads = num_cpus::get().min(args.max_threads);
 
     ThreadPoolBuilder::new()
@@ -349,8 +352,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         gene_sites.count_gene_features(&args.gff_file, args.num_genomic_bins_histogram)?;
 
     gene_feature_count.print(args.histogram_print_width);
-
-    gene_feature_count.to_tsv(&format!("{}.gene_feature_count.tsv.gz", args.output))?;
+    gene_feature_count.to_tsv(&format!("{}/gene_feature_count.tsv.gz", args.output))?;
 
     //////////////////////////
     // Take cell level data //
@@ -380,11 +382,14 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     let backend = args.backend.clone();
     let backend_file = |name: &str| -> Box<str> {
         match backend {
-            SparseIoBackend::HDF5 => format!("{}.{}.h5", &args.output, name),
-            SparseIoBackend::Zarr => format!("{}.{}.zarr", &args.output, name),
+            SparseIoBackend::HDF5 => format!("{}/{}.h5", &args.output, name),
+            SparseIoBackend::Zarr => format!("{}/{}.zarr", &args.output, name),
         }
         .into_boxed_str()
     };
+
+    let bed_file =
+        |name: &str| -> Box<str> { format!("{}/{}.bed.gz", &args.output, name).into_boxed_str() };
 
     let cutoffs = SqueezeCutoffs {
         row: args.row_nnz_cutoff,
@@ -416,9 +421,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         let mut stats = gather_m6a_stats(&gene_sites, args, &gff_map, &bam_file)?;
 
         if args.output_bed_file {
-            let bed_file = format!("{}_{}.bed.gz", args.output, batch_name);
-            info!("writing down stats to the bed file: {}", &bed_file);
-            write_bed(&mut stats, &bed_file)?;
+            write_bed(&mut stats, &gff_map, &bed_file(&batch_name))?;
         } else {
             //////////////////////////////////
             // Aggregate them into triplets //
@@ -452,32 +455,37 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 
     if args.output_null_data {
         info!("output null data");
+
         for (bam_file, batch_name) in args.mut_bam_files.iter().zip(mut_batch_names) {
             ////////////////////////////
             // collect the statistics //
             ////////////////////////////
 
-            let stats = gather_m6a_stats(&gene_sites, args, &gff_map, &bam_file)?;
+            let mut stats = gather_m6a_stats(&gene_sites, args, &gff_map, &bam_file)?;
 
-            //////////////////////////////////
-            // Aggregate them into triplets //
-            //////////////////////////////////
-            if args.gene_level_output {
-                let gene_data_file = backend_file(&format!("{}", batch_name));
-                let triplets = summarize_stats(&stats, gene_key, take_value);
-                let data = triplets.to_backend(&gene_data_file)?;
-                data.qc(cutoffs.clone())?;
-                genes.extend(data.row_names()?);
-                info!("created gene-level data: {}", &gene_data_file);
-                null_gene_data_files.push(gene_data_file);
+            if args.output_bed_file {
+                write_bed(&mut stats, &gff_map, &bed_file(&batch_name))?;
             } else {
-                let site_data_file = backend_file(&format!("{}", batch_name));
-                let triplets = summarize_stats(&stats, site_key, take_value);
-                let data = triplets.to_backend(&site_data_file)?;
-                data.qc(cutoffs.clone())?;
-                sites.extend(data.row_names()?);
-                info!("created site-level data: {}", &site_data_file);
-                null_site_data_files.push(site_data_file);
+                //////////////////////////////////
+                // Aggregate them into triplets //
+                //////////////////////////////////
+                if args.gene_level_output {
+                    let gene_data_file = backend_file(&format!("{}", batch_name));
+                    let triplets = summarize_stats(&stats, gene_key, take_value);
+                    let data = triplets.to_backend(&gene_data_file)?;
+                    data.qc(cutoffs.clone())?;
+                    genes.extend(data.row_names()?);
+                    info!("created gene-level data: {}", &gene_data_file);
+                    null_gene_data_files.push(gene_data_file);
+                } else {
+                    let site_data_file = backend_file(&format!("{}", batch_name));
+                    let triplets = summarize_stats(&stats, site_key, take_value);
+                    let data = triplets.to_backend(&site_data_file)?;
+                    data.qc(cutoffs.clone())?;
+                    sites.extend(data.row_names()?);
+                    info!("created site-level data: {}", &site_data_file);
+                    null_site_data_files.push(site_data_file);
+                }
             }
         }
     }
@@ -736,6 +744,7 @@ where
 
 fn write_bed(
     stats: &mut [(CellBarcode, BedWithGene, MethylationData)],
+    gff_map: &GffRecordMap,
     file_path: &str,
 ) -> anyhow::Result<()> {
     use std::io::Write;
@@ -745,13 +754,22 @@ fn write_bed(
     let lines = stats
         .into_iter()
         .map(|(cb, bg, data)| {
+            let gene_string = if let Some(gff) = gff_map.get(&bg.gene) {
+                match gff.gene_name {
+                    GeneSymbol::Symbol(x) => format!("{}_{}", &bg.gene, x),
+                    GeneSymbol::Missing => format!("{}", &bg.gene),
+                }
+            } else {
+                format!("{}", &bg.gene)
+            };
+
             format!(
                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 bg.chr,
                 bg.start,
                 bg.stop,
                 bg.strand,
-                bg.gene,
+                gene_string,
                 data.methylated,
                 data.unmethylated,
                 cb
@@ -762,7 +780,10 @@ fn write_bed(
 
     use rust_htslib::bgzf::Writer as BWriter;
 
+    let header = "#chr\tstart\tstop\tstrand\tgene\tmethylated\tunmethylated\tbarcode\n";
+
     let mut writer = BWriter::from_path(file_path)?;
+    writer.write_all(header.as_bytes())?;
     for l in lines {
         writer.write_all(l.as_bytes())?;
         writer.write_all(b"\n")?;
