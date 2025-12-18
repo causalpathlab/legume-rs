@@ -52,9 +52,6 @@ fn main() -> anyhow::Result<()> {
         Commands::FromH5ad(args) => {
             run_build_from_h5_triplets(args)?;
         }
-        Commands::FromH5(args) => {
-            run_build_from_h5_triplets(args)?;
-        }
         Commands::Simulate(args) => {
             run_simulate(args)?;
         }
@@ -65,9 +62,6 @@ fn main() -> anyhow::Result<()> {
             show_info(args)?;
         }
         Commands::Statistics(args) => {
-            run_stat(args)?;
-        }
-        Commands::Stat(args) => {
             run_stat(args)?;
         }
         Commands::Squeeze(args) => {
@@ -89,9 +83,6 @@ fn main() -> anyhow::Result<()> {
             subset_columns(args)?;
         }
         Commands::AlignData(args) => {
-            align_backends(args)?;
-        }
-        Commands::Align(args) => {
             align_backends(args)?;
         }
         Commands::ReorderRows(args) => {
@@ -144,11 +135,11 @@ enum Commands {
     #[command(about = "Build backend from `mtx` file and associated `tsv` files")]
     FromMtx(FromMtxArgs),
 
-    #[command(about = "Build backend from triplets in `h5` (AnnData)")]
+    #[command(
+        about = "Build backend from triplets in `h5` (AnnData)",
+        visible_alias = "from-h5"
+    )]
     FromH5ad(FromH5Args),
-
-    #[command(about = "Build backend from triplets in 10X CellRanger `h5`")]
-    FromH5(FromH5Args),
 
     #[command(
         about = "Build backend from triplets in 10X Xenium `zarr`",
@@ -217,16 +208,10 @@ enum Commands {
         about = "Align data backends",
         long_about = "To ensure that column names are aligned for multimodal analysis.\n\
 		      We will only keep columns and rows matched across files.\n\
-		      1st row: `D(1,1)-D(1,2)`, 2nd row: `D(2,1)-D(2,2)`, etc."
+		      1st row: `D(1,1)-D(1,2)`, 2nd row: `D(2,1)-D(2,2)`, etc.",
+        visible_alias = "align"
     )]
     AlignData(AlignDataArgs),
-
-    #[command(
-        about = "Alias for align-data",
-        long_about = "An alias of `align-data`.\n\
-		      Performs the same operation as `align-data`."
-    )]
-    Align(AlignDataArgs),
 
     #[command(
         about = "Merge multiple `.mtx` files",
@@ -270,16 +255,10 @@ enum Commands {
 		      (1) `nnz` - number of non-zero elements, \n\
 		      (2) `tot` - total sum, \n\
 		      (3) `mu` - average `μ`, \n\
-		      (4) `sig` - standard deviation `σ`."
+		      (4) `sig` - standard deviation `σ`.",
+        visible_alias = "stat"
     )]
     Statistics(RunStatArgs),
-
-    #[command(
-        about = "Alias for statistics",
-        long_about = "An alias of `statistics`.\n\
-		      Performs the same operation as `statistics`."
-    )]
-    Stat(RunStatArgs),
 
     #[command(
         about = "Simulate matrix with Gamma topic",
