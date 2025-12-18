@@ -252,6 +252,15 @@ pub struct DartSeqCountArgs {
         long_help = "Enable verbose output `RUST_LOG=info`"
     )]
     verbose: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Print histogram to stdout",
+        long_help = "Print histogram of gene features to stdout. \n\
+		     The histogram will be saved to a file regardless of this option."
+    )]
+    print_histogram: bool,
 }
 
 fn uniq_batch_names(bam_files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
@@ -283,15 +292,13 @@ fn uniq_batch_names(bam_files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
 /// quantify m6A β values
 ///
 pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
-<<<<<<< HEAD
-    // create output directory
-    mkdir(&args.output)?;
-=======
     if args.verbose {
         std::env::set_var("RUST_LOG", "info");
     }
     env_logger::init();
->>>>>>> 535086c (write out potential edit sites)
+
+    // create output directory
+    mkdir(&args.output)?;
 
     let max_threads = num_cpus::get().min(args.max_threads);
 
@@ -372,11 +379,10 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     let gene_feature_count =
         gene_sites.count_gene_features(&args.gff_file, args.num_genomic_bins_histogram)?;
 
-    gene_feature_count.print(args.histogram_print_width);
-<<<<<<< HEAD
-=======
+    if args.print_histogram {
+        gene_feature_count.print(args.histogram_print_width);
+    }
 
->>>>>>> 535086c (write out potential edit sites)
     gene_feature_count.to_tsv(&format!("{}/gene_feature_count.tsv.gz", args.output))?;
 
     //////////////////////////
