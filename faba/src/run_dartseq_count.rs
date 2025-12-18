@@ -1,4 +1,5 @@
 use crate::common::*;
+use crate::dartseq_io::ToParquet;
 use crate::dartseq_sifter::*;
 use crate::data::dna::Dna;
 
@@ -6,6 +7,7 @@ use crate::data::dna_stat_map::*;
 use crate::data::dna_stat_traits::*;
 use crate::data::gff::FeatureType as GffFeatureType;
 use crate::data::gff::GeneType as GffGeneType;
+use crate::data::gff::{GeneId, GffRecordMap};
 use crate::data::methylation::*;
 use crate::data::util_htslib::*;
 
@@ -242,6 +244,14 @@ pub struct DartSeqCountArgs {
 		     This file will contain the results in the selected format."
     )]
     output: Box<str>,
+
+    #[arg(
+        long,
+        short,
+        help = "verbosity",
+        long_help = "Enable verbose output `RUST_LOG=info`"
+    )]
+    verbose: bool,
 }
 
 fn uniq_batch_names(bam_files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
@@ -273,8 +283,15 @@ fn uniq_batch_names(bam_files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
 /// quantify m6A β values
 ///
 pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
+<<<<<<< HEAD
     // create output directory
     mkdir(&args.output)?;
+=======
+    if args.verbose {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
+>>>>>>> 535086c (write out potential edit sites)
 
     let max_threads = num_cpus::get().min(args.max_threads);
 
@@ -315,6 +332,8 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    mkdir(&args.output)?;
+
     /////////////////////////////////////
     // figure out potential edit sites //
     /////////////////////////////////////
@@ -344,6 +363,8 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     let ndata = gene_sites.iter().map(|x| x.value().len()).sum::<usize>();
     info!("Found {} m6A sites", ndata);
 
+    gene_sites.to_parquet(&gff_map, format!("{}/sites.parquet", args.output))?;
+
     ////////////////////////////////
     // output marginal statistics //
     ////////////////////////////////
@@ -352,6 +373,10 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         gene_sites.count_gene_features(&args.gff_file, args.num_genomic_bins_histogram)?;
 
     gene_feature_count.print(args.histogram_print_width);
+<<<<<<< HEAD
+=======
+
+>>>>>>> 535086c (write out potential edit sites)
     gene_feature_count.to_tsv(&format!("{}/gene_feature_count.tsv.gz", args.output))?;
 
     //////////////////////////
