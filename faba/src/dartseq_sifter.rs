@@ -1,18 +1,44 @@
 use crate::data::dna::Dna;
 use crate::data::dna::DnaBaseCount;
 use crate::data::dna_stat_map::HashMap;
-use crate::hypothesis_tests::BinomTest;
+use crate::hypothesis_tests::{BinomTest, BinomialCounts};
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug, Hash)]
+#[derive(Clone, Debug)]
 pub struct MethylatedSite {
     pub m6a_pos: i64,
     pub conversion_pos: i64,
     pub wt_freq: DnaBaseCount,
     pub mut_freq: DnaBaseCount,
+    pub pv: f64,
+}
+
+// Compare only positions for ordering (ignore freq and pv)
+impl PartialEq for MethylatedSite {
+    fn eq(&self, other: &Self) -> bool {
+        self.m6a_pos == other.m6a_pos && self.conversion_pos == other.conversion_pos
+    }
+}
+
+impl Eq for MethylatedSite {}
+
+impl PartialOrd for MethylatedSite {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MethylatedSite {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.m6a_pos
+            .cmp(&other.m6a_pos)
+            .then_with(|| self.conversion_pos.cmp(&other.conversion_pos))
+    }
 }
 
 pub struct DartSeqSifter {
     pub min_coverage: usize,
+    pub min_conversion: usize,
+    pub pseudocount: usize,
     pub min_meth_cutoff: f64,
     pub max_pvalue_cutoff: f64,
     pub max_mutant_cutoff: f64,
@@ -100,6 +126,7 @@ impl DartSeqSifter {
                             conversion_pos: conv_site,
                             wt_freq: wt_freq.clone(),
                             mut_freq: mut_freq.clone(),
+                            pv,
                         };
                         self.candidate_sites.push(meth);
                     }
@@ -188,6 +215,7 @@ impl DartSeqSifter {
                             conversion_pos: conv_site,
                             wt_freq: wt_freq.clone(),
                             mut_freq: mut_freq.clone(),
+                            pv,
                         };
                         self.candidate_sites.push(meth);
                     }
@@ -221,12 +249,18 @@ impl DartSeqSifter {
 
                 if ntot_wt >= self.min_coverage
                     && ntot_mut >= self.min_coverage
+                    && wt_n_success >= self.min_conversion
                     && p_wt >= self.min_meth_cutoff
                     && p_mut < self.max_mutant_cutoff
                 {
                     let pv_greater = BinomTest {
-                        expected: (mut_n_failure, mut_n_success),
-                        observed: (wt_n_failure, wt_n_success),
+                        // Add pseudocount to null/background distribution for regularization
+                        expected: BinomialCounts::with_pseudocount(
+                            mut_n_failure,
+                            mut_n_success,
+                            self.pseudocount,
+                        ),
+                        observed: BinomialCounts::new(wt_n_failure, wt_n_success),
                     }
                     .pvalue_greater()
                     .unwrap_or(1.0);

@@ -1,6 +1,7 @@
 mod common;
 mod dartseq_io;
 mod dartseq_sifter;
+mod dartseq_stat;
 mod data;
 mod hypothesis_tests;
 mod run_dartseq_count;
