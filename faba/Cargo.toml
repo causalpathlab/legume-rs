@@ -41,7 +41,9 @@ num-traits = { workspace = true }
 
 statrs = { workspace = true }
 coitrees = { workspace = true }
+parquet = { workspace = true }
 
 fnv = "1.0.7"
 dashmap = { version = "6.1.0", features = ["rayon"] }
 rust-htslib = "0.50.0"
+arrow = "56"

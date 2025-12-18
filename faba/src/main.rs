@@ -1,4 +1,5 @@
 mod common;
+mod dartseq_io;
 mod dartseq_sifter;
 mod data;
 mod hypothesis_tests;
@@ -32,10 +33,7 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
-    env_logger::init();
-
     let cli = Cli::parse();
-
     match &cli.commands {
         Commands::CountDartSeq(args) => {
             run_count_dartseq(args)?;
