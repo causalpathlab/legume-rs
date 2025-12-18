@@ -26,6 +26,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Take DART-seq `C->U` (`C->T`) conversion counts
+    #[command(alias = "count-dart")]
     CountDartSeq(DartSeqCountArgs),
     /// Count the number of reads mapped on each gene
     CountGenes(GeneCountArgs),
