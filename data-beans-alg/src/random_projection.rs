@@ -178,7 +178,7 @@ impl RandProjOps for SparseIoStack {
             .ok_or(anyhow::anyhow!("unable to determine max element"))?;
 
         for x in self.stack.iter_mut() {
-            x.assign_groups(binary_codes.clone(), ncols_per_group);
+            x.assign_groups(&binary_codes, ncols_per_group);
         }
 
         Ok(max_group + 1)
@@ -282,7 +282,7 @@ impl RandProjOps for SparseIoVec {
             .iter()
             .max()
             .ok_or(anyhow::anyhow!("unable to determine max element"))?;
-        self.assign_groups(binary_codes, ncols_per_group);
+        self.assign_groups(&binary_codes, ncols_per_group);
         Ok(max_group + 1)
     }
 }

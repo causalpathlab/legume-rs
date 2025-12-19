@@ -24,6 +24,7 @@ pub struct SparseIoVec {
     column_names_with_data_tag: Vec<Box<str>>,
     col_to_group: Option<HashMap<usize, usize>>,
     group_to_cols: Option<Vec<Vec<usize>>>,
+    group_keys: Option<Vec<Box<str>>>,
     batch_knn_lookup: Option<Vec<ColumnDict<usize>>>,
     col_to_batch: Option<Vec<usize>>,
     batch_to_cols: Option<Vec<Vec<usize>>>,
@@ -65,6 +66,7 @@ impl SparseIoVec {
             column_names_with_data_tag: vec![],
             col_to_group: None,
             group_to_cols: None,
+            group_keys: None,
             batch_knn_lookup: None,
             col_to_batch: None,
             batch_to_cols: None,
@@ -83,15 +85,29 @@ impl SparseIoVec {
     /// * `column_to_group` - column to group membership
     /// * `ncolumns_per_group` - number of columns per group. `None`: assign all the columns to the groups; `Some(x)`: limit the maximum number of columns per group to at most `x`.
     ///
-    pub fn assign_groups(
+    pub fn assign_groups<T>(
         &mut self,
-        column_to_group: Vec<usize>,
+        column_to_group: &[T],
         ncolumns_per_group: Option<usize>,
-    ) {
-        let group_to_cols: Vec<Vec<_>> =
-            partition_by_membership(&column_to_group, ncolumns_per_group)
-                .into_values()
-                .collect();
+    )
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
+        let partitions = partition_by_membership(column_to_group, ncolumns_per_group);
+
+        // Sort by keys to ensure consistent ordering
+        let mut sorted_partitions: Vec<_> = partitions.into_iter().collect();
+        sorted_partitions.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+
+        let group_keys: Vec<Box<str>> = sorted_partitions
+            .iter()
+            .map(|(key, _)| key.to_string().into_boxed_str())
+            .collect();
+
+        let group_to_cols: Vec<Vec<usize>> = sorted_partitions
+            .into_iter()
+            .map(|(_, cols)| cols)
+            .collect();
 
         let col_to_group: HashMap<_, _> = group_to_cols
             .iter()
@@ -99,6 +115,7 @@ impl SparseIoVec {
             .flat_map(|(g, cols)| cols.iter().map(|&j| (j, g)).collect::<Vec<_>>())
             .collect();
 
+        self.group_keys = Some(group_keys);
         self.group_to_cols = Some(group_to_cols);
         self.col_to_group = Some(col_to_group);
     }
@@ -106,6 +123,25 @@ impl SparseIoVec {
     /// Take a vector of columns where each vector corresponds to a set
     pub fn take_grouped_columns(&self) -> Option<&Vec<Vec<usize>>> {
         self.group_to_cols.as_ref()
+    }
+
+    /// Get the group keys in the same order as group indices
+    pub fn group_keys(&self) -> Option<&Vec<Box<str>>> {
+        self.group_keys.as_ref()
+    }
+
+    /// Get a mapping from group keys to their column indices
+    pub fn group_key_to_cols(&self) -> Option<HashMap<Box<str>, Vec<usize>>> {
+        if let (Some(keys), Some(cols)) = (&self.group_keys, &self.group_to_cols) {
+            Some(
+                keys.iter()
+                    .zip(cols.iter())
+                    .map(|(k, c)| (k.clone(), c.clone()))
+                    .collect(),
+            )
+        } else {
+            None
+        }
     }
 
     /// Take a vector of backend file and corresponding column indices
