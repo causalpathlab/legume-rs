@@ -15,6 +15,12 @@ use rand_distr::{weighted::WeightedIndex, Distribution, Poisson, Uniform};
 
 use rayon::prelude::*;
 
+// Numerical stability constants
+const MIN_VARIANCE: f32 = 1e-8;
+const MIN_LAMBDA: f32 = 1e-8;
+const EXPRESSION_THRESHOLD: f32 = 0.5;
+const DEFAULT_EFFECT_SIZE: f32 = 10.0;
+
 struct GlmSimulator {
     n_indv: usize,
     n_cells_per_indv: usize,
@@ -25,6 +31,7 @@ struct GlmSimulator {
     pve_exposure: f32,
     pve_gene: f32,
     pve_covar: f32,
+    effect_size: f32,
     rseed: u64,
     depth_gamma_hyperparam: (f32, f32),
 }
@@ -75,8 +82,8 @@ impl GlmSimulator {
         // 3.a. Pick causal genes
         let runif_gene = Uniform::new(0, self.n_genes)?;
         let runif_cat = Uniform::new(0, self.n_exp_cat)?;
-        let effect_size = 10.;
 
+        let effect_size = self.effect_size;
         let causal_genes: HashMap<usize, (usize, Mat)> = (0..self.n_causal_genes)
             .map(|_| {
                 let gene = runif_gene.sample(&mut rng);
@@ -90,7 +97,7 @@ impl GlmSimulator {
                 );
 
                 let mu = ret_n.mean();
-                let sig = ret_n.variance().sqrt().max(1e-8);
+                let sig = ret_n.variance().sqrt().max(MIN_VARIANCE);
 
                 (gene, (cat, ret_n.map(|x| (x - mu).div(sig))))
             })
@@ -106,7 +113,7 @@ impl GlmSimulator {
                 let conf_k = Mat::rnorm(1, self.n_covar);
                 let mut covar_n = conf_k * &confounder_nk.transpose();
                 let mu_covar = covar_n.mean();
-                let sig_covar = covar_n.variance().sqrt().max(1e-8);
+                let sig_covar = covar_n.variance().sqrt().max(MIN_VARIANCE);
                 covar_n
                     .iter_mut()
                     .for_each(|x| *x = (*x - mu_covar) / sig_covar);
@@ -149,9 +156,6 @@ impl GlmSimulator {
         let n_genes = self.n_genes;
         assert_eq!(n_indv, self.n_indv);
 
-        let threshold = 0.5;
-        let eps = 1e-8;
-
         // Sample number of cells
         let rpois = Poisson::new(self.n_cells_per_indv as f32)?;
 
@@ -177,10 +181,10 @@ impl GlmSimulator {
 
                     for (j, &rho_j) in rho_m.iter().enumerate() {
                         for (i, &mu_g) in mu_g.iter().enumerate() {
-                            let lambda_ij = (mu_g * rho_j).max(eps);
+                            let lambda_ij = (mu_g * rho_j).max(MIN_LAMBDA);
                             if let Ok(rpois) = Poisson::new(lambda_ij) {
                                 let y_ij = rpois.sample(&mut rng);
-                                if y_ij > threshold {
+                                if y_ij > EXPRESSION_THRESHOLD {
                                     _triplets.push((i as u64, j as u64, y_ij));
                                 }
                             }
@@ -235,7 +239,7 @@ impl GlmSimulator {
 }
 
 #[derive(Parser, Debug, Clone)]
-pub struct SimArgs {
+pub struct SimOneTypeArgs {
     #[arg(
         short = 'r',
         required = true,
@@ -311,6 +315,14 @@ pub struct SimArgs {
 
     #[arg(
         long,
+        default_value_t = DEFAULT_EFFECT_SIZE,
+        help = "effect size for causal genes",
+        long_help = "Effect size for causal genes (differential expression magnitude)"
+    )]
+    effect_size: f32,
+
+    #[arg(
+        long,
         value_delimiter = ',',
         default_value = "1.0,1.0",
         help = "hyperparameter for gamma distribution",
@@ -352,11 +364,11 @@ pub struct SimArgs {
     )]
     out: Box<str>,
 
-    #[arg(long, short, help = "verbosity", long_help = "Verbosity")]
+    #[arg(long, short, help = "verbosity", long_help = "Set RUST_LOG=`info`")]
     verbose: bool,
 }
 
-pub fn run_sim_one_type_data(args: SimArgs) -> anyhow::Result<()> {
+pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
     if args.verbose {
         std::env::set_var("RUST_LOG", "info");
     }
@@ -388,6 +400,7 @@ pub fn run_sim_one_type_data(args: SimArgs) -> anyhow::Result<()> {
         pve_exposure: args.pve_covar_exposure,
         pve_gene: args.pve_exposure_gene,
         pve_covar: args.pve_covar_gene,
+        effect_size: args.effect_size,
         rseed: args.rseed,
         depth_gamma_hyperparam,
     };
