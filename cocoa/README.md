@@ -1,3 +1,2 @@
-# Counterfactual Confounder Adjustment for Differential analysis
-
+# Counterfactual Confounder Adjustment for differential expression analysis
 

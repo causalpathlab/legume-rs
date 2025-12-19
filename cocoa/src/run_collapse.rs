@@ -130,6 +130,8 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
         topic_value: args.topic_proportion_value,
     })?;
 
+    info!("Read the full data");
+
     let cell_topic = &data.cell_topic;
     let ngenes = data.sparse_data.num_rows()?;
     let ntopics = cell_topic.ncols();
@@ -149,7 +151,7 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
             &mut topic_indv_stat,
         )?;
 
-        let mut gamma = GammaMatrix::new((ngenes, ntopics), args.a0, args.b0);
+        let mut gamma = GammaMatrix::new((ngenes, ntopics * nindv), args.a0, args.b0);
         gamma.update_stat(
             &topic_indv_stat.count_gene_topic_indv,
             &concatenate_horizontal(&vec![topic_indv_stat.count_topic_indv; ngenes])?.transpose(),
@@ -157,7 +159,7 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
         gamma.calibrate();
 
         let gene_names = data.sparse_data.row_names()?;
-        let out_file = format!("{}.parquet", args.out.replace(".parquet", ""));
+        let out_file = format!("{}.indv.parquet", args.out.replace(".parquet", ""));
 
         // Create column names with {indv}_{topic} format
         let indv_topic_names: Vec<Box<str>> = indv_names
@@ -228,6 +230,7 @@ fn collect_topic_indv_stat_visitor(
 
     let lb = kk * indv_id;
     let ub = kk * (indv_id + 1);
+
     let mut y_gk_target = stat.count_gene_topic_indv.columns_range_mut(lb..ub);
     y_gk_target += &y_gk;
 
