@@ -40,7 +40,7 @@ pub struct SparseMtxData {
     max_column_name_idx: usize,
     by_column_indptr: Vec<u64>,
     by_row_indptr: Vec<u64>,
-    by_column_indicies: Option<Vec<u64>>,
+    by_column_indices: Option<Vec<u64>>,
     by_column_data: Option<Vec<f32>>,
 }
 
@@ -51,15 +51,21 @@ impl SparseMtxData {
     ///
     /// * `backend_file` - Optional zarr backend file
     pub fn new(zarr_file: Option<&str>) -> anyhow::Result<Self> {
-        let ret = match zarr_file {
-            Some(backend_file) => Self::register_backend_file(backend_file)?,
+        Self::create_backend(zarr_file)
+    }
+
+    /// Helper to create a backend file (from provided path or temp file)
+    fn create_backend(zarr_file: Option<&str>) -> anyhow::Result<Self> {
+        match zarr_file {
+            Some(backend_file) => Self::register_backend_file(backend_file),
             None => {
                 let backend_file = create_temp_dir_file(".zarr")?;
-                let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::register_backend_file(backend_file)?
+                let backend_file = backend_file
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Failed to convert path to string"))?;
+                Self::register_backend_file(backend_file)
             }
-        };
-        Ok(ret)
+        }
     }
 
     /// Create `SparseMtxData` instance from an existing zarr backend file
@@ -67,13 +73,12 @@ impl SparseMtxData {
     pub fn open(backend_file: &str) -> anyhow::Result<Self> {
         let store = Arc::new(FilesystemStore::new(backend_file)?);
 
-        if let (Some(_nrow), Some(_ncol), Some(_nnz)) = (
+        if (
             Self::_num_rows(store.clone()),
             Self::_num_columns(store.clone()),
             Self::_num_nnz(store.clone()),
-        ) {
-            // info!("#rows: {}, #columns: {}, #non-zeros: {}", _nrow, _ncol, _nnz);
-        } else {
+        ) == (None, None, None)
+        {
             anyhow::bail!("Couldn't figure out the size of this sparse matrix data");
         }
 
@@ -84,7 +89,7 @@ impl SparseMtxData {
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
             by_row_indptr: vec![],
-            by_column_indicies: None,
+            by_column_indices: None,
             by_column_data: None,
         };
 
@@ -96,33 +101,27 @@ impl SparseMtxData {
 
     /// Create `SparseMtxData` from mtx file with `backend_file` as
     /// the backend file.  If no `backend_file` is provided, it will
-    /// be the same as `mtx_file` with `.h5` extension.
-    /// * `mtx_file`: mtx file to be read into HDF5 backend
-    /// * `backend_file`: HDF5 file to be associated with
+    /// be the same as `mtx_file` with `.zarr` extension.
+    /// * `mtx_file`: mtx file to be read into zarr backend
+    /// * `backend_file`: zarr file to be associated with
     /// * `index_by_row`: if true, the matrix will be indexed by row
     pub fn from_mtx_file(
         mtx_file: &str,
         backend_file: Option<&str>,
         index_by_row: Option<bool>,
     ) -> anyhow::Result<Self> {
-        let mut ret = match backend_file {
-            Some(backend_file) => {
-                info!("backend file : {}", backend_file);
-                Self::register_backend_file(backend_file)?
-            }
-            None => {
-                let backend_file = mtx_file.to_string() + ".zarr";
-                info!("backend file : {}", backend_file);
-                Self::register_backend_file(&backend_file)?
-            }
-        };
+        let zarr_file = backend_file
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{}.zarr", mtx_file));
 
-        // populate data from mtx file
+        info!("backend file: {}", zarr_file);
+        let mut ret = Self::register_backend_file(&zarr_file)?;
+
         info!("importing mtx file by column");
         ret.import_mtx_file_by_col(mtx_file)?;
         ret.read_column_indptr()?;
 
-        if Some(true) == index_by_row {
+        if index_by_row == Some(true) {
             info!("importing mtx file by row");
             ret.import_mtx_file_by_row(mtx_file)?;
             ret.read_row_indptr()?;
@@ -141,19 +140,12 @@ impl SparseMtxData {
         zarr_file: Option<&str>,
         index_by_row: Option<bool>,
     ) -> anyhow::Result<Self> {
-        let mut ret = match zarr_file {
-            Some(backend_file) => Self::register_backend_file(backend_file)?,
-            None => {
-                let backend_file = create_temp_dir_file(".zarr")?;
-                let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::register_backend_file(backend_file)?
-            }
-        };
+        let mut ret = Self::create_backend(zarr_file)?;
 
-        ret.import_ndarray_by_col(array)?; // for column-wise
-        ret.read_column_indptr()?; // pointers
+        ret.import_ndarray_by_col(array)?;
+        ret.read_column_indptr()?;
 
-        if Some(true) == index_by_row {
+        if index_by_row == Some(true) {
             ret.import_ndarray_by_row(array)?;
             ret.read_row_indptr()?;
         }
@@ -169,19 +161,12 @@ impl SparseMtxData {
         zarr_file: Option<&str>,
         index_by_row: Option<bool>,
     ) -> anyhow::Result<Self> {
-        let mut ret = match zarr_file {
-            Some(backend_file) => Self::register_backend_file(backend_file)?,
-            None => {
-                let backend_file = create_temp_dir_file(".zarr")?;
-                let backend_file = backend_file.to_str().expect("to_str failed");
-                Self::register_backend_file(backend_file)?
-            }
-        };
+        let mut ret = Self::create_backend(zarr_file)?;
 
-        ret.import_dmatrix_by_col(matrix)?; // for column-wise
-        ret.read_column_indptr()?; // pointers
+        ret.import_dmatrix_by_col(matrix)?;
+        ret.read_column_indptr()?;
 
-        if Some(true) == index_by_row {
+        if index_by_row == Some(true) {
             ret.import_dmatrix_by_row(matrix)?;
             ret.read_row_indptr()?;
         }
@@ -198,7 +183,6 @@ impl SparseMtxData {
 
     /// Helper function to create a new zarr backend file
     fn register_backend_file(zarr_file: &str) -> anyhow::Result<Self> {
-        // dbg!(zarr_file);
         use zarrs::group::GroupBuilder;
         let store = Arc::new(FilesystemStore::new(zarr_file)?);
         let root = GroupBuilder::new().build(store.clone(), "/")?;
@@ -211,7 +195,7 @@ impl SparseMtxData {
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
             by_row_indptr: vec![],
-            by_column_indicies: None,
+            by_column_indices: None,
             by_column_data: None,
         })
     }
@@ -236,7 +220,6 @@ impl SparseMtxData {
         use zarrs::array::ArrayBuilder;
         use zarrs::array::DataType;
         use zarrs::array::FillValue;
-        // use zarrs::array::ZARR_NAN_F32;
 
         let nelem = vec.len();
         let nchunks = NUM_CHUNKS;
@@ -260,8 +243,7 @@ impl SparseMtxData {
 
         array.store_metadata()?;
 
-        let ntot = vec.len() as u64;
-        let subset = ArraySubset::new_with_ranges(&[0..ntot]);
+        let subset = Self::create_subset(0..vec.len() as u64);
         array.store_array_subset_elements(&subset, vec)?;
 
         Ok(())
@@ -287,19 +269,11 @@ impl SparseMtxData {
         ))
     }
 
-    // fn open_csr_triplets(
-    //     &self,
-    // ) -> anyhow::Result<(
-    //     zarrs::array::Array<dyn ZStorageTraits>,
-    //     zarrs::array::Array<dyn ZStorageTraits>,
-    //     zarrs::array::Array<dyn ZStorageTraits>,
-    // )> {
-    //     Ok((
-    //         self._open_vector("/by_row/indptr")?,
-    //         self._open_vector("/by_row/data")?,
-    //         self._open_vector("/by_row/indices")?,
-    //     ))
-    // }
+    /// Helper to create an ArraySubset from a range
+    #[inline]
+    fn create_subset(range: Range<u64>) -> ArraySubset {
+        ArraySubset::new_with_ranges(&[range])
+    }
 
     fn _retrieve_vector<V>(&self, key: &str) -> anyhow::Result<Vec<V>>
     where
@@ -307,8 +281,7 @@ impl SparseMtxData {
     {
         let data = self._open_vector(key)?;
         let ntot = data.shape()[0];
-
-        let subset = ArraySubset::new_with_ranges(&[0..ntot]);
+        let subset = Self::create_subset(0..ntot);
         Ok(data.retrieve_array_subset_elements::<V>(&subset)?)
     }
 
@@ -349,7 +322,7 @@ impl SparseMtxData {
         zarrs::group::Group::open(store, group_name)
             .ok()
             .and_then(|grp| grp.attributes().get(attr_name).cloned())
-            .and_then(|attr| serde_json::from_value(attr.clone()).ok())
+            .and_then(|attr| serde_json::from_value(attr).ok())
     }
 
     fn _num_nnz(store: Arc<dyn ZStorageTraits>) -> Option<usize> {
@@ -371,8 +344,6 @@ impl SparseMtxData {
             let new_group =
                 zarrs::group::GroupBuilder::new().build(self.store.clone(), group_name)?;
             new_group.store_metadata()?;
-        } else {
-            dbg!("group already exists");
         }
 
         Ok(())
@@ -408,7 +379,7 @@ impl SparseIo for SparseMtxData {
 
     fn clean_preloaded_columns(&mut self) {
         self.by_column_data = None;
-        self.by_column_indicies = None;
+        self.by_column_indices = None;
     }
 
     /// preload columns' values and indices
@@ -423,7 +394,7 @@ impl SparseIo for SparseMtxData {
         let data = data.retrieve_array_subset_elements::<f32>(&data.subset_all())?;
         let indices = indices.retrieve_array_subset_elements::<u64>(&indices.subset_all())?;
 
-        self.by_column_indicies = Some(indices);
+        self.by_column_indices = Some(indices);
         self.by_column_data = Some(data);
         Ok(())
     }
@@ -465,8 +436,8 @@ impl SparseIo for SparseMtxData {
         let root = GroupBuilder::new().build(store.clone(), "/")?;
         root.store_metadata()?;
 
-        self.store = store.clone();
-        self.file_name = zarr_file.to_string().clone();
+        self.store = store;
+        self.file_name = zarr_file.to_string();
         self.max_column_name_idx = MAX_COLUMN_NAME_IDX;
         self.max_row_name_idx = MAX_ROW_NAME_IDX;
         self.by_column_indptr = vec![];
@@ -511,7 +482,7 @@ impl SparseIo for SparseMtxData {
 
             for jj in 0..ncol {
                 let (start, end) = (indptr[jj], indptr[jj + 1]);
-                let subset = ArraySubset::new_with_ranges(&[start..end]);
+                let subset = Self::create_subset(start..end);
                 let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
                 let indices_slice = indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
 
@@ -532,39 +503,35 @@ impl SparseIo for SparseMtxData {
     /// Set row names for the matrix
     /// * `row_name_file`: a file each line contains row name words
     fn register_row_names_file(&mut self, row_name_file: &str) {
-        self.register_names_file(
+        let _ = self.register_names_file(
             "/row_names",
             row_name_file,
             0..self.max_row_name_idx,
             ROW_SEP,
-        )
-        .expect("failed to add row names");
+        );
     }
 
     /// Set row names for the matrix
     /// * `rows`: a vector of row names
     fn register_row_names_vec(&mut self, rows: &[Box<str>]) {
-        self.register_names_vec("/row_names", rows)
-            .expect("failed to add row names");
+        let _ = self.register_names_vec("/row_names", rows);
     }
 
     /// Set column names for the matrix
     /// * `column_name_file`: a file each line contains column name words
     fn register_column_names_file(&mut self, column_name_file: &str) {
-        self.register_names_file(
+        let _ = self.register_names_file(
             "/column_names",
             column_name_file,
             0..self.max_column_name_idx,
             COLUMN_SEP,
-        )
-        .expect("failed to add column names");
+        );
     }
 
     /// Set column names for the matrix
     /// * `columns`: a vector of column names
     fn register_column_names_vec(&mut self, columns: &[Box<str>]) {
-        self.register_names_vec("/column_names", columns)
-            .expect("failed to add column names");
+        let _ = self.register_names_vec("/column_names", columns);
     }
 
     /// Number of rows in the matrix
@@ -594,23 +561,23 @@ impl SparseIo for SparseMtxData {
         name_columns: Range<usize>,
         name_sep: &str,
     ) -> anyhow::Result<()> {
-        let _names = read_lines_of_words(name_file, -1)?.lines;
-        let name_columns = name_columns.clone().collect::<Vec<_>>();
-        let _names: Vec<String> = _names
+        let name_data = read_lines_of_words(name_file, -1)?;
+        let name_columns_vec: Vec<usize> = name_columns.collect();
+
+        let names: Vec<String> = name_data
+            .lines
             .iter()
-            .map(|x| {
-                name_columns
+            .map(|line| {
+                name_columns_vec
                     .iter()
-                    .filter_map(|&i| x.get(i))
-                    .map(|x| x.to_string())
+                    .filter_map(|&i| line.get(i))
+                    .map(|s| s.to_string())
                     .collect::<Vec<_>>()
                     .join(name_sep)
-                    .parse()
-                    .expect("invalid name")
             })
             .collect();
 
-        self.new_filled_vector(key, DataType::String, &_names)?;
+        self.new_filled_vector(key, DataType::String, &names)?;
         Ok(())
     }
 
@@ -618,8 +585,8 @@ impl SparseIo for SparseMtxData {
     /// * `group_name`: group name
     /// * `names`: a file each line contains name words
     fn register_names_vec(&mut self, key: &str, names: &[Box<str>]) -> anyhow::Result<()> {
-        let _names = names.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        self.new_filled_vector(key, DataType::String, &_names)?;
+        let names_vec: Vec<String> = names.iter().map(|x| x.to_string()).collect();
+        self.new_filled_vector(key, DataType::String, &names_vec)?;
         Ok(())
     }
 
@@ -649,7 +616,6 @@ impl SparseIo for SparseMtxData {
         j_data: usize,
     ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
         use zarrs::array::Array as ZArray;
-        use zarrs::array_subset::ArraySubset;
 
         debug_assert!(!self.by_column_indptr.is_empty()); // pre-loaded
         debug_assert!(j_data < self.num_columns().unwrap_or(0)); //
@@ -663,7 +629,7 @@ impl SparseIo for SparseMtxData {
             .num_rows()
             .ok_or(anyhow!("can't figure out the number of rows"))?;
 
-        if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indicies) {
+        if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indices) {
             let ncol_out = 1;
             let jj = 0;
 
@@ -693,8 +659,7 @@ impl SparseIo for SparseMtxData {
             let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((end - start) as usize);
 
             if start < end {
-                let subset = ArraySubset::new_with_ranges(&[start..end]);
-
+                let subset = Self::create_subset(start..end);
                 let data_slice = data.retrieve_array_subset_elements::<f32>(&subset)?;
                 let indices_slice = indices.retrieve_array_subset_elements::<u64>(&subset)?;
 
@@ -718,7 +683,6 @@ impl SparseIo for SparseMtxData {
         columns: Self::IndexIter,
     ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
         use zarrs::array::Array as ZArray;
-        use zarrs::array_subset::ArraySubset;
 
         debug_assert!(!self.by_column_indptr.is_empty());
         let indptr = &self.by_column_indptr;
@@ -746,7 +710,7 @@ impl SparseIo for SparseMtxData {
             .max()
             .unwrap_or(0);
 
-        if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indicies) {
+        if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indices) {
             let ncol_out = columns_vec.len();
 
             let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((max_end - min_start) as usize);
@@ -779,8 +743,7 @@ impl SparseIo for SparseMtxData {
                     let end = indptr[j_data + 1];
 
                     if start < end {
-                        let subset = ArraySubset::new_with_ranges(&[start..end]);
-
+                        let subset = Self::create_subset(start..end);
                         let data_slice = data.retrieve_array_subset_elements::<f32>(&subset)?;
                         let indices_slice =
                             indices.retrieve_array_subset_elements::<u64>(&subset)?;
@@ -806,7 +769,6 @@ impl SparseIo for SparseMtxData {
         rows: Self::IndexIter,
     ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
         use zarrs::array::Array as ZArray;
-        use zarrs::array_subset::ArraySubset;
 
         debug_assert!(!self.by_row_indptr.is_empty());
         let indptr = &self.by_row_indptr;
@@ -846,7 +808,7 @@ impl SparseIo for SparseMtxData {
                     let end = indptr[i_data + 1];
 
                     if start < end {
-                        let subset = ArraySubset::new_with_ranges(&[start..end]);
+                        let subset = Self::create_subset(start..end);
                         let data_slice = data.retrieve_array_subset_elements::<f32>(&subset)?;
                         let indices_slice =
                             indices.retrieve_array_subset_elements::<u64>(&subset)?;
@@ -915,11 +877,8 @@ impl SparseIo for SparseMtxData {
         let key = "/by_column/data";
         self.new_filled_vector(key, DataType::Float32, csc_vals)?;
         let key = "/by_column/indices";
-        // dbg!(key);
         self.new_filled_vector(key, DataType::UInt64, csc_rows)?;
-
         let key = "/by_column/indptr";
-        // dbg!(key);
         self.new_filled_vector(key, DataType::UInt64, csc_colptr)?;
 
         Ok(())

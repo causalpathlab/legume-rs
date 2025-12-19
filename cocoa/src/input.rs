@@ -86,8 +86,11 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
             let ext = file_ext(p_file)?;
             if ext.as_ref() == "parquet" {
                 let _names = peek_parquet_field_names(p_file)?;
-                for _x in _names {
-                    topic_names.insert(_x);
+                // ignore the first column (corresponds to row names)
+                if _names.len() > 1 {
+                    for _x in _names.into_iter().skip(1) {
+                        topic_names.insert(_x);
+                    }
                 }
             }
         }
