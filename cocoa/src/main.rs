@@ -13,6 +13,7 @@ use crate::run_diff::*;
 use crate::run_sim_collider::*;
 use crate::run_sim_one_type::*;
 
+use clap::command;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -32,14 +33,14 @@ enum Commands {
         about = "Differential expression analysis with pseudobulk",
         long_about = "Differential expression analysis on pseudobulk data \n\
 		      while adjusting confounding effects by cross-condition \n\
-		      or cross-exposure/treatment matching (Park & Kellis, 2020):\n\
+		      or cross-exposure/treatment matching (Park & Kellis, 2020).\n\
 		      \n"
     )]
     Diff(DiffArgs),
 
     #[command(
-        about = "Collapse",
-        long_about = "\n\
+        about = "Collapse data into individual- and topic-level data",
+        long_about = "Collapse cell-level data into individual- and topic-level data\n\
 		      \n"
     )]
     Collapse(CollapseArgs),
@@ -47,9 +48,24 @@ enum Commands {
     #[command(
         about = "Simulate expression data with one cell type",
         long_about = "Simulate expression data with one cell type.\n\
-		      \n"
+		      First generate individual-level data by\n\
+		      a generalized linear model with confounding effects.\n\
+		      Then, sample cell-level Poisson data.\n\
+		      \n",
+        alias = "sim-v1"
     )]
-    SimulateOne(SimArgs),
+    SimulateOne(SimOneTypeArgs),
+
+    #[command(
+        about = "Simulate expression data with many cell types",
+        long_about = "Simulate expression data with many cell type.\n\
+		      First generate individual-level data by\n\
+		      a generalized linear model with confounding effects.\n\
+		      Then, sample cell-level Poisson data.\n\
+		      \n",
+        aliases = ["simulate", "sim-v2"]
+    )]
+    SimulateCollider(SimColliderArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -64,6 +80,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::SimulateOne(args) => {
             run_sim_one_type_data(args.clone())?;
+        }
+        Commands::SimulateCollider(args) => {
+            run_sim_collider_data(args.clone())?;
         }
     }
 
