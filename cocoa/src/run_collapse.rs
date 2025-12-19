@@ -2,7 +2,6 @@ use crate::common::*;
 use crate::input::*;
 
 use clap::Parser;
-
 use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::io::ParamIo;
 use matrix_param::traits::TwoStatParam;
@@ -120,7 +119,7 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
     }
     env_logger::init();
 
-    // read data without `indv` and `exposure`
+    // read data without `exposure`
     let data = read_input_data(InputDataArgs {
         data_files: args.data_files.clone(),
         indv_files: args.indv_files.clone(),
@@ -131,44 +130,117 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
         topic_value: args.topic_proportion_value,
     })?;
 
-    // indv and cell
-
-    // todo : {indv}_{cell_type} index?
-
-
-
-
-    // we want to report topic specific gene expressions
-
     let cell_topic = &data.cell_topic;
     let ngenes = data.sparse_data.num_rows()?;
     let ntopics = cell_topic.ncols();
 
-    let mut topic_stat = TopicStat {
-        count_gene_topic: Mat::zeros(ngenes, ntopics),
-        count_topic: DVec::zeros(ntopics),
-    };
+    // break down into individual level collapsing
+    if let Some(indv_names) = data.sparse_data.group_keys() {
+        let nindv = indv_names.len();
 
-    data.sparse_data.visit_columns_by_block(
-        &collect_topic_stat_visitor,
-        &cell_topic,
-        &mut topic_stat,
-        Some(args.block_size),
-    )?;
+        let mut topic_indv_stat = TopicIndvStat {
+            count_gene_topic_indv: Mat::zeros(ngenes, ntopics * nindv),
+            count_topic_indv: DVec::zeros(ntopics * nindv),
+        };
 
-    let mut gamma = GammaMatrix::new((ngenes, ntopics), args.a0, args.b0);
-    gamma.update_stat(
-        &topic_stat.count_gene_topic,
-        &concatenate_horizontal(&vec![topic_stat.count_topic; ngenes])?.transpose(),
-    );
-    gamma.calibrate();
+        data.sparse_data.visit_columns_by_group(
+            &collect_topic_indv_stat_visitor,
+            &cell_topic,
+            &mut topic_indv_stat,
+        )?;
 
-    let gene_names = data.sparse_data.row_names()?;
-    let out_file = format!("{}.parquet", args.out.replace(".parquet", ""));
-    gamma.to_parquet(Some(&gene_names), None, &out_file)?;
+        let mut gamma = GammaMatrix::new((ngenes, ntopics), args.a0, args.b0);
+        gamma.update_stat(
+            &topic_indv_stat.count_gene_topic_indv,
+            &concatenate_horizontal(&vec![topic_indv_stat.count_topic_indv; ngenes])?.transpose(),
+        );
+        gamma.calibrate();
+
+        let gene_names = data.sparse_data.row_names()?;
+        let out_file = format!("{}.parquet", args.out.replace(".parquet", ""));
+
+        // Create column names with {indv}_{topic} format
+        let indv_topic_names: Vec<Box<str>> = indv_names
+            .iter()
+            .flat_map(|indv| {
+                (0..ntopics)
+                    .map(|topic| format!("{}_{}", indv, topic).into_boxed_str())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        gamma.to_parquet(Some(&gene_names), Some(&indv_topic_names), &out_file)?;
+    }
+
+    {
+        let mut topic_stat = TopicStat {
+            count_gene_topic: Mat::zeros(ngenes, ntopics),
+            count_topic: DVec::zeros(ntopics),
+        };
+
+        data.sparse_data.visit_columns_by_block(
+            &collect_topic_stat_visitor,
+            &cell_topic,
+            &mut topic_stat,
+            Some(args.block_size),
+        )?;
+
+        let mut gamma = GammaMatrix::new((ngenes, ntopics), args.a0, args.b0);
+        gamma.update_stat(
+            &topic_stat.count_gene_topic,
+            &concatenate_horizontal(&vec![topic_stat.count_topic; ngenes])?.transpose(),
+        );
+        gamma.calibrate();
+
+        let gene_names = data.sparse_data.row_names()?;
+        let out_file = format!("{}.parquet", args.out.replace(".parquet", ""));
+        gamma.to_parquet(Some(&gene_names), None, &out_file)?;
+    }
 
     Ok(())
 }
+
+//////////////////////////////////////////////////////
+// collapsing within each topic and individual pair //
+//////////////////////////////////////////////////////
+
+struct TopicIndvStat {
+    count_gene_topic_indv: Mat,
+    count_topic_indv: DVec,
+}
+
+fn collect_topic_indv_stat_visitor(
+    indv_id: usize,  // individual id
+    cells: &[usize], // cells within this individual
+    data: &SparseIoVec,
+    cell_topic_nk: &Mat,
+    arc_stat: Arc<Mutex<&mut TopicIndvStat>>,
+) -> anyhow::Result<()> {
+    let y_gn = data.read_columns_csc(cells.iter().cloned())?;
+
+    let z_nk = subset_rows(cell_topic_nk, cells.iter().cloned())?;
+    let z_k = z_nk.row_sum().transpose();
+    let y_gk = y_gn * z_nk;
+
+    let kk = cell_topic_nk.ncols();
+
+    let mut stat = arc_stat.lock().expect("lock");
+
+    let lb = kk * indv_id;
+    let ub = kk * (indv_id + 1);
+    let mut y_gk_target = stat.count_gene_topic_indv.columns_range_mut(lb..ub);
+    y_gk_target += &y_gk;
+
+    for (j, p) in (lb..ub).enumerate() {
+        stat.count_topic_indv[p] += z_k[j];
+    }
+
+    Ok(())
+}
+
+//////////////////////////////////
+// collapsing within each topic //
+//////////////////////////////////
 
 struct TopicStat {
     count_gene_topic: Mat,
