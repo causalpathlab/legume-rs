@@ -1,11 +1,10 @@
 use crate::common::*;
 use crate::data::bed::*;
+use crate::data::read_coverage::ReadCoverage;
 use crate::data::util_htslib::*;
 use crate::data::visitors_htslib::*;
-use rust_htslib::bam::{self, record::Aux};
 
-use coitrees::{COITree, Interval, IntervalTree};
-use fnv::FnvHashMap as HashMap;
+use coitrees::IntervalTree;
 
 #[derive(Args, Debug)]
 pub struct ReadDepthArgs {
@@ -50,7 +49,12 @@ pub struct ReadDepthArgs {
     output: Box<str>,
 
     /// verbosity
-    #[arg(long, short, help = "verbosity", long_help = "Enable verbose output `RUST_LOG=info`")]
+    #[arg(
+        long,
+        short,
+        help = "verbosity",
+        long_help = "Enable verbose output `RUST_LOG=info`"
+    )]
     verbose: bool,
 }
 
@@ -78,7 +82,8 @@ pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
 
     let backend = args.backend.clone();
 
-    // 1. build a coitree for each chromosome, each cell barcode, and each coitree can keep track of coverage
+    // build a coitree for each chromosome, each cell barcode, and
+    // each coitree can keep track of coverage
     let jobs = create_bam_jobs(
         &args.bam_files[0],
         Some(args.block_size_mb * 1000_000),
@@ -157,49 +162,4 @@ pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
 
     info!("done");
     Ok(())
-}
-
-struct ReadCoverage<'a> {
-    cell_chr_to_intervals: HashMap<CellBarcode, HashMap<Box<str>, Vec<Interval<()>>>>,
-    cell_barcode_tag: &'a str,
-}
-
-impl VisitWithBamOps for ReadCoverage<'_> {}
-
-impl<'a> ReadCoverage<'a> {
-    fn new(cell_barcode_tag: &'a str) -> Self {
-        Self {
-            cell_chr_to_intervals: HashMap::default(),
-            cell_barcode_tag,
-        }
-    }
-
-    fn to_coitrees(&self) -> HashMap<CellBarcode, HashMap<Box<str>, COITree<(), u32>>> {
-        let mut trees = HashMap::default();
-
-        for (cb, chr_to_intervals) in self.cell_chr_to_intervals.iter() {
-            let cb_trees: &mut HashMap<Box<str>, COITree<(), u32>> =
-                trees.entry(cb.clone()).or_default();
-
-            for (chr, nodes) in chr_to_intervals.iter() {
-                cb_trees.insert(chr.clone(), COITree::new(nodes));
-            }
-        }
-
-        trees
-    }
-
-    fn update(&mut self, chr: &str, bam_record: bam::Record) {
-        let cell_barcode = match bam_record.aux(self.cell_barcode_tag.as_bytes()) {
-            Ok(Aux::String(barcode)) => CellBarcode::Barcode(barcode.into()),
-            _ => CellBarcode::Missing,
-        };
-        let first = bam_record.pos() as i32;
-        let last = first + bam_record.seq_len() as i32;
-
-        let chr_to_intervals = self.cell_chr_to_intervals.entry(cell_barcode).or_default();
-
-        let intervals = chr_to_intervals.entry(chr.into()).or_default();
-        intervals.push(Interval::new(first, last, ()));
-    }
 }

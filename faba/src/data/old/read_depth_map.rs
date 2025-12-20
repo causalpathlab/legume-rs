@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+// #![allow(dead_code)]
 
 use crate::data::dna_stat_traits::*;
 use crate::data::sam::*;
