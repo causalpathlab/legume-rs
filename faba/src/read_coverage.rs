@@ -3,21 +3,21 @@ use crate::data::visitors_htslib::VisitWithBamOps;
 
 use coitrees::{COITree, Interval, IntervalTree};
 use fnv::FnvHashMap as HashMap;
-use rust_htslib::bam::{self, record::Aux};
+use rust_htslib::bam::{self, ext::BamRecordExtensions, record::Aux};
 
 /// Read coverage tracker that organizes genomic intervals by cell barcode and chromosome.
 ///
 /// This structure accumulates read alignment intervals from BAM files, organizing them
 /// hierarchically by cell barcode and chromosome, then converts them to interval trees
 /// for efficient querying.
-pub struct ReadCoverage<'a> {
+pub struct ReadCoverageCollector<'a> {
     cell_chr_to_intervals: HashMap<CellBarcode, HashMap<Box<str>, Vec<Interval<()>>>>,
     cell_barcode_tag: &'a str,
 }
 
-impl VisitWithBamOps for ReadCoverage<'_> {}
+impl VisitWithBamOps for ReadCoverageCollector<'_> {}
 
-impl<'a> ReadCoverage<'a> {
+impl<'a> ReadCoverageCollector<'a> {
     /// Creates a new ReadCoverage instance.
     ///
     /// # Arguments
@@ -48,6 +48,21 @@ impl<'a> ReadCoverage<'a> {
         trees
     }
 
+    /// Convenience method to collect coverage from a BAM file region.
+    ///
+    /// This wraps the generic `visit_bam_by_region` method with the standard update logic.
+    ///
+    /// # Arguments
+    /// * `bam_file_path` - Path to the BAM file
+    /// * `bed` - Genomic region to process
+    pub fn collect_from_bam(
+        &mut self,
+        bam_file_path: &str,
+        bed: &crate::data::bed::Bed,
+    ) -> anyhow::Result<()> {
+        self.visit_bam_by_region(bam_file_path, bed, &Self::update)
+    }
+
     /// Updates the coverage with a new BAM record.
     ///
     /// Extracts the cell barcode from the BAM record and adds the read's genomic interval
@@ -62,7 +77,7 @@ impl<'a> ReadCoverage<'a> {
             _ => CellBarcode::Missing,
         };
         let first = bam_record.pos() as i32;
-        let last = first + bam_record.seq_len() as i32;
+        let last = bam_record.reference_end() as i32;
 
         let chr_to_intervals = self.cell_chr_to_intervals.entry(cell_barcode).or_default();
 

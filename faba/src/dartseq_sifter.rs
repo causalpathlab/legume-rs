@@ -52,7 +52,7 @@ impl DartSeqSifter {
     /// * third: `C->T`
     pub fn forward_sweep(
         &mut self,
-        positions: &Vec<i64>,
+        positions: &[i64],
         wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
         mut_pos_to_freq: &HashMap<i64, DnaBaseCount>,
     ) {
@@ -68,68 +68,58 @@ impl DartSeqSifter {
             let m6a_site = positions[j - 1];
             let conv_site = positions[j];
 
-            // to make sure the second position is A
-            let is_wt_m6a_a = wt_pos_to_freq
-                .get(&m6a_site)
-                .map(|s| s.most_frequent().0 == Dna::A)
+            // Cache lookups to avoid redundant hash map queries
+            let wt_m6a = wt_pos_to_freq.get(&m6a_site);
+            let mut_m6a = mut_pos_to_freq.get(&m6a_site);
+            let wt_r = wt_pos_to_freq.get(&r_site);
+            let mut_r = mut_pos_to_freq.get(&r_site);
+            let wt_conv = wt_pos_to_freq.get(&conv_site);
+            let mut_conv = mut_pos_to_freq.get(&conv_site);
+
+            // Check if both WT and mutant m6a site are 'A'
+            let both_m6a_valid = wt_m6a
+                .zip(mut_m6a)
+                .map(|(wt, mt)| {
+                    wt.most_frequent().0 == Dna::A && mt.most_frequent().0 == Dna::A
+                })
                 .unwrap_or(false);
-            if !is_wt_m6a_a {
+            if !both_m6a_valid {
                 continue;
             }
 
-            let is_mut_m6a_a = mut_pos_to_freq
-                .get(&m6a_site)
-                .map(|s| s.most_frequent().0 == Dna::A)
-                .unwrap_or(false);
-            if !is_mut_m6a_a {
-                continue;
-            }
-
-            // to ensure mutant's conversion site is mostly C
-            let is_mut_c = mut_pos_to_freq
-                .get(&conv_site)
+            // Ensure mutant's conversion site is mostly C
+            if !mut_conv
                 .map(|s| s.most_frequent().0 == Dna::C)
-                .unwrap_or(false);
-
-            if !is_mut_c {
+                .unwrap_or(false)
+            {
                 continue;
             }
 
-            // test R = A/G for the first position
-            let is_wt_r_site_valid = wt_pos_to_freq
-                .get(&r_site)
-                .map(|r| {
-                    let major = &r.most_frequent().0;
-                    major == &Dna::A || major == &Dna::G
+            // Check if both WT and mutant R site are valid (A or G)
+            let both_r_valid = wt_r
+                .zip(mut_r)
+                .map(|(wt, mt)| {
+                    let wt_major = &wt.most_frequent().0;
+                    let mt_major = &mt.most_frequent().0;
+                    (wt_major == &Dna::A || wt_major == &Dna::G)
+                        && (mt_major == &Dna::A || mt_major == &Dna::G)
                 })
                 .unwrap_or(false);
 
-            let is_mut_r_site_valid = mut_pos_to_freq
-                .get(&r_site)
-                .map(|r| {
-                    let major = &r.most_frequent().0;
-                    major == &Dna::A || major == &Dna::G
-                })
-                .unwrap_or(false);
+            if !both_r_valid {
+                continue;
+            }
 
-            if is_wt_r_site_valid && is_mut_r_site_valid {
-                let wt_conv = wt_pos_to_freq.get(&conv_site);
-                let mut_conv = mut_pos_to_freq.get(&conv_site);
-                let pv = self
-                    .binomial_test_pvalue(wt_conv, mut_conv, &Dna::C, &Dna::T)
-                    .unwrap_or(1.0);
-
-                if let (Some(wt_freq), Some(mut_freq)) = (wt_conv, mut_conv) {
-                    if pv < self.max_pvalue_cutoff {
-                        let meth = MethylatedSite {
-                            m6a_pos: m6a_site,
-                            conversion_pos: conv_site,
-                            wt_freq: wt_freq.clone(),
-                            mut_freq: mut_freq.clone(),
-                            pv,
-                        };
-                        self.candidate_sites.push(meth);
-                    }
+            // Perform binomial test and store result if significant
+            if let Some(pv) = self.binomial_test_pvalue(wt_conv, mut_conv, &Dna::C, &Dna::T) {
+                if pv < self.max_pvalue_cutoff {
+                    self.candidate_sites.push(MethylatedSite {
+                        m6a_pos: m6a_site,
+                        conversion_pos: conv_site,
+                        wt_freq: wt_conv.unwrap().clone(),
+                        mut_freq: mut_conv.unwrap().clone(),
+                        pv,
+                    });
                 }
             }
         }
@@ -141,7 +131,7 @@ impl DartSeqSifter {
     /// * R site: third `(G/A) <=> (C/T)`
     pub fn backward_sweep(
         &mut self,
-        positions: &Vec<i64>,
+        positions: &[i64],
         wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
         mut_pos_to_freq: &HashMap<i64, DnaBaseCount>,
     ) {
@@ -157,68 +147,58 @@ impl DartSeqSifter {
             let m6a_site = positions[j + 1];
             let conv_site = positions[j];
 
-            // A <=> T (complement)
-            let is_wt_m6a_t = wt_pos_to_freq
-                .get(&m6a_site)
-                .map(|s| s.most_frequent().0 == Dna::T)
+            // Cache lookups to avoid redundant hash map queries
+            let wt_m6a = wt_pos_to_freq.get(&m6a_site);
+            let mut_m6a = mut_pos_to_freq.get(&m6a_site);
+            let wt_r = wt_pos_to_freq.get(&r_site);
+            let mut_r = mut_pos_to_freq.get(&r_site);
+            let wt_conv = wt_pos_to_freq.get(&conv_site);
+            let mut_conv = mut_pos_to_freq.get(&conv_site);
+
+            // Check if both WT and mutant m6a site are 'T' (complement of A)
+            let both_m6a_valid = wt_m6a
+                .zip(mut_m6a)
+                .map(|(wt, mt)| {
+                    wt.most_frequent().0 == Dna::T && mt.most_frequent().0 == Dna::T
+                })
                 .unwrap_or(false);
-            if !is_wt_m6a_t {
+            if !both_m6a_valid {
                 continue;
             }
 
-            let is_mut_m6a_t = mut_pos_to_freq
-                .get(&m6a_site)
-                .map(|s| s.most_frequent().0 == Dna::T)
-                .unwrap_or(false);
-            if !is_mut_m6a_t {
-                continue;
-            }
-
-            // mutant's conversion site should be mostly G (C <=> G)
-            let is_mut_g = mut_pos_to_freq
-                .get(&conv_site)
+            // Ensure mutant's conversion site is mostly G (complement of C)
+            if !mut_conv
                 .map(|s| s.most_frequent().0 == Dna::G)
-                .unwrap_or(false);
-
-            if !is_mut_g {
+                .unwrap_or(false)
+            {
                 continue;
             }
 
-            // R = A/G <=> T/C (complement)
-            let is_wt_r_site_valid = wt_pos_to_freq
-                .get(&r_site)
-                .map(|r| {
-                    let major = &r.most_frequent().0;
-                    major == &Dna::T || major == &Dna::C
+            // Check if both WT and mutant R site are valid (T or C, complement of A/G)
+            let both_r_valid = wt_r
+                .zip(mut_r)
+                .map(|(wt, mt)| {
+                    let wt_major = &wt.most_frequent().0;
+                    let mt_major = &mt.most_frequent().0;
+                    (wt_major == &Dna::T || wt_major == &Dna::C)
+                        && (mt_major == &Dna::T || mt_major == &Dna::C)
                 })
                 .unwrap_or(false);
 
-            let is_mut_r_site_valid = mut_pos_to_freq
-                .get(&r_site)
-                .map(|r| {
-                    let major = &r.most_frequent().0;
-                    major == &Dna::T || major == &Dna::C
-                })
-                .unwrap_or(false);
+            if !both_r_valid {
+                continue;
+            }
 
-            if is_wt_r_site_valid && is_mut_r_site_valid {
-                let wt_conv = wt_pos_to_freq.get(&conv_site);
-                let mut_conv = mut_pos_to_freq.get(&conv_site);
-                let pv = self
-                    .binomial_test_pvalue(wt_conv, mut_conv, &Dna::G, &Dna::A)
-                    .unwrap_or(1.0);
-
-                if let (Some(wt_freq), Some(mut_freq)) = (wt_conv, mut_conv) {
-                    if pv < self.max_pvalue_cutoff {
-                        let meth = MethylatedSite {
-                            m6a_pos: m6a_site,
-                            conversion_pos: conv_site,
-                            wt_freq: wt_freq.clone(),
-                            mut_freq: mut_freq.clone(),
-                            pv,
-                        };
-                        self.candidate_sites.push(meth);
-                    }
+            // Perform binomial test and store result if significant
+            if let Some(pv) = self.binomial_test_pvalue(wt_conv, mut_conv, &Dna::G, &Dna::A) {
+                if pv < self.max_pvalue_cutoff {
+                    self.candidate_sites.push(MethylatedSite {
+                        m6a_pos: m6a_site,
+                        conversion_pos: conv_site,
+                        wt_freq: wt_conv.unwrap().clone(),
+                        mut_freq: mut_conv.unwrap().clone(),
+                        pv,
+                    });
                 }
             }
         }

@@ -5,7 +5,6 @@ use crate::data::sam::Strand;
 use dashmap::DashMap as HashMap;
 use matrix_util::common_io;
 use std::io::Write;
-use std::ops::Div;
 
 /// Represents a bin of methylation statistics
 #[derive(Eq, Hash, PartialEq, PartialOrd, Ord, Clone)]
@@ -170,17 +169,17 @@ impl GeneFeatureCount {
 
 /// Trait for computing histogram statistics on methylation sites
 pub trait Histogram {
-    fn count_on_feature_map(
-        &self,
-        feature_map: &HashMap<GeneId, GffRecord>,
-        n_genomic_bins: usize,
-    ) -> HashMap<MethBin, Vec<usize>>;
-
     fn count_gene_features(
         &self,
         gff_file: &str,
         n_genomic_bins: usize,
     ) -> anyhow::Result<GeneFeatureCount>;
+
+    fn count_on_feature_map(
+        &self,
+        feature_map: &HashMap<GeneId, GffRecord>,
+        n_genomic_bins: usize,
+    ) -> HashMap<MethBin, Vec<usize>>;
 }
 
 impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
@@ -189,6 +188,8 @@ impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
         gff_file: &str,
         n_genomic_bins: usize,
     ) -> anyhow::Result<GeneFeatureCount> {
+        use crate::data::gff::*;
+
         let gff_records = read_gff_record_vec(gff_file)?;
 
         let UTRMap {
@@ -230,30 +231,31 @@ impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
             let sites = x.value();
 
             if let Some(gff) = gene_gff_map.get(&g) {
-                let lb = gff.start; // 1-based
-                let ub = gff.stop; // 1-based
+                // Convert GFF coordinates (1-based, inclusive) to 0-based half-open [lb, ub)
+                // to match BAM/m6a_pos coordinates
+                let lb = (gff.start - 1).max(0); // GFF 1-based start -> 0-based
+                let ub = gff.stop; // GFF 1-based inclusive end -> 0-based exclusive end
                 let length = (ub - lb).max(1) as usize;
 
                 for s in sites.iter() {
                     if s.m6a_pos < ub && s.m6a_pos >= lb {
                         let beta_bin = MethBin::from(s, &gff.strand);
 
-                        let mut entry = ret.entry(beta_bin).or_insert(vec![0; n_genomic_bins + 1]);
+                        let mut entry = ret.entry(beta_bin).or_insert(vec![0; n_genomic_bins]);
                         let genomic = entry.value_mut();
 
                         // relative position with respect to (lb and ub)
                         let rel_pos = (match gff.strand {
                             Strand::Forward => (s.m6a_pos - lb) as usize,
-                            Strand::Backward => (ub - s.m6a_pos) as usize,
+                            Strand::Backward => (ub - s.m6a_pos - 1) as usize,
                         } * n_genomic_bins)
-                            .div(length + 1);
+                            / length;
 
                         genomic[rel_pos] += 1;
                     }
                 }
             }
         });
-
         ret
     }
 }
