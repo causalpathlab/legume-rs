@@ -56,6 +56,50 @@ pub fn build_gene_map(
     Ok(ret)
 }
 
+/// Build a map of start or stop codons, selecting the appropriate one per gene based on strand
+/// For start codons: picks the 5'-most (forward: lowest coords, backward: highest coords)
+/// For stop codons: picks the 3'-most (forward: highest coords, backward: lowest coords)
+pub fn build_codon_map(
+    records: &Vec<GffRecord>,
+    feature_type: &FeatureType,
+) -> anyhow::Result<HashMap<GeneId, GffRecord>> {
+    let ret: HashMap<GeneId, GffRecord> = HashMap::new();
+
+    let is_start_codon = *feature_type == FeatureType::StartCodon;
+
+    for new_rec in records.iter() {
+        if &new_rec.feature_type != feature_type {
+            continue;
+        }
+
+        let gene_id = &new_rec.gene_id;
+
+        if let Some(mut rec) = ret.get_mut(gene_id) {
+            let rec = rec.value_mut();
+
+            // Choose the appropriate codon based on strand and codon type
+            let should_replace = match (&new_rec.strand, is_start_codon) {
+                // Forward strand, start codon: pick 5'-most (lowest coordinates)
+                (Strand::Forward, true) => new_rec.start < rec.start,
+                // Forward strand, stop codon: pick 3'-most (highest coordinates)
+                (Strand::Forward, false) => new_rec.stop > rec.stop,
+                // Backward strand, start codon: pick 5'-most (highest coordinates)
+                (Strand::Backward, true) => new_rec.stop > rec.stop,
+                // Backward strand, stop codon: pick 3'-most (lowest coordinates)
+                (Strand::Backward, false) => new_rec.start < rec.start,
+            };
+
+            if should_replace {
+                *rec = new_rec.clone();
+            }
+        } else {
+            ret.insert(gene_id.clone(), new_rec.clone());
+        }
+    }
+
+    Ok(ret)
+}
+
 pub trait QuickStat {
     fn take_average_length(&self) -> i64;
     fn take_max_length(&self) -> i64;
@@ -86,9 +130,9 @@ pub struct UTRMap {
 }
 
 pub fn build_utr_map(records: &Vec<GffRecord>) -> anyhow::Result<UTRMap> {
-    let start_codons = build_gene_map(records, Some(&FeatureType::StartCodon))?;
-
-    let stop_codons = build_gene_map(records, Some(&FeatureType::StopCodon))?;
+    // Use build_codon_map to select the canonical start/stop codon per gene based on strand
+    let start_codons = build_codon_map(records, &FeatureType::StartCodon)?;
+    let stop_codons = build_codon_map(records, &FeatureType::StopCodon)?;
 
     let five_prime: HashMap<GeneId, GffRecord> = HashMap::new();
     let three_prime: HashMap<GeneId, GffRecord> = HashMap::new();
@@ -105,15 +149,45 @@ pub fn build_utr_map(records: &Vec<GffRecord>) -> anyhow::Result<UTRMap> {
                     .as_ref()
                     .map(|x| x.value()),
             ) {
+                // Calculate minimum distance between UTR and each codon
+                // by finding the gap between the intervals (or overlap if negative)
                 let (d_to_start, d_to_stop) = match new_rec.strand {
-                    Strand::Forward => (
-                        (start.start - new_rec.stop).abs(),
-                        (stop.stop - new_rec.start).abs(),
-                    ),
-                    Strand::Backward => (
-                        (start.stop - new_rec.start).abs(),
-                        (stop.start - new_rec.stop).abs(),
-                    ),
+                    Strand::Forward => {
+                        // Forward: start codon is upstream (lower coords), stop is downstream (higher coords)
+                        let gap_to_start = if new_rec.stop < start.start {
+                            start.start - new_rec.stop // UTR before start codon
+                        } else if new_rec.start > start.stop {
+                            new_rec.start - start.stop // UTR after start codon
+                        } else {
+                            0 // Overlapping
+                        };
+                        let gap_to_stop = if new_rec.stop < stop.start {
+                            stop.start - new_rec.stop // UTR before stop codon
+                        } else if new_rec.start > stop.stop {
+                            new_rec.start - stop.stop // UTR after stop codon
+                        } else {
+                            0 // Overlapping
+                        };
+                        (gap_to_start, gap_to_stop)
+                    }
+                    Strand::Backward => {
+                        // Backward: start codon is downstream (higher coords), stop is upstream (lower coords)
+                        let gap_to_start = if new_rec.start > start.stop {
+                            new_rec.start - start.stop // UTR after start codon (5' direction)
+                        } else if new_rec.stop < start.start {
+                            start.start - new_rec.stop // UTR before start codon
+                        } else {
+                            0 // Overlapping
+                        };
+                        let gap_to_stop = if new_rec.stop < stop.start {
+                            stop.start - new_rec.stop // UTR before stop codon (3' direction)
+                        } else if new_rec.start > stop.stop {
+                            new_rec.start - stop.stop // UTR after stop codon
+                        } else {
+                            0 // Overlapping
+                        };
+                        (gap_to_start, gap_to_stop)
+                    }
                 };
 
                 let gene_id = &new_rec.gene_id;
@@ -427,54 +501,3 @@ pub fn parse_gff(words: Vec<Box<str>>) -> Option<GffRecord> {
         gene_type,
     })
 }
-
-// use std::collections::hash_map::Iter;
-// use std::collections::HashMap;
-
-// /// Get an iterator over the records
-// pub fn iter(&self) -> Iter<'_, GeneId, GffRecord> {
-//     self.records.iter()
-// }
-
-// /// Insert a new `GffRecord` into the map
-// pub fn insert(&mut self, gene_id: GeneId, record: GffRecord) {
-//     self.records.insert(gene_id, record);
-// }
-
-// /// Remove a `GffRecord` by `GeneId`
-// pub fn remove(&mut self, gene_id: &GeneId) -> Option<GffRecord> {
-//     self.records.remove(gene_id)
-// }
-
-// /// Check if a `GeneId` exists in the map
-// pub fn contains(&self, gene_id: &GeneId) -> bool {
-//     self.records.contains_key(gene_id)
-// }
-
-// /// Get all `GeneId`s in the map
-// pub fn gene_ids(&self) -> Vec<&GeneId> {
-//     self.records.keys().collect()
-// }
-
-// pub struct GffRecordMapIter<'a> {
-//     inner: Iter<'a, GeneId, GffRecord>,
-// }
-
-// impl<'a> IntoIterator for &'a GffRecordMap {
-//     type Item = (&'a GeneId, &'a GffRecord);
-//     type IntoIter = GffRecordMapIter<'a>;
-
-//     fn into_iter(self) -> Self::IntoIter {
-//         GffRecordMapIter {
-//             inner: self.records.iter(),
-//         }
-//     }
-// }
-
-// impl<'a> Iterator for GffRecordMapIter<'a> {
-//     type Item = (&'a GeneId, &'a GffRecord);
-
-//     fn next(&mut self) -> Option<Self::Item> {
-//         self.inner.next()
-//     }
-// }

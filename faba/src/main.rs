@@ -4,6 +4,7 @@ mod dartseq_sifter;
 mod dartseq_stat;
 mod data;
 mod hypothesis_tests;
+mod read_coverage;
 mod run_dartseq_count;
 mod run_gene_count;
 mod run_read_depth;

@@ -1,8 +1,7 @@
 use crate::common::*;
 use crate::data::bed::*;
-use crate::data::read_coverage::ReadCoverage;
 use crate::data::util_htslib::*;
-use crate::data::visitors_htslib::*;
+use crate::read_coverage::ReadCoverageCollector;
 
 use coitrees::IntervalTree;
 
@@ -106,13 +105,13 @@ pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
                     stop,
                 };
 
-                let mut read_coverage = ReadCoverage::new(&args.cell_barcode_tag);
+                let mut read_coverage = ReadCoverageCollector::new(&args.cell_barcode_tag);
 
                 for file in &args.bam_files {
-                    read_coverage.visit_bam_by_region(file, &bed, &ReadCoverage::update)?;
+                    read_coverage.collect_from_bam(file, &bed)?;
                 }
 
-                let cov_tree = read_coverage.to_coitrees();
+                let coverage_interval_tree = read_coverage.to_coitrees();
 
                 // define segments as specified by the resolution parameter
                 let start = *lb as usize;
@@ -121,7 +120,7 @@ pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
 
                 // now count them all
                 let mut ret = vec![];
-                for (cb, chr_tree) in cov_tree {
+                for (cb, chr_tree) in coverage_interval_tree {
                     for (chr, tree) in chr_tree {
                         for lb in (start..stop).step_by(segment_size) {
                             let ub = (lb + segment_size).min(stop);

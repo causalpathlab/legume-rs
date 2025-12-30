@@ -10,6 +10,7 @@ use crate::data::gff::FeatureType as GffFeatureType;
 use crate::data::gff::GeneType as GffGeneType;
 use crate::data::gff::{GeneId, GffRecordMap};
 use crate::data::methylation::*;
+use crate::data::poly_a_stat_map::{PolyASiteArgs, PolyASiteMap};
 use crate::data::util_htslib::*;
 
 use dashmap::DashMap as HashMap;
@@ -278,6 +279,54 @@ pub struct DartSeqCountArgs {
 		     The histogram will be saved to a file regardless of this option."
     )]
     print_histogram: bool,
+
+    #[arg(
+        long,
+        default_value_t = true,
+        help = "Filter out sites near poly-A tails",
+        long_help = "Filter out methylation sites that are near poly-A tail regions to avoid false positives from internal priming."
+    )]
+    filter_polya_sites: bool,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Minimum poly-A/T tail length for filtering",
+        long_help = "Minimum length of poly-A/T tail (based on CIGAR soft-clip) required for poly-A site detection."
+    )]
+    polya_min_tail_length: usize,
+
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "Maximum non-A/T bases in poly-A tail",
+        long_help = "Maximum number of non-A (forward) or non-T (reverse) bases allowed in the soft-clipped poly-A/T region."
+    )]
+    polya_max_non_a_or_t: usize,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Bases to check for internal priming",
+        long_help = "Number of bases at the end of aligned sequence to check for A-rich (forward) or T-rich (reverse) regions indicating internal priming."
+    )]
+    polya_internal_prime_window: usize,
+
+    #[arg(
+        long,
+        default_value_t = 7,
+        help = "Minimum A/T count for internal priming",
+        long_help = "Minimum number of A (forward) or T (reverse) bases in the internal priming window to flag as internal priming."
+    )]
+    polya_internal_prime_count: usize,
+
+    #[arg(
+        long,
+        default_value_t = 50,
+        help = "Distance threshold to filter sites near poly-A",
+        long_help = "Filter out methylation sites within this distance (bp) from detected poly-A sites."
+    )]
+    polya_filter_distance: i64,
 }
 
 fn uniq_batch_names(bam_files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
@@ -584,15 +633,15 @@ fn find_methylated_sites_in_gene(
     ///////////////////////////////////////////////////////
     // 1. sweep all the bam files to find variable sites //
     ///////////////////////////////////////////////////////
-    let mut wt_freq_map = DnaBaseFreqMap::new();
+    let mut wt_base_freq_map = DnaBaseFreqMap::new();
 
     for wt_file in args.wt_bam_files.iter() {
-        wt_freq_map.update_bam_by_gene(wt_file, gff_record, &args.gene_barcode_tag)?;
+        wt_base_freq_map.update_bam_file_by_gene(wt_file, gff_record, &args.gene_barcode_tag)?;
     }
 
-    let positions = wt_freq_map.sorted_positions();
+    let positions = wt_base_freq_map.sorted_positions();
 
-    if positions.len() >= 3 {
+    if positions.len() >= 5 {
         // 2. find AC/T patterns: Using mutant statistics as null
         // distribution, it will keep possible C->U edit positions.
         let mut sifter = DartSeqSifter {
@@ -606,16 +655,20 @@ fn find_methylated_sites_in_gene(
         };
 
         // gather background frequency map
-        let mut mut_freq_map = DnaBaseFreqMap::new();
+        let mut mut_base_freq_map = DnaBaseFreqMap::new();
 
         for mut_file in args.mut_bam_files.iter() {
-            mut_freq_map.update_bam_by_gene(mut_file, gff_record, &args.gene_barcode_tag)?;
+            mut_base_freq_map.update_bam_file_by_gene(
+                mut_file,
+                gff_record,
+                &args.gene_barcode_tag,
+            )?;
         }
 
-        let wt_freq = wt_freq_map
+        let wt_freq = wt_base_freq_map
             .marginal_frequency_map()
             .ok_or(anyhow::anyhow!("failed to count wt freq"))?;
-        let mut_freq = mut_freq_map
+        let mut_freq = mut_base_freq_map
             .marginal_frequency_map()
             .ok_or(anyhow::anyhow!("failed to count mut freq"))?;
 
@@ -629,6 +682,38 @@ fn find_methylated_sites_in_gene(
         };
 
         let mut ret = sifter.candidate_sites.clone();
+
+        // Filter out sites near poly-A tails if enabled
+        if args.filter_polya_sites && !ret.is_empty() {
+            // Create poly-A site map with specified parameters
+            let polya_args = PolyASiteArgs {
+                min_tail_length: args.polya_min_tail_length,
+                max_non_a_or_t_bases: args.polya_max_non_a_or_t,
+                internal_prime_in: args.polya_internal_prime_window,
+                internal_prime_a_or_t_count: args.polya_internal_prime_count,
+            };
+
+            let mut polya_map = PolyASiteMap::new(polya_args);
+
+            // Scan BAM files to detect poly-A sites
+            for wt_file in args.wt_bam_files.iter() {
+                polya_map.update_bam_file_by_gene(wt_file, gff_record, &args.gene_barcode_tag)?;
+            }
+
+            // Get all detected poly-A positions
+            let polya_positions = polya_map.sorted_positions();
+
+            // Filter out methylation sites within distance threshold of poly-A sites
+            if !polya_positions.is_empty() {
+                ret.retain(|site| {
+                    let site_pos = site.m6a_pos;
+                    !polya_positions.iter().any(|&polya_pos| {
+                        (site_pos - polya_pos).abs() <= args.polya_filter_distance
+                    })
+                });
+            }
+        }
+
         if !ret.is_empty() {
             ret.sort();
             ret.dedup();
@@ -695,7 +780,7 @@ fn estimate_m6a_stat(
     let mut gff = gff_record.clone();
     gff.start = (lb - 1).max(0); // padding
     gff.stop = ub + 1; // padding
-    stat_map.update_bam_by_gene(bam_file, &gff, &args.gene_barcode_tag)?;
+    stat_map.update_bam_file_by_gene(bam_file, &gff, &args.gene_barcode_tag)?;
 
     let gene = gff.gene_id;
     let chr = gff.seqname.as_ref();
