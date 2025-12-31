@@ -683,37 +683,6 @@ fn find_methylated_sites_in_gene(
 
         let mut ret = sifter.candidate_sites.clone();
 
-        // Filter out sites near poly-A tails if enabled
-        if args.filter_polya_sites && !ret.is_empty() {
-            // Create poly-A site map with specified parameters
-            let polya_args = PolyASiteArgs {
-                min_tail_length: args.polya_min_tail_length,
-                max_non_a_or_t_bases: args.polya_max_non_a_or_t,
-                internal_prime_in: args.polya_internal_prime_window,
-                internal_prime_a_or_t_count: args.polya_internal_prime_count,
-            };
-
-            let mut polya_map = PolyASiteMap::new(polya_args);
-
-            // Scan BAM files to detect poly-A sites
-            for wt_file in args.wt_bam_files.iter() {
-                polya_map.update_bam_file_by_gene(wt_file, gff_record, &args.gene_barcode_tag)?;
-            }
-
-            // Get all detected poly-A positions
-            let polya_positions = polya_map.sorted_positions();
-
-            // Filter out methylation sites within distance threshold of poly-A sites
-            if !polya_positions.is_empty() {
-                ret.retain(|site| {
-                    let site_pos = site.m6a_pos;
-                    !polya_positions.iter().any(|&polya_pos| {
-                        (site_pos - polya_pos).abs() <= args.polya_filter_distance
-                    })
-                });
-            }
-        }
-
         if !ret.is_empty() {
             ret.sort();
             ret.dedup();

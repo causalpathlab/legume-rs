@@ -59,6 +59,7 @@ pub struct GeneFeatureCount {
     five_prime: HashMap<MethBin, Vec<usize>>,
     cds: HashMap<MethBin, Vec<usize>>,
     three_prime: HashMap<MethBin, Vec<usize>>,
+    non_coding: HashMap<MethBin, Vec<usize>>,
 }
 
 impl GeneFeatureCount {
@@ -69,6 +70,7 @@ impl GeneFeatureCount {
             .map(|x| x.key().clone())
             .chain(self.five_prime.iter().map(|x| x.key().clone()))
             .chain(self.three_prime.iter().map(|x| x.key().clone()))
+            .chain(self.non_coding.iter().map(|x| x.key().clone()))
             .collect();
 
         meth_bins.sort();
@@ -106,6 +108,7 @@ impl GeneFeatureCount {
                 GeneFeatureCount::max_count(&self.cds, &k),
                 GeneFeatureCount::max_count(&self.five_prime, &k),
                 GeneFeatureCount::max_count(&self.three_prime, &k),
+                GeneFeatureCount::max_count(&self.non_coding, &k),
             ]
             .into_iter()
             .max()
@@ -121,6 +124,9 @@ impl GeneFeatureCount {
             }
             if let Some(x) = self.three_prime.get(k) {
                 print_row("3'UTR", x.value(), scale, max_width);
+            }
+            if let Some(x) = self.non_coding.get(k) {
+                print_row("ncRNA", x.value(), scale, max_width);
             }
         }
     }
@@ -160,6 +166,12 @@ impl GeneFeatureCount {
                     writer.write_all(b"\n")?;
                 }
             }
+            if let Some(data) = self.non_coding.get(k) {
+                for l in into_boxed_str("ncRNA", k, data.value()) {
+                    writer.write_all(l.as_bytes())?;
+                    writer.write_all(b"\n")?;
+                }
+            }
         }
 
         writer.flush()?;
@@ -188,34 +200,54 @@ impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
         gff_file: &str,
         n_genomic_bins: usize,
     ) -> anyhow::Result<GeneFeatureCount> {
-        use crate::data::gff::*;
-
         let gff_records = read_gff_record_vec(gff_file)?;
 
-        let UTRMap {
-            five_prime,
-            three_prime,
-        } = build_utr_map(&gff_records)?;
+        // Separate protein-coding and non-coding records
+        let protein_coding_records: Vec<GffRecord> = gff_records
+            .iter()
+            .filter(|rec| rec.gene_type == GeneType::CodingGene)
+            .cloned()
+            .collect();
 
-        let cds = build_gene_map(&gff_records, Some(&FeatureType::CDS))?;
+        let non_coding_records: Vec<GffRecord> = gff_records
+            .iter()
+            .filter(|rec| rec.gene_type != GeneType::CodingGene)
+            .cloned()
+            .collect();
 
-        let n_five_prime = five_prime.take_max_length();
+        let UnionGeneModel {
+            gene_boundaries: _,
+            cds,
+            five_prime_utr,
+            three_prime_utr,
+        } = build_union_gene_model(&protein_coding_records)?;
+
+        let UnionGeneModel {
+            gene_boundaries: nc_gene_boundaries,
+            cds: _,
+            five_prime_utr: _,
+            three_prime_utr: _,
+        } = build_union_gene_model(&non_coding_records)?;
+
+        let n_five_prime = five_prime_utr.take_max_length().max(10);
         let n_cds = cds.take_max_length();
-        let n_three_prime = three_prime.take_max_length();
+        let n_three_prime = three_prime_utr.take_max_length().max(20);
         let ntot = n_five_prime + n_cds + n_three_prime;
 
         let nbins_five_prime = n_five_prime as usize * n_genomic_bins / ntot as usize;
         let nbins_cds = n_cds as usize * n_genomic_bins / ntot as usize;
         let nbins_three_prime = n_three_prime as usize * n_genomic_bins / ntot as usize;
 
-        let five_prime = self.count_on_feature_map(&five_prime, nbins_five_prime);
+        let five_prime = self.count_on_feature_map(&five_prime_utr, nbins_five_prime);
         let cds = self.count_on_feature_map(&cds, nbins_cds);
-        let three_prime = self.count_on_feature_map(&three_prime, nbins_three_prime);
+        let three_prime = self.count_on_feature_map(&three_prime_utr, nbins_three_prime);
+        let non_coding = self.count_on_feature_map(&nc_gene_boundaries, n_genomic_bins);
 
         Ok(GeneFeatureCount {
             five_prime,
             cds,
             three_prime,
+            non_coding,
         })
     }
 

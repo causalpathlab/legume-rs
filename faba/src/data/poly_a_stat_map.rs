@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::data::dna_stat_traits::*;
 use crate::data::sam::*;
 use crate::data::visitors_htslib::*;
