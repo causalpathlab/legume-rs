@@ -10,7 +10,7 @@ use crate::data::gff::FeatureType as GffFeatureType;
 use crate::data::gff::GeneType as GffGeneType;
 use crate::data::gff::{GeneId, GffRecordMap};
 use crate::data::methylation::*;
-use crate::data::poly_a_stat_map::{PolyASiteArgs, PolyASiteMap};
+
 use crate::data::util_htslib::*;
 
 use dashmap::DashMap as HashMap;
@@ -279,54 +279,6 @@ pub struct DartSeqCountArgs {
 		     The histogram will be saved to a file regardless of this option."
     )]
     print_histogram: bool,
-
-    #[arg(
-        long,
-        default_value_t = true,
-        help = "Filter out sites near poly-A tails",
-        long_help = "Filter out methylation sites that are near poly-A tail regions to avoid false positives from internal priming."
-    )]
-    filter_polya_sites: bool,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Minimum poly-A/T tail length for filtering",
-        long_help = "Minimum length of poly-A/T tail (based on CIGAR soft-clip) required for poly-A site detection."
-    )]
-    polya_min_tail_length: usize,
-
-    #[arg(
-        long,
-        default_value_t = 3,
-        help = "Maximum non-A/T bases in poly-A tail",
-        long_help = "Maximum number of non-A (forward) or non-T (reverse) bases allowed in the soft-clipped poly-A/T region."
-    )]
-    polya_max_non_a_or_t: usize,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Bases to check for internal priming",
-        long_help = "Number of bases at the end of aligned sequence to check for A-rich (forward) or T-rich (reverse) regions indicating internal priming."
-    )]
-    polya_internal_prime_window: usize,
-
-    #[arg(
-        long,
-        default_value_t = 7,
-        help = "Minimum A/T count for internal priming",
-        long_help = "Minimum number of A (forward) or T (reverse) bases in the internal priming window to flag as internal priming."
-    )]
-    polya_internal_prime_count: usize,
-
-    #[arg(
-        long,
-        default_value_t = 50,
-        help = "Distance threshold to filter sites near poly-A",
-        long_help = "Filter out methylation sites within this distance (bp) from detected poly-A sites."
-    )]
-    polya_filter_distance: i64,
 }
 
 fn uniq_batch_names(bam_files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {

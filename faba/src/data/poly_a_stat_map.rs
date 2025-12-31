@@ -157,6 +157,46 @@ impl DnaStatMap for PolyASiteMap {
     }
 }
 
+impl PolyASiteMap {
+    /// Get cell-level counts at a specific position
+    /// Returns None if position doesn't exist or cell barcode tracking is not enabled
+    pub fn get_cell_counts_at(&self, position: i64) -> Option<&HashMap<CellBarcode, usize>> {
+        self.position_to_count_with_cell
+            .as_ref()
+            .and_then(|map| map.get(&position))
+    }
+
+    /// Get total count at a specific position (aggregated across all cells)
+    /// Returns 0 if position doesn't exist
+    pub fn get_total_count_at(&self, position: i64) -> usize {
+        if let Some(map) = &self.position_to_count_with_cell {
+            map.get(&position)
+                .map(|cell_map| cell_map.values().sum())
+                .unwrap_or(0)
+        } else if let Some(map) = &self.position_to_count {
+            map.get(&position).copied().unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    /// Get all positions with their total counts
+    /// Returns a vector of (position, count) tuples sorted by position
+    pub fn positions_with_counts(&self) -> Vec<(i64, usize)> {
+        let mut result: Vec<(i64, usize)> = if let Some(map) = &self.position_to_count_with_cell {
+            map.iter()
+                .map(|(pos, cell_map)| (*pos, cell_map.values().sum()))
+                .collect()
+        } else if let Some(map) = &self.position_to_count {
+            map.iter().map(|(pos, count)| (*pos, *count)).collect()
+        } else {
+            Vec::new()
+        };
+        result.sort_by_key(|(pos, _)| *pos);
+        result
+    }
+}
+
 /// Get the query alignment boundaries from CIGAR string
 /// Returns (start, end) positions in the query sequence (0-based, half-open)
 fn get_query_alignment_bounds(cigar: &[Cigar], seq_len: usize) -> (usize, usize) {

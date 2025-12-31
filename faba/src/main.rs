@@ -7,12 +7,14 @@ mod hypothesis_tests;
 mod read_coverage;
 mod run_dartseq_count;
 mod run_gene_count;
+mod run_polya_count;
 mod run_read_depth;
 mod scan_pwm;
 
 use crate::common::*;
 use run_dartseq_count::*;
 use run_gene_count::*;
+use run_polya_count::*;
 use run_read_depth::*;
 // use scan_pwm::*; not ready yet
 
@@ -31,6 +33,9 @@ enum Commands {
     CountDartSeq(DartSeqCountArgs),
     /// Count the number of reads mapped on each gene
     CountGenes(GeneCountArgs),
+    /// Count poly-A sites at cell level
+    #[command(aliases = ["count-polya", "polya"])]
+    CountPolyA(PolyACountArgs),
     /// Genomic coverage of regular intervals
     ReadDepth(ReadDepthArgs),
 }
@@ -46,6 +51,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::CountGenes(args) => {
             run_gene_count(args)?;
+        }
+        Commands::CountPolyA(args) => {
+            run_count_polya(args)?;
         }
     }
 
