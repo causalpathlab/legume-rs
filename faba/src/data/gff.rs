@@ -18,7 +18,7 @@ pub struct GffRecordMap {
 
 /// read gff records including multiple annotations per gene
 pub fn read_gff_record_vec(file_path: &str) -> anyhow::Result<Vec<GffRecord>> {
-    let lines_of_words = read_lines_of_words_delim(file_path, &['\t', ','], -1)?.lines;
+    let lines_of_words = read_lines_of_words_delim(file_path, &['\t'], -1)?.lines;
 
     Ok(lines_of_words
         .into_iter()
@@ -27,8 +27,12 @@ pub fn read_gff_record_vec(file_path: &str) -> anyhow::Result<Vec<GffRecord>> {
         .collect::<Vec<_>>())
 }
 
-/// take specific type of records and stretch out the start and stop
+/// Take specific type of records and stretch out the start and stop
 /// positions
+///
+/// * `records`: a vector of Gff records
+/// * `feature_type`: optionally select a specific type of gene feature
+///
 pub fn build_gene_map(
     records: &Vec<GffRecord>,
     feature_type: Option<&FeatureType>,
@@ -124,101 +128,149 @@ impl QuickStat for HashMap<GeneId, GffRecord> {
     }
 }
 
-pub struct UTRMap {
-    pub five_prime: HashMap<GeneId, GffRecord>,
-    pub three_prime: HashMap<GeneId, GffRecord>,
+/// Union gene model containing gene boundaries, CDS, and UTR maps
+pub struct UnionGeneModel {
+    pub gene_boundaries: HashMap<GeneId, GffRecord>,
+    pub cds: HashMap<GeneId, GffRecord>,
+    pub five_prime_utr: HashMap<GeneId, GffRecord>,
+    pub three_prime_utr: HashMap<GeneId, GffRecord>,
 }
 
-pub fn build_utr_map(records: &Vec<GffRecord>) -> anyhow::Result<UTRMap> {
-    // Use build_codon_map to select the canonical start/stop codon per gene based on strand
-    let start_codons = build_codon_map(records, &FeatureType::StartCodon)?;
-    let stop_codons = build_codon_map(records, &FeatureType::StopCodon)?;
+/// Helper function: Insert or extend a record in a HashMap
+fn insert_or_extend_record(map: &HashMap<GeneId, GffRecord>, gene_id: &GeneId, rec: &GffRecord) {
+    if let Some(mut existing) = map.get_mut(gene_id) {
+        let existing = existing.value_mut();
+        existing.start = existing.start.min(rec.start);
+        existing.stop = existing.stop.max(rec.stop);
+    } else {
+        map.insert(gene_id.clone(), rec.clone());
+    }
+}
 
-    let five_prime: HashMap<GeneId, GffRecord> = HashMap::new();
-    let three_prime: HashMap<GeneId, GffRecord> = HashMap::new();
+/// Helper function: Calculate distance between two genomic regions
+fn distance_between_regions(
+    rec1_start: i64,
+    rec1_stop: i64,
+    rec2_start: i64,
+    rec2_stop: i64,
+) -> i64 {
+    if rec1_stop < rec2_start {
+        rec2_start - rec1_stop
+    } else if rec1_start > rec2_stop {
+        rec1_start - rec2_stop
+    } else {
+        0 // Overlapping
+    }
+}
 
-    for new_rec in records.iter().cloned() {
-        if new_rec.feature_type == FeatureType::UTR {
-            if let (Some(start), Some(stop)) = (
-                start_codons
-                    .get(&new_rec.gene_id)
-                    .as_ref()
-                    .map(|x| x.value()),
-                stop_codons
-                    .get(&new_rec.gene_id)
-                    .as_ref()
-                    .map(|x| x.value()),
-            ) {
-                // Calculate minimum distance between UTR and each codon
-                // by finding the gap between the intervals (or overlap if negative)
-                let (d_to_start, d_to_stop) = match new_rec.strand {
-                    Strand::Forward => {
-                        // Forward: start codon is upstream (lower coords), stop is downstream (higher coords)
-                        let gap_to_start = if new_rec.stop < start.start {
-                            start.start - new_rec.stop // UTR before start codon
-                        } else if new_rec.start > start.stop {
-                            new_rec.start - start.stop // UTR after start codon
-                        } else {
-                            0 // Overlapping
-                        };
-                        let gap_to_stop = if new_rec.stop < stop.start {
-                            stop.start - new_rec.stop // UTR before stop codon
-                        } else if new_rec.start > stop.stop {
-                            new_rec.start - stop.stop // UTR after stop codon
-                        } else {
-                            0 // Overlapping
-                        };
-                        (gap_to_start, gap_to_stop)
-                    }
-                    Strand::Backward => {
-                        // Backward: start codon is downstream (higher coords), stop is upstream (lower coords)
-                        let gap_to_start = if new_rec.start > start.stop {
-                            new_rec.start - start.stop // UTR after start codon (5' direction)
-                        } else if new_rec.stop < start.start {
-                            start.start - new_rec.stop // UTR before start codon
-                        } else {
-                            0 // Overlapping
-                        };
-                        let gap_to_stop = if new_rec.stop < stop.start {
-                            stop.start - new_rec.stop // UTR before stop codon (3' direction)
-                        } else if new_rec.start > stop.stop {
-                            new_rec.start - stop.stop // UTR after stop codon
-                        } else {
-                            0 // Overlapping
-                        };
-                        (gap_to_start, gap_to_stop)
-                    }
-                };
+/// Build CDS map from existing CDS annotations and start/stop codons
+fn build_cds_map(
+    records: &Vec<GffRecord>,
+    start_codons: &HashMap<GeneId, GffRecord>,
+    stop_codons: &HashMap<GeneId, GffRecord>,
+) -> HashMap<GeneId, GffRecord> {
+    let cds: HashMap<GeneId, GffRecord> = HashMap::new();
 
-                let gene_id = &new_rec.gene_id;
-                if d_to_start < d_to_stop {
-                    if five_prime.contains_key(gene_id) {
-                        if let Some(mut rec) = five_prime.get_mut(gene_id) {
-                            let rec = rec.value_mut();
-                            rec.start = rec.start.min(new_rec.start);
-                            rec.stop = rec.stop.max(new_rec.stop);
-                        }
-                    } else {
-                        five_prime.insert(gene_id.clone(), new_rec.clone());
-                    }
-                } else {
-                    if three_prime.contains_key(gene_id) {
-                        if let Some(mut rec) = three_prime.get_mut(gene_id) {
-                            let rec = rec.value_mut();
-                            rec.start = rec.start.min(new_rec.start);
-                            rec.stop = rec.stop.max(new_rec.stop);
-                        }
-                    } else {
-                        three_prime.insert(gene_id.clone(), new_rec.clone());
-                    }
-                }
-            }
+    // First, collect existing CDS annotations
+    for rec in records.iter() {
+        if rec.feature_type == FeatureType::CDS {
+            insert_or_extend_record(&cds, &rec.gene_id, rec);
         }
     }
 
-    Ok(UTRMap {
-        five_prime,
-        three_prime,
+    // Then, extend using start and stop codons
+    for entry in start_codons.iter() {
+        let gene_id = entry.key();
+        let start_rec = entry.value();
+
+        if let Some(stop_rec) = stop_codons.get(gene_id) {
+            let stop_rec = stop_rec.value();
+            let mut cds_rec = start_rec.clone();
+            cds_rec.feature_type = FeatureType::CDS;
+            cds_rec.start = start_rec.start.min(stop_rec.start);
+            cds_rec.stop = start_rec.stop.max(stop_rec.stop);
+            cds.insert(gene_id.clone(), cds_rec);
+        }
+    }
+
+    cds
+}
+
+/// Build UTR maps from explicit and generic UTR features
+fn build_utr_maps(
+    records: &Vec<GffRecord>,
+    start_codons: &HashMap<GeneId, GffRecord>,
+    stop_codons: &HashMap<GeneId, GffRecord>,
+) -> (HashMap<GeneId, GffRecord>, HashMap<GeneId, GffRecord>) {
+    let five_prime_utr: HashMap<GeneId, GffRecord> = HashMap::new();
+    let three_prime_utr: HashMap<GeneId, GffRecord> = HashMap::new();
+
+    for rec in records.iter() {
+        let gene_id = &rec.gene_id;
+
+        match rec.feature_type {
+            FeatureType::FivePrimeUTR => {
+                insert_or_extend_record(&five_prime_utr, gene_id, rec);
+            }
+            FeatureType::ThreePrimeUTR => {
+                insert_or_extend_record(&three_prime_utr, gene_id, rec);
+            }
+            FeatureType::UTR => {
+                // Classify generic UTR by distance to start/stop codons
+                if let (Some(start_codon_rec), Some(stop_codon_rec)) = (
+                    start_codons.get(gene_id).as_ref().map(|x| x.value()),
+                    stop_codons.get(gene_id).as_ref().map(|x| x.value()),
+                ) {
+                    let dist_to_start = distance_between_regions(
+                        rec.start,
+                        rec.stop,
+                        start_codon_rec.start,
+                        start_codon_rec.stop,
+                    );
+                    let dist_to_stop = distance_between_regions(
+                        rec.start,
+                        rec.stop,
+                        stop_codon_rec.start,
+                        stop_codon_rec.stop,
+                    );
+
+                    if dist_to_start <= dist_to_stop {
+                        insert_or_extend_record(&five_prime_utr, gene_id, rec);
+                    } else {
+                        insert_or_extend_record(&three_prime_utr, gene_id, rec);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (five_prime_utr, three_prime_utr)
+}
+
+/// Build a union gene model for each gene
+/// 1. Find the longest region using Gff/Gtf's "gene" feature
+/// 2. Create CDS as the union of start codon to stop codon regions
+/// 3. Create 5'UTR and 3'UTR unions based on distance to codons
+pub fn build_union_gene_model(records: &Vec<GffRecord>) -> anyhow::Result<UnionGeneModel> {
+    // Build gene boundaries from "gene" features
+    let gene_boundaries = build_gene_map(records, Some(&FeatureType::Gene))?;
+
+    // Get canonical start and stop codons
+    let start_codons = build_codon_map(records, &FeatureType::StartCodon)?;
+    let stop_codons = build_codon_map(records, &FeatureType::StopCodon)?;
+
+    // Build CDS map
+    let cds = build_cds_map(records, &start_codons, &stop_codons);
+
+    // Build UTR maps
+    let (five_prime_utr, three_prime_utr) = build_utr_maps(records, &start_codons, &stop_codons);
+
+    Ok(UnionGeneModel {
+        gene_boundaries,
+        cds,
+        five_prime_utr,
+        three_prime_utr,
     })
 }
 
@@ -226,9 +278,7 @@ impl GffRecordMap {
     /// Get GFF record mapping: one gene to one record
     pub fn from(file_path: &str) -> anyhow::Result<Self> {
         let parsed_records = read_gff_record_vec(file_path)?;
-
         let records = build_gene_map(&parsed_records, Some(&FeatureType::Gene))?;
-
         Ok(Self { records })
     }
 
@@ -309,6 +359,8 @@ pub enum FeatureType {
     Exon,
     CDS,
     UTR,
+    FivePrimeUTR,
+    ThreePrimeUTR,
     StartCodon,
     StopCodon,
     Other,
@@ -322,6 +374,8 @@ impl From<&str> for FeatureType {
             "exon" => FeatureType::Exon,
             "CDS" | "cds" => FeatureType::CDS,
             "UTR" | "utr" => FeatureType::UTR,
+            "five_prime_UTR" | "5UTR" | "five_prime_utr" => FeatureType::FivePrimeUTR,
+            "three_prime_UTR" | "3UTR" | "three_prime_utr" => FeatureType::ThreePrimeUTR,
             "start_codon" | "start" => FeatureType::StartCodon,
             "stop_codon" | "stop" => FeatureType::StopCodon,
             _ => FeatureType::Other,
@@ -337,6 +391,8 @@ impl From<FeatureType> for Box<str> {
             FeatureType::Exon => Box::from("exon"),
             FeatureType::CDS => Box::from("CDS"),
             FeatureType::UTR => Box::from("UTR"),
+            FeatureType::FivePrimeUTR => Box::from("five_prime_UTR"),
+            FeatureType::ThreePrimeUTR => Box::from("three_prime_UTR"),
             FeatureType::StartCodon => Box::from("start_codon"),
             FeatureType::StopCodon => Box::from("stop_codon"),
             FeatureType::Other => Box::from("."),
