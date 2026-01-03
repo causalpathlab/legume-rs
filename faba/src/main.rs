@@ -31,12 +31,16 @@ enum Commands {
     /// Take DART-seq `C->U` (`C->T`) conversion counts
     #[command(aliases = ["count-dart", "dart"])]
     CountDartSeq(DartSeqCountArgs),
+
     /// Count the number of reads mapped on each gene
     CountGenes(GeneCountArgs),
+
     /// Count poly-A sites at cell level
     #[command(aliases = ["count-polya", "polya"])]
     CountPolyA(PolyACountArgs),
+
     /// Genomic coverage of regular intervals
+    #[command(aliases = ["rd", "read-depth"])]
     ReadDepth(ReadDepthArgs),
 }
 
