@@ -298,6 +298,10 @@ pub struct TakeColumnsArgs {
     #[arg(short = 'f', long)]
     name_file: Option<Box<str>>,
 
+    /// column names to take: e.g., `col1,col2,col3` (supports substring matching)
+    #[arg(short = 'n', long, value_delimiter = ',')]
+    column_names: Option<Vec<Box<str>>>,
+
     /// output `parquet` file
     #[arg(short, long, default_value = "stdout")]
     output: Box<str>,
@@ -315,6 +319,10 @@ pub struct TakeRowsArgs {
     /// row name file where each line is a row name
     #[arg(short = 'f', long)]
     name_file: Option<Box<str>>,
+
+    /// row names to take: e.g., `gene1,gene2,gene3` (supports substring matching)
+    #[arg(short = 'n', long, value_delimiter = ',')]
+    row_names: Option<Vec<Box<str>>>,
 
     /// output `parquet` file
     #[arg(short, long, default_value = "stdout")]
@@ -1446,6 +1454,7 @@ fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
 fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
     let columns = args.column_indices.clone();
     let column_name_file = args.name_file.clone();
+    let column_names_arg = args.column_names.clone();
 
     let (backend, data_file) = resolve_backend_file(&args.data_file, None)?;
 
@@ -1453,6 +1462,29 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
 
     let data = open_sparse_matrix(&data_file, &backend)?;
     let row_names = data.row_names()?;
+
+    // Closure for substring matching
+    let match_columns_by_substring = |queries: &[Box<str>]| -> anyhow::Result<(Vec<usize>, Vec<Box<str>>)> {
+        let all_column_names = data.column_names()?;
+        let mut matched_indices = Vec::new();
+
+        for query in queries.iter() {
+            for (idx, column_name) in all_column_names.iter().enumerate() {
+                if column_name.contains(query.as_ref()) {
+                    matched_indices.push(idx);
+                }
+            }
+        }
+
+        if matched_indices.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No column names matched the provided queries"
+            ));
+        }
+
+        let column_names: Vec<Box<str>> = matched_indices.iter().map(|&i| all_column_names[i].clone()).collect();
+        Ok((matched_indices, column_names))
+    };
 
     let (data, column_names) = if let Some(columns) = columns {
         let n_columns = data.num_columns().unwrap_or(0);
@@ -1467,28 +1499,15 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
 
         (data.read_columns_ndarray(columns)?, column_names)
     } else if let Some(column_file) = column_name_file {
-        let col_names = read_col_names(column_file, MAX_COLUMN_NAME_IDX)?;
-        let col_names_map = data
-            .column_names()?
-            .iter()
-            .enumerate()
-            .map(|(i, x)| (x.clone(), i))
-            .collect::<HashMap<_, _>>();
-
-        let col_names_order = col_names
-            .into_iter()
-            .filter_map(|x| col_names_map.get(&x))
-            .collect::<Vec<_>>();
-
-        let columns: Vec<usize> = col_names_order.iter().map(|&x| *x).collect();
-
-        let _names = data.column_names()?;
-        let column_names: Vec<Box<str>> = columns.iter().map(|&i| _names[i].clone()).collect();
-
-        (data.read_columns_ndarray(columns)?, column_names)
+        let col_names_to_match = read_col_names(column_file, MAX_COLUMN_NAME_IDX)?;
+        let (matched_indices, column_names) = match_columns_by_substring(&col_names_to_match)?;
+        (data.read_columns_ndarray(matched_indices)?, column_names)
+    } else if let Some(col_names_to_match) = column_names_arg {
+        let (matched_indices, column_names) = match_columns_by_substring(&col_names_to_match)?;
+        (data.read_columns_ndarray(matched_indices)?, column_names)
     } else {
         return Err(anyhow::anyhow!(
-            "either `column-indices` or `name-file` must be provided"
+            "either `column-indices`, `name-file`, or `column-names` must be provided"
         ));
     };
 
@@ -1507,12 +1526,36 @@ fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
 fn take_rows(args: &TakeRowsArgs) -> anyhow::Result<()> {
     let rows = args.row_indices.clone();
     let row_name_file = args.name_file.clone();
+    let row_names_arg = args.row_names.clone();
 
     let (backend, data_file) = resolve_backend_file(&args.data_file, None)?;
 
     let output = args.output.clone();
 
     let data_backend = open_sparse_matrix(&data_file, &backend)?;
+
+    // Closure for substring matching
+    let match_rows_by_substring = |queries: &[Box<str>]| -> anyhow::Result<(Vec<usize>, Vec<Box<str>>)> {
+        let all_row_names = data_backend.row_names()?;
+        let mut matched_indices = Vec::new();
+
+        for query in queries.iter() {
+            for (idx, row_name) in all_row_names.iter().enumerate() {
+                if row_name.contains(query.as_ref()) {
+                    matched_indices.push(idx);
+                }
+            }
+        }
+
+        if matched_indices.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No row names matched the provided queries"
+            ));
+        }
+
+        let row_names: Vec<Box<str>> = matched_indices.iter().map(|&i| all_row_names[i].clone()).collect();
+        Ok((matched_indices, row_names))
+    };
 
     let (data, row_names) = if let Some(rows) = rows {
         let n_rows = data_backend.num_rows().unwrap_or(0);
@@ -1527,28 +1570,15 @@ fn take_rows(args: &TakeRowsArgs) -> anyhow::Result<()> {
 
         (data_backend.read_rows_ndarray(rows)?, row_names)
     } else if let Some(row_name_file) = row_name_file {
-        let col_names = read_col_names(row_name_file, MAX_ROW_NAME_IDX)?;
-        let col_names_map = data_backend
-            .row_names()?
-            .iter()
-            .enumerate()
-            .map(|(i, x)| (x.clone(), i))
-            .collect::<HashMap<_, _>>();
-
-        let col_names_order = col_names
-            .into_iter()
-            .filter_map(|x| col_names_map.get(&x))
-            .collect::<Vec<_>>();
-
-        let rows: Vec<usize> = col_names_order.iter().map(|&x| *x).collect();
-
-        let _names = data_backend.row_names()?;
-        let row_names: Vec<Box<str>> = rows.iter().map(|&i| _names[i].clone()).collect();
-
-        (data_backend.read_rows_ndarray(rows)?, row_names)
+        let row_names_to_match = read_col_names(row_name_file, MAX_ROW_NAME_IDX)?;
+        let (matched_indices, row_names) = match_rows_by_substring(&row_names_to_match)?;
+        (data_backend.read_rows_ndarray(matched_indices)?, row_names)
+    } else if let Some(row_names_to_match) = row_names_arg {
+        let (matched_indices, row_names) = match_rows_by_substring(&row_names_to_match)?;
+        (data_backend.read_rows_ndarray(matched_indices)?, row_names)
     } else {
         return Err(anyhow::anyhow!(
-            "either `row-indices` or `name-file` must be provided"
+            "either `row-indices`, `name-file`, or `row-names` must be provided"
         ));
     };
 
