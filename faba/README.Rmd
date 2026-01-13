@@ -1,3 +1,4 @@
-# extracting Features from Alignment data for Base-pair-level Analysis
+# Feature extraction from Alignment for Base-pair Annotation
+
 
 

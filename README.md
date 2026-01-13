@@ -1,4 +1,4 @@
-# `legume-rs`: Library for Expedited Genomic data analysis with Unsupervised Machine learning Estimators
+# `legume-rs`: Library for Exploring Genomics Using Machine learning Essentials
 
 - This is a command line based tool runs on Unix-like environments.
 
@@ -11,10 +11,10 @@
 2. You can install different binary files in your local executable directory (e.g., `~/.cargo/bin/`).
 
 ```{sh}
-cargo install --path data-beans # utility functions for sparse data management
-cargo install --path senna      # single-cell embedding with nearest neighbourhood adjustment
-cargo install --path pinto      # proximity-based interaction network analysis
-cargo install --path cocoa-diff # counterfactual confounder adjustment
-cargo install --path faba       # BAM file parsing to extract a feature matrix
+cargo install --path data-beans # Data Backend for Extraction And Neighbourhood Search
+cargo install --path senna      # Stochastic data Embedding with Nearest Neighbourhood Adjustment
+cargo install --path pinto      # Proximity-based Interaction Network for Tissue Organization
+cargo install --path cocoa      # COunterfactual COnfounder Adjustment
+cargo install --path faba       # Feature extraction from Alignment for Base-pair Annotation
 ```
 
