@@ -1,4 +1,4 @@
-# Proximity-based Interaction Network analysis to dissect Tissue Organization
+# Proximity-based Interaction Network for Tissue Organization
 
 
 
