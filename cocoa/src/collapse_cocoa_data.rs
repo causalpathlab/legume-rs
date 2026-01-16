@@ -27,15 +27,15 @@ impl CocoaCollapseOps for SparseIoVec {
     ) -> anyhow::Result<CocoaStat> {
         let n_genes = cocoa_input.n_genes;
         let n_topics = cocoa_input.n_topics;
-        let n_cells = self.num_columns()?;
+        let n_cells = self.num_columns();
         let n_indv = self.num_batches();
 
         let pb_samples = self
             .take_grouped_columns()
             .ok_or(anyhow::anyhow!("should have pseudobulk samples assigned"))?;
 
-        assert_eq!(n_cells, self.num_columns()?);
-        assert_eq!(n_genes, self.num_rows()?);
+        assert_eq!(n_cells, self.num_columns());
+        assert_eq!(n_genes, self.num_rows());
         assert_eq!(n_cells, cocoa_input.cell_topic_nk.nrows());
         assert_eq!(n_topics, cocoa_input.cell_topic_nk.ncols());
 
@@ -101,7 +101,7 @@ fn collect_matched_stat_visitor(
     input: &CocoaCollapseIn,              //
     arc_stat: Arc<Mutex<&mut CocoaStat>>, // fill in y0 for this sample `s`
 ) -> anyhow::Result<()> {
-    assert_eq!(data.num_rows().expect("data # features"), input.n_genes);
+    assert_eq!(data.num_rows(), input.n_genes);
 
     let mut y0_dk = Mat::zeros(input.n_genes, input.n_topics);
 
@@ -170,7 +170,7 @@ fn collect_basic_stat_visitor(
     input: &CocoaCollapseIn,              //
     arc_stat: Arc<Mutex<&mut CocoaStat>>, // fill in y1
 ) -> anyhow::Result<()> {
-    assert_eq!(data.num_rows().expect("data # features"), input.n_genes);
+    assert_eq!(data.num_rows(), input.n_genes);
 
     let kk = input.n_topics;
     let y1_dn = data.read_columns_csc(cells.iter().cloned())?;

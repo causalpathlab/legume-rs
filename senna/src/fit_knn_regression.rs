@@ -202,8 +202,8 @@ pub fn fit_knn_regression(args: &KnnImputeArgs) -> anyhow::Result<()> {
         },
     )?;
 
-    let n_y = y_data.num_columns()?;
-    let n_x = x_data.num_columns()?;
+    let n_y = y_data.num_columns();
+    let n_x = x_data.num_columns();
     let n_tot = n_x + n_y;
 
     info!("randomized SVD on the projected data");
@@ -309,7 +309,7 @@ pub fn fit_knn_regression(args: &KnnImputeArgs) -> anyhow::Result<()> {
             })
             .collect::<anyhow::Result<()>>()?;
 
-        let nrows = y_data.num_rows()?;
+        let nrows = y_data.num_rows();
         let ncols = n_x;
         let nnz = full_triplets.len();
 
@@ -333,7 +333,7 @@ fn project_columns(
     batch_membership: &[Box<str>],
     basis: &BasisOnSubsetRows,
 ) -> anyhow::Result<Mat> {
-    let mut proj_kn = Mat::zeros(basis.basis_dk.ncols(), data.num_columns()?);
+    let mut proj_kn = Mat::zeros(basis.basis_dk.ncols(), data.num_columns());
 
     data.visit_columns_by_block(&project_columns_visitor, basis, &mut proj_kn, None)?;
 

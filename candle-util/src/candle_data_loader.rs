@@ -236,7 +236,7 @@ impl DataLoader for InMemoryData {
 
 // impl<'a> SparseIoVecData<'a> {
 //     pub fn new(data: &'a SparseIoVec) -> anyhow::Result<Self> {
-//         let samples = (0..data.num_columns()?).collect();
+//         let samples = (0..data.num_columns()).collect();
 //         Ok(SparseIoVecData {
 //             data,
 //             minibatches: Minibatches {

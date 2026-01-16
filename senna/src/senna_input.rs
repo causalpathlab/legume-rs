@@ -75,11 +75,11 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
         }
     }
 
-    if batch_membership.len() != data_vec.num_columns()? {
+    if batch_membership.len() != data_vec.num_columns() {
         return Err(anyhow::anyhow!(
             "# batch membership {} != # of columns {}",
             batch_membership.len(),
-            data_vec.num_columns()?
+            data_vec.num_columns()
         ));
     }
 
@@ -168,7 +168,7 @@ pub fn read_data_on_shared_columns(
 
     if let Some(batch_files) = &args.batch_files {
         for (data_vec, batch_file) in data_stack.stack.iter_mut().zip(batch_files) {
-            let ntot = data_vec.num_columns()?;
+            let ntot = data_vec.num_columns();
             let mut batch_membership = Vec::with_capacity(ntot);
 
             info!("Reading batch file: {}", batch_file);
@@ -183,7 +183,7 @@ pub fn read_data_on_shared_columns(
         }
     } else {
         for data_vec in data_stack.stack.iter_mut() {
-            let ntot = data_vec.num_columns()?;
+            let ntot = data_vec.num_columns();
             let mut batch_membership = Vec::with_capacity(ntot);
             for (id, &nn) in data_vec.num_columns_by_data()?.iter().enumerate() {
                 batch_membership.extend(vec![id.to_string().into_boxed_str(); nn]);

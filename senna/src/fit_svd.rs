@@ -250,8 +250,8 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             let triplets = triplets_adjusted_by_pseudobulk(&data_vec, delta_dp)?;
 
             let mtx_shape = (
-                data_vec.num_rows()?,
-                data_vec.num_columns()?,
+                data_vec.num_rows(),
+                data_vec.num_columns(),
                 triplets.len(),
             );
 
@@ -360,7 +360,7 @@ fn do_nystrom_proj(
         u_dk.ncols()
     );
 
-    let ntot = full_data_vec.num_columns()?;
+    let ntot = full_data_vec.num_columns();
     let kk = rank;
 
     let nystrom_param = NystromParam {

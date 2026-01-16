@@ -128,7 +128,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         let data_vertices = data_vec.column_names()?;
 
         let jobs = matrix_util::utils::generate_minibatch_intervals(
-            data_vec.num_columns()?,
+            data_vec.num_columns(),
             args.block_size,
         );
 

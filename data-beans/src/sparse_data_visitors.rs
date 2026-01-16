@@ -58,7 +58,7 @@ impl VisitColumnsOps for SparseIoVec {
         SharedIn: Sync + Send + ?Sized,
         SharedOut: Sync + Send,
     {
-        let ntot = self.num_columns()?;
+        let ntot = self.num_columns();
         let jobs = create_jobs(ntot, block_size);
 
         let arc_shared_out = Arc::new(Mutex::new(shared_out));

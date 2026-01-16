@@ -30,6 +30,8 @@ pub struct SparseIoVec {
     batch_to_cols: Option<Vec<Vec<usize>>>,
     batch_idx_to_name: Option<Vec<Box<str>>>,
     between_batch_proximity: Option<Vec<Vec<usize>>>,
+    cached_num_rows: usize,
+    cached_num_columns: usize,
 }
 
 pub struct TripletsMatched {
@@ -72,6 +74,8 @@ impl SparseIoVec {
             batch_to_cols: None,
             batch_idx_to_name: None,
             between_batch_proximity: None,
+            cached_num_rows: 0,
+            cached_num_columns: 0,
         }
     }
 
@@ -85,34 +89,26 @@ impl SparseIoVec {
     /// * `column_to_group` - column to group membership
     /// * `ncolumns_per_group` - number of columns per group. `None`: assign all the columns to the groups; `Some(x)`: limit the maximum number of columns per group to at most `x`.
     ///
-    pub fn assign_groups<T>(
-        &mut self,
-        column_to_group: &[T],
-        ncolumns_per_group: Option<usize>,
-    )
+    pub fn assign_groups<T>(&mut self, column_to_group: &[T], ncolumns_per_group: Option<usize>)
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
         let partitions = partition_by_membership(column_to_group, ncolumns_per_group);
 
         // Sort by keys to ensure consistent ordering
-        let mut sorted_partitions: Vec<_> = partitions.into_iter().collect();
-        sorted_partitions.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
-
-        let group_keys: Vec<Box<str>> = sorted_partitions
-            .iter()
-            .map(|(key, _)| key.to_string().into_boxed_str())
-            .collect();
-
-        let group_to_cols: Vec<Vec<usize>> = sorted_partitions
+        let mut sorted_partitions: Vec<_> = partitions
             .into_iter()
-            .map(|(_, cols)| cols)
+            .map(|(k, cols)| (k.to_string().into_boxed_str(), cols))
             .collect();
+        sorted_partitions.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let (group_keys, group_to_cols): (Vec<Box<str>>, Vec<Vec<usize>>) =
+            sorted_partitions.into_iter().unzip();
 
         let col_to_group: HashMap<_, _> = group_to_cols
             .iter()
             .enumerate()
-            .flat_map(|(g, cols)| cols.iter().map(|&j| (j, g)).collect::<Vec<_>>())
+            .flat_map(|(g, cols)| cols.iter().map(move |&j| (j, g)))
             .collect();
 
         self.group_keys = Some(group_keys);
@@ -171,16 +167,14 @@ impl SparseIoVec {
             .as_ref()
             .expect("groups were not assigned");
 
-        let mut ret = vec![];
-        for j in cells {
-            if let Some(k) = cell_to_group.get(&j) {
-                ret.push(*k);
-            } else {
-                return Err(anyhow::anyhow!("missing group membership"));
-            }
-        }
-
-        Ok(ret)
+        cells
+            .map(|j| {
+                cell_to_group
+                    .get(&j)
+                    .copied()
+                    .ok_or_else(|| anyhow::anyhow!("missing group membership"))
+            })
+            .collect()
     }
 
     /// number of groups
@@ -203,11 +197,7 @@ impl SparseIoVec {
             debug_assert!(self.col_glob_to_loc.len() == self.offset);
             debug_assert!(self.col_to_data.len() == self.offset);
             let didx = self.data_vec.len();
-            self.data_to_cols.insert(didx, vec![]);
-            let data_to_cells = self
-                .data_to_cols
-                .get_mut(&didx)
-                .ok_or(anyhow::anyhow!("failed to take didx {}", didx))?;
+            let data_to_cells = self.data_to_cols.entry(didx).or_insert_with(Vec::new);
 
             for loc in 0..ncol_data {
                 let glob = loc + self.offset;
@@ -246,6 +236,12 @@ impl SparseIoVec {
 
             self.data_vec.push(data.clone());
             self.offset += ncol_data;
+
+            // Update cached values
+            self.cached_num_columns += ncol_data;
+            let nrow_data = data.num_rows().unwrap_or(0);
+            self.cached_num_rows = self.cached_num_rows.max(nrow_data);
+
             info!("Added {} columns", self.offset);
         } else {
             return Err(anyhow::anyhow!("data file has no columns"));
@@ -268,15 +264,8 @@ impl SparseIoVec {
         Ok(())
     }
 
-    pub fn num_rows(&self) -> anyhow::Result<usize> {
-        let mut ret = 0;
-        for dat in self.data_vec.iter() {
-            let nr = dat
-                .num_rows()
-                .ok_or(anyhow::anyhow!("can't figure out the number of rows"))?;
-            ret = ret.max(nr);
-        }
-        Ok(ret)
+    pub fn num_rows(&self) -> usize {
+        self.cached_num_rows
     }
 
     pub fn num_non_zeros(&self) -> anyhow::Result<usize> {
@@ -291,15 +280,8 @@ impl SparseIoVec {
     }
 
     /// total number of columns across all data files
-    pub fn num_columns(&self) -> anyhow::Result<usize> {
-        let mut ret = 0;
-        for data in self.data_vec.iter() {
-            let nc = data
-                .num_columns()
-                .ok_or(anyhow::anyhow!("can't figure out the number of columns"))?;
-            ret += nc;
-        }
-        Ok(ret)
+    pub fn num_columns(&self) -> usize {
+        self.cached_num_columns
     }
 
     ////////////////////
@@ -314,17 +296,17 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let mut triplets = vec![];
-        let mut nrow = 0_usize;
+
+        let nrow = self.num_rows();
         let mut ncol = 0_usize;
         // Note: each cell is a global index
         for glob in cells {
             let didx = self.col_to_data[glob];
             let loc = self.col_glob_to_loc[glob];
 
-            let (loc_nrow, loc_ncol, loc_triplets) =
+            let (_nrow, loc_ncol, loc_triplets) =
                 self.data_vec[didx].read_triplets_by_single_column(loc)?;
 
-            nrow = nrow.max(loc_nrow);
             triplets.extend(
                 loc_triplets
                     .iter()
@@ -413,25 +395,14 @@ impl SparseIoVec {
             .as_ref()
             .ok_or(anyhow::anyhow!("no cell to batch"))?;
 
-        let mut approx_ncol = 0;
-        for glob in cells.clone() {
-            let source_batch = cell_to_batch[glob]; // this cell's batch
-
-            if skip_same_batch && source_batch == target_batch {
-                continue; // skip cells in the same batch
-            }
-            approx_ncol += knn;
-        }
-
         debug_assert!(target_batch < self.num_batches());
 
-        let nrow = self.num_rows()?;
+        let nrow = self.num_rows();
         let mut ncol = 0;
-        let mut triplets = Vec::with_capacity(approx_ncol * nrow);
-
-        let mut distances = Vec::with_capacity(approx_ncol);
-        let mut source_columns = Vec::with_capacity(approx_ncol);
-        // let mut source_positions = Vec::with_capacity(approx_ncol);
+        let mut triplets = Vec::new();
+        let mut distances = Vec::new();
+        let mut source_columns = Vec::new();
+        // let mut source_positions = Vec::new();
 
         for glob in cells {
             let source_batch = cell_to_batch[glob]; // this cell's batch
@@ -500,7 +471,7 @@ impl SparseIoVec {
     {
         let cells: Vec<usize> = cells.collect();
 
-        let nrows = self.num_rows()?;
+        let nrows = self.num_rows();
         let nbatches = self.num_batches();
         let ncols = cells.len();
         let approx_ncols = ncols * knn_columns * nbatches;
@@ -580,7 +551,7 @@ impl SparseIoVec {
 
         let approx_ncol = knn_columns * knn_batches;
 
-        let nrow = self.num_rows()?;
+        let nrow = self.num_rows();
         let mut ncol = 0_usize;
         let mut triplets = Vec::with_capacity(approx_ncol * nrow);
 
@@ -593,16 +564,18 @@ impl SparseIoVec {
         for glob_index in cells {
             let source_batch = cell_to_batch[glob_index]; // this cell's batch
 
-            let _batches: Vec<usize> = match self.between_batch_proximity.as_ref() {
-                Some(prox) => prox[source_batch].to_vec(),
-                _ => (0..nbatches).collect(),
+            let neighbouring_batches: Vec<usize> = match self.between_batch_proximity.as_ref() {
+                Some(prox) => prox[source_batch]
+                    .iter()
+                    .copied()
+                    .filter(|&batch| skip_batches.is_none_or(|skip| !skip.contains(&batch)))
+                    .filter(|&batch| !skip_same_batch || batch != source_batch)
+                    .collect(),
+                _ => (0..nbatches)
+                    .filter(|&batch| skip_batches.is_none_or(|skip| !skip.contains(&batch)))
+                    .filter(|&batch| !skip_same_batch || batch != source_batch)
+                    .collect(),
             };
-
-            let neighbouring_batches: Vec<usize> = _batches
-                .into_iter()
-                .filter(|&batch| skip_batches.is_none_or(|skip| !skip.contains(&batch)))
-                .filter(|&batch| !skip_same_batch || batch != source_batch)
-                .collect();
 
             for target_batch in neighbouring_batches {
                 if let (Some(source_lookup), Some(target_lookup)) =
@@ -659,7 +632,7 @@ impl SparseIoVec {
             .as_ref()
             .ok_or(anyhow::anyhow!("no knn lookup"))?;
 
-        let nrow = self.num_rows()?;
+        let nrow = self.num_rows();
         let mut ncol = 0_usize;
 
         let approx_knn = self.num_batches() * knn_per_batch;
@@ -1105,7 +1078,7 @@ impl SparseIoVec {
     {
         let batches = partition_by_membership(batch_membership, None);
 
-        let ntot = self.num_columns()?;
+        let ntot = self.num_columns();
         let mut col_to_batch = vec![0; ntot];
 
         let mut idx_name_glob_dict = batches
@@ -1239,12 +1212,12 @@ impl SparseIoVec {
     }
 
     pub fn column_names(&self) -> anyhow::Result<Vec<Box<str>>> {
-        debug_assert_eq!(self.num_columns()?, self.column_names_with_data_tag.len());
+        debug_assert_eq!(self.num_columns(), self.column_names_with_data_tag.len());
         Ok(self.column_names_with_data_tag.clone())
     }
 
     pub fn row_names(&self) -> anyhow::Result<Vec<Box<str>>> {
-        let ntot = self.num_rows()?;
+        let ntot = self.num_rows();
         debug_assert_eq!(ntot, self.row_name_position.len());
         let mut ret = vec![Box::from(""); ntot];
         for (row, &index) in &self.row_name_position {

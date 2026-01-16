@@ -49,8 +49,6 @@ impl SparseIoStack {
         self.stack
             .iter()
             .map(|x| x.num_columns())
-            .collect::<anyhow::Result<Vec<_>>>()?
-            .into_iter()
             .max()
             .ok_or(anyhow::anyhow!("can't figure out the max"))
     }
