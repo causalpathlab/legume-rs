@@ -232,6 +232,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         delta_vec,
         &data_stack,
         n_topics,
+        args.column_sum_norm,
         Some(args.block_size),
     )?;
 
@@ -258,6 +259,7 @@ fn do_nystrom_proj(
     delta_dp_vec: Vec<Option<&Mat>>,
     full_data: &SparseIoStack,
     rank: usize,
+    column_sum_norm: f32,
     block_size: Option<usize>,
 ) -> anyhow::Result<NystromOut> {
     // 1. construct a tall xx matrix and perform one svd
@@ -283,7 +285,11 @@ fn do_nystrom_proj(
         let basis_dk = &basis_vec[d];
         let delta_dp = delta_dp_vec[d];
 
-        let nystrom_param = NystromParam { basis_dk, delta_dp };
+        let nystrom_param = NystromParam {
+            basis_dk,
+            delta_dp,
+            column_sum_norm,
+        };
 
         let mut proj_kn = Mat::zeros(kk, ntot);
         data_vec.visit_columns_by_block(
@@ -309,6 +315,7 @@ fn do_nystrom_proj(
 struct NystromParam<'a> {
     basis_dk: &'a Mat,
     delta_dp: Option<&'a Mat>,
+    column_sum_norm: f32,
 }
 
 struct NystromOut {
@@ -326,10 +333,12 @@ fn nystrom_proj_visitor(
     // let proj_dk = proj_basis.dictionary_dk;
     let basis_dk = proj_basis.basis_dk;
     let delta_dp = proj_basis.delta_dp;
+    let column_sum_norm = proj_basis.column_sum_norm;
 
     let mut x_dn = full_data_vec.read_columns_csc(lb..ub)?;
 
     x_dn.normalize_columns_inplace();
+    x_dn *= column_sum_norm;
 
     if let Some(delta_dp) = delta_dp {
         let pseudobulk = full_data_vec.get_group_membership(lb..ub)?;
