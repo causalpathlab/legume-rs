@@ -123,6 +123,16 @@ pub struct SvdArgs {
     block_size: usize,
 
     #[arg(
+        short = 'c',
+        long,
+        default_value_t = 1e4,
+        help = "Column sum normalization scale",
+        long_help = "Column sum normalization scale.\n\
+		     Adjusts normalization of columns during processing."
+    )]
+    column_sum_norm: f32,
+
+    #[arg(
         short = 't',
         long,
         default_value_t = 10,
@@ -281,6 +291,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         batch_dp.map(|x| x.posterior_mean()),
         &data_vec,
         args.n_latent_topics,
+        args.column_sum_norm,
         Some(args.block_size),
     )?;
 
@@ -307,6 +318,7 @@ struct NystromParam<'a> {
     dictionary_dk: &'a Mat,
     basis_dk: &'a Mat,
     delta_dp: Option<&'a Mat>,
+    column_sum_norm: f32,
 }
 
 struct NystromOut {
@@ -321,6 +333,7 @@ struct NystromOut {
 /// * `delta_db` - feature x batch batch effect matrix
 /// * `full_data_vec` - full sparse data vector
 /// * `rank` - matrix factorization rank
+/// * `column_sum_norm` - column sum normalization scale
 /// * `block_size` - online learning block size
 ///
 ///
@@ -329,6 +342,7 @@ fn do_nystrom_proj(
     delta_dp: Option<&Mat>,
     full_data_vec: &SparseIoVec,
     rank: usize,
+    column_sum_norm: f32,
     block_size: Option<usize>,
 ) -> anyhow::Result<NystromOut> {
     let mut log_xx_dn = log_xx_dn.clone();
@@ -353,6 +367,7 @@ fn do_nystrom_proj(
         dictionary_dk: &u_dk,
         basis_dk: &basis_dk,
         delta_dp,
+        column_sum_norm,
     };
 
     let mut proj_kn = Mat::zeros(kk, ntot);
@@ -382,10 +397,12 @@ fn nystrom_proj_visitor(
     // let proj_dk = proj_basis.dictionary_dk;
     let basis_dk = proj_basis.basis_dk;
     let delta_dp = proj_basis.delta_dp;
+    let column_sum_norm = proj_basis.column_sum_norm;
 
     let mut x_dn = full_data_vec.read_columns_csc(lb..ub)?;
 
     x_dn.normalize_columns_inplace();
+    x_dn *= column_sum_norm;
 
     if let Some(delta_dp) = delta_dp {
         let pseudobulk = full_data_vec.get_group_membership(lb..ub)?;
