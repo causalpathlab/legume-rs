@@ -327,7 +327,7 @@ impl<'a> SrtCellPairs<'a> {
     ) -> anyhow::Result<SrtCellPairs<'a>> {
         let nn = coordinates.nrows();
 
-        if data.num_columns()? != nn {
+        if data.num_columns() != nn {
             return Err(anyhow::anyhow!("incompatible data and coordinates"));
         }
 
@@ -408,7 +408,7 @@ impl<'a> SrtCellPairs<'a> {
 
         use nalgebra_sparse::{CooMatrix, CscMatrix};
 
-        let n = data.num_columns()?;
+        let n = data.num_columns();
         let mut coo = CooMatrix::new(n, n);
         for &((i, j), v) in triplets.iter() {
             coo.push(i, j, v);

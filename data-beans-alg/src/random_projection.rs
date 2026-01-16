@@ -203,8 +203,8 @@ impl RandProjOps for SparseIoVec {
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
-        let nrows = self.num_rows()?;
-        let ncols = self.num_columns()?;
+        let nrows = self.num_rows();
+        let ncols = self.num_columns();
 
         let mut proj_kn = nalgebra::DMatrix::<f32>::zeros(target_dim, ncols);
 
@@ -270,7 +270,7 @@ impl RandProjOps for SparseIoVec {
         ncols_per_group: Option<usize>,
     ) -> anyhow::Result<usize> {
         let nn = proj_kn.ncols();
-        if nn != self.num_columns()? {
+        if nn != self.num_columns() {
             return Err(anyhow::anyhow!("number of columns mismatch"));
         }
 

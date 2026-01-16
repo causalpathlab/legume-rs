@@ -78,7 +78,7 @@ pub fn collect_row_stat_across_vec(
     data: &SparseIoVec,
     block_size: usize,
 ) -> anyhow::Result<RunningStatistics<Ix1>> {
-    let mut row_stat = RunningStatistics::new(Ix1(data.num_rows()?));
+    let mut row_stat = RunningStatistics::new(Ix1(data.num_rows()));
     data.visit_columns_by_block(
         &row_stat_vec_visitor,
         &EmptyArgs {},
@@ -110,7 +110,7 @@ pub fn collect_stratified_row_stat_across_vec(
 
     for (k, cols) in partitions {
         let jobs = create_jobs(cols.len(), Some(block_size));
-        let mut row_stat = RunningStatistics::new(Ix1(data.num_rows()?));
+        let mut row_stat = RunningStatistics::new(Ix1(data.num_rows()));
         let arc_stat = Arc::new(Mutex::new(&mut row_stat));
 
         jobs.par_iter()
@@ -170,7 +170,7 @@ pub fn collect_column_stat_across_vec(
     select_rows: Option<&[usize]>,
     block_size: usize,
 ) -> anyhow::Result<RunningStatistics<Ix1>> {
-    let mut col_stat = RunningStatistics::new(Ix1(data.num_columns()?));
+    let mut col_stat = RunningStatistics::new(Ix1(data.num_columns()));
 
     data.visit_columns_by_block(
         &col_stat_selected_rows_visitor,

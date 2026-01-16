@@ -198,11 +198,11 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
         }
     }
 
-    if batch_membership.len() != data_vec.num_columns()? {
+    if batch_membership.len() != data_vec.num_columns() {
         return Err(anyhow::anyhow!(
             "# batch membership {} != # of columns {}",
             batch_membership.len(),
-            data_vec.num_columns()?
+            data_vec.num_columns()
         ));
     }
 
