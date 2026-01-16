@@ -39,7 +39,7 @@ impl<'a> SrtCollapsePairsOps for SrtCellPairs<'a> {
         batch_effect: Option<&'b Mat>,
     ) -> anyhow::Result<SrtCollapsedStat> {
         let mut srt_stat = SrtCollapsedStat::new(
-            self.data.num_rows()?,
+            self.data.num_rows(),
             self.num_coordinates(),
             self.num_coordinate_embedding(),
             self.num_samples()?,

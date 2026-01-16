@@ -253,8 +253,8 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     let d_vocab_emb = args.vocab_emb;
     let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
 
-    let n_features_decoder = data_vec.num_rows()?;
-    let n_features_encoder = data_vec.num_rows()?;
+    let n_features_decoder = data_vec.num_rows();
+    let n_features_encoder = data_vec.num_rows();
 
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(0)?,

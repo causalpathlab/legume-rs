@@ -176,7 +176,7 @@ impl CorrelateWithDictionary for Mat {
 
 impl CorrelateWithDictionary for SparseIoVec {
     fn correlate(&self, dict_dk: &Mat) -> anyhow::Result<Mat> {
-        let mut cor_kn = Mat::zeros(dict_dk.ncols(), self.num_columns()?);
+        let mut cor_kn = Mat::zeros(dict_dk.ncols(), self.num_columns());
         self.visit_columns_by_block(&cor_with_dict, dict_dk, &mut cor_kn, None)?;
         Ok(cor_kn)
     }

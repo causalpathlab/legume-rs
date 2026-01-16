@@ -257,8 +257,8 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
     let d_vocab_emb = args.vocab_emb;
     let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
 
-    let n_features_decoder = sc_data.num_rows()?;
-    let n_features_encoder = sc_data.num_rows()?;
+    let n_features_decoder = sc_data.num_rows();
+    let n_features_encoder = sc_data.num_rows();
 
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(0)?,

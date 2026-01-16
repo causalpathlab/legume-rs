@@ -88,7 +88,7 @@ impl CollapsingOps for SparseIoVec {
 
         info!(
             "found {} columns across {} batches",
-            self.num_columns()?,
+            self.num_columns(),
             self.num_batches()
         );
 
@@ -106,7 +106,7 @@ impl CollapsingOps for SparseIoVec {
             "The columns were not assigned before. Call `assign_columns_to_groups`"
         ))?;
 
-        let num_features = self.num_rows()?;
+        let num_features = self.num_rows();
         let num_groups = group_to_cols.len();
         let num_batches = self.num_batches();
 

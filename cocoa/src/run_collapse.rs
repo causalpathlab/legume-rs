@@ -133,7 +133,7 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
     info!("Read the full data");
 
     let cell_topic = &data.cell_topic;
-    let ngenes = data.sparse_data.num_rows()?;
+    let ngenes = data.sparse_data.num_rows();
     let ntopics = cell_topic.ncols();
 
     // break down into individual level collapsing

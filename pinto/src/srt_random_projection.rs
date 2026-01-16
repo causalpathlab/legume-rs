@@ -93,7 +93,7 @@ impl SrtRandProjOps for SrtCellPairs<'_> {
         let nn = self.pairs.len();
 
         // 1. random projection basis
-        let nrows = self.data.num_rows()?;
+        let nrows = self.data.num_rows();
         let basis_dk = Mat::rnorm(nrows, target_dim);
 
         // 2. visit the pairs with the projected basis
@@ -125,7 +125,7 @@ impl SrtRandProjOps for SrtCellPairs<'_> {
         if let Some(col_to_batch) = batch_membership {
             let batches = partition_by_membership(col_to_batch, None);
 
-            if col_to_batch.len() == self.data.num_columns()? && batches.len() > 1 {
+            if col_to_batch.len() == self.data.num_columns() && batches.len() > 1 {
                 info!("adjusting batch biases ...");
                 for (_, cols) in batches.iter() {
                     let left_cols = cols.iter().map(|&j| self.pairs[j].left).collect::<Vec<_>>();

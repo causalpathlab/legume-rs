@@ -214,7 +214,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         .collect();
 
     let cocoa_input = &CocoaCollapseIn {
-        n_genes: data.sparse_data.num_rows()?,
+        n_genes: data.sparse_data.num_rows(),
         n_topics: data.cell_topic.ncols(),
         knn: args.knn,
         n_opt_iter: args.num_opt_iter,
