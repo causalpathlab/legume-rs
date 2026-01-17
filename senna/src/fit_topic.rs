@@ -1,4 +1,5 @@
 use crate::embed_common::*;
+use crate::feature_selection::*;
 use crate::senna_input::*;
 
 use candle_core::Device;
@@ -305,6 +306,31 @@ pub struct TopicArgs {
 		     Prints additional information during execution."
     )]
     verbose: bool,
+
+    #[arg(
+        long,
+        help = "Maximum number of highly variable features",
+        long_help = "Select top N features by log-variance.\n\
+		     If not specified, all features are used.\n\
+		     Skipped if --warm-start is provided."
+    )]
+    max_features: Option<usize>,
+
+    #[arg(
+        long,
+        help = "Pre-computed feature selection file",
+        long_help = "Path to file with pre-selected feature names (one per line).\n\
+		     Takes precedence over --max-features.\n\
+		     Skipped if --warm-start is provided."
+    )]
+    feature_list_file: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Save feature variance statistics",
+        long_help = "Save computed log-variance for all features to {out}.feature_variance.parquet"
+    )]
+    save_feature_variance: bool,
 }
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
@@ -325,6 +351,25 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         batch_files: args.batch_files.clone(),
         preload: args.preload_data,
     })?;
+
+    // Feature selection (if requested)
+    let selected_features: Option<FeatureSelection> = if args.warm_start_proj_file.is_some() {
+        if args.max_features.is_some() || args.feature_list_file.is_some() {
+            info!("Warm-start provided: skipping feature selection (may be incompatible)");
+        }
+        None
+    } else if args.max_features.is_some() || args.feature_list_file.is_some() {
+        Some(select_highly_variable_features(
+            &data_vec,
+            args.max_features,
+            args.feature_list_file.as_deref(),
+            args.save_feature_variance,
+            &args.out,
+            args.block_size,
+        )?)
+    } else {
+        None
+    };
 
     // 2. Take projection results by warm start or projecting it again
     let proj_kn = if let Some(proj_file) = args.warm_start_proj_file.as_deref() {
@@ -393,8 +438,11 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let d_vocab_emb = args.vocab_emb;
     let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
 
-    let n_features_decoder = data_vec.num_rows();
-    let n_features_encoder = data_vec.num_rows();
+    let n_features_decoder = selected_features
+        .as_ref()
+        .map(|sel| sel.selected_indices.len())
+        .unwrap_or_else(|| data_vec.num_rows());
+    let n_features_encoder = n_features_decoder;
 
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(args.device_no)?,
@@ -426,17 +474,23 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         n_features_encoder, n_features_decoder
     );
 
-    let scores = train_encoder_decoder(&collapsed, &encoder, &decoder, &parameters, &args)?;
+    let scores = train_encoder_decoder(&collapsed, &encoder, &decoder, &parameters, &args, selected_features.as_ref())?;
 
     info!("Writing down the model parameters");
 
     let gene_names = data_vec.row_names()?;
 
+    // Use selected feature names for dictionary if feature selection was applied
+    let output_gene_names = selected_features
+        .as_ref()
+        .map(|sel| sel.selected_names.clone())
+        .unwrap_or_else(|| gene_names.clone());
+
     decoder
         .get_dictionary()?
         .to_device(&candle_core::Device::Cpu)?
         .to_parquet(
-            Some(&gene_names),
+            Some(&output_gene_names),
             None,
             &(args.out.to_string() + ".dictionary.parquet"),
         )?;
@@ -458,7 +512,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     info!("Writing down the latent states");
 
-    let z_nk = evaluate_latent_by_encoder(&data_vec, &encoder, &collapsed, &args)?;
+    let z_nk = evaluate_latent_by_encoder(&data_vec, &encoder, &collapsed, &args, selected_features.as_ref())?;
 
     let cell_names = data_vec.column_names()?;
 
@@ -467,6 +521,14 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         None,
         &(args.out.to_string() + ".latent.parquet"),
     )?;
+
+    // Save selected feature list if feature selection was applied
+    if let Some(sel) = &selected_features {
+        use matrix_util::common_io::write_lines;
+        let feature_file = args.out.to_string() + ".selected_features.txt";
+        write_lines(&sel.selected_names, &feature_file)?;
+        info!("Saved {} selected features to {}", sel.selected_names.len(), feature_file);
+    }
 
     info!("Done");
     Ok(())
@@ -508,6 +570,7 @@ fn train_encoder_decoder<Enc, Dec>(
     decoder: &Dec,
     parameters: &candle_nn::VarMap,
     args: &TopicArgs,
+    feature_selection: Option<&FeatureSelection>,
 ) -> anyhow::Result<TrainScores>
 where
     Enc: EncoderModuleT,
@@ -533,24 +596,50 @@ where
     info!("Start training VAE...");
 
     for epoch in (0..args.epochs).step_by(args.jitter_interval) {
-        let mixed_nd = collapsed
+        let mut mixed_nd = collapsed
             .mu_observed
             .posterior_sample()?
             .sum_to_one_columns()
             .scale(args.column_sum_norm)
             .transpose();
 
+        // Apply feature selection
+        if let Some(sel) = feature_selection {
+            mixed_nd = mixed_nd.select_columns(&sel.selected_indices);
+        }
+
         let clean_nd = collapsed.mu_adjusted.as_ref().map(|x| {
             let mut ret: Mat = x.posterior_sample().unwrap();
             ret.sum_to_one_columns_inplace();
             ret.scale_mut(args.column_sum_norm);
-            ret.transpose()
+            ret = ret.transpose();
+            // Apply feature selection
+            if let Some(sel) = feature_selection {
+                ret = ret.select_columns(&sel.selected_indices);
+            }
+            ret
         });
 
         let batch_nd = collapsed.mu_residual.as_ref().map(|x| {
-            let ret: Mat = x.posterior_sample().unwrap();
-            ret.transpose()
+            let mut ret: Mat = x.posterior_sample().unwrap();
+            ret = ret.transpose();
+            // Apply feature selection
+            if let Some(sel) = feature_selection {
+                ret = ret.select_columns(&sel.selected_indices);
+            }
+            ret
         });
+
+        // Validate that mixed_nd and batch_nd have the same number of features
+        if let Some(ref batch) = batch_nd {
+            if batch.ncols() != mixed_nd.ncols() {
+                return Err(anyhow::anyhow!(
+                    "mixed_nd and batch_nd have different feature dimensions: {} vs {}",
+                    mixed_nd.ncols(),
+                    batch.ncols()
+                ));
+            }
+        }
 
         let mut data_loader = InMemoryData::from(InMemoryArgs {
             input: &mixed_nd,
@@ -604,6 +693,7 @@ fn evaluate_latent_by_encoder<Enc>(
     encoder: &Enc,
     collapsed: &CollapsedOut,
     args: &TopicArgs,
+    feature_selection: Option<&FeatureSelection>,
 ) -> anyhow::Result<Mat>
 where
     Enc: EncoderModuleT + Send + Sync,
@@ -627,7 +717,14 @@ where
         AdjMethod::Batch => collapsed.delta.as_ref(),
         AdjMethod::Residual => collapsed.mu_residual.as_ref(),
     }
-    .map(|x| x.posterior_mean().clone())
+    .map(|x| {
+        let mut delta_db = x.posterior_mean().clone();
+        // Apply feature selection to delta
+        if let Some(sel) = feature_selection {
+            delta_db = delta_db.select_rows(&sel.selected_indices);
+        }
+        delta_db
+    })
     .map(|delta_db| {
         delta_db
             .to_tensor(&dev)
@@ -636,15 +733,17 @@ where
             .expect("transpose")
     });
 
+    let arc_sel = Arc::new(feature_selection);
+
     let mut chunks = jobs
         .par_iter()
         .progress_count(njobs)
         .map(|&block| match args.adj_method {
             AdjMethod::Residual => {
-                evaluate_with_residuals(block, data_vec, arc_enc.clone(), &dev, delta.as_ref())
+                evaluate_with_residuals(block, data_vec, arc_enc.clone(), &dev, delta.as_ref(), arc_sel.clone())
             }
             AdjMethod::Batch => {
-                evalulate_with_batch(block, data_vec, arc_enc.clone(), &dev, delta.as_ref())
+                evalulate_with_batch(block, data_vec, arc_enc.clone(), &dev, delta.as_ref(), arc_sel.clone())
             }
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -670,6 +769,7 @@ fn evalulate_with_batch<Enc>(
     encoder: Arc<&Enc>,
     dev: &Device,
     delta_bd: Option<&Tensor>,
+    feature_selection: Arc<Option<&FeatureSelection>>,
 ) -> anyhow::Result<(usize, Mat)>
 where
     Enc: EncoderModuleT,
@@ -684,10 +784,15 @@ where
         delta_bm.index_select(&batches, 0).expect("expand delta")
     });
 
-    let x_nd = data_vec
-        .read_columns_tensor(lb..ub)?
-        .to_device(dev)?
-        .transpose(0, 1)?;
+    // Read as CSC sparse matrix first, apply feature selection, then convert to tensor
+    let mut x_dn = data_vec.read_columns_csc(lb..ub)?;
+
+    // Apply feature selection on sparse matrix
+    if let Some(sel) = *feature_selection {
+        x_dn = filter_csc_by_rows(&sel.selection_matrix, &x_dn);
+    }
+
+    let x_nd = x_dn.to_tensor(dev)?.transpose(0, 1)?;
 
     let (z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
     let z_nk = z_nk.to_device(&candle_core::Device::Cpu)?;
@@ -700,6 +805,7 @@ fn evaluate_with_residuals<Enc>(
     encoder: Arc<&Enc>,
     dev: &Device,
     delta_bp: Option<&Tensor>,
+    feature_selection: Arc<Option<&FeatureSelection>>,
 ) -> anyhow::Result<(usize, Mat)>
 where
     Enc: EncoderModuleT,
@@ -715,10 +821,15 @@ where
         delta_bm.index_select(&groups, 0).expect("expand delta")
     });
 
-    let x_nd = data_vec
-        .read_columns_tensor(lb..ub)?
-        .to_device(dev)?
-        .transpose(0, 1)?;
+    // Read as CSC sparse matrix first, apply feature selection, then convert to tensor
+    let mut x_dn = data_vec.read_columns_csc(lb..ub)?;
+
+    // Apply feature selection on sparse matrix
+    if let Some(sel) = *feature_selection {
+        x_dn = filter_csc_by_rows(&sel.selection_matrix, &x_dn);
+    }
+
+    let x_nd = x_dn.to_tensor(dev)?.transpose(0, 1)?;
 
     let (z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
     let z_nk = z_nk.to_device(&candle_core::Device::Cpu)?;
