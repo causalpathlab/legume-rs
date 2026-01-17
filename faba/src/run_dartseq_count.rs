@@ -3,6 +3,7 @@ use crate::dartseq_io::ToParquet;
 use crate::dartseq_sifter::*;
 use crate::dartseq_stat::Histogram;
 use crate::data::dna::Dna;
+use rust_htslib::faidx;
 
 use crate::data::dna_stat_map::*;
 use crate::data::dna_stat_traits::*;
@@ -155,8 +156,11 @@ pub struct DartSeqCountArgs {
     max_background_maf: f64,
 
     #[arg(
-        short,
-        long,
+        short = 'p',
+        long = "pval",
+        alias = "pvalue",
+        alias = "p-val",
+        alias = "p-value",
         default_value_t = 0.01,
         help = "Maximum detection p-value cutoff",
         long_help = "Maximum p-value cutoff for detection. \n\
@@ -287,14 +291,15 @@ pub struct DartSeqCountArgs {
     print_histogram: bool,
 
     #[arg(
+        short = 'f',
         long = "genome",
-        help = "Reference genome FASTA file (optional)",
+        help = "Reference genome FASTA file",
         long_help = "Path to reference genome in FASTA format (.fa or .fasta). \n\
 		     Used to validate base calls at editing sites. \n\
 		     File must be indexed (.fai). If index doesn't exist, one will be created. \n\
 		     Example: genome.fa"
     )]
-    genome_file: Option<Box<str>>,
+    genome_file: Box<str>,
 }
 
 impl DartSeqCountArgs {
@@ -336,8 +341,15 @@ impl DartSeqCountArgs {
     }
 
     /// Create DartSeqSifter with current arguments
-    fn create_sifter(&self, capacity: usize) -> DartSeqSifter {
+    fn create_sifter<'a>(
+        &self,
+        faidx: &'a faidx::Reader,
+        chr: &'a str,
+        capacity: usize,
+    ) -> DartSeqSifter<'a> {
         DartSeqSifter {
+            faidx,
+            chr,
             min_coverage: self.min_coverage,
             min_conversion: self.min_conversion,
             pseudocount: self.pseudocount,
@@ -489,12 +501,9 @@ fn find_all_methylated_sites(
     let njobs = gff_map.len();
     info!("Searching possible edit sites over {} blocks", njobs);
 
-    // Validate reference genome if provided
-    if let Some(ref genome_file) = args.genome_file {
-        info!("Loading reference genome: {}", genome_file);
-        // Test that the file can be opened
-        load_fasta_index(genome_file)?;
-    }
+    // Validate reference genome
+    info!("Loading reference genome: {}", args.genome_file);
+    load_fasta_index(&args.genome_file)?;
 
     let arc_gene_sites = Arc::new(HashMap::<GeneId, Vec<MethylatedSite>>::default());
 
@@ -518,6 +527,9 @@ fn find_methylated_sites_in_gene(
     let strand = &gff_record.strand;
     let chr = gff_record.seqname.as_ref();
 
+    // Each thread creates its own reader (faidx is not thread-safe)
+    let faidx_reader = load_fasta_index(&args.genome_file)?;
+
     // Sweep all BAM files to find variable sites
     let mut wt_base_freq_map = DnaBaseFreqMap::new();
 
@@ -532,7 +544,7 @@ fn find_methylated_sites_in_gene(
     }
 
     // Find AC/T patterns using mutant statistics as null distribution
-    let mut sifter = args.create_sifter(positions.len());
+    let mut sifter = args.create_sifter(&faidx_reader, chr, positions.len());
 
     // Gather background frequency map
     let mut mut_base_freq_map = DnaBaseFreqMap::new();
@@ -558,51 +570,6 @@ fn find_methylated_sites_in_gene(
     }
 
     let mut candidate_sites = sifter.candidate_sites;
-
-    // Validate against reference genome if provided
-    if let Some(ref genome_file) = args.genome_file {
-        if !candidate_sites.is_empty() {
-            // Each thread creates its own reader (faidx is not thread-safe)
-            let faidx_reader = load_fasta_index(genome_file)?;
-
-            candidate_sites.retain(|site| {
-                // Expected bases based on strand
-                let (expected_m6a_base, expected_conversion_base) = match strand {
-                    Strand::Forward => (b'A', b'C'),  // Forward: m6A is A, conversion C->T
-                    Strand::Backward => (b'T', b'G'), // Reverse: m6A is T, conversion G->A
-                };
-
-                // Validate m6A position
-                let m6a_ref = fetch_reference_base(&faidx_reader, chr, site.m6a_pos)
-                    .ok()
-                    .flatten();
-
-                if let Some(base) = m6a_ref {
-                    // Check if the base matches (case-insensitive)
-                    if base.to_ascii_uppercase() != expected_m6a_base {
-                        return false;
-                    }
-                } else {
-                    // If we can't fetch the reference, keep the site (cautious approach)
-                    return true;
-                }
-
-                // Validate conversion position
-                let conv_ref = fetch_reference_base(&faidx_reader, chr, site.conversion_pos)
-                    .ok()
-                    .flatten();
-
-                if let Some(base) = conv_ref {
-                    // Check if the base matches (case-insensitive)
-                    if base.to_ascii_uppercase() != expected_conversion_base {
-                        return false;
-                    }
-                }
-
-                true
-            });
-        }
-    }
 
     if !candidate_sites.is_empty() {
         candidate_sites.sort();
