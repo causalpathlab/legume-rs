@@ -3,6 +3,7 @@
 const DEFAULT_BLOCK_SIZE: usize = 100_000;
 
 use rust_htslib::bam::{self, Read};
+use rust_htslib::faidx;
 use std::path::Path;
 use std::thread;
 
@@ -76,4 +77,31 @@ pub fn create_bam_jobs(
     }
 
     Ok(ret)
+}
+
+/// Load and index a FASTA file for random access
+/// If the .fai index doesn't exist, it will be created automatically
+pub fn load_fasta_index(fasta_file: &str) -> anyhow::Result<faidx::Reader> {
+    faidx::Reader::from_path(fasta_file)
+        .map_err(|e| anyhow::anyhow!("Failed to load FASTA file {}: {}", fasta_file, e))
+}
+
+/// Fetch reference base at a specific position (1-based coordinates)
+/// Returns None if position is out of bounds or chromosome not found
+pub fn fetch_reference_base(
+    faidx: &faidx::Reader,
+    chr: &str,
+    pos: i64,
+) -> anyhow::Result<Option<u8>> {
+    if pos < 0 {
+        return Ok(None);
+    }
+
+    // Convert to 0-based coordinate for fetching
+    let pos_0based = pos as usize;
+
+    match faidx.fetch_seq(chr, pos_0based, pos_0based) {
+        Ok(seq) => Ok(seq.first().copied()),
+        Err(_) => Ok(None), // chromosome not found or position out of bounds
+    }
 }

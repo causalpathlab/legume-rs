@@ -40,3 +40,9 @@ temp*
 *.bam
 *.bam.bai
 *.zip
+
+# reference genome files
+*.fa
+*.fasta
+*.fna
+*.fai

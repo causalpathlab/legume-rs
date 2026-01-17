@@ -12,8 +12,8 @@ use rayon::prelude::*;
 use fnv::FnvHashMap as HashMap;
 
 // Import the argument structs and run_squeeze function from main
-use crate::{AlignDataArgs, MergeBackendArgs, MergeMtxArgs, RunSqueezeArgs};
 use crate::run_squeeze;
+use crate::{AlignDataArgs, MergeBackendArgs, MergeMtxArgs, RunSqueezeArgs};
 
 pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     if args.data_files.len() <= 1 {
@@ -544,7 +544,7 @@ pub fn align_backends(args: &AlignDataArgs) -> anyhow::Result<()> {
             for &di in data_set_idx.iter() {
                 let data = &mut full_data_vec[di];
                 info!(
-                    "remove this unaligned backend: {}",
+                    "let's remove this unaligned backend: {}",
                     data.get_backend_file_name()
                 );
                 data.remove_backend_file()?;
