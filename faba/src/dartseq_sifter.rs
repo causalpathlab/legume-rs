@@ -1,7 +1,9 @@
 use crate::data::dna::Dna;
 use crate::data::dna::DnaBaseCount;
 use crate::data::dna_stat_map::HashMap;
+use crate::data::util_htslib::fetch_reference_base;
 use crate::hypothesis_tests::{BinomTest, BinomialCounts};
+use rust_htslib::faidx;
 
 #[derive(Clone, Debug)]
 pub struct MethylatedSite {
@@ -35,7 +37,9 @@ impl Ord for MethylatedSite {
     }
 }
 
-pub struct DartSeqSifter {
+pub struct DartSeqSifter<'a> {
+    pub faidx: &'a faidx::Reader,
+    pub chr: &'a str,
     pub min_coverage: usize,
     pub min_conversion: usize,
     pub pseudocount: usize,
@@ -45,11 +49,45 @@ pub struct DartSeqSifter {
     pub candidate_sites: Vec<MethylatedSite>,
 }
 
-impl DartSeqSifter {
-    /// search over RAC patterns
-    /// * first: `R=A/G`
-    /// * second: `A`
-    /// * third: `C->T`
+impl<'a> DartSeqSifter<'a> {
+    /// Validate RAC pattern in reference: R=A/G, A, C
+    fn validate_rac_pattern(&self, r_site: i64, m6a_site: i64, conv_site: i64) -> bool {
+        let ref_r = fetch_reference_base(self.faidx, self.chr, r_site)
+            .ok()
+            .flatten();
+        let ref_m6a = fetch_reference_base(self.faidx, self.chr, m6a_site)
+            .ok()
+            .flatten();
+        let ref_conv = fetch_reference_base(self.faidx, self.chr, conv_site)
+            .ok()
+            .flatten();
+
+        matches!(ref_r, Some(Dna::A) | Some(Dna::G))
+            && ref_m6a == Some(Dna::A)
+            && ref_conv == Some(Dna::C)
+    }
+
+    /// Validate GTY pattern in reference: G, T, Y=C/T (complement of RAC)
+    fn validate_gty_pattern(&self, conv_site: i64, m6a_site: i64, r_site: i64) -> bool {
+        let ref_conv = fetch_reference_base(self.faidx, self.chr, conv_site)
+            .ok()
+            .flatten();
+        let ref_m6a = fetch_reference_base(self.faidx, self.chr, m6a_site)
+            .ok()
+            .flatten();
+        let ref_r = fetch_reference_base(self.faidx, self.chr, r_site)
+            .ok()
+            .flatten();
+
+        ref_conv == Some(Dna::G)
+            && ref_m6a == Some(Dna::T)
+            && matches!(ref_r, Some(Dna::C) | Some(Dna::T))
+    }
+
+    /// Search over RAC patterns
+    /// * R site: `R=A/G`
+    /// * m6A site: `A`
+    /// * Conversion site: `C->T`
     pub fn forward_sweep(
         &mut self,
         positions: &[i64],
@@ -57,67 +95,36 @@ impl DartSeqSifter {
         mut_pos_to_freq: &HashMap<i64, DnaBaseCount>,
     ) {
         for j in 2..positions.len() {
-            let first = positions[j - 2];
-            let third = positions[j];
-
-            if third - first != 2 {
-                continue;
-            }
-
             let r_site = positions[j - 2];
             let m6a_site = positions[j - 1];
             let conv_site = positions[j];
 
-            // Cache lookups to avoid redundant hash map queries
-            let wt_m6a = wt_pos_to_freq.get(&m6a_site);
-            let mut_m6a = mut_pos_to_freq.get(&m6a_site);
-            let wt_r = wt_pos_to_freq.get(&r_site);
-            let mut_r = mut_pos_to_freq.get(&r_site);
-            let wt_conv = wt_pos_to_freq.get(&conv_site);
-            let mut_conv = mut_pos_to_freq.get(&conv_site);
-
-            // Check if both WT and mutant m6a site are 'A'
-            let both_m6a_valid = wt_m6a
-                .zip(mut_m6a)
-                .map(|(wt, mt)| {
-                    wt.most_frequent().0 == Dna::A && mt.most_frequent().0 == Dna::A
-                })
-                .unwrap_or(false);
-            if !both_m6a_valid {
+            // Check if positions are consecutive
+            if conv_site - r_site != 2 {
                 continue;
             }
 
-            // Ensure mutant's conversion site is mostly C
-            if !mut_conv
-                .map(|s| s.most_frequent().0 == Dna::C)
-                .unwrap_or(false)
-            {
+            // Validate reference sequence matches RAC pattern
+            if !self.validate_rac_pattern(r_site, m6a_site, conv_site) {
                 continue;
             }
 
-            // Check if both WT and mutant R site are valid (A or G)
-            let both_r_valid = wt_r
-                .zip(mut_r)
-                .map(|(wt, mt)| {
-                    let wt_major = &wt.most_frequent().0;
-                    let mt_major = &mt.most_frequent().0;
-                    (wt_major == &Dna::A || wt_major == &Dna::G)
-                        && (mt_major == &Dna::A || mt_major == &Dna::G)
-                })
-                .unwrap_or(false);
-
-            if !both_r_valid {
+            // Get frequency data for binomial test
+            let Some(wt_conv) = wt_pos_to_freq.get(&conv_site) else {
                 continue;
-            }
+            };
+            let Some(mut_conv) = mut_pos_to_freq.get(&conv_site) else {
+                continue;
+            };
 
             // Perform binomial test and store result if significant
-            if let Some(pv) = self.binomial_test_pvalue(wt_conv, mut_conv, &Dna::C, &Dna::T) {
+            if let Some(pv) = self.binomial_test_pvalue(Some(wt_conv), Some(mut_conv), &Dna::C, &Dna::T) {
                 if pv < self.max_pvalue_cutoff {
                     self.candidate_sites.push(MethylatedSite {
                         m6a_pos: m6a_site,
                         conversion_pos: conv_site,
-                        wt_freq: wt_conv.unwrap().clone(),
-                        mut_freq: mut_conv.unwrap().clone(),
+                        wt_freq: wt_conv.clone(),
+                        mut_freq: mut_conv.clone(),
                         pv,
                     });
                 }
@@ -125,10 +132,10 @@ impl DartSeqSifter {
         }
     }
 
-    /// search backward CAR patterns with complement
-    /// * conversion site: first `C->T <=> G->A`
-    /// * m6A site: second `A <=> T`
-    /// * R site: third `(G/A) <=> (C/T)`
+    /// Search backward GTY patterns (complement of RAC)
+    /// * Conversion site: `G->A`
+    /// * m6A site: `T` (complement of A)
+    /// * R site: `Y=C/T` (complement of R=A/G)
     pub fn backward_sweep(
         &mut self,
         positions: &[i64],
@@ -136,67 +143,36 @@ impl DartSeqSifter {
         mut_pos_to_freq: &HashMap<i64, DnaBaseCount>,
     ) {
         for j in 0..(positions.len().max(2) - 2) {
-            let first = positions[j];
-            let third = positions[j + 2];
-
-            if third - first != 2 {
-                continue;
-            }
-
-            let r_site = positions[j + 2];
-            let m6a_site = positions[j + 1];
             let conv_site = positions[j];
+            let m6a_site = positions[j + 1];
+            let r_site = positions[j + 2];
 
-            // Cache lookups to avoid redundant hash map queries
-            let wt_m6a = wt_pos_to_freq.get(&m6a_site);
-            let mut_m6a = mut_pos_to_freq.get(&m6a_site);
-            let wt_r = wt_pos_to_freq.get(&r_site);
-            let mut_r = mut_pos_to_freq.get(&r_site);
-            let wt_conv = wt_pos_to_freq.get(&conv_site);
-            let mut_conv = mut_pos_to_freq.get(&conv_site);
-
-            // Check if both WT and mutant m6a site are 'T' (complement of A)
-            let both_m6a_valid = wt_m6a
-                .zip(mut_m6a)
-                .map(|(wt, mt)| {
-                    wt.most_frequent().0 == Dna::T && mt.most_frequent().0 == Dna::T
-                })
-                .unwrap_or(false);
-            if !both_m6a_valid {
+            // Check if positions are consecutive
+            if r_site - conv_site != 2 {
                 continue;
             }
 
-            // Ensure mutant's conversion site is mostly G (complement of C)
-            if !mut_conv
-                .map(|s| s.most_frequent().0 == Dna::G)
-                .unwrap_or(false)
-            {
+            // Validate reference sequence matches GTY pattern
+            if !self.validate_gty_pattern(conv_site, m6a_site, r_site) {
                 continue;
             }
 
-            // Check if both WT and mutant R site are valid (T or C, complement of A/G)
-            let both_r_valid = wt_r
-                .zip(mut_r)
-                .map(|(wt, mt)| {
-                    let wt_major = &wt.most_frequent().0;
-                    let mt_major = &mt.most_frequent().0;
-                    (wt_major == &Dna::T || wt_major == &Dna::C)
-                        && (mt_major == &Dna::T || mt_major == &Dna::C)
-                })
-                .unwrap_or(false);
-
-            if !both_r_valid {
+            // Get frequency data for binomial test
+            let Some(wt_conv) = wt_pos_to_freq.get(&conv_site) else {
                 continue;
-            }
+            };
+            let Some(mut_conv) = mut_pos_to_freq.get(&conv_site) else {
+                continue;
+            };
 
             // Perform binomial test and store result if significant
-            if let Some(pv) = self.binomial_test_pvalue(wt_conv, mut_conv, &Dna::G, &Dna::A) {
+            if let Some(pv) = self.binomial_test_pvalue(Some(wt_conv), Some(mut_conv), &Dna::G, &Dna::A) {
                 if pv < self.max_pvalue_cutoff {
                     self.candidate_sites.push(MethylatedSite {
                         m6a_pos: m6a_site,
                         conversion_pos: conv_site,
-                        wt_freq: wt_conv.unwrap().clone(),
-                        mut_freq: mut_conv.unwrap().clone(),
+                        wt_freq: wt_conv.clone(),
+                        mut_freq: mut_conv.clone(),
                         pv,
                     });
                 }
