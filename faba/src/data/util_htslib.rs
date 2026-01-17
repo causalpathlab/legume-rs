@@ -2,6 +2,7 @@
 
 const DEFAULT_BLOCK_SIZE: usize = 100_000;
 
+use super::dna::Dna;
 use rust_htslib::bam::{self, Read};
 use rust_htslib::faidx;
 use std::path::Path;
@@ -86,22 +87,52 @@ pub fn load_fasta_index(fasta_file: &str) -> anyhow::Result<faidx::Reader> {
         .map_err(|e| anyhow::anyhow!("Failed to load FASTA file {}: {}", fasta_file, e))
 }
 
-/// Fetch reference base at a specific position (1-based coordinates)
+/// Fetch reference base at a specific position (0-based coordinates)
 /// Returns None if position is out of bounds or chromosome not found
 pub fn fetch_reference_base(
     faidx: &faidx::Reader,
     chr: &str,
     pos: i64,
-) -> anyhow::Result<Option<u8>> {
+) -> anyhow::Result<Option<Dna>> {
     if pos < 0 {
         return Ok(None);
     }
 
-    // Convert to 0-based coordinate for fetching
-    let pos_0based = pos as usize;
+    let pos = pos as usize;
 
-    match faidx.fetch_seq(chr, pos_0based, pos_0based) {
-        Ok(seq) => Ok(seq.first().copied()),
+    match faidx.fetch_seq(chr, pos, pos) {
+        Ok(seq) => Ok(seq.first().and_then(|&b| Dna::from_byte(b.to_ascii_uppercase()))),
         Err(_) => Ok(None), // chromosome not found or position out of bounds
+    }
+}
+
+/// Fetch reference sequence from start to end (0-based, inclusive)
+/// Returns None if positions are invalid or chromosome not found
+pub fn fetch_reference_seq(
+    faidx: &faidx::Reader,
+    chr: &str,
+    start: i64,
+    end: i64,
+) -> anyhow::Result<Option<Vec<Dna>>> {
+    if start < 0 || end < 0 || start > end {
+        return Ok(None);
+    }
+
+    let start = start as usize;
+    let end = end as usize;
+
+    match faidx.fetch_seq(chr, start, end) {
+        Ok(seq) => {
+            let bases: Vec<Dna> = seq
+                .iter()
+                .filter_map(|&b| Dna::from_byte(b.to_ascii_uppercase()))
+                .collect();
+            if bases.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(bases))
+            }
+        }
+        Err(_) => Ok(None),
     }
 }
