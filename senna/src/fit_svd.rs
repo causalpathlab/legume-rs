@@ -1,6 +1,10 @@
 use crate::embed_common::*;
 use crate::senna_input::*;
 use data_beans::sparse_data_visitors::VisitColumnsOps;
+use matrix_util::common_io::read_lines;
+use matrix_util::ndarray_stat::RunningStatistics;
+use ndarray::Ix1;
+use std::collections::HashMap;
 
 #[derive(Args, Debug)]
 pub struct SvdArgs {
@@ -166,6 +170,31 @@ pub struct SvdArgs {
 		     Prints additional information during execution."
     )]
     verbose: bool,
+
+    #[arg(
+        long,
+        help = "Maximum number of highly variable features",
+        long_help = "Select top N features by log-variance.\n\
+		     If not specified, all features are used.\n\
+		     Skipped if --warm-start is provided."
+    )]
+    max_features: Option<usize>,
+
+    #[arg(
+        long,
+        help = "Pre-computed feature selection file",
+        long_help = "Path to file with pre-selected feature names (one per line).\n\
+		     Takes precedence over --max-features.\n\
+		     Skipped if --warm-start is provided."
+    )]
+    feature_list_file: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Save feature variance statistics",
+        long_help = "Save computed log-variance for all features to {out}.feature_variance.parquet"
+    )]
+    save_feature_variance: bool,
 }
 
 pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
@@ -184,6 +213,25 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         batch_files: args.batch_files.clone(),
         preload: args.preload_data,
     })?;
+
+    // Feature selection (if requested)
+    let selected_features: Option<FeatureSelection> = if args.warm_start_proj_file.is_some() {
+        if args.max_features.is_some() || args.feature_list_file.is_some() {
+            info!("Warm-start provided: skipping feature selection (may be incompatible)");
+        }
+        None
+    } else if args.max_features.is_some() || args.feature_list_file.is_some() {
+        Some(select_highly_variable_features(
+            &data_vec,
+            args.max_features,
+            args.feature_list_file.as_deref(),
+            args.save_feature_variance,
+            &args.out,
+            args.block_size,
+        )?)
+    } else {
+        None
+    };
 
     // 2. Random projection
     let proj_kn = if let Some(proj_file) = args.warm_start_proj_file.as_deref() {
@@ -293,10 +341,17 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         args.n_latent_topics,
         args.column_sum_norm,
         Some(args.block_size),
+        selected_features.as_ref(),
     )?;
 
     let cell_names = data_vec.column_names()?;
     let gene_names = data_vec.row_names()?;
+
+    // Use selected feature names for dictionary if feature selection was applied
+    let output_gene_names = selected_features
+        .as_ref()
+        .map(|sel| sel.selected_names.clone())
+        .unwrap_or_else(|| gene_names.clone());
 
     nystrom_out.latent_nk.to_parquet(
         Some(&cell_names),
@@ -305,12 +360,28 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     )?;
 
     nystrom_out.dictionary_dk.to_parquet(
-        Some(&gene_names),
+        Some(&output_gene_names),
         None,
         &(args.out.to_string() + ".dictionary.parquet"),
     )?;
 
+    // Save selected feature list if feature selection was applied
+    if let Some(sel) = &selected_features {
+        use matrix_util::common_io::write_lines;
+        let feature_file = args.out.to_string() + ".selected_features.txt";
+        write_lines(&sel.selected_names, &feature_file)?;
+        info!("Saved {} selected features to {}", sel.selected_names.len(), feature_file);
+    }
+
     Ok(())
+}
+
+struct FeatureSelection {
+    selected_indices: Vec<usize>,      // Sorted indices of selected features
+    selected_names: Vec<Box<str>>,     // Names of selected features
+    #[allow(dead_code)]
+    index_map: HashMap<usize, usize>,  // old_idx -> new_idx mapping
+    selection_matrix: CscMat,          // Sparse selection matrix: S[new_i, old_i] = 1.0
 }
 
 #[allow(dead_code)]
@@ -319,6 +390,7 @@ struct NystromParam<'a> {
     basis_dk: &'a Mat,
     delta_dp: Option<&'a Mat>,
     column_sum_norm: f32,
+    feature_selection: Option<&'a FeatureSelection>,
 }
 
 struct NystromOut {
@@ -344,8 +416,14 @@ fn do_nystrom_proj(
     rank: usize,
     column_sum_norm: f32,
     block_size: Option<usize>,
+    feature_selection: Option<&FeatureSelection>,
 ) -> anyhow::Result<NystromOut> {
     let mut log_xx_dn = log_xx_dn.clone();
+
+    // Apply feature selection to collapsed data before RSVD
+    if let Some(sel) = feature_selection {
+        log_xx_dn = log_xx_dn.select_rows(&sel.selected_indices);
+    }
 
     log_xx_dn.scale_columns_inplace();
 
@@ -368,6 +446,7 @@ fn do_nystrom_proj(
         basis_dk: &basis_dk,
         delta_dp,
         column_sum_norm,
+        feature_selection,
     };
 
     let mut proj_kn = Mat::zeros(kk, ntot);
@@ -398,8 +477,14 @@ fn nystrom_proj_visitor(
     let basis_dk = proj_basis.basis_dk;
     let delta_dp = proj_basis.delta_dp;
     let column_sum_norm = proj_basis.column_sum_norm;
+    let feature_selection = proj_basis.feature_selection;
 
     let mut x_dn = full_data_vec.read_columns_csc(lb..ub)?;
+
+    // Apply feature selection lazily
+    if let Some(sel) = feature_selection {
+        x_dn = filter_csc_by_rows(&sel.selection_matrix, &x_dn);
+    }
 
     x_dn.normalize_columns_inplace();
     x_dn *= column_sum_norm;
@@ -467,4 +552,209 @@ fn adjust_triplets_visitor(
     let mut triplets = triplets.lock().expect("lock triplets");
     triplets.extend(new_triplets);
     Ok(())
+}
+
+/// Create sparse selection matrix from selected row indices
+fn create_selection_matrix(selected_indices: &[usize], n_total_rows: usize) -> CscMat {
+    let n_selected = selected_indices.len();
+    let mut triplets = Vec::with_capacity(n_selected);
+
+    for (new_i, &old_i) in selected_indices.iter().enumerate() {
+        triplets.push((new_i as u64, old_i as u64, 1.0_f32));
+    }
+
+    CscMat::from_nonzero_triplets(n_selected, n_total_rows, &triplets).expect("Failed to create selection matrix")
+}
+
+/// Load feature list from a text file (one feature name per line)
+fn load_feature_list_from_file(
+    file_path: &str,
+    all_feature_names: &[Box<str>],
+) -> anyhow::Result<FeatureSelection> {
+    let feature_names_from_file = read_lines(file_path)?;
+
+    if feature_names_from_file.is_empty() {
+        return Err(anyhow::anyhow!("Feature list file is empty: {}", file_path));
+    }
+
+    // Create a map from feature name to index
+    let name_to_idx: HashMap<&str, usize> = all_feature_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.as_ref(), i))
+        .collect();
+
+    // Find matching features
+    let mut selected_indices: Vec<usize> = Vec::new();
+    let mut selected_names: Vec<Box<str>> = Vec::new();
+    let mut not_found = 0;
+
+    for name in &feature_names_from_file {
+        if let Some(&idx) = name_to_idx.get(name.as_ref()) {
+            selected_indices.push(idx);
+            selected_names.push(name.clone());
+        } else {
+            not_found += 1;
+        }
+    }
+
+    if selected_indices.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No features from file matched data. File: {}",
+            file_path
+        ));
+    }
+
+    let match_rate = selected_indices.len() as f32 / feature_names_from_file.len() as f32;
+    if match_rate < 0.5 {
+        info!(
+            "Warning: Only {:.1}% of features from file matched data ({}/{})",
+            match_rate * 100.0,
+            selected_indices.len(),
+            feature_names_from_file.len()
+        );
+    }
+
+    if not_found > 0 {
+        info!("Warning: {} features from file not found in data", not_found);
+    }
+
+    // Sort indices for efficient .select() operations
+    selected_indices.sort_unstable();
+
+    // Create index map
+    let index_map = selected_indices
+        .iter()
+        .enumerate()
+        .map(|(new_i, &old_i)| (old_i, new_i))
+        .collect();
+
+    // Create sparse selection matrix once
+    let selection_matrix = create_selection_matrix(&selected_indices, all_feature_names.len());
+
+    info!("Loaded {} features from {}", selected_indices.len(), file_path);
+
+    Ok(FeatureSelection {
+        selected_indices,
+        selected_names,
+        index_map,
+        selection_matrix,
+    })
+}
+
+/// Compute log-variance for feature selection
+fn log_variance_visitor(
+    job: (usize, usize),
+    data: &SparseIoVec,
+    _: &EmptyArg,
+    arc_stat: Arc<Mutex<&mut RunningStatistics<Ix1>>>,
+) -> anyhow::Result<()> {
+    let (lb, ub) = job;
+    let xx = data.read_columns_ndarray(lb..ub)?;
+    let xx_log = xx.mapv(|x| (x + 1.0).ln());  // log1p transform
+
+    let mut stat = arc_stat.lock().unwrap();
+    // Process each column (feature across samples)
+    for col in xx_log.axis_iter(ndarray::Axis(1)) {
+        stat.add(&col);
+    }
+    Ok(())
+}
+
+/// Select highly variable features based on log-variance
+fn select_highly_variable_features(
+    data_vec: &SparseIoVec,
+    max_features: Option<usize>,
+    feature_list_file: Option<&str>,
+    save_variance: bool,
+    out_prefix: &str,
+    block_size: usize,
+) -> anyhow::Result<FeatureSelection> {
+    let feature_names = data_vec.row_names()?;
+
+    // Option 1: Load from file
+    if let Some(file_path) = feature_list_file {
+        return load_feature_list_from_file(file_path, &feature_names);
+    }
+
+    // Option 2: Compute HVF from log-variance
+    if let Some(n_features) = max_features {
+        if n_features == 0 {
+            return Err(anyhow::anyhow!("max_features must be >= 1"));
+        }
+
+        info!("Computing log-variance for {} features...", feature_names.len());
+
+        // Compute log-variance using custom visitor
+        let mut log_stat = RunningStatistics::new(Ix1(data_vec.num_rows()));
+        data_vec.visit_columns_by_block(
+            &log_variance_visitor,
+            &EmptyArg {},
+            &mut log_stat,
+            Some(block_size),
+        )?;
+
+        let variance = log_stat.variance();
+
+        // Save variance if requested
+        if save_variance {
+            let var_file = format!("{}.feature_variance.parquet", out_prefix);
+            log_stat.save(&var_file, &feature_names, "\t")?;
+            info!("Saved feature variance to {}", var_file);
+        }
+
+        // Rank features by variance (descending)
+        let mut indexed_variance: Vec<(usize, f32)> = variance
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (i, v))
+            .collect();
+
+        indexed_variance.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Select top N features
+        let n_select = n_features.min(indexed_variance.len());
+        let mut selected_indices: Vec<usize> = indexed_variance[..n_select]
+            .iter()
+            .map(|(i, _)| *i)
+            .collect();
+
+        // Sort indices for efficient .select() operations
+        selected_indices.sort_unstable();
+
+        let selected_names = selected_indices
+            .iter()
+            .map(|&i| feature_names[i].clone())
+            .collect();
+
+        let index_map = selected_indices
+            .iter()
+            .enumerate()
+            .map(|(new_i, &old_i)| (old_i, new_i))
+            .collect();
+
+        // Create sparse selection matrix once
+        let selection_matrix = create_selection_matrix(&selected_indices, feature_names.len());
+
+        info!(
+            "Selected {} / {} highly variable features",
+            n_select,
+            feature_names.len()
+        );
+
+        Ok(FeatureSelection {
+            selected_indices,
+            selected_names,
+            index_map,
+            selection_matrix,
+        })
+    } else {
+        Err(anyhow::anyhow!("Either max_features or feature_list_file must be provided"))
+    }
+}
+
+/// Filter CSC matrix by selected row indices using pre-computed selection matrix
+fn filter_csc_by_rows(selection_matrix: &CscMat, x: &CscMat) -> CscMat {
+    // Filtered result = selection_matrix * x
+    selection_matrix * x
 }
