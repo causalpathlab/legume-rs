@@ -88,11 +88,13 @@ impl<'a> DartSeqSifter<'a> {
     /// * R site: `R=A/G`
     /// * m6A site: `A`
     /// * Conversion site: `C->T`
+    ///
+    /// If `mut_pos_to_freq` is None, skips binomial test and reports all sites matching RAC pattern
     pub fn forward_sweep(
         &mut self,
         positions: &[i64],
         wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
-        mut_pos_to_freq: &HashMap<i64, DnaBaseCount>,
+        mut_pos_to_freq: Option<&HashMap<i64, DnaBaseCount>>,
     ) {
         for j in 2..positions.len() {
             let r_site = positions[j - 2];
@@ -109,23 +111,39 @@ impl<'a> DartSeqSifter<'a> {
                 continue;
             }
 
-            // Get frequency data for binomial test
+            // Get wild-type frequency data
             let Some(wt_conv) = wt_pos_to_freq.get(&conv_site) else {
                 continue;
             };
-            let Some(mut_conv) = mut_pos_to_freq.get(&conv_site) else {
-                continue;
-            };
 
-            // Perform binomial test and store result if significant
-            if let Some(pv) = self.binomial_test_pvalue(Some(wt_conv), Some(mut_conv), &Dna::C, &Dna::T) {
-                if pv < self.max_pvalue_cutoff {
+            // If mutant data provided, perform binomial test; otherwise just record the site
+            match mut_pos_to_freq {
+                Some(mut_freq_map) => {
+                    let Some(mut_conv) = mut_freq_map.get(&conv_site) else {
+                        continue;
+                    };
+
+                    // Perform binomial test and store result if significant
+                    if let Some(pv) = self.binomial_test_pvalue(Some(wt_conv), Some(mut_conv), &Dna::C, &Dna::T) {
+                        if pv < self.max_pvalue_cutoff {
+                            self.candidate_sites.push(MethylatedSite {
+                                m6a_pos: m6a_site,
+                                conversion_pos: conv_site,
+                                wt_freq: wt_conv.clone(),
+                                mut_freq: mut_conv.clone(),
+                                pv,
+                            });
+                        }
+                    }
+                }
+                None => {
+                    // No statistical test, just record sites matching RAC pattern
                     self.candidate_sites.push(MethylatedSite {
                         m6a_pos: m6a_site,
                         conversion_pos: conv_site,
                         wt_freq: wt_conv.clone(),
-                        mut_freq: mut_conv.clone(),
-                        pv,
+                        mut_freq: DnaBaseCount::default(),
+                        pv: 0.0,
                     });
                 }
             }
@@ -136,11 +154,13 @@ impl<'a> DartSeqSifter<'a> {
     /// * Conversion site: `G->A`
     /// * m6A site: `T` (complement of A)
     /// * R site: `Y=C/T` (complement of R=A/G)
+    ///
+    /// If `mut_pos_to_freq` is None, skips binomial test and reports all sites matching GTY pattern
     pub fn backward_sweep(
         &mut self,
         positions: &[i64],
         wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
-        mut_pos_to_freq: &HashMap<i64, DnaBaseCount>,
+        mut_pos_to_freq: Option<&HashMap<i64, DnaBaseCount>>,
     ) {
         for j in 0..(positions.len().max(2) - 2) {
             let conv_site = positions[j];
@@ -157,23 +177,39 @@ impl<'a> DartSeqSifter<'a> {
                 continue;
             }
 
-            // Get frequency data for binomial test
+            // Get wild-type frequency data
             let Some(wt_conv) = wt_pos_to_freq.get(&conv_site) else {
                 continue;
             };
-            let Some(mut_conv) = mut_pos_to_freq.get(&conv_site) else {
-                continue;
-            };
 
-            // Perform binomial test and store result if significant
-            if let Some(pv) = self.binomial_test_pvalue(Some(wt_conv), Some(mut_conv), &Dna::G, &Dna::A) {
-                if pv < self.max_pvalue_cutoff {
+            // If mutant data provided, perform binomial test; otherwise just record the site
+            match mut_pos_to_freq {
+                Some(mut_freq_map) => {
+                    let Some(mut_conv) = mut_freq_map.get(&conv_site) else {
+                        continue;
+                    };
+
+                    // Perform binomial test and store result if significant
+                    if let Some(pv) = self.binomial_test_pvalue(Some(wt_conv), Some(mut_conv), &Dna::G, &Dna::A) {
+                        if pv < self.max_pvalue_cutoff {
+                            self.candidate_sites.push(MethylatedSite {
+                                m6a_pos: m6a_site,
+                                conversion_pos: conv_site,
+                                wt_freq: wt_conv.clone(),
+                                mut_freq: mut_conv.clone(),
+                                pv,
+                            });
+                        }
+                    }
+                }
+                None => {
+                    // No statistical test, just record sites matching GTY pattern
                     self.candidate_sites.push(MethylatedSite {
                         m6a_pos: m6a_site,
                         conversion_pos: conv_site,
                         wt_freq: wt_conv.clone(),
-                        mut_freq: mut_conv.clone(),
-                        pv,
+                        mut_freq: DnaBaseCount::default(),
+                        pv: 0.0,
                     });
                 }
             }

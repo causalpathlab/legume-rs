@@ -562,10 +562,10 @@ fn find_methylated_sites_in_gene(
 
     match strand {
         Strand::Forward => {
-            sifter.forward_sweep(&positions, &wt_freq, &mut_freq);
+            sifter.forward_sweep(&positions, &wt_freq, Some(&mut_freq));
         }
         Strand::Backward => {
-            sifter.backward_sweep(&positions, &wt_freq, &mut_freq);
+            sifter.backward_sweep(&positions, &wt_freq, Some(&mut_freq));
         }
     }
 
