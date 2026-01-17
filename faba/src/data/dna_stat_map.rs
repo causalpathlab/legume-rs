@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::data::cell_membership::CellMembership;
 use crate::data::dna::*;
 use crate::data::dna_stat_traits::*;
 use crate::data::sam::*;
@@ -9,17 +10,18 @@ use rust_htslib::bam::{self, ext::BamRecordExtensions, record::Aux};
 
 pub use fnv::FnvHashMap as HashMap;
 
-pub struct DnaBaseFreqMap {
+pub struct DnaBaseFreqMap<'a> {
     position_to_count_with_cell: Option<HashMap<i64, HashMap<CellBarcode, DnaBaseCount>>>,
     position_to_count: Option<HashMap<i64, DnaBaseCount>>,
     cell_barcode_tag: Option<Vec<u8>>,
     anchor_position: Option<i64>,
     anchor_base: Option<Dna>,
+    cell_membership: Option<&'a CellMembership>,
 }
 
-impl VisitWithBamOps for DnaBaseFreqMap {}
+impl<'a> VisitWithBamOps for DnaBaseFreqMap<'a> {}
 
-impl DnaStatMap for DnaBaseFreqMap {
+impl<'a> DnaStatMap for DnaBaseFreqMap<'a> {
     fn add_bam_record(&mut self, bam_record: bam::Record) {
         let seq = bam_record.seq().as_bytes();
 
@@ -57,7 +59,18 @@ impl DnaStatMap for DnaBaseFreqMap {
                 true
             };
 
-            if anchor_match {
+            // Check cell membership if filter is active
+            let passes_membership = if let Some(membership) = &self.cell_membership {
+                if let Some(ref cb) = cell_barcode {
+                    membership.matches_barcode(cb).is_some()
+                } else {
+                    false
+                }
+            } else {
+                true // No filter active
+            };
+
+            if anchor_match && passes_membership {
                 update_freq_map(freq_map, cell_barcode);
             }
         }
@@ -87,28 +100,36 @@ impl DnaStatMap for DnaBaseFreqMap {
     }
 }
 
-impl DnaBaseFreqMap {
+impl<'a> DnaBaseFreqMap<'a> {
     /// empty frequency map, keeping track of cell barcodes
     ///
     /// * `cell_barcode_tag` - tag word, e.g., "CB" in 10x
-    pub fn new_with_cell_barcode(cell_barcode_tag: &str) -> Self {
+    /// * `cell_membership` - optional cell membership filter
+    pub fn new_with_cell_barcode(
+        cell_barcode_tag: &str,
+        cell_membership: Option<&'a CellMembership>,
+    ) -> Self {
         Self {
             position_to_count_with_cell: Some(HashMap::default()),
             position_to_count: None,
             cell_barcode_tag: Some(cell_barcode_tag.as_bytes().to_vec()),
             anchor_position: None,
             anchor_base: None,
+            cell_membership,
         }
     }
 
     /// empty frequency map without keeping track of cell barcode
-    pub fn new() -> Self {
+    ///
+    /// * `cell_membership` - optional cell membership filter (only used if tracking cells)
+    pub fn new(cell_membership: Option<&'a CellMembership>) -> Self {
         Self {
             position_to_count_with_cell: None,
             position_to_count: Some(HashMap::default()),
             cell_barcode_tag: None,
             anchor_position: None,
             anchor_base: None,
+            cell_membership,
         }
     }
 

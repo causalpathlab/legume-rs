@@ -5,6 +5,7 @@ use crate::dartseq_stat::Histogram;
 use crate::data::dna::Dna;
 use rust_htslib::faidx;
 
+use crate::data::cell_membership::CellMembership;
 use crate::data::dna_stat_map::*;
 use crate::data::dna_stat_traits::*;
 use crate::data::gff::FeatureType as GffFeatureType;
@@ -13,6 +14,7 @@ use crate::data::gff::{GeneId, GffRecordMap};
 use crate::data::methylation::*;
 
 use crate::data::util_htslib::*;
+use clap::ValueEnum;
 
 use dashmap::DashMap as HashMap;
 use dashmap::DashSet as HashSet;
@@ -24,6 +26,17 @@ const MIN_LENGTH_FOR_TESTING: usize = 3;
 
 /// Padding around target region when reading BAM files
 const BAM_READ_PADDING: i64 = 1;
+
+/// When to apply cell barcode membership filtering
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum FilterStage {
+    /// Filter only during quantification (second pass) - discovers sites from all cells
+    QuantificationOnly,
+    /// Filter during both discovery and quantification passes
+    Both,
+    /// Filter only during discovery (first pass) - rare use case
+    DiscoveryOnly,
+}
 
 #[derive(Args, Debug)]
 pub struct DartSeqCountArgs {
@@ -300,6 +313,63 @@ pub struct DartSeqCountArgs {
 		     Example: genome.fa"
     )]
     genome_file: Box<str>,
+
+    #[arg(
+        long = "cell-membership",
+        help = "Cell barcode membership file for filtering cells (TSV, CSV, or Parquet)",
+        long_help = "Path to cell barcode membership file for restricting analysis to specific cells.\n\
+                     Format: First column = cell barcode, Second column = cell type.\n\
+                     Supports .tsv, .csv, .parquet, and .gz variants.\n\
+                     Only cells (barcodes) present in this file will be included in analysis,\n\
+                     based on --cell-filter-stage setting."
+    )]
+    cell_membership_file: Option<Box<str>>,
+
+    #[arg(
+        long = "membership-barcode-col",
+        default_value_t = 0,
+        help = "Column index for cell barcodes in membership file (0-based)"
+    )]
+    membership_barcode_col: usize,
+
+    #[arg(
+        long = "membership-celltype-col",
+        default_value_t = 1,
+        help = "Column index for cell types in membership file (0-based)"
+    )]
+    membership_celltype_col: usize,
+
+    #[arg(
+        long = "cell-filter-stage",
+        value_enum,
+        default_value = "quantification-only",
+        help = "When to apply cell barcode membership filtering",
+        long_help = "Control when cell barcode membership filtering is applied:\n\
+                     - quantification-only: Filter cells during second pass only (default, recommended)\n\
+                       Discovers methylation sites from all cells, but only quantify cells in membership file\n\
+                     - both: Filter cells during both discovery and quantification passes\n\
+                       Only discover and quantify sites in cells from membership file\n\
+                     - discovery-only: Filter cells during first pass only (rare use case)\n\
+                       Only discover sites in membership cells, but quantify all cells"
+    )]
+    cell_filter_stage: FilterStage,
+
+    #[arg(
+        long = "exact-barcode-match",
+        default_value_t = false,
+        help = "Require exact cell barcode matching (disable prefix matching)",
+        long_help = "By default, membership cell barcodes are matched as prefixes of BAM barcodes.\n\
+                     This handles cases where BAM barcodes have suffixes like '-1'.\n\
+                     Enable this flag to require exact string matching for cell barcodes."
+    )]
+    exact_barcode_match: bool,
+
+    #[arg(
+        long = "output-cell-types",
+        default_value_t = false,
+        help = "Include cell type annotation in BED output"
+    )]
+    output_cell_types: bool,
 }
 
 impl DartSeqCountArgs {
@@ -447,11 +517,33 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Load cell membership file if provided
+    let membership = if let Some(ref path) = args.cell_membership_file {
+        let m = CellMembership::from_file(
+            path,
+            args.membership_barcode_col,
+            args.membership_celltype_col,
+            !args.exact_barcode_match,
+        )?;
+        info!("Loaded {} cell barcodes from membership file: {}", m.num_cells(), path);
+        info!("Cell filter stage: {:?}", args.cell_filter_stage);
+        info!("Prefix matching: {}", !args.exact_barcode_match);
+        Some(m)
+    } else {
+        None
+    };
+
+    // Determine when to apply cell membership filter for discovery based on filter stage
+    let membership_for_discovery = match args.cell_filter_stage {
+        FilterStage::DiscoveryOnly | FilterStage::Both => membership.as_ref(),
+        FilterStage::QuantificationOnly => None,
+    };
+
     /////////////////////////////////
     // FIRST PASS: Find edit sites //
     /////////////////////////////////
 
-    let gene_sites = find_all_methylated_sites(&gff_map, args)?;
+    let gene_sites = find_all_methylated_sites(&gff_map, args, membership_for_discovery)?;
 
     if gene_sites.is_empty() {
         info!("no sites found");
@@ -497,6 +589,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 fn find_all_methylated_sites(
     gff_map: &GffRecordMap,
     args: &DartSeqCountArgs,
+    cell_membership: Option<&CellMembership>,
 ) -> anyhow::Result<HashMap<GeneId, Vec<MethylatedSite>>> {
     let njobs = gff_map.len();
     info!("Searching possible edit sites over {} blocks", njobs);
@@ -512,7 +605,7 @@ fn find_all_methylated_sites(
         .par_iter()
         .progress_count(njobs as u64)
         .try_for_each(|rec| -> anyhow::Result<()> {
-            find_methylated_sites_in_gene(rec, args, arc_gene_sites.clone())
+            find_methylated_sites_in_gene(rec, args, arc_gene_sites.clone(), cell_membership)
         })?;
 
     Arc::try_unwrap(arc_gene_sites).map_err(|_| anyhow::anyhow!("failed to release gene_sites"))
@@ -522,6 +615,7 @@ fn find_methylated_sites_in_gene(
     gff_record: &GffRecord,
     args: &DartSeqCountArgs,
     arc_gene_sites: Arc<HashMap<GeneId, Vec<MethylatedSite>>>,
+    cell_membership: Option<&CellMembership>,
 ) -> anyhow::Result<()> {
     let gene_id = gff_record.gene_id.clone();
     let strand = &gff_record.strand;
@@ -531,7 +625,7 @@ fn find_methylated_sites_in_gene(
     let faidx_reader = load_fasta_index(&args.genome_file)?;
 
     // Sweep all BAM files to find variable sites
-    let mut wt_base_freq_map = DnaBaseFreqMap::new();
+    let mut wt_base_freq_map = DnaBaseFreqMap::new(cell_membership);
 
     for wt_file in &args.wt_bam_files {
         wt_base_freq_map.update_bam_file_by_gene(wt_file, gff_record, &args.gene_barcode_tag)?;
@@ -547,7 +641,7 @@ fn find_methylated_sites_in_gene(
     let mut sifter = args.create_sifter(&faidx_reader, chr, positions.len());
 
     // Gather background frequency map
-    let mut mut_base_freq_map = DnaBaseFreqMap::new();
+    let mut mut_base_freq_map = DnaBaseFreqMap::new(cell_membership);
 
     for mut_file in &args.mut_bam_files {
         mut_base_freq_map.update_bam_file_by_gene(mut_file, gff_record, &args.gene_barcode_tag)?;
@@ -589,11 +683,33 @@ fn process_all_bam_files_to_bed(
     gene_sites: &HashMap<GeneId, Vec<MethylatedSite>>,
     gff_map: &GffRecordMap,
 ) -> anyhow::Result<()> {
+    // Load cell membership file if provided
+    let membership = if let Some(ref path) = args.cell_membership_file {
+        let m = CellMembership::from_file(
+            path,
+            args.membership_barcode_col,
+            args.membership_celltype_col,
+            !args.exact_barcode_match,
+        )?;
+        info!("Loaded {} cell barcodes from membership file: {}", m.num_cells(), path);
+        info!("Cell filter stage: {:?}", args.cell_filter_stage);
+        info!("Prefix matching: {}", !args.exact_barcode_match);
+        Some(m)
+    } else {
+        None
+    };
+
+    // Determine when to apply cell membership filter based on filter stage
+    let membership_for_quantification = match args.cell_filter_stage {
+        FilterStage::QuantificationOnly | FilterStage::Both => membership.as_ref(),
+        FilterStage::DiscoveryOnly => None,
+    };
+
     let wt_batch_names = uniq_batch_names(&args.wt_bam_files)?;
 
     for (bam_file, batch_name) in args.wt_bam_files.iter().zip(wt_batch_names) {
-        let mut stats = gather_m6a_stats(gene_sites, args, gff_map, bam_file)?;
-        write_bed(&mut stats, gff_map, &args.bed_file_path(&batch_name))?;
+        let mut stats = gather_m6a_stats(gene_sites, args, gff_map, bam_file, membership_for_quantification)?;
+        write_bed(&mut stats, gff_map, &args.bed_file_path(&batch_name), membership_for_quantification, args)?;
     }
 
     if args.output_null_data {
@@ -601,9 +717,20 @@ fn process_all_bam_files_to_bed(
         let mut_batch_names = uniq_batch_names(&args.mut_bam_files)?;
 
         for (bam_file, batch_name) in args.mut_bam_files.iter().zip(mut_batch_names) {
-            let mut stats = gather_m6a_stats(gene_sites, args, gff_map, bam_file)?;
-            write_bed(&mut stats, gff_map, &args.bed_file_path(&batch_name))?;
+            let mut stats = gather_m6a_stats(gene_sites, args, gff_map, bam_file, membership_for_quantification)?;
+            write_bed(&mut stats, gff_map, &args.bed_file_path(&batch_name), membership_for_quantification, args)?;
         }
+    }
+
+    // Log match statistics if membership was used
+    if let Some(ref m) = membership {
+        let (matched, total) = m.match_stats();
+        info!(
+            "Cell barcode matching: {}/{} BAM barcodes matched membership ({:.1}%)",
+            matched,
+            total,
+            if total > 0 { 100.0 * matched as f64 / total as f64 } else { 0.0 }
+        );
     }
 
     Ok(())
@@ -614,6 +741,28 @@ fn process_all_bam_files_to_backend(
     gene_sites: &HashMap<GeneId, Vec<MethylatedSite>>,
     gff_map: &GffRecordMap,
 ) -> anyhow::Result<()> {
+    // Load cell membership file if provided
+    let membership = if let Some(ref path) = args.cell_membership_file {
+        let m = CellMembership::from_file(
+            path,
+            args.membership_barcode_col,
+            args.membership_celltype_col,
+            !args.exact_barcode_match,
+        )?;
+        info!("Loaded {} cell barcodes from membership file: {}", m.num_cells(), path);
+        info!("Cell filter stage: {:?}", args.cell_filter_stage);
+        info!("Prefix matching: {}", !args.exact_barcode_match);
+        Some(m)
+    } else {
+        None
+    };
+
+    // Determine when to apply cell membership filter based on filter stage
+    let membership_for_quantification = match args.cell_filter_stage {
+        FilterStage::QuantificationOnly | FilterStage::Both => membership.as_ref(),
+        FilterStage::DiscoveryOnly => None,
+    };
+
     let gene_key = create_gene_key_function(gff_map);
     let site_key = |x: &BedWithGene| -> Box<str> { format!("{}@m6A", x).into_boxed_str() };
     let take_value = args.value_extractor();
@@ -643,6 +792,7 @@ fn process_all_bam_files_to_backend(
             &mut sites,
             &mut gene_data_files,
             &mut site_data_files,
+            membership_for_quantification,
         )?;
     }
 
@@ -665,8 +815,20 @@ fn process_all_bam_files_to_backend(
                 &mut sites,
                 &mut null_gene_data_files,
                 &mut null_site_data_files,
+                membership_for_quantification,
             )?;
         }
+    }
+
+    // Log match statistics if membership was used
+    if let Some(ref m) = membership {
+        let (matched, total) = m.match_stats();
+        info!(
+            "Cell barcode matching: {}/{} BAM barcodes matched membership ({:.1}%)",
+            matched,
+            total,
+            if total > 0 { 100.0 * matched as f64 / total as f64 } else { 0.0 }
+        );
     }
 
     // Reorder rows to ensure consistency across files
@@ -698,6 +860,7 @@ fn process_bam_to_backend(
     sites: &mut HashSet<Box<str>>,
     gene_data_files: &mut Vec<Box<str>>,
     site_data_files: &mut Vec<Box<str>>,
+    cell_membership: Option<&CellMembership>,
 ) -> anyhow::Result<()> {
     info!(
         "collecting data over {} sites from {} ...",
@@ -705,7 +868,7 @@ fn process_bam_to_backend(
         bam_file
     );
 
-    let stats = gather_m6a_stats(gene_sites, args, gff_map, bam_file)?;
+    let stats = gather_m6a_stats(gene_sites, args, gff_map, bam_file, cell_membership)?;
 
     info!(
         "aggregating the '{}' triplets over {} stats...",
@@ -779,6 +942,7 @@ fn gather_m6a_stats(
     args: &DartSeqCountArgs,
     gff_map: &GffRecordMap,
     bam_file: &str,
+    cell_membership: Option<&CellMembership>,
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
     let ndata = gene_sites.iter().map(|x| x.value().len()).sum::<usize>();
     let arc_ret = Arc::new(Mutex::new(Vec::with_capacity(ndata)));
@@ -792,7 +956,7 @@ fn gather_m6a_stats(
             let sites = gs.value();
 
             if let Some(gff) = gff_map.get(gene) {
-                let stats = collect_gene_m6a_stats(args, bam_file, &gff, sites)?;
+                let stats = collect_gene_m6a_stats(args, bam_file, &gff, sites, cell_membership)?;
                 arc_ret.lock().expect("lock").extend(stats);
             }
             Ok(())
@@ -809,11 +973,12 @@ fn collect_gene_m6a_stats(
     bam_file: &str,
     gff_record: &GffRecord,
     sites: &[MethylatedSite],
+    cell_membership: Option<&CellMembership>,
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
     let mut all_stats = Vec::new();
 
     for site in sites {
-        let stats = estimate_m6a_stat(args, bam_file, gff_record, site)?;
+        let stats = estimate_m6a_stat(args, bam_file, gff_record, site, cell_membership)?;
         all_stats.extend(stats);
     }
 
@@ -825,8 +990,9 @@ fn estimate_m6a_stat(
     bam_file: &str,
     gff_record: &GffRecord,
     m6a_c2u: &MethylatedSite,
+    cell_membership: Option<&CellMembership>,
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
-    let mut stat_map = DnaBaseFreqMap::new_with_cell_barcode(&args.cell_barcode_tag);
+    let mut stat_map = DnaBaseFreqMap::new_with_cell_barcode(&args.cell_barcode_tag, cell_membership);
     let m6apos = m6a_c2u.m6a_pos;
     let c2upos = m6a_c2u.conversion_pos;
 
@@ -938,6 +1104,8 @@ fn write_bed(
     stats: &mut [(CellBarcode, BedWithGene, MethylationData)],
     gff_map: &GffRecordMap,
     file_path: &str,
+    cell_membership: Option<&CellMembership>,
+    args: &DartSeqCountArgs,
 ) -> anyhow::Result<()> {
     use rust_htslib::bgzf::Writer as BWriter;
     use std::io::Write;
@@ -955,25 +1123,64 @@ fn write_bed(
                 })
                 .unwrap_or_else(|| format!("{}", &bg.gene));
 
-            format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                bg.chr,
-                bg.start,
-                bg.stop,
-                bg.strand,
-                gene_string,
-                data.methylated,
-                data.unmethylated,
-                cb
-            )
-            .into_boxed_str()
+            if args.output_cell_types {
+                if let Some(membership) = cell_membership {
+                    let cell_type = membership
+                        .matches_barcode(cb)
+                        .unwrap_or_else(|| "unknown".into());
+                    format!(
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        bg.chr,
+                        bg.start,
+                        bg.stop,
+                        bg.strand,
+                        gene_string,
+                        data.methylated,
+                        data.unmethylated,
+                        cb,
+                        cell_type
+                    )
+                    .into_boxed_str()
+                } else {
+                    // No membership provided but cell types requested - just output unknown
+                    format!(
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tunknown",
+                        bg.chr,
+                        bg.start,
+                        bg.stop,
+                        bg.strand,
+                        gene_string,
+                        data.methylated,
+                        data.unmethylated,
+                        cb
+                    )
+                    .into_boxed_str()
+                }
+            } else {
+                format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    bg.chr,
+                    bg.start,
+                    bg.stop,
+                    bg.strand,
+                    gene_string,
+                    data.methylated,
+                    data.unmethylated,
+                    cb
+                )
+                .into_boxed_str()
+            }
         })
         .collect();
 
-    const HEADER: &[u8] = b"#chr\tstart\tstop\tstrand\tgene\tmethylated\tunmethylated\tbarcode\n";
+    let header: &[u8] = if args.output_cell_types {
+        b"#chr\tstart\tstop\tstrand\tgene\tmethylated\tunmethylated\tbarcode\tcell_type\n"
+    } else {
+        b"#chr\tstart\tstop\tstrand\tgene\tmethylated\tunmethylated\tbarcode\n"
+    };
 
     let mut writer = BWriter::from_path(file_path)?;
-    writer.write_all(HEADER)?;
+    writer.write_all(header)?;
     for line in lines {
         writer.write_all(line.as_bytes())?;
         writer.write_all(b"\n")?;
