@@ -43,9 +43,7 @@ pub struct DartSeqSifter<'a> {
     pub min_coverage: usize,
     pub min_conversion: usize,
     pub pseudocount: usize,
-    pub min_meth_cutoff: Option<f64>,
     pub max_pvalue_cutoff: f64,
-    pub max_mutant_cutoff: Option<f64>,
     pub check_r_site: bool,
     pub candidate_sites: Vec<MethylatedSite>,
 }
@@ -251,14 +249,9 @@ impl<'a> DartSeqSifter<'a> {
                 let (ntot_wt, ntot_mut) =
                     (wt_n_failure + wt_n_success, mut_n_failure + mut_n_success);
 
-                let p_wt = wt_n_success as f64 / ntot_wt as f64;
-                let p_mut = mut_n_success as f64 / ntot_mut as f64;
-
                 if ntot_wt >= self.min_coverage
                     && ntot_mut >= self.min_coverage
                     && wt_n_success >= self.min_conversion
-                    && self.min_meth_cutoff.map_or(true, |c| p_wt >= c)
-                    && self.max_mutant_cutoff.map_or(true, |c| p_mut < c)
                 {
                     let pv_greater = BinomTest {
                         // Add pseudocount to null/background distribution for regularization

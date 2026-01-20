@@ -154,22 +154,6 @@ pub struct DartSeqCountArgs {
     pseudocount: usize,
 
     #[arg(
-        long = "min-wt-maf",
-        help = "Minimum frequency of `C->U` in an edit site on the wild type",
-        long_help = "Minimum frequency of C->U conversion at an edit site in the wild-type sample. \n\
-		     Used to filter out low-frequency events. If not set, no minimum is enforced."
-    )]
-    min_methylation_maf: Option<f64>,
-
-    #[arg(
-        long = "max-mut-maf",
-        help = "Maximum frequency `C->U` on the mutant",
-        long_help = "Maximum frequency of C->U conversion at an edit site in the mutant sample. \n\
-		     Used to filter out background events. If not set, no maximum is enforced."
-    )]
-    max_background_maf: Option<f64>,
-
-    #[arg(
         short = 'p',
         long = "pval",
         alias = "pvalue",
@@ -434,9 +418,7 @@ impl DartSeqCountArgs {
             min_coverage: self.min_coverage,
             min_conversion: self.min_conversion,
             pseudocount: self.pseudocount,
-            min_meth_cutoff: self.min_methylation_maf,
             max_pvalue_cutoff: self.pvalue_cutoff,
-            max_mutant_cutoff: self.max_background_maf,
             check_r_site: self.check_r_site,
             candidate_sites: Vec::with_capacity(capacity),
         }
