@@ -43,6 +43,8 @@ pub struct DartSeqCountArgs {
     #[arg(
         short = 'w',
         long = "wt",
+        alias = "observed",
+        alias = "deamination",
         value_delimiter = ',',
         required = true,
         help = "Observed (wild-type) BAM files.",
@@ -56,6 +58,7 @@ pub struct DartSeqCountArgs {
     #[arg(
         short = 'm',
         long = "mut",
+        alias = "background",
         value_delimiter = ',',
         required = true,
         help = "Background/control (mutant) BAM files.",
@@ -152,21 +155,19 @@ pub struct DartSeqCountArgs {
 
     #[arg(
         long = "min-wt-maf",
-        default_value_t = 0.01,
         help = "Minimum frequency of `C->U` in an edit site on the wild type",
         long_help = "Minimum frequency of C->U conversion at an edit site in the wild-type sample. \n\
-		     Used to filter out low-frequency events."
+		     Used to filter out low-frequency events. If not set, no minimum is enforced."
     )]
-    min_methylation_maf: f64,
+    min_methylation_maf: Option<f64>,
 
     #[arg(
         long = "max-mut-maf",
-        default_value_t = 0.01,
         help = "Maximum frequency `C->U` on the mutant",
         long_help = "Maximum frequency of C->U conversion at an edit site in the mutant sample. \n\
-		     Used to filter out background events."
+		     Used to filter out background events. If not set, no maximum is enforced."
     )]
-    max_background_maf: f64,
+    max_background_maf: Option<f64>,
 
     #[arg(
         short = 'p',
@@ -174,7 +175,7 @@ pub struct DartSeqCountArgs {
         alias = "pvalue",
         alias = "p-val",
         alias = "p-value",
-        default_value_t = 0.01,
+        default_value_t = 0.05,
         help = "Maximum detection p-value cutoff",
         long_help = "Maximum p-value cutoff for detection. \n\
 		     Sites with p-values above this threshold will be excluded."
@@ -210,19 +211,17 @@ pub struct DartSeqCountArgs {
 
     #[arg(
         long,
-        default_value_t = 10,
         help = "Number of non-zero cutoff for rows/features",
-        long_help = "Minimum number of non-zero entries required for rows/features to be included in the output."
+        long_help = "Minimum number of non-zero entries required for rows/features to be included in the output. If not set, no filtering is applied."
     )]
-    row_nnz_cutoff: usize,
+    row_nnz_cutoff: Option<usize>,
 
     #[arg(
         long,
-        default_value_t = 10,
         help = "Minimum number of non-zero entries for the columns/cells",
-        long_help = "Minimum number of non-zero entries required for columns/cells to be included in the output."
+        long_help = "Minimum number of non-zero entries required for columns/cells to be included in the output. If not set, no filtering is applied."
     )]
-    column_nnz_cutoff: usize,
+    column_nnz_cutoff: Option<usize>,
 
     #[arg(
         short = 't',
@@ -316,6 +315,8 @@ pub struct DartSeqCountArgs {
 
     #[arg(
         long = "cell-membership",
+        alias = "barcode-membership",
+        alias = "membership",
         help = "Cell barcode membership file for filtering cells (TSV, CSV, or Parquet)",
         long_help = "Path to cell barcode membership file for restricting analysis to specific cells.\n\
                      Format: First column = cell barcode, Second column = cell type.\n\
@@ -342,7 +343,7 @@ pub struct DartSeqCountArgs {
     #[arg(
         long = "cell-filter-stage",
         value_enum,
-        default_value = "quantification-only",
+        default_value = "both",
         help = "When to apply cell barcode membership filtering",
         long_help = "Control when cell barcode membership filtering is applied:\n\
                      - quantification-only: Filter cells during second pass only (default, recommended)\n\
@@ -370,6 +371,16 @@ pub struct DartSeqCountArgs {
         help = "Include cell type annotation in BED output"
     )]
     output_cell_types: bool,
+
+    #[arg(
+        long = "check-r-site",
+        default_value_t = false,
+        help = "Validate R site (A/G for RAC, C/T for GTY) in reference",
+        long_help = "Whether to validate the R site in RAC/GTY patterns.\n\
+                     When enabled, requires R=A/G for forward strand and Y=C/T for reverse strand.\n\
+                     Enable to test if R site validation is meaningful for your data."
+    )]
+    check_r_site: bool,
 }
 
 impl DartSeqCountArgs {
@@ -390,8 +401,8 @@ impl DartSeqCountArgs {
     /// Get QC cutoffs
     fn qc_cutoffs(&self) -> SqueezeCutoffs {
         SqueezeCutoffs {
-            row: self.row_nnz_cutoff,
-            column: self.column_nnz_cutoff,
+            row: self.row_nnz_cutoff.unwrap_or(0),
+            column: self.column_nnz_cutoff.unwrap_or(0),
         }
     }
 
@@ -426,6 +437,7 @@ impl DartSeqCountArgs {
             min_meth_cutoff: self.min_methylation_maf,
             max_pvalue_cutoff: self.pvalue_cutoff,
             max_mutant_cutoff: self.max_background_maf,
+            check_r_site: self.check_r_site,
             candidate_sites: Vec::with_capacity(capacity),
         }
     }
@@ -525,7 +537,11 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             args.membership_celltype_col,
             !args.exact_barcode_match,
         )?;
-        info!("Loaded {} cell barcodes from membership file: {}", m.num_cells(), path);
+        info!(
+            "Loaded {} cell barcodes from membership file: {}",
+            m.num_cells(),
+            path
+        );
         info!("Cell filter stage: {:?}", args.cell_filter_stage);
         info!("Prefix matching: {}", !args.exact_barcode_match);
         Some(m)
@@ -691,7 +707,11 @@ fn process_all_bam_files_to_bed(
             args.membership_celltype_col,
             !args.exact_barcode_match,
         )?;
-        info!("Loaded {} cell barcodes from membership file: {}", m.num_cells(), path);
+        info!(
+            "Loaded {} cell barcodes from membership file: {}",
+            m.num_cells(),
+            path
+        );
         info!("Cell filter stage: {:?}", args.cell_filter_stage);
         info!("Prefix matching: {}", !args.exact_barcode_match);
         Some(m)
@@ -708,8 +728,20 @@ fn process_all_bam_files_to_bed(
     let wt_batch_names = uniq_batch_names(&args.wt_bam_files)?;
 
     for (bam_file, batch_name) in args.wt_bam_files.iter().zip(wt_batch_names) {
-        let mut stats = gather_m6a_stats(gene_sites, args, gff_map, bam_file, membership_for_quantification)?;
-        write_bed(&mut stats, gff_map, &args.bed_file_path(&batch_name), membership_for_quantification, args)?;
+        let mut stats = gather_m6a_stats(
+            gene_sites,
+            args,
+            gff_map,
+            bam_file,
+            membership_for_quantification,
+        )?;
+        write_bed(
+            &mut stats,
+            gff_map,
+            &args.bed_file_path(&batch_name),
+            membership_for_quantification,
+            args,
+        )?;
     }
 
     if args.output_null_data {
@@ -717,8 +749,20 @@ fn process_all_bam_files_to_bed(
         let mut_batch_names = uniq_batch_names(&args.mut_bam_files)?;
 
         for (bam_file, batch_name) in args.mut_bam_files.iter().zip(mut_batch_names) {
-            let mut stats = gather_m6a_stats(gene_sites, args, gff_map, bam_file, membership_for_quantification)?;
-            write_bed(&mut stats, gff_map, &args.bed_file_path(&batch_name), membership_for_quantification, args)?;
+            let mut stats = gather_m6a_stats(
+                gene_sites,
+                args,
+                gff_map,
+                bam_file,
+                membership_for_quantification,
+            )?;
+            write_bed(
+                &mut stats,
+                gff_map,
+                &args.bed_file_path(&batch_name),
+                membership_for_quantification,
+                args,
+            )?;
         }
     }
 
@@ -729,7 +773,11 @@ fn process_all_bam_files_to_bed(
             "Cell barcode matching: {}/{} BAM barcodes matched membership ({:.1}%)",
             matched,
             total,
-            if total > 0 { 100.0 * matched as f64 / total as f64 } else { 0.0 }
+            if total > 0 {
+                100.0 * matched as f64 / total as f64
+            } else {
+                0.0
+            }
         );
     }
 
@@ -749,7 +797,11 @@ fn process_all_bam_files_to_backend(
             args.membership_celltype_col,
             !args.exact_barcode_match,
         )?;
-        info!("Loaded {} cell barcodes from membership file: {}", m.num_cells(), path);
+        info!(
+            "Loaded {} cell barcodes from membership file: {}",
+            m.num_cells(),
+            path
+        );
         info!("Cell filter stage: {:?}", args.cell_filter_stage);
         info!("Prefix matching: {}", !args.exact_barcode_match);
         Some(m)
@@ -827,7 +879,11 @@ fn process_all_bam_files_to_backend(
             "Cell barcode matching: {}/{} BAM barcodes matched membership ({:.1}%)",
             matched,
             total,
-            if total > 0 { 100.0 * matched as f64 / total as f64 } else { 0.0 }
+            if total > 0 {
+                100.0 * matched as f64 / total as f64
+            } else {
+                0.0
+            }
         );
     }
 
@@ -992,7 +1048,8 @@ fn estimate_m6a_stat(
     m6a_c2u: &MethylatedSite,
     cell_membership: Option<&CellMembership>,
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
-    let mut stat_map = DnaBaseFreqMap::new_with_cell_barcode(&args.cell_barcode_tag, cell_membership);
+    let mut stat_map =
+        DnaBaseFreqMap::new_with_cell_barcode(&args.cell_barcode_tag, cell_membership);
     let m6apos = m6a_c2u.m6a_pos;
     let c2upos = m6a_c2u.conversion_pos;
 
