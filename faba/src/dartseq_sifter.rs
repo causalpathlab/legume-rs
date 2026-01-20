@@ -43,18 +43,17 @@ pub struct DartSeqSifter<'a> {
     pub min_coverage: usize,
     pub min_conversion: usize,
     pub pseudocount: usize,
-    pub min_meth_cutoff: f64,
+    pub min_meth_cutoff: Option<f64>,
     pub max_pvalue_cutoff: f64,
-    pub max_mutant_cutoff: f64,
+    pub max_mutant_cutoff: Option<f64>,
+    pub check_r_site: bool,
     pub candidate_sites: Vec<MethylatedSite>,
 }
 
 impl<'a> DartSeqSifter<'a> {
     /// Validate RAC pattern in reference: R=A/G, A, C
+    /// If `check_r_site` is false, only validates A and C positions
     fn validate_rac_pattern(&self, r_site: i64, m6a_site: i64, conv_site: i64) -> bool {
-        let ref_r = fetch_reference_base(self.faidx, self.chr, r_site)
-            .ok()
-            .flatten();
         let ref_m6a = fetch_reference_base(self.faidx, self.chr, m6a_site)
             .ok()
             .flatten();
@@ -62,12 +61,20 @@ impl<'a> DartSeqSifter<'a> {
             .ok()
             .flatten();
 
-        matches!(ref_r, Some(Dna::A) | Some(Dna::G))
-            && ref_m6a == Some(Dna::A)
-            && ref_conv == Some(Dna::C)
+        let r_site_valid = if self.check_r_site {
+            let ref_r = fetch_reference_base(self.faidx, self.chr, r_site)
+                .ok()
+                .flatten();
+            matches!(ref_r, Some(Dna::A) | Some(Dna::G))
+        } else {
+            true
+        };
+
+        r_site_valid && ref_m6a == Some(Dna::A) && ref_conv == Some(Dna::C)
     }
 
     /// Validate GTY pattern in reference: G, T, Y=C/T (complement of RAC)
+    /// If `check_r_site` is false, only validates G and T positions
     fn validate_gty_pattern(&self, conv_site: i64, m6a_site: i64, r_site: i64) -> bool {
         let ref_conv = fetch_reference_base(self.faidx, self.chr, conv_site)
             .ok()
@@ -75,13 +82,17 @@ impl<'a> DartSeqSifter<'a> {
         let ref_m6a = fetch_reference_base(self.faidx, self.chr, m6a_site)
             .ok()
             .flatten();
-        let ref_r = fetch_reference_base(self.faidx, self.chr, r_site)
-            .ok()
-            .flatten();
 
-        ref_conv == Some(Dna::G)
-            && ref_m6a == Some(Dna::T)
-            && matches!(ref_r, Some(Dna::C) | Some(Dna::T))
+        let r_site_valid = if self.check_r_site {
+            let ref_r = fetch_reference_base(self.faidx, self.chr, r_site)
+                .ok()
+                .flatten();
+            matches!(ref_r, Some(Dna::C) | Some(Dna::T))
+        } else {
+            true
+        };
+
+        ref_conv == Some(Dna::G) && ref_m6a == Some(Dna::T) && r_site_valid
     }
 
     /// Search over RAC patterns
@@ -124,7 +135,9 @@ impl<'a> DartSeqSifter<'a> {
                     };
 
                     // Perform binomial test and store result if significant
-                    if let Some(pv) = self.binomial_test_pvalue(Some(wt_conv), Some(mut_conv), &Dna::C, &Dna::T) {
+                    if let Some(pv) =
+                        self.binomial_test_pvalue(Some(wt_conv), Some(mut_conv), &Dna::C, &Dna::T)
+                    {
                         if pv < self.max_pvalue_cutoff {
                             self.candidate_sites.push(MethylatedSite {
                                 m6a_pos: m6a_site,
@@ -190,7 +203,9 @@ impl<'a> DartSeqSifter<'a> {
                     };
 
                     // Perform binomial test and store result if significant
-                    if let Some(pv) = self.binomial_test_pvalue(Some(wt_conv), Some(mut_conv), &Dna::G, &Dna::A) {
+                    if let Some(pv) =
+                        self.binomial_test_pvalue(Some(wt_conv), Some(mut_conv), &Dna::G, &Dna::A)
+                    {
                         if pv < self.max_pvalue_cutoff {
                             self.candidate_sites.push(MethylatedSite {
                                 m6a_pos: m6a_site,
@@ -242,8 +257,8 @@ impl<'a> DartSeqSifter<'a> {
                 if ntot_wt >= self.min_coverage
                     && ntot_mut >= self.min_coverage
                     && wt_n_success >= self.min_conversion
-                    && p_wt >= self.min_meth_cutoff
-                    && p_mut < self.max_mutant_cutoff
+                    && self.min_meth_cutoff.map_or(true, |c| p_wt >= c)
+                    && self.max_mutant_cutoff.map_or(true, |c| p_mut < c)
                 {
                     let pv_greater = BinomTest {
                         // Add pseudocount to null/background distribution for regularization
