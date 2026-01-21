@@ -197,7 +197,7 @@ impl LogSoftmaxMultimodalEncoder {
             .iter()
             .enumerate()
             .map(|(i, &in_dim)| {
-                aggregate_linear(
+                aggregate_linear_hard(
                     in_dim,
                     args.n_modules,
                     vb.pp(format!("feature.module_{}", i)),

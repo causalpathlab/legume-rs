@@ -135,7 +135,7 @@ impl LogSoftmaxIAFEncoder {
         debug_assert!(!args.layers.is_empty());
 
         let feature_module =
-            aggregate_linear(args.n_features, args.n_modules, vb.pp("feature.module"))?;
+            aggregate_linear_hard(args.n_features, args.n_modules, vb.pp("feature.module"))?;
 
         let emb_x = candle_nn::embedding(args.n_vocab, args.d_vocab_emb, vb.pp("nn.embed_x"))?;
         let emb_logx =
