@@ -204,6 +204,47 @@ impl CellMembership {
         let stats = self.stats.lock().unwrap();
         (stats.matched, stats.total_checked)
     }
+
+    /// Create cell membership from cluster assignments
+    ///
+    /// # Arguments
+    /// * `barcodes` - Cell barcodes
+    /// * `assignments` - Cluster assignment for each barcode (same length as barcodes)
+    /// * `allow_prefix` - Enable prefix matching
+    ///
+    /// # Returns
+    /// * `CellMembership` with cluster labels as cell types
+    pub fn from_clusters(
+        barcodes: &[Box<str>],
+        assignments: &[usize],
+        allow_prefix: bool,
+    ) -> Self {
+        let mut exact_barcodes = HashSet::default();
+        let mut prefix_barcodes = Vec::new();
+        let mut barcode_to_celltype = HashMap::default();
+
+        for (barcode, &cluster) in barcodes.iter().zip(assignments.iter()) {
+            let celltype: Box<str> = format!("cluster_{}", cluster).into();
+            exact_barcodes.insert(barcode.clone());
+            prefix_barcodes.push(barcode.clone());
+            barcode_to_celltype.insert(barcode.clone(), celltype);
+        }
+
+        log::info!(
+            "Created membership from {} cells in {} clusters",
+            exact_barcodes.len(),
+            assignments.iter().max().map(|x| x + 1).unwrap_or(0)
+        );
+
+        Self {
+            exact_barcodes,
+            prefix_barcodes,
+            barcode_to_celltype,
+            match_cache: Mutex::new(HashMap::default()),
+            stats: Mutex::new(MatchStats::default()),
+            allow_prefix_matching: allow_prefix,
+        }
+    }
 }
 
 #[cfg(test)]
