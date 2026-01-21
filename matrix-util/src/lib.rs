@@ -1,3 +1,4 @@
+pub mod clustering;
 pub mod common_io;
 pub mod dmatrix_io;
 pub mod dmatrix_rsvd;

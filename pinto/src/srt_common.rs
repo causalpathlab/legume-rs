@@ -9,6 +9,7 @@ pub use data_beans::sparse_data_visitors::*;
 pub use data_beans::sparse_io::*;
 pub use data_beans::sparse_io_vector::*;
 
+pub use matrix_util::clustering::{Kmeans, KmeansArgs};
 pub use matrix_util::common_io::{basename, file_ext, read_lines};
 pub use matrix_util::dmatrix_util::*;
 pub use matrix_util::knn_match::ColumnDict;
@@ -29,32 +30,6 @@ pub use candle_util::{candle_core, candle_nn};
 pub struct Pair {
     pub left: usize,
     pub right: usize,
-}
-
-pub struct KmeansArgs {
-    pub num_clusters: usize,
-    pub max_iter: usize,
-}
-
-pub trait Kmeans {
-    /// do k-means clustering of columns
-    fn kmeans_columns(&self, args: KmeansArgs) -> Vec<usize>;
-}
-
-impl<T> Kmeans for DMatrix<T>
-where
-    T: Clone + Sync + Send,
-    Vec<T>: clustering::Elem,
-{
-    fn kmeans_columns(&self, args: KmeansArgs) -> Vec<usize> {
-        let data: Vec<Vec<T>> = self
-            .column_iter()
-            .map(|x| -> Vec<T> { x.iter().cloned().collect() })
-            .collect();
-
-        let clust = clustering::kmeans(args.num_clusters, &data, args.max_iter);
-        clust.membership
-    }
 }
 
 /// Impute `y` matrix by its neighbours `y_neigh` Here, we calculate
