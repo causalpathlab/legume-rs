@@ -98,10 +98,12 @@ impl AggregateLinear {
         let assignments_d = self.get_assignments()?;
 
         // Build sparse assignment matrix [d, k] with one-hot encoding
+        // Convert to same dtype as input to ensure output dtype consistency
         let mut columns = Vec::with_capacity(k);
         for module_idx in 0..k {
             let mask_d = assignments_d.eq(module_idx as f64)?;
-            columns.push(mask_d.unsqueeze(1)?);
+            let mask_float = mask_d.to_dtype(x_nd.dtype())?;
+            columns.push(mask_float.unsqueeze(1)?);
         }
         let assignment_matrix_dk = Tensor::cat(&columns, 1)?;
 
