@@ -17,6 +17,8 @@ pub struct DnaBaseFreqMap<'a> {
     anchor_position: Option<i64>,
     anchor_base: Option<Dna>,
     cell_membership: Option<&'a CellMembership>,
+    /// Optional target cell type - if set, only cells of this type pass the filter
+    target_celltype: Option<Box<str>>,
 }
 
 impl<'a> VisitWithBamOps for DnaBaseFreqMap<'a> {}
@@ -62,7 +64,13 @@ impl<'a> DnaStatMap for DnaBaseFreqMap<'a> {
             // Check cell membership if filter is active
             let passes_membership = if let Some(membership) = &self.cell_membership {
                 if let Some(ref cb) = cell_barcode {
-                    membership.matches_barcode(cb).is_some()
+                    if let Some(ref target) = self.target_celltype {
+                        // Filter for specific cell type
+                        membership.matches_celltype(cb, target)
+                    } else {
+                        // Just check membership (any cell type)
+                        membership.matches_barcode(cb).is_some()
+                    }
                 } else {
                     false
                 }
@@ -116,20 +124,43 @@ impl<'a> DnaBaseFreqMap<'a> {
             anchor_position: None,
             anchor_base: None,
             cell_membership,
+            target_celltype: None,
+        }
+    }
+
+    /// Frequency map for a specific cell type only.
+    /// Only cells matching the target cell type will be included.
+    ///
+    /// * `cell_barcode_tag` - tag word, e.g., "CB" in 10x
+    /// * `cell_membership` - cell membership for filtering
+    /// * `target_celltype` - only include cells of this type
+    pub fn new_for_celltype(
+        cell_barcode_tag: &str,
+        cell_membership: &'a CellMembership,
+        target_celltype: &str,
+    ) -> Self {
+        Self {
+            position_to_count_with_cell: None,
+            position_to_count: Some(HashMap::default()),
+            cell_barcode_tag: Some(cell_barcode_tag.as_bytes().to_vec()),
+            anchor_position: None,
+            anchor_base: None,
+            cell_membership: Some(cell_membership),
+            target_celltype: Some(target_celltype.into()),
         }
     }
 
     /// empty frequency map without keeping track of cell barcode
-    ///
-    /// * `cell_membership` - optional cell membership filter (only used if tracking cells)
-    pub fn new(cell_membership: Option<&'a CellMembership>) -> Self {
+    /// (computes marginal/bulk statistics only)
+    pub fn new() -> Self {
         Self {
             position_to_count_with_cell: None,
             position_to_count: Some(HashMap::default()),
             cell_barcode_tag: None,
             anchor_position: None,
             anchor_base: None,
-            cell_membership,
+            cell_membership: None,
+            target_celltype: None,
         }
     }
 
