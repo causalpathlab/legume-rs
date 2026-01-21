@@ -23,6 +23,10 @@ pub struct ClusteringParams<'a> {
     pub cell_barcode_tag: &'a str,
     pub gene_barcode_tag: &'a str,
     pub allow_prefix_matching: bool,
+    /// Minimum non-zeros per row (gene) to keep
+    pub min_row_nnz: usize,
+    /// Minimum non-zeros per column (cell) to keep
+    pub min_col_nnz: usize,
 }
 
 /// Cluster cells based on gene expression profiles
@@ -88,6 +92,36 @@ pub fn cluster_cells_from_bam(
 
     let data = triplets_data.to_backend(&temp_path)?;
 
+    // Step 2b: QC - remove sparse rows/columns
+    if params.min_row_nnz > 0 || params.min_col_nnz > 0 {
+        info!(
+            "QC: removing rows with < {} nnz, columns with < {} nnz",
+            params.min_row_nnz, params.min_col_nnz
+        );
+        let cutoffs = SqueezeCutoffs {
+            row: params.min_row_nnz,
+            column: params.min_col_nnz,
+        };
+        data.qc(cutoffs)?;
+    }
+
+    // Get column names after QC (these are the cells that passed filtering)
+    let filtered_cols = data.column_names()?;
+    let n_cells_filtered = filtered_cols.len();
+
+    info!(
+        "After QC: {} cells remaining (from {} original)",
+        n_cells_filtered, n_cells
+    );
+
+    if n_cells_filtered < params.n_clusters {
+        return Err(anyhow::anyhow!(
+            "After QC, number of cells ({}) is less than requested clusters ({})",
+            n_cells_filtered,
+            params.n_clusters
+        ));
+    }
+
     // Step 3: Wrap in SparseIoVec and do random projection
     let data_arc: Arc<dyn SparseIo<IndexIter = Vec<usize>>> = Arc::from(data);
     let mut data_vec = data_beans::sparse_io_vector::SparseIoVec::new();
@@ -101,12 +135,15 @@ pub fn cluster_cells_from_bam(
     let proj_kn = proj_out.proj; // k x n matrix
 
     // Step 4: SVD on the projection
-    let svd_dim = params.svd_dim.min(params.proj_dim).min(n_cells);
+    let svd_dim = params.svd_dim.min(params.proj_dim).min(n_cells_filtered);
     info!("Computing SVD with {} components", svd_dim);
     let (_, _, v_nk) = proj_kn.rsvd(svd_dim)?;
 
     // Step 5: K-means clustering
-    info!("Running k-means clustering with {} clusters", params.n_clusters);
+    info!(
+        "Running k-means clustering with {} clusters",
+        params.n_clusters
+    );
     let assignments = v_nk.kmeans_rows(KmeansArgs {
         num_clusters: params.n_clusters,
         max_iter: params.kmeans_max_iter,
@@ -121,9 +158,9 @@ pub fn cluster_cells_from_bam(
     }
     info!("Cluster sizes: {:?}", cluster_sizes);
 
-    // Step 6: Create CellMembership from cluster assignments
+    // Step 6: Create CellMembership from cluster assignments (using filtered cells)
     let membership = CellMembership::from_clusters(
-        &triplets_data.cols,
+        &filtered_cols,
         &assignments,
         params.allow_prefix_matching,
     );
