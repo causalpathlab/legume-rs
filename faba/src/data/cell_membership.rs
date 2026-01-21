@@ -205,6 +205,22 @@ impl CellMembership {
         (stats.matched, stats.total_checked)
     }
 
+    /// Get all unique cell types in the membership
+    pub fn cell_types(&self) -> Vec<Box<str>> {
+        let mut types: Vec<_> = self.barcode_to_celltype.values().cloned().collect();
+        types.sort();
+        types.dedup();
+        types
+    }
+
+    /// Check if a barcode matches a specific cell type
+    /// Returns true if the barcode belongs to the given cell type
+    pub fn matches_celltype(&self, barcode: &CellBarcode, target_celltype: &str) -> bool {
+        self.matches_barcode(barcode)
+            .map(|ct| ct.as_ref() == target_celltype)
+            .unwrap_or(false)
+    }
+
     /// Create cell membership from cluster assignments
     ///
     /// # Arguments
