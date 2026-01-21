@@ -76,7 +76,7 @@ pub fn cluster_cells_from_bam(
         ));
     }
 
-    // Step 2: Create temporary sparse backend
+    // Step 2: Create temporary sparse backend with metadata
     let temp_dir = tempfile::tempdir()?;
     let temp_path = temp_dir
         .path()
@@ -86,13 +86,7 @@ pub fn cluster_cells_from_bam(
 
     info!("Creating temporary sparse matrix");
 
-    let mtx_shape = (n_genes, n_cells, n_nonzeros);
-    let data = create_sparse_from_triplets(
-        &triplets_data.triplets,
-        mtx_shape,
-        Some(&temp_path),
-        Some(&SparseIoBackend::Zarr),
-    )?;
+    let data = triplets_data.to_backend(&temp_path)?;
 
     // Step 3: Wrap in SparseIoVec and do random projection
     let data_arc: Arc<dyn SparseIo<IndexIter = Vec<usize>>> = Arc::from(data);
