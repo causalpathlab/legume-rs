@@ -327,6 +327,17 @@ pub struct TopicArgs {
 
     #[arg(
         long,
+        alias = "high-sd",
+        help = "Exclude highly expressed features (SD threshold)",
+        long_help = "Exclude features with high mean expression before feature selection.\n\
+		     Features with log1p(mean) > mean + threshold*SD are excluded.\n\
+		     Typical values: 2.5 or 3.0.\n\
+		     If not specified, no features are excluded based on expression level."
+    )]
+    exclude_high_expression_sd: Option<f32>,
+
+    #[arg(
+        long,
         help = "Save feature variance statistics",
         long_help = "Save computed log-variance for all features to {out}.feature_variance.parquet"
     )]
@@ -366,6 +377,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             args.save_feature_variance,
             &args.out,
             args.block_size,
+            args.exclude_high_expression_sd,
         )?)
     } else {
         None
