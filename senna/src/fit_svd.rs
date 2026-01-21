@@ -192,7 +192,7 @@ pub struct SvdArgs {
         help = "Exclude highly expressed features (SD threshold)",
         long_help = "Exclude features with high mean expression before feature selection.\n\
 		     Features with log1p(mean) > mean + threshold*SD are excluded.\n\
-		     Typical values: 2.5 or 3.0.\n\
+		     Typical values: 4 or 5.\n\
 		     If not specified, no features are excluded based on expression level."
     )]
     exclude_high_expression_sd: Option<f32>,
