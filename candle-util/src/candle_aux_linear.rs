@@ -74,26 +74,61 @@ impl Module for NonNegLinear {
 #[derive(Clone, Debug)]
 pub struct AggregateLinear {
     weight_dk: Tensor,
+    use_hard_assignment: bool,
 }
 
 impl AggregateLinear {
+    /// Get soft membership weights (for analysis/visualization)
     pub fn membership(&self) -> Result<Tensor> {
-        // ops::log_softmax(&self.weight_dk, self.weight_dk.rank() - 1)?.exp()
-        // self.weight_dk.relu()
         let eps = 1e-8;
         (ops::sigmoid(&self.weight_dk)? * (1.0 - eps))? + eps
     }
-}
 
-impl Module for AggregateLinear {
-    fn forward(&self, x_nd: &Tensor) -> Result<Tensor> {
+    /// Get hard assignments: which module each feature belongs to
+    /// Returns [d] tensor where each value is the module index (0..k)
+    pub fn get_assignments(&self) -> Result<Tensor> {
+        Ok(self.weight_dk.argmax(1)?)  // argmax along module dimension
+    }
+
+    /// Fast forward using hard assignments (scatter-based aggregation)
+    fn forward_hard(&self, x_nd: &Tensor) -> Result<Tensor> {
+        let k = self.weight_dk.dim(1)?;  // number of modules
+
+        // Get hard assignments: [d] where each value is module index
+        let assignments_d = self.get_assignments()?;
+
+        // Build sparse assignment matrix [d, k] with one-hot encoding
+        let mut columns = Vec::with_capacity(k);
+        for module_idx in 0..k {
+            let mask_d = assignments_d.eq(module_idx as f64)?;
+            columns.push(mask_d.unsqueeze(1)?);
+        }
+        let assignment_matrix_dk = Tensor::cat(&columns, 1)?;
+
+        // Efficient aggregation: x_nk = x_nd @ assignment_dk
+        x_nd.matmul(&assignment_matrix_dk)
+    }
+
+    /// Soft forward (original dense matmul)
+    fn forward_soft(&self, x_nd: &Tensor) -> Result<Tensor> {
         let c_dk = self.membership()?;
         x_nd.matmul(&c_dk)
     }
 }
 
+impl Module for AggregateLinear {
+    fn forward(&self, x_nd: &Tensor) -> Result<Tensor> {
+        if self.use_hard_assignment {
+            self.forward_hard(x_nd)
+        } else {
+            self.forward_soft(x_nd)
+        }
+    }
+}
+
 /// aggregate `X[n,d]` into `Y[n, k] = X[n, d] * C[d, k]` where we
 /// hope to have each feature to belong to a small number of modules `{k}`
+/// Uses soft assignments (dense matmul)
 pub fn aggregate_linear(
     in_dim: usize,
     out_dim: usize,
@@ -101,7 +136,26 @@ pub fn aggregate_linear(
 ) -> Result<AggregateLinear> {
     let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
     let weight_dk = vb.get_with_hints((in_dim, out_dim), "logits", init_ws)?;
-    Ok(AggregateLinear { weight_dk })
+    Ok(AggregateLinear {
+        weight_dk,
+        use_hard_assignment: false,
+    })
+}
+
+/// aggregate `X[n,d]` into `Y[n, k] = X[n, d] * C[d, k]` where
+/// each feature belongs to exactly one module (hard assignment)
+/// Much faster than soft assignment, uses scatter-gather instead of matmul
+pub fn aggregate_linear_hard(
+    in_dim: usize,
+    out_dim: usize,
+    vb: candle_nn::VarBuilder,
+) -> Result<AggregateLinear> {
+    let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
+    let weight_dk = vb.get_with_hints((in_dim, out_dim), "logits", init_ws)?;
+    Ok(AggregateLinear {
+        weight_dk,
+        use_hard_assignment: true,
+    })
 }
 
 ////////////////////////////////

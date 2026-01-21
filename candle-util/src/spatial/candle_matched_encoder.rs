@@ -138,7 +138,7 @@ impl MatchedEncoder {
 
         debug_assert!(!args.layers.is_empty());
 
-        let feature_module = aggregate_linear(
+        let feature_module = aggregate_linear_hard(
             args.dim_feature,
             args.num_feature_modules,
             vs.pp("feature.module"),
