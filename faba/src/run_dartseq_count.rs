@@ -1,3 +1,4 @@
+use crate::cell_clustering::{cluster_cells_from_bam, ClusteringParams};
 use crate::common::*;
 use crate::dartseq_io::ToParquet;
 use crate::dartseq_sifter::*;
@@ -365,6 +366,45 @@ pub struct DartSeqCountArgs {
                      Enable to test if R site validation is meaningful for your data."
     )]
     check_r_site: bool,
+
+    // ========== Cell clustering options ==========
+    #[arg(
+        long = "n-clusters",
+        default_value_t = 1,
+        help = "Number of cell clusters (1 = no clustering)",
+        long_help = "Number of cell clusters for automatic cell type assignment.\n\
+                     When set to 1 (default), all cells are treated as a single group.\n\
+                     When > 1, cells are clustered using random projection + SVD + k-means."
+    )]
+    n_clusters: usize,
+
+    #[arg(
+        long = "cluster-proj-dim",
+        default_value_t = 50,
+        help = "Random projection dimension for clustering"
+    )]
+    cluster_proj_dim: usize,
+
+    #[arg(
+        long = "cluster-svd-dim",
+        default_value_t = 10,
+        help = "Number of SVD components for clustering"
+    )]
+    cluster_svd_dim: usize,
+
+    #[arg(
+        long = "cluster-block-size",
+        default_value_t = 100,
+        help = "Block size for parallel processing during clustering"
+    )]
+    cluster_block_size: usize,
+
+    #[arg(
+        long = "cluster-max-iter",
+        default_value_t = 100,
+        help = "Maximum iterations for k-means clustering"
+    )]
+    cluster_max_iter: usize,
 }
 
 impl DartSeqCountArgs {
@@ -511,8 +551,9 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Load cell membership file if provided
+    // Load cell membership: from file, from clustering, or none
     let membership = if let Some(ref path) = args.cell_membership_file {
+        // Load from file
         let m = CellMembership::from_file(
             path,
             args.membership_barcode_col,
@@ -526,6 +567,25 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         );
         info!("Cell filter stage: {:?}", args.cell_filter_stage);
         info!("Prefix matching: {}", !args.exact_barcode_match);
+        Some(m)
+    } else if args.n_clusters > 1 {
+        // Generate membership via clustering
+        let params = ClusteringParams {
+            n_clusters: args.n_clusters,
+            proj_dim: args.cluster_proj_dim,
+            svd_dim: args.cluster_svd_dim,
+            block_size: args.cluster_block_size,
+            kmeans_max_iter: args.cluster_max_iter,
+            cell_barcode_tag: &args.cell_barcode_tag,
+            gene_barcode_tag: &args.gene_barcode_tag,
+            allow_prefix_matching: !args.exact_barcode_match,
+        };
+        let m = cluster_cells_from_bam(&args.wt_bam_files, &gff_map, &params)?;
+        info!(
+            "Generated {} cell clusters via clustering",
+            args.n_clusters
+        );
+        info!("Cell filter stage: {:?}", args.cell_filter_stage);
         Some(m)
     } else {
         None

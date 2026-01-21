@@ -1,8 +1,10 @@
+mod cell_clustering;
 mod common;
 mod dartseq_io;
 mod dartseq_sifter;
 mod dartseq_stat;
 mod data;
+mod gene_count;
 mod hypothesis_tests;
 mod read_coverage;
 mod run_dartseq_count;
