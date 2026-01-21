@@ -23,6 +23,7 @@ pub struct FeatureSelection {
 /// * `save_variance` - whether to save computed log-variance statistics
 /// * `out_prefix` - output prefix for variance file
 /// * `block_size` - block size for parallel processing
+/// * `exclude_high_expression_sd` - if Some(threshold), exclude genes with log1p(mean) > mean + threshold*SD (e.g., 2.5 or 3.0)
 ///
 /// # Returns
 /// * `FeatureSelection` - selected features with indices, names, and selection matrix
@@ -33,6 +34,7 @@ pub fn select_highly_variable_features(
     save_variance: bool,
     out_prefix: &str,
     block_size: usize,
+    exclude_high_expression_sd: Option<f32>,
 ) -> anyhow::Result<FeatureSelection> {
     let feature_names = data_vec.row_names()?;
 
@@ -47,9 +49,76 @@ pub fn select_highly_variable_features(
             return Err(anyhow::anyhow!("max_features must be >= 1"));
         }
 
-        info!("Computing log-variance for {} features...", feature_names.len());
+        // Step 1: Optionally exclude highly expressed features
+        let valid_features = if let Some(sd_threshold) = exclude_high_expression_sd {
+            info!("Computing mean expression to exclude highly expressed features (threshold: {} SD)...", sd_threshold);
 
-        // Compute log-variance using custom visitor
+            // Compute mean expression for each gene
+            let mut mean_stat = RunningStatistics::new(Ix1(data_vec.num_rows()));
+            data_vec.visit_columns_by_block(
+                &mean_expression_visitor,
+                &EmptyArg {},
+                &mut mean_stat,
+                Some(block_size),
+            )?;
+
+            let mean_expr = mean_stat.mean();
+
+            // Apply log1p transformation to mean expression
+            let log_mean_expr: Vec<f32> = mean_expr.iter().map(|&x| (x + 1.0).ln()).collect();
+
+            // Calculate mean and SD of log-transformed means
+            let log_mean: f32 = log_mean_expr.iter().sum::<f32>() / log_mean_expr.len() as f32;
+            let log_variance: f32 = log_mean_expr.iter()
+                .map(|&x| (x - log_mean).powi(2))
+                .sum::<f32>() / log_mean_expr.len() as f32;
+            let log_sd = log_variance.sqrt();
+            let cutoff = log_mean + sd_threshold * log_sd;
+
+            // Filter out highly expressed genes and collect excluded ones
+            let mut valid_features: Vec<usize> = Vec::new();
+            let mut excluded_features: Vec<(Box<str>, f32, f32)> = Vec::new(); // (name, mean_expr, log_mean_expr)
+
+            for (i, &log_expr) in log_mean_expr.iter().enumerate() {
+                if log_expr <= cutoff {
+                    valid_features.push(i);
+                } else {
+                    excluded_features.push((
+                        feature_names[i].clone(),
+                        mean_expr[i],
+                        log_expr,
+                    ));
+                }
+            }
+
+            let n_excluded = excluded_features.len();
+            info!(
+                "Excluded {} / {} highly expressed features (log1p(mean) > {:.3})",
+                n_excluded,
+                feature_names.len(),
+                cutoff
+            );
+
+            // Save excluded features to file
+            if n_excluded > 0 {
+                let excluded_file = format!("{}.excluded_high_expression.tsv", out_prefix);
+                save_excluded_features(&excluded_file, &excluded_features, cutoff)?;
+                info!("Saved excluded features to {}", excluded_file);
+            }
+
+            valid_features
+        } else {
+            // Use all features
+            (0..feature_names.len()).collect()
+        };
+
+        if valid_features.is_empty() {
+            return Err(anyhow::anyhow!("All features were excluded as highly expressed"));
+        }
+
+        info!("Computing log-variance for {} features...", valid_features.len());
+
+        // Step 2: Compute log-variance using custom visitor
         let mut log_stat = RunningStatistics::new(Ix1(data_vec.num_rows()));
         data_vec.visit_columns_by_block(
             &log_variance_visitor,
@@ -67,11 +136,9 @@ pub fn select_highly_variable_features(
             info!("Saved feature variance to {}", var_file);
         }
 
-        // Rank features by variance (descending)
-        let mut indexed_variance: Vec<(usize, f32)> = variance
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| (i, v))
+        // Rank features by variance (descending), only considering valid features
+        let mut indexed_variance: Vec<(usize, f32)> = valid_features.iter()
+            .map(|&i| (i, variance[i]))
             .collect();
 
         indexed_variance.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -200,6 +267,27 @@ fn load_feature_list_from_file(
     })
 }
 
+/// Compute mean expression for each gene (row-wise average across cells)
+///
+/// This visitor processes blocks of columns to compute running mean
+/// of raw expression values for each gene.
+fn mean_expression_visitor(
+    job: (usize, usize),
+    data: &SparseIoVec,
+    _: &EmptyArg,
+    arc_stat: Arc<Mutex<&mut RunningStatistics<Ix1>>>,
+) -> anyhow::Result<()> {
+    let (lb, ub) = job;
+    let xx = data.read_columns_ndarray(lb..ub)?;
+
+    let mut stat = arc_stat.lock().unwrap();
+    // Process each column (cell) to accumulate mean statistics per gene
+    for col in xx.axis_iter(ndarray::Axis(1)) {
+        stat.add(&col);
+    }
+    Ok(())
+}
+
 /// Compute log-variance for feature selection
 ///
 /// This visitor processes blocks of columns to compute running statistics
@@ -219,6 +307,40 @@ fn log_variance_visitor(
     for col in xx_log.axis_iter(ndarray::Axis(1)) {
         stat.add(&col);
     }
+    Ok(())
+}
+
+/// Save excluded features to TSV file
+///
+/// # Arguments
+/// * `file_path` - output file path
+/// * `excluded_features` - vector of (feature_name, mean_expr, log_mean_expr)
+/// * `cutoff` - the log1p(mean) cutoff threshold used
+///
+/// # Returns
+/// * `anyhow::Result<()>`
+fn save_excluded_features(
+    file_path: &str,
+    excluded_features: &[(Box<str>, f32, f32)],
+    cutoff: f32,
+) -> anyhow::Result<()> {
+    use std::fs::File;
+    use std::io::Write;
+
+    let mut file = File::create(file_path)?;
+
+    // Write header with cutoff info
+    writeln!(file, "# Excluded features with log1p(mean) > {:.6}", cutoff)?;
+    writeln!(file, "feature\tmean_expression\tlog1p_mean_expression")?;
+
+    // Write data, sorted by log_mean_expr descending
+    let mut sorted_features = excluded_features.to_vec();
+    sorted_features.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    for (name, mean_expr, log_mean_expr) in sorted_features {
+        writeln!(file, "{}\t{:.6}\t{:.6}", name, mean_expr, log_mean_expr)?;
+    }
+
     Ok(())
 }
 
