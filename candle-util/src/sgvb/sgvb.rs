@@ -102,6 +102,39 @@ where
     elbo.mean(0)
 }
 
+/// Compute direct ELBO loss with reparameterization gradients.
+///
+/// Unlike `sgvb_loss` which uses REINFORCE (score function estimator),
+/// this computes -ELBO directly and allows gradients to flow through
+/// the entire computation graph via reparameterization.
+///
+/// Use this for models like Susie where you need gradients to flow
+/// through deterministic transformations (e.g., softmax for selection).
+///
+/// # Arguments
+/// * `model` - SGVB model that provides samples and log probabilities
+/// * `likelihood` - Black-box likelihood p(y|η)
+/// * `num_samples` - Number of Monte Carlo samples
+///
+/// # Returns
+/// Negative ELBO (scalar) - minimize this to maximize ELBO
+pub fn direct_elbo_loss<M, L>(model: &M, likelihood: &L, num_samples: usize) -> Result<Tensor>
+where
+    M: SgvbModel,
+    L: BlackBoxLikelihood,
+{
+    let sample = model.sample(num_samples)?;
+
+    let llik = likelihood.log_likelihood(&[&sample.eta])?;
+    let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
+
+    // ELBO = log_lik + log_prior - log_q
+    let elbo = ((&llik + &sample.log_prior)? - &sample.log_q)?;
+
+    // Return negative mean ELBO as loss
+    elbo.mean(0)?.neg()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

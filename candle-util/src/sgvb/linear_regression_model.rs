@@ -1,20 +1,18 @@
 use candle_core::{Result, Tensor};
 use candle_nn::VarBuilder;
 
-use super::gaussian::GaussianVariational;
+use super::gaussian_variational::GaussianVariational;
 use super::sgvb::SGVBConfig;
 use super::traits::{Prior, SgvbModel, SgvbSample, VariationalDistribution};
 
-/// Linear regression SGVB model: η = X * θ where θ ~ q(θ) = N(μ, σ²I)
+/// Generic linear model SGVB: η = X * θ where θ ~ q(θ)
 ///
-/// This is a convenience wrapper combining:
-/// - Gaussian variational distribution for the regression coefficients
-/// - Prior distribution for coefficients
-/// - Linear predictor computation
-/// - SGVB loss computation
-pub struct LinearRegressionSGVB<P> {
+/// This is a generic wrapper that works with any variational distribution:
+/// - V: VariationalDistribution for the regression coefficients
+/// - P: Prior distribution for coefficients
+pub struct LinearModelSGVB<V, P> {
     /// Variational distribution for coefficients θ
-    pub variational: GaussianVariational,
+    pub variational: V,
     /// Prior distribution p(θ)
     pub prior: P,
     /// Design matrix X: (n, p)
@@ -23,81 +21,49 @@ pub struct LinearRegressionSGVB<P> {
     pub config: SGVBConfig,
 }
 
-impl<P: Prior> LinearRegressionSGVB<P> {
-    /// Create a new linear regression SGVB model.
+impl<V: VariationalDistribution, P: Prior> LinearModelSGVB<V, P> {
+    /// Create a new linear model with a given variational distribution.
     ///
     /// # Arguments
-    /// * `vb` - VarBuilder for creating trainable parameters
+    /// * `variational` - Variational distribution for θ
     /// * `x_design` - Design matrix X, shape (n, p)
-    /// * `k` - Number of output dimensions
     /// * `prior` - Prior distribution
     /// * `config` - SGVB configuration
-    ///
-    /// # Returns
-    /// Initialized LinearRegressionSGVB model
-    pub fn new(vb: VarBuilder, x_design: Tensor, k: usize, prior: P, config: SGVBConfig) -> Result<Self> {
-        let p = x_design.dim(1)?;
-        let variational = GaussianVariational::new(vb, p, k)?;
-
-        Ok(Self {
+    pub fn from_variational(variational: V, x_design: Tensor, prior: P, config: SGVBConfig) -> Self {
+        Self {
             variational,
             prior,
             x_design,
             config,
-        })
+        }
     }
 
     /// Compute the posterior mean prediction η = X @ μ_θ
-    ///
-    /// # Returns
-    /// Mean prediction, shape (n, k)
     pub fn eta_mean(&self) -> Result<Tensor> {
-        self.x_design.matmul(self.variational.mean())
+        let theta_mean = self.variational.mean()?;
+        self.x_design.matmul(&theta_mean)
     }
 
     /// Get the variational mean of coefficients μ_θ
-    ///
-    /// # Returns
-    /// Coefficient mean, shape (p, k)
-    pub fn coef_mean(&self) -> &Tensor {
+    pub fn coef_mean(&self) -> Result<Tensor> {
         self.variational.mean()
     }
 
-    /// Get the variational standard deviation of coefficients σ_θ
-    ///
-    /// # Returns
-    /// Coefficient std, shape (p, k)
-    pub fn coef_std(&self) -> Result<Tensor> {
-        self.variational.std()
+    /// Get the variational variance of coefficients
+    pub fn coef_var(&self) -> Result<Tensor> {
+        self.variational.var()
     }
 }
 
-impl<P: Prior> SgvbModel for LinearRegressionSGVB<P> {
+impl<V: VariationalDistribution, P: Prior> SgvbModel for LinearModelSGVB<V, P> {
     fn sample(&self, num_samples: usize) -> Result<SgvbSample> {
-        // 1. Compute η by propagating uncertainty through linear transformation
-        // η_mean = X @ μ: shape (n, k)
-        let theta_mean = self.variational.mean();
-        let theta_var = self.variational.var()?;
-
-        let eta_mean = self.x_design.matmul(theta_mean)?;
-
-        // η_var = X² @ σ²: shape (n, k)
-        let x_sq = self.x_design.powf(2.0)?;
-        let eta_var = x_sq.matmul(&theta_var)?;
-        let eta_std = eta_var.sqrt()?;
-
-        // ε ~ N(0, 1): shape (S, n, k)
-        let (n, k) = eta_mean.dims2()?;
-        let device = eta_mean.device();
-        let dtype = eta_mean.dtype();
-        let eps = Tensor::randn(0f32, 1f32, (num_samples, n, k), device)?.to_dtype(dtype)?;
-
-        // η = η_mean + η_std * ε: shape (S, n, k)
-        let eta = eta_mean.unsqueeze(0)?.broadcast_add(&eps.broadcast_mul(&eta_std)?)?;
-
-        // 2. Sample θ for log_prior and log_q (generalizable to non-Gaussian)
+        // 1. Sample θ from variational distribution
         let (theta, _) = self.variational.sample(num_samples)?;
 
+        // 2. Compute η = X @ θ
+        let eta = self.x_design.unsqueeze(0)?.broadcast_matmul(&theta)?;
+
+        // 3. Compute log_prior and log_q
         let log_prior = self.prior.log_prob(&theta)?;
         let log_q = self.variational.log_prob(&theta)?;
         let log_q_grad = self.variational.log_prob(&theta.detach())?;
@@ -111,13 +77,45 @@ impl<P: Prior> SgvbModel for LinearRegressionSGVB<P> {
     }
 }
 
+/// Linear regression SGVB model with Gaussian variational distribution.
+///
+/// Convenience type alias for LinearModelSGVB with GaussianVariational.
+pub type LinearRegressionSGVB<P> = LinearModelSGVB<GaussianVariational, P>;
+
+impl<P: Prior> LinearRegressionSGVB<P> {
+    /// Create a new linear regression SGVB model with Gaussian variational distribution.
+    ///
+    /// # Arguments
+    /// * `vb` - VarBuilder for creating trainable parameters
+    /// * `x_design` - Design matrix X, shape (n, p)
+    /// * `k` - Number of output dimensions
+    /// * `prior` - Prior distribution
+    /// * `config` - SGVB configuration
+    pub fn new(
+        vb: VarBuilder,
+        x_design: Tensor,
+        k: usize,
+        prior: P,
+        config: SGVBConfig,
+    ) -> Result<Self> {
+        let p = x_design.dim(1)?;
+        let variational = GaussianVariational::new(vb, p, k)?;
+        Ok(Self::from_variational(variational, x_design, prior, config))
+    }
+
+    /// Get the variational standard deviation of coefficients σ_θ
+    pub fn coef_std(&self) -> Result<Tensor> {
+        self.variational.std()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sgvb::traits::BlackBoxLikelihood;
-    use crate::sgvb::{compute_elbo, sgvb_loss, GaussianPrior};
+    use crate::sgvb::{compute_elbo, direct_elbo_loss, sgvb_loss, GaussianPrior};
     use candle_core::{DType, Device, Tensor};
-    use candle_nn::{VarBuilder, VarMap};
+    use candle_nn::{Optimizer, VarBuilder, VarMap};
 
     /// Simple Gaussian likelihood for testing
     struct TestGaussianLikelihood {
@@ -166,7 +164,7 @@ mod tests {
         let model = LinearRegressionSGVB::new(vb.pp("model"), x, k, prior, config)?;
 
         // Check shapes
-        assert_eq!(model.coef_mean().dims(), &[p, k]);
+        assert_eq!(model.coef_mean()?.dims(), &[p, k]);
         assert_eq!(model.coef_std()?.dims(), &[p, k]);
         assert_eq!(model.eta_mean()?.dims(), &[n, k]);
 
@@ -178,27 +176,185 @@ mod tests {
         let device = Device::Cpu;
         let dtype = DType::F32;
 
-        let n = 50;
-        let p = 10;
-        let k = 3;
+        let n = 150;
+        let p = 30;
+        let k = 1;
 
         let x = Tensor::randn(0f32, 1f32, (n, p), &device)?;
-        let y = Tensor::randn(0f32, 1f32, (n, k), &device)?;
+
+        // Generate y from first column of X: y = X[:, 0] * 2.0 + noise
+        let true_coef = 2.0f64;
+        let x_first = x.narrow(1, 0, 1)?; // (n, 1)
+        let noise = Tensor::randn(0f32, 0.5f32, (n, k), &device)?;
+        let y = (x_first * true_coef)?.add(&noise)?;
 
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
 
-        let likelihood = TestGaussianLikelihood::new(y, 1.0);
+        let likelihood = TestGaussianLikelihood::new(y, 0.5);
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
-        let config = SGVBConfig::default();
+        let config = SGVBConfig::new(50, true); // 50 samples, normalized
 
         let model = LinearRegressionSGVB::new(vb.pp("model"), x, k, prior, config.clone())?;
 
-        let loss = sgvb_loss(&model, &likelihood, &config)?;
-        assert!(loss.dims().is_empty());
+        let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.01)?;
 
-        let elbo = compute_elbo(&model, &likelihood, 50)?;
-        assert!(elbo.dims().is_empty());
+        for i in 0..200 {
+            let loss = sgvb_loss(&model, &likelihood, &config)?;
+            optimizer.backward_step(&loss)?;
+
+            let elbo = compute_elbo(&model, &likelihood, 100)?;
+
+            if i % 20 == 0 {
+                let loss_val: f32 = loss.to_scalar()?;
+                let elbo_val: f32 = elbo.to_scalar()?;
+                println!("iter {}: loss = {:.4}, elbo = {:.4}", i, loss_val, elbo_val);
+            }
+
+            assert!(loss.dims().is_empty());
+            assert!(elbo.dims().is_empty());
+        }
+
+        // Check learned coefficients
+        let coef_mean = model.coef_mean()?;
+        let coef_first: f32 = coef_mean.get(0)?.get(0)?.to_scalar()?;
+
+        // Compute mean of other coefficients
+        let mut other_sum = 0.0f32;
+        for i in 1..p {
+            let val: f32 = coef_mean.get(i)?.get(0)?.to_scalar()?;
+            other_sum += val.abs();
+        }
+        let other_mean = other_sum / (p - 1) as f32;
+
+        println!("\nCoefficients:");
+        println!("  First (true={:.1}): {:.4}", true_coef, coef_first);
+        println!("  Others mean abs: {:.4}", other_mean);
+
+        // First coefficient should be close to true_coef and much larger than others
+        assert!(coef_first > 1.0, "First coef should be > 1.0, got {}", coef_first);
+        assert!(coef_first.abs() > other_mean * 2.0, "First coef should dominate others");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_susie_linear_construction() -> Result<()> {
+        use crate::sgvb::SusieVariational;
+
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let n = 50;
+        let p = 20;
+        let k = 2;
+        let l = 3; // 3 components
+
+        let x = Tensor::randn(0f32, 1f32, (n, p), &device)?;
+
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
+
+        let susie = SusieVariational::new(vb.pp("susie"), l, p, k)?;
+        let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
+        let config = SGVBConfig::default();
+
+        let model = LinearModelSGVB::from_variational(susie, x, prior, config);
+
+        // Check shapes
+        assert_eq!(model.coef_mean()?.dims(), &[p, k]);
+        assert_eq!(model.coef_var()?.dims(), &[p, k]);
+        assert_eq!(model.eta_mean()?.dims(), &[n, k]);
+
+        // Check variational-specific methods
+        assert_eq!(model.variational.alpha()?.dims(), &[l, p, k]);
+        assert_eq!(model.variational.pip()?.dims(), &[p, k]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_susie_linear_sparse_recovery() -> Result<()> {
+        use crate::sgvb::SusieVariational;
+
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let n = 150;
+        let p = 50;
+        let k = 1;
+        let l = 2; // 2 components for 2 true effects
+
+        let x = Tensor::randn(0f32, 1f32, (n, p), &device)?;
+
+        // Generate y from features 0 and 5: y = X[:,0] * 2.0 + X[:,5] * 1.5 + noise
+        let x_0 = x.narrow(1, 0, 1)?;
+        let x_5 = x.narrow(1, 5, 1)?;
+        let noise = Tensor::randn(0f32, 0.5f32, (n, k), &device)?;
+        let y = ((x_0 * 2.0)? + (x_5 * 1.5)? + noise)?;
+
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
+
+        let likelihood = TestGaussianLikelihood::new(y, 0.5);
+        let susie = SusieVariational::new(vb.pp("susie"), l, p, k)?;
+        let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
+        let config = SGVBConfig::new(50, true);
+
+        let model = LinearModelSGVB::from_variational(susie, x, prior, config.clone());
+
+        let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.05)?;
+
+        for i in 0..500 {
+            // Use direct_elbo_loss for Susie - REINFORCE can't guide feature selection
+            // because α is deterministic (not sampled), so we need reparameterization
+            // gradients to flow: likelihood → eta → theta → alpha → logits
+            let loss = direct_elbo_loss(&model, &likelihood, config.num_samples)?;
+            optimizer.backward_step(&loss)?;
+
+            if i % 5 == 0 {
+                let loss_val: f32 = loss.to_scalar()?;
+                let pip = model.variational.pip()?;
+                let pip_0: f32 = pip.get(0)?.get(0)?.to_scalar()?;
+                let pip_5: f32 = pip.get(5)?.get(0)?.to_scalar()?;
+                println!(
+                    "iter {}: loss = {:.4}, PIP[0] = {:.4}, PIP[5] = {:.4}",
+                    i, loss_val, pip_0, pip_5
+                );
+            }
+        }
+
+        // Check PIPs - features 0 and 5 should have high PIPs
+        let pip = model.variational.pip()?;
+        let pip_0: f32 = pip.get(0)?.get(0)?.to_scalar()?;
+        let pip_5: f32 = pip.get(5)?.get(0)?.to_scalar()?;
+
+        // Mean PIP of other features
+        let mut other_sum = 0.0f32;
+        for j in 0..p {
+            if j != 0 && j != 5 {
+                let val: f32 = pip.get(j)?.get(0)?.to_scalar()?;
+                other_sum += val;
+            }
+        }
+        let other_mean = other_sum / (p - 2) as f32;
+
+        println!("\nPosterior Inclusion Probabilities:");
+        println!("  PIP[0] (true): {:.4}", pip_0);
+        println!("  PIP[5] (true): {:.4}", pip_5);
+        println!("  Others mean:   {:.4}", other_mean);
+
+        // True features should have higher PIPs than others
+        assert!(
+            pip_0 > other_mean * 3.0,
+            "PIP[0] should be > 3x other mean, got {} vs {}",
+            pip_0, other_mean
+        );
+        assert!(
+            pip_5 > other_mean * 3.0,
+            "PIP[5] should be > 3x other mean, got {} vs {}",
+            pip_5, other_mean
+        );
 
         Ok(())
     }

@@ -3,9 +3,14 @@ use candle_nn::VarBuilder;
 
 use super::traits::Prior;
 
+/// Maximum value for ln(τ) to prevent numerical overflow.
+/// ln(100) ≈ 4.6, so τ is capped at ~100.
+const MAX_LN_TAU: f64 = 4.6;
+
 /// Learnable Gaussian prior p(θ) = N(0, τ²I)
 ///
 /// The prior scale τ is a learnable parameter stored as ln(τ).
+/// τ is capped at exp(MAX_LN_TAU) ≈ 100 to prevent numerical issues.
 pub struct GaussianPrior {
     /// Log scale parameter ln(τ)
     ln_tau: Tensor,
@@ -26,9 +31,10 @@ impl GaussianPrior {
         Ok(Self { ln_tau })
     }
 
-    /// Get the prior scale τ = exp(ln_tau).
+    /// Get the prior scale τ = exp(clamp(ln_tau)).
     pub fn tau(&self) -> Result<f32> {
-        let val: f64 = self.ln_tau.to_dtype(DType::F64)?.exp()?.to_scalar()?;
+        let clamped = self.ln_tau.clamp(-MAX_LN_TAU, MAX_LN_TAU)?;
+        let val: f64 = clamped.to_dtype(DType::F64)?.exp()?.to_scalar()?;
         Ok(val as f32)
     }
 
@@ -58,8 +64,11 @@ impl Prior for GaussianPrior {
         let device = theta.device();
         let ln_2pi = Tensor::new((2.0 * std::f64::consts::PI).ln(), device)?.to_dtype(dtype)?;
 
-        // τ = exp(ln_tau), convert to theta's dtype
-        let tau = self.ln_tau.to_dtype(dtype)?.exp()?;
+        // Clamp ln_tau to prevent overflow
+        let ln_tau_clamped = self.ln_tau.clamp(-MAX_LN_TAU, MAX_LN_TAU)?.to_dtype(dtype)?;
+
+        // τ = exp(ln_tau_clamped)
+        let tau = ln_tau_clamped.exp()?;
         let tau_sq = tau.powf(2.0)?;
 
         // θ²/τ²: shape (S, p, k)
@@ -67,7 +76,7 @@ impl Prior for GaussianPrior {
 
         // 2*ln(τ) + ln(2π) is a scalar, broadcast to all elements
         let two = Tensor::new(2.0f64, device)?.to_dtype(dtype)?;
-        let const_term = self.ln_tau.to_dtype(dtype)?.broadcast_mul(&two)?.broadcast_add(&ln_2pi)?;
+        let const_term = ln_tau_clamped.broadcast_mul(&two)?.broadcast_add(&ln_2pi)?;
 
         // log p = -0.5 * [θ²/τ² + 2*ln(τ) + ln(2π)]
         let log_prob_element = (theta_sq_normalized.broadcast_add(&const_term)? * (-0.5))?;
