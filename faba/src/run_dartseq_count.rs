@@ -1,3 +1,4 @@
+use crate::cell_clustering::{cluster_cells_from_bam, ClusteringParams};
 use crate::common::*;
 use crate::dartseq_io::ToParquet;
 use crate::dartseq_sifter::*;
@@ -14,7 +15,6 @@ use crate::data::gff::{GeneId, GffRecordMap};
 use crate::data::methylation::*;
 
 use crate::data::util_htslib::*;
-use clap::ValueEnum;
 
 use dashmap::DashMap as HashMap;
 use dashmap::DashSet as HashSet;
@@ -26,17 +26,6 @@ const MIN_LENGTH_FOR_TESTING: usize = 3;
 
 /// Padding around target region when reading BAM files
 const BAM_READ_PADDING: i64 = 1;
-
-/// When to apply cell barcode membership filtering
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum FilterStage {
-    /// Filter only during quantification (second pass) - discovers sites from all cells
-    QuantificationOnly,
-    /// Filter during both discovery and quantification passes
-    Both,
-    /// Filter only during discovery (first pass) - rare use case
-    DiscoveryOnly,
-}
 
 #[derive(Args, Debug)]
 pub struct DartSeqCountArgs {
@@ -325,21 +314,6 @@ pub struct DartSeqCountArgs {
     membership_celltype_col: usize,
 
     #[arg(
-        long = "cell-filter-stage",
-        value_enum,
-        default_value = "both",
-        help = "When to apply cell barcode membership filtering",
-        long_help = "Control when cell barcode membership filtering is applied:\n\
-                     - quantification-only: Filter cells during second pass only (default, recommended)\n\
-                       Discovers methylation sites from all cells, but only quantify cells in membership file\n\
-                     - both: Filter cells during both discovery and quantification passes\n\
-                       Only discover and quantify sites in cells from membership file\n\
-                     - discovery-only: Filter cells during first pass only (rare use case)\n\
-                       Only discover sites in membership cells, but quantify all cells"
-    )]
-    cell_filter_stage: FilterStage,
-
-    #[arg(
         long = "exact-barcode-match",
         default_value_t = false,
         help = "Require exact cell barcode matching (disable prefix matching)",
@@ -365,6 +339,59 @@ pub struct DartSeqCountArgs {
                      Enable to test if R site validation is meaningful for your data."
     )]
     check_r_site: bool,
+
+    // ========== Cell clustering options ==========
+    #[arg(
+        long = "n-clusters",
+        default_value_t = 1,
+        help = "Number of cell clusters (1 = no clustering)",
+        long_help = "Number of cell clusters for automatic cell type assignment.\n\
+                     When set to 1 (default), all cells are treated as a single group.\n\
+                     When > 1, cells are clustered using random projection + SVD + k-means."
+    )]
+    n_clusters: usize,
+
+    #[arg(
+        long = "cluster-proj-dim",
+        default_value_t = 50,
+        help = "Random projection dimension for clustering"
+    )]
+    cluster_proj_dim: usize,
+
+    #[arg(
+        long = "cluster-svd-dim",
+        default_value_t = 10,
+        help = "Number of SVD components for clustering"
+    )]
+    cluster_svd_dim: usize,
+
+    #[arg(
+        long = "cluster-block-size",
+        default_value_t = 100,
+        help = "Block size for parallel processing during clustering"
+    )]
+    cluster_block_size: usize,
+
+    #[arg(
+        long = "cluster-max-iter",
+        default_value_t = 100,
+        help = "Maximum iterations for k-means clustering"
+    )]
+    cluster_max_iter: usize,
+
+    #[arg(
+        long = "cluster-min-row-nnz",
+        default_value_t = 1,
+        help = "Minimum non-zeros per gene for clustering QC"
+    )]
+    cluster_min_row_nnz: usize,
+
+    #[arg(
+        long = "cluster-min-col-nnz",
+        default_value_t = 1,
+        help = "Minimum non-zeros per cell for clustering QC"
+    )]
+    cluster_min_col_nnz: usize,
 }
 
 impl DartSeqCountArgs {
@@ -511,8 +538,9 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Load cell membership file if provided
+    // Load cell membership: from file, from clustering, or none
     let membership = if let Some(ref path) = args.cell_membership_file {
+        // Load from file
         let m = CellMembership::from_file(
             path,
             args.membership_barcode_col,
@@ -524,24 +552,37 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             m.num_cells(),
             path
         );
-        info!("Cell filter stage: {:?}", args.cell_filter_stage);
         info!("Prefix matching: {}", !args.exact_barcode_match);
+        Some(m)
+    } else if args.n_clusters > 1 {
+        // Generate membership via clustering
+        let params = ClusteringParams {
+            n_clusters: args.n_clusters,
+            proj_dim: args.cluster_proj_dim,
+            svd_dim: args.cluster_svd_dim,
+            block_size: args.cluster_block_size,
+            kmeans_max_iter: args.cluster_max_iter,
+            cell_barcode_tag: &args.cell_barcode_tag,
+            gene_barcode_tag: &args.gene_barcode_tag,
+            allow_prefix_matching: !args.exact_barcode_match,
+            min_row_nnz: args.cluster_min_row_nnz,
+            min_col_nnz: args.cluster_min_col_nnz,
+        };
+        let m = cluster_cells_from_bam(&args.wt_bam_files, &gff_map, &params)?;
+        info!(
+            "Generated {} cell clusters via clustering",
+            args.n_clusters
+        );
         Some(m)
     } else {
         None
-    };
-
-    // Determine when to apply cell membership filter for discovery based on filter stage
-    let membership_for_discovery = match args.cell_filter_stage {
-        FilterStage::DiscoveryOnly | FilterStage::Both => membership.as_ref(),
-        FilterStage::QuantificationOnly => None,
     };
 
     /////////////////////////////////
     // FIRST PASS: Find edit sites //
     /////////////////////////////////
 
-    let gene_sites = find_all_methylated_sites(&gff_map, args, membership_for_discovery)?;
+    let gene_sites = find_all_methylated_sites(&gff_map, args, membership.as_ref())?;
 
     if gene_sites.is_empty() {
         info!("no sites found");
@@ -622,8 +663,30 @@ fn find_methylated_sites_in_gene(
     // Each thread creates its own reader (faidx is not thread-safe)
     let faidx_reader = load_fasta_index(&args.genome_file)?;
 
-    // Sweep all BAM files to find variable sites
-    let mut wt_base_freq_map = DnaBaseFreqMap::new(cell_membership);
+    let candidate_sites = if let Some(membership) = cell_membership {
+        // Use per-cell-type statistics when membership is provided
+        find_sites_with_celltype_stats(gff_record, args, &faidx_reader, chr, strand, membership)?
+    } else {
+        // Use bulk statistics when no membership
+        find_sites_with_bulk_stats(gff_record, args, &faidx_reader, chr, strand)?
+    };
+
+    if !candidate_sites.is_empty() {
+        arc_gene_sites.insert(gene_id, candidate_sites);
+    }
+
+    Ok(())
+}
+
+/// Find methylated sites using bulk/marginal statistics (no cell type info)
+fn find_sites_with_bulk_stats(
+    gff_record: &GffRecord,
+    args: &DartSeqCountArgs,
+    faidx_reader: &faidx::Reader,
+    chr: &str,
+    strand: &Strand,
+) -> anyhow::Result<Vec<MethylatedSite>> {
+    let mut wt_base_freq_map = DnaBaseFreqMap::new();
 
     for wt_file in &args.wt_bam_files {
         wt_base_freq_map.update_bam_file_by_gene(wt_file, gff_record, &args.gene_barcode_tag)?;
@@ -632,14 +695,12 @@ fn find_methylated_sites_in_gene(
     let positions = wt_base_freq_map.sorted_positions();
 
     if positions.len() < MIN_LENGTH_FOR_TESTING {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
-    // Find AC/T patterns using mutant statistics as null distribution
-    let mut sifter = args.create_sifter(&faidx_reader, chr, positions.len());
+    let mut sifter = args.create_sifter(faidx_reader, chr, positions.len());
 
-    // Gather background frequency map
-    let mut mut_base_freq_map = DnaBaseFreqMap::new(cell_membership);
+    let mut mut_base_freq_map = DnaBaseFreqMap::new();
 
     for mut_file in &args.mut_bam_files {
         mut_base_freq_map.update_bam_file_by_gene(mut_file, gff_record, &args.gene_barcode_tag)?;
@@ -654,22 +715,82 @@ fn find_methylated_sites_in_gene(
 
     match strand {
         Strand::Forward => {
-            sifter.forward_sweep(&positions, &wt_freq, Some(&mut_freq));
+            sifter.forward_sweep(&positions, wt_freq, Some(mut_freq));
         }
         Strand::Backward => {
-            sifter.backward_sweep(&positions, &wt_freq, Some(&mut_freq));
+            sifter.backward_sweep(&positions, wt_freq, Some(mut_freq));
         }
     }
 
     let mut candidate_sites = sifter.candidate_sites;
+    candidate_sites.sort();
+    candidate_sites.dedup();
+    Ok(candidate_sites)
+}
 
-    if !candidate_sites.is_empty() {
-        candidate_sites.sort();
-        candidate_sites.dedup();
-        arc_gene_sites.insert(gene_id, candidate_sites);
+/// Find methylated sites using per-cell-type statistics
+fn find_sites_with_celltype_stats(
+    gff_record: &GffRecord,
+    args: &DartSeqCountArgs,
+    faidx_reader: &faidx::Reader,
+    chr: &str,
+    strand: &Strand,
+    membership: &CellMembership,
+) -> anyhow::Result<Vec<MethylatedSite>> {
+    // Get all cell types
+    let cell_types = membership.cell_types();
+
+    if cell_types.is_empty() {
+        return Ok(Vec::new());
     }
 
-    Ok(())
+    // Collect bulk frequencies from mut BAM files (background/null distribution)
+    let mut mut_base_freq_map = DnaBaseFreqMap::new();
+    for mut_file in &args.mut_bam_files {
+        mut_base_freq_map.update_bam_file_by_gene(mut_file, gff_record, &args.gene_barcode_tag)?;
+    }
+    let mut_freq = mut_base_freq_map.marginal_frequency_map();
+
+    // Find sites for each cell type
+    let mut all_candidate_sites = Vec::new();
+
+    for cell_type in &cell_types {
+        // Create frequency map for this cell type only
+        let mut wt_base_freq_map =
+            DnaBaseFreqMap::new_for_celltype(&args.cell_barcode_tag, membership, cell_type);
+
+        for wt_file in &args.wt_bam_files {
+            wt_base_freq_map.update_bam_file_by_gene(wt_file, gff_record, &args.gene_barcode_tag)?;
+        }
+
+        let positions = wt_base_freq_map.sorted_positions();
+
+        if positions.len() < MIN_LENGTH_FOR_TESTING {
+            continue;
+        }
+
+        let wt_freq = match wt_base_freq_map.marginal_frequency_map() {
+            Some(freq) => freq,
+            None => continue,
+        };
+
+        let mut sifter = args.create_sifter(faidx_reader, chr, positions.len());
+
+        match strand {
+            Strand::Forward => {
+                sifter.forward_sweep(&positions, wt_freq, mut_freq);
+            }
+            Strand::Backward => {
+                sifter.backward_sweep(&positions, wt_freq, mut_freq);
+            }
+        }
+
+        all_candidate_sites.extend(sifter.candidate_sites);
+    }
+
+    all_candidate_sites.sort();
+    all_candidate_sites.dedup();
+    Ok(all_candidate_sites)
 }
 
 //////////////////////////////////////////
@@ -694,17 +815,10 @@ fn process_all_bam_files_to_bed(
             m.num_cells(),
             path
         );
-        info!("Cell filter stage: {:?}", args.cell_filter_stage);
         info!("Prefix matching: {}", !args.exact_barcode_match);
         Some(m)
     } else {
         None
-    };
-
-    // Determine when to apply cell membership filter based on filter stage
-    let membership_for_quantification = match args.cell_filter_stage {
-        FilterStage::QuantificationOnly | FilterStage::Both => membership.as_ref(),
-        FilterStage::DiscoveryOnly => None,
     };
 
     let wt_batch_names = uniq_batch_names(&args.wt_bam_files)?;
@@ -715,13 +829,13 @@ fn process_all_bam_files_to_bed(
             args,
             gff_map,
             bam_file,
-            membership_for_quantification,
+            membership.as_ref(),
         )?;
         write_bed(
             &mut stats,
             gff_map,
             &args.bed_file_path(&batch_name),
-            membership_for_quantification,
+            membership.as_ref(),
             args,
         )?;
     }
@@ -736,13 +850,13 @@ fn process_all_bam_files_to_bed(
                 args,
                 gff_map,
                 bam_file,
-                membership_for_quantification,
+                membership.as_ref(),
             )?;
             write_bed(
                 &mut stats,
                 gff_map,
                 &args.bed_file_path(&batch_name),
-                membership_for_quantification,
+                membership.as_ref(),
                 args,
             )?;
         }
@@ -784,17 +898,10 @@ fn process_all_bam_files_to_backend(
             m.num_cells(),
             path
         );
-        info!("Cell filter stage: {:?}", args.cell_filter_stage);
         info!("Prefix matching: {}", !args.exact_barcode_match);
         Some(m)
     } else {
         None
-    };
-
-    // Determine when to apply cell membership filter based on filter stage
-    let membership_for_quantification = match args.cell_filter_stage {
-        FilterStage::QuantificationOnly | FilterStage::Both => membership.as_ref(),
-        FilterStage::DiscoveryOnly => None,
     };
 
     let gene_key = create_gene_key_function(gff_map);
@@ -826,7 +933,7 @@ fn process_all_bam_files_to_backend(
             &mut sites,
             &mut gene_data_files,
             &mut site_data_files,
-            membership_for_quantification,
+            membership.as_ref(),
         )?;
     }
 
@@ -849,7 +956,7 @@ fn process_all_bam_files_to_backend(
                 &mut sites,
                 &mut null_gene_data_files,
                 &mut null_site_data_files,
-                membership_for_quantification,
+                membership.as_ref(),
             )?;
         }
     }
