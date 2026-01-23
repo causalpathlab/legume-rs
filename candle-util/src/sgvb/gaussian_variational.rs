@@ -109,8 +109,8 @@ impl VariationalDistribution for GaussianVariational {
         log_prob_element.sum(2)?.sum(1)
     }
 
-    fn mean(&self) -> &Tensor {
-        &self.mean
+    fn mean(&self) -> Result<Tensor> {
+        Ok(self.mean.clone())
     }
 
     fn var(&self) -> Result<Tensor> {

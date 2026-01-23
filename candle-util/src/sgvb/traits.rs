@@ -39,7 +39,7 @@ pub trait VariationalDistribution {
     ///
     /// # Returns
     /// Mean tensor, shape (p, k)
-    fn mean(&self) -> &Tensor;
+    fn mean(&self) -> Result<Tensor>;
 
     /// Get the variational variance σ².
     ///

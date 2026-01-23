@@ -36,14 +36,16 @@
 //! let predictions = model.eta_mean()?;
 //! ```
 
-mod gaussian;
+mod gaussian_prior;
+mod gaussian_variational;
 mod linear_regression_model;
-mod prior;
 mod sgvb;
+mod susie_variational;
 mod traits;
 
-pub use gaussian::GaussianVariational;
-pub use linear_regression_model::LinearRegressionSGVB;
-pub use prior::{FixedGaussianPrior, GaussianPrior};
-pub use sgvb::{compute_elbo, sgvb_loss, SGVBConfig};
+pub use gaussian_variational::GaussianVariational;
+pub use gaussian_prior::{FixedGaussianPrior, GaussianPrior};
+pub use linear_regression_model::{LinearModelSGVB, LinearRegressionSGVB};
+pub use susie_variational::SusieVariational;
+pub use sgvb::{compute_elbo, direct_elbo_loss, sgvb_loss, SGVBConfig};
 pub use traits::{BlackBoxLikelihood, Prior, SgvbModel, SgvbSample, VariationalDistribution};
