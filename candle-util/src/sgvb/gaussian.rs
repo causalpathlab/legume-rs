@@ -108,6 +108,15 @@ impl VariationalDistribution for GaussianVariational {
         // Sum over dimensions 1 and 2 (p and k)
         log_prob_element.sum(2)?.sum(1)
     }
+
+    fn mean(&self) -> &Tensor {
+        &self.mean
+    }
+
+    fn var(&self) -> Result<Tensor> {
+        // σ² = exp(2 * ln_std)
+        (&self.ln_std * 2.0)?.exp()
+    }
 }
 
 #[cfg(test)]
