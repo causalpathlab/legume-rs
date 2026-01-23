@@ -34,6 +34,18 @@ pub trait VariationalDistribution {
     /// # Returns
     /// Log probability values, shape (S,) summed over parameter dimensions
     fn log_prob(&self, samples: &Tensor) -> Result<Tensor>;
+
+    /// Get the variational mean μ.
+    ///
+    /// # Returns
+    /// Mean tensor, shape (p, k)
+    fn mean(&self) -> &Tensor;
+
+    /// Get the variational variance σ².
+    ///
+    /// # Returns
+    /// Variance tensor, shape (p, k)
+    fn var(&self) -> Result<Tensor>;
 }
 
 /// Prior distribution trait.
@@ -46,4 +58,28 @@ pub trait Prior {
     /// # Returns
     /// Log prior probability, shape (S,) summed over parameter dimensions
     fn log_prob(&self, theta: &Tensor) -> Result<Tensor>;
+}
+
+/// Sample output from an SGVB model containing all components needed for REINFORCE.
+pub struct SgvbSample {
+    /// Linear predictor samples, shape (S, n, k)
+    pub eta: Tensor,
+    /// Log prior probability log p(θ), shape (S,)
+    pub log_prior: Tensor,
+    /// Log variational probability log q(θ) for reward computation (detached), shape (S,)
+    pub log_q: Tensor,
+    /// Log variational probability log q(θ) with gradients for surrogate loss, shape (S,)
+    pub log_q_grad: Tensor,
+}
+
+/// SGVB model trait - encapsulates variational distribution, prior, and model structure.
+pub trait SgvbModel {
+    /// Sample and compute all ELBO components except likelihood.
+    ///
+    /// # Arguments
+    /// * `num_samples` - Number of samples S to draw
+    ///
+    /// # Returns
+    /// SgvbSample containing eta, log_prior, log_q, and log_q_grad
+    fn sample(&self, num_samples: usize) -> Result<SgvbSample>;
 }

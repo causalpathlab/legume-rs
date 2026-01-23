@@ -13,22 +13,22 @@
 //! # Example
 //!
 //! ```ignore
-//! use candle_util::sgvb::{LinearRegressionSGVB, GaussianPrior, SGVBConfig, BlackBoxLikelihood};
+//! use candle_util::sgvb::{LinearRegressionSGVB, GaussianPrior, SGVBConfig, sgvb_loss, BlackBoxLikelihood};
 //!
 //! // Define your black-box likelihood
 //! struct MyLikelihood { /* ... */ }
 //! impl BlackBoxLikelihood for MyLikelihood {
-//!     fn log_likelihood(&self, eta: &Tensor) -> Result<Tensor> {
+//!     fn log_likelihood(&self, etas: &[&Tensor]) -> Result<Tensor> {
 //!         // Your likelihood computation here
 //!     }
 //! }
 //!
-//! // Create the model
-//! let model = LinearRegressionSGVB::new(vb, x_design, k, likelihood, prior, config)?;
+//! // Create the model (encapsulates variational distribution, prior, design matrix)
+//! let model = LinearRegressionSGVB::new(vb, x_design, k, prior, config.clone())?;
 //!
 //! // Training loop
 //! for _ in 0..num_iters {
-//!     let loss = model.loss()?;
+//!     let loss = sgvb_loss(&model, &likelihood, &config)?;
 //!     // optimizer.backward_step(&loss)?;
 //! }
 //!
@@ -46,4 +46,4 @@ pub use gaussian::GaussianVariational;
 pub use linear_regression_model::LinearRegressionSGVB;
 pub use prior::{FixedGaussianPrior, GaussianPrior};
 pub use sgvb::{compute_elbo, sgvb_loss, SGVBConfig};
-pub use traits::{BlackBoxLikelihood, Prior, VariationalDistribution};
+pub use traits::{BlackBoxLikelihood, Prior, SgvbModel, SgvbSample, VariationalDistribution};

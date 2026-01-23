@@ -1,6 +1,6 @@
 use candle_core::{Result, Tensor};
 
-use super::traits::{BlackBoxLikelihood, Prior, VariationalDistribution};
+use super::traits::{BlackBoxLikelihood, SgvbModel};
 
 /// Configuration for SGVB estimator.
 #[derive(Debug, Clone)]
@@ -37,53 +37,32 @@ impl SGVBConfig {
 /// With control variate: reward = (reward - mean) / std
 ///
 /// # Arguments
-/// * `variational` - Variational distribution q(θ)
+/// * `model` - SGVB model that provides samples and log probabilities
 /// * `likelihood` - Black-box likelihood p(y|η)
-/// * `prior` - Prior distribution p(θ)
-/// * `x_design` - Design matrix X, shape (n, p)
 /// * `config` - SGVB configuration
 ///
 /// # Returns
 /// Surrogate loss (scalar) that when differentiated gives REINFORCE gradients
-pub fn sgvb_loss<L, P, V>(
-    variational: &V,
-    likelihood: &L,
-    prior: &P,
-    x_design: &Tensor,
-    config: &SGVBConfig,
-) -> Result<Tensor>
+pub fn sgvb_loss<M, L>(model: &M, likelihood: &L, config: &SGVBConfig) -> Result<Tensor>
 where
+    M: SgvbModel,
     L: BlackBoxLikelihood,
-    P: Prior,
-    V: VariationalDistribution,
 {
-    // 1. Sample θ: (S, p, k) from q(θ)
-    let (theta, _epsilon) = variational.sample(config.num_samples)?;
+    // 1. Sample from model: get η, log p(θ), log q(θ), and log q(θ) with gradients
+    let sample = model.sample(config.num_samples)?;
 
-    // 2. Compute η = X @ θ: (S, n, k)
-    // X is (n, p), θ is (S, p, k)
-    // We need to batch matmul: unsqueeze X to (1, n, p), then matmul with (S, p, k) -> (S, n, k)
-    let eta = x_design.unsqueeze(0)?.broadcast_matmul(&theta)?;
-
-    // 3. Compute ELBO components (all should be detached for reward computation)
-    // log p(y|η): shape (S,) or (S, n) - we'll sum to (S,)
-    let llik = likelihood.log_likelihood(&[&eta])?;
+    // 2. Compute log likelihood: log p(y|η)
+    let llik = likelihood.log_likelihood(&[&sample.eta])?;
     let llik = if llik.rank() > 1 {
-        llik.sum(1)?  // Sum over observations if per-observation
+        llik.sum(1)? // Sum over observations if per-observation
     } else {
         llik
     };
 
-    // log p(θ): shape (S,)
-    let log_prior = prior.log_prob(&theta)?;
+    // 3. Reward = log p(y|η) + log p(θ) - log q(θ) (ELBO components)
+    let reward = ((&llik + &sample.log_prior)? - &sample.log_q)?;
 
-    // log q(θ): shape (S,)
-    let log_q = variational.log_prob(&theta)?;
-
-    // 4. Reward = log p(y|η) + log p(θ) - log q(θ) (ELBO components)
-    let reward = ((&llik + &log_prior)? - &log_q)?;
-
-    // 5. Normalize reward (control variate) if configured
+    // 4. Normalize reward (control variate) if configured
     let reward_norm = if config.normalize {
         let mean = reward.mean(0)?;
         let var = reward.var(0)?;
@@ -93,17 +72,12 @@ where
         reward
     };
 
-    // 6. DETACH reward from computation graph
-    // The reward should not contribute gradients - only log_q should
+    // 5. DETACH reward from computation graph
     let reward_detached = reward_norm.detach();
 
-    // 7. Recompute log_q WITH gradient tracking
-    // We detach theta so gradients flow only through log_q's parameters
-    let log_q_grad = variational.log_prob(&theta.detach())?;
-
-    // 8. Surrogate loss = -mean(reward * log_q)
+    // 6. Surrogate loss = -mean(reward * log_q_grad)
     // Minimizing this surrogate loss maximizes the ELBO via REINFORCE
-    let surrogate_loss = (&reward_detached * &log_q_grad)?.mean(0)?.neg()?;
+    let surrogate_loss = (&reward_detached * &sample.log_q_grad)?.mean(0)?.neg()?;
 
     Ok(surrogate_loss)
 }
@@ -114,48 +88,39 @@ where
 ///
 /// # Returns
 /// Mean ELBO estimate over samples (scalar)
-pub fn compute_elbo<L, P, V>(
-    variational: &V,
-    likelihood: &L,
-    prior: &P,
-    x_design: &Tensor,
-    num_samples: usize,
-) -> Result<Tensor>
+pub fn compute_elbo<M, L>(model: &M, likelihood: &L, num_samples: usize) -> Result<Tensor>
 where
+    M: SgvbModel,
     L: BlackBoxLikelihood,
-    P: Prior,
-    V: VariationalDistribution,
 {
-    let (theta, _) = variational.sample(num_samples)?;
+    let sample = model.sample(num_samples)?;
 
-    let eta = x_design.unsqueeze(0)?.broadcast_matmul(&theta)?;
-
-    let llik = likelihood.log_likelihood(&[&eta])?;
+    let llik = likelihood.log_likelihood(&[&sample.eta])?;
     let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
 
-    let log_prior = prior.log_prob(&theta)?;
-    let log_q = variational.log_prob(&theta)?;
-
-    let elbo = ((&llik + &log_prior)? - &log_q)?;
+    let elbo = ((&llik + &sample.log_prior)? - &sample.log_q)?;
     elbo.mean(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sgvb::{GaussianPrior, GaussianVariational};
+    use crate::sgvb::{GaussianPrior, LinearRegressionSGVB};
     use candle_core::{DType, Device, Tensor};
     use candle_nn::{VarBuilder, VarMap};
 
     /// Simple Gaussian likelihood for testing
     struct GaussianLikelihood {
-        y: Tensor,       // observations (n, k)
-        ln_sigma: f64,   // log noise std
+        y: Tensor,     // observations (n, k)
+        ln_sigma: f64, // log noise std
     }
 
     impl GaussianLikelihood {
         fn new(y: Tensor, sigma: f64) -> Self {
-            Self { y, ln_sigma: sigma.ln() }
+            Self {
+                y,
+                ln_sigma: sigma.ln(),
+            }
         }
     }
 
@@ -191,22 +156,20 @@ mod tests {
         // Create observations
         let y = Tensor::randn(0f32, 1f32, (n, k), &device)?;
 
-        // Create variational distribution
+        // Create model
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
-        let variational = GaussianVariational::new(vb.pp("var"), p, k)?;
-
-        // Create prior
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
+        let config = SGVBConfig::default();
+        let model = LinearRegressionSGVB::new(vb.pp("model"), x, k, prior, config.clone())?;
 
         // Create likelihood
         let likelihood = GaussianLikelihood::new(y, 1.0);
 
         // Compute loss
-        let config = SGVBConfig::default();
-        let loss = sgvb_loss(&variational, &likelihood, &prior, &x, &config)?;
+        let loss = sgvb_loss(&model, &likelihood, &config)?;
 
-        assert!(loss.dims().is_empty());  // Scalar
+        assert!(loss.dims().is_empty()); // Scalar
 
         Ok(())
     }
@@ -225,13 +188,14 @@ mod tests {
 
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
-        let variational = GaussianVariational::new(vb.pp("var"), p, k)?;
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
+        let config = SGVBConfig::default();
+        let model = LinearRegressionSGVB::new(vb.pp("model"), x, k, prior, config)?;
         let likelihood = GaussianLikelihood::new(y, 1.0);
 
-        let elbo = compute_elbo(&variational, &likelihood, &prior, &x, 100)?;
+        let elbo = compute_elbo(&model, &likelihood, 100)?;
 
-        assert!(elbo.dims().is_empty());  // Scalar
+        assert!(elbo.dims().is_empty()); // Scalar
 
         Ok(())
     }
