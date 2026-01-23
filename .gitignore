@@ -40,6 +40,8 @@ temp*
 *.bam
 *.bam.bai
 *.zip
+*.gguf
+*.json
 
 # reference genome files
 *.fa
