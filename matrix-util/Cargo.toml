@@ -32,6 +32,7 @@ indicatif = { workspace = true }
 parquet = { workspace = true }
 fnv = { workspace = true }
 zip = { workspace = true }
+clustering = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # candle-core = {  git = "https://github.com/huggingface/candle.git", package = "candle-core", features = ["cuda","cudarc","cudnn"] }

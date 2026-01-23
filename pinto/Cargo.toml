@@ -40,4 +40,3 @@ indicatif = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 dashmap = { workspace = true }
-clustering = { version = "0.2.1", features = ["parallel"] }
