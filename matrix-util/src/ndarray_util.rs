@@ -251,6 +251,29 @@ where
         }
         (val, idx)
     }
+
+    fn melt_many_with_indexes(&self, others: &[&Self]) -> (Vec<Vec<Self::Scalar>>, Vec<Vec<usize>>) {
+        let nelem = self.len();
+        let n_matrices = 1 + others.len();
+
+        // Pre-allocate all vectors
+        let mut values: Vec<Vec<Self::Scalar>> = (0..n_matrices)
+            .map(|_| Vec::with_capacity(nelem))
+            .collect();
+        let mut idx: Vec<Vec<usize>> = vec![Vec::with_capacity(nelem); self.ndim()];
+
+        // Single traversal using ndarray's indexed_iter (row-major for Array2)
+        for (ij, &x) in self.indexed_iter() {
+            idx[0].push(ij.0);
+            idx[1].push(ij.1);
+            values[0].push(x);
+            for (i, other) in others.iter().enumerate() {
+                values[i + 1].push(other[[ij.0, ij.1]]);
+            }
+        }
+
+        (values, idx)
+    }
 }
 
 impl<T> CandleDataLoaderOps for ndarray::Array2<T>

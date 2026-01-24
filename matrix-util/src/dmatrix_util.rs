@@ -374,8 +374,9 @@ where
         let mut idx: Vec<Vec<usize>> = vec![Vec::with_capacity(nelem), Vec::with_capacity(nelem)];
         let mut val: Vec<Self::Scalar> = Vec::with_capacity(nelem);
 
-        for r in 0..self.nrows() {
-            for c in 0..self.ncols() {
+        // Iterate column-major to match nalgebra's storage layout for cache efficiency
+        for c in 0..self.ncols() {
+            for r in 0..self.nrows() {
                 idx[0].push(r);
                 idx[1].push(c);
                 val.push(self[(r, c)]);
@@ -388,12 +389,40 @@ where
     fn melt(&self) -> Vec<Self::Scalar> {
         let nelem = self.len();
         let mut val: Vec<Self::Scalar> = Vec::with_capacity(nelem);
-        for r in 0..self.nrows() {
-            for c in 0..self.ncols() {
+        // Iterate column-major to match nalgebra's storage layout for cache efficiency
+        for c in 0..self.ncols() {
+            for r in 0..self.nrows() {
                 val.push(self[(r, c)]);
             }
         }
         val
+    }
+
+    fn melt_many_with_indexes(&self, others: &[&Self]) -> (Vec<Vec<Self::Scalar>>, Vec<Vec<usize>>) {
+        let nrows = self.nrows();
+        let ncols = self.ncols();
+        let nelem = nrows * ncols;
+        let n_matrices = 1 + others.len();
+
+        // Pre-allocate all vectors
+        let mut values: Vec<Vec<Self::Scalar>> = (0..n_matrices)
+            .map(|_| Vec::with_capacity(nelem))
+            .collect();
+        let mut idx: Vec<Vec<usize>> = vec![Vec::with_capacity(nelem), Vec::with_capacity(nelem)];
+
+        // Single traversal in column-major order for cache efficiency
+        for c in 0..ncols {
+            for r in 0..nrows {
+                idx[0].push(r);
+                idx[1].push(c);
+                values[0].push(self[(r, c)]);
+                for (i, other) in others.iter().enumerate() {
+                    values[i + 1].push(other[(r, c)]);
+                }
+            }
+        }
+
+        (values, idx)
     }
 }
 

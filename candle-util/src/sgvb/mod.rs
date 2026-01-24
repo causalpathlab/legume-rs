@@ -37,15 +37,17 @@
 //! ```
 
 mod gaussian_prior;
-mod gaussian_variational;
-mod linear_regression_model;
+mod regression_linear;
 mod sgvb;
-mod susie_variational;
 mod traits;
+mod variational_gaussian;
+mod variational_io;
+mod variational_susie;
 
-pub use gaussian_variational::GaussianVariational;
 pub use gaussian_prior::{FixedGaussianPrior, GaussianPrior};
-pub use linear_regression_model::{LinearModelSGVB, LinearRegressionSGVB};
-pub use susie_variational::SusieVariational;
+pub use regression_linear::{LinearModelSGVB, LinearRegressionSGVB};
+pub use variational_gaussian::GaussianVar;
+pub use variational_susie::SusieVar;
 pub use sgvb::{compute_elbo, direct_elbo_loss, sgvb_loss, SGVBConfig};
 pub use traits::{BlackBoxLikelihood, Prior, SgvbModel, SgvbSample, VariationalDistribution};
+pub use variational_io::{SparseVariationalOutput, VariationalOutput};
