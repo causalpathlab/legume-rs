@@ -1,13 +1,13 @@
-.PHONY: all install install-senna install-pinto install-cocoa install-faba install-chickpea clean build test help
+.PHONY: all install install-senna install-pinto install-cocoa install-faba install-chickpea install-candle-util clean build test help
 
-BINARIES = senna pinto cocoa faba chickpea
+BINARIES = senna pinto cocoa faba chickpea candle-util
 
 help:
 	@echo "Legume-rs Makefile"
 	@echo ""
 	@echo "Available targets:"
 	@echo "  install              - Install all binaries"
-	@echo "  install-<binary>     - Install a specific binary (senna, pinto, cocoa, faba, chickpea)"
+	@echo "  install-<binary>     - Install a specific binary (senna, pinto, cocoa, faba, chickpea, candle-util)"
 	@echo "  build                - Build all workspace members"
 	@echo "  test                 - Run all tests"
 	@echo "  clean                - Clean build artifacts"
@@ -15,7 +15,7 @@ help:
 
 all: install
 
-install: install-senna install-pinto install-cocoa install-faba install-chickpea
+install: install-senna install-pinto install-cocoa install-faba install-chickpea install-candle-util
 	@echo "All binaries installed successfully"
 
 install-senna:
@@ -37,6 +37,10 @@ install-faba:
 install-chickpea:
 	@echo "Installing chickpea..."
 	cargo install --path chickpea
+
+install-candle-util:
+	@echo "Installing candle-util..."
+	cargo install --path candle-util
 
 build:
 	cargo build --release

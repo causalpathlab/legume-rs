@@ -11,7 +11,7 @@ use super::traits::VariationalDistribution;
 ///
 /// Each output dimension k has its own independent feature selection.
 /// This can be used with LinearModelSGVB for Susie regression.
-pub struct SusieVariational {
+pub struct SusieVar {
     /// Selection logits, shape (L, p, k)
     logits: Tensor,
     /// Effect size means, shape (L, p, k)
@@ -22,7 +22,7 @@ pub struct SusieVariational {
     num_components: usize,
 }
 
-impl SusieVariational {
+impl SusieVar {
     /// Create a new Susie variational distribution.
     ///
     /// # Arguments
@@ -125,7 +125,7 @@ impl SusieVariational {
     }
 }
 
-impl VariationalDistribution for SusieVariational {
+impl VariationalDistribution for SusieVar {
     /// Sample θ = Σ_l (α_l ⊙ β_l) using reparameterization for β.
     ///
     /// # Arguments
@@ -220,7 +220,7 @@ impl VariationalDistribution for SusieVariational {
     }
 }
 
-impl SusieVariational {
+impl SusieVar {
     /// Get the actual mean of θ: E[θ] = Σ_l (α_l ⊙ μ_l)
     ///
     /// # Returns
@@ -275,7 +275,7 @@ mod tests {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
 
-        let susie = SusieVariational::new(vb, l, p, k)?;
+        let susie = SusieVar::new(vb, l, p, k)?;
 
         // Check alpha shape - now (L, p, k)
         let alpha = susie.alpha()?;
@@ -313,7 +313,7 @@ mod tests {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
 
-        let susie = SusieVariational::new(vb, l, p, k)?;
+        let susie = SusieVar::new(vb, l, p, k)?;
 
         let alpha = susie.alpha()?; // (L, p, k)
         let alpha_sum = alpha.sum(1)?; // Sum over p -> (L, k)
@@ -354,7 +354,7 @@ mod tests {
         let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
 
         // Create Susie variational distribution
-        let susie = SusieVariational::new(vb.pp("susie"), l, p, k)?;
+        let susie = SusieVar::new(vb.pp("susie"), l, p, k)?;
 
         // Create prior and config
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;

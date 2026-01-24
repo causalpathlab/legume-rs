@@ -7,14 +7,14 @@ use super::traits::VariationalDistribution;
 ///
 /// Uses mean-field approximation with diagonal covariance.
 /// Parameters are stored as mean μ and log standard deviation ln(σ).
-pub struct GaussianVariational {
+pub struct GaussianVar {
     /// Variational mean μ: shape (p, k)
     mean: Tensor,
     /// Log standard deviation ln(σ): shape (p, k)
     ln_std: Tensor,
 }
 
-impl GaussianVariational {
+impl GaussianVar {
     /// Create a new Gaussian variational distribution.
     ///
     /// # Arguments
@@ -23,7 +23,7 @@ impl GaussianVariational {
     /// * `k` - Number of output dimensions
     ///
     /// # Returns
-    /// Initialized GaussianVariational with small random mean and ln_std = 0 (std = 1)
+    /// Initialized GaussianVar with small random mean and ln_std = 0 (std = 1)
     pub fn new(vb: VarBuilder, p: usize, k: usize) -> Result<Self> {
         let mean = vb.get_with_hints((p, k), "mean", candle_nn::Init::Randn { mean: 0.0, stdev: 0.01 })?;
         let ln_std = vb.get_with_hints((p, k), "ln_std", candle_nn::Init::Const(0.0))?;
@@ -51,7 +51,7 @@ impl GaussianVariational {
     }
 }
 
-impl VariationalDistribution for GaussianVariational {
+impl VariationalDistribution for GaussianVar {
     /// Sample using reparameterization: θ = μ + σ * ε where ε ~ N(0, I)
     ///
     /// # Arguments
@@ -134,7 +134,7 @@ mod tests {
         let k = 3;
         let s = 10;
 
-        let gauss = GaussianVariational::new(vb, p, k)?;
+        let gauss = GaussianVar::new(vb, p, k)?;
         let (theta, epsilon) = gauss.sample(s)?;
 
         assert_eq!(theta.dims(), &[s, p, k]);
@@ -152,7 +152,7 @@ mod tests {
         let k = 3;
         let s = 10;
 
-        let gauss = GaussianVariational::new(vb, p, k)?;
+        let gauss = GaussianVar::new(vb, p, k)?;
         let (theta, _) = gauss.sample(s)?;
         let log_prob = gauss.log_prob(&theta)?;
 
@@ -171,7 +171,7 @@ mod tests {
         let p = 2;
         let k = 2;
 
-        let gauss = GaussianVariational::new(vb, p, k)?;
+        let gauss = GaussianVar::new(vb, p, k)?;
 
         // Create samples at the actual mean
         let theta = gauss.mean().unsqueeze(0)?;

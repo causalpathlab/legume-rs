@@ -15,6 +15,7 @@ pub mod candle_loss_functions;
 pub mod candle_model_traits;
 pub mod candle_vae_inference;
 pub mod sgvb;
+pub mod cli;
 
 pub use candle_core;
 pub use candle_nn;
