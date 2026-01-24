@@ -7,23 +7,18 @@ use super::traits::{BlackBoxLikelihood, SgvbModel};
 pub struct SGVBConfig {
     /// Number of Monte Carlo samples S for gradient estimation
     pub num_samples: usize,
-    /// Whether to normalize rewards (control variate)
-    pub normalize: bool,
 }
 
 impl Default for SGVBConfig {
     fn default() -> Self {
-        Self {
-            num_samples: 10,
-            normalize: true,
-        }
+        Self { num_samples: 10 }
     }
 }
 
 impl SGVBConfig {
     /// Create a new SGVB configuration.
-    pub fn new(num_samples: usize, normalize: bool) -> Self {
-        Self { num_samples, normalize }
+    pub fn new(num_samples: usize) -> Self {
+        Self { num_samples }
     }
 }
 
@@ -62,15 +57,11 @@ where
     // 3. Reward = log p(y|η) + log p(θ) - log q(θ) (ELBO components)
     let reward = ((&llik + &sample.log_prior)? - &sample.log_q)?;
 
-    // 4. Normalize reward (control variate) if configured
-    let reward_norm = if config.normalize {
-        let mean = reward.mean(0)?;
-        let var = reward.var(0)?;
-        let std = (var + 1e-8)?.sqrt()?;
-        reward.broadcast_sub(&mean)?.broadcast_div(&std)?
-    } else {
-        reward
-    };
+    // 4. Normalize reward (control variate)
+    let mean = reward.mean(0)?;
+    let var = reward.var(0)?;
+    let std = (var + 1e-8)?.sqrt()?;
+    let reward_norm = reward.broadcast_sub(&mean)?.broadcast_div(&std)?;
 
     // 5. DETACH reward from computation graph
     let reward_detached = reward_norm.detach();

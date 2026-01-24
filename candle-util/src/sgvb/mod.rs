@@ -36,6 +36,7 @@
 //! let predictions = model.eta_mean()?;
 //! ```
 
+mod composite_model;
 mod gaussian_prior;
 mod regression_linear;
 mod sgvb;
@@ -44,10 +45,14 @@ mod variational_gaussian;
 mod variational_io;
 mod variational_susie;
 
+pub use composite_model::{
+    composite_direct_elbo_loss, composite_elbo, composite_sgvb_loss, samples_direct_elbo_loss,
+    samples_elbo, CompositeModel,
+};
 pub use gaussian_prior::{FixedGaussianPrior, GaussianPrior};
 pub use regression_linear::{LinearModelSGVB, LinearRegressionSGVB};
-pub use variational_gaussian::GaussianVar;
-pub use variational_susie::SusieVar;
 pub use sgvb::{compute_elbo, direct_elbo_loss, sgvb_loss, SGVBConfig};
 pub use traits::{BlackBoxLikelihood, Prior, SgvbModel, SgvbSample, VariationalDistribution};
+pub use variational_gaussian::GaussianVar;
 pub use variational_io::{SparseVariationalOutput, VariationalOutput};
+pub use variational_susie::SusieVar;
