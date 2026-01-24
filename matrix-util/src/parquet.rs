@@ -35,7 +35,8 @@ impl ParquetReader {
     /// Create a new parquet reader for a matrix with row and column
     /// names.
     ///
-    /// * `row_name_index`: if `None`, the column `0` will be so.
+    /// * `row_name_index`: if `None`, no column is treated as row names
+    ///   (row names will be generated as "0", "1", "2", ...)
     ///
     /// * `select_column_index`: if `None`, use all the other columns
     ///
@@ -46,8 +47,6 @@ impl ParquetReader {
         select_columns_index: Option<&[usize]>,
         select_columns_names: Option<&[Box<str>]>,
     ) -> anyhow::Result<Self> {
-        let row_name_index = row_name_index.unwrap_or(0);
-
         let file = File::open(file_path)?;
         let reader = SerializedFileReader::new(file)?;
         let metadata = reader.metadata();
@@ -81,11 +80,16 @@ impl ParquetReader {
             }
         };
 
+        // Get the type of the row name column for later use (if specified)
+        let row_name_type = row_name_index.map(|idx| fields[idx].get_physical_type());
+
         let select_indices = fields
             .iter()
             .enumerate()
             .filter_map(|(j, f)| {
-                if select_columns.contains(&j) && j != row_name_index {
+                // Exclude row_name_index column if specified
+                let is_row_name_col = row_name_index.map_or(false, |idx| j == idx);
+                if select_columns.contains(&j) && !is_row_name_col {
                     let tt = f.get_physical_type();
                     match tt {
                         parquet::basic::Type::FLOAT
@@ -115,12 +119,39 @@ impl ParquetReader {
         let mut row_names: Vec<Box<str>> = Vec::with_capacity(nrows);
         let mut row_major_data: Vec<f64> = Vec::with_capacity(nrows * ncols);
 
+        let mut row_counter: usize = 0;
         while let Some(record) = row_iter.next() {
             let row = record?;
-            row_names.push(row.get_string(row_name_index)?.clone().into_boxed_str());
+            // Handle different column types for row names
+            let row_name: Box<str> = match (row_name_index, row_name_type) {
+                (Some(idx), Some(parquet::basic::Type::BYTE_ARRAY)) => {
+                    row.get_string(idx)?.clone().into_boxed_str()
+                }
+                (Some(idx), Some(parquet::basic::Type::DOUBLE)) => {
+                    row.get_double(idx)?.to_string().into_boxed_str()
+                }
+                (Some(idx), Some(parquet::basic::Type::FLOAT)) => {
+                    row.get_float(idx)?.to_string().into_boxed_str()
+                }
+                (Some(idx), Some(parquet::basic::Type::INT32)) => {
+                    row.get_int(idx)?.to_string().into_boxed_str()
+                }
+                (Some(idx), Some(parquet::basic::Type::INT64)) => {
+                    row.get_long(idx)?.to_string().into_boxed_str()
+                }
+                (Some(idx), Some(_)) => {
+                    // Fallback: try string, or use row index
+                    row.get_string(idx)
+                        .map(|s| s.clone().into_boxed_str())
+                        .unwrap_or_else(|_| row_counter.to_string().into_boxed_str())
+                }
+                // No row name column specified, generate numeric names
+                (None, _) | (_, None) => row_counter.to_string().into_boxed_str(),
+            };
+            row_names.push(row_name);
 
             let numbers: anyhow::Result<Vec<f64>> = select_indices.iter().try_fold(
-                Vec::with_capacity(fields.len() - 1),
+                Vec::with_capacity(ncols),
                 |mut acc, &(tt, j)| {
                     let x = match tt {
                         parquet::basic::Type::DOUBLE => row.get_double(j)?,
@@ -138,6 +169,7 @@ impl ParquetReader {
             );
 
             row_major_data.extend(numbers?);
+            row_counter += 1;
         }
 
         Ok(Self {

@@ -9,7 +9,7 @@ use crate::sgvb::BlackBoxLikelihood;
 /// where xp3 = x + 3
 fn lgamma_approx(x: &Tensor) -> Result<Tensor> {
     // Clamp x to avoid log(0) issues
-    let x_safe = x.clamp(1e-6, f64::MAX)?;
+    let x_safe = x.clamp(1e-6f32, f32::MAX)?;
 
     // logterm = log(x * (1 + x) * (2 + x))
     let x_plus_1 = (&x_safe + 1.0)?;
@@ -83,10 +83,10 @@ impl BlackBoxLikelihood for GaussianLikelihood {
         let log_var = log_var_raw.clamp(-10.0, 10.0)?;
 
         // log N(y; μ, exp(log_var)) = -0.5 * [log(2π) + log_var + (y-μ)²/exp(log_var)]
-        let ln_2pi = (2.0 * std::f64::consts::PI).ln();
+        let ln_2pi: f64 = (2.0 * std::f64::consts::PI).ln();
 
         let diff = mu.broadcast_sub(&self.y)?;
-        let diff_sq = diff.powf(2.0)?;
+        let diff_sq = diff.sqr()?;
         let var = log_var.exp()?;
         let scaled_diff_sq = (diff_sq / &var)?;
 

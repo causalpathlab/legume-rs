@@ -209,7 +209,7 @@ mod tests {
             let ln_2pi = (2.0 * std::f64::consts::PI).ln();
 
             let diff = mu.broadcast_sub(&self.y)?;
-            let diff_sq = diff.powf(2.0)?;
+            let diff_sq = diff.sqr()?;
             let var = log_var.exp()?;
             let scaled_diff_sq = (diff_sq / &var)?;
 

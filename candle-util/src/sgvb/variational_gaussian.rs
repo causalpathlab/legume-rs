@@ -90,14 +90,16 @@ impl VariationalDistribution for GaussianVar {
     fn log_prob(&self, theta: &Tensor) -> Result<Tensor> {
         let dtype = theta.dtype();
         let device = theta.device();
-        let ln_2pi = Tensor::new((2.0 * std::f64::consts::PI).ln(), device)?.to_dtype(dtype)?;
+        // Create scalar constant directly in f32 to avoid Metal F64 conversion issues
+        let ln_2pi = Tensor::new((2.0 * std::f64::consts::PI).ln() as f32, device)?
+            .to_dtype(dtype)?;
 
         // σ = exp(ln_std): shape (p, k)
         let std = self.ln_std.exp()?;
 
         // (θ - μ)²/σ²: shape (S, p, k)
         let diff = theta.broadcast_sub(&self.mean)?;
-        let normalized_sq = diff.powf(2.0)?.broadcast_div(&std.powf(2.0)?)?;
+        let normalized_sq = diff.sqr()?.broadcast_div(&std.sqr()?)?;
 
         // log q = -0.5 * [(θ-μ)²/σ² + 2*ln(σ) + ln(2π)]
         // Sum over (p, k) dimensions

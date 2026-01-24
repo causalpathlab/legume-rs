@@ -34,8 +34,9 @@ impl GaussianPrior {
     /// Get the prior scale τ = exp(clamp(ln_tau)).
     pub fn tau(&self) -> Result<f32> {
         let clamped = self.ln_tau.clamp(-MAX_LN_TAU, MAX_LN_TAU)?;
-        let val: f64 = clamped.to_dtype(DType::F64)?.exp()?.to_scalar()?;
-        Ok(val as f32)
+        // Move to CPU for dtype conversion (Metal doesn't support F64)
+        let val: f32 = clamped.to_device(&Device::Cpu)?.to_dtype(DType::F32)?.exp()?.to_scalar()?;
+        Ok(val)
     }
 
     /// Get the device of the parameters.
@@ -62,21 +63,22 @@ impl Prior for GaussianPrior {
     fn log_prob(&self, theta: &Tensor) -> Result<Tensor> {
         let dtype = theta.dtype();
         let device = theta.device();
-        let ln_2pi = Tensor::new((2.0 * std::f64::consts::PI).ln(), device)?.to_dtype(dtype)?;
+        // Create scalar constants directly in the target dtype to avoid Metal F64 conversion issues
+        let ln_2pi = Tensor::new((2.0 * std::f64::consts::PI).ln() as f32, device)?
+            .to_dtype(dtype)?;
 
         // Clamp ln_tau to prevent overflow
         let ln_tau_clamped = self.ln_tau.clamp(-MAX_LN_TAU, MAX_LN_TAU)?.to_dtype(dtype)?;
 
         // τ = exp(ln_tau_clamped)
         let tau = ln_tau_clamped.exp()?;
-        let tau_sq = tau.powf(2.0)?;
+        let tau_sq = tau.sqr()?;
 
         // θ²/τ²: shape (S, p, k)
-        let theta_sq_normalized = theta.powf(2.0)?.broadcast_div(&tau_sq)?;
+        let theta_sq_normalized = theta.sqr()?.broadcast_div(&tau_sq)?;
 
         // 2*ln(τ) + ln(2π) is a scalar, broadcast to all elements
-        let two = Tensor::new(2.0f64, device)?.to_dtype(dtype)?;
-        let const_term = ln_tau_clamped.broadcast_mul(&two)?.broadcast_add(&ln_2pi)?;
+        let const_term = (ln_tau_clamped * 2.0)?.broadcast_add(&ln_2pi)?;
 
         // log p = -0.5 * [θ²/τ² + 2*ln(τ) + ln(2π)]
         let log_prob_element = (theta_sq_normalized.broadcast_add(&const_term)? * (-0.5))?;
@@ -110,12 +112,12 @@ impl FixedGaussianPrior {
 impl Prior for FixedGaussianPrior {
     /// Compute log p(θ) = sum over all elements of log N(θ; 0, τ²)
     fn log_prob(&self, theta: &Tensor) -> Result<Tensor> {
-        let ln_2pi = (2.0 * std::f64::consts::PI).ln();
-        let ln_tau = (self.tau as f64).ln();
-        let tau_sq = (self.tau as f64).powi(2);
+        let ln_2pi: f64 = (2.0 * std::f64::consts::PI).ln();
+        let ln_tau: f64 = (self.tau as f64).ln();
+        let tau_sq: f64 = (self.tau as f64).powi(2);
 
         // θ²/τ²: shape (S, p, k)
-        let theta_sq_normalized = (theta.powf(2.0)? / tau_sq)?;
+        let theta_sq_normalized = (theta.sqr()? / tau_sq)?;
 
         // 2*ln(τ) + ln(2π)
         let const_term = 2.0 * ln_tau + ln_2pi;
