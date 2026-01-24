@@ -193,7 +193,7 @@ mod tests {
 
         let likelihood = TestGaussianLikelihood::new(y, 0.5);
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
-        let config = SGVBConfig::new(50, true); // 50 samples, normalized
+        let config = SGVBConfig::new(50); // 50 samples, normalized
 
         let model = LinearRegressionSGVB::new(vb.pp("model"), x, k, prior, config.clone())?;
 
@@ -299,7 +299,7 @@ mod tests {
         let likelihood = TestGaussianLikelihood::new(y, 0.5);
         let susie = SusieVar::new(vb.pp("susie"), l, p, k)?;
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
-        let config = SGVBConfig::new(50, true);
+        let config = SGVBConfig::new(50);
 
         let model = LinearModelSGVB::from_variational(susie, x, prior, config.clone());
 
