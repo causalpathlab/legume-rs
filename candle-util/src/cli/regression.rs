@@ -9,10 +9,10 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::sgvb::{
-    composite_direct_elbo_loss, composite_elbo, compute_elbo, direct_elbo_loss,
-    samples_direct_elbo_loss, samples_elbo, sgvb_loss, CompositeModel, GaussianPrior,
-    LinearModelSGVB, LinearRegressionSGVB, SGVBConfig, SgvbModel, SparseVariationalOutput,
-    SusieVar, VariationalOutput,
+    composite_direct_elbo_loss, composite_elbo, composite_sgvb_loss, compute_elbo,
+    direct_elbo_loss, samples_direct_elbo_loss, samples_elbo, samples_sgvb_loss, sgvb_loss,
+    CompositeModel, GaussianPrior, LinearModelSGVB, LinearRegressionSGVB, SGVBConfig, SgvbModel,
+    SparseVariationalOutput, SusieVar, VariationalOutput,
 };
 
 use super::regression_likelihood::{
@@ -215,6 +215,15 @@ pub enum VariationalType {
     Susie,
 }
 
+#[derive(Clone, Debug, Default, ValueEnum)]
+pub enum LossType {
+    /// Direct ELBO with reparameterization gradients (lower variance)
+    #[default]
+    Direct,
+    /// REINFORCE/score function estimator (works with non-differentiable ops)
+    Reinforce,
+}
+
 #[derive(Args, Debug)]
 pub struct RegressionArgs {
     #[arg(short, long)]
@@ -243,6 +252,9 @@ pub struct RegressionArgs {
 
     #[arg(long, default_value = "5", help = "Number of Susie layers (L)")]
     pub susie_layers: usize,
+
+    #[arg(long, default_value = "direct", help = "Loss type: direct (reparameterization) or reinforce (score function)")]
+    pub loss_type: LossType,
 
     #[arg(long, default_value = "500")]
     pub iters: usize,
@@ -304,7 +316,10 @@ fn run_gaussian_gaussian(
         args.iters,
         args.verbose,
         &mut optimizer,
-        || Ok(composite_direct_elbo_loss(&composite, &likelihood, config.num_samples)?),
+        || match args.loss_type {
+            LossType::Direct => Ok(composite_direct_elbo_loss(&composite, &likelihood, config.num_samples)?),
+            LossType::Reinforce => Ok(composite_sgvb_loss(&composite, &likelihood, config.num_samples, true)?),
+        },
         || Ok(composite_elbo(&composite, &likelihood, 100)?),
         None::<fn() -> Result<String>>,
     )?;
@@ -358,7 +373,10 @@ fn run_gaussian_susie(
                 model_mean.sample(config.num_samples)?,
                 model_var.sample(config.num_samples)?,
             ];
-            Ok(samples_direct_elbo_loss(&samples, &likelihood)?)
+            match args.loss_type {
+                LossType::Direct => Ok(samples_direct_elbo_loss(&samples, &likelihood)?),
+                LossType::Reinforce => Ok(samples_sgvb_loss(&samples, &likelihood, true)?),
+            }
         },
         || {
             let samples = vec![model_mean.sample(100)?, model_var.sample(100)?];
@@ -399,7 +417,10 @@ fn run_poisson_gaussian(
         args.iters,
         args.verbose,
         &mut optimizer,
-        || Ok(sgvb_loss(&model, &likelihood, &config)?),
+        || match args.loss_type {
+            LossType::Direct => Ok(direct_elbo_loss(&model, &likelihood, config.num_samples)?),
+            LossType::Reinforce => Ok(sgvb_loss(&model, &likelihood, &config)?),
+        },
         || Ok(compute_elbo(&model, &likelihood, 100)?),
         None::<fn() -> Result<String>>,
     )?;
@@ -434,7 +455,10 @@ fn run_poisson_susie(
         args.iters,
         args.verbose,
         &mut optimizer,
-        || Ok(direct_elbo_loss(&model, &likelihood, config.num_samples)?),
+        || match args.loss_type {
+            LossType::Direct => Ok(direct_elbo_loss(&model, &likelihood, config.num_samples)?),
+            LossType::Reinforce => Ok(sgvb_loss(&model, &likelihood, &config)?),
+        },
         || Ok(compute_elbo(&model, &likelihood, 100)?),
         None::<fn() -> Result<String>>,
     )?;
@@ -480,7 +504,10 @@ fn run_negbin_gaussian(
         args.iters,
         args.verbose,
         &mut optimizer,
-        || Ok(composite_direct_elbo_loss(&composite, &likelihood, config.num_samples)?),
+        || match args.loss_type {
+            LossType::Direct => Ok(composite_direct_elbo_loss(&composite, &likelihood, config.num_samples)?),
+            LossType::Reinforce => Ok(composite_sgvb_loss(&composite, &likelihood, config.num_samples, true)?),
+        },
         || Ok(composite_elbo(&composite, &likelihood, 100)?),
         None::<fn() -> Result<String>>,
     )?;
@@ -534,7 +561,10 @@ fn run_negbin_susie(
                 model_mean.sample(config.num_samples)?,
                 model_disp.sample(config.num_samples)?,
             ];
-            Ok(samples_direct_elbo_loss(&samples, &likelihood)?)
+            match args.loss_type {
+                LossType::Direct => Ok(samples_direct_elbo_loss(&samples, &likelihood)?),
+                LossType::Reinforce => Ok(samples_sgvb_loss(&samples, &likelihood, true)?),
+            }
         },
         || {
             let samples = vec![model_mean.sample(100)?, model_disp.sample(100)?];
@@ -598,6 +628,10 @@ pub fn run(args: &RegressionArgs) -> Result<()> {
     info!("Variational: {}", match args.prior {
         VariationalType::Gaussian => "Gaussian".to_string(),
         VariationalType::Susie => format!("Susie(L={})", args.susie_layers),
+    });
+    info!("Loss: {}", match args.loss_type {
+        LossType::Direct => "Direct ELBO (reparameterization)",
+        LossType::Reinforce => "REINFORCE (score function)",
     });
 
     let feat_ref = feature_names.as_deref();

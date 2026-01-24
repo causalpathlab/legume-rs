@@ -60,7 +60,6 @@ candle-util regression --help
 | `--iters` | | `500` | Number of training iterations |
 | `--lr` | | `0.01` | Learning rate for AdamW optimizer |
 | `--samples` | | `50` | Number of Monte Carlo samples per iteration |
-| `--gpu` | | `false` | Enable GPU acceleration (Metal on macOS, CUDA on Linux) |
 | `--verbose` | `-v` | `false` | Enable verbose logging output |
 
 ## Supported Models
@@ -93,8 +92,8 @@ The simplest case - standard linear regression:
 
 ```{bash, eval=FALSE}
 candle-util regression \
-  -x data_X.tsv \
-  -y data_Y.tsv \
+  -x data_X.parquet \
+  -y data_Y.parquet \
   -o coefficients
 ```
 
@@ -149,25 +148,10 @@ For overdispersed count data:
 
 ```{bash, eval=FALSE}
 candle-util regression \
-  -x data.tsv \
-  -y response.tsv \
+  -x data.parquet \
+  -y response.parquet \
   --model negbin \
   -o negbin_results
-```
-
-### Using GPU Acceleration
-
-Enable GPU for faster computation:
-
-```{bash, eval=FALSE}
-candle-util regression \
-  -x large_data_X.parquet \
-  -y large_data_Y.parquet \
-  --model gaussian \
-  --prior susie \
-  --susie-layers 10 \
-  --gpu \
-  -o results
 ```
 
 ## Example Workflow in R
@@ -178,8 +162,6 @@ Here's how you might integrate `candle-util` into an R workflow:
 
 ```{r}
 library(arrow)
-library(dplyr)
-library(ggplot2)
 
 # Simulate some data
 set.seed(42)
@@ -200,14 +182,6 @@ y <- X %*% beta_true + rnorm(n, sd = 0.1)
 # Write to parquet
 write_parquet(as.data.frame(X), "X.parquet")
 write_parquet(data.frame(y = as.vector(y)), "y.parquet")
-
-# Alternative: write to TSV
-write.table(as.data.frame(X), "X.tsv", row.names = FALSE, col.names = FALSE, sep = "\t")
-write.table(data.frame(y = as.vector(y)), "y.tsv", row.names = FALSE, col.names = FALSE, sep = "\t")
-
-# Alternative: write to gzipped TSV
-write.table(as.data.frame(X), gzfile("X.tsv.gz"), row.names = FALSE, col.names = FALSE, sep = "\t")
-write.table(data.frame(y = as.vector(y)), gzfile("y.tsv.gz"), row.names = FALSE, col.names = FALSE, sep = "\t")
 ```
 
 ### Running Regression
@@ -219,8 +193,7 @@ candle-util regression \
   --model gaussian \
   --prior susie \
   --susie-layers 3 \
-  --iters 500 \
-  --gpu \
+  --iters 1500 \
   -o results \
   -v
 ```
@@ -230,95 +203,57 @@ candle-util regression \
 ```{r}
 # Read coefficient estimates
 results <- read_parquet("results.mean.parquet")
+
 print(head(results))
 
-# Quick look at posterior inclusion probabilities
-plot(results$pip, main = "Posterior Inclusion Probabilities", ylab = "PIP", xlab = "Feature")
-
 # Compare with true coefficients
+causal_idx <- which(beta_true != 0)
 comparison <- data.frame(
-  feature = colnames(X),
-  feature_idx = 1:p,
-  true_beta = beta_true,
-  estimated_beta = results$mean,
-  pip = results$pip
+  feature = colnames(X)[causal_idx],
+  true_beta = beta_true[causal_idx],
+  estimated_beta = results$mean[causal_idx],
+  pip = results$pip[causal_idx]
 )
-print(comparison[comparison$true_beta != 0, ])
+print(comparison)
 ```
 
-### Visualizing Coefficients
+### Visualizing Results
 
 ```{r}
-# Plot estimated vs true coefficients
-ggplot(comparison, aes(x = true_beta, y = estimated_beta)) +
-  geom_point(alpha = 0.5) +
-  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
-  labs(
-    x = "True Coefficient",
-    y = "Estimated Coefficient",
-    title = "Estimated vs True Coefficients"
-  ) +
-  theme_minimal()
-```
-
-```{r}
-# Plot coefficient estimates along the feature index
-ggplot(comparison, aes(x = feature_idx, y = estimated_beta)) +
-  geom_point(alpha = 0.5, color = "steelblue") +
-  geom_point(
-    data = comparison[comparison$true_beta != 0, ],
-    aes(x = feature_idx, y = true_beta),
-    color = "red", size = 3, shape = 4, stroke = 2
-  ) +
-  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
-  labs(
-    x = "Feature Index",
-    y = "Coefficient",
-    title = "Coefficient Estimates by Feature",
-    subtitle = "Red crosses indicate true non-zero coefficients"
-  ) +
-  theme_minimal()
+# Posterior inclusion probabilities
+plot(results$pip, pch = 16, col = "steelblue",
+     main = "Posterior Inclusion Probabilities",
+     xlab = "Feature", ylab = "PIP")
+abline(h = 0.5, lty = 2, col = "gray")
+points(causal_idx, results$pip[causal_idx], pch = 16, col = "red", cex = 1.5)
+legend("topright", legend = c("All features", "True causal"),
+       pch = 16, col = c("steelblue", "red"))
 ```
 
 ```{r}
-# Plot posterior inclusion probabilities
-ggplot(comparison, aes(x = feature_idx, y = pip)) +
-  geom_point(alpha = 0.5, color = "steelblue") +
-  geom_point(
-    data = comparison[comparison$true_beta != 0, ],
-    color = "red", size = 3
-  ) +
-  geom_hline(yintercept = 0.5, linetype = "dashed", alpha = 0.5) +
-  labs(
-    x = "Feature Index",
-    y = "Posterior Inclusion Probability",
-    title = "PIP by Feature",
-    subtitle = "Red points indicate true causal features"
-  ) +
-  theme_minimal()
-```
-
-```{r}
-# Highlight top features by PIP
+# Top features by PIP
 top_k <- 10
-top_features <- comparison %>%
-  arrange(desc(pip)) %>%
-  head(top_k)
+top_idx <- order(results$pip, decreasing = TRUE)[1:top_k]
+top_pip <- results$pip[top_idx]
+top_names <- colnames(X)[top_idx]
+is_causal <- top_idx %in% causal_idx
 
-ggplot(top_features, aes(x = reorder(feature, pip), y = pip)) +
-  geom_col(fill = "steelblue") +
-  geom_point(
-    data = top_features[top_features$true_beta != 0, ],
-    aes(y = 1.05), color = "red", size = 3, shape = 8
-  ) +
-  coord_flip() +
-  labs(
-    x = "Feature",
-    y = "Posterior Inclusion Probability",
-    title = paste("Top", top_k, "Features by PIP"),
-    subtitle = "Red stars indicate true causal features"
-  ) +
-  theme_minimal()
+par(mar = c(5, 10, 4, 2))
+barplot(rev(top_pip), names.arg = rev(top_names), horiz = TRUE, las = 1,
+        col = ifelse(rev(is_causal), "red", "steelblue"),
+        main = paste("Top", top_k, "Features by PIP"),
+        xlab = "Posterior Inclusion Probability")
+legend("bottomright", legend = c("Non-causal", "True causal"),
+       fill = c("steelblue", "red"))
+par(mar = c(5, 4, 4, 2))
+```
+
+```{r}
+# Estimated vs true coefficients
+plot(beta_true, results$mean, pch = 16, col = rgb(0, 0, 0, 0.5),
+     main = "Estimated vs True Coefficients",
+     xlab = "True Coefficient", ylab = "Estimated Coefficient")
+abline(0, 1, lty = 2, col = "red")
 ```
 
 ### Count Data Example (Poisson)
@@ -337,15 +272,52 @@ candle-util regression \
   -y y_counts.parquet \
   --model poisson \
   --prior susie \
-  --susie-layers 5 \
-  --gpu \
+  --susie-layers 3 \
+  --iters 1500 \
   -o poisson_results \
   -v
 ```
 
 ```{r}
 poisson_results <- read_parquet("poisson_results.mean.parquet")
+
 print(head(poisson_results))
+
+# Compare with true coefficients
+print(data.frame(
+  feature = colnames(X)[causal_idx],
+  true_beta = beta_true[causal_idx] * 0.5,  # scaled coefficients used in simulation
+  estimated_beta = poisson_results$mean[causal_idx],
+  pip = poisson_results$pip[causal_idx]
+))
+```
+
+```{r}
+# Posterior inclusion probabilities for Poisson model
+plot(poisson_results$pip, pch = 16, col = "steelblue",
+     main = "Poisson Model: Posterior Inclusion Probabilities",
+     xlab = "Feature", ylab = "PIP")
+abline(h = 0.5, lty = 2, col = "gray")
+points(causal_idx, poisson_results$pip[causal_idx], pch = 16, col = "red", cex = 1.5)
+legend("topright", legend = c("All features", "True causal"),
+       pch = 16, col = c("steelblue", "red"))
+```
+
+```{r}
+# Top features by PIP for Poisson model
+top_idx_pois <- order(poisson_results$pip, decreasing = TRUE)[1:top_k]
+top_pip_pois <- poisson_results$pip[top_idx_pois]
+top_names_pois <- colnames(X)[top_idx_pois]
+is_causal_pois <- top_idx_pois %in% causal_idx
+
+par(mar = c(5, 10, 4, 2))
+barplot(rev(top_pip_pois), names.arg = rev(top_names_pois), horiz = TRUE, las = 1,
+        col = ifelse(rev(is_causal_pois), "red", "steelblue"),
+        main = paste("Poisson Model: Top", top_k, "Features by PIP"),
+        xlab = "Posterior Inclusion Probability")
+legend("bottomright", legend = c("Non-causal", "True causal"),
+       fill = c("steelblue", "red"))
+par(mar = c(5, 4, 4, 2))
 ```
 
 ## Output Format
