@@ -86,7 +86,8 @@ impl SusieVar {
     /// PIPs, shape (p, k)
     pub fn pip(&self) -> Result<Tensor> {
         let alpha = self.alpha()?; // (L, p, k)
-        let one_minus_alpha = (1.0 - &alpha)?;
+        // Clamp to avoid log(0) when alpha ≈ 1
+        let one_minus_alpha = (1.0 - &alpha)?.clamp(1e-10, 1.0)?;
         let log_one_minus_alpha = one_minus_alpha.log()?;
         let sum_log = log_one_minus_alpha.sum(0)?; // (p, k)
         let prod = sum_log.exp()?;
@@ -126,72 +127,66 @@ impl SusieVar {
 }
 
 impl VariationalDistribution for SusieVar {
-    /// Sample θ = Σ_l (α_l ⊙ β_l) using reparameterization for β.
+    /// Sample θ using Gaussian moment-matching approximation.
+    ///
+    /// Computes the mean and variance of θ under the Susie distribution,
+    /// then samples from N(mean, var) using reparameterization. This enables
+    /// proper REINFORCE gradients since log_prob(θ) varies per sample.
     ///
     /// # Arguments
     /// * `num_samples` - Number of samples S
     ///
     /// # Returns
     /// (theta, epsilon) where:
-    /// - theta: shape (S, p, k) - combined effect
-    /// - epsilon: shape (S, L, p, k) - noise used for β sampling
+    /// - theta: shape (S, p, k) - samples from Gaussian approximation
+    /// - epsilon: shape (S, p, k) - standard normal noise used for sampling
     fn sample(&self, num_samples: usize) -> Result<(Tensor, Tensor)> {
-        let (l, p, k) = self.beta_mean.dims3()?;
+        let (_, p, k) = self.beta_mean.dims3()?;
         let device = self.beta_mean.device();
         let dtype = self.beta_mean.dtype();
 
-        // 1. Get α = softmax(logits, dim=1): (L, p, k)
-        let alpha = self.alpha()?;
+        // Compute moments of θ under Susie distribution
+        let mean = self.theta_mean()?; // (p, k)
+        let var = self.var()?; // (p, k)
+        let std = (var + 1e-8)?.sqrt()?; // (p, k), add eps for numerical stability
 
-        // 2. Sample ε ~ N(0, 1): (S, L, p, k)
-        let epsilon = Tensor::randn(0f32, 1f32, (num_samples, l, p, k), device)?.to_dtype(dtype)?;
+        // Sample ε ~ N(0, 1): (S, p, k)
+        let epsilon = Tensor::randn(0f32, 1f32, (num_samples, p, k), device)?.to_dtype(dtype)?;
 
-        // 3. β = μ + σ * ε: (S, L, p, k)
-        let std = self.beta_ln_std.exp()?;
-        let beta = self.beta_mean.unsqueeze(0)?.broadcast_add(&epsilon.broadcast_mul(&std)?)?;
-
-        // 4. θ_l = α_l ⊙ β_l: (S, L, p, k)
-        // α: (L, p, k) -> (1, L, p, k)
-        let alpha_expanded = alpha.unsqueeze(0)?;
-        let theta_l = alpha_expanded.broadcast_mul(&beta)?;
-
-        // 5. θ = Σ_l θ_l: (S, p, k)
-        let theta = theta_l.sum(1)?;
+        // θ = mean + std * ε (reparameterization trick)
+        let theta = mean.unsqueeze(0)?.broadcast_add(&epsilon.broadcast_mul(&std)?)?;
 
         Ok((theta, epsilon))
     }
 
-    /// Compute log q(θ) including both β entropy and selection entropy.
+    /// Compute log q(θ) under the Gaussian moment-matching approximation.
     ///
-    /// This includes:
-    /// 1. Negative entropy of β: -H[q(β)]
-    /// 2. Negative entropy of selection: Σ α * log(α)
+    /// Uses θ ~ N(E[θ], Var[θ]) where the moments are computed from the
+    /// Susie parameters. This ensures log_prob varies per sample, enabling
+    /// proper REINFORCE gradient estimation.
     ///
-    /// Including the selection entropy allows REINFORCE gradients to flow to logits.
+    /// Gradients flow to all Susie parameters (logits, beta_mean, beta_ln_std)
+    /// through the mean and variance computations.
     fn log_prob(&self, theta: &Tensor) -> Result<Tensor> {
-        let s = theta.dim(0)?;
-        let device = theta.device();
         let dtype = theta.dtype();
+        let device = theta.device();
+        let ln_2pi =
+            Tensor::new((2.0 * std::f64::consts::PI).ln() as f32, device)?.to_dtype(dtype)?;
 
-        // 1. Negative entropy of β: -H[q(β)] = -0.5 * Σ (1 + ln(2π) + 2*ln(σ))
-        // Create scalar constant directly in f32 to avoid Metal F64 conversion issues
-        let ln_2pi = Tensor::new((2.0 * std::f64::consts::PI).ln() as f32, device)?
-            .to_dtype(dtype)?;
-        let two_ln_std = (&self.beta_ln_std * 2.0)?;
-        let neg_entropy_beta = ((two_ln_std.broadcast_add(&ln_2pi)? + 1.0)? * (-0.5))?;
-        let neg_entropy_beta_sum = neg_entropy_beta.sum(2)?.sum(1)?.sum(0)?;
+        // Compute moments (gradients flow through these to all Susie params)
+        let mean = self.theta_mean()?; // (p, k)
+        let var = self.var()?; // (p, k)
+        let log_var = (var.clone() + 1e-8)?.log()?; // (p, k)
 
-        // 2. Negative entropy of selection: -H[α] = Σ α * log(α)
-        // This term makes gradients flow to logits via REINFORCE
-        let log_alpha = self.log_alpha()?; // (L, p, k)
-        let alpha = self.alpha()?; // (L, p, k)
-        let neg_entropy_alpha = (&alpha * &log_alpha)?.sum(2)?.sum(1)?.sum(0)?;
+        // log N(θ; mean, var) = -0.5 * [(θ - mean)²/var + log(var) + log(2π)]
+        let diff = theta.broadcast_sub(&mean)?; // (S, p, k)
+        let normalized_sq = diff.sqr()?.broadcast_div(&(var + 1e-8)?)?; // (S, p, k)
 
-        // Combined negative entropy
-        let neg_entropy = (&neg_entropy_beta_sum + &neg_entropy_alpha)?;
+        let log_prob_element =
+            (normalized_sq.broadcast_add(&log_var)?.broadcast_add(&ln_2pi)? * (-0.5))?;
 
-        // Broadcast to (S,)
-        neg_entropy.broadcast_as((s,))
+        // Sum over (p, k) dimensions -> (S,)
+        log_prob_element.sum(2)?.sum(1)
     }
 
     /// Get the mean of θ: E[θ] = Σ_l (α_l ⊙ μ_l)
@@ -217,8 +212,8 @@ impl VariationalDistribution for SusieVar {
         let first_moment = first_moment_l.sum(0)?; // (p, k)
         let first_moment_sq = first_moment.sqr()?;
 
-        // Var[θ] = E[θ²] - E[θ]²
-        second_moment - first_moment_sq
+        // Var[θ] = E[θ²] - E[θ]², clamped to avoid negative values from numerical precision
+        (second_moment - first_moment_sq)?.clamp(1e-8, f64::INFINITY)
     }
 }
 
@@ -289,10 +284,10 @@ mod tests {
         let pip = susie.pip()?;
         assert_eq!(pip.dims(), &[p, k]);
 
-        // Check sample shape
+        // Check sample shape (using Gaussian moment-matching approximation)
         let (theta, epsilon) = susie.sample(s)?;
         assert_eq!(theta.dims(), &[s, p, k]);
-        assert_eq!(epsilon.dims(), &[s, l, p, k]);
+        assert_eq!(epsilon.dims(), &[s, p, k]); // epsilon is (S, p, k) for Gaussian approx
 
         // Check theta_mean shape
         let theta_mean = susie.theta_mean()?;

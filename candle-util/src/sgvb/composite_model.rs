@@ -162,6 +162,43 @@ where
     elbo.mean(0)?.neg()
 }
 
+/// Compute SGVB loss from pre-sampled outputs using REINFORCE estimator.
+///
+/// Allows mixing models with different variational types by sampling separately
+/// and combining. Each sample provides one eta.
+pub fn samples_sgvb_loss<L>(samples: &[SgvbSample], likelihood: &L, normalize: bool) -> Result<Tensor>
+where
+    L: BlackBoxLikelihood,
+{
+    let etas: Vec<&Tensor> = samples.iter().map(|s| &s.eta).collect();
+    let llik = likelihood.log_likelihood(&etas)?;
+    let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
+
+    // Sum log_prior and log_q across modules
+    let log_prior = sum_tensors(samples.iter().map(|s| &s.log_prior))?;
+    let log_q = sum_tensors(samples.iter().map(|s| &s.log_q))?;
+    let log_q_grad = sum_tensors(samples.iter().map(|s| &s.log_q_grad))?;
+
+    // Reward = log p(y|η) + log p(θ) - log q(θ)
+    let reward = ((&llik + &log_prior)? - &log_q)?;
+
+    // Normalize reward (control variate)
+    let reward_norm = if normalize {
+        let mean = reward.mean(0)?;
+        let var = reward.var(0)?;
+        let std = (var + 1e-8)?.sqrt()?;
+        reward.broadcast_sub(&mean)?.broadcast_div(&std)?
+    } else {
+        reward
+    };
+
+    // Detach reward and compute surrogate loss
+    let reward_detached = reward_norm.detach();
+    let surrogate_loss = (&reward_detached * &log_q_grad)?.mean(0)?.neg()?;
+
+    Ok(surrogate_loss)
+}
+
 /// Compute raw ELBO from pre-sampled outputs (for monitoring).
 pub fn samples_elbo<L>(samples: &[SgvbSample], likelihood: &L) -> Result<Tensor>
 where

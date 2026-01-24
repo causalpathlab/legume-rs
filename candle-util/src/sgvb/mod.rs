@@ -47,7 +47,7 @@ mod variational_susie;
 
 pub use composite_model::{
     composite_direct_elbo_loss, composite_elbo, composite_sgvb_loss, samples_direct_elbo_loss,
-    samples_elbo, CompositeModel,
+    samples_elbo, samples_sgvb_loss, CompositeModel,
 };
 pub use gaussian_prior::{FixedGaussianPrior, GaussianPrior};
 pub use regression_linear::{LinearModelSGVB, LinearRegressionSGVB};
