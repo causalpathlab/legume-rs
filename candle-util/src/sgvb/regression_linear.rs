@@ -306,9 +306,7 @@ mod tests {
         let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.05)?;
 
         for i in 0..500 {
-            // Use direct_elbo_loss for Susie - REINFORCE can't guide feature selection
-            // because α is deterministic (not sampled), so we need reparameterization
-            // gradients to flow: likelihood → eta → theta → alpha → logits
+            // Direct ELBO with reparameterization gradients
             let loss = direct_elbo_loss(&model, &likelihood, config.num_samples)?;
             optimizer.backward_step(&loss)?;
 
@@ -353,6 +351,94 @@ mod tests {
         assert!(
             pip_5 > other_mean * 3.0,
             "PIP[5] should be > 3x other mean, got {} vs {}",
+            pip_5, other_mean
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_susie_linear_sparse_recovery_reinforce() -> Result<()> {
+        use crate::sgvb::SusieVar;
+
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let n = 150;
+        let p = 50;
+        let k = 1;
+        let l = 2; // 2 components for 2 true effects
+
+        let x = Tensor::randn(0f32, 1f32, (n, p), &device)?;
+
+        // Generate y with stronger signal for REINFORCE (higher variance estimator)
+        // y = X[:,0] * 3.0 + X[:,5] * 2.5 + noise
+        let x_0 = x.narrow(1, 0, 1)?;
+        let x_5 = x.narrow(1, 5, 1)?;
+        let noise = Tensor::randn(0f32, 0.3f32, (n, k), &device)?;
+        let y = ((x_0 * 3.0)? + (x_5 * 2.5)? + noise)?;
+
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
+
+        let likelihood = TestGaussianLikelihood::new(y, 0.3);
+        let susie = SusieVar::new(vb.pp("susie"), l, p, k)?;
+        let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
+        // More samples for variance reduction in REINFORCE
+        let config = SGVBConfig::new(100);
+
+        let model = LinearModelSGVB::from_variational(susie, x, prior, config.clone());
+
+        // Lower learning rate for REINFORCE stability
+        let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.02)?;
+
+        for i in 0..800 {
+            // REINFORCE with Gaussian moment-matching approximation for Susie
+            let loss = sgvb_loss(&model, &likelihood, &config)?;
+            optimizer.backward_step(&loss)?;
+
+            if i % 50 == 0 {
+                let loss_val: f32 = loss.to_scalar()?;
+                let pip = model.variational.pip()?;
+                let pip_0: f32 = pip.get(0)?.get(0)?.to_scalar()?;
+                let pip_5: f32 = pip.get(5)?.get(0)?.to_scalar()?;
+                println!(
+                    "iter {}: loss = {:.4}, PIP[0] = {:.4}, PIP[5] = {:.4}",
+                    i, loss_val, pip_0, pip_5
+                );
+            }
+        }
+
+        // Check PIPs - features 0 and 5 should have high PIPs
+        let pip = model.variational.pip()?;
+        let pip_0: f32 = pip.get(0)?.get(0)?.to_scalar()?;
+        let pip_5: f32 = pip.get(5)?.get(0)?.to_scalar()?;
+
+        // Mean PIP of other features
+        let mut other_sum = 0.0f32;
+        for j in 0..p {
+            if j != 0 && j != 5 {
+                let val: f32 = pip.get(j)?.get(0)?.to_scalar()?;
+                other_sum += val;
+            }
+        }
+        let other_mean = other_sum / (p - 2) as f32;
+
+        println!("\nPosterior Inclusion Probabilities (REINFORCE):");
+        println!("  PIP[0] (true): {:.4}", pip_0);
+        println!("  PIP[5] (true): {:.4}", pip_5);
+        println!("  Others mean:   {:.4}", other_mean);
+
+        // REINFORCE has higher variance - use relaxed threshold
+        // True features should have notably higher PIPs than others
+        assert!(
+            pip_0 > other_mean * 1.5,
+            "PIP[0] should be > 1.5x other mean, got {} vs {}",
+            pip_0, other_mean
+        );
+        assert!(
+            pip_5 > other_mean * 1.5,
+            "PIP[5] should be > 1.5x other mean, got {} vs {}",
             pip_5, other_mean
         );
 
