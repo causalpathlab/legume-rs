@@ -1,7 +1,7 @@
 use candle_core::{Result, Tensor};
 use candle_nn::VarBuilder;
 
-use super::gaussian_variational::GaussianVariational;
+use super::variational_gaussian::GaussianVar;
 use super::sgvb::SGVBConfig;
 use super::traits::{Prior, SgvbModel, SgvbSample, VariationalDistribution};
 
@@ -79,8 +79,8 @@ impl<V: VariationalDistribution, P: Prior> SgvbModel for LinearModelSGVB<V, P> {
 
 /// Linear regression SGVB model with Gaussian variational distribution.
 ///
-/// Convenience type alias for LinearModelSGVB with GaussianVariational.
-pub type LinearRegressionSGVB<P> = LinearModelSGVB<GaussianVariational, P>;
+/// Convenience type alias for LinearModelSGVB with GaussianVar.
+pub type LinearRegressionSGVB<P> = LinearModelSGVB<GaussianVar, P>;
 
 impl<P: Prior> LinearRegressionSGVB<P> {
     /// Create a new linear regression SGVB model with Gaussian variational distribution.
@@ -99,7 +99,7 @@ impl<P: Prior> LinearRegressionSGVB<P> {
         config: SGVBConfig,
     ) -> Result<Self> {
         let p = x_design.dim(1)?;
-        let variational = GaussianVariational::new(vb, p, k)?;
+        let variational = GaussianVar::new(vb, p, k)?;
         Ok(Self::from_variational(variational, x_design, prior, config))
     }
 
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn test_susie_linear_construction() -> Result<()> {
-        use crate::sgvb::SusieVariational;
+        use crate::sgvb::SusieVar;
 
         let device = Device::Cpu;
         let dtype = DType::F32;
@@ -255,7 +255,7 @@ mod tests {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
 
-        let susie = SusieVariational::new(vb.pp("susie"), l, p, k)?;
+        let susie = SusieVar::new(vb.pp("susie"), l, p, k)?;
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::default();
 
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_susie_linear_sparse_recovery() -> Result<()> {
-        use crate::sgvb::SusieVariational;
+        use crate::sgvb::SusieVar;
 
         let device = Device::Cpu;
         let dtype = DType::F32;
@@ -297,7 +297,7 @@ mod tests {
         let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
 
         let likelihood = TestGaussianLikelihood::new(y, 0.5);
-        let susie = SusieVariational::new(vb.pp("susie"), l, p, k)?;
+        let susie = SusieVar::new(vb.pp("susie"), l, p, k)?;
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::new(50, true);
 
