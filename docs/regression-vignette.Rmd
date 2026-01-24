@@ -1,0 +1,394 @@
+---
+title: "Using candle-util Regression Utilities"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE)
+
+# Create temporary directory for all outputs
+tmpdir <- tempfile("candle_util_vignette_")
+dir.create(tmpdir)
+knitr::opts_knit$set(root.dir = tmpdir)
+```
+
+## Introduction
+
+This vignette demonstrates how to use the regression utilities provided by `candle-util`. We assume you have already installed `candle-util` (or `legume` in general) and can call it from the command line.
+
+The regression command uses Stochastic Gradient Variational Bayes (SGVB) for inference, supporting multiple likelihood models and variational priors.
+
+## Getting Help
+
+To see available commands:
+
+```{bash}
+candle-util --help
+```
+
+For regression-specific help:
+
+```{bash}
+candle-util regression --help
+```
+
+## Command Line Arguments
+
+### Required Arguments
+
+| Argument | Short | Description |
+|----------|-------|-------------|
+| `--x` | `-x` | Design matrix file (CSV, TSV, or Parquet) |
+| `--y` | `-y` | Response variable file (CSV, TSV, or Parquet) |
+
+### Optional Arguments
+
+| Argument | Short | Default | Description |
+|----------|-------|---------|-------------|
+| `--model` | `-m` | `gaussian` | Likelihood model: `gaussian`, `poisson`, `negbin` |
+| `--prior` | `-p` | `gaussian` | Variational prior: `gaussian`, `susie` |
+| `--output` | `-o` | None | Output file base name (generates `.mean.parquet` and `.var.parquet`) |
+| `--x_var` | | None | Variance predictor matrix (for heteroskedastic models) |
+| `--susie-layers` | | `5` | Number of Susie layers (L parameter) |
+| `--iters` | | `500` | Number of training iterations |
+| `--lr` | | `0.01` | Learning rate for AdamW optimizer |
+| `--samples` | | `50` | Number of Monte Carlo samples per iteration |
+| `--gpu` | | `false` | Enable GPU acceleration (Metal on macOS, CUDA on Linux) |
+| `--verbose` | `-v` | `false` | Enable verbose logging output |
+
+## Supported Models
+
+### Likelihood Models
+
+- **gaussian**: $y \sim N(X\beta, \exp(X_{var}\gamma))$
+- **poisson**: $y \sim \text{Poisson}(\exp(X\beta))$
+- **negbin**: $y \sim \text{NB}(\exp(X\beta), \exp(X_{var}\gamma))$ (Negative Binomial)
+
+### Variational Priors
+
+- **gaussian**: Standard Gaussian variational approximation
+- **susie**: Sparse variational approximation (Sum of Single Effects)
+
+## Input Data Formats
+
+Supported input formats:
+
+- CSV (`.csv`)
+- TSV (`.tsv`)
+- Parquet (`.parquet`, `.pq`)
+- Gzipped variants (`.csv.gz`, `.tsv.gz`, etc.)
+
+## Basic Usage Examples
+
+### Gaussian Regression with Gaussian Prior
+
+The simplest case - standard linear regression:
+
+```{bash, eval=FALSE}
+candle-util regression \
+  -x data_X.tsv \
+  -y data_Y.tsv \
+  -o coefficients
+```
+
+### Gaussian Regression with Susie Prior
+
+Sparse regression using Sum of Single Effects:
+
+```{bash, eval=FALSE}
+candle-util regression \
+  -x data_X.parquet \
+  -y data_Y.parquet \
+  --model gaussian \
+  --prior susie \
+  --susie-layers 10 \
+  -o sparse_coefficients \
+  -v
+```
+
+### Poisson Regression
+
+For count data with Poisson likelihood:
+
+```{bash, eval=FALSE}
+candle-util regression \
+  -x predictors.parquet \
+  -y counts.parquet \
+  --model poisson \
+  --prior gaussian \
+  --iters 1000 \
+  --lr 0.001 \
+  -o poisson_results
+```
+
+### Poisson Regression with Susie Prior
+
+Sparse Poisson regression:
+
+```{bash, eval=FALSE}
+candle-util regression \
+  -x predictors.parquet \
+  -y counts.parquet \
+  --model poisson \
+  --prior susie \
+  --susie-layers 5 \
+  -o sparse_poisson \
+  -v
+```
+
+### Negative Binomial Regression
+
+For overdispersed count data:
+
+```{bash, eval=FALSE}
+candle-util regression \
+  -x data.tsv \
+  -y response.tsv \
+  --model negbin \
+  -o negbin_results
+```
+
+### Using GPU Acceleration
+
+Enable GPU for faster computation:
+
+```{bash, eval=FALSE}
+candle-util regression \
+  -x large_data_X.parquet \
+  -y large_data_Y.parquet \
+  --model gaussian \
+  --prior susie \
+  --susie-layers 10 \
+  --gpu \
+  -o results
+```
+
+## Example Workflow in R
+
+Here's how you might integrate `candle-util` into an R workflow:
+
+### Preparing Data
+
+```{r}
+library(arrow)
+library(dplyr)
+library(ggplot2)
+
+# Simulate some data
+set.seed(42)
+n <- 1000
+p <- 500
+
+# Create design matrix
+X <- matrix(rnorm(n * p), nrow = n, ncol = p)
+colnames(X) <- paste0("feature_", 1:p)
+
+# True coefficients (sparse)
+beta_true <- rep(0, p)
+beta_true[c(10, 50, 100)] <- c(2, -1.5, 1)
+
+# Generate response
+y <- X %*% beta_true + rnorm(n, sd = 0.1)
+
+# Write to parquet
+write_parquet(as.data.frame(X), "X.parquet")
+write_parquet(data.frame(y = as.vector(y)), "y.parquet")
+
+# Alternative: write to TSV
+write.table(as.data.frame(X), "X.tsv", row.names = FALSE, col.names = FALSE, sep = "\t")
+write.table(data.frame(y = as.vector(y)), "y.tsv", row.names = FALSE, col.names = FALSE, sep = "\t")
+
+# Alternative: write to gzipped TSV
+write.table(as.data.frame(X), gzfile("X.tsv.gz"), row.names = FALSE, col.names = FALSE, sep = "\t")
+write.table(data.frame(y = as.vector(y)), gzfile("y.tsv.gz"), row.names = FALSE, col.names = FALSE, sep = "\t")
+```
+
+### Running Regression
+
+```{bash}
+candle-util regression \
+  -x X.parquet \
+  -y y.parquet \
+  --model gaussian \
+  --prior susie \
+  --susie-layers 3 \
+  --iters 500 \
+  --gpu \
+  -o results \
+  -v
+```
+
+### Reading Results
+
+```{r}
+# Read coefficient estimates
+results <- read_parquet("results.mean.parquet")
+print(head(results))
+
+# Quick look at posterior inclusion probabilities
+plot(results$pip, main = "Posterior Inclusion Probabilities", ylab = "PIP", xlab = "Feature")
+
+# Compare with true coefficients
+comparison <- data.frame(
+  feature = colnames(X),
+  feature_idx = 1:p,
+  true_beta = beta_true,
+  estimated_beta = results$mean,
+  pip = results$pip
+)
+print(comparison[comparison$true_beta != 0, ])
+```
+
+### Visualizing Coefficients
+
+```{r}
+# Plot estimated vs true coefficients
+ggplot(comparison, aes(x = true_beta, y = estimated_beta)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(
+    x = "True Coefficient",
+    y = "Estimated Coefficient",
+    title = "Estimated vs True Coefficients"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Plot coefficient estimates along the feature index
+ggplot(comparison, aes(x = feature_idx, y = estimated_beta)) +
+  geom_point(alpha = 0.5, color = "steelblue") +
+  geom_point(
+    data = comparison[comparison$true_beta != 0, ],
+    aes(x = feature_idx, y = true_beta),
+    color = "red", size = 3, shape = 4, stroke = 2
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(
+    x = "Feature Index",
+    y = "Coefficient",
+    title = "Coefficient Estimates by Feature",
+    subtitle = "Red crosses indicate true non-zero coefficients"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Plot posterior inclusion probabilities
+ggplot(comparison, aes(x = feature_idx, y = pip)) +
+  geom_point(alpha = 0.5, color = "steelblue") +
+  geom_point(
+    data = comparison[comparison$true_beta != 0, ],
+    color = "red", size = 3
+  ) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", alpha = 0.5) +
+  labs(
+    x = "Feature Index",
+    y = "Posterior Inclusion Probability",
+    title = "PIP by Feature",
+    subtitle = "Red points indicate true causal features"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Highlight top features by PIP
+top_k <- 10
+top_features <- comparison %>%
+  arrange(desc(pip)) %>%
+  head(top_k)
+
+ggplot(top_features, aes(x = reorder(feature, pip), y = pip)) +
+  geom_col(fill = "steelblue") +
+  geom_point(
+    data = top_features[top_features$true_beta != 0, ],
+    aes(y = 1.05), color = "red", size = 3, shape = 8
+  ) +
+  coord_flip() +
+  labs(
+    x = "Feature",
+    y = "Posterior Inclusion Probability",
+    title = paste("Top", top_k, "Features by PIP"),
+    subtitle = "Red stars indicate true causal features"
+  ) +
+  theme_minimal()
+```
+
+### Count Data Example (Poisson)
+
+```{r}
+# Simulate Poisson count data
+lambda <- exp(X %*% (beta_true * 0.5))  # scale down for reasonable counts
+y_counts <- rpois(n, lambda)
+
+write_parquet(data.frame(y = y_counts), "y_counts.parquet")
+```
+
+```{bash}
+candle-util regression \
+  -x X.parquet \
+  -y y_counts.parquet \
+  --model poisson \
+  --prior susie \
+  --susie-layers 5 \
+  --gpu \
+  -o poisson_results \
+  -v
+```
+
+```{r}
+poisson_results <- read_parquet("poisson_results.mean.parquet")
+print(head(poisson_results))
+```
+
+## Output Format
+
+The output generates two Parquet files based on the `-o` base name:
+
+- **Mean file** (`<output>.mean.parquet`):
+  - For Susie prior: contains `mean` (coefficient estimate) and `pip` (posterior inclusion probability)
+  - For Gaussian prior: contains dense coefficient estimates
+
+- **Variance file** (`<output>.var.parquet`):
+  - Contains variance/dispersion parameter estimates
+
+## Tuning Parameters
+
+### Learning Rate (`--lr`)
+
+- Default: 0.01
+- Lower values (e.g., 0.001) for more stable but slower convergence
+- Higher values for faster initial progress but potential instability
+
+### Iterations (`--iters`)
+
+- Default: 500
+- Increase for complex models or if convergence is not reached
+- Monitor the ELBO/loss with verbose mode to check convergence
+
+### Monte Carlo Samples (`--samples`)
+
+- Default: 50
+- Higher values give more accurate gradient estimates but slower iterations
+- Lower values for faster but noisier updates
+
+### Susie Layers (`--susie-layers`)
+
+- Default: 5
+- Represents the expected number of causal effects
+- Increase if you expect more non-zero coefficients
+
+## Session Info
+
+```{r}
+sessionInfo()
+
+# Temporary files in tmpdir will be cleaned up by the OS
+```
