@@ -12,9 +12,11 @@ use std::sync::Arc;
 
 use super::traits::VariationalDistribution;
 
+//
+// Traits
+//
+
 /// Trait for outputting variational distribution parameters.
-///
-/// Provides methods to save variational parameters to files in various formats.
 pub trait VariationalOutput {
     /// Write mean parameters to file (format detected from extension).
     fn write_mean(&self, path: &str) -> Result<()>;
@@ -26,12 +28,9 @@ pub trait VariationalOutput {
     fn write_std(&self, path: &str) -> Result<()>;
 
     /// Write all standard outputs with a header prefix.
-    /// Creates files like: {header}.mean.gz, {header}.std.gz
     fn write_all(&self, header: &str) -> Result<()>;
 
     /// Write to parquet in melted (long) format with row/column names.
-    ///
-    /// Output columns: row, column, mean, std
     fn to_parquet(
         &self,
         row_names: Option<&[Box<str>]>,
@@ -49,21 +48,23 @@ pub trait SparseVariationalOutput: VariationalOutput {
     fn write_alpha(&self, path: &str) -> Result<()>;
 
     /// Write all outputs including sparse-specific ones.
-    /// Creates files like: {header}.mean.gz, {header}.pip.gz, etc.
     fn write_all_sparse(&self, header: &str) -> Result<()>;
 
-    /// Write to parquet in melted format including PIP.
-    ///
-    /// Output columns: row, column, mean, std, pip
+    /// Write to parquet in melted format (delegates to to_parquet).
     fn to_parquet_sparse(
         &self,
         row_names: Option<&[Box<str>]>,
         column_names: Option<&[Box<str>]>,
         file_path: &str,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        self.to_parquet(row_names, column_names, file_path)
+    }
 }
 
-/// Extract the format extension from a path, handling .gz compression.
+//
+// Helper functions
+//
+
 fn get_format_ext(path: &Path) -> String {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let name_lower = name.to_lowercase();
@@ -82,7 +83,6 @@ fn get_format_ext(path: &Path) -> String {
     }
 }
 
-/// Helper to detect format and write tensor to file.
 fn write_tensor(tensor: &Tensor, path: &str) -> Result<()> {
     let path = Path::new(path);
     let ext = get_format_ext(path);
@@ -96,7 +96,6 @@ fn write_tensor(tensor: &Tensor, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Helper to melt a 2D tensor to (values, row_indices, col_indices).
 fn melt_tensor(tensor: &Tensor) -> Result<(Vec<f32>, Vec<usize>, Vec<usize>)> {
     let tensor = tensor.to_device(&candle_core::Device::Cpu)?;
     let dims = tensor.dims();
@@ -117,32 +116,6 @@ fn melt_tensor(tensor: &Tensor) -> Result<(Vec<f32>, Vec<usize>, Vec<usize>)> {
     Ok((data, row_idx, col_idx))
 }
 
-/// Create a parquet schema with given fields.
-fn create_schema(
-    name: &str,
-    fields: &[(&str, ParquetType, ConvertedType)],
-) -> Result<Arc<Type>> {
-    Ok(Arc::new(
-        Type::group_type_builder(name)
-            .with_fields(
-                fields
-                    .iter()
-                    .map(|(field_name, parquet_type, converted_type)| {
-                        Arc::new(
-                            Type::primitive_type_builder(field_name, *parquet_type)
-                                .with_repetition(parquet::basic::Repetition::REQUIRED)
-                                .with_converted_type(*converted_type)
-                                .build()
-                                .unwrap(),
-                        )
-                    })
-                    .collect(),
-            )
-            .build()?,
-    ))
-}
-
-/// Convert indices to ByteArray names.
 fn indices_to_names(indices: &[usize], names: Option<&[Box<str>]>) -> Vec<ByteArray> {
     indices
         .iter()
@@ -156,27 +129,96 @@ fn indices_to_names(indices: &[usize], names: Option<&[Box<str>]>) -> Vec<ByteAr
         .collect()
 }
 
-// Implementation for GaussianVar
+/// Write melted data to parquet file.
+fn write_melted_parquet(
+    file_path: &str,
+    schema_name: &str,
+    rows: &[ByteArray],
+    cols: &[ByteArray],
+    value_columns: &[(&str, &[f32])],
+) -> Result<()> {
+    let mut fields: Vec<(&str, ParquetType, ConvertedType)> = vec![
+        ("row", ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
+        ("column", ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
+    ];
+    for (name, _) in value_columns {
+        fields.push((name, ParquetType::FLOAT, ConvertedType::NONE));
+    }
+
+    let schema = Arc::new(
+        Type::group_type_builder(schema_name)
+            .with_fields(
+                fields
+                    .iter()
+                    .map(|(name, ptype, ctype)| {
+                        Arc::new(
+                            Type::primitive_type_builder(name, *ptype)
+                                .with_repetition(parquet::basic::Repetition::REQUIRED)
+                                .with_converted_type(*ctype)
+                                .build()
+                                .unwrap(),
+                        )
+                    })
+                    .collect(),
+            )
+            .build()?,
+    );
+
+    let file = File::create(file_path)?;
+    let zstd_level = ZstdLevel::try_new(5)?;
+    let props = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::ZSTD(zstd_level))
+            .build(),
+    );
+    let mut writer = SerializedFileWriter::new(file, schema, props)?;
+    let mut row_group = writer.next_row_group()?;
+
+    // Write string columns
+    for data in [rows, cols] {
+        if let Some(mut col_writer) = row_group.next_column()? {
+            col_writer
+                .typed::<ByteArrayType>()
+                .write_batch(data, None, None)?;
+            col_writer.close()?;
+        }
+    }
+
+    // Write value columns
+    for (_, values) in value_columns {
+        if let Some(mut col_writer) = row_group.next_column()? {
+            col_writer
+                .typed::<FloatType>()
+                .write_batch(values, None, None)?;
+            col_writer.close()?;
+        }
+    }
+
+    row_group.close()?;
+    writer.close()?;
+    Ok(())
+}
+
+//
+// GaussianVar implementation
+//
+
 impl VariationalOutput for super::GaussianVar {
     fn write_mean(&self, path: &str) -> Result<()> {
-        let mean = VariationalDistribution::mean(self)?;
-        write_tensor(&mean, path)
+        write_tensor(&VariationalDistribution::mean(self)?, path)
     }
 
     fn write_var(&self, path: &str) -> Result<()> {
-        let var = VariationalDistribution::var(self)?;
-        write_tensor(&var, path)
+        write_tensor(&VariationalDistribution::var(self)?, path)
     }
 
     fn write_std(&self, path: &str) -> Result<()> {
-        let std = self.std()?;
-        write_tensor(&std, path)
+        write_tensor(&self.std()?, path)
     }
 
     fn write_all(&self, header: &str) -> Result<()> {
         self.write_mean(&format!("{}.mean.gz", header))?;
-        self.write_std(&format!("{}.std.gz", header))?;
-        Ok(())
+        self.write_std(&format!("{}.std.gz", header))
     }
 
     fn to_parquet(
@@ -185,16 +227,6 @@ impl VariationalOutput for super::GaussianVar {
         column_names: Option<&[Box<str>]>,
         file_path: &str,
     ) -> Result<()> {
-        let schema = create_schema(
-            "GaussianVar",
-            &[
-                ("row", ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
-                ("column", ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
-                ("mean", ParquetType::FLOAT, ConvertedType::NONE),
-                ("std", ParquetType::FLOAT, ConvertedType::NONE),
-            ],
-        )?;
-
         let mean = VariationalDistribution::mean(self)?;
         let std = self.std()?;
 
@@ -204,61 +236,36 @@ impl VariationalOutput for super::GaussianVar {
         let rows = indices_to_names(&row_idx, row_names);
         let cols = indices_to_names(&col_idx, column_names);
 
-        // Write parquet
-        let file = File::create(file_path)?;
-        let zstd_level = ZstdLevel::try_new(5)?;
-        let props = Arc::new(
-            WriterProperties::builder()
-                .set_compression(Compression::ZSTD(zstd_level))
-                .build(),
-        );
-        let mut writer = SerializedFileWriter::new(file, schema, props)?;
-        let mut row_group = writer.next_row_group()?;
-
-        // Write name columns
-        for data in [&rows, &cols] {
-            if let Some(mut col_writer) = row_group.next_column()? {
-                col_writer.typed::<ByteArrayType>().write_batch(data, None, None)?;
-                col_writer.close()?;
-            }
-        }
-
-        // Write value columns
-        for data in [&mean_vals, &std_vals] {
-            if let Some(mut col_writer) = row_group.next_column()? {
-                col_writer.typed::<FloatType>().write_batch(data, None, None)?;
-                col_writer.close()?;
-            }
-        }
-
-        row_group.close()?;
-        writer.close()?;
-        Ok(())
+        write_melted_parquet(
+            file_path,
+            "GaussianVar",
+            &rows,
+            &cols,
+            &[("mean", &mean_vals), ("std", &std_vals)],
+        )
     }
 }
 
-// Implementation for SusieVar
+//
+// SusieVar implementation
+//
+
 impl VariationalOutput for super::SusieVar {
     fn write_mean(&self, path: &str) -> Result<()> {
-        let mean = self.theta_mean()?;
-        write_tensor(&mean, path)
+        write_tensor(&self.theta_mean()?, path)
     }
 
     fn write_var(&self, path: &str) -> Result<()> {
-        let var = VariationalDistribution::var(self)?;
-        write_tensor(&var, path)
+        write_tensor(&VariationalDistribution::var(self)?, path)
     }
 
     fn write_std(&self, path: &str) -> Result<()> {
-        let var = VariationalDistribution::var(self)?;
-        let std = var.sqrt()?;
-        write_tensor(&std, path)
+        write_tensor(&VariationalDistribution::var(self)?.sqrt()?, path)
     }
 
     fn write_all(&self, header: &str) -> Result<()> {
         self.write_mean(&format!("{}.mean.gz", header))?;
-        self.write_std(&format!("{}.std.gz", header))?;
-        Ok(())
+        self.write_std(&format!("{}.std.gz", header))
     }
 
     fn to_parquet(
@@ -267,101 +274,8 @@ impl VariationalOutput for super::SusieVar {
         column_names: Option<&[Box<str>]>,
         file_path: &str,
     ) -> Result<()> {
-        let schema = create_schema(
-            "SusieVar",
-            &[
-                ("row", ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
-                ("column", ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
-                ("mean", ParquetType::FLOAT, ConvertedType::NONE),
-                ("std", ParquetType::FLOAT, ConvertedType::NONE),
-            ],
-        )?;
-
         let mean = self.theta_mean()?;
-        let var = VariationalDistribution::var(self)?;
-        let std = var.sqrt()?;
-
-        let (mean_vals, row_idx, col_idx) = melt_tensor(&mean)?;
-        let (std_vals, _, _) = melt_tensor(&std)?;
-
-        let rows = indices_to_names(&row_idx, row_names);
-        let cols = indices_to_names(&col_idx, column_names);
-
-        let file = File::create(file_path)?;
-        let zstd_level = ZstdLevel::try_new(5)?;
-        let props = Arc::new(
-            WriterProperties::builder()
-                .set_compression(Compression::ZSTD(zstd_level))
-                .build(),
-        );
-        let mut writer = SerializedFileWriter::new(file, schema, props)?;
-        let mut row_group = writer.next_row_group()?;
-
-        for data in [&rows, &cols] {
-            if let Some(mut col_writer) = row_group.next_column()? {
-                col_writer.typed::<ByteArrayType>().write_batch(data, None, None)?;
-                col_writer.close()?;
-            }
-        }
-
-        for data in [&mean_vals, &std_vals] {
-            if let Some(mut col_writer) = row_group.next_column()? {
-                col_writer.typed::<FloatType>().write_batch(data, None, None)?;
-                col_writer.close()?;
-            }
-        }
-
-        row_group.close()?;
-        writer.close()?;
-        Ok(())
-    }
-}
-
-impl SparseVariationalOutput for super::SusieVar {
-    fn write_pip(&self, path: &str) -> Result<()> {
-        let pip = self.pip()?;
-        write_tensor(&pip, path)
-    }
-
-    fn write_alpha(&self, path: &str) -> Result<()> {
-        let alpha = self.alpha()?;
-        let dims = alpha.dims();
-        if dims.len() == 3 {
-            let (l, p, k) = (dims[0], dims[1], dims[2]);
-            let alpha_2d = alpha.reshape((l * p, k))?;
-            write_tensor(&alpha_2d, path)
-        } else {
-            write_tensor(&alpha, path)
-        }
-    }
-
-    fn write_all_sparse(&self, header: &str) -> Result<()> {
-        self.write_all(header)?;
-        self.write_pip(&format!("{}.pip.gz", header))?;
-        self.write_alpha(&format!("{}.alpha.gz", header))?;
-        Ok(())
-    }
-
-    fn to_parquet_sparse(
-        &self,
-        row_names: Option<&[Box<str>]>,
-        column_names: Option<&[Box<str>]>,
-        file_path: &str,
-    ) -> Result<()> {
-        let schema = create_schema(
-            "SusieVar",
-            &[
-                ("row", ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
-                ("column", ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
-                ("mean", ParquetType::FLOAT, ConvertedType::NONE),
-                ("std", ParquetType::FLOAT, ConvertedType::NONE),
-                ("pip", ParquetType::FLOAT, ConvertedType::NONE),
-            ],
-        )?;
-
-        let mean = self.theta_mean()?;
-        let var = VariationalDistribution::var(self)?;
-        let std = var.sqrt()?;
+        let std = VariationalDistribution::var(self)?.sqrt()?;
         let pip = self.pip()?;
 
         let (mean_vals, row_idx, col_idx) = melt_tensor(&mean)?;
@@ -371,35 +285,42 @@ impl SparseVariationalOutput for super::SusieVar {
         let rows = indices_to_names(&row_idx, row_names);
         let cols = indices_to_names(&col_idx, column_names);
 
-        let file = File::create(file_path)?;
-        let zstd_level = ZstdLevel::try_new(5)?;
-        let props = Arc::new(
-            WriterProperties::builder()
-                .set_compression(Compression::ZSTD(zstd_level))
-                .build(),
-        );
-        let mut writer = SerializedFileWriter::new(file, schema, props)?;
-        let mut row_group = writer.next_row_group()?;
-
-        for data in [&rows, &cols] {
-            if let Some(mut col_writer) = row_group.next_column()? {
-                col_writer.typed::<ByteArrayType>().write_batch(data, None, None)?;
-                col_writer.close()?;
-            }
-        }
-
-        for data in [&mean_vals, &std_vals, &pip_vals] {
-            if let Some(mut col_writer) = row_group.next_column()? {
-                col_writer.typed::<FloatType>().write_batch(data, None, None)?;
-                col_writer.close()?;
-            }
-        }
-
-        row_group.close()?;
-        writer.close()?;
-        Ok(())
+        write_melted_parquet(
+            file_path,
+            "SusieVar",
+            &rows,
+            &cols,
+            &[("mean", &mean_vals), ("std", &std_vals), ("pip", &pip_vals)],
+        )
     }
 }
+
+impl SparseVariationalOutput for super::SusieVar {
+    fn write_pip(&self, path: &str) -> Result<()> {
+        write_tensor(&self.pip()?, path)
+    }
+
+    fn write_alpha(&self, path: &str) -> Result<()> {
+        let alpha = self.alpha()?;
+        let dims = alpha.dims();
+        if dims.len() == 3 {
+            let (l, p, k) = (dims[0], dims[1], dims[2]);
+            write_tensor(&alpha.reshape((l * p, k))?, path)
+        } else {
+            write_tensor(&alpha, path)
+        }
+    }
+
+    fn write_all_sparse(&self, header: &str) -> Result<()> {
+        self.write_all(header)?;
+        self.write_pip(&format!("{}.pip.gz", header))?;
+        self.write_alpha(&format!("{}.alpha.gz", header))
+    }
+}
+
+//
+// Tests
+//
 
 #[cfg(test)]
 mod tests {
@@ -410,12 +331,8 @@ mod tests {
 
     #[test]
     fn test_gaussian_var_output() -> Result<()> {
-        let device = Device::Cpu;
-        let dtype = DType::F32;
-
         let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
-
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
         let gaussian = super::super::GaussianVar::new(vb, 10, 3)?;
 
         let dir = tempdir()?;
@@ -425,7 +342,6 @@ mod tests {
         assert!(dir.path().join("test_gaussian.mean.gz").exists());
         assert!(dir.path().join("test_gaussian.std.gz").exists());
 
-        // Test parquet output
         let pq_path = dir.path().join("test_gaussian.parquet");
         gaussian.to_parquet(None, None, pq_path.to_str().unwrap())?;
         assert!(pq_path.exists());
@@ -435,12 +351,8 @@ mod tests {
 
     #[test]
     fn test_susie_var_output() -> Result<()> {
-        let device = Device::Cpu;
-        let dtype = DType::F32;
-
         let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
-
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
         let susie = super::super::SusieVar::new(vb, 3, 10, 2)?;
 
         let dir = tempdir()?;
@@ -452,9 +364,8 @@ mod tests {
         assert!(dir.path().join("test_susie.pip.gz").exists());
         assert!(dir.path().join("test_susie.alpha.gz").exists());
 
-        // Test parquet output with PIP
         let pq_path = dir.path().join("test_susie.parquet");
-        susie.to_parquet_sparse(None, None, pq_path.to_str().unwrap())?;
+        susie.to_parquet(None, None, pq_path.to_str().unwrap())?;
         assert!(pq_path.exists());
 
         Ok(())
@@ -462,12 +373,8 @@ mod tests {
 
     #[test]
     fn test_parquet_with_names() -> Result<()> {
-        let device = Device::Cpu;
-        let dtype = DType::F32;
-
         let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
-
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
         let susie = super::super::SusieVar::new(vb, 2, 5, 2)?;
 
         let row_names: Vec<Box<str>> = (0..5).map(|i| format!("gene_{}", i).into()).collect();
@@ -475,7 +382,7 @@ mod tests {
 
         let dir = tempdir()?;
         let pq_path = dir.path().join("named.parquet");
-        susie.to_parquet_sparse(Some(&row_names), Some(&col_names), pq_path.to_str().unwrap())?;
+        susie.to_parquet(Some(&row_names), Some(&col_names), pq_path.to_str().unwrap())?;
         assert!(pq_path.exists());
 
         Ok(())
