@@ -364,9 +364,17 @@ pub trait IoOps {
     ) -> anyhow::Result<()>;
 
     /// Read a real-valued numeric matrix with the default row
-    /// index(0) and all the other available columns
+    /// index(0) and all the other available columns.
+    /// Assumes column 0 contains row names.
     ///
     fn from_parquet(file_path: &str) -> anyhow::Result<MatWithNames<Self::Mat>> {
+        Self::from_parquet_with_indices(file_path, Some(0), None)
+    }
+
+    /// Read a real-valued numeric matrix treating all columns as data.
+    /// Row names will be generated as "0", "1", "2", ...
+    ///
+    fn from_parquet_no_row_names(file_path: &str) -> anyhow::Result<MatWithNames<Self::Mat>> {
         Self::from_parquet_with_indices(file_path, None, None)
     }
 

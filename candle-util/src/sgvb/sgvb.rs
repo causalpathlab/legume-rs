@@ -157,7 +157,7 @@ mod tests {
             let ln_2pi = (2.0 * std::f64::consts::PI).ln();
             let const_term = 2.0 * self.ln_sigma + ln_2pi;
 
-            let diff_sq = eta.broadcast_sub(&self.y)?.powf(2.0)?;
+            let diff_sq = eta.broadcast_sub(&self.y)?.sqr()?;
             let log_prob = (((diff_sq / sigma_sq)? + const_term)? * (-0.5))?;
 
             // Sum over (n, k) dimensions, return (S,)

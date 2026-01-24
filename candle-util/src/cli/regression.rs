@@ -42,14 +42,38 @@ fn get_format_ext(path: &Path) -> String {
     }
 }
 
-fn load_tensor(path: &Path, device: &Device) -> Result<Tensor> {
+struct LoadedTensor {
+    tensor: Tensor,
+    col_names: Option<Vec<Box<str>>>,
+}
+
+fn load_tensor(path: &Path, device: &Device, with_row_names: bool) -> Result<LoadedTensor> {
     let path_str = path.to_str().ok_or_else(|| anyhow::anyhow!("Invalid path"))?;
-    let tensor = match get_format_ext(path).as_str() {
-        "csv" => Tensor::from_csv(path_str, None)?,
-        "parquet" | "pq" => Tensor::from_parquet(path_str)?.mat,
-        _ => Tensor::from_tsv(path_str, None)?,
+    let (tensor, col_names) = match get_format_ext(path).as_str() {
+        "csv" => (Tensor::from_csv(path_str, None)?, None),
+        "parquet" | "pq" => {
+            let mat_with_names = if with_row_names {
+                Tensor::from_parquet(path_str)?
+            } else {
+                Tensor::from_parquet_no_row_names(path_str)?
+            };
+            let cols = if mat_with_names.cols.is_empty() {
+                None
+            } else {
+                Some(mat_with_names.cols)
+            };
+            (mat_with_names.mat, cols)
+        }
+        _ => (Tensor::from_tsv(path_str, None)?, None),
     };
-    tensor.to_device(device).map_err(Into::into)
+    // Convert to f32 on CPU before moving to device (Metal doesn't support f64->f32 conversion)
+    let tensor = if tensor.dtype() != DType::F32 {
+        tensor.to_dtype(DType::F32)?
+    } else {
+        tensor
+    };
+    let tensor = tensor.to_device(device)?;
+    Ok(LoadedTensor { tensor, col_names })
 }
 
 fn load_names(path: &Option<PathBuf>) -> Result<Option<Vec<Box<str>>>> {
@@ -68,67 +92,62 @@ fn load_names(path: &Option<PathBuf>) -> Result<Option<Vec<Box<str>>>> {
     }
 }
 
-fn load_x_var(path: &Option<PathBuf>, n: usize, dtype: DType, device: &Device) -> Result<Tensor> {
+fn load_x_var(
+    path: &Option<PathBuf>,
+    n: usize,
+    dtype: DType,
+    device: &Device,
+    with_row_names: bool,
+) -> Result<Tensor> {
     if let Some(ref p) = path {
         info!("Loading X_var from {:?}", p);
-        let t = load_tensor(p, device)?;
-        info!("  X_var shape: {:?}", t.dims());
-        if t.dim(0)? != n {
+        let loaded = load_tensor(p, device, with_row_names)?;
+        info!("  X_var shape: {:?}", loaded.tensor.dims());
+        if loaded.tensor.dim(0)? != n {
             anyhow::bail!("X_var must have same number of rows as X");
         }
-        Ok(t)
+        Ok(loaded.tensor)
     } else {
         info!("Using intercept-only for variance");
         Ok(Tensor::ones((n, 1), dtype, device)?)
     }
 }
 
-fn top_k_indices(tensor: &Tensor, k: usize) -> Result<Vec<(usize, f32)>> {
-    let vec: Vec<f32> = tensor.flatten_all()?.to_vec1()?;
-    let mut indexed: Vec<(usize, f32)> = vec.into_iter().enumerate().collect();
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    Ok(indexed.into_iter().take(k).collect())
-}
-
-fn format_top_pips(pip: &Tensor, k: usize) -> Result<String> {
-    let top = top_k_indices(pip, k)?;
-    Ok(top.iter().map(|(i, v)| format!("{}:{:.3}", i, v)).collect::<Vec<_>>().join(", "))
-}
-
-fn log_top_pips(pip: &Tensor, n: usize) -> Result<()> {
-    info!("Top {} features by PIP:", n);
-    for (rank, (idx, val)) in top_k_indices(pip, n)?.iter().enumerate() {
-        info!("  {:2}. feature {:4}: PIP = {:.4}", rank + 1, idx, val);
-    }
-    Ok(())
+fn make_output_path(base: &Option<PathBuf>, suffix: &str) -> Option<PathBuf> {
+    base.as_ref().map(|p| {
+        let s = p.to_string_lossy();
+        // Strip .parquet suffix if present since we'll add it back
+        let base_str = s.strip_suffix(".parquet").unwrap_or(&s);
+        PathBuf::from(format!("{}.{}.parquet", base_str, suffix))
+    })
 }
 
 fn save_output<V: VariationalOutput>(
     var: &V,
-    path: &Option<PathBuf>,
-    label: &str,
+    base: &Option<PathBuf>,
+    suffix: &str,
     row_names: Option<&[Box<str>]>,
     col_names: Option<&[Box<str>]>,
 ) -> Result<()> {
-    if let Some(ref p) = path {
+    if let Some(ref p) = make_output_path(base, suffix) {
         let s = p.to_str().ok_or_else(|| anyhow::anyhow!("Invalid output path"))?;
         var.to_parquet(row_names, col_names, s)?;
-        info!("Saved {} variational to {:?}", label, p);
+        info!("Saved {} to {:?}", suffix, p);
     }
     Ok(())
 }
 
 fn save_output_sparse<V: SparseVariationalOutput>(
     var: &V,
-    path: &Option<PathBuf>,
-    label: &str,
+    base: &Option<PathBuf>,
+    suffix: &str,
     row_names: Option<&[Box<str>]>,
     col_names: Option<&[Box<str>]>,
 ) -> Result<()> {
-    if let Some(ref p) = path {
+    if let Some(ref p) = make_output_path(base, suffix) {
         let s = p.to_str().ok_or_else(|| anyhow::anyhow!("Invalid output path"))?;
         var.to_parquet_sparse(row_names, col_names, s)?;
-        info!("Saved {} variational to {:?}", label, p);
+        info!("Saved {} to {:?}", suffix, p);
     }
     Ok(())
 }
@@ -213,6 +232,9 @@ pub struct RegressionArgs {
     #[arg(long, help = "File with output names (one per line)")]
     pub output_names: Option<PathBuf>,
 
+    #[arg(long, help = "Parquet files have row names in column 0")]
+    pub with_row_names: bool,
+
     #[arg(short, long, default_value = "gaussian")]
     pub model: LikelihoodType,
 
@@ -231,11 +253,8 @@ pub struct RegressionArgs {
     #[arg(long, default_value = "50")]
     pub samples: usize,
 
-    #[arg(short, long)]
+    #[arg(short, long, help = "Output prefix (creates {output}.mean.parquet, {output}.var.parquet, etc.)")]
     pub output: Option<PathBuf>,
-
-    #[arg(long)]
-    pub output_var: Option<PathBuf>,
 
     #[arg(long)]
     pub gpu: bool,
@@ -253,13 +272,13 @@ fn run_gaussian_gaussian(
     x: Tensor,
     y: Tensor,
     vb: VarBuilder,
+    varmap: &VarMap,
     config: SGVBConfig,
-    optimizer: &mut impl Optimizer,
     feature_names: Option<&[Box<str>]>,
     output_names: Option<&[Box<str>]>,
 ) -> Result<()> {
     let (n, p, k) = (x.dim(0)?, x.dim(1)?, y.dim(1)?);
-    let x_var = load_x_var(&args.x_var, n, DType::F32, x.device())?;
+    let x_var = load_x_var(&args.x_var, n, DType::F32, x.device(), args.with_row_names)?;
     let p_var = x_var.dim(1)?;
 
     let model_mean = LinearRegressionSGVB::new(
@@ -275,13 +294,16 @@ fn run_gaussian_gaussian(
     let composite = CompositeModel::new(vec![model_mean, model_var]);
     let likelihood = GaussianLikelihood::new(y);
 
+    // Create optimizer AFTER models are created so varmap contains all variables
+    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+
     info!("Mean module: {} features", p);
     info!("Variance module: {} features", p_var);
 
     train(
         args.iters,
         args.verbose,
-        optimizer,
+        &mut optimizer,
         || Ok(composite_direct_elbo_loss(&composite, &likelihood, config.num_samples)?),
         || Ok(composite_elbo(&composite, &likelihood, 100)?),
         None::<fn() -> Result<String>>,
@@ -291,7 +313,7 @@ fn run_gaussian_gaussian(
     info!("Variance coefficients shape: {:?}", composite.modules[1].coef_mean()?.dims());
 
     save_output(&composite.modules[0].variational, &args.output, "mean", feature_names, output_names)?;
-    save_output(&composite.modules[1].variational, &args.output_var, "variance", None, output_names)
+    save_output(&composite.modules[1].variational, &args.output, "var", None, output_names)
 }
 
 fn run_gaussian_susie(
@@ -299,13 +321,13 @@ fn run_gaussian_susie(
     x: Tensor,
     y: Tensor,
     vb: VarBuilder,
+    varmap: &VarMap,
     config: SGVBConfig,
-    optimizer: &mut impl Optimizer,
     feature_names: Option<&[Box<str>]>,
     output_names: Option<&[Box<str>]>,
 ) -> Result<()> {
     let (n, p, k) = (x.dim(0)?, x.dim(1)?, y.dim(1)?);
-    let x_var = load_x_var(&args.x_var, n, DType::F32, x.device())?;
+    let x_var = load_x_var(&args.x_var, n, DType::F32, x.device(), args.with_row_names)?;
     let p_var = x_var.dim(1)?;
 
     let susie = SusieVar::new(vb.pp("susie_mean"), args.susie_layers, p, k)?;
@@ -321,13 +343,16 @@ fn run_gaussian_susie(
     )?;
     let likelihood = GaussianLikelihood::new(y);
 
+    // Create optimizer AFTER models are created so varmap contains all variables
+    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+
     info!("Mean module: {} features, Susie(L={})", p, args.susie_layers);
     info!("Variance module: {} features, Gaussian", p_var);
 
     train(
         args.iters,
         args.verbose,
-        optimizer,
+        &mut optimizer,
         || {
             let samples = vec![
                 model_mean.sample(config.num_samples)?,
@@ -339,15 +364,14 @@ fn run_gaussian_susie(
             let samples = vec![model_mean.sample(100)?, model_var.sample(100)?];
             Ok(samples_elbo(&samples, &likelihood)?)
         },
-        Some(|| Ok(format_top_pips(&model_mean.variational.pip()?, 3)?)),
+        None::<fn() -> Result<String>>,
     )?;
 
     info!("Mean coefficients shape: {:?}", model_mean.coef_mean()?.dims());
     info!("Variance coefficients shape: {:?}", model_var.coef_mean()?.dims());
-    log_top_pips(&model_mean.variational.pip()?, 10)?;
 
     save_output_sparse(&model_mean.variational, &args.output, "mean", feature_names, output_names)?;
-    save_output(&model_var.variational, &args.output_var, "variance", None, output_names)
+    save_output(&model_var.variational, &args.output, "var", None, output_names)
 }
 
 fn run_poisson_gaussian(
@@ -355,8 +379,8 @@ fn run_poisson_gaussian(
     x: Tensor,
     y: Tensor,
     vb: VarBuilder,
+    varmap: &VarMap,
     config: SGVBConfig,
-    optimizer: &mut impl Optimizer,
     feature_names: Option<&[Box<str>]>,
     output_names: Option<&[Box<str>]>,
 ) -> Result<()> {
@@ -368,17 +392,20 @@ fn run_poisson_gaussian(
     )?;
     let likelihood = PoissonLikelihood::new(y);
 
+    // Create optimizer AFTER models are created so varmap contains all variables
+    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+
     train(
         args.iters,
         args.verbose,
-        optimizer,
+        &mut optimizer,
         || Ok(sgvb_loss(&model, &likelihood, &config)?),
         || Ok(compute_elbo(&model, &likelihood, 100)?),
         None::<fn() -> Result<String>>,
     )?;
 
     info!("Coefficients shape: {:?}", model.coef_mean()?.dims());
-    save_output(&model.variational, &args.output, "", feature_names, output_names)
+    save_output(&model.variational, &args.output, "mean", feature_names, output_names)
 }
 
 fn run_poisson_susie(
@@ -386,8 +413,8 @@ fn run_poisson_susie(
     x: Tensor,
     y: Tensor,
     vb: VarBuilder,
+    varmap: &VarMap,
     config: SGVBConfig,
-    optimizer: &mut impl Optimizer,
     feature_names: Option<&[Box<str>]>,
     output_names: Option<&[Box<str>]>,
 ) -> Result<()> {
@@ -400,18 +427,20 @@ fn run_poisson_susie(
     );
     let likelihood = PoissonLikelihood::new(y);
 
+    // Create optimizer AFTER models are created so varmap contains all variables
+    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+
     train(
         args.iters,
         args.verbose,
-        optimizer,
+        &mut optimizer,
         || Ok(direct_elbo_loss(&model, &likelihood, config.num_samples)?),
         || Ok(compute_elbo(&model, &likelihood, 100)?),
-        Some(|| Ok(format_top_pips(&model.variational.pip()?, 3)?)),
+        None::<fn() -> Result<String>>,
     )?;
 
     info!("Coefficients shape: {:?}", model.coef_mean()?.dims());
-    log_top_pips(&model.variational.pip()?, 10)?;
-    save_output_sparse(&model.variational, &args.output, "", feature_names, output_names)
+    save_output_sparse(&model.variational, &args.output, "mean", feature_names, output_names)
 }
 
 fn run_negbin_gaussian(
@@ -419,13 +448,13 @@ fn run_negbin_gaussian(
     x: Tensor,
     y: Tensor,
     vb: VarBuilder,
+    varmap: &VarMap,
     config: SGVBConfig,
-    optimizer: &mut impl Optimizer,
     feature_names: Option<&[Box<str>]>,
     output_names: Option<&[Box<str>]>,
 ) -> Result<()> {
     let (n, p, k) = (x.dim(0)?, x.dim(1)?, y.dim(1)?);
-    let x_var = load_x_var(&args.x_var, n, DType::F32, x.device())?;
+    let x_var = load_x_var(&args.x_var, n, DType::F32, x.device(), args.with_row_names)?;
     let p_var = x_var.dim(1)?;
 
     let model_mean = LinearRegressionSGVB::new(
@@ -441,13 +470,16 @@ fn run_negbin_gaussian(
     let composite = CompositeModel::new(vec![model_mean, model_disp]);
     let likelihood = NegativeBinomialLikelihood::new(y);
 
+    // Create optimizer AFTER models are created so varmap contains all variables
+    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+
     info!("Mean module: {} features", p);
     info!("Dispersion module: {} features", p_var);
 
     train(
         args.iters,
         args.verbose,
-        optimizer,
+        &mut optimizer,
         || Ok(composite_direct_elbo_loss(&composite, &likelihood, config.num_samples)?),
         || Ok(composite_elbo(&composite, &likelihood, 100)?),
         None::<fn() -> Result<String>>,
@@ -457,7 +489,7 @@ fn run_negbin_gaussian(
     info!("Dispersion coefficients shape: {:?}", composite.modules[1].coef_mean()?.dims());
 
     save_output(&composite.modules[0].variational, &args.output, "mean", feature_names, output_names)?;
-    save_output(&composite.modules[1].variational, &args.output_var, "dispersion", None, output_names)
+    save_output(&composite.modules[1].variational, &args.output, "disp", None, output_names)
 }
 
 fn run_negbin_susie(
@@ -465,13 +497,13 @@ fn run_negbin_susie(
     x: Tensor,
     y: Tensor,
     vb: VarBuilder,
+    varmap: &VarMap,
     config: SGVBConfig,
-    optimizer: &mut impl Optimizer,
     feature_names: Option<&[Box<str>]>,
     output_names: Option<&[Box<str>]>,
 ) -> Result<()> {
     let (n, p, k) = (x.dim(0)?, x.dim(1)?, y.dim(1)?);
-    let x_var = load_x_var(&args.x_var, n, DType::F32, x.device())?;
+    let x_var = load_x_var(&args.x_var, n, DType::F32, x.device(), args.with_row_names)?;
     let p_var = x_var.dim(1)?;
 
     let susie = SusieVar::new(vb.pp("susie_mean"), args.susie_layers, p, k)?;
@@ -487,13 +519,16 @@ fn run_negbin_susie(
     )?;
     let likelihood = NegativeBinomialLikelihood::new(y);
 
+    // Create optimizer AFTER models are created so varmap contains all variables
+    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+
     info!("Mean module: {} features, Susie(L={})", p, args.susie_layers);
     info!("Dispersion module: {} features, Gaussian", p_var);
 
     train(
         args.iters,
         args.verbose,
-        optimizer,
+        &mut optimizer,
         || {
             let samples = vec![
                 model_mean.sample(config.num_samples)?,
@@ -505,15 +540,14 @@ fn run_negbin_susie(
             let samples = vec![model_mean.sample(100)?, model_disp.sample(100)?];
             Ok(samples_elbo(&samples, &likelihood)?)
         },
-        Some(|| Ok(format_top_pips(&model_mean.variational.pip()?, 3)?)),
+        None::<fn() -> Result<String>>,
     )?;
 
     info!("Mean coefficients shape: {:?}", model_mean.coef_mean()?.dims());
     info!("Dispersion coefficients shape: {:?}", model_disp.coef_mean()?.dims());
-    log_top_pips(&model_mean.variational.pip()?, 10)?;
 
     save_output_sparse(&model_mean.variational, &args.output, "mean", feature_names, output_names)?;
-    save_output(&model_disp.variational, &args.output_var, "dispersion", None, output_names)
+    save_output(&model_disp.variational, &args.output, "disp", None, output_names)
 }
 
 //
@@ -534,24 +568,27 @@ pub fn run(args: &RegressionArgs) -> Result<()> {
     info!("Using device: {:?}", device);
 
     info!("Loading X from {:?}", args.x);
-    let x = load_tensor(&args.x, &device)?;
-    info!("  X shape: {:?}", x.dims());
+    let x_loaded = load_tensor(&args.x, &device, args.with_row_names)?;
+    info!("  X shape: {:?}", x_loaded.tensor.dims());
 
     info!("Loading Y from {:?}", args.y);
-    let y = load_tensor(&args.y, &device)?;
-    info!("  Y shape: {:?}", y.dims());
+    let y_loaded = load_tensor(&args.y, &device, args.with_row_names)?;
+    info!("  Y shape: {:?}", y_loaded.tensor.dims());
 
-    if y.dim(0)? != x.dim(0)? {
+    if y_loaded.tensor.dim(0)? != x_loaded.tensor.dim(0)? {
         anyhow::bail!("X and Y must have same number of rows");
     }
 
-    let feature_names = load_names(&args.feature_names)?;
-    let output_names = load_names(&args.output_names)?;
+    // Use column names from parquet if available, otherwise fall back to CLI args
+    let feature_names = load_names(&args.feature_names)?.or(x_loaded.col_names);
+    let output_names = load_names(&args.output_names)?.or(y_loaded.col_names);
+
+    let x = x_loaded.tensor;
+    let y = y_loaded.tensor;
 
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
     let config = SGVBConfig::new(args.samples);
-    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
 
     info!("Likelihood: {}", match args.model {
         LikelihoodType::Gaussian => "Gaussian",
@@ -568,16 +605,16 @@ pub fn run(args: &RegressionArgs) -> Result<()> {
 
     match (&args.model, &args.prior) {
         (LikelihoodType::Gaussian, VariationalType::Gaussian) =>
-            run_gaussian_gaussian(args, x, y, vb, config, &mut optimizer, feat_ref, out_ref),
+            run_gaussian_gaussian(args, x, y, vb, &varmap, config, feat_ref, out_ref),
         (LikelihoodType::Gaussian, VariationalType::Susie) =>
-            run_gaussian_susie(args, x, y, vb, config, &mut optimizer, feat_ref, out_ref),
+            run_gaussian_susie(args, x, y, vb, &varmap, config, feat_ref, out_ref),
         (LikelihoodType::Poisson, VariationalType::Gaussian) =>
-            run_poisson_gaussian(args, x, y, vb, config, &mut optimizer, feat_ref, out_ref),
+            run_poisson_gaussian(args, x, y, vb, &varmap, config, feat_ref, out_ref),
         (LikelihoodType::Poisson, VariationalType::Susie) =>
-            run_poisson_susie(args, x, y, vb, config, &mut optimizer, feat_ref, out_ref),
+            run_poisson_susie(args, x, y, vb, &varmap, config, feat_ref, out_ref),
         (LikelihoodType::Negbin, VariationalType::Gaussian) =>
-            run_negbin_gaussian(args, x, y, vb, config, &mut optimizer, feat_ref, out_ref),
+            run_negbin_gaussian(args, x, y, vb, &varmap, config, feat_ref, out_ref),
         (LikelihoodType::Negbin, VariationalType::Susie) =>
-            run_negbin_susie(args, x, y, vb, config, &mut optimizer, feat_ref, out_ref),
+            run_negbin_susie(args, x, y, vb, &varmap, config, feat_ref, out_ref),
     }
 }

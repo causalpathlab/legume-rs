@@ -137,7 +137,7 @@ mod tests {
             let ln_sigma = self.sigma.ln();
             let const_term = 2.0 * ln_sigma + ln_2pi;
 
-            let diff_sq = eta.broadcast_sub(&self.y)?.powf(2.0)?;
+            let diff_sq = eta.broadcast_sub(&self.y)?.sqr()?;
             let log_prob = (((diff_sq / sigma_sq)? + const_term)? * (-0.5))?;
 
             log_prob.sum(2)?.sum(1)

@@ -174,7 +174,9 @@ impl VariationalDistribution for SusieVar {
         let dtype = theta.dtype();
 
         // 1. Negative entropy of β: -H[q(β)] = -0.5 * Σ (1 + ln(2π) + 2*ln(σ))
-        let ln_2pi = Tensor::new((2.0 * std::f64::consts::PI).ln(), device)?.to_dtype(dtype)?;
+        // Create scalar constant directly in f32 to avoid Metal F64 conversion issues
+        let ln_2pi = Tensor::new((2.0 * std::f64::consts::PI).ln() as f32, device)?
+            .to_dtype(dtype)?;
         let two_ln_std = (&self.beta_ln_std * 2.0)?;
         let neg_entropy_beta = ((two_ln_std.broadcast_add(&ln_2pi)? + 1.0)? * (-0.5))?;
         let neg_entropy_beta_sum = neg_entropy_beta.sum(2)?.sum(1)?.sum(0)?;
@@ -206,14 +208,14 @@ impl VariationalDistribution for SusieVar {
         let sigma_sq = (&self.beta_ln_std * 2.0)?.exp()?; // (L, p, k)
 
         // E[θ²] = Σ_l α_l * (σ² + μ²)
-        let mu_sq = mu.powf(2.0)?;
+        let mu_sq = mu.sqr()?;
         let second_moment_l = alpha.broadcast_mul(&(&sigma_sq + &mu_sq)?)?;
         let second_moment = second_moment_l.sum(0)?; // (p, k)
 
         // E[θ]² = (Σ_l α_l * μ)²
         let first_moment_l = alpha.broadcast_mul(mu)?;
         let first_moment = first_moment_l.sum(0)?; // (p, k)
-        let first_moment_sq = first_moment.powf(2.0)?;
+        let first_moment_sq = first_moment.sqr()?;
 
         // Var[θ] = E[θ²] - E[θ]²
         second_moment - first_moment_sq
@@ -241,11 +243,13 @@ impl SusieVar {
     pub fn log_prob_beta(&self, beta: &Tensor) -> Result<Tensor> {
         let dtype = beta.dtype();
         let device = beta.device();
-        let ln_2pi = Tensor::new((2.0 * std::f64::consts::PI).ln(), device)?.to_dtype(dtype)?;
+        // Create scalar constant directly in f32 to avoid Metal F64 conversion issues
+        let ln_2pi = Tensor::new((2.0 * std::f64::consts::PI).ln() as f32, device)?
+            .to_dtype(dtype)?;
 
         let std = self.beta_ln_std.exp()?;
         let diff = beta.broadcast_sub(&self.beta_mean)?;
-        let normalized_sq = diff.powf(2.0)?.broadcast_div(&std.powf(2.0)?)?;
+        let normalized_sq = diff.sqr()?.broadcast_div(&std.sqr()?)?;
 
         let two_ln_std = (&self.beta_ln_std * 2.0)?;
         let log_prob_element =
@@ -368,7 +372,7 @@ mod tests {
         impl BlackBoxLikelihood for GaussianLik {
             fn log_likelihood(&self, etas: &[&Tensor]) -> Result<Tensor> {
                 let eta = etas[0];
-                let diff_sq = eta.broadcast_sub(&self.y)?.powf(2.0)?;
+                let diff_sq = eta.broadcast_sub(&self.y)?.sqr()?;
                 let log_prob = (diff_sq * (-0.5))?;
                 log_prob.sum(2)?.sum(1)
             }
