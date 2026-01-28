@@ -16,7 +16,7 @@ use crate::handlers::builders::{run_build_from_mtx, run_build_from_h5_triplets, 
 use crate::handlers::inspection::{show_info, take_columns, take_rows, take_column_names, take_row_names};
 use crate::handlers::listing::{list_h5, list_zarr};
 use crate::handlers::merging::{run_merge_backend, run_merge_mtx, align_backends};
-use crate::handlers::transformation::{subset_columns, reorder_rows, run_squeeze};
+use crate::handlers::transformation::{subset_columns, subset_rows, reorder_rows, run_squeeze};
 use crate::sparse_io::*;
 use crate::sparse_util::IndexPointerType;
 
@@ -74,6 +74,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::SubsetColumns(args) => {
             subset_columns(args)?;
+        }
+        Commands::SubsetRows(args) => {
+            subset_rows(args)?;
         }
         Commands::AlignData(args) => {
             align_backends(args)?;
@@ -196,6 +199,13 @@ enum Commands {
 		      Allows for focused analysis on selected features."
     )]
     SubsetColumns(SubsetColumnsArgs),
+
+    #[command(
+        about = "Subset rows and create new backend",
+        long_about = "Take rows from the sparse matrix and create a new sparse matrix backend.\n\
+		      Allows for focused analysis on selected samples/observations."
+    )]
+    SubsetRows(SubsetRowsArgs),
 
     #[command(
         about = "Align data backends",
@@ -354,6 +364,52 @@ pub struct SubsetColumnsArgs {
     /// column name file where each line is a column name
     #[arg(short = 'f', long)]
     name_file: Option<Box<str>>,
+
+    /// delimiter for base-key extraction (e.g., '@' to match "ACGT-1@batch" with "ACGT-1")
+    #[arg(short = 'd', long, default_value = "@")]
+    delimiter: char,
+
+    /// enable prefix matching (stored name is prefix of query or vice versa)
+    #[arg(long, default_value_t = true)]
+    allow_prefix: bool,
+
+    /// squeeze
+    #[arg(long, default_value_t = false)]
+    do_squeeze: bool,
+
+    /// minimum number of non-zero cutoff for rows
+    #[arg(long, default_value_t = 1)]
+    row_nnz_cutoff: usize,
+
+    /// minimum number of non-zero cutoff for columns
+    #[arg(long, default_value_t = 1)]
+    column_nnz_cutoff: usize,
+
+    /// output file
+    #[arg(short, long, required = true)]
+    output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct SubsetRowsArgs {
+    /// data file -- either `.zarr` or `.h5`
+    data_file: Box<str>,
+
+    /// row indices to take: e.g., `0,1,2,3`
+    #[arg(short = 'i', long, value_delimiter = ',')]
+    row_indices: Option<Vec<usize>>,
+
+    /// row name file where each line is a row name
+    #[arg(short = 'f', long)]
+    name_file: Option<Box<str>>,
+
+    /// delimiter for base-key extraction (e.g., '@' to match "gene@batch" with "gene")
+    #[arg(short = 'd', long, default_value = "@")]
+    delimiter: char,
+
+    /// enable prefix matching (stored name is prefix of query or vice versa)
+    #[arg(long, default_value_t = true)]
+    allow_prefix: bool,
 
     /// squeeze
     #[arg(long, default_value_t = false)]
@@ -1029,6 +1085,27 @@ pub struct RunStatArgs {
 		     This provides statistics computed for group-wise analysis."
     )]
     column_group_file: Option<Box<str>>,
+
+    #[arg(
+        short = 'd',
+        long,
+        default_value = "@",
+        help = "Delimiter for extracting base barcode from column names",
+        long_help = "Delimiter character used to extract base barcode for matching. \n\
+		     For example, with delimiter '@', column 'ACGT-1@batch1' matches \n\
+		     membership key 'ACGT-1@batch2' via base key 'ACGT-1'."
+    )]
+    delimiter: char,
+
+    #[arg(
+        long,
+        alias = "preload-data",
+        default_value_t = false,
+        help = "Preload data into memory for faster processing",
+        long_help = "Preload all column data into memory before computing statistics. \n\
+		     This can significantly speed up processing but requires more memory."
+    )]
+    preload: bool,
 
     #[arg(
         long,

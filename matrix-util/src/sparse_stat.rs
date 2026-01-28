@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 
 use crate::common_io::{file_ext, write_lines};
+use crate::parquet::{parquet_add_numeric_column, parquet_add_string_column, ParquetWriter};
 use crate::traits::RunningStatOps;
 use nalgebra_sparse::CscMatrix;
-use num_traits::{Float, Zero};
+use num_traits::{Float, ToPrimitive, Zero};
+use parquet::basic::Type as ParquetType;
 use std::fmt::Display;
 use std::iter::Sum;
 use std::ops::AddAssign;
@@ -132,7 +134,7 @@ where
 
 impl<T> SparseRunningStatistics<T>
 where
-    T: Float + AddAssign + Sum + Zero + Display,
+    T: Float + AddAssign + Sum + Zero + Display + ToPrimitive,
 {
     /// Save the statistics to a file
     /// # Arguments
@@ -142,7 +144,7 @@ where
     pub fn save(&self, filename: &str, names: &[Box<str>], sep: &str) -> anyhow::Result<()> {
         match file_ext(filename).unwrap_or(Box::from("")).as_ref() {
             "parquet" => {
-                anyhow::bail!("Parquet output not yet supported for SparseRunningStatistics");
+                self.save_parquet(filename, names)?;
             }
             _ => {
                 let mut out = self.to_string_vec(names, sep)?;
@@ -152,6 +154,72 @@ where
             }
         };
         Ok(())
+    }
+
+    /// Save statistics to a parquet file
+    fn save_parquet(&self, filename: &str, names: &[Box<str>]) -> anyhow::Result<()> {
+        if names.len() != self.nrows {
+            anyhow::bail!(
+                "The number of names ({}) does not match nrows ({})",
+                names.len(),
+                self.nrows
+            );
+        }
+
+        let nnz: Vec<f32> = self
+            .count_positives()
+            .iter()
+            .map(|v| v.to_f32().unwrap_or(0.0))
+            .collect();
+        let tot: Vec<f32> = self.sum().iter().map(|v| v.to_f32().unwrap_or(0.0)).collect();
+        let mu: Vec<f32> = self.mean().iter().map(|v| v.to_f32().unwrap_or(0.0)).collect();
+        let sig: Vec<f32> = self.std().iter().map(|v| v.to_f32().unwrap_or(0.0)).collect();
+
+        let column_names: Vec<Box<str>> = vec!["nnz", "tot", "mu", "sig"]
+            .into_iter()
+            .map(|s| s.into())
+            .collect();
+
+        let column_types = vec![
+            ParquetType::FLOAT,
+            ParquetType::FLOAT,
+            ParquetType::FLOAT,
+            ParquetType::FLOAT,
+        ];
+
+        let parquet_writer = ParquetWriter::new(
+            filename,
+            (self.nrows, 4),
+            (Some(names), Some(&column_names)),
+            Some(&column_types),
+        )?;
+
+        let mut writer = parquet_writer.get_writer()?;
+        let mut row_group_writer = writer.next_row_group()?;
+
+        parquet_add_string_column(&mut row_group_writer, names)?;
+        parquet_add_numeric_column(&mut row_group_writer, &nnz)?;
+        parquet_add_numeric_column(&mut row_group_writer, &tot)?;
+        parquet_add_numeric_column(&mut row_group_writer, &mu)?;
+        parquet_add_numeric_column(&mut row_group_writer, &sig)?;
+
+        row_group_writer.close()?;
+        writer.close()?;
+
+        Ok(())
+    }
+
+    /// Get statistics as vectors (nnz, tot, mu, sig) converted to f32
+    pub fn to_f32_vecs(&self) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+        let nnz: Vec<f32> = self
+            .count_positives()
+            .iter()
+            .map(|v| v.to_f32().unwrap_or(0.0))
+            .collect();
+        let tot: Vec<f32> = self.sum().iter().map(|v| v.to_f32().unwrap_or(0.0)).collect();
+        let mu: Vec<f32> = self.mean().iter().map(|v| v.to_f32().unwrap_or(0.0)).collect();
+        let sig: Vec<f32> = self.std().iter().map(|v| v.to_f32().unwrap_or(0.0)).collect();
+        (nnz, tot, mu, sig)
     }
 
     /// Convert statistics to string vectors for output
@@ -188,6 +256,116 @@ where
             .collect();
         Ok(out)
     }
+}
+
+/// Save multiple group statistics to a single parquet file with a group column
+pub fn save_grouped_stats_parquet(
+    filename: &str,
+    names: &[Box<str>],
+    group_names: &[Box<str>],
+    group_stats: &[SparseRunningStatistics<f32>],
+) -> anyhow::Result<()> {
+    use parquet::basic::{Compression, ZstdLevel};
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::writer::SerializedFileWriter;
+    use parquet::schema::types::Type as SchemaType;
+    use std::sync::Arc;
+
+    if group_names.len() != group_stats.len() {
+        anyhow::bail!(
+            "Number of group names ({}) does not match number of group stats ({})",
+            group_names.len(),
+            group_stats.len()
+        );
+    }
+
+    // Calculate total rows
+    let total_rows: usize = group_stats.iter().map(|s| s.nrows()).sum();
+
+    // Build merged vectors
+    let mut all_names: Vec<Box<str>> = Vec::with_capacity(total_rows);
+    let mut all_groups: Vec<Box<str>> = Vec::with_capacity(total_rows);
+    let mut all_nnz: Vec<f32> = Vec::with_capacity(total_rows);
+    let mut all_tot: Vec<f32> = Vec::with_capacity(total_rows);
+    let mut all_mu: Vec<f32> = Vec::with_capacity(total_rows);
+    let mut all_sig: Vec<f32> = Vec::with_capacity(total_rows);
+
+    for (group_name, stat) in group_names.iter().zip(group_stats.iter()) {
+        let (nnz, tot, mu, sig) = stat.to_f32_vecs();
+        for (i, name) in names.iter().enumerate() {
+            all_names.push(name.clone());
+            all_groups.push(group_name.clone());
+            all_nnz.push(nnz[i]);
+            all_tot.push(tot[i]);
+            all_mu.push(mu[i]);
+            all_sig.push(sig[i]);
+        }
+    }
+
+    // Build schema: name, group, nnz, tot, mu, sig
+    let fields = vec![
+        Arc::new(
+            SchemaType::primitive_type_builder("name", ParquetType::BYTE_ARRAY)
+                .with_repetition(parquet::basic::Repetition::REQUIRED)
+                .with_converted_type(parquet::basic::ConvertedType::UTF8)
+                .build()?,
+        ),
+        Arc::new(
+            SchemaType::primitive_type_builder("group", ParquetType::BYTE_ARRAY)
+                .with_repetition(parquet::basic::Repetition::REQUIRED)
+                .with_converted_type(parquet::basic::ConvertedType::UTF8)
+                .build()?,
+        ),
+        Arc::new(
+            SchemaType::primitive_type_builder("nnz", ParquetType::FLOAT)
+                .with_repetition(parquet::basic::Repetition::REQUIRED)
+                .build()?,
+        ),
+        Arc::new(
+            SchemaType::primitive_type_builder("tot", ParquetType::FLOAT)
+                .with_repetition(parquet::basic::Repetition::REQUIRED)
+                .build()?,
+        ),
+        Arc::new(
+            SchemaType::primitive_type_builder("mu", ParquetType::FLOAT)
+                .with_repetition(parquet::basic::Repetition::REQUIRED)
+                .build()?,
+        ),
+        Arc::new(
+            SchemaType::primitive_type_builder("sig", ParquetType::FLOAT)
+                .with_repetition(parquet::basic::Repetition::REQUIRED)
+                .build()?,
+        ),
+    ];
+
+    let schema = Arc::new(
+        SchemaType::group_type_builder("grouped_stats")
+            .with_fields(fields)
+            .build()?,
+    );
+
+    let zstd_level = ZstdLevel::try_new(5)?;
+    let props = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::ZSTD(zstd_level))
+            .build(),
+    );
+
+    let file = std::fs::File::create(filename)?;
+    let mut writer = SerializedFileWriter::new(file, schema, props)?;
+    let mut row_group_writer = writer.next_row_group()?;
+
+    parquet_add_string_column(&mut row_group_writer, &all_names)?;
+    parquet_add_string_column(&mut row_group_writer, &all_groups)?;
+    parquet_add_numeric_column(&mut row_group_writer, &all_nnz)?;
+    parquet_add_numeric_column(&mut row_group_writer, &all_tot)?;
+    parquet_add_numeric_column(&mut row_group_writer, &all_mu)?;
+    parquet_add_numeric_column(&mut row_group_writer, &all_sig)?;
+
+    row_group_writer.close()?;
+    writer.close()?;
+
+    Ok(())
 }
 
 fn format_value<T: Float + Display>(v: T) -> String {
