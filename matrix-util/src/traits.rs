@@ -1,5 +1,24 @@
 use crate::common_io::{Delimiter, ReadLinesOut};
 use candle_core::{Device, Tensor};
+use num_traits::Float;
+
+/// Trait for running statistics operations
+///
+/// Provides a common interface for both dense (ndarray-based) and
+/// sparse running statistics implementations.
+pub trait RunningStatOps<T>
+where
+    T: Float,
+{
+    type Output;
+
+    fn clear(&mut self);
+    fn count_positives(&self) -> Self::Output;
+    fn sum(&self) -> Self::Output;
+    fn mean(&self) -> Self::Output;
+    fn variance(&self) -> Self::Output;
+    fn std(&self) -> Self::Output;
+}
 
 /// some linear algebra routines
 pub trait RandomizedAlgs {
