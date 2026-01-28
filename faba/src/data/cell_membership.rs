@@ -1,31 +1,21 @@
 #![allow(dead_code)]
 
 use crate::data::sam::CellBarcode;
-use fnv::{FnvHashMap as HashMap, FnvHashSet as HashSet};
+use fnv::FnvHashMap as HashMap;
+use matrix_util::membership::Membership;
 use std::sync::Mutex;
-use anyhow::{Result, Context};
-use matrix_util::common_io::{read_lines_of_words_delim, ReadLinesOut};
 
 /// Cell membership data structure for filtering BAM records by cell barcode
 /// Supports exact and prefix matching with caching for performance
 pub struct CellMembership {
-    // Fast exact lookup (O(1))
-    exact_barcodes: HashSet<Box<str>>,
+    /// Core membership from matrix-util
+    inner: Membership,
 
-    // For prefix matching when exact fails
-    prefix_barcodes: Vec<Box<str>>,
-
-    // Map barcode -> cell type
-    barcode_to_celltype: HashMap<Box<str>, Box<str>>,
-
-    // Cache for matched BAM barcodes (thread-safe for parallel processing)
+    /// Cache for matched BAM barcodes (thread-safe for parallel processing)
     match_cache: Mutex<HashMap<Box<str>, Option<Box<str>>>>,
 
-    // Statistics tracking
+    /// Statistics tracking
     stats: Mutex<MatchStats>,
-
-    // Configuration
-    allow_prefix_matching: bool,
 }
 
 #[derive(Default)]
@@ -35,80 +25,25 @@ struct MatchStats {
 }
 
 impl CellMembership {
-    /// Load cell membership from file (TSV, CSV, or Parquet)
+    /// Load cell membership from file (TSV, CSV, or gzipped variants)
     ///
     /// # Arguments
-    /// * `file_path` - Path to membership file (.tsv, .csv, .parquet, or .gz variants)
+    /// * `file_path` - Path to membership file (.tsv, .csv, or .gz variants)
     /// * `barcode_col` - Column index for cell barcodes (0-based)
     /// * `celltype_col` - Column index for cell types (0-based)
     /// * `allow_prefix` - Enable prefix matching (membership barcodes as prefixes of BAM barcodes)
-    ///
-    /// # Returns
-    /// * `Ok(CellMembership)` on success
-    /// * `Err` if file cannot be read or parsed
     pub fn from_file(
         file_path: &str,
         barcode_col: usize,
         celltype_col: usize,
         allow_prefix: bool,
-    ) -> Result<Self> {
-        // Determine delimiter from file extension
-        let delim = if file_path.ends_with(".csv") || file_path.ends_with(".csv.gz") {
-            ","
-        } else {
-            "\t"
-        };
-
-        // Load file using matrix-util
-        let ReadLinesOut { lines, header: _ } = read_lines_of_words_delim(file_path, delim, -1)
-            .with_context(|| format!("Failed to read membership file: {}", file_path))?;
-
-        // Validate column indices
-        if lines.is_empty() {
-            anyhow::bail!("Membership file is empty: {}", file_path);
-        }
-
-        let max_col = barcode_col.max(celltype_col);
-        if lines[0].len() <= max_col {
-            anyhow::bail!(
-                "Membership file has {} columns but requested column index {}",
-                lines[0].len(),
-                max_col
-            );
-        }
-
-        // Build data structures
-        let mut exact_barcodes = HashSet::default();
-        let mut prefix_barcodes = Vec::new();
-        let mut barcode_to_celltype = HashMap::default();
-
-        for line in lines {
-            if line.len() <= max_col {
-                log::warn!("Skipping malformed line with {} columns", line.len());
-                continue;
-            }
-
-            let barcode = line[barcode_col].clone();
-            let celltype = line[celltype_col].clone();
-
-            exact_barcodes.insert(barcode.clone());
-            prefix_barcodes.push(barcode.clone());
-            barcode_to_celltype.insert(barcode, celltype);
-        }
-
-        log::info!(
-            "Loaded {} unique cell barcodes from {}",
-            exact_barcodes.len(),
-            file_path
-        );
+    ) -> anyhow::Result<Self> {
+        let inner = Membership::from_file(file_path, barcode_col, celltype_col, allow_prefix)?;
 
         Ok(Self {
-            exact_barcodes,
-            prefix_barcodes,
-            barcode_to_celltype,
+            inner,
             match_cache: Mutex::new(HashMap::default()),
             stats: Mutex::new(MatchStats::default()),
-            allow_prefix_matching: allow_prefix,
         })
     }
 
@@ -119,9 +54,6 @@ impl CellMembership {
     /// 2. If that fails and prefix matching is enabled, try prefix match (O(n))
     /// 3. Cache results for performance
     ///
-    /// # Arguments
-    /// * `barcode` - Cell barcode from BAM file
-    ///
     /// # Returns
     /// * `Some(celltype)` if barcode matches membership
     /// * `None` if no match found or barcode is Missing
@@ -129,7 +61,6 @@ impl CellMembership {
         let bam_bc = match barcode {
             CellBarcode::Barcode(bc) => bc,
             CellBarcode::Missing => {
-                // Update stats but don't cache Missing
                 let mut stats = self.stats.lock().unwrap();
                 stats.total_checked += 1;
                 return None;
@@ -154,46 +85,26 @@ impl CellMembership {
             }
         }
 
-        // Try exact match first (O(1))
-        if self.exact_barcodes.contains(bam_bc) {
-            let result = self.barcode_to_celltype.get(bam_bc).cloned();
-            self.match_cache
-                .lock()
-                .unwrap()
-                .insert(bam_bc.clone(), result.clone());
-            if result.is_some() {
-                let mut stats = self.stats.lock().unwrap();
-                stats.matched += 1;
-            }
-            return result;
+        // Use inner membership for lookup
+        let result = self.inner.get(bam_bc).cloned();
+
+        // Cache the result
+        self.match_cache
+            .lock()
+            .unwrap()
+            .insert(bam_bc.clone(), result.clone());
+
+        if result.is_some() {
+            let mut stats = self.stats.lock().unwrap();
+            stats.matched += 1;
         }
 
-        // Fall back to prefix matching if enabled (O(n))
-        if self.allow_prefix_matching {
-            for prefix in &self.prefix_barcodes {
-                if bam_bc.starts_with(prefix.as_ref()) {
-                    let result = self.barcode_to_celltype.get(prefix).cloned();
-                    self.match_cache
-                        .lock()
-                        .unwrap()
-                        .insert(bam_bc.clone(), result.clone());
-                    if result.is_some() {
-                        let mut stats = self.stats.lock().unwrap();
-                        stats.matched += 1;
-                    }
-                    return result;
-                }
-            }
-        }
-
-        // No match found - cache the negative result
-        self.match_cache.lock().unwrap().insert(bam_bc.clone(), None);
-        None
+        result
     }
 
     /// Get total number of membership cells
     pub fn num_cells(&self) -> usize {
-        self.exact_barcodes.len()
+        self.inner.len()
     }
 
     /// Get match statistics for logging
@@ -207,14 +118,10 @@ impl CellMembership {
 
     /// Get all unique cell types in the membership
     pub fn cell_types(&self) -> Vec<Box<str>> {
-        let mut types: Vec<_> = self.barcode_to_celltype.values().cloned().collect();
-        types.sort();
-        types.dedup();
-        types
+        self.inner.unique_groups()
     }
 
     /// Check if a barcode matches a specific cell type
-    /// Returns true if the barcode belongs to the given cell type
     pub fn matches_celltype(&self, barcode: &CellBarcode, target_celltype: &str) -> bool {
         self.matches_barcode(barcode)
             .map(|ct| ct.as_ref() == target_celltype)
@@ -222,43 +129,28 @@ impl CellMembership {
     }
 
     /// Create cell membership from cluster assignments
-    ///
-    /// # Arguments
-    /// * `barcodes` - Cell barcodes
-    /// * `assignments` - Cluster assignment for each barcode (same length as barcodes)
-    /// * `allow_prefix` - Enable prefix matching
-    ///
-    /// # Returns
-    /// * `CellMembership` with cluster labels as cell types
     pub fn from_clusters(
         barcodes: &[Box<str>],
         assignments: &[usize],
         allow_prefix: bool,
     ) -> Self {
-        let mut exact_barcodes = HashSet::default();
-        let mut prefix_barcodes = Vec::new();
-        let mut barcode_to_celltype = HashMap::default();
-
-        for (barcode, &cluster) in barcodes.iter().zip(assignments.iter()) {
+        let pairs = barcodes.iter().zip(assignments.iter()).map(|(barcode, &cluster)| {
             let celltype: Box<str> = format!("cluster_{}", cluster).into();
-            exact_barcodes.insert(barcode.clone());
-            prefix_barcodes.push(barcode.clone());
-            barcode_to_celltype.insert(barcode.clone(), celltype);
-        }
+            (barcode.clone(), celltype)
+        });
+
+        let inner = Membership::from_pairs(pairs, allow_prefix);
 
         log::info!(
             "Created membership from {} cells in {} clusters",
-            exact_barcodes.len(),
+            inner.len(),
             assignments.iter().max().map(|x| x + 1).unwrap_or(0)
         );
 
         Self {
-            exact_barcodes,
-            prefix_barcodes,
-            barcode_to_celltype,
+            inner,
             match_cache: Mutex::new(HashMap::default()),
             stats: Mutex::new(MatchStats::default()),
-            allow_prefix_matching: allow_prefix,
         }
     }
 }
@@ -285,20 +177,19 @@ mod tests {
             file.path().to_str().unwrap(),
             0,
             1,
-            false, // exact matching only
+            false,
         )
         .unwrap();
 
         assert_eq!(membership.num_cells(), 3);
 
-        // Test exact match
         let barcode = CellBarcode::Barcode("AAACCTGAGAAACCAT".into());
         assert_eq!(
             membership.matches_barcode(&barcode),
             Some("T_cell".into())
         );
 
-        // Test no match (prefix would match but exact matching is disabled)
+        // No prefix matching
         let barcode_with_suffix = CellBarcode::Barcode("AAACCTGAGAAACCAT-1".into());
         assert_eq!(membership.matches_barcode(&barcode_with_suffix), None);
     }
@@ -310,25 +201,22 @@ mod tests {
             file.path().to_str().unwrap(),
             0,
             1,
-            true, // enable prefix matching
+            true,
         )
         .unwrap();
 
-        // Test exact match still works
         let barcode = CellBarcode::Barcode("AAACCTGAGCCCAATT".into());
         assert_eq!(
             membership.matches_barcode(&barcode),
             Some("B_cell".into())
         );
 
-        // Test prefix match with suffix
         let barcode_with_suffix = CellBarcode::Barcode("AAACCTGAGAAACCAT-1".into());
         assert_eq!(
             membership.matches_barcode(&barcode_with_suffix),
             Some("T_cell".into())
         );
 
-        // Test no match
         let unknown = CellBarcode::Barcode("ZZZZZZZZZZZZZZZ".into());
         assert_eq!(membership.matches_barcode(&unknown), None);
     }
@@ -351,15 +239,12 @@ mod tests {
 
         let barcode = CellBarcode::Barcode("AAACCTGAGAAACCAT-1".into());
 
-        // First call - should cache the result
         let result1 = membership.matches_barcode(&barcode);
         assert_eq!(result1, Some("T_cell".into()));
 
-        // Second call - should use cache
         let result2 = membership.matches_barcode(&barcode);
         assert_eq!(result2, Some("T_cell".into()));
 
-        // Verify both returned the same value
         assert_eq!(result1, result2);
     }
 
@@ -373,9 +258,9 @@ mod tests {
         let barcode2 = CellBarcode::Barcode("UNKNOWN".into());
         let missing = CellBarcode::Missing;
 
-        membership.matches_barcode(&barcode1); // match
-        membership.matches_barcode(&barcode2); // no match
-        membership.matches_barcode(&missing); // missing
+        membership.matches_barcode(&barcode1);
+        membership.matches_barcode(&barcode2);
+        membership.matches_barcode(&missing);
 
         let (matched, total) = membership.match_stats();
         assert_eq!(matched, 1);

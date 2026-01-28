@@ -31,6 +31,7 @@ instant-distance = { workspace = true }
 indicatif = { workspace = true }
 parquet = { workspace = true }
 fnv = { workspace = true }
+log = { workspace = true }
 zip = { workspace = true }
 clustering = { workspace = true }
 

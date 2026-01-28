@@ -1,19 +1,19 @@
 use crate::misc::*;
 use crate::qc::*;
+use crate::simulate;
 use crate::sparse_io::*;
 use crate::sparse_io_vector::*;
-use crate::simulate;
 
+use log::info;
 use matrix_util::common_io::*;
+use matrix_util::membership::Membership;
 use matrix_util::mtx_io;
 use matrix_util::traits::IoOps;
-use log::info;
-use fnv::FnvHashMap as HashMap;
 use rayon::prelude::*;
 use std::sync::Arc;
 
 // Import the argument structs from main.rs
-use crate::{RunStatArgs, RunSimulateArgs, StatDim, SparseIoBackend};
+use crate::{RunSimulateArgs, RunStatArgs, SparseIoBackend, StatDim};
 
 /// Compute statistics across sparse matrix data
 ///
@@ -31,7 +31,11 @@ pub fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     for data_file in cmd_args.data_files.iter() {
         let (backend, data_file) = resolve_backend_file(&data_file, None)?;
 
-        let this_data = open_sparse_matrix(&data_file, &backend)?;
+        let mut this_data = open_sparse_matrix(&data_file, &backend)?;
+        if cmd_args.preload {
+            info!("Preloading data from {} ...", data_file);
+            this_data.preload_columns()?;
+        }
         let data_name = attach_data_name.then(|| basename(&data_file)).transpose()?;
         data.push(Arc::from(this_data), data_name)?;
     }
@@ -39,25 +43,32 @@ pub fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
     match cmd_args.stat_dim {
         StatDim::Row => {
             if let Some(column_group_file) = &cmd_args.column_group_file {
-                let ReadLinesOut { lines, header: _ } =
-                    read_lines_of_words(&column_group_file, -1)?;
-                if lines.is_empty() {
-                    return Err(anyhow::anyhow!("empty group membership file"));
-                }
-
                 let cols = data.column_names()?;
 
-                let column_membership = if lines[0].len() == 1 && lines.len() == cols.len() {
-                    cols.into_iter()
-                        .zip(lines)
-                        .map(|(c, v)| (c, v[0].clone()))
-                        .collect::<HashMap<_, _>>()
-                } else {
-                    lines
-                        .into_iter()
-                        .map(|v| (v[0].clone(), v[1].clone()))
-                        .collect::<HashMap<_, _>>()
-                };
+                // Load membership and match to data columns
+                // Use delimiter to extract base barcode for matching
+                let membership = Membership::from_file(column_group_file, 0, 1, true)?
+                    .with_delimiter(cmd_args.delimiter);
+                let (column_membership, stats) = membership.match_keys(&cols);
+
+                info!(
+                    "Column matching: {} exact + {} base_key + {} prefix = {}/{} matched",
+                    stats.exact,
+                    stats.base_key,
+                    stats.prefix,
+                    stats.total_matched(),
+                    stats.total()
+                );
+
+                if column_membership.is_empty() {
+                    let data_sample: Vec<_> = cols.iter().take(3).collect();
+                    let memb_sample = membership.sample_keys(3);
+                    info!("Data columns sample: {:?}", data_sample);
+                    info!("Membership keys sample: {:?}", memb_sample);
+                }
+
+                let unique_groups = membership.unique_groups();
+                info!("Will collect stats for {} groups: {:?}", unique_groups.len(), unique_groups);
 
                 let (group_names, group_stats) = collect_stratified_row_stat_across_vec(
                     &data,
@@ -65,32 +76,32 @@ pub fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
                     cmd_args.block_size,
                 )?;
 
-                for (g, row_stat) in group_names.into_iter().zip(group_stats) {
-                    let (dir, base, ext) = dir_base_ext(&cmd_args.output)?;
+                info!("Collected {} group stats: {:?}", group_names.len(), group_names);
 
-                    if cmd_args.output.eq_ignore_ascii_case("stdout") {
-                        let out = row_stat
+                if cmd_args.output.eq_ignore_ascii_case("stdout") {
+                    for (g, row_stat) in group_names.iter().zip(group_stats.iter()) {
+                        let out: Vec<Box<str>> = row_stat
                             .to_string_vec(&data.row_names()?, "\t")?
                             .into_iter()
                             .map(|s| format!("{}\t{}", g, s).into_boxed_str())
                             .collect();
                         write_lines(&out, &cmd_args.output)?;
-                    } else {
-                        let out_file = if dir.len() > 0 {
-                            format!("{}/{}.{}.{}", dir, base, g, ext)
-                        } else {
-                            format!("{}.{}.{}", base, g, ext)
-                        };
-
-                        info!("writing out: {}", out_file);
-                        row_stat.save(&out_file, &data.row_names()?, "\t")?;
                     }
+                } else {
+                    use matrix_util::sparse_stat::save_grouped_stats_parquet;
+
+                    info!("writing out: {}", cmd_args.output);
+                    save_grouped_stats_parquet(
+                        &cmd_args.output,
+                        &data.row_names()?,
+                        &group_names,
+                        &group_stats,
+                    )?;
                 }
+            } else {
+                let row_stat = collect_row_stat_across_vec(&data, cmd_args.block_size)?;
+                row_stat.save(&cmd_args.output, &data.row_names()?, "\t")?;
             }
-
-            let row_stat = collect_row_stat_across_vec(&data, cmd_args.block_size)?;
-
-            row_stat.save(&cmd_args.output, &data.row_names()?, "\t")?;
         }
         StatDim::Column => {
             let select_rows = cmd_args.row_name_pattern.as_ref().map(|x| {
