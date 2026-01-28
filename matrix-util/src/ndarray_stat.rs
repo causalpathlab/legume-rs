@@ -2,7 +2,7 @@
 
 use crate::{
     common_io::{file_ext, write_lines},
-    traits::IoOps,
+    traits::{IoOps, RunningStatOps},
 };
 use ndarray::{stack, ArrayBase, Axis, Data, Dimension, NdIndex, OwnedRepr, RemoveAxis};
 
@@ -91,6 +91,11 @@ where
     ///
     pub fn count_positives(&self) -> ArrayBase<OwnedRepr<f32>, S> {
         self.npos.clone()
+    }
+
+    /// Sum of values
+    pub fn sum(&self) -> ArrayBase<OwnedRepr<f32>, S> {
+        self.s1.clone()
     }
 
     /// Average statistic
@@ -216,6 +221,42 @@ where
             })
             .collect();
         Ok(out)
+    }
+}
+
+impl<S> RunningStatOps<f32> for RunningStatistics<S>
+where
+    S: Dimension + RemoveAxis,
+{
+    type Output = ArrayBase<OwnedRepr<f32>, S>;
+
+    fn clear(&mut self) {
+        self.npos.fill(0.0);
+        self.s0.fill(0.0);
+        self.s1.fill(0.0);
+        self.s2.fill(0.0);
+    }
+
+    fn count_positives(&self) -> Self::Output {
+        self.npos.clone()
+    }
+
+    fn sum(&self) -> Self::Output {
+        self.s1.clone()
+    }
+
+    fn mean(&self) -> Self::Output {
+        self.s1.clone() / &self.s0.mapv(Self::_add_pseudo_count)
+    }
+
+    fn variance(&self) -> Self::Output {
+        let mean = <Self as RunningStatOps<f32>>::mean(self);
+        let nn = &self.s0.mapv(Self::_add_pseudo_count);
+        &self.s2 / nn - &mean * &mean
+    }
+
+    fn std(&self) -> Self::Output {
+        <Self as RunningStatOps<f32>>::variance(self).mapv(f32::sqrt)
     }
 }
 
