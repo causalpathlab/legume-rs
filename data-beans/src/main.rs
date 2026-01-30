@@ -91,9 +91,6 @@ fn main() -> anyhow::Result<()> {
         Commands::MergeBackend(args) => {
             run_merge_backend(args)?;
         }
-        Commands::Merge(args) => {
-            run_merge_backend(args)?;
-        }
     }
 
     Ok(())
@@ -227,16 +224,10 @@ enum Commands {
     #[command(
         about = "Merge multiple backend files",
         long_about = "Merge multiple backend file(sets) into one.\n\
-		      Supports various formats and options for merging."
+		      Supports various formats and options for merging.",
+        visible_alias = "merge"
     )]
     MergeBackend(MergeBackendArgs),
-
-    #[command(
-        about = "Alias for merge-backend",
-        long_about = "An alias of `merge-backend`.\n\
-		      Performs the same operation as `merge-backend`."
-    )]
-    Merge(MergeBackendArgs),
 
     #[command(
         about = "Squeeze out sparse rows/columns",
