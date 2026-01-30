@@ -8,9 +8,15 @@
 
 1. Clone this repo
 
-2. You can install different binary files in your local executable directory (e.g., `~/.cargo/bin/`).
+2. Install all binaries to your local executable directory (e.g., `~/.cargo/bin/`):
 
-```{sh}
+```sh
+make install
+```
+
+Alternatively, you can install individual binaries:
+
+```sh
 cargo install --path data-beans # Data Backend for Extraction And Neighbourhood Search
 cargo install --path senna      # Stochastic data Embedding with Nearest Neighbourhood Adjustment
 cargo install --path pinto      # Proximity-based Interaction Network for Tissue Organization
