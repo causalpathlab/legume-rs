@@ -50,10 +50,17 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
 
     if args.do_squeeze {
         let squeeze_args = RunSqueezeArgs {
-            data_file: backend_file.clone(),
+            data_files: vec![backend_file.clone()],
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
+            preload: true,
+            show_histogram: false,
+            save_histogram: None,
+            dry_run: false,
+            interactive: false,
+            output: None,
+            row_align: crate::RowAlignMode::Common,
         };
 
         run_squeeze(&squeeze_args)?;
@@ -203,10 +210,17 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
-            data_file: backend_file.clone(),
+            data_files: vec![backend_file.clone()],
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
+            preload: true,
+            show_histogram: false,
+            save_histogram: None,
+            dry_run: false,
+            interactive: false,
+            output: None,
+            row_align: crate::RowAlignMode::Common,
         };
 
         run_squeeze(&squeeze_args)?;
@@ -369,10 +383,17 @@ pub fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
-            data_file: backend_file.clone(),
+            data_files: vec![backend_file.clone()],
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
+            preload: true,
+            show_histogram: false,
+            save_histogram: None,
+            dry_run: false,
+            interactive: false,
+            output: None,
+            row_align: crate::RowAlignMode::Common,
         };
 
         run_squeeze(&squeeze_args)?;

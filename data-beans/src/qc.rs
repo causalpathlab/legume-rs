@@ -23,6 +23,7 @@ pub fn squeeze_by_nnz(
     data: &dyn SparseIo<IndexIter = Vec<usize>>,
     cutoffs: SqueezeCutoffs,
     block_size: usize,
+    preload: bool,
 ) -> anyhow::Result<()> {
     let col_stat = collect_column_stat(data, block_size)?;
     let row_stat = collect_row_stat(data, block_size)?;
@@ -31,7 +32,9 @@ pub fn squeeze_by_nnz(
     let backend = data.backend_type();
 
     let mut data = open_sparse_matrix(file, &backend)?;
-    data.preload_columns()?;
+    if preload {
+        data.preload_columns()?;
+    }
 
     fn nnz_index(nnz: &[f32], cutoff: usize) -> Option<Vec<usize>> {
         let ret: Vec<usize> = nnz

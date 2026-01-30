@@ -28,13 +28,17 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     let num_batches = args.data_files.len();
     info!("merging over {} batches ...", num_batches);
 
+    // Generate unique batch names
+    let batch_names = generate_unique_batch_names(&args.data_files)?;
+    info!("Batch names: {:?}", batch_names);
+
     let mut row_names = vec![];
     let mut column_names = vec![];
     let mut column_batch_names = vec![];
     let mut triplets = vec![];
 
     let mut ntot = 0;
-    for data_file in args.data_files.iter() {
+    for (batch_idx, data_file) in args.data_files.iter().enumerate() {
         info!("Importing data file: {}", data_file);
 
         let backend = match file_ext(data_file)?.to_string().as_str() {
@@ -78,7 +82,7 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
                 .collect::<Vec<_>>();
 
             let _names = data.column_names()?;
-            let batch_name = basename(data_file)?;
+            let batch_name = &batch_names[batch_idx];
             column_names.extend(
                 _names
                     .into_iter()
@@ -127,10 +131,17 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
-            data_file: backend_file.clone(),
+            data_files: vec![backend_file.clone()],
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: args.block_size,
+            preload: true,
+            show_histogram: false,
+            save_histogram: None,
+            dry_run: false,
+            interactive: false,
+            output: None,
+            row_align: crate::RowAlignMode::Common,
         };
 
         run_squeeze(&squeeze_args)?;
@@ -420,10 +431,17 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
-            data_file: backend_file.clone().into_boxed_str(),
+            data_files: vec![backend_file.clone().into_boxed_str()],
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
+            preload: true,
+            show_histogram: false,
+            save_histogram: None,
+            dry_run: false,
+            interactive: false,
+            output: None,
+            row_align: crate::RowAlignMode::Common,
         };
 
         run_squeeze(&squeeze_args)?;
@@ -442,6 +460,93 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
     info!("done");
     Ok(())
+}
+
+/// Generate unique batch names from file paths
+/// If basenames are unique, use them as-is
+/// If duplicates exist, add numeric suffixes
+pub fn generate_unique_batch_names(files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
+    use std::collections::HashMap;
+
+    // Extract basenames
+    let basenames: Vec<_> = files
+        .iter()
+        .map(|f| basename(f))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // Count occurrences of each basename
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for name in &basenames {
+        *counts.entry(name.as_ref()).or_insert(0) += 1;
+    }
+
+    // Generate unique names
+    let mut name_counters: HashMap<&str, usize> = HashMap::new();
+    let unique_names: Vec<Box<str>> = basenames
+        .iter()
+        .map(|name| {
+            let count = counts.get(name.as_ref()).unwrap();
+            if *count == 1 {
+                // Unique basename, use as-is
+                name.clone()
+            } else {
+                // Duplicate basename, add suffix
+                let counter = name_counters.entry(name.as_ref()).or_insert(0);
+                let unique_name = format!("{}_{}", name, counter).into_boxed_str();
+                *counter += 1;
+                unique_name
+            }
+        })
+        .collect();
+
+    Ok(unique_names)
+}
+
+/// Find common or union rows across multiple sparse matrices
+pub fn find_aligned_rows(
+    data_vec: &[&dyn SparseIo<IndexIter = Vec<usize>>],
+    mode: crate::RowAlignMode,
+) -> anyhow::Result<Vec<Box<str>>> {
+    use fnv::FnvHashMap as HashMap;
+    use rayon::prelude::*;
+
+    let fully_shared = data_vec.len();
+    let mut row_counts: HashMap<Box<str>, usize> = HashMap::default();
+
+    // Count occurrences of each row across all files
+    for data in data_vec {
+        for row_name in data.row_names()? {
+            *row_counts.entry(row_name).or_default() += 1;
+        }
+    }
+
+    // Filter based on mode
+    let mut aligned_rows: Vec<Box<str>> = match mode {
+        crate::RowAlignMode::Common => {
+            // Intersection: only rows present in ALL files
+            row_counts
+                .into_iter()
+                .filter_map(|(row, count)| {
+                    if count == fully_shared {
+                        Some(row)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        crate::RowAlignMode::Union => {
+            // Union: rows present in ANY file
+            row_counts.into_keys().collect()
+        }
+    };
+
+    if aligned_rows.is_empty() {
+        return Err(anyhow::anyhow!("No rows found for alignment"));
+    }
+
+    aligned_rows.par_sort();
+    Ok(aligned_rows)
 }
 
 pub fn align_backends(args: &AlignDataArgs) -> anyhow::Result<()> {

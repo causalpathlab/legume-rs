@@ -1,10 +1,14 @@
+use crate::handlers::merging::{run_merge_backend, find_aligned_rows, generate_unique_batch_names};
+use crate::interactive::{UserAction, prompt_user_action, confirm};
 use crate::misc::*;
 use crate::qc::*;
 use crate::sparse_io::*;
 use crate::utilities::io_helpers::{read_row_names, read_col_names, MAX_ROW_NAME_IDX, MAX_COLUMN_NAME_IDX};
+use crate::MergeBackendArgs;
 
 use matrix_util::common_io::*;
 use matrix_util::membership::Membership;
+use matrix_util::traits::RunningStatOps;
 use log::info;
 
 // Import the argument structs from main.rs
@@ -104,10 +108,17 @@ pub fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &output_file);
         let squeeze_args = RunSqueezeArgs {
-            data_file: output_file.into(),
+            data_files: vec![output_file.into()],
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
+            preload: true,
+            show_histogram: false,
+            save_histogram: None,
+            dry_run: false,
+            interactive: false,
+            output: None,
+            row_align: crate::RowAlignMode::Common,
         };
         run_squeeze(&squeeze_args)?;
     }
@@ -209,10 +220,17 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &output_file);
         let squeeze_args = RunSqueezeArgs {
-            data_file: output_file.into(),
+            data_files: vec![output_file.into()],
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
+            preload: true,
+            show_histogram: false,
+            save_histogram: None,
+            dry_run: false,
+            interactive: false,
+            output: None,
+            row_align: crate::RowAlignMode::Common,
         };
         run_squeeze(&squeeze_args)?;
     }
@@ -247,38 +265,438 @@ pub fn reorder_rows(args: &ReorderRowsArgs) -> anyhow::Result<()> {
 
 /// Squeeze a sparse matrix by removing rows and columns with too few non-zero entries
 ///
-/// This function removes rows and columns from the data file that have fewer
-/// than the specified number of non-zero entries. The operation is performed
-/// in-place on the data file.
+/// If --output is specified: Squeezes all files and merges into single output file.
+/// Otherwise, modifies files in-place (with confirmation in interactive mode).
 pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
-    let (backend, data_file) = resolve_backend_file(&cmd_args.data_file, None)?;
-    let row_nnz_cutoff = cmd_args.row_nnz_cutoff;
-    let col_nnz_cutoff = cmd_args.column_nnz_cutoff;
+    let mut row_nnz_cutoff = cmd_args.row_nnz_cutoff;
+    let mut col_nnz_cutoff = cmd_args.column_nnz_cutoff;
 
-    let data = open_sparse_matrix(&data_file, &backend)?;
+    // If output specified with multiple files, squeeze to temp and merge
+    if cmd_args.output.is_some() && cmd_args.data_files.len() > 1 {
+        return run_squeeze_and_merge(cmd_args, row_nnz_cutoff, col_nnz_cutoff);
+    }
 
-    info!(
-        "before squeeze -- data: {} rows x {} columns",
-        data.num_rows().unwrap(),
-        data.num_columns().unwrap()
-    );
+    for data_file_arg in &cmd_args.data_files {
+        info!("Processing file: {}", data_file_arg);
+        let (backend, data_file) = resolve_backend_file(data_file_arg, None)?;
 
-    squeeze_by_nnz(
-        data.as_ref(),
-        SqueezeCutoffs {
-            row: row_nnz_cutoff,
-            column: col_nnz_cutoff,
-        },
-        cmd_args.block_size,
-    )?;
+        // Determine target file
+        let target_file = if let Some(output_prefix) = &cmd_args.output {
+            let (_, output_file) = resolve_backend_file(output_prefix, Some(backend.clone()))?;
+            // Copy to output location first
+            if std::path::Path::new(output_file.as_ref()).exists() {
+                return Err(anyhow::anyhow!(
+                    "Output file already exists: {}. Please remove it first or choose a different name.",
+                    output_file
+                ));
+            }
+            info!("Copying {} to {}", data_file, output_file);
+            recursive_copy(&data_file, &output_file)?;
+            output_file
+        } else {
+            data_file.clone()
+        };
 
-    let data = open_sparse_matrix(&data_file, &backend)?;
+        let data = open_sparse_matrix(&target_file, &backend)?;
 
-    info!(
-        "after squeeze -- data: {} rows x {} columns",
-        data.num_rows().unwrap(),
-        data.num_columns().unwrap()
-    );
+        let nrow = data.num_rows().unwrap();
+        let ncol = data.num_columns().unwrap();
+
+        info!("before squeeze -- data: {} rows x {} columns", nrow, ncol);
+
+        // Collect statistics for histogram
+        let col_stat = collect_column_stat(data.as_ref(), cmd_args.block_size)?;
+        let row_stat = collect_row_stat(data.as_ref(), cmd_args.block_size)?;
+
+        let row_nnz_vec = row_stat.count_positives();
+        let col_nnz_vec = col_stat.count_positives();
+
+        // Show/save histogram if requested or in interactive mode
+        if cmd_args.show_histogram || cmd_args.save_histogram.is_some() || cmd_args.interactive {
+            display_nnz_histogram(
+                &target_file,
+                &row_nnz_vec,
+                &col_nnz_vec,
+                row_nnz_cutoff,
+                col_nnz_cutoff,
+                cmd_args.show_histogram || cmd_args.interactive,
+                cmd_args.save_histogram.as_deref(),
+            )?;
+        }
+
+        // Interactive mode: prompt user for action
+        if cmd_args.interactive {
+            match prompt_user_action(&row_nnz_vec, &col_nnz_vec, row_nnz_cutoff, col_nnz_cutoff)? {
+                UserAction::Proceed => {
+                    info!("Proceeding with squeeze operation...");
+                }
+                UserAction::AdjustCutoffs(new_row, new_col) => {
+                    row_nnz_cutoff = new_row;
+                    col_nnz_cutoff = new_col;
+                    info!("Updated cutoffs: row={}, column={}", row_nnz_cutoff, col_nnz_cutoff);
+
+                    // Show updated histogram with new cutoffs
+                    display_nnz_histogram(
+                        &target_file,
+                        &row_nnz_vec,
+                        &col_nnz_vec,
+                        row_nnz_cutoff,
+                        col_nnz_cutoff,
+                        true,
+                        None,
+                    )?;
+
+                    // Ask again with new cutoffs
+                    match prompt_user_action(&row_nnz_vec, &col_nnz_vec, row_nnz_cutoff, col_nnz_cutoff)? {
+                        UserAction::Proceed => {
+                            info!("Proceeding with squeeze operation...");
+                        }
+                        _ => {
+                            info!("Cancelled squeeze operation");
+                            continue;
+                        }
+                    }
+                }
+                UserAction::Cancel => {
+                    info!("Cancelled squeeze operation");
+                    continue;
+                }
+            }
+
+            // Confirm in-place modification if no output
+            if cmd_args.output.is_none() {
+                let msg = format!("Modify {} in-place? This will permanently alter the file", data_file_arg);
+                if !confirm(&msg)? {
+                    info!("Skipping in-place modification of {}", data_file_arg);
+                    continue;
+                }
+            }
+        }
+
+        // Skip actual squeeze if dry run
+        if cmd_args.dry_run {
+            info!("Dry run mode - skipping squeeze operation");
+            continue;
+        }
+
+        // Perform squeeze
+        squeeze_by_nnz(
+            data.as_ref(),
+            SqueezeCutoffs {
+                row: row_nnz_cutoff,
+                column: col_nnz_cutoff,
+            },
+            cmd_args.block_size,
+            cmd_args.preload,
+        )?;
+
+        let data = open_sparse_matrix(&data_file, &backend)?;
+
+        info!(
+            "after squeeze -- data: {} rows x {} columns",
+            data.num_rows().unwrap(),
+            data.num_columns().unwrap()
+        );
+    }
 
     Ok(())
+}
+
+/// Squeeze multiple files and merge into single output
+/// Strategy: Squeeze each to temp, merge temps, cleanup
+fn run_squeeze_and_merge(
+    cmd_args: &RunSqueezeArgs,
+    mut row_nnz_cutoff: usize,
+    mut col_nnz_cutoff: usize,
+) -> anyhow::Result<()> {
+    let output_prefix = cmd_args.output.as_ref().unwrap();
+    info!("Squeeze and merge mode: {} files -> {}", cmd_args.data_files.len(), output_prefix);
+
+    // Create temp directory in output location using tempfile crate
+    let output_dir = dirname(output_prefix).unwrap_or_else(|| ".".into());
+
+    // Ensure output directory exists
+    mkdir(&output_dir)?;
+
+    // Create temp directory within output location
+    let temp_dir = tempfile::Builder::new()
+        .prefix(".squeeze_temp_")
+        .tempdir_in(&*output_dir)?;
+    let temp_dir_path = temp_dir.path().to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid temp dir path"))?;
+
+    info!("Created temp directory: {}", temp_dir_path);
+
+    // Generate unique batch names from original files
+    let batch_names = generate_unique_batch_names(&cmd_args.data_files)?;
+    info!("Batch names: {:?}", batch_names);
+
+    let mut temp_files: Vec<Box<str>> = Vec::new();
+
+    // Step 1: Squeeze each file to temp location
+    for (idx, data_file_arg) in cmd_args.data_files.iter().enumerate() {
+        info!("Processing file {}/{}: {}", idx + 1, cmd_args.data_files.len(), data_file_arg);
+
+        let (backend, data_file) = resolve_backend_file(data_file_arg, None)?;
+        let data = open_sparse_matrix(&data_file, &backend)?;
+
+        let nrow = data.num_rows().unwrap();
+        let ncol = data.num_columns().unwrap();
+        info!("before squeeze -- data: {} rows x {} columns", nrow, ncol);
+
+        // Collect statistics for histogram
+        let col_stat = collect_column_stat(data.as_ref(), cmd_args.block_size)?;
+        let row_stat = collect_row_stat(data.as_ref(), cmd_args.block_size)?;
+        let row_nnz_vec = row_stat.count_positives();
+        let col_nnz_vec = col_stat.count_positives();
+
+        // Show histogram for first file and handle interactive mode
+        if idx == 0 && (cmd_args.show_histogram || cmd_args.interactive) {
+            display_nnz_histogram(
+                &data_file,
+                &row_nnz_vec,
+                &col_nnz_vec,
+                row_nnz_cutoff,
+                col_nnz_cutoff,
+                true,
+                cmd_args.save_histogram.as_deref(),
+            )?;
+
+            if cmd_args.interactive {
+                match prompt_user_action(&row_nnz_vec, &col_nnz_vec, row_nnz_cutoff, col_nnz_cutoff)? {
+                    UserAction::Proceed => {
+                        info!("Proceeding with squeeze and merge...");
+                    }
+                    UserAction::AdjustCutoffs(new_row, new_col) => {
+                        row_nnz_cutoff = new_row;
+                        col_nnz_cutoff = new_col;
+                        info!("Updated cutoffs: row={}, column={}", row_nnz_cutoff, col_nnz_cutoff);
+                    }
+                    UserAction::Cancel => {
+                        info!("Operation cancelled");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        if cmd_args.dry_run {
+            info!("Dry run - would squeeze and merge");
+            continue;
+        }
+
+        // Create temp file for this squeezed data using batch name
+        let backend_ext = match backend {
+            SparseIoBackend::Zarr => "zarr",
+            SparseIoBackend::HDF5 => "h5",
+        };
+        let temp_file = format!("{}/{}.{}", temp_dir_path, batch_names[idx], backend_ext);
+
+        info!("Copying to temp: {}", temp_file);
+        recursive_copy(&data_file, &temp_file)?;
+
+        // Squeeze the temp file
+        let temp_data = open_sparse_matrix(&temp_file, &backend)?;
+        squeeze_by_nnz(
+            temp_data.as_ref(),
+            SqueezeCutoffs {
+                row: row_nnz_cutoff,
+                column: col_nnz_cutoff,
+            },
+            cmd_args.block_size,
+            cmd_args.preload,
+        )?;
+
+        let squeezed = open_sparse_matrix(&temp_file, &backend)?;
+        info!("after squeeze -- data: {} rows x {} columns",
+              squeezed.num_rows().unwrap(),
+              squeezed.num_columns().unwrap());
+
+        temp_files.push(temp_file.into_boxed_str());
+    }
+
+    if cmd_args.dry_run {
+        info!("Dry run complete");
+        return Ok(());
+    }
+
+    // Step 2: Align rows across squeezed files
+    info!("Aligning rows (mode: {:?})...", cmd_args.row_align);
+
+    // Load all squeezed files
+    let squeezed_data: Vec<_> = temp_files
+        .iter()
+        .map(|f| {
+            let (backend, _) = resolve_backend_file(f, None)?;
+            open_sparse_matrix(f, &backend)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // Find aligned rows using helper function
+    let data_refs: Vec<&dyn SparseIo<IndexIter = Vec<usize>>> =
+        squeezed_data.iter().map(|d| d.as_ref()).collect();
+    let aligned_rows = find_aligned_rows(&data_refs, cmd_args.row_align.clone())?;
+
+    info!("Aligned to {} rows across {} files", aligned_rows.len(), temp_files.len());
+
+    // Subset each file to aligned rows
+    for (idx, temp_file) in temp_files.iter().enumerate() {
+        let (backend, _) = resolve_backend_file(temp_file, None)?;
+        let mut data = open_sparse_matrix(temp_file, &backend)?;
+
+        let current_rows = data.row_names()?;
+        let row_indices: Vec<usize> = aligned_rows
+            .iter()
+            .filter_map(|target_row| current_rows.iter().position(|r| r == target_row))
+            .collect();
+
+        info!("  File {}: subsetting from {} to {} rows",
+              idx, current_rows.len(), row_indices.len());
+
+        data.subset_columns_rows(None, Some(&row_indices))?;
+    }
+
+    // Step 3: Merge aligned files using existing merge logic
+    info!("Merging {} aligned files...", temp_files.len());
+
+    let (backend, _) = resolve_backend_file(&temp_files[0], None)?;
+    let merge_args = MergeBackendArgs {
+        data_files: temp_files.clone(),
+        backend,
+        output: cmd_args.output.clone().unwrap(),
+        do_squeeze: false, // Already squeezed
+        row_nnz_cutoff: 0,
+        column_nnz_cutoff: 0,
+        block_size: cmd_args.block_size,
+        verbose: 0,
+    };
+
+    run_merge_backend(&merge_args)?;
+
+    // Step 4: Clean up - temp directory auto-removed when temp_dir goes out of scope
+    // But we need to keep it alive until merge completes, so we drop it explicitly here
+    drop(temp_dir);
+    info!("Cleaned up temporary directory");
+
+    info!("Squeeze and merge complete!");
+    Ok(())
+}
+
+/// Display and/or save nnz histogram with cutoff markers
+fn display_nnz_histogram(
+    data_file: &str,
+    row_nnz: &[f32],
+    col_nnz: &[f32],
+    row_cutoff: usize,
+    col_cutoff: usize,
+    show: bool,
+    save_prefix: Option<&str>,
+) -> anyhow::Result<()> {
+    use matrix_util::common_io::write_types;
+
+    // Save raw nnz data if requested
+    if let Some(prefix) = save_prefix {
+        let row_file = format!("{}.row_nnz.txt", prefix);
+        let col_file = format!("{}.col_nnz.txt", prefix);
+
+        let row_nnz_usize: Vec<usize> = row_nnz.iter().map(|&x| x as usize).collect();
+        let col_nnz_usize: Vec<usize> = col_nnz.iter().map(|&x| x as usize).collect();
+
+        write_types(&row_nnz_usize, &row_file)?;
+        write_types(&col_nnz_usize, &col_file)?;
+
+        info!("Saved row nnz data to: {}", row_file);
+        info!("Saved column nnz data to: {}", col_file);
+    }
+
+    if show {
+        println!("\n========================================");
+        println!("NNZ Distribution for: {}", data_file);
+        println!("========================================\n");
+
+        print_nnz_summary("Rows", row_nnz, row_cutoff);
+        println!();
+        print_nnz_summary("Columns", col_nnz, col_cutoff);
+
+        println!("\n========================================\n");
+    }
+
+    Ok(())
+}
+
+/// Print summary statistics and histogram for nnz distribution
+fn print_nnz_summary(label: &str, nnz: &[f32], cutoff: usize) {
+    const MAX_BAR_WIDTH: usize = 50; // Maximum width for histogram bars
+
+    let total = nnz.len();
+    let below_cutoff = nnz.iter().filter(|&&x| (x as usize) < cutoff).count();
+    let pct_removed = if total > 0 {
+        100.0 * below_cutoff as f64 / total as f64
+    } else {
+        0.0
+    };
+
+    // Calculate basic statistics
+    let min = nnz.iter().copied().fold(f32::INFINITY, f32::min) as usize;
+    let max = nnz.iter().copied().fold(f32::NEG_INFINITY, f32::max) as usize;
+    let sum: f32 = nnz.iter().sum();
+    let mean = if total > 0 { sum / total as f32 } else { 0.0 };
+
+    // Calculate median
+    let mut sorted = nnz.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = if total > 0 {
+        if total % 2 == 0 {
+            (sorted[total / 2 - 1] + sorted[total / 2]) / 2.0
+        } else {
+            sorted[total / 2]
+        }
+    } else {
+        0.0
+    };
+
+    println!("{} NNZ Distribution:", label);
+    println!("  Total: {}", total);
+    println!("  Min: {}, Max: {}, Mean: {:.2}, Median: {:.2}", min, max, mean, median);
+    println!("  Cutoff: {} (removes {} / {} = {:.2}%)", cutoff, below_cutoff, total, pct_removed);
+
+    // Create histogram with log10(nnz+1) bins
+    let hist = create_log_histogram(nnz, cutoff);
+
+    // Find max count for proportional scaling
+    let max_count = hist.iter().map(|(_, count, _)| *count).max().unwrap_or(1);
+
+    println!("  Histogram (log10(nnz+1) scale):");
+    for (bin_label, count, is_cutoff_bin) in hist {
+        let marker = if is_cutoff_bin { " <-- CUTOFF" } else { "" };
+        // Scale bar width proportionally to fit within MAX_BAR_WIDTH
+        let bar_width = ((count as f64 / max_count as f64) * MAX_BAR_WIDTH as f64).round() as usize;
+        let bar_width = bar_width.max(1); // Ensure at least 1 char for non-zero counts
+        let bar = "█".repeat(bar_width);
+        println!("    {:>8}: {:>6} {}{}", bin_label, count, bar, marker);
+    }
+}
+
+/// Create histogram with log10(nnz+1) transformation
+fn create_log_histogram(nnz: &[f32], cutoff: usize) -> Vec<(String, usize, bool)> {
+    let cutoff_log = ((cutoff as f64 + 1.0).log10() * 10.0).round() as i32;
+
+    // Create bins: bin value represents log10(nnz+1)*10 as integer
+    let mut bins: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
+
+    for &val in nnz {
+        let log_val = ((val as f64 + 1.0).log10() * 10.0).round() as i32;
+        *bins.entry(log_val).or_insert(0) += 1;
+    }
+
+    // Convert to output format with labels
+    bins.into_iter()
+        .map(|(bin, count)| {
+            let bin_float = bin as f64 / 10.0;
+            let nnz_approx = (10.0_f64.powf(bin_float) - 1.0).round() as usize;
+            let label = format!("~{}", nnz_approx);
+            let is_cutoff = bin == cutoff_log;
+            (label, count, is_cutoff)
+        })
+        .collect()
 }

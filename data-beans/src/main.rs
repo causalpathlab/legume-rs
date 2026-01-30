@@ -1,4 +1,5 @@
 mod handlers;
+mod interactive;
 mod misc;
 mod qc;
 mod simulate;
@@ -1023,8 +1024,9 @@ pub struct MergeMtxArgs {
 #[derive(Args, Debug)]
 #[command(about)]
 pub struct RunSqueezeArgs {
-    /// data file -- either `.zarr` or `.h5`
-    data_file: Box<str>,
+    /// data files -- either `.zarr` or `.h5`
+    #[arg(required = true)]
+    data_files: Vec<Box<str>>,
 
     /// number of non-zero cutoff for rows
     #[arg(short, long, default_value = "0")]
@@ -1037,6 +1039,87 @@ pub struct RunSqueezeArgs {
     /// block_size for parallel processing
     #[arg(long, default_value = "100")]
     block_size: usize,
+
+    /// preload data into memory for faster processing
+    #[arg(
+        long,
+        alias = "preload-data",
+        default_value_t = true,
+        help = "Preload data into memory for faster processing",
+        long_help = "Preload all column data into memory before squeezing. \n\
+		     This can significantly speed up processing but requires more memory."
+    )]
+    preload: bool,
+
+    /// show nnz histogram before squeezing
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Show ASCII histogram of row/column nnz distributions",
+        long_help = "Display log1p-transformed ASCII histograms of row and column \n\
+		     non-zero counts before squeezing. Helps determine appropriate cutoff values."
+    )]
+    show_histogram: bool,
+
+    /// save histogram data to files
+    #[arg(
+        long,
+        help = "Output file prefix for saving histogram data",
+        long_help = "Save histogram data to {prefix}.row_nnz.txt and {prefix}.col_nnz.txt files. \n\
+		     Each file contains nnz counts that can be used for further analysis."
+    )]
+    save_histogram: Option<Box<str>>,
+
+    /// dry run - only show histograms without performing squeeze
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Preview mode - show histograms without squeezing",
+        long_help = "Only display histograms and statistics without actually performing the squeeze operation. \n\
+		     Useful for determining appropriate cutoff values."
+    )]
+    dry_run: bool,
+
+    /// interactive mode - prompt user after showing histogram
+    #[arg(
+        short,
+        long,
+        default_value_t = false,
+        help = "Interactive mode - ask for confirmation after showing histogram",
+        long_help = "Show histogram and prompt user to proceed, adjust cutoffs, or cancel. \n\
+		     Automatically enables --show-histogram."
+    )]
+    interactive: bool,
+
+    /// output file for merged squeezed data
+    #[arg(
+        short,
+        long,
+        help = "Output file for squeezed data (merges all inputs into one fileset)",
+        long_help = "Save squeezed data to a new merged fileset instead of modifying in-place. \n\
+		     All input files will be squeezed and merged into {output}.{backend}. \n\
+		     If not specified, modifies files in-place (requires confirmation in interactive mode)."
+    )]
+    output: Option<Box<str>>,
+
+    /// row alignment strategy for merging multiple files
+    #[arg(
+        long,
+        value_enum,
+        default_value = "common",
+        help = "Row alignment strategy when merging multiple files",
+        long_help = "How to align rows across files after squeezing:\n\
+		     - common: Keep only rows present in ALL files (intersection)\n\
+		     - union: Keep rows present in ANY file (union, fills missing with zeros)"
+    )]
+    row_align: RowAlignMode,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+pub enum RowAlignMode {
+    Common,
+    Union,
 }
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
