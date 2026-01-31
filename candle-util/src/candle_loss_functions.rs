@@ -88,3 +88,4 @@ pub fn poisson_likelihood(x_nd: &Tensor, rate_nd: &Tensor) -> Result<Tensor> {
 pub fn gaussian_likelihood(x_nd: &Tensor, hat_nd: &Tensor) -> Result<Tensor> {
     x_nd.sub(hat_nd)?.powf(2.)?.sum(1)? * (-0.5)
 }
+

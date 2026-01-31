@@ -197,12 +197,34 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
+        default_value_t = 2,
         help = "Number of inverse autoregressive flow transformations",
         long_help = "Number of inverse autoregressive flow transformations.\n\
-		     Controls the number of flow steps in the model."
+		     Controls the number of flow steps in the model.\n\
+		     Set to 0 to disable IAF.\n\
+		     Note: Mutually exclusive with --use-sparsemax."
     )]
     iaf_trans: usize,
+
+    #[arg(
+        long,
+        default_value_t = 10.0,
+        help = "Initial KL weight for annealing",
+        long_help = "Initial KL weight for annealing schedule.\n\
+		     Start with high KL weight and cool down to 1.0.\n\
+		     Formula: kl_weight = 1 + (init - 1) * exp(-epoch / warmup)\n\
+		     Set to 1.0 to disable annealing."
+    )]
+    kl_weight_init: f64,
+
+    #[arg(
+        long,
+        default_value_t = 200.0,
+        help = "KL annealing warmup epochs",
+        long_help = "Number of epochs for KL weight to decay from init to ~1.\n\
+		     Larger value = slower decay."
+    )]
+    kl_warmup_epochs: f64,
 
     #[arg(
         long,
@@ -342,6 +364,17 @@ pub struct TopicArgs {
         long_help = "Save computed log-variance for all features to {out}.feature_variance.parquet"
     )]
     save_feature_variance: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Use sparsemax instead of softmax",
+        long_help = "Use sparsemax activation instead of softmax.\n\
+		     Sparsemax can output exact zeros for sparse topic assignments.\n\
+		     May help with more decisive cell type annotations.\n\
+		     Note: Mutually exclusive with --iaf-trans (IAF will be disabled)."
+    )]
+    use_sparsemax: bool,
 }
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
@@ -349,6 +382,16 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         std::env::set_var("RUST_LOG", "info");
     }
     env_logger::init();
+
+    // Sparsemax and IAF are mutually exclusive - sparsemax disables IAF
+    let iaf_trans = if args.use_sparsemax {
+        if args.iaf_trans > 0 {
+            info!("Sparsemax enabled: disabling IAF (iaf_trans set to 0)");
+        }
+        0
+    } else {
+        args.iaf_trans
+    };
 
     let reference = args.reference_batches.as_deref();
 
@@ -474,7 +517,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             n_vocab,
             d_vocab_emb,
             layers: &args.encoder_layers,
-            n_transforms: args.iaf_trans,
+            n_transforms: iaf_trans,
+            use_sparsemax: args.use_sparsemax,
         },
         param_builder.clone(),
     )?;
@@ -662,6 +706,10 @@ where
 
         data_loader.shuffle_minibatch(args.minibatch_size)?;
 
+        // KL annealing: kl_weight = 1 + (init - 1) * exp(-epoch / warmup)
+        let kl_weight = 1.0
+            + (args.kl_weight_init - 1.0) * (-(epoch as f64) / args.kl_warmup_epochs).exp();
+
         for jitter in 0..args.jitter_interval {
             let mut llik_tot = 0f32;
             let mut kl_tot = 0f32;
@@ -672,7 +720,7 @@ where
                 let y_nd = mb.output.unwrap_or(mb.input);
                 let (_, llik) = decoder.forward_with_llik(&z_nk, &y_nd, &topic_likelihood)?;
 
-                let loss = (&kl - &llik)?.mean_all()?;
+                let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
                 adam.backward_step(&loss)?;
 
                 let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
