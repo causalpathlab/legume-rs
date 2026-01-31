@@ -8,6 +8,7 @@ mod fit_joint_topic;
 mod fit_knn_regression;
 mod fit_svd;
 mod fit_topic;
+mod pseudobulk_topic;
 mod senna_input;
 
 use annotate_topic::*;
