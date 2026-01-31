@@ -16,10 +16,8 @@ pub enum AnnotationModel {
     /// Standard SuSiE: sparse in annotation dimension only
     Susie,
     /// Bi-directional SuSiE: sparse in both annotation and topic dimensions (softmax)
-    BiSusie,
-    /// Bi-directional SuSiE with sparsemax for exact zeros (recommended)
     #[default]
-    BiSusieSparsemax,
+    BiSusie,
 }
 
 #[derive(Args, Debug)]
@@ -84,8 +82,8 @@ pub struct AnnotateTopicArgs {
     #[arg(
         long,
         short = 'i',
-        default_value_t = 500,
-        help = "Number of training epochs."
+        default_value_t = 1000,
+        help = "Number of training epochs (after KL annealing if enabled)."
     )]
     epochs: usize,
 
@@ -121,6 +119,16 @@ pub struct AnnotateTopicArgs {
         help = "Number of Monte Carlo samples for SGVB."
     )]
     num_samples: usize,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Use Poisson sampling for output Y during training.",
+        long_help = "When enabled, samples Y[g,t] ~ Poisson(rate) where rate is derived from\n\
+		     the data matrix scaled by column_sum_norm. This adds stochasticity to training.\n\
+		     When disabled, uses the scaled data directly without sampling."
+    )]
+    poisson_sampling: bool,
 
     #[arg(
         long,
@@ -177,12 +185,11 @@ pub struct AnnotateTopicArgs {
     #[arg(
         long,
         short = 'M',
-        default_value = "bi-susie-sparsemax",
+        default_value = "bi-susie",
         help = "Model type for annotation.",
         long_help = "Model type for annotation:\n\
              - susie: Standard SuSiE, sparse in annotation dimension only\n\
-             - bi-susie: Bi-directional SuSiE with softmax\n\
-             - bi-susie-sparsemax: Bi-directional SuSiE with sparsemax (recommended)"
+             - bi-susie: Bi-directional SuSiE, sparse in both annotation and topic dimensions"
     )]
     model: AnnotationModel,
 }
@@ -369,25 +376,6 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
                 )?
                 .0
             }
-            AnnotationModel::BiSusieSparsemax => {
-                let model = BiSusieDeconv::with_sparsemax(
-                    x_ga,
-                    training_data.data.ncols(),
-                    args.susie_components,
-                    prior_var,
-                    args.num_samples,
-                    param_builder,
-                )?;
-                run_training(
-                    &model,
-                    &parameters,
-                    args,
-                    &training_data.data,
-                    &dev,
-                    use_pseudobulk,
-                )?
-                .0
-            }
         }
     } else {
         // Multiple prior_var values: model averaging with ELBO weights
@@ -428,24 +416,6 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
                 }
                 AnnotationModel::BiSusie => {
                     let model = BiSusieDeconv::new(
-                        x_ga.clone(),
-                        training_data.data.ncols(),
-                        args.susie_components,
-                        prior_var,
-                        args.num_samples,
-                        param_builder,
-                    )?;
-                    run_training(
-                        &model,
-                        &parameters,
-                        args,
-                        &training_data.data,
-                        &dev,
-                        use_pseudobulk,
-                    )?
-                }
-                AnnotationModel::BiSusieSparsemax => {
-                    let model = BiSusieDeconv::with_sparsemax(
                         x_ga.clone(),
                         training_data.data.ncols(),
                         args.susie_components,
@@ -739,34 +709,46 @@ fn run_training<M: DeconvModel>(
 
     let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate)?;
 
-    let pb = ProgressBar::new(args.epochs as u64);
+    // KL annealing parameters
+    let use_kl_annealing = args.kl_anneal_epochs > 0;
+    let annealing_done_epoch = args.kl_anneal_epochs;
+
+    // Total epochs = annealing epochs + training epochs
+    let total_epochs = if use_kl_annealing {
+        args.kl_anneal_epochs + args.epochs
+    } else {
+        args.epochs
+    };
+
+    let pb = ProgressBar::new(total_epochs as u64);
 
     if args.verbose {
         pb.set_draw_target(ProgressDrawTarget::hidden());
     }
 
-    // KL annealing parameters
-    let use_kl_annealing = args.kl_anneal_epochs > 0;
-    let annealing_done_epoch = args.kl_anneal_epochs;
-
     // Track losses after annealing for averaging
     let mut post_anneal_losses: Vec<f32> = Vec::new();
 
+    // Precompute scaled data (used when not sampling)
+    let scale = args.column_sum_norm;
+    let scaled_data = data_gt.map(|x| (x.exp() * scale).max(1e-10));
+    let y_gt_fixed = if !args.poisson_sampling {
+        Some(scaled_data.to_tensor(dev)?)
+    } else {
+        None
+    };
+
     // Training loop
-    for epoch in 0..args.epochs {
-        // Sample Y[g,t] ~ Poisson(rate)
-        let mut rng = rand::rngs::StdRng::seed_from_u64(epoch as u64 + 1);
-
-        // Both pseudobulk and dictionary are now in log-probability space
-        // Use the same scale for Poisson sampling
-        let scale = args.column_sum_norm;
-
-        let y_gt = data_gt
-            .map(|x| {
-                let rate = (x.exp() * scale).max(1e-10);
-                Poisson::new(rate as f64).unwrap().sample(&mut rng) as f32
-            })
-            .to_tensor(dev)?;
+    for epoch in 0..total_epochs {
+        // Either sample Y[g,t] ~ Poisson(rate) or use scaled data directly
+        let y_gt = if args.poisson_sampling {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(epoch as u64 + 1);
+            scaled_data
+                .map(|rate| Poisson::new(rate as f64).unwrap().sample(&mut rng) as f32)
+                .to_tensor(dev)?
+        } else {
+            y_gt_fixed.as_ref().unwrap().clone()
+        };
 
         // Compute loss with optional KL annealing (warm-up: 0 → 1)
         let loss = if use_kl_annealing {
