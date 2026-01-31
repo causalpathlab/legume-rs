@@ -1,5 +1,10 @@
 use crate::deconv::{BiSusieDeconv, SusieDeconv};
 use crate::embed_common::*;
+use crate::interactive_markers::{
+    auto_suggest_markers, augment_membership_matrix, find_candidate_markers,
+    print_augmentation_summary, read_suggestions_json, run_interactive_round,
+    save_augmented_markers, write_candidates_json, MarkerDatabase,
+};
 use crate::pseudobulk_topic::{compute_pseudobulk_by_topic, TopicWeightStrategy};
 use matrix_util::common_io::*;
 
@@ -192,6 +197,80 @@ pub struct AnnotateTopicArgs {
              - bi-susie: Bi-directional SuSiE, sparse in both annotation and topic dimensions"
     )]
     model: AnnotationModel,
+
+    #[arg(
+        long,
+        short = 'I',
+        help = "Enable interactive marker augmentation.",
+        long_help = "Enable interactive mode for marker gene augmentation.\n\
+             After initial fitting, shows candidate genes for each cell type and\n\
+             asks if you want to add them as markers. This iterates until\n\
+             you're satisfied with the marker coverage."
+    )]
+    interactive: bool,
+
+    #[arg(
+        long,
+        help = "Output candidate markers to JSON for LLM review.",
+        long_help = "Output candidate markers to JSON for LLM-assisted annotation.\n\n\
+             The JSON contains cell types with candidate genes ranked by topic weight.\n\
+             Share this with an LLM and ask it to:\n\
+             1. Web search each gene to find its known cell type markers\n\
+             2. Confirm or reject each gene-celltype association\n\
+             3. Output validated pairs as: [{\"gene\": \"X\", \"celltype\": \"Y\"}, ...]\n\n\
+             Example prompt for LLM:\n\
+             \"For each candidate gene, search what cell types it marks.\n\
+             Return only genes that are known markers for the proposed cell type.\""
+    )]
+    suggest_only: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Apply marker suggestions from JSON file.",
+        long_help = "Apply LLM-validated marker suggestions from JSON.\n\n\
+             Expected format: [{\"gene\": \"ENSG..._SYM\", \"celltype\": \"Cell_Type\"}, ...]\n\
+             Gene names must match dictionary rows exactly.\n\
+             Cell type names must match marker file annotations.\n\n\
+             Workflow: --suggest-only out.json -> LLM review -> --apply-suggestions validated.json"
+    )]
+    apply_suggestions: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Reference marker database for auto-suggestions (e.g., PanglaoDB TSV).",
+        long_help = "Path to a reference marker gene database (TSV with gene and cell_type columns).\n\
+             When provided, candidates matching known markers are auto-accepted.\n\
+             Unmatched candidates are shown for manual review (if --interactive) or skipped."
+    )]
+    marker_db: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "Number of candidate genes to show per topic in interactive mode."
+    )]
+    top_candidates: usize,
+
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Number of top topics to show per cell type in interactive mode."
+    )]
+    topics_per_celltype: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.05,
+        help = "Minimum PIP to show topic-celltype match in interactive mode."
+    )]
+    interactive_min_pip: f32,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Weight for augmented markers (vs 1.0 for original markers)."
+    )]
+    augment_weight: f32,
 }
 
 /// Training data bundle
@@ -200,6 +279,8 @@ struct TrainingData {
     data: Mat,
     /// Gene × annotation membership matrix
     membership: Mat,
+    /// Gene names (row names of data and membership)
+    gene_names: Vec<Box<str>>,
 }
 
 pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
@@ -309,6 +390,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
             TrainingData {
                 data: normalized,
                 membership: pb_membership,
+                gene_names: pseudobulk_row_names,
             },
             true,
         )
@@ -318,155 +400,271 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
             TrainingData {
                 data: log_dict_dk.clone(),
                 membership: membership_ga.clone(),
+                gene_names: row_names.clone(),
             },
             false,
         )
     };
 
     // 4. Build and train deconvolution model(s)
-    // If multiple prior_var values provided, try each and select best by ELBO
     let dev = candle_core::Device::Cpu;
-    let x_ga = training_data.membership.to_tensor(&dev)?;
+    let data = &training_data.data;
 
     info!("Using {:?} model", args.model);
 
-    let pip_mat = if args.prior_var.len() == 1 {
-        // Single prior_var: train directly
-        let prior_var = args.prior_var[0];
-        let parameters = candle_nn::VarMap::new();
-        let param_builder =
-            candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
+    // Closure: train model with given membership matrix, return PIP
+    let train_model = |membership: &Mat| -> anyhow::Result<Mat> {
+        let x_ga = membership.to_tensor(&dev)?;
 
-        match args.model {
-            AnnotationModel::Susie => {
-                let model = SusieDeconv::new(
-                    x_ga,
-                    training_data.data.ncols(),
-                    args.susie_components,
-                    prior_var,
-                    args.num_samples,
-                    param_builder,
-                )?;
-                run_training(
-                    &model,
-                    &parameters,
-                    args,
-                    &training_data.data,
-                    &dev,
-                    use_pseudobulk,
-                )?
-                .0
-            }
-            AnnotationModel::BiSusie => {
-                let model = BiSusieDeconv::new(
-                    x_ga,
-                    training_data.data.ncols(),
-                    args.susie_components,
-                    prior_var,
-                    args.num_samples,
-                    param_builder,
-                )?;
-                run_training(
-                    &model,
-                    &parameters,
-                    args,
-                    &training_data.data,
-                    &dev,
-                    use_pseudobulk,
-                )?
-                .0
-            }
+        if args.prior_var.len() == 1 {
+            let prior_var = args.prior_var[0];
+            let params = candle_nn::VarMap::new();
+            let vb = candle_nn::VarBuilder::from_varmap(&params, candle_core::DType::F32, &dev);
+
+            let pip = match args.model {
+                AnnotationModel::Susie => {
+                    let m = SusieDeconv::new(
+                        x_ga,
+                        data.ncols(),
+                        args.susie_components,
+                        prior_var,
+                        args.num_samples,
+                        vb,
+                    )?;
+                    run_training(&m, &params, args, data, &dev, use_pseudobulk)?.0
+                }
+                AnnotationModel::BiSusie => {
+                    let m = BiSusieDeconv::new(
+                        x_ga,
+                        data.ncols(),
+                        args.susie_components,
+                        prior_var,
+                        args.num_samples,
+                        vb,
+                    )?;
+                    run_training(&m, &params, args, data, &dev, use_pseudobulk)?.0
+                }
+            };
+            return Ok(pip);
         }
-    } else {
-        // Multiple prior_var values: model averaging with ELBO weights
-        info!(
-            "Model averaging over {} prior_var values: {:?}",
-            args.prior_var.len(),
-            args.prior_var
-        );
 
+        // Model averaging over multiple prior_var
         let mut pips: Vec<Mat> = Vec::new();
         let mut elbos: Vec<f32> = Vec::new();
 
         for &prior_var in &args.prior_var {
-            info!("Training with prior_var = {}", prior_var);
+            let params = candle_nn::VarMap::new();
+            let vb = candle_nn::VarBuilder::from_varmap(&params, candle_core::DType::F32, &dev);
 
-            let parameters = candle_nn::VarMap::new();
-            let param_builder =
-                candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
-
-            let (pip, final_loss) = match args.model {
+            let (pip, loss) = match args.model {
                 AnnotationModel::Susie => {
-                    let model = SusieDeconv::new(
+                    let m = SusieDeconv::new(
                         x_ga.clone(),
-                        training_data.data.ncols(),
+                        data.ncols(),
                         args.susie_components,
                         prior_var,
                         args.num_samples,
-                        param_builder,
+                        vb,
                     )?;
-                    run_training(
-                        &model,
-                        &parameters,
-                        args,
-                        &training_data.data,
-                        &dev,
-                        use_pseudobulk,
-                    )?
+                    run_training(&m, &params, args, data, &dev, use_pseudobulk)?
                 }
                 AnnotationModel::BiSusie => {
-                    let model = BiSusieDeconv::new(
+                    let m = BiSusieDeconv::new(
                         x_ga.clone(),
-                        training_data.data.ncols(),
+                        data.ncols(),
                         args.susie_components,
                         prior_var,
                         args.num_samples,
-                        param_builder,
+                        vb,
                     )?;
-                    run_training(
-                        &model,
-                        &parameters,
-                        args,
-                        &training_data.data,
-                        &dev,
-                        use_pseudobulk,
-                    )?
+                    run_training(&m, &params, args, data, &dev, use_pseudobulk)?
                 }
             };
-
-            let elbo = -final_loss; // loss is -ELBO
-            info!("  prior_var = {} -> ELBO = {:.2}", prior_var, elbo);
-
             pips.push(pip);
-            elbos.push(elbo);
+            elbos.push(-loss);
         }
 
-        // Compute softmax weights from ELBOs
-        let max_elbo = elbos.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let exp_elbos: Vec<f32> = elbos.iter().map(|&e| (e - max_elbo).exp()).collect();
-        let sum_exp: f32 = exp_elbos.iter().sum();
-        let weights: Vec<f32> = exp_elbos.iter().map(|&e| e / sum_exp).collect();
+        // Softmax weights from ELBOs
+        let max_e = elbos.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let exp_e: Vec<f32> = elbos.iter().map(|&e| (e - max_e).exp()).collect();
+        let sum_e: f32 = exp_e.iter().sum();
+        let weights: Vec<f32> = exp_e.iter().map(|&e| e / sum_e).collect();
 
-        // Log weights
-        for (&prior_var, &w) in args.prior_var.iter().zip(weights.iter()) {
-            info!("  prior_var = {} -> weight = {:.3}", prior_var, w);
-        }
-
-        // Weighted average of PIPs
-        let n_rows = pips[0].nrows();
-        let n_cols = pips[0].ncols();
-        let mut avg_pip = Mat::zeros(n_rows, n_cols);
-
-        for (pip, &w) in pips.iter().zip(weights.iter()) {
-            for i in 0..n_rows {
-                for j in 0..n_cols {
-                    avg_pip[(i, j)] += w * pip[(i, j)];
+        // Weighted average
+        let (nr, nc) = (pips[0].nrows(), pips[0].ncols());
+        let mut avg = Mat::zeros(nr, nc);
+        for (pip, &w) in pips.iter().zip(&weights) {
+            for i in 0..nr {
+                for j in 0..nc {
+                    avg[(i, j)] += w * pip[(i, j)];
                 }
             }
         }
-
-        avg_pip
+        Ok(avg)
     };
+
+    // 5. Train with optional marker augmentation (interactive, suggest-only, or apply)
+    let original_markers = read_marker_gene_info(&args.marker_file)?;
+    let mut membership = training_data.membership.clone();
+    let mut all_new_markers: Vec<(Box<str>, Box<str>)> = Vec::new();
+
+    // Load reference marker database if provided (with vocab-aware parsing)
+    let marker_db = if let Some(db_path) = &args.marker_db {
+        info!("Loading marker database from {}...", db_path);
+        let db = MarkerDatabase::load_with_vocab(db_path, &training_data.gene_names, &annot_names)?;
+        info!("Loaded {} genes from marker database", db.len());
+        Some(db)
+    } else {
+        None
+    };
+
+    // Handle apply-suggestions mode (non-interactive)
+    if let Some(suggestions_path) = &args.apply_suggestions {
+        info!("Applying suggestions from {}...", suggestions_path);
+        let suggestions = read_suggestions_json(suggestions_path)?;
+        info!("Read {} suggestions", suggestions.len());
+
+        augment_membership_matrix(
+            &mut membership,
+            &training_data.gene_names,
+            &annot_names,
+            &suggestions,
+            args.augment_weight,
+        );
+        all_new_markers.extend(suggestions);
+    }
+
+    // Handle suggest-only mode (non-interactive)
+    let pip_mat = if let Some(output_path) = &args.suggest_only {
+        info!("Training initial model...");
+        let pip = train_model(&membership)?;
+
+        let candidates = find_candidate_markers(
+            &pip,
+            data,
+            &membership,
+            &training_data.gene_names,
+            &topic_names,
+            &annot_names,
+            args.interactive_min_pip,
+            args.top_candidates,
+            args.topics_per_celltype,
+        );
+
+        info!("Writing {} cell types with candidates to {}", candidates.len(), output_path);
+        write_candidates_json(&candidates, output_path)?;
+
+        // Also auto-suggest if marker_db provided
+        if let Some(db) = &marker_db {
+            let auto_suggestions = auto_suggest_markers(&candidates, db);
+            if !auto_suggestions.is_empty() {
+                let auto_file = format!("{}.auto_suggestions.json", args.out);
+                eprintln!("Auto-suggested {} markers based on database:", auto_suggestions.len());
+                for (gene, ct) in &auto_suggestions {
+                    eprintln!("  {} -> {}", gene, ct);
+                }
+
+                // Write auto-suggestions as simple JSON
+                let mut file = std::fs::File::create(&auto_file)?;
+                use std::io::Write;
+                writeln!(file, "[")?;
+                for (i, (gene, ct)) in auto_suggestions.iter().enumerate() {
+                    let comma = if i + 1 < auto_suggestions.len() { "," } else { "" };
+                    writeln!(file, "  {{\"gene\": \"{}\", \"celltype\": \"{}\"}}{}",
+                        gene, ct, comma)?;
+                }
+                writeln!(file, "]")?;
+                info!("Wrote auto-suggestions to {}", auto_file);
+            }
+        }
+
+        pip
+    } else if args.interactive {
+        let mut iteration = 1usize;
+        loop {
+            info!("Training iteration {}...", iteration);
+            let pip = train_model(&membership)?;
+
+            let candidates = find_candidate_markers(
+                &pip,
+                data,
+                &membership,
+                &training_data.gene_names,
+                &topic_names,
+                &annot_names,
+                args.interactive_min_pip,
+                args.top_candidates,
+                args.topics_per_celltype,
+            );
+
+            // Auto-accept known markers if database provided
+            let auto_accepted = if let Some(db) = &marker_db {
+                let suggestions = auto_suggest_markers(&candidates, db);
+                if !suggestions.is_empty() {
+                    eprintln!();
+                    eprintln!("Auto-accepted {} markers from database:", suggestions.len());
+                    for (gene, ct) in &suggestions {
+                        eprintln!("  + {} -> {}", gene, ct);
+                    }
+                    augment_membership_matrix(
+                        &mut membership,
+                        &training_data.gene_names,
+                        &annot_names,
+                        &suggestions,
+                        args.augment_weight,
+                    );
+                    all_new_markers.extend(suggestions.clone());
+                }
+                suggestions
+            } else {
+                Vec::new()
+            };
+
+            // Filter out auto-accepted from interactive prompts
+            // (for now, show all - user can skip already-added)
+            let _ = auto_accepted;
+
+            let result = run_interactive_round(&candidates, iteration)?;
+
+            if !result.proceed && result.new_markers.is_empty() {
+                // User cancelled with no pending markers
+                return Ok(());
+            }
+
+            if result.new_markers.is_empty() {
+                info!("No new markers. Finalizing...");
+                break pip;
+            }
+
+            // Add new markers to membership
+            augment_membership_matrix(
+                &mut membership,
+                &training_data.gene_names,
+                &annot_names,
+                &result.new_markers,
+                args.augment_weight,
+            );
+            all_new_markers.extend(result.new_markers);
+
+            if !result.proceed {
+                // User added markers but doesn't want more rounds - do final fit
+                info!("Final training with augmented markers...");
+                break train_model(&membership)?;
+            }
+
+            iteration += 1;
+        }
+    } else {
+        train_model(&membership)?
+    };
+
+    // Save augmented markers if any
+    if !all_new_markers.is_empty() {
+        let marker_file = format!("{}.augmented_markers.tsv", args.out);
+        save_augmented_markers(&original_markers, &all_new_markers, &marker_file)?;
+        print_augmentation_summary(&all_new_markers, all_new_markers.len());
+        info!("Saved augmented markers to {}", marker_file);
+    }
 
     // 5. Output results
     let pip_file = format!("{}.pip.parquet", args.out);
