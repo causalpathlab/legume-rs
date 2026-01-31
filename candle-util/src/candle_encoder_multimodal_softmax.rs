@@ -9,6 +9,7 @@ pub struct LogSoftmaxMultimodalEncoder {
     n_features: Vec<usize>,
     n_topics: usize,
     n_vocab: usize,
+    use_sparsemax: bool,
     // n_modules: usize,
     feature_module: Vec<AggregateLinear>,
     emb_x: Vec<Embedding>,
@@ -28,7 +29,12 @@ impl MultimodalEncoderModuleT for LogSoftmaxMultimodalEncoder {
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
         let (z_nk, kl) = self.latent_gaussian_with_kl(x_nd_vec, x0_nd_vec, train)?;
-        Ok((ops::softmax(&z_nk, z_nk.rank() - 1)?, kl))
+        let prob = if self.use_sparsemax {
+            sparsemax(&z_nk)?
+        } else {
+            ops::softmax(&z_nk, z_nk.rank() - 1)?
+        };
+        Ok((prob, kl))
     }
 
     fn dim_latent(&self) -> usize {
@@ -272,6 +278,7 @@ impl LogSoftmaxMultimodalEncoder {
             n_features: args.n_features,
             n_topics: args.n_topics,
             n_vocab: args.n_vocab,
+            use_sparsemax: args.use_sparsemax,
             feature_module,
             emb_x,
             emb_logx,
@@ -290,4 +297,5 @@ pub struct LogSoftmaxMultimodalEncoderArgs<'a> {
     pub n_vocab: usize,
     pub d_vocab_emb: usize,
     pub layers: &'a [usize],
+    pub use_sparsemax: bool,
 }

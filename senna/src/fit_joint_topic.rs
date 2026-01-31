@@ -1,4 +1,5 @@
 use crate::embed_common::*;
+use crate::feature_selection::*;
 use crate::senna_input::*;
 
 use candle_nn::AdamW;
@@ -169,6 +170,15 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
+        help = "Maximum number of highly variable features per modality.",
+        long_help = "Select top N features by log-variance for each modality.\n\
+		     If not specified, all features are used.\n\
+		     Applied independently to each data modality."
+    )]
+    max_features: Option<usize>,
+
+    #[arg(
+        long,
         short = 'e',
         value_delimiter(','),
         default_values_t = vec![128, 1024, 128],
@@ -185,7 +195,8 @@ pub struct JointTopicArgs {
         help = "Number of inverse autoregressive flow transformations.",
         long_help = "Number of inverse autoregressive flow transformations.\n\
 		     Controls the number of flow steps in the model.\n\
-		     Set to 0 to disable IAF."
+		     Set to 0 to disable IAF.\n\
+		     Note: Mutually exclusive with --use-sparsemax."
     )]
     iaf_trans: usize,
 
@@ -305,6 +316,17 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
+        default_value_t = false,
+        help = "Use sparsemax instead of softmax",
+        long_help = "Use sparsemax activation instead of softmax.\n\
+		     Sparsemax can output exact zeros for sparse topic assignments.\n\
+		     May help with more decisive cell type annotations.\n\
+		     Note: Mutually exclusive with --iaf-trans (IAF will be disabled)."
+    )]
+    use_sparsemax: bool,
+
+    #[arg(
+        long,
         short,
         help = "Verbosity.",
         long_help = "Enable verbose output.\n\
@@ -319,6 +341,10 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     }
     env_logger::init();
 
+    if args.use_sparsemax {
+        info!("Using sparsemax activation for sparse topic assignments");
+    }
+
     // 1. Read the data with batch membership
     let SparseStackWithBatch {
         mut data_stack,
@@ -330,6 +356,39 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         num_types: args.num_modalities,
         preload: args.preload_data,
     })?;
+
+    // 1b. Feature selection per modality (if requested)
+    let feature_selections: Vec<Option<FeatureSelection>> = if let Some(max_feat) = args.max_features
+    {
+        info!(
+            "Selecting top {} features per modality by log-variance",
+            max_feat
+        );
+        data_stack
+            .stack
+            .iter()
+            .enumerate()
+            .map(|(d, data_vec)| {
+                let sel = select_highly_variable_features(
+                    data_vec,
+                    Some(max_feat),
+                    None,
+                    false,
+                    &format!("{}_{}", args.out, d),
+                    args.block_size,
+                    None,
+                )?;
+                info!(
+                    "Modality {}: selected {} features",
+                    d,
+                    sel.selected_indices.len()
+                );
+                Ok(Some(sel))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+    } else {
+        data_stack.stack.iter().map(|_| None).collect()
+    };
 
     // 2. Concatenate projections
     let proj_dim = args.proj_dim.max(args.n_latent_topics);
@@ -387,7 +446,12 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
 
     let n_features: Vec<usize> = collapsed_data_vec
         .iter()
-        .map(|x| x.mu_observed.nrows())
+        .zip(&feature_selections)
+        .map(|(x, sel)| {
+            sel.as_ref()
+                .map(|s| s.selected_indices.len())
+                .unwrap_or_else(|| x.mu_observed.nrows())
+        })
         .collect();
 
     let encoder = LogSoftmaxMultimodalEncoder::new(
@@ -398,6 +462,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             n_vocab,
             d_vocab_emb,
             layers: &args.encoder_layers,
+            use_sparsemax: args.use_sparsemax,
         },
         param_builder.clone(),
     )?;
@@ -408,12 +473,33 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         param_builder.clone(),
     )?;
 
-    let scores =
-        train_encoder_decoder(&collapsed_data_vec, &encoder, &decoder, &parameters, &args)?;
+    let scores = train_encoder_decoder(
+        &collapsed_data_vec,
+        &encoder,
+        &decoder,
+        &parameters,
+        &args,
+        &feature_selections,
+    )?;
 
     info!("Writing down the model parameters");
 
-    let gene_names = data_stack.row_names()?;
+    // Get gene names - use selected names if feature selection was applied
+    let gene_names: Vec<Box<str>> = data_stack
+        .stack
+        .iter()
+        .zip(&feature_selections)
+        .map(|(dv, sel)| -> anyhow::Result<Vec<Box<str>>> {
+            if let Some(sel) = sel {
+                Ok(sel.selected_names.clone())
+            } else {
+                dv.row_names()
+            }
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     let dictionaries = decoder
         .get_dictionary()?
@@ -435,7 +521,13 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
 
     info!("Writing down the latent states");
 
-    let z_nk = evaluate_latent_by_encoder(&data_stack, &encoder, &collapsed_data_vec, &args)?;
+    let z_nk = evaluate_latent_by_encoder(
+        &data_stack,
+        &encoder,
+        &collapsed_data_vec,
+        &args,
+        &feature_selections,
+    )?;
     let cell_names = data_stack.column_names()?;
     z_nk.to_parquet(
         Some(&cell_names),
@@ -452,6 +544,7 @@ fn evaluate_latent_by_encoder<Enc>(
     encoder: &Enc,
     collapsed_vec: &[CollapsedOut],
     args: &JointTopicArgs,
+    feature_selections: &[Option<FeatureSelection>],
 ) -> anyhow::Result<Mat>
 where
     Enc: MultimodalEncoderModuleT + Send + Sync,
@@ -490,16 +583,27 @@ where
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
+    let arc_sel = Arc::new(feature_selections);
     let mut chunks = jobs
         .par_iter()
         .progress_count(njobs)
         .map(|&block| match args.adj_method {
-            AdjMethod::Residual => {
-                evalulate_with_residuals(block, data_stack, arc_enc.clone(), &dev, delta.as_ref())
-            }
-            AdjMethod::Batch => {
-                evalulate_with_batch(block, data_stack, arc_enc.clone(), &dev, delta.as_ref())
-            }
+            AdjMethod::Residual => evalulate_with_residuals(
+                block,
+                data_stack,
+                arc_enc.clone(),
+                &dev,
+                delta.as_ref(),
+                arc_sel.clone(),
+            ),
+            AdjMethod::Batch => evalulate_with_batch(
+                block,
+                data_stack,
+                arc_enc.clone(),
+                &dev,
+                delta.as_ref(),
+                arc_sel.clone(),
+            ),
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
@@ -524,6 +628,7 @@ fn evalulate_with_batch<Enc>(
     encoder: Arc<&Enc>,
     dev: &Device,
     delta_bd_vec: &[Option<Tensor>],
+    feature_selections: Arc<&[Option<FeatureSelection>]>,
 ) -> anyhow::Result<(usize, Mat)>
 where
     Enc: MultimodalEncoderModuleT,
@@ -533,11 +638,17 @@ where
     let x_vec = data_stack
         .stack
         .iter()
-        .map(|dv| -> anyhow::Result<Tensor> {
-            Ok(dv
-                .read_columns_tensor(lb..ub)?
-                .to_device(dev)?
-                .transpose(0, 1)?)
+        .zip(feature_selections.iter())
+        .map(|(dv, sel)| -> anyhow::Result<Tensor> {
+            let x = dv.read_columns_tensor(lb..ub)?;
+            let x = if let Some(sel) = sel {
+                let indices =
+                    Tensor::from_iter(sel.selected_indices.iter().map(|&i| i as u32), dev)?;
+                x.index_select(&indices, 0)?
+            } else {
+                x
+            };
+            Ok(x.to_device(dev)?.transpose(0, 1)?)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
@@ -545,7 +656,8 @@ where
         .stack
         .iter()
         .zip(delta_bd_vec)
-        .map(|(dv, delta)| {
+        .zip(feature_selections.iter())
+        .map(|((dv, delta), sel)| {
             delta
                 .as_ref()
                 .map(|delta| -> anyhow::Result<Tensor> {
@@ -554,7 +666,15 @@ where
                         .into_iter()
                         .map(|j| j as u32);
                     let batches = Tensor::from_iter(batches, dev)?;
-                    Ok(delta.index_select(&batches, 0)?)
+                    let selected_delta = delta.index_select(&batches, 0)?;
+                    // Also select features from delta if feature selection is active
+                    if let Some(sel) = sel {
+                        let indices =
+                            Tensor::from_iter(sel.selected_indices.iter().map(|&i| i as u32), dev)?;
+                        Ok(selected_delta.index_select(&indices, 1)?)
+                    } else {
+                        Ok(selected_delta)
+                    }
                 })
                 .transpose()
         })
@@ -571,6 +691,7 @@ fn evalulate_with_residuals<Enc>(
     encoder: Arc<&Enc>,
     dev: &Device,
     delta_bd_vec: &[Option<Tensor>],
+    feature_selections: Arc<&[Option<FeatureSelection>]>,
 ) -> anyhow::Result<(usize, Mat)>
 where
     Enc: MultimodalEncoderModuleT,
@@ -580,11 +701,17 @@ where
     let x_vec = data_stack
         .stack
         .iter()
-        .map(|dv| -> anyhow::Result<Tensor> {
-            Ok(dv
-                .read_columns_tensor(lb..ub)?
-                .to_device(dev)?
-                .transpose(0, 1)?)
+        .zip(feature_selections.iter())
+        .map(|(dv, sel)| -> anyhow::Result<Tensor> {
+            let x = dv.read_columns_tensor(lb..ub)?;
+            let x = if let Some(sel) = sel {
+                let indices =
+                    Tensor::from_iter(sel.selected_indices.iter().map(|&i| i as u32), dev)?;
+                x.index_select(&indices, 0)?
+            } else {
+                x
+            };
+            Ok(x.to_device(dev)?.transpose(0, 1)?)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
@@ -592,7 +719,8 @@ where
         .stack
         .iter()
         .zip(delta_bd_vec)
-        .map(|(dv, delta)| {
+        .zip(feature_selections.iter())
+        .map(|((dv, delta), sel)| {
             delta
                 .as_ref()
                 .map(|delta| -> anyhow::Result<Tensor> {
@@ -601,7 +729,15 @@ where
                         .into_iter()
                         .map(|j| j as u32);
                     let groups = Tensor::from_iter(groups, dev)?;
-                    Ok(delta.index_select(&groups, 0)?)
+                    let selected_delta = delta.index_select(&groups, 0)?;
+                    // Also select features from delta if feature selection is active
+                    if let Some(sel) = sel {
+                        let indices =
+                            Tensor::from_iter(sel.selected_indices.iter().map(|&i| i as u32), dev)?;
+                        Ok(selected_delta.index_select(&indices, 1)?)
+                    } else {
+                        Ok(selected_delta)
+                    }
                 })
                 .transpose()
         })
@@ -648,6 +784,7 @@ fn train_encoder_decoder<Enc, Dec>(
     decoder: &Dec,
     parameters: &candle_nn::VarMap,
     args: &JointTopicArgs,
+    feature_selections: &[Option<FeatureSelection>],
 ) -> anyhow::Result<TrainScores>
 where
     Enc: MultimodalEncoderModuleT,
@@ -679,36 +816,57 @@ where
 
         let input = collapsed_data_vec
             .iter()
-            .map(|x| -> anyhow::Result<Mat> {
-                Ok(x.mu_observed
+            .zip(feature_selections)
+            .map(|(x, sel)| -> anyhow::Result<Mat> {
+                let mat = x
+                    .mu_observed
                     .posterior_sample()?
                     .sum_to_one_columns()
-                    .scale(args.column_sum_norm)
-                    .transpose())
+                    .scale(args.column_sum_norm);
+                let mat = if let Some(sel) = sel {
+                    mat.select_rows(&sel.selected_indices)
+                } else {
+                    mat
+                };
+                Ok(mat.transpose())
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         let input_null = collapsed_data_vec
             .iter()
-            .map(|x| -> anyhow::Result<Option<Mat>> {
+            .zip(feature_selections)
+            .map(|(x, sel)| -> anyhow::Result<Option<Mat>> {
                 x.mu_residual
                     .as_ref()
-                    .map(|y| Ok(y.posterior_sample()?.transpose()))
+                    .map(|y| {
+                        let mat = y.posterior_sample()?;
+                        let mat = if let Some(sel) = sel {
+                            mat.select_rows(&sel.selected_indices)
+                        } else {
+                            mat
+                        };
+                        Ok(mat.transpose())
+                    })
                     .transpose()
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         let output = collapsed_data_vec
             .iter()
-            .map(|x| -> anyhow::Result<Option<Mat>> {
+            .zip(feature_selections)
+            .map(|(x, sel)| -> anyhow::Result<Option<Mat>> {
                 Ok(x.mu_adjusted
                     .as_ref()
                     .map(|y| y.posterior_sample())
                     .transpose()?
                     .map(|y| {
-                        y.sum_to_one_columns()
-                            .scale(args.column_sum_norm)
-                            .transpose()
+                        let mat = y.sum_to_one_columns().scale(args.column_sum_norm);
+                        let mat = if let Some(sel) = sel {
+                            mat.select_rows(&sel.selected_indices)
+                        } else {
+                            mat
+                        };
+                        mat.transpose()
                     }))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
