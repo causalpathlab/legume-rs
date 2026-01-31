@@ -1,4 +1,4 @@
-use crate::deconv::SusieDeconv;
+use crate::deconv::{BiSusieDeconv, SusieDeconv};
 use crate::embed_common::*;
 use matrix_util::common_io::*;
 
@@ -8,6 +8,16 @@ use fnv::FnvHashMap as HashMap;
 use fnv::FnvHashSet as HashSet;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use rand::SeedableRng;
+
+/// Model type for topic annotation
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum AnnotationModel {
+    /// Standard SuSiE: sparse in annotation dimension only
+    #[default]
+    Susie,
+    /// Bi-directional SuSiE: sparse in both annotation and topic dimensions
+    BiSusie,
+}
 
 #[derive(Args, Debug)]
 pub struct AnnotateTopicArgs {
@@ -112,6 +122,17 @@ pub struct AnnotateTopicArgs {
 		     Prints additional information during execution."
     )]
     verbose: bool,
+
+    #[arg(
+        long,
+        short = 'M',
+        default_value = "bi-susie",
+        help = "Model type for annotation.",
+        long_help = "Model type for annotation:\n\
+             - susie: Standard SuSiE, sparse in annotation dimension only\n\
+             - bi-susie: Bi-directional SuSiE, sparse in both dimensions (recommended)"
+    )]
+    model: AnnotationModel,
 }
 
 pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
@@ -163,9 +184,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
         nnz_features
     );
 
-    // 3. Build SuSiE-Poisson deconvolution model
-    use rand_distr::{Distribution, Poisson};
-
+    // 3. Build deconvolution model
     let dev = candle_core::Device::Cpu;
     let parameters = candle_nn::VarMap::new();
     let param_builder =
@@ -173,14 +192,80 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
 
     let x_ga = membership_ga.to_tensor(&dev)?;
 
-    let model = SusieDeconv::new(
-        x_ga,
-        log_dict_dk.ncols(),
-        args.susie_components,
-        args.prior_var,
-        args.num_samples,
-        param_builder,
-    )?;
+    info!("Using {:?} model", args.model);
+
+    // Train and get PIP based on model type
+    let pip_mat = match args.model {
+        AnnotationModel::Susie => {
+            let model = SusieDeconv::new(
+                x_ga,
+                log_dict_dk.ncols(),
+                args.susie_components,
+                args.prior_var,
+                args.num_samples,
+                param_builder,
+            )?;
+            run_training(&model, &parameters, args, &log_dict_dk, &dev)?
+        }
+        AnnotationModel::BiSusie => {
+            let model = BiSusieDeconv::new(
+                x_ga,
+                log_dict_dk.ncols(),
+                args.susie_components,
+                args.prior_var,
+                args.num_samples,
+                param_builder,
+            )?;
+            run_training(&model, &parameters, args, &log_dict_dk, &dev)?
+        }
+    };
+
+    // 5. Output results
+    let pip_file = format!("{}.pip.parquet", args.out);
+    let cell_annot_file = format!("{}.annotation.parquet", args.out);
+
+    pip_mat.to_parquet(Some(&annot_names), Some(&topic_names), &pip_file)?;
+
+    // Cell annotation = PIP × topic_proportions, then normalize
+    let topic_tn = topic_nt.transpose().sum_to_one_columns();
+    let topic_annot = (&pip_mat * topic_tn).sum_to_one_columns().transpose();
+    topic_annot.to_parquet(Some(&cell_names), Some(&annot_names), &cell_annot_file)?;
+
+    Ok(())
+}
+
+/// Trait for deconvolution models
+trait DeconvModel {
+    fn loss(&self, y_gt: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor>;
+    fn pip(&self) -> candle_core::Result<candle_core::Tensor>;
+}
+
+impl DeconvModel for SusieDeconv {
+    fn loss(&self, y_gt: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
+        SusieDeconv::loss(self, y_gt)
+    }
+    fn pip(&self) -> candle_core::Result<candle_core::Tensor> {
+        SusieDeconv::pip(self)
+    }
+}
+
+impl DeconvModel for BiSusieDeconv {
+    fn loss(&self, y_gt: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
+        BiSusieDeconv::loss(self, y_gt)
+    }
+    fn pip(&self) -> candle_core::Result<candle_core::Tensor> {
+        BiSusieDeconv::pip(self)
+    }
+}
+
+fn run_training<M: DeconvModel>(
+    model: &M,
+    parameters: &candle_nn::VarMap,
+    args: &AnnotateTopicArgs,
+    log_dict_dk: &Mat,
+    dev: &candle_core::Device,
+) -> anyhow::Result<Mat> {
+    use rand_distr::{Distribution, Poisson};
 
     let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate)?;
 
@@ -190,7 +275,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
         pb.set_draw_target(ProgressDrawTarget::hidden());
     }
 
-    // 4. Training loop
+    // Training loop
     for epoch in 0..args.epochs {
         // Sample Y[g,t] ~ Poisson(β[g,t] * N)
         let mut rng = rand::rngs::StdRng::seed_from_u64(epoch as u64 + 1);
@@ -201,7 +286,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
                     .unwrap()
                     .sample(&mut rng)
             })
-            .to_tensor(&dev)?;
+            .to_tensor(dev)?;
 
         let loss = model.loss(&y_gt)?;
         adam.backward_step(&loss)?;
@@ -215,21 +300,9 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
 
     pb.finish_and_clear();
 
-    // 5. Output results
-    let pip_file = format!("{}.pip.parquet", args.out);
-    let cell_annot_file = format!("{}.annotation.parquet", args.out);
-
     // Get PIP (Posterior Inclusion Probabilities) - annotation x topic
     let pip = model.pip()?;
-    let pip_mat = Mat::from_tensor(&pip)?;
-    pip_mat.to_parquet(Some(&annot_names), Some(&topic_names), &pip_file)?;
-
-    // Cell annotation = PIP × topic_proportions, then normalize
-    let topic_tn = topic_nt.transpose().sum_to_one_columns();
-    let topic_annot = (&pip_mat * topic_tn).sum_to_one_columns().transpose();
-    topic_annot.to_parquet(Some(&cell_names), Some(&annot_names), &cell_annot_file)?;
-
-    Ok(())
+    Ok(Mat::from_tensor(&pip)?)
 }
 
 fn read_mat(file_path: &str) -> anyhow::Result<MatWithNames<Mat>> {
