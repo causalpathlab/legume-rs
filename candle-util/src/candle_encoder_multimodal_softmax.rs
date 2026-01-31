@@ -20,6 +20,7 @@ pub struct LogSoftmaxMultimodalEncoder {
 }
 
 impl MultimodalEncoderModuleT for LogSoftmaxMultimodalEncoder {
+    /// Returns (prob, kl) where prob is on the probability simplex
     fn forward_t(
         &self,
         x_nd_vec: &[Tensor],
@@ -27,7 +28,7 @@ impl MultimodalEncoderModuleT for LogSoftmaxMultimodalEncoder {
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
         let (z_nk, kl) = self.latent_gaussian_with_kl(x_nd_vec, x0_nd_vec, train)?;
-        Ok((ops::log_softmax(&z_nk, z_nk.rank() - 1)?, kl))
+        Ok((ops::softmax(&z_nk, z_nk.rank() - 1)?, kl))
     }
 
     fn dim_latent(&self) -> usize {

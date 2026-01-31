@@ -34,9 +34,9 @@ impl TopicDecoder {
 }
 
 impl DecoderModuleT for TopicDecoder {
+    /// Input z_nk is already on the probability simplex (from softmax/sparsemax)
     fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
-        let theta_nk = z_nk.exp()?;
-        self.dictionary.forward(&theta_nk)
+        self.dictionary.forward(z_nk)
     }
 
     fn get_dictionary(&self) -> Result<Tensor> {
@@ -64,6 +64,66 @@ impl DecoderModuleT for TopicDecoder {
         // let llik = llik(x_nd, &logits_nd)?.broadcast_sub(&penalty)?;
         let llik = llik(x_nd, &logits_nd)?;
         Ok((logits_nd, llik))
+    }
+
+    fn dim_obs(&self) -> usize {
+        self.n_features
+    }
+
+    fn dim_latent(&self) -> usize {
+        self.n_topics
+    }
+}
+
+////////////////////////////////
+// Sparse Topic Model Decoder //
+////////////////////////////////
+
+pub struct SparseTopicDecoder {
+    n_features: usize,
+    n_topics: usize,
+    dictionary: SparsemaxLinear,
+}
+
+impl SparseTopicDecoder {
+    /// Create a sparse topic decoder using sparsemax for gene distributions
+    pub fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
+        let dictionary = sparsemax_linear(n_topics, n_features, vs.pp("dictionary"))?;
+
+        Ok(Self {
+            n_features,
+            n_topics,
+            dictionary,
+        })
+    }
+
+    pub fn dictionary(&self) -> &SparsemaxLinear {
+        &self.dictionary
+    }
+}
+
+impl DecoderModuleT for SparseTopicDecoder {
+    /// Input z_nk is already on the probability simplex (from softmax/sparsemax)
+    fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
+        self.dictionary.forward(z_nk)
+    }
+
+    fn get_dictionary(&self) -> Result<Tensor> {
+        self.dictionary.weight_dk()
+    }
+
+    fn forward_with_llik<LlikFn>(
+        &self,
+        z_nk: &Tensor,
+        x_nd: &Tensor,
+        llik: &LlikFn,
+    ) -> Result<(Tensor, Tensor)>
+    where
+        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
+    {
+        let recon_nd = self.forward(z_nk)?;
+        let llik = llik(x_nd, &recon_nd)?;
+        Ok((recon_nd, llik))
     }
 
     fn dim_obs(&self) -> usize {
