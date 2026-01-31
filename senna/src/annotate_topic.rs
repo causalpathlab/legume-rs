@@ -1,5 +1,6 @@
 use crate::deconv::{BiSusieDeconv, SusieDeconv};
 use crate::embed_common::*;
+use crate::pseudobulk_topic::{compute_pseudobulk_by_topic, TopicWeightStrategy};
 use matrix_util::common_io::*;
 
 use candle_nn::AdamW;
@@ -59,6 +60,28 @@ pub struct AnnotateTopicArgs {
     marker_file: Box<str>,
 
     #[arg(
+        short = 'd',
+        long = "data",
+        help = "Expression data files (.h5 or .zarr)",
+        long_help = "Optional expression data files for pseudobulk aggregation.\n\
+		     When provided, computes pseudobulk by topic (weighted by topic proportions)\n\
+		     instead of using the gene dictionary directly.\n\
+		     Only marker genes are included in the pseudobulk."
+    )]
+    data_files: Option<Vec<Box<str>>>,
+
+    #[arg(
+        long,
+        default_value_t = true,
+        help = "Use hard assignment for pseudobulk (argmax instead of soft weights)",
+        long_help = "When computing pseudobulk, use hard assignment (argmax) instead of soft weights.\n\
+		     With soft weights, each cell's expression is spread across all topics proportionally.\n\
+		     With hard assignment, each cell is assigned to its top topic only,\n\
+		     which gives cleaner topic-specific expression patterns."
+    )]
+    pseudobulk_hard: bool,
+
+    #[arg(
         long,
         short = 'i',
         default_value_t = 500,
@@ -101,10 +124,25 @@ pub struct AnnotateTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Prior variance for effect sizes."
+        value_delimiter = ',',
+        default_values_t = vec![0.1, 1.0, 10.0],
+        help = "Prior variance(s) for effect sizes (comma-separated for grid search).",
+        long_help = "Prior variance(s) for effect sizes.\n\
+		     If multiple values are provided (comma-separated), performs grid search\n\
+		     and selects the best prior variance based on ELBO.\n\
+		     Example: --prior-var 0.1,1.0,10.0"
     )]
-    prior_var: f32,
+    prior_var: Vec<f32>,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Number of epochs for KL annealing (0 to disable).",
+        long_help = "Number of epochs over which to linearly anneal KL weight from 0 to 1.\n\
+		     KL annealing helps prevent posterior collapse and improves training stability.\n\
+		     Set to 0 to disable annealing (default). A common choice is epochs/2."
+    )]
+    kl_anneal_epochs: usize,
 
     #[arg(
         long,
@@ -135,6 +173,14 @@ pub struct AnnotateTopicArgs {
              - bi-susie: Bi-directional SuSiE, sparse in both dimensions (recommended)"
     )]
     model: AnnotationModel,
+}
+
+/// Training data bundle
+struct TrainingData {
+    /// Gene × topic data matrix (log dictionary or normalized pseudobulk)
+    data: Mat,
+    /// Gene × annotation membership matrix
+    membership: Mat,
 }
 
 pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
@@ -186,51 +232,207 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
         nnz_features
     );
 
-    // 3. Build deconvolution model
-    let dev = candle_core::Device::Cpu;
-    let parameters = candle_nn::VarMap::new();
-    let param_builder =
-        candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
+    // 3. Prepare training data: either from pseudobulk or gene dictionary
+    let (training_data, use_pseudobulk) = if let Some(data_files) = &args.data_files {
+        // Compute pseudobulk by topic weighted by topic proportions
+        let weight_strategy = if args.pseudobulk_hard {
+            info!("Computing pseudobulk with hard assignment (argmax)...");
+            TopicWeightStrategy::Hard
+        } else {
+            info!("Computing pseudobulk with soft weights...");
+            TopicWeightStrategy::Soft
+        };
 
-    let x_ga = membership_ga.to_tensor(&dev)?;
+        // Collect marker genes for filtering
+        let marker_genes: HashSet<Box<str>> = read_marker_gene_info(&args.marker_file)?
+            .keys()
+            .cloned()
+            .collect();
+
+        let (pseudobulk_row_names, pseudobulk_gt) = compute_pseudobulk_by_topic(
+            data_files,
+            &cell_names,
+            &topic_nt,
+            Some(&marker_genes),
+            weight_strategy,
+        )?;
+
+        // Build membership matrix on the pseudobulk rows
+        let AnnotInfo {
+            membership_ga: pb_membership,
+            annot_names: pb_annot_names,
+        } = build_annotation_matrix(&args.marker_file, &pseudobulk_row_names)?;
+
+        // Verify annotation names match (they should since we used the same marker file)
+        if pb_annot_names != annot_names {
+            info!(
+                "Warning: annotation names differ between dictionary and pseudobulk.\n\
+                 Using pseudobulk annotations."
+            );
+        }
+
+        // Normalize pseudobulk:
+        // 1. log1p to stabilize expression values
+        // 2. sum_to_one_rows: normalize each gene across topics (removes gene-level bias)
+        // 3. sum_to_one_columns + log: convert to log-probabilities per topic
+        let log_pseudobulk = pseudobulk_gt.map(|x| (1.0 + x).ln());
+        let row_norm = log_pseudobulk.sum_to_one_rows();
+        let normalized = row_norm.sum_to_one_columns().map(|x| x.max(1e-10).ln());
+
+        info!(
+            "Pseudobulk data: {} genes × {} topics (row+col normalized to log-prob)",
+            normalized.nrows(),
+            normalized.ncols()
+        );
+
+        // Store the membership matrix for later use
+        (TrainingData {
+            data: normalized,
+            membership: pb_membership,
+        }, true)
+    } else {
+        // Use gene dictionary directly
+        (TrainingData {
+            data: log_dict_dk.clone(),
+            membership: membership_ga.clone(),
+        }, false)
+    };
+
+    // 4. Build and train deconvolution model(s)
+    // If multiple prior_var values provided, try each and select best by ELBO
+    let dev = candle_core::Device::Cpu;
+    let x_ga = training_data.membership.to_tensor(&dev)?;
 
     info!("Using {:?} model", args.model);
 
-    // Train and get PIP based on model type
-    let pip_mat = match args.model {
-        AnnotationModel::Susie => {
-            let model = SusieDeconv::new(
-                x_ga,
-                log_dict_dk.ncols(),
-                args.susie_components,
-                args.prior_var,
-                args.num_samples,
-                param_builder,
-            )?;
-            run_training(&model, &parameters, args, &log_dict_dk, &dev)?
+    let pip_mat = if args.prior_var.len() == 1 {
+        // Single prior_var: train directly
+        let prior_var = args.prior_var[0];
+        let parameters = candle_nn::VarMap::new();
+        let param_builder =
+            candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
+
+        match args.model {
+            AnnotationModel::Susie => {
+                let model = SusieDeconv::new(
+                    x_ga,
+                    training_data.data.ncols(),
+                    args.susie_components,
+                    prior_var,
+                    args.num_samples,
+                    param_builder,
+                )?;
+                run_training(&model, &parameters, args, &training_data.data, &dev, use_pseudobulk)?.0
+            }
+            AnnotationModel::BiSusie => {
+                let model = BiSusieDeconv::new(
+                    x_ga,
+                    training_data.data.ncols(),
+                    args.susie_components,
+                    prior_var,
+                    args.num_samples,
+                    param_builder,
+                )?;
+                run_training(&model, &parameters, args, &training_data.data, &dev, use_pseudobulk)?.0
+            }
+            AnnotationModel::BiSusieSparsemax => {
+                let model = BiSusieDeconv::with_sparsemax(
+                    x_ga,
+                    training_data.data.ncols(),
+                    args.susie_components,
+                    prior_var,
+                    args.num_samples,
+                    param_builder,
+                )?;
+                run_training(&model, &parameters, args, &training_data.data, &dev, use_pseudobulk)?.0
+            }
         }
-        AnnotationModel::BiSusie => {
-            let model = BiSusieDeconv::new(
-                x_ga,
-                log_dict_dk.ncols(),
-                args.susie_components,
-                args.prior_var,
-                args.num_samples,
-                param_builder,
-            )?;
-            run_training(&model, &parameters, args, &log_dict_dk, &dev)?
+    } else {
+        // Multiple prior_var values: model averaging with ELBO weights
+        info!(
+            "Model averaging over {} prior_var values: {:?}",
+            args.prior_var.len(),
+            args.prior_var
+        );
+
+        let mut pips: Vec<Mat> = Vec::new();
+        let mut elbos: Vec<f32> = Vec::new();
+
+        for &prior_var in &args.prior_var {
+            info!("Training with prior_var = {}", prior_var);
+
+            let parameters = candle_nn::VarMap::new();
+            let param_builder =
+                candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
+
+            let (pip, final_loss) = match args.model {
+                AnnotationModel::Susie => {
+                    let model = SusieDeconv::new(
+                        x_ga.clone(),
+                        training_data.data.ncols(),
+                        args.susie_components,
+                        prior_var,
+                        args.num_samples,
+                        param_builder,
+                    )?;
+                    run_training(&model, &parameters, args, &training_data.data, &dev, use_pseudobulk)?
+                }
+                AnnotationModel::BiSusie => {
+                    let model = BiSusieDeconv::new(
+                        x_ga.clone(),
+                        training_data.data.ncols(),
+                        args.susie_components,
+                        prior_var,
+                        args.num_samples,
+                        param_builder,
+                    )?;
+                    run_training(&model, &parameters, args, &training_data.data, &dev, use_pseudobulk)?
+                }
+                AnnotationModel::BiSusieSparsemax => {
+                    let model = BiSusieDeconv::with_sparsemax(
+                        x_ga.clone(),
+                        training_data.data.ncols(),
+                        args.susie_components,
+                        prior_var,
+                        args.num_samples,
+                        param_builder,
+                    )?;
+                    run_training(&model, &parameters, args, &training_data.data, &dev, use_pseudobulk)?
+                }
+            };
+
+            let elbo = -final_loss; // loss is -ELBO
+            info!("  prior_var = {} -> ELBO = {:.2}", prior_var, elbo);
+
+            pips.push(pip);
+            elbos.push(elbo);
         }
-        AnnotationModel::BiSusieSparsemax => {
-            let model = BiSusieDeconv::with_sparsemax(
-                x_ga,
-                log_dict_dk.ncols(),
-                args.susie_components,
-                args.prior_var,
-                args.num_samples,
-                param_builder,
-            )?;
-            run_training(&model, &parameters, args, &log_dict_dk, &dev)?
+
+        // Compute softmax weights from ELBOs
+        let max_elbo = elbos.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let exp_elbos: Vec<f32> = elbos.iter().map(|&e| (e - max_elbo).exp()).collect();
+        let sum_exp: f32 = exp_elbos.iter().sum();
+        let weights: Vec<f32> = exp_elbos.iter().map(|&e| e / sum_exp).collect();
+
+        // Log weights
+        for (&prior_var, &w) in args.prior_var.iter().zip(weights.iter()) {
+            info!("  prior_var = {} -> weight = {:.3}", prior_var, w);
         }
+
+        // Weighted average of PIPs
+        let n_rows = pips[0].nrows();
+        let n_cols = pips[0].ncols();
+        let mut avg_pip = Mat::zeros(n_rows, n_cols);
+
+        for (pip, &w) in pips.iter().zip(weights.iter()) {
+            for i in 0..n_rows {
+                for j in 0..n_cols {
+                    avg_pip[(i, j)] += w * pip[(i, j)];
+                }
+            }
+        }
+
+        avg_pip
     };
 
     // 5. Output results
@@ -350,12 +552,24 @@ fn display_annotation_histogram(annot: &Mat, annot_names: &[Box<str>]) {
 /// Trait for deconvolution models
 trait DeconvModel {
     fn loss(&self, y_gt: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor>;
+    fn loss_with_kl_weight(
+        &self,
+        y_gt: &candle_core::Tensor,
+        kl_weight: f32,
+    ) -> candle_core::Result<candle_core::Tensor>;
     fn pip(&self) -> candle_core::Result<candle_core::Tensor>;
 }
 
 impl DeconvModel for SusieDeconv {
     fn loss(&self, y_gt: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
         SusieDeconv::loss(self, y_gt)
+    }
+    fn loss_with_kl_weight(
+        &self,
+        y_gt: &candle_core::Tensor,
+        kl_weight: f32,
+    ) -> candle_core::Result<candle_core::Tensor> {
+        SusieDeconv::loss_with_kl_weight(self, y_gt, kl_weight)
     }
     fn pip(&self) -> candle_core::Result<candle_core::Tensor> {
         SusieDeconv::pip(self)
@@ -366,18 +580,27 @@ impl DeconvModel for BiSusieDeconv {
     fn loss(&self, y_gt: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
         BiSusieDeconv::loss(self, y_gt)
     }
+    fn loss_with_kl_weight(
+        &self,
+        y_gt: &candle_core::Tensor,
+        kl_weight: f32,
+    ) -> candle_core::Result<candle_core::Tensor> {
+        BiSusieDeconv::loss_with_kl_weight(self, y_gt, kl_weight)
+    }
     fn pip(&self) -> candle_core::Result<candle_core::Tensor> {
         BiSusieDeconv::pip(self)
     }
 }
 
+/// Returns (PIP matrix, average loss after annealing)
 fn run_training<M: DeconvModel>(
     model: &M,
     parameters: &candle_nn::VarMap,
     args: &AnnotateTopicArgs,
-    log_dict_dk: &Mat,
+    data_gt: &Mat,
     dev: &candle_core::Device,
-) -> anyhow::Result<Mat> {
+    _use_pseudobulk: bool,
+) -> anyhow::Result<(Mat, f32)> {
     use rand_distr::{Distribution, Poisson};
 
     let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate)?;
@@ -388,34 +611,68 @@ fn run_training<M: DeconvModel>(
         pb.set_draw_target(ProgressDrawTarget::hidden());
     }
 
+    // KL annealing parameters
+    let use_kl_annealing = args.kl_anneal_epochs > 0;
+    let annealing_done_epoch = args.kl_anneal_epochs;
+
+    // Track losses after annealing for averaging
+    let mut post_anneal_losses: Vec<f32> = Vec::new();
+
     // Training loop
     for epoch in 0..args.epochs {
-        // Sample Y[g,t] ~ Poisson(β[g,t] * N)
+        // Sample Y[g,t] ~ Poisson(rate)
         let mut rng = rand::rngs::StdRng::seed_from_u64(epoch as u64 + 1);
-        // log_dict_dk contains log-probabilities, exp and scale for Poisson rate
-        let y_gt = log_dict_dk
+
+        // Both pseudobulk and dictionary are now in log-probability space
+        // Use the same scale for Poisson sampling
+        let scale = args.column_sum_norm;
+
+        let y_gt = data_gt
             .map(|x| {
-                Poisson::new(x.exp() * args.column_sum_norm)
-                    .unwrap()
-                    .sample(&mut rng)
+                let rate = (x.exp() * scale).max(1e-10);
+                Poisson::new(rate as f64).unwrap().sample(&mut rng) as f32
             })
             .to_tensor(dev)?;
 
-        let loss = model.loss(&y_gt)?;
+        // Compute loss with optional KL annealing
+        let loss = if use_kl_annealing {
+            let kl_weight = (epoch as f32 / args.kl_anneal_epochs as f32).min(1.0);
+            model.loss_with_kl_weight(&y_gt, kl_weight)?
+        } else {
+            model.loss(&y_gt)?
+        };
+
         adam.backward_step(&loss)?;
         let loss_val: f32 = loss.to_scalar()?;
         pb.inc(1);
 
+        // Accumulate losses after annealing is complete
+        if epoch >= annealing_done_epoch {
+            post_anneal_losses.push(loss_val);
+        }
+
         if args.verbose {
-            info!("[{}] loss={:.2}", epoch, loss_val);
+            if use_kl_annealing && epoch < args.kl_anneal_epochs {
+                let kl_weight = (epoch as f32 / args.kl_anneal_epochs as f32).min(1.0);
+                info!("[{}] loss={:.2} kl_weight={:.3}", epoch, loss_val, kl_weight);
+            } else {
+                info!("[{}] loss={:.2}", epoch, loss_val);
+            }
         }
     }
 
     pb.finish_and_clear();
 
+    // Compute average loss after annealing (or all losses if no annealing)
+    let avg_loss = if post_anneal_losses.is_empty() {
+        0.0
+    } else {
+        post_anneal_losses.iter().sum::<f32>() / post_anneal_losses.len() as f32
+    };
+
     // Get PIP (Posterior Inclusion Probabilities) - annotation x topic
     let pip = model.pip()?;
-    Ok(Mat::from_tensor(&pip)?)
+    Ok((Mat::from_tensor(&pip)?, avg_loss))
 }
 
 fn read_mat(file_path: &str) -> anyhow::Result<MatWithNames<Mat>> {

@@ -1,7 +1,8 @@
 use crate::embed_common::*;
 use candle_util::cli::regression_likelihood::PoissonLikelihood;
 use candle_util::sgvb::{
-    direct_elbo_loss, BiSusieVar, GaussianPrior, LinearModelSGVB, SGVBConfig, SusieVar,
+    direct_elbo_loss, BiSusieVar, BlackBoxLikelihood, GaussianPrior, LinearModelSGVB, SGVBConfig,
+    SgvbModel, SusieVar,
 };
 use candle_core::{Result, Tensor};
 
@@ -36,6 +37,25 @@ impl SusieDeconv {
     pub fn loss(&self, y_gt: &Tensor) -> Result<Tensor> {
         let likelihood = PoissonLikelihood::new(y_gt.clone());
         direct_elbo_loss(&self.model, &likelihood, self.config.num_samples)
+    }
+
+    /// Compute SGVB loss with KL annealing.
+    ///
+    /// KL annealing gradually increases the KL divergence weight during training,
+    /// which helps prevent posterior collapse and improves training stability.
+    ///
+    /// # Arguments
+    /// * `y_gt` - Target data tensor
+    /// * `kl_weight` - Weight for KL divergence term (0.0 to 1.0)
+    pub fn loss_with_kl_weight(&self, y_gt: &Tensor, kl_weight: f32) -> Result<Tensor> {
+        let likelihood = PoissonLikelihood::new(y_gt.clone());
+        let sample = self.model.sample(self.config.num_samples)?;
+        let llik = likelihood.log_likelihood(&[&sample.eta])?;
+        let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
+        // ELBO with KL annealing: log_lik - β*(log_q - log_prior)
+        let kl_term = (&sample.log_q - &sample.log_prior)?;
+        let elbo = (&llik - kl_term.affine(kl_weight as f64, 0.0)?)?;
+        elbo.mean(0)?.neg()
     }
 
     /// Get posterior inclusion probabilities (PIPs) for each annotation-topic pair.
@@ -105,15 +125,29 @@ impl BiSusieDeconv {
         direct_elbo_loss(&self.model, &likelihood, self.config.num_samples)
     }
 
+    /// Compute SGVB loss with KL annealing.
+    ///
+    /// KL annealing gradually increases the KL divergence weight during training,
+    /// which helps prevent posterior collapse and improves training stability.
+    ///
+    /// # Arguments
+    /// * `y_gt` - Target data tensor
+    /// * `kl_weight` - Weight for KL divergence term (0.0 to 1.0)
+    pub fn loss_with_kl_weight(&self, y_gt: &Tensor, kl_weight: f32) -> Result<Tensor> {
+        let likelihood = PoissonLikelihood::new(y_gt.clone());
+        let sample = self.model.sample(self.config.num_samples)?;
+        let llik = likelihood.log_likelihood(&[&sample.eta])?;
+        let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
+        // ELBO with KL annealing: log_lik - β*(log_q - log_prior)
+        let kl_term = (&sample.log_q - &sample.log_prior)?;
+        let elbo = (&llik - kl_term.affine(kl_weight as f64, 0.0)?)?;
+        elbo.mean(0)?.neg()
+    }
+
     /// Get posterior inclusion probabilities (PIPs) for each annotation-topic pair.
     /// Shape: (n_annotations, n_topics)
     pub fn pip(&self) -> Result<Tensor> {
         self.model.variational.pip()
     }
 
-    /// Get the learned effect matrix mean.
-    /// Shape: (n_annotations, n_topics)
-    pub fn theta_mean(&self) -> Result<Tensor> {
-        self.model.variational.theta_mean()
-    }
 }
