@@ -101,7 +101,7 @@ pub struct AnnotateTopicArgs {
     #[arg(
         short = 'l',
         long,
-        default_value_t = 1e-2,
+        default_value_t = 0.1,
         help = "Learning rate for optimization."
     )]
     learning_rate: f64,
@@ -109,7 +109,7 @@ pub struct AnnotateTopicArgs {
     #[arg(
         long,
         short = 'L',
-        default_value_t = 3,
+        default_value_t = 10,
         help = "Number of SuSiE components (L)."
     )]
     susie_components: usize,
@@ -117,7 +117,7 @@ pub struct AnnotateTopicArgs {
     #[arg(
         long,
         short = 's',
-        default_value_t = 10,
+        default_value_t = 30,
         help = "Number of Monte Carlo samples for SGVB."
     )]
     num_samples: usize,
@@ -136,13 +136,24 @@ pub struct AnnotateTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
-        help = "Number of epochs for KL annealing (0 to disable).",
+        default_value_t = 10,
+        help = "Number of epochs for KL annealing warm-up (0 to disable).",
         long_help = "Number of epochs over which to linearly anneal KL weight from 0 to 1.\n\
-		     KL annealing helps prevent posterior collapse and improves training stability.\n\
-		     Set to 0 to disable annealing (default). A common choice is epochs/2."
+		     KL annealing (warm-up) helps prevent posterior collapse by letting the model\n\
+		     focus on data fitting first, then gradually enforcing the prior.\n\
+		     Set to 0 to disable annealing. A common choice is epochs/2."
     )]
     kl_anneal_epochs: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.01,
+        help = "Minimum max-PIP threshold for including a topic.",
+        long_help = "Topics with max PIP below this threshold are excluded from cell annotation.\n\
+		     This filters out topics that don't map to any known cell type.\n\
+		     Set to 0 to include all topics."
+    )]
+    min_pip: f32,
 
     #[arg(
         long,
@@ -166,11 +177,12 @@ pub struct AnnotateTopicArgs {
     #[arg(
         long,
         short = 'M',
-        default_value = "bi-susie",
+        default_value = "bi-susie-sparsemax",
         help = "Model type for annotation.",
         long_help = "Model type for annotation:\n\
              - susie: Standard SuSiE, sparse in annotation dimension only\n\
-             - bi-susie: Bi-directional SuSiE, sparse in both dimensions (recommended)"
+             - bi-susie: Bi-directional SuSiE with softmax\n\
+             - bi-susie-sparsemax: Bi-directional SuSiE with sparsemax (recommended)"
     )]
     model: AnnotationModel,
 }
@@ -286,16 +298,22 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
         );
 
         // Store the membership matrix for later use
-        (TrainingData {
-            data: normalized,
-            membership: pb_membership,
-        }, true)
+        (
+            TrainingData {
+                data: normalized,
+                membership: pb_membership,
+            },
+            true,
+        )
     } else {
         // Use gene dictionary directly
-        (TrainingData {
-            data: log_dict_dk.clone(),
-            membership: membership_ga.clone(),
-        }, false)
+        (
+            TrainingData {
+                data: log_dict_dk.clone(),
+                membership: membership_ga.clone(),
+            },
+            false,
+        )
     };
 
     // 4. Build and train deconvolution model(s)
@@ -322,7 +340,15 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
                     args.num_samples,
                     param_builder,
                 )?;
-                run_training(&model, &parameters, args, &training_data.data, &dev, use_pseudobulk)?.0
+                run_training(
+                    &model,
+                    &parameters,
+                    args,
+                    &training_data.data,
+                    &dev,
+                    use_pseudobulk,
+                )?
+                .0
             }
             AnnotationModel::BiSusie => {
                 let model = BiSusieDeconv::new(
@@ -333,7 +359,15 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
                     args.num_samples,
                     param_builder,
                 )?;
-                run_training(&model, &parameters, args, &training_data.data, &dev, use_pseudobulk)?.0
+                run_training(
+                    &model,
+                    &parameters,
+                    args,
+                    &training_data.data,
+                    &dev,
+                    use_pseudobulk,
+                )?
+                .0
             }
             AnnotationModel::BiSusieSparsemax => {
                 let model = BiSusieDeconv::with_sparsemax(
@@ -344,7 +378,15 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
                     args.num_samples,
                     param_builder,
                 )?;
-                run_training(&model, &parameters, args, &training_data.data, &dev, use_pseudobulk)?.0
+                run_training(
+                    &model,
+                    &parameters,
+                    args,
+                    &training_data.data,
+                    &dev,
+                    use_pseudobulk,
+                )?
+                .0
             }
         }
     } else {
@@ -375,7 +417,14 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
                         args.num_samples,
                         param_builder,
                     )?;
-                    run_training(&model, &parameters, args, &training_data.data, &dev, use_pseudobulk)?
+                    run_training(
+                        &model,
+                        &parameters,
+                        args,
+                        &training_data.data,
+                        &dev,
+                        use_pseudobulk,
+                    )?
                 }
                 AnnotationModel::BiSusie => {
                     let model = BiSusieDeconv::new(
@@ -386,7 +435,14 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
                         args.num_samples,
                         param_builder,
                     )?;
-                    run_training(&model, &parameters, args, &training_data.data, &dev, use_pseudobulk)?
+                    run_training(
+                        &model,
+                        &parameters,
+                        args,
+                        &training_data.data,
+                        &dev,
+                        use_pseudobulk,
+                    )?
                 }
                 AnnotationModel::BiSusieSparsemax => {
                     let model = BiSusieDeconv::with_sparsemax(
@@ -397,7 +453,14 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
                         args.num_samples,
                         param_builder,
                     )?;
-                    run_training(&model, &parameters, args, &training_data.data, &dev, use_pseudobulk)?
+                    run_training(
+                        &model,
+                        &parameters,
+                        args,
+                        &training_data.data,
+                        &dev,
+                        use_pseudobulk,
+                    )?
                 }
             };
 
@@ -441,9 +504,70 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
 
     pip_mat.to_parquet(Some(&annot_names), Some(&topic_names), &pip_file)?;
 
-    // Cell annotation = PIP × topic_proportions, then normalize
+    // Filter topics by max PIP threshold
+    let n_topics = pip_mat.ncols();
+    let mut topic_mask = vec![true; n_topics];
+    let mut excluded_topics = Vec::new();
+
+    for t in 0..n_topics {
+        let max_pip = (0..pip_mat.nrows())
+            .map(|a| pip_mat[(a, t)])
+            .fold(0.0f32, f32::max);
+        if max_pip < args.min_pip {
+            topic_mask[t] = false;
+            excluded_topics.push((t, max_pip));
+        }
+    }
+
+    let n_included = topic_mask.iter().filter(|&&x| x).count();
+
+    if !excluded_topics.is_empty() {
+        info!(
+            "Excluding {} topics with max PIP < {}: {:?}",
+            excluded_topics.len(),
+            args.min_pip,
+            excluded_topics
+                .iter()
+                .map(|(t, p)| format!("{}({:.3})", topic_names[*t], p))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // Check if any topics remain
+    if n_included == 0 {
+        log::warn!(
+            "All {} topics were excluded (max PIP < {}). \
+             Try lowering --min-pip threshold or adjusting --prior-var.",
+            n_topics,
+            args.min_pip
+        );
+        // Use uniform annotation as fallback
+        let n_annots = annot_names.len();
+        let uniform_prob = 1.0 / n_annots as f32;
+        let topic_annot = Mat::from_fn(cell_names.len(), n_annots, |_, _| uniform_prob);
+        topic_annot.to_parquet(Some(&cell_names), Some(&annot_names), &cell_annot_file)?;
+
+        // Output argmax assignments (will be arbitrary due to uniform probs)
+        let argmax_file = format!("{}.argmax.tsv", args.out);
+        write_argmax_assignments(&topic_annot, &cell_names, &annot_names, &argmax_file)?;
+
+        display_annotation_histogram(&topic_annot, &annot_names);
+        return Ok(());
+    }
+
+    // Apply mask to PIP matrix (zero out excluded topics)
+    let mut pip_filtered = pip_mat.clone();
+    for t in 0..n_topics {
+        if !topic_mask[t] {
+            for a in 0..pip_filtered.nrows() {
+                pip_filtered[(a, t)] = 0.0;
+            }
+        }
+    }
+
+    // Cell annotation = filtered_PIP × topic_proportions, then normalize
     let topic_tn = topic_nt.transpose().sum_to_one_columns();
-    let topic_annot = (&pip_mat * topic_tn).sum_to_one_columns().transpose();
+    let topic_annot = (&pip_filtered * topic_tn).sum_to_one_columns().transpose();
     topic_annot.to_parquet(Some(&cell_names), Some(&annot_names), &cell_annot_file)?;
 
     // Output argmax assignments
@@ -474,7 +598,11 @@ fn write_argmax_assignments(
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .unwrap();
-        writeln!(file, "{}\t{}\t{:.4}", cell_names[i], annot_names[max_idx], max_val)?;
+        writeln!(
+            file,
+            "{}\t{}\t{:.4}",
+            cell_names[i], annot_names[max_idx], max_val
+        )?;
     }
     info!("Wrote argmax assignments to {}", output_file);
     Ok(())
@@ -513,24 +641,24 @@ fn display_annotation_histogram(annot: &Mat, annot_names: &[Box<str>]) {
     sorted_types.sort_by(|&a, &b| type_counts[b].cmp(&type_counts[a]));
 
     let max_count = *type_counts.iter().max().unwrap_or(&1);
-    const MAX_BAR: usize = 30;
+    const MAX_BAR: usize = 20;
 
     // Statistics
     let mean_prob: f32 = max_probs.iter().sum::<f32>() / n_cells as f32;
     let above_50 = max_probs.iter().filter(|&&x| x > 0.5).count();
     let above_70 = max_probs.iter().filter(|&&x| x > 0.7).count();
 
-    println!();
-    println!("┌─────────────────────────────────────────────────────────────────┐");
-    println!("│             Annotation Summary ({} cells)                   │", n_cells);
-    println!("├─────────────────────────────────────────────────────────────────┤");
-    println!("│ Max prob: mean={:.3}  >0.5: {} ({:.1}%)  >0.7: {} ({:.1}%)",
-             mean_prob,
-             above_50, 100.0 * above_50 as f32 / n_cells as f32,
-             above_70, 100.0 * above_70 as f32 / n_cells as f32);
-    println!("├─────────────────────────────────────────────────────────────────┤");
-    println!("│ Cell Type            Count    %     Mean Prob                   │");
-    println!("├─────────────────────────────────────────────────────────────────┤");
+    eprintln!();
+    eprintln!("Annotation Summary ({} cells)", n_cells);
+    eprintln!(
+        "  Mean max-prob: {:.3}  >0.5: {} ({:.1}%)  >0.7: {} ({:.1}%)",
+        mean_prob,
+        above_50,
+        100.0 * above_50 as f32 / n_cells as f32,
+        above_70,
+        100.0 * above_70 as f32 / n_cells as f32
+    );
+    eprintln!();
 
     for &ct in &sorted_types {
         if type_counts[ct] == 0 {
@@ -541,12 +669,18 @@ fn display_annotation_histogram(annot: &Mat, annot_names: &[Box<str>]) {
         let pct = 100.0 * count as f32 / n_cells as f32;
         let mean_p = type_prob_sum[ct] / count as f32;
         let bar_len = ((count as f64 / max_count as f64) * MAX_BAR as f64).round() as usize;
-        let bar = "█".repeat(bar_len.max(1));
+        let bar = "#".repeat(bar_len.max(1));
 
-        println!("│ {:16} {:>6} {:>5.1}%  {:.3}  {}",
-                 &name[..name.len().min(16)], count, pct, mean_p, bar);
+        eprintln!(
+            "  {:20} {:>6} {:>5.1}%  {:.3}  {}",
+            &name[..name.len().min(20)],
+            count,
+            pct,
+            mean_p,
+            bar
+        );
     }
-    println!("└─────────────────────────────────────────────────────────────────┘");
+    eprintln!();
 }
 
 /// Trait for deconvolution models
@@ -634,7 +768,7 @@ fn run_training<M: DeconvModel>(
             })
             .to_tensor(dev)?;
 
-        // Compute loss with optional KL annealing
+        // Compute loss with optional KL annealing (warm-up: 0 → 1)
         let loss = if use_kl_annealing {
             let kl_weight = (epoch as f32 / args.kl_anneal_epochs as f32).min(1.0);
             model.loss_with_kl_weight(&y_gt, kl_weight)?
@@ -654,7 +788,10 @@ fn run_training<M: DeconvModel>(
         if args.verbose {
             if use_kl_annealing && epoch < args.kl_anneal_epochs {
                 let kl_weight = (epoch as f32 / args.kl_anneal_epochs as f32).min(1.0);
-                info!("[{}] loss={:.2} kl_weight={:.3}", epoch, loss_val, kl_weight);
+                info!(
+                    "[{}] loss={:.2} kl_weight={:.3}",
+                    epoch, loss_val, kl_weight
+                );
             } else {
                 info!("[{}] loss={:.2}", epoch, loss_val);
             }
