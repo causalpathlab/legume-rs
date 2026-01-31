@@ -13,10 +13,12 @@ use rand::SeedableRng;
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 pub enum AnnotationModel {
     /// Standard SuSiE: sparse in annotation dimension only
-    #[default]
     Susie,
-    /// Bi-directional SuSiE: sparse in both annotation and topic dimensions
+    /// Bi-directional SuSiE: sparse in both annotation and topic dimensions (softmax)
     BiSusie,
+    /// Bi-directional SuSiE with sparsemax for exact zeros (recommended)
+    #[default]
+    BiSusieSparsemax,
 }
 
 #[derive(Args, Debug)]
@@ -218,6 +220,17 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
             )?;
             run_training(&model, &parameters, args, &log_dict_dk, &dev)?
         }
+        AnnotationModel::BiSusieSparsemax => {
+            let model = BiSusieDeconv::with_sparsemax(
+                x_ga,
+                log_dict_dk.ncols(),
+                args.susie_components,
+                args.prior_var,
+                args.num_samples,
+                param_builder,
+            )?;
+            run_training(&model, &parameters, args, &log_dict_dk, &dev)?
+        }
     };
 
     // 5. Output results
@@ -231,7 +244,107 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
     let topic_annot = (&pip_mat * topic_tn).sum_to_one_columns().transpose();
     topic_annot.to_parquet(Some(&cell_names), Some(&annot_names), &cell_annot_file)?;
 
+    // Output argmax assignments
+    let argmax_file = format!("{}.argmax.tsv", args.out);
+    write_argmax_assignments(&topic_annot, &cell_names, &annot_names, &argmax_file)?;
+
+    // Show annotation summary histogram
+    display_annotation_histogram(&topic_annot, &annot_names);
+
     Ok(())
+}
+
+/// Write argmax cell type assignment for each cell
+fn write_argmax_assignments(
+    annot: &Mat,
+    cell_names: &[Box<str>],
+    annot_names: &[Box<str>],
+    output_file: &str,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(output_file)?;
+    writeln!(file, "cell\tcell_type\tprobability")?;
+
+    for i in 0..annot.nrows() {
+        let row = annot.row(i);
+        let (max_idx, max_val) = row
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .unwrap();
+        writeln!(file, "{}\t{}\t{:.4}", cell_names[i], annot_names[max_idx], max_val)?;
+    }
+    info!("Wrote argmax assignments to {}", output_file);
+    Ok(())
+}
+
+/// Display histogram of cell type assignments
+fn display_annotation_histogram(annot: &Mat, annot_names: &[Box<str>]) {
+    let n_cells = annot.nrows();
+    let n_types = annot.ncols();
+
+    // Compute max probability and argmax per cell
+    let mut max_probs = Vec::with_capacity(n_cells);
+    let mut assignments = Vec::with_capacity(n_cells);
+
+    for i in 0..n_cells {
+        let row = annot.row(i);
+        let (max_idx, max_val) = row
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .unwrap();
+        max_probs.push(*max_val);
+        assignments.push(max_idx);
+    }
+
+    // Count per cell type
+    let mut type_counts = vec![0usize; n_types];
+    let mut type_prob_sum = vec![0.0f32; n_types];
+    for (i, &ct) in assignments.iter().enumerate() {
+        type_counts[ct] += 1;
+        type_prob_sum[ct] += max_probs[i];
+    }
+
+    // Sort by count descending
+    let mut sorted_types: Vec<usize> = (0..n_types).collect();
+    sorted_types.sort_by(|&a, &b| type_counts[b].cmp(&type_counts[a]));
+
+    let max_count = *type_counts.iter().max().unwrap_or(&1);
+    const MAX_BAR: usize = 30;
+
+    // Statistics
+    let mean_prob: f32 = max_probs.iter().sum::<f32>() / n_cells as f32;
+    let above_50 = max_probs.iter().filter(|&&x| x > 0.5).count();
+    let above_70 = max_probs.iter().filter(|&&x| x > 0.7).count();
+
+    println!();
+    println!("┌─────────────────────────────────────────────────────────────────┐");
+    println!("│             Annotation Summary ({} cells)                   │", n_cells);
+    println!("├─────────────────────────────────────────────────────────────────┤");
+    println!("│ Max prob: mean={:.3}  >0.5: {} ({:.1}%)  >0.7: {} ({:.1}%)",
+             mean_prob,
+             above_50, 100.0 * above_50 as f32 / n_cells as f32,
+             above_70, 100.0 * above_70 as f32 / n_cells as f32);
+    println!("├─────────────────────────────────────────────────────────────────┤");
+    println!("│ Cell Type            Count    %     Mean Prob                   │");
+    println!("├─────────────────────────────────────────────────────────────────┤");
+
+    for &ct in &sorted_types {
+        if type_counts[ct] == 0 {
+            continue;
+        }
+        let name = &annot_names[ct];
+        let count = type_counts[ct];
+        let pct = 100.0 * count as f32 / n_cells as f32;
+        let mean_p = type_prob_sum[ct] / count as f32;
+        let bar_len = ((count as f64 / max_count as f64) * MAX_BAR as f64).round() as usize;
+        let bar = "█".repeat(bar_len.max(1));
+
+        println!("│ {:16} {:>6} {:>5.1}%  {:.3}  {}",
+                 &name[..name.len().min(16)], count, pct, mean_p, bar);
+    }
+    println!("└─────────────────────────────────────────────────────────────────┘");
 }
 
 /// Trait for deconvolution models

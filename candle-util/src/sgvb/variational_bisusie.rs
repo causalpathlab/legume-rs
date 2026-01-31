@@ -2,14 +2,25 @@ use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 
 use super::traits::VariationalDistribution;
+use crate::candle_aux_layers::sparsemax;
+
+/// Selection function for BiSusieVar.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum SelectionFn {
+    /// Standard softmax - always positive probabilities
+    #[default]
+    Softmax,
+    /// Sparsemax - can produce exact zeros for cleaner sparsity
+    Sparsemax,
+}
 
 /// Bi-directional Susie (Sum of Single Effects) variational distribution.
 ///
 /// θ[p,k] = Σ_l α_p[l,p] * α_k[l,k] * β[l]
 ///
 /// where:
-/// - α_p[l,:] = softmax over predictors (dim P) - each component selects one predictor
-/// - α_k[l,:] = softmax over outcomes (dim K) - each component selects one outcome
+/// - α_p[l,:] = softmax/sparsemax over predictors (dim P) - each component selects one predictor
+/// - α_k[l,:] = softmax/sparsemax over outcomes (dim K) - each component selects one outcome
 /// - β[l] ~ N(μ[l], σ[l]²) - effect size per component
 ///
 /// This creates an outer-product structure where each component l selects
@@ -29,10 +40,12 @@ pub struct BiSusieVar {
     num_predictors: usize,
     /// Number of outcomes K
     num_outcomes: usize,
+    /// Selection function (softmax or sparsemax)
+    selection_fn: SelectionFn,
 }
 
 impl BiSusieVar {
-    /// Create a new Bi-directional Susie variational distribution.
+    /// Create a new Bi-directional Susie variational distribution with softmax.
     ///
     /// # Arguments
     /// * `vb` - VarBuilder for creating trainable parameters
@@ -44,6 +57,27 @@ impl BiSusieVar {
         num_components: usize,
         num_predictors: usize,
         num_outcomes: usize,
+    ) -> Result<Self> {
+        Self::with_selection_fn(vb, num_components, num_predictors, num_outcomes, SelectionFn::Softmax)
+    }
+
+    /// Create a new Bi-directional Susie with sparsemax for exact zeros.
+    pub fn with_sparsemax(
+        vb: VarBuilder,
+        num_components: usize,
+        num_predictors: usize,
+        num_outcomes: usize,
+    ) -> Result<Self> {
+        Self::with_selection_fn(vb, num_components, num_predictors, num_outcomes, SelectionFn::Sparsemax)
+    }
+
+    /// Create a new Bi-directional Susie with specified selection function.
+    pub fn with_selection_fn(
+        vb: VarBuilder,
+        num_components: usize,
+        num_predictors: usize,
+        num_outcomes: usize,
+        selection_fn: SelectionFn,
     ) -> Result<Self> {
         let logits_predictor = vb.get_with_hints(
             (num_components, num_predictors),
@@ -80,17 +114,24 @@ impl BiSusieVar {
             num_components,
             num_predictors,
             num_outcomes,
+            selection_fn,
         })
     }
 
-    /// Get predictor selection probabilities α_p = softmax(logits_predictor, dim=1).
+    /// Get predictor selection probabilities α_p.
     pub fn alpha_predictor(&self) -> Result<Tensor> {
-        candle_nn::ops::softmax(&self.logits_predictor, 1)
+        match self.selection_fn {
+            SelectionFn::Softmax => candle_nn::ops::softmax(&self.logits_predictor, 1),
+            SelectionFn::Sparsemax => sparsemax(&self.logits_predictor),
+        }
     }
 
-    /// Get outcome selection probabilities α_k = softmax(logits_outcome, dim=1).
+    /// Get outcome selection probabilities α_k.
     pub fn alpha_outcome(&self) -> Result<Tensor> {
-        candle_nn::ops::softmax(&self.logits_outcome, 1)
+        match self.selection_fn {
+            SelectionFn::Softmax => candle_nn::ops::softmax(&self.logits_outcome, 1),
+            SelectionFn::Sparsemax => sparsemax(&self.logits_outcome),
+        }
     }
 
     /// Get joint selection probabilities for each (predictor, outcome) pair per component.

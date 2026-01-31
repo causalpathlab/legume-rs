@@ -63,6 +63,7 @@ pub struct BiSusieDeconv {
 }
 
 impl BiSusieDeconv {
+    /// Create BiSusieDeconv with softmax selection.
     pub fn new(
         x_ga: Tensor,
         n_topics: usize,
@@ -74,6 +75,24 @@ impl BiSusieDeconv {
         let n_annotations = x_ga.dim(1)?;
         let bisusie =
             BiSusieVar::new(vb.pp("bisusie"), n_components, n_annotations, n_topics)?;
+        let prior = GaussianPrior::new(vb.pp("prior"), prior_var)?;
+        let config = SGVBConfig::new(num_samples);
+        let model = LinearModelSGVB::from_variational(bisusie, x_ga, prior, config.clone());
+        Ok(Self { model, config })
+    }
+
+    /// Create BiSusieDeconv with sparsemax selection for exact zeros.
+    pub fn with_sparsemax(
+        x_ga: Tensor,
+        n_topics: usize,
+        n_components: usize,
+        prior_var: f32,
+        num_samples: usize,
+        vb: candle_nn::VarBuilder,
+    ) -> anyhow::Result<Self> {
+        let n_annotations = x_ga.dim(1)?;
+        let bisusie =
+            BiSusieVar::with_sparsemax(vb.pp("bisusie"), n_components, n_annotations, n_topics)?;
         let prior = GaussianPrior::new(vb.pp("prior"), prior_var)?;
         let config = SGVBConfig::new(num_samples);
         let model = LinearModelSGVB::from_variational(bisusie, x_ga, prior, config.clone());

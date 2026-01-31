@@ -56,5 +56,5 @@ pub use sgvb::{compute_elbo, direct_elbo_loss, sgvb_loss, SGVBConfig};
 pub use traits::{BlackBoxLikelihood, Prior, SgvbModel, SgvbSample, VariationalDistribution};
 pub use variational_gaussian::GaussianVar;
 pub use variational_io::{SparseVariationalOutput, VariationalOutput};
-pub use variational_bisusie::BiSusieVar;
+pub use variational_bisusie::{BiSusieVar, SelectionFn};
 pub use variational_susie::SusieVar;
