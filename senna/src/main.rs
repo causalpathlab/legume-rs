@@ -57,7 +57,8 @@ enum Commands {
         long_about = "Annotate what each topic would mean using marker features/genes.\n\
 		      For each topic, we regress a feature vector of the dictionary\n\
 		      on the marker gene membership matrix (a design matrix)\n\
-		      to estimate the probability of assigning cell/group types.\n"
+		      to estimate the probability of assigning cell/group types.\n",
+        visible_alias = "annotate"
     )]
     AnnotateTopic(AnnotateTopicArgs),
 

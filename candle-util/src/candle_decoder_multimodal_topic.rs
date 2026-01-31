@@ -45,12 +45,9 @@ impl MultimodalDecoderModuleT for MultimodalTopicDecoder {
             .collect::<Result<Vec<Tensor>>>()
     }
 
+    /// Input z_nk is already on the probability simplex (from softmax/sparsemax)
     fn forward(&self, z_nk: &Tensor) -> Result<Vec<Tensor>> {
-        let theta_nk = z_nk.exp()?;
-        self.dictionary
-            .iter()
-            .map(|x| x.forward(&theta_nk))
-            .collect()
+        self.dictionary.iter().map(|x| x.forward(z_nk)).collect()
     }
 
     fn forward_with_llik<LlikFn>(

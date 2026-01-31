@@ -31,10 +31,10 @@ where
             let z_lnvar = self.z_lnvar.forward(&h)?.clamp(min_lv, max_lv)?;
             let kl = gaussian_kl_loss(&z_mean, &z_lnvar)?;
             let z = if train {
-                z_mean
-            } else {
                 let eps = Tensor::randn_like(&z_mean, 0., 1.)?;
                 (z_mean + (z_lnvar * 0.5)?.exp()?.mul(&eps)?)?
+            } else {
+                z_mean
             };
             Ok((z, kl))
         } else {
@@ -199,4 +199,51 @@ pub fn stack_relu_linear(
         candle_nn::Activation::Relu,
     );
     Ok(ret)
+}
+
+///////////////////////////////////
+// Sparsemax activation function //
+///////////////////////////////////
+
+/// Sparsemax activation function (Martins & Astudillo, 2016)
+///
+/// Projects input onto the probability simplex, producing sparse outputs.
+/// Unlike softmax, can output exact zeros.
+///
+/// * `z` - input tensor of shape (batch, dim)
+///
+/// Returns tensor of same shape with values in [0, 1] summing to 1 along last dim.
+///
+pub fn sparsemax(z: &Tensor) -> Result<Tensor> {
+    let z = z.contiguous()?; // ensure contiguous for sort_last_dim
+    let dim = z.rank() - 1;
+    let (z_sorted, _indices) = z.sort_last_dim(false)?; // descending order
+    let k = z.dim(dim)?;
+    let device = z.device();
+    let dtype = z.dtype();
+
+    // Compute cumsum of sorted values
+    let cumsum = z_sorted.cumsum(dim)?;
+
+    // Compute 1 + i * z_sorted[i] for i = 1..k
+    let range = Tensor::arange(1.0, (k + 1) as f64, device)?.to_dtype(dtype)?;
+    // Broadcast range to match z shape
+    let shape: Vec<usize> = (0..z.rank()).map(|i| if i == dim { k } else { 1 }).collect();
+    let range = range.reshape(shape.as_slice())?;
+    let bound = (z_sorted.broadcast_mul(&range)? + 1.0)?;
+
+    // Find support: where bound > cumsum
+    let support = bound.gt(&cumsum)?;
+
+    // Count support size per row (sum of True values)
+    let support_f = support.to_dtype(dtype)?;
+    let support_size = support_f.sum_keepdim(dim)?;
+
+    // tau = (sum(z_sorted * support) - 1) / support_size
+    let z_sorted_masked = z_sorted.broadcast_mul(&support_f)?;
+    let z_sum_support = z_sorted_masked.sum_keepdim(dim)?;
+    let tau = (z_sum_support - 1.0)?.broadcast_div(&support_size.clamp(1.0, f64::INFINITY)?)?;
+
+    // Output: max(z - tau, 0)
+    z.broadcast_sub(&tau)?.clamp(0.0, f64::INFINITY)
 }

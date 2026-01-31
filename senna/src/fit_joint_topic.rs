@@ -181,12 +181,33 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
+        default_value_t = 2,
         help = "Number of inverse autoregressive flow transformations.",
         long_help = "Number of inverse autoregressive flow transformations.\n\
-		     Controls the number of flow steps in the model."
+		     Controls the number of flow steps in the model.\n\
+		     Set to 0 to disable IAF."
     )]
     iaf_trans: usize,
+
+    #[arg(
+        long,
+        default_value_t = 10.0,
+        help = "Initial KL weight for annealing",
+        long_help = "Initial KL weight for annealing schedule.\n\
+		     Start with high KL weight and cool down to 1.0.\n\
+		     Formula: kl_weight = 1 + (init - 1) * exp(-epoch / warmup)\n\
+		     Set to 1.0 to disable annealing."
+    )]
+    kl_weight_init: f64,
+
+    #[arg(
+        long,
+        default_value_t = 200.0,
+        help = "KL annealing warmup epochs",
+        long_help = "Number of epochs for KL weight to decay from init to ~1.\n\
+		     Larger value = slower decay."
+    )]
+    kl_warmup_epochs: f64,
 
     #[arg(
         long,
@@ -701,6 +722,10 @@ where
 
         data_loader.shuffle_minibatch(args.minibatch_size)?;
 
+        // KL annealing: kl_weight = 1 + (init - 1) * exp(-epoch / warmup)
+        let kl_weight = 1.0
+            + (args.kl_weight_init - 1.0) * (-(epoch as f64) / args.kl_warmup_epochs).exp();
+
         for jitter in 0..args.jitter_interval {
             let mut llik_tot = 0f32;
             let mut kl_tot = 0f32;
@@ -719,7 +744,7 @@ where
 
                 let (_, llik) = decoder.forward_with_llik(&z_nk, &y_vec, &topic_likelihood)?;
 
-                let loss = (&kl - &llik)?.mean_all()?;
+                let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
                 adam.backward_step(&loss)?;
 
                 let llik_val = llik.sum_all()?.to_scalar::<f32>()?;

@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::candle_aux_layers::sparsemax;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Module};
 
@@ -234,6 +235,58 @@ pub fn log_softmax_linear_nobias(
     let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
     let ws_dk = vb.get_with_hints((out_dim, in_dim), "logits", init_ws)?;
     Ok(SoftmaxLinear::new(ws_dk, None))
+}
+
+/////////////////////////////
+// Sparsemax linear layer //
+/////////////////////////////
+
+#[derive(Clone, Debug)]
+pub struct SparsemaxLinear {
+    weight_kd: Tensor,
+    bias_1d: Option<Tensor>,
+}
+
+impl SparsemaxLinear {
+    pub fn new(weight_kd: Tensor, bias_1d: Option<Tensor>) -> Self {
+        Self { weight_kd, bias_1d }
+    }
+
+    pub fn weight_dk(&self) -> Result<Tensor> {
+        sparsemax(&self.weight_kd)?.transpose(0, 1)
+    }
+
+    fn biased_weight_kd(&self) -> Result<Tensor> {
+        match &self.bias_1d {
+            Some(bias) => sparsemax(&self.weight_kd.broadcast_add(bias)?),
+            _ => sparsemax(&self.weight_kd),
+        }
+    }
+}
+
+impl Module for SparsemaxLinear {
+    fn forward(&self, h_nk: &Tensor) -> Result<Tensor> {
+        let w_kd = match *h_nk.dims() {
+            [b1, b2, _, _] => self.biased_weight_kd()?.broadcast_left((b1, b2))?,
+            [bsize, _, _] => self.biased_weight_kd()?.broadcast_left(bsize)?,
+            _ => self.biased_weight_kd()?,
+        };
+        h_nk.matmul(&w_kd)
+    }
+}
+
+/// create a sparsemax linear layer
+/// `output_nd <- input_nk * t(β_dk)`
+/// where β_dk = sparsemax(weight_kd) is sparse and sums to 1
+pub fn sparsemax_linear(
+    in_dim: usize,
+    out_dim: usize,
+    vb: candle_nn::VarBuilder,
+) -> Result<SparsemaxLinear> {
+    let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
+    let ws_kd = vb.get_with_hints((in_dim, out_dim), "logits", init_ws)?;
+    let b_1d = vb.get_with_hints((1, out_dim), "logit_bias", candle_nn::init::ZERO)?;
+    Ok(SparsemaxLinear::new(ws_kd, Some(b_1d)))
 }
 
 /////////////////////////
