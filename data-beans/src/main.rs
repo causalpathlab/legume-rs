@@ -1082,13 +1082,13 @@ pub struct RunSqueezeArgs {
     )]
     interactive: bool,
 
-    /// output file for merged squeezed data
+    /// output file for squeezed data
     #[arg(
         short,
         long,
-        help = "Output file for squeezed data (merges all inputs into one fileset)",
-        long_help = "Save squeezed data to a new merged fileset instead of modifying in-place. \n\
-		     All input files will be squeezed and merged into {output}.{backend}. \n\
+        help = "Output file for squeezed data",
+        long_help = "Save squeezed data to a new file instead of modifying in-place. \n\
+		     With multiple inputs, all files will be squeezed and merged into {output}.{backend}. \n\
 		     If not specified, modifies files in-place (requires confirmation in interactive mode)."
     )]
     output: Option<Box<str>>,
