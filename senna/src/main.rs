@@ -13,7 +13,6 @@ mod fit_topic;
 mod fit_visualize;
 mod interactive_markers;
 mod visualization_alg;
-mod pseudobulk_topic;
 mod senna_input;
 
 use annotate_topic::*;
