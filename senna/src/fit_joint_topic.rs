@@ -191,17 +191,6 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 2,
-        help = "Number of inverse autoregressive flow transformations.",
-        long_help = "Number of inverse autoregressive flow transformations.\n\
-		     Controls the number of flow steps in the model.\n\
-		     Set to 0 to disable IAF.\n\
-		     Note: Mutually exclusive with --use-sparsemax."
-    )]
-    iaf_trans: usize,
-
-    #[arg(
-        long,
         default_value_t = 10.0,
         help = "Initial KL weight for annealing",
         long_help = "Initial KL weight for annealing schedule.\n\
