@@ -61,6 +61,7 @@ zip = { version = "6" }
 statrs = { version = "0.18" }
 coitrees = { version = "0.4" }
 clustering = { version = "0.2.1", features = ["parallel"] }
+colored = { version = "2" }
 
 data-beans = { path = "data-beans"}
 data-beans-alg = { path = "data-beans-alg"}

@@ -2,8 +2,8 @@ use crate::deconv::{BiSusieDeconv, SusieDeconv};
 use crate::embed_common::*;
 use crate::interactive_markers::{
     auto_suggest_markers, augment_membership_matrix, find_candidate_markers,
-    print_augmentation_summary, read_suggestions_json, run_interactive_round,
-    save_augmented_markers, write_candidates_json, MarkerDatabase,
+    flexible_gene_match, print_augmentation_summary, read_suggestions_json,
+    run_interactive_round, save_augmented_markers, write_candidates_json, MarkerDatabase,
 };
 use crate::pseudobulk_topic::{compute_pseudobulk_by_topic, TopicWeightStrategy};
 use matrix_util::common_io::*;
@@ -23,6 +23,18 @@ pub enum AnnotationModel {
     /// Bi-directional SuSiE: sparse in both annotation and topic dimensions (softmax)
     #[default]
     BiSusie,
+}
+
+/// Design matrix normalization method
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum DesignNorm {
+    /// No normalization
+    None,
+    /// Column scaling (divide by column sum or std) - default
+    #[default]
+    Scale,
+    /// L2 normalization (unit length columns)
+    L2,
 }
 
 #[derive(Args, Debug)]
@@ -56,8 +68,13 @@ pub struct AnnotateTopicArgs {
 		     Each line contains two names: \n\
 		     (1) gene and \n\
 		     (2) cell type \n\
-		     (tab-separated or comma-separated). \n\
-		     We allow space but will replace it with '_'.",
+		     (tab-separated or comma-separated). \n\n\
+		     Cell type names: spaces will be replaced with '_' (e.g., 'T cell' -> 'T_cell').\n\n\
+		     Gene name matching is flexible (case-insensitive, underscore-delimited):\n\
+		     - 'CD8A' matches 'ENSG00000153563_CD8A' (suffix)\n\
+		     - 'CD8A' matches 'CD8A_variant1' (prefix)\n\
+		     - 'CD8A' matches 'chr1_CD8A_isoform2' (segment)\n\
+		     You can use simple gene symbols even if your dictionary has Ensembl IDs.",
         required = true
     )]
     marker_file: Box<str>,
@@ -88,7 +105,7 @@ pub struct AnnotateTopicArgs {
         long,
         short = 'i',
         default_value_t = 1000,
-        help = "Number of training epochs (after KL annealing if enabled)."
+        help = "Number of training epochs after KL annealing (total = kl-anneal-epochs + epochs)."
     )]
     epochs: usize,
 
@@ -96,8 +113,11 @@ pub struct AnnotateTopicArgs {
         short = 'c',
         long,
         default_value_t = 1e4,
-        help = "Column sum normalization scale.",
-        long_help = "Column sum normalization to scale the model parameters."
+        help = "Scale factor for the observation matrix Y.",
+        long_help = "Scale factor applied to the observation matrix Y (gene × topic data).\n\
+		     The data is transformed as: Y = exp(log_data) * scale.\n\
+		     Higher values increase the magnitude of observations.\n\
+		     Does not affect the membership matrix (derived from marker genes)."
     )]
     column_sum_norm: f32,
 
@@ -173,8 +193,13 @@ pub struct AnnotateTopicArgs {
         short,
         required = true,
         help = "Output header",
-        long_help = "Output header for results.\n\
-		     Specify the output file or prefix for generated files."
+        long_help = "Output prefix for generated files.\n\n\
+		     Output files:\n\
+		     - {out}.pip.parquet: PIP matrix (annotation × topic)\n\
+		     - {out}.annotation.parquet: Cell annotations (cell × annotation probabilities)\n\
+		     - {out}.argmax.tsv: Argmax cell type assignment per cell\n\
+		     - {out}.augmented_markers.tsv: Augmented markers (if --interactive used)\n\
+		     - {out}.auto_suggestions.json: Auto-suggestions (if --marker-db with --suggest-only)"
     )]
     out: Box<str>,
 
@@ -197,6 +222,19 @@ pub struct AnnotateTopicArgs {
              - bi-susie: Bi-directional SuSiE, sparse in both annotation and topic dimensions"
     )]
     model: AnnotationModel,
+
+    #[arg(
+        long,
+        default_value = "scale",
+        help = "Design matrix normalization method.",
+        long_help = "Normalization applied to design matrix X (gene × annotation membership) before fitting.\n\n\
+             Methods:\n\
+             - scale: Column scaling (divide by column statistics) - balances annotations with different marker counts\n\
+             - l2: L2 normalization (unit length columns) - standard for regression\n\
+             - none: No normalization - use raw 0/1 membership values\n\n\
+             Default 'scale' helps prevent cell types with many markers from dominating."
+    )]
+    design_norm: DesignNorm,
 
     #[arg(
         long,
@@ -229,7 +267,8 @@ pub struct AnnotateTopicArgs {
         help = "Apply marker suggestions from JSON file.",
         long_help = "Apply LLM-validated marker suggestions from JSON.\n\n\
              Expected format: [{\"gene\": \"ENSG..._SYM\", \"celltype\": \"Cell_Type\"}, ...]\n\
-             Gene names must match dictionary rows exactly.\n\
+             Gene name matching is flexible (same as --marker-genes):\n\
+             you can use symbols like 'CD8A' or full names like 'ENSG00000153563_CD8A'.\n\
              Cell type names must match marker file annotations.\n\n\
              Workflow: --suggest-only out.json -> LLM review -> --apply-suggestions validated.json"
     )]
@@ -240,7 +279,10 @@ pub struct AnnotateTopicArgs {
         help = "Reference marker database for auto-suggestions (e.g., PanglaoDB TSV).",
         long_help = "Path to a reference marker gene database (TSV with gene and cell_type columns).\n\
              When provided, candidates matching known markers are auto-accepted.\n\
-             Unmatched candidates are shown for manual review (if --interactive) or skipped."
+             Unmatched candidates are shown for manual review (if --interactive) or skipped.\n\n\
+             Matching behavior:\n\
+             - Genes: flexible matching (same as --marker-genes)\n\
+             - Cell types: fuzzy substring matching to handle name variations"
     )]
     marker_db: Option<Box<str>>,
 
@@ -414,7 +456,20 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
 
     // Closure: train model with given membership matrix, return PIP
     let train_model = |membership: &Mat| -> anyhow::Result<Mat> {
-        let x_ga = membership.to_tensor(&dev)?;
+        // Apply design matrix normalization
+        let normalized_membership = match args.design_norm {
+            DesignNorm::None => membership.clone(),
+            DesignNorm::Scale => {
+                info!("Applying column scaling to design matrix");
+                membership.scale_columns()
+            }
+            DesignNorm::L2 => {
+                info!("Applying L2 normalization to design matrix");
+                membership.normalize_columns()
+            }
+        };
+
+        let x_ga = normalized_membership.to_tensor(&dev)?;
 
         if args.prior_var.len() == 1 {
             let prior_var = args.prior_var[0];
@@ -1028,26 +1083,9 @@ fn build_annotation_matrix(
     let mut row_to_type_vec = vec![];
 
     for (ri, rn) in row_names.iter().enumerate() {
-        let rn_lower = rn.to_lowercase();
-
-        // Check each marker gene
+        // Check each marker gene using flexible matching
         for (marker_gene, cell_type) in gene_to_type.iter() {
-            let marker_lower = marker_gene.to_lowercase();
-
-            // 1. Exact match
-            if rn_lower == marker_lower {
-                row_to_type_vec.push((ri, cell_type));
-                continue;
-            }
-
-            // 2. Match at word boundary: row ends with "_MARKER" or "MARKER_"
-            let suffix_match = rn_lower.ends_with(&format!("_{}", marker_lower));
-            let prefix_match = rn_lower.starts_with(&format!("{}_", marker_lower));
-
-            // 3. Match marker as a complete segment between underscores
-            let segment_match = rn_lower.contains(&format!("_{}_", marker_lower));
-
-            if suffix_match || prefix_match || segment_match {
+            if flexible_gene_match(marker_gene, rn) {
                 row_to_type_vec.push((ri, cell_type));
             }
         }
