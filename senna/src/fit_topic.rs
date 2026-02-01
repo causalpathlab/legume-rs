@@ -208,21 +208,11 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        default_value_t = 10.0,
-        help = "Initial KL weight for annealing",
-        long_help = "Initial KL weight for annealing schedule.\n\
-		     Start with high KL weight and cool down to 1.0.\n\
-		     Formula: kl_weight = 1 + (init - 1) * exp(-epoch / warmup)\n\
-		     Set to 1.0 to disable annealing."
-    )]
-    kl_weight_init: f64,
-
-    #[arg(
-        long,
         default_value_t = 200.0,
         help = "KL annealing warmup epochs",
-        long_help = "Number of epochs for KL weight to decay from init to ~1.\n\
-		     Larger value = slower decay."
+        long_help = "Number of epochs for KL weight to warm up from 0 to 1.\n\
+		     Standard warm-up: kl_weight = 1 - exp(-epoch / warmup)\n\
+		     Larger value = slower warm-up. Set to 0 to disable annealing."
     )]
     kl_warmup_epochs: f64,
 
@@ -706,9 +696,13 @@ where
 
         data_loader.shuffle_minibatch(args.minibatch_size)?;
 
-        // KL annealing: kl_weight = 1 + (init - 1) * exp(-epoch / warmup)
-        let kl_weight = 1.0
-            + (args.kl_weight_init - 1.0) * (-(epoch as f64) / args.kl_warmup_epochs).exp();
+        // KL annealing (standard warm-up): kl_weight = 1 - exp(-epoch / warmup)
+        // Starts at 0, increases to 1 as training progresses
+        let kl_weight = if args.kl_warmup_epochs > 0.0 {
+            1.0 - (-(epoch as f64) / args.kl_warmup_epochs).exp()
+        } else {
+            1.0
+        };
 
         for jitter in 0..args.jitter_interval {
             let mut llik_tot = 0f32;
