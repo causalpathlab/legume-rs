@@ -141,6 +141,39 @@ pub trait MatElemOps {
     fn log1p(&self) -> Self::Mat;
 }
 
+/// TF-IDF (Term Frequency–Inverse Document Frequency) transformation
+///
+/// A numerical statistic reflecting how important a word (term) is to a document
+/// in a collection or corpus. (Wikipedia)
+///
+/// Treats the matrix as a term-document matrix where:
+/// - Rows are "terms" (e.g., genes, words)
+/// - Columns are "documents" (e.g., cell types, text documents)
+///
+/// **TF-IDF(t, d) = TF(t, d) × IDF(t)**
+///
+/// where:
+/// - TF(t, d) = term frequency of term t in document d (matrix values)
+/// - IDF(t) = log(N / df(t)) = inverse document frequency
+/// - N = total number of documents (columns)
+/// - df(t) = document frequency = number of documents containing term t
+///
+/// Terms appearing in many documents get lower weight; terms specific to few
+/// documents get higher weight.
+pub trait TfIdfOps {
+    type Mat;
+
+    /// Apply TF-IDF transformation
+    ///
+    /// IDF(t) = log(N / (df(t) + 1)) where df(t) = number of non-zero entries in row t
+    fn tfidf(&self) -> Self::Mat;
+
+    /// Apply TF-IDF followed by L2 column normalization
+    ///
+    /// Useful for cosine similarity comparisons between documents (columns)
+    fn tfidf_normalize_columns(&self) -> Self::Mat;
+}
+
 /// Operations to sample random matrices, only works for
 /// `nalgebra::DMatrix` and `ndarray::Array2`
 pub trait SampleOps {
