@@ -803,7 +803,7 @@ where
                 evaluate_with_residuals(block, data_vec, arc_enc.clone(), &dev, delta.as_ref(), arc_sel.clone())
             }
             AdjMethod::Batch => {
-                evalulate_with_batch(block, data_vec, arc_enc.clone(), &dev, delta.as_ref(), arc_sel.clone())
+                evaluate_with_batch(block, data_vec, arc_enc.clone(), &dev, delta.as_ref(), arc_sel.clone())
             }
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -823,7 +823,7 @@ where
     Ok(ret)
 }
 
-fn evalulate_with_batch<Enc>(
+fn evaluate_with_batch<Enc>(
     block: (usize, usize),
     data_vec: &SparseIoVec,
     encoder: Arc<&Enc>,

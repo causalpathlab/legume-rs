@@ -372,8 +372,8 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
             info!(
                 "[{}] log-likelihood: {} {}",
                 epoch + args.jitter_interval,
-                llik_sc.last().ok_or(anyhow::anyhow!("llik"))?,
-                llik_bulk.last().ok_or(anyhow::anyhow!("llik bulk"))?,
+                llik_sc.last().ok_or(anyhow::anyhow!("No SC loss values recorded"))?,
+                llik_bulk.last().ok_or(anyhow::anyhow!("No bulk loss values recorded"))?,
             );
         }
     }
