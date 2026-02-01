@@ -35,7 +35,7 @@ pub struct VisualizeArgs {
 		     {out}.cell_coords.parquet:\n\
 		       Cell coordinates (n_cells × 2 or 3)\n\
 		       Columns: row (cell ID), x, y, [cluster]\n\
-		       Cluster column included if --kmeans is used"
+		       Cluster column included if --clusters is provided"
     )]
     out: Box<str>,
 
@@ -247,15 +247,16 @@ pub struct VisualizeArgs {
 
     #[arg(
         long,
-        help = "Number of k-means clusters for cells",
-        long_help = "Run k-means clustering on cell latent (topic proportions).\n\
-		     Cluster assignments are added to the output parquet.\n\
-		     Default: number of topics in latent. Set to 0 to disable.\n\n\
-		     Note: If clusters are highly imbalanced (>90% in one cluster),\n\
-		     this may indicate topic modeling collapsed to few topics.\n\
-		     Consider checking the .dictionary.parquet for topic diversity."
+        help = "Cluster assignments file (from `senna clustering`)",
+        long_help = "Optional cluster assignments parquet file.\n\
+		     If provided, cluster labels are added to the output cell coordinates.\n\n\
+		     Expected format (from `senna clustering`):\n\
+		     - {prefix}.clusters.parquet: cell × 1 matrix with cluster IDs\n\
+		     - First column: cell names (must match latent file)\n\n\
+		     To generate clusters:\n\
+		     senna clustering -l latent.parquet -k 10 -o clusters"
     )]
-    kmeans: Option<usize>,
+    clusters: Option<Box<str>>,
 }
 
 pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
@@ -331,49 +332,30 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
     let similarity_pp = regularize_similarity(&similarity_pp, 0.01);
 
     // 8. K-means clustering on SVD-projected latent
-    // Do rSVD on PB latent, project cell latent onto V, then cluster
-    // Default k = number of topics; 0 means disabled
-    let num_topics = latent_nk.ncols();
-    let kmeans_k = args.kmeans.unwrap_or(num_topics);
-    let cell_clusters = if kmeans_k > 0 {
-        use matrix_util::clustering::{KmeansArgs, Kmeans};
-        use matrix_util::traits::RandomizedAlgs;
+    // Read cluster assignments if provided
+    let cell_clusters = if let Some(cluster_file) = &args.clusters {
+        info!("Reading cluster assignments from {}...", cluster_file);
+        let MatWithNames {
+            rows: _cluster_cell_names,
+            cols: _,
+            mat: cluster_mat,
+        } = Mat::from_parquet(cluster_file)?;
 
-        // Compute PB latent (P x K matrix)
-        let pb_latent = compute_pb_latent(&latent_nk, &data_vec)?;
-        let n_pb = pb_latent.nrows();
-
-        // rSVD on PB latent to extract principal directions (max rank = 0 means full)
-        let (_u, singular_values, v) = pb_latent.rsvd(0)?;
-        let svd_rank = singular_values.iter().filter(|&&s| s > 1e-10).count();
-        info!("PB latent rSVD: {} PBs × {} topics → rank {}", n_pb, num_topics, svd_rank);
-
-        // Project cell latent onto V: cell_proj = cell_latent * V
-        let cell_proj = &latent_nk * &v.columns(0, svd_rank);
-
-        // Scale columns and run k-means
-        let mut scaled = cell_proj;
-        scaled.scale_columns_inplace();
-        let clusters = scaled.kmeans_rows(KmeansArgs { num_clusters: kmeans_k, max_iter: 100 });
-        info!("Computed k-means clustering with k={} on SVD-projected latent (dim={})", kmeans_k, svd_rank);
-
-        // Warn if clusters are highly imbalanced
-        let n_cells = clusters.len();
-        let mut cluster_counts = vec![0usize; kmeans_k];
-        for &c in &clusters {
-            if c < kmeans_k {
-                cluster_counts[c] += 1;
-            }
-        }
-        let max_cluster_pct = cluster_counts.iter().max().unwrap_or(&0) * 100 / n_cells.max(1);
-        if max_cluster_pct > 80 {
-            info!(
-                "Warning: Cluster imbalance detected (largest cluster has {}% of cells). \
-                 This may indicate topic modeling collapsed to few dominant topics.",
-                max_cluster_pct
+        // Verify that cluster file has same number of cells as latent
+        if cluster_mat.nrows() != latent_nk.nrows() {
+            anyhow::bail!(
+                "Cluster file has {} cells but latent has {} cells",
+                cluster_mat.nrows(),
+                latent_nk.nrows()
             );
         }
 
+        // Extract cluster labels (assume single column with cluster IDs)
+        let clusters: Vec<usize> = (0..cluster_mat.nrows())
+            .map(|i| cluster_mat[(i, 0)] as usize)
+            .collect();
+
+        info!("Loaded {} cluster assignments", clusters.len());
         Some(clusters)
     } else {
         None
