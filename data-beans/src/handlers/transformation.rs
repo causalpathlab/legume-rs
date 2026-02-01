@@ -403,7 +403,9 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
 }
 
 /// Squeeze multiple files and merge into single output
-/// Strategy: Squeeze each to temp, merge temps, cleanup
+///
+/// For Common mode: Squeeze each file first, then find common rows, subset, and merge.
+/// For Union mode: Merge first with union of all rows, then squeeze the merged result.
 fn run_squeeze_and_merge(
     cmd_args: &RunSqueezeArgs,
     mut row_nnz_cutoff: usize,
@@ -412,13 +414,237 @@ fn run_squeeze_and_merge(
     let output_prefix = cmd_args.output.as_ref().unwrap();
     info!("Squeeze and merge mode: {} files -> {}", cmd_args.data_files.len(), output_prefix);
 
-    // Create temp directory in output location using tempfile crate
-    let output_dir = dirname(output_prefix).unwrap_or_else(|| ".".into());
+    // Handle interactive mode for first file to get cutoffs
+    if cmd_args.interactive || cmd_args.show_histogram {
+        let (backend, data_file) = resolve_backend_file(&cmd_args.data_files[0], None)?;
+        let data = open_sparse_matrix(&data_file, &backend)?;
 
-    // Ensure output directory exists
+        let col_stat = collect_column_stat(data.as_ref(), cmd_args.block_size)?;
+        let row_stat = collect_row_stat(data.as_ref(), cmd_args.block_size)?;
+        let row_nnz_vec = row_stat.count_positives();
+        let col_nnz_vec = col_stat.count_positives();
+
+        display_nnz_histogram(
+            &data_file,
+            &row_nnz_vec,
+            &col_nnz_vec,
+            row_nnz_cutoff,
+            col_nnz_cutoff,
+            true,
+            cmd_args.save_histogram.as_deref(),
+        )?;
+
+        if cmd_args.interactive {
+            match prompt_user_action(&row_nnz_vec, &col_nnz_vec, row_nnz_cutoff, col_nnz_cutoff)? {
+                UserAction::Proceed => {
+                    info!("Proceeding with squeeze and merge...");
+                }
+                UserAction::AdjustCutoffs(new_row, new_col) => {
+                    row_nnz_cutoff = new_row;
+                    col_nnz_cutoff = new_col;
+                    info!("Updated cutoffs: row={}, column={}", row_nnz_cutoff, col_nnz_cutoff);
+                }
+                UserAction::Cancel => {
+                    info!("Operation cancelled");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    if cmd_args.dry_run {
+        info!("Dry run complete");
+        return Ok(());
+    }
+
+    match cmd_args.row_align {
+        crate::RowAlignMode::Union => {
+            run_merge_then_squeeze(cmd_args, row_nnz_cutoff, col_nnz_cutoff)
+        }
+        crate::RowAlignMode::Common => {
+            run_squeeze_then_merge(cmd_args, row_nnz_cutoff, col_nnz_cutoff)
+        }
+    }
+}
+
+/// Union mode: Merge first with union of all rows, then squeeze the merged result.
+fn run_merge_then_squeeze(
+    cmd_args: &RunSqueezeArgs,
+    row_nnz_cutoff: usize,
+    col_nnz_cutoff: usize,
+) -> anyhow::Result<()> {
+    use fnv::FnvHashMap as HashMap;
+    use data_beans::sparse_data_visitors::create_jobs;
+    use rayon::prelude::*;
+
+    let output_prefix = cmd_args.output.as_ref().unwrap();
+    info!("Union mode: merge first, then squeeze");
+
+    // Generate unique batch names
+    let batch_names = generate_unique_batch_names(&cmd_args.data_files)?;
+    info!("Batch names: {:?}", batch_names);
+
+    // Step 1: Build union of all row names across all files
+    info!("Building union of row names...");
+    let mut all_row_names: Vec<Box<str>> = Vec::new();
+    let mut row_name_set: std::collections::HashSet<Box<str>> = std::collections::HashSet::new();
+
+    for data_file_arg in &cmd_args.data_files {
+        let (backend, data_file) = resolve_backend_file(data_file_arg, None)?;
+        let data = open_sparse_matrix(&data_file, &backend)?;
+        for row_name in data.row_names()? {
+            if row_name_set.insert(row_name.clone()) {
+                all_row_names.push(row_name);
+            }
+        }
+    }
+    all_row_names.sort();
+    info!("Union contains {} unique rows", all_row_names.len());
+
+    // Create row name to union index mapping
+    let row_to_union_idx: HashMap<Box<str>, u64> = all_row_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.clone(), i as u64))
+        .collect();
+
+    // Step 2: Read triplets from each file and remap row indices
+    info!("Reading and remapping triplets...");
+    let mut all_triplets: Vec<(u64, u64, f32)> = Vec::new();
+    let mut column_names: Vec<Box<str>> = Vec::new();
+    let mut column_batch_names: Vec<Box<str>> = Vec::new();
+    let mut col_offset: u64 = 0;
+
+    for (batch_idx, data_file_arg) in cmd_args.data_files.iter().enumerate() {
+        info!("Processing file {}/{}: {}", batch_idx + 1, cmd_args.data_files.len(), data_file_arg);
+
+        let (backend, data_file) = resolve_backend_file(data_file_arg, None)?;
+        let mut data = open_sparse_matrix(&data_file, &backend)?;
+        data.preload_columns()?;
+
+        let file_row_names = data.row_names()?;
+        let ncols = data.num_columns().unwrap_or(0);
+
+        // Build mapping from file's row index to union row index
+        let file_row_to_union: Vec<u64> = file_row_names
+            .iter()
+            .map(|name| *row_to_union_idx.get(name).unwrap())
+            .collect();
+
+        // Read triplets and remap
+        let jobs = create_jobs(ncols, Some(cmd_args.block_size));
+        let triplets_curr: Vec<(u64, u64, f32)> = jobs
+            .par_iter()
+            .filter_map(|(lb, ub)| {
+                if let Ok((_, _, triplets)) = data.read_triplets_by_columns((*lb..*ub).collect()) {
+                    Some(
+                        triplets
+                            .iter()
+                            .map(|&(i, j, x_ij)| {
+                                let union_row = file_row_to_union[i as usize];
+                                (union_row, j + col_offset, x_ij)
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+
+        all_triplets.extend(triplets_curr);
+
+        // Add column names with batch suffix
+        let batch_name = &batch_names[batch_idx];
+        let file_col_names = data.column_names()?;
+        column_names.extend(
+            file_col_names
+                .into_iter()
+                .map(|x| format!("{}{}{}", x, COLUMN_SEP, batch_name).into_boxed_str()),
+        );
+        column_batch_names.extend(vec![batch_name.clone(); ncols]);
+
+        col_offset += ncols as u64;
+        info!("  Added {} columns, {} triplets", ncols, all_triplets.len());
+    }
+
+    // Step 3: Create merged sparse matrix
+    info!("Creating merged matrix: {} rows x {} columns, {} triplets",
+          all_row_names.len(), column_names.len(), all_triplets.len());
+
+    let (backend, backend_file) = resolve_backend_file(output_prefix, None)?;
+
+    if std::path::Path::new(backend_file.as_ref()).exists() {
+        info!("Removing existing output file: {}", &backend_file);
+        remove_file(&backend_file)?;
+    }
+
+    let mut merged_data = create_sparse_from_triplets(
+        &all_triplets,
+        (all_row_names.len(), column_names.len(), all_triplets.len()),
+        Some(&backend_file),
+        Some(&backend),
+    )?;
+
+    merged_data.register_row_names_vec(&all_row_names);
+    merged_data.register_column_names_vec(&column_names);
+
+    info!("Created merged file: {}", &backend_file);
+
+    // Step 4: Squeeze the merged result
+    info!("Squeezing merged data with cutoffs: row={}, column={}", row_nnz_cutoff, col_nnz_cutoff);
+
+    drop(merged_data); // Close before squeeze
+    let merged_data = open_sparse_matrix(&backend_file, &backend)?;
+
+    squeeze_by_nnz(
+        merged_data.as_ref(),
+        SqueezeCutoffs {
+            row: row_nnz_cutoff,
+            column: col_nnz_cutoff,
+        },
+        cmd_args.block_size,
+        cmd_args.preload,
+    )?;
+
+    // Verify and report
+    let final_data = open_sparse_matrix(&backend_file, &backend)?;
+    info!("After squeeze: {} rows x {} columns",
+          final_data.num_rows().unwrap(),
+          final_data.num_columns().unwrap());
+
+    // Write batch membership file
+    let batch_memb_file = format!("{}.batch.gz", output_prefix);
+    let batch_map: HashMap<Box<str>, Box<str>> = column_names
+        .into_iter()
+        .zip(column_batch_names)
+        .collect();
+    let default_batch = basename(output_prefix)?;
+    let final_col_names = final_data.column_names()?;
+    let final_batch_names: Vec<Box<str>> = final_col_names
+        .iter()
+        .map(|k| batch_map.get(k).unwrap_or(&default_batch).clone())
+        .collect();
+    write_lines(&final_batch_names, &batch_memb_file)?;
+
+    info!("Squeeze and merge (union) complete!");
+    Ok(())
+}
+
+/// Common mode: Squeeze each file first, then find common rows, subset, and merge.
+fn run_squeeze_then_merge(
+    cmd_args: &RunSqueezeArgs,
+    row_nnz_cutoff: usize,
+    col_nnz_cutoff: usize,
+) -> anyhow::Result<()> {
+    let output_prefix = cmd_args.output.as_ref().unwrap();
+    info!("Common mode: squeeze first, then merge common rows");
+
+    // Create temp directory
+    let output_dir = dirname(output_prefix).unwrap_or_else(|| ".".into());
     mkdir(&output_dir)?;
 
-    // Create temp directory within output location
     let temp_dir = tempfile::Builder::new()
         .prefix(".squeeze_temp_")
         .tempdir_in(&*output_dir)?;
@@ -427,7 +653,6 @@ fn run_squeeze_and_merge(
 
     info!("Created temp directory: {}", temp_dir_path);
 
-    // Generate unique batch names from original files
     let batch_names = generate_unique_batch_names(&cmd_args.data_files)?;
     info!("Batch names: {:?}", batch_names);
 
@@ -440,52 +665,9 @@ fn run_squeeze_and_merge(
         let (backend, data_file) = resolve_backend_file(data_file_arg, None)?;
         let data = open_sparse_matrix(&data_file, &backend)?;
 
-        let nrow = data.num_rows().unwrap();
-        let ncol = data.num_columns().unwrap();
-        info!("before squeeze -- data: {} rows x {} columns", nrow, ncol);
+        info!("before squeeze -- data: {} rows x {} columns",
+              data.num_rows().unwrap(), data.num_columns().unwrap());
 
-        // Collect statistics for histogram
-        let col_stat = collect_column_stat(data.as_ref(), cmd_args.block_size)?;
-        let row_stat = collect_row_stat(data.as_ref(), cmd_args.block_size)?;
-        let row_nnz_vec = row_stat.count_positives();
-        let col_nnz_vec = col_stat.count_positives();
-
-        // Show histogram for first file and handle interactive mode
-        if idx == 0 && (cmd_args.show_histogram || cmd_args.interactive) {
-            display_nnz_histogram(
-                &data_file,
-                &row_nnz_vec,
-                &col_nnz_vec,
-                row_nnz_cutoff,
-                col_nnz_cutoff,
-                true,
-                cmd_args.save_histogram.as_deref(),
-            )?;
-
-            if cmd_args.interactive {
-                match prompt_user_action(&row_nnz_vec, &col_nnz_vec, row_nnz_cutoff, col_nnz_cutoff)? {
-                    UserAction::Proceed => {
-                        info!("Proceeding with squeeze and merge...");
-                    }
-                    UserAction::AdjustCutoffs(new_row, new_col) => {
-                        row_nnz_cutoff = new_row;
-                        col_nnz_cutoff = new_col;
-                        info!("Updated cutoffs: row={}, column={}", row_nnz_cutoff, col_nnz_cutoff);
-                    }
-                    UserAction::Cancel => {
-                        info!("Operation cancelled");
-                        return Ok(());
-                    }
-                }
-            }
-        }
-
-        if cmd_args.dry_run {
-            info!("Dry run - would squeeze and merge");
-            continue;
-        }
-
-        // Create temp file for this squeezed data using batch name
         let backend_ext = match backend {
             SparseIoBackend::Zarr => "zarr",
             SparseIoBackend::HDF5 => "h5",
@@ -495,7 +677,6 @@ fn run_squeeze_and_merge(
         info!("Copying to temp: {}", temp_file);
         recursive_copy(&data_file, &temp_file)?;
 
-        // Squeeze the temp file
         let temp_data = open_sparse_matrix(&temp_file, &backend)?;
         squeeze_by_nnz(
             temp_data.as_ref(),
@@ -509,21 +690,14 @@ fn run_squeeze_and_merge(
 
         let squeezed = open_sparse_matrix(&temp_file, &backend)?;
         info!("after squeeze -- data: {} rows x {} columns",
-              squeezed.num_rows().unwrap(),
-              squeezed.num_columns().unwrap());
+              squeezed.num_rows().unwrap(), squeezed.num_columns().unwrap());
 
         temp_files.push(temp_file.into_boxed_str());
     }
 
-    if cmd_args.dry_run {
-        info!("Dry run complete");
-        return Ok(());
-    }
+    // Step 2: Find common rows across squeezed files
+    info!("Finding common rows...");
 
-    // Step 2: Align rows across squeezed files
-    info!("Aligning rows (mode: {:?})...", cmd_args.row_align);
-
-    // Load all squeezed files
     let squeezed_data: Vec<_> = temp_files
         .iter()
         .map(|f| {
@@ -532,14 +706,13 @@ fn run_squeeze_and_merge(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    // Find aligned rows using helper function
     let data_refs: Vec<&dyn SparseIo<IndexIter = Vec<usize>>> =
         squeezed_data.iter().map(|d| d.as_ref()).collect();
-    let aligned_rows = find_aligned_rows(&data_refs, cmd_args.row_align.clone())?;
+    let aligned_rows = find_aligned_rows(&data_refs, crate::RowAlignMode::Common)?;
 
-    info!("Aligned to {} rows across {} files", aligned_rows.len(), temp_files.len());
+    info!("Found {} common rows across {} files", aligned_rows.len(), temp_files.len());
 
-    // Subset each file to aligned rows
+    // Step 3: Subset each file to common rows
     for (idx, temp_file) in temp_files.iter().enumerate() {
         let (backend, _) = resolve_backend_file(temp_file, None)?;
         let mut data = open_sparse_matrix(temp_file, &backend)?;
@@ -556,7 +729,7 @@ fn run_squeeze_and_merge(
         data.subset_columns_rows(None, Some(&row_indices))?;
     }
 
-    // Step 3: Merge aligned files using existing merge logic
+    // Step 4: Merge aligned files
     info!("Merging {} aligned files...", temp_files.len());
 
     let (backend, _) = resolve_backend_file(&temp_files[0], None)?;
@@ -564,7 +737,7 @@ fn run_squeeze_and_merge(
         data_files: temp_files.clone(),
         backend,
         output: cmd_args.output.clone().unwrap(),
-        do_squeeze: false, // Already squeezed
+        do_squeeze: false,
         row_nnz_cutoff: 0,
         column_nnz_cutoff: 0,
         block_size: cmd_args.block_size,
@@ -573,12 +746,10 @@ fn run_squeeze_and_merge(
 
     run_merge_backend(&merge_args)?;
 
-    // Step 4: Clean up - temp directory auto-removed when temp_dir goes out of scope
-    // But we need to keep it alive until merge completes, so we drop it explicitly here
     drop(temp_dir);
     info!("Cleaned up temporary directory");
 
-    info!("Squeeze and merge complete!");
+    info!("Squeeze and merge (common) complete!");
     Ok(())
 }
 
