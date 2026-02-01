@@ -68,10 +68,51 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
             }
         }
     } else {
-        for (id, &nn) in data_vec.num_columns_by_data()?.iter().enumerate() {
-            let data_file = args.data_files[id].clone();
-            let (_dir, base, _ext) = common_io::dir_base_ext(&data_file)?;
-            batch_membership.extend(vec![base; nn]);
+        // Extract batch info from column names and/or file names
+        let num_files = args.data_files.len();
+        let column_counts = data_vec.num_columns_by_data()?;
+
+        for (file_idx, &ncols) in column_counts.iter().enumerate() {
+            let data_file = args.data_files[file_idx].clone();
+            let (_dir, file_base, _ext) = common_io::dir_base_ext(&data_file)?;
+
+            // Get column names for this file's range
+            let col_start: usize = column_counts[..file_idx].iter().copied().sum();
+            let col_end = col_start + ncols;
+            let column_names = data_vec.column_names()?;
+            let file_columns = &column_names[col_start..col_end];
+
+            // Check if column names contain '@' (embedded batch info)
+            let has_embedded_batch = file_columns
+                .first()
+                .map_or(false, |name| name.contains('@'));
+
+            if has_embedded_batch {
+                // Parse batch from column names
+                for col_name in file_columns {
+                    let embedded_batch = col_name
+                        .rsplit('@')
+                        .next()
+                        .unwrap_or(col_name.as_ref());
+
+                    // If multiple files, combine embedded batch with file name
+                    let batch = if num_files > 1 {
+                        format!("{}@{}", embedded_batch, file_base).into_boxed_str()
+                    } else {
+                        embedded_batch.to_string().into_boxed_str()
+                    };
+                    batch_membership.push(batch);
+                }
+                if num_files > 1 {
+                    info!("File {}: combining embedded batch with file name '{}'", file_idx, file_base);
+                } else {
+                    info!("Extracting batch from column names (detected '@' separator)");
+                }
+            } else {
+                // Use file name as batch
+                info!("File {}: using file name '{}' as batch", file_idx, file_base);
+                batch_membership.extend(vec![file_base; ncols]);
+            }
         }
     }
 
