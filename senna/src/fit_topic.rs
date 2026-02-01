@@ -375,18 +375,6 @@ pub struct TopicArgs {
 		     Note: Mutually exclusive with --iaf-trans (IAF will be disabled)."
     )]
     use_sparsemax: bool,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Save pseudobulk data for embedding",
-        long_help = "Save pseudobulk expression and membership for later embedding.\n\
-		     Outputs:\n\
-		     - {out}.pseudobulk.parquet: PB expression (genes × n_pb)\n\
-		     - {out}.pb_latent.parquet: PB topic proportions (n_pb × K)\n\
-		     - {out}.pb_membership.parquet: cell to PB mapping"
-    )]
-    save_pseudobulk: bool,
 }
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
