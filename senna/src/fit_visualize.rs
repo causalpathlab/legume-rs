@@ -28,9 +28,14 @@ pub struct VisualizeArgs {
         required = true,
         help = "Output header",
         long_help = "Output header for results.\n\
-		     Specify the output file or prefix for generated files:\n\
-		     - {out}.pb_coords.parquet\n\
-		     - {out}.cell_coords.parquet\n"
+		     Generates the following files:\n\n\
+		     {out}.pb_coords.parquet:\n\
+		       Pseudobulk sample coordinates (n_pb × 2)\n\
+		       Columns: row (PB ID), x, y\n\n\
+		     {out}.cell_coords.parquet:\n\
+		       Cell coordinates (n_cells × 2 or 3)\n\
+		       Columns: row (cell ID), x, y, [cluster]\n\
+		       Cluster column included if --kmeans is used"
     )]
     out: Box<str>,
 
@@ -39,9 +44,15 @@ pub struct VisualizeArgs {
         short = 'l',
         required = true,
         help = "Latent file (cells × K)",
-        long_help = "Latent topic proportions or SVD projection.\n\
+        long_help = "Latent topic proportions or SVD projection (cells × K matrix).\n\
 		     Used for partitioning cells into pseudobulk groups\n\
-		     and for computing cell-to-PB similarity."
+		     and for computing cell-to-PB similarity.\n\n\
+		     Expected format from `senna topic`:\n\
+		     - .latent.parquet: softmax probabilities in [0,1], rows sum to 1\n\
+		     - First column: cell names (must match data files)\n\n\
+		     Cell coordinates are computed by:\n\
+		     1. Finding k nearest PB samples based on latent similarity\n\
+		     2. Weighted average of PB positions using temperature-scaled softmax"
     )]
     latent: Box<str>,
 
@@ -51,7 +62,11 @@ pub struct VisualizeArgs {
         default_value_t = 10,
         help = "Top {d} components for partitioning",
         long_help = "Use top {d} components for partitioning cells into PB groups.\n\
-		     Number of PB samples will be less than `2^{d}+1`."
+		     Number of PB samples will be less than `2^{d}+1`.\n\n\
+		     Tuning:\n\
+		     - Increase (11-12) for finer-grained PB partitioning\n\
+		     - Decrease (8-9) if you have fewer distinct populations\n\
+		     - Typical values: 8-12"
     )]
     sort_dim: usize,
 
@@ -64,13 +79,6 @@ pub struct VisualizeArgs {
 		     Each batch file should correspond to each data file."
     )]
     batch_files: Option<Vec<Box<str>>>,
-
-    #[arg(
-        long,
-        default_value_t = 100,
-        help = "Block size for parallel processing"
-    )]
-    block_size: usize,
 
     #[arg(
         long,
@@ -105,15 +113,6 @@ pub struct VisualizeArgs {
 
     #[arg(
         long,
-        default_value_t = false,
-        help = "Use normalized Laplacian",
-        long_help = "Use symmetric normalized Laplacian (L_sym = I - D^{-1/2} S D^{-1/2})\n\
-		     instead of unnormalized Laplacian (L = D - S)."
-    )]
-    normalized_laplacian: bool,
-
-    #[arg(
-        long,
         default_value_t = 2,
         help = "Number of eigenvectors for spectral embedding",
         long_help = "Number of non-trivial eigenvectors to use.\n\
@@ -129,7 +128,11 @@ pub struct VisualizeArgs {
         help = "Softmax temperature for cell projection",
         long_help = "Temperature for softmax weighting when projecting cells.\n\
 		     Lower values make assignments sharper (closer to nearest PB).\n\
-		     Higher values spread cells more evenly."
+		     Higher values spread cells more evenly.\n\n\
+		     Tuning:\n\
+		     - 0.01-0.1: sharp assignments, cells cluster tightly around PBs\n\
+		     - 0.5-2.0: smoother, cells spread between PBs\n\
+		     - If visualization too concentrated, try increasing to 0.5"
     )]
     temperature: f32,
 
@@ -140,7 +143,11 @@ pub struct VisualizeArgs {
         help = "Number of nearest PB neighbors for cell projection",
         long_help = "For each cell, find k nearest PB samples based on latent similarity.\n\
 		     Cell position is weighted average of these k PB positions.\n\
-		     Uses HNSW index for fast lookup."
+		     Uses HNSW index for fast lookup.\n\n\
+		     Tuning:\n\
+		     - Increase if visualization is too concentrated\n\
+		     - Decrease if visualization is too diffuse\n\
+		     - Typical values: 10-30"
     )]
     knn: usize,
 
@@ -149,10 +156,19 @@ pub struct VisualizeArgs {
         value_enum,
         default_value = "spectral",
         help = "Layout method for PB samples",
-        long_help = "Layout algorithm for positioning PB samples:\n\
-		     - spectral: Laplacian eigenvector embedding (default)\n\
-		     - tree: MST-based radial tree layout\n\
-		     - tsne: t-SNE with spectral initialization"
+        long_help = "Layout algorithm for positioning PB samples:\n\n\
+		     spectral (default):\n\
+		       Best for general-purpose visualization.\n\
+		       Uses normalized Laplacian eigenvectors (diffusion map style).\n\
+		       Preserves local neighborhood structure.\n\n\
+		     tree:\n\
+		       Best for hierarchical/developmental trajectories.\n\
+		       Creates MST-based radial tree showing branching structure.\n\
+		       Root at center, branches spread radially.\n\n\
+		     tsne:\n\
+		       Best for emphasizing local cluster separation.\n\
+		       Initialized with spectral, refined with t-SNE.\n\
+		       More computationally expensive."
     )]
     layout: LayoutMethod,
 
@@ -203,15 +219,6 @@ pub struct VisualizeArgs {
 
     #[arg(
         long,
-        default_value_t = false,
-        help = "Output MST edges for tree layout",
-        long_help = "Save MST edges to {out}.edges.parquet for visualizing tree structure.\n\
-		     Each row contains: from, to, x1, y1, x2, y2, similarity"
-    )]
-    save_edges: bool,
-
-    #[arg(
-        long,
         help = "Clip outliers beyond ±N standard deviations",
         long_help = "For spectral layout, clip coordinates beyond ±N standard deviations.\n\
 		     Helps prevent outlier PB samples from distorting the visualization.\n\
@@ -243,7 +250,10 @@ pub struct VisualizeArgs {
         help = "Number of k-means clusters for cells",
         long_help = "Run k-means clustering on cell latent (topic proportions).\n\
 		     Cluster assignments are added to the output parquet.\n\
-		     Default: number of topics in latent. Set to 0 to disable."
+		     Default: number of topics in latent. Set to 0 to disable.\n\n\
+		     Note: If clusters are highly imbalanced (>90% in one cluster),\n\
+		     this may indicate topic modeling collapsed to few topics.\n\
+		     Consider checking the .dictionary.parquet for topic diversity."
     )]
     kmeans: Option<usize>,
 }
@@ -317,6 +327,9 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
         similarity_pp
     };
 
+    // 7c. Regularize similarity: add small self-loops to prevent isolated nodes
+    let similarity_pp = regularize_similarity(&similarity_pp, 0.01);
+
     // 8. K-means clustering on SVD-projected latent
     // Do rSVD on PB latent, project cell latent onto V, then cluster
     // Default k = number of topics; 0 means disabled
@@ -343,6 +356,24 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
         scaled.scale_columns_inplace();
         let clusters = scaled.kmeans_rows(KmeansArgs { num_clusters: kmeans_k, max_iter: 100 });
         info!("Computed k-means clustering with k={} on SVD-projected latent (dim={})", kmeans_k, svd_rank);
+
+        // Warn if clusters are highly imbalanced
+        let n_cells = clusters.len();
+        let mut cluster_counts = vec![0usize; kmeans_k];
+        for &c in &clusters {
+            if c < kmeans_k {
+                cluster_counts[c] += 1;
+            }
+        }
+        let max_cluster_pct = cluster_counts.iter().max().unwrap_or(&0) * 100 / n_cells.max(1);
+        if max_cluster_pct > 80 {
+            info!(
+                "Warning: Cluster imbalance detected (largest cluster has {}% of cells). \
+                 This may indicate topic modeling collapsed to few dominant topics.",
+                max_cluster_pct
+            );
+        }
+
         Some(clusters)
     } else {
         None
@@ -354,7 +385,7 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
     // 10. Compute 2D coordinates for visualization
     let pb_coords = match args.layout {
         LayoutMethod::Spectral => {
-            let pb_spectral = spectral_embed(&similarity_pp, args.normalized_laplacian, args.num_eigen)?;
+            let pb_spectral = spectral_embed(&similarity_pp, args.num_eigen)?;
             let mut coords = reduce_to_2d(&pb_spectral);
             if let Some(sd_threshold) = args.outlier_sd {
                 clip_outliers(&mut coords, sd_threshold);
@@ -372,7 +403,7 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
         LayoutMethod::Tsne => {
             use crate::visualization_alg::{TSne, similarity_to_distance};
 
-            let pb_spectral = spectral_embed(&similarity_pp, args.normalized_laplacian, args.num_eigen)?;
+            let pb_spectral = spectral_embed(&similarity_pp, args.num_eigen)?;
             let init = reduce_to_2d(&pb_spectral);
             let init_flat: Vec<f32> = init.iter().cloned().collect();
 
@@ -671,21 +702,41 @@ fn argsort(vals: &DVec, asc: bool) -> Vec<usize> {
     idx
 }
 
+/// Regularize similarity matrix: add small self-loops to prevent isolated nodes
+/// S_reg = S + ε * I ensures minimum degree ≥ ε
+fn regularize_similarity(similarity: &Mat, eps: f32) -> Mat {
+    let n = similarity.nrows();
+    let mut sim_reg = similarity.clone();
+    for i in 0..n {
+        sim_reg[(i, i)] += eps;
+    }
+
+    // Warn about low-degree nodes
+    let low_degree_count = (0..n)
+        .filter(|&i| sim_reg.row(i).iter().sum::<f32>() < eps * 2.0)
+        .count();
+    if low_degree_count > 0 {
+        info!(
+            "Warning: {} PB samples have very low similarity to others.",
+            low_degree_count
+        );
+    }
+
+    sim_reg
+}
+
 /// Spectral embedding: compute k-dimensional embedding from similarity matrix
+/// Uses symmetric normalized Laplacian: L_sym = I - D^{-1/2} S D^{-1/2}
 /// Returns weighted eigenvectors (1/λ) for clustering
-fn spectral_embed(similarity: &Mat, normalized: bool, num_eigen: usize) -> anyhow::Result<Mat> {
+fn spectral_embed(similarity: &Mat, num_eigen: usize) -> anyhow::Result<Mat> {
     let n = similarity.nrows();
     let k = num_eigen.clamp(2, n - 1);
     anyhow::ensure!(n >= k + 1, "Need {} PB samples, got {}", k + 1, n);
 
-    // Build Laplacian
+    // Build normalized Laplacian: L_sym = I - D^{-1/2} S D^{-1/2}
     let degree: DVec = DVec::from_iterator(n, similarity.row_iter().map(|r| r.sum()));
-    let laplacian = if normalized {
-        let d_inv = Mat::from_diagonal(&degree.map(|d| if d > 1e-10 { 1.0 / d.sqrt() } else { 0.0 }));
-        Mat::identity(n, n) - &d_inv * similarity * &d_inv
-    } else {
-        Mat::from_diagonal(&degree) - similarity
-    };
+    let d_inv_sqrt = Mat::from_diagonal(&degree.map(|d| 1.0 / d.sqrt()));
+    let laplacian = Mat::identity(n, n) - &d_inv_sqrt * similarity * &d_inv_sqrt;
 
     // Eigen decomposition, extract k eigenvectors (skip trivial), weight by 1/λ
     let eig = laplacian.symmetric_eigen();
@@ -967,6 +1018,8 @@ fn project_cells_to_embedding(
     knn: usize,
     temperature: f32,
 ) -> anyhow::Result<Mat> {
+    use rayon::prelude::*;
+
     let n_cells = cell_latent.nrows();
     let n_pb = pb_latent.nrows();
     let k = knn.min(n_pb);
@@ -975,37 +1028,58 @@ fn project_cells_to_embedding(
     let pb_names: Vec<usize> = (0..n_pb).collect();
     let pb_dict: ColumnDict<usize> = ColumnDict::from_dmatrix(pb_latent.transpose(), pb_names);
 
+    // Process cells in parallel
+    let coords: Vec<_> = (0..n_cells)
+        .into_par_iter()
+        .map(|i| {
+            // Get cell's latent vector as VecPoint
+            let cell_vec: Vec<f32> = cell_latent.row(i).iter().cloned().collect();
+            let query = VecPoint { data: cell_vec };
+
+            // Find k nearest PB samples
+            let (neighbors, distances) = pb_dict
+                .search_by_query_data(&query, k)
+                .unwrap_or_else(|_| (vec![], vec![]));
+
+            if neighbors.is_empty() {
+                return (0.0f32, 0.0f32);
+            }
+
+            // Convert distances to weights (inverse distance with softmax)
+            let weights: Vec<f32> = if distances.iter().any(|&d| d < 1e-10) {
+                // If any distance is ~0, use hard assignment to that neighbor
+                distances
+                    .iter()
+                    .map(|&d| if d < 1e-10 { 1.0 } else { 0.0 })
+                    .collect()
+            } else {
+                // Softmax on negative distances (closer = higher weight)
+                let neg_dists: Vec<f32> = distances.iter().map(|&d| -d / temperature).collect();
+                let max_neg = neg_dists.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let exp_vals: Vec<f32> = neg_dists.iter().map(|&x| (x - max_neg).exp()).collect();
+                let sum_exp: f32 = exp_vals.iter().sum();
+                if sum_exp < 1e-10 {
+                    return (0.0, 0.0);
+                }
+                exp_vals.iter().map(|&e| e / sum_exp).collect()
+            };
+
+            // Weighted average of neighbor PB coordinates
+            let mut x = 0.0f32;
+            let mut y = 0.0f32;
+            for (j, &pb_idx) in neighbors.iter().enumerate() {
+                x += weights[j] * pb_coords[(pb_idx, 0)];
+                y += weights[j] * pb_coords[(pb_idx, 1)];
+            }
+            (x, y)
+        })
+        .collect();
+
+    // Convert to matrix
     let mut cell_coords = Mat::zeros(n_cells, 2);
-
-    for i in 0..n_cells {
-        // Get cell's latent vector as VecPoint
-        let cell_vec: Vec<f32> = cell_latent.row(i).iter().cloned().collect();
-        let query = VecPoint { data: cell_vec };
-
-        // Find k nearest PB samples
-        let (neighbors, distances) = pb_dict.search_by_query_data(&query, k)?;
-
-        // Convert distances to weights (inverse distance with softmax)
-        let weights: Vec<f32> = if distances.iter().any(|&d| d < 1e-10) {
-            // If any distance is ~0, use hard assignment to that neighbor
-            distances
-                .iter()
-                .map(|&d| if d < 1e-10 { 1.0 } else { 0.0 })
-                .collect()
-        } else {
-            // Softmax on negative distances (closer = higher weight)
-            let neg_dists: Vec<f32> = distances.iter().map(|&d| -d / temperature).collect();
-            let max_neg = neg_dists.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let exp_vals: Vec<f32> = neg_dists.iter().map(|&x| (x - max_neg).exp()).collect();
-            let sum_exp: f32 = exp_vals.iter().sum();
-            exp_vals.iter().map(|&e| e / sum_exp).collect()
-        };
-
-        // Weighted average of neighbor PB coordinates
-        for (j, &pb_idx) in neighbors.iter().enumerate() {
-            cell_coords[(i, 0)] += weights[j] * pb_coords[(pb_idx, 0)];
-            cell_coords[(i, 1)] += weights[j] * pb_coords[(pb_idx, 1)];
-        }
+    for (i, (x, y)) in coords.into_iter().enumerate() {
+        cell_coords[(i, 0)] = x;
+        cell_coords[(i, 1)] = y;
     }
 
     Ok(cell_coords)

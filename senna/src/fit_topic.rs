@@ -12,7 +12,7 @@ use candle_util::candle_model_traits::*;
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
 
-use candle_util::candle_encoder_softmax_iaf::*;
+use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_model_traits::DecoderModuleT;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 
@@ -197,17 +197,6 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        default_value_t = 2,
-        help = "Number of inverse autoregressive flow transformations",
-        long_help = "Number of inverse autoregressive flow transformations.\n\
-		     Controls the number of flow steps in the model.\n\
-		     Set to 0 to disable IAF.\n\
-		     Note: Mutually exclusive with --use-sparsemax."
-    )]
-    iaf_trans: usize,
-
-    #[arg(
-        long,
         default_value_t = 0.0,
         help = "KL annealing warmup epochs",
         long_help = "Number of epochs for KL weight to warm up from 0 to 1.\n\
@@ -215,6 +204,7 @@ pub struct TopicArgs {
 		     Larger value = slower warm-up. Set to 0 to disable annealing."
     )]
     kl_warmup_epochs: f64,
+
 
     #[arg(
         long,
@@ -358,13 +348,42 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Use sparsemax instead of softmax",
+        help = "Use sparsemax for exact zeros (optional)",
         long_help = "Use sparsemax activation instead of softmax.\n\
-		     Sparsemax can output exact zeros for sparse topic assignments.\n\
-		     May help with more decisive cell type annotations.\n\
-		     Note: Mutually exclusive with --iaf-trans (IAF will be disabled)."
+		     Sparsemax produces exact zeros for low-ranked topics.\n\
+		     Most users should use temperature annealing with softmax instead.\n\
+		     Only enable if you specifically need exact zeros."
     )]
     use_sparsemax: bool,
+
+    #[arg(
+        long,
+        default_value_t = 5.0,
+        help = "Starting temperature for annealing",
+        long_help = "Initial temperature for softmax/sparsemax (higher = smoother).\n\
+		     Temperature anneals exponentially to temp_min during training.\n\
+		     Standard Gumbel-Softmax starts around 5.0-10.0."
+    )]
+    temp_start: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.1,
+        help = "Minimum temperature for annealing",
+        long_help = "Final temperature after annealing (lower = more peaked/sparse).\n\
+		     Standard values: 0.1-0.5 for sparse, 1.0 for no annealing."
+    )]
+    temp_min: f32,
+
+    #[arg(
+        long,
+        default_value_t = 500.0,
+        help = "Temperature annealing rate",
+        long_help = "Controls how fast temperature decays (higher = slower decay).\n\
+		     temp = temp_min + (temp_start - temp_min) * exp(-epoch / tau).\n\
+		     Set to 0 to disable annealing (use temp_start throughout)."
+    )]
+    temp_anneal_tau: f64,
 }
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
@@ -372,16 +391,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         std::env::set_var("RUST_LOG", "info");
     }
     env_logger::init();
-
-    // Sparsemax and IAF are mutually exclusive - sparsemax disables IAF
-    let iaf_trans = if args.use_sparsemax {
-        if args.iaf_trans > 0 {
-            info!("Sparsemax enabled: disabling IAF (iaf_trans set to 0)");
-        }
-        0
-    } else {
-        args.iaf_trans
-    };
 
     let reference = args.reference_batches.as_deref();
 
@@ -499,16 +508,16 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
-    let encoder = LogSoftmaxIAFEncoder::new(
-        LogSoftmaxIAFEncoderArgs {
+    let mut encoder = LogSoftmaxEncoder::new(
+        LogSoftmaxEncoderArgs {
             n_features: n_features_encoder,
             n_topics,
             n_modules,
             n_vocab,
             d_vocab_emb,
             layers: &args.encoder_layers,
-            n_transforms: iaf_trans,
             use_sparsemax: args.use_sparsemax,
+            temperature: args.temp_start,
         },
         param_builder.clone(),
     )?;
@@ -520,7 +529,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         n_features_encoder, n_features_decoder
     );
 
-    let scores = train_encoder_decoder(&collapsed, &encoder, &decoder, &parameters, &args, selected_features.as_ref())?;
+    let scores = train_encoder_decoder(&collapsed, &mut encoder, &decoder, &parameters, &args, selected_features.as_ref())?;
 
     info!("Writing down the model parameters");
 
@@ -612,7 +621,7 @@ impl TrainScores {
 
 fn train_encoder_decoder<Enc, Dec>(
     collapsed: &CollapsedOut,
-    encoder: &Enc,
+    encoder: &mut Enc,
     decoder: &Dec,
     parameters: &candle_nn::VarMap,
     args: &TopicArgs,
@@ -703,6 +712,20 @@ where
         } else {
             1.0
         };
+
+        // Temperature annealing: temp = temp_min + (temp_start - temp_min) * exp(-epoch / tau)
+        let temperature = if args.temp_anneal_tau > 0.0 {
+            let progress = epoch as f64 / args.temp_anneal_tau;
+            let decay = (-progress).exp() as f32;
+            args.temp_min + (args.temp_start - args.temp_min) * decay
+        } else {
+            args.temp_start
+        };
+        encoder.set_temperature(temperature);
+
+        if args.verbose && epoch % 100 == 0 {
+            info!("Epoch {}: temperature = {:.3}", epoch, temperature);
+        }
 
         for jitter in 0..args.jitter_interval {
             let mut llik_tot = 0f32;
