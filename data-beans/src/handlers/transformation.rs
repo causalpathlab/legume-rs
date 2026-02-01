@@ -390,7 +390,7 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
             cmd_args.preload,
         )?;
 
-        let data = open_sparse_matrix(&data_file, &backend)?;
+        let data = open_sparse_matrix(&target_file, &backend)?;
 
         info!(
             "after squeeze -- data: {} rows x {} columns",
