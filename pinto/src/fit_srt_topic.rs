@@ -274,6 +274,8 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
             n_vocab,
             d_vocab_emb,
             layers: &args.encoder_layers,
+            use_sparsemax: false,
+            temperature: 1.0,
         },
         param_builder.clone(),
     )?;

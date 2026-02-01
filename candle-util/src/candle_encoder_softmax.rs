@@ -10,6 +10,8 @@ pub struct LogSoftmaxEncoder {
     n_topics: usize,
     n_vocab: usize,
     n_modules: usize,
+    use_sparsemax: bool,
+    temperature: f32,
     feature_module: AggregateLinear,
     emb_x: Embedding,
     emb_logx: Embedding,
@@ -29,10 +31,20 @@ impl EncoderModuleT for LogSoftmaxEncoder {
         let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params(x_nd, x0_nd, train)?;
         let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
 
-        Ok((
-            ops::log_softmax(&z_nk, 1)?,
-            gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?,
-        ))
+        // Apply temperature scaling
+        let z_nk_scaled = if self.use_sparsemax && self.temperature != 1.0 {
+            (z_nk / self.temperature as f64)?
+        } else {
+            z_nk
+        };
+
+        let prob = if self.use_sparsemax {
+            sparsemax(&z_nk_scaled)?
+        } else {
+            ops::log_softmax(&z_nk_scaled, 1)?.exp()?
+        };
+
+        Ok((prob, gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?))
     }
 
     fn dim_latent(&self) -> usize {
@@ -43,6 +55,14 @@ impl EncoderModuleT for LogSoftmaxEncoder {
 impl LogSoftmaxEncoder {
     pub fn num_feature_modules(&self) -> usize {
         self.n_modules
+    }
+
+    pub fn set_use_sparsemax(&mut self, use_sparsemax: bool) {
+        self.use_sparsemax = use_sparsemax;
+    }
+
+    pub fn set_temperature(&mut self, temperature: f32) {
+        self.temperature = temperature;
     }
 
     fn discretize_whitened_tensor(&self, x_nd: &Tensor) -> Result<Tensor> {
@@ -189,6 +209,8 @@ impl LogSoftmaxEncoder {
             n_topics: args.n_topics,
             n_vocab: args.n_vocab,
             n_modules: args.n_modules,
+            use_sparsemax: args.use_sparsemax,
+            temperature: args.temperature,
             feature_module,
             emb_x,
             emb_logx,
@@ -207,4 +229,6 @@ pub struct LogSoftmaxEncoderArgs<'a> {
     pub n_vocab: usize,
     pub d_vocab_emb: usize,
     pub layers: &'a [usize],
+    pub use_sparsemax: bool,
+    pub temperature: f32,
 }
