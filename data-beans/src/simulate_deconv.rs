@@ -53,7 +53,7 @@ pub fn generate_convoluted_data(args: &SimConvArgs) -> anyhow::Result<()> {
     let sc_data = match file_ext(&args.sc_data_file)?.to_string().as_ref() {
         "h5" => open_sparse_matrix(&args.sc_data_file, &SparseIoBackend::HDF5),
         "zarr" => open_sparse_matrix(&args.sc_data_file, &SparseIoBackend::Zarr),
-        _ => panic!(""),
+        ext => panic!("Unsupported file extension: {}", ext),
     }?;
 
     let MatWithNames {

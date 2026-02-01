@@ -125,7 +125,7 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         .unwrap_or_else(|_| (0..nrows).map(|x| x.to_string().into_boxed_str()).collect());
 
     let mut row_names = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_name_field)
-        .or_else(|_| read_zarr_strings(store.clone(), args.row_id_field.as_ref()))
+        .or_else(|_| read_zarr_strings(store.clone(), args.row_name_field.as_ref()))
         .unwrap_or_else(|_| (0..nrows).map(|x| x.to_string().into_boxed_str()).collect());
 
     info!("Read {} row names", row_ids.len());
@@ -156,7 +156,7 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         .collect();
 
     let mut row_types = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_type_field)
-        .or_else(|_| read_zarr_strings(store.clone(), args.row_id_field.as_ref()))
+        .or_else(|_| read_zarr_strings(store.clone(), args.row_type_field.as_ref()))
         .unwrap_or_else(|_| vec![args.select_row_type.clone(); nrows]);
     if nrows < row_types.len() {
         info!("data doesn't contain all the rows");
