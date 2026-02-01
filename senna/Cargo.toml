@@ -41,3 +41,4 @@ log = { workspace = true }
 dashmap = { workspace = true }
 fnv = { workspace=true }
 statrs = { workspace = true }
+colored = { workspace = true }

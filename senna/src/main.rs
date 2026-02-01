@@ -1,7 +1,9 @@
 mod annotate_topic;
+mod cluster;
 mod deconv;
 mod embed_common;
 mod feature_selection;
+mod fit_clustering;
 mod fit_deconv_reg;
 mod fit_joint_svd;
 mod fit_joint_topic;
@@ -16,6 +18,7 @@ mod senna_input;
 
 use annotate_topic::*;
 use embed_common::*;
+use fit_clustering::*;
 use fit_deconv_reg::*;
 use fit_joint_svd::*;
 use fit_joint_topic::*;
@@ -23,6 +26,58 @@ use fit_knn_regression::*;
 use fit_svd::*;
 use fit_topic::*;
 use fit_visualize::*;
+
+use colored::Colorize;
+
+const LOGO: &str = include_str!("../logo.txt");
+
+fn colorize_logo_line(line: &str) -> String {
+    line
+        .replace('@', &"@".bright_yellow().to_string())
+        .replace('◠', &"◠".bright_yellow().to_string())
+        .replace('◡', &"◠".bright_yellow().to_string())
+        .replace('_', &"_".bright_yellow().to_string())
+        .replace('(', &"(".bright_yellow().to_string())
+        .replace(')', &")".bright_yellow().to_string())
+        .replace('{', &"{".bright_yellow().to_string())
+        .replace('}', &"}".bright_yellow().to_string())
+        .replace('\\', &"\\".bright_yellow().to_string())
+        .replace('/', &"/".bright_yellow().to_string())
+        .replace('|', &"|".green().to_string())
+        .replace('‖', &"‖".green().to_string())
+        .replace('~', &"~".truecolor(101, 67, 33).to_string())
+}
+
+fn print_logo() {
+    let intro = vec![
+        "",
+        "",
+        "SENNA",
+        "Stochastic data Embedding with",
+        "Nearest Neighbourhood Adjustment",
+        "",
+    ];
+
+    let logo_lines: Vec<_> = LOGO.lines().collect();
+    let max_lines = logo_lines.len().max(intro.len());
+
+    for i in 0..max_lines {
+        let logo_part = if i < logo_lines.len() {
+            colorize_logo_line(logo_lines[i])
+        } else {
+            " ".repeat(13) // width of logo box
+        };
+
+        let text_part = if i < intro.len() {
+            intro[i]
+        } else {
+            ""
+        };
+
+        println!("{}  {}", logo_part, text_part);
+    }
+    println!();
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -136,9 +191,25 @@ enum Commands {
         visible_alias = "viz"
     )]
     Visualize(VisualizeArgs),
+
+    #[command(
+        about = "Cluster cells based on latent representations",
+        long_about = "Cluster cells using latent topic proportions or SVD embeddings.\n\n\
+		     Supports multiple clustering algorithms:\n\
+		     - K-means (default)\n\
+		     - Leiden (graph-based, not yet implemented)\n\
+		     - Louvain (graph-based, not yet implemented)\n\n\
+		     Output: cluster assignments in parquet format"
+    )]
+    Clustering(ClusteringArgs),
 }
 
 fn main() -> anyhow::Result<()> {
+    // Show logo if help is requested
+    if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
+        print_logo();
+    }
+
     let cli = Cli::parse();
 
     match &cli.commands {
@@ -168,6 +239,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Visualize(args) => {
             fit_visualize(args)?;
+        }
+        Commands::Clustering(args) => {
+            run_clustering(args)?;
         }
     }
 

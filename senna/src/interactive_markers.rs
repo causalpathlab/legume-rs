@@ -10,6 +10,41 @@ use std::io::{self, BufRead, Write};
 
 use crate::embed_common::Mat;
 
+/// Flexible gene name matching (case-insensitive, underscore-delimited)
+/// Returns true if marker_gene matches dict_gene with these rules:
+/// - Exact match (case-insensitive)
+/// - Suffix match: dict_gene ends with "_marker_gene"
+/// - Prefix match: dict_gene starts with "marker_gene_"
+/// - Segment match: dict_gene contains "_marker_gene_"
+///
+/// Example: "CD8A" matches "ENSG00000153563_CD8A", "CD8A_variant1", "chr1_CD8A_isoform2"
+pub fn flexible_gene_match(marker_gene: &str, dict_gene: &str) -> bool {
+    let marker_lower = marker_gene.to_lowercase();
+    let dict_lower = dict_gene.to_lowercase();
+
+    // 1. Exact match
+    if dict_lower == marker_lower {
+        return true;
+    }
+
+    // 2. Suffix match: dict ends with "_marker"
+    if dict_lower.ends_with(&format!("_{}", marker_lower)) {
+        return true;
+    }
+
+    // 3. Prefix match: dict starts with "marker_"
+    if dict_lower.starts_with(&format!("{}_", marker_lower)) {
+        return true;
+    }
+
+    // 4. Segment match: dict contains "_marker_"
+    if dict_lower.contains(&format!("_{}_", marker_lower)) {
+        return true;
+    }
+
+    false
+}
+
 /// Fuzzy match for cell type names
 /// Returns true if query matches target with these rules:
 /// - Short strings (< 5 chars) require exact match to avoid false positives like "B" matching "Erythroblast"
@@ -326,6 +361,7 @@ pub fn save_augmented_markers(
 }
 
 /// Update membership matrix with new markers
+/// Uses flexible gene name matching (same as initial marker file)
 pub fn augment_membership_matrix(
     membership_ga: &mut Mat,
     gene_names: &[Box<str>],
@@ -333,25 +369,24 @@ pub fn augment_membership_matrix(
     new_markers: &[(Box<str>, Box<str>)],
     weight: f32,
 ) {
-    // Build lookup maps
-    let gene_to_idx: HashMap<&str, usize> = gene_names
-        .iter()
-        .enumerate()
-        .map(|(i, g)| (g.as_ref(), i))
-        .collect();
-
+    // Build celltype lookup (exact match for cell types)
     let annot_to_idx: HashMap<&str, usize> = annot_names
         .iter()
         .enumerate()
         .map(|(i, a)| (a.as_ref(), i))
         .collect();
 
-    for (gene, celltype) in new_markers {
-        if let (Some(&g_idx), Some(&a_idx)) = (
-            gene_to_idx.get(gene.as_ref()),
-            annot_to_idx.get(celltype.as_ref()),
-        ) {
-            membership_ga[(g_idx, a_idx)] = weight;
+    for (marker_gene, celltype) in new_markers {
+        // Find matching cell type (exact match)
+        let Some(&a_idx) = annot_to_idx.get(celltype.as_ref()) else {
+            continue;
+        };
+
+        // Find all matching genes using flexible matching
+        for (g_idx, dict_gene) in gene_names.iter().enumerate() {
+            if flexible_gene_match(marker_gene, dict_gene) {
+                membership_ga[(g_idx, a_idx)] = weight;
+            }
         }
     }
 }
@@ -503,7 +538,9 @@ pub struct MarkerDatabase {
 }
 
 impl MarkerDatabase {
-    /// Load by fuzzy matching tokens against known gene/celltype vocabularies
+    /// Load using flexible gene matching and fuzzy cell type matching
+    /// - Genes: uses flexible_gene_match (underscore-delimited segments)
+    /// - Cell types: uses fuzzy substring matching for variation tolerance
     pub fn load_with_vocab(
         path: &str,
         genes: &[Box<str>],
@@ -511,39 +548,44 @@ impl MarkerDatabase {
     ) -> anyhow::Result<Self> {
         let norm = |s: &str| s.to_lowercase().replace([' ', '-', '_'], "");
 
-        // Gene vocab: full name and symbol after underscore
-        let gene_set: HashSet<_> = genes
-            .iter()
-            .flat_map(|g| {
-                let n = norm(g);
-                std::iter::once(n).chain(g.find('_').map(|i| norm(&g[i + 1..])))
-            })
-            .collect();
-
-        // Celltype vocab with variants for fuzzy matching
-        let ct_norms: Vec<_> = celltypes.iter().map(|c| (norm(c), c.as_ref())).collect();
-
         let mut db = Self::default();
         for line in open_buf_reader(path)?.lines().filter_map(|l| l.ok()) {
             let tokens: Vec<_> = line.split(['\t', ',', ';', '|']).map(|s| s.trim()).collect();
 
-            // Find genes (exact match on normalized)
-            let found_genes: Vec<_> = tokens.iter().filter(|t| gene_set.contains(&norm(t))).collect();
-
-            // Find all matching celltypes (fuzzy matching with length constraints)
-            let found_cts: Vec<_> = tokens
+            // Find genes using flexible matching
+            let found_genes: Vec<(&str, &str)> = tokens
                 .iter()
-                .flat_map(|t| {
-                    let tn = norm(t);
-                    ct_norms.iter()
-                        .filter(move |(cn, _)| fuzzy_match_ct(&tn, cn))
-                        .map(|(_, c)| *c)
+                .flat_map(|token| {
+                    genes
+                        .iter()
+                        .filter(|dict_gene| flexible_gene_match(token, dict_gene))
+                        .map(move |dict_gene| (*token, dict_gene.as_ref()))
                 })
                 .collect();
 
-            for g in &found_genes {
+            // Find all matching celltypes (fuzzy matching with length constraints)
+            let found_cts: Vec<&str> = tokens
+                .iter()
+                .flat_map(|token| {
+                    let tn = norm(token);
+                    celltypes
+                        .iter()
+                        .filter(move |ct| fuzzy_match_ct(&tn, &norm(ct)))
+                        .map(|ct| ct.as_ref())
+                })
+                .collect();
+
+            for (token_gene, dict_gene) in &found_genes {
                 for ct in &found_cts {
-                    db.gene_to_celltypes.entry(norm(g)).or_default().insert(norm(ct));
+                    db.gene_to_celltypes
+                        .entry(norm(dict_gene))
+                        .or_default()
+                        .insert(norm(ct));
+                    // Also store the token form for lookup
+                    db.gene_to_celltypes
+                        .entry(norm(token_gene))
+                        .or_default()
+                        .insert(norm(ct));
                 }
             }
         }
