@@ -191,7 +191,7 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 200.0,
+        default_value_t = 0.0,
         help = "KL annealing warmup epochs",
         long_help = "Number of epochs for KL weight to warm up from 0 to 1.\n\
 		     Standard warm-up: kl_weight = 1 - exp(-epoch / warmup)\n\
