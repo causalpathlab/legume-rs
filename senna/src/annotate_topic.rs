@@ -149,7 +149,7 @@ pub struct AnnotateTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 10,
+        default_value_t = 0,
         help = "Number of epochs for KL annealing warm-up (0 to disable).",
         long_help = "Number of epochs over which to linearly anneal KL weight from 0 to 1.\n\
 		     KL annealing (warm-up) helps prevent posterior collapse by letting the model\n\
