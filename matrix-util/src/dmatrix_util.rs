@@ -979,6 +979,62 @@ where
     }
 }
 
+/// TF-IDF (Term Frequency–Inverse Document Frequency)
+///
+/// A numerical statistic reflecting how important a word (term) is to a document
+/// in a collection or corpus. (Wikipedia)
+///
+/// Given a term-document matrix where rows are terms and columns are documents:
+///
+/// - **TF (Term Frequency)**: The raw count or frequency of term t in document d.
+///   Here we use the matrix values directly as TF.
+///
+/// - **IDF (Inverse Document Frequency)**: A measure of how much information
+///   the term provides, i.e., how common or rare it is across all documents.
+///
+///   IDF(t) = log(N / df(t))
+///
+///   where N = total number of documents, df(t) = number of documents containing term t.
+///   We use log(N / (df(t) + 1)) to avoid division by zero.
+///
+/// - **TF-IDF(t, d) = TF(t, d) × IDF(t)**
+///
+/// Terms appearing in many documents get lower weight; terms specific to few
+/// documents get higher weight.
+impl<T> TfIdfOps for DMatrix<T>
+where
+    T: nalgebra::RealField,
+{
+    type Mat = Self;
+
+    fn tfidf(&self) -> Self::Mat {
+        let (nrows, ncols) = self.shape();
+        let n_docs = T::from_usize(ncols).unwrap();
+        let mut result = self.clone();
+
+        for i in 0..nrows {
+            // df(t) = document frequency = number of documents containing term t
+            let df = (0..ncols)
+                .filter(|&j| self[(i, j)] != T::zero())
+                .count();
+            let df_t = T::from_usize(df).unwrap();
+            // IDF(t) = log(N / (df(t) + 1))
+            let idf = (n_docs.clone() / (df_t + T::one())).ln();
+            // TF-IDF(t, d) = TF(t, d) × IDF(t)
+            for j in 0..ncols {
+                result[(i, j)] = result[(i, j)].clone() * idf.clone();
+            }
+        }
+        result
+    }
+
+    fn tfidf_normalize_columns(&self) -> Self::Mat {
+        let mut result = self.tfidf();
+        result.normalize_columns_inplace();
+        result
+    }
+}
+
 ////////////////////////////////////////
 // Input and output in triplet format //
 ////////////////////////////////////////

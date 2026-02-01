@@ -1,11 +1,10 @@
-use crate::deconv::{BiSusieDeconv, SusieDeconv};
+use crate::deconv::{VmfBiSusieDeconv, VmfSusieDeconv};
 use crate::embed_common::*;
 use crate::interactive_markers::{
     auto_suggest_markers, augment_membership_matrix, find_candidate_markers,
     flexible_gene_match, print_augmentation_summary, read_suggestions_json,
     run_interactive_round, save_augmented_markers, write_candidates_json, MarkerDatabase,
 };
-use crate::pseudobulk_topic::{compute_pseudobulk_by_topic, TopicWeightStrategy};
 use matrix_util::common_io::*;
 
 use candle_nn::AdamW;
@@ -13,7 +12,6 @@ use candle_nn::Optimizer;
 use fnv::FnvHashMap as HashMap;
 use fnv::FnvHashSet as HashSet;
 use indicatif::{ProgressBar, ProgressDrawTarget};
-use rand::SeedableRng;
 
 /// Model type for topic annotation
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -30,11 +28,13 @@ pub enum AnnotationModel {
 pub enum DesignNorm {
     /// No normalization
     None,
-    /// Column scaling (divide by column sum or std) - default
-    #[default]
+    /// Column scaling (divide by column sum or std)
     Scale,
     /// L2 normalization (unit length columns)
     L2,
+    /// TF-IDF: down-weight genes marking many cell types, up-weight specific markers
+    #[default]
+    TfIdf,
 }
 
 #[derive(Args, Debug)]
@@ -79,27 +79,6 @@ pub struct AnnotateTopicArgs {
     )]
     marker_file: Box<str>,
 
-    #[arg(
-        short = 'd',
-        long = "data",
-        help = "Expression data files (.h5 or .zarr)",
-        long_help = "Optional expression data files for pseudobulk aggregation.\n\
-		     When provided, computes pseudobulk by topic (weighted by topic proportions)\n\
-		     instead of using the gene dictionary directly.\n\
-		     Only marker genes are included in the pseudobulk."
-    )]
-    data_files: Option<Vec<Box<str>>>,
-
-    #[arg(
-        long,
-        default_value_t = true,
-        help = "Use hard assignment for pseudobulk (argmax instead of soft weights)",
-        long_help = "When computing pseudobulk, use hard assignment (argmax) instead of soft weights.\n\
-		     With soft weights, each cell's expression is spread across all topics proportionally.\n\
-		     With hard assignment, each cell is assigned to its top topic only,\n\
-		     which gives cleaner topic-specific expression patterns."
-    )]
-    pseudobulk_hard: bool,
 
     #[arg(
         long,
@@ -109,17 +88,6 @@ pub struct AnnotateTopicArgs {
     )]
     epochs: usize,
 
-    #[arg(
-        short = 'c',
-        long,
-        default_value_t = 1e4,
-        help = "Scale factor for the observation matrix Y.",
-        long_help = "Scale factor applied to the observation matrix Y (gene × topic data).\n\
-		     The data is transformed as: Y = exp(log_data) * scale.\n\
-		     Higher values increase the magnitude of observations.\n\
-		     Does not affect the membership matrix (derived from marker genes)."
-    )]
-    column_sum_norm: f32,
 
     #[arg(
         short = 'l',
@@ -145,15 +113,6 @@ pub struct AnnotateTopicArgs {
     )]
     num_samples: usize,
 
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Use Poisson sampling for output Y during training.",
-        long_help = "When enabled, samples Y[g,t] ~ Poisson(rate) where rate is derived from\n\
-		     the data matrix scaled by column_sum_norm. This adds stochasticity to training.\n\
-		     When disabled, uses the scaled data directly without sampling."
-    )]
-    poisson_sampling: bool,
 
     #[arg(
         long,
@@ -169,12 +128,12 @@ pub struct AnnotateTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
+        default_value_t = 200,
         help = "Number of epochs for KL annealing warm-up (0 to disable).",
         long_help = "Number of epochs over which to linearly anneal KL weight from 0 to 1.\n\
 		     KL annealing (warm-up) helps prevent posterior collapse by letting the model\n\
 		     focus on data fitting first, then gradually enforcing the prior.\n\
-		     Set to 0 to disable annealing. A common choice is epochs/2."
+		     Set to 0 to disable annealing. Default 200 works well with vMF likelihood."
     )]
     kl_anneal_epochs: usize,
 
@@ -225,14 +184,14 @@ pub struct AnnotateTopicArgs {
 
     #[arg(
         long,
-        default_value = "scale",
+        default_value = "tf-idf",
         help = "Design matrix normalization method.",
         long_help = "Normalization applied to design matrix X (gene × annotation membership) before fitting.\n\n\
              Methods:\n\
-             - scale: Column scaling (divide by column statistics) - balances annotations with different marker counts\n\
-             - l2: L2 normalization (unit length columns) - standard for regression\n\
-             - none: No normalization - use raw 0/1 membership values\n\n\
-             Default 'scale' helps prevent cell types with many markers from dominating."
+             - tf-idf: TF-IDF weighting (down-weights common markers, up-weights specific ones) (default)\n\
+             - l2: L2 normalization (unit length columns)\n\
+             - scale: Column scaling (divide by column statistics)\n\
+             - none: No normalization - use raw 0/1 membership values"
     )]
     design_norm: DesignNorm,
 
@@ -313,6 +272,7 @@ pub struct AnnotateTopicArgs {
         help = "Weight for augmented markers (vs 1.0 for original markers)."
     )]
     augment_weight: f32,
+
 }
 
 /// Training data bundle
@@ -374,102 +334,100 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
         nnz_features
     );
 
-    // 3. Prepare training data: either from pseudobulk or gene dictionary
-    let (training_data, use_pseudobulk) = if let Some(data_files) = &args.data_files {
-        // Compute pseudobulk by topic weighted by topic proportions
-        let weight_strategy = if args.pseudobulk_hard {
-            info!("Computing pseudobulk with hard assignment (argmax)...");
-            TopicWeightStrategy::Hard
-        } else {
-            info!("Computing pseudobulk with soft weights...");
-            TopicWeightStrategy::Soft
-        };
-
-        // Collect marker genes for filtering
-        let marker_genes: HashSet<Box<str>> = read_marker_gene_info(&args.marker_file)?
-            .keys()
-            .cloned()
-            .collect();
-
-        let (pseudobulk_row_names, pseudobulk_gt) = compute_pseudobulk_by_topic(
-            data_files,
-            &cell_names,
-            &topic_nt,
-            Some(&marker_genes),
-            weight_strategy,
-        )?;
-
-        // Build membership matrix on the pseudobulk rows
-        let AnnotInfo {
-            membership_ga: pb_membership,
-            annot_names: pb_annot_names,
-        } = build_annotation_matrix(&args.marker_file, &pseudobulk_row_names)?;
-
-        // Verify annotation names match (they should since we used the same marker file)
-        if pb_annot_names != annot_names {
-            info!(
-                "Warning: annotation names differ between dictionary and pseudobulk.\n\
-                 Using pseudobulk annotations."
-            );
-        }
-
-        // Normalize pseudobulk:
-        // 1. log1p to stabilize expression values
-        // 2. sum_to_one_rows: normalize each gene across topics (removes gene-level bias)
-        // 3. sum_to_one_columns + log: convert to log-probabilities per topic
-        let log_pseudobulk = pseudobulk_gt.map(|x| (1.0 + x).ln());
-        let row_norm = log_pseudobulk.sum_to_one_rows();
-        let normalized = row_norm.sum_to_one_columns().map(|x| x.max(1e-10).ln());
-
-        info!(
-            "Pseudobulk data: {} genes × {} topics (row+col normalized to log-prob)",
-            normalized.nrows(),
-            normalized.ncols()
-        );
-
-        // Store the membership matrix for later use
-        (
-            TrainingData {
-                data: normalized,
-                membership: pb_membership,
-                gene_names: pseudobulk_row_names,
-            },
-            true,
-        )
-    } else {
-        // Use gene dictionary directly
-        (
-            TrainingData {
-                data: log_dict_dk.clone(),
-                membership: membership_ga.clone(),
-                gene_names: row_names.clone(),
-            },
-            false,
-        )
+    // 3. Prepare training data from gene dictionary
+    let training_data = TrainingData {
+        data: log_dict_dk.clone(),
+        membership: membership_ga.clone(),
+        gene_names: row_names.clone(),
     };
 
     // 4. Build and train deconvolution model(s)
     let dev = candle_core::Device::Cpu;
-    let data = &training_data.data;
+    let full_data = &training_data.data;
 
     info!("Using {:?} model", args.model);
 
     // Closure: train model with given membership matrix, return PIP
     let train_model = |membership: &Mat| -> anyhow::Result<Mat> {
+        // Find marker genes (annotated - non-zero rows in membership)
+        let marker_gene_indices: Vec<usize> = (0..membership.nrows())
+            .filter(|&i| membership.row(i).iter().any(|&x| x > 0.0))
+            .collect();
+
+        // Find control genes: not annotated, with flat expression profiles (low variance)
+        // These are non-informative genes that help the model learn "no cell-type specificity"
+        let mut unannotated_with_scores: Vec<(usize, f32)> = (0..membership.nrows())
+            .filter(|&i| membership.row(i).iter().all(|&x| x == 0.0))
+            .filter_map(|i| {
+                let row = full_data.row(i);
+                let n = row.len() as f32;
+                let mean = row.iter().sum::<f32>() / n;
+                // Filter out lowly expressed genes (noise-dominated)
+                // Threshold: mean log-prob > -10 (i.e., prob > exp(-10) ≈ 4.5e-5)
+                if mean < -10.0 {
+                    return None;
+                }
+                // Compute variance: lower variance = flatter profile = better control
+                let variance = row.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n;
+                Some((i, variance))
+            })
+            .collect();
+
+        // Sort by variance ascending (lowest variance = flattest profile first)
+        unannotated_with_scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+        // Take same number of controls as markers (50-50 split)
+        let n_controls = marker_gene_indices.len();
+        let control_gene_indices: Vec<usize> = unannotated_with_scores
+            .iter()
+            .take(n_controls)
+            .map(|(i, _)| *i)
+            .collect();
+
+        // Combine marker and control genes
+        let mut selected_indices = marker_gene_indices.clone();
+        selected_indices.extend(&control_gene_indices);
+        selected_indices.sort();
+
+        let (data, membership_filtered) = if selected_indices.len() < full_data.nrows() {
+            info!(
+                "Selected {} genes: {} markers + {} controls (from {} total)",
+                selected_indices.len(),
+                marker_gene_indices.len(),
+                control_gene_indices.len(),
+                full_data.nrows()
+            );
+            (
+                full_data.select_rows(&selected_indices),
+                membership.select_rows(&selected_indices),
+            )
+        } else {
+            (full_data.clone(), membership.clone())
+        };
+
         // Apply design matrix normalization
         let normalized_membership = match args.design_norm {
-            DesignNorm::None => membership.clone(),
+            DesignNorm::None => membership_filtered,
             DesignNorm::Scale => {
                 info!("Applying column scaling to design matrix");
-                membership.scale_columns()
+                membership_filtered.scale_columns()
             }
             DesignNorm::L2 => {
                 info!("Applying L2 normalization to design matrix");
-                membership.normalize_columns()
+                membership_filtered.normalize_columns()
+            }
+            DesignNorm::TfIdf => {
+                info!("Applying TF-IDF transformation to design matrix");
+                membership_filtered.tfidf_normalize_columns()
             }
         };
 
         let x_ga = normalized_membership.to_tensor(&dev)?;
+
+        // Prepare normalized y for vMF: exp(log_prob) then L2 normalize
+        info!("Using von Mises-Fisher likelihood (angle matching)");
+        let probs = data.map(|x| x.exp());
+        let y_normalized = probs.normalize_columns().to_tensor(&dev)?;
 
         if args.prior_var.len() == 1 {
             let prior_var = args.prior_var[0];
@@ -478,26 +436,28 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
 
             let pip = match args.model {
                 AnnotationModel::Susie => {
-                    let m = SusieDeconv::new(
+                    let m = VmfSusieDeconv::new(
                         x_ga,
+                        y_normalized,
                         data.ncols(),
                         args.susie_components,
                         prior_var,
                         args.num_samples,
                         vb,
                     )?;
-                    run_training(&m, &params, args, data, &dev, use_pseudobulk)?.0
+                    run_training_vmf(&m, &params, args)?.0
                 }
                 AnnotationModel::BiSusie => {
-                    let m = BiSusieDeconv::new(
+                    let m = VmfBiSusieDeconv::new(
                         x_ga,
+                        y_normalized,
                         data.ncols(),
                         args.susie_components,
                         prior_var,
                         args.num_samples,
                         vb,
                     )?;
-                    run_training(&m, &params, args, data, &dev, use_pseudobulk)?.0
+                    run_training_vmf(&m, &params, args)?.0
                 }
             };
             return Ok(pip);
@@ -506,6 +466,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
         // Model averaging over multiple prior_var
         let mut pips: Vec<Mat> = Vec::new();
         let mut elbos: Vec<f32> = Vec::new();
+        let n_topics = data.ncols();
 
         for &prior_var in &args.prior_var {
             let params = candle_nn::VarMap::new();
@@ -513,26 +474,28 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
 
             let (pip, loss) = match args.model {
                 AnnotationModel::Susie => {
-                    let m = SusieDeconv::new(
+                    let m = VmfSusieDeconv::new(
                         x_ga.clone(),
-                        data.ncols(),
+                        y_normalized.clone(),
+                        n_topics,
                         args.susie_components,
                         prior_var,
                         args.num_samples,
                         vb,
                     )?;
-                    run_training(&m, &params, args, data, &dev, use_pseudobulk)?
+                    run_training_vmf(&m, &params, args)?
                 }
                 AnnotationModel::BiSusie => {
-                    let m = BiSusieDeconv::new(
+                    let m = VmfBiSusieDeconv::new(
                         x_ga.clone(),
-                        data.ncols(),
+                        y_normalized.clone(),
+                        n_topics,
                         args.susie_components,
                         prior_var,
                         args.num_samples,
                         vb,
                     )?;
-                    run_training(&m, &params, args, data, &dev, use_pseudobulk)?
+                    run_training_vmf(&m, &params, args)?
                 }
             };
             pips.push(pip);
@@ -596,7 +559,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
 
         let candidates = find_candidate_markers(
             &pip,
-            data,
+            full_data,
             &membership,
             &training_data.gene_names,
             &topic_names,
@@ -642,7 +605,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
 
             let candidates = find_candidate_markers(
                 &pip,
-                data,
+                full_data,
                 &membership,
                 &training_data.gene_names,
                 &topic_names,
@@ -906,60 +869,43 @@ fn display_annotation_histogram(annot: &Mat, annot_names: &[Box<str>]) {
     eprintln!();
 }
 
-/// Trait for deconvolution models
-trait DeconvModel {
-    fn loss(&self, y_gt: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor>;
-    fn loss_with_kl_weight(
-        &self,
-        y_gt: &candle_core::Tensor,
-        kl_weight: f32,
-    ) -> candle_core::Result<candle_core::Tensor>;
+/// Trait for vMF deconvolution models (y is stored in the model, not passed to loss)
+trait VmfDeconvModel {
+    fn loss(&self) -> candle_core::Result<candle_core::Tensor>;
+    fn loss_with_kl_weight(&self, kl_weight: f32) -> candle_core::Result<candle_core::Tensor>;
     fn pip(&self) -> candle_core::Result<candle_core::Tensor>;
 }
 
-impl DeconvModel for SusieDeconv {
-    fn loss(&self, y_gt: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
-        SusieDeconv::loss(self, y_gt)
+impl VmfDeconvModel for VmfSusieDeconv {
+    fn loss(&self) -> candle_core::Result<candle_core::Tensor> {
+        VmfSusieDeconv::loss(self)
     }
-    fn loss_with_kl_weight(
-        &self,
-        y_gt: &candle_core::Tensor,
-        kl_weight: f32,
-    ) -> candle_core::Result<candle_core::Tensor> {
-        SusieDeconv::loss_with_kl_weight(self, y_gt, kl_weight)
+    fn loss_with_kl_weight(&self, kl_weight: f32) -> candle_core::Result<candle_core::Tensor> {
+        VmfSusieDeconv::loss_with_kl_weight(self, kl_weight)
     }
     fn pip(&self) -> candle_core::Result<candle_core::Tensor> {
-        SusieDeconv::pip(self)
+        VmfSusieDeconv::pip(self)
     }
 }
 
-impl DeconvModel for BiSusieDeconv {
-    fn loss(&self, y_gt: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
-        BiSusieDeconv::loss(self, y_gt)
+impl VmfDeconvModel for VmfBiSusieDeconv {
+    fn loss(&self) -> candle_core::Result<candle_core::Tensor> {
+        VmfBiSusieDeconv::loss(self)
     }
-    fn loss_with_kl_weight(
-        &self,
-        y_gt: &candle_core::Tensor,
-        kl_weight: f32,
-    ) -> candle_core::Result<candle_core::Tensor> {
-        BiSusieDeconv::loss_with_kl_weight(self, y_gt, kl_weight)
+    fn loss_with_kl_weight(&self, kl_weight: f32) -> candle_core::Result<candle_core::Tensor> {
+        VmfBiSusieDeconv::loss_with_kl_weight(self, kl_weight)
     }
     fn pip(&self) -> candle_core::Result<candle_core::Tensor> {
-        BiSusieDeconv::pip(self)
+        VmfBiSusieDeconv::pip(self)
     }
 }
 
 /// Returns (PIP matrix, average loss after annealing)
-fn run_training<M: DeconvModel>(
+fn run_training_vmf<M: VmfDeconvModel>(
     model: &M,
     parameters: &candle_nn::VarMap,
     args: &AnnotateTopicArgs,
-    data_gt: &Mat,
-    dev: &candle_core::Device,
-    _use_pseudobulk: bool,
 ) -> anyhow::Result<(Mat, f32)> {
-    use rand_distr::{Distribution, Poisson};
-
     let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate)?;
 
     // KL annealing parameters
@@ -982,33 +928,14 @@ fn run_training<M: DeconvModel>(
     // Track losses after annealing for averaging
     let mut post_anneal_losses: Vec<f32> = Vec::new();
 
-    // Precompute scaled data (used when not sampling)
-    let scale = args.column_sum_norm;
-    let scaled_data = data_gt.map(|x| (x.exp() * scale).max(1e-10));
-    let y_gt_fixed = if !args.poisson_sampling {
-        Some(scaled_data.to_tensor(dev)?)
-    } else {
-        None
-    };
-
-    // Training loop
+    // Training loop (vMF: y is already stored in model, no Poisson sampling)
     for epoch in 0..total_epochs {
-        // Either sample Y[g,t] ~ Poisson(rate) or use scaled data directly
-        let y_gt = if args.poisson_sampling {
-            let mut rng = rand::rngs::StdRng::seed_from_u64(epoch as u64 + 1);
-            scaled_data
-                .map(|rate| Poisson::new(rate as f64).unwrap().sample(&mut rng) as f32)
-                .to_tensor(dev)?
-        } else {
-            y_gt_fixed.as_ref().unwrap().clone()
-        };
-
         // Compute loss with optional KL annealing (warm-up: 0 → 1)
         let loss = if use_kl_annealing {
             let kl_weight = (epoch as f32 / args.kl_anneal_epochs as f32).min(1.0);
-            model.loss_with_kl_weight(&y_gt, kl_weight)?
+            model.loss_with_kl_weight(kl_weight)?
         } else {
-            model.loss(&y_gt)?
+            model.loss()?
         };
 
         adam.backward_step(&loss)?;
