@@ -577,7 +577,7 @@ where
         .par_iter()
         .progress_count(njobs)
         .map(|&block| match args.adj_method {
-            AdjMethod::Residual => evalulate_with_residuals(
+            AdjMethod::Residual => evaluate_with_residuals(
                 block,
                 data_stack,
                 arc_enc.clone(),
@@ -585,7 +585,7 @@ where
                 delta.as_ref(),
                 arc_sel.clone(),
             ),
-            AdjMethod::Batch => evalulate_with_batch(
+            AdjMethod::Batch => evaluate_with_batch(
                 block,
                 data_stack,
                 arc_enc.clone(),
@@ -611,7 +611,7 @@ where
     Ok(ret)
 }
 
-fn evalulate_with_batch<Enc>(
+fn evaluate_with_batch<Enc>(
     block: (usize, usize),
     data_stack: &SparseIoStack,
     encoder: Arc<&Enc>,
@@ -674,7 +674,7 @@ where
     Ok((lb, Mat::from_tensor(&z_nk)?))
 }
 
-fn evalulate_with_residuals<Enc>(
+fn evaluate_with_residuals<Enc>(
     block: (usize, usize),
     data_stack: &SparseIoStack,
     encoder: Arc<&Enc>,
