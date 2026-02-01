@@ -217,7 +217,7 @@ mod tests {
             .map(|idx| {
                 let i = idx / n;
                 let j = idx % n;
-                if i == j { 0.0 } else { ((i as f32 - j as f32).abs()) }
+                if i == j { 0.0 } else { (i as f32 - j as f32).abs() }
             })
             .collect();
 
