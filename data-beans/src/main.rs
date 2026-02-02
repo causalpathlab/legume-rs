@@ -1143,10 +1143,13 @@ pub struct RunStatArgs {
     #[arg(
         short,
         long,
-        help = "Row name pattern for column statistics",
-        long_help = "Specify a pattern to select row names \n\
+        help = "Row name regex pattern for column statistics",
+        long_help = "Specify a regex pattern to select row names \n\
 		     when accumulating statistics over columns.\n\
-		     Only rows matching this pattern will be included."
+		     Only rows matching this pattern will be included.\n\
+		     Examples: '^MT-' (starts with MT-), 'GAPDH$' (ends with GAPDH),\n\
+		     '^(MT|RPL|RPS)-' (mitochondrial or ribosomal genes).\n\
+		     Matching is case-insensitive."
     )]
     row_name_pattern: Option<Box<str>>,
 
