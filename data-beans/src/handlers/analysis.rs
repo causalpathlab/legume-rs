@@ -10,6 +10,7 @@ use matrix_util::membership::Membership;
 use matrix_util::mtx_io;
 use matrix_util::traits::IoOps;
 use rayon::prelude::*;
+use regex::Regex;
 use std::sync::Arc;
 
 // Import the argument structs from main.rs
@@ -104,20 +105,22 @@ pub fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
             }
         }
         StatDim::Column => {
-            let select_rows = cmd_args.row_name_pattern.as_ref().map(|x| {
-                let select_pattern = x.to_lowercase();
-                data.row_names()
-                    .expect("couldn't get the row names")
+            let select_rows = cmd_args.row_name_pattern.as_ref().map(|pattern| {
+                let re = Regex::new(&format!("(?i){}", pattern))
+                    .expect("Invalid regex pattern for --row-name-pattern");
+                let row_names = data.row_names().expect("couldn't get the row names");
+                let selected: Vec<_> = row_names
                     .iter()
                     .enumerate()
-                    .filter_map(|(i, x)| {
-                        if x.to_lowercase().contains(&select_pattern) {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
+                    .filter_map(|(i, name)| if re.is_match(name) { Some(i) } else { None })
+                    .collect();
+                info!(
+                    "Row pattern '{}' matched {}/{} rows",
+                    pattern,
+                    selected.len(),
+                    row_names.len()
+                );
+                selected
             });
 
             let col_stat =

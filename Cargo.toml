@@ -56,6 +56,7 @@ indicatif = { version = "^0.18", features = ["rayon"] }
 parquet = { version = "56" }
 env_logger = { version = "0.11" }
 log = { version = "0.4" }
+regex = { version = "1" }
 zip = { version = "6" }
 
 statrs = { version = "0.18" }

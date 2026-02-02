@@ -22,6 +22,7 @@ clap = { workspace = true }
 flate2 = { workspace = true }
 num_cpus = { workspace = true }
 rayon = { workspace = true }
+regex = { workspace = true }
 
 hdf5 = { package = "hdf5-metno", version = "0.10.0", features = ["blosc"] }
 libz-sys = { version = "1.1", features = ["libc"], default-features = false }
