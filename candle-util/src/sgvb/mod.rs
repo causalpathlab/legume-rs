@@ -38,6 +38,7 @@
 
 mod composite_model;
 mod gaussian_prior;
+pub mod likelihood;
 mod regression_linear;
 mod sgvb;
 mod traits;
@@ -51,6 +52,11 @@ pub use composite_model::{
     samples_elbo, samples_sgvb_loss, CompositeModel,
 };
 pub use gaussian_prior::{FixedGaussianPrior, GaussianPrior};
+pub use likelihood::{
+    estimate_kappa_mle, l2_normalize_dim, lgamma_approx, log_bessel_i, suggest_kappa_init,
+    vmf_log_normalizer, GaussianLikelihood, NegativeBinomialLikelihood, PoissonLikelihood,
+    VmfFixedKappaLikelihood,
+};
 pub use regression_linear::{LinearModelSGVB, LinearRegressionSGVB};
 pub use sgvb::{compute_elbo, direct_elbo_loss, sgvb_loss, SGVBConfig};
 pub use traits::{BlackBoxLikelihood, Prior, SgvbModel, SgvbSample, VariationalDistribution};

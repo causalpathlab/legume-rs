@@ -8,6 +8,10 @@ homepage.workspace = true
 edition.workspace = true
 version.workspace = true
 
+[lib]
+name = "senna"
+path = "src/lib.rs"
+
 [[bin]]
 name = "senna"
 path = "src/main.rs"

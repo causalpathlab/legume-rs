@@ -607,10 +607,6 @@ impl MarkerDatabase {
         };
         check(&gn) || gs.map_or(false, |s| check(&s))
     }
-
-    pub fn len(&self) -> usize {
-        self.gene_to_celltypes.len()
-    }
 }
 
 /// Auto-suggest markers based on reference database
