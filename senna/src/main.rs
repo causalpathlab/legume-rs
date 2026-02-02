@@ -1,4 +1,4 @@
-mod annotate_topic;
+mod fit_annotate_topic;
 mod cluster;
 mod deconv;
 mod embed_common;
@@ -15,7 +15,7 @@ mod interactive_markers;
 mod visualization_alg;
 mod senna_input;
 
-use annotate_topic::*;
+use fit_annotate_topic::*;
 use embed_common::*;
 use fit_clustering::*;
 use fit_deconv_reg::*;
@@ -112,37 +112,12 @@ enum Commands {
     Topic(TopicArgs),
 
     #[command(
-        about = "Annotate the dictionary and latent topics using marker features",
-        long_about = "Annotate what each topic would mean using marker features/genes.\n\
-              For each topic, we regress a feature vector of the dictionary\n\
-              on the marker gene membership matrix (a design matrix)\n\
-              to estimate the probability of assigning cell/group types.\n\n\
-              LLM-ASSISTED ANNOTATION WORKFLOW:\n\n\
-              1. Generate candidates:  --suggest-only candidates.json\n\
-              2. Share candidates.json with an LLM (e.g., Claude)\n\
-              3. LLM searches each gene and outputs suggestions.json\n\
-              4. Apply suggestions:    --apply-suggestions suggestions.json\n\n\
-              PROMPT FOR LLM:\n\
-              \"Review these candidate genes for cell type annotation.\n\
-              For each gene, search what cell types it marks.\n\
-              Output JSON: [{\\\"gene\\\": \\\"GENE\\\", \\\"celltype\\\": \\\"TYPE\\\"}]\n\
-              Only include genes confidently matching the proposed cell type.\"\n",
-        after_help = "EXAMPLE LLM SESSION:\n\n\
-              Input (candidates.json excerpt):\n  \
-                {\"celltype\": \"Late_Erythroid\", \"topics\": [{\"genes\": [\n    \
-                  {\"gene\": \"ENSG00000105205_CLC\", \"weight\": 0.0025}]}]}\n\n\
-              LLM analysis:\n  \
-                - CLC (Charcot-Leyden crystal galectin): eosinophil marker, NOT erythroid\n  \
-                - Action: SKIP (does not match Late_Erythroid)\n\n\
-              Input:\n  \
-                {\"celltype\": \"Megakaryocyte_Precursor\", \"topics\": [{\"genes\": [\n    \
-                  {\"gene\": \"ENSG00000244734_HBB\", \"weight\": 0.0018}]}]}\n\n\
-              LLM analysis:\n  \
-                - HBB (Hemoglobin subunit beta): erythroid lineage marker\n  \
-                - Megakaryocytes share lineage with erythroid (MEP progenitor)\n  \
-                - Action: INCLUDE\n\n\
-              Output (suggestions.json):\n  \
-                [{\"gene\": \"ENSG00000244734_HBB\", \"celltype\": \"Megakaryocyte_Precursor\"}]",
+        about = "Annotate topics using marker genes (vMF cosine similarity)",
+        long_about = "Assign cell type probabilities to topics via vMF softmax on cosine similarity.\n\n\
+              Modes:\n\
+              - Direct:      senna annotate -g dict.parquet -z latent.parquet -m markers.tsv -o out\n\
+              - Interactive: add -I to iteratively augment markers\n\
+              - LLM-assist:  --suggest-only out.json, then --apply-suggestions in.json",
         visible_alias = "annotate"
     )]
     AnnotateTopic(AnnotateTopicArgs),

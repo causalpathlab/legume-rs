@@ -11,12 +11,9 @@ use std::path::{Path, PathBuf};
 use crate::sgvb::{
     composite_direct_elbo_loss, composite_elbo, composite_sgvb_loss, compute_elbo,
     direct_elbo_loss, samples_direct_elbo_loss, samples_elbo, samples_sgvb_loss, sgvb_loss,
-    CompositeModel, GaussianPrior, LinearModelSGVB, LinearRegressionSGVB, SGVBConfig, SgvbModel,
-    SparseVariationalOutput, SusieVar, VariationalOutput,
-};
-
-use super::regression_likelihood::{
-    GaussianLikelihood, NegativeBinomialLikelihood, PoissonLikelihood,
+    CompositeModel, GaussianLikelihood, GaussianPrior, LinearModelSGVB, LinearRegressionSGVB,
+    NegativeBinomialLikelihood, PoissonLikelihood, SGVBConfig, SgvbModel, SparseVariationalOutput,
+    SusieVar, VariationalOutput,
 };
 
 //
