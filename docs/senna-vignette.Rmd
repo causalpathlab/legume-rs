@@ -1,0 +1,272 @@
+---
+title: "Introduction to Senna"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE)
+```
+
+## Introduction
+
+**SENNA** (Stochastic data Embedding with Nearest Neighbourhood Adjustment) provides embedding and dimensionality reduction tools for single-cell data. This vignette demonstrates a basic workflow using SVD-based embedding and tree visualization.
+
+## Getting Help
+
+```{bash}
+senna --help
+```
+
+## Example Workflow
+
+We will use a 10X Genomics PBMC dataset to demonstrate the workflow:
+
+1. Create a data backend from H5 file
+2. Squeeze low-expressed genes and sparse columns
+3. Run SVD embedding
+4. Visualize with tree layout
+
+### Step 1: Setup and Create Backend
+
+First, create a temporary output directory and convert the H5 file to a zarr backend.
+
+```{r}
+# Create temp directory for outputs (prefix "temp" so it's not tracked in git)
+# Keep intermediate results to avoid re-running same steps
+temp_dir <- "temp_senna_vignette"
+if (!dir.exists(temp_dir)) dir.create(temp_dir)
+```
+
+```{bash}
+[ -d "temp_senna_vignette/pbmc.zarr" ] && echo "Skipping: pbmc.zarr exists" && exit 0
+data-beans from-h5ad \
+  10k_Human_PBMC_5p_v3_Ultima_10k_Human_PBMC_5p_v3_Ultima_count_sample_filtered_feature_bc_matrix.h5 \
+  -o temp_senna_vignette/pbmc \
+  -v
+```
+
+### Step 2: Squeeze Low-Expressed Features
+
+Remove genes with too few expressing cells and cells with too few detected genes.
+
+```{bash}
+[ -d "temp_senna_vignette/pbmc_squeezed.zarr" ] && echo "Skipping: pbmc_squeezed.zarr exists" && exit 0
+data-beans squeeze \
+  temp_senna_vignette/pbmc.zarr \
+  -r 10 \
+  -c 100 \
+  -o temp_senna_vignette/pbmc_squeezed
+```
+
+### Step 3: Run SVD Embedding
+
+Compute SVD-based dimensionality reduction.
+
+```{bash}
+[ -f "temp_senna_vignette/pbmc_svd.latent.parquet" ] && echo "Skipping: pbmc_svd exists" && exit 0
+senna svd \
+  temp_senna_vignette/pbmc_squeezed.zarr \
+  -o temp_senna_vignette/pbmc_svd \
+  -t 20 \
+  --max-features 2000 \
+  --ignore-batch-effects \
+  -v
+```
+
+### Step 4: Visualize with Tree Layout
+
+Create 2D visualization using tree layout.
+
+```{bash}
+[ -f "temp_senna_vignette/pbmc_viz.cell_coords.parquet" ] && echo "Skipping: pbmc_viz exists" && exit 0
+senna visualize \
+  temp_senna_vignette/pbmc_squeezed.zarr \
+  -l temp_senna_vignette/pbmc_svd.latent.parquet \
+  -o temp_senna_vignette/pbmc_viz \
+  --layout tree \
+  -v
+```
+
+### Step 5: Plot Results
+
+```{r}
+library(arrow)
+library(ggplot2)
+
+# Read cell coordinates
+coords <- read_parquet("temp_senna_vignette/pbmc_viz.cell_coords.parquet")
+head(coords)
+```
+
+```{r, fig.width=8, fig.height=6}
+ggplot(coords, aes(x = x, y = y)) +
+  geom_point(alpha = 0.3, size = 0.5, color = "steelblue") +
+  theme_minimal() +
+  labs(title = "PBMC Tree Visualization", x = "Dim 1", y = "Dim 2") +
+  coord_fixed()
+```
+
+### Step 6: Cluster Cells
+
+Run k-means clustering on the SVD latent space.
+
+```{bash}
+[ -f "temp_senna_vignette/pbmc_clusters.clusters.parquet" ] && echo "Skipping: pbmc_clusters exists" && exit 0
+senna clustering \
+  -l temp_senna_vignette/pbmc_svd.latent.parquet \
+  -k 10 \
+  -o temp_senna_vignette/pbmc_clusters \
+  -v
+```
+
+### Step 7: Visualize Clusters
+
+```{r}
+# Read cluster assignments
+clusters <- read_parquet("temp_senna_vignette/pbmc_clusters.clusters.parquet")
+head(clusters)
+
+# Merge with coordinates
+coords_clustered <- merge(coords, clusters, by = "row")
+coords_clustered$cluster <- factor(coords_clustered$cluster)
+```
+
+```{r, fig.width=10, fig.height=8}
+ggplot(coords_clustered, aes(x = x, y = y, color = cluster)) +
+  geom_point(alpha = 0.5, size = 0.5) +
+  theme_minimal() +
+  labs(title = "PBMC Clusters", x = "Dim 1", y = "Dim 2") +
+  coord_fixed() +
+  scale_color_brewer(palette = "Set3")
+```
+
+### Step 8: Per-Cluster Gene Statistics
+
+Compute gene expression statistics for each cluster.
+
+```{r}
+# Create cluster membership file for data-beans
+write.table(clusters, "temp_senna_vignette/cluster_membership.tsv",
+            sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+```{bash}
+[ -f "temp_senna_vignette/gene_stats_by_cluster.parquet" ] && echo "Skipping: gene_stats exists" && exit 0
+data-beans stat \
+  temp_senna_vignette/pbmc_squeezed.zarr \
+  -s row \
+  -g temp_senna_vignette/cluster_membership.tsv \
+  -o temp_senna_vignette/gene_stats_by_cluster.parquet
+```
+
+```{r}
+# Read per-cluster gene statistics
+gene_stats <- read_parquet("temp_senna_vignette/gene_stats_by_cluster.parquet")
+head(gene_stats)
+```
+
+### Step 9: Gene Set Enrichment Analysis
+
+Identify marker genes and perform gene set enrichment for each cluster.
+
+```{r, message=FALSE, warning=FALSE}
+library(fgsea)
+library(dplyr)
+library(tidyr)
+
+# Load PanglaoDB cell type markers
+panglaodb <- read.delim(gzfile("../senna/temp/PanglaoDB_markers_27_Mar_2020.tsv.gz"))
+
+# Filter for human markers (species contains "Hs") and blood/immune cell types
+panglaodb_hs <- panglaodb %>%
+  filter(grepl("Hs", species)) %>%
+  filter(organ %in% c("Blood", "Immune system")) %>%
+  select(gene = official.gene.symbol, cell_type = cell.type)
+
+# Create pathway list (cell type -> genes)
+pathways <- split(panglaodb_hs$gene, panglaodb_hs$cell_type)
+
+# Show available cell types
+cat("Number of cell types:", length(pathways), "\n")
+cat("Cell types:", paste(names(pathways), collapse = ", "), "\n")
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Pivot gene stats to wide format (gene x cluster)
+gene_wide <- gene_stats %>%
+  select(name, group, mu) %>%
+  pivot_wider(names_from = group, values_from = mu, values_fill = 0)
+
+# Extract gene symbol from name (format: ENSG..._SYMBOL or just SYMBOL)
+gene_wide$gene <- sapply(strsplit(gene_wide$name, "_"), function(x) tail(x, 1))
+
+# Remove duplicate genes (keep first occurrence)
+gene_wide <- gene_wide[!duplicated(gene_wide$gene), ]
+
+# For each cluster, use mean expression as ranking (fgsea is rank-based)
+run_gsea_for_cluster <- function(cluster_id, gene_wide, pathways) {
+  # Mean expression in this cluster
+  stats <- gene_wide[[cluster_id]]
+  names(stats) <- gene_wide$gene
+
+  # Sort by expression for GSEA
+  stats <- sort(stats, decreasing = TRUE)
+
+  # Run fgsea (suppress messages and warnings)
+  fgsea_res <- suppressWarnings(suppressMessages(fgsea(pathways = pathways, stats = stats, minSize = 10, maxSize = 500)))
+  fgsea_res$cluster <- cluster_id
+  return(fgsea_res)
+}
+
+# Run for all clusters
+cluster_ids <- setdiff(colnames(gene_wide), c("name", "gene"))
+gsea_results <- lapply(cluster_ids, run_gsea_for_cluster,
+                       gene_wide = gene_wide, pathways = pathways)
+gsea_all <- bind_rows(gsea_results)
+```
+
+```{r}
+# Top enriched pathways per cluster (one-sided: positive enrichment only)
+top_pathways <- gsea_all %>%
+  filter(padj < 0.05, NES > 0) %>%
+  group_by(cluster) %>%
+  slice_min(pval, n = 5) %>%
+  select(cluster, pathway, NES, padj)
+
+print(top_pathways, n = 50)
+```
+
+```{r, fig.width=12, fig.height=6}
+library(pheatmap)
+
+# Heatmap of top pathways colored by -log10(pvalue)
+top_pw_names <- unique(top_pathways$pathway)
+gsea_top <- gsea_all %>%
+  filter(pathway %in% top_pw_names) %>%
+  mutate(neg_log_p = -log10(pval)) %>%
+  select(cluster, pathway, neg_log_p) %>%
+  pivot_wider(names_from = cluster, values_from = neg_log_p, values_fill = 0)
+
+if (nrow(gsea_top) > 0) {
+  mat <- as.matrix(gsea_top[, -1])
+  rownames(mat) <- gsea_top$pathway
+
+  pheatmap(mat,
+           color = colorRampPalette(c("white", "red"))(100),
+           cluster_rows = TRUE, cluster_cols = TRUE,
+           fontsize_row = 8, fontsize_col = 10,
+           main = "GSEA: -log10(pvalue) by Cluster")
+}
+```
+
+## Session Info
+
+```{r}
+sessionInfo()
+```

@@ -1,3 +1,14 @@
+<!---------------------------------------------------------------------------->
+<!-- Rules for vignettes												    -->
+<!-- 																	    -->
+<!-- 1. use legume CLI tools											    -->
+<!-- 																	    -->
+<!-- 2. use R, don't use Python											    -->
+<!-- 																	    -->
+<!-- 3. save intermediate files with "temp" prefix not to be kept in github -->
+<!-- 4. keep intermediate results in temp folder to avoid re-running same steps -->
+<!---------------------------------------------------------------------------->
+
 # `legume-rs`: Library for Exploring Genomics Using Machine learning Essentials
 
 This is a command line based tool that runs on Unix-like environments.
@@ -40,9 +51,6 @@ Basic utility functions for processing sparse matrices from single-cell omics da
 
 ### faba
 **FABA**: Feature statistics Accumulator for Base-pair-level Analysis - genomic feature extraction tools.
-
-### sprout
-Interactive LLM chat interface for genomics data analysis using local LLMs (Llama, DeepSeek, Mistral).
 
 ## Documentation
 
