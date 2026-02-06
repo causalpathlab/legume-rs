@@ -12,4 +12,8 @@ version.workspace = true
 anyhow = { workspace = true }
 dashmap = { workspace = true }
 rayon = { workspace = true }
+nalgebra = { workspace = true }
 matrix-util = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
