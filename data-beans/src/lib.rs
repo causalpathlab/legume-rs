@@ -1,3 +1,4 @@
+pub mod convert; // data format conversion (h5/zarr → backend)
 pub mod misc; //miscellaneous helper functions
 pub mod qc; // functions needed to perform quality control
 pub mod simulate; // helper function for simulation
