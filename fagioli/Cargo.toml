@@ -27,8 +27,6 @@ num_cpus = { workspace = true }
 rayon = { workspace = true }
 tempfile = { workspace = true }
 rand = { workspace = true }
-ndarray = { workspace = true }
-ndarray-rand = { workspace = true }
 rand_distr = { workspace = true }
 nalgebra = { workspace = true }
 nalgebra-sparse = { workspace = true }
@@ -41,8 +39,7 @@ env_logger = { workspace = true }
 log = { workspace = true }
 dashmap = { workspace = true }
 
-# For PLINK BED format reading
-bed-reader = "1.0"
+colored = { workspace = true }
 
 # For JSON output
 serde = { workspace = true }

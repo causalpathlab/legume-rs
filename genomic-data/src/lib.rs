@@ -9,4 +9,5 @@
 pub mod gff;
 pub mod sam;
 pub mod bed;
+pub mod plink;
 pub mod positions;
