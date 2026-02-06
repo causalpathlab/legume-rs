@@ -14,7 +14,7 @@ pub struct EstimateBatchArgs {
 
 pub fn estimate_batch(
     data_vec: &mut SparseIoVec,
-    batch_membership: &Vec<Box<str>>,
+    batch_membership: &[Box<str>],
     args: EstimateBatchArgs,
 ) -> anyhow::Result<Option<GammaMatrix>> {
     let batch_hash: HashSet<Box<str>> = batch_membership.iter().cloned().collect();
@@ -26,7 +26,7 @@ pub fn estimate_batch(
     let proj_out = data_vec.project_columns_with_batch_correction(
         args.proj_dim,
         Some(args.block_size),
-        Some(&batch_membership),
+        Some(batch_membership),
     )?;
 
     let proj_kn = proj_out.proj;
@@ -37,7 +37,7 @@ pub fn estimate_batch(
 
     info!("Assigning to random {} samples", nsamp);
 
-    data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
+    data_vec.build_hnsw_per_batch(&proj_kn, batch_membership)?;
 
     let collapse_out =
         data_vec.collapse_columns(Some(args.knn_batches), Some(args.knn_cells), None, None)?;
