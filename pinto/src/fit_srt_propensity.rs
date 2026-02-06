@@ -39,6 +39,13 @@ pub struct SrtPropensityArgs {
     #[arg(long, default_value = "right_cell")]
     right_name: Box<str>,
 
+    /// coordinate column names (looked up as left_{name} in coord_pair_file)
+    #[arg(
+        long = "coord-column-names",
+        value_delimiter(',')
+    )]
+    coord_column_names: Option<Vec<Box<str>>>,
+
     /// Block_size for parallel processing
     #[arg(long, default_value_t = 100)]
     block_size: usize,
@@ -115,11 +122,60 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
 
     prop_kn.sum_to_one_columns_inplace();
 
-    prop_kn.transpose().to_parquet(
-        Some(vertices.as_ref()),
-        None,
-        &(args.out.to_string() + ".propensity.parquet"),
-    )?;
+    // Optionally attach coordinates from the coord_pair_file
+    if let Some(coord_column_names) = &args.coord_column_names {
+        info!("Extracting vertex coordinates from coord_pair_file");
+
+        // Read left_{name} columns from coord_pair parquet
+        let left_coord_names: Vec<Box<str>> = coord_column_names
+            .iter()
+            .map(|name| format!("left_{}", name).into_boxed_str())
+            .collect();
+
+        let MatWithNames {
+            rows: _,
+            cols: _,
+            mat: left_coords,
+        } = Mat::from_parquet_with_indices_names(
+            &args.coord_pair_file,
+            Some(0),
+            Some(&[]),
+            Some(&left_coord_names),
+        )?;
+
+        // Build vertex coordinate matrix from left-cell positions
+        let n_coords = coord_column_names.len();
+        let mut vertex_coords = Mat::zeros(nvertices, n_coords);
+        for (pair_idx, pair) in pair_names.iter().enumerate() {
+            let left_cell = &pair[0];
+            if let Some(&v_idx) = vertex_index.get(left_cell) {
+                vertex_coords
+                    .row_mut(v_idx)
+                    .copy_from(&left_coords.row(pair_idx));
+            }
+        }
+
+        // Concatenate propensity + coordinates
+        let prop_nk = prop_kn.transpose();
+        let combined = concatenate_horizontal(&[prop_nk, vertex_coords])?;
+
+        let mut col_names: Vec<Box<str>> = (0..prop_kn.nrows())
+            .map(|k| format!("propensity_{}", k).into_boxed_str())
+            .collect();
+        col_names.extend(coord_column_names.iter().cloned());
+
+        combined.to_parquet(
+            Some(vertices.as_ref()),
+            Some(&col_names),
+            &(args.out.to_string() + ".propensity.parquet"),
+        )?;
+    } else {
+        prop_kn.transpose().to_parquet(
+            Some(vertices.as_ref()),
+            None,
+            &(args.out.to_string() + ".propensity.parquet"),
+        )?;
+    }
 
     if let Some(data_files) = args.expr_data_files.as_ref() {
         info!("Estimate cluster-specific gene expressions");
