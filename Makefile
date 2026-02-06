@@ -1,4 +1,4 @@
-BINARIES := senna pinto cocoa faba chickpea candle-util data-beans
+BINARIES := senna pinto cocoa faba chickpea candle-util data-beans fagioli
 
 .PHONY: all install $(addprefix install-,$(BINARIES)) build test clean help
 
