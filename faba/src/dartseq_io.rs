@@ -1,5 +1,5 @@
-use crate::data::gff::{GeneId, GffRecordMap};
-use crate::data::sam::Strand;
+use genomic_data::gff::{GeneId, GffRecordMap};
+use genomic_data::sam::Strand;
 use crate::dartseq_sifter::MethylatedSite;
 use anyhow::Result;
 use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array};

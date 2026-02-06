@@ -9,9 +9,9 @@ use rust_htslib::faidx;
 use crate::data::cell_membership::CellMembership;
 use crate::data::dna_stat_map::*;
 use crate::data::dna_stat_traits::*;
-use crate::data::gff::FeatureType as GffFeatureType;
-use crate::data::gff::GeneType as GffGeneType;
-use crate::data::gff::{GeneId, GffRecordMap};
+use genomic_data::gff::FeatureType as GffFeatureType;
+use genomic_data::gff::GeneType as GffGeneType;
+use genomic_data::gff::{GeneId, GffRecordMap};
 use crate::data::methylation::*;
 
 use crate::data::util_htslib::*;

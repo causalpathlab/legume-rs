@@ -1,9 +1,9 @@
 use crate::common::*;
-use crate::data::bed::BedWithGene;
+use genomic_data::bed::BedWithGene;
 use crate::data::dna_stat_traits::*;
-use crate::data::gff::FeatureType as GffFeatureType;
-use crate::data::gff::GeneType as GffGeneType;
-use crate::data::gff::{GeneId, GffRecordMap};
+use genomic_data::gff::FeatureType as GffFeatureType;
+use genomic_data::gff::GeneType as GffGeneType;
+use genomic_data::gff::{GeneId, GffRecordMap};
 use crate::data::poly_a_stat_map::{PolyASiteArgs, PolyASiteMap};
 use crate::data::util_htslib::*;
 

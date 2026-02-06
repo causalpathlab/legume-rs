@@ -1,5 +1,5 @@
 use crate::common::*;
-use crate::data::bed::*;
+use genomic_data::bed::*;
 use crate::data::util_htslib::*;
 use crate::read_coverage::ReadCoverageCollector;
 

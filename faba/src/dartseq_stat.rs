@@ -1,7 +1,7 @@
 use crate::dartseq_sifter::MethylatedSite;
 use crate::data::dna::Dna;
-use crate::data::gff::*;
-use crate::data::sam::Strand;
+use genomic_data::gff::*;
+use genomic_data::sam::Strand;
 use dashmap::DashMap as HashMap;
 use matrix_util::common_io;
 use std::io::Write;

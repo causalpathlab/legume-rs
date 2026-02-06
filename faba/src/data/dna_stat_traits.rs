@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-use crate::data::bed::Bed;
-use crate::data::gff::*;
-use crate::data::positions::*;
+use genomic_data::bed::Bed;
+use genomic_data::gff::*;
+use genomic_data::positions::*;
 use crate::data::visitors_htslib::*;
 
 use rust_htslib::bam::{self, record::Aux};

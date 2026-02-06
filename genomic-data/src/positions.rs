@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-pub use crate::data::gff::GeneId as Gene;
+pub use crate::gff::GeneId as Gene;
 use std::collections::HashMap;
 
 #[derive(Hash, Eq, PartialEq, Clone, PartialOrd, Ord)]

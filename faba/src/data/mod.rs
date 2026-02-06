@@ -1,12 +1,8 @@
-pub mod bed;
 pub mod cell_membership;
 pub mod dna;
 pub mod dna_stat_map;
 pub mod dna_stat_traits;
-pub mod gff;
 pub mod methylation;
 pub mod poly_a_stat_map;
-pub mod positions;
-pub mod sam;
 pub mod util_htslib;
 pub mod visitors_htslib;

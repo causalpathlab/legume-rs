@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-pub use crate::data::bed::*;
+pub use genomic_data::bed::*;
 use clap::ValueEnum;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
