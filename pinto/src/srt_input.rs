@@ -17,7 +17,7 @@ pub struct SRTData {
     pub batches: Vec<Box<str>>,
 }
 
-pub fn read_expr_data(data_files: &Vec<Box<str>>) -> anyhow::Result<SparseIoVec> {
+pub fn read_expr_data(data_files: &[Box<str>]) -> anyhow::Result<SparseIoVec> {
     if data_files.is_empty() {
         return Err(anyhow::anyhow!("empty data files"));
     }
@@ -108,7 +108,7 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
 
     for (i, coord_file) in args.coord_files.iter().enumerate() {
         info!("Reading coordinate file: {}", coord_file);
-        let ext = file_ext(&coord_file)?;
+        let ext = file_ext(coord_file)?;
 
         let MatWithNames {
             rows: coord_cell_names,
@@ -116,13 +116,13 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
             mat: data,
         } = match ext.as_ref() {
             "parquet" => Mat::from_parquet_with_indices_names(
-                &coord_file,
+                coord_file,
                 Some(0),
                 Some(&args.coord_columns),
                 Some(&args.coord_column_names),
             )?,
             _ => Mat::read_data(
-                &coord_file,
+                coord_file,
                 &['\t', ',', ' '],
                 args.header_in_coord,
                 Some(0),
@@ -135,12 +135,10 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
 
         if coord_column_names.is_empty() {
             coord_column_names.extend(column_names);
-        } else {
-            if coord_column_names != column_names {
-                return Err(anyhow::anyhow!(
-                    "coordinate column names do not match with each other"
-                ));
-            }
+        } else if coord_column_names != column_names {
+            return Err(anyhow::anyhow!(
+                "coordinate column names do not match with each other"
+            ));
         }
 
         if data_cell_names == coord_cell_names {
@@ -162,7 +160,7 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
                         .ok_or_else(|| {
                             anyhow::anyhow!("cell '{}' not found in the file {}", name, coord_file)
                         })
-                        .map(|item| *item.value())
+                        .copied()
                 })
                 .collect::<anyhow::Result<_>>()?;
 
@@ -231,7 +229,7 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
     })
 }
 
-fn append_batch_coordinate<T>(coords: &Mat, batch_membership: &Vec<T>) -> anyhow::Result<Mat>
+fn append_batch_coordinate<T>(coords: &Mat, batch_membership: &[T]) -> anyhow::Result<Mat>
 where
     T: Sync + Send + Clone + Eq + std::hash::Hash,
 {

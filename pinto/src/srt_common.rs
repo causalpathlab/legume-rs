@@ -20,8 +20,7 @@ pub use indicatif::ParallelProgressIterator;
 pub use log::info;
 pub use rayon::prelude::*;
 
-pub use dashmap::DashMap as HashMap;
-pub use dashmap::DashSet as HashSet;
+pub use std::collections::{HashMap, HashSet};
 
 pub use std::sync::{Arc, Mutex};
 
@@ -30,29 +29,6 @@ pub use candle_util::{candle_core, candle_nn};
 pub struct Pair {
     pub left: usize,
     pub right: usize,
-}
-
-/// Impute `y` matrix by its neighbours `y_neigh` Here, we calculate
-/// Euclidean distances after log1p transformation.
-pub fn impute_with_neighbours(y: &CscMat, y_neigh: &CscMat) -> anyhow::Result<CscMat> {
-    let mut log1p_y = y.clone();
-    log1p_y.log1p_inplace();
-    log1p_y.scale_columns_inplace();
-
-    let mut log1p_y_neigh = y_neigh.clone();
-    log1p_y_neigh.log1p_inplace();
-    log1p_y_neigh.scale_columns_inplace();
-
-    // columns of neighbours x columns of target y
-    let dd = CscMat::from_nonzero_triplets(
-        y_neigh.ncols(),
-        y.ncols(),
-        &log1p_y_neigh.euclidean_distance(&log1p_y)?,
-    )?;
-
-    let ww = (-dd).normalize_exp_logits_columns();
-
-    Ok(y_neigh * &ww)
 }
 
 ////////////////////////////////////
@@ -122,11 +98,11 @@ pub fn names_from_parquet(
         ));
     }
 
-    let mut row_iter = reader.get_row_iter(None)?;
+    let row_iter = reader.get_row_iter(None)?;
 
     let mut pairs = Vec::with_capacity(nrows);
 
-    while let Some(record) = row_iter.next() {
+    for record in row_iter {
         let row = record?;
         let pp = select_indices
             .iter()

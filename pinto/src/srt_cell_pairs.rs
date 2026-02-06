@@ -1,4 +1,5 @@
 use crate::srt_common::*;
+use crate::srt_knn_graph::{KnnGraph, KnnGraphArgs};
 use matrix_util::parquet::*;
 use matrix_util::utils::generate_minibatch_intervals;
 
@@ -7,17 +8,11 @@ use parquet::basic::Type as ParquetType;
 pub struct SrtCellPairs<'a> {
     pub data: &'a SparseIoVec,
     pub coordinates: &'a Mat,
+    pub graph: KnnGraph,
     pub pairs: Vec<Pair>,
-    pub pairs_neighbours: Vec<PairsNeighbours>,
     pub coordinate_embedding: Mat,
-    pub distances: Vec<f32>,
     pub pair_to_sample: Option<Vec<usize>>,
     pub sample_to_pair: Option<Vec<Vec<usize>>>,
-}
-
-pub struct PairsNeighbours {
-    pub left_only: Vec<usize>,
-    pub right_only: Vec<usize>,
 }
 
 pub struct SrtCellPairsArgs {
@@ -54,11 +49,11 @@ impl<'a> SrtCellPairs<'a> {
         let mut column_types = vec![];
 
         // 1. left data column names
-        column_names.push(format!("left_cell").into_boxed_str());
+        column_names.push("left_cell".to_string().into_boxed_str());
         column_types.push(ParquetType::BYTE_ARRAY);
 
         // 2. right data column names
-        column_names.push(format!("right_cell").into_boxed_str());
+        column_names.push("right_cell".to_string().into_boxed_str());
         column_types.push(ParquetType::BYTE_ARRAY);
 
         // 3. left coordinate names
@@ -95,7 +90,7 @@ impl<'a> SrtCellPairs<'a> {
         let mut row_group_writer = writer.next_row_group()?;
 
         // 0. row names
-        parquet_add_bytearray(&mut row_group_writer, &row_names)?;
+        parquet_add_bytearray(&mut row_group_writer, row_names)?;
 
         let cell_names = self.data.column_names()?;
         // 1. left column names
@@ -131,7 +126,7 @@ impl<'a> SrtCellPairs<'a> {
         }
 
         // 5. distances
-        parquet_add_numeric_column(&mut row_group_writer, &self.distances)?;
+        parquet_add_numeric_column(&mut row_group_writer, &self.graph.distances)?;
 
         row_group_writer.close()?;
         writer.close()?;
@@ -143,6 +138,7 @@ impl<'a> SrtCellPairs<'a> {
     ///
     /// returns `(left_coordinates, right_coordinates)`
     ///
+    #[allow(clippy::type_complexity)]
     pub fn all_pairs_positions(&self) -> anyhow::Result<(Vec<Vec<f32>>, Vec<Vec<f32>>)> {
         let left: Vec<Vec<f32>> = self
             .coordinates
@@ -169,7 +165,7 @@ impl<'a> SrtCellPairs<'a> {
         let mut npairs = 0_f32;
 
         select_pair_indices
-            .into_iter()
+            .iter()
             .filter_map(|&pp| self.pairs.get(pp))
             .for_each(|pp| {
                 left += self.coordinates.row(pp.left).transpose();
@@ -189,7 +185,7 @@ impl<'a> SrtCellPairs<'a> {
         let mut npairs = 0_f32;
 
         select_pair_indices
-            .into_iter()
+            .iter()
             .filter_map(|&pp| self.pairs.get(pp))
             .for_each(|pp| {
                 left += self.coordinate_embedding.row(pp.left).transpose();
@@ -248,7 +244,7 @@ impl<'a> SrtCellPairs<'a> {
         jobs.par_iter()
             .progress_count(jobs.len() as u64)
             .map(|&(lb, ub)| -> anyhow::Result<()> {
-                visitor((lb, ub), &self, shared_in, arc_shared_out.clone())
+                visitor((lb, ub), self, shared_in, arc_shared_out.clone())
             })
             .collect::<anyhow::Result<()>>()
     }
@@ -287,7 +283,7 @@ impl<'a> SrtCellPairs<'a> {
                 .enumerate()
                 .progress_count(num_samples as u64)
                 .map(|(sample, indices)| {
-                    visitor(&indices, &self, sample, shared_in, arc_shared_out.clone())
+                    visitor(indices, self, sample, shared_in, arc_shared_out.clone())
                 })
                 .collect()
         } else {
@@ -332,203 +328,34 @@ impl<'a> SrtCellPairs<'a> {
         }
 
         let points = coordinates.transpose();
-        let points = points.column_iter().collect::<Vec<_>>();
-        let names = (0..nn).collect::<Vec<_>>();
 
-        let dict = ColumnDict::from_dvector_views(points, names);
-        let nquery = (args.knn + 1).min(nn).max(2);
-
-        let jobs = create_jobs(nn, Some(args.block_size));
-        let njobs = jobs.len() as u64;
-
-        /////////////////////////////////////////////////////////////////
-        // step 1: searching nearest neighbours in spatial coordinates //
-        /////////////////////////////////////////////////////////////////
-
-        let triplets = jobs
-            .into_par_iter()
-            .progress_count(njobs)
-            .map(|(lb, ub)| -> anyhow::Result<Vec<((usize, usize), f32)>> {
-                let mut ret = Vec::with_capacity((ub - lb) * nquery);
-
-                for i in lb..ub {
-                    let (_indices, _distances) = dict.search_others(&i, nquery)?;
-                    ret.extend(
-                        _indices
-                            .into_iter()
-                            .zip(_distances)
-                            .map(|(j, d_ij)| ((i, j), d_ij))
-                            .collect::<Vec<_>>(),
-                    );
-                }
-
-                Ok(ret)
-            })
-            .flatten()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flatten()
-            .collect::<HashMap<_, _>>();
-
-        info!("{} triplets by spatial kNN matching", triplets.len());
-
-        if triplets.len() < 1 {
-            return Err(anyhow::anyhow!("empty triplets"));
-        }
-
-        let keys = triplets
-            .iter()
-            .map(|entry| *entry.key())
-            .collect::<Vec<_>>();
-
-        let mut triplets = keys
-            .into_par_iter()
-            .filter_map(|(i, j)| {
-                // if the reciprocal key (j, i) exists
-                if triplets.contains_key(&(j, i)) {
-                    if let Some(x) = triplets.get(&(j, i)) {
-                        if i < j {
-                            return Some(((i, j), *x.value()));
-                        } else if j < i {
-                            return Some(((j, i), *x.value()));
-                        }
-                    }
-                }
-                None
-            })
-            .collect::<Vec<_>>();
-
-        triplets.par_sort_by_key(|&(ij, _)| ij);
-        triplets.dedup();
-        info!("{} triplets after reciprocal matching", triplets.len());
-
-        ///////////////////////////////////////////////
-        // step 2: construct sparse network backbone //
-        ///////////////////////////////////////////////
-
-        use nalgebra_sparse::{CooMatrix, CscMatrix};
-
-        let n = data.num_columns();
-        let mut coo = CooMatrix::new(n, n);
-        for &((i, j), v) in triplets.iter() {
-            coo.push(i, j, v);
-            coo.push(j, i, v);
-        }
-
-        let graph = CscMatrix::from(&coo);
-
-        info!("compiling the list of neighbouring cells for all the pairs");
-        let neighbours = |i: usize| -> HashSet<usize> {
-            graph
-                .get_col(i)
-                .unwrap()
-                .row_indices()
-                .iter()
-                .cloned()
-                .collect()
-        };
-
-        //////////////////////////////////////////////////////////////////////////
-        // step 3: compile disjoint set of neighbours for each left-right pair  //
-        //////////////////////////////////////////////////////////////////////////
-
-        let triplets_with_neighbours = triplets
-            .into_iter()
-            .par_bridge()
-            .filter_map(
-                |((left, right), v)| -> Option<((usize, usize), f32, PairsNeighbours)> {
-                    let n_left = neighbours(left);
-                    let n_right = neighbours(right);
-                    // remove left-right edge
-                    n_left.remove(&right);
-                    n_right.remove(&left);
-
-                    let s_ij = n_left
-                        .iter()
-                        .filter_map(|x| {
-                            if n_right.contains(x.key()) {
-                                Some(*x)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>();
-
-                    // add self-loop
-                    n_left.insert(left);
-                    n_right.insert(right);
-
-                    let left_only = n_left
-                        .iter()
-                        .filter_map(|x| {
-                            if !n_right.contains(x.key()) && !s_ij.contains(x.key()) {
-                                Some(*x)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>();
-
-                    let right_only = n_right
-                        .iter()
-                        .filter_map(|x| {
-                            if !n_left.contains(x.key()) && !s_ij.contains(x.key()) {
-                                Some(*x)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>();
-
-                    if left_only.is_empty() || right_only.is_empty() {
-                        return None;
-                    }
-
-                    Some((
-                        (left, right),
-                        v,
-                        PairsNeighbours {
-                            left_only,
-                            right_only,
-                        },
-                    ))
-                },
-            )
-            .collect::<Vec<_>>();
-
-        if triplets_with_neighbours.len() < 1 {
-            return Err(anyhow::anyhow!(
-                "unable to extract two types of neighbours (increase `--knn-spatial`)"
-            ));
-        }
+        let graph = KnnGraph::from_columns(
+            &points,
+            KnnGraphArgs {
+                knn: args.knn,
+                block_size: args.block_size,
+            },
+        )?;
 
         /////////////////////////////////////////////
-        // step 5: precompute positional embedding //
+        // precompute positional embedding          //
         /////////////////////////////////////////////
 
         let coordinate_embedding =
             coordinates.positional_embedding_columns(args.coordinate_emb_dim)?;
 
-        let pairs = triplets_with_neighbours
+        let pairs = graph
+            .edges
             .iter()
-            .map(|&((i, j), _, _)| Pair { left: i, right: j })
-            .collect::<Vec<_>>();
-        let distances = triplets_with_neighbours
-            .iter()
-            .map(|&(_, x, _)| x)
-            .collect::<Vec<_>>();
-        let pairs_neighbours = triplets_with_neighbours
-            .into_iter()
-            .map(|(_, _, x)| x)
+            .map(|&(i, j)| Pair { left: i, right: j })
             .collect::<Vec<_>>();
 
         Ok(SrtCellPairs {
             data,
             coordinates,
+            graph,
             pairs,
             coordinate_embedding,
-            distances,
-            pairs_neighbours,
             pair_to_sample: None,
             sample_to_pair: None,
         })
