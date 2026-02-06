@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::data::sam::CellBarcode;
+use genomic_data::sam::CellBarcode;
 use fnv::FnvHashMap as HashMap;
 use matrix_util::membership::Membership;
 use std::sync::Mutex;

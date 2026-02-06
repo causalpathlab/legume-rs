@@ -1,8 +1,8 @@
 // #![allow(dead_code)]
 
-use crate::data::bed::Bed;
-use crate::data::gff::GffRecord;
-use crate::data::sam::{CellBarcode, Strand};
+use genomic_data::bed::Bed;
+use genomic_data::gff::GffRecord;
+use genomic_data::sam::{CellBarcode, Strand};
 use crate::data::visitors_htslib::*;
 
 use coitrees::{COITree, Interval, IntervalTree};

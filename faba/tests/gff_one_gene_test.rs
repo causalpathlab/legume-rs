@@ -1,4 +1,4 @@
-use faba::data::gff::*;
+use genomic_data::gff::*;
 
 #[test]
 fn test_ensg00000214046() -> anyhow::Result<()> {

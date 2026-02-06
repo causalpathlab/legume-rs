@@ -1,0 +1,15 @@
+[package]
+name = "genomic-data"
+license.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+dashmap = { workspace = true }
+rayon = { workspace = true }
+matrix-util = { workspace = true }

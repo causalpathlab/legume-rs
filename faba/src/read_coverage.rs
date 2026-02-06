@@ -1,4 +1,4 @@
-use crate::data::sam::CellBarcode;
+use genomic_data::sam::CellBarcode;
 use crate::data::visitors_htslib::VisitWithBamOps;
 
 use coitrees::{COITree, Interval, IntervalTree};
@@ -58,7 +58,7 @@ impl<'a> ReadCoverageCollector<'a> {
     pub fn collect_from_bam(
         &mut self,
         bam_file_path: &str,
-        bed: &crate::data::bed::Bed,
+        bed: &genomic_data::bed::Bed,
     ) -> anyhow::Result<()> {
         self.visit_bam_by_region(bam_file_path, bed, &Self::update)
     }

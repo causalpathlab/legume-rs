@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use crate::data::bed::*;
-use crate::data::gff::*;
+use genomic_data::bed::*;
+use genomic_data::gff::*;
 
 use rust_htslib::bam::{self, Read};
 

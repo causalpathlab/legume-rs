@@ -173,7 +173,7 @@ impl<'a> DartSeqSifter<'a> {
         wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
         mut_pos_to_freq: Option<&HashMap<i64, DnaBaseCount>>,
     ) {
-        for j in 0..(positions.len().max(2) - 2) {
+        for j in 0..positions.len().saturating_sub(2) {
             let conv_site = positions[j];
             let m6a_site = positions[j + 1];
             let r_site = positions[j + 2];
