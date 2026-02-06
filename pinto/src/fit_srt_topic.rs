@@ -233,7 +233,7 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     srt_cell_pairs.assign_pairs_to_samples(
         &proj_out,
         Some(args.sort_dim),
-        args.down_sample.clone(),
+        args.down_sample,
     )?;
 
     info!("Collecting summary statistics across cell pairs...");
@@ -307,12 +307,11 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     let mut log_likelihoods = Vec::with_capacity(train_config.num_epochs);
 
     for epoch in (0..args.epochs).step_by(args.jitter_interval) {
-        // just train on the delta data
         let x_nd = concatenate_horizontal(&[
-            collapsed_params.left_delta.posterior_sample()?,
-            collapsed_params.right_delta.posterior_sample()?,
-            (collapsed_params.left_delta.posterior_sample()?
-                + collapsed_params.right_delta.posterior_sample()?),
+            collapsed_params.left.posterior_sample()?,
+            collapsed_params.right.posterior_sample()?,
+            (collapsed_params.left.posterior_sample()?
+                + collapsed_params.right.posterior_sample()?),
         ])?
         .sum_to_one_columns()
         .scale(args.column_sum_norm)
@@ -384,10 +383,10 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
 }
 
 trait SrtLatentTopicOps {
-    fn evaluate_latent<'a, Enc>(
+    fn evaluate_latent<Enc>(
         &self,
         encoder: &Enc,
-        batch_db: Option<&'a Mat>,
+        batch_db: Option<&Mat>,
         train_config: &TrainConfig,
         block_size: usize,
     ) -> anyhow::Result<Mat>
@@ -396,10 +395,10 @@ trait SrtLatentTopicOps {
 }
 
 impl SrtLatentTopicOps for SrtCellPairs<'_> {
-    fn evaluate_latent<'a, Enc>(
+    fn evaluate_latent<Enc>(
         &self,
         encoder: &Enc,
-        batch_db: Option<&'a Mat>,
+        batch_db: Option<&Mat>,
         train_config: &TrainConfig,
         block_size: usize,
     ) -> anyhow::Result<Mat>
@@ -411,9 +410,9 @@ impl SrtLatentTopicOps for SrtCellPairs<'_> {
         self.visit_pairs_by_block(
             &evaluate_latent_visitor,
             &EncoderBatchConfig {
-                encoder: encoder,
-                batch_db: batch_db,
-                train_config: train_config,
+                encoder,
+                batch_db,
+                train_config,
             },
             &mut latent_vec,
             block_size,
@@ -469,88 +468,11 @@ where
         y_right.adjust_by_division_of_selected_inplace(delta_db, &right_batches);
     }
 
-    ////////////////////////////////////////////////////
-    // imputation by neighbours and update statistics //
-    ////////////////////////////////////////////////////
+    let y_left_nd = y_left.to_tensor(dev)?.transpose(0, 1)?;
+    let y_right_nd = y_right.to_tensor(dev)?.transpose(0, 1)?;
 
-    let pairs_neighbours = data.pairs_neighbours[lb..ub]
-        .iter()
-        .map(|x| x)
-        .collect::<Vec<_>>();
-
-    // adjust the left by the neighbours of the right
-    let mut y_delta_left = pairs_neighbours
-        .iter()
-        .enumerate()
-        .map(|(j, &n)| -> anyhow::Result<CscMat> {
-            let left = pairs[j].left;
-
-            let mut y_d1 = data.data.read_columns_csc(std::iter::once(left))?;
-            let y_right_neigh_dm = data.data.read_columns_csc(n.right_only.iter().cloned())?;
-            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_right_neigh_dm)?;
-            y_d1.adjust_by_division_inplace(&y_hat_d1);
-
-            Ok(y_d1)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    // adjust the right by the neighbours of the left
-    let mut y_delta_right = pairs_neighbours
-        .iter()
-        .enumerate()
-        .map(|(j, &n)| -> anyhow::Result<CscMat> {
-            let right = pairs[j].right;
-
-            let mut y_d1 = data.data.read_columns_csc(std::iter::once(right))?;
-            let y_left_neigh_dm = data.data.read_columns_csc(n.left_only.iter().cloned())?;
-            let y_hat_d1 = impute_with_neighbours(&y_d1, &y_left_neigh_dm)?;
-            y_d1.adjust_by_division_inplace(&y_hat_d1);
-
-            Ok(y_d1)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    // batch adjustment if needed
-    if let Some(delta_db) = delta_db {
-        let left = pairs.iter().map(|x| x.left);
-        let right = pairs.iter().map(|x| x.right);
-        let left_batches = data.data.get_batch_membership(left);
-        let right_batches = data.data.get_batch_membership(right);
-
-        y_delta_left
-            .iter_mut()
-            .zip(left_batches)
-            .for_each(|(y_d, b)| {
-                y_d.adjust_by_division_of_selected_inplace(delta_db, &[b]);
-            });
-
-        y_delta_right
-            .iter_mut()
-            .zip(right_batches)
-            .for_each(|(y_d, b)| {
-                y_d.adjust_by_division_of_selected_inplace(delta_db, &[b]);
-            });
-    }
-
-    let y_delta_left_nd = Tensor::cat(
-        &y_delta_left
-            .into_iter()
-            .map(|x| -> anyhow::Result<Tensor> { Ok(x.to_tensor(dev)?.transpose(0, 1)?) })
-            .collect::<anyhow::Result<Vec<_>>>()?,
-        0,
-    )?;
-
-    let y_delta_right_nd = Tensor::cat(
-        &y_delta_right
-            .into_iter()
-            .map(|x| -> anyhow::Result<Tensor> { Ok(x.to_tensor(dev)?.transpose(0, 1)?) })
-            .collect::<anyhow::Result<Vec<_>>>()?,
-        0,
-    )?;
-
-    // combine two delta signals for this pair
     let (logits_theta, _) =
-        encoder.forward_t(&y_delta_left_nd.add(&y_delta_right_nd)?, None, false)?;
+        encoder.forward_t(&y_left_nd.add(&y_right_nd)?, None, false)?;
 
     latent_vec
         .lock()

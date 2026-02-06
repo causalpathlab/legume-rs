@@ -172,7 +172,7 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
     srt_cell_pairs.assign_pairs_to_samples(
         &proj_out,
         Some(args.sort_dim),
-        args.down_sample.clone(),
+        args.down_sample,
     )?;
 
     info!("Collecting summary statistics across cell pairs...");
@@ -187,10 +187,8 @@ pub fn fit_srt_svd(args: &SrtSvdArgs) -> anyhow::Result<()> {
 
     info!("Randomized SVD ...");
     let training_dm = concatenate_horizontal(&[
-        collapsed_params.left_delta.posterior_log_mean().clone(),
-        collapsed_params.right_delta.posterior_log_mean().clone(),
-        collapsed_params.left_resid.posterior_log_mean().clone(),
-        collapsed_params.right_resid.posterior_log_mean().clone(),
+        collapsed_params.left.posterior_log_mean().clone(),
+        collapsed_params.right.posterior_log_mean().clone(),
     ])?
     .scale_columns();
 

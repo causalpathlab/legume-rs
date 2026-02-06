@@ -6,6 +6,7 @@ mod srt_collapse_pairs;
 mod srt_common;
 mod srt_estimate_batch_effects;
 mod srt_input;
+mod srt_knn_graph;
 mod srt_random_projection;
 
 use fit_srt_propensity::*;

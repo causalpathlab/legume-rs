@@ -102,8 +102,8 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         .zip(edge_membership)
         .for_each(|(vertices, k)| {
             let indices = vertices
-                .into_iter()
-                .filter_map(|x| vertex_index.get(x).map(|ret| *ret.value()))
+                .iter()
+                .filter_map(|x| vertex_index.get(x).copied())
                 .collect::<Vec<_>>();
 
             let mut count_kn = arc_count_kn.lock().expect("lock count kn");
@@ -140,7 +140,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
                 let mut p_kn = Mat::zeros(prop_kn.nrows(), x_dn.ncols());
 
                 for (i, v) in data_vertices[lb..ub].iter().enumerate() {
-                    if let Some(j) = vertex_index.get(v).map(|x| x.value().clone()) {
+                    if let Some(&j) = vertex_index.get(v) {
                         p_kn.column_mut(i).copy_from(&prop_kn.column(j));
                     }
                 }

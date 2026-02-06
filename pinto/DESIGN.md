@@ -75,15 +75,15 @@ two genes are synthetic lethal when losing either alone is viable but losing bot
 is lethal. The core statistical idea transfers directly to our setting—measure
 **deviation from independence**.
 
-**Epsilon scores.** In combinatorial CRISPR screens the standard interaction
-measure is the epsilon score:
+**Delta scores.** In combinatorial CRISPR screens the standard interaction
+measure is the delta score:
 
 ```
-ε_{g1,g2} = fitness_{g1,g2} - fitness_{g1} × fitness_{g2}
+δ_{g1,g2} = fitness_{g1,g2} - fitness_{g1} × fitness_{g2}
 ```
 
-where fitness is the observed growth under knockout. ε ≈ 0 means the genes act
-independently; ε < 0 is synergistic (synthetic sick/lethal); ε > 0 is
+where fitness is the observed growth under knockout. δ ≈ 0 means the genes act
+independently; δ < 0 is synergistic (synthetic sick/lethal); δ > 0 is
 alleviating. This multiplicative-null model is the direct analog of what we want:
 given two gene deltas, does their joint behavior deviate from what individual
 deltas predict?
@@ -108,7 +108,7 @@ interaction features:
 
 | Method | Formula | Interpretation |
 |---|---|---|
-| Multiplicative deviation | `obs - E[g1] × E[g2]` | Epsilon-style; deviation from independence |
+| Multiplicative deviation | `obs - E[g1] × E[g2]` | Delta-style; deviation from independence |
 | Hadamard product | `x_{g1} ⊙ x_{g2}` | Element-wise product; used in tensor genetic models |
 | Mutual information | `MI(g1; g2) = KL(P_{g1,g2} ‖ P_{g1} P_{g2})` | Non-parametric; captures non-linear dependence |
 | Multifactor dim. reduction | model-free combinatorial binning | Good for discrete genotypes; less natural for continuous expression |
@@ -124,14 +124,14 @@ BioGRID (thebiogrid.org) is an open-access database of curated protein, genetic,
 and chemical interactions:
 
 - **Scale**: ~2.9M protein and genetic interactions across species
-- **Genetic interactions**: annotated with epsilon scores where available
-  (ε < -0.08, p < 0.05 for significant SL)
+- **Genetic interactions**: annotated with delta scores where available
+  (δ < -0.08, p < 0.05 for significant SL)
 - **Physical interactions**: experimentally validated protein-protein interactions
 - **Access**: REST API, tab-delimited bulk downloads, PSI-MITAB format
 
 For our purposes, BioGRID provides two things: (1) a prior edge set for the
 gene-gene graph—known interacting gene pairs get edges regardless of expression
-correlation; (2) epsilon scores as ground-truth validation for discovered
+correlation; (2) delta scores as ground-truth validation for discovered
 interaction features.
 
 ### Graphical lasso with priors
@@ -200,10 +200,10 @@ Import known genetic and physical interactions from BioGRID as edges:
 
 ```
 1. Download BioGRID tab-delimited for the target species
-2. Filter to genetic interactions (|ε| > 0.08) and/or physical PPI
+2. Filter to genetic interactions (|δ| > 0.08) and/or physical PPI
 3. Map gene symbols to row indices in our expression matrix
 4. Construct CscMatrix adjacency from matched edges
-5. (Optional) Add edge weights from ε scores or PPI confidence
+5. (Optional) Add edge weights from δ scores or PPI confidence
 ```
 
 **Advantages**: biologically grounded; no dependence on sample size;
@@ -232,24 +232,24 @@ what two genes would do independently—already captures the interesting
 biology. The cell-cell neighbor imputation becomes unnecessary overhead.
 
 For each gene pair `(g1, g2)` in G_genes and each cell `c`, define the
-**epsilon interaction statistic** directly on raw (size-normalized) expression:
+**delta interaction statistic** directly on raw (size-normalized) expression:
 
 ```
-ε_{g1,g2}(c) = x_{g1}(c) × x_{g2}(c)  -  μ_{g1} × μ_{g2}
+δ_{g1,g2}(c) = x_{g1}(c) × x_{g2}(c)  -  μ_{g1} × μ_{g2}
 ```
 
 where `x_g(c)` is the (size-normalized) expression of gene g in cell c and
 `μ_g` is the gene-level mean across cells. This is the direct analog of the
-synthetic lethality epsilon score: observed joint behavior minus expected
+synthetic lethality delta score: observed joint behavior minus expected
 under independence.
 
 **Why this works without deltas:**
 
-- The epsilon statistic already measures **deviation from independence** —
+- The delta statistic already measures **deviation from independence** —
   exactly what deltas + products were trying to capture in two steps
-- Positive ε: genes are co-activated beyond expectation (synergistic)
-- Negative ε: genes are anti-correlated (antagonistic / SL-like)
-- ε ≈ 0: genes act independently in this cell
+- Positive δ: genes are co-activated beyond expectation (synergistic)
+- Negative δ: genes are anti-correlated (antagonistic / SL-like)
+- δ ≈ 0: genes act independently in this cell
 - Spatial structure is recovered by the cell → sample assignment
   (cells in similar spatial contexts land in the same pseudobulk sample)
 
@@ -257,12 +257,12 @@ under independence.
 
 | Statistic | Formula | Interpretation |
 |---|---|---|
-| **Epsilon (multiplicative)** | `x_{g1} × x_{g2} - μ_{g1} × μ_{g2}` | SL-style deviation from independence |
-| **Log epsilon** | `log(x_{g1} + 1) × log(x_{g2} + 1) - E[log(x_{g1}+1)] × E[log(x_{g2}+1)]` | Variance-stabilized; less dominated by high-expressors |
+| **Delta (multiplicative)** | `x_{g1} × x_{g2} - μ_{g1} × μ_{g2}` | SL-style deviation from independence |
+| **Log delta** | `log(x_{g1} + 1) × log(x_{g2} + 1) - E[log(x_{g1}+1)] × E[log(x_{g2}+1)]` | Variance-stabilized; less dominated by high-expressors |
 | **Min co-activation** | `min(x_{g1}, x_{g2})` | Both genes must be on; robust to outliers |
-| **Signed geometric mean** | `sign(ε) × sqrt(|x_{g1} × x_{g2}|)` | Scale-compressed concordance |
+| **Signed geometric mean** | `sign(δ) × sqrt(|x_{g1} × x_{g2}|)` | Scale-compressed concordance |
 
-The **log epsilon** is the recommended default for count data: log1p
+The **log delta** is the recommended default for count data: log1p
 transformation stabilizes variance, and the centered product on log-scale
 is a covariance-like statistic that sums naturally across cells.
 
@@ -277,9 +277,9 @@ through the sample assignment step.
 The gene-gene interaction features have the structure of a **sparse attention
 matrix** over genes, computed per cell. In standard (quadratic) attention,
 each token pair gets a score `Q_i · K_j`; here, each gene pair gets a score
-`ε_{g1,g2}(c)` that captures their joint deviation from independence. The
+`δ_{g1,g2}(c)` that captures their joint deviation from independence. The
 KNN-sparsified gene graph plays the role of the attention mask—restricting
-which pairs interact—while the epsilon statistic plays the role of the
+which pairs interact—while the delta statistic plays the role of the
 attention logit.
 
 This is rich information: each gene pair encodes a different interaction mode,
@@ -296,13 +296,13 @@ the pipeline no longer needs the cell-cell delta imputation step:
    raw expression × gene-gene graph
               │
               ▼
-     compute ε per cell          (SL-style interaction statistics)
+     compute δ per cell          (SL-style interaction statistics)
               │
               ▼
      assign cells to samples     (random projection + binary sort, or spatial)
               │
               ▼
-     collapse cells → samples    (sum ε per gene pair per sample)
+     collapse cells → samples    (sum δ per gene pair per sample)
               │
               ▼
      gene-pair × sample          (the new data matrix)
@@ -323,8 +323,8 @@ prerequisite for the gene-gene interaction features.
 
 ### Steps
 
-1. **Compute ε per cell**: for each cell c and each edge `(g1, g2)` in
-   G_genes, compute `ε_{g1,g2}(c) = log1p(x_{g1}) × log1p(x_{g2}) - μ̃_{g1} × μ̃_{g2}`
+1. **Compute δ per cell**: for each cell c and each edge `(g1, g2)` in
+   G_genes, compute `δ_{g1,g2}(c) = log1p(x_{g1}) × log1p(x_{g2}) - μ̃_{g1} × μ̃_{g2}`
    where `μ̃_g = E[log1p(x_g)]` across cells. This is a sparse operation:
    only |E(G_genes)| interactions per cell, not p².
 
@@ -332,7 +332,7 @@ prerequisite for the gene-gene interaction features.
    (expression or spatial coordinates) + `binary_sort_columns` to partition
    cells into pseudobulk samples. This reuses existing infrastructure.
 
-3. **Collapse cells → samples**: sum ε values per gene pair across cells
+3. **Collapse cells → samples**: sum δ values per gene pair across cells
    within each sample. Result: **gene_pair × sample** matrix—gene pairs
    remain as individual rows.
 
@@ -351,27 +351,27 @@ the signal:
 
 | Filter | Criterion | Effect |
 |---|---|---|
-| **Variance filter** | Drop gene pairs with low variance of ε across samples | Removes constitutive co-expression (no spatial modulation) |
-| **Signal-to-noise** | Keep pairs where |mean(ε)| / sd(ε) exceeds threshold | Focuses on reproducible interactions |
-| **Marginal independence** | Drop pairs where |mean(ε)| < threshold across samples | Removes non-interacting pairs (ε ≈ 0 everywhere) |
-| **Top-k per gene** | Keep only the top-k interactors per gene by |mean(ε)| | Hard cap on matrix rows; ensures every gene is represented |
+| **Variance filter** | Drop gene pairs with low variance of δ across samples | Removes constitutive co-expression (no spatial modulation) |
+| **Signal-to-noise** | Keep pairs where |mean(δ)| / sd(δ) exceeds threshold | Focuses on reproducible interactions |
+| **Marginal independence** | Drop pairs where |mean(δ)| < threshold across samples | Removes non-interacting pairs (δ ≈ 0 everywhere) |
+| **Top-k per gene** | Keep only the top-k interactors per gene by |mean(δ)| | Hard cap on matrix rows; ensures every gene is represented |
 
 These filters are cheap on the collapsed gene_pair × sample matrix.
 
 ### Feature engineering for gene pairs
 
-**Handling signed ε.** The epsilon statistic is naturally signed (positive =
+**Handling signed δ.** The delta statistic is naturally signed (positive =
 synergistic, negative = antagonistic). Two approaches for the Poisson-Gamma
 framework, which requires non-negative inputs:
 
 - **Split into positive and negative channels**: accumulate
-  `ε⁺ = max(ε, 0)` and `ε⁻ = max(-ε, 0)` separately per gene pair per
+  `δ⁺ = max(δ, 0)` and `δ⁻ = max(-δ, 0)` separately per gene pair per
   sample. Each channel is non-negative and Poisson-Gamma compatible. The
   gene_pair × sample matrix has 2|E| rows. This is the recommended approach:
   it preserves the sign information and lets the SVD/topic model learn which
   gene pairs are synergistic vs. antagonistic in each program.
 
-- **Squared epsilon**: use `ε²` as the interaction feature. Always
+- **Squared delta**: use `δ²` as the interaction feature. Always
   non-negative, captures interaction strength regardless of direction.
   Loses sign but halves the row dimension.
 
@@ -379,7 +379,7 @@ framework, which requires non-negative inputs:
 per gene pair, analogous to how the current pipeline concatenates left_delta,
 right_delta, left_resid, right_resid:
 
-- **ε⁺ / ε⁻**: signed interaction channels (synergistic / antagonistic)
+- **δ⁺ / δ⁻**: signed interaction channels (synergistic / antagonistic)
 - **Co-activation**: `min(log1p(x_{g1}), log1p(x_{g2}))` — both genes on
 - **Differential**: `|log1p(x_{g1}) - log1p(x_{g2})|` — one gene on, other off
 
@@ -405,7 +405,7 @@ SVD operates on log E[λ_{g,s} | Y] across g and s.
 For gene pair (g1, g2) ∈ E(G_genes), cell c, define:
 
 ```
-ε_{g1,g2}(c) = log1p(x_{g1}(c)) × log1p(x_{g2}(c))  -  μ̃_{g1} × μ̃_{g2}
+δ_{g1,g2}(c) = log1p(x_{g1}(c)) × log1p(x_{g2}(c))  -  μ̃_{g1} × μ̃_{g2}
 ```
 
 where `μ̃_g = (1/N) Σ_c log1p(x_g(c))` is the gene-level mean.
@@ -413,24 +413,24 @@ where `μ̃_g = (1/N) Σ_c log1p(x_g(c))` is the gene-level mean.
 Aggregate into pseudobulk samples by summing over cells assigned to sample s:
 
 ```
-ε⁺_{(g1,g2), s} = Σ_{c ∈ sample s}  max(ε_{g1,g2}(c), 0)
-ε⁻_{(g1,g2), s} = Σ_{c ∈ sample s}  max(-ε_{g1,g2}(c), 0)
+δ⁺_{(g1,g2), s} = Σ_{c ∈ sample s}  max(δ_{g1,g2}(c), 0)
+δ⁻_{(g1,g2), s} = Σ_{c ∈ sample s}  max(-δ_{g1,g2}(c), 0)
 ```
 
 Each channel is non-negative and approximately Poisson-distributed (sum of
 sparse non-negative terms), so the Poisson-Gamma conjugate framework applies:
 
 ```
-ε⁺_{(g1,g2), s} ~ Poisson-Gamma
-ε⁻_{(g1,g2), s} ~ Poisson-Gamma
+δ⁺_{(g1,g2), s} ~ Poisson-Gamma
+δ⁻_{(g1,g2), s} ~ Poisson-Gamma
 ```
 
 Apply SVD or topic model on the gene_pair × sample posterior means:
 
 ```
-log E[ε⁺ | data]             U⁺
+log E[δ⁺ | data]             U⁺
                     ≈  [ U⁺ ; U⁻ ]  Σ  V^T
-log E[ε⁻ | data]             U⁻
+log E[δ⁻ | data]             U⁻
 ```
 
 where U⁺ and U⁻ are concatenated vertically (one block per sign channel).
@@ -442,16 +442,16 @@ per-sample latent codes.
 
 ### Connection to covariance decomposition
 
-The aggregated epsilon has a natural interpretation. For a sample s with
+The aggregated delta has a natural interpretation. For a sample s with
 n_s cells:
 
 ```
-Σ_{c ∈ s} ε_{g1,g2}(c) = Σ_c log1p(x_{g1}) × log1p(x_{g2})  -  n_s × μ̃_{g1} × μ̃_{g2}
+Σ_{c ∈ s} δ_{g1,g2}(c) = Σ_c log1p(x_{g1}) × log1p(x_{g2})  -  n_s × μ̃_{g1} × μ̃_{g2}
                         = n_s × [ Ĉov_s(log1p(x_{g1}), log1p(x_{g2})) + (μ̂_{g1,s} - μ̃_{g1})(μ̂_{g2,s} - μ̃_{g2}) ]
 ```
 
 where Ĉov_s is the within-sample covariance and μ̂_{g,s} is the sample mean.
-So the aggregated epsilon decomposes into **within-sample covariance** (local
+So the aggregated delta decomposes into **within-sample covariance** (local
 co-regulation) and **mean-shift interaction** (sample-level co-expression
 shift). Both are biologically meaningful: the first captures cell-level
 co-regulation programs; the second captures tissue-region-level co-expression.
@@ -472,9 +472,9 @@ most p · k_gene / 2 = 10K for p=1000—tractable.
 | `ColumnDict` + HNSW | `matrix_util::knn_match` | Cell-cell spatial KNN | Gene-gene KNN in sample space (Path A) |
 | Reciprocal filtering | `srt_cell_pairs.rs` (DashMap pattern) | Symmetric cell graph | Symmetric gene graph |
 | `CscMatrix` + COO construction | `nalgebra_sparse` via `srt_cell_pairs.rs` | Cell-cell spatial graph | Gene-gene graph storage |
-| `GammaMatrix` | `matrix_param` | Per-gene Poisson-Gamma posteriors | Per-gene-pair Poisson-Gamma posteriors (ε⁺, ε⁻) |
+| `GammaMatrix` | `matrix_param` | Per-gene Poisson-Gamma posteriors | Per-gene-pair Poisson-Gamma posteriors (δ⁺, δ⁻) |
 | `binary_sort_columns` | `srt_random_projection.rs` | Assign cell pairs to samples | Assign cells to samples (no pairing needed) |
-| `read_columns_csc` visitor | `data_beans::SparseIoVec` | Read cell-pair expression | Read per-cell expression for ε computation |
+| `read_columns_csc` visitor | `data_beans::SparseIoVec` | Read cell-pair expression | Read per-cell expression for δ computation |
 | RSVD | `matrix_util` | SVD on gene × sample | SVD on gene_pair × sample |
 | `LogSoftmaxEncoder` / `TopicDecoder` | `candle_util` | VAE topic model on gene features | VAE topic model on gene-pair features |
 
@@ -492,12 +492,12 @@ additional stage** after the existing per-gene pipeline. The flow:
    construction (gene KNN from posterior means).
 2. **Construct G_genes** via Path A (gene KNN from posterior means),
    Path B (BioGRID import), or both combined (Section 4).
-3. **Compute ε per cell**: visit each cell's expression column, compute
+3. **Compute δ per cell**: visit each cell's expression column, compute
    interaction statistics for all edges in G_genes (sparse inner product).
 4. **Assign cells to samples**: random projection on expression or spatial
    coordinates + `binary_sort_columns` (reuses existing infrastructure;
    cell-cell pairing no longer required).
-5. **Collapse**: sum ε⁺ and ε⁻ per gene pair across cells within each sample.
+5. **Collapse**: sum δ⁺ and δ⁻ per gene pair across cells within each sample.
 6. **Filter**: prune gene pairs with weak signal (Section 5).
 7. **Fit Poisson-Gamma** on the gene_pair × sample matrix.
 8. **RSVD or topic model** on posterior means.
@@ -511,16 +511,16 @@ SrtGenePairGraph {
     adjacency: CscMatrix<f32>,
     /// Edge list for iteration: Vec<(g1, g2)>
     edges: Vec<(usize, usize)>,
-    /// Edge weights (correlation from Path A, ε/PPI confidence from Path B)
+    /// Edge weights (correlation from Path A, δ/PPI confidence from Path B)
     weights: Vec<f32>,
     /// Provenance per edge: DataDriven, BioGRID, or Both
     source: Vec<EdgeSource>,
 }
 
 SrtGenePairCollapsedStat {
-    /// Positive interaction sums ε⁺: (n_gene_pairs × n_samples)
+    /// Positive interaction sums δ⁺: (n_gene_pairs × n_samples)
     eps_pos_ds: Mat,
-    /// Negative interaction sums ε⁻: (n_gene_pairs × n_samples)
+    /// Negative interaction sums δ⁻: (n_gene_pairs × n_samples)
     eps_neg_ds: Mat,
     /// Number of cells per sample
     size_s: DVec,
@@ -537,9 +537,9 @@ SrtGenePairCollapsedStat {
 | Gene-gene edges | p × k_gene / 2 ≈ 5K – 50K | With k_gene = 20 |
 | Cells (N) | 10K – 500K | Depends on tissue size |
 | Samples | 50 – 500 | After binary sorting |
-| Gene-pair × sample matrix | 50K × 500 × 2 = 50M entries | ×2 for ε⁺/ε⁻ channels; fits in memory |
+| Gene-pair × sample matrix | 50K × 500 × 2 = 50M entries | ×2 for δ⁺/δ⁻ channels; fits in memory |
 
-### Bottleneck: per-cell ε computation
+### Bottleneck: per-cell δ computation
 
 For each cell, we read its sparse expression vector and compute |E(G_genes)|
 interaction statistics. With 100K cells and 10K gene edges, that is ~1 billion
@@ -549,20 +549,20 @@ current cell-pair pipeline (which reads two cells + their neighbors per pair).
 The computation is embarrassingly parallel across cells and I/O-bound
 (one `read_columns_csc` per cell chunk). Each cell's expression vector is
 sparse (typically 1K–5K non-zero entries), and the gene-gene edge list is
-pre-sorted, so the ε computation is a sparse inner-product-like operation.
+pre-sorted, so the δ computation is a sparse inner-product-like operation.
 
 Mitigations for very large datasets:
 
 - **Chunked visitor pattern**: reuse the existing `read_columns_csc` batching
   to amortize I/O. Process cells in chunks of 100–1000.
-- **Subsample cells**: use a random subset of cells for ε accumulation
+- **Subsample cells**: use a random subset of cells for δ accumulation
   (pseudobulk averaging smooths out per-cell noise anyway).
 - **Random projection on gene-pair features**: if |E| > 50K, project the
-  ε vector (length |E|) onto a random basis of dimension d_proj << |E|
+  δ vector (length |E|) onto a random basis of dimension d_proj << |E|
   before accumulating into the sample matrix.
 
 ### Memory
 
 The gene_pair × sample matrix is the primary new allocation. At 50K gene pairs
 × 500 samples × 2 channels × 4 bytes = 200 MB, this is modest. The transient
-per-chunk ε vectors are bounded by chunk_size × |E| × 4 bytes.
+per-chunk δ vectors are bounded by chunk_size × |E| × 4 bytes.
