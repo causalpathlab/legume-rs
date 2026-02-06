@@ -3,7 +3,7 @@
 use crate::data::cell_membership::CellMembership;
 use crate::data::dna::*;
 use crate::data::dna_stat_traits::*;
-use crate::data::sam::*;
+use genomic_data::sam::*;
 use crate::data::visitors_htslib::*;
 
 use rust_htslib::bam::{self, ext::BamRecordExtensions, record::Aux};

@@ -1,4 +1,4 @@
-use faba::data::gff::*;
+use genomic_data::gff::*;
 
 #[test]
 fn test_union_gene_model() -> anyhow::Result<()> {
@@ -91,7 +91,7 @@ fn test_union_gene_model() -> anyhow::Result<()> {
                 "  Gene boundary: {}-{} ({} strand)",
                 boundary_rec.start,
                 boundary_rec.stop,
-                if boundary_rec.strand == faba::data::sam::Strand::Forward {
+                if boundary_rec.strand == genomic_data::sam::Strand::Forward {
                     "+"
                 } else {
                     "-"
@@ -149,7 +149,7 @@ fn test_union_gene_model() -> anyhow::Result<()> {
             "  Gene boundary: {}-{} ({} strand)",
             boundary_rec.start,
             boundary_rec.stop,
-            if boundary_rec.strand == faba::data::sam::Strand::Forward {
+            if boundary_rec.strand == genomic_data::sam::Strand::Forward {
                 "+"
             } else {
                 "-"

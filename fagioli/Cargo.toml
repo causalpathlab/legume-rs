@@ -1,5 +1,5 @@
 [package]
-name = "faba"
+name = "fagioli"
 license.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -9,15 +9,16 @@ edition.workspace = true
 version.workspace = true
 
 [[bin]]
-name = "faba"
+name = "fagioli"
 path = "src/main.rs"
 
 [dependencies]
 data-beans = { workspace = true }
 data-beans-alg = { workspace = true }
-genomic-data = { workspace = true }
+candle-util = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
+genomic-data = { workspace = true }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
@@ -36,15 +37,13 @@ approx = { workspace = true }
 instant-distance = { workspace = true }
 special = { workspace = true }
 indicatif = { workspace = true }
-log = { workspace = true }
 env_logger = { workspace = true }
-num-traits = { workspace = true }
+log = { workspace = true }
+dashmap = { workspace = true }
 
-statrs = { workspace = true }
-coitrees = { workspace = true }
-parquet = { workspace = true }
+# For PLINK BED format reading
+bed-reader = "1.0"
 
-fnv = "1.0.7"
-dashmap = { version = "6.1.0", features = ["rayon"] }
-rust-htslib = "0.50.0"
-arrow = "56"
+# For JSON output
+serde = { workspace = true }
+serde_json = { workspace = true }

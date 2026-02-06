@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::data::dna_stat_traits::*;
-use crate::data::sam::*;
+use genomic_data::sam::*;
 use crate::data::visitors_htslib::*;
 use fnv::FnvHashMap as HashMap;
 use rust_htslib::bam::record::Cigar;
@@ -203,23 +203,26 @@ fn get_query_alignment_bounds(cigar: &[Cigar], seq_len: usize) -> (usize, usize)
     let mut start = 0;
     let mut end = seq_len;
 
-    // Calculate aligned start (skip leading soft/hard clips)
+    // Calculate aligned start (skip leading soft clips)
+    // Note: HardClip bases are NOT in the query sequence, so we only handle SoftClip
     for op in cigar.iter() {
         match op {
-            Cigar::SoftClip(len) | Cigar::HardClip(len) => start += *len as usize,
+            Cigar::SoftClip(len) => start += *len as usize,
+            Cigar::HardClip(_) => {}
             _ => break,
         }
     }
 
-    // Calculate aligned end (skip trailing soft/hard clips)
+    // Calculate aligned end (skip trailing soft clips)
     for op in cigar.iter().rev() {
         match op {
-            Cigar::SoftClip(len) | Cigar::HardClip(len) => end -= *len as usize,
+            Cigar::SoftClip(len) => end = end.saturating_sub(*len as usize),
+            Cigar::HardClip(_) => {}
             _ => break,
         }
     }
 
-    (start, end)
+    (start.min(end), end)
 }
 
 /// Count the number of A (forward) or T (reverse) bases in the soft-clipped region

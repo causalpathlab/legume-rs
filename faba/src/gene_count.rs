@@ -4,7 +4,7 @@
 //! both run_gene_count and cell clustering.
 
 use crate::common::*;
-use crate::data::gff::{parse_ensembl_id, GeneId, GffRecord, GffRecordMap};
+use genomic_data::gff::{parse_ensembl_id, GeneId, GffRecord, GffRecordMap};
 
 use fnv::FnvHashMap;
 use rust_htslib::bam::{self, record::Aux, Read};

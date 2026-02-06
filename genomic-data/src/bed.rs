@@ -1,5 +1,5 @@
-use crate::data::gff::GeneId;
-use crate::data::sam::Strand;
+use crate::gff::GeneId;
+use crate::sam::Strand;
 use std::hash::Hash;
 
 #[derive(Hash, Clone, PartialEq, Eq, PartialOrd, Ord)]

@@ -5,7 +5,7 @@
 
 use crate::common::*;
 use crate::data::cell_membership::CellMembership;
-use crate::data::gff::GffRecordMap;
+use genomic_data::gff::GffRecordMap;
 use crate::gene_count::collect_all_gene_counts;
 
 use data_beans_alg::random_projection::RandProjOps;

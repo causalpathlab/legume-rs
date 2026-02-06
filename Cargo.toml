@@ -10,7 +10,8 @@ members = [
 	"pinto",
 	"cocoa",
 	"faba",
-	"chickpea"]
+	"chickpea",
+	"fagioli", "genomic-data"]
 
 resolver = "3"
 
@@ -69,4 +70,5 @@ data-beans-alg = { path = "data-beans-alg"}
 matrix-param = { path = "matrix-param" }
 matrix-util = { path = "matrix-util" }
 candle-util = { path = "candle-util" }
-mcmc-util = { path = "mcmc-util" }
+genomic-data = { path = "genomic-data" }
+faba = { path = "faba" }

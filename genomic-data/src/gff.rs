@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::data::sam::Strand;
+use crate::sam::Strand;
 
 use dashmap::DashMap as HashMap;
 use matrix_util::common_io::read_lines_of_words_delim;

@@ -1,5 +1,5 @@
 use crate::data::dna_stat_traits::DnaStatMap;
-use crate::data::sam::CellBarcode;
+use genomic_data::sam::CellBarcode;
 use crate::data::visitors_htslib::VisitWithBamOps;
 
 use fnv::FnvHashMap as HashMap;
