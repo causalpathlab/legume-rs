@@ -1,6 +1,7 @@
 use crate::embed_common::*;
 use dashmap::DashSet as HashSet;
-use matrix_util::common_io::{self, basename, file_ext, read_lines};
+use data_beans::convert::try_open_or_convert;
+use matrix_util::common_io::{self, basename, read_lines};
 
 //////////////////////////////////////////
 // read data files and batch membership //
@@ -25,13 +26,7 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
     for data_file in args.data_files.iter() {
         info!("Importing data file: {}", data_file);
 
-        let backend = match file_ext(data_file)?.to_string().as_str() {
-            "h5" => SparseIoBackend::HDF5,
-            "zarr" => SparseIoBackend::Zarr,
-            _ => return Err(anyhow::anyhow!("unknown backend file {}", data_file)),
-        };
-
-        let mut data = open_sparse_matrix(data_file, &backend)?;
+        let mut data = try_open_or_convert(data_file)?;
 
         if args.preload {
             data.preload_columns()?;
@@ -178,7 +173,7 @@ pub fn read_data_on_shared_columns(
         }
     }
 
-    use matrix_util::common_io::{file_ext, read_lines};
+    use matrix_util::common_io::read_lines;
 
     for files in args.data_files.chunks(nfiles_per_type) {
         let mut data_vec = SparseIoVec::new();
@@ -186,13 +181,8 @@ pub fn read_data_on_shared_columns(
 
         for (data_idx, data_file) in files.iter().enumerate() {
             info!("Importing data file: {}", data_file);
-            let backend = match file_ext(data_file)?.to_string().as_str() {
-                "h5" => SparseIoBackend::HDF5,
-                "zarr" => SparseIoBackend::Zarr,
-                _ => return Err(anyhow::anyhow!("unknown backend file {}", data_file)),
-            };
 
-            let mut data = open_sparse_matrix(data_file, &backend)?;
+            let mut data = try_open_or_convert(data_file)?;
 
             if args.preload {
                 data.preload_columns()?;
