@@ -13,10 +13,8 @@ pub enum ClusterMethodCli {
     /// K-means clustering
     #[default]
     Kmeans,
-    /// Leiden clustering (graph-based, not yet implemented)
+    /// Leiden clustering (graph-based)
     Leiden,
-    /// Louvain clustering (graph-based, not yet implemented)
-    Louvain,
 }
 
 impl From<ClusterMethodCli> for ClusterMethod {
@@ -24,7 +22,6 @@ impl From<ClusterMethodCli> for ClusterMethod {
         match cli {
             ClusterMethodCli::Kmeans => ClusterMethod::KMeans,
             ClusterMethodCli::Leiden => ClusterMethod::Leiden,
-            ClusterMethodCli::Louvain => ClusterMethod::Louvain,
         }
     }
 }
@@ -67,11 +64,10 @@ pub struct ClusteringArgs {
 		     - kmeans: K-means clustering (default)\n\
 		       Fast, works well for spherical clusters\n\
 		       Requires specifying k\n\n\
-		     - leiden: Leiden algorithm (graph-based, not yet implemented)\n\
+		     - leiden: Leiden algorithm (graph-based)\n\
 		       Finds communities in cell similarity graph\n\
-		       Automatically determines number of clusters\n\n\
-		     - louvain: Louvain algorithm (graph-based, not yet implemented)\n\
-		       Similar to Leiden but may produce disconnected communities"
+		       Automatically determines number of clusters\n\
+		       Use --knn and --resolution to tune"
     )]
     method: ClusterMethodCli,
 
@@ -81,6 +77,23 @@ pub struct ClusteringArgs {
         help = "Maximum iterations for k-means"
     )]
     max_iter: usize,
+
+    #[arg(
+        long,
+        default_value_t = 15,
+        help = "Number of nearest neighbors for Leiden clustering"
+    )]
+    knn: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Resolution parameter for Leiden (higher = more clusters)"
+    )]
+    resolution: f64,
+
+    #[arg(long, help = "Random seed for Leiden clustering")]
+    seed: Option<u64>,
 
     #[arg(
         long,
@@ -128,10 +141,11 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
             kmeans_clustering(&latent, k, args.max_iter)?
         }
         ClusterMethodCli::Leiden => {
-            anyhow::bail!("Leiden clustering not yet implemented")
-        }
-        ClusterMethodCli::Louvain => {
-            anyhow::bail!("Louvain clustering not yet implemented")
+            info!(
+                "Running Leiden clustering with knn={}, resolution={:.2}",
+                args.knn, args.resolution
+            );
+            leiden_clustering(&latent, args.knn, args.resolution, args.seed)?
         }
     };
 

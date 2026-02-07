@@ -11,7 +11,7 @@ members = [
 	"cocoa",
 	"faba",
 	"chickpea",
-	"fagioli", "genomic-data"]
+	"fagioli", "genomic-data", "leiden"]
 
 resolver = "3"
 
@@ -72,3 +72,4 @@ matrix-util = { path = "matrix-util" }
 candle-util = { path = "candle-util" }
 genomic-data = { path = "genomic-data" }
 faba = { path = "faba" }
+leiden = { path = "leiden" }

@@ -12,7 +12,6 @@ pub use data_beans::sparse_io_vector::*;
 pub use matrix_util::clustering::{Kmeans, KmeansArgs};
 pub use matrix_util::common_io::{basename, file_ext, read_lines};
 pub use matrix_util::dmatrix_util::*;
-pub use matrix_util::knn_match::ColumnDict;
 pub use matrix_util::traits::*;
 pub use matrix_util::utils::partition_by_membership;
 
