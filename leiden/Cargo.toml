@@ -1,0 +1,17 @@
+[package]
+name = "leiden"
+version = "0.1.0"
+authors = ["10x Genomics"]
+license-file = "LICENSE"
+edition = "2021"
+include = ["src/**/*", "LICENSE", "README.md"]
+
+[dependencies]
+fxhash = "0.2"
+num-traits.workspace = true
+rand.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+insta = "1"
