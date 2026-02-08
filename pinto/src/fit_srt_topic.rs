@@ -153,7 +153,7 @@ pub struct SrtTopicArgs {
 
 /// Fits SVD and write down the dictionary matrix and pair-level
 /// latent states.
-pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
+pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     if args.verbose {
         std::env::set_var("RUST_LOG", "info");
     }
