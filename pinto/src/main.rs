@@ -1,5 +1,6 @@
 mod fit_srt_gene_pair_svd;
 mod fit_srt_gene_pair_topic;
+mod fit_srt_delta_svd;
 mod fit_srt_propensity;
 mod fit_srt_svd;
 mod fit_srt_topic;
@@ -15,6 +16,7 @@ mod srt_random_projection;
 
 use fit_srt_gene_pair_svd::*;
 use fit_srt_gene_pair_topic::*;
+use fit_srt_delta_svd::*;
 use fit_srt_propensity::*;
 use fit_srt_svd::*;
 use fit_srt_topic::*;
@@ -61,11 +63,13 @@ enum Commands {
     /// Estimate vertex propensity with clustering
     Propensity(SrtPropensityArgs),
     /// by topic modelling
-    Topic(SrtTopicArgs),
+    DeltaTopic(SrtTopicArgs),
+    /// delta SVD with shared/difference channels
+    DeltaSvd(SrtDeltaSvdArgs),
     /// gene-gene interaction analysis by SVD
-    GenePairSvd(SrtGenePairSvdArgs),
+    GenePairDeltaSvd(SrtGenePairSvdArgs),
     /// gene-gene interaction analysis by topic modelling
-    GenePairTopic(SrtGenePairTopicArgs),
+    GenePairDeltaTopic(SrtGenePairTopicArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -84,13 +88,16 @@ fn main() -> anyhow::Result<()> {
         Commands::Propensity(args) => {
             fit_srt_propensity(args)?;
         }
-        Commands::Topic(args) => {
-            fit_srt_topic(args)?;
+        Commands::DeltaTopic(args) => {
+            fit_srt_delta_topic(args)?;
         }
-        Commands::GenePairSvd(args) => {
+        Commands::DeltaSvd(args) => {
+            fit_srt_delta_svd(args)?;
+        }
+        Commands::GenePairDeltaSvd(args) => {
             fit_srt_gene_pair_svd(args)?;
         }
-        Commands::GenePairTopic(args) => {
+        Commands::GenePairDeltaTopic(args) => {
             fit_srt_gene_pair_topic(args)?;
         }
     }
