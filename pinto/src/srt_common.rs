@@ -25,6 +25,14 @@ pub use std::sync::{Arc, Mutex};
 
 pub use candle_util::{candle_core, candle_nn};
 
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+pub enum ComputeDevice {
+    Cpu,
+    Cuda,
+    Metal,
+}
+
 pub struct Pair {
     pub left: usize,
     pub right: usize,

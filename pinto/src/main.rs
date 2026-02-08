@@ -1,4 +1,5 @@
 mod fit_srt_gene_pair_svd;
+mod fit_srt_gene_pair_topic;
 mod fit_srt_propensity;
 mod fit_srt_svd;
 mod fit_srt_topic;
@@ -13,6 +14,7 @@ mod srt_knn_graph;
 mod srt_random_projection;
 
 use fit_srt_gene_pair_svd::*;
+use fit_srt_gene_pair_topic::*;
 use fit_srt_propensity::*;
 use fit_srt_svd::*;
 use fit_srt_topic::*;
@@ -62,6 +64,8 @@ enum Commands {
     Topic(SrtTopicArgs),
     /// gene-gene interaction analysis by SVD
     GenePairSvd(SrtGenePairSvdArgs),
+    /// gene-gene interaction analysis by topic modelling
+    GenePairTopic(SrtGenePairTopicArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -85,6 +89,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::GenePairSvd(args) => {
             fit_srt_gene_pair_svd(args)?;
+        }
+        Commands::GenePairTopic(args) => {
+            fit_srt_gene_pair_topic(args)?;
         }
     }
 
