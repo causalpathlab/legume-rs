@@ -43,9 +43,9 @@ fn dmatrix_csc_rsvd_test() -> anyhow::Result<()> {
     xx.fill_with_identity();
     dbg!(&xx);
 
-    let (nrows, ncols, triplets) = xx.to_nonzero_triplets()?;
+    let t = xx.to_nonzero_triplets()?;
 
-    let xx = nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(nrows, ncols, triplets)?;
+    let xx = nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(t.nrow, t.ncol, &t.triplets)?;
 
     let svd = xx.rsvd(3)?;
 

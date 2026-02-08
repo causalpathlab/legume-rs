@@ -23,6 +23,20 @@ pub struct KnnGraph {
 pub struct KnnGraphArgs {
     pub knn: usize,
     pub block_size: usize,
+    /// If true, keep only reciprocal edges (i→j AND j→i).
+    /// If false, keep union edges (i→j OR j→i), using min distance.
+    pub reciprocal: bool,
+}
+
+fn median_f32(values: &[f32]) -> f32 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = sorted.len();
+    if n % 2 == 0 {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    } else {
+        sorted[n / 2]
+    }
 }
 
 impl KnnGraph {
@@ -82,26 +96,51 @@ impl KnnGraph {
             return Err(anyhow::anyhow!("empty triplets"));
         }
 
-        //////////////////////////////////////////////////
-        // step 2: reciprocal filtering (i <-> j edges) //
-        //////////////////////////////////////////////////
+        ///////////////////////////////////////////////////
+        // step 2: edge filtering (reciprocal or union) //
+        ///////////////////////////////////////////////////
 
-        let mut edges: Vec<((usize, usize), f32)> = triplets
-            .par_iter()
-            .filter_map(|entry| {
-                let &(i, j) = entry.key();
-                if i < j && triplets.contains_key(&(j, i)) {
-                    Some(((i, j), *entry.value()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut edges: Vec<((usize, usize), f32)> = if args.reciprocal {
+            // Intersection: keep (i,j) only if both i→j and j→i exist
+            triplets
+                .par_iter()
+                .filter_map(|entry| {
+                    let &(i, j) = entry.key();
+                    if i < j && triplets.contains_key(&(j, i)) {
+                        Some(((i, j), *entry.value()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            // Union: keep (i,j) if either i→j or j→i exists, min distance
+            triplets
+                .par_iter()
+                .filter_map(|entry| {
+                    let &(i, j) = entry.key();
+                    if i < j {
+                        let d_ij = *entry.value();
+                        let d_ji = triplets.get(&(j, i)).map(|e| *e).unwrap_or(d_ij);
+                        Some(((i, j), d_ij.min(d_ji)))
+                    } else if i > j && !triplets.contains_key(&(j, i)) {
+                        // Only (i→j) exists with i > j; emit as canonical (j, i)
+                        Some(((j, i), *entry.value()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
 
         edges.par_sort_by_key(|&(ij, _)| ij);
         edges.dedup();
 
-        info!("{} triplets after reciprocal matching", edges.len());
+        info!(
+            "{} edges after {} matching",
+            edges.len(),
+            if args.reciprocal { "reciprocal" } else { "union" }
+        );
 
         ///////////////////////////////////////////////
         // step 3: construct sparse network backbone //
@@ -140,6 +179,167 @@ impl KnnGraph {
     pub fn num_nodes(&self) -> usize {
         self.n_nodes
     }
+
+    /// Convert distances to similarity weights using an exponential kernel:
+    /// `w = exp(-d / σ)` where σ = median distance.
+    ///
+    /// Returns weights parallel to `self.edges`, all in (0, 1].
+    /// Consistent with the softmax(-d) pattern used in counterfactual
+    /// inference (data-beans-alg) but with a global bandwidth.
+    pub fn exp_kernel_weights(&self) -> Vec<f32> {
+        if self.distances.is_empty() {
+            return Vec::new();
+        }
+        let sigma = median_f32(&self.distances);
+        let sigma = if sigma <= 0.0 { 1.0 } else { sigma };
+        info!("exp_kernel_weights: σ (median distance) = {:.4}", sigma);
+        self.distances
+            .iter()
+            .map(|&d| (-d / sigma).exp())
+            .collect()
+    }
+
+    /// Adaptive-bandwidth kernel weights with local connectivity.
+    ///
+    /// Per-point sigma calibration (originated in t-SNE, van der Maaten
+    /// & Hinton 2008) ensures every node has the same effective number
+    /// of neighbors, preventing isolated singletons in sparse regions.
+    /// The rho subtraction and fuzzy-union symmetrization follow UMAP
+    /// (McInnes et al. 2018), matching the scanpy default for Leiden.
+    ///
+    /// Algorithm:
+    /// 1. rho_i = distance to nearest neighbor (local connectivity)
+    /// 2. sigma_i via binary search: sum_j exp(-(d_ij - rho_i)/sigma_i) = log2(k)
+    /// 3. Directed weight: w(i→j) = exp(-(d_ij - rho_i) / sigma_i)
+    /// 4. Symmetrize: w_sym = w(i→j) + w(j→i) - w(i→j) * w(j→i)
+    ///
+    /// Returns weights parallel to `self.edges`, all in (0, 1].
+    pub fn fuzzy_kernel_weights(&self) -> Vec<f32> {
+        if self.distances.is_empty() {
+            return Vec::new();
+        }
+
+        let offsets = self.adjacency.col_offsets();
+        let row_indices = self.adjacency.row_indices();
+        let values = self.adjacency.values();
+
+        // Step 1-2: compute rho and sigma per node
+        let mut rho = vec![0.0f32; self.n_nodes];
+        let mut sigma = vec![1.0f32; self.n_nodes];
+
+        for i in 0..self.n_nodes {
+            let start = offsets[i];
+            let end = offsets[i + 1];
+            let dists: Vec<f32> = (start..end).map(|idx| values[idx]).collect();
+
+            if dists.is_empty() {
+                continue;
+            }
+
+            // rho = distance to nearest neighbor
+            rho[i] = dists.iter().cloned().fold(f32::INFINITY, f32::min);
+
+            // Binary search for sigma: target = log2(k)
+            let target = (dists.len() as f32).log2();
+            sigma[i] = smooth_knn_sigma(&dists, rho[i], target);
+        }
+
+        // Step 3-4: compute directed weights and symmetrize per edge
+        let mut weights = Vec::with_capacity(self.edges.len());
+
+        for &(i, j) in &self.edges {
+            // directed weight i → j
+            let d_ij = self.edge_distance_directed(offsets, row_indices, values, i, j);
+            let w_ij = directed_umap_weight(d_ij, rho[i], sigma[i]);
+
+            // directed weight j → i
+            let d_ji = self.edge_distance_directed(offsets, row_indices, values, j, i);
+            let w_ji = directed_umap_weight(d_ji, rho[j], sigma[j]);
+
+            // fuzzy union: P(at least one edge) = P(A) + P(B) - P(A)*P(B)
+            let w_sym = w_ij + w_ji - w_ij * w_ji;
+            weights.push(w_sym);
+        }
+
+        weights
+    }
+
+    /// Look up the distance from node `from` to node `to` in the CSC adjacency.
+    fn edge_distance_directed(
+        &self,
+        offsets: &[usize],
+        row_indices: &[usize],
+        values: &[f32],
+        from: usize,
+        to: usize,
+    ) -> f32 {
+        let start = offsets[from];
+        let end = offsets[from + 1];
+        for idx in start..end {
+            if row_indices[idx] == to {
+                return values[idx];
+            }
+        }
+        f32::INFINITY
+    }
+}
+
+/// Binary search for per-point sigma (UMAP's smooth_knn_dist).
+///
+/// Finds sigma such that: sum_j exp(-max(0, d_j - rho) / sigma) = target
+fn smooth_knn_sigma(dists: &[f32], rho: f32, target: f32) -> f32 {
+    const TOLERANCE: f32 = 1e-5;
+    const MAX_ITER: usize = 64;
+
+    let mean_dist: f32 = dists.iter().sum::<f32>() / dists.len().max(1) as f32;
+    let min_sigma = 1e-3 * mean_dist;
+
+    let mut lo = 0.0f32;
+    let mut hi = f32::INFINITY;
+    let mut mid = 1.0f32;
+
+    for _ in 0..MAX_ITER {
+        let mut psum = 0.0f32;
+        for &d in dists {
+            let gap = d - rho;
+            if gap > 0.0 {
+                psum += (-gap / mid).exp();
+            } else {
+                psum += 1.0;
+            }
+        }
+
+        if (psum - target).abs() < TOLERANCE {
+            break;
+        }
+
+        if psum > target {
+            hi = mid;
+            mid = (lo + hi) / 2.0;
+        } else {
+            lo = mid;
+            if hi.is_infinite() {
+                mid *= 2.0;
+            } else {
+                mid = (lo + hi) / 2.0;
+            }
+        }
+    }
+
+    mid.max(min_sigma)
+}
+
+/// Compute a single directed UMAP membership weight.
+fn directed_umap_weight(d: f32, rho: f32, sigma: f32) -> f32 {
+    if d.is_infinite() || sigma <= 0.0 {
+        return 0.0;
+    }
+    let gap = d - rho;
+    if gap <= 0.0 {
+        1.0
+    } else {
+        (-gap / sigma).exp()
+    }
 }
 
 #[cfg(test)]
@@ -176,6 +376,7 @@ mod tests {
             KnnGraphArgs {
                 knn: 4,
                 block_size: 100,
+                reciprocal: true,
             },
         )
         .unwrap();
@@ -205,6 +406,7 @@ mod tests {
             KnnGraphArgs {
                 knn: 3,
                 block_size: 100,
+                reciprocal: true,
             },
         )
         .unwrap();
@@ -214,6 +416,7 @@ mod tests {
             KnnGraphArgs {
                 knn: 3,
                 block_size: 100,
+                reciprocal: true,
             },
         )
         .unwrap();
@@ -239,6 +442,7 @@ mod tests {
             KnnGraphArgs {
                 knn: 4,
                 block_size: 100,
+                reciprocal: true,
             },
         )
         .unwrap();
@@ -262,6 +466,7 @@ mod tests {
             KnnGraphArgs {
                 knn: 3,
                 block_size: 100,
+                reciprocal: true,
             },
         )
         .unwrap();
@@ -288,12 +493,113 @@ mod tests {
             KnnGraphArgs {
                 knn: 3,
                 block_size: 100,
+                reciprocal: true,
             },
         )
         .unwrap();
 
         assert_eq!(graph.adjacency.nrows(), 10);
         assert_eq!(graph.adjacency.ncols(), 10);
+    }
+
+    #[test]
+    fn test_exp_kernel_weights() {
+        let data = two_cluster_matrix();
+        let graph = KnnGraph::from_rows(
+            &data,
+            KnnGraphArgs {
+                knn: 4,
+                block_size: 100,
+                reciprocal: true,
+            },
+        )
+        .unwrap();
+
+        let weights = graph.exp_kernel_weights();
+        assert_eq!(weights.len(), graph.num_edges());
+
+        // All weights should be in (0, 1]
+        for &w in &weights {
+            assert!(w > 0.0, "Weight {} should be > 0", w);
+            assert!(w <= 1.0, "Weight {} should be <= 1", w);
+        }
+
+        // Median edge gets exp(-1) ≈ 0.37; closer edges get higher weights
+        let mean_w: f32 = weights.iter().sum::<f32>() / weights.len() as f32;
+        assert!(
+            mean_w > 0.2 && mean_w < 0.9,
+            "Mean weight {} should be in a reasonable range",
+            mean_w
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_kernel_weights() {
+        let data = two_cluster_matrix();
+        let graph = KnnGraph::from_rows(
+            &data,
+            KnnGraphArgs {
+                knn: 4,
+                block_size: 100,
+                reciprocal: false, // union, like scanpy default
+            },
+        )
+        .unwrap();
+
+        let weights = graph.fuzzy_kernel_weights();
+        assert_eq!(weights.len(), graph.num_edges());
+
+        // All weights should be in (0, 1]
+        for &w in &weights {
+            assert!(w > 0.0, "Weight {} should be > 0", w);
+            assert!(w <= 1.0, "Weight {} should be <= 1", w);
+        }
+
+        // With UMAP weights, no edge should be near zero (local sigma adapts)
+        let min_w = weights.iter().cloned().fold(f32::INFINITY, f32::min);
+        assert!(
+            min_w > 0.01,
+            "Min fuzzy weight {} is too small; local sigma should prevent near-zero weights",
+            min_w
+        );
+    }
+
+    #[test]
+    fn test_smooth_knn_sigma() {
+        // 5 distances, rho = 0.1 (nearest neighbor)
+        let dists = [0.1, 0.2, 0.3, 0.5, 1.0];
+        let rho = 0.1;
+        let target = (5.0f32).log2(); // log2(k)
+
+        let sigma = super::smooth_knn_sigma(&dists, rho, target);
+        assert!(sigma > 0.0, "sigma should be positive");
+
+        // Verify the sigma achieves the target
+        let psum: f32 = dists
+            .iter()
+            .map(|&d| {
+                let gap = d - rho;
+                if gap > 0.0 {
+                    (-gap / sigma).exp()
+                } else {
+                    1.0
+                }
+            })
+            .sum();
+
+        assert!(
+            (psum - target).abs() < 0.1,
+            "psum {:.3} should be close to target {:.3}",
+            psum,
+            target
+        );
+    }
+
+    #[test]
+    fn test_median_f32() {
+        assert_eq!(median_f32(&[1.0, 3.0, 2.0]), 2.0);
+        assert_eq!(median_f32(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+        assert_eq!(median_f32(&[5.0]), 5.0);
     }
 
     #[test]

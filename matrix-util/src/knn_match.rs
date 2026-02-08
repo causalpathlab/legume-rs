@@ -1,12 +1,17 @@
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 
-/// A dictionary (HnswMap wrapper) for fast column look-up
+use anndists::dist::DistL2;
+use hnsw_rs::prelude::*;
+use log::info;
+
+/// A dictionary (HNSW wrapper) for fast column look-up
 ///
 pub struct ColumnDict<K> {
-    pub dict: instant_distance::HnswMap<VecPoint, K>,
+    hnsw: Hnsw<'static, f32, DistL2>,
     pub data_vec: Vec<VecPoint>,
     pub name2index: HashMap<K, usize>,
+    names: Vec<K>,
 }
 
 impl<K> ColumnDict<K>
@@ -14,7 +19,7 @@ where
     K: Clone + Eq + std::hash::Hash + Debug + Display + std::cmp::PartialEq,
 {
     pub fn names(&self) -> &Vec<K> {
-        &self.dict.values
+        &self.names
     }
 
     pub fn from_ndarray_views<'a>(data: Vec<ndarray::ArrayView1<'a, f32>>, names: Vec<K>) -> Self {
@@ -77,25 +82,22 @@ where
         knn: usize,
         exclude_same: bool,
     ) -> anyhow::Result<(Vec<K>, Vec<f32>)> {
-        use instant_distance::Search;
-
         let nquery = knn.min(self.data_vec.len());
 
         if let Some(self_idx) = self.name2index.get(query_name) {
             let query = &self.data_vec[*self_idx];
+            let ef_search = nquery.max(24);
+            let neighbours = self.hnsw.search(query.data.as_slice(), nquery, ef_search);
 
-            let mut search = Search::default();
-            let knn_iter = self.dict.search(query, &mut search).take(nquery);
             let mut points = Vec::with_capacity(nquery);
             let mut distances = Vec::with_capacity(nquery);
-            for v in knn_iter {
-                let vv = v.value;
-                if exclude_same && vv == query_name {
+            for n in neighbours {
+                let name = &self.names[n.d_id];
+                if exclude_same && name == query_name {
                     continue;
                 }
-                let dd = v.distance;
-                points.push(vv.clone());
-                distances.push(dd);
+                points.push(name.clone());
+                distances.push(n.distance);
             }
             Ok((points, distances))
         } else {
@@ -103,8 +105,7 @@ where
         }
     }
 
-    /// k-nearest neighbour match by name within the same dictionary
-    /// to return a Vec of names
+    /// k-nearest neighbour match by query data point
     ///
     /// * `query` - query data `VecPoint`
     /// * `knn` - the number of nearest neighbours to return
@@ -114,23 +115,19 @@ where
         query: &VecPoint,
         knn: usize,
     ) -> anyhow::Result<(Vec<K>, Vec<f32>)> {
-        use instant_distance::Search;
-
         if self.dim().unwrap_or(0) != query.len() {
             return Err(anyhow::anyhow!("query's dim does not match"));
         }
 
         let nquery = knn.min(self.data_vec.len());
+        let ef_search = nquery.max(24);
+        let neighbours = self.hnsw.search(query.data.as_slice(), nquery, ef_search);
 
-        let mut search = Search::default();
-        let knn_iter = self.dict.search(query, &mut search).take(nquery);
         let mut points = Vec::with_capacity(nquery);
         let mut distances = Vec::with_capacity(nquery);
-        for v in knn_iter {
-            let vv = v.value;
-            let dd = v.distance;
-            points.push(vv.clone());
-            distances.push(dd);
+        for n in neighbours {
+            points.push(self.names[n.d_id].clone());
+            distances.push(n.distance);
         }
 
         Ok((points, distances))
@@ -149,21 +146,18 @@ where
         knn: usize,
         against: &Self,
     ) -> anyhow::Result<(Vec<K>, Vec<f32>)> {
-        use instant_distance::Search;
-
         let nquery = knn.min(against.data_vec.len());
 
         if let Some(self_idx) = self.name2index.get(query_name) {
             let query = &self.data_vec[*self_idx];
-            let mut search = Search::default();
-            let knn_iter = against.dict.search(query, &mut search).take(nquery);
+            let ef_search = nquery.max(24);
+            let neighbours = against.hnsw.search(query.data.as_slice(), nquery, ef_search);
+
             let mut points = Vec::with_capacity(nquery);
             let mut distances = Vec::with_capacity(nquery);
-            for v in knn_iter {
-                let vv = v.value;
-                let dd = v.distance;
-                points.push(vv.clone());
-                distances.push(dd);
+            for n in neighbours {
+                points.push(against.names[n.d_id].clone());
+                distances.push(n.distance);
             }
             Ok((points, distances))
         } else {
@@ -183,11 +177,11 @@ where
     V: Sync + MakeVecPoint,
 {
     fn empty() -> Self {
-        use instant_distance::Builder;
         Self {
-            dict: Builder::default().build(vec![], vec![]),
+            hnsw: Hnsw::<f32, DistL2>::new(16, 1, 1, 100, DistL2 {}),
             data_vec: vec![],
             name2index: HashMap::new(),
+            names: vec![],
         }
     }
 
@@ -207,21 +201,47 @@ where
             name2index.insert(x.clone(), j);
         });
 
-        use instant_distance::Builder;
-        let dict = Builder::default().build(data_vec.clone(), names.clone());
+        // HNSW parameters
+        let max_nb_connection = 24; // M parameter
+        let nb_layer = 16.min((nn as f32).ln().ceil() as usize).max(1);
+        let ef_construction = 400;
+
+        let mut hnsw = Hnsw::<f32, DistL2>::new(
+            max_nb_connection,
+            nn.max(1),
+            nb_layer,
+            ef_construction,
+            DistL2 {},
+        );
+
+        // Parallel insert — the key performance improvement over instant-distance
+        let data_for_insert: Vec<(&[f32], usize)> = data_vec
+            .iter()
+            .enumerate()
+            .map(|(id, vp)| (vp.data.as_slice(), id))
+            .collect();
+
+        info!(
+            "Building HNSW index: {} points, M={}, layers={}, ef={}",
+            nn, max_nb_connection, nb_layer, ef_construction
+        );
+        hnsw.parallel_insert_slice(&data_for_insert);
+        hnsw.set_searching_mode(true);
+        info!("HNSW index built");
 
         let ret = ColumnDict {
-            dict,
+            hnsw,
             data_vec,
             name2index,
+            names: names.clone(),
         };
 
         #[cfg(debug_assertions)]
         {
             // check if the name matches
-            for x in ret.names().iter() {
-                if let Some(&i) = ret.name2index.get(x) {
-                    debug_assert_eq!(*x, names[i]);
+            for (i, x) in ret.names.iter().enumerate() {
+                if let Some(&j) = ret.name2index.get(x) {
+                    debug_assert_eq!(i, j);
                 }
             }
         }
@@ -264,17 +284,5 @@ impl MakeVecPoint for ndarray::ArrayView1<'_, f32> {
         VecPoint {
             data: self.iter().cloned().collect(),
         }
-    }
-}
-
-impl instant_distance::Point for VecPoint {
-    /// Euclidean distance
-    fn distance(&self, other: &Self) -> f32 {
-        self.data
-            .iter()
-            .zip(other.data.iter())
-            .map(|(&x, &y)| (x - y) * (x - y))
-            .sum::<f32>()
-            .sqrt()
     }
 }

@@ -39,7 +39,7 @@ impl Leiden {
             return update;
         }
 
-        let mut local_merging = LocalMerging::new(self.resolution, self.randomness);
+        let mut local_merging = LocalMerging::new(self.randomness, self.resolution);
 
         let subnetworks = n.create_subnetworks(c);
 

@@ -88,12 +88,19 @@ pub struct ClusteringArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Resolution parameter for Leiden (higher = more clusters)"
+        help = "Resolution parameter for Leiden modularity (higher = more clusters, default 1.0)"
     )]
     resolution: f64,
 
     #[arg(long, help = "Random seed for Leiden clustering")]
     seed: Option<u64>,
+
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Minimum cluster size to report (smaller clusters become unassigned, default 2)"
+    )]
+    min_cluster_size: usize,
 
     #[arg(
         long,
@@ -111,6 +118,11 @@ pub struct ClusteringArgs {
 }
 
 pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
+    if args.verbose {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
+
     // Read latent representation
     let MatWithNames {
         rows: cell_names,
@@ -135,24 +147,37 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
     });
 
     // Run clustering
-    let result = match args.method {
+    let mut result = match args.method {
         ClusterMethodCli::Kmeans => {
             info!("Running k-means clustering with k={}, max_iter={}", k, args.max_iter);
             kmeans_clustering(&latent, k, args.max_iter)?
         }
         ClusterMethodCli::Leiden => {
             info!(
-                "Running Leiden clustering with knn={}, resolution={:.2}",
-                args.knn, args.resolution
+                "Running Leiden clustering with knn={}, resolution={:.2}, target_k={:?}",
+                args.knn, args.resolution, args.num_clusters
             );
-            leiden_clustering(&latent, args.knn, args.resolution, args.seed)?
+            leiden_clustering(&latent, args.knn, args.resolution, args.num_clusters, args.seed, Some(&args.out))?
         }
     };
 
-    // Display cluster statistics if verbose
+    // Remove small clusters
+    if args.min_cluster_size > 1 {
+        result.remove_small_clusters(args.min_cluster_size);
+    }
+
+    let n_unassigned = result.labels.iter().filter(|&&l| l == usize::MAX).count();
+    info!(
+        "Clustering complete: {} cells assigned to {} clusters ({} unassigned)",
+        result.labels.len(),
+        result.n_clusters,
+        n_unassigned,
+    );
+
+    // Display cluster statistics if verbose (top 100 biggest)
     if args.verbose {
         eprintln!();
-        eprintln!("{}", result.histogram_ascii(50));
+        eprintln!("{}", result.histogram_ascii(50, 100));
         eprintln!();
     }
 
@@ -179,10 +204,14 @@ fn write_cluster_assignments(
     cell_names: &[Box<str>],
     output_path: &str,
 ) -> anyhow::Result<()> {
-    // Create a simple matrix: cells × 1 column (cluster id)
+    // Create a simple matrix: cells × 1 column (cluster id, NaN if unassigned)
     let mut data = Mat::zeros(cell_names.len(), 1);
     for (i, &cluster_id) in result.labels.iter().enumerate() {
-        data[(i, 0)] = cluster_id as f32;
+        data[(i, 0)] = if cluster_id == usize::MAX {
+            f32::NAN
+        } else {
+            cluster_id as f32
+        };
     }
 
     let col_names = vec!["cluster".into()];

@@ -28,7 +28,8 @@ ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
 
 dashmap = { workspace = true }
-instant-distance = { workspace = true }
+hnsw_rs = { workspace = true }
+anndists = { workspace = true }
 indicatif = { workspace = true }
 parquet = { workspace = true }
 fnv = { workspace = true }
