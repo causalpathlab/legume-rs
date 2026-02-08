@@ -18,6 +18,25 @@ use fit_srt_svd::*;
 use fit_srt_topic::*;
 
 use clap::{Parser, Subcommand};
+use colored::Colorize;
+
+const LOGO: &str = include_str!("../logo.txt");
+
+fn colorize_logo_line(line: &str) -> String {
+    line.replace('▄', &"▄".truecolor(139, 90, 43).to_string())
+        .replace('▓', &"▓".truecolor(139, 90, 43).to_string())
+        .replace('█', &"█".truecolor(180, 120, 60).to_string())
+        .replace('▀', &"▀".truecolor(139, 90, 43).to_string())
+        .replace('─', &"─".green().to_string())
+}
+
+fn print_logo() {
+    for line in LOGO.lines() {
+        println!("  {}", colorize_logo_line(line));
+    }
+    println!(" {}", "Proximity-based Interaction Network --> Tissue Organization".bold());
+    println!();
+}
 
 /// Proximity-based Interaction Network analysis to dissect Tissue
 /// Organizations
@@ -47,6 +66,10 @@ enum Commands {
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
+
+    if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
+        print_logo();
+    }
 
     let cli = Cli::parse();
 
