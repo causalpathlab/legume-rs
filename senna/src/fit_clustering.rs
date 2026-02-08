@@ -157,7 +157,7 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
                 "Running Leiden clustering with knn={}, resolution={:.2}, target_k={:?}",
                 args.knn, args.resolution, args.num_clusters
             );
-            leiden_clustering(&latent, args.knn, args.resolution, args.num_clusters, args.seed, Some(&args.out))?
+            leiden_clustering(&latent, args.knn, args.resolution, args.num_clusters, args.seed)?
         }
     };
 
