@@ -22,7 +22,7 @@ pub struct GenePairParameters {
 }
 
 /// Shared input for delta computation visitor
-pub struct DeltaSharedInput {
+struct DeltaSharedInput {
     pub gene_log_means: DVec,
     pub gene_adj: Vec<Vec<(usize, usize)>>,
     pub n_edges: usize,
@@ -30,10 +30,7 @@ pub struct DeltaSharedInput {
 
 #[allow(dead_code)]
 impl GenePairCollapsedStat {
-    pub fn new(
-        gene_graph: &GenePairGraph,
-        n_samples: usize,
-    ) -> Self {
+    pub fn new(gene_graph: &GenePairGraph, n_samples: usize) -> Self {
         let n_gene_pairs = gene_graph.num_edges();
         Self {
             delta_pos_ds: Mat::zeros(n_gene_pairs, n_samples),
@@ -55,10 +52,7 @@ impl GenePairCollapsedStat {
     }
 
     /// Fit Poisson-Gamma on δ⁺ and δ⁻
-    pub fn optimize(
-        &self,
-        hyper_param: Option<(f32, f32)>,
-    ) -> anyhow::Result<GenePairParameters> {
+    pub fn optimize(&self, hyper_param: Option<(f32, f32)>) -> anyhow::Result<GenePairParameters> {
         let (a0, b0) = hyper_param.unwrap_or((1_f32, 1_f32));
         let shape = (self.n_gene_pairs, self.n_samples);
 
@@ -106,11 +100,36 @@ impl GenePairCollapsedStat {
     }
 }
 
+/// Visit all gene-pair interaction deltas for a single cell's sparse
+/// expression vector. Calls `on_delta(edge_idx, delta)` for each
+/// observed gene pair (g1, g2) where both genes are present.
+#[inline]
+pub fn visit_gene_pair_deltas(
+    rows: &[usize],
+    vals: &[f32],
+    gene_adj: &[Vec<(usize, usize)>],
+    gene_log_means: &DVec,
+    mut on_delta: impl FnMut(usize, f32),
+) {
+    let gene_log1p: HashMap<usize, f32> = rows
+        .iter()
+        .zip(vals.iter())
+        .map(|(&g, &v)| (g, v.ln_1p()))
+        .collect();
+
+    for (&g1, &val_g1) in rows.iter().zip(vals.iter()) {
+        let log1p_g1 = val_g1.ln_1p();
+        for &(g2, edge_idx) in gene_adj[g1].iter() {
+            if let Some(&log1p_g2) = gene_log1p.get(&g2) {
+                let delta = log1p_g1 * log1p_g2 - gene_log_means[g1] * gene_log_means[g2];
+                on_delta(edge_idx, delta);
+            }
+        }
+    }
+}
+
 /// Compute gene-level log1p means: μ̃_g = E[log1p(x_g)] across all cells
-pub fn compute_gene_log_means(
-    data_vec: &SparseIoVec,
-    block_size: usize,
-) -> anyhow::Result<DVec> {
+pub fn compute_gene_log_means(data_vec: &SparseIoVec, block_size: usize) -> anyhow::Result<DVec> {
     let n_genes = data_vec.num_rows();
     let n_cells = data_vec.num_columns();
 
@@ -121,12 +140,7 @@ pub fn compute_gene_log_means(
 
     let mut sums = DVec::zeros(n_genes);
 
-    data_vec.visit_columns_by_block(
-        &gene_log_mean_visitor,
-        &(),
-        &mut sums,
-        Some(block_size),
-    )?;
+    data_vec.visit_columns_by_block(&gene_log_mean_visitor, &(), &mut sums, Some(block_size))?;
 
     sums /= n_cells as f32;
     Ok(sums)
@@ -161,7 +175,7 @@ fn gene_log_mean_visitor(
 ///   δ = log1p(x_g1(c)) × log1p(x_g2(c)) - μ̃_g1 × μ̃_g2
 ///   if δ > 0: δ⁺(edge, s) += δ
 ///   if δ < 0: δ⁻(edge, s) += |δ|
-pub fn compute_gene_pair_deltas(
+pub fn compute_gene_interaction_deltas(
     data_vec: &SparseIoVec,
     gene_graph: &GenePairGraph,
     gene_log_means: &DVec,
@@ -183,16 +197,12 @@ pub fn compute_gene_pair_deltas(
         n_edges,
     };
 
-    data_vec.visit_columns_by_group(
-        &delta_visitor,
-        &shared_in,
-        &mut stat,
-    )?;
+    data_vec.visit_columns_by_group(&gene_interaction_delta_visitor, &shared_in, &mut stat)?;
 
     Ok(stat)
 }
 
-fn delta_visitor(
+fn gene_interaction_delta_visitor(
     sample: usize,
     cells: &[usize],
     data_vec: &SparseIoVec,
@@ -213,30 +223,13 @@ fn delta_visitor(
         let rows = y_j.row_indices();
         let vals = y_j.values();
 
-        // Build sparse lookup: gene → log1p(x)
-        let gene_log1p: HashMap<usize, f32> = rows
-            .iter()
-            .zip(vals.iter())
-            .map(|(&g, &v)| (g, v.ln_1p()))
-            .collect();
-
-        // For each present gene g1, check directed neighbors g2 > g1
-        for (&g1, &val_g1) in rows.iter().zip(vals.iter()) {
-            let log1p_g1 = val_g1.ln_1p();
-
-            for &(g2, edge_idx) in gene_adj[g1].iter() {
-                if let Some(&log1p_g2) = gene_log1p.get(&g2) {
-                    let delta =
-                        log1p_g1 * log1p_g2 - gene_log_means[g1] * gene_log_means[g2];
-
-                    if delta > 0.0 {
-                        local_delta_pos[edge_idx] += delta;
-                    } else {
-                        local_delta_neg[edge_idx] += -delta;
-                    }
-                }
+        visit_gene_pair_deltas(rows, vals, gene_adj, gene_log_means, |edge_idx, delta| {
+            if delta > 0.0 {
+                local_delta_pos[edge_idx] += delta;
+            } else {
+                local_delta_neg[edge_idx] += -delta;
             }
-        }
+        });
 
         local_size += 1.0;
     }
@@ -258,119 +251,6 @@ fn delta_visitor(
     Ok(())
 }
 
-/// Nystrom projection: project individual cells onto the gene-pair
-/// dictionary to obtain per-cell latent codes.
-///
-/// For each cell, computes delta values for present gene pairs and
-/// projects onto the SVD basis (split into pos/neg halves).
-pub fn nystrom_gene_pair_projection(
-    data_vec: &SparseIoVec,
-    gene_graph: &GenePairGraph,
-    gene_log_means: &DVec,
-    basis_dk: &Mat,
-    block_size: usize,
-) -> anyhow::Result<Mat> {
-    let n_cells = data_vec.num_columns();
-    let n_topics = basis_dk.ncols();
-    let n_edges = gene_graph.num_edges();
-
-    info!(
-        "Nystrom gene-pair projection: {} cells, {} edges, {} topics",
-        n_cells, n_edges, n_topics,
-    );
-
-    // Split basis into pos (top half) and neg (bottom half)
-    let basis_pos = basis_dk.rows(0, n_edges).clone_owned();
-    let basis_neg = basis_dk.rows(n_edges, n_edges).clone_owned();
-
-    let gene_adj = gene_graph.build_directed_adjacency();
-
-    let shared_in = NystromSharedInput {
-        gene_log_means: gene_log_means.clone(),
-        gene_adj,
-        n_edges,
-        basis_pos,
-        basis_neg,
-    };
-
-    let mut proj_kn = Mat::zeros(n_topics, n_cells);
-
-    data_vec.visit_columns_by_block(
-        &nystrom_gene_pair_visitor,
-        &shared_in,
-        &mut proj_kn,
-        Some(block_size),
-    )?;
-
-    Ok(proj_kn)
-}
-
-#[allow(dead_code)]
-struct NystromSharedInput {
-    gene_log_means: DVec,
-    gene_adj: Vec<Vec<(usize, usize)>>,
-    n_edges: usize,
-    basis_pos: Mat,
-    basis_neg: Mat,
-}
-
-fn nystrom_gene_pair_visitor(
-    bound: (usize, usize),
-    data_vec: &SparseIoVec,
-    shared_in: &NystromSharedInput,
-    arc_proj: Arc<Mutex<&mut Mat>>,
-) -> anyhow::Result<()> {
-    let (lb, ub) = bound;
-    let gene_log_means = &shared_in.gene_log_means;
-    let gene_adj = &shared_in.gene_adj;
-    let basis_pos = &shared_in.basis_pos;
-    let basis_neg = &shared_in.basis_neg;
-    let n_topics = basis_pos.ncols();
-
-    let yy = data_vec.read_columns_csc(lb..ub)?;
-
-    let n_cells_block = ub - lb;
-    let mut local_proj = Mat::zeros(n_topics, n_cells_block);
-
-    for (cell_idx, y_j) in yy.col_iter().enumerate() {
-        let rows = y_j.row_indices();
-        let vals = y_j.values();
-
-        // Build sparse lookup
-        let gene_log1p: HashMap<usize, f32> = rows
-            .iter()
-            .zip(vals.iter())
-            .map(|(&g, &v)| (g, v.ln_1p()))
-            .collect();
-
-        let mut proj_k = DVec::zeros(n_topics);
-
-        for (&g1, &val_g1) in rows.iter().zip(vals.iter()) {
-            let log1p_g1 = val_g1.ln_1p();
-
-            for &(g2, edge_idx) in gene_adj[g1].iter() {
-                if let Some(&log1p_g2) = gene_log1p.get(&g2) {
-                    let delta =
-                        log1p_g1 * log1p_g2 - gene_log_means[g1] * gene_log_means[g2];
-
-                    if delta > 0.0 {
-                        proj_k += delta * &basis_pos.row(edge_idx).transpose();
-                    } else if delta < 0.0 {
-                        proj_k += (-delta) * &basis_neg.row(edge_idx).transpose();
-                    }
-                }
-            }
-        }
-
-        local_proj.column_mut(cell_idx).copy_from(&proj_k);
-    }
-
-    let mut proj_kn = arc_proj.lock().expect("lock nystrom proj");
-    proj_kn.columns_range_mut(lb..ub).copy_from(&local_proj);
-
-    Ok(())
-}
-
 /// Simple preliminary collapse: sum observed expression per gene per sample.
 /// Returns (gene_sum_ds, size_s) for building the gene graph.
 pub fn preliminary_collapse(
@@ -388,11 +268,7 @@ pub fn preliminary_collapse(
         size_s: DVec::zeros(n_samples),
     };
 
-    data_vec.visit_columns_by_group(
-        &prelim_collapse_visitor,
-        &(),
-        &mut stat,
-    )?;
+    data_vec.visit_columns_by_group(&prelim_collapse_visitor, &(), &mut stat)?;
 
     Ok((stat.gene_sum_ds, stat.size_s))
 }
@@ -411,16 +287,21 @@ fn prelim_collapse_visitor(
 ) -> anyhow::Result<()> {
     let yy = data_vec.read_columns_csc(cells.iter().cloned())?;
 
-    let mut stat = arc_stat.lock().expect("lock prelim stat");
+    let n_genes = yy.nrows();
+    let mut local_sum = DVec::zeros(n_genes);
+    let mut local_size = 0_f32;
 
     for y_j in yy.col_iter() {
-        let rows = y_j.row_indices();
-        let vals = y_j.values();
-        for (&gene, &y) in rows.iter().zip(vals.iter()) {
-            stat.gene_sum_ds[(gene, sample)] += y;
+        for (&gene, &y) in y_j.row_indices().iter().zip(y_j.values().iter()) {
+            local_sum[gene] += y;
         }
-        stat.size_s[sample] += 1_f32;
+        local_size += 1_f32;
     }
+
+    let mut stat = arc_stat.lock().expect("lock prelim stat");
+    let mut col = stat.gene_sum_ds.column_mut(sample);
+    col += &local_sum;
+    stat.size_s[sample] += local_size;
 
     Ok(())
 }

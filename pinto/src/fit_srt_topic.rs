@@ -6,7 +6,7 @@ use crate::srt_estimate_batch_effects::EstimateBatchArgs;
 use crate::srt_input::*;
 use crate::srt_random_projection::*;
 
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use matrix_param::io::ParamIo;
 use matrix_param::traits::*;
 
@@ -18,14 +18,6 @@ use candle_util::candle_loss_functions as loss_func;
 use candle_util::candle_model_traits::*;
 use candle_util::candle_vae_inference::*;
 use indicatif::{ProgressBar, ProgressDrawTarget};
-
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
-enum ComputeDevice {
-    Cpu,
-    Cuda,
-    Metal,
-}
 
 #[derive(Parser, Debug, Clone)]
 ///
