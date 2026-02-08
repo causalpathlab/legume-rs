@@ -24,7 +24,6 @@ approx = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 
-instant-distance = { workspace = true }
 indicatif = { workspace = true }
 parquet = { workspace = true }
 matrix-util = { workspace = true }
