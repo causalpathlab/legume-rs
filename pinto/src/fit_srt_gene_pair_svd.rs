@@ -9,80 +9,86 @@ use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::*;
 
 #[derive(Parser, Debug, Clone)]
-///
-/// PINTO gene-gene interaction analysis by SVD
-///
 pub struct SrtGenePairSvdArgs {
-    /// Data files of either `.zarr` or `.h5` format.
-    #[arg(required = true, value_delimiter(','))]
+    #[arg(required = true, value_delimiter(','),
+          help = "Data files (.zarr or .h5 format, comma separated)")]
     data_files: Vec<Box<str>>,
 
-    /// Auxiliary cell coordinate files (comma separated).
-    #[arg(long = "coord", short = 'c', required = true, value_delimiter(','))]
+    #[arg(long = "coord", short = 'c', required = true, value_delimiter(','),
+          help = "Spatial coordinate files, one per data file",
+          long_help = "Spatial coordinate files, one per data file (comma separated).\n\
+                       Each file: barcode, x, y, ... per line.")]
     coord_files: Vec<Box<str>>,
 
-    /// Cell coordinate column indices in the `coord` files (comma separated)
-    #[arg(long = "coord-column-indices", value_delimiter(','))]
+    #[arg(long = "coord-column-indices", value_delimiter(','),
+          help = "Column indices for coordinates in coord files",
+          long_help = "Column indices for coordinates in coord files (comma separated).\n\
+                       Use when coord files have extra columns beyond barcode,x,y.")]
     coord_columns: Option<Vec<usize>>,
 
-    /// Column names in the `coord` files (comma separated)
-    #[arg(
-        long = "coord-column-names",
-        value_delimiter(','),
-        default_value = "pxl_row_in_fullres,pxl_col_in_fullres"
-    )]
+    #[arg(long = "coord-column-names", value_delimiter(','),
+          default_value = "pxl_row_in_fullres,pxl_col_in_fullres",
+          help = "Column names to look up in coord files")]
     coord_column_names: Vec<Box<str>>,
 
-    /// Header row in coordinate file (0 if first line is column names)
-    #[arg(long)]
+    #[arg(long,
+          help = "Header row index in coord files (0 = first line is column names)")]
     coord_header_row: Option<usize>,
 
-    /// Coordinate embedding dimension
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = 256,
+          help = "Dimension for spectral embedding of spatial coordinates")]
     coord_emb: usize,
 
-    /// Batch membership files (comma separated).
-    #[arg(long, short = 'b', value_delimiter(','))]
+    #[arg(long, short = 'b', value_delimiter(','),
+          help = "Batch membership files, one per data file",
+          long_help = "Batch membership files, one per data file (comma separated).\n\
+                       Each file maps cells to batch labels for batch effect correction.")]
     batch_files: Option<Vec<Box<str>>>,
 
-    /// Random projection dimension
-    #[arg(long, short = 'p', default_value_t = 50)]
+    #[arg(long, short = 'p', default_value_t = 50,
+          help = "Random projection dimension for pseudobulk sample construction")]
     proj_dim: usize,
 
-    /// Use top S components for sample assignment. #samples < 2^S+1.
-    #[arg(long, short = 'd', default_value_t = 10)]
+    #[arg(long, short = 'd', default_value_t = 10,
+          help = "Number of top projection components for binary sort",
+          long_help = "Number of top projection components for binary sort.\n\
+                       Produces up to 2^S pseudobulk samples.")]
     sort_dim: usize,
 
-    /// k-nearest neighbours for gene-gene graph
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 20,
+          help = "Number of nearest neighbours for gene-gene co-expression graph")]
     knn_gene: usize,
 
-    /// k-nearest neighbours for spatial cell pairs
-    #[arg(short = 'k', long, default_value_t = 10)]
+    #[arg(short = 'k', long, default_value_t = 10,
+          help = "Number of nearest neighbours for spatial cell-pair graph")]
     knn_spatial: usize,
 
-    /// Downsampling columns per collapsed sample
-    #[arg(long, short = 's')]
+    #[arg(long, short = 's',
+          help = "Maximum cells per pseudobulk sample (downsampling)")]
     down_sample: Option<usize>,
 
-    /// Output header
-    #[arg(long, short, required = true)]
+    #[arg(long, short, required = true,
+          help = "Output file prefix",
+          long_help = "Output file prefix.\n\
+                       Generates: {out}.coord_pairs.parquet, {out}.gene_graph.parquet,\n\
+                       {out}.gene_pairs.parquet, {out}.dictionary.parquet,\n\
+                       {out}.latent.parquet")]
     out: Box<str>,
 
-    /// Block size for parallel processing
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 100,
+          help = "Block size for parallel processing of cells")]
     block_size: usize,
 
-    /// Number of latent topics
-    #[arg(short = 't', long, default_value_t = 10)]
+    #[arg(short = 't', long, default_value_t = 10,
+          help = "Number of SVD components (latent dimensions)")]
     n_latent_topics: usize,
 
-    /// Preload all column data
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false,
+          help = "Preload all sparse column data into memory for faster access")]
     preload_data: bool,
 
-    /// Verbosity
-    #[arg(long, short)]
+    #[arg(long, short,
+          help = "Enable verbose logging (sets RUST_LOG=info)")]
     verbose: bool,
 }
 

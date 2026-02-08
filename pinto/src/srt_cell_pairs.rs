@@ -154,49 +154,6 @@ impl<'a> SrtCellPairs<'a> {
         Ok((left, right))
     }
 
-    ///
-    /// Take average position of these cell pairs (indices)
-    ///
-    /// returns `(left_coordinate, right_coordinate)`
-    ///
-    pub fn average_position(&self, select_pair_indices: &[usize]) -> (DVec, DVec) {
-        let mut left = DVec::zeros(self.coordinates.ncols());
-        let mut right = DVec::zeros(self.coordinates.ncols());
-        let mut npairs = 0_f32;
-
-        select_pair_indices
-            .iter()
-            .filter_map(|&pp| self.pairs.get(pp))
-            .for_each(|pp| {
-                left += self.coordinates.row(pp.left).transpose();
-                right += self.coordinates.row(pp.right).transpose();
-                npairs += 1.;
-            });
-
-        left /= npairs;
-        right /= npairs;
-        (left, right)
-    }
-
-    pub fn average_coordinate_embedding(&self, select_pair_indices: &[usize]) -> (DVec, DVec) {
-        let d_emb = self.coordinate_embedding.ncols();
-        let mut left = DVec::zeros(d_emb);
-        let mut right = DVec::zeros(d_emb);
-        let mut npairs = 0_f32;
-
-        select_pair_indices
-            .iter()
-            .filter_map(|&pp| self.pairs.get(pp))
-            .for_each(|pp| {
-                left += self.coordinate_embedding.row(pp.left).transpose();
-                right += self.coordinate_embedding.row(pp.right).transpose();
-                npairs += 1.;
-            });
-        left /= npairs;
-        right /= npairs;
-        (left, right)
-    }
-
     /// put together coordinate embedding results for all the pairs
     pub fn coordinate_embedding_pairs(&self) -> anyhow::Result<Mat> {
         concatenate_vertical(
@@ -293,10 +250,6 @@ impl<'a> SrtCellPairs<'a> {
 
     pub fn num_coordinates(&self) -> usize {
         self.coordinates.ncols()
-    }
-
-    pub fn num_coordinate_embedding(&self) -> usize {
-        self.coordinate_embedding.ncols()
     }
 
     pub fn num_samples(&self) -> anyhow::Result<usize> {

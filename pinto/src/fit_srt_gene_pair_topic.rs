@@ -19,120 +19,128 @@ use candle_util::candle_vae_inference::*;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 
 #[derive(Parser, Debug, Clone)]
-///
-/// PINTO gene-gene interaction analysis by topic modelling
-///
 pub struct SrtGenePairTopicArgs {
-    /// Data files of either `.zarr` or `.h5` format.
-    #[arg(required = true, value_delimiter(','))]
+    #[arg(required = true, value_delimiter(','),
+          help = "Data files (.zarr or .h5 format, comma separated)")]
     data_files: Vec<Box<str>>,
 
-    /// Auxiliary cell coordinate files (comma separated).
-    #[arg(long = "coord", short = 'c', required = true, value_delimiter(','))]
+    #[arg(long = "coord", short = 'c', required = true, value_delimiter(','),
+          help = "Spatial coordinate files, one per data file",
+          long_help = "Spatial coordinate files, one per data file (comma separated).\n\
+                       Each file: barcode, x, y, ... per line.")]
     coord_files: Vec<Box<str>>,
 
-    /// Cell coordinate column indices in the `coord` files (comma separated)
-    #[arg(long = "coord-column-indices", value_delimiter(','))]
+    #[arg(long = "coord-column-indices", value_delimiter(','),
+          help = "Column indices for coordinates in coord files",
+          long_help = "Column indices for coordinates in coord files (comma separated).\n\
+                       Use when coord files have extra columns beyond barcode,x,y.")]
     coord_columns: Option<Vec<usize>>,
 
-    /// Column names in the `coord` files (comma separated)
-    #[arg(
-        long = "coord-column-names",
-        value_delimiter(','),
-        default_value = "pxl_row_in_fullres,pxl_col_in_fullres"
-    )]
+    #[arg(long = "coord-column-names", value_delimiter(','),
+          default_value = "pxl_row_in_fullres,pxl_col_in_fullres",
+          help = "Column names to look up in coord files")]
     coord_column_names: Vec<Box<str>>,
 
-    /// Header row in coordinate file (0 if first line is column names)
-    #[arg(long)]
+    #[arg(long,
+          help = "Header row index in coord files (0 = first line is column names)")]
     coord_header_row: Option<usize>,
 
-    /// Coordinate embedding dimension
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = 256,
+          help = "Dimension for spectral embedding of spatial coordinates")]
     coord_emb: usize,
 
-    /// Batch membership files (comma separated).
-    #[arg(long, short = 'b', value_delimiter(','))]
+    #[arg(long, short = 'b', value_delimiter(','),
+          help = "Batch membership files, one per data file",
+          long_help = "Batch membership files, one per data file (comma separated).\n\
+                       Each file maps cells to batch labels for batch effect correction.")]
     batch_files: Option<Vec<Box<str>>>,
 
-    /// Random projection dimension
-    #[arg(long, short = 'p', default_value_t = 50)]
+    #[arg(long, short = 'p', default_value_t = 50,
+          help = "Random projection dimension for pseudobulk sample construction")]
     proj_dim: usize,
 
-    /// Use top S components for sample assignment. #samples < 2^S+1.
-    #[arg(long, short = 'd', default_value_t = 10)]
+    #[arg(long, short = 'd', default_value_t = 10,
+          help = "Number of top projection components for binary sort",
+          long_help = "Number of top projection components for binary sort.\n\
+                       Produces up to 2^S pseudobulk samples.")]
     sort_dim: usize,
 
-    /// k-nearest neighbours for gene-gene graph
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 20,
+          help = "Number of nearest neighbours for gene-gene co-expression graph")]
     knn_gene: usize,
 
-    /// k-nearest neighbours for spatial cell pairs
-    #[arg(short = 'k', long, default_value_t = 10)]
+    #[arg(short = 'k', long, default_value_t = 10,
+          help = "Number of nearest neighbours for spatial cell-pair graph")]
     knn_spatial: usize,
 
-    /// Downsampling columns per collapsed sample
-    #[arg(long, short = 's')]
+    #[arg(long, short = 's',
+          help = "Maximum cells per pseudobulk sample (downsampling)")]
     down_sample: Option<usize>,
 
-    /// Output header
-    #[arg(long, short, required = true)]
+    #[arg(long, short, required = true,
+          help = "Output file prefix",
+          long_help = "Output file prefix.\n\
+                       Generates: {out}.coord_pairs.parquet, {out}.gene_graph.parquet,\n\
+                       {out}.gene_pairs.parquet, {out}.dictionary.parquet,\n\
+                       {out}.latent.parquet, {out}.log_likelihood.gz")]
     out: Box<str>,
 
-    /// Block size for parallel processing
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 100,
+          help = "Block size for parallel processing of cells")]
     block_size: usize,
 
-    /// Number of latent topics
-    #[arg(short = 't', long, default_value_t = 10)]
+    #[arg(short = 't', long, default_value_t = 10,
+          help = "Number of latent topics")]
     n_latent_topics: usize,
 
-    /// Number of feature modules in the encoder.
-    /// If not specified, `encoder_layers[0]` will be used.
-    #[arg(short = 'm', long)]
+    #[arg(short = 'm', long,
+          help = "Number of feature modules in the encoder",
+          long_help = "Number of feature modules in the encoder (smaller = faster).\n\
+                       Defaults to encoder_layers[0] if not specified.")]
     feature_modules: Option<usize>,
 
-    /// Encoder layers
-    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128, 1024, 128])]
+    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128, 1024, 128],
+          help = "Encoder hidden layer sizes (comma separated)")]
     encoder_layers: Vec<usize>,
 
-    /// Intensity levels for frequency embedding
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 10,
+          help = "Number of intensity levels for frequency embedding")]
     vocab_size: usize,
 
-    /// Intensity embedding dimension
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 10,
+          help = "Dimension of intensity embedding vectors")]
     vocab_emb: usize,
 
-    /// Training epochs
-    #[arg(long, short = 'i', default_value_t = 1000)]
+    #[arg(long, short = 'i', default_value_t = 1000,
+          help = "Total number of training epochs")]
     epochs: usize,
 
-    /// Data jitter interval
-    #[arg(long, short = 'j', default_value_t = 5)]
+    #[arg(long, short = 'j', default_value_t = 5,
+          help = "Posterior resampling interval (epochs between data jittering)")]
     jitter_interval: usize,
 
-    /// Minibatch size
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 100,
+          help = "Minibatch size for SGD training")]
     minibatch_size: usize,
 
-    #[arg(long, default_value_t = 1e-3)]
+    #[arg(long, default_value_t = 1e-3,
+          help = "Learning rate for Adam optimizer")]
     learning_rate: f32,
 
-    /// Candle device
-    #[arg(long, value_enum, default_value = "cpu")]
+    #[arg(long, value_enum, default_value = "cpu",
+          help = "Compute device for neural network training (cpu, cuda, metal)")]
     device: ComputeDevice,
 
-    /// Column sum normalization scale
-    #[arg(long, default_value_t = 1e4)]
+    #[arg(long, default_value_t = 1e4,
+          help = "Column sum normalization scale for decoder reconstruction")]
     column_sum_norm: f32,
 
-    /// Preload all column data
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false,
+          help = "Preload all sparse column data into memory for faster access")]
     preload_data: bool,
 
-    /// Verbosity
-    #[arg(long, short)]
+    #[arg(long, short,
+          help = "Enable verbose logging (sets RUST_LOG=info)")]
     verbose: bool,
 }
 
@@ -322,12 +330,11 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
     let mut log_likelihoods = Vec::with_capacity(train_config.num_epochs);
 
     for epoch in (0..args.epochs).step_by(args.jitter_interval) {
+        let half_norm = args.column_sum_norm / 2.0;
         let x_nd = concatenate_vertical(&[
-            gene_pair_params.delta_pos.posterior_sample()?,
-            gene_pair_params.delta_neg.posterior_sample()?,
+            gene_pair_params.delta_pos.posterior_sample()?.sum_to_one_columns().scale(half_norm),
+            gene_pair_params.delta_neg.posterior_sample()?.sum_to_one_columns().scale(half_norm),
         ])?
-        .sum_to_one_columns()
-        .scale(args.column_sum_norm)
         .transpose();
 
         let mut data_loader = InMemoryData::from(InMemoryArgs {
@@ -506,11 +513,16 @@ where
         });
     }
 
-    // Normalize and encode: (n_cells_block × 2*n_edges)
-    let x_nd = features
-        .sum_to_one_columns()
-        .scale(shared_in.column_sum_norm)
-        .transpose();
+    // Normalize each channel independently, then stack
+    let half_norm = shared_in.column_sum_norm / 2.0;
+    let mut pos_part = features.rows(0, n_edges).clone_owned();
+    let mut neg_part = features.rows(n_edges, n_edges).clone_owned();
+    pos_part.sum_to_one_columns_inplace();
+    pos_part *= half_norm;
+    neg_part.sum_to_one_columns_inplace();
+    neg_part *= half_norm;
+
+    let x_nd = concatenate_vertical(&[pos_part, neg_part])?.transpose();
 
     let x_tensor = x_nd.to_tensor(dev)?;
     let (logits_theta, _) = shared_in.encoder.forward_t(&x_tensor, None, false)?;
