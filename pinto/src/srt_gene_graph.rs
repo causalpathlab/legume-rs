@@ -49,6 +49,7 @@ impl GenePairGraph {
             KnnGraphArgs {
                 knn: args.knn,
                 block_size: args.block_size,
+                reciprocal: true,
             },
         )?;
 
