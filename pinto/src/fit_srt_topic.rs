@@ -1,5 +1,5 @@
+use crate::fit_srt_delta_svd::*;
 use crate::srt_cell_pairs::*;
-use crate::srt_collapse_pairs::*;
 use crate::srt_common::*;
 use crate::srt_estimate_batch_effects::estimate_batch;
 use crate::srt_estimate_batch_effects::EstimateBatchArgs;
@@ -20,134 +20,136 @@ use candle_util::candle_vae_inference::*;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 
 #[derive(Parser, Debug, Clone)]
-///
-/// PINTO by topic modelling
-///
 pub struct SrtTopicArgs {
-    /// Data files of either `.zarr` or `.h5` format. All the formats
-    /// in the given list should be identical. We can convert `.mtx`
-    /// to `.zarr` or `.h5` using `data-beans from-mtx` command.
-    #[arg(required = true, value_delimiter(','))]
+    #[arg(required = true, value_delimiter(','),
+          help = "Data files (.zarr or .h5 format, comma separated)")]
     data_files: Vec<Box<str>>,
 
-    /// An auxiliary cell coordinate file. Each coordinate file should
-    /// correspond to each data file. Each line contains barcode, x, y, ...
-    /// coordinates. We could include more columns.
-    #[arg(long = "coord", short = 'c', required = true, value_delimiter(','))]
+    #[arg(long = "coord", short = 'c', required = true, value_delimiter(','),
+          help = "Spatial coordinate files, one per data file",
+          long_help = "Spatial coordinate files, one per data file (comma separated).\n\
+                       Each file: barcode, x, y, ... per line.")]
     coord_files: Vec<Box<str>>,
 
-    /// Indicate the cell coordinate columns in the `coord` files (comma separated)
-    #[arg(long = "coord-column-indices", value_delimiter(','))]
+    #[arg(long = "coord-column-indices", value_delimiter(','),
+          help = "Column indices for coordinates in coord files",
+          long_help = "Column indices for coordinates in coord files (comma separated).\n\
+                       Use when coord files have extra columns beyond barcode,x,y.")]
     coord_columns: Option<Vec<usize>>,
 
-    /// The columns names in the `coord` files (comma separated)
-    #[arg(
-        long = "coord-column-names",
-        value_delimiter(','),
-        default_value = "pxl_row_in_fullres,pxl_col_in_fullres"
-    )]
+    #[arg(long = "coord-column-names", value_delimiter(','),
+          default_value = "pxl_row_in_fullres,pxl_col_in_fullres",
+          help = "Column names to look up in coord files")]
     coord_column_names: Vec<Box<str>>,
 
-    /// header row in the coordinate information (feed 0 if the first line writes column names)
-    #[arg(long)]
+    #[arg(long,
+          help = "Header row index in coord files (0 = first line is column names)")]
     coord_header_row: Option<usize>,
 
-    /// Coordinate embedding dimension
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = 256,
+          help = "Dimension for spectral embedding of spatial coordinates")]
     coord_emb: usize,
 
-    /// batch membership files (comma-separated names). Each bach file
-    /// should correspond to each data file.
-    #[arg(long, short = 'b', value_delimiter(','))]
+    #[arg(long, short = 'b', value_delimiter(','),
+          help = "Batch membership files, one per data file",
+          long_help = "Batch membership files, one per data file (comma separated).\n\
+                       Each file maps cells to batch labels for batch effect correction.")]
     batch_files: Option<Vec<Box<str>>>,
 
-    /// ignore batch adjustment
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false,
+          help = "Skip batch effect estimation and correction")]
     ignore_batch_effects: bool,
 
-    /// Random projection dimension to project the data.
-    #[arg(long, short = 'p', default_value_t = 50)]
+    #[arg(long, short = 'p', default_value_t = 50,
+          help = "Random projection dimension for pseudobulk sample construction")]
     proj_dim: usize,
 
-    /// Use top `S` components of projection. #samples < `2^S+1`.
-    #[arg(long, short = 'd', default_value_t = 10)]
+    #[arg(long, short = 'd', default_value_t = 10,
+          help = "Number of top projection components for binary sort",
+          long_help = "Number of top projection components for binary sort.\n\
+                       Produces up to 2^S pseudobulk samples.")]
     sort_dim: usize,
 
-    /// #k-nearest neighbours for spectral embedding for spatial coordinates
-    #[arg(short = 'k', long, default_value_t = 10)]
+    #[arg(short = 'k', long, default_value_t = 10,
+          help = "Number of nearest neighbours for spatial cell-pair graph")]
     knn_spatial: usize,
 
-    /// #k-nearest neighbours batches
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 10,
+          help = "Number of nearest-neighbour batches for batch effect estimation")]
     knn_batches: usize,
 
-    /// #k-nearest neighbours within each batch
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 10,
+          help = "Number of nearest neighbours within each batch for batch estimation")]
     knn_cells: usize,
 
-    /// #downsampling columns per each collapsed sample. If None, no
-    /// downsampling.
-    #[arg(long, short = 's')]
+    #[arg(long, short = 's',
+          help = "Maximum cells per pseudobulk sample (downsampling)")]
     down_sample: Option<usize>,
 
-    /// Output header
-    #[arg(long, short, required = true)]
+    #[arg(long, short, required = true,
+          help = "Output file prefix",
+          long_help = "Output file prefix.\n\
+                       Generates: {out}.delta.parquet (when multiple batches), {out}.coord_pairs.parquet,\n\
+                       {out}.dictionary.parquet, {out}.latent.parquet,\n\
+                       {out}.log_likelihood.gz")]
     out: Box<str>,
 
-    /// Block_size for parallel processing
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 100,
+          help = "Block size for parallel processing of cell pairs")]
     block_size: usize,
 
-    /// number of latent topics
-    #[arg(short = 't', long, default_value_t = 10)]
+    #[arg(short = 't', long, default_value_t = 10,
+          help = "Number of latent topics")]
     n_latent_topics: usize,
 
-    /// number of modules of the features in the encoder model.
-    /// If not specified, `encoder_layers[0]` will be used.
-    #[arg(short = 'm', long)]
+    #[arg(short = 'm', long,
+          help = "Number of feature modules in the encoder",
+          long_help = "Number of feature modules in the encoder (smaller = faster).\n\
+                       Defaults to encoder_layers[0] if not specified.")]
     feature_modules: Option<usize>,
 
-    /// encoder layers
-    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
+    #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128],
+          help = "Encoder hidden layer sizes (comma separated)")]
     encoder_layers: Vec<usize>,
 
-    /// intensity levels for frequency embedding
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 10,
+          help = "Number of intensity levels for frequency embedding")]
     vocab_size: usize,
 
-    /// intensity embedding dimension
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 10,
+          help = "Dimension of intensity embedding vectors")]
     vocab_emb: usize,
 
-    /// # training epochs
-    #[arg(long, short = 'i', default_value_t = 1000)]
+    #[arg(long, short = 'i', default_value_t = 1000,
+          help = "Total number of training epochs")]
     epochs: usize,
 
-    /// data jitter interval
-    #[arg(long, short = 'j', default_value_t = 5)]
+    #[arg(long, short = 'j', default_value_t = 5,
+          help = "Posterior resampling interval (epochs between data jittering)")]
     jitter_interval: usize,
 
-    /// Minibatch size
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 100,
+          help = "Minibatch size for SGD training")]
     minibatch_size: usize,
 
-    #[arg(long, default_value_t = 1e-3)]
+    #[arg(long, default_value_t = 1e-3,
+          help = "Learning rate for Adam optimizer")]
     learning_rate: f32,
 
-    /// candle device
-    #[arg(long, value_enum, default_value = "cpu")]
+    #[arg(long, value_enum, default_value = "cpu",
+          help = "Compute device for neural network training (cpu, cuda, metal)")]
     device: ComputeDevice,
 
-    /// column sum normalization scale (will only affect decoder)
-    #[arg(short = 'c', long, default_value_t = 1e4)]
+    #[arg(long, default_value_t = 1e4,
+          help = "Column sum normalization scale for decoder reconstruction")]
     column_sum_norm: f32,
 
-    /// preload all the columns data
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false,
+          help = "Preload all sparse column data into memory for faster access")]
     preload_data: bool,
 
-    /// verbosity
-    #[arg(long, short)]
+    #[arg(long, short,
+          help = "Enable verbose logging (sets RUST_LOG=info)")]
     verbose: bool,
 }
 
@@ -228,16 +230,18 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         args.down_sample,
     )?;
 
-    info!("Collecting summary statistics across cell pairs...");
+    info!("Collecting shared/difference statistics across cell pairs...");
     let batch_db = batch_effects.map(|x| x.posterior_mean().clone());
-    let collapsed_data = srt_cell_pairs.collapse_pairs(batch_db.as_ref())?;
-    let collapsed_params = collapsed_data.optimize(None)?;
-
-    info!("Writing down collapsed pairs");
-    collapsed_data.to_parquet(
-        &(args.out.to_string() + ".collapsed_pairs.parquet"),
-        Some(coordinate_names.clone()),
+    let n_genes = data_vec.num_rows();
+    let batch_ref = batch_db.as_ref();
+    let mut collapsed_stat =
+        PairDeltaCollapsedStat::new(n_genes, srt_cell_pairs.num_samples()?);
+    srt_cell_pairs.visit_pairs_by_sample(
+        &collect_pair_delta_visitor,
+        &batch_ref,
+        &mut collapsed_stat,
     )?;
+    let collapsed_params = collapsed_stat.optimize(None)?;
 
     info!("Setting up training data...");
     let n_topics = args.n_latent_topics;
@@ -245,8 +249,8 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     let d_vocab_emb = args.vocab_emb;
     let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
 
-    let n_features_decoder = data_vec.num_rows();
-    let n_features_encoder = data_vec.num_rows();
+    let n_features_decoder = 2 * n_genes;
+    let n_features_encoder = 2 * n_genes;
 
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
@@ -299,14 +303,11 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     let mut log_likelihoods = Vec::with_capacity(train_config.num_epochs);
 
     for epoch in (0..args.epochs).step_by(args.jitter_interval) {
-        let x_nd = concatenate_horizontal(&[
-            collapsed_params.left.posterior_sample()?,
-            collapsed_params.right.posterior_sample()?,
-            (collapsed_params.left.posterior_sample()?
-                + collapsed_params.right.posterior_sample()?),
+        let half_norm = args.column_sum_norm / 2.0;
+        let x_nd = concatenate_vertical(&[
+            collapsed_params.shared.posterior_sample()?.sum_to_one_columns().scale(half_norm),
+            collapsed_params.diff.posterior_sample()?.sum_to_one_columns().scale(half_norm),
         ])?
-        .sum_to_one_columns()
-        .scale(args.column_sum_norm)
         .transpose();
 
         let mut data_loader = InMemoryData::from(InMemoryArgs {
@@ -351,9 +352,19 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         &(args.out.to_string() + ".log_likelihood.gz"),
     )?;
 
+    let dict_row_names: Vec<Box<str>> = gene_names
+        .iter()
+        .map(|g| format!("{}@shared", g).into_boxed_str())
+        .chain(
+            gene_names
+                .iter()
+                .map(|g| format!("{}@diff", g).into_boxed_str()),
+        )
+        .collect();
+
     named_tensor_parquet_out(
         &decoder.dictionary().weight_dk()?,
-        Some(&gene_names),
+        Some(&dict_row_names),
         None,
         &args.out,
         "dictionary",
@@ -366,6 +377,8 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         batch_db.as_ref(),
         &train_config,
         args.block_size,
+        n_genes,
+        args.column_sum_norm,
     )?;
 
     latent.to_parquet(None, None, &(args.out.to_string() + ".latent.parquet"))?;
@@ -381,6 +394,8 @@ trait SrtLatentTopicOps {
         batch_db: Option<&Mat>,
         train_config: &TrainConfig,
         block_size: usize,
+        n_genes: usize,
+        column_sum_norm: f32,
     ) -> anyhow::Result<Mat>
     where
         Enc: EncoderModuleT + Send + Sync + 'static;
@@ -393,6 +408,8 @@ impl SrtLatentTopicOps for SrtCellPairs<'_> {
         batch_db: Option<&Mat>,
         train_config: &TrainConfig,
         block_size: usize,
+        n_genes: usize,
+        column_sum_norm: f32,
     ) -> anyhow::Result<Mat>
     where
         Enc: EncoderModuleT + Send + Sync + 'static,
@@ -405,6 +422,8 @@ impl SrtLatentTopicOps for SrtCellPairs<'_> {
                 encoder,
                 batch_db,
                 train_config,
+                n_genes,
+                column_sum_norm,
             },
             &mut latent_vec,
             block_size,
@@ -419,15 +438,16 @@ struct EncoderBatchConfig<'a, Enc> {
     encoder: &'a Enc,
     batch_db: Option<&'a Mat>,
     train_config: &'a TrainConfig,
+    n_genes: usize,
+    column_sum_norm: f32,
 }
 
-/// Evaluate latent representation with the trained encoder network
+/// Evaluate latent representation with shared/diff features
 ///
-/// #Arguments
-/// * `data_vec` - full data vector
-/// * `encoder` - encoder network
-/// * `train_config` - training configuration
-/// * `delta_db` - batch effect matrix (feature x batch)
+/// For each pair, reads left/right sparse columns, computes per-gene
+/// shared = log1p(left) + log1p(right) and diff = |log1p(left) - log1p(right)|,
+/// builds a dense (2*n_genes × n_pairs_block) feature matrix, normalizes,
+/// and encodes through the trained network.
 fn evaluate_latent_visitor<'a, Enc>(
     bound: (usize, usize),
     data: &SrtCellPairs,
@@ -440,6 +460,8 @@ where
     let encoder = encoder_batch_config.encoder;
     let delta_db = encoder_batch_config.batch_db;
     let config = encoder_batch_config.train_config;
+    let n_genes = encoder_batch_config.n_genes;
+    let column_sum_norm = encoder_batch_config.column_sum_norm;
     let dev = &config.device;
     let (lb, ub) = bound;
 
@@ -460,11 +482,58 @@ where
         y_right.adjust_by_division_of_selected_inplace(delta_db, &right_batches);
     }
 
-    let y_left_nd = y_left.to_tensor(dev)?.transpose(0, 1)?;
-    let y_right_nd = y_right.to_tensor(dev)?.transpose(0, 1)?;
+    let n_pairs_block = ub - lb;
+    let mut features = Mat::zeros(2 * n_genes, n_pairs_block);
 
-    let (logits_theta, _) =
-        encoder.forward_t(&y_left_nd.add(&y_right_nd)?, None, false)?;
+    for (pair_idx, (left_col, right_col)) in
+        y_left.col_iter().zip(y_right.col_iter()).enumerate()
+    {
+        let right_log: HashMap<usize, f32> = right_col
+            .row_indices()
+            .iter()
+            .zip(right_col.values().iter())
+            .map(|(&g, &v)| (g, v.ln_1p()))
+            .collect();
+
+        let mut left_visited = HashSet::new();
+
+        for (&gene, &val) in left_col
+            .row_indices()
+            .iter()
+            .zip(left_col.values().iter())
+        {
+            let log_left = val.ln_1p();
+            let log_right = right_log.get(&gene).copied().unwrap_or(0.0);
+            features[(gene, pair_idx)] = log_left + log_right;
+            features[(n_genes + gene, pair_idx)] = (log_left - log_right).abs();
+            left_visited.insert(gene);
+        }
+
+        for (&gene, _) in right_col
+            .row_indices()
+            .iter()
+            .zip(right_col.values().iter())
+        {
+            if !left_visited.contains(&gene) {
+                let log_right = right_log[&gene];
+                features[(gene, pair_idx)] = log_right;
+                features[(n_genes + gene, pair_idx)] = log_right;
+            }
+        }
+    }
+
+    let half_norm = column_sum_norm / 2.0;
+    let mut shared_part = features.rows(0, n_genes).clone_owned();
+    let mut diff_part = features.rows(n_genes, n_genes).clone_owned();
+    shared_part.sum_to_one_columns_inplace();
+    shared_part *= half_norm;
+    diff_part.sum_to_one_columns_inplace();
+    diff_part *= half_norm;
+
+    let x_nd = concatenate_vertical(&[shared_part, diff_part])?.transpose();
+
+    let x_tensor = x_nd.to_tensor(dev)?;
+    let (logits_theta, _) = encoder.forward_t(&x_tensor, None, false)?;
 
     latent_vec
         .lock()

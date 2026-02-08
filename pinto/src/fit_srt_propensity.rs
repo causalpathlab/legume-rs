@@ -8,50 +8,55 @@ use matrix_param::traits::TwoStatParam;
 use rayon::prelude::*;
 
 #[derive(Parser, Debug, Clone)]
-///
-/// Estimate vertex propensity
-///
 pub struct SrtPropensityArgs {
-    /// number of (edge) clusters
-    #[arg(short = 'k', long)]
+    #[arg(short = 'k', long,
+          help = "Number of edge clusters for K-means",
+          long_help = "Number of edge clusters for K-means.\n\
+                       Defaults to the number of latent dimensions if not specified.")]
     n_edge_clusters: Option<usize>,
 
-    /// number of (edge) clusters
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 100,
+          help = "Maximum K-means iterations for edge clustering")]
     maxiter_clustering: usize,
 
-    /// latent vectors for edges
-    #[arg(short = 'z', long, required = true)]
+    #[arg(short = 'z', long, required = true,
+          help = "Latent edge representation file (.latent.parquet)")]
     latent_data_file: Box<str>,
 
-    /// coordinate pair file (edges)
-    #[arg(short = 'e', long, required = true)]
+    #[arg(short = 'e', long, required = true,
+          help = "Coordinate pair file (.coord_pairs.parquet)",
+          long_help = "Coordinate pair file (.coord_pairs.parquet from delta-svd or delta-topic).\n\
+                       Must contain left_cell and right_cell columns.")]
     coord_pair_file: Box<str>,
 
-    /// expression data
-    #[arg(short = 'd', long, value_delimiter(','))]
+    #[arg(short = 'd', long, value_delimiter(','),
+          help = "Expression data files (.zarr or .h5)",
+          long_help = "Expression data files (.zarr or .h5, comma separated).\n\
+                       Optional; used for additional per-vertex expression statistics.")]
     expr_data_files: Option<Vec<Box<str>>>,
 
-    /// coordinate left name
-    #[arg(long, default_value = "left_cell")]
+    #[arg(long, default_value = "left_cell",
+          help = "Column name for left cell index in coord_pair_file")]
     left_name: Box<str>,
-    /// coordinate right name
-    #[arg(long, default_value = "right_cell")]
+
+    #[arg(long, default_value = "right_cell",
+          help = "Column name for right cell index in coord_pair_file")]
     right_name: Box<str>,
 
-    /// coordinate column names (looked up as left_{name} in coord_pair_file)
-    #[arg(
-        long = "coord-column-names",
-        value_delimiter(',')
-    )]
+    #[arg(long = "coord-column-names", value_delimiter(','),
+          help = "Coordinate column names in coord_pair_file",
+          long_help = "Coordinate column names in coord_pair_file (comma separated).\n\
+                       Looked up as left_{name} and right_{name}.")]
     coord_column_names: Option<Vec<Box<str>>>,
 
-    /// Block_size for parallel processing
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 100,
+          help = "Block size for parallel processing")]
     block_size: usize,
 
-    /// Output header
-    #[arg(long, short, required = true)]
+    #[arg(long, short, required = true,
+          help = "Output file prefix",
+          long_help = "Output file prefix.\n\
+                       Generates: {out}.propensity.parquet, {out}.edge_cluster.parquet")]
     out: Box<str>,
 }
 
