@@ -5,6 +5,7 @@ use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::*;
 
 /// Accumulated δ⁺ statistics per gene-pair per sample
+#[allow(dead_code)]
 pub struct GenePairCollapsedStat {
     pub delta_pos_ds: Mat,
     pub size_s: DVec,
@@ -69,21 +70,6 @@ impl GenePairCollapsedStat {
         Ok(GenePairParameters { delta_pos })
     }
 
-    /// Write gene-pair collapsed data to parquet
-    pub fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
-        let edge_names: Vec<Box<str>> = self
-            .gene_pairs
-            .iter()
-            .map(|&(g1, g2)| {
-                format!("{}:{}", self.gene_names[g1], self.gene_names[g2]).into_boxed_str()
-            })
-            .collect();
-
-        self.delta_pos_ds
-            .to_parquet(Some(&edge_names), None, file_path)?;
-
-        Ok(())
-    }
 }
 
 /// Visit all gene-pair interaction deltas for a single cell's sparse

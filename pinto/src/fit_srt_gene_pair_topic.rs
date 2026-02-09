@@ -82,7 +82,7 @@ pub struct SrtGenePairTopicArgs {
           long_help = "Output file prefix.\n\
                        Generates: {out}.coord_pairs.parquet, {out}.gene_graph.parquet,\n\
                        {out}.dictionary.parquet,\n\
-                       {out}.latent.parquet, {out}.log_likelihood.gz")]
+                       {out}.latent.parquet, {out}.scores.parquet")]
     out: Box<str>,
 
     #[arg(long, default_value_t = 100,
@@ -172,6 +172,22 @@ pub struct SrtGenePairTopicArgs {
                        Set to 0 to disable annealing (use temp_start throughout).")]
     temp_anneal_tau: f64,
 
+    #[arg(long,
+          help = "External gene-gene network file (two-column TSV: gene1, gene2)",
+          long_help = "External gene-gene network file (e.g., from BioGRID).\n\
+                       Two-column TSV/CSV with gene1 and gene2 per line.\n\
+                       Gene names are matched against data using exact, delimiter-based,\n\
+                       and prefix matching. Skips KNN graph construction when provided.")]
+    gene_network: Option<Box<str>>,
+
+    #[arg(long, default_value_t = false,
+          help = "Allow prefix matching for gene names in external network")]
+    gene_network_allow_prefix: bool,
+
+    #[arg(long,
+          help = "Delimiter for base-key extraction in gene name matching (e.g., '.')")]
+    gene_network_delimiter: Option<char>,
+
     #[arg(long, short,
           help = "Enable verbose logging (sets RUST_LOG=info)")]
     verbose: bool,
@@ -259,27 +275,37 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
 
     info!("Assigned cells to {} samples", n_samples);
 
-    // 4. Preliminary collapse: gene × sample sums
-    let (gene_sum_ds, size_s) = preliminary_collapse(&data_vec, n_genes, n_samples)?;
+    // 4-5. Build gene-gene graph (external network or KNN from posterior means)
+    let gene_graph = if let Some(network_file) = &args.gene_network {
+        info!("Loading external gene network from {}...", network_file);
+        GenePairGraph::from_edge_list(
+            network_file,
+            gene_names.clone(),
+            args.gene_network_allow_prefix,
+            args.gene_network_delimiter,
+        )?
+    } else {
+        // 4. Preliminary collapse: gene × sample sums
+        let (gene_sum_ds, size_s) = preliminary_collapse(&data_vec, n_genes, n_samples)?;
 
-    // Compute posterior means via Poisson-Gamma
-    let (a0, b0) = (1_f32, 1_f32);
-    let mut mu_param = GammaMatrix::new((n_genes, n_samples), a0, b0);
-    let denom_ds = DVec::from_element(n_genes, 1_f32) * size_s.transpose();
-    mu_param.update_stat(&gene_sum_ds, &denom_ds);
-    mu_param.calibrate();
+        // Compute posterior means via Poisson-Gamma
+        let (a0, b0) = (1_f32, 1_f32);
+        let mut mu_param = GammaMatrix::new((n_genes, n_samples), a0, b0);
+        let denom_ds = DVec::from_element(n_genes, 1_f32) * size_s.transpose();
+        mu_param.update_stat(&gene_sum_ds, &denom_ds);
+        mu_param.calibrate();
 
-    // 5. Build gene-gene KNN graph
-    info!("Building gene-gene KNN graph...");
-
-    let gene_graph = GenePairGraph::from_posterior_means(
-        mu_param.posterior_mean(),
-        gene_names.clone(),
-        GenePairGraphArgs {
-            knn: args.knn_gene,
-            block_size: args.block_size,
-        },
-    )?;
+        // 5. Build gene-gene KNN graph
+        info!("Building gene-gene KNN graph...");
+        GenePairGraph::from_posterior_means(
+            mu_param.posterior_mean(),
+            gene_names.clone(),
+            GenePairGraphArgs {
+                knn: args.knn_gene,
+                block_size: args.block_size,
+            },
+        )?
+    };
 
     gene_graph.to_parquet(&(args.out.to_string() + ".gene_graph.parquet"))?;
 
@@ -349,7 +375,7 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
     }
 
     let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate as f64)?;
-    let mut log_likelihoods = Vec::with_capacity(args.epochs);
+    let mut scores = TrainScores::new(args.epochs);
 
     for outer_epoch in (0..args.epochs).step_by(args.jitter_interval) {
         let x_nd = gene_pair_params
@@ -386,6 +412,7 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
             encoder.set_temperature(temperature);
 
             let mut llik_tot = 0f32;
+            let mut kl_tot = 0f32;
 
             for b in 0..data_loader.num_minibatch() {
                 let mb = data_loader.minibatch_shuffled(b, &dev)?;
@@ -395,9 +422,10 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
                 let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
                 adam.backward_step(&loss)?;
                 llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+                kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
             }
 
-            log_likelihoods.push(llik_tot);
+            scores.push(llik_tot, kl_tot);
         }
 
         pb.inc(args.jitter_interval as u64);
@@ -406,7 +434,7 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
             info!(
                 "[{}] log-likelihood: {}",
                 outer_epoch + args.jitter_interval,
-                log_likelihoods.last().ok_or(anyhow::anyhow!("llik"))?
+                scores.last_llik().ok_or(anyhow::anyhow!("llik"))?
             );
         }
     }
@@ -415,16 +443,13 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
 
     info!("Writing down the model parameters");
 
-    matrix_util::common_io::write_types::<f32>(
-        &log_likelihoods,
-        &(args.out.to_string() + ".log_likelihood.gz"),
-    )?;
+    scores.to_parquet(&(args.out.to_string() + ".scores.parquet"))?;
 
     let dict_row_names = gene_graph.edge_names();
 
     named_tensor_parquet_out(
         &decoder.dictionary().weight_dk()?,
-        Some(&dict_row_names),
+        (Some(&dict_row_names), Some("gene_pair")),
         None,
         &args.out,
         "dictionary",
@@ -456,7 +481,7 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
         pair_latent.row_mut(pair_idx).copy_from(&avg);
     }
 
-    pair_latent.to_parquet(None, None, &(args.out.to_string() + ".latent.parquet"))?;
+    pair_latent.to_parquet(&(args.out.to_string() + ".latent.parquet"))?;
 
     info!("Done");
     Ok(())

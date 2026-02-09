@@ -83,6 +83,7 @@ impl<'a> SrtCellPairs<'a> {
             shape,
             (None, Some(&column_names)),
             Some(&column_types),
+            Some("pair"),
         )?;
         let row_names = writer.row_names_vec();
 

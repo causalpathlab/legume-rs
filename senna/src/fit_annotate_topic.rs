@@ -401,7 +401,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
     // pip_mat is CellType × Topic (transposed), we want Topic × CellType for output
     let assignment_mat = pip_mat.transpose();
     let assignment_file = format!("{}.assignment.parquet", args.out);
-    assignment_mat.to_parquet(Some(&topic_names), Some(&annot_names), &assignment_file)?;
+    assignment_mat.to_parquet_with_names(&assignment_file, (Some(&topic_names), Some("topic")), Some(&annot_names))?;
     info!("Wrote topic-celltype assignment to {}", assignment_file);
 
     // Filter topics by max probability threshold
@@ -444,7 +444,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
         let uniform_prob = 1.0 / n_annots as f32;
         let topic_annot = Mat::from_fn(cell_names.len(), n_annots, |_, _| uniform_prob);
         let cell_annot_file = format!("{}.annotation.parquet", args.out);
-        topic_annot.to_parquet(Some(&cell_names), Some(&annot_names), &cell_annot_file)?;
+        topic_annot.to_parquet_with_names(&cell_annot_file, (Some(&cell_names), Some("cell")), Some(&annot_names))?;
 
         let argmax_file = format!("{}.argmax.tsv", args.out);
         write_argmax_assignments(&topic_annot, &cell_names, &annot_names, &argmax_file)?;
@@ -468,7 +468,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
     // Result: Cell × CellType (each row = one cell's distribution over cell types)
     let topic_annot = (&topic_nt * &assignment_filtered).sum_to_one_rows();
     let cell_annot_file = format!("{}.annotation.parquet", args.out);
-    topic_annot.to_parquet(Some(&cell_names), Some(&annot_names), &cell_annot_file)?;
+    topic_annot.to_parquet_with_names(&cell_annot_file, (Some(&cell_names), Some("cell")), Some(&annot_names))?;
 
     let argmax_file = format!("{}.argmax.tsv", args.out);
     write_argmax_assignments(&topic_annot, &cell_names, &annot_names, &argmax_file)?;

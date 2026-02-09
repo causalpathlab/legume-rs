@@ -169,16 +169,16 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
             .collect();
         col_names.extend(coord_column_names.iter().cloned());
 
-        combined.to_parquet(
-            Some(vertices.as_ref()),
-            Some(&col_names),
+        combined.to_parquet_with_names(
             &(args.out.to_string() + ".propensity.parquet"),
+            (Some(&vertices), Some("cell")),
+            Some(&col_names),
         )?;
     } else {
-        prop_kn.transpose().to_parquet(
-            Some(vertices.as_ref()),
-            None,
+        prop_kn.transpose().to_parquet_with_names(
             &(args.out.to_string() + ".propensity.parquet"),
+            (Some(&vertices), Some("cell")),
+            None,
         )?;
     }
 
@@ -229,10 +229,10 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         gamma_param.update_stat(&sum_dk, &denom_dk);
         gamma_param.calibrate();
 
-        gamma_param.to_parquet(
-            Some(genes.as_ref()),
-            None,
+        gamma_param.to_parquet_with_names(
             &(args.out.to_string() + ".genes.parquet"),
+            (Some(&genes), Some("gene")),
+            None,
         )?;
     }
 

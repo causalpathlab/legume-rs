@@ -31,12 +31,17 @@ pub trait VariationalOutput {
     fn write_all(&self, header: &str) -> Result<()>;
 
     /// Write to parquet in melted (long) format with row/column names.
-    fn to_parquet(
+    fn to_parquet_with_names(
         &self,
-        row_names: Option<&[Box<str>]>,
-        column_names: Option<&[Box<str>]>,
         file_path: &str,
+        row_names: (Option<&[Box<str>]>, Option<&str>),
+        column_names: Option<&[Box<str>]>,
     ) -> Result<()>;
+
+    /// Write to parquet with default names
+    fn to_parquet(&self, file_path: &str) -> Result<()> {
+        self.to_parquet_with_names(file_path, (None, None), None)
+    }
 }
 
 /// Extended output trait for sparse variational distributions (e.g., Susie).
@@ -50,14 +55,14 @@ pub trait SparseVariationalOutput: VariationalOutput {
     /// Write all outputs including sparse-specific ones.
     fn write_all_sparse(&self, header: &str) -> Result<()>;
 
-    /// Write to parquet in melted format (delegates to to_parquet).
+    /// Write to parquet in melted format (delegates to to_parquet_with_names).
     fn to_parquet_sparse(
         &self,
+        file_path: &str,
         row_names: Option<&[Box<str>]>,
         column_names: Option<&[Box<str>]>,
-        file_path: &str,
     ) -> Result<()> {
-        self.to_parquet(row_names, column_names, file_path)
+        self.to_parquet_with_names(file_path, (row_names, None), column_names)
     }
 }
 
@@ -90,7 +95,7 @@ fn write_tensor(tensor: &Tensor, path: &str) -> Result<()> {
 
     match ext.as_str() {
         "csv" => tensor.to_csv(path.to_str().unwrap())?,
-        "parquet" | "pq" => tensor.to_parquet(None, None, path.to_str().unwrap())?,
+        "parquet" | "pq" => tensor.to_parquet(path.to_str().unwrap())?,
         _ => tensor.to_tsv(path.to_str().unwrap())?,
     }
     Ok(())
@@ -221,11 +226,11 @@ impl VariationalOutput for super::GaussianVar {
         self.write_std(&format!("{}.std.gz", header))
     }
 
-    fn to_parquet(
+    fn to_parquet_with_names(
         &self,
-        row_names: Option<&[Box<str>]>,
-        column_names: Option<&[Box<str>]>,
         file_path: &str,
+        row_names: (Option<&[Box<str>]>, Option<&str>),
+        column_names: Option<&[Box<str>]>,
     ) -> Result<()> {
         let mean = VariationalDistribution::mean(self)?;
         let std = self.std()?;
@@ -233,7 +238,8 @@ impl VariationalOutput for super::GaussianVar {
         let (mean_vals, row_idx, col_idx) = melt_tensor(&mean)?;
         let (std_vals, _, _) = melt_tensor(&std)?;
 
-        let rows = indices_to_names(&row_idx, row_names);
+        let row_names_slice = row_names.0;
+        let rows = indices_to_names(&row_idx, row_names_slice);
         let cols = indices_to_names(&col_idx, column_names);
 
         write_melted_parquet(
@@ -268,11 +274,11 @@ impl VariationalOutput for super::SusieVar {
         self.write_std(&format!("{}.std.gz", header))
     }
 
-    fn to_parquet(
+    fn to_parquet_with_names(
         &self,
-        row_names: Option<&[Box<str>]>,
-        column_names: Option<&[Box<str>]>,
         file_path: &str,
+        row_names: (Option<&[Box<str>]>, Option<&str>),
+        column_names: Option<&[Box<str>]>,
     ) -> Result<()> {
         let mean = self.theta_mean()?;
         let std = VariationalDistribution::var(self)?.sqrt()?;
@@ -282,7 +288,8 @@ impl VariationalOutput for super::SusieVar {
         let (std_vals, _, _) = melt_tensor(&std)?;
         let (pip_vals, _, _) = melt_tensor(&pip)?;
 
-        let rows = indices_to_names(&row_idx, row_names);
+        let row_names_slice = row_names.0;
+        let rows = indices_to_names(&row_idx, row_names_slice);
         let cols = indices_to_names(&col_idx, column_names);
 
         write_melted_parquet(
@@ -343,7 +350,7 @@ mod tests {
         assert!(dir.path().join("test_gaussian.std.gz").exists());
 
         let pq_path = dir.path().join("test_gaussian.parquet");
-        gaussian.to_parquet(None, None, pq_path.to_str().unwrap())?;
+        gaussian.to_parquet(pq_path.to_str().unwrap())?;
         assert!(pq_path.exists());
 
         Ok(())
@@ -365,7 +372,7 @@ mod tests {
         assert!(dir.path().join("test_susie.alpha.gz").exists());
 
         let pq_path = dir.path().join("test_susie.parquet");
-        susie.to_parquet(None, None, pq_path.to_str().unwrap())?;
+        susie.to_parquet(pq_path.to_str().unwrap())?;
         assert!(pq_path.exists());
 
         Ok(())
@@ -382,7 +389,7 @@ mod tests {
 
         let dir = tempdir()?;
         let pq_path = dir.path().join("named.parquet");
-        susie.to_parquet(Some(&row_names), Some(&col_names), pq_path.to_str().unwrap())?;
+        susie.to_parquet_with_names(pq_path.to_str().unwrap(), (Some(&row_names), Some("row")), Some(&col_names))?;
         assert!(pq_path.exists());
 
         Ok(())

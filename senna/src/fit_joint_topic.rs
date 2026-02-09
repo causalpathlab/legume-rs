@@ -486,10 +486,10 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         .map(|x| x.to_device(&candle_core::Device::Cpu))
         .collect::<candle_core::Result<Vec<_>>>()?;
 
-    candle_core::Tensor::cat(&dictionaries, 0)?.to_parquet(
-        Some(&gene_names),
-        None,
+    candle_core::Tensor::cat(&dictionaries, 0)?.to_parquet_with_names(
         &(args.out.to_string() + ".dictionary.parquet"),
+        (Some(&gene_names), Some("gene")),
+        None,
     )?;
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
@@ -508,10 +508,10 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         &feature_selections,
     )?;
     let cell_names = data_stack.column_names()?;
-    z_nk.to_parquet(
-        Some(&cell_names),
-        None,
+    z_nk.to_parquet_with_names(
         &(args.out.to_string() + ".latent.parquet"),
+        (Some(&cell_names), Some("cell")),
+        None,
     )?;
 
     info!("Done");
@@ -753,7 +753,7 @@ impl TrainScores {
             .map(|x| (x + 1).to_string().into_boxed_str())
             .collect();
 
-        mat.to_parquet(Some(&epochs), Some(&score_types), file_path)
+        mat.to_parquet_with_names(file_path, (Some(&epochs), Some("epoch")), Some(&score_types))
     }
 }
 

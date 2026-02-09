@@ -38,6 +38,51 @@ pub struct Pair {
     pub right: usize,
 }
 
+//////////////////////
+// training scores  //
+//////////////////////
+
+pub struct TrainScores {
+    pub llik: Vec<f32>,
+    pub kl: Vec<f32>,
+}
+
+impl TrainScores {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            llik: Vec::with_capacity(capacity),
+            kl: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn push(&mut self, llik: f32, kl: f32) {
+        self.llik.push(llik);
+        self.kl.push(kl);
+    }
+
+    pub fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
+        let mat = Mat::from_columns(&[
+            DVec::from_vec(self.llik.clone()),
+            DVec::from_vec(self.kl.clone()),
+        ]);
+
+        let score_types = vec![
+            "log_likelihood".to_string().into_boxed_str(),
+            "kl_divergence".to_string().into_boxed_str(),
+        ];
+
+        let epochs: Vec<Box<str>> = (0..mat.nrows())
+            .map(|x| (x + 1).to_string().into_boxed_str())
+            .collect();
+
+        mat.to_parquet_with_names(file_path, (Some(&epochs), Some("epoch")), Some(&score_types))
+    }
+
+    pub fn last_llik(&self) -> Option<&f32> {
+        self.llik.last()
+    }
+}
+
 ////////////////////////////////////
 // miscellaneous helper functions //
 ////////////////////////////////////
@@ -51,19 +96,19 @@ pub fn tsv_gz_out(data: &Tensor, header: &str, file_name: &str) -> anyhow::Resul
 /// a thin wrapper for parquet out: `{header}.{file_name}.parquet`
 pub fn named_tensor_parquet_out(
     data: &Tensor,
-    row_names: Option<&[Box<str>]>,
+    row_names: (Option<&[Box<str>]>, Option<&str>),
     column_names: Option<&[Box<str>]>,
     header: &str,
     file_name: &str,
 ) -> anyhow::Result<()> {
     let file_path = header.to_string() + "." + file_name + ".parquet";
     data.to_device(&candle_core::Device::Cpu)?
-        .to_parquet(row_names, column_names, &file_path)
+        .to_parquet_with_names(&file_path, row_names, column_names)
 }
 
 /// a thin wrapper for parquet out: `{header}.{file_name}.parquet`
 pub fn tensor_parquet_out(data: &Tensor, header: &str, file_name: &str) -> anyhow::Result<()> {
-    named_tensor_parquet_out(data, None, None, header, file_name)
+    named_tensor_parquet_out(data, (None, None), None, header, file_name)
 }
 
 /// Filter a parquet file to keep only rows at the given indices.

@@ -128,7 +128,7 @@ fn save_output<V: VariationalOutput>(
 ) -> Result<()> {
     if let Some(ref p) = make_output_path(base, suffix) {
         let s = p.to_str().ok_or_else(|| anyhow::anyhow!("Invalid output path"))?;
-        var.to_parquet(row_names, col_names, s)?;
+        var.to_parquet_with_names(s, (row_names, None), col_names)?;
         info!("Saved {} to {:?}", suffix, p);
     }
     Ok(())
@@ -143,7 +143,7 @@ fn save_output_sparse<V: SparseVariationalOutput>(
 ) -> Result<()> {
     if let Some(ref p) = make_output_path(base, suffix) {
         let s = p.to_str().ok_or_else(|| anyhow::anyhow!("Invalid output path"))?;
-        var.to_parquet_sparse(row_names, col_names, s)?;
+        var.to_parquet_sparse(s, row_names, col_names)?;
         info!("Saved {} to {:?}", suffix, p);
     }
     Ok(())
