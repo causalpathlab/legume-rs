@@ -93,6 +93,8 @@ enum Commands {
                       6. Fit Poisson-Gamma model on each channel\n\
                       7. Train encoder-decoder topic model on [shared; diff] posterior samples via SGD\n\
                       8. Encode individual cell pairs into latent topic proportions\n\n\
+                      Supports --use-sparsemax for sparse topic assignments, --kl-warmup-epochs for\n\
+                      KL annealing, and --temp-start/--temp-min/--temp-anneal-tau for temperature annealing.\n\n\
                       Outputs:\n\
                       - {out}.delta.parquet: batch effect estimates (when multiple batches)\n\
                       - {out}.coord_pairs.parquet: spatial cell pair coordinates\n\
@@ -107,23 +109,22 @@ enum Commands {
         long_about = "Gene-gene interaction analysis by randomized SVD.\n\n\
                       Discovers gene-gene co-expression patterns within spatial neighbourhoods. \
                       Builds a gene-gene KNN graph from pseudobulk posterior means, computes \
-                      directional deltas (delta_pos/delta_neg) for each gene pair, and applies \
-                      SVD + Nystrom projection.\n\n\
+                      positive interaction deltas (raw count products) for each gene pair, and \
+                      applies SVD + Nystrom projection.\n\n\
                       Pipeline stages:\n\
                       1. Load SRT data + spatial coordinates\n\
                       2. Build spatial cell-cell KNN graph\n\
                       3. Assign cells to pseudobulk samples (random projection + binary sort)\n\
                       4. Preliminary collapse: gene x sample sums\n\
                       5. Build gene-gene KNN graph from posterior means\n\
-                      6. Compute gene-pair directional deltas per cell\n\
+                      6. Compute gene-pair positive deltas per cell\n\
                       7. Fit Poisson-Gamma on gene-pair statistics\n\
-                      8. SVD on stacked [delta_pos; delta_neg] posterior log means\n\
+                      8. SVD on positive delta posterior log means\n\
                       9. Nystrom projection: per-cell then averaged to per-pair latent codes\n\n\
                       Outputs:\n\
                       - {out}.coord_pairs.parquet: spatial cell pair coordinates\n\
                       - {out}.gene_graph.parquet: gene-gene KNN graph edges\n\
-                      - {out}.gene_pairs.parquet: gene-pair delta statistics\n\
-                      - {out}.dictionary.parquet: SVD dictionary (2*n_edges x n_topics)\n\
+                      - {out}.dictionary.parquet: SVD dictionary (n_edges x n_topics)\n\
                       - {out}.latent.parquet: per-pair latent codes (n_pairs x n_topics)"
     )]
     GenePairDeltaSvd(SrtGenePairSvdArgs),
@@ -132,21 +133,23 @@ enum Commands {
         about = "Gene-gene interaction analysis by topic model",
         long_about = "Gene-gene interaction analysis by neural topic model.\n\n\
                       Same gene-pair pipeline as gene-pair-delta-svd, but replaces SVD with \
-                      an encoder-decoder topic model trained via SGD.\n\n\
+                      an encoder-decoder topic model trained via SGD. Uses raw count product \
+                      deltas (positive channel only).\n\n\
                       Pipeline stages:\n\
                       1. Load SRT data + spatial coordinates\n\
                       2. Build spatial cell-cell KNN graph\n\
                       3. Assign cells to pseudobulk samples\n\
                       4. Preliminary collapse + gene-gene KNN graph\n\
-                      5. Compute gene-pair directional deltas\n\
+                      5. Compute gene-pair positive deltas (raw counts)\n\
                       6. Fit Poisson-Gamma on gene-pair statistics\n\
-                      7. Train encoder-decoder topic model on [delta_pos; delta_neg] posterior samples\n\
+                      7. Train encoder-decoder topic model on positive delta posterior samples\n\
                       8. Encode individual cells into latent topics, average to per-pair codes\n\n\
+                      Supports --use-sparsemax for sparse topic assignments, --kl-warmup-epochs for\n\
+                      KL annealing, and --temp-start/--temp-min/--temp-anneal-tau for temperature annealing.\n\n\
                       Outputs:\n\
                       - {out}.coord_pairs.parquet: spatial cell pair coordinates\n\
                       - {out}.gene_graph.parquet: gene-gene KNN graph edges\n\
-                      - {out}.gene_pairs.parquet: gene-pair delta statistics\n\
-                      - {out}.dictionary.parquet: topic dictionary (2*n_edges x n_topics)\n\
+                      - {out}.dictionary.parquet: topic dictionary (n_edges x n_topics)\n\
                       - {out}.latent.parquet: per-pair latent topic proportions\n\
                       - {out}.log_likelihood.gz: training log-likelihoods"
     )]

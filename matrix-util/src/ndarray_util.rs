@@ -111,9 +111,10 @@ where
     }
 
     fn normalize_columns_inplace(&mut self) {
+        let eps = T::from_f64(1e-8).unwrap();
         for j in 0..self.ncols() {
             let mut x_j = self.column_mut(j);
-            let denom = x_j.mapv(|x| x * x).sum().sqrt();
+            let denom = x_j.mapv(|x| x * x).sum().sqrt().max(eps);
             x_j.mapv_inplace(|x| x / denom);
         }
     }

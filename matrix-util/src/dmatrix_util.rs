@@ -735,7 +735,7 @@ where
                 for &x_ij in x_j.values() {
                     denom += x_ij * x_ij;
                 }
-                denom = denom.sqrt().max(T::one());
+                denom = denom.sqrt().max(T::from_f64(1e-8).unwrap());
 
                 if let Some(mut x_j) = self.get_col_mut(j) {
                     for x_ij in x_j.values_mut() {
@@ -920,7 +920,7 @@ where
 
     fn normalize_columns_inplace(&mut self) {
         for mut xx_j in self.column_iter_mut() {
-            let denom = xx_j.norm();
+            let denom = xx_j.norm().max(T::from_f64(1e-8).unwrap());
             xx_j /= denom;
         }
     }

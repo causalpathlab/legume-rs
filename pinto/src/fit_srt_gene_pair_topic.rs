@@ -12,10 +12,10 @@ use matrix_param::traits::*;
 use candle_util::candle_data_loader::*;
 use candle_util::candle_decoder_topic::*;
 use candle_util::candle_encoder_softmax::*;
-use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_loss_functions as loss_func;
 use candle_util::candle_model_traits::*;
-use candle_util::candle_vae_inference::*;
+use candle_nn::optim::Optimizer;
+use candle_nn::AdamW;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 
 #[derive(Parser, Debug, Clone)]
@@ -81,7 +81,7 @@ pub struct SrtGenePairTopicArgs {
           help = "Output file prefix",
           long_help = "Output file prefix.\n\
                        Generates: {out}.coord_pairs.parquet, {out}.gene_graph.parquet,\n\
-                       {out}.gene_pairs.parquet, {out}.dictionary.parquet,\n\
+                       {out}.dictionary.parquet,\n\
                        {out}.latent.parquet, {out}.log_likelihood.gz")]
     out: Box<str>,
 
@@ -138,6 +138,39 @@ pub struct SrtGenePairTopicArgs {
     #[arg(long, default_value_t = false,
           help = "Preload all sparse column data into memory for faster access")]
     preload_data: bool,
+
+    #[arg(long, default_value_t = false,
+          help = "Use sparsemax activation instead of softmax",
+          long_help = "Use sparsemax activation instead of softmax.\n\
+                       Sparsemax produces exact zeros for low-ranked topics,\n\
+                       yielding sparser topic assignments.")]
+    use_sparsemax: bool,
+
+    #[arg(long, default_value_t = 0.0,
+          help = "KL annealing warmup epochs (0 = disabled)",
+          long_help = "Number of epochs for KL weight to warm up from 0 to 1.\n\
+                       kl_weight = 1 - exp(-epoch / warmup).\n\
+                       Set to 0 to disable annealing.")]
+    kl_warmup_epochs: f64,
+
+    #[arg(long, default_value_t = 5.0,
+          help = "Starting temperature for annealing",
+          long_help = "Initial temperature for softmax/sparsemax (higher = smoother).\n\
+                       Temperature anneals exponentially to temp_min during training.")]
+    temp_start: f32,
+
+    #[arg(long, default_value_t = 0.1,
+          help = "Minimum temperature for annealing",
+          long_help = "Final temperature after annealing (lower = more peaked/sparse).\n\
+                       Standard values: 0.1-0.5 for sparse, 1.0 for no annealing.")]
+    temp_min: f32,
+
+    #[arg(long, default_value_t = 500.0,
+          help = "Temperature annealing rate (0 = disabled)",
+          long_help = "Controls how fast temperature decays (higher = slower decay).\n\
+                       temp = temp_min + (temp_start - temp_min) * exp(-epoch / tau).\n\
+                       Set to 0 to disable annealing (use temp_start throughout).")]
+    temp_anneal_tau: f64,
 
     #[arg(long, short,
           help = "Enable verbose logging (sets RUST_LOG=info)")]
@@ -250,26 +283,25 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
 
     gene_graph.to_parquet(&(args.out.to_string() + ".gene_graph.parquet"))?;
 
-    // 6. Compute gene log means
-    let gene_log_means = compute_gene_log_means(&data_vec, args.block_size)?;
+    // 6. Compute gene raw means (counts, not log1p)
+    let gene_means = compute_gene_raw_means(&data_vec, args.block_size)?;
 
-    // 7. Compute gene-pair deltas
+    // 7. Compute gene-pair deltas (raw counts, positive channel only)
     info!("Calibrating gene-gene interaction statistics...");
 
     let gene_pair_stat = compute_gene_interaction_deltas(
         &data_vec,
         &gene_graph,
-        &gene_log_means,
+        &gene_means,
         n_samples,
+        false,
     )?;
 
-    gene_pair_stat.to_parquet(&(args.out.to_string() + ".gene_pairs.parquet"))?;
-
-    // 8. Fit Poisson-Gamma
+    // 8. Fit Poisson-Gamma (positive channel only)
     info!("Fitting Poisson-Gamma on gene-pair statistics...");
     let gene_pair_params = gene_pair_stat.optimize(None)?;
 
-    // 9. Train encoder-decoder topic model
+    // 9. Train encoder-decoder topic model (positive channel only)
     info!("Setting up training data...");
 
     let n_edges = gene_graph.num_edges();
@@ -277,7 +309,7 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
     let n_vocab = args.vocab_size;
     let d_vocab_emb = args.vocab_emb;
     let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
-    let n_features = 2 * n_edges;
+    let n_features = n_edges;
 
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
@@ -289,7 +321,7 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
-    let encoder = LogSoftmaxEncoder::new(
+    let mut encoder = LogSoftmaxEncoder::new(
         LogSoftmaxEncoderArgs {
             n_features,
             n_topics,
@@ -297,8 +329,8 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
             n_vocab,
             d_vocab_emb,
             layers: &args.encoder_layers,
-            use_sparsemax: false,
-            temperature: 1.0,
+            use_sparsemax: args.use_sparsemax,
+            temperature: args.temp_start,
         },
         param_builder.clone(),
     )?;
@@ -310,32 +342,22 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
         n_features, n_features
     );
 
-    let mut train_config = TrainConfig {
-        learning_rate: args.learning_rate,
-        batch_size: args.minibatch_size,
-        num_epochs: args.epochs,
-        num_pretrain_epochs: 0,
-        device: dev.clone(),
-        verbose: args.verbose,
-        show_progress: true,
-    };
+    let pb = ProgressBar::new(args.epochs as u64);
 
-    let pb = ProgressBar::new(train_config.num_epochs as u64);
-
-    if !train_config.show_progress || train_config.verbose {
+    if args.verbose {
         pb.set_draw_target(ProgressDrawTarget::hidden());
     }
 
-    let mut vae = Vae::build(&encoder, &decoder, &parameters);
-    let mut log_likelihoods = Vec::with_capacity(train_config.num_epochs);
+    let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate as f64)?;
+    let mut log_likelihoods = Vec::with_capacity(args.epochs);
 
-    for epoch in (0..args.epochs).step_by(args.jitter_interval) {
-        let half_norm = args.column_sum_norm / 2.0;
-        let x_nd = concatenate_vertical(&[
-            gene_pair_params.delta_pos.posterior_sample()?.sum_to_one_columns().scale(half_norm),
-            gene_pair_params.delta_neg.posterior_sample()?.sum_to_one_columns().scale(half_norm),
-        ])?
-        .transpose();
+    for outer_epoch in (0..args.epochs).step_by(args.jitter_interval) {
+        let x_nd = gene_pair_params
+            .delta_pos
+            .posterior_sample()?
+            .sum_to_one_columns()
+            .scale(args.column_sum_norm)
+            .transpose();
 
         let mut data_loader = InMemoryData::from(InMemoryArgs {
             input: &x_nd,
@@ -344,23 +366,46 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
             output_null: None,
         })?;
 
-        train_config.verbose = false;
-        train_config.show_progress = args.verbose;
-        train_config.num_epochs = args.jitter_interval;
+        data_loader.shuffle_minibatch(args.minibatch_size)?;
 
-        let llik = vae.train_encoder_decoder(
-            &mut data_loader,
-            &loss_func::topic_likelihood,
-            &train_config,
-        )?;
+        for inner in 0..args.jitter_interval {
+            let global_epoch = outer_epoch + inner;
 
-        log_likelihoods.extend(llik);
+            let kl_weight = if args.kl_warmup_epochs > 0.0 {
+                1.0 - (-(global_epoch as f64) / args.kl_warmup_epochs).exp()
+            } else {
+                1.0
+            };
+
+            let temperature = if args.temp_anneal_tau > 0.0 {
+                let decay = (-(global_epoch as f64) / args.temp_anneal_tau).exp() as f32;
+                args.temp_min + (args.temp_start - args.temp_min) * decay
+            } else {
+                args.temp_start
+            };
+            encoder.set_temperature(temperature);
+
+            let mut llik_tot = 0f32;
+
+            for b in 0..data_loader.num_minibatch() {
+                let mb = data_loader.minibatch_shuffled(b, &dev)?;
+                let (z_nk, kl) = encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
+                let y_nd = mb.output.unwrap_or(mb.input);
+                let (_, llik) = decoder.forward_with_llik(&z_nk, &y_nd, &loss_func::topic_likelihood)?;
+                let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
+                adam.backward_step(&loss)?;
+                llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+            }
+
+            log_likelihoods.push(llik_tot);
+        }
+
         pb.inc(args.jitter_interval as u64);
 
         if args.verbose {
             info!(
                 "[{}] log-likelihood: {}",
-                epoch + args.jitter_interval,
+                outer_epoch + args.jitter_interval,
                 log_likelihoods.last().ok_or(anyhow::anyhow!("llik"))?
             );
         }
@@ -375,7 +420,7 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
         &(args.out.to_string() + ".log_likelihood.gz"),
     )?;
 
-    let dict_row_names = gene_graph.edge_names_with_channels();
+    let dict_row_names = gene_graph.edge_names();
 
     named_tensor_parquet_out(
         &decoder.dictionary().weight_dk()?,
@@ -391,7 +436,7 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
     let cell_latent_nk = encode_gene_pair_projection(
         &data_vec,
         &gene_graph,
-        &gene_log_means,
+        &gene_means,
         &encoder,
         &dev,
         args.column_sum_norm,
@@ -420,15 +465,15 @@ pub fn fit_srt_gene_pair_topic(args: &SrtGenePairTopicArgs) -> anyhow::Result<()
 /// Encoder-based projection: project individual cells onto the gene-pair
 /// dictionary using a trained encoder network.
 ///
-/// For each cell, builds a dense feature vector of gene-pair deltas
-/// (δ⁺ in top half, |δ⁻| in bottom half), normalizes, and passes
-/// through the encoder to obtain per-cell latent codes.
+/// For each cell, builds a dense feature vector of positive gene-pair
+/// deltas (raw count products), normalizes, and passes through the
+/// encoder to obtain per-cell latent codes.
 ///
 /// Returns latent matrix of shape (n_cells × n_topics).
 fn encode_gene_pair_projection<Enc>(
     data_vec: &SparseIoVec,
     gene_graph: &GenePairGraph,
-    gene_log_means: &DVec,
+    gene_means: &DVec,
     encoder: &Enc,
     device: &candle_core::Device,
     column_sum_norm: f32,
@@ -448,7 +493,7 @@ where
     let gene_adj = gene_graph.build_directed_adjacency();
 
     let shared_in = EncoderSharedInput {
-        gene_log_means: gene_log_means.clone(),
+        gene_means: gene_means.clone(),
         gene_adj,
         n_edges,
         encoder,
@@ -471,7 +516,7 @@ where
 }
 
 struct EncoderSharedInput<'a, Enc> {
-    gene_log_means: DVec,
+    gene_means: DVec,
     gene_adj: Vec<Vec<(usize, usize)>>,
     n_edges: usize,
     encoder: &'a Enc,
@@ -489,7 +534,7 @@ where
     Enc: EncoderModuleT + Send + Sync,
 {
     let (lb, ub) = bound;
-    let gene_log_means = &shared_in.gene_log_means;
+    let gene_means = &shared_in.gene_means;
     let gene_adj = &shared_in.gene_adj;
     let n_edges = shared_in.n_edges;
     let dev = shared_in.device;
@@ -497,32 +542,25 @@ where
     let yy = data_vec.read_columns_csc(lb..ub)?;
     let n_cells_block = ub - lb;
 
-    // Build dense delta feature matrix: [δ⁺; |δ⁻|] (2*n_edges × n_cells_block)
-    let mut features = Mat::zeros(2 * n_edges, n_cells_block);
+    // Build dense delta feature vector: positive deltas only (n_edges × n_cells_block)
+    let mut features = Mat::zeros(n_edges, n_cells_block);
 
     for (cell_idx, y_j) in yy.col_iter().enumerate() {
         let rows = y_j.row_indices();
         let vals = y_j.values();
 
-        visit_gene_pair_deltas(rows, vals, gene_adj, gene_log_means, |edge_idx, delta| {
+        visit_gene_pair_deltas(rows, vals, gene_adj, gene_means, false, |edge_idx, delta| {
             if delta > 0.0 {
                 features[(edge_idx, cell_idx)] = delta;
-            } else if delta < 0.0 {
-                features[(n_edges + edge_idx, cell_idx)] = -delta;
             }
         });
     }
 
-    // Normalize each channel independently, then stack
-    let half_norm = shared_in.column_sum_norm / 2.0;
-    let mut pos_part = features.rows(0, n_edges).clone_owned();
-    let mut neg_part = features.rows(n_edges, n_edges).clone_owned();
-    pos_part.sum_to_one_columns_inplace();
-    pos_part *= half_norm;
-    neg_part.sum_to_one_columns_inplace();
-    neg_part *= half_norm;
+    // Normalize to sum-to-one then scale
+    features.sum_to_one_columns_inplace();
+    features *= shared_in.column_sum_norm;
 
-    let x_nd = concatenate_vertical(&[pos_part, neg_part])?.transpose();
+    let x_nd = features.transpose();
 
     let x_tensor = x_nd.to_tensor(dev)?;
     let (logits_theta, _) = shared_in.encoder.forward_t(&x_tensor, None, false)?;
