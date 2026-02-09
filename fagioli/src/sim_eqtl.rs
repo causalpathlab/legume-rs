@@ -378,10 +378,10 @@ fn write_outputs(
     // Phenotypes (N × K)
     let pheno_file = format!("{}.phenotypes.{}", args.output, ext);
     if use_parquet {
-        pheno.phenotypes.to_parquet(
-            Some(&geno.individual_ids),
+        pheno.phenotypes.to_parquet_with_names(
+            &pheno_file,
+            (Some(&geno.individual_ids), Some("individual")),
             Some(&cell_type_names),
-            &pheno_file
         )?;
     } else {
         pheno.phenotypes.to_tsv(&pheno_file)?;
@@ -391,10 +391,10 @@ fn write_outputs(
     // Cell fractions (N × K)
     let frac_file = format!("{}.cell_fractions.{}", args.output, ext);
     if use_parquet {
-        cell_frac.to_parquet(
-            Some(&geno.individual_ids),
+        cell_frac.to_parquet_with_names(
+            &frac_file,
+            (Some(&geno.individual_ids), Some("individual")),
             Some(&cell_type_names),
-            &frac_file
         )?;
     } else {
         cell_frac.to_tsv(&frac_file)?;
@@ -559,10 +559,10 @@ fn write_phase2_outputs(
 
     let frac_file = format!("{}.cell_fractions.{}", args.output, ext);
     if use_parquet {
-        cell_frac.to_parquet(
-            Some(&geno.individual_ids),
-            Some(&cell_type_names),
+        cell_frac.to_parquet_with_names(
             &frac_file,
+            (Some(&geno.individual_ids), Some("individual")),
+            Some(&cell_type_names),
         )?;
     } else {
         cell_frac.to_tsv(&frac_file)?;
@@ -579,10 +579,10 @@ fn write_phase2_outputs(
 
     let loadings_file = format!("{}.gene_loadings.{}", args.output, ext);
     if use_parquet {
-        factor_model.gene_loadings.to_parquet(
-            Some(&gene_ids),
-            Some(&factor_names),
+        factor_model.gene_loadings.to_parquet_with_names(
             &loadings_file,
+            (Some(&gene_ids), Some("gene")),
+            Some(&factor_names),
         )?;
     } else {
         factor_model.gene_loadings.to_tsv(&loadings_file)?;
@@ -591,10 +591,10 @@ fn write_phase2_outputs(
 
     let scores_file = format!("{}.factor_celltype.{}", args.output, ext);
     if use_parquet {
-        factor_model.factor_celltype.to_parquet(
-            Some(&factor_names),
-            Some(&cell_type_names),
+        factor_model.factor_celltype.to_parquet_with_names(
             &scores_file,
+            (Some(&factor_names), Some("factor")),
+            Some(&cell_type_names),
         )?;
     } else {
         factor_model.factor_celltype.to_tsv(&scores_file)?;

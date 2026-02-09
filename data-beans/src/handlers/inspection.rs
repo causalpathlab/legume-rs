@@ -98,7 +98,7 @@ pub fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
 
     if let Ok(ext) = file_ext(&output) {
         if ext.as_ref() == "parquet" {
-            data.to_parquet(Some(&row_names), Some(&column_names), &output)?;
+            data.to_parquet_with_names(&output, (Some(&row_names), Some("row_name")), Some(&column_names))?;
             return Ok(());
         }
     }
@@ -151,7 +151,7 @@ pub fn take_rows(args: &TakeRowsArgs) -> anyhow::Result<()> {
     if let Ok(ext) = file_ext(&output) {
         if ext.as_ref() == "parquet" {
             let column_names = data_backend.column_names()?;
-            data_t.to_parquet(Some(&column_names), Some(&row_names), &output)?;
+            data_t.to_parquet_with_names(&output, (Some(&column_names), Some("column_name")), Some(&row_names))?;
             return Ok(());
         }
     }

@@ -483,7 +483,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         let outfile = args.out.to_string() + ".delta.parquet";
         let batch_names = data_vec.batch_names();
         let gene_names = data_vec.row_names()?;
-        batch_db.to_parquet(Some(&gene_names), batch_names.as_deref(), &outfile)?;
+        batch_db.to_parquet_with_names(&outfile, (Some(&gene_names), Some("gene")), batch_names.as_deref())?;
     }
 
     // 4. Train a topic model on the collapsed data
@@ -544,10 +544,10 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     decoder
         .get_dictionary()?
         .to_device(&candle_core::Device::Cpu)?
-        .to_parquet(
-            Some(&output_gene_names),
-            None,
+        .to_parquet_with_names(
             &(args.out.to_string() + ".dictionary.parquet"),
+            (Some(&output_gene_names), Some("gene")),
+            None,
         )?;
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
@@ -571,10 +571,10 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     let cell_names = data_vec.column_names()?;
 
-    z_nk.to_parquet(
-        Some(&cell_names),
-        None,
+    z_nk.to_parquet_with_names(
         &(args.out.to_string() + ".latent.parquet"),
+        (Some(&cell_names), Some("cell")),
+        None,
     )?;
 
     // Save selected feature list if feature selection was applied
@@ -615,7 +615,7 @@ impl TrainScores {
             .map(|x| (x + 1).to_string().into_boxed_str())
             .collect();
 
-        mat.to_parquet(Some(&epochs), Some(&score_types), file_path)
+        mat.to_parquet_with_names(file_path, (Some(&epochs), Some("epoch")), Some(&score_types))
     }
 }
 

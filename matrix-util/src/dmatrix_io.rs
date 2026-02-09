@@ -98,11 +98,11 @@ where
         Ok(())
     }
 
-    fn to_parquet(
+    fn to_parquet_with_names(
         &self,
-        row_names: Option<&[Box<str>]>,
-        column_names: Option<&[Box<str>]>,
         file_path: &str,
+        row_names: (Option<&[Box<str>]>, Option<&str>),
+        column_names: Option<&[Box<str>]>,
     ) -> anyhow::Result<()> {
         let (nrows, ncols) = (self.nrows(), self.ncols());
 
@@ -125,11 +125,14 @@ where
 
         let column_types = vec![parquet_type; ncols];
 
+        let (row_names_slice, row_column_name) = row_names;
+
         let writer = ParquetWriter::new(
             file_path,
             (nrows, ncols),
-            (row_names, column_names),
+            (row_names_slice, column_names),
             Some(&column_types),
+            row_column_name,
         )?;
         let row_names = writer.row_names_vec();
 

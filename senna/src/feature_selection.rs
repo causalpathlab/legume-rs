@@ -132,7 +132,7 @@ pub fn select_highly_variable_features(
         // Save variance if requested
         if save_variance {
             let var_file = format!("{}.feature_variance.parquet", out_prefix);
-            log_stat.save(&var_file, &feature_names, "\t")?;
+            log_stat.save(&var_file, &feature_names, "\t", None)?;
             info!("Saved feature variance to {}", var_file);
         }
 

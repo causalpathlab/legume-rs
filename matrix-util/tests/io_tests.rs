@@ -13,7 +13,7 @@ fn dmatrix_io_test() -> anyhow::Result<()> {
     approx::assert_abs_diff_eq!(xx, yy);
 
     let parquet_file = create_temp_dir_file("parquet")?;
-    xx.to_parquet(None, None, &parquet_file.to_str().unwrap())?;
+    xx.to_parquet(&parquet_file.to_str().unwrap())?;
 
     Ok(())
 }
@@ -30,7 +30,7 @@ fn ndarray_io_test() -> anyhow::Result<()> {
     assert_eq!(xx, yy);
 
     let parquet_file = create_temp_dir_file("parquet")?;
-    xx.to_parquet(None, None, &parquet_file.to_str().unwrap())?;
+    xx.to_parquet(&parquet_file.to_str().unwrap())?;
 
     Ok(())
 }
@@ -47,7 +47,7 @@ fn tensor_io_test() -> anyhow::Result<()> {
     assert_eq!(xx.to_vec2::<f32>()?, yy.to_vec2::<f32>()?);
 
     let parquet_file = create_temp_dir_file("parquet")?;
-    xx.to_parquet(None, None, &parquet_file.to_str().unwrap())?;
+    xx.to_parquet(&parquet_file.to_str().unwrap())?;
 
     Ok(())
 }

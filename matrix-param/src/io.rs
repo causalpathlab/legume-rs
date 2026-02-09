@@ -84,16 +84,17 @@ where
         Ok(())
     }
 
-    fn to_parquet(
+    fn to_parquet_with_names(
         &self,
-        row_names: Option<&[Box<str>]>,
-        column_names: Option<&[Box<str>]>,
         file_path: &str,
+        row_names: (Option<&[Box<str>]>, Option<&str>),
+        column_names: Option<&[Box<str>]>,
     ) -> anyhow::Result<()> {
+        let row_names_slice = row_names.0;
         let schema = build_parquet_schema(false)?;
 
         // Pre-compute name ByteArrays once for efficient lookup
-        let row_bytes = precompute_name_bytes(row_names, self.nrows());
+        let row_bytes = precompute_name_bytes(row_names_slice, self.nrows());
         let col_bytes = precompute_name_bytes(column_names, self.ncols());
 
         // prepare data - single traversal for all matrices
@@ -161,6 +162,11 @@ where
         writer.close()?;
 
         Ok(())
+    }
+
+    /// Write to parquet with default names
+    fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
+        self.to_parquet_with_names(file_path, (None, None), None)
     }
 }
 
@@ -306,7 +312,7 @@ mod tests {
         let row_names: Vec<Box<str>> = vec!["r0".into(), "r1".into(), "r2".into()];
         let col_names: Vec<Box<str>> = vec!["c0".into(), "c1".into()];
 
-        gamma.to_parquet(Some(&row_names), Some(&col_names), file_path_str)?;
+        gamma.to_parquet(file_path_str, Some(&row_names), Some(&col_names), None)?;
 
         // Read back and verify
         let file = File::open(&file_path)?;
@@ -407,7 +413,7 @@ mod tests {
         let file_path = temp_dir.path().join("test_no_names.parquet");
         let file_path_str = file_path.to_str().unwrap();
 
-        gamma.to_parquet(None, None, file_path_str)?;
+        gamma.to_parquet_simple(file_path_str)?;
 
         // Read back and verify
         let file = File::open(&file_path)?;

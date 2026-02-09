@@ -87,6 +87,22 @@ pub struct SrtGenePairSvdArgs {
           help = "Preload all sparse column data into memory for faster access")]
     preload_data: bool,
 
+    #[arg(long,
+          help = "External gene-gene network file (two-column TSV: gene1, gene2)",
+          long_help = "External gene-gene network file (e.g., from BioGRID).\n\
+                       Two-column TSV/CSV with gene1 and gene2 per line.\n\
+                       Gene names are matched against data using exact, delimiter-based,\n\
+                       and prefix matching. Skips KNN graph construction when provided.")]
+    gene_network: Option<Box<str>>,
+
+    #[arg(long, default_value_t = false,
+          help = "Allow prefix matching for gene names in external network")]
+    gene_network_allow_prefix: bool,
+
+    #[arg(long,
+          help = "Delimiter for base-key extraction in gene name matching (e.g., '.')")]
+    gene_network_delimiter: Option<char>,
+
     #[arg(long, short,
           help = "Enable verbose logging (sets RUST_LOG=info)")]
     verbose: bool,
@@ -175,30 +191,38 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
 
     info!("Assigned cells to {} samples", n_samples);
 
-    // 4. Preliminary collapse: gene × sample sums
-    let (gene_sum_ds, size_s) = preliminary_collapse(&data_vec, n_genes, n_samples)?;
+    // 4-5. Build gene-gene graph (external network or KNN from posterior means)
+    let gene_graph = if let Some(network_file) = &args.gene_network {
+        info!("Loading external gene network from {}...", network_file);
+        GenePairGraph::from_edge_list(
+            network_file,
+            gene_names.clone(),
+            args.gene_network_allow_prefix,
+            args.gene_network_delimiter,
+        )?
+    } else {
+        // 4. Preliminary collapse: gene × sample sums
+        let (gene_sum_ds, size_s) = preliminary_collapse(&data_vec, n_genes, n_samples)?;
 
-    // Compute posterior means via Poisson-Gamma
-    let (a0, b0) = (1_f32, 1_f32);
-    let mut mu_param = GammaMatrix::new((n_genes, n_samples), a0, b0);
-    let denom_ds = DVec::from_element(n_genes, 1_f32) * size_s.transpose();
-    mu_param.update_stat(&gene_sum_ds, &denom_ds);
-    mu_param.calibrate();
+        // Compute posterior means via Poisson-Gamma
+        let (a0, b0) = (1_f32, 1_f32);
+        let mut mu_param = GammaMatrix::new((n_genes, n_samples), a0, b0);
+        let denom_ds = DVec::from_element(n_genes, 1_f32) * size_s.transpose();
+        mu_param.update_stat(&gene_sum_ds, &denom_ds);
+        mu_param.calibrate();
 
-    // 5. Build gene-gene KNN graph
-    info!("Building gene-gene KNN graph...");
+        // 5. Build gene-gene KNN graph
+        info!("Building gene-gene KNN graph...");
+        GenePairGraph::from_posterior_means(
+            mu_param.posterior_mean(),
+            gene_names.clone(),
+            GenePairGraphArgs {
+                knn: args.knn_gene,
+                block_size: args.block_size,
+            },
+        )?
+    };
 
-    let gene_graph = GenePairGraph::from_posterior_means(
-        mu_param.posterior_mean(),
-        gene_names.clone(),
-        GenePairGraphArgs {
-            knn: args.knn_gene,
-            block_size: args.block_size,
-        },
-    )?;
-
-    // We may consider edges x vertices incidence matrix later in
-    // downstream analyses.
     gene_graph.to_parquet(&(args.out.to_string() + ".gene_graph.parquet"))?;
 
     // 6. Compute gene raw means
@@ -238,10 +262,10 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
 
     // Write dictionary
     let dict_row_names = gene_graph.edge_names();
-    u_dk.to_parquet(
-        Some(&dict_row_names),
-        None,
+    u_dk.to_parquet_with_names(
         &(args.out.to_string() + ".dictionary.parquet"),
+        (Some(&dict_row_names), Some("gene_pair")),
+        None,
     )?;
 
     // 10. Nystrom projection: per-cell first, then convert to per-pair
@@ -294,9 +318,11 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     // is driven by direction rather than magnitude.
     pair_proj_kn.normalize_columns_inplace();
 
-    pair_proj_kn
-        .transpose()
-        .to_parquet(None, None, &(args.out.to_string() + ".latent.parquet"))?;
+    pair_proj_kn.transpose().to_parquet_with_names(
+        &(args.out.to_string() + ".latent.parquet"),
+        (None, Some("cell_pair")),
+        None,
+    )?;
 
     // Rewrite coord_pairs to include only kept pairs
     if n_kept < cell_pairs.len() {

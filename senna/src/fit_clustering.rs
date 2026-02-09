@@ -215,7 +215,7 @@ fn write_cluster_assignments(
     }
 
     let col_names = vec!["cluster".into()];
-    data.to_parquet(Some(cell_names), Some(&col_names), output_path)?;
+    data.to_parquet_with_names(output_path, (Some(cell_names), Some("cell")), Some(&col_names))?;
 
     Ok(())
 }

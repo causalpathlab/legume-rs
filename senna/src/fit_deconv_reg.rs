@@ -140,17 +140,17 @@ pub fn fit_deconv_reg(args: &DeconvRegArgs) -> anyhow::Result<()> {
         info!("Read single-cell data files");
 
         let sc_cor_kn = sc_data.correlate(&dict_dk)?;
-        sc_cor_kn.transpose().to_parquet(
-            Some(sc_data.column_names()?.as_ref()),
-            None,
+        sc_cor_kn.transpose().to_parquet_with_names(
             &(args.out.to_string() + ".deconv.sc.parquet"),
+            (Some(sc_data.column_names()?.as_ref()), None),
+            None,
         )?;
     }
 
-    bulk_cor_km.transpose().to_parquet(
-        Some(&bulk_samples),
-        None,
+    bulk_cor_km.transpose().to_parquet_with_names(
         &(args.out.to_string() + ".deconv.parquet"),
+        (Some(&bulk_samples), None),
+        None,
     )?;
 
     Ok(())
