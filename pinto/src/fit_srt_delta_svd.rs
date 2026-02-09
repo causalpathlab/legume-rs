@@ -266,10 +266,9 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     info!("Randomized SVD on pair delta features...");
 
     let training_dm = concatenate_vertical(&[
-        params.shared.posterior_log_mean().clone(),
-        params.diff.posterior_log_mean().clone(),
-    ])?
-    .scale_columns();
+        params.shared.posterior_log_mean().scale_columns(),
+        params.diff.posterior_log_mean().scale_columns(),
+    ])?;
 
     let (u_dk, s_k, _) = training_dm.rsvd(args.n_latent_topics)?;
     let eps = 1e-8;
@@ -315,6 +314,10 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     )?;
 
     // 9. Export
+    // L2-normalize each pair's latent vector so downstream clustering
+    // is driven by direction rather than magnitude.
+    proj_kn.normalize_columns_inplace();
+
     proj_kn
         .transpose()
         .to_parquet(None, None, &(args.out.to_string() + ".latent.parquet"))?;
