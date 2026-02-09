@@ -209,7 +209,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         let outfile = args.out.to_string() + ".delta.parquet";
         let batch_names = data_vec.batch_names();
         let gene_names = data_vec.row_names()?;
-        batch_db.to_parquet(Some(&gene_names), batch_names.as_deref(), &outfile)?;
+        batch_db.to_parquet_with_names(&outfile, (Some(&gene_names), Some("gene")), batch_names.as_deref())?;
     }
 
     // 3. Build spatial KNN graph
@@ -289,10 +289,10 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         )
         .collect();
 
-    u_dk.to_parquet(
-        Some(&dict_row_names),
-        None,
+    u_dk.to_parquet_with_names(
         &(args.out.to_string() + ".dictionary.parquet"),
+        (Some(&dict_row_names), Some("gene")),
+        None,
     )?;
 
     // 8. Nystrom projection
@@ -318,9 +318,11 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     // is driven by direction rather than magnitude.
     proj_kn.normalize_columns_inplace();
 
-    proj_kn
-        .transpose()
-        .to_parquet(None, None, &(args.out.to_string() + ".latent.parquet"))?;
+    proj_kn.transpose().to_parquet_with_names(
+        &(args.out.to_string() + ".latent.parquet"),
+        (None, Some("cell_pair")),
+        None,
+    )?;
 
     info!("Done");
     Ok(())

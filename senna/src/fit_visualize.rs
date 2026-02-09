@@ -421,10 +421,10 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
         "y".to_string().into_boxed_str(),
     ];
 
-    pb_coords.to_parquet(
-        Some(&pb_names),
-        Some(&coord_cols),
+    pb_coords.to_parquet_with_names(
         &(args.out.to_string() + ".pb_coords.parquet"),
+        (Some(&pb_names), None),
+        Some(&coord_cols),
     )?;
 
     let cell_names = data_vec.column_names()?;
@@ -442,16 +442,16 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
             "y".to_string().into_boxed_str(),
             "cluster".to_string().into_boxed_str(),
         ];
-        cell_coords_with_cluster.to_parquet(
-            Some(&cell_names),
-            Some(&coord_cols_with_cluster),
+        cell_coords_with_cluster.to_parquet_with_names(
             &(args.out.to_string() + ".cell_coords.parquet"),
+            (Some(&cell_names), Some("cell")),
+            Some(&coord_cols_with_cluster),
         )?;
     } else {
-        cell_coords.to_parquet(
-            Some(&cell_names),
-            Some(&coord_cols),
+        cell_coords.to_parquet_with_names(
             &(args.out.to_string() + ".cell_coords.parquet"),
+            (Some(&cell_names), Some("cell")),
+            Some(&coord_cols),
         )?;
     }
 

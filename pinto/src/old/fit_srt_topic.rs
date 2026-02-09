@@ -335,7 +335,7 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     )?;
 
     let latent = srt_cell_pairs.evaluate_latent_states(&encoder, &train_config, args.block_size)?;
-    latent.to_parquet(None, None, &(args.out.to_string() + ".latent.parquet"))?;
+    latent.to_parquet_simple(&(args.out.to_string() + ".latent.parquet"))?;
 
     srt_cell_pairs.to_parquet(
         &(args.out.to_string() + ".coord_pairs.parquet"),

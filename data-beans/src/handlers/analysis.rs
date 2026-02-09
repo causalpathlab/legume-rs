@@ -204,11 +204,11 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         .collect();
 
     sim.ln_delta_db
-        .to_parquet(Some(&rows), None, &ln_batch_file)?;
+        .to_parquet_with_names(&ln_batch_file, (Some(&rows), Some("feature")), None)?;
     sim.theta_kn
         .transpose()
-        .to_parquet(Some(&cols), None, &prop_file)?;
-    sim.beta_dk.to_parquet(Some(&rows), None, &dict_file)?;
+        .to_parquet_with_names(&prop_file, (Some(&cols), Some("cell")), None)?;
+    sim.beta_dk.to_parquet_with_names(&dict_file, (Some(&rows), Some("feature")), None)?;
 
     info!(
         "wrote parameter files:\n{:?},\n{:?},\n{:?}",

@@ -202,11 +202,12 @@ impl ParquetWriter {
         shape: (usize, usize),
         names: (Option<&[Box<str>]>, Option<&[Box<str>]>),
         column_types: Option<&[ParquetType]>,
+        row_column_name: Option<&str>,
     ) -> anyhow::Result<Self> {
         let (nrows, ncols) = shape;
         let (row_names, column_names) = names;
 
-        let schema = build_columns_schema(ncols, column_names, column_types)?;
+        let schema = build_columns_schema(ncols, column_names, column_types, row_column_name)?;
 
         let file = std::fs::File::create(file_path)?;
 
@@ -338,6 +339,7 @@ fn build_columns_schema(
     ncols: usize,
     column_names: Option<&[Box<str>]>,
     column_types: Option<&[ParquetType]>,
+    row_column_name: Option<&str>,
 ) -> anyhow::Result<Arc<SchemaType>> {
     if let Some(column_names) = column_names {
         if column_names.len() != ncols {
@@ -349,8 +351,9 @@ fn build_columns_schema(
         }
     }
 
+    let row_col_name = row_column_name.unwrap_or("rowname");
     let mut fields = vec![Arc::new(
-        SchemaType::primitive_type_builder("row", ParquetType::BYTE_ARRAY)
+        SchemaType::primitive_type_builder(row_col_name, ParquetType::BYTE_ARRAY)
             .with_repetition(parquet::basic::Repetition::REQUIRED)
             .with_converted_type(ConvertedType::UTF8)
             .build()

@@ -330,7 +330,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         let outfile = args.out.to_string() + ".delta.parquet";
         let batch_names = data_vec.batch_names();
         let gene_names = data_vec.row_names()?;
-        batch_db.to_parquet(Some(&gene_names), batch_names.as_deref(), &outfile)?;
+        batch_db.to_parquet_with_names(&outfile, (Some(&gene_names), Some("gene")), batch_names.as_deref())?;
     }
 
     // 5. Nystrom projection
@@ -358,16 +358,16 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         .map(|sel| sel.selected_names.clone())
         .unwrap_or_else(|| gene_names.clone());
 
-    nystrom_out.latent_nk.to_parquet(
-        Some(&cell_names),
-        None,
+    nystrom_out.latent_nk.to_parquet_with_names(
         &(args.out.to_string() + ".latent.parquet"),
+        (Some(&cell_names), Some("cell")),
+        None,
     )?;
 
-    nystrom_out.dictionary_dk.to_parquet(
-        Some(&output_gene_names),
-        None,
+    nystrom_out.dictionary_dk.to_parquet_with_names(
         &(args.out.to_string() + ".dictionary.parquet"),
+        (Some(&output_gene_names), Some("gene")),
+        None,
     )?;
 
     // Save selected feature list if feature selection was applied

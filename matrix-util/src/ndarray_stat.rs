@@ -36,6 +36,9 @@ where
     /// # Examples
     ///
     /// ```
+    /// use matrix_util::ndarray_stat::RunningStatistics;
+    /// use ndarray::Ix1;
+    /// let nrow = 10;
     /// RunningStatistics::new(Ix1(nrow));
     /// ```
     ///
@@ -156,7 +159,15 @@ where
     /// # Arguments
     /// * `filename` - The name of the file to save the statistics to
     /// * `names` - The names of the statistics
-    pub fn save(&self, filename: &str, names: &Vec<Box<str>>, sep: &str) -> anyhow::Result<()> {
+    /// * `sep` - Separator for text formats
+    /// * `row_column_name` - Name for the row column in parquet format (defaults to "stat")
+    pub fn save(
+        &self,
+        filename: &str,
+        names: &Vec<Box<str>>,
+        sep: &str,
+        row_column_name: Option<&str>,
+    ) -> anyhow::Result<()> {
         match file_ext(filename).unwrap_or(Box::from("")).as_ref() {
             "parquet" => {
                 let nnz = &self.count_positives();
@@ -186,7 +197,8 @@ where
                     .map(|s| s.into())
                     .collect();
 
-                stacked.to_parquet(Some(&names), Some(&column_names), filename)?;
+                let row_col = row_column_name.or(Some("stat"));
+                stacked.to_parquet_with_names(filename, (Some(&names), row_col), Some(&column_names))?;
             }
             _ => {
                 let mut out = self.to_string_vec(names, sep)?;

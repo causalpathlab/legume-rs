@@ -92,7 +92,7 @@ pub struct SrtTopicArgs {
           long_help = "Output file prefix.\n\
                        Generates: {out}.delta.parquet (when multiple batches), {out}.coord_pairs.parquet,\n\
                        {out}.dictionary.parquet, {out}.latent.parquet,\n\
-                       {out}.log_likelihood.gz")]
+                       {out}.scores.parquet")]
     out: Box<str>,
 
     #[arg(long, default_value_t = 100,
@@ -233,7 +233,7 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         let outfile = args.out.to_string() + ".delta.parquet";
         let batch_names = data_vec.batch_names();
         let gene_names = data_vec.row_names()?;
-        batch_db.to_parquet(Some(&gene_names), batch_names.as_deref(), &outfile)?;
+        batch_db.to_parquet_with_names(&outfile, (Some(&gene_names), Some("gene")), batch_names.as_deref())?;
     }
 
     info!("Constructing spatial nearest neighbourhood graphs");
@@ -334,7 +334,7 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     }
 
     let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate as f64)?;
-    let mut log_likelihoods = Vec::with_capacity(train_config.num_epochs);
+    let mut scores = TrainScores::new(train_config.num_epochs);
 
     for outer_epoch in (0..args.epochs).step_by(args.jitter_interval) {
         let half_norm = args.column_sum_norm / 2.0;
@@ -371,6 +371,7 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
             encoder.set_temperature(temperature);
 
             let mut llik_tot = 0f32;
+            let mut kl_tot = 0f32;
 
             for b in 0..data_loader.num_minibatch() {
                 let mb = data_loader.minibatch_shuffled(b, &dev)?;
@@ -380,9 +381,10 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
                 let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
                 adam.backward_step(&loss)?;
                 llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+                kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
             }
 
-            log_likelihoods.push(llik_tot);
+            scores.push(llik_tot, kl_tot);
         }
 
         pb.inc(args.jitter_interval as u64);
@@ -391,7 +393,7 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
             info!(
                 "[{}] log-likelihood: {}",
                 outer_epoch + args.jitter_interval,
-                log_likelihoods.last().ok_or(anyhow::anyhow!("llik"))?
+                scores.last_llik().ok_or(anyhow::anyhow!("llik"))?
             );
         }
     }
@@ -400,10 +402,7 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
 
     info!("Writing down the model parameters");
 
-    matrix_util::common_io::write_types::<f32>(
-        &log_likelihoods,
-        &(args.out.to_string() + ".log_likelihood.gz"),
-    )?;
+    scores.to_parquet(&(args.out.to_string() + ".scores.parquet"))?;
 
     let dict_row_names: Vec<Box<str>> = gene_names
         .iter()
@@ -417,7 +416,7 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
 
     named_tensor_parquet_out(
         &decoder.dictionary().weight_dk()?,
-        Some(&dict_row_names),
+        (Some(&dict_row_names), Some("gene")),
         None,
         &args.out,
         "dictionary",
@@ -438,7 +437,7 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     // is driven by direction rather than magnitude.
     let latent = latent.transpose().normalize_columns().transpose();
 
-    latent.to_parquet(None, None, &(args.out.to_string() + ".latent.parquet"))?;
+    latent.to_parquet_with_names(&(args.out.to_string() + ".latent.parquet"), (None, Some("cell_pair")), None)?;
 
     info!("done");
     Ok(())

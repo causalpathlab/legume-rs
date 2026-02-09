@@ -404,16 +404,27 @@ pub trait IoOps {
         self.write_file_delim(csv_file, ",")
     }
 
-    /// write the matrix down to parquet
-    /// * `row_names`: if `None`, just add `[0, n)` numbers.
-    /// * `column_names`: if `None`, just add `[0, n)` numbers.
+    /// write the matrix down to parquet with full control over naming
     /// * `file_path`: output file path
-    fn to_parquet(
+    /// * `row_names`: Tuple of (optional row_names, optional row_column_name)
+    ///   - `(None, None)`: use numeric row names `[0, n)` with "row" column name
+    ///   - `(None, Some("cell_pair"))`: use numeric row names with "cell_pair" column name
+    ///   - `(Some(names), None)`: use provided names with "row" column name
+    ///   - `(Some(names), Some("gene"))`: use provided names with "gene" column name
+    /// * `column_names`: if `None`, just add `[0, n)` numbers.
+    fn to_parquet_with_names(
         &self,
-        row_names: Option<&[Box<str>]>,
-        column_names: Option<&[Box<str>]>,
         file_path: &str,
+        row_names: (Option<&[Box<str>]>, Option<&str>),
+        column_names: Option<&[Box<str>]>,
     ) -> anyhow::Result<()>;
+
+    /// write the matrix down to parquet with default names
+    /// * `file_path`: output file path
+    /// Uses numeric row/column names and default "row" column name
+    fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
+        self.to_parquet_with_names(file_path, (None, None), None)
+    }
 
     /// Read a real-valued numeric matrix with the default row
     /// index(0) and all the other available columns.

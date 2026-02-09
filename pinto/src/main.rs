@@ -1,3 +1,4 @@
+mod fit_srt_gene_network;
 mod fit_srt_gene_pair_svd;
 mod fit_srt_gene_pair_topic;
 mod fit_srt_delta_svd;
@@ -12,6 +13,7 @@ mod srt_input;
 mod srt_knn_graph;
 mod srt_random_projection;
 
+use fit_srt_gene_network::*;
 use fit_srt_gene_pair_svd::*;
 use fit_srt_gene_pair_topic::*;
 use fit_srt_delta_svd::*;
@@ -170,6 +172,22 @@ enum Commands {
                       - {out}.edge_cluster.parquet: edge cluster assignments"
     )]
     Propensity(SrtPropensityArgs),
+
+    #[command(
+        about = "Visualize gene network with dictionary loadings",
+        long_about = "Visualize gene-gene interaction network from gene-pair pipelines.\n\n\
+                      Reads gene_graph.parquet and dictionary.parquet produced by gene-pair-delta-svd\n\
+                      or gene-pair-delta-topic, computes a 2D spectral layout of genes using\n\
+                      fuzzy-kernel weighted similarity, and K-means clusters gene-pair edges\n\
+                      by their dictionary vectors.\n\n\
+                      Inputs:\n\
+                      - Gene graph file (.gene_graph.parquet)\n\
+                      - Dictionary file (.dictionary.parquet)\n\n\
+                      Outputs:\n\
+                      - {out}.gene_coords.parquet: 2D gene node positions (gene, x, y)\n\
+                      - {out}.gene_pair_clusters.parquet: edge clusters + topic loadings"
+    )]
+    Visualize(SrtGeneNetworkArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -196,6 +214,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::GenePairDeltaTopic(args) => {
             fit_srt_gene_pair_topic(args)?;
+        }
+        Commands::Visualize(args) => {
+            fit_srt_gene_network(args)?;
         }
     }
 

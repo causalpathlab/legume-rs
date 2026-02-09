@@ -192,6 +192,7 @@ where
             (self.nrows, 4),
             (Some(names), Some(&column_names)),
             Some(&column_types),
+            None,
         )?;
 
         let mut writer = parquet_writer.get_writer()?;
