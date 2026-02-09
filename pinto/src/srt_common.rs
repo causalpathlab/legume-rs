@@ -66,6 +66,117 @@ pub fn tensor_parquet_out(data: &Tensor, header: &str, file_name: &str) -> anyho
     named_tensor_parquet_out(data, None, None, header, file_name)
 }
 
+/// Filter a parquet file to keep only rows at the given indices.
+/// Reads the file, selects rows, and overwrites the file.
+pub fn filter_parquet_by_indices(file_path: &str, keep_indices: &[usize]) -> anyhow::Result<()> {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    use parquet::file::writer::SerializedFileWriter;
+    use parquet::record::RowAccessor;
+    use std::fs::File;
+
+    let file = File::open(file_path)?;
+    let reader = SerializedFileReader::new(file)?;
+    let schema = reader.metadata().file_metadata().schema().clone();
+    let n_fields = schema.get_fields().len();
+
+    let field_types: Vec<_> = schema
+        .get_fields()
+        .iter()
+        .map(|f| f.get_physical_type())
+        .collect();
+
+    let keep_set: HashSet<usize> = keep_indices.iter().cloned().collect();
+
+    // Collect kept rows
+    let row_iter = reader.get_row_iter(None)?;
+    let mut kept_rows = Vec::with_capacity(keep_indices.len());
+
+    for (idx, record) in row_iter.enumerate() {
+        if keep_set.contains(&idx) {
+            kept_rows.push(record?);
+        }
+    }
+    drop(reader);
+
+    // Rewrite file
+    let file = File::create(file_path)?;
+    let schema_arc = std::sync::Arc::new(schema);
+    let mut writer = SerializedFileWriter::new(file, schema_arc, Default::default())?;
+    let mut row_group = writer.next_row_group()?;
+
+    // Write column by column
+    for col_idx in 0..n_fields {
+        use parquet::basic::Type as PhysicalType;
+        use parquet::data_type::*;
+
+        let mut col_writer = row_group.next_column()?.unwrap();
+        let physical_type = field_types[col_idx];
+
+        match physical_type {
+            PhysicalType::FLOAT => {
+                let vals: Vec<f32> = kept_rows
+                    .iter()
+                    .map(|r| r.get_float(col_idx).unwrap())
+                    .collect();
+                col_writer
+                    .typed::<FloatType>()
+                    .write_batch(&vals, None, None)?;
+            }
+            PhysicalType::BYTE_ARRAY => {
+                let vals: Vec<ByteArray> = kept_rows
+                    .iter()
+                    .map(|r| {
+                        ByteArray::from(r.get_string(col_idx).unwrap().as_bytes().to_vec())
+                    })
+                    .collect();
+                col_writer
+                    .typed::<ByteArrayType>()
+                    .write_batch(&vals, None, None)?;
+            }
+            PhysicalType::DOUBLE => {
+                let vals: Vec<f64> = kept_rows
+                    .iter()
+                    .map(|r| r.get_double(col_idx).unwrap())
+                    .collect();
+                col_writer
+                    .typed::<DoubleType>()
+                    .write_batch(&vals, None, None)?;
+            }
+            PhysicalType::INT32 => {
+                let vals: Vec<i32> = kept_rows
+                    .iter()
+                    .map(|r| r.get_int(col_idx).unwrap())
+                    .collect();
+                col_writer
+                    .typed::<Int32Type>()
+                    .write_batch(&vals, None, None)?;
+            }
+            PhysicalType::INT64 => {
+                let vals: Vec<i64> = kept_rows
+                    .iter()
+                    .map(|r| r.get_long(col_idx).unwrap())
+                    .collect();
+                col_writer
+                    .typed::<Int64Type>()
+                    .write_batch(&vals, None, None)?;
+            }
+            other => {
+                return Err(anyhow::anyhow!(
+                    "unsupported column type {:?} at index {}",
+                    other,
+                    col_idx
+                ));
+            }
+        }
+        col_writer.close()?;
+    }
+
+    row_group.close()?;
+    writer.close()?;
+
+    Ok(())
+}
+
 /// take names from parquet file
 /// * `file_path` - file path
 /// * `select_columns` - column names to extract

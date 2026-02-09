@@ -16,7 +16,8 @@ use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_loss_functions as loss_func;
 use candle_util::candle_model_traits::*;
-use candle_util::candle_vae_inference::*;
+use candle_nn::optim::Optimizer;
+use candle_nn::AdamW;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 
 #[derive(Parser, Debug, Clone)]
@@ -148,6 +149,39 @@ pub struct SrtTopicArgs {
           help = "Preload all sparse column data into memory for faster access")]
     preload_data: bool,
 
+    #[arg(long, default_value_t = false,
+          help = "Use sparsemax activation instead of softmax",
+          long_help = "Use sparsemax activation instead of softmax.\n\
+                       Sparsemax produces exact zeros for low-ranked topics,\n\
+                       yielding sparser topic assignments.")]
+    use_sparsemax: bool,
+
+    #[arg(long, default_value_t = 0.0,
+          help = "KL annealing warmup epochs (0 = disabled)",
+          long_help = "Number of epochs for KL weight to warm up from 0 to 1.\n\
+                       kl_weight = 1 - exp(-epoch / warmup).\n\
+                       Set to 0 to disable annealing.")]
+    kl_warmup_epochs: f64,
+
+    #[arg(long, default_value_t = 5.0,
+          help = "Starting temperature for annealing",
+          long_help = "Initial temperature for softmax/sparsemax (higher = smoother).\n\
+                       Temperature anneals exponentially to temp_min during training.")]
+    temp_start: f32,
+
+    #[arg(long, default_value_t = 0.1,
+          help = "Minimum temperature for annealing",
+          long_help = "Final temperature after annealing (lower = more peaked/sparse).\n\
+                       Standard values: 0.1-0.5 for sparse, 1.0 for no annealing.")]
+    temp_min: f32,
+
+    #[arg(long, default_value_t = 500.0,
+          help = "Temperature annealing rate (0 = disabled)",
+          long_help = "Controls how fast temperature decays (higher = slower decay).\n\
+                       temp = temp_min + (temp_start - temp_min) * exp(-epoch / tau).\n\
+                       Set to 0 to disable annealing (use temp_start throughout).")]
+    temp_anneal_tau: f64,
+
     #[arg(long, short,
           help = "Enable verbose logging (sets RUST_LOG=info)")]
     verbose: bool,
@@ -262,7 +296,7 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
-    let encoder = LogSoftmaxEncoder::new(
+    let mut encoder = LogSoftmaxEncoder::new(
         LogSoftmaxEncoderArgs {
             n_features: n_features_encoder,
             n_topics,
@@ -270,8 +304,8 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
             n_vocab,
             d_vocab_emb,
             layers: &args.encoder_layers,
-            use_sparsemax: false,
-            temperature: 1.0,
+            use_sparsemax: args.use_sparsemax,
+            temperature: args.temp_start,
         },
         param_builder.clone(),
     )?;
@@ -283,7 +317,7 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         n_features_encoder, n_features_decoder
     );
 
-    let mut train_config = TrainConfig {
+    let train_config = TrainConfig {
         learning_rate: args.learning_rate,
         batch_size: args.minibatch_size,
         num_epochs: args.epochs,
@@ -299,10 +333,10 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         pb.set_draw_target(ProgressDrawTarget::hidden());
     }
 
-    let mut vae = Vae::build(&encoder, &decoder, &parameters);
+    let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate as f64)?;
     let mut log_likelihoods = Vec::with_capacity(train_config.num_epochs);
 
-    for epoch in (0..args.epochs).step_by(args.jitter_interval) {
+    for outer_epoch in (0..args.epochs).step_by(args.jitter_interval) {
         let half_norm = args.column_sum_norm / 2.0;
         let x_nd = concatenate_vertical(&[
             collapsed_params.shared.posterior_sample()?.sum_to_one_columns().scale(half_norm),
@@ -317,33 +351,52 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
             output_null: None,
         })?;
 
-        train_config.verbose = false;
-        train_config.show_progress = args.verbose;
-        train_config.num_epochs = args.jitter_interval;
+        data_loader.shuffle_minibatch(args.minibatch_size)?;
 
-        let llik = vae.train_encoder_decoder(
-            &mut data_loader,
-            &loss_func::topic_likelihood,
-            &train_config,
-        )?;
+        for inner in 0..args.jitter_interval {
+            let global_epoch = outer_epoch + inner;
 
-        log_likelihoods.extend(llik);
+            let kl_weight = if args.kl_warmup_epochs > 0.0 {
+                1.0 - (-(global_epoch as f64) / args.kl_warmup_epochs).exp()
+            } else {
+                1.0
+            };
+
+            let temperature = if args.temp_anneal_tau > 0.0 {
+                let decay = (-(global_epoch as f64) / args.temp_anneal_tau).exp() as f32;
+                args.temp_min + (args.temp_start - args.temp_min) * decay
+            } else {
+                args.temp_start
+            };
+            encoder.set_temperature(temperature);
+
+            let mut llik_tot = 0f32;
+
+            for b in 0..data_loader.num_minibatch() {
+                let mb = data_loader.minibatch_shuffled(b, &dev)?;
+                let (z_nk, kl) = encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
+                let y_nd = mb.output.unwrap_or(mb.input);
+                let (_, llik) = decoder.forward_with_llik(&z_nk, &y_nd, &loss_func::topic_likelihood)?;
+                let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
+                adam.backward_step(&loss)?;
+                llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+            }
+
+            log_likelihoods.push(llik_tot);
+        }
+
         pb.inc(args.jitter_interval as u64);
 
         if args.verbose {
             info!(
                 "[{}] log-likelihood: {}",
-                epoch + args.jitter_interval,
+                outer_epoch + args.jitter_interval,
                 log_likelihoods.last().ok_or(anyhow::anyhow!("llik"))?
             );
         }
     }
 
     pb.finish_and_clear();
-
-    if train_config.verbose {
-        info!("Finished {} epochs", train_config.num_epochs);
-    }
 
     info!("Writing down the model parameters");
 
@@ -380,6 +433,10 @@ pub fn fit_srt_delta_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
         n_genes,
         args.column_sum_norm,
     )?;
+
+    // L2-normalize each pair's latent vector so downstream clustering
+    // is driven by direction rather than magnitude.
+    let latent = latent.transpose().normalize_columns().transpose();
 
     latent.to_parquet(None, None, &(args.out.to_string() + ".latent.parquet"))?;
 

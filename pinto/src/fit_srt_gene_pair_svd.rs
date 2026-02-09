@@ -71,7 +71,7 @@ pub struct SrtGenePairSvdArgs {
           help = "Output file prefix",
           long_help = "Output file prefix.\n\
                        Generates: {out}.coord_pairs.parquet, {out}.gene_graph.parquet,\n\
-                       {out}.gene_pairs.parquet, {out}.dictionary.parquet,\n\
+                       {out}.dictionary.parquet,\n\
                        {out}.latent.parquet")]
     out: Box<str>,
 
@@ -201,33 +201,31 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     // downstream analyses.
     gene_graph.to_parquet(&(args.out.to_string() + ".gene_graph.parquet"))?;
 
-    // 6. Compute gene log means
-    let gene_log_means = compute_gene_log_means(&data_vec, args.block_size)?;
+    // 6. Compute gene raw means
+    let gene_means = compute_gene_raw_means(&data_vec, args.block_size)?;
 
-    // 7. Compute gene-pair deltas
+    // 7. Compute gene-pair deltas (raw counts, positive only)
     info!("Calibrating gene-gene interaction statistics...");
 
     let gene_pair_stat = compute_gene_interaction_deltas(
         &data_vec,
         &gene_graph,
-        &gene_log_means,
+        &gene_means,
         n_samples,
+        false,
     )?;
-
-    gene_pair_stat.to_parquet(&(args.out.to_string() + ".gene_pairs.parquet"))?;
 
     // 8. Fit Poisson-Gamma
     info!("Fitting Poisson-Gamma on gene-pair statistics...");
     let gene_pair_params = gene_pair_stat.optimize(None)?;
 
-    // 9. SVD on vertically concatenated [δ⁺; δ⁻] posterior log means
+    // 9. SVD on positive channel posterior log means
     info!("Randomized SVD on gene-pair x sample features...");
 
-    let training_dm = concatenate_vertical(&[
-        gene_pair_params.delta_pos.posterior_log_mean().clone(),
-        gene_pair_params.delta_neg.posterior_log_mean().clone(),
-    ])?
-    .scale_columns();
+    let training_dm = gene_pair_params
+        .delta_pos
+        .posterior_log_mean()
+        .scale_columns();
 
     // Here, d = 2 x gene-gene interactions
     let (u_dk, s_k, _) = training_dm.rsvd(args.n_latent_topics)?;
@@ -239,7 +237,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     let basis_dk = &u_dk * Mat::from_diagonal(&sinv_k);
 
     // Write dictionary
-    let dict_row_names = gene_graph.edge_names_with_channels();
+    let dict_row_names = gene_graph.edge_names();
     u_dk.to_parquet(
         Some(&dict_row_names),
         None,
@@ -252,28 +250,59 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     let cell_proj_kn = nystrom_gene_pair_projection(
         &data_vec,
         &gene_graph,
-        &gene_log_means,
+        &gene_means,
         &basis_dk,
         args.block_size,
     )?;
 
-    // Convert cell-level projections to pair-level:
-    // pair_proj = 0.5 * (cell_proj[left] + cell_proj[right])
+    // Convert cell-level projections to pair-level, skipping pairs
+    // where both cells have zero projection (no observed gene-pair deltas).
     info!("Converting cell latents to pair latents...");
-    let n_pairs = cell_pairs.len();
     let n_topics = args.n_latent_topics;
-    let mut pair_proj_kn = Mat::zeros(n_topics, n_pairs);
+    let mut kept_pairs: Vec<(usize, DVec)> = Vec::with_capacity(cell_pairs.len());
 
     for (pair_idx, &(left, right)) in cell_pairs.iter().enumerate() {
         let left_col = cell_proj_kn.column(left);
         let right_col = cell_proj_kn.column(right);
         let avg = (&left_col + &right_col) * 0.5;
-        pair_proj_kn.column_mut(pair_idx).copy_from(&avg);
+        if avg.norm() > 0.0 {
+            kept_pairs.push((pair_idx, avg));
+        }
     }
+
+    let n_kept = kept_pairs.len();
+    if n_kept < cell_pairs.len() {
+        info!(
+            "Filtered {} zero-projection pairs ({} -> {})",
+            cell_pairs.len() - n_kept,
+            cell_pairs.len(),
+            n_kept,
+        );
+    }
+
+    let mut pair_proj_kn = Mat::zeros(n_topics, n_kept);
+    let kept_indices: Vec<usize> = kept_pairs
+        .iter()
+        .enumerate()
+        .map(|(new_idx, (_, avg))| {
+            pair_proj_kn.column_mut(new_idx).copy_from(avg);
+            kept_pairs[new_idx].0
+        })
+        .collect();
+
+    // L2-normalize each pair's latent vector so downstream clustering
+    // is driven by direction rather than magnitude.
+    pair_proj_kn.normalize_columns_inplace();
 
     pair_proj_kn
         .transpose()
         .to_parquet(None, None, &(args.out.to_string() + ".latent.parquet"))?;
+
+    // Rewrite coord_pairs to include only kept pairs
+    if n_kept < cell_pairs.len() {
+        let coord_path = args.out.to_string() + ".coord_pairs.parquet";
+        filter_parquet_by_indices(&coord_path, &kept_indices)?;
+    }
 
     info!("Done");
     Ok(())
@@ -282,12 +311,12 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
 /// Nystrom projection: project individual cells onto the gene-pair
 /// dictionary to obtain per-cell latent codes.
 ///
-/// For each cell, computes delta values for present gene pairs and
-/// projects onto the SVD basis (split into pos/neg halves).
+/// For each cell, computes positive delta values (raw count products)
+/// for present gene pairs and projects onto the SVD basis.
 fn nystrom_gene_pair_projection(
     data_vec: &SparseIoVec,
     gene_graph: &GenePairGraph,
-    gene_log_means: &DVec,
+    gene_means: &DVec,
     basis_dk: &Mat,
     block_size: usize,
 ) -> anyhow::Result<Mat> {
@@ -300,17 +329,12 @@ fn nystrom_gene_pair_projection(
         n_cells, n_edges, n_topics,
     );
 
-    // Split basis into pos (top half) and neg (bottom half)
-    let basis_pos = basis_dk.rows(0, n_edges).clone_owned();
-    let basis_neg = basis_dk.rows(n_edges, n_edges).clone_owned();
-
     let gene_adj = gene_graph.build_directed_adjacency();
 
     let shared_in = NystromSharedInput {
-        gene_log_means: gene_log_means.clone(),
+        gene_means: gene_means.clone(),
         gene_adj,
-        basis_pos,
-        basis_neg,
+        basis: basis_dk.clone(),
     };
 
     let mut proj_kn = Mat::zeros(n_topics, n_cells);
@@ -326,10 +350,9 @@ fn nystrom_gene_pair_projection(
 }
 
 struct NystromSharedInput {
-    gene_log_means: DVec,
+    gene_means: DVec,
     gene_adj: Vec<Vec<(usize, usize)>>,
-    basis_pos: Mat,
-    basis_neg: Mat,
+    basis: Mat,
 }
 
 fn nystrom_gene_pair_visitor(
@@ -339,11 +362,10 @@ fn nystrom_gene_pair_visitor(
     arc_proj: Arc<Mutex<&mut Mat>>,
 ) -> anyhow::Result<()> {
     let (lb, ub) = bound;
-    let gene_log_means = &shared_in.gene_log_means;
+    let gene_means = &shared_in.gene_means;
     let gene_adj = &shared_in.gene_adj;
-    let basis_pos = &shared_in.basis_pos;
-    let basis_neg = &shared_in.basis_neg;
-    let n_topics = basis_pos.ncols();
+    let basis = &shared_in.basis;
+    let n_topics = basis.ncols();
 
     let yy = data_vec.read_columns_csc(lb..ub)?;
 
@@ -356,11 +378,9 @@ fn nystrom_gene_pair_visitor(
 
         let mut proj_k = DVec::zeros(n_topics);
 
-        visit_gene_pair_deltas(rows, vals, gene_adj, gene_log_means, |edge_idx, delta| {
+        visit_gene_pair_deltas(rows, vals, gene_adj, gene_means, false, |edge_idx, delta| {
             if delta > 0.0 {
-                proj_k += delta * &basis_pos.row(edge_idx).transpose();
-            } else if delta < 0.0 {
-                proj_k += (-delta) * &basis_neg.row(edge_idx).transpose();
+                proj_k += delta * &basis.row(edge_idx).transpose();
             }
         });
 
