@@ -2,7 +2,7 @@ mod fit_srt_gene_pair_svd;
 mod fit_srt_gene_pair_topic;
 mod fit_srt_delta_svd;
 mod fit_srt_propensity;
-mod fit_srt_topic;
+mod fit_srt_delta_topic;
 mod srt_cell_pairs;
 mod srt_common;
 mod srt_estimate_batch_effects;
@@ -16,7 +16,7 @@ use fit_srt_gene_pair_svd::*;
 use fit_srt_gene_pair_topic::*;
 use fit_srt_delta_svd::*;
 use fit_srt_propensity::*;
-use fit_srt_topic::*;
+use fit_srt_delta_topic::*;
 
 use clap::{Parser, Subcommand};
 use colored::Colorize;
