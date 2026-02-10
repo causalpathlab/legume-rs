@@ -15,6 +15,8 @@ pub enum ClusterMethodCli {
     Kmeans,
     /// Leiden clustering (graph-based)
     Leiden,
+    /// Hierarchical Stochastic Block Model (graph-based)
+    Hsblock,
 }
 
 impl From<ClusterMethodCli> for ClusterMethod {
@@ -22,6 +24,7 @@ impl From<ClusterMethodCli> for ClusterMethod {
         match cli {
             ClusterMethodCli::Kmeans => ClusterMethod::KMeans,
             ClusterMethodCli::Leiden => ClusterMethod::Leiden,
+            ClusterMethodCli::Hsblock => ClusterMethod::Hsblock,
         }
     }
 }
@@ -67,7 +70,11 @@ pub struct ClusteringArgs {
 		     - leiden: Leiden algorithm (graph-based)\n\
 		       Finds communities in cell similarity graph\n\
 		       Automatically determines number of clusters\n\
-		       Use --knn and --resolution to tune"
+		       Use --knn and --resolution to tune\n\n\
+		     - hsblock: Hierarchical Stochastic Block Model (graph-based)\n\
+		       Bayesian inference of hierarchical community structure\n\
+		       Number of clusters = 2^(tree_depth-1)\n\
+		       Use --knn and --tree-depth to tune"
     )]
     method: ClusterMethodCli,
 
@@ -77,7 +84,7 @@ pub struct ClusteringArgs {
     #[arg(
         long,
         default_value_t = 15,
-        help = "Number of nearest neighbors for Leiden clustering"
+        help = "Number of nearest neighbors for graph-based clustering (Leiden/Hsblock)"
     )]
     knn: usize,
 
@@ -88,7 +95,21 @@ pub struct ClusteringArgs {
     )]
     resolution: f64,
 
-    #[arg(long, help = "Random seed for Leiden clustering")]
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "Tree depth for HSBM (clusters = 2^(depth-1), default 3 → 4 clusters)"
+    )]
+    tree_depth: usize,
+
+    #[arg(
+        long,
+        default_value_t = true,
+        help = "Use degree-corrected HSBM (default true)"
+    )]
+    degree_corrected: bool,
+
+    #[arg(long, help = "Random seed for graph-based clustering")]
     seed: Option<u64>,
 
     #[arg(
@@ -161,6 +182,19 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
                 args.knn,
                 args.resolution,
                 args.num_clusters,
+                args.seed,
+            )?
+        }
+        ClusterMethodCli::Hsblock => {
+            info!(
+                "Running HSBM clustering with knn={}, tree_depth={}, degree_corrected={}",
+                args.knn, args.tree_depth, args.degree_corrected
+            );
+            hsblock_clustering(
+                &latent,
+                args.knn,
+                args.tree_depth,
+                args.degree_corrected,
                 args.seed,
             )?
         }
