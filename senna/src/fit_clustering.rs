@@ -71,11 +71,7 @@ pub struct ClusteringArgs {
     )]
     method: ClusterMethodCli,
 
-    #[arg(
-        long,
-        default_value_t = 100,
-        help = "Maximum iterations for k-means"
-    )]
+    #[arg(long, default_value_t = 100, help = "Maximum iterations for k-means")]
     max_iter: usize,
 
     #[arg(
@@ -149,7 +145,10 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
     // Run clustering
     let mut result = match args.method {
         ClusterMethodCli::Kmeans => {
-            info!("Running k-means clustering with k={}, max_iter={}", k, args.max_iter);
+            info!(
+                "Running k-means clustering with k={}, max_iter={}",
+                k, args.max_iter
+            );
             kmeans_clustering(&latent, k, args.max_iter)?
         }
         ClusterMethodCli::Leiden => {
@@ -157,7 +156,13 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
                 "Running Leiden clustering with knn={}, resolution={:.2}, target_k={:?}",
                 args.knn, args.resolution, args.num_clusters
             );
-            leiden_clustering(&latent, args.knn, args.resolution, args.num_clusters, args.seed)?
+            leiden_clustering(
+                &latent,
+                args.knn,
+                args.resolution,
+                args.num_clusters,
+                args.seed,
+            )?
         }
     };
 
@@ -215,7 +220,11 @@ fn write_cluster_assignments(
     }
 
     let col_names = vec!["cluster".into()];
-    data.to_parquet_with_names(output_path, (Some(cell_names), Some("cell")), Some(&col_names))?;
+    data.to_parquet_with_names(
+        output_path,
+        (Some(cell_names), Some("cell")),
+        Some(&col_names),
+    )?;
 
     Ok(())
 }

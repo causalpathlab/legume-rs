@@ -1,8 +1,8 @@
-mod fit_annotate_topic;
 mod cluster;
 mod deconv;
 mod embed_common;
 mod feature_selection;
+mod fit_annotate_topic;
 mod fit_clustering;
 mod fit_deconv_reg;
 mod fit_joint_svd;
@@ -12,11 +12,11 @@ mod fit_svd;
 mod fit_topic;
 mod fit_visualize;
 mod interactive_markers;
-mod visualization_alg;
 mod senna_input;
+mod visualization_alg;
 
-use fit_annotate_topic::*;
 use embed_common::*;
+use fit_annotate_topic::*;
 use fit_clustering::*;
 use fit_deconv_reg::*;
 use fit_joint_svd::*;
@@ -31,8 +31,7 @@ use colored::Colorize;
 const LOGO: &str = include_str!("../logo.txt");
 
 fn colorize_logo_line(line: &str) -> String {
-    line
-        .replace('@', &"@".bright_yellow().to_string())
+    line.replace('@', &"@".bright_yellow().to_string())
         .replace('◠', &"◠".bright_yellow().to_string())
         .replace('◡', &"◠".bright_yellow().to_string())
         .replace('_', &"_".bright_yellow().to_string())
@@ -67,11 +66,7 @@ fn print_logo() {
             " ".repeat(13) // width of logo box
         };
 
-        let text_part = if i < intro.len() {
-            intro[i]
-        } else {
-            ""
-        };
+        let text_part = if i < intro.len() { intro[i] } else { "" };
 
         println!("{}  {}", logo_part, text_part);
     }

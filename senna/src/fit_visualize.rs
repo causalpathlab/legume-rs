@@ -80,11 +80,7 @@ pub struct VisualizeArgs {
     )]
     batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Preload all columns data"
-    )]
+    #[arg(long, default_value_t = false, help = "Preload all columns data")]
     preload_data: bool,
 
     #[arg(long, short, help = "Verbosity")]
@@ -181,11 +177,7 @@ pub struct VisualizeArgs {
     )]
     perplexity: f32,
 
-    #[arg(
-        long,
-        default_value_t = 1000,
-        help = "Number of iterations for t-SNE"
-    )]
+    #[arg(long, default_value_t = 1000, help = "Number of iterations for t-SNE")]
     tsne_iter: usize,
 
     #[arg(
@@ -379,11 +371,14 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
             }
             coords
         }
-        LayoutMethod::Tree => {
-            tree_layout_2d(&similarity_pp, args.tree_root, args.tree_radius, args.tree_decay)?
-        }
+        LayoutMethod::Tree => tree_layout_2d(
+            &similarity_pp,
+            args.tree_root,
+            args.tree_radius,
+            args.tree_decay,
+        )?,
         LayoutMethod::Tsne => {
-            use crate::visualization_alg::{TSne, similarity_to_distance};
+            use crate::visualization_alg::{similarity_to_distance, TSne};
 
             let pb_spectral = spectral_embed(&similarity_pp, args.num_eigen)?;
             let init = reduce_to_2d(&pb_spectral);
@@ -393,8 +388,11 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
             let sim_flat: Vec<f32> = similarity_pp.iter().cloned().collect();
             let distances = similarity_to_distance(&sim_flat, n);
 
-            let tsne = TSne::default().perplexity(args.perplexity).n_iter(args.tsne_iter);
-            let result = tsne.fit(&distances, n, Some(&init_flat))
+            let tsne = TSne::default()
+                .perplexity(args.perplexity)
+                .n_iter(args.tsne_iter);
+            let result = tsne
+                .fit(&distances, n, Some(&init_flat))
                 .map_err(|e| anyhow::anyhow!("t-SNE failed: {}", e))?;
 
             let mut coords = Mat::zeros(n, 2);
@@ -402,13 +400,22 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
                 coords[(i, 0)] = result[i * 2];
                 coords[(i, 1)] = result[i * 2 + 1];
             }
-            info!("Computed t-SNE for visualization (perplexity={}, iter={})", args.perplexity, args.tsne_iter);
+            info!(
+                "Computed t-SNE for visualization (perplexity={}, iter={})",
+                args.perplexity, args.tsne_iter
+            );
             coords
         }
     };
 
     // 12. Project cells to 2D for visualization
-    let cell_coords = project_cells_to_embedding(&latent_nk, &pb_latent, &pb_coords, args.knn, args.temperature)?;
+    let cell_coords = project_cells_to_embedding(
+        &latent_nk,
+        &pb_latent,
+        &pb_coords,
+        args.knn,
+        args.temperature,
+    )?;
     info!("Projected cells to 2D for visualization");
 
     // 13. Save outputs
@@ -497,7 +504,10 @@ fn load_latent_file(path: &str, data_vec: &SparseIoVec) -> anyhow::Result<Mat> {
     if !missing.is_empty() {
         return Err(anyhow::anyhow!(
             "Latent file missing {} cells from data (e.g., {:?})",
-            data_cells.iter().filter(|c| !latent_idx.contains_key(c.as_ref())).count(),
+            data_cells
+                .iter()
+                .filter(|c| !latent_idx.contains_key(c.as_ref()))
+                .count(),
             missing
         ));
     }
@@ -561,16 +571,17 @@ fn local_scale_similarity(s: &Mat, k: usize) -> Mat {
     // For each point, find the k-th highest similarity (excluding self)
     let mut sigma = vec![0.0f32; n];
     for i in 0..n {
-        let mut sims: Vec<f32> = (0..n)
-            .filter(|&j| j != i)
-            .map(|j| s[(i, j)])
-            .collect();
+        let mut sims: Vec<f32> = (0..n).filter(|&j| j != i).map(|j| s[(i, j)]).collect();
         // Sort descending to get k-th highest
         sims.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 
         // σ_i = 1 - (similarity to k-th neighbor), i.e., distance to k-th neighbor
         // Use small epsilon to avoid division by zero
-        let kth_sim = if k <= sims.len() { sims[k - 1] } else { sims.last().copied().unwrap_or(0.0) };
+        let kth_sim = if k <= sims.len() {
+            sims[k - 1]
+        } else {
+            sims.last().copied().unwrap_or(0.0)
+        };
         sigma[i] = (1.0 - kth_sim).max(1e-6);
     }
 
@@ -679,7 +690,11 @@ fn argsort(vals: &DVec, asc: bool) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..vals.len()).collect();
     idx.sort_by(|&a, &b| {
         let c = vals[a].partial_cmp(&vals[b]).unwrap();
-        if asc { c } else { c.reverse() }
+        if asc {
+            c
+        } else {
+            c.reverse()
+        }
     });
     idx
 }
@@ -726,7 +741,8 @@ fn spectral_embed(similarity: &Mat, num_eigen: usize) -> anyhow::Result<Mat> {
     let mut emb = Mat::zeros(n, k);
     for (j, &i) in idx[1..=k].iter().enumerate() {
         let w = 1.0 / eig.eigenvalues[i].max(1e-10);
-        emb.column_mut(j).copy_from(&(w * eig.eigenvectors.column(i)));
+        emb.column_mut(j)
+            .copy_from(&(w * eig.eigenvectors.column(i)));
     }
 
     Ok(emb)
@@ -747,11 +763,14 @@ fn reduce_to_2d(emb: &Mat) -> Mat {
     let pca = (centered.transpose() * &centered).symmetric_eigen();
     let pca_idx = argsort(&pca.eigenvalues, false);
     let mut coords = Mat::zeros(n, 2);
-    coords.column_mut(0).copy_from(&(&centered * pca.eigenvectors.column(pca_idx[0])));
-    coords.column_mut(1).copy_from(&(&centered * pca.eigenvectors.column(pca_idx[1])));
+    coords
+        .column_mut(0)
+        .copy_from(&(&centered * pca.eigenvectors.column(pca_idx[0])));
+    coords
+        .column_mut(1)
+        .copy_from(&(&centered * pca.eigenvectors.column(pca_idx[1])));
     coords
 }
-
 
 /// MST-based radial tree layout
 fn tree_layout_2d(
@@ -774,7 +793,9 @@ fn tree_layout_2d(
             .max_by(|&a, &b| {
                 let sum_a: f32 = similarity.row(a).iter().sum();
                 let sum_b: f32 = similarity.row(b).iter().sum();
-                sum_a.partial_cmp(&sum_b).unwrap_or(std::cmp::Ordering::Equal)
+                sum_a
+                    .partial_cmp(&sum_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .unwrap_or(0)
     });
@@ -790,7 +811,15 @@ fn tree_layout_2d(
     let (parent, depth, subtree_size) = tree_structure(&adj, root_node);
 
     // 5. Radial layout with growth factor
-    let coords = radial_layout(&adj, &parent, &depth, &subtree_size, root_node, radius_scale, growth);
+    let coords = radial_layout(
+        &adj,
+        &parent,
+        &depth,
+        &subtree_size,
+        root_node,
+        radius_scale,
+        growth,
+    );
 
     Ok(coords)
 }
