@@ -16,6 +16,7 @@ pub struct GenePairGraph {
 pub struct GenePairGraphArgs {
     pub knn: usize,
     pub block_size: usize,
+    pub reciprocal: bool,
 }
 
 #[allow(dead_code)]
@@ -52,7 +53,7 @@ impl GenePairGraph {
             KnnGraphArgs {
                 knn: args.knn,
                 block_size: args.block_size,
-                reciprocal: true,
+                reciprocal: args.reciprocal,
             },
         )?;
 
@@ -87,13 +88,27 @@ impl GenePairGraph {
         let n_genes = gene_names.len();
 
         // Build membership: gene_name → gene_index (as string)
-        let pairs = gene_names.iter().enumerate().map(|(i, name)| {
-            (name.clone(), i.to_string().into_boxed_str())
-        });
-        let mut membership = Membership::from_pairs(pairs, allow_prefix);
+        // When a delimiter is set, also index by each component so that
+        // compound names like "ENSG00000141510_TP53" can be matched by
+        // either the ID ("ENSG00000141510") or the symbol ("TP53").
+        let mut pairs_vec: Vec<(Box<str>, Box<str>)> = gene_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i.to_string().into_boxed_str()))
+            .collect();
+
         if let Some(d) = delimiter {
-            membership = membership.with_delimiter(d);
+            for (i, name) in gene_names.iter().enumerate() {
+                let idx_str: Box<str> = i.to_string().into_boxed_str();
+                for part in name.splitn(2, d) {
+                    if part != name.as_ref() {
+                        pairs_vec.push((part.into(), idx_str.clone()));
+                    }
+                }
+            }
         }
+
+        let membership = Membership::from_pairs(pairs_vec.into_iter(), allow_prefix);
 
         // Read the edge list file
         let file_delim = detect_delimiter(file_path);
@@ -161,6 +176,14 @@ impl GenePairGraph {
             n_genes,
             gene_edges,
         })
+    }
+
+    /// Keep only edges at the given indices. Updates gene_edges, graph.edges, graph.distances.
+    /// Note: graph.adjacency becomes stale (not used after graph construction).
+    pub fn filter_edges(&mut self, keep_indices: &[usize]) {
+        self.gene_edges = keep_indices.iter().map(|&i| self.gene_edges[i]).collect();
+        self.graph.edges = self.gene_edges.clone();
+        self.graph.distances = keep_indices.iter().map(|&i| self.graph.distances[i]).collect();
     }
 
     pub fn num_edges(&self) -> usize {

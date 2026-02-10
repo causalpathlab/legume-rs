@@ -5,7 +5,10 @@ use dmatrix_gamma::GammaMatrix;
 use matrix_param::dmatrix_gamma;
 use matrix_param::io::ParamIo;
 use matrix_param::traits::TwoStatParam;
-use rayon::prelude::*;
+use matrix_util::parquet::{
+    parquet_add_bytearray, parquet_add_numeric_column, parquet_add_string_column, ParquetWriter,
+};
+use parquet::basic::Type as ParquetType;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtPropensityArgs {
@@ -25,7 +28,7 @@ pub struct SrtPropensityArgs {
 
     #[arg(short = 'e', long, required = true,
           help = "Coordinate pair file (.coord_pairs.parquet)",
-          long_help = "Coordinate pair file (.coord_pairs.parquet from delta-svd or delta-topic).\n\
+          long_help = "Coordinate pair file (.coord_pairs.parquet from delta-svd).\n\
                        Must contain left_cell and right_cell columns.")]
     coord_pair_file: Box<str>,
 
@@ -63,22 +66,21 @@ pub struct SrtPropensityArgs {
 pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
     let MatWithNames {
         rows,
-        cols: _cols,
+        cols: _,
         mat: proj_mk,
     } = Mat::from_parquet(args.latent_data_file.as_ref())?;
 
-    // just take left_cell and right_cell
     let pair_names = names_from_parquet(
         &args.coord_pair_file,
         &[args.left_name.clone(), args.right_name.clone()],
     )?;
 
     if pair_names.len() != rows.len() {
-        return Err(anyhow::anyhow!(
-            "Check the length of pair names, {} vs. the rows of the latent matrix, {}",
+        anyhow::bail!(
+            "pair names length {} != latent matrix rows {}",
             pair_names.len(),
             rows.len()
-        ));
+        );
     }
 
     let proj_km = proj_mk.transpose();
@@ -111,8 +113,8 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
 
     pair_names
         .par_iter()
-        .zip(edge_membership)
-        .for_each(|(vertices, k)| {
+        .zip(edge_membership.par_iter())
+        .for_each(|(vertices, &k)| {
             let indices = vertices
                 .iter()
                 .filter_map(|x| vertex_index.get(x).copied())
@@ -127,11 +129,23 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
 
     prop_kn.sum_to_one_columns_inplace();
 
-    // Optionally attach coordinates from the coord_pair_file
+    // Dominant cluster per vertex (argmax of propensity)
+    let cluster_col: Vec<f32> = (0..nvertices)
+        .map(|j| prop_kn.column(j).iamax() as f32)
+        .collect();
+    let cluster_mat = Mat::from_column_slice(nvertices, 1, &cluster_col);
+
+    // Build propensity column names: propensity_0 .. propensity_{K-1}, cluster
+    let mut col_names: Vec<Box<str>> = (0..num_clusters)
+        .map(|k| format!("propensity_{}", k).into_boxed_str())
+        .collect();
+    col_names.push("cluster".into());
+
+    // Propensity output (optionally with coordinates)
+    let prop_nk = prop_kn.transpose();
     if let Some(coord_column_names) = &args.coord_column_names {
         info!("Extracting vertex coordinates from coord_pair_file");
 
-        // Read left_{name} columns from coord_pair parquet
         let left_coord_names: Vec<Box<str>> = coord_column_names
             .iter()
             .map(|name| format!("left_{}", name).into_boxed_str())
@@ -148,26 +162,18 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
             Some(&left_coord_names),
         )?;
 
-        // Build vertex coordinate matrix from left-cell positions
         let n_coords = coord_column_names.len();
         let mut vertex_coords = Mat::zeros(nvertices, n_coords);
         for (pair_idx, pair) in pair_names.iter().enumerate() {
-            let left_cell = &pair[0];
-            if let Some(&v_idx) = vertex_index.get(left_cell) {
+            if let Some(&v_idx) = vertex_index.get(&pair[0]) {
                 vertex_coords
                     .row_mut(v_idx)
                     .copy_from(&left_coords.row(pair_idx));
             }
         }
 
-        // Concatenate propensity + coordinates
-        let prop_nk = prop_kn.transpose();
-        let combined = concatenate_horizontal(&[prop_nk, vertex_coords])?;
-
-        let mut col_names: Vec<Box<str>> = (0..prop_kn.nrows())
-            .map(|k| format!("propensity_{}", k).into_boxed_str())
-            .collect();
         col_names.extend(coord_column_names.iter().cloned());
+        let combined = concatenate_horizontal(&[prop_nk, cluster_mat, vertex_coords])?;
 
         combined.to_parquet_with_names(
             &(args.out.to_string() + ".propensity.parquet"),
@@ -175,11 +181,44 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
             Some(&col_names),
         )?;
     } else {
-        prop_kn.transpose().to_parquet_with_names(
+        let combined = concatenate_horizontal(&[prop_nk, cluster_mat])?;
+
+        combined.to_parquet_with_names(
             &(args.out.to_string() + ".propensity.parquet"),
             (Some(&vertices), Some("cell")),
-            None,
+            Some(&col_names),
         )?;
+    }
+
+    // Edge cluster assignments
+    {
+        info!("Writing edge cluster assignments");
+        let n_edges = pair_names.len();
+        let left_cells: Vec<Box<str>> = pair_names.iter().map(|p| p[0].clone()).collect();
+        let right_cells: Vec<Box<str>> = pair_names.iter().map(|p| p[1].clone()).collect();
+        let cluster_f32: Vec<f32> = edge_membership.iter().map(|&k| k as f32).collect();
+
+        let ec_col_names: Vec<Box<str>> = vec!["right_cell".into(), "cluster".into()];
+        let ec_col_types = vec![ParquetType::BYTE_ARRAY, ParquetType::FLOAT];
+
+        let writer = ParquetWriter::new(
+            &(args.out.to_string() + ".edge_cluster.parquet"),
+            (n_edges, 2),
+            (Some(&left_cells), Some(&ec_col_names)),
+            Some(&ec_col_types),
+            Some("left_cell"),
+        )?;
+
+        let row_names = writer.row_names_vec();
+        let mut writer = writer.get_writer()?;
+        let mut row_group = writer.next_row_group()?;
+
+        parquet_add_bytearray(&mut row_group, row_names)?;
+        parquet_add_string_column(&mut row_group, &right_cells)?;
+        parquet_add_numeric_column(&mut row_group, &cluster_f32)?;
+
+        row_group.close()?;
+        writer.close()?;
     }
 
     if let Some(data_files) = args.expr_data_files.as_ref() {
@@ -207,7 +246,6 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
                 }
 
                 let n_k = p_kn.column_sum();
-
                 let sum_dk = x_dn * p_kn.transpose();
 
                 Ok((sum_dk, n_k))

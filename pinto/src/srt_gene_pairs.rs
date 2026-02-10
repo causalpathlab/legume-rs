@@ -50,6 +50,53 @@ impl GenePairCollapsedStat {
         self.n_samples
     }
 
+    /// Remove low-signal gene-pair edges.
+    ///
+    /// When `use_elbow` is true, applies a kneedle elbow on sorted row sums
+    /// to prune noise-level edges (for union KNN or external networks).
+    /// When false, removes only exact zeros (for reciprocal KNN).
+    ///
+    /// Mutates self and gene_graph in place. Returns number of removed edges.
+    pub fn filter_empty_edges(&mut self, gene_graph: &mut GenePairGraph, use_elbow: bool) -> usize {
+        let row_sums: Vec<f32> = (0..self.n_gene_pairs)
+            .map(|i| self.delta_pos_ds.row(i).sum())
+            .collect();
+
+        let (threshold, elbow_rank) = if use_elbow {
+            elbow_threshold(&row_sums)
+        } else {
+            (0.0, 0)
+        };
+
+        let keep_indices: Vec<usize> = (0..self.n_gene_pairs)
+            .filter(|&i| row_sums[i] > threshold)
+            .collect();
+
+        let n_removed = self.n_gene_pairs - keep_indices.len();
+        if n_removed == 0 {
+            return 0;
+        }
+
+        let n_kept = keep_indices.len();
+        let mut new_delta = Mat::zeros(n_kept, self.n_samples);
+        for (new_idx, &old_idx) in keep_indices.iter().enumerate() {
+            new_delta.row_mut(new_idx).copy_from(&self.delta_pos_ds.row(old_idx));
+        }
+
+        self.delta_pos_ds = new_delta;
+        self.gene_pairs = keep_indices.iter().map(|&i| self.gene_pairs[i]).collect();
+        self.n_gene_pairs = n_kept;
+
+        gene_graph.filter_edges(&keep_indices);
+
+        info!(
+            "Elbow threshold: {:.4} (rank {}), kept {}/{} edges",
+            threshold, elbow_rank, n_kept, n_kept + n_removed
+        );
+
+        n_removed
+    }
+
     /// Fit Poisson-Gamma on δ⁺
     pub fn optimize(&self, hyper_param: Option<(f32, f32)>) -> anyhow::Result<GenePairParameters> {
         let (a0, b0) = hyper_param.unwrap_or((1_f32, 1_f32));
@@ -276,4 +323,53 @@ fn prelim_collapse_visitor(
     stat.size_s[sample] += local_size;
 
     Ok(())
+}
+
+/// Find elbow threshold from a set of values using the kneedle method.
+///
+/// Sorts positive values descending, normalizes rank and value to [0, 1],
+/// then finds the point with maximum perpendicular distance from the line
+/// connecting the first and last points.
+///
+/// Returns (threshold, elbow_rank). Threshold is 0.0 if no clear elbow
+/// exists (all values similar or too few points).
+fn elbow_threshold(values: &[f32]) -> (f32, usize) {
+    // Only consider positive values for elbow detection
+    let mut positive: Vec<f32> = values.iter().copied().filter(|&v| v > 0.0).collect();
+    if positive.len() < 3 {
+        return (0.0, 0);
+    }
+
+    positive.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n = positive.len();
+
+    // Normalize: x = rank/(n-1) in [0,1], y = value/max in [0,1]
+    let y_max = positive[0] as f64;
+    if y_max < 1e-12 {
+        return (0.0, 0);
+    }
+
+    let x1 = 1.0_f64;
+    let y1 = positive[n - 1] as f64 / y_max;
+
+    // Line from (0, 1) to (1, y1)
+    let dx = x1;
+    let dy = y1 - 1.0;
+    let line_len = (dx * dx + dy * dy).sqrt();
+
+    let mut max_dist = 0.0_f64;
+    let mut elbow_idx = 0;
+
+    for i in 1..(n - 1) {
+        let px = i as f64 / (n - 1) as f64;
+        let py = positive[i] as f64 / y_max - 1.0;
+        let dist = (px * dy - py * dx).abs() / line_len;
+        if dist > max_dist {
+            max_dist = dist;
+            elbow_idx = i;
+        }
+    }
+
+    (positive[elbow_idx], elbow_idx)
 }
