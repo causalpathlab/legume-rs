@@ -205,7 +205,6 @@ pub struct TopicArgs {
     )]
     kl_warmup_epochs: f64,
 
-
     #[arg(
         long,
         default_value_t = 10,
@@ -483,7 +482,11 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         let outfile = args.out.to_string() + ".delta.parquet";
         let batch_names = data_vec.batch_names();
         let gene_names = data_vec.row_names()?;
-        batch_db.to_parquet_with_names(&outfile, (Some(&gene_names), Some("gene")), batch_names.as_deref())?;
+        batch_db.to_parquet_with_names(
+            &outfile,
+            (Some(&gene_names), Some("gene")),
+            batch_names.as_deref(),
+        )?;
     }
 
     // 4. Train a topic model on the collapsed data
@@ -529,7 +532,14 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         n_features_encoder, n_features_decoder
     );
 
-    let scores = train_encoder_decoder(&collapsed, &mut encoder, &decoder, &parameters, &args, selected_features.as_ref())?;
+    let scores = train_encoder_decoder(
+        &collapsed,
+        &mut encoder,
+        &decoder,
+        &parameters,
+        &args,
+        selected_features.as_ref(),
+    )?;
 
     info!("Writing down the model parameters");
 
@@ -567,7 +577,13 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     info!("Writing down the latent states");
 
-    let z_nk = evaluate_latent_by_encoder(&data_vec, &encoder, &collapsed, &args, selected_features.as_ref())?;
+    let z_nk = evaluate_latent_by_encoder(
+        &data_vec,
+        &encoder,
+        &collapsed,
+        &args,
+        selected_features.as_ref(),
+    )?;
 
     let cell_names = data_vec.column_names()?;
 
@@ -582,7 +598,11 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         use matrix_util::common_io::write_lines;
         let feature_file = args.out.to_string() + ".selected_features.txt";
         write_lines(&sel.selected_names, &feature_file)?;
-        info!("Saved {} selected features to {}", sel.selected_names.len(), feature_file);
+        info!(
+            "Saved {} selected features to {}",
+            sel.selected_names.len(),
+            feature_file
+        );
     }
 
     info!("Done");
@@ -615,7 +635,11 @@ impl TrainScores {
             .map(|x| (x + 1).to_string().into_boxed_str())
             .collect();
 
-        mat.to_parquet_with_names(file_path, (Some(&epochs), Some("epoch")), Some(&score_types))
+        mat.to_parquet_with_names(
+            file_path,
+            (Some(&epochs), Some("epoch")),
+            Some(&score_types),
+        )
     }
 }
 
@@ -816,12 +840,22 @@ where
         .par_iter()
         .progress_count(njobs)
         .map(|&block| match args.adj_method {
-            AdjMethod::Residual => {
-                evaluate_with_residuals(block, data_vec, arc_enc.clone(), &dev, delta.as_ref(), arc_sel.clone())
-            }
-            AdjMethod::Batch => {
-                evaluate_with_batch(block, data_vec, arc_enc.clone(), &dev, delta.as_ref(), arc_sel.clone())
-            }
+            AdjMethod::Residual => evaluate_with_residuals(
+                block,
+                data_vec,
+                arc_enc.clone(),
+                &dev,
+                delta.as_ref(),
+                arc_sel.clone(),
+            ),
+            AdjMethod::Batch => evaluate_with_batch(
+                block,
+                data_vec,
+                arc_enc.clone(),
+                &dev,
+                delta.as_ref(),
+                arc_sel.clone(),
+            ),
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 

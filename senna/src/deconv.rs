@@ -113,7 +113,10 @@ pub fn vmf_assign_averaged(topic_profiles: &Mat, marker_profiles: &Mat, kappas: 
     }
 
     // Softmax over log marginals to get weights
-    let max_log = log_marginals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let max_log = log_marginals
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
     let weights: Vec<f64> = log_marginals.iter().map(|&x| (x - max_log).exp()).collect();
     let sum: f64 = weights.iter().sum();
     let weights: Vec<f32> = weights.iter().map(|&w| (w / sum) as f32).collect();
@@ -220,10 +223,16 @@ mod tests {
 
         // Higher κ → lower entropy (more peaked)
         let entropy = |p: &Mat, t: usize| -> f32 {
-            (0..2).map(|c| {
-                let v = p[(t, c)];
-                if v > 0.0 { -v * v.ln() } else { 0.0 }
-            }).sum()
+            (0..2)
+                .map(|c| {
+                    let v = p[(t, c)];
+                    if v > 0.0 {
+                        -v * v.ln()
+                    } else {
+                        0.0
+                    }
+                })
+                .sum()
         };
         assert!(entropy(&high, 0) < entropy(&low, 0));
     }
