@@ -99,14 +99,6 @@ pub struct DeconvArgs {
     #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
     encoder_layers: Vec<usize>,
 
-    /// intensity levels for frequency embedding
-    #[arg(long, default_value_t = 100)]
-    vocab_size: usize,
-
-    /// intensity embedding dimension
-    #[arg(long, default_value_t = 3)]
-    vocab_emb: usize,
-
     /// # training epochs
     #[arg(long, short = 'i', default_value_t = 1000)]
     epochs: usize,
@@ -253,8 +245,6 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
 
     // 4. Train topic model on the collapsed data
     let n_topics = args.n_latent_topics;
-    let n_vocab = args.vocab_size;
-    let d_vocab_emb = args.vocab_emb;
     let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
 
     let n_features_decoder = sc_data.num_rows();
@@ -275,8 +265,6 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
             n_features: n_features_encoder,
             n_topics,
             n_modules,
-            n_vocab,
-            d_vocab_emb,
             layers: &args.encoder_layers,
             use_sparsemax: false,
             temperature: 1.0,

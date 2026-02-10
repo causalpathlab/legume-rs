@@ -271,7 +271,7 @@ mod tests {
         let dtype = DType::F32;
 
         // Problem size: N observations, P predictors, K outcomes
-        let n = 200;
+        let n = 400;
         let p = 5; // predictors (e.g., cell types)
         let k = 10; // outcomes (e.g., topics)
         let l = 3; // number of true effects (and BiSusie components)
@@ -323,7 +323,7 @@ mod tests {
         // Train
         let mut optimizer = AdamW::new_lr(varmap.all_vars(), 0.05)?;
 
-        for _epoch in 0..300 {
+        for _epoch in 0..500 {
             let loss = direct_elbo_loss(&model, &likelihood, config.num_samples)?;
             optimizer.backward_step(&loss)?;
         }

@@ -3,18 +3,15 @@ use crate::candle_aux_linear::*;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, BatchNorm, Embedding, Linear, Module, ModuleT, VarBuilder};
+use candle_nn::{ops, BatchNorm, Linear, Module, ModuleT, VarBuilder};
 
 pub struct LogSoftmaxEncoder {
     n_features: usize,
     n_topics: usize,
-    n_vocab: usize,
     n_modules: usize,
     use_sparsemax: bool,
     temperature: f32,
     feature_module: AggregateLinear,
-    emb_x: Embedding,
-    emb_logx: Embedding,
     fc: StackLayers<Linear>,
     bn_z: BatchNorm,
     z_mean: Linear,
@@ -65,36 +62,6 @@ impl LogSoftmaxEncoder {
         self.temperature = temperature;
     }
 
-    fn discretize_whitened_tensor(&self, x_nd: &Tensor) -> Result<Tensor> {
-        let n_vocab = self.n_vocab as f64;
-        let d = x_nd.rank();
-        let min_val = x_nd.min_keepdim(d - 1)?;
-        let max_val = x_nd.max_keepdim(d - 1)?;
-        let div_val = ((max_val - &min_val)? + 1.0)?;
-
-        let x_nd = x_nd.broadcast_sub(&min_val)?.broadcast_div(&div_val)?;
-
-        Ok((x_nd * (n_vocab - 1.0))?
-            .floor()?
-            .to_dtype(candle_core::DType::U32)?)
-    }
-
-    fn composite_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
-        let int_x_nd = self.discretize_whitened_tensor(x_nd)?;
-        let logx_nd = (x_nd + 1.)?.log()?;
-        let int_logx_nd = self.discretize_whitened_tensor(&logx_nd)?;
-        self.emb_x.forward_t(&int_x_nd, train)? + self.emb_logx.forward_t(&int_logx_nd, train)?
-    }
-
-    fn modularized_composite_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
-        // This is important to make every data points to have the same scale
-        let denom_n1 = x_nd.sum_keepdim(x_nd.rank() - 1)?;
-        let x_nd = (x_nd.broadcast_div(&denom_n1)? * (self.n_features as f64))?;
-        // group features into modules
-        let x_nm = self.feature_module.forward(&x_nd)?;
-        self.composite_embedding(&x_nm, train)
-    }
-
     pub fn feature_module_membership(&self) -> Result<Tensor> {
         self.feature_module.membership()
     }
@@ -103,19 +70,27 @@ impl LogSoftmaxEncoder {
         &self,
         x_nd: &Tensor,
         x0_nd: Option<&Tensor>,
-        train: bool,
+        _train: bool,
     ) -> Result<Tensor> {
         debug_assert_eq!(x_nd.dims().len(), 2);
         debug_assert!(x_nd.min_all()?.to_scalar::<f32>()? >= 0_f32);
 
-        let emb_nmk = self.modularized_composite_embedding(x_nd, train)?;
-        let last_dim = emb_nmk.rank();
+        let lx_nd = (x_nd + 1.)?.log()?;
+        let denom_n1 = lx_nd.sum_keepdim(lx_nd.rank() - 1)?;
+        let h_nm = self.feature_module.forward(
+            &(lx_nd.broadcast_div(&denom_n1)? * (self.n_features as f64))?,
+        )?;
 
-        if let Some(x0_nd) = x0_nd {
-            let emb0_nmk = self.modularized_composite_embedding(x0_nd, train)?;
-            (emb_nmk - &emb0_nmk)?.mean(last_dim - 1)
-        } else {
-            emb_nmk.mean(last_dim - 1)
+        match x0_nd {
+            Some(x0) => {
+                let lx0_nd = (x0 + 1.)?.log()?;
+                let denom0 = lx0_nd.sum_keepdim(lx0_nd.rank() - 1)?;
+                let x0_nm = self.feature_module.forward(
+                    &(lx0_nd.broadcast_div(&denom0)? * (self.n_features as f64))?,
+                )?;
+                h_nm - x0_nm
+            }
+            None => Ok(h_nm),
         }
     }
 
@@ -161,20 +136,10 @@ impl LogSoftmaxEncoder {
     }
 
     /// Will create a new non-negative encoder module
-    /// with these variables:
-    ///
-    /// * `nn.embed_x` for intensity embedding
-    /// * `nn.enc.fc.{}.weight` where {} is the layer index
-    /// * `nn.enc.z.mean.weight`
-    /// * `nn.enc.z.lnvar.weight`
     ///
     /// # Arguments
-    /// * `n_features` - the number of features
-    /// * `n_topics` - the number of topics (latent factors)
-    /// * `n_vocab` - the size of intensity vocabulary
-    /// * `d_emb` - vocabulary embedding dim
-    /// * `layers` - fully connected layers, each with the dim
-    /// * `vs` - variable builder
+    /// * `args` - encoder arguments
+    /// * `vb` - variable builder
     pub fn new(args: LogSoftmaxEncoderArgs, vb: VarBuilder) -> Result<Self> {
         let bn_config = candle_nn::BatchNormConfig {
             eps: 1e-4,
@@ -187,10 +152,6 @@ impl LogSoftmaxEncoder {
 
         let feature_module =
             aggregate_linear_hard(args.n_features, args.n_modules, vb.pp("feature.module"))?;
-
-        let emb_x = candle_nn::embedding(args.n_vocab, args.d_vocab_emb, vb.pp("nn.embed_x"))?;
-        let emb_logx =
-            candle_nn::embedding(args.n_vocab, args.d_vocab_emb, vb.pp("nn.embed_logx"))?;
 
         // (1) data -> fc
         let fc_dims = args.layers[..args.layers.len() - 1].to_vec();
@@ -207,13 +168,10 @@ impl LogSoftmaxEncoder {
         Ok(Self {
             n_features: args.n_features,
             n_topics: args.n_topics,
-            n_vocab: args.n_vocab,
             n_modules: args.n_modules,
             use_sparsemax: args.use_sparsemax,
             temperature: args.temperature,
             feature_module,
-            emb_x,
-            emb_logx,
             fc,
             bn_z,
             z_mean,
@@ -226,8 +184,6 @@ pub struct LogSoftmaxEncoderArgs<'a> {
     pub n_features: usize,
     pub n_topics: usize,
     pub n_modules: usize,
-    pub n_vocab: usize,
-    pub d_vocab_emb: usize,
     pub layers: &'a [usize],
     pub use_sparsemax: bool,
     pub temperature: f32,
