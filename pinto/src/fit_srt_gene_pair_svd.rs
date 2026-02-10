@@ -99,9 +99,18 @@ pub struct SrtGenePairSvdArgs {
           help = "Allow prefix matching for gene names in external network")]
     gene_network_allow_prefix: bool,
 
-    #[arg(long,
-          help = "Delimiter for base-key extraction in gene name matching (e.g., '.')")]
+    #[arg(long, default_value = "_",
+          help = "Delimiter for splitting compound gene names (e.g., ENSG00000141510_TP53)")]
     gene_network_delimiter: Option<char>,
+
+    #[arg(long, default_value_t = false,
+          help = "Use union (non-reciprocal) matching for gene KNN graph",
+          long_help = "Use union matching for the gene-gene KNN graph.\n\
+                       By default, only reciprocal KNN edges are kept (both genes\n\
+                       must be in each other's KNN list). With union matching,\n\
+                       an edge is kept if either gene is in the other's list,\n\
+                       producing a denser graph.")]
+    gene_graph_union: bool,
 
     #[arg(long, short,
           help = "Enable verbose logging (sets RUST_LOG=info)")]
@@ -192,7 +201,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     info!("Assigned cells to {} samples", n_samples);
 
     // 4-5. Build gene-gene graph (external network or KNN from posterior means)
-    let gene_graph = if let Some(network_file) = &args.gene_network {
+    let mut gene_graph = if let Some(network_file) = &args.gene_network {
         info!("Loading external gene network from {}...", network_file);
         GenePairGraph::from_edge_list(
             network_file,
@@ -219,11 +228,10 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
             GenePairGraphArgs {
                 knn: args.knn_gene,
                 block_size: args.block_size,
+                reciprocal: !args.gene_graph_union,
             },
         )?
     };
-
-    gene_graph.to_parquet(&(args.out.to_string() + ".gene_graph.parquet"))?;
 
     // 6. Compute gene raw means
     let gene_means = compute_gene_raw_means(&data_vec, args.block_size)?;
@@ -231,13 +239,22 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     // 7. Compute gene-pair deltas (raw counts, positive only)
     info!("Calibrating gene-gene interaction statistics...");
 
-    let gene_pair_stat = compute_gene_interaction_deltas(
+    let mut gene_pair_stat = compute_gene_interaction_deltas(
         &data_vec,
         &gene_graph,
         &gene_means,
         n_samples,
         false,
     )?;
+
+    // 7b. Filter empty gene pairs
+    let use_elbow = args.gene_graph_union || args.gene_network.is_some();
+    let n_removed = gene_pair_stat.filter_empty_edges(&mut gene_graph, use_elbow);
+    if n_removed > 0 {
+        info!("Filtered {} empty gene pairs ({} remaining)", n_removed, gene_graph.num_edges());
+    }
+
+    gene_graph.to_parquet(&(args.out.to_string() + ".gene_graph.parquet"))?;
 
     // 8. Fit Poisson-Gamma
     info!("Fitting Poisson-Gamma on gene-pair statistics...");

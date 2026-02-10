@@ -23,7 +23,7 @@ pub use std::collections::{HashMap, HashSet};
 
 pub use std::sync::{Arc, Mutex};
 
-pub use candle_util::{candle_core, candle_nn};
+pub use candle_util::candle_core;
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
