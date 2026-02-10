@@ -14,11 +14,35 @@ mod run_read_depth;
 mod scan_pwm;
 
 use crate::common::*;
+use colored::Colorize;
 use run_dartseq_count::*;
 use run_gene_count::*;
 use run_polya_count::*;
 use run_read_depth::*;
 // use scan_pwm::*; not ready yet
+
+const LOGO: &str = include_str!("../logo.txt");
+
+fn colorize_logo_line(line: &str) -> String {
+    line.replace("(o)", &"(o)".truecolor(139, 90, 43).to_string())
+        .replace("(.)", &"(.)".truecolor(180, 160, 100).to_string())
+        .replace('\\', &"\\".green().to_string())
+        .replace('/', &"/".green().to_string())
+        .replace('|', &"|".green().to_string())
+        .replace('-', &"-".green().to_string())
+        .replace('>', &">".green().to_string())
+}
+
+fn print_logo() {
+    for line in LOGO.lines() {
+        println!("  {}", colorize_logo_line(line));
+    }
+    println!(
+        " {}",
+        "Feature statistics Accumulator for Base-pair-level Analysis".bold()
+    );
+    println!();
+}
 
 /// Feature statistics Accumulator for Base-pair-level Analysis
 #[derive(Parser, Debug)]
@@ -42,11 +66,15 @@ enum Commands {
     CountPolyA(PolyACountArgs),
 
     /// Genomic coverage of regular intervals
-    #[command(aliases = ["rd", "read-depth"])]
+    #[command(alias = "rd")]
     ReadDepth(ReadDepthArgs),
 }
 
 fn main() -> anyhow::Result<()> {
+    if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
+        print_logo();
+    }
+
     let cli = Cli::parse();
     match &cli.commands {
         Commands::CountDartSeq(args) => {
