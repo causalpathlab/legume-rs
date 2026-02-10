@@ -10,7 +10,6 @@ pub type Mat = nalgebra::DMatrix<f32>;
 pub type DVec = nalgebra::DVector<f32>;
 pub type CscMat = nalgebra_sparse::CscMatrix<f32>;
 
-
 pub type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 
 pub use data_beans::sparse_data_visitors::*;

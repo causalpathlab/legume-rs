@@ -1,4 +1,4 @@
-use candle_util::candle_core::{Device, DType, Result, Tensor, Var, D};
+use candle_util::candle_core::{DType, Device, Result, Tensor, Var, D};
 
 /// t-SNE implementation using candle for automatic differentiation
 pub struct TSne {
@@ -74,7 +74,8 @@ impl TSne {
             let y_grad = grad.get(&y).unwrap();
 
             // Momentum update
-            velocity = ((&velocity * self.momentum as f64)? - (y_grad * self.learning_rate as f64)?)?;
+            velocity =
+                ((&velocity * self.momentum as f64)? - (y_grad * self.learning_rate as f64)?)?;
             y.set(&(y.as_tensor() + &velocity)?)?;
         }
 
@@ -129,7 +130,15 @@ impl TSne {
     }
 
     /// Binary search for sigma to match target entropy (perplexity)
-    fn binary_search_sigma(&self, i: usize, distances: &[f32], n: usize, target: f32, mut lo: f32, mut hi: f32) -> f32 {
+    fn binary_search_sigma(
+        &self,
+        i: usize,
+        distances: &[f32],
+        n: usize,
+        target: f32,
+        mut lo: f32,
+        mut hi: f32,
+    ) -> f32 {
         for _ in 0..50 {
             let mid = (lo + hi) / 2.0;
             let entropy = self.compute_entropy(i, distances, n, mid);
@@ -173,10 +182,10 @@ impl TSne {
     fn kl_divergence(&self, y: &Var, p: &Tensor, n: usize) -> Result<Tensor> {
         // Compute pairwise squared distances in low-dim
         // ||y_i - y_j||^2 = ||y_i||^2 + ||y_j||^2 - 2 * y_i · y_j
-        let y_sq = y.as_tensor().sqr()?.sum(D::Minus1)?;  // (n,)
-        let y_sq_row = y_sq.reshape((n, 1))?;  // (n, 1)
-        let y_sq_col = y_sq.reshape((1, n))?;  // (1, n)
-        let dot = y.as_tensor().matmul(&y.as_tensor().t()?)?;  // (n, n)
+        let y_sq = y.as_tensor().sqr()?.sum(D::Minus1)?; // (n,)
+        let y_sq_row = y_sq.reshape((n, 1))?; // (n, 1)
+        let y_sq_col = y_sq.reshape((1, n))?; // (1, n)
+        let dot = y.as_tensor().matmul(&y.as_tensor().t()?)?; // (n, n)
         let dist_sq = (y_sq_row.broadcast_add(&y_sq_col)? - (&dot * 2.0)?)?;
 
         // Student-t: q_ij = (1 + ||y_i - y_j||^2)^-1
@@ -201,7 +210,7 @@ impl TSne {
 /// Convert similarity matrix to distance matrix
 pub fn similarity_to_distance(sim: &[f32], _n: usize) -> Vec<f32> {
     sim.iter()
-        .map(|&s| (2.0 * (1.0 - s.clamp(-1.0, 1.0))).sqrt())  // Angular distance
+        .map(|&s| (2.0 * (1.0 - s.clamp(-1.0, 1.0))).sqrt()) // Angular distance
         .collect()
 }
 
@@ -213,11 +222,15 @@ mod tests {
     fn test_tsne_small() {
         // Small test: 5 points
         let n = 5;
-        let distances: Vec<f32> = (0..n*n)
+        let distances: Vec<f32> = (0..n * n)
             .map(|idx| {
                 let i = idx / n;
                 let j = idx % n;
-                if i == j { 0.0 } else { (i as f32 - j as f32).abs() }
+                if i == j {
+                    0.0
+                } else {
+                    (i as f32 - j as f32).abs()
+                }
             })
             .collect();
 
