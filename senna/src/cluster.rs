@@ -4,6 +4,7 @@
 //! (topic proportions, SVD embeddings, etc.)
 
 use crate::embed_common::*;
+use hsblock::{Hsblock, HsbmOptions};
 use leiden::clustering::SimpleClustering;
 use leiden::leiden::Leiden;
 use leiden::network::Graph;
@@ -20,6 +21,8 @@ pub enum ClusterMethod {
     KMeans,
     /// Leiden clustering (graph-based)
     Leiden,
+    /// Hierarchical Stochastic Block Model (graph-based)
+    Hsblock,
 }
 
 /// Clustering result
@@ -276,7 +279,10 @@ pub fn leiden_clustering(
         );
         tune_leiden_resolution(&network, n, target_k, resolution_scaled, seed_val)?
     } else {
-        info!("Running Leiden at scaled resolution={:.6e} ...", resolution_scaled);
+        info!(
+            "Running Leiden at scaled resolution={:.6e} ...",
+            resolution_scaled
+        );
         run_leiden(&network, n, resolution_scaled, seed_val)
     };
 
@@ -298,13 +304,115 @@ pub fn leiden_clustering(
     Ok(result)
 }
 
+/// Run HSBM community detection on latent representation (cells × features)
+///
+/// Uses the Hierarchical Stochastic Block Model as a drop-in alternative to Leiden.
+/// Infers hierarchical community structure via Variational EM (collapsed Gibbs E-step
+/// + candle autodiff M-step).
+///
+/// * `tree_depth` - Depth of the binary tree (K = 2^(depth-1) leaf clusters). Default: 3
+/// * `degree_corrected` - Whether to use degree-corrected model. Default: true
+pub fn hsblock_clustering(
+    latent: &Mat,
+    knn: usize,
+    tree_depth: usize,
+    degree_corrected: bool,
+    seed: Option<u64>,
+) -> anyhow::Result<ClusterResult> {
+    let n = latent.nrows();
+    let d = latent.ncols();
+    if n < 2 {
+        anyhow::bail!("Need at least 2 cells for HSBM clustering");
+    }
+
+    let k = 1 << (tree_depth - 1);
+    info!(
+        "HSBM: {} cells x {} features, knn={}, depth={} (K={}), dc={}, seed={:?}",
+        n, d, knn, tree_depth, k, degree_corrected, seed
+    );
+
+    // Step 1: Column-wise z-score standardization then build KNN graph
+    let mut latent_z = latent.clone();
+    latent_z.scale_columns_inplace();
+
+    info!("Building KNN graph (k={}) for {} cells ...", knn, n);
+    let graph = KnnGraph::from_rows(
+        &latent_z,
+        KnnGraphArgs {
+            knn,
+            block_size: 1000,
+            reciprocal: false,
+        },
+    )?;
+
+    let mean_degree = if graph.num_nodes() > 0 {
+        2.0 * graph.num_edges() as f64 / graph.num_nodes() as f64
+    } else {
+        0.0
+    };
+    info!(
+        "KNN graph: {} nodes, {} edges (mean degree {:.1})",
+        graph.num_nodes(),
+        graph.num_edges(),
+        mean_degree
+    );
+
+    // Step 2: Convert to leiden::Network (same as leiden_clustering)
+    let weights = graph.fuzzy_kernel_weights();
+
+    let mut node_degree = vec![0.0f32; n];
+    for (&(i, j), &w) in graph.edges.iter().zip(weights.iter()) {
+        node_degree[i] += w;
+        node_degree[j] += w;
+    }
+
+    let mut leiden_graph = Graph::with_capacity(n, graph.num_edges());
+    for i in 0..n {
+        leiden_graph.add_node(node_degree[i]);
+    }
+    for (&(i, j), &w) in graph.edges.iter().zip(weights.iter()) {
+        leiden_graph.add_edge((i as u32).into(), (j as u32).into(), w);
+    }
+    let network = Network::new_from_graph(leiden_graph);
+
+    // Step 3: Run HSBM
+    let options = HsbmOptions {
+        tree_depth,
+        degree_corrected,
+        seed: seed.unwrap_or(42),
+        ..Default::default()
+    };
+
+    let device = candle_core::Device::Cpu;
+    let mut hsblock = Hsblock::new(options, device);
+    let mut clustering = SimpleClustering::init_different_clusters(n);
+
+    let changed = hsblock.iterate(&network, &mut clustering);
+    info!(
+        "HSBM done: {} clusters, changed={}",
+        clustering.num_clusters(),
+        changed
+    );
+
+    let labels: Vec<usize> = (0..n).map(|i| clustering.get(i)).collect();
+    let result = ClusterResult {
+        n_clusters: clustering.num_clusters(),
+        labels,
+    };
+
+    let sizes = result.cluster_sizes();
+    let min_size = sizes.iter().copied().min().unwrap_or(0);
+    let max_size = sizes.iter().copied().max().unwrap_or(0);
+    info!(
+        "HSBM: {} clusters, cluster sizes min={} max={}",
+        result.n_clusters, min_size, max_size
+    );
+
+    Ok(result)
+}
+
 /// Run Leiden at a fixed resolution and return the result.
-fn run_leiden(
-    network: &Network,
-    n: usize,
-    resolution: f64,
-    seed: Option<usize>,
-) -> ClusterResult {
+fn run_leiden(network: &Network, n: usize, resolution: f64, seed: Option<usize>) -> ClusterResult {
     let mut leiden = Leiden::new(resolution, 0.01, seed);
     let mut clustering = SimpleClustering::init_different_clusters(n);
 
@@ -499,9 +607,7 @@ mod tests {
         // No label should appear in two different ground-truth groups
         for i in 0..TEST_N_GROUPS {
             for j in (i + 1)..TEST_N_GROUPS {
-                let overlap: Vec<_> = group_labels[i]
-                    .intersection(&group_labels[j])
-                    .collect();
+                let overlap: Vec<_> = group_labels[i].intersection(&group_labels[j]).collect();
                 assert!(
                     overlap.is_empty(),
                     "Ground-truth groups {} and {} share labels: {:?}",
@@ -521,8 +627,15 @@ mod tests {
         // HNSW parallel_insert is non-deterministic, so exact label
         // reproducibility is not guaranteed. Check structure instead.
         assert_eq!(r1.labels.len(), TEST_N);
-        assert!(r1.n_clusters >= TEST_N_GROUPS, "Should find at least {} clusters", TEST_N_GROUPS);
-        assert!(r1.n_clusters <= TEST_N / 2, "Should not be overly fragmented");
+        assert!(
+            r1.n_clusters >= TEST_N_GROUPS,
+            "Should find at least {} clusters",
+            TEST_N_GROUPS
+        );
+        assert!(
+            r1.n_clusters <= TEST_N / 2,
+            "Should not be overly fragmented"
+        );
     }
 
     #[test]
@@ -564,8 +677,7 @@ mod tests {
         let latent = three_cluster_latent();
         let target_k = TEST_N_GROUPS; // 3
 
-        let result =
-            leiden_clustering(&latent, TEST_KNN, 0.1, Some(target_k), Some(42)).unwrap();
+        let result = leiden_clustering(&latent, TEST_KNN, 0.1, Some(target_k), Some(42)).unwrap();
 
         assert_eq!(
             result.n_clusters, target_k,
@@ -589,16 +701,55 @@ mod tests {
         let latent = three_cluster_latent();
         let target_k = 6;
 
-        let result =
-            leiden_clustering(&latent, TEST_KNN, 0.5, Some(target_k), Some(42)).unwrap();
+        let result = leiden_clustering(&latent, TEST_KNN, 0.5, Some(target_k), Some(42)).unwrap();
 
         // May not hit exactly 6, but should be close
         let diff = (result.n_clusters as isize - target_k as isize).unsigned_abs();
         assert!(
             diff <= 2,
             "Resolution tuning for k={} produced {} clusters (too far off)",
-            target_k, result.n_clusters
+            target_k,
+            result.n_clusters
         );
+    }
+
+    #[test]
+    fn test_hsblock_valid_output() {
+        let latent = three_cluster_latent();
+        let result = hsblock_clustering(&latent, TEST_KNN, 3, false, Some(42)).unwrap();
+
+        assert_eq!(result.labels.len(), TEST_N);
+        assert!(result.n_clusters > 0);
+        assert!(result.n_clusters <= TEST_N);
+
+        // All labels should be in [0, n_clusters)
+        for &label in &result.labels {
+            assert!(label < result.n_clusters);
+        }
+
+        // Cluster sizes should sum to total
+        let total: usize = result.cluster_sizes().iter().sum();
+        assert_eq!(total, TEST_N, "Cluster sizes should sum to total cells");
+    }
+
+    #[test]
+    fn test_hsblock_degree_corrected() {
+        let latent = three_cluster_latent();
+        let result = hsblock_clustering(&latent, TEST_KNN, 2, true, Some(99)).unwrap();
+
+        assert_eq!(result.labels.len(), TEST_N);
+        assert!(result.n_clusters > 0);
+
+        for &label in &result.labels {
+            assert!(label < result.n_clusters);
+        }
+    }
+
+    #[test]
+    fn test_hsblock_too_few_cells() {
+        let latent = Mat::from_row_slice(1, 2, &[1.0, 2.0]);
+        let result = hsblock_clustering(&latent, 5, 2, false, None);
+        assert!(result.is_err());
     }
 
     #[test]
