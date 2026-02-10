@@ -5,15 +5,12 @@ use crate::candle_model_traits::*;
 
 use candle_core::{Result, Tensor};
 use candle_nn::linear;
-use candle_nn::{ops, BatchNorm, Embedding, Linear, Module, ModuleT, VarBuilder};
+use candle_nn::{ops, BatchNorm, Linear, Module, ModuleT, VarBuilder};
 
 pub struct MatchedEncoder {
     n_features: usize,
     n_topics: usize,
-    n_vocab: usize,
     feature_module: AggregateLinear,
-    emb_x: Embedding,
-    emb_logx: Embedding,
     coord_proj: Linear,
     fc_left_expr: StackLayers<Linear>,
     fc_right_expr: StackLayers<Linear>,
@@ -32,21 +29,17 @@ impl MatchedEncoderModuleT for MatchedEncoder {
     /// 2. kl-divergence
     ///
     fn forward_t(&self, data: MatchedEncoderData, train: bool) -> Result<MatchedEncoderLatent> {
-        let left_nmk = self.modularized_value_embedding(data.left, train)?;
-        let right_nmk = self.modularized_value_embedding(data.right, train)?;
+        let left_nm = self.modularized_value_embedding(data.left, train)?;
+        let right_nm = self.modularized_value_embedding(data.right, train)?;
 
         let left_nm = match data.aux_left {
-            Some(coord_nc) => left_nmk
-                .sum(left_nmk.rank() - 1)?
-                .add(&self.coord_proj.forward(coord_nc)?),
-            _ => left_nmk.sum(left_nmk.rank() - 1),
+            Some(coord_nc) => left_nm.add(&self.coord_proj.forward(coord_nc)?),
+            _ => Ok(left_nm),
         }?;
 
         let right_nm = match data.aux_right {
-            Some(coord_nc) => right_nmk
-                .sum(right_nmk.rank() - 1)?
-                .add(&self.coord_proj.forward(coord_nc)?),
-            _ => right_nmk.sum(right_nmk.rank() - 1),
+            Some(coord_nc) => right_nm.add(&self.coord_proj.forward(coord_nc)?),
+            _ => Ok(right_nm),
         }?;
 
         let (z_left_mean_nk, z_left_lnvar_nk) =
@@ -86,46 +79,19 @@ pub struct MatchedEncoderArg<'a> {
     pub dim_feature: usize,
     pub dim_latent: usize,
     pub dim_coord: usize,
-    pub n_vocab_emb: usize,
-    pub dim_emb: usize,
     pub num_feature_modules: usize,
     pub layers: &'a [usize],
 }
 
 impl MatchedEncoder {
-    /// will first aggregate `d` features into `m` modules
-    /// then embed each element in `k` different ways
+    /// Aggregate `d` features into `m` modules and apply log1p transform.
     /// * input: `x_nd` - `n x d` tensor
-    /// * output: `emb_nmk` - `n x m x k` embedding results
-    fn modularized_value_embedding(&self, x_nd: &Tensor, train: bool) -> Result<Tensor> {
-        let denom_n1 = x_nd.sum_keepdim(x_nd.rank() - 1)?;
-        let x_nd = (x_nd.broadcast_div(&denom_n1)? * 1e4)?;
-        let x_nm = self.feature_module.forward(&x_nd)?;
-        Ok(self.value_embedding(&x_nm, train)?.detach())
-    }
-
-    fn value_embedding(&self, x: &Tensor, train: bool) -> Result<Tensor> {
-        let int_x_nd = self.discretize_whitened_tensor(x)?;
-        let logx_nd = (x + 1.)?.log()?;
-        let int_logx_nd = self.discretize_whitened_tensor(&logx_nd)?;
-        self.emb_x
-            .forward_t(&int_x_nd, train)?
-            .add(&self.emb_logx.forward_t(&int_logx_nd, train)?)
-    }
-
-    fn discretize_whitened_tensor(&self, x_nd: &Tensor) -> Result<Tensor> {
-        let n_vocab = self.n_vocab as f64;
-        let d = x_nd.rank();
-        let min_val = x_nd.min_keepdim(d - 1)?;
-        let max_val = x_nd.max_keepdim(d - 1)?;
-        let div_val = ((max_val - &min_val)? + 1.0)?;
-
-        let x_nd = x_nd.broadcast_sub(&min_val)?.broadcast_div(&div_val)?;
-
-        Ok((x_nd * n_vocab)?
-            .floor()?
-            .clamp(0.0, n_vocab - 1.0)?
-            .to_dtype(candle_core::DType::U32)?)
+    /// * output: `h_nm` - `n x m` tensor
+    fn modularized_value_embedding(&self, x_nd: &Tensor, _train: bool) -> Result<Tensor> {
+        let lx_nd = (x_nd + 1.)?.log()?;
+        let denom_n1 = lx_nd.sum_keepdim(lx_nd.rank() - 1)?;
+        let lx_nd = (lx_nd.broadcast_div(&denom_n1)? * 1e4)?;
+        self.feature_module.forward(&lx_nd)
     }
 
     pub fn new(args: MatchedEncoderArg, vs: VarBuilder) -> Result<Self> {
@@ -143,10 +109,6 @@ impl MatchedEncoder {
             args.num_feature_modules,
             vs.pp("feature.module"),
         )?;
-
-        let emb_x = candle_nn::embedding(args.n_vocab_emb, args.dim_emb, vs.pp("nn.embed_x"))?;
-        let emb_logx =
-            candle_nn::embedding(args.n_vocab_emb, args.dim_emb, vs.pp("nn.embed_logx"))?;
 
         let coord_proj = linear(
             args.dim_coord,
@@ -189,10 +151,7 @@ impl MatchedEncoder {
         Ok(Self {
             n_features: args.dim_feature,
             n_topics: args.dim_latent,
-            n_vocab: args.n_vocab_emb,
             feature_module,
-            emb_x,
-            emb_logx,
             coord_proj,
             fc_left_expr,
             fc_right_expr,
@@ -282,7 +241,5 @@ pub struct MatchedEncoderArgs<'a> {
     pub n_features: usize,
     pub n_topics: usize,
     pub n_modules: usize,
-    pub n_vocab: usize,
-    pub d_vocab_emb: usize,
     pub layers: &'a [usize],
 }

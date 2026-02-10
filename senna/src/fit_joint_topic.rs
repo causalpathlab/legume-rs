@@ -409,8 +409,6 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
 
     // 4. Train a joint topic model on the collapsed data
     let n_topics = args.n_latent_topics;
-    let n_vocab = args.vocab_size;
-    let d_vocab_emb = args.vocab_emb;
     let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
 
     let dev = match args.device {
@@ -438,8 +436,6 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             n_features: n_features.clone(),
             n_topics,
             n_modules,
-            n_vocab,
-            d_vocab_emb,
             layers: &args.encoder_layers,
             use_sparsemax: args.use_sparsemax,
         },

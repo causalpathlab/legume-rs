@@ -3,17 +3,13 @@ use crate::candle_aux_linear::*;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, BatchNorm, Embedding, Linear, Module, ModuleT, VarBuilder};
+use candle_nn::{ops, BatchNorm, Linear, Module, ModuleT, VarBuilder};
 
 pub struct LogSoftmaxMultimodalEncoder {
     n_features: Vec<usize>,
     n_topics: usize,
-    n_vocab: usize,
     use_sparsemax: bool,
-    // n_modules: usize,
     feature_module: Vec<AggregateLinear>,
-    emb_x: Vec<Embedding>,
-    emb_logx: Vec<Embedding>,
     fc: Vec<StackLayers<Linear>>,
     bn_z: Vec<BatchNorm>,
     z_mean: Vec<Linear>,
@@ -43,56 +39,32 @@ impl MultimodalEncoderModuleT for LogSoftmaxMultimodalEncoder {
 }
 
 impl LogSoftmaxMultimodalEncoder {
-    fn discretize_whitened_tensor(&self, x_nd: &Tensor) -> Result<Tensor> {
-        let n_vocab = self.n_vocab as f64;
-        let d = x_nd.rank();
-        let min_val = x_nd.min_keepdim(d - 1)?;
-        let max_val = x_nd.max_keepdim(d - 1)?;
-        let div_val = ((max_val - &min_val)? + 1.0)?;
-
-        let x_nd = x_nd.broadcast_sub(&min_val)?.broadcast_div(&div_val)?;
-
-        Ok((x_nd * (n_vocab - 1.0))?
-            .floor()?
-            .to_dtype(candle_core::DType::U32)?)
-    }
-
-    fn modularized_composite_embedding(
-        &self,
-        x_nd: &Tensor,
-        m: usize,
-        train: bool,
-    ) -> Result<Tensor> {
-        // This is important to make every data points to have the same scale
-        let denom_n1 = x_nd.sum_keepdim(x_nd.rank() - 1)?;
-        let x_nd = (x_nd.broadcast_div(&denom_n1)? * (self.n_features[m] as f64))?;
-        // group features into modules
-        let x_nm = self.feature_module[m].forward(&x_nd)?;
-        // combine two types of embedding results
-        let int_x_nm = self.discretize_whitened_tensor(&x_nm)?;
-        let logx_nm = (x_nm + 1.)?.log()?;
-        let int_logx_nm = self.discretize_whitened_tensor(&logx_nm)?;
-        self.emb_x[m].forward_t(&int_x_nm, train)? + self.emb_logx[m].forward_t(&int_logx_nm, train)
-    }
-
     fn preprocess_input(
         &self,
         x_nd_vec: &[Tensor],
         x0_nd_vec: &[Option<Tensor>],
-        train: bool,
+        _train: bool,
     ) -> Result<Vec<Tensor>> {
         x_nd_vec
             .iter()
             .zip(x0_nd_vec)
             .enumerate()
             .map(|(m, (x_nd, x0_nd))| {
-                let emb_nmk = self.modularized_composite_embedding(x_nd, m, train)?;
-                let last_dim = emb_nmk.rank();
+                let lx_nd = (x_nd + 1.)?.log()?;
+                let denom_n1 = lx_nd.sum_keepdim(lx_nd.rank() - 1)?;
+                let h_nm = self.feature_module[m].forward(
+                    &(lx_nd.broadcast_div(&denom_n1)? * (self.n_features[m] as f64))?,
+                )?;
+
                 if let Some(x0_nd) = x0_nd {
-                    let emb0_nmk = self.modularized_composite_embedding(x0_nd, m, train)?;
-                    (emb_nmk - &emb0_nmk)?.mean(last_dim - 1)
+                    let lx0_nd = (x0_nd + 1.)?.log()?;
+                    let denom0 = lx0_nd.sum_keepdim(lx0_nd.rank() - 1)?;
+                    let x0_nm = self.feature_module[m].forward(
+                        &(lx0_nd.broadcast_div(&denom0)? * (self.n_features[m] as f64))?,
+                    )?;
+                    h_nm - x0_nm
                 } else {
-                    emb_nmk.mean(last_dim - 1)
+                    Ok(h_nm)
                 }
             })
             .collect()
@@ -173,20 +145,10 @@ impl LogSoftmaxMultimodalEncoder {
     }
 
     /// Will create a new non-negative encoder module
-    /// with these variables:
-    ///
-    /// * `nn.embed_x` for intensity embedding
-    /// * `nn.enc.fc.{}.weight` where {} is the layer index
-    /// * `nn.enc.z.mean.weight`
-    /// * `nn.enc.z.lnvar.weight`
     ///
     /// # Arguments
-    /// * `n_features` - the number of features
-    /// * `n_topics` - the number of topics (latent factors)
-    /// * `n_vocab` - the size of intensity vocabulary
-    /// * `d_emb` - vocabulary embedding dim
-    /// * `layers` - fully connected layers, each with the dim
-    /// * `vs` - variable builder
+    /// * `args` - encoder arguments
+    /// * `vb` - variable builder
     pub fn new(args: LogSoftmaxMultimodalEncoderArgs, vb: VarBuilder) -> Result<Self> {
         debug_assert!(!args.layers.is_empty());
 
@@ -212,48 +174,23 @@ impl LogSoftmaxMultimodalEncoder {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let emb_x = (0..n_modalities)
-            .into_iter()
-            .map(|i| {
-                candle_nn::embedding(
-                    args.n_vocab,
-                    args.d_vocab_emb,
-                    vb.pp(format!("nn.embed_x_{}", i)),
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let emb_logx = (0..n_modalities)
-            .into_iter()
-            .map(|i| {
-                candle_nn::embedding(
-                    args.n_vocab,
-                    args.d_vocab_emb,
-                    vb.pp(format!("nn.embed_logx_{}", i)),
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-
         // (1) data -> fc
         let fc_dims = args.layers[..args.layers.len() - 1].to_vec();
         let in_dim = args.n_modules;
         let out_dim = *args.layers.last().unwrap();
 
         let fc = (0..n_modalities)
-            .into_iter()
             .map(|i| {
                 stack_relu_linear(in_dim, out_dim, &fc_dims, vb.pp(format!("nn.enc.fc_{}", i)))
             })
             .collect::<Result<Vec<_>>>()?;
 
         let bn_z = (0..n_modalities)
-            .into_iter()
             .map(|i| candle_nn::batch_norm(out_dim, bn_config, vb.pp(format!("nn.enc.bn_z_{}", i))))
             .collect::<Result<Vec<_>>>()?;
 
         // (2) fc -> K
         let z_mean = (0..n_modalities)
-            .into_iter()
             .map(|i| {
                 candle_nn::linear(
                     out_dim,
@@ -264,7 +201,6 @@ impl LogSoftmaxMultimodalEncoder {
             .collect::<Result<Vec<_>>>()?;
 
         let z_lnvar = (0..n_modalities)
-            .into_iter()
             .map(|i| {
                 candle_nn::linear(
                     out_dim,
@@ -277,11 +213,8 @@ impl LogSoftmaxMultimodalEncoder {
         Ok(Self {
             n_features: args.n_features,
             n_topics: args.n_topics,
-            n_vocab: args.n_vocab,
             use_sparsemax: args.use_sparsemax,
             feature_module,
-            emb_x,
-            emb_logx,
             fc,
             bn_z,
             z_mean,
@@ -294,8 +227,6 @@ pub struct LogSoftmaxMultimodalEncoderArgs<'a> {
     pub n_features: Vec<usize>,
     pub n_topics: usize,
     pub n_modules: usize,
-    pub n_vocab: usize,
-    pub d_vocab_emb: usize,
     pub layers: &'a [usize],
     pub use_sparsemax: bool,
 }
