@@ -1,9 +1,7 @@
 mod fit_srt_gene_network;
 mod fit_srt_gene_pair_svd;
-mod fit_srt_gene_pair_topic;
 mod fit_srt_delta_svd;
 mod fit_srt_propensity;
-mod fit_srt_delta_topic;
 mod srt_cell_pairs;
 mod srt_common;
 mod srt_estimate_batch_effects;
@@ -15,11 +13,8 @@ mod srt_random_projection;
 
 use fit_srt_gene_network::*;
 use fit_srt_gene_pair_svd::*;
-use fit_srt_gene_pair_topic::*;
 use fit_srt_delta_svd::*;
 use fit_srt_propensity::*;
-use fit_srt_delta_topic::*;
-
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 
@@ -50,7 +45,7 @@ fn print_logo() {
                   PINTO identifies spatial cell-cell interaction patterns from spatially-resolved\n\
                   transcriptomics (SRT) data. It constructs spatial cell pairs from KNN graphs,\n\
                   decomposes pair-level expression into shared/difference channels, and learns\n\
-                  latent interaction topics via SVD or neural topic models.\n\n\
+                  latent interaction topics via SVD.\n\n\
                   Data files must be `.zarr` or `.h5` (`data-beans`) format. \n\
 		  Or convert `.mtx` files using `data-beans from-mtx`.",
     term_width = 80
@@ -84,29 +79,6 @@ enum Commands {
     DeltaSvd(SrtDeltaSvdArgs),
 
     #[command(
-        about = "Gene-level shared/difference by topic model",
-        long_about = "Gene-level cell-cell interaction analysis by topics with shared/difference channels.\n\n\
-                      Pipeline stages:\n\
-                      1. Load SRT data + spatial coordinates\n\
-                      2. Estimate and correct gene-level batch effects\n\
-                      3. Build spatial cell-cell KNN graph to define cell pairs\n\
-                      4. Random projection + binary sort to assign pairs to pseudobulk samples\n\
-                      5. Collapse: accumulate shared/diff statistics per gene per sample\n\
-                      6. Fit Poisson-Gamma model on each channel\n\
-                      7. Train encoder-decoder topic model on [shared; diff] posterior samples via SGD\n\
-                      8. Encode individual cell pairs into latent topic proportions\n\n\
-                      Supports --use-sparsemax for sparse topic assignments, --kl-warmup-epochs for\n\
-                      KL annealing, and --temp-start/--temp-min/--temp-anneal-tau for temperature annealing.\n\n\
-                      Outputs:\n\
-                      - {out}.delta.parquet: batch effect estimates (when multiple batches)\n\
-                      - {out}.coord_pairs.parquet: spatial cell pair coordinates\n\
-                      - {out}.dictionary.parquet: topic dictionary (2*n_genes x n_topics)\n\
-                      - {out}.latent.parquet: per-pair latent topic proportions (n_pairs x n_topics)\n\
-                      - {out}.log_likelihood.gz: training log-likelihoods"
-    )]
-    DeltaTopic(SrtTopicArgs),
-
-    #[command(
         about = "Gene-gene interaction patterns analysis by SVD",
         long_about = "Gene-gene interaction analysis by randomized SVD.\n\n\
                       Discovers gene-gene co-expression patterns within spatial neighbourhoods. \
@@ -132,39 +104,13 @@ enum Commands {
     GenePairDeltaSvd(SrtGenePairSvdArgs),
 
     #[command(
-        about = "Gene-gene interaction analysis by topic model",
-        long_about = "Gene-gene interaction analysis by neural topic model.\n\n\
-                      Same gene-pair pipeline as gene-pair-delta-svd, but replaces SVD with \
-                      an encoder-decoder topic model trained via SGD. Uses raw count product \
-                      deltas (positive channel only).\n\n\
-                      Pipeline stages:\n\
-                      1. Load SRT data + spatial coordinates\n\
-                      2. Build spatial cell-cell KNN graph\n\
-                      3. Assign cells to pseudobulk samples\n\
-                      4. Preliminary collapse + gene-gene KNN graph\n\
-                      5. Compute gene-pair positive deltas (raw counts)\n\
-                      6. Fit Poisson-Gamma on gene-pair statistics\n\
-                      7. Train encoder-decoder topic model on positive delta posterior samples\n\
-                      8. Encode individual cells into latent topics, average to per-pair codes\n\n\
-                      Supports --use-sparsemax for sparse topic assignments, --kl-warmup-epochs for\n\
-                      KL annealing, and --temp-start/--temp-min/--temp-anneal-tau for temperature annealing.\n\n\
-                      Outputs:\n\
-                      - {out}.coord_pairs.parquet: spatial cell pair coordinates\n\
-                      - {out}.gene_graph.parquet: gene-gene KNN graph edges\n\
-                      - {out}.dictionary.parquet: topic dictionary (n_edges x n_topics)\n\
-                      - {out}.latent.parquet: per-pair latent topic proportions\n\
-                      - {out}.log_likelihood.gz: training log-likelihoods"
-    )]
-    GenePairDeltaTopic(SrtGenePairTopicArgs),
-
-    #[command(
         about = "Estimate vertex propensity from edge clusters",
         long_about = "Estimate vertex (cell) propensity scores from edge (cell-pair) cluster assignments.\n\n\
-                      Takes latent edge representations from delta-svd/delta-topic, clusters edges \
+                      Takes latent edge representations from delta-svd, clusters edges \
                       via K-means, then estimates per-vertex propensity as the distribution of \
                       edge cluster memberships across all edges incident to each vertex.\n\n\
                       Inputs:\n\
-                      - Latent edge representations (.latent.parquet from delta-svd or delta-topic)\n\
+                      - Latent edge representations (.latent.parquet from delta-svd)\n\
                       - Coordinate pair file (.coord_pairs.parquet)\n\
                       - Optionally, expression data for additional statistics\n\n\
                       Outputs:\n\
@@ -203,17 +149,11 @@ fn main() -> anyhow::Result<()> {
         Commands::Propensity(args) => {
             fit_srt_propensity(args)?;
         }
-        Commands::DeltaTopic(args) => {
-            fit_srt_delta_topic(args)?;
-        }
         Commands::DeltaSvd(args) => {
             fit_srt_delta_svd(args)?;
         }
         Commands::GenePairDeltaSvd(args) => {
             fit_srt_gene_pair_svd(args)?;
-        }
-        Commands::GenePairDeltaTopic(args) => {
-            fit_srt_gene_pair_topic(args)?;
         }
         Commands::Visualize(args) => {
             fit_srt_gene_network(args)?;
