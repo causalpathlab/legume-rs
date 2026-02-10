@@ -59,7 +59,11 @@ fn fuzzy_match_ct(query: &str, target: &str) -> bool {
         return true;
     }
     // Check for common substring of 5+ chars (character-based for UTF-8 safety)
-    let (shorter, longer) = if qchars.len() <= tchars.len() { (&qchars, target) } else { (&tchars, query) };
+    let (shorter, longer) = if qchars.len() <= tchars.len() {
+        (&qchars, target)
+    } else {
+        (&tchars, query)
+    };
     (0..=shorter.len().saturating_sub(5)).any(|i| {
         let sub: String = shorter[i..i + 5].iter().collect();
         longer.contains(&sub)
@@ -104,9 +108,9 @@ pub struct CelltypeCandidates {
 /// 1. Have high weight in those topics' dictionaries
 /// 2. Are NOT already markers for that celltype
 pub fn find_candidate_markers(
-    pip_at: &Mat,                          // annotation × topic
-    dict_gt: &Mat,                         // gene × topic (log-prob or weights)
-    membership_ga: &Mat,                   // gene × annotation
+    pip_at: &Mat,        // annotation × topic
+    dict_gt: &Mat,       // gene × topic (log-prob or weights)
+    membership_ga: &Mat, // gene × annotation
     gene_names: &[Box<str>],
     topic_names: &[Box<str>],
     annot_names: &[Box<str>],
@@ -221,7 +225,10 @@ pub fn prompt_celltype_candidates(ct: &CelltypeCandidates) -> anyhow::Result<Int
         }
     }
 
-    eprint!("  Add as {} markers? [1,2,.../a=all/s=skip/d=done/q=quit]: ", ct.celltype_name);
+    eprint!(
+        "  Add as {} markers? [1,2,.../a=all/s=skip/d=done/q=quit]: ",
+        ct.celltype_name
+    );
     io::stderr().flush()?;
 
     let mut input = String::new();
@@ -392,10 +399,7 @@ pub fn augment_membership_matrix(
 }
 
 /// Print summary at end of session
-pub fn print_augmentation_summary(
-    all_new_markers: &[(Box<str>, Box<str>)],
-    iterations: usize,
-) {
+pub fn print_augmentation_summary(all_new_markers: &[(Box<str>, Box<str>)], iterations: usize) {
     eprintln!();
     eprintln!(
         "Augmentation complete: {} iterations, {} new markers",
@@ -445,7 +449,11 @@ pub fn write_candidates_json(
             writeln!(w, "          \"genes\": [")?;
 
             for (gi, g) in tm.candidates.iter().enumerate() {
-                let comma = if gi + 1 < tm.candidates.len() { "," } else { "" };
+                let comma = if gi + 1 < tm.candidates.len() {
+                    ","
+                } else {
+                    ""
+                };
                 writeln!(
                     w,
                     "            {{\"gene\": \"{}\", \"weight\": {:.6}}}{}",
@@ -454,7 +462,11 @@ pub fn write_candidates_json(
             }
 
             writeln!(w, "          ]")?;
-            let comma = if ti + 1 < ct.topic_matches.len() { "," } else { "" };
+            let comma = if ti + 1 < ct.topic_matches.len() {
+                ","
+            } else {
+                ""
+            };
             writeln!(w, "        }}{}", comma)?;
         }
 
@@ -550,7 +562,10 @@ impl MarkerDatabase {
 
         let mut db = Self::default();
         for line in open_buf_reader(path)?.lines().filter_map(|l| l.ok()) {
-            let tokens: Vec<_> = line.split(['\t', ',', ';', '|']).map(|s| s.trim()).collect();
+            let tokens: Vec<_> = line
+                .split(['\t', ',', ';', '|'])
+                .map(|s| s.trim())
+                .collect();
 
             // Find genes using flexible matching
             let found_genes: Vec<(&str, &str)> = tokens
@@ -601,9 +616,9 @@ impl MarkerDatabase {
         let gs = gene.find('_').map(|i| norm(&gene[i + 1..]));
 
         let check = |key: &str| {
-            self.gene_to_celltypes.get(key).map_or(false, |cts| {
-                cts.iter().any(|ct| fuzzy_match_ct(ct, &cn))
-            })
+            self.gene_to_celltypes
+                .get(key)
+                .map_or(false, |cts| cts.iter().any(|ct| fuzzy_match_ct(ct, &cn)))
         };
         check(&gn) || gs.map_or(false, |s| check(&s))
     }

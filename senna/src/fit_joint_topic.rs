@@ -337,37 +337,37 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     })?;
 
     // 1b. Feature selection per modality (if requested)
-    let feature_selections: Vec<Option<FeatureSelection>> = if let Some(max_feat) = args.max_features
-    {
-        info!(
-            "Selecting top {} features per modality by log-variance",
-            max_feat
-        );
-        data_stack
-            .stack
-            .iter()
-            .enumerate()
-            .map(|(d, data_vec)| {
-                let sel = select_highly_variable_features(
-                    data_vec,
-                    Some(max_feat),
-                    None,
-                    false,
-                    &format!("{}_{}", args.out, d),
-                    args.block_size,
-                    None,
-                )?;
-                info!(
-                    "Modality {}: selected {} features",
-                    d,
-                    sel.selected_indices.len()
-                );
-                Ok(Some(sel))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?
-    } else {
-        data_stack.stack.iter().map(|_| None).collect()
-    };
+    let feature_selections: Vec<Option<FeatureSelection>> =
+        if let Some(max_feat) = args.max_features {
+            info!(
+                "Selecting top {} features per modality by log-variance",
+                max_feat
+            );
+            data_stack
+                .stack
+                .iter()
+                .enumerate()
+                .map(|(d, data_vec)| {
+                    let sel = select_highly_variable_features(
+                        data_vec,
+                        Some(max_feat),
+                        None,
+                        false,
+                        &format!("{}_{}", args.out, d),
+                        args.block_size,
+                        None,
+                    )?;
+                    info!(
+                        "Modality {}: selected {} features",
+                        d,
+                        sel.selected_indices.len()
+                    );
+                    Ok(Some(sel))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?
+        } else {
+            data_stack.stack.iter().map(|_| None).collect()
+        };
 
     // 2. Concatenate projections
     let proj_dim = args.proj_dim.max(args.n_latent_topics);
@@ -749,7 +749,11 @@ impl TrainScores {
             .map(|x| (x + 1).to_string().into_boxed_str())
             .collect();
 
-        mat.to_parquet_with_names(file_path, (Some(&epochs), Some("epoch")), Some(&score_types))
+        mat.to_parquet_with_names(
+            file_path,
+            (Some(&epochs), Some("epoch")),
+            Some(&score_types),
+        )
     }
 }
 

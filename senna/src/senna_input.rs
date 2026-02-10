@@ -85,10 +85,7 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
             if has_embedded_batch {
                 // Parse batch from column names
                 for col_name in file_columns {
-                    let embedded_batch = col_name
-                        .rsplit('@')
-                        .next()
-                        .unwrap_or(col_name.as_ref());
+                    let embedded_batch = col_name.rsplit('@').next().unwrap_or(col_name.as_ref());
 
                     // If multiple files, combine embedded batch with file name
                     let batch = if num_files > 1 {
@@ -99,13 +96,19 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
                     batch_membership.push(batch);
                 }
                 if num_files > 1 {
-                    info!("File {}: combining embedded batch with file name '{}'", file_idx, file_base);
+                    info!(
+                        "File {}: combining embedded batch with file name '{}'",
+                        file_idx, file_base
+                    );
                 } else {
                     info!("Extracting batch from column names (detected '@' separator)");
                 }
             } else {
                 // Use file name as batch
-                info!("File {}: using file name '{}' as batch", file_idx, file_base);
+                info!(
+                    "File {}: using file name '{}' as batch",
+                    file_idx, file_base
+                );
                 batch_membership.extend(vec![file_base; ncols]);
             }
         }
