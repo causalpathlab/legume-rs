@@ -23,14 +23,33 @@ use run_read_depth::*;
 
 const LOGO: &str = include_str!("../logo.txt");
 
+fn colorize_pod(s: &str) -> String {
+    s.replace('○', &"○".bright_green().to_string())
+        .replace(':', &":".truecolor(100, 160, 80).to_string())
+        .replace('.', &".".truecolor(120, 170, 90).to_string())
+        .replace('_', &"_".truecolor(60, 120, 40).to_string())
+        .replace('~', &"~".truecolor(80, 140, 60).to_string())
+        .replace('\'', &"'".truecolor(60, 120, 40).to_string())
+        .replace('`', &"`".truecolor(60, 120, 40).to_string())
+        .replace('/', &"/".truecolor(60, 120, 40).to_string())
+        .replace('\\', &"\\".truecolor(60, 120, 40).to_string())
+        .replace('-', &"-".truecolor(80, 140, 60).to_string())
+}
+
+fn colorize_funnel(s: &str) -> String {
+    s.replace('○', &"○".bright_green().to_string())
+        .replace('/', &"/".truecolor(200, 160, 60).to_string())
+        .replace('\\', &"\\".truecolor(200, 160, 60).to_string())
+        .replace('|', &"|".truecolor(200, 160, 60).to_string())
+        .replace('-', &"-".truecolor(200, 160, 60).to_string())
+        .replace('>', &">".truecolor(240, 200, 80).to_string())
+}
+
 fn colorize_logo_line(line: &str) -> String {
-    line.replace("(o)", &"(o)".truecolor(139, 90, 43).to_string())
-        .replace("(.)", &"(.)".truecolor(180, 160, 100).to_string())
-        .replace('\\', &"\\".green().to_string())
-        .replace('/', &"/".green().to_string())
-        .replace('|', &"|".green().to_string())
-        .replace('-', &"-".green().to_string())
-        .replace('>', &">".green().to_string())
+    // Pod ends around column 38, funnel+peas after
+    let split = 38.min(line.len());
+    let (pod, funnel) = line.split_at(split);
+    format!("{}{}", colorize_pod(pod), colorize_funnel(funnel))
 }
 
 fn print_logo() {
