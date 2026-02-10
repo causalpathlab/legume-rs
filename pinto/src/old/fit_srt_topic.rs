@@ -247,8 +247,6 @@ pub fn fit_srt_topic(args: &SrtTopicArgs) -> anyhow::Result<()> {
             dim_feature: collapsed.nrows(),
             dim_latent: args.n_latent_topics,
             dim_coord: collapsed.num_coordinate_embedding(),
-            n_vocab_emb: args.vocab_size,
-            dim_emb: args.coord_emb,
             num_feature_modules: args.feature_modules.unwrap_or(args.encoder_layers[0]),
             layers: &args.encoder_layers,
         },

@@ -208,24 +208,6 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        default_value_t = 10,
-        help = "Intensity levels for frequency embedding",
-        long_help = "Intensity levels for frequency embedding.\n\
-		     Controls the vocabulary size for intensity embedding."
-    )]
-    vocab_size: usize,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Intensity embedding dimension",
-        long_help = "Intensity embedding dimension.\n\
-		     Controls the size of the embedding for intensity levels."
-    )]
-    vocab_emb: usize,
-
-    #[arg(
-        long,
         short = 'i',
         default_value_t = 1000,
         help = "Number of training epochs",
@@ -488,8 +470,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     // 4. Train a topic model on the collapsed data
     let n_topics = args.n_latent_topics;
-    let n_vocab = args.vocab_size;
-    let d_vocab_emb = args.vocab_emb;
     let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
 
     let n_features_decoder = selected_features
@@ -513,8 +493,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             n_features: n_features_encoder,
             n_topics,
             n_modules,
-            n_vocab,
-            d_vocab_emb,
             layers: &args.encoder_layers,
             use_sparsemax: args.use_sparsemax,
             temperature: args.temp_start,
