@@ -21,11 +21,11 @@ use colored::Colorize;
 const LOGO: &str = include_str!("../logo.txt");
 
 fn colorize_logo_line(line: &str) -> String {
-    line.replace('▄', &"▄".truecolor(139, 90, 43).to_string())
-        .replace('▓', &"▓".truecolor(139, 90, 43).to_string())
+    line.replace('▄', &"▄".truecolor(190, 100, 70).to_string())
+        .replace('▓', &"▓".truecolor(217, 119, 87).to_string())
         .replace('█', &"█".truecolor(180, 120, 60).to_string())
-        .replace('▀', &"▀".truecolor(139, 90, 43).to_string())
-        .replace('─', &"─".green().to_string())
+        .replace('▀', &"▀".truecolor(190, 100, 70).to_string())
+        .replace('━', &"━".truecolor(0, 100, 0).to_string())
 }
 
 fn print_logo() {

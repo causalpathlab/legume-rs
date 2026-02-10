@@ -11,12 +11,12 @@ const LOGO: &str = include_str!("../logo.txt");
 fn colorize_logo_line(line: &str) -> String {
     line
         .replace('●', &"●".bright_yellow().to_string())
-        .replace('╱', &"╱".green().to_string())
-        .replace('╲', &"╲".green().to_string())
-        .replace('(', &"(".green().to_string())
-        .replace(')', &")".green().to_string())
-        .replace('\\', &"\\".green().to_string())
-        .replace('/', &"/".green().to_string())
+        .replace('╱', &"╱".truecolor(0, 100, 0).to_string())
+        .replace('╲', &"╲".truecolor(0, 100, 0).to_string())
+        .replace('(', &"(".truecolor(0, 100, 0).to_string())
+        .replace(')', &")".truecolor(0, 100, 0).to_string())
+        .replace('\\', &"\\".truecolor(0, 100, 0).to_string())
+        .replace('/', &"/".truecolor(0, 100, 0).to_string())
         .replace('~', &"~".truecolor(101, 67, 33).to_string())
 }
 
