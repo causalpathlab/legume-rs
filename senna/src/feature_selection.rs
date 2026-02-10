@@ -7,11 +7,11 @@ use ndarray::Ix1;
 
 /// Feature selection result with selected indices, names, and selection matrix
 pub struct FeatureSelection {
-    pub selected_indices: Vec<usize>,      // Sorted indices of selected features
-    pub selected_names: Vec<Box<str>>,     // Names of selected features
+    pub selected_indices: Vec<usize>, // Sorted indices of selected features
+    pub selected_names: Vec<Box<str>>, // Names of selected features
     #[allow(dead_code)]
-    pub index_map: FnvHashMap<usize, usize>,  // old_idx -> new_idx mapping
-    pub selection_matrix: CscMat,          // Sparse selection matrix: S[new_i, old_i] = 1.0
+    pub index_map: FnvHashMap<usize, usize>, // old_idx -> new_idx mapping
+    pub selection_matrix: CscMat,     // Sparse selection matrix: S[new_i, old_i] = 1.0
 }
 
 /// Select highly variable features based on log-variance or from a pre-selected list
@@ -69,9 +69,11 @@ pub fn select_highly_variable_features(
 
             // Calculate mean and SD of log-transformed means
             let log_mean: f32 = log_mean_expr.iter().sum::<f32>() / log_mean_expr.len() as f32;
-            let log_variance: f32 = log_mean_expr.iter()
+            let log_variance: f32 = log_mean_expr
+                .iter()
                 .map(|&x| (x - log_mean).powi(2))
-                .sum::<f32>() / log_mean_expr.len() as f32;
+                .sum::<f32>()
+                / log_mean_expr.len() as f32;
             let log_sd = log_variance.sqrt();
             let cutoff = log_mean + sd_threshold * log_sd;
 
@@ -83,11 +85,7 @@ pub fn select_highly_variable_features(
                 if log_expr <= cutoff {
                     valid_features.push(i);
                 } else {
-                    excluded_features.push((
-                        feature_names[i].clone(),
-                        mean_expr[i],
-                        log_expr,
-                    ));
+                    excluded_features.push((feature_names[i].clone(), mean_expr[i], log_expr));
                 }
             }
 
@@ -113,10 +111,15 @@ pub fn select_highly_variable_features(
         };
 
         if valid_features.is_empty() {
-            return Err(anyhow::anyhow!("All features were excluded as highly expressed"));
+            return Err(anyhow::anyhow!(
+                "All features were excluded as highly expressed"
+            ));
         }
 
-        info!("Computing log-variance for {} features...", valid_features.len());
+        info!(
+            "Computing log-variance for {} features...",
+            valid_features.len()
+        );
 
         // Step 2: Compute log-variance using custom visitor
         let mut log_stat = RunningStatistics::new(Ix1(data_vec.num_rows()));
@@ -137,9 +140,8 @@ pub fn select_highly_variable_features(
         }
 
         // Rank features by variance (descending), only considering valid features
-        let mut indexed_variance: Vec<(usize, f32)> = valid_features.iter()
-            .map(|&i| (i, variance[i]))
-            .collect();
+        let mut indexed_variance: Vec<(usize, f32)> =
+            valid_features.iter().map(|&i| (i, variance[i])).collect();
 
         indexed_variance.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -180,7 +182,9 @@ pub fn select_highly_variable_features(
             selection_matrix,
         })
     } else {
-        Err(anyhow::anyhow!("Either max_features or feature_list_file must be provided"))
+        Err(anyhow::anyhow!(
+            "Either max_features or feature_list_file must be provided"
+        ))
     }
 }
 
@@ -241,7 +245,10 @@ fn load_feature_list_from_file(
     }
 
     if not_found > 0 {
-        info!("Warning: {} features from file not found in data", not_found);
+        info!(
+            "Warning: {} features from file not found in data",
+            not_found
+        );
     }
 
     // Sort indices for efficient .select() operations
@@ -257,7 +264,11 @@ fn load_feature_list_from_file(
     // Create sparse selection matrix once
     let selection_matrix = create_selection_matrix(&selected_indices, all_feature_names.len());
 
-    info!("Loaded {} features from {}", selected_indices.len(), file_path);
+    info!(
+        "Loaded {} features from {}",
+        selected_indices.len(),
+        file_path
+    );
 
     Ok(FeatureSelection {
         selected_indices,
@@ -300,7 +311,7 @@ fn log_variance_visitor(
 ) -> anyhow::Result<()> {
     let (lb, ub) = job;
     let xx = data.read_columns_ndarray(lb..ub)?;
-    let xx_log = xx.mapv(|x| (x + 1.0).ln());  // log1p transform
+    let xx_log = xx.mapv(|x| (x + 1.0).ln()); // log1p transform
 
     let mut stat = arc_stat.lock().unwrap();
     // Process each column (feature across samples)
@@ -363,7 +374,8 @@ fn create_selection_matrix(selected_indices: &[usize], n_total_rows: usize) -> C
         triplets.push((new_i as u64, old_i as u64, 1.0_f32));
     }
 
-    CscMat::from_nonzero_triplets(n_selected, n_total_rows, &triplets).expect("Failed to create selection matrix")
+    CscMat::from_nonzero_triplets(n_selected, n_total_rows, &triplets)
+        .expect("Failed to create selection matrix")
 }
 
 /// Filter CSC matrix by selected row indices using pre-computed selection matrix

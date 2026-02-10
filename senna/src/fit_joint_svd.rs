@@ -211,7 +211,11 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
             let data_vec = &data_stack.stack[d];
             let batch_names = data_vec.batch_names();
             let gene_names = data_vec.row_names()?;
-            batch_db.to_parquet_with_names(&outfile, (Some(&gene_names), Some("gene")), batch_names.as_deref())?;
+            batch_db.to_parquet_with_names(
+                &outfile,
+                (Some(&gene_names), Some("gene")),
+                batch_names.as_deref(),
+            )?;
         }
     }
 
