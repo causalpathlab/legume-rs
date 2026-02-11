@@ -160,6 +160,71 @@ impl GibbsSampler {
 
         total_moves
     }
+
+    /// Run greedy (argmax) sweeps: each vertex moves to the cluster with
+    /// highest conditional score. No stochastic sampling.
+    ///
+    /// Typically used as a finalization step after Gibbs exploration to
+    /// settle into the MAP assignment.
+    ///
+    /// Returns the total number of vertex moves across all sweeps.
+    pub fn run_greedy(
+        &mut self,
+        tree: &BTree,
+        stats: &mut SufficientStats,
+        adj_list: &[Vec<(usize, f64)>],
+        num_sweeps: usize,
+        degree_corrected: bool,
+    ) -> usize {
+        let k = stats.k;
+        let n = stats.n;
+        self.log_probs.resize(k, 0.0);
+
+        let mut total_moves = 0;
+
+        for _sweep in 0..num_sweeps {
+            let mut sweep_moves = 0;
+            for v in 0..n {
+                let old_c = stats.membership[v];
+
+                compute_log_probs_for_vertex(
+                    v,
+                    tree,
+                    stats,
+                    adj_list,
+                    degree_corrected,
+                    &mut self.log_probs,
+                );
+
+                // Argmax: pick cluster with highest delta score
+                let new_c = argmax_log(&self.log_probs);
+
+                if new_c != old_c {
+                    stats.delta_move(v, old_c, new_c, &adj_list[v]);
+                    sweep_moves += 1;
+                }
+            }
+            total_moves += sweep_moves;
+            if sweep_moves == 0 {
+                break; // converged
+            }
+        }
+
+        total_moves
+    }
+}
+
+/// Pick the index with the highest value.
+fn argmax_log(log_probs: &[f64]) -> usize {
+    let mut best = 0;
+    let mut best_val = log_probs[0];
+    for (i, &v) in log_probs.iter().enumerate().skip(1) {
+        if v > best_val {
+            best_val = v;
+            best = i;
+        }
+    }
+    best
 }
 
 /// Compute log-probability for assigning vertex `v` to each cluster.
@@ -280,8 +345,12 @@ fn compute_log_probs_for_vertex(
                     } else {
                         stats.cluster_volume[cj]
                     };
-                    // Degree-corrected: total_stat(ci,cj) = vol_ci * vol_cj for all pairs
-                    vol_ci * vol_cj
+                    // Degree-corrected: vol_i * vol_j, halved for self-pairs
+                    if ci == cj {
+                        vol_ci * vol_cj / 2.0
+                    } else {
+                        vol_ci * vol_cj
+                    }
                 } else {
                     let sz_ci = if ci == current_c {
                         new_size_s

@@ -307,8 +307,8 @@ pub fn leiden_clustering(
 /// Run HSBM community detection on latent representation (cells × features)
 ///
 /// Uses the Hierarchical Stochastic Block Model as a drop-in alternative to Leiden.
-/// Infers hierarchical community structure via Variational EM (collapsed Gibbs E-step
-/// + candle autodiff M-step).
+/// Infers hierarchical community structure via collapsed Gibbs sampling with
+/// Poisson rates analytically integrated out (Gamma-Poisson conjugacy).
 ///
 /// * `tree_depth` - Depth of the binary tree (K = 2^(depth-1) leaf clusters). Default: 3
 /// * `degree_corrected` - Whether to use degree-corrected model. Default: true
@@ -317,6 +317,7 @@ pub fn hsblock_clustering(
     knn: usize,
     tree_depth: usize,
     degree_corrected: bool,
+    edge_scale: f64,
     seed: Option<u64>,
 ) -> anyhow::Result<ClusterResult> {
     let n = latent.nrows();
@@ -379,12 +380,12 @@ pub fn hsblock_clustering(
     let options = HsbmOptions {
         tree_depth,
         degree_corrected,
+        edge_scale,
         seed: seed.unwrap_or(42),
         ..Default::default()
     };
 
-    let device = candle_core::Device::Cpu;
-    let mut hsblock = Hsblock::new(options, device);
+    let mut hsblock = Hsblock::new(options);
     let mut clustering = SimpleClustering::init_different_clusters(n);
 
     let changed = hsblock.iterate(&network, &mut clustering);
@@ -404,8 +405,15 @@ pub fn hsblock_clustering(
     let min_size = sizes.iter().copied().min().unwrap_or(0);
     let max_size = sizes.iter().copied().max().unwrap_or(0);
     info!(
-        "HSBM: {} clusters, cluster sizes min={} max={}",
-        result.n_clusters, min_size, max_size
+        "HSBM done: {} clusters, cluster sizes min={} max={} median={}",
+        result.n_clusters,
+        min_size,
+        max_size,
+        {
+            let mut s = sizes.clone();
+            s.sort();
+            s[s.len() / 2]
+        }
     );
 
     Ok(result)
@@ -716,7 +724,7 @@ mod tests {
     #[test]
     fn test_hsblock_valid_output() {
         let latent = three_cluster_latent();
-        let result = hsblock_clustering(&latent, TEST_KNN, 3, false, Some(42)).unwrap();
+        let result = hsblock_clustering(&latent, TEST_KNN, 3, false, 100.0, Some(42)).unwrap();
 
         assert_eq!(result.labels.len(), TEST_N);
         assert!(result.n_clusters > 0);
@@ -735,7 +743,7 @@ mod tests {
     #[test]
     fn test_hsblock_degree_corrected() {
         let latent = three_cluster_latent();
-        let result = hsblock_clustering(&latent, TEST_KNN, 2, true, Some(99)).unwrap();
+        let result = hsblock_clustering(&latent, TEST_KNN, 2, true, 100.0, Some(99)).unwrap();
 
         assert_eq!(result.labels.len(), TEST_N);
         assert!(result.n_clusters > 0);
@@ -748,7 +756,7 @@ mod tests {
     #[test]
     fn test_hsblock_too_few_cells() {
         let latent = Mat::from_row_slice(1, 2, &[1.0, 2.0]);
-        let result = hsblock_clustering(&latent, 5, 2, false, None);
+        let result = hsblock_clustering(&latent, 5, 2, false, 100.0, None);
         assert!(result.is_err());
     }
 

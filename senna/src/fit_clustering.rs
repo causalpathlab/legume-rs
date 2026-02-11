@@ -72,9 +72,9 @@ pub struct ClusteringArgs {
 		       Automatically determines number of clusters\n\
 		       Use --knn and --resolution to tune\n\n\
 		     - hsblock: Hierarchical Stochastic Block Model (graph-based)\n\
-		       Bayesian inference of hierarchical community structure\n\
+		       Collapsed Gibbs sampling + greedy refinement\n\
 		       Number of clusters = 2^(tree_depth-1)\n\
-		       Use --knn and --tree-depth to tune"
+		       Use --knn, --tree-depth, and --edge-scale to tune"
     )]
     method: ClusterMethodCli,
 
@@ -108,6 +108,13 @@ pub struct ClusteringArgs {
         help = "Use degree-corrected HSBM (default true)"
     )]
     degree_corrected: bool,
+
+    #[arg(
+        long,
+        default_value_t = 100.0,
+        help = "Edge weight scale for HSBM (default 100.0, scales fuzzy weights to count-like values)"
+    )]
+    edge_scale: f64,
 
     #[arg(long, help = "Random seed for graph-based clustering")]
     seed: Option<u64>,
@@ -195,6 +202,7 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
                 args.knn,
                 args.tree_depth,
                 args.degree_corrected,
+                args.edge_scale,
                 args.seed,
             )?
         }

@@ -3,12 +3,10 @@
 //! Tracks the K×K edge count matrix `C = Z * A * Z'`, cluster sizes,
 //! and cluster volumes (degree sums) needed for the Poisson model.
 //!
-//! Supports both:
-//! - O(degree) incremental updates when a single vertex moves (Gibbs E-step)
-//! - Full GPU recomputation via candle matmul (periodic recalibration)
+//! Supports O(degree) incremental updates when a single vertex moves
+//! (Gibbs E-step), plus full recomputation for periodic recalibration.
 
 use crate::btree::BTree;
-use candle_core::{DType, Device, Result, Tensor};
 
 /// Sufficient statistics for the HSBM.
 ///
@@ -97,7 +95,15 @@ impl SufficientStats {
     #[inline]
     pub fn total_stat(&self, ci: usize, cj: usize, degree_corrected: bool) -> f64 {
         if degree_corrected {
-            self.cluster_volume[ci] * self.cluster_volume[cj]
+            let vi = self.cluster_volume[ci];
+            let vj = self.cluster_volume[cj];
+            if ci == cj {
+                // Self-pair: analogous to n*(n-1)/2 in non-DC.
+                // Use vol^2 / 2 to avoid double-counting undirected pairs.
+                vi * vj / 2.0
+            } else {
+                vi * vj
+            }
         } else if ci == cj {
             let s = self.cluster_size[ci];
             s * (s - 1.0) / 2.0
@@ -185,82 +191,33 @@ impl SufficientStats {
         (node_edge, node_total)
     }
 
-    /// Convert aggregated tree stats to candle tensors (excluding index 0).
-    ///
-    /// Returns tensors of shape `(num_nodes,)` on the specified device.
-    pub fn tree_stats_to_tensors(
-        node_edge: &[f64],
-        node_total: &[f64],
-        device: &Device,
-    ) -> Result<(Tensor, Tensor)> {
-        // Skip index 0 (unused in 1-indexed heap)
-        let edge_f32: Vec<f32> = node_edge[1..].iter().map(|&x| x as f32).collect();
-        let total_f32: Vec<f32> = node_total[1..].iter().map(|&x| x as f32).collect();
-        let n = edge_f32.len();
-
-        let edge_t = Tensor::from_vec(edge_f32, (n,), device)?;
-        let total_t = Tensor::from_vec(total_f32, (n,), device)?;
-
-        Ok((edge_t, total_t))
-    }
-
-    /// Full recomputation of edge counts via candle GPU matmul: C = Z @ A @ Z^T.
+    /// Full recomputation of sufficient statistics from edge list.
     ///
     /// This is useful for periodic recalibration to avoid floating-point drift
     /// from many incremental delta_move updates.
-    ///
-    /// * `edges` - Original edge list
-    /// * `device` - Candle device (CPU or GPU)
-    pub fn recompute_candle(&mut self, edges: &[WeightedEdge], device: &Device) -> Result<()> {
+    pub fn recompute(&mut self, edges: &[WeightedEdge]) {
         let n = self.n;
         let k = self.k;
 
-        // Build dense adjacency matrix (n x n) — for small-to-medium graphs
-        // For very large graphs, consider sparse representation
-        let mut adj_data = vec![0.0f32; n * n];
-        for &(i, j, w) in edges {
-            adj_data[i * n + j] = w;
-            adj_data[j * n + i] = w;
-        }
-        let adj = Tensor::from_vec(adj_data, (n, n), device)?;
-
-        // Build membership matrix Z (k x n) one-hot
-        let mut z_data = vec![0.0f32; k * n];
-        for (v, &c) in self.membership.iter().enumerate() {
-            z_data[c * n + v] = 1.0;
-        }
-        let z = Tensor::from_vec(z_data, (k, n), device)?;
-        let z_t = z.t()?;
-
-        // C = Z @ A @ Z^T  (k x n) @ (n x n) @ (n x k) = (k x k)
-        let za = z.matmul(&adj)?;
-        let c = za.matmul(&z_t)?;
-
-        // Copy back to CPU
-        // Note: Z @ A @ Z^T double-counts within-cluster edges since A is symmetric.
-        // Halve the diagonal blocks to match the convention of from_edges().
-        let c_cpu: Vec<f32> = c.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
-        for ci in 0..k {
-            for cj in 0..k {
-                let val = c_cpu[ci * k + cj] as f64;
-                if ci == cj {
-                    self.edge_counts[ci * k + cj] = val / 2.0;
-                } else {
-                    self.edge_counts[ci * k + cj] = val;
-                }
-            }
-        }
-
-        // Recompute cluster sizes and volumes
+        self.edge_counts = vec![0.0; k * k];
         self.cluster_size = vec![0.0; k];
         self.cluster_volume = vec![0.0; k];
+
         for v in 0..n {
             let c = self.membership[v];
             self.cluster_size[c] += 1.0;
             self.cluster_volume[c] += self.vertex_degree[v];
         }
 
-        Ok(())
+        for &(i, j, w) in edges {
+            let ci = self.membership[i];
+            let cj = self.membership[j];
+            let w = w as f64;
+            self.edge_counts[ci * k + cj] += w;
+            if ci != cj {
+                self.edge_counts[cj * k + ci] += w;
+            }
+        }
     }
 }
 
@@ -356,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recompute_candle() -> Result<()> {
+    fn test_recompute() {
         let (edges, n) = simple_graph();
         let labels = vec![0, 0, 0, 1, 1];
         let mut stats = SufficientStats::from_edges(&edges, n, 2, &labels);
@@ -364,19 +321,17 @@ mod tests {
         // Save original
         let orig_counts = stats.edge_counts.clone();
 
-        // Recompute via candle
-        stats.recompute_candle(&edges, &Device::Cpu)?;
+        // Recompute from scratch
+        stats.recompute(&edges);
 
         for i in 0..4 {
             assert!(
-                (stats.edge_counts[i] - orig_counts[i]).abs() < 1e-5,
-                "Mismatch at {}: candle={}, orig={}",
+                (stats.edge_counts[i] - orig_counts[i]).abs() < 1e-10,
+                "Mismatch at {}: recomputed={}, orig={}",
                 i,
                 stats.edge_counts[i],
                 orig_counts[i]
             );
         }
-
-        Ok(())
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! A drop-in alternative to Leiden clustering that infers hierarchical
 //! community structure using a Bayesian stochastic block model with a
-//! binary tree prior. Inference is performed via Variational EM with
-//! collapsed Gibbs sampling (E-step) and candle-based autodiff (M-step).
+//! binary tree prior. Inference is performed via collapsed Gibbs sampling,
+//! with Poisson rates analytically integrated out via Gamma-Poisson conjugacy.
 //!
 //! # Model
 //!
@@ -20,19 +20,19 @@
 /// Binary tree data structure with O(1) lowest-common-ancestor queries
 pub mod btree;
 
-/// Poisson (Gamma-Poisson) score functions for CPU and candle
+/// Poisson (Gamma-Poisson) score functions (CPU)
 pub mod model;
 
 /// Sufficient statistics: Z*A*Z' edge counts, cluster sizes, volumes
 pub mod sufficient_stats;
 
-/// Collapsed Gibbs sampler (E-step)
+/// Collapsed Gibbs sampler
 pub mod gibbs;
 
-/// Variational EM outer loop with candle-based M-step
-pub mod variational;
+/// Collapsed Gibbs inference loop
+pub mod inference;
 
 #[cfg(test)]
 mod test;
 
-pub use variational::{Hsblock, HsbmOptions};
+pub use inference::{Hsblock, HsbmOptions};
