@@ -1,6 +1,6 @@
+mod fit_srt_delta_svd;
 mod fit_srt_gene_network;
 mod fit_srt_gene_pair_svd;
-mod fit_srt_delta_svd;
 mod fit_srt_propensity;
 mod srt_cell_pairs;
 mod srt_common;
@@ -11,12 +11,12 @@ mod srt_input;
 mod srt_knn_graph;
 mod srt_random_projection;
 
-use fit_srt_gene_network::*;
-use fit_srt_gene_pair_svd::*;
-use fit_srt_delta_svd::*;
-use fit_srt_propensity::*;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use fit_srt_delta_svd::*;
+use fit_srt_gene_network::*;
+use fit_srt_gene_pair_svd::*;
+use fit_srt_propensity::*;
 
 const LOGO: &str = include_str!("../logo.txt");
 
@@ -32,7 +32,10 @@ fn print_logo() {
     for line in LOGO.lines() {
         println!("  {}", colorize_logo_line(line));
     }
-    println!(" {}", "Proximity-based Interaction Network --> Tissue Organization".bold());
+    println!(
+        " {}",
+        "Proximity-based Interaction Network --> Tissue Organization".bold()
+    );
     println!();
 }
 

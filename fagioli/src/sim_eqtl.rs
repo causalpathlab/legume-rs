@@ -1,13 +1,13 @@
 use anyhow::Result;
 use clap::Args;
 use log::info;
-use nalgebra::DMatrix;
 use matrix_util::traits::SampleOps;
+use nalgebra::DMatrix;
 
 use fagioli::genotype::{BedReader, GenomicRegion, GenotypeReader};
 use fagioli::simulation::{
-    sample_cell_type_fractions, sample_cell_type_genetic_effects,
-    simulate_phenotypes, PhenotypeSimulationParams,
+    sample_cell_type_fractions, sample_cell_type_genetic_effects, simulate_phenotypes,
+    PhenotypeSimulationParams,
 };
 
 #[derive(Args, Debug, Clone)]
@@ -45,7 +45,6 @@ pub struct SimulationArgs {
     pub seed: u64,
 
     // === Phase 2: Gene-level eQTL and single-cell simulation ===
-
     /// Simulation mode: 'aggregated' (Phase 1) or 'single-cell' (Phase 2)
     #[arg(long, default_value = "single-cell")]
     pub mode: String,
@@ -119,7 +118,6 @@ pub struct SimulationArgs {
     pub backend: String,
 
     // === Phase 1 backward compatibility ===
-
     /// [Phase 1 only] Number of shared causal variants
     #[arg(long, default_value = "5")]
     pub num_shared_causal: usize,
@@ -154,7 +152,10 @@ fn read_genotypes(args: &SimulationArgs) -> Result<fagioli::genotype::GenotypeMa
         (None, Some(right)) => format!("chr={}, ..{}", args.chromosome, right),
         (None, None) => format!("chr={}", args.chromosome),
     };
-    info!("Reading genotypes from {} ({})", args.bed_prefix, region_str);
+    info!(
+        "Reading genotypes from {} ({})",
+        args.bed_prefix, region_str
+    );
 
     let mut reader = BedReader::new(&args.bed_prefix)?;
     let region = GenomicRegion::new(
@@ -164,7 +165,11 @@ fn read_genotypes(args: &SimulationArgs) -> Result<fagioli::genotype::GenotypeMa
     );
 
     let geno = reader.read(args.max_individuals, Some(region))?;
-    info!("Loaded {} individuals × {} SNPs", geno.num_individuals(), geno.num_snps());
+    info!(
+        "Loaded {} individuals × {} SNPs",
+        geno.num_individuals(),
+        geno.num_snps()
+    );
     Ok(geno)
 }
 
@@ -197,13 +202,16 @@ fn sim_eqtl_phase1(args: &SimulationArgs, use_parquet: bool) -> Result<()> {
     if args.num_shared_causal + args.num_independent_causal > m {
         anyhow::bail!(
             "num_shared_causal ({}) + num_independent_causal ({}) > num_snps ({})",
-            args.num_shared_causal, args.num_independent_causal, m
+            args.num_shared_causal,
+            args.num_independent_causal,
+            m
         );
     }
 
     // Sample cell fractions
     info!("Sampling cell type fractions");
-    let cell_frac = sample_cell_type_fractions(n, args.num_cell_types, &args.dirichlet_alpha, args.seed)?;
+    let cell_frac =
+        sample_cell_type_fractions(n, args.num_cell_types, &args.dirichlet_alpha, args.seed)?;
 
     // Sample genetic effects
     info!(
@@ -211,8 +219,12 @@ fn sim_eqtl_phase1(args: &SimulationArgs, use_parquet: bool) -> Result<()> {
         args.num_shared_causal, args.num_independent_causal
     );
     let gen_eff = sample_cell_type_genetic_effects(
-        m, args.num_cell_types, args.num_shared_causal, args.num_independent_causal,
-        args.h2_snp, args.seed + 1
+        m,
+        args.num_cell_types,
+        args.num_shared_causal,
+        args.num_independent_causal,
+        args.h2_snp,
+        args.seed + 1,
     )?;
 
     // Generate covariates
@@ -244,7 +256,10 @@ fn sim_eqtl_phase1(args: &SimulationArgs, use_parquet: bool) -> Result<()> {
     })?;
 
     // Write outputs
-    info!("Writing outputs to {} (format: {})", args.output, args.format);
+    info!(
+        "Writing outputs to {} (format: {})",
+        args.output, args.format
+    );
     write_outputs(args, &geno, &cell_frac, &gen_eff, &pheno, use_parquet)?;
 
     info!("Done!");
@@ -254,9 +269,8 @@ fn sim_eqtl_phase1(args: &SimulationArgs, use_parquet: bool) -> Result<()> {
 /// Phase 2: Gene-level eQTL with single-cell counts
 fn sim_eqtl_phase2(args: &SimulationArgs, use_parquet: bool) -> Result<()> {
     use fagioli::simulation::{
-        simulate_factor_model, sample_sc_eqtl_effects, generate_sc_phenotypes,
-        GeneticArchitectureParams, ScPhenotypeParams, simulate_gene_annotations,
-        load_gtf,
+        generate_sc_phenotypes, load_gtf, sample_sc_eqtl_effects, simulate_factor_model,
+        simulate_gene_annotations, GeneticArchitectureParams, ScPhenotypeParams,
     };
 
     info!("Running Phase 2: Gene-level eQTL with single-cell simulation");
@@ -292,12 +306,8 @@ fn sim_eqtl_phase2(args: &SimulationArgs, use_parquet: bool) -> Result<()> {
 
     // Sample cell type fractions
     info!("Sampling cell type fractions");
-    let cell_frac = sample_cell_type_fractions(
-        n,
-        args.num_cell_types,
-        &args.dirichlet_alpha,
-        args.seed,
-    )?;
+    let cell_frac =
+        sample_cell_type_fractions(n, args.num_cell_types, &args.dirichlet_alpha, args.seed)?;
 
     // Step 1: Simulate factor model
     info!("Simulating factor model");
@@ -350,7 +360,16 @@ fn sim_eqtl_phase2(args: &SimulationArgs, use_parquet: bool) -> Result<()> {
 
     // Write outputs
     info!("Writing Phase 2 outputs to {}", args.output);
-    write_phase2_outputs(args, &geno, &genes, &cell_frac, &factor_model, &eqtl_effects, &sc_data, use_parquet)?;
+    write_phase2_outputs(
+        args,
+        &geno,
+        &genes,
+        &cell_frac,
+        &factor_model,
+        &eqtl_effects,
+        &sc_data,
+        use_parquet,
+    )?;
 
     info!("Done!");
     Ok(())
@@ -364,8 +383,8 @@ fn write_outputs(
     pheno: &fagioli::simulation::SimulatedPhenotypes,
     use_parquet: bool,
 ) -> Result<()> {
-    use matrix_util::traits::IoOps;
     use matrix_util::common_io::open_buf_writer;
+    use matrix_util::traits::IoOps;
     use std::io::Write;
 
     let ext = if use_parquet { "parquet" } else { "tsv" };
@@ -404,23 +423,38 @@ fn write_outputs(
     // Causal SNPs (TSV.GZ)
     let causal_file = format!("{}.causal_snps.tsv.gz", args.output);
     let mut writer = open_buf_writer(&causal_file)?;
-    writeln!(writer, "type\tcell_type\tsnp_id\tchromosome\tposition\teffect_size")?;
+    writeln!(
+        writer,
+        "type\tcell_type\tsnp_id\tchromosome\tposition\teffect_size"
+    )?;
 
     // Write shared causal SNPs
     for ct in 0..gen_eff.num_cell_types {
         for (j, &snp_idx) in gen_eff.shared_causal_indices.iter().enumerate() {
-            writeln!(writer, "shared\t{}\t{}\t{}\t{}\t{}",
-                ct, geno.snp_ids[snp_idx], geno.chromosomes[snp_idx],
-                geno.positions[snp_idx], gen_eff.shared_effect_sizes[(ct, j)])?;
+            writeln!(
+                writer,
+                "shared\t{}\t{}\t{}\t{}\t{}",
+                ct,
+                geno.snp_ids[snp_idx],
+                geno.chromosomes[snp_idx],
+                geno.positions[snp_idx],
+                gen_eff.shared_effect_sizes[(ct, j)]
+            )?;
         }
     }
 
     // Write independent causal SNPs
     for ct in 0..gen_eff.num_cell_types {
         for (j, &snp_idx) in gen_eff.independent_causal_indices[ct].iter().enumerate() {
-            writeln!(writer, "independent\t{}\t{}\t{}\t{}\t{}",
-                ct, geno.snp_ids[snp_idx], geno.chromosomes[snp_idx],
-                geno.positions[snp_idx], gen_eff.independent_effect_sizes[(ct, j)])?;
+            writeln!(
+                writer,
+                "independent\t{}\t{}\t{}\t{}\t{}",
+                ct,
+                geno.snp_ids[snp_idx],
+                geno.chromosomes[snp_idx],
+                geno.positions[snp_idx],
+                gen_eff.independent_effect_sizes[(ct, j)]
+            )?;
         }
     }
     writer.flush()?;
@@ -455,9 +489,9 @@ fn write_phase2_outputs(
     sc_data: &fagioli::simulation::ScCountData,
     use_parquet: bool,
 ) -> Result<()> {
-    use matrix_util::traits::IoOps;
-    use matrix_util::common_io::open_buf_writer;
     use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
+    use matrix_util::common_io::open_buf_writer;
+    use matrix_util::traits::IoOps;
     use std::io::Write;
 
     let ext = if use_parquet { "parquet" } else { "tsv" };
@@ -486,7 +520,9 @@ fn write_phase2_outputs(
     )?;
 
     // Add gene names (rows) with format: {ensembl}_{name} if gene_name available
-    let gene_names: Vec<Box<str>> = genes.genes.iter()
+    let gene_names: Vec<Box<str>> = genes
+        .genes
+        .iter()
         .map(|g| {
             if let Some(ref name) = g.gene_name {
                 Box::from(format!("{}_{}", g.gene_id, name))
@@ -506,20 +542,27 @@ fn write_phase2_outputs(
         .collect();
     sparse_backend.register_column_names_vec(&cell_names);
 
-    info!("Created backend with {} genes × {} cells: {}",
-          sc_data.num_genes, sc_data.num_cells, backend_file);
+    info!(
+        "Created backend with {} genes × {} cells: {}",
+        sc_data.num_genes, sc_data.num_cells, backend_file
+    );
 
     // 2. Cell annotations (TSV.GZ)
     let cell_anno_file = format!("{}.cells.tsv.gz", args.output);
     let mut writer = open_buf_writer(&cell_anno_file)?;
     writeln!(writer, "cell_id\tindividual_id\tcell_type")?;
-    for (cell_idx, (&ind_id, &ct)) in sc_data.cell_individuals.iter()
+    for (cell_idx, (&ind_id, &ct)) in sc_data
+        .cell_individuals
+        .iter()
         .zip(&sc_data.cell_types)
         .enumerate()
     {
         let cell_id = format!("cell_{}@{}", cell_idx, geno.individual_ids[ind_id]);
-        writeln!(writer, "{}\t{}\tcell_type_{}",
-                 cell_id, geno.individual_ids[ind_id], ct)?;
+        writeln!(
+            writer,
+            "{}\t{}\tcell_type_{}",
+            cell_id, geno.individual_ids[ind_id], ct
+        )?;
     }
     writer.flush()?;
     info!("Wrote cell annotations: {}", cell_anno_file);
@@ -530,8 +573,11 @@ fn write_phase2_outputs(
     writeln!(writer, "cell_id\tindividual_id\tindividual_index")?;
     for (cell_idx, &ind_idx) in sc_data.cell_individuals.iter().enumerate() {
         let cell_id = format!("cell_{}@{}", cell_idx, geno.individual_ids[ind_idx]);
-        writeln!(writer, "{}\t{}\t{}",
-                 cell_id, geno.individual_ids[ind_idx], ind_idx)?;
+        writeln!(
+            writer,
+            "{}\t{}\t{}",
+            cell_id, geno.individual_ids[ind_idx], ind_idx
+        )?;
     }
     writer.flush()?;
     info!("Wrote cell-to-individual mapping: {}", mapping_file);
@@ -539,15 +585,21 @@ fn write_phase2_outputs(
     // 3. Gene annotations (TSV.GZ)
     let gene_anno_file = format!("{}.genes.tsv.gz", args.output);
     let mut writer = open_buf_writer(&gene_anno_file)?;
-    writeln!(writer, "gene_idx\tgene_id\tgene_name\tchromosome\ttss\tstrand")?;
+    writeln!(
+        writer,
+        "gene_idx\tgene_id\tgene_name\tchromosome\ttss\tstrand"
+    )?;
     for (idx, gene) in genes.genes.iter().enumerate() {
-        writeln!(writer, "{}\t{}\t{}\t{}\t{}\t{}",
-                 idx,
-                 gene.gene_id,
-                 gene.gene_name.as_ref().map(|s| s.as_ref()).unwrap_or("NA"),
-                 gene.chromosome,
-                 gene.tss,
-                 gene.strand)?;
+        writeln!(
+            writer,
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            idx,
+            gene.gene_id,
+            gene.gene_name.as_ref().map(|s| s.as_ref()).unwrap_or("NA"),
+            gene.chromosome,
+            gene.tss,
+            gene.strand
+        )?;
     }
     writer.flush()?;
     info!("Wrote gene annotations: {}", gene_anno_file);
@@ -570,7 +622,9 @@ fn write_phase2_outputs(
     info!("Wrote cell fractions: {}", frac_file);
 
     // 5. Factor model (parquet/tsv)
-    let gene_ids: Vec<Box<str>> = genes.genes.iter()
+    let gene_ids: Vec<Box<str>> = genes
+        .genes
+        .iter()
         .map(|g| Box::from(g.gene_id.to_string()))
         .collect();
     let factor_names: Vec<Box<str>> = (0..args.num_factors)
@@ -614,13 +668,18 @@ fn write_phase2_outputs(
         for causal_snp in &gene_effects.shared_causal_snps {
             for (ct, &effect) in causal_snp.effect_sizes.iter().enumerate() {
                 if effect.abs() > 1e-10 {
-                    writeln!(writer, "{}\t{}\tshared\t{}\t{}\t{}\t{}\t{}\t{}",
-                             gene_idx, gene_id, ct,
-                             causal_snp.snp_idx,
-                             geno.snp_ids[causal_snp.snp_idx],
-                             geno.chromosomes[causal_snp.snp_idx],
-                             causal_snp.position,
-                             effect)?;
+                    writeln!(
+                        writer,
+                        "{}\t{}\tshared\t{}\t{}\t{}\t{}\t{}\t{}",
+                        gene_idx,
+                        gene_id,
+                        ct,
+                        causal_snp.snp_idx,
+                        geno.snp_ids[causal_snp.snp_idx],
+                        geno.chromosomes[causal_snp.snp_idx],
+                        causal_snp.position,
+                        effect
+                    )?;
                 }
             }
         }
@@ -630,13 +689,18 @@ fn write_phase2_outputs(
             for causal_snp in snps {
                 let effect = causal_snp.effect_sizes[ct];
                 if effect.abs() > 1e-10 {
-                    writeln!(writer, "{}\t{}\tindependent\t{}\t{}\t{}\t{}\t{}\t{}",
-                             gene_idx, gene_id, ct,
-                             causal_snp.snp_idx,
-                             geno.snp_ids[causal_snp.snp_idx],
-                             geno.chromosomes[causal_snp.snp_idx],
-                             causal_snp.position,
-                             effect)?;
+                    writeln!(
+                        writer,
+                        "{}\t{}\tindependent\t{}\t{}\t{}\t{}\t{}\t{}",
+                        gene_idx,
+                        gene_id,
+                        ct,
+                        causal_snp.snp_idx,
+                        geno.snp_ids[causal_snp.snp_idx],
+                        geno.chromosomes[causal_snp.snp_idx],
+                        causal_snp.position,
+                        effect
+                    )?;
                 }
             }
         }

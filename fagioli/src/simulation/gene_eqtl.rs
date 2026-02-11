@@ -50,9 +50,9 @@ impl Default for GeneticArchitectureParams {
 /// Causal SNP with effect sizes per cell type
 #[derive(Debug, Clone)]
 pub struct CausalSnp {
-    pub snp_idx: usize,           // Global SNP index
+    pub snp_idx: usize, // Global SNP index
     pub position: u64,
-    pub effect_sizes: Vec<f32>,   // Per cell type (K values)
+    pub effect_sizes: Vec<f32>, // Per cell type (K values)
 }
 
 /// Gene-level eQTL effects (both shared and independent)
@@ -65,7 +65,7 @@ pub struct GeneEqtlEffects {
     pub shared_causal_snps: Vec<CausalSnp>,
 
     /// Independent causal variants (per cell type)
-    pub independent_causal_snps: Vec<Vec<CausalSnp>>,  // K vectors
+    pub independent_causal_snps: Vec<Vec<CausalSnp>>, // K vectors
 
     pub num_cell_types: usize,
 }
@@ -99,22 +99,35 @@ impl ScEqtlEffects {
 
     /// Count genes with any eQTL
     pub fn num_egenes(&self) -> usize {
-        self.genes.iter().filter(|g| {
-            !g.shared_causal_snps.is_empty() ||
-            g.independent_causal_snps.iter().any(|snps| !snps.is_empty())
-        }).count()
+        self.genes
+            .iter()
+            .filter(|g| {
+                !g.shared_causal_snps.is_empty()
+                    || g.independent_causal_snps
+                        .iter()
+                        .any(|snps| !snps.is_empty())
+            })
+            .count()
     }
 
     /// Count genes with shared eQTL
     pub fn num_shared_egenes(&self) -> usize {
-        self.genes.iter().filter(|g| !g.shared_causal_snps.is_empty()).count()
+        self.genes
+            .iter()
+            .filter(|g| !g.shared_causal_snps.is_empty())
+            .count()
     }
 
     /// Count genes with independent eQTL
     pub fn num_independent_egenes(&self) -> usize {
-        self.genes.iter().filter(|g| {
-            g.independent_causal_snps.iter().any(|snps| !snps.is_empty())
-        }).count()
+        self.genes
+            .iter()
+            .filter(|g| {
+                g.independent_causal_snps
+                    .iter()
+                    .any(|snps| !snps.is_empty())
+            })
+            .count()
     }
 }
 
@@ -129,11 +142,18 @@ pub fn sample_sc_eqtl_effects(
 ) -> Result<ScEqtlEffects> {
     info!("Sampling eQTL effects for {} genes", genes.genes.len());
     info!("  eQTL gene proportion: {:.2}", params.eqtl_gene_proportion);
-    info!("  Shared eQTL proportion: {:.2}", params.shared_eqtl_proportion);
-    info!("  Independent eQTL proportion: {:.2}", params.independent_eqtl_proportion);
+    info!(
+        "  Shared eQTL proportion: {:.2}",
+        params.shared_eqtl_proportion
+    );
+    info!(
+        "  Independent eQTL proportion: {:.2}",
+        params.independent_eqtl_proportion
+    );
 
     // Parallel across genes!
-    let gene_effects: Vec<GeneEqtlEffects> = genes.genes
+    let gene_effects: Vec<GeneEqtlEffects> = genes
+        .genes
         .par_iter()
         .enumerate()
         .map(|(gene_idx, gene)| {
@@ -180,14 +200,22 @@ fn sample_gene_eqtl_effects(
     // Step 1: Does this gene have any eQTL?
     let has_eqtl = rng.random_bool(params.eqtl_gene_proportion as f64);
     if !has_eqtl {
-        return Ok(GeneEqtlEffects::empty(gene_id.clone(), gene_idx, num_cell_types));
+        return Ok(GeneEqtlEffects::empty(
+            gene_id.clone(),
+            gene_idx,
+            num_cell_types,
+        ));
     }
 
     // Step 2: Get SNPs in cis window
     let cis_snps = genes.cis_snp_indices(gene_idx, snp_positions, snp_chromosomes);
 
     if cis_snps.is_empty() {
-        return Ok(GeneEqtlEffects::empty(gene_id.clone(), gene_idx, num_cell_types));
+        return Ok(GeneEqtlEffects::empty(
+            gene_id.clone(),
+            gene_idx,
+            num_cell_types,
+        ));
     }
 
     // Step 3: Sample architecture type
@@ -209,7 +237,11 @@ fn sample_gene_eqtl_effects(
     // Step 4: Variance allocation
     let total_causal = num_shared + num_independent;
     if total_causal == 0 {
-        return Ok(GeneEqtlEffects::empty(gene_id.clone(), gene_idx, num_cell_types));
+        return Ok(GeneEqtlEffects::empty(
+            gene_id.clone(),
+            gene_idx,
+            num_cell_types,
+        ));
     }
 
     let shared_var = params.genetic_variance * (num_shared as f32 / total_causal as f32);
@@ -224,17 +256,20 @@ fn sample_gene_eqtl_effects(
         let effect_std = (shared_var / (num_cell_types as f32 * num_shared as f32)).sqrt();
         let normal = Normal::new(0.0, effect_std as f64)?;
 
-        shared_sampled.iter().map(|idx| {
-            let snp_idx = cis_snps[idx];
-            let effect_sizes: Vec<f32> = (0..num_cell_types)
-                .map(|_| normal.sample(&mut rng) as f32)
-                .collect();
-            CausalSnp {
-                snp_idx,
-                position: snp_positions[snp_idx],
-                effect_sizes,
-            }
-        }).collect()
+        shared_sampled
+            .iter()
+            .map(|idx| {
+                let snp_idx = cis_snps[idx];
+                let effect_sizes: Vec<f32> = (0..num_cell_types)
+                    .map(|_| normal.sample(&mut rng) as f32)
+                    .collect();
+                CausalSnp {
+                    snp_idx,
+                    position: snp_positions[snp_idx],
+                    effect_sizes,
+                }
+            })
+            .collect()
     } else {
         vec![]
     };
@@ -251,21 +286,26 @@ fn sample_gene_eqtl_effects(
         let normal = Normal::new(0.0, effect_std as f64)?;
         let n_pick = num_independent.min(available_for_indep.len());
 
-        (0..num_cell_types).map(|k| {
-            // Use index::sample to avoid cloning the full vec per cell type
-            let sampled = rand::seq::index::sample(&mut rng, available_for_indep.len(), n_pick);
+        (0..num_cell_types)
+            .map(|k| {
+                // Use index::sample to avoid cloning the full vec per cell type
+                let sampled = rand::seq::index::sample(&mut rng, available_for_indep.len(), n_pick);
 
-            sampled.iter().map(|idx| {
-                let snp_idx = available_for_indep[idx];
-                let mut effect_sizes = vec![0.0; num_cell_types];
-                effect_sizes[k] = normal.sample(&mut rng) as f32;
-                CausalSnp {
-                    snp_idx,
-                    position: snp_positions[snp_idx],
-                    effect_sizes,
-                }
-            }).collect()
-        }).collect()
+                sampled
+                    .iter()
+                    .map(|idx| {
+                        let snp_idx = available_for_indep[idx];
+                        let mut effect_sizes = vec![0.0; num_cell_types];
+                        effect_sizes[k] = normal.sample(&mut rng) as f32;
+                        CausalSnp {
+                            snp_idx,
+                            position: snp_positions[snp_idx],
+                            effect_sizes,
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
     } else {
         vec![vec![]; num_cell_types]
     };
@@ -281,8 +321,8 @@ fn sample_gene_eqtl_effects(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::gene_annotations::simulate_gene_annotations;
+    use super::*;
 
     #[test]
     fn test_sample_eqtl_effects() {
@@ -302,14 +342,9 @@ mod tests {
             cis_window: 1_000_000,
         };
 
-        let effects = sample_sc_eqtl_effects(
-            &genes,
-            &snp_positions,
-            &snp_chromosomes,
-            3,
-            &params,
-            42,
-        ).unwrap();
+        let effects =
+            sample_sc_eqtl_effects(&genes, &snp_positions, &snp_chromosomes, 3, &params, 42)
+                .unwrap();
 
         assert_eq!(effects.num_genes, 100);
         assert_eq!(effects.num_cell_types, 3);
@@ -330,18 +365,13 @@ mod tests {
         let snp_chromosomes: Vec<Box<str>> = vec![Box::from("22")];
 
         let params = GeneticArchitectureParams {
-            eqtl_gene_proportion: 0.0,  // No eQTL
+            eqtl_gene_proportion: 0.0, // No eQTL
             ..Default::default()
         };
 
-        let effects = sample_sc_eqtl_effects(
-            &genes,
-            &snp_positions,
-            &snp_chromosomes,
-            2,
-            &params,
-            42,
-        ).unwrap();
+        let effects =
+            sample_sc_eqtl_effects(&genes, &snp_positions, &snp_chromosomes, 2, &params, 42)
+                .unwrap();
 
         assert_eq!(effects.num_egenes(), 0);
     }
@@ -363,10 +393,14 @@ mod tests {
         };
 
         let effects = sample_sc_eqtl_effects(
-            &genes, &snp_positions, &snp_chromosomes,
+            &genes,
+            &snp_positions,
+            &snp_chromosomes,
             1, // single cell type
-            &params, 42,
-        ).unwrap();
+            &params,
+            42,
+        )
+        .unwrap();
 
         assert_eq!(effects.num_cell_types, 1);
         // With 1 cell type, shared and independent are effectively equivalent
@@ -380,8 +414,10 @@ mod tests {
         let snp_chromosomes: Vec<Box<str>> = vec![Box::from("22"); 500];
         let params = GeneticArchitectureParams::default();
 
-        let e1 = sample_sc_eqtl_effects(&genes, &snp_positions, &snp_chromosomes, 3, &params, 42).unwrap();
-        let e2 = sample_sc_eqtl_effects(&genes, &snp_positions, &snp_chromosomes, 3, &params, 42).unwrap();
+        let e1 = sample_sc_eqtl_effects(&genes, &snp_positions, &snp_chromosomes, 3, &params, 42)
+            .unwrap();
+        let e2 = sample_sc_eqtl_effects(&genes, &snp_positions, &snp_chromosomes, 3, &params, 42)
+            .unwrap();
 
         assert_eq!(e1.num_egenes(), e2.num_egenes());
         assert_eq!(e1.num_shared_egenes(), e2.num_shared_egenes());
@@ -390,7 +426,11 @@ mod tests {
         // Check individual gene effects match
         for (g1, g2) in e1.genes.iter().zip(e2.genes.iter()) {
             assert_eq!(g1.shared_causal_snps.len(), g2.shared_causal_snps.len());
-            for (s1, s2) in g1.shared_causal_snps.iter().zip(g2.shared_causal_snps.iter()) {
+            for (s1, s2) in g1
+                .shared_causal_snps
+                .iter()
+                .zip(g2.shared_causal_snps.iter())
+            {
                 assert_eq!(s1.snp_idx, s2.snp_idx);
                 assert_eq!(s1.effect_sizes, s2.effect_sizes);
             }

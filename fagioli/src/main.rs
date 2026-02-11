@@ -9,8 +9,7 @@ use colored::Colorize;
 const LOGO: &str = include_str!("../logo.txt");
 
 fn colorize_logo_line(line: &str) -> String {
-    line
-        .replace('●', &"●".bright_yellow().to_string())
+    line.replace('●', &"●".bright_yellow().to_string())
         .replace('╱', &"╱".truecolor(0, 100, 0).to_string())
         .replace('╲', &"╲".truecolor(0, 100, 0).to_string())
         .replace('(', &"(".truecolor(0, 100, 0).to_string())

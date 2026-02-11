@@ -101,7 +101,9 @@ pub fn fetch_reference_base(
     let pos = pos as usize;
 
     match faidx.fetch_seq(chr, pos, pos) {
-        Ok(seq) => Ok(seq.first().and_then(|&b| Dna::from_byte(b.to_ascii_uppercase()))),
+        Ok(seq) => Ok(seq
+            .first()
+            .and_then(|&b| Dna::from_byte(b.to_ascii_uppercase()))),
         Err(_) => Ok(None), // chromosome not found or position out of bounds
     }
 }

@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
 use crate::data::dna_stat_traits::*;
-use genomic_data::sam::*;
 use crate::data::visitors_htslib::*;
 use fnv::FnvHashMap as HashMap;
+use genomic_data::sam::*;
 use rust_htslib::bam::record::Cigar;
 use rust_htslib::bam::{self, ext::BamRecordExtensions, record::Aux};
 

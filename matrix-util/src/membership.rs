@@ -63,7 +63,10 @@ impl Membership {
     }
 
     /// Create membership from key-value pairs
-    pub fn from_pairs(pairs: impl IntoIterator<Item = (Box<str>, Box<str>)>, allow_prefix: bool) -> Self {
+    pub fn from_pairs(
+        pairs: impl IntoIterator<Item = (Box<str>, Box<str>)>,
+        allow_prefix: bool,
+    ) -> Self {
         let mut map = HashMap::default();
         let mut keys = Vec::new();
 
@@ -85,7 +88,8 @@ impl Membership {
     pub fn with_delimiter(mut self, delimiter: char) -> Self {
         self.delimiter = Some(delimiter);
         // Rebuild base_map
-        self.base_map = self.map
+        self.base_map = self
+            .map
             .iter()
             .map(|(k, v)| (extract_base_key(k, self.delimiter), v.clone()))
             .collect();
@@ -152,10 +156,7 @@ impl Membership {
     /// Load membership from file with single column (values only)
     ///
     /// Keys will be assigned positionally from the provided key list.
-    pub fn from_file_positional(
-        file_path: &str,
-        keys: &[Box<str>],
-    ) -> anyhow::Result<Self> {
+    pub fn from_file_positional(file_path: &str, keys: &[Box<str>]) -> anyhow::Result<Self> {
         let delim = detect_delimiter(file_path);
 
         let ReadLinesOut { lines, header: _ } = read_lines_of_words_delim(file_path, delim, -1)?;
@@ -365,8 +366,14 @@ mod tests {
         let file = create_test_file();
         let membership = Membership::from_file(file.path().to_str().unwrap(), 0, 1, false).unwrap();
 
-        assert_eq!(membership.get("AAACCT").map(|s| s.as_ref()), Some("group_A"));
-        assert_eq!(membership.get("BBBCCT").map(|s| s.as_ref()), Some("group_B"));
+        assert_eq!(
+            membership.get("AAACCT").map(|s| s.as_ref()),
+            Some("group_A")
+        );
+        assert_eq!(
+            membership.get("BBBCCT").map(|s| s.as_ref()),
+            Some("group_B")
+        );
         assert_eq!(membership.get("AAACCT@suffix"), None); // No prefix matching
     }
 
@@ -376,7 +383,10 @@ mod tests {
         let membership = Membership::from_file(file.path().to_str().unwrap(), 0, 1, true).unwrap();
 
         // Forward prefix: stored "AAACCT" is prefix of query "AAACCT@suffix"
-        assert_eq!(membership.get("AAACCT@suffix").map(|s| s.as_ref()), Some("group_A"));
+        assert_eq!(
+            membership.get("AAACCT@suffix").map(|s| s.as_ref()),
+            Some("group_A")
+        );
 
         // Reverse prefix: query "AAA" is prefix of stored "AAACCT"
         assert_eq!(membership.get("AAA").map(|s| s.as_ref()), Some("group_A"));
@@ -387,11 +397,7 @@ mod tests {
         let file = create_test_file();
         let membership = Membership::from_file(file.path().to_str().unwrap(), 0, 1, true).unwrap();
 
-        let queries: Vec<Box<str>> = vec![
-            "AAACCT".into(),
-            "BBBCCT@1".into(),
-            "UNKNOWN".into(),
-        ];
+        let queries: Vec<Box<str>> = vec!["AAACCT".into(), "BBBCCT@1".into(), "UNKNOWN".into()];
 
         let (matched, stats) = membership.match_keys(&queries);
 

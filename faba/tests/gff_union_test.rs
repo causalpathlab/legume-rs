@@ -86,7 +86,10 @@ fn test_union_gene_model() -> anyhow::Result<()> {
             let boundary_rec = entry.value();
 
             count += 1;
-            println!("\nGene #{}: {} ({:?})", count, gene_id, boundary_rec.gene_type);
+            println!(
+                "\nGene #{}: {} ({:?})",
+                count, gene_id, boundary_rec.gene_type
+            );
             println!(
                 "  Gene boundary: {}-{} ({} strand)",
                 boundary_rec.start,

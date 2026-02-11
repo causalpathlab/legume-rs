@@ -21,7 +21,10 @@ pub struct CompositeModel<M: SgvbModel> {
 impl<M: SgvbModel> CompositeModel<M> {
     /// Create a composite model from a vector of modules.
     pub fn new(modules: Vec<M>) -> Self {
-        assert!(!modules.is_empty(), "CompositeModel requires at least one module");
+        assert!(
+            !modules.is_empty(),
+            "CompositeModel requires at least one module"
+        );
         Self { modules }
     }
 
@@ -29,10 +32,7 @@ impl<M: SgvbModel> CompositeModel<M> {
     ///
     /// Returns a vector of SgvbSample, one per module.
     pub fn sample_all(&self, num_samples: usize) -> Result<Vec<SgvbSample>> {
-        self.modules
-            .iter()
-            .map(|m| m.sample(num_samples))
-            .collect()
+        self.modules.iter().map(|m| m.sample(num_samples)).collect()
     }
 
     /// Number of modules (number of etas).
@@ -166,7 +166,11 @@ where
 ///
 /// Allows mixing models with different variational types by sampling separately
 /// and combining. Each sample provides one eta.
-pub fn samples_sgvb_loss<L>(samples: &[SgvbSample], likelihood: &L, normalize: bool) -> Result<Tensor>
+pub fn samples_sgvb_loss<L>(
+    samples: &[SgvbSample],
+    likelihood: &L,
+    normalize: bool,
+) -> Result<Tensor>
 where
     L: BlackBoxLikelihood,
 {

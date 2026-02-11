@@ -3,7 +3,7 @@ use genomic_data::plink::PlinkBed;
 use log::info;
 use nalgebra::DMatrix;
 
-use super::genotype_reader::{GenotypeMatrix, GenotypeReader, GenomicRegion};
+use super::genotype_reader::{GenomicRegion, GenotypeMatrix, GenotypeReader};
 
 /// PLINK BED format reader
 pub struct BedReader {
@@ -111,19 +111,19 @@ impl GenotypeReader for BedReader {
                 .collect();
             (snp_ids, chromosomes, positions)
         } else {
-            let snp_ids = self.bed.sid.iter().map(|id| Box::from(id.as_str())).collect();
+            let snp_ids = self
+                .bed
+                .sid
+                .iter()
+                .map(|id| Box::from(id.as_str()))
+                .collect();
             let chromosomes = self
                 .bed
                 .chromosome
                 .iter()
                 .map(|chr| Box::from(chr.as_str()))
                 .collect();
-            let positions = self
-                .bed
-                .bp_position
-                .iter()
-                .map(|&pos| pos as u64)
-                .collect();
+            let positions = self.bed.bp_position.iter().map(|&pos| pos as u64).collect();
             (snp_ids, chromosomes, positions)
         };
 
@@ -160,24 +160,20 @@ fn impute_missing_with_mean(genotypes: &mut DMatrix<f32>) {
 
         if non_missing.is_empty() {
             // All values missing - impute with 0
-            col.iter_mut()
-                .filter(|x| !x.is_finite())
-                .for_each(|x| {
-                    *x = 0.0;
-                    num_imputed += 1;
-                });
+            col.iter_mut().filter(|x| !x.is_finite()).for_each(|x| {
+                *x = 0.0;
+                num_imputed += 1;
+            });
             continue;
         }
 
         let mean = non_missing.iter().sum::<f32>() / non_missing.len() as f32;
 
         // Replace NaN with mean
-        col.iter_mut()
-            .filter(|x| !x.is_finite())
-            .for_each(|x| {
-                *x = mean;
-                num_imputed += 1;
-            });
+        col.iter_mut().filter(|x| !x.is_finite()).for_each(|x| {
+            *x = mean;
+            num_imputed += 1;
+        });
     }
 
     if num_imputed > 0 {
@@ -191,11 +187,7 @@ mod tests {
 
     #[test]
     fn test_mean_imputation() {
-        let mut mat = DMatrix::from_row_slice(
-            3,
-            2,
-            &[1.0, f32::NAN, 2.0, 1.0, f32::NAN, 2.0],
-        );
+        let mut mat = DMatrix::from_row_slice(3, 2, &[1.0, f32::NAN, 2.0, 1.0, f32::NAN, 2.0]);
 
         impute_missing_with_mean(&mut mat);
 

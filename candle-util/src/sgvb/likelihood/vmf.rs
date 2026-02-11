@@ -341,7 +341,9 @@ impl BlackBoxLikelihood for VmfFixedKappaLikelihood {
                 let log_norms_3d = log_norms.unsqueeze(0)?.unsqueeze(2)?; // (1, n, 1)
 
                 // Scaled cosine: κ_base * w_g * cos_sim (S, n, k)
-                let scaled_cos = cos_sim_per_gene.broadcast_mul(&weights_3d)?.affine(self.kappa, 0.0)?;
+                let scaled_cos = cos_sim_per_gene
+                    .broadcast_mul(&weights_3d)?
+                    .affine(self.kappa, 0.0)?;
 
                 // Add per-gene log normalizers (broadcast over topics)
                 let log_prob_per_gene = scaled_cos.broadcast_add(&log_norms_3d)?; // (S, n, k)
@@ -420,11 +422,7 @@ mod tests {
         let device = Device::Cpu;
 
         // Simple test: y and mu are identical -> cos_sim = 1.0
-        let y = Tensor::from_vec(
-            vec![1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0],
-            (3, 2),
-            &device,
-        )?;
+        let y = Tensor::from_vec(vec![1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0], (3, 2), &device)?;
 
         let kappa = 10.0;
         let likelihood = VmfFixedKappaLikelihood::from_normalized(y.clone(), kappa)?;
@@ -528,9 +526,7 @@ mod tests {
     /// - Topic directions y: derived from X @ θ + noise, then normalized
     #[test]
     fn test_vmf_susie_sparse_recovery() -> Result<()> {
-        use crate::sgvb::{
-            direct_elbo_loss, GaussianPrior, LinearModelSGVB, SGVBConfig, SusieVar,
-        };
+        use crate::sgvb::{direct_elbo_loss, GaussianPrior, LinearModelSGVB, SGVBConfig, SusieVar};
         use candle_core::DType;
         use candle_nn::{Optimizer, VarBuilder, VarMap};
 
@@ -689,7 +685,8 @@ mod tests {
             let susie = SusieVar::new(vb.pp("susie"), n_components, n_annotations, n_topics)?;
             let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
             let config = SGVBConfig::new(num_samples);
-            let model = LinearModelSGVB::from_variational(susie, x_norm.clone(), prior, config.clone());
+            let model =
+                LinearModelSGVB::from_variational(susie, x_norm.clone(), prior, config.clone());
 
             let likelihood = VmfFixedKappaLikelihood::from_normalized(y.clone(), kappa)?;
 
@@ -700,8 +697,8 @@ mod tests {
                 optimizer.backward_step(&loss)?;
             }
 
-            let final_loss: f32 = direct_elbo_loss(&model, &likelihood, config.num_samples)?
-                .to_scalar()?;
+            let final_loss: f32 =
+                direct_elbo_loss(&model, &likelihood, config.num_samples)?.to_scalar()?;
             let log_norm = likelihood.log_normalizer();
 
             results.push((kappa, final_loss, log_norm));
@@ -713,7 +710,11 @@ mod tests {
 
         // Verify that all losses are finite
         for (kappa, loss, log_norm) in &results {
-            assert!(loss.is_finite(), "Loss should be finite for kappa={}", kappa);
+            assert!(
+                loss.is_finite(),
+                "Loss should be finite for kappa={}",
+                kappa
+            );
             assert!(
                 log_norm.is_finite(),
                 "Log normalizer should be finite for kappa={}",
@@ -745,7 +746,8 @@ mod tests {
         let gene_weights = Tensor::from_vec(weights_vec.clone(), (n_genes,), &device)?;
 
         // Create likelihood with per-gene weights
-        let likelihood = VmfFixedKappaLikelihood::with_gene_weights(y.clone(), kappa, gene_weights)?;
+        let likelihood =
+            VmfFixedKappaLikelihood::with_gene_weights(y.clone(), kappa, gene_weights)?;
 
         assert!(likelihood.has_gene_weights());
         assert_eq!(likelihood.kappa(), kappa);
@@ -756,17 +758,28 @@ mod tests {
 
         let vals: Vec<f32> = log_lik.to_vec1()?;
         for (i, &v) in vals.iter().enumerate() {
-            assert!(v.is_finite(), "Log likelihood not finite at sample {}: {}", i, v);
+            assert!(
+                v.is_finite(),
+                "Log likelihood not finite at sample {}: {}",
+                i,
+                v
+            );
         }
 
-        println!("Per-gene weights: mean_log_lik = {:.4}", log_lik.mean_all()?.to_scalar::<f32>()?);
+        println!(
+            "Per-gene weights: mean_log_lik = {:.4}",
+            log_lik.mean_all()?.to_scalar::<f32>()?
+        );
 
         // Compare with uniform weights
         let likelihood_uniform = VmfFixedKappaLikelihood::from_normalized(y.clone(), kappa)?;
         assert!(!likelihood_uniform.has_gene_weights());
 
         let log_lik_uniform = likelihood_uniform.log_likelihood(&[&eta_raw])?;
-        println!("Uniform weights: mean_log_lik = {:.4}", log_lik_uniform.mean_all()?.to_scalar::<f32>()?);
+        println!(
+            "Uniform weights: mean_log_lik = {:.4}",
+            log_lik_uniform.mean_all()?.to_scalar::<f32>()?
+        );
 
         // With per-gene weights, effective kappa is higher for some genes
         // So total log-likelihood magnitude should be different
@@ -804,7 +817,10 @@ mod tests {
         // Update kappa (simulating EM M-step)
         let updated = likelihood.with_kappa(25.0)?;
 
-        assert!(updated.has_gene_weights(), "Gene weights should be preserved after kappa update");
+        assert!(
+            updated.has_gene_weights(),
+            "Gene weights should be preserved after kappa update"
+        );
         assert!((updated.kappa() - 25.0).abs() < 1e-10);
 
         Ok(())

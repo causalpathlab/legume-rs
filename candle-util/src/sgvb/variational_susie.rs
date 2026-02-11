@@ -43,7 +43,10 @@ impl SusieVar {
         let beta_mean = vb.get_with_hints(
             (num_components, p, k),
             "beta_mean",
-            candle_nn::Init::Randn { mean: 0.0, stdev: 0.01 },
+            candle_nn::Init::Randn {
+                mean: 0.0,
+                stdev: 0.01,
+            },
         )?;
 
         // Initialize beta_ln_std to 0 (std = 1)
@@ -86,7 +89,7 @@ impl SusieVar {
     /// PIPs, shape (p, k)
     pub fn pip(&self) -> Result<Tensor> {
         let alpha = self.alpha()?; // (L, p, k)
-        // Clamp to avoid log(0) when alpha ≈ 1
+                                   // Clamp to avoid log(0) when alpha ≈ 1
         let one_minus_alpha = (1.0 - &alpha)?.clamp(1e-10, 1.0)?;
         let log_one_minus_alpha = one_minus_alpha.log()?;
         let sum_log = log_one_minus_alpha.sum(0)?; // (p, k)
@@ -154,7 +157,9 @@ impl VariationalDistribution for SusieVar {
         let epsilon = Tensor::randn(0f32, 1f32, (num_samples, p, k), device)?.to_dtype(dtype)?;
 
         // θ = mean + std * ε (reparameterization trick)
-        let theta = mean.unsqueeze(0)?.broadcast_add(&epsilon.broadcast_mul(&std)?)?;
+        let theta = mean
+            .unsqueeze(0)?
+            .broadcast_add(&epsilon.broadcast_mul(&std)?)?;
 
         Ok((theta, epsilon))
     }
@@ -182,8 +187,10 @@ impl VariationalDistribution for SusieVar {
         let diff = theta.broadcast_sub(&mean)?; // (S, p, k)
         let normalized_sq = diff.sqr()?.broadcast_div(&(var + 1e-8)?)?; // (S, p, k)
 
-        let log_prob_element =
-            (normalized_sq.broadcast_add(&log_var)?.broadcast_add(&ln_2pi)? * (-0.5))?;
+        let log_prob_element = (normalized_sq
+            .broadcast_add(&log_var)?
+            .broadcast_add(&ln_2pi)?
+            * (-0.5))?;
 
         // Sum over (p, k) dimensions -> (S,)
         log_prob_element.sum(2)?.sum(1)
@@ -239,16 +246,18 @@ impl SusieVar {
         let dtype = beta.dtype();
         let device = beta.device();
         // Create scalar constant directly in f32 to avoid Metal F64 conversion issues
-        let ln_2pi = Tensor::new((2.0 * std::f64::consts::PI).ln() as f32, device)?
-            .to_dtype(dtype)?;
+        let ln_2pi =
+            Tensor::new((2.0 * std::f64::consts::PI).ln() as f32, device)?.to_dtype(dtype)?;
 
         let std = self.beta_ln_std.exp()?;
         let diff = beta.broadcast_sub(&self.beta_mean)?;
         let normalized_sq = diff.sqr()?.broadcast_div(&std.sqr()?)?;
 
         let two_ln_std = (&self.beta_ln_std * 2.0)?;
-        let log_prob_element =
-            (normalized_sq.broadcast_add(&two_ln_std)?.broadcast_add(&ln_2pi)? * (-0.5))?;
+        let log_prob_element = (normalized_sq
+            .broadcast_add(&two_ln_std)?
+            .broadcast_add(&ln_2pi)?
+            * (-0.5))?;
 
         // Sum over L, p, k dimensions -> (S,)
         log_prob_element.sum(3)?.sum(2)?.sum(1)
@@ -323,7 +332,9 @@ mod tests {
                 assert!(
                     (sum - 1.0).abs() < 1e-5,
                     "Alpha should sum to 1 for l={}, k={}, got {}",
-                    i, j, sum
+                    i,
+                    j,
+                    sum
                 );
             }
         }
@@ -333,8 +344,8 @@ mod tests {
 
     #[test]
     fn test_susie_with_linear_model() -> Result<()> {
-        use crate::sgvb::{compute_elbo, sgvb_loss, GaussianPrior, LinearModelSGVB, SGVBConfig};
         use crate::sgvb::traits::BlackBoxLikelihood;
+        use crate::sgvb::{compute_elbo, sgvb_loss, GaussianPrior, LinearModelSGVB, SGVBConfig};
         use candle_core::Tensor;
 
         let device = Device::Cpu;
@@ -363,7 +374,9 @@ mod tests {
         let model = LinearModelSGVB::from_variational(susie, x, prior, config.clone());
 
         // Simple Gaussian likelihood
-        struct GaussianLik { y: Tensor }
+        struct GaussianLik {
+            y: Tensor,
+        }
         impl BlackBoxLikelihood for GaussianLik {
             fn log_likelihood(&self, etas: &[&Tensor]) -> Result<Tensor> {
                 let eta = etas[0];

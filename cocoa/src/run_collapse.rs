@@ -171,7 +171,11 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
             })
             .collect();
 
-        gamma.to_parquet_with_names(&out_file, (Some(&gene_names), Some("gene")), Some(&indv_topic_names))?;
+        gamma.to_parquet_with_names(
+            &out_file,
+            (Some(&gene_names), Some("gene")),
+            Some(&indv_topic_names),
+        )?;
     }
 
     {

@@ -94,8 +94,13 @@ where
 
         let (row_names_slice, row_column_name) = row_names;
 
-        let writer =
-            ParquetWriter::new(file_path, (nrows, ncols), (row_names_slice, column_names), None, row_column_name)?;
+        let writer = ParquetWriter::new(
+            file_path,
+            (nrows, ncols),
+            (row_names_slice, column_names),
+            None,
+            row_column_name,
+        )?;
         let row_names = writer.row_names_vec();
 
         if row_names.len() != nrows {

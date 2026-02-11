@@ -150,23 +150,23 @@ impl ParquetReader {
             };
             row_names.push(row_name);
 
-            let numbers: anyhow::Result<Vec<f64>> = select_indices.iter().try_fold(
-                Vec::with_capacity(ncols),
-                |mut acc, &(tt, j)| {
-                    let x = match tt {
-                        parquet::basic::Type::DOUBLE => row.get_double(j)?,
-                        parquet::basic::Type::FLOAT => row.get_float(j)? as f64,
-                        parquet::basic::Type::INT32 | parquet::basic::Type::INT64 => {
-                            row.get_int(j)? as f64
-                        }
-                        _ => {
-                            unimplemented!("we just support integer and float/double for now")
-                        }
-                    };
-                    acc.push(x);
-                    Ok(acc)
-                },
-            );
+            let numbers: anyhow::Result<Vec<f64>> =
+                select_indices
+                    .iter()
+                    .try_fold(Vec::with_capacity(ncols), |mut acc, &(tt, j)| {
+                        let x = match tt {
+                            parquet::basic::Type::DOUBLE => row.get_double(j)?,
+                            parquet::basic::Type::FLOAT => row.get_float(j)? as f64,
+                            parquet::basic::Type::INT32 | parquet::basic::Type::INT64 => {
+                                row.get_int(j)? as f64
+                            }
+                            _ => {
+                                unimplemented!("we just support integer and float/double for now")
+                            }
+                        };
+                        acc.push(x);
+                        Ok(acc)
+                    });
 
             row_major_data.extend(numbers?);
             row_counter += 1;

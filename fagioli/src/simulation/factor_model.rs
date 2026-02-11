@@ -166,11 +166,7 @@ mod tests {
 
     #[test]
     fn test_orthogonalization() {
-        let mat = DMatrix::from_row_slice(3, 2, &[
-            1.0, 1.0,
-            2.0, 0.0,
-            0.0, 1.0,
-        ]);
+        let mat = DMatrix::from_row_slice(3, 2, &[1.0, 1.0, 2.0, 0.0, 0.0, 1.0]);
 
         let orth = orthogonalize_columns(&mat);
 

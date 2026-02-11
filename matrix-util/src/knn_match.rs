@@ -151,7 +151,9 @@ where
         if let Some(self_idx) = self.name2index.get(query_name) {
             let query = &self.data_vec[*self_idx];
             let ef_search = nquery.max(24);
-            let neighbours = against.hnsw.search(query.data.as_slice(), nquery, ef_search);
+            let neighbours = against
+                .hnsw
+                .search(query.data.as_slice(), nquery, ef_search);
 
             let mut points = Vec::with_capacity(nquery);
             let mut distances = Vec::with_capacity(nquery);

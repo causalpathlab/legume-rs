@@ -183,7 +183,10 @@ impl GenePairGraph {
     pub fn filter_edges(&mut self, keep_indices: &[usize]) {
         self.gene_edges = keep_indices.iter().map(|&i| self.gene_edges[i]).collect();
         self.graph.edges = self.gene_edges.clone();
-        self.graph.distances = keep_indices.iter().map(|&i| self.graph.distances[i]).collect();
+        self.graph.distances = keep_indices
+            .iter()
+            .map(|&i| self.graph.distances[i])
+            .collect();
     }
 
     pub fn num_edges(&self) -> usize {
@@ -251,11 +254,7 @@ impl GenePairGraph {
     pub fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
         let n_edges = self.gene_edges.len();
 
-        let column_names: Vec<Box<str>> = vec![
-            "gene1".into(),
-            "gene2".into(),
-            "distance".into(),
-        ];
+        let column_names: Vec<Box<str>> = vec!["gene1".into(), "gene2".into(), "distance".into()];
         let column_types = vec![
             ParquetType::BYTE_ARRAY,
             ParquetType::BYTE_ARRAY,
@@ -323,13 +322,9 @@ mod tests {
         let file = write_edge_file(&["TP53\tBRCA1", "BRCA1\tEGFR", "TP53\tEGFR"]);
         let names = gene_names(&["TP53", "BRCA1", "EGFR", "MYC"]);
 
-        let graph = GenePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let graph =
+            GenePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, None)
+                .unwrap();
 
         assert_eq!(graph.num_genes(), 4);
         assert_eq!(graph.num_edges(), 3);
@@ -344,13 +339,9 @@ mod tests {
         let file = write_edge_file(&["A\tB", "B\tA", "A\tB"]);
         let names = gene_names(&["A", "B", "C"]);
 
-        let graph = GenePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let graph =
+            GenePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, None)
+                .unwrap();
 
         assert_eq!(graph.num_edges(), 1);
         assert_eq!(graph.gene_edges, vec![(0, 1)]);
@@ -361,13 +352,9 @@ mod tests {
         let file = write_edge_file(&["TP53\tBRCA1", "UNKNOWN1\tBRCA1", "TP53\tUNKNOWN2"]);
         let names = gene_names(&["TP53", "BRCA1"]);
 
-        let graph = GenePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let graph =
+            GenePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, None)
+                .unwrap();
 
         assert_eq!(graph.num_edges(), 1);
         assert_eq!(graph.gene_edges, vec![(0, 1)]);
@@ -378,13 +365,9 @@ mod tests {
         let file = write_edge_file(&["A\tA", "A\tB"]);
         let names = gene_names(&["A", "B"]);
 
-        let graph = GenePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let graph =
+            GenePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, None)
+                .unwrap();
 
         assert_eq!(graph.num_edges(), 1);
         assert_eq!(graph.gene_edges, vec![(0, 1)]);
@@ -414,13 +397,9 @@ mod tests {
         let file = write_edge_file(&["TP53\tBRCA1"]);
         let names = gene_names(&["TP53.v1", "BRCA1.v2"]);
 
-        let graph = GenePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            Some('.'),
-        )
-        .unwrap();
+        let graph =
+            GenePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, Some('.'))
+                .unwrap();
 
         assert_eq!(graph.num_edges(), 1);
     }
@@ -430,13 +409,9 @@ mod tests {
         let file = write_edge_file(&[]);
         let names = gene_names(&["A", "B"]);
 
-        let graph = GenePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let graph =
+            GenePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, None)
+                .unwrap();
 
         assert_eq!(graph.num_edges(), 0);
         assert_eq!(graph.num_genes(), 2);
@@ -451,13 +426,8 @@ mod tests {
 
         let names = gene_names(&["A", "B", "C"]);
 
-        let graph = GenePairGraph::from_edge_list(
-            f.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let graph =
+            GenePairGraph::from_edge_list(f.path().to_str().unwrap(), names, false, None).unwrap();
 
         assert_eq!(graph.num_edges(), 2);
         assert_eq!(graph.gene_edges, vec![(0, 1), (1, 2)]);
@@ -468,13 +438,9 @@ mod tests {
         let file = write_edge_file(&["A\tB", "B\tC", "A\tC"]);
         let names = gene_names(&["A", "B", "C"]);
 
-        let graph = GenePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let graph =
+            GenePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, None)
+                .unwrap();
 
         assert!(graph.verify_adjacency());
         // Check symmetric neighbors
@@ -487,13 +453,9 @@ mod tests {
         let file = write_edge_file(&["A\tB", "B\tC"]);
         let names = gene_names(&["A", "B", "C"]);
 
-        let graph = GenePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let graph =
+            GenePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, None)
+                .unwrap();
 
         assert_eq!(graph.graph.distances.len(), 2);
         assert!(graph.graph.distances.iter().all(|d| d.is_nan()));
@@ -504,13 +466,9 @@ mod tests {
         let file = write_edge_file(&["TP53\tBRCA1", "BRCA1\tEGFR"]);
         let names = gene_names(&["TP53", "BRCA1", "EGFR"]);
 
-        let graph = GenePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let graph =
+            GenePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, None)
+                .unwrap();
 
         let edge_names = graph.edge_names();
         assert_eq!(edge_names.len(), 2);
@@ -523,13 +481,9 @@ mod tests {
         let file = write_edge_file(&["A\tB", "A\tC", "B\tC"]);
         let names = gene_names(&["A", "B", "C"]);
 
-        let graph = GenePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let graph =
+            GenePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, None)
+                .unwrap();
 
         let adj = graph.build_directed_adjacency();
         // A(0) -> B(1) edge 0, A(0) -> C(2) edge 1
@@ -545,13 +499,9 @@ mod tests {
         let file = write_edge_file(&["A\tB"]);
         let names = gene_names(&["A", "B"]);
 
-        let graph = GenePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let graph =
+            GenePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, None)
+                .unwrap();
 
         let ch_names = graph.edge_names_with_channels();
         assert_eq!(ch_names.len(), 2);

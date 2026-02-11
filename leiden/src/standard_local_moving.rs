@@ -107,11 +107,13 @@ impl StandardLocalMoving {
              */
             let mut best_cluster = current_cluster;
             let mut max_qv_increment = self.edge_weight_per_cluster[current_cluster]
-                - n.weight(j) * self.cluster_weights[current_cluster] * self.resolution / (2.0 * total_edge_weight);
+                - n.weight(j) * self.cluster_weights[current_cluster] * self.resolution
+                    / (2.0 * total_edge_weight);
 
             for &l in &self.neighboring_clusters[..num_neighboring_clusters] {
                 let qv_increment = self.edge_weight_per_cluster[l]
-                    - n.weight(j) * self.cluster_weights[l] * self.resolution / (2.0 * total_edge_weight);
+                    - n.weight(j) * self.cluster_weights[l] * self.resolution
+                        / (2.0 * total_edge_weight);
                 if qv_increment > max_qv_increment {
                     best_cluster = l;
                     max_qv_increment = qv_increment;

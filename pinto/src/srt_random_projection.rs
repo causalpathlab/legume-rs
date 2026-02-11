@@ -49,11 +49,7 @@ impl SrtRandProjOps for SrtCellPairs<'_> {
             .scale_columns()
             .transpose();
 
-        let proj_kn = concatenate_vertical(&[
-            proj.left.clone(),
-            proj.right.clone(),
-            embedding_kn,
-        ])?;
+        let proj_kn = concatenate_vertical(&[proj.left.clone(), proj.right.clone(), embedding_kn])?;
 
         let target_kk = num_sorting_features.unwrap_or(proj_kn.nrows());
         let kk = proj_kn.nrows().min(target_kk).min(mm);

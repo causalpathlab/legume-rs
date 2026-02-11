@@ -75,7 +75,11 @@ impl TrainScores {
             .map(|x| (x + 1).to_string().into_boxed_str())
             .collect();
 
-        mat.to_parquet_with_names(file_path, (Some(&epochs), Some("epoch")), Some(&score_types))
+        mat.to_parquet_with_names(
+            file_path,
+            (Some(&epochs), Some("epoch")),
+            Some(&score_types),
+        )
     }
 
     pub fn last_llik(&self) -> Option<&f32> {
@@ -170,9 +174,7 @@ pub fn filter_parquet_by_indices(file_path: &str, keep_indices: &[usize]) -> any
             PhysicalType::BYTE_ARRAY => {
                 let vals: Vec<ByteArray> = kept_rows
                     .iter()
-                    .map(|r| {
-                        ByteArray::from(r.get_string(col_idx).unwrap().as_bytes().to_vec())
-                    })
+                    .map(|r| ByteArray::from(r.get_string(col_idx).unwrap().as_bytes().to_vec()))
                     .collect();
                 col_writer
                     .typed::<ByteArrayType>()

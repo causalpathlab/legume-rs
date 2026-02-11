@@ -22,7 +22,11 @@ impl ParallelLocalMoving {
 
     /// Run a louvain iteration, but update all the nodes simultaneously using only information
     /// from the previous iteration.
-    pub fn iterate<C: Clustering + Clone + Send + Sync + Default>(&mut self, n: &Network, c: &mut C) -> bool {
+    pub fn iterate<C: Clustering + Clone + Send + Sync + Default>(
+        &mut self,
+        n: &Network,
+        c: &mut C,
+    ) -> bool {
         let total_edge_weight = n.get_total_edge_weight_par();
 
         self.cluster_weights.zero_len(n.nodes());
@@ -79,7 +83,8 @@ impl ParallelLocalMoving {
                     if curr_cluster_unused {
                         neighboring_clusters[0] = current_cluster;
                     } else {
-                        neighboring_clusters[0] = self.unused_clusters[initial_num_unused_clusters - 1];
+                        neighboring_clusters[0] =
+                            self.unused_clusters[initial_num_unused_clusters - 1];
                     }
                     let mut num_neighboring_clusters = 1;
 
@@ -116,7 +121,8 @@ impl ParallelLocalMoving {
                             self.cluster_weights[l]
                         };
                         let qv_increment = edge_weight_per_cluster[l]
-                            - n.weight(j) * cluster_weight * self.resolution / (2.0 * total_edge_weight);
+                            - n.weight(j) * cluster_weight * self.resolution
+                                / (2.0 * total_edge_weight);
 
                         if qv_increment > max_qv_increment {
                             best_cluster = l;

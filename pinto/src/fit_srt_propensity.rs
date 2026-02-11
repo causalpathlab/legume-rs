@@ -12,54 +12,88 @@ use parquet::basic::Type as ParquetType;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtPropensityArgs {
-    #[arg(short = 'k', long,
-          help = "Number of edge clusters for K-means",
-          long_help = "Number of edge clusters for K-means.\n\
-                       Defaults to the number of latent dimensions if not specified.")]
+    #[arg(
+        short = 'k',
+        long,
+        help = "Number of edge clusters for K-means",
+        long_help = "Number of edge clusters for K-means.\n\
+                       Defaults to the number of latent dimensions if not specified."
+    )]
     n_edge_clusters: Option<usize>,
 
-    #[arg(long, default_value_t = 100,
-          help = "Maximum K-means iterations for edge clustering")]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Maximum K-means iterations for edge clustering"
+    )]
     maxiter_clustering: usize,
 
-    #[arg(short = 'z', long, required = true,
-          help = "Latent edge representation file (.latent.parquet)")]
+    #[arg(
+        short = 'z',
+        long,
+        required = true,
+        help = "Latent edge representation file (.latent.parquet)"
+    )]
     latent_data_file: Box<str>,
 
-    #[arg(short = 'e', long, required = true,
-          help = "Coordinate pair file (.coord_pairs.parquet)",
-          long_help = "Coordinate pair file (.coord_pairs.parquet from delta-svd).\n\
-                       Must contain left_cell and right_cell columns.")]
+    #[arg(
+        short = 'e',
+        long,
+        required = true,
+        help = "Coordinate pair file (.coord_pairs.parquet)",
+        long_help = "Coordinate pair file (.coord_pairs.parquet from delta-svd).\n\
+                       Must contain left_cell and right_cell columns."
+    )]
     coord_pair_file: Box<str>,
 
-    #[arg(short = 'd', long, value_delimiter(','),
-          help = "Expression data files (.zarr or .h5)",
-          long_help = "Expression data files (.zarr or .h5, comma separated).\n\
-                       Optional; used for additional per-vertex expression statistics.")]
+    #[arg(
+        short = 'd',
+        long,
+        value_delimiter(','),
+        help = "Expression data files (.zarr or .h5)",
+        long_help = "Expression data files (.zarr or .h5, comma separated).\n\
+                       Optional; used for additional per-vertex expression statistics."
+    )]
     expr_data_files: Option<Vec<Box<str>>>,
 
-    #[arg(long, default_value = "left_cell",
-          help = "Column name for left cell index in coord_pair_file")]
+    #[arg(
+        long,
+        default_value = "left_cell",
+        help = "Column name for left cell index in coord_pair_file"
+    )]
     left_name: Box<str>,
 
-    #[arg(long, default_value = "right_cell",
-          help = "Column name for right cell index in coord_pair_file")]
+    #[arg(
+        long,
+        default_value = "right_cell",
+        help = "Column name for right cell index in coord_pair_file"
+    )]
     right_name: Box<str>,
 
-    #[arg(long = "coord-column-names", value_delimiter(','),
-          help = "Coordinate column names in coord_pair_file",
-          long_help = "Coordinate column names in coord_pair_file (comma separated).\n\
-                       Looked up as left_{name} and right_{name}.")]
+    #[arg(
+        long = "coord-column-names",
+        value_delimiter(','),
+        help = "Coordinate column names in coord_pair_file",
+        long_help = "Coordinate column names in coord_pair_file (comma separated).\n\
+                       Looked up as left_{name} and right_{name}."
+    )]
     coord_column_names: Option<Vec<Box<str>>>,
 
-    #[arg(long, default_value_t = 100,
-          help = "Block size for parallel processing")]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Block size for parallel processing"
+    )]
     block_size: usize,
 
-    #[arg(long, short, required = true,
-          help = "Output file prefix",
-          long_help = "Output file prefix.\n\
-                       Generates: {out}.propensity.parquet, {out}.edge_cluster.parquet")]
+    #[arg(
+        long,
+        short,
+        required = true,
+        help = "Output file prefix",
+        long_help = "Output file prefix.\n\
+                       Generates: {out}.propensity.parquet, {out}.edge_cluster.parquet"
+    )]
     out: Box<str>,
 }
 

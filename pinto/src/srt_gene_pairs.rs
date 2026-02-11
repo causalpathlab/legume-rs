@@ -80,7 +80,9 @@ impl GenePairCollapsedStat {
         let n_kept = keep_indices.len();
         let mut new_delta = Mat::zeros(n_kept, self.n_samples);
         for (new_idx, &old_idx) in keep_indices.iter().enumerate() {
-            new_delta.row_mut(new_idx).copy_from(&self.delta_pos_ds.row(old_idx));
+            new_delta
+                .row_mut(new_idx)
+                .copy_from(&self.delta_pos_ds.row(old_idx));
         }
 
         self.delta_pos_ds = new_delta;
@@ -91,7 +93,10 @@ impl GenePairCollapsedStat {
 
         info!(
             "Elbow threshold: {:.4} (rank {}), kept {}/{} edges",
-            threshold, elbow_rank, n_kept, n_kept + n_removed
+            threshold,
+            elbow_rank,
+            n_kept,
+            n_kept + n_removed
         );
 
         n_removed
@@ -116,7 +121,6 @@ impl GenePairCollapsedStat {
 
         Ok(GenePairParameters { delta_pos })
     }
-
 }
 
 /// Visit all gene-pair interaction deltas for a single cell's sparse
@@ -249,11 +253,18 @@ fn gene_interaction_delta_visitor(
         let rows = y_j.row_indices();
         let vals = y_j.values();
 
-        visit_gene_pair_deltas(rows, vals, gene_adj, gene_means, use_log1p, |edge_idx, delta| {
-            if delta > 0.0 {
-                local_delta_pos[edge_idx] += delta;
-            }
-        });
+        visit_gene_pair_deltas(
+            rows,
+            vals,
+            gene_adj,
+            gene_means,
+            use_log1p,
+            |edge_idx, delta| {
+                if delta > 0.0 {
+                    local_delta_pos[edge_idx] += delta;
+                }
+            },
+        );
 
         local_size += 1.0;
     }

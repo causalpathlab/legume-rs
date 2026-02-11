@@ -1,19 +1,21 @@
-use crate::handlers::merging::{run_merge_backend, find_aligned_rows, generate_unique_batch_names};
-use crate::interactive::{UserAction, prompt_user_action, confirm};
+use crate::handlers::merging::{find_aligned_rows, generate_unique_batch_names, run_merge_backend};
+use crate::interactive::{confirm, prompt_user_action, UserAction};
 use crate::misc::*;
 use crate::qc::*;
 use crate::sparse_io::*;
-use crate::utilities::io_helpers::{read_row_names, read_col_names, MAX_ROW_NAME_IDX, MAX_COLUMN_NAME_IDX};
+use crate::utilities::io_helpers::{
+    read_col_names, read_row_names, MAX_COLUMN_NAME_IDX, MAX_ROW_NAME_IDX,
+};
 use crate::MergeBackendArgs;
 
+use log::info;
 use matrix_util::common_io::*;
 use matrix_util::membership::Membership;
 use matrix_util::traits::RunningStatOps;
-use log::info;
 
 // Import the argument structs from main.rs
 // These will need to be public in main.rs
-use crate::{SubsetColumnsArgs, SubsetRowsArgs, ReorderRowsArgs, RunSqueezeArgs};
+use crate::{ReorderRowsArgs, RunSqueezeArgs, SubsetColumnsArgs, SubsetRowsArgs};
 
 /// Subset columns from a sparse matrix data file
 ///
@@ -58,9 +60,13 @@ pub fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
         // Build membership from column names in file (these are the ones we want to keep)
         // The keys are the column names from the file, values are their indices
         let membership = Membership::from_pairs(
-            col_names.iter().enumerate().map(|(i, name)| (name.clone(), i.to_string().into_boxed_str())),
+            col_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), i.to_string().into_boxed_str())),
             args.allow_prefix,
-        ).with_delimiter(args.delimiter);
+        )
+        .with_delimiter(args.delimiter);
 
         // Match data columns against the membership to find which ones to keep
         let (matched, stats) = membership.match_keys(&data_col_names);
@@ -79,7 +85,9 @@ pub fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
             let data_sample: Vec<_> = data_col_names.iter().take(3).collect();
             info!("column names from file (sample): {:?}", file_sample);
             info!("column names in data (sample): {:?}", data_sample);
-            return Err(anyhow::anyhow!("Found empty columns - no matching column names"));
+            return Err(anyhow::anyhow!(
+                "Found empty columns - no matching column names"
+            ));
         }
 
         // Build index list: for each data column that matched, include its index
@@ -163,15 +171,17 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
         }
         info!("read {} row names from file", row_names.len());
 
-        let data_row_names = data
-            .row_names()
-            .expect("row names not found in data file");
+        let data_row_names = data.row_names().expect("row names not found in data file");
 
         // Build membership from row names in file (these are the ones we want to keep)
         let membership = Membership::from_pairs(
-            row_names.iter().enumerate().map(|(i, name)| (name.clone(), i.to_string().into_boxed_str())),
+            row_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), i.to_string().into_boxed_str())),
             args.allow_prefix,
-        ).with_delimiter(args.delimiter);
+        )
+        .with_delimiter(args.delimiter);
 
         // Match data rows against the membership to find which ones to keep
         let (matched, stats) = membership.match_keys(&data_row_names);
@@ -333,7 +343,10 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
                 UserAction::AdjustCutoffs(new_row, new_col) => {
                     row_nnz_cutoff = new_row;
                     col_nnz_cutoff = new_col;
-                    info!("Updated cutoffs: row={}, column={}", row_nnz_cutoff, col_nnz_cutoff);
+                    info!(
+                        "Updated cutoffs: row={}, column={}",
+                        row_nnz_cutoff, col_nnz_cutoff
+                    );
 
                     // Show updated histogram with new cutoffs
                     display_nnz_histogram(
@@ -347,7 +360,12 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
                     )?;
 
                     // Ask again with new cutoffs
-                    match prompt_user_action(&row_nnz_vec, &col_nnz_vec, row_nnz_cutoff, col_nnz_cutoff)? {
+                    match prompt_user_action(
+                        &row_nnz_vec,
+                        &col_nnz_vec,
+                        row_nnz_cutoff,
+                        col_nnz_cutoff,
+                    )? {
                         UserAction::Proceed => {
                             info!("Proceeding with squeeze operation...");
                         }
@@ -365,7 +383,10 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
 
             // Confirm in-place modification if no output
             if cmd_args.output.is_none() {
-                let msg = format!("Modify {} in-place? This will permanently alter the file", data_file_arg);
+                let msg = format!(
+                    "Modify {} in-place? This will permanently alter the file",
+                    data_file_arg
+                );
                 if !confirm(&msg)? {
                     info!("Skipping in-place modification of {}", data_file_arg);
                     continue;
@@ -412,7 +433,11 @@ fn run_squeeze_and_merge(
     mut col_nnz_cutoff: usize,
 ) -> anyhow::Result<()> {
     let output_prefix = cmd_args.output.as_ref().unwrap();
-    info!("Squeeze and merge mode: {} files -> {}", cmd_args.data_files.len(), output_prefix);
+    info!(
+        "Squeeze and merge mode: {} files -> {}",
+        cmd_args.data_files.len(),
+        output_prefix
+    );
 
     // Handle interactive mode for first file to get cutoffs
     if cmd_args.interactive || cmd_args.show_histogram {
@@ -442,7 +467,10 @@ fn run_squeeze_and_merge(
                 UserAction::AdjustCutoffs(new_row, new_col) => {
                     row_nnz_cutoff = new_row;
                     col_nnz_cutoff = new_col;
-                    info!("Updated cutoffs: row={}, column={}", row_nnz_cutoff, col_nnz_cutoff);
+                    info!(
+                        "Updated cutoffs: row={}, column={}",
+                        row_nnz_cutoff, col_nnz_cutoff
+                    );
                 }
                 UserAction::Cancel => {
                     info!("Operation cancelled");
@@ -473,8 +501,8 @@ fn run_merge_then_squeeze(
     row_nnz_cutoff: usize,
     col_nnz_cutoff: usize,
 ) -> anyhow::Result<()> {
-    use fnv::FnvHashMap as HashMap;
     use data_beans::sparse_data_visitors::create_jobs;
+    use fnv::FnvHashMap as HashMap;
     use rayon::prelude::*;
 
     let output_prefix = cmd_args.output.as_ref().unwrap();
@@ -516,7 +544,12 @@ fn run_merge_then_squeeze(
     let mut col_offset: u64 = 0;
 
     for (batch_idx, data_file_arg) in cmd_args.data_files.iter().enumerate() {
-        info!("Processing file {}/{}: {}", batch_idx + 1, cmd_args.data_files.len(), data_file_arg);
+        info!(
+            "Processing file {}/{}: {}",
+            batch_idx + 1,
+            cmd_args.data_files.len(),
+            data_file_arg
+        );
 
         let (backend, data_file) = resolve_backend_file(data_file_arg, None)?;
         let mut data = open_sparse_matrix(&data_file, &backend)?;
@@ -570,8 +603,12 @@ fn run_merge_then_squeeze(
     }
 
     // Step 3: Create merged sparse matrix
-    info!("Creating merged matrix: {} rows x {} columns, {} triplets",
-          all_row_names.len(), column_names.len(), all_triplets.len());
+    info!(
+        "Creating merged matrix: {} rows x {} columns, {} triplets",
+        all_row_names.len(),
+        column_names.len(),
+        all_triplets.len()
+    );
 
     let (backend, backend_file) = resolve_backend_file(output_prefix, None)?;
 
@@ -593,7 +630,10 @@ fn run_merge_then_squeeze(
     info!("Created merged file: {}", &backend_file);
 
     // Step 4: Squeeze the merged result
-    info!("Squeezing merged data with cutoffs: row={}, column={}", row_nnz_cutoff, col_nnz_cutoff);
+    info!(
+        "Squeezing merged data with cutoffs: row={}, column={}",
+        row_nnz_cutoff, col_nnz_cutoff
+    );
 
     drop(merged_data); // Close before squeeze
     let merged_data = open_sparse_matrix(&backend_file, &backend)?;
@@ -610,16 +650,16 @@ fn run_merge_then_squeeze(
 
     // Verify and report
     let final_data = open_sparse_matrix(&backend_file, &backend)?;
-    info!("After squeeze: {} rows x {} columns",
-          final_data.num_rows().unwrap(),
-          final_data.num_columns().unwrap());
+    info!(
+        "After squeeze: {} rows x {} columns",
+        final_data.num_rows().unwrap(),
+        final_data.num_columns().unwrap()
+    );
 
     // Write batch membership file
     let batch_memb_file = format!("{}.batch.gz", output_prefix);
-    let batch_map: HashMap<Box<str>, Box<str>> = column_names
-        .into_iter()
-        .zip(column_batch_names)
-        .collect();
+    let batch_map: HashMap<Box<str>, Box<str>> =
+        column_names.into_iter().zip(column_batch_names).collect();
     let default_batch = basename(output_prefix)?;
     let final_col_names = final_data.column_names()?;
     let final_batch_names: Vec<Box<str>> = final_col_names
@@ -648,7 +688,9 @@ fn run_squeeze_then_merge(
     let temp_dir = tempfile::Builder::new()
         .prefix(".squeeze_temp_")
         .tempdir_in(&*output_dir)?;
-    let temp_dir_path = temp_dir.path().to_str()
+    let temp_dir_path = temp_dir
+        .path()
+        .to_str()
         .ok_or_else(|| anyhow::anyhow!("Invalid temp dir path"))?;
 
     info!("Created temp directory: {}", temp_dir_path);
@@ -660,13 +702,21 @@ fn run_squeeze_then_merge(
 
     // Step 1: Squeeze each file to temp location
     for (idx, data_file_arg) in cmd_args.data_files.iter().enumerate() {
-        info!("Processing file {}/{}: {}", idx + 1, cmd_args.data_files.len(), data_file_arg);
+        info!(
+            "Processing file {}/{}: {}",
+            idx + 1,
+            cmd_args.data_files.len(),
+            data_file_arg
+        );
 
         let (backend, data_file) = resolve_backend_file(data_file_arg, None)?;
         let data = open_sparse_matrix(&data_file, &backend)?;
 
-        info!("before squeeze -- data: {} rows x {} columns",
-              data.num_rows().unwrap(), data.num_columns().unwrap());
+        info!(
+            "before squeeze -- data: {} rows x {} columns",
+            data.num_rows().unwrap(),
+            data.num_columns().unwrap()
+        );
 
         let backend_ext = match backend {
             SparseIoBackend::Zarr => "zarr",
@@ -689,8 +739,11 @@ fn run_squeeze_then_merge(
         )?;
 
         let squeezed = open_sparse_matrix(&temp_file, &backend)?;
-        info!("after squeeze -- data: {} rows x {} columns",
-              squeezed.num_rows().unwrap(), squeezed.num_columns().unwrap());
+        info!(
+            "after squeeze -- data: {} rows x {} columns",
+            squeezed.num_rows().unwrap(),
+            squeezed.num_columns().unwrap()
+        );
 
         temp_files.push(temp_file.into_boxed_str());
     }
@@ -710,7 +763,11 @@ fn run_squeeze_then_merge(
         squeezed_data.iter().map(|d| d.as_ref()).collect();
     let aligned_rows = find_aligned_rows(&data_refs, crate::RowAlignMode::Common)?;
 
-    info!("Found {} common rows across {} files", aligned_rows.len(), temp_files.len());
+    info!(
+        "Found {} common rows across {} files",
+        aligned_rows.len(),
+        temp_files.len()
+    );
 
     // Step 3: Subset each file to common rows
     for (idx, temp_file) in temp_files.iter().enumerate() {
@@ -723,8 +780,12 @@ fn run_squeeze_then_merge(
             .filter_map(|target_row| current_rows.iter().position(|r| r == target_row))
             .collect();
 
-        info!("  File {}: subsetting from {} to {} rows",
-              idx, current_rows.len(), row_indices.len());
+        info!(
+            "  File {}: subsetting from {} to {} rows",
+            idx,
+            current_rows.len(),
+            row_indices.len()
+        );
 
         data.subset_columns_rows(None, Some(&row_indices))?;
     }
@@ -828,8 +889,14 @@ fn print_nnz_summary(label: &str, nnz: &[f32], cutoff: usize) {
 
     println!("{} NNZ Distribution:", label);
     println!("  Total: {}", total);
-    println!("  Min: {}, Max: {}, Mean: {:.2}, Median: {:.2}", min, max, mean, median);
-    println!("  Cutoff: {} (removes {} / {} = {:.2}%)", cutoff, below_cutoff, total, pct_removed);
+    println!(
+        "  Min: {}, Max: {}, Mean: {:.2}, Median: {:.2}",
+        min, max, mean, median
+    );
+    println!(
+        "  Cutoff: {} (removes {} / {} = {:.2}%)",
+        cutoff, below_cutoff, total, pct_removed
+    );
 
     // Create histogram with log10(nnz+1) bins
     let hist = create_log_histogram(nnz, cutoff);

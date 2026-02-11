@@ -1,9 +1,9 @@
 //! Integration tests for the hsblock crate.
 
 use crate::btree::BTree;
+use crate::inference::{Hsblock, HsbmOptions};
 use crate::model::poisson_score_cpu;
 use crate::sufficient_stats::SufficientStats;
-use crate::inference::{Hsblock, HsbmOptions};
 use leiden::clustering::SimpleClustering;
 use leiden::leiden::Leiden;
 use leiden::network::{Graph, Network};
@@ -283,8 +283,7 @@ fn test_tree_score_improves() {
 fn test_diagnostic_integer_weights() {
     println!("\n=== DIAGNOSTIC: Integer weights (w=1.0) ===");
 
-    let (network, true_labels) =
-        planted_partition_network(50, 3, 0.4, 0.02, false, 42);
+    let (network, true_labels) = planted_partition_network(50, 3, 0.4, 0.02, false, 42);
     let n = network.nodes();
 
     println!("Graph: {} nodes, 3 true clusters of 50", n);
@@ -337,8 +336,7 @@ fn test_diagnostic_integer_weights() {
 fn test_diagnostic_fractional_weights() {
     println!("\n=== DIAGNOSTIC: Fractional weights (fuzzy kernel simulation) ===");
 
-    let (network, true_labels) =
-        planted_partition_network(50, 3, 0.4, 0.02, true, 42);
+    let (network, true_labels) = planted_partition_network(50, 3, 0.4, 0.02, true, 42);
     let n = network.nodes();
 
     // Print weight statistics
@@ -411,8 +409,7 @@ fn test_diagnostic_two_clusters() {
 
     for &frac in &[false, true] {
         let label = if frac { "fractional" } else { "integer" };
-        let (network, true_labels) =
-            planted_partition_network(50, 2, 0.5, 0.02, frac, 42);
+        let (network, true_labels) = planted_partition_network(50, 2, 0.5, 0.02, frac, 42);
         let n = network.nodes();
 
         let leiden_labels = run_leiden(&network, n, 1.0);

@@ -153,11 +153,17 @@ pub fn generate_convoluted_data(args: &SimConvArgs) -> anyhow::Result<()> {
         .map(|x| x.to_string().into_boxed_str())
         .collect::<Vec<_>>();
 
-    fractions_kn
-        .transpose()
-        .to_parquet_with_names(&frac_file, (Some(&samples), Some("sample")), Some(&topic_names))?;
+    fractions_kn.transpose().to_parquet_with_names(
+        &frac_file,
+        (Some(&samples), Some("sample")),
+        Some(&topic_names),
+    )?;
 
-    conv_ds.to_parquet_with_names(&bulk_file, (Some(genes.as_ref()), Some("gene")), Some(&samples))?;
+    conv_ds.to_parquet_with_names(
+        &bulk_file,
+        (Some(genes.as_ref()), Some("gene")),
+        Some(&samples),
+    )?;
 
     info!("done");
     Ok(())

@@ -154,8 +154,7 @@ impl ZITopicDecoder {
         let dictionary = log_softmax_linear(n_topics, n_features, vs.pp("dictionary"))?;
 
         let init_val = candle_nn::Init::Const(-2.0);
-        let dropout_logit_1d =
-            vs.get_with_hints((1, n_features), "dropout_logit", init_val)?;
+        let dropout_logit_1d = vs.get_with_hints((1, n_features), "dropout_logit", init_val)?;
 
         Ok(Self {
             n_features,

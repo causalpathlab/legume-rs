@@ -1,7 +1,7 @@
 use anyhow::Result;
 use log::info;
-use nalgebra::DMatrix;
 use matrix_util::traits::{MatOps, SampleOps};
+use nalgebra::DMatrix;
 
 use super::cell_type_effects::CellTypeGeneticEffects;
 
@@ -51,12 +51,18 @@ pub fn simulate_phenotypes(params: PhenotypeSimulationParams) -> Result<Simulate
 
     // Validate
     if cell_fractions.nrows() != n {
-        anyhow::bail!("cell_fractions rows ({}) != genotypes rows ({})",
-                      cell_fractions.nrows(), n);
+        anyhow::bail!(
+            "cell_fractions rows ({}) != genotypes rows ({})",
+            cell_fractions.nrows(),
+            n
+        );
     }
     if cell_fractions.ncols() != k {
-        anyhow::bail!("cell_fractions cols ({}) != num_cell_types ({})",
-                      cell_fractions.ncols(), k);
+        anyhow::bail!(
+            "cell_fractions cols ({}) != num_cell_types ({})",
+            cell_fractions.ncols(),
+            k
+        );
     }
     if let Some(z) = covariates {
         if z.nrows() != n {
@@ -67,9 +73,16 @@ pub fn simulate_phenotypes(params: PhenotypeSimulationParams) -> Result<Simulate
         anyhow::bail!("h2_genetic + h2_covariate must be <= 1");
     }
 
-    info!("Generating cell type-specific phenotypes: {} individuals × {} cell types", n, k);
-    info!("h²_g={:.3}, h²_c={:.3}, h²_ε={:.3}",
-          h2_genetic, h2_covariate, 1.0 - h2_genetic - h2_covariate);
+    info!(
+        "Generating cell type-specific phenotypes: {} individuals × {} cell types",
+        n, k
+    );
+    info!(
+        "h²_g={:.3}, h²_c={:.3}, h²_ε={:.3}",
+        h2_genetic,
+        h2_covariate,
+        1.0 - h2_genetic - h2_covariate
+    );
 
     // G: N × K, G_ik = X_i^shared β_k^shared + X_i^independent β_k^independent
     let mut g_raw = DMatrix::zeros(n, k);
@@ -87,8 +100,9 @@ pub fn simulate_phenotypes(params: PhenotypeSimulationParams) -> Result<Simulate
 
             // β_shared_k: S × 1
             let beta_shared_k = DMatrix::from_iterator(
-                shared_idx.len(), 1,
-                genetic_effects.shared_effect_sizes.row(ct).iter().copied()
+                shared_idx.len(),
+                1,
+                genetic_effects.shared_effect_sizes.row(ct).iter().copied(),
             );
 
             // G_shared_k = X_shared × β_shared_k (N × 1)
@@ -111,8 +125,14 @@ pub fn simulate_phenotypes(params: PhenotypeSimulationParams) -> Result<Simulate
 
             // β_independent_k: I × 1
             let beta_indep_k = DMatrix::from_iterator(
-                indep_idx.len(), 1,
-                genetic_effects.independent_effect_sizes.row(ct).iter().take(indep_idx.len()).copied()
+                indep_idx.len(),
+                1,
+                genetic_effects
+                    .independent_effect_sizes
+                    .row(ct)
+                    .iter()
+                    .take(indep_idx.len())
+                    .copied(),
             );
 
             // G_independent_k = X_independent × β_independent_k (N × 1)

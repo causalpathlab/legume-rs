@@ -110,12 +110,7 @@ where
 
     /// Convert to owned vectors (npos, sum, mean, std)
     pub fn to_vecs(&self) -> (Vec<T>, Vec<T>, Vec<T>, Vec<T>) {
-        (
-            self.npos.clone(),
-            self.s1.clone(),
-            self.mean(),
-            self.std(),
-        )
+        (self.npos.clone(), self.s1.clone(), self.mean(), self.std())
     }
 
     /// Add columns from a CscMatrix
@@ -171,9 +166,21 @@ where
             .iter()
             .map(|v| v.to_f32().unwrap_or(0.0))
             .collect();
-        let tot: Vec<f32> = self.sum().iter().map(|v| v.to_f32().unwrap_or(0.0)).collect();
-        let mu: Vec<f32> = self.mean().iter().map(|v| v.to_f32().unwrap_or(0.0)).collect();
-        let sig: Vec<f32> = self.std().iter().map(|v| v.to_f32().unwrap_or(0.0)).collect();
+        let tot: Vec<f32> = self
+            .sum()
+            .iter()
+            .map(|v| v.to_f32().unwrap_or(0.0))
+            .collect();
+        let mu: Vec<f32> = self
+            .mean()
+            .iter()
+            .map(|v| v.to_f32().unwrap_or(0.0))
+            .collect();
+        let sig: Vec<f32> = self
+            .std()
+            .iter()
+            .map(|v| v.to_f32().unwrap_or(0.0))
+            .collect();
 
         let column_names: Vec<Box<str>> = vec!["nnz", "tot", "mu", "sig"]
             .into_iter()
@@ -217,9 +224,21 @@ where
             .iter()
             .map(|v| v.to_f32().unwrap_or(0.0))
             .collect();
-        let tot: Vec<f32> = self.sum().iter().map(|v| v.to_f32().unwrap_or(0.0)).collect();
-        let mu: Vec<f32> = self.mean().iter().map(|v| v.to_f32().unwrap_or(0.0)).collect();
-        let sig: Vec<f32> = self.std().iter().map(|v| v.to_f32().unwrap_or(0.0)).collect();
+        let tot: Vec<f32> = self
+            .sum()
+            .iter()
+            .map(|v| v.to_f32().unwrap_or(0.0))
+            .collect();
+        let mu: Vec<f32> = self
+            .mean()
+            .iter()
+            .map(|v| v.to_f32().unwrap_or(0.0))
+            .collect();
+        let sig: Vec<f32> = self
+            .std()
+            .iter()
+            .map(|v| v.to_f32().unwrap_or(0.0))
+            .collect();
         (nnz, tot, mu, sig)
     }
 

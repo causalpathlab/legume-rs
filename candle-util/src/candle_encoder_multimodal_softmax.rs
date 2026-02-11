@@ -52,9 +52,8 @@ impl LogSoftmaxMultimodalEncoder {
             .map(|(m, (x_nd, x0_nd))| {
                 let lx_nd = (x_nd + 1.)?.log()?;
                 let denom_n1 = lx_nd.sum_keepdim(lx_nd.rank() - 1)?;
-                let h_nm = self.feature_module[m].forward(
-                    &(lx_nd.broadcast_div(&denom_n1)? * (self.n_features[m] as f64))?,
-                )?;
+                let h_nm = self.feature_module[m]
+                    .forward(&(lx_nd.broadcast_div(&denom_n1)? * (self.n_features[m] as f64))?)?;
 
                 if let Some(x0_nd) = x0_nd {
                     let lx0_nd = (x0_nd + 1.)?.log()?;

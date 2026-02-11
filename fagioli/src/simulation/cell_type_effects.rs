@@ -1,10 +1,10 @@
 use anyhow::Result;
 use log::info;
+use matrix_util::traits::MatOps;
 use nalgebra::DMatrix;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Gamma, Normal};
-use matrix_util::traits::MatOps;
 
 /// Cell type-specific genetic effects with hybrid shared/independent model
 #[derive(Debug, Clone)]
@@ -199,7 +199,8 @@ pub fn sample_cell_type_genetic_effects(
             // Select causal variants for this cell type
             let mut indices = available_indices.clone();
             indices.shuffle(&mut rng);
-            let causal_k: Vec<usize> = indices[..num_independent_causal.min(indices.len())].to_vec();
+            let causal_k: Vec<usize> =
+                indices[..num_independent_causal.min(indices.len())].to_vec();
 
             // Sample effect sizes for this cell type
             let effects_k: Vec<f32> = (0..causal_k.len())
@@ -210,7 +211,10 @@ pub fn sample_cell_type_genetic_effects(
             all_effects.push(effects_k);
         }
 
-        info!("Selected independent causal variants for {} cell types", num_cell_types);
+        info!(
+            "Selected independent causal variants for {} cell types",
+            num_cell_types
+        );
 
         // Convert to DMatrix
         let mut effects = DMatrix::zeros(num_cell_types, num_independent_causal);
@@ -222,7 +226,10 @@ pub fn sample_cell_type_genetic_effects(
 
         (causal_per_type, effects)
     } else {
-        (vec![Vec::new(); num_cell_types], DMatrix::zeros(num_cell_types, 0))
+        (
+            vec![Vec::new(); num_cell_types],
+            DMatrix::zeros(num_cell_types, 0),
+        )
     };
 
     Ok(CellTypeGeneticEffects {
@@ -264,9 +271,7 @@ mod tests {
 
     #[test]
     fn test_shared_causal_only() {
-        let effects = sample_cell_type_genetic_effects(
-            1000, 3, 10, 0, 0.5, 42
-        ).unwrap();
+        let effects = sample_cell_type_genetic_effects(1000, 3, 10, 0, 0.5, 42).unwrap();
 
         assert_eq!(effects.num_cell_types, 3);
         assert_eq!(effects.shared_causal_indices.len(), 10);
@@ -280,16 +285,20 @@ mod tests {
 
     #[test]
     fn test_independent_causal_only() {
-        let effects = sample_cell_type_genetic_effects(
-            1000, 3, 0, 10, 0.5, 42
-        ).unwrap();
+        let effects = sample_cell_type_genetic_effects(1000, 3, 0, 10, 0.5, 42).unwrap();
 
         assert_eq!(effects.num_cell_types, 3);
         assert_eq!(effects.independent_causal_indices.len(), 3);
 
         // Each cell type should have different causal indices
-        assert_ne!(effects.independent_causal_indices[0], effects.independent_causal_indices[1]);
-        assert_ne!(effects.independent_causal_indices[1], effects.independent_causal_indices[2]);
+        assert_ne!(
+            effects.independent_causal_indices[0],
+            effects.independent_causal_indices[1]
+        );
+        assert_ne!(
+            effects.independent_causal_indices[1],
+            effects.independent_causal_indices[2]
+        );
 
         assert_eq!(effects.independent_effect_sizes.nrows(), 3);
         assert_eq!(effects.independent_effect_sizes.ncols(), 10);
@@ -300,9 +309,7 @@ mod tests {
 
     #[test]
     fn test_hybrid_model() {
-        let effects = sample_cell_type_genetic_effects(
-            1000, 3, 5, 5, 0.5, 42
-        ).unwrap();
+        let effects = sample_cell_type_genetic_effects(1000, 3, 5, 5, 0.5, 42).unwrap();
 
         assert_eq!(effects.num_cell_types, 3);
 
