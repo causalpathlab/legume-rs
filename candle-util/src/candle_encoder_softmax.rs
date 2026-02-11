@@ -10,7 +10,6 @@ pub struct LogSoftmaxEncoder {
     n_topics: usize,
     n_modules: usize,
     use_sparsemax: bool,
-    temperature: f32,
     feature_module: AggregateLinear,
     fc: StackLayers<Linear>,
     bn_z: BatchNorm,
@@ -28,17 +27,10 @@ impl EncoderModuleT for LogSoftmaxEncoder {
         let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params(x_nd, x0_nd, train)?;
         let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
 
-        // Apply temperature scaling
-        let z_nk_scaled = if self.use_sparsemax && self.temperature != 1.0 {
-            (z_nk / self.temperature as f64)?
-        } else {
-            z_nk
-        };
-
         let prob = if self.use_sparsemax {
-            sparsemax(&z_nk_scaled)?
+            sparsemax(&z_nk)?
         } else {
-            ops::log_softmax(&z_nk_scaled, 1)?.exp()?
+            ops::log_softmax(&z_nk, 1)?.exp()?
         };
 
         Ok((prob, gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?))
@@ -56,10 +48,6 @@ impl LogSoftmaxEncoder {
 
     pub fn set_use_sparsemax(&mut self, use_sparsemax: bool) {
         self.use_sparsemax = use_sparsemax;
-    }
-
-    pub fn set_temperature(&mut self, temperature: f32) {
-        self.temperature = temperature;
     }
 
     pub fn feature_module_membership(&self) -> Result<Tensor> {
@@ -170,7 +158,6 @@ impl LogSoftmaxEncoder {
             n_topics: args.n_topics,
             n_modules: args.n_modules,
             use_sparsemax: args.use_sparsemax,
-            temperature: args.temperature,
             feature_module,
             fc,
             bn_z,
@@ -186,5 +173,4 @@ pub struct LogSoftmaxEncoderArgs<'a> {
     pub n_modules: usize,
     pub layers: &'a [usize],
     pub use_sparsemax: bool,
-    pub temperature: f32,
 }

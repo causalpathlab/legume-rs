@@ -189,22 +189,34 @@ impl SoftmaxLinear {
             _ => ops::log_softmax(&self.weight_kd, self.weight_kd.rank() - 1),
         }
     }
-}
 
-impl Module for SoftmaxLinear {
-    fn forward(&self, h_nk: &Tensor) -> Result<Tensor> {
+    /// Log-space forward: log(recon_nd) via logsumexp
+    ///
+    /// log(Σ_k z_nk * β_kd) = logsumexp_k(log(z_nk) + log(β_kd))
+    ///
+    /// Numerically stable — avoids exp→log roundtrip.
+    pub fn forward_log(&self, h_nk: &Tensor) -> Result<Tensor> {
         let log_w_kd = match *h_nk.dims() {
             [b1, b2, _, _] => self.biased_weight_kd()?.broadcast_left((b1, b2))?,
             [bsize, _, _] => self.biased_weight_kd()?.broadcast_left(bsize)?,
             _ => self.biased_weight_kd()?,
         };
 
-        h_nk.matmul(&log_w_kd.exp()?)
-        // the following is exact... but there is sacrifice in speed
-        // candle_nn::ops::log_softmax(&(prob_nd + eps)?.log()?, 1)
-        // perhaps, we should consider memory alignment?
-        // let prob_dn = self.dictionary.forward(&theta_nk)?.t()?;
-        // candle_nn::ops::log_softmax(&(prob_dn + eps)?.log()?, 0)?.t()
+        // log(z_nk) + log(β_kd) via broadcasting: [N,K,1] + [K,D] → [N,K,D]
+        let eps = 1e-20;
+        let log_h = (h_nk + eps)?.log()?;          // [N, K]
+        let log_h = log_h.unsqueeze(2)?;            // [N, K, 1]
+        let log_w = log_w_kd.unsqueeze(0)?;         // [1, K, D]
+        let log_terms = log_h.broadcast_add(&log_w)?; // [N, K, D]
+
+        // logsumexp over K dimension → [N, D]
+        log_terms.log_sum_exp(1)
+    }
+}
+
+impl Module for SoftmaxLinear {
+    fn forward(&self, h_nk: &Tensor) -> Result<Tensor> {
+        self.forward_log(h_nk)?.exp()
     }
 }
 
@@ -261,6 +273,20 @@ impl SparsemaxLinear {
             Some(bias) => sparsemax(&self.weight_kd.broadcast_add(bias)?),
             _ => sparsemax(&self.weight_kd),
         }
+    }
+
+    /// Log-space forward: log(recon_nd) = log(z_nk @ sparsemax(W) + eps)
+    ///
+    /// Sparsemax has exact zeros so we can't use pure log-space logsumexp.
+    /// Instead we compute the matmul on probability-scale and take log.
+    pub fn forward_log(&self, h_nk: &Tensor) -> Result<Tensor> {
+        let w_kd = match *h_nk.dims() {
+            [b1, b2, _, _] => self.biased_weight_kd()?.broadcast_left((b1, b2))?,
+            [bsize, _, _] => self.biased_weight_kd()?.broadcast_left(bsize)?,
+            _ => self.biased_weight_kd()?,
+        };
+        let eps = 1e-20;
+        (h_nk.matmul(&w_kd)? + eps)?.log()
     }
 }
 

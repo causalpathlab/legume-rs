@@ -4,6 +4,25 @@ use crate::candle_model_traits::*;
 use candle_core::{IndexOp, Result, Tensor};
 use candle_nn::{ops, VarBuilder};
 
+/// softplus(x) = log(1 + exp(x)), numerically stable
+fn softplus(x: &Tensor) -> Result<Tensor> {
+    // For large x, softplus(x) ≈ x. For small x, softplus(x) ≈ exp(x).
+    // Use: softplus(x) = max(x, 0) + log(1 + exp(-|x|))
+    let abs_x = x.abs()?;
+    let relu_x = x.relu()?;
+    relu_x + (abs_x.neg()?.exp()? + 1.0)?.log()?
+}
+
+/// Numerically stable log(sigmoid(x)) = -softplus(-x)
+fn log_sigmoid(x: &Tensor) -> Result<Tensor> {
+    softplus(&x.neg()?)?.neg()
+}
+
+/// Numerically stable log(1 - sigmoid(x)) = log(sigmoid(-x)) = -softplus(x)
+fn log_one_minus_sigmoid(x: &Tensor) -> Result<Tensor> {
+    softplus(x)?.neg()
+}
+
 ///////////////////////////////////////////////
 // Hierarchical Topic Decoder (BTree Gates) //
 ///////////////////////////////////////////////
@@ -92,124 +111,126 @@ impl HierarchicalTopicDecoder {
         self.depth
     }
 
-    /// Compute leaf dictionary [K, D] via top-down gate propagation.
+    /// Compute log leaf dictionary [K, D] via top-down log-gate propagation.
     ///
-    /// Each leaf's distribution is the product of gated probabilities
-    /// along the root-to-leaf path.
-    pub fn leaf_dictionary_kd(&self) -> Result<Tensor> {
+    /// log(leaf_k_d) = log_softmax(root) + Σ_{gates on path} log_sigmoid(±gate)
+    ///
+    /// Numerically stable — accumulates log-probabilities instead of
+    /// multiplying small probabilities that underflow for deep trees.
+    pub fn log_leaf_dictionary_kd(&self) -> Result<Tensor> {
         let num_leaves = self.n_topics;
 
-        // Root probability: softmax over features
-        let root_prob = ops::softmax(&self.root_logits, 1)?; // [1, D]
+        // Root log-probability: log_softmax over features
+        let log_root = ops::log_softmax(&self.root_logits, 1)?; // [1, D]
 
         if self.num_internal == 0 {
-            // depth == 1 edge case: only one leaf = root (shouldn't happen with depth >= 2)
-            return Ok(root_prob);
+            return Ok(log_root);
         }
 
-        // Compute all gate values: sigmoid(gate_logits) → [num_internal, D]
-        let gates = ops::sigmoid(&self.gate_logits)?; // [num_internal, D]
+        // Propagate log-probabilities top-down using log_sigmoid
+        let mut log_node_probs: Vec<Option<Tensor>> = vec![None; self.num_nodes + 1];
+        log_node_probs[1] = Some(log_root);
 
-        // Allocate node probabilities for all nodes.
-        // We propagate top-down: node_probs[h] for 1-indexed node h.
-        // Store as Vec<Tensor> with index 0 unused.
-        let mut node_probs: Vec<Option<Tensor>> = vec![None; self.num_nodes + 1];
-
-        // Root (node 1) gets the softmaxed root probability
-        node_probs[1] = Some(root_prob);
-
-        // Top-down propagation through internal nodes
-        // Internal nodes are 1..num_leaves (1-indexed)
         for h in 1..num_leaves {
-            let parent_prob = node_probs[h].as_ref().unwrap().clone(); // [1, D]
+            let log_parent = log_node_probs[h].as_ref().unwrap().clone(); // [1, D]
 
-            // gate_logits row index: h-1 (since row 0 = node 1)
-            let gate_h = gates.i(h - 1)?; // [D]
-            let gate_h = gate_h.unsqueeze(0)?; // [1, D]
+            // gate_logits row: h-1 (row 0 = node 1)
+            let gate_h = self.gate_logits.i(h - 1)?.unsqueeze(0)?; // [1, D]
 
-            let left_prob = parent_prob.mul(&gate_h)?; // [1, D]
-            let one_minus_gate = (1.0 - gate_h.clone())?; // [1, D]
-            let right_prob = parent_prob.mul(&one_minus_gate)?; // [1, D]
+            // log(sigmoid(g)) and log(1 - sigmoid(g)) = log(sigmoid(-g))
+            let log_left = log_parent.add(&log_sigmoid(&gate_h)?)?;
+            let log_right = log_parent.add(&log_one_minus_sigmoid(&gate_h)?)?;
 
-            let left_child = 2 * h;
-            let right_child = 2 * h + 1;
-
-            node_probs[left_child] = Some(left_prob);
-            node_probs[right_child] = Some(right_prob);
+            log_node_probs[2 * h] = Some(log_left);
+            log_node_probs[2 * h + 1] = Some(log_right);
         }
 
-        // Collect leaf probabilities: leaves are at positions [num_leaves, 2*num_leaves)
-        let leaf_probs: Vec<Tensor> = (0..num_leaves)
-            .map(|k| {
-                let leaf_node = num_leaves + k; // 1-indexed leaf position
-                node_probs[leaf_node].as_ref().unwrap().clone()
-            })
+        let leaf_log_probs: Vec<Tensor> = (0..num_leaves)
+            .map(|k| log_node_probs[num_leaves + k].as_ref().unwrap().clone())
             .collect();
 
-        // Stack into [K, D]
-        Tensor::cat(&leaf_probs, 0)
+        Tensor::cat(&leaf_log_probs, 0) // [K, D]
+    }
+
+    /// Compute leaf dictionary [K, D] on probability scale.
+    pub fn leaf_dictionary_kd(&self) -> Result<Tensor> {
+        self.log_leaf_dictionary_kd()?.exp()
+    }
+
+    /// Log-space forward: log(Σ_k z_nk * β_kd) via logsumexp
+    pub fn forward_log(&self, z_nk: &Tensor) -> Result<Tensor> {
+        let log_beta_kd = self.log_leaf_dictionary_kd()?; // [K, D]
+        let eps = 1e-20;
+        let log_z = (z_nk + eps)?.log()?;    // [N, K]
+        let log_z = log_z.unsqueeze(2)?;      // [N, K, 1]
+        let log_b = log_beta_kd.unsqueeze(0)?; // [1, K, D]
+        let log_terms = log_z.broadcast_add(&log_b)?; // [N, K, D]
+        log_terms.log_sum_exp(1) // [N, D]
     }
 
     /// Get all node probabilities [num_nodes, D] for hierarchy visualization.
     ///
     /// Returns probabilities for all tree nodes (internal + leaves), ordered
     /// by 1-indexed node number. Row 0 = root (node 1), etc.
+    /// Computed via log-space propagation then exp for numerical stability.
     pub fn node_probabilities(&self) -> Result<Tensor> {
         let num_leaves = self.n_topics;
 
-        let root_prob = ops::softmax(&self.root_logits, 1)?;
+        let log_root = ops::log_softmax(&self.root_logits, 1)?;
 
         if self.num_internal == 0 {
-            return Ok(root_prob);
+            return log_root.exp();
         }
 
-        let gates = ops::sigmoid(&self.gate_logits)?;
-
-        let mut node_probs: Vec<Option<Tensor>> = vec![None; self.num_nodes + 1];
-        node_probs[1] = Some(root_prob);
+        let mut log_node_probs: Vec<Option<Tensor>> = vec![None; self.num_nodes + 1];
+        log_node_probs[1] = Some(log_root);
 
         for h in 1..num_leaves {
-            let parent_prob = node_probs[h].as_ref().unwrap().clone();
-            let gate_h = gates.i(h - 1)?.unsqueeze(0)?;
+            let log_parent = log_node_probs[h].as_ref().unwrap().clone();
+            let gate_h = self.gate_logits.i(h - 1)?.unsqueeze(0)?;
 
-            let left_prob = parent_prob.mul(&gate_h)?;
-            let right_prob = parent_prob.mul(&(1.0 - &gate_h)?)?;
+            let log_left = log_parent.add(&log_sigmoid(&gate_h)?)?;
+            let log_right = log_parent.add(&log_one_minus_sigmoid(&gate_h)?)?;
 
-            node_probs[2 * h] = Some(left_prob);
-            node_probs[2 * h + 1] = Some(right_prob);
+            log_node_probs[2 * h] = Some(log_left);
+            log_node_probs[2 * h + 1] = Some(log_right);
         }
 
-        // Collect all node probs (1-indexed → row 0 = node 1)
-        let all_probs: Vec<Tensor> = (1..=self.num_nodes)
-            .map(|h| node_probs[h].as_ref().unwrap().clone())
+        let all_log_probs: Vec<Tensor> = (1..=self.num_nodes)
+            .map(|h| log_node_probs[h].as_ref().unwrap().clone())
             .collect();
 
-        Tensor::cat(&all_probs, 0)
+        Tensor::cat(&all_log_probs, 0)?.exp()
     }
 }
 
 impl DecoderModuleT for HierarchicalTopicDecoder {
     fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
-        let beta_kd = self.leaf_dictionary_kd()?; // [K, D]
-        z_nk.matmul(&beta_kd) // [N, K] @ [K, D] → [N, D]
+        self.forward_log(z_nk)?.exp()
     }
 
     fn get_dictionary(&self) -> Result<Tensor> {
-        let beta_kd = self.leaf_dictionary_kd()?; // [K, D]
-        beta_kd.t() // [D, K]
+        self.log_leaf_dictionary_kd()?.exp()?.t()
     }
 
     fn forward_with_llik<LlikFn>(
         &self,
         z_nk: &Tensor,
         x_nd: &Tensor,
-        llik: &LlikFn,
+        _llik: &LlikFn,
     ) -> Result<(Tensor, Tensor)>
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
-        let recon_nd = self.forward(z_nk)?;
-        let llik = llik(x_nd, &recon_nd)?;
+        let log_recon_nd = self.forward_log(z_nk)?;
+        let recon_nd = log_recon_nd.exp()?;
+
+        // Direct log-space likelihood: llik = Σ_d x_d * log(recon_d)
+        let llik = x_nd
+            .clamp(0.0, f64::INFINITY)?
+            .mul(&log_recon_nd)?
+            .sum(x_nd.rank() - 1)?;
+
         Ok((recon_nd, llik))
     }
 
