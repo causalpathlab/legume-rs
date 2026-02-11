@@ -1,9 +1,9 @@
 use anyhow::Result;
 use log::info;
-use rand::SeedableRng;
 use rand::Rng;
+use rand::SeedableRng;
 
-use genomic_data::gff::{read_gff_record_vec, GffRecord, FeatureType, GeneId, GeneSymbol};
+use genomic_data::gff::{read_gff_record_vec, FeatureType, GeneId, GeneSymbol, GffRecord};
 use genomic_data::sam::Strand;
 
 /// Gene annotation simplified for eQTL simulation
@@ -12,7 +12,7 @@ pub struct Gene {
     pub gene_id: GeneId,
     pub gene_name: Option<Box<str>>,
     pub chromosome: Box<str>,
-    pub tss: u64,           // Transcription start site
+    pub tss: u64, // Transcription start site
     pub strand: Strand,
 }
 
@@ -20,7 +20,7 @@ pub struct Gene {
 #[derive(Debug, Clone)]
 pub struct GeneAnnotations {
     pub genes: Vec<Gene>,
-    pub cis_window: u64,    // Default: 1,000,000 bp (1Mb)
+    pub cis_window: u64, // Default: 1,000,000 bp (1Mb)
 }
 
 impl GeneAnnotations {
@@ -42,30 +42,22 @@ impl GeneAnnotations {
         let gene = &self.genes[gene_idx];
         let (start, end) = self.cis_region(gene_idx);
 
-        snp_positions.iter()
+        snp_positions
+            .iter()
             .enumerate()
             .filter(|(idx, &pos)| {
-                snp_chromosomes[*idx] == gene.chromosome
-                    && pos >= start
-                    && pos <= end
+                snp_chromosomes[*idx] == gene.chromosome && pos >= start && pos <= end
             })
             .map(|(idx, _)| idx)
             .collect()
     }
 
     /// Filter genes to a specific genomic region
-    pub fn filter_to_region(
-        &self,
-        chromosome: &str,
-        start: u64,
-        end: u64,
-    ) -> GeneAnnotations {
-        let filtered_genes: Vec<Gene> = self.genes.iter()
-            .filter(|g| {
-                g.chromosome.as_ref() == chromosome
-                    && g.tss >= start
-                    && g.tss <= end
-            })
+    pub fn filter_to_region(&self, chromosome: &str, start: u64, end: u64) -> GeneAnnotations {
+        let filtered_genes: Vec<Gene> = self
+            .genes
+            .iter()
+            .filter(|g| g.chromosome.as_ref() == chromosome && g.tss >= start && g.tss <= end)
             .cloned()
             .collect();
 
@@ -161,10 +153,7 @@ pub fn load_gtf(
 
     info!("Loaded {} genes from GTF (after filtering)", genes.len());
 
-    Ok(GeneAnnotations {
-        genes,
-        cis_window,
-    })
+    Ok(GeneAnnotations { genes, cis_window })
 }
 
 /// Simulate gene annotations for testing (random positions in region)
@@ -201,10 +190,7 @@ pub fn simulate_gene_annotations(
         });
     }
 
-    GeneAnnotations {
-        genes,
-        cis_window,
-    }
+    GeneAnnotations { genes, cis_window }
 }
 
 #[cfg(test)]
@@ -213,14 +199,7 @@ mod tests {
 
     #[test]
     fn test_simulate_genes() {
-        let genes = simulate_gene_annotations(
-            100,
-            "22",
-            20_000_000,
-            30_000_000,
-            1_000_000,
-            42,
-        );
+        let genes = simulate_gene_annotations(100, "22", 20_000_000, 30_000_000, 1_000_000, 42);
 
         assert_eq!(genes.genes.len(), 100);
         assert_eq!(genes.cis_window, 1_000_000);

@@ -16,12 +16,20 @@ impl ParallelLouvain {
     }
 
     /// Iterate the Louvain algorithm a single level
-    pub fn iterate_one_level<C: Clustering + Clone + Send + Sync + Default>(&mut self, n: &Network, c: &mut C) -> bool {
+    pub fn iterate_one_level<C: Clustering + Clone + Send + Sync + Default>(
+        &mut self,
+        n: &Network,
+        c: &mut C,
+    ) -> bool {
         self.local_moving.iterate(n, c)
     }
 
     /// Build a Louvain-compatible network from a list of adjacencies
-    pub fn build_network<I: Iterator<Item = (u32, u32)>>(n_nodes: usize, n_edges: usize, adjacency: I) -> Network {
+    pub fn build_network<I: Iterator<Item = (u32, u32)>>(
+        n_nodes: usize,
+        n_edges: usize,
+        adjacency: I,
+    ) -> Network {
         let mut graph = Graph::with_capacity(n_nodes, n_edges);
         let mut node_indices = Vec::with_capacity(n_nodes);
         for _ in 0..n_nodes {

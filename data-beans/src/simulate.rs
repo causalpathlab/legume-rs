@@ -8,7 +8,7 @@ use matrix_util::traits::*;
 use matrix_util::{common_io::write_lines, dmatrix_util::row_membership_matrix};
 use nalgebra::ComplexField;
 use rand::SeedableRng;
-use rand_distr::{Distribution, Poisson, Uniform};
+use rand_distr::{Distribution, Normal, Poisson, Uniform};
 use rayon::prelude::*;
 
 pub struct SimArgs {
@@ -21,6 +21,10 @@ pub struct SimArgs {
     pub pve_topic: f32,
     pub pve_batch: f32,
     pub rseed: u64,
+    /// If set, generate a hierarchical gene dictionary using stick-breaking
+    /// gates on a binary tree of this depth. K = 2^(depth-1) leaf topics.
+    /// Overrides `factors` when set.
+    pub hierarchical_depth: Option<usize>,
 }
 
 pub struct SimOut {
@@ -29,6 +33,8 @@ pub struct SimOut {
     pub theta_kn: DMatrix<f32>,
     pub batch_membership: Vec<usize>,
     pub triplets: Vec<(u64, u64, f32)>,
+    /// If hierarchical: all node probabilities [D, num_nodes] (1-indexed by column)
+    pub hierarchy_node_probs: Option<DMatrix<f32>>,
 }
 
 /// Generate a simulated dataset with a factored gamma model
@@ -105,7 +111,12 @@ pub fn generate_factored_poisson_gamma_data_mtx(
 pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<SimOut> {
     let nn = args.cols;
     let dd = args.rows;
-    let kk = args.factors;
+    // When hierarchical, K is determined by tree depth
+    let kk = if let Some(depth) = args.hierarchical_depth {
+        1usize << (depth - 1)
+    } else {
+        args.factors
+    };
     let bb = args.batches;
     let nnz = args.depth;
     let rseed = args.rseed;
@@ -138,17 +149,30 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
     info!("simulated batch effects");
 
     // 3. factorization model
-    let (a, b) = (1. / overdisp, (kk as f32).sqrt() * overdisp);
-    let mut beta_dk = DMatrix::<f32>::rgamma(dd, kk, (a, b));
+    let (beta_dk, hierarchy_node_probs) = if let Some(tree_depth) = args.hierarchical_depth {
+        let (beta, node_probs) =
+            generate_hierarchical_dictionary(dd, tree_depth, overdisp, &mut rng);
+        info!(
+            "generated hierarchical dictionary: depth={}, K={} leaves, {} nodes",
+            tree_depth,
+            beta.ncols(),
+            node_probs.ncols()
+        );
+        (beta, Some(node_probs))
+    } else {
+        let (a, b) = (1. / overdisp, (kk as f32).sqrt() * overdisp);
+        let mut beta_dk = DMatrix::<f32>::rgamma(dd, kk, (a, b));
 
-    if kk > 1 && pve_topic < 1. {
-        let beta_null = DMatrix::<f32>::rgamma(dd, 1, (a, b))
-            .scale((1.0 - pve_topic).clamp(0., 1.).unscale(kk as f32).sqrt());
-        for k in 0..kk {
-            let x = beta_dk.column(k).scale(pve_topic.clamp(0., 1.).sqrt()) + &beta_null;
-            beta_dk.column_mut(k).copy_from(&x);
+        if kk > 1 && pve_topic < 1. {
+            let beta_null = DMatrix::<f32>::rgamma(dd, 1, (a, b))
+                .scale((1.0 - pve_topic).clamp(0., 1.).unscale(kk as f32).sqrt());
+            for k in 0..kk {
+                let x = beta_dk.column(k).scale(pve_topic.clamp(0., 1.).sqrt()) + &beta_null;
+                beta_dk.column_mut(k).copy_from(&x);
+            }
         }
-    }
+        (beta_dk, None)
+    };
 
     let runif = Uniform::new(0, kk)?;
     let k_membership: Vec<usize> = (0..nn).map(|_| runif.sample(&mut rng)).collect();
@@ -218,5 +242,91 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
         theta_kn,
         batch_membership,
         triplets,
+        hierarchy_node_probs,
     })
+}
+
+/// Generate a hierarchical gene dictionary using stick-breaking gates on a
+/// binary tree, mirroring the `HierarchicalTopicDecoder` structure.
+///
+/// * `dd` - number of genes (D)
+/// * `tree_depth` - tree depth (>= 2), K = 2^(depth-1) leaf topics
+/// * `overdisp` - overdispersion parameter (controls gate sharpness)
+/// * `rng` - random number generator
+///
+/// Returns `(beta_dk, node_probs_d_by_numnodes)`:
+/// - `beta_dk`: [D, K] leaf dictionary (each column sums to ~1)
+/// - `node_probs`: [D, num_nodes] all node probabilities (col 0 = root, etc.)
+fn generate_hierarchical_dictionary(
+    dd: usize,
+    tree_depth: usize,
+    overdisp: f32,
+    rng: &mut impl rand::Rng,
+) -> (DMatrix<f32>, DMatrix<f32>) {
+    assert!(tree_depth >= 2, "Tree depth must be at least 2");
+
+    let num_leaves = 1usize << (tree_depth - 1); // K = 2^(depth-1)
+    let num_nodes = (1usize << tree_depth) - 1; // 2^depth - 1
+    let num_internal = num_leaves - 1;
+
+    // 1. Root distribution: Gamma-drawn then normalized to probability simplex
+    let (a, b) = (1. / overdisp, (num_leaves as f32).sqrt() * overdisp);
+    let root_raw = DMatrix::<f32>::rgamma(dd, 1, (a, b));
+    let root_sum: f32 = root_raw.sum();
+    let root_prob: Vec<f32> = root_raw.iter().map(|&x| x / root_sum).collect();
+
+    // 2. Gate logits: Normal(0, overdisp_scale) → sigmoid gives gates in (0,1)
+    // Higher overdisp → sharper gates → more distinct subtrees
+    let gate_scale = (overdisp / 10.0).clamp(0.1, 5.0);
+    let normal = Normal::new(0.0f32, gate_scale).expect("normal distribution");
+    let gate_logits: Vec<Vec<f32>> = (0..num_internal)
+        .map(|_| (0..dd).map(|_| normal.sample(rng)).collect())
+        .collect();
+
+    // 3. Top-down propagation: compute node probabilities
+    // node_probs[h] is a Vec<f32> of length dd, 1-indexed (index 0 = node 1)
+    let mut node_probs: Vec<Vec<f32>> = vec![vec![0.0; dd]; num_nodes + 1];
+    node_probs[1] = root_prob;
+
+    for h in 1..num_leaves {
+        let gate_idx = h - 1; // gate_logits index
+        let left_child = 2 * h;
+        let right_child = 2 * h + 1;
+
+        let mut left = vec![0.0f32; dd];
+        let mut right = vec![0.0f32; dd];
+
+        for d in 0..dd {
+            let gate = sigmoid(gate_logits[gate_idx][d]);
+            left[d] = node_probs[h][d] * gate;
+            right[d] = node_probs[h][d] * (1.0 - gate);
+        }
+
+        node_probs[left_child] = left;
+        node_probs[right_child] = right;
+    }
+
+    // 4. Extract leaf dictionary: [D, K]
+    let mut beta_dk = DMatrix::<f32>::zeros(dd, num_leaves);
+    for k in 0..num_leaves {
+        let leaf_node = num_leaves + k; // 1-indexed leaf
+        for d in 0..dd {
+            beta_dk[(d, k)] = node_probs[leaf_node][d];
+        }
+    }
+
+    // 5. Pack all node probabilities into [D, num_nodes] matrix
+    let mut all_node_probs = DMatrix::<f32>::zeros(dd, num_nodes);
+    for h in 0..num_nodes {
+        for d in 0..dd {
+            all_node_probs[(d, h)] = node_probs[h + 1][d]; // 1-indexed → 0-indexed column
+        }
+    }
+
+    (beta_dk, all_node_probs)
+}
+
+#[inline]
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
 }

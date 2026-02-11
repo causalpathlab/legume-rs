@@ -88,12 +88,12 @@ impl AggregateLinear {
     /// Get hard assignments: which module each feature belongs to
     /// Returns [d] tensor where each value is the module index (0..k)
     pub fn get_assignments(&self) -> Result<Tensor> {
-        Ok(self.weight_dk.argmax(1)?)  // argmax along module dimension
+        Ok(self.weight_dk.argmax(1)?) // argmax along module dimension
     }
 
     /// Fast forward using hard assignments (scatter-based aggregation)
     fn forward_hard(&self, x_nd: &Tensor) -> Result<Tensor> {
-        let k = self.weight_dk.dim(1)?;  // number of modules
+        let k = self.weight_dk.dim(1)?; // number of modules
 
         // Get hard assignments: [d] where each value is module index
         let assignments_d = self.get_assignments()?;

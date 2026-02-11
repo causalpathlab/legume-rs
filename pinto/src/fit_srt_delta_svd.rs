@@ -12,88 +12,145 @@ use matrix_param::traits::*;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtDeltaSvdArgs {
-    #[arg(required = true, value_delimiter(','),
-          help = "Data files (.zarr or .h5 format, comma separated)")]
+    #[arg(
+        required = true,
+        value_delimiter(','),
+        help = "Data files (.zarr or .h5 format, comma separated)"
+    )]
     data_files: Vec<Box<str>>,
 
-    #[arg(long = "coord", short = 'c', required = true, value_delimiter(','),
-          help = "Spatial coordinate files, one per data file",
-          long_help = "Spatial coordinate files, one per data file (comma separated).\n\
-                       Each file: barcode, x, y, ... per line.")]
+    #[arg(
+        long = "coord",
+        short = 'c',
+        required = true,
+        value_delimiter(','),
+        help = "Spatial coordinate files, one per data file",
+        long_help = "Spatial coordinate files, one per data file (comma separated).\n\
+                       Each file: barcode, x, y, ... per line."
+    )]
     coord_files: Vec<Box<str>>,
 
-    #[arg(long = "coord-column-indices", value_delimiter(','),
-          help = "Column indices for coordinates in coord files",
-          long_help = "Column indices for coordinates in coord files (comma separated).\n\
-                       Use when coord files have extra columns beyond barcode,x,y.")]
+    #[arg(
+        long = "coord-column-indices",
+        value_delimiter(','),
+        help = "Column indices for coordinates in coord files",
+        long_help = "Column indices for coordinates in coord files (comma separated).\n\
+                       Use when coord files have extra columns beyond barcode,x,y."
+    )]
     coord_columns: Option<Vec<usize>>,
 
-    #[arg(long = "coord-column-names", value_delimiter(','),
-          default_value = "pxl_row_in_fullres,pxl_col_in_fullres",
-          help = "Column names to look up in coord files")]
+    #[arg(
+        long = "coord-column-names",
+        value_delimiter(','),
+        default_value = "pxl_row_in_fullres,pxl_col_in_fullres",
+        help = "Column names to look up in coord files"
+    )]
     coord_column_names: Vec<Box<str>>,
 
-    #[arg(long,
-          help = "Header row index in coord files (0 = first line is column names)")]
+    #[arg(
+        long,
+        help = "Header row index in coord files (0 = first line is column names)"
+    )]
     coord_header_row: Option<usize>,
 
-    #[arg(long, default_value_t = 256,
-          help = "Dimension for spectral embedding of spatial coordinates")]
+    #[arg(
+        long,
+        default_value_t = 256,
+        help = "Dimension for spectral embedding of spatial coordinates"
+    )]
     coord_emb: usize,
 
-    #[arg(long, short = 'b', value_delimiter(','),
-          help = "Batch membership files, one per data file",
-          long_help = "Batch membership files, one per data file (comma separated).\n\
-                       Each file maps cells to batch labels for batch effect correction.")]
+    #[arg(
+        long,
+        short = 'b',
+        value_delimiter(','),
+        help = "Batch membership files, one per data file",
+        long_help = "Batch membership files, one per data file (comma separated).\n\
+                       Each file maps cells to batch labels for batch effect correction."
+    )]
     batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(long, short = 'p', default_value_t = 50,
-          help = "Random projection dimension for pseudobulk sample construction")]
+    #[arg(
+        long,
+        short = 'p',
+        default_value_t = 50,
+        help = "Random projection dimension for pseudobulk sample construction"
+    )]
     proj_dim: usize,
 
-    #[arg(long, short = 'd', default_value_t = 10,
-          help = "Number of top projection components for binary sort",
-          long_help = "Number of top projection components for binary sort.\n\
-                       Produces up to 2^S pseudobulk samples.")]
+    #[arg(
+        long,
+        short = 'd',
+        default_value_t = 10,
+        help = "Number of top projection components for binary sort",
+        long_help = "Number of top projection components for binary sort.\n\
+                       Produces up to 2^S pseudobulk samples."
+    )]
     sort_dim: usize,
 
-    #[arg(short = 'k', long, default_value_t = 10,
-          help = "Number of nearest neighbours for spatial cell-pair graph")]
+    #[arg(
+        short = 'k',
+        long,
+        default_value_t = 10,
+        help = "Number of nearest neighbours for spatial cell-pair graph"
+    )]
     knn_spatial: usize,
 
-    #[arg(long, default_value_t = 10,
-          help = "Number of nearest-neighbour batches for batch effect estimation")]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Number of nearest-neighbour batches for batch effect estimation"
+    )]
     knn_batches: usize,
 
-    #[arg(long, default_value_t = 10,
-          help = "Number of nearest neighbours within each batch for batch estimation")]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Number of nearest neighbours within each batch for batch estimation"
+    )]
     knn_cells: usize,
 
-    #[arg(long, short = 's',
-          help = "Maximum cells per pseudobulk sample (downsampling)")]
+    #[arg(
+        long,
+        short = 's',
+        help = "Maximum cells per pseudobulk sample (downsampling)"
+    )]
     down_sample: Option<usize>,
 
-    #[arg(long, short, required = true,
-          help = "Output file prefix",
-          long_help = "Output file prefix.\n\
+    #[arg(
+        long,
+        short,
+        required = true,
+        help = "Output file prefix",
+        long_help = "Output file prefix.\n\
                        Generates: {out}.delta.parquet (when multiple batches), {out}.coord_pairs.parquet,\n\
-                       {out}.dictionary.parquet, {out}.latent.parquet")]
+                       {out}.dictionary.parquet, {out}.latent.parquet"
+    )]
     out: Box<str>,
 
-    #[arg(long, default_value_t = 100,
-          help = "Block size for parallel processing of cell pairs")]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Block size for parallel processing of cell pairs"
+    )]
     block_size: usize,
 
-    #[arg(short = 't', long, default_value_t = 10,
-          help = "Number of SVD components (latent dimensions)")]
+    #[arg(
+        short = 't',
+        long,
+        default_value_t = 10,
+        help = "Number of SVD components (latent dimensions)"
+    )]
     n_latent_topics: usize,
 
-    #[arg(long, default_value_t = false,
-          help = "Preload all sparse column data into memory for faster access")]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Preload all sparse column data into memory for faster access"
+    )]
     preload_data: bool,
 
-    #[arg(long, short,
-          help = "Enable verbose logging (sets RUST_LOG=info)")]
+    #[arg(long, short, help = "Enable verbose logging (sets RUST_LOG=info)")]
     verbose: bool,
 }
 
@@ -209,7 +266,11 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         let outfile = args.out.to_string() + ".delta.parquet";
         let batch_names = data_vec.batch_names();
         let gene_names = data_vec.row_names()?;
-        batch_db.to_parquet_with_names(&outfile, (Some(&gene_names), Some("gene")), batch_names.as_deref())?;
+        batch_db.to_parquet_with_names(
+            &outfile,
+            (Some(&gene_names), Some("gene")),
+            batch_names.as_deref(),
+        )?;
     }
 
     // 3. Build spatial KNN graph
@@ -237,11 +298,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         Some(&batch_membership),
     )?;
 
-    srt_cell_pairs.assign_pairs_to_samples(
-        &proj_out,
-        Some(args.sort_dim),
-        args.down_sample,
-    )?;
+    srt_cell_pairs.assign_pairs_to_samples(&proj_out, Some(args.sort_dim), args.down_sample)?;
 
     // 5. Collapse: compute shared/diff per gene per sample
     info!("Collecting shared/difference statistics across cell pairs...");
@@ -249,8 +306,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     let batch_db = batch_effects.map(|x| x.posterior_mean().clone());
     let batch_ref = batch_db.as_ref();
 
-    let mut collapsed_stat =
-        PairDeltaCollapsedStat::new(n_genes, srt_cell_pairs.num_samples()?);
+    let mut collapsed_stat = PairDeltaCollapsedStat::new(n_genes, srt_cell_pairs.num_samples()?);
 
     srt_cell_pairs.visit_pairs_by_sample(
         &collect_pair_delta_visitor,
@@ -272,10 +328,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
 
     let (u_dk, s_k, _) = training_dm.rsvd(args.n_latent_topics)?;
     let eps = 1e-8;
-    let sinv_k = DVec::from_iterator(
-        s_k.len(),
-        s_k.iter().map(|&s| 1.0 / (s + eps)),
-    );
+    let sinv_k = DVec::from_iterator(s_k.len(), s_k.iter().map(|&s| 1.0 / (s + eps)));
     let basis_dk = &u_dk * Mat::from_diagonal(&sinv_k);
 
     // Write dictionary
@@ -336,10 +389,7 @@ pub(crate) fn collect_pair_delta_visitor(
     batch_effect: &Option<&Mat>,
     arc_stat: Arc<Mutex<&mut PairDeltaCollapsedStat>>,
 ) -> anyhow::Result<()> {
-    let pairs: Vec<&Pair> = indices
-        .iter()
-        .filter_map(|&j| data.pairs.get(j))
-        .collect();
+    let pairs: Vec<&Pair> = indices.iter().filter_map(|&j| data.pairs.get(j)).collect();
 
     let left = pairs.iter().map(|&x| x.left);
     let right = pairs.iter().map(|&x| x.right);
@@ -374,11 +424,7 @@ pub(crate) fn collect_pair_delta_visitor(
         let mut left_visited = HashSet::new();
 
         // Process genes present in left cell
-        for (&gene, &val) in left_col
-            .row_indices()
-            .iter()
-            .zip(left_col.values().iter())
-        {
+        for (&gene, &val) in left_col.row_indices().iter().zip(left_col.values().iter()) {
             let log_left = val.ln_1p();
             let log_right = right_log.get(&gene).copied().unwrap_or(0.0);
             local_shared[gene] += log_left + log_right;
@@ -454,9 +500,7 @@ fn nystrom_pair_delta_visitor(
     let n_pairs_block = ub - lb;
     let mut local_proj = Mat::zeros(n_topics, n_pairs_block);
 
-    for (pair_idx, (left_col, right_col)) in
-        y_left.col_iter().zip(y_right.col_iter()).enumerate()
-    {
+    for (pair_idx, (left_col, right_col)) in y_left.col_iter().zip(y_right.col_iter()).enumerate() {
         let right_log: HashMap<usize, f32> = right_col
             .row_indices()
             .iter()
@@ -467,11 +511,7 @@ fn nystrom_pair_delta_visitor(
         let mut proj_k = DVec::zeros(n_topics);
         let mut left_visited = HashSet::new();
 
-        for (&gene, &val) in left_col
-            .row_indices()
-            .iter()
-            .zip(left_col.values().iter())
-        {
+        for (&gene, &val) in left_col.row_indices().iter().zip(left_col.values().iter()) {
             let log_left = val.ln_1p();
             let log_right = right_log.get(&gene).copied().unwrap_or(0.0);
             let sigma = log_left + log_right;

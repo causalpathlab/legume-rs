@@ -130,7 +130,8 @@ impl Network {
     /// network equals the sum of the weights of the edges between the nodes in
     /// the two corresponding clusters in the original network.
     pub fn create_reduced_network(&self, clustering: &impl Clustering) -> Network {
-        let mut cluster_g = Graph::with_capacity(clustering.num_clusters(), clustering.num_clusters() * 2);
+        let mut cluster_g =
+            Graph::with_capacity(clustering.num_clusters(), clustering.num_clusters() * 2);
 
         for i in 0..clustering.num_clusters() {
             let ni = cluster_g.add_node(0.0);

@@ -89,7 +89,8 @@ fn run_leiden() {
     let num_clusters = 100000 / 50;
     let nodes_per_cluster = 50;
 
-    let (g, true_clusters) = gen_sample_network(&mut rng, num_clusters, nodes_per_cluster, 10.0, 0.4);
+    let (g, true_clusters) =
+        gen_sample_network(&mut rng, num_clusters, nodes_per_cluster, 10.0, 0.4);
     let n = Network { graph: g };
     check_edge_weight_par(&n);
 
@@ -116,7 +117,9 @@ fn run_leiden() {
 
 fn relabel_by_size(labels: &mut [i16]) -> Vec<(i16, usize)> {
     let max_label = labels.iter().max().unwrap();
-    let mut hist = (0..(max_label + 1)).map(|i| (i, 0usize)).collect::<Vec<_>>();
+    let mut hist = (0..(max_label + 1))
+        .map(|i| (i, 0usize))
+        .collect::<Vec<_>>();
     labels.iter().for_each(|&x| hist[x as usize].1 += 1);
     hist.sort_by(|(_, x), (_, y)| y.cmp(x));
     let map = hist
@@ -134,7 +137,12 @@ fn relabel_by_size(labels: &mut [i16]) -> Vec<(i16, usize)> {
 }
 
 fn rand_index(x: &[i16], y: &[i16]) -> f64 {
-    assert!(x.len() == y.len(), "x.len({}) != y.len({})", x.len(), y.len());
+    assert!(
+        x.len() == y.len(),
+        "x.len({}) != y.len({})",
+        x.len(),
+        y.len()
+    );
     let n = x.len();
     let mut num = 0usize;
     for i in 0..n {
@@ -161,7 +169,9 @@ fn read_expected() -> std::io::Result<Vec<i16>> {
 #[test]
 fn run_louvain() -> std::io::Result<()> {
     let (n_nodes, adjacency) = {
-        let file = BufReader::new(GzDecoder::new(File::open("testdata/louvain/adjacency.txt.gz")?));
+        let file = BufReader::new(GzDecoder::new(File::open(
+            "testdata/louvain/adjacency.txt.gz",
+        )?));
         let mut nodes = HashSet::new();
         let mut adjacency = Vec::new();
         for line in file.lines() {
@@ -228,9 +238,11 @@ fn run_louvain_parallel() -> std::io::Result<()> {
     let n_repeats = 0;
 
     let (n_nodes, adjacency) = {
-        let data: Vec<u8> = BufReader::new(GzDecoder::new(File::open("testdata/louvain/adjacency.txt.gz")?))
-            .bytes()
-            .collect::<Result<_, _>>()?;
+        let data: Vec<u8> = BufReader::new(GzDecoder::new(File::open(
+            "testdata/louvain/adjacency.txt.gz",
+        )?))
+        .bytes()
+        .collect::<Result<_, _>>()?;
 
         let mut nodes = HashSet::new();
         let mut adjacency = Vec::new();

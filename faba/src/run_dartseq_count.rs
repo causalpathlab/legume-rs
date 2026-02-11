@@ -9,10 +9,10 @@ use rust_htslib::faidx;
 use crate::data::cell_membership::CellMembership;
 use crate::data::dna_stat_map::*;
 use crate::data::dna_stat_traits::*;
+use crate::data::methylation::*;
 use genomic_data::gff::FeatureType as GffFeatureType;
 use genomic_data::gff::GeneType as GffGeneType;
 use genomic_data::gff::{GeneId, GffRecordMap};
-use crate::data::methylation::*;
 
 use crate::data::util_htslib::*;
 
@@ -569,10 +569,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             min_col_nnz: args.cluster_min_col_nnz,
         };
         let m = cluster_cells_from_bam(&args.wt_bam_files, &gff_map, &params)?;
-        info!(
-            "Generated {} cell clusters via clustering",
-            args.n_clusters
-        );
+        info!("Generated {} cell clusters via clustering", args.n_clusters);
         Some(m)
     } else {
         None
@@ -760,7 +757,11 @@ fn find_sites_with_celltype_stats(
             DnaBaseFreqMap::new_for_celltype(&args.cell_barcode_tag, membership, cell_type);
 
         for wt_file in &args.wt_bam_files {
-            wt_base_freq_map.update_bam_file_by_gene(wt_file, gff_record, &args.gene_barcode_tag)?;
+            wt_base_freq_map.update_bam_file_by_gene(
+                wt_file,
+                gff_record,
+                &args.gene_barcode_tag,
+            )?;
         }
 
         let positions = wt_base_freq_map.sorted_positions();
@@ -824,13 +825,7 @@ fn process_all_bam_files_to_bed(
     let wt_batch_names = uniq_batch_names(&args.wt_bam_files)?;
 
     for (bam_file, batch_name) in args.wt_bam_files.iter().zip(wt_batch_names) {
-        let mut stats = gather_m6a_stats(
-            gene_sites,
-            args,
-            gff_map,
-            bam_file,
-            membership.as_ref(),
-        )?;
+        let mut stats = gather_m6a_stats(gene_sites, args, gff_map, bam_file, membership.as_ref())?;
         write_bed(
             &mut stats,
             gff_map,
@@ -845,13 +840,8 @@ fn process_all_bam_files_to_bed(
         let mut_batch_names = uniq_batch_names(&args.mut_bam_files)?;
 
         for (bam_file, batch_name) in args.mut_bam_files.iter().zip(mut_batch_names) {
-            let mut stats = gather_m6a_stats(
-                gene_sites,
-                args,
-                gff_map,
-                bam_file,
-                membership.as_ref(),
-            )?;
+            let mut stats =
+                gather_m6a_stats(gene_sites, args, gff_map, bam_file, membership.as_ref())?;
             write_bed(
                 &mut stats,
                 gff_map,

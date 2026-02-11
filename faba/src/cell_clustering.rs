@@ -5,8 +5,8 @@
 
 use crate::common::*;
 use crate::data::cell_membership::CellMembership;
-use genomic_data::gff::GffRecordMap;
 use crate::gene_count::collect_all_gene_counts;
+use genomic_data::gff::GffRecordMap;
 
 use data_beans_alg::random_projection::RandProjOps;
 use matrix_util::clustering::{Kmeans, KmeansArgs};
@@ -49,7 +49,10 @@ pub fn cluster_cells_from_bam(
     );
 
     // Step 1: Collect gene counts per cell
-    info!("Collecting gene counts from {} BAM files...", bam_files.len());
+    info!(
+        "Collecting gene counts from {} BAM files...",
+        bam_files.len()
+    );
     let gene_counts = collect_all_gene_counts(
         bam_files,
         gff_map,
@@ -159,11 +162,8 @@ pub fn cluster_cells_from_bam(
     info!("Cluster sizes: {:?}", cluster_sizes);
 
     // Step 6: Create CellMembership from cluster assignments (using filtered cells)
-    let membership = CellMembership::from_clusters(
-        &filtered_cols,
-        &assignments,
-        params.allow_prefix_matching,
-    );
+    let membership =
+        CellMembership::from_clusters(&filtered_cols, &assignments, params.allow_prefix_matching);
 
     // Temp directory is cleaned up when temp_dir goes out of scope
     Ok(membership)

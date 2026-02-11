@@ -5,50 +5,64 @@ use parquet::basic::Type as ParquetType;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtGeneNetworkArgs {
-    #[arg(short = 'g', long, required = true,
-          help = "Gene graph parquet file (gene_graph.parquet)")]
+    #[arg(
+        short = 'g',
+        long,
+        required = true,
+        help = "Gene graph parquet file (gene_graph.parquet)"
+    )]
     gene_graph: Box<str>,
 
-    #[arg(short = 'd', long, required = true,
-          help = "Dictionary parquet file (dictionary.parquet)")]
+    #[arg(
+        short = 'd',
+        long,
+        required = true,
+        help = "Dictionary parquet file (dictionary.parquet)"
+    )]
     dictionary: Box<str>,
 
-    #[arg(short = 'k', long,
-          help = "Number of edge clusters for K-means (default = n_topics)")]
+    #[arg(
+        short = 'k',
+        long,
+        help = "Number of edge clusters for K-means (default = n_topics)"
+    )]
     n_clusters: Option<usize>,
 
-    #[arg(long, default_value_t = 100,
-          help = "Maximum K-means iterations for edge clustering")]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Maximum K-means iterations for edge clustering"
+    )]
     maxiter_clustering: usize,
 
-    #[arg(long, default_value_t = 10,
-          help = "Number of Laplacian eigenvectors for spectral embedding")]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Number of Laplacian eigenvectors for spectral embedding"
+    )]
     num_eigen: usize,
 
-    #[arg(long, short, required = true,
-          help = "Output file prefix",
-          long_help = "Output file prefix.\n\
-                       Generates: {out}.gene_coords.parquet, {out}.gene_pair_clusters.parquet")]
+    #[arg(
+        long,
+        short,
+        required = true,
+        help = "Output file prefix",
+        long_help = "Output file prefix.\n\
+                       Generates: {out}.gene_coords.parquet, {out}.gene_pair_clusters.parquet"
+    )]
     out: Box<str>,
 }
 
 pub fn fit_srt_gene_network(args: &SrtGeneNetworkArgs) -> anyhow::Result<()> {
     // Step A: Read gene graph from parquet
     info!("Reading gene graph from {}", args.gene_graph);
-    let graph_rows = names_from_parquet(
-        &args.gene_graph,
-        &["gene1".into(), "gene2".into()],
-    )?;
+    let graph_rows = names_from_parquet(&args.gene_graph, &["gene1".into(), "gene2".into()])?;
 
     let MatWithNames {
         rows: _,
         cols: _,
         mat: dist_col,
-    } = Mat::from_parquet_with_names(
-        &args.gene_graph,
-        None,
-        Some(&["distance".into()]),
-    )?;
+    } = Mat::from_parquet_with_names(&args.gene_graph, None, Some(&["distance".into()]))?;
 
     // Build gene index
     let mut gene_names: Vec<Box<str>> = graph_rows
@@ -116,7 +130,11 @@ pub fn fit_srt_gene_network(args: &SrtGeneNetworkArgs) -> anyhow::Result<()> {
     let n_topics = dict_mk.ncols();
     let num_clusters = args.n_clusters.unwrap_or(n_topics);
 
-    info!("K-means clustering: {} edges into {} clusters", dict_mk.nrows(), num_clusters);
+    info!(
+        "K-means clustering: {} edges into {} clusters",
+        dict_mk.nrows(),
+        num_clusters
+    );
     let dict_km = dict_mk.transpose();
     let membership = dict_km.kmeans_columns(KmeansArgs {
         num_clusters,
@@ -153,11 +171,7 @@ pub fn fit_srt_gene_network(args: &SrtGeneNetworkArgs) -> anyhow::Result<()> {
     let n_edges = dict_rows.len();
 
     // Build schema: row_index, gene1, gene2, cluster, 0, 1, ...
-    let mut col_names: Vec<Box<str>> = vec![
-        "gene1".into(),
-        "gene2".into(),
-        "cluster".into(),
-    ];
+    let mut col_names: Vec<Box<str>> = vec!["gene1".into(), "gene2".into(), "cluster".into()];
     for k in 0..n_topics {
         col_names.push(k.to_string().into_boxed_str());
     }
@@ -313,7 +327,8 @@ fn spectral_embed(similarity: &Mat, num_eigen: usize) -> anyhow::Result<Mat> {
     let mut emb = Mat::zeros(n, k);
     for (j, &i) in idx[1..=k].iter().enumerate() {
         let w = 1.0 / eig.eigenvalues[i].max(1e-10);
-        emb.column_mut(j).copy_from(&(w * eig.eigenvectors.column(i)));
+        emb.column_mut(j)
+            .copy_from(&(w * eig.eigenvectors.column(i)));
     }
 
     Ok(emb)
@@ -333,8 +348,12 @@ fn reduce_to_2d(emb: &Mat) -> Mat {
     let pca = (centered.transpose() * &centered).symmetric_eigen();
     let pca_idx = argsort(&pca.eigenvalues, false);
     let mut coords = Mat::zeros(n, 2);
-    coords.column_mut(0).copy_from(&(&centered * pca.eigenvectors.column(pca_idx[0])));
-    coords.column_mut(1).copy_from(&(&centered * pca.eigenvectors.column(pca_idx[1])));
+    coords
+        .column_mut(0)
+        .copy_from(&(&centered * pca.eigenvectors.column(pca_idx[0])));
+    coords
+        .column_mut(1)
+        .copy_from(&(&centered * pca.eigenvectors.column(pca_idx[1])));
     coords
 }
 
@@ -343,7 +362,11 @@ fn argsort(vals: &DVec, asc: bool) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..vals.len()).collect();
     idx.sort_by(|&a, &b| {
         let c = vals[a].partial_cmp(&vals[b]).unwrap();
-        if asc { c } else { c.reverse() }
+        if asc {
+            c
+        } else {
+            c.reverse()
+        }
     });
     idx
 }
@@ -368,7 +391,11 @@ mod tests {
 
         let n_edges = edges.len();
         let col_names: Vec<Box<str>> = vec!["gene1".into(), "gene2".into(), "distance".into()];
-        let col_types = vec![ParquetType::BYTE_ARRAY, ParquetType::BYTE_ARRAY, ParquetType::FLOAT];
+        let col_types = vec![
+            ParquetType::BYTE_ARRAY,
+            ParquetType::BYTE_ARRAY,
+            ParquetType::FLOAT,
+        ];
 
         let pw = ParquetWriter::new(
             path,
@@ -400,9 +427,8 @@ mod tests {
     /// Create a synthetic dictionary.parquet with 7 edges x 3 topics
     fn write_test_dictionary(path: &str) -> anyhow::Result<()> {
         let genes = ["GENE_A", "GENE_B", "GENE_C", "GENE_D", "GENE_E"];
-        let edges: Vec<(usize, usize)> = vec![
-            (0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (2, 4), (3, 4),
-        ];
+        let edges: Vec<(usize, usize)> =
+            vec![(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (2, 4), (3, 4)];
 
         let row_names: Vec<Box<str>> = edges
             .iter()
@@ -420,11 +446,7 @@ mod tests {
             }
         }
 
-        dict.to_parquet_with_names(
-            path,
-            (Some(&row_names), Some("gene_pair")),
-            None,
-        )?;
+        dict.to_parquet_with_names(path, (Some(&row_names), Some("gene_pair")), None)?;
         Ok(())
     }
 
@@ -461,25 +483,30 @@ mod tests {
         // All coordinates should be finite
         for i in 0..mat.nrows() {
             for j in 0..mat.ncols() {
-                assert!(mat[(i, j)].is_finite(), "non-finite coord at ({}, {})", i, j);
+                assert!(
+                    mat[(i, j)].is_finite(),
+                    "non-finite coord at ({}, {})",
+                    i,
+                    j
+                );
             }
         }
 
         // Check gene_pair_clusters output
         let cluster_file = out_prefix.to_str().unwrap().to_string() + ".gene_pair_clusters.parquet";
-        let cluster_names = names_from_parquet(
-            &cluster_file,
-            &["gene1".into(), "gene2".into()],
-        )?;
+        let cluster_names = names_from_parquet(&cluster_file, &["gene1".into(), "gene2".into()])?;
         assert_eq!(cluster_names.len(), 7, "expected 7 edges");
 
         // Read the numeric part (cluster + topics)
-        let MatWithNames { rows: _, cols: cluster_cols, mat: cluster_mat } =
-            Mat::from_parquet_with_names(
-                &cluster_file,
-                None,
-                Some(&["cluster".into(), "0".into(), "1".into(), "2".into()]),
-            )?;
+        let MatWithNames {
+            rows: _,
+            cols: cluster_cols,
+            mat: cluster_mat,
+        } = Mat::from_parquet_with_names(
+            &cluster_file,
+            None,
+            Some(&["cluster".into(), "0".into(), "1".into(), "2".into()]),
+        )?;
         assert_eq!(cluster_cols.len(), 4, "expected cluster + 3 topics");
         assert_eq!(cluster_mat.nrows(), 7);
 

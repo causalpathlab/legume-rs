@@ -15,7 +15,7 @@ pub trait VisitWithBamOps {
     where
         Visitor: Fn(&mut Self, &str, bam::Record),
     {
-	let chr = bed.chr.as_ref();
+        let chr = bed.chr.as_ref();
         let region = (chr, bed.start, bed.stop);
         let index_file = bam_file_path.to_string() + ".bai";
         let mut bam_reader = bam::IndexedReader::from_path_and_index(bam_file_path, &index_file)?;

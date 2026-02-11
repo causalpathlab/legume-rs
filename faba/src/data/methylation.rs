@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-pub use genomic_data::bed::*;
 use clap::ValueEnum;
+pub use genomic_data::bed::*;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]

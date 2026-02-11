@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use genomic_data::sam::CellBarcode;
 use fnv::FnvHashMap as HashMap;
+use genomic_data::sam::CellBarcode;
 use matrix_util::membership::Membership;
 use std::sync::Mutex;
 
@@ -129,15 +129,14 @@ impl CellMembership {
     }
 
     /// Create cell membership from cluster assignments
-    pub fn from_clusters(
-        barcodes: &[Box<str>],
-        assignments: &[usize],
-        allow_prefix: bool,
-    ) -> Self {
-        let pairs = barcodes.iter().zip(assignments.iter()).map(|(barcode, &cluster)| {
-            let celltype: Box<str> = format!("cluster_{}", cluster).into();
-            (barcode.clone(), celltype)
-        });
+    pub fn from_clusters(barcodes: &[Box<str>], assignments: &[usize], allow_prefix: bool) -> Self {
+        let pairs = barcodes
+            .iter()
+            .zip(assignments.iter())
+            .map(|(barcode, &cluster)| {
+                let celltype: Box<str> = format!("cluster_{}", cluster).into();
+                (barcode.clone(), celltype)
+            });
 
         let inner = Membership::from_pairs(pairs, allow_prefix);
 
@@ -173,21 +172,13 @@ mod tests {
     #[test]
     fn test_exact_matching() {
         let file = create_test_membership_file();
-        let membership = CellMembership::from_file(
-            file.path().to_str().unwrap(),
-            0,
-            1,
-            false,
-        )
-        .unwrap();
+        let membership =
+            CellMembership::from_file(file.path().to_str().unwrap(), 0, 1, false).unwrap();
 
         assert_eq!(membership.num_cells(), 3);
 
         let barcode = CellBarcode::Barcode("AAACCTGAGAAACCAT".into());
-        assert_eq!(
-            membership.matches_barcode(&barcode),
-            Some("T_cell".into())
-        );
+        assert_eq!(membership.matches_barcode(&barcode), Some("T_cell".into()));
 
         // No prefix matching
         let barcode_with_suffix = CellBarcode::Barcode("AAACCTGAGAAACCAT-1".into());
@@ -197,19 +188,11 @@ mod tests {
     #[test]
     fn test_prefix_matching() {
         let file = create_test_membership_file();
-        let membership = CellMembership::from_file(
-            file.path().to_str().unwrap(),
-            0,
-            1,
-            true,
-        )
-        .unwrap();
+        let membership =
+            CellMembership::from_file(file.path().to_str().unwrap(), 0, 1, true).unwrap();
 
         let barcode = CellBarcode::Barcode("AAACCTGAGCCCAATT".into());
-        assert_eq!(
-            membership.matches_barcode(&barcode),
-            Some("B_cell".into())
-        );
+        assert_eq!(membership.matches_barcode(&barcode), Some("B_cell".into()));
 
         let barcode_with_suffix = CellBarcode::Barcode("AAACCTGAGAAACCAT-1".into());
         assert_eq!(

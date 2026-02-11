@@ -509,7 +509,8 @@ pub trait MeltOps {
     /// Melt multiple matrices/tensors together in a single traversal for cache efficiency.
     /// All inputs must have the same dimensions.
     /// Returns (values for each input, indices for each dimension).
-    fn melt_many_with_indexes(&self, others: &[&Self]) -> (Vec<Vec<Self::Scalar>>, Vec<Vec<usize>>);
+    fn melt_many_with_indexes(&self, others: &[&Self])
+        -> (Vec<Vec<Self::Scalar>>, Vec<Vec<usize>>);
 }
 
 pub trait CandleDataLoaderOps {

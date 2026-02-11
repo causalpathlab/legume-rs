@@ -13,10 +13,8 @@ use tempfile::TempDir;
 ///   root_group/data, root_group/indices, root_group/indptr (CSC),
 ///   root_group/features/{id,name,feature_type}, root_group/barcodes
 pub fn convert_h5_to_backend(h5_file: &str, output: &str) -> anyhow::Result<()> {
-    let (backend, backend_file) = resolve_backend_file(
-        &Box::from(output),
-        Some(SparseIoBackend::Zarr),
-    )?;
+    let (backend, backend_file) =
+        resolve_backend_file(&Box::from(output), Some(SparseIoBackend::Zarr))?;
 
     if std::path::Path::new(backend_file.as_ref()).exists() {
         info!("Removing existing backend file: {}", &backend_file);
@@ -27,25 +25,31 @@ pub fn convert_h5_to_backend(h5_file: &str, output: &str) -> anyhow::Result<()> 
     info!("Opened data file: {}", h5_file);
 
     let root_group_name = "matrix";
-    let root = file
-        .group(root_group_name)
-        .map_err(|_| anyhow::anyhow!(
+    let root = file.group(root_group_name).map_err(|_| {
+        anyhow::anyhow!(
             "Unable to find root group '{}' in {}",
             root_group_name,
             h5_file,
-        ))?;
+        )
+    })?;
 
     // Read triplets
     let CooTripletsShape { triplets, shape } = {
-        let values = root.dataset("data")
+        let values = root
+            .dataset("data")
             .map_err(|_| anyhow::anyhow!("missing 'data' dataset"))?
-            .read_1d::<f32>()?.to_vec();
-        let indices = root.dataset("indices")
+            .read_1d::<f32>()?
+            .to_vec();
+        let indices = root
+            .dataset("indices")
             .map_err(|_| anyhow::anyhow!("missing 'indices' dataset"))?
-            .read_1d::<u64>()?.to_vec();
-        let indptr = root.dataset("indptr")
+            .read_1d::<u64>()?
+            .to_vec();
+        let indptr = root
+            .dataset("indptr")
             .map_err(|_| anyhow::anyhow!("missing 'indptr' dataset"))?
-            .read_1d::<u64>()?.to_vec();
+            .read_1d::<u64>()?
+            .to_vec();
 
         ValuesIndicesPointers {
             values: &values,
@@ -171,10 +175,8 @@ pub fn convert_h5_to_backend(h5_file: &str, output: &str) -> anyhow::Result<()> 
 ///   /cell_features/features/{id,name,feature_type},
 ///   /cell_features/cell_id
 pub fn convert_zarr_to_backend(zarr_file: &str, output: &str) -> anyhow::Result<()> {
-    let (backend, backend_file) = resolve_backend_file(
-        &Box::from(output),
-        Some(SparseIoBackend::Zarr),
-    )?;
+    let (backend, backend_file) =
+        resolve_backend_file(&Box::from(output), Some(SparseIoBackend::Zarr))?;
 
     if std::path::Path::new(backend_file.as_ref()).exists() {
         info!("Removing existing backend file: {}", &backend_file);
@@ -337,10 +339,7 @@ pub fn try_open_or_convert(
                     convert_h5_to_backend(data_file, &converted)?;
                 }
                 "zarr" | "zip" => {
-                    info!(
-                        "Converting zarr to backend: {} -> {}",
-                        data_file, converted
-                    );
+                    info!("Converting zarr to backend: {} -> {}", data_file, converted);
                     convert_zarr_to_backend(data_file, &converted)?;
                 }
                 _ => return Err(original_err),

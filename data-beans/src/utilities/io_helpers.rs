@@ -1,8 +1,11 @@
+use crate::sparse_io::{COLUMN_SEP, ROW_SEP};
 use matrix_util::common_io::*;
-use crate::sparse_io::{ROW_SEP, COLUMN_SEP};
 
 /// Read row names from a file, joining multi-column names with ROW_SEP
-pub fn read_row_names(row_file: Box<str>, max_row_name_idx: usize) -> anyhow::Result<Vec<Box<str>>> {
+pub fn read_row_names(
+    row_file: Box<str>,
+    max_row_name_idx: usize,
+) -> anyhow::Result<Vec<Box<str>>> {
     let _names = read_lines_of_words(&row_file, -1)?.lines;
     Ok(_names
         .into_iter()
@@ -20,7 +23,10 @@ pub fn read_row_names(row_file: Box<str>, max_row_name_idx: usize) -> anyhow::Re
 }
 
 /// Read column names from a file, joining multi-column names with COLUMN_SEP
-pub fn read_col_names(col_file: Box<str>, max_column_name_idx: usize) -> anyhow::Result<Vec<Box<str>>> {
+pub fn read_col_names(
+    col_file: Box<str>,
+    max_column_name_idx: usize,
+) -> anyhow::Result<Vec<Box<str>>> {
     let _names = read_lines_of_words(&col_file, -1)?.lines;
     Ok(_names
         .into_iter()
@@ -38,4 +44,4 @@ pub fn read_col_names(col_file: Box<str>, max_column_name_idx: usize) -> anyhow:
 }
 
 // Re-export constants for convenience
-pub use crate::sparse_io::{MAX_ROW_NAME_IDX, MAX_COLUMN_NAME_IDX};
+pub use crate::sparse_io::{MAX_COLUMN_NAME_IDX, MAX_ROW_NAME_IDX};

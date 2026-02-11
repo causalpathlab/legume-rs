@@ -108,7 +108,9 @@ where
         return Ok(default);
     }
 
-    input.trim().parse::<T>()
+    input
+        .trim()
+        .parse::<T>()
         .map_err(|_| anyhow::anyhow!("Invalid number format"))
 }
 

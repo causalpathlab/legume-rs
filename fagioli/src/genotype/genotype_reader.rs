@@ -4,7 +4,7 @@ use nalgebra::DMatrix;
 /// Genotype matrix with metadata
 #[derive(Debug, Clone)]
 pub struct GenotypeMatrix {
-    pub genotypes: DMatrix<f32>,      // N individuals x M SNPs (values: 0, 1, 2)
+    pub genotypes: DMatrix<f32>, // N individuals x M SNPs (values: 0, 1, 2)
     pub individual_ids: Vec<Box<str>>,
     pub snp_ids: Vec<Box<str>>,
     pub chromosomes: Vec<Box<str>>,
@@ -96,11 +96,7 @@ mod tests {
 
     #[test]
     fn test_genomic_region_contains() {
-        let region = GenomicRegion::new(
-            Some("chr1".to_string()),
-            Some(1000),
-            Some(2000),
-        );
+        let region = GenomicRegion::new(Some("chr1".to_string()), Some(1000), Some(2000));
 
         assert!(region.contains("chr1", 1500));
         assert!(!region.contains("chr2", 1500));
@@ -110,11 +106,7 @@ mod tests {
 
     #[test]
     fn test_genomic_region_chr_only() {
-        let region = GenomicRegion::new(
-            Some("chr1".to_string()),
-            None,
-            None,
-        );
+        let region = GenomicRegion::new(Some("chr1".to_string()), None, None);
 
         assert!(region.contains("chr1", 100));
         assert!(region.contains("chr1", 999999));
@@ -123,11 +115,7 @@ mod tests {
 
     #[test]
     fn test_genomic_region_position_only() {
-        let region = GenomicRegion::new(
-            None,
-            Some(1000),
-            Some(2000),
-        );
+        let region = GenomicRegion::new(None, Some(1000), Some(2000));
 
         assert!(region.contains("chr1", 1500));
         assert!(region.contains("chr2", 1500));

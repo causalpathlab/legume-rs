@@ -1,6 +1,6 @@
 use anyhow::Result;
+use candle_util::cli::{regression, Cli, Commands};
 use clap::Parser;
-use candle_util::cli::{Cli, Commands, regression};
 
 fn main() -> Result<()> {
     env_logger::init();

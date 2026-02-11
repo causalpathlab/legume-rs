@@ -1,10 +1,10 @@
 use anyhow::Result;
+use indicatif::{ParallelProgressIterator, ProgressStyle};
 use log::{info, warn};
 use nalgebra::{DMatrix, DVector};
 use rand::SeedableRng;
-use rand_distr::{Distribution, Poisson, weighted::WeightedIndex};
+use rand_distr::{weighted::WeightedIndex, Distribution, Poisson};
 use rayon::prelude::*;
-use indicatif::{ParallelProgressIterator, ProgressStyle};
 
 use super::factor_model::FactorModel;
 use super::gene_eqtl::ScEqtlEffects;
@@ -103,7 +103,10 @@ pub fn generate_sc_phenotypes(
     info!("  {} individuals", num_individuals);
     info!("  {} genes", num_genes);
     info!("  {} cell types", num_cell_types);
-    info!("  Mean cells/individual: {}", params.mean_cells_per_individual);
+    info!(
+        "  Mean cells/individual: {}",
+        params.mean_cells_per_individual
+    );
     info!("  Depth/cell: {}", params.depth_per_cell);
 
     // Step 1: Compute base cell type means from factor model (G × K)
@@ -119,7 +122,10 @@ pub fn generate_sc_phenotypes(
         .collect();
 
     let total_cells: usize = cells_per_individual.iter().sum();
-    info!("Sampling {} total cells across {} individuals", total_cells, num_individuals);
+    info!(
+        "Sampling {} total cells across {} individuals",
+        total_cells, num_individuals
+    );
 
     // Progress bar setup
     let pb_style = ProgressStyle::default_bar()
@@ -229,8 +235,12 @@ fn generate_individual_cells(
 
             // Shared causal SNPs (same SNPs, potentially different effects per cell type)
             for causal_snp in &gene_effects.shared_causal_snps {
-                debug_assert!(causal_snp.snp_idx < genotype_row.len(),
-                    "snp_idx {} out of bounds (genotype len {})", causal_snp.snp_idx, genotype_row.len());
+                debug_assert!(
+                    causal_snp.snp_idx < genotype_row.len(),
+                    "snp_idx {} out of bounds (genotype len {})",
+                    causal_snp.snp_idx,
+                    genotype_row.len()
+                );
                 let genotype = genotype_row[causal_snp.snp_idx];
                 let effect = causal_snp.effect_sizes[cell_type_idx];
                 log_expr += genotype * effect;
@@ -238,8 +248,12 @@ fn generate_individual_cells(
 
             // Independent causal SNPs (cell-type-specific SNPs)
             for causal_snp in &gene_effects.independent_causal_snps[cell_type_idx] {
-                debug_assert!(causal_snp.snp_idx < genotype_row.len(),
-                    "snp_idx {} out of bounds (genotype len {})", causal_snp.snp_idx, genotype_row.len());
+                debug_assert!(
+                    causal_snp.snp_idx < genotype_row.len(),
+                    "snp_idx {} out of bounds (genotype len {})",
+                    causal_snp.snp_idx,
+                    genotype_row.len()
+                );
                 let genotype = genotype_row[causal_snp.snp_idx];
                 let effect = causal_snp.effect_sizes[cell_type_idx];
                 log_expr += genotype * effect;
@@ -277,7 +291,10 @@ fn generate_individual_cells(
                     }
                 }
                 Err(_) => {
-                    warn!("Poisson sampling failed for gene {} (lambda={}), skipping", gene_idx, scaled_lambda);
+                    warn!(
+                        "Poisson sampling failed for gene {} (lambda={}), skipping",
+                        gene_idx, scaled_lambda
+                    );
                 }
             }
         }
@@ -293,10 +310,10 @@ fn generate_individual_cells(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::factor_model::simulate_factor_model;
-    use super::super::gene_eqtl::{sample_sc_eqtl_effects, GeneticArchitectureParams};
     use super::super::gene_annotations::simulate_gene_annotations;
+    use super::super::gene_eqtl::{sample_sc_eqtl_effects, GeneticArchitectureParams};
+    use super::*;
     use rand::Rng;
 
     #[test]
@@ -308,24 +325,12 @@ mod tests {
         let num_factors = 5;
 
         // Simulate factor model
-        let factor_model = simulate_factor_model(
-            num_genes,
-            num_factors,
-            num_cell_types,
-            1.0,
-            1.0,
-            42,
-        ).unwrap();
+        let factor_model =
+            simulate_factor_model(num_genes, num_factors, num_cell_types, 1.0, 1.0, 42).unwrap();
 
         // Simulate gene annotations
-        let genes = simulate_gene_annotations(
-            num_genes,
-            "22",
-            20_000_000,
-            30_000_000,
-            1_000_000,
-            42,
-        );
+        let genes =
+            simulate_gene_annotations(num_genes, "22", 20_000_000, 30_000_000, 1_000_000, 42);
 
         // Simulate SNPs
         let snp_positions: Vec<u64> = (0..200).map(|i| 20_000_000 + i * 50_000).collect();
@@ -349,7 +354,8 @@ mod tests {
             num_cell_types,
             &eqtl_params,
             42,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Simulate genotypes
         let mut genotypes = DMatrix::from_element(num_individuals, 200, 0.0);
@@ -361,7 +367,8 @@ mod tests {
         }
 
         // Simulate cell fractions
-        let cell_fractions = DMatrix::from_element(num_individuals, num_cell_types, 1.0 / num_cell_types as f32);
+        let cell_fractions =
+            DMatrix::from_element(num_individuals, num_cell_types, 1.0 / num_cell_types as f32);
 
         // Generate sc phenotypes
         let params = ScPhenotypeParams {
@@ -377,7 +384,8 @@ mod tests {
             &cell_fractions,
             &params,
             42,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Assertions
         assert!(sc_data.num_cells > 0);
@@ -388,9 +396,14 @@ mod tests {
         assert_eq!(sc_data.cell_types.len(), sc_data.num_cells);
         assert!(sc_data.triplets.len() > 0);
 
-        println!("Generated {} cells with {} non-zero counts",
-                 sc_data.num_cells, sc_data.triplets.len());
-        println!("Average counts per cell: {:.1}",
-                 sc_data.triplets.len() as f32 / sc_data.num_cells as f32);
+        println!(
+            "Generated {} cells with {} non-zero counts",
+            sc_data.num_cells,
+            sc_data.triplets.len()
+        );
+        println!(
+            "Average counts per cell: {:.1}",
+            sc_data.triplets.len() as f32 / sc_data.num_cells as f32
+        );
     }
 }

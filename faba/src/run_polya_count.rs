@@ -1,11 +1,11 @@
 use crate::common::*;
-use genomic_data::bed::BedWithGene;
 use crate::data::dna_stat_traits::*;
+use crate::data::poly_a_stat_map::{PolyASiteArgs, PolyASiteMap};
+use crate::data::util_htslib::*;
+use genomic_data::bed::BedWithGene;
 use genomic_data::gff::FeatureType as GffFeatureType;
 use genomic_data::gff::GeneType as GffGeneType;
 use genomic_data::gff::{GeneId, GffRecordMap};
-use crate::data::poly_a_stat_map::{PolyASiteArgs, PolyASiteMap};
-use crate::data::util_htslib::*;
 
 use dashmap::DashMap as HashMap;
 use dashmap::DashSet as HashSet;

@@ -58,7 +58,13 @@ impl BiSusieVar {
         num_predictors: usize,
         num_outcomes: usize,
     ) -> Result<Self> {
-        Self::with_selection_fn(vb, num_components, num_predictors, num_outcomes, SelectionFn::Softmax)
+        Self::with_selection_fn(
+            vb,
+            num_components,
+            num_predictors,
+            num_outcomes,
+            SelectionFn::Softmax,
+        )
     }
 
     /// Create a new Bi-directional Susie with sparsemax for exact zeros.
@@ -68,7 +74,13 @@ impl BiSusieVar {
         num_predictors: usize,
         num_outcomes: usize,
     ) -> Result<Self> {
-        Self::with_selection_fn(vb, num_components, num_predictors, num_outcomes, SelectionFn::Sparsemax)
+        Self::with_selection_fn(
+            vb,
+            num_components,
+            num_predictors,
+            num_outcomes,
+            SelectionFn::Sparsemax,
+        )
     }
 
     /// Create a new Bi-directional Susie with specified selection function.
@@ -224,8 +236,10 @@ impl VariationalDistribution for BiSusieVar {
         let diff = theta.broadcast_sub(&mean)?;
         let normalized_sq = diff.sqr()?.broadcast_div(&(var + 1e-8)?)?;
 
-        let log_prob_element =
-            (normalized_sq.broadcast_add(&log_var)?.broadcast_add(&ln_2pi)? * (-0.5))?;
+        let log_prob_element = (normalized_sq
+            .broadcast_add(&log_var)?
+            .broadcast_add(&ln_2pi)?
+            * (-0.5))?;
 
         log_prob_element.sum(2)?.sum(1)
     }
@@ -371,7 +385,9 @@ mod tests {
     #[test]
     fn test_bisusie_with_linear_model() -> Result<()> {
         use crate::sgvb::traits::BlackBoxLikelihood;
-        use crate::sgvb::{compute_elbo, direct_elbo_loss, GaussianPrior, LinearModelSGVB, SGVBConfig};
+        use crate::sgvb::{
+            compute_elbo, direct_elbo_loss, GaussianPrior, LinearModelSGVB, SGVBConfig,
+        };
 
         let device = Device::Cpu;
         let dtype = DType::F32;
