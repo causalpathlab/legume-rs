@@ -329,6 +329,16 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = false,
+        help = "Enable zero-inflated topic likelihood",
+        long_help = "Enable per-feature zero-inflation gate.\n\
+		     Learns a dropout probability π_d for each feature to explain\n\
+		     structural zeros, freeing the dictionary to focus on expressed features."
+    )]
+    zero_inflation: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
         help = "Use sparsemax for exact zeros (optional)",
         long_help = "Use sparsemax activation instead of softmax.\n\
 		     Sparsemax produces exact zeros for low-ranked topics.\n\
@@ -503,23 +513,10 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         param_builder.clone(),
     )?;
 
-    let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
-
     info!(
         "input: {} -> encoder -> decoder -> output: {}",
         n_features_encoder, n_features_decoder
     );
-
-    let scores = train_encoder_decoder(
-        &collapsed,
-        &mut encoder,
-        &decoder,
-        &parameters,
-        &args,
-        selected_features.as_ref(),
-    )?;
-
-    info!("Writing down the model parameters");
 
     let gene_names = data_vec.row_names()?;
 
@@ -529,14 +526,73 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         .map(|sel| sel.selected_names.clone())
         .unwrap_or_else(|| gene_names.clone());
 
-    decoder
-        .get_dictionary()?
-        .to_device(&candle_core::Device::Cpu)?
-        .to_parquet_with_names(
-            &(args.out.to_string() + ".dictionary.parquet"),
-            (Some(&output_gene_names), Some("gene")),
-            None,
+    // Branch on decoder type: ZI or standard
+    let scores = if args.zero_inflation {
+        let decoder =
+            ZITopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
+
+        let scores = train_encoder_decoder(
+            &collapsed,
+            &mut encoder,
+            &decoder,
+            &parameters,
+            &args,
+            selected_features.as_ref(),
         )?;
+
+        info!("Writing down the model parameters");
+
+        decoder
+            .get_dictionary()?
+            .to_device(&candle_core::Device::Cpu)?
+            .to_parquet_with_names(
+                &(args.out.to_string() + ".dictionary.parquet"),
+                (Some(&output_gene_names), Some("gene")),
+                None,
+            )?;
+
+        // Save per-feature dropout probabilities
+        let dropout_d = decoder
+            .dropout_prob()?
+            .to_device(&candle_core::Device::Cpu)?;
+        let dropout_vec: Vec<f32> = dropout_d.flatten_all()?.to_vec1()?;
+        let dropout_mat =
+            Mat::from_column_slice(dropout_vec.len(), 1, &dropout_vec);
+        let col_names = vec!["dropout_prob".to_string().into_boxed_str()];
+        dropout_mat.to_parquet_with_names(
+            &(args.out.to_string() + ".dropout.parquet"),
+            (Some(&output_gene_names), Some("gene")),
+            Some(&col_names),
+        )?;
+        info!("Saved dropout probabilities to {}.dropout.parquet", &args.out);
+
+        scores
+    } else {
+        let decoder =
+            TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
+
+        let scores = train_encoder_decoder(
+            &collapsed,
+            &mut encoder,
+            &decoder,
+            &parameters,
+            &args,
+            selected_features.as_ref(),
+        )?;
+
+        info!("Writing down the model parameters");
+
+        decoder
+            .get_dictionary()?
+            .to_device(&candle_core::Device::Cpu)?
+            .to_parquet_with_names(
+                &(args.out.to_string() + ".dictionary.parquet"),
+                (Some(&output_gene_names), Some("gene")),
+                None,
+            )?;
+
+        scores
+    };
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
 
