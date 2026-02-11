@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::candle_aux_linear::*;
-use crate::candle_loss_functions::zi_topic_likelihood;
+use crate::candle_loss_functions::zi_topic_log_likelihood;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Module, VarBuilder};
@@ -48,23 +48,21 @@ impl DecoderModuleT for TopicDecoder {
         &self,
         z_nk: &Tensor,
         x_nd: &Tensor,
-        llik: &LlikFn,
+        _llik: &LlikFn,
     ) -> Result<(Tensor, Tensor)>
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
-        let logits_nd = self.forward(z_nk)?;
+        let log_recon_nd = self.dictionary.forward_log(z_nk)?;
+        let recon_nd = log_recon_nd.exp()?;
 
-        // penalize self regression likelihood
-        // use std::f64::INFINITY;
-        // let eps = 1e-8;
-        // let logits_weight_dk = self.dictionary.weight()?;
-        // let weight_dk = logits_weight_dk.exp()?.clamp(eps, INFINITY)?;
-        // let llik_kk = weight_dk.transpose(0, 1)?.matmul(&logits_weight_dk)?;
-        // let penalty = self.mask.mul(&llik_kk)?.sum_all()?;
-        // let llik = llik(x_nd, &logits_nd)?.broadcast_sub(&penalty)?;
-        let llik = llik(x_nd, &logits_nd)?;
-        Ok((logits_nd, llik))
+        // Direct log-space likelihood: llik = Σ_d x_d * log(recon_d)
+        let llik = x_nd
+            .clamp(0.0, f64::INFINITY)?
+            .mul(&log_recon_nd)?
+            .sum(x_nd.rank() - 1)?;
+
+        Ok((recon_nd, llik))
     }
 
     fn dim_obs(&self) -> usize {
@@ -117,13 +115,20 @@ impl DecoderModuleT for SparseTopicDecoder {
         &self,
         z_nk: &Tensor,
         x_nd: &Tensor,
-        llik: &LlikFn,
+        _llik: &LlikFn,
     ) -> Result<(Tensor, Tensor)>
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
-        let recon_nd = self.forward(z_nk)?;
-        let llik = llik(x_nd, &recon_nd)?;
+        let log_recon_nd = self.dictionary.forward_log(z_nk)?;
+        let recon_nd = log_recon_nd.exp()?;
+
+        // Direct log-space likelihood: llik = Σ_d x_d * log(recon_d)
+        let llik = x_nd
+            .clamp(0.0, f64::INFINITY)?
+            .mul(&log_recon_nd)?
+            .sum(x_nd.rank() - 1)?;
+
         Ok((recon_nd, llik))
     }
 
@@ -188,8 +193,9 @@ impl DecoderModuleT for ZITopicDecoder {
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
-        let recon_nd = self.forward(z_nk)?;
-        let llik = zi_topic_likelihood(x_nd, &recon_nd, &self.dropout_logit_1d)?;
+        let log_recon_nd = self.dictionary.forward_log(z_nk)?;
+        let recon_nd = log_recon_nd.exp()?;
+        let llik = zi_topic_log_likelihood(x_nd, &log_recon_nd, &self.dropout_logit_1d)?;
         Ok((recon_nd, llik))
     }
 

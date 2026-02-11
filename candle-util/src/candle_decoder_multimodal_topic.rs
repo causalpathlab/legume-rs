@@ -54,18 +54,31 @@ impl MultimodalDecoderModuleT for MultimodalTopicDecoder {
         &self,
         z_nk: &Tensor,
         x_nd_vec: &[Tensor],
-        llik: &LlikFn,
+        _llik: &LlikFn,
     ) -> Result<(Vec<Tensor>, Tensor)>
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
-        let logits_nd_vec = self.forward(z_nk)?;
+        // Compute log-space reconstructions for each modality
+        let log_recon_vec: Vec<Tensor> = self
+            .dictionary
+            .iter()
+            .map(|x| x.forward_log(z_nk))
+            .collect::<Result<Vec<_>>>()?;
+
+        let recon_vec: Vec<Tensor> = log_recon_vec
+            .iter()
+            .map(|x| x.exp())
+            .collect::<Result<Vec<_>>>()?;
 
         let llik_vec = x_nd_vec
             .iter()
-            .zip(&logits_nd_vec)
-            .map(|(x, logits_nd)| -> Result<Tensor> {
-                let ret = llik(x, logits_nd)?;
+            .zip(&log_recon_vec)
+            .map(|(x, log_recon)| -> Result<Tensor> {
+                let ret = x
+                    .clamp(0.0, f64::INFINITY)?
+                    .mul(log_recon)?
+                    .sum(x.rank() - 1)?;
                 ret.unsqueeze(ret.rank())
             })
             .collect::<Result<Vec<Tensor>>>()?;
@@ -73,7 +86,7 @@ impl MultimodalDecoderModuleT for MultimodalTopicDecoder {
         let k = llik_vec[0].rank();
         let llik = Tensor::cat(&llik_vec, k - 1)?.sum(k - 1)?;
 
-        Ok((logits_nd_vec, llik))
+        Ok((recon_vec, llik))
     }
 
     fn dim_obs(&self) -> &[usize] {
