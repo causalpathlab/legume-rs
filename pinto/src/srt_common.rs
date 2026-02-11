@@ -1,9 +1,5 @@
-#![allow(dead_code)]
-
 pub type Mat = nalgebra::DMatrix<f32>;
 pub type DVec = nalgebra::DVector<f32>;
-pub type CscMat = nalgebra_sparse::CscMatrix<f32>;
-pub type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 
 pub use data_beans::sparse_data_visitors::*;
 pub use data_beans::sparse_io::*;
@@ -23,96 +19,9 @@ pub use std::collections::{HashMap, HashSet};
 
 pub use std::sync::{Arc, Mutex};
 
-pub use candle_util::candle_core;
-
-#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
-pub enum ComputeDevice {
-    Cpu,
-    Cuda,
-    Metal,
-}
-
 pub struct Pair {
     pub left: usize,
     pub right: usize,
-}
-
-//////////////////////
-// training scores  //
-//////////////////////
-
-pub struct TrainScores {
-    pub llik: Vec<f32>,
-    pub kl: Vec<f32>,
-}
-
-impl TrainScores {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            llik: Vec::with_capacity(capacity),
-            kl: Vec::with_capacity(capacity),
-        }
-    }
-
-    pub fn push(&mut self, llik: f32, kl: f32) {
-        self.llik.push(llik);
-        self.kl.push(kl);
-    }
-
-    pub fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
-        let mat = Mat::from_columns(&[
-            DVec::from_vec(self.llik.clone()),
-            DVec::from_vec(self.kl.clone()),
-        ]);
-
-        let score_types = vec![
-            "log_likelihood".to_string().into_boxed_str(),
-            "kl_divergence".to_string().into_boxed_str(),
-        ];
-
-        let epochs: Vec<Box<str>> = (0..mat.nrows())
-            .map(|x| (x + 1).to_string().into_boxed_str())
-            .collect();
-
-        mat.to_parquet_with_names(
-            file_path,
-            (Some(&epochs), Some("epoch")),
-            Some(&score_types),
-        )
-    }
-
-    pub fn last_llik(&self) -> Option<&f32> {
-        self.llik.last()
-    }
-}
-
-////////////////////////////////////
-// miscellaneous helper functions //
-////////////////////////////////////
-
-/// a thin wrapper for gzipped tsv out: `{header}.{file_name}.tsv.gz`
-pub fn tsv_gz_out(data: &Tensor, header: &str, file_name: &str) -> anyhow::Result<()> {
-    let tsv_file = header.to_string() + "." + file_name + ".tsv.gz";
-    data.to_device(&candle_core::Device::Cpu)?.to_tsv(&tsv_file)
-}
-
-/// a thin wrapper for parquet out: `{header}.{file_name}.parquet`
-pub fn named_tensor_parquet_out(
-    data: &Tensor,
-    row_names: (Option<&[Box<str>]>, Option<&str>),
-    column_names: Option<&[Box<str>]>,
-    header: &str,
-    file_name: &str,
-) -> anyhow::Result<()> {
-    let file_path = header.to_string() + "." + file_name + ".parquet";
-    data.to_device(&candle_core::Device::Cpu)?
-        .to_parquet_with_names(&file_path, row_names, column_names)
-}
-
-/// a thin wrapper for parquet out: `{header}.{file_name}.parquet`
-pub fn tensor_parquet_out(data: &Tensor, header: &str, file_name: &str) -> anyhow::Result<()> {
-    named_tensor_parquet_out(data, (None, None), None, header, file_name)
 }
 
 /// Filter a parquet file to keep only rows at the given indices.
@@ -126,8 +35,6 @@ pub fn filter_parquet_by_indices(file_path: &str, keep_indices: &[usize]) -> any
     let file = File::open(file_path)?;
     let reader = SerializedFileReader::new(file)?;
     let schema = reader.metadata().file_metadata().schema().clone();
-    let n_fields = schema.get_fields().len();
-
     let field_types: Vec<_> = schema
         .get_fields()
         .iter()
@@ -154,19 +61,20 @@ pub fn filter_parquet_by_indices(file_path: &str, keep_indices: &[usize]) -> any
     let mut row_group = writer.next_row_group()?;
 
     // Write column by column
-    for col_idx in 0..n_fields {
+    for (col_idx, &physical_type) in field_types.iter().enumerate() {
         use parquet::basic::Type as PhysicalType;
         use parquet::data_type::*;
 
-        let mut col_writer = row_group.next_column()?.unwrap();
-        let physical_type = field_types[col_idx];
+        let mut col_writer = row_group
+            .next_column()?
+            .ok_or_else(|| anyhow::anyhow!("missing column writer at index {}", col_idx))?;
 
         match physical_type {
             PhysicalType::FLOAT => {
                 let vals: Vec<f32> = kept_rows
                     .iter()
-                    .map(|r| r.get_float(col_idx).unwrap())
-                    .collect();
+                    .map(|r| r.get_float(col_idx))
+                    .collect::<Result<_, _>>()?;
                 col_writer
                     .typed::<FloatType>()
                     .write_batch(&vals, None, None)?;
@@ -174,8 +82,8 @@ pub fn filter_parquet_by_indices(file_path: &str, keep_indices: &[usize]) -> any
             PhysicalType::BYTE_ARRAY => {
                 let vals: Vec<ByteArray> = kept_rows
                     .iter()
-                    .map(|r| ByteArray::from(r.get_string(col_idx).unwrap().as_bytes().to_vec()))
-                    .collect();
+                    .map(|r| Ok(ByteArray::from(r.get_string(col_idx)?.as_bytes().to_vec())))
+                    .collect::<Result<_, parquet::errors::ParquetError>>()?;
                 col_writer
                     .typed::<ByteArrayType>()
                     .write_batch(&vals, None, None)?;
@@ -183,8 +91,8 @@ pub fn filter_parquet_by_indices(file_path: &str, keep_indices: &[usize]) -> any
             PhysicalType::DOUBLE => {
                 let vals: Vec<f64> = kept_rows
                     .iter()
-                    .map(|r| r.get_double(col_idx).unwrap())
-                    .collect();
+                    .map(|r| r.get_double(col_idx))
+                    .collect::<Result<_, _>>()?;
                 col_writer
                     .typed::<DoubleType>()
                     .write_batch(&vals, None, None)?;
@@ -192,8 +100,8 @@ pub fn filter_parquet_by_indices(file_path: &str, keep_indices: &[usize]) -> any
             PhysicalType::INT32 => {
                 let vals: Vec<i32> = kept_rows
                     .iter()
-                    .map(|r| r.get_int(col_idx).unwrap())
-                    .collect();
+                    .map(|r| r.get_int(col_idx))
+                    .collect::<Result<_, _>>()?;
                 col_writer
                     .typed::<Int32Type>()
                     .write_batch(&vals, None, None)?;
@@ -201,8 +109,8 @@ pub fn filter_parquet_by_indices(file_path: &str, keep_indices: &[usize]) -> any
             PhysicalType::INT64 => {
                 let vals: Vec<i64> = kept_rows
                     .iter()
-                    .map(|r| r.get_long(col_idx).unwrap())
-                    .collect();
+                    .map(|r| r.get_long(col_idx))
+                    .collect::<Result<_, _>>()?;
                 col_writer
                     .typed::<Int64Type>()
                     .write_batch(&vals, None, None)?;
@@ -271,8 +179,8 @@ pub fn names_from_parquet(
         let row = record?;
         let pp = select_indices
             .iter()
-            .map(|&j| row.get_string(j).unwrap().clone().into_boxed_str())
-            .collect::<Vec<_>>();
+            .map(|&j| Ok(row.get_string(j)?.clone().into_boxed_str()))
+            .collect::<Result<Vec<_>, parquet::errors::ParquetError>>()?;
 
         pairs.push(pp);
     }

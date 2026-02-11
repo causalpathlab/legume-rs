@@ -19,7 +19,6 @@ pub struct GenePairGraphArgs {
     pub reciprocal: bool,
 }
 
-#[allow(dead_code)]
 impl GenePairGraph {
     /// Build gene-gene KNN graph from gene × sample posterior means.
     ///
@@ -108,7 +107,7 @@ impl GenePairGraph {
             }
         }
 
-        let membership = Membership::from_pairs(pairs_vec.into_iter(), allow_prefix);
+        let membership = Membership::from_pairs(pairs_vec, allow_prefix);
 
         // Read the edge list file
         let file_delim = detect_delimiter(file_path);
@@ -193,6 +192,7 @@ impl GenePairGraph {
         self.gene_edges.len()
     }
 
+    #[cfg(test)]
     pub fn num_genes(&self) -> usize {
         self.n_genes
     }
@@ -219,6 +219,7 @@ impl GenePairGraph {
     }
 
     /// Gene pair names with channel suffix: "GENE1:GENE2@+" and "GENE1:GENE2@-"
+    #[cfg(test)]
     pub fn edge_names_with_channels(&self) -> Vec<Box<str>> {
         let base = self.edge_names();
         let mut names = Vec::with_capacity(base.len() * 2);
@@ -233,6 +234,7 @@ impl GenePairGraph {
 
     /// Build directed adjacency from external edge list and verify consistency
     /// with the `gene_edges` stored on self.
+    #[cfg(test)]
     pub fn verify_adjacency(&self) -> bool {
         for &(i, j) in &self.gene_edges {
             if i >= j {

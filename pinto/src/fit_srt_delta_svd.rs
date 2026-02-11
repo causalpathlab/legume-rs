@@ -226,7 +226,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     }
 
     // 1. Load data
-    info!("Reading data files...");
+    info!("[1/8] Loading data files...");
 
     let SRTData {
         data: mut data_vec,
@@ -245,9 +245,27 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
 
     let gene_names = data_vec.row_names()?;
     let n_genes = data_vec.num_rows();
+    let n_cells = data_vec.num_columns();
+
+    anyhow::ensure!(args.proj_dim > 0, "proj_dim must be > 0");
+    anyhow::ensure!(args.sort_dim > 0, "sort_dim must be > 0");
+    anyhow::ensure!(
+        args.sort_dim <= args.proj_dim,
+        "sort_dim ({}) must be <= proj_dim ({})",
+        args.sort_dim,
+        args.proj_dim
+    );
+    anyhow::ensure!(args.knn_spatial > 0, "knn_spatial must be > 0");
+    anyhow::ensure!(args.n_latent_topics > 0, "n_latent_topics must be > 0");
+    anyhow::ensure!(
+        args.knn_spatial < n_cells,
+        "knn_spatial ({}) must be < number of cells ({})",
+        args.knn_spatial,
+        n_cells
+    );
 
     // 2. Estimate batch effects
-    info!("Checking potential batch effects...");
+    info!("[2/8] Estimating batch effects...");
 
     let batch_effects = estimate_batch(
         &mut data_vec,
@@ -274,7 +292,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     }
 
     // 3. Build spatial KNN graph
-    info!("Constructing spatial nearest neighbourhood graphs");
+    info!("[3/8] Building spatial KNN graph (k={})...", args.knn_spatial);
 
     let mut srt_cell_pairs = SrtCellPairs::new(
         &data_vec,
@@ -292,6 +310,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     )?;
 
     // 4. Random projection + sample assignment
+    info!("[4/8] Random projection and sample assignment...");
     let proj_out = srt_cell_pairs.random_projection(
         args.proj_dim,
         args.block_size,
@@ -301,7 +320,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     srt_cell_pairs.assign_pairs_to_samples(&proj_out, Some(args.sort_dim), args.down_sample)?;
 
     // 5. Collapse: compute shared/diff per gene per sample
-    info!("Collecting shared/difference statistics across cell pairs...");
+    info!("[5/8] Collapsing shared/difference statistics...");
 
     let batch_db = batch_effects.map(|x| x.posterior_mean().clone());
     let batch_ref = batch_db.as_ref();
@@ -315,11 +334,11 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     )?;
 
     // 6. Fit Poisson-Gamma
-    info!("Fitting Poisson-Gamma on shared/difference statistics...");
+    info!("[6/8] Fitting Poisson-Gamma model...");
     let params = collapsed_stat.optimize(None)?;
 
     // 7. SVD on [shared; diff] posterior log means
-    info!("Randomized SVD on pair delta features...");
+    info!("[7/8] Randomized SVD ({} components)...", args.n_latent_topics);
 
     let training_dm = concatenate_vertical(&[
         params.shared.posterior_log_mean().scale_columns(),
@@ -349,7 +368,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     )?;
 
     // 8. Nystrom projection
-    info!("Nystrom pair delta projection...");
+    info!("[8/8] Nystrom projection...");
 
     let mut proj_kn = Mat::zeros(args.n_latent_topics, srt_cell_pairs.num_pairs());
 

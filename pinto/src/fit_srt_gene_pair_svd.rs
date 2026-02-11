@@ -201,7 +201,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     }
 
     // 1. Load data
-    info!("Reading data files...");
+    info!("[1/9] Loading data files...");
 
     let SRTData {
         data: mut data_vec,
@@ -220,9 +220,28 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
 
     let gene_names = data_vec.row_names()?;
     let n_genes = data_vec.num_rows();
+    let n_cells = data_vec.num_columns();
+
+    anyhow::ensure!(args.proj_dim > 0, "proj_dim must be > 0");
+    anyhow::ensure!(args.sort_dim > 0, "sort_dim must be > 0");
+    anyhow::ensure!(
+        args.sort_dim <= args.proj_dim,
+        "sort_dim ({}) must be <= proj_dim ({})",
+        args.sort_dim,
+        args.proj_dim
+    );
+    anyhow::ensure!(args.knn_spatial > 0, "knn_spatial must be > 0");
+    anyhow::ensure!(args.knn_gene > 0, "knn_gene must be > 0");
+    anyhow::ensure!(args.n_latent_topics > 0, "n_latent_topics must be > 0");
+    anyhow::ensure!(
+        args.knn_spatial < n_cells,
+        "knn_spatial ({}) must be < number of cells ({})",
+        args.knn_spatial,
+        n_cells
+    );
 
     // 2. Build spatial cell-cell KNN graph and extract pair info
-    info!("Constructing spatial nearest neighbourhood graphs");
+    info!("[2/9] Building spatial KNN graph (k={})...", args.knn_spatial);
     let cell_pairs: Vec<(usize, usize)>;
     {
         let srt_cell_pairs = SrtCellPairs::new(
@@ -249,7 +268,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     // srt_cell_pairs dropped — data_vec is no longer borrowed
 
     // 3. Assign individual cells to samples for gene-pair analysis
-    info!("Projecting cells for sample assignment...");
+    info!("[3/9] Random projection and sample assignment...");
 
     let cell_proj_out = data_vec.project_columns_with_batch_correction(
         args.proj_dim,
@@ -267,7 +286,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
 
     // 4-5. Build gene-gene graph (external network or KNN from posterior means)
     let mut gene_graph = if let Some(network_file) = &args.gene_network {
-        info!("Loading external gene network from {}...", network_file);
+        info!("[4/9] Loading external gene network from {}...", network_file);
         GenePairGraph::from_edge_list(
             network_file,
             gene_names.clone(),
@@ -286,7 +305,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
         mu_param.calibrate();
 
         // 5. Build gene-gene KNN graph
-        info!("Building gene-gene KNN graph...");
+        info!("[5/9] Building gene-gene KNN graph (k={})...", args.knn_gene);
         GenePairGraph::from_posterior_means(
             mu_param.posterior_mean(),
             gene_names.clone(),
@@ -302,7 +321,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     let gene_means = compute_gene_raw_means(&data_vec, args.block_size)?;
 
     // 7. Compute gene-pair deltas (raw counts, positive only)
-    info!("Calibrating gene-gene interaction statistics...");
+    info!("[6/9] Computing gene-pair interaction deltas...");
 
     let mut gene_pair_stat =
         compute_gene_interaction_deltas(&data_vec, &gene_graph, &gene_means, n_samples, false)?;
@@ -321,11 +340,11 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     gene_graph.to_parquet(&(args.out.to_string() + ".gene_graph.parquet"))?;
 
     // 8. Fit Poisson-Gamma
-    info!("Fitting Poisson-Gamma on gene-pair statistics...");
+    info!("[7/9] Fitting Poisson-Gamma model...");
     let gene_pair_params = gene_pair_stat.optimize(None)?;
 
     // 9. SVD on positive channel posterior log means
-    info!("Randomized SVD on gene-pair x sample features...");
+    info!("[8/9] Randomized SVD ({} components)...", args.n_latent_topics);
 
     let training_dm = gene_pair_params
         .delta_pos
@@ -347,7 +366,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     )?;
 
     // 10. Nystrom projection: per-cell first, then convert to per-pair
-    info!("Nystrom gene-pair projection...");
+    info!("[9/9] Nystrom projection...");
 
     let cell_proj_kn = nystrom_gene_pair_projection(
         &data_vec,
@@ -366,7 +385,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     for (pair_idx, &(left, right)) in cell_pairs.iter().enumerate() {
         let left_col = cell_proj_kn.column(left);
         let right_col = cell_proj_kn.column(right);
-        let avg = (&left_col + &right_col) * 0.5;
+        let avg = (left_col + right_col) * 0.5;
         if avg.norm() > 0.0 {
             kept_pairs.push((pair_idx, avg));
         }
