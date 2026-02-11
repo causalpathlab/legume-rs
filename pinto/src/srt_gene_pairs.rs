@@ -5,12 +5,10 @@ use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::*;
 
 /// Accumulated δ⁺ statistics per gene-pair per sample
-#[allow(dead_code)]
 pub struct GenePairCollapsedStat {
     pub delta_pos_ds: Mat,
     pub size_s: DVec,
     pub gene_pairs: Vec<(usize, usize)>,
-    pub gene_names: Vec<Box<str>>,
     n_gene_pairs: usize,
     n_samples: usize,
 }
@@ -28,7 +26,6 @@ struct DeltaSharedInput {
     pub use_log1p: bool,
 }
 
-#[allow(dead_code)]
 impl GenePairCollapsedStat {
     pub fn new(gene_graph: &GenePairGraph, n_samples: usize) -> Self {
         let n_gene_pairs = gene_graph.num_edges();
@@ -36,18 +33,9 @@ impl GenePairCollapsedStat {
             delta_pos_ds: Mat::zeros(n_gene_pairs, n_samples),
             size_s: DVec::zeros(n_samples),
             gene_pairs: gene_graph.gene_edges.clone(),
-            gene_names: gene_graph.gene_names.clone(),
             n_gene_pairs,
             n_samples,
         }
-    }
-
-    pub fn num_gene_pairs(&self) -> usize {
-        self.n_gene_pairs
-    }
-
-    pub fn num_samples(&self) -> usize {
-        self.n_samples
     }
 
     /// Remove low-signal gene-pair edges.
@@ -372,9 +360,9 @@ fn elbow_threshold(values: &[f32]) -> (f32, usize) {
     let mut max_dist = 0.0_f64;
     let mut elbow_idx = 0;
 
-    for i in 1..(n - 1) {
+    for (i, &val) in positive.iter().enumerate().take(n - 1).skip(1) {
         let px = i as f64 / (n - 1) as f64;
-        let py = positive[i] as f64 / y_max - 1.0;
+        let py = val as f64 / y_max - 1.0;
         let dist = (px * dy - py * dx).abs() / line_len;
         if dist > max_dist {
             max_dist = dist;
@@ -383,4 +371,99 @@ fn elbow_threshold(values: &[f32]) -> (f32, usize) {
     }
 
     (positive[elbow_idx], elbow_idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_elbow_threshold_clear_elbow() {
+        // High values followed by a sharp drop → elbow should detect the transition
+        let values = vec![100.0, 90.0, 80.0, 70.0, 10.0, 5.0, 2.0, 1.0];
+        let (threshold, rank) = elbow_threshold(&values);
+        assert!(threshold > 0.0, "threshold should be positive");
+        assert!(rank > 0 && rank < values.len(), "rank={}", rank);
+    }
+
+    #[test]
+    fn test_elbow_threshold_all_zeros() {
+        let values = vec![0.0, 0.0, 0.0];
+        let (threshold, rank) = elbow_threshold(&values);
+        assert_eq!(threshold, 0.0);
+        assert_eq!(rank, 0);
+    }
+
+    #[test]
+    fn test_elbow_threshold_too_few() {
+        // Fewer than 3 positive values → no elbow
+        let values = vec![1.0, 2.0];
+        let (threshold, rank) = elbow_threshold(&values);
+        assert_eq!(threshold, 0.0);
+        assert_eq!(rank, 0);
+    }
+
+    #[test]
+    fn test_elbow_threshold_with_negatives() {
+        // Negative values are ignored
+        let values = vec![100.0, 50.0, 10.0, -5.0, -10.0];
+        let (threshold, _rank) = elbow_threshold(&values);
+        assert!(threshold > 0.0);
+    }
+
+    #[test]
+    fn test_elbow_threshold_uniform() {
+        // All equal → elbow at some interior point
+        let values = vec![5.0; 10];
+        let (threshold, _rank) = elbow_threshold(&values);
+        // With uniform values the curve is flat, threshold is one of the values
+        assert_eq!(threshold, 5.0);
+    }
+
+    #[test]
+    fn test_visit_gene_pair_deltas() {
+        // 3 genes: 0, 1, 2. Edges: (0,1) idx=0, (0,2) idx=1
+        let gene_adj: Vec<Vec<(usize, usize)>> = vec![
+            vec![(1, 0), (2, 1)], // gene 0 → gene 1 (edge 0), gene 2 (edge 1)
+            vec![],               // gene 1
+            vec![],               // gene 2
+        ];
+        let gene_means = DVec::from_vec(vec![1.0, 2.0, 3.0]);
+
+        // Cell has genes 0 and 1 present (raw counts)
+        let rows = vec![0usize, 1];
+        let vals = vec![4.0f32, 6.0];
+
+        let mut deltas = vec![];
+        visit_gene_pair_deltas(&rows, &vals, &gene_adj, &gene_means, false, |edge_idx, delta| {
+            deltas.push((edge_idx, delta));
+        });
+
+        // Edge (0,1): 4.0 * 6.0 - 1.0 * 2.0 = 22.0
+        assert_eq!(deltas.len(), 1); // gene 2 not present → edge 1 skipped
+        assert_eq!(deltas[0].0, 0);
+        assert!((deltas[0].1 - 22.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_visit_gene_pair_deltas_log1p() {
+        let gene_adj: Vec<Vec<(usize, usize)>> = vec![
+            vec![(1, 0)],
+            vec![],
+        ];
+        // When use_log1p=true, gene_means should be log1p-scale means
+        let gene_means = DVec::from_vec(vec![1.0f32.ln_1p(), 2.0f32.ln_1p()]);
+
+        let rows = vec![0usize, 1];
+        let vals = vec![1.0f32, 2.0];
+
+        let mut deltas = vec![];
+        visit_gene_pair_deltas(&rows, &vals, &gene_adj, &gene_means, true, |edge_idx, delta| {
+            deltas.push((edge_idx, delta));
+        });
+
+        let expected = 1.0f32.ln_1p() * 2.0f32.ln_1p() - gene_means[0] * gene_means[1];
+        assert_eq!(deltas.len(), 1);
+        assert!((deltas[0].1 - expected).abs() < 1e-6);
+    }
 }

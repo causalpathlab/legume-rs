@@ -192,7 +192,7 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
 
 fn append_batch_coordinate<T>(coords: &Mat, batch_membership: &[T]) -> anyhow::Result<Mat>
 where
-    T: Sync + Send + Clone + Eq + std::hash::Hash,
+    T: Sync + Send + Clone + Eq + std::hash::Hash + std::fmt::Debug,
 {
     if coords.nrows() != batch_membership.len() {
         return Err(anyhow::anyhow!("incompatible batch membership"));
@@ -213,12 +213,71 @@ where
     let batch_coord = batch_membership
         .iter()
         .map(|k| {
-            let b = *batch_index.get(k).unwrap();
-            width * (b as f32)
+            let b = *batch_index
+                .get(k)
+                .ok_or_else(|| anyhow::anyhow!("batch key {:?} not found in index", k))?;
+            Ok(width * (b as f32))
         })
-        .collect::<Vec<_>>();
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     let bb = Mat::from_vec(coords.nrows(), 1, batch_coord);
 
     concatenate_horizontal(&[coords.clone(), bb])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_append_batch_coordinate_single_batch() {
+        let coords = Mat::from_vec(3, 2, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        let batches = vec!["A", "A", "A"];
+        let result = append_batch_coordinate(&coords, &batches).unwrap();
+        assert_eq!(result.nrows(), 3);
+        assert_eq!(result.ncols(), 3); // original 2 + 1 batch
+        // Single batch → all batch coordinates should be 0.0
+        for i in 0..3 {
+            assert_eq!(result[(i, 2)], 0.0);
+        }
+    }
+
+    #[test]
+    fn test_append_batch_coordinate_two_batches() {
+        let coords = Mat::from_vec(4, 2, vec![0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0]);
+        let batches = vec!["A", "A", "B", "B"];
+        let result = append_batch_coordinate(&coords, &batches).unwrap();
+        assert_eq!(result.ncols(), 3);
+        // Batch coordinates should differ between A and B
+        let batch_a = result[(0, 2)];
+        let batch_b = result[(2, 2)];
+        assert_ne!(batch_a, batch_b, "different batches should have different coordinates");
+        // Same batch should have same coordinate
+        assert_eq!(result[(0, 2)], result[(1, 2)]);
+        assert_eq!(result[(2, 2)], result[(3, 2)]);
+    }
+
+    #[test]
+    fn test_append_batch_coordinate_scaling() {
+        // Width = max - min of all coords
+        let coords = Mat::from_vec(2, 1, vec![0.0, 10.0]);
+        let batches = vec!["X", "Y"];
+        let result = append_batch_coordinate(&coords, &batches).unwrap();
+        // Width = 10.0, one batch at 0*width, other at 1*width
+        let vals: Vec<f32> = (0..2).map(|i| result[(i, 1)]).collect();
+        let (lo, hi) = if vals[0] < vals[1] {
+            (vals[0], vals[1])
+        } else {
+            (vals[1], vals[0])
+        };
+        assert_eq!(lo, 0.0);
+        assert_eq!(hi, 10.0); // 1 * width
+    }
+
+    #[test]
+    fn test_append_batch_coordinate_mismatch() {
+        let coords = Mat::from_vec(2, 1, vec![0.0, 1.0]);
+        let batches = vec!["A"]; // wrong length
+        assert!(append_batch_coordinate(&coords, &batches).is_err());
+    }
 }
