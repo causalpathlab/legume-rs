@@ -316,7 +316,7 @@ fn directed_umap_weight(d: f32, rho: f32, sigma: f32) -> f32 {
 fn spectral_embed(similarity: &Mat, num_eigen: usize) -> anyhow::Result<Mat> {
     let n = similarity.nrows();
     let k = num_eigen.clamp(2, n - 1);
-    anyhow::ensure!(n >= k + 1, "Need {} genes, got {}", k + 1, n);
+    anyhow::ensure!(n > k, "Need more than {} genes, got {}", k, n);
 
     let degree: DVec = DVec::from_iterator(n, similarity.row_iter().map(|r| r.sum()));
     let d_inv_sqrt = Mat::from_diagonal(&degree.map(|d| 1.0 / d.sqrt()));
@@ -516,6 +516,105 @@ mod tests {
             assert!(c == 0 || c == 1, "cluster {} not in {{0, 1}}", c);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_smooth_knn_sigma() {
+        // With uniform distances around rho, sigma should converge
+        let dists = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let rho = 1.0;
+        let target = (dists.len() as f32).log2();
+        let sigma = smooth_knn_sigma(&dists, rho, target);
+        assert!(sigma > 0.0, "sigma must be positive");
+        // Verify convergence: sum of weights should be close to target
+        let psum: f32 = dists
+            .iter()
+            .map(|&d| {
+                let gap = d - rho;
+                if gap > 0.0 { (-gap / sigma).exp() } else { 1.0 }
+            })
+            .sum();
+        assert!(
+            (psum - target).abs() < 0.1,
+            "psum={} should be close to target={}",
+            psum,
+            target
+        );
+    }
+
+    #[test]
+    fn test_smooth_knn_sigma_all_equal() {
+        // All distances equal to rho → all weights = 1.0
+        let dists = vec![2.0, 2.0, 2.0];
+        let rho = 2.0;
+        let target = 2.0;
+        let sigma = smooth_knn_sigma(&dists, rho, target);
+        assert!(sigma > 0.0);
+    }
+
+    #[test]
+    fn test_directed_umap_weight_basic() {
+        // d <= rho → weight = 1.0
+        assert_eq!(directed_umap_weight(1.0, 2.0, 1.0), 1.0);
+        assert_eq!(directed_umap_weight(2.0, 2.0, 1.0), 1.0);
+
+        // d > rho → weight in (0, 1)
+        let w = directed_umap_weight(3.0, 1.0, 1.0);
+        assert!(w > 0.0 && w < 1.0, "weight={}", w);
+
+        // infinite distance → weight = 0
+        assert_eq!(directed_umap_weight(f32::INFINITY, 1.0, 1.0), 0.0);
+
+        // sigma <= 0 → weight = 0
+        assert_eq!(directed_umap_weight(3.0, 1.0, 0.0), 0.0);
+        assert_eq!(directed_umap_weight(3.0, 1.0, -1.0), 0.0);
+    }
+
+    #[test]
+    fn test_argsort_ascending() {
+        let vals = DVec::from_vec(vec![3.0, 1.0, 4.0, 1.5, 2.0]);
+        let idx = argsort(&vals, true);
+        assert_eq!(idx, vec![1, 3, 4, 0, 2]);
+    }
+
+    #[test]
+    fn test_argsort_descending() {
+        let vals = DVec::from_vec(vec![3.0, 1.0, 4.0, 1.5, 2.0]);
+        let idx = argsort(&vals, false);
+        assert_eq!(idx, vec![2, 0, 4, 3, 1]);
+    }
+
+    #[test]
+    fn test_spectral_embed_dimensions() -> anyhow::Result<()> {
+        // Build a 6-node similarity matrix (block diagonal → 2 clusters)
+        let n = 6;
+        let mut sim = Mat::from_element(n, n, 0.01);
+        for i in 0..3 {
+            for j in 0..3 {
+                sim[(i, j)] = 1.0;
+            }
+        }
+        for i in 3..6 {
+            for j in 3..6 {
+                sim[(i, j)] = 1.0;
+            }
+        }
+        // Add small self-loops
+        for i in 0..n {
+            sim[(i, i)] += 1e-4;
+        }
+
+        let k = 3;
+        let emb = spectral_embed(&sim, k)?;
+        assert_eq!(emb.nrows(), n);
+        assert_eq!(emb.ncols(), k);
+        // All values should be finite
+        for i in 0..emb.nrows() {
+            for j in 0..emb.ncols() {
+                assert!(emb[(i, j)].is_finite());
+            }
+        }
         Ok(())
     }
 }
