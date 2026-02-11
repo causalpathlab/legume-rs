@@ -2,7 +2,7 @@ use crate::embed_common::*;
 use crate::feature_selection::*;
 use crate::senna_input::*;
 
-use candle_core::Device;
+use candle_core::{Device, Tensor};
 use candle_nn::AdamW;
 use candle_nn::Optimizer;
 use candle_util::candle_data_loader::*;
@@ -366,32 +366,15 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        default_value_t = 5.0,
-        help = "Starting temperature for annealing",
-        long_help = "Initial temperature for softmax/sparsemax (higher = smoother).\n\
-		     Temperature anneals exponentially to temp_min during training.\n\
-		     Standard Gumbel-Softmax starts around 5.0-10.0."
+        default_value_t = 0.0,
+        help = "Topic smoothing during training",
+        long_help = "Mix encoder topic proportions with uniform distribution during training:\n\
+		     z_smooth = (1 - α) * z_nk + α / K\n\
+		     Ensures every topic receives gradient signal through the decoder,\n\
+		     preventing dead topics. Only applied during training.\n\
+		     Typical values: 0.05-0.2. Set to 0 to disable."
     )]
-    temp_start: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0.1,
-        help = "Minimum temperature for annealing",
-        long_help = "Final temperature after annealing (lower = more peaked/sparse).\n\
-		     Standard values: 0.1-0.5 for sparse, 1.0 for no annealing."
-    )]
-    temp_min: f32,
-
-    #[arg(
-        long,
-        default_value_t = 500.0,
-        help = "Temperature annealing rate",
-        long_help = "Controls how fast temperature decays (higher = slower decay).\n\
-		     temp = temp_min + (temp_start - temp_min) * exp(-epoch / tau).\n\
-		     Set to 0 to disable annealing (use temp_start throughout)."
-    )]
-    temp_anneal_tau: f64,
+    topic_smoothing: f64,
 }
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
@@ -537,7 +520,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             n_modules,
             layers: &args.encoder_layers,
             use_sparsemax,
-            temperature: args.temp_start,
         },
         param_builder.clone(),
     )?;
@@ -878,20 +860,6 @@ where
             1.0
         };
 
-        // Temperature annealing: temp = temp_min + (temp_start - temp_min) * exp(-epoch / tau)
-        let temperature = if args.temp_anneal_tau > 0.0 {
-            let progress = epoch as f64 / args.temp_anneal_tau;
-            let decay = (-progress).exp() as f32;
-            args.temp_min + (args.temp_start - args.temp_min) * decay
-        } else {
-            args.temp_start
-        };
-        encoder.set_temperature(temperature);
-
-        if args.verbose && epoch % 100 == 0 {
-            info!("Epoch {}: temperature = {:.3}", epoch, temperature);
-        }
-
         for jitter in 0..args.jitter_interval {
             let mut llik_tot = 0f32;
             let mut kl_tot = 0f32;
@@ -899,6 +867,16 @@ where
             for b in 0..data_loader.num_minibatch() {
                 let mb = data_loader.minibatch_shuffled(b, &dev)?;
                 let (z_nk, kl) = encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
+
+                // Topic smoothing: mix with uniform to prevent dead topics
+                let z_nk = if args.topic_smoothing > 0.0 {
+                    let alpha = args.topic_smoothing;
+                    let kk = z_nk.dim(1)? as f64;
+                    ((&z_nk * (1.0 - alpha))? + alpha / kk)?
+                } else {
+                    z_nk
+                };
+
                 let y_nd = mb.output.unwrap_or(mb.input);
                 let (_, llik) = decoder.forward_with_llik(&z_nk, &y_nd, &topic_likelihood)?;
 
