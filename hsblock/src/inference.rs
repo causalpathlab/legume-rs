@@ -1,15 +1,14 @@
-//! Variational EM outer loop with candle-based M-step.
+//! HSBM inference: collapsed Gibbs sampling + greedy refinement.
 //!
-//! Alternates between:
-//! - **E-step**: Collapsed Gibbs sampling (CPU) to update cluster assignments
-//! - **M-step**: Stochastic gradient update of tree parameters via candle autodiff
+//! 1. **Gibbs sweeps** (stochastic): explore the posterior over cluster
+//!    assignments. Poisson rates are analytically integrated out via
+//!    Gamma-Poisson conjugacy — only (a0, b0) hyperpriors and memberships remain.
+//! 2. **Greedy sweeps** (argmax): deterministic refinement to the MAP assignment.
 
 use crate::btree::BTree;
 use crate::gibbs::{build_adj_list, GibbsSampler};
-use crate::model::tree_score_candle;
+use crate::model::tree_score_cpu;
 use crate::sufficient_stats::{SufficientStats, WeightedEdge};
-use candle_core::{DType, Device};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW};
 use leiden::{Clustering, Network};
 use log::info;
 use rand::rngs::SmallRng;
@@ -20,16 +19,8 @@ use rand::{Rng, SeedableRng};
 pub struct HsbmOptions {
     /// Depth of the binary tree (K = 2^(depth-1) leaf clusters). Default: 3
     pub tree_depth: usize,
-    /// Number of outer variational EM iterations. Default: 100
-    pub vb_iter: usize,
-    /// Number of Gibbs sweeps per VB iteration (E-step). Default: 10
-    pub inner_iter: usize,
-    /// Number of Gibbs sweeps in the final E-step. Default: 100
-    pub final_inner_iter: usize,
-    /// Number of burn-in Gibbs sweeps to discard. Default: 5
-    pub burnin_iter: usize,
-    /// Learning rate for Adam optimizer (M-step). Default: 0.01
-    pub learning_rate: f64,
+    /// Number of Gibbs sweeps. Default: 100
+    pub num_sweeps: usize,
     /// Use degree-corrected model. Default: true
     pub degree_corrected: bool,
     /// Random seed. Default: 42
@@ -38,21 +29,24 @@ pub struct HsbmOptions {
     pub init_a0: f64,
     /// Initial rate parameter b0 for Gamma prior. Default: 1.0
     pub init_b0: f64,
+    /// Multiplicative scale for edge weights. Default: 100.0
+    ///
+    /// The Poisson-Gamma conjugate model expects count-like data, but fuzzy
+    /// kernel weights from KNN graphs are continuous in (0, 1]. Scaling them
+    /// up gives the model more signal to discriminate cluster structure.
+    pub edge_scale: f64,
 }
 
 impl Default for HsbmOptions {
     fn default() -> Self {
         HsbmOptions {
             tree_depth: 3,
-            vb_iter: 100,
-            inner_iter: 10,
-            final_inner_iter: 100,
-            burnin_iter: 5,
-            learning_rate: 0.01,
+            num_sweeps: 100,
             degree_corrected: true,
             seed: 42,
             init_a0: 1.0,
             init_b0: 1.0,
+            edge_scale: 100.0,
         }
     }
 }
@@ -66,21 +60,19 @@ impl Default for HsbmOptions {
 /// use leiden::{Network, Clustering, SimpleClustering};
 ///
 /// let options = HsbmOptions::default();
-/// let device = candle_core::Device::Cpu;
-/// let mut hsblock = Hsblock::new(options, device);
+/// let mut hsblock = Hsblock::new(options);
 ///
 /// let mut clustering = SimpleClustering::init_different_clusters(network.nodes());
 /// hsblock.iterate(&network, &mut clustering);
 /// ```
 pub struct Hsblock {
     options: HsbmOptions,
-    device: Device,
 }
 
 impl Hsblock {
     /// Create a new HSBM instance.
-    pub fn new(options: HsbmOptions, device: Device) -> Self {
-        Hsblock { options, device }
+    pub fn new(options: HsbmOptions) -> Self {
+        Hsblock { options }
     }
 
     /// Run HSBM inference on the network, writing results into `clustering`.
@@ -95,8 +87,9 @@ impl Hsblock {
             return false;
         }
 
-        // Extract edge list from Network
-        let edges = extract_edges(network);
+        // Extract edge list from Network, scaling weights for the Poisson model.
+        // Fuzzy kernel weights are in (0,1], so scaling makes them count-like.
+        let edges = extract_edges(network, self.options.edge_scale);
         let adj_list = build_adj_list(&edges, n);
 
         let k = 1 << (self.options.tree_depth - 1); // 2^(D-1) clusters
@@ -109,7 +102,7 @@ impl Hsblock {
         let initial_labels: Vec<usize> = (0..n).map(|i| clustering.get(i)).collect();
 
         // Build data structures
-        let mut tree = BTree::new(
+        let tree = BTree::new(
             self.options.tree_depth,
             self.options.init_a0,
             self.options.init_b0,
@@ -118,13 +111,33 @@ impl Hsblock {
         let mut gibbs =
             GibbsSampler::new(SmallRng::seed_from_u64(self.options.seed.wrapping_add(1)));
 
-        // Run Variational EM
-        match self.run_vem(&mut tree, &mut stats, &mut gibbs, &edges, &adj_list) {
-            Ok(()) => {}
-            Err(e) => {
-                info!("HSBM M-step error (falling back to Gibbs-only): {}", e);
-            }
-        }
+        let dc = self.options.degree_corrected;
+
+        info!(
+            "HSBM: n={}, K={}, depth={}, dc={}, sweeps={}",
+            n, k, self.options.tree_depth, dc, self.options.num_sweeps,
+        );
+
+        // Run collapsed Gibbs sampling, then finalize with greedy argmax sweeps
+        let moves = gibbs.run_parallel(&tree, &mut stats, &adj_list, self.options.num_sweeps, dc);
+        let greedy_moves = gibbs.run_greedy(&tree, &mut stats, &adj_list, 10, dc);
+
+        // Log final score
+        let (node_edge, node_total) = stats.aggregate_to_tree(&tree, dc);
+        let a0: Vec<f64> = (1..=tree.num_nodes())
+            .map(|n| tree.node_params(n).0)
+            .collect();
+        let b0: Vec<f64> = (1..=tree.num_nodes())
+            .map(|n| tree.node_params(n).1)
+            .collect();
+        let score = tree_score_cpu(&a0, &b0, &node_edge[1..], &node_total[1..]);
+        info!(
+            "HSBM done: score={:.4}, gibbs_moves={}, greedy_moves={}, K_eff={}",
+            score,
+            moves,
+            greedy_moves,
+            count_nonempty_clusters(&stats),
+        );
 
         // Write results into clustering
         let mut changed = false;
@@ -139,126 +152,22 @@ impl Hsblock {
 
         changed
     }
-
-    /// Internal: run the full Variational EM loop.
-    fn run_vem(
-        &self,
-        tree: &mut BTree,
-        stats: &mut SufficientStats,
-        gibbs: &mut GibbsSampler,
-        edges: &[WeightedEdge],
-        adj_list: &[Vec<(usize, f64)>],
-    ) -> anyhow::Result<()> {
-        let opts = &self.options;
-        let device = &self.device;
-
-        let num_nodes = tree.num_nodes();
-
-        // Initialize learnable parameters from tree as Var tensors
-        let init_ln_a0: Vec<f32> = tree.ln_a0[1..=num_nodes]
-            .iter()
-            .map(|&x| x as f32)
-            .collect();
-        let init_ln_b0: Vec<f32> = tree.ln_b0[1..=num_nodes]
-            .iter()
-            .map(|&x| x as f32)
-            .collect();
-
-        let ln_a0_t = candle_core::Tensor::from_vec(init_ln_a0, (num_nodes,), device)?;
-        let ln_b0_t = candle_core::Tensor::from_vec(init_ln_b0, (num_nodes,), device)?;
-
-        let ln_a0_var = candle_core::Var::from_tensor(&ln_a0_t)?;
-        let ln_b0_var = candle_core::Var::from_tensor(&ln_b0_t)?;
-
-        let adam_params = ParamsAdamW {
-            lr: opts.learning_rate,
-            ..Default::default()
-        };
-        let mut optimizer = AdamW::new(vec![ln_a0_var.clone(), ln_b0_var.clone()], adam_params)?;
-
-        info!(
-            "HSBM: n={}, K={}, depth={}, dc={}, vb_iter={}, inner={}",
-            stats.n, stats.k, opts.tree_depth, opts.degree_corrected, opts.vb_iter, opts.inner_iter,
-        );
-
-        for vb_iter in 0..opts.vb_iter {
-            let is_final = vb_iter == opts.vb_iter - 1;
-            let sweeps = if is_final {
-                opts.final_inner_iter
-            } else {
-                opts.inner_iter
-            };
-
-            // E-step: Gibbs sampling (parallel for large graphs, sequential for small)
-            let total_sweeps = opts.burnin_iter + sweeps;
-            let moves =
-                gibbs.run_parallel(tree, stats, adj_list, total_sweeps, opts.degree_corrected);
-
-            // M-step: update tree parameters via candle autodiff
-            let (node_edge, node_total) = stats.aggregate_to_tree(tree, opts.degree_corrected);
-
-            let (edge_t, total_t) =
-                SufficientStats::tree_stats_to_tensors(&node_edge, &node_total, device)?;
-
-            // Use the Var tensors directly for autodiff
-            let score = tree_score_candle(
-                ln_a0_var.as_tensor(),
-                ln_b0_var.as_tensor(),
-                &edge_t,
-                &total_t,
-            )?;
-            let loss = score.neg()?; // minimize negative score = maximize score
-
-            // Adam backward step
-            optimizer.backward_step(&loss)?;
-
-            // Copy updated parameters back to BTree
-            let updated_a0: Vec<f32> = ln_a0_var
-                .as_tensor()
-                .to_dtype(DType::F32)?
-                .flatten_all()?
-                .to_vec1()?;
-            let updated_b0: Vec<f32> = ln_b0_var
-                .as_tensor()
-                .to_dtype(DType::F32)?
-                .flatten_all()?
-                .to_vec1()?;
-
-            for i in 0..num_nodes {
-                tree.set_node_ln_params(i + 1, updated_a0[i] as f64, updated_b0[i] as f64);
-            }
-
-            if vb_iter % 10 == 0 || is_final {
-                let score_val: f32 = score.to_dtype(DType::F32)?.to_scalar()?;
-                info!(
-                    "  VB iter {}: score={:.4}, moves={}, K_eff={}",
-                    vb_iter,
-                    score_val,
-                    moves,
-                    count_nonempty_clusters(stats),
-                );
-            }
-
-            // Periodic GPU recalibration of sufficient stats
-            if vb_iter > 0 && vb_iter % 50 == 0 {
-                stats.recompute_candle(edges, device)?;
-            }
-        }
-
-        Ok(())
-    }
 }
 
-/// Extract weighted edge list from a leiden `Network`.
-fn extract_edges(network: &Network) -> Vec<WeightedEdge> {
+/// Extract weighted edge list from a leiden `Network`, scaling weights.
+///
+/// The Poisson model needs count-like edge weights. Fuzzy kernel weights
+/// are in (0, 1], so we multiply by `edge_scale` to make them informative.
+fn extract_edges(network: &Network, edge_scale: f64) -> Vec<WeightedEdge> {
     let mut edges = Vec::new();
     let n = network.nodes();
+    let scale = edge_scale as f32;
 
     for i in 0..n {
         for (j, w) in network.neighbors(i) {
             if j > i {
                 // Undirected: only store each edge once
-                edges.push((i, j, w as f32));
+                edges.push((i, j, w as f32 * scale));
             }
         }
     }
@@ -333,16 +242,13 @@ mod tests {
 
         let options = HsbmOptions {
             tree_depth: 2,
-            vb_iter: 20,
-            inner_iter: 5,
-            final_inner_iter: 20,
-            burnin_iter: 2,
+            num_sweeps: 50,
             degree_corrected: false,
             seed: 42,
             ..Default::default()
         };
 
-        let mut hsblock = Hsblock::new(options, Device::Cpu);
+        let mut hsblock = Hsblock::new(options);
         let mut clustering = SimpleClustering::init_different_clusters(n);
 
         let changed = hsblock.iterate(&network, &mut clustering);
@@ -372,16 +278,13 @@ mod tests {
 
         let options = HsbmOptions {
             tree_depth: 2,
-            vb_iter: 15,
-            inner_iter: 5,
-            final_inner_iter: 10,
-            burnin_iter: 2,
+            num_sweeps: 50,
             degree_corrected: true,
             seed: 99,
             ..Default::default()
         };
 
-        let mut hsblock = Hsblock::new(options, Device::Cpu);
+        let mut hsblock = Hsblock::new(options);
         let mut clustering = SimpleClustering::init_different_clusters(n);
 
         let changed = hsblock.iterate(&network, &mut clustering);
@@ -401,7 +304,7 @@ mod tests {
         graph.add_edge(0u32.into(), 2u32.into(), 1.0);
 
         let network = Network::new_from_graph(graph);
-        let edges = extract_edges(&network);
+        let edges = extract_edges(&network, 1.0);
 
         assert_eq!(edges.len(), 3);
     }
