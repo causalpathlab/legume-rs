@@ -6,7 +6,6 @@ use candle_core::{Device, Tensor};
 use candle_nn::AdamW;
 use candle_nn::Optimizer;
 use candle_util::candle_data_loader::*;
-use candle_util::candle_decoder_hierarchical_topic::*;
 use candle_util::candle_decoder_topic::*;
 use candle_util::candle_loss_functions::topic_likelihood;
 use candle_util::candle_model_traits::*;
@@ -41,8 +40,6 @@ enum DecoderType {
     Sparse,
     /// Zero-inflated topic decoder with per-feature dropout
     ZeroInflated,
-    /// Hierarchical topic decoder with stick-breaking gates on a binary tree
-    Hierarchical,
 }
 
 #[derive(Args, Debug)]
@@ -348,21 +345,9 @@ pub struct TopicArgs {
         long_help = "Topic decoder type:\n\
 		     flat: standard softmax dictionary\n\
 		     sparse: sparsemax dictionary (exact zeros)\n\
-		     zero-inflated: per-feature dropout gate for structural zeros\n\
-		     hierarchical: stick-breaking gates on a binary tree"
+		     zero-inflated: per-feature dropout gate for structural zeros"
     )]
     decoder: DecoderType,
-
-    #[arg(
-        long,
-        default_value_t = 3,
-        help = "Tree depth for hierarchical decoder",
-        long_help = "Depth of the binary tree for hierarchical decoder.\n\
-		     Number of leaf topics K = 2^(depth-1).\n\
-		     Only used when --decoder hierarchical.\n\
-		     Overrides --n-latent-topics when active."
-    )]
-    hierarchical_depth: usize,
 
     #[arg(
         long,
@@ -482,17 +467,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     }
 
     // 4. Train a topic model on the collapsed data
-    // For hierarchical decoder, n_topics is determined by tree depth
-    let n_topics = if args.decoder == DecoderType::Hierarchical {
-        let k = 1usize << (args.hierarchical_depth - 1);
-        info!(
-            "Hierarchical decoder: depth={}, K={} leaf topics",
-            args.hierarchical_depth, k
-        );
-        k
-    } else {
-        args.n_latent_topics
-    };
+    let n_topics = args.n_latent_topics;
     let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
 
     let n_features_decoder = selected_features
@@ -576,55 +551,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             )?;
             info!(
                 "Saved dropout probabilities to {}.dropout.parquet",
-                &args.out
-            );
-
-            scores
-        }
-        DecoderType::Hierarchical => {
-            let decoder = HierarchicalTopicDecoder::new(
-                n_features_decoder,
-                args.hierarchical_depth,
-                param_builder.clone(),
-            )?;
-
-            let scores = train_encoder_decoder(
-                &collapsed,
-                &mut encoder,
-                &decoder,
-                &parameters,
-                &args,
-                selected_features.as_ref(),
-            )?;
-
-            info!("Writing down the model parameters");
-
-            // Save leaf dictionary [D, K]
-            decoder
-                .get_dictionary()?
-                .to_device(&candle_core::Device::Cpu)?
-                .to_parquet_with_names(
-                    &(args.out.to_string() + ".dictionary.parquet"),
-                    (Some(&output_gene_names), Some("gene")),
-                    None,
-                )?;
-
-            // Save full hierarchy: all node probabilities [num_nodes, D]
-            let node_probs = decoder
-                .node_probabilities()?
-                .to_device(&candle_core::Device::Cpu)?
-                .t()?;
-            let node_names: Vec<Box<str>> = (1..=decoder.num_nodes())
-                .map(|h| format!("node_{}", h).into_boxed_str())
-                .collect();
-            node_probs.to_parquet_with_names(
-                &(args.out.to_string() + ".hierarchy.parquet"),
-                (Some(&output_gene_names), Some("gene")),
-                Some(&node_names),
-            )?;
-            info!(
-                "Saved hierarchy ({} nodes) to {}.hierarchy.parquet",
-                decoder.num_nodes(),
                 &args.out
             );
 
