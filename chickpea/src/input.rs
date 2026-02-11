@@ -1,5 +1,3 @@
-
-
 // 1. build sparse_io_vector for expression
 
 // 2. build sparse_io_vector for atac peaks
@@ -10,5 +8,4 @@
 // - gff/gtf?
 
 // cell type assignment analysis?
-// 
-
+//

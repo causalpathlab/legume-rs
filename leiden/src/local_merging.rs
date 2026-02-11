@@ -64,8 +64,11 @@ impl LocalMerging {
              * split up. Additionally, only nodes that are well connected with
              * the rest of the network are considered for moving.
              */
-            let thresh = self.cluster_weights[j] * (total_node_weight - self.cluster_weights[j]) * self.resolution;
-            if !self.non_singleton_clusters[j] && self.external_edge_weight_per_cluster[j] >= thresh {
+            let thresh = self.cluster_weights[j]
+                * (total_node_weight - self.cluster_weights[j])
+                * self.resolution;
+            if !self.non_singleton_clusters[j] && self.external_edge_weight_per_cluster[j] >= thresh
+            {
                 /*
                  * Remove the currently selected node from its current cluster.
                  * This causes the cluster to be empty.
@@ -114,11 +117,12 @@ impl LocalMerging {
                     // l is the neighboring cluster
                     let l = self.neighboring_clusters[k];
 
-                    let thresh =
-                        self.cluster_weights[l] * (total_node_weight - self.cluster_weights[l]) * self.resolution;
+                    let thresh = self.cluster_weights[l]
+                        * (total_node_weight - self.cluster_weights[l])
+                        * self.resolution;
                     if self.external_edge_weight_per_cluster[l] >= thresh {
-                        let qv_increment =
-                            self.edge_weight_per_cluster[l] - n.weight(j) * self.cluster_weights[l] * self.resolution;
+                        let qv_increment = self.edge_weight_per_cluster[l]
+                            - n.weight(j) * self.cluster_weights[l] * self.resolution;
 
                         if qv_increment > max_qv_increment {
                             best_cluster = l;
@@ -126,7 +130,8 @@ impl LocalMerging {
                         }
 
                         if qv_increment >= 0.0 {
-                            total_transformed_qv_increment += (qv_increment / self.randomness).exp();
+                            total_transformed_qv_increment +=
+                                (qv_increment / self.randomness).exp();
                         }
                     }
 

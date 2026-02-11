@@ -112,8 +112,8 @@ impl FastLocalMoving {
             for k in 0..num_neighboring_clusters {
                 let l = self.neighboring_clusters[k];
 
-                let qv_increment =
-                    self.edge_weight_per_cluster[l] - n.weight(j) * self.cluster_weights[l] * self.resolution;
+                let qv_increment = self.edge_weight_per_cluster[l]
+                    - n.weight(j) * self.cluster_weights[l] * self.resolution;
                 if qv_increment > max_qv_increment {
                     best_cluster = l;
                     max_qv_increment = qv_increment;

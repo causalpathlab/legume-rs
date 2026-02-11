@@ -198,7 +198,11 @@ where
                     .collect();
 
                 let row_col = row_column_name.or(Some("stat"));
-                stacked.to_parquet_with_names(filename, (Some(&names), row_col), Some(&column_names))?;
+                stacked.to_parquet_with_names(
+                    filename,
+                    (Some(&names), row_col),
+                    Some(&column_names),
+                )?;
             }
             _ => {
                 let mut out = self.to_string_vec(names, sep)?;

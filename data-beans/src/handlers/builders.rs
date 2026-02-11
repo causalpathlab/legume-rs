@@ -2,8 +2,8 @@ use crate::misc::*;
 use crate::sparse_io::*;
 use crate::sparse_util::*;
 
-use matrix_util::common_io::*;
 use log::info;
+use matrix_util::common_io::*;
 use std::sync::Arc;
 use tempfile::TempDir;
 

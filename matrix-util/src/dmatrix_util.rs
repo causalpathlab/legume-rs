@@ -398,16 +398,18 @@ where
         val
     }
 
-    fn melt_many_with_indexes(&self, others: &[&Self]) -> (Vec<Vec<Self::Scalar>>, Vec<Vec<usize>>) {
+    fn melt_many_with_indexes(
+        &self,
+        others: &[&Self],
+    ) -> (Vec<Vec<Self::Scalar>>, Vec<Vec<usize>>) {
         let nrows = self.nrows();
         let ncols = self.ncols();
         let nelem = nrows * ncols;
         let n_matrices = 1 + others.len();
 
         // Pre-allocate all vectors
-        let mut values: Vec<Vec<Self::Scalar>> = (0..n_matrices)
-            .map(|_| Vec::with_capacity(nelem))
-            .collect();
+        let mut values: Vec<Vec<Self::Scalar>> =
+            (0..n_matrices).map(|_| Vec::with_capacity(nelem)).collect();
         let mut idx: Vec<Vec<usize>> = vec![Vec::with_capacity(nelem), Vec::with_capacity(nelem)];
 
         // Single traversal in column-major order for cache efficiency
@@ -1014,9 +1016,7 @@ where
 
         for i in 0..nrows {
             // df(t) = document frequency = number of documents containing term t
-            let df = (0..ncols)
-                .filter(|&j| self[(i, j)] != T::zero())
-                .count();
+            let df = (0..ncols).filter(|&j| self[(i, j)] != T::zero()).count();
             let df_t = T::from_usize(df).unwrap();
             // IDF(t) = log(N / (df(t) + 1))
             let idf = (n_docs.clone() / (df_t + T::one())).ln();

@@ -12,12 +12,16 @@ mod sparse_matrix_zarr;
 mod sparse_util;
 mod utilities;
 
-use crate::handlers::analysis::{run_stat, run_simulate};
-use crate::handlers::builders::{run_build_from_mtx, run_build_from_h5_triplets, run_build_from_zarr_triplets};
-use crate::handlers::inspection::{show_info, take_columns, take_rows, take_column_names, take_row_names};
+use crate::handlers::analysis::{run_simulate, run_stat};
+use crate::handlers::builders::{
+    run_build_from_h5_triplets, run_build_from_mtx, run_build_from_zarr_triplets,
+};
+use crate::handlers::inspection::{
+    show_info, take_column_names, take_columns, take_row_names, take_rows,
+};
 use crate::handlers::listing::{list_h5, list_zarr};
-use crate::handlers::merging::{run_merge_backend, run_merge_mtx, align_backends};
-use crate::handlers::transformation::{subset_columns, subset_rows, reorder_rows, run_squeeze};
+use crate::handlers::merging::{align_backends, run_merge_backend, run_merge_mtx};
+use crate::handlers::transformation::{reorder_rows, run_squeeze, subset_columns, subset_rows};
 use crate::sparse_io::*;
 use crate::sparse_util::IndexPointerType;
 
@@ -1312,6 +1316,15 @@ pub struct RunSimulateArgs {
         long_help = "Set the random seed for reproducibility of the simulation."
     )]
     rseed: u64,
+
+    #[arg(
+        long,
+        help = "Generate hierarchical gene dictionary using a binary tree of this depth",
+        long_help = "If set, generate a hierarchical gene dictionary using stick-breaking \n\
+		     gates on a binary tree of the given depth (>= 2). The number of leaf \n\
+		     topics K = 2^(depth-1). Overrides --factors when set."
+    )]
+    hierarchical_depth: Option<usize>,
 
     #[arg(
         long,

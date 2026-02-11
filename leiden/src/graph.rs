@@ -124,8 +124,9 @@ where
     repeat(src).zip(edges.iter())
 }
 
-type EdgeRefsMapper<W, NodeIx> =
-    fn((Index<NodeIx>, &Vec<DiEdge<W, NodeIx>>)) -> Zip<Repeat<Index<NodeIx>>, Iter<DiEdge<W, NodeIx>>>;
+type EdgeRefsMapper<W, NodeIx> = fn(
+    (Index<NodeIx>, &Vec<DiEdge<W, NodeIx>>),
+) -> Zip<Repeat<Index<NodeIx>>, Iter<DiEdge<W, NodeIx>>>;
 type IndexEdgeMapInput<'a, W, NodeIx> = Zip<Repeat<Index<NodeIx>>, Iter<'a, DiEdge<W, NodeIx>>>;
 type IndexEdgeMapOutput<'a, W, NodeIx> = Zip<NodeIndices<NodeIx>, Iter<'a, Vec<DiEdge<W, NodeIx>>>>;
 
@@ -134,7 +135,11 @@ where
     W: Add<Output = W> + Clone,
     NodeIx: IndexTrait,
 {
-    iter: FlatMap<IndexEdgeMapOutput<'a, W, NodeIx>, IndexEdgeMapInput<'a, W, NodeIx>, EdgeRefsMapper<W, NodeIx>>,
+    iter: FlatMap<
+        IndexEdgeMapOutput<'a, W, NodeIx>,
+        IndexEdgeMapInput<'a, W, NodeIx>,
+        EdgeRefsMapper<W, NodeIx>,
+    >,
 }
 
 impl<'a, W, NodeIx> Iterator for EdgeReferences<'a, W, NodeIx>
@@ -208,7 +213,10 @@ where
             target,
             weight: weight.clone(),
         });
-        self.edges[target.0.as_()].push(DiEdge { target: source, weight });
+        self.edges[target.0.as_()].push(DiEdge {
+            target: source,
+            weight,
+        });
         self.total_edges += 1;
     }
 
@@ -269,7 +277,11 @@ where
         EdgeReferences { iter }
     }
 
-    pub fn filter_map<'a, F, G, N2, E2>(&'a self, mut node_map: F, mut edge_map: G) -> UnGraph<N2, E2, NodeIx>
+    pub fn filter_map<'a, F, G, N2, E2>(
+        &'a self,
+        mut node_map: F,
+        mut edge_map: G,
+    ) -> UnGraph<N2, E2, NodeIx>
     where
         N2: Add<Output = N2> + AddAssign + Clone + Zero,
         E2: Add<Output = E2> + AddAssign + Clone + Zero,

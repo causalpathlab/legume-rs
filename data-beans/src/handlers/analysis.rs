@@ -69,7 +69,11 @@ pub fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
                 }
 
                 let unique_groups = membership.unique_groups();
-                info!("Will collect stats for {} groups: {:?}", unique_groups.len(), unique_groups);
+                info!(
+                    "Will collect stats for {} groups: {:?}",
+                    unique_groups.len(),
+                    unique_groups
+                );
 
                 let (group_names, group_stats) = collect_stratified_row_stat_across_vec(
                     &data,
@@ -77,7 +81,11 @@ pub fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
                     cmd_args.block_size,
                 )?;
 
-                info!("Collected {} group stats: {:?}", group_names.len(), group_names);
+                info!(
+                    "Collected {} group stats: {:?}",
+                    group_names.len(),
+                    group_names
+                );
 
                 if cmd_args.output.eq_ignore_ascii_case("stdout") {
                     for (g, row_stat) in group_names.iter().zip(group_stats.iter()) {
@@ -179,6 +187,7 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         pve_topic: cmd_args.pve_topic,
         pve_batch: cmd_args.pve_batch,
         rseed: cmd_args.rseed,
+        hierarchical_depth: cmd_args.hierarchical_depth,
     };
 
     let sim = simulate::generate_factored_poisson_gamma_data(&sim_args)?;
@@ -205,10 +214,19 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
 
     sim.ln_delta_db
         .to_parquet_with_names(&ln_batch_file, (Some(&rows), Some("feature")), None)?;
-    sim.theta_kn
-        .transpose()
-        .to_parquet_with_names(&prop_file, (Some(&cols), Some("cell")), None)?;
-    sim.beta_dk.to_parquet_with_names(&dict_file, (Some(&rows), Some("feature")), None)?;
+    sim.theta_kn.transpose().to_parquet_with_names(
+        &prop_file,
+        (Some(&cols), Some("cell")),
+        None,
+    )?;
+    sim.beta_dk
+        .to_parquet_with_names(&dict_file, (Some(&rows), Some("feature")), None)?;
+
+    if let Some(ref node_probs) = sim.hierarchy_node_probs {
+        let hierarchy_file = mtx_file.replace(".mtx.gz", ".hierarchy.parquet");
+        node_probs.to_parquet_with_names(&hierarchy_file, (Some(&rows), Some("feature")), None)?;
+        info!("wrote hierarchy node probabilities: {:?}", &hierarchy_file);
+    }
 
     info!(
         "wrote parameter files:\n{:?},\n{:?},\n{:?}",

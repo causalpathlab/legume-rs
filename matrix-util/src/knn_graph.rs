@@ -78,9 +78,8 @@ impl KnnGraph {
 
         let triplets: DashMap<(usize, usize), f32> = DashMap::new();
 
-        jobs.into_par_iter()
-            .progress_count(njobs)
-            .try_for_each(|(lb, ub)| -> anyhow::Result<()> {
+        jobs.into_par_iter().progress_count(njobs).try_for_each(
+            |(lb, ub)| -> anyhow::Result<()> {
                 for i in lb..ub {
                     let (_indices, _distances) = dict.search_others(&i, nquery)?;
                     for (j, d_ij) in _indices.into_iter().zip(_distances) {
@@ -88,7 +87,8 @@ impl KnnGraph {
                     }
                 }
                 Ok(())
-            })?;
+            },
+        )?;
 
         info!("{} triplets by kNN matching", triplets.len());
 
@@ -139,7 +139,11 @@ impl KnnGraph {
         info!(
             "{} edges after {} matching",
             edges.len(),
-            if args.reciprocal { "reciprocal" } else { "union" }
+            if args.reciprocal {
+                "reciprocal"
+            } else {
+                "union"
+            }
         );
 
         ///////////////////////////////////////////////
@@ -193,10 +197,7 @@ impl KnnGraph {
         let sigma = median_f32(&self.distances);
         let sigma = if sigma <= 0.0 { 1.0 } else { sigma };
         info!("exp_kernel_weights: σ (median distance) = {:.4}", sigma);
-        self.distances
-            .iter()
-            .map(|&d| (-d / sigma).exp())
-            .collect()
+        self.distances.iter().map(|&d| (-d / sigma).exp()).collect()
     }
 
     /// Adaptive-bandwidth kernel weights with local connectivity.

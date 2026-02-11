@@ -48,7 +48,12 @@ pub struct GeneCountArgs {
     output: Box<str>,
 
     /// verbosity
-    #[arg(long, short, help = "verbosity", long_help = "Enable verbose output `RUST_LOG=info`")]
+    #[arg(
+        long,
+        short,
+        help = "verbosity",
+        long_help = "Enable verbose output `RUST_LOG=info`"
+    )]
     verbose: bool,
 }
 

@@ -35,7 +35,11 @@ impl GaussianPrior {
     pub fn tau(&self) -> Result<f32> {
         let clamped = self.ln_tau.clamp(-MAX_LN_TAU, MAX_LN_TAU)?;
         // Move to CPU for dtype conversion (Metal doesn't support F64)
-        let val: f32 = clamped.to_device(&Device::Cpu)?.to_dtype(DType::F32)?.exp()?.to_scalar()?;
+        let val: f32 = clamped
+            .to_device(&Device::Cpu)?
+            .to_dtype(DType::F32)?
+            .exp()?
+            .to_scalar()?;
         Ok(val)
     }
 
@@ -64,11 +68,14 @@ impl Prior for GaussianPrior {
         let dtype = theta.dtype();
         let device = theta.device();
         // Create scalar constants directly in the target dtype to avoid Metal F64 conversion issues
-        let ln_2pi = Tensor::new((2.0 * std::f64::consts::PI).ln() as f32, device)?
-            .to_dtype(dtype)?;
+        let ln_2pi =
+            Tensor::new((2.0 * std::f64::consts::PI).ln() as f32, device)?.to_dtype(dtype)?;
 
         // Clamp ln_tau to prevent overflow
-        let ln_tau_clamped = self.ln_tau.clamp(-MAX_LN_TAU, MAX_LN_TAU)?.to_dtype(dtype)?;
+        let ln_tau_clamped = self
+            .ln_tau
+            .clamp(-MAX_LN_TAU, MAX_LN_TAU)?
+            .to_dtype(dtype)?;
 
         // τ = exp(ln_tau_clamped)
         let tau = ln_tau_clamped.exp()?;
@@ -145,7 +152,12 @@ mod tests {
         let prior = GaussianPrior::new(vb, init_tau)?;
 
         let tau = prior.tau()?;
-        assert!((tau - init_tau).abs() < 1e-5, "Expected {}, got {}", init_tau, tau);
+        assert!(
+            (tau - init_tau).abs() < 1e-5,
+            "Expected {}, got {}",
+            init_tau,
+            tau
+        );
 
         Ok(())
     }
@@ -185,7 +197,12 @@ mod tests {
 
         for i in 0..s {
             let actual: f64 = log_prob.get(i)?.to_scalar()?;
-            assert!((actual - expected).abs() < 1e-5, "Expected {}, got {}", expected, actual);
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "Expected {}, got {}",
+                expected,
+                actual
+            );
         }
 
         Ok(())

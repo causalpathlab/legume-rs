@@ -10,110 +10,175 @@ use matrix_param::traits::*;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtGenePairSvdArgs {
-    #[arg(required = true, value_delimiter(','),
-          help = "Data files (.zarr or .h5 format, comma separated)")]
+    #[arg(
+        required = true,
+        value_delimiter(','),
+        help = "Data files (.zarr or .h5 format, comma separated)"
+    )]
     data_files: Vec<Box<str>>,
 
-    #[arg(long = "coord", short = 'c', required = true, value_delimiter(','),
-          help = "Spatial coordinate files, one per data file",
-          long_help = "Spatial coordinate files, one per data file (comma separated).\n\
-                       Each file: barcode, x, y, ... per line.")]
+    #[arg(
+        long = "coord",
+        short = 'c',
+        required = true,
+        value_delimiter(','),
+        help = "Spatial coordinate files, one per data file",
+        long_help = "Spatial coordinate files, one per data file (comma separated).\n\
+                       Each file: barcode, x, y, ... per line."
+    )]
     coord_files: Vec<Box<str>>,
 
-    #[arg(long = "coord-column-indices", value_delimiter(','),
-          help = "Column indices for coordinates in coord files",
-          long_help = "Column indices for coordinates in coord files (comma separated).\n\
-                       Use when coord files have extra columns beyond barcode,x,y.")]
+    #[arg(
+        long = "coord-column-indices",
+        value_delimiter(','),
+        help = "Column indices for coordinates in coord files",
+        long_help = "Column indices for coordinates in coord files (comma separated).\n\
+                       Use when coord files have extra columns beyond barcode,x,y."
+    )]
     coord_columns: Option<Vec<usize>>,
 
-    #[arg(long = "coord-column-names", value_delimiter(','),
-          default_value = "pxl_row_in_fullres,pxl_col_in_fullres",
-          help = "Column names to look up in coord files")]
+    #[arg(
+        long = "coord-column-names",
+        value_delimiter(','),
+        default_value = "pxl_row_in_fullres,pxl_col_in_fullres",
+        help = "Column names to look up in coord files"
+    )]
     coord_column_names: Vec<Box<str>>,
 
-    #[arg(long,
-          help = "Header row index in coord files (0 = first line is column names)")]
+    #[arg(
+        long,
+        help = "Header row index in coord files (0 = first line is column names)"
+    )]
     coord_header_row: Option<usize>,
 
-    #[arg(long, default_value_t = 256,
-          help = "Dimension for spectral embedding of spatial coordinates")]
+    #[arg(
+        long,
+        default_value_t = 256,
+        help = "Dimension for spectral embedding of spatial coordinates"
+    )]
     coord_emb: usize,
 
-    #[arg(long, short = 'b', value_delimiter(','),
-          help = "Batch membership files, one per data file",
-          long_help = "Batch membership files, one per data file (comma separated).\n\
-                       Each file maps cells to batch labels for batch effect correction.")]
+    #[arg(
+        long,
+        short = 'b',
+        value_delimiter(','),
+        help = "Batch membership files, one per data file",
+        long_help = "Batch membership files, one per data file (comma separated).\n\
+                       Each file maps cells to batch labels for batch effect correction."
+    )]
     batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(long, short = 'p', default_value_t = 50,
-          help = "Random projection dimension for pseudobulk sample construction")]
+    #[arg(
+        long,
+        short = 'p',
+        default_value_t = 50,
+        help = "Random projection dimension for pseudobulk sample construction"
+    )]
     proj_dim: usize,
 
-    #[arg(long, short = 'd', default_value_t = 10,
-          help = "Number of top projection components for binary sort",
-          long_help = "Number of top projection components for binary sort.\n\
-                       Produces up to 2^S pseudobulk samples.")]
+    #[arg(
+        long,
+        short = 'd',
+        default_value_t = 10,
+        help = "Number of top projection components for binary sort",
+        long_help = "Number of top projection components for binary sort.\n\
+                       Produces up to 2^S pseudobulk samples."
+    )]
     sort_dim: usize,
 
-    #[arg(long, default_value_t = 20,
-          help = "Number of nearest neighbours for gene-gene co-expression graph")]
+    #[arg(
+        long,
+        default_value_t = 20,
+        help = "Number of nearest neighbours for gene-gene co-expression graph"
+    )]
     knn_gene: usize,
 
-    #[arg(short = 'k', long, default_value_t = 10,
-          help = "Number of nearest neighbours for spatial cell-pair graph")]
+    #[arg(
+        short = 'k',
+        long,
+        default_value_t = 10,
+        help = "Number of nearest neighbours for spatial cell-pair graph"
+    )]
     knn_spatial: usize,
 
-    #[arg(long, short = 's',
-          help = "Maximum cells per pseudobulk sample (downsampling)")]
+    #[arg(
+        long,
+        short = 's',
+        help = "Maximum cells per pseudobulk sample (downsampling)"
+    )]
     down_sample: Option<usize>,
 
-    #[arg(long, short, required = true,
-          help = "Output file prefix",
-          long_help = "Output file prefix.\n\
+    #[arg(
+        long,
+        short,
+        required = true,
+        help = "Output file prefix",
+        long_help = "Output file prefix.\n\
                        Generates: {out}.coord_pairs.parquet, {out}.gene_graph.parquet,\n\
                        {out}.dictionary.parquet,\n\
-                       {out}.latent.parquet")]
+                       {out}.latent.parquet"
+    )]
     out: Box<str>,
 
-    #[arg(long, default_value_t = 100,
-          help = "Block size for parallel processing of cells")]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Block size for parallel processing of cells"
+    )]
     block_size: usize,
 
-    #[arg(short = 't', long, default_value_t = 10,
-          help = "Number of SVD components (latent dimensions)")]
+    #[arg(
+        short = 't',
+        long,
+        default_value_t = 10,
+        help = "Number of SVD components (latent dimensions)"
+    )]
     n_latent_topics: usize,
 
-    #[arg(long, default_value_t = false,
-          help = "Preload all sparse column data into memory for faster access")]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Preload all sparse column data into memory for faster access"
+    )]
     preload_data: bool,
 
-    #[arg(long,
-          help = "External gene-gene network file (two-column TSV: gene1, gene2)",
-          long_help = "External gene-gene network file (e.g., from BioGRID).\n\
+    #[arg(
+        long,
+        help = "External gene-gene network file (two-column TSV: gene1, gene2)",
+        long_help = "External gene-gene network file (e.g., from BioGRID).\n\
                        Two-column TSV/CSV with gene1 and gene2 per line.\n\
                        Gene names are matched against data using exact, delimiter-based,\n\
-                       and prefix matching. Skips KNN graph construction when provided.")]
+                       and prefix matching. Skips KNN graph construction when provided."
+    )]
     gene_network: Option<Box<str>>,
 
-    #[arg(long, default_value_t = false,
-          help = "Allow prefix matching for gene names in external network")]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Allow prefix matching for gene names in external network"
+    )]
     gene_network_allow_prefix: bool,
 
-    #[arg(long, default_value = "_",
-          help = "Delimiter for splitting compound gene names (e.g., ENSG00000141510_TP53)")]
+    #[arg(
+        long,
+        default_value = "_",
+        help = "Delimiter for splitting compound gene names (e.g., ENSG00000141510_TP53)"
+    )]
     gene_network_delimiter: Option<char>,
 
-    #[arg(long, default_value_t = false,
-          help = "Use union (non-reciprocal) matching for gene KNN graph",
-          long_help = "Use union matching for the gene-gene KNN graph.\n\
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Use union (non-reciprocal) matching for gene KNN graph",
+        long_help = "Use union matching for the gene-gene KNN graph.\n\
                        By default, only reciprocal KNN edges are kept (both genes\n\
                        must be in each other's KNN list). With union matching,\n\
                        an edge is kept if either gene is in the other's list,\n\
-                       producing a denser graph.")]
+                       producing a denser graph."
+    )]
     gene_graph_union: bool,
 
-    #[arg(long, short,
-          help = "Enable verbose logging (sets RUST_LOG=info)")]
+    #[arg(long, short, help = "Enable verbose logging (sets RUST_LOG=info)")]
     verbose: bool,
 }
 
@@ -239,19 +304,18 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     // 7. Compute gene-pair deltas (raw counts, positive only)
     info!("Calibrating gene-gene interaction statistics...");
 
-    let mut gene_pair_stat = compute_gene_interaction_deltas(
-        &data_vec,
-        &gene_graph,
-        &gene_means,
-        n_samples,
-        false,
-    )?;
+    let mut gene_pair_stat =
+        compute_gene_interaction_deltas(&data_vec, &gene_graph, &gene_means, n_samples, false)?;
 
     // 7b. Filter empty gene pairs
     let use_elbow = args.gene_graph_union || args.gene_network.is_some();
     let n_removed = gene_pair_stat.filter_empty_edges(&mut gene_graph, use_elbow);
     if n_removed > 0 {
-        info!("Filtered {} empty gene pairs ({} remaining)", n_removed, gene_graph.num_edges());
+        info!(
+            "Filtered {} empty gene pairs ({} remaining)",
+            n_removed,
+            gene_graph.num_edges()
+        );
     }
 
     gene_graph.to_parquet(&(args.out.to_string() + ".gene_graph.parquet"))?;
@@ -271,10 +335,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     // Here, d = 2 x gene-gene interactions
     let (u_dk, s_k, _) = training_dm.rsvd(args.n_latent_topics)?;
     let eps = 1e-8;
-    let sinv_k = DVec::from_iterator(
-        s_k.len(),
-        s_k.iter().map(|&s| 1.0 / (s + eps)),
-    );
+    let sinv_k = DVec::from_iterator(s_k.len(), s_k.iter().map(|&s| 1.0 / (s + eps)));
     let basis_dk = &u_dk * Mat::from_diagonal(&sinv_k);
 
     // Write dictionary
@@ -421,11 +482,18 @@ fn nystrom_gene_pair_visitor(
 
         let mut proj_k = DVec::zeros(n_topics);
 
-        visit_gene_pair_deltas(rows, vals, gene_adj, gene_means, false, |edge_idx, delta| {
-            if delta > 0.0 {
-                proj_k += delta * &basis.row(edge_idx).transpose();
-            }
-        });
+        visit_gene_pair_deltas(
+            rows,
+            vals,
+            gene_adj,
+            gene_means,
+            false,
+            |edge_idx, delta| {
+                if delta > 0.0 {
+                    proj_k += delta * &basis.row(edge_idx).transpose();
+                }
+            },
+        );
 
         local_proj.column_mut(cell_idx).copy_from(&proj_k);
     }

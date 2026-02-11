@@ -100,14 +100,13 @@ fn check_and_precompute_iid_index(
         i_mod_4_times_2_array[idx] = (in_iid_i % 4 * 2) as u8;
     }
 
-    let (i_div_4_start, i_div_4_len) = if let Some(&min_value) =
-        i_div_4_less_start_array.iter().min()
-    {
-        let max_value = *i_div_4_less_start_array.iter().max().unwrap();
-        (min_value as u64, (max_value + 1 - min_value) as u64)
-    } else {
-        (0, 0)
-    };
+    let (i_div_4_start, i_div_4_len) =
+        if let Some(&min_value) = i_div_4_less_start_array.iter().min() {
+            let max_value = *i_div_4_less_start_array.iter().max().unwrap();
+            (min_value as u64, (max_value + 1 - min_value) as u64)
+        } else {
+            (0, 0)
+        };
 
     if i_div_4_start > 0 {
         for x in i_div_4_less_start_array.iter_mut() {
@@ -202,13 +201,9 @@ fn internal_read_no_alloc(
 
 /// Parse a whitespace-delimited metadata file (.fam or .bim), extracting the
 /// specified field indices (0-based). Returns `(vec_of_columns, row_count)`.
-fn read_fam_or_bim(
-    field_indices: &[usize],
-    path: &Path,
-) -> Result<(Vec<Vec<String>>, usize)> {
+fn read_fam_or_bim(field_indices: &[usize], path: &Path) -> Result<(Vec<Vec<String>>, usize)> {
     let mut vec_of_vec = vec![vec![]; field_indices.len()];
-    let file =
-        File::open(path).with_context(|| format!("Cannot open file: {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("Cannot open file: {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut count = 0;
 
@@ -312,10 +307,7 @@ impl PlinkBed {
     ///
     /// Optionally subset individuals with `iid_range` (e.g. `Some(0..100)`).
     /// Missing genotypes are `f32::NAN`.
-    pub fn read_f32(
-        &self,
-        iid_range: Option<std::ops::Range<usize>>,
-    ) -> Result<DMatrix<f32>> {
+    pub fn read_f32(&self, iid_range: Option<std::ops::Range<usize>>) -> Result<DMatrix<f32>> {
         let (buf_reader, _header) = open_and_check(&self.bed_path)?;
 
         let iid_index: Vec<isize> = match iid_range {

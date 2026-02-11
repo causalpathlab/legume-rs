@@ -48,14 +48,18 @@ impl Leiden {
         // clear clustering
         c.clear();
 
-        self.num_nodes_per_cluster_reduced_network.zero_len(subnetworks.len());
+        self.num_nodes_per_cluster_reduced_network
+            .zero_len(subnetworks.len());
         let mut cluster_counter = 0;
 
         for i in 0..subnetworks.len() {
             let sub_clustering = local_merging.run(&subnetworks[i], &mut self.rng);
 
             for j in 0..subnetworks[i].nodes() {
-                c.set(nodes_per_cluster[i][j], cluster_counter + sub_clustering.get(j))
+                c.set(
+                    nodes_per_cluster[i][j],
+                    cluster_counter + sub_clustering.get(j),
+                )
             }
 
             cluster_counter += sub_clustering.num_clusters();
@@ -72,7 +76,11 @@ impl Leiden {
         let mut clusters_reduced_network = vec![0; c.num_clusters()];
 
         let mut i = 0;
-        for (j, num_nodes) in self.num_nodes_per_cluster_reduced_network.iter().enumerate() {
+        for (j, num_nodes) in self
+            .num_nodes_per_cluster_reduced_network
+            .iter()
+            .enumerate()
+        {
             for cluster in clusters_reduced_network.iter_mut().skip(i).take(*num_nodes) {
                 *cluster = j;
             }

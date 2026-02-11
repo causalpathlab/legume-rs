@@ -19,7 +19,10 @@ fn test_ensg00000214046() -> anyhow::Result<()> {
     println!("Total records for ENSG00000214046: {}", gene_records.len());
 
     for rec in &gene_records {
-        println!("  Feature: {:?}, {}-{}", rec.feature_type, rec.start, rec.stop);
+        println!(
+            "  Feature: {:?}, {}-{}",
+            rec.feature_type, rec.start, rec.stop
+        );
     }
 
     let UnionGeneModel {
@@ -39,53 +42,86 @@ fn test_ensg00000214046() -> anyhow::Result<()> {
 
     if let Some(boundary) = gene_boundaries.get(&gene_id) {
         let boundary = boundary.value();
-        println!("\nGene boundary: {}-{} (strand: {:?})", boundary.start, boundary.stop, boundary.strand);
+        println!(
+            "\nGene boundary: {}-{} (strand: {:?})",
+            boundary.start, boundary.stop, boundary.strand
+        );
     }
 
     if let Some(cds_rec) = cds.get(&gene_id) {
         let cds_rec = cds_rec.value();
-        println!("CDS: {}-{} (length: {})", cds_rec.start, cds_rec.stop, cds_rec.stop - cds_rec.start);
+        println!(
+            "CDS: {}-{} (length: {})",
+            cds_rec.start,
+            cds_rec.stop,
+            cds_rec.stop - cds_rec.start
+        );
     } else {
         println!("CDS: None");
     }
 
     if let Some(utr5) = five_prime_utr.get(&gene_id) {
         let utr5 = utr5.value();
-        println!("5'UTR: {}-{} (length: {})", utr5.start, utr5.stop, utr5.stop - utr5.start);
+        println!(
+            "5'UTR: {}-{} (length: {})",
+            utr5.start,
+            utr5.stop,
+            utr5.stop - utr5.start
+        );
     } else {
         println!("5'UTR: None");
     }
 
     if let Some(utr3) = three_prime_utr.get(&gene_id) {
         let utr3 = utr3.value();
-        println!("3'UTR: {}-{} (length: {})", utr3.start, utr3.stop, utr3.stop - utr3.start);
+        println!(
+            "3'UTR: {}-{} (length: {})",
+            utr3.start,
+            utr3.stop,
+            utr3.stop - utr3.start
+        );
     } else {
         println!("3'UTR: None");
     }
 
     // Let's check the start and stop codons
     println!("\nStart codons:");
-    for rec in gene_records.iter().filter(|r| r.feature_type == FeatureType::StartCodon) {
+    for rec in gene_records
+        .iter()
+        .filter(|r| r.feature_type == FeatureType::StartCodon)
+    {
         println!("  {}: {}-{}", rec.gene_name, rec.start, rec.stop);
     }
 
     println!("\nStop codons:");
-    for rec in gene_records.iter().filter(|r| r.feature_type == FeatureType::StopCodon) {
+    for rec in gene_records
+        .iter()
+        .filter(|r| r.feature_type == FeatureType::StopCodon)
+    {
         println!("  {}: {}-{}", rec.gene_name, rec.start, rec.stop);
     }
 
     println!("\nCDS regions:");
-    for rec in gene_records.iter().filter(|r| r.feature_type == FeatureType::CDS) {
+    for rec in gene_records
+        .iter()
+        .filter(|r| r.feature_type == FeatureType::CDS)
+    {
         println!("  {}: {}-{}", rec.gene_name, rec.start, rec.stop);
     }
 
     println!("\n5' UTRs:");
-    for rec in gene_records.iter().filter(|r| r.feature_type == FeatureType::FivePrimeUTR) {
+    for rec in gene_records
+        .iter()
+        .filter(|r| r.feature_type == FeatureType::FivePrimeUTR)
+    {
         println!("  {}: {}-{}", rec.gene_name, rec.start, rec.stop);
     }
 
     println!("\n3' UTRs:");
-    for rec in gene_records.iter().filter(|r| r.feature_type == FeatureType::ThreePrimeUTR) {
+    for rec in gene_records
+        .iter()
+        .filter(|r| r.feature_type == FeatureType::ThreePrimeUTR)
+    {
         println!("  {}: {}-{}", rec.gene_name, rec.start, rec.stop);
     }
 

@@ -28,4 +28,3 @@ pub use matrix_util::traits::*;
 
 pub use data_beans_alg::collapse_data::*;
 pub use data_beans_alg::random_projection::*;
-

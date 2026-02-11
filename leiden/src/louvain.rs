@@ -54,7 +54,11 @@ impl Louvain {
     }
 
     /// Build a Louvain-compatible network from a list of adjacencies
-    pub fn build_network<I: Iterator<Item = (u32, u32)>>(n_nodes: usize, n_edges: usize, adjacency: I) -> Network {
+    pub fn build_network<I: Iterator<Item = (u32, u32)>>(
+        n_nodes: usize,
+        n_edges: usize,
+        adjacency: I,
+    ) -> Network {
         let mut graph = Graph::with_capacity(n_nodes, n_edges);
         let mut node_indices = Vec::with_capacity(n_nodes);
         for _ in 0..n_nodes {

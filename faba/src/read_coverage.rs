@@ -1,5 +1,5 @@
-use genomic_data::sam::CellBarcode;
 use crate::data::visitors_htslib::VisitWithBamOps;
+use genomic_data::sam::CellBarcode;
 
 use coitrees::{COITree, Interval, IntervalTree};
 use fnv::FnvHashMap as HashMap;

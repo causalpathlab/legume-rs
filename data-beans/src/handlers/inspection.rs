@@ -1,15 +1,14 @@
-use matrix_util::common_io::*;
 use crate::misc::*;
 use crate::sparse_io::*;
-use crate::utilities::io_helpers::{read_col_names, MAX_ROW_NAME_IDX, MAX_COLUMN_NAME_IDX};
+use crate::utilities::io_helpers::{read_col_names, MAX_COLUMN_NAME_IDX, MAX_ROW_NAME_IDX};
 use crate::utilities::name_matching::match_by_substring;
+use matrix_util::common_io::*;
 use matrix_util::traits::IoOps;
 
 // Import the argument types from main
-use crate::{TakeColumnNamesArgs, TakeRowNamesArgs, InfoArgs, TakeColumnsArgs, TakeRowsArgs};
+use crate::{InfoArgs, TakeColumnNamesArgs, TakeColumnsArgs, TakeRowNamesArgs, TakeRowsArgs};
 
 pub fn take_column_names(cmd_args: &TakeColumnNamesArgs) -> anyhow::Result<()> {
-
     let output = cmd_args.output.clone();
     let (backend, input) = resolve_backend_file(&cmd_args.data_file, None)?;
     let data = open_sparse_matrix(&input, &backend)?;
@@ -84,11 +83,13 @@ pub fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
     } else if let Some(column_file) = column_name_file {
         let col_names_to_match = read_col_names(column_file, MAX_COLUMN_NAME_IDX)?;
         let all_names = data.column_names()?;
-        let (matched_indices, column_names) = match_by_substring(&all_names, &col_names_to_match, "column")?;
+        let (matched_indices, column_names) =
+            match_by_substring(&all_names, &col_names_to_match, "column")?;
         (data.read_columns_ndarray(matched_indices)?, column_names)
     } else if let Some(col_names_to_match) = column_names_arg {
         let all_names = data.column_names()?;
-        let (matched_indices, column_names) = match_by_substring(&all_names, &col_names_to_match, "column")?;
+        let (matched_indices, column_names) =
+            match_by_substring(&all_names, &col_names_to_match, "column")?;
         (data.read_columns_ndarray(matched_indices)?, column_names)
     } else {
         return Err(anyhow::anyhow!(
@@ -98,7 +99,11 @@ pub fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
 
     if let Ok(ext) = file_ext(&output) {
         if ext.as_ref() == "parquet" {
-            data.to_parquet_with_names(&output, (Some(&row_names), Some("row_name")), Some(&column_names))?;
+            data.to_parquet_with_names(
+                &output,
+                (Some(&row_names), Some("row_name")),
+                Some(&column_names),
+            )?;
             return Ok(());
         }
     }
@@ -134,11 +139,13 @@ pub fn take_rows(args: &TakeRowsArgs) -> anyhow::Result<()> {
     } else if let Some(row_name_file) = row_name_file {
         let row_names_to_match = read_col_names(row_name_file, MAX_ROW_NAME_IDX)?;
         let all_names = data_backend.row_names()?;
-        let (matched_indices, row_names) = match_by_substring(&all_names, &row_names_to_match, "row")?;
+        let (matched_indices, row_names) =
+            match_by_substring(&all_names, &row_names_to_match, "row")?;
         (data_backend.read_rows_ndarray(matched_indices)?, row_names)
     } else if let Some(row_names_to_match) = row_names_arg {
         let all_names = data_backend.row_names()?;
-        let (matched_indices, row_names) = match_by_substring(&all_names, &row_names_to_match, "row")?;
+        let (matched_indices, row_names) =
+            match_by_substring(&all_names, &row_names_to_match, "row")?;
         (data_backend.read_rows_ndarray(matched_indices)?, row_names)
     } else {
         return Err(anyhow::anyhow!(
@@ -151,7 +158,11 @@ pub fn take_rows(args: &TakeRowsArgs) -> anyhow::Result<()> {
     if let Ok(ext) = file_ext(&output) {
         if ext.as_ref() == "parquet" {
             let column_names = data_backend.column_names()?;
-            data_t.to_parquet_with_names(&output, (Some(&column_names), Some("column_name")), Some(&row_names))?;
+            data_t.to_parquet_with_names(
+                &output,
+                (Some(&column_names), Some("column_name")),
+                Some(&row_names),
+            )?;
             return Ok(());
         }
     }

@@ -389,7 +389,11 @@ mod tests {
 
         let dir = tempdir()?;
         let pq_path = dir.path().join("named.parquet");
-        susie.to_parquet_with_names(pq_path.to_str().unwrap(), (Some(&row_names), Some("row")), Some(&col_names))?;
+        susie.to_parquet_with_names(
+            pq_path.to_str().unwrap(),
+            (Some(&row_names), Some("row")),
+            Some(&col_names),
+        )?;
         assert!(pq_path.exists());
 
         Ok(())

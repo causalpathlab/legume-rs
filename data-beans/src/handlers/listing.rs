@@ -1,5 +1,5 @@
-use matrix_util::common_io::file_ext;
 use log::info;
+use matrix_util::common_io::file_ext;
 use std::sync::Arc;
 
 // Import Args from main.rs

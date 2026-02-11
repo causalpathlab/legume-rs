@@ -103,14 +103,35 @@ where
         let mat_log_mean = self.posterior_log_mean();
         let mat_log_sd = self.posterior_log_sd();
 
-        let (mut values, idx) = mat_mean.melt_many_with_indexes(&[mat_sd, mat_log_mean, mat_log_sd]);
+        let (mut values, idx) =
+            mat_mean.melt_many_with_indexes(&[mat_sd, mat_log_mean, mat_log_sd]);
         debug_assert_eq!(values.len(), 4);
 
         // Pop in reverse order: log_sd, log_mean, sd, mean
-        let log_sd: Vec<f32> = values.pop().unwrap().into_iter().map(|x| x.into()).collect();
-        let log_mean: Vec<f32> = values.pop().unwrap().into_iter().map(|x| x.into()).collect();
-        let sd: Vec<f32> = values.pop().unwrap().into_iter().map(|x| x.into()).collect();
-        let mean: Vec<f32> = values.pop().unwrap().into_iter().map(|x| x.into()).collect();
+        let log_sd: Vec<f32> = values
+            .pop()
+            .unwrap()
+            .into_iter()
+            .map(|x| x.into())
+            .collect();
+        let log_mean: Vec<f32> = values
+            .pop()
+            .unwrap()
+            .into_iter()
+            .map(|x| x.into())
+            .collect();
+        let sd: Vec<f32> = values
+            .pop()
+            .unwrap()
+            .into_iter()
+            .map(|x| x.into())
+            .collect();
+        let mean: Vec<f32> = values
+            .pop()
+            .unwrap()
+            .into_iter()
+            .map(|x| x.into())
+            .collect();
 
         // Map indices to pre-computed ByteArrays
         let rows: Vec<_> = idx[0].iter().map(|&i| row_bytes[i].clone()).collect();
@@ -228,14 +249,35 @@ where
         let mat_log_mean = param.posterior_log_mean();
         let mat_log_sd = param.posterior_log_sd();
 
-        let (mut values, idx) = mat_mean.melt_many_with_indexes(&[mat_sd, mat_log_mean, mat_log_sd]);
+        let (mut values, idx) =
+            mat_mean.melt_many_with_indexes(&[mat_sd, mat_log_mean, mat_log_sd]);
         debug_assert_eq!(values.len(), 4);
 
         // Pop in reverse order: log_sd, log_mean, sd, mean
-        let log_sd: Vec<f32> = values.pop().unwrap().into_iter().map(|x| x.into()).collect();
-        let log_mean: Vec<f32> = values.pop().unwrap().into_iter().map(|x| x.into()).collect();
-        let sd: Vec<f32> = values.pop().unwrap().into_iter().map(|x| x.into()).collect();
-        let mean: Vec<f32> = values.pop().unwrap().into_iter().map(|x| x.into()).collect();
+        let log_sd: Vec<f32> = values
+            .pop()
+            .unwrap()
+            .into_iter()
+            .map(|x| x.into())
+            .collect();
+        let log_mean: Vec<f32> = values
+            .pop()
+            .unwrap()
+            .into_iter()
+            .map(|x| x.into())
+            .collect();
+        let sd: Vec<f32> = values
+            .pop()
+            .unwrap()
+            .into_iter()
+            .map(|x| x.into())
+            .collect();
+        let mean: Vec<f32> = values
+            .pop()
+            .unwrap()
+            .into_iter()
+            .map(|x| x.into())
+            .collect();
 
         let factor_name = factor_names[factor_idx].clone();
         let factor_label = ByteArray::from(factor_name.as_bytes());
@@ -457,7 +499,8 @@ mod tests {
 
         let row_names: Vec<Box<str>> = vec!["gene1".into(), "gene2".into()];
         let col_names: Vec<Box<str>> = vec!["cell1".into(), "cell2".into()];
-        let factor_names: Vec<Box<str>> = vec!["factor0".into(), "factor1".into(), "factor2".into()];
+        let factor_names: Vec<Box<str>> =
+            vec!["factor0".into(), "factor1".into(), "factor2".into()];
 
         to_parquet(
             &params,
@@ -483,7 +526,10 @@ mod tests {
             let sd = row.get_float(4)?;
             let log_mean = row.get_float(5)?;
             let log_sd = row.get_float(6)?;
-            results.insert((row_name, col_name, factor_name), (mean, sd, log_mean, log_sd));
+            results.insert(
+                (row_name, col_name, factor_name),
+                (mean, sd, log_mean, log_sd),
+            );
         }
 
         // Should have nrows * ncols * n_factors entries

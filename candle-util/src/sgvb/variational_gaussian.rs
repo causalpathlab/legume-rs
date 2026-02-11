@@ -25,7 +25,14 @@ impl GaussianVar {
     /// # Returns
     /// Initialized GaussianVar with small random mean and ln_std = 0 (std = 1)
     pub fn new(vb: VarBuilder, p: usize, k: usize) -> Result<Self> {
-        let mean = vb.get_with_hints((p, k), "mean", candle_nn::Init::Randn { mean: 0.0, stdev: 0.01 })?;
+        let mean = vb.get_with_hints(
+            (p, k),
+            "mean",
+            candle_nn::Init::Randn {
+                mean: 0.0,
+                stdev: 0.01,
+            },
+        )?;
         let ln_std = vb.get_with_hints((p, k), "ln_std", candle_nn::Init::Const(0.0))?;
         Ok(Self { mean, ln_std })
     }
@@ -73,7 +80,10 @@ impl VariationalDistribution for GaussianVar {
         let std = self.ln_std.exp()?;
 
         // θ = μ + σ * ε: broadcast (p, k) + (p, k) * (S, p, k) -> (S, p, k)
-        let theta = self.mean.unsqueeze(0)?.broadcast_add(&epsilon.broadcast_mul(&std)?)?;
+        let theta = self
+            .mean
+            .unsqueeze(0)?
+            .broadcast_add(&epsilon.broadcast_mul(&std)?)?;
 
         Ok((theta, epsilon))
     }
@@ -91,8 +101,8 @@ impl VariationalDistribution for GaussianVar {
         let dtype = theta.dtype();
         let device = theta.device();
         // Create scalar constant directly in f32 to avoid Metal F64 conversion issues
-        let ln_2pi = Tensor::new((2.0 * std::f64::consts::PI).ln() as f32, device)?
-            .to_dtype(dtype)?;
+        let ln_2pi =
+            Tensor::new((2.0 * std::f64::consts::PI).ln() as f32, device)?.to_dtype(dtype)?;
 
         // σ = exp(ln_std): shape (p, k)
         let std = self.ln_std.exp()?;
@@ -105,7 +115,10 @@ impl VariationalDistribution for GaussianVar {
         // Sum over (p, k) dimensions
         // 2*ln(σ): broadcast (p, k) to (S, p, k)
         let two_ln_std = (&self.ln_std * 2.0)?;
-        let log_prob_element = (normalized_sq.broadcast_add(&two_ln_std)?.broadcast_add(&ln_2pi)? * (-0.5))?;
+        let log_prob_element = (normalized_sq
+            .broadcast_add(&two_ln_std)?
+            .broadcast_add(&ln_2pi)?
+            * (-0.5))?;
 
         // Sum over dimensions 1 and 2 (p and k)
         log_prob_element.sum(2)?.sum(1)
@@ -184,7 +197,12 @@ mod tests {
         let expected = -0.5 * (2.0 * std::f64::consts::PI).ln() * (p * k) as f64;
         let actual: f64 = log_prob.get(0)?.to_scalar()?;
 
-        assert!((actual - expected).abs() < 1e-5, "Expected {}, got {}", expected, actual);
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "Expected {}, got {}",
+            expected,
+            actual
+        );
 
         Ok(())
     }

@@ -45,7 +45,9 @@ struct LoadedTensor {
 }
 
 fn load_tensor(path: &Path, device: &Device, with_row_names: bool) -> Result<LoadedTensor> {
-    let path_str = path.to_str().ok_or_else(|| anyhow::anyhow!("Invalid path"))?;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid path"))?;
     let (tensor, col_names) = match get_format_ext(path).as_str() {
         "csv" => (Tensor::from_csv(path_str, None)?, None),
         "parquet" | "pq" => {
@@ -127,7 +129,9 @@ fn save_output<V: VariationalOutput>(
     col_names: Option<&[Box<str>]>,
 ) -> Result<()> {
     if let Some(ref p) = make_output_path(base, suffix) {
-        let s = p.to_str().ok_or_else(|| anyhow::anyhow!("Invalid output path"))?;
+        let s = p
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid output path"))?;
         var.to_parquet_with_names(s, (row_names, None), col_names)?;
         info!("Saved {} to {:?}", suffix, p);
     }
@@ -142,7 +146,9 @@ fn save_output_sparse<V: SparseVariationalOutput>(
     col_names: Option<&[Box<str>]>,
 ) -> Result<()> {
     if let Some(ref p) = make_output_path(base, suffix) {
-        let s = p.to_str().ok_or_else(|| anyhow::anyhow!("Invalid output path"))?;
+        let s = p
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid output path"))?;
         var.to_parquet_sparse(s, row_names, col_names)?;
         info!("Saved {} to {:?}", suffix, p);
     }
@@ -177,11 +183,16 @@ where
                 match &pip_fn {
                     Some(f) => info!(
                         "iter {:4}: loss = {:10.4}, ELBO = {:10.4}, PIPs: {}",
-                        i, loss.to_scalar::<f32>()?, elbo.to_scalar::<f32>()?, f()?
+                        i,
+                        loss.to_scalar::<f32>()?,
+                        elbo.to_scalar::<f32>()?,
+                        f()?
                     ),
                     None => info!(
                         "iter {:4}: loss = {:10.4}, ELBO = {:10.4}",
-                        i, loss.to_scalar::<f32>()?, elbo.to_scalar::<f32>()?
+                        i,
+                        loss.to_scalar::<f32>()?,
+                        elbo.to_scalar::<f32>()?
                     ),
                 }
             } else {
@@ -250,7 +261,11 @@ pub struct RegressionArgs {
     #[arg(long, default_value = "5", help = "Number of Susie layers (L)")]
     pub susie_layers: usize,
 
-    #[arg(long, default_value = "direct", help = "Loss type: direct (reparameterization) or reinforce (score function)")]
+    #[arg(
+        long,
+        default_value = "direct",
+        help = "Loss type: direct (reparameterization) or reinforce (score function)"
+    )]
     pub loss_type: LossType,
 
     #[arg(long, default_value = "500")]
@@ -262,7 +277,11 @@ pub struct RegressionArgs {
     #[arg(long, default_value = "50")]
     pub samples: usize,
 
-    #[arg(short, long, help = "Output prefix (creates {output}.mean.parquet, {output}.var.parquet, etc.)")]
+    #[arg(
+        short,
+        long,
+        help = "Output prefix (creates {output}.mean.parquet, {output}.var.parquet, etc.)"
+    )]
     pub output: Option<PathBuf>,
 
     #[arg(long)]
@@ -291,12 +310,16 @@ fn run_gaussian_gaussian(
     let p_var = x_var.dim(1)?;
 
     let model_mean = LinearRegressionSGVB::new(
-        vb.pp("mean"), x, k,
+        vb.pp("mean"),
+        x,
+        k,
         GaussianPrior::new(vb.pp("prior_mean"), 1.0)?,
         config.clone(),
     )?;
     let model_var = LinearRegressionSGVB::new(
-        vb.pp("var"), x_var, k,
+        vb.pp("var"),
+        x_var,
+        k,
         GaussianPrior::new(vb.pp("prior_var"), 1.0)?,
         config.clone(),
     )?;
@@ -314,18 +337,45 @@ fn run_gaussian_gaussian(
         args.verbose,
         &mut optimizer,
         || match args.loss_type {
-            LossType::Direct => Ok(composite_direct_elbo_loss(&composite, &likelihood, config.num_samples)?),
-            LossType::Reinforce => Ok(composite_sgvb_loss(&composite, &likelihood, config.num_samples, true)?),
+            LossType::Direct => Ok(composite_direct_elbo_loss(
+                &composite,
+                &likelihood,
+                config.num_samples,
+            )?),
+            LossType::Reinforce => Ok(composite_sgvb_loss(
+                &composite,
+                &likelihood,
+                config.num_samples,
+                true,
+            )?),
         },
         || Ok(composite_elbo(&composite, &likelihood, 100)?),
         None::<fn() -> Result<String>>,
     )?;
 
-    info!("Mean coefficients shape: {:?}", composite.modules[0].coef_mean()?.dims());
-    info!("Variance coefficients shape: {:?}", composite.modules[1].coef_mean()?.dims());
+    info!(
+        "Mean coefficients shape: {:?}",
+        composite.modules[0].coef_mean()?.dims()
+    );
+    info!(
+        "Variance coefficients shape: {:?}",
+        composite.modules[1].coef_mean()?.dims()
+    );
 
-    save_output(&composite.modules[0].variational, &args.output, "mean", feature_names, output_names)?;
-    save_output(&composite.modules[1].variational, &args.output, "var", None, output_names)
+    save_output(
+        &composite.modules[0].variational,
+        &args.output,
+        "mean",
+        feature_names,
+        output_names,
+    )?;
+    save_output(
+        &composite.modules[1].variational,
+        &args.output,
+        "var",
+        None,
+        output_names,
+    )
 }
 
 fn run_gaussian_susie(
@@ -344,12 +394,15 @@ fn run_gaussian_susie(
 
     let susie = SusieVar::new(vb.pp("susie_mean"), args.susie_layers, p, k)?;
     let model_mean = LinearModelSGVB::from_variational(
-        susie, x,
+        susie,
+        x,
         GaussianPrior::new(vb.pp("prior_mean"), 1.0)?,
         config.clone(),
     );
     let model_var = LinearRegressionSGVB::new(
-        vb.pp("var"), x_var, k,
+        vb.pp("var"),
+        x_var,
+        k,
         GaussianPrior::new(vb.pp("prior_var"), 1.0)?,
         config.clone(),
     )?;
@@ -358,7 +411,10 @@ fn run_gaussian_susie(
     // Create optimizer AFTER models are created so varmap contains all variables
     let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
 
-    info!("Mean module: {} features, Susie(L={})", p, args.susie_layers);
+    info!(
+        "Mean module: {} features, Susie(L={})",
+        p, args.susie_layers
+    );
     info!("Variance module: {} features, Gaussian", p_var);
 
     train(
@@ -382,11 +438,29 @@ fn run_gaussian_susie(
         None::<fn() -> Result<String>>,
     )?;
 
-    info!("Mean coefficients shape: {:?}", model_mean.coef_mean()?.dims());
-    info!("Variance coefficients shape: {:?}", model_var.coef_mean()?.dims());
+    info!(
+        "Mean coefficients shape: {:?}",
+        model_mean.coef_mean()?.dims()
+    );
+    info!(
+        "Variance coefficients shape: {:?}",
+        model_var.coef_mean()?.dims()
+    );
 
-    save_output_sparse(&model_mean.variational, &args.output, "mean", feature_names, output_names)?;
-    save_output(&model_var.variational, &args.output, "var", None, output_names)
+    save_output_sparse(
+        &model_mean.variational,
+        &args.output,
+        "mean",
+        feature_names,
+        output_names,
+    )?;
+    save_output(
+        &model_var.variational,
+        &args.output,
+        "var",
+        None,
+        output_names,
+    )
 }
 
 fn run_poisson_gaussian(
@@ -401,7 +475,9 @@ fn run_poisson_gaussian(
 ) -> Result<()> {
     let k = y.dim(1)?;
     let model = LinearRegressionSGVB::new(
-        vb.pp("model"), x, k,
+        vb.pp("model"),
+        x,
+        k,
         GaussianPrior::new(vb.pp("prior"), 1.0)?,
         config.clone(),
     )?;
@@ -423,7 +499,13 @@ fn run_poisson_gaussian(
     )?;
 
     info!("Coefficients shape: {:?}", model.coef_mean()?.dims());
-    save_output(&model.variational, &args.output, "mean", feature_names, output_names)
+    save_output(
+        &model.variational,
+        &args.output,
+        "mean",
+        feature_names,
+        output_names,
+    )
 }
 
 fn run_poisson_susie(
@@ -439,7 +521,8 @@ fn run_poisson_susie(
     let (p, k) = (x.dim(1)?, y.dim(1)?);
     let susie = SusieVar::new(vb.pp("susie"), args.susie_layers, p, k)?;
     let model = LinearModelSGVB::from_variational(
-        susie, x,
+        susie,
+        x,
         GaussianPrior::new(vb.pp("prior"), 1.0)?,
         config.clone(),
     );
@@ -461,7 +544,13 @@ fn run_poisson_susie(
     )?;
 
     info!("Coefficients shape: {:?}", model.coef_mean()?.dims());
-    save_output_sparse(&model.variational, &args.output, "mean", feature_names, output_names)
+    save_output_sparse(
+        &model.variational,
+        &args.output,
+        "mean",
+        feature_names,
+        output_names,
+    )
 }
 
 fn run_negbin_gaussian(
@@ -479,12 +568,16 @@ fn run_negbin_gaussian(
     let p_var = x_var.dim(1)?;
 
     let model_mean = LinearRegressionSGVB::new(
-        vb.pp("mean"), x, k,
+        vb.pp("mean"),
+        x,
+        k,
         GaussianPrior::new(vb.pp("prior_mean"), 1.0)?,
         config.clone(),
     )?;
     let model_disp = LinearRegressionSGVB::new(
-        vb.pp("disp"), x_var, k,
+        vb.pp("disp"),
+        x_var,
+        k,
         GaussianPrior::new(vb.pp("prior_disp"), 1.0)?,
         config.clone(),
     )?;
@@ -502,18 +595,45 @@ fn run_negbin_gaussian(
         args.verbose,
         &mut optimizer,
         || match args.loss_type {
-            LossType::Direct => Ok(composite_direct_elbo_loss(&composite, &likelihood, config.num_samples)?),
-            LossType::Reinforce => Ok(composite_sgvb_loss(&composite, &likelihood, config.num_samples, true)?),
+            LossType::Direct => Ok(composite_direct_elbo_loss(
+                &composite,
+                &likelihood,
+                config.num_samples,
+            )?),
+            LossType::Reinforce => Ok(composite_sgvb_loss(
+                &composite,
+                &likelihood,
+                config.num_samples,
+                true,
+            )?),
         },
         || Ok(composite_elbo(&composite, &likelihood, 100)?),
         None::<fn() -> Result<String>>,
     )?;
 
-    info!("Mean coefficients shape: {:?}", composite.modules[0].coef_mean()?.dims());
-    info!("Dispersion coefficients shape: {:?}", composite.modules[1].coef_mean()?.dims());
+    info!(
+        "Mean coefficients shape: {:?}",
+        composite.modules[0].coef_mean()?.dims()
+    );
+    info!(
+        "Dispersion coefficients shape: {:?}",
+        composite.modules[1].coef_mean()?.dims()
+    );
 
-    save_output(&composite.modules[0].variational, &args.output, "mean", feature_names, output_names)?;
-    save_output(&composite.modules[1].variational, &args.output, "disp", None, output_names)
+    save_output(
+        &composite.modules[0].variational,
+        &args.output,
+        "mean",
+        feature_names,
+        output_names,
+    )?;
+    save_output(
+        &composite.modules[1].variational,
+        &args.output,
+        "disp",
+        None,
+        output_names,
+    )
 }
 
 fn run_negbin_susie(
@@ -532,12 +652,15 @@ fn run_negbin_susie(
 
     let susie = SusieVar::new(vb.pp("susie_mean"), args.susie_layers, p, k)?;
     let model_mean = LinearModelSGVB::from_variational(
-        susie, x,
+        susie,
+        x,
         GaussianPrior::new(vb.pp("prior_mean"), 1.0)?,
         config.clone(),
     );
     let model_disp = LinearRegressionSGVB::new(
-        vb.pp("disp"), x_var, k,
+        vb.pp("disp"),
+        x_var,
+        k,
         GaussianPrior::new(vb.pp("prior_disp"), 1.0)?,
         config.clone(),
     )?;
@@ -546,7 +669,10 @@ fn run_negbin_susie(
     // Create optimizer AFTER models are created so varmap contains all variables
     let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
 
-    info!("Mean module: {} features, Susie(L={})", p, args.susie_layers);
+    info!(
+        "Mean module: {} features, Susie(L={})",
+        p, args.susie_layers
+    );
     info!("Dispersion module: {} features, Gaussian", p_var);
 
     train(
@@ -570,11 +696,29 @@ fn run_negbin_susie(
         None::<fn() -> Result<String>>,
     )?;
 
-    info!("Mean coefficients shape: {:?}", model_mean.coef_mean()?.dims());
-    info!("Dispersion coefficients shape: {:?}", model_disp.coef_mean()?.dims());
+    info!(
+        "Mean coefficients shape: {:?}",
+        model_mean.coef_mean()?.dims()
+    );
+    info!(
+        "Dispersion coefficients shape: {:?}",
+        model_disp.coef_mean()?.dims()
+    );
 
-    save_output_sparse(&model_mean.variational, &args.output, "mean", feature_names, output_names)?;
-    save_output(&model_disp.variational, &args.output, "disp", None, output_names)
+    save_output_sparse(
+        &model_mean.variational,
+        &args.output,
+        "mean",
+        feature_names,
+        output_names,
+    )?;
+    save_output(
+        &model_disp.variational,
+        &args.output,
+        "disp",
+        None,
+        output_names,
+    )
 }
 
 //
@@ -584,11 +728,17 @@ fn run_negbin_susie(
 pub fn run(args: &RegressionArgs) -> Result<()> {
     let device = if args.gpu {
         #[cfg(target_os = "macos")]
-        { Device::new_metal(0).unwrap_or(Device::Cpu) }
+        {
+            Device::new_metal(0).unwrap_or(Device::Cpu)
+        }
         #[cfg(target_os = "linux")]
-        { Device::new_cuda(0).unwrap_or(Device::Cpu) }
+        {
+            Device::new_cuda(0).unwrap_or(Device::Cpu)
+        }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        { Device::Cpu }
+        {
+            Device::Cpu
+        }
     } else {
         Device::Cpu
     };
@@ -617,35 +767,50 @@ pub fn run(args: &RegressionArgs) -> Result<()> {
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
     let config = SGVBConfig::new(args.samples);
 
-    info!("Likelihood: {}", match args.model {
-        LikelihoodType::Gaussian => "Gaussian",
-        LikelihoodType::Poisson => "Poisson",
-        LikelihoodType::Negbin => "Negative Binomial",
-    });
-    info!("Variational: {}", match args.prior {
-        VariationalType::Gaussian => "Gaussian".to_string(),
-        VariationalType::Susie => format!("Susie(L={})", args.susie_layers),
-    });
-    info!("Loss: {}", match args.loss_type {
-        LossType::Direct => "Direct ELBO (reparameterization)",
-        LossType::Reinforce => "REINFORCE (score function)",
-    });
+    info!(
+        "Likelihood: {}",
+        match args.model {
+            LikelihoodType::Gaussian => "Gaussian",
+            LikelihoodType::Poisson => "Poisson",
+            LikelihoodType::Negbin => "Negative Binomial",
+        }
+    );
+    info!(
+        "Variational: {}",
+        match args.prior {
+            VariationalType::Gaussian => "Gaussian".to_string(),
+            VariationalType::Susie => format!("Susie(L={})", args.susie_layers),
+        }
+    );
+    info!(
+        "Loss: {}",
+        match args.loss_type {
+            LossType::Direct => "Direct ELBO (reparameterization)",
+            LossType::Reinforce => "REINFORCE (score function)",
+        }
+    );
 
     let feat_ref = feature_names.as_deref();
     let out_ref = output_names.as_deref();
 
     match (&args.model, &args.prior) {
-        (LikelihoodType::Gaussian, VariationalType::Gaussian) =>
-            run_gaussian_gaussian(args, x, y, vb, &varmap, config, feat_ref, out_ref),
-        (LikelihoodType::Gaussian, VariationalType::Susie) =>
-            run_gaussian_susie(args, x, y, vb, &varmap, config, feat_ref, out_ref),
-        (LikelihoodType::Poisson, VariationalType::Gaussian) =>
-            run_poisson_gaussian(args, x, y, vb, &varmap, config, feat_ref, out_ref),
-        (LikelihoodType::Poisson, VariationalType::Susie) =>
-            run_poisson_susie(args, x, y, vb, &varmap, config, feat_ref, out_ref),
-        (LikelihoodType::Negbin, VariationalType::Gaussian) =>
-            run_negbin_gaussian(args, x, y, vb, &varmap, config, feat_ref, out_ref),
-        (LikelihoodType::Negbin, VariationalType::Susie) =>
-            run_negbin_susie(args, x, y, vb, &varmap, config, feat_ref, out_ref),
+        (LikelihoodType::Gaussian, VariationalType::Gaussian) => {
+            run_gaussian_gaussian(args, x, y, vb, &varmap, config, feat_ref, out_ref)
+        }
+        (LikelihoodType::Gaussian, VariationalType::Susie) => {
+            run_gaussian_susie(args, x, y, vb, &varmap, config, feat_ref, out_ref)
+        }
+        (LikelihoodType::Poisson, VariationalType::Gaussian) => {
+            run_poisson_gaussian(args, x, y, vb, &varmap, config, feat_ref, out_ref)
+        }
+        (LikelihoodType::Poisson, VariationalType::Susie) => {
+            run_poisson_susie(args, x, y, vb, &varmap, config, feat_ref, out_ref)
+        }
+        (LikelihoodType::Negbin, VariationalType::Gaussian) => {
+            run_negbin_gaussian(args, x, y, vb, &varmap, config, feat_ref, out_ref)
+        }
+        (LikelihoodType::Negbin, VariationalType::Susie) => {
+            run_negbin_susie(args, x, y, vb, &varmap, config, feat_ref, out_ref)
+        }
     }
 }

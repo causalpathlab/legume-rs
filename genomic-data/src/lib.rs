@@ -6,8 +6,8 @@
 //! - BED file format
 //! - Genomic positions
 
-pub mod gff;
-pub mod sam;
 pub mod bed;
+pub mod gff;
 pub mod plink;
 pub mod positions;
+pub mod sam;

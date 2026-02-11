@@ -1,7 +1,7 @@
 use crate::common::*;
-use genomic_data::bed::*;
 use crate::data::util_htslib::*;
 use crate::read_coverage::ReadCoverageCollector;
+use genomic_data::bed::*;
 
 use coitrees::IntervalTree;
 

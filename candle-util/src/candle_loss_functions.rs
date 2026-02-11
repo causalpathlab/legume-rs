@@ -133,4 +133,3 @@ pub fn zi_topic_likelihood(
 pub fn gaussian_likelihood(x_nd: &Tensor, hat_nd: &Tensor) -> Result<Tensor> {
     x_nd.sub(hat_nd)?.powf(2.)?.sum(1)? * (-0.5)
 }
-

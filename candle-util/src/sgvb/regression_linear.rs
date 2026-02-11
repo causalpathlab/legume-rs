@@ -1,9 +1,9 @@
 use candle_core::{Result, Tensor};
 use candle_nn::VarBuilder;
 
-use super::variational_gaussian::GaussianVar;
 use super::sgvb::SGVBConfig;
 use super::traits::{Prior, SgvbModel, SgvbSample, VariationalDistribution};
+use super::variational_gaussian::GaussianVar;
 
 /// Generic linear model SGVB: η = X * θ where θ ~ q(θ)
 ///
@@ -29,7 +29,12 @@ impl<V: VariationalDistribution, P: Prior> LinearModelSGVB<V, P> {
     /// * `x_design` - Design matrix X, shape (n, p)
     /// * `prior` - Prior distribution
     /// * `config` - SGVB configuration
-    pub fn from_variational(variational: V, x_design: Tensor, prior: P, config: SGVBConfig) -> Self {
+    pub fn from_variational(
+        variational: V,
+        x_design: Tensor,
+        prior: P,
+        config: SGVBConfig,
+    ) -> Self {
         Self {
             variational,
             prior,
@@ -232,8 +237,15 @@ mod tests {
         println!("  Others mean abs: {:.4}", other_mean);
 
         // First coefficient should be close to true_coef and much larger than others
-        assert!(coef_first > 1.0, "First coef should be > 1.0, got {}", coef_first);
-        assert!(coef_first.abs() > other_mean * 2.0, "First coef should dominate others");
+        assert!(
+            coef_first > 1.0,
+            "First coef should be > 1.0, got {}",
+            coef_first
+        );
+        assert!(
+            coef_first.abs() > other_mean * 2.0,
+            "First coef should dominate others"
+        );
 
         Ok(())
     }
@@ -346,12 +358,14 @@ mod tests {
         assert!(
             pip_0 > other_mean * 3.0,
             "PIP[0] should be > 3x other mean, got {} vs {}",
-            pip_0, other_mean
+            pip_0,
+            other_mean
         );
         assert!(
             pip_5 > other_mean * 3.0,
             "PIP[5] should be > 3x other mean, got {} vs {}",
-            pip_5, other_mean
+            pip_5,
+            other_mean
         );
 
         Ok(())
@@ -434,12 +448,14 @@ mod tests {
         assert!(
             pip_0 > other_mean * 1.5,
             "PIP[0] should be > 1.5x other mean, got {} vs {}",
-            pip_0, other_mean
+            pip_0,
+            other_mean
         );
         assert!(
             pip_5 > other_mean * 1.5,
             "PIP[5] should be > 1.5x other mean, got {} vs {}",
-            pip_5, other_mean
+            pip_5,
+            other_mean
         );
 
         Ok(())

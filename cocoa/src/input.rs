@@ -81,7 +81,10 @@ fn collect_all_topic_names(
 
     let mut topic_names = HashSet::<Box<str>>::new();
 
-    for (a_file, p_file) in topic_assignment_files.iter().zip(topic_proportion_files.iter()) {
+    for (a_file, p_file) in topic_assignment_files
+        .iter()
+        .zip(topic_proportion_files.iter())
+    {
         if let Some(a_file) = a_file {
             collect_topic_names_from_assignment(a_file, &mut topic_names)?;
         }
@@ -204,9 +207,7 @@ fn read_individual_assignments(
     let missing = MISSING.to_string().into_boxed_str();
 
     let this_indv = match indv_file {
-        Some(input_file) => {
-            read_lines_of_words_delim(input_file, &['\t', ',', ' '], -1)?.lines
-        }
+        Some(input_file) => read_lines_of_words_delim(input_file, &['\t', ',', ' '], -1)?.lines,
         None => vec![vec![missing.clone()]; ndata],
     };
 
@@ -234,7 +235,12 @@ fn read_individual_assignments(
 
         column_names
             .iter()
-            .map(|c| cell_to_indv_map.get(c).cloned().unwrap_or_else(|| missing.clone()))
+            .map(|c| {
+                cell_to_indv_map
+                    .get(c)
+                    .cloned()
+                    .unwrap_or_else(|| missing.clone())
+            })
             .collect()
     };
 
@@ -321,8 +327,7 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
         let ndata = this_data.num_columns().unwrap_or(0);
         let column_names = this_data.column_names()?;
 
-        let this_indv =
-            read_individual_assignments(this_indv_file.as_ref(), &column_names, ndata)?;
+        let this_indv = read_individual_assignments(this_indv_file.as_ref(), &column_names, ndata)?;
 
         let topic_a_file = &topic_assignment_files[f];
         let topic_p_file = &topic_proportion_files[f];
@@ -364,14 +369,13 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
 
     sparse_data.assign_groups(&cell_to_indv, None);
 
-    let (indv_to_exposure, exposure_id) = if let Some(exposure_assignment_file) =
-        args.exposure_assignment_file
-    {
-        let (indv_map, exp_id) = process_exposure_assignments(&exposure_assignment_file)?;
-        (Some(indv_map), Some(exp_id))
-    } else {
-        (None, None)
-    };
+    let (indv_to_exposure, exposure_id) =
+        if let Some(exposure_assignment_file) = args.exposure_assignment_file {
+            let (indv_map, exp_id) = process_exposure_assignments(&exposure_assignment_file)?;
+            (Some(indv_map), Some(exp_id))
+        } else {
+            (None, None)
+        };
 
     Ok(InputData {
         sparse_data,
