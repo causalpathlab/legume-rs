@@ -289,6 +289,23 @@ impl SparseIoVec {
     // access columns //
     ////////////////////
 
+    /// Read a single column by global index and append offset triplets
+    fn read_column_offset(
+        &self,
+        glob: usize,
+        col_offset: &mut usize,
+        triplets: &mut Vec<(u64, u64, f32)>,
+    ) -> anyhow::Result<()> {
+        let didx = self.col_to_data[glob];
+        let loc = self.col_glob_to_loc[glob];
+        let (_, loc_ncol, loc_triplets) =
+            self.data_vec[didx].read_triplets_by_single_column(loc)?;
+        let off = *col_offset as u64;
+        triplets.extend(loc_triplets.into_iter().map(|(i, j, v)| (i, j + off, v)));
+        *col_offset += loc_ncol;
+        Ok(())
+    }
+
     pub fn columns_triplets<I>(
         &self,
         cells: I,
@@ -296,24 +313,30 @@ impl SparseIoVec {
     where
         I: Iterator<Item = usize>,
     {
-        let mut triplets = vec![];
-
         let nrow = self.num_rows();
-        let mut ncol = 0_usize;
-        // Note: each cell is a global index
-        for glob in cells {
+        let cells: Vec<usize> = cells.collect();
+        let ncol = cells.len();
+
+        // Group cells by backend, tracking (local_col, output_col)
+        let mut backend_groups: HashMap<usize, Vec<(usize, usize)>> = HashMap::default();
+        for (out_col, &glob) in cells.iter().enumerate() {
             let didx = self.col_to_data[glob];
             let loc = self.col_glob_to_loc[glob];
+            backend_groups.entry(didx).or_default().push((loc, out_col));
+        }
 
-            let (_nrow, loc_ncol, loc_triplets) =
-                self.data_vec[didx].read_triplets_by_single_column(loc)?;
+        let mut triplets = Vec::new();
+        for (&didx, group) in &backend_groups {
+            let local_cols: Vec<usize> = group.iter().map(|&(loc, _)| loc).collect();
+            let (_, _, group_triplets) =
+                self.data_vec[didx].read_triplets_by_columns(local_cols)?;
 
-            triplets.extend(
-                loc_triplets
-                    .iter()
-                    .map(|&(i, j, v)| (i, j + (ncol as u64), v)),
-            );
-            ncol += loc_ncol;
+            // Remap: group_triplets columns are 0..group.len(),
+            // map each to the original output column position
+            triplets.extend(group_triplets.into_iter().map(|(i, j, v)| {
+                let out_col = group[j as usize].1 as u64;
+                (i, out_col, v)
+            }));
         }
 
         Ok(((nrow, ncol), triplets))
@@ -421,17 +444,7 @@ impl SparseIoVec {
                     if glob == glob_matched {
                         continue; // avoid identical cell pairs
                     }
-                    let didx = self.col_to_data[glob_matched];
-                    let loc = self.col_glob_to_loc[glob_matched];
-                    let (_, loc_ncol, loc_triplets) =
-                        self.data_vec[didx].read_triplets_by_single_column(loc)?;
-
-                    triplets.extend(
-                        loc_triplets
-                            .iter()
-                            .map(|&(i, j, v)| (i, j + (ncol as u64), v)),
-                    );
-                    ncol += loc_ncol;
+                    self.read_column_offset(glob_matched, &mut ncol, &mut triplets)?;
                     source_columns.push(glob);
                     matched_columns.push(glob_matched);
                     distances.push(dist);
@@ -500,8 +513,8 @@ impl SparseIoVec {
 
             tot_triplets.extend(
                 triplets
-                    .iter()
-                    .map(|(i, j, z_ij)| (*i, *j + (tot_ncells_matched as u64), *z_ij)),
+                    .into_iter()
+                    .map(|(i, j, z_ij)| (i, j + (tot_ncells_matched as u64), z_ij)),
             );
 
             tot_distances.extend(distances);
@@ -567,23 +580,26 @@ impl SparseIoVec {
 
         let nbatches = self.num_batches();
 
-        for glob_index in cells {
-            let source_batch = cell_to_batch[glob_index]; // this cell's batch
-
-            let neighbouring_batches: Vec<usize> = match self.between_batch_proximity.as_ref() {
+        // Pre-compute neighbouring batches per source batch
+        let neighbouring_batches_by_source: Vec<Vec<usize>> = (0..nbatches)
+            .map(|source_batch| match self.between_batch_proximity.as_ref() {
                 Some(prox) => prox[source_batch]
                     .iter()
                     .copied()
-                    .filter(|&batch| skip_batches.is_none_or(|skip| !skip.contains(&batch)))
-                    .filter(|&batch| !skip_same_batch || batch != source_batch)
+                    .filter(|&b| skip_batches.is_none_or(|skip| !skip.contains(&b)))
+                    .filter(|&b| !skip_same_batch || b != source_batch)
                     .collect(),
                 _ => (0..nbatches)
-                    .filter(|&batch| skip_batches.is_none_or(|skip| !skip.contains(&batch)))
-                    .filter(|&batch| !skip_same_batch || batch != source_batch)
+                    .filter(|&b| skip_batches.is_none_or(|skip| !skip.contains(&b)))
+                    .filter(|&b| !skip_same_batch || b != source_batch)
                     .collect(),
-            };
+            })
+            .collect();
 
-            for target_batch in neighbouring_batches {
+        for glob_index in cells {
+            let source_batch = cell_to_batch[glob_index];
+
+            for &target_batch in &neighbouring_batches_by_source[source_batch] {
                 if let (Some(source_lookup), Some(target_lookup)) =
                     (lookups.get(source_batch), lookups.get(target_batch))
                 {
@@ -596,19 +612,9 @@ impl SparseIoVec {
                         matched.into_iter().zip(matched_distances.into_iter())
                     {
                         if glob_index == glob_matched_index {
-                            continue; // avoid identical cell pairs
+                            continue;
                         }
-                        let data_idx = self.col_to_data[glob_matched_index];
-                        let loc = self.col_glob_to_loc[glob_matched_index];
-                        let (_, loc_ncol, loc_triplets) =
-                            self.data_vec[data_idx].read_triplets_by_single_column(loc)?;
-
-                        triplets.extend(
-                            loc_triplets
-                                .iter()
-                                .map(|&(i, j, v)| (i, j + (ncol as u64), v)),
-                        );
-                        ncol += loc_ncol;
+                        self.read_column_offset(glob_matched_index, &mut ncol, &mut triplets)?;
                         source_columns.push(glob_index);
                         matched_columns.push(glob_matched_index);
                         distances.push(dist);
@@ -653,17 +659,7 @@ impl SparseIoVec {
                 lookup.search_by_query_data(&query.to_vp(), knn_per_batch)?;
 
             for (&glob_idx, &dist) in matched.iter().zip(matched_distances.iter()) {
-                let data_idx = self.col_to_data[glob_idx];
-                let loc = self.col_glob_to_loc[glob_idx];
-                let (_nrow, loc_ncol, loc_triplets) =
-                    self.data_vec[data_idx].read_triplets_by_single_column(loc)?;
-
-                triplets.extend(
-                    loc_triplets
-                        .iter()
-                        .map(|&(i, j, v)| (i, j + (ncol as u64), v)),
-                );
-                ncol += loc_ncol;
+                self.read_column_offset(glob_idx, &mut ncol, &mut triplets)?;
                 source_columns.push(glob_idx);
                 matched_columns.push(glob_idx);
                 distances.push(dist);

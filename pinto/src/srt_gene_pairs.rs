@@ -435,9 +435,16 @@ mod tests {
         let vals = vec![4.0f32, 6.0];
 
         let mut deltas = vec![];
-        visit_gene_pair_deltas(&rows, &vals, &gene_adj, &gene_means, false, |edge_idx, delta| {
-            deltas.push((edge_idx, delta));
-        });
+        visit_gene_pair_deltas(
+            &rows,
+            &vals,
+            &gene_adj,
+            &gene_means,
+            false,
+            |edge_idx, delta| {
+                deltas.push((edge_idx, delta));
+            },
+        );
 
         // Edge (0,1): 4.0 * 6.0 - 1.0 * 2.0 = 22.0
         assert_eq!(deltas.len(), 1); // gene 2 not present → edge 1 skipped
@@ -447,10 +454,7 @@ mod tests {
 
     #[test]
     fn test_visit_gene_pair_deltas_log1p() {
-        let gene_adj: Vec<Vec<(usize, usize)>> = vec![
-            vec![(1, 0)],
-            vec![],
-        ];
+        let gene_adj: Vec<Vec<(usize, usize)>> = vec![vec![(1, 0)], vec![]];
         // When use_log1p=true, gene_means should be log1p-scale means
         let gene_means = DVec::from_vec(vec![1.0f32.ln_1p(), 2.0f32.ln_1p()]);
 
@@ -458,9 +462,16 @@ mod tests {
         let vals = vec![1.0f32, 2.0];
 
         let mut deltas = vec![];
-        visit_gene_pair_deltas(&rows, &vals, &gene_adj, &gene_means, true, |edge_idx, delta| {
-            deltas.push((edge_idx, delta));
-        });
+        visit_gene_pair_deltas(
+            &rows,
+            &vals,
+            &gene_adj,
+            &gene_means,
+            true,
+            |edge_idx, delta| {
+                deltas.push((edge_idx, delta));
+            },
+        );
 
         let expected = 1.0f32.ln_1p() * 2.0f32.ln_1p() - gene_means[0] * gene_means[1];
         assert_eq!(deltas.len(), 1);

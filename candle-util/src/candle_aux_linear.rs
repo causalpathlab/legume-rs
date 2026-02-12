@@ -204,9 +204,9 @@ impl SoftmaxLinear {
 
         // log(z_nk) + log(β_kd) via broadcasting: [N,K,1] + [K,D] → [N,K,D]
         let eps = 1e-20;
-        let log_h = (h_nk + eps)?.log()?;          // [N, K]
-        let log_h = log_h.unsqueeze(2)?;            // [N, K, 1]
-        let log_w = log_w_kd.unsqueeze(0)?;         // [1, K, D]
+        let log_h = (h_nk + eps)?.log()?; // [N, K]
+        let log_h = log_h.unsqueeze(2)?; // [N, K, 1]
+        let log_w = log_w_kd.unsqueeze(0)?; // [1, K, D]
         let log_terms = log_h.broadcast_add(&log_w)?; // [N, K, D]
 
         // logsumexp over K dimension → [N, D]

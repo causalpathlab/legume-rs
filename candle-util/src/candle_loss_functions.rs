@@ -125,7 +125,7 @@ pub fn zi_topic_log_likelihood(
     let log_pi = (&pi + eps)?.log()?;
     let log_one_minus_pi = (&one_minus_pi + eps)?.log()?;
     let log_term2 = log_one_minus_pi.broadcast_add(log_recon_nd)?; // [N, D]
-    // logsumexp of log_pi [1,D] and log_term2 [N,D]
+                                                                   // logsumexp of log_pi [1,D] and log_term2 [N,D]
     let max_val = log_pi.broadcast_maximum(&log_term2)?;
     let sum_exp = log_pi
         .broadcast_sub(&max_val)?
