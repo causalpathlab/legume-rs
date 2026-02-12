@@ -3,6 +3,7 @@ use indicatif::ProgressIterator;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::Inference;
 use matrix_param::traits::*;
+use special::Error;
 
 pub struct CocoaStat {
     y1_sum_dp_vec: Vec<Mat>, // cell type topic x gene x pseudobulk sample
@@ -177,4 +178,46 @@ impl CocoaStat {
             exposure: tau_param_di,
         })
     }
+}
+
+/// Compute per-gene signed log exposure contrast:
+///   mean(log τ_{exp1}) - mean(log τ_{exp0})
+/// averaged across topics. Returns Vec<f32> of length n_genes.
+pub fn compute_exposure_contrast(
+    parameters: &[CocoaGammaOut],
+    exposure_assignment: &[usize],
+) -> Vec<f32> {
+    let n_topics = parameters.len();
+    let n_genes = parameters[0].exposure.posterior_log_mean().nrows();
+    let n_indv = parameters[0].exposure.posterior_log_mean().ncols();
+
+    let exp0_indvs: Vec<usize> = (0..n_indv)
+        .filter(|&i| exposure_assignment[i] == 0)
+        .collect();
+    let exp1_indvs: Vec<usize> = (0..n_indv)
+        .filter(|&i| exposure_assignment[i] == 1)
+        .collect();
+
+    let n0 = exp0_indvs.len() as f32;
+    let n1 = exp1_indvs.len() as f32;
+
+    let mut contrast = vec![0f32; n_genes];
+
+    for k in 0..n_topics {
+        let tau_log = parameters[k].exposure.posterior_log_mean();
+        for g in 0..n_genes {
+            let mean0: f32 = exp0_indvs.iter().map(|&i| tau_log[(g, i)]).sum::<f32>() / n0;
+            let mean1: f32 = exp1_indvs.iter().map(|&i| tau_log[(g, i)]).sum::<f32>() / n1;
+            contrast[g] += (mean1 - mean0) / n_topics as f32;
+        }
+    }
+
+    contrast
+}
+
+/// Compute two-sided p-value from z-score using normal CDF.
+pub fn z_to_pvalue(z: f32) -> f32 {
+    // p = erfc(|z| / sqrt(2))
+    let p = (z.abs() as f64 / std::f64::consts::SQRT_2).compl_error();
+    p as f32
 }
