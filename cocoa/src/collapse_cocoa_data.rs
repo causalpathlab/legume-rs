@@ -52,46 +52,11 @@ impl CocoaCollapseOps for SparseIoVec {
             cocoa_input.hyper_param,
         );
 
-        info!("pseudobulk data per individual and per topic (cell type)");
-        self.visit_columns_by_group(&collect_basic_stat_visitor, cocoa_input, &mut cocoa_stat)?;
-        info!("sum per individual");
-        self.visit_columns_by_group(&collect_indv_stat_visitor, cocoa_input, &mut cocoa_stat)?;
+        info!("matching and collecting statistics per topic (cell type)");
         self.visit_columns_by_group(&collect_matched_stat_visitor, cocoa_input, &mut cocoa_stat)?;
 
         Ok(cocoa_stat)
     }
-}
-
-fn collect_indv_stat_visitor(
-    this_sample: usize, // pseudo bulk sample
-    cells: &[usize],    // cells within this pseudo bulk sample
-    data: &SparseIoVec,
-    input: &CocoaCollapseIn,
-    arc_stat: Arc<Mutex<&mut CocoaStat>>,
-) -> anyhow::Result<()> {
-    let yy = data.read_columns_csc(cells.iter().cloned())?;
-    let indv = data.get_batch_membership(cells.iter().cloned());
-
-    let mut stat = arc_stat.lock().expect("lock");
-    yy.col_iter()
-        .zip(cells.iter().zip(indv.iter()))
-        .for_each(|(y_j, (&j, &i))| {
-            let rows = y_j.row_indices();
-            let vals = y_j.values();
-
-            let z_j = &input.cell_topic_nk.row(j);
-
-            for (k, &z_jk) in z_j.iter().enumerate() {
-                let y1 = stat.indv_y1_stat_mut(k);
-                for (&g, &y_gj) in rows.iter().zip(vals.iter()) {
-                    y1[(g, i)] += y_gj * z_jk;
-                }
-                let n_is = stat.indv_size_stat_mut(k);
-                n_is[(i, this_sample)] += z_jk;
-            }
-        });
-
-    Ok(())
 }
 
 fn collect_matched_stat_visitor(
@@ -99,19 +64,30 @@ fn collect_matched_stat_visitor(
     cells: &[usize],                      // cells within this pseudo bulk sample
     data: &SparseIoVec,                   // full data
     input: &CocoaCollapseIn,              //
-    arc_stat: Arc<Mutex<&mut CocoaStat>>, // fill in y0 for this sample `s`
+    arc_stat: Arc<Mutex<&mut CocoaStat>>, // fill in y1, y0, size, y1_di, size_ip
 ) -> anyhow::Result<()> {
     assert_eq!(data.num_rows(), input.n_genes);
 
-    let mut y0_dk = Mat::zeros(input.n_genes, input.n_topics);
+    let n_genes = input.n_genes;
+    let n_topics = input.n_topics;
 
-    // break down cells into batch assignment groups
+    let mut y0_dk = Mat::zeros(n_genes, n_topics);
+    let mut y1_dk = Mat::zeros(n_genes, n_topics);
+    let mut size_k = DVec::zeros(n_topics);
+
+    // Read ALL source cells in this sample once
+    let y1_all = data.read_columns_csc(cells.iter().cloned())?;
+
+    // Break down cells into batch (individual) assignment groups
     let indv_vec = data.get_batch_membership(cells.iter().cloned());
     let indv_to_cells = partition_by_membership(&indv_vec, None);
     let n_indv = data.num_batches();
 
     let knn_batches = n_indv;
     let knn_cells = input.knn;
+
+    // Per-individual y1 and size (for indv-level stats)
+    let mut indv_stats: Vec<(usize, Mat, DVec)> = Vec::new();
 
     for (indv_index, indv_cells) in indv_to_cells {
         ///////////////////////////////////////////////
@@ -123,82 +99,96 @@ fn collect_matched_stat_visitor(
             .filter(|&i| input.exposure_assignment[i] == this_exposure)
             .collect();
 
-        let i_cells = indv_cells.into_iter().map(|j| cells[j]);
-        let (y0_mat, matched, distances) = data.read_neighbouring_columns_csc(
-            i_cells,
+        // indv_cells[p] is a position in `cells`; cells[indv_cells[p]] is global index
+        let (y0_mat, matched, matched_glob, distances) = data.read_neighbouring_columns_csc(
+            indv_cells.iter().map(|&j| cells[j]),
             knn_batches,
             knn_cells,
             true,
             Some(&same_exposure),
         )?;
 
-        // sum_j (sum_a y0[g,a] * w[j,a]) * z[j,k] * ind[j,s]
         let y1_to_y0 = partition_by_membership(&matched, None);
 
-        for (y1_col, y0_cols) in y1_to_y0 {
-            let z_j = &input.cell_topic_nk.row(y1_col);
-            let weights: Vec<f32> = y0_cols.iter().map(|&j| (-distances[j]).exp()).collect();
-            let denom = weights.iter().sum::<f32>();
+        let mut indv_y1_dk = Mat::zeros(n_genes, n_topics);
+        let mut indv_size_k = DVec::zeros(n_topics);
+
+        // Process ALL source cells — only accumulate y1 alongside valid y0
+        for &cell_pos in &indv_cells {
+            let cell_glob = cells[cell_pos];
+            let z_j = &input.cell_topic_nk.row(cell_glob);
+
+            let y0_cols = match y1_to_y0.get(&cell_glob) {
+                Some(cols) => cols.as_slice(),
+                None => continue, // no matches at all — skip y1 and y0
+            };
 
             for (k, &z_jk) in z_j.iter().enumerate() {
+                if z_jk < 1e-8 {
+                    continue;
+                }
+
+                // Weight by both distance and matched cell's topic membership
+                let weights: Vec<f32> = y0_cols
+                    .iter()
+                    .map(|&a| {
+                        let z_matched_k = input.cell_topic_nk[(matched_glob[a], k)];
+                        (-distances[a]).exp() * z_matched_k
+                    })
+                    .collect();
+                let denom = weights.iter().sum::<f32>();
+                if denom < 1e-8 {
+                    continue; // no same-type matches — skip both y1 and y0
+                }
+
+                // Accumulate y0
                 y0_cols.iter().zip(weights.iter()).for_each(|(&a, &w_j)| {
                     let y0_a = y0_mat.get_col(a).expect("cell a");
-                    let y0_rows = y0_a.row_indices();
-                    let y0_vals = y0_a.values();
-                    y0_rows.iter().zip(y0_vals.iter()).for_each(|(&g, &y0_gj)| {
-                        y0_dk[(g, k)] += z_jk * y0_gj * w_j / denom;
-                    });
+                    y0_a.row_indices()
+                        .iter()
+                        .zip(y0_a.values().iter())
+                        .for_each(|(&g, &y0_gj)| {
+                            y0_dk[(g, k)] += z_jk * y0_gj * w_j / denom;
+                        });
                 });
+
+                // Accumulate y1 symmetrically
+                if let Some(y1_j) = y1_all.get_col(cell_pos) {
+                    for (&g, &y_gj) in y1_j.row_indices().iter().zip(y1_j.values().iter()) {
+                        y1_dk[(g, k)] += z_jk * y_gj;
+                        indv_y1_dk[(g, k)] += z_jk * y_gj;
+                    }
+                }
+                size_k[k] += z_jk;
+                indv_size_k[k] += z_jk;
             }
+        }
+
+        if indv_size_k.iter().any(|&v| v > 0.) {
+            indv_stats.push((indv_index, indv_y1_dk, indv_size_k));
         }
     }
 
-    // update statistics
+    // Update statistics
     let mut stat = arc_stat.lock().expect("lock stat");
-    for k in 0..input.n_topics {
+    for k in 0..n_topics {
         let mut y0_k_s = stat.y0_stat_mut(k).column_mut(this_sample);
         y0_k_s += &y0_dk.column(k);
-    }
 
-    Ok(())
-}
-
-fn collect_basic_stat_visitor(
-    this_sample: usize,                   // sample id
-    cells: &[usize],                      // cells within this sample
-    data: &SparseIoVec,                   // full data
-    input: &CocoaCollapseIn,              //
-    arc_stat: Arc<Mutex<&mut CocoaStat>>, // fill in y1
-) -> anyhow::Result<()> {
-    assert_eq!(data.num_rows(), input.n_genes);
-
-    let kk = input.n_topics;
-    let y1_dn = data.read_columns_csc(cells.iter().cloned())?;
-
-    // sum_j y1[g,j] * z[j,k] * ind[j,s]
-    let mut y1_dk = Mat::zeros(y1_dn.nrows(), kk);
-    let mut size_k = DVec::zeros(kk);
-    y1_dn
-        .col_iter()
-        .zip(cells.iter().cloned())
-        .for_each(|(y, y1_col)| {
-            let z_j = &input.cell_topic_nk.row(y1_col);
-            for (k, &z_jk) in z_j.iter().enumerate() {
-                let y_rows = y.row_indices();
-                let y_vals = y.values();
-                y_rows.iter().zip(y_vals.iter()).for_each(|(&g, &y_gj)| {
-                    y1_dk[(g, k)] += z_jk * y_gj;
-                });
-                size_k[k] += z_jk;
-            }
-        });
-
-    // update global statistics
-    let mut stat = arc_stat.lock().expect("lock stat");
-    for k in 0..input.n_topics {
         let mut y1_k_s = stat.y1_stat_mut(k).column_mut(this_sample);
         y1_k_s += &y1_dk.column(k);
+
         stat.size_stat_mut(k)[this_sample] += size_k[k];
+    }
+
+    for (indv_index, indv_y1, indv_size) in &indv_stats {
+        for k in 0..n_topics {
+            let y1_di = stat.indv_y1_stat_mut(k);
+            for g in 0..n_genes {
+                y1_di[(g, *indv_index)] += indv_y1[(g, k)];
+            }
+            stat.indv_size_stat_mut(k)[(*indv_index, this_sample)] += indv_size[k];
+        }
     }
 
     Ok(())
