@@ -236,7 +236,7 @@ mod tests {
         let result = append_batch_coordinate(&coords, &batches).unwrap();
         assert_eq!(result.nrows(), 3);
         assert_eq!(result.ncols(), 3); // original 2 + 1 batch
-        // Single batch → all batch coordinates should be 0.0
+                                       // Single batch → all batch coordinates should be 0.0
         for i in 0..3 {
             assert_eq!(result[(i, 2)], 0.0);
         }
@@ -251,7 +251,10 @@ mod tests {
         // Batch coordinates should differ between A and B
         let batch_a = result[(0, 2)];
         let batch_b = result[(2, 2)];
-        assert_ne!(batch_a, batch_b, "different batches should have different coordinates");
+        assert_ne!(
+            batch_a, batch_b,
+            "different batches should have different coordinates"
+        );
         // Same batch should have same coordinate
         assert_eq!(result[(0, 2)], result[(1, 2)]);
         assert_eq!(result[(2, 2)], result[(3, 2)]);

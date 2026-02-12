@@ -241,7 +241,10 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     );
 
     // 2. Build spatial cell-cell KNN graph and extract pair info
-    info!("[2/9] Building spatial KNN graph (k={})...", args.knn_spatial);
+    info!(
+        "[2/9] Building spatial KNN graph (k={})...",
+        args.knn_spatial
+    );
     let cell_pairs: Vec<(usize, usize)>;
     {
         let srt_cell_pairs = SrtCellPairs::new(
@@ -286,7 +289,10 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
 
     // 4-5. Build gene-gene graph (external network or KNN from posterior means)
     let mut gene_graph = if let Some(network_file) = &args.gene_network {
-        info!("[4/9] Loading external gene network from {}...", network_file);
+        info!(
+            "[4/9] Loading external gene network from {}...",
+            network_file
+        );
         GenePairGraph::from_edge_list(
             network_file,
             gene_names.clone(),
@@ -305,7 +311,10 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
         mu_param.calibrate();
 
         // 5. Build gene-gene KNN graph
-        info!("[5/9] Building gene-gene KNN graph (k={})...", args.knn_gene);
+        info!(
+            "[5/9] Building gene-gene KNN graph (k={})...",
+            args.knn_gene
+        );
         GenePairGraph::from_posterior_means(
             mu_param.posterior_mean(),
             gene_names.clone(),
@@ -344,7 +353,10 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     let gene_pair_params = gene_pair_stat.optimize(None)?;
 
     // 9. SVD on positive channel posterior log means
-    info!("[8/9] Randomized SVD ({} components)...", args.n_latent_topics);
+    info!(
+        "[8/9] Randomized SVD ({} components)...",
+        args.n_latent_topics
+    );
 
     let training_dm = gene_pair_params
         .delta_pos

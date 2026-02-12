@@ -292,7 +292,10 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     }
 
     // 3. Build spatial KNN graph
-    info!("[3/8] Building spatial KNN graph (k={})...", args.knn_spatial);
+    info!(
+        "[3/8] Building spatial KNN graph (k={})...",
+        args.knn_spatial
+    );
 
     let mut srt_cell_pairs = SrtCellPairs::new(
         &data_vec,
@@ -338,7 +341,10 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     let params = collapsed_stat.optimize(None)?;
 
     // 7. SVD on [shared; diff] posterior log means
-    info!("[7/8] Randomized SVD ({} components)...", args.n_latent_topics);
+    info!(
+        "[7/8] Randomized SVD ({} components)...",
+        args.n_latent_topics
+    );
 
     let training_dm = concatenate_vertical(&[
         params.shared.posterior_log_mean().scale_columns(),

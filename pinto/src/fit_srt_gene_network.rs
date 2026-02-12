@@ -532,7 +532,11 @@ mod tests {
             .iter()
             .map(|&d| {
                 let gap = d - rho;
-                if gap > 0.0 { (-gap / sigma).exp() } else { 1.0 }
+                if gap > 0.0 {
+                    (-gap / sigma).exp()
+                } else {
+                    1.0
+                }
             })
             .sum();
         assert!(

@@ -24,7 +24,6 @@ pub trait RandPartitionOps {
     ) -> anyhow::Result<()>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
-
 }
 
 impl RandPartitionOps for SparseIoVec {
@@ -37,19 +36,19 @@ impl RandPartitionOps for SparseIoVec {
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
-        // treat an individual as a "batch" so that we can estimate projections
-        // comparable across batches
-        let proj_out = self.project_columns_with_batch_correction(
+        // Centred projection for pseudobulk partitioning
+        // (needs cells mixed across individuals within each group)
+        let centred = self.project_columns_with_batch_correction(
             proj_dim,
             Some(block_size),
             Some(&cell_to_indv),
         )?;
+        self.partition_columns_to_groups(&centred.proj, None, None)?;
 
-        let proj_kn = proj_out.proj;
-        self.partition_columns_to_groups(&proj_kn, None, None)?;
-
-        // treat each individual as a batch
-        self.build_hnsw_per_batch(&proj_kn, cell_to_indv)?;
+        // Uncentred projection for HNSW matching
+        // (preserves individual-level signal V for confounder adjustment)
+        let raw = self.project_columns(proj_dim, Some(block_size))?;
+        self.build_hnsw_per_batch(&raw.proj, cell_to_indv)?;
 
         Ok(())
     }
@@ -94,5 +93,4 @@ impl RandPartitionOps for SparseIoVec {
 
         Ok(())
     }
-
 }
