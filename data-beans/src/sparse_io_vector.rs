@@ -38,6 +38,7 @@ pub struct TripletsMatched {
     pub shape: (usize, usize),
     pub triplets: Vec<(u64, u64, f32)>,
     pub source_columns: Vec<usize>,
+    pub matched_columns: Vec<usize>,
     pub distances: Vec<f32>,
 }
 
@@ -402,7 +403,7 @@ impl SparseIoVec {
         let mut triplets = Vec::new();
         let mut distances = Vec::new();
         let mut source_columns = Vec::new();
-        // let mut source_positions = Vec::new();
+        let mut matched_columns = Vec::new();
 
         for glob in cells {
             let source_batch = cell_to_batch[glob]; // this cell's batch
@@ -432,7 +433,7 @@ impl SparseIoVec {
                     );
                     ncol += loc_ncol;
                     source_columns.push(glob);
-                    // source_positions.push(idx);
+                    matched_columns.push(glob_matched);
                     distances.push(dist);
                 }
             }
@@ -442,6 +443,7 @@ impl SparseIoVec {
             shape: (nrow, ncol),
             triplets,
             source_columns,
+            matched_columns,
             distances,
         })
     }
@@ -479,6 +481,7 @@ impl SparseIoVec {
         let mut tot_triplets: Vec<(u64, u64, f32)> = Vec::with_capacity(approx_ncols);
         let mut tot_distances: Vec<f32> = Vec::with_capacity(approx_ncols);
         let mut tot_sources: Vec<usize> = Vec::with_capacity(approx_ncols);
+        let mut tot_matched: Vec<usize> = Vec::with_capacity(approx_ncols);
         let mut tot_ncells_matched: usize = 0;
 
         for &target_b in target_batches.iter() {
@@ -486,6 +489,7 @@ impl SparseIoVec {
                 shape,
                 triplets,
                 source_columns,
+                matched_columns,
                 distances,
             } = self.matched_columns_triplets_on_one_target(
                 cells.iter().cloned(),
@@ -503,6 +507,7 @@ impl SparseIoVec {
             tot_distances.extend(distances);
             tot_ncells_matched += shape.1;
             tot_sources.extend(source_columns);
+            tot_matched.extend(matched_columns);
         }
 
         let shape = (nrows, tot_ncells_matched);
@@ -511,6 +516,7 @@ impl SparseIoVec {
             shape,
             triplets: tot_triplets,
             source_columns: tot_sources,
+            matched_columns: tot_matched,
             distances: tot_distances,
         })
     }
@@ -557,7 +563,7 @@ impl SparseIoVec {
 
         let mut distances = Vec::with_capacity(approx_ncol);
         let mut source_columns = Vec::with_capacity(approx_ncol);
-        // let mut source_positions = Vec::with_capacity(approx_ncol);
+        let mut matched_columns = Vec::with_capacity(approx_ncol);
 
         let nbatches = self.num_batches();
 
@@ -604,7 +610,7 @@ impl SparseIoVec {
                         );
                         ncol += loc_ncol;
                         source_columns.push(glob_index);
-                        // source_positions.push(idx);
+                        matched_columns.push(glob_matched_index);
                         distances.push(dist);
                     }
                 }
@@ -615,6 +621,7 @@ impl SparseIoVec {
             shape: (nrow, ncol),
             triplets,
             source_columns,
+            matched_columns,
             distances,
         })
     }
@@ -638,6 +645,7 @@ impl SparseIoVec {
         let approx_knn = self.num_batches() * knn_per_batch;
         let mut triplets = Vec::with_capacity(approx_knn);
         let mut source_columns = Vec::with_capacity(approx_knn);
+        let mut matched_columns = Vec::with_capacity(approx_knn);
         let mut distances = Vec::with_capacity(approx_knn);
 
         for lookup in lookups {
@@ -657,6 +665,7 @@ impl SparseIoVec {
                 );
                 ncol += loc_ncol;
                 source_columns.push(glob_idx);
+                matched_columns.push(glob_idx);
                 distances.push(dist);
             }
         }
@@ -665,6 +674,7 @@ impl SparseIoVec {
             shape: (nrow, ncol),
             triplets,
             source_columns,
+            matched_columns,
             distances,
         })
     }
@@ -689,7 +699,7 @@ impl SparseIoVec {
         knn_columns: usize,
         skip_same_batch: bool,
         skip_batches: Option<&[usize]>,
-    ) -> anyhow::Result<(CscMatrix<f32>, Vec<usize>, Vec<f32>)>
+    ) -> anyhow::Result<(CscMatrix<f32>, Vec<usize>, Vec<usize>, Vec<f32>)>
     where
         I: Iterator<Item = usize>,
     {
@@ -697,6 +707,7 @@ impl SparseIoVec {
             shape: (nrow, ncol),
             triplets,
             source_columns,
+            matched_columns,
             distances,
         } = self.neighbouring_columns_triplets(
             cells,
@@ -709,6 +720,7 @@ impl SparseIoVec {
         Ok((
             CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)?,
             source_columns,
+            matched_columns,
             distances,
         ))
     }
@@ -741,6 +753,7 @@ impl SparseIoVec {
             triplets,
             source_columns,
             distances,
+            ..
         } = self.neighbouring_columns_triplets(
             cells,
             knn_batches,
@@ -783,6 +796,7 @@ impl SparseIoVec {
             triplets,
             source_columns,
             distances,
+            ..
         } = self.neighbouring_columns_triplets(
             cells,
             knn_batches,
@@ -824,6 +838,7 @@ impl SparseIoVec {
             triplets,
             source_columns,
             distances,
+            ..
         } = self.matched_columns_triplets(cells, target_batches, knn, skip_same_batch)?;
         Ok((
             CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)?,
@@ -859,6 +874,7 @@ impl SparseIoVec {
             triplets,
             source_columns,
             distances,
+            ..
         } = self.matched_columns_triplets(cells, target_batches, knn, skip_same_batch)?;
 
         Ok((
@@ -895,6 +911,7 @@ impl SparseIoVec {
             triplets,
             source_columns,
             distances,
+            ..
         } = self.matched_columns_triplets(cells, target_batches, knn, skip_same_batch)?;
 
         Ok((
@@ -927,6 +944,7 @@ impl SparseIoVec {
             triplets,
             source_columns,
             distances,
+            ..
         } = self.query_columns_by_data_triplets(query, knn_per_batch)?;
 
         Ok((
@@ -959,6 +977,7 @@ impl SparseIoVec {
             triplets,
             source_columns,
             distances,
+            ..
         } = self.query_columns_by_data_triplets(query, knn_per_batch)?;
 
         Ok((
@@ -991,6 +1010,7 @@ impl SparseIoVec {
             triplets,
             source_columns,
             distances,
+            ..
         } = self.query_columns_by_data_triplets(query, knn_per_batch)?;
 
         Ok((

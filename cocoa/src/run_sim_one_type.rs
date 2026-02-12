@@ -488,7 +488,7 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn sample_logits_each_row(
+pub(crate) fn sample_logits_each_row(
     logits_nk: Mat,
     rng: &mut rand::rngs::StdRng,
 ) -> anyhow::Result<Vec<usize>> {
@@ -502,7 +502,10 @@ fn sample_logits_each_row(
     sample_each_row(weights_nk, rng)
 }
 
-fn sample_each_row(weights_nk: Mat, rng: &mut rand::rngs::StdRng) -> anyhow::Result<Vec<usize>> {
+pub(crate) fn sample_each_row(
+    weights_nk: Mat,
+    rng: &mut rand::rngs::StdRng,
+) -> anyhow::Result<Vec<usize>> {
     let weights_vec = weights_nk.row_iter().collect::<Vec<_>>();
     Ok(weights_vec
         .iter()
