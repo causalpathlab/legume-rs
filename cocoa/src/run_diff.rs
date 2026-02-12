@@ -2,10 +2,14 @@ use crate::collapse_cocoa_data::*;
 use crate::common::*;
 use crate::input::*;
 use crate::randomly_partition_data::*;
+use crate::stat::*;
 
 use clap::Parser;
 use matrix_param::io::*;
+use matrix_util::common_io::write_lines;
 use matrix_util::traits::{IoOps, MatOps};
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 
 #[derive(Parser, Debug, Clone)]
 pub struct DiffArgs {
@@ -132,6 +136,20 @@ pub struct DiffArgs {
 
     #[arg(
         long,
+        default_value_t = 0,
+        help = "Number of exposure-label permutations for empirical p-values."
+    )]
+    n_permutations: usize,
+
+    #[arg(
+        long,
+        default_value_t = 42,
+        help = "Random seed for permutation testing."
+    )]
+    permutation_seed: u64,
+
+    #[arg(
+        long,
         default_value_t = false,
         help = "Preload all the columns data.",
         long_help = "Preload all the columns data."
@@ -235,9 +253,13 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         })
         .collect();
 
-    let cocoa_input = &CocoaCollapseIn {
-        n_genes: data.sparse_data.num_rows(),
-        n_topics: data.cell_topic.ncols(),
+    let n_genes = data.sparse_data.num_rows();
+    let n_topics = data.cell_topic.ncols();
+    let gene_names = data.sparse_data.row_names()?;
+
+    let cocoa_input = CocoaCollapseIn {
+        n_genes,
+        n_topics,
         knn: args.knn,
         n_opt_iter: args.num_opt_iter,
         hyper_param: Some((args.a0, args.b0)),
@@ -246,13 +268,19 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     };
 
     info!("Collecting statistics...");
-    let cocoa_stat = data.sparse_data.collect_cocoa_stat(cocoa_input)?;
+    let cocoa_stat = data.sparse_data.collect_cocoa_stat(&cocoa_input)?;
 
     info!("Optimizing parameters...");
     let parameters = cocoa_stat.estimate_parameters()?;
 
+    // Compute real contrast before consuming parameters
+    let real_contrast = if args.n_permutations > 0 {
+        Some(compute_exposure_contrast(&parameters, &exposure_assignment))
+    } else {
+        None
+    };
+
     info!("Writing down the estimates...");
-    let gene_names = data.sparse_data.row_names()?;
 
     let mut tau = Vec::with_capacity(parameters.len());
     let mut shared = Vec::with_capacity(parameters.len());
@@ -272,22 +300,59 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         &format!("{}.effect.parquet", args.out),
     )?;
 
-    // these can take too much space...
-    // to_parquet(
-    //     &shared,
-    //     Some(&gene_names),
-    //     None,
-    // 	Some(&topic_names),
-    //     &format!("{}.pb.shared.parquet", args.out),
-    // )?;
+    // Permutation testing
+    if let Some(real_contrast) = real_contrast {
+        info!(
+            "Building match cache for {} permutations...",
+            args.n_permutations
+        );
+        let cache = MatchCache::build(&data.sparse_data, args.knn)?;
 
-    // to_parquet(
-    //     &residual,
-    //     Some(&gene_names),
-    //     None,
-    // 	Some(&topic_names),
-    //     &format!("{}.pb.residual.parquet", args.out),
-    // )?;
+        let mut null_sum = vec![0f32; n_genes];
+        let mut null_sum_sq = vec![0f32; n_genes];
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(args.permutation_seed);
+
+        for p in 0..args.n_permutations {
+            let mut perm_exposure = exposure_assignment.clone();
+            perm_exposure.shuffle(&mut rng);
+
+            let perm_stat = cache.replay_with_exposure(
+                &cocoa_input.cell_topic_nk,
+                &perm_exposure,
+                n_genes,
+                n_topics,
+                args.num_opt_iter,
+                Some((args.a0, args.b0)),
+            )?;
+            let perm_params = perm_stat.estimate_parameters()?;
+            let perm_contrast = compute_exposure_contrast(&perm_params, &perm_exposure);
+
+            for g in 0..n_genes {
+                null_sum[g] += perm_contrast[g];
+                null_sum_sq[g] += perm_contrast[g] * perm_contrast[g];
+            }
+            info!("Permutation {}/{}", p + 1, args.n_permutations);
+        }
+
+        // Compute z-scores and p-values
+        let np = args.n_permutations as f32;
+        let lines: Vec<Box<str>> = std::iter::once("gene\tcontrast\tz_score\tpvalue".into())
+            .chain((0..n_genes).map(|g| {
+                let null_mean = null_sum[g] / np;
+                let null_var = null_sum_sq[g] / np - null_mean * null_mean;
+                let null_std = null_var.max(1e-10).sqrt();
+                let z = (real_contrast[g] - null_mean) / null_std;
+                let pval = z_to_pvalue(z);
+                let name = &gene_names[g];
+                format!("{}\t{}\t{}\t{}", name, real_contrast[g], z, pval).into()
+            }))
+            .collect();
+
+        let perm_file = format!("{}.perm.tsv.gz", args.out);
+        write_lines(&lines, &perm_file)?;
+        info!("Wrote permutation results to {}", perm_file);
+    }
 
     info!("Done");
     Ok(())
