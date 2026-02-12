@@ -5,7 +5,7 @@ use crate::randomly_partition_data::*;
 
 use clap::Parser;
 use matrix_param::io::*;
-use matrix_util::traits::MatOps;
+use matrix_util::traits::{IoOps, MatOps};
 
 #[derive(Parser, Debug, Clone)]
 pub struct DiffArgs {
@@ -139,6 +139,16 @@ pub struct DiffArgs {
     preload_data: bool,
 
     #[arg(
+        long,
+        help = "Known confounder matrix file (tsv.gz, n_indv x n_covar).",
+        long_help = "Provide a known individual-level confounder matrix V instead of\n\
+                     discovering confounders by random projection. The file should be\n\
+                     a tab-delimited matrix (n_indv x n_covar) in .tsv.gz format.\n\
+                     Rows correspond to individuals 0, 1, 2, ... in order."
+    )]
+    confounder_file: Option<Box<str>>,
+
+    #[arg(
         short,
         long,
         help = "Verbosity.",
@@ -174,11 +184,23 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
 
     info!("Assign cells to pseudobulk samples to calibrate the null distribution");
 
-    data.sparse_data.assign_pseudobulk_individuals(
-        args.proj_dim,
-        args.block_size,
-        &data.cell_to_indv,
-    )?;
+    if let Some(ref conf_file) = args.confounder_file {
+        info!("Loading known confounders from: {}", conf_file);
+        let confounder_v = Mat::from_tsv(conf_file, None)?;
+        info!(
+            "Confounder matrix: {} individuals x {} covariates",
+            confounder_v.nrows(),
+            confounder_v.ncols()
+        );
+        data.sparse_data
+            .assign_pseudobulk_with_known_confounders(&confounder_v, &data.cell_to_indv)?;
+    } else {
+        data.sparse_data.assign_pseudobulk_individuals(
+            args.proj_dim,
+            args.block_size,
+            &data.cell_to_indv,
+        )?;
+    }
 
     let indv_names = data.sparse_data.batch_names().unwrap();
     let indv_to_exposure = data

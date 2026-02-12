@@ -231,13 +231,16 @@ fn collect_matched_stat_visitor(
             knn_cells,
             true,
         )?,
-        None => data_vec.read_neighbouring_columns_csc(
-            cells.iter().cloned(),
-            knn_batches,
-            knn_cells,
-            true,
-            None,
-        )?,
+        None => {
+            let (mat, src, _matched, dist) = data_vec.read_neighbouring_columns_csc(
+                cells.iter().cloned(),
+                knn_batches,
+                knn_cells,
+                true,
+                None,
+            )?;
+            (mat, src, dist)
+        }
     };
 
     let mut y1 = data_vec.read_columns_csc(cells.iter().cloned())?;

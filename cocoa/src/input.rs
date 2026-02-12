@@ -365,6 +365,15 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
     }
 
     let cell_topic = concatenate_vertical(topic_vec.as_slice())?;
+
+    // If no topic files were given, we created a single default column;
+    // make sure there's a matching name so downstream parquet output works
+    let sorted_topic_names = if sorted_topic_names.is_empty() && cell_topic.ncols() == 1 {
+        vec!["0".to_string().into_boxed_str()]
+    } else {
+        sorted_topic_names
+    };
+
     info!("Total {} data sets combined", sparse_data.len());
 
     sparse_data.assign_groups(&cell_to_indv, None);
