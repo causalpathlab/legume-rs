@@ -8,7 +8,7 @@ use crate::srt_random_projection::*;
 use candle_util::candle_core::{self, Device, Tensor};
 use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_aux_linear::non_neg_linear;
-use candle_util::candle_loss_functions::poisson_likelihood;
+use candle_util::candle_loss_functions::{poisson_likelihood, topic_log_likelihood};
 use candle_util::candle_model_traits::EncoderModuleT;
 use candle_util::candle_data_loader::*;
 use candle_util::candle_nn::{self, AdamW, Module, Optimizer};
@@ -26,6 +26,22 @@ enum ComputeDevice {
     Cpu,
     Cuda,
     Metal,
+}
+
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+enum Likelihood {
+    Poisson,
+    Multinomial,
+}
+
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+enum Interaction {
+    /// θ_left ⊙ θ_right (Hadamard product)
+    Multiply,
+    /// θ_left + θ_right (additive)
+    Add,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -195,6 +211,29 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
+        default_value_t = false,
+        help = "Normalize interaction to simplex (divide by row sum)"
+    )]
+    normalize_interaction: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "multiply",
+        help = "Interaction type: multiply (θ_left ⊙ θ_right) or add (θ_left + θ_right)"
+    )]
+    interaction: Interaction,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "poisson",
+        help = "Likelihood model: poisson (rate-based) or multinomial (composition-based)"
+    )]
+    likelihood: Likelihood,
+
+    #[arg(
+        long,
         short = 'n',
         default_value_t = 1e4,
         help = "Column sum normalization scale for encoder input"
@@ -338,6 +377,8 @@ pub(crate) fn collect_pair_left_right_visitor(
 
 struct BilinearInteractionDecoder {
     n_topics: usize,
+    normalize_interaction: bool,
+    interaction: Interaction,
     dictionary: candle_util::candle_aux_linear::NonNegLinear,
 }
 
@@ -345,22 +386,35 @@ impl BilinearInteractionDecoder {
     fn new(
         n_genes: usize,
         n_topics: usize,
+        normalize_interaction: bool,
+        interaction: Interaction,
         vb: candle_nn::VarBuilder,
     ) -> candle_core::Result<Self> {
         let dictionary = non_neg_linear(n_topics, n_genes, vb.pp("dictionary"))?;
         Ok(Self {
             n_topics,
+            normalize_interaction,
+            interaction,
             dictionary,
         })
     }
 
-    /// Forward: rate = (θ_left ⊙ θ_right) @ λ^T   [N, G]
+    /// Forward: combine θ_left and θ_right, then decode through dictionary [N, G]
     fn forward(
         &self,
         theta_left: &Tensor,
         theta_right: &Tensor,
     ) -> candle_core::Result<Tensor> {
-        let interaction = (theta_left * theta_right)?;
+        let interaction = match self.interaction {
+            Interaction::Multiply => (theta_left * theta_right)?,
+            Interaction::Add => (theta_left + theta_right)?,
+        };
+        let interaction = if self.normalize_interaction {
+            let row_sum = interaction.sum_keepdim(1)?;
+            interaction.broadcast_div(&row_sum)?
+        } else {
+            interaction
+        };
         self.dictionary.forward(&interaction)
     }
 
@@ -376,10 +430,31 @@ impl BilinearInteractionDecoder {
         Ok((rate_nd, llik))
     }
 
+    /// Forward with multinomial log-likelihood:
+    /// log_p = log_softmax(rate, dim=1) over genes, then Σ_g y_g log_p_g
+    fn forward_with_multinomial_llik(
+        &self,
+        theta_left: &Tensor,
+        theta_right: &Tensor,
+        y_nd: &Tensor,
+    ) -> candle_core::Result<(Tensor, Tensor)> {
+        let rate_nd = self.forward(theta_left, theta_right)?;
+        let log_p_nd = candle_nn::ops::log_softmax(&rate_nd, 1)?;
+        let llik = topic_log_likelihood(y_nd, &log_p_nd)?;
+        Ok((rate_nd, llik))
+    }
+
     /// Get dictionary [G, K] as non-negative weights
     fn get_dictionary(&self, dev: &Device) -> candle_core::Result<Tensor> {
         let eye = Tensor::eye(self.n_topics, candle_core::DType::F32, dev)?;
         self.dictionary.forward(&eye)?.t()
+    }
+
+    /// Get dictionary [G, K] as log-probabilities (log_softmax over genes per topic)
+    fn get_log_dictionary(&self, dev: &Device) -> candle_core::Result<Tensor> {
+        let eye = Tensor::eye(self.n_topics, candle_core::DType::F32, dev)?;
+        let dict_kg = self.dictionary.forward(&eye)?; // [K, G]
+        candle_nn::ops::log_softmax(&dict_kg, 1)?.t() // [G, K]
     }
 }
 
@@ -505,8 +580,14 @@ fn train_link_community(
                     theta_right
                 };
 
-                let (_, llik) =
-                    decoder.forward_with_llik(&theta_left, &theta_right, &y_nd)?;
+                let (_, llik) = match args.likelihood {
+                    Likelihood::Poisson => {
+                        decoder.forward_with_llik(&theta_left, &theta_right, &y_nd)?
+                    }
+                    Likelihood::Multinomial => {
+                        decoder.forward_with_multinomial_llik(&theta_left, &theta_right, &y_nd)?
+                    }
+                };
 
                 let kl = (&kl_l + &kl_r)?;
                 let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
@@ -751,7 +832,8 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         vb.clone(),
     )?;
 
-    let decoder = BilinearInteractionDecoder::new(n_genes, n_topics, vb.clone())?;
+    let decoder =
+        BilinearInteractionDecoder::new(n_genes, n_topics, args.normalize_interaction, args.interaction.clone(), vb.clone())?;
 
     info!(
         "Encoder: {} features -> {} modules -> {:?} -> {} topics",
@@ -768,7 +850,10 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // Write dictionary
     info!("[9/10] Writing dictionary...");
 
-    let dict_gk = decoder.get_dictionary(&dev)?;
+    let dict_gk = match args.likelihood {
+        Likelihood::Multinomial => decoder.get_log_dictionary(&dev)?,
+        Likelihood::Poisson => decoder.get_dictionary(&dev)?,
+    };
     dict_gk
         .to_device(&Device::Cpu)?
         .to_parquet_with_names(
