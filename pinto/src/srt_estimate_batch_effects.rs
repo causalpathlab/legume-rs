@@ -32,15 +32,15 @@ pub fn estimate_batch(
     let proj_kn = proj_out.proj;
     info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
 
-    let nsamp =
-        data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), args.down_sample)?;
-
-    info!("Assigning to random {} samples", nsamp);
-
-    data_vec.build_hnsw_per_batch(&proj_kn, batch_membership)?;
-
-    let collapse_out =
-        data_vec.collapse_columns(Some(args.knn_batches), Some(args.knn_cells), None, None)?;
+    let collapse_out = collapse_columns_multilevel_impl(
+        data_vec,
+        &proj_kn,
+        batch_membership,
+        Some(args.knn_cells),
+        None, // default num_levels
+        Some(args.sort_dim),
+        None, // default opt_iter
+    )?;
 
     Ok(collapse_out.delta)
 }

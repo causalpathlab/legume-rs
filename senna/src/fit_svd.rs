@@ -82,7 +82,7 @@ pub struct SvdArgs {
         help = "Number of k-nearest neighbour batches",
         long_help = "Number of k-nearest neighbour batches.\n\
 		     Controls the number of batches considered \n\
-		     for nearest neighbour search."
+		     for nearest neighbour search (cell-level mode)."
     )]
     knn_batches: usize,
 
@@ -91,8 +91,8 @@ pub struct SvdArgs {
         default_value_t = 10,
         help = "Number of k-nearest neighbours within each batch",
         long_help = "Number of k-nearest neighbours within each batch.\n\
-		     Controls the number of cells considered \n\
-		     for nearest neighbour search within each batch."
+		     Controls the number of neighbours for \n\
+		     nearest neighbour search."
     )]
     knn_cells: usize,
 
@@ -101,9 +101,30 @@ pub struct SvdArgs {
         value_delimiter(','),
         help = "Reference batch names",
         long_help = "Reference batch names (comma-separated).\n\
-		     Specify batches to be used as reference during adjustment."
+		     Specify batches to be used as reference during adjustment.\n\
+		     Forces cell-level matching (disables super-cell mode)."
     )]
     reference_batches: Option<Vec<Box<str>>>,
+
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Number of multi-level coarsening levels",
+        long_help = "Number of multi-level coarsening levels for batch correction.\n\
+		     Higher values add intermediate refinement steps.\n\
+		     Level sort dimensions are linearly spaced from 4 to sort_dim."
+    )]
+    num_levels: usize,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Disable super-cell matching",
+        long_help = "Disable super-cell matching and use cell-level KNN instead.\n\
+		     The cell-level approach is slower but may be more accurate\n\
+		     for small datasets."
+    )]
+    no_supercell: bool,
 
     #[arg(
         long,
@@ -277,23 +298,40 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
 
     info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
 
-    let nsamp = data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
-
-    if !args.ignore_batch_effects && nbatch > 1 {
-        info!("Registering batch information");
-        data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
-    }
-
     // 3. Batch-adjusted collapsing (pseudobulk)
     let reference = args.reference_batches.as_ref().map(|x| x.as_slice());
 
-    info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
-    let collapse_out = data_vec.collapse_columns(
-        Some(args.knn_batches),
-        Some(args.knn_cells),
-        reference,
-        Some(args.iter_opt),
-    )?;
+    let use_multilevel =
+        !args.ignore_batch_effects && nbatch > 1 && reference.is_none() && !args.no_supercell;
+
+    let collapse_out = if use_multilevel {
+        info!("Multi-level collapsing with super-cells ...");
+        collapse_columns_multilevel_impl(
+            &mut data_vec,
+            &proj_kn,
+            &batch_membership,
+            Some(args.knn_cells),
+            Some(args.num_levels),
+            Some(args.sort_dim),
+            Some(args.iter_opt),
+        )?
+    } else {
+        let nsamp =
+            data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
+
+        if !args.ignore_batch_effects && nbatch > 1 {
+            info!("Registering batch information");
+            data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
+        }
+
+        info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
+        data_vec.collapse_columns(
+            Some(args.knn_batches),
+            Some(args.knn_cells),
+            reference,
+            Some(args.iter_opt),
+        )?
+    };
 
     // 4. batch-adjusted data
     let batch_dp = collapse_out.mu_residual.as_ref();
