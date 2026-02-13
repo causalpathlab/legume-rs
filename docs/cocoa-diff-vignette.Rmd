@@ -1,0 +1,292 @@
+---
+title: "CoCoA Permutation-Based Differential Analysis"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE)
+```
+
+## Introduction
+
+**CoCoA** (Confounder-adjusted Co-expression Analysis) provides differential expression analysis that accounts for confounding in single-cell data. This vignette demonstrates:
+
+1. Simulating single-cell data with confounded exposure assignment
+2. Running CoCoA's permutation-based differential testing
+3. Comparing results with a naive pseudobulk Wilcoxon rank-sum test
+
+The key advantage of CoCoA's permutation approach is proper calibration under confounding: shuffling exposure labels under the null preserves the confounding structure, yielding valid p-values even when confounders correlate with both exposure and gene expression.
+
+## Setup
+
+```{r}
+temp_dir <- "temp_cocoa_diff_vignette"
+if (!dir.exists(temp_dir)) dir.create(temp_dir)
+```
+
+## Getting Help
+
+```{bash}
+cocoa diff --help
+```
+
+## Step 1: Simulate Data
+
+We simulate single-cell count data with:
+
+- 200 genes (10 causal, differentially expressed between exposure groups)
+- ~5000 cells across 20 individuals (10 per exposure group)
+- Strong confounding: covariates explain 80% of variance in both exposure and expression
+- Moderate effect size (1.0 standard deviations)
+
+```{bash}
+[ -d "temp_cocoa_diff_vignette/sim.zarr" ] && echo "Skipping: sim.zarr exists" && exit 0
+cocoa simulate-one -r 200 -c 5000 -a 10 \
+  --n-samples-per-exposure 10 \
+  --effect-size 1.0 \
+  --pve-covar-exposure 0.8 \
+  --pve-covar-gene 0.8 \
+  -o temp_cocoa_diff_vignette/sim \
+  -v
+```
+
+The simulation outputs:
+
+- `sim.zarr` -- sparse single-cell count matrix (genes x cells)
+- `sim.samples.gz` -- cell-to-individual assignment (one line per cell)
+- `sim.exposures.gz` -- individual-to-exposure mapping
+- `sim.causal.gz` -- ground-truth causal gene indices and their exposure category
+
+## Step 2: Run CoCoA Differential Analysis with Permutations
+
+CoCoA builds a KNN graph within each exposure condition, estimates gene-level effects, then permutes exposure labels to build a null distribution. With 50 permutations, we get empirical z-scores and p-values.
+
+```{bash}
+[ -f "temp_cocoa_diff_vignette/cocoa_result.perm.tsv.gz" ] && echo "Skipping: cocoa_result exists" && exit 0
+cocoa diff temp_cocoa_diff_vignette/sim.zarr \
+  -i temp_cocoa_diff_vignette/sim.samples.gz \
+  -e temp_cocoa_diff_vignette/sim.exposures.gz \
+  --n-permutations 50 \
+  --permutation-seed 42 \
+  -o temp_cocoa_diff_vignette/cocoa_result \
+  -v
+```
+
+## Step 3: Load CoCoA Results
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(arrow)
+
+# Read permutation test results (gene, contrast, z_score, pvalue)
+cocoa_perm <- read.delim(
+  gzfile("temp_cocoa_diff_vignette/cocoa_result.perm.tsv.gz"),
+  header = TRUE
+)
+head(cocoa_perm)
+```
+
+```{r}
+# Read ground-truth causal genes (gene_idx, exposure_category)
+causal <- read.delim(
+  gzfile("temp_cocoa_diff_vignette/sim.causal.gz"),
+  header = FALSE,
+  col.names = c("gene_idx", "exposure_cat")
+)
+causal$gene <- as.character(causal$gene_idx)
+cat("Causal genes:", sort(causal$gene_idx), "\n")
+```
+
+```{r}
+# Flag causal genes in CoCoA results
+cocoa_perm$causal <- cocoa_perm$gene %in% causal$gene
+
+# Top hits by |z-score|
+cocoa_perm %>%
+  arrange(desc(abs(z_score))) %>%
+  head(20)
+```
+
+## Step 4: Pseudobulk Aggregation
+
+To run a naive pseudobulk test, we first aggregate single-cell counts to individual-level means using `data-beans stat`. This requires a membership file mapping each cell to its individual.
+
+```{bash}
+[ -f "temp_cocoa_diff_vignette/cell_names.gz" ] && echo "Skipping: cell_names exists" && exit 0
+data-beans column-names temp_cocoa_diff_vignette/sim.zarr \
+  -o temp_cocoa_diff_vignette/cell_names.gz
+```
+
+```{r}
+# Build membership file: cell name -> individual ID
+cell_names <- readLines(gzfile("temp_cocoa_diff_vignette/cell_names.gz"))
+samples <- readLines(gzfile("temp_cocoa_diff_vignette/sim.samples.gz"))
+
+n <- min(length(cell_names), length(samples))
+cat("Cells:", length(cell_names), "  Sample assignments:", length(samples),
+    "  Using:", n, "\n")
+
+membership <- data.frame(row = cell_names[1:n], group = samples[1:n])
+write.table(membership, "temp_cocoa_diff_vignette/membership.tsv",
+            sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+```{bash}
+[ -f "temp_cocoa_diff_vignette/pseudobulk.parquet" ] && echo "Skipping: pseudobulk exists" && exit 0
+data-beans stat \
+  temp_cocoa_diff_vignette/sim.zarr \
+  -s row \
+  -g temp_cocoa_diff_vignette/membership.tsv \
+  -o temp_cocoa_diff_vignette/pseudobulk.parquet
+```
+
+## Step 5: Wilcoxon Rank-Sum Test
+
+We run a naive Wilcoxon rank-sum test on the pseudobulk means, comparing individuals in the two exposure groups gene by gene.
+
+```{r}
+# Read pseudobulk statistics (name, group, nnz, tot, mu, sig)
+pseudobulk <- read_parquet("temp_cocoa_diff_vignette/pseudobulk.parquet")
+head(pseudobulk)
+```
+
+```{r}
+# Read exposure assignments (individual -> exposure group)
+exposures <- read.delim(
+  gzfile("temp_cocoa_diff_vignette/sim.exposures.gz"),
+  header = FALSE,
+  col.names = c("indv", "exposure")
+)
+exposure_map <- setNames(as.character(exposures$exposure),
+                         as.character(exposures$indv))
+
+# Pivot pseudobulk to gene x individual matrix using mean expression
+pb_wide <- pseudobulk %>%
+  select(name, group, mu) %>%
+  pivot_wider(names_from = group, values_from = mu, values_fill = 0)
+
+# Split individuals by exposure group
+indv_ids <- colnames(pb_wide)[-1]
+indv_exposures <- exposure_map[indv_ids]
+
+group0 <- indv_ids[indv_exposures == "0"]
+group1 <- indv_ids[indv_exposures == "1"]
+
+cat("Group 0:", length(group0), "individuals\n")
+cat("Group 1:", length(group1), "individuals\n")
+```
+
+```{r}
+# Wilcoxon rank-sum test per gene
+wilcox_results <- data.frame(gene = pb_wide$name, stringsAsFactors = FALSE)
+
+wilcox_results$pvalue <- sapply(seq_len(nrow(pb_wide)), function(i) {
+  x <- as.numeric(pb_wide[i, group0])
+  y <- as.numeric(pb_wide[i, group1])
+  if (sd(c(x, y)) < 1e-10) return(1.0)
+  tryCatch(
+    wilcox.test(x, y, exact = FALSE)$p.value,
+    error = function(e) 1.0
+  )
+})
+
+wilcox_results$causal <- wilcox_results$gene %in% causal$gene
+
+wilcox_results %>%
+  arrange(pvalue) %>%
+  head(20)
+```
+
+## Step 6: Comparison
+
+### CoCoA z-score vs Wilcoxon p-value
+
+```{r, fig.width=8, fig.height=6}
+comparison <- merge(
+  cocoa_perm %>% select(gene, z_score, cocoa_pval = pvalue, causal),
+  wilcox_results %>% select(gene, wilcox_pval = pvalue),
+  by = "gene"
+)
+
+ggplot(comparison, aes(x = z_score, y = -log10(wilcox_pval), color = causal)) +
+  geom_point(alpha = 0.7, size = 2) +
+  scale_color_manual(values = c("FALSE" = "grey60", "TRUE" = "red")) +
+  theme_minimal() +
+  labs(
+    title = "CoCoA z-score vs Wilcoxon -log10(p)",
+    x = "CoCoA permutation z-score",
+    y = "Wilcoxon -log10(p-value)",
+    color = "Causal"
+  )
+```
+
+### Volcano Plots
+
+```{r, fig.width=10, fig.height=5}
+par(mfrow = c(1, 2))
+
+# CoCoA
+plot(as.numeric(cocoa_perm$gene), cocoa_perm$z_score,
+     pch = 16, col = ifelse(cocoa_perm$causal, "red", "grey60"),
+     cex = ifelse(cocoa_perm$causal, 1.5, 0.8),
+     xlab = "Gene index", ylab = "z-score",
+     main = "CoCoA permutation z-scores")
+abline(h = c(-2, 2), lty = 2, col = "blue")
+legend("topright", legend = c("Null", "Causal"),
+       pch = 16, col = c("grey60", "red"))
+
+# Wilcoxon
+plot(as.numeric(wilcox_results$gene), -log10(wilcox_results$pvalue),
+     pch = 16, col = ifelse(wilcox_results$causal, "red", "grey60"),
+     cex = ifelse(wilcox_results$causal, 1.5, 0.8),
+     xlab = "Gene index", ylab = "-log10(p-value)",
+     main = "Wilcoxon -log10(p)")
+abline(h = -log10(0.05), lty = 2, col = "blue")
+legend("topright", legend = c("Null", "Causal"),
+       pch = 16, col = c("grey60", "red"))
+
+par(mfrow = c(1, 1))
+```
+
+### True Positive / False Positive Table
+
+```{r}
+thresholds <- c(0.001, 0.01, 0.05, 0.1)
+
+cocoa_table <- sapply(thresholds, function(alpha) {
+  sig <- comparison$cocoa_pval < alpha
+  c(TP = sum(sig & comparison$causal),
+    FP = sum(sig & !comparison$causal),
+    FN = sum(!sig & comparison$causal),
+    TN = sum(!sig & !comparison$causal))
+})
+colnames(cocoa_table) <- paste0("alpha=", thresholds)
+
+wilcox_table <- sapply(thresholds, function(alpha) {
+  sig <- comparison$wilcox_pval < alpha
+  c(TP = sum(sig & comparison$causal),
+    FP = sum(sig & !comparison$causal),
+    FN = sum(!sig & comparison$causal),
+    TN = sum(!sig & !comparison$causal))
+})
+colnames(wilcox_table) <- paste0("alpha=", thresholds)
+
+cat("=== CoCoA (permutation) ===\n")
+print(cocoa_table)
+cat("\n=== Wilcoxon rank-sum ===\n")
+print(wilcox_table)
+```
+
+## Session Info
+
+```{r}
+sessionInfo()
+```
