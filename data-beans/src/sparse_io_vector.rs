@@ -1201,7 +1201,43 @@ impl SparseIoVec {
     }
 
     pub fn num_batches(&self) -> usize {
-        self.batch_knn_lookup.as_ref().map_or(0, |v| v.len())
+        if let Some(v) = &self.batch_to_cols {
+            v.len()
+        } else if let Some(v) = &self.batch_knn_lookup {
+            v.len()
+        } else {
+            0
+        }
+    }
+
+    /// Register batch membership information without building HNSW
+    /// indices. This is a lightweight alternative to `register_batches_dmatrix`
+    /// for use with super-cell based batch correction.
+    pub fn register_batch_membership<T>(&mut self, batch_membership: &[T])
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
+        let batches = partition_by_membership(batch_membership, None);
+        let ntot = self.num_columns();
+        let mut col_to_batch = vec![0; ntot];
+
+        let mut sorted_batches: Vec<_> = batches.into_iter().collect();
+        sorted_batches.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+
+        let mut batch_names = Vec::with_capacity(sorted_batches.len());
+        let mut batch_to_cols = Vec::with_capacity(sorted_batches.len());
+
+        for (batch_idx, (batch_name, glob_indices)) in sorted_batches.into_iter().enumerate() {
+            for &cell in &glob_indices {
+                col_to_batch[cell] = batch_idx;
+            }
+            batch_names.push(batch_name.to_string().into_boxed_str());
+            batch_to_cols.push(glob_indices);
+        }
+
+        self.col_to_batch = Some(col_to_batch);
+        self.batch_to_cols = Some(batch_to_cols);
+        self.batch_idx_to_name = Some(batch_names);
     }
 
     pub fn batch_names(&self) -> Option<Vec<Box<str>>> {
