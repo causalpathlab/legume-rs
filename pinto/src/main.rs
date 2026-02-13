@@ -1,6 +1,7 @@
 mod fit_srt_delta_svd;
 mod fit_srt_gene_network;
 mod fit_srt_gene_pair_svd;
+mod fit_srt_link_community;
 mod fit_srt_propensity;
 mod srt_cell_pairs;
 mod srt_common;
@@ -16,6 +17,7 @@ use colored::Colorize;
 use fit_srt_delta_svd::*;
 use fit_srt_gene_network::*;
 use fit_srt_gene_pair_svd::*;
+use fit_srt_link_community::*;
 use fit_srt_propensity::*;
 
 const LOGO: &str = include_str!("../logo.txt");
@@ -107,6 +109,32 @@ enum Commands {
     GenePairDeltaSvd(SrtGenePairSvdArgs),
 
     #[command(
+        about = "Bipartite linked community model (VAE)",
+        long_about = "Bipartite Linked Community Model for spatial cell-cell interaction analysis.\n\n\
+                      Uses a VAE with bilinear decoder to discover edge communities from spatial\n\
+                      KNN graphs. Edges are \"colored\" by communities with vertex propensities\n\
+                      θ governing participation.\n\n\
+                      Pipeline stages:\n\
+                      1. Load SRT data + spatial coordinates\n\
+                      2. Estimate and correct gene-level batch effects\n\
+                      3. Build spatial cell-cell KNN graph to define cell pairs\n\
+                      4. Random projection + binary sort to assign pairs to pseudobulk samples\n\
+                      5. Collapse: accumulate left/right expression per gene per sample\n\
+                      6. Fit Poisson-Gamma model on each channel\n\
+                      7. Initialize encoder (LogSoftmaxEncoder) + decoder (BilinearInteractionDecoder)\n\
+                      8. Train with jitter resampling from Poisson-Gamma posterior\n\
+                      9. Amortized inference: encoder on individual cells → per-cell propensities\n\
+                      10. Save outputs\n\n\
+                      Outputs:\n\
+                      - {out}.delta.parquet: batch effect estimates (when multiple batches)\n\
+                      - {out}.coord_pairs.parquet: spatial cell pair coordinates\n\
+                      - {out}.dictionary.parquet: gene dictionary λ (G × K, non-negative)\n\
+                      - {out}.propensity.parquet: per-cell community propensities θ (n_cells × K)\n\
+                      - {out}.log_likelihood.parquet: training trace (llik, kl)"
+    )]
+    LinkCommunity(SrtLinkCommunityArgs),
+
+    #[command(
         about = "Estimate vertex propensity from edge clusters",
         long_about = "Estimate vertex (cell) propensity scores from edge (cell-pair) cluster assignments.\n\n\
                       Takes latent edge representations from delta-svd, clusters edges \
@@ -157,6 +185,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::GenePairDeltaSvd(args) => {
             fit_srt_gene_pair_svd(args)?;
+        }
+        Commands::LinkCommunity(args) => {
+            fit_srt_link_community(args)?;
         }
         Commands::Visualize(args) => {
             fit_srt_gene_network(args)?;
