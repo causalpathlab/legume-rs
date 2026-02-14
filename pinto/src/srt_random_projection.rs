@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
 use data_beans_alg::random_projection::*;

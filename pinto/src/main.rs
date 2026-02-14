@@ -5,6 +5,7 @@ mod fit_srt_link_community;
 mod fit_srt_propensity;
 mod srt_cell_pairs;
 mod srt_common;
+mod srt_graph_coarsen;
 mod srt_estimate_batch_effects;
 mod srt_gene_graph;
 mod srt_gene_pairs;

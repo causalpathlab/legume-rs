@@ -2,8 +2,9 @@ use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
 use crate::srt_estimate_batch_effects::estimate_batch;
 use crate::srt_estimate_batch_effects::EstimateBatchArgs;
+use crate::srt_graph_coarsen::*;
 use crate::srt_input::*;
-use crate::srt_random_projection::*;
+use data_beans_alg::random_projection::*;
 
 use clap::Parser;
 use matrix_param::dmatrix_gamma::GammaMatrix;
@@ -81,12 +82,10 @@ pub struct SrtDeltaSvdArgs {
     #[arg(
         long,
         short = 'd',
-        default_value_t = 10,
-        help = "Number of top projection components for binary sort",
-        long_help = "Number of top projection components for binary sort.\n\
-                       Produces up to 2^S pseudobulk samples."
+        default_value_t = 1024,
+        help = "Target number of pseudobulk clusters for graph coarsening"
     )]
-    sort_dim: usize,
+    n_clusters: usize,
 
     #[arg(
         short = 'k',
@@ -233,7 +232,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     env_logger::init();
 
     // 1. Load data
-    info!("[1/8] Loading data files...");
+    info!("Loading data files...");
 
     let SRTData {
         data: mut data_vec,
@@ -255,13 +254,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     let n_cells = data_vec.num_columns();
 
     anyhow::ensure!(args.proj_dim > 0, "proj_dim must be > 0");
-    anyhow::ensure!(args.sort_dim > 0, "sort_dim must be > 0");
-    anyhow::ensure!(
-        args.sort_dim <= args.proj_dim,
-        "sort_dim ({}) must be <= proj_dim ({})",
-        args.sort_dim,
-        args.proj_dim
-    );
+    anyhow::ensure!(args.n_clusters > 0, "n_clusters must be > 0");
     anyhow::ensure!(args.knn_spatial > 0, "knn_spatial must be > 0");
     anyhow::ensure!(args.n_latent_topics > 0, "n_latent_topics must be > 0");
     anyhow::ensure!(
@@ -272,14 +265,15 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     );
 
     // 2. Estimate batch effects
-    info!("[2/8] Estimating batch effects...");
+    info!("Estimating batch effects...");
 
+    let batch_sort_dim = args.proj_dim.min(10);
     let batch_effects = estimate_batch(
         &mut data_vec,
         &batch_membership,
         EstimateBatchArgs {
             proj_dim: args.proj_dim,
-            sort_dim: args.sort_dim,
+            sort_dim: batch_sort_dim,
             block_size: args.block_size,
             knn_cells: args.knn_cells,
         },
@@ -298,11 +292,11 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
 
     // 3. Build spatial KNN graph
     info!(
-        "[3/8] Building spatial KNN graph (k={})...",
+        "Building spatial KNN graph (k={})...",
         args.knn_spatial
     );
 
-    let mut srt_cell_pairs = SrtCellPairs::new(
+    let srt_cell_pairs = SrtCellPairs::new(
         &data_vec,
         &coordinates,
         SrtCellPairsArgs {
@@ -317,46 +311,39 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         Some(coordinate_names.clone()),
     )?;
 
-    // 4. Random projection + sample assignment
-    info!("[4/8] Random projection and sample assignment...");
-    let proj_out = srt_cell_pairs.random_projection(
+    // 4. Per-cell random projection
+    info!("Per-cell random projection...");
+    let mut cell_proj = data_vec.project_columns_with_batch_correction(
         args.proj_dim,
-        args.block_size,
+        Some(args.block_size),
         Some(&batch_membership),
     )?;
 
-    // 5. Multi-level fused collapse: compute shared/diff per gene per sample
-    //    Precompute assignments for all levels (cheap), then read data once.
+    // 5. Graph-constrained coarsening + multi-level assignment
     info!(
-        "[5/8] Multi-level collapsing ({} levels, sort_dim={})...",
-        args.num_levels, args.sort_dim
+        "Graph coarsening + multi-level assignment ({} levels, n_clusters={})...",
+        args.num_levels, args.n_clusters
     );
 
     let batch_db = batch_effects.map(|x| x.posterior_mean().clone());
     let batch_ref = batch_db.as_ref();
 
-    let level_dims = compute_level_sort_dims(args.sort_dim, args.num_levels);
-    let mut all_pair_to_sample = Vec::with_capacity(level_dims.len());
-    let mut all_num_samples = Vec::with_capacity(level_dims.len());
+    let ml = graph_coarsen_multilevel(
+        &srt_cell_pairs.graph,
+        &mut cell_proj.proj,
+        &srt_cell_pairs.pairs,
+        args.n_clusters,
+        args.num_levels,
+    );
 
-    for &sort_dim in &level_dims {
-        let n_samples = srt_cell_pairs.assign_pairs_to_samples(
-            &proj_out,
-            Some(sort_dim),
-            args.down_sample,
-        )?;
-        all_pair_to_sample.push(srt_cell_pairs.pair_to_sample.clone().unwrap());
-        all_num_samples.push(n_samples);
-    }
-
-    let mut all_stats: Vec<PairDeltaCollapsedStat> = all_num_samples
+    let mut all_stats: Vec<PairDeltaCollapsedStat> = ml.all_num_samples
         .iter()
         .map(|&n| PairDeltaCollapsedStat::new(n_genes, n))
         .collect();
 
     let fused_input = FusedDeltaInput {
         batch_effect: batch_ref,
-        all_pair_to_sample,
+        all_pair_to_sample: ml.all_pair_to_sample,
     };
 
     srt_cell_pairs.visit_pairs_by_block(
@@ -367,7 +354,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     )?;
 
     // 6. Fit Poisson-Gamma (finest level)
-    info!("[6/8] Fitting Poisson-Gamma model...");
+    info!("Fitting Poisson-Gamma model...");
     let collapsed_stat = all_stats
         .last()
         .ok_or(anyhow::anyhow!("no levels"))?;
@@ -375,7 +362,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
 
     // 7. SVD on [shared; diff] posterior log means
     info!(
-        "[7/8] Randomized SVD ({} components)...",
+        "Randomized SVD ({} components)...",
         args.n_latent_topics
     );
 
@@ -407,7 +394,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     )?;
 
     // 8. Nystrom projection
-    info!("[8/8] Nystrom projection...");
+    info!("Nystrom projection...");
 
     let mut proj_kn = Mat::zeros(args.n_latent_topics, srt_cell_pairs.num_pairs());
 

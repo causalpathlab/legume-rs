@@ -1,6 +1,5 @@
 use crate::srt_common::*;
 use crate::srt_knn_graph::{KnnGraph, KnnGraphArgs};
-use crate::srt_random_projection::{SrtRandProjOps, SrtRandProjOut};
 use matrix_util::parquet::*;
 use matrix_util::utils::generate_minibatch_intervals;
 
@@ -11,16 +10,10 @@ pub struct SrtCellPairs<'a> {
     pub coordinates: &'a Mat,
     pub graph: KnnGraph,
     pub pairs: Vec<Pair>,
+    #[allow(dead_code)]
     pub coordinate_embedding: Mat,
     pub pair_to_sample: Option<Vec<usize>>,
     pub sample_to_pair: Option<Vec<Vec<usize>>>,
-}
-
-pub struct CollapsePairsArgs<'a> {
-    pub proj_out: &'a SrtRandProjOut,
-    pub finest_sort_dim: usize,
-    pub num_levels: usize,
-    pub down_sample: Option<usize>,
 }
 
 pub struct SrtCellPairsArgs {
@@ -164,6 +157,7 @@ impl<'a> SrtCellPairs<'a> {
     }
 
     /// put together coordinate embedding results for all the pairs
+    #[allow(dead_code)]
     pub fn coordinate_embedding_pairs(&self) -> anyhow::Result<Mat> {
         concatenate_vertical(
             &self
@@ -261,6 +255,7 @@ impl<'a> SrtCellPairs<'a> {
         self.coordinates.ncols()
     }
 
+    #[allow(dead_code)]
     pub fn num_samples(&self) -> anyhow::Result<usize> {
         let sample_to_pair = self
             .sample_to_pair
@@ -325,6 +320,7 @@ impl<'a> SrtCellPairs<'a> {
     }
 
     /// number of pairs
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.pairs.len()
     }
@@ -339,54 +335,4 @@ impl<'a> SrtCellPairs<'a> {
         self.pair_to_sample = Some(pair_to_sample);
     }
 
-    /// Multi-level collapsing for pair-based pipelines.
-    ///
-    /// For each level (coarse → fine): re-assign pairs at that sort_dim,
-    /// create a fresh stat via `stat_factory`, visit all samples, collect.
-    /// Returns `Vec<SharedOut>` from coarsest to finest.
-    pub fn collapse_pairs_multilevel<Visitor, SharedIn, SharedOut>(
-        &mut self,
-        collapse_args: &CollapsePairsArgs<'_>,
-        visitor: &Visitor,
-        shared_in: &SharedIn,
-        stat_factory: impl Fn(usize) -> SharedOut,
-    ) -> anyhow::Result<Vec<SharedOut>>
-    where
-        Visitor: Fn(
-                &[usize],
-                &SrtCellPairs,
-                usize,
-                &SharedIn,
-                Arc<Mutex<&mut SharedOut>>,
-            ) -> anyhow::Result<()>
-            + Sync
-            + Send,
-        SharedIn: Sync + Send + ?Sized,
-        SharedOut: Sync + Send,
-    {
-        let level_dims = compute_level_sort_dims(
-            collapse_args.finest_sort_dim,
-            collapse_args.num_levels,
-        );
-        let mut results = Vec::with_capacity(level_dims.len());
-
-        for (level, &sort_dim) in level_dims.iter().enumerate() {
-            info!(
-                "Level {}/{}: sort_dim={}",
-                level + 1,
-                level_dims.len(),
-                sort_dim
-            );
-            self.assign_pairs_to_samples(
-                collapse_args.proj_out,
-                Some(sort_dim),
-                collapse_args.down_sample,
-            )?;
-            let mut stat = stat_factory(self.num_samples()?);
-            self.visit_pairs_by_sample(visitor, shared_in, &mut stat)?;
-            results.push(stat);
-        }
-
-        Ok(results)
-    }
 }
