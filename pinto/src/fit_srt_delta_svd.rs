@@ -99,13 +99,6 @@ pub struct SrtDeltaSvdArgs {
     #[arg(
         long,
         default_value_t = 10,
-        help = "Number of nearest-neighbour batches for batch effect estimation"
-    )]
-    knn_batches: usize,
-
-    #[arg(
-        long,
-        default_value_t = 10,
         help = "Number of nearest neighbours within each batch for batch estimation"
     )]
     knn_cells: usize,
@@ -150,8 +143,21 @@ pub struct SrtDeltaSvdArgs {
     )]
     preload_data: bool,
 
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Number of multi-level collapsing levels (coarse→fine)"
+    )]
+    num_levels: usize,
+
     #[arg(long, short, help = "Enable verbose logging (sets RUST_LOG=info)")]
     verbose: bool,
+}
+
+/// Input for fused multi-level pair delta visitor.
+struct FusedDeltaInput<'a> {
+    batch_effect: Option<&'a Mat>,
+    all_pair_to_sample: Vec<Vec<usize>>,
 }
 
 /// Accumulated shared/difference statistics per gene per sample.
@@ -224,6 +230,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     if args.verbose {
         std::env::set_var("RUST_LOG", "info");
     }
+    env_logger::init();
 
     // 1. Load data
     info!("[1/8] Loading data files...");
@@ -274,9 +281,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
             proj_dim: args.proj_dim,
             sort_dim: args.sort_dim,
             block_size: args.block_size,
-            knn_batches: args.knn_batches,
             knn_cells: args.knn_cells,
-            down_sample: args.down_sample,
         },
     )?;
 
@@ -320,24 +325,52 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         Some(&batch_membership),
     )?;
 
-    srt_cell_pairs.assign_pairs_to_samples(&proj_out, Some(args.sort_dim), args.down_sample)?;
-
-    // 5. Collapse: compute shared/diff per gene per sample
-    info!("[5/8] Collapsing shared/difference statistics...");
+    // 5. Multi-level fused collapse: compute shared/diff per gene per sample
+    //    Precompute assignments for all levels (cheap), then read data once.
+    info!(
+        "[5/8] Multi-level collapsing ({} levels, sort_dim={})...",
+        args.num_levels, args.sort_dim
+    );
 
     let batch_db = batch_effects.map(|x| x.posterior_mean().clone());
     let batch_ref = batch_db.as_ref();
 
-    let mut collapsed_stat = PairDeltaCollapsedStat::new(n_genes, srt_cell_pairs.num_samples()?);
+    let level_dims = compute_level_sort_dims(args.sort_dim, args.num_levels);
+    let mut all_pair_to_sample = Vec::with_capacity(level_dims.len());
+    let mut all_num_samples = Vec::with_capacity(level_dims.len());
 
-    srt_cell_pairs.visit_pairs_by_sample(
-        &collect_pair_delta_visitor,
-        &batch_ref,
-        &mut collapsed_stat,
+    for &sort_dim in &level_dims {
+        let n_samples = srt_cell_pairs.assign_pairs_to_samples(
+            &proj_out,
+            Some(sort_dim),
+            args.down_sample,
+        )?;
+        all_pair_to_sample.push(srt_cell_pairs.pair_to_sample.clone().unwrap());
+        all_num_samples.push(n_samples);
+    }
+
+    let mut all_stats: Vec<PairDeltaCollapsedStat> = all_num_samples
+        .iter()
+        .map(|&n| PairDeltaCollapsedStat::new(n_genes, n))
+        .collect();
+
+    let fused_input = FusedDeltaInput {
+        batch_effect: batch_ref,
+        all_pair_to_sample,
+    };
+
+    srt_cell_pairs.visit_pairs_by_block(
+        &fused_pair_delta_visitor,
+        &fused_input,
+        &mut all_stats,
+        args.block_size,
     )?;
 
-    // 6. Fit Poisson-Gamma
+    // 6. Fit Poisson-Gamma (finest level)
     info!("[6/8] Fitting Poisson-Gamma model...");
+    let collapsed_stat = all_stats
+        .last()
+        .ok_or(anyhow::anyhow!("no levels"))?;
     let params = collapsed_stat.optimize(None)?;
 
     // 7. SVD on [shared; diff] posterior log means
@@ -406,26 +439,27 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Collapse visitor: accumulate shared/diff per gene per sample.
-pub(crate) fn collect_pair_delta_visitor(
-    indices: &[usize],
+/// Fused block-based visitor: read pair data once, accumulate into all levels' stats.
+fn fused_pair_delta_visitor(
+    bound: (usize, usize),
     data: &SrtCellPairs,
-    sample: usize,
-    batch_effect: &Option<&Mat>,
-    arc_stat: Arc<Mutex<&mut PairDeltaCollapsedStat>>,
+    input: &FusedDeltaInput,
+    arc_stats: Arc<Mutex<&mut Vec<PairDeltaCollapsedStat>>>,
 ) -> anyhow::Result<()> {
-    let pairs: Vec<&Pair> = indices.iter().filter_map(|&j| data.pairs.get(j)).collect();
+    let (lb, ub) = bound;
+    let pairs = &data.pairs[lb..ub];
+    let n_pairs = ub - lb;
 
-    let left = pairs.iter().map(|&x| x.left);
-    let right = pairs.iter().map(|&x| x.right);
+    let left = pairs.iter().map(|x| x.left);
+    let right = pairs.iter().map(|x| x.right);
 
     let mut y_left = data.data.read_columns_csc(left)?;
     let mut y_right = data.data.read_columns_csc(right)?;
 
-    // batch adjustment: divide raw counts by batch effect
-    if let Some(delta_db) = *batch_effect {
-        let left = pairs.iter().map(|&x| x.left);
-        let right = pairs.iter().map(|&x| x.right);
+    // batch adjustment
+    if let Some(delta_db) = input.batch_effect {
+        let left = pairs.iter().map(|x| x.left);
+        let right = pairs.iter().map(|x| x.right);
         let left_batches = data.data.get_batch_membership(left);
         y_left.adjust_by_division_of_selected_inplace(delta_db, &left_batches);
         let right_batches = data.data.get_batch_membership(right);
@@ -433,12 +467,12 @@ pub(crate) fn collect_pair_delta_visitor(
     }
 
     let n_genes = y_left.nrows();
-    let mut local_shared = DVec::zeros(n_genes);
-    let mut local_diff = DVec::zeros(n_genes);
-    let mut local_size = 0_f32;
 
-    for (left_col, right_col) in y_left.col_iter().zip(y_right.col_iter()) {
-        // Build hashmap for right cell: gene -> log1p(adjusted_count)
+    // Compute per-pair shared/diff into dense block matrices
+    let mut block_shared = Mat::zeros(n_genes, n_pairs);
+    let mut block_diff = Mat::zeros(n_genes, n_pairs);
+
+    for (pair_idx, (left_col, right_col)) in y_left.col_iter().zip(y_right.col_iter()).enumerate() {
         let right_log: HashMap<usize, f32> = right_col
             .row_indices()
             .iter()
@@ -448,16 +482,14 @@ pub(crate) fn collect_pair_delta_visitor(
 
         let mut left_visited = HashSet::new();
 
-        // Process genes present in left cell
         for (&gene, &val) in left_col.row_indices().iter().zip(left_col.values().iter()) {
             let log_left = val.ln_1p();
             let log_right = right_log.get(&gene).copied().unwrap_or(0.0);
-            local_shared[gene] += log_left + log_right;
-            local_diff[gene] += (log_left - log_right).abs();
+            block_shared[(gene, pair_idx)] += log_left + log_right;
+            block_diff[(gene, pair_idx)] += (log_left - log_right).abs();
             left_visited.insert(gene);
         }
 
-        // Process genes only present in right cell
         for (&gene, &val) in right_col
             .row_indices()
             .iter()
@@ -465,21 +497,24 @@ pub(crate) fn collect_pair_delta_visitor(
         {
             if !left_visited.contains(&gene) {
                 let log_right = val.ln_1p();
-                // log_left = 0 → shared = log_right, diff = log_right
-                local_shared[gene] += log_right;
-                local_diff[gene] += log_right;
+                block_shared[(gene, pair_idx)] += log_right;
+                block_diff[(gene, pair_idx)] += log_right;
             }
         }
-
-        local_size += 1.0;
     }
 
-    let mut stat = arc_stat.lock().expect("lock pair delta stat");
-    let mut col_shared = stat.shared_ds.column_mut(sample);
-    col_shared += &local_shared;
-    let mut col_diff = stat.diff_ds.column_mut(sample);
-    col_diff += &local_diff;
-    stat.size_s[sample] += local_size;
+    // Single lock: distribute to all levels' stats
+    let mut stats = arc_stats.lock().expect("lock fused delta stats");
+    for (level, pair_to_sample) in input.all_pair_to_sample.iter().enumerate() {
+        for local_idx in 0..n_pairs {
+            let sample = pair_to_sample[lb + local_idx];
+            let mut col_shared = stats[level].shared_ds.column_mut(sample);
+            col_shared += &block_shared.column(local_idx);
+            let mut col_diff = stats[level].diff_ds.column_mut(sample);
+            col_diff += &block_diff.column(local_idx);
+            stats[level].size_s[sample] += 1.0;
+        }
+    }
 
     Ok(())
 }

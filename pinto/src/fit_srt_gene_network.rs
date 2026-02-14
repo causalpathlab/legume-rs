@@ -54,6 +54,8 @@ pub struct SrtGeneNetworkArgs {
 }
 
 pub fn fit_srt_gene_network(args: &SrtGeneNetworkArgs) -> anyhow::Result<()> {
+    let _ = env_logger::try_init();
+
     // Step A: Read gene graph from parquet
     info!("Reading gene graph from {}", args.gene_graph);
     let graph_rows = names_from_parquet(&args.gene_graph, &["gene1".into(), "gene2".into()])?;
