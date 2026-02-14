@@ -7,9 +7,7 @@ pub struct EstimateBatchArgs {
     pub proj_dim: usize,
     pub sort_dim: usize,
     pub block_size: usize,
-    pub knn_batches: usize,
     pub knn_cells: usize,
-    pub down_sample: Option<usize>,
 }
 
 pub fn estimate_batch(

@@ -178,6 +178,13 @@ pub struct SrtGenePairSvdArgs {
     )]
     gene_graph_union: bool,
 
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Number of multi-level collapsing levels (coarse→fine)"
+    )]
+    num_levels: usize,
+
     #[arg(long, short, help = "Enable verbose logging (sets RUST_LOG=info)")]
     verbose: bool,
 }
@@ -199,6 +206,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     if args.verbose {
         std::env::set_var("RUST_LOG", "info");
     }
+    env_logger::init();
 
     // 1. Load data
     info!("[1/9] Loading data files...");
@@ -270,7 +278,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     }
     // srt_cell_pairs dropped — data_vec is no longer borrowed
 
-    // 3. Assign individual cells to samples for gene-pair analysis
+    // 3. Assign individual cells to samples (finest level for gene graph)
     info!("[3/9] Random projection and sample assignment...");
 
     let cell_proj_out = data_vec.project_columns_with_batch_correction(
@@ -285,7 +293,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
         args.down_sample,
     )?;
 
-    info!("Assigned cells to {} samples", n_samples);
+    info!("Assigned cells to {} samples (finest level)", n_samples);
 
     // 4-5. Build gene-gene graph (external network or KNN from posterior means)
     let mut gene_graph = if let Some(network_file) = &args.gene_network {
@@ -329,11 +337,37 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     // 6. Compute gene raw means
     let gene_means = compute_gene_raw_means(&data_vec, args.block_size)?;
 
-    // 7. Compute gene-pair deltas (raw counts, positive only)
-    info!("[6/9] Computing gene-pair interaction deltas...");
+    // 7. Multi-level gene-pair interaction deltas
+    info!(
+        "[6/9] Computing gene-pair interaction deltas ({} levels)...",
+        args.num_levels
+    );
 
-    let mut gene_pair_stat =
-        compute_gene_interaction_deltas(&data_vec, &gene_graph, &gene_means, n_samples, false)?;
+    let level_dims = compute_level_sort_dims(args.sort_dim, args.num_levels);
+    let mut gene_pair_stat = {
+        let mut last_stat = None;
+        for (level, &level_sort_dim) in level_dims.iter().enumerate() {
+            info!(
+                "Level {}/{}: sort_dim={}",
+                level + 1,
+                level_dims.len(),
+                level_sort_dim
+            );
+            let level_n_samples = data_vec.partition_columns_to_groups(
+                &cell_proj_out.proj,
+                Some(level_sort_dim),
+                args.down_sample,
+            )?;
+            last_stat = Some(compute_gene_interaction_deltas(
+                &data_vec,
+                &gene_graph,
+                &gene_means,
+                level_n_samples,
+                false,
+            )?);
+        }
+        last_stat.ok_or(anyhow::anyhow!("no levels"))?
+    };
 
     // 7b. Filter empty gene pairs
     let use_elbow = args.gene_graph_union || args.gene_network.is_some();

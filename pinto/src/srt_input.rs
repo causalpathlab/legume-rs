@@ -82,14 +82,19 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
                 Some(&args.coord_columns),
                 Some(&args.coord_column_names),
             )?,
-            _ => Mat::read_data(
-                coord_file,
-                &['\t', ',', ' '],
-                args.header_in_coord,
-                Some(0),
-                Some(&args.coord_columns),
-                Some(&args.coord_column_names),
-            )?,
+            _ => {
+                let header_row = args.header_in_coord.or_else(|| {
+                    detect_header_row(coord_file, &['\t', ',', ' '], &args.coord_column_names)
+                });
+                Mat::read_data(
+                    coord_file,
+                    &['\t', ',', ' '],
+                    header_row,
+                    Some(0),
+                    Some(&args.coord_columns),
+                    Some(&args.coord_column_names),
+                )?
+            }
         };
 
         let data_cell_names = data_vec[i].column_names()?;
@@ -188,6 +193,26 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
         coordinate_names: coord_column_names,
         batches: batch_membership,
     })
+}
+
+/// Auto-detect whether the first line of a delimited file is a header row
+/// by checking if it contains any of the requested column names.
+fn detect_header_row(file_path: &str, delimiters: &[char], column_names: &[Box<str>]) -> Option<usize> {
+    if column_names.is_empty() {
+        return None;
+    }
+    let first_line = std::io::BufRead::lines(
+        std::io::BufReader::new(std::fs::File::open(file_path).ok()?),
+    )
+    .next()?
+    .ok()?;
+    let tokens: HashSet<&str> = first_line.split(delimiters.as_ref()).collect();
+    if column_names.iter().any(|name| tokens.contains(name.as_ref())) {
+        info!("Auto-detected header row in {}", file_path);
+        Some(0)
+    } else {
+        None
+    }
 }
 
 fn append_batch_coordinate<T>(coords: &Mat, batch_membership: &[T]) -> anyhow::Result<Mat>

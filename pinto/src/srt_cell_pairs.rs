@@ -1,5 +1,6 @@
 use crate::srt_common::*;
 use crate::srt_knn_graph::{KnnGraph, KnnGraphArgs};
+use crate::srt_random_projection::{SrtRandProjOps, SrtRandProjOut};
 use matrix_util::parquet::*;
 use matrix_util::utils::generate_minibatch_intervals;
 
@@ -83,7 +84,7 @@ impl<'a> SrtCellPairs<'a> {
             shape,
             (None, Some(&column_names)),
             Some(&column_types),
-            Some("pair"),
+            Some("cell_pair"),
         )?;
         let row_names = writer.row_names_vec();
 
@@ -329,5 +330,52 @@ impl<'a> SrtCellPairs<'a> {
                 .collect(),
         );
         self.pair_to_sample = Some(pair_to_sample);
+    }
+
+    /// Multi-level collapsing for pair-based pipelines.
+    ///
+    /// For each level (coarse → fine): re-assign pairs at that sort_dim,
+    /// create a fresh stat via `stat_factory`, visit all samples, collect.
+    /// Returns `Vec<SharedOut>` from coarsest to finest.
+    pub fn collapse_pairs_multilevel<Visitor, SharedIn, SharedOut>(
+        &mut self,
+        proj_out: &SrtRandProjOut,
+        finest_sort_dim: usize,
+        num_levels: usize,
+        down_sample: Option<usize>,
+        visitor: &Visitor,
+        shared_in: &SharedIn,
+        stat_factory: impl Fn(usize) -> SharedOut,
+    ) -> anyhow::Result<Vec<SharedOut>>
+    where
+        Visitor: Fn(
+                &[usize],
+                &SrtCellPairs,
+                usize,
+                &SharedIn,
+                Arc<Mutex<&mut SharedOut>>,
+            ) -> anyhow::Result<()>
+            + Sync
+            + Send,
+        SharedIn: Sync + Send + ?Sized,
+        SharedOut: Sync + Send,
+    {
+        let level_dims = compute_level_sort_dims(finest_sort_dim, num_levels);
+        let mut results = Vec::with_capacity(level_dims.len());
+
+        for (level, &sort_dim) in level_dims.iter().enumerate() {
+            info!(
+                "Level {}/{}: sort_dim={}",
+                level + 1,
+                level_dims.len(),
+                sort_dim
+            );
+            self.assign_pairs_to_samples(proj_out, Some(sort_dim), down_sample)?;
+            let mut stat = stat_factory(self.num_samples()?);
+            self.visit_pairs_by_sample(visitor, shared_in, &mut stat)?;
+            results.push(stat);
+        }
+
+        Ok(results)
     }
 }

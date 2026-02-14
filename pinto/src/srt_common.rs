@@ -187,3 +187,18 @@ pub fn names_from_parquet(
 
     Ok(pairs)
 }
+
+/// Linearly interpolate sort dimensions from coarsest (min 4) to finest.
+pub fn compute_level_sort_dims(finest_sort_dim: usize, num_levels: usize) -> Vec<usize> {
+    if num_levels <= 1 {
+        return vec![finest_sort_dim];
+    }
+    let coarsest = 4usize.min(finest_sort_dim);
+    let mut dims = Vec::with_capacity(num_levels);
+    for level in 0..num_levels {
+        let t = level as f32 / (num_levels - 1) as f32;
+        let dim = coarsest as f32 + t * (finest_sort_dim - coarsest) as f32;
+        dims.push(dim.round() as usize);
+    }
+    dims
+}
