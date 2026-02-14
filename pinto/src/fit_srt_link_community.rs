@@ -6,12 +6,16 @@ use crate::srt_input::*;
 use crate::srt_random_projection::*;
 
 use candle_util::candle_core::{self, Device, Tensor};
+use candle_util::candle_decoder_topic::TopicDecoder;
 use candle_util::candle_encoder_softmax::*;
-use candle_util::candle_aux_linear::non_neg_linear;
-use candle_util::candle_loss_functions::{poisson_likelihood, topic_log_likelihood};
-use candle_util::candle_model_traits::EncoderModuleT;
+use candle_util::candle_loss_functions::topic_likelihood;
+use candle_util::candle_model_traits::{DecoderModuleT, EncoderModuleT};
 use candle_util::candle_data_loader::*;
-use candle_util::candle_nn::{self, AdamW, Module, Optimizer};
+use candle_util::candle_nn::{self, AdamW, Optimizer};
+
+use std::collections::{HashMap, HashSet};
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
 
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressDrawTarget};
@@ -26,22 +30,6 @@ enum ComputeDevice {
     Cpu,
     Cuda,
     Metal,
-}
-
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
-enum Likelihood {
-    Poisson,
-    Multinomial,
-}
-
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
-enum Interaction {
-    /// θ_left ⊙ θ_right (Hadamard product)
-    Multiply,
-    /// θ_left + θ_right (additive)
-    Add,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -211,29 +199,6 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
-        default_value_t = false,
-        help = "Normalize interaction to simplex (divide by row sum)"
-    )]
-    normalize_interaction: bool,
-
-    #[arg(
-        long,
-        value_enum,
-        default_value = "multiply",
-        help = "Interaction type: multiply (θ_left ⊙ θ_right) or add (θ_left + θ_right)"
-    )]
-    interaction: Interaction,
-
-    #[arg(
-        long,
-        value_enum,
-        default_value = "poisson",
-        help = "Likelihood model: poisson (rate-based) or multinomial (composition-based)"
-    )]
-    likelihood: Likelihood,
-
-    #[arg(
-        long,
         short = 'n',
         default_value_t = 1e4,
         help = "Column sum normalization scale for encoder input"
@@ -267,23 +232,25 @@ pub struct SrtLinkCommunityArgs {
 }
 
 /////////////////////////////////////////
-// Left/Right collapsed statistics     //
+// Pair + Null collapsed statistics    //
 /////////////////////////////////////////
 
-pub(crate) struct PairLeftRightCollapsedStat {
-    left_ds: Mat,
-    right_ds: Mat,
-    size_s: DVec,
+pub(crate) struct PairNullCollapsedStat {
+    pair_ds: Mat,
+    null_ds: Mat,
+    pair_size_s: DVec,
+    null_size_s: DVec,
     n_genes: usize,
     n_samples: usize,
 }
 
-impl PairLeftRightCollapsedStat {
+impl PairNullCollapsedStat {
     pub(crate) fn new(n_genes: usize, n_samples: usize) -> Self {
         Self {
-            left_ds: Mat::zeros(n_genes, n_samples),
-            right_ds: Mat::zeros(n_genes, n_samples),
-            size_s: DVec::zeros(n_samples),
+            pair_ds: Mat::zeros(n_genes, n_samples),
+            null_ds: Mat::zeros(n_genes, n_samples),
+            pair_size_s: DVec::zeros(n_samples),
+            null_size_s: DVec::zeros(n_samples),
             n_genes,
             n_samples,
         }
@@ -292,170 +259,143 @@ impl PairLeftRightCollapsedStat {
     pub(crate) fn optimize(
         &self,
         hyper_param: Option<(f32, f32)>,
-    ) -> anyhow::Result<PairLeftRightParameters> {
+    ) -> anyhow::Result<PairNullParameters> {
         let (a0, b0) = hyper_param.unwrap_or((1_f32, 1_f32));
         let shape = (self.n_genes, self.n_samples);
 
-        let mut left = GammaMatrix::new(shape, a0, b0);
-        let mut right = GammaMatrix::new(shape, a0, b0);
+        let mut pair = GammaMatrix::new(shape, a0, b0);
+        let mut null = GammaMatrix::new(shape, a0, b0);
 
-        let size_s = &self.size_s.transpose();
-        let sample_size_ds = Mat::from_rows(&vec![size_s.clone(); shape.0]);
+        let pair_size = &self.pair_size_s.transpose();
+        let pair_size_ds = Mat::from_rows(&vec![pair_size.clone(); shape.0]);
 
-        info!("Calibrating left/right pair statistics");
+        let null_size = &self.null_size_s.transpose();
+        let null_size_ds = Mat::from_rows(&vec![null_size.clone(); shape.0]);
 
-        left.update_stat(&self.left_ds, &sample_size_ds);
-        left.calibrate();
-        right.update_stat(&self.right_ds, &sample_size_ds);
-        right.calibrate();
+        info!("Calibrating null statistics");
 
-        info!("Resolved pair left/right collapsed statistics");
+        null.update_stat(&self.null_ds, &null_size_ds);
+        null.calibrate();
 
-        Ok(PairLeftRightParameters { left, right })
+        // Use null posterior mean as denominator for pair Gamma,
+        // so pair posterior models fold-change over null baseline.
+        info!("Calibrating pair statistics (null-adjusted denominator)");
+
+        let null_mean = null.posterior_mean();
+        let pair_denom = null_mean.component_mul(&pair_size_ds);
+        pair.update_stat(&self.pair_ds, &pair_denom);
+        pair.calibrate();
+
+        info!("Resolved pair/null collapsed statistics");
+
+        Ok(PairNullParameters { pair, null })
     }
 }
 
-pub(crate) struct PairLeftRightParameters {
-    pub(crate) left: GammaMatrix,
-    pub(crate) right: GammaMatrix,
+pub(crate) struct PairNullParameters {
+    pub(crate) pair: GammaMatrix,
+    pub(crate) null: GammaMatrix,
 }
 
-/// Collapse visitor: accumulate left/right expression per gene per sample.
-pub(crate) fn collect_pair_left_right_visitor(
+/// Collapse visitor: accumulate pair (sum of both cells) and null
+/// (sum of random non-neighbor cell pairs) expression per gene per sample.
+pub(crate) fn collect_pair_null_visitor(
     indices: &[usize],
     data: &SrtCellPairs,
     sample: usize,
     batch_effect: &Option<&Mat>,
-    arc_stat: Arc<Mutex<&mut PairLeftRightCollapsedStat>>,
+    arc_stat: Arc<Mutex<&mut PairNullCollapsedStat>>,
 ) -> anyhow::Result<()> {
     let pairs: Vec<&Pair> = indices.iter().filter_map(|&j| data.pairs.get(j)).collect();
+    let n_pairs = pairs.len();
+    if n_pairs == 0 {
+        return Ok(());
+    }
 
-    let left = pairs.iter().map(|&x| x.left);
-    let right = pairs.iter().map(|&x| x.right);
+    // 1. Collect unique cell indices from all pairs in this sample
+    let mut unique_set = HashSet::new();
+    for p in &pairs {
+        unique_set.insert(p.left);
+        unique_set.insert(p.right);
+    }
+    let unique_cells: Vec<usize> = {
+        let mut v: Vec<usize> = unique_set.into_iter().collect();
+        v.sort_unstable();
+        v
+    };
+    let n_unique = unique_cells.len();
 
-    let mut y_left = data.data.read_columns_csc(left)?;
-    let mut y_right = data.data.read_columns_csc(right)?;
+    // 2. Generate random non-neighbor pairs via rejection sampling
+    //    Cap attempts to avoid infinite loops when too few unique cells
+    let mut rng = SmallRng::seed_from_u64(sample as u64);
+    let mut random_pairs: Vec<(usize, usize)> = Vec::with_capacity(n_pairs);
+    let max_attempts = n_pairs * 20;
+    let mut attempts = 0;
 
-    // batch adjustment: divide raw counts by batch effect
+    while random_pairs.len() < n_pairs && attempts < max_attempts {
+        attempts += 1;
+        let a = unique_cells[rng.random_range(0..n_unique)];
+        let b = unique_cells[rng.random_range(0..n_unique)];
+        if a == b {
+            continue;
+        }
+        let key = (a.min(b), a.max(b));
+        if data.graph.edges.binary_search(&key).is_ok() {
+            continue; // reject real spatial neighbours
+        }
+        random_pairs.push((a, b));
+    }
+
+    // 3. Read expression for all unique cells once
+    let mut all_columns = data.data.read_columns_csc(unique_cells.iter().copied())?;
+
+    // 4. Batch adjustment
     if let Some(delta_db) = *batch_effect {
-        let left = pairs.iter().map(|&x| x.left);
-        let right = pairs.iter().map(|&x| x.right);
-        let left_batches = data.data.get_batch_membership(left);
-        y_left.adjust_by_division_of_selected_inplace(delta_db, &left_batches);
-        let right_batches = data.data.get_batch_membership(right);
-        y_right.adjust_by_division_of_selected_inplace(delta_db, &right_batches);
+        let batches = data.data.get_batch_membership(unique_cells.iter().copied());
+        all_columns.adjust_by_division_of_selected_inplace(delta_db, &batches);
     }
 
-    let n_genes = y_left.nrows();
-    let mut local_left = DVec::zeros(n_genes);
-    let mut local_right = DVec::zeros(n_genes);
-    let mut local_size = 0_f32;
+    // 5. Build cell → column-index mapping
+    let cell_to_col: HashMap<usize, usize> = unique_cells
+        .iter()
+        .enumerate()
+        .map(|(col_idx, &cell)| (cell, col_idx))
+        .collect();
 
-    for (left_col, right_col) in y_left.col_iter().zip(y_right.col_iter()) {
-        for (&gene, &val) in left_col.row_indices().iter().zip(left_col.values().iter()) {
-            local_left[gene] += val;
+    let n_genes = all_columns.nrows();
+    let mut local_pair = DVec::zeros(n_genes);
+    let mut local_null = DVec::zeros(n_genes);
+
+    // Helper: accumulate a sparse column into a dense vector
+    let accumulate = |target: &mut DVec, col_idx: usize| {
+        let col = all_columns.col(col_idx);
+        for (&gene, &val) in col.row_indices().iter().zip(col.values().iter()) {
+            target[gene] += val;
         }
-        for (&gene, &val) in right_col.row_indices().iter().zip(right_col.values().iter()) {
-            local_right[gene] += val;
-        }
-        local_size += 1.0;
+    };
+
+    // 6. Pair accumulation: sum both cells per real neighbour pair
+    for p in &pairs {
+        accumulate(&mut local_pair, cell_to_col[&p.left]);
+        accumulate(&mut local_pair, cell_to_col[&p.right]);
     }
 
-    let mut stat = arc_stat.lock().expect("lock pair left/right stat");
-    let mut col_left = stat.left_ds.column_mut(sample);
-    col_left += &local_left;
-    let mut col_right = stat.right_ds.column_mut(sample);
-    col_right += &local_right;
-    stat.size_s[sample] += local_size;
+    // 7. Null accumulation: sum both cells per random non-neighbour pair
+    for &(a, b) in &random_pairs {
+        accumulate(&mut local_null, cell_to_col[&a]);
+        accumulate(&mut local_null, cell_to_col[&b]);
+    }
+
+    // 8. Lock and update shared statistics
+    let mut stat = arc_stat.lock().expect("lock pair null stat");
+    let mut col_pair = stat.pair_ds.column_mut(sample);
+    col_pair += &local_pair;
+    let mut col_null = stat.null_ds.column_mut(sample);
+    col_null += &local_null;
+    stat.pair_size_s[sample] += n_pairs as f32;
+    stat.null_size_s[sample] += random_pairs.len() as f32;
 
     Ok(())
-}
-
-/////////////////////////////////////////
-// Bilinear Interaction Decoder        //
-/////////////////////////////////////////
-
-struct BilinearInteractionDecoder {
-    n_topics: usize,
-    normalize_interaction: bool,
-    interaction: Interaction,
-    dictionary: candle_util::candle_aux_linear::NonNegLinear,
-}
-
-impl BilinearInteractionDecoder {
-    fn new(
-        n_genes: usize,
-        n_topics: usize,
-        normalize_interaction: bool,
-        interaction: Interaction,
-        vb: candle_nn::VarBuilder,
-    ) -> candle_core::Result<Self> {
-        let dictionary = non_neg_linear(n_topics, n_genes, vb.pp("dictionary"))?;
-        Ok(Self {
-            n_topics,
-            normalize_interaction,
-            interaction,
-            dictionary,
-        })
-    }
-
-    /// Forward: combine θ_left and θ_right, then decode through dictionary [N, G]
-    fn forward(
-        &self,
-        theta_left: &Tensor,
-        theta_right: &Tensor,
-    ) -> candle_core::Result<Tensor> {
-        let interaction = match self.interaction {
-            Interaction::Multiply => (theta_left * theta_right)?,
-            Interaction::Add => (theta_left + theta_right)?,
-        };
-        let interaction = if self.normalize_interaction {
-            let row_sum = interaction.sum_keepdim(1)?;
-            interaction.broadcast_div(&row_sum)?
-        } else {
-            interaction
-        };
-        self.dictionary.forward(&interaction)
-    }
-
-    /// Forward with Poisson log-likelihood
-    fn forward_with_llik(
-        &self,
-        theta_left: &Tensor,
-        theta_right: &Tensor,
-        y_nd: &Tensor,
-    ) -> candle_core::Result<(Tensor, Tensor)> {
-        let rate_nd = self.forward(theta_left, theta_right)?;
-        let llik = poisson_likelihood(y_nd, &rate_nd)?;
-        Ok((rate_nd, llik))
-    }
-
-    /// Forward with multinomial log-likelihood:
-    /// log_p = log_softmax(rate, dim=1) over genes, then Σ_g y_g log_p_g
-    fn forward_with_multinomial_llik(
-        &self,
-        theta_left: &Tensor,
-        theta_right: &Tensor,
-        y_nd: &Tensor,
-    ) -> candle_core::Result<(Tensor, Tensor)> {
-        let rate_nd = self.forward(theta_left, theta_right)?;
-        let log_p_nd = candle_nn::ops::log_softmax(&rate_nd, 1)?;
-        let llik = topic_log_likelihood(y_nd, &log_p_nd)?;
-        Ok((rate_nd, llik))
-    }
-
-    /// Get dictionary [G, K] as non-negative weights
-    fn get_dictionary(&self, dev: &Device) -> candle_core::Result<Tensor> {
-        let eye = Tensor::eye(self.n_topics, candle_core::DType::F32, dev)?;
-        self.dictionary.forward(&eye)?.t()
-    }
-
-    /// Get dictionary [G, K] as log-probabilities (log_softmax over genes per topic)
-    fn get_log_dictionary(&self, dev: &Device) -> candle_core::Result<Tensor> {
-        let eye = Tensor::eye(self.n_topics, candle_core::DType::F32, dev)?;
-        let dict_kg = self.dictionary.forward(&eye)?; // [K, G]
-        candle_nn::ops::log_softmax(&dict_kg, 1)?.t() // [G, K]
-    }
 }
 
 /////////////////////////////////////////
@@ -492,9 +432,9 @@ impl TrainScores {
 }
 
 fn train_link_community(
-    params: &PairLeftRightParameters,
+    params: &PairNullParameters,
     encoder: &mut LogSoftmaxEncoder,
-    decoder: &BilinearInteractionDecoder,
+    decoder: &TopicDecoder,
     parameters: &candle_nn::VarMap,
     args: &SrtLinkCommunityArgs,
 ) -> anyhow::Result<TrainScores> {
@@ -514,35 +454,10 @@ fn train_link_community(
     let mut llik_trace = Vec::with_capacity(args.epochs);
     let mut kl_trace = Vec::with_capacity(args.epochs);
 
-    info!("Start training bilinear link community VAE...");
+    info!("Start training topic link community VAE...");
 
     for epoch in (0..args.epochs).step_by(args.jitter_interval) {
-        // Resample from Poisson-Gamma posterior (stochastic data augmentation)
-        let left_sg = params
-            .left
-            .posterior_sample()?
-            .sum_to_one_columns()
-            .scale(args.column_sum_norm)
-            .transpose();
-
-        let right_sg = params
-            .right
-            .posterior_sample()?
-            .sum_to_one_columns()
-            .scale(args.column_sum_norm)
-            .transpose();
-
-        // Create data loader with paired left/right data
-        let mut data_loader = InMemoryData::from(InMemoryArgs {
-            input: &left_sg,
-            input_null: None,
-            output: Some(&right_sg),
-            output_null: None,
-        })?;
-
-        data_loader.shuffle_minibatch(args.batch_size)?;
-
-        // KL annealing
+        // KL annealing (changes slowly, per jitter block)
         let kl_weight = if args.kl_warmup_epochs > 0.0 {
             1.0 - (-(epoch as f64) / args.kl_warmup_epochs).exp()
         } else {
@@ -550,46 +465,54 @@ fn train_link_community(
         };
 
         for jitter in 0..args.jitter_interval {
+            // Fresh posterior sample each sub-epoch for data variety
+            let pair_sg = params
+                .pair
+                .posterior_sample()?
+                .sum_to_one_columns()
+                .scale(args.column_sum_norm)
+                .transpose();
+
+            let null_sg = params
+                .null
+                .posterior_sample()?
+                .sum_to_one_columns()
+                .scale(args.column_sum_norm)
+                .transpose();
+
+            let mut data_loader = InMemoryData::from(InMemoryArgs {
+                input: &pair_sg,
+                input_null: Some(&null_sg),
+                output: None,
+                output_null: None,
+            })?;
+
+            data_loader.shuffle_minibatch(args.batch_size)?;
+
             let mut llik_tot = 0f32;
             let mut kl_tot = 0f32;
 
             for b in 0..data_loader.num_minibatch() {
                 let mb = data_loader.minibatch_shuffled(b, &dev)?;
 
-                let x_left = &mb.input;
-                let x_right = mb.output.as_ref().unwrap_or(&mb.input);
-                let y_nd = (x_left + x_right)?;
+                let x_pair = &mb.input;
+                let x_null = mb.input_null.as_ref();
+                let y_nd = x_pair; // reconstruct pair (mixture) data
 
-                let (theta_left, kl_l) = encoder.forward_t(x_left, None, true)?;
-                let (theta_right, kl_r) = encoder.forward_t(x_right, None, true)?;
+                // Encoder: h(pair) - h(null) in feature space
+                let (theta, kl) = encoder.forward_t(x_pair, x_null, true)?;
 
                 // Topic smoothing
-                let theta_left = if args.topic_smoothing > 0.0 {
+                let theta = if args.topic_smoothing > 0.0 {
                     let alpha = args.topic_smoothing;
-                    let kk = theta_left.dim(1)? as f64;
-                    ((&theta_left * (1.0 - alpha))? + alpha / kk)?
+                    let kk = theta.dim(1)? as f64;
+                    ((&theta * (1.0 - alpha))? + alpha / kk)?
                 } else {
-                    theta_left
+                    theta
                 };
 
-                let theta_right = if args.topic_smoothing > 0.0 {
-                    let alpha = args.topic_smoothing;
-                    let kk = theta_right.dim(1)? as f64;
-                    ((&theta_right * (1.0 - alpha))? + alpha / kk)?
-                } else {
-                    theta_right
-                };
+                let (_, llik) = decoder.forward_with_llik(&theta, y_nd, &topic_likelihood)?;
 
-                let (_, llik) = match args.likelihood {
-                    Likelihood::Poisson => {
-                        decoder.forward_with_llik(&theta_left, &theta_right, &y_nd)?
-                    }
-                    Likelihood::Multinomial => {
-                        decoder.forward_with_multinomial_llik(&theta_left, &theta_right, &y_nd)?
-                    }
-                };
-
-                let kl = (&kl_l + &kl_r)?;
                 let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
                 adam.backward_step(&loss)?;
 
@@ -620,12 +543,33 @@ fn train_link_community(
 }
 
 /////////////////////////////////////////
-// Inference: cell propensities        //
+// Global null + cell propensities     //
 /////////////////////////////////////////
+
+/// Compute global null from the random-pair posterior mean.
+/// Average across S samples → [G] vector, normalize to sum-to-one, scale.
+fn compute_global_null(params: &PairNullParameters, column_sum_norm: f32) -> DVec {
+    let null_mean = params.null.posterior_mean();
+    let g = null_mean.nrows();
+    let s = null_mean.ncols();
+
+    let mut g_vec = DVec::zeros(g);
+    for j in 0..s {
+        g_vec += &null_mean.column(j);
+    }
+    g_vec /= s as f32;
+
+    let total = g_vec.sum();
+    if total > 0.0 {
+        g_vec *= column_sum_norm / total;
+    }
+    g_vec
+}
 
 fn evaluate_cell_propensities(
     data_vec: &SparseIoVec,
     encoder: &LogSoftmaxEncoder,
+    global_null: &Tensor,
     args: &SrtLinkCommunityArgs,
 ) -> anyhow::Result<Mat> {
     let dev = match args.device {
@@ -648,7 +592,9 @@ fn evaluate_cell_propensities(
         .map(|&(lb, ub)| {
             let x_dn = data_vec.read_columns_csc(lb..ub)?;
             let x_nd = x_dn.to_tensor(&dev)?.transpose(0, 1)?;
-            let (theta_nk, _) = arc_enc.forward_t(&x_nd, None, false)?;
+            let n = x_nd.dim(0)?;
+            let null_nd = global_null.broadcast_as((n, global_null.dim(1)?))?.contiguous()?;
+            let (theta_nk, _) = arc_enc.forward_t(&x_nd, Some(&null_nd), false)?;
             let theta_nk = theta_nk.to_device(&Device::Cpu)?;
             Ok((lb, Mat::from_tensor(&theta_nk)?))
         })
@@ -670,25 +616,26 @@ fn evaluate_cell_propensities(
 // Main pipeline                       //
 /////////////////////////////////////////
 
-/// Bipartite Linked Community Model pipeline:
+/// Linked Community Model pipeline (pair + random non-pair null):
 ///
-/// 1. Load data + coordinates
-/// 2. Estimate batch effects
-/// 3. Build spatial cell-cell KNN graph
-/// 4. Random projection → assign pairs to samples
-/// 5. Collapse: accumulate left/right expression per gene per sample
-/// 6. Fit Poisson-Gamma on each channel
-/// 7. Initialize encoder + bilinear decoder
-/// 8. Train with jitter resampling
-/// 9. Inference: encoder on individual cells → propensities
-/// 10. Save outputs
+/// 1.  Load data + coordinates
+/// 2.  Estimate batch effects
+/// 3.  Build spatial cell-cell KNN graph
+/// 4.  Random projection → assign pairs to samples
+/// 5.  Collapse: accumulate pair/null expression per gene per sample
+/// 6.  Fit Poisson-Gamma on pair and null channels
+/// 7.  Initialize encoder + topic decoder
+/// 8.  Train with jitter resampling (encoder: pair − null)
+/// 9.  Write dictionary
+/// 10. Compute global null for cell-level inference
+/// 11. Inference: encoder on individual cells → propensities
 pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()> {
     if args.verbose {
         std::env::set_var("RUST_LOG", "info");
     }
 
     // 1. Load data
-    info!("[1/10] Loading data files...");
+    info!("[1/11] Loading data files...");
 
     let SRTData {
         data: mut data_vec,
@@ -727,7 +674,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     );
 
     // 2. Estimate batch effects
-    info!("[2/10] Estimating batch effects...");
+    info!("[2/11] Estimating batch effects...");
 
     let batch_effects = estimate_batch(
         &mut data_vec,
@@ -755,7 +702,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     // 3. Build spatial KNN graph
     info!(
-        "[3/10] Building spatial KNN graph (k={})...",
+        "[3/11] Building spatial KNN graph (k={})...",
         args.knn_spatial
     );
 
@@ -775,7 +722,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     )?;
 
     // 4. Random projection + sample assignment
-    info!("[4/10] Random projection and sample assignment...");
+    info!("[4/11] Random projection and sample assignment...");
     let proj_out = srt_cell_pairs.random_projection(
         args.proj_dim,
         args.block_size,
@@ -784,28 +731,28 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     srt_cell_pairs.assign_pairs_to_samples(&proj_out, Some(args.sort_dim), args.down_sample)?;
 
-    // 5. Collapse: accumulate left/right expression per gene per sample
-    info!("[5/10] Collapsing left/right expression statistics...");
+    // 5. Collapse: accumulate pair/null expression statistics
+    info!("[5/11] Collapsing pair/null expression statistics...");
 
     let batch_db = batch_effects.map(|x| x.posterior_mean().clone());
     let batch_ref = batch_db.as_ref();
 
     let mut collapsed_stat =
-        PairLeftRightCollapsedStat::new(n_genes, srt_cell_pairs.num_samples()?);
+        PairNullCollapsedStat::new(n_genes, srt_cell_pairs.num_samples()?);
 
     srt_cell_pairs.visit_pairs_by_sample(
-        &collect_pair_left_right_visitor,
+        &collect_pair_null_visitor,
         &batch_ref,
         &mut collapsed_stat,
     )?;
 
-    // 6. Fit Poisson-Gamma on each channel
-    info!("[6/10] Fitting Poisson-Gamma model...");
+    // 6. Fit Poisson-Gamma on pair and null channels
+    info!("[6/11] Fitting Poisson-Gamma model...");
     let params = collapsed_stat.optimize(None)?;
 
-    // 7. Initialize encoder + bilinear decoder
+    // 7. Initialize encoder + topic decoder
     info!(
-        "[7/10] Initializing encoder ({} topics, {} genes)...",
+        "[7/11] Initializing encoder ({} topics, {} genes)...",
         args.n_topics, n_genes
     );
 
@@ -832,8 +779,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         vb.clone(),
     )?;
 
-    let decoder =
-        BilinearInteractionDecoder::new(n_genes, n_topics, args.normalize_interaction, args.interaction.clone(), vb.clone())?;
+    let decoder = TopicDecoder::new(n_genes, n_topics, vb.clone())?;
 
     info!(
         "Encoder: {} features -> {} modules -> {:?} -> {} topics",
@@ -841,19 +787,16 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     );
 
     // 8. Train with jitter resampling
-    info!("[8/10] Training ({} epochs, jitter every {})...", args.epochs, args.jitter_interval);
+    info!("[8/11] Training ({} epochs, jitter every {})...", args.epochs, args.jitter_interval);
 
     let scores = train_link_community(&params, &mut encoder, &decoder, &var_map, args)?;
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
 
-    // Write dictionary
-    info!("[9/10] Writing dictionary...");
+    // 9. Write dictionary
+    info!("[9/11] Writing dictionary...");
 
-    let dict_gk = match args.likelihood {
-        Likelihood::Multinomial => decoder.get_log_dictionary(&dev)?,
-        Likelihood::Poisson => decoder.get_dictionary(&dev)?,
-    };
+    let dict_gk = decoder.get_dictionary()?;
     dict_gk
         .to_device(&Device::Cpu)?
         .to_parquet_with_names(
@@ -862,10 +805,18 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             None,
         )?;
 
-    // 9. Inference: encoder on individual cells
-    info!("[10/10] Inferring cell propensities...");
+    // 10. Compute global null for cell-level inference
+    info!("[10/11] Computing global null...");
 
-    let propensity_nk = evaluate_cell_propensities(&data_vec, &encoder, args)?;
+    let global_null = compute_global_null(&params, args.column_sum_norm);
+    let global_null_data: Vec<f32> = global_null.as_slice().to_vec();
+    let global_null_tensor = Tensor::from_vec(global_null_data, (1, n_genes), &dev)?;
+
+    // 11. Inference: encoder on individual cells
+    info!("[11/11] Inferring cell propensities...");
+
+    let propensity_nk =
+        evaluate_cell_propensities(&data_vec, &encoder, &global_null_tensor, args)?;
 
     let cell_names = data_vec.column_names()?;
 
