@@ -168,8 +168,6 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
-    env_logger::init();
-
     if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
         print_logo();
     }

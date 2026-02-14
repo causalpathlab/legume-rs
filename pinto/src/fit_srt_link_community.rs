@@ -113,13 +113,6 @@ pub struct SrtLinkCommunityArgs {
     #[arg(
         long,
         default_value_t = 10,
-        help = "Number of nearest-neighbour batches for batch effect estimation"
-    )]
-    knn_batches: usize,
-
-    #[arg(
-        long,
-        default_value_t = 10,
         help = "Number of nearest neighbours within each batch for batch estimation"
     )]
     knn_cells: usize,
@@ -226,6 +219,13 @@ pub struct SrtLinkCommunityArgs {
         help = "Preload all sparse column data into memory"
     )]
     preload_data: bool,
+
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Number of multi-level collapsing levels (coarse→fine)"
+    )]
+    num_levels: usize,
 
     #[arg(long, short, help = "Enable verbose logging (sets RUST_LOG=info)")]
     verbose: bool,
@@ -431,6 +431,132 @@ impl TrainScores {
     }
 }
 
+fn train_link_community_progressive(
+    all_params: &[PairNullParameters],
+    encoder: &mut LogSoftmaxEncoder,
+    decoder: &TopicDecoder,
+    parameters: &candle_nn::VarMap,
+    args: &SrtLinkCommunityArgs,
+) -> anyhow::Result<TrainScores> {
+    let dev = match args.device {
+        ComputeDevice::Metal => Device::new_metal(args.device_no)?,
+        ComputeDevice::Cuda => Device::new_cuda(args.device_no)?,
+        _ => Device::Cpu,
+    };
+
+    let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate as f64)?;
+
+    let num_levels = all_params.len();
+    let total_weight: usize = (1..=num_levels).sum();
+    let mut llik_trace = Vec::with_capacity(args.epochs);
+    let mut kl_trace = Vec::with_capacity(args.epochs);
+
+    let pb = ProgressBar::new(args.epochs as u64);
+    if args.verbose {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
+
+    info!("Start progressive training ({} levels, {} total epochs)...", num_levels, args.epochs);
+
+    let mut epoch_counter = 0usize;
+
+    for (level, params) in all_params.iter().enumerate() {
+        let level_epochs = (args.epochs * (num_levels - level) + total_weight - 1) / total_weight;
+        info!(
+            "Progressive level {}/{}: {} epochs",
+            level + 1,
+            num_levels,
+            level_epochs
+        );
+
+        for epoch in (0..level_epochs).step_by(args.jitter_interval) {
+            let kl_weight = if args.kl_warmup_epochs > 0.0 {
+                1.0 - (-(epoch_counter as f64) / args.kl_warmup_epochs).exp()
+            } else {
+                1.0
+            };
+
+            for jitter in 0..args.jitter_interval {
+                if epoch + jitter >= level_epochs {
+                    break;
+                }
+
+                let pair_sg = params
+                    .pair
+                    .posterior_sample()?
+                    .sum_to_one_columns()
+                    .scale(args.column_sum_norm)
+                    .transpose();
+
+                let null_sg = params
+                    .null
+                    .posterior_sample()?
+                    .sum_to_one_columns()
+                    .scale(args.column_sum_norm)
+                    .transpose();
+
+                let mut data_loader = InMemoryData::from(InMemoryArgs {
+                    input: &pair_sg,
+                    input_null: Some(&null_sg),
+                    output: None,
+                    output_null: None,
+                })?;
+
+                data_loader.shuffle_minibatch(args.batch_size)?;
+
+                let mut llik_tot = 0f32;
+                let mut kl_tot = 0f32;
+
+                for b in 0..data_loader.num_minibatch() {
+                    let mb = data_loader.minibatch_shuffled(b, &dev)?;
+                    let x_pair = &mb.input;
+                    let x_null = mb.input_null.as_ref();
+                    let y_nd = x_pair;
+
+                    let (theta, kl) = encoder.forward_t(x_pair, x_null, true)?;
+
+                    let theta = if args.topic_smoothing > 0.0 {
+                        let alpha = args.topic_smoothing;
+                        let kk = theta.dim(1)? as f64;
+                        ((&theta * (1.0 - alpha))? + alpha / kk)?
+                    } else {
+                        theta
+                    };
+
+                    let (_, llik) = decoder.forward_with_llik(&theta, y_nd, &topic_likelihood)?;
+                    let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
+                    adam.backward_step(&loss)?;
+
+                    llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+                    kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
+                }
+
+                let n_mb = data_loader.num_minibatch().max(1) as f32;
+                kl_trace.push(kl_tot / n_mb);
+                llik_trace.push(llik_tot / n_mb);
+
+                pb.inc(1);
+                epoch_counter += 1;
+
+                if args.verbose {
+                    info!(
+                        "[L{}][{}][{}] llik={:.2} kl={:.2}",
+                        level, epoch, jitter, llik_tot, kl_tot
+                    );
+                }
+            }
+        }
+    }
+
+    pb.finish_and_clear();
+    info!("Done progressive model training");
+
+    Ok(TrainScores {
+        llik: llik_trace,
+        kl: kl_trace,
+    })
+}
+
 fn train_link_community(
     params: &PairNullParameters,
     encoder: &mut LogSoftmaxEncoder,
@@ -633,6 +759,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     if args.verbose {
         std::env::set_var("RUST_LOG", "info");
     }
+    env_logger::init();
 
     // 1. Load data
     info!("[1/11] Loading data files...");
@@ -683,9 +810,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             proj_dim: args.proj_dim,
             sort_dim: args.sort_dim,
             block_size: args.block_size,
-            knn_batches: args.knn_batches,
             knn_cells: args.knn_cells,
-            down_sample: args.down_sample,
         },
     )?;
 
@@ -729,26 +854,33 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         Some(&batch_membership),
     )?;
 
-    srt_cell_pairs.assign_pairs_to_samples(&proj_out, Some(args.sort_dim), args.down_sample)?;
-
-    // 5. Collapse: accumulate pair/null expression statistics
-    info!("[5/11] Collapsing pair/null expression statistics...");
+    // 5. Multi-level collapse: accumulate pair/null expression statistics
+    info!(
+        "[5/11] Multi-level collapsing ({} levels, sort_dim={})...",
+        args.num_levels, args.sort_dim
+    );
 
     let batch_db = batch_effects.map(|x| x.posterior_mean().clone());
     let batch_ref = batch_db.as_ref();
 
-    let mut collapsed_stat =
-        PairNullCollapsedStat::new(n_genes, srt_cell_pairs.num_samples()?);
-
-    srt_cell_pairs.visit_pairs_by_sample(
+    let collapsed_stats = srt_cell_pairs.collapse_pairs_multilevel(
+        &proj_out,
+        args.sort_dim,
+        args.num_levels,
+        args.down_sample,
         &collect_pair_null_visitor,
         &batch_ref,
-        &mut collapsed_stat,
+        |n_samples| PairNullCollapsedStat::new(n_genes, n_samples),
     )?;
 
-    // 6. Fit Poisson-Gamma on pair and null channels
-    info!("[6/11] Fitting Poisson-Gamma model...");
-    let params = collapsed_stat.optimize(None)?;
+    // 6. Fit Poisson-Gamma on each level
+    info!("[6/11] Fitting Poisson-Gamma model ({} levels)...", collapsed_stats.len());
+    let all_params: Vec<PairNullParameters> = collapsed_stats
+        .iter()
+        .map(|stat| stat.optimize(None))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let params = all_params.last().ok_or(anyhow::anyhow!("no levels"))?;
 
     // 7. Initialize encoder + topic decoder
     info!(
@@ -789,7 +921,11 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // 8. Train with jitter resampling
     info!("[8/11] Training ({} epochs, jitter every {})...", args.epochs, args.jitter_interval);
 
-    let scores = train_link_community(&params, &mut encoder, &decoder, &var_map, args)?;
+    let scores = if all_params.len() > 1 {
+        train_link_community_progressive(&all_params, &mut encoder, &decoder, &var_map, args)?
+    } else {
+        train_link_community(params, &mut encoder, &decoder, &var_map, args)?
+    };
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
 
