@@ -2,8 +2,9 @@ use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
 use crate::srt_estimate_batch_effects::estimate_batch;
 use crate::srt_estimate_batch_effects::EstimateBatchArgs;
+use crate::srt_graph_coarsen::*;
 use crate::srt_input::*;
-use crate::srt_random_projection::*;
+use data_beans_alg::random_projection::*;
 
 use candle_util::candle_core::{self, Device, Tensor};
 use candle_util::candle_decoder_topic::TopicDecoder;
@@ -97,10 +98,10 @@ pub struct SrtLinkCommunityArgs {
     #[arg(
         long,
         short = 'd',
-        default_value_t = 10,
-        help = "Number of top projection components for binary sort"
+        default_value_t = 1024,
+        help = "Target number of pseudobulk clusters for graph coarsening"
     )]
-    sort_dim: usize,
+    n_clusters: usize,
 
     #[arg(
         short = 'k',
@@ -762,7 +763,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     env_logger::init();
 
     // 1. Load data
-    info!("[1/11] Loading data files...");
+    info!("Loading data files...");
 
     let SRTData {
         data: mut data_vec,
@@ -784,13 +785,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     let n_cells = data_vec.num_columns();
 
     anyhow::ensure!(args.proj_dim > 0, "proj_dim must be > 0");
-    anyhow::ensure!(args.sort_dim > 0, "sort_dim must be > 0");
-    anyhow::ensure!(
-        args.sort_dim <= args.proj_dim,
-        "sort_dim ({}) must be <= proj_dim ({})",
-        args.sort_dim,
-        args.proj_dim
-    );
+    anyhow::ensure!(args.n_clusters > 0, "n_clusters must be > 0");
     anyhow::ensure!(args.knn_spatial > 0, "knn_spatial must be > 0");
     anyhow::ensure!(args.n_topics > 0, "n_topics must be > 0");
     anyhow::ensure!(
@@ -801,14 +796,15 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     );
 
     // 2. Estimate batch effects
-    info!("[2/11] Estimating batch effects...");
+    info!("Estimating batch effects...");
 
+    let batch_sort_dim = args.proj_dim.min(10);
     let batch_effects = estimate_batch(
         &mut data_vec,
         &batch_membership,
         EstimateBatchArgs {
             proj_dim: args.proj_dim,
-            sort_dim: args.sort_dim,
+            sort_dim: batch_sort_dim,
             block_size: args.block_size,
             knn_cells: args.knn_cells,
         },
@@ -827,7 +823,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     // 3. Build spatial KNN graph
     info!(
-        "[3/11] Building spatial KNN graph (k={})...",
+        "Building spatial KNN graph (k={})...",
         args.knn_spatial
     );
 
@@ -846,39 +842,41 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         Some(coordinate_names.clone()),
     )?;
 
-    // 4. Random projection + sample assignment
-    info!("[4/11] Random projection and sample assignment...");
-    let proj_out = srt_cell_pairs.random_projection(
+    // 4. Per-cell random projection
+    info!("Per-cell random projection...");
+    let mut cell_proj = data_vec.project_columns_with_batch_correction(
         args.proj_dim,
-        args.block_size,
+        Some(args.block_size),
         Some(&batch_membership),
     )?;
 
-    // 5. Multi-level collapse: accumulate pair/null expression statistics
+    // 5. Graph-constrained coarsening + multi-level collapse
     info!(
-        "[5/11] Multi-level collapsing ({} levels, sort_dim={})...",
-        args.num_levels, args.sort_dim
+        "Graph coarsening + multi-level collapse ({} levels, n_clusters={})...",
+        args.num_levels, args.n_clusters
     );
 
     let batch_db = batch_effects.map(|x| x.posterior_mean().clone());
     let batch_ref = batch_db.as_ref();
 
-    let collapse_args = CollapsePairsArgs {
-        proj_out: &proj_out,
-        finest_sort_dim: args.sort_dim,
-        num_levels: args.num_levels,
-        down_sample: args.down_sample,
-    };
+    let ml = graph_coarsen_multilevel(
+        &srt_cell_pairs.graph,
+        &mut cell_proj.proj,
+        &srt_cell_pairs.pairs,
+        args.n_clusters,
+        args.num_levels,
+    );
 
-    let collapsed_stats = srt_cell_pairs.collapse_pairs_multilevel(
-        &collapse_args,
-        &collect_pair_null_visitor,
-        &batch_ref,
-        |n_samples| PairNullCollapsedStat::new(n_genes, n_samples),
-    )?;
+    let mut collapsed_stats = Vec::with_capacity(ml.all_num_samples.len());
+    for (p2s, &ns) in ml.all_pair_to_sample.into_iter().zip(&ml.all_num_samples) {
+        srt_cell_pairs.assign_samples(p2s, args.down_sample);
+        let mut stat = PairNullCollapsedStat::new(n_genes, ns);
+        srt_cell_pairs.visit_pairs_by_sample(&collect_pair_null_visitor, &batch_ref, &mut stat)?;
+        collapsed_stats.push(stat);
+    }
 
     // 6. Fit Poisson-Gamma on each level
-    info!("[6/11] Fitting Poisson-Gamma model ({} levels)...", collapsed_stats.len());
+    info!("Fitting Poisson-Gamma model ({} levels)...", collapsed_stats.len());
     let all_params: Vec<PairNullParameters> = collapsed_stats
         .iter()
         .map(|stat| stat.optimize(None))
@@ -888,7 +886,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     // 7. Initialize encoder + topic decoder
     info!(
-        "[7/11] Initializing encoder ({} topics, {} genes)...",
+        "Initializing encoder ({} topics, {} genes)...",
         args.n_topics, n_genes
     );
 
@@ -923,7 +921,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     );
 
     // 8. Train with jitter resampling
-    info!("[8/11] Training ({} epochs, jitter every {})...", args.epochs, args.jitter_interval);
+    info!("Training ({} epochs, jitter every {})...", args.epochs, args.jitter_interval);
 
     let scores = if all_params.len() > 1 {
         train_link_community_progressive(&all_params, &mut encoder, &decoder, &var_map, args)?
@@ -934,7 +932,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
 
     // 9. Write dictionary
-    info!("[9/11] Writing dictionary...");
+    info!("Writing dictionary...");
 
     let dict_gk = decoder.get_dictionary()?;
     dict_gk
@@ -946,14 +944,14 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         )?;
 
     // 10. Compute global null for cell-level inference
-    info!("[10/11] Computing global null...");
+    info!("Computing global null...");
 
     let global_null = compute_global_null(params, args.column_sum_norm);
     let global_null_data: Vec<f32> = global_null.as_slice().to_vec();
     let global_null_tensor = Tensor::from_vec(global_null_data, (1, n_genes), &dev)?;
 
     // 11. Inference: encoder on individual cells
-    info!("[11/11] Inferring cell propensities...");
+    info!("Inferring cell propensities...");
 
     let propensity_nk =
         evaluate_cell_propensities(&data_vec, &encoder, &global_null_tensor, args)?;
