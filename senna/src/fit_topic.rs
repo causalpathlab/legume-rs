@@ -461,9 +461,11 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let use_multilevel =
         !args.ignore_batch_effects && nbatch > 1 && reference.is_none() && !args.no_supercell;
 
-    let collapsed = if use_multilevel {
+    let use_progressive = use_multilevel && args.num_levels > 1;
+
+    let collapsed_levels: Option<Vec<CollapsedOut>> = if use_progressive {
         info!("Multi-level collapsing with super-cells ...");
-        collapse_columns_multilevel_impl(
+        Some(collapse_columns_multilevel_vec(
             &mut data_vec,
             &proj_kn,
             &batch_membership,
@@ -471,26 +473,51 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             Some(args.num_levels),
             Some(args.sort_dim),
             Some(args.iter_opt),
-        )?
+        )?)
     } else {
-        let nsamp =
-            data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
-
-        if !args.ignore_batch_effects && nbatch > 1 {
-            info!("Registering batch information");
-            data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
-        }
-
-        info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
-        data_vec.collapse_columns(
-            Some(args.knn_batches),
-            Some(args.knn_cells),
-            reference,
-            Some(args.iter_opt),
-        )?
+        None
     };
 
-    let batch_db = collapsed.delta.as_ref();
+    let collapsed = if !use_progressive {
+        Some(if use_multilevel {
+            collapse_columns_multilevel_impl(
+                &mut data_vec,
+                &proj_kn,
+                &batch_membership,
+                Some(args.knn_cells),
+                Some(1),
+                Some(args.sort_dim),
+                Some(args.iter_opt),
+            )?
+        } else {
+            let nsamp =
+                data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
+
+            if !args.ignore_batch_effects && nbatch > 1 {
+                info!("Registering batch information");
+                data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
+            }
+
+            info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
+            data_vec.collapse_columns(
+                Some(args.knn_batches),
+                Some(args.knn_cells),
+                reference,
+                Some(args.iter_opt),
+            )?
+        })
+    } else {
+        None
+    };
+
+    // For delta output and latent evaluation, use the finest level
+    let finest_collapsed: &CollapsedOut = if let Some(ref levels) = collapsed_levels {
+        levels.last().unwrap()
+    } else {
+        collapsed.as_ref().unwrap()
+    };
+
+    let batch_db = finest_collapsed.delta.as_ref();
 
     if let Some(batch_db) = batch_db {
         let outfile = args.out.to_string() + ".delta.parquet";
@@ -554,14 +581,25 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         DecoderType::ZeroInflated => {
             let decoder = ZITopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
-            let scores = train_encoder_decoder(
-                &collapsed,
-                &mut encoder,
-                &decoder,
-                &parameters,
-                &args,
-                selected_features.as_ref(),
-            )?;
+            let scores = if let Some(ref levels) = collapsed_levels {
+                train_encoder_decoder_progressive(
+                    levels,
+                    &mut encoder,
+                    &decoder,
+                    &parameters,
+                    &args,
+                    selected_features.as_ref(),
+                )?
+            } else {
+                train_encoder_decoder(
+                    collapsed.as_ref().unwrap(),
+                    &mut encoder,
+                    &decoder,
+                    &parameters,
+                    &args,
+                    selected_features.as_ref(),
+                )?
+            };
 
             info!("Writing down the model parameters");
 
@@ -597,14 +635,25 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             let decoder =
                 SparseTopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
-            let scores = train_encoder_decoder(
-                &collapsed,
-                &mut encoder,
-                &decoder,
-                &parameters,
-                &args,
-                selected_features.as_ref(),
-            )?;
+            let scores = if let Some(ref levels) = collapsed_levels {
+                train_encoder_decoder_progressive(
+                    levels,
+                    &mut encoder,
+                    &decoder,
+                    &parameters,
+                    &args,
+                    selected_features.as_ref(),
+                )?
+            } else {
+                train_encoder_decoder(
+                    collapsed.as_ref().unwrap(),
+                    &mut encoder,
+                    &decoder,
+                    &parameters,
+                    &args,
+                    selected_features.as_ref(),
+                )?
+            };
 
             info!("Writing down the model parameters");
 
@@ -622,14 +671,25 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         DecoderType::Flat => {
             let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
-            let scores = train_encoder_decoder(
-                &collapsed,
-                &mut encoder,
-                &decoder,
-                &parameters,
-                &args,
-                selected_features.as_ref(),
-            )?;
+            let scores = if let Some(ref levels) = collapsed_levels {
+                train_encoder_decoder_progressive(
+                    levels,
+                    &mut encoder,
+                    &decoder,
+                    &parameters,
+                    &args,
+                    selected_features.as_ref(),
+                )?
+            } else {
+                train_encoder_decoder(
+                    collapsed.as_ref().unwrap(),
+                    &mut encoder,
+                    &decoder,
+                    &parameters,
+                    &args,
+                    selected_features.as_ref(),
+                )?
+            };
 
             info!("Writing down the model parameters");
 
@@ -666,7 +726,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let z_nk = evaluate_latent_by_encoder(
         &data_vec,
         &encoder,
-        &collapsed,
+        finest_collapsed,
         &args,
         selected_features.as_ref(),
     )?;
@@ -852,19 +912,211 @@ where
                 kl_tot += kl_val;
             }
 
-            kl_trace.push(kl_tot / data_loader.num_minibatch() as f32);
-            llik_trace.push(llik_tot / data_loader.num_minibatch() as f32);
+            let n = data_loader.num_data() as f32;
+            let llik_avg = llik_tot / n;
+            let kl_avg = kl_tot / n;
+            llik_trace.push(llik_avg);
+            kl_trace.push(kl_avg);
 
             pb.inc(1);
 
             if args.verbose {
-                info!("[{}][{}] {} {}", epoch, jitter, llik_tot, kl_tot);
+                info!("[{}][{}] {} {}", epoch, jitter, llik_avg, kl_avg);
             }
         }
     }
     pb.finish_and_clear();
 
     info!("done model training");
+    Ok(TrainScores {
+        llik: llik_trace,
+        kl: kl_trace,
+    })
+}
+
+/// Progressive multi-level VAE training.
+///
+/// Allocates epochs across levels with weights inversely proportional to
+/// level index: level `i` gets `total_epochs * (num_levels - i) / sum(1..=num_levels)`.
+/// Coarse levels have fewer samples so each epoch is cheap — train longer
+/// there for a solid warm start, then fine-tune briefly on finer data.
+/// A single optimizer is created once and carries state across levels.
+fn train_encoder_decoder_progressive<Enc, Dec>(
+    collapsed_levels: &[CollapsedOut],
+    encoder: &mut Enc,
+    decoder: &Dec,
+    parameters: &candle_nn::VarMap,
+    args: &TopicArgs,
+    feature_selection: Option<&FeatureSelection>,
+) -> anyhow::Result<TrainScores>
+where
+    Enc: EncoderModuleT,
+    Dec: DecoderModuleT,
+{
+    let dev = match args.device {
+        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
+        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
+        _ => candle_core::Device::Cpu,
+    };
+
+    let num_levels = collapsed_levels.len();
+    let total_epochs = args.epochs;
+
+    // Compute per-level epoch allocation: w[i] = num_levels - i
+    // Coarse levels are cheap per epoch, so train longer there for
+    // a solid warm start, then fine-tune briefly on finer data.
+    let total_weight: usize = (1..=num_levels).sum();
+    let level_epochs: Vec<usize> = (0..num_levels)
+        .map(|i| {
+            let w = num_levels - i;
+            (total_epochs * w / total_weight).max(1)
+        })
+        .collect();
+
+    info!(
+        "Progressive training: {} levels, epoch allocation: {:?} (total {})",
+        num_levels,
+        level_epochs,
+        level_epochs.iter().sum::<usize>()
+    );
+
+    let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate as f64)?;
+
+    let total_actual_epochs: usize = level_epochs.iter().sum();
+    let pb = ProgressBar::new(total_actual_epochs as u64);
+    if args.verbose {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
+
+    let mut llik_trace = Vec::with_capacity(total_actual_epochs);
+    let mut kl_trace = Vec::with_capacity(total_actual_epochs);
+    let mut global_epoch: usize = 0;
+
+    for (level, (collapsed, &level_ep)) in
+        collapsed_levels.iter().zip(level_epochs.iter()).enumerate()
+    {
+        info!(
+            "Level {}/{}: {} epochs, {} samples",
+            level + 1,
+            num_levels,
+            level_ep,
+            collapsed.mu_observed.ncols(),
+        );
+
+        for epoch in (0..level_ep).step_by(args.jitter_interval) {
+            let mut mixed_nd = collapsed
+                .mu_observed
+                .posterior_sample()?
+                .sum_to_one_columns()
+                .scale(args.column_sum_norm)
+                .transpose();
+
+            if let Some(sel) = feature_selection {
+                mixed_nd = mixed_nd.select_columns(&sel.selected_indices);
+            }
+
+            let clean_nd = collapsed.mu_adjusted.as_ref().map(|x| {
+                let mut ret: Mat = x.posterior_sample().unwrap();
+                ret.sum_to_one_columns_inplace();
+                ret.scale_mut(args.column_sum_norm);
+                ret = ret.transpose();
+                if let Some(sel) = feature_selection {
+                    ret = ret.select_columns(&sel.selected_indices);
+                }
+                ret
+            });
+
+            let batch_nd = collapsed.mu_residual.as_ref().map(|x| {
+                let mut ret: Mat = x.posterior_sample().unwrap();
+                ret = ret.transpose();
+                if let Some(sel) = feature_selection {
+                    ret = ret.select_columns(&sel.selected_indices);
+                }
+                ret
+            });
+
+            if let Some(ref batch) = batch_nd {
+                if batch.ncols() != mixed_nd.ncols() {
+                    return Err(anyhow::anyhow!(
+                        "mixed_nd and batch_nd have different feature dimensions: {} vs {}",
+                        mixed_nd.ncols(),
+                        batch.ncols()
+                    ));
+                }
+            }
+
+            let mut data_loader = InMemoryData::from(InMemoryArgs {
+                input: &mixed_nd,
+                input_null: batch_nd.as_ref(),
+                output: clean_nd.as_ref(),
+                output_null: None,
+            })?;
+
+            data_loader.shuffle_minibatch(args.minibatch_size)?;
+
+            let kl_weight = if args.kl_warmup_epochs > 0.0 {
+                1.0 - (-(global_epoch as f64) / args.kl_warmup_epochs).exp()
+            } else {
+                1.0
+            };
+
+            let jitter_end = args.jitter_interval.min(level_ep - epoch);
+            for jitter in 0..jitter_end {
+                let mut llik_tot = 0f32;
+                let mut kl_tot = 0f32;
+
+                for b in 0..data_loader.num_minibatch() {
+                    let mb = data_loader.minibatch_shuffled(b, &dev)?;
+                    let (z_nk, kl) =
+                        encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
+
+                    let z_nk = if args.topic_smoothing > 0.0 {
+                        let alpha = args.topic_smoothing;
+                        let kk = z_nk.dim(1)? as f64;
+                        ((&z_nk * (1.0 - alpha))? + alpha / kk)?
+                    } else {
+                        z_nk
+                    };
+
+                    let y_nd = mb.output.unwrap_or(mb.input);
+                    let (_, llik) =
+                        decoder.forward_with_llik(&z_nk, &y_nd, &topic_likelihood)?;
+
+                    let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
+                    adam.backward_step(&loss)?;
+
+                    let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
+                    let kl_val = kl.sum_all()?.to_scalar::<f32>()?;
+                    llik_tot += llik_val;
+                    kl_tot += kl_val;
+                }
+
+                let n = data_loader.num_data() as f32;
+                let llik_avg = llik_tot / n;
+                let kl_avg = kl_tot / n;
+                llik_trace.push(llik_avg);
+                kl_trace.push(kl_avg);
+
+                pb.inc(1);
+                global_epoch += 1;
+
+                if args.verbose {
+                    info!(
+                        "[level {}/{}][{}][{}] {} {}",
+                        level + 1,
+                        num_levels,
+                        epoch,
+                        jitter,
+                        llik_avg,
+                        kl_avg
+                    );
+                }
+            }
+        }
+    }
+
+    pb.finish_and_clear();
+    info!("done progressive model training");
     Ok(TrainScores {
         llik: llik_trace,
         kl: kl_trace,
