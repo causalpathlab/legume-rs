@@ -16,6 +16,13 @@ pub struct SrtCellPairs<'a> {
     pub sample_to_pair: Option<Vec<Vec<usize>>>,
 }
 
+pub struct CollapsePairsArgs<'a> {
+    pub proj_out: &'a SrtRandProjOut,
+    pub finest_sort_dim: usize,
+    pub num_levels: usize,
+    pub down_sample: Option<usize>,
+}
+
 pub struct SrtCellPairsArgs {
     pub knn: usize,
     pub coordinate_emb_dim: usize,
@@ -339,10 +346,7 @@ impl<'a> SrtCellPairs<'a> {
     /// Returns `Vec<SharedOut>` from coarsest to finest.
     pub fn collapse_pairs_multilevel<Visitor, SharedIn, SharedOut>(
         &mut self,
-        proj_out: &SrtRandProjOut,
-        finest_sort_dim: usize,
-        num_levels: usize,
-        down_sample: Option<usize>,
+        collapse_args: &CollapsePairsArgs<'_>,
         visitor: &Visitor,
         shared_in: &SharedIn,
         stat_factory: impl Fn(usize) -> SharedOut,
@@ -360,7 +364,10 @@ impl<'a> SrtCellPairs<'a> {
         SharedIn: Sync + Send + ?Sized,
         SharedOut: Sync + Send,
     {
-        let level_dims = compute_level_sort_dims(finest_sort_dim, num_levels);
+        let level_dims = compute_level_sort_dims(
+            collapse_args.finest_sort_dim,
+            collapse_args.num_levels,
+        );
         let mut results = Vec::with_capacity(level_dims.len());
 
         for (level, &sort_dim) in level_dims.iter().enumerate() {
@@ -370,7 +377,11 @@ impl<'a> SrtCellPairs<'a> {
                 level_dims.len(),
                 sort_dim
             );
-            self.assign_pairs_to_samples(proj_out, Some(sort_dim), down_sample)?;
+            self.assign_pairs_to_samples(
+                collapse_args.proj_out,
+                Some(sort_dim),
+                collapse_args.down_sample,
+            )?;
             let mut stat = stat_factory(self.num_samples()?);
             self.visit_pairs_by_sample(visitor, shared_in, &mut stat)?;
             results.push(stat);
