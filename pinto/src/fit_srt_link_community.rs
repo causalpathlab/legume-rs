@@ -461,7 +461,7 @@ fn train_link_community_progressive(
     let mut epoch_counter = 0usize;
 
     for (level, params) in all_params.iter().enumerate() {
-        let level_epochs = (args.epochs * (num_levels - level) + total_weight - 1) / total_weight;
+        let level_epochs = (args.epochs * (num_levels - level)).div_ceil(total_weight);
         info!(
             "Progressive level {}/{}: {} epochs",
             level + 1,
@@ -863,11 +863,15 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     let batch_db = batch_effects.map(|x| x.posterior_mean().clone());
     let batch_ref = batch_db.as_ref();
 
+    let collapse_args = CollapsePairsArgs {
+        proj_out: &proj_out,
+        finest_sort_dim: args.sort_dim,
+        num_levels: args.num_levels,
+        down_sample: args.down_sample,
+    };
+
     let collapsed_stats = srt_cell_pairs.collapse_pairs_multilevel(
-        &proj_out,
-        args.sort_dim,
-        args.num_levels,
-        args.down_sample,
+        &collapse_args,
         &collect_pair_null_visitor,
         &batch_ref,
         |n_samples| PairNullCollapsedStat::new(n_genes, n_samples),
@@ -944,7 +948,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // 10. Compute global null for cell-level inference
     info!("[10/11] Computing global null...");
 
-    let global_null = compute_global_null(&params, args.column_sum_norm);
+    let global_null = compute_global_null(params, args.column_sum_norm);
     let global_null_data: Vec<f32> = global_null.as_slice().to_vec();
     let global_null_tensor = Tensor::from_vec(global_null_data, (1, n_genes), &dev)?;
 
