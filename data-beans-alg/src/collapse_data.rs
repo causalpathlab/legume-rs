@@ -859,6 +859,36 @@ pub fn collapse_columns_multilevel_impl<T>(
 where
     T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
 {
+    let mut results = collapse_columns_multilevel_vec(
+        data_vec,
+        proj_kn,
+        batch_membership,
+        knn_super_cells,
+        num_levels,
+        sort_dim,
+        num_opt_iter,
+    )?;
+    results
+        .pop()
+        .ok_or(anyhow::anyhow!("no levels processed"))
+}
+
+/// Multi-level collapsing returning per-level `CollapsedOut` objects.
+///
+/// Same logic as `collapse_columns_multilevel_impl` but returns all
+/// levels (coarse → fine) for progressive training strategies.
+pub fn collapse_columns_multilevel_vec<T>(
+    data_vec: &mut SparseIoVec,
+    proj_kn: &DMatrix<f32>,
+    batch_membership: &[T],
+    knn_super_cells: Option<usize>,
+    num_levels: Option<usize>,
+    sort_dim: Option<usize>,
+    num_opt_iter: Option<usize>,
+) -> anyhow::Result<Vec<CollapsedOut>>
+where
+    T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+{
     let num_levels = num_levels.unwrap_or(DEFAULT_NUM_LEVELS);
     let sort_dim = sort_dim.unwrap_or(proj_kn.nrows().min(12));
     let knn = knn_super_cells.unwrap_or(DEFAULT_KNN);
@@ -879,7 +909,7 @@ where
         let num_groups = group_to_cols.len();
         let mut stat = CollapsedStat::new(num_features, num_groups, 0);
         data_vec.collect_basic_stat(&mut stat)?;
-        return optimize(&stat, (1.0, 1.0), opt_iter);
+        return Ok(vec![optimize(&stat, (1.0, 1.0), opt_iter)?]);
     }
 
     let level_dims = compute_level_sort_dims(sort_dim, num_levels);
@@ -889,7 +919,7 @@ where
         num_levels, level_dims, num_batches
     );
 
-    let mut result: Option<CollapsedOut> = None;
+    let mut results = Vec::with_capacity(num_levels);
 
     for (level, &level_sort_dim) in level_dims.iter().enumerate() {
         let is_finest = level == level_dims.len() - 1;
@@ -934,8 +964,12 @@ where
 
         // Optimize parameters
         info!("Optimizing parameters ...");
-        result = Some(optimize(&stat, (1.0, 1.0), level_opt_iter)?);
+        results.push(optimize(&stat, (1.0, 1.0), level_opt_iter)?);
     }
 
-    result.ok_or(anyhow::anyhow!("no levels processed"))
+    if results.is_empty() {
+        return Err(anyhow::anyhow!("no levels processed"));
+    }
+
+    Ok(results)
 }
