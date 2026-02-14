@@ -37,6 +37,13 @@ pub fn read_expr_data(data_files: &[Box<str>]) -> anyhow::Result<SparseIoVec> {
 }
 
 pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> {
+    anyhow::ensure!(
+        args.coord_files.len() == args.data_files.len(),
+        "Number of coordinate files ({}) must match number of data files ({})",
+        args.coord_files.len(),
+        args.data_files.len()
+    );
+
     let attach_data_name = args.data_files.len() > 1;
     let mut data_vec = SparseIoVec::new();
 
