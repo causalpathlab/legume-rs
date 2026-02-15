@@ -312,6 +312,7 @@ pub fn mkdir(file: &str) -> anyhow::Result<()> {
 }
 
 pub trait PathOsToStr {
+    #[allow(clippy::wrong_self_convention)]
     fn into_boxed_str(&self) -> Box<str>;
 }
 
@@ -373,11 +374,11 @@ pub fn recursive_copy(src_path: &str, dst_path: &str) -> anyhow::Result<()> {
 /// `None`, just use a current directory.
 /// * Returns `extract_path`
 pub fn unzip_dir(zip_path: &str, extract_path: Option<&str>) -> anyhow::Result<Box<str>> {
-    let zip_file = std::fs::File::open(&zip_path)?;
+    let zip_file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(zip_file)?;
 
     let extract_path = extract_path
-        .map(|x| std::path::PathBuf::from(x))
+        .map(std::path::PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
 
     for i in 0..archive.len() {

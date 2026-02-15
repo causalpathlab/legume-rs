@@ -273,8 +273,8 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             cols: _,
             mat: proj_nk,
         } = match ext.as_ref() {
-            "parquet" => Mat::from_parquet_with_row_names(&proj_file, Some(0))?,
-            _ => Mat::read_data_with_names(&proj_file, &['\t', ',', ' '], Some(0), Some(0))?,
+            "parquet" => Mat::from_parquet_with_row_names(proj_file, Some(0))?,
+            _ => Mat::read_data_with_names(proj_file, &['\t', ',', ' '], Some(0), Some(0))?,
         };
 
         if data_vec.column_names()? != cell_names {
@@ -299,7 +299,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
 
     // 3. Batch-adjusted collapsing (pseudobulk)
-    let reference = args.reference_batches.as_ref().map(|x| x.as_slice());
+    let reference = args.reference_batches.as_deref();
 
     let use_multilevel =
         !args.ignore_batch_effects && nbatch > 1 && reference.is_none() && !args.no_supercell;
@@ -316,8 +316,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             Some(args.iter_opt),
         )?
     } else {
-        let nsamp =
-            data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
+        let nsamp = data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
 
         if !args.ignore_batch_effects && nbatch > 1 {
             info!("Registering batch information");
@@ -568,6 +567,7 @@ fn triplets_adjusted_by_pseudobulk(
     Ok(triplets)
 }
 
+#[allow(clippy::type_complexity)]
 fn adjust_triplets_visitor(
     job: (usize, usize),
     full_data_vec: &SparseIoVec,

@@ -578,7 +578,7 @@ pub fn align_backends(args: &AlignDataArgs) -> anyhow::Result<()> {
                 args.output_directory, data_row_id, data_col_id, base, ext
             );
             info!("renaming files for easier sorting: {}", dst_path);
-            recursive_copy(&a_file, &dst_path)?;
+            recursive_copy(a_file, &dst_path)?;
             let (backend, a_copied_file) = resolve_backend_file(&dst_path, None)?;
             open_sparse_matrix(&a_copied_file, &backend)
         })

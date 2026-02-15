@@ -164,7 +164,7 @@ where
     pub fn save(
         &self,
         filename: &str,
-        names: &Vec<Box<str>>,
+        names: &[Box<str>],
         sep: &str,
         row_column_name: Option<&str>,
     ) -> anyhow::Result<()> {
@@ -200,7 +200,7 @@ where
                 let row_col = row_column_name.or(Some("stat"));
                 stacked.to_parquet_with_names(
                     filename,
-                    (Some(&names), row_col),
+                    (Some(names), row_col),
                     Some(&column_names),
                 )?;
             }
@@ -215,7 +215,7 @@ where
         Ok(())
     }
 
-    pub fn to_string_vec(&self, names: &Vec<Box<str>>, sep: &str) -> anyhow::Result<Vec<Box<str>>> {
+    pub fn to_string_vec(&self, names: &[Box<str>], sep: &str) -> anyhow::Result<Vec<Box<str>>> {
         if names.len() != self.shape()[0] {
             anyhow::bail!(
                 "The number of names does not match the number of the first dimension of the statistics"

@@ -27,8 +27,8 @@ where
             let min_lv = -10.; // clamp log variance
             let max_lv = 10.; //
 
-            let z_mean = self.z_mean.forward(&h)?;
-            let z_lnvar = self.z_lnvar.forward(&h)?.clamp(min_lv, max_lv)?;
+            let z_mean = self.z_mean.forward(h)?;
+            let z_lnvar = self.z_lnvar.forward(h)?.clamp(min_lv, max_lv)?;
             let kl = gaussian_kl_loss(&z_mean, &z_lnvar)?;
             let z = if train {
                 let eps = Tensor::randn_like(&z_mean, 0., 1.)?;

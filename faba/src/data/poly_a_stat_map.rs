@@ -291,6 +291,6 @@ fn check_internal_prime(
     };
 
     let target = if is_reverse { b'T' } else { b'A' };
-    let count = window.into_iter().filter(|&&b| b == target).count();
+    let count = window.iter().filter(|&&b| b == target).count();
     count >= misprime_a_count
 }

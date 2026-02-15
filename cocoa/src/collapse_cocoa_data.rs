@@ -203,19 +203,19 @@ fn collect_matched_stat_visitor(
 /// Cached KNN matches for one individual within a pseudobulk sample
 struct IndvMatchCache {
     indv_index: usize,
-    indv_cells: Vec<usize>,       // positions within sample's cell list
-    y0_mat: CscMat,               // all KNN matches (no exposure filter)
-    matched_source: Vec<usize>,   // source cell global indices
-    matched_glob: Vec<usize>,     // matched cell global indices
+    indv_cells: Vec<usize>,     // positions within sample's cell list
+    y0_mat: CscMat,             // all KNN matches (no exposure filter)
+    matched_source: Vec<usize>, // source cell global indices
+    matched_glob: Vec<usize>,   // matched cell global indices
     distances: Vec<f32>,
-    matched_batch: Vec<usize>,    // batch of each matched cell
+    matched_batch: Vec<usize>, // batch of each matched cell
 }
 
 /// Cached data for one pseudobulk sample
 struct SampleMatchCache {
     sample_index: usize,
-    cells: Vec<usize>,            // global cell indices
-    y1_all: CscMat,               // source cell expression
+    cells: Vec<usize>, // global cell indices
+    y1_all: CscMat,    // source cell expression
     indv_caches: Vec<IndvMatchCache>,
 }
 
@@ -307,8 +307,8 @@ fn build_one_sample(
 
     for (indv_index, indv_cells) in indv_to_cells {
         // Query ALL batches (no exposure filter), only skip same batch
-        let (y0_mat, matched_source, matched_glob, distances) =
-            data.read_neighbouring_columns_csc(
+        let (y0_mat, matched_source, matched_glob, distances) = data
+            .read_neighbouring_columns_csc(
                 indv_cells.iter().map(|&j| cells[j]),
                 knn_batches,
                 knn,

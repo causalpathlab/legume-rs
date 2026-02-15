@@ -169,9 +169,9 @@ impl TSne {
         }
 
         let mut entropy = 0.0f32;
-        for j in 0..n {
-            if i != j && probs[j] > 0.0 {
-                let p = probs[j] / sum;
+        for (j, &prob_j) in probs.iter().enumerate() {
+            if i != j && prob_j > 0.0 {
+                let p = prob_j / sum;
                 entropy -= p * p.ln();
             }
         }

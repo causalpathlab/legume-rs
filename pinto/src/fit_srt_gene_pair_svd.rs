@@ -53,13 +53,6 @@ pub struct SrtGenePairSvdArgs {
 
     #[arg(
         long,
-        default_value_t = 256,
-        help = "Dimension for spectral embedding of spatial coordinates"
-    )]
-    coord_emb: usize,
-
-    #[arg(
-        long,
         short = 'b',
         value_delimiter(','),
         help = "Batch membership files, one per data file",
@@ -203,10 +196,7 @@ pub struct SrtGenePairSvdArgs {
 /// 10. Nystrom projection → per-cell → per-pair latent codes
 /// 11. Export
 pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
+    init_logger(args.verbose);
 
     // 1. Load data
     info!("[1/9] Loading data files...");
@@ -260,7 +250,6 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
             &coordinates,
             SrtCellPairsArgs {
                 knn: args.knn_spatial,
-                coordinate_emb_dim: args.coord_emb,
                 block_size: args.block_size,
             },
         )?;

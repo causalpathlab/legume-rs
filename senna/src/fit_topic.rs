@@ -432,8 +432,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             cols: _,
             mat: proj_nk,
         } = match ext.as_ref() {
-            "parquet" => Mat::from_parquet_with_row_names(&proj_file, Some(0))?,
-            _ => Mat::read_data_with_names(&proj_file, &['\t', ',', ' '], Some(0), Some(0))?,
+            "parquet" => Mat::from_parquet_with_row_names(proj_file, Some(0))?,
+            _ => Mat::read_data_with_names(proj_file, &['\t', ',', ' '], Some(0), Some(0))?,
         };
 
         if data_vec.column_names()? != cell_names {
@@ -587,7 +587,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                     &mut encoder,
                     &decoder,
                     &parameters,
-                    &args,
+                    args,
                     selected_features.as_ref(),
                 )?
             } else {
@@ -596,7 +596,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                     &mut encoder,
                     &decoder,
                     &parameters,
-                    &args,
+                    args,
                     selected_features.as_ref(),
                 )?
             };
@@ -641,7 +641,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                     &mut encoder,
                     &decoder,
                     &parameters,
-                    &args,
+                    args,
                     selected_features.as_ref(),
                 )?
             } else {
@@ -650,7 +650,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                     &mut encoder,
                     &decoder,
                     &parameters,
-                    &args,
+                    args,
                     selected_features.as_ref(),
                 )?
             };
@@ -677,7 +677,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                     &mut encoder,
                     &decoder,
                     &parameters,
-                    &args,
+                    args,
                     selected_features.as_ref(),
                 )?
             } else {
@@ -686,7 +686,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                     &mut encoder,
                     &decoder,
                     &parameters,
-                    &args,
+                    args,
                     selected_features.as_ref(),
                 )?
             };
@@ -727,7 +727,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         &data_vec,
         &encoder,
         finest_collapsed,
-        &args,
+        args,
         selected_features.as_ref(),
     )?;
 
@@ -777,7 +777,6 @@ impl TrainScores {
         ];
 
         let epochs: Vec<Box<str>> = (0..mat.nrows())
-            .into_iter()
             .map(|x| (x + 1).to_string().into_boxed_str())
             .collect();
 
@@ -1067,8 +1066,7 @@ where
 
                 for b in 0..data_loader.num_minibatch() {
                     let mb = data_loader.minibatch_shuffled(b, &dev)?;
-                    let (z_nk, kl) =
-                        encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
+                    let (z_nk, kl) = encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
 
                     let z_nk = if args.topic_smoothing > 0.0 {
                         let alpha = args.topic_smoothing;
@@ -1079,8 +1077,7 @@ where
                     };
 
                     let y_nd = mb.output.unwrap_or(mb.input);
-                    let (_, llik) =
-                        decoder.forward_with_llik(&z_nk, &y_nd, &topic_likelihood)?;
+                    let (_, llik) = decoder.forward_with_llik(&z_nk, &y_nd, &topic_likelihood)?;
 
                     let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
                     adam.backward_step(&loss)?;
@@ -1146,8 +1143,6 @@ where
 
     let jobs = create_jobs(ntot, Some(block_size));
     let njobs = jobs.len() as u64;
-    let arc_enc = Arc::new(encoder);
-
     let delta = match args.adj_method {
         AdjMethod::Batch => collapsed.delta.as_ref(),
         AdjMethod::Residual => collapsed.mu_residual.as_ref(),
@@ -1168,8 +1163,6 @@ where
             .expect("transpose")
     });
 
-    let arc_sel = Arc::new(feature_selection);
-
     let mut chunks = jobs
         .par_iter()
         .progress_count(njobs)
@@ -1177,18 +1170,18 @@ where
             AdjMethod::Residual => evaluate_with_residuals(
                 block,
                 data_vec,
-                arc_enc.clone(),
+                encoder,
                 &dev,
                 delta.as_ref(),
-                arc_sel.clone(),
+                feature_selection,
             ),
             AdjMethod::Batch => evaluate_with_batch(
                 block,
                 data_vec,
-                arc_enc.clone(),
+                encoder,
                 &dev,
                 delta.as_ref(),
-                arc_sel.clone(),
+                feature_selection,
             ),
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -1211,10 +1204,10 @@ where
 fn evaluate_with_batch<Enc>(
     block: (usize, usize),
     data_vec: &SparseIoVec,
-    encoder: Arc<&Enc>,
+    encoder: &Enc,
     dev: &Device,
     delta_bd: Option<&Tensor>,
-    feature_selection: Arc<Option<&FeatureSelection>>,
+    feature_selection: Option<&FeatureSelection>,
 ) -> anyhow::Result<(usize, Mat)>
 where
     Enc: EncoderModuleT,
@@ -1233,7 +1226,7 @@ where
     let mut x_dn = data_vec.read_columns_csc(lb..ub)?;
 
     // Apply feature selection on sparse matrix
-    if let Some(sel) = *feature_selection {
+    if let Some(sel) = feature_selection {
         x_dn = filter_csc_by_rows(&sel.selection_matrix, &x_dn);
     }
 
@@ -1247,10 +1240,10 @@ where
 fn evaluate_with_residuals<Enc>(
     block: (usize, usize),
     data_vec: &SparseIoVec,
-    encoder: Arc<&Enc>,
+    encoder: &Enc,
     dev: &Device,
     delta_bp: Option<&Tensor>,
-    feature_selection: Arc<Option<&FeatureSelection>>,
+    feature_selection: Option<&FeatureSelection>,
 ) -> anyhow::Result<(usize, Mat)>
 where
     Enc: EncoderModuleT,
@@ -1270,7 +1263,7 @@ where
     let mut x_dn = data_vec.read_columns_csc(lb..ub)?;
 
     // Apply feature selection on sparse matrix
-    if let Some(sel) = *feature_selection {
+    if let Some(sel) = feature_selection {
         x_dn = filter_csc_by_rows(&sel.selection_matrix, &x_dn);
     }
 

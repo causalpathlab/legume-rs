@@ -1,37 +1,24 @@
+#![allow(clippy::needless_range_loop)]
+//! Link community model pipeline for spatial transcriptomics.
+//!
+//! Discovers link communities from spatial cell-cell KNN graphs via
+//! collapsed Gibbs sampling on gene-projected edge profiles.
+
+use crate::edge_profiles::*;
+use crate::link_community_gibbs::LinkGibbsSampler;
+use crate::link_community_model::LinkCommunitySuffStats;
 use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
-use crate::srt_estimate_batch_effects::estimate_batch;
-use crate::srt_estimate_batch_effects::EstimateBatchArgs;
+use crate::srt_estimate_batch_effects::{estimate_batch, EstimateBatchArgs};
 use crate::srt_graph_coarsen::*;
 use crate::srt_input::*;
-use data_beans_alg::random_projection::*;
 
-use candle_util::candle_core::{self, Device, Tensor};
-use candle_util::candle_decoder_topic::TopicDecoder;
-use candle_util::candle_encoder_softmax::*;
-use candle_util::candle_loss_functions::topic_likelihood;
-use candle_util::candle_model_traits::{DecoderModuleT, EncoderModuleT};
-use candle_util::candle_data_loader::*;
-use candle_util::candle_nn::{self, AdamW, Optimizer};
-
-use std::collections::{HashMap, HashSet};
-use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
-
-use clap::{Parser, ValueEnum};
-use indicatif::{ProgressBar, ProgressDrawTarget};
-use matrix_param::dmatrix_gamma::GammaMatrix;
+use clap::Parser;
+use data_beans_alg::random_projection::RandProjOps;
 use matrix_param::io::ParamIo;
-use matrix_param::traits::*;
 use matrix_util::utils::generate_minibatch_intervals;
-
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
-enum ComputeDevice {
-    Cpu,
-    Cuda,
-    Metal,
-}
+use rand::rngs::SmallRng;
+use rand::SeedableRng;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtLinkCommunityArgs {
@@ -74,13 +61,6 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
-        default_value_t = 256,
-        help = "Dimension for spectral embedding of spatial coordinates"
-    )]
-    coord_emb: usize,
-
-    #[arg(
-        long,
         short = 'b',
         value_delimiter(','),
         help = "Batch membership files, one per data file"
@@ -90,23 +70,30 @@ pub struct SrtLinkCommunityArgs {
     #[arg(
         long,
         short = 'p',
-        default_value_t = 50,
-        help = "Random projection dimension for pseudobulk sample construction"
+        default_value_t = 300,
+        help = "Random projection dimension (M)"
     )]
     proj_dim: usize,
 
     #[arg(
-        long,
-        short = 'd',
-        default_value_t = 1024,
-        help = "Target number of pseudobulk clusters for graph coarsening"
-    )]
-    n_clusters: usize,
-
-    #[arg(
         short = 'k',
         long,
-        default_value_t = 10,
+        default_value_t = 20,
+        help = "Number of link communities (K)"
+    )]
+    n_communities: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Number of gene modules (0 = same as K). When larger than K, \
+                K-means on edge profiles produces finer gene modules"
+    )]
+    n_gene_modules: usize,
+
+    #[arg(
+        long,
+        default_value_t = 3,
         help = "Number of nearest neighbours for spatial cell-pair graph"
     )]
     knn_spatial: usize,
@@ -118,8 +105,46 @@ pub struct SrtLinkCommunityArgs {
     )]
     knn_cells: usize,
 
-    #[arg(long, short = 's', help = "Maximum cells per pseudobulk sample")]
-    down_sample: Option<usize>,
+    #[arg(long, default_value_t = 100, help = "Number of Gibbs sweeps per level")]
+    num_sweeps: usize,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Number of greedy finalization sweeps"
+    )]
+    num_greedy: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Number of projection refinement rounds"
+    )]
+    num_refine_rounds: usize,
+
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Number of multi-level coarsening levels"
+    )]
+    num_levels: usize,
+
+    #[arg(
+        long,
+        short = 'd',
+        default_value_t = 1024,
+        help = "Target number of coarse clusters for graph coarsening"
+    )]
+    n_coarse_clusters: usize,
+
+    #[arg(long, default_value_t = 1.0, help = "Gamma shape prior (a0)")]
+    a0: f32,
+
+    #[arg(long, default_value_t = 1.0, help = "Gamma rate prior (b0)")]
+    b0: f32,
+
+    #[arg(long, default_value_t = 42, help = "Random seed")]
+    seed: u64,
 
     #[arg(long, short, required = true, help = "Output file prefix")]
     out: Box<str>,
@@ -127,92 +152,9 @@ pub struct SrtLinkCommunityArgs {
     #[arg(
         long,
         default_value_t = 100,
-        help = "Block size for parallel processing of cell pairs"
+        help = "Block size for parallel processing of edges"
     )]
     block_size: usize,
-
-    #[arg(
-        short = 't',
-        long,
-        default_value_t = 10,
-        help = "Number of latent community topics (K)"
-    )]
-    n_topics: usize,
-
-    #[arg(
-        short = 'f',
-        long,
-        help = "Number of feature modules in encoder (default: encoder_layers[0])"
-    )]
-    feature_modules: Option<usize>,
-
-    #[arg(
-        long,
-        short = 'e',
-        value_delimiter(','),
-        default_values_t = vec![128, 1024, 128],
-        help = "Encoder layers (comma-separated)"
-    )]
-    encoder_layers: Vec<usize>,
-
-    #[arg(
-        long,
-        short = 'i',
-        default_value_t = 1000,
-        help = "Number of training epochs"
-    )]
-    epochs: usize,
-
-    #[arg(
-        long,
-        short = 'j',
-        default_value_t = 5,
-        help = "Jitter resampling interval (epochs between posterior resampling)"
-    )]
-    jitter_interval: usize,
-
-    #[arg(long, default_value_t = 100, help = "Minibatch size for training")]
-    batch_size: usize,
-
-    #[arg(long, default_value_t = 1e-3, help = "Learning rate")]
-    learning_rate: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0.0,
-        help = "KL warmup: kl_weight = 1 - exp(-epoch / warmup). 0 = no annealing."
-    )]
-    kl_warmup_epochs: f64,
-
-    #[arg(
-        long,
-        default_value_t = 0.0,
-        help = "Topic smoothing: z = (1-α)z + α/K. 0 = disabled."
-    )]
-    topic_smoothing: f64,
-
-    #[arg(
-        long,
-        short = 'n',
-        default_value_t = 1e4,
-        help = "Column sum normalization scale for encoder input"
-    )]
-    column_sum_norm: f32,
-
-    #[arg(
-        long,
-        value_enum,
-        default_value = "cpu",
-        help = "Compute device (cpu, cuda, metal)"
-    )]
-    device: ComputeDevice,
-
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "Device ordinal for cuda/metal"
-    )]
-    device_no: usize,
 
     #[arg(
         long,
@@ -221,548 +163,35 @@ pub struct SrtLinkCommunityArgs {
     )]
     preload_data: bool,
 
-    #[arg(
-        long,
-        default_value_t = 2,
-        help = "Number of multi-level collapsing levels (coarse→fine)"
-    )]
-    num_levels: usize,
-
     #[arg(long, short, help = "Enable verbose logging (sets RUST_LOG=info)")]
     verbose: bool,
 }
 
-/////////////////////////////////////////
-// Pair + Null collapsed statistics    //
-/////////////////////////////////////////
-
-pub(crate) struct PairNullCollapsedStat {
-    pair_ds: Mat,
-    null_ds: Mat,
-    pair_size_s: DVec,
-    null_size_s: DVec,
-    n_genes: usize,
-    n_samples: usize,
-}
-
-impl PairNullCollapsedStat {
-    pub(crate) fn new(n_genes: usize, n_samples: usize) -> Self {
-        Self {
-            pair_ds: Mat::zeros(n_genes, n_samples),
-            null_ds: Mat::zeros(n_genes, n_samples),
-            pair_size_s: DVec::zeros(n_samples),
-            null_size_s: DVec::zeros(n_samples),
-            n_genes,
-            n_samples,
-        }
-    }
-
-    pub(crate) fn optimize(
-        &self,
-        hyper_param: Option<(f32, f32)>,
-    ) -> anyhow::Result<PairNullParameters> {
-        let (a0, b0) = hyper_param.unwrap_or((1_f32, 1_f32));
-        let shape = (self.n_genes, self.n_samples);
-
-        let mut pair = GammaMatrix::new(shape, a0, b0);
-        let mut null = GammaMatrix::new(shape, a0, b0);
-
-        let pair_size = &self.pair_size_s.transpose();
-        let pair_size_ds = Mat::from_rows(&vec![pair_size.clone(); shape.0]);
-
-        let null_size = &self.null_size_s.transpose();
-        let null_size_ds = Mat::from_rows(&vec![null_size.clone(); shape.0]);
-
-        info!("Calibrating null statistics");
-
-        null.update_stat(&self.null_ds, &null_size_ds);
-        null.calibrate();
-
-        // Use null posterior mean as denominator for pair Gamma,
-        // so pair posterior models fold-change over null baseline.
-        info!("Calibrating pair statistics (null-adjusted denominator)");
-
-        let null_mean = null.posterior_mean();
-        let pair_denom = null_mean.component_mul(&pair_size_ds);
-        pair.update_stat(&self.pair_ds, &pair_denom);
-        pair.calibrate();
-
-        info!("Resolved pair/null collapsed statistics");
-
-        Ok(PairNullParameters { pair, null })
-    }
-}
-
-pub(crate) struct PairNullParameters {
-    pub(crate) pair: GammaMatrix,
-    pub(crate) null: GammaMatrix,
-}
-
-/// Collapse visitor: accumulate pair (sum of both cells) and null
-/// (sum of random non-neighbor cell pairs) expression per gene per sample.
-pub(crate) fn collect_pair_null_visitor(
-    indices: &[usize],
-    data: &SrtCellPairs,
-    sample: usize,
-    batch_effect: &Option<&Mat>,
-    arc_stat: Arc<Mutex<&mut PairNullCollapsedStat>>,
-) -> anyhow::Result<()> {
-    let pairs: Vec<&Pair> = indices.iter().filter_map(|&j| data.pairs.get(j)).collect();
-    let n_pairs = pairs.len();
-    if n_pairs == 0 {
-        return Ok(());
-    }
-
-    // 1. Collect unique cell indices from all pairs in this sample
-    let mut unique_set = HashSet::new();
-    for p in &pairs {
-        unique_set.insert(p.left);
-        unique_set.insert(p.right);
-    }
-    let unique_cells: Vec<usize> = {
-        let mut v: Vec<usize> = unique_set.into_iter().collect();
-        v.sort_unstable();
-        v
-    };
-    let n_unique = unique_cells.len();
-
-    // 2. Generate random non-neighbor pairs via rejection sampling
-    //    Cap attempts to avoid infinite loops when too few unique cells
-    let mut rng = SmallRng::seed_from_u64(sample as u64);
-    let mut random_pairs: Vec<(usize, usize)> = Vec::with_capacity(n_pairs);
-    let max_attempts = n_pairs * 20;
-    let mut attempts = 0;
-
-    while random_pairs.len() < n_pairs && attempts < max_attempts {
-        attempts += 1;
-        let a = unique_cells[rng.random_range(0..n_unique)];
-        let b = unique_cells[rng.random_range(0..n_unique)];
-        if a == b {
-            continue;
-        }
-        let key = (a.min(b), a.max(b));
-        if data.graph.edges.binary_search(&key).is_ok() {
-            continue; // reject real spatial neighbours
-        }
-        random_pairs.push((a, b));
-    }
-
-    // 3. Read expression for all unique cells once
-    let mut all_columns = data.data.read_columns_csc(unique_cells.iter().copied())?;
-
-    // 4. Batch adjustment
-    if let Some(delta_db) = *batch_effect {
-        let batches = data.data.get_batch_membership(unique_cells.iter().copied());
-        all_columns.adjust_by_division_of_selected_inplace(delta_db, &batches);
-    }
-
-    // 5. Build cell → column-index mapping
-    let cell_to_col: HashMap<usize, usize> = unique_cells
-        .iter()
-        .enumerate()
-        .map(|(col_idx, &cell)| (cell, col_idx))
-        .collect();
-
-    let n_genes = all_columns.nrows();
-    let mut local_pair = DVec::zeros(n_genes);
-    let mut local_null = DVec::zeros(n_genes);
-
-    // Helper: accumulate a sparse column into a dense vector
-    let accumulate = |target: &mut DVec, col_idx: usize| {
-        let col = all_columns.col(col_idx);
-        for (&gene, &val) in col.row_indices().iter().zip(col.values().iter()) {
-            target[gene] += val;
-        }
-    };
-
-    // 6. Pair accumulation: sum both cells per real neighbour pair
-    for p in &pairs {
-        accumulate(&mut local_pair, cell_to_col[&p.left]);
-        accumulate(&mut local_pair, cell_to_col[&p.right]);
-    }
-
-    // 7. Null accumulation: sum both cells per random non-neighbour pair
-    for &(a, b) in &random_pairs {
-        accumulate(&mut local_null, cell_to_col[&a]);
-        accumulate(&mut local_null, cell_to_col[&b]);
-    }
-
-    // 8. Lock and update shared statistics
-    let mut stat = arc_stat.lock().expect("lock pair null stat");
-    let mut col_pair = stat.pair_ds.column_mut(sample);
-    col_pair += &local_pair;
-    let mut col_null = stat.null_ds.column_mut(sample);
-    col_null += &local_null;
-    stat.pair_size_s[sample] += n_pairs as f32;
-    stat.null_size_s[sample] += random_pairs.len() as f32;
-
-    Ok(())
-}
-
-/////////////////////////////////////////
-// Training loop                       //
-/////////////////////////////////////////
-
-struct TrainScores {
-    llik: Vec<f32>,
-    kl: Vec<f32>,
-}
-
-impl TrainScores {
-    fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
-        let mat = Mat::from_columns(&[
-            DVec::from_vec(self.llik.clone()),
-            DVec::from_vec(self.kl.clone()),
-        ]);
-
-        let score_types = vec![
-            "log_likelihood".to_string().into_boxed_str(),
-            "kl_divergence".to_string().into_boxed_str(),
-        ];
-
-        let epochs: Vec<Box<str>> = (0..mat.nrows())
-            .map(|x| (x + 1).to_string().into_boxed_str())
-            .collect();
-
-        mat.to_parquet_with_names(
-            file_path,
-            (Some(&epochs), Some("epoch")),
-            Some(&score_types),
-        )
-    }
-}
-
-fn train_link_community_progressive(
-    all_params: &[PairNullParameters],
-    encoder: &mut LogSoftmaxEncoder,
-    decoder: &TopicDecoder,
-    parameters: &candle_nn::VarMap,
-    args: &SrtLinkCommunityArgs,
-) -> anyhow::Result<TrainScores> {
-    let dev = match args.device {
-        ComputeDevice::Metal => Device::new_metal(args.device_no)?,
-        ComputeDevice::Cuda => Device::new_cuda(args.device_no)?,
-        _ => Device::Cpu,
-    };
-
-    let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate as f64)?;
-
-    let num_levels = all_params.len();
-    let total_weight: usize = (1..=num_levels).sum();
-    let mut llik_trace = Vec::with_capacity(args.epochs);
-    let mut kl_trace = Vec::with_capacity(args.epochs);
-
-    let pb = ProgressBar::new(args.epochs as u64);
-    if args.verbose {
-        pb.set_draw_target(ProgressDrawTarget::hidden());
-    }
-
-    info!("Start progressive training ({} levels, {} total epochs)...", num_levels, args.epochs);
-
-    let mut epoch_counter = 0usize;
-
-    for (level, params) in all_params.iter().enumerate() {
-        let level_epochs = (args.epochs * (num_levels - level)).div_ceil(total_weight);
-        info!(
-            "Progressive level {}/{}: {} epochs",
-            level + 1,
-            num_levels,
-            level_epochs
-        );
-
-        for epoch in (0..level_epochs).step_by(args.jitter_interval) {
-            let kl_weight = if args.kl_warmup_epochs > 0.0 {
-                1.0 - (-(epoch_counter as f64) / args.kl_warmup_epochs).exp()
-            } else {
-                1.0
-            };
-
-            for jitter in 0..args.jitter_interval {
-                if epoch + jitter >= level_epochs {
-                    break;
-                }
-
-                let pair_sg = params
-                    .pair
-                    .posterior_sample()?
-                    .sum_to_one_columns()
-                    .scale(args.column_sum_norm)
-                    .transpose();
-
-                let null_sg = params
-                    .null
-                    .posterior_sample()?
-                    .sum_to_one_columns()
-                    .scale(args.column_sum_norm)
-                    .transpose();
-
-                let mut data_loader = InMemoryData::from(InMemoryArgs {
-                    input: &pair_sg,
-                    input_null: Some(&null_sg),
-                    output: None,
-                    output_null: None,
-                })?;
-
-                data_loader.shuffle_minibatch(args.batch_size)?;
-
-                let mut llik_tot = 0f32;
-                let mut kl_tot = 0f32;
-
-                for b in 0..data_loader.num_minibatch() {
-                    let mb = data_loader.minibatch_shuffled(b, &dev)?;
-                    let x_pair = &mb.input;
-                    let x_null = mb.input_null.as_ref();
-                    let y_nd = x_pair;
-
-                    let (theta, kl) = encoder.forward_t(x_pair, x_null, true)?;
-
-                    let theta = if args.topic_smoothing > 0.0 {
-                        let alpha = args.topic_smoothing;
-                        let kk = theta.dim(1)? as f64;
-                        ((&theta * (1.0 - alpha))? + alpha / kk)?
-                    } else {
-                        theta
-                    };
-
-                    let (_, llik) = decoder.forward_with_llik(&theta, y_nd, &topic_likelihood)?;
-                    let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
-                    adam.backward_step(&loss)?;
-
-                    llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
-                    kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
-                }
-
-                let n_mb = data_loader.num_minibatch().max(1) as f32;
-                kl_trace.push(kl_tot / n_mb);
-                llik_trace.push(llik_tot / n_mb);
-
-                pb.inc(1);
-                epoch_counter += 1;
-
-                if args.verbose {
-                    info!(
-                        "[L{}][{}][{}] llik={:.2} kl={:.2}",
-                        level, epoch, jitter, llik_tot, kl_tot
-                    );
-                }
-            }
-        }
-    }
-
-    pb.finish_and_clear();
-    info!("Done progressive model training");
-
-    Ok(TrainScores {
-        llik: llik_trace,
-        kl: kl_trace,
-    })
-}
-
-fn train_link_community(
-    params: &PairNullParameters,
-    encoder: &mut LogSoftmaxEncoder,
-    decoder: &TopicDecoder,
-    parameters: &candle_nn::VarMap,
-    args: &SrtLinkCommunityArgs,
-) -> anyhow::Result<TrainScores> {
-    let dev = match args.device {
-        ComputeDevice::Metal => Device::new_metal(args.device_no)?,
-        ComputeDevice::Cuda => Device::new_cuda(args.device_no)?,
-        _ => Device::Cpu,
-    };
-
-    let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate as f64)?;
-
-    let pb = ProgressBar::new(args.epochs as u64);
-    if args.verbose {
-        pb.set_draw_target(ProgressDrawTarget::hidden());
-    }
-
-    let mut llik_trace = Vec::with_capacity(args.epochs);
-    let mut kl_trace = Vec::with_capacity(args.epochs);
-
-    info!("Start training topic link community VAE...");
-
-    for epoch in (0..args.epochs).step_by(args.jitter_interval) {
-        // KL annealing (changes slowly, per jitter block)
-        let kl_weight = if args.kl_warmup_epochs > 0.0 {
-            1.0 - (-(epoch as f64) / args.kl_warmup_epochs).exp()
-        } else {
-            1.0
-        };
-
-        for jitter in 0..args.jitter_interval {
-            // Fresh posterior sample each sub-epoch for data variety
-            let pair_sg = params
-                .pair
-                .posterior_sample()?
-                .sum_to_one_columns()
-                .scale(args.column_sum_norm)
-                .transpose();
-
-            let null_sg = params
-                .null
-                .posterior_sample()?
-                .sum_to_one_columns()
-                .scale(args.column_sum_norm)
-                .transpose();
-
-            let mut data_loader = InMemoryData::from(InMemoryArgs {
-                input: &pair_sg,
-                input_null: Some(&null_sg),
-                output: None,
-                output_null: None,
-            })?;
-
-            data_loader.shuffle_minibatch(args.batch_size)?;
-
-            let mut llik_tot = 0f32;
-            let mut kl_tot = 0f32;
-
-            for b in 0..data_loader.num_minibatch() {
-                let mb = data_loader.minibatch_shuffled(b, &dev)?;
-
-                let x_pair = &mb.input;
-                let x_null = mb.input_null.as_ref();
-                let y_nd = x_pair; // reconstruct pair (mixture) data
-
-                // Encoder: h(pair) - h(null) in feature space
-                let (theta, kl) = encoder.forward_t(x_pair, x_null, true)?;
-
-                // Topic smoothing
-                let theta = if args.topic_smoothing > 0.0 {
-                    let alpha = args.topic_smoothing;
-                    let kk = theta.dim(1)? as f64;
-                    ((&theta * (1.0 - alpha))? + alpha / kk)?
-                } else {
-                    theta
-                };
-
-                let (_, llik) = decoder.forward_with_llik(&theta, y_nd, &topic_likelihood)?;
-
-                let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
-                adam.backward_step(&loss)?;
-
-                let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
-                let kl_val = kl.sum_all()?.to_scalar::<f32>()?;
-                llik_tot += llik_val;
-                kl_tot += kl_val;
-            }
-
-            let n_mb = data_loader.num_minibatch().max(1) as f32;
-            kl_trace.push(kl_tot / n_mb);
-            llik_trace.push(llik_tot / n_mb);
-
-            pb.inc(1);
-
-            if args.verbose {
-                info!("[{}][{}] llik={:.2} kl={:.2}", epoch, jitter, llik_tot, kl_tot);
-            }
-        }
-    }
-    pb.finish_and_clear();
-
-    info!("Done model training");
-    Ok(TrainScores {
-        llik: llik_trace,
-        kl: kl_trace,
-    })
-}
-
-/////////////////////////////////////////
-// Global null + cell propensities     //
-/////////////////////////////////////////
-
-/// Compute global null from the random-pair posterior mean.
-/// Average across S samples → [G] vector, normalize to sum-to-one, scale.
-fn compute_global_null(params: &PairNullParameters, column_sum_norm: f32) -> DVec {
-    let null_mean = params.null.posterior_mean();
-    let g = null_mean.nrows();
-    let s = null_mean.ncols();
-
-    let mut g_vec = DVec::zeros(g);
-    for j in 0..s {
-        g_vec += &null_mean.column(j);
-    }
-    g_vec /= s as f32;
-
-    let total = g_vec.sum();
-    if total > 0.0 {
-        g_vec *= column_sum_norm / total;
-    }
-    g_vec
-}
-
-fn evaluate_cell_propensities(
-    data_vec: &SparseIoVec,
-    encoder: &LogSoftmaxEncoder,
-    global_null: &Tensor,
-    args: &SrtLinkCommunityArgs,
-) -> anyhow::Result<Mat> {
-    let dev = match args.device {
-        ComputeDevice::Metal => Device::new_metal(args.device_no)?,
-        ComputeDevice::Cuda => Device::new_cuda(args.device_no)?,
-        _ => Device::Cpu,
-    };
-
-    let ntot = data_vec.num_columns();
-    let kk = encoder.dim_latent();
-    let block_size = args.batch_size;
-
-    let jobs = generate_minibatch_intervals(ntot, block_size);
-    let njobs = jobs.len() as u64;
-    let arc_enc = Arc::new(encoder);
-
-    let mut chunks = jobs
-        .par_iter()
-        .progress_count(njobs)
-        .map(|&(lb, ub)| {
-            let x_dn = data_vec.read_columns_csc(lb..ub)?;
-            let x_nd = x_dn.to_tensor(&dev)?.transpose(0, 1)?;
-            let n = x_nd.dim(0)?;
-            let null_nd = global_null.broadcast_as((n, global_null.dim(1)?))?.contiguous()?;
-            let (theta_nk, _) = arc_enc.forward_t(&x_nd, Some(&null_nd), false)?;
-            let theta_nk = theta_nk.to_device(&Device::Cpu)?;
-            Ok((lb, Mat::from_tensor(&theta_nk)?))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    chunks.par_sort_by_key(|&(lb, _)| lb);
-
-    let mut ret = Mat::zeros(ntot, kk);
-    let mut lb = 0;
-    for (_, z) in chunks {
-        let ub = lb + z.nrows();
-        ret.rows_range_mut(lb..ub).copy_from(&z);
-        lb = ub;
-    }
-    Ok(ret)
-}
-
-/////////////////////////////////////////
-// Main pipeline                       //
-/////////////////////////////////////////
-
-/// Linked Community Model pipeline (pair + random non-pair null):
+/// Link community model pipeline.
 ///
 /// 1.  Load data + coordinates
 /// 2.  Estimate batch effects
-/// 3.  Build spatial cell-cell KNN graph
-/// 4.  Random projection → assign pairs to samples
-/// 5.  Collapse: accumulate pair/null expression per gene per sample
-/// 6.  Fit Poisson-Gamma on pair and null channels
-/// 7.  Initialize encoder + topic decoder
-/// 8.  Train with jitter resampling (encoder: pair − null)
-/// 9.  Write dictionary
-/// 10. Compute global null for cell-level inference
-/// 11. Inference: encoder on individual cells → propensities
+/// 3.  Build spatial KNN graph
+/// 4.  Random projection basis
+/// 5.  Build edge profiles
+/// 6.  Multi-level coarsening
+/// 7.  Gibbs on coarsest → transfer → refine at each finer level
+/// 8.  Projection refinement rounds
+/// 9.  Extract and write outputs
 pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
+    init_logger(args.verbose);
 
-    // 1. Load data
+    let a0 = args.a0 as f64;
+    let b0 = args.b0 as f64;
+    let k = args.n_communities;
+    let m = args.proj_dim;
+    let n_gm = if args.n_gene_modules > 0 {
+        args.n_gene_modules
+    } else {
+        k
+    };
+
+    // 1. Load data + coordinates
     info!("Loading data files...");
 
     let SRTData {
@@ -780,14 +209,12 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         header_in_coord: args.coord_header_row,
     })?;
 
-    let gene_names = data_vec.row_names()?;
     let n_genes = data_vec.num_rows();
     let n_cells = data_vec.num_columns();
 
     anyhow::ensure!(args.proj_dim > 0, "proj_dim must be > 0");
-    anyhow::ensure!(args.n_clusters > 0, "n_clusters must be > 0");
+    anyhow::ensure!(args.n_communities > 0, "n_communities must be > 0");
     anyhow::ensure!(args.knn_spatial > 0, "knn_spatial must be > 0");
-    anyhow::ensure!(args.n_topics > 0, "n_topics must be > 0");
     anyhow::ensure!(
         args.knn_spatial < n_cells,
         "knn_spatial ({}) must be < number of cells ({})",
@@ -822,17 +249,13 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     }
 
     // 3. Build spatial KNN graph
-    info!(
-        "Building spatial KNN graph (k={})...",
-        args.knn_spatial
-    );
+    info!("Building spatial KNN graph (k={})...", args.knn_spatial);
 
-    let mut srt_cell_pairs = SrtCellPairs::new(
+    let srt_cell_pairs = SrtCellPairs::new(
         &data_vec,
         &coordinates,
         SrtCellPairsArgs {
             knn: args.knn_spatial,
-            coordinate_emb_dim: args.coord_emb,
             block_size: args.block_size,
         },
     )?;
@@ -842,128 +265,437 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         Some(coordinate_names.clone()),
     )?;
 
-    // 4. Per-cell random projection
-    info!("Per-cell random projection...");
-    let mut cell_proj = data_vec.project_columns_with_batch_correction(
-        args.proj_dim,
-        Some(args.block_size),
-        Some(&batch_membership),
-    )?;
+    let edges = &srt_cell_pairs.graph.edges;
+    let n_edges = edges.len();
+    info!("{} cells, {} edges", n_cells, n_edges);
 
-    // 5. Graph-constrained coarsening + multi-level collapse
-    info!(
-        "Graph coarsening + multi-level collapse ({} levels, n_clusters={})...",
-        args.num_levels, args.n_clusters
-    );
+    // 4. Random projection basis
+    info!("Building random projection basis ({} → {})...", n_genes, m);
+    let mut basis = Mat::rnorm(n_genes, m);
 
-    let batch_db = batch_effects.map(|x| x.posterior_mean().clone());
-    let batch_ref = batch_db.as_ref();
-
-    let ml = graph_coarsen_multilevel(
-        &srt_cell_pairs.graph,
-        &mut cell_proj.proj,
-        &srt_cell_pairs.pairs,
-        args.n_clusters,
-        args.num_levels,
-    );
-
-    let mut collapsed_stats = Vec::with_capacity(ml.all_num_samples.len());
-    for (p2s, &ns) in ml.all_pair_to_sample.into_iter().zip(&ml.all_num_samples) {
-        srt_cell_pairs.assign_samples(p2s, args.down_sample);
-        let mut stat = PairNullCollapsedStat::new(n_genes, ns);
-        srt_cell_pairs.visit_pairs_by_sample(&collect_pair_null_visitor, &batch_ref, &mut stat)?;
-        collapsed_stats.push(stat);
+    // Normalize basis columns
+    for j in 0..m {
+        let norm: f32 = (0..n_genes)
+            .map(|i| basis[(i, j)] * basis[(i, j)])
+            .sum::<f32>()
+            .sqrt();
+        if norm > 0.0 {
+            for i in 0..n_genes {
+                basis[(i, j)] /= norm;
+            }
+        }
     }
 
-    // 6. Fit Poisson-Gamma on each level
-    info!("Fitting Poisson-Gamma model ({} levels)...", collapsed_stats.len());
-    let all_params: Vec<PairNullParameters> = collapsed_stats
-        .iter()
-        .map(|stat| stat.optimize(None))
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    // Track scores across rounds
+    let mut score_trace: Vec<f64> = Vec::new();
+    let mut final_membership: Vec<usize> = vec![0; n_edges];
+    let mut last_edge_profiles: Option<crate::link_community_model::LinkProfileStore> = None;
 
-    let params = all_params.last().ok_or(anyhow::anyhow!("no levels"))?;
+    for refine_round in 0..=args.num_refine_rounds {
+        info!(
+            "=== Refinement round {}/{} ===",
+            refine_round, args.num_refine_rounds
+        );
 
-    // 7. Initialize encoder + topic decoder
-    info!(
-        "Initializing encoder ({} topics, {} genes)...",
-        args.n_topics, n_genes
-    );
-
-    let n_topics = args.n_topics;
-    let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
-
-    let dev = match args.device {
-        ComputeDevice::Metal => Device::new_metal(args.device_no)?,
-        ComputeDevice::Cuda => Device::new_cuda(args.device_no)?,
-        _ => Device::Cpu,
-    };
-
-    let var_map = candle_nn::VarMap::new();
-    let vb = candle_nn::VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &dev);
-
-    let mut encoder = LogSoftmaxEncoder::new(
-        LogSoftmaxEncoderArgs {
-            n_features: n_genes,
-            n_topics,
-            n_modules,
-            layers: &args.encoder_layers,
-            use_sparsemax: false,
-        },
-        vb.clone(),
-    )?;
-
-    let decoder = TopicDecoder::new(n_genes, n_topics, vb.clone())?;
-
-    info!(
-        "Encoder: {} features -> {} modules -> {:?} -> {} topics",
-        n_genes, n_modules, args.encoder_layers, n_topics
-    );
-
-    // 8. Train with jitter resampling
-    info!("Training ({} epochs, jitter every {})...", args.epochs, args.jitter_interval);
-
-    let scores = if all_params.len() > 1 {
-        train_link_community_progressive(&all_params, &mut encoder, &decoder, &var_map, args)?
-    } else {
-        train_link_community(params, &mut encoder, &decoder, &var_map, args)?
-    };
-
-    scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
-
-    // 9. Write dictionary
-    info!("Writing dictionary...");
-
-    let dict_gk = decoder.get_dictionary()?;
-    dict_gk
-        .to_device(&Device::Cpu)?
-        .to_parquet_with_names(
-            &(args.out.to_string() + ".dictionary.parquet"),
-            (Some(&gene_names), Some("gene")),
-            None,
+        // 5. Build edge profiles
+        info!("Building edge profiles...");
+        let edge_profiles = build_edge_profiles(
+            &data_vec,
+            edges,
+            &basis,
+            None, // batch_effect handled in data_vec already
+            args.block_size,
         )?;
 
-    // 10. Compute global null for cell-level inference
-    info!("Computing global null...");
+        info!(
+            "Edge profiles: {} edges × {} dims, mean size factor: {:.1}",
+            edge_profiles.n_edges,
+            edge_profiles.m,
+            edge_profiles.size_factors.iter().sum::<f32>() / edge_profiles.n_edges as f32
+        );
 
-    let global_null = compute_global_null(params, args.column_sum_norm);
-    let global_null_data: Vec<f32> = global_null.as_slice().to_vec();
-    let global_null_tensor = Tensor::from_vec(global_null_data, (1, n_genes), &dev)?;
+        // 6. Multi-level coarsening
+        info!(
+            "Graph coarsening ({} levels, {} coarse clusters)...",
+            args.num_levels, args.n_coarse_clusters
+        );
 
-    // 11. Inference: encoder on individual cells
-    info!("Inferring cell propensities...");
+        let cell_proj = data_vec.project_columns_with_batch_correction(
+            args.proj_dim.min(50),
+            Some(args.block_size),
+            Some(&batch_membership),
+        )?;
 
-    let propensity_nk =
-        evaluate_cell_propensities(&data_vec, &encoder, &global_null_tensor, args)?;
+        let ml = graph_coarsen_multilevel(
+            &srt_cell_pairs.graph,
+            &mut cell_proj.proj.clone(),
+            &srt_cell_pairs.pairs,
+            args.n_coarse_clusters,
+            args.num_levels,
+        );
 
+        // 7. Gibbs: coarsest → transfer → refine at each finer level
+        let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(
+            args.seed.wrapping_add(refine_round as u64),
+        ));
+
+        // Extract cell labels at each level for edge profile coarsening
+        let level_cell_labels: Vec<Vec<usize>> = ml
+            .all_pair_to_sample
+            .iter()
+            .map(|p2s| {
+                // Build cell labels from pair-to-sample
+                let mut cell_labels = vec![0usize; n_cells];
+                for (pair_idx, &sample) in p2s.iter().enumerate() {
+                    let p = &srt_cell_pairs.pairs[pair_idx];
+                    cell_labels[p.left] = sample;
+                    cell_labels[p.right] = sample;
+                }
+                cell_labels
+            })
+            .collect();
+
+        // Coarsest level
+        let coarsest_labels = &level_cell_labels[0];
+        let (coarse_profiles, fine_to_super) =
+            coarsen_edge_profiles(&edge_profiles, edges, coarsest_labels);
+
+        info!(
+            "Coarsest level: {} super-edges from {} fine edges",
+            coarse_profiles.n_edges, n_edges
+        );
+
+        // Random initial labels for coarsest
+        let init_labels: Vec<usize> = (0..coarse_profiles.n_edges).map(|e| e % k).collect();
+
+        let mut coarse_stats =
+            LinkCommunitySuffStats::from_profiles(&coarse_profiles, k, &init_labels);
+
+        info!("Gibbs on coarsest ({} sweeps)...", args.num_sweeps);
+        let moves =
+            sampler.run_parallel(&mut coarse_stats, &coarse_profiles, a0, b0, args.num_sweeps);
+        info!(
+            "Coarsest Gibbs: {} total moves, score={:.2}",
+            moves,
+            coarse_stats.total_score(a0, b0)
+        );
+        score_trace.push(coarse_stats.total_score(a0, b0));
+
+        // Transfer to fine level
+        let mut current_labels = transfer_labels(&fine_to_super, &coarse_stats.membership);
+
+        // Refine at finer levels
+        for level in 1..args.num_levels {
+            info!("Refining at level {}...", level);
+
+            let level_labels = &level_cell_labels[level.min(level_cell_labels.len() - 1)];
+            let (level_profiles, level_f2s) =
+                coarsen_edge_profiles(&edge_profiles, edges, level_labels);
+
+            // Transfer current labels to this level's super-edges (majority vote)
+            let n_super = level_profiles.n_edges;
+            let mut super_label_votes = vec![vec![0usize; k]; n_super];
+            for (fine_e, &se) in level_f2s.iter().enumerate() {
+                let c = current_labels[fine_e];
+                super_label_votes[se][c] += 1;
+            }
+            let super_init: Vec<usize> = super_label_votes
+                .iter()
+                .map(|votes| {
+                    votes
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|&(_, &count)| count)
+                        .map(|(c, _)| c)
+                        .unwrap_or(0)
+                })
+                .collect();
+
+            let mut level_stats =
+                LinkCommunitySuffStats::from_profiles(&level_profiles, k, &super_init);
+
+            let sweeps = args.num_sweeps / 2; // fewer sweeps at finer levels
+            let moves =
+                sampler.run_parallel(&mut level_stats, &level_profiles, a0, b0, sweeps.max(10));
+            info!(
+                "Level {} Gibbs: {} moves, score={:.2}",
+                level,
+                moves,
+                level_stats.total_score(a0, b0)
+            );
+            score_trace.push(level_stats.total_score(a0, b0));
+
+            current_labels = transfer_labels(&level_f2s, &level_stats.membership);
+        }
+
+        // Final refinement on original edges
+        info!(
+            "Final Gibbs on full edge set ({} sweeps)...",
+            args.num_sweeps / 2
+        );
+        let mut fine_stats =
+            LinkCommunitySuffStats::from_profiles(&edge_profiles, k, &current_labels);
+
+        let moves = sampler.run_parallel(
+            &mut fine_stats,
+            &edge_profiles,
+            a0,
+            b0,
+            (args.num_sweeps / 2).max(10),
+        );
+        info!(
+            "Fine Gibbs: {} moves, score={:.2}",
+            moves,
+            fine_stats.total_score(a0, b0)
+        );
+
+        // Greedy finalization
+        info!("Greedy finalization ({} max sweeps)...", args.num_greedy);
+        let greedy_moves =
+            sampler.run_greedy(&mut fine_stats, &edge_profiles, a0, b0, args.num_greedy);
+        info!(
+            "Greedy: {} moves, final score={:.2}",
+            greedy_moves,
+            fine_stats.total_score(a0, b0)
+        );
+        score_trace.push(fine_stats.total_score(a0, b0));
+
+        // Recompute for drift correction
+        fine_stats.recompute(&edge_profiles);
+        final_membership = fine_stats.membership.clone();
+
+        // Projection refinement (skip on last round)
+        if refine_round < args.num_refine_rounds {
+            info!("Refining projection basis...");
+            let centroids = compute_community_centroids(
+                &data_vec,
+                edges,
+                &final_membership,
+                k,
+                args.block_size,
+            )?;
+            basis = refine_projection_basis(&centroids, m)?;
+            info!("Projection basis refined");
+        }
+
+        last_edge_profiles = Some(edge_profiles);
+    }
+
+    // 9. Extract and write outputs
+    let gene_names = data_vec.row_names()?;
     let cell_names = data_vec.column_names()?;
 
-    propensity_nk.to_parquet_with_names(
+    // 9a. cell propensity [N × K]
+    info!("Computing cell propensity...");
+    let cell_propensity = compute_node_membership(edges, &final_membership, n_cells, k);
+
+    let topic_names: Vec<Box<str>> = (0..k).map(|i| i.to_string().into_boxed_str()).collect();
+    cell_propensity.to_parquet_with_names(
         &(args.out.to_string() + ".propensity.parquet"),
         (Some(&cell_names), Some("cell")),
-        None,
+        Some(&topic_names),
     )?;
+
+    // 9b. Gene modules [G × n_gm]: accumulate per-module gene sums
+    let gene_module_membership = if n_gm != k {
+        info!(
+            "K-means on edge profiles ({} → {} gene modules)...",
+            k, n_gm
+        );
+        let ep = last_edge_profiles.as_ref().expect("edge profiles");
+        let prof_mat = Mat::from_fn(ep.m, ep.n_edges, |g, e| ep.profiles[e * ep.m + g]);
+        prof_mat.kmeans_columns(KmeansArgs {
+            num_clusters: n_gm,
+            max_iter: 100,
+        })
+    } else {
+        final_membership.clone()
+    };
+
+    info!("Computing gene modules ({} modules)...", n_gm);
+    let gene_modules = compute_gene_modules(
+        &data_vec,
+        edges,
+        &gene_module_membership,
+        n_gm,
+        args.block_size,
+    )?;
+
+    let module_names: Vec<Box<str>> = (0..n_gm).map(|i| i.to_string().into_boxed_str()).collect();
+    gene_modules.to_parquet_with_names(
+        &(args.out.to_string() + ".gene_modules.parquet"),
+        (Some(&gene_names), Some("gene")),
+        Some(&module_names),
+    )?;
+
+    // 9c. Link community assignments
+    info!("Writing link community assignments...");
+    write_link_communities(
+        &(args.out.to_string() + ".link_community.parquet"),
+        edges,
+        &final_membership,
+        &cell_names,
+    )?;
+
+    // 9d. Score trace
+    info!("Writing score trace...");
+    write_score_trace(&(args.out.to_string() + ".scores.parquet"), &score_trace)?;
 
     info!("Done");
     Ok(())
+}
+
+/// Compute gene expression modules per community.
+///
+/// For each community k, sums the expression of both cells across all edges
+/// assigned to k, then normalizes by total community size.
+fn compute_gene_modules(
+    data: &SparseIoVec,
+    edges: &[(usize, usize)],
+    membership: &[usize],
+    k: usize,
+    block_size: usize,
+) -> anyhow::Result<Mat> {
+    let n_genes = data.num_rows();
+    let n_edges = edges.len();
+
+    let jobs = generate_minibatch_intervals(n_edges, block_size);
+
+    let pb = new_progress_bar(
+        jobs.len() as u64,
+        "Gene modules {bar:40} {pos}/{len} blocks ({eta})",
+    );
+    let partial_stats: Vec<(Mat, Vec<f64>)> = jobs
+        .par_iter()
+        .progress_with(pb.clone())
+        .map(|&(lb, ub)| -> anyhow::Result<(Mat, Vec<f64>)> {
+            let chunk_edges = &edges[lb..ub];
+            let chunk_mem = &membership[lb..ub];
+
+            let mut unique_set: HashSet<usize> = HashSet::new();
+            for &(i, j) in chunk_edges {
+                unique_set.insert(i);
+                unique_set.insert(j);
+            }
+            let mut unique_cells: Vec<usize> = unique_set.into_iter().collect();
+            unique_cells.sort_unstable();
+
+            let x_dn = data.read_columns_csc(unique_cells.iter().copied())?;
+            let cell_to_col: HashMap<usize, usize> = unique_cells
+                .iter()
+                .enumerate()
+                .map(|(col, &cell)| (cell, col))
+                .collect();
+
+            let mut local_sum = Mat::zeros(n_genes, k);
+            let mut local_total = vec![0.0f64; k];
+
+            for (&(ci, cj), &c) in chunk_edges.iter().zip(chunk_mem.iter()) {
+                let col_i = cell_to_col[&ci];
+                let col_j = cell_to_col[&cj];
+
+                let col_slice_i = x_dn.col(col_i);
+                for (&row, &val) in col_slice_i
+                    .row_indices()
+                    .iter()
+                    .zip(col_slice_i.values().iter())
+                {
+                    local_sum[(row, c)] += val;
+                }
+                let col_slice_j = x_dn.col(col_j);
+                for (&row, &val) in col_slice_j
+                    .row_indices()
+                    .iter()
+                    .zip(col_slice_j.values().iter())
+                {
+                    local_sum[(row, c)] += val;
+                }
+
+                local_total[c] += 1.0;
+            }
+
+            Ok((local_sum, local_total))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    pb.finish_and_clear();
+
+    let mut total_sum = Mat::zeros(n_genes, k);
+    let mut total_count = vec![0.0f64; k];
+    for (local_sum, local_total) in partial_stats {
+        total_sum += local_sum;
+        for c in 0..k {
+            total_count[c] += local_total[c];
+        }
+    }
+
+    // Normalize: gene_modules[g,k] = sum[g,k] / total_count[k]
+    for c in 0..k {
+        if total_count[c] > 0.0 {
+            let scale = 1.0 / total_count[c] as f32;
+            total_sum.column_mut(c).scale_mut(scale);
+        }
+    }
+
+    Ok(total_sum)
+}
+
+/// Write link community assignments to parquet.
+fn write_link_communities(
+    file_path: &str,
+    edges: &[(usize, usize)],
+    membership: &[usize],
+    cell_names: &[Box<str>],
+) -> anyhow::Result<()> {
+    use matrix_util::parquet::*;
+    use parquet::basic::Type as ParquetType;
+
+    let n_edges = edges.len();
+    let left_cells: Vec<Box<str>> = edges.iter().map(|&(i, _)| cell_names[i].clone()).collect();
+    let right_cells: Vec<Box<str>> = edges.iter().map(|&(_, j)| cell_names[j].clone()).collect();
+    let cluster_f32: Vec<f32> = membership.iter().map(|&k| k as f32).collect();
+
+    let col_names: Vec<Box<str>> =
+        vec!["left_cell".into(), "right_cell".into(), "community".into()];
+    let col_types = vec![
+        ParquetType::BYTE_ARRAY,
+        ParquetType::BYTE_ARRAY,
+        ParquetType::FLOAT,
+    ];
+
+    let writer = ParquetWriter::new(
+        file_path,
+        (n_edges, col_names.len()),
+        (None, Some(&col_names)),
+        Some(&col_types),
+        Some("edge"),
+    )?;
+
+    let row_names = writer.row_names_vec();
+    let mut writer = writer.get_writer()?;
+    let mut row_group = writer.next_row_group()?;
+
+    parquet_add_bytearray(&mut row_group, row_names)?;
+    parquet_add_string_column(&mut row_group, &left_cells)?;
+    parquet_add_string_column(&mut row_group, &right_cells)?;
+    parquet_add_numeric_column(&mut row_group, &cluster_f32)?;
+
+    row_group.close()?;
+    writer.close()?;
+
+    Ok(())
+}
+
+/// Write score trace to parquet.
+fn write_score_trace(file_path: &str, scores: &[f64]) -> anyhow::Result<()> {
+    let mat = Mat::from_fn(scores.len(), 1, |i, _| scores[i] as f32);
+    let col_names = vec!["score".to_string().into_boxed_str()];
+    let row_names: Vec<Box<str>> = (0..scores.len())
+        .map(|i| i.to_string().into_boxed_str())
+        .collect();
+
+    mat.to_parquet_with_names(
+        file_path,
+        (Some(&row_names), Some("step")),
+        Some(&col_names),
+    )
 }

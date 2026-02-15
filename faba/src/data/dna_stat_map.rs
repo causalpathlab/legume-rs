@@ -35,7 +35,7 @@ impl<'a> DnaStatMap for DnaBaseFreqMap<'a> {
                 let freq_map: &mut HashMap<CellBarcode, DnaBaseCount> =
                     map.entry(genome_pos).or_default();
                 let key = cell_barcode.clone().unwrap_or(CellBarcode::Missing);
-                let freq = freq_map.entry(key).or_insert_with(DnaBaseCount::new);
+                let freq = freq_map.entry(key).or_default();
                 freq.add(base.as_ref(), 1);
             }
         };
@@ -55,7 +55,7 @@ impl<'a> DnaStatMap for DnaBaseFreqMap<'a> {
             {
                 bam_record.aligned_pairs().any(|[rpos, gpos]| {
                     Dna::from_byte(seq[rpos as usize])
-                        .map_or(false, |b| anchor_pos == gpos + 1 && b == *anchor_base)
+                        .is_some_and(|b| anchor_pos == gpos + 1 && b == *anchor_base)
                 })
             } else {
                 true
@@ -105,6 +105,12 @@ impl<'a> DnaStatMap for DnaBaseFreqMap<'a> {
         ret.sort();
         ret.dedup();
         ret
+    }
+}
+
+impl<'a> Default for DnaBaseFreqMap<'a> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

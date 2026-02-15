@@ -30,7 +30,7 @@ pub fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
 
     let mut data = SparseIoVec::new();
     for data_file in cmd_args.data_files.iter() {
-        let (backend, data_file) = resolve_backend_file(&data_file, None)?;
+        let (backend, data_file) = resolve_backend_file(data_file, None)?;
 
         let mut this_data = open_sparse_matrix(&data_file, &backend)?;
         if cmd_args.preload {

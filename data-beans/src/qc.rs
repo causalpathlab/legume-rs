@@ -96,6 +96,7 @@ pub fn collect_row_stat_across_vec(
 /// * `data` - `SparseIo`
 /// * `column_membership` - a hashmap assign columns to groups
 /// * `block_size` - a block size for each parallelized job
+#[allow(clippy::type_complexity)]
 pub fn collect_stratified_row_stat_across_vec(
     data: &SparseIoVec,
     column_membership: &HashMap<Box<str>, Box<str>>,

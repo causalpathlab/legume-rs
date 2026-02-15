@@ -728,7 +728,7 @@ fn regularize_similarity(similarity: &Mat, eps: f32) -> Mat {
 fn spectral_embed(similarity: &Mat, num_eigen: usize) -> anyhow::Result<Mat> {
     let n = similarity.nrows();
     let k = num_eigen.clamp(2, n - 1);
-    anyhow::ensure!(n >= k + 1, "Need {} PB samples, got {}", k + 1, n);
+    anyhow::ensure!(n > k, "Need {} PB samples, got {}", k + 1, n);
 
     // Build normalized Laplacian: L_sym = I - D^{-1/2} S D^{-1/2}
     let degree: DVec = DVec::from_iterator(n, similarity.row_iter().map(|r| r.sum()));
@@ -847,7 +847,7 @@ fn build_mst(similarity: &Mat) -> Vec<(usize, usize)> {
                     continue;
                 }
                 let w = similarity[(u, v)];
-                if best_edge.map_or(true, |(_, _, bw)| w > bw) {
+                if best_edge.is_none_or(|(_, _, bw)| w > bw) {
                     best_edge = Some((u, v, w));
                 }
             }

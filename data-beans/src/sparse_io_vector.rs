@@ -85,6 +85,11 @@ impl SparseIoVec {
         self.data_vec.len()
     }
 
+    /// check if the vector is empty
+    pub fn is_empty(&self) -> bool {
+        self.data_vec.is_empty()
+    }
+
     /// Assign columns to groups
     ///
     /// * `column_to_group` - column to group membership
@@ -198,7 +203,7 @@ impl SparseIoVec {
             debug_assert!(self.col_glob_to_loc.len() == self.offset);
             debug_assert!(self.col_to_data.len() == self.offset);
             let didx = self.data_vec.len();
-            let data_to_cells = self.data_to_cols.entry(didx).or_insert_with(Vec::new);
+            let data_to_cells = self.data_to_cols.entry(didx).or_default();
 
             for loc in 0..ncol_data {
                 let glob = loc + self.offset;
@@ -306,6 +311,7 @@ impl SparseIoVec {
         Ok(())
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn columns_triplets<I>(
         &self,
         cells: I,
@@ -688,6 +694,7 @@ impl SparseIoVec {
     /// * the knn-matched matrix
     /// * `source_columns` - a vector of the source columns
     /// * a vector of distances between the matched columns
+    #[allow(clippy::type_complexity)]
     pub fn read_neighbouring_columns_csc<I>(
         &self,
         cells: I,

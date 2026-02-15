@@ -183,6 +183,7 @@ pub fn generate_sc_phenotypes(
 
 /// Generate cells for a single individual
 ///
+#[allow(clippy::too_many_arguments)]
 fn generate_individual_cells(
     _ind_idx: usize,
     num_cells: usize,
