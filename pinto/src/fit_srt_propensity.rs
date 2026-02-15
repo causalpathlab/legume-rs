@@ -98,7 +98,7 @@ pub struct SrtPropensityArgs {
 }
 
 pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
-    let _ = env_logger::try_init();
+    init_logger(false);
 
     let MatWithNames {
         rows,
@@ -268,9 +268,13 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
             args.block_size,
         );
 
+        let pb = new_progress_bar(
+            jobs.len() as u64,
+            "Gene modules {bar:40} {pos}/{len} blocks ({eta})",
+        );
         let partial_stats = jobs
             .par_iter()
-            .progress_count(jobs.len() as u64)
+            .progress_with(pb.clone())
             .map(|&(lb, ub)| -> anyhow::Result<(Mat, DVec)> {
                 let x_dn = data_vec.read_columns_csc(lb..ub)?;
                 let mut p_kn = Mat::zeros(prop_kn.nrows(), x_dn.ncols());
@@ -287,6 +291,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
                 Ok((sum_dk, n_k))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
+        pb.finish_and_clear();
 
         let mut sum_dk = Mat::zeros(genes.len(), prop_kn.nrows());
         let mut n_1k = Mat::zeros(1, prop_kn.nrows());

@@ -114,7 +114,7 @@ impl IoOps for Tensor {
 
         let mut writer = writer.get_writer()?;
         let mut row_group_writer = writer.next_row_group()?;
-        parquet_add_bytearray(&mut row_group_writer, &row_names)?;
+        parquet_add_bytearray(&mut row_group_writer, row_names)?;
 
         let tensor = self.to_dtype(candle_core::DType::F32)?;
 

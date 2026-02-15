@@ -65,7 +65,7 @@ pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
     }
     env_logger::init();
 
-    if (args.resolution_kb * 1000.0) as usize > args.block_size_mb * 1000_000 {
+    if (args.resolution_kb * 1000.0) as usize > args.block_size_mb * 1_000_000 {
         return Err(anyhow::anyhow!(
             "resolution should be smaller than the block size"
         ));
@@ -85,7 +85,7 @@ pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
     // each coitree can keep track of coverage
     let jobs = create_bam_jobs(
         &args.bam_files[0],
-        Some(args.block_size_mb * 1000_000),
+        Some(args.block_size_mb * 1_000_000),
         Some(0),
     )?;
     let njobs = jobs.len() as u64;

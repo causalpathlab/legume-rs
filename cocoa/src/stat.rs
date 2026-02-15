@@ -158,7 +158,7 @@ impl CocoaStat {
                 row.component_mul_assign(&size_p.transpose());
             });
 
-            gamma_param_dp.update_stat(&y0_dp, &denom_dp);
+            gamma_param_dp.update_stat(y0_dp, &denom_dp);
             gamma_param_dp.calibrate();
 
             // individual-specific effect τ(d,i)
@@ -168,7 +168,7 @@ impl CocoaStat {
             // sum_s μ(d,p) * n(i,p)
 
             denom_di.copy_from(&(mu_dp * size_ip.transpose()));
-            tau_param_di.update_stat(&y1_di, &denom_di);
+            tau_param_di.update_stat(y1_di, &denom_di);
             tau_param_di.calibrate();
         });
 
@@ -203,8 +203,8 @@ pub fn compute_exposure_contrast(
 
     let mut contrast = vec![0f32; n_genes];
 
-    for k in 0..n_topics {
-        let tau_log = parameters[k].exposure.posterior_log_mean();
+    for param in parameters {
+        let tau_log = param.exposure.posterior_log_mean();
         for g in 0..n_genes {
             let mean0: f32 = exp0_indvs.iter().map(|&i| tau_log[(g, i)]).sum::<f32>() / n0;
             let mean1: f32 = exp1_indvs.iter().map(|&i| tau_log[(g, i)]).sum::<f32>() / n1;

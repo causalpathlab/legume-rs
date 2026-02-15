@@ -116,7 +116,7 @@ pub fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &output_file);
         let squeeze_args = RunSqueezeArgs {
-            data_files: vec![output_file.into()],
+            data_files: vec![output_file],
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
@@ -230,7 +230,7 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &output_file);
         let squeeze_args = RunSqueezeArgs {
-            data_files: vec![output_file.into()],
+            data_files: vec![output_file],
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             block_size: 100,
@@ -878,7 +878,7 @@ fn print_nnz_summary(label: &str, nnz: &[f32], cutoff: usize) {
     let mut sorted = nnz.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let median = if total > 0 {
-        if total % 2 == 0 {
+        if total.is_multiple_of(2) {
             (sorted[total / 2 - 1] + sorted[total / 2]) / 2.0
         } else {
             sorted[total / 2]

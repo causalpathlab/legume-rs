@@ -147,7 +147,7 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
 
         data.sparse_data.visit_columns_by_group(
             &collect_topic_indv_stat_visitor,
-            &cell_topic,
+            cell_topic,
             &mut topic_indv_stat,
         )?;
 
@@ -186,7 +186,7 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
 
         data.sparse_data.visit_columns_by_block(
             &collect_topic_stat_visitor,
-            &cell_topic,
+            cell_topic,
             &mut topic_stat,
             Some(args.block_size),
         )?;

@@ -64,7 +64,7 @@ impl ToParquet for DashMap<GeneId, Vec<MethylatedSite>> {
                         format!("{}", rec.strand),
                         rec.start,
                         rec.stop,
-                        rec.strand.clone(),
+                        rec.strand,
                     )
                 })
                 .unwrap_or_else(|| {

@@ -162,12 +162,12 @@ impl GlmSimulator {
         let mut rng = rand::rngs::StdRng::seed_from_u64(self.rseed);
 
         let num_cells = (0..n_indv)
-            .into_iter()
             .map(|_i| (rpois.sample(&mut rng) as usize).max(1))
             .collect::<Vec<_>>();
 
         // for each individual, sample n_cells_per_indv cells
         // y(g,j) ~ Poisson(ρ(j) * μ(g,i=N(j)))
+        #[allow(clippy::type_complexity)]
         let mut indv_ncells_triplets = num_cells
             .into_par_iter()
             .progress_count(n_indv as u64)
@@ -212,7 +212,7 @@ impl GlmSimulator {
 
         let samples: Vec<usize> = indv_ncells_triplets
             .iter()
-            .flat_map(|&(indv, ncells, _)| std::iter::repeat(indv).take(ncells))
+            .flat_map(|&(indv, ncells, _)| std::iter::repeat_n(indv, ncells))
             .collect();
 
         // provide unified/cumulative indexes for the columns/cells across individuals

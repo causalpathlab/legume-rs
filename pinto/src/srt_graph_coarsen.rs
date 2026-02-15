@@ -1,6 +1,5 @@
 use crate::srt_common::*;
 use crate::srt_knn_graph::KnnGraph;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -155,11 +154,9 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
     let max_merges = n.saturating_sub(1);
     let mut merges = Vec::with_capacity(max_merges);
 
-    let pb = ProgressBar::new(max_merges as u64);
-    pb.set_style(
-        ProgressStyle::with_template("Coarsening {bar:40} {pos}/{len} merges ({eta})")
-            .unwrap()
-            .progress_chars("##-"),
+    let pb = new_progress_bar(
+        max_merges as u64,
+        "Coarsening {bar:40} {pos}/{len} merges ({eta})",
     );
 
     while let Some(candidate) = heap.pop() {
@@ -232,10 +229,7 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
 ///
 /// Each pair (i,j) maps to a canonical sample key `(min(label[i], label[j]), max(...))`.
 /// Returns `(pair_to_sample, n_samples)`.
-pub fn cell_labels_to_pair_samples(
-    cell_labels: &[usize],
-    pairs: &[Pair],
-) -> (Vec<usize>, usize) {
+pub fn cell_labels_to_pair_samples(cell_labels: &[usize], pairs: &[Pair]) -> (Vec<usize>, usize) {
     let mut pair_key_to_sample: HashMap<(usize, usize), usize> = HashMap::new();
     let mut next_sample = 0usize;
 

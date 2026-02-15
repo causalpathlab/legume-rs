@@ -295,16 +295,28 @@ pub struct RegressionArgs {
 // Model runners
 //
 
-fn run_gaussian_gaussian(
-    args: &RegressionArgs,
+struct RegressionContext<'a> {
+    args: &'a RegressionArgs,
     x: Tensor,
     y: Tensor,
-    vb: VarBuilder,
-    varmap: &VarMap,
+    vb: VarBuilder<'a>,
+    varmap: &'a VarMap,
     config: SGVBConfig,
-    feature_names: Option<&[Box<str>]>,
-    output_names: Option<&[Box<str>]>,
-) -> Result<()> {
+    feature_names: Option<&'a [Box<str>]>,
+    output_names: Option<&'a [Box<str>]>,
+}
+
+fn run_gaussian_gaussian(ctx: RegressionContext) -> Result<()> {
+    let RegressionContext {
+        args,
+        x,
+        y,
+        vb,
+        varmap,
+        config,
+        feature_names,
+        output_names,
+    } = ctx;
     let (n, p, k) = (x.dim(0)?, x.dim(1)?, y.dim(1)?);
     let x_var = load_x_var(&args.x_var, n, DType::F32, x.device(), args.with_row_names)?;
     let p_var = x_var.dim(1)?;
@@ -378,16 +390,17 @@ fn run_gaussian_gaussian(
     )
 }
 
-fn run_gaussian_susie(
-    args: &RegressionArgs,
-    x: Tensor,
-    y: Tensor,
-    vb: VarBuilder,
-    varmap: &VarMap,
-    config: SGVBConfig,
-    feature_names: Option<&[Box<str>]>,
-    output_names: Option<&[Box<str>]>,
-) -> Result<()> {
+fn run_gaussian_susie(ctx: RegressionContext) -> Result<()> {
+    let RegressionContext {
+        args,
+        x,
+        y,
+        vb,
+        varmap,
+        config,
+        feature_names,
+        output_names,
+    } = ctx;
     let (n, p, k) = (x.dim(0)?, x.dim(1)?, y.dim(1)?);
     let x_var = load_x_var(&args.x_var, n, DType::F32, x.device(), args.with_row_names)?;
     let p_var = x_var.dim(1)?;
@@ -463,16 +476,17 @@ fn run_gaussian_susie(
     )
 }
 
-fn run_poisson_gaussian(
-    args: &RegressionArgs,
-    x: Tensor,
-    y: Tensor,
-    vb: VarBuilder,
-    varmap: &VarMap,
-    config: SGVBConfig,
-    feature_names: Option<&[Box<str>]>,
-    output_names: Option<&[Box<str>]>,
-) -> Result<()> {
+fn run_poisson_gaussian(ctx: RegressionContext) -> Result<()> {
+    let RegressionContext {
+        args,
+        x,
+        y,
+        vb,
+        varmap,
+        config,
+        feature_names,
+        output_names,
+    } = ctx;
     let k = y.dim(1)?;
     let model = LinearRegressionSGVB::new(
         vb.pp("model"),
@@ -508,16 +522,17 @@ fn run_poisson_gaussian(
     )
 }
 
-fn run_poisson_susie(
-    args: &RegressionArgs,
-    x: Tensor,
-    y: Tensor,
-    vb: VarBuilder,
-    varmap: &VarMap,
-    config: SGVBConfig,
-    feature_names: Option<&[Box<str>]>,
-    output_names: Option<&[Box<str>]>,
-) -> Result<()> {
+fn run_poisson_susie(ctx: RegressionContext) -> Result<()> {
+    let RegressionContext {
+        args,
+        x,
+        y,
+        vb,
+        varmap,
+        config,
+        feature_names,
+        output_names,
+    } = ctx;
     let (p, k) = (x.dim(1)?, y.dim(1)?);
     let susie = SusieVar::new(vb.pp("susie"), args.susie_layers, p, k)?;
     let model = LinearModelSGVB::from_variational(
@@ -553,16 +568,17 @@ fn run_poisson_susie(
     )
 }
 
-fn run_negbin_gaussian(
-    args: &RegressionArgs,
-    x: Tensor,
-    y: Tensor,
-    vb: VarBuilder,
-    varmap: &VarMap,
-    config: SGVBConfig,
-    feature_names: Option<&[Box<str>]>,
-    output_names: Option<&[Box<str>]>,
-) -> Result<()> {
+fn run_negbin_gaussian(ctx: RegressionContext) -> Result<()> {
+    let RegressionContext {
+        args,
+        x,
+        y,
+        vb,
+        varmap,
+        config,
+        feature_names,
+        output_names,
+    } = ctx;
     let (n, p, k) = (x.dim(0)?, x.dim(1)?, y.dim(1)?);
     let x_var = load_x_var(&args.x_var, n, DType::F32, x.device(), args.with_row_names)?;
     let p_var = x_var.dim(1)?;
@@ -636,16 +652,17 @@ fn run_negbin_gaussian(
     )
 }
 
-fn run_negbin_susie(
-    args: &RegressionArgs,
-    x: Tensor,
-    y: Tensor,
-    vb: VarBuilder,
-    varmap: &VarMap,
-    config: SGVBConfig,
-    feature_names: Option<&[Box<str>]>,
-    output_names: Option<&[Box<str>]>,
-) -> Result<()> {
+fn run_negbin_susie(ctx: RegressionContext) -> Result<()> {
+    let RegressionContext {
+        args,
+        x,
+        y,
+        vb,
+        varmap,
+        config,
+        feature_names,
+        output_names,
+    } = ctx;
     let (n, p, k) = (x.dim(0)?, x.dim(1)?, y.dim(1)?);
     let x_var = load_x_var(&args.x_var, n, DType::F32, x.device(), args.with_row_names)?;
     let p_var = x_var.dim(1)?;
@@ -726,6 +743,19 @@ fn run_negbin_susie(
 //
 
 pub fn run(args: &RegressionArgs) -> Result<()> {
+    // Validate argument combinations
+    if matches!(args.prior, VariationalType::Susie) && args.susie_layers == 0 {
+        anyhow::bail!("susie_layers must be greater than 0 when using Susie prior");
+    }
+
+    if matches!(args.prior, VariationalType::Gaussian) && args.susie_layers != 5 {
+        info!("Warning: --susie-layers is ignored when using Gaussian prior");
+    }
+
+    if matches!(args.model, LikelihoodType::Poisson) && args.x_var.is_some() {
+        anyhow::bail!("--x-var is not used with Poisson likelihood (only Gaussian and Negbin)");
+    }
+
     let device = if args.gpu {
         #[cfg(target_os = "macos")]
         {
@@ -793,24 +823,29 @@ pub fn run(args: &RegressionArgs) -> Result<()> {
     let feat_ref = feature_names.as_deref();
     let out_ref = output_names.as_deref();
 
+    let mk_ctx = |x, y, vb| RegressionContext {
+        args,
+        x,
+        y,
+        vb,
+        varmap: &varmap,
+        config: config.clone(),
+        feature_names: feat_ref,
+        output_names: out_ref,
+    };
+
     match (&args.model, &args.prior) {
         (LikelihoodType::Gaussian, VariationalType::Gaussian) => {
-            run_gaussian_gaussian(args, x, y, vb, &varmap, config, feat_ref, out_ref)
+            run_gaussian_gaussian(mk_ctx(x, y, vb))
         }
-        (LikelihoodType::Gaussian, VariationalType::Susie) => {
-            run_gaussian_susie(args, x, y, vb, &varmap, config, feat_ref, out_ref)
-        }
+        (LikelihoodType::Gaussian, VariationalType::Susie) => run_gaussian_susie(mk_ctx(x, y, vb)),
         (LikelihoodType::Poisson, VariationalType::Gaussian) => {
-            run_poisson_gaussian(args, x, y, vb, &varmap, config, feat_ref, out_ref)
+            run_poisson_gaussian(mk_ctx(x, y, vb))
         }
-        (LikelihoodType::Poisson, VariationalType::Susie) => {
-            run_poisson_susie(args, x, y, vb, &varmap, config, feat_ref, out_ref)
-        }
+        (LikelihoodType::Poisson, VariationalType::Susie) => run_poisson_susie(mk_ctx(x, y, vb)),
         (LikelihoodType::Negbin, VariationalType::Gaussian) => {
-            run_negbin_gaussian(args, x, y, vb, &varmap, config, feat_ref, out_ref)
+            run_negbin_gaussian(mk_ctx(x, y, vb))
         }
-        (LikelihoodType::Negbin, VariationalType::Susie) => {
-            run_negbin_susie(args, x, y, vb, &varmap, config, feat_ref, out_ref)
-        }
+        (LikelihoodType::Negbin, VariationalType::Susie) => run_negbin_susie(mk_ctx(x, y, vb)),
     }
 }

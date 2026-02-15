@@ -338,6 +338,7 @@ pub trait SparseIo: Sync + Send {
     /// Read rows within the range and return a vector of triplets (row, column, value)
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
+    #[allow(clippy::type_complexity)]
     fn read_triplets_by_rows(
         &self,
         rows: Self::IndexIter,
@@ -346,6 +347,7 @@ pub trait SparseIo: Sync + Send {
     /// Read columns within the range and return a vector of triplets (row, col, value)
     /// * `columns` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
+    #[allow(clippy::type_complexity)]
     fn read_triplets_by_columns(
         &self,
         columns: Self::IndexIter,
@@ -354,6 +356,7 @@ pub trait SparseIo: Sync + Send {
     /// Read columns within the range and return a vector of triplets (row, col, value)
     /// * `col` : usize
     ///
+    #[allow(clippy::type_complexity)]
     fn read_triplets_by_single_column(
         &self,
         col: usize,

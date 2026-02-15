@@ -43,7 +43,7 @@ impl std::fmt::Display for UmiBarcode {
 
 impl std::fmt::Display for Strand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let x: Box<str> = self.clone().into();
+        let x: Box<str> = (*self).into();
         write!(f, "{}", x)
     }
 }

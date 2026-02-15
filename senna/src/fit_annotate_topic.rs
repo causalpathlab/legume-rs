@@ -214,7 +214,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
             kappas.push(k);
             k *= 2.0;
         }
-        if kappas.last().map_or(true, |&last| last < 1024.0) {
+        if kappas.last().is_none_or(|&last| last < 1024.0) {
             kappas.push(1024.0);
         }
         info!(
@@ -509,7 +509,7 @@ fn write_argmax_assignments(
     let mut file = std::fs::File::create(output_file)?;
     writeln!(file, "cell\tcell_type\tprobability")?;
 
-    for i in 0..annot.nrows() {
+    for (i, cell_name) in cell_names.iter().enumerate().take(annot.nrows()) {
         let row = annot.row(i);
         let (max_idx, max_val) = row
             .iter()
@@ -519,7 +519,7 @@ fn write_argmax_assignments(
         writeln!(
             file,
             "{}\t{}\t{:.4}",
-            cell_names[i], annot_names[max_idx], max_val
+            cell_name, annot_names[max_idx], max_val
         )?;
     }
     info!("Wrote argmax assignments to {}", output_file);
@@ -604,8 +604,7 @@ fn read_mat(file_path: &str) -> anyhow::Result<MatWithNames<Mat>> {
 }
 
 fn read_marker_gene_info(file_path: &str) -> anyhow::Result<HashMap<Box<str>, Box<str>>> {
-    let ReadLinesOut { lines, header: _ } =
-        read_lines_of_words_delim(&file_path, &['\t', ','], -1)?;
+    let ReadLinesOut { lines, header: _ } = read_lines_of_words_delim(file_path, &['\t', ','], -1)?;
 
     Ok(lines
         .into_iter()

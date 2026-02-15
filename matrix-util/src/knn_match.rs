@@ -52,7 +52,7 @@ where
     }
 
     pub fn dim(&self) -> Option<usize> {
-        if self.data_vec.len() > 0 {
+        if !self.data_vec.is_empty() {
             Some(self.data_vec[0].len())
         } else {
             None
@@ -260,6 +260,10 @@ pub struct VecPoint {
 impl VecPoint {
     pub fn len(&self) -> usize {
         self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
     }
 }
 

@@ -209,7 +209,7 @@ where
     f32: From<<<Param as Inference>::Mat as MeltOps>::Scalar>,
 {
     let factor_names: Vec<Box<str>> = match factor_names {
-        Some(x) => x.iter().cloned().collect(),
+        Some(x) => x.to_vec(),
         _ => (0..parameters.len())
             .map(|x| x.to_string().into_boxed_str())
             .collect(),
@@ -354,7 +354,11 @@ mod tests {
         let row_names: Vec<Box<str>> = vec!["r0".into(), "r1".into(), "r2".into()];
         let col_names: Vec<Box<str>> = vec!["c0".into(), "c1".into()];
 
-        gamma.to_parquet(file_path_str, Some(&row_names), Some(&col_names), None)?;
+        gamma.to_parquet_with_names(
+            file_path_str,
+            (Some(row_names.as_slice()), None),
+            Some(col_names.as_slice()),
+        )?;
 
         // Read back and verify
         let file = File::open(&file_path)?;
@@ -455,7 +459,7 @@ mod tests {
         let file_path = temp_dir.path().join("test_no_names.parquet");
         let file_path_str = file_path.to_str().unwrap();
 
-        gamma.to_parquet_simple(file_path_str)?;
+        gamma.to_parquet(file_path_str)?;
 
         // Read back and verify
         let file = File::open(&file_path)?;

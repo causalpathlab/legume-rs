@@ -2,7 +2,7 @@
 
 use data_beans::sparse_data_visitors::*;
 use data_beans::sparse_io_vector::SparseIoVec;
-use indicatif::ProgressIterator;
+use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
 use log::{info, warn};
 use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::Inference;
@@ -77,7 +77,6 @@ pub trait CollapsingOps {
         reference_indices: Option<&[usize]>,
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()>;
-
 }
 
 impl CollapsingOps for SparseIoVec {
@@ -90,7 +89,7 @@ impl CollapsingOps for SparseIoVec {
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
         info!("creating batch-specific HNSW maps ...");
-        self.register_batches_dmatrix(&proj_kn, col_to_batch)?;
+        self.register_batches_dmatrix(proj_kn, col_to_batch)?;
 
         info!(
             "found {} columns across {} batches",
@@ -422,40 +421,49 @@ fn optimize(
             mu_resid_param.calibrate();
         };
 
-        (0..num_iter).progress().for_each(|_opt_iter| {
-            #[cfg(debug_assertions)]
-            {
-                debug!("iteration: {}", &_opt_iter);
-            }
+        let pb = ProgressBar::new(num_iter as u64).with_style(
+            ProgressStyle::with_template("Optimizing {bar:40} {pos}/{len} iterations ({eta})")
+                .unwrap()
+                .progress_chars("##-"),
+        );
+        (0..num_iter)
+            .progress_with(pb.clone())
+            .for_each(|_opt_iter| {
+                #[cfg(debug_assertions)]
+                {
+                    debug!("iteration: {}", &_opt_iter);
+                }
 
-            let resid_ds = mu_resid_param.posterior_mean();
-            let gamma_ds = gamma_param.posterior_mean();
+                let resid_ds = mu_resid_param.posterior_mean();
+                let gamma_ds = gamma_param.posterior_mean();
 
-            //      observed_ds + imputed_sum_ds
-            // μ = ---------------------------------
-            //      (μ_resid + γ) .* (1_d * size_s')
+                //      observed_ds + imputed_sum_ds
+                // μ = ---------------------------------
+                //      (μ_resid + γ) .* (1_d * size_s')
 
-            denom_ds.copy_from(&(resid_ds + gamma_ds));
-            denom_ds.row_iter_mut().for_each(|mut row| {
-                row.component_mul_assign(&stat.size_s.transpose());
+                denom_ds.copy_from(&(resid_ds + gamma_ds));
+                denom_ds.row_iter_mut().for_each(|mut row| {
+                    row.component_mul_assign(&stat.size_s.transpose());
+                });
+
+                mu_adj_param
+                    .update_stat(&(&stat.observed_sum_ds + &stat.imputed_sum_ds), &denom_ds);
+                mu_adj_param.calibrate();
+
+                let mu_ds = mu_adj_param.posterior_mean();
+
+                //      imputed_sum_ds
+                // γ = ---------------------
+                //      μ .* (1_d * size_s')
+
+                denom_ds.copy_from(mu_ds);
+                denom_ds.row_iter_mut().for_each(|mut row| {
+                    row.component_mul_assign(&stat.size_s.transpose());
+                });
+                gamma_param.update_stat(&stat.imputed_sum_ds, &denom_ds);
+                gamma_param.calibrate();
             });
-
-            mu_adj_param.update_stat(&(&stat.observed_sum_ds + &stat.imputed_sum_ds), &denom_ds);
-            mu_adj_param.calibrate();
-
-            let mu_ds = mu_adj_param.posterior_mean();
-
-            //      imputed_sum_ds
-            // γ = ---------------------
-            //      μ .* (1_d * size_s')
-
-            denom_ds.copy_from(mu_ds);
-            denom_ds.row_iter_mut().for_each(|mut row| {
-                row.component_mul_assign(&stat.size_s.transpose());
-            });
-            gamma_param.update_stat(&stat.imputed_sum_ds, &denom_ds);
-            gamma_param.calibrate();
-        });
+        pb.finish_and_clear();
 
         //      observed_db
         // δ = ---------------------
@@ -637,12 +645,13 @@ fn build_super_cells(
     proj_kn: &DMatrix<f32>,
     num_genes: usize,
 ) -> anyhow::Result<SuperCellCollection> {
-    let group_to_cols = data_vec.take_grouped_columns().ok_or(anyhow::anyhow!(
-        "columns not assigned to groups"
-    ))?;
+    let group_to_cols = data_vec
+        .take_grouped_columns()
+        .ok_or(anyhow::anyhow!("columns not assigned to groups"))?;
     let proj_dim = proj_kn.nrows();
 
     // Collect super-cell data per group in parallel
+    #[allow(clippy::type_complexity)]
     let per_group_results: Vec<Vec<(Vec<f32>, Vec<(usize, f32)>, f32, usize, usize)>> =
         group_to_cols
             .par_iter()
@@ -654,17 +663,16 @@ fn build_super_cells(
                     .expect("read_columns_csc");
 
                 // Accumulate per-batch: (centroid_sum, gene_sum_map, count)
+                #[allow(clippy::type_complexity)]
                 let mut batch_data: HashMap<
                     usize,
                     (Vec<f32>, HashMap<usize, f32>, usize),
                 > = HashMap::default();
 
-                for (local_idx, (y_j, &batch)) in
-                    yy.col_iter().zip(batches.iter()).enumerate()
-                {
-                    let entry = batch_data.entry(batch).or_insert_with(|| {
-                        (vec![0f32; proj_dim], HashMap::default(), 0)
-                    });
+                for (local_idx, (y_j, &batch)) in yy.col_iter().zip(batches.iter()).enumerate() {
+                    let entry = batch_data
+                        .entry(batch)
+                        .or_insert_with(|| (vec![0f32; proj_dim], HashMap::default(), 0));
 
                     // Accumulate projection centroid
                     let glob_idx = cells[local_idx];
@@ -690,8 +698,7 @@ fn build_super_cells(
                         centroid.iter_mut().for_each(|v| *v *= inv_count);
 
                         // Convert gene map to sorted sparse vector
-                        let mut gene_sum: Vec<(usize, f32)> =
-                            gene_map.into_iter().collect();
+                        let mut gene_sum: Vec<(usize, f32)> = gene_map.into_iter().collect();
                         gene_sum.sort_unstable_by_key(|&(g, _)| g);
 
                         (centroid, gene_sum, count as f32, batch, group)
@@ -784,7 +791,10 @@ fn collect_matched_stat_coarse(
             .iter()
             .map(|(_, d)| -d)
             .fold(f32::NEG_INFINITY, f32::max);
-        let mut weights: Vec<f32> = filtered.iter().map(|(_, d)| (-d - max_neg_d).exp()).collect();
+        let mut weights: Vec<f32> = filtered
+            .iter()
+            .map(|(_, d)| (-d - max_neg_d).exp())
+            .collect();
         let w_sum: f32 = weights.iter().sum();
         if w_sum > 0.0 {
             weights.iter_mut().for_each(|w| *w /= w_sum);
@@ -868,9 +878,7 @@ where
         sort_dim,
         num_opt_iter,
     )?;
-    results
-        .pop()
-        .ok_or(anyhow::anyhow!("no levels processed"))
+    results.pop().ok_or(anyhow::anyhow!("no levels processed"))
 }
 
 /// Multi-level collapsing returning per-level `CollapsedOut` objects.
@@ -903,9 +911,9 @@ where
     if num_batches < 2 {
         // No batch effects — single-level collapsing
         data_vec.partition_columns_to_groups(proj_kn, Some(sort_dim), None)?;
-        let group_to_cols = data_vec.take_grouped_columns().ok_or(anyhow::anyhow!(
-            "columns not assigned"
-        ))?;
+        let group_to_cols = data_vec
+            .take_grouped_columns()
+            .ok_or(anyhow::anyhow!("columns not assigned"))?;
         let num_groups = group_to_cols.len();
         let mut stat = CollapsedStat::new(num_features, num_groups, 0);
         data_vec.collect_basic_stat(&mut stat)?;
@@ -940,9 +948,9 @@ where
         // Repartition at this level's granularity
         data_vec.partition_columns_to_groups(proj_kn, Some(level_sort_dim), None)?;
 
-        let group_to_cols = data_vec.take_grouped_columns().ok_or(anyhow::anyhow!(
-            "columns not assigned"
-        ))?;
+        let group_to_cols = data_vec
+            .take_grouped_columns()
+            .ok_or(anyhow::anyhow!("columns not assigned"))?;
         let num_groups = group_to_cols.len();
 
         let mut stat = CollapsedStat::new(num_features, num_groups, num_batches);

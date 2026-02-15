@@ -1179,7 +1179,7 @@ fn estimate_m6a_stat(
                         start,
                         stop,
                         gene: gene.clone(),
-                        strand: strand.clone(),
+                        strand: *strand,
                     },
                     MethylationData {
                         methylated,

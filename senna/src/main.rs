@@ -47,7 +47,7 @@ fn colorize_logo_line(line: &str) -> String {
 }
 
 fn print_logo() {
-    let intro = vec![
+    let intro = [
         "",
         "",
         "SENNA",

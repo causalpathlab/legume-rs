@@ -297,6 +297,7 @@ pub trait IoOps {
         Self::read_data(file_path, delim, header_row, header_column, None, None)
     }
 
+    #[allow(clippy::type_complexity)]
     fn read_data_vec_with_indices_names(
         file_path: &str,
         delim: impl Into<Delimiter>,
@@ -421,7 +422,7 @@ pub trait IoOps {
 
     /// write the matrix down to parquet with default names
     /// * `file_path`: output file path
-    /// Uses numeric row/column names and default "row" column name
+    ///   Uses numeric row/column names and default "row" column name
     fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
         self.to_parquet_with_names(file_path, (None, None), None)
     }

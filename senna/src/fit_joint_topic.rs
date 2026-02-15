@@ -453,7 +453,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         &encoder,
         &decoder,
         &parameters,
-        &args,
+        args,
         &feature_selections,
     )?;
 
@@ -500,7 +500,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         &data_stack,
         &encoder,
         &collapsed_data_vec,
-        &args,
+        args,
         &feature_selections,
     )?;
     let cell_names = data_stack.column_names()?;
@@ -537,8 +537,6 @@ where
 
     let jobs = create_jobs(ntot, Some(block_size));
     let njobs = jobs.len() as u64;
-    let arc_enc = Arc::new(encoder);
-
     // potential batch effects
     let delta = collapsed_vec
         .iter()
@@ -558,7 +556,6 @@ where
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let arc_sel = Arc::new(feature_selections);
     let mut chunks = jobs
         .par_iter()
         .progress_count(njobs)
@@ -566,18 +563,18 @@ where
             AdjMethod::Residual => evaluate_with_residuals(
                 block,
                 data_stack,
-                arc_enc.clone(),
+                encoder,
                 &dev,
                 delta.as_ref(),
-                arc_sel.clone(),
+                feature_selections,
             ),
             AdjMethod::Batch => evaluate_with_batch(
                 block,
                 data_stack,
-                arc_enc.clone(),
+                encoder,
                 &dev,
                 delta.as_ref(),
-                arc_sel.clone(),
+                feature_selections,
             ),
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -600,10 +597,10 @@ where
 fn evaluate_with_batch<Enc>(
     block: (usize, usize),
     data_stack: &SparseIoStack,
-    encoder: Arc<&Enc>,
+    encoder: &Enc,
     dev: &Device,
     delta_bd_vec: &[Option<Tensor>],
-    feature_selections: Arc<&[Option<FeatureSelection>]>,
+    feature_selections: &[Option<FeatureSelection>],
 ) -> anyhow::Result<(usize, Mat)>
 where
     Enc: MultimodalEncoderModuleT,
@@ -663,10 +660,10 @@ where
 fn evaluate_with_residuals<Enc>(
     block: (usize, usize),
     data_stack: &SparseIoStack,
-    encoder: Arc<&Enc>,
+    encoder: &Enc,
     dev: &Device,
     delta_bd_vec: &[Option<Tensor>],
-    feature_selections: Arc<&[Option<FeatureSelection>]>,
+    feature_selections: &[Option<FeatureSelection>],
 ) -> anyhow::Result<(usize, Mat)>
 where
     Enc: MultimodalEncoderModuleT,
@@ -745,7 +742,6 @@ impl TrainScores {
         ];
 
         let epochs: Vec<Box<str>> = (0..mat.nrows())
-            .into_iter()
             .map(|x| (x + 1).to_string().into_boxed_str())
             .collect();
 

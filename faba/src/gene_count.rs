@@ -59,8 +59,8 @@ fn count_reads_in_bam_for_gene(
 ) -> anyhow::Result<()> {
     let mut reader = bam::IndexedReader::from_path(bam_file)?;
     let chr = rec.seqname.as_ref();
-    let start = (rec.start - 1).max(0) as i64;
-    let stop = rec.stop as i64;
+    let start = (rec.start - 1).max(0);
+    let stop = rec.stop;
 
     // Fetch reads in the gene region
     let tid = reader.header().tid(chr.as_bytes());

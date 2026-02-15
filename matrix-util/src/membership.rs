@@ -194,17 +194,17 @@ impl Membership {
     }
 
     /// Get the group for a key using exact, base-key, or prefix matching
-    pub fn get(&self, key: &str) -> Option<&Box<str>> {
+    pub fn get(&self, key: &str) -> Option<&str> {
         // Try exact match first
         if let Some(value) = self.map.get(key) {
-            return Some(value);
+            return Some(value.as_ref());
         }
 
         // Try base key match (if delimiter is set)
         if self.delimiter.is_some() {
             let base_key = extract_base_key(key, self.delimiter);
             if let Some(value) = self.base_map.get(&base_key) {
-                return Some(value);
+                return Some(value.as_ref());
             }
         }
 
@@ -215,14 +215,14 @@ impl Membership {
         // Try prefix match: stored key is prefix of query
         for stored_key in &self.keys {
             if key.starts_with(stored_key.as_ref()) {
-                return self.map.get(stored_key);
+                return self.map.get(stored_key).map(|v| v.as_ref());
             }
         }
 
         // Try reverse prefix: query is prefix of stored key
         for stored_key in &self.keys {
             if stored_key.starts_with(key) {
-                return self.map.get(stored_key);
+                return self.map.get(stored_key).map(|v| v.as_ref());
             }
         }
 
@@ -327,8 +327,8 @@ impl Membership {
     }
 
     /// Get sample keys for debugging
-    pub fn sample_keys(&self, n: usize) -> Vec<&Box<str>> {
-        self.keys.iter().take(n).collect()
+    pub fn sample_keys(&self, n: usize) -> Vec<&str> {
+        self.keys.iter().take(n).map(|k| k.as_ref()).collect()
     }
 
     /// Iterate over all key-value pairs

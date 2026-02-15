@@ -65,29 +65,26 @@ impl JointInMemoryData {
             return Err(anyhow::anyhow!("empty input in data loader"));
         }
 
-        let input_data: Vec<Vec<Tensor>> = args
-            .input
-            .into_iter()
-            .map(|x| x.rows_to_tensor_vec())
-            .collect();
+        let input_data: Vec<Vec<Tensor>> =
+            args.input.iter().map(|x| x.rows_to_tensor_vec()).collect();
 
         let nrows = input_data[0].len();
 
         let input_null_data: Vec<Option<Vec<Tensor>>> = args
             .input_null
-            .into_iter()
+            .iter()
             .map(|vv| vv.as_ref().map(|x| x.rows_to_tensor_vec()))
             .collect();
 
         let output_data: Vec<Option<Vec<Tensor>>> = args
             .output
-            .into_iter()
+            .iter()
             .map(|vv| vv.as_ref().map(|x| x.rows_to_tensor_vec()))
             .collect();
 
         let output_null_data: Vec<Option<Vec<Tensor>>> = args
             .output_null
-            .into_iter()
+            .iter()
             .map(|vv| vv.as_ref().map(|x| x.rows_to_tensor_vec()))
             .collect();
 
@@ -162,16 +159,16 @@ impl JointDataLoader for JointInMemoryData {
             self.shuffled_output_data.as_ref(),
             self.shuffled_output_null_data.as_ref(),
         ) {
-            let input = extract(&input, batch_idx, target_device)
+            let input = extract(input, batch_idx, target_device)
                 .into_iter()
                 .map(|x| x.unwrap())
                 .collect::<Vec<_>>();
 
-            let input_null = extract(&input_null, batch_idx, target_device);
+            let input_null = extract(input_null, batch_idx, target_device);
 
-            let output = extract(&output, batch_idx, target_device);
+            let output = extract(output, batch_idx, target_device);
 
-            let output_null = extract(&output_null, batch_idx, target_device);
+            let output_null = extract(output_null, batch_idx, target_device);
 
             Ok(JointMinibatchData {
                 input,
@@ -197,22 +194,12 @@ impl JointDataLoader for JointInMemoryData {
 
         let ntypes = self.input_data.len();
 
-        self.shuffled_input_data = Some(vec![
-            Vec::with_capacity(self.num_minibatch()).into();
-            ntypes
-        ]);
-        self.shuffled_input_null_data = Some(vec![
-            Vec::with_capacity(self.num_minibatch()).into();
-            ntypes
-        ]);
-        self.shuffled_output_data = Some(vec![
-            Vec::with_capacity(self.num_minibatch()).into();
-            ntypes
-        ]);
-        self.shuffled_output_null_data = Some(vec![
-            Vec::with_capacity(self.num_minibatch()).into();
-            ntypes
-        ]);
+        self.shuffled_input_data = Some(vec![Vec::with_capacity(self.num_minibatch()); ntypes]);
+        self.shuffled_input_null_data =
+            Some(vec![Vec::with_capacity(self.num_minibatch()); ntypes]);
+        self.shuffled_output_data = Some(vec![Vec::with_capacity(self.num_minibatch()); ntypes]);
+        self.shuffled_output_null_data =
+            Some(vec![Vec::with_capacity(self.num_minibatch()); ntypes]);
 
         ///////////////////////////////////
         // preload all the shuffled data //

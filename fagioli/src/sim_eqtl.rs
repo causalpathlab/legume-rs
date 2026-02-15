@@ -479,6 +479,7 @@ fn write_outputs(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_phase2_outputs(
     args: &SimulationArgs,
     geno: &fagioli::genotype::GenotypeMatrix,

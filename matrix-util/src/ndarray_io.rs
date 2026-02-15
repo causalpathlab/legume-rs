@@ -109,7 +109,7 @@ where
 
         let mut writer = writer.get_writer()?;
         let mut row_group_writer = writer.next_row_group()?;
-        parquet_add_bytearray(&mut row_group_writer, &row_names)?;
+        parquet_add_bytearray(&mut row_group_writer, row_names)?;
         for j in 0..ncols {
             parquet_add_numeric_column(&mut row_group_writer, &self.column(j).to_vec())?;
         }

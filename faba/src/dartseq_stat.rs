@@ -105,10 +105,10 @@ impl GeneFeatureCount {
             eprintln!("{}", k);
 
             let nmax = [
-                GeneFeatureCount::max_count(&self.cds, &k),
-                GeneFeatureCount::max_count(&self.five_prime, &k),
-                GeneFeatureCount::max_count(&self.three_prime, &k),
-                GeneFeatureCount::max_count(&self.non_coding, &k),
+                GeneFeatureCount::max_count(&self.cds, k),
+                GeneFeatureCount::max_count(&self.five_prime, k),
+                GeneFeatureCount::max_count(&self.three_prime, k),
+                GeneFeatureCount::max_count(&self.non_coding, k),
             ]
             .into_iter()
             .max()
@@ -262,7 +262,7 @@ impl Histogram for HashMap<GeneId, Vec<MethylatedSite>> {
             let g = x.key();
             let sites = x.value();
 
-            if let Some(gff) = gene_gff_map.get(&g) {
+            if let Some(gff) = gene_gff_map.get(g) {
                 // Convert GFF coordinates (1-based, inclusive) to 0-based half-open [lb, ub)
                 // to match BAM/m6a_pos coordinates
                 let lb = (gff.start - 1).max(0); // GFF 1-based start -> 0-based

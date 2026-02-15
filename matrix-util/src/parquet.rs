@@ -20,7 +20,7 @@ pub fn peek_parquet_field_names(file_path: &str) -> anyhow::Result<Vec<Box<str>>
     let fields = metadata.file_metadata().schema().get_fields();
 
     Ok(fields
-        .into_iter()
+        .iter()
         .map(|f| f.name().to_string().into_boxed_str())
         .collect())
 }
@@ -88,7 +88,7 @@ impl ParquetReader {
             .enumerate()
             .filter_map(|(j, f)| {
                 // Exclude row_name_index column if specified
-                let is_row_name_col = row_name_index.map_or(false, |idx| j == idx);
+                let is_row_name_col = row_name_index == Some(j);
                 if select_columns.contains(&j) && !is_row_name_col {
                     let tt = f.get_physical_type();
                     match tt {
@@ -115,12 +115,11 @@ impl ParquetReader {
             .map(|&(_, j)| fields[j].name().to_string().into_boxed_str())
             .collect();
 
-        let mut row_iter = reader.get_row_iter(None)?;
+        let row_iter = reader.get_row_iter(None)?;
         let mut row_names: Vec<Box<str>> = Vec::with_capacity(nrows);
         let mut row_major_data: Vec<f64> = Vec::with_capacity(nrows * ncols);
 
-        let mut row_counter: usize = 0;
-        while let Some(record) = row_iter.next() {
+        for (row_counter, record) in row_iter.enumerate() {
             let row = record?;
             // Handle different column types for row names
             let row_name: Box<str> = match (row_name_index, row_name_type) {
@@ -169,7 +168,6 @@ impl ParquetReader {
                     });
 
             row_major_data.extend(numbers?);
-            row_counter += 1;
         }
 
         Ok(Self {
@@ -197,6 +195,7 @@ impl ParquetWriter {
     ///
     /// * `names`: for row and column names, respectively; if `None`, just add `[0, n)` numbers.
     ///
+    #[allow(clippy::type_complexity)]
     pub fn new(
         file_path: &str,
         shape: (usize, usize),
@@ -257,7 +256,7 @@ pub fn parquet_add_bytearray<'a>(
 ) -> anyhow::Result<()> {
     if let Some(mut column_writer) = row_group_writer.next_column()? {
         let typed_writer = column_writer.typed::<ByteArrayType>();
-        typed_writer.write_batch(&data, None, None)?;
+        typed_writer.write_batch(data, None, None)?;
         column_writer.close()?;
     }
 

@@ -107,6 +107,7 @@ pub struct CelltypeCandidates {
 /// For each cell type, finds topics that match it and candidate genes that:
 /// 1. Have high weight in those topics' dictionaries
 /// 2. Are NOT already markers for that celltype
+#[allow(clippy::too_many_arguments)]
 pub fn find_candidate_markers(
     pip_at: &Mat,        // annotation × topic
     dict_gt: &Mat,       // gene × topic (log-prob or weights)
@@ -561,7 +562,7 @@ impl MarkerDatabase {
         let norm = |s: &str| s.to_lowercase().replace([' ', '-', '_'], "");
 
         let mut db = Self::default();
-        for line in open_buf_reader(path)?.lines().filter_map(|l| l.ok()) {
+        for line in open_buf_reader(path)?.lines().map_while(Result::ok) {
             let tokens: Vec<_> = line
                 .split(['\t', ',', ';', '|'])
                 .map(|s| s.trim())
@@ -618,9 +619,9 @@ impl MarkerDatabase {
         let check = |key: &str| {
             self.gene_to_celltypes
                 .get(key)
-                .map_or(false, |cts| cts.iter().any(|ct| fuzzy_match_ct(ct, &cn)))
+                .is_some_and(|cts| cts.iter().any(|ct| fuzzy_match_ct(ct, &cn)))
         };
-        check(&gn) || gs.map_or(false, |s| check(&s))
+        check(&gn) || gs.is_some_and(|s| check(&s))
     }
 }
 

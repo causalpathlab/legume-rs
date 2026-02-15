@@ -45,7 +45,7 @@ impl ModularSofmaxLinear {
 }
 
 impl Module for ModularSofmaxLinear {
-    fn forward(&self, h_nt: &Tensor) -> Result<Tensor> {
+    fn forward(&self, _h_nt: &Tensor) -> Result<Tensor> {
         todo!("");
     }
 }

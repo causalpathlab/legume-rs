@@ -78,9 +78,7 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
             let file_columns = &column_names[col_start..col_end];
 
             // Check if column names contain '@' (embedded batch info)
-            let has_embedded_batch = file_columns
-                .first()
-                .map_or(false, |name| name.contains('@'));
+            let has_embedded_batch = file_columns.first().is_some_and(|name| name.contains('@'));
 
             if has_embedded_batch {
                 // Parse batch from column names
