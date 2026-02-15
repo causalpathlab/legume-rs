@@ -3,8 +3,8 @@ use candle_util::candle_core::{DType, Device, Tensor};
 use candle_util::candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_util::sgvb::{
     BlackBoxLikelihood, FixedGaussianPrior, GaussianPrior, LinearModelSGVB,
-    LinearRegressionSGVB, PoissonLikelihood, Prior, SGVBConfig, SgvbModel, SusieVar,
-    direct_elbo_loss,
+    LinearRegressionSGVB, NegativeBinomialLikelihood, PoissonLikelihood, Prior, SGVBConfig,
+    SgvbModel, SusieVar, direct_elbo_loss,
 };
 use special::Error as SpecialError;
 
@@ -127,18 +127,16 @@ pub fn map_gene_qtl(
     let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
     let sgvb_config = SGVBConfig::new(config.num_samples);
 
-    let use_poisson = config.likelihood == "poisson";
-
     // Build model, run optimization, extract results
     // We use a macro to handle the combinatorial explosion of model × prior × likelihood
     // while still having access to the concrete model type for result extraction.
     let (final_elbo, summary) = if config.model == "susie" {
         run_susie_model(
-            vb, &varmap, x_tensor, &y_tensor, sgvb_config, use_poisson, config,
+            vb, &varmap, x_tensor, &y_tensor, sgvb_config, config,
         )?
     } else {
         run_gaussian_model(
-            vb, &varmap, x_tensor, &y_tensor, sgvb_config, use_poisson, config,
+            vb, &varmap, x_tensor, &y_tensor, sgvb_config, config,
         )?
     };
 
@@ -169,10 +167,10 @@ fn run_susie_model(
     x_tensor: Tensor,
     y_tensor: &Tensor,
     sgvb_config: SGVBConfig,
-    use_poisson: bool,
     config: &MappingConfig,
 ) -> Result<(f32, PosteriorSummary)> {
     let p_cis = x_tensor.dim(1)?;
+    let n = x_tensor.dim(0)?;
     let variational = SusieVar::new(vb.clone(), config.num_components, p_cis, 1)?;
 
     macro_rules! run_and_extract {
@@ -183,7 +181,7 @@ fn run_susie_model(
                 $prior,
                 sgvb_config,
             );
-            let elbo = run_optimization(varmap, &model, y_tensor, use_poisson, config)?;
+            let elbo = run_optimization(varmap, &model, y_tensor, n, config)?;
             let summary = extract_susie_results(&model)?;
             Ok((elbo, summary))
         }};
@@ -202,9 +200,10 @@ fn run_gaussian_model(
     x_tensor: Tensor,
     y_tensor: &Tensor,
     sgvb_config: SGVBConfig,
-    use_poisson: bool,
     config: &MappingConfig,
 ) -> Result<(f32, PosteriorSummary)> {
+    let n = x_tensor.dim(0)?;
+
     macro_rules! run_and_extract {
         ($prior:expr) => {{
             let model = LinearRegressionSGVB::new(
@@ -214,7 +213,7 @@ fn run_gaussian_model(
                 $prior,
                 sgvb_config,
             )?;
-            let elbo = run_optimization(varmap, &model, y_tensor, use_poisson, config)?;
+            let elbo = run_optimization(varmap, &model, y_tensor, n, config)?;
             let summary = extract_gaussian_results(&model)?;
             Ok((elbo, summary))
         }};
@@ -231,16 +230,32 @@ fn run_optimization<M: SgvbModel>(
     varmap: &VarMap,
     model: &M,
     y_tensor: &Tensor,
-    use_poisson: bool,
+    n: usize,
     config: &MappingConfig,
 ) -> Result<f32> {
-    if use_poisson {
-        let likelihood = PoissonLikelihood::new(y_tensor.clone());
-        train_loop(varmap, model, &likelihood, config)
-    } else {
-        let y_sd = y_std(y_tensor)?;
-        let likelihood = SimpleGaussianLikelihood::new(y_tensor.clone(), y_sd);
-        train_loop(varmap, model, &likelihood, config)
+    match config.likelihood.as_str() {
+        "poisson" => {
+            let likelihood = PoissonLikelihood::new(y_tensor.clone());
+            train_loop(varmap, model, &likelihood, config)
+        }
+        "nb" | "negative_binomial" => {
+            // Create a learnable log-dispersion parameter (scalar, init = 0 → r = 1)
+            let device = Device::Cpu;
+            let dtype = DType::F32;
+            let vb_disp = candle_util::candle_nn::VarBuilder::from_varmap(varmap, dtype, &device);
+            let log_r = vb_disp.get_with_hints(
+                (1,),
+                "log_r",
+                candle_util::candle_nn::Init::Const(0.0),
+            )?;
+            let likelihood = NegativeBinomialLikelihood::new(y_tensor.clone());
+            train_loop_nb(varmap, model, &likelihood, &log_r, n, config)
+        }
+        _ => {
+            let y_sd = y_std(y_tensor)?;
+            let likelihood = SimpleGaussianLikelihood::new(y_tensor.clone(), y_sd);
+            train_loop(varmap, model, &likelihood, config)
+        }
     }
 }
 
@@ -256,6 +271,47 @@ fn train_loop<M: SgvbModel, L: BlackBoxLikelihood>(
     let mut final_elbo = f32::NEG_INFINITY;
     for _iter in 0..config.num_iters {
         let loss = direct_elbo_loss(model, likelihood, config.num_samples)?;
+        optimizer.backward_step(&loss)?;
+        final_elbo = -(loss.to_scalar::<f32>()?);
+    }
+    Ok(final_elbo)
+}
+
+/// Training loop for negative binomial likelihood.
+///
+/// NB requires two etas: log-mean (from the regression model) and log-dispersion
+/// (a learnable scalar shared across individuals). We sample from the main model
+/// to get eta1 (log-mean), then broadcast the learnable log_r as eta2.
+fn train_loop_nb<M: SgvbModel>(
+    varmap: &VarMap,
+    model: &M,
+    likelihood: &NegativeBinomialLikelihood,
+    log_r: &Tensor,
+    n: usize,
+    config: &MappingConfig,
+) -> Result<f32> {
+    let mut optimizer =
+        candle_util::candle_nn::AdamW::new_lr(varmap.all_vars(), config.learning_rate)?;
+
+    let mut final_elbo = f32::NEG_INFINITY;
+    for _iter in 0..config.num_iters {
+        let sample = model.sample(config.num_samples)?;
+        let s = config.num_samples;
+
+        // Broadcast log_r to (S, n, 1) to match eta shape
+        let log_r_broadcast = log_r
+            .reshape((1, 1, 1))?
+            .broadcast_as((s, n, 1))?
+            .contiguous()?;
+
+        // Compute log-likelihood with both etas
+        let llik = likelihood.log_likelihood(&[&sample.eta, &log_r_broadcast])?;
+        let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
+
+        // ELBO = log_lik + log_prior - log_q
+        let elbo = ((&llik + &sample.log_prior)? - &sample.log_q)?;
+        let loss = elbo.mean(0)?.neg()?;
+
         optimizer.backward_step(&loss)?;
         final_elbo = -(loss.to_scalar::<f32>()?);
     }
@@ -336,7 +392,7 @@ mod tests {
     use super::*;
     use nalgebra::{DMatrix, DVector};
     use rand::SeedableRng;
-    use rand_distr::{Distribution, Normal};
+    use rand_distr::{Distribution, Gamma, Normal, Poisson};
 
     #[test]
     fn test_simple_gaussian_likelihood() -> Result<()> {
@@ -406,6 +462,140 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(max_idx, 2, "Causal SNP should have largest effect size");
+
+        Ok(())
+    }
+
+    /// Generate NB counts via Poisson-Gamma mixture: y ~ Poisson(Gamma(r, r/μ))
+    fn sample_nb(rng: &mut impl rand::Rng, mu: f32, r: f32) -> f32 {
+        let gamma = Gamma::new(r as f64, (mu / r) as f64).unwrap();
+        let lambda = gamma.sample(rng).max(1e-10);
+        let pois = Poisson::new(lambda).unwrap();
+        pois.sample(rng) as f32
+    }
+
+    #[test]
+    fn test_map_gene_qtl_nb() -> Result<()> {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(123);
+        let n = 80;
+        let p = 5;
+        let normal = Normal::new(0.0f32, 1.0).unwrap();
+        let r_true = 5.0f32; // dispersion
+
+        // Simulate genotypes (0/1/2)
+        let mut geno = DMatrix::<f32>::zeros(n, p);
+        for i in 0..n {
+            for j in 0..p {
+                geno[(i, j)] = (normal.sample(&mut rng) > 0.0) as u8 as f32
+                    + (normal.sample(&mut rng) > 0.0) as u8 as f32;
+            }
+        }
+
+        // Generate NB counts: log(mu) = 2.0 + 0.5 * X[:,2]
+        // Causal SNP is index 2 with positive effect on log-mean
+        let mut y = DVector::<f32>::zeros(n);
+        for i in 0..n {
+            let log_mu = 2.0 + 0.5 * geno[(i, 2)];
+            let mu = log_mu.exp();
+            y[i] = sample_nb(&mut rng, mu, r_true);
+        }
+
+        let mask = vec![true; n];
+        let cis_snps: Vec<usize> = (0..p).collect();
+
+        let config = MappingConfig {
+            model: "gaussian".to_string(),
+            likelihood: "nb".to_string(),
+            num_samples: 10,
+            num_iters: 300,
+            prior_tau: 1.0,
+            ..Default::default()
+        };
+
+        let result = map_gene_qtl("gene_nb", "T_cell", &cis_snps, &geno, &y, &mask, &config)?;
+
+        assert_eq!(result.effect_sizes.len(), p);
+        assert!(result.final_elbo.is_finite(), "ELBO should be finite");
+
+        // The causal SNP (index 2) should have the largest absolute effect
+        let max_idx = result
+            .effect_sizes
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(max_idx, 2, "Causal SNP should have largest effect size");
+
+        // Effect should be positive (matching the true positive effect)
+        assert!(
+            result.effect_sizes[2] > 0.0,
+            "Causal SNP effect should be positive, got {}",
+            result.effect_sizes[2]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_gene_qtl_poisson() -> Result<()> {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(99);
+        let n = 80;
+        let p = 5;
+        let normal = Normal::new(0.0f32, 1.0).unwrap();
+
+        // Simulate genotypes (0/1/2)
+        let mut geno = DMatrix::<f32>::zeros(n, p);
+        for i in 0..n {
+            for j in 0..p {
+                geno[(i, j)] = (normal.sample(&mut rng) > 0.0) as u8 as f32
+                    + (normal.sample(&mut rng) > 0.0) as u8 as f32;
+            }
+        }
+
+        // Generate Poisson counts: log(mu) = 2.0 + 0.5 * X[:,2]
+        let mut y = DVector::<f32>::zeros(n);
+        for i in 0..n {
+            let log_mu = 2.0 + 0.5 * geno[(i, 2)];
+            let lambda = (log_mu as f64).exp();
+            let pois = Poisson::new(lambda).unwrap();
+            y[i] = pois.sample(&mut rng) as f32;
+        }
+
+        let mask = vec![true; n];
+        let cis_snps: Vec<usize> = (0..p).collect();
+
+        let config = MappingConfig {
+            model: "gaussian".to_string(),
+            likelihood: "poisson".to_string(),
+            num_samples: 10,
+            num_iters: 300,
+            prior_tau: 1.0,
+            ..Default::default()
+        };
+
+        let result =
+            map_gene_qtl("gene_pois", "T_cell", &cis_snps, &geno, &y, &mask, &config)?;
+
+        assert_eq!(result.effect_sizes.len(), p);
+        assert!(result.final_elbo.is_finite(), "ELBO should be finite");
+
+        // The causal SNP (index 2) should have the largest absolute effect
+        let max_idx = result
+            .effect_sizes
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(max_idx, 2, "Causal SNP should have largest effect size");
+
+        // Effect should be positive (matching the true positive effect)
+        assert!(
+            result.effect_sizes[2] > 0.0,
+            "Causal SNP effect should be positive, got {}",
+            result.effect_sizes[2]
+        );
 
         Ok(())
     }
