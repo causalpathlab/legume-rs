@@ -645,8 +645,12 @@ mod tests {
         use std::sync::Arc;
         let nrow = raw.nrows();
         let ncol = raw.ncols();
-        let rows: Vec<Box<str>> = (0..nrow).map(|i| format!("g{i}").into_boxed_str()).collect();
-        let cols: Vec<Box<str>> = (0..ncol).map(|i| format!("c{i}").into_boxed_str()).collect();
+        let rows: Vec<Box<str>> = (0..nrow)
+            .map(|i| format!("g{i}").into_boxed_str())
+            .collect();
+        let cols: Vec<Box<str>> = (0..ncol)
+            .map(|i| format!("c{i}").into_boxed_str())
+            .collect();
         let mut sp = create_sparse_from_ndarray(raw, None, None).unwrap();
         sp.register_row_names_vec(&rows);
         sp.register_column_names_vec(&cols);
@@ -677,8 +681,7 @@ mod tests {
         let data = make_test_sparse_io(&raw);
         let cell_labels = vec![0, 0, 0, 1, 1, 1];
 
-        let embed =
-            compute_gene_module_sketch(&data, &cell_labels, 2, 10, 3).unwrap();
+        let embed = compute_gene_module_sketch(&data, &cell_labels, 2, 10, 3).unwrap();
 
         assert_eq!(embed.nrows(), n_genes);
         assert_eq!(embed.ncols(), 10);
@@ -720,8 +723,7 @@ mod tests {
         let gene_to_module = vec![0, 0, 1, 1];
         let edges = vec![(0, 1), (2, 3)];
 
-        let store =
-            build_edge_profiles_by_module(&data, &edges, &gene_to_module, 2, 10).unwrap();
+        let store = build_edge_profiles_by_module(&data, &edges, &gene_to_module, 2, 10).unwrap();
 
         assert_eq!(store.n_edges, 2);
         assert_eq!(store.m, 2);
