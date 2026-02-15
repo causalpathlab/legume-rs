@@ -83,7 +83,11 @@ pub struct MapQtlArgs {
     #[arg(long, default_value = "5")]
     pub min_cells: usize,
 
-    /// PIP threshold for VCF output (Susie only; variants with max PIP below this are excluded)
+    /// Minimum minor allele frequency (MAF) filter
+    #[arg(long, default_value = "0.05")]
+    pub min_maf: f32,
+
+    /// PIP threshold for TSV output (Susie only; variants with max PIP below this are excluded)
     #[arg(long, default_value = "0.0")]
     pub pip_threshold: f32,
 
@@ -152,7 +156,7 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
         bail!("No individuals matched between genotype and pseudobulk data");
     }
 
-    // Subset genotype matrix to matched individuals
+    // Subset genotype matrix to matched individuals and standardize columns
     let n_matched = matched_geno_indices.len();
     let mut matched_genotypes =
         nalgebra::DMatrix::<f32>::zeros(n_matched, geno.num_snps());
@@ -161,6 +165,59 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
             matched_genotypes[(new_idx, snp)] = geno.genotypes[(orig_idx, snp)];
         }
     }
+
+    // MAF filter: remove low-MAF SNPs (computed on matched individuals)
+    let maf_pass: Vec<bool> = (0..geno.num_snps())
+        .map(|snp| {
+            let col = matched_genotypes.column(snp);
+            let mean = col.mean();
+            let af = mean / 2.0; // allele frequency (dosage 0/1/2)
+            let maf = af.min(1.0 - af);
+            maf >= args.min_maf
+        })
+        .collect();
+
+    let pass_indices: Vec<usize> = maf_pass.iter().enumerate()
+        .filter(|(_, &pass)| pass)
+        .map(|(i, _)| i)
+        .collect();
+
+    let n_filtered = geno.num_snps() - pass_indices.len();
+    if n_filtered > 0 {
+        info!(
+            "MAF filter (>= {}): removed {} SNPs, {} remaining",
+            args.min_maf, n_filtered, pass_indices.len()
+        );
+    }
+
+    if pass_indices.is_empty() {
+        bail!("No SNPs remaining after MAF filter");
+    }
+
+    // Build filtered genotype matrix and metadata
+    let n_pass = pass_indices.len();
+    let mut filtered_genotypes = nalgebra::DMatrix::<f32>::zeros(n_matched, n_pass);
+    for (new_col, &orig_col) in pass_indices.iter().enumerate() {
+        for row in 0..n_matched {
+            filtered_genotypes[(row, new_col)] = matched_genotypes[(row, orig_col)];
+        }
+    }
+    let matched_genotypes = filtered_genotypes;
+
+    let geno = fagioli::genotype::GenotypeMatrix {
+        genotypes: nalgebra::DMatrix::<f32>::zeros(0, 0), // not used after this
+        individual_ids: Vec::new(),
+        snp_ids: pass_indices.iter().map(|&i| geno.snp_ids[i].clone()).collect(),
+        chromosomes: pass_indices.iter().map(|&i| geno.chromosomes[i].clone()).collect(),
+        positions: pass_indices.iter().map(|&i| geno.positions[i]).collect(),
+        allele1: pass_indices.iter().map(|&i| geno.allele1[i].clone()).collect(),
+        allele2: pass_indices.iter().map(|&i| geno.allele2[i].clone()).collect(),
+    };
+
+    // Center genotype columns (subtract mean, keep original scale)
+    use matrix_util::traits::MatOps;
+    let mut matched_genotypes = matched_genotypes;
+    matched_genotypes.centre_columns_inplace();
 
     // Build mapping config
     let config = MappingConfig {
@@ -173,7 +230,45 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
         prior_tau: args.prior_tau,
     };
 
-    // 6. For each cell type, run parallel gene mapping
+    // 6. Build gene name lookup: GFF gene_id -> GFF index
+    use genomic_data::gff::GeneId;
+    use std::collections::HashMap;
+    let gff_gene_lookup: HashMap<&str, usize> = genes
+        .genes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, g)| match &g.gene_id {
+            GeneId::Ensembl(id) => Some((id.as_ref(), i)),
+            _ => None,
+        })
+        .collect();
+
+    // Map pseudobulk gene index -> GFF gene index (match by ENSG prefix)
+    let pb_to_gff: Vec<Option<usize>> = pseudobulk
+        .gene_names
+        .iter()
+        .map(|name| {
+            // Try exact match first, then prefix before first '_'
+            if let Some(&idx) = gff_gene_lookup.get(name.as_ref()) {
+                return Some(idx);
+            }
+            if let Some(prefix) = name.split('_').next() {
+                if let Some(&idx) = gff_gene_lookup.get(prefix) {
+                    return Some(idx);
+                }
+            }
+            None
+        })
+        .collect();
+
+    let n_matched_genes = pb_to_gff.iter().filter(|x| x.is_some()).count();
+    info!(
+        "Matched {}/{} pseudobulk genes to GFF annotations",
+        n_matched_genes,
+        pseudobulk.gene_names.len()
+    );
+
+    // 7. For each cell type, run parallel gene mapping
     let mut all_results: Vec<GeneQtlResult> = Vec::new();
 
     for (ct_idx, ct_name) in pseudobulk.cell_type_names.iter().enumerate() {
@@ -213,8 +308,17 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
         let gene_results: Vec<GeneQtlResult> = (0..num_genes)
             .into_par_iter()
             .filter_map(|gene_idx| {
+                // Look up the correct GFF gene for this pseudobulk gene
+                let gff_idx = match pb_to_gff[gene_idx] {
+                    Some(idx) => idx,
+                    None => {
+                        progress.inc(1);
+                        return None;
+                    }
+                };
+
                 let cis_snps = genes.cis_snp_indices(
-                    gene_idx,
+                    gff_idx,
                     &geno.positions,
                     &geno.chromosomes,
                 );
