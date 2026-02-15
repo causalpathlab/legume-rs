@@ -24,7 +24,10 @@ pub struct SrtGenePairSvdArgs {
         value_delimiter(','),
         help = "Spatial coordinate files, one per data file",
         long_help = "Spatial coordinate files, one per data file (comma separated).\n\
-                       Each file: barcode, x, y, ... per line."
+                       Format: CSV, TSV, or space-delimited text (or .parquet).\n\
+                       First column: cell/barcode names (must match data file).\n\
+                       Subsequent columns: spatial coordinates (x, y, etc.).\n\
+                       Header row is auto-detected or use --coord-header-row to specify."
     )]
     coord_files: Vec<Box<str>>,
 
@@ -57,7 +60,9 @@ pub struct SrtGenePairSvdArgs {
         value_delimiter(','),
         help = "Batch membership files, one per data file",
         long_help = "Batch membership files, one per data file (comma separated).\n\
-                       Each file maps cells to batch labels for batch effect correction."
+                       Format: plain text file, one batch label per line.\n\
+                       Must have one line for each cell in the corresponding data file.\n\
+                       If not provided, each data file is treated as a separate batch."
     )]
     batch_files: Option<Vec<Box<str>>>,
 
