@@ -499,7 +499,7 @@ fn collect_polya_counts_at_site(
                     start,
                     stop,
                     gene: gene_id.clone(),
-                    strand: strand.clone(),
+                    strand: *strand,
                 },
                 *count,
             )

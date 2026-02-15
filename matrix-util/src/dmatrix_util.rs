@@ -208,8 +208,8 @@ where
                 .map(|&i| denom_db[(i, b)])
                 .collect::<Vec<_>>();
 
-            let dsum = d_j.iter().map(|&x| x).sum::<T>();
-            let xsum = x_j.values().iter().map(|&x| x).sum::<T>();
+            let dsum = d_j.iter().copied().sum::<T>();
+            let xsum = x_j.values().iter().copied().sum::<T>();
             let scale = if dsum > T::zero() {
                 xsum / dsum
             } else {
@@ -237,8 +237,8 @@ where
                     .map(|&i| d_j[i])
                     .collect::<Vec<_>>();
 
-                let dsum = d_j.iter().map(|&x| x).sum::<T>();
-                let xsum = x_j.values().iter().map(|&x| x).sum::<T>();
+                let dsum = d_j.iter().copied().sum::<T>();
+                let xsum = x_j.values().iter().copied().sum::<T>();
                 let scale = if dsum > T::zero() {
                     xsum / dsum
                 } else {
@@ -350,7 +350,7 @@ where
         &self,
         other: &Self::Other,
     ) -> anyhow::Result<Vec<(usize, usize, Self::Scalar)>> {
-        csc_euclidean_distance_on_select_columns(&self, other, None)
+        csc_euclidean_distance_on_select_columns(self, other, None)
     }
 
     fn euclidean_distance_on_select_columns(
@@ -358,7 +358,7 @@ where
         other: &Self::Other,
         select_columns_in_other: &[usize],
     ) -> anyhow::Result<Vec<(usize, usize, Self::Scalar)>> {
-        csc_euclidean_distance_on_select_columns(&self, other, Some(select_columns_in_other))
+        csc_euclidean_distance_on_select_columns(self, other, Some(select_columns_in_other))
     }
 }
 

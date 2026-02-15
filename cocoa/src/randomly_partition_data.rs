@@ -41,7 +41,7 @@ impl RandPartitionOps for SparseIoVec {
         let centred = self.project_columns_with_batch_correction(
             proj_dim,
             Some(block_size),
-            Some(&cell_to_indv),
+            Some(cell_to_indv),
         )?;
         self.partition_columns_to_groups(&centred.proj, None, None)?;
 

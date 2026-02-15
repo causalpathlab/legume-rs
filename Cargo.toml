@@ -54,6 +54,7 @@ fnv = { version = "1.0.7" }
 hnsw_rs = "0.3"
 anndists = "0.1"
 indicatif = { version = "^0.18", features = ["rayon"] }
+indicatif-log-bridge = { version = "0.2" }
 
 parquet = { version = "56" }
 env_logger = { version = "0.11" }

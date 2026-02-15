@@ -43,6 +43,7 @@ where
 
 /// Read a matrix market file and return a vector of triplets (row, col, val)
 /// * `mtx_file` - Path to the matrix market file
+#[allow(clippy::type_complexity)]
 pub fn read_mtx_triplets(
     mtx_file: &str,
 ) -> anyhow::Result<(Vec<(u64, u64, f32)>, Option<(usize, usize, usize)>)> {

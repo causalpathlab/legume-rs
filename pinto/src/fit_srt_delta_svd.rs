@@ -56,13 +56,6 @@ pub struct SrtDeltaSvdArgs {
 
     #[arg(
         long,
-        default_value_t = 256,
-        help = "Dimension for spectral embedding of spatial coordinates"
-    )]
-    coord_emb: usize,
-
-    #[arg(
-        long,
         short = 'b',
         value_delimiter(','),
         help = "Batch membership files, one per data file",
@@ -226,10 +219,7 @@ pub(crate) struct PairDeltaParameters {
 /// 8. Nystrom projection → per-pair latent codes
 /// 9. Export dictionary + pair latents
 pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
+    init_logger(args.verbose);
 
     // 1. Load data
     info!("Loading data files...");
@@ -291,17 +281,13 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     }
 
     // 3. Build spatial KNN graph
-    info!(
-        "Building spatial KNN graph (k={})...",
-        args.knn_spatial
-    );
+    info!("Building spatial KNN graph (k={})...", args.knn_spatial);
 
     let srt_cell_pairs = SrtCellPairs::new(
         &data_vec,
         &coordinates,
         SrtCellPairsArgs {
             knn: args.knn_spatial,
-            coordinate_emb_dim: args.coord_emb,
             block_size: args.block_size,
         },
     )?;
@@ -336,7 +322,8 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         args.num_levels,
     );
 
-    let mut all_stats: Vec<PairDeltaCollapsedStat> = ml.all_num_samples
+    let mut all_stats: Vec<PairDeltaCollapsedStat> = ml
+        .all_num_samples
         .iter()
         .map(|&n| PairDeltaCollapsedStat::new(n_genes, n))
         .collect();
@@ -355,16 +342,11 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
 
     // 6. Fit Poisson-Gamma (finest level)
     info!("Fitting Poisson-Gamma model...");
-    let collapsed_stat = all_stats
-        .last()
-        .ok_or(anyhow::anyhow!("no levels"))?;
+    let collapsed_stat = all_stats.last().ok_or(anyhow::anyhow!("no levels"))?;
     let params = collapsed_stat.optimize(None)?;
 
     // 7. SVD on [shared; diff] posterior log means
-    info!(
-        "Randomized SVD ({} components)...",
-        args.n_latent_topics
-    );
+    info!("Randomized SVD ({} components)...", args.n_latent_topics);
 
     let training_dm = concatenate_vertical(&[
         params.shared.posterior_log_mean().scale_columns(),

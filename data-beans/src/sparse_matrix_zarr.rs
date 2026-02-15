@@ -255,6 +255,7 @@ impl SparseMtxData {
         Ok(ret)
     }
 
+    #[allow(clippy::type_complexity)]
     fn open_csc_triplets(
         &self,
     ) -> anyhow::Result<(

@@ -112,8 +112,8 @@ impl ToBackend for TripletsRowsCols {
 
         let mut data =
             create_sparse_from_triplets(triplets, mtx_shape, Some(file_path), Some(&backend))?;
-        data.register_column_names_vec(&col_names);
-        data.register_row_names_vec(&row_names);
+        data.register_column_names_vec(col_names);
+        data.register_row_names_vec(row_names);
 
         Ok(data)
     }

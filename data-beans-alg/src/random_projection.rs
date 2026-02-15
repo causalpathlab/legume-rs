@@ -120,7 +120,7 @@ impl RandProjOps for SparseIoStack {
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
         let ncols = self.num_columns()?;
-        let batch_membership = batch_membership.map(|x| x.get(0..ncols)).flatten();
+        let batch_membership = batch_membership.and_then(|x| x.get(0..ncols));
 
         let proj_vec = self
             .stack
@@ -128,8 +128,8 @@ impl RandProjOps for SparseIoStack {
             .map(|data_vec| -> anyhow::Result<_> {
                 data_vec.project_columns_with_batch_correction(
                     target_dim,
-                    block_size.clone(),
-                    batch_membership.clone(),
+                    block_size,
+                    batch_membership,
                 )
             })
             .collect::<anyhow::Result<Vec<_>>>()?;

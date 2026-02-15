@@ -314,7 +314,7 @@ impl ColliderSimulator {
                 let x_logit = &x_onehot * &eta; // 1 x n_ct
 
                 // V_i contribution to gene expression: V_i * gamma_g^T => (1 x n_genes)
-                let v_effect_g = &v_i * &gamma_gk.transpose(); // 1 x n_genes
+                let v_effect_g = v_i * &gamma_gk.transpose(); // 1 x n_genes
 
                 // Sample U_j for all cells of this individual
                 let u_mat = Mat::rnorm(nn, n_cell_covar); // nn x n_cell_covar
@@ -432,9 +432,9 @@ impl ColliderSimulator {
         let mut prop_a_rows = Vec::with_capacity(n_total_cells);
 
         for &(indv, nn, _, ref ct, ref u_mat, ref pa) in &sorted {
-            for j in 0..nn {
+            for (j, &ct_j) in ct.iter().enumerate().take(nn) {
                 samples.push(indv);
-                celltypes_all.push(ct[j]);
+                celltypes_all.push(ct_j);
                 u_rows.push(u_mat.row(j).clone_owned());
                 prop_a_rows.push(pa.row(j).clone_owned());
             }

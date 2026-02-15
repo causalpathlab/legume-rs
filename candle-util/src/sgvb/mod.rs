@@ -40,6 +40,7 @@ mod composite_model;
 mod gaussian_prior;
 pub mod likelihood;
 mod regression_linear;
+#[allow(clippy::module_inception)]
 mod sgvb;
 mod traits;
 mod variational_bisusie;

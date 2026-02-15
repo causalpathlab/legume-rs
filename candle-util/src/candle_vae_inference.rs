@@ -96,7 +96,7 @@ where
         let data_aux_out_vec = (0..num_minbatches)
             .map(|b| {
                 data.minibatch_shuffled(b, device)
-                    .expect(format!("failed to preload minibatch #{}", b).as_str())
+                    .unwrap_or_else(|_| panic!("failed to preload minibatch #{}", b))
             })
             .collect::<Vec<_>>();
 
@@ -162,8 +162,8 @@ where
 
         let data_aux_vec = (0..num_minbatches)
             .map(|b| {
-                data.minibatch_shuffled(b, &device)
-                    .expect(format!("failed to preload minibatch #{}", b).as_str())
+                data.minibatch_shuffled(b, device)
+                    .unwrap_or_else(|_| panic!("failed to preload minibatch #{}", b))
             })
             .collect::<Vec<_>>();
 

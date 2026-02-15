@@ -86,7 +86,7 @@ impl CellMembership {
         }
 
         // Use inner membership for lookup
-        let result = self.inner.get(bam_bc).cloned();
+        let result = self.inner.get(bam_bc).map(Box::from);
 
         // Cache the result
         self.match_cache

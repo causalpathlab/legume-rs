@@ -147,7 +147,7 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         .into_iter()
         .zip(row_names)
         .map(|(id, name)| {
-            if name.len() > 0 {
+            if !name.is_empty() {
                 format!("{}_{}", id, name).into_boxed_str()
             } else {
                 id
@@ -305,7 +305,7 @@ pub fn run_build_from_h5_triplets(args: &FromH5Args) -> anyhow::Result<()> {
             .into_iter()
             .zip(row_names)
             .map(|(id, name)| {
-                if name.len() > 0 {
+                if !name.is_empty() {
                     format!("{}_{}", id, name).into_boxed_str()
                 } else {
                     id

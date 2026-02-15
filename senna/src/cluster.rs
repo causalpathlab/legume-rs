@@ -250,8 +250,8 @@ pub fn leiden_clustering(
     }
 
     let mut leiden_graph = Graph::with_capacity(n, graph.num_edges());
-    for i in 0..n {
-        leiden_graph.add_node(node_degree[i]);
+    for nd in node_degree.iter() {
+        leiden_graph.add_node(*nd);
     }
     for (&(i, j), &w) in graph.edges.iter().zip(weights.iter()) {
         leiden_graph.add_edge((i as u32).into(), (j as u32).into(), w);
@@ -368,8 +368,8 @@ pub fn hsblock_clustering(
     }
 
     let mut leiden_graph = Graph::with_capacity(n, graph.num_edges());
-    for i in 0..n {
-        leiden_graph.add_node(node_degree[i]);
+    for nd in node_degree.iter() {
+        leiden_graph.add_node(*nd);
     }
     for (&(i, j), &w) in graph.edges.iter().zip(weights.iter()) {
         leiden_graph.add_edge((i as u32).into(), (j as u32).into(), w);

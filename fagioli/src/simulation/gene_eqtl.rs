@@ -185,6 +185,7 @@ pub fn sample_sc_eqtl_effects(
 }
 
 /// Sample eQTL effects for a single gene
+#[allow(clippy::too_many_arguments)]
 fn sample_gene_eqtl_effects(
     gene_idx: usize,
     gene_id: &GeneId,

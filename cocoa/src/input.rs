@@ -172,6 +172,7 @@ fn read_topic_proportions(
 }
 
 /// Processes exposure assignment file and returns mapping and ID structures
+#[allow(clippy::type_complexity)]
 fn process_exposure_assignments(
     file_path: &str,
 ) -> anyhow::Result<(HashMap<Box<str>, Box<str>>, HashMap<Box<str>, usize>)> {
@@ -199,7 +200,7 @@ fn process_exposure_assignments(
 
 /// Reads individual assignments from a file or creates default assignments
 fn read_individual_assignments(
-    indv_file: Option<&Box<str>>,
+    indv_file: Option<&str>,
     column_names: &[Box<str>],
     ndata: usize,
 ) -> anyhow::Result<Vec<Box<str>>> {
@@ -327,7 +328,8 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
         let ndata = this_data.num_columns().unwrap_or(0);
         let column_names = this_data.column_names()?;
 
-        let this_indv = read_individual_assignments(this_indv_file.as_ref(), &column_names, ndata)?;
+        let this_indv =
+            read_individual_assignments(this_indv_file.as_deref(), &column_names, ndata)?;
 
         let topic_a_file = &topic_assignment_files[f];
         let topic_p_file = &topic_proportion_files[f];
@@ -358,7 +360,7 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
             )?;
         }
 
-        let data_name = basename(&this_data_file)?;
+        let data_name = basename(this_data_file)?;
         sparse_data.push(Arc::from(this_data), Some(data_name))?;
         cell_to_indv.extend(this_indv);
         topic_vec.push(this_topic);

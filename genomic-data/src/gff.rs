@@ -23,7 +23,7 @@ pub fn read_gff_record_vec(file_path: &str) -> anyhow::Result<Vec<GffRecord>> {
     Ok(lines_of_words
         .into_iter()
         .par_bridge()
-        .filter_map(|x| parse_gff(x))
+        .filter_map(parse_gff)
         .collect::<Vec<_>>())
 }
 
@@ -165,7 +165,7 @@ fn distance_between_regions(
 
 /// Build CDS map from existing CDS annotations and start/stop codons
 fn build_cds_map(
-    records: &Vec<GffRecord>,
+    records: &[GffRecord],
     start_codons: &HashMap<GeneId, GffRecord>,
     stop_codons: &HashMap<GeneId, GffRecord>,
 ) -> HashMap<GeneId, GffRecord> {
@@ -198,7 +198,7 @@ fn build_cds_map(
 
 /// Build UTR maps from explicit and generic UTR features
 fn build_utr_maps(
-    records: &Vec<GffRecord>,
+    records: &[GffRecord],
     start_codons: &HashMap<GeneId, GffRecord>,
     stop_codons: &HashMap<GeneId, GffRecord>,
 ) -> (HashMap<GeneId, GffRecord>, HashMap<GeneId, GffRecord>) {
@@ -274,6 +274,12 @@ pub fn build_union_gene_model(records: &Vec<GffRecord>) -> anyhow::Result<UnionG
     })
 }
 
+impl Default for GffRecordMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GffRecordMap {
     /// Get GFF record mapping: one gene to one record
     pub fn from(file_path: &str) -> anyhow::Result<Self> {
@@ -317,7 +323,7 @@ impl GffRecordMap {
         self.records.par_iter_mut().for_each(|mut entry| {
             let rec = entry.value_mut();
             rec.start = (rec.start - padding).max(0);
-            rec.stop = rec.stop + padding;
+            rec.stop += padding;
         });
     }
 

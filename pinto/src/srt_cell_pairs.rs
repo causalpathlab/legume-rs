@@ -10,15 +10,10 @@ pub struct SrtCellPairs<'a> {
     pub coordinates: &'a Mat,
     pub graph: KnnGraph,
     pub pairs: Vec<Pair>,
-    #[allow(dead_code)]
-    pub coordinate_embedding: Mat,
-    pub pair_to_sample: Option<Vec<usize>>,
-    pub sample_to_pair: Option<Vec<Vec<usize>>>,
 }
 
 pub struct SrtCellPairsArgs {
     pub knn: usize,
-    pub coordinate_emb_dim: usize,
     pub block_size: usize,
 }
 
@@ -156,20 +151,6 @@ impl<'a> SrtCellPairs<'a> {
         Ok((left, right))
     }
 
-    /// put together coordinate embedding results for all the pairs
-    #[allow(dead_code)]
-    pub fn coordinate_embedding_pairs(&self) -> anyhow::Result<Mat> {
-        concatenate_vertical(
-            &self
-                .pairs
-                .iter()
-                .map(|pp| {
-                    self.coordinate_embedding.row(pp.left) + self.coordinate_embedding.row(pp.right)
-                })
-                .collect::<Vec<_>>(),
-        )
-    }
-
     /// visit cell pairs by regular-sized block
     ///
     /// A visitor function takes
@@ -201,68 +182,20 @@ impl<'a> SrtCellPairs<'a> {
         let jobs = generate_minibatch_intervals(ntot, block_size);
         let arc_shared_out = Arc::new(Mutex::new(shared_out));
 
+        let pb = new_progress_bar(
+            jobs.len() as u64,
+            "Processing {bar:40} {pos}/{len} blocks ({eta})",
+        );
         jobs.par_iter()
-            .progress_count(jobs.len() as u64)
+            .progress_with(pb)
             .map(|&(lb, ub)| -> anyhow::Result<()> {
                 visitor((lb, ub), self, shared_in, arc_shared_out.clone())
             })
             .collect::<anyhow::Result<()>>()
     }
 
-    /// visit cell pairs by sample
-    ///
-    /// A visitor function takes
-    /// - `pair_id` `&[usize]`
-    /// - data itself
-    /// - `sample_id`
-    /// - `shared_out` (`Arc(Mutex())`)
-    pub fn visit_pairs_by_sample<Visitor, SharedIn, SharedOut>(
-        &self,
-        visitor: &Visitor,
-        shared_in: &SharedIn,
-        shared_out: &mut SharedOut,
-    ) -> anyhow::Result<()>
-    where
-        Visitor: Fn(
-                &[usize],
-                &SrtCellPairs,
-                usize,
-                &SharedIn,
-                Arc<Mutex<&mut SharedOut>>,
-            ) -> anyhow::Result<()>
-            + Sync
-            + Send,
-        SharedIn: Sync + Send + ?Sized,
-        SharedOut: Sync + Send,
-    {
-        if let Some(sample_to_pair) = self.sample_to_pair.as_ref() {
-            let arc_shared_out = Arc::new(Mutex::new(shared_out));
-            let num_samples = sample_to_pair.len();
-            sample_to_pair
-                .into_par_iter()
-                .enumerate()
-                .progress_count(num_samples as u64)
-                .map(|(sample, indices)| {
-                    visitor(indices, self, sample, shared_in, arc_shared_out.clone())
-                })
-                .collect()
-        } else {
-            Err(anyhow::anyhow!("no sample was assigned"))
-        }
-    }
-
     pub fn num_coordinates(&self) -> usize {
         self.coordinates.ncols()
-    }
-
-    #[allow(dead_code)]
-    pub fn num_samples(&self) -> anyhow::Result<usize> {
-        let sample_to_pair = self
-            .sample_to_pair
-            .as_ref()
-            .ok_or(anyhow::anyhow!("no sample was assigned"))?;
-
-        Ok(sample_to_pair.len())
     }
 
     ///
@@ -295,13 +228,6 @@ impl<'a> SrtCellPairs<'a> {
             },
         )?;
 
-        /////////////////////////////////////////////
-        // precompute positional embedding          //
-        /////////////////////////////////////////////
-
-        let coordinate_embedding =
-            coordinates.positional_embedding_columns(args.coordinate_emb_dim)?;
-
         let pairs = graph
             .edges
             .iter()
@@ -313,26 +239,6 @@ impl<'a> SrtCellPairs<'a> {
             coordinates,
             graph,
             pairs,
-            coordinate_embedding,
-            pair_to_sample: None,
-            sample_to_pair: None,
         })
     }
-
-    /// number of pairs
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.pairs.len()
-    }
-
-    /// assign pairs to samples
-    pub fn assign_samples(&mut self, pair_to_sample: Vec<usize>, npairs_per_sample: Option<usize>) {
-        self.sample_to_pair = Some(
-            partition_by_membership(&pair_to_sample, npairs_per_sample)
-                .into_values()
-                .collect(),
-        );
-        self.pair_to_sample = Some(pair_to_sample);
-    }
-
 }

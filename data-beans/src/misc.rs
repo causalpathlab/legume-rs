@@ -57,8 +57,8 @@ pub fn resolve_backend_file(
         };
 
         let backend_file = match resolved_backend {
-            SparseIoBackend::HDF5 => format!("{}", file_path),
-            SparseIoBackend::Zarr => format!("{}", file_path),
+            SparseIoBackend::HDF5 => file_path.to_string(),
+            SparseIoBackend::Zarr => file_path.to_string(),
         };
 
         Ok((resolved_backend, backend_file.into_boxed_str()))
@@ -77,15 +77,12 @@ pub fn update_zarr_to_v3(
 
     let arr = ZArray::open_opt(store.clone(), key_name, &MetadataRetrieveVersion::Default)?;
 
-    match arr.metadata() {
-        ArrayMetadata::V2(_v2) => {
-            let arr = arr.to_v3().with_context(|| "unable to convert to v3")?;
-            arr.store_metadata()
-                .with_context(|| "failed to store meta data")?;
-            arr.erase_metadata_opt(MetadataEraseVersion::V2)
-                .with_context(|| "failed to erase the old one")?;
-        }
-        _ => {}
+    if let ArrayMetadata::V2(_v2) = arr.metadata() {
+        let arr = arr.to_v3().with_context(|| "unable to convert to v3")?;
+        arr.store_metadata()
+            .with_context(|| "failed to store meta data")?;
+        arr.erase_metadata_opt(MetadataEraseVersion::V2)
+            .with_context(|| "failed to erase the old one")?;
     };
 
     Ok(())
