@@ -102,7 +102,7 @@ impl Hsblock {
         let initial_labels: Vec<usize> = (0..n).map(|i| clustering.get(i)).collect();
 
         // Build data structures
-        let tree = BTree::new(
+        let tree = BTree::with_gamma_poisson(
             self.options.tree_depth,
             self.options.init_a0,
             self.options.init_b0,

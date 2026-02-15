@@ -219,7 +219,7 @@ fn test_tree_score_improves() {
     }
 
     let k = 2;
-    let tree = BTree::new(2, 1.0, 1.0);
+    let tree = BTree::with_gamma_poisson(2, 1.0, 1.0);
 
     // Random initial labels
     let mut rng = SmallRng::seed_from_u64(42);
@@ -251,7 +251,7 @@ fn test_tree_score_improves() {
     let final_labels: Vec<usize> = (0..n).map(|i| clustering.get(i)).collect();
     // Number of effective clusters may differ from k
     let k_final = clustering.num_clusters();
-    let tree_final = BTree::new(2, 1.0, 1.0);
+    let tree_final = BTree::with_gamma_poisson(2, 1.0, 1.0);
     if k_final <= tree_final.num_leaves() {
         let stats_final =
             SufficientStats::from_edges(&edges, n, tree_final.num_leaves(), &final_labels);

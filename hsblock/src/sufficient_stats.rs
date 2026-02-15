@@ -166,7 +166,11 @@ impl SufficientStats {
     /// This function sums edge_stat and total_stat for all pairs sharing the same LCA node.
     ///
     /// Returns `(node_edge_stats, node_total_stats)` vectors indexed by 1-indexed tree node.
-    pub fn aggregate_to_tree(&self, tree: &BTree, degree_corrected: bool) -> (Vec<f64>, Vec<f64>) {
+    pub fn aggregate_to_tree<P: Clone>(
+        &self,
+        tree: &BTree<P>,
+        degree_corrected: bool,
+    ) -> (Vec<f64>, Vec<f64>) {
         let num_nodes = tree.num_nodes();
         let mut node_edge = vec![0.0; num_nodes + 1]; // 1-indexed
         let mut node_total = vec![0.0; num_nodes + 1];
@@ -303,7 +307,7 @@ mod tests {
         let labels = vec![0, 0, 0, 1, 1];
         let stats = SufficientStats::from_edges(&edges, n, 2, &labels);
 
-        let tree = BTree::new(2, 1.0, 1.0);
+        let tree = BTree::with_gamma_poisson(2, 1.0, 1.0);
         let (node_edge, _node_total) = stats.aggregate_to_tree(&tree, false);
 
         // Depth 2 tree: root=1, leaves=2,3
