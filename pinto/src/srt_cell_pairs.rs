@@ -224,7 +224,7 @@ impl<'a> SrtCellPairs<'a> {
             KnnGraphArgs {
                 knn: args.knn,
                 block_size: args.block_size,
-                reciprocal: true,
+                reciprocal: false,
             },
         )?;
 
