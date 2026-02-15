@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::Result;
 use log::info;
 use matrix_util::traits::IoOps;
@@ -8,18 +6,13 @@ use nalgebra::DMatrix;
 use crate::genotype::GenotypeMatrix;
 use super::gene_mapping::GeneQtlResult;
 
-/// A single VCF record aggregating all (gene, cell_type) results for one variant.
+/// A single long-form VCF record: one row per (variant, gene, cell_type).
 struct VcfRecord {
     chromosome: Box<str>,
     position: u64,
     snp_id: Box<str>,
     ref_allele: Box<str>,
     alt_allele: Box<str>,
-    /// Per (gene_id, cell_type): (effect_size, effect_std, z_score, p_value, pip)
-    annotations: Vec<VcfAnnotation>,
-}
-
-struct VcfAnnotation {
     gene_id: Box<str>,
     cell_type: Box<str>,
     effect_size: f32,
@@ -190,11 +183,11 @@ fn write_results_tsv(
     Ok(())
 }
 
-/// Write results as a sorted VCF.GZ file.
+/// Write results as a long-form sorted VCF.GZ file.
 ///
-/// Variants are sorted by (chromosome, position). For Susie results, variants
-/// where the maximum PIP across all gene/cell_type annotations is below
-/// `pip_threshold` are excluded.
+/// Each row is one (variant, gene, cell_type) combination. The ID column
+/// contains `gene@cell_type` for easy filtering. For Susie results, rows
+/// with PIP below `pip_threshold` are excluded.
 fn write_results_vcf(
     output_prefix: &str,
     results: &[GeneQtlResult],
@@ -204,14 +197,30 @@ fn write_results_vcf(
     use rust_htslib::bgzf::Writer as BgzfWriter;
     use std::io::Write;
 
-    // Aggregate results by global SNP index
-    let mut snp_records: HashMap<usize, VcfRecord> = HashMap::new();
+    let has_pips = results.iter().any(|r| r.pips.is_some());
+
+    // Build long-form records: one per (variant, gene, cell_type)
+    let mut records: Vec<VcfRecord> = Vec::new();
 
     for result in results {
         for (local_idx, &global_snp_idx) in result.snp_indices.iter().enumerate() {
             let pip = result.pips.as_ref().map(|p| p[local_idx]);
 
-            let annotation = VcfAnnotation {
+            // Apply PIP threshold per row
+            if has_pips && pip_threshold > 0.0 {
+                if let Some(p) = pip {
+                    if p < pip_threshold {
+                        continue;
+                    }
+                }
+            }
+
+            records.push(VcfRecord {
+                chromosome: genotype_matrix.chromosomes[global_snp_idx].clone(),
+                position: genotype_matrix.positions[global_snp_idx],
+                snp_id: genotype_matrix.snp_ids[global_snp_idx].clone(),
+                ref_allele: genotype_matrix.allele1[global_snp_idx].clone(),
+                alt_allele: genotype_matrix.allele2[global_snp_idx].clone(),
                 gene_id: result.gene_id.clone(),
                 cell_type: result.cell_type.clone(),
                 effect_size: result.effect_sizes[local_idx],
@@ -220,48 +229,17 @@ fn write_results_vcf(
                 p_value: result.p_values[local_idx],
                 pip,
                 elbo: result.final_elbo,
-            };
-
-            snp_records
-                .entry(global_snp_idx)
-                .or_insert_with(|| VcfRecord {
-                    chromosome: genotype_matrix.chromosomes[global_snp_idx].clone(),
-                    position: genotype_matrix.positions[global_snp_idx],
-                    snp_id: genotype_matrix.snp_ids[global_snp_idx].clone(),
-                    ref_allele: genotype_matrix.allele1[global_snp_idx].clone(),
-                    alt_allele: genotype_matrix.allele2[global_snp_idx].clone(),
-                    annotations: Vec::new(),
-                })
-                .annotations
-                .push(annotation);
+            });
         }
     }
 
-    // Apply PIP threshold: keep variant if max PIP across annotations >= threshold
-    let has_pips = results.iter().any(|r| r.pips.is_some());
-    let mut records: Vec<VcfRecord> = snp_records
-        .into_values()
-        .filter(|rec| {
-            if !has_pips || pip_threshold <= 0.0 {
-                return true;
-            }
-            let max_pip = rec
-                .annotations
-                .iter()
-                .filter_map(|a| a.pip)
-                .fold(0.0f32, f32::max);
-            max_pip >= pip_threshold
-        })
-        .collect();
-
-    let total_before = results.iter().map(|r| r.snp_indices.len()).sum::<usize>();
-    let filtered_annotations: usize = records.iter().map(|r| r.annotations.len()).sum();
-
-    // Sort by chromosome (natural order), then position
+    // Sort by chromosome (natural order), then position, then gene@celltype
     records.sort_by(|a, b| {
         chr_sort_key(&a.chromosome)
             .cmp(&chr_sort_key(&b.chromosome))
             .then(a.position.cmp(&b.position))
+            .then(a.gene_id.cmp(&b.gene_id))
+            .then(a.cell_type.cmp(&b.cell_type))
     });
 
     let out_file = format!("{}.qtl_results.vcf.gz", output_prefix);
@@ -272,90 +250,57 @@ fn write_results_vcf(
     writeln!(writer, "##fileformat=VCFv4.2")?;
     writeln!(
         writer,
-        "##INFO=<ID=GENE,Number=.,Type=String,Description=\"Gene ID\">"
+        "##INFO=<ID=SNP,Number=1,Type=String,Description=\"SNP identifier\">"
     )?;
     writeln!(
         writer,
-        "##INFO=<ID=CT,Number=.,Type=String,Description=\"Cell type\">"
+        "##INFO=<ID=ES,Number=1,Type=Float,Description=\"Effect size (posterior mean)\">"
     )?;
     writeln!(
         writer,
-        "##INFO=<ID=ES,Number=.,Type=Float,Description=\"Effect size (posterior mean)\">"
+        "##INFO=<ID=SE,Number=1,Type=Float,Description=\"Effect size standard deviation\">"
     )?;
     writeln!(
         writer,
-        "##INFO=<ID=SE,Number=.,Type=Float,Description=\"Effect size standard deviation\">"
+        "##INFO=<ID=Z,Number=1,Type=Float,Description=\"Z-score\">"
     )?;
     writeln!(
         writer,
-        "##INFO=<ID=Z,Number=.,Type=Float,Description=\"Z-score\">"
-    )?;
-    writeln!(
-        writer,
-        "##INFO=<ID=P,Number=.,Type=Float,Description=\"P-value (two-sided)\">"
+        "##INFO=<ID=P,Number=1,Type=Float,Description=\"P-value (two-sided)\">"
     )?;
     if has_pips {
         writeln!(
             writer,
-            "##INFO=<ID=PIP,Number=.,Type=Float,Description=\"Posterior inclusion probability\">"
+            "##INFO=<ID=PIP,Number=1,Type=Float,Description=\"Posterior inclusion probability\">"
         )?;
     }
     writeln!(
         writer,
-        "##INFO=<ID=ELBO,Number=.,Type=Float,Description=\"Final ELBO\">"
+        "##INFO=<ID=ELBO,Number=1,Type=Float,Description=\"Final ELBO\">"
     )?;
-    if has_pips && pip_threshold > 0.0 {
-        writeln!(
-            writer,
-            "##FILTER=<ID=LOW_PIP,Description=\"Max PIP below {}\">",
-            pip_threshold
-        )?;
-    }
     writeln!(writer, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO")?;
 
     // Write records
     for rec in &records {
-        // Build INFO field: one annotation set per (gene, cell_type)
-        let mut info_parts: Vec<String> = Vec::new();
-        let mut genes: Vec<&str> = Vec::new();
-        let mut cts: Vec<&str> = Vec::new();
-        let mut ess: Vec<String> = Vec::new();
-        let mut ses: Vec<String> = Vec::new();
-        let mut zs: Vec<String> = Vec::new();
-        let mut ps: Vec<String> = Vec::new();
-        let mut pips_vec: Vec<String> = Vec::new();
-        let mut elbos: Vec<String> = Vec::new();
+        let id = format!("{}@{}", rec.gene_id, rec.cell_type);
 
-        for ann in &rec.annotations {
-            genes.push(&ann.gene_id);
-            cts.push(&ann.cell_type);
-            ess.push(format!("{:.6}", ann.effect_size));
-            ses.push(format!("{:.6}", ann.effect_std));
-            zs.push(format!("{:.4}", ann.z_score));
-            ps.push(format!("{:.6e}", ann.p_value));
-            if let Some(pip) = ann.pip {
-                pips_vec.push(format!("{:.6}", pip));
-            }
-            elbos.push(format!("{:.2}", ann.elbo));
+        let mut info_parts: Vec<String> = Vec::with_capacity(7);
+        info_parts.push(format!("SNP={}", rec.snp_id));
+        info_parts.push(format!("ES={:.6}", rec.effect_size));
+        info_parts.push(format!("SE={:.6}", rec.effect_std));
+        info_parts.push(format!("Z={:.4}", rec.z_score));
+        info_parts.push(format!("P={:.6e}", rec.p_value));
+        if let Some(pip) = rec.pip {
+            info_parts.push(format!("PIP={:.6}", pip));
         }
-
-        info_parts.push(format!("GENE={}", genes.join(",")));
-        info_parts.push(format!("CT={}", cts.join(",")));
-        info_parts.push(format!("ES={}", ess.join(",")));
-        info_parts.push(format!("SE={}", ses.join(",")));
-        info_parts.push(format!("Z={}", zs.join(",")));
-        info_parts.push(format!("P={}", ps.join(",")));
-        if !pips_vec.is_empty() {
-            info_parts.push(format!("PIP={}", pips_vec.join(",")));
-        }
-        info_parts.push(format!("ELBO={}", elbos.join(",")));
+        info_parts.push(format!("ELBO={:.2}", rec.elbo));
 
         let info_str = info_parts.join(";");
 
         writeln!(
             writer,
             "{}\t{}\t{}\t{}\t{}\t.\tPASS\t{}",
-            rec.chromosome, rec.position, rec.snp_id, rec.ref_allele, rec.alt_allele, info_str
+            rec.chromosome, rec.position, id, rec.ref_allele, rec.alt_allele, info_str
         )?;
     }
 
@@ -385,23 +330,11 @@ fn write_results_vcf(
         }
     }
 
-    if has_pips && pip_threshold > 0.0 {
-        info!(
-            "Wrote VCF: {} variants ({} annotations, filtered from {} at PIP >= {}): {}",
-            records.len(),
-            filtered_annotations,
-            total_before,
-            pip_threshold,
-            out_file
-        );
-    } else {
-        info!(
-            "Wrote VCF: {} variants ({} annotations): {}",
-            records.len(),
-            filtered_annotations,
-            out_file
-        );
-    }
+    info!(
+        "Wrote VCF: {} rows (long-form): {}",
+        records.len(),
+        out_file
+    );
 
     Ok(())
 }
