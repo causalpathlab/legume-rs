@@ -48,10 +48,10 @@ fn print_logo() {
     version,
     about = "PINTO",
     long_about = "Proximity-based Interaction Network analysis to dissect Tissue Organizations\n\n\
-                  PINTO identifies spatial cell-cell interaction patterns from spatially-resolved\n\
-                  transcriptomics (SRT) data. It constructs spatial cell pairs from KNN graphs,\n\
-                  decomposes pair-level expression into shared/difference channels, and learns\n\
-                  latent interaction topics via SVD.\n\n\
+                  PINTO discovers spatial interaction patterns from spatially-resolved\n\
+                  transcriptomics data via link community detection. Communities are\n\
+                  assigned to edges (cell-cell interactions) using gene module-based\n\
+                  profiles or dimensionality reduction (SVD).\n\n\
                   Data files must be `.zarr` or `.h5` (`data-beans`) format. \n\
 		  Or convert `.mtx` files using `data-beans from-mtx`.",
     term_width = 80
@@ -180,36 +180,34 @@ enum Commands {
                       conjugate model.\n\n\
                       Model:\n\
                       \x20 Given N cells, G genes, KNN spatial graph with E edges.\n\
-                      \x20 W  ~ N(0,1)^{G x M}       random projection basis\n\
-                      \x20 y_e = ReLU(W^T (x_i + x_j))  projected link profile\n\
-                      \x20 z_e in {1..K}              link community assignment\n\
-                      \x20 y_e^g | z_e=k ~ Poisson(s_e * mu_{g,k})\n\
-                      \x20 mu_{g,k} ~ Gamma(a0, b0)   collapsed out analytically\n\
-                      \x20 s_e = sum_g y_e^g           link size factor\n\n\
+                      \x20 For each edge e=(i,j), build module-count profile:\n\
+                      \x20   y_e[m] = sum_{g in module m} (x_{g,i} + x_{g,j})\n\
+                      \x20 Link community assignment:\n\
+                      \x20   z_e in {1..K}\n\
+                      \x20   y_e^m | z_e=k ~ Poisson(s_e * mu_{m,k})\n\
+                      \x20   mu_{m,k} ~ Gamma(a0, b0)   collapsed out analytically\n\
+                      \x20   s_e = sum_m y_e^m          link size factor\n\n\
                       Algorithm:\n\
                       \x20 1. Load data X [G x N] and coordinates [N x D]\n\
                       \x20 2. Estimate batch effects delta [G x B]\n\
                       \x20 3. Build spatial KNN graph -> E edges\n\
-                      \x20 4. W <- random N(0,1) [G x M], normalize columns\n\
-                      \x20 5. for round = 0 .. num_refine_rounds:\n\
-                      \x20    a. y_e <- ReLU(W^T (x_i+x_j)) for each edge e\n\
-                      \x20    b. Coarsen: cell KMeans -> super-edges, sum profiles\n\
-                      \x20    c. Gibbs on coarsest super-edges (num_sweeps):\n\
-                      \x20       for each sweep:\n\
-                      \x20         for each edge e:\n\
-                      \x20           remove e from community z_e\n\
-                      \x20           for t = 1..K:\n\
-                      \x20             delta_t = sum_g [score(a0+E_{t,g}+y_e^g,\n\
-                      \x20               b0+T_t+s_e) - score(a0+E_{t,g}, b0+T_t)]\n\
-                      \x20           z_e ~ Categorical(softmax(delta))\n\
-                      \x20           add e to community z_e\n\
-                      \x20    d. Transfer labels to finer levels, refine\n\
-                      \x20    e. Greedy finalization (argmax instead of sample)\n\
-                      \x20    f. If not last round: compute gene centroids per\n\
-                      \x20       community [G x K], SVD -> new W [G x M]\n\
-                      \x20 6. Output:\n\
-                      \x20    node_membership[i,k] = frac of i's edges in k\n\
-                      \x20    gene_modules[g,k] = mean expression in community k\n\n\
+                      \x20 4. Discover gene modules via random sketch clustering\n\
+                      \x20 5. Build edge profiles: y_e[m] = sum of module m counts\n\
+                      \x20 6. Coarsen: cell KMeans -> super-edges, sum profiles\n\
+                      \x20 7. Collapsed Gibbs sampling on coarsest super-edges:\n\
+                      \x20    for each sweep:\n\
+                      \x20      for each edge e:\n\
+                      \x20        remove e from community z_e\n\
+                      \x20        for t = 1..K:\n\
+                      \x20          delta_t = sum_m [score(a0+E_{t,m}+y_e^m,\n\
+                      \x20            b0+T_t+s_e) - score(a0+E_{t,m}, b0+T_t)]\n\
+                      \x20        z_e ~ Categorical(softmax(delta))\n\
+                      \x20        add e to community z_e\n\
+                      \x20 8. Transfer labels to finer levels, refine\n\
+                      \x20 9. Greedy finalization (argmax instead of sample)\n\
+                      \x20 10. Output:\n\
+                      \x20     node_membership[i,k] = frac of i's edges in k\n\
+                      \x20     gene_modules[g,k] = mean expression in community k\n\n\
                       Outputs:\n\
                       - {out}.node_membership.parquet: soft membership (N x K)\n\
                       - {out}.gene_modules.parquet: gene modules (G x K)\n\
