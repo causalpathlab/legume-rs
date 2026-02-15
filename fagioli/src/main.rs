@@ -1,6 +1,8 @@
-mod sim_eqtl;
+mod map_qtl;
+mod sim_qtl;
 
-use sim_eqtl::*;
+use map_qtl::*;
+use sim_qtl::*;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -31,7 +33,7 @@ fn print_logo() {
 
 #[derive(Parser)]
 #[command(name = "fagioli")]
-#[command(about = "Genetic association analysis toolkit")]
+#[command(about = "Molecular QTL simulation and mapping toolkit for single-cell genomics")]
 struct Cli {
     #[command(subcommand)]
     commands: Commands,
@@ -39,8 +41,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run eQTL simulation with cell type heterogeneity
-    SimEqtl(SimulationArgs),
+    /// Simulate molecular QTL with cell type heterogeneity and single-cell counts
+    SimQtl(SimulationArgs),
+    /// Map cis-QTL from genotype and single-cell expression data
+    MapQtl(MapQtlArgs),
 }
 
 fn main() -> Result<()> {
@@ -54,8 +58,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.commands {
-        Commands::SimEqtl(args) => {
-            sim_eqtl(args)?;
+        Commands::SimQtl(args) => {
+            sim_qtl(args)?;
+        }
+        Commands::MapQtl(args) => {
+            map_qtl(args)?;
         }
     }
 

@@ -1,7 +1,6 @@
 # Fagioli
 
-<!-- Factored Association study with Genetic Information for Optimal Linear -->
-<!-- Interpolation -->
+Faceted Association for Genetic variant Identification Of Linear models
 
 ## Features
 

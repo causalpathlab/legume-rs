@@ -9,6 +9,8 @@ pub struct GenotypeMatrix {
     pub snp_ids: Vec<Box<str>>,
     pub chromosomes: Vec<Box<str>>,
     pub positions: Vec<u64>,
+    pub allele1: Vec<Box<str>>,
+    pub allele2: Vec<Box<str>>,
 }
 
 impl GenotypeMatrix {
