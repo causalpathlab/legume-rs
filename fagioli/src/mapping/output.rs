@@ -20,7 +20,6 @@ struct VcfRecord {
     z_score: f32,
     p_value: f32,
     pip: Option<f32>,
-    elbo: f32,
 }
 
 /// Write QTL mapping results to Parquet, TSV.GZ, and VCF.GZ.
@@ -57,7 +56,6 @@ pub fn write_mapping_results(
     let mut z_scores: Vec<f32> = Vec::with_capacity(total_rows);
     let mut p_values: Vec<f32> = Vec::with_capacity(total_rows);
     let mut pips: Vec<f32> = Vec::with_capacity(total_rows);
-    let mut elbos: Vec<f32> = Vec::with_capacity(total_rows);
 
     for result in results {
         for (local_idx, &global_snp_idx) in result.snp_indices.iter().enumerate() {
@@ -77,12 +75,11 @@ pub fn write_mapping_results(
                     .map(|p| p[local_idx])
                     .unwrap_or(f32::NAN),
             );
-            elbos.push(result.final_elbo);
         }
     }
 
-    // Build a numeric matrix: total_rows × 6 columns (effect_size, effect_std, z_score, p_value, pip, elbo)
-    let num_numeric_cols = 6;
+    // Build a numeric matrix: total_rows × 5 columns (effect_size, effect_std, z_score, p_value, pip)
+    let num_numeric_cols = 5;
     let mut numeric_data = DMatrix::<f32>::zeros(total_rows, num_numeric_cols);
     for i in 0..total_rows {
         numeric_data[(i, 0)] = effect_sizes[i];
@@ -90,7 +87,6 @@ pub fn write_mapping_results(
         numeric_data[(i, 2)] = z_scores[i];
         numeric_data[(i, 3)] = p_values[i];
         numeric_data[(i, 4)] = pips[i];
-        numeric_data[(i, 5)] = elbos[i];
     }
 
     let col_names: Vec<Box<str>> = vec![
@@ -99,7 +95,6 @@ pub fn write_mapping_results(
         Box::from("z_score"),
         Box::from("p_value"),
         Box::from("pip"),
-        Box::from("elbo"),
     ];
 
     // Row names encode gene_id|snp_id|chr|pos|cell_type for metadata
@@ -149,7 +144,7 @@ fn write_results_tsv(
 
     writeln!(
         writer,
-        "gene_id\tsnp_id\tchromosome\tposition\tcell_type\teffect_size\teffect_std\tz_score\tp_value\tpip\telbo"
+        "gene_id\tsnp_id\tchromosome\tposition\tcell_type\teffect_size\teffect_std\tz_score\tp_value\tpip"
     )?;
 
     for result in results {
@@ -162,7 +157,7 @@ fn write_results_tsv(
 
             writeln!(
                 writer,
-                "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.4}\t{:.6e}\t{}\t{:.2}",
+                "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.4}\t{:.6e}\t{}",
                 result.gene_id,
                 genotype_matrix.snp_ids[global_snp_idx],
                 genotype_matrix.chromosomes[global_snp_idx],
@@ -173,7 +168,6 @@ fn write_results_tsv(
                 result.z_scores[local_idx],
                 result.p_values[local_idx],
                 pip_str,
-                result.final_elbo,
             )?;
         }
     }
@@ -228,7 +222,6 @@ fn write_results_vcf(
                 z_score: result.z_scores[local_idx],
                 p_value: result.p_values[local_idx],
                 pip,
-                elbo: result.final_elbo,
             });
         }
     }
@@ -274,17 +267,13 @@ fn write_results_vcf(
             "##INFO=<ID=PIP,Number=1,Type=Float,Description=\"Posterior inclusion probability\">"
         )?;
     }
-    writeln!(
-        writer,
-        "##INFO=<ID=ELBO,Number=1,Type=Float,Description=\"Final ELBO\">"
-    )?;
     writeln!(writer, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO")?;
 
     // Write records
     for rec in &records {
         let id = format!("{}@{}", rec.gene_id, rec.cell_type);
 
-        let mut info_parts: Vec<String> = Vec::with_capacity(7);
+        let mut info_parts: Vec<String> = Vec::with_capacity(6);
         info_parts.push(format!("SNP={}", rec.snp_id));
         info_parts.push(format!("ES={:.6}", rec.effect_size));
         info_parts.push(format!("SE={:.6}", rec.effect_std));
@@ -293,7 +282,6 @@ fn write_results_vcf(
         if let Some(pip) = rec.pip {
             info_parts.push(format!("PIP={:.6}", pip));
         }
-        info_parts.push(format!("ELBO={:.2}", rec.elbo));
 
         let info_str = info_parts.join(";");
 
