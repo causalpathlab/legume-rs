@@ -44,7 +44,7 @@ pub struct SimulationArgs {
     #[arg(long, default_value = "42")]
     pub seed: u64,
 
-    // === Phase 2: Gene-level eQTL and single-cell simulation ===
+    // === Phase 2: Gene-level QTL and single-cell simulation ===
     /// Simulation mode: 'aggregated' (Phase 1) or 'single-cell' (Phase 2)
     #[arg(long, default_value = "single-cell")]
     pub mode: String,
@@ -73,15 +73,15 @@ pub struct SimulationArgs {
     #[arg(long, default_value = "1.0")]
     pub factor_score_std: f32,
 
-    /// Proportion of genes with eQTL
+    /// Proportion of genes with QTL effects
     #[arg(long, default_value = "0.4")]
     pub eqtl_gene_proportion: f32,
 
-    /// Of eGenes, proportion with shared causal variants
+    /// Of QTL genes, proportion with shared causal variants across cell types
     #[arg(long, default_value = "0.6")]
     pub shared_eqtl_proportion: f32,
 
-    /// Of eGenes, proportion with independent causal variants
+    /// Of QTL genes, proportion with cell-type-specific causal variants
     #[arg(long, default_value = "0.4")]
     pub independent_eqtl_proportion: f32,
 
@@ -173,7 +173,7 @@ fn read_genotypes(args: &SimulationArgs) -> Result<fagioli::genotype::GenotypeMa
     Ok(geno)
 }
 
-pub fn sim_eqtl(args: &SimulationArgs) -> Result<()> {
+pub fn sim_qtl(args: &SimulationArgs) -> Result<()> {
     info!("Starting simulation (mode: {})", args.mode);
 
     // Validate format
@@ -185,14 +185,14 @@ pub fn sim_eqtl(args: &SimulationArgs) -> Result<()> {
 
     // Branch based on mode
     match args.mode.to_lowercase().as_str() {
-        "single-cell" | "sc" => sim_eqtl_phase2(args, use_parquet),
-        "aggregated" | "phase1" => sim_eqtl_phase1(args, use_parquet),
+        "single-cell" | "sc" => sim_qtl_phase2(args, use_parquet),
+        "aggregated" | "phase1" => sim_qtl_phase1(args, use_parquet),
         _ => anyhow::bail!("mode must be 'single-cell' or 'aggregated'"),
     }
 }
 
 /// Phase 1: Individual-level aggregated phenotypes
-fn sim_eqtl_phase1(args: &SimulationArgs, use_parquet: bool) -> Result<()> {
+fn sim_qtl_phase1(args: &SimulationArgs, use_parquet: bool) -> Result<()> {
     info!("Running Phase 1: Aggregated phenotype simulation");
 
     let geno = read_genotypes(args)?;
@@ -267,7 +267,7 @@ fn sim_eqtl_phase1(args: &SimulationArgs, use_parquet: bool) -> Result<()> {
 }
 
 /// Phase 2: Gene-level eQTL with single-cell counts
-fn sim_eqtl_phase2(args: &SimulationArgs, use_parquet: bool) -> Result<()> {
+fn sim_qtl_phase2(args: &SimulationArgs, use_parquet: bool) -> Result<()> {
     use fagioli::simulation::{
         generate_sc_phenotypes, load_gtf, sample_sc_eqtl_effects, simulate_factor_model,
         simulate_gene_annotations, GeneticArchitectureParams, ScPhenotypeParams,
