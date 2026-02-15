@@ -55,8 +55,8 @@ pub struct MapQtlArgs {
     #[arg(long, default_value = "susie")]
     pub model: String,
 
-    /// Likelihood type: gaussian or poisson
-    #[arg(long, default_value = "gaussian")]
+    /// Likelihood type: gaussian, poisson, or nb (negative binomial)
+    #[arg(short, long, default_value = "gaussian")]
     pub likelihood: String,
 
     /// Number of Susie components (L)
