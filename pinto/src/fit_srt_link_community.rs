@@ -298,7 +298,10 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         args.block_size,
     )?;
 
-    info!("K-means on gene embeddings ({} → {} modules)...", n_genes, n_gm);
+    info!(
+        "K-means on gene embeddings ({} → {} modules)...",
+        n_genes, n_gm
+    );
     let gene_to_module = gene_embed.kmeans_rows(KmeansArgs {
         num_clusters: n_gm,
         max_iter: 100,
@@ -306,13 +309,8 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     // 6. Build edge profiles as module counts
     info!("Building module-count edge profiles...");
-    let edge_profiles = build_edge_profiles_by_module(
-        &data_vec,
-        edges,
-        &gene_to_module,
-        n_gm,
-        args.block_size,
-    )?;
+    let edge_profiles =
+        build_edge_profiles_by_module(&data_vec, edges, &gene_to_module, n_gm, args.block_size)?;
 
     info!(
         "Edge profiles: {} edges × {} modules, mean size factor: {:.1}",
@@ -337,12 +335,10 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // Random initial labels for coarsest
     let init_labels: Vec<usize> = (0..coarse_profiles.n_edges).map(|e| e % k).collect();
 
-    let mut coarse_stats =
-        LinkCommunitySuffStats::from_profiles(&coarse_profiles, k, &init_labels);
+    let mut coarse_stats = LinkCommunitySuffStats::from_profiles(&coarse_profiles, k, &init_labels);
 
     info!("Gibbs on coarsest ({} sweeps)...", args.num_sweeps);
-    let moves =
-        sampler.run_parallel(&mut coarse_stats, &coarse_profiles, a0, b0, args.num_sweeps);
+    let moves = sampler.run_parallel(&mut coarse_stats, &coarse_profiles, a0, b0, args.num_sweeps);
     info!(
         "Coarsest Gibbs: {} total moves, score={:.2}",
         moves,
@@ -357,8 +353,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     for level in 1..args.num_levels {
         info!("Refining at level {}...", level);
 
-        let level_labels =
-            &ml.all_cell_labels[level.min(ml.all_cell_labels.len() - 1)];
+        let level_labels = &ml.all_cell_labels[level.min(ml.all_cell_labels.len() - 1)];
         let (level_profiles, level_f2s) =
             coarsen_edge_profiles(&edge_profiles, edges, level_labels);
 
@@ -385,8 +380,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             LinkCommunitySuffStats::from_profiles(&level_profiles, k, &super_init);
 
         let sweeps = args.num_sweeps / 2; // fewer sweeps at finer levels
-        let moves =
-            sampler.run_parallel(&mut level_stats, &level_profiles, a0, b0, sweeps.max(10));
+        let moves = sampler.run_parallel(&mut level_stats, &level_profiles, a0, b0, sweeps.max(10));
         info!(
             "Level {} Gibbs: {} moves, score={:.2}",
             level,
@@ -403,8 +397,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         "Final Gibbs on full edge set ({} sweeps)...",
         args.num_sweeps / 2
     );
-    let mut fine_stats =
-        LinkCommunitySuffStats::from_profiles(&edge_profiles, k, &current_labels);
+    let mut fine_stats = LinkCommunitySuffStats::from_profiles(&edge_profiles, k, &current_labels);
 
     let moves = sampler.run_parallel(
         &mut fine_stats,
@@ -421,8 +414,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     // Greedy finalization
     info!("Greedy finalization ({} max sweeps)...", args.num_greedy);
-    let greedy_moves =
-        sampler.run_greedy(&mut fine_stats, &edge_profiles, a0, b0, args.num_greedy);
+    let greedy_moves = sampler.run_greedy(&mut fine_stats, &edge_profiles, a0, b0, args.num_greedy);
     info!(
         "Greedy: {} moves, final score={:.2}",
         greedy_moves,
