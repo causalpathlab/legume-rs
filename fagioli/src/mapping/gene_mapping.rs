@@ -540,7 +540,7 @@ mod tests {
     #[test]
     fn test_map_gene_qtl_poisson() -> Result<()> {
         let mut rng = rand::rngs::StdRng::seed_from_u64(99);
-        let n = 80;
+        let n = 120;
         let p = 5;
         let normal = Normal::new(0.0f32, 1.0).unwrap();
 
@@ -553,10 +553,10 @@ mod tests {
             }
         }
 
-        // Generate Poisson counts: log(mu) = 2.0 + 0.5 * X[:,2]
+        // Generate Poisson counts: log(mu) = 2.0 + 0.8 * X[:,2]
         let mut y = DVector::<f32>::zeros(n);
         for i in 0..n {
-            let log_mu = 2.0 + 0.5 * geno[(i, 2)];
+            let log_mu = 2.0 + 0.8 * geno[(i, 2)];
             let lambda = (log_mu as f64).exp();
             let pois = Poisson::new(lambda).unwrap();
             y[i] = pois.sample(&mut rng) as f32;
