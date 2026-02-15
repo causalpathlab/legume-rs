@@ -35,4 +35,5 @@ pub mod inference;
 #[cfg(test)]
 mod test;
 
+pub use btree::GammaPoissonParam;
 pub use inference::{Hsblock, HsbmOptions};

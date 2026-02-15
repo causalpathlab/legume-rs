@@ -6,7 +6,7 @@
 //!
 //! Supports both sequential and parallel (rayon) sweeps.
 
-use crate::btree::BTree;
+use crate::btree::{BTree, GammaPoissonParam};
 use crate::model::poisson_score_cpu;
 use crate::sufficient_stats::{SufficientStats, WeightedEdge};
 use rand::rngs::SmallRng;
@@ -46,7 +46,7 @@ impl GibbsSampler {
     /// * `degree_corrected` - Whether to use degree-corrected model
     pub fn run(
         &mut self,
-        tree: &BTree,
+        tree: &BTree<GammaPoissonParam>,
         stats: &mut SufficientStats,
         adj_list: &[Vec<(usize, f64)>],
         num_sweeps: usize,
@@ -97,7 +97,7 @@ impl GibbsSampler {
     /// Returns the total number of vertex moves across all sweeps.
     pub fn run_parallel(
         &mut self,
-        tree: &BTree,
+        tree: &BTree<GammaPoissonParam>,
         stats: &mut SufficientStats,
         adj_list: &[Vec<(usize, f64)>],
         num_sweeps: usize,
@@ -170,7 +170,7 @@ impl GibbsSampler {
     /// Returns the total number of vertex moves across all sweeps.
     pub fn run_greedy(
         &mut self,
-        tree: &BTree,
+        tree: &BTree<GammaPoissonParam>,
         stats: &mut SufficientStats,
         adj_list: &[Vec<(usize, f64)>],
         num_sweeps: usize,
@@ -246,7 +246,7 @@ fn argmax_log(log_probs: &[f64]) -> usize {
 /// * `log_probs` - Output buffer of length K (caller-provided)
 fn compute_log_probs_for_vertex(
     vertex: usize,
-    tree: &BTree,
+    tree: &BTree<GammaPoissonParam>,
     stats: &SufficientStats,
     adj_list: &[Vec<(usize, f64)>],
     degree_corrected: bool,
@@ -458,7 +458,7 @@ mod tests {
     fn test_gibbs_reduces_moves() {
         let (edges, n, _true_labels) = planted_partition_graph(20, 2, 0.6, 0.05, 42);
 
-        let tree = BTree::new(2, 1.0, 1.0);
+        let tree = BTree::with_gamma_poisson(2, 1.0, 1.0);
         let k = tree.num_leaves();
 
         // Random initial labels
@@ -491,7 +491,7 @@ mod tests {
     /// For each cluster pair (ci, cj) with ci <= cj, compute the Poisson score
     /// at the LCA node and sum them up.
     fn brute_force_tree_score(
-        tree: &BTree,
+        tree: &BTree<GammaPoissonParam>,
         stats: &SufficientStats,
         degree_corrected: bool,
     ) -> f64 {
@@ -519,7 +519,7 @@ mod tests {
     fn test_delta_score_matches_brute_force() {
         // Build a small graph: 3 clusters of 5 vertices each
         let (edges, n, _true_labels) = planted_partition_graph(5, 3, 0.8, 0.1, 42);
-        let tree = BTree::new(3, 2.0, 1.5); // depth 3 → K=4 leaves
+        let tree = BTree::with_gamma_poisson(3, 2.0, 1.5); // depth 3 → K=4 leaves
         let k = tree.num_leaves();
 
         // Use a fixed labeling (not necessarily aligned with truth)
@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn test_delta_score_degree_corrected_matches_brute_force() {
         let (edges, n, _true_labels) = planted_partition_graph(5, 2, 0.7, 0.1, 99);
-        let tree = BTree::new(2, 1.0, 1.0); // depth 2 → K=2 leaves
+        let tree = BTree::with_gamma_poisson(2, 1.0, 1.0); // depth 2 → K=2 leaves
         let k = tree.num_leaves();
 
         let labels: Vec<usize> = (0..n).map(|v| v % k).collect();
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn test_delta_score_nonuniform_tree_params() {
         let (edges, n, _true_labels) = planted_partition_graph(4, 2, 0.6, 0.1, 77);
-        let mut tree = BTree::new(3, 1.0, 1.0); // depth 3 → K=4 leaves
+        let mut tree = BTree::with_gamma_poisson(3, 1.0, 1.0); // depth 3 → K=4 leaves
         let k = tree.num_leaves();
 
         // Set different parameters at each node
@@ -701,7 +701,7 @@ mod tests {
     fn test_parallel_gibbs_convergence() {
         let (edges, n, _true_labels) = planted_partition_graph(20, 2, 0.6, 0.05, 42);
 
-        let tree = BTree::new(2, 1.0, 1.0);
+        let tree = BTree::with_gamma_poisson(2, 1.0, 1.0);
         let k = tree.num_leaves();
 
         // Random initial labels
