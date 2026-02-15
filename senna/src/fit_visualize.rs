@@ -5,8 +5,8 @@ use matrix_util::knn_match::{ColumnDict, VecPoint};
 #[derive(ValueEnum, Clone, Debug, Default, PartialEq)]
 #[clap(rename_all = "lowercase")]
 pub enum LayoutMethod {
-    #[default]
     Spectral,
+    #[default]
     Tree,
     Tsne,
 }
@@ -150,14 +150,14 @@ pub struct VisualizeArgs {
     #[arg(
         long,
         value_enum,
-        default_value = "spectral",
+        default_value = "tree",
         help = "Layout method for PB samples",
         long_help = "Layout algorithm for positioning PB samples:\n\n\
-		     spectral (default):\n\
+		     spectral:\n\
 		       Best for general-purpose visualization.\n\
 		       Uses normalized Laplacian eigenvectors (diffusion map style).\n\
 		       Preserves local neighborhood structure.\n\n\
-		     tree:\n\
+		     tree (default):\n\
 		       Best for hierarchical/developmental trajectories.\n\
 		       Creates MST-based radial tree showing branching structure.\n\
 		       Root at center, branches spread radially.\n\n\
