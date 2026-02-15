@@ -52,8 +52,37 @@ fn print_logo() {
                   transcriptomics data via link community detection. Communities are\n\
                   assigned to edges (cell-cell interactions) using gene module-based\n\
                   profiles or dimensionality reduction (SVD).\n\n\
-                  Data files must be `.zarr` or `.h5` (`data-beans`) format. \n\
-		  Or convert `.mtx` files using `data-beans from-mtx`.",
+                  FILE FORMATS:\n\n\
+                  Data files:\n\
+                  - Must be `.zarr` or `.h5` (HDF5) format\n\
+                  - Convert from `.mtx` using: data-beans from-mtx input.mtx output.zarr\n\
+                  - Multiple files can be provided (comma-separated)\n\n\
+                  Coordinate files (one per data file):\n\
+                  - CSV, TSV, or space-delimited text files (or .parquet)\n\
+                  - First column: cell/barcode names (must match data file)\n\
+                  - Subsequent columns: spatial coordinates (x, y, etc.)\n\
+                  - Header row optional (auto-detected or specify with --coord-header-row)\n\
+                  - Default column names: pxl_row_in_fullres, pxl_col_in_fullres (10X Visium)\n\
+                  - Use --coord-column-names for different column headers\n\n\
+                  Batch files (optional, one per data file):\n\
+                  - Plain text file, one batch label per line\n\
+                  - Must have one line for each cell in the corresponding data file\n\
+                  - If not provided, each data file is treated as a separate batch\n\n\
+                  WORKFLOWS:\n\n\
+                  1. SVD-based cell-level analysis (shared/difference channels):\n\
+                     pinto dsvd data.zarr -c coords.csv -o out\n\
+                     pinto prop -z out.latent.parquet -e out.coord_pairs.parquet -o out\n\
+                     → Outputs: cell propensity scores, edge clusters\n\n\
+                  2. SVD-based gene-gene interaction analysis:\n\
+                     pinto gisvd data.zarr -c coords.csv -o out\n\
+                     pinto prop -z out.latent.parquet -e out.coord_pairs.parquet -o out\n\
+                     → Outputs: gene-pair graph, cell propensity scores\n\n\
+                  3. Link community model (gene module-based, standalone):\n\
+                     pinto lc data.zarr -c coords.csv -k 20 -o out\n\
+                     → Outputs: link communities, cell propensity, gene modules\n\n\
+                  Choose dsvd for cell-level shared/difference patterns, gisvd for\n\
+                  gene-gene co-expression networks, or lc for direct probabilistic\n\
+                  link community detection with interpretable gene modules.",
     term_width = 80
 )]
 struct Cli {
@@ -170,7 +199,8 @@ enum Commands {
                       - Optionally, expression data (.zarr or .h5)\n\n\
                       Outputs:\n\
                       - {out}.propensity.parquet: per-vertex propensity (N x K)\n\
-                      - {out}.edge_cluster.parquet: edge cluster assignments"
+                      - {out}.edge_cluster.parquet: edge cluster assignments\n\
+                      - {out}.genes.parquet: cluster-specific gene expression (when expr_data_files provided)"
     )]
     Propensity(SrtPropensityArgs),
 
@@ -211,10 +241,10 @@ enum Commands {
                       \x20 9. Greedy finalization (argmax instead of sample)\n\
                       \x20 10. Output:\n\
                       \x20     node_membership[i,k] = frac of i's edges in k\n\
-                      \x20     gene_modules[g,k] = mean expression in community k\n\n\
+                      \x20     gene_to_module[g] = module assignment per gene\n\n\
                       Outputs:\n\
-                      - {out}.node_membership.parquet: soft membership (N x K)\n\
-                      - {out}.gene_modules.parquet: gene modules (G x K)\n\
+                      - {out}.propensity.parquet: soft membership (N x K)\n\
+                      - {out}.gene_modules.parquet: gene module assignments (G x 1)\n\
                       - {out}.link_community.parquet: link community assignments\n\
                       - {out}.scores.parquet: score trace\n\
                       - {out}.coord_pairs.parquet: spatial cell pair coordinates\n\

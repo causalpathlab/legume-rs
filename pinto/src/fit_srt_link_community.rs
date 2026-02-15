@@ -33,7 +33,12 @@ pub struct SrtLinkCommunityArgs {
         short = 'c',
         required = true,
         value_delimiter(','),
-        help = "Spatial coordinate files, one per data file"
+        help = "Spatial coordinate files, one per data file",
+        long_help = "Spatial coordinate files, one per data file (comma separated).\n\
+                       Format: CSV, TSV, or space-delimited text (or .parquet).\n\
+                       First column: cell/barcode names (must match data file).\n\
+                       Subsequent columns: spatial coordinates (x, y, etc.).\n\
+                       Header row is auto-detected or use --coord-header-row to specify."
     )]
     coord_files: Vec<Box<str>>,
 
@@ -62,7 +67,11 @@ pub struct SrtLinkCommunityArgs {
         long,
         short = 'b',
         value_delimiter(','),
-        help = "Batch membership files, one per data file"
+        help = "Batch membership files, one per data file",
+        long_help = "Batch membership files, one per data file (comma separated).\n\
+                       Format: plain text file, one batch label per line.\n\
+                       Must have one line for each cell in the corresponding data file.\n\
+                       If not provided, each data file is treated as a separate batch."
     )]
     batch_files: Option<Vec<Box<str>>>,
 
