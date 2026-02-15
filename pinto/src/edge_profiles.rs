@@ -362,6 +362,188 @@ pub fn compute_node_membership(
     counts
 }
 
+/// Compute gene embeddings via a random sketch over coarsened cell clusters.
+///
+/// For each gene g, accumulates `gene_embed[g,:] += x[g,c] * R[cell_labels[c],:]`
+/// where R is a `[n_clusters × sketch_dim]` random Gaussian matrix. After
+/// accumulation, normalizes by gene totals so each row is a rate vector.
+///
+/// * `data` - Sparse expression data [n_genes × n_cells]
+/// * `cell_labels` - Cluster assignment per cell
+/// * `n_clusters` - Number of distinct clusters
+/// * `sketch_dim` - Embedding dimension
+/// * `block_size` - Number of cells per parallel block
+pub fn compute_gene_module_sketch(
+    data: &SparseIoVec,
+    cell_labels: &[usize],
+    n_clusters: usize,
+    sketch_dim: usize,
+    block_size: usize,
+) -> anyhow::Result<Mat> {
+    let n_genes = data.num_rows();
+    let n_cells = data.num_columns();
+
+    // Random sketch matrix [n_clusters × sketch_dim]
+    let r_mat = Mat::rnorm(n_clusters, sketch_dim);
+
+    let jobs = generate_minibatch_intervals(n_cells, block_size);
+
+    let pb = new_progress_bar(
+        jobs.len() as u64,
+        "Gene sketch {bar:40} {pos}/{len} blocks ({eta})",
+    );
+    let partials: Vec<(Mat, Vec<f64>)> = jobs
+        .par_iter()
+        .progress_with(pb.clone())
+        .map(|&(lb, ub)| -> anyhow::Result<(Mat, Vec<f64>)> {
+            let cells: Vec<usize> = (lb..ub).collect();
+            let x_dn = data.read_columns_csc(cells.iter().copied())?;
+
+            let mut local_embed = Mat::zeros(n_genes, sketch_dim);
+            let mut local_total = vec![0.0f64; n_genes];
+
+            for (local_col, &cell) in cells.iter().enumerate() {
+                let col_slice = x_dn.col(local_col);
+                let cluster = cell_labels[cell];
+                for (&row, &val) in col_slice
+                    .row_indices()
+                    .iter()
+                    .zip(col_slice.values().iter())
+                {
+                    local_total[row] += val as f64;
+                    for d in 0..sketch_dim {
+                        local_embed[(row, d)] += val * r_mat[(cluster, d)];
+                    }
+                }
+            }
+
+            Ok((local_embed, local_total))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    pb.finish_and_clear();
+
+    // Aggregate
+    let mut gene_embed = Mat::zeros(n_genes, sketch_dim);
+    let mut gene_total = vec![0.0f64; n_genes];
+    for (local_embed, local_total) in partials {
+        gene_embed += local_embed;
+        for g in 0..n_genes {
+            gene_total[g] += local_total[g];
+        }
+    }
+
+    // Normalize by gene totals
+    for g in 0..n_genes {
+        let denom = gene_total[g].max(1.0) as f32;
+        for d in 0..sketch_dim {
+            gene_embed[(g, d)] /= denom;
+        }
+    }
+
+    Ok(gene_embed)
+}
+
+/// Build edge profiles as module-level counts via table lookup.
+///
+/// For each edge (i, j), sums the expression of cells i and j binned by
+/// gene module assignment. Produces exact Poisson counts (sum of Poissons
+/// is Poisson).
+///
+/// * `data` - Sparse expression data [n_genes × n_cells]
+/// * `edges` - Sorted edge list from KNN graph
+/// * `gene_to_module` - Module assignment per gene
+/// * `n_modules` - Number of gene modules
+/// * `block_size` - Number of edges per parallel block
+pub fn build_edge_profiles_by_module(
+    data: &SparseIoVec,
+    edges: &[(usize, usize)],
+    gene_to_module: &[usize],
+    n_modules: usize,
+    block_size: usize,
+) -> anyhow::Result<LinkProfileStore> {
+    let n_edges = edges.len();
+
+    let jobs = generate_minibatch_intervals(n_edges, block_size);
+
+    let pb = new_progress_bar(
+        jobs.len() as u64,
+        "Module profiles {bar:40} {pos}/{len} blocks ({eta})",
+    );
+    let partial_results: Vec<(usize, Vec<f32>)> = jobs
+        .par_iter()
+        .progress_with(pb.clone())
+        .map(|&(lb, ub)| -> anyhow::Result<(usize, Vec<f32>)> {
+            let chunk_edges = &edges[lb..ub];
+            let chunk_size = ub - lb;
+
+            // Collect unique cell indices from this chunk
+            let mut unique_set: HashSet<usize> = HashSet::new();
+            for &(i, j) in chunk_edges {
+                unique_set.insert(i);
+                unique_set.insert(j);
+            }
+            let mut unique_cells: Vec<usize> = unique_set.into_iter().collect();
+            unique_cells.sort_unstable();
+
+            // Read sparse data for unique cells
+            let x_dn = data.read_columns_csc(unique_cells.iter().copied())?;
+
+            // Build cell → local column index map
+            let cell_to_col: HashMap<usize, usize> = unique_cells
+                .iter()
+                .enumerate()
+                .map(|(col, &cell)| (cell, col))
+                .collect();
+
+            // For each edge, accumulate module counts
+            let mut chunk_profiles = vec![0.0f32; chunk_size * n_modules];
+
+            for (e_idx, &(ci, cj)) in chunk_edges.iter().enumerate() {
+                let col_i = cell_to_col[&ci];
+                let col_j = cell_to_col[&cj];
+                let base = e_idx * n_modules;
+
+                // Accumulate from sparse column i
+                let col_slice_i = x_dn.col(col_i);
+                for (&row, &val) in col_slice_i
+                    .row_indices()
+                    .iter()
+                    .zip(col_slice_i.values().iter())
+                {
+                    chunk_profiles[base + gene_to_module[row]] += val;
+                }
+
+                // Accumulate from sparse column j
+                let col_slice_j = x_dn.col(col_j);
+                for (&row, &val) in col_slice_j
+                    .row_indices()
+                    .iter()
+                    .zip(col_slice_j.values().iter())
+                {
+                    chunk_profiles[base + gene_to_module[row]] += val;
+                }
+            }
+
+            Ok((lb, chunk_profiles))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    pb.finish_and_clear();
+
+    // Assemble into single profiles buffer
+    let mut profiles = vec![0.0f32; n_edges * n_modules];
+    for (lb, chunk) in partial_results {
+        let chunk_edges_count = chunk.len() / n_modules;
+        for e in 0..chunk_edges_count {
+            let src_base = e * n_modules;
+            let dst_base = (lb + e) * n_modules;
+            profiles[dst_base..dst_base + n_modules]
+                .copy_from_slice(&chunk[src_base..src_base + n_modules]);
+        }
+    }
+
+    Ok(LinkProfileStore::new(profiles, n_edges, n_modules))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +639,105 @@ mod tests {
         let basis = refine_projection_basis(&centroids, 5).unwrap();
         assert_eq!(basis.nrows(), 10);
         assert_eq!(basis.ncols(), 5);
+    }
+
+    fn make_test_sparse_io(raw: &ndarray::Array2<f32>) -> SparseIoVec {
+        use std::sync::Arc;
+        let nrow = raw.nrows();
+        let ncol = raw.ncols();
+        let rows: Vec<Box<str>> = (0..nrow).map(|i| format!("g{i}").into_boxed_str()).collect();
+        let cols: Vec<Box<str>> = (0..ncol).map(|i| format!("c{i}").into_boxed_str()).collect();
+        let mut sp = create_sparse_from_ndarray(raw, None, None).unwrap();
+        sp.register_row_names_vec(&rows);
+        sp.register_column_names_vec(&cols);
+        sp.preload_columns().unwrap();
+        let mut vec = SparseIoVec::new();
+        vec.push(Arc::from(sp), None).unwrap();
+        vec
+    }
+
+    #[test]
+    fn test_compute_gene_module_sketch() {
+        // 5 genes, 6 cells in 2 clusters
+        let n_genes = 5;
+        let n_cells = 6;
+        let mut raw = ndarray::Array2::<f32>::zeros((n_genes, n_cells));
+
+        // Cluster 0: cells 0,1,2 — genes 0,1 are active
+        for c in 0..3 {
+            raw[(0, c)] = 10.0;
+            raw[(1, c)] = 5.0;
+        }
+        // Cluster 1: cells 3,4,5 — genes 3,4 are active
+        for c in 3..6 {
+            raw[(3, c)] = 8.0;
+            raw[(4, c)] = 12.0;
+        }
+
+        let data = make_test_sparse_io(&raw);
+        let cell_labels = vec![0, 0, 0, 1, 1, 1];
+
+        let embed =
+            compute_gene_module_sketch(&data, &cell_labels, 2, 10, 3).unwrap();
+
+        assert_eq!(embed.nrows(), n_genes);
+        assert_eq!(embed.ncols(), 10);
+
+        // Gene 2 has no counts — its embedding should be zero
+        for d in 0..10 {
+            assert!((embed[(2, d)]).abs() < 1e-10);
+        }
+
+        // Genes in the same cluster should have similar embeddings
+        // (both project through R[cluster_0,:])
+        let dot_01: f32 = (0..10).map(|d| embed[(0, d)] * embed[(1, d)]).sum();
+        let dot_04: f32 = (0..10).map(|d| embed[(0, d)] * embed[(4, d)]).sum();
+
+        // Genes 0,1 (same cluster) should be more aligned than genes 0,4
+        assert!(dot_01 > dot_04);
+    }
+
+    #[test]
+    fn test_build_edge_profiles_by_module() {
+        // 4 genes, 4 cells, 2 modules
+        let n_genes = 4;
+        let n_cells = 4;
+        let mut raw = ndarray::Array2::<f32>::zeros((n_genes, n_cells));
+        // cell 0: gene0=3, gene1=2
+        raw[(0, 0)] = 3.0;
+        raw[(1, 0)] = 2.0;
+        // cell 1: gene2=5
+        raw[(2, 1)] = 5.0;
+        // cell 2: gene0=1, gene3=4
+        raw[(0, 2)] = 1.0;
+        raw[(3, 2)] = 4.0;
+        // cell 3: gene1=6
+        raw[(1, 3)] = 6.0;
+
+        let data = make_test_sparse_io(&raw);
+
+        // Module 0: genes 0,1; Module 1: genes 2,3
+        let gene_to_module = vec![0, 0, 1, 1];
+        let edges = vec![(0, 1), (2, 3)];
+
+        let store =
+            build_edge_profiles_by_module(&data, &edges, &gene_to_module, 2, 10).unwrap();
+
+        assert_eq!(store.n_edges, 2);
+        assert_eq!(store.m, 2);
+
+        // Edge (0,1): cell0 + cell1
+        // Module 0: gene0(3) + gene1(2) + 0 = 5
+        // Module 1: 0 + gene2(5) = 5
+        let p0 = store.profile(0);
+        assert!((p0[0] - 5.0).abs() < 1e-6);
+        assert!((p0[1] - 5.0).abs() < 1e-6);
+
+        // Edge (2,3): cell2 + cell3
+        // Module 0: gene0(1) + gene1(6) = 7
+        // Module 1: gene3(4) + 0 = 4
+        let p1 = store.profile(1);
+        assert!((p1[0] - 7.0).abs() < 1e-6);
+        assert!((p1[1] - 4.0).abs() < 1e-6);
     }
 }
