@@ -120,23 +120,62 @@ pub fn map_gene_qtl(
     }
     let x_tensor = Tensor::from_vec(x_data, (n_valid, p_cis), &device)?.to_dtype(dtype)?;
 
-    let y_data: Vec<f32> = valid_indices.iter().map(|&i| pseudobulk_y[i]).collect();
-    let y_tensor = Tensor::from_vec(y_data, (n_valid, 1), &device)?.to_dtype(dtype)?;
+    let y_raw: Vec<f32> = valid_indices.iter().map(|&i| pseudobulk_y[i]).collect();
+
+    // Transform y based on likelihood type:
+    // - Gaussian: center y (subtract mean) so η ≈ 0 captures deviations
+    // - Poisson/NB: use log(y+1) standardization → Gaussian on log-scale
+    //   This avoids the missing-intercept problem (η=0 → μ=1 but y~300k)
+    let (y_data, effective_likelihood) = match config.likelihood.as_str() {
+        "poisson" | "nb" | "negative_binomial" => {
+            // Log-transform counts: log(y + 1), then center
+            let log_y: Vec<f32> = y_raw.iter().map(|&v| (v + 1.0).ln()).collect();
+            let log_mean = log_y.iter().sum::<f32>() / log_y.len() as f32;
+            let centered: Vec<f32> = log_y.iter().map(|&v| v - log_mean).collect();
+            // Fit Gaussian on log-transformed, centered counts
+            (centered, "gaussian")
+        }
+        _ => {
+            // Gaussian: standardize y (center + scale by std)
+            let n = y_raw.len() as f32;
+            let y_mean = y_raw.iter().sum::<f32>() / n;
+            let y_var = y_raw.iter().map(|&v| (v - y_mean).powi(2)).sum::<f32>() / n;
+            let y_std = y_var.sqrt().max(1e-8);
+            let standardized: Vec<f32> = y_raw.iter().map(|&v| (v - y_mean) / y_std).collect();
+            (standardized, config.likelihood.as_str())
+        }
+    };
+
+    let y_tensor = Tensor::from_vec(y_data.clone(), (n_valid, 1), &device)?.to_dtype(dtype)?;
+
+    // Log y-value diagnostics
+    if log::log_enabled!(log::Level::Trace) {
+        let y_min = y_data.iter().cloned().reduce(f32::min).unwrap_or(0.0);
+        let y_max = y_data.iter().cloned().reduce(f32::max).unwrap_or(0.0);
+        let y_mean = y_data.iter().sum::<f32>() / y_data.len() as f32;
+        let y_raw_mean = y_raw.iter().sum::<f32>() / y_raw.len() as f32;
+        log::trace!(
+            "Gene {} ({}): n={}, p={}, y_raw_mean={:.0}, y_transformed: min={:.4}, max={:.4}, mean={:.4}",
+            gene_id, cell_type, n_valid, p_cis, y_raw_mean, y_min, y_max, y_mean
+        );
+    }
+
+    // Use effective_likelihood (may differ from config for count models)
+    let mut effective_config = config.clone();
+    effective_config.likelihood = effective_likelihood.to_string();
 
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
     let sgvb_config = SGVBConfig::new(config.num_samples);
 
     // Build model, run optimization, extract results
-    // We use a macro to handle the combinatorial explosion of model × prior × likelihood
-    // while still having access to the concrete model type for result extraction.
     let (final_elbo, summary) = if config.model == "susie" {
         run_susie_model(
-            vb, &varmap, x_tensor, &y_tensor, sgvb_config, config,
+            vb, &varmap, x_tensor, &y_tensor, sgvb_config, &effective_config,
         )?
     } else {
         run_gaussian_model(
-            vb, &varmap, x_tensor, &y_tensor, sgvb_config, config,
+            vb, &varmap, x_tensor, &y_tensor, sgvb_config, &effective_config,
         )?
     };
 
@@ -269,10 +308,13 @@ fn train_loop<M: SgvbModel, L: BlackBoxLikelihood>(
         candle_util::candle_nn::AdamW::new_lr(varmap.all_vars(), config.learning_rate)?;
 
     let mut final_elbo = f32::NEG_INFINITY;
-    for _iter in 0..config.num_iters {
+    for iter in 0..config.num_iters {
         let loss = direct_elbo_loss(model, likelihood, config.num_samples)?;
         optimizer.backward_step(&loss)?;
         final_elbo = -(loss.to_scalar::<f32>()?);
+        if log::log_enabled!(log::Level::Trace) && iter % 100 == 0 {
+            log::trace!("  iter {}: ELBO = {:.2}", iter, final_elbo);
+        }
     }
     Ok(final_elbo)
 }
@@ -294,7 +336,7 @@ fn train_loop_nb<M: SgvbModel>(
         candle_util::candle_nn::AdamW::new_lr(varmap.all_vars(), config.learning_rate)?;
 
     let mut final_elbo = f32::NEG_INFINITY;
-    for _iter in 0..config.num_iters {
+    for iter in 0..config.num_iters {
         let sample = model.sample(config.num_samples)?;
         let s = config.num_samples;
 
@@ -314,6 +356,15 @@ fn train_loop_nb<M: SgvbModel>(
 
         optimizer.backward_step(&loss)?;
         final_elbo = -(loss.to_scalar::<f32>()?);
+        if log::log_enabled!(log::Level::Trace) && iter % 100 == 0 {
+            let llik_val: f32 = llik.mean(0)?.to_scalar()?;
+            let kl_val: f32 = (&sample.log_q - &sample.log_prior)?.mean(0)?.to_scalar()?;
+            let log_r_val: f32 = log_r.to_vec1::<f32>()?[0];
+            log::trace!(
+                "  iter {}: ELBO = {:.2}, llik = {:.2}, KL = {:.2}, log_r = {:.3}",
+                iter, final_elbo, llik_val, kl_val, log_r_val
+            );
+        }
     }
     Ok(final_elbo)
 }
