@@ -39,6 +39,7 @@ log = { workspace = true }
 dashmap = { workspace = true }
 
 colored = { workspace = true }
+rust-htslib = { workspace = true }
 
 # For JSON output
 serde = { workspace = true }

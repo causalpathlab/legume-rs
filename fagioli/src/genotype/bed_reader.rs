@@ -96,36 +96,57 @@ impl GenotypeReader for BedReader {
             .map(|id| Box::from(id.as_str()))
             .collect();
 
-        let (snp_ids, chromosomes, positions) = if let Some(ref indices) = snp_indices {
-            let snp_ids = indices
-                .iter()
-                .map(|&i| Box::from(self.bed.sid[i].as_str()))
-                .collect();
-            let chromosomes = indices
-                .iter()
-                .map(|&i| Box::from(self.bed.chromosome[i].as_str()))
-                .collect();
-            let positions = indices
-                .iter()
-                .map(|&i| self.bed.bp_position[i] as u64)
-                .collect();
-            (snp_ids, chromosomes, positions)
-        } else {
-            let snp_ids = self
-                .bed
-                .sid
-                .iter()
-                .map(|id| Box::from(id.as_str()))
-                .collect();
-            let chromosomes = self
-                .bed
-                .chromosome
-                .iter()
-                .map(|chr| Box::from(chr.as_str()))
-                .collect();
-            let positions = self.bed.bp_position.iter().map(|&pos| pos as u64).collect();
-            (snp_ids, chromosomes, positions)
-        };
+        let (snp_ids, chromosomes, positions, allele1, allele2) =
+            if let Some(ref indices) = snp_indices {
+                let snp_ids = indices
+                    .iter()
+                    .map(|&i| Box::from(self.bed.sid[i].as_str()))
+                    .collect();
+                let chromosomes = indices
+                    .iter()
+                    .map(|&i| Box::from(self.bed.chromosome[i].as_str()))
+                    .collect();
+                let positions = indices
+                    .iter()
+                    .map(|&i| self.bed.bp_position[i] as u64)
+                    .collect();
+                let allele1 = indices
+                    .iter()
+                    .map(|&i| Box::from(self.bed.allele1[i].as_str()))
+                    .collect();
+                let allele2 = indices
+                    .iter()
+                    .map(|&i| Box::from(self.bed.allele2[i].as_str()))
+                    .collect();
+                (snp_ids, chromosomes, positions, allele1, allele2)
+            } else {
+                let snp_ids = self
+                    .bed
+                    .sid
+                    .iter()
+                    .map(|id| Box::from(id.as_str()))
+                    .collect();
+                let chromosomes = self
+                    .bed
+                    .chromosome
+                    .iter()
+                    .map(|chr| Box::from(chr.as_str()))
+                    .collect();
+                let positions = self.bed.bp_position.iter().map(|&pos| pos as u64).collect();
+                let allele1 = self
+                    .bed
+                    .allele1
+                    .iter()
+                    .map(|a| Box::from(a.as_str()))
+                    .collect();
+                let allele2 = self
+                    .bed
+                    .allele2
+                    .iter()
+                    .map(|a| Box::from(a.as_str()))
+                    .collect();
+                (snp_ids, chromosomes, positions, allele1, allele2)
+            };
 
         info!("Successfully loaded: {} individuals × {} SNPs", n, m);
 
@@ -135,6 +156,8 @@ impl GenotypeReader for BedReader {
             snp_ids,
             chromosomes,
             positions,
+            allele1,
+            allele2,
         })
     }
 

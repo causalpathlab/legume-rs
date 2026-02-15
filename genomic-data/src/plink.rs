@@ -247,6 +247,10 @@ pub struct PlinkBed {
     pub chromosome: Vec<String>,
     /// Base-pair positions from .bim (column 3)
     pub bp_position: Vec<i32>,
+    /// Allele 1 (A1) from .bim (column 4)
+    pub allele1: Vec<String>,
+    /// Allele 2 (A2) from .bim (column 5)
+    pub allele2: Vec<String>,
 }
 
 impl PlinkBed {
@@ -264,7 +268,9 @@ impl PlinkBed {
         let iid = fam_cols.pop().unwrap();
 
         // Parse .bim — fields: chr(0) sid(1) cm(2) bp(3) allele1(4) allele2(5)
-        let (mut bim_cols, sid_count) = read_fam_or_bim(&[0, 1, 3], &bim_path)?;
+        let (mut bim_cols, sid_count) = read_fam_or_bim(&[0, 1, 3, 4, 5], &bim_path)?;
+        let allele2 = bim_cols.pop().unwrap();
+        let allele1 = bim_cols.pop().unwrap();
         let bp_strings = bim_cols.pop().unwrap();
         let sid = bim_cols.pop().unwrap();
         let chromosome = bim_cols.pop().unwrap();
@@ -292,6 +298,8 @@ impl PlinkBed {
             sid,
             chromosome,
             bp_position,
+            allele1,
+            allele2,
         })
     }
 
