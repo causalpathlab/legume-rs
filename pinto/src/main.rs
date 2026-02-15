@@ -64,6 +64,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     #[command(
+        alias = "dsvd",
         about = "Gene-level shared/difference analysis by SVD",
         long_about = "Gene-level cell-cell interaction analysis by SVD with\n\
                       shared/difference channels.\n\n\
@@ -102,6 +103,7 @@ enum Commands {
     DeltaSvd(SrtDeltaSvdArgs),
 
     #[command(
+        alias = "gisvd",
         about = "Gene-gene interaction patterns analysis by SVD",
         long_about = "Gene-gene interaction analysis by randomized SVD.\n\n\
                       Discovers gene-gene co-expression patterns within spatial\n\
@@ -141,6 +143,7 @@ enum Commands {
     GenePairDeltaSvd(SrtGenePairSvdArgs),
 
     #[command(
+        alias = "prop",
         about = "Estimate vertex propensity from edge clusters",
         long_about = "Estimate vertex (cell) propensity scores from edge\n\
                       (cell-pair) cluster assignments.\n\n\
@@ -172,6 +175,7 @@ enum Commands {
     Propensity(SrtPropensityArgs),
 
     #[command(
+        alias = "lc",
         about = "Link community model via collapsed Gibbs sampling",
         long_about = "Link community model for spatial cell-cell interaction analysis.\n\n\
                       Treats spatial transcriptomics data as G separate weighted\n\
