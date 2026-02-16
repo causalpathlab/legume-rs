@@ -1,7 +1,7 @@
-mod map_qtl;
+mod pseudobulk_cmd;
 mod sim_qtl;
 
-use map_qtl::*;
+use pseudobulk_cmd::*;
 use sim_qtl::*;
 
 use anyhow::Result;
@@ -43,8 +43,8 @@ struct Cli {
 enum Commands {
     /// Simulate molecular QTL with cell type heterogeneity and single-cell counts
     SimQtl(SimulationArgs),
-    /// Map cis-QTL from genotype and single-cell expression data
-    MapQtl(MapQtlArgs),
+    /// Collapse single-cell counts into Poisson-Gamma pseudobulk
+    Pseudobulk(PseudobulkArgs),
 }
 
 fn main() -> Result<()> {
@@ -61,8 +61,8 @@ fn main() -> Result<()> {
         Commands::SimQtl(args) => {
             sim_qtl(args)?;
         }
-        Commands::MapQtl(args) => {
-            map_qtl(args)?;
+        Commands::Pseudobulk(args) => {
+            pseudobulk(args)?;
         }
     }
 
