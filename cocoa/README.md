@@ -24,32 +24,47 @@ graph TD
 | V → Y | `pve_covar_gene` | Confounder directly affects gene expression via `V*γ` |
 
 Generative model:
-```
-V_i ~ N(0, I)                                          [individual confounders]
-X_i ~ Cat(softmax(V_i * α * pve + ε * (1-pve)))        [exposure assignment]
-log μ_{ig} = β_g * X_i * √pve_xg + V_i * γ_g * √pve_vg + ε * √(1-pve_xg-pve_vg)
-Y_{ijg} ~ Poisson(ρ_j * exp(log μ_{ig}))               [cell-level counts]
-ρ_j ~ Gamma(a, b)                                      [cell depth]
-```
+
+- $V_i \sim \mathcal{N}(0, I)$ — individual confounders
+- $X_i \sim \mathrm{Cat}\!\left(\mathrm{softmax}(V_i \alpha \sqrt{\mathrm{pve}} + \varepsilon \sqrt{1-\mathrm{pve}})\right)$ — exposure assignment
+- $\log \mu_{ig} = \beta_g X_i \sqrt{\mathrm{pve}_{xg}} + V_i \gamma_g \sqrt{\mathrm{pve}_{vg}} + \varepsilon\sqrt{1 - \mathrm{pve}_{xg} - \mathrm{pve}_{vg}}$
+- $Y_{ijg} \sim \mathrm{Poisson}(\rho_j \exp(\log \mu_{ig}))$ — cell-level counts
+- $\rho_j \sim \mathrm{Gamma}(a, b)$ — cell depth
 
 ### `simulate-collider` (multiple cell types)
 
 Cell-type assignment A is a collider on the V→X→Y path.
 U is a cell-level confounder that affects both A and Y.
 
+**Null (no direct X→Yg)**
+
 ```mermaid
 graph TD
     V((V)) --> X((X))
-    V((V)) --> Y_g((Yg))
-    X((X)) --> Y_g((Yg))
+    V((V)) --> Yg((Yg))
     X((X)) --> A((A))
     U((U)) --> A((A))
-    U((U)) --> Y_g((Yg))
-    A((A)) --> Y_g((Yg))
+    U((U)) --> Yg((Yg))
     classDef open fill:#fff,stroke:#000
     classDef shaded fill:#d3d3d3,stroke:#000
     class V,U open
-    class X,A,Y_g shaded
+    class X,A,Yg shaded
+```
+
+**Causal (X→Yg present)**
+
+```mermaid
+graph TD
+    V((V)) --> X((X))
+    V((V)) --> Yg((Yg))
+    X((X)) --> A((A))
+    X((X)) --> Yg((Yg))
+    U((U)) --> A((A))
+    U((U)) --> Yg((Yg))
+    classDef open fill:#fff,stroke:#000
+    classDef shaded fill:#d3d3d3,stroke:#000
+    class V,U open
+    class X,A,Yg shaded
 ```
 
 | Edge | Parameter | Description |
@@ -63,14 +78,13 @@ graph TD
 | A → Y | `celltype_effect_size` | Cell-type DE (different baseline expression per type) |
 
 Generative model:
-```
-V_i ~ N(0, I)                                          [individual confounders]
-X_i ~ Cat(softmax(V_i * α * √pve_vx + ε * √(1-pve_vx)))
-U_j ~ N(0, I)                                          [cell-level confounders]
-A_{ij} ~ Cat(softmax(U_j * δ * √pve_ua + X_i * η * √pve_xa + ε * √(1-pve_ua-pve_xa)))
-log μ_{ijg} = Δ_{g,A} + β_g * X_i * √pve_xg + V_i * γ_g * √pve_vg + U_j * ξ_g * √pve_ug + ε * √(1-...)
-Y_{ijg} ~ Poisson(ρ_j * exp(log μ))                    [cell-level counts]
-```
+
+- $V_i \sim \mathcal{N}(0, I)$ — individual confounders
+- $X_i \sim \mathrm{Cat}\!\left(\mathrm{softmax}(V_i \alpha \sqrt{\mathrm{pve}_{vx}} + \varepsilon \sqrt{1-\mathrm{pve}_{vx}})\right)$
+- $U_j \sim \mathcal{N}(0, I)$ — cell-level confounders
+- $A_{ij} \sim \mathrm{Cat}\!\left(\mathrm{softmax}(U_j \delta \sqrt{\mathrm{pve}_{ua}} + X_i \eta \sqrt{\mathrm{pve}_{xa}} + \varepsilon \sqrt{1-\mathrm{pve}_{ua}-\mathrm{pve}_{xa}})\right)$
+- $\log \mu_{ijg} = \Delta_{g,A} + \beta_g X_i \sqrt{\mathrm{pve}_{xg}} + V_i \gamma_g \sqrt{\mathrm{pve}_{vg}} + U_j \xi_g \sqrt{\mathrm{pve}_{ug}} + \varepsilon \sqrt{1 - \cdots}$
+- $Y_{ijg} \sim \mathrm{Poisson}(\rho_j \exp(\log \mu_{ijg}))$ — cell-level counts
 
 ### Collider bias
 
