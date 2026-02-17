@@ -227,9 +227,8 @@ pub fn create_uniform_blocks(
         let mut end = (start + block_size).min(num_snps);
 
         // Don't split across chromosomes
-        while end < num_snps && end > start + 1 && chromosomes[end - 1] != chromosomes[end] {
+        if end < num_snps && end > start + 1 && chromosomes[end - 1] != chromosomes[end] {
             // end is already at a chromosome boundary, keep it
-            break;
         }
         // Also break at chromosome boundaries within the block
         for j in (start + 1)..end {
