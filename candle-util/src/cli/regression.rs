@@ -9,11 +9,10 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::sgvb::{
-    composite_direct_elbo_loss, composite_elbo, composite_sgvb_loss, compute_elbo,
-    direct_elbo_loss, samples_direct_elbo_loss, samples_elbo, samples_sgvb_loss, sgvb_loss,
-    CompositeModel, GaussianLikelihood, GaussianPrior, LinearModelSGVB, LinearRegressionSGVB,
-    NegativeBinomialLikelihood, PoissonLikelihood, SGVBConfig, SgvbModel, SparseVariationalOutput,
-    SusieVar, VariationalOutput,
+    composite_local_reparam_loss, local_reparam_loss, samples_local_reparam_loss,
+    variant_tree::VariantTree, CompositeModel, GaussianLikelihood, GaussianPrior, LinearModelSGVB,
+    LinearRegressionSGVB, MultiLevelSusieVar, NegativeBinomialLikelihood, PoissonLikelihood,
+    SGVBConfig, SparseVariationalOutput, SusieVar, VariationalOutput,
 };
 
 //
@@ -159,17 +158,15 @@ fn save_output_sparse<V: SparseVariationalOutput>(
 // Generic training loop
 //
 
-fn train<L, E, P>(
+fn train<L, P>(
     iters: usize,
     verbose: bool,
     optimizer: &mut impl Optimizer,
     loss_fn: L,
-    elbo_fn: E,
     pip_fn: Option<P>,
 ) -> Result<()>
 where
     L: Fn() -> Result<Tensor>,
-    E: Fn() -> Result<Tensor>,
     P: Fn() -> Result<String>,
 {
     info!("Training for {} iterations", iters);
@@ -179,20 +176,19 @@ where
 
         if i % 50 == 0 || i == iters - 1 {
             if verbose {
-                let elbo = elbo_fn()?;
+                let loss_val: f32 = loss.to_scalar()?;
+                let elbo_val = -loss_val;
                 match &pip_fn {
                     Some(f) => info!(
                         "iter {:4}: loss = {:10.4}, ELBO = {:10.4}, PIPs: {}",
                         i,
-                        loss.to_scalar::<f32>()?,
-                        elbo.to_scalar::<f32>()?,
+                        loss_val,
+                        elbo_val,
                         f()?
                     ),
                     None => info!(
                         "iter {:4}: loss = {:10.4}, ELBO = {:10.4}",
-                        i,
-                        loss.to_scalar::<f32>()?,
-                        elbo.to_scalar::<f32>()?
+                        i, loss_val, elbo_val
                     ),
                 }
             } else {
@@ -221,15 +217,8 @@ pub enum LikelihoodType {
 pub enum VariationalType {
     Gaussian,
     Susie,
-}
-
-#[derive(Clone, Debug, Default, ValueEnum)]
-pub enum LossType {
-    /// Direct ELBO with reparameterization gradients (lower variance)
-    #[default]
-    Direct,
-    /// REINFORCE/score function estimator (works with non-differentiable ops)
-    Reinforce,
+    #[value(alias = "ml-susie")]
+    MultiLevelSusie,
 }
 
 #[derive(Args, Debug)]
@@ -263,10 +252,17 @@ pub struct RegressionArgs {
 
     #[arg(
         long,
-        default_value = "direct",
-        help = "Loss type: direct (reparameterization) or reinforce (score function)"
+        default_value = "50",
+        help = "Block size for multi-level Susie tree (variants per group)"
     )]
-    pub loss_type: LossType,
+    pub block_size: usize,
+
+    #[arg(
+        long,
+        default_value = "1.0",
+        help = "Softmax temperature for multi-level Susie (>1 smoother, <1 sharper)"
+    )]
+    pub temperature: f64,
 
     #[arg(long, default_value = "500")]
     pub iters: usize,
@@ -348,20 +344,14 @@ fn run_gaussian_gaussian(ctx: RegressionContext) -> Result<()> {
         args.iters,
         args.verbose,
         &mut optimizer,
-        || match args.loss_type {
-            LossType::Direct => Ok(composite_direct_elbo_loss(
+        || {
+            Ok(composite_local_reparam_loss(
                 &composite,
                 &likelihood,
                 config.num_samples,
-            )?),
-            LossType::Reinforce => Ok(composite_sgvb_loss(
-                &composite,
-                &likelihood,
-                config.num_samples,
-                true,
-            )?),
+                1.0,
+            )?)
         },
-        || Ok(composite_elbo(&composite, &likelihood, 100)?),
         None::<fn() -> Result<String>>,
     )?;
 
@@ -435,18 +425,11 @@ fn run_gaussian_susie(ctx: RegressionContext) -> Result<()> {
         args.verbose,
         &mut optimizer,
         || {
-            let samples = vec![
-                model_mean.sample(config.num_samples)?,
-                model_var.sample(config.num_samples)?,
+            let lr_samples = vec![
+                model_mean.local_reparam_sample(config.num_samples)?,
+                model_var.local_reparam_sample(config.num_samples)?,
             ];
-            match args.loss_type {
-                LossType::Direct => Ok(samples_direct_elbo_loss(&samples, &likelihood)?),
-                LossType::Reinforce => Ok(samples_sgvb_loss(&samples, &likelihood, true)?),
-            }
-        },
-        || {
-            let samples = vec![model_mean.sample(100)?, model_var.sample(100)?];
-            Ok(samples_elbo(&samples, &likelihood)?)
+            Ok(samples_local_reparam_loss(&lr_samples, &likelihood, 1.0)?)
         },
         None::<fn() -> Result<String>>,
     )?;
@@ -504,11 +487,14 @@ fn run_poisson_gaussian(ctx: RegressionContext) -> Result<()> {
         args.iters,
         args.verbose,
         &mut optimizer,
-        || match args.loss_type {
-            LossType::Direct => Ok(direct_elbo_loss(&model, &likelihood, config.num_samples)?),
-            LossType::Reinforce => Ok(sgvb_loss(&model, &likelihood, &config)?),
+        || {
+            Ok(local_reparam_loss(
+                &model,
+                &likelihood,
+                config.num_samples,
+                1.0,
+            )?)
         },
-        || Ok(compute_elbo(&model, &likelihood, 100)?),
         None::<fn() -> Result<String>>,
     )?;
 
@@ -550,17 +536,217 @@ fn run_poisson_susie(ctx: RegressionContext) -> Result<()> {
         args.iters,
         args.verbose,
         &mut optimizer,
-        || match args.loss_type {
-            LossType::Direct => Ok(direct_elbo_loss(&model, &likelihood, config.num_samples)?),
-            LossType::Reinforce => Ok(sgvb_loss(&model, &likelihood, &config)?),
+        || {
+            Ok(local_reparam_loss(
+                &model,
+                &likelihood,
+                config.num_samples,
+                1.0,
+            )?)
         },
-        || Ok(compute_elbo(&model, &likelihood, 100)?),
         None::<fn() -> Result<String>>,
     )?;
 
     info!("Coefficients shape: {:?}", model.coef_mean()?.dims());
     save_output_sparse(
         &model.variational,
+        &args.output,
+        "mean",
+        feature_names,
+        output_names,
+    )
+}
+
+fn build_ml_susie_model<'a>(
+    vb: VarBuilder<'a>,
+    x: Tensor,
+    args: &RegressionArgs,
+    k: usize,
+    config: SGVBConfig,
+) -> candle_core::Result<LinearModelSGVB<MultiLevelSusieVar, GaussianPrior>> {
+    let p = x.dim(1)?;
+    let tree = VariantTree::regular(p, args.block_size);
+    info!(
+        "Multi-level Susie tree: depth={}, block_size={}, temperature={}",
+        tree.depth, args.block_size, args.temperature
+    );
+    for (d, level) in tree.levels.iter().enumerate() {
+        info!(
+            "  Level {}: {} groups, max {} children",
+            d, level.num_groups, level.max_children
+        );
+    }
+    let susie = MultiLevelSusieVar::new(
+        vb.pp("ml_susie"),
+        tree,
+        args.susie_layers,
+        k,
+        args.temperature,
+    )?;
+    Ok(LinearModelSGVB::from_variational(
+        susie,
+        x,
+        GaussianPrior::new(vb.pp("prior"), 1.0)?,
+        config,
+    ))
+}
+
+fn run_gaussian_ml_susie(ctx: RegressionContext) -> Result<()> {
+    let RegressionContext {
+        args,
+        x,
+        y,
+        vb,
+        varmap,
+        config,
+        feature_names,
+        output_names,
+    } = ctx;
+    let (n, p, k) = (x.dim(0)?, x.dim(1)?, y.dim(1)?);
+    let x_var = load_x_var(&args.x_var, n, DType::F32, x.device(), args.with_row_names)?;
+    let p_var = x_var.dim(1)?;
+
+    let model_mean = build_ml_susie_model(vb.pp("mean"), x, args, k, config.clone())?;
+    let model_var = LinearRegressionSGVB::new(
+        vb.pp("var"),
+        x_var,
+        k,
+        GaussianPrior::new(vb.pp("prior_var"), 1.0)?,
+        config.clone(),
+    )?;
+    let likelihood = GaussianLikelihood::new(y);
+
+    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+
+    info!(
+        "Mean module: {} features, MultiLevelSusie(L={})",
+        p, args.susie_layers
+    );
+    info!("Variance module: {} features, Gaussian", p_var);
+
+    train(
+        args.iters,
+        args.verbose,
+        &mut optimizer,
+        || {
+            let lr_samples = vec![
+                model_mean.local_reparam_sample(config.num_samples)?,
+                model_var.local_reparam_sample(config.num_samples)?,
+            ];
+            Ok(samples_local_reparam_loss(&lr_samples, &likelihood, 1.0)?)
+        },
+        None::<fn() -> Result<String>>,
+    )?;
+
+    save_output_sparse(
+        &model_mean.variational,
+        &args.output,
+        "mean",
+        feature_names,
+        output_names,
+    )?;
+    save_output(
+        &model_var.variational,
+        &args.output,
+        "var",
+        feature_names,
+        output_names,
+    )
+}
+
+fn run_poisson_ml_susie(ctx: RegressionContext) -> Result<()> {
+    let RegressionContext {
+        args,
+        x,
+        y,
+        vb,
+        varmap,
+        config,
+        feature_names,
+        output_names,
+    } = ctx;
+    let (p, k) = (x.dim(1)?, y.dim(1)?);
+    let model = build_ml_susie_model(vb, x, args, k, config.clone())?;
+    let likelihood = PoissonLikelihood::new(y);
+
+    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+
+    info!(
+        "Model: {} features, MultiLevelSusie(L={})",
+        p, args.susie_layers
+    );
+
+    train(
+        args.iters,
+        args.verbose,
+        &mut optimizer,
+        || {
+            Ok(local_reparam_loss(
+                &model,
+                &likelihood,
+                config.num_samples,
+                1.0,
+            )?)
+        },
+        None::<fn() -> Result<String>>,
+    )?;
+
+    save_output_sparse(
+        &model.variational,
+        &args.output,
+        "mean",
+        feature_names,
+        output_names,
+    )
+}
+
+fn run_negbin_ml_susie(ctx: RegressionContext) -> Result<()> {
+    let RegressionContext {
+        args,
+        x,
+        y,
+        vb,
+        varmap,
+        config,
+        feature_names,
+        output_names,
+    } = ctx;
+    let (n, p, k) = (x.dim(0)?, x.dim(1)?, y.dim(1)?);
+    let x_var = load_x_var(&args.x_var, n, DType::F32, x.device(), args.with_row_names)?;
+
+    let model_mean = build_ml_susie_model(vb.pp("mean"), x, args, k, config.clone())?;
+    let model_disp = LinearRegressionSGVB::new(
+        vb.pp("disp"),
+        x_var,
+        k,
+        GaussianPrior::new(vb.pp("prior_disp"), 1.0)?,
+        config.clone(),
+    )?;
+    let likelihood = NegativeBinomialLikelihood::new(y);
+
+    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+
+    info!(
+        "Mean module: {} features, MultiLevelSusie(L={})",
+        p, args.susie_layers
+    );
+
+    train(
+        args.iters,
+        args.verbose,
+        &mut optimizer,
+        || {
+            let lr_samples = vec![
+                model_mean.local_reparam_sample(config.num_samples)?,
+                model_disp.local_reparam_sample(config.num_samples)?,
+            ];
+            Ok(samples_local_reparam_loss(&lr_samples, &likelihood, 1.0)?)
+        },
+        None::<fn() -> Result<String>>,
+    )?;
+
+    save_output_sparse(
+        &model_mean.variational,
         &args.output,
         "mean",
         feature_names,
@@ -610,20 +796,14 @@ fn run_negbin_gaussian(ctx: RegressionContext) -> Result<()> {
         args.iters,
         args.verbose,
         &mut optimizer,
-        || match args.loss_type {
-            LossType::Direct => Ok(composite_direct_elbo_loss(
+        || {
+            Ok(composite_local_reparam_loss(
                 &composite,
                 &likelihood,
                 config.num_samples,
-            )?),
-            LossType::Reinforce => Ok(composite_sgvb_loss(
-                &composite,
-                &likelihood,
-                config.num_samples,
-                true,
-            )?),
+                1.0,
+            )?)
         },
-        || Ok(composite_elbo(&composite, &likelihood, 100)?),
         None::<fn() -> Result<String>>,
     )?;
 
@@ -697,18 +877,11 @@ fn run_negbin_susie(ctx: RegressionContext) -> Result<()> {
         args.verbose,
         &mut optimizer,
         || {
-            let samples = vec![
-                model_mean.sample(config.num_samples)?,
-                model_disp.sample(config.num_samples)?,
+            let lr_samples = vec![
+                model_mean.local_reparam_sample(config.num_samples)?,
+                model_disp.local_reparam_sample(config.num_samples)?,
             ];
-            match args.loss_type {
-                LossType::Direct => Ok(samples_direct_elbo_loss(&samples, &likelihood)?),
-                LossType::Reinforce => Ok(samples_sgvb_loss(&samples, &likelihood, true)?),
-            }
-        },
-        || {
-            let samples = vec![model_mean.sample(100)?, model_disp.sample(100)?];
-            Ok(samples_elbo(&samples, &likelihood)?)
+            Ok(samples_local_reparam_loss(&lr_samples, &likelihood, 1.0)?)
         },
         None::<fn() -> Result<String>>,
     )?;
@@ -744,7 +917,11 @@ fn run_negbin_susie(ctx: RegressionContext) -> Result<()> {
 
 pub fn run(args: &RegressionArgs) -> Result<()> {
     // Validate argument combinations
-    if matches!(args.prior, VariationalType::Susie) && args.susie_layers == 0 {
+    if matches!(
+        args.prior,
+        VariationalType::Susie | VariationalType::MultiLevelSusie
+    ) && args.susie_layers == 0
+    {
         anyhow::bail!("susie_layers must be greater than 0 when using Susie prior");
     }
 
@@ -810,13 +987,10 @@ pub fn run(args: &RegressionArgs) -> Result<()> {
         match args.prior {
             VariationalType::Gaussian => "Gaussian".to_string(),
             VariationalType::Susie => format!("Susie(L={})", args.susie_layers),
-        }
-    );
-    info!(
-        "Loss: {}",
-        match args.loss_type {
-            LossType::Direct => "Direct ELBO (reparameterization)",
-            LossType::Reinforce => "REINFORCE (score function)",
+            VariationalType::MultiLevelSusie => format!(
+                "MultiLevelSusie(L={}, block={}, τ={})",
+                args.susie_layers, args.block_size, args.temperature
+            ),
         }
     );
 
@@ -839,13 +1013,22 @@ pub fn run(args: &RegressionArgs) -> Result<()> {
             run_gaussian_gaussian(mk_ctx(x, y, vb))
         }
         (LikelihoodType::Gaussian, VariationalType::Susie) => run_gaussian_susie(mk_ctx(x, y, vb)),
+        (LikelihoodType::Gaussian, VariationalType::MultiLevelSusie) => {
+            run_gaussian_ml_susie(mk_ctx(x, y, vb))
+        }
         (LikelihoodType::Poisson, VariationalType::Gaussian) => {
             run_poisson_gaussian(mk_ctx(x, y, vb))
         }
         (LikelihoodType::Poisson, VariationalType::Susie) => run_poisson_susie(mk_ctx(x, y, vb)),
+        (LikelihoodType::Poisson, VariationalType::MultiLevelSusie) => {
+            run_poisson_ml_susie(mk_ctx(x, y, vb))
+        }
         (LikelihoodType::Negbin, VariationalType::Gaussian) => {
             run_negbin_gaussian(mk_ctx(x, y, vb))
         }
         (LikelihoodType::Negbin, VariationalType::Susie) => run_negbin_susie(mk_ctx(x, y, vb)),
+        (LikelihoodType::Negbin, VariationalType::MultiLevelSusie) => {
+            run_negbin_ml_susie(mk_ctx(x, y, vb))
+        }
     }
 }
