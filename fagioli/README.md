@@ -38,32 +38,32 @@ graph TD
     W(("W")) --> M
     Z_f(("Z")) --> M
     h2(["h²"]):::hyper
-    rho(["ρ"]):::hyper
+    rho(["rho"]):::hyper
     classDef hyper fill:none,stroke:none
 
     subgraph plate_g ["g = 1, ..., G (genes)"]
         subgraph plate_k ["k = 1, ..., K (cell types)"]
             M(("M_gk"))
-            beta_s(("β^sh_gjk"))
-            beta_i(("β^ind_gjk"))
+            beta_s(("beta^sh_gjk"))
+            beta_i(("beta^ind_gjk"))
             subgraph plate_i ["i = 1, ..., N (individuals)"]
                 X(("X_i"))
                 G(("G_gki"))
-                eps(("ε_gki"))
+                eps(("eps_gki"))
                 Y(("Y_gik"))
-                log_mu(("log μ_gki"))
+                log_mu(("log_mu_gki"))
             end
         end
     end
 
-    M -->|"√ρ"| log_mu
+    M -->|"sqrt(rho)"| log_mu
     X --> G
     beta_s --> G
     beta_i -.->|"eQTL genes"| G
     G --> Y
     eps --> Y
     h2 --> Y
-    Y -->|"√(1-ρ)"| log_mu
+    Y -->|"sqrt(1-rho)"| log_mu
     rho --> log_mu
 
     style X fill:#ddd,stroke:#333
@@ -78,15 +78,15 @@ Takes $\log \mu_{gki}$ from Phase 1 and samples single cells:
 
 ```mermaid
 graph TD
-    log_mu(("log μ_gki"))
-    alpha(("α")) --> pi(("π_i"))
-    mu(("μ")) --> n_i(("n_i"))
+    log_mu(("log_mu_gki"))
+    alpha(("alpha")) --> pi(("pi_i"))
+    mu(("mu")) --> n_i(("n_i"))
 
     subgraph plate_i ["i = 1, ..., N (individuals)"]
         subgraph plate_c ["c = 1, ..., n_i (cells)"]
             k(("k_c"))
             subgraph plate_g ["g = 1, ..., G (genes)"]
-                lambda(("λ_gc"))
+                lambda(("lambda_gc"))
                 Y_obs(("Y_gc"))
             end
         end
