@@ -6,14 +6,15 @@
 
 No cell-type heterogeneity. Individual-level confounding only.
 
-```
-    V
-   / \
-  v   v
-  X   |
-  |   |
-  v   v
-  Y_g
+```mermaid
+graph TD
+    V((V)) --> X((X))
+    V((V)) --> Y_g((Yg))
+    X((X)) --> Y_g((Yg))
+    classDef open fill:#fff,stroke:#000
+    classDef shaded fill:#d3d3d3,stroke:#000
+    class V open
+    class X,Y_g shaded
 ```
 
 | Edge | Parameter | Description |
@@ -36,27 +37,19 @@ Y_{ijg} ~ Poisson(ρ_j * exp(log μ_{ig}))               [cell-level counts]
 Cell-type assignment A is a collider on the V→X→Y path.
 U is a cell-level confounder that affects both A and Y.
 
-```
-    V           U
-   / \         / \
-  v   v       v   v
-  X   |       A   |
-  |\ _|_ ___/|   |
-  | \ | /    |   |
-  v  vvv     v   v
-  Y_g(A)
-```
-
-More precisely:
-
-```
-V ──→ X ──→ Y
-│     │      ↑
-│     ↓      │
-│     A ←── U
-│     │      │
-│     ↓      ↓
-└───→ Y      Y
+```mermaid
+graph TD
+    V((V)) --> X((X))
+    V((V)) --> Y_g((Yg))
+    X((X)) --> Y_g((Yg))
+    X((X)) --> A((A))
+    U((U)) --> A((A))
+    U((U)) --> Y_g((Yg))
+    A((A)) --> Y_g((Yg))
+    classDef open fill:#fff,stroke:#000
+    classDef shaded fill:#d3d3d3,stroke:#000
+    class V,U open
+    class X,A,Y_g shaded
 ```
 
 | Edge | Parameter | Description |
