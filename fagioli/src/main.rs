@@ -1,8 +1,10 @@
 mod pseudobulk_cmd;
 mod sim_qtl;
+mod sim_sumstat;
 
 use pseudobulk_cmd::*;
 use sim_qtl::*;
+use sim_sumstat::*;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -43,6 +45,8 @@ struct Cli {
 enum Commands {
     /// Simulate molecular QTL with cell type heterogeneity and single-cell counts
     SimQtl(SimulationArgs),
+    /// Simulate multi-trait GWAS summary statistics with LD structure
+    SimSumstat(SimSumstatArgs),
     /// Collapse single-cell counts into Poisson-Gamma pseudobulk
     Pseudobulk(PseudobulkArgs),
 }
@@ -60,6 +64,9 @@ fn main() -> Result<()> {
     match &cli.commands {
         Commands::SimQtl(args) => {
             sim_qtl(args)?;
+        }
+        Commands::SimSumstat(args) => {
+            sim_sumstat(args)?;
         }
         Commands::Pseudobulk(args) => {
             pseudobulk(args)?;
