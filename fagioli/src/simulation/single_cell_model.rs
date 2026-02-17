@@ -403,9 +403,7 @@ fn sample_one_individual(
     };
 
     let ct_dist = WeightedIndex::new(&fracs).unwrap();
-    let ct_assignments: Vec<usize> = (0..num_cells)
-        .map(|_| ct_dist.sample(&mut rng))
-        .collect();
+    let ct_assignments: Vec<usize> = (0..num_cells).map(|_| ct_dist.sample(&mut rng)).collect();
 
     let counts: Vec<Vec<(usize, f32)>> = ct_assignments
         .iter()
@@ -421,7 +419,11 @@ fn sample_one_individual(
                     let scaled = (lam * scale).max(1e-8);
                     Poisson::new(scaled as f64).ok().and_then(|d| {
                         let c = d.sample(&mut rng);
-                        if c > 0.5 { Some((g, c as f32)) } else { None }
+                        if c > 0.5 {
+                            Some((g, c as f32))
+                        } else {
+                            None
+                        }
                     })
                 })
                 .collect()
@@ -447,8 +449,9 @@ mod tests {
 
         let genes =
             simulate_gene_annotations(num_genes, "22", 20_000_000, 30_000_000, 1_000_000, 42);
-        let snp_positions: Vec<u64> =
-            (0..num_snps).map(|i| 20_000_000 + i as u64 * 50_000).collect();
+        let snp_positions: Vec<u64> = (0..num_snps)
+            .map(|i| 20_000_000 + i as u64 * 50_000)
+            .collect();
         let snp_chromosomes: Vec<Box<str>> = vec![Box::from("22"); num_snps];
 
         let mut genotypes = DMatrix::from_element(num_individuals, num_snps, 0.0);

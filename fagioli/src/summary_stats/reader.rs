@@ -111,14 +111,25 @@ mod tests {
 
         {
             let mut writer = bgzf::Writer::from_path(&path_gz).unwrap();
-            writeln!(writer, "#chr\tstart\tend\tsnp_id\ttrait_idx\tn\tbeta\tse\tz\tpvalue")
-                .unwrap();
+            writeln!(
+                writer,
+                "#chr\tstart\tend\tsnp_id\ttrait_idx\tn\tbeta\tse\tz\tpvalue"
+            )
+            .unwrap();
             writeln!(writer, "chr1\t99\t100\trs1\t0\t100\t0.1\t0.05\t2.0\t0.05").unwrap();
             writeln!(writer, "chr1\t99\t100\trs1\t1\t100\t0.2\t0.05\t4.0\t0.001").unwrap();
-            writeln!(writer, "chr1\t199\t200\trs2\t0\t100\t-0.1\t0.05\t-2.0\t0.05").unwrap();
+            writeln!(
+                writer,
+                "chr1\t199\t200\trs2\t0\t100\t-0.1\t0.05\t-2.0\t0.05"
+            )
+            .unwrap();
             writeln!(writer, "chr1\t199\t200\trs2\t1\t100\t0.05\t0.05\t1.0\t0.3").unwrap();
             // rs3 not in reference panel - should be skipped
-            writeln!(writer, "chr1\t299\t300\trs3\t0\t100\t0.3\t0.05\t6.0\t0.0001").unwrap();
+            writeln!(
+                writer,
+                "chr1\t299\t300\trs3\t0\t100\t0.3\t0.05\t6.0\t0.0001"
+            )
+            .unwrap();
             writer.flush().unwrap();
         }
 

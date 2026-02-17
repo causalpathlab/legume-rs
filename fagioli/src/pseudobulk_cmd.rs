@@ -58,7 +58,9 @@ pub fn pseudobulk(args: &PseudobulkArgs) -> anyhow::Result<()> {
         info!("Reading cell annotations from {}", path);
         read_cell_annotations(path)?
     } else {
-        info!("No cell annotations provided; inferring individuals from cell names (barcode@indiv)");
+        info!(
+            "No cell annotations provided; inferring individuals from cell names (barcode@indiv)"
+        );
         let mut individual_to_idx: std::collections::HashMap<Box<str>, usize> =
             std::collections::HashMap::new();
         let mut individual_ids: Vec<Box<str>> = Vec::new();
@@ -78,7 +80,10 @@ pub fn pseudobulk(args: &PseudobulkArgs) -> anyhow::Result<()> {
             cell_to_individual.insert(cell_name.clone(), idx);
         }
 
-        info!("Inferred {} individuals from cell names", individual_ids.len());
+        info!(
+            "Inferred {} individuals from cell names",
+            individual_ids.len()
+        );
         CellAnnotations {
             cell_to_individual,
             individual_ids,
@@ -105,8 +110,13 @@ pub fn pseudobulk(args: &PseudobulkArgs) -> anyhow::Result<()> {
         "Collapsing pseudobulk with Poisson-Gamma model (a0={}, b0={})...",
         args.gamma_a0, args.gamma_b0
     );
-    let collapsed =
-        collapse_pseudobulk(data_vec, &annotations, &membership, args.gamma_a0, args.gamma_b0)?;
+    let collapsed = collapse_pseudobulk(
+        data_vec,
+        &annotations,
+        &membership,
+        args.gamma_a0,
+        args.gamma_b0,
+    )?;
 
     // 5. Write output per cell type
     for (ct_idx, ct_name) in collapsed.cell_type_names.iter().enumerate() {

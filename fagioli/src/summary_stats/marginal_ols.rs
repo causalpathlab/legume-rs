@@ -161,11 +161,7 @@ mod tests {
 
         // First SNP should have large |z|
         let z_first = records[0].z.abs();
-        assert!(
-            z_first > 5.0,
-            "Causal SNP z-score too small: {}",
-            z_first
-        );
+        assert!(z_first > 5.0, "Causal SNP z-score too small: {}", z_first);
 
         // SNP index should have correct offset
         assert_eq!(records[0].snp_idx, 100);

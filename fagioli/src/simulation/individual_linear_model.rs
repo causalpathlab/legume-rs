@@ -52,11 +52,7 @@ pub fn simulate_individual_linear_model(
         "Generating cell type-specific phenotypes: {} individuals × {} cell types",
         n, k
     );
-    info!(
-        "h²_g={:.3}, h²_ε={:.3}",
-        h2_genetic,
-        1.0 - h2_genetic
-    );
+    info!("h²_g={:.3}, h²_ε={:.3}", h2_genetic, 1.0 - h2_genetic);
 
     // G: N × K, G_ik = X_i^shared β_k^shared + X_i^independent β_k^independent
     let mut g_raw = DMatrix::zeros(n, k);
