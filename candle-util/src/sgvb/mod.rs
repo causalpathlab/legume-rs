@@ -1,19 +1,20 @@
 //! Stochastic Gradient Variational Bayes (SGVB) module.
 //!
-//! Implements Black Box Variational Inference using the score function (REINFORCE)
-//! estimator with Gaussian reparameterization and control variates.
+//! Implements variational inference using the local reparameterization trick
+//! with analytical KL divergence and antithetic sampling.
 //!
 //! # Key characteristics
 //!
 //! - Likelihood is black-box (no gradients through it)
-//! - Score function gradient: `∇ELBO ≈ E[(normalized_reward) * ∇log q(θ)]`
-//! - Control variate: `(reward - mean) / std`
+//! - Local reparameterization: samples η in n-space instead of θ in p-space
+//! - Analytical KL divergence (no MC estimation needed)
+//! - Antithetic sampling for variance reduction
 //! - Linear model: `η = X * θ` where `θ ~ q(θ) = N(μ, σ)`
 //!
 //! # Example
 //!
 //! ```ignore
-//! use candle_util::sgvb::{LinearRegressionSGVB, GaussianPrior, SGVBConfig, sgvb_loss, BlackBoxLikelihood};
+//! use candle_util::sgvb::{LinearRegressionSGVB, GaussianPrior, SGVBConfig, local_reparam_loss, BlackBoxLikelihood};
 //!
 //! // Define your black-box likelihood
 //! struct MyLikelihood { /* ... */ }
@@ -28,7 +29,7 @@
 //!
 //! // Training loop
 //! for _ in 0..num_iters {
-//!     let loss = sgvb_loss(&model, &likelihood, &config)?;
+//!     let loss = local_reparam_loss(&model, &likelihood, config.num_samples, 1.0)?;
 //!     // optimizer.backward_step(&loss)?;
 //! }
 //!
@@ -36,6 +37,7 @@
 //! let predictions = model.eta_mean()?;
 //! ```
 
+pub mod cavi_susie;
 mod composite_model;
 mod gaussian_prior;
 pub mod likelihood;
@@ -43,25 +45,29 @@ mod regression_linear;
 #[allow(clippy::module_inception)]
 mod sgvb;
 mod traits;
+pub mod variant_tree;
 mod variational_bisusie;
 mod variational_gaussian;
 mod variational_io;
+mod variational_multilevel_susie;
 mod variational_susie;
 
 pub use composite_model::{
-    composite_direct_elbo_loss, composite_elbo, composite_sgvb_loss, samples_direct_elbo_loss,
-    samples_elbo, samples_sgvb_loss, CompositeModel,
+    composite_local_reparam_loss, samples_local_reparam_loss, CompositeModel,
 };
 pub use gaussian_prior::{FixedGaussianPrior, GaussianPrior};
 pub use likelihood::{
     estimate_kappa_mle, l2_normalize_dim, lgamma_approx, log_bessel_i, suggest_kappa_init,
-    vmf_log_normalizer, GaussianLikelihood, NegativeBinomialLikelihood, PoissonLikelihood,
-    VmfFixedKappaLikelihood,
+    vmf_log_normalizer, FixedGaussianLikelihood, GaussianLikelihood, NegativeBinomialLikelihood,
+    OffsetPoissonLikelihood, PoissonLikelihood, VmfFixedKappaLikelihood,
 };
 pub use regression_linear::{LinearModelSGVB, LinearRegressionSGVB};
-pub use sgvb::{compute_elbo, direct_elbo_loss, sgvb_loss, SGVBConfig};
-pub use traits::{BlackBoxLikelihood, Prior, SgvbModel, SgvbSample, VariationalDistribution};
-pub use variational_bisusie::{BiSusieVar, SelectionFn};
+pub use sgvb::{local_reparam_loss, SGVBConfig};
+pub use traits::{
+    AnalyticalKL, BlackBoxLikelihood, LocalReparamSample, Prior, VariationalDistribution,
+};
+pub use variational_bisusie::BiSusieVar;
 pub use variational_gaussian::GaussianVar;
 pub use variational_io::{SparseVariationalOutput, VariationalOutput};
+pub use variational_multilevel_susie::MultiLevelSusieVar;
 pub use variational_susie::SusieVar;

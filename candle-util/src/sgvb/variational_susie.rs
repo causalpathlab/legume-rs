@@ -130,72 +130,6 @@ impl SusieVar {
 }
 
 impl VariationalDistribution for SusieVar {
-    /// Sample θ using Gaussian moment-matching approximation.
-    ///
-    /// Computes the mean and variance of θ under the Susie distribution,
-    /// then samples from N(mean, var) using reparameterization. This enables
-    /// proper REINFORCE gradients since log_prob(θ) varies per sample.
-    ///
-    /// # Arguments
-    /// * `num_samples` - Number of samples S
-    ///
-    /// # Returns
-    /// (theta, epsilon) where:
-    /// - theta: shape (S, p, k) - samples from Gaussian approximation
-    /// - epsilon: shape (S, p, k) - standard normal noise used for sampling
-    fn sample(&self, num_samples: usize) -> Result<(Tensor, Tensor)> {
-        let (_, p, k) = self.beta_mean.dims3()?;
-        let device = self.beta_mean.device();
-        let dtype = self.beta_mean.dtype();
-
-        // Compute moments of θ under Susie distribution
-        let mean = self.theta_mean()?; // (p, k)
-        let var = self.var()?; // (p, k)
-        let std = (var + 1e-8)?.sqrt()?; // (p, k), add eps for numerical stability
-
-        // Sample ε ~ N(0, 1): (S, p, k)
-        let epsilon = Tensor::randn(0f32, 1f32, (num_samples, p, k), device)?.to_dtype(dtype)?;
-
-        // θ = mean + std * ε (reparameterization trick)
-        let theta = mean
-            .unsqueeze(0)?
-            .broadcast_add(&epsilon.broadcast_mul(&std)?)?;
-
-        Ok((theta, epsilon))
-    }
-
-    /// Compute log q(θ) under the Gaussian moment-matching approximation.
-    ///
-    /// Uses θ ~ N(E[θ], Var[θ]) where the moments are computed from the
-    /// Susie parameters. This ensures log_prob varies per sample, enabling
-    /// proper REINFORCE gradient estimation.
-    ///
-    /// Gradients flow to all Susie parameters (logits, beta_mean, beta_ln_std)
-    /// through the mean and variance computations.
-    fn log_prob(&self, theta: &Tensor) -> Result<Tensor> {
-        let dtype = theta.dtype();
-        let device = theta.device();
-        let ln_2pi =
-            Tensor::new((2.0 * std::f64::consts::PI).ln() as f32, device)?.to_dtype(dtype)?;
-
-        // Compute moments (gradients flow through these to all Susie params)
-        let mean = self.theta_mean()?; // (p, k)
-        let var = self.var()?; // (p, k)
-        let log_var = (var.clone() + 1e-8)?.log()?; // (p, k)
-
-        // log N(θ; mean, var) = -0.5 * [(θ - mean)²/var + log(var) + log(2π)]
-        let diff = theta.broadcast_sub(&mean)?; // (S, p, k)
-        let normalized_sq = diff.sqr()?.broadcast_div(&(var + 1e-8)?)?; // (S, p, k)
-
-        let log_prob_element = (normalized_sq
-            .broadcast_add(&log_var)?
-            .broadcast_add(&ln_2pi)?
-            * (-0.5))?;
-
-        // Sum over (p, k) dimensions -> (S,)
-        log_prob_element.sum(2)?.sum(1)
-    }
-
     /// Get the mean of θ: E[θ] = Σ_l (α_l ⊙ μ_l)
     fn mean(&self) -> Result<Tensor> {
         self.theta_mean()
@@ -278,7 +212,6 @@ mod tests {
         let l = 3;
         let p = 20;
         let k = 2;
-        let s = 10;
 
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
@@ -292,11 +225,6 @@ mod tests {
         // Check PIP shape - now (p, k)
         let pip = susie.pip()?;
         assert_eq!(pip.dims(), &[p, k]);
-
-        // Check sample shape (using Gaussian moment-matching approximation)
-        let (theta, epsilon) = susie.sample(s)?;
-        assert_eq!(theta.dims(), &[s, p, k]);
-        assert_eq!(epsilon.dims(), &[s, p, k]); // epsilon is (S, p, k) for Gaussian approx
 
         // Check theta_mean shape
         let theta_mean = susie.theta_mean()?;
@@ -345,7 +273,7 @@ mod tests {
     #[test]
     fn test_susie_with_linear_model() -> Result<()> {
         use crate::sgvb::traits::BlackBoxLikelihood;
-        use crate::sgvb::{compute_elbo, sgvb_loss, GaussianPrior, LinearModelSGVB, SGVBConfig};
+        use crate::sgvb::{local_reparam_loss, GaussianPrior, LinearModelSGVB, SGVBConfig};
         use candle_core::Tensor;
 
         let device = Device::Cpu;
@@ -371,7 +299,7 @@ mod tests {
         let config = SGVBConfig::default();
 
         // Combine into generic LinearModelSGVB
-        let model = LinearModelSGVB::from_variational(susie, x, prior, config.clone());
+        let model = LinearModelSGVB::from_variational(susie, x, prior, config);
 
         // Simple Gaussian likelihood
         struct GaussianLik {
@@ -387,13 +315,9 @@ mod tests {
         }
         let likelihood = GaussianLik { y };
 
-        // Test that sgvb_loss works
-        let loss = sgvb_loss(&model, &likelihood, &config)?;
+        // Test that local_reparam_loss works
+        let loss = local_reparam_loss(&model, &likelihood, 10, 1.0)?;
         assert!(loss.dims().is_empty());
-
-        // Test that compute_elbo works
-        let elbo = compute_elbo(&model, &likelihood, 10)?;
-        assert!(elbo.dims().is_empty());
 
         // Test model methods
         let eta_mean = model.eta_mean()?;

@@ -325,6 +325,75 @@ impl SparseVariationalOutput for super::SusieVar {
     }
 }
 
+impl VariationalOutput for super::MultiLevelSusieVar {
+    fn write_mean(&self, path: &str) -> Result<()> {
+        write_tensor(&self.theta_mean()?, path)
+    }
+
+    fn write_var(&self, path: &str) -> Result<()> {
+        write_tensor(&VariationalDistribution::var(self)?, path)
+    }
+
+    fn write_std(&self, path: &str) -> Result<()> {
+        write_tensor(&VariationalDistribution::var(self)?.sqrt()?, path)
+    }
+
+    fn write_all(&self, header: &str) -> Result<()> {
+        self.write_mean(&format!("{}.mean.gz", header))?;
+        self.write_std(&format!("{}.std.gz", header))
+    }
+
+    fn to_parquet_with_names(
+        &self,
+        file_path: &str,
+        row_names: (Option<&[Box<str>]>, Option<&str>),
+        column_names: Option<&[Box<str>]>,
+    ) -> Result<()> {
+        let mean = self.theta_mean()?;
+        let std = VariationalDistribution::var(self)?.sqrt()?;
+        let pip = self.pip()?;
+
+        let (mean_vals, row_idx, col_idx) = melt_tensor(&mean)?;
+        let (std_vals, _, _) = melt_tensor(&std)?;
+        let (pip_vals, _, _) = melt_tensor(&pip)?;
+
+        let row_names_slice = row_names.0;
+        let rows = indices_to_names(&row_idx, row_names_slice);
+        let cols = indices_to_names(&col_idx, column_names);
+
+        write_melted_parquet(
+            file_path,
+            "MultiLevelSusieVar",
+            &rows,
+            &cols,
+            &[("mean", &mean_vals), ("std", &std_vals), ("pip", &pip_vals)],
+        )
+    }
+}
+
+impl SparseVariationalOutput for super::MultiLevelSusieVar {
+    fn write_pip(&self, path: &str) -> Result<()> {
+        write_tensor(&self.pip()?, path)
+    }
+
+    fn write_alpha(&self, path: &str) -> Result<()> {
+        let alpha = self.alpha()?;
+        let dims = alpha.dims();
+        if dims.len() == 3 {
+            let (l, p, k) = (dims[0], dims[1], dims[2]);
+            write_tensor(&alpha.reshape((l * p, k))?, path)
+        } else {
+            write_tensor(&alpha, path)
+        }
+    }
+
+    fn write_all_sparse(&self, header: &str) -> Result<()> {
+        self.write_all(header)?;
+        self.write_pip(&format!("{}.pip.gz", header))?;
+        self.write_alpha(&format!("{}.alpha.gz", header))
+    }
+}
+
 //
 // Tests
 //

@@ -2,7 +2,7 @@ use candle_core::{Result, Tensor};
 use candle_nn::VarBuilder;
 
 use super::sgvb::SGVBConfig;
-use super::traits::{Prior, SgvbModel, SgvbSample, VariationalDistribution};
+use super::traits::{AnalyticalKL, LocalReparamSample, Prior, VariationalDistribution};
 use super::variational_gaussian::GaussianVar;
 
 /// Generic linear model SGVB: η = X * θ where θ ~ q(θ)
@@ -60,25 +60,60 @@ impl<V: VariationalDistribution, P: Prior> LinearModelSGVB<V, P> {
     }
 }
 
-impl<V: VariationalDistribution, P: Prior> SgvbModel for LinearModelSGVB<V, P> {
-    fn sample(&self, num_samples: usize) -> Result<SgvbSample> {
-        // 1. Sample θ from variational distribution
-        let (theta, _) = self.variational.sample(num_samples)?;
+impl<V: VariationalDistribution, P: Prior + AnalyticalKL> LinearModelSGVB<V, P> {
+    /// Sample in n-space using the local reparameterization trick.
+    ///
+    /// Instead of sampling θ (p-dimensional) and computing η = Xθ,
+    /// we directly sample η in n-space:
+    ///   E[η] = X @ E[θ],  V[η] = (X⊙X) @ V[θ]
+    ///   η = E[η] + √V[η] ⊙ ε,  ε ~ N(0, I)
+    ///
+    /// Uses antithetic sampling by default: pairs each ε with −ε so the
+    /// empirical mean of noise is exactly zero. This strictly reduces
+    /// variance of the MC log-likelihood estimate with no hyperparameters.
+    pub fn local_reparam_sample(&self, num_samples: usize) -> Result<LocalReparamSample> {
+        let theta_mean = self.variational.mean()?; // (p, k)
+        let theta_var = self.variational.var()?; // (p, k)
 
-        // 2. Compute η = X @ θ
-        let eta = self.x_design.unsqueeze(0)?.broadcast_matmul(&theta)?;
+        // E[η] = X @ E[θ]
+        let eta_mean = self.x_design.matmul(&theta_mean)?; // (n, k)
 
-        // 3. Compute log_prior and log_q
-        let log_prior = self.prior.log_prob(&theta)?;
-        let log_q = self.variational.log_prob(&theta)?;
-        let log_q_grad = self.variational.log_prob(&theta.detach())?;
+        // V[η] = (X⊙X) @ V[θ]
+        let x_sq = self.x_design.sqr()?; // (n, p)
+        let eta_var = x_sq.matmul(&theta_var)?; // (n, k)
 
-        Ok(SgvbSample {
-            eta,
-            log_prior,
-            log_q,
-            log_q_grad,
-        })
+        let (n, k) = eta_mean.dims2()?;
+        let device = eta_mean.device();
+        let dtype = eta_mean.dtype();
+
+        // Antithetic sampling: draw S/2 noise vectors, mirror them
+        // For each ε_i, also use −ε_i → sample mean of noise is exactly 0
+        let half_s = num_samples / 2;
+        let epsilon = if half_s > 0 {
+            let eps_half = Tensor::randn(0f32, 1f32, (half_s, n, k), device)?.to_dtype(dtype)?;
+            let eps_neg = eps_half.neg()?;
+            if num_samples % 2 == 1 {
+                // Odd: add one extra independent sample
+                let eps_extra = Tensor::randn(0f32, 1f32, (1, n, k), device)?.to_dtype(dtype)?;
+                Tensor::cat(&[eps_half, eps_neg, eps_extra], 0)?
+            } else {
+                Tensor::cat(&[eps_half, eps_neg], 0)?
+            }
+        } else {
+            // num_samples == 1: single sample, no antithetic partner
+            Tensor::randn(0f32, 1f32, (1, n, k), device)?.to_dtype(dtype)?
+        };
+
+        // η = E[η] + √V[η] ⊙ ε
+        let eta_std = (eta_var + 1e-8)?.sqrt()?; // (n, k)
+        let eta = eta_mean
+            .unsqueeze(0)?
+            .broadcast_add(&epsilon.broadcast_mul(&eta_std.unsqueeze(0)?)?)?; // (S, n, k)
+
+        // Analytical KL
+        let kl = self.prior.kl_from_gaussian(&theta_mean, &theta_var)?;
+
+        Ok(LocalReparamSample { eta, kl })
     }
 }
 
@@ -118,7 +153,7 @@ impl<P: Prior> LinearRegressionSGVB<P> {
 mod tests {
     use super::*;
     use crate::sgvb::traits::BlackBoxLikelihood;
-    use crate::sgvb::{compute_elbo, direct_elbo_loss, sgvb_loss, GaussianPrior};
+    use crate::sgvb::{local_reparam_loss, GaussianPrior};
     use candle_core::{DType, Device, Tensor};
     use candle_nn::{Optimizer, VarBuilder, VarMap};
 
@@ -198,26 +233,23 @@ mod tests {
 
         let likelihood = TestGaussianLikelihood::new(y, 0.5);
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
-        let config = SGVBConfig::new(50); // 50 samples, normalized
+        let config = SGVBConfig::new(50);
 
-        let model = LinearRegressionSGVB::new(vb.pp("model"), x, k, prior, config.clone())?;
+        let model = LinearRegressionSGVB::new(vb.pp("model"), x, k, prior, config)?;
 
         let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.01)?;
 
         for i in 0..200 {
-            let loss = sgvb_loss(&model, &likelihood, &config)?;
+            let loss = local_reparam_loss(&model, &likelihood, 50, 1.0)?;
             optimizer.backward_step(&loss)?;
-
-            let elbo = compute_elbo(&model, &likelihood, 100)?;
 
             if i % 20 == 0 {
                 let loss_val: f32 = loss.to_scalar()?;
-                let elbo_val: f32 = elbo.to_scalar()?;
+                let elbo_val = -loss_val;
                 println!("iter {}: loss = {:.4}, elbo = {:.4}", i, loss_val, elbo_val);
             }
 
             assert!(loss.dims().is_empty());
-            assert!(elbo.dims().is_empty());
         }
 
         // Check learned coefficients
@@ -313,13 +345,12 @@ mod tests {
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::new(50);
 
-        let model = LinearModelSGVB::from_variational(susie, x, prior, config.clone());
+        let model = LinearModelSGVB::from_variational(susie, x, prior, config);
 
         let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.05)?;
 
         for i in 0..500 {
-            // Direct ELBO with reparameterization gradients
-            let loss = direct_elbo_loss(&model, &likelihood, config.num_samples)?;
+            let loss = local_reparam_loss(&model, &likelihood, 50, 1.0)?;
             optimizer.backward_step(&loss)?;
 
             if i % 5 == 0 {
@@ -364,96 +395,6 @@ mod tests {
         assert!(
             pip_5 > other_mean * 3.0,
             "PIP[5] should be > 3x other mean, got {} vs {}",
-            pip_5,
-            other_mean
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_susie_linear_sparse_recovery_reinforce() -> Result<()> {
-        use crate::sgvb::SusieVar;
-
-        let device = Device::Cpu;
-        let dtype = DType::F32;
-
-        let n = 150;
-        let p = 50;
-        let k = 1;
-        let l = 2; // 2 components for 2 true effects
-
-        let x = Tensor::randn(0f32, 1f32, (n, p), &device)?;
-
-        // Generate y with stronger signal for REINFORCE (higher variance estimator)
-        // y = X[:,0] * 3.0 + X[:,5] * 2.5 + noise
-        let x_0 = x.narrow(1, 0, 1)?;
-        let x_5 = x.narrow(1, 5, 1)?;
-        let noise = Tensor::randn(0f32, 0.3f32, (n, k), &device)?;
-        let y = ((x_0 * 3.0)? + (x_5 * 2.5)? + noise)?;
-
-        let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
-
-        let likelihood = TestGaussianLikelihood::new(y, 0.3);
-        let susie = SusieVar::new(vb.pp("susie"), l, p, k)?;
-        let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
-        // More samples for variance reduction in REINFORCE
-        let config = SGVBConfig::new(100);
-
-        let model = LinearModelSGVB::from_variational(susie, x, prior, config.clone());
-
-        // Lower learning rate for REINFORCE stability
-        let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.02)?;
-
-        for i in 0..800 {
-            // REINFORCE with Gaussian moment-matching approximation for Susie
-            let loss = sgvb_loss(&model, &likelihood, &config)?;
-            optimizer.backward_step(&loss)?;
-
-            if i % 50 == 0 {
-                let loss_val: f32 = loss.to_scalar()?;
-                let pip = model.variational.pip()?;
-                let pip_0: f32 = pip.get(0)?.get(0)?.to_scalar()?;
-                let pip_5: f32 = pip.get(5)?.get(0)?.to_scalar()?;
-                println!(
-                    "iter {}: loss = {:.4}, PIP[0] = {:.4}, PIP[5] = {:.4}",
-                    i, loss_val, pip_0, pip_5
-                );
-            }
-        }
-
-        // Check PIPs - features 0 and 5 should have high PIPs
-        let pip = model.variational.pip()?;
-        let pip_0: f32 = pip.get(0)?.get(0)?.to_scalar()?;
-        let pip_5: f32 = pip.get(5)?.get(0)?.to_scalar()?;
-
-        // Mean PIP of other features
-        let mut other_sum = 0.0f32;
-        for j in 0..p {
-            if j != 0 && j != 5 {
-                let val: f32 = pip.get(j)?.get(0)?.to_scalar()?;
-                other_sum += val;
-            }
-        }
-        let other_mean = other_sum / (p - 2) as f32;
-
-        println!("\nPosterior Inclusion Probabilities (REINFORCE):");
-        println!("  PIP[0] (true): {:.4}", pip_0);
-        println!("  PIP[5] (true): {:.4}", pip_5);
-        println!("  Others mean:   {:.4}", other_mean);
-
-        // REINFORCE has higher variance - use relaxed threshold
-        // True features should have notably higher PIPs than others
-        assert!(
-            pip_0 > other_mean * 1.5,
-            "PIP[0] should be > 1.5x other mean, got {} vs {}",
-            pip_0,
-            other_mean
-        );
-        assert!(
-            pip_5 > other_mean * 1.5,
-            "PIP[5] should be > 1.5x other mean, got {} vs {}",
             pip_5,
             other_mean
         );

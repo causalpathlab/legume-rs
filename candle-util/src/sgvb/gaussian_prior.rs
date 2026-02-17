@@ -1,7 +1,7 @@
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 
-use super::traits::Prior;
+use super::traits::{AnalyticalKL, Prior};
 
 /// Maximum value for ln(τ) to prevent numerical overflow.
 /// ln(100) ≈ 4.6, so τ is capped at ~100.
@@ -95,6 +95,33 @@ impl Prior for GaussianPrior {
     }
 }
 
+impl AnalyticalKL for GaussianPrior {
+    /// KL(N(μ, σ²) ‖ N(0, τ²)) = Σ [ln(τ/σ) + (σ² + μ²)/(2τ²) − 0.5]
+    fn kl_from_gaussian(&self, mean: &Tensor, var: &Tensor) -> Result<Tensor> {
+        let dtype = mean.dtype();
+
+        let ln_tau_clamped = self
+            .ln_tau
+            .clamp(-MAX_LN_TAU, MAX_LN_TAU)?
+            .to_dtype(dtype)?;
+        let tau = ln_tau_clamped.exp()?;
+        let tau_sq = tau.sqr()?;
+
+        // ln(τ) - 0.5·ln(var)
+        let ln_var = (var + 1e-8)?.log()?;
+        let log_term = ln_tau_clamped.broadcast_sub(&(ln_var * 0.5)?)?;
+
+        // (var + mean²) / (2τ²)
+        let quad_term = ((var + mean.sqr()?)?.broadcast_div(&tau_sq)? * 0.5)?;
+
+        // KL per element = ln(τ/σ) + (σ² + μ²)/(2τ²) - 0.5
+        let kl_elements = ((log_term + quad_term)? - 0.5)?;
+
+        // Sum over all (p, k) elements
+        kl_elements.sum_all()
+    }
+}
+
 /// Fixed (non-learnable) Gaussian prior p(θ) = N(0, τ²I)
 pub struct FixedGaussianPrior {
     /// Fixed scale parameter τ
@@ -134,6 +161,22 @@ impl Prior for FixedGaussianPrior {
 
         // Sum over dimensions 1 and 2 (p and k)
         log_prob_element.sum(2)?.sum(1)
+    }
+}
+
+impl AnalyticalKL for FixedGaussianPrior {
+    /// KL(N(μ, σ²) ‖ N(0, τ²)) = Σ [ln(τ/σ) + (σ² + μ²)/(2τ²) − 0.5]
+    fn kl_from_gaussian(&self, mean: &Tensor, var: &Tensor) -> Result<Tensor> {
+        let ln_tau: f64 = (self.tau as f64).ln();
+        let tau_sq: f64 = (self.tau as f64).powi(2);
+
+        let ln_var = (var + 1e-8)?.log()?;
+        let log_term = (ln_var * (-0.5))? + ln_tau;
+
+        let quad_term = (((var + mean.sqr()?)? / tau_sq)? * 0.5)?;
+
+        let kl_elements = ((log_term? + quad_term)? - 0.5)?;
+        kl_elements.sum_all()
     }
 }
 

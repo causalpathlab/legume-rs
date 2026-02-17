@@ -8,9 +8,9 @@ mod negbinom;
 mod poisson;
 mod vmf;
 
-pub use gaussian::GaussianLikelihood;
+pub use gaussian::{FixedGaussianLikelihood, GaussianLikelihood};
 pub use negbinom::{lgamma_approx, NegativeBinomialLikelihood};
-pub use poisson::PoissonLikelihood;
+pub use poisson::{OffsetPoissonLikelihood, PoissonLikelihood};
 pub use vmf::{
     estimate_kappa_mle, l2_normalize_dim, log_bessel_i, suggest_kappa_init, vmf_log_normalizer,
     VmfFixedKappaLikelihood,

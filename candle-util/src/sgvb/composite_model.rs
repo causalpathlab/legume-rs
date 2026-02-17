@@ -8,31 +8,27 @@
 
 use candle_core::{Result, Tensor};
 
-use super::traits::{BlackBoxLikelihood, SgvbModel, SgvbSample};
+use super::regression_linear::LinearModelSGVB;
+use super::traits::{
+    AnalyticalKL, BlackBoxLikelihood, LocalReparamSample, Prior, VariationalDistribution,
+};
 
 /// Composite model that combines multiple SGVB modules.
 ///
 /// Each module produces its own eta from potentially different
 /// design matrices and variational distributions.
-pub struct CompositeModel<M: SgvbModel> {
-    pub modules: Vec<M>,
+pub struct CompositeModel<V, P> {
+    pub modules: Vec<LinearModelSGVB<V, P>>,
 }
 
-impl<M: SgvbModel> CompositeModel<M> {
+impl<V: VariationalDistribution, P: Prior> CompositeModel<V, P> {
     /// Create a composite model from a vector of modules.
-    pub fn new(modules: Vec<M>) -> Self {
+    pub fn new(modules: Vec<LinearModelSGVB<V, P>>) -> Self {
         assert!(
             !modules.is_empty(),
             "CompositeModel requires at least one module"
         );
         Self { modules }
-    }
-
-    /// Sample from all modules.
-    ///
-    /// Returns a vector of SgvbSample, one per module.
-    pub fn sample_all(&self, num_samples: usize) -> Result<Vec<SgvbSample>> {
-        self.modules.iter().map(|m| m.sample(num_samples)).collect()
     }
 
     /// Number of modules (number of etas).
@@ -41,182 +37,53 @@ impl<M: SgvbModel> CompositeModel<M> {
     }
 }
 
-/// Sum a collection of tensors element-wise.
-fn sum_tensors<'a>(mut tensors: impl Iterator<Item = &'a Tensor>) -> Result<Tensor> {
-    let first = tensors.next().expect("Expected at least one tensor");
-    let mut result = first.clone();
-    for t in tensors {
-        result = (&result + t)?;
+/// Compute local reparameterization loss for a composite model.
+///
+/// All modules must use local reparameterization (same variational + prior types).
+pub fn composite_local_reparam_loss<V, P, L>(
+    model: &CompositeModel<V, P>,
+    likelihood: &L,
+    num_samples: usize,
+    kl_weight: f64,
+) -> Result<Tensor>
+where
+    V: VariationalDistribution,
+    P: Prior + AnalyticalKL,
+    L: BlackBoxLikelihood,
+{
+    let samples: Vec<LocalReparamSample> = model
+        .modules
+        .iter()
+        .map(|m| m.local_reparam_sample(num_samples))
+        .collect::<Result<_>>()?;
+
+    samples_local_reparam_loss(&samples, likelihood, kl_weight)
+}
+
+/// Compute local reparameterization loss from pre-sampled outputs.
+///
+/// Allows mixing modules that were sampled separately using local reparameterization.
+pub fn samples_local_reparam_loss<L>(
+    samples: &[LocalReparamSample],
+    likelihood: &L,
+    kl_weight: f64,
+) -> Result<Tensor>
+where
+    L: BlackBoxLikelihood,
+{
+    let etas: Vec<&Tensor> = samples.iter().map(|s| &s.eta).collect();
+    let llik = likelihood.log_likelihood(&etas)?;
+    let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
+
+    // Sum KLs across modules
+    let mut total_kl = samples[0].kl.clone();
+    for s in &samples[1..] {
+        total_kl = (&total_kl + &s.kl)?;
     }
-    Ok(result)
-}
 
-/// Compute SGVB loss for a composite model using REINFORCE estimator.
-///
-/// Each module contributes its own eta to the likelihood, and the
-/// log_prior and log_q terms are summed across modules.
-pub fn composite_sgvb_loss<M, L>(
-    model: &CompositeModel<M>,
-    likelihood: &L,
-    num_samples: usize,
-    normalize: bool,
-) -> Result<Tensor>
-where
-    M: SgvbModel,
-    L: BlackBoxLikelihood,
-{
-    let samples = model.sample_all(num_samples)?;
-
-    // Collect etas for likelihood
-    let etas: Vec<&Tensor> = samples.iter().map(|s| &s.eta).collect();
-    let llik = likelihood.log_likelihood(&etas)?;
-    let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
-
-    // Sum log_prior and log_q across modules
-    let log_prior = sum_tensors(samples.iter().map(|s| &s.log_prior))?;
-    let log_q = sum_tensors(samples.iter().map(|s| &s.log_q))?;
-    let log_q_grad = sum_tensors(samples.iter().map(|s| &s.log_q_grad))?;
-
-    // Reward = log p(y|η) + log p(θ) - log q(θ)
-    let reward = ((&llik + &log_prior)? - &log_q)?;
-
-    // Normalize reward (control variate)
-    let reward_norm = if normalize {
-        let mean = reward.mean(0)?;
-        let var = reward.var(0)?;
-        let std = (var + 1e-8)?.sqrt()?;
-        reward.broadcast_sub(&mean)?.broadcast_div(&std)?
-    } else {
-        reward
-    };
-
-    // Detach reward and compute surrogate loss
-    let reward_detached = reward_norm.detach();
-    let surrogate_loss = (&reward_detached * &log_q_grad)?.mean(0)?.neg()?;
-
-    Ok(surrogate_loss)
-}
-
-/// Compute direct ELBO loss for a composite model with reparameterization gradients.
-pub fn composite_direct_elbo_loss<M, L>(
-    model: &CompositeModel<M>,
-    likelihood: &L,
-    num_samples: usize,
-) -> Result<Tensor>
-where
-    M: SgvbModel,
-    L: BlackBoxLikelihood,
-{
-    let samples = model.sample_all(num_samples)?;
-
-    // Collect etas for likelihood
-    let etas: Vec<&Tensor> = samples.iter().map(|s| &s.eta).collect();
-    let llik = likelihood.log_likelihood(&etas)?;
-    let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
-
-    // Sum log_prior and log_q across modules
-    let log_prior = sum_tensors(samples.iter().map(|s| &s.log_prior))?;
-    let log_q = sum_tensors(samples.iter().map(|s| &s.log_q))?;
-
-    // ELBO = log_lik + log_prior - log_q
-    let elbo = ((&llik + &log_prior)? - &log_q)?;
-
-    // Return negative mean ELBO as loss
-    elbo.mean(0)?.neg()
-}
-
-/// Compute raw ELBO for a composite model (for monitoring).
-pub fn composite_elbo<M, L>(
-    model: &CompositeModel<M>,
-    likelihood: &L,
-    num_samples: usize,
-) -> Result<Tensor>
-where
-    M: SgvbModel,
-    L: BlackBoxLikelihood,
-{
-    let samples = model.sample_all(num_samples)?;
-    samples_elbo(&samples, likelihood)
-}
-
-// ============================================================================
-// Functions that work directly with Vec<SgvbSample> for heterogeneous modules
-// ============================================================================
-
-/// Compute direct ELBO loss from pre-sampled outputs.
-///
-/// Allows mixing models with different variational types by sampling separately
-/// and combining. Each sample provides one eta.
-pub fn samples_direct_elbo_loss<L>(samples: &[SgvbSample], likelihood: &L) -> Result<Tensor>
-where
-    L: BlackBoxLikelihood,
-{
-    let etas: Vec<&Tensor> = samples.iter().map(|s| &s.eta).collect();
-    let llik = likelihood.log_likelihood(&etas)?;
-    let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
-
-    let log_prior = sum_tensors(samples.iter().map(|s| &s.log_prior))?;
-    let log_q = sum_tensors(samples.iter().map(|s| &s.log_q))?;
-
-    let elbo = ((&llik + &log_prior)? - &log_q)?;
-    elbo.mean(0)?.neg()
-}
-
-/// Compute SGVB loss from pre-sampled outputs using REINFORCE estimator.
-///
-/// Allows mixing models with different variational types by sampling separately
-/// and combining. Each sample provides one eta.
-pub fn samples_sgvb_loss<L>(
-    samples: &[SgvbSample],
-    likelihood: &L,
-    normalize: bool,
-) -> Result<Tensor>
-where
-    L: BlackBoxLikelihood,
-{
-    let etas: Vec<&Tensor> = samples.iter().map(|s| &s.eta).collect();
-    let llik = likelihood.log_likelihood(&etas)?;
-    let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
-
-    // Sum log_prior and log_q across modules
-    let log_prior = sum_tensors(samples.iter().map(|s| &s.log_prior))?;
-    let log_q = sum_tensors(samples.iter().map(|s| &s.log_q))?;
-    let log_q_grad = sum_tensors(samples.iter().map(|s| &s.log_q_grad))?;
-
-    // Reward = log p(y|η) + log p(θ) - log q(θ)
-    let reward = ((&llik + &log_prior)? - &log_q)?;
-
-    // Normalize reward (control variate)
-    let reward_norm = if normalize {
-        let mean = reward.mean(0)?;
-        let var = reward.var(0)?;
-        let std = (var + 1e-8)?.sqrt()?;
-        reward.broadcast_sub(&mean)?.broadcast_div(&std)?
-    } else {
-        reward
-    };
-
-    // Detach reward and compute surrogate loss
-    let reward_detached = reward_norm.detach();
-    let surrogate_loss = (&reward_detached * &log_q_grad)?.mean(0)?.neg()?;
-
-    Ok(surrogate_loss)
-}
-
-/// Compute raw ELBO from pre-sampled outputs (for monitoring).
-pub fn samples_elbo<L>(samples: &[SgvbSample], likelihood: &L) -> Result<Tensor>
-where
-    L: BlackBoxLikelihood,
-{
-    let etas: Vec<&Tensor> = samples.iter().map(|s| &s.eta).collect();
-    let llik = likelihood.log_likelihood(&etas)?;
-    let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
-
-    let log_prior = sum_tensors(samples.iter().map(|s| &s.log_prior))?;
-    let log_q = sum_tensors(samples.iter().map(|s| &s.log_q))?;
-
-    let elbo = ((&llik + &log_prior)? - &log_q)?;
-    elbo.mean(0)
+    // ELBO = E[log p(y|η)] − β·KL
+    let elbo = (llik.mean(0)? - (total_kl * kl_weight)?)?;
+    elbo.neg()
 }
 
 #[cfg(test)]
@@ -291,8 +158,12 @@ mod tests {
 
         assert_eq!(composite.num_modules(), 2);
 
-        // Test sampling
-        let samples = composite.sample_all(10)?;
+        // Test local reparam sampling
+        let samples: Vec<LocalReparamSample> = composite
+            .modules
+            .iter()
+            .map(|m| m.local_reparam_sample(10))
+            .collect::<Result<_>>()?;
         assert_eq!(samples.len(), 2);
         assert_eq!(samples[0].eta.dims(), &[10, n, k]);
         assert_eq!(samples[1].eta.dims(), &[10, n, k]);
@@ -342,16 +213,15 @@ mod tests {
         let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.01)?;
 
         for i in 0..300 {
-            let loss = composite_direct_elbo_loss(&composite, &likelihood, 30)?;
+            let loss = composite_local_reparam_loss(&composite, &likelihood, 30, 1.0)?;
             optimizer.backward_step(&loss)?;
 
             if i % 100 == 0 {
-                let elbo = composite_elbo(&composite, &likelihood, 50)?;
+                let loss_val: f32 = loss.to_scalar()?;
+                let elbo_val = -loss_val;
                 println!(
                     "iter {:4}: loss = {:10.4}, ELBO = {:10.4}",
-                    i,
-                    loss.to_scalar::<f32>()?,
-                    elbo.to_scalar::<f32>()?
+                    i, loss_val, elbo_val
                 );
             }
         }

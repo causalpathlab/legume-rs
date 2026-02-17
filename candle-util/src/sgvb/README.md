@@ -19,7 +19,7 @@ Stochastic Gradient Variational Bayes using the score function (REINFORCE) estim
 | `traits.rs` | `BlackBoxLikelihood`, `VariationalDistribution`, `Prior` |
 | `gaussian.rs` | `GaussianVariational` |
 | `prior.rs` | `GaussianPrior`, `FixedGaussianPrior` |
-| `sgvb.rs` | `sgvb_loss`, `compute_elbo`, `SGVBConfig` |
+| `sgvb.rs` | `local_reparam_loss`, `SGVBConfig` |
 | `linear_regression_model.rs` | `LinearRegressionSGVB` |
 
 ## Usage
