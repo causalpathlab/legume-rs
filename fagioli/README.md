@@ -22,10 +22,11 @@ Per gene $g$, the model generates individual × cell type phenotypes in two stag
 
 $$Y_{gik} = \sqrt{h^2} \cdot \widetilde{G}_{gik} + \sqrt{1-h^2} \cdot \widetilde{\varepsilon}_{gik}$$
 
-where tildes denote column-standardized values, and:
+where tildes denote column-standardized values. The genetic value (zero for non-eQTL genes) is:
 
-- $G_{gik} = \sum_j X_{ij} \beta^{\text{sh}}_{gjk} + \sum_j X_{ij} \beta^{\text{ind}}_{gjk}$ (genetic value; zero for non-eQTL genes)
-- $\varepsilon_{gik} \sim \mathcal{N}(0, 1)$
+$$G_{gik} = \sum_j X_{ij} \beta^{\text{sh}}_{gjk} + \sum_j X_{ij} \beta^{\text{ind}}_{gjk}$$
+
+and $\varepsilon_{gik} \sim \mathcal{N}(0, 1)$.
 
 **Stage B — Combine with factor model baseline**:
 
