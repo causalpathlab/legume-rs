@@ -33,6 +33,7 @@ nalgebra-sparse = { workspace = true }
 approx = { workspace = true }
 
 special = { workspace = true }
+statrs = { workspace = true }
 indicatif = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
