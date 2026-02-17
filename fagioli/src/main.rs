@@ -1,7 +1,9 @@
+mod map_sumstat;
 mod pseudobulk_cmd;
 mod sim_qtl;
 mod sim_sumstat;
 
+use map_sumstat::*;
 use pseudobulk_cmd::*;
 use sim_qtl::*;
 use sim_sumstat::*;
@@ -47,6 +49,8 @@ enum Commands {
     SimQtl(SimulationArgs),
     /// Simulate multi-trait GWAS summary statistics with LD structure
     SimSumstat(SimSumstatArgs),
+    /// Summary-statistics-based multi-trait fine-mapping with SuSiE
+    MapSumstat(MapSumstatArgs),
     /// Collapse single-cell counts into Poisson-Gamma pseudobulk
     Pseudobulk(PseudobulkArgs),
 }
@@ -67,6 +71,9 @@ fn main() -> Result<()> {
         }
         Commands::SimSumstat(args) => {
             sim_sumstat(args)?;
+        }
+        Commands::MapSumstat(args) => {
+            map_sumstat(args)?;
         }
         Commands::Pseudobulk(args) => {
             pseudobulk(args)?;
