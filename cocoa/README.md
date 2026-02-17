@@ -6,6 +6,20 @@
 
 No cell-type heterogeneity. Individual-level confounding only.
 
+**Null (no direct X→Yg)**
+
+```mermaid
+graph TD
+    V((V)) --> X((X))
+    V((V)) --> Y_g((Yg))
+    classDef open fill:#fff,stroke:#000
+    classDef shaded fill:#d3d3d3,stroke:#000
+    class V open
+    class X,Y_g shaded
+```
+
+**Causal (X→Yg present)**
+
 ```mermaid
 graph TD
     V((V)) --> X((X))
@@ -17,19 +31,18 @@ graph TD
     class X,Y_g shaded
 ```
 
-| Edge | Parameter | Description |
-|------|-----------|-------------|
-| V → X | `pve_covar_exposure` | Confounder drives exposure assignment via `logit(X) ~ V*α + ε` |
-| X → Y | `pve_exposure_gene` | Causal effect of exposure on gene expression (causal genes only) |
-| V → Y | `pve_covar_gene` | Confounder directly affects gene expression via `V*γ` |
+| Edge | Model param | Sim. param | Description |
+|------|-------------|------------|-------------|
+| V → X | α | `pve_covar_exposure` | Confounder drives exposure assignment |
+| X → Y | β | `pve_exposure_gene` | Causal effect of exposure on gene expression (causal genes only) |
+| V → Y | γ | `pve_covar_gene` | Confounder directly affects gene expression |
 
 Generative model:
 
 - $V_i \sim \mathcal{N}(0, I)$ — individual confounders
-- $X_i \sim \mathrm{Cat}\!\left(\mathrm{softmax}(V_i \alpha \sqrt{\mathrm{pve}} + \varepsilon \sqrt{1-\mathrm{pve}})\right)$ — exposure assignment
-- $\log \mu_{ig} = \beta_g X_i \sqrt{\mathrm{pve}_{xg}} + V_i \gamma_g \sqrt{\mathrm{pve}_{vg}} + \varepsilon\sqrt{1 - \mathrm{pve}_{xg} - \mathrm{pve}_{vg}}$
+- $X_i \sim \mathrm{Cat}(\mathrm{softmax}(V_i \alpha + \varepsilon))$ — exposure assignment
+- $\log \mu_{ig} = \beta_g X_i + V_i \gamma_g + \varepsilon$ — log mean expression
 - $Y_{ijg} \sim \mathrm{Poisson}(\rho_j \exp(\log \mu_{ig}))$ — cell-level counts
-- $\rho_j \sim \mathrm{Gamma}(a, b)$ — cell depth
 
 ### `simulate-collider` (multiple cell types)
 
@@ -67,23 +80,21 @@ graph TD
     class X,A,Yg shaded
 ```
 
-| Edge | Parameter | Description |
-|------|-----------|-------------|
-| V → X | `pve_covar_exposure` | Individual confounder drives exposure |
-| X → A | `pve_exposure_celltype` | Exposure shifts cell-type composition (collider) |
-| U → A | `pve_cell_covar_celltype` | Cell-level confounder drives cell-type assignment (collider) |
-| X → Y | `pve_exposure_gene` | Causal exposure effect on expression (causal genes only) |
-| V → Y | `pve_covar_gene` | Individual confounder directly affects expression |
-| U → Y | `pve_cell_covar_gene` | Cell-level confounder directly affects expression |
-| A → Y | `celltype_effect_size` | Cell-type DE (different baseline expression per type) |
+| Edge | Model param | Sim. param | Description |
+|------|-------------|------------|-------------|
+| V → X | α | `pve_covar_exposure` | Individual confounder drives exposure |
+| X → A | η | `pve_exposure_celltype` | Exposure shifts cell-type composition (collider) |
+| U → A | δ | `pve_cell_covar_celltype` | Cell-level confounder drives cell-type assignment (collider) |
+| X → Y | β | `pve_exposure_gene` | Causal exposure effect on expression (causal genes only) |
+| V → Y | γ | `pve_covar_gene` | Individual confounder directly affects expression |
+| U → Y | ξ | `pve_cell_covar_gene` | Cell-level confounder directly affects expression |
 
 Generative model:
 
-- $V_i \sim \mathcal{N}(0, I)$ — individual confounders
-- $X_i \sim \mathrm{Cat}\!\left(\mathrm{softmax}(V_i \alpha \sqrt{\mathrm{pve}_{vx}} + \varepsilon \sqrt{1-\mathrm{pve}_{vx}})\right)$
-- $U_j \sim \mathcal{N}(0, I)$ — cell-level confounders
-- $A_{ij} \sim \mathrm{Cat}\!\left(\mathrm{softmax}(U_j \delta \sqrt{\mathrm{pve}_{ua}} + X_i \eta \sqrt{\mathrm{pve}_{xa}} + \varepsilon \sqrt{1-\mathrm{pve}_{ua}-\mathrm{pve}_{xa}})\right)$
-- $\log \mu_{ijg} = \Delta_{g,A} + \beta_g X_i \sqrt{\mathrm{pve}_{xg}} + V_i \gamma_g \sqrt{\mathrm{pve}_{vg}} + U_j \xi_g \sqrt{\mathrm{pve}_{ug}} + \varepsilon \sqrt{1 - \cdots}$
+- $V_i \sim \mathcal{N}(0, I)$, $U_j \sim \mathcal{N}(0, I)$ — individual and cell-level confounders
+- $X_i \sim \mathrm{Cat}(\mathrm{softmax}(V_i \alpha + \varepsilon))$
+- $A_{ij} \sim \mathrm{Cat}(\mathrm{softmax}(U_j \delta + X_i \eta + \varepsilon))$
+- $\log \mu_{ijg} = \Delta_{g,A} + \beta_g X_i + V_i \gamma_g + U_j \xi_g + \varepsilon$
 - $Y_{ijg} \sim \mathrm{Poisson}(\rho_j \exp(\log \mu_{ijg}))$ — cell-level counts
 
 ### Collider bias

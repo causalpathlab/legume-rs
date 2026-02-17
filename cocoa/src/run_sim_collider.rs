@@ -15,7 +15,6 @@ const MIN_VARIANCE: f32 = 1e-8;
 const MIN_LAMBDA: f32 = 1e-8;
 const EXPRESSION_THRESHOLD: f32 = 0.5;
 const DEFAULT_EFFECT_SIZE: f32 = 10.0;
-const DEFAULT_CELLTYPE_EFFECT: f32 = 5.0;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SimColliderArgs {
@@ -34,9 +33,6 @@ pub struct SimColliderArgs {
 
     #[arg(short = 't', required = true, help = "number of cell types")]
     n_cell_types: usize,
-
-    #[arg(long, default_value_t = 20, help = "number of cell-type DE genes")]
-    n_de_genes: usize,
 
     #[arg(
         long,
@@ -79,9 +75,6 @@ pub struct SimColliderArgs {
     #[arg(long, default_value_t = DEFAULT_EFFECT_SIZE, help = "causal gene effect size")]
     effect_size: f32,
 
-    #[arg(long, default_value_t = DEFAULT_CELLTYPE_EFFECT, help = "cell-type DE magnitude")]
-    celltype_effect_size: f32,
-
     #[arg(
         long,
         value_delimiter = ',',
@@ -115,7 +108,6 @@ struct ColliderSimulator {
     n_cell_types: usize,
     n_genes: usize,
     n_causal_genes: usize,
-    n_de_genes: usize,
     pve_covar_exposure: f32,
     pve_exposure_celltype: f32,
     pve_cell_covar_celltype: f32,
@@ -123,7 +115,6 @@ struct ColliderSimulator {
     pve_covar_gene: f32,
     pve_cell_covar_gene: f32,
     effect_size: f32,
-    celltype_effect_size: f32,
     rseed: u64,
     depth_gamma_hyperparam: (f32, f32),
 }
@@ -156,12 +147,8 @@ struct CellOut {
 struct GeneInfo {
     /// (gene_idx, exposure_category) for causal genes
     causal_genes: Vec<(usize, usize)>,
-    /// (gene_idx, cell_type) for cell-type DE genes
-    de_genes: Vec<(usize, usize)>,
     /// Causal gene effects: gene_idx -> standardized effect vector (1 x n_indv)
     causal_effects: HashMap<usize, (usize, Mat)>,
-    /// Cell-type DE offsets: gene_idx -> (cell_type, offset)
-    celltype_offsets: HashMap<usize, Vec<(usize, f32)>>,
 }
 
 impl ColliderSimulator {
@@ -193,13 +180,12 @@ impl ColliderSimulator {
         })
     }
 
-    /// Set up gene-level effects (causal genes and cell-type DE genes)
+    /// Set up gene-level effects (causal genes)
     fn generate_gene_info(&self, exposure_assignment: &[usize]) -> anyhow::Result<GeneInfo> {
         let mut rng = rand::rngs::StdRng::seed_from_u64(self.rseed.wrapping_add(1));
 
         let runif_gene = Uniform::new(0, self.n_genes)?;
         let runif_cat = Uniform::new(0, self.n_exp_cat)?;
-        let runif_ct = Uniform::new(0, self.n_cell_types)?;
 
         // Causal genes: exposure -> expression
         let effect_size = self.effect_size;
@@ -227,26 +213,9 @@ impl ColliderSimulator {
         let causal_genes: Vec<(usize, usize)> =
             causal_effects.iter().map(|(&g, &(c, _))| (g, c)).collect();
 
-        // Cell-type DE genes: different expression in specific cell types
-        let ct_effect = self.celltype_effect_size;
-        let mut celltype_offsets: HashMap<usize, Vec<(usize, f32)>> = HashMap::new();
-        let mut de_genes_list = Vec::new();
-
-        for _ in 0..self.n_de_genes {
-            let gene = runif_gene.sample(&mut rng);
-            let ct = runif_ct.sample(&mut rng);
-            celltype_offsets
-                .entry(gene)
-                .or_default()
-                .push((ct, ct_effect));
-            de_genes_list.push((gene, ct));
-        }
-
         Ok(GeneInfo {
             causal_genes,
-            de_genes: de_genes_list,
             causal_effects,
-            celltype_offsets,
         })
     }
 
@@ -284,8 +253,15 @@ impl ColliderSimulator {
         // Gene-specific confounder loadings (V -> Y and U -> Y)
         // gamma_g: V loading per gene (n_genes x n_covar)
         // xi_g: U loading per gene (n_genes x n_cell_covar)
-        let gamma_gk = Mat::rnorm(n_genes, self.n_covar);
-        let xi_gk = Mat::rnorm(n_genes, n_cell_covar);
+        // Normalize rows to unit L2 norm so Var(V * gamma_g^T) = 1
+        let gamma_gk = Mat::rnorm(n_genes, self.n_covar)
+            .transpose()
+            .normalize_columns()
+            .transpose();
+        let xi_gk = Mat::rnorm(n_genes, n_cell_covar)
+            .transpose()
+            .normalize_columns()
+            .transpose();
 
         // Per-individual processing (parallelized)
         let pve_exp_ct = self.pve_exposure_celltype;
@@ -348,36 +324,23 @@ impl ColliderSimulator {
                 let rho = Mat::rgamma(1, nn, depth_gamma);
 
                 // Generate triplets: for each cell j, gene g
-                let pve_residual_gene =
+                let pve_residual_causal =
                     (1. - pve_exp_gene - pve_covar_gene - pve_cell_gene).max(0.);
+                let pve_residual_noncausal = (1. - pve_covar_gene - pve_cell_gene).max(0.);
 
                 let mut triplets = Vec::with_capacity(nn * n_genes / 2);
 
                 for j in 0..nn {
                     let rho_j = rho[(0, j)];
-                    let ct_j = celltypes[j];
 
                     for g in 0..n_genes {
                         // Causal gene effect (X -> Y)
-                        let causal_term =
+                        let (causal_term, pve_residual_gene) =
                             if let Some((_, ref eff)) = gene_info.causal_effects.get(&g) {
-                                eff[(0, indv)] * pve_exp_gene.sqrt()
+                                (eff[(0, indv)] * pve_exp_gene.sqrt(), pve_residual_causal)
                             } else {
-                                0.0
+                                (0.0, pve_residual_noncausal)
                             };
-
-                        // Cell-type DE offset
-                        let ct_offset = gene_info
-                            .celltype_offsets
-                            .get(&g)
-                            .map(|offsets| {
-                                offsets
-                                    .iter()
-                                    .filter(|&&(ct, _)| ct == ct_j)
-                                    .map(|&(_, eff)| eff)
-                                    .sum::<f32>()
-                            })
-                            .unwrap_or(0.0);
 
                         // V_i confounding
                         let v_term = v_effect_g[(0, g)] * pve_covar_gene.sqrt();
@@ -392,7 +355,7 @@ impl ColliderSimulator {
                             val * pve_residual_gene.sqrt()
                         };
 
-                        let log_mu = ct_offset + causal_term + v_term + u_term + eps;
+                        let log_mu = causal_term + v_term + u_term + eps;
                         let lambda = (rho_j * log_mu.exp()).max(MIN_LAMBDA);
 
                         if let Ok(rpois) = Poisson::new(lambda) {
@@ -511,7 +474,6 @@ pub fn run_sim_collider_data(args: SimColliderArgs) -> anyhow::Result<()> {
         n_cell_types: args.n_cell_types,
         n_genes: args.n_genes,
         n_causal_genes: args.n_causal_genes,
-        n_de_genes: args.n_de_genes,
         pve_covar_exposure: args.pve_covar_exposure,
         pve_exposure_celltype: args.pve_exposure_celltype,
         pve_cell_covar_celltype: args.pve_cell_covar_celltype,
@@ -519,7 +481,6 @@ pub fn run_sim_collider_data(args: SimColliderArgs) -> anyhow::Result<()> {
         pve_covar_gene: args.pve_covar_gene,
         pve_cell_covar_gene: args.pve_cell_covar_gene,
         effect_size: args.effect_size,
-        celltype_effect_size: args.celltype_effect_size,
         rseed: args.rseed,
         depth_gamma_hyperparam,
     };
@@ -576,17 +537,6 @@ pub fn run_sim_collider_data(args: SimColliderArgs) -> anyhow::Result<()> {
             .map(|(g, c)| format!("{}\t{}", g, c))
             .collect(),
         &causal_file,
-    )?;
-
-    // Cell-type DE gene labels
-    let de_file = output.to_string() + ".de_genes.gz";
-    write_types(
-        &gene_info
-            .de_genes
-            .iter()
-            .map(|(g, ct)| format!("{}\t{}", g, ct))
-            .collect(),
-        &de_file,
     )?;
 
     // V_i individual-level confounders
