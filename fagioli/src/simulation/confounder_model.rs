@@ -75,11 +75,7 @@ pub fn compose_phenotype(
     let t = num_traits;
 
     if h2 + pve_conf > 1.0 + 1e-6 {
-        anyhow::bail!(
-            "h2 ({}) + pve_conf ({}) cannot exceed 1.0",
-            h2,
-            pve_conf
-        );
+        anyhow::bail!("h2 ({}) + pve_conf ({}) cannot exceed 1.0", h2, pve_conf);
     }
     let pve_noise = (1.0 - h2 - pve_conf).max(0.0);
 

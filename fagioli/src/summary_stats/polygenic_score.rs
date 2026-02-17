@@ -37,8 +37,14 @@ pub fn compute_block_polygenic_scores(
 
     // Thin SVD
     let svd = x_scaled.svd(true, true);
-    let u = svd.u.as_ref().ok_or_else(|| anyhow::anyhow!("SVD failed to compute U"))?;
-    let vt = svd.v_t.as_ref().ok_or_else(|| anyhow::anyhow!("SVD failed to compute V'"))?;
+    let u = svd
+        .u
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("SVD failed to compute U"))?;
+    let vt = svd
+        .v_t
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("SVD failed to compute V'"))?;
     let singular_values = &svd.singular_values;
 
     // Determine truncation threshold
@@ -93,14 +99,10 @@ pub fn compute_all_polygenic_scores(
             let block_m = block.num_snps();
 
             // Extract block genotypes
-            let x_block = genotypes
-                .columns(block.snp_start, block_m)
-                .clone_owned();
+            let x_block = genotypes.columns(block.snp_start, block_m).clone_owned();
 
             // Extract block z-scores
-            let z_block = zscores
-                .rows(block.snp_start, block_m)
-                .clone_owned();
+            let z_block = zscores.rows(block.snp_start, block_m).clone_owned();
 
             compute_block_polygenic_scores(&x_block, &z_block)
                 .expect("Failed to compute block polygenic scores")

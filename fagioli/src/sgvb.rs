@@ -1,12 +1,12 @@
 use anyhow::Result;
 use candle_util::candle_core::{DType, Device, Tensor};
 use candle_util::candle_nn::{AdamW, Optimizer, VarBuilder, VarMap};
+use candle_util::sgvb::variant_tree::VariantTree;
 use candle_util::sgvb::{
     samples_local_reparam_loss, AnalyticalKL, BiSusieVar, FixedGaussianLikelihood,
     FixedGaussianPrior, LinearModelSGVB, LinearRegressionSGVB, LocalReparamSample,
     MultiLevelSusieVar, SGVBConfig, SusieVar, VariationalDistribution,
 };
-use candle_util::sgvb::variant_tree::VariantTree;
 use log::info;
 use matrix_util::traits::ConvertMatOps;
 use nalgebra::DMatrix;
@@ -106,9 +106,7 @@ pub fn fit_block(
     let x_tensor = x_block.to_tensor(&device)?.contiguous()?;
     let y_tensor = y_block.to_tensor(&device)?.contiguous()?;
     let conf_tensor = confounders
-        .map(|c| -> Result<Tensor> {
-            Ok(c.to_tensor(&device)?.contiguous()?)
-        })
+        .map(|c| -> Result<Tensor> { Ok(c.to_tensor(&device)?.contiguous()?) })
         .transpose()?;
 
     let use_minibatch = n > config.batch_size;
@@ -247,7 +245,11 @@ fn fit_single_prior(
         // Confounder sample
         if let Some(ref cm) = conf_model {
             let conf_sample = if tensors.use_minibatch {
-                local_reparam_with_design(cm, config.num_sgvb_samples, conf_batch.as_ref().unwrap())?
+                local_reparam_with_design(
+                    cm,
+                    config.num_sgvb_samples,
+                    conf_batch.as_ref().unwrap(),
+                )?
             } else {
                 cm.local_reparam_sample(config.num_sgvb_samples)?
             };

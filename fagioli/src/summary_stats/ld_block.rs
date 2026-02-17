@@ -133,7 +133,14 @@ pub fn estimate_ld_blocks(
     }
 
     // Step 6: Enforce min/max block size constraints
-    let blocks = build_blocks_from_cuts(&cut_points, m, positions, chromosomes, min_block_snps, max_block_snps);
+    let blocks = build_blocks_from_cuts(
+        &cut_points,
+        m,
+        positions,
+        chromosomes,
+        min_block_snps,
+        max_block_snps,
+    );
 
     info!("Estimated {} LD blocks", blocks.len());
     Ok(blocks)
@@ -206,10 +213,7 @@ pub fn load_ld_blocks_from_file(
         block.block_idx = i;
     }
 
-    info!(
-        "Assigned SNPs to {} non-empty LD blocks",
-        blocks.len()
-    );
+    info!("Assigned SNPs to {} non-empty LD blocks", blocks.len());
     Ok(blocks)
 }
 
@@ -267,9 +271,9 @@ fn smooth_moving_average(values: &[f32], window: usize) -> Vec<f32> {
         let hi = (i + half + 1).min(n);
         let mut sum = 0.0f32;
         let mut count = 0;
-        for j in lo..hi {
-            if values[j].is_finite() {
-                sum += values[j];
+        for val in &values[lo..hi] {
+            if val.is_finite() {
+                sum += val;
                 count += 1;
             }
         }
@@ -305,7 +309,7 @@ fn build_blocks_from_cuts(
         let (start, end) = (w[0], w[1]);
         let size = end - start;
         if size > max_block_snps {
-            let num_sub = (size + max_block_snps - 1) / max_block_snps;
+            let num_sub = size.div_ceil(max_block_snps);
             let sub_size = size / num_sub;
             for i in 1..num_sub {
                 refined.push(start + i * sub_size);
@@ -378,7 +382,11 @@ mod tests {
         for block in &blocks {
             let chr_start = &chromosomes[block.snp_start];
             let chr_end = &chromosomes[block.snp_end - 1];
-            assert_eq!(chr_start, chr_end, "Block {} spans chromosomes", block.block_idx);
+            assert_eq!(
+                chr_start, chr_end,
+                "Block {} spans chromosomes",
+                block.block_idx
+            );
         }
     }
 

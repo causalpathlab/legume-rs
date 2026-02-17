@@ -5,8 +5,7 @@ use nalgebra::DMatrix;
 
 use fagioli::genotype::{BedReader, GenomicRegion, GenotypeReader};
 use fagioli::simulation::{
-    sample_cell_type_fractions, simulate_factor_model, GeneticArchitectureParams,
-    ScPhenotypeParams,
+    sample_cell_type_fractions, simulate_factor_model, GeneticArchitectureParams, ScPhenotypeParams,
 };
 
 #[derive(Args, Debug, Clone)]
@@ -126,7 +125,10 @@ fn read_genotypes(args: &SimulationArgs) -> Result<fagioli::genotype::GenotypeMa
         (None, Some(right)) => format!("chr={}, ..{}", args.chromosome, right),
         (None, None) => format!("chr={}", args.chromosome),
     };
-    info!("Reading genotypes from {} ({})", args.bed_prefix, region_str);
+    info!(
+        "Reading genotypes from {} ({})",
+        args.bed_prefix, region_str
+    );
 
     let mut reader = BedReader::new(&args.bed_prefix)?;
     let region = GenomicRegion::new(
@@ -462,8 +464,14 @@ fn write_outputs(
                     writeln!(
                         writer,
                         "{}\t{}\tshared\t{}\t{}\t{}\t{}\t{}\t{}",
-                        gene_idx, gene_id, ct, snp_idx, geno.snp_ids[snp_idx],
-                        geno.chromosomes[snp_idx], geno.positions[snp_idx], effect
+                        gene_idx,
+                        gene_id,
+                        ct,
+                        snp_idx,
+                        geno.snp_ids[snp_idx],
+                        geno.chromosomes[snp_idx],
+                        geno.positions[snp_idx],
+                        effect
                     )?;
                 }
             }
@@ -476,8 +484,14 @@ fn write_outputs(
                     writeln!(
                         writer,
                         "{}\t{}\tindependent\t{}\t{}\t{}\t{}\t{}\t{}",
-                        gene_idx, gene_id, ct, snp_idx, geno.snp_ids[snp_idx],
-                        geno.chromosomes[snp_idx], geno.positions[snp_idx], effect
+                        gene_idx,
+                        gene_id,
+                        ct,
+                        snp_idx,
+                        geno.snp_ids[snp_idx],
+                        geno.chromosomes[snp_idx],
+                        geno.positions[snp_idx],
+                        effect
                     )?;
                 }
             }
