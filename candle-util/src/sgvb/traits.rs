@@ -13,28 +13,8 @@ pub trait BlackBoxLikelihood {
     fn log_likelihood(&self, etas: &[&Tensor]) -> Result<Tensor>;
 }
 
-/// Variational distribution trait for reparameterized sampling.
+/// Variational distribution trait for local reparameterization.
 pub trait VariationalDistribution {
-    /// Sample using reparameterization trick.
-    ///
-    /// # Arguments
-    /// * `num_samples` - Number of samples S to draw
-    ///
-    /// # Returns
-    /// Tuple of (samples, epsilon) where:
-    /// - samples: shape (S, p, k) sampled parameters
-    /// - epsilon: shape (S, p, k) standard normal noise used for reparameterization
-    fn sample(&self, num_samples: usize) -> Result<(Tensor, Tensor)>;
-
-    /// Compute log q(θ|φ) for the variational distribution.
-    ///
-    /// # Arguments
-    /// * `samples` - Parameter samples, shape (S, p, k)
-    ///
-    /// # Returns
-    /// Log probability values, shape (S,) summed over parameter dimensions
-    fn log_prob(&self, samples: &Tensor) -> Result<Tensor>;
-
     /// Get the variational mean μ.
     ///
     /// # Returns
@@ -60,26 +40,25 @@ pub trait Prior {
     fn log_prob(&self, theta: &Tensor) -> Result<Tensor>;
 }
 
-/// Sample output from an SGVB model containing all components needed for REINFORCE.
-pub struct SgvbSample {
-    /// Linear predictor samples, shape (S, n, k)
-    pub eta: Tensor,
-    /// Log prior probability log p(θ), shape (S,)
-    pub log_prior: Tensor,
-    /// Log variational probability log q(θ) for reward computation (detached), shape (S,)
-    pub log_q: Tensor,
-    /// Log variational probability log q(θ) with gradients for surrogate loss, shape (S,)
-    pub log_q_grad: Tensor,
-}
-
-/// SGVB model trait - encapsulates variational distribution, prior, and model structure.
-pub trait SgvbModel {
-    /// Sample and compute all ELBO components except likelihood.
+/// Trait for priors that support analytical KL divergence from a Gaussian q.
+///
+/// Used by the local reparameterization trick to avoid sampling in p-space.
+pub trait AnalyticalKL {
+    /// KL(N(mean, diag(var)) || prior), summed over all (p, k) elements.
     ///
     /// # Arguments
-    /// * `num_samples` - Number of samples S to draw
+    /// * `mean` - Variational mean, shape (p, k)
+    /// * `var` - Variational variance, shape (p, k)
     ///
     /// # Returns
-    /// SgvbSample containing eta, log_prior, log_q, and log_q_grad
-    fn sample(&self, num_samples: usize) -> Result<SgvbSample>;
+    /// Scalar tensor with the KL divergence
+    fn kl_from_gaussian(&self, mean: &Tensor, var: &Tensor) -> Result<Tensor>;
+}
+
+/// Sample output from local reparameterization (sampling in n-space, not p-space).
+pub struct LocalReparamSample {
+    /// Linear predictor samples, shape (S, n, k) — sampled in n-space
+    pub eta: Tensor,
+    /// Analytical KL divergence, scalar
+    pub kl: Tensor,
 }

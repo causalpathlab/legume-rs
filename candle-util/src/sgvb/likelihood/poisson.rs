@@ -34,6 +34,41 @@ impl BlackBoxLikelihood for PoissonLikelihood {
     }
 }
 
+/// Poisson likelihood with a fixed offset: y ~ Poisson(exp(offset + η))
+///
+/// This is useful when the linear predictor η = Xβ has no intercept.
+/// The offset absorbs the baseline log-rate so that β = 0 → μ = exp(offset).
+///
+/// ```text
+/// log p(y | η) = y * (offset + η) - exp(offset + η) - log(y!)
+/// ```
+pub struct OffsetPoissonLikelihood {
+    y: Tensor,
+    offset: Tensor,
+}
+
+impl OffsetPoissonLikelihood {
+    /// Create with a scalar offset broadcast to all observations.
+    pub fn new(y: Tensor, offset: f32) -> candle_core::Result<Self> {
+        let device = y.device().clone();
+        let (n, k) = (y.dim(0)?, y.dim(1)?);
+        let offset = Tensor::full(offset, (n, k), &device)?;
+        Ok(Self { y, offset })
+    }
+}
+
+impl BlackBoxLikelihood for OffsetPoissonLikelihood {
+    fn log_likelihood(&self, etas: &[&Tensor]) -> Result<Tensor> {
+        let eta = etas[0];
+        // η_full = offset + η (broadcast offset from (n,k) to (S,n,k))
+        let eta_full = eta.broadcast_add(&self.offset)?;
+        let y_eta = eta_full.broadcast_mul(&self.y)?;
+        let exp_eta = eta_full.exp()?;
+        let log_prob = (y_eta - exp_eta)?;
+        log_prob.sum(2)?.sum(1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

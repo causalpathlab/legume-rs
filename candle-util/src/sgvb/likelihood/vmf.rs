@@ -72,7 +72,7 @@ pub fn log_bessel_i(p: f64, x: f64) -> f64 {
     let log_x_half = (x * 0.5).ln();
 
     // Number of terms in series (heuristic: 3*p is usually enough)
-    let n_terms = ((3.0 * p).max(30.0)).min(200.0) as usize;
+    let n_terms = (3.0 * p).clamp(30.0, 200.0) as usize;
 
     // Initialize with j=0 term: log f(x,0) = -lgamma(p+1)
     let mut log_sum_series = -fast_lgamma(p + 1.0);
@@ -526,7 +526,9 @@ mod tests {
     /// - Topic directions y: derived from X @ θ + noise, then normalized
     #[test]
     fn test_vmf_susie_sparse_recovery() -> Result<()> {
-        use crate::sgvb::{direct_elbo_loss, GaussianPrior, LinearModelSGVB, SGVBConfig, SusieVar};
+        use crate::sgvb::{
+            local_reparam_loss, GaussianPrior, LinearModelSGVB, SGVBConfig, SusieVar,
+        };
         use candle_core::DType;
         use candle_nn::{Optimizer, VarBuilder, VarMap};
 
@@ -582,7 +584,7 @@ mod tests {
         let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.05)?;
 
         for i in 0..500 {
-            let loss = direct_elbo_loss(&model, &likelihood, config.num_samples)?;
+            let loss = local_reparam_loss(&model, &likelihood, config.num_samples, 1.0)?;
             optimizer.backward_step(&loss)?;
 
             if i % 100 == 0 {
@@ -654,7 +656,9 @@ mod tests {
     /// Test vMF recovery with different kappa values to verify model comparison.
     #[test]
     fn test_vmf_kappa_comparison() -> Result<()> {
-        use crate::sgvb::{direct_elbo_loss, GaussianPrior, LinearModelSGVB, SGVBConfig, SusieVar};
+        use crate::sgvb::{
+            local_reparam_loss, GaussianPrior, LinearModelSGVB, SGVBConfig, SusieVar,
+        };
         use candle_core::DType;
         use candle_nn::{Optimizer, VarBuilder, VarMap};
 
@@ -693,12 +697,12 @@ mod tests {
             let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.05)?;
 
             for _ in 0..200 {
-                let loss = direct_elbo_loss(&model, &likelihood, config.num_samples)?;
+                let loss = local_reparam_loss(&model, &likelihood, config.num_samples, 1.0)?;
                 optimizer.backward_step(&loss)?;
             }
 
             let final_loss: f32 =
-                direct_elbo_loss(&model, &likelihood, config.num_samples)?.to_scalar()?;
+                local_reparam_loss(&model, &likelihood, config.num_samples, 1.0)?.to_scalar()?;
             let log_norm = likelihood.log_normalizer();
 
             results.push((kappa, final_loss, log_norm));

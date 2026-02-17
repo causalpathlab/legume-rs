@@ -52,6 +52,34 @@ impl BlackBoxLikelihood for GaussianLikelihood {
     }
 }
 
+/// Fixed-variance Gaussian likelihood: y ~ N(η, σ²) with known σ².
+///
+/// Only requires 1 eta (the mean). No variance model needed.
+pub struct FixedGaussianLikelihood {
+    y: Tensor,
+    inv_2var: f64,
+    log_2pi_var: f64,
+}
+
+impl FixedGaussianLikelihood {
+    pub fn new(y: Tensor, variance: f64) -> Self {
+        Self {
+            y,
+            inv_2var: 0.5 / variance,
+            log_2pi_var: (2.0 * std::f64::consts::PI * variance).ln(),
+        }
+    }
+}
+
+impl BlackBoxLikelihood for FixedGaussianLikelihood {
+    fn log_likelihood(&self, etas: &[&Tensor]) -> Result<Tensor> {
+        let eta = etas[0]; // (S, n, k)
+        let diff_sq = eta.broadcast_sub(&self.y)?.sqr()?;
+        let log_prob = ((diff_sq * (-self.inv_2var))? + (-0.5 * self.log_2pi_var))?;
+        log_prob.sum(2)?.sum(1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
