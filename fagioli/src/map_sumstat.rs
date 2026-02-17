@@ -11,8 +11,8 @@ use std::io::Write;
 use fagioli::genotype::{BedReader, GenomicRegion, GenotypeReader};
 use fagioli::sgvb::{fit_block, BlockFitResult, FitConfig, ModelType};
 use fagioli::summary_stats::{
-    compute_all_polygenic_scores, estimate_ld_blocks, load_ld_blocks_from_file, LdBlock,
-    read_sumstat_zscores_with_n,
+    compute_all_polygenic_scores, estimate_ld_blocks, load_ld_blocks_from_file,
+    read_sumstat_zscores_with_n, LdBlock,
 };
 
 #[derive(Args, Debug, Clone)]
@@ -166,12 +166,7 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         )?
     } else {
         info!("Too few SNPs for block estimation, using single block");
-        fagioli::summary_stats::create_uniform_blocks(
-            m,
-            m,
-            &geno.positions,
-            &geno.chromosomes,
-        )
+        fagioli::summary_stats::create_uniform_blocks(m, m, &geno.positions, &geno.chromosomes)
     };
 
     let num_blocks = blocks.len();
@@ -222,7 +217,10 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         ml_block_size: args.ml_block_size,
     };
 
-    info!("Model: {:?}, L={}, prior_vars={:?}", model_type, args.num_components, &fit_config.prior_vars);
+    info!(
+        "Model: {:?}, L={}, prior_vars={:?}",
+        model_type, args.num_components, &fit_config.prior_vars
+    );
 
     // ── Step 7: Per-block SGVB regression (parallel) ──────────────────────
     info!("Fitting SGVB models for {} blocks", num_blocks);
@@ -256,21 +254,16 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
             let mut block_config = fit_config.clone();
             block_config.seed = fit_config.seed.wrapping_add(block_idx as u64);
 
-            let result = fit_block(
-                &x_block,
-                y_block,
-                confounders.as_ref(),
-                &block_config,
-            )
-            .unwrap_or_else(|e| {
-                log::warn!("Block {} failed: {}, using zeros", block_idx, e);
-                BlockFitResult {
-                    pip: DMatrix::<f32>::zeros(block_m, t),
-                    effect_mean: DMatrix::<f32>::zeros(block_m, t),
-                    effect_std: DMatrix::<f32>::zeros(block_m, t),
-                    avg_elbo: f32::NEG_INFINITY,
-                }
-            });
+            let result = fit_block(&x_block, y_block, confounders.as_ref(), &block_config)
+                .unwrap_or_else(|e| {
+                    log::warn!("Block {} failed: {}, using zeros", block_idx, e);
+                    BlockFitResult {
+                        pip: DMatrix::<f32>::zeros(block_m, t),
+                        effect_mean: DMatrix::<f32>::zeros(block_m, t),
+                        effect_std: DMatrix::<f32>::zeros(block_m, t),
+                        avg_elbo: f32::NEG_INFINITY,
+                    }
+                });
 
             info!(
                 "Block {}/{}: {} SNPs, avg_elbo={:.2}",
