@@ -2,6 +2,8 @@ use anyhow::Result;
 use log::info;
 use matrix_util::common_io::open_buf_writer;
 use nalgebra::DMatrix;
+use rust_htslib::bgzf;
+use rust_htslib::tpool::ThreadPool;
 use std::io::Write;
 
 use super::ld_block::LdBlock;
@@ -9,9 +11,18 @@ use super::ld_score::LdScoreRecord;
 use super::marginal_ols::SumstatRecord;
 use crate::simulation::CellTypeGeneticEffects;
 
-/// Streaming writer for summary statistics
+/// Open a BGZF writer with htslib thread pool for parallel compression.
+fn open_bgzf_writer(path: &str, tpool: Option<&ThreadPool>) -> Result<bgzf::Writer> {
+    let mut writer = bgzf::Writer::from_path(path)?;
+    if let Some(tp) = tpool {
+        writer.set_thread_pool(tp)?;
+    }
+    Ok(writer)
+}
+
+/// Streaming writer for summary statistics (BGZF-compressed, tabix-compatible)
 pub struct SumstatWriter {
-    writer: Box<dyn Write>,
+    writer: bgzf::Writer,
     snp_ids: Vec<Box<str>>,
     chromosomes: Vec<Box<str>>,
     positions: Vec<u64>,
@@ -25,11 +36,12 @@ impl SumstatWriter {
         chromosomes: &[Box<str>],
         positions: &[u64],
         num_individuals: usize,
+        tpool: Option<&ThreadPool>,
     ) -> Result<Self> {
-        let mut writer = open_buf_writer(path)?;
+        let mut writer = open_bgzf_writer(path, tpool)?;
         writeln!(
             writer,
-            "trait_idx\tsnp_idx\tsnp_id\tchr\tpos\tn\tbeta\tse\tz\tpvalue"
+            "#chr\tstart\tend\tsnp_id\ttrait_idx\tn\tbeta\tse\tz\tpvalue"
         )?;
 
         Ok(Self {
@@ -43,14 +55,15 @@ impl SumstatWriter {
 
     pub fn write_block(&mut self, records: &[SumstatRecord]) -> Result<()> {
         for rec in records {
+            let pos = self.positions[rec.snp_idx];
             writeln!(
                 self.writer,
                 "{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.4}\t{:.6e}",
-                rec.trait_idx,
-                rec.snp_idx,
-                self.snp_ids[rec.snp_idx],
                 self.chromosomes[rec.snp_idx],
-                self.positions[rec.snp_idx],
+                pos.saturating_sub(1),
+                pos,
+                self.snp_ids[rec.snp_idx],
+                rec.trait_idx,
                 self.num_individuals,
                 rec.beta,
                 rec.se,
@@ -67,9 +80,9 @@ impl SumstatWriter {
     }
 }
 
-/// Streaming writer for LD scores
+/// Streaming writer for LD scores (BGZF-compressed, tabix-compatible)
 pub struct LdScoreWriter {
-    writer: Box<dyn Write>,
+    writer: bgzf::Writer,
     snp_ids: Vec<Box<str>>,
     chromosomes: Vec<Box<str>>,
     positions: Vec<u64>,
@@ -81,9 +94,10 @@ impl LdScoreWriter {
         snp_ids: &[Box<str>],
         chromosomes: &[Box<str>],
         positions: &[u64],
+        tpool: Option<&ThreadPool>,
     ) -> Result<Self> {
-        let mut writer = open_buf_writer(path)?;
-        writeln!(writer, "snp_idx\tsnp_id\tchr\tpos\tl2\tnum_snps")?;
+        let mut writer = open_bgzf_writer(path, tpool)?;
+        writeln!(writer, "#chr\tstart\tend\tsnp_id\tl2\tnum_snps")?;
 
         Ok(Self {
             writer,
@@ -95,13 +109,14 @@ impl LdScoreWriter {
 
     pub fn write_block(&mut self, records: &[LdScoreRecord]) -> Result<()> {
         for rec in records {
+            let pos = self.positions[rec.snp_idx];
             writeln!(
                 self.writer,
                 "{}\t{}\t{}\t{}\t{:.4}\t{}",
-                rec.snp_idx,
-                self.snp_ids[rec.snp_idx],
                 self.chromosomes[rec.snp_idx],
-                self.positions[rec.snp_idx],
+                pos.saturating_sub(1),
+                pos,
+                self.snp_ids[rec.snp_idx],
                 rec.l2,
                 rec.num_snps_in_block,
             )?;
@@ -115,19 +130,19 @@ impl LdScoreWriter {
     }
 }
 
-/// Write LD block definitions
-pub fn write_ld_blocks(path: &str, blocks: &[LdBlock]) -> Result<()> {
-    let mut writer = open_buf_writer(path)?;
-    writeln!(writer, "block_idx\tchr\tbp_start\tbp_end\tnum_snps")?;
+/// Write LD block definitions (BGZF-compressed, tabix-compatible)
+pub fn write_ld_blocks(path: &str, blocks: &[LdBlock], tpool: Option<&ThreadPool>) -> Result<()> {
+    let mut writer = open_bgzf_writer(path, tpool)?;
+    writeln!(writer, "#chr\tstart\tend\tblock_idx\tnum_snps")?;
 
     for block in blocks {
         writeln!(
             writer,
             "{}\t{}\t{}\t{}\t{}",
-            block.block_idx,
             block.chr,
-            block.bp_start,
+            block.bp_start.saturating_sub(1),
             block.bp_end,
+            block.block_idx,
             block.num_snps(),
         )?;
     }
@@ -137,7 +152,7 @@ pub fn write_ld_blocks(path: &str, blocks: &[LdBlock]) -> Result<()> {
     Ok(())
 }
 
-/// Write ground truth causal effects
+/// Write ground truth causal effects (BGZF-compressed, tabix-compatible)
 pub fn write_ground_truth(
     path: &str,
     block_effects: &[(usize, CellTypeGeneticEffects)],
@@ -145,58 +160,79 @@ pub fn write_ground_truth(
     snp_ids: &[Box<str>],
     chromosomes: &[Box<str>],
     positions: &[u64],
+    tpool: Option<&ThreadPool>,
 ) -> Result<()> {
-    let mut writer = open_buf_writer(path)?;
-    writeln!(
-        writer,
-        "block_idx\teffect_type\ttrait_idx\tsnp_idx\tsnp_id\tchr\tpos\teffect_size"
-    )?;
+    // Collect all records, then sort by position for tabix compatibility
+    struct GtRecord {
+        global_idx: usize,
+        block_idx: usize,
+        effect_type: &'static str,
+        trait_idx: usize,
+        effect: f32,
+    }
+
+    let mut records: Vec<GtRecord> = Vec::new();
 
     for (block_idx, effects) in block_effects {
         let block = &blocks[*block_idx];
         let offset = block.snp_start;
 
-        // Shared effects
         for (j, &local_idx) in effects.shared_causal_indices.iter().enumerate() {
             let global_idx = offset + local_idx;
             for trait_idx in 0..effects.num_cell_types {
                 let effect = effects.shared_effect_sizes[(trait_idx, j)];
                 if effect.abs() > 1e-10 {
-                    writeln!(
-                        writer,
-                        "{}\tshared\t{}\t{}\t{}\t{}\t{}\t{:.6}",
-                        block_idx,
-                        trait_idx,
+                    records.push(GtRecord {
                         global_idx,
-                        snp_ids[global_idx],
-                        chromosomes[global_idx],
-                        positions[global_idx],
+                        block_idx: *block_idx,
+                        effect_type: "shared",
+                        trait_idx,
                         effect,
-                    )?;
+                    });
                 }
             }
         }
 
-        // Independent effects
         for (trait_idx, trait_indices) in effects.independent_causal_indices.iter().enumerate() {
             for (j, &local_idx) in trait_indices.iter().enumerate() {
                 let global_idx = offset + local_idx;
                 let effect = effects.independent_effect_sizes[(trait_idx, j)];
                 if effect.abs() > 1e-10 {
-                    writeln!(
-                        writer,
-                        "{}\tindependent\t{}\t{}\t{}\t{}\t{}\t{:.6}",
-                        block_idx,
-                        trait_idx,
+                    records.push(GtRecord {
                         global_idx,
-                        snp_ids[global_idx],
-                        chromosomes[global_idx],
-                        positions[global_idx],
+                        block_idx: *block_idx,
+                        effect_type: "independent",
+                        trait_idx,
                         effect,
-                    )?;
+                    });
                 }
             }
         }
+    }
+
+    // Sort by position for tabix compatibility
+    records.sort_by_key(|r| positions[r.global_idx]);
+
+    let mut writer = open_bgzf_writer(path, tpool)?;
+    writeln!(
+        writer,
+        "#chr\tstart\tend\tsnp_id\tblock_idx\teffect_type\ttrait_idx\teffect_size"
+    )?;
+
+    for rec in &records {
+        let pos = positions[rec.global_idx];
+        writeln!(
+            writer,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}",
+            chromosomes[rec.global_idx],
+            pos.saturating_sub(1),
+            pos,
+            snp_ids[rec.global_idx],
+            rec.block_idx,
+            rec.effect_type,
+            rec.trait_idx,
+            rec.effect,
+        )?;
     }
 
     writer.flush()?;
@@ -204,7 +240,7 @@ pub fn write_ground_truth(
     Ok(())
 }
 
-/// Write confounder matrix
+/// Write confounder matrix (plain gzip, not BED-format)
 pub fn write_confounders(path: &str, confounders: &DMatrix<f32>) -> Result<()> {
     if confounders.ncols() == 0 {
         return Ok(());

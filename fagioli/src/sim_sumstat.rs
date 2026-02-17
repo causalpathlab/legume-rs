@@ -3,11 +3,13 @@ use clap::Args;
 use log::info;
 use nalgebra::DMatrix;
 use rand::SeedableRng;
+use rayon::prelude::*;
+use rust_htslib::tpool::ThreadPool;
 
 use fagioli::genotype::{BedReader, GenomicRegion, GenotypeReader};
 use fagioli::simulation::{
     compose_phenotype, generate_confounder_matrix, sample_cell_type_genetic_effects,
-    ConfounderParams, CellTypeGeneticEffects,
+    CellTypeGeneticEffects, ConfounderParams,
 };
 use fagioli::summary_stats::{
     compute_block_ld_scores, compute_block_sumstats, compute_yty_diagonal, create_uniform_blocks,
@@ -109,6 +111,11 @@ const SEED_EFFECTS: u64 = 300;
 pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
     info!("Starting sim-sumstat");
 
+    // Create htslib thread pool for parallel BGZF compression
+    let num_threads = rayon::current_num_threads().max(1) as u32;
+    let tpool = ThreadPool::new(num_threads)?;
+    info!("Using {} threads", num_threads);
+
     // ── Step 1: Read genotypes ───────────────────────────────────────────
     let region = GenomicRegion::new(
         Some(args.chromosome.clone()),
@@ -149,8 +156,8 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
     info!("Using {} LD blocks", num_blocks);
 
     // Write LD blocks
-    let blocks_file = format!("{}.ld_blocks.tsv.gz", args.output);
-    write_ld_blocks(&blocks_file, &blocks)?;
+    let blocks_file = format!("{}.ld_blocks.bed.gz", args.output);
+    write_ld_blocks(&blocks_file, &blocks, Some(&tpool))?;
 
     // ── Step 3: Pass 1 — Build phenotypes ────────────────────────────────
     // Determine which blocks are causal
@@ -165,47 +172,53 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
         num_causal_blocks, num_blocks, args.causal_block_density
     );
 
-    // Accumulate genetic values: G_total (N x T)
+    // Collect causal block indices for parallel processing
+    let causal_block_indices: Vec<usize> = (0..num_blocks)
+        .filter(|&i| {
+            causal_block_mask[i]
+                && blocks[i].num_snps() >= args.num_shared_causal + args.num_independent_causal
+        })
+        .collect();
+
+    // Pass 1: Parallel computation of per-block genetic values
+    let block_results: Vec<(usize, CellTypeGeneticEffects, DMatrix<f32>)> = causal_block_indices
+        .par_iter()
+        .map(|&block_idx| {
+            let block = &blocks[block_idx];
+            let block_m = block.num_snps();
+
+            let block_seed = args.seed + SEED_EFFECTS + block_idx as u64 * 1000;
+            let effects = sample_cell_type_genetic_effects(
+                block_m,
+                t,
+                args.num_shared_causal,
+                args.num_independent_causal,
+                args.genetic_variance / num_causal_blocks.max(1) as f32,
+                block_seed,
+            )
+            .expect("Failed to sample genetic effects");
+
+            let x_block = geno
+                .genotypes
+                .columns(block.snp_start, block_m)
+                .clone_owned();
+
+            let g_block = compute_genetic_values(&x_block, &effects);
+            (block_idx, effects, g_block)
+        })
+        .collect();
+
+    // Accumulate genetic values (sequential reduction)
     let mut g_total = DMatrix::<f32>::zeros(n, t);
     let mut block_effects: Vec<(usize, CellTypeGeneticEffects)> = Vec::new();
 
-    for (block_idx, block) in blocks.iter().enumerate() {
-        if !causal_block_mask[block_idx] {
-            continue;
-        }
-
-        let block_m = block.num_snps();
-        if block_m < args.num_shared_causal + args.num_independent_causal {
-            info!(
-                "Block {} too small ({} SNPs) for causal effects, skipping",
-                block_idx, block_m
-            );
-            continue;
-        }
-
-        // Sample causal effects for this block
-        let block_seed = args.seed + SEED_EFFECTS + block_idx as u64 * 1000;
-        let effects = sample_cell_type_genetic_effects(
-            block_m,
-            t,
-            args.num_shared_causal,
-            args.num_independent_causal,
-            args.genetic_variance / num_causal_blocks.max(1) as f32,
-            block_seed,
-        )?;
-
-        // Extract block genotypes
-        let x_block = geno
-            .genotypes
-            .columns(block.snp_start, block_m)
-            .clone_owned();
-
-        // Compute genetic values: G_block = X_block * beta_block (for each trait)
-        let g_block = compute_genetic_values(&x_block, &effects);
+    for (block_idx, effects, g_block) in block_results {
         g_total += g_block;
-
         block_effects.push((block_idx, effects));
     }
+
+    // Sort block_effects by block index for deterministic output
+    block_effects.sort_by_key(|(idx, _)| *idx);
 
     info!(
         "Accumulated genetic values from {} causal blocks",
@@ -243,7 +256,7 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
     );
 
     // Write ground truth
-    let gt_file = format!("{}.ground_truth.tsv.gz", args.output);
+    let gt_file = format!("{}.ground_truth.bed.gz", args.output);
     write_ground_truth(
         &gt_file,
         &block_effects,
@@ -251,6 +264,7 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
         &geno.snp_ids,
         &geno.chromosomes,
         &geno.positions,
+        Some(&tpool),
     )?;
 
     // Write confounders (if any)
@@ -259,50 +273,68 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
         write_confounders(&conf_file, &confounder_matrix)?;
     }
 
-    // ── Step 4: Pass 2 — Summary statistics ──────────────────────────────
+    // ── Step 4: Pass 2 — Summary statistics (parallel compute, sequential write)
     info!("Computing summary statistics block by block");
 
-    let sumstat_file = format!("{}.sumstats.tsv.gz", args.output);
+    let sumstat_file = format!("{}.sumstats.bed.gz", args.output);
     let mut sumstat_writer = SumstatWriter::new(
         &sumstat_file,
         &geno.snp_ids,
         &geno.chromosomes,
         &geno.positions,
         n,
+        Some(&tpool),
     )?;
 
-    let ld_score_file = format!("{}.ld_scores.tsv.gz", args.output);
+    let ld_score_file = format!("{}.ld_scores.bed.gz", args.output);
     let mut ld_writer = LdScoreWriter::new(
         &ld_score_file,
         &geno.snp_ids,
         &geno.chromosomes,
         &geno.positions,
+        Some(&tpool),
     )?;
 
     let yty_diag = compute_yty_diagonal(&phenotypes);
 
-    for (block_idx, block) in blocks.iter().enumerate() {
-        let block_m = block.num_snps();
-        let x_block = geno
-            .genotypes
-            .columns(block.snp_start, block_m)
-            .clone_owned();
+    // Process blocks in batches: parallel compute, sequential write
+    let batch_size = num_threads as usize * 2;
+    for batch_start in (0..num_blocks).step_by(batch_size) {
+        let batch_end = (batch_start + batch_size).min(num_blocks);
+        let batch_indices: Vec<usize> = (batch_start..batch_end).collect();
 
-        // Summary statistics
-        let sumstats = compute_block_sumstats(&x_block, &phenotypes, &yty_diag, block.snp_start);
-        sumstat_writer.write_block(&sumstats)?;
+        // Parallel: compute sumstats + LD scores for batch of blocks
+        let batch_results: Vec<_> = batch_indices
+            .par_iter()
+            .map(|&block_idx| {
+                let block = &blocks[block_idx];
+                let block_m = block.num_snps();
+                let x_block = geno
+                    .genotypes
+                    .columns(block.snp_start, block_m)
+                    .clone_owned();
 
-        // LD scores
-        let ld_scores = compute_block_ld_scores(&x_block, block.snp_start);
-        ld_writer.write_block(&ld_scores)?;
+                let sumstats =
+                    compute_block_sumstats(&x_block, &phenotypes, &yty_diag, block.snp_start);
+                let ld_scores = compute_block_ld_scores(&x_block, block.snp_start);
 
-        if (block_idx + 1) % 10 == 0 || block_idx + 1 == num_blocks {
-            info!(
-                "Processed block {}/{} ({} SNPs)",
-                block_idx + 1,
-                num_blocks,
-                block_m
-            );
+                (block_idx, sumstats, ld_scores)
+            })
+            .collect();
+
+        // Sequential: write in block order (required for tabix sort order)
+        for (block_idx, sumstats, ld_scores) in batch_results {
+            sumstat_writer.write_block(&sumstats)?;
+            ld_writer.write_block(&ld_scores)?;
+
+            if (block_idx + 1) % 10 == 0 || block_idx + 1 == num_blocks {
+                info!(
+                    "Processed block {}/{} ({} SNPs)",
+                    block_idx + 1,
+                    num_blocks,
+                    blocks[block_idx].num_snps()
+                );
+            }
         }
     }
 
