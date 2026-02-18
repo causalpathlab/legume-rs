@@ -44,7 +44,7 @@ pub fn simulate_individual_linear_model(
     let n = genotypes.nrows();
     let k = genetic_effects.num_cell_types;
 
-    if h2_genetic > 1.0 || h2_genetic < 0.0 {
+    if !(0.0..=1.0).contains(&h2_genetic) {
         anyhow::bail!("h2_genetic must be in [0, 1], got {}", h2_genetic);
     }
 

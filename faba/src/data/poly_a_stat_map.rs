@@ -53,7 +53,7 @@ impl DnaStatMap for PolyASiteMap {
     /// Parse CIGAR string and get potential poly-A cleavage sites
     /// - mark cleavage sites
     /// - mark internally primed sites (later filter out)
-    /// while filtering out reads by:
+    ///   while filtering out reads by:
     /// - soft-clipped length
     /// - need to consider #A's or #T's within the soft-clipped
     ///

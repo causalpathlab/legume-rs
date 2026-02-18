@@ -117,7 +117,7 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         indices: &indices,
         indptr: &indptr,
     }
-    .into_coo(args.pointer_type.clone())?;
+    .to_coo(args.pointer_type.clone())?;
 
     let TripletsShape { nrows, ncols, nnz } = shape;
     info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
@@ -264,7 +264,7 @@ pub fn run_build_from_10x_matrix(args: &From10xMatrixArgs) -> anyhow::Result<()>
             indices: &indices.read_1d::<u64>()?.to_vec(),
             indptr: &indptr.read_1d::<u64>()?.to_vec(),
         }
-        .into_coo(args.pointer_type.clone())?
+        .to_coo(args.pointer_type.clone())?
     } else {
         return Err(anyhow::anyhow!("unable to read triplets"));
     };
@@ -437,7 +437,7 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
             indices: &indices,
             indptr: &indptr,
         }
-        .into_coo(pointer_type)?
+        .to_coo(pointer_type)?
     };
 
     let TripletsShape { nrows, ncols, nnz } = shape;

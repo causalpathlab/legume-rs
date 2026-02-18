@@ -88,7 +88,7 @@ impl RssSvd {
     ///
     /// # Arguments
     /// * `x` - Standardized genotype matrix, shape (n, p).
-    ///         Columns should be mean-centered and unit-variance.
+    ///   Columns should be mean-centered and unit-variance.
     /// * `max_rank` - Maximum rank for randomized SVD.
     /// * `lambda` - Regularization: D̃ = √(D² + λ).
     /// * `device` - Candle device for output tensors.
@@ -491,8 +491,7 @@ mod tests {
         let susie = SusieVar::new(vb.pp("susie"), l, p, t)?;
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::new(50);
-        let model =
-            LinearModelSGVB::from_variational(susie, svd.x_design().clone(), prior, config);
+        let model = LinearModelSGVB::from_variational(susie, svd.x_design().clone(), prior, config);
 
         let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.01)?;
         for i in 0..300 {
