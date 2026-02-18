@@ -94,7 +94,6 @@ pub struct AnnotateTopicArgs {
 
     #[arg(long, help = "Reference marker DB for auto-suggestions")]
     marker_db: Option<Box<str>>,
-
     // === Misc ===
 }
 

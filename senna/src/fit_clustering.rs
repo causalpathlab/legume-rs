@@ -136,7 +136,6 @@ pub struct ClusteringArgs {
 		     - {out}.clusters.parquet: Cluster assignments (cell × cluster)"
     )]
     out: Box<str>,
-
 }
 
 pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
