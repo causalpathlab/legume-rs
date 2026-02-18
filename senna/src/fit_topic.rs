@@ -646,15 +646,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
 
-    // encoder
-    //     .feature_module_membership()?
-    //     .to_device(&candle_core::Device::Cpu)?
-    //     .to_parquet(
-    //         Some(&gene_names),
-    //         None,
-    //         &(args.out.to_string() + ".feature_module.parquet"),
-    //     )?;
-
     /////////////////////////////////////////////////////
     // evaluate latent states while adjusting the bias //
     /////////////////////////////////////////////////////
@@ -927,7 +918,6 @@ fn evaluate_latent_by_encoder<Enc>(
 where
     Enc: EncoderModuleT + Send + Sync,
 {
-
     let ntot = data_vec.num_columns();
     let kk = encoder.dim_latent();
 
@@ -941,7 +931,6 @@ where
     }
     .map(|x| {
         let mut delta_db = x.posterior_mean().clone();
-        // Apply feature selection to delta
         if let Some(sel) = feature_selection {
             delta_db = delta_db.select_rows(&sel.selected_indices);
         }
@@ -949,46 +938,53 @@ where
     })
     .map(|delta_db| {
         delta_db
-            .to_tensor(&dev)
+            .to_tensor(dev)
             .expect("delta to tensor")
             .transpose(0, 1)
             .expect("transpose")
     });
 
-    let mut chunks = jobs
-        .par_iter()
-        .progress_count(njobs)
-        .map(|&block| match args.adj_method {
-            AdjMethod::Residual => evaluate_with_residuals(
-                block,
-                data_vec,
-                encoder,
-                &dev,
-                delta.as_ref(),
-                feature_selection,
-            ),
-            AdjMethod::Batch => evaluate_with_batch(
-                block,
-                data_vec,
-                encoder,
-                &dev,
-                delta.as_ref(),
-                feature_selection,
-            ),
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let eval_block =
+        |block| -> anyhow::Result<(usize, Mat)> {
+            match args.adj_method {
+                AdjMethod::Residual => evaluate_with_residuals(
+                    block, data_vec, encoder, dev, delta.as_ref(), feature_selection,
+                ),
+                AdjMethod::Batch => evaluate_with_batch(
+                    block, data_vec, encoder, dev, delta.as_ref(), feature_selection,
+                ),
+            }
+        };
 
-    chunks.par_sort_by_key(|&(lb, _)| lb);
-    let chunks = chunks.into_iter().map(|(_, z_nk)| z_nk).collect::<Vec<_>>();
+    // GPU forward passes are not thread-safe — run sequentially on Metal/CUDA,
+    // parallel on CPU
+    let mut chunks: Vec<(usize, Mat)> = if dev.is_cpu() {
+        jobs.par_iter()
+            .progress_count(njobs)
+            .map(|&block| eval_block(block))
+            .collect::<anyhow::Result<Vec<_>>>()?
+    } else {
+        let pb = ProgressBar::new(njobs);
+        let result = jobs
+            .iter()
+            .map(|&block| {
+                let r = eval_block(block);
+                pb.inc(1);
+                r
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        pb.finish_and_clear();
+        result
+    };
+
+    chunks.sort_by_key(|&(lb, _)| lb);
 
     let mut ret = Mat::zeros(ntot, kk);
-    {
-        let mut lb = 0;
-        for z in chunks {
-            let ub = lb + z.nrows();
-            ret.rows_range_mut(lb..ub).copy_from(&z);
-            lb = ub;
-        }
+    let mut lb = 0;
+    for (_, z) in chunks {
+        let ub = lb + z.nrows();
+        ret.rows_range_mut(lb..ub).copy_from(&z);
+        lb = ub;
     }
     Ok(ret)
 }
