@@ -83,9 +83,6 @@ pub struct VisualizeArgs {
     #[arg(long, default_value_t = false, help = "Preload all columns data")]
     preload_data: bool,
 
-    #[arg(long, short, help = "Verbosity")]
-    verbose: bool,
-
     #[arg(
         long,
         default_value_t = 0.0,
@@ -252,11 +249,6 @@ pub struct VisualizeArgs {
 }
 
 pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     // 1. Read the data
     let SparseDataWithBatch {
         data: mut data_vec,

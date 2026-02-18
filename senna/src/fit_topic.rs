@@ -14,7 +14,7 @@ use rayon::prelude::*;
 
 use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_model_traits::DecoderModuleT;
-use indicatif::{ProgressBar, ProgressDrawTarget};
+use indicatif::ProgressBar;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -315,15 +315,6 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        short,
-        help = "Verbosity",
-        long_help = "Enable verbose output.\n\
-		     Prints additional information during execution."
-    )]
-    verbose: bool,
-
-    #[arg(
-        long,
         help = "Maximum number of highly variable features",
         long_help = "Select top N features by log-variance.\n\
 		     If not specified, all features are used.\n\
@@ -384,11 +375,6 @@ pub struct TopicArgs {
 }
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     let reference = args.reference_batches.as_deref();
 
     // 1. Read the data with batch membership
@@ -810,9 +796,6 @@ where
 
     let pb = ProgressBar::new(args.epochs as u64);
 
-    if args.verbose {
-        pb.set_draw_target(ProgressDrawTarget::hidden());
-    }
 
     let mut llik_trace = Vec::with_capacity(args.epochs);
     let mut kl_trace = Vec::with_capacity(args.epochs);
@@ -919,9 +902,7 @@ where
 
             pb.inc(1);
 
-            if args.verbose {
-                info!("[{}][{}] {} {}", epoch, jitter, llik_avg, kl_avg);
-            }
+            info!("[{}][{}] {} {}", epoch, jitter, llik_avg, kl_avg);
         }
     }
     pb.finish_and_clear();
@@ -983,9 +964,6 @@ where
 
     let total_actual_epochs: usize = level_epochs.iter().sum();
     let pb = ProgressBar::new(total_actual_epochs as u64);
-    if args.verbose {
-        pb.set_draw_target(ProgressDrawTarget::hidden());
-    }
 
     let mut llik_trace = Vec::with_capacity(total_actual_epochs);
     let mut kl_trace = Vec::with_capacity(total_actual_epochs);
@@ -1097,17 +1075,15 @@ where
                 pb.inc(1);
                 global_epoch += 1;
 
-                if args.verbose {
-                    info!(
-                        "[level {}/{}][{}][{}] {} {}",
-                        level + 1,
-                        num_levels,
-                        epoch,
-                        jitter,
-                        llik_avg,
-                        kl_avg
-                    );
-                }
+                info!(
+                    "[level {}/{}][{}][{}] {} {}",
+                    level + 1,
+                    num_levels,
+                    epoch,
+                    jitter,
+                    llik_avg,
+                    kl_avg
+                );
             }
         }
     }

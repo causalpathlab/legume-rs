@@ -15,7 +15,7 @@ use candle_util::candle_inference::TrainConfig;
 use candle_util::candle_loss_functions as loss_func;
 use candle_util::candle_model_traits::DecoderModuleT;
 use candle_util::candle_vae_inference::*;
-use indicatif::{ProgressBar, ProgressDrawTarget};
+use indicatif::ProgressBar;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -118,9 +118,6 @@ pub struct DeconvArgs {
     #[arg(long, value_enum, default_value = "cpu")]
     device: ComputeDevice,
 
-    /// verbosity
-    #[arg(long, short)]
-    verbose: bool,
 }
 
 struct BulkDataOut {
@@ -285,17 +282,13 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
         num_epochs: args.epochs,
         num_pretrain_epochs: 0,
         device: dev.clone(),
-        verbose: args.verbose,
+        verbose: log::log_enabled!(log::Level::Info),
         show_progress: true,
     };
 
     info!("Set up training data");
 
     let pb = ProgressBar::new(train_config.num_epochs as u64);
-
-    if !train_config.show_progress || train_config.verbose {
-        pb.set_draw_target(ProgressDrawTarget::hidden());
-    }
 
     let mut vae = Vae::build(&encoder, &decoder, &parameters);
     let mut llik_sc = Vec::with_capacity(train_config.num_epochs);
@@ -325,7 +318,7 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
         data_loader.shuffle_minibatch(args.block_size)?;
 
         train_config.verbose = false;
-        train_config.show_progress = args.verbose;
+        train_config.show_progress = true;
         train_config.num_epochs = args.jitter_interval;
 
         let llik = vae.train_encoder_decoder(
@@ -345,7 +338,7 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
         })?;
 
         train_config.verbose = false;
-        train_config.show_progress = args.verbose;
+        train_config.show_progress = true;
         train_config.num_epochs = args.jitter_interval;
 
         let llik = vae.train_encoder_decoder(
@@ -358,21 +351,17 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
 
         pb.inc(args.jitter_interval as u64);
 
-        if args.verbose {
-            info!(
-                "[{}] log-likelihood: {} {}",
-                epoch + args.jitter_interval,
-                llik_sc.last().ok_or(anyhow::anyhow!("No SC loss values recorded"))?,
-                llik_bulk.last().ok_or(anyhow::anyhow!("No bulk loss values recorded"))?,
-            );
-        }
+        info!(
+            "[{}] log-likelihood: {} {}",
+            epoch + args.jitter_interval,
+            llik_sc.last().ok_or(anyhow::anyhow!("No SC loss values recorded"))?,
+            llik_bulk.last().ok_or(anyhow::anyhow!("No bulk loss values recorded"))?,
+        );
     }
 
     pb.finish_and_clear();
 
-    if train_config.verbose {
-        info!("Finished {} epochs", train_config.num_epochs);
-    }
+    info!("Finished {} epochs", train_config.num_epochs);
 
     info!("Writing down the model parameters");
 

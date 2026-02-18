@@ -30,10 +30,6 @@ pub struct DeconvRegArgs {
     #[arg(long, default_value_t = false)]
     preload_data: bool,
 
-    /// verbosity
-    #[arg(long, short)]
-    verbose: bool,
-
     /// output header
     #[arg(long, short, required = true)]
     out: Box<str>,
@@ -103,11 +99,6 @@ fn read_bulk_files(
 }
 
 pub fn fit_deconv_reg(args: &DeconvRegArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     let MatWithNames {
         rows: sc_genes,
         cols: _samples,

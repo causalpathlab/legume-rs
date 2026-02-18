@@ -138,22 +138,9 @@ pub struct JointSvdArgs {
     )]
     preload_data: bool,
 
-    #[arg(
-        long,
-        short,
-        help = "Verbosity.",
-        long_help = "Enable verbose output.\n\
-		     Prints additional information during execution."
-    )]
-    verbose: bool,
 }
 
 pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     // 1. Read the data with batch membership
     let SparseStackWithBatch {
         mut data_stack,

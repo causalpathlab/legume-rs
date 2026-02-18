@@ -39,6 +39,9 @@ fn print_logo() {
 #[command(name = "fagioli")]
 #[command(about = "Molecular QTL simulation and mapping toolkit for single-cell genomics")]
 struct Cli {
+    #[arg(short = 'v', long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     commands: Commands,
 }
@@ -56,14 +59,17 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
-
     // Show logo if help is requested
     if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
         print_logo();
     }
 
     let cli = Cli::parse();
+
+    if cli.verbose {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
 
     match &cli.commands {
         Commands::SimQtl(args) => {

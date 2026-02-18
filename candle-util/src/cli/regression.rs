@@ -160,7 +160,6 @@ fn save_output_sparse<V: SparseVariationalOutput>(
 
 fn train<L, P>(
     iters: usize,
-    verbose: bool,
     optimizer: &mut impl Optimizer,
     loss_fn: L,
     pip_fn: Option<P>,
@@ -175,24 +174,20 @@ where
         optimizer.backward_step(&loss)?;
 
         if i % 50 == 0 || i == iters - 1 {
-            if verbose {
-                let loss_val: f32 = loss.to_scalar()?;
-                let elbo_val = -loss_val;
-                match &pip_fn {
-                    Some(f) => info!(
-                        "iter {:4}: loss = {:10.4}, ELBO = {:10.4}, PIPs: {}",
-                        i,
-                        loss_val,
-                        elbo_val,
-                        f()?
-                    ),
-                    None => info!(
-                        "iter {:4}: loss = {:10.4}, ELBO = {:10.4}",
-                        i, loss_val, elbo_val
-                    ),
-                }
-            } else {
-                info!("iter {:4}/{}", i, iters);
+            let loss_val: f32 = loss.to_scalar()?;
+            let elbo_val = -loss_val;
+            match &pip_fn {
+                Some(f) => info!(
+                    "iter {:4}: loss = {:10.4}, ELBO = {:10.4}, PIPs: {}",
+                    i,
+                    loss_val,
+                    elbo_val,
+                    f()?
+                ),
+                None => info!(
+                    "iter {:4}: loss = {:10.4}, ELBO = {:10.4}",
+                    i, loss_val, elbo_val
+                ),
             }
         }
     }
@@ -283,8 +278,6 @@ pub struct RegressionArgs {
     #[arg(long)]
     pub gpu: bool,
 
-    #[arg(short, long)]
-    pub verbose: bool,
 }
 
 //
@@ -342,7 +335,6 @@ fn run_gaussian_gaussian(ctx: RegressionContext) -> Result<()> {
 
     train(
         args.iters,
-        args.verbose,
         &mut optimizer,
         || {
             Ok(composite_local_reparam_loss(
@@ -422,7 +414,6 @@ fn run_gaussian_susie(ctx: RegressionContext) -> Result<()> {
 
     train(
         args.iters,
-        args.verbose,
         &mut optimizer,
         || {
             let lr_samples = vec![
@@ -485,7 +476,6 @@ fn run_poisson_gaussian(ctx: RegressionContext) -> Result<()> {
 
     train(
         args.iters,
-        args.verbose,
         &mut optimizer,
         || {
             Ok(local_reparam_loss(
@@ -534,7 +524,6 @@ fn run_poisson_susie(ctx: RegressionContext) -> Result<()> {
 
     train(
         args.iters,
-        args.verbose,
         &mut optimizer,
         || {
             Ok(local_reparam_loss(
@@ -626,7 +615,6 @@ fn run_gaussian_ml_susie(ctx: RegressionContext) -> Result<()> {
 
     train(
         args.iters,
-        args.verbose,
         &mut optimizer,
         || {
             let lr_samples = vec![
@@ -678,7 +666,6 @@ fn run_poisson_ml_susie(ctx: RegressionContext) -> Result<()> {
 
     train(
         args.iters,
-        args.verbose,
         &mut optimizer,
         || {
             Ok(local_reparam_loss(
@@ -733,7 +720,6 @@ fn run_negbin_ml_susie(ctx: RegressionContext) -> Result<()> {
 
     train(
         args.iters,
-        args.verbose,
         &mut optimizer,
         || {
             let lr_samples = vec![
@@ -794,7 +780,6 @@ fn run_negbin_gaussian(ctx: RegressionContext) -> Result<()> {
 
     train(
         args.iters,
-        args.verbose,
         &mut optimizer,
         || {
             Ok(composite_local_reparam_loss(
@@ -874,7 +859,6 @@ fn run_negbin_susie(ctx: RegressionContext) -> Result<()> {
 
     train(
         args.iters,
-        args.verbose,
         &mut optimizer,
         || {
             let lr_samples = vec![

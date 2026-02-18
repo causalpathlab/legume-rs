@@ -183,8 +183,6 @@ pub struct SrtGenePairSvdArgs {
     )]
     num_levels: usize,
 
-    #[arg(long, short, help = "Enable verbose logging (sets RUST_LOG=info)")]
-    verbose: bool,
 }
 
 /// Gene-gene interaction pipeline:
@@ -201,8 +199,6 @@ pub struct SrtGenePairSvdArgs {
 /// 10. Nystrom projection → per-cell → per-pair latent codes
 /// 11. Export
 pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
-    init_logger(args.verbose);
-
     // 1. Load data
     info!("[1/9] Loading data files...");
 

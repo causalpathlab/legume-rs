@@ -260,14 +260,6 @@ pub struct DartSeqCountArgs {
 
     #[arg(
         long,
-        short,
-        help = "verbosity",
-        long_help = "Enable verbose output `RUST_LOG=info`"
-    )]
-    verbose: bool,
-
-    #[arg(
-        long,
         default_value_t = false,
         help = "Print histogram to stdout",
         long_help = "Print histogram of gene features to stdout. \n\
@@ -500,12 +492,6 @@ fn check_all_bam_indices(bam_files: &[Box<str>]) -> anyhow::Result<()> {
 /// Count possibly methylated A positions in DART-seq bam files to
 /// quantify m6A β values
 pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
-    // Setup logging and environment
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     mkdir(&args.output)?;
 
     // Setup thread pool

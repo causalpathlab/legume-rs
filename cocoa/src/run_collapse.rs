@@ -104,21 +104,9 @@ pub struct CollapseArgs {
     )]
     preload_data: bool,
 
-    #[arg(
-        short,
-        long = "verbose",
-        help = "Verbosity.",
-        long_help = "Increase output verbosity."
-    )]
-    verbose: bool,
 }
 
 pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     // read data without `exposure`
     let data = read_input_data(InputDataArgs {
         data_files: args.data_files.clone(),
