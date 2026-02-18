@@ -96,8 +96,6 @@ pub struct AnnotateTopicArgs {
     marker_db: Option<Box<str>>,
 
     // === Misc ===
-    #[arg(short = 'v', long, help = "Verbose output")]
-    verbose: bool,
 }
 
 /// Training data bundle
@@ -116,11 +114,6 @@ struct AnnotInfo {
 }
 
 pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     // 1. Read dictionary (log-probabilities) and latent states (probabilities)
     let MatWithNames {
         rows: row_names,

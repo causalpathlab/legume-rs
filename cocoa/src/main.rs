@@ -23,6 +23,9 @@ use clap::{Parser, Subcommand};
     long_about = "Routines in CoCoA will be useful "
 )]
 struct Cli {
+    #[arg(short = 'v', long, global = true, help = "Increase output verbosity.")]
+    verbose: bool,
+
     #[command(subcommand)]
     commands: Commands,
 }
@@ -70,6 +73,11 @@ enum Commands {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    if cli.verbose {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
 
     match &cli.commands {
         Commands::Diff(args) => {

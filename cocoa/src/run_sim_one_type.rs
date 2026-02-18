@@ -364,16 +364,9 @@ pub struct SimOneTypeArgs {
     )]
     out: Box<str>,
 
-    #[arg(long, short, help = "verbosity", long_help = "Set RUST_LOG=`info`")]
-    verbose: bool,
 }
 
 pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     if args.gamma_hyperparam.len() != 2 {
         return Err(anyhow::anyhow!(
             "need exactly two values for `gamma-hyperparam`"

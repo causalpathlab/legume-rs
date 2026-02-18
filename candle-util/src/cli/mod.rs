@@ -8,6 +8,9 @@ pub use regression::{LikelihoodType, RegressionArgs, VariationalType};
 #[command(name = "candle-util")]
 #[command(about = "Candle utility CLI for variational inference models")]
 pub struct Cli {
+    #[arg(short = 'v', long, global = true)]
+    pub verbose: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }

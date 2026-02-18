@@ -111,9 +111,6 @@ pub struct MapSumstatArgs {
     #[arg(long, default_value = "42")]
     pub seed: u64,
 
-    /// Verbose: report top significant SNPs per block (PIP >= 0.7)
-    #[arg(long, short)]
-    pub verbose: bool,
 
     /// Output prefix
     #[arg(short, long)]
@@ -261,8 +258,8 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
                 result.avg_elbo,
             );
 
-            // Report top significant SNPs (PIP >= 0.7) in verbose mode
-            if args.verbose {
+            // Report top significant SNPs (PIP >= 0.7)
+            {
                 let mut hits: Vec<(f32, usize, usize)> = Vec::new();
                 for snp_j in 0..block_m {
                     for trait_k in 0..t {

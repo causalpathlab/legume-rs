@@ -16,9 +16,6 @@ use crate::{
 use crate::run_squeeze;
 
 pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
-    if args.verbose > 0 {
-        std::env::set_var("RUST_LOG", "info");
-    }
 
     let mtx_file = args.mtx.as_ref();
     let row_file = args.row.as_ref();
@@ -73,9 +70,6 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
 }
 
 pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
-    if args.verbose > 0 {
-        std::env::set_var("RUST_LOG", "info");
-    }
 
     let source_zarr_file_path = args.zarr_file.clone();
 
@@ -234,9 +228,6 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
 
 /// Build backend from 10X Genomics H5 format (Cell Ranger).
 pub fn run_build_from_10x_matrix(args: &From10xMatrixArgs) -> anyhow::Result<()> {
-    if args.verbose > 0 {
-        std::env::set_var("RUST_LOG", "info");
-    }
 
     let file = hdf5::File::open(args.h5_file.to_string())?;
     info!("Opened 10X H5 file: {}", args.h5_file);
@@ -380,9 +371,6 @@ pub fn run_build_from_10x_matrix(args: &From10xMatrixArgs) -> anyhow::Result<()>
 /// Reads all obs columns and writes metadata `.tsv.gz` files.
 /// Creates `barcode@donor_id` column names when donor_id is available.
 pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
-    if args.verbose > 0 {
-        std::env::set_var("RUST_LOG", "info");
-    }
 
     let file = hdf5::File::open(args.h5ad_file.to_string())?;
     info!("Opened AnnData h5ad file: {}", args.h5ad_file);
@@ -682,9 +670,6 @@ fn write_sample_metadata(
 /// Aggregates per-molecule counts into a feature x cell sparse matrix.
 /// Handles multi-gem-group (cellranger aggr) and multi-library (CITE-seq).
 pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result<()> {
-    if args.verbose > 0 {
-        std::env::set_var("RUST_LOG", "info");
-    }
 
     let file = hdf5::File::open(args.h5_file.to_string())?;
     info!("Opened molecule_info.h5: {}", args.h5_file);

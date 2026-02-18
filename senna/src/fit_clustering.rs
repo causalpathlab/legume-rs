@@ -137,16 +137,9 @@ pub struct ClusteringArgs {
     )]
     out: Box<str>,
 
-    #[arg(long, short = 'v', help = "Verbose output with cluster statistics")]
-    verbose: bool,
 }
 
 pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     // Read latent representation
     let MatWithNames {
         rows: cell_names,
@@ -221,8 +214,8 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
         n_unassigned,
     );
 
-    // Display cluster statistics if verbose (top 100 biggest)
-    if args.verbose {
+    // Display cluster statistics when verbose logging is enabled (top 100 biggest)
+    if log::log_enabled!(log::Level::Info) {
         eprintln!();
         eprintln!("{}", result.histogram_ascii(50, 100));
         eprintln!();

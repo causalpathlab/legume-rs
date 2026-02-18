@@ -46,25 +46,11 @@ pub struct ReadDepthArgs {
     /// output header for `data-beans` files
     #[arg(short, long, required = true)]
     output: Box<str>,
-
-    /// verbosity
-    #[arg(
-        long,
-        short,
-        help = "verbosity",
-        long_help = "Enable verbose output `RUST_LOG=info`"
-    )]
-    verbose: bool,
 }
 
 /// Count read depth
 ///
 pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     if (args.resolution_kb * 1000.0) as usize > args.block_size_mb * 1_000_000 {
         return Err(anyhow::anyhow!(
             "resolution should be smaller than the block size"

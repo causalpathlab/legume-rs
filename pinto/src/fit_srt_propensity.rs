@@ -98,8 +98,6 @@ pub struct SrtPropensityArgs {
 }
 
 pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
-    init_logger(false);
-
     let MatWithNames {
         rows,
         cols: _,

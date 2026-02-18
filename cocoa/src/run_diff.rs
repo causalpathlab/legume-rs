@@ -166,13 +166,6 @@ pub struct DiffArgs {
     )]
     confounder_file: Option<Box<str>>,
 
-    #[arg(
-        short,
-        long,
-        help = "Verbosity.",
-        long_help = "Increase output verbosity."
-    )]
-    verbose: bool,
 }
 
 /////////////////////////////////////
@@ -180,11 +173,6 @@ pub struct DiffArgs {
 /////////////////////////////////////
 
 pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     let mut data = read_input_data(InputDataArgs {
         data_files: args.data_files,
         indv_files: Some(args.indv_files),

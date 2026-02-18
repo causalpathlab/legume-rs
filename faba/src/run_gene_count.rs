@@ -46,24 +46,10 @@ pub struct GeneCountArgs {
     /// output header for `data-beans` files
     #[arg(short, long, required = true)]
     output: Box<str>,
-
-    /// verbosity
-    #[arg(
-        long,
-        short,
-        help = "verbosity",
-        long_help = "Enable verbose output `RUST_LOG=info`"
-    )]
-    verbose: bool,
 }
 
 /// simply count the occurence of gene and cell barcode
 pub fn run_gene_count(args: &GeneCountArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     if args.bam_files.is_empty() {
         return Err(anyhow::anyhow!("need bam files"));
     }
