@@ -108,23 +108,13 @@ pub struct SvdArgs {
 
     #[arg(
         long,
-        default_value_t = 2,
+        default_value_t = 1,
         help = "Number of multi-level coarsening levels",
         long_help = "Number of multi-level coarsening levels for batch correction.\n\
 		     Higher values add intermediate refinement steps.\n\
 		     Level sort dimensions are linearly spaced from 4 to sort_dim."
     )]
     num_levels: usize,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Disable super-cell matching",
-        long_help = "Disable super-cell matching and use cell-level KNN instead.\n\
-		     The cell-level approach is slower but may be more accurate\n\
-		     for small datasets."
-    )]
-    no_supercell: bool,
 
     #[arg(
         long,
@@ -287,21 +277,8 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     // 3. Batch-adjusted collapsing (pseudobulk)
     let reference = args.reference_batches.as_deref();
 
-    let use_multilevel =
-        !args.ignore_batch_effects && nbatch > 1 && reference.is_none() && !args.no_supercell;
-
-    let collapse_out = if use_multilevel {
-        info!("Multi-level collapsing with super-cells ...");
-        collapse_columns_multilevel_impl(
-            &mut data_vec,
-            &proj_kn,
-            &batch_membership,
-            Some(args.knn_cells),
-            Some(args.num_levels),
-            Some(args.sort_dim),
-            Some(args.iter_opt),
-        )?
-    } else {
+    let collapse_out = if reference.is_some() {
+        // Legacy cell-level KNN path for --reference-batches
         let nsamp = data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
 
         if !args.ignore_batch_effects && nbatch > 1 {
@@ -314,6 +291,16 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             Some(args.knn_batches),
             Some(args.knn_cells),
             reference,
+            Some(args.iter_opt),
+        )?
+    } else {
+        collapse_columns_multilevel_impl(
+            &mut data_vec,
+            &proj_kn,
+            &batch_membership,
+            Some(args.knn_cells),
+            Some(args.num_levels),
+            Some(args.sort_dim),
             Some(args.iter_opt),
         )?
     };
