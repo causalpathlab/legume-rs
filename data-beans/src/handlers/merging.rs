@@ -3,7 +3,7 @@ use crate::sparse_io::*;
 use crate::utilities::io_helpers::{read_col_names, read_row_names};
 
 use data_beans::sparse_data_visitors::create_jobs;
-use indicatif::{ParallelProgressIterator, ProgressBar, ProgressDrawTarget};
+use indicatif::{ParallelProgressIterator, ProgressBar};
 use log::info;
 use matrix_util::common_io::*;
 use matrix_util::mtx_io;
@@ -19,10 +19,6 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     if args.data_files.len() <= 1 {
         info!("no need to merge one file");
         return Ok(());
-    }
-
-    if args.verbose > 0 {
-        std::env::set_var("RUST_LOG", "info");
     }
 
     let num_batches = args.data_files.len();
@@ -164,10 +160,6 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
 }
 
 pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
-    if args.verbose > 0 {
-        std::env::set_var("RUST_LOG", "info");
-    }
-
     let directories = args.data_directories.clone();
 
     let mut mtx_files = vec![];
@@ -338,10 +330,6 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
     let mut nnz_tot = 0;
 
     let pb = ProgressBar::new(num_batches as u64);
-
-    if args.verbose > 0 {
-        pb.set_draw_target(ProgressDrawTarget::hidden());
-    }
 
     for b in 0..num_batches {
         let row_names = read_row_names(row_files[b].clone(), args.num_feature_name_words)?;

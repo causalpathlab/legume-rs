@@ -182,15 +182,6 @@ pub struct SvdArgs {
 
     #[arg(
         long,
-        short,
-        help = "Verbosity",
-        long_help = "Enable verbose output.\n\
-		     Prints additional information during execution."
-    )]
-    verbose: bool,
-
-    #[arg(
-        long,
         help = "Maximum number of highly variable features",
         long_help = "Select top N features by log-variance.\n\
 		     If not specified, all features are used.\n\
@@ -227,11 +218,6 @@ pub struct SvdArgs {
 }
 
 pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     // 1. Read the data with batch membership
     let SparseDataWithBatch {
         data: mut data_vec,

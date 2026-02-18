@@ -147,8 +147,6 @@ pub struct SrtDeltaSvdArgs {
     )]
     num_levels: usize,
 
-    #[arg(long, short, help = "Enable verbose logging (sets RUST_LOG=info)")]
-    verbose: bool,
 }
 
 /// Input for fused multi-level pair delta visitor.
@@ -224,8 +222,6 @@ pub(crate) struct PairDeltaParameters {
 /// 8. Nystrom projection → per-pair latent codes
 /// 9. Export dictionary + pair latents
 pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
-    init_logger(args.verbose);
-
     // 1. Load data
     info!("Loading data files...");
 

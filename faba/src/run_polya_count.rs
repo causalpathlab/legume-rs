@@ -159,14 +159,6 @@ pub struct PolyACountArgs {
 
     #[arg(
         long,
-        short,
-        help = "verbosity",
-        long_help = "Enable verbose output `RUST_LOG=info`"
-    )]
-    verbose: bool,
-
-    #[arg(
-        long,
         value_enum,
         default_value = "zarr",
         help = "Backend format for the output file",
@@ -248,12 +240,6 @@ fn uniq_batch_names(bam_files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
 /// Count poly-A sites in RNA-seq bam files to quantify
 /// poly-A cleavage sites at cell level
 pub fn run_count_polya(args: &PolyACountArgs) -> anyhow::Result<()> {
-    // Setup logging and environment
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     mkdir(&args.output)?;
 
     // Setup thread pool

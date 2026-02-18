@@ -163,8 +163,6 @@ pub struct SrtLinkCommunityArgs {
     )]
     preload_data: bool,
 
-    #[arg(long, short, help = "Enable verbose logging (sets RUST_LOG=info)")]
-    verbose: bool,
 }
 
 /// Link community model pipeline.
@@ -178,8 +176,6 @@ pub struct SrtLinkCommunityArgs {
 /// 7.  Gibbs on coarsest → transfer → refine at each finer level
 /// 8.  Extract and write outputs
 pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()> {
-    init_logger(args.verbose);
-
     let a0 = args.a0 as f64;
     let b0 = args.b0 as f64;
     let k = args.n_communities;

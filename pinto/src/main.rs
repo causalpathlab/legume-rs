@@ -86,6 +86,9 @@ fn print_logo() {
     term_width = 80
 )]
 struct Cli {
+    #[arg(short = 'v', long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     commands: Commands,
 }
@@ -259,6 +262,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     let cli = Cli::parse();
+
+    srt_common::init_logger(cli.verbose);
 
     match &cli.commands {
         Commands::Propensity(args) => {

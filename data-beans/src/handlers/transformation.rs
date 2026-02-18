@@ -802,7 +802,6 @@ fn run_squeeze_then_merge(
         row_nnz_cutoff: 0,
         column_nnz_cutoff: 0,
         block_size: cmd_args.block_size,
-        verbose: 0,
     };
 
     run_merge_backend(&merge_args)?;

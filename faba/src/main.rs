@@ -67,6 +67,9 @@ fn print_logo() {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about, term_width = 80)]
 struct Cli {
+    #[arg(short = 'v', long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     commands: Commands,
 }
@@ -95,6 +98,12 @@ fn main() -> anyhow::Result<()> {
     }
 
     let cli = Cli::parse();
+
+    if cli.verbose {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
+
     match &cli.commands {
         Commands::CountDartSeq(args) => {
             run_count_dartseq(args)?;

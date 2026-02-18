@@ -95,8 +95,6 @@ pub struct SimColliderArgs {
     #[arg(long, short, required = true, help = "output header")]
     out: Box<str>,
 
-    #[arg(long, short, help = "verbosity")]
-    verbose: bool,
 }
 
 struct ColliderSimulator {
@@ -446,11 +444,6 @@ fn softmax_rows(logits: &Mat) -> Mat {
 }
 
 pub fn run_sim_collider_data(args: SimColliderArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     if args.gamma_hyperparam.len() != 2 {
         return Err(anyhow::anyhow!(
             "need exactly two values for `gamma-hyperparam`"

@@ -26,14 +26,17 @@ use crate::handlers::transformation::{reorder_rows, run_squeeze, subset_columns,
 use crate::sparse_io::*;
 use crate::sparse_util::IndexPointerType;
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use simulate_deconv::generate_convoluted_data;
 use simulate_deconv::SimConvArgs;
 
 fn main() -> anyhow::Result<()> {
-    env_logger::init();
-
     let cli = Cli::parse();
+
+    if cli.verbose {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
 
     match &cli.commands {
         Commands::FromMtx(args) => {
@@ -131,6 +134,9 @@ This tool creates a data structure for faster access, organized as follows:
 For more details on each command, use '--help' after the command name."
 )]
 struct Cli {
+    #[arg(short = 'v', long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     commands: Commands,
 }
@@ -520,9 +526,6 @@ pub struct FromMtxArgs {
     #[arg(long, default_value_t = 1)]
     column_nnz_cutoff: usize,
 
-    /// verbose mode
-    #[arg(short, long, action = ArgAction::Count)]
-    verbose: u8,
 }
 
 #[derive(Args, Debug)]
@@ -692,15 +695,6 @@ pub struct From10xMatrixArgs {
     )]
     column_nnz_cutoff: usize,
 
-    #[arg(
-        short,
-        long,
-        action = clap::ArgAction::Count,
-        help = "Verbose mode",
-        long_help = "Enable verbose mode for more detailed output. \n\
-		     Use multiple times for increased verbosity."
-    )]
-    verbose: u8,
 }
 
 #[derive(Args, Debug)]
@@ -774,14 +768,6 @@ pub struct FromH5adArgs {
     )]
     column_nnz_cutoff: usize,
 
-    #[arg(
-        short,
-        long,
-        action = clap::ArgAction::Count,
-        help = "Verbose mode",
-        long_help = "Enable verbose mode for more detailed output."
-    )]
-    verbose: u8,
 }
 
 #[derive(Args, Debug)]
@@ -871,14 +857,6 @@ pub struct From10xMoleculeArgs {
     )]
     column_nnz_cutoff: usize,
 
-    #[arg(
-        short,
-        long,
-        action = clap::ArgAction::Count,
-        help = "Verbose mode",
-        long_help = "Enable verbose mode for more detailed output."
-    )]
-    verbose: u8,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1030,15 +1008,6 @@ pub struct FromZarrArgs {
     )]
     column_nnz_cutoff: usize,
 
-    #[arg(
-        short,
-        long,
-        action = clap::ArgAction::Count,
-        help = "Verbose mode",
-        long_help = "Enable verbose mode for more detailed output. \n\
-		     Use multiple times for increased verbosity."
-    )]
-    verbose: u8,
 }
 
 #[derive(Args, Debug)]
@@ -1108,15 +1077,6 @@ pub struct MergeBackendArgs {
     )]
     block_size: usize,
 
-    #[arg(
-        short,
-        long,
-        action = clap::ArgAction::Count,
-        help = "Verbose mode",
-        long_help = "Enable verbose mode for more detailed output. \n\
-		     Use multiple times for increased verbosity."
-    )]
-    verbose: u8,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1231,15 +1191,6 @@ pub struct MergeMtxArgs {
     )]
     column_nnz_cutoff: usize,
 
-    #[arg(
-        short,
-        long,
-        action = clap::ArgAction::Count,
-        help = "Verbose mode",
-        long_help = "Enable verbose mode for more detailed output. \n\
-                     Use multiple times for increased verbosity."
-    )]
-    verbose: u8,
 }
 
 #[derive(Args, Debug)]

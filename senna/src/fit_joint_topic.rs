@@ -11,7 +11,7 @@ use candle_util::candle_encoder_multimodal_softmax::*;
 use candle_util::candle_joint_data_loader::*;
 use candle_util::candle_loss_functions::topic_likelihood;
 use candle_util::candle_model_traits::*;
-use indicatif::{ParallelProgressIterator, ProgressBar, ProgressDrawTarget};
+use indicatif::{ParallelProgressIterator, ProgressBar};
 use rayon::prelude::*;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -304,22 +304,9 @@ pub struct JointTopicArgs {
     )]
     use_sparsemax: bool,
 
-    #[arg(
-        long,
-        short,
-        help = "Verbosity.",
-        long_help = "Enable verbose output.\n\
-		     Prints additional information during execution."
-    )]
-    verbose: bool,
 }
 
 pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
-    if args.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     if args.use_sparsemax {
         info!("Using sparsemax activation for sparse topic assignments");
     }
@@ -775,10 +762,6 @@ where
 
     let pb = ProgressBar::new(args.epochs as u64);
 
-    if args.verbose {
-        pb.set_draw_target(ProgressDrawTarget::hidden());
-    }
-
     let mut llik_trace = Vec::with_capacity(args.epochs);
     let mut kl_trace = Vec::with_capacity(args.epochs);
 
@@ -895,9 +878,7 @@ where
 
             pb.inc(1);
 
-            if args.verbose {
-                info!("[{}][{}] {} {}", epoch, jitter, llik_tot, kl_tot);
-            }
+            info!("[{}][{}] {} {}", epoch, jitter, llik_tot, kl_tot);
         }
     }
     pb.finish_and_clear();
