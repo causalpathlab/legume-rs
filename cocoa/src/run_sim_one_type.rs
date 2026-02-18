@@ -363,7 +363,6 @@ pub struct SimOneTypeArgs {
         long_help = "Output header"
     )]
     out: Box<str>,
-
 }
 
 pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {

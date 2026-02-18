@@ -165,7 +165,6 @@ pub struct DiffArgs {
                      Rows correspond to individuals 0, 1, 2, ... in order."
     )]
     confounder_file: Option<Box<str>>,
-
 }
 
 /////////////////////////////////////

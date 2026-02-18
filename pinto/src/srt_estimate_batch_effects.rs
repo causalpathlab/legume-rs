@@ -30,14 +30,14 @@ pub fn estimate_batch(
     let proj_kn = proj_out.proj;
     info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
 
-    let collapse_out = collapse_columns_multilevel_impl(
-        data_vec,
+    let collapse_out = data_vec.collapse_columns_multilevel(
         &proj_kn,
         batch_membership,
-        Some(args.knn_cells),
-        None, // default num_levels
-        Some(args.sort_dim),
-        None, // default opt_iter
+        &MultilevelParams {
+            knn_super_cells: args.knn_cells,
+            sort_dim: args.sort_dim,
+            ..MultilevelParams::new(proj_kn.nrows())
+        },
     )?;
 
     Ok(collapse_out.delta)

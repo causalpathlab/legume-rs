@@ -441,14 +441,15 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     let collapsed_levels: Vec<CollapsedOut> = if use_multilevel {
         info!("Multi-level collapsing with super-cells ...");
-        collapse_columns_multilevel_vec(
-            &mut data_vec,
+        data_vec.collapse_columns_multilevel_vec(
             &proj_kn,
             &batch_membership,
-            Some(args.knn_cells),
-            Some(args.num_levels),
-            Some(args.sort_dim),
-            Some(args.iter_opt),
+            &MultilevelParams {
+                knn_super_cells: args.knn_cells,
+                num_levels: args.num_levels,
+                sort_dim: args.sort_dim,
+                num_opt_iter: args.iter_opt,
+            },
         )?
     } else {
         let nsamp = data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
@@ -550,6 +551,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 &mut encoder,
                 &decoder,
                 &parameters,
+                &dev,
                 args,
                 selected_features.as_ref(),
                 &stop,
@@ -594,6 +596,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 &mut encoder,
                 &decoder,
                 &parameters,
+                &dev,
                 args,
                 selected_features.as_ref(),
                 &stop,
@@ -620,6 +623,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 &mut encoder,
                 &decoder,
                 &parameters,
+                &dev,
                 args,
                 selected_features.as_ref(),
                 &stop,
@@ -661,6 +665,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         &data_vec,
         &encoder,
         finest_collapsed,
+        &dev,
         args,
         selected_features.as_ref(),
     )?;
@@ -734,6 +739,7 @@ fn train_encoder_decoder_progressive<Enc, Dec>(
     encoder: &mut Enc,
     decoder: &Dec,
     parameters: &candle_nn::VarMap,
+    dev: &Device,
     args: &TopicArgs,
     feature_selection: Option<&FeatureSelection>,
     stop: &AtomicBool,
@@ -742,11 +748,6 @@ where
     Enc: EncoderModuleT,
     Dec: DecoderModuleT,
 {
-    let dev = match args.device {
-        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
-        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
-        _ => candle_core::Device::Cpu,
-    };
 
     let num_levels = collapsed_levels.len();
     let total_epochs = args.epochs;
@@ -919,17 +920,13 @@ fn evaluate_latent_by_encoder<Enc>(
     data_vec: &SparseIoVec,
     encoder: &Enc,
     collapsed: &CollapsedOut,
+    dev: &Device,
     args: &TopicArgs,
     feature_selection: Option<&FeatureSelection>,
 ) -> anyhow::Result<Mat>
 where
     Enc: EncoderModuleT + Send + Sync,
 {
-    let dev = match args.device {
-        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
-        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
-        _ => candle_core::Device::Cpu,
-    };
 
     let ntot = data_vec.num_columns();
     let kk = encoder.dim_latent();

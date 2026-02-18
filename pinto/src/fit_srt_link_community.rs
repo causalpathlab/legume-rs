@@ -6,7 +6,7 @@
 
 use crate::edge_profiles::*;
 use crate::link_community_gibbs::LinkGibbsSampler;
-use crate::link_community_model::LinkCommunitySuffStats;
+use crate::link_community_model::LinkCommunityStats;
 use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
 use crate::srt_estimate_batch_effects::{estimate_batch, EstimateBatchArgs};
@@ -162,7 +162,6 @@ pub struct SrtLinkCommunityArgs {
         help = "Preload all sparse column data into memory"
     )]
     preload_data: bool,
-
 }
 
 /// Link community model pipeline.
@@ -340,7 +339,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // Random initial labels for coarsest
     let init_labels: Vec<usize> = (0..coarse_profiles.n_edges).map(|e| e % k).collect();
 
-    let mut coarse_stats = LinkCommunitySuffStats::from_profiles(&coarse_profiles, k, &init_labels);
+    let mut coarse_stats = LinkCommunityStats::from_profiles(&coarse_profiles, k, &init_labels);
 
     info!("Gibbs on coarsest ({} sweeps)...", args.num_sweeps);
     let moves = sampler.run_parallel(&mut coarse_stats, &coarse_profiles, a0, b0, args.num_sweeps);
@@ -382,7 +381,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             .collect();
 
         let mut level_stats =
-            LinkCommunitySuffStats::from_profiles(&level_profiles, k, &super_init);
+            LinkCommunityStats::from_profiles(&level_profiles, k, &super_init);
 
         let sweeps = args.num_sweeps / 2; // fewer sweeps at finer levels
         let moves = sampler.run_parallel(&mut level_stats, &level_profiles, a0, b0, sweeps.max(10));
@@ -402,7 +401,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         "Final Gibbs on full edge set ({} sweeps)...",
         args.num_sweeps / 2
     );
-    let mut fine_stats = LinkCommunitySuffStats::from_profiles(&edge_profiles, k, &current_labels);
+    let mut fine_stats = LinkCommunityStats::from_profiles(&edge_profiles, k, &current_labels);
 
     let moves = sampler.run_parallel(
         &mut fine_stats,
