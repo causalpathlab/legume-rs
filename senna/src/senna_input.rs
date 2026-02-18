@@ -144,7 +144,6 @@ pub struct ReadSharedColumnsArgs {
 pub struct SparseStackWithBatch {
     pub data_stack: SparseIoStack,
     pub batch_stack: Vec<Vec<Box<str>>>,
-    pub nbatch_stack: Vec<usize>,
 }
 
 pub fn read_data_on_shared_columns(
@@ -196,7 +195,6 @@ pub fn read_data_on_shared_columns(
     }
 
     let mut batch_stack = vec![];
-    let mut nbatch_stack = vec![];
 
     if let Some(batch_files) = &args.batch_files {
         for (data_vec, batch_file) in data_stack.stack.iter_mut().zip(batch_files) {
@@ -207,24 +205,14 @@ pub fn read_data_on_shared_columns(
             for s in read_lines(batch_file)? {
                 batch_membership.push(s.to_string().into_boxed_str());
             }
-            let batch_hash: HashSet<Box<str>> = batch_membership.iter().cloned().collect();
-            let nbatch = batch_hash.len();
-
-            nbatch_stack.push(nbatch);
             batch_stack.push(batch_membership);
         }
     } else {
         for data_vec in data_stack.stack.iter_mut() {
-            let ntot = data_vec.num_columns();
-            let mut batch_membership = Vec::with_capacity(ntot);
+            let mut batch_membership = Vec::with_capacity(data_vec.num_columns());
             for (id, &nn) in data_vec.num_columns_by_data()?.iter().enumerate() {
                 batch_membership.extend(vec![id.to_string().into_boxed_str(); nn]);
             }
-
-            let batch_hash: HashSet<Box<str>> = batch_membership.iter().cloned().collect();
-            let nbatch = batch_hash.len();
-
-            nbatch_stack.push(nbatch);
             batch_stack.push(batch_membership);
         }
     }
@@ -232,7 +220,6 @@ pub fn read_data_on_shared_columns(
     Ok(SparseStackWithBatch {
         data_stack,
         batch_stack,
-        nbatch_stack,
     })
 }
 

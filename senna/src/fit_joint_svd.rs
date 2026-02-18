@@ -137,7 +137,6 @@ pub struct JointSvdArgs {
 		     Improves performance for large datasets."
     )]
     preload_data: bool,
-
 }
 
 pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
@@ -145,7 +144,6 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     let SparseStackWithBatch {
         mut data_stack,
         batch_stack,
-        nbatch_stack,
     } = read_data_on_shared_columns(ReadSharedColumnsArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
@@ -167,8 +165,11 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     let nsamp = data_stack.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
 
     for (d, data_vec) in data_stack.stack.iter_mut().enumerate() {
-        let nbatch = nbatch_stack[d];
         let batch_membership = &batch_stack[d];
+        let nbatch = batch_membership
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
 
         if nbatch > 1 {
             info!("Registering batch information");

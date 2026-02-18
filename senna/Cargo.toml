@@ -47,3 +47,4 @@ dashmap = { workspace = true }
 fnv = { workspace=true }
 statrs = { workspace = true }
 colored = { workspace = true }
+ctrlc = { workspace = true }

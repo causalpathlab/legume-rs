@@ -104,7 +104,6 @@ pub struct KnnImputeArgs {
         long_help = "Cutoff value to determine zero imputation."
     )]
     impute_cutoff: f32,
-
 }
 
 pub fn fit_knn_regression(args: &KnnImputeArgs) -> anyhow::Result<()> {
