@@ -33,7 +33,7 @@ impl LinkGibbsSampler {
     /// Returns the total number of edge moves across all sweeps.
     pub fn run(
         &mut self,
-        stats: &mut LinkCommunitySuffStats,
+        stats: &mut LinkCommunityStats,
         profiles: &LinkProfileStore,
         a0: f64,
         b0: f64,
@@ -78,7 +78,7 @@ impl LinkGibbsSampler {
     /// Returns the total number of edge moves across all sweeps.
     pub fn run_parallel(
         &mut self,
-        stats: &mut LinkCommunitySuffStats,
+        stats: &mut LinkCommunityStats,
         profiles: &LinkProfileStore,
         a0: f64,
         b0: f64,
@@ -141,7 +141,7 @@ impl LinkGibbsSampler {
     /// Returns the total number of edge moves across all sweeps.
     pub fn run_greedy(
         &mut self,
-        stats: &mut LinkCommunitySuffStats,
+        stats: &mut LinkCommunityStats,
         profiles: &LinkProfileStore,
         a0: f64,
         b0: f64,
@@ -252,7 +252,7 @@ mod tests {
 
         // Start with random labels
         let random_labels: Vec<usize> = (0..100).map(|e| e % k).collect();
-        let mut stats = LinkCommunitySuffStats::from_profiles(&store, k, &random_labels);
+        let mut stats = LinkCommunityStats::from_profiles(&store, k, &random_labels);
 
         let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
 
@@ -275,7 +275,7 @@ mod tests {
 
         // Start with random labels
         let random_labels: Vec<usize> = (0..100).map(|e| (e * 7) % k).collect();
-        let mut stats = LinkCommunitySuffStats::from_profiles(&store, k, &random_labels);
+        let mut stats = LinkCommunityStats::from_profiles(&store, k, &random_labels);
 
         let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
         sampler.run(&mut stats, &store, 1.0, 1.0, 50);
@@ -303,7 +303,7 @@ mod tests {
         let k = 2;
 
         let random_labels: Vec<usize> = (0..100).map(|e| e % k).collect();
-        let mut stats = LinkCommunitySuffStats::from_profiles(&store, k, &random_labels);
+        let mut stats = LinkCommunityStats::from_profiles(&store, k, &random_labels);
 
         let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
 

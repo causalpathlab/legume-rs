@@ -73,10 +73,15 @@ fn collect_topic_names_from_proportion(
 }
 
 /// Collects and sorts all unique topic names from assignment and proportion files
+struct TopicIndex {
+    sorted_names: Vec<Box<str>>,
+    name_to_index: HashMap<Box<str>, usize>,
+}
+
 fn collect_all_topic_names(
     topic_assignment_files: &[Option<Box<str>>],
     topic_proportion_files: &[Option<Box<str>>],
-) -> anyhow::Result<(Vec<Box<str>>, HashMap<Box<str>, usize>)> {
+) -> anyhow::Result<TopicIndex> {
     info!("Looking into the topic files...");
 
     let mut topic_names = HashSet::<Box<str>>::new();
@@ -104,7 +109,10 @@ fn collect_all_topic_names(
 
     info!("Found {} topics", sorted_topic_names.len());
 
-    Ok((sorted_topic_names, topic_name_to_index))
+    Ok(TopicIndex {
+        sorted_names: sorted_topic_names,
+        name_to_index: topic_name_to_index,
+    })
 }
 
 /// Reads topic assignments from a file and populates the topic matrix
@@ -302,8 +310,10 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
         None => vec![None; data_files.len()],
     };
 
-    let (sorted_topic_names, topic_names) =
+    let topic_index =
         collect_all_topic_names(&topic_assignment_files, &topic_proportion_files)?;
+    let sorted_topic_names = topic_index.sorted_names;
+    let topic_names = topic_index.name_to_index;
 
     ////////////////////////////////////
     // Read matched data, topic, indv //

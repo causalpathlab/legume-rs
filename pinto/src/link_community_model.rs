@@ -52,7 +52,7 @@ impl LinkProfileStore {
 /// Sufficient statistics for the link community model.
 ///
 /// All accumulators are f64 to prevent drift during incremental updates.
-pub struct LinkCommunitySuffStats {
+pub struct LinkCommunityStats {
     /// Number of communities.
     pub k: usize,
     /// Projection dimension.
@@ -69,7 +69,7 @@ pub struct LinkCommunitySuffStats {
     pub membership: Vec<usize>,
 }
 
-impl LinkCommunitySuffStats {
+impl LinkCommunityStats {
     /// Build sufficient statistics from profiles and initial labels.
     pub fn from_profiles(profiles: &LinkProfileStore, k: usize, labels: &[usize]) -> Self {
         let m = profiles.m;
@@ -92,7 +92,7 @@ impl LinkCommunitySuffStats {
             edge_count[c] += 1;
         }
 
-        LinkCommunitySuffStats {
+        LinkCommunityStats {
             k,
             m,
             n_edges,
@@ -188,7 +188,7 @@ pub fn poisson_score(a0: f64, b0: f64, edge: f64, total: f64) -> f64 {
 /// Complexity: O(K × M).
 pub fn compute_log_probs_for_edge(
     e: usize,
-    stats: &LinkCommunitySuffStats,
+    stats: &LinkCommunityStats,
     profiles: &LinkProfileStore,
     a0: f64,
     b0: f64,
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn test_from_profiles_basic() {
         let (store, labels) = make_synthetic_profiles(20, 6, 3);
-        let stats = LinkCommunitySuffStats::from_profiles(&store, 3, &labels);
+        let stats = LinkCommunityStats::from_profiles(&store, 3, &labels);
 
         assert_eq!(stats.k, 3);
         assert_eq!(stats.m, 6);
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn test_delta_move_consistency() {
         let (store, labels) = make_synthetic_profiles(30, 4, 3);
-        let mut stats = LinkCommunitySuffStats::from_profiles(&store, 3, &labels);
+        let mut stats = LinkCommunityStats::from_profiles(&store, 3, &labels);
 
         // Move edge 0 from community 0 to community 1
         let old_c = stats.membership[0];
@@ -291,7 +291,7 @@ mod tests {
         stats.delta_move(0, old_c, new_c, &store);
 
         // Recompute from scratch and compare
-        let stats_recomputed = LinkCommunitySuffStats::from_profiles(&store, 3, &stats.membership);
+        let stats_recomputed = LinkCommunityStats::from_profiles(&store, 3, &stats.membership);
         let score_delta = stats.total_score(1.0, 1.0);
         let score_recomputed = stats_recomputed.total_score(1.0, 1.0);
 
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn test_recompute_matches() {
         let (store, labels) = make_synthetic_profiles(20, 4, 2);
-        let mut stats = LinkCommunitySuffStats::from_profiles(&store, 2, &labels);
+        let mut stats = LinkCommunityStats::from_profiles(&store, 2, &labels);
 
         // Do a few moves
         stats.delta_move(0, 0, 1, &store);
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn test_delta_score_matches_brute_force() {
         let (store, labels) = make_synthetic_profiles(15, 4, 3);
-        let stats = LinkCommunitySuffStats::from_profiles(&store, 3, &labels);
+        let stats = LinkCommunityStats::from_profiles(&store, 3, &labels);
 
         let a0 = 1.0;
         let b0 = 1.0;
@@ -356,7 +356,7 @@ mod tests {
                 }
 
                 let mut stats_moved =
-                    LinkCommunitySuffStats::from_profiles(&store, 3, &stats.membership);
+                    LinkCommunityStats::from_profiles(&store, 3, &stats.membership);
                 stats_moved.delta_move(e, current_c, t, &store);
                 let score_after = stats_moved.total_score(a0, b0);
                 let expected_delta = score_after - score_before;

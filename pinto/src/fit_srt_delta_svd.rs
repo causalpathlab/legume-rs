@@ -146,7 +146,6 @@ pub struct SrtDeltaSvdArgs {
         help = "Number of multi-level collapsing levels (coarse→fine)"
     )]
     num_levels: usize,
-
 }
 
 /// Input for fused multi-level pair delta visitor.

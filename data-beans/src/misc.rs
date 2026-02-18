@@ -8,6 +8,12 @@ use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
 
 use crate::sparse_io::*;
 
+/// Column names and their string data from an H5AD obs/var dataframe
+pub struct H5adDataFrame {
+    pub col_names: Vec<Box<str>>,
+    pub col_data: Vec<Vec<Box<str>>>,
+}
+
 /// Resolve the backend type and the corresponding file path
 ///
 /// If you want to decide the backend by the file name:
@@ -412,7 +418,7 @@ pub fn read_h5ad_column(group: &hdf5::Group, col_name: &str) -> anyhow::Result<V
 /// `columns_data` is a `Vec<Box<str>>` of the same length.
 pub fn read_h5ad_dataframe(
     group: &hdf5::Group,
-) -> anyhow::Result<(Vec<Box<str>>, Vec<Vec<Box<str>>>)> {
+) -> anyhow::Result<H5adDataFrame> {
     let col_order: Vec<String> = group
         .attr("column-order")?
         .read_1d::<VarLenUnicode>()?
@@ -435,7 +441,10 @@ pub fn read_h5ad_dataframe(
         }
     }
 
-    Ok((col_names, col_data))
+    Ok(H5adDataFrame {
+        col_names,
+        col_data,
+    })
 }
 
 /// Read strings from `HDF5` dataset

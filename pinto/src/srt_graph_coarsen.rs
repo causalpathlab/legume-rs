@@ -3,6 +3,13 @@ use crate::srt_knn_graph::KnnGraph;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+#[derive(Clone)]
+struct CoarsenLevelResult {
+    pair_to_sample: Vec<usize>,
+    num_samples: usize,
+    cell_labels: Vec<usize>,
+}
+
 /// Union-Find (disjoint set) with path halving and union by rank.
 struct UnionFind {
     parent: Vec<usize>,
@@ -308,8 +315,7 @@ pub fn graph_coarsen_multilevel(
 
     let mut uf = UnionFind::new(n);
     let mut merge_idx = 0usize;
-    let mut results: Vec<Option<(Vec<usize>, usize, Vec<usize>)>> =
-        vec![None; level_n_clusters.len()];
+    let mut results: Vec<Option<CoarsenLevelResult>> = vec![None; level_n_clusters.len()];
 
     for (nc, orig_idx) in sorted {
         let target = n.saturating_sub(nc).min(result.merges.len());
@@ -334,17 +340,21 @@ pub fn graph_coarsen_multilevel(
         rep_to_label.clear();
 
         let (p2s, ns) = cell_labels_to_pair_samples(&cell_labels, pairs);
-        results[orig_idx] = Some((p2s, ns, cell_labels));
+        results[orig_idx] = Some(CoarsenLevelResult {
+            pair_to_sample: p2s,
+            num_samples: ns,
+            cell_labels,
+        });
     }
 
     let mut all_pair_to_sample = Vec::with_capacity(level_n_clusters.len());
     let mut all_num_samples = Vec::with_capacity(level_n_clusters.len());
     let mut all_cell_labels = Vec::with_capacity(level_n_clusters.len());
     for slot in results {
-        let (p2s, ns, cl) = slot.unwrap();
-        all_pair_to_sample.push(p2s);
-        all_num_samples.push(ns);
-        all_cell_labels.push(cl);
+        let r = slot.unwrap();
+        all_pair_to_sample.push(r.pair_to_sample);
+        all_num_samples.push(r.num_samples);
+        all_cell_labels.push(r.cell_labels);
     }
 
     info!(

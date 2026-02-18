@@ -294,14 +294,15 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             Some(args.iter_opt),
         )?
     } else {
-        collapse_columns_multilevel_impl(
-            &mut data_vec,
+        data_vec.collapse_columns_multilevel(
             &proj_kn,
             &batch_membership,
-            Some(args.knn_cells),
-            Some(args.num_levels),
-            Some(args.sort_dim),
-            Some(args.iter_opt),
+            &MultilevelParams {
+                knn_super_cells: args.knn_cells,
+                num_levels: args.num_levels,
+                sort_dim: args.sort_dim,
+                num_opt_iter: args.iter_opt,
+            },
         )?
     };
 

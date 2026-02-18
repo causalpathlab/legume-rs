@@ -12,6 +12,7 @@ use fagioli::genotype::{BedReader, GenomicRegion, GenotypeReader};
 use fagioli::sgvb::{fit_block_rss, BlockFitResult, FitConfig, ModelType};
 use fagioli::summary_stats::{
     estimate_ld_blocks, load_ld_blocks_from_file, read_sumstat_zscores_with_n, LdBlock,
+    LdBlockParams,
 };
 
 #[derive(Args, Debug, Clone)]
@@ -111,7 +112,6 @@ pub struct MapSumstatArgs {
     #[arg(long, default_value = "42")]
     pub seed: u64,
 
-
     /// Output prefix
     #[arg(short, long)]
     pub output: String,
@@ -158,11 +158,13 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
             &geno.genotypes,
             &geno.positions,
             &geno.chromosomes,
-            args.num_landmarks,
-            args.num_ld_components,
-            args.min_block_snps,
-            args.max_block_snps,
-            args.seed,
+            &LdBlockParams {
+                num_landmarks: args.num_landmarks,
+                num_components: args.num_ld_components,
+                min_block_snps: args.min_block_snps,
+                max_block_snps: args.max_block_snps,
+                seed: args.seed,
+            },
         )?
     } else {
         info!("Too few SNPs for block estimation, using single block");
