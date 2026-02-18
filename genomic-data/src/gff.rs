@@ -34,7 +34,7 @@ pub fn read_gff_record_vec(file_path: &str) -> anyhow::Result<Vec<GffRecord>> {
 /// * `feature_type`: optionally select a specific type of gene feature
 ///
 pub fn build_gene_map(
-    records: &Vec<GffRecord>,
+    records: &[GffRecord],
     feature_type: Option<&FeatureType>,
 ) -> anyhow::Result<HashMap<GeneId, GffRecord>> {
     let ret: HashMap<GeneId, GffRecord> = HashMap::new();
@@ -64,7 +64,7 @@ pub fn build_gene_map(
 /// For start codons: picks the 5'-most (forward: lowest coords, backward: highest coords)
 /// For stop codons: picks the 3'-most (forward: highest coords, backward: lowest coords)
 pub fn build_codon_map(
-    records: &Vec<GffRecord>,
+    records: &[GffRecord],
     feature_type: &FeatureType,
 ) -> anyhow::Result<HashMap<GeneId, GffRecord>> {
     let ret: HashMap<GeneId, GffRecord> = HashMap::new();
@@ -252,7 +252,7 @@ fn build_utr_maps(
 /// 1. Find the longest region using Gff/Gtf's "gene" feature
 /// 2. Create CDS as the union of start codon to stop codon regions
 /// 3. Create 5'UTR and 3'UTR unions based on distance to codons
-pub fn build_union_gene_model(records: &Vec<GffRecord>) -> anyhow::Result<UnionGeneModel> {
+pub fn build_union_gene_model(records: &[GffRecord]) -> anyhow::Result<UnionGeneModel> {
     // Build gene boundaries from "gene" features
     let gene_boundaries = build_gene_map(records, Some(&FeatureType::Gene))?;
 

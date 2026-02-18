@@ -236,17 +236,22 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
             // λ: user-specified or default 0.1/K
             let block_lambda = args.lambda.unwrap_or(0.1 / args.max_rank as f64);
 
-            let result =
-                fit_block_rss(&x_block, &z_block, &block_config, args.max_rank, block_lambda)
-                    .unwrap_or_else(|e| {
-                        log::warn!("Block {} failed: {}, using zeros", block_idx, e);
-                        BlockFitResult {
-                            pip: DMatrix::<f32>::zeros(block_m, t),
-                            effect_mean: DMatrix::<f32>::zeros(block_m, t),
-                            effect_std: DMatrix::<f32>::zeros(block_m, t),
-                            avg_elbo: f32::NEG_INFINITY,
-                        }
-                    });
+            let result = fit_block_rss(
+                &x_block,
+                &z_block,
+                &block_config,
+                args.max_rank,
+                block_lambda,
+            )
+            .unwrap_or_else(|e| {
+                log::warn!("Block {} failed: {}, using zeros", block_idx, e);
+                BlockFitResult {
+                    pip: DMatrix::<f32>::zeros(block_m, t),
+                    effect_mean: DMatrix::<f32>::zeros(block_m, t),
+                    effect_std: DMatrix::<f32>::zeros(block_m, t),
+                    avg_elbo: f32::NEG_INFINITY,
+                }
+            });
 
             info!(
                 "Block {}/{}: {} SNPs, avg_elbo={:.2}",

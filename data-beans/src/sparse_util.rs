@@ -26,7 +26,7 @@ pub enum IndexPointerType {
 
 pub trait SparseTripletsTraits {
     /// convert sparse pointers into (row, column, value) triplets
-    fn into_coo(&self, pointer_type: IndexPointerType) -> anyhow::Result<CooTripletsShape>;
+    fn to_coo(&self, pointer_type: IndexPointerType) -> anyhow::Result<CooTripletsShape>;
 }
 
 /////////////////////
@@ -34,7 +34,7 @@ pub trait SparseTripletsTraits {
 /////////////////////
 
 impl<'a> SparseTripletsTraits for ValuesIndicesPointers<'a> {
-    fn into_coo(&self, pointer_type: IndexPointerType) -> anyhow::Result<CooTripletsShape> {
+    fn to_coo(&self, pointer_type: IndexPointerType) -> anyhow::Result<CooTripletsShape> {
         use indicatif::ParallelProgressIterator;
         use rayon::prelude::*;
         use std::sync::{Arc, Mutex};

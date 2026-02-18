@@ -397,7 +397,10 @@ pub fn fit_block_rss(
 
     info!(
         "  RSS block: p={}, K={}, T={}, λ={:.2e}",
-        p, kk, k, svd.lambda(),
+        p,
+        kk,
+        k,
+        svd.lambda(),
     );
 
     let mut results: Vec<PriorFitResult> = Vec::new();
@@ -441,11 +444,9 @@ pub fn fit_block_rss(
 
         for _iter in 0..config.num_iterations {
             // No minibatch needed: K << N, design is already compact
-            let gen_sample =
-                genetic.local_reparam_sample(config.num_sgvb_samples, &x_design)?;
+            let gen_sample = genetic.local_reparam_sample(config.num_sgvb_samples, &x_design)?;
             let intercept_sample = intercept_model.local_reparam_sample(config.num_sgvb_samples)?;
-            let loss =
-                samples_local_reparam_loss(&[gen_sample, intercept_sample], &rss, 1.0)?;
+            let loss = samples_local_reparam_loss(&[gen_sample, intercept_sample], &rss, 1.0)?;
 
             optimizer.backward_step(&loss)?;
 
@@ -462,8 +463,7 @@ pub fn fit_block_rss(
         let pip: DMatrix<f32> = <DMatrix<f32> as ConvertMatOps>::from_tensor(&pip_tensor)?;
         let eff_mean: DMatrix<f32> =
             <DMatrix<f32> as ConvertMatOps>::from_tensor(&eff_mean_tensor)?;
-        let eff_std: DMatrix<f32> =
-            <DMatrix<f32> as ConvertMatOps>::from_tensor(&eff_std_tensor)?;
+        let eff_std: DMatrix<f32> = <DMatrix<f32> as ConvertMatOps>::from_tensor(&eff_std_tensor)?;
 
         info!("  prior_var={:.3}, avg_elbo={:.2}", prior_var, avg_elbo);
         results.push((avg_elbo, pip, eff_mean, eff_std));
