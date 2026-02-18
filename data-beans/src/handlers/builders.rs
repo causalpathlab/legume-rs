@@ -16,7 +16,6 @@ use crate::{
 use crate::run_squeeze;
 
 pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
-
     let mtx_file = args.mtx.as_ref();
     let row_file = args.row.as_ref();
     let col_file = args.col.as_ref();
@@ -70,7 +69,6 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
 }
 
 pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
-
     let source_zarr_file_path = args.zarr_file.clone();
 
     let (backend, backend_file) = resolve_backend_file(&args.output, Some(args.backend.clone()))?;
@@ -228,7 +226,6 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
 
 /// Build backend from 10X Genomics H5 format (Cell Ranger).
 pub fn run_build_from_10x_matrix(args: &From10xMatrixArgs) -> anyhow::Result<()> {
-
     let file = hdf5::File::open(args.h5_file.to_string())?;
     info!("Opened 10X H5 file: {}", args.h5_file);
     let (backend, backend_file) = resolve_backend_file(&args.output, Some(args.backend.clone()))?;
@@ -371,7 +368,6 @@ pub fn run_build_from_10x_matrix(args: &From10xMatrixArgs) -> anyhow::Result<()>
 /// Reads all obs columns and writes metadata `.tsv.gz` files.
 /// Creates `barcode@donor_id` column names when donor_id is available.
 pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
-
     let file = hdf5::File::open(args.h5ad_file.to_string())?;
     info!("Opened AnnData h5ad file: {}", args.h5ad_file);
 
@@ -532,11 +528,11 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
     };
 
     // Read all obs metadata columns
-    let (obs_col_names, obs_col_data) = read_h5ad_dataframe(&obs_group)?;
+    let obs_df = read_h5ad_dataframe(&obs_group)?;
     info!(
         "Read {} obs columns: {:?}",
-        obs_col_names.len(),
-        obs_col_names
+        obs_df.col_names.len(),
+        obs_df.col_names
     );
 
     // Output stem for metadata files (strip .zarr/.h5)
@@ -546,10 +542,10 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
         .unwrap_or(&backend_file);
 
     // Handle donor_id: barcode@donor_id column names + donor mapping files
-    let donor_idx = obs_col_names.iter().position(|c| c.as_ref() == "donor_id");
+    let donor_idx = obs_df.col_names.iter().position(|c| c.as_ref() == "donor_id");
 
     if let Some(di) = donor_idx {
-        let donors = &obs_col_data[di];
+        let donors = &obs_df.col_data[di];
         let new_col_names: Vec<Box<str>> = column_names
             .iter()
             .zip(donors.iter())
@@ -570,7 +566,7 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
 
         // sample_metadata.tsv.gz (one row per unique donor)
         let sample_file = format!("{}.sample_metadata.tsv.gz", output_stem);
-        write_sample_metadata(&sample_file, &obs_col_names, &obs_col_data, di)?;
+        write_sample_metadata(&sample_file, &obs_df.col_names, &obs_df.col_data, di)?;
         info!("Wrote {}", sample_file);
     } else {
         out.register_column_names_vec(&column_names);
@@ -591,14 +587,14 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
     let mut lines: Vec<Box<str>> = Vec::with_capacity(column_names.len() + 1);
     // header
     let header = std::iter::once("barcode")
-        .chain(obs_col_names.iter().map(|s| s.as_ref()))
+        .chain(obs_df.col_names.iter().map(|s| s.as_ref()))
         .collect::<Vec<&str>>()
         .join("\t");
     lines.push(header.into());
     // rows
     for i in 0..column_names.len() {
         let row = std::iter::once(column_names[i].as_ref())
-            .chain(obs_col_data.iter().map(|col| col[i].as_ref()))
+            .chain(obs_df.col_data.iter().map(|col| col[i].as_ref()))
             .collect::<Vec<&str>>()
             .join("\t");
         lines.push(row.into());
@@ -670,7 +666,6 @@ fn write_sample_metadata(
 /// Aggregates per-molecule counts into a feature x cell sparse matrix.
 /// Handles multi-gem-group (cellranger aggr) and multi-library (CITE-seq).
 pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result<()> {
-
     let file = hdf5::File::open(args.h5_file.to_string())?;
     info!("Opened molecule_info.h5: {}", args.h5_file);
 

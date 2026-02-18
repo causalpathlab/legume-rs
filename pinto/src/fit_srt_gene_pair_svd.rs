@@ -182,7 +182,6 @@ pub struct SrtGenePairSvdArgs {
         help = "Number of multi-level collapsing levels (coarse→fine)"
     )]
     num_levels: usize,
-
 }
 
 /// Gene-gene interaction pipeline:

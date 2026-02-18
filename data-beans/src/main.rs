@@ -525,7 +525,6 @@ pub struct FromMtxArgs {
     /// minimum number of non-zero cutoff for columns
     #[arg(long, default_value_t = 1)]
     column_nnz_cutoff: usize,
-
 }
 
 #[derive(Args, Debug)]
@@ -694,7 +693,6 @@ pub struct From10xMatrixArgs {
 		     Columns with fewer non-zeros will be removed if squeezing is enabled."
     )]
     column_nnz_cutoff: usize,
-
 }
 
 #[derive(Args, Debug)]
@@ -767,7 +765,6 @@ pub struct FromH5adArgs {
         long_help = "Minimum number of non-zero elements required for columns."
     )]
     column_nnz_cutoff: usize,
-
 }
 
 #[derive(Args, Debug)]
@@ -856,7 +853,6 @@ pub struct From10xMoleculeArgs {
         long_help = "Minimum number of non-zero elements required for columns."
     )]
     column_nnz_cutoff: usize,
-
 }
 
 #[derive(clap::Args, Debug)]
@@ -1007,7 +1003,6 @@ pub struct FromZarrArgs {
 		     Columns with fewer non-zeros will be removed if squeezing is enabled."
     )]
     column_nnz_cutoff: usize,
-
 }
 
 #[derive(Args, Debug)]
@@ -1076,7 +1071,6 @@ pub struct MergeBackendArgs {
 		     Adjust this value to optimize performance for your hardware."
     )]
     block_size: usize,
-
 }
 
 #[derive(clap::Args, Debug)]
@@ -1190,7 +1184,6 @@ pub struct MergeMtxArgs {
                      Columns with fewer non-zeros will be removed if squeezing is enabled."
     )]
     column_nnz_cutoff: usize,
-
 }
 
 #[derive(Args, Debug)]

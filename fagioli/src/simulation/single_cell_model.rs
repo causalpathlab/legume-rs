@@ -13,6 +13,7 @@ use super::cell_type_effects::CellTypeGeneticEffects;
 use super::factor_model::FactorModel;
 use super::gene_annotations::GeneAnnotations;
 use super::individual_linear_model::{simulate_individual_linear_model, PhenotypeSimulationParams};
+use crate::genotype::GenotypeMatrix;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Parameters
@@ -211,15 +212,16 @@ fn sample_gene_effects(
 /// Returns (ScCountData, per-gene effects for ground truth output).
 pub fn sample_sc_counts(
     genes: &GeneAnnotations,
-    genotypes: &DMatrix<f32>,
-    snp_positions: &[u64],
-    snp_chromosomes: &[Box<str>],
+    geno: &GenotypeMatrix,
     factor_model: &FactorModel,
     cell_fractions: &DMatrix<f32>,
     arch_params: &GeneticArchitectureParams,
     sc_params: &ScPhenotypeParams,
     seed: u64,
 ) -> Result<(ScCountData, Vec<Option<CellTypeGeneticEffects>>)> {
+    let genotypes = &geno.genotypes;
+    let snp_positions = geno.positions.as_slice();
+    let snp_chromosomes = geno.chromosomes.as_slice();
     let num_individuals = genotypes.nrows();
     let num_cell_types = cell_fractions.ncols();
     let num_genes = factor_model.cell_type_means().nrows();
@@ -449,10 +451,10 @@ mod tests {
 
         let genes =
             simulate_gene_annotations(num_genes, "22", 20_000_000, 30_000_000, 1_000_000, 42);
-        let snp_positions: Vec<u64> = (0..num_snps)
+        let positions: Vec<u64> = (0..num_snps)
             .map(|i| 20_000_000 + i as u64 * 50_000)
             .collect();
-        let snp_chromosomes: Vec<Box<str>> = vec![Box::from("22"); num_snps];
+        let chromosomes: Vec<Box<str>> = vec![Box::from("22"); num_snps];
 
         let mut genotypes = DMatrix::from_element(num_individuals, num_snps, 0.0);
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -461,6 +463,20 @@ mod tests {
                 genotypes[(i, j)] = rng.random_range(0..=2) as f32;
             }
         }
+
+        let geno = crate::genotype::GenotypeMatrix {
+            individual_ids: (0..num_individuals)
+                .map(|i| format!("ind_{i}").into_boxed_str())
+                .collect(),
+            snp_ids: (0..num_snps)
+                .map(|i| format!("snp_{i}").into_boxed_str())
+                .collect(),
+            allele1: vec![Box::from("A"); num_snps],
+            allele2: vec![Box::from("T"); num_snps],
+            genotypes,
+            positions,
+            chromosomes,
+        };
 
         let factor_model =
             simulate_factor_model(num_genes, 5, num_cell_types, 1.0, 1.0, 42).unwrap();
@@ -474,9 +490,7 @@ mod tests {
 
         let (sc, gene_effects) = sample_sc_counts(
             &genes,
-            &genotypes,
-            &snp_positions,
-            &snp_chromosomes,
+            &geno,
             &factor_model,
             &cell_fractions,
             &arch_params,

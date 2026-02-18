@@ -217,9 +217,7 @@ pub fn sim_qtl(args: &SimulationArgs) -> Result<()> {
 
     let (sc_data, gene_effects) = fagioli::simulation::sample_sc_counts(
         &genes,
-        &geno.genotypes,
-        &geno.positions,
-        &geno.chromosomes,
+        &geno,
         &factor_model,
         &cell_frac,
         &arch_params,

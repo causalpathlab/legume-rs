@@ -94,7 +94,6 @@ pub struct SimColliderArgs {
 
     #[arg(long, short, required = true, help = "output header")]
     out: Box<str>,
-
 }
 
 struct ColliderSimulator {

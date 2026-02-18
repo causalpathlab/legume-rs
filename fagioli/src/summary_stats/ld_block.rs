@@ -22,6 +22,15 @@ impl LdBlock {
     }
 }
 
+/// Configuration for LD block estimation
+pub struct LdBlockParams {
+    pub num_landmarks: usize,
+    pub num_components: usize,
+    pub min_block_snps: usize,
+    pub max_block_snps: usize,
+    pub seed: u64,
+}
+
 /// Estimate LD blocks from genotype data using Nystrom + rSVD.
 ///
 /// 1. Sample S landmark SNPs -> N x S matrix -> rSVD -> U (N x k)
@@ -31,12 +40,15 @@ pub fn estimate_ld_blocks(
     genotypes: &DMatrix<f32>,
     positions: &[u64],
     chromosomes: &[Box<str>],
-    num_landmarks: usize,
-    num_components: usize,
-    min_block_snps: usize,
-    max_block_snps: usize,
-    seed: u64,
+    params: &LdBlockParams,
 ) -> Result<Vec<LdBlock>> {
+    let LdBlockParams {
+        num_landmarks,
+        num_components,
+        min_block_snps,
+        max_block_snps,
+        seed,
+    } = *params;
     let n = genotypes.nrows();
     let m = genotypes.ncols();
 
@@ -411,11 +423,13 @@ mod tests {
             &genotypes,
             &positions,
             &chromosomes,
-            50,  // landmarks
-            10,  // components
-            20,  // min block
-            100, // max block
-            42,
+            &LdBlockParams {
+                num_landmarks: 50,
+                num_components: 10,
+                min_block_snps: 20,
+                max_block_snps: 100,
+                seed: 42,
+            },
         )
         .unwrap();
 

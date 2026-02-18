@@ -14,7 +14,7 @@ use fagioli::simulation::{
 use fagioli::summary_stats::{
     compute_block_ld_scores, compute_block_sumstats, compute_yty_diagonal, create_uniform_blocks,
     estimate_ld_blocks, load_ld_blocks_from_file, write_confounders, write_ground_truth,
-    write_ld_blocks, LdBlock, LdScoreWriter, SumstatWriter,
+    write_ld_blocks, LdBlock, LdBlockParams, LdScoreWriter, SumstatWriter,
 };
 
 #[derive(Args, Debug, Clone)]
@@ -141,11 +141,13 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
             &geno.genotypes,
             &geno.positions,
             &geno.chromosomes,
-            args.num_landmarks,
-            args.num_ld_components,
-            args.min_block_snps,
-            args.max_block_snps,
-            args.seed,
+            &LdBlockParams {
+                num_landmarks: args.num_landmarks,
+                num_components: args.num_ld_components,
+                min_block_snps: args.min_block_snps,
+                max_block_snps: args.max_block_snps,
+                seed: args.seed,
+            },
         )?
     } else {
         info!("Too few SNPs for block estimation, using single block");

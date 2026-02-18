@@ -277,7 +277,6 @@ pub struct RegressionArgs {
 
     #[arg(long)]
     pub gpu: bool,
-
 }
 
 //

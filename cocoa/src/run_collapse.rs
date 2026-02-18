@@ -103,7 +103,6 @@ pub struct CollapseArgs {
         long_help = "Preload all the columns data."
     )]
     preload_data: bool,
-
 }
 
 pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
