@@ -5,7 +5,7 @@ use candle_util::sgvb::variant_tree::VariantTree;
 use candle_util::sgvb::{
     samples_local_reparam_loss, AnalyticalKL, BiSusieVar, FixedGaussianLikelihood,
     FixedGaussianPrior, LinearModelSGVB, LinearRegressionSGVB, LocalReparamSample,
-    MultiLevelSusieVar, SGVBConfig, SusieVar, VariationalDistribution,
+    MultiLevelSusieVar, RssLikelihood, RssSvd, SGVBConfig, SusieVar, VariationalDistribution,
 };
 use log::info;
 use matrix_util::traits::ConvertMatOps;
@@ -362,6 +362,138 @@ impl GeneticModel {
             }
         }
     }
+}
+
+/// Fit a fine-mapping model for a single LD block using RSS likelihood.
+///
+/// Uses the eigenspace projection approach (Zhu & Stephens 2017, YPARK/zqtl):
+/// z-scores are projected through the SVD of X/√n into K-dimensional space,
+/// avoiding explicit R = X'X/n and operating in the efficient K-space.
+///
+/// - `x_block`: Standardized genotypes (N × p_block).
+/// - `z_block`: Z-scores for this block (p_block × T).
+/// - `config`: Fit configuration.
+/// - `max_rank`: Maximum rank for rSVD.
+/// - `lambda`: Regularization for D̃ = √(D² + λ).
+pub fn fit_block_rss(
+    x_block: &DMatrix<f32>,
+    z_block: &DMatrix<f32>,
+    config: &FitConfig,
+    max_rank: usize,
+    lambda: f64,
+) -> Result<BlockFitResult> {
+    let p = x_block.ncols();
+    let k = z_block.ncols(); // number of traits T
+    let device = Device::Cpu;
+
+    // Compute SVD of block genotypes (done once, reused across prior_vars)
+    let x_tensor = x_block.to_tensor(&device)?;
+    let z_tensor = z_block.to_tensor(&device)?;
+
+    let svd = RssSvd::from_genotypes(&x_tensor, max_rank, lambda, &device)?;
+    let rss = RssLikelihood::new(&svd, &z_tensor)?;
+    let x_design = svd.x_design().clone(); // (K, p) — fat design
+    let kk = svd.effective_rank(); // eigenspace dimension
+
+    info!(
+        "  RSS block: p={}, K={}, T={}, λ={:.2e}",
+        p, kk, k, svd.lambda(),
+    );
+
+    let mut results: Vec<PriorFitResult> = Vec::new();
+
+    for &prior_var in &config.prior_vars {
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+
+        let prior = FixedGaussianPrior::new(prior_var);
+        let sgvb_config = SGVBConfig {
+            num_samples: config.num_sgvb_samples,
+            kl_weight: 1.0,
+        };
+
+        // Intercept model: identity design I_K in eigenspace, broad prior
+        let intercept_design = Tensor::eye(kk, DType::F32, &device)?;
+        let intercept_prior = FixedGaussianPrior::new(10.0);
+        let intercept_model = LinearRegressionSGVB::new(
+            vb.pp("intercept"),
+            intercept_design.clone(),
+            k,
+            intercept_prior,
+            sgvb_config.clone(),
+        )?;
+
+        // Build genetic model with X̃ = D̃V' (K × p) as design
+        let genetic = GeneticModel::new(
+            &vb,
+            config.model_type,
+            config.num_components,
+            p,
+            k,
+            x_design.clone(),
+            prior,
+            sgvb_config,
+            config.ml_block_size,
+        )?;
+
+        let mut optimizer = AdamW::new_lr(varmap.all_vars(), config.learning_rate)?;
+        let mut elbo_buffer: VecDeque<f32> = VecDeque::with_capacity(config.elbo_window);
+
+        for _iter in 0..config.num_iterations {
+            // No minibatch needed: K << N, design is already compact
+            let gen_sample =
+                genetic.local_reparam_sample(config.num_sgvb_samples, &x_design)?;
+            let intercept_sample = intercept_model.local_reparam_sample(config.num_sgvb_samples)?;
+            let loss =
+                samples_local_reparam_loss(&[gen_sample, intercept_sample], &rss, 1.0)?;
+
+            optimizer.backward_step(&loss)?;
+
+            let elbo_val = -loss.to_scalar::<f32>()?;
+            if elbo_buffer.len() == config.elbo_window {
+                elbo_buffer.pop_front();
+            }
+            elbo_buffer.push_back(elbo_val);
+        }
+
+        let avg_elbo: f32 = elbo_buffer.iter().sum::<f32>() / elbo_buffer.len() as f32;
+
+        let (pip_tensor, eff_mean_tensor, eff_std_tensor) = genetic.extract_results()?;
+        let pip: DMatrix<f32> = <DMatrix<f32> as ConvertMatOps>::from_tensor(&pip_tensor)?;
+        let eff_mean: DMatrix<f32> =
+            <DMatrix<f32> as ConvertMatOps>::from_tensor(&eff_mean_tensor)?;
+        let eff_std: DMatrix<f32> =
+            <DMatrix<f32> as ConvertMatOps>::from_tensor(&eff_std_tensor)?;
+
+        info!("  prior_var={:.3}, avg_elbo={:.2}", prior_var, avg_elbo);
+        results.push((avg_elbo, pip, eff_mean, eff_std));
+    }
+
+    // Model averaging via softmax over average ELBOs
+    let elbos: Vec<f32> = results.iter().map(|(e, _, _, _)| *e).collect();
+    let max_elbo = elbos.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let weights: Vec<f32> = elbos.iter().map(|e| (e - max_elbo).exp()).collect();
+    let sum_w: f32 = weights.iter().sum();
+    let weights: Vec<f32> = weights.iter().map(|w| w / sum_w).collect();
+
+    let mut pip_avg = DMatrix::<f32>::zeros(p, k);
+    let mut eff_mean_avg = DMatrix::<f32>::zeros(p, k);
+    let mut eff_std_avg = DMatrix::<f32>::zeros(p, k);
+
+    for (w, (_elbo, pip, eff_m, eff_s)) in weights.iter().zip(results.iter()) {
+        pip_avg += pip * *w;
+        eff_mean_avg += eff_m * *w;
+        eff_std_avg += eff_s * *w;
+    }
+
+    let weighted_elbo: f32 = weights.iter().zip(elbos.iter()).map(|(w, e)| w * e).sum();
+
+    Ok(BlockFitResult {
+        pip: pip_avg,
+        effect_mean: eff_mean_avg,
+        effect_std: eff_std_avg,
+        avg_elbo: weighted_elbo,
+    })
 }
 
 /// Compute local reparameterization sample with a custom design matrix (for minibatch).
