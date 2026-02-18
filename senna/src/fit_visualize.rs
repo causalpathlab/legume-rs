@@ -1010,11 +1010,9 @@ fn compute_pb_latent(latent_nk: &Mat, data_vec: &SparseIoVec) -> anyhow::Result<
     }
 
     // Average
-    for pb_idx in 0..n_pb {
-        if pb_count[pb_idx] > 0 {
-            pb_sum
-                .row_mut(pb_idx)
-                .scale_mut(1.0 / pb_count[pb_idx] as f32);
+    for (pb_idx, &count) in pb_count.iter().enumerate().take(n_pb) {
+        if count > 0 {
+            pb_sum.row_mut(pb_idx).scale_mut(1.0 / count as f32);
         }
     }
 

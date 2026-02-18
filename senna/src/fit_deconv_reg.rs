@@ -54,7 +54,7 @@ fn read_mat(file_path: &str) -> anyhow::Result<MatWithNames<Mat>> {
 
 fn read_bulk_files(
     bulk_data_files: &[Box<str>],
-    genes: &Vec<Box<str>>,
+    genes: &[Box<str>],
 ) -> anyhow::Result<BulkDataOut> {
     let gene_to_position: HashMap<Box<str>, usize> = genes
         .iter()

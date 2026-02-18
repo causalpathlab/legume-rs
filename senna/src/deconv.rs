@@ -40,7 +40,7 @@ fn log_bessel_i(p: f64, x: f64) -> f64 {
         return f64::NEG_INFINITY;
     }
     let log_half_x = (x * 0.5).ln();
-    let n_terms = ((3.0 * p).max(30.0)).min(200.0) as usize;
+    let n_terms = (3.0 * p).clamp(30.0, 200.0) as usize;
 
     let mut result = -fast_lgamma(p + 1.0);
     for j in 1..n_terms {

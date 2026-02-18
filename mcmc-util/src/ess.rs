@@ -93,7 +93,7 @@ impl EssSampler {
             current = new;
             cur_lnpdf = new_ll;
 
-            if i >= self.warmup && (i - self.warmup) % self.thin == 0 {
+            if i >= self.warmup && (i - self.warmup).is_multiple_of(self.thin) {
                 samples.push(current.clone());
                 log_likelihoods.push(cur_lnpdf);
             }
@@ -205,7 +205,10 @@ mod tests {
         };
 
         let prior_draw = move |rng: &mut SmallRng| -> DVector<f32> {
-            DVector::from_fn(d, |_, _| { let v: f64 = StandardNormal.sample(rng); v as f32 })
+            DVector::from_fn(d, |_, _| {
+                let v: f64 = StandardNormal.sample(rng);
+                v as f32
+            })
         };
 
         let init = DVector::from_element(d, 0.0f32);
@@ -256,10 +259,7 @@ mod tests {
         let chol_l = chol.l();
 
         // Analytic posterior: Σ_post = (Σ⁻¹ + I/σ²)⁻¹
-        let sigma_prior_inv = sigma_prior
-            .clone()
-            .try_inverse()
-            .unwrap();
+        let sigma_prior_inv = sigma_prior.clone().try_inverse().unwrap();
         let eye = DMatrix::identity(d, d);
         let precision_post = &sigma_prior_inv + &eye / sigma_sq;
         let sigma_post = precision_post.try_inverse().unwrap();
@@ -276,7 +276,10 @@ mod tests {
         let prior_draw = {
             let l = chol_l.clone();
             move |rng: &mut SmallRng| -> DVector<f32> {
-                let z = DVector::from_fn(d, |_, _| { let v: f64 = StandardNormal.sample(rng); v as f32 });
+                let z = DVector::from_fn(d, |_, _| {
+                    let v: f64 = StandardNormal.sample(rng);
+                    v as f32
+                });
                 &l * z
             }
         };
@@ -342,7 +345,10 @@ mod tests {
         };
 
         let prior_draw = move |rng: &mut SmallRng| -> DVector<f32> {
-            DVector::from_fn(d, |_, _| { let v: f64 = StandardNormal.sample(rng); v as f32 })
+            DVector::from_fn(d, |_, _| {
+                let v: f64 = StandardNormal.sample(rng);
+                v as f32
+            })
         };
 
         let init = DVector::from_element(d, 0.0f32);
@@ -386,7 +392,10 @@ mod tests {
         };
 
         let prior_draw = |rng: &mut SmallRng| -> DVector<f32> {
-            DVector::from_fn(1, |_, _| { let v: f64 = StandardNormal.sample(rng); v as f32 })
+            DVector::from_fn(1, |_, _| {
+                let v: f64 = StandardNormal.sample(rng);
+                v as f32
+            })
         };
 
         let init = DVector::from_element(1, 0.0f32);
@@ -441,9 +450,7 @@ mod tests {
 
         let prior_draw = {
             let dev = device.clone();
-            move |_rng: &mut SmallRng| -> Tensor {
-                Tensor::randn(0f32, 1f32, &[d], &dev).unwrap()
-            }
+            move |_rng: &mut SmallRng| -> Tensor { Tensor::randn(0f32, 1f32, &[d], &dev).unwrap() }
         };
 
         let init = Tensor::zeros(&[d], DType::F32, &device).unwrap();

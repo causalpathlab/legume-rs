@@ -56,7 +56,7 @@ pub fn convert_h5_to_backend(h5_file: &str, output: &str) -> anyhow::Result<()> 
             indices: &indices,
             indptr: &indptr,
         }
-        .into_coo(IndexPointerType::Column)?
+        .to_coo(IndexPointerType::Column)?
     };
 
     let TripletsShape { nrows, ncols, nnz } = shape;
@@ -207,7 +207,7 @@ pub fn convert_zarr_to_backend(zarr_file: &str, output: &str) -> anyhow::Result<
         indices: &indices,
         indptr: &indptr,
     }
-    .into_coo(IndexPointerType::Column)?;
+    .to_coo(IndexPointerType::Column)?;
 
     let TripletsShape { nrows, ncols, nnz } = shape;
     info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
