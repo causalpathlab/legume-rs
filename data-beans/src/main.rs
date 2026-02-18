@@ -14,7 +14,8 @@ mod utilities;
 
 use crate::handlers::analysis::{run_simulate, run_stat};
 use crate::handlers::builders::{
-    run_build_from_h5_triplets, run_build_from_mtx, run_build_from_zarr_triplets,
+    run_build_from_10x_matrix, run_build_from_10x_molecule, run_build_from_h5ad,
+    run_build_from_mtx, run_build_from_zarr_triplets,
 };
 use crate::handlers::inspection::{
     show_info, take_column_names, take_columns, take_row_names, take_rows,
@@ -47,8 +48,14 @@ fn main() -> anyhow::Result<()> {
         Commands::FromZarr(args) => {
             run_build_from_zarr_triplets(args)?;
         }
+        Commands::From10xMatrix(args) => {
+            run_build_from_10x_matrix(args)?;
+        }
         Commands::FromH5ad(args) => {
-            run_build_from_h5_triplets(args)?;
+            run_build_from_h5ad(args)?;
+        }
+        Commands::From10xMolecule(args) => {
+            run_build_from_10x_molecule(args)?;
         }
         Commands::Simulate(args) => {
             run_simulate(args)?;
@@ -134,10 +141,51 @@ enum Commands {
     FromMtx(FromMtxArgs),
 
     #[command(
-        about = "Build backend from triplets in `h5` (AnnData)",
+        name = "from-10x-matrix",
+        about = "Build backend from 10X Genomics feature-barcode matrix `h5`",
+        long_about = "Build a backend from a 10X Genomics Cell Ranger feature-barcode matrix HDF5 file.\n\
+		      Expected layout: matrix/{data,indices,indptr,barcodes,features/...}\n\
+		      \n\
+		      This is the `filtered_feature_bc_matrix.h5` or `raw_feature_bc_matrix.h5`\n\
+		      output from Cell Ranger count/multi.\n\
+		      \n\
+		      Use --root-group-name, --data-field, etc. to customize field paths.\n\
+		      Use --select-row-type to filter features (default: 'gene').",
         visible_alias = "from-h5"
     )]
-    FromH5ad(FromH5Args),
+    From10xMatrix(From10xMatrixArgs),
+
+    #[command(
+        about = "Build backend from AnnData `h5ad` file (CELLxGENE schema)",
+        long_about = "Build a backend from an AnnData h5ad file (CELLxGENE schema v7, AnnData spec v0.1.0).\n\
+		      \n\
+		      Auto-detects sparse format (CSR/CSC) and transposes to (features x cells).\n\
+		      Prefers raw/X (raw counts) over X (processed) when available.\n\
+		      \n\
+		      Additionally outputs:\n\
+		      - {output}.cell_metadata.tsv.gz    (all obs columns per cell)\n\
+		      - {output}.barcode_to_donor.tsv.gz (barcode-to-donor mapping, if donor_id exists)\n\
+		      - {output}.sample_metadata.tsv.gz  (one row per donor, if donor_id exists)\n\
+		      \n\
+		      Column names become barcode@donor_id for multi-donor data.\n\
+		      Use --select-row-type to filter by biotype (e.g., 'protein_coding')."
+    )]
+    FromH5ad(FromH5adArgs),
+
+    #[command(
+        name = "from-10x-molecule",
+        about = "Build backend from 10X molecule_info.h5",
+        long_about = "Build a backend by aggregating per-molecule counts from a 10X Genomics\n\
+		      molecule_info.h5 file into a feature x cell sparse matrix.\n\
+		      \n\
+		      Each molecule has (barcode_idx, feature_idx, count, gem_group, library_idx).\n\
+		      Molecules are filtered by --library-type and optionally by Cell Ranger's\n\
+		      pass_filter (valid cell calls), then aggregated into count triplets.\n\
+		      \n\
+		      Barcode names are formatted as SEQUENCE-GEMGROUP (e.g., AAACCTGA-1).\n\
+		      Handles multi-sample (cellranger aggr) and multi-library (CITE-seq) data."
+    )]
+    From10xMolecule(From10xMoleculeArgs),
 
     #[command(
         about = "Build backend from triplets in 10X Xenium `zarr`",
@@ -488,7 +536,7 @@ pub struct ListZarrArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct FromH5Args {
+pub struct From10xMatrixArgs {
     #[arg(
         help = "Input HDF5 file containing sparse matrix triplets",
         long_help = "Specify the HDF5 file where triplets of sparse matrix data are stored. \n\
@@ -651,6 +699,184 @@ pub struct FromH5Args {
         help = "Verbose mode",
         long_help = "Enable verbose mode for more detailed output. \n\
 		     Use multiple times for increased verbosity."
+    )]
+    verbose: u8,
+}
+
+#[derive(Args, Debug)]
+pub struct FromH5adArgs {
+    #[arg(
+        help = "Input AnnData h5ad file",
+        long_help = "Specify the AnnData h5ad file (CELLxGENE schema v7).\n\
+		     Expected layout: X/{data,indices,indptr}, obs/, var/.\n\
+		     Prefers raw/X over X when available."
+    )]
+    h5ad_file: Box<str>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "zarr",
+        help = "Backend format for output",
+        long_help = "Choose the backend format for the output file."
+    )]
+    backend: SparseIoBackend,
+
+    #[arg(
+        short,
+        long,
+        help = "Output file header or name",
+        long_help = "Specify the output file header.\n\
+		     The output will be named as {output}.{backend}.\n\
+		     Metadata files will be named {output}.cell_metadata.tsv.gz, etc."
+    )]
+    output: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "",
+        help = "Select row type (biotype) for filtering",
+        long_help = "Filter features by biotype (e.g., 'protein_coding', 'lncRNA').\n\
+		     Leave empty to keep all features (default).\n\
+		     CELLxGENE uses biotype annotations rather than 'Gene Expression'."
+    )]
+    select_row_type: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "",
+        help = "Remove row type",
+        long_help = "Remove rows if their biotype contains this value."
+    )]
+    remove_row_type: Box<str>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Squeeze sparse rows or columns",
+        long_help = "Enable squeezing to remove rows and columns with too few non-zeros."
+    )]
+    do_squeeze: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Row non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for rows."
+    )]
+    row_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Column non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for columns."
+    )]
+    column_nnz_cutoff: usize,
+
+    #[arg(
+        short,
+        long,
+        action = clap::ArgAction::Count,
+        help = "Verbose mode",
+        long_help = "Enable verbose mode for more detailed output."
+    )]
+    verbose: u8,
+}
+
+#[derive(Args, Debug)]
+pub struct From10xMoleculeArgs {
+    #[arg(
+        help = "Input 10X molecule_info.h5 file",
+        long_help = "Specify the molecule_info.h5 file from Cell Ranger count/multi.\n\
+		     Contains per-molecule data: barcode_idx, feature_idx, count, gem_group, etc."
+    )]
+    h5_file: Box<str>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "zarr",
+        help = "Backend format for output",
+        long_help = "Choose the backend format for the output file."
+    )]
+    backend: SparseIoBackend,
+
+    #[arg(
+        short,
+        long,
+        help = "Output file header or name",
+        long_help = "Specify the output file header.\n\
+		     The output will be named as {output}.{backend}."
+    )]
+    output: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "Gene Expression",
+        help = "Library type to include",
+        long_help = "Filter molecules to only those from libraries of this type.\n\
+		     Common types: 'Gene Expression', 'Antibody Capture', 'CRISPR Guide Capture'.\n\
+		     Reads library_info JSON to determine which library indices match."
+    )]
+    library_type: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "Gene Expression",
+        help = "Select row type (feature_type)",
+        long_help = "Filter features by type. 10X uses 'Gene Expression', 'Antibody Capture', etc.\n\
+		     Rows are included if their type contains this value."
+    )]
+    select_row_type: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "aggregate",
+        help = "Remove row type",
+        long_help = "Remove rows if their type contains this value."
+    )]
+    remove_row_type: Box<str>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Skip pass_filter and include all barcodes",
+        long_help = "By default, only barcodes that passed Cell Ranger cell calling are included.\n\
+		     Set this flag to include ALL barcodes with at least one molecule."
+    )]
+    no_pass_filter: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Squeeze sparse rows or columns",
+        long_help = "Enable squeezing to remove rows and columns with too few non-zeros."
+    )]
+    do_squeeze: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Row non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for rows."
+    )]
+    row_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Column non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for columns."
+    )]
+    column_nnz_cutoff: usize,
+
+    #[arg(
+        short,
+        long,
+        action = clap::ArgAction::Count,
+        help = "Verbose mode",
+        long_help = "Enable verbose mode for more detailed output."
     )]
     verbose: u8,
 }
