@@ -59,7 +59,7 @@ pub use gaussian_prior::{FixedGaussianPrior, GaussianPrior};
 pub use likelihood::{
     estimate_kappa_mle, l2_normalize_dim, lgamma_approx, log_bessel_i, suggest_kappa_init,
     vmf_log_normalizer, FixedGaussianLikelihood, GaussianLikelihood, NegativeBinomialLikelihood,
-    OffsetPoissonLikelihood, PoissonLikelihood, VmfFixedKappaLikelihood,
+    OffsetPoissonLikelihood, PoissonLikelihood, RssLikelihood, RssSvd, VmfFixedKappaLikelihood,
 };
 pub use regression_linear::{LinearModelSGVB, LinearRegressionSGVB};
 pub use sgvb::{local_reparam_loss, SGVBConfig};

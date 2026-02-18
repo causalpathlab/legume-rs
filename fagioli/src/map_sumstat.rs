@@ -9,10 +9,9 @@ use rust_htslib::tpool::ThreadPool;
 use std::io::Write;
 
 use fagioli::genotype::{BedReader, GenomicRegion, GenotypeReader};
-use fagioli::sgvb::{fit_block, BlockFitResult, FitConfig, ModelType};
+use fagioli::sgvb::{fit_block_rss, BlockFitResult, FitConfig, ModelType};
 use fagioli::summary_stats::{
-    compute_all_polygenic_scores, estimate_ld_blocks, load_ld_blocks_from_file,
-    read_sumstat_zscores_with_n, LdBlock,
+    estimate_ld_blocks, load_ld_blocks_from_file, read_sumstat_zscores_with_n, LdBlock,
 };
 
 #[derive(Args, Debug, Clone)]
@@ -62,10 +61,14 @@ pub struct MapSumstatArgs {
     #[arg(long, default_value = "5000")]
     pub max_block_snps: usize,
 
-    // --- Confounder parameters ---
-    /// Number of SVD confounding components extracted from PGS
-    #[arg(long, default_value = "10")]
-    pub num_confounders: usize,
+    // --- RSS SVD parameters ---
+    /// Maximum rank for rSVD of each LD block's genotype matrix
+    #[arg(long, default_value = "50")]
+    pub max_rank: usize,
+
+    /// Regularization λ for D̃ = √(D² + λ); default 0.1/K
+    #[arg(long)]
+    pub lambda: Option<f64>,
 
     // --- Model parameters ---
     /// Fine-mapping model: susie, bisusie, multilevel-susie
@@ -172,31 +175,7 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
     let num_blocks = blocks.len();
     info!("Using {} LD blocks", num_blocks);
 
-    // ── Step 4: Compute polygenic scores ──────────────────────────────────
-    info!("Computing polygenic scores across all blocks");
-    let yhat = compute_all_polygenic_scores(&geno.genotypes, &zscores, &blocks)?;
-    info!("PGS shape: {} x {}", yhat.nrows(), yhat.ncols());
-
-    // ── Step 5: Extract confounders via SVD on PGS ────────────────────────
-    let confounders = if args.num_confounders > 0 {
-        let mut yhat_scaled = yhat.clone();
-        yhat_scaled.scale_columns_inplace();
-
-        let svd = yhat_scaled.svd(true, false);
-        let u = svd
-            .u
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("SVD failed on PGS"))?;
-
-        let k_conf = args.num_confounders.min(u.ncols()).min(t);
-        let conf = u.columns(0, k_conf).clone_owned();
-        info!("Extracted {} confounder components from PGS", k_conf);
-        Some(conf)
-    } else {
-        None
-    };
-
-    // ── Step 6: Build fit config ──────────────────────────────────────────
+    // ── Step 4: Build fit config ────────────────────────────────────────
     let model_type: ModelType = args.model.parse()?;
     let prior_vars: Vec<f32> = args
         .prior_var
@@ -222,19 +201,19 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         model_type, args.num_components, &fit_config.prior_vars
     );
 
-    // ── Step 7: Per-block SGVB regression (parallel) ──────────────────────
-    info!("Fitting SGVB models for {} blocks", num_blocks);
+    // ── Step 5: Per-block RSS fine-mapping (parallel) ────────────────────
+    info!("Fitting RSS SGVB models for {} blocks", num_blocks);
 
     let block_results: Vec<(usize, BlockFitResult)> = blocks
         .par_iter()
         .enumerate()
         .map(|(block_idx, block)| {
             let block_m = block.num_snps();
-            if block_m == 0 {
+            if block_m < 10 {
                 let empty = BlockFitResult {
-                    pip: DMatrix::<f32>::zeros(0, t),
-                    effect_mean: DMatrix::<f32>::zeros(0, t),
-                    effect_std: DMatrix::<f32>::zeros(0, t),
+                    pip: DMatrix::<f32>::zeros(block_m, t),
+                    effect_mean: DMatrix::<f32>::zeros(block_m, t),
+                    effect_std: DMatrix::<f32>::zeros(block_m, t),
                     avg_elbo: 0.0,
                 };
                 return (block_idx, empty);
@@ -247,23 +226,27 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
                 .clone_owned();
             x_block.scale_columns_inplace();
 
-            // PGS for this block as response
-            let y_block = &yhat;
+            // Extract z-scores for this block
+            let z_block = zscores.rows(block.snp_start, block_m).clone_owned();
 
             // Per-block seed for reproducibility
             let mut block_config = fit_config.clone();
             block_config.seed = fit_config.seed.wrapping_add(block_idx as u64);
 
-            let result = fit_block(&x_block, y_block, confounders.as_ref(), &block_config)
-                .unwrap_or_else(|e| {
-                    log::warn!("Block {} failed: {}, using zeros", block_idx, e);
-                    BlockFitResult {
-                        pip: DMatrix::<f32>::zeros(block_m, t),
-                        effect_mean: DMatrix::<f32>::zeros(block_m, t),
-                        effect_std: DMatrix::<f32>::zeros(block_m, t),
-                        avg_elbo: f32::NEG_INFINITY,
-                    }
-                });
+            // λ: user-specified or default 0.1/K
+            let block_lambda = args.lambda.unwrap_or(0.1 / args.max_rank as f64);
+
+            let result =
+                fit_block_rss(&x_block, &z_block, &block_config, args.max_rank, block_lambda)
+                    .unwrap_or_else(|e| {
+                        log::warn!("Block {} failed: {}, using zeros", block_idx, e);
+                        BlockFitResult {
+                            pip: DMatrix::<f32>::zeros(block_m, t),
+                            effect_mean: DMatrix::<f32>::zeros(block_m, t),
+                            effect_std: DMatrix::<f32>::zeros(block_m, t),
+                            avg_elbo: f32::NEG_INFINITY,
+                        }
+                    });
 
             info!(
                 "Block {}/{}: {} SNPs, avg_elbo={:.2}",
@@ -307,7 +290,7 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         })
         .collect();
 
-    // ── Step 8: Write results ─────────────────────────────────────────────
+    // ── Step 6: Write results ─────────────────────────────────────────────
     let out_file = format!("{}.results.bed.gz", args.output);
     info!("Writing results to {}", out_file);
 
@@ -360,7 +343,7 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
     writer.flush()?;
     info!("Results written: {}", out_file);
 
-    // ── Step 9: Write parameters ──────────────────────────────────────────
+    // ── Step 7: Write parameters ──────────────────────────────────────────
     let param_file = format!("{}.parameters.json", args.output);
     let params = serde_json::json!({
         "command": "map-sumstat",
@@ -380,7 +363,8 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         "num_iterations": args.num_iterations,
         "batch_size": args.batch_size,
         "elbo_window": args.elbo_window,
-        "num_confounders": args.num_confounders,
+        "max_rank": args.max_rank,
+        "lambda": args.lambda.unwrap_or(0.1 / args.max_rank as f64),
         "seed": args.seed,
     });
     std::fs::write(&param_file, serde_json::to_string_pretty(&params)?)?;
