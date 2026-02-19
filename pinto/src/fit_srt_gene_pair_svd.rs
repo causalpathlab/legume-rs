@@ -2,7 +2,7 @@ use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
 use crate::srt_gene_graph::*;
 use crate::srt_gene_pairs::*;
-use crate::srt_input::*;
+use crate::srt_input::{self, *};
 use clap::Parser;
 use data_beans_alg::random_projection::*;
 use matrix_param::dmatrix_gamma::GammaMatrix;
@@ -205,7 +205,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
         data: mut data_vec,
         coordinates,
         coordinate_names,
-        batches: batch_membership,
+        batches: mut batch_membership,
     } = read_data_with_coordinates(SRTReadArgs {
         data_files: args.data_files.clone(),
         coord_files: args.coord_files.clone(),
@@ -258,6 +258,14 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
             &(args.out.to_string() + ".coord_pairs.parquet"),
             Some(coordinate_names.clone()),
         )?;
+
+        // Auto-detect batches from connected components when no explicit batch files
+        if args.batch_files.is_none() {
+            srt_input::auto_batch_from_components(
+                &srt_cell_pairs.graph,
+                &mut batch_membership,
+            );
+        }
 
         cell_pairs = srt_cell_pairs
             .pairs

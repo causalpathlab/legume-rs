@@ -568,4 +568,5 @@ mod tests {
         assert_eq!(ml1.all_pair_to_sample.len(), 1);
         assert_eq!(ml1.all_num_samples.len(), 1);
     }
+
 }

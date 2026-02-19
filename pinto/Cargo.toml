@@ -20,6 +20,7 @@ matrix-param = { workspace = true }
 candle-util = { workspace = true }
 parquet = { workspace = true }
 
+dashmap = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 rayon = { workspace = true }

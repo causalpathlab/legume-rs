@@ -3,7 +3,7 @@ use crate::srt_common::*;
 use crate::srt_estimate_batch_effects::estimate_batch;
 use crate::srt_estimate_batch_effects::EstimateBatchArgs;
 use crate::srt_graph_coarsen::*;
-use crate::srt_input::*;
+use crate::srt_input::{self, *};
 use data_beans_alg::random_projection::*;
 
 use clap::Parser;
@@ -94,11 +94,17 @@ pub struct SrtDeltaSvdArgs {
     knn_spatial: usize,
 
     #[arg(
-        long,
+        long = "batch-knn",
         default_value_t = 10,
-        help = "Number of nearest neighbours within each batch for batch estimation"
+        help = "KNN for cross-batch super-cell matching during batch correction",
+        long_help = "Number of nearest neighbours for cross-batch super-cell matching.\n\
+                       During batch effect estimation, cells are coarsened into super-cells\n\
+                       (one per batch x pseudobulk group). Each super-cell finds its batch-knn\n\
+                       nearest neighbors from other batches via HNSW on centroids. These matches\n\
+                       provide counterfactual expression estimates for batch effect decomposition.\n\
+                       Searches are over coarsened centroids, not individual cells, so this stays small."
     )]
-    knn_cells: usize,
+    batch_knn: usize,
 
     #[arg(
         long,
@@ -228,7 +234,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         data: mut data_vec,
         coordinates,
         coordinate_names,
-        batches: batch_membership,
+        batches: mut batch_membership,
     } = read_data_with_coordinates(SRTReadArgs {
         data_files: args.data_files.clone(),
         coord_files: args.coord_files.clone(),
@@ -254,7 +260,23 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         n_cells
     );
 
-    // 2. Estimate batch effects
+    // 2. Build spatial KNN graph
+    info!("Building spatial KNN graph (k={})...", args.knn_spatial);
+
+    let graph = build_spatial_graph(
+        &coordinates,
+        SrtCellPairsArgs {
+            knn: args.knn_spatial,
+            block_size: args.block_size,
+        },
+    )?;
+
+    // Auto-detect batches from connected components when no explicit batch files
+    if args.batch_files.is_none() {
+        srt_input::auto_batch_from_components(&graph, &mut batch_membership);
+    }
+
+    // 3. Estimate batch effects
     info!("Estimating batch effects...");
 
     let batch_sort_dim = args.proj_dim.min(10);
@@ -265,7 +287,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
             proj_dim: args.proj_dim,
             sort_dim: batch_sort_dim,
             block_size: args.block_size,
-            knn_cells: args.knn_cells,
+            batch_knn: args.batch_knn,
         },
     )?;
 
@@ -280,17 +302,8 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    // 3. Build spatial KNN graph
-    info!("Building spatial KNN graph (k={})...", args.knn_spatial);
-
-    let srt_cell_pairs = SrtCellPairs::new(
-        &data_vec,
-        &coordinates,
-        SrtCellPairsArgs {
-            knn: args.knn_spatial,
-            block_size: args.block_size,
-        },
-    )?;
+    // Wrap graph with data for pair-level operations
+    let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, graph);
 
     srt_cell_pairs.to_parquet(
         &(args.out.to_string() + ".coord_pairs.parquet"),
