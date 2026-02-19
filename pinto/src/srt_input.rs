@@ -162,11 +162,15 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
                 batch_membership.push(s.to_string().into_boxed_str());
             }
         }
-    } else {
+    } else if data_vec.len() > 1 {
         info!("Each data file will be considered a different batch.");
         for (id, &nn) in data_vec.num_columns_by_data()?.iter().enumerate() {
             batch_membership.extend(vec![id.to_string().into_boxed_str(); nn]);
         }
+    } else {
+        // Single data file, single batch — uniform label
+        let nn = data_vec.num_columns();
+        batch_membership.extend(vec!["0".to_string().into_boxed_str(); nn]);
     }
 
     if batch_membership.len() != data_vec.num_columns() {

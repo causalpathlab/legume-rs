@@ -215,20 +215,27 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         n_cells
     );
 
-    // 2. Estimate batch effects
-    info!("Estimating batch effects...");
+    // 2. Estimate batch effects (only when multiple batches exist)
+    let uniq_batches: HashSet<&Box<str>> = batch_membership.iter().collect();
+    let n_batches = uniq_batches.len();
+    drop(uniq_batches);
 
-    let batch_sort_dim = args.proj_dim.min(10);
-    let batch_effects = estimate_batch(
-        &mut data_vec,
-        &batch_membership,
-        EstimateBatchArgs {
-            proj_dim: args.proj_dim,
-            sort_dim: batch_sort_dim,
-            block_size: args.block_size,
-            knn_cells: args.knn_cells,
-        },
-    )?;
+    let batch_effects = if n_batches > 1 {
+        info!("Estimating batch effects ({} batches)...", n_batches);
+        let batch_sort_dim = args.proj_dim.min(10);
+        estimate_batch(
+            &mut data_vec,
+            &batch_membership,
+            EstimateBatchArgs {
+                proj_dim: args.proj_dim,
+                sort_dim: batch_sort_dim,
+                block_size: args.block_size,
+                knn_cells: args.knn_cells,
+            },
+        )?
+    } else {
+        None
+    };
 
     if let Some(batch_db) = batch_effects.as_ref() {
         let outfile = args.out.to_string() + ".delta.parquet";
@@ -271,10 +278,16 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         args.num_levels, args.n_coarse_clusters
     );
 
+    let batch_arg: Option<&[Box<str>]> = if n_batches > 1 {
+        Some(&batch_membership)
+    } else {
+        None
+    };
+
     let cell_proj = data_vec.project_columns_with_batch_correction(
         args.proj_dim.min(50),
         Some(args.block_size),
-        Some(&batch_membership),
+        batch_arg,
     )?;
 
     let ml = graph_coarsen_multilevel(
