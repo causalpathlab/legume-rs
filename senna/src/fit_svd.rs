@@ -444,9 +444,7 @@ fn do_nystrom_proj(
     log_xx_dn.scale_columns_inplace();
 
     let (u_dk, s_k, _) = log_xx_dn.rsvd(rank)?;
-    let eps = 1e-8;
-    let sinv_k = DVec::from_iterator(s_k.len(), s_k.iter().map(|&s| 1.0 / (s + eps)));
-    let basis_dk = &u_dk * Mat::from_diagonal(&sinv_k);
+    let basis_dk = nystrom_basis(&u_dk, &s_k);
 
     info!(
         "Constructed {} x {} projection matrix",

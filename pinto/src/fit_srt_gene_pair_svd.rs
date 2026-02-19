@@ -1,3 +1,4 @@
+use crate::edge_profiles::compute_propensity_and_gene_topic_stat;
 use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
 use crate::srt_gene_graph::*;
@@ -10,135 +11,52 @@ use matrix_param::traits::*;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtGenePairSvdArgs {
-    #[arg(
-        required = true,
-        value_delimiter(','),
-        help = "Data files (.zarr or .h5 format, comma separated)"
-    )]
-    data_files: Vec<Box<str>>,
-
-    #[arg(
-        long = "coord",
-        short = 'c',
-        required = true,
-        value_delimiter(','),
-        help = "Spatial coordinate files, one per data file",
-        long_help = "Spatial coordinate files, one per data file (comma separated).\n\
-                       Format: CSV, TSV, or space-delimited text (or .parquet).\n\
-                       First column: cell/barcode names (must match data file).\n\
-                       Subsequent columns: spatial coordinates (x, y, etc.).\n\
-                       Header row is auto-detected or use --coord-header-row to specify."
-    )]
-    coord_files: Vec<Box<str>>,
-
-    #[arg(
-        long = "coord-column-indices",
-        value_delimiter(','),
-        help = "Column indices for coordinates in coord files",
-        long_help = "Column indices for coordinates in coord files (comma separated).\n\
-                       Use when coord files have extra columns beyond barcode,x,y."
-    )]
-    coord_columns: Option<Vec<usize>>,
-
-    #[arg(
-        long = "coord-column-names",
-        value_delimiter(','),
-        default_value = "pxl_row_in_fullres,pxl_col_in_fullres",
-        help = "Column names to look up in coord files"
-    )]
-    coord_column_names: Vec<Box<str>>,
+    #[command(flatten)]
+    pub common: srt_input::SrtInputArgs,
 
     #[arg(
         long,
-        help = "Header row index in coord files (0 = first line is column names)"
-    )]
-    coord_header_row: Option<usize>,
-
-    #[arg(
-        long,
-        short = 'b',
-        value_delimiter(','),
-        help = "Batch membership files, one per data file",
-        long_help = "Batch membership files, one per data file (comma separated).\n\
-                       Format: plain text file, one batch label per line.\n\
-                       Must have one line for each cell in the corresponding data file.\n\
-                       If not provided, each data file is treated as a separate batch."
-    )]
-    batch_files: Option<Vec<Box<str>>>,
-
-    #[arg(
-        long,
-        short = 'p',
-        default_value_t = 50,
-        help = "Random projection dimension for pseudobulk sample construction"
-    )]
-    proj_dim: usize,
-
-    #[arg(
-        long,
-        short = 'd',
         default_value_t = 10,
-        help = "Number of top projection components for binary sort",
+        help = "Binary sort depth: produces up to 2^S pseudobulk samples",
         long_help = "Number of top projection components for binary sort.\n\
-                       Produces up to 2^S pseudobulk samples."
+                       Cells are recursively split along each component,\n\
+                       producing up to 2^S pseudobulk samples.\n\
+                       Must be <= --proj-dim."
     )]
     sort_dim: usize,
 
     #[arg(
         long,
         default_value_t = 20,
-        help = "Number of nearest neighbours for gene-gene co-expression graph"
+        help = "KNN for gene-gene co-expression graph",
+        long_help = "Number of nearest neighbours for building the gene-gene graph.\n\
+                       Genes are connected based on similarity of their posterior\n\
+                       mean expression across pseudobulk samples.\n\
+                       Ignored when --gene-network is provided."
     )]
     knn_gene: usize,
 
     #[arg(
-        short = 'k',
-        long,
-        default_value_t = 10,
-        help = "Number of nearest neighbours for spatial cell-pair graph"
-    )]
-    knn_spatial: usize,
-
-    #[arg(
         long,
         short = 's',
-        help = "Maximum cells per pseudobulk sample (downsampling)"
+        help = "Max cells per pseudobulk sample (cap group size)"
     )]
     down_sample: Option<usize>,
-
-    #[arg(
-        long,
-        short,
-        required = true,
-        help = "Output file prefix",
-        long_help = "Output file prefix.\n\
-                       Generates: {out}.coord_pairs.parquet, {out}.gene_graph.parquet,\n\
-                       {out}.dictionary.parquet,\n\
-                       {out}.latent.parquet"
-    )]
-    out: Box<str>,
-
-    #[arg(
-        long,
-        default_value_t = 100,
-        help = "Block size for parallel processing of cells"
-    )]
-    block_size: usize,
 
     #[arg(
         short = 't',
         long,
         default_value_t = 10,
-        help = "Number of SVD components (latent dimensions)"
+        help = "Number of SVD components for latent pair representation"
     )]
     n_latent_topics: usize,
 
     #[arg(
+        short = 'k',
         long,
-        default_value_t = false,
-        help = "Preload all sparse column data into memory for faster access"
+        help = "Number of edge clusters for K-means (defaults to n_latent_topics)"
     )]
-    preload_data: bool,
+    n_edge_clusters: Option<usize>,
 
     #[arg(
         long,
@@ -175,13 +93,6 @@ pub struct SrtGenePairSvdArgs {
                        producing a denser graph."
     )]
     gene_graph_union: bool,
-
-    #[arg(
-        long,
-        default_value_t = 1,
-        help = "Number of multi-level collapsing levels (coarse→fine)"
-    )]
-    num_levels: usize,
 }
 
 /// Gene-gene interaction pipeline:
@@ -198,6 +109,8 @@ pub struct SrtGenePairSvdArgs {
 /// 10. Nystrom projection → per-cell → per-pair latent codes
 /// 11. Export
 pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
+    let c = &args.common;
+
     // 1. Load data
     info!("[1/9] Loading data files...");
 
@@ -206,65 +119,51 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
         coordinates,
         coordinate_names,
         batches: mut batch_membership,
-    } = read_data_with_coordinates(SRTReadArgs {
-        data_files: args.data_files.clone(),
-        coord_files: args.coord_files.clone(),
-        preload_data: args.preload_data,
-        coord_columns: args.coord_columns.clone().unwrap_or_default(),
-        coord_column_names: args.coord_column_names.clone(),
-        batch_files: args.batch_files.clone(),
-        header_in_coord: args.coord_header_row,
-    })?;
+    } = read_data_with_coordinates(c.to_read_args())?;
 
     let gene_names = data_vec.row_names()?;
     let n_genes = data_vec.num_rows();
     let n_cells = data_vec.num_columns();
 
-    anyhow::ensure!(args.proj_dim > 0, "proj_dim must be > 0");
+    anyhow::ensure!(c.proj_dim > 0, "proj_dim must be > 0");
     anyhow::ensure!(args.sort_dim > 0, "sort_dim must be > 0");
     anyhow::ensure!(
-        args.sort_dim <= args.proj_dim,
+        args.sort_dim <= c.proj_dim,
         "sort_dim ({}) must be <= proj_dim ({})",
         args.sort_dim,
-        args.proj_dim
+        c.proj_dim
     );
-    anyhow::ensure!(args.knn_spatial > 0, "knn_spatial must be > 0");
+    anyhow::ensure!(c.knn_spatial > 0, "knn_spatial must be > 0");
     anyhow::ensure!(args.knn_gene > 0, "knn_gene must be > 0");
     anyhow::ensure!(args.n_latent_topics > 0, "n_latent_topics must be > 0");
     anyhow::ensure!(
-        args.knn_spatial < n_cells,
+        c.knn_spatial < n_cells,
         "knn_spatial ({}) must be < number of cells ({})",
-        args.knn_spatial,
+        c.knn_spatial,
         n_cells
     );
 
     // 2. Build spatial cell-cell KNN graph and extract pair info
-    info!(
-        "[2/9] Building spatial KNN graph (k={})...",
-        args.knn_spatial
-    );
+    info!("[2/9] Building spatial KNN graph (k={})...", c.knn_spatial);
     let cell_pairs: Vec<(usize, usize)>;
     {
         let srt_cell_pairs = SrtCellPairs::new(
             &data_vec,
             &coordinates,
             SrtCellPairsArgs {
-                knn: args.knn_spatial,
-                block_size: args.block_size,
+                knn: c.knn_spatial,
+                block_size: c.block_size,
             },
         )?;
 
         srt_cell_pairs.to_parquet(
-            &(args.out.to_string() + ".coord_pairs.parquet"),
+            &(c.out.to_string() + ".coord_pairs.parquet"),
             Some(coordinate_names.clone()),
         )?;
 
         // Auto-detect batches from connected components when no explicit batch files
-        if args.batch_files.is_none() {
-            srt_input::auto_batch_from_components(
-                &srt_cell_pairs.graph,
-                &mut batch_membership,
-            );
+        if c.batch_files.is_none() {
+            srt_input::auto_batch_from_components(&srt_cell_pairs.graph, &mut batch_membership);
         }
 
         cell_pairs = srt_cell_pairs
@@ -279,8 +178,8 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     info!("[3/9] Random projection and sample assignment...");
 
     let cell_proj_out = data_vec.project_columns_with_batch_correction(
-        args.proj_dim,
-        Some(args.block_size),
+        c.proj_dim,
+        Some(c.block_size),
         Some(&batch_membership),
     )?;
 
@@ -325,22 +224,22 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
             gene_names.clone(),
             GenePairGraphArgs {
                 knn: args.knn_gene,
-                block_size: args.block_size,
+                block_size: c.block_size,
                 reciprocal: !args.gene_graph_union,
             },
         )?
     };
 
     // 6. Compute gene raw means
-    let gene_means = compute_gene_raw_means(&data_vec, args.block_size)?;
+    let gene_means = compute_gene_raw_means(&data_vec, c.block_size)?;
 
     // 7. Multi-level gene-pair interaction deltas
     info!(
         "[6/9] Computing gene-pair interaction deltas ({} levels)...",
-        args.num_levels
+        c.num_levels
     );
 
-    let level_dims = compute_level_sort_dims(args.sort_dim, args.num_levels);
+    let level_dims = compute_level_sort_dims(args.sort_dim, c.num_levels);
     let mut gene_pair_stat = {
         let mut last_stat = None;
         for (level, &level_sort_dim) in level_dims.iter().enumerate() {
@@ -377,7 +276,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
         );
     }
 
-    gene_graph.to_parquet(&(args.out.to_string() + ".gene_graph.parquet"))?;
+    gene_graph.to_parquet(&(c.out.to_string() + ".gene_graph.parquet"))?;
 
     // 8. Fit Poisson-Gamma
     info!("[7/9] Fitting Poisson-Gamma model...");
@@ -396,14 +295,12 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
 
     // Here, d = 2 x gene-gene interactions
     let (u_dk, s_k, _) = training_dm.rsvd(args.n_latent_topics)?;
-    let eps = 1e-8;
-    let sinv_k = DVec::from_iterator(s_k.len(), s_k.iter().map(|&s| 1.0 / (s + eps)));
-    let basis_dk = &u_dk * Mat::from_diagonal(&sinv_k);
+    let basis_dk = nystrom_basis(&u_dk, &s_k);
 
     // Write dictionary
     let dict_row_names = gene_graph.edge_names();
     u_dk.to_parquet_with_names(
-        &(args.out.to_string() + ".dictionary.parquet"),
+        &(c.out.to_string() + ".basis.parquet"),
         (Some(&dict_row_names), Some("gene_pair")),
         None,
     )?;
@@ -411,13 +308,8 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     // 10. Nystrom projection: per-cell first, then convert to per-pair
     info!("[9/9] Nystrom projection...");
 
-    let cell_proj_kn = nystrom_gene_pair_projection(
-        &data_vec,
-        &gene_graph,
-        &gene_means,
-        &basis_dk,
-        args.block_size,
-    )?;
+    let cell_proj_kn =
+        nystrom_gene_pair_projection(&data_vec, &gene_graph, &gene_means, &basis_dk, c.block_size)?;
 
     // Convert cell-level projections to pair-level, skipping pairs
     // where both cells have zero projection (no observed gene-pair deltas).
@@ -459,16 +351,30 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     pair_proj_kn.normalize_columns_inplace();
 
     pair_proj_kn.transpose().to_parquet_with_names(
-        &(args.out.to_string() + ".latent.parquet"),
+        &(c.out.to_string() + ".latent.parquet"),
         (None, Some("cell_pair")),
         None,
     )?;
 
     // Rewrite coord_pairs to include only kept pairs
     if n_kept < cell_pairs.len() {
-        let coord_path = args.out.to_string() + ".coord_pairs.parquet";
+        let coord_path = c.out.to_string() + ".coord_pairs.parquet";
         filter_parquet_by_indices(&coord_path, &kept_indices)?;
     }
+
+    // Propensity + dictionary
+    let kept_edges: Vec<(usize, usize)> = kept_indices.iter().map(|&i| cell_pairs[i]).collect();
+
+    let n_clusters = args.n_edge_clusters.unwrap_or(args.n_latent_topics);
+    compute_propensity_and_gene_topic_stat(
+        &pair_proj_kn,
+        &kept_edges,
+        &data_vec,
+        n_cells,
+        n_clusters,
+        c.block_size,
+        &c.out,
+    )?;
 
     info!("Done");
     Ok(())

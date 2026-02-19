@@ -164,17 +164,13 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
                         best_j = j;
                     }
                 }
-                best_sim
-                    .is_finite()
-                    .then_some((i, best_j, best_sim))
+                best_sim.is_finite().then_some((i, best_j, best_sim))
             })
             .collect();
 
         // Sort by similarity descending for greedy matching
         let mut sorted = proposals;
-        sorted.sort_unstable_by(|a, b| {
-            b.2.partial_cmp(&a.2).unwrap_or(Ordering::Equal)
-        });
+        sorted.sort_unstable_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(Ordering::Equal));
 
         // Greedy matching: accept merges where neither endpoint is already taken
         let mut taken = vec![false; n];
@@ -568,5 +564,4 @@ mod tests {
         assert_eq!(ml1.all_pair_to_sample.len(), 1);
         assert_eq!(ml1.all_num_samples.len(), 1);
     }
-
 }

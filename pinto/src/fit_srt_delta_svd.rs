@@ -1,157 +1,41 @@
+use crate::edge_profiles::compute_propensity_and_gene_topic_stat;
 use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
-use crate::srt_estimate_batch_effects::estimate_batch;
-use crate::srt_estimate_batch_effects::EstimateBatchArgs;
+use crate::srt_estimate_batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::srt_graph_coarsen::*;
 use crate::srt_input::{self, *};
 use data_beans_alg::random_projection::*;
 
 use clap::Parser;
 use matrix_param::dmatrix_gamma::GammaMatrix;
-use matrix_param::io::ParamIo;
 use matrix_param::traits::*;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtDeltaSvdArgs {
-    #[arg(
-        required = true,
-        value_delimiter(','),
-        help = "Data files (.zarr or .h5 format, comma separated)"
-    )]
-    data_files: Vec<Box<str>>,
-
-    #[arg(
-        long = "coord",
-        short = 'c',
-        required = true,
-        value_delimiter(','),
-        help = "Spatial coordinate files, one per data file",
-        long_help = "Spatial coordinate files, one per data file (comma separated).\n\
-                       Format: CSV, TSV, or space-delimited text (or .parquet).\n\
-                       First column: cell/barcode names (must match data file).\n\
-                       Subsequent columns: spatial coordinates (x, y, etc.).\n\
-                       Header row is auto-detected or use --coord-header-row to specify."
-    )]
-    coord_files: Vec<Box<str>>,
-
-    #[arg(
-        long = "coord-column-indices",
-        value_delimiter(','),
-        help = "Column indices for coordinates in coord files",
-        long_help = "Column indices for coordinates in coord files (comma separated).\n\
-                       Use when coord files have extra columns beyond barcode,x,y."
-    )]
-    coord_columns: Option<Vec<usize>>,
-
-    #[arg(
-        long = "coord-column-names",
-        value_delimiter(','),
-        default_value = "pxl_row_in_fullres,pxl_col_in_fullres",
-        help = "Column names to look up in coord files"
-    )]
-    coord_column_names: Vec<Box<str>>,
-
-    #[arg(
-        long,
-        help = "Header row index in coord files (0 = first line is column names)"
-    )]
-    coord_header_row: Option<usize>,
-
-    #[arg(
-        long,
-        short = 'b',
-        value_delimiter(','),
-        help = "Batch membership files, one per data file",
-        long_help = "Batch membership files, one per data file (comma separated).\n\
-                       Format: plain text file, one batch label per line.\n\
-                       Must have one line for each cell in the corresponding data file.\n\
-                       If not provided, each data file is treated as a separate batch."
-    )]
-    batch_files: Option<Vec<Box<str>>>,
-
-    #[arg(
-        long,
-        short = 'p',
-        default_value_t = 50,
-        help = "Random projection dimension for pseudobulk sample construction"
-    )]
-    proj_dim: usize,
-
-    #[arg(
-        long,
-        short = 'd',
-        default_value_t = 1024,
-        help = "Target number of pseudobulk clusters for graph coarsening"
-    )]
-    n_clusters: usize,
-
-    #[arg(
-        short = 'k',
-        long,
-        default_value_t = 10,
-        help = "Number of nearest neighbours for spatial cell-pair graph"
-    )]
-    knn_spatial: usize,
-
-    #[arg(
-        long = "batch-knn",
-        default_value_t = 10,
-        help = "KNN for cross-batch super-cell matching during batch correction",
-        long_help = "Number of nearest neighbours for cross-batch super-cell matching.\n\
-                       During batch effect estimation, cells are coarsened into super-cells\n\
-                       (one per batch x pseudobulk group). Each super-cell finds its batch-knn\n\
-                       nearest neighbors from other batches via HNSW on centroids. These matches\n\
-                       provide counterfactual expression estimates for batch effect decomposition.\n\
-                       Searches are over coarsened centroids, not individual cells, so this stays small."
-    )]
-    batch_knn: usize,
+    #[command(flatten)]
+    pub common: srt_input::SrtInputArgs,
 
     #[arg(
         long,
         short = 's',
-        help = "Maximum cells per pseudobulk sample (downsampling)"
+        help = "Max cells per pseudobulk sample (cap group size)"
     )]
     down_sample: Option<usize>,
-
-    #[arg(
-        long,
-        short,
-        required = true,
-        help = "Output file prefix",
-        long_help = "Output file prefix.\n\
-                       Generates: {out}.delta.parquet (when multiple batches), {out}.coord_pairs.parquet,\n\
-                       {out}.dictionary.parquet, {out}.latent.parquet"
-    )]
-    out: Box<str>,
-
-    #[arg(
-        long,
-        default_value_t = 100,
-        help = "Block size for parallel processing of cell pairs"
-    )]
-    block_size: usize,
 
     #[arg(
         short = 't',
         long,
         default_value_t = 10,
-        help = "Number of SVD components (latent dimensions)"
+        help = "Number of SVD components for latent pair representation"
     )]
     n_latent_topics: usize,
 
     #[arg(
+        short = 'k',
         long,
-        default_value_t = false,
-        help = "Preload all sparse column data into memory for faster access"
+        help = "Number of edge clusters for K-means (defaults to n_latent_topics)"
     )]
-    preload_data: bool,
-
-    #[arg(
-        long,
-        default_value_t = 1,
-        help = "Number of multi-level collapsing levels (coarse→fine)"
-    )]
-    num_levels: usize,
+    n_edge_clusters: Option<usize>,
 }
 
 /// Input for fused multi-level pair delta visitor.
@@ -230,109 +114,90 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     // 1. Load data
     info!("Loading data files...");
 
+    let c = &args.common;
+
     let SRTData {
         data: mut data_vec,
         coordinates,
         coordinate_names,
         batches: mut batch_membership,
-    } = read_data_with_coordinates(SRTReadArgs {
-        data_files: args.data_files.clone(),
-        coord_files: args.coord_files.clone(),
-        preload_data: args.preload_data,
-        coord_columns: args.coord_columns.clone().unwrap_or_default(),
-        coord_column_names: args.coord_column_names.clone(),
-        batch_files: args.batch_files.clone(),
-        header_in_coord: args.coord_header_row,
-    })?;
+    } = read_data_with_coordinates(c.to_read_args())?;
 
     let gene_names = data_vec.row_names()?;
     let n_genes = data_vec.num_rows();
     let n_cells = data_vec.num_columns();
 
-    anyhow::ensure!(args.proj_dim > 0, "proj_dim must be > 0");
-    anyhow::ensure!(args.n_clusters > 0, "n_clusters must be > 0");
-    anyhow::ensure!(args.knn_spatial > 0, "knn_spatial must be > 0");
+    anyhow::ensure!(c.proj_dim > 0, "proj_dim must be > 0");
+    anyhow::ensure!(c.n_pseudobulk > 0, "n_pseudobulk must be > 0");
+    anyhow::ensure!(c.knn_spatial > 0, "knn_spatial must be > 0");
     anyhow::ensure!(args.n_latent_topics > 0, "n_latent_topics must be > 0");
     anyhow::ensure!(
-        args.knn_spatial < n_cells,
+        c.knn_spatial < n_cells,
         "knn_spatial ({}) must be < number of cells ({})",
-        args.knn_spatial,
+        c.knn_spatial,
         n_cells
     );
 
     // 2. Build spatial KNN graph
-    info!("Building spatial KNN graph (k={})...", args.knn_spatial);
+    info!("Building spatial KNN graph (k={})...", c.knn_spatial);
 
     let graph = build_spatial_graph(
         &coordinates,
         SrtCellPairsArgs {
-            knn: args.knn_spatial,
-            block_size: args.block_size,
+            knn: c.knn_spatial,
+            block_size: c.block_size,
         },
     )?;
 
     // Auto-detect batches from connected components when no explicit batch files
-    if args.batch_files.is_none() {
+    if c.batch_files.is_none() {
         srt_input::auto_batch_from_components(&graph, &mut batch_membership);
     }
 
     // 3. Estimate batch effects
-    info!("Estimating batch effects...");
-
-    let batch_sort_dim = args.proj_dim.min(10);
-    let batch_effects = estimate_batch(
+    let batch_sort_dim = c.proj_dim.min(10);
+    let batch_db = estimate_and_write_batch_effects(
         &mut data_vec,
         &batch_membership,
         EstimateBatchArgs {
-            proj_dim: args.proj_dim,
+            proj_dim: c.proj_dim,
             sort_dim: batch_sort_dim,
-            block_size: args.block_size,
-            batch_knn: args.batch_knn,
+            block_size: c.block_size,
+            batch_knn: c.batch_knn,
         },
+        &c.out,
     )?;
-
-    if let Some(batch_db) = batch_effects.as_ref() {
-        let outfile = args.out.to_string() + ".delta.parquet";
-        let batch_names = data_vec.batch_names();
-        let gene_names = data_vec.row_names()?;
-        batch_db.to_parquet_with_names(
-            &outfile,
-            (Some(&gene_names), Some("gene")),
-            batch_names.as_deref(),
-        )?;
-    }
 
     // Wrap graph with data for pair-level operations
     let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, graph);
 
     srt_cell_pairs.to_parquet(
-        &(args.out.to_string() + ".coord_pairs.parquet"),
+        &(c.out.to_string() + ".coord_pairs.parquet"),
         Some(coordinate_names.clone()),
     )?;
 
     // 4. Per-cell random projection
     info!("Per-cell random projection...");
     let mut cell_proj = data_vec.project_columns_with_batch_correction(
-        args.proj_dim,
-        Some(args.block_size),
+        c.proj_dim,
+        Some(c.block_size),
         Some(&batch_membership),
     )?;
 
     // 5. Graph-constrained coarsening + multi-level assignment
     info!(
         "Graph coarsening + multi-level assignment ({} levels, n_clusters={})...",
-        args.num_levels, args.n_clusters
+        c.num_levels, c.n_pseudobulk
     );
 
-    let batch_db = batch_effects.map(|x| x.posterior_mean().clone());
     let batch_ref = batch_db.as_ref();
 
     let ml = graph_coarsen_multilevel(
         &srt_cell_pairs.graph,
         &mut cell_proj.proj,
         &srt_cell_pairs.pairs,
-        args.n_clusters,
-        args.num_levels,
+        c.n_pseudobulk,
+        c.num_levels,
     );
 
     let mut all_stats: Vec<PairDeltaCollapsedStat> = ml
@@ -350,7 +215,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         &fused_pair_delta_visitor,
         &fused_input,
         &mut all_stats,
-        args.block_size,
+        c.block_size,
     )?;
 
     // 6. Fit Poisson-Gamma (finest level)
@@ -367,9 +232,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     ])?;
 
     let (u_dk, s_k, _) = training_dm.rsvd(args.n_latent_topics)?;
-    let eps = 1e-8;
-    let sinv_k = DVec::from_iterator(s_k.len(), s_k.iter().map(|&s| 1.0 / (s + eps)));
-    let basis_dk = &u_dk * Mat::from_diagonal(&sinv_k);
+    let basis_dk = nystrom_basis(&u_dk, &s_k);
 
     // Write dictionary
     let dict_row_names: Vec<Box<str>> = gene_names
@@ -383,7 +246,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         .collect();
 
     u_dk.to_parquet_with_names(
-        &(args.out.to_string() + ".dictionary.parquet"),
+        &(c.out.to_string() + ".basis.parquet"),
         (Some(&dict_row_names), Some("gene")),
         None,
     )?;
@@ -403,7 +266,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         &nystrom_pair_delta_visitor,
         &nystrom_input,
         &mut proj_kn,
-        args.block_size,
+        c.block_size,
     )?;
 
     // 9. Export
@@ -412,9 +275,27 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     proj_kn.normalize_columns_inplace();
 
     proj_kn.transpose().to_parquet_with_names(
-        &(args.out.to_string() + ".latent.parquet"),
+        &(c.out.to_string() + ".latent.parquet"),
         (None, Some("cell_pair")),
         None,
+    )?;
+
+    // 10. Propensity + dictionary
+    let edges: Vec<(usize, usize)> = srt_cell_pairs
+        .pairs
+        .iter()
+        .map(|p| (p.left, p.right))
+        .collect();
+
+    let n_clusters = args.n_edge_clusters.unwrap_or(args.n_latent_topics);
+    compute_propensity_and_gene_topic_stat(
+        &proj_kn,
+        &edges,
+        &data_vec,
+        n_cells,
+        n_clusters,
+        c.block_size,
+        &c.out,
     )?;
 
     info!("Done");
