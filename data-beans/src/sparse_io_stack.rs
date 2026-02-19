@@ -61,6 +61,16 @@ impl SparseIoStack {
         Ok(self.column_names.clone())
     }
 
+    /// Register batch membership for all layers in the stack.
+    pub fn register_batch_membership<T>(&mut self, batch_membership: &[T])
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
+        for layer in self.stack.iter_mut() {
+            layer.register_batch_membership(batch_membership);
+        }
+    }
+
     /// Get the row names combined across all the types. We will
     /// append additional data type index: `format!({}_{}, x, d)`
     ///

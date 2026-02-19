@@ -286,6 +286,16 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
+        default_value_t = 2,
+        help = "Number of multi-level collapsing levels.",
+        long_help = "Number of multi-level collapsing levels.\n\
+		     More levels = coarser-to-finer batch correction.\n\
+		     Set to 1 to disable multi-level."
+    )]
+    num_levels: usize,
+
+    #[arg(
+        long,
         default_value_t = false,
         help = "Preload all columns data.",
         long_help = "Preload all the columns data into memory.\n\
@@ -363,37 +373,19 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     )?;
     let proj_kn = proj_out.proj;
 
-    // 3. Batch-adjusted collapsing (pseudobulk)
-    // assign pseudobulk samples by proj_kn
-    let nsamp = data_stack.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
+    // 3. Batch-adjusted multilevel collapsing (pseudobulk)
+    info!("Multi-level collapsing across {} modalities ...", data_stack.num_types());
 
-    for (d, data_vec) in data_stack.stack.iter_mut().enumerate() {
-        let batch_membership = &batch_stack[d];
-        let nbatch = batch_membership
-            .iter()
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-
-        if nbatch > 1 {
-            info!("Registering batch information");
-            data_vec.build_hnsw_per_batch(&proj_kn, batch_membership)?;
-        }
-    }
-
-    info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
-
-    let collapsed_data_vec = data_stack
-        .stack
-        .iter()
-        .map(|x| {
-            x.collapse_columns(
-                Some(args.knn_batches),
-                Some(args.knn_cells),
-                None,
-                Some(args.iter_opt),
-            )
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let collapsed_data_vec: Vec<CollapsedOut> = data_stack.collapse_columns_multilevel(
+        &proj_kn,
+        batch_stack[0].as_ref(),
+        &MultilevelParams {
+            knn_super_cells: args.knn_cells,
+            num_levels: args.num_levels,
+            sort_dim: args.sort_dim,
+            num_opt_iter: args.iter_opt,
+        },
+    )?;
 
     // 4. Train a joint topic model on the collapsed data
     let n_topics = args.n_latent_topics;
@@ -441,6 +433,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         &encoder,
         &decoder,
         &parameters,
+        &dev,
         args,
         &feature_selections,
     )?;
@@ -488,6 +481,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         &data_stack,
         &encoder,
         &collapsed_data_vec,
+        &dev,
         args,
         &feature_selections,
     )?;
@@ -506,17 +500,13 @@ fn evaluate_latent_by_encoder<Enc>(
     data_stack: &SparseIoStack,
     encoder: &Enc,
     collapsed_vec: &[CollapsedOut],
+    dev: &candle_core::Device,
     args: &JointTopicArgs,
     feature_selections: &[Option<FeatureSelection>],
 ) -> anyhow::Result<Mat>
 where
     Enc: MultimodalEncoderModuleT + Send + Sync,
 {
-    let dev = match args.device {
-        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
-        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
-        _ => candle_core::Device::Cpu,
-    };
 
     let ntot = data_stack.num_columns()?;
     let kk = encoder.dim_latent();
@@ -537,37 +527,55 @@ where
                 Ok(delta
                     .posterior_mean()
                     .clone()
-                    .to_tensor(&dev)?
+                    .to_tensor(dev)?
                     .transpose(0, 1)?)
             })
             .transpose()
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let mut chunks = jobs
-        .par_iter()
-        .progress_count(njobs)
-        .map(|&block| match args.adj_method {
-            AdjMethod::Residual => evaluate_with_residuals(
-                block,
-                data_stack,
-                encoder,
-                &dev,
-                delta.as_ref(),
-                feature_selections,
-            ),
-            AdjMethod::Batch => evaluate_with_batch(
-                block,
-                data_stack,
-                encoder,
-                &dev,
-                delta.as_ref(),
-                feature_selections,
-            ),
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let eval_block = |&block: &(usize, usize)| match args.adj_method {
+        AdjMethod::Residual => evaluate_with_residuals(
+            block,
+            data_stack,
+            encoder,
+            dev,
+            delta.as_ref(),
+            feature_selections,
+        ),
+        AdjMethod::Batch => evaluate_with_batch(
+            block,
+            data_stack,
+            encoder,
+            dev,
+            delta.as_ref(),
+            feature_selections,
+        ),
+    };
 
-    chunks.par_sort_by_key(|&(lb, _)| lb);
+    // Metal/CUDA don't support parallel dispatch to the same device
+    let use_sequential = !dev.is_cpu();
+
+    let mut chunks: Vec<(usize, Mat)> = if use_sequential {
+        let pb = ProgressBar::new(njobs);
+        let result = jobs
+            .iter()
+            .map(|block| {
+                let r = eval_block(block);
+                pb.inc(1);
+                r
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        pb.finish_and_clear();
+        result
+    } else {
+        jobs.par_iter()
+            .progress_count(njobs)
+            .map(eval_block)
+            .collect::<anyhow::Result<Vec<_>>>()?
+    };
+
+    chunks.sort_by_key(|&(lb, _)| lb);
     let chunks = chunks.into_iter().map(|(_, z_nk)| z_nk).collect::<Vec<_>>();
 
     let mut ret = Mat::zeros(ntot, kk);
@@ -746,6 +754,7 @@ fn train_encoder_decoder<Enc, Dec>(
     encoder: &Enc,
     decoder: &Dec,
     parameters: &candle_nn::VarMap,
+    dev: &candle_core::Device,
     args: &JointTopicArgs,
     feature_selections: &[Option<FeatureSelection>],
 ) -> anyhow::Result<TrainScores>
@@ -753,11 +762,6 @@ where
     Enc: MultimodalEncoderModuleT,
     Dec: MultimodalDecoderModuleT,
 {
-    let dev = match args.device {
-        ComputeDevice::Metal => candle_core::Device::new_metal(0)?,
-        ComputeDevice::Cuda => candle_core::Device::new_cuda(0)?,
-        _ => candle_core::Device::Cpu,
-    };
 
     let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate as f64)?;
 
@@ -852,7 +856,7 @@ where
             let mut kl_tot = 0f32;
 
             for b in 0..data_loader.num_minibatch() {
-                let mb = data_loader.minibatch_shuffled(b, &dev)?;
+                let mb = data_loader.minibatch_shuffled(b, dev)?;
 
                 let (z_nk, kl) = encoder.forward_t(&mb.input, &mb.input_null, true)?;
 
