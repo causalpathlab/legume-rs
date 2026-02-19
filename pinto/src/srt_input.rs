@@ -1,4 +1,6 @@
+use crate::srt_cell_pairs::connected_components;
 use crate::srt_common::*;
+use crate::srt_knn_graph::KnnGraph;
 use data_beans::convert::try_open_or_convert;
 
 pub struct SRTReadArgs {
@@ -204,6 +206,28 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
         coordinate_names: coord_column_names,
         batches: batch_membership,
     })
+}
+
+/// Replace batch membership with connected component labels if the spatial
+/// graph has multiple disconnected components (e.g., tissue microarray cores).
+///
+/// Returns the number of components found.
+pub fn auto_batch_from_components(
+    graph: &KnnGraph,
+    batch_membership: &mut Vec<Box<str>>,
+) -> usize {
+    let (labels, n_components) = connected_components(graph);
+    if n_components > 1 {
+        *batch_membership = labels
+            .iter()
+            .map(|l| format!("cc_{l}").into_boxed_str())
+            .collect();
+        info!(
+            "Auto-detected {} spatial components as batches",
+            n_components
+        );
+    }
+    n_components
 }
 
 /// Auto-detect whether the first line of a delimited file is a header row
