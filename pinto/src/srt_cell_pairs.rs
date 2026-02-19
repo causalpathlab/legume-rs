@@ -1,7 +1,9 @@
 use crate::srt_common::*;
 use crate::srt_knn_graph::{KnnGraph, KnnGraphArgs};
+use dashmap::DashMap;
 use matrix_util::parquet::*;
 use matrix_util::utils::generate_minibatch_intervals;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use parquet::basic::Type as ParquetType;
 
@@ -198,6 +200,25 @@ impl<'a> SrtCellPairs<'a> {
         self.coordinates.ncols()
     }
 
+    /// Wrap a pre-built KNN graph with data and coordinates.
+    pub fn with_graph(
+        data: &'a SparseIoVec,
+        coordinates: &'a Mat,
+        graph: KnnGraph,
+    ) -> SrtCellPairs<'a> {
+        let pairs = graph
+            .edges
+            .iter()
+            .map(|&(i, j)| Pair { left: i, right: j })
+            .collect::<Vec<_>>();
+        SrtCellPairs {
+            data,
+            coordinates,
+            graph,
+            pairs,
+        }
+    }
+
     ///
     /// Create a thin wrapper for cell pairs
     ///
@@ -240,5 +261,126 @@ impl<'a> SrtCellPairs<'a> {
             graph,
             pairs,
         })
+    }
+}
+
+/// Build a spatial KNN graph from coordinate matrix.
+pub fn build_spatial_graph(
+    coordinates: &Mat,
+    args: SrtCellPairsArgs,
+) -> anyhow::Result<KnnGraph> {
+    let points = coordinates.transpose();
+    KnnGraph::from_columns(
+        &points,
+        KnnGraphArgs {
+            knn: args.knn,
+            block_size: args.block_size,
+            reciprocal: false,
+        },
+    )
+}
+
+/// Find connected components of a KNN graph.
+///
+/// Returns `(labels, n_components)` where `labels[i]` is the component index
+/// of node `i`. Uses Union-Find for edge processing, then DashMap for parallel
+/// label compaction.
+pub fn connected_components(graph: &KnnGraph) -> (Vec<usize>, usize) {
+    let n = graph.n_nodes;
+
+    // Union-Find with path halving and union by rank
+    let mut parent: Vec<usize> = (0..n).collect();
+    let mut rank: Vec<usize> = vec![0; n];
+
+    let find = |parent: &mut Vec<usize>, mut x: usize| -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    };
+
+    for &(i, j) in &graph.edges {
+        let ri = find(&mut parent, i);
+        let rj = find(&mut parent, j);
+        if ri != rj {
+            let (big, small) = if rank[ri] >= rank[rj] {
+                (ri, rj)
+            } else {
+                (rj, ri)
+            };
+            parent[small] = big;
+            if rank[big] == rank[small] {
+                rank[big] += 1;
+            }
+        }
+    }
+
+    // Resolve all roots (serial, since find mutates)
+    let roots: Vec<usize> = (0..n).map(|i| find(&mut parent, i)).collect();
+
+    // Parallel label compaction with DashMap
+    let rep_to_label = DashMap::new();
+    let next = AtomicUsize::new(0);
+    let labels: Vec<usize> = roots
+        .par_iter()
+        .map(|&r| {
+            *rep_to_label
+                .entry(r)
+                .or_insert_with(|| next.fetch_add(1, AtomicOrdering::Relaxed))
+        })
+        .collect();
+
+    (labels, next.load(AtomicOrdering::Relaxed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra_sparse::{CooMatrix, CscMatrix};
+
+    fn make_test_graph(n_nodes: usize, edges: Vec<(usize, usize)>) -> KnnGraph {
+        let distances = vec![1.0; edges.len()];
+        let mut coo = CooMatrix::new(n_nodes, n_nodes);
+        for &(i, j) in &edges {
+            coo.push(i, j, 1.0f32);
+            coo.push(j, i, 1.0f32);
+        }
+        let adjacency = CscMatrix::from(&coo);
+        KnnGraph {
+            adjacency,
+            edges,
+            distances,
+            n_nodes,
+        }
+    }
+
+    #[test]
+    fn test_connected_components_single() {
+        let graph = make_test_graph(5, vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
+        let (labels, n_components) = connected_components(&graph);
+        assert_eq!(n_components, 1);
+        assert!(labels.iter().all(|&l| l == labels[0]));
+    }
+
+    #[test]
+    fn test_connected_components_two_cliques() {
+        let graph = make_test_graph(6, vec![(0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5)]);
+        let (labels, n_components) = connected_components(&graph);
+        assert_eq!(n_components, 2);
+        assert_eq!(labels[0], labels[1]);
+        assert_eq!(labels[0], labels[2]);
+        assert_eq!(labels[3], labels[4]);
+        assert_eq!(labels[3], labels[5]);
+        assert_ne!(labels[0], labels[3]);
+    }
+
+    #[test]
+    fn test_connected_components_isolates() {
+        let graph = make_test_graph(4, vec![]);
+        let (labels, n_components) = connected_components(&graph);
+        assert_eq!(n_components, 4);
+        let unique: HashSet<usize> = labels.iter().cloned().collect();
+        assert_eq!(unique.len(), 4);
     }
 }
