@@ -10,7 +10,9 @@ mod fit_joint_topic;
 mod fit_knn_regression;
 mod fit_svd;
 mod fit_topic;
+
 mod fit_visualize;
+mod tree_topic_decoder;
 mod interactive_markers;
 mod senna_input;
 mod visualization_alg;
@@ -24,6 +26,7 @@ use fit_joint_topic::*;
 use fit_knn_regression::*;
 use fit_svd::*;
 use fit_topic::*;
+
 use fit_visualize::*;
 
 use colored::Colorize;
@@ -199,6 +202,7 @@ fn main() -> anyhow::Result<()> {
         Commands::JointTopic(args) => {
             fit_joint_topic_model(args)?;
         }
+
         Commands::AnnotateTopic(args) => {
             annotate_topics(args)?;
         }

@@ -20,7 +20,7 @@ use indicatif::ProgressBar;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
-enum ComputeDevice {
+pub(crate) enum ComputeDevice {
     Cpu,
     Cuda,
     Metal,
@@ -28,7 +28,7 @@ enum ComputeDevice {
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
-enum AdjMethod {
+pub(crate) enum AdjMethod {
     Batch,
     Residual,
 }
@@ -657,7 +657,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         &encoder,
         finest_collapsed,
         &dev,
-        args,
+        &args.adj_method,
+        args.minibatch_size,
         selected_features.as_ref(),
     )?;
 
@@ -689,13 +690,13 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 // training routines //
 ///////////////////////
 
-struct TrainScores {
-    llik: Vec<f32>,
-    kl: Vec<f32>,
+pub(crate) struct TrainScores {
+    pub(crate) llik: Vec<f32>,
+    pub(crate) kl: Vec<f32>,
 }
 
 impl TrainScores {
-    fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
+    pub(crate) fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
         let mat = Mat::from_columns(&[
             DVec::from_vec(self.llik.clone()),
             DVec::from_vec(self.kl.clone()),
@@ -907,12 +908,13 @@ where
     })
 }
 
-fn evaluate_latent_by_encoder<Enc>(
+pub(crate) fn evaluate_latent_by_encoder<Enc>(
     data_vec: &SparseIoVec,
     encoder: &Enc,
     collapsed: &CollapsedOut,
     dev: &Device,
-    args: &TopicArgs,
+    adj_method: &AdjMethod,
+    minibatch_size: usize,
     feature_selection: Option<&FeatureSelection>,
 ) -> anyhow::Result<Mat>
 where
@@ -921,11 +923,11 @@ where
     let ntot = data_vec.num_columns();
     let kk = encoder.dim_latent();
 
-    let block_size = args.minibatch_size;
+    let block_size = minibatch_size;
 
     let jobs = create_jobs(ntot, Some(block_size));
     let njobs = jobs.len() as u64;
-    let delta = match args.adj_method {
+    let delta = match adj_method {
         AdjMethod::Batch => collapsed.delta.as_ref(),
         AdjMethod::Residual => collapsed.mu_residual.as_ref(),
     }
@@ -946,7 +948,7 @@ where
 
     let eval_block =
         |block| -> anyhow::Result<(usize, Mat)> {
-            match args.adj_method {
+            match adj_method {
                 AdjMethod::Residual => evaluate_with_residuals(
                     block, data_vec, encoder, dev, delta.as_ref(), feature_selection,
                 ),
@@ -989,7 +991,7 @@ where
     Ok(ret)
 }
 
-fn evaluate_with_batch<Enc>(
+pub(crate) fn evaluate_with_batch<Enc>(
     block: (usize, usize),
     data_vec: &SparseIoVec,
     encoder: &Enc,
@@ -1025,7 +1027,7 @@ where
     Ok((lb, Mat::from_tensor(&z_nk)?))
 }
 
-fn evaluate_with_residuals<Enc>(
+pub(crate) fn evaluate_with_residuals<Enc>(
     block: (usize, usize),
     data_vec: &SparseIoVec,
     encoder: &Enc,
