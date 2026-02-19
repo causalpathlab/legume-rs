@@ -1,7 +1,6 @@
 use crate::srt_common::*;
 use crate::srt_knn_graph::KnnGraph;
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 
 #[derive(Clone)]
 struct CoarsenLevelResult {
@@ -54,34 +53,10 @@ impl UnionFind {
         }
         big
     }
-}
 
-/// A candidate merge for the priority queue (max-heap by similarity).
-struct MergeCandidate {
-    similarity: f32,
-    node_a: usize,
-    node_b: usize,
-}
-
-impl PartialEq for MergeCandidate {
-    fn eq(&self, other: &Self) -> bool {
-        self.similarity == other.similarity
-    }
-}
-
-impl Eq for MergeCandidate {}
-
-impl PartialOrd for MergeCandidate {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for MergeCandidate {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.similarity
-            .partial_cmp(&other.similarity)
-            .unwrap_or(Ordering::Equal)
+    #[inline]
+    fn is_root(&self, x: usize) -> bool {
+        self.parent[x] == x
     }
 }
 
@@ -122,11 +97,13 @@ fn dot_columns(features: &Mat, a: usize, b: usize) -> f32 {
     s
 }
 
-/// Graph-constrained agglomerative coarsening.
+/// Parallel graph-constrained agglomerative coarsening.
 ///
-/// Merges cells along KNN graph edges, prioritized by cosine similarity
-/// of their projected feature vectors. Produces a full dendrogram that
-/// can be cut at any level.
+/// Uses a Leiden-style parallel sweep strategy:
+/// 1. Each active root finds its best neighbor by cosine similarity (parallel)
+/// 2. Greedy matching accepts non-conflicting merges sorted by similarity
+/// 3. Batch-apply merges: update Union-Find, features, adjacency
+/// 4. Repeat until no more merges possible
 ///
 /// * `graph` - spatial KNN graph
 /// * `cell_features` - `[proj_dim × n_cells]` matrix, mutated for centroid updates
@@ -134,28 +111,18 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
     let n = graph.n_nodes;
     let dim = cell_features.nrows();
 
-    // L2-normalize all feature columns in-place
+    // L2-normalize all feature columns
     for i in 0..n {
         normalize_column_inplace(cell_features, i);
     }
 
     let mut uf = UnionFind::new(n);
 
-    // Build adjacency lists and initial heap
+    // Build adjacency lists
     let mut adj: Vec<HashSet<usize>> = vec![HashSet::new(); n];
-    let mut heap = BinaryHeap::new();
-
     for &(i, j) in &graph.edges {
         adj[i].insert(j);
         adj[j].insert(i);
-        let sim = dot_columns(cell_features, i, j);
-        if sim.is_finite() {
-            heap.push(MergeCandidate {
-                similarity: sim,
-                node_a: i,
-                node_b: j,
-            });
-        }
     }
 
     let max_merges = n.saturating_sub(1);
@@ -166,67 +133,106 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
         "Coarsening {bar:40} {pos}/{len} merges ({eta})",
     );
 
-    while let Some(candidate) = heap.pop() {
-        let ra = uf.find(candidate.node_a);
-        let rb = uf.find(candidate.node_b);
-        if ra == rb {
-            continue;
+    let mut n_rounds = 0u32;
+
+    loop {
+        // Collect active roots with at least one neighbor
+        let active_roots: Vec<usize> = (0..n)
+            .filter(|&i| uf.is_root(i) && !adj[i].is_empty())
+            .collect();
+
+        if active_roots.is_empty() {
+            break;
         }
 
-        merges.push((ra, rb));
-        pb.inc(1);
+        // Parallel: each root finds its best neighbor by cosine similarity.
+        // Uses read-only find (no path compression) so &uf is safely shared.
+        let features_ref = &*cell_features;
+        let adj_ref = &adj;
+        let uf_ref = &uf;
 
-        // Weighted average of feature vectors — in-place, zero allocation
-        let size_a = uf.size[ra] as f32;
-        let size_b = uf.size[rb] as f32;
-        let total = size_a + size_b;
+        let proposals: Vec<(usize, usize, f32)> = active_roots
+            .par_iter()
+            .filter_map(|&i| {
+                let mut best_j = 0usize;
+                let mut best_sim = f32::NEG_INFINITY;
+                for &j in &adj_ref[i] {
+                    debug_assert!(uf_ref.is_root(j));
+                    let sim = dot_columns(features_ref, i, j);
+                    if sim > best_sim || (sim == best_sim && j < best_j) {
+                        best_sim = sim;
+                        best_j = j;
+                    }
+                }
+                best_sim
+                    .is_finite()
+                    .then_some((i, best_j, best_sim))
+            })
+            .collect();
 
-        let new_rep = uf.union(ra, rb);
-        let absorbed = if new_rep == ra { rb } else { ra };
+        // Sort by similarity descending for greedy matching
+        let mut sorted = proposals;
+        sorted.sort_unstable_by(|a, b| {
+            b.2.partial_cmp(&a.2).unwrap_or(Ordering::Equal)
+        });
 
-        // Weighted average: feat[ra] * size_a + feat[rb] * size_b
-        // Use ra/rb directly since union doesn't move column data.
-        for r in 0..dim {
-            cell_features[(r, new_rep)] =
-                (cell_features[(r, ra)] * size_a + cell_features[(r, rb)] * size_b) / total;
-        }
+        // Greedy matching: accept merges where neither endpoint is already taken
+        let mut taken = vec![false; n];
+        let mut round_merges: Vec<(usize, usize)> = Vec::new();
 
-        normalize_column_inplace(cell_features, new_rep);
-
-        // Merge adjacency: take absorbed's set (frees its allocation)
-        let absorbed_neighbors = std::mem::take(&mut adj[absorbed]);
-        for &c in &absorbed_neighbors {
-            adj[c].remove(&absorbed);
-            if c != new_rep {
-                adj[c].insert(new_rep);
-                adj[new_rep].insert(c);
+        for (a, b, _) in sorted {
+            if !taken[a] && !taken[b] {
+                taken[a] = true;
+                taken[b] = true;
+                round_merges.push((a, b));
             }
         }
-        drop(absorbed_neighbors);
-        adj[new_rep].remove(&absorbed);
-        adj[new_rep].remove(&new_rep);
 
-        // Push new edges for merged node — stale check on pop handles duplicates
-        for &c in &adj[new_rep] {
-            let rc = uf.find(c);
-            if rc != new_rep {
-                let sim = dot_columns(cell_features, new_rep, rc);
-                if sim.is_finite() {
-                    heap.push(MergeCandidate {
-                        similarity: sim,
-                        node_a: new_rep,
-                        node_b: rc,
-                    });
+        if round_merges.is_empty() {
+            break;
+        }
+
+        // Apply merges: update UF, features, adjacency
+        for &(a, b) in &round_merges {
+            merges.push((a, b));
+            pb.inc(1);
+
+            let size_a = uf.size[a] as f32;
+            let size_b = uf.size[b] as f32;
+            let total = size_a + size_b;
+
+            let new_rep = uf.union(a, b);
+            let absorbed = if new_rep == a { b } else { a };
+
+            // Weighted average of feature vectors
+            for r in 0..dim {
+                cell_features[(r, new_rep)] =
+                    (cell_features[(r, a)] * size_a + cell_features[(r, b)] * size_b) / total;
+            }
+            normalize_column_inplace(cell_features, new_rep);
+
+            // Merge adjacency
+            let absorbed_neighbors = std::mem::take(&mut adj[absorbed]);
+            for c in absorbed_neighbors {
+                adj[c].remove(&absorbed);
+                if c != new_rep {
+                    adj[c].insert(new_rep);
+                    adj[new_rep].insert(c);
                 }
             }
+            adj[new_rep].remove(&absorbed);
+            adj[new_rep].remove(&new_rep);
         }
+
+        n_rounds += 1;
     }
 
     pb.finish_and_clear();
     info!(
-        "Graph coarsening: {} nodes, {} merges recorded",
+        "Graph coarsening: {} nodes, {} merges in {} rounds",
         n,
-        merges.len()
+        merges.len(),
+        n_rounds
     );
 
     CoarsenResult { merges, n_nodes: n }
