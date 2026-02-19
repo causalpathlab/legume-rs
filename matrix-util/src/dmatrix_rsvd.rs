@@ -3,6 +3,17 @@ use nalgebra::LU;
 use nalgebra::{DMatrix, DVector};
 use nalgebra_sparse::{csc::CscMatrix, csr::CsrMatrix};
 
+/// Compute the Nystrom basis: `U * diag(1 / (s + eps))`.
+///
+/// Given the left singular vectors `u` and singular values `s` from an SVD,
+/// returns the pseudo-inverted projection matrix used for out-of-sample
+/// Nystrom extension.
+pub fn nystrom_basis(u: &DMatrix<f32>, s: &DVector<f32>) -> DMatrix<f32> {
+    let eps = 1e-8;
+    let sinv = DVector::from_iterator(s.len(), s.iter().map(|&si| 1.0 / (si + eps)));
+    u * DMatrix::from_diagonal(&sinv)
+}
+
 trait IntoDense<OutMat> {
     fn matmul(&self, other: &OutMat) -> OutMat;
     fn transpose_matmul(&self, other: &OutMat) -> OutMat;

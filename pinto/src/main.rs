@@ -71,12 +71,12 @@ fn print_logo() {
                   WORKFLOWS:\n\n\
                   1. SVD-based cell-level analysis (shared/difference channels):\n\
                      pinto dsvd data.zarr -c coords.csv -o out\n\
-                     pinto prop -z out.latent.parquet -e out.coord_pairs.parquet -o out\n\
-                     → Outputs: cell propensity scores, edge clusters\n\n\
+                     → Outputs: propensity, edge clusters, gene-topic stats\n\
+                     (prop subcommand only for different K or coord embed)\n\n\
                   2. SVD-based gene-gene interaction analysis:\n\
                      pinto gisvd data.zarr -c coords.csv -o out\n\
-                     pinto prop -z out.latent.parquet -e out.coord_pairs.parquet -o out\n\
-                     → Outputs: gene-pair graph, cell propensity scores\n\n\
+                     → Outputs: gene-pair graph, propensity, edge clusters\n\
+                     (prop subcommand only for different K or coord embed)\n\n\
                   3. Link community model (gene module-based, standalone):\n\
                      pinto lc data.zarr -c coords.csv -k 20 -o out\n\
                      → Outputs: link communities, cell propensity, gene modules\n\n\
@@ -129,8 +129,10 @@ enum Commands {
                       Outputs:\n\
                       - {out}.delta.parquet: batch effects (when multi-batch)\n\
                       - {out}.coord_pairs.parquet: spatial cell pair coordinates\n\
-                      - {out}.dictionary.parquet: SVD dictionary (2G x T)\n\
-                      - {out}.latent.parquet: per-pair latent codes (E x T)"
+                      - {out}.basis.parquet: SVD basis (2G x T)\n\
+                      - {out}.latent.parquet: per-pair latent codes (E x T)\n\
+                      - {out}.propensity.parquet: cell propensity (N x K)\n\
+                      - {out}.gene_topic.parquet: gene-topic Poisson-Gamma statistics (G x K)"
     )]
     DeltaSvd(SrtDeltaSvdArgs),
 
@@ -169,16 +171,22 @@ enum Commands {
                       Outputs:\n\
                       - {out}.coord_pairs.parquet: spatial cell pair coords\n\
                       - {out}.gene_graph.parquet: gene-gene graph edges\n\
-                      - {out}.dictionary.parquet: SVD dictionary (n_edges x T)\n\
-                      - {out}.latent.parquet: per-pair latent codes (E x T)"
+                      - {out}.basis.parquet: SVD basis (n_edges x T)\n\
+                      - {out}.latent.parquet: per-pair latent codes (E x T)\n\
+                      - {out}.propensity.parquet: cell propensity (N x K)\n\
+                      - {out}.gene_topic.parquet: gene-topic Poisson-Gamma statistics (G x K)"
     )]
     GenePairDeltaSvd(SrtGenePairSvdArgs),
 
     #[command(
         alias = "prop",
-        about = "Estimate vertex propensity from edge clusters",
+        about = "Estimate vertex propensity from edge clusters (standalone)",
         long_about = "Estimate vertex (cell) propensity scores from edge\n\
                       (cell-pair) cluster assignments.\n\n\
+                      NOTE: dsvd and gisvd now produce propensity and edge\n\
+                      cluster outputs inline. Use this subcommand only when\n\
+                      you need a different K, coordinate embedding, or\n\
+                      separate expression data.\n\n\
                       Model:\n\
                       \x20 Given latent codes z_e [E x T] from delta-svd or\n\
                       \x20 gene-pair-delta-svd:\n\

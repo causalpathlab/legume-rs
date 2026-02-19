@@ -265,10 +265,7 @@ impl<'a> SrtCellPairs<'a> {
 }
 
 /// Build a spatial KNN graph from coordinate matrix.
-pub fn build_spatial_graph(
-    coordinates: &Mat,
-    args: SrtCellPairsArgs,
-) -> anyhow::Result<KnnGraph> {
+pub fn build_spatial_graph(coordinates: &Mat, args: SrtCellPairsArgs) -> anyhow::Result<KnnGraph> {
     let points = coordinates.transpose();
     KnnGraph::from_columns(
         &points,

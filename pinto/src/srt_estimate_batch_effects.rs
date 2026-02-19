@@ -45,6 +45,8 @@ use crate::srt_common::*;
 use data_beans_alg::collapse_data::*;
 use data_beans_alg::random_projection::*;
 use matrix_param::dmatrix_gamma::GammaMatrix;
+use matrix_param::io::ParamIo;
+use matrix_param::traits::Inference;
 
 pub struct EstimateBatchArgs {
     pub proj_dim: usize,
@@ -91,4 +93,40 @@ pub fn estimate_batch(
     )?;
 
     Ok(collapse_out.delta)
+}
+
+/// Estimate batch effects and write them to parquet.
+///
+/// Skips estimation when fewer than 2 batches are present.
+/// Returns the posterior mean matrix `[n_genes × n_batches]` when
+/// multi-batch, or `None` for single-batch.
+pub fn estimate_and_write_batch_effects(
+    data_vec: &mut SparseIoVec,
+    batch_membership: &[Box<str>],
+    args: EstimateBatchArgs,
+    out_prefix: &str,
+) -> anyhow::Result<Option<Mat>> {
+    let uniq_batches: HashSet<&Box<str>> = batch_membership.iter().collect();
+    let n_batches = uniq_batches.len();
+    drop(uniq_batches);
+
+    if n_batches < 2 {
+        return Ok(None);
+    }
+
+    info!("Estimating batch effects ({} batches)...", n_batches);
+    let batch_effects = estimate_batch(data_vec, batch_membership, args)?;
+
+    if let Some(batch_db) = batch_effects.as_ref() {
+        let outfile = out_prefix.to_string() + ".delta.parquet";
+        let batch_names = data_vec.batch_names();
+        let gene_names = data_vec.row_names()?;
+        batch_db.to_parquet_with_names(
+            &outfile,
+            (Some(&gene_names), Some("gene")),
+            batch_names.as_deref(),
+        )?;
+    }
+
+    Ok(batch_effects.map(|x| x.posterior_mean().clone()))
 }
