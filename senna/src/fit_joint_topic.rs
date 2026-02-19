@@ -13,6 +13,7 @@ use candle_util::candle_loss_functions::topic_likelihood;
 use candle_util::candle_model_traits::*;
 use indicatif::{ParallelProgressIterator, ProgressBar};
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -376,7 +377,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     // 3. Batch-adjusted multilevel collapsing (pseudobulk)
     info!("Multi-level collapsing across {} modalities ...", data_stack.num_types());
 
-    let collapsed_data_vec: Vec<CollapsedOut> = data_stack.collapse_columns_multilevel(
+    let collapsed_levels: Vec<Vec<CollapsedOut>> = data_stack.collapse_columns_multilevel_vec(
         &proj_kn,
         batch_stack[0].as_ref(),
         &MultilevelParams {
@@ -387,7 +388,25 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         },
     )?;
 
-    // 4. Train a joint topic model on the collapsed data
+    // For delta output, n_features, and latent evaluation, use the finest level
+    let collapsed_data_vec = collapsed_levels.last().unwrap();
+
+    // 4. output batch effect information
+    for (d, collapsed) in collapsed_data_vec.iter().enumerate() {
+        if let Some(batch_db) = &collapsed.delta {
+            let outfile = format!("{}_{}.delta.parquet", args.out, d);
+            let data_vec = &data_stack.stack[d];
+            let batch_names = data_vec.batch_names();
+            let gene_names = data_vec.row_names()?;
+            batch_db.to_parquet_with_names(
+                &outfile,
+                (Some(&gene_names), Some("gene")),
+                batch_names.as_deref(),
+            )?;
+        }
+    }
+
+    // 5. Train a joint topic model on the collapsed data (progressive)
     let n_topics = args.n_latent_topics;
     let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
 
@@ -428,14 +447,26 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         param_builder.clone(),
     )?;
 
-    let scores = train_encoder_decoder(
-        &collapsed_data_vec,
+    // Set up graceful stop flag for SIGINT/SIGTERM
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        ctrlc::set_handler(move || {
+            info!("Interrupt received — stopping training early and saving results...");
+            stop.store(true, Ordering::SeqCst);
+        })
+        .expect("failed to set signal handler");
+    }
+
+    let scores = train_encoder_decoder_progressive(
+        &collapsed_levels,
         &encoder,
         &decoder,
         &parameters,
         &dev,
         args,
         &feature_selections,
+        &stop,
     )?;
 
     info!("Writing down the model parameters");
@@ -749,141 +780,199 @@ impl TrainScores {
     }
 }
 
-fn train_encoder_decoder<Enc, Dec>(
-    collapsed_data_vec: &[CollapsedOut],
+/// Progressive multi-level training: coarse levels get more epochs for
+/// warm start, finer levels for fine-tuning.
+/// Epoch allocation: level `i` gets `total_epochs * (num_levels - i) / sum(1..=num_levels)`.
+fn train_encoder_decoder_progressive<Enc, Dec>(
+    collapsed_levels: &[Vec<CollapsedOut>],
     encoder: &Enc,
     decoder: &Dec,
     parameters: &candle_nn::VarMap,
     dev: &candle_core::Device,
     args: &JointTopicArgs,
     feature_selections: &[Option<FeatureSelection>],
+    stop: &AtomicBool,
 ) -> anyhow::Result<TrainScores>
 where
     Enc: MultimodalEncoderModuleT,
     Dec: MultimodalDecoderModuleT,
 {
+    let num_levels = collapsed_levels.len();
+    let total_epochs = args.epochs;
+
+    // Compute per-level epoch allocation: w[i] = num_levels - i
+    let total_weight: usize = (1..=num_levels).sum();
+    let level_epochs: Vec<usize> = (0..num_levels)
+        .map(|i| {
+            let w = num_levels - i;
+            (total_epochs * w / total_weight).max(1)
+        })
+        .collect();
+
+    info!(
+        "Progressive training: {} levels, epoch allocation: {:?} (total {})",
+        num_levels,
+        level_epochs,
+        level_epochs.iter().sum::<usize>()
+    );
 
     let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate as f64)?;
 
-    let pb = ProgressBar::new(args.epochs as u64);
+    let total_actual_epochs: usize = level_epochs.iter().sum();
+    let pb = ProgressBar::new(total_actual_epochs as u64);
 
-    let mut llik_trace = Vec::with_capacity(args.epochs);
-    let mut kl_trace = Vec::with_capacity(args.epochs);
+    let mut llik_trace = Vec::with_capacity(total_actual_epochs);
+    let mut kl_trace = Vec::with_capacity(total_actual_epochs);
+    let mut global_epoch: usize = 0;
 
-    info!("Start training VAE...");
+    for (level, (collapsed_data_vec, &level_ep)) in
+        collapsed_levels.iter().zip(level_epochs.iter()).enumerate()
+    {
+        info!(
+            "Level {}/{}: {} epochs, {} samples",
+            level + 1,
+            num_levels,
+            level_ep,
+            collapsed_data_vec[0].mu_observed.ncols(),
+        );
 
-    for epoch in (0..args.epochs).step_by(args.jitter_interval) {
-        //////////////////////////////////////////
-        // every jitter interval, resample data //
-        //////////////////////////////////////////
+        for epoch in (0..level_ep).step_by(args.jitter_interval) {
+            //////////////////////////////////////////
+            // every jitter interval, resample data //
+            //////////////////////////////////////////
 
-        let input = collapsed_data_vec
-            .iter()
-            .zip(feature_selections)
-            .map(|(x, sel)| -> anyhow::Result<Mat> {
-                let mat = x
-                    .mu_observed
-                    .posterior_sample()?
-                    .sum_to_one_columns()
-                    .scale(args.column_sum_norm);
-                let mat = if let Some(sel) = sel {
-                    mat.select_rows(&sel.selected_indices)
-                } else {
-                    mat
-                };
-                Ok(mat.transpose())
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            let input = collapsed_data_vec
+                .iter()
+                .zip(feature_selections)
+                .map(|(x, sel)| -> anyhow::Result<Mat> {
+                    let mat = x
+                        .mu_observed
+                        .posterior_sample()?
+                        .sum_to_one_columns()
+                        .scale(args.column_sum_norm);
+                    let mat = if let Some(sel) = sel {
+                        mat.select_rows(&sel.selected_indices)
+                    } else {
+                        mat
+                    };
+                    Ok(mat.transpose())
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
 
-        let input_null = collapsed_data_vec
-            .iter()
-            .zip(feature_selections)
-            .map(|(x, sel)| -> anyhow::Result<Option<Mat>> {
-                x.mu_residual
-                    .as_ref()
-                    .map(|y| {
-                        let mat = y.posterior_sample()?;
-                        let mat = if let Some(sel) = sel {
-                            mat.select_rows(&sel.selected_indices)
-                        } else {
-                            mat
-                        };
-                        Ok(mat.transpose())
-                    })
-                    .transpose()
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            let input_null = collapsed_data_vec
+                .iter()
+                .zip(feature_selections)
+                .map(|(x, sel)| -> anyhow::Result<Option<Mat>> {
+                    x.mu_residual
+                        .as_ref()
+                        .map(|y| {
+                            let mat = y.posterior_sample()?;
+                            let mat = if let Some(sel) = sel {
+                                mat.select_rows(&sel.selected_indices)
+                            } else {
+                                mat
+                            };
+                            Ok(mat.transpose())
+                        })
+                        .transpose()
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
 
-        let output = collapsed_data_vec
-            .iter()
-            .zip(feature_selections)
-            .map(|(x, sel)| -> anyhow::Result<Option<Mat>> {
-                Ok(x.mu_adjusted
-                    .as_ref()
-                    .map(|y| y.posterior_sample())
-                    .transpose()?
-                    .map(|y| {
-                        let mat = y.sum_to_one_columns().scale(args.column_sum_norm);
-                        let mat = if let Some(sel) = sel {
-                            mat.select_rows(&sel.selected_indices)
-                        } else {
-                            mat
-                        };
-                        mat.transpose()
-                    }))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            let output = collapsed_data_vec
+                .iter()
+                .zip(feature_selections)
+                .map(|(x, sel)| -> anyhow::Result<Option<Mat>> {
+                    Ok(x.mu_adjusted
+                        .as_ref()
+                        .map(|y| y.posterior_sample())
+                        .transpose()?
+                        .map(|y| {
+                            let mat = y.sum_to_one_columns().scale(args.column_sum_norm);
+                            let mat = if let Some(sel) = sel {
+                                mat.select_rows(&sel.selected_indices)
+                            } else {
+                                mat
+                            };
+                            mat.transpose()
+                        }))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
 
-        let mut data_loader = JointInMemoryData::from(JointInMemoryArgs {
-            input: &input,
-            input_null: &input_null,
-            output: &output,
-            output_null: &vec![None; input.len()],
-        })?;
+            let mut data_loader = JointInMemoryData::from(JointInMemoryArgs {
+                input: &input,
+                input_null: &input_null,
+                output: &output,
+                output_null: &vec![None; input.len()],
+            })?;
 
-        data_loader.shuffle_minibatch(args.minibatch_size)?;
+            data_loader.shuffle_minibatch(args.minibatch_size)?;
 
-        // KL annealing (standard warm-up): kl_weight = 1 - exp(-epoch / warmup)
-        // Starts at 0, increases to 1 as training progresses
-        let kl_weight = if args.kl_warmup_epochs > 0.0 {
-            1.0 - (-(epoch as f64) / args.kl_warmup_epochs).exp()
-        } else {
-            1.0
-        };
+            let kl_weight = if args.kl_warmup_epochs > 0.0 {
+                1.0 - (-(global_epoch as f64) / args.kl_warmup_epochs).exp()
+            } else {
+                1.0
+            };
 
-        for jitter in 0..args.jitter_interval {
-            let mut llik_tot = 0f32;
-            let mut kl_tot = 0f32;
+            let jitter_end = args.jitter_interval.min(level_ep - epoch);
+            for jitter in 0..jitter_end {
+                let mut llik_tot = 0f32;
+                let mut kl_tot = 0f32;
 
-            for b in 0..data_loader.num_minibatch() {
-                let mb = data_loader.minibatch_shuffled(b, dev)?;
+                for b in 0..data_loader.num_minibatch() {
+                    let mb = data_loader.minibatch_shuffled(b, dev)?;
 
-                let (z_nk, kl) = encoder.forward_t(&mb.input, &mb.input_null, true)?;
+                    let (z_nk, kl) = encoder.forward_t(&mb.input, &mb.input_null, true)?;
 
-                let y_vec = mb
-                    .output
-                    .into_iter()
-                    .zip(mb.input)
-                    .map(|(y, x)| y.unwrap_or(x))
-                    .collect::<Vec<_>>();
+                    let y_vec = mb
+                        .output
+                        .into_iter()
+                        .zip(mb.input)
+                        .map(|(y, x)| y.unwrap_or(x))
+                        .collect::<Vec<_>>();
 
-                let (_, llik) = decoder.forward_with_llik(&z_nk, &y_vec, &topic_likelihood)?;
+                    let (_, llik) =
+                        decoder.forward_with_llik(&z_nk, &y_vec, &topic_likelihood)?;
 
-                let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
-                adam.backward_step(&loss)?;
+                    let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
+                    adam.backward_step(&loss)?;
 
-                let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
-                let kl_val = kl.sum_all()?.to_scalar::<f32>()?;
-                llik_tot += llik_val;
-                kl_tot += kl_val;
+                    let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
+                    let kl_val = kl.sum_all()?.to_scalar::<f32>()?;
+                    llik_tot += llik_val;
+                    kl_tot += kl_val;
+                }
+
+                let n_mb = data_loader.num_minibatch() as f32;
+                kl_trace.push(kl_tot / n_mb);
+                llik_trace.push(llik_tot / n_mb);
+
+                pb.inc(1);
+                global_epoch += 1;
+
+                info!(
+                    "[level {}/{}][{}][{}] {} {}",
+                    level + 1,
+                    num_levels,
+                    epoch,
+                    jitter,
+                    llik_tot / n_mb,
+                    kl_tot / n_mb
+                );
+
+                if stop.load(Ordering::SeqCst) {
+                    pb.finish_and_clear();
+                    info!(
+                        "Stopping training early at level {}/{}, epoch {}",
+                        level + 1,
+                        num_levels,
+                        epoch
+                    );
+                    return Ok(TrainScores {
+                        llik: llik_trace,
+                        kl: kl_trace,
+                    });
+                }
             }
-
-            kl_trace.push(kl_tot / data_loader.num_minibatch() as f32);
-            llik_trace.push(llik_tot / data_loader.num_minibatch() as f32);
-
-            pb.inc(1);
-
-            info!("[{}][{}] {} {}", epoch, jitter, llik_tot, kl_tot);
         }
     }
     pb.finish_and_clear();
