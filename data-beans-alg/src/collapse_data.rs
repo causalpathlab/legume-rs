@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use data_beans::sparse_data_visitors::*;
+use data_beans::sparse_io_stack::SparseIoStack;
 use data_beans::sparse_io_vector::SparseIoVec;
 use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
 use log::{info, warn};
@@ -556,21 +557,29 @@ impl CollapsedStat {
 const DEFAULT_NUM_LEVELS: usize = 2;
 const DEFAULT_COARSEST_SORT_DIM: usize = 4;
 
-/// Pre-aggregated super-cell data for fast cross-batch matching.
-/// Each super-cell is the intersection of a (batch, sample) pair.
-pub struct SuperCellCollection {
+/// Shared layout for super-cells (batch × group intersections).
+/// Reusable across multiple layers in a `SparseIoStack`.
+pub struct SuperCellLayout {
     /// Centroid matrix: proj_dim x num_super_cells
     pub centroids: DMatrix<f32>,
-    /// Sparse gene sums per super-cell: Vec of (gene_index, sum)
-    pub gene_sums: Vec<Vec<(usize, f32)>>,
     /// Number of cells in each super-cell
     pub cell_counts: Vec<f32>,
     /// Batch index for each super-cell
     pub super_cell_to_batch: Vec<usize>,
     /// Sample/group index for each super-cell
     pub super_cell_to_group: Vec<usize>,
+    /// Maps (batch, group) → super-cell index
+    pub bg_to_sc: HashMap<(usize, usize), usize>,
     /// HNSW index built on super-cell centroids
     pub knn_lookup: ColumnDict<usize>,
+}
+
+/// Pre-aggregated super-cell data for fast cross-batch matching.
+/// Each super-cell is the intersection of a (batch, sample) pair.
+pub struct SuperCellCollection {
+    pub layout: SuperCellLayout,
+    /// Sparse gene sums per super-cell: Vec of (gene_index, sum)
+    pub gene_sums: Vec<Vec<(usize, f32)>>,
     /// Number of genes
     pub num_genes: usize,
 }
@@ -591,50 +600,42 @@ struct SuperCellData {
     group: usize,
 }
 
-/// Build super-cells from (batch, sample) intersections.
+/// Build the shared super-cell layout from (batch, group) intersections.
 ///
-/// For each non-empty (batch, sample) block:
+/// For each non-empty (batch, group) block:
 /// - Centroid = mean of projection vectors
-/// - Gene sum = sum of raw expression counts
 /// - Cell count = number of cells in block
-fn build_super_cells(
-    data_vec: &SparseIoVec,
+///
+/// This only uses `proj_kn` (no CSC reads), so it can be shared across layers.
+fn build_super_cell_layout(
+    group_to_cols: &[Vec<usize>],
+    col_to_batch: &[usize],
     proj_kn: &DMatrix<f32>,
-    num_genes: usize,
-) -> anyhow::Result<SuperCellCollection> {
-    let group_to_cols = data_vec
-        .take_grouped_columns()
-        .ok_or(anyhow::anyhow!("columns not assigned to groups"))?;
+) -> anyhow::Result<SuperCellLayout> {
     let proj_dim = proj_kn.nrows();
 
-    // Collect super-cell data per group in parallel
-    let per_group_results: Vec<Vec<SuperCellData>> = group_to_cols
+    /// Intermediate per-batch accumulator for centroid computation.
+    struct CentroidAccum {
+        centroid_sum: Vec<f32>,
+        count: usize,
+    }
+
+    // Collect centroid data per group in parallel
+    let per_group_results: Vec<Vec<(usize, usize, Vec<f32>, f32)>> = group_to_cols
         .par_iter()
         .enumerate()
         .map(|(group, cells)| {
-            let batches = data_vec.get_batch_membership(cells.iter().cloned());
-            let yy = data_vec
-                .read_columns_csc(cells.iter().cloned())
-                .expect("read_columns_csc");
+            let mut batch_data: HashMap<usize, CentroidAccum> = HashMap::default();
 
-            let mut batch_data: HashMap<usize, BatchAccumulator> = HashMap::default();
-
-            for (local_idx, (y_j, &batch)) in yy.col_iter().zip(batches.iter()).enumerate() {
-                let acc = batch_data.entry(batch).or_insert_with(|| BatchAccumulator {
+            for &glob_idx in cells {
+                let batch = col_to_batch[glob_idx];
+                let acc = batch_data.entry(batch).or_insert_with(|| CentroidAccum {
                     centroid_sum: vec![0f32; proj_dim],
-                    gene_sum: HashMap::default(),
                     count: 0,
                 });
-
-                let glob_idx = cells[local_idx];
                 for d in 0..proj_dim {
                     acc.centroid_sum[d] += proj_kn[(d, glob_idx)];
                 }
-
-                for (&gene, &val) in y_j.row_indices().iter().zip(y_j.values().iter()) {
-                    *acc.gene_sum.entry(gene).or_default() += val;
-                }
-
                 acc.count += 1;
             }
 
@@ -645,24 +646,14 @@ fn build_super_cells(
                     let inv_count = 1.0 / acc.count as f32;
                     let centroid: Vec<f32> =
                         acc.centroid_sum.iter().map(|v| v * inv_count).collect();
-
-                    let mut gene_sums: Vec<(usize, f32)> = acc.gene_sum.into_iter().collect();
-                    gene_sums.sort_unstable_by_key(|&(g, _)| g);
-
-                    SuperCellData {
-                        centroid,
-                        gene_sums,
-                        cell_count: acc.count as f32,
-                        batch,
-                        group,
-                    }
+                    (batch, group, centroid, acc.count as f32)
                 })
                 .collect::<Vec<_>>()
         })
         .collect();
 
     // Flatten into a single list
-    let all_sc: Vec<SuperCellData> = per_group_results.into_iter().flatten().collect();
+    let all_sc: Vec<_> = per_group_results.into_iter().flatten().collect();
     let num_sc = all_sc.len();
 
     if num_sc == 0 {
@@ -674,29 +665,103 @@ fn build_super_cells(
     let mut cell_counts = Vec::with_capacity(num_sc);
     let mut sc_to_batch = Vec::with_capacity(num_sc);
     let mut sc_to_group = Vec::with_capacity(num_sc);
-    let mut gene_sums = Vec::with_capacity(num_sc);
+    let mut bg_to_sc = HashMap::default();
 
-    for (i, sc) in all_sc.into_iter().enumerate() {
-        for (d, &v) in sc.centroid.iter().enumerate() {
+    for (i, (batch, group, centroid, count)) in all_sc.into_iter().enumerate() {
+        for (d, &v) in centroid.iter().enumerate() {
             centroids[(d, i)] = v;
         }
-        cell_counts.push(sc.cell_count);
-        sc_to_batch.push(sc.batch);
-        sc_to_group.push(sc.group);
-        gene_sums.push(sc.gene_sums);
+        cell_counts.push(count);
+        sc_to_batch.push(batch);
+        sc_to_group.push(group);
+        bg_to_sc.insert((batch, group), i);
     }
 
     // Build a single HNSW from all super-cell centroids
     let names: Vec<usize> = (0..num_sc).collect();
     let knn_lookup = ColumnDict::<usize>::from_dmatrix(centroids.clone(), names);
 
-    Ok(SuperCellCollection {
+    Ok(SuperCellLayout {
         centroids,
-        gene_sums,
         cell_counts,
         super_cell_to_batch: sc_to_batch,
         super_cell_to_group: sc_to_group,
+        bg_to_sc,
         knn_lookup,
+    })
+}
+
+/// Collect gene sums for each super-cell from a single `SparseIoVec` layer.
+///
+/// Uses the `bg_to_sc` mapping from the layout to accumulate gene expression
+/// per super-cell, parallelized over groups.
+fn collect_super_cell_gene_sums(
+    data_vec: &SparseIoVec,
+    group_to_cols: &[Vec<usize>],
+    col_to_batch: &[usize],
+    bg_to_sc: &HashMap<(usize, usize), usize>,
+    num_sc: usize,
+) -> anyhow::Result<Vec<Vec<(usize, f32)>>> {
+    let gene_sum_maps: Vec<(usize, HashMap<usize, f32>)> = group_to_cols
+        .par_iter()
+        .enumerate()
+        .flat_map(|(group, cells)| {
+            let yy = data_vec
+                .read_columns_csc(cells.iter().cloned())
+                .expect("read_columns_csc");
+
+            let mut batch_gene_sums: HashMap<usize, HashMap<usize, f32>> = HashMap::default();
+
+            for (local_idx, y_j) in yy.col_iter().enumerate() {
+                let batch = col_to_batch[cells[local_idx]];
+                let gene_map = batch_gene_sums
+                    .entry(batch)
+                    .or_insert_with(HashMap::default);
+                for (&gene, &val) in y_j.row_indices().iter().zip(y_j.values().iter()) {
+                    *gene_map.entry(gene).or_default() += val;
+                }
+            }
+
+            batch_gene_sums
+                .into_iter()
+                .filter_map(|(batch, gene_map)| {
+                    bg_to_sc.get(&(batch, group)).map(|&sc_idx| (sc_idx, gene_map))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    let mut gene_sums: Vec<Vec<(usize, f32)>> = vec![vec![]; num_sc];
+    for (sc_idx, gene_map) in gene_sum_maps {
+        let mut sorted: Vec<(usize, f32)> = gene_map.into_iter().collect();
+        sorted.sort_unstable_by_key(|&(g, _)| g);
+        gene_sums[sc_idx] = sorted;
+    }
+
+    Ok(gene_sums)
+}
+
+/// Build super-cells (layout + gene sums) from a single `SparseIoVec`.
+fn build_super_cells(
+    data_vec: &SparseIoVec,
+    proj_kn: &DMatrix<f32>,
+    num_genes: usize,
+) -> anyhow::Result<SuperCellCollection> {
+    let group_to_cols = data_vec
+        .take_grouped_columns()
+        .ok_or(anyhow::anyhow!("columns not assigned to groups"))?;
+    let col_to_batch: Vec<usize> = (0..proj_kn.ncols())
+        .map(|c| data_vec.get_batch_membership(std::iter::once(c))[0])
+        .collect();
+
+    let layout = build_super_cell_layout(group_to_cols, &col_to_batch, proj_kn)?;
+    let num_sc = layout.cell_counts.len();
+    let gene_sums =
+        collect_super_cell_gene_sums(data_vec, group_to_cols, &col_to_batch, &layout.bg_to_sc, num_sc)?;
+
+    Ok(SuperCellCollection {
+        layout,
+        gene_sums,
         num_genes,
     })
 }
@@ -704,18 +769,19 @@ fn build_super_cells(
 /// Match super-cells across batches and accumulate counterfactual
 /// statistics into `stat.imputed_sum_ds` and `stat.residual_sum_ds`.
 fn collect_matched_stat_coarse(
-    super_cells: &SuperCellCollection,
+    layout: &SuperCellLayout,
+    gene_sums: &[Vec<(usize, f32)>],
     knn: usize,
     stat: &mut CollapsedStat,
 ) -> anyhow::Result<()> {
-    let num_sc = super_cells.cell_counts.len();
+    let num_sc = layout.cell_counts.len();
 
     // Process super-cells (could parallelize with mutex, but
     // num_sc is typically small enough for sequential processing)
     for sc_idx in 0..num_sc {
-        let sc_batch = super_cells.super_cell_to_batch[sc_idx];
-        let sc_group = super_cells.super_cell_to_group[sc_idx];
-        let sc_count = super_cells.cell_counts[sc_idx];
+        let sc_batch = layout.super_cell_to_batch[sc_idx];
+        let sc_group = layout.super_cell_to_group[sc_idx];
+        let sc_count = layout.cell_counts[sc_idx];
 
         if sc_count < 1.0 {
             continue;
@@ -723,7 +789,7 @@ fn collect_matched_stat_coarse(
 
         // Query HNSW for neighbors, oversampling to filter same-batch
         let oversample = (knn * 3 + 1).min(num_sc);
-        let (neighbors, distances) = super_cells
+        let (neighbors, distances) = layout
             .knn_lookup
             .search_by_query_name(&sc_idx, oversample, true)?;
 
@@ -731,7 +797,7 @@ fn collect_matched_stat_coarse(
         let filtered: Vec<(usize, f32)> = neighbors
             .iter()
             .zip(distances.iter())
-            .filter(|(&n, _)| super_cells.super_cell_to_batch[n] != sc_batch)
+            .filter(|(&n, _)| layout.super_cell_to_batch[n] != sc_batch)
             .map(|(&n, &d)| (n, d))
             .take(knn)
             .collect();
@@ -759,12 +825,12 @@ fn collect_matched_stat_coarse(
         // y_hat[g] = sum_k w[k] * gene_sums[k][g] / cell_counts[k]
         let mut y_hat: HashMap<usize, f32> = HashMap::default();
         for ((matched_sc, _), &w) in filtered.iter().zip(weights.iter()) {
-            let matched_count = super_cells.cell_counts[*matched_sc];
+            let matched_count = layout.cell_counts[*matched_sc];
             if matched_count < 1.0 {
                 continue;
             }
             let inv_count = 1.0 / matched_count;
-            for &(gene, val) in &super_cells.gene_sums[*matched_sc] {
+            for &(gene, val) in &gene_sums[*matched_sc] {
                 *y_hat.entry(gene).or_default() += w * val * inv_count;
             }
         }
@@ -779,7 +845,7 @@ fn collect_matched_stat_coarse(
         // -> residual_sum_ds[g, s] += gene_sums[sc][g] / (cell_counts[sc] * y_hat[g])
         //    then × cell_counts[sc] to match original scaling
         // = gene_sums[sc][g] / y_hat[g]
-        for &(gene, val) in &super_cells.gene_sums[sc_idx] {
+        for &(gene, val) in &gene_sums[sc_idx] {
             if let Some(&y_h) = y_hat.get(&gene) {
                 if y_h > 0.0 {
                     stat.residual_sum_ds[(gene, sc_group)] += val / y_h;
@@ -807,14 +873,19 @@ fn compute_level_sort_dims(finest_sort_dim: usize, num_levels: usize) -> Vec<usi
     dims
 }
 
-/// Multi-level collapsing trait for `SparseIoVec`.
+/// Multi-level collapsing trait.
+///
+/// `LevelOutput` is `CollapsedOut` for `SparseIoVec` (single layer)
+/// and `Vec<CollapsedOut>` for `SparseIoStack` (one per layer).
 pub trait MultilevelCollapsingOps {
+    type LevelOutput;
+
     fn collapse_columns_multilevel<T>(
         &mut self,
         proj_kn: &DMatrix<f32>,
         batch_membership: &[T],
         params: &MultilevelParams,
-    ) -> anyhow::Result<CollapsedOut>
+    ) -> anyhow::Result<Self::LevelOutput>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 
@@ -823,12 +894,14 @@ pub trait MultilevelCollapsingOps {
         proj_kn: &DMatrix<f32>,
         batch_membership: &[T],
         params: &MultilevelParams,
-    ) -> anyhow::Result<Vec<CollapsedOut>>
+    ) -> anyhow::Result<Vec<Self::LevelOutput>>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 }
 
 impl MultilevelCollapsingOps for SparseIoVec {
+    type LevelOutput = CollapsedOut;
+
     fn collapse_columns_multilevel<T>(
         &mut self,
         proj_kn: &DMatrix<f32>,
@@ -919,14 +992,159 @@ impl MultilevelCollapsingOps for SparseIoVec {
             let super_cells = build_super_cells(self, proj_kn, num_features)?;
             info!(
                 "Built {} super-cells, matching with knn={} ...",
-                super_cells.cell_counts.len(),
+                super_cells.layout.cell_counts.len(),
                 knn
             );
-            collect_matched_stat_coarse(&super_cells, knn, &mut stat)?;
+            collect_matched_stat_coarse(&super_cells.layout, &super_cells.gene_sums, knn, &mut stat)?;
 
             // Optimize parameters
             info!("Optimizing parameters ...");
             results.push(optimize(&stat, (1.0, 1.0), level_opt_iter)?);
+        }
+
+        if results.is_empty() {
+            return Err(anyhow::anyhow!("no levels processed"));
+        }
+
+        Ok(results)
+    }
+}
+
+impl MultilevelCollapsingOps for SparseIoStack {
+    type LevelOutput = Vec<CollapsedOut>;
+
+    fn collapse_columns_multilevel<T>(
+        &mut self,
+        proj_kn: &DMatrix<f32>,
+        batch_membership: &[T],
+        params: &MultilevelParams,
+    ) -> anyhow::Result<Vec<CollapsedOut>>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
+        let mut results = self.collapse_columns_multilevel_vec(proj_kn, batch_membership, params)?;
+        results.pop().ok_or(anyhow::anyhow!("no levels processed"))
+    }
+
+    fn collapse_columns_multilevel_vec<T>(
+        &mut self,
+        proj_kn: &DMatrix<f32>,
+        batch_membership: &[T],
+        params: &MultilevelParams,
+    ) -> anyhow::Result<Vec<Vec<CollapsedOut>>>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
+        let num_layers = self.num_types();
+        if num_layers == 0 {
+            return Err(anyhow::anyhow!("empty SparseIoStack"));
+        }
+
+        let num_levels = params.num_levels;
+        let sort_dim = params.sort_dim;
+        let knn = params.knn_super_cells;
+        let opt_iter = params.num_opt_iter;
+
+        // Register batch membership on all layers
+        self.register_batch_membership(batch_membership);
+
+        // Use first layer for num_batches (all layers share the same columns)
+        let num_batches = self.stack[0].num_batches();
+
+        // Build col_to_batch from the first layer (shared across all layers)
+        let ncols = proj_kn.ncols();
+        let col_to_batch: Vec<usize> = self.stack[0]
+            .get_batch_membership((0..ncols).into_iter());
+
+        if num_batches < 2 {
+            // No batch effects — single-level collapsing per layer
+            self.partition_columns_to_groups(proj_kn, Some(sort_dim), None)?;
+
+            let mut layer_results = Vec::with_capacity(num_layers);
+            for layer in self.stack.iter() {
+                let group_to_cols = layer
+                    .take_grouped_columns()
+                    .ok_or(anyhow::anyhow!("columns not assigned"))?;
+                let num_groups = group_to_cols.len();
+                let num_features = layer.num_rows();
+                let mut stat = CollapsedStat::new(num_features, num_groups, 0);
+                layer.collect_basic_stat(&mut stat)?;
+                layer_results.push(optimize(&stat, (1.0, 1.0), opt_iter)?);
+            }
+            return Ok(vec![layer_results]);
+        }
+
+        let level_dims = compute_level_sort_dims(sort_dim, num_levels);
+
+        info!(
+            "Multi-level stack collapsing: {} levels, sort_dims={:?}, {} batches, {} layers",
+            num_levels, level_dims, num_batches, num_layers
+        );
+
+        let mut results = Vec::with_capacity(num_levels);
+
+        for (level, &level_sort_dim) in level_dims.iter().enumerate() {
+            let is_finest = level == level_dims.len() - 1;
+            let level_opt_iter = if is_finest {
+                opt_iter
+            } else {
+                (opt_iter / 2).max(10)
+            };
+
+            info!(
+                "Level {}/{}: sort_dim={}, opt_iter={}",
+                level + 1,
+                num_levels,
+                level_sort_dim,
+                level_opt_iter
+            );
+
+            // Repartition at this level's granularity (shared across layers)
+            self.partition_columns_to_groups(proj_kn, Some(level_sort_dim), None)?;
+
+            // Get group_to_cols from first layer (all layers share the same grouping)
+            let group_to_cols = self.stack[0]
+                .take_grouped_columns()
+                .ok_or(anyhow::anyhow!("columns not assigned"))?;
+            let num_groups = group_to_cols.len();
+
+            // Build shared super-cell layout ONCE
+            info!("Building shared super-cell layout ...");
+            let layout = build_super_cell_layout(group_to_cols, &col_to_batch, proj_kn)?;
+            let num_sc = layout.cell_counts.len();
+            info!(
+                "Built {} super-cells, matching with knn={} ...",
+                num_sc, knn
+            );
+
+            // Process each layer with the shared layout
+            let mut layer_results = Vec::with_capacity(num_layers);
+
+            for (d, layer) in self.stack.iter().enumerate() {
+                let num_features = layer.num_rows();
+                let mut stat = CollapsedStat::new(num_features, num_groups, num_batches);
+
+                info!("Layer {}/{}: collecting stats ...", d + 1, num_layers);
+                layer.collect_basic_stat(&mut stat)?;
+                layer.collect_batch_stat(&mut stat)?;
+
+                // Collect layer-specific gene sums
+                let gene_sums = collect_super_cell_gene_sums(
+                    layer,
+                    group_to_cols,
+                    &col_to_batch,
+                    &layout.bg_to_sc,
+                    num_sc,
+                )?;
+
+                // Match across batches using shared layout + layer gene sums
+                collect_matched_stat_coarse(&layout, &gene_sums, knn, &mut stat)?;
+
+                // Optimize parameters
+                layer_results.push(optimize(&stat, (1.0, 1.0), level_opt_iter)?);
+            }
+
+            results.push(layer_results);
         }
 
         if results.is_empty() {

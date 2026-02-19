@@ -131,6 +131,16 @@ pub struct JointSvdArgs {
 
     #[arg(
         long,
+        default_value_t = 2,
+        help = "Number of multi-level collapsing levels.",
+        long_help = "Number of multi-level collapsing levels.\n\
+		     More levels = coarser-to-finer batch correction.\n\
+		     Set to 1 to disable multi-level."
+    )]
+    num_levels: usize,
+
+    #[arg(
+        long,
         default_value_t = false,
         help = "Preload all columns data.",
         long_help = "Preload all the columns data into memory.\n\
@@ -160,37 +170,19 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     )?;
     let proj_kn = proj_out.proj;
 
-    // 3. Batch-adjusted collapsing (pseudobulk)
-    // assign pseudobulk samples by proj_kn
-    let nsamp = data_stack.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
+    // 3. Batch-adjusted multilevel collapsing (pseudobulk)
+    info!("Multi-level collapsing across {} modalities ...", data_stack.num_types());
 
-    for (d, data_vec) in data_stack.stack.iter_mut().enumerate() {
-        let batch_membership = &batch_stack[d];
-        let nbatch = batch_membership
-            .iter()
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-
-        if nbatch > 1 {
-            info!("Registering batch information");
-            data_vec.build_hnsw_per_batch(&proj_kn, batch_membership)?;
-        }
-    }
-
-    info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
-
-    let collapsed_data_vec = data_stack
-        .stack
-        .iter()
-        .map(|x| {
-            x.collapse_columns(
-                Some(args.knn_batches),
-                Some(args.knn_cells),
-                None,
-                Some(args.iter_opt),
-            )
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let collapsed_data_vec: Vec<CollapsedOut> = data_stack.collapse_columns_multilevel(
+        &proj_kn,
+        batch_stack[0].as_ref(),
+        &MultilevelParams {
+            knn_super_cells: args.knn_cells,
+            num_levels: args.num_levels,
+            sort_dim: args.sort_dim,
+            num_opt_iter: args.iter_opt,
+        },
+    )?;
 
     // 4. output batch effect information
     for (d, collapsed) in collapsed_data_vec.iter().enumerate() {
