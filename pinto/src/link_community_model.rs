@@ -47,6 +47,17 @@ impl LinkProfileStore {
     pub fn profile(&self, e: usize) -> &[f32] {
         &self.profiles[e * self.m..(e + 1) * self.m]
     }
+
+    /// Extract a sub-store for the given edge indices.
+    pub fn subset(&self, edge_indices: &[usize]) -> Self {
+        let n = edge_indices.len();
+        let m = self.m;
+        let mut profiles = vec![0.0f32; n * m];
+        for (local_e, &global_e) in edge_indices.iter().enumerate() {
+            profiles[local_e * m..(local_e + 1) * m].copy_from_slice(self.profile(global_e));
+        }
+        LinkProfileStore::new(profiles, n, m)
+    }
 }
 
 /// Sufficient statistics for the link community model.
@@ -130,6 +141,58 @@ impl LinkCommunityStats {
         self.edge_count[old_k] -= 1;
         self.edge_count[new_k] += 1;
         self.membership[e] = new_k;
+    }
+
+    /// Build sufficient statistics for a subset of edges (no membership vector).
+    ///
+    /// Returns only the aggregate stats (gene_sum, size_sum, edge_count) for the
+    /// given edge indices, using their assignments from `membership`.
+    /// This is used for memoized per-component stats.
+    pub fn component_stats(
+        profiles: &LinkProfileStore,
+        k: usize,
+        edge_indices: &[usize],
+        membership: &[usize],
+    ) -> (Vec<f64>, Vec<f64>, Vec<usize>) {
+        let m = profiles.m;
+        let mut gene_sum = vec![0.0f64; k * m];
+        let mut size_sum = vec![0.0f64; k];
+        let mut edge_count = vec![0usize; k];
+
+        for &e in edge_indices {
+            let c = membership[e];
+            debug_assert!(c < k);
+            let row = profiles.profile(e);
+            let base = c * m;
+            for g in 0..m {
+                gene_sum[base + g] += row[g] as f64;
+            }
+            size_sum[c] += profiles.size_factors[e] as f64;
+            edge_count[c] += 1;
+        }
+
+        (gene_sum, size_sum, edge_count)
+    }
+
+    /// Apply a delta to the sufficient statistics: self += (new - old).
+    ///
+    /// Used in the memoized EM: after a component updates its local stats,
+    /// the global stats are patched with the difference.
+    pub fn apply_delta(
+        &mut self,
+        old: (&[f64], &[f64], &[usize]),
+        new: (&[f64], &[f64], &[usize]),
+    ) {
+        let km = self.k * self.m;
+        for i in 0..km {
+            self.gene_sum[i] += new.0[i] - old.0[i];
+        }
+        for c in 0..self.k {
+            self.size_sum[c] += new.1[c] - old.1[c];
+            // edge_count delta: new - old (both usize, but difference can be negative)
+            self.edge_count[c] =
+                (self.edge_count[c] as isize + new.2[c] as isize - old.2[c] as isize) as usize;
+        }
     }
 
     /// Recompute all statistics from scratch (drift correction).

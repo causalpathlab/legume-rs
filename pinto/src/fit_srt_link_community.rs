@@ -9,165 +9,86 @@ use crate::link_community_gibbs::LinkGibbsSampler;
 use crate::link_community_model::LinkCommunityStats;
 use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
-use crate::srt_estimate_batch_effects::{estimate_batch, EstimateBatchArgs};
+use crate::srt_estimate_batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::srt_graph_coarsen::*;
 use crate::srt_input::{self, *};
 
 use clap::Parser;
 use data_beans_alg::random_projection::RandProjOps;
-use matrix_param::io::ParamIo;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtLinkCommunityArgs {
-    #[arg(
-        required = true,
-        value_delimiter(','),
-        help = "Data files (.zarr or .h5 format, comma separated)"
-    )]
-    data_files: Vec<Box<str>>,
+    #[command(flatten)]
+    pub common: srt_input::SrtInputArgs,
 
     #[arg(
-        long = "coord",
-        short = 'c',
-        required = true,
-        value_delimiter(','),
-        help = "Spatial coordinate files, one per data file",
-        long_help = "Spatial coordinate files, one per data file (comma separated).\n\
-                       Format: CSV, TSV, or space-delimited text (or .parquet).\n\
-                       First column: cell/barcode names (must match data file).\n\
-                       Subsequent columns: spatial coordinates (x, y, etc.).\n\
-                       Header row is auto-detected or use --coord-header-row to specify."
-    )]
-    coord_files: Vec<Box<str>>,
-
-    #[arg(
-        long = "coord-column-indices",
-        value_delimiter(','),
-        help = "Column indices for coordinates in coord files"
-    )]
-    coord_columns: Option<Vec<usize>>,
-
-    #[arg(
-        long = "coord-column-names",
-        value_delimiter(','),
-        default_value = "pxl_row_in_fullres,pxl_col_in_fullres",
-        help = "Column names to look up in coord files"
-    )]
-    coord_column_names: Vec<Box<str>>,
-
-    #[arg(
-        long,
-        help = "Header row index in coord files (0 = first line is column names)"
-    )]
-    coord_header_row: Option<usize>,
-
-    #[arg(
-        long,
-        short = 'b',
-        value_delimiter(','),
-        help = "Batch membership files, one per data file",
-        long_help = "Batch membership files, one per data file (comma separated).\n\
-                       Format: plain text file, one batch label per line.\n\
-                       Must have one line for each cell in the corresponding data file.\n\
-                       If not provided, each data file is treated as a separate batch."
-    )]
-    batch_files: Option<Vec<Box<str>>>,
-
-    #[arg(
-        long,
-        short = 'p',
-        default_value_t = 300,
-        help = "Random projection dimension (M)"
-    )]
-    proj_dim: usize,
-
-    #[arg(
-        short = 'k',
         long,
         default_value_t = 20,
-        help = "Number of link communities (K)"
+        help = "Number of spatial link communities to discover",
+        long_help = "Number of link communities (K). Each edge in the spatial graph\n\
+                       is assigned to one of K communities via collapsed Gibbs sampling.\n\
+                       Communities capture distinct spatial gene expression patterns.\n\
+                       Cell propensity = fraction of edges per community."
     )]
     n_communities: usize,
 
     #[arg(
         long,
         default_value_t = 50,
-        help = "Number of gene modules for edge profiles (0 = same as K)"
+        help = "Number of gene modules for edge profiles",
+        long_help = "Number of gene modules (M) for edge profile construction.\n\
+                       Genes are clustered into M modules via K-means on gene embeddings.\n\
+                       Edge profiles are M-dimensional module-count vectors.\n\
+                       Set to 0 to use the same value as --n-communities."
     )]
     n_gene_modules: usize,
 
     #[arg(
         long,
-        default_value_t = 3,
-        help = "Number of nearest neighbours for spatial cell-pair graph"
+        default_value_t = 50,
+        help = "Sketch dimension for gene module discovery",
+        long_help = "Dimension of random sketches for gene module discovery.\n\
+                       Genes are projected into this many dimensions per pseudobulk\n\
+                       cluster, then clustered via K-means to form gene modules.\n\
+                       Independent of --proj-dim (which is for cell embeddings)."
     )]
-    knn_spatial: usize,
+    sketch_dim: usize,
 
     #[arg(
-        long = "batch-knn",
-        default_value_t = 10,
-        help = "KNN for cross-batch super-cell matching during batch correction",
-        long_help = "Number of nearest neighbours for cross-batch super-cell matching.\n\
-                       During batch effect estimation, cells are coarsened into super-cells\n\
-                       (one per batch x pseudobulk group). Each super-cell finds its batch-knn\n\
-                       nearest neighbors from other batches via HNSW on centroids. These matches\n\
-                       provide counterfactual expression estimates for batch effect decomposition.\n\
-                       Searches are over coarsened centroids, not individual cells, so this stays small."
+        long,
+        default_value_t = 100,
+        help = "Gibbs sampling sweeps per coarsening level",
+        long_help = "Number of Gibbs sweeps at each multi-level coarsening level.\n\
+                       The finest level uses num_sweeps/2 (minimum 10).\n\
+                       More sweeps improve convergence but take longer."
     )]
-    batch_knn: usize,
-
-    #[arg(long, default_value_t = 100, help = "Number of Gibbs sweeps per level")]
     num_sweeps: usize,
 
     #[arg(
         long,
         default_value_t = 10,
-        help = "Number of greedy finalization sweeps"
+        help = "Max greedy refinement sweeps after Gibbs",
+        long_help = "Maximum number of greedy (argmax) sweeps after Gibbs sampling.\n\
+                       Each sweep deterministically moves edges to their best community.\n\
+                       Stops early if no edges move. Typically converges in 2-5 sweeps."
     )]
     num_greedy: usize,
 
     #[arg(
         long,
-        default_value_t = 2,
-        help = "Number of multi-level coarsening levels"
+        default_value_t = 1.0,
+        help = "Gamma shape prior for Poisson-Gamma model"
     )]
-    num_levels: usize,
-
-    #[arg(
-        long,
-        short = 'd',
-        default_value_t = 1024,
-        help = "Target number of coarse clusters for graph coarsening"
-    )]
-    n_coarse_clusters: usize,
-
-    #[arg(long, default_value_t = 1.0, help = "Gamma shape prior (a0)")]
     a0: f32,
 
-    #[arg(long, default_value_t = 1.0, help = "Gamma rate prior (b0)")]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Gamma rate prior for Poisson-Gamma model"
+    )]
     b0: f32,
-
-    #[arg(long, default_value_t = 42, help = "Random seed")]
-    seed: u64,
-
-    #[arg(long, short, required = true, help = "Output file prefix")]
-    out: Box<str>,
-
-    #[arg(
-        long,
-        default_value_t = 100,
-        help = "Block size for parallel processing of edges"
-    )]
-    block_size: usize,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Preload all sparse column data into memory"
-    )]
-    preload_data: bool,
 }
 
 /// Link community model pipeline.
@@ -181,6 +102,7 @@ pub struct SrtLinkCommunityArgs {
 /// 7.  Gibbs on coarsest → transfer → refine at each finer level
 /// 8.  Extract and write outputs
 pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()> {
+    let c = &args.common;
     let a0 = args.a0 as f64;
     let b0 = args.b0 as f64;
     let k = args.n_communities;
@@ -198,83 +120,56 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         coordinates,
         coordinate_names,
         batches: mut batch_membership,
-    } = read_data_with_coordinates(SRTReadArgs {
-        data_files: args.data_files.clone(),
-        coord_files: args.coord_files.clone(),
-        preload_data: args.preload_data,
-        coord_columns: args.coord_columns.clone().unwrap_or_default(),
-        coord_column_names: args.coord_column_names.clone(),
-        batch_files: args.batch_files.clone(),
-        header_in_coord: args.coord_header_row,
-    })?;
+    } = read_data_with_coordinates(c.to_read_args())?;
 
     let n_genes = data_vec.num_rows();
     let n_cells = data_vec.num_columns();
 
-    anyhow::ensure!(args.proj_dim > 0, "proj_dim must be > 0");
+    anyhow::ensure!(c.proj_dim > 0, "proj_dim must be > 0");
     anyhow::ensure!(args.n_communities > 0, "n_communities must be > 0");
-    anyhow::ensure!(args.knn_spatial > 0, "knn_spatial must be > 0");
+    anyhow::ensure!(c.knn_spatial > 0, "knn_spatial must be > 0");
     anyhow::ensure!(
-        args.knn_spatial < n_cells,
+        c.knn_spatial < n_cells,
         "knn_spatial ({}) must be < number of cells ({})",
-        args.knn_spatial,
+        c.knn_spatial,
         n_cells
     );
 
     // 2. Build spatial KNN graph
-    info!("Building spatial KNN graph (k={})...", args.knn_spatial);
+    info!("Building spatial KNN graph (k={})...", c.knn_spatial);
 
     let graph = build_spatial_graph(
         &coordinates,
         SrtCellPairsArgs {
-            knn: args.knn_spatial,
-            block_size: args.block_size,
+            knn: c.knn_spatial,
+            block_size: c.block_size,
         },
     )?;
 
     // Auto-detect batches from connected components when no explicit batch files
-    if args.batch_files.is_none() {
+    if c.batch_files.is_none() {
         srt_input::auto_batch_from_components(&graph, &mut batch_membership);
     }
 
-    // 3. Estimate batch effects (only when multiple batches exist)
-    let uniq_batches: HashSet<&Box<str>> = batch_membership.iter().collect();
-    let n_batches = uniq_batches.len();
-    drop(uniq_batches);
-
-    let batch_effects = if n_batches > 1 {
-        info!("Estimating batch effects ({} batches)...", n_batches);
-        let batch_sort_dim = args.proj_dim.min(10);
-        estimate_batch(
-            &mut data_vec,
-            &batch_membership,
-            EstimateBatchArgs {
-                proj_dim: args.proj_dim,
-                sort_dim: batch_sort_dim,
-                block_size: args.block_size,
-                batch_knn: args.batch_knn,
-            },
-        )?
-    } else {
-        None
-    };
-
-    if let Some(batch_db) = batch_effects.as_ref() {
-        let outfile = args.out.to_string() + ".delta.parquet";
-        let batch_names = data_vec.batch_names();
-        let gene_names = data_vec.row_names()?;
-        batch_db.to_parquet_with_names(
-            &outfile,
-            (Some(&gene_names), Some("gene")),
-            batch_names.as_deref(),
-        )?;
-    }
+    // 3. Estimate batch effects (skipped for single-batch)
+    let batch_sort_dim = c.proj_dim.min(10);
+    let batch_db = estimate_and_write_batch_effects(
+        &mut data_vec,
+        &batch_membership,
+        EstimateBatchArgs {
+            proj_dim: c.proj_dim,
+            sort_dim: batch_sort_dim,
+            block_size: c.block_size,
+            batch_knn: c.batch_knn,
+        },
+        &c.out,
+    )?;
 
     // Wrap graph with data for pair-level operations
     let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, graph);
 
     srt_cell_pairs.to_parquet(
-        &(args.out.to_string() + ".coord_pairs.parquet"),
+        &(c.out.to_string() + ".coord_pairs.parquet"),
         Some(coordinate_names.clone()),
     )?;
 
@@ -288,18 +183,18 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // 4. Multi-level cell coarsening
     info!(
         "Graph coarsening ({} levels, {} coarse clusters)...",
-        args.num_levels, args.n_coarse_clusters
+        c.num_levels, c.n_pseudobulk
     );
 
-    let batch_arg: Option<&[Box<str>]> = if n_batches > 1 {
+    let batch_arg: Option<&[Box<str>]> = if batch_db.is_some() {
         Some(&batch_membership)
     } else {
         None
     };
 
     let cell_proj = data_vec.project_columns_with_batch_correction(
-        args.proj_dim.min(50),
-        Some(args.block_size),
+        c.proj_dim,
+        Some(c.block_size),
         batch_arg,
     )?;
 
@@ -307,25 +202,24 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &srt_cell_pairs.graph,
         &mut cell_proj.proj.clone(),
         &srt_cell_pairs.pairs,
-        args.n_coarse_clusters,
-        args.num_levels,
+        c.n_pseudobulk,
+        c.num_levels,
     );
 
     // 5. Gene module discovery via sketch + K-means
     let finest_cell_labels = &ml.all_cell_labels[ml.all_cell_labels.len() - 1];
     let n_finest_clusters = ml.all_num_samples[ml.all_num_samples.len() - 1];
 
-    let sketch_dim = args.proj_dim.min(50);
     info!(
         "Gene module sketch ({} clusters, {} sketch dims)...",
-        n_finest_clusters, sketch_dim
+        n_finest_clusters, args.sketch_dim
     );
     let gene_embed = compute_gene_module_sketch(
         &data_vec,
         finest_cell_labels,
         n_finest_clusters,
-        sketch_dim,
-        args.block_size,
+        args.sketch_dim,
+        c.block_size,
     )?;
 
     info!(
@@ -340,7 +234,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // 6. Build edge profiles as module counts
     info!("Building module-count edge profiles...");
     let edge_profiles =
-        build_edge_profiles_by_module(&data_vec, edges, &gene_to_module, n_gm, args.block_size)?;
+        build_edge_profiles_by_module(&data_vec, edges, &gene_to_module, n_gm, c.block_size)?;
 
     info!(
         "Edge profiles: {} edges × {} modules, mean size factor: {:.1}",
@@ -350,7 +244,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     );
 
     // 7. Gibbs: coarsest → transfer → refine at each finer level
-    let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(args.seed));
+    let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(c.seed));
 
     // Use cell labels from coarsening for edge profile coarsening
     let coarsest_labels = &ml.all_cell_labels[0];
@@ -380,7 +274,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     let mut current_labels = transfer_labels(&fine_to_super, &coarse_stats.membership);
 
     // Refine at finer levels
-    for level in 1..args.num_levels {
+    for level in 1..c.num_levels {
         info!("Refining at level {}...", level);
 
         let level_labels = &ml.all_cell_labels[level.min(ml.all_cell_labels.len() - 1)];
@@ -406,8 +300,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             })
             .collect();
 
-        let mut level_stats =
-            LinkCommunityStats::from_profiles(&level_profiles, k, &super_init);
+        let mut level_stats = LinkCommunityStats::from_profiles(&level_profiles, k, &super_init);
 
         let sweeps = args.num_sweeps / 2; // fewer sweeps at finer levels
         let moves = sampler.run_parallel(&mut level_stats, &level_profiles, a0, b0, sweeps.max(10));
@@ -422,29 +315,40 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         current_labels = transfer_labels(&level_f2s, &level_stats.membership);
     }
 
-    // Final refinement on original edges
+    // Final refinement on original edges (memoized EM parallel by connected components)
+    let num_fine_sweeps = (args.num_sweeps / 2).max(10);
     info!(
         "Final Gibbs on full edge set ({} sweeps)...",
-        args.num_sweeps / 2
+        num_fine_sweeps
     );
-    let mut fine_stats = LinkCommunityStats::from_profiles(&edge_profiles, k, &current_labels);
 
-    let moves = sampler.run_parallel(
-        &mut fine_stats,
+    let moves = sampler.run_components_em(
+        &mut current_labels,
         &edge_profiles,
+        &srt_cell_pairs.graph,
+        edges,
+        k,
         a0,
         b0,
-        (args.num_sweeps / 2).max(10),
+        num_fine_sweeps,
     );
-    info!(
-        "Fine Gibbs: {} moves, score={:.2}",
-        moves,
-        fine_stats.total_score(a0, b0)
-    );
+    let fine_score =
+        LinkCommunityStats::from_profiles(&edge_profiles, k, &current_labels).total_score(a0, b0);
+    info!("Fine Gibbs: {} moves, score={:.2}", moves, fine_score);
 
-    // Greedy finalization
+    // Greedy finalization (memoized parallel by connected components)
     info!("Greedy finalization ({} max sweeps)...", args.num_greedy);
-    let greedy_moves = sampler.run_greedy(&mut fine_stats, &edge_profiles, a0, b0, args.num_greedy);
+    let greedy_moves = sampler.run_greedy_by_components(
+        &mut current_labels,
+        &edge_profiles,
+        &srt_cell_pairs.graph,
+        edges,
+        k,
+        a0,
+        b0,
+        args.num_greedy,
+    );
+    let mut fine_stats = LinkCommunityStats::from_profiles(&edge_profiles, k, &current_labels);
     info!(
         "Greedy: {} moves, final score={:.2}",
         greedy_moves,
@@ -466,17 +370,20 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     let topic_names: Vec<Box<str>> = (0..k).map(|i| i.to_string().into_boxed_str()).collect();
     cell_propensity.to_parquet_with_names(
-        &(args.out.to_string() + ".propensity.parquet"),
+        &(c.out.to_string() + ".propensity.parquet"),
         (Some(&cell_names), Some("cell")),
         Some(&topic_names),
     )?;
 
-    // 9b. Gene module assignments [G × 1]
+    // 9b. Gene-topic statistics: Poisson-Gamma profiles per community [G × K]
+    compute_gene_topic_stat(&cell_propensity, &data_vec, c.block_size, &c.out)?;
+
+    // 9c. Gene module assignments [G × 1]
     info!("Writing gene module assignments ({} modules)...", n_gm);
     let gene_modules = Mat::from_fn(n_genes, 1, |g, _| gene_to_module[g] as f32);
     let module_col_names: Vec<Box<str>> = vec!["module".into()];
     gene_modules.to_parquet_with_names(
-        &(args.out.to_string() + ".gene_modules.parquet"),
+        &(c.out.to_string() + ".gene_modules.parquet"),
         (Some(&gene_names), Some("gene")),
         Some(&module_col_names),
     )?;
@@ -484,7 +391,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // 9c. Link community assignments
     info!("Writing link community assignments...");
     write_link_communities(
-        &(args.out.to_string() + ".link_community.parquet"),
+        &(c.out.to_string() + ".link_community.parquet"),
         edges,
         &final_membership,
         &cell_names,
@@ -492,7 +399,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     // 9d. Score trace
     info!("Writing score trace...");
-    write_score_trace(&(args.out.to_string() + ".scores.parquet"), &score_trace)?;
+    write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
     info!("Done");
     Ok(())

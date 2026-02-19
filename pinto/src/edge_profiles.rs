@@ -8,7 +8,34 @@
 
 use crate::link_community_model::LinkProfileStore;
 use crate::srt_common::*;
+use matrix_param::io::ParamIo;
 use matrix_util::utils::generate_minibatch_intervals;
+use nalgebra_sparse::csc::CscMatrix;
+
+/// Collect unique cells from a chunk of edges, read their sparse columns,
+/// and build an index map from global cell index to local column index.
+pub(crate) fn read_unique_cells_for_edges(
+    data: &SparseIoVec,
+    chunk_edges: &[(usize, usize)],
+) -> anyhow::Result<(CscMatrix<f32>, HashMap<usize, usize>)> {
+    let mut unique_set: HashSet<usize> = HashSet::new();
+    for &(i, j) in chunk_edges {
+        unique_set.insert(i);
+        unique_set.insert(j);
+    }
+    let mut unique_cells: Vec<usize> = unique_set.into_iter().collect();
+    unique_cells.sort_unstable();
+
+    let x_dn = data.read_columns_csc(unique_cells.iter().copied())?;
+
+    let cell_to_col: HashMap<usize, usize> = unique_cells
+        .iter()
+        .enumerate()
+        .map(|(col, &cell)| (cell, col))
+        .collect();
+
+    Ok((x_dn, cell_to_col))
+}
 
 /// Build projected link profiles from sparse data, KNN edges, and a random
 /// projection basis.
@@ -44,24 +71,7 @@ pub fn build_edge_profiles(
             let chunk_edges = &edges[lb..ub];
             let chunk_size = ub - lb;
 
-            // Collect unique cell indices from this chunk
-            let mut unique_set: HashSet<usize> = HashSet::new();
-            for &(i, j) in chunk_edges {
-                unique_set.insert(i);
-                unique_set.insert(j);
-            }
-            let mut unique_cells: Vec<usize> = unique_set.into_iter().collect();
-            unique_cells.sort_unstable();
-
-            // Read sparse data for unique cells
-            let x_dn = data.read_columns_csc(unique_cells.iter().copied())?;
-
-            // Build cell → local column index map
-            let cell_to_col: HashMap<usize, usize> = unique_cells
-                .iter()
-                .enumerate()
-                .map(|(col, &cell)| (cell, col))
-                .collect();
+            let (x_dn, cell_to_col) = read_unique_cells_for_edges(data, chunk_edges)?;
 
             // For each edge, project sum of the two cells
             let mut chunk_profiles = vec![0.0f32; chunk_size * m];
@@ -203,22 +213,7 @@ pub fn compute_community_centroids(
             let chunk_edges = &edges[lb..ub];
             let chunk_mem = &membership[lb..ub];
 
-            // Collect unique cells
-            let mut unique_set: HashSet<usize> = HashSet::new();
-            for &(i, j) in chunk_edges {
-                unique_set.insert(i);
-                unique_set.insert(j);
-            }
-            let mut unique_cells: Vec<usize> = unique_set.into_iter().collect();
-            unique_cells.sort_unstable();
-
-            let x_dn = data.read_columns_csc(unique_cells.iter().copied())?;
-
-            let cell_to_col: HashMap<usize, usize> = unique_cells
-                .iter()
-                .enumerate()
-                .map(|(col, &cell)| (cell, col))
-                .collect();
+            let (x_dn, cell_to_col) = read_unique_cells_for_edges(data, chunk_edges)?;
 
             let mut local_sum = Mat::zeros(n_genes, k);
             let mut local_count = vec![0usize; k];
@@ -476,24 +471,7 @@ pub fn build_edge_profiles_by_module(
             let chunk_edges = &edges[lb..ub];
             let chunk_size = ub - lb;
 
-            // Collect unique cell indices from this chunk
-            let mut unique_set: HashSet<usize> = HashSet::new();
-            for &(i, j) in chunk_edges {
-                unique_set.insert(i);
-                unique_set.insert(j);
-            }
-            let mut unique_cells: Vec<usize> = unique_set.into_iter().collect();
-            unique_cells.sort_unstable();
-
-            // Read sparse data for unique cells
-            let x_dn = data.read_columns_csc(unique_cells.iter().copied())?;
-
-            // Build cell → local column index map
-            let cell_to_col: HashMap<usize, usize> = unique_cells
-                .iter()
-                .enumerate()
-                .map(|(col, &cell)| (cell, col))
-                .collect();
+            let (x_dn, cell_to_col) = read_unique_cells_for_edges(data, chunk_edges)?;
 
             // For each edge, accumulate module counts
             let mut chunk_profiles = vec![0.0f32; chunk_size * n_modules];
@@ -542,6 +520,176 @@ pub fn build_edge_profiles_by_module(
     }
 
     Ok(LinkProfileStore::new(profiles, n_edges, n_modules))
+}
+
+/// Compute topic-specific gene expression statistics via Poisson-Gamma.
+///
+/// Given cell propensity [N × K] and sparse expression data [G × N],
+/// computes weighted gene sums `X @ propensity^T` and fits a Poisson-Gamma
+/// to get posterior gene expression rates per topic.
+///
+/// Writes `{out_prefix}.gene_topic.parquet` (genes × K).
+pub fn compute_gene_topic_stat(
+    cell_propensity: &Mat,
+    data_vec: &SparseIoVec,
+    block_size: usize,
+    out_prefix: &str,
+) -> anyhow::Result<()> {
+    use matrix_param::dmatrix_gamma::GammaMatrix;
+    use matrix_param::traits::TwoStatParam;
+
+    let gene_names = data_vec.row_names()?;
+    let n_genes = data_vec.num_rows();
+    let n_cells = data_vec.num_columns();
+    let k = cell_propensity.ncols();
+
+    info!("Computing gene-topic statistics...");
+    let prop_kn = cell_propensity.transpose();
+    let jobs = generate_minibatch_intervals(n_cells, block_size);
+
+    let pb = new_progress_bar(
+        jobs.len() as u64,
+        "Gene-topic {bar:40} {pos}/{len} blocks ({eta})",
+    );
+    let partial_stats: Vec<(Mat, DVec)> = jobs
+        .par_iter()
+        .progress_with(pb.clone())
+        .map(|&(lb, ub)| -> anyhow::Result<(Mat, DVec)> {
+            let x_gn = data_vec.read_columns_csc(lb..ub)?;
+            let block_len = ub - lb;
+            let mut p_kn_block = Mat::zeros(k, block_len);
+            for i in 0..block_len {
+                p_kn_block.column_mut(i).copy_from(&prop_kn.column(lb + i));
+            }
+            let n_k = p_kn_block.column_sum();
+            let sum_gk = x_gn * p_kn_block.transpose();
+            Ok((sum_gk, n_k))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    pb.finish_and_clear();
+
+    let mut sum_gk = Mat::zeros(n_genes, k);
+    let mut n_1k = Mat::zeros(1, k);
+    for (s, n) in partial_stats {
+        sum_gk += s;
+        n_1k += n.transpose();
+    }
+
+    let mut gamma_param = GammaMatrix::new((n_genes, k), 1.0, 1.0);
+    let denom_gk = DVec::from_element(n_genes, 1.0) * &n_1k;
+    gamma_param.update_stat(&sum_gk, &denom_gk);
+    gamma_param.calibrate();
+
+    let topic_names: Vec<Box<str>> = (0..k).map(|i| i.to_string().into_boxed_str()).collect();
+    gamma_param.to_parquet_with_names(
+        &(out_prefix.to_string() + ".gene_topic.parquet"),
+        (Some(&gene_names), Some("gene")),
+        Some(&topic_names),
+    )?;
+
+    Ok(())
+}
+
+/// Compute propensity and gene-topic statistics from latent pair projections.
+///
+/// 1. K-means on `proj_kn` (K_latent × N_pairs) → edge cluster labels
+/// 2. Propensity: soft cell membership from edge clusters [N_cells × K_clusters]
+/// 3. Gene-topic stat: Poisson-Gamma gene expression rates per topic [G × K_clusters]
+///
+/// Writes `{out_prefix}.propensity.parquet` and `{out_prefix}.gene_topic.parquet`.
+pub fn compute_propensity_and_gene_topic_stat(
+    proj_kn: &Mat,
+    edges: &[(usize, usize)],
+    data_vec: &SparseIoVec,
+    n_cells: usize,
+    n_clusters: usize,
+    block_size: usize,
+    out_prefix: &str,
+) -> anyhow::Result<()> {
+    // 1. K-means on latent edge vectors
+    info!("K-means clustering edges (k={})...", n_clusters);
+    let edge_membership = proj_kn.kmeans_columns(KmeansArgs {
+        num_clusters: n_clusters,
+        max_iter: 100,
+    });
+
+    // 2. Propensity [N_cells × K]
+    info!("Computing cell propensity...");
+    let cell_propensity = compute_node_membership(edges, &edge_membership, n_cells, n_clusters);
+
+    let cell_names = data_vec.column_names()?;
+
+    // Dominant cluster per cell (argmax of propensity)
+    let cluster_col: Vec<f32> = (0..n_cells)
+        .map(|i| {
+            cell_propensity
+                .row(i)
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .map(|(k, _)| k as f32)
+                .unwrap_or(0.0)
+        })
+        .collect();
+    let cluster_mat = Mat::from_column_slice(n_cells, 1, &cluster_col);
+
+    let mut col_names: Vec<Box<str>> = (0..n_clusters)
+        .map(|i| i.to_string().into_boxed_str())
+        .collect();
+    col_names.push("cluster".into());
+
+    let combined = concatenate_horizontal(&[cell_propensity.clone(), cluster_mat])?;
+    combined.to_parquet_with_names(
+        &(out_prefix.to_string() + ".propensity.parquet"),
+        (Some(&cell_names), Some("cell")),
+        Some(&col_names),
+    )?;
+
+    // Edge cluster assignments
+    write_edge_clusters(out_prefix, edges, &edge_membership, &cell_names)?;
+
+    // 3. Gene-topic stat
+    compute_gene_topic_stat(&cell_propensity, data_vec, block_size, out_prefix)
+}
+
+/// Write per-edge K-means cluster assignments to parquet.
+fn write_edge_clusters(
+    out_prefix: &str,
+    edges: &[(usize, usize)],
+    edge_membership: &[usize],
+    cell_names: &[Box<str>],
+) -> anyhow::Result<()> {
+    use matrix_util::parquet::*;
+    use parquet::basic::Type as ParquetType;
+
+    let n_edges = edges.len();
+    let left_cells: Vec<Box<str>> = edges.iter().map(|&(i, _)| cell_names[i].clone()).collect();
+    let right_cells: Vec<Box<str>> = edges.iter().map(|&(_, j)| cell_names[j].clone()).collect();
+    let cluster_f32: Vec<f32> = edge_membership.iter().map(|&k| k as f32).collect();
+
+    let col_names: Vec<Box<str>> = vec!["right_cell".into(), "cluster".into()];
+    let col_types = vec![ParquetType::BYTE_ARRAY, ParquetType::FLOAT];
+
+    let writer = ParquetWriter::new(
+        &(out_prefix.to_string() + ".edge_cluster.parquet"),
+        (n_edges, 2),
+        (Some(&left_cells), Some(&col_names)),
+        Some(&col_types),
+        Some("left_cell"),
+    )?;
+
+    let row_names = writer.row_names_vec();
+    let mut writer = writer.get_writer()?;
+    let mut row_group = writer.next_row_group()?;
+
+    parquet_add_bytearray(&mut row_group, row_names)?;
+    parquet_add_string_column(&mut row_group, &right_cells)?;
+    parquet_add_numeric_column(&mut row_group, &cluster_f32)?;
+
+    row_group.close()?;
+    writer.close()?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -681,20 +829,21 @@ mod tests {
         let data = make_test_sparse_io(&raw);
         let cell_labels = vec![0, 0, 0, 1, 1, 1];
 
-        let embed = compute_gene_module_sketch(&data, &cell_labels, 2, 10, 3).unwrap();
+        let sketch_dim = 100;
+        let embed = compute_gene_module_sketch(&data, &cell_labels, 2, sketch_dim, 3).unwrap();
 
         assert_eq!(embed.nrows(), n_genes);
-        assert_eq!(embed.ncols(), 10);
+        assert_eq!(embed.ncols(), sketch_dim);
 
         // Gene 2 has no counts — its embedding should be zero
-        for d in 0..10 {
+        for d in 0..sketch_dim {
             assert!((embed[(2, d)]).abs() < 1e-10);
         }
 
         // Genes in the same cluster should have similar embeddings
         // (both project through R[cluster_0,:])
-        let dot_01: f32 = (0..10).map(|d| embed[(0, d)] * embed[(1, d)]).sum();
-        let dot_04: f32 = (0..10).map(|d| embed[(0, d)] * embed[(4, d)]).sum();
+        let dot_01: f32 = (0..sketch_dim).map(|d| embed[(0, d)] * embed[(1, d)]).sum();
+        let dot_04: f32 = (0..sketch_dim).map(|d| embed[(0, d)] * embed[(4, d)]).sum();
 
         // Genes 0,1 (same cluster) should be more aligned than genes 0,4
         assert!(dot_01 > dot_04);

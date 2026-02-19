@@ -6,6 +6,7 @@ use rand::Rng;
 use rand_distr::{Distribution, Gamma, StandardNormal, Uniform};
 use rayon::prelude::*;
 
+pub use crate::dmatrix_rsvd::nystrom_basis;
 use crate::traits::*;
 
 pub fn subset_columns<T, D, S, I>(
