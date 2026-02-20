@@ -332,7 +332,7 @@ fn prelim_collapse_visitor(
 ///
 /// Returns (threshold, elbow_rank). Threshold is 0.0 if no clear elbow
 /// exists (all values similar or too few points).
-fn elbow_threshold(values: &[f32]) -> (f32, usize) {
+pub fn elbow_threshold(values: &[f32]) -> (f32, usize) {
     // Only consider positive values for elbow detection
     let mut positive: Vec<f32> = values.iter().copied().filter(|&v| v > 0.0).collect();
     if positive.len() < 3 {

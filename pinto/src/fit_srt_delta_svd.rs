@@ -150,8 +150,8 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         },
     )?;
 
-    // Auto-detect batches from connected components when no explicit batch files
-    if c.batch_files.is_none() {
+    // Auto-detect batches from connected components (opt-in via --auto-batch)
+    if c.auto_batch && c.batch_files.is_none() {
         srt_input::auto_batch_from_components(&graph, &mut batch_membership);
     }
 
