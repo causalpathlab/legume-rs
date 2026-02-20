@@ -146,6 +146,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         SrtCellPairsArgs {
             knn: c.knn_spatial,
             block_size: c.block_size,
+            reciprocal: c.reciprocal,
         },
     )?;
 
@@ -164,6 +165,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
             sort_dim: batch_sort_dim,
             block_size: c.block_size,
             batch_knn: c.batch_knn,
+            num_levels: c.num_levels,
         },
         &c.out,
     )?;

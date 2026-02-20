@@ -555,7 +555,7 @@ impl CollapsedStat {
 /////////////////////////////////////////////////////////////
 
 const DEFAULT_NUM_LEVELS: usize = 2;
-const DEFAULT_COARSEST_SORT_DIM: usize = 4;
+const DEFAULT_COARSEST_SORT_DIM: usize = 7;
 
 /// Shared layout for super-cells (batch × group intersections).
 /// Reusable across multiple layers in a `SparseIoStack`.
@@ -858,7 +858,8 @@ fn collect_matched_stat_coarse(
 }
 
 /// Compute sort dimensions for each level, linearly spaced from
-/// coarsest to finest.
+/// coarsest to finest. Duplicate dimensions are removed so that
+/// extra levels don't repeat the same partitioning.
 fn compute_level_sort_dims(finest_sort_dim: usize, num_levels: usize) -> Vec<usize> {
     if num_levels <= 1 {
         return vec![finest_sort_dim];
@@ -868,7 +869,10 @@ fn compute_level_sort_dims(finest_sort_dim: usize, num_levels: usize) -> Vec<usi
     for level in 0..num_levels {
         let t = level as f32 / (num_levels - 1) as f32;
         let dim = coarsest as f32 + t * (finest_sort_dim - coarsest) as f32;
-        dims.push(dim.round() as usize);
+        let dim = dim.round() as usize;
+        if dims.last() != Some(&dim) {
+            dims.push(dim);
+        }
     }
     dims
 }
