@@ -64,7 +64,7 @@ pub struct JointTopicArgs {
 		     Specify the output file or prefix for generated files:\n\
 		     - {out}.delta.parquet\n\
 		     - {out}.dictionary.parquet\n\
-		     - {out}.latent.parquet\n"
+		     - {out}.latent.parquet (log-softmax topic proportions)\n"
     )]
     out: Box<str>,
 
@@ -375,8 +375,10 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         },
     )?;
 
-    // For delta output, n_features, and latent evaluation, use the finest level
-    let collapsed_data_vec = collapsed_levels.last().unwrap();
+    // For delta output, n_features, and latent evaluation, use the finest level.
+    // collapsed_levels[0] is the finest (most groups), matching the group
+    // assignments stored in data_stack by assign_groups().
+    let collapsed_data_vec = collapsed_levels.first().unwrap();
 
     // 4. output batch effect information
     for (d, collapsed) in collapsed_data_vec.iter().enumerate() {
@@ -666,7 +668,7 @@ where
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     let (log_z_nk, _) = encoder.forward_t(&x_vec, &x0_vec, false)?;
-    let z_nk = log_z_nk.exp()?.to_device(&candle_core::Device::Cpu)?;
+    let z_nk = log_z_nk.to_device(&candle_core::Device::Cpu)?;
     Ok((lb, Mat::from_tensor(&z_nk)?))
 }
 
@@ -729,7 +731,7 @@ where
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     let (log_z_nk, _) = encoder.forward_t(&x_vec, &x0_vec, false)?;
-    let z_nk = log_z_nk.exp()?.to_device(&candle_core::Device::Cpu)?;
+    let z_nk = log_z_nk.to_device(&candle_core::Device::Cpu)?;
     Ok((lb, Mat::from_tensor(&z_nk)?))
 }
 
