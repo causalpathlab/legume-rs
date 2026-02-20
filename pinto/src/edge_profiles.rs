@@ -8,9 +8,60 @@
 
 use crate::link_community_model::LinkProfileStore;
 use crate::srt_common::*;
+use crate::srt_gene_pairs::visit_gene_pair_deltas;
 use matrix_param::io::ParamIo;
 use matrix_util::utils::generate_minibatch_intervals;
 use nalgebra_sparse::csc::CscMatrix;
+
+/// Compute per-gene total counts from sparse data.
+///
+/// Returns a vector of length `n_genes` with the sum of all entries per row.
+pub fn compute_gene_totals(
+    data: &SparseIoVec,
+    block_size: usize,
+) -> anyhow::Result<Vec<f64>> {
+    let n_genes = data.num_rows();
+    let n_cells = data.num_columns();
+    let jobs = generate_minibatch_intervals(n_cells, block_size);
+
+    let partials: Vec<Vec<f64>> = jobs
+        .par_iter()
+        .map(|&(lb, ub)| -> anyhow::Result<Vec<f64>> {
+            let x = data.read_columns_csc(lb..ub)?;
+            let mut local = vec![0.0f64; n_genes];
+            for col in 0..x.ncols() {
+                let s = x.col(col);
+                for (&row, &val) in s.row_indices().iter().zip(s.values().iter()) {
+                    local[row] += val as f64;
+                }
+            }
+            Ok(local)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let mut totals = vec![0.0f64; n_genes];
+    for local in partials {
+        for g in 0..n_genes {
+            totals[g] += local[g];
+        }
+    }
+    Ok(totals)
+}
+
+/// Zero out rows of a basis matrix for genes below a count threshold.
+///
+/// Returns the number of genes that were kept (not zeroed).
+pub fn filter_basis_by_gene_count(basis: &mut Mat, gene_totals: &[f64], min_count: f32) -> usize {
+    let mut n_kept = 0usize;
+    for g in 0..basis.nrows() {
+        if gene_totals[g] < min_count as f64 {
+            basis.row_mut(g).fill(0.0);
+        } else {
+            n_kept += 1;
+        }
+    }
+    n_kept
+}
 
 /// Collect unique cells from a chunk of edges, read their sparse columns,
 /// and build an index map from global cell index to local column index.
@@ -690,6 +741,121 @@ fn write_edge_clusters(
     writer.close()?;
 
     Ok(())
+}
+
+/// Build edge profiles from gene-pair interaction deltas.
+///
+/// For each spatial edge (i,j), accumulates positive δ values across
+/// all gene pairs in the gene adjacency list. Each edge profile has
+/// dimension `n_gene_pairs`.
+///
+/// * `data` - Sparse expression data [n_genes × n_cells]
+/// * `edges` - Sorted spatial edge list from KNN graph
+/// * `gene_adj` - Directed gene adjacency: gene_adj[g] = [(neighbor, edge_idx)]
+/// * `gene_means` - Per-gene raw means for delta computation
+/// * `n_gene_pairs` - Number of gene-gene edges (profile dimension)
+/// * `block_size` - Number of spatial edges per parallel block
+pub fn build_edge_profiles_by_gene_pairs(
+    data: &SparseIoVec,
+    edges: &[(usize, usize)],
+    gene_adj: &[Vec<(usize, usize)>],
+    gene_means: &DVec,
+    n_gene_pairs: usize,
+    block_size: usize,
+) -> anyhow::Result<LinkProfileStore> {
+    let n_edges = edges.len();
+
+    let jobs = generate_minibatch_intervals(n_edges, block_size);
+
+    let pb = new_progress_bar(
+        jobs.len() as u64,
+        "Gene-pair profiles {bar:40} {pos}/{len} blocks ({eta})",
+    );
+    let partial_results: Vec<(usize, Vec<f32>)> = jobs
+        .par_iter()
+        .progress_with(pb.clone())
+        .map(|&(lb, ub)| -> anyhow::Result<(usize, Vec<f32>)> {
+            let chunk_edges = &edges[lb..ub];
+            let chunk_size = ub - lb;
+
+            let (x_dn, cell_to_col) = read_unique_cells_for_edges(data, chunk_edges)?;
+
+            let mut chunk_profiles = vec![0.0f32; chunk_size * n_gene_pairs];
+
+            for (e_idx, &(ci, cj)) in chunk_edges.iter().enumerate() {
+                let base = e_idx * n_gene_pairs;
+
+                // Accumulate δ⁺ from cell i
+                let col_i = cell_to_col[&ci];
+                let col_slice_i = x_dn.col(col_i);
+                visit_gene_pair_deltas(
+                    col_slice_i.row_indices(),
+                    col_slice_i.values(),
+                    gene_adj,
+                    gene_means,
+                    false,
+                    |edge_idx, delta| {
+                        if delta > 0.0 {
+                            chunk_profiles[base + edge_idx] += delta;
+                        }
+                    },
+                );
+
+                // Accumulate δ⁺ from cell j
+                let col_j = cell_to_col[&cj];
+                let col_slice_j = x_dn.col(col_j);
+                visit_gene_pair_deltas(
+                    col_slice_j.row_indices(),
+                    col_slice_j.values(),
+                    gene_adj,
+                    gene_means,
+                    false,
+                    |edge_idx, delta| {
+                        if delta > 0.0 {
+                            chunk_profiles[base + edge_idx] += delta;
+                        }
+                    },
+                );
+            }
+
+            Ok((lb, chunk_profiles))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    pb.finish_and_clear();
+
+    // Assemble into single profiles buffer
+    let mut profiles = vec![0.0f32; n_edges * n_gene_pairs];
+    for (lb, chunk) in partial_results {
+        let chunk_edges_count = chunk.len() / n_gene_pairs;
+        for e in 0..chunk_edges_count {
+            let src_base = e * n_gene_pairs;
+            let dst_base = (lb + e) * n_gene_pairs;
+            profiles[dst_base..dst_base + n_gene_pairs]
+                .copy_from_slice(&chunk[src_base..src_base + n_gene_pairs]);
+        }
+    }
+
+    Ok(LinkProfileStore::new(profiles, n_edges, n_gene_pairs))
+}
+
+/// Filter a LinkProfileStore to keep only the specified column indices.
+///
+/// Rebuilds the store with a reduced profile dimension. Used after
+/// elbow filtering to remove low-signal gene pairs.
+pub fn filter_profile_columns(store: &LinkProfileStore, keep: &[usize]) -> LinkProfileStore {
+    let n_edges = store.n_edges;
+    let new_m = keep.len();
+    let mut new_profiles = vec![0.0f32; n_edges * new_m];
+
+    for e in 0..n_edges {
+        let old_profile = store.profile(e);
+        let new_base = e * new_m;
+        for (new_col, &old_col) in keep.iter().enumerate() {
+            new_profiles[new_base + new_col] = old_profile[old_col];
+        }
+    }
+
+    LinkProfileStore::new(new_profiles, n_edges, new_m)
 }
 
 #[cfg(test)]

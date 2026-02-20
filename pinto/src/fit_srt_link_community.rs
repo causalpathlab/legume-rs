@@ -37,11 +37,12 @@ pub struct SrtLinkCommunityArgs {
     #[arg(
         long,
         default_value_t = 50,
-        help = "Number of gene modules for edge profiles",
+        help = "Number of gene modules for edge profiles (0 = skip gene modules)",
         long_help = "Number of gene modules (M) for edge profile construction.\n\
                        Genes are clustered into M modules via K-means on gene embeddings.\n\
                        Edge profiles are M-dimensional module-count vectors.\n\
-                       Set to 0 to use the same value as --n-communities."
+                       Set to 0 to skip gene modules and use random-projection edge profiles\n\
+                       of dimension --proj-dim instead."
     )]
     n_gene_modules: usize,
 
@@ -52,7 +53,8 @@ pub struct SrtLinkCommunityArgs {
         long_help = "Dimension of random sketches for gene module discovery.\n\
                        Genes are projected into this many dimensions per pseudobulk\n\
                        cluster, then clustered via K-means to form gene modules.\n\
-                       Independent of --proj-dim (which is for cell embeddings)."
+                       Independent of --proj-dim (which is for cell embeddings).\n\
+                       Only used when --n-gene-modules > 0."
     )]
     sketch_dim: usize,
 
@@ -75,6 +77,16 @@ pub struct SrtLinkCommunityArgs {
                        Stops early if no edges move. Typically converges in 2-5 sweeps."
     )]
     num_greedy: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Min total count to include a gene in projection basis",
+        long_help = "Genes with total count below this threshold are zeroed out\n\
+                       in the projection basis. Only used when --n-gene-modules=0.\n\
+                       Set to 0 to include all genes."
+    )]
+    min_gene_count: f32,
 
     #[arg(
         long,
@@ -106,11 +118,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     let a0 = args.a0 as f64;
     let b0 = args.b0 as f64;
     let k = args.n_communities;
-    let n_gm = if args.n_gene_modules > 0 {
-        args.n_gene_modules
-    } else {
-        k
-    };
+    let n_gm = args.n_gene_modules; // 0 = skip gene modules
 
     // 1. Load data + coordinates
     info!("Loading data files...");
@@ -147,8 +155,8 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         },
     )?;
 
-    // Auto-detect batches from connected components when no explicit batch files
-    if c.batch_files.is_none() {
+    // Auto-detect batches from connected components (opt-in via --auto-batch)
+    if c.auto_batch && c.batch_files.is_none() {
         srt_input::auto_batch_from_components(&graph, &mut batch_membership);
     }
 
@@ -208,38 +216,65 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         c.num_levels,
     );
 
-    // 5. Gene module discovery via sketch + K-means
-    let finest_cell_labels = &ml.all_cell_labels[ml.all_cell_labels.len() - 1];
-    let n_finest_clusters = finest_cell_labels.iter().copied().max().unwrap_or(0) + 1;
+    // 5-6. Build edge profiles: either via gene modules or random projection
+    let gene_to_module: Option<Vec<usize>>;
+    let edge_profiles;
+
+    if n_gm > 0 {
+        // Gene module discovery via sketch + K-means
+        let finest_cell_labels = &ml.all_cell_labels[ml.all_cell_labels.len() - 1];
+        let n_finest_clusters = finest_cell_labels.iter().copied().max().unwrap_or(0) + 1;
+
+        info!(
+            "Gene module sketch ({} clusters, {} sketch dims)...",
+            n_finest_clusters, args.sketch_dim
+        );
+        let gene_embed = compute_gene_module_sketch(
+            &data_vec,
+            finest_cell_labels,
+            n_finest_clusters,
+            args.sketch_dim,
+            c.block_size,
+        )?;
+
+        info!(
+            "K-means on gene embeddings ({} → {} modules)...",
+            n_genes, n_gm
+        );
+        let g2m = gene_embed.kmeans_rows(KmeansArgs {
+            num_clusters: n_gm,
+            max_iter: 100,
+        });
+
+        info!("Building module-count edge profiles...");
+        edge_profiles =
+            build_edge_profiles_by_module(&data_vec, edges, &g2m, n_gm, c.block_size)?;
+        gene_to_module = Some(g2m);
+    } else {
+        // Skip gene modules: use random-projection edge profiles
+        let mut basis = cell_proj.basis.clone();
+
+        if args.min_gene_count > 0.0 {
+            info!("Computing gene totals for filtering...");
+            let gene_totals = compute_gene_totals(&data_vec, c.block_size)?;
+            let n_kept =
+                filter_basis_by_gene_count(&mut basis, &gene_totals, args.min_gene_count);
+            info!(
+                "Kept {}/{} genes (min_count={:.0})",
+                n_kept, n_genes, args.min_gene_count
+            );
+        }
+
+        info!(
+            "Building random-projection edge profiles (dim={})...",
+            c.proj_dim
+        );
+        edge_profiles = build_edge_profiles(&data_vec, edges, &basis, None, c.block_size)?;
+        gene_to_module = None;
+    }
 
     info!(
-        "Gene module sketch ({} clusters, {} sketch dims)...",
-        n_finest_clusters, args.sketch_dim
-    );
-    let gene_embed = compute_gene_module_sketch(
-        &data_vec,
-        finest_cell_labels,
-        n_finest_clusters,
-        args.sketch_dim,
-        c.block_size,
-    )?;
-
-    info!(
-        "K-means on gene embeddings ({} → {} modules)...",
-        n_genes, n_gm
-    );
-    let gene_to_module = gene_embed.kmeans_rows(KmeansArgs {
-        num_clusters: n_gm,
-        max_iter: 100,
-    });
-
-    // 6. Build edge profiles as module counts
-    info!("Building module-count edge profiles...");
-    let edge_profiles =
-        build_edge_profiles_by_module(&data_vec, edges, &gene_to_module, n_gm, c.block_size)?;
-
-    info!(
-        "Edge profiles: {} edges × {} modules, mean size factor: {:.1}",
+        "Edge profiles: {} edges × {} dims, mean size factor: {:.1}",
         edge_profiles.n_edges,
         edge_profiles.m,
         edge_profiles.size_factors.iter().sum::<f32>() / edge_profiles.n_edges as f32
@@ -387,15 +422,17 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // 9b. Gene-topic statistics: Poisson-Gamma profiles per community [G × K]
     compute_gene_topic_stat(&cell_propensity, &data_vec, c.block_size, &c.out)?;
 
-    // 9c. Gene module assignments [G × 1]
-    info!("Writing gene module assignments ({} modules)...", n_gm);
-    let gene_modules = Mat::from_fn(n_genes, 1, |g, _| gene_to_module[g] as f32);
-    let module_col_names: Vec<Box<str>> = vec!["module".into()];
-    gene_modules.to_parquet_with_names(
-        &(c.out.to_string() + ".gene_modules.parquet"),
-        (Some(&gene_names), Some("gene")),
-        Some(&module_col_names),
-    )?;
+    // 9c. Gene module assignments [G × 1] (only when gene modules are used)
+    if let Some(ref g2m) = gene_to_module {
+        info!("Writing gene module assignments ({} modules)...", n_gm);
+        let gene_modules = Mat::from_fn(n_genes, 1, |g, _| g2m[g] as f32);
+        let module_col_names: Vec<Box<str>> = vec!["module".into()];
+        gene_modules.to_parquet_with_names(
+            &(c.out.to_string() + ".gene_modules.parquet"),
+            (Some(&gene_names), Some("gene")),
+            Some(&module_col_names),
+        )?;
+    }
 
     // 9c. Link community assignments
     info!("Writing link community assignments...");
@@ -415,7 +452,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 }
 
 /// Write link community assignments to parquet.
-fn write_link_communities(
+pub(crate) fn write_link_communities(
     file_path: &str,
     edges: &[(usize, usize)],
     membership: &[usize],
@@ -461,7 +498,7 @@ fn write_link_communities(
 }
 
 /// ASCII histogram of link community sizes, showing communities with > 1% of edges.
-fn link_community_histogram(membership: &[usize], k: usize, max_width: usize) -> String {
+pub(crate) fn link_community_histogram(membership: &[usize], k: usize, max_width: usize) -> String {
     let n = membership.len();
     let mut sizes = vec![0usize; k];
     for &c in membership {
@@ -520,7 +557,7 @@ fn link_community_histogram(membership: &[usize], k: usize, max_width: usize) ->
 }
 
 /// Write score trace to parquet.
-fn write_score_trace(file_path: &str, scores: &[f64]) -> anyhow::Result<()> {
+pub(crate) fn write_score_trace(file_path: &str, scores: &[f64]) -> anyhow::Result<()> {
     let mat = Mat::from_fn(scores.len(), 1, |i, _| scores[i] as f32);
     let col_names = vec!["score".to_string().into_boxed_str()];
     let row_names: Vec<Box<str>> = (0..scores.len())
