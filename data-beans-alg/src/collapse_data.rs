@@ -12,9 +12,10 @@ use matrix_util::knn_match::ColumnDict;
 use matrix_util::traits::*;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
+use std::ops::AddAssign;
 use std::sync::{Arc, Mutex};
 
-use crate::random_projection::RandProjOps;
+use crate::random_projection::{binary_sort_columns, RandProjOps};
 
 use fnv::FnvHashMap as HashMap;
 type CscMat = nalgebra_sparse::CscMatrix<f32>;
@@ -621,7 +622,8 @@ fn build_super_cell_layout(
     }
 
     // Collect centroid data per group in parallel
-    let per_group_results: Vec<Vec<(usize, usize, Vec<f32>, f32)>> = group_to_cols
+    type CentroidTuple = (usize, usize, Vec<f32>, f32);
+    let per_group_results: Vec<Vec<CentroidTuple>> = group_to_cols
         .par_iter()
         .enumerate()
         .map(|(group, cells)| {
@@ -716,7 +718,7 @@ fn collect_super_cell_gene_sums(
                 let batch = col_to_batch[cells[local_idx]];
                 let gene_map = batch_gene_sums
                     .entry(batch)
-                    .or_insert_with(HashMap::default);
+                    .or_default();
                 for (&gene, &val) in y_j.row_indices().iter().zip(y_j.values().iter()) {
                     *gene_map.entry(gene).or_default() += val;
                 }
@@ -725,7 +727,9 @@ fn collect_super_cell_gene_sums(
             batch_gene_sums
                 .into_iter()
                 .filter_map(|(batch, gene_map)| {
-                    bg_to_sc.get(&(batch, group)).map(|&sc_idx| (sc_idx, gene_map))
+                    bg_to_sc
+                        .get(&(batch, group))
+                        .map(|&sc_idx| (sc_idx, gene_map))
                 })
                 .collect::<Vec<_>>()
         })
@@ -756,8 +760,13 @@ fn build_super_cells(
 
     let layout = build_super_cell_layout(group_to_cols, &col_to_batch, proj_kn)?;
     let num_sc = layout.cell_counts.len();
-    let gene_sums =
-        collect_super_cell_gene_sums(data_vec, group_to_cols, &col_to_batch, &layout.bg_to_sc, num_sc)?;
+    let gene_sums = collect_super_cell_gene_sums(
+        data_vec,
+        group_to_cols,
+        &col_to_batch,
+        &layout.bg_to_sc,
+        num_sc,
+    )?;
 
     Ok(SuperCellCollection {
         layout,
@@ -858,8 +867,8 @@ fn collect_matched_stat_coarse(
 }
 
 /// Compute sort dimensions for each level, linearly spaced from
-/// coarsest to finest. Duplicate dimensions are removed so that
-/// extra levels don't repeat the same partitioning.
+/// finest to coarsest (fine→coarse). Duplicate dimensions are
+/// removed so that extra levels don't repeat the same partitioning.
 fn compute_level_sort_dims(finest_sort_dim: usize, num_levels: usize) -> Vec<usize> {
     if num_levels <= 1 {
         return vec![finest_sort_dim];
@@ -867,14 +876,88 @@ fn compute_level_sort_dims(finest_sort_dim: usize, num_levels: usize) -> Vec<usi
     let coarsest = DEFAULT_COARSEST_SORT_DIM.min(finest_sort_dim);
     let mut dims = Vec::with_capacity(num_levels);
     for level in 0..num_levels {
+        // t goes from 0 (finest) to 1 (coarsest)
         let t = level as f32 / (num_levels - 1) as f32;
-        let dim = coarsest as f32 + t * (finest_sort_dim - coarsest) as f32;
+        let dim = finest_sort_dim as f32 - t * (finest_sort_dim - coarsest) as f32;
         let dim = dim.round() as usize;
         if dims.last() != Some(&dim) {
             dims.push(dim);
         }
     }
     dims
+}
+
+/// Compute the mapping from fine group indices to coarse group indices.
+///
+/// Each fine group's binary code is masked to `coarse_dim` bits to
+/// produce its coarse code. Unique coarse codes are assigned
+/// consecutive indices.
+fn compute_fine_to_coarse_mapping(
+    group_to_cols: &[Vec<usize>],
+    fine_codes: &[usize],
+    coarse_dim: usize,
+) -> (Vec<usize>, usize) {
+    let coarse_mask = (1_usize << coarse_dim) - 1;
+
+    // For each fine group, look up binary code from any member column
+    let coarse_codes: Vec<usize> = group_to_cols
+        .iter()
+        .map(|cols| fine_codes[cols[0]] & coarse_mask)
+        .collect();
+
+    // Unique coarse codes → consecutive indices
+    let mut unique_coarse: Vec<usize> = coarse_codes.to_vec();
+    unique_coarse.sort_unstable();
+    unique_coarse.dedup();
+    let num_coarse = unique_coarse.len();
+
+    let coarse_to_idx: HashMap<usize, usize> = unique_coarse
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| (c, i))
+        .collect();
+
+    let fine_to_coarse: Vec<usize> = coarse_codes.iter().map(|c| coarse_to_idx[c]).collect();
+
+    (fine_to_coarse, num_coarse)
+}
+
+/// Agglomerate fine-level statistics into coarser groups.
+///
+/// Sums columns of all group-indexed matrices (`observed_sum_ds`,
+/// `imputed_sum_ds`, `residual_sum_ds`, `size_s`, `n_bs`) according
+/// to the merge mapping. `observed_sum_db` is copied unchanged
+/// (batch-marginal).
+fn merge_stat(
+    fine_stat: &CollapsedStat,
+    fine_to_coarse: &[usize],
+    num_coarse_groups: usize,
+) -> CollapsedStat {
+    let num_genes = fine_stat.num_genes();
+    let num_batches = fine_stat.num_batches();
+    let mut coarse = CollapsedStat::new(num_genes, num_coarse_groups, num_batches);
+
+    for (fine_g, &coarse_g) in fine_to_coarse.iter().enumerate() {
+        coarse
+            .observed_sum_ds
+            .column_mut(coarse_g)
+            .add_assign(&fine_stat.observed_sum_ds.column(fine_g));
+        coarse
+            .imputed_sum_ds
+            .column_mut(coarse_g)
+            .add_assign(&fine_stat.imputed_sum_ds.column(fine_g));
+        coarse
+            .residual_sum_ds
+            .column_mut(coarse_g)
+            .add_assign(&fine_stat.residual_sum_ds.column(fine_g));
+        coarse.size_s[coarse_g] += fine_stat.size_s[fine_g];
+        for b in 0..num_batches {
+            coarse.n_bs[(b, coarse_g)] += fine_stat.n_bs[(b, fine_g)];
+        }
+    }
+
+    coarse.observed_sum_db.copy_from(&fine_stat.observed_sum_db);
+    coarse
 }
 
 /// Multi-level collapsing trait.
@@ -915,8 +998,12 @@ impl MultilevelCollapsingOps for SparseIoVec {
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
-        let mut results = self.collapse_columns_multilevel_vec(proj_kn, batch_membership, params)?;
-        results.pop().ok_or(anyhow::anyhow!("no levels processed"))
+        let mut results =
+            self.collapse_columns_multilevel_vec(proj_kn, batch_membership, params)?;
+        if results.is_empty() {
+            return Err(anyhow::anyhow!("no levels processed"));
+        }
+        Ok(results.remove(0))
     }
 
     fn collapse_columns_multilevel_vec<T>(
@@ -928,7 +1015,6 @@ impl MultilevelCollapsingOps for SparseIoVec {
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
-        let num_levels = params.num_levels;
         let sort_dim = params.sort_dim;
         let knn = params.knn_super_cells;
         let opt_iter = params.num_opt_iter;
@@ -951,63 +1037,94 @@ impl MultilevelCollapsingOps for SparseIoVec {
             return Ok(vec![optimize(&stat, (1.0, 1.0), opt_iter)?]);
         }
 
-        let level_dims = compute_level_sort_dims(sort_dim, num_levels);
+        // Level dims: [finest, ..., coarsest]
+        let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
 
         info!(
-            "Multi-level collapsing: {} levels, sort_dims={:?}, {} batches",
-            num_levels, level_dims, num_batches
+            "Multi-level collapsing (fine→coarse): {} levels, sort_dims={:?}, {} batches",
+            level_dims.len(),
+            level_dims,
+            num_batches
         );
 
-        let mut results = Vec::with_capacity(num_levels);
+        // Compute binary codes at finest resolution once
+        let finest_dim = level_dims[0];
+        let nn = proj_kn.ncols();
+        let kk = proj_kn.nrows().min(finest_dim).min(nn);
+        let fine_codes = binary_sort_columns(proj_kn, kk)?;
 
-        for (level, &level_sort_dim) in level_dims.iter().enumerate() {
-            let is_finest = level == level_dims.len() - 1;
-            let level_opt_iter = if is_finest {
-                opt_iter
-            } else {
-                (opt_iter / 2).max(10)
-            };
+        // Partition at finest level
+        self.assign_groups(&fine_codes, None);
+
+        let group_to_cols = self
+            .take_grouped_columns()
+            .ok_or(anyhow::anyhow!("columns not assigned"))?;
+        let num_groups = group_to_cols.len();
+
+        // Collect ALL statistics once at finest level
+        let mut fine_stat = CollapsedStat::new(num_features, num_groups, num_batches);
+
+        info!(
+            "Level 1/{}: sort_dim={}, {} groups (finest — full computation)",
+            level_dims.len(),
+            finest_dim,
+            num_groups
+        );
+        self.collect_basic_stat(&mut fine_stat)?;
+        self.collect_batch_stat(&mut fine_stat)?;
+
+        // Build super-cells and match across batches (once)
+        info!("Building super-cells ...");
+        let super_cells = build_super_cells(self, proj_kn, num_features)?;
+        info!(
+            "Built {} super-cells, matching with knn={} ...",
+            super_cells.layout.cell_counts.len(),
+            knn
+        );
+        collect_matched_stat_coarse(
+            &super_cells.layout,
+            &super_cells.gene_sums,
+            knn,
+            &mut fine_stat,
+        )?;
+
+        // Optimize finest level
+        info!("Optimizing parameters ...");
+        let mut results = vec![optimize(&fine_stat, (1.0, 1.0), opt_iter)?];
+
+        // Agglomeratively merge for coarser levels
+        let mut prev_stat = fine_stat;
+        let mut prev_group_to_cols = group_to_cols.clone();
+
+        for (level, &level_sort_dim) in level_dims.iter().enumerate().skip(1) {
+            let level_opt_iter = (opt_iter / 2).max(10);
+
+            // Compute merge mapping from previous level to this coarser level
+            let (fine_to_coarse, num_coarse) =
+                compute_fine_to_coarse_mapping(&prev_group_to_cols, &fine_codes, level_sort_dim);
 
             info!(
-                "Level {}/{}: sort_dim={}, opt_iter={}",
+                "Level {}/{}: sort_dim={}, {} groups (merged from {})",
                 level + 1,
-                num_levels,
+                level_dims.len(),
                 level_sort_dim,
-                level_opt_iter
+                num_coarse,
+                prev_stat.num_samples(),
             );
 
-            // Repartition at this level's granularity
-            self.partition_columns_to_groups(proj_kn, Some(level_sort_dim), None)?;
+            let coarse_stat = merge_stat(&prev_stat, &fine_to_coarse, num_coarse);
 
-            let group_to_cols = self
-                .take_grouped_columns()
-                .ok_or(anyhow::anyhow!("columns not assigned"))?;
-            let num_groups = group_to_cols.len();
-
-            let mut stat = CollapsedStat::new(num_features, num_groups, num_batches);
-
-            // Collect basic and batch stats (reads all cells once)
-            info!("Collecting basic stats for {} groups ...", num_groups);
-            self.collect_basic_stat(&mut stat)?;
-            self.collect_batch_stat(&mut stat)?;
-
-            // Build super-cells and match across batches
-            info!("Building super-cells ...");
-            let super_cells = build_super_cells(self, proj_kn, num_features)?;
-            info!(
-                "Built {} super-cells, matching with knn={} ...",
-                super_cells.layout.cell_counts.len(),
-                knn
-            );
-            collect_matched_stat_coarse(&super_cells.layout, &super_cells.gene_sums, knn, &mut stat)?;
-
-            // Optimize parameters
             info!("Optimizing parameters ...");
-            results.push(optimize(&stat, (1.0, 1.0), level_opt_iter)?);
-        }
+            results.push(optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?);
 
-        if results.is_empty() {
-            return Err(anyhow::anyhow!("no levels processed"));
+            // Build coarse group_to_cols for next iteration
+            let mut coarse_group_to_cols = vec![vec![]; num_coarse];
+            for (fine_g, &coarse_g) in fine_to_coarse.iter().enumerate() {
+                coarse_group_to_cols[coarse_g].extend_from_slice(&prev_group_to_cols[fine_g]);
+            }
+
+            prev_stat = coarse_stat;
+            prev_group_to_cols = coarse_group_to_cols;
         }
 
         Ok(results)
@@ -1026,8 +1143,12 @@ impl MultilevelCollapsingOps for SparseIoStack {
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
-        let mut results = self.collapse_columns_multilevel_vec(proj_kn, batch_membership, params)?;
-        results.pop().ok_or(anyhow::anyhow!("no levels processed"))
+        let mut results =
+            self.collapse_columns_multilevel_vec(proj_kn, batch_membership, params)?;
+        if results.is_empty() {
+            return Err(anyhow::anyhow!("no levels processed"));
+        }
+        Ok(results.remove(0))
     }
 
     fn collapse_columns_multilevel_vec<T>(
@@ -1044,7 +1165,6 @@ impl MultilevelCollapsingOps for SparseIoStack {
             return Err(anyhow::anyhow!("empty SparseIoStack"));
         }
 
-        let num_levels = params.num_levels;
         let sort_dim = params.sort_dim;
         let knn = params.knn_super_cells;
         let opt_iter = params.num_opt_iter;
@@ -1057,8 +1177,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
 
         // Build col_to_batch from the first layer (shared across all layers)
         let ncols = proj_kn.ncols();
-        let col_to_batch: Vec<usize> = self.stack[0]
-            .get_batch_membership((0..ncols).into_iter());
+        let col_to_batch: Vec<usize> = self.stack[0].get_batch_membership(0..ncols);
 
         if num_batches < 2 {
             // No batch effects — single-level collapsing per layer
@@ -1078,81 +1197,117 @@ impl MultilevelCollapsingOps for SparseIoStack {
             return Ok(vec![layer_results]);
         }
 
-        let level_dims = compute_level_sort_dims(sort_dim, num_levels);
+        // Level dims: [finest, ..., coarsest]
+        let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
 
         info!(
-            "Multi-level stack collapsing: {} levels, sort_dims={:?}, {} batches, {} layers",
-            num_levels, level_dims, num_batches, num_layers
+            "Multi-level stack collapsing (fine→coarse): {} levels, sort_dims={:?}, {} batches, {} layers",
+            level_dims.len(), level_dims, num_batches, num_layers
         );
 
-        let mut results = Vec::with_capacity(num_levels);
+        // Compute binary codes at finest resolution once
+        let finest_dim = level_dims[0];
+        let kk = proj_kn.nrows().min(finest_dim).min(ncols);
+        let fine_codes = binary_sort_columns(proj_kn, kk)?;
 
-        for (level, &level_sort_dim) in level_dims.iter().enumerate() {
-            let is_finest = level == level_dims.len() - 1;
-            let level_opt_iter = if is_finest {
-                opt_iter
-            } else {
-                (opt_iter / 2).max(10)
-            };
+        // Partition all layers at finest level using binary codes
+        for layer in self.stack.iter_mut() {
+            layer.assign_groups(&fine_codes, None);
+        }
+
+        // Get group_to_cols from first layer (all layers share the same grouping)
+        let group_to_cols = self.stack[0]
+            .take_grouped_columns()
+            .ok_or(anyhow::anyhow!("columns not assigned"))?;
+        let num_groups = group_to_cols.len();
+
+        // Build shared super-cell layout ONCE at finest level
+        info!(
+            "Level 1/{}: sort_dim={}, {} groups (finest — full computation)",
+            level_dims.len(),
+            finest_dim,
+            num_groups
+        );
+        let layout = build_super_cell_layout(group_to_cols, &col_to_batch, proj_kn)?;
+        let num_sc = layout.cell_counts.len();
+        info!(
+            "Built {} super-cells, matching with knn={} ...",
+            num_sc, knn
+        );
+
+        // Collect per-layer stats at finest level (reads all cells ONCE)
+        let mut fine_stats: Vec<CollapsedStat> = Vec::with_capacity(num_layers);
+        let mut layer_results = Vec::with_capacity(num_layers);
+
+        for (d, layer) in self.stack.iter().enumerate() {
+            let num_features = layer.num_rows();
+            let mut stat = CollapsedStat::new(num_features, num_groups, num_batches);
+
+            info!("Layer {}/{}: collecting stats ...", d + 1, num_layers);
+            layer.collect_basic_stat(&mut stat)?;
+            layer.collect_batch_stat(&mut stat)?;
+
+            // Collect layer-specific gene sums
+            let gene_sums = collect_super_cell_gene_sums(
+                layer,
+                group_to_cols,
+                &col_to_batch,
+                &layout.bg_to_sc,
+                num_sc,
+            )?;
+
+            // Match across batches using shared layout + layer gene sums
+            collect_matched_stat_coarse(&layout, &gene_sums, knn, &mut stat)?;
+
+            // Optimize finest-level parameters
+            layer_results.push(optimize(&stat, (1.0, 1.0), opt_iter)?);
+            fine_stats.push(stat);
+        }
+
+        let mut results = vec![layer_results];
+
+        // Agglomeratively merge for coarser levels
+        let mut prev_stats = fine_stats;
+        let mut prev_group_to_cols = group_to_cols.clone();
+
+        for (level, &level_sort_dim) in level_dims.iter().enumerate().skip(1) {
+            let level_opt_iter = (opt_iter / 2).max(10);
+
+            // Compute merge mapping (shared across layers)
+            let (fine_to_coarse, num_coarse) =
+                compute_fine_to_coarse_mapping(&prev_group_to_cols, &fine_codes, level_sort_dim);
 
             info!(
-                "Level {}/{}: sort_dim={}, opt_iter={}",
+                "Level {}/{}: sort_dim={}, {} groups (merged from {})",
                 level + 1,
-                num_levels,
+                level_dims.len(),
                 level_sort_dim,
-                level_opt_iter
+                num_coarse,
+                prev_stats[0].num_samples(),
             );
 
-            // Repartition at this level's granularity (shared across layers)
-            self.partition_columns_to_groups(proj_kn, Some(level_sort_dim), None)?;
-
-            // Get group_to_cols from first layer (all layers share the same grouping)
-            let group_to_cols = self.stack[0]
-                .take_grouped_columns()
-                .ok_or(anyhow::anyhow!("columns not assigned"))?;
-            let num_groups = group_to_cols.len();
-
-            // Build shared super-cell layout ONCE
-            info!("Building shared super-cell layout ...");
-            let layout = build_super_cell_layout(group_to_cols, &col_to_batch, proj_kn)?;
-            let num_sc = layout.cell_counts.len();
-            info!(
-                "Built {} super-cells, matching with knn={} ...",
-                num_sc, knn
-            );
-
-            // Process each layer with the shared layout
+            // Merge and optimize each layer
             let mut layer_results = Vec::with_capacity(num_layers);
+            let mut coarse_stats = Vec::with_capacity(num_layers);
 
-            for (d, layer) in self.stack.iter().enumerate() {
-                let num_features = layer.num_rows();
-                let mut stat = CollapsedStat::new(num_features, num_groups, num_batches);
+            for (d, prev_stat) in prev_stats.iter().enumerate() {
+                let coarse_stat = merge_stat(prev_stat, &fine_to_coarse, num_coarse);
 
-                info!("Layer {}/{}: collecting stats ...", d + 1, num_layers);
-                layer.collect_basic_stat(&mut stat)?;
-                layer.collect_batch_stat(&mut stat)?;
-
-                // Collect layer-specific gene sums
-                let gene_sums = collect_super_cell_gene_sums(
-                    layer,
-                    group_to_cols,
-                    &col_to_batch,
-                    &layout.bg_to_sc,
-                    num_sc,
-                )?;
-
-                // Match across batches using shared layout + layer gene sums
-                collect_matched_stat_coarse(&layout, &gene_sums, knn, &mut stat)?;
-
-                // Optimize parameters
-                layer_results.push(optimize(&stat, (1.0, 1.0), level_opt_iter)?);
+                info!("Layer {}/{}: optimizing ...", d + 1, num_layers);
+                layer_results.push(optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?);
+                coarse_stats.push(coarse_stat);
             }
 
             results.push(layer_results);
-        }
 
-        if results.is_empty() {
-            return Err(anyhow::anyhow!("no levels processed"));
+            // Build coarse group_to_cols for next iteration
+            let mut coarse_group_to_cols = vec![vec![]; num_coarse];
+            for (fine_g, &coarse_g) in fine_to_coarse.iter().enumerate() {
+                coarse_group_to_cols[coarse_g].extend_from_slice(&prev_group_to_cols[fine_g]);
+            }
+
+            prev_stats = coarse_stats;
+            prev_group_to_cols = coarse_group_to_cols;
         }
 
         Ok(results)
