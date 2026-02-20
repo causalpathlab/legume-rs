@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_model_traits::DecoderModuleT;
+use candle_util::candle_topic_refinement::*;
 use indicatif::ProgressBar;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -365,6 +366,31 @@ pub struct TopicArgs {
 		     Typical values: 0.05-0.2. Set to 0 to disable."
     )]
     topic_smoothing: f64,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Per-cell refinement steps at inference",
+        long_help = "Number of gradient steps for per-cell topic refinement at inference time.\n\
+		     Optimizes topic logits against the frozen decoder likelihood,\n\
+		     anchored to the encoder output via L2 regularization.\n\
+		     Set to 0 to disable (default)."
+    )]
+    refine_steps: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.01,
+        help = "Learning rate for refinement"
+    )]
+    refine_lr: f64,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "L2 regularization strength for refinement"
+    )]
+    refine_reg: f64,
 }
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
@@ -505,15 +531,12 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
-    let use_sparsemax = args.decoder == DecoderType::Sparse;
-
     let mut encoder = LogSoftmaxEncoder::new(
         LogSoftmaxEncoderArgs {
             n_features: n_features_encoder,
             n_topics,
             n_modules,
             layers: &args.encoder_layers,
-            use_sparsemax,
         },
         param_builder.clone(),
     )?;
@@ -542,8 +565,20 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         .expect("failed to set signal handler");
     }
 
-    // Build decoder and train based on decoder type
-    let scores = match args.decoder {
+    // Build refinement config (None if disabled)
+    let refine_config = if args.refine_steps > 0 {
+        Some(TopicRefinementConfig {
+            num_steps: args.refine_steps,
+            learning_rate: args.refine_lr,
+            regularization: args.refine_reg,
+        })
+    } else {
+        None
+    };
+
+    // Build decoder, train, save dictionary, and evaluate — all inside each arm
+    // so the decoder is in scope for refinement during evaluation.
+    let (scores, z_nk) = match args.decoder {
         DecoderType::ZeroInflated => {
             let decoder = ZITopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
@@ -586,7 +621,20 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 &args.out
             );
 
-            scores
+            info!("Writing down the latent states");
+            let z_nk = evaluate_latent_by_encoder(
+                &data_vec,
+                &encoder,
+                finest_collapsed,
+                &dev,
+                &args.adj_method,
+                args.minibatch_size,
+                selected_features.as_ref(),
+                Some(&decoder),
+                refine_config.as_ref(),
+            )?;
+
+            (scores, z_nk)
         }
         DecoderType::Sparse => {
             let decoder =
@@ -614,7 +662,20 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                     None,
                 )?;
 
-            scores
+            info!("Writing down the latent states");
+            let z_nk = evaluate_latent_by_encoder(
+                &data_vec,
+                &encoder,
+                finest_collapsed,
+                &dev,
+                &args.adj_method,
+                args.minibatch_size,
+                selected_features.as_ref(),
+                Some(&decoder),
+                refine_config.as_ref(),
+            )?;
+
+            (scores, z_nk)
         }
         DecoderType::Flat => {
             let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
@@ -641,27 +702,24 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                     None,
                 )?;
 
-            scores
+            info!("Writing down the latent states");
+            let z_nk = evaluate_latent_by_encoder(
+                &data_vec,
+                &encoder,
+                finest_collapsed,
+                &dev,
+                &args.adj_method,
+                args.minibatch_size,
+                selected_features.as_ref(),
+                Some(&decoder),
+                refine_config.as_ref(),
+            )?;
+
+            (scores, z_nk)
         }
     };
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
-
-    /////////////////////////////////////////////////////
-    // evaluate latent states while adjusting the bias //
-    /////////////////////////////////////////////////////
-
-    info!("Writing down the latent states");
-
-    let z_nk = evaluate_latent_by_encoder(
-        &data_vec,
-        &encoder,
-        finest_collapsed,
-        &dev,
-        &args.adj_method,
-        args.minibatch_size,
-        selected_features.as_ref(),
-    )?;
 
     let cell_names = data_vec.column_names()?;
 
@@ -841,18 +899,21 @@ where
 
                 for b in 0..data_loader.num_minibatch() {
                     let mb = data_loader.minibatch_shuffled(b, &dev)?;
-                    let (z_nk, kl) = encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
+                    let (log_z_nk, kl) =
+                        encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
 
-                    let z_nk = if args.topic_smoothing > 0.0 {
+                    // Smoothing in log-space: exp→mix→log
+                    let log_z_nk = if args.topic_smoothing > 0.0 {
                         let alpha = args.topic_smoothing;
-                        let kk = z_nk.dim(1)? as f64;
-                        ((&z_nk * (1.0 - alpha))? + alpha / kk)?
+                        let kk = log_z_nk.dim(1)? as f64;
+                        ((log_z_nk.exp()? * (1.0 - alpha))? + alpha / kk)?.log()?
                     } else {
-                        z_nk
+                        log_z_nk
                     };
 
                     let y_nd = mb.output.unwrap_or(mb.input);
-                    let (_, llik) = decoder.forward_with_llik(&z_nk, &y_nd, &topic_likelihood)?;
+                    let (_, llik) =
+                        decoder.forward_with_llik(&log_z_nk, &y_nd, &topic_likelihood)?;
 
                     let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
                     adam.backward_step(&loss)?;
@@ -909,7 +970,7 @@ where
     })
 }
 
-pub(crate) fn evaluate_latent_by_encoder<Enc>(
+pub(crate) fn evaluate_latent_by_encoder<Enc, Dec>(
     data_vec: &SparseIoVec,
     encoder: &Enc,
     collapsed: &CollapsedOut,
@@ -917,9 +978,12 @@ pub(crate) fn evaluate_latent_by_encoder<Enc>(
     adj_method: &AdjMethod,
     minibatch_size: usize,
     feature_selection: Option<&FeatureSelection>,
+    decoder: Option<&Dec>,
+    refine_config: Option<&TopicRefinementConfig>,
 ) -> anyhow::Result<Mat>
 where
     Enc: EncoderModuleT + Send + Sync,
+    Dec: DecoderModuleT + Send + Sync,
 {
     let ntot = data_vec.num_columns();
     let kk = encoder.dim_latent();
@@ -951,10 +1015,24 @@ where
         |block| -> anyhow::Result<(usize, Mat)> {
             match adj_method {
                 AdjMethod::Residual => evaluate_with_residuals(
-                    block, data_vec, encoder, dev, delta.as_ref(), feature_selection,
+                    block,
+                    data_vec,
+                    encoder,
+                    dev,
+                    delta.as_ref(),
+                    feature_selection,
+                    decoder,
+                    refine_config,
                 ),
                 AdjMethod::Batch => evaluate_with_batch(
-                    block, data_vec, encoder, dev, delta.as_ref(), feature_selection,
+                    block,
+                    data_vec,
+                    encoder,
+                    dev,
+                    delta.as_ref(),
+                    feature_selection,
+                    decoder,
+                    refine_config,
                 ),
             }
         };
@@ -992,16 +1070,19 @@ where
     Ok(ret)
 }
 
-pub(crate) fn evaluate_with_batch<Enc>(
+pub(crate) fn evaluate_with_batch<Enc, Dec>(
     block: (usize, usize),
     data_vec: &SparseIoVec,
     encoder: &Enc,
     dev: &Device,
     delta_bd: Option<&Tensor>,
     feature_selection: Option<&FeatureSelection>,
+    decoder: Option<&Dec>,
+    refine_config: Option<&TopicRefinementConfig>,
 ) -> anyhow::Result<(usize, Mat)>
 where
     Enc: EncoderModuleT,
+    Dec: DecoderModuleT,
 {
     let (lb, ub) = block;
     let x0_nd = delta_bd.map(|delta_bm| {
@@ -1023,21 +1104,33 @@ where
 
     let x_nd = x_dn.to_tensor(dev)?.transpose(0, 1)?;
 
-    let (z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
-    let z_nk = z_nk.to_device(&candle_core::Device::Cpu)?;
+    let (log_z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
+
+    // Apply per-cell refinement if configured
+    let log_z_nk = if let (Some(dec), Some(cfg)) = (decoder, refine_config) {
+        refine_topic_proportions(&log_z_nk, &x_nd, dec, cfg)?
+    } else {
+        log_z_nk
+    };
+
+    // exp() to get probabilities before converting to Mat
+    let z_nk = log_z_nk.exp()?.to_device(&candle_core::Device::Cpu)?;
     Ok((lb, Mat::from_tensor(&z_nk)?))
 }
 
-pub(crate) fn evaluate_with_residuals<Enc>(
+pub(crate) fn evaluate_with_residuals<Enc, Dec>(
     block: (usize, usize),
     data_vec: &SparseIoVec,
     encoder: &Enc,
     dev: &Device,
     delta_bp: Option<&Tensor>,
     feature_selection: Option<&FeatureSelection>,
+    decoder: Option<&Dec>,
+    refine_config: Option<&TopicRefinementConfig>,
 ) -> anyhow::Result<(usize, Mat)>
 where
     Enc: EncoderModuleT,
+    Dec: DecoderModuleT,
 {
     let (lb, ub) = block;
     let x0_nd = delta_bp.map(|delta_bm| {
@@ -1060,7 +1153,16 @@ where
 
     let x_nd = x_dn.to_tensor(dev)?.transpose(0, 1)?;
 
-    let (z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
-    let z_nk = z_nk.to_device(&candle_core::Device::Cpu)?;
+    let (log_z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
+
+    // Apply per-cell refinement if configured
+    let log_z_nk = if let (Some(dec), Some(cfg)) = (decoder, refine_config) {
+        refine_topic_proportions(&log_z_nk, &x_nd, dec, cfg)?
+    } else {
+        log_z_nk
+    };
+
+    // exp() to get probabilities before converting to Mat
+    let z_nk = log_z_nk.exp()?.to_device(&candle_core::Device::Cpu)?;
     Ok((lb, Mat::from_tensor(&z_nk)?))
 }

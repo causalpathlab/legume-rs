@@ -9,7 +9,6 @@ pub struct LogSoftmaxEncoder {
     n_features: usize,
     n_topics: usize,
     n_modules: usize,
-    use_sparsemax: bool,
     feature_module: AggregateLinear,
     fc: StackLayers<Linear>,
     bn_z: BatchNorm,
@@ -27,13 +26,9 @@ impl EncoderModuleT for LogSoftmaxEncoder {
         let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params(x_nd, x0_nd, train)?;
         let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
 
-        let prob = if self.use_sparsemax {
-            sparsemax(&z_nk)?
-        } else {
-            ops::log_softmax(&z_nk, 1)?.exp()?
-        };
+        let log_prob = ops::log_softmax(&z_nk, 1)?;
 
-        Ok((prob, gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?))
+        Ok((log_prob, gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?))
     }
 
     fn dim_latent(&self) -> usize {
@@ -44,10 +39,6 @@ impl EncoderModuleT for LogSoftmaxEncoder {
 impl LogSoftmaxEncoder {
     pub fn num_feature_modules(&self) -> usize {
         self.n_modules
-    }
-
-    pub fn set_use_sparsemax(&mut self, use_sparsemax: bool) {
-        self.use_sparsemax = use_sparsemax;
     }
 
     pub fn feature_module_membership(&self) -> Result<Tensor> {
@@ -157,7 +148,6 @@ impl LogSoftmaxEncoder {
             n_features: args.n_features,
             n_topics: args.n_topics,
             n_modules: args.n_modules,
-            use_sparsemax: args.use_sparsemax,
             feature_module,
             fc,
             bn_z,
@@ -172,5 +162,4 @@ pub struct LogSoftmaxEncoderArgs<'a> {
     pub n_topics: usize,
     pub n_modules: usize,
     pub layers: &'a [usize],
-    pub use_sparsemax: bool,
 }

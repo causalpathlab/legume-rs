@@ -263,7 +263,6 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
             n_topics,
             n_modules,
             layers: &args.encoder_layers,
-            use_sparsemax: false,
             temperature: 1.0,
         },
         param_builder.clone(),
