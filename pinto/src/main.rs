@@ -1,5 +1,6 @@
 mod edge_profiles;
 mod fit_srt_delta_svd;
+mod fit_srt_gene_pair_link_community;
 mod fit_srt_gene_pair_svd;
 mod fit_srt_link_community;
 mod fit_srt_propensity;
@@ -17,6 +18,7 @@ mod srt_knn_graph;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use fit_srt_delta_svd::*;
+use fit_srt_gene_pair_link_community::*;
 use fit_srt_gene_pair_svd::*;
 use fit_srt_link_community::*;
 use fit_srt_propensity::*;
@@ -262,6 +264,25 @@ enum Commands {
                       - {out}.delta.parquet: batch effects (when multi-batch)"
     )]
     LinkCommunity(SrtLinkCommunityArgs),
+
+    #[command(
+        alias = "gplc",
+        about = "Gene pair link community model via collapsed Gibbs sampling",
+        long_about = "Gene pair link community model for spatial cell-cell interaction analysis.\n\n\
+                      Combines gene-pair interaction deltas with collapsed Gibbs link\n\
+                      community sampling. For each spatial edge (i,j), the profile is a\n\
+                      vector of δ⁺ values across gene pairs from a gene-gene graph,\n\
+                      capturing which gene-gene interactions are active on that edge.\n\n\
+                      Outputs:\n\
+                      - {out}.propensity.parquet: soft membership (N x K)\n\
+                      - {out}.gene_topic.parquet: gene-topic statistics (G x K)\n\
+                      - {out}.gene_graph.parquet: gene-gene graph edges\n\
+                      - {out}.link_community.parquet: link community assignments\n\
+                      - {out}.scores.parquet: score trace\n\
+                      - {out}.coord_pairs.parquet: spatial cell pair coordinates\n\
+                      - {out}.delta.parquet: batch effects (when multi-batch)"
+    )]
+    GenePairLinkCommunity(SrtGenePairLinkCommunityArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -285,6 +306,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::LinkCommunity(args) => {
             fit_srt_link_community(args)?;
+        }
+        Commands::GenePairLinkCommunity(args) => {
+            fit_srt_gene_pair_link_community(args)?;
         }
     }
 

@@ -76,11 +76,16 @@ pub struct SrtInputArgs {
         long_help = "Batch membership files, one per data file (comma separated).\n\
                        Plain text, one batch label per line (one line per cell).\n\
                        Cells with the same label share batch effects.\n\
-                       If omitted, each data file is treated as one batch;\n\
-                       disconnected graph components are also auto-detected as\n\
-                       separate batches."
+                       If omitted, each data file is treated as one batch."
     )]
     pub batch_files: Option<Vec<Box<str>>>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Auto-detect batches from disconnected spatial graph components"
+    )]
+    pub auto_batch: bool,
 
     #[arg(
         long,

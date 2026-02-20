@@ -162,8 +162,8 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
             Some(coordinate_names.clone()),
         )?;
 
-        // Auto-detect batches from connected components when no explicit batch files
-        if c.batch_files.is_none() {
+        // Auto-detect batches from connected components (opt-in via --auto-batch)
+        if c.auto_batch && c.batch_files.is_none() {
             srt_input::auto_batch_from_components(&srt_cell_pairs.graph, &mut batch_membership);
         }
 
