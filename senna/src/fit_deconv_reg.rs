@@ -14,7 +14,7 @@ pub struct DeconvRegArgs {
 
     /// bulk data files (`.parquet`, `.tsv.gz`, or `.csv.gz`)
     /// where the first column corresponds to gene names
-    #[arg(short = 'x', long, required = true)]
+    #[arg(short = 'x', long, required = true, value_delimiter = ',')]
     bulk_data_files: Vec<Box<str>>,
 
     /// single-cell data (`.zarr` or `.h5`)
