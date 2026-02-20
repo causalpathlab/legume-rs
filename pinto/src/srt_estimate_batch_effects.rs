@@ -56,6 +56,7 @@ pub struct EstimateBatchArgs {
     /// collapsing. Searches are over coarsened super-cell centroids,
     /// not individual cells, so this stays small.
     pub batch_knn: usize,
+    pub num_levels: usize,
 }
 
 /// Estimate per-gene batch effect multipliers (δ) via hierarchical
@@ -88,6 +89,7 @@ pub fn estimate_batch(
         &MultilevelParams {
             knn_super_cells: args.batch_knn,
             sort_dim: args.sort_dim,
+            num_levels: args.num_levels,
             ..MultilevelParams::new(proj_kn.nrows())
         },
     )?;

@@ -153,6 +153,7 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
             SrtCellPairsArgs {
                 knn: c.knn_spatial,
                 block_size: c.block_size,
+                reciprocal: c.reciprocal,
             },
         )?;
 
