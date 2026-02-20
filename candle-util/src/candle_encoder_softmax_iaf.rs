@@ -8,7 +8,6 @@ pub struct LogSoftmaxIAFEncoder {
     n_features: usize,
     n_topics: usize,
     n_modules: usize,
-    use_sparsemax: bool,
     feature_module: AggregateLinear,
     fc: StackLayers<Linear>,
     bn_z: BatchNorm,
@@ -16,7 +15,7 @@ pub struct LogSoftmaxIAFEncoder {
 }
 
 impl EncoderModuleT for LogSoftmaxIAFEncoder {
-    /// Returns (prob, kl) where prob is on the probability simplex
+    /// Returns (log_prob, kl) where log_prob is log-probabilities on the simplex
     fn forward_t(
         &self,
         x_nd: &Tensor,
@@ -24,12 +23,8 @@ impl EncoderModuleT for LogSoftmaxIAFEncoder {
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
         let (z_nk, kl) = self.latent_gaussian_with_kl(x_nd, x0_nd, train)?;
-        let prob = if self.use_sparsemax {
-            sparsemax(&z_nk)?
-        } else {
-            ops::softmax(&z_nk, z_nk.rank() - 1)?
-        };
-        Ok((prob, kl))
+        let log_prob = ops::log_softmax(&z_nk, z_nk.rank() - 1)?;
+        Ok((log_prob, kl))
     }
 
     fn dim_latent(&self) -> usize {
@@ -106,12 +101,6 @@ impl LogSoftmaxIAFEncoder {
 
         debug_assert!(!args.layers.is_empty());
 
-        // Sparsemax and IAF are mutually exclusive
-        debug_assert!(
-            !(args.use_sparsemax && args.n_transforms > 0),
-            "Sparsemax and IAF are mutually exclusive. Use sparsemax OR iaf_trans, not both."
-        );
-
         let feature_module =
             aggregate_linear_hard(args.n_features, args.n_modules, vb.pp("feature.module"))?;
 
@@ -136,7 +125,6 @@ impl LogSoftmaxIAFEncoder {
             n_features: args.n_features,
             n_topics: args.n_topics,
             n_modules: args.n_modules,
-            use_sparsemax: args.use_sparsemax,
             feature_module,
             fc,
             bn_z,
@@ -150,6 +138,5 @@ pub struct LogSoftmaxIAFEncoderArgs<'a> {
     pub n_topics: usize,
     pub n_modules: usize,
     pub layers: &'a [usize],
-    pub use_sparsemax: bool,
     pub n_transforms: usize,
 }
