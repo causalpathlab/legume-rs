@@ -210,7 +210,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     // 5. Gene module discovery via sketch + K-means
     let finest_cell_labels = &ml.all_cell_labels[ml.all_cell_labels.len() - 1];
-    let n_finest_clusters = ml.all_num_samples[ml.all_num_samples.len() - 1];
+    let n_finest_clusters = finest_cell_labels.iter().copied().max().unwrap_or(0) + 1;
 
     info!(
         "Gene module sketch ({} clusters, {} sketch dims)...",
