@@ -34,10 +34,11 @@ enum AdjMethod {
 pub struct JointTopicArgs {
     #[arg(
         required = true,
+        value_delimiter = ',',
         help = "Data files",
         long_help = "Data files to be processed.\n\
 		     Each file should be specified as a path.\n\
-		     Multiple files can be provided."
+		     Multiple files can be provided (space or comma separated)."
     )]
     data_files: Vec<Box<str>>,
 

@@ -481,7 +481,7 @@ pub struct SubsetRowsArgs {
 #[derive(Args, Debug)]
 pub struct AlignDataArgs {
     /// data file -- either `.zarr` or `.h5`
-    #[arg(required = true)]
+    #[arg(required = true, value_delimiter = ',')]
     data_files: Vec<Box<str>>,
 
     /// Data types (treating them as different rows)
@@ -1008,6 +1008,7 @@ pub struct FromZarrArgs {
 #[derive(Args, Debug)]
 pub struct MergeBackendArgs {
     #[arg(
+        value_delimiter = ',',
         help = "Input data files",
         long_help = "Data files to be merged into a single backend. \n\
 		     Provide one or more files in supported formats."
@@ -1190,7 +1191,7 @@ pub struct MergeMtxArgs {
 #[command(about)]
 pub struct RunSqueezeArgs {
     /// data files -- either `.zarr` or `.h5`
-    #[arg(required = true)]
+    #[arg(required = true, value_delimiter = ',')]
     data_files: Vec<Box<str>>,
 
     /// number of non-zero cutoff for rows
@@ -1298,6 +1299,7 @@ enum StatDim {
 pub struct RunStatArgs {
     #[arg(
         required = true,
+        value_delimiter = ',',
         help = "Input data files in '.zarr' or '.h5' format",
         long_help = "Provide data files in either '.zarr' or '.h5' format. \n\
 		     You can convert '.mtx' files to '.zarr' or '.h5' using\n\
