@@ -8,7 +8,6 @@ use candle_nn::{ops, BatchNorm, Linear, Module, ModuleT, VarBuilder};
 pub struct LogSoftmaxMultimodalEncoder {
     n_features: Vec<usize>,
     n_topics: usize,
-    use_sparsemax: bool,
     feature_module: Vec<AggregateLinear>,
     fc: Vec<StackLayers<Linear>>,
     bn_z: Vec<BatchNorm>,
@@ -17,7 +16,7 @@ pub struct LogSoftmaxMultimodalEncoder {
 }
 
 impl MultimodalEncoderModuleT for LogSoftmaxMultimodalEncoder {
-    /// Returns (prob, kl) where prob is on the probability simplex
+    /// Returns (log_prob, kl) where log_prob is log-probabilities on the simplex
     fn forward_t(
         &self,
         x_nd_vec: &[Tensor],
@@ -25,12 +24,8 @@ impl MultimodalEncoderModuleT for LogSoftmaxMultimodalEncoder {
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
         let (z_nk, kl) = self.latent_gaussian_with_kl(x_nd_vec, x0_nd_vec, train)?;
-        let prob = if self.use_sparsemax {
-            sparsemax(&z_nk)?
-        } else {
-            ops::softmax(&z_nk, z_nk.rank() - 1)?
-        };
-        Ok((prob, kl))
+        let log_prob = ops::log_softmax(&z_nk, z_nk.rank() - 1)?;
+        Ok((log_prob, kl))
     }
 
     fn dim_latent(&self) -> usize {
@@ -212,7 +207,6 @@ impl LogSoftmaxMultimodalEncoder {
         Ok(Self {
             n_features: args.n_features,
             n_topics: args.n_topics,
-            use_sparsemax: args.use_sparsemax,
             feature_module,
             fc,
             bn_z,
@@ -227,5 +221,4 @@ pub struct LogSoftmaxMultimodalEncoderArgs<'a> {
     pub n_topics: usize,
     pub n_modules: usize,
     pub layers: &'a [usize],
-    pub use_sparsemax: bool,
 }

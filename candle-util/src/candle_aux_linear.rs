@@ -194,18 +194,15 @@ impl SoftmaxLinear {
     ///
     /// log(Σ_k z_nk * β_kd) = logsumexp_k(log(z_nk) + log(β_kd))
     ///
-    /// Numerically stable — avoids exp→log roundtrip.
-    pub fn forward_log(&self, h_nk: &Tensor) -> Result<Tensor> {
-        let log_w_kd = match *h_nk.dims() {
+    /// Input `log_h_nk` is already in log-space (from encoder's log_softmax).
+    pub fn forward_log(&self, log_h_nk: &Tensor) -> Result<Tensor> {
+        let log_w_kd = match *log_h_nk.dims() {
             [b1, b2, _, _] => self.biased_weight_kd()?.broadcast_left((b1, b2))?,
             [bsize, _, _] => self.biased_weight_kd()?.broadcast_left(bsize)?,
             _ => self.biased_weight_kd()?,
         };
 
-        // log(z_nk) + log(β_kd) via broadcasting: [N,K,1] + [K,D] → [N,K,D]
-        let eps = 1e-20;
-        let log_h = (h_nk + eps)?.log()?; // [N, K]
-        let log_h = log_h.unsqueeze(2)?; // [N, K, 1]
+        let log_h = log_h_nk.unsqueeze(2)?; // [N, K, 1] — already log-space
         let log_w = log_w_kd.unsqueeze(0)?; // [1, K, D]
         let log_terms = log_h.broadcast_add(&log_w)?; // [N, K, D]
 
@@ -215,8 +212,9 @@ impl SoftmaxLinear {
 }
 
 impl Module for SoftmaxLinear {
-    fn forward(&self, h_nk: &Tensor) -> Result<Tensor> {
-        self.forward_log(h_nk)?.exp()
+    /// Input `log_h_nk` is log-probabilities from the encoder.
+    fn forward(&self, log_h_nk: &Tensor) -> Result<Tensor> {
+        self.forward_log(log_h_nk)?.exp()
     }
 }
 
@@ -277,9 +275,10 @@ impl SparsemaxLinear {
 
     /// Log-space forward: log(recon_nd) = log(z_nk @ sparsemax(W) + eps)
     ///
+    /// Input `log_h_nk` is log-probabilities; exp to get probs for matmul.
     /// Sparsemax has exact zeros so we can't use pure log-space logsumexp.
-    /// Instead we compute the matmul on probability-scale and take log.
-    pub fn forward_log(&self, h_nk: &Tensor) -> Result<Tensor> {
+    pub fn forward_log(&self, log_h_nk: &Tensor) -> Result<Tensor> {
+        let h_nk = log_h_nk.exp()?;
         let w_kd = match *h_nk.dims() {
             [b1, b2, _, _] => self.biased_weight_kd()?.broadcast_left((b1, b2))?,
             [bsize, _, _] => self.biased_weight_kd()?.broadcast_left(bsize)?,
@@ -291,7 +290,9 @@ impl SparsemaxLinear {
 }
 
 impl Module for SparsemaxLinear {
-    fn forward(&self, h_nk: &Tensor) -> Result<Tensor> {
+    /// Input `log_h_nk` is log-probabilities; exp to get probs for matmul.
+    fn forward(&self, log_h_nk: &Tensor) -> Result<Tensor> {
+        let h_nk = log_h_nk.exp()?;
         let w_kd = match *h_nk.dims() {
             [b1, b2, _, _] => self.biased_weight_kd()?.broadcast_left((b1, b2))?,
             [bsize, _, _] => self.biased_weight_kd()?.broadcast_left(bsize)?,

@@ -305,23 +305,9 @@ pub struct JointTopicArgs {
     )]
     preload_data: bool,
 
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Use sparsemax instead of softmax",
-        long_help = "Use sparsemax activation instead of softmax.\n\
-		     Sparsemax can output exact zeros for sparse topic assignments.\n\
-		     May help with more decisive cell type annotations.\n\
-		     Note: Mutually exclusive with --iaf-trans (IAF will be disabled)."
-    )]
-    use_sparsemax: bool,
 }
 
 pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
-    if args.use_sparsemax {
-        info!("Using sparsemax activation for sparse topic assignments");
-    }
-
     // 1. Read the data with batch membership
     let SparseStackWithBatch {
         mut data_stack,
@@ -437,7 +423,6 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             n_topics,
             n_modules,
             layers: &args.encoder_layers,
-            use_sparsemax: args.use_sparsemax,
         },
         param_builder.clone(),
     )?;
@@ -680,8 +665,8 @@ where
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let (z_nk, _) = encoder.forward_t(&x_vec, &x0_vec, false)?;
-    let z_nk = z_nk.to_device(&candle_core::Device::Cpu)?;
+    let (log_z_nk, _) = encoder.forward_t(&x_vec, &x0_vec, false)?;
+    let z_nk = log_z_nk.exp()?.to_device(&candle_core::Device::Cpu)?;
     Ok((lb, Mat::from_tensor(&z_nk)?))
 }
 
@@ -743,8 +728,8 @@ where
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let (z_nk, _) = encoder.forward_t(&x_vec, &x0_vec, false)?;
-    let z_nk = z_nk.to_device(&candle_core::Device::Cpu)?;
+    let (log_z_nk, _) = encoder.forward_t(&x_vec, &x0_vec, false)?;
+    let z_nk = log_z_nk.exp()?.to_device(&candle_core::Device::Cpu)?;
     Ok((lb, Mat::from_tensor(&z_nk)?))
 }
 

@@ -19,12 +19,6 @@ pub trait EncoderModuleT {
     ) -> Result<(Tensor, Tensor)>;
 
     fn dim_latent(&self) -> usize;
-
-    /// Set whether to use sparsemax instead of softmax
-    /// Default implementation does nothing (for encoders that don't support this)
-    fn set_use_sparsemax(&mut self, _use_sparsemax: bool) {
-        // Default: no-op
-    }
 }
 
 pub trait MultimodalEncoderModuleT {
