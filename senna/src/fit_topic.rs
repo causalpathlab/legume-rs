@@ -66,7 +66,7 @@ pub struct TopicArgs {
 		     Specify the output file or prefix for generated files:\n\
 		     - {out}.delta.parquet\n\
 		     - {out}.dictionary.parquet\n\
-		     - {out}.latent.parquet\n"
+		     - {out}.latent.parquet (log-softmax topic proportions)\n"
     )]
     out: Box<str>,
 
@@ -495,8 +495,10 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         )?]
     };
 
-    // For delta output and latent evaluation, use the finest level
-    let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
+    // For delta output and latent evaluation, use the finest level.
+    // collapsed_levels[0] is the finest (most groups), matching the group
+    // assignments stored in data_vec by assign_groups().
+    let finest_collapsed: &CollapsedOut = collapsed_levels.first().unwrap();
 
     let batch_db = finest_collapsed.delta.as_ref();
 
@@ -1113,8 +1115,7 @@ where
         log_z_nk
     };
 
-    // exp() to get probabilities before converting to Mat
-    let z_nk = log_z_nk.exp()?.to_device(&candle_core::Device::Cpu)?;
+    let z_nk = log_z_nk.to_device(&candle_core::Device::Cpu)?;
     Ok((lb, Mat::from_tensor(&z_nk)?))
 }
 
@@ -1162,7 +1163,6 @@ where
         log_z_nk
     };
 
-    // exp() to get probabilities before converting to Mat
-    let z_nk = log_z_nk.exp()?.to_device(&candle_core::Device::Cpu)?;
+    let z_nk = log_z_nk.to_device(&candle_core::Device::Cpu)?;
     Ok((lb, Mat::from_tensor(&z_nk)?))
 }
