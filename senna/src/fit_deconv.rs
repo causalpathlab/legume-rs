@@ -33,7 +33,7 @@ pub struct DeconvArgs {
 
     /// bulk data files (`.parquet`, `.tsv.gz`, `.csv.gz`)
     /// where the first column corresponds to gene names
-    #[arg(short = 'x', long, required = true)]
+    #[arg(short = 'x', long, required = true, value_delimiter = ',')]
     bulk_data_files: Vec<Box<str>>,
 
     /// random projection dimension to project the data.
