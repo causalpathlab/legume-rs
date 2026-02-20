@@ -165,7 +165,7 @@ pub struct SrtInputArgs {
     #[arg(
         short = 'k',
         long,
-        default_value_t = 10,
+        default_value_t = 5,
         help = "Spatial KNN: neighbours per cell for cell-pair graph",
         long_help = "Number of nearest neighbours per cell for building the spatial\n\
                        cell-pair graph. Each cell connects to its K closest neighbours\n\
@@ -175,6 +175,18 @@ pub struct SrtInputArgs {
                        higher values smooth over larger neighbourhoods."
     )]
     pub knn_spatial: usize,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Use reciprocal (mutual) KNN matching for spatial graph",
+        long_help = "Use reciprocal (mutual) KNN matching for the spatial cell graph.\n\
+                       By default, union matching is used: an edge (i,j) exists if i is\n\
+                       in j's KNN list OR j is in i's KNN list. With reciprocal matching,\n\
+                       both must be in each other's KNN list, producing a sparser graph\n\
+                       with higher-confidence edges."
+    )]
+    pub reciprocal: bool,
 }
 
 impl SrtInputArgs {

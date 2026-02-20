@@ -186,15 +186,14 @@ impl LinkGibbsSampler {
         total_moves
     }
 
-    /// Memoized EM Gibbs: parallel sequential-Gibbs per connected component
+    /// Memoized EM Gibbs: parallel sequential-Gibbs per balanced partition
     /// with memoized sufficient statistics.
     ///
-    /// Maintains global stats as the sum of per-component memoized stats.
-    /// Each sweep: components run sequential Gibbs in parallel using a frozen
+    /// Edges are partitioned by connected component and then large components
+    /// are split so that partition sizes are roughly `total_edges / n_threads`.
+    /// Each sweep: partitions run sequential Gibbs in parallel using a frozen
     /// snapshot of global stats for scoring, then global stats are patched
-    /// with per-component deltas (new_local - old_local). No full recompute.
-    ///
-    /// Falls through to `run_parallel` if the graph has only 1 component.
+    /// with per-partition deltas (new_local - old_local). No full recompute.
     ///
     /// Returns the total number of edge moves.
     pub fn run_components_em(
@@ -210,14 +209,8 @@ impl LinkGibbsSampler {
     ) -> usize {
         let (comp_labels, n_comp) = connected_components(graph);
 
-        if n_comp <= 1 {
-            let mut stats = LinkCommunityStats::from_profiles(profiles, k, membership);
-            let moves = self.run_parallel(&mut stats, profiles, a0, b0, num_sweeps);
-            membership.copy_from_slice(&stats.membership);
-            return moves;
-        }
-
-        let comp_edges = partition_edges_by_component(edges, &comp_labels, n_comp);
+        let comp_edges = partition_edges_balanced(edges, &comp_labels, n_comp);
+        let n_parts = comp_edges.len();
 
         // Build sub-profile stores (reused across sweeps)
         let sub_stores: Vec<LinkProfileStore> = comp_edges
@@ -226,8 +219,9 @@ impl LinkGibbsSampler {
             .collect();
 
         info!(
-            "Memoized EM Gibbs: {} components (edges: {})",
+            "Memoized EM Gibbs: {} components -> {} partitions (edges: {})",
             n_comp,
+            n_parts,
             comp_edges
                 .iter()
                 .map(|e| e.len().to_string())
@@ -235,7 +229,7 @@ impl LinkGibbsSampler {
                 .join(", ")
         );
 
-        // Initialize global stats and memoized per-component stats
+        // Initialize global stats and memoized per-partition stats
         let mut global_stats = LinkCommunityStats::from_profiles(profiles, k, membership);
 
         let mut memo_stats: Vec<_> = comp_edges
@@ -247,21 +241,22 @@ impl LinkGibbsSampler {
         let base_seed = self.rng.random::<u64>() | 1;
 
         let pb = new_progress_bar(
-            num_sweeps as u64,
-            "EM Gibbs {bar:40} {pos}/{len} sweeps ({eta})",
+            (num_sweeps * n_parts) as u64,
+            "EM Gibbs {bar:40} {pos}/{len} jobs ({eta})",
         );
 
         for sweep in 0..num_sweeps {
             let sweep_seed = base_seed.wrapping_mul(sweep as u64 + 1);
 
-            // E-step: parallel per component using frozen global stats for scoring
-            // Each component builds local stats = global stats (for scoring),
+            // E-step: parallel per partition using frozen global stats for scoring
+            // Each partition builds local stats = global stats (for scoring),
             // but only iterates over its own edges.
-            let local_results: Vec<ComponentResult> = (0..n_comp)
+            let local_results: Vec<ComponentResult> = (0..n_parts)
                 .into_par_iter()
                 .map(|c| {
                     let indices = &comp_edges[c];
                     if indices.is_empty() {
+                        pb.inc(1);
                         return ComponentResult::empty(k, profiles.m);
                     }
 
@@ -274,7 +269,7 @@ impl LinkGibbsSampler {
                         gene_sum: global_stats.gene_sum.clone(),
                         size_sum: global_stats.size_sum.clone(),
                         edge_count: global_stats.edge_count.clone(),
-                        // Local membership for this component's edges only
+                        // Local membership for this partition's edges only
                         membership: indices.iter().map(|&e| membership[e]).collect(),
                     };
 
@@ -301,13 +296,15 @@ impl LinkGibbsSampler {
                         }
                     }
 
-                    // Compute new component-level stats after this sweep
+                    // Compute new partition-level stats after this sweep
                     let new_comp_stats = LinkCommunityStats::component_stats(
                         &sub_stores[c],
                         k,
                         &(0..n).collect::<Vec<_>>(),
                         &local_stats.membership,
                     );
+
+                    pb.inc(1);
 
                     ComponentResult {
                         membership: local_stats.membership,
@@ -339,22 +336,19 @@ impl LinkGibbsSampler {
                 );
                 global_stats.apply_delta(old, new);
 
-                // Update memoized stats for this component
+                // Update memoized stats for this partition
                 memo_stats[c] = result.new_stats;
             }
-            pb.inc(1);
         }
         pb.finish_and_clear();
 
         total_moves
     }
 
-    /// Memoized greedy finalization parallelized by connected components.
+    /// Memoized greedy finalization parallelized by balanced partitions.
     ///
     /// Same memoized approach as `run_components_em` but uses argmax instead
-    /// of sampling. Stops early if no moves across all components.
-    ///
-    /// Falls through to `run_greedy` if graph has only 1 component.
+    /// of sampling. Stops early if no moves across all partitions.
     ///
     /// Returns the total number of edge moves.
     pub fn run_greedy_by_components(
@@ -370,14 +364,9 @@ impl LinkGibbsSampler {
     ) -> usize {
         let (comp_labels, n_comp) = connected_components(graph);
 
-        if n_comp <= 1 {
-            let mut stats = LinkCommunityStats::from_profiles(profiles, k, membership);
-            let moves = self.run_greedy(&mut stats, profiles, a0, b0, max_sweeps);
-            membership.copy_from_slice(&stats.membership);
-            return moves;
-        }
+        let comp_edges = partition_edges_balanced(edges, &comp_labels, n_comp);
+        let n_parts = comp_edges.len();
 
-        let comp_edges = partition_edges_by_component(edges, &comp_labels, n_comp);
         let sub_stores: Vec<LinkProfileStore> = comp_edges
             .iter()
             .map(|indices| profiles.subset(indices))
@@ -393,16 +382,17 @@ impl LinkGibbsSampler {
         let mut total_moves = 0usize;
 
         let pb = new_progress_bar(
-            max_sweeps as u64,
-            "Greedy(CC) {bar:40} {pos}/{len} sweeps ({eta})",
+            (max_sweeps * n_parts) as u64,
+            "Greedy {bar:40} {pos}/{len} jobs ({eta})",
         );
 
         for _sweep in 0..max_sweeps {
-            let local_results: Vec<ComponentResult> = (0..n_comp)
+            let local_results: Vec<ComponentResult> = (0..n_parts)
                 .into_par_iter()
                 .map(|c| {
                     let indices = &comp_edges[c];
                     if indices.is_empty() {
+                        pb.inc(1);
                         return ComponentResult::empty(k, profiles.m);
                     }
 
@@ -444,6 +434,8 @@ impl LinkGibbsSampler {
                         &local_stats.membership,
                     );
 
+                    pb.inc(1);
+
                     ComponentResult {
                         membership: local_stats.membership,
                         new_stats: new_comp_stats,
@@ -475,7 +467,6 @@ impl LinkGibbsSampler {
             }
 
             total_moves += sweep_moves;
-            pb.inc(1);
             if sweep_moves == 0 {
                 break;
             }
@@ -517,6 +508,36 @@ fn partition_edges_by_component(
         comp_edges[comp_labels[i]].push(e);
     }
     comp_edges
+}
+
+/// Balanced partitioning: partition by connected component, then split large
+/// components so no partition exceeds `total_edges / n_threads`.
+///
+/// This ensures the memoized EM approach works even for single-component graphs
+/// and avoids bottlenecks from imbalanced component sizes.
+fn partition_edges_balanced(
+    edges: &[(usize, usize)],
+    comp_labels: &[usize],
+    n_comp: usize,
+) -> Vec<Vec<usize>> {
+    let n_threads = rayon::current_num_threads().max(1);
+    let target_size = (edges.len() / n_threads).max(256);
+
+    let mut comp_edges = partition_edges_by_component(edges, comp_labels, n_comp);
+
+    let mut balanced = Vec::new();
+    for group in comp_edges.drain(..) {
+        if group.len() <= target_size {
+            if !group.is_empty() {
+                balanced.push(group);
+            }
+        } else {
+            for chunk in group.chunks(target_size) {
+                balanced.push(chunk.to_vec());
+            }
+        }
+    }
+    balanced
 }
 
 /// Pick the index with the highest value.
@@ -776,7 +797,7 @@ mod tests {
         );
     }
 
-    /// Test that memoized EM falls through to run_parallel on single component.
+    /// Test memoized EM on a single-component graph (balanced partitioning splits it).
     #[test]
     fn test_memoized_em_single_component() {
         let (store, _true_labels) = make_planted_profiles(100, 10);

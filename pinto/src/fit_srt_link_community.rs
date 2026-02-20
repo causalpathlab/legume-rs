@@ -143,6 +143,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         SrtCellPairsArgs {
             knn: c.knn_spatial,
             block_size: c.block_size,
+            reciprocal: c.reciprocal,
         },
     )?;
 
@@ -161,6 +162,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             sort_dim: batch_sort_dim,
             block_size: c.block_size,
             batch_knn: c.batch_knn,
+            num_levels: c.num_levels,
         },
         &c.out,
     )?;
@@ -360,6 +362,13 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     fine_stats.recompute(&edge_profiles);
     let final_membership = fine_stats.membership.clone();
 
+    // Display link community size histogram
+    if log::log_enabled!(log::Level::Info) {
+        eprintln!();
+        eprintln!("{}", link_community_histogram(&final_membership, k, 50));
+        eprintln!();
+    }
+
     // 9. Extract and write outputs
     let gene_names = data_vec.row_names()?;
     let cell_names = data_vec.column_names()?;
@@ -449,6 +458,65 @@ fn write_link_communities(
     writer.close()?;
 
     Ok(())
+}
+
+/// ASCII histogram of link community sizes, showing communities with > 1% of edges.
+fn link_community_histogram(membership: &[usize], k: usize, max_width: usize) -> String {
+    let n = membership.len();
+    let mut sizes = vec![0usize; k];
+    for &c in membership {
+        sizes[c] += 1;
+    }
+
+    // Sort non-empty communities by size descending
+    let mut ranked: Vec<(usize, usize)> = sizes
+        .iter()
+        .enumerate()
+        .filter(|(_, &s)| s > 0)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|(id, &s)| (id, s))
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let max_size = ranked.first().map(|&(_, s)| s).unwrap_or(1);
+    let min_edges = n / 100; // 1% threshold
+
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Link communities ({} edges, {} non-empty of {}):",
+        n,
+        ranked.len(),
+        k
+    ));
+    lines.push(String::new());
+
+    let mut shown = 0;
+    for &(community_id, size) in &ranked {
+        if size <= min_edges {
+            break;
+        }
+        let pct = 100.0 * size as f64 / n as f64;
+        let bar_len = ((size as f64 / max_size as f64) * max_width as f64) as usize;
+        let bar = "\u{2588}".repeat(bar_len.max(1));
+        lines.push(format!(
+            "  Community {:3}  {:>7} edges ({:>5.1}%)  {}",
+            community_id, size, pct, bar
+        ));
+        shown += 1;
+    }
+
+    let hidden = ranked.len() - shown;
+    if hidden > 0 {
+        let hidden_edges: usize = ranked[shown..].iter().map(|&(_, s)| s).sum();
+        let hidden_pct = 100.0 * hidden_edges as f64 / n as f64;
+        lines.push(format!(
+            "  ... and {} more ({} edges, {:.1}%)",
+            hidden, hidden_edges, hidden_pct
+        ));
+    }
+
+    lines.join("\n")
 }
 
 /// Write score trace to parquet.
