@@ -63,8 +63,8 @@ fn planted_partition_network(
     }
 
     let mut graph = Graph::with_capacity(n, edge_list.len());
-    for i in 0..n {
-        graph.add_node(degree[i]);
+    for &deg in degree.iter().take(n) {
+        graph.add_node(deg);
     }
     for &(i, j, w) in &edge_list {
         graph.add_edge((i as u32).into(), (j as u32).into(), w);
@@ -115,7 +115,7 @@ fn adjusted_rand_index(labels_a: &[usize], labels_b: &[usize]) -> f64 {
 fn run_leiden(network: &Network, n: usize, resolution: f64) -> Vec<usize> {
     // Scale resolution to CPM form: gamma / (2m)
     let total_edge_weight: f64 = (0..n)
-        .flat_map(|i| network.neighbors(i).map(|(_, w)| w as f64))
+        .flat_map(|i| network.neighbors(i).map(|(_, w)| w))
         .sum::<f64>()
         / 2.0;
     let resolution_scaled = resolution / (2.0 * total_edge_weight);
@@ -152,7 +152,7 @@ fn run_hsblock(
 
     let mut hsblock = Hsblock::new(options);
     let mut clustering = SimpleClustering::init_different_clusters(n);
-    hsblock.iterate(&network, &mut clustering);
+    hsblock.iterate(network, &mut clustering);
 
     (0..n).map(|i| clustering.get(i)).collect()
 }

@@ -298,8 +298,7 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
     let mut sorted_results = block_results;
     sorted_results.sort_by_key(|(idx, _)| *idx);
 
-    let variant_rows =
-        build_sumstat_variant_rows(&sorted_results, &blocks, &zscores, t);
+    let variant_rows = build_sumstat_variant_rows(&sorted_results, &blocks, &zscores, t);
     write_variant_results(
         &format!("{}.results.bed.gz", args.output),
         &["trait_idx"],

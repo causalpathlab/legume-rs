@@ -16,7 +16,9 @@ use fagioli::io::cell_annotations::{
 };
 use fagioli::io::covariates::load_covariate_files;
 use fagioli::io::gene_annotations::{load_bed_annotations, load_gtf};
-use fagioli::io::results::{write_gene_summary, write_parameters, write_variant_results, VariantRow};
+use fagioli::io::results::{
+    write_gene_summary, write_parameters, write_variant_results, VariantRow,
+};
 use fagioli::mapping::map_qtl_helpers::*;
 use fagioli::mapping::pseudobulk::{collapse_pseudobulk, Membership};
 use fagioli::sgvb::{fit_block_weighted, FitConfig, ModelType};
@@ -405,8 +407,11 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
     };
 
     // ── Step 11: Write output ────────────────────────────────────────────
-    let variant_rows =
-        build_qtl_variant_rows(&gene_results, &collapsed.cell_type_names, eb_weights.as_deref());
+    let variant_rows = build_qtl_variant_rows(
+        &gene_results,
+        &collapsed.cell_type_names,
+        eb_weights.as_deref(),
+    );
     write_variant_results(
         &format!("{}.results.bed.gz", args.output),
         &["gene_id", "cell_type"],

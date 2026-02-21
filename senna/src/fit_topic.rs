@@ -580,15 +580,18 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         DecoderType::ZeroInflated => {
             let decoder = ZITopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
+            let train_config = ProgressiveTrainConfig {
+                parameters: &parameters,
+                dev: &dev,
+                args,
+                feature_selection: selected_features.as_ref(),
+                stop: &stop,
+            };
             let scores = train_encoder_decoder_progressive(
                 &collapsed_levels,
                 &mut encoder,
                 &decoder,
-                &parameters,
-                &dev,
-                args,
-                selected_features.as_ref(),
-                &stop,
+                &train_config,
             )?;
 
             info!("Writing down the model parameters");
@@ -620,16 +623,19 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             );
 
             info!("Writing down the latent states");
+            let eval_config = EvaluateLatentConfig {
+                dev: &dev,
+                adj_method: &args.adj_method,
+                minibatch_size: args.minibatch_size,
+                feature_selection: selected_features.as_ref(),
+                decoder: Some(&decoder),
+                refine_config: refine_config.as_ref(),
+            };
             let z_nk = evaluate_latent_by_encoder(
                 &data_vec,
                 &encoder,
                 finest_collapsed,
-                &dev,
-                &args.adj_method,
-                args.minibatch_size,
-                selected_features.as_ref(),
-                Some(&decoder),
-                refine_config.as_ref(),
+                &eval_config,
             )?;
 
             (scores, z_nk)
@@ -638,15 +644,18 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             let decoder =
                 SparseTopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
+            let train_config = ProgressiveTrainConfig {
+                parameters: &parameters,
+                dev: &dev,
+                args,
+                feature_selection: selected_features.as_ref(),
+                stop: &stop,
+            };
             let scores = train_encoder_decoder_progressive(
                 &collapsed_levels,
                 &mut encoder,
                 &decoder,
-                &parameters,
-                &dev,
-                args,
-                selected_features.as_ref(),
-                &stop,
+                &train_config,
             )?;
 
             info!("Writing down the model parameters");
@@ -661,16 +670,19 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 )?;
 
             info!("Writing down the latent states");
+            let eval_config = EvaluateLatentConfig {
+                dev: &dev,
+                adj_method: &args.adj_method,
+                minibatch_size: args.minibatch_size,
+                feature_selection: selected_features.as_ref(),
+                decoder: Some(&decoder),
+                refine_config: refine_config.as_ref(),
+            };
             let z_nk = evaluate_latent_by_encoder(
                 &data_vec,
                 &encoder,
                 finest_collapsed,
-                &dev,
-                &args.adj_method,
-                args.minibatch_size,
-                selected_features.as_ref(),
-                Some(&decoder),
-                refine_config.as_ref(),
+                &eval_config,
             )?;
 
             (scores, z_nk)
@@ -678,15 +690,18 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         DecoderType::Flat => {
             let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
+            let train_config = ProgressiveTrainConfig {
+                parameters: &parameters,
+                dev: &dev,
+                args,
+                feature_selection: selected_features.as_ref(),
+                stop: &stop,
+            };
             let scores = train_encoder_decoder_progressive(
                 &collapsed_levels,
                 &mut encoder,
                 &decoder,
-                &parameters,
-                &dev,
-                args,
-                selected_features.as_ref(),
-                &stop,
+                &train_config,
             )?;
 
             info!("Writing down the model parameters");
@@ -701,16 +716,19 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 )?;
 
             info!("Writing down the latent states");
+            let eval_config = EvaluateLatentConfig {
+                dev: &dev,
+                adj_method: &args.adj_method,
+                minibatch_size: args.minibatch_size,
+                feature_selection: selected_features.as_ref(),
+                decoder: Some(&decoder),
+                refine_config: refine_config.as_ref(),
+            };
             let z_nk = evaluate_latent_by_encoder(
                 &data_vec,
                 &encoder,
                 finest_collapsed,
-                &dev,
-                &args.adj_method,
-                args.minibatch_size,
-                selected_features.as_ref(),
-                Some(&decoder),
-                refine_config.as_ref(),
+                &eval_config,
             )?;
 
             (scores, z_nk)
@@ -776,6 +794,15 @@ impl TrainScores {
     }
 }
 
+/// Configuration for progressive training
+struct ProgressiveTrainConfig<'a> {
+    parameters: &'a candle_nn::VarMap,
+    dev: &'a Device,
+    args: &'a TopicArgs,
+    feature_selection: Option<&'a FeatureSelection>,
+    stop: &'a AtomicBool,
+}
+
 /// Progressive multi-level VAE training.
 ///
 /// Allocates epochs across levels with weights inversely proportional to
@@ -787,18 +814,14 @@ fn train_encoder_decoder_progressive<Enc, Dec>(
     collapsed_levels: &[CollapsedOut],
     encoder: &mut Enc,
     decoder: &Dec,
-    parameters: &candle_nn::VarMap,
-    dev: &Device,
-    args: &TopicArgs,
-    feature_selection: Option<&FeatureSelection>,
-    stop: &AtomicBool,
+    config: &ProgressiveTrainConfig,
 ) -> anyhow::Result<TrainScores>
 where
     Enc: EncoderModuleT,
     Dec: DecoderModuleT,
 {
     let num_levels = collapsed_levels.len();
-    let total_epochs = args.epochs;
+    let total_epochs = config.args.epochs;
 
     // Compute per-level epoch allocation: w[i] = num_levels - i
     // Coarse levels are cheap per epoch, so train longer there for
@@ -818,7 +841,7 @@ where
         level_epochs.iter().sum::<usize>()
     );
 
-    let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate as f64)?;
+    let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.args.learning_rate as f64)?;
 
     let total_actual_epochs: usize = level_epochs.iter().sum();
     let pb = ProgressBar::new(total_actual_epochs as u64);
@@ -838,17 +861,17 @@ where
             collapsed.mu_observed.ncols(),
         );
 
-        for epoch in (0..level_ep).step_by(args.jitter_interval) {
+        for epoch in (0..level_ep).step_by(config.args.jitter_interval) {
             let mut mixed_nd = collapsed.mu_observed.posterior_sample()?.transpose();
 
-            if let Some(sel) = feature_selection {
+            if let Some(sel) = config.feature_selection {
                 mixed_nd = mixed_nd.select_columns(&sel.selected_indices);
             }
 
             let clean_nd = collapsed.mu_adjusted.as_ref().map(|x| {
                 let mut ret: Mat = x.posterior_sample().unwrap();
                 ret = ret.transpose();
-                if let Some(sel) = feature_selection {
+                if let Some(sel) = config.feature_selection {
                     ret = ret.select_columns(&sel.selected_indices);
                 }
                 ret
@@ -857,7 +880,7 @@ where
             let batch_nd = collapsed.mu_residual.as_ref().map(|x| {
                 let mut ret: Mat = x.posterior_sample().unwrap();
                 ret = ret.transpose();
-                if let Some(sel) = feature_selection {
+                if let Some(sel) = config.feature_selection {
                     ret = ret.select_columns(&sel.selected_indices);
                 }
                 ret
@@ -880,28 +903,28 @@ where
                 output_null: None,
             })?;
 
-            data_loader.shuffle_minibatch(args.minibatch_size)?;
+            data_loader.shuffle_minibatch(config.args.minibatch_size)?;
 
-            let kl_weight = if args.kl_warmup_epochs > 0.0 {
-                1.0 - (-(global_epoch as f64) / args.kl_warmup_epochs).exp()
+            let kl_weight = if config.args.kl_warmup_epochs > 0.0 {
+                1.0 - (-(global_epoch as f64) / config.args.kl_warmup_epochs).exp()
             } else {
                 1.0
             };
 
-            let jitter_end = args.jitter_interval.min(level_ep - epoch);
+            let jitter_end = config.args.jitter_interval.min(level_ep - epoch);
             for jitter in 0..jitter_end {
                 let mut llik_tot = 0f32;
                 let mut kl_tot = 0f32;
                 let mut count_tot = 0f32;
 
                 for b in 0..data_loader.num_minibatch() {
-                    let mb = data_loader.minibatch_shuffled(b, &dev)?;
+                    let mb = data_loader.minibatch_shuffled(b, config.dev)?;
                     let (log_z_nk, kl) =
                         encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
 
                     // Smoothing in log-space: exp→mix→log
-                    let log_z_nk = if args.topic_smoothing > 0.0 {
-                        let alpha = args.topic_smoothing;
+                    let log_z_nk = if config.args.topic_smoothing > 0.0 {
+                        let alpha = config.args.topic_smoothing;
                         let kk = log_z_nk.dim(1)? as f64;
                         ((log_z_nk.exp()? * (1.0 - alpha))? + alpha / kk)?.log()?
                     } else {
@@ -942,7 +965,7 @@ where
                     kl_avg
                 );
 
-                if stop.load(Ordering::SeqCst) {
+                if config.stop.load(Ordering::SeqCst) {
                     pb.finish_and_clear();
                     info!(
                         "Stopping training early at level {}/{}, epoch {}",
@@ -967,16 +990,21 @@ where
     })
 }
 
+/// Configuration for latent evaluation by encoder
+pub(crate) struct EvaluateLatentConfig<'a, Dec> {
+    pub dev: &'a Device,
+    pub adj_method: &'a AdjMethod,
+    pub minibatch_size: usize,
+    pub feature_selection: Option<&'a FeatureSelection>,
+    pub decoder: Option<&'a Dec>,
+    pub refine_config: Option<&'a TopicRefinementConfig>,
+}
+
 pub(crate) fn evaluate_latent_by_encoder<Enc, Dec>(
     data_vec: &SparseIoVec,
     encoder: &Enc,
     collapsed: &CollapsedOut,
-    dev: &Device,
-    adj_method: &AdjMethod,
-    minibatch_size: usize,
-    feature_selection: Option<&FeatureSelection>,
-    decoder: Option<&Dec>,
-    refine_config: Option<&TopicRefinementConfig>,
+    config: &EvaluateLatentConfig<Dec>,
 ) -> anyhow::Result<Mat>
 where
     Enc: EncoderModuleT + Send + Sync,
@@ -985,57 +1013,57 @@ where
     let ntot = data_vec.num_columns();
     let kk = encoder.dim_latent();
 
-    let block_size = minibatch_size;
+    let block_size = config.minibatch_size;
 
     let jobs = create_jobs(ntot, Some(block_size));
     let njobs = jobs.len() as u64;
-    let delta = match adj_method {
+    let delta = match config.adj_method {
         AdjMethod::Batch => collapsed.delta.as_ref(),
         AdjMethod::Residual => collapsed.mu_residual.as_ref(),
     }
     .map(|x| {
         let mut delta_db = x.posterior_mean().clone();
-        if let Some(sel) = feature_selection {
+        if let Some(sel) = config.feature_selection {
             delta_db = delta_db.select_rows(&sel.selected_indices);
         }
         delta_db
     })
     .map(|delta_db| {
         delta_db
-            .to_tensor(dev)
+            .to_tensor(config.dev)
             .expect("delta to tensor")
             .transpose(0, 1)
             .expect("transpose")
     });
 
+    let block_config = EvaluateBlockConfig {
+        dev: config.dev,
+        delta: delta.as_ref(),
+        feature_selection: config.feature_selection,
+        decoder: config.decoder,
+        refine_config: config.refine_config,
+    };
+
     let eval_block = |block| -> anyhow::Result<(usize, Mat)> {
-        match adj_method {
+        match config.adj_method {
             AdjMethod::Residual => evaluate_with_residuals(
                 block,
                 data_vec,
                 encoder,
-                dev,
-                delta.as_ref(),
-                feature_selection,
-                decoder,
-                refine_config,
+                &block_config,
             ),
             AdjMethod::Batch => evaluate_with_batch(
                 block,
                 data_vec,
                 encoder,
-                dev,
-                delta.as_ref(),
-                feature_selection,
-                decoder,
-                refine_config,
+                &block_config,
             ),
         }
     };
 
     // GPU forward passes are not thread-safe — run sequentially on Metal/CUDA,
     // parallel on CPU
-    let mut chunks: Vec<(usize, Mat)> = if dev.is_cpu() {
+    let mut chunks: Vec<(usize, Mat)> = if config.dev.is_cpu() {
         jobs.par_iter()
             .progress_count(njobs)
             .map(|&block| eval_block(block))
@@ -1066,27 +1094,32 @@ where
     Ok(ret)
 }
 
+/// Configuration for block-wise evaluation
+pub(crate) struct EvaluateBlockConfig<'a, Dec> {
+    pub dev: &'a Device,
+    pub delta: Option<&'a Tensor>,
+    pub feature_selection: Option<&'a FeatureSelection>,
+    pub decoder: Option<&'a Dec>,
+    pub refine_config: Option<&'a TopicRefinementConfig>,
+}
+
 pub(crate) fn evaluate_with_batch<Enc, Dec>(
     block: (usize, usize),
     data_vec: &SparseIoVec,
     encoder: &Enc,
-    dev: &Device,
-    delta_bd: Option<&Tensor>,
-    feature_selection: Option<&FeatureSelection>,
-    decoder: Option<&Dec>,
-    refine_config: Option<&TopicRefinementConfig>,
+    config: &EvaluateBlockConfig<Dec>,
 ) -> anyhow::Result<(usize, Mat)>
 where
     Enc: EncoderModuleT,
     Dec: DecoderModuleT,
 {
     let (lb, ub) = block;
-    let x0_nd = delta_bd.map(|delta_bm| {
+    let x0_nd = config.delta.map(|delta_bm| {
         let batches = data_vec
             .get_batch_membership(lb..ub)
             .into_iter()
             .map(|x| x as u32);
-        let batches = Tensor::from_iter(batches, dev).unwrap();
+        let batches = Tensor::from_iter(batches, config.dev).unwrap();
         delta_bm.index_select(&batches, 0).expect("expand delta")
     });
 
@@ -1094,16 +1127,16 @@ where
     let mut x_dn = data_vec.read_columns_csc(lb..ub)?;
 
     // Apply feature selection on sparse matrix
-    if let Some(sel) = feature_selection {
+    if let Some(sel) = config.feature_selection {
         x_dn = filter_csc_by_rows(&sel.selection_matrix, &x_dn);
     }
 
-    let x_nd = x_dn.to_tensor(dev)?.transpose(0, 1)?;
+    let x_nd = x_dn.to_tensor(config.dev)?.transpose(0, 1)?;
 
     let (log_z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
 
     // Apply per-cell refinement if configured
-    let log_z_nk = if let (Some(dec), Some(cfg)) = (decoder, refine_config) {
+    let log_z_nk = if let (Some(dec), Some(cfg)) = (config.decoder, config.refine_config) {
         refine_topic_proportions(&log_z_nk, &x_nd, dec, cfg)?
     } else {
         log_z_nk
@@ -1117,24 +1150,20 @@ pub(crate) fn evaluate_with_residuals<Enc, Dec>(
     block: (usize, usize),
     data_vec: &SparseIoVec,
     encoder: &Enc,
-    dev: &Device,
-    delta_bp: Option<&Tensor>,
-    feature_selection: Option<&FeatureSelection>,
-    decoder: Option<&Dec>,
-    refine_config: Option<&TopicRefinementConfig>,
+    config: &EvaluateBlockConfig<Dec>,
 ) -> anyhow::Result<(usize, Mat)>
 where
     Enc: EncoderModuleT,
     Dec: DecoderModuleT,
 {
     let (lb, ub) = block;
-    let x0_nd = delta_bp.map(|delta_bm| {
+    let x0_nd = config.delta.map(|delta_bm| {
         let groups = data_vec
             .get_group_membership(lb..ub)
             .expect("failed to get group membership")
             .into_iter()
             .map(|x| x as u32);
-        let groups = Tensor::from_iter(groups, dev).unwrap();
+        let groups = Tensor::from_iter(groups, config.dev).unwrap();
         delta_bm.index_select(&groups, 0).expect("expand delta")
     });
 
@@ -1142,16 +1171,16 @@ where
     let mut x_dn = data_vec.read_columns_csc(lb..ub)?;
 
     // Apply feature selection on sparse matrix
-    if let Some(sel) = feature_selection {
+    if let Some(sel) = config.feature_selection {
         x_dn = filter_csc_by_rows(&sel.selection_matrix, &x_dn);
     }
 
-    let x_nd = x_dn.to_tensor(dev)?.transpose(0, 1)?;
+    let x_nd = x_dn.to_tensor(config.dev)?.transpose(0, 1)?;
 
     let (log_z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
 
     // Apply per-cell refinement if configured
-    let log_z_nk = if let (Some(dec), Some(cfg)) = (decoder, refine_config) {
+    let log_z_nk = if let (Some(dec), Some(cfg)) = (config.decoder, config.refine_config) {
         refine_topic_proportions(&log_z_nk, &x_nd, dec, cfg)?
     } else {
         log_z_nk

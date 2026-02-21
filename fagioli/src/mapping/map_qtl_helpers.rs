@@ -320,4 +320,3 @@ pub fn eb_reweight(
 
     (pip_avg, eff_avg, std_avg)
 }
-
