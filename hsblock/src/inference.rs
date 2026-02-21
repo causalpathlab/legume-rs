@@ -225,8 +225,8 @@ mod tests {
         }
 
         let mut graph = Graph::with_capacity(n, edge_list.len());
-        for i in 0..n {
-            graph.add_node(degree[i]);
+        for &deg in degree.iter().take(n) {
+            graph.add_node(deg);
         }
         for &(i, j, w) in &edge_list {
             graph.add_edge((i as u32).into(), (j as u32).into(), w);

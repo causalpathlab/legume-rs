@@ -716,9 +716,7 @@ fn collect_super_cell_gene_sums(
 
             for (local_idx, y_j) in yy.col_iter().enumerate() {
                 let batch = col_to_batch[cells[local_idx]];
-                let gene_map = batch_gene_sums
-                    .entry(batch)
-                    .or_default();
+                let gene_map = batch_gene_sums.entry(batch).or_default();
                 for (&gene, &val) in y_j.row_indices().iter().zip(y_j.values().iter()) {
                     *gene_map.entry(gene).or_default() += val;
                 }

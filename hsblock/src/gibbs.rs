@@ -547,7 +547,7 @@ mod tests {
             // Compute the baseline (before-move) tree score
             let score_before = brute_force_tree_score(&tree, &stats, false);
 
-            for t in 0..k {
+            for (t, &computed_delta) in log_probs.iter().enumerate().take(k) {
                 if t == current_c {
                     continue;
                 }
@@ -560,7 +560,6 @@ mod tests {
                 let score_after = brute_force_tree_score(&tree, &stats_moved, false);
 
                 let expected_delta = score_after - score_before;
-                let computed_delta = log_probs[t];
                 let err = (computed_delta - expected_delta).abs();
 
                 if err > max_err {
@@ -598,7 +597,7 @@ mod tests {
 
             let score_before = brute_force_tree_score(&tree, &stats, true);
 
-            for t in 0..k {
+            for (t, &computed_delta) in log_probs.iter().enumerate().take(k) {
                 if t == current_c {
                     continue;
                 }
@@ -608,7 +607,6 @@ mod tests {
 
                 let score_after = brute_force_tree_score(&tree, &stats_moved, true);
                 let expected_delta = score_after - score_before;
-                let computed_delta = log_probs[t];
                 let err = (computed_delta - expected_delta).abs();
 
                 if err > max_err {
@@ -654,7 +652,7 @@ mod tests {
 
             let score_before = brute_force_tree_score(&tree, &stats, false);
 
-            for t in 0..k {
+            for (t, &computed_delta) in log_probs.iter().enumerate().take(k) {
                 if t == current_c {
                     continue;
                 }
@@ -664,7 +662,6 @@ mod tests {
 
                 let score_after = brute_force_tree_score(&tree, &stats_moved, false);
                 let expected_delta = score_after - score_before;
-                let computed_delta = log_probs[t];
                 let err = (computed_delta - expected_delta).abs();
 
                 if err > max_err {
