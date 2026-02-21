@@ -13,7 +13,6 @@ use parquet::basic::Type as ParquetType;
 #[derive(Parser, Debug, Clone)]
 pub struct SrtPropensityArgs {
     #[arg(
-        short = 'k',
         long,
         help = "Number of edge clusters for K-means",
         long_help = "Number of edge clusters for K-means.\n\
