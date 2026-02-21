@@ -14,6 +14,15 @@ use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 
+/// Parameters for component-partitioned Gibbs/greedy methods.
+pub struct ComponentGibbsArgs<'a> {
+    pub graph: &'a KnnGraph,
+    pub edges: &'a [(usize, usize)],
+    pub k: usize,
+    pub a0: f64,
+    pub b0: f64,
+}
+
 /// Collapsed Gibbs sampler for link community assignments.
 pub struct LinkGibbsSampler {
     rng: SmallRng,
@@ -200,13 +209,18 @@ impl LinkGibbsSampler {
         &mut self,
         membership: &mut [usize],
         profiles: &LinkProfileStore,
-        graph: &KnnGraph,
-        edges: &[(usize, usize)],
-        k: usize,
-        a0: f64,
-        b0: f64,
+        args: &ComponentGibbsArgs,
         num_sweeps: usize,
     ) -> usize {
+        let ComponentGibbsArgs {
+            graph,
+            edges,
+            k,
+            a0,
+            b0,
+        } = args;
+        let (k, a0, b0) = (*k, *a0, *b0);
+
         let (comp_labels, n_comp) = connected_components(graph);
 
         let comp_edges = partition_edges_balanced(edges, &comp_labels, n_comp);
@@ -355,13 +369,18 @@ impl LinkGibbsSampler {
         &mut self,
         membership: &mut [usize],
         profiles: &LinkProfileStore,
-        graph: &KnnGraph,
-        edges: &[(usize, usize)],
-        k: usize,
-        a0: f64,
-        b0: f64,
+        args: &ComponentGibbsArgs,
         max_sweeps: usize,
     ) -> usize {
+        let ComponentGibbsArgs {
+            graph,
+            edges,
+            k,
+            a0,
+            b0,
+        } = args;
+        let (k, a0, b0) = (*k, *a0, *b0);
+
         let (comp_labels, n_comp) = connected_components(graph);
 
         let comp_edges = partition_edges_balanced(edges, &comp_labels, n_comp);
@@ -756,29 +775,19 @@ mod tests {
         let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
 
         // Run memoized EM Gibbs
-        let moves = sampler.run_components_em(
-            &mut membership,
-            &store,
-            &graph,
-            &edges_list,
+        let comp_args = ComponentGibbsArgs {
+            graph: &graph,
+            edges: &edges_list,
             k,
-            1.0,
-            1.0,
-            50,
-        );
+            a0: 1.0,
+            b0: 1.0,
+        };
+        let moves = sampler.run_components_em(&mut membership, &store, &comp_args, 50);
         assert!(moves > 0, "Expected some moves");
 
         // Run memoized greedy
-        let greedy_moves = sampler.run_greedy_by_components(
-            &mut membership,
-            &store,
-            &graph,
-            &edges_list,
-            k,
-            1.0,
-            1.0,
-            20,
-        );
+        let greedy_moves =
+            sampler.run_greedy_by_components(&mut membership, &store, &comp_args, 20);
         let _ = greedy_moves;
 
         // Check planted recovery (up to label permutation)
@@ -813,8 +822,14 @@ mod tests {
 
         let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
 
-        let moves =
-            sampler.run_components_em(&mut membership, &store, &graph, &edges, k, 1.0, 1.0, 10);
+        let comp_args = ComponentGibbsArgs {
+            graph: &graph,
+            edges: &edges,
+            k,
+            a0: 1.0,
+            b0: 1.0,
+        };
+        let moves = sampler.run_components_em(&mut membership, &store, &comp_args, 10);
         // Should converge (fewer moves over time, similar to parallel test)
         assert!(moves > 0 || membership.iter().all(|&m| m < k));
     }
