@@ -177,7 +177,9 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
 
     let mut column_names =
         parse_10x_cell_id(read_zarr_ndarray::<u32>(store.clone(), &args.column_name_field)?.view())
-            .or_else(|_| read_zarr_group_attr::<Vec<Box<str>>>(store.clone(), &args.column_name_field))
+            .or_else(|_| {
+                read_zarr_group_attr::<Vec<Box<str>>>(store.clone(), &args.column_name_field)
+            })
             .or_else(|_| read_zarr_strings(store.clone(), args.column_name_field.as_ref()))
             .unwrap_or_else(|_| (0..ncols).map(|x| x.to_string().into_boxed_str()).collect());
 
@@ -543,7 +545,10 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
         .unwrap_or(&backend_file);
 
     // Handle donor_id: barcode@donor_id column names + donor mapping files
-    let donor_idx = obs_df.col_names.iter().position(|c| c.as_ref() == "donor_id");
+    let donor_idx = obs_df
+        .col_names
+        .iter()
+        .position(|c| c.as_ref() == "donor_id");
 
     if let Some(di) = donor_idx {
         let donors = &obs_df.col_data[di];

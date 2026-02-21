@@ -147,7 +147,8 @@ fn read_genotypes(args: &SimulationArgs) -> Result<fagioli::genotype::GenotypeMa
 }
 
 pub fn sim_qtl(args: &SimulationArgs) -> Result<()> {
-    use fagioli::simulation::{load_gtf, simulate_gene_annotations};
+    use fagioli::io::gene_annotations::load_gtf;
+    use fagioli::simulation::simulate_gene_annotations;
 
     let use_parquet = match args.format.to_lowercase().as_str() {
         "parquet" => true,

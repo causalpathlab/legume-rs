@@ -19,10 +19,7 @@ use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
 // ── V2 → V3 migration ──────────────────────────────────────────────────
 
 /// Upgrade a zarr v2 array to v3 format in-place (no-op if already v3).
-pub fn update_zarr_to_v3(
-    store: Arc<dyn ZStorageTraits>,
-    key_name: &str,
-) -> anyhow::Result<()> {
+pub fn update_zarr_to_v3(store: Arc<dyn ZStorageTraits>, key_name: &str) -> anyhow::Result<()> {
     use anyhow::Context;
     use zarrs::config::MetadataEraseVersion;
     use zarrs::metadata::ArrayMetadata;
@@ -75,16 +72,13 @@ pub fn read_zarr_array_attr<V: serde::de::DeserializeOwned>(
     attr_name: &str,
 ) -> anyhow::Result<V> {
     let arr = ZArray::open_opt(store, array_path, &MetadataRetrieveVersion::Default)?;
-    let attr = arr
-        .attributes()
-        .get(attr_name)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "attribute '{}' not found on array '{}'",
-                attr_name,
-                array_path
-            )
-        })?;
+    let attr = arr.attributes().get(attr_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "attribute '{}' not found on array '{}'",
+            attr_name,
+            array_path
+        )
+    })?;
     Ok(serde_json::from_value(attr.clone())?)
 }
 
@@ -236,10 +230,7 @@ where
 ///
 /// `key_name` is parsed as `"group_path/attr_name"`, e.g.
 /// `"/cell_features/features/id"` → group `"/cell_features/features"`, attr `"id"`.
-pub fn read_zarr_group_attr<V>(
-    store: Arc<dyn ZStorageTraits>,
-    key_name: &str,
-) -> anyhow::Result<V>
+pub fn read_zarr_group_attr<V>(store: Arc<dyn ZStorageTraits>, key_name: &str) -> anyhow::Result<V>
 where
     V: serde::de::DeserializeOwned,
 {
@@ -312,7 +303,11 @@ fn hex_to_shifted_lookup() -> [Option<char>; 256] {
 }
 
 /// Encode a single `(barcode_u32, suffix_u32)` pair into a 10x cell-ID string.
-fn encode_10x_cell_id(lookup: &[Option<char>; 256], barcode: u32, suffix: u32) -> anyhow::Result<Box<str>> {
+fn encode_10x_cell_id(
+    lookup: &[Option<char>; 256],
+    barcode: u32,
+    suffix: u32,
+) -> anyhow::Result<Box<str>> {
     let barcode: String = format!("{:08x}", barcode)
         .chars()
         .map(|ch| lookup[ch as usize].ok_or_else(|| anyhow::anyhow!("invalid hex char: {}", ch)))
@@ -382,16 +377,13 @@ fn resolve_columns(
         column_names
             .iter()
             .map(|name| {
-                all_col_names
-                    .iter()
-                    .position(|c| c == name)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "column '{}' not found (available: {:?})",
-                            name,
-                            all_col_names
-                        )
-                    })
+                all_col_names.iter().position(|c| c == name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "column '{}' not found (available: {:?})",
+                        name,
+                        all_col_names
+                    )
+                })
             })
             .collect()
     } else {
@@ -425,7 +417,11 @@ pub fn read_zarr_matrix(
     // Read the data array
     let (flat, shape) = read_zarr_flat_f32(store.clone(), data_array)?;
     let nrows = shape[0] as usize;
-    let ncols_total = if shape.len() > 1 { shape[1] as usize } else { 1 };
+    let ncols_total = if shape.len() > 1 {
+        shape[1] as usize
+    } else {
+        1
+    };
 
     // Read column names from attribute (if available)
     let all_col_names: Vec<Box<str>> = if let Some(attr) = col_names_attr {
@@ -470,9 +466,7 @@ pub fn read_zarr_matrix(
             read_zarr_strings(store.clone(), rn_path)?
         }
     } else {
-        (0..nrows)
-            .map(|i| i.to_string().into_boxed_str())
-            .collect()
+        (0..nrows).map(|i| i.to_string().into_boxed_str()).collect()
     };
 
     info!(
@@ -548,10 +542,7 @@ mod tests {
         let result = read_zarr_coordinates(
             p.to_str().unwrap(),
             &[],
-            &[
-                "cell_centroid_x".into(),
-                "cell_centroid_y".into(),
-            ],
+            &["cell_centroid_x".into(), "cell_centroid_y".into()],
         )
         .unwrap();
 
