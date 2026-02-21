@@ -7,8 +7,8 @@ use nalgebra::DMatrix;
 use data_beans::convert::try_open_or_convert;
 use data_beans::sparse_io_vector::SparseIoVec;
 use fagioli::mapping::pseudobulk::{
-    build_onehot_membership, collapse_pseudobulk, read_cell_annotations,
-    read_membership_proportions, CellAnnotations, Membership,
+    build_onehot_membership, collapse_pseudobulk, infer_cell_annotations, read_cell_annotations,
+    read_membership_proportions, Membership,
 };
 use matrix_param::io::ParamIo;
 use matrix_util::common_io::basename;
@@ -58,36 +58,7 @@ pub fn pseudobulk(args: &PseudobulkArgs) -> anyhow::Result<()> {
         info!("Reading cell annotations from {}", path);
         read_cell_annotations(path)?
     } else {
-        info!(
-            "No cell annotations provided; inferring individuals from cell names (barcode@indiv)"
-        );
-        let mut individual_to_idx: std::collections::HashMap<Box<str>, usize> =
-            std::collections::HashMap::new();
-        let mut individual_ids: Vec<Box<str>> = Vec::new();
-        let mut cell_to_individual = std::collections::HashMap::new();
-
-        for cell_name in &column_names {
-            let indiv: Box<str> = if let Some(pos) = cell_name.rfind('@') {
-                Box::from(&cell_name[pos + 1..])
-            } else {
-                Box::from("all")
-            };
-            let idx = *individual_to_idx.entry(indiv.clone()).or_insert_with(|| {
-                let i = individual_ids.len();
-                individual_ids.push(indiv);
-                i
-            });
-            cell_to_individual.insert(cell_name.clone(), idx);
-        }
-
-        info!(
-            "Inferred {} individuals from cell names",
-            individual_ids.len()
-        );
-        CellAnnotations {
-            cell_to_individual,
-            individual_ids,
-        }
+        infer_cell_annotations(&column_names)
     };
 
     // 3. Build membership (soft from parquet, hard from annotations, or default: one cell type)

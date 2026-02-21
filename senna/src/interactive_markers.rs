@@ -10,40 +10,8 @@ use std::io::{self, BufRead, Write};
 
 use crate::embed_common::Mat;
 
-/// Flexible gene name matching (case-insensitive, underscore-delimited)
-/// Returns true if marker_gene matches dict_gene with these rules:
-/// - Exact match (case-insensitive)
-/// - Suffix match: dict_gene ends with "_marker_gene"
-/// - Prefix match: dict_gene starts with "marker_gene_"
-/// - Segment match: dict_gene contains "_marker_gene_"
-///
-/// Example: "CD8A" matches "ENSG00000153563_CD8A", "CD8A_variant1", "chr1_CD8A_isoform2"
-pub fn flexible_gene_match(marker_gene: &str, dict_gene: &str) -> bool {
-    let marker_lower = marker_gene.to_lowercase();
-    let dict_lower = dict_gene.to_lowercase();
-
-    // 1. Exact match
-    if dict_lower == marker_lower {
-        return true;
-    }
-
-    // 2. Suffix match: dict ends with "_marker"
-    if dict_lower.ends_with(&format!("_{}", marker_lower)) {
-        return true;
-    }
-
-    // 3. Prefix match: dict starts with "marker_"
-    if dict_lower.starts_with(&format!("{}_", marker_lower)) {
-        return true;
-    }
-
-    // 4. Segment match: dict contains "_marker_"
-    if dict_lower.contains(&format!("_{}_", marker_lower)) {
-        return true;
-    }
-
-    false
-}
+/// Flexible gene name matching — delegates to shared implementation in data-beans
+pub use data_beans::utilities::name_matching::flexible_name_match as flexible_gene_match;
 
 /// Fuzzy match for cell type names
 /// Returns true if query matches target with these rules:
