@@ -1,6 +1,7 @@
 use crate::misc::*;
 use crate::sparse_io::*;
 use crate::sparse_util::*;
+use data_beans::zarr_io::*;
 
 use log::info;
 use matrix_util::common_io::*;
@@ -114,11 +115,11 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     let TripletsShape { nrows, ncols, nnz } = shape;
     info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
 
-    let mut row_ids = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_id_field)
+    let mut row_ids = read_zarr_group_attr::<Vec<Box<str>>>(store.clone(), &args.row_id_field)
         .or_else(|_| read_zarr_strings(store.clone(), args.row_id_field.as_ref()))
         .unwrap_or_else(|_| (0..nrows).map(|x| x.to_string().into_boxed_str()).collect());
 
-    let mut row_names = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_name_field)
+    let mut row_names = read_zarr_group_attr::<Vec<Box<str>>>(store.clone(), &args.row_name_field)
         .or_else(|_| read_zarr_strings(store.clone(), args.row_name_field.as_ref()))
         .unwrap_or_else(|_| (0..nrows).map(|x| x.to_string().into_boxed_str()).collect());
 
@@ -149,7 +150,7 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         })
         .collect();
 
-    let mut row_types = read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.row_type_field)
+    let mut row_types = read_zarr_group_attr::<Vec<Box<str>>>(store.clone(), &args.row_type_field)
         .or_else(|_| read_zarr_strings(store.clone(), args.row_type_field.as_ref()))
         .unwrap_or_else(|_| vec![args.select_row_type.clone(); nrows]);
     if nrows < row_types.len() {
@@ -176,7 +177,7 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
 
     let mut column_names =
         parse_10x_cell_id(read_zarr_ndarray::<u32>(store.clone(), &args.column_name_field)?.view())
-            .or_else(|_| read_zarr_attr::<Vec<Box<str>>>(store.clone(), &args.column_name_field))
+            .or_else(|_| read_zarr_group_attr::<Vec<Box<str>>>(store.clone(), &args.column_name_field))
             .or_else(|_| read_zarr_strings(store.clone(), args.column_name_field.as_ref()))
             .unwrap_or_else(|_| (0..ncols).map(|x| x.to_string().into_boxed_str()).collect());
 

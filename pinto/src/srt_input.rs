@@ -27,10 +27,13 @@ pub struct SrtInputArgs {
         value_delimiter(','),
         help = "Spatial coordinate files, one per data file",
         long_help = "Spatial coordinate files, one per data file (comma separated).\n\
-                       Accepted formats: CSV, TSV, space-delimited text, or .parquet.\n\
-                       First column: cell/barcode names (must match data file column names).\n\
-                       Subsequent columns: spatial coordinates (x, y, ...).\n\
-                       Header row is auto-detected, or use --coord-header-row to specify.\n\
+                       Accepted formats: CSV, TSV, space-delimited text, .parquet,\n\
+                       or .zarr/.zarr.zip (Xenium cells.zarr.zip).\n\
+                       For CSV/TSV/parquet: first column is cell/barcode names\n\
+                       (must match data file column names), subsequent columns\n\
+                       are spatial coordinates.\n\
+                       For zarr: cell IDs are read from /cell_id and coordinates\n\
+                       from /cell_summary (column names from its attributes).\n\
                        Coordinate columns are selected by --coord-column-names or\n\
                        --coord-column-indices."
     )]
@@ -286,29 +289,43 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
         info!("Reading coordinate file: {}", coord_file);
         let ext = file_ext(coord_file)?;
 
+        let is_zarr = coord_file.contains(".zarr");
+
         let MatWithNames {
             rows: coord_cell_names,
             cols: column_names,
             mat: data,
-        } = match ext.as_ref() {
-            "parquet" => Mat::from_parquet_with_indices_names(
+        } = if is_zarr {
+            data_beans::zarr_io::read_zarr_coordinates(
                 coord_file,
-                Some(0),
-                Some(&args.coord_columns),
-                Some(&args.coord_column_names),
-            )?,
-            _ => {
-                let header_row = args.header_in_coord.or_else(|| {
-                    detect_header_row(coord_file, &['\t', ',', ' '], &args.coord_column_names)
-                });
-                Mat::read_data(
+                &args.coord_columns,
+                &args.coord_column_names,
+            )?
+        } else {
+            match ext.as_ref() {
+                "parquet" => Mat::from_parquet_with_indices_names(
                     coord_file,
-                    &['\t', ',', ' '],
-                    header_row,
                     Some(0),
                     Some(&args.coord_columns),
                     Some(&args.coord_column_names),
-                )?
+                )?,
+                _ => {
+                    let header_row = args.header_in_coord.or_else(|| {
+                        detect_header_row(
+                            coord_file,
+                            &['\t', ',', ' '],
+                            &args.coord_column_names,
+                        )
+                    });
+                    Mat::read_data(
+                        coord_file,
+                        &['\t', ',', ' '],
+                        header_row,
+                        Some(0),
+                        Some(&args.coord_columns),
+                        Some(&args.coord_column_names),
+                    )?
+                }
             }
         };
 
