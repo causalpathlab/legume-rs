@@ -1,8 +1,10 @@
+mod map_qtl;
 mod map_sumstat;
 mod pseudobulk_cmd;
 mod sim_qtl;
 mod sim_sumstat;
 
+use map_qtl::*;
 use map_sumstat::*;
 use pseudobulk_cmd::*;
 use sim_qtl::*;
@@ -37,7 +39,9 @@ fn print_logo() {
 
 #[derive(Parser)]
 #[command(name = "fagioli")]
-#[command(about = "Faceted Associations of Genotype Information via Omics-based Locus Identification")]
+#[command(
+    about = "Faceted Associations of Genotype Information via Omics-based Locus Identification"
+)]
 struct Cli {
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
@@ -54,6 +58,8 @@ enum Commands {
     SimSumstat(SimSumstatArgs),
     /// Summary-statistics-based multi-trait fine-mapping with SuSiE
     MapSumstat(MapSumstatArgs),
+    /// Single-cell eQTL fine-mapping: pseudobulk + multi-output SuSiE with uncertainty
+    MapQtl(MapQtlArgs),
     /// Collapse single-cell counts into Poisson-Gamma pseudobulk
     Pseudobulk(PseudobulkArgs),
 }
@@ -80,6 +86,9 @@ fn main() -> Result<()> {
         }
         Commands::MapSumstat(args) => {
             map_sumstat(args)?;
+        }
+        Commands::MapQtl(args) => {
+            map_qtl(args)?;
         }
         Commands::Pseudobulk(args) => {
             pseudobulk(args)?;

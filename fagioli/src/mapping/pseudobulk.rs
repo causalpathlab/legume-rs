@@ -72,6 +72,42 @@ pub fn read_cell_annotations(path: &str) -> Result<CellAnnotations> {
     })
 }
 
+/// Infer cell annotations from cell names by splitting on `@`.
+///
+/// Cell names like `ACGT@IND_A` map to individual `IND_A`.
+/// Names without `@` are assigned to a single individual `"all"`.
+pub fn infer_cell_annotations(column_names: &[Box<str>]) -> CellAnnotations {
+    info!("Inferring individuals from cell names (barcode@indiv)");
+
+    let mut individual_to_idx: HashMap<Box<str>, usize> = HashMap::new();
+    let mut individual_ids: Vec<Box<str>> = Vec::new();
+    let mut cell_to_individual: HashMap<Box<str>, usize> = HashMap::new();
+
+    for cell_name in column_names {
+        let indiv: Box<str> = if let Some(pos) = cell_name.rfind('@') {
+            Box::from(&cell_name[pos + 1..])
+        } else {
+            Box::from("all")
+        };
+        let idx = *individual_to_idx.entry(indiv.clone()).or_insert_with(|| {
+            let i = individual_ids.len();
+            individual_ids.push(indiv);
+            i
+        });
+        cell_to_individual.insert(cell_name.clone(), idx);
+    }
+
+    info!(
+        "Inferred {} individuals from cell names",
+        individual_ids.len()
+    );
+
+    CellAnnotations {
+        cell_to_individual,
+        individual_ids,
+    }
+}
+
 /// Membership matrix with cell type names.
 pub struct Membership {
     /// Membership matrix: cells × cell_types (aligned to SC backend column order)
