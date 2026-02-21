@@ -378,11 +378,7 @@ pub struct TopicArgs {
     )]
     refine_steps: usize,
 
-    #[arg(
-        long,
-        default_value_t = 0.01,
-        help = "Learning rate for refinement"
-    )]
+    #[arg(long, default_value_t = 0.01, help = "Learning rate for refinement")]
     refine_lr: f64,
 
     #[arg(
@@ -801,7 +797,6 @@ where
     Enc: EncoderModuleT,
     Dec: DecoderModuleT,
 {
-
     let num_levels = collapsed_levels.len();
     let total_epochs = args.epochs;
 
@@ -1013,31 +1008,30 @@ where
             .expect("transpose")
     });
 
-    let eval_block =
-        |block| -> anyhow::Result<(usize, Mat)> {
-            match adj_method {
-                AdjMethod::Residual => evaluate_with_residuals(
-                    block,
-                    data_vec,
-                    encoder,
-                    dev,
-                    delta.as_ref(),
-                    feature_selection,
-                    decoder,
-                    refine_config,
-                ),
-                AdjMethod::Batch => evaluate_with_batch(
-                    block,
-                    data_vec,
-                    encoder,
-                    dev,
-                    delta.as_ref(),
-                    feature_selection,
-                    decoder,
-                    refine_config,
-                ),
-            }
-        };
+    let eval_block = |block| -> anyhow::Result<(usize, Mat)> {
+        match adj_method {
+            AdjMethod::Residual => evaluate_with_residuals(
+                block,
+                data_vec,
+                encoder,
+                dev,
+                delta.as_ref(),
+                feature_selection,
+                decoder,
+                refine_config,
+            ),
+            AdjMethod::Batch => evaluate_with_batch(
+                block,
+                data_vec,
+                encoder,
+                dev,
+                delta.as_ref(),
+                feature_selection,
+                decoder,
+                refine_config,
+            ),
+        }
+    };
 
     // GPU forward passes are not thread-safe — run sequentially on Metal/CUDA,
     // parallel on CPU

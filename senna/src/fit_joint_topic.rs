@@ -304,7 +304,6 @@ pub struct JointTopicArgs {
 		     Improves performance for large datasets."
     )]
     preload_data: bool,
-
 }
 
 pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
@@ -362,7 +361,10 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     let proj_kn = proj_out.proj;
 
     // 3. Batch-adjusted multilevel collapsing (pseudobulk)
-    info!("Multi-level collapsing across {} modalities ...", data_stack.num_types());
+    info!(
+        "Multi-level collapsing across {} modalities ...",
+        data_stack.num_types()
+    );
 
     let collapsed_levels: Vec<Vec<CollapsedOut>> = data_stack.collapse_columns_multilevel_vec(
         &proj_kn,
@@ -526,7 +528,6 @@ fn evaluate_latent_by_encoder<Enc>(
 where
     Enc: MultimodalEncoderModuleT + Send + Sync,
 {
-
     let ntot = data_stack.num_columns()?;
     let kk = encoder.dim_latent();
 
@@ -918,8 +919,7 @@ where
                         .map(|(y, x)| y.unwrap_or(x))
                         .collect::<Vec<_>>();
 
-                    let (_, llik) =
-                        decoder.forward_with_llik(&z_nk, &y_vec, &topic_likelihood)?;
+                    let (_, llik) = decoder.forward_with_llik(&z_nk, &y_vec, &topic_likelihood)?;
 
                     let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
                     adam.backward_step(&loss)?;

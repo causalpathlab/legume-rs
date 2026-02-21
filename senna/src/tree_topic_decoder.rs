@@ -165,11 +165,7 @@ pub struct GeneModuleStats {
 
 impl GeneModuleStats {
     /// Build from gene profiles and initial assignments.
-    pub fn from_profiles(
-        profiles: &GeneProfileStore,
-        m: usize,
-        labels: &[usize],
-    ) -> Self {
+    pub fn from_profiles(profiles: &GeneProfileStore, m: usize, labels: &[usize]) -> Self {
         let k = profiles.n_topics;
         let n_genes = profiles.n_genes;
         debug_assert_eq!(labels.len(), n_genes);
@@ -455,13 +451,7 @@ impl TreeTopicDecoder {
     /// * `a0` - Gamma shape prior
     /// * `b0` - Gamma rate prior
     /// * `seed` - Random seed
-    pub fn new(
-        profiles: GeneProfileStore,
-        n_modules: usize,
-        a0: f64,
-        b0: f64,
-        seed: u64,
-    ) -> Self {
+    pub fn new(profiles: GeneProfileStore, n_modules: usize, a0: f64, b0: f64, seed: u64) -> Self {
         let n_genes = profiles.n_genes();
         let mut rng = SmallRng::seed_from_u64(seed);
 
@@ -566,9 +556,7 @@ impl TreeTopicDecoder {
         n_topics: usize,
     ) {
         let n_genes = self.profiles.n_genes;
-        self.profiles = GeneProfileStore::from_dense(
-            x_ng, theta_nk, n_cells, n_genes, n_topics,
-        );
+        self.profiles = GeneProfileStore::from_dense(x_ng, theta_nk, n_cells, n_genes, n_topics);
         if self.stats.k != n_topics {
             // Dimension changed (e.g., pseudobulk → topic space): rebuild stats
             self.stats = GeneModuleStats::from_profiles(
@@ -660,8 +648,7 @@ impl TreeTopicDecoder {
                                 self.b0,
                                 &mut log_probs,
                             );
-                            let vertex_seed =
-                                sweep_seed ^ (g as u64).wrapping_mul(2654435761);
+                            let vertex_seed = sweep_seed ^ (g as u64).wrapping_mul(2654435761);
                             let mut rng = SmallRng::seed_from_u64(vertex_seed);
                             sample_categorical_log(&log_probs, &mut rng)
                         })
@@ -798,8 +785,7 @@ impl TreeTopicDecoder {
             let mod_base = c * k;
             let gene_base = g * k;
             for t in 0..k {
-                log_beta[gene_base + t] =
-                    (log_rates[mod_base + t] - log_norm[t]) as f32 + log_pi;
+                log_beta[gene_base + t] = (log_rates[mod_base + t] - log_norm[t]) as f32 + log_pi;
             }
         }
 
@@ -1221,8 +1207,7 @@ mod tests {
                     continue;
                 }
 
-                let mut stats_moved =
-                    GeneModuleStats::from_profiles(&store, 3, &stats.membership);
+                let mut stats_moved = GeneModuleStats::from_profiles(&store, 3, &stats.membership);
                 stats_moved.delta_move(g, current_c, t, &store);
                 let score_after = stats_moved.total_score(a0, b0);
                 let expected_delta = score_after - score_before;
@@ -1243,11 +1228,7 @@ mod tests {
     fn test_log_beta_columns_sum_to_one() {
         let (store, labels) = make_synthetic_profiles(20, 4, 3);
         let stats = GeneModuleStats::from_profiles(&store, 3, &labels);
-        let within = WithinModuleWeights::from_marginal_expression(
-            &store.size_factors,
-            &labels,
-            3,
-        );
+        let within = WithinModuleWeights::from_marginal_expression(&store.size_factors, &labels, 3);
 
         let decoder = TreeTopicDecoder {
             stats,
@@ -1362,11 +1343,8 @@ mod tests {
         let membership = vec![0, 0, 1, 1, 2, 2];
         let n_modules = 3;
 
-        let w = WithinModuleWeights::from_marginal_expression(
-            &size_factors,
-            &membership,
-            n_modules,
-        );
+        let w =
+            WithinModuleWeights::from_marginal_expression(&size_factors, &membership, n_modules);
 
         // Within each module, weights should sum to ~1
         for m in 0..n_modules {

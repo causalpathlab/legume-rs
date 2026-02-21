@@ -207,9 +207,7 @@ pub fn read_h5ad_column(group: &hdf5::Group, col_name: &str) -> anyhow::Result<V
 ///
 /// Returns `(column_names, columns_data)` where each entry in
 /// `columns_data` is a `Vec<Box<str>>` of the same length.
-pub fn read_h5ad_dataframe(
-    group: &hdf5::Group,
-) -> anyhow::Result<H5adDataFrame> {
+pub fn read_h5ad_dataframe(group: &hdf5::Group) -> anyhow::Result<H5adDataFrame> {
     let col_order: Vec<String> = group
         .attr("column-order")?
         .read_1d::<VarLenUnicode>()?
