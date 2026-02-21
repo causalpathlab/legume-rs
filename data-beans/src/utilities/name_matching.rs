@@ -1,3 +1,20 @@
+/// Flexible gene name matching (case-insensitive, underscore-delimited)
+/// Returns true if `query` matches `target` with these rules:
+/// - Exact match (case-insensitive)
+/// - Suffix match: target ends with `_query`
+/// - Prefix match: target starts with `query_`
+/// - Segment match: target contains `_query_`
+///
+/// Example: "CD8A" matches "ENSG00000153563_CD8A", "CD8A_variant1", "chr1_CD8A_isoform2"
+pub fn flexible_name_match(query: &str, target: &str) -> bool {
+    let q = query.to_lowercase();
+    let t = target.to_lowercase();
+    t == q
+        || t.ends_with(&format!("_{}", q))
+        || t.starts_with(&format!("{}_", q))
+        || t.contains(&format!("_{}_", q))
+}
+
 /// Match names by substring queries and return matched indices and names
 ///
 /// # Arguments

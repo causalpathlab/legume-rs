@@ -8,6 +8,7 @@ mod negbinom;
 mod poisson;
 mod rss;
 mod vmf;
+mod weighted_gaussian;
 
 pub use gaussian::{FixedGaussianLikelihood, GaussianLikelihood};
 pub use negbinom::{lgamma_approx, NegativeBinomialLikelihood};
@@ -17,3 +18,4 @@ pub use vmf::{
     estimate_kappa_mle, l2_normalize_dim, log_bessel_i, suggest_kappa_init, vmf_log_normalizer,
     VmfFixedKappaLikelihood,
 };
+pub use weighted_gaussian::WeightedGaussianLikelihood;

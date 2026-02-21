@@ -6,6 +6,7 @@ use candle_util::sgvb::{
     samples_local_reparam_loss, AnalyticalKL, BiSusieVar, FixedGaussianLikelihood,
     FixedGaussianPrior, LinearModelSGVB, LinearRegressionSGVB, LocalReparamSample,
     MultiLevelSusieVar, RssLikelihood, RssSvd, SGVBConfig, SusieVar, VariationalDistribution,
+    WeightedGaussianLikelihood,
 };
 use log::info;
 use matrix_util::traits::ConvertMatOps;
@@ -84,6 +85,21 @@ pub struct BlockFitResult {
     pub avg_elbo: f32,
 }
 
+/// Result from fitting a single block with detailed per-prior-var results.
+#[derive(Debug)]
+pub struct BlockFitResultDetailed {
+    /// Model-averaged result.
+    pub result: BlockFitResult,
+    /// Per-prior-var average ELBOs (for empirical Bayes re-weighting).
+    pub per_prior_elbos: Vec<f32>,
+    /// Per-prior-var PIPs, shape (p, k) each.
+    pub per_prior_pips: Vec<DMatrix<f32>>,
+    /// Per-prior-var effect means, shape (p, k) each.
+    pub per_prior_effects: Vec<DMatrix<f32>>,
+    /// Per-prior-var effect stds, shape (p, k) each.
+    pub per_prior_stds: Vec<DMatrix<f32>>,
+}
+
 /// Fit a fine-mapping model for a single LD block.
 ///
 /// - `x_block`: Standardized genotypes (N × p_block).
@@ -98,6 +114,34 @@ pub fn fit_block(
     confounders: Option<&DMatrix<f32>>,
     config: &FitConfig,
 ) -> Result<BlockFitResult> {
+    let detailed = fit_block_inner(x_block, y_block, None, confounders, config)?;
+    Ok(detailed.result)
+}
+
+/// Fit a fine-mapping model for a single block with per-observation variance.
+///
+/// Like `fit_block()` but accepts a per-observation variance tensor `(N, K)`.
+/// Uses `WeightedGaussianLikelihood` instead of `FixedGaussianLikelihood`.
+///
+/// Returns detailed results with per-prior-var ELBOs for empirical Bayes.
+pub fn fit_block_weighted(
+    x_block: &DMatrix<f32>,
+    y_block: &DMatrix<f32>,
+    var_block: &DMatrix<f32>,
+    confounders: Option<&DMatrix<f32>>,
+    config: &FitConfig,
+) -> Result<BlockFitResultDetailed> {
+    fit_block_inner(x_block, y_block, Some(var_block), confounders, config)
+}
+
+/// Shared implementation for `fit_block` and `fit_block_weighted`.
+fn fit_block_inner(
+    x_block: &DMatrix<f32>,
+    y_block: &DMatrix<f32>,
+    var_block: Option<&DMatrix<f32>>,
+    confounders: Option<&DMatrix<f32>>,
+    config: &FitConfig,
+) -> Result<BlockFitResultDetailed> {
     let n = x_block.nrows();
     let p = x_block.ncols();
     let k = y_block.ncols();
@@ -105,6 +149,9 @@ pub fn fit_block(
 
     let x_tensor = x_block.to_tensor(&device)?.contiguous()?;
     let y_tensor = y_block.to_tensor(&device)?.contiguous()?;
+    let var_tensor = var_block
+        .map(|v| -> Result<Tensor> { Ok(v.to_tensor(&device)?.contiguous()?) })
+        .transpose()?;
     let conf_tensor = confounders
         .map(|c| -> Result<Tensor> { Ok(c.to_tensor(&device)?.contiguous()?) })
         .transpose()?;
@@ -114,6 +161,7 @@ pub fn fit_block(
     let tensors = BlockTensors {
         x: x_tensor,
         y: y_tensor,
+        var: var_tensor,
         conf: conf_tensor,
         p,
         k,
@@ -121,19 +169,24 @@ pub fn fit_block(
         use_minibatch,
     };
 
-    let mut results: Vec<PriorFitResult> = Vec::new();
+    let mut elbos_vec: Vec<f32> = Vec::new();
+    let mut pips_vec: Vec<DMatrix<f32>> = Vec::new();
+    let mut effects_vec: Vec<DMatrix<f32>> = Vec::new();
+    let mut stds_vec: Vec<DMatrix<f32>> = Vec::new();
 
     for &prior_var in &config.prior_vars {
         let (avg_elbo, pip, eff_mean, eff_std) =
             fit_single_prior(&tensors, prior_var, config, &device)?;
         info!("  prior_var={:.3}, avg_elbo={:.2}", prior_var, avg_elbo);
-        results.push((avg_elbo, pip, eff_mean, eff_std));
+        elbos_vec.push(avg_elbo);
+        pips_vec.push(pip);
+        effects_vec.push(eff_mean);
+        stds_vec.push(eff_std);
     }
 
     // Model averaging via softmax over average ELBOs
-    let elbos: Vec<f32> = results.iter().map(|(e, _, _, _)| *e).collect();
-    let max_elbo = elbos.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let weights: Vec<f32> = elbos.iter().map(|e| (e - max_elbo).exp()).collect();
+    let max_elbo = elbos_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let weights: Vec<f32> = elbos_vec.iter().map(|e| (e - max_elbo).exp()).collect();
     let sum_w: f32 = weights.iter().sum();
     let weights: Vec<f32> = weights.iter().map(|w| w / sum_w).collect();
 
@@ -141,19 +194,34 @@ pub fn fit_block(
     let mut eff_mean_avg = DMatrix::<f32>::zeros(p, k);
     let mut eff_std_avg = DMatrix::<f32>::zeros(p, k);
 
-    for (w, (_elbo, pip, eff_m, eff_s)) in weights.iter().zip(results.iter()) {
+    for (w, (pip, eff_m, eff_s)) in weights.iter().zip(
+        pips_vec
+            .iter()
+            .zip(effects_vec.iter().zip(stds_vec.iter()))
+            .map(|(p, (e, s))| (p, e, s)),
+    ) {
         pip_avg += pip * *w;
         eff_mean_avg += eff_m * *w;
         eff_std_avg += eff_s * *w;
     }
 
-    let weighted_elbo: f32 = weights.iter().zip(elbos.iter()).map(|(w, e)| w * e).sum();
+    let weighted_elbo: f32 = weights
+        .iter()
+        .zip(elbos_vec.iter())
+        .map(|(w, e)| w * e)
+        .sum();
 
-    Ok(BlockFitResult {
-        pip: pip_avg,
-        effect_mean: eff_mean_avg,
-        effect_std: eff_std_avg,
-        avg_elbo: weighted_elbo,
+    Ok(BlockFitResultDetailed {
+        result: BlockFitResult {
+            pip: pip_avg,
+            effect_mean: eff_mean_avg,
+            effect_std: eff_std_avg,
+            avg_elbo: weighted_elbo,
+        },
+        per_prior_elbos: elbos_vec,
+        per_prior_pips: pips_vec,
+        per_prior_effects: effects_vec,
+        per_prior_stds: stds_vec,
     })
 }
 
@@ -161,6 +229,8 @@ pub fn fit_block(
 struct BlockTensors {
     x: Tensor,
     y: Tensor,
+    /// Per-observation variance (n, k). None → unit variance (FixedGaussianLikelihood).
+    var: Option<Tensor>,
     conf: Option<Tensor>,
     p: usize,
     k: usize,
@@ -169,7 +239,6 @@ struct BlockTensors {
 }
 
 /// Train with a single prior_var. Returns (avg_elbo, pip, effect_mean, effect_std).
-#[allow(clippy::too_many_arguments)]
 fn fit_single_prior(
     tensors: &BlockTensors,
     prior_var: f32,
@@ -219,21 +288,31 @@ fn fit_single_prior(
 
     for _iter in 0..config.num_iterations {
         // Optionally subsample rows with replacement
-        let (x_batch, y_batch, conf_batch) = if tensors.use_minibatch {
+        let (x_batch, y_batch, var_batch, conf_batch) = if tensors.use_minibatch {
             let indices: Vec<u32> = (0..config.batch_size)
                 .map(|_| rng.random_range(0..tensors.n as u32))
                 .collect();
             let idx_tensor = Tensor::from_vec(indices, (config.batch_size,), device)?;
             let xb = tensors.x.index_select(&idx_tensor, 0)?;
             let yb = tensors.y.index_select(&idx_tensor, 0)?;
+            let vb = tensors
+                .var
+                .as_ref()
+                .map(|v| v.index_select(&idx_tensor, 0))
+                .transpose()?;
             let cb = tensors
                 .conf
                 .as_ref()
                 .map(|ct| ct.index_select(&idx_tensor, 0))
                 .transpose()?;
-            (xb, yb, cb)
+            (xb, yb, vb, cb)
         } else {
-            (tensors.x.clone(), tensors.y.clone(), tensors.conf.clone())
+            (
+                tensors.x.clone(),
+                tensors.y.clone(),
+                tensors.var.clone(),
+                tensors.conf.clone(),
+            )
         };
 
         let mut samples: Vec<LocalReparamSample> = Vec::new();
@@ -256,8 +335,14 @@ fn fit_single_prior(
             samples.push(conf_sample);
         }
 
-        let likelihood = FixedGaussianLikelihood::new(y_batch, 1.0);
-        let loss = samples_local_reparam_loss(&samples, &likelihood, 1.0)?;
+        // Choose likelihood based on whether per-observation variance is provided
+        let loss = if let Some(ref vb) = var_batch {
+            let likelihood = WeightedGaussianLikelihood::new(y_batch, vb)?;
+            samples_local_reparam_loss(&samples, &likelihood, 1.0)?
+        } else {
+            let likelihood = FixedGaussianLikelihood::new(y_batch, 1.0);
+            samples_local_reparam_loss(&samples, &likelihood, 1.0)?
+        };
 
         optimizer.backward_step(&loss)?;
 

@@ -9,4 +9,5 @@ pub mod sparse_io_vector; // wide sparse io vector
 pub mod sparse_matrix_hdf5; // sparse matrix with hdf5 backend
 pub mod sparse_matrix_zarr; //  sparse matrix with zarr backend
 pub mod sparse_util; // sparse matrix triplets utils
+pub mod utilities; // shared utility functions (name matching, IO helpers)
 pub mod zarr_io; // read coordinate data from zarr files
