@@ -328,13 +328,13 @@ mod tests {
         // Recompute from scratch
         stats.recompute(&edges);
 
-        for i in 0..4 {
+        for (i, (stat, orig)) in stats.edge_counts.iter().zip(orig_counts.iter()).enumerate().take(4) {
             assert!(
-                (stats.edge_counts[i] - orig_counts[i]).abs() < 1e-10,
+                (stat - orig).abs() < 1e-10,
                 "Mismatch at {}: recomputed={}, orig={}",
                 i,
-                stats.edge_counts[i],
-                orig_counts[i]
+                stat,
+                orig
             );
         }
     }

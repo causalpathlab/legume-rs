@@ -310,8 +310,7 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
         None => vec![None; data_files.len()],
     };
 
-    let topic_index =
-        collect_all_topic_names(&topic_assignment_files, &topic_proportion_files)?;
+    let topic_index = collect_all_topic_names(&topic_assignment_files, &topic_proportion_files)?;
     let sorted_topic_names = topic_index.sorted_names;
     let topic_names = topic_index.name_to_index;
 

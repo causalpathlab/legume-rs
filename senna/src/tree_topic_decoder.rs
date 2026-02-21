@@ -443,6 +443,18 @@ pub struct TreeTopicDecoder {
     parallel_seed: u64,
 }
 
+/// Configuration for creating a TreeTopicDecoder from pseudobulk
+pub struct PseudobulkConfig {
+    pub n_samples: usize,
+    pub n_genes: usize,
+    pub n_modules: usize,
+    pub a0: f64,
+    pub b0: f64,
+    pub gibbs_sweeps: usize,
+    pub greedy_sweeps: usize,
+    pub seed: u64,
+}
+
 impl TreeTopicDecoder {
     /// Create a new tree topic decoder with random initial module assignments.
     ///
@@ -520,21 +532,11 @@ impl TreeTopicDecoder {
     ///
     /// After initialization, call `update_profiles()` to switch to topic-space
     /// profiles before the first E-step.
-    pub fn from_pseudobulk(
-        pb_ns: &[f32],
-        n_samples: usize,
-        n_genes: usize,
-        n_modules: usize,
-        a0: f64,
-        b0: f64,
-        gibbs_sweeps: usize,
-        greedy_sweeps: usize,
-        seed: u64,
-    ) -> Self {
-        let pb_profiles = GeneProfileStore::from_pseudobulk(pb_ns, n_samples, n_genes);
-        let mut td = Self::new(pb_profiles, n_modules, a0, b0, seed);
-        td.gibbs_sweep_parallel(gibbs_sweeps);
-        td.greedy_sweep(greedy_sweeps);
+    pub fn from_pseudobulk(pb_ns: &[f32], config: &PseudobulkConfig) -> Self {
+        let pb_profiles = GeneProfileStore::from_pseudobulk(pb_ns, config.n_samples, config.n_genes);
+        let mut td = Self::new(pb_profiles, config.n_modules, config.a0, config.b0, config.seed);
+        td.gibbs_sweep_parallel(config.gibbs_sweeps);
+        td.greedy_sweep(config.greedy_sweeps);
         td
     }
 

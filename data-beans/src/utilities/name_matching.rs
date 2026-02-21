@@ -6,6 +6,7 @@
 /// - Segment match: target contains `_query_`
 ///
 /// Example: "CD8A" matches "ENSG00000153563_CD8A", "CD8A_variant1", "chr1_CD8A_isoform2"
+#[allow(dead_code)]
 pub fn flexible_name_match(query: &str, target: &str) -> bool {
     let q = query.to_lowercase();
     let t = target.to_lowercase();

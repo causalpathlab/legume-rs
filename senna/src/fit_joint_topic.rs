@@ -448,15 +448,18 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         .expect("failed to set signal handler");
     }
 
+    let train_config = ProgressiveTrainConfig {
+        parameters: &parameters,
+        dev: &dev,
+        args,
+        feature_selections: &feature_selections,
+        stop: &stop,
+    };
     let scores = train_encoder_decoder_progressive(
         &collapsed_levels,
         &encoder,
         &decoder,
-        &parameters,
-        &dev,
-        args,
-        &feature_selections,
-        &stop,
+        &train_config,
     )?;
 
     info!("Writing down the model parameters");
@@ -501,7 +504,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     let z_nk = evaluate_latent_by_encoder(
         &data_stack,
         &encoder,
-        &collapsed_data_vec,
+        collapsed_data_vec,
         &dev,
         args,
         &feature_selections,
@@ -769,6 +772,15 @@ impl TrainScores {
     }
 }
 
+/// Configuration for progressive training
+struct ProgressiveTrainConfig<'a> {
+    parameters: &'a candle_nn::VarMap,
+    dev: &'a candle_core::Device,
+    args: &'a JointTopicArgs,
+    feature_selections: &'a [Option<FeatureSelection>],
+    stop: &'a AtomicBool,
+}
+
 /// Progressive multi-level training: coarse levels get more epochs for
 /// warm start, finer levels for fine-tuning.
 /// Epoch allocation: level `i` gets `total_epochs * (num_levels - i) / sum(1..=num_levels)`.
@@ -776,18 +788,14 @@ fn train_encoder_decoder_progressive<Enc, Dec>(
     collapsed_levels: &[Vec<CollapsedOut>],
     encoder: &Enc,
     decoder: &Dec,
-    parameters: &candle_nn::VarMap,
-    dev: &candle_core::Device,
-    args: &JointTopicArgs,
-    feature_selections: &[Option<FeatureSelection>],
-    stop: &AtomicBool,
+    config: &ProgressiveTrainConfig,
 ) -> anyhow::Result<TrainScores>
 where
     Enc: MultimodalEncoderModuleT,
     Dec: MultimodalDecoderModuleT,
 {
     let num_levels = collapsed_levels.len();
-    let total_epochs = args.epochs;
+    let total_epochs = config.args.epochs;
 
     // Compute per-level epoch allocation: w[i] = num_levels - i
     let total_weight: usize = (1..=num_levels).sum();
@@ -805,7 +813,7 @@ where
         level_epochs.iter().sum::<usize>()
     );
 
-    let mut adam = AdamW::new_lr(parameters.all_vars(), args.learning_rate as f64)?;
+    let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.args.learning_rate as f64)?;
 
     let total_actual_epochs: usize = level_epochs.iter().sum();
     let pb = ProgressBar::new(total_actual_epochs as u64);
@@ -825,20 +833,20 @@ where
             collapsed_data_vec[0].mu_observed.ncols(),
         );
 
-        for epoch in (0..level_ep).step_by(args.jitter_interval) {
+        for epoch in (0..level_ep).step_by(config.args.jitter_interval) {
             //////////////////////////////////////////
             // every jitter interval, resample data //
             //////////////////////////////////////////
 
             let input = collapsed_data_vec
                 .iter()
-                .zip(feature_selections)
+                .zip(config.feature_selections)
                 .map(|(x, sel)| -> anyhow::Result<Mat> {
                     let mat = x
                         .mu_observed
                         .posterior_sample()?
                         .sum_to_one_columns()
-                        .scale(args.column_sum_norm);
+                        .scale(config.args.column_sum_norm);
                     let mat = if let Some(sel) = sel {
                         mat.select_rows(&sel.selected_indices)
                     } else {
@@ -850,7 +858,7 @@ where
 
             let input_null = collapsed_data_vec
                 .iter()
-                .zip(feature_selections)
+                .zip(config.feature_selections)
                 .map(|(x, sel)| -> anyhow::Result<Option<Mat>> {
                     x.mu_residual
                         .as_ref()
@@ -869,14 +877,14 @@ where
 
             let output = collapsed_data_vec
                 .iter()
-                .zip(feature_selections)
+                .zip(config.feature_selections)
                 .map(|(x, sel)| -> anyhow::Result<Option<Mat>> {
                     Ok(x.mu_adjusted
                         .as_ref()
                         .map(|y| y.posterior_sample())
                         .transpose()?
                         .map(|y| {
-                            let mat = y.sum_to_one_columns().scale(args.column_sum_norm);
+                            let mat = y.sum_to_one_columns().scale(config.args.column_sum_norm);
                             let mat = if let Some(sel) = sel {
                                 mat.select_rows(&sel.selected_indices)
                             } else {
@@ -894,21 +902,21 @@ where
                 output_null: &vec![None; input.len()],
             })?;
 
-            data_loader.shuffle_minibatch(args.minibatch_size)?;
+            data_loader.shuffle_minibatch(config.args.minibatch_size)?;
 
-            let kl_weight = if args.kl_warmup_epochs > 0.0 {
-                1.0 - (-(global_epoch as f64) / args.kl_warmup_epochs).exp()
+            let kl_weight = if config.args.kl_warmup_epochs > 0.0 {
+                1.0 - (-(global_epoch as f64) / config.args.kl_warmup_epochs).exp()
             } else {
                 1.0
             };
 
-            let jitter_end = args.jitter_interval.min(level_ep - epoch);
+            let jitter_end = config.args.jitter_interval.min(level_ep - epoch);
             for jitter in 0..jitter_end {
                 let mut llik_tot = 0f32;
                 let mut kl_tot = 0f32;
 
                 for b in 0..data_loader.num_minibatch() {
-                    let mb = data_loader.minibatch_shuffled(b, dev)?;
+                    let mb = data_loader.minibatch_shuffled(b, config.dev)?;
 
                     let (z_nk, kl) = encoder.forward_t(&mb.input, &mb.input_null, true)?;
 
@@ -947,7 +955,7 @@ where
                     kl_tot / n_mb
                 );
 
-                if stop.load(Ordering::SeqCst) {
+                if config.stop.load(Ordering::SeqCst) {
                     pb.finish_and_clear();
                     info!(
                         "Stopping training early at level {}/{}, epoch {}",
