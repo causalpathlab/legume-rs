@@ -29,15 +29,15 @@ fn print_logo() {
     for line in LOGO.lines() {
         println!("  {}", colorize_logo_line(line));
     }
-    // Faceted Aggregation of Genotype Information
-    // On Locus Identification
+    // Faceted Associations of Genotype Information
+    // via Omics-based Locus Identification
     println!("  {}", "fagioli".bold());
     println!();
 }
 
 #[derive(Parser)]
 #[command(name = "fagioli")]
-#[command(about = "Faceted Aggregation of Genotype Information On Locus Identification")]
+#[command(about = "Faceted Associations of Genotype Information via Omics-based Locus Identification")]
 struct Cli {
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
