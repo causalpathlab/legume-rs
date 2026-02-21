@@ -1,0 +1,216 @@
+---
+title: "Pinto: Spatial Transcriptomics Analysis"
+output: html_document
+---
+
+## Prepare spatially-resolved transcriptomic data
+
+* We can download [10x Genomics Xenium Prime Ovarian Cancer FFPE data](https://www.10xgenomics.com/datasets/xenium-prime-ffpe-human-ovarian-cancer) (Note: This is a large zip file).
+
+* Convert the 10x Xenium `.zarr.zip` matrix into a `.zarr` backend that pinto can read efficiently.
+
+```{sh download_and_unzip, eval=FALSE}
+mkdir -p temp
+if ! [ -d temp/data.zarr ] ; then
+	[ -f Xenium_Prime_Ovarian_Cancer_FFPE_XRrun_xe_outs.zip ] || \
+		curl -O https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Ovarian_Cancer_FFPE_XRrun/Xenium_Prime_Ovarian_Cancer_FFPE_XRrun_xe_outs.zip
+	unzip Xenium_Prime_Ovarian_Cancer_FFPE_XRrun_xe_outs.zip -d temp
+	data-beans from-zarr temp/cell_feature_matrix.zarr.zip \
+		--backend zarr \
+		--do-squeeze \
+		--row-nnz-cutoff 10 \
+		--column-nnz-cutoff 10 \
+		--output temp/data
+fi
+```
+
+* Alternatively, pinto can auto-convert on the fly (creates `{file}.db.zarr` next to the input), but pre-converting avoids repeated work across runs.
+
+## Run delta-SVD
+
+* Delta-SVD decomposes cell-cell edge profiles into shared and difference channels, then finds latent topics via randomized SVD.
+
+```{sh run_dsvd, eval=FALSE}
+[ -f temp/dsvd.latent.parquet ] || \
+	pinto dsvd temp/data.zarr \
+	--coord temp/cells.zarr.zip \
+	--coord-column-names cell_centroid_x,cell_centroid_y \
+	-d 1024 \
+	-t 7 --preload-data \
+	-o temp/dsvd
+```
+
+This produces:
+
+| Output file | Description |
+|---|---|
+| `dsvd.coord_pairs.parquet` | Spatial coordinates for each cell pair (edge) |
+| `dsvd.basis.parquet` | SVD basis vectors (gene loadings, `@shared` / `@diff` suffixes) |
+| `dsvd.latent.parquet` | Latent edge representations (L2-normalized) |
+| `dsvd.propensity.parquet` | Soft cell-to-topic membership |
+| `dsvd.gene_topic.parquet` | Per-topic gene expression rates |
+| `dsvd.edge_cluster.parquet` | Edge-to-cluster assignments |
+
+## Run link community model
+
+* The link community model assigns each edge to one of K communities via collapsed Gibbs sampling on a Poisson-Gamma model, using multi-level coarsening for scalability.
+
+```{sh run_lc, eval=FALSE}
+[ -f temp/lc.propensity.parquet ] || \
+	pinto lc temp/data.zarr \
+	--coord temp/cells.zarr.zip \
+	--coord-column-names cell_centroid_x,cell_centroid_y \
+	-d 1024 --preload-data --reciprocal \
+	--n-communities 7 \
+	--num-sweeps 10 \
+	-k 10 \
+	-o temp/lc
+```
+
+This produces:
+
+| Output file | Description |
+|---|---|
+| `lc.coord_pairs.parquet` | Spatial coordinates for each cell pair (edge) |
+| `lc.propensity.parquet` | Soft cell-to-community membership |
+| `lc.gene_topic.parquet` | Per-community gene expression rates |
+| `lc.gene_modules.parquet` | Gene-to-module assignments (K-means on gene sketches) |
+| `lc.link_community.parquet` | Edge-to-community assignments |
+| `lc.scores.parquet` | Gibbs sampling score trace per coarsening level |
+
+## Visualize results in R
+
+```{r setup, message=FALSE}
+library(arrow)
+library(data.table)
+library(ggplot2)
+library(patchwork)
+
+theme_set(theme_minimal(base_size = 12))
+```
+
+### Load delta-SVD results
+
+```{r load_dsvd}
+dsvd_prop <- as.data.table(read_parquet("temp/dsvd.propensity.parquet"))
+dsvd_gene <- as.data.table(read_parquet("temp/dsvd.gene_topic.parquet"))
+dsvd_basis <- as.data.table(read_parquet("temp/dsvd.basis.parquet"))
+```
+
+### Load link community results
+
+```{r load_lc}
+lc_prop <- as.data.table(read_parquet("temp/lc.propensity.parquet"))
+lc_gene <- as.data.table(read_parquet("temp/lc.gene_topic.parquet"))
+lc_links <- as.data.table(read_parquet("temp/lc.link_community.parquet"))
+lc_scores <- as.data.table(read_parquet("temp/lc.scores.parquet"))
+```
+
+### Load coordinates
+
+```{r load_coords}
+coords <- as.data.table(read_parquet("temp/cells.parquet"))
+```
+
+### Delta-SVD: cell topic map
+
+* Each cell has a soft loading vector across latent topics. We assign each cell to its dominant topic and label topics by their top marker genes.
+
+```{r dsvd_propensity_map, fig.width=10, fig.height=4}
+library(dplyr)
+
+.dsvd <- dsvd_prop %>%
+    as.data.table() %>%
+    melt(id.vars = c("cell", "cluster"), variable.name = "topic_label") %>%
+    filter(value > .1) %>%
+    rename(cell_id = cell) %>%
+    left_join(coords) %>%
+    na.omit() %>%
+    as.data.table()
+
+.aes <- aes(x = cell_centroid_x,
+            y = cell_centroid_y,
+            colour = topic_label,
+            size = value)
+
+ggplot(.dsvd, .aes) +
+    theme_void() +
+    scale_size_continuous(range=c(0, 0.5), guide="none") +
+	ggrastr::rasterize(geom_point(stroke = 0.0),dpi=300) +
+    scale_colour_brewer(palette="Dark2") +
+    scale_y_reverse()
+```
+
+### Delta-SVD: top genes per topic
+
+```{r dsvd_top_genes, fig.width=12, fig.height=8}
+# gene_topic is long format: row (gene), column (topic), mean, sd, log_mean
+dsvd_gene[, gene := sub("^[^_]+_", "", row)]
+
+top_genes <- dsvd_gene[, .SD[order(-mean)][1:10], by = column]
+
+ggplot(top_genes, aes(x = reorder(gene, mean), y = mean)) +
+	geom_col() +
+	coord_flip() +
+	facet_wrap(~ column, scales = "free_y") +
+	labs(title = "Delta-SVD: top 10 genes per topic",
+	     x = NULL, y = "Expression rate")
+```
+
+Based on the top marker genes, the delta-SVD topics correspond to major cell populations in the ovarian cancer tumour microenvironment:
+
+| Topic | Top markers | Interpretation |
+|---|---|---|
+| 0 | MYH11, MYL9, CNN1 | Smooth muscle cells |
+| 1 | H19, PLXNB1, CD47, NORAD | Tumour epithelial cells |
+| 2 | C7, DCN, CCN1 | Stromal / immune interface |
+| 3 | BGN, LUM, COL5A1, DCN, POSTN | Desmoplastic stroma / cancer-associated fibroblasts (CAFs) |
+| 4 | H19, CD47, LAPTM4B, YWHAZ | Tumour cells (overlaps topic 1) |
+| 5 | C1QC, C7, MS4A6A | Macrophages / myeloid cells |
+| 6 | AQP1, COL4A1, ADAMTS1 | Endothelium / vasculature |
+
+### Link community: cell membership map
+
+```{r lc_propensity_map, fig.width=10, fig.height=4}
+.lc <- melt(lc_prop, id.vars = "cell", variable.name = "community", value.name = "value") %>%
+    filter(value > .1) %>%
+    rename(cell_id = cell) %>%
+    left_join(coords) %>%
+    na.omit() %>%
+    as.data.table()
+
+ggplot(.lc, aes(x = cell_centroid_x, y = cell_centroid_y, colour = community, size = value)) +
+    theme_void() +
+    scale_size_continuous(range = c(0, 0.5), guide="none") +
+    ggrastr::rasterize(geom_point(stroke = 0.0), dpi = 300) +
+    scale_colour_brewer(palette = "Dark2") +
+    scale_y_reverse()
+```
+
+### Link community: top genes per community
+
+```{r lc_top_genes, fig.width=12, fig.height=8}
+# gene_topic is long format: row (gene), column (community), mean, sd, log_mean
+lc_gene[, gene := sub("^[^_]+_", "", row)]
+
+lc_top <- lc_gene[, .SD[order(-mean)][1:10], by = column]
+
+ggplot(lc_top, aes(x = reorder(gene, mean), y = mean)) +
+	geom_col() +
+	coord_flip() +
+	facet_wrap(~ column, scales = "free_y") +
+	labs(title = "Link community: top 10 genes per community",
+	     x = NULL, y = "Expression rate")
+```
+
+The link communities are broadly concordant with the delta-SVD topics, capturing the same major compartments of the tumour microenvironment:
+
+| Community | Top markers | Interpretation |
+|---|---|---|
+| 0 | H19, CD47, LAPTM4B, YWHAZ | Tumour cells |
+| 1 | MYL9, BGN, TIMP3, COL5A1 | Mixed stromal / myofibroblast |
+| 2 | C7, DCN, NAMPT, ADAMTS1 | Stromal / immune-rich zone |
+| 3 | BGN, LUM, COL5A1, DCN, POSTN | Desmoplastic stroma / CAFs |
+| 4 | MYH11, MYL9, CNN1 | Smooth muscle cells |
+| 5 | H19, CD47, PLXNB1, NORAD | Tumour epithelial cells |
+| 6 | C1QC, NAMPT, COL4A1 | Macrophage-enriched niche |
