@@ -5,7 +5,7 @@
 //! collapsed Gibbs sampling on gene-projected edge profiles.
 
 use crate::edge_profiles::*;
-use crate::link_community_gibbs::LinkGibbsSampler;
+use crate::link_community_gibbs::{ComponentGibbsArgs, LinkGibbsSampler};
 use crate::link_community_model::LinkCommunityStats;
 use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
@@ -120,15 +120,22 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     let k = args.n_communities;
     let n_gm = args.n_gene_modules; // 0 = skip gene modules
 
-    // 1. Load data + coordinates
+    // 1. Load data (with or without coordinates)
     info!("Loading data files...");
+
+    let has_coords = c.has_coordinates();
 
     let SRTData {
         data: mut data_vec,
-        coordinates,
-        coordinate_names,
+        mut coordinates,
+        mut coordinate_names,
         batches: mut batch_membership,
-    } = read_data_with_coordinates(c.to_read_args())?;
+    } = if has_coords {
+        read_data_with_coordinates(c.to_read_args())?
+    } else {
+        info!("No coordinate files provided — using expression mode");
+        read_data_without_coordinates(c.to_read_args())?
+    };
 
     let n_genes = data_vec.num_rows();
     let n_cells = data_vec.num_columns();
@@ -143,17 +150,41 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         n_cells
     );
 
-    // 2. Build spatial KNN graph
-    info!("Building spatial KNN graph (k={})...", c.knn_spatial);
+    // 2. Build KNN graph (spatial or expression-based)
+    let graph;
 
-    let graph = build_spatial_graph(
-        &coordinates,
-        SrtCellPairsArgs {
-            knn: c.knn_spatial,
-            block_size: c.block_size,
-            reciprocal: c.reciprocal,
-        },
-    )?;
+    if has_coords {
+        info!("Building spatial KNN graph (k={})...", c.knn_spatial);
+        graph = build_spatial_graph(
+            &coordinates,
+            SrtCellPairsArgs {
+                knn: c.knn_spatial,
+                block_size: c.block_size,
+                reciprocal: c.reciprocal,
+            },
+        )?;
+    } else {
+        info!(
+            "Building expression KNN graph (k={}, proj_dim={})...",
+            c.knn_spatial, c.proj_dim
+        );
+        let cell_proj_pre = data_vec.project_columns_with_batch_correction(
+            c.proj_dim,
+            Some(c.block_size),
+            None::<&[Box<str>]>,
+        )?;
+        let (g, embedding) = build_expression_graph(
+            &cell_proj_pre.proj,
+            SrtCellPairsArgs {
+                knn: c.knn_spatial,
+                block_size: c.block_size,
+                reciprocal: c.reciprocal,
+            },
+        )?;
+        graph = g;
+        coordinates = embedding;
+        coordinate_names = vec!["pc_1".into(), "pc_2".into()];
+    }
 
     // Auto-detect batches from connected components (opt-in via --auto-batch)
     if c.auto_batch && c.batch_files.is_none() {
@@ -247,8 +278,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         });
 
         info!("Building module-count edge profiles...");
-        edge_profiles =
-            build_edge_profiles_by_module(&data_vec, edges, &g2m, n_gm, c.block_size)?;
+        edge_profiles = build_edge_profiles_by_module(&data_vec, edges, &g2m, n_gm, c.block_size)?;
         gene_to_module = Some(g2m);
     } else {
         // Skip gene modules: use random-projection edge profiles
@@ -257,8 +287,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         if args.min_gene_count > 0.0 {
             info!("Computing gene totals for filtering...");
             let gene_totals = compute_gene_totals(&data_vec, c.block_size)?;
-            let n_kept =
-                filter_basis_by_gene_count(&mut basis, &gene_totals, args.min_gene_count);
+            let n_kept = filter_basis_by_gene_count(&mut basis, &gene_totals, args.min_gene_count);
             info!(
                 "Kept {}/{} genes (min_count={:.0})",
                 n_kept, n_genes, args.min_gene_count
@@ -359,14 +388,18 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         num_fine_sweeps
     );
 
-    let moves = sampler.run_components_em(
-        &mut current_labels,
-        &edge_profiles,
-        &srt_cell_pairs.graph,
+    let comp_args = ComponentGibbsArgs {
+        graph: &srt_cell_pairs.graph,
         edges,
         k,
         a0,
         b0,
+    };
+
+    let moves = sampler.run_components_em(
+        &mut current_labels,
+        &edge_profiles,
+        &comp_args,
         num_fine_sweeps,
     );
     let fine_score =
@@ -378,11 +411,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     let greedy_moves = sampler.run_greedy_by_components(
         &mut current_labels,
         &edge_profiles,
-        &srt_cell_pairs.graph,
-        edges,
-        k,
-        a0,
-        b0,
+        &comp_args,
         args.num_greedy,
     );
     let mut fine_stats = LinkCommunityStats::from_profiles(&edge_profiles, k, &current_labels);

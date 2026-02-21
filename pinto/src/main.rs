@@ -50,41 +50,50 @@ fn print_logo() {
     version,
     about = "PINTO",
     long_about = "Proximity-based Interaction Network analysis to dissect Tissue Organizations\n\n\
-                  PINTO discovers spatial interaction patterns from spatially-resolved\n\
-                  transcriptomics data via link community detection. Communities are\n\
-                  assigned to edges (cell-cell interactions) using gene module-based\n\
-                  profiles or dimensionality reduction (SVD).\n\n\
+                  PINTO discovers cell-cell interaction patterns from transcriptomics\n\
+                  data via link community detection. Communities are assigned to edges\n\
+                  (cell-cell interactions) using gene module-based profiles or\n\
+                  dimensionality reduction (SVD).\n\n\
+                  PINTO supports two modes:\n\
+                  - Spatial mode (recommended): provide coordinate files to build\n\
+                    a spatial KNN graph from cell positions.\n\
+                  - Expression mode: omit --coord to build a KNN graph from\n\
+                    random-projected gene expression embeddings. 2D coordinates\n\
+                    are generated via force-directed layout for visualization.\n\n\
                   FILE FORMATS:\n\n\
                   Data files:\n\
                   - Must be `.zarr` or `.h5` (HDF5) format\n\
                   - Convert from `.mtx` using: data-beans from-mtx input.mtx output.zarr\n\
                   - Multiple files can be provided (comma-separated)\n\n\
-                  Coordinate files (one per data file):\n\
+                  Coordinate files (recommended, one per data file):\n\
                   - CSV, TSV, or space-delimited text files (or .parquet)\n\
                   - First column: cell/barcode names (must match data file)\n\
                   - Subsequent columns: spatial coordinates (x, y, etc.)\n\
                   - Header row optional (auto-detected or specify with --coord-header-row)\n\
                   - Default column names: pxl_row_in_fullres, pxl_col_in_fullres (10X Visium)\n\
-                  - Use --coord-column-names for different column headers\n\n\
+                  - Use --coord-column-names for different column headers\n\
+                  - When omitted, KNN graph is built from expression embeddings\n\n\
                   Batch files (optional, one per data file):\n\
                   - Plain text file, one batch label per line\n\
                   - Must have one line for each cell in the corresponding data file\n\
                   - If not provided, each data file is treated as a separate batch\n\n\
                   WORKFLOWS:\n\n\
-                  1. SVD-based cell-level analysis (shared/difference channels):\n\
-                     pinto dsvd data.zarr -c coords.csv -o out\n\
-                     → Outputs: propensity, edge clusters, gene-topic stats\n\
-                     (prop subcommand only for different K or coord embed)\n\n\
-                  2. SVD-based gene-gene interaction analysis:\n\
-                     pinto gisvd data.zarr -c coords.csv -o out\n\
-                     → Outputs: gene-pair graph, propensity, edge clusters\n\
-                     (prop subcommand only for different K or coord embed)\n\n\
-                  3. Link community model (gene module-based, standalone):\n\
-                     pinto lc data.zarr -c coords.csv -k 20 -o out\n\
-                     → Outputs: link communities, cell propensity, gene modules\n\n\
-                  Choose dsvd for cell-level shared/difference patterns, gisvd for\n\
-                  gene-gene co-expression networks, or lc for direct probabilistic\n\
-                  link community detection with interpretable gene modules.",
+                  1. SVD-based cell-level analysis (spatial):\n\
+                     pinto dsvd data.zarr -c coords.csv -o out\n\n\
+                  2. SVD-based cell-level analysis (expression only):\n\
+                     pinto dsvd data.zarr -o out\n\n\
+                  3. SVD-based gene-pair interaction analysis:\n\
+                     pinto gpsvd data.zarr -c coords.csv -o out\n\n\
+                  4. Link community model (gene module-based):\n\
+                     pinto lc data.zarr -c coords.csv -k 20 -o out\n\n\
+                  5. Gene-pair link community model:\n\
+                     pinto gplc data.zarr -c coords.csv -o out\n\n\
+                  All subcommands accept --coord or work without it.\n\
+                  Use prop subcommand for re-clustering with different K.\n\n\
+                  Choose dsvd for cell-level shared/difference patterns, gpsvd for\n\
+                  gene-pair co-expression networks, lc for probabilistic link\n\
+                  community detection with gene modules, or gplc for gene-pair\n\
+                  link communities.",
     term_width = 80
 )]
 struct Cli {
@@ -114,8 +123,11 @@ enum Commands {
                       \x20   mu_g ~ Gamma(a0, b0)   collapsed out\n\n\
                       Algorithm:\n\
                       \x20 1. Load data X [G x N] and coordinates [N x D]\n\
+                      \x20    (if no coordinates, use expression embeddings)\n\
                       \x20 2. Estimate batch effects delta [G x B]\n\
-                      \x20 3. Build spatial KNN graph -> E cell pairs\n\
+                      \x20 3. Build KNN graph -> E cell pairs\n\
+                      \x20    (spatial KNN from coordinates, or expression KNN\n\
+                      \x20     from random-projected gene expression)\n\
                       \x20 4. Random projection of cells [N x P]\n\
                       \x20 5. Graph coarsening -> assign pairs to S samples\n\
                       \x20 6. Collapse: accumulate sigma/delta per gene per sample\n\
@@ -130,7 +142,7 @@ enum Commands {
                       \x20     z_e <- z_e / ||z_e||   (L2 normalize)\n\n\
                       Outputs:\n\
                       - {out}.delta.parquet: batch effects (when multi-batch)\n\
-                      - {out}.coord_pairs.parquet: spatial cell pair coordinates\n\
+                      - {out}.coord_pairs.parquet: cell pair coordinates\n\
                       - {out}.basis.parquet: SVD basis (2G x T)\n\
                       - {out}.latent.parquet: per-pair latent codes (E x T)\n\
                       - {out}.propensity.parquet: cell propensity (N x K)\n\
@@ -139,10 +151,10 @@ enum Commands {
     DeltaSvd(SrtDeltaSvdArgs),
 
     #[command(
-        alias = "gisvd",
-        about = "Gene-gene interaction patterns analysis by SVD",
-        long_about = "Gene-gene interaction analysis by randomized SVD.\n\n\
-                      Discovers gene-gene co-expression patterns within spatial\n\
+        alias = "gpsvd",
+        about = "Gene-pair interaction patterns analysis by SVD",
+        long_about = "Gene-pair interaction analysis by randomized SVD.\n\n\
+                      Discovers gene-pair co-expression patterns within cell\n\
                       neighbourhoods by building a gene-gene graph and decomposing\n\
                       interaction deltas via SVD.\n\n\
                       Model:\n\
@@ -156,7 +168,10 @@ enum Commands {
                       \x20   Y_s | mu ~ Poisson(n_s * mu), mu ~ Gamma(a0, b0)\n\n\
                       Algorithm:\n\
                       \x20 1. Load data X [G x N] and coordinates [N x D]\n\
-                      \x20 2. Build spatial KNN graph -> E cell pairs\n\
+                      \x20    (if no coordinates, use expression embeddings)\n\
+                      \x20 2. Build KNN graph -> E cell pairs\n\
+                      \x20    (spatial KNN from coordinates, or expression KNN\n\
+                      \x20     from random-projected gene expression)\n\
                       \x20 3. Random projection + binary sort -> S samples\n\
                       \x20 4. Preliminary collapse: gene x sample sums\n\
                       \x20 5. Poisson-Gamma on gene sums -> posterior means\n\
@@ -171,7 +186,7 @@ enum Commands {
                       \x20     z_j = sum_{(g1,g2)} delta_j^+ * basis[g1:g2]\n\
                       \x20     z_e = (z_i + z_j) / 2, then L2 normalize\n\n\
                       Outputs:\n\
-                      - {out}.coord_pairs.parquet: spatial cell pair coords\n\
+                      - {out}.coord_pairs.parquet: cell pair coordinates\n\
                       - {out}.gene_graph.parquet: gene-gene graph edges\n\
                       - {out}.basis.parquet: SVD basis (n_edges x T)\n\
                       - {out}.latent.parquet: per-pair latent codes (E x T)\n\
@@ -185,10 +200,9 @@ enum Commands {
         about = "Estimate vertex propensity from edge clusters (standalone)",
         long_about = "Estimate vertex (cell) propensity scores from edge\n\
                       (cell-pair) cluster assignments.\n\n\
-                      NOTE: dsvd and gisvd now produce propensity and edge\n\
+                      NOTE: dsvd and gpsvd now produce propensity and edge\n\
                       cluster outputs inline. Use this subcommand only when\n\
-                      you need a different K, coordinate embedding, or\n\
-                      separate expression data.\n\n\
+                      you need a different K or separate expression data.\n\n\
                       Model:\n\
                       \x20 Given latent codes z_e [E x T] from delta-svd or\n\
                       \x20 gene-pair-delta-svd:\n\
@@ -220,13 +234,15 @@ enum Commands {
     #[command(
         alias = "lc",
         about = "Link community model via collapsed Gibbs sampling",
-        long_about = "Link community model for spatial cell-cell interaction analysis.\n\n\
-                      Treats spatial transcriptomics data as G separate weighted\n\
-                      networks on N cells. Community membership is assigned at the\n\
-                      link level via collapsed Gibbs sampling with a Poisson-Gamma\n\
+        long_about = "Link community model for cell-cell interaction analysis.\n\n\
+                      Treats transcriptomics data as G separate weighted networks\n\
+                      on N cells. Community membership is assigned at the link\n\
+                      level via collapsed Gibbs sampling with a Poisson-Gamma\n\
                       conjugate model.\n\n\
+                      Supports spatial coordinates or expression-only mode\n\
+                      (omit --coord to build KNN from expression embeddings).\n\n\
                       Model:\n\
-                      \x20 Given N cells, G genes, KNN spatial graph with E edges.\n\
+                      \x20 Given N cells, G genes, KNN graph with E edges.\n\
                       \x20 For each edge e=(i,j), build module-count profile:\n\
                       \x20   y_e[m] = sum_{g in module m} (x_{g,i} + x_{g,j})\n\
                       \x20 Link community assignment:\n\
@@ -236,8 +252,10 @@ enum Commands {
                       \x20   s_e = sum_m y_e^m          link size factor\n\n\
                       Algorithm:\n\
                       \x20 1. Load data X [G x N] and coordinates [N x D]\n\
+                      \x20    (if no coordinates, use expression embeddings)\n\
                       \x20 2. Estimate batch effects delta [G x B]\n\
-                      \x20 3. Build spatial KNN graph -> E edges\n\
+                      \x20 3. Build KNN graph -> E edges\n\
+                      \x20    (spatial or expression-based)\n\
                       \x20 4. Discover gene modules via random sketch clustering\n\
                       \x20 5. Build edge profiles: y_e[m] = sum of module m counts\n\
                       \x20 6. Coarsen: cell KMeans -> super-edges, sum profiles\n\
@@ -260,7 +278,7 @@ enum Commands {
                       - {out}.gene_modules.parquet: gene module assignments (G x 1)\n\
                       - {out}.link_community.parquet: link community assignments\n\
                       - {out}.scores.parquet: score trace\n\
-                      - {out}.coord_pairs.parquet: spatial cell pair coordinates\n\
+                      - {out}.coord_pairs.parquet: cell pair coordinates\n\
                       - {out}.delta.parquet: batch effects (when multi-batch)"
     )]
     LinkCommunity(SrtLinkCommunityArgs),
@@ -268,18 +286,23 @@ enum Commands {
     #[command(
         alias = "gplc",
         about = "Gene pair link community model via collapsed Gibbs sampling",
-        long_about = "Gene pair link community model for spatial cell-cell interaction analysis.\n\n\
+        long_about = "Gene-pair link community model for cell-cell interaction analysis.\n\n\
                       Combines gene-pair interaction deltas with collapsed Gibbs link\n\
-                      community sampling. For each spatial edge (i,j), the profile is a\n\
-                      vector of δ⁺ values across gene pairs from a gene-gene graph,\n\
-                      capturing which gene-gene interactions are active on that edge.\n\n\
+                      community sampling. For each edge (i,j), the profile is a vector\n\
+                      of δ⁺ values across gene pairs from a gene-gene graph, capturing\n\
+                      which gene-gene interactions are active on that edge.\n\n\
+                      Supports spatial coordinates or expression-only mode\n\
+                      (omit --coord to build KNN from expression embeddings).\n\n\
+                      When the number of gene pairs exceeds --n-edge-modules,\n\
+                      gene pairs are clustered into modules via K-means to reduce\n\
+                      dimensionality of edge profiles.\n\n\
                       Outputs:\n\
                       - {out}.propensity.parquet: soft membership (N x K)\n\
                       - {out}.gene_topic.parquet: gene-topic statistics (G x K)\n\
                       - {out}.gene_graph.parquet: gene-gene graph edges\n\
                       - {out}.link_community.parquet: link community assignments\n\
                       - {out}.scores.parquet: score trace\n\
-                      - {out}.coord_pairs.parquet: spatial cell pair coordinates\n\
+                      - {out}.coord_pairs.parquet: cell pair coordinates\n\
                       - {out}.delta.parquet: batch effects (when multi-batch)"
     )]
     GenePairLinkCommunity(SrtGenePairLinkCommunityArgs),

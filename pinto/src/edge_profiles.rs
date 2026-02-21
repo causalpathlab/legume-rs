@@ -16,10 +16,7 @@ use nalgebra_sparse::csc::CscMatrix;
 /// Compute per-gene total counts from sparse data.
 ///
 /// Returns a vector of length `n_genes` with the sum of all entries per row.
-pub fn compute_gene_totals(
-    data: &SparseIoVec,
-    block_size: usize,
-) -> anyhow::Result<Vec<f64>> {
+pub fn compute_gene_totals(data: &SparseIoVec, block_size: usize) -> anyhow::Result<Vec<f64>> {
     let n_genes = data.num_rows();
     let n_cells = data.num_columns();
     let jobs = generate_minibatch_intervals(n_cells, block_size);
@@ -856,6 +853,67 @@ pub fn filter_profile_columns(store: &LinkProfileStore, keep: &[usize]) -> LinkP
     }
 
     LinkProfileStore::new(new_profiles, n_edges, new_m)
+}
+
+/// Collapse gene-pair columns into modules via K-means clustering.
+///
+/// Given a `LinkProfileStore` with `n_edges × n_gene_pairs`, clusters the
+/// gene-pair dimension (columns) into `n_modules` groups via K-means on
+/// the column profiles (each column is a vector of length `n_edges`).
+/// Returns a new store with `n_edges × n_modules` where each module's
+/// value is the sum of its member gene-pair columns, plus the
+/// gene-pair-to-module assignment vector.
+pub fn collapse_profile_columns_by_module(
+    store: &LinkProfileStore,
+    n_modules: usize,
+) -> (LinkProfileStore, Vec<usize>) {
+    use matrix_util::clustering::Kmeans;
+    use matrix_util::traits::SampleOps;
+
+    let n_edges = store.n_edges;
+    let m = store.m; // n_gene_pairs
+
+    // Build n_gene_pairs × n_edges matrix (each row = one gene pair's profile across edges)
+    let mut col_profiles = Mat::zeros(m, n_edges);
+    for e in 0..n_edges {
+        let profile = store.profile(e);
+        for p in 0..m {
+            col_profiles[(p, e)] = profile[p];
+        }
+    }
+
+    // Random project to low dim for faster K-means when n_edges is large
+    let proj_dim = 50.min(n_edges);
+    let projected = if n_edges > proj_dim {
+        let rng_proj = Mat::rnorm(n_edges, proj_dim);
+        let scale = 1.0 / (proj_dim as f32).sqrt();
+        let mut proj = &col_profiles * &rng_proj;
+        proj *= scale;
+        proj
+    } else {
+        col_profiles.clone()
+    };
+
+    // K-means on rows → gene_pair_to_module
+    let assignments = projected.kmeans_rows(matrix_util::clustering::KmeansArgs {
+        num_clusters: n_modules,
+        max_iter: 100,
+    });
+
+    // Sum per-module
+    let mut new_profiles = vec![0.0f32; n_edges * n_modules];
+    for e in 0..n_edges {
+        let profile = store.profile(e);
+        let base = e * n_modules;
+        for (p, &module) in assignments.iter().enumerate() {
+            new_profiles[base + module] += profile[p];
+        }
+    }
+
+    (
+        LinkProfileStore::new(new_profiles, n_edges, n_modules),
+        assignments,
+    )
 }
 
 #[cfg(test)]

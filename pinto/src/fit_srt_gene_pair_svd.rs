@@ -4,6 +4,7 @@ use crate::srt_common::*;
 use crate::srt_gene_graph::*;
 use crate::srt_gene_pairs::*;
 use crate::srt_input::{self, *};
+use crate::srt_knn_graph::KnnGraph;
 use clap::Parser;
 use data_beans_alg::random_projection::*;
 use matrix_param::dmatrix_gamma::GammaMatrix;
@@ -110,15 +111,22 @@ pub struct SrtGenePairSvdArgs {
 pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
     let c = &args.common;
 
-    // 1. Load data
+    // 1. Load data (with or without coordinates)
     info!("[1/9] Loading data files...");
+
+    let has_coords = c.has_coordinates();
 
     let SRTData {
         data: mut data_vec,
-        coordinates,
-        coordinate_names,
+        mut coordinates,
+        mut coordinate_names,
         batches: mut batch_membership,
-    } = read_data_with_coordinates(c.to_read_args())?;
+    } = if has_coords {
+        read_data_with_coordinates(c.to_read_args())?
+    } else {
+        info!("No coordinate files provided — using expression mode");
+        read_data_without_coordinates(c.to_read_args())?
+    };
 
     let gene_names = data_vec.row_names()?;
     let n_genes = data_vec.num_rows();
@@ -142,19 +150,45 @@ pub fn fit_srt_gene_pair_svd(args: &SrtGenePairSvdArgs) -> anyhow::Result<()> {
         n_cells
     );
 
-    // 2. Build spatial cell-cell KNN graph and extract pair info
-    info!("[2/9] Building spatial KNN graph (k={})...", c.knn_spatial);
+    // 2. Build KNN graph (spatial or expression-based) and extract pair info
     let cell_pairs: Vec<(usize, usize)>;
     {
-        let srt_cell_pairs = SrtCellPairs::new(
-            &data_vec,
-            &coordinates,
-            SrtCellPairsArgs {
-                knn: c.knn_spatial,
-                block_size: c.block_size,
-                reciprocal: c.reciprocal,
-            },
-        )?;
+        let graph: KnnGraph;
+
+        if has_coords {
+            info!("[2/9] Building spatial KNN graph (k={})...", c.knn_spatial);
+            graph = build_spatial_graph(
+                &coordinates,
+                SrtCellPairsArgs {
+                    knn: c.knn_spatial,
+                    block_size: c.block_size,
+                    reciprocal: c.reciprocal,
+                },
+            )?;
+        } else {
+            info!(
+                "[2/9] Building expression KNN graph (k={}, proj_dim={})...",
+                c.knn_spatial, c.proj_dim
+            );
+            let cell_proj_pre = data_vec.project_columns_with_batch_correction(
+                c.proj_dim,
+                Some(c.block_size),
+                None::<&[Box<str>]>,
+            )?;
+            let (g, embedding) = build_expression_graph(
+                &cell_proj_pre.proj,
+                SrtCellPairsArgs {
+                    knn: c.knn_spatial,
+                    block_size: c.block_size,
+                    reciprocal: c.reciprocal,
+                },
+            )?;
+            graph = g;
+            coordinates = embedding;
+            coordinate_names = vec!["pc_1".into(), "pc_2".into()];
+        }
+
+        let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, graph);
 
         srt_cell_pairs.to_parquet(
             &(c.out.to_string() + ".coord_pairs.parquet"),
