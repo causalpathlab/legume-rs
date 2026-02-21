@@ -1,6 +1,6 @@
 # Fagioli
 
-Faceted Aggregation of Genotype Information On Locus Identification
+Faceted Associations of Genotype Information via Omics-based Locus Identification
 
 ## Features
 
