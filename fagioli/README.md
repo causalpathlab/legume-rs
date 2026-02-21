@@ -1,6 +1,6 @@
 # Fagioli
 
-Molecular QTL simulation toolkit for single-cell genomics
+Faceted Aggregation of Genotype Information On Locus Identification
 
 ## Features
 
@@ -10,19 +10,29 @@ Molecular QTL simulation toolkit for single-cell genomics
   - Factor model for gene-gene correlations (W × Z factorization)
   - Two-level variance decomposition (cell type identity vs individual genetic/noise)
   - Single-cell count generation with Poisson sampling
+- **Summary Statistics Simulation** (`sim-sumstat`): Simulate multi-trait GWAS summary statistics with LD structure
+  - Block-level causal architecture (shared + independent causal SNPs per LD block)
+  - Optional low-rank confounders
+  - Marginal OLS summary statistics and within-block LD scores
+- **Fine-Mapping** (`map-sumstat`): Summary-statistics-based multi-trait fine-mapping
+  - RSS likelihood with rSVD-compressed LD
+  - SuSiE, BiSuSiE, and MultiLevel-SuSiE variational models
+  - SGVB optimization with coordinate search over prior variance grid
 - **Pseudobulk** (`pseudobulk`): Collapse single-cell counts into Poisson-Gamma pseudobulk profiles
 
-## Generative Model
+## Generative Models
 
-### Phase 1: Individual-level expression
+### `sim-qtl`: Single-cell eQTL
+
+#### Phase 1: Individual-level expression
 
 Per gene $g$, the model generates individual × cell type phenotypes in two stages:
 
 **Stage A — Per-gene linear model** (N × K phenotypes):
 
-$$Y_{gik} = \sqrt{h^2} \cdot \widetilde{G}_{gik} + \sqrt{1-h^2} \cdot \widetilde{\varepsilon}_{gik}$$
+$$Y_{gik} = \widetilde{G}_{gik} + \widetilde{\varepsilon}_{gik}, \quad \text{Var}(\widetilde{G}) = h^2, \quad \text{Var}(\widetilde{\varepsilon}) = 1 - h^2$$
 
-where tildes denote column-standardized values. The genetic value (zero for non-eQTL genes) is:
+where tildes denote standardized-then-scaled components. The genetic value (zero for non-eQTL genes) is:
 
 $$G_{gik} = \sum_j X_{ij} \beta^{\text{sh}}_{gjk} + \sum_j X_{ij} \beta^{\text{ind}}_{gjk}$$
 
@@ -30,79 +40,31 @@ and $\varepsilon_{gik} \sim \mathcal{N}(0, 1)$.
 
 **Stage B — Combine with factor model baseline**:
 
-$$\log \mu_{gki} = \sqrt{\rho} \cdot \widetilde{M}_{gk} + \sqrt{1 - \rho} \cdot Y_{gik}$$
+$$\log \mu_{gki} = \widetilde{M}_{gk} + Y_{gik}, \quad \text{Var}(\widetilde{M}) = \rho, \quad \text{Var}(Y) = 1 - \rho$$
 
 where $\rho$ = `pve_cell_type` controls the fraction of log-rate variance from cell type identity vs individual phenotypes, and $M_{gk} = (W \times Z)_{gk}$ is the factor model baseline.
 
 ```mermaid
-graph TD
-    W(("W")) --> M
-    Z_f(("Z")) --> M
-    h2(["h²"]):::hyper
-    rho(["rho"]):::hyper
-    classDef hyper fill:none,stroke:none
-
-    subgraph plate_g ["g = 1, ..., G (genes)"]
-        subgraph plate_k ["k = 1, ..., K (cell types)"]
-            M(("M_gk"))
-            beta_s(("beta^sh_gjk"))
-            beta_i(("beta^ind_gjk"))
-            subgraph plate_i ["i = 1, ..., N (individuals)"]
-                X(("X_i"))
-                G(("G_gki"))
-                eps(("eps_gki"))
-                Y(("Y_gik"))
-                log_mu(("log_mu_gki"))
-            end
-        end
-    end
-
-    M -->|"sqrt(rho)"| log_mu
-    X --> G
-    beta_s --> G
-    beta_i -.->|"eQTL genes"| G
-    G --> Y
-    eps --> Y
-    h2 --> Y
-    Y -->|"sqrt(1-rho)"| log_mu
-    rho --> log_mu
-
+graph LR
+    X(("X")) --> G(("G"))
+    beta(("β")) -.-> G
+    G --> Y(("Y"))
+    M(("WZ")) -->|"ρ"| log_mu(("log μ"))
+    Y -->|"1-ρ"| log_mu
     style X fill:#ddd,stroke:#333
-    style plate_g fill:none,stroke:#666,stroke-dasharray:5 5
-    style plate_k fill:none,stroke:#666,stroke-dasharray:5 5
-    style plate_i fill:none,stroke:#666,stroke-dasharray:5 5
 ```
 
-### Phase 2: Single-cell sampling
+#### Phase 2: Single-cell sampling
 
 Takes $\log \mu_{gki}$ from Phase 1 and samples single cells:
 
 ```mermaid
-graph TD
-    log_mu(("log_mu_gki"))
-    alpha(("alpha")) --> pi(("pi_i"))
-    mu(("mu")) --> n_i(("n_i"))
-
-    subgraph plate_i ["i = 1, ..., N (individuals)"]
-        subgraph plate_c ["c = 1, ..., n_i (cells)"]
-            k(("k_c"))
-            subgraph plate_g ["g = 1, ..., G (genes)"]
-                lambda(("lambda_gc"))
-                Y_obs(("Y_gc"))
-            end
-        end
-    end
-
-    pi --> k
-    k --> lambda
-    d(("depth")) --> lambda
-    log_mu --> lambda
-    lambda --> Y_obs
-
-    style Y_obs fill:#ddd,stroke:#333
-    style plate_i fill:none,stroke:#666,stroke-dasharray:5 5
-    style plate_c fill:none,stroke:#666,stroke-dasharray:5 5
-    style plate_g fill:none,stroke:#666,stroke-dasharray:5 5
+graph LR
+    log_mu(("log μ")) --> λ(("λ"))
+    π(("π~Dir")) --> k(("k_c"))
+    k --> λ
+    λ --> Y(("Y_gc"))
+    style Y fill:#ddd,stroke:#333
 ```
 
 1. $n_i \sim \text{Poisson}(\mu)$ — number of cells per individual
@@ -112,6 +74,47 @@ graph TD
 
 - **Shaded nodes**: observed ($Y$, $X$)
 - **Dashed arrows**: independent eQTL effects (eQTL genes only)
+
+### `sim-sumstat`: Multi-trait GWAS summary statistics
+
+Generates multi-trait summary statistics from PLINK genotype files with block-structured LD.
+
+#### Phenotype model
+
+The genome is partitioned into LD blocks. Each block $b$ is causal with probability `causal_block_density`. Within each causal block, the genetic value for individual $i$ and trait $t$ is:
+
+$$G_{it}^{(b)} = \sum_{j \in \mathcal{S}_b} X_{ij} \beta^{\text{sh}}_{jt} + \sum_{j \in \mathcal{I}_{bt}} X_{ij} \beta^{\text{ind}}_{jt}$$
+
+where $\mathcal{S}_b$ are shared causal SNPs (same across traits) and $\mathcal{I}_{bt}$ are independent causal SNPs (different per trait). Effect sizes are scaled so that the total genetic variance across all causal blocks sums to $h^2$:
+
+$$\beta^{\text{sh}}_{jt} \sim \mathcal{N}\!\left(0,\; \frac{\sigma^2_{\text{sh}}}{T \cdot S}\right), \quad \beta^{\text{ind}}_{jt} \sim \mathcal{N}\!\left(0,\; \frac{\sigma^2_{\text{ind}}}{I}\right)$$
+
+with $\sigma^2_{\text{sh}} = h^2 \cdot S/(S+I)$ and $\sigma^2_{\text{ind}} = h^2 \cdot I/(S+I)$, divided equally across causal blocks.
+
+The final phenotype combines genetic signal, optional low-rank confounders, and noise:
+
+$$Y_t = \widetilde{G}_t + \widetilde{C \gamma_t} + \widetilde{\varepsilon}_t, \quad \text{Var}(\widetilde{G}) = h^2, \quad \text{Var}(\widetilde{C\gamma}) = \rho_c, \quad \text{Var}(\widetilde{\varepsilon}) = 1 - h^2 - \rho_c$$
+
+where tildes denote standardized-then-scaled components, $C = \text{QR}(R_{N \times r}) \cdot \Lambda_{r \times L}$ is a low-rank confounder matrix, $\gamma_t \sim \mathcal{N}(0, 1/L)$, and $\varepsilon_t \sim \mathcal{N}(0,1)$.
+
+```mermaid
+graph LR
+    X(("X")) --> G(("G"))
+    β(("β")) -.-> G
+    G --> Y(("Y"))
+    C(("C")) --> Y
+    Y -->|"OLS"| z(("z_jt"))
+    style X fill:#ddd,stroke:#333
+    style z fill:#ddd,stroke:#333
+```
+
+#### Summary statistics
+
+For each SNP $j$ and trait $t$, marginal OLS produces:
+
+$$\hat\beta_{jt} = \frac{X_j^\top Y_t}{X_j^\top X_j}, \quad \text{SE}_{jt} = \frac{\sqrt{\text{RSS}/(n-2)}}{\sqrt{X_j^\top X_j}}, \quad z_{jt} = \frac{\hat\beta_{jt}}{\text{SE}_{jt}}$$
+
+Within-block LD scores: $\ell_j = \sum_{k \in \text{block}} r^2_{jk}$.
 
 ## Installation
 
@@ -170,6 +173,59 @@ fagioli sim-qtl \
 - `sim.parameters.json` — All simulation parameters
 
 **Backend options:** `--backend zarr` (default) or `--backend hdf5`
+
+### Summary Statistics Simulation
+
+Simulate multi-trait GWAS summary statistics with LD block structure:
+
+```bash
+fagioli sim-sumstat \
+  --bed-prefix /path/to/genotypes \
+  --chromosome 22 \
+  --output ./results/sim \
+  --num-traits 10 \
+  --num-shared-causal 5 \
+  --num-independent-causal 3 \
+  --genetic-variance 0.4 \
+  --causal-block-density 0.3 \
+  --num-confounders 10 \
+  --num-hidden-factors 5 \
+  --pve-confounders 0.1 \
+  --seed 42
+```
+
+**Output files:**
+- `sim.sumstats.bed.gz` — Beta, SE, z-scores, p-values per SNP-trait pair
+- `sim.ld_scores.bed.gz` — Within-block LD scores
+- `sim.ld_blocks.bed.gz` — LD block intervals (BED format)
+- `sim.ground_truth.bed.gz` — True causal effect sizes
+- `sim.confounders.tsv.gz` — Confounder matrix (if `--num-confounders > 0`)
+- `sim.parameters.json` — All simulation parameters
+
+LD blocks can be provided via `--ld-block-file` (BED format) or estimated from data using Nystrom + rSVD.
+
+### Summary Statistics Fine-Mapping
+
+Multi-trait fine-mapping from summary statistics with an LD reference panel:
+
+```bash
+fagioli map-sumstat \
+  --sumstat-file ./results/sim.sumstats.bed.gz \
+  --bed-prefix /path/to/genotypes \
+  --chromosome 22 \
+  --output ./results/map \
+  --model susie \
+  --num-components 10 \
+  --max-rank 50 \
+  --num-iterations 500 \
+  --seed 42
+```
+
+Available models: `susie`, `bisusie`, `multilevel-susie`.
+
+**Output files:**
+- `map.results.bed.gz` — Per-SNP-trait PIPs, posterior effect mean/std, marginal z-scores
+- `map.parameters.json` — All mapping parameters
 
 ### Pseudobulk Aggregation
 

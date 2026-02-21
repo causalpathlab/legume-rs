@@ -29,15 +29,15 @@ fn print_logo() {
     for line in LOGO.lines() {
         println!("  {}", colorize_logo_line(line));
     }
-    // Factored Association study with Genetic Information
-    // for Optimal Linear Interpolation
+    // Faceted Aggregation of Genotype Information
+    // On Locus Identification
     println!("  {}", "fagioli".bold());
     println!();
 }
 
 #[derive(Parser)]
 #[command(name = "fagioli")]
-#[command(about = "Molecular QTL simulation and mapping toolkit for single-cell genomics")]
+#[command(about = "Faceted Aggregation of Genotype Information On Locus Identification")]
 struct Cli {
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
