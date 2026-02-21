@@ -172,7 +172,10 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     let proj_kn = proj_out.proj;
 
     // 3. Batch-adjusted multilevel collapsing (pseudobulk)
-    info!("Multi-level collapsing across {} modalities ...", data_stack.num_types());
+    info!(
+        "Multi-level collapsing across {} modalities ...",
+        data_stack.num_types()
+    );
 
     let collapsed_data_vec: Vec<CollapsedOut> = data_stack.collapse_columns_multilevel(
         &proj_kn,

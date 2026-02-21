@@ -4,11 +4,10 @@ use log::info;
 use matrix_util::traits::MatOps;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
-use rust_htslib::bgzf;
 use rust_htslib::tpool::ThreadPool;
-use std::io::Write;
 
 use fagioli::genotype::{BedReader, GenomicRegion, GenotypeReader};
+use fagioli::io::results::{write_parameters, write_variant_results, VariantRow};
 use fagioli::sgvb::{fit_block_rss, BlockFitResult, FitConfig, ModelType};
 use fagioli::summary_stats::{
     estimate_ld_blocks, load_ld_blocks_from_file, read_sumstat_zscores_with_n, LdBlock,
@@ -295,60 +294,21 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         .collect();
 
     // ── Step 6: Write results ─────────────────────────────────────────────
-    let out_file = format!("{}.results.bed.gz", args.output);
-    info!("Writing results to {}", out_file);
-
-    let mut writer = bgzf::Writer::from_path(&out_file)?;
-    writer.set_thread_pool(&tpool)?;
-
-    // Header
-    writeln!(
-        writer,
-        "#chr\tstart\tend\tsnp_id\ttrait_idx\tpip\teffect_mean\teffect_std\tz_marginal"
-    )?;
-
     // Sort by block index for deterministic output
     let mut sorted_results = block_results;
     sorted_results.sort_by_key(|(idx, _)| *idx);
 
-    for (block_idx, result) in &sorted_results {
-        let block = &blocks[*block_idx];
-        let block_m = block.num_snps();
-
-        for snp_j in 0..block_m {
-            let global_snp = block.snp_start + snp_j;
-            let chr = &geno.chromosomes[global_snp];
-            let pos = geno.positions[global_snp];
-            let snp_id = &geno.snp_ids[global_snp];
-
-            for trait_k in 0..t {
-                let pip = result.pip[(snp_j, trait_k)];
-                let eff_mean = result.effect_mean[(snp_j, trait_k)];
-                let eff_std = result.effect_std[(snp_j, trait_k)];
-                let z_marginal = zscores[(global_snp, trait_k)];
-
-                writeln!(
-                    writer,
-                    "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.4}",
-                    chr,
-                    pos,
-                    pos + 1,
-                    snp_id,
-                    trait_k,
-                    pip,
-                    eff_mean,
-                    eff_std,
-                    z_marginal,
-                )?;
-            }
-        }
-    }
-
-    writer.flush()?;
-    info!("Results written: {}", out_file);
+    let variant_rows =
+        build_sumstat_variant_rows(&sorted_results, &blocks, &zscores, t);
+    write_variant_results(
+        &format!("{}.results.bed.gz", args.output),
+        &["trait_idx"],
+        &variant_rows,
+        &geno,
+        &tpool,
+    )?;
 
     // ── Step 7: Write parameters ──────────────────────────────────────────
-    let param_file = format!("{}.parameters.json", args.output);
     let params = serde_json::json!({
         "command": "map-sumstat",
         "sumstat_file": args.sumstat_file,
@@ -371,9 +331,40 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         "lambda": args.lambda.unwrap_or(0.1 / args.max_rank as f64),
         "seed": args.seed,
     });
-    std::fs::write(&param_file, serde_json::to_string_pretty(&params)?)?;
-    info!("Wrote parameters: {}", param_file);
+    write_parameters(&format!("{}.parameters.json", args.output), &params)?;
 
     info!("map-sumstat completed successfully");
     Ok(())
+}
+
+/// Build variant result rows from block-level RSS fine-mapping output.
+fn build_sumstat_variant_rows(
+    sorted_results: &[(usize, BlockFitResult)],
+    blocks: &[LdBlock],
+    zscores: &DMatrix<f32>,
+    t: usize,
+) -> Vec<VariantRow> {
+    let mut rows = Vec::new();
+
+    for (block_idx, result) in sorted_results {
+        let block = &blocks[*block_idx];
+        let block_m = block.num_snps();
+
+        for snp_j in 0..block_m {
+            let global_snp = block.snp_start + snp_j;
+
+            for trait_k in 0..t {
+                rows.push(VariantRow {
+                    snp_idx: global_snp,
+                    labels: vec![Box::from(trait_k.to_string())],
+                    pip: result.pip[(snp_j, trait_k)],
+                    effect_mean: result.effect_mean[(snp_j, trait_k)],
+                    effect_std: result.effect_std[(snp_j, trait_k)],
+                    z_marginal: zscores[(global_snp, trait_k)],
+                });
+            }
+        }
+    }
+
+    rows
 }
