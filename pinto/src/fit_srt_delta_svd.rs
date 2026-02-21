@@ -31,7 +31,6 @@ pub struct SrtDeltaSvdArgs {
     n_latent_topics: usize,
 
     #[arg(
-        short = 'k',
         long,
         help = "Number of edge clusters for K-means (defaults to n_latent_topics)"
     )]
