@@ -23,10 +23,13 @@ pub struct SrtInputArgs {
     #[arg(
         long = "coord",
         short = 'c',
-        required = true,
         value_delimiter(','),
-        help = "Spatial coordinate files, one per data file",
+        help = "Spatial coordinate files, one per data file (recommended)",
         long_help = "Spatial coordinate files, one per data file (comma separated).\n\
+                       Recommended for spatial transcriptomics data.\n\
+                       When omitted, the cell-cell KNN graph is built from\n\
+                       random-projected gene expression instead of spatial\n\
+                       coordinates (expression mode).\n\
                        Accepted formats: CSV, TSV, space-delimited text, .parquet,\n\
                        or .zarr/.zarr.zip (Xenium cells.zarr.zip).\n\
                        For CSV/TSV/parquet: first column is cell/barcode names\n\
@@ -174,13 +177,14 @@ pub struct SrtInputArgs {
         short = 'k',
         long,
         default_value_t = 5,
-        help = "Spatial KNN: neighbours per cell for cell-pair graph",
-        long_help = "Number of nearest neighbours per cell for building the spatial\n\
+        help = "KNN: neighbours per cell for cell-pair graph",
+        long_help = "Number of nearest neighbours per cell for building the\n\
                        cell-pair graph. Each cell connects to its K closest neighbours\n\
-                       in coordinate space (Euclidean distance, HNSW index).\n\
+                       via HNSW index (Euclidean distance).\n\
+                       With --coord: neighbours in spatial coordinate space.\n\
+                       Without --coord: neighbours in expression embedding space.\n\
                        The resulting edges define cell pairs for all downstream analysis.\n\
-                       Typical range: 3-20. Lower values capture fine local structure;\n\
-                       higher values smooth over larger neighbourhoods."
+                       Typical range: 3-20 (spatial), 10-30 (expression)."
     )]
     pub knn_spatial: usize,
 
@@ -198,6 +202,11 @@ pub struct SrtInputArgs {
 }
 
 impl SrtInputArgs {
+    /// Whether spatial coordinate files were provided.
+    pub fn has_coordinates(&self) -> bool {
+        !self.coord_files.is_empty()
+    }
+
     /// Convert to the internal read args for data loading.
     pub fn to_read_args(&self) -> SRTReadArgs {
         SRTReadArgs {
@@ -311,11 +320,7 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
                 )?,
                 _ => {
                     let header_row = args.header_in_coord.or_else(|| {
-                        detect_header_row(
-                            coord_file,
-                            &['\t', ',', ' '],
-                            &args.coord_column_names,
-                        )
+                        detect_header_row(coord_file, &['\t', ',', ' '], &args.coord_column_names)
                     });
                     Mat::read_data(
                         coord_file,
@@ -427,6 +432,84 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
         data: data_vec,
         coordinates: coord_nk,
         coordinate_names: coord_column_names,
+        batches: batch_membership,
+    })
+}
+
+/// Load expression data and batch labels without spatial coordinates.
+///
+/// Use this when no coordinate files are provided (expression mode).
+/// Coordinates will be filled in later from expression embeddings.
+pub fn read_data_without_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> {
+    let attach_data_name = args.data_files.len() > 1;
+    let mut data_vec = SparseIoVec::new();
+
+    for data_file in args.data_files.iter() {
+        info!("Importing data file: {}", data_file);
+
+        let mut data = try_open_or_convert(data_file)?;
+        let data_name = attach_data_name.then(|| basename(data_file)).transpose()?;
+
+        if args.preload_data {
+            data.preload_columns()?;
+        }
+
+        data_vec.push(Arc::from(data), data_name)?;
+    }
+
+    // check if row names are the same across data
+    let row_names = data_vec[0].row_names()?;
+    for j in 1..data_vec.len() {
+        let row_names_j = data_vec[j].row_names()?;
+        if row_names != row_names_j {
+            return Err(anyhow::anyhow!("Row names are not the same"));
+        }
+    }
+
+    // Parse batch membership
+    let mut batch_membership = Vec::with_capacity(data_vec.len());
+
+    if let Some(batch_files) = &args.batch_files {
+        if batch_files.len() != args.data_files.len() {
+            return Err(anyhow::anyhow!("# batch files != # of data files"));
+        }
+
+        for batch_file in batch_files.iter() {
+            info!("Reading batch file: {}", batch_file);
+            for s in read_lines(batch_file)? {
+                batch_membership.push(s.to_string().into_boxed_str());
+            }
+        }
+    } else if data_vec.len() > 1 {
+        info!("Each data file will be considered a different batch.");
+        for (id, &nn) in data_vec.num_columns_by_data()?.iter().enumerate() {
+            batch_membership.extend(vec![id.to_string().into_boxed_str(); nn]);
+        }
+    } else {
+        let nn = data_vec.num_columns();
+        batch_membership.extend(vec!["0".to_string().into_boxed_str(); nn]);
+    }
+
+    if batch_membership.len() != data_vec.num_columns() {
+        return Err(anyhow::anyhow!(
+            "# batch membership {} != # of columns {}",
+            batch_membership.len(),
+            data_vec.num_columns()
+        ));
+    }
+
+    let n_cells = data_vec.num_columns();
+
+    // Placeholder coordinates (0×0) — will be replaced by expression embeddings
+    let coordinates = Mat::zeros(n_cells, 0);
+    let coordinate_names = vec![];
+
+    info!("Read {} cells (expression mode, no coordinates)", n_cells);
+
+    Ok(SRTData {
+        data: data_vec,
+        coordinates,
+        coordinate_names,
         batches: batch_membership,
     })
 }

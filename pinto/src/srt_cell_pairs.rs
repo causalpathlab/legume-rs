@@ -2,6 +2,7 @@ use crate::srt_common::*;
 use crate::srt_knn_graph::{KnnGraph, KnnGraphArgs};
 use dashmap::DashMap;
 use matrix_util::parquet::*;
+use matrix_util::traits::RandomizedAlgs;
 use matrix_util::utils::generate_minibatch_intervals;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -219,50 +220,6 @@ impl<'a> SrtCellPairs<'a> {
             pairs,
         }
     }
-
-    ///
-    /// Create a thin wrapper for cell pairs
-    ///
-    /// * `data` - sparse matrix data vector
-    /// * `coordinates` - n x 2 or n x 3 or more spatial coordinates
-    /// * `knn` - k-nearest neighbours
-    /// * `block_size` block size for parallel processing
-    ///
-    pub fn new(
-        data: &'a SparseIoVec,
-        coordinates: &'a Mat,
-        args: SrtCellPairsArgs,
-    ) -> anyhow::Result<SrtCellPairs<'a>> {
-        let nn = coordinates.nrows();
-
-        if data.num_columns() != nn {
-            return Err(anyhow::anyhow!("incompatible data and coordinates"));
-        }
-
-        let points = coordinates.transpose();
-
-        let graph = KnnGraph::from_columns(
-            &points,
-            KnnGraphArgs {
-                knn: args.knn,
-                block_size: args.block_size,
-                reciprocal: args.reciprocal,
-            },
-        )?;
-
-        let pairs = graph
-            .edges
-            .iter()
-            .map(|&(i, j)| Pair { left: i, right: j })
-            .collect::<Vec<_>>();
-
-        Ok(SrtCellPairs {
-            data,
-            coordinates,
-            graph,
-            pairs,
-        })
-    }
 }
 
 /// Build a spatial KNN graph from coordinate matrix.
@@ -276,6 +233,154 @@ pub fn build_spatial_graph(coordinates: &Mat, args: SrtCellPairsArgs) -> anyhow:
             reciprocal: args.reciprocal,
         },
     )
+}
+
+/// Build a KNN graph from expression embeddings (random projection).
+///
+/// When spatial coordinates are not available, we build the cell-cell graph
+/// from random-projected gene expression. Returns the graph and a 2D
+/// force-directed layout for visualization in output files.
+pub fn build_expression_graph(
+    cell_proj: &Mat,
+    args: SrtCellPairsArgs,
+) -> anyhow::Result<(KnnGraph, Mat)> {
+    // cell_proj is proj_dim × N from RandProjOps; transpose to N × proj_dim
+    // so each row is a cell embedding for KNN
+    let embedding_nk = cell_proj.transpose();
+    let graph = build_spatial_graph(&embedding_nk, args)?;
+
+    // Compute 2D layout: PCA init → force-directed refinement using graph
+    info!("Computing 2D layout (PCA + force-directed)...");
+    let coords_2d = force_directed_layout(&embedding_nk, &graph)?;
+
+    Ok((graph, coords_2d))
+}
+
+/// Compute a 2D PCA initialization from an N × D embedding matrix.
+fn pca_2d(embedding: &Mat) -> anyhow::Result<Mat> {
+    let n = embedding.nrows();
+    let d = embedding.ncols();
+
+    if d <= 2 {
+        return Ok(embedding.clone());
+    }
+
+    // Column-centre
+    let col_means: Vec<f32> = (0..d)
+        .map(|j| embedding.column(j).sum() / n as f32)
+        .collect();
+
+    let mut centred = embedding.clone();
+    for (j, &m) in col_means.iter().enumerate() {
+        centred.column_mut(j).add_scalar_mut(-m);
+    }
+
+    // Top-2 SVD → N × 2
+    let (u, s, _) = centred.rsvd(2)?;
+    let mut coords = Mat::zeros(n, 2);
+    for k in 0..2 {
+        for i in 0..n {
+            coords[(i, k)] = u[(i, k)] * s[k];
+        }
+    }
+
+    Ok(coords)
+}
+
+/// Force-directed 2D layout with negative sampling.
+///
+/// PCA-initialized, then refined with:
+/// - Attractive forces along KNN graph edges (pull neighbours closer)
+/// - Repulsive forces against random negative samples (push non-neighbours apart)
+///
+/// This is essentially the UMAP/LargeVis optimization step applied to the
+/// existing KNN graph, producing a visually informative 2D embedding.
+fn force_directed_layout(embedding: &Mat, graph: &KnnGraph) -> anyhow::Result<Mat> {
+    use rand::rngs::SmallRng;
+    use rand::Rng;
+    use rand::SeedableRng;
+
+    let n = graph.n_nodes;
+    let n_edges = graph.edges.len();
+
+    // Initialize from PCA
+    let mut coords = pca_2d(embedding)?;
+
+    // Scale initial coordinates to unit variance per dimension
+    for d in 0..2 {
+        let mean = coords.column(d).sum() / n as f32;
+        let var = coords
+            .column(d)
+            .iter()
+            .map(|&x| (x - mean).powi(2))
+            .sum::<f32>()
+            / n as f32;
+        let std = var.sqrt().max(1e-8);
+        for i in 0..n {
+            coords[(i, d)] = (coords[(i, d)] - mean) / std;
+        }
+    }
+
+    // Layout parameters
+    let n_epochs = 200;
+    let neg_samples_per_edge = 5usize;
+    let initial_lr: f32 = 1.0;
+    let min_dist: f32 = 0.01;
+    let a: f32 = 1.0; // attractive curve shape
+    let b: f32 = 1.0; // repulsive curve shape
+
+    let mut rng = SmallRng::seed_from_u64(42);
+
+    for epoch in 0..n_epochs {
+        let lr = initial_lr * (1.0 - epoch as f32 / n_epochs as f32);
+        let lr = lr.max(initial_lr * 0.01);
+
+        // Attractive forces: pull edge endpoints together
+        for e in 0..n_edges {
+            let (i, j) = graph.edges[e];
+
+            let dx = coords[(i, 0)] - coords[(j, 0)];
+            let dy = coords[(i, 1)] - coords[(j, 1)];
+            let dist_sq = dx * dx + dy * dy + min_dist;
+            let dist = dist_sq.sqrt();
+
+            // Attractive gradient: 2ab * d^(2b-2) / (1 + a * d^(2b))
+            let grad = -2.0 * a * b * dist.powf(2.0 * b - 2.0) / (1.0 + a * dist.powf(2.0 * b));
+            let fx = grad * dx * lr;
+            let fy = grad * dy * lr;
+
+            coords[(i, 0)] += fx;
+            coords[(i, 1)] += fy;
+            coords[(j, 0)] -= fx;
+            coords[(j, 1)] -= fy;
+        }
+
+        // Repulsive forces: push random non-neighbours apart
+        for e in 0..n_edges {
+            let (i, _) = graph.edges[e];
+            for _ in 0..neg_samples_per_edge {
+                let k = rng.random_range(0..n);
+                if k == i {
+                    continue;
+                }
+
+                let dx = coords[(i, 0)] - coords[(k, 0)];
+                let dy = coords[(i, 1)] - coords[(k, 1)];
+                let dist_sq = dx * dx + dy * dy + min_dist;
+                let dist = dist_sq.sqrt();
+
+                // Repulsive gradient: 2b / (d * (1 + a * d^(2b)))
+                let grad = 2.0 * b / (dist * (1.0 + a * dist.powf(2.0 * b)) + 1e-6);
+                let fx = (grad * dx / dist).clamp(-4.0, 4.0) * lr;
+                let fy = (grad * dy / dist).clamp(-4.0, 4.0) * lr;
+
+                coords[(i, 0)] += fx;
+                coords[(i, 1)] += fy;
+            }
+        }
+    }
+
+    Ok(coords)
 }
 
 /// Find connected components of a KNN graph.
