@@ -16,28 +16,39 @@ use matrix_util::common_io::basename;
 
 #[derive(Args, Debug, Clone)]
 pub struct PseudobulkArgs {
-    /// Single-cell count matrices (Zarr, HDF5, or mtx paths; multiple files supported)
-    #[arg(long, num_args = 1..)]
+    // ── Input ────────────────────────────────────────────────────────────
+    #[arg(long, num_args = 1.., help = "Single-cell count matrices (Zarr, HDF5, or mtx; multiple supported)")]
     pub sc_backend_files: Vec<Box<str>>,
 
-    /// Cell annotations file (TSV or TSV.GZ): cell_id, individual_id[, cell_type]
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Cell annotations TSV: cell_id, individual_id[, cell_type]",
+        long_help = "Cell annotations file (TSV or TSV.GZ).\n\
+            Columns: cell_id, individual_id, and optionally cell_type.\n\
+            If cell_type column is present, hard cell-type assignments are used.\n\
+            Use --membership-parquet for soft assignments instead."
+    )]
     pub cell_annotations: Option<Box<str>>,
 
-    /// Soft membership proportions from parquet (alternative to hard cell-type column)
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Soft membership proportions (parquet, alternative to cell_type column)"
+    )]
     pub membership_parquet: Option<Box<str>>,
 
-    /// Gamma prior shape parameter
-    #[arg(long, default_value = "1.0")]
+    // ── Pseudobulk parameters ────────────────────────────────────────────
+    #[arg(long, default_value = "1.0", help = "Gamma prior shape (a0)")]
     pub gamma_a0: f32,
 
-    /// Gamma prior rate parameter
-    #[arg(long, default_value = "1.0")]
+    #[arg(long, default_value = "1.0", help = "Gamma prior rate (b0)")]
     pub gamma_b0: f32,
 
-    /// Output prefix
-    #[arg(short, long)]
+    // ── Output ───────────────────────────────────────────────────────────
+    #[arg(
+        short,
+        long,
+        help = "Output prefix (writes {prefix}.{cell_type}.parquet)"
+    )]
     pub output: Box<str>,
 }
 
