@@ -1,12 +1,14 @@
 mod map_qtl;
 mod map_sumstat;
 mod pseudobulk_cmd;
+mod sim_geno;
 mod sim_qtl;
 mod sim_sumstat;
 
 use map_qtl::*;
 use map_sumstat::*;
 use pseudobulk_cmd::*;
+use sim_geno::*;
 use sim_qtl::*;
 use sim_sumstat::*;
 
@@ -52,15 +54,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Simulate molecular QTL with cell type heterogeneity and single-cell counts
+    /// Simulate genotype data via Wright-Fisher forward simulation → PLINK BED
+    SimGeno(SimGenoArgs),
+    /// Simulate single-cell eQTL data with cell-type-specific genetic effects
     SimQtl(SimulationArgs),
-    /// Simulate multi-trait GWAS summary statistics with LD structure
+    /// Simulate multi-trait GWAS summary statistics with LD blocks and confounders
     SimSumstat(SimSumstatArgs),
-    /// Summary-statistics-based multi-trait fine-mapping with SuSiE
+    /// Fine-map causal variants from GWAS summary statistics using variational SuSiE
     MapSumstat(MapSumstatArgs),
-    /// Single-cell eQTL fine-mapping: pseudobulk + multi-output SuSiE with uncertainty
+    /// Fine-map cis-eQTL from single-cell RNA-seq with Poisson-Gamma pseudobulk
     MapQtl(MapQtlArgs),
-    /// Collapse single-cell counts into Poisson-Gamma pseudobulk
+    /// Collapse single-cell counts into Poisson-Gamma pseudobulk per individual and cell type
     Pseudobulk(PseudobulkArgs),
 }
 
@@ -78,6 +82,9 @@ fn main() -> Result<()> {
     env_logger::init();
 
     match &cli.commands {
+        Commands::SimGeno(args) => {
+            sim_geno(args)?;
+        }
         Commands::SimQtl(args) => {
             sim_qtl(args)?;
         }

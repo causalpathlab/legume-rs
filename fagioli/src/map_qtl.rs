@@ -21,138 +21,207 @@ use fagioli::io::results::{
 };
 use fagioli::mapping::map_qtl_helpers::*;
 use fagioli::mapping::pseudobulk::{collapse_pseudobulk, Membership};
-use fagioli::sgvb::{fit_block_weighted, FitConfig, ModelType};
+use fagioli::sgvb::{fit_block_weighted, ComputeDevice, FitConfig, ModelType};
 use matrix_util::common_io::basename;
 
 #[derive(Args, Debug, Clone)]
 pub struct MapQtlArgs {
-    // ── SC input ──────────────────────────────────────────────────────────
-    /// Single-cell count matrices (Zarr, HDF5, or mtx paths; multiple files supported)
-    #[arg(long, num_args = 1..)]
+    // ── Single-cell input ────────────────────────────────────────────────
+    #[arg(long, num_args = 1.., help = "Single-cell count matrices (Zarr, HDF5, or mtx; multiple supported)")]
     pub sc_backend_files: Vec<Box<str>>,
 
-    /// Cell annotations file (TSV or TSV.GZ): cell_id, individual_id[, cell_type]
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Cell annotations TSV: cell_id, individual_id[, cell_type]",
+        long_help = "Cell annotations file (TSV or TSV.GZ).\n\
+            Columns: cell_id, individual_id, and optionally cell_type.\n\
+            If cell_type column is present, hard cell-type assignments are used.\n\
+            Use --membership-parquet for soft assignments instead."
+    )]
     pub cell_annotations: Option<Box<str>>,
 
-    /// Soft membership proportions from parquet (alternative to hard cell-type column)
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Soft membership proportions (parquet, alternative to cell_type column)"
+    )]
     pub membership_parquet: Option<Box<str>>,
 
-    // ── Genotype ──────────────────────────────────────────────────────────
-    /// PLINK BED file prefix (without .bed)
-    #[arg(long)]
+    // ── Genotype ─────────────────────────────────────────────────────────
+    #[arg(long, help = "PLINK BED file prefix (without .bed/.bim/.fam)")]
     pub bed_prefix: String,
 
-    /// Chromosome
-    #[arg(long)]
+    #[arg(long, help = "Chromosome to analyze")]
     pub chromosome: String,
 
-    /// Left position bound (optional)
-    #[arg(long)]
+    #[arg(long, help = "Left genomic position bound (bp)")]
     pub left_bound: Option<u64>,
 
-    /// Right position bound (optional)
-    #[arg(long)]
+    #[arg(long, help = "Right genomic position bound (bp)")]
     pub right_bound: Option<u64>,
 
-    /// Max individuals to use from genotype file
-    #[arg(long)]
+    #[arg(long, help = "Max individuals to use from genotype file")]
     pub max_individuals: Option<usize>,
 
-    // ── Gene annotations ──────────────────────────────────────────────────
-    /// GTF/GFF file for gene annotations (cis-eQTL mode)
-    #[arg(long)]
+    // ── Gene annotations ─────────────────────────────────────────────────
+    #[arg(long, help = "GTF/GFF gene annotation file for cis-eQTL windows")]
     pub gtf_file: Option<String>,
 
-    /// BED file for gene annotations: chr, start, end, gene_id[, gene_name[, strand]]
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "BED gene annotation file: chr, start, end, gene_id[, name[, strand]]"
+    )]
     pub gene_bed_file: Option<String>,
 
-    /// Cis window size in base pairs (default: 1Mb)
-    #[arg(long, default_value = "1000000")]
+    #[arg(
+        long,
+        default_value = "1000000",
+        help = "Cis window size in bp (default: 1Mb)"
+    )]
     pub cis_window: u64,
 
-    // ── Pseudobulk parameters ─────────────────────────────────────────────
-    /// Gamma prior shape parameter
-    #[arg(long, default_value = "1.0")]
+    // ── Pseudobulk parameters ────────────────────────────────────────────
+    #[arg(
+        long,
+        default_value = "1.0",
+        help = "Gamma prior shape (a0) for pseudobulk"
+    )]
     pub gamma_a0: f32,
 
-    /// Gamma prior rate parameter
-    #[arg(long, default_value = "1.0")]
+    #[arg(
+        long,
+        default_value = "1.0",
+        help = "Gamma prior rate (b0) for pseudobulk"
+    )]
     pub gamma_b0: f32,
 
-    /// Minimum effective cell weight to include an individual-celltype pair
-    #[arg(long, default_value = "1.0")]
+    #[arg(
+        long,
+        default_value = "1.0",
+        help = "Min effective cell weight per individual-celltype pair"
+    )]
     pub min_cell_weight: f32,
 
-    // ── Model parameters ──────────────────────────────────────────────────
-    /// Fine-mapping model: susie, bisusie, multilevel-susie
-    #[arg(long, default_value = "susie")]
+    // ── Model parameters ─────────────────────────────────────────────────
+    #[arg(
+        long,
+        default_value = "susie",
+        help = "Fine-mapping model: susie, bisusie, multilevel-susie"
+    )]
     pub model: String,
 
-    /// Number of SuSiE/BiSuSiE components (L)
-    #[arg(long, default_value = "10")]
+    #[arg(
+        long,
+        default_value = "10",
+        help = "Number of SuSiE/BiSuSiE components (L)"
+    )]
     pub num_components: usize,
 
-    /// Comma-separated prior variances for coordinate search
-    #[arg(long, default_value = "0.01,0.05,0.1,0.2,0.5,1.0")]
+    #[arg(
+        long,
+        default_value = "0.01,0.05,0.1,0.2,0.5,1.0",
+        help = "Comma-separated prior variances for coordinate search"
+    )]
     pub prior_var: String,
 
-    // ── SGVB parameters ───────────────────────────────────────────────────
-    /// Number of SGVB Monte Carlo samples
-    #[arg(long, default_value = "20")]
+    // ── SGVB training ────────────────────────────────────────────────────
+    #[arg(
+        long,
+        default_value = "20",
+        help = "SGVB Monte Carlo samples per iteration"
+    )]
     pub num_sgvb_samples: usize,
 
-    /// AdamW learning rate
-    #[arg(long, default_value = "0.01")]
+    #[arg(long, default_value = "0.01", help = "AdamW learning rate")]
     pub learning_rate: f64,
 
-    /// Number of training iterations per gene
-    #[arg(long, default_value = "500")]
+    #[arg(long, default_value = "500", help = "Training iterations per gene")]
     pub num_iterations: usize,
 
-    /// Minibatch size (use minibatch when N > batch_size)
-    #[arg(long, default_value = "1000")]
+    #[arg(
+        long,
+        default_value = "1000",
+        help = "Minibatch size (full batch if N <= batch_size)"
+    )]
     pub batch_size: usize,
 
-    /// Number of ELBO values to average for model selection
-    #[arg(long, default_value = "50")]
+    #[arg(
+        long,
+        default_value = "50",
+        help = "ELBO values to average for convergence"
+    )]
     pub elbo_window: usize,
 
-    /// Block size for MultiLevelSusieVar tree
-    #[arg(long, default_value = "50")]
+    #[arg(
+        long,
+        default_value = "50",
+        help = "Block size for MultiLevelSusieVar tree"
+    )]
     pub ml_block_size: usize,
 
-    // ── Empirical Bayes ───────────────────────────────────────────────────
-    /// Enable cross-gene empirical Bayes for prior variance
-    #[arg(long)]
+    // ── Empirical Bayes ──────────────────────────────────────────────────
+    #[arg(long, help = "Enable cross-gene empirical Bayes for prior variance")]
     pub empirical_bayes: bool,
 
-    // ── Covariates ──────────────────────────────────────────────────────
-    /// Include cell-type composition covariates (default: true)
-    #[arg(long, default_value = "true")]
+    // ── Covariates ───────────────────────────────────────────────────────
+    #[arg(
+        long,
+        default_value = "true",
+        help = "Include cell-type composition as covariates"
+    )]
     pub composition_covariates: bool,
 
-    /// Additional covariate file(s) — TSV/CSV with individuals as rows.
-    /// First column = individual ID, remaining columns = covariate values.
-    /// Multiple files can be specified. Covariates are concatenated with
-    /// composition covariates and centered before fitting.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Additional covariate TSV/CSV files (individual_id + values)",
+        long_help = "Additional covariate file(s) in TSV/CSV format.\n\
+            First column = individual ID, remaining columns = covariate values.\n\
+            Multiple files can be specified. Covariates are concatenated with\n\
+            composition covariates and centered before fitting."
+    )]
     pub covariate_files: Vec<String>,
 
-    // ── Misc ──────────────────────────────────────────────────────────────
-    /// Random seed
-    #[arg(long, default_value = "42")]
+    // ── Device ───────────────────────────────────────────────────────────
+    #[arg(
+        long,
+        value_enum,
+        default_value = "cpu",
+        help = "Compute device: cpu, cuda, metal"
+    )]
+    pub device: ComputeDevice,
+
+    #[arg(long, default_value_t = 0, help = "Device number for cuda or metal")]
+    pub device_no: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Parallel jobs (0 = auto: all CPUs for cpu, 1 for gpu)"
+    )]
+    pub jobs: usize,
+
+    // ── Misc ─────────────────────────────────────────────────────────────
+    #[arg(long, default_value = "42", help = "Random seed")]
     pub seed: u64,
 
-    /// Output prefix
-    #[arg(short, long)]
+    #[arg(short, long, help = "Output prefix for results and parameters")]
     pub output: String,
 }
 
 pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
     info!("Starting map-qtl");
+
+    let device = args.device.to_device(args.device_no)?;
+    let use_gpu = args.device != ComputeDevice::Cpu;
+    let num_jobs = if args.jobs == 0 {
+        if use_gpu {
+            1
+        } else {
+            rayon::current_num_threads()
+        }
+    } else {
+        args.jobs
+    };
+    info!("Compute device: {:?}, jobs: {}", args.device, num_jobs);
 
     let num_threads = rayon::current_num_threads().max(1) as u32;
     let tpool = ThreadPool::new(num_threads)?;
@@ -342,59 +411,79 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
         model_type, args.num_components, &fit_config.prior_vars
     );
 
-    // ── Step 9: Per-gene parallel fine-mapping ───────────────────────────
-    info!("Starting per-gene fine-mapping ({} genes)", n_testable);
+    // ── Step 9: Per-gene fine-mapping ──────────────────────────────────
+    info!(
+        "Starting per-gene fine-mapping ({} genes, {} jobs)",
+        n_testable, num_jobs
+    );
 
-    let gene_results: Vec<GeneResult> = gene_specs
-        .par_iter()
-        .enumerate()
-        .filter_map(|(spec_idx, spec)| {
-            if spec.cis_indices.len() < 2 {
+    let fit_gene = |(spec_idx, spec): (usize, &GeneSpec)| -> Option<GeneResult> {
+        if spec.cis_indices.len() < 2 {
+            return None;
+        }
+
+        let (y_g, v_g) = build_gene_phenotype(
+            &collapsed,
+            spec.gene_idx,
+            &matched.pb_indices,
+            n_ct,
+            args.min_cell_weight,
+        );
+
+        let (x_g, valid_cis_indices) =
+            build_cis_genotypes(&geno, &matched.geno_indices, &spec.cis_indices)?;
+
+        let mut gene_config = fit_config.clone();
+        gene_config.seed = fit_config.seed.wrapping_add(spec_idx as u64);
+
+        let detailed = match fit_block_weighted(
+            &x_g,
+            &y_g,
+            &v_g,
+            covariates.as_ref(),
+            &gene_config,
+            &device,
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("Gene {} failed: {}", spec.gene_id, e);
                 return None;
             }
+        };
 
-            let (y_g, v_g) = build_gene_phenotype(
-                &collapsed,
-                spec.gene_idx,
-                &matched.pb_indices,
-                n_ct,
-                args.min_cell_weight,
-            );
+        let z_marginal = compute_marginal_z(&x_g, &y_g, &v_g);
 
-            let (x_g, valid_cis_indices) =
-                build_cis_genotypes(&geno, &matched.geno_indices, &spec.cis_indices)?;
+        info!(
+            "Gene {}/{}: {} ({} cis SNPs, avg_elbo={:.2})",
+            spec_idx + 1,
+            n_testable,
+            spec.gene_id,
+            x_g.ncols(),
+            detailed.result.avg_elbo,
+        );
 
-            let mut gene_config = fit_config.clone();
-            gene_config.seed = fit_config.seed.wrapping_add(spec_idx as u64);
-
-            let detailed =
-                match fit_block_weighted(&x_g, &y_g, &v_g, covariates.as_ref(), &gene_config) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        log::warn!("Gene {} failed: {}", spec.gene_id, e);
-                        return None;
-                    }
-                };
-
-            let z_marginal = compute_marginal_z(&x_g, &y_g, &v_g);
-
-            info!(
-                "Gene {}/{}: {} ({} cis SNPs, avg_elbo={:.2})",
-                spec_idx + 1,
-                n_testable,
-                spec.gene_id,
-                x_g.ncols(),
-                detailed.result.avg_elbo,
-            );
-
-            Some(GeneResult {
-                gene_id: spec.gene_id.clone(),
-                cis_snp_indices: valid_cis_indices,
-                detailed,
-                z_marginal,
-            })
+        Some(GeneResult {
+            gene_id: spec.gene_id.clone(),
+            cis_snp_indices: valid_cis_indices,
+            detailed,
+            z_marginal,
         })
-        .collect();
+    };
+
+    let gene_results: Vec<GeneResult> = if num_jobs <= 1 {
+        gene_specs.iter().enumerate().filter_map(fit_gene).collect()
+    } else {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_jobs)
+            .build()?;
+        pool.install(|| {
+            gene_specs
+                .par_iter()
+                .enumerate()
+                .filter_map(fit_gene)
+                .collect()
+        })
+    };
 
     let n_fitted = gene_results.len();
     info!("Successfully fitted {} / {} genes", n_fitted, n_testable);

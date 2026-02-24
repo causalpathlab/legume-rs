@@ -10,108 +10,151 @@ use fagioli::simulation::{
 
 #[derive(Args, Debug, Clone)]
 pub struct SimulationArgs {
-    /// PLINK BED file prefix (without .bed)
-    #[arg(long)]
+    // ── Input / Output ───────────────────────────────────────────────────
+    #[arg(long, help = "PLINK BED file prefix (without .bed/.bim/.fam)")]
     pub bed_prefix: String,
 
-    /// Output prefix
-    #[arg(short, long)]
+    #[arg(short, long, help = "Output prefix for all generated files")]
     pub output: String,
 
-    /// Output format: parquet or tsv
-    #[arg(long, default_value = "parquet")]
+    #[arg(
+        long,
+        default_value = "parquet",
+        help = "Output format: parquet or tsv"
+    )]
     pub format: String,
 
-    /// Chromosome (required to prevent memory overflow)
-    #[arg(long)]
+    // ── Genomic region ───────────────────────────────────────────────────
+    #[arg(long, help = "Chromosome to simulate from")]
     pub chromosome: String,
 
-    /// Left position bound (optional)
-    #[arg(long)]
+    #[arg(long, help = "Left genomic position bound (bp)")]
     pub left_bound: Option<u64>,
 
-    /// Right position bound (optional)
-    #[arg(long)]
+    #[arg(long, help = "Right genomic position bound (bp)")]
     pub right_bound: Option<u64>,
 
-    /// Max individuals
-    #[arg(long)]
+    #[arg(long, help = "Max individuals to use from genotype file")]
     pub max_individuals: Option<usize>,
 
-    /// Random seed
-    #[arg(long, default_value = "42")]
+    #[arg(long, default_value = "42", help = "Random seed")]
     pub seed: u64,
 
-    /// GFF/GTF file for gene annotations
-    #[arg(long)]
+    // ── Gene model ───────────────────────────────────────────────────────
+    #[arg(
+        long,
+        help = "GFF/GTF file for gene annotations (overrides --num-genes)"
+    )]
     pub gff_file: Option<String>,
 
-    /// Number of genes to simulate (if not using GFF)
-    #[arg(long, default_value = "1000")]
+    #[arg(
+        long,
+        default_value = "1000",
+        help = "Number of genes to simulate (ignored if --gff-file)"
+    )]
     pub num_genes: usize,
 
-    /// Number of cell types
-    #[arg(long, default_value = "5")]
+    #[arg(long, default_value = "5", help = "Number of cell types")]
     pub num_cell_types: usize,
 
-    /// Number of latent factors for gene correlations
-    #[arg(long, default_value = "10")]
+    #[arg(
+        long,
+        default_value = "10",
+        help = "Latent factors for gene-gene correlations"
+    )]
     pub num_factors: usize,
 
-    /// Gene loading standard deviation (factor model)
-    #[arg(long, default_value = "1.0")]
+    #[arg(
+        long,
+        default_value = "1.0",
+        help = "Gene loading std dev (factor model)"
+    )]
     pub gene_loading_std: f32,
 
-    /// Factor score standard deviation (factor model)
-    #[arg(long, default_value = "1.0")]
+    #[arg(
+        long,
+        default_value = "1.0",
+        help = "Factor score std dev (factor model)"
+    )]
     pub factor_score_std: f32,
 
-    /// Proportion of genes with QTL effects
-    #[arg(long, default_value = "0.4")]
+    // ── Genetic architecture ─────────────────────────────────────────────
+    #[arg(
+        long,
+        default_value = "0.4",
+        help = "Proportion of genes with eQTL effects"
+    )]
     pub eqtl_gene_proportion: f32,
 
-    /// Of QTL genes, proportion with shared causal variants across cell types
-    #[arg(long, default_value = "0.6")]
+    #[arg(
+        long,
+        default_value = "0.6",
+        help = "Of eQTL genes, proportion with shared causal variants"
+    )]
     pub shared_eqtl_proportion: f32,
 
-    /// Of QTL genes, proportion with cell-type-specific causal variants
-    #[arg(long, default_value = "0.4")]
+    #[arg(
+        long,
+        default_value = "0.4",
+        help = "Of eQTL genes, proportion with cell-type-specific variants"
+    )]
     pub independent_eqtl_proportion: f32,
 
-    /// Number of shared causal SNPs per gene
-    #[arg(long, default_value = "1")]
+    #[arg(long, default_value = "1", help = "Shared causal SNPs per gene")]
     pub num_shared_causal_per_gene: usize,
 
-    /// Number of independent causal SNPs per gene (per cell type)
-    #[arg(long, default_value = "1")]
+    #[arg(
+        long,
+        default_value = "1",
+        help = "Cell-type-specific causal SNPs per gene"
+    )]
     pub num_independent_causal_per_gene: usize,
 
-    /// Genetic variance (h²)
-    #[arg(long, default_value = "0.4")]
+    #[arg(
+        long,
+        default_value = "0.4",
+        help = "Heritability (genetic variance proportion)"
+    )]
     pub genetic_variance: f32,
 
-    /// Cis window size (bp)
-    #[arg(long, default_value = "1000000")]
+    #[arg(long, default_value = "1000000", help = "Cis window size in bp")]
     pub cis_window: u64,
 
-    /// Proportion of log-rate variance from cell type identity vs individual phenotypes
-    #[arg(long, default_value = "0.5")]
+    // ── Single-cell parameters ───────────────────────────────────────────
+    #[arg(
+        long,
+        default_value = "0.5",
+        help = "Variance proportion from cell type vs individual"
+    )]
     pub pve_cell_type: f32,
 
-    /// Mean cells per individual (Poisson)
-    #[arg(long, default_value = "1000")]
+    #[arg(
+        long,
+        default_value = "1000",
+        help = "Mean cells per individual (Poisson-sampled)"
+    )]
     pub mean_cells_per_individual: f64,
 
-    /// Sequencing depth per cell (total UMI)
-    #[arg(long, default_value = "5000")]
+    #[arg(
+        long,
+        default_value = "5000",
+        help = "Sequencing depth per cell (total UMI)"
+    )]
     pub depth_per_cell: f64,
 
-    /// Dirichlet alpha for cell type fractions (comma-separated or single value)
-    #[arg(long, value_delimiter = ',', default_value = "1.0")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "1.0",
+        help = "Dirichlet alpha for cell type fractions (comma-separated)"
+    )]
     pub dirichlet_alpha: Vec<f32>,
 
-    /// Sparse matrix backend: zarr or hdf5
-    #[arg(long, default_value = "zarr")]
+    #[arg(
+        long,
+        default_value = "zarr",
+        help = "Sparse matrix backend: zarr or hdf5"
+    )]
     pub backend: String,
 }
 
