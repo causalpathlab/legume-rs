@@ -8,11 +8,32 @@ use candle_util::sgvb::{
     MultiLevelSusieVar, RssLikelihood, RssSvd, SGVBConfig, SusieVar, VariationalDistribution,
     WeightedGaussianLikelihood,
 };
+use clap::ValueEnum;
 use log::info;
 use matrix_util::traits::ConvertMatOps;
 use nalgebra::DMatrix;
 use rand::prelude::*;
 use std::collections::VecDeque;
+
+/// Compute device selection for SGVB fitting.
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+pub enum ComputeDevice {
+    Cpu,
+    Cuda,
+    Metal,
+}
+
+impl ComputeDevice {
+    /// Create a candle `Device` from this enum.
+    pub fn to_device(&self, device_no: usize) -> Result<Device> {
+        Ok(match self {
+            ComputeDevice::Metal => Device::new_metal(device_no)?,
+            ComputeDevice::Cuda => Device::new_cuda(device_no)?,
+            ComputeDevice::Cpu => Device::Cpu,
+        })
+    }
+}
 
 /// Model type for SGVB fine-mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,8 +134,9 @@ pub fn fit_block(
     y_block: &DMatrix<f32>,
     confounders: Option<&DMatrix<f32>>,
     config: &FitConfig,
+    device: &Device,
 ) -> Result<BlockFitResult> {
-    let detailed = fit_block_inner(x_block, y_block, None, confounders, config)?;
+    let detailed = fit_block_inner(x_block, y_block, None, confounders, config, device)?;
     Ok(detailed.result)
 }
 
@@ -130,8 +152,16 @@ pub fn fit_block_weighted(
     var_block: &DMatrix<f32>,
     confounders: Option<&DMatrix<f32>>,
     config: &FitConfig,
+    device: &Device,
 ) -> Result<BlockFitResultDetailed> {
-    fit_block_inner(x_block, y_block, Some(var_block), confounders, config)
+    fit_block_inner(
+        x_block,
+        y_block,
+        Some(var_block),
+        confounders,
+        config,
+        device,
+    )
 }
 
 /// Shared implementation for `fit_block` and `fit_block_weighted`.
@@ -141,19 +171,19 @@ fn fit_block_inner(
     var_block: Option<&DMatrix<f32>>,
     confounders: Option<&DMatrix<f32>>,
     config: &FitConfig,
+    device: &Device,
 ) -> Result<BlockFitResultDetailed> {
     let n = x_block.nrows();
     let p = x_block.ncols();
     let k = y_block.ncols();
-    let device = Device::Cpu;
 
-    let x_tensor = x_block.to_tensor(&device)?.contiguous()?;
-    let y_tensor = y_block.to_tensor(&device)?.contiguous()?;
+    let x_tensor = x_block.to_tensor(device)?.contiguous()?;
+    let y_tensor = y_block.to_tensor(device)?.contiguous()?;
     let var_tensor = var_block
-        .map(|v| -> Result<Tensor> { Ok(v.to_tensor(&device)?.contiguous()?) })
+        .map(|v| -> Result<Tensor> { Ok(v.to_tensor(device)?.contiguous()?) })
         .transpose()?;
     let conf_tensor = confounders
-        .map(|c| -> Result<Tensor> { Ok(c.to_tensor(&device)?.contiguous()?) })
+        .map(|c| -> Result<Tensor> { Ok(c.to_tensor(device)?.contiguous()?) })
         .transpose()?;
 
     let use_minibatch = n > config.batch_size;
@@ -176,7 +206,7 @@ fn fit_block_inner(
 
     for &prior_var in &config.prior_vars {
         let (avg_elbo, pip, eff_mean, eff_std) =
-            fit_single_prior(&tensors, prior_var, config, &device)?;
+            fit_single_prior(&tensors, prior_var, config, device)?;
         info!("  prior_var={:.3}, avg_elbo={:.2}", prior_var, avg_elbo);
         elbos_vec.push(avg_elbo);
         pips_vec.push(pip);
@@ -184,39 +214,36 @@ fn fit_block_inner(
         stds_vec.push(eff_std);
     }
 
-    // Model averaging via softmax over average ELBOs
+    // Model-average across prior_vars using softmax weights on ELBOs
     let max_elbo = elbos_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let weights: Vec<f32> = elbos_vec.iter().map(|e| (e - max_elbo).exp()).collect();
-    let sum_w: f32 = weights.iter().sum();
-    let weights: Vec<f32> = weights.iter().map(|w| w / sum_w).collect();
+    let w_sum: f32 = weights.iter().sum();
+    let weights: Vec<f32> = weights.iter().map(|w| w / w_sum).collect();
 
-    let mut pip_avg = DMatrix::<f32>::zeros(p, k);
-    let mut eff_mean_avg = DMatrix::<f32>::zeros(p, k);
-    let mut eff_std_avg = DMatrix::<f32>::zeros(p, k);
+    let n_prior = elbos_vec.len();
+    let (nr, nc) = pips_vec[0].shape();
 
-    for (w, (pip, eff_m, eff_s)) in weights.iter().zip(
-        pips_vec
-            .iter()
-            .zip(effects_vec.iter().zip(stds_vec.iter()))
-            .map(|(p, (e, s))| (p, e, s)),
-    ) {
-        pip_avg += pip * *w;
-        eff_mean_avg += eff_m * *w;
-        eff_std_avg += eff_s * *w;
+    let mut pip_avg = DMatrix::zeros(nr, nc);
+    let mut eff_avg = DMatrix::zeros(nr, nc);
+    let mut std_avg = DMatrix::zeros(nr, nc);
+    for i in 0..n_prior {
+        pip_avg += &pips_vec[i] * weights[i];
+        eff_avg += &effects_vec[i] * weights[i];
+        std_avg += &stds_vec[i] * weights[i];
     }
 
-    let weighted_elbo: f32 = weights
+    let avg_elbo = elbos_vec
         .iter()
-        .zip(elbos_vec.iter())
-        .map(|(w, e)| w * e)
-        .sum();
+        .zip(weights.iter())
+        .map(|(e, w)| e * w)
+        .sum::<f32>();
 
     Ok(BlockFitResultDetailed {
         result: BlockFitResult {
             pip: pip_avg,
-            effect_mean: eff_mean_avg,
-            effect_std: eff_std_avg,
-            avg_elbo: weighted_elbo,
+            effect_mean: eff_avg,
+            effect_std: std_avg,
+            avg_elbo,
         },
         per_prior_elbos: elbos_vec,
         per_prior_pips: pips_vec,
@@ -351,10 +378,14 @@ fn fit_single_prior(
             elbo_buffer.pop_front();
         }
         elbo_buffer.push_back(elbo_val);
+
     }
 
-    // Average ELBO over the last window
-    let avg_elbo: f32 = elbo_buffer.iter().sum::<f32>() / elbo_buffer.len() as f32;
+    let avg_elbo = if elbo_buffer.is_empty() {
+        0.0
+    } else {
+        elbo_buffer.iter().sum::<f32>() / elbo_buffer.len() as f32
+    };
 
     // Extract results
     let (pip_tensor, eff_mean_tensor, eff_std_tensor) = genetic.extract_results()?;
@@ -466,16 +497,16 @@ pub fn fit_block_rss(
     config: &FitConfig,
     max_rank: usize,
     lambda: f64,
+    device: &Device,
 ) -> Result<BlockFitResult> {
     let p = x_block.ncols();
     let k = z_block.ncols(); // number of traits T
-    let device = Device::Cpu;
 
     // Compute SVD of block genotypes (done once, reused across prior_vars)
-    let x_tensor = x_block.to_tensor(&device)?;
-    let z_tensor = z_block.to_tensor(&device)?;
+    let x_tensor = x_block.to_tensor(device)?;
+    let z_tensor = z_block.to_tensor(device)?;
 
-    let svd = RssSvd::from_genotypes(&x_tensor, max_rank, lambda, &device)?;
+    let svd = RssSvd::from_genotypes(&x_tensor, max_rank, lambda, device)?;
     let rss = RssLikelihood::new(&svd, &z_tensor)?;
     let x_design = svd.x_design().clone(); // (K, p) — fat design
     let kk = svd.effective_rank(); // eigenspace dimension
@@ -492,7 +523,7 @@ pub fn fit_block_rss(
 
     for &prior_var in &config.prior_vars {
         let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
 
         let prior = FixedGaussianPrior::new(prior_var);
         let sgvb_config = SGVBConfig {
@@ -501,7 +532,7 @@ pub fn fit_block_rss(
         };
 
         // Intercept model: identity design I_K in eigenspace, broad prior
-        let intercept_design = Tensor::eye(kk, DType::F32, &device)?;
+        let intercept_design = Tensor::eye(kk, DType::F32, device)?;
         let intercept_prior = FixedGaussianPrior::new(10.0);
         let intercept_model = LinearRegressionSGVB::new(
             vb.pp("intercept"),
@@ -542,7 +573,11 @@ pub fn fit_block_rss(
             elbo_buffer.push_back(elbo_val);
         }
 
-        let avg_elbo: f32 = elbo_buffer.iter().sum::<f32>() / elbo_buffer.len() as f32;
+        let avg_elbo = if elbo_buffer.is_empty() {
+            0.0
+        } else {
+            elbo_buffer.iter().sum::<f32>() / elbo_buffer.len() as f32
+        };
 
         let (pip_tensor, eff_mean_tensor, eff_std_tensor) = genetic.extract_results()?;
         let pip: DMatrix<f32> = <DMatrix<f32> as ConvertMatOps>::from_tensor(&pip_tensor)?;
@@ -554,30 +589,34 @@ pub fn fit_block_rss(
         results.push((avg_elbo, pip, eff_mean, eff_std));
     }
 
-    // Model averaging via softmax over average ELBOs
+    // Model-average across prior_vars using softmax weights on ELBOs
     let elbos: Vec<f32> = results.iter().map(|(e, _, _, _)| *e).collect();
     let max_elbo = elbos.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let weights: Vec<f32> = elbos.iter().map(|e| (e - max_elbo).exp()).collect();
-    let sum_w: f32 = weights.iter().sum();
-    let weights: Vec<f32> = weights.iter().map(|w| w / sum_w).collect();
+    let w_sum: f32 = weights.iter().sum();
+    let weights: Vec<f32> = weights.iter().map(|w| w / w_sum).collect();
 
-    let mut pip_avg = DMatrix::<f32>::zeros(p, k);
-    let mut eff_mean_avg = DMatrix::<f32>::zeros(p, k);
-    let mut eff_std_avg = DMatrix::<f32>::zeros(p, k);
-
-    for (w, (_elbo, pip, eff_m, eff_s)) in weights.iter().zip(results.iter()) {
-        pip_avg += pip * *w;
-        eff_mean_avg += eff_m * *w;
-        eff_std_avg += eff_s * *w;
+    let (nr, nc) = results[0].1.shape();
+    let mut pip_avg = DMatrix::zeros(nr, nc);
+    let mut eff_avg = DMatrix::zeros(nr, nc);
+    let mut std_avg = DMatrix::zeros(nr, nc);
+    for (i, (_elbo, pip, eff, std)) in results.iter().enumerate() {
+        pip_avg += pip * weights[i];
+        eff_avg += eff * weights[i];
+        std_avg += std * weights[i];
     }
 
-    let weighted_elbo: f32 = weights.iter().zip(elbos.iter()).map(|(w, e)| w * e).sum();
+    let avg_elbo = elbos
+        .iter()
+        .zip(weights.iter())
+        .map(|(e, w)| e * w)
+        .sum::<f32>();
 
     Ok(BlockFitResult {
         pip: pip_avg,
-        effect_mean: eff_mean_avg,
-        effect_std: eff_std_avg,
-        avg_elbo: weighted_elbo,
+        effect_mean: eff_avg,
+        effect_std: std_avg,
+        avg_elbo,
     })
 }
 

@@ -19,88 +19,110 @@ use fagioli::summary_stats::{
 
 #[derive(Args, Debug, Clone)]
 pub struct SimSumstatArgs {
-    /// PLINK BED file prefix (without .bed)
-    #[arg(long)]
+    // ── Input ────────────────────────────────────────────────────────────
+    #[arg(long, help = "PLINK BED file prefix (without .bed/.bim/.fam)")]
     pub bed_prefix: String,
 
-    /// Chromosome
-    #[arg(long)]
+    #[arg(long, help = "Chromosome to simulate from")]
     pub chromosome: String,
 
-    /// Left position bound (optional)
-    #[arg(long)]
+    #[arg(long, help = "Left genomic position bound (bp)")]
     pub left_bound: Option<u64>,
 
-    /// Right position bound (optional)
-    #[arg(long)]
+    #[arg(long, help = "Right genomic position bound (bp)")]
     pub right_bound: Option<u64>,
 
-    /// Max individuals to use
-    #[arg(long)]
+    #[arg(long, help = "Max individuals to use from genotype file")]
     pub max_individuals: Option<usize>,
 
-    /// Random seed
-    #[arg(long, default_value = "42")]
+    #[arg(long, default_value = "42", help = "Random seed")]
     pub seed: u64,
 
-    // --- Trait parameters ---
-    /// Number of traits
-    #[arg(long, default_value = "10")]
+    // ── Trait parameters ─────────────────────────────────────────────────
+    #[arg(long, default_value = "10", help = "Number of traits to simulate")]
     pub num_traits: usize,
 
-    /// Number of shared causal SNPs per causal block
-    #[arg(long, default_value = "5")]
+    #[arg(
+        long,
+        default_value = "5",
+        help = "Shared causal SNPs per causal block"
+    )]
     pub num_shared_causal: usize,
 
-    /// Number of independent (per-trait) causal SNPs per causal block
-    #[arg(long, default_value = "3")]
+    #[arg(
+        long,
+        default_value = "3",
+        help = "Per-trait independent causal SNPs per causal block"
+    )]
     pub num_independent_causal: usize,
 
-    /// Heritability (genetic variance proportion)
-    #[arg(long, default_value = "0.4")]
+    #[arg(
+        long,
+        default_value = "0.4",
+        help = "Heritability (genetic variance proportion)"
+    )]
     pub genetic_variance: f32,
 
-    /// Per-block probability of containing causal SNPs
-    #[arg(long, default_value = "0.3")]
+    #[arg(
+        long,
+        default_value = "0.3",
+        help = "Probability a block contains causal SNPs"
+    )]
     pub causal_block_density: f32,
 
-    // --- Confounder parameters ---
-    /// Number of confounder columns (0 = no confounders)
-    #[arg(long, default_value = "0")]
+    // ── Confounder parameters ────────────────────────────────────────────
+    #[arg(
+        long,
+        default_value = "0",
+        help = "Number of confounder columns (0 = none)"
+    )]
     pub num_confounders: usize,
 
-    /// Number of hidden factors generating confounders
-    #[arg(long, default_value = "5")]
+    #[arg(
+        long,
+        default_value = "5",
+        help = "Hidden factors generating confounders"
+    )]
     pub num_hidden_factors: usize,
 
-    /// Proportion of variance explained by confounders
-    #[arg(long, default_value = "0.1")]
+    #[arg(
+        long,
+        default_value = "0.1",
+        help = "Variance proportion explained by confounders"
+    )]
     pub pve_confounders: f32,
 
-    // --- LD block parameters ---
-    /// External LD block file (BED format: chr, start, end). If omitted, estimate from data.
-    #[arg(long)]
+    // ── LD block parameters ──────────────────────────────────────────────
+    #[arg(
+        long,
+        help = "External LD block file (BED: chr, start, end)",
+        long_help = "External LD block file in BED format (chr, start, end).\n\
+            If omitted, blocks are estimated from the genotype data via Nystrom + rSVD."
+    )]
     pub ld_block_file: Option<String>,
 
-    /// Number of landmark SNPs for Nystrom LD block estimation
-    #[arg(long, default_value = "500")]
+    #[arg(
+        long,
+        default_value = "500",
+        help = "Landmark SNPs for Nystrom LD block estimation"
+    )]
     pub num_landmarks: usize,
 
-    /// Number of rSVD components for block estimation
-    #[arg(long, default_value = "20")]
+    #[arg(
+        long,
+        default_value = "20",
+        help = "rSVD components for LD block estimation"
+    )]
     pub num_ld_components: usize,
 
-    /// Minimum block size in SNPs
-    #[arg(long, default_value = "50")]
+    #[arg(long, default_value = "50", help = "Minimum LD block size in SNPs")]
     pub min_block_snps: usize,
 
-    /// Maximum block size in SNPs
-    #[arg(long, default_value = "5000")]
+    #[arg(long, default_value = "5000", help = "Maximum LD block size in SNPs")]
     pub max_block_snps: usize,
 
-    // --- Output ---
-    /// Output prefix
-    #[arg(short, long)]
+    // ── Output ───────────────────────────────────────────────────────────
+    #[arg(short, long, help = "Output prefix for summary stats and LD files")]
     pub output: String,
 }
 
