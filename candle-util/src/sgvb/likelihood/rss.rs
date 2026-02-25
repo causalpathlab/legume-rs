@@ -155,6 +155,53 @@ impl RssSvd {
         self.effective_rank
     }
 
+    /// Estimate the LDSC intercept in eigenspace via OLS, per trait.
+    ///
+    /// Under z ~ N(0, h*R + a*I), projected scores satisfy
+    /// E[(V'z)²_k] = h * d²_k + a (Bulik-Sullivan et al.,
+    /// Nat. Genet. 2015, adapted to per-block eigendecomposition).
+    ///
+    /// # Arguments
+    /// * `d_sq` - Squared singular values d²_k, length K.
+    /// * `y_raw` - Projected z-scores V'z, stored as y_raw\[k\]\[t\].
+    /// * `num_traits` - Number of traits T.
+    ///
+    /// # Returns
+    /// `(intercepts, slopes)` each of length T.
+    /// Intercepts are clamped to >= 1.0 (no deflation).
+    pub fn estimate_ldsc_intercept(
+        d_sq: &[f32],
+        y_raw: &[Vec<f32>],
+        num_traits: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let k = d_sq.len();
+        if k == 0 || num_traits == 0 {
+            return (vec![1.0; num_traits], vec![0.0; num_traits]);
+        }
+
+        let mean_x: f32 = d_sq.iter().sum::<f32>() / k as f32;
+        let var_x: f32 = d_sq.iter().map(|&x| (x - mean_x) * (x - mean_x)).sum();
+
+        let mut intercepts = Vec::with_capacity(num_traits);
+        let mut slopes = Vec::with_capacity(num_traits);
+
+        for tt in 0..num_traits {
+            // y²_k for this trait
+            let y2: Vec<f32> = (0..k).map(|kk| y_raw[kk][tt] * y_raw[kk][tt]).collect();
+            let mean_y: f32 = y2.iter().sum::<f32>() / k as f32;
+
+            let cov: f32 = (0..k).map(|kk| (d_sq[kk] - mean_x) * (y2[kk] - mean_y)).sum();
+
+            let slope = if var_x > 1e-12 { cov / var_x } else { 0.0 };
+            let intercept = (mean_y - slope * mean_x).max(1.0);
+
+            intercepts.push(intercept);
+            slopes.push(slope);
+        }
+
+        (intercepts, slopes)
+    }
+
     /// Estimate λ by MLE under the null model z ~ N(0, (1-λ)R + λI).
     ///
     /// In eigenspace: ỹ_kt ~ N(0, σ²_k(λ)) where σ²_k(λ) = (1-λ)d²_k + λ.
@@ -555,5 +602,96 @@ mod tests {
         );
         assert!(d_default[last] >= d_small[last]);
         Ok(())
+    }
+
+    #[test]
+    fn test_ldsc_intercept_recovery() {
+        // Simulate y²_k = h * d²_k + a + noise
+        // with true a = 2.0, h = 0.5
+        let k = 200;
+        let num_traits = 3;
+        let true_a = 2.0f32;
+        let true_h = 0.5f32;
+
+        let d_sq: Vec<f32> = (0..k).map(|i| 1.0 + 10.0 * (i as f32 / k as f32)).collect();
+
+        // For each trait, y_kt ~ N(0, h*d²_k + a), so y²_kt ~ (h*d²_k + a) * chi²(1)
+        // With many eigenvalues, the OLS should recover (a, h) reasonably.
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(42);
+
+        let y_raw: Vec<Vec<f32>> = (0..k)
+            .map(|kk| {
+                let var = true_h * d_sq[kk] + true_a;
+                let std = var.sqrt();
+                (0..num_traits)
+                    .map(|_| rng.random::<f32>() * 2.0 * std - std) // uniform approx
+                    .collect()
+            })
+            .collect();
+
+        // Use many traits for better averaging — generate 50 traits
+        let big_t = 50;
+        let y_raw_big: Vec<Vec<f32>> = (0..k)
+            .map(|kk| {
+                let var = true_h * d_sq[kk] + true_a;
+                let std = var.sqrt();
+                (0..big_t)
+                    .map(|_| {
+                        // Box-Muller for proper normal
+                        let u1: f32 = rng.random::<f32>().max(1e-10);
+                        let u2: f32 = rng.random::<f32>();
+                        std * (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let (intercepts, slopes) = RssSvd::estimate_ldsc_intercept(&d_sq, &y_raw_big, big_t);
+
+        // Check that the average intercept is close to true_a
+        let mean_a: f32 = intercepts.iter().sum::<f32>() / big_t as f32;
+        let mean_h: f32 = slopes.iter().sum::<f32>() / big_t as f32;
+        println!("LDSC intercept: mean_a={:.3} (true={}), mean_h={:.3} (true={})", mean_a, true_a, mean_h, true_h);
+        assert!((mean_a - true_a).abs() < 1.0, "intercept too far: {}", mean_a);
+        assert!((mean_h - true_h).abs() < 0.5, "slope too far: {}", mean_h);
+
+        // With few traits, individual estimates are noisier but should still be >= 1.0
+        let (intercepts_3, _) = RssSvd::estimate_ldsc_intercept(&d_sq, &y_raw, num_traits);
+        for &a in &intercepts_3 {
+            assert!(a >= 1.0, "intercept should be clamped >= 1.0, got {}", a);
+        }
+    }
+
+    #[test]
+    fn test_ldsc_intercept_no_inflation() {
+        // When data matches null (a=1, h~0), intercept should be ~1.0
+        let k = 100;
+        let num_traits = 20;
+        let d_sq: Vec<f32> = (0..k).map(|i| 0.5 + 5.0 * (i as f32 / k as f32)).collect();
+
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(123);
+
+        // y ~ N(0, 1) — no LD-driven signal, no inflation
+        let y_raw: Vec<Vec<f32>> = (0..k)
+            .map(|_| {
+                (0..num_traits)
+                    .map(|_| {
+                        let u1: f32 = rng.random::<f32>().max(1e-10);
+                        let u2: f32 = rng.random::<f32>();
+                        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let (intercepts, _slopes) = RssSvd::estimate_ldsc_intercept(&d_sq, &y_raw, num_traits);
+        let mean_a: f32 = intercepts.iter().sum::<f32>() / num_traits as f32;
+        println!("No-inflation LDSC: mean_a={:.3}", mean_a);
+        // Should be close to 1.0 (clamped floor)
+        assert!(mean_a < 2.0, "intercept should be near 1.0, got {}", mean_a);
     }
 }

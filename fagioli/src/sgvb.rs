@@ -499,6 +499,7 @@ impl GeneticModel {
 /// - `config`: Fit configuration.
 /// - `max_rank`: Maximum rank for rSVD.
 /// - `lambda`: Regularization for D̃ = √(D² + λ).
+/// - `ldsc_intercept`: If true, estimate per-trait LDSC intercept and rescale.
 pub fn fit_block_rss(
     x_block: &DMatrix<f32>,
     z_block: &DMatrix<f32>,
@@ -506,16 +507,16 @@ pub fn fit_block_rss(
     max_rank: usize,
     lambda: f64,
     device: &Device,
+    ldsc_intercept: bool,
 ) -> Result<BlockFitResult> {
     let p = x_block.ncols();
     let k = z_block.ncols(); // number of traits T
 
     // Compute SVD of block genotypes (done once, reused across grid)
     let x_tensor = x_block.to_tensor(device)?;
-    let z_tensor = z_block.to_tensor(device)?;
+    let mut z_tensor = z_block.to_tensor(device)?;
 
     let svd = RssSvd::from_genotypes(&x_tensor, max_rank, lambda, device)?;
-    let y_tilde = svd.project_zscores(&z_tensor)?; // (K, T) — computed once
     let x_design = svd.x_design().clone(); // (K, p) — fat design
     let kk = svd.effective_rank(); // eigenspace dimension
 
@@ -528,6 +529,43 @@ pub fn fit_block_rss(
         config.sigma2_inf,
     );
 
+    // ── Local LDSC intercept estimation ──────────────────────────────
+    if ldsc_intercept && kk > 2 {
+        // Compute V'z (raw projection without D̃⁻¹ scaling) for LDSC
+        let vt = svd.v_mat().t()?;
+        let vt_z = vt.matmul(&z_tensor)?; // (K, T)
+
+        let d_vals: Vec<f32> = svd.singular_values().to_vec1()?;
+        let d_sq: Vec<f32> = d_vals.iter().map(|&d| d * d).collect();
+
+        let vt_z_data: Vec<f32> = vt_z.flatten_all()?.to_vec1()?;
+        let y_raw: Vec<Vec<f32>> = (0..kk)
+            .map(|kk_i| (0..k).map(|tt| vt_z_data[kk_i * k + tt]).collect())
+            .collect();
+
+        let (intercepts, slopes) = RssSvd::estimate_ldsc_intercept(&d_sq, &y_raw, k);
+
+        // Log per-trait intercept and slope (heritability proxy)
+        for tt in 0..k {
+            if intercepts[tt] > 1.01 || slopes[tt].abs() > 0.01 {
+                info!(
+                    "    LDSC trait {}: intercept={:.3}, slope(h)={:.4}",
+                    tt, intercepts[tt], slopes[tt],
+                );
+            }
+        }
+
+        // Rescale z-scores per trait where intercept > 1
+        let any_inflated = intercepts.iter().any(|&a| a > 1.0 + 1e-6);
+        if any_inflated {
+            let scale: Vec<f32> = intercepts.iter().map(|&a| 1.0 / a.sqrt()).collect();
+            let scale_tensor =
+                Tensor::from_vec(scale, (1, k), z_tensor.device())?.to_dtype(z_tensor.dtype())?;
+            z_tensor = z_tensor.broadcast_mul(&scale_tensor)?;
+        }
+    }
+
+    let y_tilde = svd.project_zscores(&z_tensor)?; // (K, T)
     let rss = RssLikelihood::from_projected(y_tilde);
     let mut results: Vec<PriorFitResult> = Vec::new();
 
