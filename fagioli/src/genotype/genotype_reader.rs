@@ -1,6 +1,8 @@
 use anyhow::Result;
 use nalgebra::DMatrix;
 
+use crate::util::chr_eq;
+
 /// Genotype matrix with metadata
 #[derive(Debug, Clone)]
 pub struct GenotypeMatrix {
@@ -48,7 +50,7 @@ impl GenomicRegion {
     pub fn contains(&self, chr: &str, pos: u64) -> bool {
         // Check chromosome
         if let Some(ref target_chr) = self.chromosome {
-            if chr != target_chr {
+            if !chr_eq(chr, target_chr) {
                 return false;
             }
         }
@@ -113,6 +115,18 @@ mod tests {
         assert!(region.contains("chr1", 100));
         assert!(region.contains("chr1", 999999));
         assert!(!region.contains("chr2", 100));
+    }
+
+    #[test]
+    fn test_genomic_region_cross_prefix() {
+        // "chr1" region should match SNPs labeled "1" and vice versa
+        let region_with = GenomicRegion::new(Some("chr1".to_string()), Some(1000), Some(2000));
+        assert!(region_with.contains("1", 1500));
+        assert!(!region_with.contains("2", 1500));
+
+        let region_without = GenomicRegion::new(Some("1".to_string()), Some(1000), Some(2000));
+        assert!(region_without.contains("chr1", 1500));
+        assert!(!region_without.contains("chr2", 1500));
     }
 
     #[test]

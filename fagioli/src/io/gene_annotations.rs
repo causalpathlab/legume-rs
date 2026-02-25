@@ -5,6 +5,7 @@ use genomic_data::gff::{read_gff_record_vec, FeatureType, GeneId, GeneSymbol, Gf
 use genomic_data::sam::Strand;
 
 use crate::simulation::{Gene, GeneAnnotations};
+use crate::util::chr_eq;
 
 /// Convert GffRecord to Gene (calculate TSS from start/end based on strand)
 fn gff_record_to_gene(rec: &GffRecord) -> Gene {
@@ -55,7 +56,7 @@ pub fn load_gtf(
     for rec in gene_records {
         // Apply chromosome filter
         if let Some(chr_filter) = chromosome_filter {
-            if rec.seqname.as_ref() != chr_filter {
+            if !chr_eq(rec.seqname.as_ref(), chr_filter) {
                 continue;
             }
         }
@@ -120,7 +121,7 @@ pub fn load_bed_annotations(
 
         // Apply chromosome filter
         if let Some(chr_filter) = chromosome_filter {
-            if chr.as_ref() != chr_filter {
+            if !chr_eq(chr.as_ref(), chr_filter) {
                 continue;
             }
         }

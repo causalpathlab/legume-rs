@@ -5,6 +5,8 @@ use rand::SeedableRng;
 use genomic_data::gff::GeneId;
 use genomic_data::sam::Strand;
 
+use crate::util::chr_eq;
+
 /// Gene annotation simplified for eQTL simulation
 #[derive(Debug, Clone)]
 pub struct Gene {
@@ -45,7 +47,7 @@ impl GeneAnnotations {
             .iter()
             .enumerate()
             .filter(|(idx, &pos)| {
-                snp_chromosomes[*idx] == gene.chromosome && pos >= start && pos <= end
+                chr_eq(&snp_chromosomes[*idx], &gene.chromosome) && pos >= start && pos <= end
             })
             .map(|(idx, _)| idx)
             .collect()
@@ -56,7 +58,7 @@ impl GeneAnnotations {
         let filtered_genes: Vec<Gene> = self
             .genes
             .iter()
-            .filter(|g| g.chromosome.as_ref() == chromosome && g.tss >= start && g.tss <= end)
+            .filter(|g| chr_eq(g.chromosome.as_ref(), chromosome) && g.tss >= start && g.tss <= end)
             .cloned()
             .collect();
 
