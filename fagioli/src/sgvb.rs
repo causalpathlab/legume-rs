@@ -378,7 +378,6 @@ fn fit_single_prior(
             elbo_buffer.pop_front();
         }
         elbo_buffer.push_back(elbo_val);
-
     }
 
     let avg_elbo = if elbo_buffer.is_empty() {
