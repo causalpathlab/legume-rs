@@ -5,6 +5,8 @@ use nalgebra::DMatrix;
 use rand::seq::index::sample;
 use rand::SeedableRng;
 
+use crate::util::chr_eq;
+
 /// An LD block: contiguous range of SNPs
 #[derive(Debug, Clone)]
 pub struct LdBlock {
@@ -92,7 +94,7 @@ pub fn estimate_ld_blocks(
     let mut distances = vec![0.0f32; m.saturating_sub(1)];
     for j in 0..m.saturating_sub(1) {
         // Also cut at chromosome boundaries (infinite distance)
-        if chromosomes[j] != chromosomes[j + 1] {
+        if !chr_eq(&chromosomes[j], &chromosomes[j + 1]) {
             distances[j] = f32::INFINITY;
         } else {
             let diff = embeddings.row(j + 1) - embeddings.row(j);
@@ -197,7 +199,7 @@ pub fn load_ld_blocks_from_file(
         let mut snp_end = None;
 
         for j in 0..m {
-            if snp_chromosomes[j].as_ref() == chr.as_ref()
+            if chr_eq(snp_chromosomes[j].as_ref(), chr.as_ref())
                 && snp_positions[j] >= *bp_start
                 && snp_positions[j] < *bp_end
             {
@@ -243,12 +245,12 @@ pub fn create_uniform_blocks(
         let mut end = (start + block_size).min(num_snps);
 
         // Don't split across chromosomes
-        if end < num_snps && end > start + 1 && chromosomes[end - 1] != chromosomes[end] {
+        if end < num_snps && end > start + 1 && !chr_eq(&chromosomes[end - 1], &chromosomes[end]) {
             // end is already at a chromosome boundary, keep it
         }
         // Also break at chromosome boundaries within the block
         for j in (start + 1)..end {
-            if chromosomes[j] != chromosomes[start] {
+            if !chr_eq(&chromosomes[j], &chromosomes[start]) {
                 end = j;
                 break;
             }
