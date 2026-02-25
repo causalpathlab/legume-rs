@@ -26,22 +26,27 @@ pub struct SumstatWriter {
     snp_ids: Vec<Box<str>>,
     chromosomes: Vec<Box<str>>,
     positions: Vec<u64>,
+    allele1: Vec<Box<str>>,
+    allele2: Vec<Box<str>>,
     num_individuals: usize,
 }
 
 impl SumstatWriter {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         path: &str,
         snp_ids: &[Box<str>],
         chromosomes: &[Box<str>],
         positions: &[u64],
+        allele1: &[Box<str>],
+        allele2: &[Box<str>],
         num_individuals: usize,
         tpool: Option<&ThreadPool>,
     ) -> Result<Self> {
         let mut writer = open_bgzf_writer(path, tpool)?;
         writeln!(
             writer,
-            "#chr\tstart\tend\tsnp_id\ttrait_idx\tn\tbeta\tse\tz\tpvalue"
+            "#chr\tstart\tend\tsnp_id\ta1\ta2\ttrait_idx\tn\tbeta\tse\tz\tpvalue"
         )?;
 
         Ok(Self {
@@ -49,6 +54,8 @@ impl SumstatWriter {
             snp_ids: snp_ids.to_vec(),
             chromosomes: chromosomes.to_vec(),
             positions: positions.to_vec(),
+            allele1: allele1.to_vec(),
+            allele2: allele2.to_vec(),
             num_individuals,
         })
     }
@@ -58,11 +65,13 @@ impl SumstatWriter {
             let pos = self.positions[rec.snp_idx];
             writeln!(
                 self.writer,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.4}\t{:.6e}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.4}\t{:.6e}",
                 self.chromosomes[rec.snp_idx],
                 pos.saturating_sub(1),
                 pos,
                 self.snp_ids[rec.snp_idx],
+                self.allele1[rec.snp_idx],
+                self.allele2[rec.snp_idx],
                 rec.trait_idx,
                 self.num_individuals,
                 rec.beta,
