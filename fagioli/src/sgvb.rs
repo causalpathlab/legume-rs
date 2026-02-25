@@ -75,6 +75,10 @@ pub struct FitConfig {
     /// When > 0, a dense `LinearRegressionSGVB` with prior variance
     /// σ²_inf / p is fitted alongside the sparse SuSiE term.
     pub sigma2_inf: f32,
+    /// Prior concentration for SuSiE alpha (PIP prior).
+    /// Each SNP gets prior probability prior_alpha / p.
+    /// Default 1.0 (uniform prior).
+    pub prior_alpha: f64,
 }
 
 impl Default for FitConfig {
@@ -86,11 +90,12 @@ impl Default for FitConfig {
             learning_rate: 0.01,
             num_iterations: 500,
             batch_size: 1000,
-            prior_vars: vec![0.01, 0.05, 0.1, 0.2, 0.5, 1.0],
+            prior_vars: vec![0.05, 0.1, 0.15, 0.2, 0.3, 0.5],
             elbo_window: 50,
             seed: 42,
             ml_block_size: 50,
             sigma2_inf: 0.0,
+            prior_alpha: 1.0,
         }
     }
 }
@@ -111,12 +116,10 @@ pub struct BlockFitResult {
     pub avg_elbo: f32,
 }
 
-/// Result from fitting a single block with detailed per-prior-var results.
+/// Result from fitting a single block with per-prior-var results.
 #[derive(Debug)]
 pub struct BlockFitResultDetailed {
-    /// Model-averaged result.
-    pub result: BlockFitResult,
-    /// Per-prior-var average ELBOs (for empirical Bayes re-weighting).
+    /// Per-prior-var average ELBOs.
     pub per_prior_elbos: Vec<f32>,
     /// Per-prior-var PIPs, shape (p, k) each.
     pub per_prior_pips: Vec<DMatrix<f32>>,
@@ -124,6 +127,13 @@ pub struct BlockFitResultDetailed {
     pub per_prior_effects: Vec<DMatrix<f32>>,
     /// Per-prior-var effect stds, shape (p, k) each.
     pub per_prior_stds: Vec<DMatrix<f32>>,
+}
+
+impl BlockFitResultDetailed {
+    /// Pick the best prior by local ELBO argmax.
+    pub fn best_result(&self) -> BlockFitResult {
+        select_best_prior(self)
+    }
 }
 
 /// Fit a fine-mapping model for a single LD block.
@@ -142,7 +152,7 @@ pub fn fit_block(
     device: &Device,
 ) -> Result<BlockFitResult> {
     let detailed = fit_block_inner(x_block, y_block, None, confounders, config, device)?;
-    Ok(detailed.result)
+    Ok(select_best_prior(&detailed))
 }
 
 /// Fit a fine-mapping model for a single block with per-observation variance.
@@ -219,37 +229,7 @@ fn fit_block_inner(
         stds_vec.push(eff_std);
     }
 
-    // Model-average across prior_vars using softmax weights on ELBOs
-    let max_elbo = elbos_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let weights: Vec<f32> = elbos_vec.iter().map(|e| (e - max_elbo).exp()).collect();
-    let w_sum: f32 = weights.iter().sum();
-    let weights: Vec<f32> = weights.iter().map(|w| w / w_sum).collect();
-
-    let n_prior = elbos_vec.len();
-    let (nr, nc) = pips_vec[0].shape();
-
-    let mut pip_avg = DMatrix::zeros(nr, nc);
-    let mut eff_avg = DMatrix::zeros(nr, nc);
-    let mut std_avg = DMatrix::zeros(nr, nc);
-    for i in 0..n_prior {
-        pip_avg += &pips_vec[i] * weights[i];
-        eff_avg += &effects_vec[i] * weights[i];
-        std_avg += &stds_vec[i] * weights[i];
-    }
-
-    let avg_elbo = elbos_vec
-        .iter()
-        .zip(weights.iter())
-        .map(|(e, w)| e * w)
-        .sum::<f32>();
-
     Ok(BlockFitResultDetailed {
-        result: BlockFitResult {
-            pip: pip_avg,
-            effect_mean: eff_avg,
-            effect_std: std_avg,
-            avg_elbo,
-        },
         per_prior_elbos: elbos_vec,
         per_prior_pips: pips_vec,
         per_prior_effects: effects_vec,
@@ -460,6 +440,17 @@ impl GeneticModel {
         }
     }
 
+    fn kl_categorical(&self, prior_alpha: f64, device: &Device) -> Result<Tensor> {
+        match self {
+            Self::Susie(m) => Ok(m.variational.kl_categorical(prior_alpha)?),
+            _ => Ok(Tensor::zeros(
+                (),
+                candle_util::candle_core::DType::F32,
+                device,
+            )?),
+        }
+    }
+
     fn extract_results(&self) -> Result<(Tensor, Tensor, Tensor)> {
         match self {
             Self::Susie(m) => {
@@ -508,7 +499,7 @@ pub fn fit_block_rss(
     lambda: f64,
     device: &Device,
     ldsc_intercept: bool,
-) -> Result<BlockFitResult> {
+) -> Result<BlockFitResultDetailed> {
     let p = x_block.ncols();
     let k = z_block.ncols(); // number of traits T
 
@@ -569,6 +560,15 @@ pub fn fit_block_rss(
     let rss = RssLikelihood::from_projected(y_tilde);
     let mut results: Vec<PriorFitResult> = Vec::new();
 
+    // Intercept design: D̃⁻¹ V' 1, shape (K, 1)
+    // Projects an all-ones vector through the same eigenspace transform as z-scores.
+    let intercept_design: Option<Tensor> = if config.sigma2_inf > 0.0 {
+        let ones_p = Tensor::ones((p, 1), x_design.dtype(), device)?;
+        Some(svd.project_zscores(&ones_p)?)
+    } else {
+        None
+    };
+
     // Loop over prior variance grid
     for &prior_var in &config.prior_vars {
         let varmap = VarMap::new();
@@ -593,15 +593,15 @@ pub fn fit_block_rss(
             config.ml_block_size,
         )?;
 
-        // Optional dense polygenic component with fixed σ²_inf / p prior
-        let polygenic_model: Option<LinearRegressionSGVB<FixedGaussianPrior>> =
-            if config.sigma2_inf > 0.0 {
-                let poly_prior = FixedGaussianPrior::new(config.sigma2_inf / p as f32);
+        // Optional intercept: 1 variational param per trait, design = D̃⁻¹V'1
+        let intercept_model: Option<LinearRegressionSGVB<FixedGaussianPrior>> =
+            if let Some(ref int_design) = intercept_design {
+                let int_prior = FixedGaussianPrior::new(config.sigma2_inf);
                 Some(LinearRegressionSGVB::new(
-                    vb.pp("polygenic"),
-                    x_design.clone(),
+                    vb.pp("intercept"),
+                    int_design.clone(),
                     k,
-                    poly_prior,
+                    int_prior,
                     sgvb_config,
                 )?)
             } else {
@@ -616,11 +616,13 @@ pub fn fit_block_rss(
             let gen_sample = genetic.local_reparam_sample(config.num_sgvb_samples, &x_design)?;
 
             let mut samples = vec![gen_sample];
-            if let Some(ref pm) = polygenic_model {
-                samples.push(pm.local_reparam_sample(config.num_sgvb_samples)?);
+            if let Some(ref im) = intercept_model {
+                samples.push(im.local_reparam_sample(config.num_sgvb_samples)?);
             }
 
             let loss = samples_local_reparam_loss(&samples, &rss, 1.0)?;
+            let kl_cat = genetic.kl_categorical(config.prior_alpha, device)?;
+            let loss = (loss + kl_cat)?;
 
             optimizer.backward_step(&loss)?;
 
@@ -647,35 +649,38 @@ pub fn fit_block_rss(
         results.push((avg_elbo, pip, eff_mean, eff_std));
     }
 
-    // Model-average across prior_vars using softmax weights on ELBOs
     let elbos: Vec<f32> = results.iter().map(|(e, _, _, _)| *e).collect();
-    let max_elbo = elbos.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let weights: Vec<f32> = elbos.iter().map(|e| (e - max_elbo).exp()).collect();
-    let w_sum: f32 = weights.iter().sum();
-    let weights: Vec<f32> = weights.iter().map(|w| w / w_sum).collect();
+    let pips: Vec<DMatrix<f32>> = results.iter().map(|(_, p, _, _)| p.clone()).collect();
+    let effects: Vec<DMatrix<f32>> = results.iter().map(|(_, _, e, _)| e.clone()).collect();
+    let stds: Vec<DMatrix<f32>> = results.iter().map(|(_, _, _, s)| s.clone()).collect();
 
-    let (nr, nc) = results[0].1.shape();
-    let mut pip_avg = DMatrix::zeros(nr, nc);
-    let mut eff_avg = DMatrix::zeros(nr, nc);
-    let mut std_avg = DMatrix::zeros(nr, nc);
-    for (i, (_elbo, pip, eff, std)) in results.iter().enumerate() {
-        pip_avg += pip * weights[i];
-        eff_avg += eff * weights[i];
-        std_avg += std * weights[i];
-    }
-
-    let avg_elbo = elbos
-        .iter()
-        .zip(weights.iter())
-        .map(|(e, w)| e * w)
-        .sum::<f32>();
-
-    Ok(BlockFitResult {
-        pip: pip_avg,
-        effect_mean: eff_avg,
-        effect_std: std_avg,
-        avg_elbo,
+    Ok(BlockFitResultDetailed {
+        per_prior_elbos: elbos,
+        per_prior_pips: pips,
+        per_prior_effects: effects,
+        per_prior_stds: stds,
     })
+}
+
+/// Select the best prior by ELBO argmax from a `BlockFitResultDetailed`.
+pub fn select_best_prior(detailed: &BlockFitResultDetailed) -> BlockFitResult {
+    let best_idx = elbo_argmax(&detailed.per_prior_elbos);
+    BlockFitResult {
+        pip: detailed.per_prior_pips[best_idx].clone(),
+        effect_mean: detailed.per_prior_effects[best_idx].clone(),
+        effect_std: detailed.per_prior_stds[best_idx].clone(),
+        avg_elbo: detailed.per_prior_elbos[best_idx],
+    }
+}
+
+/// Return the index of the maximum value (argmax).
+pub fn elbo_argmax(elbos: &[f32]) -> usize {
+    elbos
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap_or(0)
 }
 
 /// Compute local reparameterization sample with a custom design matrix (for minibatch).

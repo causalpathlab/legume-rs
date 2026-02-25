@@ -83,7 +83,7 @@ pub fn write_gene_summary(
     for gr in gene_results {
         let max_pip = gr
             .detailed
-            .result
+            .best_result()
             .pip
             .iter()
             .cloned()
@@ -91,8 +91,8 @@ pub fn write_gene_summary(
 
         let mut sig_ct = 0usize;
         for ct_idx in 0..n_ct {
-            let has_sig =
-                (0..gr.cis_snp_indices.len()).any(|j| gr.detailed.result.pip[(j, ct_idx)] >= 0.5);
+            let has_sig = (0..gr.cis_snp_indices.len())
+                .any(|j| gr.detailed.best_result().pip[(j, ct_idx)] >= 0.5);
             if has_sig {
                 sig_ct += 1;
             }
@@ -104,7 +104,7 @@ pub fn write_gene_summary(
             gr.gene_id,
             gr.cis_snp_indices.len(),
             max_pip,
-            gr.detailed.result.avg_elbo,
+            gr.detailed.best_result().avg_elbo,
             sig_ct,
         )?;
     }

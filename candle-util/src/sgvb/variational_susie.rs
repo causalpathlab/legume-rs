@@ -64,6 +64,35 @@ impl SusieVar {
         })
     }
 
+    /// Compute categorical KL divergence: KL(α || prior).
+    ///
+    /// `KL = Σ_l Σ_j Σ_k α_{l,j,k} * log(α_{l,j,k} / prior_j)`
+    ///
+    /// where `prior_j = prior_alpha / p` (uniform when `prior_alpha = 1`).
+    ///
+    /// Returns a scalar tensor.
+    /// Compute categorical KL divergence: KL(q(α) || prior).
+    ///
+    /// `KL = Σ_l Σ_j Σ_k α_{l,j,k} * (log α_{l,j,k} - log(prior_alpha / p))`
+    ///
+    /// where `prior_alpha / p` is the per-SNP prior probability
+    /// (uniform when `prior_alpha = 1`).
+    ///
+    /// Uses `log_softmax` for numerical stability.
+    /// Returns a scalar tensor.
+    pub fn kl_categorical(&self, prior_alpha: f64) -> Result<Tensor> {
+        let alpha = self.alpha()?; // (L, p, k)
+        let log_alpha = self.log_alpha()?; // (L, p, k) via log_softmax
+        let p = alpha.dim(1)?;
+        let log_prior = (prior_alpha / p as f64).ln();
+        // KL = Σ α * (log α - log_prior)
+        //    = Σ α * log α  -  log_prior * Σ α
+        // Σ_j α_{l,j,k} = 1 for each (l,k), so Σ α = L * k
+        let neg_entropy = alpha.broadcast_mul(&log_alpha)?.sum_all()?; // Σ α log α
+        let lk = self.num_components as f64 * alpha.dim(2)? as f64;
+        neg_entropy - log_prior * lk
+    }
+
     /// Get selection probabilities α = softmax(logits, dim=1) for each component.
     /// Softmax is applied over the p dimension for each (l, k) pair.
     ///
