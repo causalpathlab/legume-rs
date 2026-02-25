@@ -443,8 +443,7 @@ mod tests {
             move |f: &Tensor| -> f32 {
                 let diff = (f - &y).unwrap();
                 let sq = (&diff * &diff).unwrap().sum_all().unwrap();
-                let val = (sq.to_scalar::<f32>().unwrap()) * (-0.5 / sigma_sq);
-                val
+                (sq.to_scalar::<f32>().unwrap()) * (-0.5 / sigma_sq)
             }
         };
 

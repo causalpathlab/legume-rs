@@ -348,6 +348,14 @@ impl RssLikelihood {
         Ok(Self { y_tilde })
     }
 
+    /// Create from pre-projected ỹ (already in eigenspace).
+    ///
+    /// Use this when you have already computed ỹ = D̃⁻¹ V' z
+    /// and want to avoid recomputing it.
+    pub fn from_projected(y_tilde: Tensor) -> Self {
+        Self { y_tilde }
+    }
+
     /// Get the projected z-scores ỹ = D̃⁻¹ V' z, shape (K, T).
     pub fn y_tilde(&self) -> &Tensor {
         &self.y_tilde
@@ -358,18 +366,24 @@ impl BlackBoxLikelihood for RssLikelihood {
     /// Evaluate the RSS log-likelihood in K-space.
     ///
     /// ```text
-    /// log p(z | β) = -½ ‖ỹ - η‖² + const
+    /// log p(z | β) = -½ ‖ỹ - Σ_j η_j‖²
     /// ```
     ///
-    /// where η = X̃ β (K × T) and ỹ = D̃⁻¹ V' z (K × T).
+    /// where η_j = X̃_j β_j (K × T) are additive components and
+    /// ỹ = D̃⁻¹ V' z (K × T).
     ///
     /// # Arguments
-    /// * `etas` - `etas[0]` has shape (S, K, T).
+    /// * `etas` - Each `etas[j]` has shape (S, K, T). All are summed
+    ///   to form the combined predictor.
     ///
     /// # Returns
     /// Log-likelihood values, shape (S,).
     fn log_likelihood(&self, etas: &[&Tensor]) -> Result<Tensor> {
-        let eta = etas[0]; // (S, K, T)
+        // Sum all additive components: sparse + intercept [+ polygenic]
+        let mut eta = etas[0].clone();
+        for e in &etas[1..] {
+            eta = eta.broadcast_add(e)?;
+        }
         let diff_sq = eta.broadcast_sub(&self.y_tilde)?.sqr()?; // (S, K, T)
         diff_sq.sum(2)?.sum(1)? * (-0.5) // (S,)
     }

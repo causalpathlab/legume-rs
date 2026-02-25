@@ -404,6 +404,7 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
         elbo_window: args.elbo_window,
         seed: args.seed,
         ml_block_size: args.ml_block_size,
+        sigma2_inf: 0.0,
     };
 
     info!(
