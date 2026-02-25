@@ -190,7 +190,9 @@ impl RssSvd {
             let y2: Vec<f32> = (0..k).map(|kk| y_raw[kk][tt] * y_raw[kk][tt]).collect();
             let mean_y: f32 = y2.iter().sum::<f32>() / k as f32;
 
-            let cov: f32 = (0..k).map(|kk| (d_sq[kk] - mean_x) * (y2[kk] - mean_y)).sum();
+            let cov: f32 = (0..k)
+                .map(|kk| (d_sq[kk] - mean_x) * (y2[kk] - mean_y))
+                .sum();
 
             let slope = if var_x > 1e-12 { cov / var_x } else { 0.0 };
             let intercept = (mean_y - slope * mean_x).max(1.0);
@@ -653,8 +655,15 @@ mod tests {
         // Check that the average intercept is close to true_a
         let mean_a: f32 = intercepts.iter().sum::<f32>() / big_t as f32;
         let mean_h: f32 = slopes.iter().sum::<f32>() / big_t as f32;
-        println!("LDSC intercept: mean_a={:.3} (true={}), mean_h={:.3} (true={})", mean_a, true_a, mean_h, true_h);
-        assert!((mean_a - true_a).abs() < 1.0, "intercept too far: {}", mean_a);
+        println!(
+            "LDSC intercept: mean_a={:.3} (true={}), mean_h={:.3} (true={})",
+            mean_a, true_a, mean_h, true_h
+        );
+        assert!(
+            (mean_a - true_a).abs() < 1.0,
+            "intercept too far: {}",
+            mean_a
+        );
         assert!((mean_h - true_h).abs() < 0.5, "slope too far: {}", mean_h);
 
         // With few traits, individual estimates are noisier but should still be >= 1.0

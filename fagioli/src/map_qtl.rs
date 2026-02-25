@@ -118,7 +118,7 @@ pub struct MapQtlArgs {
 
     #[arg(
         long,
-        default_value = "0.01,0.05,0.1,0.2,0.5,1.0",
+        default_value = "0.05,0.1,0.15,0.2,0.3,0.5",
         help = "Comma-separated prior variances for coordinate search"
     )]
     pub prior_var: String,
@@ -405,6 +405,7 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
         seed: args.seed,
         ml_block_size: args.ml_block_size,
         sigma2_inf: 0.0,
+        prior_alpha: 1.0,
     };
 
     info!(
@@ -460,7 +461,7 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
             n_testable,
             spec.gene_id,
             x_g.ncols(),
-            detailed.result.avg_elbo,
+            detailed.best_result().avg_elbo,
         );
 
         Some(GeneResult {
@@ -635,9 +636,9 @@ fn build_qtl_variant_rows(
             eb_reweight(gr, eb_w, n_ct)
         } else {
             (
-                gr.detailed.result.pip.clone(),
-                gr.detailed.result.effect_mean.clone(),
-                gr.detailed.result.effect_std.clone(),
+                gr.detailed.best_result().pip.clone(),
+                gr.detailed.best_result().effect_mean.clone(),
+                gr.detailed.best_result().effect_std.clone(),
             )
         };
 
