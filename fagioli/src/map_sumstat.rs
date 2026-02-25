@@ -193,6 +193,17 @@ pub struct MapSumstatArgs {
     )]
     pub jobs: usize,
 
+    // ── Z-score adjustments ─────────────────────────────────────────────
+    #[arg(long, default_value_t = false, help = "Disable PVE adjustment on z-scores")]
+    pub no_pve_adjust: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Disable local LDSC intercept correction per block"
+    )]
+    pub no_ldsc_intercept: bool,
+
     // ── Misc ─────────────────────────────────────────────────────────────
     #[arg(long, default_value = "42", help = "Random seed")]
     pub seed: u64,
@@ -287,6 +298,28 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         t,
         median_n,
     );
+
+    // ── Step 2b: PVE-adjusted z-scores (Zhu & Stephens, Ann. Appl. Stat. 2017;
+    //    Zou et al., PLoS Genet. 2022, Eq. 14-18).
+    //    z_tilde_j = z_j * sqrt((n-1) / (z_j^2 + n - 2))
+    let mut zscores = zscores;
+    if !args.no_pve_adjust && median_n > 2 {
+        let max_z_before = zscores.iter().map(|z| z.abs()).fold(0.0f32, f32::max);
+        let nf = median_n as f32;
+        zscores.iter_mut().for_each(|z| {
+            let z2 = *z * *z;
+            *z *= ((nf - 1.0) / (z2 + nf - 2.0)).sqrt();
+        });
+        let max_z_after = zscores.iter().map(|z| z.abs()).fold(0.0f32, f32::max);
+        info!(
+            "PVE adjustment: max|z| {:.2} -> {:.2} (median_n={})",
+            max_z_before, max_z_after, median_n,
+        );
+    } else if args.no_pve_adjust {
+        info!("PVE adjustment: disabled (--no-pve-adjust)");
+    } else {
+        info!("PVE adjustment: skipped (median_n={} <= 2)", median_n);
+    }
 
     // ── Step 3: Determine LD blocks ───────────────────────────────────────
     let blocks: Vec<LdBlock> = if let Some(ref block_file) = args.ld_block_file {
@@ -383,6 +416,7 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
             args.max_rank,
             block_lambda,
             &device,
+            !args.no_ldsc_intercept,
         )
         .unwrap_or_else(|e| {
             log::warn!("Block {} failed: {}, using zeros", block_idx, e);
@@ -481,6 +515,8 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         "lambda": args.lambda.unwrap_or(0.1 / args.max_rank as f64),
         "seed": args.seed,
         "sigma2_inf": args.sigma2_inf,
+        "pve_adjust": !args.no_pve_adjust,
+        "ldsc_intercept": !args.no_ldsc_intercept,
     });
     write_parameters(&format!("{}.parameters.json", args.output), &params)?;
 
