@@ -71,6 +71,10 @@ pub struct FitConfig {
     pub seed: u64,
     /// Block size for MultiLevelSusieVar tree.
     pub ml_block_size: usize,
+    /// Infinitesimal prior variance σ²_inf for polygenic background.
+    /// When > 0, a dense `LinearRegressionSGVB` with prior variance
+    /// σ²_inf / p is fitted alongside the sparse SuSiE term.
+    pub sigma2_inf: f32,
 }
 
 impl Default for FitConfig {
@@ -86,6 +90,7 @@ impl Default for FitConfig {
             elbo_window: 50,
             seed: 42,
             ml_block_size: 50,
+            sigma2_inf: 0.0,
         }
     }
 }
@@ -485,6 +490,10 @@ impl GeneticModel {
 /// z-scores are projected through the SVD of X/√n into K-dimensional space,
 /// avoiding explicit R = X'X/n and operating in the efficient K-space.
 ///
+/// Model averaging is performed over the prior_var grid.
+/// When `config.sigma2_inf > 0`, an additional dense polygenic component
+/// with fixed prior variance σ²_inf / p is included.
+///
 /// - `x_block`: Standardized genotypes (N × p_block).
 /// - `z_block`: Z-scores for this block (p_block × T).
 /// - `config`: Fit configuration.
@@ -501,25 +510,28 @@ pub fn fit_block_rss(
     let p = x_block.ncols();
     let k = z_block.ncols(); // number of traits T
 
-    // Compute SVD of block genotypes (done once, reused across prior_vars)
+    // Compute SVD of block genotypes (done once, reused across grid)
     let x_tensor = x_block.to_tensor(device)?;
     let z_tensor = z_block.to_tensor(device)?;
 
     let svd = RssSvd::from_genotypes(&x_tensor, max_rank, lambda, device)?;
-    let rss = RssLikelihood::new(&svd, &z_tensor)?;
+    let y_tilde = svd.project_zscores(&z_tensor)?; // (K, T) — computed once
     let x_design = svd.x_design().clone(); // (K, p) — fat design
     let kk = svd.effective_rank(); // eigenspace dimension
 
     info!(
-        "  RSS block: p={}, K={}, T={}, λ={:.2e}",
+        "  RSS block: p={}, K={}, T={}, λ={:.2e}, σ²_inf={:.2e}",
         p,
         kk,
         k,
         svd.lambda(),
+        config.sigma2_inf,
     );
 
+    let rss = RssLikelihood::from_projected(y_tilde);
     let mut results: Vec<PriorFitResult> = Vec::new();
 
+    // Loop over prior variance grid
     for &prior_var in &config.prior_vars {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
@@ -530,18 +542,7 @@ pub fn fit_block_rss(
             kl_weight: 1.0,
         };
 
-        // Intercept model: identity design I_K in eigenspace, broad prior
-        let intercept_design = Tensor::eye(kk, DType::F32, device)?;
-        let intercept_prior = FixedGaussianPrior::new(10.0);
-        let intercept_model = LinearRegressionSGVB::new(
-            vb.pp("intercept"),
-            intercept_design.clone(),
-            k,
-            intercept_prior,
-            sgvb_config.clone(),
-        )?;
-
-        // Build genetic model with X̃ = D̃V' (K × p) as design
+        // Build genetic model with X̃ as design
         let genetic = GeneticModel::new(
             &vb,
             config.model_type,
@@ -550,9 +551,24 @@ pub fn fit_block_rss(
             k,
             x_design.clone(),
             prior,
-            sgvb_config,
+            sgvb_config.clone(),
             config.ml_block_size,
         )?;
+
+        // Optional dense polygenic component with fixed σ²_inf / p prior
+        let polygenic_model: Option<LinearRegressionSGVB<FixedGaussianPrior>> =
+            if config.sigma2_inf > 0.0 {
+                let poly_prior = FixedGaussianPrior::new(config.sigma2_inf / p as f32);
+                Some(LinearRegressionSGVB::new(
+                    vb.pp("polygenic"),
+                    x_design.clone(),
+                    k,
+                    poly_prior,
+                    sgvb_config,
+                )?)
+            } else {
+                None
+            };
 
         let mut optimizer = AdamW::new_lr(varmap.all_vars(), config.learning_rate)?;
         let mut elbo_buffer: VecDeque<f32> = VecDeque::with_capacity(config.elbo_window);
@@ -560,8 +576,13 @@ pub fn fit_block_rss(
         for _iter in 0..config.num_iterations {
             // No minibatch needed: K << N, design is already compact
             let gen_sample = genetic.local_reparam_sample(config.num_sgvb_samples, &x_design)?;
-            let intercept_sample = intercept_model.local_reparam_sample(config.num_sgvb_samples)?;
-            let loss = samples_local_reparam_loss(&[gen_sample, intercept_sample], &rss, 1.0)?;
+
+            let mut samples = vec![gen_sample];
+            if let Some(ref pm) = polygenic_model {
+                samples.push(pm.local_reparam_sample(config.num_sgvb_samples)?);
+            }
+
+            let loss = samples_local_reparam_loss(&samples, &rss, 1.0)?;
 
             optimizer.backward_step(&loss)?;
 

@@ -455,12 +455,8 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         feature_selections: &feature_selections,
         stop: &stop,
     };
-    let scores = train_encoder_decoder_progressive(
-        &collapsed_levels,
-        &encoder,
-        &decoder,
-        &train_config,
-    )?;
+    let scores =
+        train_encoder_decoder_progressive(&collapsed_levels, &encoder, &decoder, &train_config)?;
 
     info!("Writing down the model parameters");
 
@@ -813,7 +809,10 @@ where
         level_epochs.iter().sum::<usize>()
     );
 
-    let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.args.learning_rate as f64)?;
+    let mut adam = AdamW::new_lr(
+        config.parameters.all_vars(),
+        config.args.learning_rate as f64,
+    )?;
 
     let total_actual_epochs: usize = level_epochs.iter().sum();
     let pb = ProgressBar::new(total_actual_epochs as u64);

@@ -533,8 +533,15 @@ impl TreeTopicDecoder {
     /// After initialization, call `update_profiles()` to switch to topic-space
     /// profiles before the first E-step.
     pub fn from_pseudobulk(pb_ns: &[f32], config: &PseudobulkConfig) -> Self {
-        let pb_profiles = GeneProfileStore::from_pseudobulk(pb_ns, config.n_samples, config.n_genes);
-        let mut td = Self::new(pb_profiles, config.n_modules, config.a0, config.b0, config.seed);
+        let pb_profiles =
+            GeneProfileStore::from_pseudobulk(pb_ns, config.n_samples, config.n_genes);
+        let mut td = Self::new(
+            pb_profiles,
+            config.n_modules,
+            config.a0,
+            config.b0,
+            config.seed,
+        );
         td.gibbs_sweep_parallel(config.gibbs_sweeps);
         td.greedy_sweep(config.greedy_sweeps);
         td
