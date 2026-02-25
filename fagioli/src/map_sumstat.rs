@@ -11,7 +11,9 @@ use rust_htslib::tpool::ThreadPool;
 
 use fagioli::genotype::{BedReader, GenomicRegion, GenotypeMatrix, GenotypeReader};
 use fagioli::io::results::{write_parameters, write_variant_results, VariantRow};
-use fagioli::sgvb::{fit_block_rss, BlockFitResult, ComputeDevice, FitConfig, ModelType};
+use fagioli::sgvb::{
+    fit_block_rss, BlockFitResult, BlockFitResultDetailed, ComputeDevice, FitConfig, ModelType,
+};
 use fagioli::summary_stats::{
     estimate_ld_blocks, load_ld_blocks_from_file, read_sumstat_zscores_with_n, LdBlock,
     LdBlockParams,
@@ -127,7 +129,7 @@ pub struct MapSumstatArgs {
 
     #[arg(
         long,
-        default_value = "0.01,0.05,0.1,0.2,0.5,1.0",
+        default_value = "0.05,0.1,0.15,0.2,0.3,0.5",
         help = "Comma-separated prior variances for coordinate search"
     )]
     pub prior_var: String,
@@ -174,6 +176,13 @@ pub struct MapSumstatArgs {
     )]
     pub sigma2_inf: f32,
 
+    #[arg(
+        long,
+        default_value = "1.0",
+        help = "Prior alpha for SuSiE PIP prior (each SNP gets prior_alpha/p)"
+    )]
+    pub prior_alpha: f64,
+
     // ── Device ───────────────────────────────────────────────────────────
     #[arg(
         long,
@@ -194,7 +203,11 @@ pub struct MapSumstatArgs {
     pub jobs: usize,
 
     // ── Z-score adjustments ─────────────────────────────────────────────
-    #[arg(long, default_value_t = false, help = "Disable PVE adjustment on z-scores")]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Disable PVE adjustment on z-scores"
+    )]
     pub no_pve_adjust: bool,
 
     #[arg(
@@ -203,6 +216,13 @@ pub struct MapSumstatArgs {
         help = "Disable local LDSC intercept correction per block"
     )]
     pub no_ldsc_intercept: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Use per-block prior selection instead of global (default is global)"
+    )]
+    pub local_prior: bool,
 
     // ── Misc ─────────────────────────────────────────────────────────────
     #[arg(long, default_value = "42", help = "Random seed")]
@@ -367,6 +387,7 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         seed: args.seed,
         ml_block_size: args.ml_block_size,
         sigma2_inf: args.sigma2_inf,
+        prior_alpha: args.prior_alpha,
     };
 
     info!(
@@ -380,14 +401,15 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         num_blocks, num_jobs
     );
 
-    let fit_block_fn = |(block_idx, block): (usize, &LdBlock)| -> (usize, BlockFitResult) {
+    let fit_block_fn = |(block_idx, block): (usize, &LdBlock)| -> (usize, BlockFitResultDetailed) {
         let block_m = block.num_snps();
+        let num_priors = fit_config.prior_vars.len();
         if block_m < 10 {
-            let empty = BlockFitResult {
-                pip: DMatrix::<f32>::zeros(block_m, t),
-                effect_mean: DMatrix::<f32>::zeros(block_m, t),
-                effect_std: DMatrix::<f32>::zeros(block_m, t),
-                avg_elbo: 0.0,
+            let empty = BlockFitResultDetailed {
+                per_prior_elbos: vec![0.0; num_priors],
+                per_prior_pips: vec![DMatrix::<f32>::zeros(block_m, t); num_priors],
+                per_prior_effects: vec![DMatrix::<f32>::zeros(block_m, t); num_priors],
+                per_prior_stds: vec![DMatrix::<f32>::zeros(block_m, t); num_priors],
             };
             return (block_idx, empty);
         }
@@ -420,11 +442,11 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         )
         .unwrap_or_else(|e| {
             log::warn!("Block {} failed: {}, using zeros", block_idx, e);
-            BlockFitResult {
-                pip: DMatrix::<f32>::zeros(block_m, t),
-                effect_mean: DMatrix::<f32>::zeros(block_m, t),
-                effect_std: DMatrix::<f32>::zeros(block_m, t),
-                avg_elbo: f32::NEG_INFINITY,
+            BlockFitResultDetailed {
+                per_prior_elbos: vec![f32::NEG_INFINITY; num_priors],
+                per_prior_pips: vec![DMatrix::<f32>::zeros(block_m, t); num_priors],
+                per_prior_effects: vec![DMatrix::<f32>::zeros(block_m, t); num_priors],
+                per_prior_stds: vec![DMatrix::<f32>::zeros(block_m, t); num_priors],
             }
         });
 
@@ -433,43 +455,13 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
             block_idx + 1,
             num_blocks,
             block_m,
-            result.avg_elbo,
+            result.best_result().avg_elbo,
         );
-
-        // Report top significant SNPs (PIP >= 0.7)
-        {
-            let mut hits: Vec<(f32, usize, usize)> = Vec::new();
-            for snp_j in 0..block_m {
-                for trait_k in 0..t {
-                    let pip = result.pip[(snp_j, trait_k)];
-                    if pip >= 0.7 {
-                        hits.push((pip, snp_j, trait_k));
-                    }
-                }
-            }
-            if !hits.is_empty() {
-                hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-                let n_show = hits.len().min(5);
-                for &(pip, snp_j, trait_k) in &hits[..n_show] {
-                    let global_snp = block.snp_start + snp_j;
-                    let snp_id = &geno.snp_ids[global_snp];
-                    let z = zscores[(global_snp, trait_k)];
-                    let eff = result.effect_mean[(snp_j, trait_k)];
-                    info!(
-                        "  ** {}: trait={}, pip={:.4}, z={:.2}, effect={:.4}",
-                        snp_id, trait_k, pip, z, eff,
-                    );
-                }
-                if hits.len() > 5 {
-                    info!("  ... and {} more with pip >= 0.7", hits.len() - 5);
-                }
-            }
-        }
 
         (block_idx, result)
     };
 
-    let block_results: Vec<(usize, BlockFitResult)> = if num_jobs <= 1 {
+    let block_results: Vec<(usize, BlockFitResultDetailed)> = if num_jobs <= 1 {
         blocks.iter().enumerate().map(fit_block_fn).collect()
     } else {
         let pool = rayon::ThreadPoolBuilder::new()
@@ -478,12 +470,110 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         pool.install(|| blocks.par_iter().enumerate().map(fit_block_fn).collect())
     };
 
-    // ── Step 6: Write results ─────────────────────────────────────────────
     // Sort by block index for deterministic output
     let mut sorted_results = block_results;
     sorted_results.sort_by_key(|(idx, _)| *idx);
 
-    let variant_rows = build_sumstat_variant_rows(&sorted_results, &blocks, &zscores, t);
+    // ── Step 6: Prior selection via ELBO argmax ─────────────────────────
+    let num_priors = fit_config.prior_vars.len();
+
+    let globally_averaged: Vec<(usize, BlockFitResult)> = if !args.local_prior {
+        // Global: sum ELBOs across all blocks, pick single best prior_var
+        let mut global_elbos = vec![0.0f32; num_priors];
+        for (_idx, detailed) in &sorted_results {
+            for (j, &e) in detailed.per_prior_elbos.iter().enumerate() {
+                global_elbos[j] += e;
+            }
+        }
+        let best_idx = global_elbos
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        info!(
+            "Global prior: prior_var={:.3} (total_elbo={:.1}), all: {:?}",
+            fit_config.prior_vars[best_idx],
+            global_elbos[best_idx],
+            fit_config
+                .prior_vars
+                .iter()
+                .zip(global_elbos.iter())
+                .map(|(v, e)| format!("{:.3}:{:.1}", v, e))
+                .collect::<Vec<_>>()
+        );
+        sorted_results
+            .iter()
+            .map(|(idx, d)| {
+                (
+                    *idx,
+                    BlockFitResult {
+                        pip: d.per_prior_pips[best_idx].clone(),
+                        effect_mean: d.per_prior_effects[best_idx].clone(),
+                        effect_std: d.per_prior_stds[best_idx].clone(),
+                        avg_elbo: d.per_prior_elbos[best_idx],
+                    },
+                )
+            })
+            .collect()
+    } else {
+        // Local (default): each block picks its own best prior_var by ELBO argmax
+        sorted_results
+            .iter()
+            .map(|(idx, d)| {
+                let best_idx = d
+                    .per_prior_elbos
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                (
+                    *idx,
+                    BlockFitResult {
+                        pip: d.per_prior_pips[best_idx].clone(),
+                        effect_mean: d.per_prior_effects[best_idx].clone(),
+                        effect_std: d.per_prior_stds[best_idx].clone(),
+                        avg_elbo: d.per_prior_elbos[best_idx],
+                    },
+                )
+            })
+            .collect()
+    };
+
+    // Report top hits from globally averaged results
+    for (block_idx, result) in &globally_averaged {
+        let block = &blocks[*block_idx];
+        let block_m = block.num_snps();
+        let mut hits: Vec<(f32, usize, usize)> = Vec::new();
+        for snp_j in 0..block_m {
+            for trait_k in 0..t {
+                let pip = result.pip[(snp_j, trait_k)];
+                if pip >= 0.7 {
+                    hits.push((pip, snp_j, trait_k));
+                }
+            }
+        }
+        if !hits.is_empty() {
+            hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            let n_show = hits.len().min(5);
+            for &(pip, snp_j, trait_k) in &hits[..n_show] {
+                let global_snp = block.snp_start + snp_j;
+                let snp_id = &geno.snp_ids[global_snp];
+                let z = zscores[(global_snp, trait_k)];
+                let eff = result.effect_mean[(snp_j, trait_k)];
+                info!(
+                    "  ** {}: trait={}, pip={:.4}, z={:.2}, effect={:.4}",
+                    snp_id, trait_k, pip, z, eff,
+                );
+            }
+            if hits.len() > 5 {
+                info!("  ... and {} more with pip >= 0.7", hits.len() - 5);
+            }
+        }
+    }
+
+    let variant_rows = build_sumstat_variant_rows(&globally_averaged, &blocks, &zscores, t);
     write_variant_results(
         &format!("{}.results.bed.gz", args.output),
         &["trait_idx"],
