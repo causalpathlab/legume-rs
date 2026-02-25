@@ -167,6 +167,13 @@ pub struct MapSumstatArgs {
     )]
     pub ml_block_size: usize,
 
+    #[arg(
+        long,
+        default_value = "0.0",
+        help = "Infinitesimal prior variance for polygenic background (0 = off, scaled by 1/p internally)"
+    )]
+    pub sigma2_inf: f32,
+
     // ── Device ───────────────────────────────────────────────────────────
     #[arg(
         long,
@@ -319,11 +326,12 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         elbo_window: args.elbo_window,
         seed: args.seed,
         ml_block_size: args.ml_block_size,
+        sigma2_inf: args.sigma2_inf,
     };
 
     info!(
-        "Model: {:?}, L={}, prior_vars={:?}",
-        model_type, args.num_components, &fit_config.prior_vars
+        "Model: {:?}, L={}, prior_vars={:?}, σ²_inf={:.2e}",
+        model_type, args.num_components, &fit_config.prior_vars, args.sigma2_inf,
     );
 
     // ── Step 5: Per-block RSS fine-mapping ──────────────────────────────
@@ -465,6 +473,7 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         "max_rank": args.max_rank,
         "lambda": args.lambda.unwrap_or(0.1 / args.max_rank as f64),
         "seed": args.seed,
+        "sigma2_inf": args.sigma2_inf,
     });
     write_parameters(&format!("{}.parameters.json", args.output), &params)?;
 

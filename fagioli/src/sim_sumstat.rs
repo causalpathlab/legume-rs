@@ -59,16 +59,23 @@ pub struct SimSumstatArgs {
     #[arg(
         long,
         default_value = "0.4",
-        help = "Heritability (genetic variance proportion)"
+        help = "Sparse heritability (genetic variance from causal SNPs)"
     )]
-    pub genetic_variance: f32,
+    pub h2_sparse: f32,
 
     #[arg(
         long,
-        default_value = "0.3",
-        help = "Probability a block contains causal SNPs"
+        default_value = "0.0",
+        help = "Polygenic heritability (dense infinitesimal effects on all SNPs)"
     )]
-    pub causal_block_density: f32,
+    pub h2_polygenic: f32,
+
+    #[arg(
+        long,
+        default_value = "1",
+        help = "Number of LD blocks that contain causal SNPs"
+    )]
+    pub num_causal_blocks: usize,
 
     // ── Confounder parameters ────────────────────────────────────────────
     #[arg(
@@ -184,25 +191,22 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
     write_ld_blocks(&blocks_file, &blocks, Some(&tpool))?;
 
     // ── Step 3: Pass 1 — Build phenotypes ────────────────────────────────
-    // Determine which blocks are causal
+    // Select causal blocks: pick num_causal_blocks blocks at random
     let mut rng = rand::rngs::StdRng::seed_from_u64(args.seed + SEED_EFFECTS);
-    let causal_block_mask: Vec<bool> = (0..num_blocks)
-        .map(|_| rand::Rng::random_bool(&mut rng, args.causal_block_density as f64))
+    let min_snps = args.num_shared_causal + args.num_independent_causal;
+    let mut eligible: Vec<usize> = (0..num_blocks)
+        .filter(|&i| blocks[i].num_snps() >= min_snps)
         .collect();
 
-    let num_causal_blocks = causal_block_mask.iter().filter(|&&x| x).count();
+    use rand::seq::SliceRandom;
+    eligible.shuffle(&mut rng);
+    let num_causal_blocks = args.num_causal_blocks.min(eligible.len());
+    let causal_block_indices: Vec<usize> = eligible.into_iter().take(num_causal_blocks).collect();
+
     info!(
-        "{} of {} blocks contain causal SNPs (density={:.2})",
-        num_causal_blocks, num_blocks, args.causal_block_density
+        "{} of {} blocks contain causal SNPs",
+        num_causal_blocks, num_blocks,
     );
-
-    // Collect causal block indices for parallel processing
-    let causal_block_indices: Vec<usize> = (0..num_blocks)
-        .filter(|&i| {
-            causal_block_mask[i]
-                && blocks[i].num_snps() >= args.num_shared_causal + args.num_independent_causal
-        })
-        .collect();
 
     // Pass 1: Parallel computation of per-block genetic values
     let block_results: Vec<(usize, CellTypeGeneticEffects, DMatrix<f32>)> = causal_block_indices
@@ -217,7 +221,7 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
                 t,
                 args.num_shared_causal,
                 args.num_independent_causal,
-                args.genetic_variance / num_causal_blocks.max(1) as f32,
+                args.h2_sparse / num_causal_blocks.max(1) as f32,
                 block_seed,
             )
             .expect("Failed to sample genetic effects");
@@ -249,6 +253,29 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
         block_effects.len()
     );
 
+    // ── Step 3b: Polygenic effects (dense infinitesimal) ─────────────────
+    let g_poly = if args.h2_polygenic > 0.0 {
+        info!(
+            "Generating polygenic effects: h2_poly={:.3}, sigma2/p={:.2e}",
+            args.h2_polygenic,
+            1.0 / m as f64,
+        );
+        let mut rng_poly = rand::rngs::StdRng::seed_from_u64(args.seed + SEED_EFFECTS + 999999);
+        let normal = rand_distr::Normal::new(0.0f32, (1.0 / m as f32).sqrt()).unwrap();
+
+        // beta_poly: p x T, each element ~ N(0, 1/p)
+        let beta_poly = DMatrix::from_fn(m, t, |_, _| {
+            rand_distr::Distribution::sample(&normal, &mut rng_poly)
+        });
+
+        // G_poly = X * beta_poly (N x T)
+        let g = &geno.genotypes * &beta_poly;
+        info!("Polygenic genetic values: {} x {}", g.nrows(), g.ncols());
+        Some(g)
+    } else {
+        None
+    };
+
     // Generate confounders
     let conf_params = ConfounderParams {
         num_confounders: args.num_confounders,
@@ -264,14 +291,29 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
     } else {
         0.0
     };
-    let phenotypes = compose_phenotype(
-        &g_total,
-        &confounder_matrix,
-        args.genetic_variance,
-        pve_conf,
-        t,
-        args.seed + SEED_PHENOTYPE,
-    )?;
+
+    let phenotypes = if let Some(ref gp) = g_poly {
+        // Manual composition: separate h2 for sparse and polygenic
+        compose_phenotype_with_polygenic(
+            &g_total,
+            gp,
+            &confounder_matrix,
+            args.h2_sparse,
+            args.h2_polygenic,
+            pve_conf,
+            t,
+            args.seed + SEED_PHENOTYPE,
+        )?
+    } else {
+        compose_phenotype(
+            &g_total,
+            &confounder_matrix,
+            args.h2_sparse,
+            pve_conf,
+            t,
+            args.seed + SEED_PHENOTYPE,
+        )?
+    };
 
     info!(
         "Phenotype matrix: {} x {}",
@@ -376,8 +418,8 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
         "num_causal_blocks": num_causal_blocks,
         "num_shared_causal_per_block": args.num_shared_causal,
         "num_independent_causal_per_block": args.num_independent_causal,
-        "genetic_variance": args.genetic_variance,
-        "causal_block_density": args.causal_block_density,
+        "h2_sparse": args.h2_sparse,
+        "h2_polygenic": args.h2_polygenic,
         "num_confounders": args.num_confounders,
         "num_hidden_factors": args.num_hidden_factors,
         "pve_confounders": pve_conf,
@@ -456,4 +498,81 @@ fn compute_genetic_values(
     }
 
     g
+}
+
+/// Compose phenotype with separate sparse and polygenic genetic components.
+///
+/// Y_t = sqrt(h2_sparse) * std(G_sparse_t) + sqrt(h2_poly) * std(G_poly_t)
+///     + sqrt(pve_conf) * std(C * gamma_t) + sqrt(pve_noise) * std(eps_t)
+#[allow(clippy::too_many_arguments)]
+fn compose_phenotype_with_polygenic(
+    g_sparse: &DMatrix<f32>,
+    g_poly: &DMatrix<f32>,
+    confounder_matrix: &DMatrix<f32>,
+    h2_sparse: f32,
+    h2_poly: f32,
+    pve_conf: f32,
+    num_traits: usize,
+    seed: u64,
+) -> Result<DMatrix<f32>> {
+    use matrix_util::traits::{MatOps, SampleOps};
+    use rand_distr::{Distribution, Normal};
+
+    let n = g_sparse.nrows();
+    let t = num_traits;
+
+    let h2_total = h2_sparse + h2_poly;
+    if h2_total + pve_conf > 1.0 + 1e-6 {
+        anyhow::bail!(
+            "h2_sparse ({}) + h2_poly ({}) + pve_conf ({}) cannot exceed 1.0",
+            h2_sparse,
+            h2_poly,
+            pve_conf,
+        );
+    }
+    let pve_noise = (1.0 - h2_total - pve_conf).max(0.0);
+
+    info!(
+        "Composing phenotype: h2_sparse={:.3}, h2_poly={:.3}, pve_conf={:.3}, pve_noise={:.3}",
+        h2_sparse, h2_poly, pve_conf, pve_noise
+    );
+
+    // Standardize and scale sparse genetic values
+    let mut gs = g_sparse.clone();
+    gs.scale_columns_inplace();
+    gs *= h2_sparse.sqrt();
+
+    // Standardize and scale polygenic genetic values
+    let mut gp = g_poly.clone();
+    gp.scale_columns_inplace();
+    gp *= h2_poly.sqrt();
+
+    // Confounder contribution
+    let mut conf_component = DMatrix::zeros(n, t);
+    if pve_conf > 0.0 && confounder_matrix.ncols() > 0 {
+        let l = confounder_matrix.ncols();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let normal = Normal::new(0.0, (1.0 / l as f64).sqrt()).unwrap();
+
+        let gamma = DMatrix::from_fn(l, t, |_, _| normal.sample(&mut rng) as f32);
+        conf_component = confounder_matrix * gamma;
+        conf_component.scale_columns_inplace();
+        conf_component *= pve_conf.sqrt();
+    }
+
+    // Noise
+    let mut eps = DMatrix::<f32>::rnorm(n, t);
+    eps.scale_columns_inplace();
+    eps *= pve_noise.sqrt();
+
+    // Combine: Y = G_sparse + G_poly + C + eps
+    let mut y = gs;
+    for j in 0..t {
+        for i in 0..n {
+            y[(i, j)] += gp[(i, j)] + conf_component[(i, j)] + eps[(i, j)];
+        }
+    }
+
+    info!("Composed phenotype matrix: {} x {}", y.nrows(), y.ncols());
+    Ok(y)
 }

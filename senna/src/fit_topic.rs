@@ -631,12 +631,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 decoder: Some(&decoder),
                 refine_config: refine_config.as_ref(),
             };
-            let z_nk = evaluate_latent_by_encoder(
-                &data_vec,
-                &encoder,
-                finest_collapsed,
-                &eval_config,
-            )?;
+            let z_nk =
+                evaluate_latent_by_encoder(&data_vec, &encoder, finest_collapsed, &eval_config)?;
 
             (scores, z_nk)
         }
@@ -678,12 +674,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 decoder: Some(&decoder),
                 refine_config: refine_config.as_ref(),
             };
-            let z_nk = evaluate_latent_by_encoder(
-                &data_vec,
-                &encoder,
-                finest_collapsed,
-                &eval_config,
-            )?;
+            let z_nk =
+                evaluate_latent_by_encoder(&data_vec, &encoder, finest_collapsed, &eval_config)?;
 
             (scores, z_nk)
         }
@@ -724,12 +716,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 decoder: Some(&decoder),
                 refine_config: refine_config.as_ref(),
             };
-            let z_nk = evaluate_latent_by_encoder(
-                &data_vec,
-                &encoder,
-                finest_collapsed,
-                &eval_config,
-            )?;
+            let z_nk =
+                evaluate_latent_by_encoder(&data_vec, &encoder, finest_collapsed, &eval_config)?;
 
             (scores, z_nk)
         }
@@ -841,7 +829,10 @@ where
         level_epochs.iter().sum::<usize>()
     );
 
-    let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.args.learning_rate as f64)?;
+    let mut adam = AdamW::new_lr(
+        config.parameters.all_vars(),
+        config.args.learning_rate as f64,
+    )?;
 
     let total_actual_epochs: usize = level_epochs.iter().sum();
     let pb = ProgressBar::new(total_actual_epochs as u64);
@@ -1046,18 +1037,8 @@ where
 
     let eval_block = |block| -> anyhow::Result<(usize, Mat)> {
         match config.adj_method {
-            AdjMethod::Residual => evaluate_with_residuals(
-                block,
-                data_vec,
-                encoder,
-                &block_config,
-            ),
-            AdjMethod::Batch => evaluate_with_batch(
-                block,
-                data_vec,
-                encoder,
-                &block_config,
-            ),
+            AdjMethod::Residual => evaluate_with_residuals(block, data_vec, encoder, &block_config),
+            AdjMethod::Batch => evaluate_with_batch(block, data_vec, encoder, &block_config),
         }
     };
 
