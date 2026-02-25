@@ -348,6 +348,8 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
         &geno.snp_ids,
         &geno.chromosomes,
         &geno.positions,
+        &geno.allele1,
+        &geno.allele2,
         n,
         Some(&tpool),
     )?;

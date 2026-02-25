@@ -272,7 +272,14 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
     info!("Reference panel: {} individuals x {} SNPs", n, m);
 
     // ── Step 2: Read summary statistics ───────────────────────────────────
-    let (zscores, median_n) = read_sumstat_zscores_with_n(&args.sumstat_file, &geno.snp_ids)?;
+    let (zscores, median_n) = read_sumstat_zscores_with_n(
+        &args.sumstat_file,
+        &geno.snp_ids,
+        &geno.chromosomes,
+        &geno.positions,
+        &geno.allele1,
+        &geno.allele2,
+    )?;
     let t = zscores.ncols();
     info!(
         "Z-scores: {} SNPs x {} traits, median N={}",
