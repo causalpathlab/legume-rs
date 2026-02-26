@@ -99,8 +99,7 @@ impl SusieVar {
     /// # Returns
     /// Selection probabilities, shape (L, p, k)
     pub fn alpha(&self) -> Result<Tensor> {
-        // softmax over dim 1 (the p dimension)
-        candle_nn::ops::softmax(&self.logits, 1)
+        self.log_alpha()?.exp()
     }
 
     /// Get log selection probabilities log(α) = log_softmax(logits, dim=1).
