@@ -83,14 +83,24 @@ impl BiSusieVar {
         })
     }
 
+    /// Get predictor log-selection probabilities log(α_p).
+    pub fn log_alpha_predictor(&self) -> Result<Tensor> {
+        candle_nn::ops::log_softmax(&self.logits_predictor, 1)
+    }
+
+    /// Get outcome log-selection probabilities log(α_k).
+    pub fn log_alpha_outcome(&self) -> Result<Tensor> {
+        candle_nn::ops::log_softmax(&self.logits_outcome, 1)
+    }
+
     /// Get predictor selection probabilities α_p.
     pub fn alpha_predictor(&self) -> Result<Tensor> {
-        candle_nn::ops::softmax(&self.logits_predictor, 1)
+        self.log_alpha_predictor()?.exp()
     }
 
     /// Get outcome selection probabilities α_k.
     pub fn alpha_outcome(&self) -> Result<Tensor> {
-        candle_nn::ops::softmax(&self.logits_outcome, 1)
+        self.log_alpha_outcome()?.exp()
     }
 
     /// Get joint selection probabilities for each (predictor, outcome) pair per component.
