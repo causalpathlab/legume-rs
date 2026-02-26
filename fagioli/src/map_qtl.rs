@@ -118,7 +118,7 @@ pub struct MapQtlArgs {
 
     #[arg(
         long,
-        default_value = "0.05,0.1,0.15,0.2,0.3,0.5",
+        default_value = "0.05,0.1,0.12,0.15,0.18,0.2,0.25,0.3,0.5",
         help = "Comma-separated prior variances for coordinate search"
     )]
     pub prior_var: String,

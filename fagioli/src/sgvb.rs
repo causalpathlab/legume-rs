@@ -90,7 +90,7 @@ impl Default for FitConfig {
             learning_rate: 0.01,
             num_iterations: 500,
             batch_size: 1000,
-            prior_vars: vec![0.05, 0.1, 0.15, 0.2, 0.3, 0.5],
+            prior_vars: vec![0.05, 0.1, 0.12, 0.15, 0.18, 0.2, 0.25, 0.3, 0.5],
             elbo_window: 50,
             seed: 42,
             ml_block_size: 50,
