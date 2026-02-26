@@ -475,6 +475,57 @@ impl GeneticModel {
     }
 }
 
+/// Estimate per-trait LDSC h² (slope) for a single LD block.
+///
+/// Performs rSVD on the block genotypes and regresses (V'z)²_k on d²_k.
+/// Since d²_k are eigenvalues of R = X'X/N and E[(V'z)²_k] = N·h²·d²_k + a,
+/// the raw slope is N·h²_block. We divide by N to return h²_block per trait.
+/// Returns zeros if K <= 2.
+pub fn estimate_block_h2(
+    x_block: &DMatrix<f32>,
+    z_block: &DMatrix<f32>,
+    max_rank: usize,
+    lambda: f64,
+    device: &Device,
+) -> Result<Vec<f32>> {
+    let n = x_block.nrows() as f32;
+    let k = z_block.ncols();
+    let x_tensor = x_block.to_tensor(device)?;
+    let z_tensor = z_block.to_tensor(device)?;
+
+    let svd = RssSvd::from_genotypes(&x_tensor, max_rank, lambda, device)?;
+    let kk = svd.effective_rank();
+
+    if kk <= 2 {
+        return Ok(vec![0.0; k]);
+    }
+
+    let vt = svd.v_mat().t()?;
+    let vt_z = vt.matmul(&z_tensor)?;
+
+    let d_vals: Vec<f32> = svd.singular_values().to_vec1()?;
+    let d_sq: Vec<f32> = d_vals.iter().map(|&d| d * d).collect();
+
+    let vt_z_data: Vec<f32> = vt_z.flatten_all()?.to_vec1()?;
+    let y_raw: Vec<Vec<f32>> = (0..kk)
+        .map(|kk_i| (0..k).map(|tt| vt_z_data[kk_i * k + tt]).collect())
+        .collect();
+
+    let (_intercepts, slopes) = RssSvd::estimate_ldsc_intercept(&d_sq, &y_raw, k);
+    // Divide by N: raw slope = N * h²_block
+    Ok(slopes.iter().map(|&s| (s / n).max(0.0)).collect())
+}
+
+/// Build an adaptive prior_var grid centered on `h2 / num_components`.
+pub fn adaptive_prior_grid(h2_estimate: f32, num_components: usize) -> Vec<f32> {
+    let center = (h2_estimate / num_components as f32).max(0.01);
+    let multipliers = [0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0];
+    let mut grid: Vec<f32> = multipliers.iter().map(|&m| center * m).collect();
+    // Clamp to reasonable range
+    grid.iter_mut().for_each(|v| *v = v.clamp(0.001, 10.0));
+    grid
+}
+
 /// Fit a fine-mapping model for a single LD block using RSS likelihood.
 ///
 /// Uses the eigenspace projection approach (Zhu & Stephens 2017, YPARK/zqtl):
@@ -482,15 +533,7 @@ impl GeneticModel {
 /// avoiding explicit R = X'X/n and operating in the efficient K-space.
 ///
 /// Model averaging is performed over the prior_var grid.
-/// When `config.sigma2_inf > 0`, an additional dense polygenic component
-/// with fixed prior variance σ²_inf / p is included.
-///
-/// - `x_block`: Standardized genotypes (N × p_block).
-/// - `z_block`: Z-scores for this block (p_block × T).
-/// - `config`: Fit configuration.
-/// - `max_rank`: Maximum rank for rSVD.
-/// - `lambda`: Regularization for D̃ = √(D² + λ).
-/// - `ldsc_intercept`: If true, estimate per-trait LDSC intercept and rescale.
+/// When `config.sigma2_inf > 0`, an additional intercept component is included.
 pub fn fit_block_rss(
     x_block: &DMatrix<f32>,
     z_block: &DMatrix<f32>,
