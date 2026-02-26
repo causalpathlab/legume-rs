@@ -12,7 +12,8 @@ use rust_htslib::tpool::ThreadPool;
 use fagioli::genotype::{BedReader, GenomicRegion, GenotypeMatrix, GenotypeReader};
 use fagioli::io::results::{write_parameters, write_variant_results, VariantRow};
 use fagioli::sgvb::{
-    fit_block_rss, BlockFitResult, BlockFitResultDetailed, ComputeDevice, FitConfig, ModelType,
+    adaptive_prior_grid, estimate_block_h2, fit_block_rss, BlockFitResult, BlockFitResultDetailed,
+    ComputeDevice, FitConfig, ModelType,
 };
 use fagioli::summary_stats::{
     estimate_ld_blocks, load_ld_blocks_from_file, read_sumstat_zscores_with_n, LdBlock,
@@ -129,8 +130,15 @@ pub struct MapSumstatArgs {
 
     #[arg(
         long,
-        default_value = "0.05,0.1,0.12,0.15,0.18,0.2,0.25,0.3,0.5",
-        help = "Comma-separated prior variances for coordinate search"
+        default_value = "",
+        help = "Prior variances for grid search (comma-separated)",
+        long_help = "Comma-separated prior variances for effect size grid search.\n\
+            If empty (default), an adaptive grid is built from LDSC h² estimation:\n\
+            the chromosome-wide h² is estimated via LDSC regression, then a grid\n\
+            of 9 points is placed around h²/L using log-spaced multipliers.\n\n\
+            Examples:\n  \
+              --prior-var 0.05,0.1,0.2,0.3,0.5\n  \
+              (empty) = adaptive from LDSC h²"
     )]
     pub prior_var: String,
 
@@ -369,11 +377,60 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
 
     // ── Step 4: Build fit config ────────────────────────────────────────
     let model_type: ModelType = args.model.parse()?;
-    let prior_vars: Vec<f32> = args
-        .prior_var
-        .split(',')
-        .map(|s| s.trim().parse::<f32>())
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let prior_vars: Vec<f32> = if args.prior_var.trim().is_empty() {
+        Vec::new()
+    } else {
+        args.prior_var
+            .split(',')
+            .map(|s| s.trim().parse::<f32>())
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+
+    // ── Step 4b: LDSC h² estimation → adaptive prior grid ──────────────
+    let prior_vars: Vec<f32> = if prior_vars.is_empty() {
+        // Estimate chromosome-wide h² via LDSC slopes across all blocks
+        let block_lambda = args.lambda.unwrap_or(0.1 / args.max_rank as f64);
+        let mut h2_sum = vec![0.0f32; t];
+        let mut n_blocks_used = 0usize;
+        for block in &blocks {
+            let block_m = block.num_snps();
+            if block_m < 10 {
+                continue;
+            }
+            let mut x_block = geno
+                .genotypes
+                .columns(block.snp_start, block_m)
+                .clone_owned();
+            x_block.scale_columns_inplace();
+            let z_block = zscores.rows(block.snp_start, block_m).clone_owned();
+            if let Ok(slopes) =
+                estimate_block_h2(&x_block, &z_block, args.max_rank, block_lambda, &device)
+            {
+                for (tt, &s) in slopes.iter().enumerate() {
+                    h2_sum[tt] += s;
+                }
+                n_blocks_used += 1;
+            }
+        }
+        let mean_h2 = if n_blocks_used > 0 {
+            h2_sum.iter().sum::<f32>() / t as f32
+        } else {
+            0.1
+        };
+        let h2_est = mean_h2.max(0.01);
+        info!(
+            "LDSC h² estimate: {:.4} (per-trait: {:?}, {} blocks)",
+            h2_est,
+            h2_sum
+                .iter()
+                .map(|h| format!("{:.4}", h))
+                .collect::<Vec<_>>(),
+            n_blocks_used,
+        );
+        adaptive_prior_grid(h2_est, args.num_components)
+    } else {
+        prior_vars
+    };
 
     let fit_config = FitConfig {
         model_type,
