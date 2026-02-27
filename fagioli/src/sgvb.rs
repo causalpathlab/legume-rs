@@ -260,7 +260,7 @@ fn fit_single_prior(
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
 
-    let prior = FixedGaussianPrior::new(prior_var);
+    let prior = FixedGaussianPrior::new(prior_var.sqrt());
     let sgvb_config = SGVBConfig {
         num_samples: config.num_sgvb_samples,
         kl_weight: 1.0,
@@ -517,12 +517,17 @@ pub fn estimate_block_h2(
 }
 
 /// Build an adaptive prior_var grid centered on `h2 / num_components`.
-pub fn adaptive_prior_grid(h2_estimate: f32, num_components: usize) -> Vec<f32> {
+///
+/// When `n` is provided (RSS mode), the grid is scaled by `n` to convert
+/// from per-SD variance to z-score–scale variance, since the RSS eigenspace
+/// model parameterises effects on the z-score scale (β_z ≈ √n · β_sd).
+pub fn adaptive_prior_grid(h2_estimate: f32, num_components: usize, n: Option<u64>) -> Vec<f32> {
     let center = (h2_estimate / num_components as f32).max(0.01);
+    let scale = n.unwrap_or(1) as f32;
     let multipliers = [0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0];
-    let mut grid: Vec<f32> = multipliers.iter().map(|&m| center * m).collect();
+    let mut grid: Vec<f32> = multipliers.iter().map(|&m| center * scale * m).collect();
     // Clamp to reasonable range
-    grid.iter_mut().for_each(|v| *v = v.clamp(0.001, 10.0));
+    grid.iter_mut().for_each(|v| *v = v.clamp(0.001, 1e6));
     grid
 }
 
@@ -617,7 +622,7 @@ pub fn fit_block_rss(
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
 
-        let prior = FixedGaussianPrior::new(prior_var);
+        let prior = FixedGaussianPrior::new(prior_var.sqrt());
         let sgvb_config = SGVBConfig {
             num_samples: config.num_sgvb_samples,
             kl_weight: 1.0,
