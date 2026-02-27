@@ -180,7 +180,7 @@ impl SoftmaxLinear {
         ops::log_softmax(&self.weight_kd, self.weight_kd.rank() - 1)?.transpose(0, 1)
     }
 
-    fn biased_weight_kd(&self) -> Result<Tensor> {
+    pub(crate) fn biased_weight_kd(&self) -> Result<Tensor> {
         match &self.bias_1d {
             Some(bias) => ops::log_softmax(
                 &self.weight_kd.broadcast_add(bias)?,
@@ -243,8 +243,8 @@ pub fn log_softmax_linear_nobias(
     vb: candle_nn::VarBuilder,
 ) -> Result<SoftmaxLinear> {
     let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
-    let ws_dk = vb.get_with_hints((out_dim, in_dim), "logits", init_ws)?;
-    Ok(SoftmaxLinear::new(ws_dk, None))
+    let ws_kd = vb.get_with_hints((in_dim, out_dim), "logits", init_ws)?;
+    Ok(SoftmaxLinear::new(ws_kd, None))
 }
 
 /////////////////////////////
