@@ -102,8 +102,8 @@ pub struct MapSumstatArgs {
     pub max_block_snps: usize,
 
     // ── RSS SVD parameters ───────────────────────────────────────────────
-    #[arg(long, default_value = "50", help = "Max rank for rSVD per LD block")]
-    pub max_rank: usize,
+    #[arg(long, help = "Max rank for rSVD per LD block (default: sample size n)")]
+    pub max_rank: Option<usize>,
 
     #[arg(
         long,
@@ -153,7 +153,7 @@ pub struct MapSumstatArgs {
     #[arg(long, default_value = "0.01", help = "AdamW learning rate")]
     pub learning_rate: f64,
 
-    #[arg(long, default_value = "500", help = "Training iterations per block")]
+    #[arg(long, default_value = "1000", help = "Training iterations per block")]
     pub num_iterations: usize,
 
     #[arg(
@@ -307,6 +307,7 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
 
     let n = geno.num_individuals();
     let m = geno.num_snps();
+    let max_rank = args.max_rank.unwrap_or(n);
 
     info!("Reference panel: {} individuals x {} SNPs", n, m);
 
@@ -389,7 +390,7 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
     // ── Step 4b: LDSC h² estimation → adaptive prior grid ──────────────
     let prior_vars: Vec<f32> = if prior_vars.is_empty() {
         // Estimate chromosome-wide h² via LDSC slopes across all blocks
-        let block_lambda = args.lambda.unwrap_or(0.1 / args.max_rank as f64);
+        let block_lambda = args.lambda.unwrap_or(0.1 / max_rank as f64);
         let mut h2_sum = vec![0.0f32; t];
         let mut n_blocks_used = 0usize;
         for block in &blocks {
@@ -404,7 +405,7 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
             x_block.scale_columns_inplace();
             let z_block = zscores.rows(block.snp_start, block_m).clone_owned();
             if let Ok(slopes) =
-                estimate_block_h2(&x_block, &z_block, args.max_rank, block_lambda, &device)
+                estimate_block_h2(&x_block, &z_block, max_rank, block_lambda, &device)
             {
                 for (tt, &s) in slopes.iter().enumerate() {
                     h2_sum[tt] += s;
@@ -427,7 +428,7 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
                 .collect::<Vec<_>>(),
             n_blocks_used,
         );
-        adaptive_prior_grid(h2_est, args.num_components)
+        adaptive_prior_grid(h2_est, args.num_components, Some(median_n))
     } else {
         prior_vars
     };
@@ -486,13 +487,13 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         block_config.seed = fit_config.seed.wrapping_add(block_idx as u64);
 
         // λ: user-specified or default 0.1/K
-        let block_lambda = args.lambda.unwrap_or(0.1 / args.max_rank as f64);
+        let block_lambda = args.lambda.unwrap_or(0.1 / max_rank as f64);
 
         let result = fit_block_rss(
             &x_block,
             &z_block,
             &block_config,
-            args.max_rank,
+            max_rank,
             block_lambda,
             &device,
             !args.no_ldsc_intercept,
@@ -658,8 +659,8 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         "num_iterations": args.num_iterations,
         "batch_size": args.batch_size,
         "elbo_window": args.elbo_window,
-        "max_rank": args.max_rank,
-        "lambda": args.lambda.unwrap_or(0.1 / args.max_rank as f64),
+        "max_rank": max_rank,
+        "lambda": args.lambda.unwrap_or(0.1 / max_rank as f64),
         "seed": args.seed,
         "sigma2_inf": args.sigma2_inf,
         "pve_adjust": !args.no_pve_adjust,
