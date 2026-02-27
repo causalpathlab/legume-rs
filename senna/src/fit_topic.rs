@@ -151,7 +151,7 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        default_value_t = 2,
+        default_value_t = 3,
         help = "Number of multi-level coarsening levels",
         long_help = "Number of multi-level coarsening levels for batch correction.\n\
 		     Higher values add intermediate refinement steps.\n\
@@ -458,13 +458,12 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
 
-    // 3. Batch-adjusted collapsing (pseudobulk)
-    let use_multilevel =
-        !args.ignore_batch_effects && nbatch > 1 && reference.is_none() && !args.no_supercell;
+    // 3. Multi-level collapsing (pseudobulk)
+    let use_multilevel = args.num_levels > 1 && !args.no_supercell;
 
     let collapsed_levels: Vec<CollapsedOut> = if use_multilevel {
         info!("Multi-level collapsing with super-cells ...");
-        data_vec.collapse_columns_multilevel_vec(
+        let mut levels = data_vec.collapse_columns_multilevel_vec(
             &proj_kn,
             &batch_membership,
             &MultilevelParams {
@@ -473,7 +472,11 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 sort_dim: args.sort_dim,
                 num_opt_iter: args.iter_opt,
             },
-        )?
+        )?;
+        // Reverse so training goes coarse→fine: coarsest (fewest samples)
+        // gets the most epochs for a warm start, finest gets brief refinement.
+        levels.reverse();
+        levels
     } else {
         let nsamp = data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
 
@@ -492,9 +495,9 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     };
 
     // For delta output and latent evaluation, use the finest level.
-    // collapsed_levels[0] is the finest (most groups), matching the group
-    // assignments stored in data_vec by assign_groups().
-    let finest_collapsed: &CollapsedOut = collapsed_levels.first().unwrap();
+    // After reversing, the finest level (most groups) is the last element,
+    // matching the group assignments stored in data_vec by assign_groups().
+    let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
 
     let batch_db = finest_collapsed.delta.as_ref();
 
@@ -844,12 +847,20 @@ where
     for (level, (collapsed, &level_ep)) in
         collapsed_levels.iter().zip(level_epochs.iter()).enumerate()
     {
+        let label = if level == 0 {
+            "coarsest"
+        } else if level + 1 == num_levels {
+            "finest"
+        } else {
+            ""
+        };
         info!(
-            "Level {}/{}: {} epochs, {} samples",
+            "Level {}/{}: {} epochs, {} samples {}",
             level + 1,
             num_levels,
             level_ep,
             collapsed.mu_observed.ncols(),
+            label,
         );
 
         for epoch in (0..level_ep).step_by(config.args.jitter_interval) {

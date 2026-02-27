@@ -1023,18 +1023,6 @@ impl MultilevelCollapsingOps for SparseIoVec {
         let num_features = self.num_rows();
         let num_batches = self.num_batches();
 
-        if num_batches < 2 {
-            // No batch effects — single-level collapsing
-            self.partition_columns_to_groups(proj_kn, Some(sort_dim), None)?;
-            let group_to_cols = self
-                .take_grouped_columns()
-                .ok_or(anyhow::anyhow!("columns not assigned"))?;
-            let num_groups = group_to_cols.len();
-            let mut stat = CollapsedStat::new(num_features, num_groups, 0);
-            self.collect_basic_stat(&mut stat)?;
-            return Ok(vec![optimize(&stat, (1.0, 1.0), opt_iter)?]);
-        }
-
         // Level dims: [finest, ..., coarsest]
         let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
 
@@ -1059,32 +1047,35 @@ impl MultilevelCollapsingOps for SparseIoVec {
             .ok_or(anyhow::anyhow!("columns not assigned"))?;
         let num_groups = group_to_cols.len();
 
-        // Collect ALL statistics once at finest level
+        // Collect statistics at finest level
         let mut fine_stat = CollapsedStat::new(num_features, num_groups, num_batches);
 
         info!(
-            "Level 1/{}: sort_dim={}, {} groups (finest — full computation)",
+            "Level 1/{}: sort_dim={}, {} groups (finest)",
             level_dims.len(),
             finest_dim,
             num_groups
         );
         self.collect_basic_stat(&mut fine_stat)?;
-        self.collect_batch_stat(&mut fine_stat)?;
 
-        // Build super-cells and match across batches (once)
-        info!("Building super-cells ...");
-        let super_cells = build_super_cells(self, proj_kn, num_features)?;
-        info!(
-            "Built {} super-cells, matching with knn={} ...",
-            super_cells.layout.cell_counts.len(),
-            knn
-        );
-        collect_matched_stat_coarse(
-            &super_cells.layout,
-            &super_cells.gene_sums,
-            knn,
-            &mut fine_stat,
-        )?;
+        // Batch correction: super-cell matching across batches
+        if num_batches >= 2 {
+            self.collect_batch_stat(&mut fine_stat)?;
+
+            info!("Building super-cells ...");
+            let super_cells = build_super_cells(self, proj_kn, num_features)?;
+            info!(
+                "Built {} super-cells, matching with knn={} ...",
+                super_cells.layout.cell_counts.len(),
+                knn
+            );
+            collect_matched_stat_coarse(
+                &super_cells.layout,
+                &super_cells.gene_sums,
+                knn,
+                &mut fine_stat,
+            )?;
+        }
 
         // Optimize finest level
         info!("Optimizing parameters ...");
@@ -1097,7 +1088,6 @@ impl MultilevelCollapsingOps for SparseIoVec {
         for (level, &level_sort_dim) in level_dims.iter().enumerate().skip(1) {
             let level_opt_iter = (opt_iter / 2).max(10);
 
-            // Compute merge mapping from previous level to this coarser level
             let (fine_to_coarse, num_coarse) =
                 compute_fine_to_coarse_mapping(&prev_group_to_cols, &fine_codes, level_sort_dim);
 
@@ -1115,7 +1105,6 @@ impl MultilevelCollapsingOps for SparseIoVec {
             info!("Optimizing parameters ...");
             results.push(optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?);
 
-            // Build coarse group_to_cols for next iteration
             let mut coarse_group_to_cols = vec![vec![]; num_coarse];
             for (fine_g, &coarse_g) in fine_to_coarse.iter().enumerate() {
                 coarse_group_to_cols[coarse_g].extend_from_slice(&prev_group_to_cols[fine_g]);

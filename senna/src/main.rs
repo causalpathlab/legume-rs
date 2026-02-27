@@ -5,6 +5,7 @@ mod feature_selection;
 mod fit_annotate_topic;
 mod fit_clustering;
 mod fit_deconv_reg;
+mod fit_indexed_topic;
 mod fit_joint_svd;
 mod fit_joint_topic;
 mod fit_knn_regression;
@@ -21,6 +22,7 @@ use embed_common::*;
 use fit_annotate_topic::*;
 use fit_clustering::*;
 use fit_deconv_reg::*;
+use fit_indexed_topic::*;
 use fit_joint_svd::*;
 use fit_joint_topic::*;
 use fit_knn_regression::*;
@@ -113,6 +115,17 @@ enum Commands {
     Topic(TopicArgs),
 
     #[command(
+        about = "Embedding data by indexed topic modelling (adaptive feature windows)",
+        long_about = "Estimate a probabilistic topic model with indexed encoder/decoder: \n\
+		      (1) Collapse sparse data while adjusting batch effects\n\
+		      (2) Estimate indexed encoder-decoder via SGD (top-K feature windows)\n\
+		      (3) Estimate latent states on the original data.\n\
+		      Uses per-sample adaptive feature selection for ~4-7x decoder speedup.\n",
+        visible_alias = "itopic"
+    )]
+    IndexedTopic(IndexedTopicArgs),
+
+    #[command(
         about = "Annotate topics using marker genes (vMF cosine similarity)",
         long_about = "Assign cell type probabilities to topics via vMF softmax on cosine similarity.\n\n\
               Modes:\n\
@@ -198,6 +211,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Topic(args) => {
             fit_topic_model(args)?;
+        }
+        Commands::IndexedTopic(args) => {
+            fit_indexed_topic_model(args)?;
         }
         Commands::JointTopic(args) => {
             fit_joint_topic_model(args)?;

@@ -366,7 +366,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         data_stack.num_types()
     );
 
-    let collapsed_levels: Vec<Vec<CollapsedOut>> = data_stack.collapse_columns_multilevel_vec(
+    let mut collapsed_levels: Vec<Vec<CollapsedOut>> = data_stack.collapse_columns_multilevel_vec(
         &proj_kn,
         batch_stack[0].as_ref(),
         &MultilevelParams {
@@ -376,11 +376,12 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             num_opt_iter: args.iter_opt,
         },
     )?;
+    // Reverse so training goes coarse→fine: coarsest (fewest samples)
+    // gets the most epochs for a warm start, finest gets brief refinement.
+    collapsed_levels.reverse();
 
-    // For delta output, n_features, and latent evaluation, use the finest level.
-    // collapsed_levels[0] is the finest (most groups), matching the group
-    // assignments stored in data_stack by assign_groups().
-    let collapsed_data_vec = collapsed_levels.first().unwrap();
+    // After reversing, the finest level (most groups) is the last element.
+    let collapsed_data_vec = collapsed_levels.last().unwrap();
 
     // 4. output batch effect information
     for (d, collapsed) in collapsed_data_vec.iter().enumerate() {
@@ -824,12 +825,20 @@ where
     for (level, (collapsed_data_vec, &level_ep)) in
         collapsed_levels.iter().zip(level_epochs.iter()).enumerate()
     {
+        let label = if level == 0 {
+            "coarsest"
+        } else if level + 1 == num_levels {
+            "finest"
+        } else {
+            ""
+        };
         info!(
-            "Level {}/{}: {} epochs, {} samples",
+            "Level {}/{}: {} epochs, {} samples {}",
             level + 1,
             num_levels,
             level_ep,
             collapsed_data_vec[0].mu_observed.ncols(),
+            label,
         );
 
         for epoch in (0..level_ep).step_by(config.args.jitter_interval) {
