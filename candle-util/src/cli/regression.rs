@@ -131,7 +131,7 @@ fn save_output<V: VariationalOutput>(
         let s = p
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid output path"))?;
-        var.to_parquet_with_names(s, (row_names, None), col_names)?;
+        var.to_melted_parquet(s, (row_names, None), (col_names, None))?;
         info!("Saved {} to {:?}", suffix, p);
     }
     Ok(())

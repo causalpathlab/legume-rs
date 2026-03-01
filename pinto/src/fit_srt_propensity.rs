@@ -305,10 +305,10 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         gamma_param.update_stat(&sum_dk, &denom_dk);
         gamma_param.calibrate();
 
-        gamma_param.to_parquet_with_names(
+        gamma_param.to_melted_parquet(
             &(args.out.to_string() + ".genes.parquet"),
             (Some(&genes), Some("gene")),
-            None,
+            (None, Some("topic")),
         )?;
     }
 
