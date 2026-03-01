@@ -158,10 +158,10 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
             })
             .collect();
 
-        gamma.to_parquet_with_names(
+        gamma.to_melted_parquet(
             &out_file,
             (Some(&gene_names), Some("gene")),
-            Some(&indv_topic_names),
+            (Some(&indv_topic_names), Some("individual_topic")),
         )?;
     }
 
@@ -187,7 +187,7 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
 
         let gene_names = data.sparse_data.row_names()?;
         let out_file = format!("{}.parquet", args.out.replace(".parquet", ""));
-        gamma.to_parquet_with_names(&out_file, (Some(&gene_names), Some("gene")), None)?;
+        gamma.to_melted_parquet(&out_file, (Some(&gene_names), Some("gene")), (None, Some("topic")))?;
     }
 
     Ok(())

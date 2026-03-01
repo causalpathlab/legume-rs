@@ -281,8 +281,8 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
 
     to_parquet(
         &tau,
-        Some(&gene_names),
-        Some(&indv_exposure_names),
+        (Some(&gene_names), Some("gene")),
+        (Some(&indv_exposure_names), Some("individual_exposure")),
         Some(&topic_names),
         &format!("{}.effect.parquet", args.out),
     )?;

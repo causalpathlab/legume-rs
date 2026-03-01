@@ -313,10 +313,10 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         let outfile = args.out.to_string() + ".delta.parquet";
         let batch_names = data_vec.batch_names();
         let gene_names = data_vec.row_names()?;
-        batch_db.to_parquet_with_names(
+        batch_db.to_melted_parquet(
             &outfile,
             (Some(&gene_names), Some("gene")),
-            batch_names.as_deref(),
+            (batch_names.as_deref(), Some("batch")),
         )?;
     }
 

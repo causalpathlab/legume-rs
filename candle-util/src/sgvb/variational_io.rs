@@ -31,16 +31,16 @@ pub trait VariationalOutput {
     fn write_all(&self, header: &str) -> Result<()>;
 
     /// Write to parquet in melted (long) format with row/column names.
-    fn to_parquet_with_names(
+    fn to_melted_parquet(
         &self,
         file_path: &str,
         row_names: (Option<&[Box<str>]>, Option<&str>),
-        column_names: Option<&[Box<str>]>,
+        column_names: (Option<&[Box<str>]>, Option<&str>),
     ) -> Result<()>;
 
     /// Write to parquet with default names
     fn to_parquet(&self, file_path: &str) -> Result<()> {
-        self.to_parquet_with_names(file_path, (None, None), None)
+        self.to_melted_parquet(file_path, (None, None), (None, None))
     }
 }
 
@@ -55,14 +55,14 @@ pub trait SparseVariationalOutput: VariationalOutput {
     /// Write all outputs including sparse-specific ones.
     fn write_all_sparse(&self, header: &str) -> Result<()>;
 
-    /// Write to parquet in melted format (delegates to to_parquet_with_names).
+    /// Write to parquet in melted format (delegates to to_melted_parquet).
     fn to_parquet_sparse(
         &self,
         file_path: &str,
         row_names: Option<&[Box<str>]>,
         column_names: Option<&[Box<str>]>,
     ) -> Result<()> {
-        self.to_parquet_with_names(file_path, (row_names, None), column_names)
+        self.to_melted_parquet(file_path, (row_names, None), (column_names, None))
     }
 }
 
@@ -138,13 +138,15 @@ fn indices_to_names(indices: &[usize], names: Option<&[Box<str>]>) -> Vec<ByteAr
 fn write_melted_parquet(
     file_path: &str,
     schema_name: &str,
+    row_title: &str,
+    col_title: &str,
     rows: &[ByteArray],
     cols: &[ByteArray],
     value_columns: &[(&str, &[f32])],
 ) -> Result<()> {
     let mut fields: Vec<(&str, ParquetType, ConvertedType)> = vec![
-        ("row", ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
-        ("column", ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
+        (row_title, ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
+        (col_title, ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
     ];
     for (name, _) in value_columns {
         fields.push((name, ParquetType::FLOAT, ConvertedType::NONE));
@@ -226,11 +228,11 @@ impl VariationalOutput for super::GaussianVar {
         self.write_std(&format!("{}.std.gz", header))
     }
 
-    fn to_parquet_with_names(
+    fn to_melted_parquet(
         &self,
         file_path: &str,
         row_names: (Option<&[Box<str>]>, Option<&str>),
-        column_names: Option<&[Box<str>]>,
+        column_names: (Option<&[Box<str>]>, Option<&str>),
     ) -> Result<()> {
         let mean = VariationalDistribution::mean(self)?;
         let std = self.std()?;
@@ -238,13 +240,14 @@ impl VariationalOutput for super::GaussianVar {
         let (mean_vals, row_idx, col_idx) = melt_tensor(&mean)?;
         let (std_vals, _, _) = melt_tensor(&std)?;
 
-        let row_names_slice = row_names.0;
-        let rows = indices_to_names(&row_idx, row_names_slice);
-        let cols = indices_to_names(&col_idx, column_names);
+        let rows = indices_to_names(&row_idx, row_names.0);
+        let cols = indices_to_names(&col_idx, column_names.0);
 
         write_melted_parquet(
             file_path,
             "GaussianVar",
+            row_names.1.unwrap_or("row"),
+            column_names.1.unwrap_or("column"),
             &rows,
             &cols,
             &[("mean", &mean_vals), ("std", &std_vals)],
@@ -274,11 +277,11 @@ impl VariationalOutput for super::SusieVar {
         self.write_std(&format!("{}.std.gz", header))
     }
 
-    fn to_parquet_with_names(
+    fn to_melted_parquet(
         &self,
         file_path: &str,
         row_names: (Option<&[Box<str>]>, Option<&str>),
-        column_names: Option<&[Box<str>]>,
+        column_names: (Option<&[Box<str>]>, Option<&str>),
     ) -> Result<()> {
         let mean = self.theta_mean()?;
         let std = VariationalDistribution::var(self)?.sqrt()?;
@@ -288,13 +291,14 @@ impl VariationalOutput for super::SusieVar {
         let (std_vals, _, _) = melt_tensor(&std)?;
         let (pip_vals, _, _) = melt_tensor(&pip)?;
 
-        let row_names_slice = row_names.0;
-        let rows = indices_to_names(&row_idx, row_names_slice);
-        let cols = indices_to_names(&col_idx, column_names);
+        let rows = indices_to_names(&row_idx, row_names.0);
+        let cols = indices_to_names(&col_idx, column_names.0);
 
         write_melted_parquet(
             file_path,
             "SusieVar",
+            row_names.1.unwrap_or("row"),
+            column_names.1.unwrap_or("column"),
             &rows,
             &cols,
             &[("mean", &mean_vals), ("std", &std_vals), ("pip", &pip_vals)],
@@ -343,11 +347,11 @@ impl VariationalOutput for super::MultiLevelSusieVar {
         self.write_std(&format!("{}.std.gz", header))
     }
 
-    fn to_parquet_with_names(
+    fn to_melted_parquet(
         &self,
         file_path: &str,
         row_names: (Option<&[Box<str>]>, Option<&str>),
-        column_names: Option<&[Box<str>]>,
+        column_names: (Option<&[Box<str>]>, Option<&str>),
     ) -> Result<()> {
         let mean = self.theta_mean()?;
         let std = VariationalDistribution::var(self)?.sqrt()?;
@@ -357,13 +361,14 @@ impl VariationalOutput for super::MultiLevelSusieVar {
         let (std_vals, _, _) = melt_tensor(&std)?;
         let (pip_vals, _, _) = melt_tensor(&pip)?;
 
-        let row_names_slice = row_names.0;
-        let rows = indices_to_names(&row_idx, row_names_slice);
-        let cols = indices_to_names(&col_idx, column_names);
+        let rows = indices_to_names(&row_idx, row_names.0);
+        let cols = indices_to_names(&col_idx, column_names.0);
 
         write_melted_parquet(
             file_path,
             "MultiLevelSusieVar",
+            row_names.1.unwrap_or("row"),
+            column_names.1.unwrap_or("column"),
             &rows,
             &cols,
             &[("mean", &mean_vals), ("std", &std_vals), ("pip", &pip_vals)],
@@ -458,10 +463,10 @@ mod tests {
 
         let dir = tempdir()?;
         let pq_path = dir.path().join("named.parquet");
-        susie.to_parquet_with_names(
+        susie.to_melted_parquet(
             pq_path.to_str().unwrap(),
             (Some(&row_names), Some("row")),
-            Some(&col_names),
+            (Some(&col_names), None),
         )?;
         assert!(pq_path.exists());
 
