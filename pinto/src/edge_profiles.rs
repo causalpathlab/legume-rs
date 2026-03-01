@@ -629,10 +629,10 @@ pub fn compute_gene_topic_stat(
     gamma_param.calibrate();
 
     let topic_names: Vec<Box<str>> = (0..k).map(|i| i.to_string().into_boxed_str()).collect();
-    gamma_param.to_parquet_with_names(
+    gamma_param.to_melted_parquet(
         &(out_prefix.to_string() + ".gene_topic.parquet"),
         (Some(&gene_names), Some("gene")),
-        Some(&topic_names),
+        (Some(&topic_names), Some("topic")),
     )?;
 
     Ok(())

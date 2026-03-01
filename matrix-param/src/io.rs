@@ -24,10 +24,14 @@ fn precompute_name_bytes(names: Option<&[Box<str>]>, count: usize) -> Vec<ByteAr
 
 /// Build parquet schema for parameter matrices.
 /// If `include_factor` is true, includes a "factor" column between "column" and "mean".
-fn build_parquet_schema(include_factor: bool) -> anyhow::Result<Arc<Type>> {
+fn build_parquet_schema(
+    row_title: &str,
+    col_title: &str,
+    include_factor: bool,
+) -> anyhow::Result<Arc<Type>> {
     let mut fields: Vec<(&str, ParquetType, ConvertedType)> = vec![
-        ("row", ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
-        ("column", ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
+        (row_title, ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
+        (col_title, ParquetType::BYTE_ARRAY, ConvertedType::UTF8),
     ];
 
     if include_factor {
@@ -84,18 +88,20 @@ where
         Ok(())
     }
 
-    fn to_parquet_with_names(
+    fn to_melted_parquet(
         &self,
         file_path: &str,
         row_names: (Option<&[Box<str>]>, Option<&str>),
-        column_names: Option<&[Box<str>]>,
+        column_names: (Option<&[Box<str>]>, Option<&str>),
     ) -> anyhow::Result<()> {
         let row_names_slice = row_names.0;
-        let schema = build_parquet_schema(false)?;
+        let row_title = row_names.1.unwrap_or("row");
+        let col_title = column_names.1.unwrap_or("column");
+        let schema = build_parquet_schema(row_title, col_title, false)?;
 
         // Pre-compute name ByteArrays once for efficient lookup
         let row_bytes = precompute_name_bytes(row_names_slice, self.nrows());
-        let col_bytes = precompute_name_bytes(column_names, self.ncols());
+        let col_bytes = precompute_name_bytes(column_names.0, self.ncols());
 
         // prepare data - single traversal for all matrices
         let mat_mean = self.posterior_mean();
@@ -187,21 +193,21 @@ where
 
     /// Write to parquet with default names
     fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
-        self.to_parquet_with_names(file_path, (None, None), None)
+        self.to_melted_parquet(file_path, (None, None), (None, None))
     }
 }
 
 /// Write down a vector of matrix parameters into one parquet file.
 ///
 /// * `parameters`: a vector of row x column parameters (factors)
-/// * `row_names`: a vector of row names
-/// * `column_names`: a vector of column names
+/// * `row_names`: (values, optional title) — title defaults to "row"
+/// * `column_names`: (values, optional title) — title defaults to "column"
 /// * `factor_names`: a vector of factor names
 /// * `file_path`
 pub fn to_parquet<Param: Inference>(
     parameters: &[Param],
-    row_names: Option<&[Box<str>]>,
-    column_names: Option<&[Box<str>]>,
+    row_names: (Option<&[Box<str>]>, Option<&str>),
+    column_names: (Option<&[Box<str>]>, Option<&str>),
     factor_names: Option<&[Box<str>]>,
     file_path: &str,
 ) -> anyhow::Result<()>
@@ -225,7 +231,9 @@ where
         ));
     }
 
-    let schema = build_parquet_schema(true)?;
+    let row_title = row_names.1.unwrap_or("row");
+    let col_title = column_names.1.unwrap_or("column");
+    let schema = build_parquet_schema(row_title, col_title, true)?;
 
     // Write data to parquet
     let file = File::create(file_path)?;
@@ -239,8 +247,8 @@ where
 
     // Pre-compute name ByteArrays once (reused across all factors)
     let first_param = &parameters[0];
-    let row_bytes = precompute_name_bytes(row_names, first_param.nrows());
-    let col_bytes = precompute_name_bytes(column_names, first_param.ncols());
+    let row_bytes = precompute_name_bytes(row_names.0, first_param.nrows());
+    let col_bytes = precompute_name_bytes(column_names.0, first_param.ncols());
 
     for (factor_idx, param) in parameters.iter().enumerate() {
         // Single traversal for all matrices
@@ -354,10 +362,10 @@ mod tests {
         let row_names: Vec<Box<str>> = vec!["r0".into(), "r1".into(), "r2".into()];
         let col_names: Vec<Box<str>> = vec!["c0".into(), "c1".into()];
 
-        gamma.to_parquet_with_names(
+        gamma.to_melted_parquet(
             file_path_str,
             (Some(row_names.as_slice()), None),
-            Some(col_names.as_slice()),
+            (Some(col_names.as_slice()), None),
         )?;
 
         // Read back and verify
@@ -508,8 +516,8 @@ mod tests {
 
         to_parquet(
             &params,
-            Some(&row_names),
-            Some(&col_names),
+            (Some(&row_names), None),
+            (Some(&col_names), None),
             Some(&factor_names),
             file_path_str,
         )?;
@@ -581,7 +589,7 @@ mod tests {
         let file_path = temp_dir.path().join("test_empty.parquet");
         let file_path_str = file_path.to_str().unwrap();
 
-        let result = to_parquet::<GammaMatrix>(&params, None, None, None, file_path_str);
+        let result = to_parquet::<GammaMatrix>(&params, (None, None), (None, None), None, file_path_str);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
     }

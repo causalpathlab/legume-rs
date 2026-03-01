@@ -106,10 +106,10 @@ pub fn pseudobulk(args: &PseudobulkArgs) -> anyhow::Result<()> {
         let out_path = format!("{}.{}.parquet", args.output, ct_name);
         info!("Writing {} to {}", ct_name, out_path);
 
-        collapsed.gamma_params[ct_idx].to_parquet_with_names(
+        collapsed.gamma_params[ct_idx].to_melted_parquet(
             &out_path,
             (Some(&collapsed.gene_names), Some("gene")),
-            Some(&collapsed.individual_ids),
+            (Some(&collapsed.individual_ids), Some("individual")),
         )?;
     }
 
