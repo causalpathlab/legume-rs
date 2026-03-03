@@ -1,0 +1,49 @@
+[package]
+name = "sprout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Interactive LLM chat interface for genomics data analysis"
+repository.workspace = true
+
+[lib]
+name = "sprout"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sprout"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace crates
+data-beans = { workspace = true }
+matrix-util = { workspace = true }
+
+# Core dependencies
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+clap = { workspace = true }
+
+# LLM inference
+tokenizers = { workspace = true }
+hf-hub = { workspace = true }
+
+# REPL
+rustyline = { workspace = true }
+
+# Progress indicators
+indicatif = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.9.1", features = ["metal", "accelerate"] }
+candle-nn = { version = "0.9.1", features = ["metal", "accelerate"] }
+candle-transformers = { version = "0.9.1", features = ["metal", "accelerate"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+candle-core = { version = "0.9.1", features = ["cuda", "cudnn"] }
+candle-nn = { version = "0.9.1", features = ["cuda"] }
+candle-transformers = { version = "0.9.1", features = ["cuda"] }
