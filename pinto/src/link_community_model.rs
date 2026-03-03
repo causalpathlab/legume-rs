@@ -58,6 +58,41 @@ impl LinkProfileStore {
         }
         LinkProfileStore::new(profiles, n, m)
     }
+
+    /// Distribute coarse super-edge profiles to fine edges.
+    ///
+    /// Each fine edge inherits the averaged profile from its super-edge:
+    /// fine_profile[e] = coarse_profile[fine_to_super[e]] / count[fine_to_super[e]]
+    ///
+    /// This preserves the total sum: Σ_e fine_profile[e] = Σ_se coarse_profile[se]
+    pub fn distribute_coarse_to_fine(
+        coarse_profiles: &LinkProfileStore,
+        fine_to_super: &[usize],
+        n_super: usize,
+    ) -> Self {
+        let n_edges = fine_to_super.len();
+        let m = coarse_profiles.m;
+
+        // Count fine edges per super-edge
+        let mut super_edge_counts = vec![0usize; n_super];
+        for &se in fine_to_super {
+            super_edge_counts[se] += 1;
+        }
+
+        // Duplicate and average coarse profiles to fine edges
+        let mut fine_profiles_vec = vec![0.0f32; n_edges * m];
+        for e in 0..n_edges {
+            let se = fine_to_super[e];
+            let count = super_edge_counts[se] as f32;
+            let coarse_prof = coarse_profiles.profile(se);
+            let base = e * m;
+            for i in 0..m {
+                fine_profiles_vec[base + i] = coarse_prof[i] / count;
+            }
+        }
+
+        LinkProfileStore::new(fine_profiles_vec, n_edges, m)
+    }
 }
 
 /// Sufficient statistics for the link community model.

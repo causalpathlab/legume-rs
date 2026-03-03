@@ -6,7 +6,7 @@
 
 use crate::edge_profiles::*;
 use crate::link_community_gibbs::{ComponentGibbsArgs, LinkGibbsSampler};
-use crate::link_community_model::LinkCommunityStats;
+use crate::link_community_model::{LinkCommunityStats, LinkProfileStore};
 use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
 use crate::srt_estimate_batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
@@ -247,9 +247,34 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         c.num_levels,
     );
 
-    // 5-6. Build edge profiles: either via gene modules or random projection
+    // 5-6. Build COARSE edge profiles first
     let gene_to_module: Option<Vec<usize>>;
-    let edge_profiles;
+    let coarse_profiles;
+    let proj_basis: Option<Mat>;
+
+    // Build super-edges at coarsest level
+    let coarsest_labels = &ml.all_cell_labels[0];
+    let mut super_edge_map: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut super_edges: Vec<(usize, usize)> = Vec::new();
+    let mut fine_to_super = Vec::with_capacity(n_edges);
+
+    for &(i, j) in edges {
+        let li = coarsest_labels[i];
+        let lj = coarsest_labels[j];
+        let key = (li.min(lj), li.max(lj));
+        let se = *super_edge_map.entry(key).or_insert_with(|| {
+            let s = super_edges.len();
+            super_edges.push(key);
+            s
+        });
+        fine_to_super.push(se);
+    }
+
+    let n_super = super_edges.len();
+    info!(
+        "Coarsest level: {} super-edges from {} fine edges",
+        n_super, n_edges
+    );
 
     if n_gm > 0 {
         // Gene module discovery via sketch + K-means
@@ -277,9 +302,11 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             max_iter: 100,
         });
 
-        info!("Building module-count edge profiles...");
-        edge_profiles = build_edge_profiles_by_module(&data_vec, edges, &g2m, n_gm, c.block_size)?;
+        info!("Building COARSE module-count edge profiles...");
+        coarse_profiles =
+            build_edge_profiles_by_module(&data_vec, &super_edges, &g2m, n_gm, c.block_size)?;
         gene_to_module = Some(g2m);
+        proj_basis = None;
     } else {
         // Skip gene modules: use random-projection edge profiles
         let mut basis = cell_proj.basis.clone();
@@ -295,32 +322,23 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         }
 
         info!(
-            "Building random-projection edge profiles (dim={})...",
+            "Building COARSE random-projection edge profiles (dim={})...",
             c.proj_dim
         );
-        edge_profiles = build_edge_profiles(&data_vec, edges, &basis, None, c.block_size)?;
+        coarse_profiles = build_edge_profiles(&data_vec, &super_edges, &basis, None, c.block_size)?;
         gene_to_module = None;
+        proj_basis = Some(basis);
     }
 
     info!(
-        "Edge profiles: {} edges × {} dims, mean size factor: {:.1}",
-        edge_profiles.n_edges,
-        edge_profiles.m,
-        edge_profiles.size_factors.iter().sum::<f32>() / edge_profiles.n_edges as f32
+        "Coarse edge profiles: {} super-edges × {} dims, mean size factor: {:.1}",
+        coarse_profiles.n_edges,
+        coarse_profiles.m,
+        coarse_profiles.size_factors.iter().sum::<f32>() / coarse_profiles.n_edges as f32
     );
 
-    // 7. Gibbs: coarsest → transfer → refine at each finer level
+    // 7. Gibbs on coarsest level
     let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(c.seed));
-
-    // Use cell labels from coarsening for edge profile coarsening
-    let coarsest_labels = &ml.all_cell_labels[0];
-    let (coarse_profiles, fine_to_super) =
-        coarsen_edge_profiles(&edge_profiles, edges, coarsest_labels);
-
-    info!(
-        "Coarsest level: {} super-edges from {} fine edges",
-        coarse_profiles.n_edges, n_edges
-    );
 
     // Random initial labels for coarsest
     let init_labels: Vec<usize> = (0..coarse_profiles.n_edges).map(|e| e % k).collect();
@@ -339,54 +357,25 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // Transfer to fine level
     let mut current_labels = transfer_labels(&fine_to_super, &coarse_stats.membership);
 
-    // Refine at finer levels
-    for level in 1..c.num_levels {
-        info!("Refining at level {}...", level);
-
-        let level_labels = &ml.all_cell_labels[level.min(ml.all_cell_labels.len() - 1)];
-        let (level_profiles, level_f2s) =
-            coarsen_edge_profiles(&edge_profiles, edges, level_labels);
-
-        // Transfer current labels to this level's super-edges (majority vote)
-        let n_super = level_profiles.n_edges;
-        let mut super_label_votes = vec![vec![0usize; k]; n_super];
-        for (fine_e, &se) in level_f2s.iter().enumerate() {
-            let c = current_labels[fine_e];
-            super_label_votes[se][c] += 1;
-        }
-        let super_init: Vec<usize> = super_label_votes
-            .iter()
-            .map(|votes| {
-                votes
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|&(_, &count)| count)
-                    .map(|(c, _)| c)
-                    .unwrap_or(0)
-            })
-            .collect();
-
-        let mut level_stats = LinkCommunityStats::from_profiles(&level_profiles, k, &super_init);
-
-        let sweeps = args.num_sweeps / 2; // fewer sweeps at finer levels
-        let moves = sampler.run_parallel(&mut level_stats, &level_profiles, a0, b0, sweeps.max(10));
-        info!(
-            "Level {} Gibbs: {} moves, score={:.2}",
-            level,
-            moves,
-            level_stats.total_score(a0, b0)
-        );
-        score_trace.push(level_stats.total_score(a0, b0));
-
-        current_labels = transfer_labels(&level_f2s, &level_stats.membership);
-    }
-
-    // Final refinement on original edges (memoized EM parallel by connected components)
+    // 8. Refinement on fine edges with full profile building
     let num_fine_sweeps = (args.num_sweeps / 2).max(10);
-    info!(
-        "Final Gibbs on full edge set ({} sweeps)...",
-        num_fine_sweeps
-    );
+    info!("EM Gibbs on full edge set ({} sweeps)...", num_fine_sweeps);
+
+    // Create profile builder closure
+    let data_ref = &data_vec;
+    let edges_ref = edges;
+    let m_ref = coarse_profiles.m;
+
+    let profile_builder = |edge_indices: &[usize]| -> LinkProfileStore {
+        if let Some(ref g2m) = gene_to_module {
+            build_module_profiles_for_edges(data_ref, edge_indices, edges_ref, g2m, m_ref)
+                .expect("module profile build failed")
+        } else {
+            let basis_ref = proj_basis.as_ref().expect("basis missing");
+            build_projection_profiles_for_edges(data_ref, edge_indices, edges_ref, basis_ref)
+                .expect("projection profile build failed")
+        }
+    };
 
     let comp_args = ComponentGibbsArgs {
         graph: &srt_cell_pairs.graph,
@@ -396,25 +385,37 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         b0,
     };
 
+    // Build all profiles upfront
+    info!("Building full edge profiles...");
+    let full_profiles = profile_builder(&(0..n_edges).collect::<Vec<_>>());
+
+    info!(
+        "Full profiles: {} edges × {} dims ({:.1} MB)",
+        full_profiles.n_edges,
+        full_profiles.m,
+        (full_profiles.profiles.len() * std::mem::size_of::<f32>()) as f64 / 1_048_576.0
+    );
+
     let moves = sampler.run_components_em(
         &mut current_labels,
-        &edge_profiles,
+        &full_profiles,
         &comp_args,
         num_fine_sweeps,
     );
-    let fine_score =
-        LinkCommunityStats::from_profiles(&edge_profiles, k, &current_labels).total_score(a0, b0);
-    info!("Fine Gibbs: {} moves, score={:.2}", moves, fine_score);
+    info!("EM Gibbs: {} moves", moves);
 
-    // Greedy finalization (memoized parallel by connected components)
+    // Greedy finalization
     info!("Greedy finalization ({} max sweeps)...", args.num_greedy);
+
     let greedy_moves = sampler.run_greedy_by_components(
         &mut current_labels,
-        &edge_profiles,
+        &full_profiles,
         &comp_args,
         args.num_greedy,
     );
-    let mut fine_stats = LinkCommunityStats::from_profiles(&edge_profiles, k, &current_labels);
+
+    // Compute final stats
+    let mut fine_stats = LinkCommunityStats::from_profiles(&full_profiles, k, &current_labels);
     info!(
         "Greedy: {} moves, final score={:.2}",
         greedy_moves,
@@ -423,7 +424,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     score_trace.push(fine_stats.total_score(a0, b0));
 
     // Recompute for drift correction
-    fine_stats.recompute(&edge_profiles);
+    fine_stats.recompute(&full_profiles);
     let final_membership = fine_stats.membership.clone();
 
     // Display link community size histogram

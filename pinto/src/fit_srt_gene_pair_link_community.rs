@@ -11,7 +11,7 @@ use crate::fit_srt_link_community::{
     link_community_histogram, write_link_communities, write_score_trace,
 };
 use crate::link_community_gibbs::{ComponentGibbsArgs, LinkGibbsSampler};
-use crate::link_community_model::LinkCommunityStats;
+use crate::link_community_model::{LinkCommunityStats, LinkProfileStore};
 use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
 use crate::srt_estimate_batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
@@ -117,7 +117,7 @@ pub struct SrtGenePairLinkCommunityArgs {
 
     #[arg(
         long,
-        default_value_t = 1000,
+        default_value_t = 100,
         help = "Max gene-pair dimensions; cluster into modules if exceeded",
         long_help = "Maximum number of gene-pair dimensions for edge profiles.\n\
                        When the number of gene pairs exceeds this threshold,\n\
@@ -307,7 +307,14 @@ pub fn fit_srt_gene_pair_link_community(args: &SrtGenePairLinkCommunityArgs) -> 
     // Track scores
     let mut score_trace: Vec<f64> = Vec::new();
 
-    // 6. Multi-level cell coarsening
+    // 7. Compute gene raw means
+    let gene_means = compute_gene_raw_means(&data_vec, c.block_size)?;
+
+    // 8. Build gene adjacency for gene-pair profiles
+    info!("Building gene adjacency structure...");
+    let gene_adj = gene_graph.build_directed_adjacency();
+
+    // 9. Multi-level cell coarsening
     info!(
         "Graph coarsening ({} levels, {} coarse clusters)...",
         c.num_levels, c.n_pseudobulk
@@ -321,31 +328,49 @@ pub fn fit_srt_gene_pair_link_community(args: &SrtGenePairLinkCommunityArgs) -> 
         c.num_levels,
     );
 
-    // 7. Compute gene raw means
-    let gene_means = compute_gene_raw_means(&data_vec, c.block_size)?;
+    // 10. Build COARSE profiles first (much faster!)
+    info!("Building COARSE gene-pair profiles at coarsest level...");
+    let coarsest_labels = &ml.all_cell_labels[0];
 
-    // 8. Build gene-pair edge profiles
+    // Build super-edges at coarsest level
+    let mut super_edge_map: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut super_edges: Vec<(usize, usize)> = Vec::new();
+    let mut fine_to_super = Vec::with_capacity(n_edges);
+
+    for &(i, j) in edges {
+        let li = coarsest_labels[i];
+        let lj = coarsest_labels[j];
+        let key = (li.min(lj), li.max(lj));
+        let se = *super_edge_map.entry(key).or_insert_with(|| {
+            let s = super_edges.len();
+            super_edges.push(key);
+            s
+        });
+        fine_to_super.push(se);
+    }
+
+    let n_super = super_edges.len();
     info!(
-        "Building gene-pair edge profiles ({} edges x {} gene pairs)...",
-        n_edges, n_gene_pairs
+        "Coarsest level: {} super-edges from {} fine edges",
+        n_super, n_edges
     );
-    let gene_adj = gene_graph.build_directed_adjacency();
 
-    let edge_profiles = build_edge_profiles_by_gene_pairs(
+    // Build profiles at COARSE level (much smaller!)
+    let coarse_profiles = build_edge_profiles_by_gene_pairs(
         &data_vec,
-        edges,
+        &super_edges,
         &gene_adj,
         &gene_means,
         n_gene_pairs,
         c.block_size,
     )?;
 
-    // 9. Filter low-signal gene pairs via elbow on column sums
+    // 11. Filter low-signal gene pairs via elbow on coarse column sums
     let col_sums: Vec<f32> = (0..n_gene_pairs)
         .map(|p| {
             let mut s = 0.0f32;
-            for e in 0..n_edges {
-                s += edge_profiles.profile(e)[p];
+            for e in 0..n_super {
+                s += coarse_profiles.profile(e)[p];
             }
             s
         })
@@ -362,7 +387,7 @@ pub fn fit_srt_gene_pair_link_community(args: &SrtGenePairLinkCommunityArgs) -> 
         .filter(|&p| col_sums[p] > threshold)
         .collect();
 
-    let edge_profiles = if keep_cols.len() < n_gene_pairs {
+    let (coarse_profiles, final_n_gene_pairs) = if keep_cols.len() < n_gene_pairs {
         info!(
             "Elbow threshold: {:.4} (rank {}), kept {}/{} gene pairs",
             threshold,
@@ -371,44 +396,42 @@ pub fn fit_srt_gene_pair_link_community(args: &SrtGenePairLinkCommunityArgs) -> 
             n_gene_pairs
         );
         gene_graph.filter_edges(&keep_cols);
-        filter_profile_columns(&edge_profiles, &keep_cols)
+        (
+            filter_profile_columns(&coarse_profiles, &keep_cols),
+            keep_cols.len(),
+        )
     } else {
-        edge_profiles
+        (coarse_profiles, n_gene_pairs)
     };
 
     gene_graph.to_parquet(&(c.out.to_string() + ".gene_graph.parquet"))?;
 
+    // Rebuild gene adjacency after filtering
+    let gene_adj = gene_graph.build_directed_adjacency();
+
     // Collapse gene-pair columns into modules if too many
-    let edge_profiles = if args.n_edge_modules > 0 && edge_profiles.m > args.n_edge_modules {
-        info!(
-            "Clustering {} gene pairs into {} edge modules...",
-            edge_profiles.m, args.n_edge_modules
-        );
-        let (module_profiles, _assignments) =
-            collapse_profile_columns_by_module(&edge_profiles, args.n_edge_modules);
-        module_profiles
-    } else {
-        edge_profiles
-    };
+    let (coarse_profiles, _final_m, module_collapse) =
+        if args.n_edge_modules > 0 && final_n_gene_pairs > args.n_edge_modules {
+            info!(
+                "Clustering {} gene pairs into {} edge modules...",
+                final_n_gene_pairs, args.n_edge_modules
+            );
+            let (module_profiles, assignments) =
+                collapse_profile_columns_by_module(&coarse_profiles, args.n_edge_modules);
+            (module_profiles, args.n_edge_modules, Some(assignments))
+        } else {
+            (coarse_profiles, final_n_gene_pairs, None)
+        };
 
     info!(
-        "Edge profiles: {} edges x {} dims, mean size factor: {:.1}",
-        edge_profiles.n_edges,
-        edge_profiles.m,
-        edge_profiles.size_factors.iter().sum::<f32>() / edge_profiles.n_edges as f32
+        "Coarse edge profiles: {} super-edges x {} dims, mean size factor: {:.1}",
+        coarse_profiles.n_edges,
+        coarse_profiles.m,
+        coarse_profiles.size_factors.iter().sum::<f32>() / coarse_profiles.n_edges as f32
     );
 
-    // 10. Gibbs: coarsest -> transfer -> refine at each finer level
+    // 12. Gibbs on coarsest level
     let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(c.seed));
-
-    let coarsest_labels = &ml.all_cell_labels[0];
-    let (coarse_profiles, fine_to_super) =
-        coarsen_edge_profiles(&edge_profiles, edges, coarsest_labels);
-
-    info!(
-        "Coarsest level: {} super-edges from {} fine edges",
-        coarse_profiles.n_edges, n_edges
-    );
 
     // Random initial labels for coarsest
     let init_labels: Vec<usize> = (0..coarse_profiles.n_edges).map(|e| e % k).collect();
@@ -427,54 +450,45 @@ pub fn fit_srt_gene_pair_link_community(args: &SrtGenePairLinkCommunityArgs) -> 
     // Transfer to fine level
     let mut current_labels = transfer_labels(&fine_to_super, &coarse_stats.membership);
 
-    // Refine at finer levels
-    for level in 1..c.num_levels {
-        info!("Refining at level {}...", level);
-
-        let level_labels = &ml.all_cell_labels[level.min(ml.all_cell_labels.len() - 1)];
-        let (level_profiles, level_f2s) =
-            coarsen_edge_profiles(&edge_profiles, edges, level_labels);
-
-        // Transfer current labels to this level's super-edges (majority vote)
-        let n_super = level_profiles.n_edges;
-        let mut super_label_votes = vec![vec![0usize; k]; n_super];
-        for (fine_e, &se) in level_f2s.iter().enumerate() {
-            let c = current_labels[fine_e];
-            super_label_votes[se][c] += 1;
-        }
-        let super_init: Vec<usize> = super_label_votes
-            .iter()
-            .map(|votes| {
-                votes
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|&(_, &count)| count)
-                    .map(|(c, _)| c)
-                    .unwrap_or(0)
-            })
-            .collect();
-
-        let mut level_stats = LinkCommunityStats::from_profiles(&level_profiles, k, &super_init);
-
-        let sweeps = args.num_sweeps / 2;
-        let moves = sampler.run_parallel(&mut level_stats, &level_profiles, a0, b0, sweeps.max(10));
-        info!(
-            "Level {} Gibbs: {} moves, score={:.2}",
-            level,
-            moves,
-            level_stats.total_score(a0, b0)
-        );
-        score_trace.push(level_stats.total_score(a0, b0));
-
-        current_labels = transfer_labels(&level_f2s, &level_stats.membership);
-    }
-
-    // Final refinement on original edges
+    // 13. Refinement on fine edges with full profile building
     let num_fine_sweeps = (args.num_sweeps / 2).max(10);
-    info!(
-        "Final Gibbs on full edge set ({} sweeps)...",
-        num_fine_sweeps
-    );
+    info!("EM Gibbs on full edge set ({} sweeps)...", num_fine_sweeps);
+
+    // Create profile builder closure
+    let data_ref = &data_vec;
+    let gene_adj_ref = &gene_adj;
+    let gene_means_ref = &gene_means;
+    let edges_ref = edges;
+    let n_gene_pairs_ref = final_n_gene_pairs;
+
+    let profile_builder = |edge_indices: &[usize]| -> LinkProfileStore {
+        let mut store = build_gene_pair_profiles_for_edges(
+            data_ref,
+            edge_indices,
+            edges_ref,
+            gene_adj_ref,
+            gene_means_ref,
+            n_gene_pairs_ref,
+        )
+        .expect("profile build failed");
+
+        // Apply module collapse if needed
+        if let Some(ref assignments) = module_collapse {
+            let n_edges = store.n_edges;
+            let n_modules = *assignments.iter().max().unwrap_or(&0) + 1;
+            let mut new_profiles = vec![0.0f32; n_edges * n_modules];
+            for e in 0..n_edges {
+                let profile = store.profile(e);
+                let base = e * n_modules;
+                for (p, &module) in assignments.iter().enumerate() {
+                    new_profiles[base + module] += profile[p];
+                }
+            }
+            store = LinkProfileStore::new(new_profiles, n_edges, n_modules);
+        }
+
+        store
+    };
 
     let comp_args = ComponentGibbsArgs {
         graph: &srt_cell_pairs.graph,
@@ -484,25 +498,37 @@ pub fn fit_srt_gene_pair_link_community(args: &SrtGenePairLinkCommunityArgs) -> 
         b0,
     };
 
+    // Build all profiles upfront
+    info!("Building full edge profiles...");
+    let full_profiles = profile_builder(&(0..n_edges).collect::<Vec<_>>());
+
+    info!(
+        "Full profiles: {} edges × {} dims ({:.1} MB)",
+        full_profiles.n_edges,
+        full_profiles.m,
+        (full_profiles.profiles.len() * std::mem::size_of::<f32>()) as f64 / 1_048_576.0
+    );
+
     let moves = sampler.run_components_em(
         &mut current_labels,
-        &edge_profiles,
+        &full_profiles,
         &comp_args,
         num_fine_sweeps,
     );
-    let fine_score =
-        LinkCommunityStats::from_profiles(&edge_profiles, k, &current_labels).total_score(a0, b0);
-    info!("Fine Gibbs: {} moves, score={:.2}", moves, fine_score);
+    info!("EM Gibbs: {} moves", moves);
 
     // Greedy finalization
     info!("Greedy finalization ({} max sweeps)...", args.num_greedy);
+
     let greedy_moves = sampler.run_greedy_by_components(
         &mut current_labels,
-        &edge_profiles,
+        &full_profiles,
         &comp_args,
         args.num_greedy,
     );
-    let mut fine_stats = LinkCommunityStats::from_profiles(&edge_profiles, k, &current_labels);
+
+    // Compute final stats
+    let mut fine_stats = LinkCommunityStats::from_profiles(&full_profiles, k, &current_labels);
     info!(
         "Greedy: {} moves, final score={:.2}",
         greedy_moves,
@@ -511,7 +537,7 @@ pub fn fit_srt_gene_pair_link_community(args: &SrtGenePairLinkCommunityArgs) -> 
     score_trace.push(fine_stats.total_score(a0, b0));
 
     // Recompute for drift correction
-    fine_stats.recompute(&edge_profiles);
+    fine_stats.recompute(&full_profiles);
     let final_membership = fine_stats.membership.clone();
 
     // Display link community size histogram

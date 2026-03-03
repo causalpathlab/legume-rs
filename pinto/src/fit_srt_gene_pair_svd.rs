@@ -472,11 +472,15 @@ fn nystrom_gene_pair_visitor(
     let gene_adj = &shared_in.gene_adj;
     let basis = &shared_in.basis;
     let n_topics = basis.ncols();
+    let n_genes = gene_means.len();
 
     let yy = data_vec.read_columns_csc(lb..ub)?;
 
     let n_cells_block = ub - lb;
     let mut local_proj = Mat::zeros(n_topics, n_cells_block);
+
+    // Pre-allocate reusable buffer to avoid per-cell allocation
+    let mut gene_vals_buffer = vec![-1.0f32; n_genes];
 
     for (cell_idx, y_j) in yy.col_iter().enumerate() {
         let rows = y_j.row_indices();
@@ -484,12 +488,13 @@ fn nystrom_gene_pair_visitor(
 
         let mut proj_k = DVec::zeros(n_topics);
 
-        visit_gene_pair_deltas(
+        visit_gene_pair_deltas_with_buffer(
             rows,
             vals,
             gene_adj,
             gene_means,
             false,
+            &mut gene_vals_buffer,
             |edge_idx, delta| {
                 if delta > 0.0 {
                     proj_k += delta * &basis.row(edge_idx).transpose();
