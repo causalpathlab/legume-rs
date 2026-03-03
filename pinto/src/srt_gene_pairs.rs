@@ -124,22 +124,57 @@ pub fn visit_gene_pair_deltas(
     gene_adj: &[Vec<(usize, usize)>],
     gene_means: &DVec,
     use_log1p: bool,
+    on_delta: impl FnMut(usize, f32),
+) {
+    // Use dense array lookup instead of HashMap for better cache locality
+    // and faster lookups. Sentinel value -1.0 indicates gene not present.
+    let n_genes = gene_means.len();
+    let mut gene_vals = vec![-1.0f32; n_genes];
+
+    visit_gene_pair_deltas_with_buffer(
+        rows,
+        vals,
+        gene_adj,
+        gene_means,
+        use_log1p,
+        &mut gene_vals,
+        on_delta,
+    )
+}
+
+/// Version of visit_gene_pair_deltas that accepts a pre-allocated buffer.
+/// Reuse this buffer across multiple cells to avoid allocation overhead.
+#[inline]
+pub fn visit_gene_pair_deltas_with_buffer(
+    rows: &[usize],
+    vals: &[f32],
+    gene_adj: &[Vec<(usize, usize)>],
+    gene_means: &DVec,
+    use_log1p: bool,
+    gene_vals: &mut [f32],
     mut on_delta: impl FnMut(usize, f32),
 ) {
-    let gene_vals: HashMap<usize, f32> = rows
-        .iter()
-        .zip(vals.iter())
-        .map(|(&g, &v)| (g, if use_log1p { v.ln_1p() } else { v }))
-        .collect();
+    // Populate dense array with transformed values
+    for (&g, &v) in rows.iter().zip(vals.iter()) {
+        gene_vals[g] = if use_log1p { v.ln_1p() } else { v };
+    }
 
-    for (&g1, &val_g1) in rows.iter().zip(vals.iter()) {
-        let t_g1 = if use_log1p { val_g1.ln_1p() } else { val_g1 };
+    // Visit gene pairs
+    for &g1 in rows.iter() {
+        let t_g1 = gene_vals[g1];
         for &(g2, edge_idx) in gene_adj[g1].iter() {
-            if let Some(&t_g2) = gene_vals.get(&g2) {
+            let t_g2 = gene_vals[g2];
+            if t_g2 >= 0.0 {
+                // g2 is expressed in this cell
                 let delta = t_g1 * t_g2 - gene_means[g1] * gene_means[g2];
                 on_delta(edge_idx, delta);
             }
         }
+    }
+
+    // Clear for next use
+    for &g in rows.iter() {
+        gene_vals[g] = -1.0;
     }
 }
 

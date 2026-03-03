@@ -359,6 +359,182 @@ impl LinkGibbsSampler {
         total_moves
     }
 
+    /// Memoized EM Gibbs with lazy profile building per component.
+    ///
+    /// Similar to `run_components_em`, but instead of pre-building all profiles,
+    /// profiles are built on-demand per component using a profile builder function.
+    ///
+    /// * `membership` - Current edge labels (will be updated)
+    /// * `profile_builder` - Function that builds profiles for a given set of edge indices
+    /// * `initial_stats` - Global stats (e.g., from coarse level)
+    /// * `args` - Component Gibbs parameters
+    /// * `num_sweeps` - Number of EM sweeps
+    ///
+    /// Returns the total number of edge moves.
+    pub fn run_components_em_lazy<F>(
+        &mut self,
+        membership: &mut [usize],
+        profile_builder: F,
+        initial_stats: (Vec<f64>, Vec<f64>, Vec<usize>),
+        args: &ComponentGibbsArgs,
+        num_sweeps: usize,
+    ) -> usize
+    where
+        F: Fn(&[usize]) -> LinkProfileStore + Sync,
+    {
+        let ComponentGibbsArgs {
+            graph,
+            edges,
+            k,
+            a0,
+            b0,
+        } = args;
+        let (k, a0, b0) = (*k, *a0, *b0);
+
+        let (comp_labels, n_comp) = connected_components(graph);
+
+        let comp_edges = partition_edges_balanced(edges, &comp_labels, n_comp);
+        let n_parts = comp_edges.len();
+
+        info!(
+            "Lazy memoized EM Gibbs: {} components -> {} partitions (edges: {})",
+            n_comp,
+            n_parts,
+            comp_edges
+                .iter()
+                .map(|e| e.len().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+
+        // Initialize global stats from coarse approximation
+        let m = initial_stats.0.len() / k;
+        let mut global_stats = LinkCommunityStats {
+            k,
+            m,
+            n_edges: edges.len(),
+            gene_sum: initial_stats.0,
+            size_sum: initial_stats.1,
+            edge_count: initial_stats.2,
+            membership: membership.to_vec(),
+        };
+
+        // Initialize memoized stats per partition (start with zeros, will be computed after first sweep)
+        let mut memo_stats: Vec<(Vec<f64>, Vec<f64>, Vec<usize>)> = comp_edges
+            .iter()
+            .map(|_| (vec![0.0; k * m], vec![0.0; k], vec![0; k]))
+            .collect();
+
+        let mut total_moves = 0usize;
+        let base_seed = self.rng.random::<u64>() | 1;
+
+        let pb = new_progress_bar(
+            (num_sweeps * n_parts) as u64,
+            "Lazy EM Gibbs {bar:40} {pos}/{len} jobs ({eta})",
+        );
+
+        for sweep in 0..num_sweeps {
+            let sweep_seed = base_seed.wrapping_mul(sweep as u64 + 1);
+
+            // E-step: parallel per partition, build profiles on-demand
+            let local_results: Vec<ComponentResult> = (0..n_parts)
+                .into_par_iter()
+                .map(|c| {
+                    let indices = &comp_edges[c];
+                    if indices.is_empty() {
+                        pb.inc(1);
+                        return ComponentResult::empty(k, m);
+                    }
+
+                    // BUILD PROFILES ON-DEMAND for this component
+                    let component_profiles = profile_builder(indices);
+
+                    // Build local stats initialized from GLOBAL stats snapshot
+                    let mut local_stats = LinkCommunityStats {
+                        k,
+                        m,
+                        n_edges: component_profiles.n_edges,
+                        gene_sum: global_stats.gene_sum.clone(),
+                        size_sum: global_stats.size_sum.clone(),
+                        edge_count: global_stats.edge_count.clone(),
+                        membership: indices.iter().map(|&e| membership[e]).collect(),
+                    };
+
+                    let comp_seed = sweep_seed ^ (c as u64).wrapping_mul(2654435761);
+                    let mut rng = SmallRng::seed_from_u64(comp_seed);
+                    let mut log_probs = vec![0.0f64; k];
+                    let mut moves = 0usize;
+
+                    let n = indices.len();
+                    for e in 0..n {
+                        let old_c = local_stats.membership[e];
+                        compute_log_probs_for_edge(
+                            e,
+                            &local_stats,
+                            &component_profiles,
+                            a0,
+                            b0,
+                            &mut log_probs,
+                        );
+                        let new_c = sample_categorical_log(&log_probs, &mut rng);
+                        if new_c != old_c {
+                            local_stats.delta_move(e, old_c, new_c, &component_profiles);
+                            moves += 1;
+                        }
+                    }
+
+                    // Compute new partition-level stats after this sweep
+                    let new_comp_stats = LinkCommunityStats::component_stats(
+                        &component_profiles,
+                        k,
+                        &(0..n).collect::<Vec<_>>(),
+                        &local_stats.membership,
+                    );
+
+                    pb.inc(1);
+
+                    // Drop profiles to free memory
+                    drop(component_profiles);
+
+                    ComponentResult {
+                        membership: local_stats.membership,
+                        new_stats: new_comp_stats,
+                        moves,
+                    }
+                })
+                .collect();
+
+            // M-step: apply deltas to global stats and update membership
+            for (c, result) in local_results.into_iter().enumerate() {
+                total_moves += result.moves;
+
+                // Write back membership
+                for (local_e, &global_e) in comp_edges[c].iter().enumerate() {
+                    membership[global_e] = result.membership[local_e];
+                }
+
+                // Patch global stats: global += (new_local - old_local)
+                let old = (
+                    memo_stats[c].0.as_slice(),
+                    memo_stats[c].1.as_slice(),
+                    memo_stats[c].2.as_slice(),
+                );
+                let new = (
+                    result.new_stats.0.as_slice(),
+                    result.new_stats.1.as_slice(),
+                    result.new_stats.2.as_slice(),
+                );
+                global_stats.apply_delta(old, new);
+
+                // Update memoized stats for this partition
+                memo_stats[c] = result.new_stats;
+            }
+        }
+        pb.finish_and_clear();
+
+        total_moves
+    }
+
     /// Memoized greedy finalization parallelized by balanced partitions.
     ///
     /// Same memoized approach as `run_components_em` but uses argmax instead
@@ -454,6 +630,155 @@ impl LinkGibbsSampler {
                     );
 
                     pb.inc(1);
+
+                    ComponentResult {
+                        membership: local_stats.membership,
+                        new_stats: new_comp_stats,
+                        moves,
+                    }
+                })
+                .collect();
+
+            let mut sweep_moves = 0usize;
+            for (c, result) in local_results.into_iter().enumerate() {
+                sweep_moves += result.moves;
+
+                for (local_e, &global_e) in comp_edges[c].iter().enumerate() {
+                    membership[global_e] = result.membership[local_e];
+                }
+
+                let old = (
+                    memo_stats[c].0.as_slice(),
+                    memo_stats[c].1.as_slice(),
+                    memo_stats[c].2.as_slice(),
+                );
+                let new = (
+                    result.new_stats.0.as_slice(),
+                    result.new_stats.1.as_slice(),
+                    result.new_stats.2.as_slice(),
+                );
+                global_stats.apply_delta(old, new);
+                memo_stats[c] = result.new_stats;
+            }
+
+            total_moves += sweep_moves;
+            if sweep_moves == 0 {
+                break;
+            }
+        }
+        pb.finish_and_clear();
+
+        total_moves
+    }
+
+    /// Memoized greedy finalization with lazy profile building per component.
+    ///
+    /// Same as `run_greedy_by_components` but builds profiles on-demand.
+    ///
+    /// Returns the total number of edge moves.
+    pub fn run_greedy_by_components_lazy<F>(
+        &mut self,
+        membership: &mut [usize],
+        profile_builder: F,
+        initial_stats: (Vec<f64>, Vec<f64>, Vec<usize>),
+        args: &ComponentGibbsArgs,
+        max_sweeps: usize,
+    ) -> usize
+    where
+        F: Fn(&[usize]) -> LinkProfileStore + Sync,
+    {
+        let ComponentGibbsArgs {
+            graph,
+            edges,
+            k,
+            a0,
+            b0,
+        } = args;
+        let (k, a0, b0) = (*k, *a0, *b0);
+
+        let (comp_labels, n_comp) = connected_components(graph);
+
+        let comp_edges = partition_edges_balanced(edges, &comp_labels, n_comp);
+        let n_parts = comp_edges.len();
+
+        // Initialize global stats from coarse approximation
+        let m = initial_stats.0.len() / k;
+        let mut global_stats = LinkCommunityStats {
+            k,
+            m,
+            n_edges: edges.len(),
+            gene_sum: initial_stats.0,
+            size_sum: initial_stats.1,
+            edge_count: initial_stats.2,
+            membership: membership.to_vec(),
+        };
+
+        let mut memo_stats: Vec<(Vec<f64>, Vec<f64>, Vec<usize>)> = comp_edges
+            .iter()
+            .map(|_| (vec![0.0; k * m], vec![0.0; k], vec![0; k]))
+            .collect();
+
+        let mut total_moves = 0usize;
+
+        let pb = new_progress_bar(
+            (max_sweeps * n_parts) as u64,
+            "Lazy Greedy {bar:40} {pos}/{len} jobs ({eta})",
+        );
+
+        for _sweep in 0..max_sweeps {
+            let local_results: Vec<ComponentResult> = (0..n_parts)
+                .into_par_iter()
+                .map(|c| {
+                    let indices = &comp_edges[c];
+                    if indices.is_empty() {
+                        pb.inc(1);
+                        return ComponentResult::empty(k, m);
+                    }
+
+                    // BUILD PROFILES ON-DEMAND
+                    let component_profiles = profile_builder(indices);
+
+                    let mut local_stats = LinkCommunityStats {
+                        k,
+                        m,
+                        n_edges: component_profiles.n_edges,
+                        gene_sum: global_stats.gene_sum.clone(),
+                        size_sum: global_stats.size_sum.clone(),
+                        edge_count: global_stats.edge_count.clone(),
+                        membership: indices.iter().map(|&e| membership[e]).collect(),
+                    };
+
+                    let mut log_probs = vec![0.0f64; k];
+                    let mut moves = 0usize;
+
+                    let n = indices.len();
+                    for e in 0..n {
+                        let old_c = local_stats.membership[e];
+                        compute_log_probs_for_edge(
+                            e,
+                            &local_stats,
+                            &component_profiles,
+                            a0,
+                            b0,
+                            &mut log_probs,
+                        );
+                        let new_c = argmax_log(&log_probs);
+                        if new_c != old_c {
+                            local_stats.delta_move(e, old_c, new_c, &component_profiles);
+                            moves += 1;
+                        }
+                    }
+
+                    let new_comp_stats = LinkCommunityStats::component_stats(
+                        &component_profiles,
+                        k,
+                        &(0..n).collect::<Vec<_>>(),
+                        &local_stats.membership,
+                    );
+
+                    pb.inc(1);
+
+                    drop(component_profiles);
 
                     ComponentResult {
                         membership: local_stats.membership,
@@ -832,6 +1157,127 @@ mod tests {
         let moves = sampler.run_components_em(&mut membership, &store, &comp_args, 10);
         // Should converge (fewer moves over time, similar to parallel test)
         assert!(moves > 0 || membership.iter().all(|&m| m < k));
+    }
+
+    /// Test that lazy EM produces equivalent results to regular EM.
+    ///
+    /// Lazy EM builds profiles on-demand per component, while regular EM
+    /// pre-builds all profiles. Both should converge to the same or very
+    /// similar cluster assignments given the same random seed.
+    #[test]
+    fn test_lazy_em_correctness() {
+        let m = 10;
+        let k = 2;
+
+        // Two disconnected cliques: nodes 0-4 and nodes 5-9
+        let edges_list = vec![
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 2),
+            (1, 3),
+            (2, 3),
+            (2, 4),
+            (3, 4),
+            (5, 6),
+            (5, 7),
+            (5, 8),
+            (6, 7),
+            (6, 8),
+            (7, 8),
+            (7, 9),
+            (8, 9),
+        ];
+        let n_edges = edges_list.len();
+        let graph = make_test_graph(10, edges_list.clone());
+
+        // Build profiles: edges in component 0 → community 0 signal,
+        //                  edges in component 1 → community 1 signal
+        let mut profiles = vec![0.0f32; n_edges * m];
+        let mut true_labels = vec![0usize; n_edges];
+        for (e, &(i, _j)) in edges_list.iter().enumerate() {
+            let c = if i < 5 { 0 } else { 1 };
+            true_labels[e] = c;
+            for g in 0..m {
+                let signal = if (g < m / 2) == (c == 0) { 10.0 } else { 1.0 };
+                profiles[e * m + g] = signal;
+            }
+        }
+        let store = LinkProfileStore::new(profiles, n_edges, m);
+
+        // Run regular EM
+        let mut membership_regular: Vec<usize> = (0..n_edges).map(|e| (e * 7) % k).collect();
+        let mut sampler_regular = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
+
+        let comp_args = ComponentGibbsArgs {
+            graph: &graph,
+            edges: &edges_list,
+            k,
+            a0: 1.0,
+            b0: 1.0,
+        };
+        let moves_regular =
+            sampler_regular.run_components_em(&mut membership_regular, &store, &comp_args, 20);
+
+        // Run lazy EM with the same seed
+        let mut membership_lazy: Vec<usize> = (0..n_edges).map(|e| (e * 7) % k).collect();
+        let mut sampler_lazy = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
+
+        // Build initial stats from regular EM's starting point
+        let init_stats_lazy = LinkCommunityStats::from_profiles(&store, k, &membership_lazy);
+        let initial_stats = (
+            init_stats_lazy.gene_sum,
+            init_stats_lazy.size_sum,
+            init_stats_lazy.edge_count,
+        );
+
+        // Profile builder: just returns a subset of the pre-built store
+        let profile_builder =
+            |edge_indices: &[usize]| -> LinkProfileStore { store.subset(edge_indices) };
+
+        let moves_lazy = sampler_lazy.run_components_em_lazy(
+            &mut membership_lazy,
+            profile_builder,
+            initial_stats,
+            &comp_args,
+            20,
+        );
+
+        // Both should make moves (not stuck)
+        assert!(moves_regular > 0, "Regular EM made no moves");
+        assert!(moves_lazy > 0, "Lazy EM made no moves");
+
+        // Cluster assignments should match (up to label permutation)
+        let match_direct: usize = (0..n_edges)
+            .filter(|&e| membership_regular[e] == membership_lazy[e])
+            .count();
+        let match_flipped: usize = (0..n_edges)
+            .filter(|&e| membership_regular[e] == 1 - membership_lazy[e])
+            .count();
+        let best_match = match_direct.max(match_flipped);
+
+        assert!(
+            best_match >= n_edges - 1,
+            "Lazy vs regular EM mismatch: {}/{} edges agree",
+            best_match,
+            n_edges
+        );
+
+        // Both should recover the planted partition
+        let match_direct_true: usize = (0..n_edges)
+            .filter(|&e| membership_lazy[e] == true_labels[e])
+            .count();
+        let match_flipped_true: usize = (0..n_edges)
+            .filter(|&e| membership_lazy[e] == 1 - true_labels[e])
+            .count();
+        let best_match_true = match_direct_true.max(match_flipped_true);
+
+        assert!(
+            best_match_true >= n_edges - 2,
+            "Lazy EM failed to recover planted partition: {}/{}",
+            best_match_true,
+            n_edges
+        );
     }
 
     /// Test that memoized stats delta preserves exact global stats.
