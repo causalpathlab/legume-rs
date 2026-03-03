@@ -4,9 +4,51 @@ use crate::utilities::io_helpers::{read_col_names, MAX_COLUMN_NAME_IDX, MAX_ROW_
 use crate::utilities::name_matching::match_by_substring;
 use matrix_util::common_io::*;
 use matrix_util::traits::IoOps;
+use ndarray::Array2;
+use std::io::Write;
 
 // Import the argument types from main
 use crate::{InfoArgs, TakeColumnNamesArgs, TakeColumnsArgs, TakeRowNamesArgs, TakeRowsArgs};
+
+/// Write an Array2 as TSV with optional row/column names.
+/// Arguments mirror `to_parquet_with_names`:
+/// - `row_names`: `(Option<&[Box<str>]>, Option<&str>)` — names and label for the row dimension
+/// - `column_names`: `Option<&[Box<str>]>` — column headers
+fn write_named_tsv(
+    output: &str,
+    data: &Array2<f32>,
+    row_names: (Option<&[Box<str>]>, Option<&str>),
+    column_names: Option<&[Box<str>]>,
+) -> anyhow::Result<()> {
+    let nrows = data.nrows();
+    let row_label = row_names.1.unwrap_or("row");
+    let row_names: Vec<Box<str>> = match row_names.0 {
+        Some(names) => names.to_vec(),
+        None => (0..nrows).map(|i| format!("{}", i).into()).collect(),
+    };
+    let mut w = open_buf_writer(output)?;
+    // Header
+    write!(w, "{}", row_label)?;
+    if let Some(col_names) = column_names {
+        for name in col_names {
+            write!(w, "\t{}", name)?;
+        }
+    } else {
+        for j in 0..data.ncols() {
+            write!(w, "\t{}", j)?;
+        }
+    }
+    writeln!(w)?;
+    // Data rows
+    for (i, row) in data.rows().into_iter().enumerate() {
+        write!(w, "{}", row_names[i])?;
+        for val in row.iter() {
+            write!(w, "\t{}", val)?;
+        }
+        writeln!(w)?;
+    }
+    Ok(())
+}
 
 pub fn take_column_names(cmd_args: &TakeColumnNamesArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
@@ -108,7 +150,12 @@ pub fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
         }
     }
 
-    data.to_tsv(&output)?;
+    write_named_tsv(
+        &output,
+        &data,
+        (Some(&row_names), Some("row_name")),
+        Some(&column_names),
+    )?;
 
     Ok(())
 }
@@ -154,10 +201,10 @@ pub fn take_rows(args: &TakeRowsArgs) -> anyhow::Result<()> {
     };
 
     let data_t = data.t().to_owned();
+    let column_names = data_backend.column_names()?;
 
     if let Ok(ext) = file_ext(&output) {
         if ext.as_ref() == "parquet" {
-            let column_names = data_backend.column_names()?;
             data_t.to_parquet_with_names(
                 &output,
                 (Some(&column_names), Some("column_name")),
@@ -167,6 +214,11 @@ pub fn take_rows(args: &TakeRowsArgs) -> anyhow::Result<()> {
         }
     }
 
-    data_t.to_tsv(&output)?;
+    write_named_tsv(
+        &output,
+        &data_t,
+        (Some(&column_names), Some("column_name")),
+        Some(&row_names),
+    )?;
     Ok(())
 }
