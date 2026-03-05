@@ -672,7 +672,12 @@ fn find_sites_with_bulk_stats(
     let mut wt_base_freq_map = DnaBaseFreqMap::new();
 
     for wt_file in &args.wt_bam_files {
-        wt_base_freq_map.update_bam_file_by_gene(wt_file, gff_record, &args.gene_barcode_tag)?;
+        wt_base_freq_map.update_bam_file_by_gene(
+            wt_file,
+            gff_record,
+            &args.gene_barcode_tag,
+            args.include_missing_barcode,
+        )?;
     }
 
     let positions = wt_base_freq_map.sorted_positions();
@@ -686,7 +691,12 @@ fn find_sites_with_bulk_stats(
     let mut mut_base_freq_map = DnaBaseFreqMap::new();
 
     for mut_file in &args.mut_bam_files {
-        mut_base_freq_map.update_bam_file_by_gene(mut_file, gff_record, &args.gene_barcode_tag)?;
+        mut_base_freq_map.update_bam_file_by_gene(
+            mut_file,
+            gff_record,
+            &args.gene_barcode_tag,
+            args.include_missing_barcode,
+        )?;
     }
 
     let wt_freq = wt_base_freq_map
@@ -730,7 +740,12 @@ fn find_sites_with_celltype_stats(
     // Collect bulk frequencies from mut BAM files (background/null distribution)
     let mut mut_base_freq_map = DnaBaseFreqMap::new();
     for mut_file in &args.mut_bam_files {
-        mut_base_freq_map.update_bam_file_by_gene(mut_file, gff_record, &args.gene_barcode_tag)?;
+        mut_base_freq_map.update_bam_file_by_gene(
+            mut_file,
+            gff_record,
+            &args.gene_barcode_tag,
+            args.include_missing_barcode,
+        )?;
     }
     let mut_freq = mut_base_freq_map.marginal_frequency_map();
 
@@ -747,6 +762,7 @@ fn find_sites_with_celltype_stats(
                 wt_file,
                 gff_record,
                 &args.gene_barcode_tag,
+                args.include_missing_barcode,
             )?;
         }
 
@@ -1125,7 +1141,12 @@ fn estimate_m6a_stat(
     let mut gff = gff_record.clone();
     gff.start = (lb - BAM_READ_PADDING).max(0);
     gff.stop = ub + BAM_READ_PADDING;
-    stat_map.update_bam_file_by_gene(bam_file, &gff, &args.gene_barcode_tag)?;
+    stat_map.update_bam_file_by_gene(
+        bam_file,
+        &gff,
+        &args.gene_barcode_tag,
+        args.include_missing_barcode,
+    )?;
 
     let gene = gff.gene_id;
     let chr = gff.seqname.as_ref();
@@ -1149,7 +1170,7 @@ fn estimate_m6a_stat(
         return Ok(Vec::new());
     };
 
-    let (start, stop) = bin_position_kb(m6apos, args.resolution_kb);
+    let (start, stop) = bin_position_kb(c2upos, args.resolution_kb);
 
     let stats = meth_stat
         .iter()
@@ -1170,6 +1191,7 @@ fn estimate_m6a_stat(
                     MethylationData {
                         methylated,
                         unmethylated,
+                        m6a_pos: m6apos,
                     },
                 ))
             } else {
@@ -1251,7 +1273,7 @@ fn write_bed(
                         .matches_barcode(cb)
                         .unwrap_or_else(|| "unknown".into());
                     format!(
-                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                         bg.chr,
                         bg.start,
                         bg.stop,
@@ -1260,13 +1282,14 @@ fn write_bed(
                         data.methylated,
                         data.unmethylated,
                         cb,
+                        data.m6a_pos,
                         cell_type
                     )
                     .into_boxed_str()
                 } else {
                     // No membership provided but cell types requested - just output unknown
                     format!(
-                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tunknown",
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tunknown",
                         bg.chr,
                         bg.start,
                         bg.stop,
@@ -1274,13 +1297,14 @@ fn write_bed(
                         gene_string,
                         data.methylated,
                         data.unmethylated,
-                        cb
+                        cb,
+                        data.m6a_pos
                     )
                     .into_boxed_str()
                 }
             } else {
                 format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     bg.chr,
                     bg.start,
                     bg.stop,
@@ -1288,7 +1312,8 @@ fn write_bed(
                     gene_string,
                     data.methylated,
                     data.unmethylated,
-                    cb
+                    cb,
+                    data.m6a_pos
                 )
                 .into_boxed_str()
             }
@@ -1296,9 +1321,9 @@ fn write_bed(
         .collect();
 
     let header: &[u8] = if args.output_cell_types {
-        b"#chr\tstart\tstop\tstrand\tgene\tmethylated\tunmethylated\tbarcode\tcell_type\n"
+        b"#chr\tstart\tstop\tstrand\tgene\tmethylated\tunmethylated\tbarcode\tm6a_pos\tcell_type\n"
     } else {
-        b"#chr\tstart\tstop\tstrand\tgene\tmethylated\tunmethylated\tbarcode\n"
+        b"#chr\tstart\tstop\tstrand\tgene\tmethylated\tunmethylated\tbarcode\tm6a_pos\n"
     };
 
     let mut writer = BWriter::from_path(file_path)?;

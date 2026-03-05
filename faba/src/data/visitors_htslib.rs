@@ -40,10 +40,11 @@ pub trait VisitWithBamOps {
         bam_file_path: &str,
         gff_record: &GffRecord,
         gene_barcode_tag: &str,
+        include_missing_barcode: bool,
         visitor: &Visitor,
     ) -> anyhow::Result<()>
     where
-        Visitor: Fn(&mut Self, &GffRecord, &str, bam::Record),
+        Visitor: Fn(&mut Self, &GffRecord, &str, bool, bam::Record),
     {
         let region = (
             gff_record.seqname.as_ref(),
@@ -63,7 +64,13 @@ pub trait VisitWithBamOps {
             .collect();
 
         for rec in bam_records {
-            visitor(self, gff_record, gene_barcode_tag, rec);
+            visitor(
+                self,
+                gff_record,
+                gene_barcode_tag,
+                include_missing_barcode,
+                rec,
+            );
         }
 
         Ok(())
