@@ -31,7 +31,7 @@ impl<'a> DnaStatMap for DnaBaseFreqMap<'a> {
         let update_freq_map = |map: &mut HashMap<_, _>, cell_barcode: Option<CellBarcode>| {
             for [rpos, gpos] in bam_record.aligned_pairs() {
                 let base = Dna::from_byte(seq[rpos as usize]);
-                let genome_pos = gpos + 1;
+                let genome_pos = gpos;
                 let freq_map: &mut HashMap<CellBarcode, DnaBaseCount> =
                     map.entry(genome_pos).or_default();
                 let key = cell_barcode.clone().unwrap_or(CellBarcode::Missing);
@@ -55,7 +55,7 @@ impl<'a> DnaStatMap for DnaBaseFreqMap<'a> {
             {
                 bam_record.aligned_pairs().any(|[rpos, gpos]| {
                     Dna::from_byte(seq[rpos as usize])
-                        .is_some_and(|b| anchor_pos == gpos + 1 && b == *anchor_base)
+                        .is_some_and(|b| anchor_pos == gpos && b == *anchor_base)
                 })
             } else {
                 true
@@ -87,7 +87,7 @@ impl<'a> DnaStatMap for DnaBaseFreqMap<'a> {
         if let Some(map) = &mut self.position_to_count {
             for [rpos, gpos] in bam_record.aligned_pairs() {
                 let base = Dna::from_byte(seq[rpos as usize]);
-                let genome_pos = gpos + 1;
+                let genome_pos = gpos;
                 let freq = map.entry(genome_pos).or_insert_with(DnaBaseCount::new);
                 freq.add(base.as_ref(), 1);
             }

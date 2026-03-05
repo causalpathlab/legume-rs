@@ -33,11 +33,13 @@ pub trait DnaStatMap: VisitWithBamOps {
         bam_file_path: &str,
         gff_record: &GffRecord,
         gene_barcode_tag: &str,
+        include_missing_barcode: bool,
     ) -> anyhow::Result<()> {
         self.visit_bam_by_gene(
             bam_file_path,
             gff_record,
             gene_barcode_tag,
+            include_missing_barcode,
             &Self::update_visitor_by_gene,
         )
     }
@@ -46,6 +48,7 @@ pub trait DnaStatMap: VisitWithBamOps {
         &mut self,
         gff_record: &GffRecord,
         gene_barcode_tag: &str,
+        include_missing_barcode: bool,
         bam_record: bam::Record,
     ) {
         let gene_id = &gff_record.gene_id;
@@ -58,7 +61,8 @@ pub trait DnaStatMap: VisitWithBamOps {
             _ => Gene::Missing,
         };
 
-        if gene_id_found == *gene_id {
+        if gene_id_found == *gene_id || (include_missing_barcode && gene_id_found == Gene::Missing)
+        {
             self.add_bam_record(bam_record);
         }
     }
