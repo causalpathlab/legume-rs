@@ -87,7 +87,7 @@ pub fn load_fasta_index(fasta_file: &str) -> anyhow::Result<faidx::Reader> {
         .map_err(|e| anyhow::anyhow!("Failed to load FASTA file {}: {}", fasta_file, e))
 }
 
-/// Fetch reference base at a specific position (0-based coordinates)
+/// Fetch reference base at a specific position (0-based coordinates, matching BAM/DnaBaseFreqMap keys)
 /// Returns None if position is out of bounds or chromosome not found
 pub fn fetch_reference_base(
     faidx: &faidx::Reader,

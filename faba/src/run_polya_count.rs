@@ -345,7 +345,12 @@ fn find_polya_sites_in_gene(
 
     // Sweep all BAM files to find poly-A sites
     for bam_file in &args.bam_files {
-        polya_map.update_bam_file_by_gene(bam_file, gff_record, &args.gene_barcode_tag)?;
+        polya_map.update_bam_file_by_gene(
+            bam_file,
+            gff_record,
+            &args.gene_barcode_tag,
+            args.include_missing_barcode,
+        )?;
     }
 
     // Filter by minimum coverage and insert into map
@@ -463,7 +468,12 @@ fn collect_polya_counts_at_site(
     gff.start = (position - PADDING).max(0);
     gff.stop = position + PADDING;
 
-    polya_map.update_bam_file_by_gene(bam_file, &gff, &args.gene_barcode_tag)?;
+    polya_map.update_bam_file_by_gene(
+        bam_file,
+        &gff,
+        &args.gene_barcode_tag,
+        args.include_missing_barcode,
+    )?;
 
     // Extract and bin cell-level counts
     let Some(cell_counts) = polya_map.get_cell_counts_at(position) else {

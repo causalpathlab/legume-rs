@@ -117,7 +117,13 @@ fn count_read_per_gene(
     let mut read_counter = ReadCounter::new(&args.cell_barcode_tag);
 
     for file in &args.bam_files {
-        read_counter.visit_bam_by_gene(file, rec, &args.gene_barcode_tag, &ReadCounter::update)?;
+        read_counter.visit_bam_by_gene(
+            file,
+            rec,
+            &args.gene_barcode_tag,
+            false,
+            &ReadCounter::update,
+        )?;
     }
 
     Ok(read_counter
@@ -149,7 +155,13 @@ impl<'a> ReadCounter<'a> {
             .collect()
     }
 
-    fn update(&mut self, gff_record: &GffRecord, gene_barcode_tag: &str, bam_record: bam::Record) {
+    fn update(
+        &mut self,
+        gff_record: &GffRecord,
+        gene_barcode_tag: &str,
+        include_missing_barcode: bool,
+        bam_record: bam::Record,
+    ) {
         let gene_id_found = match bam_record.aux(gene_barcode_tag.as_bytes()) {
             Ok(Aux::String(id)) => match parse_ensembl_id(id) {
                 Some(id) => GeneId::Ensembl(id.into()),
@@ -158,7 +170,9 @@ impl<'a> ReadCounter<'a> {
             _ => GeneId::Missing,
         };
 
-        if gene_id_found == gff_record.gene_id {
+        if gene_id_found == gff_record.gene_id
+            || (include_missing_barcode && gene_id_found == GeneId::Missing)
+        {
             let cell_barcode = match bam_record.aux(self.cell_barcode_tag.as_bytes()) {
                 Ok(Aux::String(barcode)) => CellBarcode::Barcode(barcode.into()),
                 _ => CellBarcode::Missing,
