@@ -25,9 +25,9 @@ use run_read_depth::*;
 const LOGO: &str = include_str!("../logo.txt");
 
 fn colorize_pod(s: &str) -> String {
-    s.replace('○', &"○".bright_green().to_string())
-        .replace(':', &":".truecolor(100, 160, 80).to_string())
-        .replace('.', &".".truecolor(120, 170, 90).to_string())
+    s.replace('○', &"○".truecolor(200, 160, 60).to_string())
+        .replace(':', &":".truecolor(200, 160, 80).to_string())
+        .replace('.', &".".truecolor(220, 170, 90).to_string())
         .replace('_', &"_".truecolor(60, 120, 40).to_string())
         .replace('~', &"~".truecolor(80, 140, 60).to_string())
         .replace('\'', &"'".truecolor(60, 120, 40).to_string())
@@ -38,7 +38,7 @@ fn colorize_pod(s: &str) -> String {
 }
 
 fn colorize_funnel(s: &str) -> String {
-    s.replace('○', &"○".bright_green().to_string())
+    s.replace('○', &"○".truecolor(240, 100, 100).to_string())
         .replace('/', &"/".truecolor(200, 160, 60).to_string())
         .replace('\\', &"\\".truecolor(200, 160, 60).to_string())
         .replace('|', &"|".truecolor(200, 160, 60).to_string())
@@ -84,7 +84,11 @@ enum Commands {
             Discovers m6A methylation sites by comparing C->T (forward) or\n\
             G->A (reverse) conversion rates between wild-type and mutant BAM\n\
             files using binomial tests, then quantifies per-cell methylation\n\
-            at discovered sites.")]
+            at discovered sites.\n\n\
+            Reference:\n  \
+            Meyer, \"DART-seq: an antibody-free method for global m6A\n  \
+            detection\", Nature Methods, 16(12):1275-1280, 2019.\n  \
+            https://doi.org/10.1038/s41592-019-0570-0")]
     CountDartSeq(DartSeqCountArgs),
 
     /// Count reads per gene for single-cell or bulk RNA-seq
