@@ -8,7 +8,6 @@ use rust_htslib::faidx;
 
 use crate::data::cell_membership::CellMembership;
 use crate::data::dna_stat_map::*;
-use crate::data::dna_stat_traits::*;
 use crate::data::methylation::*;
 use genomic_data::gff::FeatureType as GffFeatureType;
 use genomic_data::gff::GeneType as GffGeneType;
@@ -672,7 +671,7 @@ fn find_sites_with_bulk_stats(
     let mut wt_base_freq_map = DnaBaseFreqMap::new();
 
     for wt_file in &args.wt_bam_files {
-        wt_base_freq_map.update_bam_file_by_gene(
+        wt_base_freq_map.update_from_gene(
             wt_file,
             gff_record,
             &args.gene_barcode_tag,
@@ -691,7 +690,7 @@ fn find_sites_with_bulk_stats(
     let mut mut_base_freq_map = DnaBaseFreqMap::new();
 
     for mut_file in &args.mut_bam_files {
-        mut_base_freq_map.update_bam_file_by_gene(
+        mut_base_freq_map.update_from_gene(
             mut_file,
             gff_record,
             &args.gene_barcode_tag,
@@ -740,7 +739,7 @@ fn find_sites_with_celltype_stats(
     // Collect bulk frequencies from mut BAM files (background/null distribution)
     let mut mut_base_freq_map = DnaBaseFreqMap::new();
     for mut_file in &args.mut_bam_files {
-        mut_base_freq_map.update_bam_file_by_gene(
+        mut_base_freq_map.update_from_gene(
             mut_file,
             gff_record,
             &args.gene_barcode_tag,
@@ -758,7 +757,7 @@ fn find_sites_with_celltype_stats(
             DnaBaseFreqMap::new_for_celltype(&args.cell_barcode_tag, membership, cell_type);
 
         for wt_file in &args.wt_bam_files {
-            wt_base_freq_map.update_bam_file_by_gene(
+            wt_base_freq_map.update_from_gene(
                 wt_file,
                 gff_record,
                 &args.gene_barcode_tag,
@@ -1141,7 +1140,7 @@ fn estimate_m6a_stat(
     let mut gff = gff_record.clone();
     gff.start = (lb - BAM_READ_PADDING).max(0);
     gff.stop = ub + BAM_READ_PADDING;
-    stat_map.update_bam_file_by_gene(
+    stat_map.update_from_gene(
         bam_file,
         &gff,
         &args.gene_barcode_tag,

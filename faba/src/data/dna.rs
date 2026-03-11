@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Clone, Ord, Hash)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Clone, Copy, Ord, Hash)]
 pub enum Dna {
     A,
     T,
@@ -123,8 +123,8 @@ impl DnaBaseCount {
             .unwrap();
 
         BiAllele {
-            a1: fst.0.clone(),
-            a2: snd.0.clone(),
+            a1: fst.0,
+            a2: snd.0,
             n1: fst.1,
             n2: snd.1,
         }
