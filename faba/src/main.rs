@@ -42,8 +42,8 @@ fn colorize_funnel(s: &str) -> String {
         .replace('/', &"/".truecolor(200, 160, 60).to_string())
         .replace('\\', &"\\".truecolor(200, 160, 60).to_string())
         .replace('|', &"|".truecolor(200, 160, 60).to_string())
-        .replace('-', &"-".truecolor(200, 160, 60).to_string())
-        .replace('>', &">".truecolor(240, 200, 80).to_string())
+        .replace('=', &"=".truecolor(200, 160, 60).to_string())
+        .replace('>', &">".truecolor(200, 170, 60).to_string())
 }
 
 fn colorize_logo_line(line: &str) -> String {
@@ -66,9 +66,10 @@ fn print_logo() {
 
 /// Feature statistics Accumulator for Base-pair-level Analysis
 #[derive(Parser, Debug)]
-#[command(version, about, long_about, term_width = 80)]
+#[command(version, about, long_about = None, term_width = 80,
+    after_help = "Use `faba <COMMAND> --help` for detailed options on each subcommand.")]
 struct Cli {
-    #[arg(short = 'v', long, global = true)]
+    #[arg(short = 'v', long, global = true, help = "Enable verbose logging")]
     verbose: bool,
 
     #[command(subcommand)]
@@ -77,19 +78,43 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Take DART-seq `C->U` (`C->T`) conversion counts
-    #[command(aliases = ["count-dart", "dart"])]
+    /// Quantify DART-seq m6A sites from C-to-T conversions
+    #[command(aliases = ["count-dart", "dart"],
+        long_about = "Quantify DART-seq m6A sites from C-to-T conversions\n\n\
+            Discovers m6A methylation sites by comparing C->T (forward) or\n\
+            G->A (reverse) conversion rates between wild-type and mutant BAM\n\
+            files using binomial tests, then quantifies per-cell methylation\n\
+            at discovered sites.")]
     CountDartSeq(DartSeqCountArgs),
 
-    /// Count the number of reads mapped on each gene
+    /// Count reads per gene for single-cell or bulk RNA-seq
+    #[command(
+        long_about = "Count reads per gene for single-cell or bulk RNA-seq\n\n\
+            Produces a sparse (cells x genes) count matrix from BAM files\n\
+            using GFF gene annotations. Supports 10x-style cell barcodes."
+    )]
     CountGenes(GeneCountArgs),
 
-    /// Quantify alternative polyadenylation (APA) sites at cell level
-    #[command(aliases = ["count-polya", "polya", "apa-mix", "apamix", "apa"])]
+    /// Quantify alternative polyadenylation (APA) sites per cell
+    #[command(aliases = ["count-polya", "polya", "apa-mix", "apamix", "apa"],
+        long_about = "Quantify alternative polyadenylation (APA) sites per cell\n\n\
+            Discovers and quantifies poly(A) site usage from 3'-end sequencing\n\
+            data. The mixture mode implements the SCAPE model.\n\n\
+            Reference:\n  \
+            Zhou et al., \"SCAPE: a mixture model revealing single-cell\n  \
+            polyadenylation diversity and cellular dynamics during cell\n  \
+            differentiation and reprogramming\",\n  \
+            Nucleic Acids Research, 50(11):e66, 2022.\n  \
+            https://doi.org/10.1093/nar/gkac167")]
     CountApa(CountApaArgs),
 
-    /// Genomic coverage of regular intervals
-    #[command(alias = "rd")]
+    /// Compute read depth over genomic intervals
+    #[command(
+        alias = "rd",
+        long_about = "Compute read depth over genomic intervals\n\n\
+            Bins the genome at a given resolution and counts read coverage\n\
+            per cell, producing a sparse (cells x bins) matrix."
+    )]
     ReadDepth(ReadDepthArgs),
 }
 
