@@ -589,7 +589,8 @@ mod tests {
         let file_path = temp_dir.path().join("test_empty.parquet");
         let file_path_str = file_path.to_str().unwrap();
 
-        let result = to_parquet::<GammaMatrix>(&params, (None, None), (None, None), None, file_path_str);
+        let result =
+            to_parquet::<GammaMatrix>(&params, (None, None), (None, None), None, file_path_str);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
     }
