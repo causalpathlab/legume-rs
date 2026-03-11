@@ -21,21 +21,6 @@ use indicatif::ProgressBar;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
-pub(crate) enum ComputeDevice {
-    Cpu,
-    Cuda,
-    Metal,
-}
-
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
-pub(crate) enum AdjMethod {
-    Batch,
-    Residual,
-}
-
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
 enum DecoderType {
     /// Flat topic decoder with softmax dictionary
     Flat,
@@ -755,35 +740,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 ///////////////////////
 // training routines //
 ///////////////////////
-
-pub(crate) struct TrainScores {
-    pub(crate) llik: Vec<f32>,
-    pub(crate) kl: Vec<f32>,
-}
-
-impl TrainScores {
-    pub(crate) fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
-        let mat = Mat::from_columns(&[
-            DVec::from_vec(self.llik.clone()),
-            DVec::from_vec(self.kl.clone()),
-        ]);
-
-        let score_types = vec![
-            "log_likelihood".to_string().into_boxed_str(),
-            "kl_divergence".to_string().into_boxed_str(),
-        ];
-
-        let epochs: Vec<Box<str>> = (0..mat.nrows())
-            .map(|x| (x + 1).to_string().into_boxed_str())
-            .collect();
-
-        mat.to_parquet_with_names(
-            file_path,
-            (Some(&epochs), Some("epoch")),
-            Some(&score_types),
-        )
-    }
-}
 
 /// Configuration for progressive training
 struct ProgressiveTrainConfig<'a> {

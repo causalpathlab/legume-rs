@@ -15,21 +15,6 @@ use indicatif::{ParallelProgressIterator, ProgressBar};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
-enum ComputeDevice {
-    Cpu,
-    Cuda,
-    Metal,
-}
-
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
-enum AdjMethod {
-    Batch,
-    Residual,
-}
-
 #[derive(Args, Debug)]
 pub struct JointTopicArgs {
     #[arg(
@@ -739,35 +724,6 @@ where
 ///////////////////////
 // training routines //
 ///////////////////////
-
-struct TrainScores {
-    llik: Vec<f32>,
-    kl: Vec<f32>,
-}
-
-impl TrainScores {
-    fn to_parquet(&self, file_path: &str) -> anyhow::Result<()> {
-        let mat = Mat::from_columns(&[
-            DVec::from_vec(self.llik.clone()),
-            DVec::from_vec(self.kl.clone()),
-        ]);
-
-        let score_types = vec![
-            "log_likelihood".to_string().into_boxed_str(),
-            "kl_divergence".to_string().into_boxed_str(),
-        ];
-
-        let epochs: Vec<Box<str>> = (0..mat.nrows())
-            .map(|x| (x + 1).to_string().into_boxed_str())
-            .collect();
-
-        mat.to_parquet_with_names(
-            file_path,
-            (Some(&epochs), Some("epoch")),
-            Some(&score_types),
-        )
-    }
-}
 
 /// Configuration for progressive training
 struct ProgressiveTrainConfig<'a> {
