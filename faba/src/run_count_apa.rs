@@ -26,164 +26,145 @@ use std::sync::{Arc, Mutex};
 pub enum ApaMethod {
     /// Pileup-based poly-A site counting (fast, no EM)
     Simple,
-    /// SCAPE EM deconvolution mixture model
+    /// EM mixture model based on the SCAPE framework (Zhou et al., NAR 2022)
     #[default]
     Mixture,
 }
 
 #[derive(Args, Debug)]
+#[command(after_long_help = "CITATION:\n  \
+        The mixture model is based on the SCAPE framework:\n  \
+        Zhou et al., \"SCAPE: a mixture model revealing single-cell\n  \
+        polyadenylation diversity and cellular dynamics during cell\n  \
+        differentiation and reprogramming\",\n  \
+        Nucleic Acids Research, 50(11):e66, 2022.\n  \
+        https://doi.org/10.1093/nar/gkac167")]
 pub struct CountApaArgs {
-    #[arg(
-        value_delimiter = ',',
-        required = true,
-        help = "Input BAM files (comma-separated)"
-    )]
+    /// Input BAM file(s), comma-separated
+    #[arg(value_delimiter = ',', required = true)]
     bam_files: Vec<Box<str>>,
 
-    #[arg(short = 'g', long = "gff", help = "Gene annotation (GFF/GTF) file")]
+    /// Gene annotation file (GFF/GTF)
+    #[arg(short = 'g', long = "gff")]
     gff_file: Option<Box<str>>,
 
-    #[arg(long, default_value = "CB", help = "Cell barcode BAM tag")]
+    /// Cell barcode BAM tag
+    #[arg(long, default_value = "CB")]
     cell_barcode_tag: Box<str>,
 
-    #[arg(long, default_value_t = 10, help = "Minimum poly-A tail length")]
+    /// Minimum soft-clipped poly(A) tail length to call a junction read
+    #[arg(long, default_value_t = 10)]
     polya_min_tail_length: usize,
 
-    #[arg(
-        long,
-        default_value_t = 3,
-        help = "Maximum non-A/T bases in poly-A tail"
-    )]
+    /// Maximum non-A/T bases allowed in poly(A) tail
+    #[arg(long, default_value_t = 3)]
     polya_max_non_a_or_t: usize,
 
-    #[arg(long, default_value_t = 10, help = "Internal priming check window")]
+    /// Window size (bp) for internal priming check
+    #[arg(long, default_value_t = 10)]
     polya_internal_prime_window: usize,
 
-    #[arg(
-        long,
-        default_value_t = 7,
-        help = "Internal priming A/T count threshold"
-    )]
+    /// A/T count threshold to flag internal priming
+    #[arg(long, default_value_t = 7)]
     polya_internal_prime_count: usize,
 
-    #[arg(long, default_value_t = 10, help = "Minimum read coverage at a site")]
+    /// Minimum read coverage at a candidate site
+    #[arg(long, default_value_t = 10)]
     min_coverage: usize,
 
-    #[arg(long, default_value_t = 16, help = "Maximum number of threads")]
+    /// Maximum number of threads
+    #[arg(long, default_value_t = 16)]
     max_threads: usize,
 
-    #[arg(long, default_value_t = 10, help = "Row NNZ cutoff")]
+    /// Minimum non-zero entries per row (site) to keep
+    #[arg(long, default_value_t = 10)]
     row_nnz_cutoff: usize,
 
-    #[arg(long, default_value_t = 1, help = "Column NNZ cutoff")]
+    /// Minimum non-zero entries per column (cell) to keep
+    #[arg(long, default_value_t = 1)]
     column_nnz_cutoff: usize,
 
-    #[arg(short, long, required = true, help = "Output directory")]
+    /// Output directory
+    #[arg(short, long, required = true)]
     output: Box<str>,
 
-    #[arg(long, value_enum, default_value = "zarr", help = "Output backend")]
+    /// Sparse matrix output backend
+    #[arg(long, value_enum, default_value = "zarr")]
     backend: SparseIoBackend,
 
     // --- Method selection ---
-    #[arg(
-        long,
-        value_enum,
-        default_value = "mixture",
-        help = "APA quantification method"
-    )]
+    /// APA quantification method
+    #[arg(long, value_enum, default_value = "mixture")]
     method: ApaMethod,
 
-    // --- Simple-mode-only args ---
-    #[arg(
-        long,
-        default_value = "GX",
-        help = "Gene barcode BAM tag (simple mode)"
-    )]
+    // --- Simple-mode args ---
+    /// Gene barcode BAM tag (simple mode only)
+    #[arg(long, default_value = "GX")]
     gene_barcode_tag: Box<str>,
 
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Resolution for binning poly-A sites in bp (simple mode)"
-    )]
+    /// Bin resolution in bp for poly(A) site grouping (simple mode only)
+    #[arg(long, default_value_t = 10)]
     resolution_bp: usize,
 
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Include reads w/o barcode info (simple mode)"
-    )]
+    /// Include reads without cell barcode (simple mode only)
+    #[arg(long, default_value_t = false)]
     include_missing_barcode: bool,
 
-    #[arg(long, value_enum, help = "BAM record type filter (simple mode)")]
+    /// GFF record type filter (simple mode only)
+    #[arg(long, value_enum)]
     record_type: Option<GffFeatureType>,
 
-    #[arg(long, value_enum, help = "Gene type filter (simple mode)")]
+    /// Gene biotype filter (simple mode only)
+    #[arg(long, value_enum)]
     gene_type: Option<GffGeneType>,
 
-    // --- Mixture-mode-only args ---
-    #[arg(
-        short = 'u',
-        long = "utr-bed",
-        help = "UTR regions BED file (mixture mode, alternative to --gff)"
-    )]
+    // --- Mixture-mode (SCAPE) args ---
+    /// 3'-UTR regions BED file; alternative to --gff (mixture mode)
+    #[arg(short = 'u', long = "utr-bed")]
     utr_bed: Option<Box<str>>,
 
-    #[arg(
-        long,
-        default_value_t = 200,
-        help = "Minimum 3'-UTR length in bp (mixture mode)"
-    )]
+    /// Minimum 3'-UTR length in bp (mixture mode)
+    #[arg(long, default_value_t = 200)]
     min_utr_length: usize,
 
-    #[arg(long, help = "Pre-identified pA sites BED file (mixture mode)")]
+    /// Pre-identified pA sites BED file; skips de novo discovery (mixture mode)
+    #[arg(long)]
     pre_sites: Option<Box<str>>,
 
-    #[arg(long, default_value = "UB", help = "UMI BAM tag (mixture mode)")]
+    /// UMI BAM tag (mixture mode)
+    #[arg(long, default_value = "UB")]
     umi_tag: Box<str>,
 
-    #[arg(long, default_value_t = 300.0, help = "Expected fragment length mean")]
+    /// Expected fragment length mean, mu_f in SCAPE (mixture mode)
+    #[arg(long, default_value_t = 300.0)]
     mu_f: f64,
 
-    #[arg(
-        long,
-        default_value_t = 50.0,
-        help = "Fragment length standard deviation"
-    )]
+    /// Fragment length standard deviation, sigma_f in SCAPE (mixture mode)
+    #[arg(long, default_value_t = 50.0)]
     sigma_f: f64,
 
-    #[arg(long, default_value_t = 10, help = "Theta enumeration step size (bp)")]
+    /// pA site position enumeration step size in bp (mixture mode)
+    #[arg(long, default_value_t = 10)]
     theta_step: usize,
 
-    #[arg(
-        long,
-        default_value_t = 70.0,
-        help = "Maximum beta (pA site dispersion)"
-    )]
+    /// Maximum pA site dispersion beta (mixture mode)
+    #[arg(long, default_value_t = 70.0)]
     max_beta: f64,
 
-    #[arg(long, default_value_t = 10.0, help = "Minimum beta")]
+    /// Minimum pA site dispersion beta (mixture mode)
+    #[arg(long, default_value_t = 10.0)]
     min_beta: f64,
 
-    #[arg(
-        long,
-        default_value_t = 0.01,
-        help = "Minimum component weight before pruning"
-    )]
+    /// Minimum component weight; smaller components are pruned (mixture mode)
+    #[arg(long, default_value_t = 0.01)]
     min_ws: f64,
 
-    #[arg(
-        long,
-        default_value_t = 50,
-        help = "Minimum fragments per UTR to run EM"
-    )]
+    /// Minimum fragments per UTR to attempt EM (mixture mode)
+    #[arg(long, default_value_t = 50)]
     min_fragments: usize,
 
-    #[arg(
-        long,
-        default_value_t = 50.0,
-        help = "Merge distance for nearby candidate pA sites"
-    )]
+    /// Merge distance in bp for nearby candidate pA sites (mixture mode)
+    #[arg(long, default_value_t = 50.0)]
     merge_distance: f64,
 }
 
