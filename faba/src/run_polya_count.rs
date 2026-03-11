@@ -1,5 +1,4 @@
 use crate::common::*;
-use crate::data::dna_stat_traits::*;
 use crate::data::poly_a_stat_map::{PolyASiteArgs, PolyASiteMap};
 use crate::data::util_htslib::*;
 use genomic_data::bed::BedWithGene;
@@ -345,7 +344,7 @@ fn find_polya_sites_in_gene(
 
     // Sweep all BAM files to find poly-A sites
     for bam_file in &args.bam_files {
-        polya_map.update_bam_file_by_gene(
+        polya_map.update_from_gene(
             bam_file,
             gff_record,
             &args.gene_barcode_tag,
@@ -468,7 +467,7 @@ fn collect_polya_counts_at_site(
     gff.start = (position - PADDING).max(0);
     gff.stop = position + PADDING;
 
-    polya_map.update_bam_file_by_gene(
+    polya_map.update_from_gene(
         bam_file,
         &gff,
         &args.gene_barcode_tag,

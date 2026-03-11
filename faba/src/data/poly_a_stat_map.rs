@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-use crate::data::dna_stat_traits::*;
-use crate::data::visitors_htslib::*;
+use crate::data::bam_io;
 use fnv::FnvHashMap as HashMap;
+use genomic_data::gff::GffRecord;
 use genomic_data::sam::*;
 use rust_htslib::bam::record::Cigar;
-use rust_htslib::bam::{self, ext::BamRecordExtensions, record::Aux};
+use rust_htslib::bam::{self, ext::BamRecordExtensions};
 
 pub struct PolyASiteMap {
     position_to_count_with_cell: Option<HashMap<i64, HashMap<CellBarcode, usize>>>,
@@ -29,7 +29,7 @@ impl PolyASiteMap {
             position_to_count_with_cell: Some(HashMap::default()),
             position_to_count: None,
             internal_prime_to_count: HashMap::default(),
-            qc_args: qc_args.clone(),
+            qc_args,
             cell_barcode_tag: Some(cell_barcode_tag.as_bytes().to_vec()),
         }
     }
@@ -39,15 +39,28 @@ impl PolyASiteMap {
             position_to_count_with_cell: None,
             position_to_count: Some(HashMap::default()),
             internal_prime_to_count: HashMap::default(),
-            qc_args: qc_args.clone(),
+            qc_args,
             cell_barcode_tag: None,
         }
     }
-}
 
-impl VisitWithBamOps for PolyASiteMap {}
+    /// Update from BAM records matching a gene barcode
+    pub fn update_from_gene(
+        &mut self,
+        bam_file_path: &str,
+        gff_record: &GffRecord,
+        gene_barcode_tag: &str,
+        include_missing_barcode: bool,
+    ) -> anyhow::Result<()> {
+        bam_io::for_each_record_in_gene(
+            bam_file_path,
+            gff_record,
+            gene_barcode_tag,
+            include_missing_barcode,
+            |rec| self.add_bam_record(rec),
+        )
+    }
 
-impl DnaStatMap for PolyASiteMap {
     /// Update frequency maps
     ///
     /// Parse CIGAR string and get potential poly-A cleavage sites
@@ -129,10 +142,7 @@ impl DnaStatMap for PolyASiteMap {
                 &self.cell_barcode_tag,
                 &mut self.position_to_count_with_cell,
             ) {
-                let cell_barcode = match bam_record.aux(tag) {
-                    Ok(Aux::String(barcode)) => CellBarcode::Barcode(barcode.into()),
-                    _ => CellBarcode::Missing,
-                };
+                let cell_barcode = bam_io::extract_cell_barcode(&bam_record, tag);
 
                 let cell_map = freq_map.entry(poly_a_position).or_default();
                 *cell_map.entry(cell_barcode).or_default() += 1;
@@ -144,7 +154,9 @@ impl DnaStatMap for PolyASiteMap {
             }
         }
     }
-    fn sorted_positions(&self) -> Vec<i64> {
+
+    /// Output sorted genomic positions
+    pub fn sorted_positions(&self) -> Vec<i64> {
         let mut positions: Vec<i64> = if let Some(map) = &self.position_to_count_with_cell {
             map.keys().copied().collect()
         } else if let Some(map) = &self.position_to_count {
@@ -155,9 +167,7 @@ impl DnaStatMap for PolyASiteMap {
         positions.sort_unstable();
         positions
     }
-}
 
-impl PolyASiteMap {
     /// Get cell-level counts at a specific position
     /// Returns None if position doesn't exist or cell barcode tracking is not enabled
     pub fn get_cell_counts_at(&self, position: i64) -> Option<&HashMap<CellBarcode, usize>> {
