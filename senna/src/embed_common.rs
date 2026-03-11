@@ -31,6 +31,7 @@ pub use matrix_util::common_io::file_ext;
 pub use matrix_util::dmatrix_util::concatenate_horizontal;
 
 pub use data_beans_alg::collapse_data::*;
+pub use data_beans_alg::feature_coarsening::*;
 pub use data_beans_alg::random_projection::*;
 
 /// Shared compute device enum for candle-based models
