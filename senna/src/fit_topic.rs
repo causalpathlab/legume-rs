@@ -1,5 +1,4 @@
 use crate::embed_common::*;
-use crate::feature_selection::*;
 use crate::senna_input::*;
 
 use candle_core::{Device, Tensor};
@@ -294,42 +293,6 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        help = "Maximum number of highly variable features",
-        long_help = "Select top N features by log-variance.\n\
-		     If not specified, all features are used.\n\
-		     Skipped if --warm-start is provided."
-    )]
-    max_features: Option<usize>,
-
-    #[arg(
-        long,
-        help = "Pre-computed feature selection file",
-        long_help = "Path to file with pre-selected feature names (one per line).\n\
-		     Takes precedence over --max-features.\n\
-		     Skipped if --warm-start is provided."
-    )]
-    feature_list_file: Option<Box<str>>,
-
-    #[arg(
-        long,
-        alias = "high-sd",
-        help = "Exclude highly expressed features (SD threshold)",
-        long_help = "Exclude features with high mean expression before feature selection.\n\
-		     Features with log1p(mean) > mean + threshold*SD are excluded.\n\
-		     Typical values: 4 or 5.\n\
-		     If not specified, no features are excluded based on expression level."
-    )]
-    exclude_high_expression_sd: Option<f32>,
-
-    #[arg(
-        long,
-        help = "Save feature variance statistics",
-        long_help = "Save computed log-variance for all features to {out}.feature_variance.parquet"
-    )]
-    save_feature_variance: bool,
-
-    #[arg(
-        long,
         default_value_t = 0,
         help = "Cap feature dimension by coarsening",
         long_help = "Cap the feature dimension by grouping co-expressed features into\n\
@@ -399,26 +362,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         batch_files: args.batch_files.clone(),
         preload: args.preload_data,
     })?;
-
-    // Feature selection (if requested)
-    let selected_features: Option<FeatureSelection> = if args.warm_start_proj_file.is_some() {
-        if args.max_features.is_some() || args.feature_list_file.is_some() {
-            info!("Warm-start provided: skipping feature selection (may be incompatible)");
-        }
-        None
-    } else if args.max_features.is_some() || args.feature_list_file.is_some() {
-        Some(select_highly_variable_features(
-            &data_vec,
-            args.max_features,
-            args.feature_list_file.as_deref(),
-            args.save_feature_variance,
-            &args.out,
-            args.block_size,
-            args.exclude_high_expression_sd,
-        )?)
-    } else {
-        None
-    };
 
     // 2. Take projection results by warm start or projecting it again
     let proj_kn = if let Some(proj_file) = args.warm_start_proj_file.as_deref() {
@@ -509,18 +452,12 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    // 4. Feature coarsening (if D' > max_coarse_features)
-    let n_features_full = selected_features
-        .as_ref()
-        .map(|sel| sel.selected_indices.len())
-        .unwrap_or_else(|| data_vec.num_rows());
+    // 4. Feature coarsening (if D > max_coarse_features)
+    let n_features_full = data_vec.num_rows();
 
     let coarsening: Option<FeatureCoarsening> =
         if args.max_coarse_features > 0 && n_features_full > args.max_coarse_features {
-            let mut sketch_ds = finest_collapsed.mu_observed.posterior_mean().clone();
-            if let Some(sel) = &selected_features {
-                sketch_ds = sketch_ds.select_rows(&sel.selected_indices);
-            }
+            let sketch_ds = finest_collapsed.mu_observed.posterior_mean().clone();
             Some(compute_feature_coarsening(
                 &sketch_ds,
                 args.max_coarse_features,
@@ -565,12 +502,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     );
 
     let gene_names = data_vec.row_names()?;
-
-    // Use selected feature names for dictionary if feature selection was applied
-    let output_gene_names = selected_features
-        .as_ref()
-        .map(|sel| sel.selected_names.clone())
-        .unwrap_or_else(|| gene_names.clone());
+    let output_gene_names = gene_names.clone();
 
     // Set up graceful stop flag for SIGINT/SIGTERM
     let stop = Arc::new(AtomicBool::new(false));
@@ -604,7 +536,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 parameters: &parameters,
                 dev: &dev,
                 args,
-                feature_selection: selected_features.as_ref(),
                 feature_coarsening: coarsening.as_ref(),
                 stop: &stop,
             };
@@ -647,7 +578,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 dev: &dev,
                 adj_method: &args.adj_method,
                 minibatch_size: args.minibatch_size,
-                feature_selection: selected_features.as_ref(),
                 feature_coarsening: coarsening.as_ref(),
                 decoder: Some(&decoder),
                 refine_config: refine_config.as_ref(),
@@ -665,7 +595,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 parameters: &parameters,
                 dev: &dev,
                 args,
-                feature_selection: selected_features.as_ref(),
                 feature_coarsening: coarsening.as_ref(),
                 stop: &stop,
             };
@@ -691,7 +620,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 dev: &dev,
                 adj_method: &args.adj_method,
                 minibatch_size: args.minibatch_size,
-                feature_selection: selected_features.as_ref(),
                 feature_coarsening: coarsening.as_ref(),
                 decoder: Some(&decoder),
                 refine_config: refine_config.as_ref(),
@@ -708,7 +636,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 parameters: &parameters,
                 dev: &dev,
                 args,
-                feature_selection: selected_features.as_ref(),
                 feature_coarsening: coarsening.as_ref(),
                 stop: &stop,
             };
@@ -734,7 +661,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 dev: &dev,
                 adj_method: &args.adj_method,
                 minibatch_size: args.minibatch_size,
-                feature_selection: selected_features.as_ref(),
                 feature_coarsening: coarsening.as_ref(),
                 decoder: Some(&decoder),
                 refine_config: refine_config.as_ref(),
@@ -755,18 +681,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         (Some(&cell_names), Some("cell")),
         None,
     )?;
-
-    // Save selected feature list if feature selection was applied
-    if let Some(sel) = &selected_features {
-        use matrix_util::common_io::write_lines;
-        let feature_file = args.out.to_string() + ".selected_features.txt";
-        write_lines(&sel.selected_names, &feature_file)?;
-        info!(
-            "Saved {} selected features to {}",
-            sel.selected_names.len(),
-            feature_file
-        );
-    }
 
     info!("Done");
     Ok(())
@@ -816,7 +730,6 @@ struct ProgressiveTrainConfig<'a> {
     parameters: &'a candle_nn::VarMap,
     dev: &'a Device,
     args: &'a TopicArgs,
-    feature_selection: Option<&'a FeatureSelection>,
     feature_coarsening: Option<&'a FeatureCoarsening>,
     stop: &'a AtomicBool,
 }
@@ -893,9 +806,6 @@ where
         for epoch in (0..level_ep).step_by(config.args.jitter_interval) {
             let mut mixed_nd = collapsed.mu_observed.posterior_sample()?.transpose();
 
-            if let Some(sel) = config.feature_selection {
-                mixed_nd = mixed_nd.select_columns(&sel.selected_indices);
-            }
             if let Some(fc) = config.feature_coarsening {
                 mixed_nd = fc.aggregate_columns_nd(&mixed_nd);
             }
@@ -903,9 +813,6 @@ where
             let clean_nd = collapsed.mu_adjusted.as_ref().map(|x| {
                 let mut ret: Mat = x.posterior_sample().unwrap();
                 ret = ret.transpose();
-                if let Some(sel) = config.feature_selection {
-                    ret = ret.select_columns(&sel.selected_indices);
-                }
                 if let Some(fc) = config.feature_coarsening {
                     ret = fc.aggregate_columns_nd(&ret);
                 }
@@ -915,9 +822,6 @@ where
             let batch_nd = collapsed.mu_residual.as_ref().map(|x| {
                 let mut ret: Mat = x.posterior_sample().unwrap();
                 ret = ret.transpose();
-                if let Some(sel) = config.feature_selection {
-                    ret = ret.select_columns(&sel.selected_indices);
-                }
                 if let Some(fc) = config.feature_coarsening {
                     ret = fc.aggregate_columns_nd(&ret);
                 }
@@ -1033,7 +937,6 @@ pub(crate) struct EvaluateLatentConfig<'a, Dec> {
     pub dev: &'a Device,
     pub adj_method: &'a AdjMethod,
     pub minibatch_size: usize,
-    pub feature_selection: Option<&'a FeatureSelection>,
     pub feature_coarsening: Option<&'a FeatureCoarsening>,
     pub decoder: Option<&'a Dec>,
     pub refine_config: Option<&'a TopicRefinementConfig>,
@@ -1062,9 +965,6 @@ where
     }
     .map(|x| {
         let mut delta_db = x.posterior_mean().clone();
-        if let Some(sel) = config.feature_selection {
-            delta_db = delta_db.select_rows(&sel.selected_indices);
-        }
         if let Some(fc) = config.feature_coarsening {
             delta_db = fc.aggregate_rows_ds(&delta_db);
         }
@@ -1081,7 +981,6 @@ where
     let block_config = EvaluateBlockConfig {
         dev: config.dev,
         delta: delta.as_ref(),
-        feature_selection: config.feature_selection,
         feature_coarsening: config.feature_coarsening,
         decoder: config.decoder,
         refine_config: config.refine_config,
@@ -1131,7 +1030,6 @@ where
 pub(crate) struct EvaluateBlockConfig<'a, Dec> {
     pub dev: &'a Device,
     pub delta: Option<&'a Tensor>,
-    pub feature_selection: Option<&'a FeatureSelection>,
     pub feature_coarsening: Option<&'a FeatureCoarsening>,
     pub decoder: Option<&'a Dec>,
     pub refine_config: Option<&'a TopicRefinementConfig>,
@@ -1158,12 +1056,7 @@ where
     });
 
     // Read as CSC sparse matrix first, apply feature selection, then convert to tensor
-    let mut x_dn = data_vec.read_columns_csc(lb..ub)?;
-
-    // Apply feature selection on sparse matrix
-    if let Some(sel) = config.feature_selection {
-        x_dn = filter_csc_by_rows(&sel.selection_matrix, &x_dn);
-    }
+    let x_dn = data_vec.read_columns_csc(lb..ub)?;
 
     // Aggregate features if coarsening is active
     let x_nd = if let Some(fc) = config.feature_coarsening {
@@ -1208,12 +1101,7 @@ where
     });
 
     // Read as CSC sparse matrix first, apply feature selection, then convert to tensor
-    let mut x_dn = data_vec.read_columns_csc(lb..ub)?;
-
-    // Apply feature selection on sparse matrix
-    if let Some(sel) = config.feature_selection {
-        x_dn = filter_csc_by_rows(&sel.selection_matrix, &x_dn);
-    }
+    let x_dn = data_vec.read_columns_csc(lb..ub)?;
 
     // Aggregate features if coarsening is active
     let x_nd = if let Some(fc) = config.feature_coarsening {
