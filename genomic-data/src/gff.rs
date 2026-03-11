@@ -288,6 +288,12 @@ impl GffRecordMap {
         Ok(Self { records })
     }
 
+    /// Build from an existing gene map (avoids double-parsing when you
+    /// also need exon intervals from the same GFF)
+    pub fn from_map(records: HashMap<GeneId, GffRecord>) -> Self {
+        Self { records }
+    }
+
     pub fn count_gene_types(&self) -> HashMap<GeneType, usize> {
         let gene_type_counts = HashMap::new();
 
@@ -497,6 +503,43 @@ pub struct GffRecord {
     pub gene_id: GeneId,
     pub gene_name: GeneSymbol,
     pub gene_type: GeneType,
+}
+
+/// Build sorted, merged exon intervals per gene from GFF records.
+///
+/// Returns 0-based half-open `(start, end)` coordinates, merged where
+/// overlapping or adjacent. Only records with `FeatureType::Exon` are
+/// considered.
+pub fn build_exon_intervals(records: &[GffRecord]) -> HashMap<GeneId, Vec<(i64, i64)>> {
+    let map: HashMap<GeneId, Vec<(i64, i64)>> = HashMap::new();
+
+    for rec in records.iter() {
+        if rec.feature_type != FeatureType::Exon {
+            continue;
+        }
+        // Convert GFF 1-based inclusive to 0-based half-open
+        let interval = (rec.start - 1, rec.stop);
+        map.entry(rec.gene_id.clone()).or_default().push(interval);
+    }
+
+    // Sort and merge overlapping intervals per gene
+    map.iter_mut().for_each(|mut entry| {
+        let intervals = entry.value_mut();
+        intervals.sort_unstable();
+        let mut merged: Vec<(i64, i64)> = Vec::with_capacity(intervals.len());
+        for &(s, e) in intervals.iter() {
+            if let Some(last) = merged.last_mut() {
+                if s <= last.1 {
+                    last.1 = last.1.max(e);
+                    continue;
+                }
+            }
+            merged.push((s, e));
+        }
+        *intervals = merged;
+    });
+
+    map
 }
 
 /// parse a GFF line to a record
