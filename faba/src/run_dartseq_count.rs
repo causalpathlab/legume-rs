@@ -896,7 +896,10 @@ fn process_all_bam_files_to_backend(
     };
 
     let gene_key = create_gene_key_function(gff_map);
-    let site_key = |x: &BedWithGene| -> Box<str> { format!("{}@m6A", x).into_boxed_str() };
+    let site_key = |x: &BedWithGene| -> Box<str> {
+        let gene_part = gene_key(x);
+        format!("{}_{}_{}_{}/m6A", gene_part, x.chr, x.start, x.stop).into_boxed_str()
+    };
     let take_value = args.value_extractor();
     let cutoffs = args.qc_cutoffs();
 

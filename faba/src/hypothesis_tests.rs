@@ -86,3 +86,66 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pvalue_greater_significant() {
+        // Expected 10% rate (90C/10T), observed 50% rate (50C/50T)
+        let test = BinomTest {
+            expected: BinomialCounts::new(90u64, 10u64),
+            observed: BinomialCounts::new(50u64, 50u64),
+        };
+        let pv = test.pvalue_greater().unwrap();
+        assert!(pv < 0.001, "pvalue_greater should be < 0.001, got {pv}");
+    }
+
+    #[test]
+    fn test_pvalue_greater_nonsignificant() {
+        // Expected 10% rate (90C/10T), observed ~12% rate (88C/12T)
+        let test = BinomTest {
+            expected: BinomialCounts::new(90u64, 10u64),
+            observed: BinomialCounts::new(88u64, 12u64),
+        };
+        let pv = test.pvalue_greater().unwrap();
+        assert!(pv > 0.1, "pvalue_greater should be > 0.1, got {pv}");
+    }
+
+    #[test]
+    fn test_pvalue_less() {
+        // Expected 50% rate, observed only 10% (90C/10T)
+        let test = BinomTest {
+            expected: BinomialCounts::new(50u64, 50u64),
+            observed: BinomialCounts::new(90u64, 10u64),
+        };
+        let pv = test.pvalue_less().unwrap();
+        assert!(pv < 0.001, "pvalue_less should be < 0.001, got {pv}");
+    }
+
+    #[test]
+    fn test_pvalue_at_null() {
+        // Expected and observed both 50/50
+        let test = BinomTest {
+            expected: BinomialCounts::new(50u64, 50u64),
+            observed: BinomialCounts::new(50u64, 50u64),
+        };
+        let pv = test.pvalue_greater().unwrap();
+        assert!(
+            (pv - 0.5).abs() < 0.1,
+            "pvalue_greater at null should be ~0.5, got {pv}"
+        );
+    }
+
+    #[test]
+    fn test_pseudocount() {
+        let c1 = BinomialCounts::with_pseudocount(0u64, 0u64, 1u64);
+        assert_eq!(c1.num_failure, 1);
+        assert_eq!(c1.num_success, 1);
+
+        let c2 = BinomialCounts::with_pseudocount(10u64, 5u64, 2u64);
+        assert_eq!(c2.num_failure, 12);
+        assert_eq!(c2.num_success, 7);
+    }
+}
