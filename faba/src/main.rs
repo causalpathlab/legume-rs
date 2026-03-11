@@ -1,3 +1,4 @@
+mod apa_mix;
 mod cell_clustering;
 mod common;
 mod dartseq_io;
@@ -7,17 +8,17 @@ mod data;
 mod gene_count;
 mod hypothesis_tests;
 mod read_coverage;
+mod run_count_apa;
 mod run_dartseq_count;
 mod run_gene_count;
-mod run_polya_count;
 mod run_read_depth;
 mod scan_pwm;
 
 use crate::common::*;
 use colored::Colorize;
+use run_count_apa::*;
 use run_dartseq_count::*;
 use run_gene_count::*;
-use run_polya_count::*;
 use run_read_depth::*;
 // use scan_pwm::*; not ready yet
 
@@ -83,9 +84,9 @@ enum Commands {
     /// Count the number of reads mapped on each gene
     CountGenes(GeneCountArgs),
 
-    /// Count poly-A sites at cell level
-    #[command(aliases = ["count-polya", "polya"])]
-    CountPolyA(PolyACountArgs),
+    /// Quantify alternative polyadenylation (APA) sites at cell level
+    #[command(aliases = ["count-polya", "polya", "apa-mix", "apamix", "apa"])]
+    CountApa(CountApaArgs),
 
     /// Genomic coverage of regular intervals
     #[command(alias = "rd")]
@@ -114,8 +115,8 @@ fn main() -> anyhow::Result<()> {
         Commands::CountGenes(args) => {
             run_gene_count(args)?;
         }
-        Commands::CountPolyA(args) => {
-            run_count_polya(args)?;
+        Commands::CountApa(args) => {
+            run_count_apa(args)?;
         }
     }
 

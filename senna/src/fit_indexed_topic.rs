@@ -1,6 +1,5 @@
 use crate::embed_common::*;
 use crate::feature_selection::*;
-use crate::fit_topic::{AdjMethod, ComputeDevice, TrainScores};
 use crate::senna_input::*;
 
 use candle_core::{Device, Tensor};

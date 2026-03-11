@@ -3,10 +3,7 @@ use crate::routines_post_process::*;
 use crate::routines_pre_process::*;
 
 use candle_util::candle_model_traits::EncoderModuleT;
-use dashmap::DashMap as HashMap;
 use data_beans_alg::normalization::NormalizeDistance;
-use matrix_util::common_io::extension;
-use matrix_util::dmatrix_util::concatenate_horizontal;
 
 use candle_util::candle_data_loader::*;
 use candle_util::candle_decoder_topic::*;
@@ -17,13 +14,6 @@ use candle_util::candle_model_traits::DecoderModuleT;
 use candle_util::candle_vae_inference::*;
 use indicatif::ProgressBar;
 
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
-enum ComputeDevice {
-    Cpu,
-    Cuda,
-    Metal,
-}
 
 #[derive(Args, Debug)]
 pub struct DeconvArgs {
@@ -120,68 +110,6 @@ pub struct DeconvArgs {
 
 }
 
-struct BulkDataOut {
-    genes: Vec<Box<str>>,
-    samples: Vec<Box<str>>,
-    data: Mat,
-}
-
-/// a helper function to read bulk data with the matching row names
-/// * `bulk_data_files` - bulk file names
-/// * `sc_data` - opened `SparseIoVec`
-///
-fn read_bulk_data_consistent_with_sc(
-    bulk_data_files: &[Box<str>],
-    sc_data: &SparseIoVec,
-) -> anyhow::Result<BulkDataOut> {
-    let genes = sc_data.row_names()?;
-    let gene_to_position: HashMap<Box<str>, usize> = genes
-        .iter()
-        .enumerate()
-        .map(|(i, x)| (x.clone(), i))
-        .collect();
-
-    let ngenes = gene_to_position.len();
-    info!("use {} genes as common features", ngenes);
-
-    let mut samples = vec![];
-    let mut bulk_data_vec = vec![];
-
-    for bulk_file in bulk_data_files {
-        let MatWithNames {
-            rows: raw_genes,
-            cols: raw_samples,
-            mat: raw_ds,
-        } = match extension(bulk_file.as_ref())?.as_ref() {
-            "parquet" => Mat::from_parquet(bulk_file.as_ref())?,
-            _ => Mat::read_data(bulk_file.as_ref(), &['\t', ','], None, Some(0), None, None)?,
-        };
-
-        let ncols = raw_samples.len();
-
-        let mut padded_ds = Mat::zeros(ngenes, ncols);
-        for (i, g) in raw_genes.iter().enumerate() {
-            if let Some(r) = gene_to_position.get(g) {
-                padded_ds.row_mut(*r.value()).copy_from(&raw_ds.row(i));
-            }
-        }
-
-        samples.extend(raw_samples);
-        bulk_data_vec.push(padded_ds);
-    }
-    let bulk_data = concatenate_horizontal(&bulk_data_vec)?;
-
-    info!(
-        "Read bulk data {} genes x {} samples",
-        ngenes,
-        samples.len()
-    );
-    Ok(BulkDataOut {
-        genes,
-        samples,
-        data: bulk_data,
-    })
-}
 
 /// a master function to perform the deconvolution of bulk data files
 ///
@@ -202,7 +130,7 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
         genes: bulk_genes,
         samples: bulk_samples,
         data: bulk_data,
-    } = read_bulk_data_consistent_with_sc(&args.bulk_data_files, &sc_data)?;
+    } = read_bulk_data_aligned(&args.bulk_data_files, &sc_data.row_names()?)?;
 
     if bulk_genes != sc_data.row_names()? {
         return Err(anyhow::anyhow!("bulk and sc data gene names should match"));

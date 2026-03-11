@@ -274,3 +274,253 @@ impl<'a> DartSeqSifter<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    /// Create a temp FASTA with a single chromosome "chr1" containing `seq`,
+    /// and build its .fai index via rust_htslib.
+    fn create_test_fasta(seq: &str) -> (NamedTempFile, faidx::Reader) {
+        let mut f = NamedTempFile::with_suffix(".fa").unwrap();
+        writeln!(f, ">chr1").unwrap();
+        writeln!(f, "{}", seq).unwrap();
+        f.flush().unwrap();
+
+        let path = f.path().to_str().unwrap().to_string();
+        let reader = faidx::Reader::from_path(&path).unwrap();
+        (f, reader)
+    }
+
+    /// Build a HashMap<i64, DnaBaseCount> from (pos, base, count) tuples.
+    fn build_freq_map(entries: &[(i64, Dna, usize)]) -> HashMap<i64, DnaBaseCount> {
+        let mut map = HashMap::default();
+        for &(pos, base, count) in entries {
+            let freq: &mut DnaBaseCount = map.entry(pos).or_default();
+            freq.add(Some(&base), count);
+        }
+        map
+    }
+
+    fn make_sifter<'a>(faidx: &'a faidx::Reader) -> DartSeqSifter<'a> {
+        DartSeqSifter {
+            faidx,
+            chr: "chr1",
+            min_coverage: 10,
+            min_conversion: 5,
+            pseudocount: 1,
+            max_pvalue_cutoff: 0.05,
+            check_r_site: true,
+            candidate_sites: Vec::new(),
+        }
+    }
+
+    // ── Forward sweep tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_forward_sweep_discovers_rac_site() {
+        //                  0123456789012
+        let seq = "NNNNNNNNGAC";
+        // positions:       8=G(R), 9=A(m6A), 10=C(conv)
+        let (_f, reader) = create_test_fasta(seq);
+        let mut sifter = make_sifter(&reader);
+
+        // WT: high conversion C→T at pos 10
+        let wt = build_freq_map(&[(10, Dna::C, 20), (10, Dna::T, 80)]);
+        // MUT: low conversion (background)
+        let mt = build_freq_map(&[(10, Dna::C, 90), (10, Dna::T, 10)]);
+
+        let positions: Vec<i64> = (0..=10).collect();
+        sifter.forward_sweep(&positions, &wt, Some(&mt));
+
+        assert_eq!(sifter.candidate_sites.len(), 1);
+        let site = &sifter.candidate_sites[0];
+        assert_eq!(site.m6a_pos, 9);
+        assert_eq!(site.conversion_pos, 10);
+        assert!(site.pv < 0.01, "pv should be < 0.01, got {}", site.pv);
+    }
+
+    #[test]
+    fn test_forward_sweep_rejects_non_rac() {
+        //                  0123456789012
+        // T at pos 8 → not R={A,G}
+        let seq = "NNNNNNNNTAC";
+        let (_f, reader) = create_test_fasta(seq);
+        let mut sifter = make_sifter(&reader);
+
+        let wt = build_freq_map(&[(10, Dna::C, 20), (10, Dna::T, 80)]);
+        let mt = build_freq_map(&[(10, Dna::C, 90), (10, Dna::T, 10)]);
+
+        let positions: Vec<i64> = (0..=10).collect();
+        sifter.forward_sweep(&positions, &wt, Some(&mt));
+
+        assert_eq!(
+            sifter.candidate_sites.len(),
+            0,
+            "TAC should not match RAC pattern"
+        );
+    }
+
+    // ── Backward sweep tests ────────────────────────────────────────
+
+    #[test]
+    fn test_backward_sweep_discovers_gty_site() {
+        //                  0123456789012
+        // GTY at pos 8=G(conv), 9=T(m6A), 10=C(Y)
+        let seq = "NNNNNNNNGTC";
+        let (_f, reader) = create_test_fasta(seq);
+        let mut sifter = make_sifter(&reader);
+
+        // WT: high conversion G→A at pos 8
+        let wt = build_freq_map(&[(8, Dna::G, 20), (8, Dna::A, 80)]);
+        // MUT: low conversion
+        let mt = build_freq_map(&[(8, Dna::G, 90), (8, Dna::A, 10)]);
+
+        let positions: Vec<i64> = (0..=10).collect();
+        sifter.backward_sweep(&positions, &wt, Some(&mt));
+
+        assert_eq!(sifter.candidate_sites.len(), 1);
+        let site = &sifter.candidate_sites[0];
+        assert_eq!(site.m6a_pos, 9);
+        assert_eq!(site.conversion_pos, 8);
+        assert!(site.pv < 0.01, "pv should be < 0.01, got {}", site.pv);
+    }
+
+    // ── Coverage / conversion thresholds ────────────────────────────
+
+    #[test]
+    fn test_sweep_respects_min_coverage() {
+        let seq = "NNNNNNNNGAC";
+        let (_f, reader) = create_test_fasta(seq);
+        let mut sifter = make_sifter(&reader);
+        sifter.min_coverage = 10;
+
+        // Only 5 total WT reads — below min_coverage
+        let wt = build_freq_map(&[(10, Dna::C, 1), (10, Dna::T, 4)]);
+        let mt = build_freq_map(&[(10, Dna::C, 90), (10, Dna::T, 10)]);
+
+        let positions: Vec<i64> = (0..=10).collect();
+        sifter.forward_sweep(&positions, &wt, Some(&mt));
+
+        assert_eq!(
+            sifter.candidate_sites.len(),
+            0,
+            "Should reject when WT coverage < min_coverage"
+        );
+    }
+
+    #[test]
+    fn test_sweep_respects_min_conversion() {
+        let seq = "NNNNNNNNGAC";
+        let (_f, reader) = create_test_fasta(seq);
+        let mut sifter = make_sifter(&reader);
+        sifter.min_conversion = 5;
+
+        // Only 3 T reads (conversions) — below min_conversion=5
+        let wt = build_freq_map(&[(10, Dna::C, 97), (10, Dna::T, 3)]);
+        let mt = build_freq_map(&[(10, Dna::C, 99), (10, Dna::T, 1)]);
+
+        let positions: Vec<i64> = (0..=10).collect();
+        sifter.forward_sweep(&positions, &wt, Some(&mt));
+
+        assert_eq!(
+            sifter.candidate_sites.len(),
+            0,
+            "Should reject when conversion count < min_conversion"
+        );
+    }
+
+    // ── No-mutant mode ──────────────────────────────────────────────
+
+    #[test]
+    fn test_forward_sweep_no_mutant() {
+        let seq = "NNNNNNNNGAC";
+        let (_f, reader) = create_test_fasta(seq);
+        let mut sifter = make_sifter(&reader);
+
+        let wt = build_freq_map(&[(10, Dna::C, 20), (10, Dna::T, 80)]);
+
+        let positions: Vec<i64> = (0..=10).collect();
+        sifter.forward_sweep(&positions, &wt, None);
+
+        assert_eq!(sifter.candidate_sites.len(), 1);
+        let site = &sifter.candidate_sites[0];
+        assert_eq!(site.m6a_pos, 9);
+        assert_eq!(site.pv, 0.0, "No-mutant mode should report pv=0.0");
+    }
+
+    // ── Multiple sites with varying strength ────────────────────────
+
+    #[test]
+    fn test_multiple_sites_varying_strength() {
+        // Three RAC motifs at different positions
+        //  pos: 0  1  2  3  4  5  6  7  8
+        //       G  A  C  G  A  C  G  A  C
+        let seq = "GACGACGAC";
+        let (_f, reader) = create_test_fasta(seq);
+        let mut sifter = make_sifter(&reader);
+        sifter.max_pvalue_cutoff = 0.01;
+
+        // Site 1 (conv=2): strong — 80% conversion in WT vs 10% in MUT
+        // Site 2 (conv=5): moderate — 60% conversion in WT vs 10% in MUT
+        // Site 3 (conv=8): weak — 15% conversion in WT vs 10% in MUT
+        let wt = build_freq_map(&[
+            (2, Dna::C, 20),
+            (2, Dna::T, 80),
+            (5, Dna::C, 40),
+            (5, Dna::T, 60),
+            (8, Dna::C, 85),
+            (8, Dna::T, 15),
+        ]);
+        let mt = build_freq_map(&[
+            (2, Dna::C, 90),
+            (2, Dna::T, 10),
+            (5, Dna::C, 90),
+            (5, Dna::T, 10),
+            (8, Dna::C, 90),
+            (8, Dna::T, 10),
+        ]);
+
+        let positions: Vec<i64> = (0..=8).collect();
+        sifter.forward_sweep(&positions, &wt, Some(&mt));
+
+        // Strong and moderate should pass; weak should not
+        assert_eq!(
+            sifter.candidate_sites.len(),
+            2,
+            "Expected 2 significant sites, got {}",
+            sifter.candidate_sites.len()
+        );
+        let conv_positions: Vec<i64> = sifter
+            .candidate_sites
+            .iter()
+            .map(|s| s.conversion_pos)
+            .collect();
+        assert!(conv_positions.contains(&2));
+        assert!(conv_positions.contains(&5));
+    }
+
+    // ── Non-consecutive positions ───────────────────────────────────
+
+    #[test]
+    fn test_nonconsecutive_positions_skip() {
+        let seq = "NNNNNNNNNNGAC";
+        let (_f, reader) = create_test_fasta(seq);
+        let mut sifter = make_sifter(&reader);
+
+        let wt = build_freq_map(&[(10, Dna::C, 20), (10, Dna::T, 80)]);
+        let mt = build_freq_map(&[(10, Dna::C, 90), (10, Dna::T, 10)]);
+
+        // Gap: positions [5, 9, 10] — conv_site(10) - r_site(5) = 5 ≠ 2
+        let positions = vec![5i64, 9, 10];
+        sifter.forward_sweep(&positions, &wt, Some(&mt));
+
+        assert_eq!(
+            sifter.candidate_sites.len(),
+            0,
+            "Non-consecutive positions should yield no sites"
+        );
+    }
+}

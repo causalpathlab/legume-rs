@@ -588,13 +588,6 @@ fn display_annotation_histogram(annot: &Mat, annot_names: &[Box<str>]) {
     eprintln!();
 }
 
-fn read_mat(file_path: &str) -> anyhow::Result<MatWithNames<Mat>> {
-    Ok(match file_ext(file_path)?.as_ref() {
-        "parquet" => Mat::from_parquet(file_path)?,
-        _ => Mat::read_data(file_path, &['\t', ','], None, Some(0), None, None)?,
-    })
-}
-
 fn read_marker_gene_info(file_path: &str) -> anyhow::Result<HashMap<Box<str>, Box<str>>> {
     let ReadLinesOut { lines, header: _ } = read_lines_of_words_delim(file_path, &['\t', ','], -1)?;
 

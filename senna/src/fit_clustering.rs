@@ -4,7 +4,6 @@
 
 use crate::cluster::*;
 use crate::embed_common::*;
-use matrix_util::common_io::*;
 
 /// Clustering method CLI enum
 #[derive(ValueEnum, Clone, Debug, Default, PartialEq)]
@@ -144,7 +143,7 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
         rows: cell_names,
         cols: _feature_names,
         mat: latent,
-    } = read_matrix(&args.latent)?;
+    } = read_mat(&args.latent)?;
 
     info!(
         "Loaded latent representation: {} cells × {} features",
@@ -227,14 +226,6 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
     info!("Wrote cluster assignments to {}", output_file);
 
     Ok(())
-}
-
-/// Helper: read matrix file (parquet or text)
-fn read_matrix(file_path: &str) -> anyhow::Result<MatWithNames<Mat>> {
-    Ok(match file_ext(file_path)?.as_ref() {
-        "parquet" => Mat::from_parquet(file_path)?,
-        _ => Mat::read_data(file_path, &['\t', ','], None, Some(0), None, None)?,
-    })
 }
 
 /// Write cluster assignments to parquet
