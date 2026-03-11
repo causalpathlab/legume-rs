@@ -1,7 +1,7 @@
 use crate::common::*;
+use crate::data::bam_io;
 use crate::data::util_htslib::*;
-use crate::data::visitors_htslib::*;
-use rust_htslib::bam::{self, record::Aux};
+use rust_htslib::bam;
 
 use fnv::FnvHashMap as HashMap;
 
@@ -117,13 +117,9 @@ fn count_read_per_gene(
     let mut read_counter = ReadCounter::new(&args.cell_barcode_tag);
 
     for file in &args.bam_files {
-        read_counter.visit_bam_by_gene(
-            file,
-            rec,
-            &args.gene_barcode_tag,
-            false,
-            &ReadCounter::update,
-        )?;
+        bam_io::for_each_record_in_gene(file, rec, &args.gene_barcode_tag, false, |bam_record| {
+            read_counter.count(bam_record);
+        })?;
     }
 
     Ok(read_counter
@@ -137,8 +133,6 @@ struct ReadCounter<'a> {
     cell_to_count: HashMap<CellBarcode, usize>,
     cell_barcode_tag: &'a str,
 }
-
-impl VisitWithBamOps for ReadCounter<'_> {}
 
 impl<'a> ReadCounter<'a> {
     fn new(cell_barcode_tag: &'a str) -> Self {
@@ -155,31 +149,9 @@ impl<'a> ReadCounter<'a> {
             .collect()
     }
 
-    fn update(
-        &mut self,
-        gff_record: &GffRecord,
-        gene_barcode_tag: &str,
-        include_missing_barcode: bool,
-        bam_record: bam::Record,
-    ) {
-        let gene_id_found = match bam_record.aux(gene_barcode_tag.as_bytes()) {
-            Ok(Aux::String(id)) => match parse_ensembl_id(id) {
-                Some(id) => GeneId::Ensembl(id.into()),
-                _ => GeneId::Missing,
-            },
-            _ => GeneId::Missing,
-        };
-
-        if gene_id_found == gff_record.gene_id
-            || (include_missing_barcode && gene_id_found == GeneId::Missing)
-        {
-            let cell_barcode = match bam_record.aux(self.cell_barcode_tag.as_bytes()) {
-                Ok(Aux::String(barcode)) => CellBarcode::Barcode(barcode.into()),
-                _ => CellBarcode::Missing,
-            };
-
-            let nreads = self.cell_to_count.entry(cell_barcode).or_default();
-            *nreads += 1;
-        }
+    fn count(&mut self, bam_record: bam::Record) {
+        let cell_barcode =
+            bam_io::extract_cell_barcode(&bam_record, self.cell_barcode_tag.as_bytes());
+        *self.cell_to_count.entry(cell_barcode).or_default() += 1;
     }
 }

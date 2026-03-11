@@ -1,111 +1,37 @@
 #![allow(dead_code)]
 
+use crate::data::bam_io;
 use crate::data::cell_membership::CellMembership;
 use crate::data::dna::*;
-use crate::data::dna_stat_traits::*;
-use crate::data::visitors_htslib::*;
+use genomic_data::bed::Bed;
+use genomic_data::gff::GffRecord;
 use genomic_data::sam::*;
 
-use rust_htslib::bam::{self, ext::BamRecordExtensions, record::Aux};
+use rust_htslib::bam::{self, ext::BamRecordExtensions};
 
 pub use fnv::FnvHashMap as HashMap;
 
-pub struct DnaBaseFreqMap<'a> {
-    position_to_count_with_cell: Option<HashMap<i64, HashMap<CellBarcode, DnaBaseCount>>>,
-    position_to_count: Option<HashMap<i64, DnaBaseCount>>,
-    cell_barcode_tag: Option<Vec<u8>>,
-    anchor_position: Option<i64>,
-    anchor_base: Option<Dna>,
-    cell_membership: Option<&'a CellMembership>,
-    /// Optional target cell type - if set, only cells of this type pass the filter
-    target_celltype: Option<Box<str>>,
+pub enum CountMode<'a> {
+    /// Marginal/bulk statistics only — no cell barcode tracking
+    Marginal { counts: HashMap<i64, DnaBaseCount> },
+    /// Per-cell statistics with optional membership filter
+    PerCell {
+        counts: HashMap<i64, HashMap<CellBarcode, DnaBaseCount>>,
+        cell_barcode_tag: Vec<u8>,
+        cell_membership: Option<&'a CellMembership>,
+    },
+    /// Aggregated marginal counts filtered to a specific cell type
+    CellTypeFiltered {
+        counts: HashMap<i64, DnaBaseCount>,
+        cell_barcode_tag: Vec<u8>,
+        cell_membership: &'a CellMembership,
+        target_celltype: Box<str>,
+    },
 }
 
-impl<'a> VisitWithBamOps for DnaBaseFreqMap<'a> {}
-
-impl<'a> DnaStatMap for DnaBaseFreqMap<'a> {
-    fn add_bam_record(&mut self, bam_record: bam::Record) {
-        let seq = bam_record.seq().as_bytes();
-
-        // Helper closure to update frequency maps
-        let update_freq_map = |map: &mut HashMap<_, _>, cell_barcode: Option<CellBarcode>| {
-            for [rpos, gpos] in bam_record.aligned_pairs() {
-                let base = Dna::from_byte(seq[rpos as usize]);
-                let genome_pos = gpos;
-                let freq_map: &mut HashMap<CellBarcode, DnaBaseCount> =
-                    map.entry(genome_pos).or_default();
-                let key = cell_barcode.clone().unwrap_or(CellBarcode::Missing);
-                let freq = freq_map.entry(key).or_default();
-                freq.add(base.as_ref(), 1);
-            }
-        };
-
-        // Records with cell barcode information
-        if let (Some(tag), Some(freq_map)) = (
-            &self.cell_barcode_tag,
-            &mut self.position_to_count_with_cell,
-        ) {
-            let cell_barcode = match bam_record.aux(tag) {
-                Ok(Aux::String(barcode)) => Some(CellBarcode::Barcode(barcode.into())),
-                _ => Some(CellBarcode::Missing),
-            };
-
-            let anchor_match = if let (Some(anchor_base), Some(anchor_pos)) =
-                (&self.anchor_base, self.anchor_position)
-            {
-                bam_record.aligned_pairs().any(|[rpos, gpos]| {
-                    Dna::from_byte(seq[rpos as usize])
-                        .is_some_and(|b| anchor_pos == gpos && b == *anchor_base)
-                })
-            } else {
-                true
-            };
-
-            // Check cell membership if filter is active
-            let passes_membership = if let Some(membership) = &self.cell_membership {
-                if let Some(ref cb) = cell_barcode {
-                    if let Some(ref target) = self.target_celltype {
-                        // Filter for specific cell type
-                        membership.matches_celltype(cb, target)
-                    } else {
-                        // Just check membership (any cell type)
-                        membership.matches_barcode(cb).is_some()
-                    }
-                } else {
-                    false
-                }
-            } else {
-                true // No filter active
-            };
-
-            if anchor_match && passes_membership {
-                update_freq_map(freq_map, cell_barcode);
-            }
-        }
-
-        // just keeping the marginal frequencies
-        if let Some(map) = &mut self.position_to_count {
-            for [rpos, gpos] in bam_record.aligned_pairs() {
-                let base = Dna::from_byte(seq[rpos as usize]);
-                let genome_pos = gpos;
-                let freq = map.entry(genome_pos).or_insert_with(DnaBaseCount::new);
-                freq.add(base.as_ref(), 1);
-            }
-        }
-    }
-
-    fn sorted_positions(&self) -> Vec<i64> {
-        let mut ret = if let Some(map) = &self.position_to_count {
-            map.keys().copied().collect::<Vec<_>>()
-        } else if let Some(map) = &self.position_to_count_with_cell {
-            map.keys().copied().collect::<Vec<_>>()
-        } else {
-            vec![]
-        };
-        ret.sort();
-        ret.dedup();
-        ret
-    }
+pub struct DnaBaseFreqMap<'a> {
+    mode: CountMode<'a>,
+    anchor: Option<(i64, Dna)>,
 }
 
 impl<'a> Default for DnaBaseFreqMap<'a> {
@@ -115,7 +41,18 @@ impl<'a> Default for DnaBaseFreqMap<'a> {
 }
 
 impl<'a> DnaBaseFreqMap<'a> {
-    /// empty frequency map, keeping track of cell barcodes
+    /// Empty frequency map without keeping track of cell barcode
+    /// (computes marginal/bulk statistics only)
+    pub fn new() -> Self {
+        Self {
+            mode: CountMode::Marginal {
+                counts: HashMap::default(),
+            },
+            anchor: None,
+        }
+    }
+
+    /// Empty frequency map, keeping track of cell barcodes
     ///
     /// * `cell_barcode_tag` - tag word, e.g., "CB" in 10x
     /// * `cell_membership` - optional cell membership filter
@@ -124,13 +61,12 @@ impl<'a> DnaBaseFreqMap<'a> {
         cell_membership: Option<&'a CellMembership>,
     ) -> Self {
         Self {
-            position_to_count_with_cell: Some(HashMap::default()),
-            position_to_count: None,
-            cell_barcode_tag: Some(cell_barcode_tag.as_bytes().to_vec()),
-            anchor_position: None,
-            anchor_base: None,
-            cell_membership,
-            target_celltype: None,
+            mode: CountMode::PerCell {
+                counts: HashMap::default(),
+                cell_barcode_tag: cell_barcode_tag.as_bytes().to_vec(),
+                cell_membership,
+            },
+            anchor: None,
         }
     }
 
@@ -146,27 +82,13 @@ impl<'a> DnaBaseFreqMap<'a> {
         target_celltype: &str,
     ) -> Self {
         Self {
-            position_to_count_with_cell: None,
-            position_to_count: Some(HashMap::default()),
-            cell_barcode_tag: Some(cell_barcode_tag.as_bytes().to_vec()),
-            anchor_position: None,
-            anchor_base: None,
-            cell_membership: Some(cell_membership),
-            target_celltype: Some(target_celltype.into()),
-        }
-    }
-
-    /// empty frequency map without keeping track of cell barcode
-    /// (computes marginal/bulk statistics only)
-    pub fn new() -> Self {
-        Self {
-            position_to_count_with_cell: None,
-            position_to_count: Some(HashMap::default()),
-            cell_barcode_tag: None,
-            anchor_position: None,
-            anchor_base: None,
-            cell_membership: None,
-            target_celltype: None,
+            mode: CountMode::CellTypeFiltered {
+                counts: HashMap::default(),
+                cell_barcode_tag: cell_barcode_tag.as_bytes().to_vec(),
+                cell_membership,
+                target_celltype: target_celltype.into(),
+            },
+            anchor: None,
         }
     }
 
@@ -174,26 +96,148 @@ impl<'a> DnaBaseFreqMap<'a> {
     /// - `pos` can be m6A genomic position
     /// - `base` can be the corresponding DNA base, such as `A`
     pub fn set_anchor_position(&mut self, loc: i64, base: Dna) {
-        self.anchor_position = Some(loc);
-        self.anchor_base = Some(base);
+        self.anchor = Some((loc, base));
     }
 
-    /// frequency stratified by cell barcodes on a genomic position `pos`
+    /// Update from BAM records in a BED region
+    pub fn update_from_region(&mut self, bam_file_path: &str, region: &Bed) -> anyhow::Result<()> {
+        bam_io::for_each_record_in_region(bam_file_path, region, |_chr, rec| {
+            self.add_bam_record(rec);
+        })
+    }
+
+    /// Update from BAM records matching a gene barcode
+    pub fn update_from_gene(
+        &mut self,
+        bam_file_path: &str,
+        gff_record: &GffRecord,
+        gene_barcode_tag: &str,
+        include_missing_barcode: bool,
+    ) -> anyhow::Result<()> {
+        bam_io::for_each_record_in_gene(
+            bam_file_path,
+            gff_record,
+            gene_barcode_tag,
+            include_missing_barcode,
+            |rec| self.add_bam_record(rec),
+        )
+    }
+
+    /// Accumulate base frequencies from aligned pairs into a marginal count map.
+    fn accumulate_marginal(
+        seq: &[u8],
+        bam_record: &bam::Record,
+        counts: &mut HashMap<i64, DnaBaseCount>,
+    ) {
+        for [rpos, gpos] in bam_record.aligned_pairs() {
+            let base = Dna::from_byte(seq[rpos as usize]);
+            let freq = counts.entry(gpos).or_default();
+            freq.add(base.as_ref(), 1);
+        }
+    }
+
+    fn add_bam_record(&mut self, bam_record: bam::Record) {
+        let seq = bam_record.seq().as_bytes();
+
+        match &mut self.mode {
+            CountMode::Marginal { counts } => {
+                Self::accumulate_marginal(&seq, &bam_record, counts);
+            }
+
+            CountMode::PerCell {
+                counts,
+                cell_barcode_tag,
+                cell_membership,
+            } => {
+                let cell_barcode = bam_io::extract_cell_barcode(&bam_record, cell_barcode_tag);
+
+                let passes_membership = if let Some(membership) = cell_membership {
+                    membership.matches_barcode(&cell_barcode).is_some()
+                } else {
+                    true
+                };
+
+                if !passes_membership {
+                    return;
+                }
+
+                // Single pass: check anchor while accumulating counts.
+                // If anchor is set and not matched by end, discard the accumulated data.
+                let anchor = self.anchor;
+                let mut anchor_matched = anchor.is_none();
+                let mut pending: Vec<(i64, Option<Dna>)> = Vec::new();
+
+                for [rpos, gpos] in bam_record.aligned_pairs() {
+                    let base = Dna::from_byte(seq[rpos as usize]);
+                    pending.push((gpos, base));
+                    if let Some((anchor_pos, anchor_base)) = anchor {
+                        if gpos == anchor_pos && base.is_some_and(|b| b == anchor_base) {
+                            anchor_matched = true;
+                        }
+                    }
+                }
+
+                if anchor_matched {
+                    for (gpos, base) in pending {
+                        let freq_map: &mut HashMap<CellBarcode, DnaBaseCount> =
+                            counts.entry(gpos).or_default();
+                        let freq = freq_map.entry(cell_barcode.clone()).or_default();
+                        freq.add(base.as_ref(), 1);
+                    }
+                }
+            }
+
+            CountMode::CellTypeFiltered {
+                counts,
+                cell_barcode_tag,
+                cell_membership,
+                target_celltype,
+            } => {
+                let cell_barcode = bam_io::extract_cell_barcode(&bam_record, cell_barcode_tag);
+
+                if cell_membership.matches_celltype(&cell_barcode, target_celltype) {
+                    Self::accumulate_marginal(&seq, &bam_record, counts);
+                }
+            }
+        }
+    }
+
+    /// Output sorted genomic positions
+    pub fn sorted_positions(&self) -> Vec<i64> {
+        let mut ret: Vec<i64> = match &self.mode {
+            CountMode::Marginal { counts } => counts.keys().copied().collect(),
+            CountMode::PerCell { counts, .. } => counts.keys().copied().collect(),
+            CountMode::CellTypeFiltered { counts, .. } => counts.keys().copied().collect(),
+        };
+        ret.sort();
+        ret
+    }
+
+    /// Frequency stratified by cell barcodes on a genomic position `pos`
     pub fn stratified_frequency_at(&self, pos: i64) -> Option<&HashMap<CellBarcode, DnaBaseCount>> {
-        self.position_to_count_with_cell
-            .as_ref()
-            .and_then(|map| map.get(&pos))
+        match &self.mode {
+            CountMode::PerCell { counts, .. } => counts.get(&pos),
+            _ => None,
+        }
     }
 
-    /// marginal frequency on a genomic position `pos`
+    /// Marginal frequency on a genomic position `pos`
     pub fn marginal_frequency_at(&self, pos: i64) -> Option<&DnaBaseCount> {
-        self.position_to_count
-            .as_ref()
-            .and_then(|map| map.get(&pos))
+        match &self.mode {
+            CountMode::Marginal { counts } | CountMode::CellTypeFiltered { counts, .. } => {
+                counts.get(&pos)
+            }
+            _ => None,
+        }
     }
 
-    /// marginal frequency
+    /// Marginal frequency map
     pub fn marginal_frequency_map(&self) -> Option<&HashMap<i64, DnaBaseCount>> {
-        self.position_to_count.as_ref()
+        match &self.mode {
+            CountMode::Marginal { counts } | CountMode::CellTypeFiltered { counts, .. } => {
+                Some(counts)
+            }
+            _ => None,
+        }
     }
 }

@@ -1,9 +1,9 @@
-use crate::data::visitors_htslib::VisitWithBamOps;
+use crate::data::bam_io;
 use genomic_data::sam::CellBarcode;
 
 use coitrees::{COITree, Interval, IntervalTree};
 use fnv::FnvHashMap as HashMap;
-use rust_htslib::bam::{self, ext::BamRecordExtensions, record::Aux};
+use rust_htslib::bam::{self, ext::BamRecordExtensions};
 
 /// Read coverage tracker that organizes genomic intervals by cell barcode and chromosome.
 ///
@@ -14,8 +14,6 @@ pub struct ReadCoverageCollector<'a> {
     cell_chr_to_intervals: HashMap<CellBarcode, HashMap<Box<str>, Vec<Interval<()>>>>,
     cell_barcode_tag: &'a str,
 }
-
-impl VisitWithBamOps for ReadCoverageCollector<'_> {}
 
 impl<'a> ReadCoverageCollector<'a> {
     /// Creates a new ReadCoverage instance.
@@ -50,8 +48,6 @@ impl<'a> ReadCoverageCollector<'a> {
 
     /// Convenience method to collect coverage from a BAM file region.
     ///
-    /// This wraps the generic `visit_bam_by_region` method with the standard update logic.
-    ///
     /// # Arguments
     /// * `bam_file_path` - Path to the BAM file
     /// * `bed` - Genomic region to process
@@ -60,7 +56,9 @@ impl<'a> ReadCoverageCollector<'a> {
         bam_file_path: &str,
         bed: &genomic_data::bed::Bed,
     ) -> anyhow::Result<()> {
-        self.visit_bam_by_region(bam_file_path, bed, &Self::update)
+        bam_io::for_each_record_in_region(bam_file_path, bed, |chr, rec| {
+            self.update(chr, rec);
+        })
     }
 
     /// Updates the coverage with a new BAM record.
@@ -72,10 +70,8 @@ impl<'a> ReadCoverageCollector<'a> {
     /// * `chr` - Chromosome/contig name
     /// * `bam_record` - The BAM alignment record to process
     pub fn update(&mut self, chr: &str, bam_record: bam::Record) {
-        let cell_barcode = match bam_record.aux(self.cell_barcode_tag.as_bytes()) {
-            Ok(Aux::String(barcode)) => CellBarcode::Barcode(barcode.into()),
-            _ => CellBarcode::Missing,
-        };
+        let cell_barcode =
+            bam_io::extract_cell_barcode(&bam_record, self.cell_barcode_tag.as_bytes());
         let first = bam_record.pos() as i32;
         let last = bam_record.reference_end() as i32;
 
