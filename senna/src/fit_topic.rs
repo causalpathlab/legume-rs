@@ -330,6 +330,18 @@ pub struct TopicArgs {
 
     #[arg(
         long,
+        default_value_t = 0,
+        help = "Cap feature dimension by coarsening",
+        long_help = "Cap the feature dimension by grouping co-expressed features into\n\
+		     meta-features. The model trains at this reduced resolution.\n\
+		     On output, the dictionary is expanded back to full resolution.\n\
+		     Set to 0 to disable (default). Typical value: 5000.\n\
+		     Applied after --max-features selection if both are specified."
+    )]
+    max_coarse_features: usize,
+
+    #[arg(
+        long,
         value_enum,
         default_value = "flat",
         help = "Decoder type",
@@ -497,14 +509,34 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    // 4. Train a topic model on the collapsed data
-    let n_topics = args.n_latent_topics;
-    let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
-
-    let n_features_decoder = selected_features
+    // 4. Feature coarsening (if D' > max_coarse_features)
+    let n_features_full = selected_features
         .as_ref()
         .map(|sel| sel.selected_indices.len())
         .unwrap_or_else(|| data_vec.num_rows());
+
+    let coarsening: Option<FeatureCoarsening> =
+        if args.max_coarse_features > 0 && n_features_full > args.max_coarse_features {
+            let mut sketch_ds = finest_collapsed.mu_observed.posterior_mean().clone();
+            if let Some(sel) = &selected_features {
+                sketch_ds = sketch_ds.select_rows(&sel.selected_indices);
+            }
+            Some(compute_feature_coarsening(
+                &sketch_ds,
+                args.max_coarse_features,
+            )?)
+        } else {
+            None
+        };
+
+    // 5. Train a topic model on the collapsed data
+    let n_topics = args.n_latent_topics;
+    let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
+
+    let n_features_decoder = coarsening
+        .as_ref()
+        .map(|c| c.num_coarse)
+        .unwrap_or(n_features_full);
     let n_features_encoder = n_features_decoder;
 
     let dev = match args.device {
@@ -573,6 +605,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 dev: &dev,
                 args,
                 feature_selection: selected_features.as_ref(),
+                feature_coarsening: coarsening.as_ref(),
                 stop: &stop,
             };
             let scores = train_encoder_decoder_progressive(
@@ -584,14 +617,13 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
             info!("Writing down the model parameters");
 
-            decoder
-                .get_dictionary()?
-                .to_device(&candle_core::Device::Cpu)?
-                .to_parquet_with_names(
-                    &(args.out.to_string() + ".dictionary.parquet"),
-                    (Some(&output_gene_names), Some("gene")),
-                    None,
-                )?;
+            write_dictionary_expanded(
+                &decoder,
+                coarsening.as_ref(),
+                n_features_full,
+                &output_gene_names,
+                &args.out,
+            )?;
 
             // Save per-feature dropout probabilities
             let dropout_d = decoder
@@ -616,6 +648,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 adj_method: &args.adj_method,
                 minibatch_size: args.minibatch_size,
                 feature_selection: selected_features.as_ref(),
+                feature_coarsening: coarsening.as_ref(),
                 decoder: Some(&decoder),
                 refine_config: refine_config.as_ref(),
             };
@@ -633,6 +666,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 dev: &dev,
                 args,
                 feature_selection: selected_features.as_ref(),
+                feature_coarsening: coarsening.as_ref(),
                 stop: &stop,
             };
             let scores = train_encoder_decoder_progressive(
@@ -644,14 +678,13 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
             info!("Writing down the model parameters");
 
-            decoder
-                .get_dictionary()?
-                .to_device(&candle_core::Device::Cpu)?
-                .to_parquet_with_names(
-                    &(args.out.to_string() + ".dictionary.parquet"),
-                    (Some(&output_gene_names), Some("gene")),
-                    None,
-                )?;
+            write_dictionary_expanded(
+                &decoder,
+                coarsening.as_ref(),
+                n_features_full,
+                &output_gene_names,
+                &args.out,
+            )?;
 
             info!("Writing down the latent states");
             let eval_config = EvaluateLatentConfig {
@@ -659,6 +692,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 adj_method: &args.adj_method,
                 minibatch_size: args.minibatch_size,
                 feature_selection: selected_features.as_ref(),
+                feature_coarsening: coarsening.as_ref(),
                 decoder: Some(&decoder),
                 refine_config: refine_config.as_ref(),
             };
@@ -675,6 +709,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 dev: &dev,
                 args,
                 feature_selection: selected_features.as_ref(),
+                feature_coarsening: coarsening.as_ref(),
                 stop: &stop,
             };
             let scores = train_encoder_decoder_progressive(
@@ -686,14 +721,13 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
             info!("Writing down the model parameters");
 
-            decoder
-                .get_dictionary()?
-                .to_device(&candle_core::Device::Cpu)?
-                .to_parquet_with_names(
-                    &(args.out.to_string() + ".dictionary.parquet"),
-                    (Some(&output_gene_names), Some("gene")),
-                    None,
-                )?;
+            write_dictionary_expanded(
+                &decoder,
+                coarsening.as_ref(),
+                n_features_full,
+                &output_gene_names,
+                &args.out,
+            )?;
 
             info!("Writing down the latent states");
             let eval_config = EvaluateLatentConfig {
@@ -701,6 +735,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 adj_method: &args.adj_method,
                 minibatch_size: args.minibatch_size,
                 feature_selection: selected_features.as_ref(),
+                feature_coarsening: coarsening.as_ref(),
                 decoder: Some(&decoder),
                 refine_config: refine_config.as_ref(),
             };
@@ -737,6 +772,41 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Write dictionary with optional expansion from coarse to fine resolution.
+fn write_dictionary_expanded<Dec: DecoderModuleT>(
+    decoder: &Dec,
+    coarsening: Option<&FeatureCoarsening>,
+    n_features_full: usize,
+    gene_names: &[Box<str>],
+    out_prefix: &str,
+) -> anyhow::Result<()> {
+    let dict_tensor = decoder
+        .get_dictionary()?
+        .to_device(&candle_core::Device::Cpu)?;
+
+    if let Some(fc) = coarsening {
+        // Dictionary is [d, K] in log-probability space; expand to [D', K]
+        let dict_dk: Mat = Mat::from_tensor(&dict_tensor)?;
+        let expanded_dk = fc.expand_log_dict_dk(&dict_dk, n_features_full);
+        expanded_dk.to_parquet_with_names(
+            &(out_prefix.to_string() + ".dictionary.parquet"),
+            (Some(gene_names), Some("gene")),
+            None,
+        )?;
+        info!(
+            "Expanded dictionary from {} to {} features",
+            fc.num_coarse, n_features_full
+        );
+    } else {
+        dict_tensor.to_parquet_with_names(
+            &(out_prefix.to_string() + ".dictionary.parquet"),
+            (Some(gene_names), Some("gene")),
+            None,
+        )?;
+    }
+    Ok(())
+}
+
 ///////////////////////
 // training routines //
 ///////////////////////
@@ -747,6 +817,7 @@ struct ProgressiveTrainConfig<'a> {
     dev: &'a Device,
     args: &'a TopicArgs,
     feature_selection: Option<&'a FeatureSelection>,
+    feature_coarsening: Option<&'a FeatureCoarsening>,
     stop: &'a AtomicBool,
 }
 
@@ -825,12 +896,18 @@ where
             if let Some(sel) = config.feature_selection {
                 mixed_nd = mixed_nd.select_columns(&sel.selected_indices);
             }
+            if let Some(fc) = config.feature_coarsening {
+                mixed_nd = fc.aggregate_columns_nd(&mixed_nd);
+            }
 
             let clean_nd = collapsed.mu_adjusted.as_ref().map(|x| {
                 let mut ret: Mat = x.posterior_sample().unwrap();
                 ret = ret.transpose();
                 if let Some(sel) = config.feature_selection {
                     ret = ret.select_columns(&sel.selected_indices);
+                }
+                if let Some(fc) = config.feature_coarsening {
+                    ret = fc.aggregate_columns_nd(&ret);
                 }
                 ret
             });
@@ -840,6 +917,9 @@ where
                 ret = ret.transpose();
                 if let Some(sel) = config.feature_selection {
                     ret = ret.select_columns(&sel.selected_indices);
+                }
+                if let Some(fc) = config.feature_coarsening {
+                    ret = fc.aggregate_columns_nd(&ret);
                 }
                 ret
             });
@@ -954,6 +1034,7 @@ pub(crate) struct EvaluateLatentConfig<'a, Dec> {
     pub adj_method: &'a AdjMethod,
     pub minibatch_size: usize,
     pub feature_selection: Option<&'a FeatureSelection>,
+    pub feature_coarsening: Option<&'a FeatureCoarsening>,
     pub decoder: Option<&'a Dec>,
     pub refine_config: Option<&'a TopicRefinementConfig>,
 }
@@ -984,6 +1065,9 @@ where
         if let Some(sel) = config.feature_selection {
             delta_db = delta_db.select_rows(&sel.selected_indices);
         }
+        if let Some(fc) = config.feature_coarsening {
+            delta_db = fc.aggregate_rows_ds(&delta_db);
+        }
         delta_db
     })
     .map(|delta_db| {
@@ -998,6 +1082,7 @@ where
         dev: config.dev,
         delta: delta.as_ref(),
         feature_selection: config.feature_selection,
+        feature_coarsening: config.feature_coarsening,
         decoder: config.decoder,
         refine_config: config.refine_config,
     };
@@ -1047,6 +1132,7 @@ pub(crate) struct EvaluateBlockConfig<'a, Dec> {
     pub dev: &'a Device,
     pub delta: Option<&'a Tensor>,
     pub feature_selection: Option<&'a FeatureSelection>,
+    pub feature_coarsening: Option<&'a FeatureCoarsening>,
     pub decoder: Option<&'a Dec>,
     pub refine_config: Option<&'a TopicRefinementConfig>,
 }
@@ -1079,7 +1165,13 @@ where
         x_dn = filter_csc_by_rows(&sel.selection_matrix, &x_dn);
     }
 
-    let x_nd = x_dn.to_tensor(config.dev)?.transpose(0, 1)?;
+    // Aggregate features if coarsening is active
+    let x_nd = if let Some(fc) = config.feature_coarsening {
+        let coarse_dn = fc.aggregate_sparse_csc(&x_dn);
+        coarse_dn.to_tensor(config.dev)?.transpose(0, 1)?
+    } else {
+        x_dn.to_tensor(config.dev)?.transpose(0, 1)?
+    };
 
     let (log_z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
 
@@ -1123,7 +1215,13 @@ where
         x_dn = filter_csc_by_rows(&sel.selection_matrix, &x_dn);
     }
 
-    let x_nd = x_dn.to_tensor(config.dev)?.transpose(0, 1)?;
+    // Aggregate features if coarsening is active
+    let x_nd = if let Some(fc) = config.feature_coarsening {
+        let coarse_dn = fc.aggregate_sparse_csc(&x_dn);
+        coarse_dn.to_tensor(config.dev)?.transpose(0, 1)?
+    } else {
+        x_dn.to_tensor(config.dev)?.transpose(0, 1)?
+    };
 
     let (log_z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
 

@@ -15,7 +15,6 @@ mod fit_topic;
 mod fit_visualize;
 mod interactive_markers;
 mod senna_input;
-mod tree_topic_decoder;
 mod visualization_alg;
 
 use embed_common::*;
