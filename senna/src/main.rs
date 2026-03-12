@@ -1,14 +1,12 @@
 mod cluster;
-mod deconv;
+mod vmf;
 mod embed_common;
 mod feature_selection;
 mod fit_annotate_topic;
 mod fit_clustering;
-mod fit_deconv_reg;
 mod fit_indexed_topic;
 mod fit_joint_svd;
 mod fit_joint_topic;
-mod fit_knn_regression;
 mod fit_svd;
 mod fit_topic;
 
@@ -20,11 +18,9 @@ mod visualization_alg;
 use embed_common::*;
 use fit_annotate_topic::*;
 use fit_clustering::*;
-use fit_deconv_reg::*;
 use fit_indexed_topic::*;
 use fit_joint_svd::*;
 use fit_joint_topic::*;
-use fit_knn_regression::*;
 use fit_svd::*;
 use fit_topic::*;
 
@@ -154,21 +150,6 @@ enum Commands {
     JointTopic(JointTopicArgs),
 
     #[command(
-        about = "Construct matched data modality by kNN regression",
-        long_about = "Construct matched data modality by kNN regression.\n\
-		      If X data and Y data share no common columns/cells,\n\
-		      we can predict Yhat by projecting x's columns onto\n\
-		      and imputing values based on shared row/gene features.\n"
-    )]
-    KnnImputedData(KnnImputeArgs),
-
-    #[command(about = "alias of knn-imputed-data")]
-    KnnImpute(KnnImputeArgs),
-
-    /// deconvolve bulk data with single cell reference dictionary
-    DeconvReg(DeconvRegArgs),
-
-    #[command(
         about = "Visualize topic/SVD results with spectral embedding",
         long_about = "Create 2D visualization coordinates using spectral embedding.\n\
 		      (1) Collapse data into pseudobulk samples\n\
@@ -223,15 +204,6 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::JointSvd(args) => {
             fit_joint_svd(args)?;
-        }
-        Commands::DeconvReg(args) => {
-            fit_deconv_reg(args)?;
-        }
-        Commands::KnnImputedData(args) => {
-            fit_knn_regression(args)?;
-        }
-        Commands::KnnImpute(args) => {
-            fit_knn_regression(args)?;
         }
         Commands::Visualize(args) => {
             fit_visualize(args)?;

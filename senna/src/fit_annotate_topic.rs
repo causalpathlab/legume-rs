@@ -1,4 +1,4 @@
-use crate::deconv::{vmf_assign, vmf_assign_averaged};
+use crate::vmf::{vmf_assign, vmf_assign_averaged};
 use crate::embed_common::*;
 use crate::interactive_markers::{
     augment_membership_matrix, auto_suggest_markers, find_candidate_markers, flexible_gene_match,
