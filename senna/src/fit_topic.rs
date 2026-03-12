@@ -254,12 +254,12 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
+        default_value_t = 5000,
         help = "Cap feature dimension by coarsening",
         long_help = "Cap the feature dimension by grouping co-expressed features into\n\
 		     meta-features. The model trains at this reduced resolution.\n\
 		     On output, the dictionary is expanded back to full resolution.\n\
-		     Set to 0 to disable (default). Typical value: 5000.\n\
+		     Set to 0 to disable. Default: 5000.\n\
 		     Applied after --max-features selection if both are specified."
     )]
     max_coarse_features: usize,
