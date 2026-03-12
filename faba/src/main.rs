@@ -19,7 +19,7 @@ use run_count_apa::*;
 use run_dartseq_count::*;
 use run_gene_count::*;
 use run_read_depth::*;
-// use scan_pwm::*; not ready yet
+use scan_pwm::*;
 
 const LOGO: &str = include_str!("../logo.txt");
 
@@ -119,6 +119,16 @@ enum Commands {
             per cell, producing a sparse (cells x bins) matrix."
     )]
     ReadDepth(ReadDepthArgs),
+
+    /// Build position weight matrix around genomic sites
+    #[command(
+        alias = "pwm",
+        long_about = "Build position weight matrix around genomic sites\n\n\
+            Reads site-level parquet files from dart or apa output, collects\n\
+            base frequencies in a +/- window around each site, and outputs\n\
+            a position weight matrix as TSV."
+    )]
+    ScanPwm(ScanPwmArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -145,6 +155,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::CountApa(args) => {
             run_count_apa(args)?;
+        }
+        Commands::ScanPwm(args) => {
+            run_scan_pwm(args)?;
         }
     }
 
