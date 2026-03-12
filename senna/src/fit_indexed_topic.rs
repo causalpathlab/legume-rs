@@ -204,6 +204,7 @@ pub struct IndexedTopicArgs {
         help = "Bulk data files for joint deconvolution (.parquet, .tsv.gz)"
     )]
     bulk_data_files: Option<Vec<Box<str>>>,
+
 }
 
 pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
@@ -317,7 +318,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
-    let encoder = IndexedEmbeddingEncoder::new(
+    let base_encoder = IndexedEmbeddingEncoder::new(
         IndexedEmbeddingEncoderArgs {
             n_features: n_features_decoder,
             n_topics,
@@ -326,8 +327,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         },
         param_builder.pp("enc"),
     )?;
-
-    let decoder = IndexedTopicDecoder::new(n_features_decoder, n_topics, param_builder.pp("dec"))?;
 
     info!(
         "input: {} -> indexed encoder (emb={}, ctx={}) -> indexed decoder -> output: {}",
@@ -403,9 +402,13 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         _ => None,
     };
 
+    // Build decoder, train, save dictionary, and evaluate.
+    let decoder =
+        IndexedTopicDecoder::new(n_features_decoder, n_topics, param_builder.pp("dec"))?;
+
     let scores = train_indexed_progressive(
         &collapsed_levels,
-        &encoder,
+        &base_encoder,
         &decoder,
         &train_config,
         bulk_with_deltas,
@@ -431,8 +434,28 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         decoder: &decoder,
         refine_config: refine_config.as_ref(),
     };
-    let z_nk =
-        evaluate_latent_by_indexed_encoder(&data_vec, &encoder, finest_collapsed, &eval_config)?;
+    let z_nk = evaluate_latent_by_indexed_encoder(
+        &data_vec,
+        &base_encoder,
+        finest_collapsed,
+        &eval_config,
+    )?;
+
+    // Evaluate bulk with standard encoder/decoder
+    if let (Some(bulk), Some(bulk_deltas)) = (&bulk, &bulk_deltas) {
+        evaluate_bulk_samples(
+            bulk,
+            bulk_deltas,
+            &base_encoder,
+            &decoder,
+            &coarsening,
+            &dev,
+            args.context_size,
+            refine_config.as_ref(),
+            &gene_names,
+            &args.out,
+        )?;
+    }
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
 
@@ -444,62 +467,74 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         None,
     )?;
 
-    // Evaluate bulk samples if present
-    if let (Some(bulk), Some(bulk_deltas)) = (&bulk, &bulk_deltas) {
-        info!("Evaluating bulk samples ...");
-        let finest_delta = bulk_deltas.last().unwrap();
-        let mut delta_mean = finest_delta.posterior_mean().clone(); // [D_sc, 1]
-
-        // Prepare corrected bulk: divide by delta
-        let mut bulk_corrected = bulk.data.transpose(); // [M, D_sc]
-        if let Some(fc) = coarsening.as_ref() {
-            delta_mean = fc.aggregate_rows_ds(&delta_mean);
-            bulk_corrected = fc.aggregate_columns_nd(&bulk_corrected);
-        }
-        // delta_mean is [D_coarse, 1], broadcast divide each row
-        for j in 0..bulk_corrected.ncols() {
-            let d = delta_mean[(j, 0)].max(1e-8);
-            for i in 0..bulk_corrected.nrows() {
-                bulk_corrected[(i, j)] /= d;
-            }
-        }
-
-        // Convert to indexed and forward through encoder
-        let bulk_tensor = bulk_corrected
-            .to_tensor(&dev)?
-            .to_dtype(candle_core::DType::F32)?;
-        let (union_indices, indexed_x) = dense_to_indexed(&bulk_tensor, args.context_size, &dev)?;
-        let (log_z_nk, _) = encoder.forward_indexed_t(&union_indices, &indexed_x, None, false)?;
-        let log_z_nk = if let Some(cfg) = refine_config.as_ref() {
-            refine_indexed_topic_proportions(&log_z_nk, &union_indices, &indexed_x, &decoder, cfg)?
-        } else {
-            log_z_nk
-        };
-        let z_nk_bulk = log_z_nk.to_device(&candle_core::Device::Cpu)?;
-        let z_nk_bulk = Mat::from_tensor(&z_nk_bulk)?;
-
-        z_nk_bulk.to_parquet_with_names(
-            &(args.out.to_string() + ".deconv.parquet"),
-            (Some(&bulk.samples), Some("sample")),
-            None,
-        )?;
-
-        // Write bulk delta posterior mean
-        delta_mean.to_parquet_with_names(
-            &(args.out.to_string() + ".bulk_delta.parquet"),
-            (Some(&gene_names), Some("gene")),
-            None,
-        )?;
-        info!("Wrote bulk deconvolution results");
-    }
-
     info!("Done");
     Ok(())
 }
 
+/// Evaluate bulk samples using the given encoder/decoder and write results.
+fn evaluate_bulk_samples<Enc, Dec>(
+    bulk: &BulkDataOut,
+    bulk_deltas: &[GammaMatrix],
+    encoder: &Enc,
+    decoder: &Dec,
+    coarsening: &Option<FeatureCoarsening>,
+    dev: &Device,
+    context_size: usize,
+    refine_config: Option<&TopicRefinementConfig>,
+    gene_names: &[Box<str>],
+    out_prefix: &str,
+) -> anyhow::Result<()>
+where
+    Enc: IndexedEncoderT,
+    Dec: IndexedDecoderT,
+{
+    info!("Evaluating bulk samples ...");
+    let finest_delta = bulk_deltas.last().unwrap();
+    let mut delta_mean = finest_delta.posterior_mean().clone();
+
+    let mut bulk_corrected = bulk.data.transpose();
+    if let Some(fc) = coarsening.as_ref() {
+        delta_mean = fc.aggregate_rows_ds(&delta_mean);
+        bulk_corrected = fc.aggregate_columns_nd(&bulk_corrected);
+    }
+    for j in 0..bulk_corrected.ncols() {
+        let d = delta_mean[(j, 0)].max(1e-8);
+        for i in 0..bulk_corrected.nrows() {
+            bulk_corrected[(i, j)] /= d;
+        }
+    }
+
+    let bulk_tensor = bulk_corrected
+        .to_tensor(dev)?
+        .to_dtype(candle_core::DType::F32)?;
+    let (union_indices, indexed_x) = dense_to_indexed(&bulk_tensor, context_size, dev)?;
+    let (log_z_nk, _) = encoder.forward_indexed_t(&union_indices, &indexed_x, None, false)?;
+    let log_z_nk = if let Some(cfg) = refine_config {
+        refine_indexed_topic_proportions(&log_z_nk, &union_indices, &indexed_x, decoder, cfg)?
+    } else {
+        log_z_nk
+    };
+    let z_nk_bulk = log_z_nk.to_device(&candle_core::Device::Cpu)?;
+    let z_nk_bulk = Mat::from_tensor(&z_nk_bulk)?;
+
+    z_nk_bulk.to_parquet_with_names(
+        &(out_prefix.to_string() + ".deconv.parquet"),
+        (Some(&bulk.samples), Some("sample")),
+        None,
+    )?;
+
+    delta_mean.to_parquet_with_names(
+        &(out_prefix.to_string() + ".bulk_delta.parquet"),
+        (Some(gene_names), Some("gene")),
+        None,
+    )?;
+    info!("Wrote bulk deconvolution results");
+    Ok(())
+}
+
 /// Write dictionary with optional expansion from coarse to fine resolution.
-fn write_indexed_dictionary(
-    decoder: &IndexedTopicDecoder,
+fn write_indexed_dictionary<Dec: IndexedDecoderT>(
+    decoder: &Dec,
     coarsening: Option<&FeatureCoarsening>,
     n_features_full: usize,
     gene_names: &[Box<str>],
@@ -654,13 +689,17 @@ fn smooth_topics(log_z_nk: Tensor, alpha: f64) -> candle_core::Result<Tensor> {
     }
 }
 
-fn train_indexed_progressive(
+fn train_indexed_progressive<Enc, Dec>(
     collapsed_levels: &[CollapsedOut],
-    encoder: &IndexedEmbeddingEncoder,
-    decoder: &IndexedTopicDecoder,
+    encoder: &Enc,
+    decoder: &Dec,
     config: &ProgressiveTrainConfig,
     bulk_with_deltas: Option<(&Mat, &[GammaMatrix])>,
-) -> anyhow::Result<TrainScores> {
+) -> anyhow::Result<TrainScores>
+where
+    Enc: IndexedEncoderT,
+    Dec: IndexedDecoderT,
+{
     let num_levels = collapsed_levels.len();
     let level_epochs = compute_level_epochs(num_levels, config.epochs);
 
@@ -880,24 +919,28 @@ fn dense_to_indexed(
 // evaluation routines //
 /////////////////////////
 
-struct EvaluateLatentConfig<'a> {
+struct EvaluateLatentConfig<'a, Dec> {
     dev: &'a Device,
     adj_method: &'a AdjMethod,
     minibatch_size: usize,
     context_size: usize,
     feature_coarsening: Option<&'a FeatureCoarsening>,
-    decoder: &'a IndexedTopicDecoder,
+    decoder: &'a Dec,
     refine_config: Option<&'a TopicRefinementConfig>,
 }
 
-fn evaluate_latent_by_indexed_encoder(
+fn evaluate_latent_by_indexed_encoder<Enc, Dec>(
     data_vec: &SparseIoVec,
-    encoder: &IndexedEmbeddingEncoder,
+    encoder: &Enc,
     collapsed: &CollapsedOut,
-    config: &EvaluateLatentConfig,
-) -> anyhow::Result<Mat> {
+    config: &EvaluateLatentConfig<Dec>,
+) -> anyhow::Result<Mat>
+where
+    Enc: IndexedEncoderT + Send + Sync,
+    Dec: IndexedDecoderT + Send + Sync,
+{
     let ntot = data_vec.num_columns();
-    let kk = encoder.n_topics();
+    let kk = encoder.dim_latent();
 
     let block_size = config.minibatch_size;
 
@@ -969,22 +1012,26 @@ fn evaluate_latent_by_indexed_encoder(
     Ok(ret)
 }
 
-struct EvaluateBlockConfig<'a> {
+struct EvaluateBlockConfig<'a, Dec> {
     dev: &'a Device,
     adj_method: &'a AdjMethod,
     delta: Option<&'a Tensor>,
     context_size: usize,
     feature_coarsening: Option<&'a FeatureCoarsening>,
-    decoder: &'a IndexedTopicDecoder,
+    decoder: &'a Dec,
     refine_config: Option<&'a TopicRefinementConfig>,
 }
 
-fn evaluate_indexed_block(
+fn evaluate_indexed_block<Enc, Dec>(
     block: (usize, usize),
     data_vec: &SparseIoVec,
-    encoder: &IndexedEmbeddingEncoder,
-    config: &EvaluateBlockConfig,
-) -> anyhow::Result<(usize, Mat)> {
+    encoder: &Enc,
+    config: &EvaluateBlockConfig<Dec>,
+) -> anyhow::Result<(usize, Mat)>
+where
+    Enc: IndexedEncoderT,
+    Dec: IndexedDecoderT,
+{
     let (lb, ub) = block;
 
     // Read sparse -> dense [D, N] -> transpose -> [N, D]
@@ -1064,11 +1111,11 @@ fn evaluate_indexed_block(
 }
 
 /// Refine per-cell topic proportions by gradient descent against the frozen indexed decoder.
-fn refine_indexed_topic_proportions(
+fn refine_indexed_topic_proportions<Dec: IndexedDecoderT>(
     log_z_nk: &Tensor,
     union_indices: &Tensor,
     indexed_x: &Tensor,
-    decoder: &IndexedTopicDecoder,
+    decoder: &Dec,
     config: &TopicRefinementConfig,
 ) -> candle_core::Result<Tensor> {
     let z_logits_init = log_z_nk.detach();
