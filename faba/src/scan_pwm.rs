@@ -1,80 +1,332 @@
-// todo:
+use crate::common::*;
+use crate::data::dna::{Dna, DnaBaseCount};
+use crate::data::dna_stat_map::DnaBaseFreqMap;
+use crate::data::util_htslib;
 
-// use crate::common::*;
-// use crate::data::dna::DnaBaseCount;
-// use dashmap::DashMap as HashMap;
-// use dashmap::DashSet as HashSet;
+use fnv::FnvHashSet;
+use genomic_data::bed::Bed;
+use genomic_data::sam::Strand;
 
-// fn collect_frequencies_nearby(
-//     gene_sites: &HashMap<GeneId, Vec<MethylatedSite>>,
-//     gff_map: &GffRecordMap,
-//     bam_files: &[Box<str>],
-// ) -> anyhow::Result<()> {
-//     // Avoid double counting. Create intervals for each chromosome by
-//     // scanning them all
-//     let nsites = gene_sites.iter().map(|x| x.len()).sum::<usize>();
-//     let chr_forward_sites: HashMap<Box<str>, HashSet<MethylatedSite>> =
-//         HashMap::with_capacity(nsites);
-//     let chr_backward_sites: HashMap<Box<str>, HashSet<MethylatedSite>> =
-//         HashMap::with_capacity(nsites);
+use parquet::file::reader::{FileReader, SerializedFileReader};
+use parquet::record::RowAccessor;
 
-//     gene_sites.par_iter().for_each(|gs| {
-//         if let Some(gff) = gff_map.get(gs.key()) {
-//             let chr = &gff.seqname;
-//             let strand = &gff.strand;
-//             let mut entry = if strand == &Strand::Forward {
-//                 chr_forward_sites.entry(chr.clone()).or_default()
-//             } else {
-//                 chr_backward_sites.entry(chr.clone()).or_default()
-//             };
-//             let list = entry.value_mut();
-//             for s in gs.value() {
-//                 list.insert(s.clone());
-//             }
-//         }
-//     });
+use std::fs::File;
+use std::io::{BufWriter, Write};
 
-//     let window: i64 = 4;
+#[derive(clap::ValueEnum, Clone, Debug)]
+pub enum PwmSource {
+    Reads,
+    Reference,
+}
 
-//     let forward_freq_map: HashMap<usize, DnaBaseCount> =
-//         HashMap::with_capacity(2 * window as usize + 1);
+#[derive(Args, Debug)]
+pub struct ScanPwmArgs {
+    /// Site-level parquet file (from dart or apa output)
+    #[arg(short = 's', long = "sites", required = true)]
+    site_file: Box<str>,
 
-//     for chr_sites in chr_forward_sites.iter() {
-//         let chr = chr_sites.key();
-//         let njobs = chr_sites.value().len();
-//         info!("gathering DNA frequencies from {} sites in {}", njobs, chr);
-//         chr_sites
-//             .value()
-//             .par_iter()
-//             .progress_count(njobs as u64)
-//             .for_each(|s| {
-//                 let mut freq_map = DnaBaseFreqMap::new();
-//                 let pos = s.m6a_pos;
-//                 let bed = Bed {
-//                     chr: chr.clone(),
-//                     start: (pos - window).max(0),
-//                     stop: pos + window + 1,
-//                 };
-//                 for bam_file in bam_files.as_ref() {
-//                     freq_map
-//                         .update_bam_by_region(bam_file, &bed)
-//                         .expect("failed to read the bam file");
-//                 }
-//                 let freq_map = freq_map.marginal_frequency_map().expect("marginal freq");
-//                 for (j, p) in ((pos - window)..(pos + window + 1)).enumerate() {
-//                     if let Some(count) = freq_map.get(&p) {
-//                         let mut prev_count = forward_freq_map.entry(j).or_default();
-//                         *prev_count += count;
-//                     }
-//                 }
-//             });
-//     }
+    /// Input BAM file(s), comma-separated (required for --source reads)
+    #[arg(value_delimiter = ',')]
+    bam_files: Vec<Box<str>>,
 
-//     for j in 0..(2 * window + 2) as usize {
-//         if let Some(x) = forward_freq_map.get(&j) {
-//             println!("{:?}", x.value());
-//         }
-//     }
+    /// Reference genome FASTA (required for --source reference)
+    #[arg(short = 'f', long = "genome")]
+    genome_file: Option<Box<str>>,
 
-//     Ok(())
-// }
+    /// Base frequency source: reads (from BAM) or reference (from FASTA)
+    #[arg(long, value_enum, default_value = "reference")]
+    source: PwmSource,
+
+    /// Half-window size: collect +/- this many bp around each site
+    #[arg(short = 'w', long, default_value_t = 10)]
+    window: i64,
+
+    /// Number of threads
+    #[arg(long, default_value_t = 16)]
+    threads: usize,
+
+    /// Output file path (TSV, or .gz for gzipped)
+    #[arg(short, long, required = true)]
+    output: Box<str>,
+}
+
+struct GenomicSite {
+    chr: Box<str>,
+    position: i64,
+    strand: Strand,
+}
+
+/// Read sites from a parquet file, auto-detecting dart vs apa format.
+fn read_sites(site_file: &str) -> anyhow::Result<Vec<GenomicSite>> {
+    let field_names = matrix_util::parquet::peek_parquet_field_names(site_file)?;
+    let has_m6a_pos = field_names.iter().any(|f| f.as_ref() == "m6a_pos");
+    let has_genomic_alpha = field_names.iter().any(|f| f.as_ref() == "genomic_alpha");
+
+    let file = File::open(site_file)?;
+    let reader = SerializedFileReader::new(file)?;
+    let row_iter = reader.get_row_iter(None)?;
+
+    // Find column indices
+    let chr_idx = field_names
+        .iter()
+        .position(|f| f.as_ref() == "chr")
+        .ok_or_else(|| anyhow::anyhow!("missing 'chr' column in {}", site_file))?;
+
+    let mut sites = Vec::new();
+
+    if has_m6a_pos {
+        // Dart format: chr, m6a_pos, strand
+        let pos_idx = field_names
+            .iter()
+            .position(|f| f.as_ref() == "m6a_pos")
+            .unwrap();
+        let strand_idx = field_names
+            .iter()
+            .position(|f| f.as_ref() == "strand")
+            .ok_or_else(|| anyhow::anyhow!("missing 'strand' column in {}", site_file))?;
+
+        for record in row_iter {
+            let row = record?;
+            let chr: Box<str> = row.get_string(chr_idx)?.clone().into_boxed_str();
+            let position = row.get_long(pos_idx)?;
+            let strand_str = row.get_string(strand_idx)?;
+            let strand = if strand_str == "+" {
+                Strand::Forward
+            } else {
+                Strand::Backward
+            };
+            sites.push(GenomicSite {
+                chr,
+                position,
+                strand,
+            });
+        }
+    } else if has_genomic_alpha {
+        // APA format: chr, genomic_alpha (no strand column)
+        let pos_idx = field_names
+            .iter()
+            .position(|f| f.as_ref() == "genomic_alpha")
+            .unwrap();
+
+        for record in row_iter {
+            let row = record?;
+            let chr: Box<str> = row.get_string(chr_idx)?.clone().into_boxed_str();
+            let position = row.get_long(pos_idx)?;
+            sites.push(GenomicSite {
+                chr,
+                position,
+                strand: Strand::Forward,
+            });
+        }
+    } else {
+        return Err(anyhow::anyhow!(
+            "unrecognized parquet format: expected 'm6a_pos' (dart) or 'genomic_alpha' (apa) column"
+        ));
+    }
+
+    // Deduplicate by (chr, position)
+    let mut seen = FnvHashSet::default();
+    sites.retain(|s| seen.insert((s.chr.clone(), s.position)));
+
+    info!("loaded {} unique sites from {}", sites.len(), site_file);
+    Ok(sites)
+}
+
+/// Swap A<->T and G<->C counts to complement a DnaBaseCount.
+fn complement_base_count(count: &DnaBaseCount) -> DnaBaseCount {
+    let mut out = DnaBaseCount::new();
+    out.add(Some(&Dna::A), count.count_t());
+    out.add(Some(&Dna::T), count.count_a());
+    out.add(Some(&Dna::G), count.count_c());
+    out.add(Some(&Dna::C), count.count_g());
+    out
+}
+
+/// Collect PWM from reference FASTA sequence around each site.
+fn collect_from_reference(
+    sites: &[GenomicSite],
+    genome_file: &str,
+    window: i64,
+) -> anyhow::Result<Vec<DnaBaseCount>> {
+    let width = (2 * window + 1) as usize;
+    let mut pwm: Vec<DnaBaseCount> = (0..width).map(|_| DnaBaseCount::new()).collect();
+
+    let faidx = util_htslib::load_fasta_index(genome_file)?;
+
+    for site in sites {
+        let start = site.position - window;
+        let end = site.position + window; // inclusive
+        let seq = util_htslib::fetch_reference_seq(&faidx, &site.chr, start, end)?;
+
+        if let Some(bases) = seq {
+            if bases.len() != width {
+                continue; // skip sites near chromosome boundaries
+            }
+            match site.strand {
+                Strand::Forward => {
+                    for (j, base) in bases.iter().enumerate() {
+                        pwm[j].add(Some(base), 1);
+                    }
+                }
+                Strand::Backward => {
+                    // Reverse complement: reverse order and complement each base
+                    for (j, base) in bases.iter().rev().enumerate() {
+                        let comp = match base {
+                            Dna::A => Dna::T,
+                            Dna::T => Dna::A,
+                            Dna::G => Dna::C,
+                            Dna::C => Dna::G,
+                        };
+                        pwm[j].add(Some(&comp), 1);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(pwm)
+}
+
+/// Collect PWM from BAM read base frequencies around each site.
+fn collect_from_reads(
+    sites: &[GenomicSite],
+    bam_files: &[Box<str>],
+    window: i64,
+) -> anyhow::Result<Vec<DnaBaseCount>> {
+    let width = (2 * window + 1) as usize;
+
+    // Ensure BAM indexes exist
+    for bam_file in bam_files {
+        util_htslib::check_bam_index(bam_file, None)?;
+    }
+
+    let pwm: Vec<DnaBaseCount> = sites
+        .par_iter()
+        .progress_count(sites.len() as u64)
+        .map(|site| {
+            let mut local_pwm: Vec<DnaBaseCount> =
+                (0..width).map(|_| DnaBaseCount::new()).collect();
+
+            let bed = Bed {
+                chr: site.chr.clone(),
+                start: (site.position - window).max(0),
+                stop: site.position + window + 1,
+            };
+
+            let mut freq_map = DnaBaseFreqMap::new();
+            for bam_file in bam_files {
+                freq_map
+                    .update_from_region(bam_file, &bed)
+                    .expect("failed to read BAM file");
+            }
+
+            if let Some(counts) = freq_map.marginal_frequency_map() {
+                for (j, p) in ((site.position - window)..=(site.position + window)).enumerate() {
+                    if let Some(count) = counts.get(&p) {
+                        match site.strand {
+                            Strand::Forward => {
+                                local_pwm[j] += count;
+                            }
+                            Strand::Backward => {
+                                // Reverse offset and complement
+                                let rev_j = width - 1 - j;
+                                let comp = complement_base_count(count);
+                                local_pwm[rev_j] += &comp;
+                            }
+                        }
+                    }
+                }
+            }
+
+            local_pwm
+        })
+        .reduce(
+            || (0..width).map(|_| DnaBaseCount::new()).collect(),
+            |mut acc, local| {
+                for (a, b) in acc.iter_mut().zip(local.iter()) {
+                    *a += b;
+                }
+                acc
+            },
+        );
+
+    Ok(pwm)
+}
+
+/// Write PWM table as TSV.
+fn write_pwm(pwm: &[DnaBaseCount], window: i64, output: &str) -> anyhow::Result<()> {
+    let file = File::create(output)?;
+    let mut writer: Box<dyn Write> = if output.ends_with(".gz") {
+        Box::new(BufWriter::new(flate2::write::GzEncoder::new(
+            file,
+            flate2::Compression::default(),
+        )))
+    } else {
+        Box::new(BufWriter::new(file))
+    };
+
+    writeln!(
+        writer,
+        "position\tcount_A\tcount_T\tcount_G\tcount_C\ttotal\tfreq_A\tfreq_T\tfreq_G\tfreq_C"
+    )?;
+
+    for (j, count) in pwm.iter().enumerate() {
+        let rel_pos = j as i64 - window;
+        let a = count.count_a();
+        let t = count.count_t();
+        let g = count.count_g();
+        let c = count.count_c();
+        let total = a + t + g + c;
+        let tot_f = total as f64;
+        if total > 0 {
+            writeln!(
+                writer,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}",
+                rel_pos,
+                a,
+                t,
+                g,
+                c,
+                total,
+                a as f64 / tot_f,
+                t as f64 / tot_f,
+                g as f64 / tot_f,
+                c as f64 / tot_f,
+            )?;
+        } else {
+            writeln!(writer, "{}\t0\t0\t0\t0\t0\t0\t0\t0\t0", rel_pos)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn run_scan_pwm(args: &ScanPwmArgs) -> anyhow::Result<()> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.threads)
+        .build_global()
+        .ok(); // ignore if already set
+
+    let sites = read_sites(&args.site_file)?;
+
+    let pwm = match args.source {
+        PwmSource::Reference => {
+            let genome = args
+                .genome_file
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("--genome is required when --source reference"))?;
+            collect_from_reference(&sites, genome, args.window)?
+        }
+        PwmSource::Reads => {
+            if args.bam_files.is_empty() {
+                return Err(anyhow::anyhow!("BAM file(s) required when --source reads"));
+            }
+            collect_from_reads(&sites, &args.bam_files, args.window)?
+        }
+    };
+
+    write_pwm(&pwm, args.window, &args.output)?;
+    info!("wrote PWM to {}", args.output);
+
+    Ok(())
+}
