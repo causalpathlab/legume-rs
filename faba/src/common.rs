@@ -74,6 +74,89 @@ where
     }
 }
 
+/// Format triplets using pre-specified shared row/col name-to-index mappings.
+/// This ensures two matrices end up with identical dimensions.
+pub fn format_data_triplets_shared<Feat, Val>(
+    stats: Vec<(CellBarcode, Feat, Val)>,
+    feature_to_index: &FnvHashMap<Feat, usize>,
+    cell_to_index: &FnvHashMap<CellBarcode, usize>,
+    rows: Vec<Box<str>>,
+    cols: Vec<Box<str>>,
+) -> TripletsRowsCols
+where
+    Feat: std::hash::Hash + std::cmp::Eq + Clone + ToString,
+    Val: Into<f32>,
+{
+    let mut relabeled_triplets = Vec::with_capacity(stats.len());
+    for (cb, k, value) in stats {
+        let row_idx = feature_to_index[&k] as u64;
+        let col_idx = cell_to_index[&cb] as u64;
+        relabeled_triplets.push((row_idx, col_idx, value.into()));
+    }
+
+    TripletsRowsCols {
+        triplets: relabeled_triplets,
+        rows,
+        cols,
+    }
+}
+
+pub struct UnionNames<Feat> {
+    pub col_names: Vec<Box<str>>,
+    pub cell_to_index: FnvHashMap<CellBarcode, usize>,
+    pub row_names: Vec<Box<str>>,
+    pub feature_to_index: FnvHashMap<Feat, usize>,
+}
+
+/// Collect the union of cells and features from two sets of triplets,
+/// returning sorted name vectors and index maps.
+pub fn collect_union_names<Feat>(
+    triplets_a: &[(CellBarcode, Feat, f32)],
+    triplets_b: &[(CellBarcode, Feat, f32)],
+) -> UnionNames<Feat>
+where
+    Feat: std::hash::Hash + std::cmp::Eq + std::cmp::Ord + Clone + Send + ToString,
+{
+    let mut unique_cells = FnvHashSet::default();
+    let mut unique_features = FnvHashSet::default();
+
+    for (cb, f, _) in triplets_a.iter().chain(triplets_b.iter()) {
+        unique_cells.insert(cb.clone());
+        unique_features.insert(f.clone());
+    }
+
+    let mut unique_cells = unique_cells.into_iter().collect::<Vec<_>>();
+    unique_cells.par_sort();
+    let cell_to_index: FnvHashMap<CellBarcode, usize> = unique_cells
+        .iter()
+        .enumerate()
+        .map(|(i, cb)| (cb.clone(), i))
+        .collect();
+    let col_names: Vec<Box<str>> = unique_cells
+        .into_iter()
+        .map(|cb| cb.to_string().into_boxed_str())
+        .collect();
+
+    let mut unique_features = unique_features.into_iter().collect::<Vec<_>>();
+    unique_features.par_sort();
+    let feature_to_index: FnvHashMap<Feat, usize> = unique_features
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.clone(), i))
+        .collect();
+    let row_names: Vec<Box<str>> = unique_features
+        .into_iter()
+        .map(|f| f.to_string().into_boxed_str())
+        .collect();
+
+    UnionNames {
+        col_names,
+        cell_to_index,
+        row_names,
+        feature_to_index,
+    }
+}
+
 // pub trait ToBed {
 //     fn to_bed(&self, file_path: &str) -> anyhow::Result<()>;
 // }
