@@ -107,9 +107,9 @@ struct TrainingData {
     gene_names: Vec<Box<str>>,
 }
 
-struct AnnotInfo {
-    membership_ga: Mat,
-    annot_names: Vec<Box<str>>,
+pub(crate) struct AnnotInfo {
+    pub membership_ga: Mat,
+    pub annot_names: Vec<Box<str>>,
 }
 
 pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
@@ -603,7 +603,7 @@ fn read_marker_gene_info(file_path: &str) -> anyhow::Result<HashMap<Box<str>, Bo
         .collect())
 }
 
-fn build_annotation_matrix(
+pub(crate) fn build_annotation_matrix(
     marker_gene_path: &str,
     row_names: &[Box<str>],
 ) -> anyhow::Result<AnnotInfo> {

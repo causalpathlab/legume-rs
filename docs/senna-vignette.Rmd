@@ -15,7 +15,9 @@ knitr::opts_chunk$set(echo = TRUE, eval = TRUE)
 
 ## Introduction
 
-**SENNA** (Stochastic data Embedding with Nearest Neighbourhood Adjustment) provides embedding and dimensionality reduction tools for single-cell data. This vignette demonstrates a basic workflow using SVD-based embedding and tree visualization.
+**SENNA** (Stochastic data Embedding with Nearest Neighbourhood Adjustment) provides embedding, clustering, and cell type annotation tools for single-cell data. This vignette demonstrates a workflow using a marker-guided topic model on a 10X Genomics PBMC dataset.
+
+With marker gene information, we can guide topic learning toward known cell types and immediately annotate cells -- no gene filtering or feature selection is needed.
 
 ## Getting Help
 
@@ -25,244 +27,216 @@ senna --help
 
 ## Example Workflow
 
-We will use a 10X Genomics PBMC dataset to demonstrate the workflow:
-
 1. Create a data backend from H5 file
-2. Squeeze low-expressed genes and sparse columns
-3. Run SVD embedding
-4. Visualize with tree layout
+2. Fit a marker-guided topic model (no gene QC required)
+3. Cluster cells with Leiden community detection
+4. Visualize and plot results
 
 ### Step 1: Setup and Create Backend
 
-First, create a temporary output directory and convert the H5 file to a zarr backend.
-
 ```{r}
-# Create temp directory for outputs (prefix "temp" so it's not tracked in git)
-# Keep intermediate results to avoid re-running same steps
 temp_dir <- "temp_senna_vignette"
 if (!dir.exists(temp_dir)) dir.create(temp_dir)
 ```
 
+Convert the 10X H5 file to a zarr backend:
+
 ```{bash}
 [ -d "temp_senna_vignette/pbmc.zarr" ] && echo "Skipping: pbmc.zarr exists" && exit 0
-data-beans from-h5ad \
+data-beans from-h5 \
   10k_Human_PBMC_5p_v3_Ultima_10k_Human_PBMC_5p_v3_Ultima_count_sample_filtered_feature_bc_matrix.h5 \
   -o temp_senna_vignette/pbmc \
   -v
 ```
 
-### Step 2: Squeeze Low-Expressed Features
+### Step 2: Prepare Marker Genes
 
-Remove genes with too few expressing cells and cells with too few detected genes.
+Create a marker gene file for major PBMC cell types. This is a simple two-column TSV with gene symbol and cell type:
 
-```{bash}
-[ -d "temp_senna_vignette/pbmc_squeezed.zarr" ] && echo "Skipping: pbmc_squeezed.zarr exists" && exit 0
-data-beans squeeze \
-  temp_senna_vignette/pbmc.zarr \
-  -r 10 \
-  -c 100 \
-  -o temp_senna_vignette/pbmc_squeezed
+```{r}
+markers <- data.frame(
+  gene = c(
+    # CD4+ T cells
+    "IL7R", "CD4", "TCF7", "LEF1", "CCR7", "MAL", "LDHB",
+    # CD8+ T cells
+    "CD8A", "CD8B", "GZMK", "GZMA", "CCL5", "CST7", "GZMH",
+    # B cells
+    "CD79A", "CD79B", "MS4A1", "CD19", "BANK1", "PAX5",
+    # NK cells
+    "GNLY", "KLRD1", "KLRF1", "PRF1", "GZMB", "KLRB1", "NKG7",
+    # CD14+ Monocytes
+    "CD14", "LYZ", "S100A9", "S100A8", "VCAN", "FCN1", "S100A12",
+    # FCGR3A+ Monocytes
+    "FCGR3A", "MS4A7", "LST1", "IFITM3", "AIF1", "CDKN1C",
+    # Dendritic cells
+    "FCER1A", "CST3", "CLEC10A", "CD1C", "HLA-DPB1", "HLA-DQA1", "IRF8",
+    # Platelets
+    "PPBP", "PF4", "GP9", "ITGA2B", "TUBB1", "GNG11"
+  ),
+  cell_type = c(
+    rep("CD4+ T cells", 7),
+    rep("CD8+ T cells", 7),
+    rep("B cells", 6),
+    rep("NK cells", 7),
+    rep("CD14+ Monocytes", 7),
+    rep("FCGR3A+ Monocytes", 6),
+    rep("Dendritic cells", 7),
+    rep("Platelets", 6)
+  )
+)
+
+write.table(markers, "temp_senna_vignette/pbmc_markers.tsv",
+            sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+cat("Marker genes:", nrow(markers), "genes across",
+    length(unique(markers$cell_type)), "cell types\n")
+table(markers$cell_type)
 ```
 
-### Step 3: Run SVD Embedding
+### Step 3: Fit Marker-Guided Topic Model
 
-Compute SVD-based dimensionality reduction.
+The topic model can incorporate marker genes during training via `--marker-genes`, biasing topics toward known cell types. No gene QC or feature selection is needed. The model outputs an alignment matrix that maps topics to cell types:
 
 ```{bash}
-[ -f "temp_senna_vignette/pbmc_svd.latent.parquet" ] && echo "Skipping: pbmc_svd exists" && exit 0
-senna svd \
-  temp_senna_vignette/pbmc_squeezed.zarr \
-  -o temp_senna_vignette/pbmc_svd \
-  -t 20 \
-  --max-features 2000 \
-  --ignore-batch-effects \
+[ -f "temp_senna_vignette/pbmc_topic.latent.parquet" ] && echo "Skipping: topic exists" && exit 0
+senna itopic \
+  temp_senna_vignette/pbmc.zarr \
+  -o temp_senna_vignette/pbmc_topic \
+  -t 10 --max-coarse-features 2500 \
+  --marker-genes temp_senna_vignette/pbmc_markers.tsv \
+  --marker-weight 0.1 \
+  -i 1000 \
   -v
 ```
 
-### Step 4: Visualize with Tree Layout
+### Step 4: Cluster Cells with Leiden
 
-Create 2D visualization using tree layout.
+Run Leiden community detection on the topic model latent space:
 
 ```{bash}
-[ -f "temp_senna_vignette/pbmc_viz.cell_coords.parquet" ] && echo "Skipping: pbmc_viz exists" && exit 0
+[ -f "temp_senna_vignette/pbmc_leiden.clusters.parquet" ] && echo "Skipping: leiden exists" && exit 0
+senna clustering \
+  -l temp_senna_vignette/pbmc_topic.latent.parquet \
+  -m leiden \
+  --knn 15 \
+  --resolution 1.0 \
+  -o temp_senna_vignette/pbmc_leiden \
+  -v
+```
+
+### Step 5: Visualize with Tree Layout
+
+Create 2D coordinates from the topic model embedding:
+
+```{bash}
+[ -f "temp_senna_vignette/pbmc_viz.cell_coords.parquet" ] && echo "Skipping: viz exists" && exit 0
 senna visualize \
-  temp_senna_vignette/pbmc_squeezed.zarr \
-  -l temp_senna_vignette/pbmc_svd.latent.parquet \
+  temp_senna_vignette/pbmc.zarr \
+  -l temp_senna_vignette/pbmc_topic.latent.parquet \
   -o temp_senna_vignette/pbmc_viz \
   --layout tree \
   -v
 ```
 
-### Step 5: Plot Results
+### Step 6: Derive Cell Type Annotations
+
+The marker-guided topic model produces an `alignment.parquet` that maps each topic to cell types. We can assign each cell its most likely cell type by combining the per-cell topic proportions with the topic-cell type alignment:
 
 ```{r}
 library(arrow)
 library(ggplot2)
+library(dplyr)
 
-# Read cell coordinates
+# Read outputs
 coords <- read_parquet("temp_senna_vignette/pbmc_viz.cell_coords.parquet")
-head(coords)
+clusters <- read_parquet("temp_senna_vignette/pbmc_leiden.clusters.parquet")
+latent <- read_parquet("temp_senna_vignette/pbmc_topic.latent.parquet")
+alignment <- read_parquet("temp_senna_vignette/pbmc_topic.alignment.parquet")
+
+# alignment: cell types (rows) x topics (columns)
+cell_types <- alignment$celltype
+align_mat <- as.matrix(alignment[, -1])  # cell_type x topic
+
+# latent: cells x topics (log-softmax scale)
+topic_cols <- setdiff(colnames(latent), "cell")
+theta <- as.matrix(latent[, topic_cols])
+theta <- exp(theta)  # convert to proportions
+theta <- theta / rowSums(theta)
+
+# Cell type scores: multiply topic proportions by alignment
+# (n_cells x n_topics) %*% t(n_celltypes x n_topics) = n_cells x n_celltypes
+scores <- theta %*% t(align_mat)
+colnames(scores) <- cell_types
+
+# Assign each cell to its top-scoring cell type
+cell_annot <- data.frame(
+  cell = latent$cell,
+  cell_type = cell_types[apply(scores, 1, which.max)]
+)
+cell_annot$cell_type <- gsub("_", " ", cell_annot$cell_type)
+
+table(cell_annot$cell_type)
 ```
+
+### Step 7: Topic-Cell Type Alignment
+
+Examine the alignment matrix showing how topics map to cell types:
+
+```{r, fig.width=10, fig.height=6}
+library(pheatmap)
+
+rownames(align_mat) <- gsub("_", " ", cell_types)
+colnames(align_mat) <- paste0("Topic ", 0:(ncol(align_mat) - 1))
+
+pheatmap(align_mat,
+         color = colorRampPalette(c("white", "steelblue", "darkblue"))(100),
+         cluster_rows = TRUE, cluster_cols = TRUE,
+         fontsize_row = 10, fontsize_col = 10,
+         main = "Topic-Cell Type Alignment")
+```
+
+### Step 8: Plot Results
 
 ```{r, fig.width=8, fig.height=6}
-ggplot(coords, aes(x = x, y = y)) +
-  geom_point(alpha = 0.3, size = 0.5, color = "steelblue") +
-  theme_minimal() +
-  labs(title = "PBMC Tree Visualization", x = "Dim 1", y = "Dim 2") +
-  coord_fixed()
-```
+# Merge coordinates with cluster and cell type annotations
+df <- coords %>%
+  left_join(clusters, by = "cell") %>%
+  left_join(cell_annot, by = "cell") %>%
+  mutate(cluster = factor(cluster))
 
-### Step 6: Cluster Cells
-
-Run k-means clustering on the SVD latent space.
-
-```{bash}
-[ -f "temp_senna_vignette/pbmc_clusters.clusters.parquet" ] && echo "Skipping: pbmc_clusters exists" && exit 0
-senna clustering \
-  -l temp_senna_vignette/pbmc_svd.latent.parquet \
-  -k 10 \
-  -o temp_senna_vignette/pbmc_clusters \
-  -v
-```
-
-### Step 7: Visualize Clusters
-
-```{r}
-# Read cluster assignments
-clusters <- read_parquet("temp_senna_vignette/pbmc_clusters.clusters.parquet")
-head(clusters)
-
-# Merge with coordinates
-coords_clustered <- merge(coords, clusters, by = "row")
-coords_clustered$cluster <- factor(coords_clustered$cluster)
-```
-
-```{r, fig.width=10, fig.height=8}
-ggplot(coords_clustered, aes(x = x, y = y, color = cluster)) +
+ggplot(df, aes(x = x, y = y, color = cluster)) +
   geom_point(alpha = 0.5, size = 0.5) +
   theme_minimal() +
-  labs(title = "PBMC Clusters", x = "Dim 1", y = "Dim 2") +
+  labs(title = "PBMC Leiden Clusters", x = "Dim 1", y = "Dim 2") +
   coord_fixed() +
   scale_color_brewer(palette = "Set3")
 ```
 
-### Step 8: Per-Cluster Gene Statistics
-
-Compute gene expression statistics for each cluster.
-
-```{r}
-# Create cluster membership file for data-beans
-write.table(clusters, "temp_senna_vignette/cluster_membership.tsv",
-            sep = "\t", row.names = FALSE, quote = FALSE)
+```{r, fig.width=10, fig.height=8}
+ggplot(df, aes(x = x, y = y, color = cell_type)) +
+  geom_point(alpha = 0.5, size = 0.5) +
+  theme_minimal() +
+  labs(title = "PBMC Cell Type Annotation (Marker-Guided Topic Model)",
+       x = "Dim 1", y = "Dim 2", color = "Cell Type") +
+  coord_fixed() +
+  guides(color = guide_legend(override.aes = list(size = 3, alpha = 1)))
 ```
 
-```{bash}
-[ -f "temp_senna_vignette/gene_stats_by_cluster.parquet" ] && echo "Skipping: gene_stats exists" && exit 0
-data-beans stat \
-  temp_senna_vignette/pbmc_squeezed.zarr \
-  -s row \
-  -g temp_senna_vignette/cluster_membership.tsv \
-  -o temp_senna_vignette/gene_stats_by_cluster.parquet
-```
+### Step 9: Cell Type Composition per Cluster
 
-```{r}
-# Read per-cluster gene statistics
-gene_stats <- read_parquet("temp_senna_vignette/gene_stats_by_cluster.parquet")
-head(gene_stats)
-```
-
-### Step 9: Gene Set Enrichment Analysis
-
-Identify marker genes and perform gene set enrichment for each cluster.
-
-```{r, message=FALSE, warning=FALSE}
-library(fgsea)
-library(dplyr)
-library(tidyr)
-
-# Load PanglaoDB cell type markers
-panglaodb <- read.delim(gzfile("../senna/temp/PanglaoDB_markers_27_Mar_2020.tsv.gz"))
-
-# Filter for human markers (species contains "Hs") and blood/immune cell types
-panglaodb_hs <- panglaodb %>%
-  filter(grepl("Hs", species)) %>%
-  filter(organ %in% c("Blood", "Immune system")) %>%
-  select(gene = official.gene.symbol, cell_type = cell.type)
-
-# Create pathway list (cell type -> genes)
-pathways <- split(panglaodb_hs$gene, panglaodb_hs$cell_type)
-
-# Show available cell types
-cat("Number of cell types:", length(pathways), "\n")
-cat("Cell types:", paste(names(pathways), collapse = ", "), "\n")
-```
-
-```{r, message=FALSE, warning=FALSE}
-# Pivot gene stats to wide format (gene x cluster)
-gene_wide <- gene_stats %>%
-  select(name, group, mu) %>%
-  pivot_wider(names_from = group, values_from = mu, values_fill = 0)
-
-# Extract gene symbol from name (format: ENSG..._SYMBOL or just SYMBOL)
-gene_wide$gene <- sapply(strsplit(gene_wide$name, "_"), function(x) tail(x, 1))
-
-# Remove duplicate genes (keep first occurrence)
-gene_wide <- gene_wide[!duplicated(gene_wide$gene), ]
-
-# For each cluster, use mean expression as ranking (fgsea is rank-based)
-run_gsea_for_cluster <- function(cluster_id, gene_wide, pathways) {
-  # Mean expression in this cluster
-  stats <- gene_wide[[cluster_id]]
-  names(stats) <- gene_wide$gene
-
-  # Sort by expression for GSEA
-  stats <- sort(stats, decreasing = TRUE)
-
-  # Run fgsea (suppress messages and warnings)
-  fgsea_res <- suppressWarnings(suppressMessages(fgsea(pathways = pathways, stats = stats, minSize = 10, maxSize = 500)))
-  fgsea_res$cluster <- cluster_id
-  return(fgsea_res)
-}
-
-# Run for all clusters
-cluster_ids <- setdiff(colnames(gene_wide), c("name", "gene"))
-gsea_results <- lapply(cluster_ids, run_gsea_for_cluster,
-                       gene_wide = gene_wide, pathways = pathways)
-gsea_all <- bind_rows(gsea_results)
-```
-
-```{r}
-# Top enriched pathways per cluster (one-sided: positive enrichment only)
-top_pathways <- gsea_all %>%
-  filter(padj < 0.05, NES > 0) %>%
+```{r, fig.width=10, fig.height=6}
+ct_table <- df %>%
+  filter(!is.na(cluster), !is.na(cell_type)) %>%
+  count(cluster, cell_type) %>%
   group_by(cluster) %>%
-  slice_min(pval, n = 5) %>%
-  select(cluster, pathway, NES, padj)
+  mutate(frac = n / sum(n))
 
-print(top_pathways, n = 50)
-```
-
-```{r, fig.width=12, fig.height=6}
-library(pheatmap)
-
-# Heatmap of top pathways colored by -log10(pvalue)
-top_pw_names <- unique(top_pathways$pathway)
-gsea_top <- gsea_all %>%
-  filter(pathway %in% top_pw_names) %>%
-  mutate(neg_log_p = -log10(pval)) %>%
-  select(cluster, pathway, neg_log_p) %>%
-  pivot_wider(names_from = cluster, values_from = neg_log_p, values_fill = 0)
-
-if (nrow(gsea_top) > 0) {
-  mat <- as.matrix(gsea_top[, -1])
-  rownames(mat) <- gsea_top$pathway
-
-  pheatmap(mat,
-           color = colorRampPalette(c("white", "red"))(100),
-           cluster_rows = TRUE, cluster_cols = TRUE,
-           fontsize_row = 8, fontsize_col = 10,
-           main = "GSEA: -log10(pvalue) by Cluster")
-}
+ggplot(ct_table, aes(x = cluster, y = frac, fill = cell_type)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Cell Type Composition per Cluster",
+       x = "Leiden Cluster", y = "Fraction", fill = "Cell Type") +
+  scale_fill_brewer(palette = "Set2")
 ```
 
 ## Session Info
