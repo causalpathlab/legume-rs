@@ -1,4 +1,4 @@
-use crate::dartseq_sifter::MethylatedSite;
+use crate::dartseq::sifter::MethylatedSite;
 use crate::data::dna::Dna;
 use dashmap::DashMap as HashMap;
 use genomic_data::gff::*;

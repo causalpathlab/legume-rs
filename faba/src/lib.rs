@@ -1,6 +1,4 @@
-pub mod dartseq_io;
-pub mod dartseq_sifter;
-pub mod dartseq_stat;
+pub mod dartseq;
 pub mod data;
 pub mod hypothesis_tests;
-pub mod read_coverage;
+pub mod read_depth_coverage;
