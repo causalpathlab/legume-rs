@@ -254,7 +254,6 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
     let SparseDataWithBatch {
         data: mut data_vec,
         batch: _batch_membership,
-        nbatch: _,
     } = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
