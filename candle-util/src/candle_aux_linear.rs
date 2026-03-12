@@ -180,6 +180,15 @@ impl SoftmaxLinear {
         ops::log_softmax(&self.weight_kd, self.weight_kd.rank() - 1)?.transpose(0, 1)
     }
 
+    /// Raw logits with optional bias applied (before softmax normalization).
+    /// Returns `weight_kd + bias_1d` (or just `weight_kd` if no bias).
+    pub(crate) fn raw_biased_logits_kd(&self) -> Result<Tensor> {
+        match &self.bias_1d {
+            Some(bias) => self.weight_kd.broadcast_add(bias),
+            _ => Ok(self.weight_kd.clone()),
+        }
+    }
+
     pub(crate) fn biased_weight_kd(&self) -> Result<Tensor> {
         match &self.bias_1d {
             Some(bias) => ops::log_softmax(
