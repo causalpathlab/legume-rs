@@ -1,5 +1,4 @@
 mod cluster;
-mod vmf;
 mod embed_common;
 mod feature_selection;
 mod fit_annotate_topic;
@@ -9,6 +8,7 @@ mod fit_joint_svd;
 mod fit_joint_topic;
 mod fit_svd;
 mod fit_topic;
+mod vmf;
 
 mod fit_visualize;
 mod interactive_markers;

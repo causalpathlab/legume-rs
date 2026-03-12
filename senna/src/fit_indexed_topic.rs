@@ -344,12 +344,15 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         .transpose()?;
 
     // Compute per-level bulk delta
-    let bulk_deltas: Option<Vec<GammaMatrix>> = bulk.as_ref().map(|b| {
-        collapsed_levels
-            .iter()
-            .map(|collapsed| estimate_bulk_delta(&b.data, collapsed))
-            .collect::<anyhow::Result<Vec<_>>>()
-    }).transpose()?;
+    let bulk_deltas: Option<Vec<GammaMatrix>> = bulk
+        .as_ref()
+        .map(|b| {
+            collapsed_levels
+                .iter()
+                .map(|collapsed| estimate_bulk_delta(&b.data, collapsed))
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .transpose()?;
 
     let refine_config = if args.refine_steps > 0 {
         Some(TopicRefinementConfig {
@@ -462,11 +465,11 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         }
 
         // Convert to indexed and forward through encoder
-        let bulk_tensor = bulk_corrected.to_tensor(&dev)?.to_dtype(candle_core::DType::F32)?;
-        let (union_indices, indexed_x) =
-            dense_to_indexed(&bulk_tensor, args.context_size, &dev)?;
-        let (log_z_nk, _) =
-            encoder.forward_indexed_t(&union_indices, &indexed_x, None, false)?;
+        let bulk_tensor = bulk_corrected
+            .to_tensor(&dev)?
+            .to_dtype(candle_core::DType::F32)?;
+        let (union_indices, indexed_x) = dense_to_indexed(&bulk_tensor, args.context_size, &dev)?;
+        let (log_z_nk, _) = encoder.forward_indexed_t(&union_indices, &indexed_x, None, false)?;
         let z_nk_bulk = log_z_nk.to_device(&candle_core::Device::Cpu)?;
         let z_nk_bulk = Mat::from_tensor(&z_nk_bulk)?;
 
@@ -533,7 +536,7 @@ fn write_indexed_dictionary(
 /// to compute the expected per-gene mean, then fits a Gamma posterior for the ratio
 /// of bulk expression to SC expression.
 fn estimate_bulk_delta(
-    bulk_dm: &Mat,           // [D_sc, M] bulk data aligned to SC genes
+    bulk_dm: &Mat, // [D_sc, M] bulk data aligned to SC genes
     collapsed: &CollapsedOut,
 ) -> anyhow::Result<GammaMatrix> {
     let mu_adj = collapsed
@@ -753,14 +756,13 @@ fn train_indexed_progressive(
                         }
                     }
 
-                    let mut bulk_loader =
-                        IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
-                            input: &corrected_nd,
-                            input_null: None,
-                            output: None,
-                            output_null: None,
-                            context_size: config.context_size,
-                        })?;
+                    let mut bulk_loader = IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
+                        input: &corrected_nd,
+                        input_null: None,
+                        output: None,
+                        output_null: None,
+                        context_size: config.context_size,
+                    })?;
                     bulk_loader.shuffle_minibatch(config.minibatch_size);
 
                     for b in 0..bulk_loader.num_minibatch() {
