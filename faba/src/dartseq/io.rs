@@ -1,4 +1,4 @@
-use crate::dartseq_sifter::MethylatedSite;
+use crate::dartseq::sifter::MethylatedSite;
 use anyhow::Result;
 use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;

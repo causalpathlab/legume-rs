@@ -157,6 +157,28 @@ where
     }
 }
 
+/// Generate unique batch names from BAM file paths (using file stems).
+pub fn uniq_batch_names(bam_files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
+    let batch_names: Vec<Box<str>> = bam_files
+        .iter()
+        .map(|x| basename(x))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let unique_bams: FnvHashSet<_> = bam_files.iter().cloned().collect();
+    let unique_names: FnvHashSet<_> = batch_names.iter().cloned().collect();
+
+    if unique_names.len() == bam_files.len() && unique_bams.len() == bam_files.len() {
+        Ok(batch_names)
+    } else {
+        info!("bam file (base) names are not unique, appending index");
+        Ok(batch_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| format!("{}_{}", name, i).into_boxed_str())
+            .collect())
+    }
+}
+
 // pub trait ToBed {
 //     fn to_bed(&self, file_path: &str) -> anyhow::Result<()>;
 // }
