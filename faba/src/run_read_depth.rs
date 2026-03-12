@@ -1,50 +1,97 @@
 use crate::common::*;
 use crate::data::util_htslib::*;
-use crate::read_coverage::ReadCoverageCollector;
+use crate::read_depth_coverage::ReadCoverageCollector;
 use genomic_data::bed::*;
 
 use coitrees::IntervalTree;
 
 #[derive(Args, Debug)]
 pub struct ReadDepthArgs {
-    /// `.bam` files to quantify
-    #[arg(value_delimiter = ',', required = true)]
+    /// Input BAM file(s), comma-separated
+    #[arg(
+        value_delimiter = ',',
+        required = true,
+        help = "Input BAM file(s)",
+        long_help = "Comma-separated list of BAM files to quantify.\n\
+                     Each file produces a separate output matrix."
+    )]
     bam_files: Vec<Box<str>>,
 
-    /// resolution (in kb)
-    #[arg(short = 'r', long, required = true)]
+    /// Bin resolution in kb
+    #[arg(
+        short = 'r',
+        long,
+        required = true,
+        help = "Bin resolution in kb",
+        long_help = "Size of genomic bins in kilobases.\n\
+                     The genome is tiled at this resolution and read coverage\n\
+                     is counted per bin per cell."
+    )]
     resolution_kb: f32,
 
-    /// block size for parallelism (in mb)
-    #[arg(short = 'b', long, default_value_t = 1)]
+    /// Block size for parallelism in Mb
+    #[arg(
+        short = 'b',
+        long,
+        default_value_t = 1,
+        help = "Block size for parallelism (Mb)",
+        long_help = "Size of genomic blocks in megabases for parallel processing.\n\
+                     Must be larger than the bin resolution."
+    )]
     block_size_mb: usize,
 
-    /// (10x) cell/sample barcode tag. [See here](`https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam`)
-    #[arg(long, default_value = "CB")]
+    /// Cell barcode BAM tag
+    #[arg(
+        long,
+        default_value = "CB",
+        help = "Cell barcode BAM tag",
+        long_help = "BAM tag for cell/sample barcode identification.\n\
+                     Standard 10x Genomics tag is \"CB\"."
+    )]
     cell_barcode_tag: Box<str>,
 
-    /// bam record type (gene, transcript, exon, utr)
-    #[arg(long, default_value = "gene")]
-    record_type: Box<str>,
-
-    /// gene type (protein_coding, pseudogene, lncRNA)
-    #[arg(long, default_value = "protein_coding")]
-    gene_type: Box<str>,
-
-    /// number of non-zero cutoff for rows/genes
-    #[arg(short, long, default_value_t = 10)]
+    /// Minimum non-zero entries per row (bin) to keep
+    #[arg(
+        short,
+        long,
+        default_value_t = 10,
+        help = "Minimum non-zeros per row (bin)",
+        long_help = "Bins with fewer than this many non-zero cells are removed\n\
+                     from the output matrix."
+    )]
     row_nnz_cutoff: usize,
 
-    /// number of non-zero cutoff for columns/cells
-    #[arg(short, long, default_value_t = 10)]
+    /// Minimum non-zero entries per column (cell) to keep
+    #[arg(
+        short,
+        long,
+        default_value_t = 10,
+        help = "Minimum non-zeros per column (cell)",
+        long_help = "Cells with fewer than this many non-zero bins are removed\n\
+                     from the output matrix."
+    )]
     column_nnz_cutoff: usize,
 
-    /// backend for the output file
-    #[arg(long, value_enum, default_value = "zarr")]
+    /// Sparse matrix output backend
+    #[arg(
+        long,
+        value_enum,
+        default_value = "zarr",
+        help = "Sparse matrix output backend",
+        long_help = "File format for the output sparse matrix.\n\
+                     Supported: zarr, hdf5."
+    )]
     backend: SparseIoBackend,
 
-    /// output header for `data-beans` files
-    #[arg(short, long, required = true)]
+    /// Output directory
+    #[arg(
+        short,
+        long,
+        required = true,
+        help = "Output directory",
+        long_help = "Directory for output files.\n\
+                     One sparse matrix file per input BAM is created here."
+    )]
     output: Box<str>,
 }
 
@@ -65,85 +112,83 @@ pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
         check_bam_index(x, None)?;
     }
 
+    let batch_names = uniq_batch_names(&args.bam_files)?;
+    std::fs::create_dir_all(args.output.as_ref())?;
+
     let backend = args.backend.clone();
+    let cutoffs = SqueezeCutoffs {
+        row: args.row_nnz_cutoff,
+        column: args.column_nnz_cutoff,
+    };
 
-    // build a coitree for each chromosome, each cell barcode, and
-    // each coitree can keep track of coverage
-    let jobs = create_bam_jobs(
-        &args.bam_files[0],
-        Some(args.block_size_mb * 1_000_000),
-        Some(0),
-    )?;
-    let njobs = jobs.len() as u64;
-    info!("Combining reads over {} blocks", njobs);
+    for (bam_file, batch_name) in args.bam_files.iter().zip(&batch_names) {
+        // build a coitree for each chromosome, each cell barcode, and
+        // each coitree can keep track of coverage
+        let jobs = create_bam_jobs(bam_file, Some(args.block_size_mb * 1_000_000), Some(0))?;
+        let njobs = jobs.len() as u64;
+        info!("Combining reads for {} over {} blocks", batch_name, njobs);
 
-    let segment_stats = jobs
-        .par_iter()
-        .progress_count(njobs)
-        .map(
-            |(chr, lb, ub)| -> anyhow::Result<Vec<(CellBarcode, Box<str>, f32)>> {
-                let start = *lb;
-                let stop = *ub;
+        let segment_stats = jobs
+            .par_iter()
+            .progress_count(njobs)
+            .map(
+                |(chr, lb, ub)| -> anyhow::Result<Vec<(CellBarcode, Box<str>, f32)>> {
+                    let start = *lb;
+                    let stop = *ub;
 
-                let bed = Bed {
-                    chr: chr.clone(),
-                    start,
-                    stop,
-                };
+                    let bed = Bed {
+                        chr: chr.clone(),
+                        start,
+                        stop,
+                    };
 
-                let mut read_coverage = ReadCoverageCollector::new(&args.cell_barcode_tag);
+                    let mut read_coverage = ReadCoverageCollector::new(&args.cell_barcode_tag);
+                    read_coverage.collect_from_bam(bam_file, &bed)?;
 
-                for file in &args.bam_files {
-                    read_coverage.collect_from_bam(file, &bed)?;
-                }
+                    let coverage_interval_tree = read_coverage.to_coitrees();
 
-                let coverage_interval_tree = read_coverage.to_coitrees();
+                    // define segments as specified by the resolution parameter
+                    let start = *lb as usize;
+                    let stop = *ub as usize;
+                    let segment_size = (args.resolution_kb * 1000.0) as usize;
 
-                // define segments as specified by the resolution parameter
-                let start = *lb as usize;
-                let stop = *ub as usize;
-                let segment_size = (args.resolution_kb * 1000.0) as usize;
-
-                // now count them all
-                let mut ret = vec![];
-                for (cb, chr_tree) in coverage_interval_tree {
-                    for (chr, tree) in chr_tree {
-                        for lb in (start..stop).step_by(segment_size) {
-                            let ub = (lb + segment_size).min(stop);
-                            let nn = tree.query_count(lb as i32, ub as i32);
-                            if nn > 0 {
-                                let feature = format!("{}:{}-{}", chr, lb, ub);
-                                ret.push((cb.clone(), feature.into_boxed_str(), nn as f32));
+                    // now count them all
+                    let mut ret = vec![];
+                    for (cb, chr_tree) in coverage_interval_tree {
+                        for (chr, tree) in chr_tree {
+                            for lb in (start..stop).step_by(segment_size) {
+                                let ub = (lb + segment_size).min(stop);
+                                let nn = tree.query_count(lb as i32, ub as i32);
+                                if nn > 0 {
+                                    let feature = format!("{}:{}-{}", chr, lb, ub);
+                                    ret.push((cb.clone(), feature.into_boxed_str(), nn as f32));
+                                }
                             }
                         }
                     }
-                }
 
-                Ok(ret)
-            },
-        )
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+                    Ok(ret)
+                },
+            )
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
 
-    info!(
-        "constructing backend data with {} segments",
-        segment_stats.len()
-    );
+        info!(
+            "constructing backend data with {} segments",
+            segment_stats.len()
+        );
 
-    let output = args.output.clone();
-    let backend_file = match backend {
-        SparseIoBackend::HDF5 => format!("{}.h5", &output),
-        SparseIoBackend::Zarr => format!("{}.zarr", &output),
-    };
+        let backend_file = match &backend {
+            SparseIoBackend::HDF5 => format!("{}/{}.h5", &args.output, batch_name),
+            SparseIoBackend::Zarr => format!("{}/{}.zarr", &args.output, batch_name),
+        };
 
-    format_data_triplets(segment_stats)
-        .to_backend(&backend_file)?
-        .qc(SqueezeCutoffs {
-            row: args.row_nnz_cutoff,
-            column: args.column_nnz_cutoff,
-        })?;
+        format_data_triplets(segment_stats)
+            .to_backend(&backend_file)?
+            .qc(cutoffs.clone())?;
+    }
 
     info!("done");
     Ok(())

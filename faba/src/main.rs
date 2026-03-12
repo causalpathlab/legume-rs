@@ -1,13 +1,12 @@
 mod apa_mix;
 mod cell_clustering;
 mod common;
-mod dartseq_io;
-mod dartseq_sifter;
-mod dartseq_stat;
+mod dartseq;
+mod dartseq_pipeline;
 mod data;
 mod gene_count;
 mod hypothesis_tests;
-mod read_coverage;
+mod read_depth_coverage;
 mod run_count_apa;
 mod run_dartseq_count;
 mod run_gene_count;
