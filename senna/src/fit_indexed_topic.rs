@@ -470,6 +470,11 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             .to_dtype(candle_core::DType::F32)?;
         let (union_indices, indexed_x) = dense_to_indexed(&bulk_tensor, args.context_size, &dev)?;
         let (log_z_nk, _) = encoder.forward_indexed_t(&union_indices, &indexed_x, None, false)?;
+        let log_z_nk = if let Some(cfg) = refine_config.as_ref() {
+            refine_indexed_topic_proportions(&log_z_nk, &union_indices, &indexed_x, &decoder, cfg)?
+        } else {
+            log_z_nk
+        };
         let z_nk_bulk = log_z_nk.to_device(&candle_core::Device::Cpu)?;
         let z_nk_bulk = Mat::from_tensor(&z_nk_bulk)?;
 
