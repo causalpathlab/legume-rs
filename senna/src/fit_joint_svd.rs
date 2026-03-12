@@ -84,16 +84,6 @@ pub struct JointSvdArgs {
 
     #[arg(
         long,
-        default_value_t = 3,
-        help = "Number of k-nearest neighbour batches.",
-        long_help = "Number of k-nearest neighbour batches.\n\
-		     Controls the number of batches considered \n\
-		     for nearest neighbour search."
-    )]
-    knn_batches: usize,
-
-    #[arg(
-        long,
         default_value_t = 10,
         help = "Number of k-nearest neighbours within each batch.",
         long_help = "Number of k-nearest neighbours within each batch.\n\
