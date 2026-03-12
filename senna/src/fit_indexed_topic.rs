@@ -60,18 +60,8 @@ pub struct IndexedTopicArgs {
     #[arg(long, short, value_delimiter(','), help = "Batch membership files")]
     batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(long, default_value_t = false, help = "Ignore batch adjustment")]
-    ignore_batch_effects: bool,
-
     #[arg(short = 'w', long = "warm-start", help = "Warm start projection file")]
     warm_start_proj_file: Option<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = 3,
-        help = "Number of k-nearest neighbour batches"
-    )]
-    knn_batches: usize,
 
     #[arg(
         long,
@@ -80,18 +70,12 @@ pub struct IndexedTopicArgs {
     )]
     knn_cells: usize,
 
-    #[arg(long, value_delimiter(','), help = "Reference batch names")]
-    reference_batches: Option<Vec<Box<str>>>,
-
     #[arg(
         long,
         default_value_t = 3,
         help = "Number of multi-level coarsening levels"
     )]
     num_levels: usize,
-
-    #[arg(long, default_value_t = false, help = "Disable super-cell matching")]
-    no_supercell: bool,
 
     #[arg(long, default_value_t = 30, help = "Optimization iterations")]
     iter_opt: usize,
@@ -199,13 +183,11 @@ pub struct IndexedTopicArgs {
 }
 
 pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
-    let reference = args.reference_batches.as_deref();
-
     // 1. Read the data with batch membership
     let SparseDataWithBatch {
         data: mut data_vec,
         batch: batch_membership,
-        nbatch,
+        ..
     } = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
@@ -268,40 +250,20 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
 
     // 3. Multi-level collapsing (pseudobulk)
-    let use_multilevel = args.num_levels > 1 && !args.no_supercell;
-
-    let collapsed_levels: Vec<CollapsedOut> = if use_multilevel {
-        info!("Multi-level collapsing with super-cells ...");
-        let mut levels = data_vec.collapse_columns_multilevel_vec(
-            &proj_kn,
-            &batch_membership,
-            &MultilevelParams {
-                knn_super_cells: args.knn_cells,
-                num_levels: args.num_levels,
-                sort_dim: args.sort_dim,
-                num_opt_iter: args.iter_opt,
-            },
-        )?;
-        // Reverse so training goes coarse→fine: coarsest (fewest samples)
-        // gets the most epochs for a warm start, finest gets brief refinement.
-        levels.reverse();
-        levels
-    } else {
-        let nsamp = data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
-
-        if !args.ignore_batch_effects && nbatch > 1 {
-            info!("Registering batch information");
-            data_vec.build_hnsw_per_batch(&proj_kn, &batch_membership)?;
-        }
-
-        info!("Collapsing columns into {} pseudobulk samples ...", nsamp);
-        vec![data_vec.collapse_columns(
-            Some(args.knn_batches),
-            Some(args.knn_cells),
-            reference,
-            Some(args.iter_opt),
-        )?]
-    };
+    info!("Multi-level collapsing with super-cells ...");
+    let mut collapsed_levels: Vec<CollapsedOut> = data_vec.collapse_columns_multilevel_vec(
+        &proj_kn,
+        &batch_membership,
+        &MultilevelParams {
+            knn_super_cells: args.knn_cells,
+            num_levels: args.num_levels,
+            sort_dim: args.sort_dim,
+            num_opt_iter: args.iter_opt,
+        },
+    )?;
+    // Reverse so training goes coarse→fine: coarsest (fewest samples)
+    // gets the most epochs for a warm start, finest gets brief refinement.
+    collapsed_levels.reverse();
 
     // After reversing, the finest level (most groups) is the last element.
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
