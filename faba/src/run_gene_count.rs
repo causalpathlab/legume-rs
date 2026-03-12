@@ -1,6 +1,7 @@
 use crate::common::*;
 use crate::data::bam_io;
 use crate::data::util_htslib::*;
+use matrix_util::traits::RunningStatOps;
 use rust_htslib::bam::{self, ext::BamRecordExtensions, record::Cigar};
 
 use fnv::FnvHashMap as HashMap;
@@ -166,50 +167,128 @@ fn run_splice_aware(args: &GeneCountArgs, backend: &SparseIoBackend) -> anyhow::
         unspliced_triplets.len()
     );
 
-    let output = args.output.clone();
-    let cutoffs = SqueezeCutoffs {
-        row: args.row_nnz_cutoff,
-        column: args.column_nnz_cutoff,
-    };
+    // Collect union of cells and genes across both matrices
+    let UnionNames {
+        col_names,
+        cell_to_index,
+        row_names,
+        feature_to_index,
+    } = collect_union_names(&spliced_triplets, &unspliced_triplets);
 
-    // Write spliced matrix
+    info!(
+        "union: {} genes x {} cells",
+        row_names.len(),
+        col_names.len()
+    );
+
+    let output = args.output.clone();
+
+    // Write spliced matrix with shared names
     let spliced_file = match backend {
         SparseIoBackend::HDF5 => format!("{}_spliced.h5", &output),
         SparseIoBackend::Zarr => format!("{}_spliced.zarr", &output),
     };
     info!("writing spliced counts to {}", spliced_file);
-    format_data_triplets(spliced_triplets)
-        .to_backend(&spliced_file)?
-        .qc(cutoffs.clone())?;
+    let spliced_data = format_data_triplets_shared(
+        spliced_triplets,
+        &feature_to_index,
+        &cell_to_index,
+        row_names.clone(),
+        col_names.clone(),
+    )
+    .to_backend(&spliced_file)?;
 
-    // Write unspliced matrix
+    // Write unspliced matrix with shared names
     let unspliced_file = match backend {
         SparseIoBackend::HDF5 => format!("{}_unspliced.h5", &output),
         SparseIoBackend::Zarr => format!("{}_unspliced.zarr", &output),
     };
     info!("writing unspliced counts to {}", unspliced_file);
-    format_data_triplets(unspliced_triplets)
-        .to_backend(&unspliced_file)?
-        .qc(cutoffs)?;
+    let unspliced_data = format_data_triplets_shared(
+        unspliced_triplets,
+        &feature_to_index,
+        &cell_to_index,
+        row_names,
+        col_names,
+    )
+    .to_backend(&unspliced_file)?;
+
+    // Union QC: keep a row/col if it passes the cutoff in either matrix
+    info!("union Q/C across spliced and unspliced matrices");
+    let block_size = 100;
+
+    let spliced_row = collect_row_stat(spliced_data.as_ref(), block_size)?;
+    let unspliced_row = collect_row_stat(unspliced_data.as_ref(), block_size)?;
+    let spliced_col = collect_column_stat(spliced_data.as_ref(), block_size)?;
+    let unspliced_col = collect_column_stat(unspliced_data.as_ref(), block_size)?;
+
+    let s_row_nnz = spliced_row.count_positives();
+    let u_row_nnz = unspliced_row.count_positives();
+    let s_col_nnz = spliced_col.count_positives();
+    let u_col_nnz = unspliced_col.count_positives();
+
+    let row_cutoff = args.row_nnz_cutoff;
+    let col_cutoff = args.column_nnz_cutoff;
+
+    let row_idx: Vec<usize> = (0..s_row_nnz.len())
+        .filter(|&i| (s_row_nnz[i] as usize) >= row_cutoff || (u_row_nnz[i] as usize) >= row_cutoff)
+        .collect();
+
+    let col_idx: Vec<usize> = (0..s_col_nnz.len())
+        .filter(|&i| (s_col_nnz[i] as usize) >= col_cutoff || (u_col_nnz[i] as usize) >= col_cutoff)
+        .collect();
+
+    info!(
+        "after union Q/C: {} genes x {} cells",
+        row_idx.len(),
+        col_idx.len()
+    );
+
+    let col_ref = if col_idx.len() < s_col_nnz.len() {
+        Some(&col_idx)
+    } else {
+        None
+    };
+    let row_ref = if row_idx.len() < s_row_nnz.len() {
+        Some(&row_idx)
+    } else {
+        None
+    };
+
+    let mut spliced_data = open_sparse_matrix(&spliced_file, backend)?;
+    spliced_data.subset_columns_rows(col_ref, row_ref)?;
+
+    let mut unspliced_data = open_sparse_matrix(&unspliced_file, backend)?;
+    unspliced_data.subset_columns_rows(col_ref, row_ref)?;
 
     Ok(())
 }
 
 struct SplicedUnsplicedTriplets {
-    spliced: Vec<(CellBarcode, GeneId, f32)>,
-    unspliced: Vec<(CellBarcode, GeneId, f32)>,
+    spliced: Vec<(CellBarcode, Box<str>, f32)>,
+    unspliced: Vec<(CellBarcode, Box<str>, f32)>,
+}
+
+/// Format row name as `"{gene_id}_{gene_symbol}"` consistent with data-beans.
+/// Falls back to gene_id alone if symbol is missing.
+fn format_row_name(rec: &GffRecord) -> Box<str> {
+    match &rec.gene_name {
+        GeneSymbol::Symbol(sym) if !sym.is_empty() => {
+            format!("{}_{}", rec.gene_id, sym).into_boxed_str()
+        }
+        _ => rec.gene_id.to_string().into_boxed_str(),
+    }
 }
 
 fn count_read_per_gene(
     args: &GeneCountArgs,
     rec: &GffRecord,
-) -> anyhow::Result<Vec<(CellBarcode, GeneId, f32)>> {
-    let gene_id = &rec.gene_id;
-
-    if gene_id == &GeneId::Missing {
+) -> anyhow::Result<Vec<(CellBarcode, Box<str>, f32)>> {
+    if rec.gene_id == GeneId::Missing {
         return Ok(vec![]);
     }
 
+    let row_name = format_row_name(rec);
     let mut read_counter = ReadCounter::new(&args.cell_barcode_tag);
 
     for file in &args.bam_files {
@@ -221,7 +300,7 @@ fn count_read_per_gene(
     Ok(read_counter
         .to_vec()
         .into_iter()
-        .map(|(cb, x)| (cb, gene_id.clone(), x as f32))
+        .map(|(cb, x)| (cb, row_name.clone(), x as f32))
         .collect())
 }
 
@@ -230,16 +309,14 @@ fn count_read_per_gene_splice(
     rec: &GffRecord,
     exon_intervals: &HashMap<GeneId, Vec<(i64, i64)>>,
 ) -> anyhow::Result<SplicedUnsplicedTriplets> {
-    let gene_id = &rec.gene_id;
-
-    if gene_id == &GeneId::Missing {
+    if rec.gene_id == GeneId::Missing {
         return Ok(SplicedUnsplicedTriplets {
             spliced: vec![],
             unspliced: vec![],
         });
     }
 
-    let exons = match exon_intervals.get(gene_id) {
+    let exons = match exon_intervals.get(&rec.gene_id) {
         Some(e) if !e.is_empty() => e.as_slice(),
         _ => {
             // No exon annotations for this gene — skip entirely
@@ -250,6 +327,7 @@ fn count_read_per_gene_splice(
         }
     };
 
+    let row_name = format_row_name(rec);
     let mut counter =
         SpliceAwareReadCounter::new(&args.cell_barcode_tag, exons, args.intron_buffer);
 
@@ -262,13 +340,13 @@ fn count_read_per_gene_splice(
     let spliced = counter
         .spliced
         .into_iter()
-        .map(|(cb, x)| (cb, gene_id.clone(), x as f32))
+        .map(|(cb, x)| (cb, row_name.clone(), x as f32))
         .collect();
 
     let unspliced = counter
         .unspliced
         .into_iter()
-        .map(|(cb, x)| (cb, gene_id.clone(), x as f32))
+        .map(|(cb, x)| (cb, row_name.clone(), x as f32))
         .collect();
 
     Ok(SplicedUnsplicedTriplets { spliced, unspliced })
