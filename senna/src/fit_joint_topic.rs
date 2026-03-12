@@ -96,16 +96,6 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 3,
-        help = "Number of k-nearest neighbour batches.",
-        long_help = "Number of k-nearest neighbour batches.\n\
-		     Controls the number of batches considered \n\
-		     for nearest neighbour search."
-    )]
-    knn_batches: usize,
-
-    #[arg(
-        long,
         default_value_t = 10,
         help = "Number of k-nearest neighbours within each batch.",
         long_help = "Number of k-nearest neighbours within each batch.\n\
@@ -185,24 +175,6 @@ pub struct JointTopicArgs {
 		     Larger value = slower warm-up. Set to 0 to disable annealing."
     )]
     kl_warmup_epochs: f64,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Intensity levels for frequency embedding.",
-        long_help = "Intensity levels for frequency embedding.\n\
-		     Controls the vocabulary size for intensity embedding."
-    )]
-    vocab_size: usize,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Intensity embedding dimension.",
-        long_help = "Intensity embedding dimension.\n\
-		     Controls the size of the embedding for intensity levels."
-    )]
-    vocab_emb: usize,
 
     #[arg(
         long,

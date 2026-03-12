@@ -43,21 +43,9 @@ pub struct DeconvArgs {
     #[arg(long, short, value_delimiter(','))]
     batch_files: Option<Vec<Box<str>>>,
 
-    /// #k-nearest neighbours batches
-    #[arg(long, default_value_t = 10)]
-    knn_batches: usize,
-
     /// #k-nearest neighbours within each batch
     #[arg(long, default_value_t = 10)]
     knn_cells: usize,
-
-    /// #k-nearest neighbours within each bulk
-    #[arg(long, default_value_t = 50)]
-    knn_bulk: usize,
-
-    /// reference batch names
-    #[arg(long, value_delimiter(','))]
-    reference_batches: Option<Vec<Box<str>>>,
 
     /// #downsampling columns per each collapsed sample. If None, no
     /// downsampling.
@@ -80,10 +68,6 @@ pub struct DeconvArgs {
     /// If not specified, `encoder_layers[0]` will be used.
     #[arg(short = 'm', long)]
     feature_modules: Option<usize>,
-
-    /// to reduce row features (#gene modules ~ 2^r)
-    #[arg(short = 'r', long, default_value_t = 10)]
-    n_row_proj_dim: usize,
 
     /// encoder layers
     #[arg(long, short = 'e', value_delimiter(','), default_values_t = vec![128,1024,128])]
@@ -155,9 +139,9 @@ pub fn fit_deconv(args: &DeconvArgs) -> anyhow::Result<()> {
     // 3. Batch-adjusted collapsing (pseudobulk)
     info!("Constructing PB in the sc data... into {} samples", nsamp);
     let collapsed_sc = sc_data.collapse_columns(
-        Some(args.knn_batches),
+        Some(10),
         Some(args.knn_cells),
-        args.reference_batches.as_deref(),
+        None,
         Some(args.iter_opt),
     )?;
 
