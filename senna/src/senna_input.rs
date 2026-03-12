@@ -1,5 +1,4 @@
 use crate::embed_common::*;
-use dashmap::DashSet as HashSet;
 use data_beans::convert::try_open_or_convert;
 use matrix_util::common_io::{self, basename, read_lines};
 
@@ -15,7 +14,6 @@ pub struct ReadSharedRowsArgs {
 pub struct SparseDataWithBatch {
     pub data: SparseIoVec,
     pub batch: Vec<Box<str>>,
-    pub nbatch: usize,
 }
 
 pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<SparseDataWithBatch> {
@@ -120,13 +118,9 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
         ));
     }
 
-    let batch_hash: HashSet<Box<str>> = batch_membership.iter().cloned().collect();
-    let nbatch = batch_hash.len();
-
     Ok(SparseDataWithBatch {
         data: data_vec,
         batch: batch_membership,
-        nbatch,
     })
 }
 
