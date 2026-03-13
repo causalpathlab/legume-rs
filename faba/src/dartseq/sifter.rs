@@ -317,7 +317,7 @@ mod tests {
         }
     }
 
-    // ── Forward sweep tests ─────────────────────────────────────────
+    // -- Forward sweep tests --
 
     #[test]
     fn test_forward_sweep_discovers_rac_site() {
@@ -327,7 +327,7 @@ mod tests {
         let (_f, reader) = create_test_fasta(seq);
         let mut sifter = make_sifter(&reader);
 
-        // WT: high conversion C→T at pos 10
+        // WT: high conversion C->T at pos 10
         let wt = build_freq_map(&[(10, Dna::C, 20), (10, Dna::T, 80)]);
         // MUT: low conversion (background)
         let mt = build_freq_map(&[(10, Dna::C, 90), (10, Dna::T, 10)]);
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn test_forward_sweep_rejects_non_rac() {
         //                  0123456789012
-        // T at pos 8 → not R={A,G}
+        // T at pos 8 -> not R={A,G}
         let seq = "NNNNNNNNTAC";
         let (_f, reader) = create_test_fasta(seq);
         let mut sifter = make_sifter(&reader);
@@ -363,7 +363,7 @@ mod tests {
         );
     }
 
-    // ── Backward sweep tests ────────────────────────────────────────
+    // -- Backward sweep tests --
 
     #[test]
     fn test_backward_sweep_discovers_gty_site() {
@@ -373,7 +373,7 @@ mod tests {
         let (_f, reader) = create_test_fasta(seq);
         let mut sifter = make_sifter(&reader);
 
-        // WT: high conversion G→A at pos 8
+        // WT: high conversion G->A at pos 8
         let wt = build_freq_map(&[(8, Dna::G, 20), (8, Dna::A, 80)]);
         // MUT: low conversion
         let mt = build_freq_map(&[(8, Dna::G, 90), (8, Dna::A, 10)]);
@@ -388,7 +388,7 @@ mod tests {
         assert!(site.pv < 0.01, "pv should be < 0.01, got {}", site.pv);
     }
 
-    // ── Coverage / conversion thresholds ────────────────────────────
+    // -- Coverage / conversion thresholds --
 
     #[test]
     fn test_sweep_respects_min_coverage() {
@@ -432,7 +432,7 @@ mod tests {
         );
     }
 
-    // ── No-mutant mode ──────────────────────────────────────────────
+    // -- No-mutant mode --
 
     #[test]
     fn test_forward_sweep_no_mutant() {
@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(site.pv, 0.0, "No-mutant mode should report pv=0.0");
     }
 
-    // ── Multiple sites with varying strength ────────────────────────
+    // -- Multiple sites with varying strength --
 
     #[test]
     fn test_multiple_sites_varying_strength() {
@@ -502,7 +502,7 @@ mod tests {
         assert!(conv_positions.contains(&5));
     }
 
-    // ── Non-consecutive positions ───────────────────────────────────
+    // -- Non-consecutive positions --
 
     #[test]
     fn test_nonconsecutive_positions_skip() {
@@ -513,7 +513,7 @@ mod tests {
         let wt = build_freq_map(&[(10, Dna::C, 20), (10, Dna::T, 80)]);
         let mt = build_freq_map(&[(10, Dna::C, 90), (10, Dna::T, 10)]);
 
-        // Gap: positions [5, 9, 10] — conv_site(10) - r_site(5) = 5 ≠ 2
+        // Gap: positions [5, 9, 10] — conv_site(10) - r_site(5) = 5 != 2
         let positions = vec![5i64, 9, 10];
         sifter.forward_sweep(&positions, &wt, Some(&mt));
 

@@ -1,10 +1,14 @@
+use crate::atoi::io::load_atoi_mask_from_parquet;
+use crate::atoi::io::ToParquet as AtoIToParquet;
+use crate::atoi::mask::{build_atoi_mask, filter_m6a_by_atoi_mask};
+use crate::atoi::pipeline::*;
 use crate::cell_clustering::{cluster_cells_from_bam, ClusteringParams};
 use crate::common::*;
 use crate::dartseq::io::ToParquet;
+use crate::dartseq::pipeline::*;
 use crate::dartseq::sifter::*;
-use crate::dartseq::stat::Histogram;
-use crate::dartseq_pipeline::*;
 use crate::data::methylation::*;
+use crate::pipeline_util::*;
 
 use crate::data::cell_membership::CellMembership;
 use genomic_data::gff::FeatureType as GffFeatureType;
@@ -67,24 +71,6 @@ pub struct DartSeqCountArgs {
     pub resolution_kb: Option<f32>,
 
     #[arg(
-        long = "genome-bins",
-        default_value_t = 57,
-        help = "#bins for genomic locations in histogram",
-        long_help = "Number of bins for genomic locations in the histogram. \n\
-		     Controls the granularity of the histogram across the genome."
-    )]
-    num_genomic_bins_histogram: usize,
-
-    #[arg(
-        long = "print_width",
-        default_value_t = 40,
-        help = "#bins in histogram when printing on the screen",
-        long_help = "Approximate number of bins in the output histogram. \n\
-		     Adjusts the print width for visualization."
-    )]
-    histogram_print_width: usize,
-
-    #[arg(
         long,
         default_value = "CB",
         help = "Cell barcode tag",
@@ -145,9 +131,10 @@ pub struct DartSeqCountArgs {
     #[arg(
         long,
         value_enum,
-        help = "Bam record type (gene, transcript, exon, utr)",
-        long_help = "Selectively choose BAM record type for analysis. \n\
-		     Options include gene, transcript, exon, or UTR."
+        help = "GFF feature type filter (gene, transcript, exon, utr)",
+        long_help = "Filter GFF records by feature type.\n\
+		     Common values: gene, transcript, exon, utr.\n\
+		     Note: currently unused, reserved for future use."
     )]
     record_type: Option<GffFeatureType>,
 
@@ -189,7 +176,10 @@ pub struct DartSeqCountArgs {
         value_enum,
         default_value = "beta",
         help = "Type of output value to report",
-        long_help = "Type of output value to report. Options include beta, count, or other supported types."
+        long_help = "Type of output value to report.\n\
+		     beta: methylation fraction (methylated / total),\n\
+		     methylated: raw methylated read count,\n\
+		     unmethylated: raw unmethylated read count."
     )]
     pub output_value_type: MethFeatureType,
 
@@ -198,7 +188,8 @@ pub struct DartSeqCountArgs {
         value_enum,
         default_value = "zarr",
         help = "Backend format for the output file",
-        long_help = "Backend format for the output file. Options include zarr, hdf5, or other supported sparse IO backends."
+        long_help = "File format for the output sparse matrix.\n\
+		     Supported: zarr, hdf5."
     )]
     pub backend: SparseIoBackend,
 
@@ -246,15 +237,6 @@ pub struct DartSeqCountArgs {
     pub output: Box<str>,
 
     #[arg(
-        long,
-        default_value_t = false,
-        help = "Print histogram to stdout",
-        long_help = "Print histogram of gene features to stdout. \n\
-		     The histogram will be saved to a file regardless of this option."
-    )]
-    print_histogram: bool,
-
-    #[arg(
         short = 'f',
         long = "genome",
         help = "Reference genome FASTA file",
@@ -273,8 +255,8 @@ pub struct DartSeqCountArgs {
         long_help = "Path to cell barcode membership file for restricting analysis to specific cells.\n\
                      Format: First column = cell barcode, Second column = cell type.\n\
                      Supports .tsv, .csv, .parquet, and .gz variants.\n\
-                     Only cells (barcodes) present in this file will be included in analysis,\n\
-                     based on --cell-filter-stage setting."
+                     Only cells (barcodes) present in this file will be included in analysis.\n\
+                     By default, barcodes are prefix-matched (use --exact-barcode-match to change)."
     )]
     pub cell_membership_file: Option<Box<str>>,
 
@@ -324,6 +306,50 @@ pub struct DartSeqCountArgs {
                      forward strand and Y=C/T on the reverse strand."
     )]
     pub check_r_site: bool,
+
+    // ========== A-to-I editing detection ==========
+    #[arg(
+        long = "detect-atoi",
+        default_value_t = false,
+        help = "Detect A-to-I editing sites and mask them from m6A calling",
+        long_help = "Detect A-to-I (adenosine-to-inosine) RNA editing sites\n\
+                     via A→G conversions. Detected sites are output to a\n\
+                     separate parquet file and used as a mask to exclude\n\
+                     false-positive m6A candidates whose RAC/GTY triplet\n\
+                     overlaps an A-to-I site."
+    )]
+    pub detect_atoi: bool,
+
+    #[arg(
+        long = "atoi-min-coverage",
+        default_value_t = 10,
+        help = "Minimum coverage for A-to-I site detection"
+    )]
+    pub atoi_min_coverage: usize,
+
+    #[arg(
+        long = "atoi-min-conversion",
+        default_value_t = 5,
+        help = "Minimum A-to-G conversions for A-to-I detection"
+    )]
+    pub atoi_min_conversion: usize,
+
+    #[arg(
+        long = "atoi-pval",
+        default_value_t = 0.05,
+        help = "P-value cutoff for A-to-I detection"
+    )]
+    pub atoi_pvalue_cutoff: f64,
+
+    #[arg(
+        long = "atoi-mask",
+        help = "Pre-computed A-to-I mask parquet file (from `faba atoi` or `faba dart --detect-atoi`)",
+        long_help = "Path to a pre-computed A-to-I sites parquet file.\n\
+                     When provided, skips A-to-I discovery and loads the mask\n\
+                     directly from this file to filter m6A candidates.\n\
+                     Implies --detect-atoi behavior for masking."
+    )]
+    pub atoi_mask_file: Option<Box<str>>,
 
     // ========== Cell clustering options ==========
     #[arg(
@@ -450,6 +476,33 @@ impl DartSeqCountArgs {
     }
 }
 
+impl From<&DartSeqCountArgs> for AtoIParams {
+    fn from(args: &DartSeqCountArgs) -> Self {
+        AtoIParams {
+            genome_file: args.genome_file.clone(),
+            wt_bam_files: args.wt_bam_files.clone(),
+            mut_bam_files: args.mut_bam_files.clone(),
+            gene_barcode_tag: args.gene_barcode_tag.clone(),
+            cell_barcode_tag: args.cell_barcode_tag.clone(),
+            include_missing_barcode: args.include_missing_barcode,
+            min_coverage: args.atoi_min_coverage,
+            min_conversion: args.atoi_min_conversion,
+            pseudocount: args.pseudocount,
+            pvalue_cutoff: args.atoi_pvalue_cutoff,
+            resolution_kb: args.resolution_kb,
+            backend: args.backend.clone(),
+            output: args.output.clone(),
+            output_value_type: args.output_value_type.clone(),
+            row_nnz_cutoff: args.row_nnz_cutoff,
+            column_nnz_cutoff: args.column_nnz_cutoff,
+            cell_membership_file: args.cell_membership_file.clone(),
+            membership_barcode_col: args.membership_barcode_col,
+            membership_celltype_col: args.membership_celltype_col,
+            exact_barcode_match: args.exact_barcode_match,
+        }
+    }
+}
+
 /// Count possibly methylated A positions in DART-seq bam files to
 /// quantify m6A β values
 pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
@@ -526,7 +579,52 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     // FIRST PASS: Find edit sites //
     /////////////////////////////////
 
+    // Detect A-to-I editing sites first (if requested), or load pre-computed mask
+    let atoi_params = AtoIParams::from(args);
+    let atoi_mask = if let Some(ref mask_file) = args.atoi_mask_file {
+        // Load pre-computed A-to-I mask from parquet
+        info!("Loading A-to-I mask from {}", mask_file);
+        let mask = load_atoi_mask_from_parquet(mask_file.as_ref())?;
+        info!("Loaded A-to-I mask with {} positions", mask.len());
+        Some((None, mask))
+    } else if args.detect_atoi {
+        let atoi_sites = find_all_atoi_sites(&gff_map, &atoi_params)?;
+        let n_atoi: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
+        info!("Found {} A-to-I editing sites", n_atoi);
+
+        if !atoi_sites.is_empty() {
+            AtoIToParquet::to_parquet(
+                &atoi_sites,
+                &gff_map,
+                format!("{}/atoi_sites.parquet", args.output),
+            )?;
+        }
+
+        let mask = build_atoi_mask(&atoi_sites, &gff_map);
+        info!("Built A-to-I mask with {} positions", mask.len());
+
+        // Store atoi_sites for second-pass quantification
+        Some((Some(atoi_sites), mask))
+    } else {
+        None
+    };
+
     let gene_sites = find_all_methylated_sites(&gff_map, args, membership.as_ref())?;
+
+    // Apply A-to-I mask to filter m6A candidates
+    if let Some((_, ref mask)) = atoi_mask {
+        if !mask.is_empty() {
+            let n_before: usize = gene_sites.iter().map(|x| x.value().len()).sum();
+            filter_m6a_by_atoi_mask(&gene_sites, mask, &gff_map);
+            let n_after: usize = gene_sites.iter().map(|x| x.value().len()).sum();
+            info!(
+                "A-to-I masking: {} → {} m6A sites ({} removed)",
+                n_before,
+                n_after,
+                n_before - n_after
+            );
+        }
+    }
 
     if gene_sites.is_empty() {
         info!("no sites found");
@@ -538,19 +636,6 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 
     gene_sites.to_parquet(&gff_map, format!("{}/sites.parquet", args.output))?;
 
-    ////////////////////////////////
-    // Output marginal statistics //
-    ////////////////////////////////
-
-    let gene_feature_count =
-        gene_sites.count_gene_features(&args.gff_file, args.num_genomic_bins_histogram)?;
-
-    if args.print_histogram {
-        gene_feature_count.print(args.histogram_print_width);
-    }
-
-    gene_feature_count.to_tsv(&format!("{}/gene_feature_count.tsv.gz", args.output))?;
-
     //////////////////////////////////////////
     // SECOND PASS: Collect cell-level data //
     //////////////////////////////////////////
@@ -559,6 +644,14 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         process_all_bam_files_to_bed(args, &gene_sites, &gff_map)?;
     } else {
         process_all_bam_files_to_backend(args, &gene_sites, &gff_map)?;
+    }
+
+    // A-to-I second pass: quantify editing sites into sparse matrices
+    if let Some((Some(ref atoi_sites), _)) = atoi_mask {
+        if !atoi_sites.is_empty() {
+            info!("Second pass: A-to-I count matrix");
+            process_all_bam_files_to_backend_atoi(&atoi_params, atoi_sites, &gff_map)?;
+        }
     }
 
     info!("done");
