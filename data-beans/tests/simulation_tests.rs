@@ -14,6 +14,8 @@ fn sparse_matrix_simulation_and_loading() -> anyhow::Result<()> {
         pve_batch: 1.,
         rseed: 42,
         hierarchical_depth: None,
+        n_housekeeping: 0,
+        housekeeping_fold: 10.0,
     };
 
     let _out = generate_factored_poisson_gamma_data(&args)?;
@@ -40,6 +42,8 @@ fn hierarchical_simulation_and_loading() -> anyhow::Result<()> {
         pve_batch: 1.,
         rseed: 42,
         hierarchical_depth: Some(3), // K = 2^(3-1) = 4 leaf topics
+        n_housekeeping: 0,
+        housekeeping_fold: 10.0,
     };
 
     let out = generate_factored_poisson_gamma_data(&args)?;
