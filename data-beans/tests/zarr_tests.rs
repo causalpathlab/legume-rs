@@ -210,6 +210,8 @@ fn simulate() -> anyhow::Result<()> {
         pve_batch: 1.,
         rseed: 42,
         hierarchical_depth: None,
+        n_housekeeping: 0,
+        housekeeping_fold: 10.0,
     };
 
     let mtx_file = create_temp_dir_file(".mtx.gz")?;

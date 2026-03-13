@@ -1500,6 +1500,20 @@ pub struct RunSimulateArgs {
 
     #[arg(
         long,
+        default_value_t = 0,
+        help = "Number of housekeeping genes with high uniform expression across all topics"
+    )]
+    n_housekeeping: usize,
+
+    #[arg(
+        long,
+        default_value_t = 10.0,
+        help = "Expression fold-change of housekeeping genes relative to mean"
+    )]
+    housekeeping_fold: f32,
+
+    #[arg(
+        long,
         default_value_t = false,
         help = "Save output in MTX format",
         long_help = "Enable this option to save the simulated matrix in MTX format \n\
