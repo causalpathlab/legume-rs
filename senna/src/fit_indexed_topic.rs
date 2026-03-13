@@ -204,7 +204,6 @@ pub struct IndexedTopicArgs {
         help = "Bulk data files for joint deconvolution (.parquet, .tsv.gz)"
     )]
     bulk_data_files: Option<Vec<Box<str>>>,
-
 }
 
 pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
@@ -403,8 +402,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     };
 
     // Build decoder, train, save dictionary, and evaluate.
-    let decoder =
-        IndexedTopicDecoder::new(n_features_decoder, n_topics, param_builder.pp("dec"))?;
+    let decoder = IndexedTopicDecoder::new(n_features_decoder, n_topics, param_builder.pp("dec"))?;
 
     let scores = train_indexed_progressive(
         &collapsed_levels,
@@ -443,18 +441,16 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
 
     // Evaluate bulk with standard encoder/decoder
     if let (Some(bulk), Some(bulk_deltas)) = (&bulk, &bulk_deltas) {
-        evaluate_bulk_samples(
-            bulk,
-            bulk_deltas,
-            &base_encoder,
-            &decoder,
-            &coarsening,
-            &dev,
-            args.context_size,
-            refine_config.as_ref(),
-            &gene_names,
-            &args.out,
-        )?;
+        let bulk_config = BulkEvalConfig {
+            coarsening: &coarsening,
+            dev: &dev,
+            context_size: args.context_size,
+            refine_config: refine_config.as_ref(),
+            decoder: &decoder,
+            gene_names: &gene_names,
+            out_prefix: &args.out,
+        };
+        evaluate_bulk_samples(bulk, bulk_deltas, &base_encoder, &bulk_config)?;
     }
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
@@ -471,18 +467,22 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct BulkEvalConfig<'a, Dec> {
+    coarsening: &'a Option<FeatureCoarsening>,
+    dev: &'a Device,
+    context_size: usize,
+    refine_config: Option<&'a TopicRefinementConfig>,
+    decoder: &'a Dec,
+    gene_names: &'a [Box<str>],
+    out_prefix: &'a str,
+}
+
 /// Evaluate bulk samples using the given encoder/decoder and write results.
 fn evaluate_bulk_samples<Enc, Dec>(
     bulk: &BulkDataOut,
     bulk_deltas: &[GammaMatrix],
     encoder: &Enc,
-    decoder: &Dec,
-    coarsening: &Option<FeatureCoarsening>,
-    dev: &Device,
-    context_size: usize,
-    refine_config: Option<&TopicRefinementConfig>,
-    gene_names: &[Box<str>],
-    out_prefix: &str,
+    config: &BulkEvalConfig<Dec>,
 ) -> anyhow::Result<()>
 where
     Enc: IndexedEncoderT,
@@ -493,7 +493,7 @@ where
     let mut delta_mean = finest_delta.posterior_mean().clone();
 
     let mut bulk_corrected = bulk.data.transpose();
-    if let Some(fc) = coarsening.as_ref() {
+    if let Some(fc) = config.coarsening.as_ref() {
         delta_mean = fc.aggregate_rows_ds(&delta_mean);
         bulk_corrected = fc.aggregate_columns_nd(&bulk_corrected);
     }
@@ -505,12 +505,19 @@ where
     }
 
     let bulk_tensor = bulk_corrected
-        .to_tensor(dev)?
+        .to_tensor(config.dev)?
         .to_dtype(candle_core::DType::F32)?;
-    let (union_indices, indexed_x) = dense_to_indexed(&bulk_tensor, context_size, dev)?;
+    let (union_indices, indexed_x) =
+        dense_to_indexed(&bulk_tensor, config.context_size, config.dev)?;
     let (log_z_nk, _) = encoder.forward_indexed_t(&union_indices, &indexed_x, None, false)?;
-    let log_z_nk = if let Some(cfg) = refine_config {
-        refine_indexed_topic_proportions(&log_z_nk, &union_indices, &indexed_x, decoder, cfg)?
+    let log_z_nk = if let Some(cfg) = config.refine_config {
+        refine_indexed_topic_proportions(
+            &log_z_nk,
+            &union_indices,
+            &indexed_x,
+            config.decoder,
+            cfg,
+        )?
     } else {
         log_z_nk
     };
@@ -518,14 +525,14 @@ where
     let z_nk_bulk = Mat::from_tensor(&z_nk_bulk)?;
 
     z_nk_bulk.to_parquet_with_names(
-        &(out_prefix.to_string() + ".deconv.parquet"),
+        &(config.out_prefix.to_string() + ".deconv.parquet"),
         (Some(&bulk.samples), Some("sample")),
         None,
     )?;
 
     delta_mean.to_parquet_with_names(
-        &(out_prefix.to_string() + ".bulk_delta.parquet"),
-        (Some(gene_names), Some("gene")),
+        &(config.out_prefix.to_string() + ".bulk_delta.parquet"),
+        (Some(config.gene_names), Some("gene")),
         None,
     )?;
     info!("Wrote bulk deconvolution results");
