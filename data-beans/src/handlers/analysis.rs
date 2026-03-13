@@ -188,6 +188,8 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         pve_batch: cmd_args.pve_batch,
         rseed: cmd_args.rseed,
         hierarchical_depth: cmd_args.hierarchical_depth,
+        n_housekeeping: cmd_args.n_housekeeping,
+        housekeeping_fold: cmd_args.housekeeping_fold,
     };
 
     let sim = simulate::generate_factored_poisson_gamma_data(&sim_args)?;

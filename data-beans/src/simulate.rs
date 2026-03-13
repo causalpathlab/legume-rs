@@ -25,6 +25,13 @@ pub struct SimArgs {
     /// gates on a binary tree of this depth. K = 2^(depth-1) leaf topics.
     /// Overrides `factors` when set.
     pub hierarchical_depth: Option<usize>,
+    /// Number of housekeeping genes with high uniform expression across all topics.
+    /// These genes get a large, equal dictionary value in every topic, simulating
+    /// ubiquitous genes like B2M, EEF1A1, ribosomal proteins.
+    pub n_housekeeping: usize,
+    /// Expression fold-change of housekeeping genes relative to the mean
+    /// topic-specific gene. Default: 10.0
+    pub housekeeping_fold: f32,
 }
 
 pub struct SimOut {
@@ -172,6 +179,31 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
             }
         }
         (beta_dk, None)
+    };
+
+    // Inject housekeeping genes: first n_housekeeping rows get high expression
+    // across all topics, drawn from Gamma with mean = housekeeping_fold * mean_beta
+    let beta_dk = if args.n_housekeeping > 0 && args.n_housekeeping < dd {
+        let mean_val = beta_dk.mean();
+        let hk_mean = mean_val * args.housekeeping_fold;
+        // Gamma(shape, rate) with mean = shape/rate = hk_mean, CV ~ 1/sqrt(shape)
+        let hk_shape = 2.0_f32; // moderate variability across housekeeping genes
+        let hk_rate = hk_shape / hk_mean;
+        let hk_dist = rand_distr::Gamma::new(hk_shape, 1.0 / hk_rate).expect("housekeeping gamma");
+        let mut beta = beta_dk;
+        for g in 0..args.n_housekeeping {
+            let base = hk_dist.sample(&mut rng);
+            for k in 0..kk {
+                beta[(g, k)] = base;
+            }
+        }
+        info!(
+            "injected {} housekeeping genes: Gamma(shape={:.1}, mean={:.4}) (fold={:.1}x mean {:.4})",
+            args.n_housekeeping, hk_shape, hk_mean, args.housekeeping_fold, mean_val
+        );
+        beta
+    } else {
+        beta_dk
     };
 
     let runif = Uniform::new(0, kk)?;
