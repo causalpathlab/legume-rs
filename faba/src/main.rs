@@ -1,25 +1,29 @@
 mod apa_mix;
+mod atoi;
 mod cell_clustering;
 mod common;
 mod dartseq;
-mod dartseq_pipeline;
 mod data;
 mod gene_count;
 mod hypothesis_tests;
-mod read_depth_coverage;
+mod pipeline_util;
+mod read_depth;
+mod run_atoi;
 mod run_count_apa;
 mod run_dartseq_count;
 mod run_gene_count;
 mod run_read_depth;
-mod scan_pwm;
+mod site_analysis;
 
 use crate::common::*;
 use colored::Colorize;
+use run_atoi::*;
 use run_count_apa::*;
 use run_dartseq_count::*;
 use run_gene_count::*;
 use run_read_depth::*;
-use scan_pwm::*;
+use site_analysis::metagene::*;
+use site_analysis::scan_pwm::*;
 
 const LOGO: &str = include_str!("../logo.txt");
 
@@ -120,6 +124,18 @@ enum Commands {
     )]
     ReadDepth(ReadDepthArgs),
 
+    /// Detect and quantify A-to-I RNA editing sites
+    #[command(aliases = ["atoi", "a2i", "editing"],
+        long_about = "Detect A-to-I (adenosine-to-inosine) RNA editing sites\n\n\
+            Discovers editing sites by comparing A->G (forward) or T->C\n\
+            (reverse) conversion rates between wild-type and mutant BAM\n\
+            files using binomial tests, then quantifies per-cell editing\n\
+            at discovered sites.\n\n\
+            Output: atoi_sites.parquet (site annotations) + sparse matrix\n\
+            (cells x sites). The parquet file can be used as --atoi-mask\n\
+            input for `faba dart` or `faba apa`.")]
+    AtoI(AtoICountArgs),
+
     /// Build position weight matrix around genomic sites
     #[command(
         alias = "pwm",
@@ -129,6 +145,16 @@ enum Commands {
             a position weight matrix as TSV."
     )]
     ScanPwm(ScanPwmArgs),
+
+    /// Metagene histogram of site positions across gene features
+    #[command(
+        alias = "mg",
+        long_about = "Metagene histogram of site positions across gene features\n\n\
+            Maps sites from a parquet file onto gene features (5'UTR, CDS,\n\
+            3'UTR, non-coding) using GFF annotations, and produces a binned\n\
+            histogram showing the distribution of sites across the metagene."
+    )]
+    Metagene(MetageneArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -156,8 +182,14 @@ fn main() -> anyhow::Result<()> {
         Commands::CountApa(args) => {
             run_count_apa(args)?;
         }
+        Commands::AtoI(args) => {
+            run_atoi(args)?;
+        }
         Commands::ScanPwm(args) => {
             run_scan_pwm(args)?;
+        }
+        Commands::Metagene(args) => {
+            run_metagene(args)?;
         }
     }
 
