@@ -308,7 +308,6 @@ pub struct TopicArgs {
         help = "L2 regularization strength for refinement"
     )]
     refine_reg: f64,
-
 }
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
@@ -469,8 +468,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     // Build decoder, train, save dictionary, and evaluate.
     let (scores, z_nk) = match args.decoder {
         DecoderType::ZeroInflated => {
-            let decoder =
-                ZITopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
+            let decoder = ZITopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
             let train_config = ProgressiveTrainConfig {
                 parameters: &parameters,
@@ -522,12 +520,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 decoder: Some(&decoder),
                 refine_config: refine_config.as_ref(),
             };
-            let z_nk = evaluate_latent_by_encoder(
-                &data_vec,
-                &encoder,
-                finest_collapsed,
-                &eval_config,
-            )?;
+            let z_nk =
+                evaluate_latent_by_encoder(&data_vec, &encoder, finest_collapsed, &eval_config)?;
 
             (scores, z_nk)
         }
@@ -568,18 +562,13 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 decoder: Some(&decoder),
                 refine_config: refine_config.as_ref(),
             };
-            let z_nk = evaluate_latent_by_encoder(
-                &data_vec,
-                &encoder,
-                finest_collapsed,
-                &eval_config,
-            )?;
+            let z_nk =
+                evaluate_latent_by_encoder(&data_vec, &encoder, finest_collapsed, &eval_config)?;
 
             (scores, z_nk)
         }
         DecoderType::Flat => {
-            let decoder =
-                TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
+            let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
             let train_config = ProgressiveTrainConfig {
                 parameters: &parameters,
@@ -614,12 +603,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 decoder: Some(&decoder),
                 refine_config: refine_config.as_ref(),
             };
-            let z_nk = evaluate_latent_by_encoder(
-                &data_vec,
-                &encoder,
-                finest_collapsed,
-                &eval_config,
-            )?;
+            let z_nk =
+                evaluate_latent_by_encoder(&data_vec, &encoder, finest_collapsed, &eval_config)?;
 
             (scores, z_nk)
         }
