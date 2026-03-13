@@ -133,19 +133,6 @@ pub struct JointTopicArgs {
     n_latent_topics: usize,
 
     #[arg(
-        short = 'f',
-        long,
-        help = "Number of feature modules.",
-        long_help = "Number of modules of the features in the encoder model.\n\
-		     If not specified, encoder_layers[0] will be used. \n\
-		     Giving the number of features modules smaller than that of features,\n\
-		     we can expedite model training while not loosing too much of accuracy,\n\
-		     as many features are redundant and frequently dropped out.\n\n\
-		     We will assume the same number of feature modules for all data types.\n"
-    )]
-    feature_modules: Option<usize>,
-
-    #[arg(
         long,
         help = "Maximum number of highly variable features per modality.",
         long_help = "Select top N features by log-variance for each modality.\n\
@@ -357,7 +344,6 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
 
     // 5. Train a joint topic model on the collapsed data (progressive)
     let n_topics = args.n_latent_topics;
-    let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
 
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(args.device_no)?,
@@ -383,7 +369,6 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         LogSoftmaxMultimodalEncoderArgs {
             n_features: n_features.clone(),
             n_topics,
-            n_modules,
             layers: &args.encoder_layers,
         },
         param_builder.clone(),
