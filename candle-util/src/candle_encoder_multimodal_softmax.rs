@@ -1,5 +1,4 @@
 use crate::candle_aux_layers::*;
-use crate::candle_aux_linear::*;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
@@ -8,7 +7,6 @@ use candle_nn::{ops, BatchNorm, Linear, Module, ModuleT, VarBuilder};
 pub struct LogSoftmaxMultimodalEncoder {
     n_features: Vec<usize>,
     n_topics: usize,
-    feature_module: Vec<AggregateLinear>,
     fc: Vec<StackLayers<Linear>>,
     bn_z: Vec<BatchNorm>,
     z_mean: Vec<Linear>,
@@ -47,18 +45,15 @@ impl LogSoftmaxMultimodalEncoder {
             .map(|(m, (x_nd, x0_nd))| {
                 let lx_nd = (x_nd + 1.)?.log()?;
                 let denom_n1 = lx_nd.sum_keepdim(lx_nd.rank() - 1)?;
-                let h_nm = self.feature_module[m]
-                    .forward(&(lx_nd.broadcast_div(&denom_n1)? * (self.n_features[m] as f64))?)?;
+                let h_nd = (lx_nd.broadcast_div(&denom_n1)? * (self.n_features[m] as f64))?;
 
                 if let Some(x0_nd) = x0_nd {
                     let lx0_nd = (x0_nd + 1.)?.log()?;
                     let denom0 = lx0_nd.sum_keepdim(lx0_nd.rank() - 1)?;
-                    let x0_nm = self.feature_module[m].forward(
-                        &(lx0_nd.broadcast_div(&denom0)? * (self.n_features[m] as f64))?,
-                    )?;
-                    h_nm - x0_nm
+                    let x0_nd = (lx0_nd.broadcast_div(&denom0)? * (self.n_features[m] as f64))?;
+                    h_nd - x0_nd
                 } else {
-                    Ok(h_nm)
+                    Ok(h_nd)
                 }
             })
             .collect()
@@ -79,8 +74,8 @@ impl LogSoftmaxMultimodalEncoder {
             .preprocess_input(x_nd_vec, x0_nd_vec, train)?
             .into_iter()
             .enumerate()
-            .map(|(m, xx_nm)| -> Result<Tensor> {
-                let fc_nl = self.fc[m].forward_t(&xx_nm, train)?;
+            .map(|(m, xx_nd)| -> Result<Tensor> {
+                let fc_nl = self.fc[m].forward_t(&xx_nd, train)?;
                 self.bn_z[m].forward_t(&fc_nl, train)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -156,25 +151,14 @@ impl LogSoftmaxMultimodalEncoder {
         let n_features = args.n_features.clone();
         let n_modalities = n_features.len();
 
-        let feature_module = n_features
+        // data [N, D_m] -> fc stack -> final_hidden (per modality)
+        let fc_dims = args.layers[..args.layers.len() - 1].to_vec();
+        let out_dim = *args.layers.last().unwrap();
+
+        let fc = n_features
             .iter()
             .enumerate()
             .map(|(i, &in_dim)| {
-                aggregate_linear_hard(
-                    in_dim,
-                    args.n_modules,
-                    vb.pp(format!("feature.module_{}", i)),
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        // (1) data -> fc
-        let fc_dims = args.layers[..args.layers.len() - 1].to_vec();
-        let in_dim = args.n_modules;
-        let out_dim = *args.layers.last().unwrap();
-
-        let fc = (0..n_modalities)
-            .map(|i| {
                 stack_relu_linear(in_dim, out_dim, &fc_dims, vb.pp(format!("nn.enc.fc_{}", i)))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -183,7 +167,7 @@ impl LogSoftmaxMultimodalEncoder {
             .map(|i| candle_nn::batch_norm(out_dim, bn_config, vb.pp(format!("nn.enc.bn_z_{}", i))))
             .collect::<Result<Vec<_>>>()?;
 
-        // (2) fc -> K
+        // fc -> K
         let z_mean = (0..n_modalities)
             .map(|i| {
                 candle_nn::linear(
@@ -207,7 +191,6 @@ impl LogSoftmaxMultimodalEncoder {
         Ok(Self {
             n_features: args.n_features,
             n_topics: args.n_topics,
-            feature_module,
             fc,
             bn_z,
             z_mean,
@@ -219,6 +202,5 @@ impl LogSoftmaxMultimodalEncoder {
 pub struct LogSoftmaxMultimodalEncoderArgs<'a> {
     pub n_features: Vec<usize>,
     pub n_topics: usize,
-    pub n_modules: usize,
     pub layers: &'a [usize],
 }

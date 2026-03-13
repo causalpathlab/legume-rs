@@ -10,32 +10,33 @@ pub struct IndexedSample {
     pub values: Vec<f32>,
 }
 
-/// Batched minibatch with union-of-indexed-windows
+/// Batched minibatch with separate input (encoder) and output (decoder) windows.
 pub struct IndexedMinibatchData {
-    /// [S] u32 — sorted union of per-sample top-K indices
-    pub union_indices: Tensor,
-    /// [N, S] f32 — input values at union positions
-    pub indexed_x: Tensor,
-    /// [N, S] f32 — null/batch correction at union positions
-    pub indexed_x_null: Option<Tensor>,
-    /// [N, S] f32 — output/target at union positions
-    pub indexed_y: Option<Tensor>,
-    /// [N, S] f32 — output null at union positions
-    pub indexed_y_null: Option<Tensor>,
+    /// [S_in] u32 — sorted union of per-sample top-K indices for encoder
+    pub input_union_indices: Tensor,
+    /// [N, S_in] f32 — encoder input values at union positions
+    pub input_indexed_x: Tensor,
+    /// [N, S_in] f32 — encoder null/batch correction at union positions
+    pub input_indexed_x_null: Option<Tensor>,
+    /// [S_out] u32 — sorted union of per-sample top-K indices for decoder
+    pub output_union_indices: Tensor,
+    /// [N, S_out] f32 — decoder target values at union positions
+    pub output_indexed_x: Tensor,
 }
 
-/// Adaptive feature window data loader.
+/// Adaptive feature window data loader with decoupled encoder/decoder windows.
 ///
-/// Each sample keeps only its top-K features by value (K = context_size).
-/// Batches use the union of selected indices across the minibatch,
-/// producing [N, S] tensors where S is the union size.
+/// Each sample keeps its top-K features by value independently for input (encoder)
+/// and output (decoder) sides. Batches use the union of selected indices within
+/// each side, producing separate [N, S_in] and [N, S_out] tensors.
 pub struct IndexedInMemoryData {
-    samples: Vec<IndexedSample>,
-    null_samples: Option<Vec<Vec<f32>>>,
-    output_samples: Option<Vec<Vec<f32>>>,
-    output_null_samples: Option<Vec<Vec<f32>>>,
-    n_features: usize,
-    context_size: usize,
+    input_samples: Vec<IndexedSample>,
+    input_null_rows: Option<Vec<Vec<f32>>>,
+    output_samples: Vec<IndexedSample>,
+    n_input_features: usize,
+    n_output_features: usize,
+    input_context_size: usize,
+    output_context_size: usize,
     minibatches: Minibatches,
 }
 
@@ -45,9 +46,9 @@ where
 {
     pub input: &'a D,
     pub input_null: Option<&'a D>,
-    pub output: Option<&'a D>,
-    pub output_null: Option<&'a D>,
-    pub context_size: usize,
+    pub output: &'a D,
+    pub input_context_size: usize,
+    pub output_context_size: usize,
 }
 
 /// Select top-K indices by value from a dense row.
@@ -81,48 +82,104 @@ fn tensor_to_row(t: &Tensor) -> Vec<f32> {
     t.flatten_all().unwrap().to_vec1::<f32>().unwrap()
 }
 
+struct UnionScatterOut {
+    union_indices: Tensor,
+    indexed_x: Tensor,
+    union_vec: Vec<u32>,
+    pos_map: HashMap<u32, usize>,
+}
+
+/// Build union indices and scattered [N, S] matrix from IndexedSamples.
+fn build_union_scatter(
+    samples: &[IndexedSample],
+    sample_indices: &[usize],
+    target_device: &Device,
+) -> anyhow::Result<UnionScatterOut> {
+    let n_batch = sample_indices.len();
+
+    let mut union_set = BTreeSet::new();
+    for &si in sample_indices {
+        for &idx in &samples[si].indices {
+            union_set.insert(idx);
+        }
+    }
+    let union_vec: Vec<u32> = union_set.into_iter().collect();
+    let s = union_vec.len();
+
+    let pos_map: HashMap<u32, usize> = union_vec
+        .iter()
+        .enumerate()
+        .map(|(pos, &idx)| (idx, pos))
+        .collect();
+
+    let mut x_data = vec![0.0f32; n_batch * s];
+    for (row, &si) in sample_indices.iter().enumerate() {
+        let sample = &samples[si];
+        for (k, &feat_idx) in sample.indices.iter().enumerate() {
+            let col = pos_map[&feat_idx];
+            x_data[row * s + col] = sample.values[k];
+        }
+    }
+
+    let union_indices = Tensor::from_vec(union_vec.clone(), (s,), target_device)?
+        .to_dtype(candle_core::DType::U32)?;
+    let indexed_x = Tensor::from_vec(x_data, (n_batch, s), target_device)?;
+
+    Ok(UnionScatterOut {
+        union_indices,
+        indexed_x,
+        union_vec,
+        pos_map,
+    })
+}
+
 impl IndexedInMemoryData {
     /// Build indexed data from dense matrices.
     ///
-    /// For each row of `input`, finds top-K indices by value.
-    /// The same indices are used to index all four data sources.
+    /// Input and output get independent top-K selections from their respective sources.
     pub fn from_dense<D>(args: IndexedInMemoryArgs<D>) -> anyhow::Result<Self>
     where
         D: CandleDataLoaderOps,
     {
         let input_rows = args.input.rows_to_tensor_vec();
+        let output_rows = args.output.rows_to_tensor_vec();
         let n_samples = input_rows.len();
-        let n_features = input_rows[0].flatten_all()?.to_vec1::<f32>()?.len();
-        let context_size = args.context_size.min(n_features);
+        let n_input_features = input_rows[0].flatten_all()?.to_vec1::<f32>()?.len();
+        let n_output_features = output_rows[0].flatten_all()?.to_vec1::<f32>()?.len();
+        let input_context_size = args.input_context_size.min(n_input_features);
+        let output_context_size = args.output_context_size.min(n_output_features);
 
-        // Pre-extract all rows for auxiliary data
+        // Pre-extract null rows
         let null_rows: Option<Vec<Vec<f32>>> = args
             .input_null
             .map(|d| d.rows_to_tensor_vec().iter().map(tensor_to_row).collect());
-        let output_rows: Option<Vec<Vec<f32>>> = args
-            .output
-            .map(|d| d.rows_to_tensor_vec().iter().map(tensor_to_row).collect());
-        let output_null_rows: Option<Vec<Vec<f32>>> = args
-            .output_null
-            .map(|d| d.rows_to_tensor_vec().iter().map(tensor_to_row).collect());
 
-        // Build indexed samples from input
-        let mut samples = Vec::with_capacity(n_samples);
+        // Build input indexed samples
+        let mut input_samples = Vec::with_capacity(n_samples);
         for row_tensor in &input_rows {
             let row = tensor_to_row(row_tensor);
-            let (indices, values) = top_k_indices(&row, context_size);
-            samples.push(IndexedSample { indices, values });
+            let (indices, values) = top_k_indices(&row, input_context_size);
+            input_samples.push(IndexedSample { indices, values });
+        }
+
+        // Build output indexed samples
+        let mut output_samples = Vec::with_capacity(n_samples);
+        for row_tensor in &output_rows {
+            let row = tensor_to_row(row_tensor);
+            let (indices, values) = top_k_indices(&row, output_context_size);
+            output_samples.push(IndexedSample { indices, values });
         }
 
         let rows: Vec<usize> = (0..n_samples).collect();
 
         Ok(IndexedInMemoryData {
-            samples,
-            null_samples: null_rows,
-            output_samples: output_rows,
-            output_null_samples: output_null_rows,
-            n_features,
-            context_size,
+            input_samples,
+            input_null_rows: null_rows,
+            output_samples,
+            n_input_features,
+            n_output_features,
+            input_context_size,
+            output_context_size,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -142,19 +199,23 @@ impl IndexedInMemoryData {
         self.minibatches.chunks.len()
     }
 
-    pub fn context_size(&self) -> usize {
-        self.context_size
+    pub fn input_context_size(&self) -> usize {
+        self.input_context_size
     }
 
-    pub fn n_features(&self) -> usize {
-        self.n_features
+    pub fn output_context_size(&self) -> usize {
+        self.output_context_size
     }
 
-    /// Build an indexed minibatch from the given sample indices.
-    ///
-    /// 1. Collect top-K indices from each sample into BTreeSet (sorted union)
-    /// 2. Build position map: feature index -> position in union
-    /// 3. Scatter values into [N, S] matrices
+    pub fn n_input_features(&self) -> usize {
+        self.n_input_features
+    }
+
+    pub fn n_output_features(&self) -> usize {
+        self.n_output_features
+    }
+
+    /// Build an indexed minibatch with separate input/output unions.
     fn build_minibatch(
         &self,
         sample_indices: &[usize],
@@ -162,96 +223,34 @@ impl IndexedInMemoryData {
     ) -> anyhow::Result<IndexedMinibatchData> {
         let n_batch = sample_indices.len();
 
-        // 1. Build sorted union of all indices in this batch
-        let mut union_set = BTreeSet::new();
-        for &si in sample_indices {
-            for &idx in &self.samples[si].indices {
-                union_set.insert(idx);
-            }
-        }
-        let union_vec: Vec<u32> = union_set.into_iter().collect();
-        let s = union_vec.len();
+        // Build input side (encoder)
+        let input_out = build_union_scatter(&self.input_samples, sample_indices, target_device)?;
 
-        // 2. Position map: feature index -> position in union
-        let pos_map: HashMap<u32, usize> = union_vec
-            .iter()
-            .enumerate()
-            .map(|(pos, &idx)| (idx, pos))
-            .collect();
-
-        // 3. Build [N, S] matrices by scattering values
-        let mut x_data = vec![0.0f32; n_batch * s];
-        let mut x_null_data = self
-            .null_samples
-            .as_ref()
-            .map(|_| vec![0.0f32; n_batch * s]);
-        let mut y_data = self
-            .output_samples
-            .as_ref()
-            .map(|_| vec![0.0f32; n_batch * s]);
-        let mut y_null_data = self
-            .output_null_samples
-            .as_ref()
-            .map(|_| vec![0.0f32; n_batch * s]);
-
-        for (row, &si) in sample_indices.iter().enumerate() {
-            let sample = &self.samples[si];
-
-            // Scatter input values at selected positions
-            for (k, &feat_idx) in sample.indices.iter().enumerate() {
-                let col = pos_map[&feat_idx];
-                x_data[row * s + col] = sample.values[k];
-            }
-
-            // Scatter auxiliary data at all union positions
-            if let Some(ref null_data) = self.null_samples {
-                let buf = x_null_data.as_mut().unwrap();
+        // Scatter null data at input union positions
+        let input_indexed_x_null = if let Some(ref null_data) = self.input_null_rows {
+            let s = input_out.union_vec.len();
+            let mut buf = vec![0.0f32; n_batch * s];
+            for (row, &si) in sample_indices.iter().enumerate() {
                 let null_row = &null_data[si];
-                for &feat_idx in &union_vec {
-                    let col = pos_map[&feat_idx];
+                for &feat_idx in &input_out.union_vec {
+                    let col = input_out.pos_map[&feat_idx];
                     buf[row * s + col] = null_row[feat_idx as usize];
                 }
             }
+            Some(Tensor::from_vec(buf, (n_batch, s), target_device)?)
+        } else {
+            None
+        };
 
-            if let Some(ref out_data) = self.output_samples {
-                let buf = y_data.as_mut().unwrap();
-                let out_row = &out_data[si];
-                for &feat_idx in &union_vec {
-                    let col = pos_map[&feat_idx];
-                    buf[row * s + col] = out_row[feat_idx as usize];
-                }
-            }
-
-            if let Some(ref out_null) = self.output_null_samples {
-                let buf = y_null_data.as_mut().unwrap();
-                let out_null_row = &out_null[si];
-                for &feat_idx in &union_vec {
-                    let col = pos_map[&feat_idx];
-                    buf[row * s + col] = out_null_row[feat_idx as usize];
-                }
-            }
-        }
-
-        // Convert to tensors
-        let union_indices =
-            Tensor::from_vec(union_vec, (s,), target_device)?.to_dtype(candle_core::DType::U32)?;
-        let indexed_x = Tensor::from_vec(x_data, (n_batch, s), target_device)?;
-        let indexed_x_null = x_null_data
-            .map(|buf| Tensor::from_vec(buf, (n_batch, s), target_device))
-            .transpose()?;
-        let indexed_y = y_data
-            .map(|buf| Tensor::from_vec(buf, (n_batch, s), target_device))
-            .transpose()?;
-        let indexed_y_null = y_null_data
-            .map(|buf| Tensor::from_vec(buf, (n_batch, s), target_device))
-            .transpose()?;
+        // Build output side (decoder)
+        let output_out = build_union_scatter(&self.output_samples, sample_indices, target_device)?;
 
         Ok(IndexedMinibatchData {
-            union_indices,
-            indexed_x,
-            indexed_x_null,
-            indexed_y,
-            indexed_y_null,
+            input_union_indices: input_out.union_indices,
+            input_indexed_x: input_out.indexed_x,
+            input_indexed_x_null,
+            output_union_indices: output_out.union_indices,
+            output_indexed_x: output_out.indexed_x,
         })
     }
 
@@ -324,23 +323,23 @@ mod tests {
         let args = IndexedInMemoryArgs {
             input: &data,
             input_null: None,
-            output: None,
-            output_null: None,
-            context_size: 3,
+            output: &data,
+            input_context_size: 3,
+            output_context_size: 3,
         };
 
         let indexed = IndexedInMemoryData::from_dense(args).unwrap();
         assert_eq!(indexed.num_data(), 4);
-        assert_eq!(indexed.n_features(), 6);
-        assert_eq!(indexed.context_size(), 3);
+        assert_eq!(indexed.n_input_features(), 6);
+        assert_eq!(indexed.input_context_size(), 3);
 
-        // Verify sample 0: top-3 should be indices 1, 3, 5
-        assert_eq!(indexed.samples[0].indices, vec![1, 3, 5]);
-        assert_eq!(indexed.samples[0].values, vec![0.5, 0.9, 0.7]);
+        // Verify input sample 0: top-3 should be indices 1, 3, 5
+        assert_eq!(indexed.input_samples[0].indices, vec![1, 3, 5]);
+        assert_eq!(indexed.input_samples[0].values, vec![0.5, 0.9, 0.7]);
 
-        // Verify sample 1: top-3 should be indices 0, 2, 4
-        assert_eq!(indexed.samples[1].indices, vec![0, 2, 4]);
-        assert_eq!(indexed.samples[1].values, vec![0.8, 0.6, 0.9]);
+        // Verify input sample 1: top-3 should be indices 0, 2, 4
+        assert_eq!(indexed.input_samples[1].indices, vec![0, 2, 4]);
+        assert_eq!(indexed.input_samples[1].values, vec![0.8, 0.6, 0.9]);
     }
 
     #[test]
@@ -358,9 +357,9 @@ mod tests {
         let args = IndexedInMemoryArgs {
             input: &data,
             input_null: None,
-            output: None,
-            output_null: None,
-            context_size: 2,
+            output: &data,
+            input_context_size: 2,
+            output_context_size: 2,
         };
 
         let indexed = IndexedInMemoryData::from_dense(args).unwrap();
@@ -369,14 +368,14 @@ mod tests {
         let mb = indexed.minibatch_ordered(0, 3, &Device::Cpu).unwrap();
 
         // Union of {3,5}, {0,4}, {1,4} = {0,1,3,4,5} => S=5
-        let union: Vec<u32> = mb.union_indices.to_vec1().unwrap();
+        let union: Vec<u32> = mb.input_union_indices.to_vec1().unwrap();
         assert_eq!(union, vec![0, 1, 3, 4, 5]);
 
-        // indexed_x shape should be [3, 5]
-        assert_eq!(mb.indexed_x.dims(), &[3, 5]);
+        // input_indexed_x shape should be [3, 5]
+        assert_eq!(mb.input_indexed_x.dims(), &[3, 5]);
 
         // Verify values: sample 0 has features 3,5 active with values 0.9, 0.7
-        let x_vals: Vec<Vec<f32>> = mb.indexed_x.to_vec2().unwrap();
+        let x_vals: Vec<Vec<f32>> = mb.input_indexed_x.to_vec2().unwrap();
         // union positions: 0->0, 1->1, 3->2, 4->3, 5->4
         // sample 0: feat 3 at pos 2 = 0.9, feat 5 at pos 4 = 0.7, rest = 0
         assert!((x_vals[0][2] - 0.9).abs() < 1e-6); // feat 3
@@ -385,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn test_indexed_with_output() {
+    fn test_indexed_with_separate_output() {
         let input = DMatrix::<f32>::from_row_slice(
             2,
             4,
@@ -398,34 +397,68 @@ mod tests {
             2,
             4,
             &[
-                10.0, 20.0, 30.0, 40.0, //
-                50.0, 60.0, 70.0, 80.0, //
+                10.0, 20.0, 30.0, 40.0, // top-2 = {30,40} -> {2,3}
+                50.0, 60.0, 70.0, 80.0, // top-2 = {70,80} -> {2,3}
             ],
         );
 
         let args = IndexedInMemoryArgs {
             input: &input,
             input_null: None,
-            output: Some(&output),
-            output_null: None,
-            context_size: 2,
+            output: &output,
+            input_context_size: 2,
+            output_context_size: 2,
         };
 
         let indexed = IndexedInMemoryData::from_dense(args).unwrap();
         let mb = indexed.minibatch_ordered(0, 2, &Device::Cpu).unwrap();
 
-        // Union of {0,2} and {1,3} = {0,1,2,3} => S=4
-        let union: Vec<u32> = mb.union_indices.to_vec1().unwrap();
-        assert_eq!(union, vec![0, 1, 2, 3]);
+        // Input union: {0,2} ∪ {1,3} = {0,1,2,3} => S_in=4
+        let input_union: Vec<u32> = mb.input_union_indices.to_vec1().unwrap();
+        assert_eq!(input_union, vec![0, 1, 2, 3]);
 
-        // Output should be present and indexed at same positions
-        assert!(mb.indexed_y.is_some());
-        let y_vals: Vec<Vec<f32>> = mb.indexed_y.unwrap().to_vec2().unwrap();
-        // sample 0: all 4 features in union, output = [10, 20, 30, 40]
-        assert!((y_vals[0][0] - 10.0).abs() < 1e-6);
-        assert!((y_vals[0][2] - 30.0).abs() < 1e-6);
-        // sample 1: output = [50, 60, 70, 80]
-        assert!((y_vals[1][1] - 60.0).abs() < 1e-6);
-        assert!((y_vals[1][3] - 80.0).abs() < 1e-6);
+        // Output union: {2,3} ∪ {2,3} = {2,3} => S_out=2
+        let output_union: Vec<u32> = mb.output_union_indices.to_vec1().unwrap();
+        assert_eq!(output_union, vec![2, 3]);
+
+        // Output values: sample 0 at positions {2,3} = [30.0, 40.0]
+        let y_vals: Vec<Vec<f32>> = mb.output_indexed_x.to_vec2().unwrap();
+        assert!((y_vals[0][0] - 30.0).abs() < 1e-6);
+        assert!((y_vals[0][1] - 40.0).abs() < 1e-6);
+        // sample 1 at positions {2,3} = [70.0, 80.0]
+        assert!((y_vals[1][0] - 70.0).abs() < 1e-6);
+        assert!((y_vals[1][1] - 80.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_indexed_different_context_sizes() {
+        let data = DMatrix::<f32>::from_row_slice(
+            2,
+            6,
+            &[
+                0.1, 0.5, 0.3, 0.9, 0.2, 0.7, // input top-3={1,3,5}, output top-1={3}
+                0.8, 0.1, 0.6, 0.2, 0.9, 0.3, // input top-3={0,2,4}, output top-1={4}
+            ],
+        );
+
+        let args = IndexedInMemoryArgs {
+            input: &data,
+            input_null: None,
+            output: &data,
+            input_context_size: 3,
+            output_context_size: 1,
+        };
+
+        let indexed = IndexedInMemoryData::from_dense(args).unwrap();
+        assert_eq!(indexed.input_context_size(), 3);
+        assert_eq!(indexed.output_context_size(), 1);
+
+        let mb = indexed.minibatch_ordered(0, 2, &Device::Cpu).unwrap();
+
+        // Input union: {1,3,5} ∪ {0,2,4} = {0,1,2,3,4,5} => S_in=6
+        assert_eq!(mb.input_indexed_x.dims()[1], 6);
+
+        // Output union: {3} ∪ {4} = {3,4} => S_out=2
+        assert_eq!(mb.output_indexed_x.dims()[1], 2);
     }
 }
