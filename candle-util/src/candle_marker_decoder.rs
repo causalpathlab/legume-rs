@@ -19,8 +19,8 @@ pub struct MarkerGuidedTopicDecoder {
     n_features: usize,
     n_topics: usize,
     dictionary: SoftmaxLinear,
-    marker_da: Tensor,  // [D, A] fixed
-    alignment: Tensor,  // [A, K] learnable
+    marker_da: Tensor, // [D, A] fixed
+    alignment: Tensor, // [A, K] learnable
 }
 
 impl MarkerGuidedTopicDecoder {
@@ -137,8 +137,8 @@ pub struct MarkerGuidedIndexedTopicDecoder {
     n_features: usize,
     n_topics: usize,
     dictionary: SoftmaxLinear,
-    marker_da: Tensor,  // [D, A] fixed
-    alignment: Tensor,  // [A, K] learnable
+    marker_da: Tensor, // [D, A] fixed
+    alignment: Tensor, // [A, K] learnable
 }
 
 impl MarkerGuidedIndexedTopicDecoder {
@@ -330,7 +330,13 @@ mod tests {
                     marker_avg > other_avg,
                     "Cell type {} markers (genes {}-{}): aligned topic {} avg={:.4} \
                      but topic {} avg={:.4}",
-                    a, marker_start, marker_start + 4, k, marker_avg, other_k, other_avg
+                    a,
+                    marker_start,
+                    marker_start + 4,
+                    k,
+                    marker_avg,
+                    other_k,
+                    other_avg
                 );
             }
         }
@@ -358,7 +364,12 @@ mod tests {
             let (_, llik) = plain_decoder
                 .forward_with_llik(&log_z_nk, &x_nd, &|_, _| unreachable!())
                 .unwrap();
-            llik.neg().unwrap().mean_all().unwrap().to_scalar::<f32>().unwrap()
+            llik.neg()
+                .unwrap()
+                .mean_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
         };
 
         for _epoch in 0..300 {
@@ -373,13 +384,19 @@ mod tests {
             let (_, llik) = plain_decoder
                 .forward_with_llik(&log_z_nk, &x_nd, &|_, _| unreachable!())
                 .unwrap();
-            llik.neg().unwrap().mean_all().unwrap().to_scalar::<f32>().unwrap()
+            llik.neg()
+                .unwrap()
+                .mean_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
         };
 
         assert!(
             final_loss < first_loss,
             "Plain decoder should decrease loss: {} -> {}",
-            first_loss, final_loss
+            first_loss,
+            final_loss
         );
     }
 
@@ -405,25 +422,29 @@ mod tests {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
 
-        let dense_decoder = MarkerGuidedTopicDecoder::new(
-            n_features, n_topics, marker_da.clone(), vb.pp("dec"),
-        ).unwrap();
-        let indexed_decoder = MarkerGuidedIndexedTopicDecoder::new(
-            n_features, n_topics, marker_da, vb.pp("dec"),
-        ).unwrap();
+        let dense_decoder =
+            MarkerGuidedTopicDecoder::new(n_features, n_topics, marker_da.clone(), vb.pp("dec"))
+                .unwrap();
+        let indexed_decoder =
+            MarkerGuidedIndexedTopicDecoder::new(n_features, n_topics, marker_da, vb.pp("dec"))
+                .unwrap();
 
         let logits = Tensor::randn(0.0f32, 1.0, (n_samples, n_topics), &device).unwrap();
         let log_z = ops::log_softmax(&logits, 1).unwrap();
         let x = Tensor::randn(0.0f32, 1.0, (n_samples, n_features), &device)
-            .unwrap().abs().unwrap();
+            .unwrap()
+            .abs()
+            .unwrap();
 
         let (_, llik_dense) = dense_decoder
-            .forward_with_llik(&log_z, &x, &|_, _| unreachable!()).unwrap();
+            .forward_with_llik(&log_z, &x, &|_, _| unreachable!())
+            .unwrap();
 
         let all_indices: Vec<u32> = (0..n_features as u32).collect();
         let union_indices = Tensor::from_vec(all_indices, (n_features,), &device).unwrap();
         let (_, llik_indexed) = indexed_decoder
-            .forward_indexed(&log_z, &union_indices, &x).unwrap();
+            .forward_indexed(&log_z, &union_indices, &x)
+            .unwrap();
 
         // Both produce valid negative log-likelihoods
         let dense_vals: Vec<f32> = llik_dense.to_vec1().unwrap();
@@ -433,8 +454,14 @@ mod tests {
             assert!(*i < 0.0, "indexed llik should be negative: {}", i);
         }
 
-        assert_eq!(dense_decoder.get_dictionary().unwrap().dims(), &[n_features, n_topics]);
-        assert_eq!(indexed_decoder.get_dictionary().unwrap().dims(), &[n_features, n_topics]);
+        assert_eq!(
+            dense_decoder.get_dictionary().unwrap().dims(),
+            &[n_features, n_topics]
+        );
+        assert_eq!(
+            indexed_decoder.get_dictionary().unwrap().dims(),
+            &[n_features, n_topics]
+        );
     }
 
     /// Helper: build overlapping-topic test data.
@@ -448,19 +475,29 @@ mod tests {
     ) -> (Vec<f32>, Tensor, Tensor, Tensor) {
         let mut gt_dict = vec![0.0f32; n_topics * n_features];
         for k in 0..n_topics {
-            for d in 0..10 { gt_dict[k * n_features + d] = 1.0; }
-            for d in 25..n_features { gt_dict[k * n_features + d] = 1.0; }
+            for d in 0..10 {
+                gt_dict[k * n_features + d] = 1.0;
+            }
+            for d in 25..n_features {
+                gt_dict[k * n_features + d] = 1.0;
+            }
             let ms = 10 + k * 5;
-            for d in ms..(ms + 5) { gt_dict[k * n_features + d] = 5.0; }
+            for d in ms..(ms + 5) {
+                gt_dict[k * n_features + d] = 5.0;
+            }
             for ok in 0..n_topics {
                 if ok != k {
-                    for d in ms..(ms + 5) { gt_dict[ok * n_features + d] += 0.1; }
+                    for d in ms..(ms + 5) {
+                        gt_dict[ok * n_features + d] += 0.1;
+                    }
                 }
             }
         }
         for k in 0..n_topics {
             let s: f32 = gt_dict[k * n_features..(k + 1) * n_features].iter().sum();
-            for d in 0..n_features { gt_dict[k * n_features + d] /= s; }
+            for d in 0..n_features {
+                gt_dict[k * n_features + d] /= s;
+            }
         }
 
         let total = 100.0f32;
@@ -481,7 +518,9 @@ mod tests {
         let mut m_data = vec![0.0f32; n_features * n_annots];
         for a in 0..n_annots {
             let ms = 10 + a * 5;
-            for d in ms..(ms + 5) { m_data[d * n_annots + a] = 1.0; }
+            for d in ms..(ms + 5) {
+                m_data[d * n_annots + a] = 1.0;
+            }
         }
         let marker_da = Tensor::from_vec(m_data, (n_features, n_annots), device).unwrap();
 

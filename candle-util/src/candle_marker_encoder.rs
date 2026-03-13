@@ -15,7 +15,7 @@ use candle_nn::{ops, VarBuilder};
 /// KL loss comes from the data expert only (marker expert is deterministic).
 pub struct MarkerGuidedEncoder<E: EncoderModuleT> {
     base_encoder: E,
-    marker_da: Tensor,    // [D, A] fixed
+    marker_da: Tensor,     // [D, A] fixed
     marker_linear: Tensor, // [A, K] learnable B_ak
     marker_weight: Tensor, // scalar λ, learnable
 }
@@ -105,7 +105,7 @@ impl<E: EncoderModuleT> EncoderModuleT for MarkerGuidedEncoder<E> {
 /// selecting rows of M_da corresponding to the union indices.
 pub struct MarkerGuidedIndexedEncoder<E: IndexedEncoderT> {
     base_encoder: E,
-    marker_da: Tensor,    // [D, A] fixed
+    marker_da: Tensor,     // [D, A] fixed
     marker_linear: Tensor, // [A, K] learnable B_ak
     marker_weight: Tensor, // scalar λ, learnable
     n_features: usize,
