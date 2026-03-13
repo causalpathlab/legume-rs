@@ -1,14 +1,11 @@
+use super::site_io::*;
 use crate::common::*;
 use crate::data::dna::{Dna, DnaBaseCount};
 use crate::data::dna_stat_map::DnaBaseFreqMap;
 use crate::data::util_htslib;
 
-use fnv::FnvHashSet;
 use genomic_data::bed::Bed;
 use genomic_data::sam::Strand;
-
-use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::record::RowAccessor;
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -48,88 +45,6 @@ pub struct ScanPwmArgs {
     /// Output file path (TSV, or .gz for gzipped)
     #[arg(short, long, required = true)]
     output: Box<str>,
-}
-
-struct GenomicSite {
-    chr: Box<str>,
-    position: i64,
-    strand: Strand,
-}
-
-/// Read sites from a parquet file, auto-detecting dart vs apa format.
-fn read_sites(site_file: &str) -> anyhow::Result<Vec<GenomicSite>> {
-    let field_names = matrix_util::parquet::peek_parquet_field_names(site_file)?;
-    let has_m6a_pos = field_names.iter().any(|f| f.as_ref() == "m6a_pos");
-    let has_genomic_alpha = field_names.iter().any(|f| f.as_ref() == "genomic_alpha");
-
-    let file = File::open(site_file)?;
-    let reader = SerializedFileReader::new(file)?;
-    let row_iter = reader.get_row_iter(None)?;
-
-    // Find column indices
-    let chr_idx = field_names
-        .iter()
-        .position(|f| f.as_ref() == "chr")
-        .ok_or_else(|| anyhow::anyhow!("missing 'chr' column in {}", site_file))?;
-
-    let mut sites = Vec::new();
-
-    if has_m6a_pos {
-        // Dart format: chr, m6a_pos, strand
-        let pos_idx = field_names
-            .iter()
-            .position(|f| f.as_ref() == "m6a_pos")
-            .unwrap();
-        let strand_idx = field_names
-            .iter()
-            .position(|f| f.as_ref() == "strand")
-            .ok_or_else(|| anyhow::anyhow!("missing 'strand' column in {}", site_file))?;
-
-        for record in row_iter {
-            let row = record?;
-            let chr: Box<str> = row.get_string(chr_idx)?.clone().into_boxed_str();
-            let position = row.get_long(pos_idx)?;
-            let strand_str = row.get_string(strand_idx)?;
-            let strand = if strand_str == "+" {
-                Strand::Forward
-            } else {
-                Strand::Backward
-            };
-            sites.push(GenomicSite {
-                chr,
-                position,
-                strand,
-            });
-        }
-    } else if has_genomic_alpha {
-        // APA format: chr, genomic_alpha (no strand column)
-        let pos_idx = field_names
-            .iter()
-            .position(|f| f.as_ref() == "genomic_alpha")
-            .unwrap();
-
-        for record in row_iter {
-            let row = record?;
-            let chr: Box<str> = row.get_string(chr_idx)?.clone().into_boxed_str();
-            let position = row.get_long(pos_idx)?;
-            sites.push(GenomicSite {
-                chr,
-                position,
-                strand: Strand::Forward,
-            });
-        }
-    } else {
-        return Err(anyhow::anyhow!(
-            "unrecognized parquet format: expected 'm6a_pos' (dart) or 'genomic_alpha' (apa) column"
-        ));
-    }
-
-    // Deduplicate by (chr, position)
-    let mut seen = FnvHashSet::default();
-    sites.retain(|s| seen.insert((s.chr.clone(), s.position)));
-
-    info!("loaded {} unique sites from {}", sites.len(), site_file);
-    Ok(sites)
 }
 
 /// Swap A<->T and G<->C counts to complement a DnaBaseCount.
