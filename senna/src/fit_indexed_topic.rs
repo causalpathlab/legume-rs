@@ -198,6 +198,15 @@ pub struct IndexedTopicArgs {
     refine_reg: f64,
 
     #[arg(
+        long,
+        help = "Decoder context window size (defaults to --context-size)",
+        long_help = "Top-K features per sample for the decoder side.\n\
+                     Defaults to the encoder's --context-size when not set.\n\
+                     Use a smaller value when feature coarsening reduces dimensions."
+    )]
+    decoder_context_size: Option<usize>,
+
+    #[arg(
         short = 'x',
         long,
         value_delimiter = ',',
@@ -317,6 +326,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
+    let dec_context_size = args.decoder_context_size.unwrap_or(args.context_size);
+
     let base_encoder = IndexedEmbeddingEncoder::new(
         IndexedEmbeddingEncoderArgs {
             n_features: n_features_decoder,
@@ -328,8 +339,12 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     )?;
 
     info!(
-        "input: {} -> indexed encoder (emb={}, ctx={}) -> indexed decoder -> output: {}",
-        n_features_decoder, args.embedding_dim, args.context_size, n_features_decoder
+        "input: {} -> indexed encoder (emb={}, ctx={}) -> indexed decoder (ctx={}) -> output: {}",
+        n_features_decoder,
+        args.embedding_dim,
+        args.context_size,
+        dec_context_size,
+        n_features_decoder
     );
 
     let gene_names = data_vec.row_names()?;
@@ -373,13 +388,14 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         .expect("failed to set signal handler");
     }
 
-    // Prepare bulk data for training: transpose to [M, D_sc] and optionally coarsen
-    let bulk_nd: Option<Mat> = bulk.as_ref().map(|b| {
-        let mut m = b.data.transpose();
+    // Prepare bulk data: coarsened to D_coarse for both encoder and decoder
+    let bulk_nd_coarsened: Option<Mat> = bulk.as_ref().map(|b| {
+        let m = b.data.transpose();
         if let Some(fc) = coarsening.as_ref() {
-            m = fc.aggregate_columns_nd(&m);
+            fc.aggregate_columns_nd(&m)
+        } else {
+            m
         }
-        m
     });
 
     let train_config = ProgressiveTrainConfig {
@@ -391,13 +407,15 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         learning_rate: args.learning_rate,
         kl_warmup_epochs: args.kl_warmup_epochs,
         topic_smoothing: args.topic_smoothing,
-        context_size: args.context_size,
+        enc_context_size: args.context_size,
+        dec_context_size,
         feature_coarsening: coarsening.as_ref(),
         stop: &stop,
     };
 
-    let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd, &bulk_deltas) {
-        (Some(nd), Some(deltas)) => Some((nd, deltas)),
+    let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd_coarsened, &bulk_deltas)
+    {
+        (Some(coarsened), Some(deltas)) => Some((coarsened, deltas)),
         _ => None,
     };
 
@@ -427,7 +445,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         dev: &dev,
         adj_method: &args.adj_method,
         minibatch_size: args.minibatch_size,
-        context_size: args.context_size,
+        enc_context_size: args.context_size,
+        dec_context_size,
         feature_coarsening: coarsening.as_ref(),
         decoder: &decoder,
         refine_config: refine_config.as_ref(),
@@ -444,7 +463,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         let bulk_config = BulkEvalConfig {
             coarsening: &coarsening,
             dev: &dev,
-            context_size: args.context_size,
+            enc_context_size: args.context_size,
+            dec_context_size,
             refine_config: refine_config.as_ref(),
             decoder: &decoder,
             gene_names: &gene_names,
@@ -470,7 +490,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
 struct BulkEvalConfig<'a, Dec> {
     coarsening: &'a Option<FeatureCoarsening>,
     dev: &'a Device,
-    context_size: usize,
+    enc_context_size: usize,
+    dec_context_size: usize,
     refine_config: Option<&'a TopicRefinementConfig>,
     decoder: &'a Dec,
     gene_names: &'a [Box<str>],
@@ -490,31 +511,44 @@ where
 {
     info!("Evaluating bulk samples ...");
     let finest_delta = bulk_deltas.last().unwrap();
-    let mut delta_mean = finest_delta.posterior_mean().clone();
+    let delta_mean = finest_delta.posterior_mean().clone();
 
-    let mut bulk_corrected = bulk.data.transpose();
+    // Coarsened bulk for both encoder and decoder
+    let mut bulk_coarsened = bulk.data.transpose();
+    let mut delta_mean_coarse = delta_mean.clone();
     if let Some(fc) = config.coarsening.as_ref() {
-        delta_mean = fc.aggregate_rows_ds(&delta_mean);
-        bulk_corrected = fc.aggregate_columns_nd(&bulk_corrected);
+        bulk_coarsened = fc.aggregate_columns_nd(&bulk_coarsened);
+        delta_mean_coarse = fc.aggregate_rows_ds(&delta_mean_coarse);
     }
+
+    // Delta-corrected version for decoder/refinement
+    let mut bulk_corrected = bulk_coarsened.clone();
     for j in 0..bulk_corrected.ncols() {
-        let d = delta_mean[(j, 0)].max(1e-8);
+        let d = delta_mean_coarse[(j, 0)].max(1e-8);
         for i in 0..bulk_corrected.nrows() {
             bulk_corrected[(i, j)] /= d;
         }
     }
 
-    let bulk_tensor = bulk_corrected
+    // Encoder: coarsened indexed
+    let bulk_tensor = bulk_coarsened
         .to_tensor(config.dev)?
         .to_dtype(candle_core::DType::F32)?;
-    let (union_indices, indexed_x) =
-        dense_to_indexed(&bulk_tensor, config.context_size, config.dev)?;
-    let (log_z_nk, _) = encoder.forward_indexed_t(&union_indices, &indexed_x, None, false)?;
+    let (enc_union, enc_indexed_x) =
+        dense_to_indexed(&bulk_tensor, config.enc_context_size, config.dev)?;
+    let (log_z_nk, _) = encoder.forward_indexed_t(&enc_union, &enc_indexed_x, None, false)?;
+
+    // Decoder refinement: coarsened indexed
     let log_z_nk = if let Some(cfg) = config.refine_config {
+        let bulk_coarse_tensor = bulk_corrected
+            .to_tensor(config.dev)?
+            .to_dtype(candle_core::DType::F32)?;
+        let (dec_union, dec_indexed_x) =
+            dense_to_indexed(&bulk_coarse_tensor, config.dec_context_size, config.dev)?;
         refine_indexed_topic_proportions(
             &log_z_nk,
-            &union_indices,
-            &indexed_x,
+            &dec_union,
+            &dec_indexed_x,
             config.decoder,
             cfg,
         )?
@@ -530,6 +564,7 @@ where
         None,
     )?;
 
+    // Write full-resolution delta (not coarsened) with gene names
     delta_mean.to_parquet_with_names(
         &(config.out_prefix.to_string() + ".bulk_delta.parquet"),
         (Some(config.gene_names), Some("gene")),
@@ -628,7 +663,8 @@ struct ProgressiveTrainConfig<'a> {
     learning_rate: f32,
     kl_warmup_epochs: f64,
     topic_smoothing: f64,
-    context_size: usize,
+    enc_context_size: usize,
+    dec_context_size: usize,
     feature_coarsening: Option<&'a FeatureCoarsening>,
     stop: &'a AtomicBool,
 }
@@ -645,45 +681,47 @@ fn compute_level_epochs(num_levels: usize, total_epochs: usize) -> Vec<usize> {
 }
 
 /// Sample collapsed data for one jitter interval.
+///
+/// Returns (coarsened_mixed_nd, coarsened_batch_nd, coarsened_target_nd):
+/// All outputs are coarsened to D_coarse (both encoder and decoder operate at D_coarse).
 fn sample_collapsed_data(
     collapsed: &CollapsedOut,
     feature_coarsening: Option<&FeatureCoarsening>,
-) -> anyhow::Result<(Mat, Option<Mat>, Option<Mat>)> {
-    let mut mixed_nd = collapsed.mu_observed.posterior_sample()?.transpose();
+) -> anyhow::Result<(Mat, Option<Mat>, Mat)> {
+    let full_mixed_nd = collapsed.mu_observed.posterior_sample()?.transpose();
 
-    if let Some(fc) = feature_coarsening {
-        mixed_nd = fc.aggregate_columns_nd(&mixed_nd);
-    }
+    // Coarsen encoder input
+    let coarsened_mixed_nd = if let Some(fc) = feature_coarsening {
+        fc.aggregate_columns_nd(&full_mixed_nd)
+    } else {
+        full_mixed_nd.clone()
+    };
 
+    // Coarsen encoder null
+    let coarsened_batch_nd = collapsed.mu_residual.as_ref().map(|x| {
+        let mut ret: Mat = x.posterior_sample().unwrap();
+        ret = ret.transpose();
+        if let Some(fc) = feature_coarsening {
+            ret = fc.aggregate_columns_nd(&ret);
+        }
+        ret
+    });
+
+    // Decoder target: batch-adjusted (clean) if available, else observed
     let clean_nd = collapsed.mu_adjusted.as_ref().map(|x| {
-        let mut ret: Mat = x.posterior_sample().unwrap();
-        ret = ret.transpose();
-        if let Some(fc) = feature_coarsening {
-            ret = fc.aggregate_columns_nd(&ret);
-        }
-        ret
+        let ret: Mat = x.posterior_sample().unwrap();
+        ret.transpose()
     });
+    let target_base = clean_nd.as_ref().unwrap_or(&full_mixed_nd);
 
-    let batch_nd = collapsed.mu_residual.as_ref().map(|x| {
-        let mut ret: Mat = x.posterior_sample().unwrap();
-        ret = ret.transpose();
-        if let Some(fc) = feature_coarsening {
-            ret = fc.aggregate_columns_nd(&ret);
-        }
-        ret
-    });
+    // Coarsen for decoder
+    let coarsened_target_nd = if let Some(fc) = feature_coarsening {
+        fc.aggregate_columns_nd(target_base)
+    } else {
+        target_base.clone()
+    };
 
-    if let Some(ref batch) = batch_nd {
-        if batch.ncols() != mixed_nd.ncols() {
-            return Err(anyhow::anyhow!(
-                "mixed_nd and batch_nd have different feature dimensions: {} vs {}",
-                mixed_nd.ncols(),
-                batch.ncols()
-            ));
-        }
-    }
-
-    Ok((mixed_nd, clean_nd, batch_nd))
+    Ok((coarsened_mixed_nd, coarsened_batch_nd, coarsened_target_nd))
 }
 
 /// Apply topic smoothing in log-space.
@@ -745,15 +783,15 @@ where
         );
 
         for epoch in (0..level_ep).step_by(config.jitter_interval) {
-            let (mixed_nd, clean_nd, batch_nd) =
+            let (mixed_nd, batch_nd, target_nd) =
                 sample_collapsed_data(collapsed, config.feature_coarsening)?;
 
             let mut data_loader = IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
                 input: &mixed_nd,
                 input_null: batch_nd.as_ref(),
-                output: clean_nd.as_ref(),
-                output_null: None,
-                context_size: config.context_size,
+                output: &target_nd,
+                input_context_size: config.enc_context_size,
+                output_context_size: config.dec_context_size,
             })?;
 
             data_loader.shuffle_minibatch(config.minibatch_size);
@@ -773,66 +811,77 @@ where
                 for b in 0..data_loader.num_minibatch() {
                     let mb = data_loader.minibatch_shuffled(b, config.dev)?;
                     let (log_z_nk, kl) = encoder.forward_indexed_t(
-                        &mb.union_indices,
-                        &mb.indexed_x,
-                        mb.indexed_x_null.as_ref(),
+                        &mb.input_union_indices,
+                        &mb.input_indexed_x,
+                        mb.input_indexed_x_null.as_ref(),
                         true,
                     )?;
 
                     let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;
 
-                    let target_x = mb.indexed_y.as_ref().unwrap_or(&mb.indexed_x);
-                    let (_, llik) =
-                        decoder.forward_indexed(&log_z_nk, &mb.union_indices, target_x)?;
+                    let (_, llik) = decoder.forward_indexed(
+                        &log_z_nk,
+                        &mb.output_union_indices,
+                        &mb.output_indexed_x,
+                    )?;
 
                     let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
                     adam.backward_step(&loss)?;
 
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
                     kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
-                    count_tot += target_x.sum_all()?.to_scalar::<f32>()?;
+                    count_tot += mb.output_indexed_x.sum_all()?.to_scalar::<f32>()?;
                 }
 
                 // Bulk training step (if present)
-                if let Some((bulk_nd, bulk_deltas)) = &bulk_with_deltas {
+                if let Some((bulk_coarsened, bulk_deltas)) = &bulk_with_deltas {
                     let bulk_delta = &bulk_deltas[level];
-                    let delta_sample = bulk_delta.posterior_sample()?.transpose(); // [1, D]
+                    let mut delta_sample = bulk_delta.posterior_sample()?; // [D_full, 1]
 
-                    // Divide bulk by delta: corrected[n,d] = bulk[n,d] / delta[d]
-                    let mut corrected_nd = (*bulk_nd).clone();
-                    for j in 0..corrected_nd.ncols() {
+                    // Coarsen delta to match decoder dimensions
+                    if let Some(fc) = config.feature_coarsening {
+                        delta_sample = fc.aggregate_rows_ds(&delta_sample);
+                    }
+                    let delta_sample = delta_sample.transpose(); // [1, D_coarse]
+
+                    // Divide coarsened bulk by coarsened delta for decoder target
+                    let mut corrected_coarse = (*bulk_coarsened).clone();
+                    for j in 0..corrected_coarse.ncols() {
                         let d = delta_sample[(0, j)].max(1e-8);
-                        for i in 0..corrected_nd.nrows() {
-                            corrected_nd[(i, j)] /= d;
+                        for i in 0..corrected_coarse.nrows() {
+                            corrected_coarse[(i, j)] /= d;
                         }
                     }
 
                     let mut bulk_loader = IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
-                        input: &corrected_nd,
+                        input: *bulk_coarsened,
                         input_null: None,
-                        output: None,
-                        output_null: None,
-                        context_size: config.context_size,
+                        output: &corrected_coarse,
+                        input_context_size: config.enc_context_size,
+                        output_context_size: config.dec_context_size,
                     })?;
                     bulk_loader.shuffle_minibatch(config.minibatch_size);
 
                     for b in 0..bulk_loader.num_minibatch() {
                         let mb = bulk_loader.minibatch_shuffled(b, config.dev)?;
                         let (log_z_nk, kl) = encoder.forward_indexed_t(
-                            &mb.union_indices,
-                            &mb.indexed_x,
+                            &mb.input_union_indices,
+                            &mb.input_indexed_x,
                             None,
                             true,
                         )?;
                         let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;
-                        let (_, llik) =
-                            decoder.forward_indexed(&log_z_nk, &mb.union_indices, &mb.indexed_x)?;
+                        let (_, llik) = decoder.forward_indexed(
+                            &log_z_nk,
+                            &mb.output_union_indices,
+                            &mb.output_indexed_x,
+                        )?;
                         let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
                         adam.backward_step(&loss)?;
 
                         llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
                         kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
-                        count_tot += mb.indexed_x.sum_all()?.to_scalar::<f32>()?;
+                        count_tot += mb.output_indexed_x.sum_all()?.to_scalar::<f32>()?;
                     }
                 }
 
@@ -930,7 +979,8 @@ struct EvaluateLatentConfig<'a, Dec> {
     dev: &'a Device,
     adj_method: &'a AdjMethod,
     minibatch_size: usize,
-    context_size: usize,
+    enc_context_size: usize,
+    dec_context_size: usize,
     feature_coarsening: Option<&'a FeatureCoarsening>,
     decoder: &'a Dec,
     refine_config: Option<&'a TopicRefinementConfig>,
@@ -954,18 +1004,16 @@ where
     let jobs = create_jobs(ntot, Some(block_size));
     let njobs = jobs.len() as u64;
 
+    // Delta coarsened to D_coarse — encoder operates at D_coarse
     let delta = match config.adj_method {
         AdjMethod::Batch => collapsed.delta.as_ref(),
         AdjMethod::Residual => collapsed.mu_residual.as_ref(),
     }
-    .map(|x| {
-        let mut delta_db = x.posterior_mean().clone();
+    .map(|x| x.posterior_mean().clone())
+    .map(|mut delta_db| {
         if let Some(fc) = config.feature_coarsening {
             delta_db = fc.aggregate_rows_ds(&delta_db);
         }
-        delta_db
-    })
-    .map(|delta_db| {
         delta_db
             .to_tensor(config.dev)
             .expect("delta to tensor")
@@ -977,7 +1025,8 @@ where
         dev: config.dev,
         adj_method: config.adj_method,
         delta: delta.as_ref(),
-        context_size: config.context_size,
+        enc_context_size: config.enc_context_size,
+        dec_context_size: config.dec_context_size,
         feature_coarsening: config.feature_coarsening,
         decoder: config.decoder,
         refine_config: config.refine_config,
@@ -1023,7 +1072,8 @@ struct EvaluateBlockConfig<'a, Dec> {
     dev: &'a Device,
     adj_method: &'a AdjMethod,
     delta: Option<&'a Tensor>,
-    context_size: usize,
+    enc_context_size: usize,
+    dec_context_size: usize,
     feature_coarsening: Option<&'a FeatureCoarsening>,
     decoder: &'a Dec,
     refine_config: Option<&'a TopicRefinementConfig>,
@@ -1041,9 +1091,8 @@ where
 {
     let (lb, ub) = block;
 
-    // Read sparse -> dense [D, N] -> transpose -> [N, D]
+    // Read sparse -> dense [D, N], coarsen to D_coarse for both encoder and decoder
     let x_dn = data_vec.read_columns_csc(lb..ub)?;
-
     let x_nd = if let Some(fc) = config.feature_coarsening {
         let coarse_dn = fc.aggregate_sparse_csc(&x_dn);
         coarse_dn.to_tensor(config.dev)?.transpose(0, 1)?
@@ -1051,7 +1100,7 @@ where
         x_dn.to_tensor(config.dev)?.transpose(0, 1)?
     };
 
-    // Get batch/residual correction if available
+    // Get batch/residual correction if available (coarsened, same as encoder)
     let x0_nd = config.delta.map(|delta_bm| match config.adj_method {
         AdjMethod::Batch => {
             let batches = data_vec
@@ -1072,12 +1121,12 @@ where
         }
     });
 
-    // Convert dense to indexed format
-    let (union_indices, indexed_x) = dense_to_indexed(&x_nd, config.context_size, config.dev)?;
+    // Encoder: coarsened indexed
+    let (enc_union, enc_indexed_x) = dense_to_indexed(&x_nd, config.enc_context_size, config.dev)?;
 
-    // Scatter batch correction at union positions if available
-    let indexed_x_null = if let Some(x0) = &x0_nd {
-        let union_vec: Vec<u32> = union_indices.to_vec1()?;
+    // Scatter batch correction at encoder union positions if available
+    let enc_indexed_x_null = if let Some(x0) = &x0_nd {
+        let union_vec: Vec<u32> = enc_union.to_vec1()?;
         let s = union_vec.len();
         let n_batch = ub - lb;
         let pos_map: HashMap<u32, usize> = union_vec
@@ -1098,14 +1147,21 @@ where
         None
     };
 
-    let (log_z_nk, _) =
-        encoder.forward_indexed_t(&union_indices, &indexed_x, indexed_x_null.as_ref(), false)?;
+    let (log_z_nk, _) = encoder.forward_indexed_t(
+        &enc_union,
+        &enc_indexed_x,
+        enc_indexed_x_null.as_ref(),
+        false,
+    )?;
 
+    // Decoder refinement (same D_coarse data, possibly different context size)
     let log_z_nk = if let Some(cfg) = config.refine_config {
+        let (dec_union, dec_indexed_x) =
+            dense_to_indexed(&x_nd, config.dec_context_size, config.dev)?;
         refine_indexed_topic_proportions(
             &log_z_nk,
-            &union_indices,
-            &indexed_x,
+            &dec_union,
+            &dec_indexed_x,
             config.decoder,
             cfg,
         )?

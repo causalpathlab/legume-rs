@@ -21,12 +21,10 @@ use indicatif::ProgressBar;
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
 enum DecoderType {
-    /// Flat topic decoder with softmax dictionary
-    Flat,
-    /// Sparse topic decoder with sparsemax dictionary
-    Sparse,
-    /// Zero-inflated topic decoder with per-feature dropout
-    ZeroInflated,
+    /// Softmax dictionary with multinomial likelihood
+    Multinom,
+    /// Negative binomial with per-gene dispersion and library size
+    Nb,
 }
 
 #[derive(Args, Debug)]
@@ -143,18 +141,6 @@ pub struct TopicArgs {
     n_latent_topics: usize,
 
     #[arg(
-        short = 'f',
-        long,
-        help = "Number of feature modules",
-        long_help = "Number of modules of the features in the encoder model.\n\
-		     If not specified, encoder_layers[0] will be used. \n\
-		     Giving the number of features modules smaller than that of features,\n\
-		     we can expedite model training while not loosing too much of accuracy,\n\
-		     as many features are redundant and frequently dropped out.\n"
-    )]
-    feature_modules: Option<usize>,
-
-    #[arg(
         long,
         short = 'e',
         value_delimiter(','),
@@ -267,12 +253,11 @@ pub struct TopicArgs {
     #[arg(
         long,
         value_enum,
-        default_value = "flat",
+        default_value = "multinom",
         help = "Decoder type",
         long_help = "Topic decoder type:\n\
-		     flat: standard softmax dictionary\n\
-		     sparse: sparsemax dictionary (exact zeros)\n\
-		     zero-inflated: per-feature dropout gate for structural zeros"
+		     multinom: softmax dictionary with multinomial likelihood\n\
+		     nb: negative binomial with per-gene dispersion and library size"
     )]
     decoder: DecoderType,
 
@@ -407,7 +392,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     // 5. Train a topic model on the collapsed data
     let n_topics = args.n_latent_topics;
-    let n_modules = args.feature_modules.unwrap_or(args.encoder_layers[0]);
 
     let n_features_decoder = coarsening
         .as_ref()
@@ -429,7 +413,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         LogSoftmaxEncoderArgs {
             n_features: n_features_encoder,
             n_topics,
-            n_modules,
             layers: &args.encoder_layers,
         },
         param_builder.clone(),
@@ -467,8 +450,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     // Build decoder, train, save dictionary, and evaluate.
     let (scores, z_nk) = match args.decoder {
-        DecoderType::ZeroInflated => {
-            let decoder = ZITopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
+        DecoderType::Nb => {
+            let decoder = NbTopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
             let train_config = ProgressiveTrainConfig {
                 parameters: &parameters,
@@ -494,20 +477,29 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 &args.out,
             )?;
 
-            // Save per-feature dropout probabilities
-            let dropout_d = decoder
-                .dropout_prob()?
-                .to_device(&candle_core::Device::Cpu)?;
-            let dropout_vec: Vec<f32> = dropout_d.flatten_all()?.to_vec1()?;
-            let dropout_mat = Mat::from_column_slice(dropout_vec.len(), 1, &dropout_vec);
-            let col_names = vec!["dropout_prob".to_string().into_boxed_str()];
-            dropout_mat.to_parquet_with_names(
-                &(args.out.to_string() + ".dropout.parquet"),
+            // Save per-gene dispersion φ_g
+            let log_phi = decoder.log_phi().to_device(&candle_core::Device::Cpu)?;
+            let phi_vec: Vec<f32> = log_phi.exp()?.flatten_all()?.to_vec1()?;
+            let phi_expanded: Vec<f32> = if let Some(fc) = coarsening.as_ref() {
+                let mut full = vec![0.0f32; n_features_full];
+                for (c, group) in fc.coarse_to_fine.iter().enumerate() {
+                    for &f in group {
+                        full[f] = phi_vec[c];
+                    }
+                }
+                full
+            } else {
+                phi_vec
+            };
+            let phi_mat = Mat::from_column_slice(phi_expanded.len(), 1, &phi_expanded);
+            let col_names = vec!["dispersion_phi".to_string().into_boxed_str()];
+            phi_mat.to_parquet_with_names(
+                &(args.out.to_string() + ".dispersion.parquet"),
                 (Some(&output_gene_names), Some("gene")),
                 Some(&col_names),
             )?;
             info!(
-                "Saved dropout probabilities to {}.dropout.parquet",
+                "Saved dispersion parameters to {}.dispersion.parquet",
                 &args.out
             );
 
@@ -525,49 +517,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
             (scores, z_nk)
         }
-        DecoderType::Sparse => {
-            let decoder =
-                SparseTopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
-
-            let train_config = ProgressiveTrainConfig {
-                parameters: &parameters,
-                dev: &dev,
-                args,
-                feature_coarsening: coarsening.as_ref(),
-                stop: &stop,
-            };
-            let scores = train_encoder_decoder_progressive(
-                &collapsed_levels,
-                &mut encoder,
-                &decoder,
-                &train_config,
-            )?;
-
-            info!("Writing down the model parameters");
-
-            write_dictionary_expanded(
-                &decoder,
-                coarsening.as_ref(),
-                n_features_full,
-                &output_gene_names,
-                &args.out,
-            )?;
-
-            info!("Writing down the latent states");
-            let eval_config = EvaluateLatentConfig {
-                dev: &dev,
-                adj_method: &args.adj_method,
-                minibatch_size: args.minibatch_size,
-                feature_coarsening: coarsening.as_ref(),
-                decoder: Some(&decoder),
-                refine_config: refine_config.as_ref(),
-            };
-            let z_nk =
-                evaluate_latent_by_encoder(&data_vec, &encoder, finest_collapsed, &eval_config)?;
-
-            (scores, z_nk)
-        }
-        DecoderType::Flat => {
+        DecoderType::Multinom => {
             let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
 
             let train_config = ProgressiveTrainConfig {
@@ -742,11 +692,14 @@ where
         );
 
         for epoch in (0..level_ep).step_by(config.args.jitter_interval) {
-            let mut mixed_nd = collapsed.mu_observed.posterior_sample()?.transpose();
+            let full_mixed_nd = collapsed.mu_observed.posterior_sample()?.transpose();
 
-            if let Some(fc) = config.feature_coarsening {
-                mixed_nd = fc.aggregate_columns_nd(&mixed_nd);
-            }
+            // Coarsen everything to D_coarse (encoder and decoder both at D_coarse)
+            let mixed_nd = if let Some(fc) = config.feature_coarsening {
+                fc.aggregate_columns_nd(&full_mixed_nd)
+            } else {
+                full_mixed_nd.clone()
+            };
 
             let clean_nd = collapsed.mu_adjusted.as_ref().map(|x| {
                 let mut ret: Mat = x.posterior_sample().unwrap();
@@ -757,6 +710,7 @@ where
                 ret
             });
 
+            // Encoder null: coarsened (encoder operates at D_coarse)
             let batch_nd = collapsed.mu_residual.as_ref().map(|x| {
                 let mut ret: Mat = x.posterior_sample().unwrap();
                 ret = ret.transpose();
@@ -765,16 +719,6 @@ where
                 }
                 ret
             });
-
-            if let Some(ref batch) = batch_nd {
-                if batch.ncols() != mixed_nd.ncols() {
-                    return Err(anyhow::anyhow!(
-                        "mixed_nd and batch_nd have different feature dimensions: {} vs {}",
-                        mixed_nd.ncols(),
-                        batch.ncols()
-                    ));
-                }
-            }
 
             let mut data_loader = InMemoryData::from(InMemoryArgs {
                 input: &mixed_nd,
@@ -897,18 +841,16 @@ where
 
     let jobs = create_jobs(ntot, Some(block_size));
     let njobs = jobs.len() as u64;
+    // Delta coarsened to D_coarse — encoder operates at D_coarse
     let delta = match config.adj_method {
         AdjMethod::Batch => collapsed.delta.as_ref(),
         AdjMethod::Residual => collapsed.mu_residual.as_ref(),
     }
-    .map(|x| {
-        let mut delta_db = x.posterior_mean().clone();
+    .map(|x| x.posterior_mean().clone())
+    .map(|mut delta_db| {
         if let Some(fc) = config.feature_coarsening {
             delta_db = fc.aggregate_rows_ds(&delta_db);
         }
-        delta_db
-    })
-    .map(|delta_db| {
         delta_db
             .to_tensor(config.dev)
             .expect("delta to tensor")
@@ -993,22 +935,22 @@ where
         delta_bm.index_select(&batches, 0).expect("expand delta")
     });
 
-    // Read as CSC sparse matrix first, apply feature selection, then convert to tensor
     let x_dn = data_vec.read_columns_csc(lb..ub)?;
 
-    // Aggregate features if coarsening is active
-    let x_nd = if let Some(fc) = config.feature_coarsening {
-        let coarse_dn = fc.aggregate_sparse_csc(&x_dn);
-        coarse_dn.to_tensor(config.dev)?.transpose(0, 1)?
+    // Coarsen to D_coarse for encoder (same resolution as decoder)
+    let x_enc_nd = if let Some(fc) = config.feature_coarsening {
+        fc.aggregate_sparse_csc(&x_dn)
+            .to_tensor(config.dev)?
+            .transpose(0, 1)?
     } else {
         x_dn.to_tensor(config.dev)?.transpose(0, 1)?
     };
 
-    let (log_z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
+    let (log_z_nk, _) = encoder.forward_t(&x_enc_nd, x0_nd.as_ref(), false)?;
 
-    // Apply per-cell refinement if configured
+    // Apply per-cell refinement (data already at D_coarse)
     let log_z_nk = if let (Some(dec), Some(cfg)) = (config.decoder, config.refine_config) {
-        refine_topic_proportions(&log_z_nk, &x_nd, dec, cfg)?
+        refine_topic_proportions(&log_z_nk, &x_enc_nd, dec, cfg)?
     } else {
         log_z_nk
     };
@@ -1038,22 +980,22 @@ where
         delta_bm.index_select(&groups, 0).expect("expand delta")
     });
 
-    // Read as CSC sparse matrix first, apply feature selection, then convert to tensor
     let x_dn = data_vec.read_columns_csc(lb..ub)?;
 
-    // Aggregate features if coarsening is active
-    let x_nd = if let Some(fc) = config.feature_coarsening {
-        let coarse_dn = fc.aggregate_sparse_csc(&x_dn);
-        coarse_dn.to_tensor(config.dev)?.transpose(0, 1)?
+    // Coarsen to D_coarse for encoder (same resolution as decoder)
+    let x_enc_nd = if let Some(fc) = config.feature_coarsening {
+        fc.aggregate_sparse_csc(&x_dn)
+            .to_tensor(config.dev)?
+            .transpose(0, 1)?
     } else {
         x_dn.to_tensor(config.dev)?.transpose(0, 1)?
     };
 
-    let (log_z_nk, _) = encoder.forward_t(&x_nd, x0_nd.as_ref(), false)?;
+    let (log_z_nk, _) = encoder.forward_t(&x_enc_nd, x0_nd.as_ref(), false)?;
 
-    // Apply per-cell refinement if configured
+    // Apply per-cell refinement (data already at D_coarse)
     let log_z_nk = if let (Some(dec), Some(cfg)) = (config.decoder, config.refine_config) {
-        refine_topic_proportions(&log_z_nk, &x_nd, dec, cfg)?
+        refine_topic_proportions(&log_z_nk, &x_enc_nd, dec, cfg)?
     } else {
         log_z_nk
     };
