@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
 use crate::candle_aux_linear::*;
-use crate::candle_loss_functions::zi_topic_log_likelihood;
+use crate::candle_loss_functions::nb_log_likelihood;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, Module, VarBuilder};
+use candle_nn::{Module, VarBuilder};
 
 /////////////////////////
 // Topic Model Decoder //
@@ -74,108 +74,54 @@ impl DecoderModuleT for TopicDecoder {
     }
 }
 
-////////////////////////////////
-// Sparse Topic Model Decoder //
-////////////////////////////////
-
-pub struct SparseTopicDecoder {
-    n_features: usize,
-    n_topics: usize,
-    dictionary: SparsemaxLinear,
-}
-
-impl SparseTopicDecoder {
-    /// Create a sparse topic decoder using sparsemax for gene distributions
-    pub fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
-        let dictionary = sparsemax_linear(n_topics, n_features, vs.pp("dictionary"))?;
-
-        Ok(Self {
-            n_features,
-            n_topics,
-            dictionary,
-        })
-    }
-
-    pub fn dictionary(&self) -> &SparsemaxLinear {
-        &self.dictionary
-    }
-}
-
-impl DecoderModuleT for SparseTopicDecoder {
-    /// Input z_nk is already on the probability simplex (from softmax/sparsemax)
-    fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
-        self.dictionary.forward(z_nk)
-    }
-
-    fn get_dictionary(&self) -> Result<Tensor> {
-        self.dictionary.weight_dk()
-    }
-
-    fn forward_with_llik<LlikFn>(
-        &self,
-        z_nk: &Tensor,
-        x_nd: &Tensor,
-        _llik: &LlikFn,
-    ) -> Result<(Tensor, Tensor)>
-    where
-        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
-    {
-        let log_recon_nd = self.dictionary.forward_log(z_nk)?;
-        let recon_nd = log_recon_nd.exp()?;
-
-        // Direct log-space likelihood: llik = Σ_d x_d * log(recon_d)
-        let llik = x_nd
-            .clamp(0.0, f64::INFINITY)?
-            .mul(&log_recon_nd)?
-            .sum(x_nd.rank() - 1)?;
-
-        Ok((recon_nd, llik))
-    }
-
-    fn dim_obs(&self) -> usize {
-        self.n_features
-    }
-
-    fn dim_latent(&self) -> usize {
-        self.n_topics
-    }
-}
-
 ////////////////////////////////////////
-// Zero-Inflated Topic Model Decoder //
+// Negative Binomial Topic Decoder    //
 ////////////////////////////////////////
 
-pub struct ZITopicDecoder {
+/// Topic decoder with negative binomial likelihood.
+///
+/// μ_gn = l_n · softmax(W · z_n)_g
+/// x_gn ~ NB(μ_gn, φ_g)
+///
+/// where l_n is per-cell library size (total counts) and
+/// φ_g is per-gene inverse dispersion (learned).
+pub struct NbTopicDecoder {
     n_features: usize,
     n_topics: usize,
     dictionary: SoftmaxLinear,
-    dropout_logit_1d: Tensor, // [1, D] learnable parameter
+    /// log(φ_g) per-gene inverse dispersion, [1, D]
+    log_phi_1d: Tensor,
 }
 
-impl ZITopicDecoder {
-    /// Create a zero-inflated topic decoder with per-feature dropout gate.
-    /// `dropout_logit_1d` is initialized to -2.0 (sigmoid(-2) ≈ 0.12).
+impl NbTopicDecoder {
+    /// Create a NB topic decoder.
+    /// `log_phi` initialized to ln(2) ≈ 0.69 (moderate dispersion).
     pub fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
         let dictionary = log_softmax_linear(n_topics, n_features, vs.pp("dictionary"))?;
 
-        let init_val = candle_nn::Init::Const(-2.0);
-        let dropout_logit_1d = vs.get_with_hints((1, n_features), "dropout_logit", init_val)?;
+        let init_val = candle_nn::Init::Const(0.693); // ln(2)
+        let log_phi_1d = vs.get_with_hints((1, n_features), "log_phi", init_val)?;
 
         Ok(Self {
             n_features,
             n_topics,
             dictionary,
-            dropout_logit_1d,
+            log_phi_1d,
         })
     }
 
-    /// Return per-feature dropout probabilities sigmoid(dropout_logit_1d) as [1, D]
-    pub fn dropout_prob(&self) -> Result<Tensor> {
-        ops::sigmoid(&self.dropout_logit_1d)
+    /// Return per-gene dispersion φ_g as [1, D]
+    pub fn phi(&self) -> Result<Tensor> {
+        self.log_phi_1d.exp()
+    }
+
+    /// Return log(φ_g) as [1, D]
+    pub fn log_phi(&self) -> &Tensor {
+        &self.log_phi_1d
     }
 }
 
-impl DecoderModuleT for ZITopicDecoder {
+impl DecoderModuleT for NbTopicDecoder {
     fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
         self.dictionary.forward(z_nk)
     }
@@ -193,10 +139,21 @@ impl DecoderModuleT for ZITopicDecoder {
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
+        // softmax(W · z) gives gene proportions per cell [N, D]
         let log_recon_nd = self.dictionary.forward_log(z_nk)?;
         let recon_nd = log_recon_nd.exp()?;
-        let llik = zi_topic_log_likelihood(x_nd, &log_recon_nd, &self.dropout_logit_1d)?;
-        Ok((recon_nd, llik))
+
+        // Library size: l_n = Σ_g x_gn per cell [N, 1]
+        let lib_size = x_nd.sum(x_nd.rank() - 1)?.unsqueeze(1)?; // [N, 1]
+
+        // μ_gn = l_n · softmax(W · z_n)_g
+        let mu_nd = recon_nd.broadcast_mul(&lib_size)?;
+
+        // NB log-likelihood
+        let llik = nb_log_likelihood(x_nd, &mu_nd, &self.log_phi_1d)?;
+
+        // Return proportions (not mu) for dictionary extraction
+        Ok((log_recon_nd.exp()?, llik))
     }
 
     fn dim_obs(&self) -> usize {

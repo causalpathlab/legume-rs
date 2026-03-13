@@ -157,6 +157,44 @@ pub fn zi_topic_likelihood(
     zi_topic_log_likelihood(x_nd, &log_recon_nd, dropout_logit_1d)
 }
 
+/// Negative binomial log-likelihood for count data
+///
+/// NB(x; μ, φ) where Var(X) = μ + μ²/φ
+///
+/// log p(x | μ, φ) = lgamma(x + φ) - lgamma(φ) - lgamma(x + 1)
+///                  + φ·log(φ/(φ+μ)) + x·log(μ/(φ+μ))
+///
+/// * `x_nd` - observed counts [N, D]
+/// * `mu_nd` - mean parameter μ [N, D]
+/// * `log_phi_1d` - log dispersion parameter log(φ) [1, D]
+///
+/// Returns: log-likelihood per sample [N]
+pub fn nb_log_likelihood(x_nd: &Tensor, mu_nd: &Tensor, log_phi_1d: &Tensor) -> Result<Tensor> {
+    let phi = log_phi_1d.clamp(-10.0, 10.0)?.exp()?; // [1, D], clamped to [~4.5e-5, ~2.2e4]
+    let mu_nd = mu_nd.clamp(1e-6, 1e6)?; // [N, D]
+    let eps = 1e-8;
+
+    let phi_plus_mu = phi.broadcast_add(&mu_nd)?; // [N, D]
+    let log_phi = (&phi + eps)?.log()?;
+    let log_phi_plus_mu = (&phi_plus_mu + eps)?.log()?;
+    let log_mu = (&mu_nd + eps)?.log()?;
+
+    // φ·log(φ/(φ+μ)) = φ·(log φ - log(φ+μ))
+    let term_phi = phi.broadcast_mul(&log_phi.broadcast_sub(&log_phi_plus_mu)?)?;
+
+    // x·log(μ/(φ+μ)) = x·(log μ - log(φ+μ))
+    let term_x = x_nd.mul(&log_mu.broadcast_sub(&log_phi_plus_mu)?)?;
+
+    // lgamma(x + φ) - lgamma(φ) - lgamma(x + 1)
+    let x_plus_phi = x_nd.broadcast_add(&phi)?;
+    let lgamma_term = approx_lgamma(&x_plus_phi)?
+        .broadcast_sub(&approx_lgamma(&phi)?)?
+        .sub(&approx_lgamma(&(x_nd + 1.0)?)?)?;
+
+    // Sum over features
+    (lgamma_term + term_phi + term_x)?.sum(x_nd.rank() - 1)
+}
+
 /// Gaussian log-likelihood of count-ish data
 ///
 /// llik(i) = -0.5 * sum_w [ x(i,w) - xhat(i,w) ]^2
