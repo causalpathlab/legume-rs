@@ -1,5 +1,5 @@
-use crate::apa_mix::em::*;
-use crate::apa_mix::likelihood::*;
+use crate::apa::em::*;
+use crate::apa::likelihood::*;
 use crate::common::*;
 use crate::data::poly_a_stat_map::PolyASiteArgs;
 use crate::data::util_htslib::*;
@@ -357,6 +357,19 @@ pub struct CountApaArgs {
                      a single site. Only used in mixture mode."
     )]
     pub(crate) merge_distance: f64,
+
+    /// Compute PDUI (Percentage of Distal poly(A) site Usage Index)
+    #[arg(
+        long = "compute-pdui",
+        default_value_t = false,
+        help = "Compute PDUI for genes with exactly 2 active pA sites",
+        long_help = "Compute PDUI (Percentage of Distal poly(A) site Usage Index)\n\
+                     for genes with exactly 2 active poly(A) sites after EM.\n\
+                     PDUI = distal_count / (distal + proximal).\n\
+                     Outputs a sparse (genes x cells) PDUI matrix.\n\
+                     Only used in mixture mode."
+    )]
+    pub(crate) compute_pdui: bool,
 }
 
 impl CountApaArgs {
@@ -422,7 +435,7 @@ pub fn run_count_apa(args: &CountApaArgs) -> anyhow::Result<()> {
     }
 
     match args.method {
-        ApaMethod::Simple => crate::apa_mix::pipeline::run_simple(args),
-        ApaMethod::Mixture => crate::apa_mix::pipeline::run_mixture(args),
+        ApaMethod::Simple => crate::apa::pipeline::run_simple(args),
+        ApaMethod::Mixture => crate::apa::pipeline::run_mixture(args),
     }
 }

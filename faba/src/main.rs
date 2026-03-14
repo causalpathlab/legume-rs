@@ -1,11 +1,11 @@
-mod apa_mix;
-mod atoi;
+mod apa;
 mod cell_clustering;
 mod common;
-mod dartseq;
 mod data;
+mod editing;
 mod gene_count;
 mod hypothesis_tests;
+mod mixture;
 mod pipeline_util;
 mod read_depth;
 mod run_atoi;

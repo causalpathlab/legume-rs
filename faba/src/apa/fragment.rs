@@ -1,4 +1,4 @@
-use crate::apa_mix::utr_region::UtrRegion;
+use crate::apa::utr_region::UtrRegion;
 use crate::data::bam_io;
 use crate::data::polya_utils::*;
 use genomic_data::bed::Bed;
