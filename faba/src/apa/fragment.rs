@@ -23,15 +23,15 @@ pub struct PolyAFilterParams {
 /// Following SCAPE notation: x = UTR break position, l = aligned length, r = polyA length.
 pub struct FragmentRecord {
     /// UTR-relative start position (1-based, from UTR start)
-    pub x: f64,
+    pub x: f32,
     /// Aligned length within the UTR
-    pub l: f64,
+    pub l: f32,
     /// PolyA tail length (from soft-clip or DT tag)
-    pub r: f64,
+    pub r: f32,
     /// Whether this is a junction read (covers pA site boundary)
     pub is_junction: bool,
     /// Junction-detected pA site position (UTR-relative, if junction read)
-    pub pa_site: Option<f64>,
+    pub pa_site: Option<f32>,
     /// Cell barcode
     pub cell_barcode: CellBarcode,
     /// UMI
@@ -51,7 +51,7 @@ pub fn extract_fragments(
 
     let utr_start = utr.start;
     let utr_end = utr.end;
-    let utr_len = utr.utr_length as f64;
+    let utr_len = utr.utr_length as f32;
 
     // Try fetching with the original chr name; if empty, try alternate (chr1 <-> 1)
     let bed = utr.to_bed();
@@ -109,15 +109,15 @@ pub fn extract_fragments(
                 // Forward strand: UTR position 1 is at utr_start
                 let x_abs = ref_start.max(utr_start);
                 let end_abs = ref_end.min(utr_end);
-                let x_rel = (x_abs - utr_start + 1) as f64;
-                let l_val = (end_abs - x_abs) as f64;
+                let x_rel = (x_abs - utr_start + 1) as f32;
+                let l_val = (end_abs - x_abs) as f32;
 
                 if l_val <= 0.0 || x_rel < 1.0 || x_rel > utr_len {
                     return;
                 }
 
                 let r_val = if is_junction {
-                    poly_tail_len as f64
+                    poly_tail_len as f32
                 } else {
                     0.0
                 };
@@ -133,7 +133,7 @@ pub fn extract_fragments(
                             polya.internal_prime_count,
                         )
                     {
-                        Some((ref_end - utr_start) as f64)
+                        Some((ref_end - utr_start) as f32)
                     } else {
                         None
                     }
@@ -147,15 +147,15 @@ pub fn extract_fragments(
                 // Reverse strand: UTR position 1 is at utr_end (UTR is reversed)
                 let x_abs = ref_end.min(utr_end);
                 let start_abs = ref_start.max(utr_start);
-                let x_rel = (utr_end - x_abs + 1) as f64;
-                let l_val = (x_abs - start_abs) as f64;
+                let x_rel = (utr_end - x_abs + 1) as f32;
+                let l_val = (x_abs - start_abs) as f32;
 
                 if l_val <= 0.0 || x_rel < 1.0 || x_rel > utr_len {
                     return;
                 }
 
                 let r_val = if is_junction {
-                    poly_tail_len as f64
+                    poly_tail_len as f32
                 } else {
                     0.0
                 };
@@ -171,7 +171,7 @@ pub fn extract_fragments(
                             polya.internal_prime_count,
                         )
                     {
-                        Some((utr_end - ref_start) as f64)
+                        Some((utr_end - ref_start) as f32)
                     } else {
                         None
                     }

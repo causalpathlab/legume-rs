@@ -8,7 +8,7 @@ pub struct MixtureParams {
     /// Maximum components to test via BIC
     pub max_k: usize,
     /// Initial sigma (0 = auto: gene_length / (2*K))
-    pub initial_sigma: f64,
+    pub initial_sigma: f32,
     /// EM parameters
     pub em_params: EmParams,
 }
@@ -35,11 +35,11 @@ pub struct MixtureComponentAnnotation {
     /// Component index within gene
     pub component_idx: usize,
     /// Learned mean position
-    pub mu: f64,
+    pub mu: f32,
     /// Learned standard deviation
-    pub sigma: f64,
+    pub sigma: f32,
     /// Mixing weight
-    pub pi: f64,
+    pub pi: f32,
 }
 
 /// Result of per-gene mixture model
@@ -58,7 +58,7 @@ pub struct CellObservation {
     /// Index of the cell in the cell list
     pub cell_idx: usize,
     /// Genomic position of the modification
-    pub position: f64,
+    pub position: f32,
 }
 
 /// Run per-gene GMM model selection over K=1..max_k, pick best by BIC.
@@ -70,7 +70,7 @@ pub struct CellObservation {
 /// Returns None if fewer than min_sites distinct positions.
 pub fn fit_gene_mixture(
     observations: &[CellObservation],
-    gene_length: f64,
+    gene_length: f32,
     params: &MixtureParams,
 ) -> Option<GeneMixtureResult> {
     if observations.is_empty() {
@@ -78,28 +78,28 @@ pub fn fit_gene_mixture(
     }
 
     // Check distinct positions
-    let mut distinct: Vec<i64> = observations.iter().map(|o| o.position as i64).collect();
+    let mut distinct: Vec<i32> = observations.iter().map(|o| o.position as i32).collect();
     distinct.sort();
     distinct.dedup();
     if distinct.len() < params.min_sites {
         return None;
     }
 
-    let positions: Vec<f64> = observations.iter().map(|o| o.position).collect();
-    let gene_start = distinct[0] as f64;
+    let positions: Vec<f32> = observations.iter().map(|o| o.position).collect();
+    let gene_start = distinct[0] as f32;
 
     let mut best_result: Option<(usize, GmmResult)> = None;
 
     for k in 1..=params.max_k {
         // Initialize means at regular intervals
-        let initial_mus: Vec<f64> = (0..k)
-            .map(|i| gene_start + (i as f64 + 1.0) * gene_length / (k as f64 + 1.0))
+        let initial_mus: Vec<f32> = (0..k)
+            .map(|i| gene_start + (i as f32 + 1.0) * gene_length / (k as f32 + 1.0))
             .collect();
 
         let initial_sigma = if params.initial_sigma > 0.0 {
             params.initial_sigma
         } else {
-            gene_length / (2.0 * k as f64)
+            gene_length / (2.0 * k as f32)
         };
 
         let result = gaussian_mixture_em(
@@ -156,7 +156,7 @@ mod tests {
         let obs: Vec<CellObservation> = (0..50)
             .map(|i| CellObservation {
                 cell_idx: i % 5,
-                position: 50.0 + (i as f64 - 25.0) * 0.2,
+                position: 50.0 + (i as f32 - 25.0) * 0.2,
             })
             .collect();
 
@@ -182,13 +182,13 @@ mod tests {
         for i in 0..30 {
             obs.push(CellObservation {
                 cell_idx: i % 5,
-                position: 20.0 + (i as f64 - 15.0) * 0.3,
+                position: 20.0 + (i as f32 - 15.0) * 0.3,
             });
         }
         for i in 0..30 {
             obs.push(CellObservation {
                 cell_idx: i % 5,
-                position: 80.0 + (i as f64 - 15.0) * 0.3,
+                position: 80.0 + (i as f32 - 15.0) * 0.3,
             });
         }
 
@@ -209,7 +209,7 @@ mod tests {
         let mut mus = result.gmm.mus.clone();
         mus.sort_by(|a, b| a.partial_cmp(b).unwrap());
         // Filter out noise-assigned mus
-        let active_mus: Vec<f64> = mus
+        let active_mus: Vec<f32> = mus
             .iter()
             .zip(result.gmm.weights.iter().skip(1))
             .filter(|(_, &w)| w > 0.01)
@@ -248,7 +248,7 @@ mod tests {
         let obs: Vec<CellObservation> = (0..10)
             .map(|i| CellObservation {
                 cell_idx: i % 2,
-                position: 30.0 + i as f64,
+                position: 30.0 + i as f32,
             })
             .collect();
 

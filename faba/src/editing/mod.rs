@@ -15,14 +15,14 @@ pub enum ConversionSite {
         conversion_pos: i64,
         wt_freq: DnaBaseCount,
         mut_freq: DnaBaseCount,
-        pv: f64,
+        pv: f32,
     },
     /// A-to-I RNA editing site: A->G on forward strand, T->C on reverse
     AtoI {
         editing_pos: i64,
         wt_freq: DnaBaseCount,
         mut_freq: DnaBaseCount,
-        pv: f64,
+        pv: f32,
     },
 }
 
@@ -60,7 +60,7 @@ impl ConversionSite {
     }
 
     /// P-value from binomial test
-    pub fn pv(&self) -> f64 {
+    pub fn pv(&self) -> f32 {
         match self {
             ConversionSite::M6A { pv, .. } => *pv,
             ConversionSite::AtoI { pv, .. } => *pv,
