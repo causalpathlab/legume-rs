@@ -1,4 +1,4 @@
-use crate::apa_mix::fragment::FragmentRecord;
+use crate::apa::fragment::FragmentRecord;
 use genomic_data::sam::{CellBarcode, UmiBarcode};
 use rand::distr::weighted::WeightedIndex;
 use rand::distr::{Distribution, Uniform};

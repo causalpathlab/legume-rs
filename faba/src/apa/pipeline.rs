@@ -1,9 +1,9 @@
-use crate::apa_mix::cell_assign::*;
-use crate::apa_mix::em::*;
-use crate::apa_mix::fragment::*;
-use crate::apa_mix::likelihood::*;
-use crate::apa_mix::site_discovery::*;
-use crate::apa_mix::utr_region::*;
+use crate::apa::cell_assign::*;
+use crate::apa::em::*;
+use crate::apa::fragment::*;
+use crate::apa::likelihood::*;
+use crate::apa::site_discovery::*;
+use crate::apa::utr_region::*;
 use crate::common::*;
 use crate::data::poly_a_stat_map::PolyASiteMap;
 use crate::run_count_apa::CountApaArgs;
@@ -45,8 +45,8 @@ pub fn run_simple(args: &CountApaArgs) -> anyhow::Result<()> {
 
     // Apply A-to-I mask if provided
     if let Some(ref mask_file) = args.atoi_mask_file {
-        use crate::atoi::io::load_atoi_mask_from_parquet;
-        use crate::atoi::mask::filter_polya_by_atoi_mask;
+        use crate::editing::io::load_atoi_mask_from_parquet;
+        use crate::editing::mask::filter_polya_by_atoi_mask;
 
         info!("Loading A-to-I mask from {}", mask_file);
         let atoi_mask = load_atoi_mask_from_parquet(mask_file.as_ref())?;
@@ -367,6 +367,11 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Compute PDUI before consuming all_counts
+    if args.compute_pdui {
+        compute_and_write_pdui(&all_counts, &all_annotations, &utrs, args)?;
+    }
+
     // Rows=sites, cols=cells
     let triplets_data: Vec<(CellBarcode, Box<str>, f32)> = all_counts
         .into_iter()
@@ -557,6 +562,97 @@ fn process_utr(
     let (cell_counts, annotations) = assign_fragments_to_sites(&all_fragments, &em_result, utr);
 
     Ok((cell_counts, annotations))
+}
+
+/// Compute PDUI for genes with exactly 2 active pA sites and write a sparse matrix.
+fn compute_and_write_pdui(
+    all_counts: &[CellSiteCount],
+    all_annotations: &[ApaSiteAnnotation],
+    utrs: &[UtrRegion],
+    args: &CountApaArgs,
+) -> anyhow::Result<()> {
+    use crate::apa::pdui::compute_pdui;
+    use fnv::FnvHashMap;
+
+    info!("Computing PDUI...");
+
+    // Build a strand lookup from UTRs by gene name
+    let strand_by_gene: FnvHashMap<Box<str>, genomic_data::sam::Strand> =
+        utrs.iter().map(|u| (u.name.clone(), u.strand)).collect();
+
+    // Group annotations and counts by gene_name
+    let mut annots_by_gene: FnvHashMap<Box<str>, Vec<ApaSiteAnnotation>> = FnvHashMap::default();
+    for a in all_annotations {
+        annots_by_gene
+            .entry(a.gene_name.clone())
+            .or_default()
+            .push(a.clone());
+    }
+
+    let mut counts_by_gene: FnvHashMap<Box<str>, Vec<&CellSiteCount>> = FnvHashMap::default();
+    for c in all_counts {
+        // Extract gene name from site_id (format: "GENE/pA/k")
+        let gene_name = c
+            .site_id
+            .find("/pA/")
+            .map(|pos| &c.site_id[..pos])
+            .unwrap_or(c.site_id.as_ref());
+
+        counts_by_gene.entry(gene_name.into()).or_default().push(c);
+    }
+
+    let mut pdui_triplets: Vec<(CellBarcode, Box<str>, f32)> = Vec::new();
+    let mut n_pdui_genes = 0;
+
+    for (gene_name, annots) in &annots_by_gene {
+        if annots.len() != 2 {
+            continue;
+        }
+
+        let strand = match strand_by_gene.get(gene_name) {
+            Some(s) => *s,
+            None => continue,
+        };
+
+        let gene_counts: Vec<CellSiteCount> = counts_by_gene
+            .get(gene_name)
+            .map(|cs| {
+                cs.iter()
+                    .map(|c| CellSiteCount {
+                        cell_barcode: c.cell_barcode.clone(),
+                        site_id: c.site_id.clone(),
+                        count: c.count,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if let Some(pdui_result) = compute_pdui(&gene_counts, annots, strand) {
+            n_pdui_genes += 1;
+            for (cb, pdui_val) in &pdui_result.cell_pdui {
+                pdui_triplets.push((cb.clone(), gene_name.clone(), *pdui_val));
+            }
+        }
+    }
+
+    info!(
+        "PDUI: computed for {} genes, {} cell-gene values",
+        n_pdui_genes,
+        pdui_triplets.len()
+    );
+
+    if pdui_triplets.is_empty() {
+        info!("No PDUI values to output");
+        return Ok(());
+    }
+
+    let triplets = format_data_triplets(pdui_triplets);
+    let output_file = args.backend_file_path("pdui");
+    let data = triplets.to_backend(&output_file)?;
+    data.qc(args.qc_cutoffs())?;
+    info!("PDUI: created {}", &output_file);
+
+    Ok(())
 }
 
 /// Write APA site annotations to a Parquet file.

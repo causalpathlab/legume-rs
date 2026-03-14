@@ -1,4 +1,4 @@
-use crate::apa_mix::fragment::FragmentRecord;
+use crate::apa::fragment::FragmentRecord;
 
 /// Parameters for the SCAPE likelihood model.
 pub struct LikelihoodParams {
