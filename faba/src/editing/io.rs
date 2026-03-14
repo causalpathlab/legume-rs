@@ -1,6 +1,6 @@
 use crate::editing::ConversionSite;
 use anyhow::Result;
-use arrow::array::{ArrayRef, Float64Array, Int64Array, Int64Builder, StringArray, UInt64Array};
+use arrow::array::{ArrayRef, Float32Array, Int64Array, Int64Builder, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use dashmap::DashMap;
 use genomic_data::gff::{GeneId, GffRecordMap};
@@ -43,7 +43,7 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         let mut primary_pos_vec: Vec<i64> = Vec::new();
         let mut conversion_pos_builder = Int64Builder::new();
         let mut rel_pos_vec: Vec<i64> = Vec::new();
-        let mut pv_vec: Vec<f64> = Vec::new();
+        let mut pv_vec: Vec<f32> = Vec::new();
         let mut wt_a_vec: Vec<u64> = Vec::new();
         let mut wt_t_vec: Vec<u64> = Vec::new();
         let mut wt_g_vec: Vec<u64> = Vec::new();
@@ -138,7 +138,7 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         let primary_pos_array = Arc::new(Int64Array::from(primary_pos_vec)) as ArrayRef;
         let conversion_pos_array = Arc::new(conversion_pos_builder.finish()) as ArrayRef;
         let rel_pos_array = Arc::new(Int64Array::from(rel_pos_vec)) as ArrayRef;
-        let pv_array = Arc::new(Float64Array::from(pv_vec)) as ArrayRef;
+        let pv_array = Arc::new(Float32Array::from(pv_vec)) as ArrayRef;
 
         let wt_a_array = Arc::new(UInt64Array::from(wt_a_vec)) as ArrayRef;
         let wt_t_array = Arc::new(UInt64Array::from(wt_t_vec)) as ArrayRef;
@@ -164,7 +164,7 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
                 true, // nullable
             ),
             arrow::datatypes::Field::new("rel_pos", arrow::datatypes::DataType::Int64, false),
-            arrow::datatypes::Field::new("pv", arrow::datatypes::DataType::Float64, false),
+            arrow::datatypes::Field::new("pv", arrow::datatypes::DataType::Float32, false),
             arrow::datatypes::Field::new("wt_a", arrow::datatypes::DataType::UInt64, false),
             arrow::datatypes::Field::new("wt_t", arrow::datatypes::DataType::UInt64, false),
             arrow::datatypes::Field::new("wt_g", arrow::datatypes::DataType::UInt64, false),

@@ -192,7 +192,7 @@ fn write_pwm(pwm: &[DnaBaseCount], window: i64, output: &str) -> anyhow::Result<
         let g = count.count_g();
         let c = count.count_c();
         let total = a + t + g + c;
-        let tot_f = total as f64;
+        let tot_f = total as f32;
         if total > 0 {
             writeln!(
                 writer,
@@ -203,10 +203,10 @@ fn write_pwm(pwm: &[DnaBaseCount], window: i64, output: &str) -> anyhow::Result<
                 g,
                 c,
                 total,
-                a as f64 / tot_f,
-                t as f64 / tot_f,
-                g as f64 / tot_f,
-                c as f64 / tot_f,
+                a as f32 / tot_f,
+                t as f32 / tot_f,
+                g as f32 / tot_f,
+                c as f32 / tot_f,
             )?;
         } else {
             writeln!(writer, "{}\t0\t0\t0\t0\t0\t0\t0\t0\t0", rel_pos)?;

@@ -22,7 +22,7 @@ pub struct ConversionSifter<'a> {
     pub min_coverage: usize,
     pub min_conversion: usize,
     pub pseudocount: usize,
-    pub max_pvalue_cutoff: f64,
+    pub max_pvalue_cutoff: f32,
     pub mod_type: ModificationType,
     pub candidate_sites: Vec<ConversionSite>,
 }
@@ -330,7 +330,7 @@ impl<'a> ConversionSifter<'a> {
         background_count: Option<&DnaBaseCount>,
         failure_base: &Dna,
         success_base: &Dna,
-    ) -> Option<f64> {
+    ) -> Option<f32> {
         match (observed_count, background_count) {
             (Some(wt_freq), Some(mut_freq)) => {
                 let (wt_n_failure, wt_n_success) = (

@@ -126,7 +126,7 @@ pub struct DartSeqCountArgs {
         long_help = "Maximum p-value cutoff for detection. \n\
 		     Sites with p-values above this threshold will be excluded."
     )]
-    pub pvalue_cutoff: f64,
+    pub pvalue_cutoff: f32,
 
     #[arg(
         long,
@@ -340,7 +340,7 @@ pub struct DartSeqCountArgs {
         default_value_t = 0.05,
         help = "P-value cutoff for A-to-I detection"
     )]
-    pub atoi_pvalue_cutoff: f64,
+    pub atoi_pvalue_cutoff: f32,
 
     #[arg(
         long = "atoi-mask",
@@ -384,7 +384,7 @@ pub struct DartSeqCountArgs {
         default_value_t = 0.0,
         help = "Initial sigma, or 0 for auto (default: 0)"
     )]
-    pub mixture_initial_sigma: f64,
+    pub mixture_initial_sigma: f32,
 
     // ========== Cell clustering options ==========
     #[arg(

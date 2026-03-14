@@ -286,7 +286,7 @@ pub struct CountApaArgs {
         long_help = "Expected mean fragment length in base pairs (mu_f in SCAPE).\n\
                      Only used in mixture mode."
     )]
-    pub(crate) mu_f: f64,
+    pub(crate) mu_f: f32,
 
     /// Fragment length standard deviation (mixture mode)
     #[arg(
@@ -296,7 +296,7 @@ pub struct CountApaArgs {
         long_help = "Expected fragment length standard deviation (sigma_f in SCAPE).\n\
                      Only used in mixture mode."
     )]
-    pub(crate) sigma_f: f64,
+    pub(crate) sigma_f: f32,
 
     /// pA site position step size in bp (mixture mode)
     #[arg(
@@ -316,7 +316,7 @@ pub struct CountApaArgs {
         long_help = "Upper bound on the dispersion parameter (beta) for each\n\
                      poly(A) site component. Only used in mixture mode."
     )]
-    pub(crate) max_beta: f64,
+    pub(crate) max_beta: f32,
 
     /// Minimum pA site dispersion (mixture mode)
     #[arg(
@@ -326,7 +326,7 @@ pub struct CountApaArgs {
         long_help = "Lower bound on the dispersion parameter (beta) for each\n\
                      poly(A) site component. Only used in mixture mode."
     )]
-    pub(crate) min_beta: f64,
+    pub(crate) min_beta: f32,
 
     /// Minimum component weight (mixture mode)
     #[arg(
@@ -336,7 +336,7 @@ pub struct CountApaArgs {
         long_help = "Components with weight below this threshold are pruned\n\
                      during EM iterations. Only used in mixture mode."
     )]
-    pub(crate) min_ws: f64,
+    pub(crate) min_ws: f32,
 
     /// Minimum fragments per UTR (mixture mode)
     #[arg(
@@ -356,7 +356,7 @@ pub struct CountApaArgs {
         long_help = "Candidate pA sites within this distance are merged into\n\
                      a single site. Only used in mixture mode."
     )]
-    pub(crate) merge_distance: f64,
+    pub(crate) merge_distance: f32,
 
     /// Compute PDUI (Percentage of Distal poly(A) site Usage Index)
     #[arg(

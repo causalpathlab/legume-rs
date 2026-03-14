@@ -3,15 +3,15 @@ use crate::apa::fragment::FragmentRecord;
 /// Parameters for the SCAPE likelihood model.
 pub struct LikelihoodParams {
     /// Expected mean fragment length (mu_f), default 300
-    pub mu_f: f64,
+    pub mu_f: f32,
     /// Standard deviation of fragment length (sigma_f), default 50
-    pub sigma_f: f64,
+    pub sigma_f: f32,
     /// Step size for theta enumeration, default 10
     pub theta_step: usize,
     /// Maximum polyA length (LA), default 150
-    pub max_polya: f64,
+    pub max_polya: f32,
     /// Minimum polyA length, default 20
-    pub min_polya: f64,
+    pub min_polya: f32,
 }
 
 impl Default for LikelihoodParams {
@@ -36,10 +36,10 @@ impl Default for LikelihoodParams {
 /// For junction reads (r > 0, pa_site known): s is known, theta = pa_site.
 pub fn log_lik_fragment_given_theta(
     frag: &FragmentRecord,
-    theta: f64,
-    utr_length: f64,
+    theta: f32,
+    utr_length: f32,
     params: &LikelihoodParams,
-) -> f64 {
+) -> f32 {
     let x = frag.x;
     let l = frag.l;
     let r = frag.r;
@@ -52,16 +52,16 @@ pub fn log_lik_fragment_given_theta(
         if l >= 1.0 && l <= max_l && max_l > 0.0 {
             return -(max_l).ln();
         } else {
-            return f64::NEG_INFINITY;
+            return f32::NEG_INFINITY;
         }
     }
 
     // Non-junction read: marginalize over s
     let s_min = params.min_polya;
     let s_max = params.max_polya;
-    let s_step = params.theta_step as f64;
+    let s_step = params.theta_step as f32;
 
-    let mut log_sum = f64::NEG_INFINITY;
+    let mut log_sum = f32::NEG_INFINITY;
 
     let mut s = s_min;
     while s <= s_max {
@@ -75,18 +75,18 @@ pub fn log_lik_fragment_given_theta(
 
 /// Compute log f(x, l, r, s, theta) = log[p(l|x,theta) * p(x|s,theta) * p(r|s) * p(s)]
 fn compute_log_f(
-    x: f64,
-    l: f64,
-    r: f64,
-    s: f64,
-    theta: f64,
-    _utr_length: f64,
+    x: f32,
+    l: f32,
+    r: f32,
+    s: f32,
+    theta: f32,
+    _utr_length: f32,
     params: &LikelihoodParams,
-) -> f64 {
+) -> f32 {
     // p(s) = 1/(LA - min_polya) for s in [min_polya, LA]
     let s_range = params.max_polya - params.min_polya;
     if s_range <= 0.0 || s < params.min_polya || s > params.max_polya {
-        return f64::NEG_INFINITY;
+        return f32::NEG_INFINITY;
     }
     let log_ps = -s_range.ln();
 
@@ -96,7 +96,7 @@ fn compute_log_f(
         if r >= 1.0 && r <= s {
             -s.ln()
         } else {
-            return f64::NEG_INFINITY;
+            return f32::NEG_INFINITY;
         }
     } else {
         0.0 // r unobserved
@@ -112,14 +112,14 @@ fn compute_log_f(
     let log_pl_x_theta = if max_l > 0.0 && l >= 1.0 && l <= max_l {
         -max_l.ln()
     } else {
-        return f64::NEG_INFINITY;
+        return f32::NEG_INFINITY;
     };
 
     log_ps + log_pr_s + log_px_s_theta + log_pl_x_theta
 }
 
 /// Log of the noise model likelihood (eq 13): 1/(L^2 * LA)
-pub fn log_lik_noise(utr_length: f64, max_polya: f64) -> f64 {
+pub fn log_lik_noise(utr_length: f32, max_polya: f32) -> f32 {
     -2.0 * utr_length.ln() - max_polya.ln()
 }
 
@@ -130,19 +130,19 @@ pub fn log_lik_noise(utr_length: f64, max_polya: f64) -> f64 {
 /// theta_grid: the grid of theta values to evaluate (1, 1+step, 1+2*step, ..., L)
 pub fn precompute_theta_lik_matrix(
     fragments: &[FragmentRecord],
-    utr_length: f64,
+    utr_length: f32,
     params: &LikelihoodParams,
-) -> (Vec<Vec<f64>>, Vec<f64>) {
+) -> (Vec<Vec<f32>>, Vec<f32>) {
     let step = params.theta_step;
-    let theta_grid: Vec<f64> = (1..=utr_length as usize)
+    let theta_grid: Vec<f32> = (1..=utr_length as usize)
         .step_by(step)
-        .map(|t| t as f64)
+        .map(|t| t as f32)
         .collect();
 
     let n_frag = fragments.len();
     let n_theta = theta_grid.len();
 
-    let mut lik_matrix = vec![vec![f64::NEG_INFINITY; n_theta]; n_frag];
+    let mut lik_matrix = vec![vec![f32::NEG_INFINITY; n_theta]; n_frag];
 
     for (n, frag) in fragments.iter().enumerate() {
         for (t, &theta) in theta_grid.iter().enumerate() {
@@ -158,12 +158,12 @@ pub fn precompute_theta_lik_matrix(
 ///
 /// log p(x,l,r|alpha,beta) = log sum_theta p(x,l,r|theta) * N(theta|alpha, beta^2)
 pub fn log_lik_fragment_given_site(
-    frag_theta_liks: &[f64],
-    theta_grid: &[f64],
-    alpha: f64,
-    beta: f64,
-) -> f64 {
-    let mut log_sum = f64::NEG_INFINITY;
+    frag_theta_liks: &[f32],
+    theta_grid: &[f32],
+    alpha: f32,
+    beta: f32,
+) -> f32 {
+    let mut log_sum = f32::NEG_INFINITY;
 
     for (t, &theta) in theta_grid.iter().enumerate() {
         let log_lik = frag_theta_liks[t];
@@ -177,17 +177,17 @@ pub fn log_lik_fragment_given_site(
 }
 
 /// Compute log-normal PDF: log N(x | mu, sigma)
-fn log_normal_pdf(x: f64, mu: f64, sigma: f64) -> f64 {
+fn log_normal_pdf(x: f32, mu: f32, sigma: f32) -> f32 {
     let z = (x - mu) / sigma;
-    -0.5 * z * z - sigma.ln() - 0.5 * std::f64::consts::TAU.ln()
+    -0.5 * z * z - sigma.ln() - 0.5 * std::f32::consts::TAU.ln()
 }
 
 /// Numerically stable log(exp(a) + exp(b))
-pub fn log_sum_exp(a: f64, b: f64) -> f64 {
-    if a == f64::NEG_INFINITY {
+pub fn log_sum_exp(a: f32, b: f32) -> f32 {
+    if a == f32::NEG_INFINITY {
         return b;
     }
-    if b == f64::NEG_INFINITY {
+    if b == f32::NEG_INFINITY {
         return a;
     }
     let max = a.max(b);
@@ -201,9 +201,9 @@ mod tests {
     #[test]
     fn test_noise_log_lik() {
         let ll = log_lik_noise(1000.0, 150.0);
-        let expected = -2.0 * 1000.0_f64.ln() - 150.0_f64.ln();
+        let expected = -2.0 * 1000.0_f32.ln() - 150.0_f32.ln();
         assert!(
-            (ll - expected).abs() < 1e-10,
+            (ll - expected).abs() < 1e-5,
             "noise log-lik: got {}, expected {}",
             ll,
             expected
@@ -259,12 +259,12 @@ mod tests {
 
         let utr_length = 2000.0;
         let step = params.theta_step;
-        let theta_grid: Vec<f64> = (1..=utr_length as usize)
+        let theta_grid: Vec<f32> = (1..=utr_length as usize)
             .step_by(step)
-            .map(|t| t as f64)
+            .map(|t| t as f32)
             .collect();
 
-        let frag_theta_liks: Vec<f64> = theta_grid
+        let frag_theta_liks: Vec<f32> = theta_grid
             .iter()
             .map(|&theta| log_lik_fragment_given_theta(&frag, theta, utr_length, &params))
             .collect();
@@ -284,9 +284,9 @@ mod tests {
     fn test_log_sum_exp_basic() {
         // log(exp(0) + exp(0)) = log(2)
         let result = log_sum_exp(0.0, 0.0);
-        assert!((result - 2.0_f64.ln()).abs() < 1e-10);
+        assert!((result - 2.0_f32.ln()).abs() < 1e-5);
 
         // log(exp(-inf) + exp(5)) = 5
-        assert!((log_sum_exp(f64::NEG_INFINITY, 5.0) - 5.0).abs() < 1e-10);
+        assert!((log_sum_exp(f32::NEG_INFINITY, 5.0) - 5.0).abs() < 1e-5);
     }
 }

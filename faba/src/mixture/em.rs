@@ -3,9 +3,9 @@ pub struct EmParams {
     /// Maximum number of EM iterations
     pub max_iter: usize,
     /// Convergence tolerance for log-likelihood change
-    pub tol: f64,
+    pub tol: f32,
     /// Minimum component weight before pruning
-    pub min_weight: f64,
+    pub min_weight: f32,
 }
 
 impl Default for EmParams {
@@ -21,13 +21,13 @@ impl Default for EmParams {
 /// Result of fixed-parameter EM (weights only).
 pub struct FixedEmResult {
     /// Estimated mixing weights pi_0..pi_K (pi_0 = noise)
-    pub weights: Vec<f64>,
+    pub weights: Vec<f32>,
     /// Posterior assignment probabilities gamma[n][k] (k=0 is noise)
-    pub gamma: Vec<Vec<f64>>,
+    pub gamma: Vec<Vec<f32>>,
     /// Final log-likelihood
-    pub log_lik: f64,
+    pub log_lik: f32,
     /// BIC
-    pub bic: f64,
+    pub bic: f32,
     /// Number of iterations
     pub n_iter: usize,
 }
@@ -35,23 +35,23 @@ pub struct FixedEmResult {
 /// Result of full Gaussian mixture EM.
 pub struct GmmResult {
     /// Mixing weights pi_0..pi_K (pi_0 = noise/uniform)
-    pub weights: Vec<f64>,
+    pub weights: Vec<f32>,
     /// Learned component means
-    pub mus: Vec<f64>,
+    pub mus: Vec<f32>,
     /// Learned component standard deviations
-    pub sigmas: Vec<f64>,
+    pub sigmas: Vec<f32>,
     /// Posterior assignment probabilities gamma[n][k]
-    pub gamma: Vec<Vec<f64>>,
+    pub gamma: Vec<Vec<f32>>,
     /// BIC
-    pub bic: f64,
+    pub bic: f32,
 }
 
 /// Numerically stable log-sum-exp: log(exp(a) + exp(b))
-pub fn log_sum_exp(a: f64, b: f64) -> f64 {
-    if a == f64::NEG_INFINITY {
+pub fn log_sum_exp(a: f32, b: f32) -> f32 {
+    if a == f32::NEG_INFINITY {
         return b;
     }
-    if b == f64::NEG_INFINITY {
+    if b == f32::NEG_INFINITY {
         return a;
     }
     let max = a.max(b);
@@ -65,7 +65,7 @@ pub fn log_sum_exp(a: f64, b: f64) -> f64 {
 /// * `n_free_params` - number of free parameters for BIC computation
 /// * `params` - EM parameters
 pub fn fixed_em(
-    component_log_liks: &[Vec<f64>],
+    component_log_liks: &[Vec<f32>],
     n_free_params: usize,
     params: &EmParams,
 ) -> FixedEmResult {
@@ -81,9 +81,9 @@ pub fn fixed_em(
     }
     let n_total = component_log_liks[0].len();
 
-    let mut weights = vec![1.0 / n_total as f64; n_total];
+    let mut weights = vec![1.0 / n_total as f32; n_total];
     let mut gamma = vec![vec![0.0; n_total]; n_obs];
-    let mut prev_ll = f64::NEG_INFINITY;
+    let mut prev_ll = f32::NEG_INFINITY;
 
     let mut iter = 0;
     loop {
@@ -91,7 +91,7 @@ pub fn fixed_em(
         let mut total_ll = 0.0;
 
         for n in 0..n_obs {
-            let mut log_probs = vec![f64::NEG_INFINITY; n_total];
+            let mut log_probs = vec![f32::NEG_INFINITY; n_total];
             for k in 0..n_total {
                 if weights[k] > 0.0 {
                     log_probs[k] = weights[k].ln() + component_log_liks[n][k];
@@ -100,7 +100,7 @@ pub fn fixed_em(
 
             let log_norm = log_probs
                 .iter()
-                .fold(f64::NEG_INFINITY, |acc, &x| log_sum_exp(acc, x));
+                .fold(f32::NEG_INFINITY, |acc, &x| log_sum_exp(acc, x));
 
             total_ll += log_norm;
 
@@ -113,7 +113,7 @@ pub fn fixed_em(
 
         let ll_change = (total_ll - prev_ll).abs();
         if iter > 1 && (ll_change < params.tol || iter >= params.max_iter) {
-            let bic = -2.0 * total_ll + n_free_params as f64 * (n_obs as f64).ln();
+            let bic = -2.0 * total_ll + n_free_params as f32 * (n_obs as f32).ln();
 
             return FixedEmResult {
                 weights,
@@ -128,8 +128,8 @@ pub fn fixed_em(
 
         // M-step: update weights only
         for k in 0..n_total {
-            let sum_gamma: f64 = gamma.iter().map(|g| g[k]).sum();
-            weights[k] = sum_gamma / n_obs as f64;
+            let sum_gamma: f32 = gamma.iter().map(|g| g[k]).sum();
+            weights[k] = sum_gamma / n_obs as f32;
         }
 
         // Prune low-weight components (skip noise at k=0)
@@ -140,7 +140,7 @@ pub fn fixed_em(
         }
 
         // Renormalize
-        let w_sum: f64 = weights.iter().sum();
+        let w_sum: f32 = weights.iter().sum();
         if w_sum > 0.0 {
             for w in weights.iter_mut() {
                 *w /= w_sum;
@@ -150,12 +150,12 @@ pub fn fixed_em(
 }
 
 /// Log PDF of a Gaussian distribution
-fn gaussian_log_pdf(x: f64, mu: f64, sigma: f64) -> f64 {
+fn gaussian_log_pdf(x: f32, mu: f32, sigma: f32) -> f32 {
     if sigma <= 0.0 {
-        return f64::NEG_INFINITY;
+        return f32::NEG_INFINITY;
     }
     let z = (x - mu) / sigma;
-    -0.5 * z * z - sigma.ln() - 0.5 * std::f64::consts::TAU.ln()
+    -0.5 * z * z - sigma.ln() - 0.5 * std::f32::consts::TAU.ln()
 }
 
 /// Full 1D Gaussian mixture EM with a uniform noise component.
@@ -169,10 +169,10 @@ fn gaussian_log_pdf(x: f64, mu: f64, sigma: f64) -> f64 {
 /// Component 0 is always uniform noise over `[0, domain_length]`.
 /// Components 1..K are Gaussians.
 pub fn gaussian_mixture_em(
-    observations: &[f64],
-    initial_mus: &[f64],
-    initial_sigma: f64,
-    domain_length: f64,
+    observations: &[f32],
+    initial_mus: &[f32],
+    initial_sigma: f32,
+    domain_length: f32,
     params: &EmParams,
 ) -> GmmResult {
     let n = observations.len();
@@ -189,19 +189,19 @@ pub fn gaussian_mixture_em(
         };
     }
 
-    let mut weights = vec![1.0 / n_total as f64; n_total];
+    let mut weights = vec![1.0 / n_total as f32; n_total];
     let mut mus = initial_mus.to_vec();
     let mut sigmas = vec![initial_sigma; k];
     let mut gamma = vec![vec![0.0; n_total]; n];
-    let mut prev_ll = f64::NEG_INFINITY;
+    let mut prev_ll = f32::NEG_INFINITY;
 
     let noise_log_lik = if domain_length > 0.0 {
         -(domain_length.ln())
     } else {
-        f64::NEG_INFINITY
+        f32::NEG_INFINITY
     };
 
-    let sigma_floor = domain_length / (100.0 * k as f64);
+    let sigma_floor = domain_length / (100.0 * k as f32);
 
     let mut iter = 0;
     loop {
@@ -210,7 +210,7 @@ pub fn gaussian_mixture_em(
 
         for i in 0..n {
             let x = observations[i];
-            let mut log_probs = vec![f64::NEG_INFINITY; n_total];
+            let mut log_probs = vec![f32::NEG_INFINITY; n_total];
 
             // Noise component
             if weights[0] > 0.0 {
@@ -226,7 +226,7 @@ pub fn gaussian_mixture_em(
 
             let log_norm = log_probs
                 .iter()
-                .fold(f64::NEG_INFINITY, |acc, &lp| log_sum_exp(acc, lp));
+                .fold(f32::NEG_INFINITY, |acc, &lp| log_sum_exp(acc, lp));
 
             total_ll += log_norm;
 
@@ -241,7 +241,7 @@ pub fn gaussian_mixture_em(
         if iter > 1 && (ll_change < params.tol || iter >= params.max_iter) {
             // BIC: 3K (mu, sigma, weight per Gaussian) + 1 (noise weight) - 1 (constraint)
             let n_params = 3 * k;
-            let bic = -2.0 * total_ll + n_params as f64 * (n as f64).ln();
+            let bic = -2.0 * total_ll + n_params as f32 * (n as f32).ln();
 
             return GmmResult {
                 weights,
@@ -257,37 +257,37 @@ pub fn gaussian_mixture_em(
         // M-step: update weights, mus, sigmas
         for j in 0..k {
             let kk = j + 1; // skip noise
-            let sum_gamma: f64 = gamma.iter().map(|g| g[kk]).sum();
+            let sum_gamma: f32 = gamma.iter().map(|g| g[kk]).sum();
 
             if sum_gamma < 1e-10 {
                 weights[kk] = 0.0;
                 continue;
             }
 
-            weights[kk] = sum_gamma / n as f64;
+            weights[kk] = sum_gamma / n as f32;
 
             // Update mu
-            let mu_new: f64 = gamma
+            let mu_new: f32 = gamma
                 .iter()
                 .zip(observations.iter())
                 .map(|(g, &x)| g[kk] * x)
-                .sum::<f64>()
+                .sum::<f32>()
                 / sum_gamma;
             mus[j] = mu_new;
 
             // Update sigma
-            let var_new: f64 = gamma
+            let var_new: f32 = gamma
                 .iter()
                 .zip(observations.iter())
                 .map(|(g, &x)| g[kk] * (x - mu_new).powi(2))
-                .sum::<f64>()
+                .sum::<f32>()
                 / sum_gamma;
             sigmas[j] = var_new.sqrt().max(sigma_floor);
         }
 
         // Update noise weight
-        let noise_sum: f64 = gamma.iter().map(|g| g[0]).sum();
-        weights[0] = noise_sum / n as f64;
+        let noise_sum: f32 = gamma.iter().map(|g| g[0]).sum();
+        weights[0] = noise_sum / n as f32;
 
         // Prune low-weight Gaussian components
         for w in weights.iter_mut().skip(1) {
@@ -297,7 +297,7 @@ pub fn gaussian_mixture_em(
         }
 
         // Renormalize
-        let w_sum: f64 = weights.iter().sum();
+        let w_sum: f32 = weights.iter().sum();
         if w_sum > 0.0 {
             for w in weights.iter_mut() {
                 *w /= w_sum;
@@ -312,16 +312,16 @@ mod tests {
 
     #[test]
     fn test_log_sum_exp() {
-        let a = 2.0_f64.ln();
-        let b = 3.0_f64.ln();
+        let a = 2.0_f32.ln();
+        let b = 3.0_f32.ln();
         let result = log_sum_exp(a, b);
-        assert!((result - 5.0_f64.ln()).abs() < 1e-10);
+        assert!((result - 5.0_f32.ln()).abs() < 1e-5);
     }
 
     #[test]
     fn test_log_sum_exp_neg_inf() {
-        assert_eq!(log_sum_exp(f64::NEG_INFINITY, 1.0), 1.0);
-        assert_eq!(log_sum_exp(1.0, f64::NEG_INFINITY), 1.0);
+        assert_eq!(log_sum_exp(f32::NEG_INFINITY, 1.0), 1.0);
+        assert_eq!(log_sum_exp(1.0, f32::NEG_INFINITY), 1.0);
     }
 
     #[test]
@@ -334,9 +334,9 @@ mod tests {
             rng_state = rng_state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            let u = (rng_state >> 11) as f64 / (1u64 << 53) as f64;
+            let u = (rng_state >> 11) as f32 / (1u64 << 53) as f32;
             // Box-Muller (simplified, using one uniform)
-            let x = 50.0 + 5.0 * (2.0 * std::f64::consts::PI * u).cos();
+            let x = 50.0 + 5.0 * (2.0 * std::f32::consts::PI * u).cos();
             obs.push(x);
         }
 
@@ -366,10 +366,10 @@ mod tests {
         // Two groups: 50 points around 20, 50 around 80
         let mut obs = Vec::new();
         for i in 0..50 {
-            obs.push(20.0 + (i as f64 - 25.0) * 0.5);
+            obs.push(20.0 + (i as f32 - 25.0) * 0.5);
         }
         for i in 0..50 {
-            obs.push(80.0 + (i as f64 - 25.0) * 0.5);
+            obs.push(80.0 + (i as f32 - 25.0) * 0.5);
         }
 
         let params = EmParams {

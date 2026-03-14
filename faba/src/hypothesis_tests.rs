@@ -50,7 +50,7 @@ where
 {
     /// Test if observed success rate is greater than expected
     /// Returns P(X >= obs_success | X ~ Binomial(n, p_expected))
-    pub fn pvalue_greater(&self) -> anyhow::Result<f64> {
+    pub fn pvalue_greater(&self) -> anyhow::Result<f32> {
         if let (Some(exp_success), Some(exp_failure), Some(obs_success), Some(obs_failure)) = (
             self.expected.num_success.to_u64(),
             self.expected.num_failure.to_u64(),
@@ -62,7 +62,7 @@ where
             let distrib = Binomial::new(null_pr, nobs)?;
             // P(X >= k) = P(X > k-1) = sf(k-1)
             // Using sf() is more numerically stable than 1 - cdf()
-            Ok(distrib.sf(obs_success.saturating_sub(1)))
+            Ok(distrib.sf(obs_success.saturating_sub(1)) as f32)
         } else {
             Err(anyhow::anyhow!("failed to construct binomial test"))
         }
@@ -70,7 +70,7 @@ where
 
     /// Test if observed success rate is less than expected
     /// Returns P(X <= obs_success | X ~ Binomial(n, p_expected))
-    pub fn pvalue_less(&self) -> anyhow::Result<f64> {
+    pub fn pvalue_less(&self) -> anyhow::Result<f32> {
         if let (Some(exp_success), Some(exp_failure), Some(obs_success), Some(obs_failure)) = (
             self.expected.num_success.to_u64(),
             self.expected.num_failure.to_u64(),
@@ -80,7 +80,7 @@ where
             let null_pr = (exp_success as f64) / ((exp_failure + exp_success) as f64).max(1.0);
             let nobs = obs_success + obs_failure;
             let distrib = Binomial::new(null_pr, nobs)?;
-            Ok(distrib.cdf(obs_success))
+            Ok(distrib.cdf(obs_success) as f32)
         } else {
             Err(anyhow::anyhow!("failed to construct binomial test"))
         }
