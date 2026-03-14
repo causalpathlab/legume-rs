@@ -555,7 +555,7 @@ pub fn process_all_bam_files_to_backend(
 
     let site_key = |x: &BedWithGene| -> Box<str> {
         let gene_part = gene_key(x);
-        format!("{}_{}_{}_{}/{}", gene_part, x.chr, x.start, x.stop, suffix).into_boxed_str()
+        format!("{}/{}/{}:{}", gene_part, suffix, x.chr, x.start).into_boxed_str()
     };
     let take_value = params.value_extractor();
     let cutoffs = params.qc_cutoffs();

@@ -77,7 +77,7 @@ pub fn run_simple(args: &CountApaArgs) -> anyhow::Result<()> {
             .get(&x.gene)
             .map(|gff| format!("{}_{}", gff.gene_id, gff.gene_name))
             .unwrap_or_else(|| format!("{}", x.gene));
-        format!("{}_{}_{}_{}/pA", gene_part, x.chr, x.start, x.stop).into_boxed_str()
+        format!("{}/pA/{}:{}", gene_part, x.chr, x.start).into_boxed_str()
     };
 
     let cutoffs = args.qc_cutoffs();
