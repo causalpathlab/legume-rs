@@ -89,17 +89,17 @@ mod tests {
     use super::*;
     use genomic_data::sam::CellBarcode;
 
-    fn make_annotation(site_id: &str, gene: &str, alpha: i64, weight: f64) -> ApaSiteAnnotation {
+    fn make_annotation(site_id: &str, gene: &str, alpha: i64, weight: f32) -> ApaSiteAnnotation {
         ApaSiteAnnotation {
             site_id: site_id.into(),
             gene_name: gene.into(),
             chr: "chr1".into(),
             genomic_alpha: alpha,
-            beta: 30.0,
+            beta: 30.0_f32,
             genomic_start: alpha - 50,
             genomic_stop: alpha + 50,
             pi_weight: weight,
-            expected_tail_length: 100.0,
+            expected_tail_length: 100.0_f32,
         }
     }
 

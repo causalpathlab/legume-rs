@@ -110,7 +110,7 @@ pub struct AtoICountArgs {
         default_value_t = 0.05,
         help = "P-value cutoff for A-to-I detection"
     )]
-    pub pvalue_cutoff: f64,
+    pub pvalue_cutoff: f32,
 
     #[arg(
         short = 't',
@@ -210,7 +210,7 @@ pub struct AtoICountArgs {
         default_value_t = 0.0,
         help = "Initial sigma, or 0 for auto"
     )]
-    pub mixture_initial_sigma: f64,
+    pub mixture_initial_sigma: f32,
 }
 
 impl From<&AtoICountArgs> for ConversionParams {

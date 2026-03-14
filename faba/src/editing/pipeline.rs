@@ -29,7 +29,7 @@ pub struct ConversionParams {
     pub min_coverage: usize,
     pub min_conversion: usize,
     pub pseudocount: usize,
-    pub pvalue_cutoff: f64,
+    pub pvalue_cutoff: f32,
     pub resolution_kb: Option<f32>,
     pub backend: SparseIoBackend,
     pub output: Box<str>,
@@ -616,7 +616,7 @@ pub fn process_all_bam_files_to_backend(
             matched,
             total,
             if total > 0 {
-                100.0 * matched as f64 / total as f64
+                100.0 * matched as f32 / total as f32
             } else {
                 0.0
             }
@@ -792,7 +792,7 @@ pub fn process_all_bam_files_to_bed(
             matched,
             total,
             if total > 0 {
-                100.0 * matched as f64 / total as f64
+                100.0 * matched as f32 / total as f32
             } else {
                 0.0
             }
@@ -945,7 +945,7 @@ pub fn run_mixture_model(
         .collect();
 
     // Group observations by gene, converting to strand-aware relative position
-    let mut gene_obs: fnv::FnvHashMap<GeneId, Vec<(usize, f64, usize)>> =
+    let mut gene_obs: fnv::FnvHashMap<GeneId, Vec<(usize, f32, usize)>> =
         fnv::FnvHashMap::default();
     for (cb, bed, meth) in &all_stats {
         let cell_idx = cell_to_idx[cb];
@@ -955,11 +955,11 @@ pub fn run_mixture_model(
             let lb = (gff.start - 1).max(0); // GFF 1-based -> 0-based
             let ub = gff.stop;
             match gff.strand {
-                Strand::Forward => (meth.site_pos - lb) as f64,
-                Strand::Backward => (ub - meth.site_pos - 1) as f64,
+                Strand::Forward => (meth.site_pos - lb) as f32,
+                Strand::Backward => (ub - meth.site_pos - 1) as f32,
             }
         } else {
-            meth.site_pos as f64
+            meth.site_pos as f32
         };
         gene_obs
             .entry(bed.gene.clone())
@@ -987,7 +987,7 @@ pub fn run_mixture_model(
 
         let gene_length = gff_map
             .get(gene_id)
-            .map(|gff| (gff.stop - gff.start) as f64)
+            .map(|gff| (gff.stop - gff.start) as f32)
             .unwrap_or(1000.0);
 
         // Expand observations by count
@@ -1145,23 +1145,23 @@ fn write_mixture_annotations(
     annotations: &[crate::editing::mixture::MixtureComponentAnnotation],
     path: &str,
 ) -> anyhow::Result<()> {
-    use arrow::array::{ArrayRef, Float64Array, StringArray, UInt64Array};
+    use arrow::array::{ArrayRef, Float32Array, StringArray, UInt64Array};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::WriterProperties;
 
     let gene_names: Vec<&str> = annotations.iter().map(|a| a.gene_name.as_ref()).collect();
     let component_idxs: Vec<u64> = annotations.iter().map(|a| a.component_idx as u64).collect();
-    let mus: Vec<f64> = annotations.iter().map(|a| a.mu).collect();
-    let sigmas: Vec<f64> = annotations.iter().map(|a| a.sigma).collect();
-    let pis: Vec<f64> = annotations.iter().map(|a| a.pi).collect();
+    let mus: Vec<f32> = annotations.iter().map(|a| a.mu).collect();
+    let sigmas: Vec<f32> = annotations.iter().map(|a| a.sigma).collect();
+    let pis: Vec<f32> = annotations.iter().map(|a| a.pi).collect();
 
     let schema = arrow::datatypes::Schema::new(vec![
         arrow::datatypes::Field::new("gene_name", arrow::datatypes::DataType::Utf8, false),
         arrow::datatypes::Field::new("component_idx", arrow::datatypes::DataType::UInt64, false),
-        arrow::datatypes::Field::new("mu", arrow::datatypes::DataType::Float64, false),
-        arrow::datatypes::Field::new("sigma", arrow::datatypes::DataType::Float64, false),
-        arrow::datatypes::Field::new("pi", arrow::datatypes::DataType::Float64, false),
+        arrow::datatypes::Field::new("mu", arrow::datatypes::DataType::Float32, false),
+        arrow::datatypes::Field::new("sigma", arrow::datatypes::DataType::Float32, false),
+        arrow::datatypes::Field::new("pi", arrow::datatypes::DataType::Float32, false),
     ]);
 
     let batch = RecordBatch::try_new(
@@ -1169,9 +1169,9 @@ fn write_mixture_annotations(
         vec![
             std::sync::Arc::new(StringArray::from(gene_names)) as ArrayRef,
             std::sync::Arc::new(UInt64Array::from(component_idxs)) as ArrayRef,
-            std::sync::Arc::new(Float64Array::from(mus)) as ArrayRef,
-            std::sync::Arc::new(Float64Array::from(sigmas)) as ArrayRef,
-            std::sync::Arc::new(Float64Array::from(pis)) as ArrayRef,
+            std::sync::Arc::new(Float32Array::from(mus)) as ArrayRef,
+            std::sync::Arc::new(Float32Array::from(sigmas)) as ArrayRef,
+            std::sync::Arc::new(Float32Array::from(pis)) as ArrayRef,
         ],
     )?;
 

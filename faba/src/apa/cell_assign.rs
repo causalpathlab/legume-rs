@@ -20,11 +20,11 @@ pub struct ApaSiteAnnotation {
     pub gene_name: Box<str>,
     pub chr: Box<str>,
     pub genomic_alpha: i64,
-    pub beta: f64,
+    pub beta: f32,
     pub genomic_start: i64,
     pub genomic_stop: i64,
-    pub pi_weight: f64,
-    pub expected_tail_length: f64,
+    pub pi_weight: f32,
+    pub expected_tail_length: f32,
 }
 
 /// Assign fragments to mixture components via hard assignment (argmax gamma),
@@ -68,7 +68,7 @@ pub fn assign_fragments_to_sites(
     let make_site_id = |component_k: usize| -> (Box<str>, i64, i64) {
         let alpha = em_result.alphas[component_k - 1];
         let beta = em_result.betas[component_k - 1];
-        let (gstart, gstop) = utr.alpha_to_genomic_range(alpha, beta);
+        let (gstart, gstop) = utr.alpha_to_genomic_range(alpha.into(), beta.into());
         let site_id: Box<str> = format!("{}/pA/{}", utr.name, component_k - 1).into();
         (site_id, gstart, gstop)
     };
@@ -93,13 +93,13 @@ pub fn assign_fragments_to_sites(
             continue;
         }
         let beta = em_result.betas[k];
-        let (gstart, gstop) = utr.alpha_to_genomic_range(alpha, beta);
+        let (gstart, gstop) = utr.alpha_to_genomic_range(alpha.into(), beta.into());
         let genomic_alpha = match utr.strand {
             genomic_data::sam::Strand::Forward => utr.start + alpha as i64,
             genomic_data::sam::Strand::Backward => utr.end - alpha as i64,
         };
         let site_id: Box<str> = format!("{}/pA/{}", utr.name, k).into();
-        let expected_tail_length = utr.utr_length as f64 - alpha;
+        let expected_tail_length = utr.utr_length as f32 - alpha;
         annotations.push(ApaSiteAnnotation {
             site_id,
             gene_name: utr.name.clone(),
@@ -136,7 +136,7 @@ mod tests {
                 let umi = UmiBarcode::Barcode(format!("UMI{:04}", umi_id).into());
 
                 fragments.push(FragmentRecord {
-                    x: 100.0 + frag_idx as f64 * 10.0,
+                    x: 100.0 + frag_idx as f32 * 10.0,
                     l: 50.0,
                     r: 0.0,
                     is_junction: false,

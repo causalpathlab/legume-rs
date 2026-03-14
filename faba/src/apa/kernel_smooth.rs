@@ -4,7 +4,7 @@
 /// * `y` - values at positions
 /// * `x_out` - output positions to evaluate at
 /// * `bandwidth` - kernel bandwidth (standard deviation)
-pub fn gaussian_kernel_smooth(x: &[f64], y: &[f64], x_out: &[f64], bandwidth: f64) -> Vec<f64> {
+pub fn gaussian_kernel_smooth(x: &[f32], y: &[f32], x_out: &[f32], bandwidth: f32) -> Vec<f32> {
     assert_eq!(x.len(), y.len());
     let bw2 = 2.0 * bandwidth * bandwidth;
 
@@ -32,7 +32,7 @@ pub fn gaussian_kernel_smooth(x: &[f64], y: &[f64], x_out: &[f64], bandwidth: f6
 
 /// Find local modes (peaks) in a smoothed signal.
 /// Returns indices where y[i] > y[i-1] and y[i] > y[i+1].
-pub fn find_modes(y: &[f64]) -> Vec<usize> {
+pub fn find_modes(y: &[f32]) -> Vec<usize> {
     if y.len() < 3 {
         return Vec::new();
     }
@@ -48,7 +48,7 @@ pub fn find_modes(y: &[f64]) -> Vec<usize> {
 
 /// Find local valleys (minima) in a smoothed signal.
 /// Returns indices where y[i] < y[i-1] and y[i] < y[i+1].
-pub fn find_valleys(y: &[f64]) -> Vec<usize> {
+pub fn find_valleys(y: &[f32]) -> Vec<usize> {
     if y.len() < 3 {
         return Vec::new();
     }
@@ -65,10 +65,10 @@ pub fn find_valleys(y: &[f64]) -> Vec<usize> {
 /// Compute a coverage histogram from fragment positions.
 /// Returns (positions, counts) at the given resolution.
 pub fn coverage_histogram(
-    positions: &[f64],
-    utr_length: f64,
-    resolution: f64,
-) -> (Vec<f64>, Vec<f64>) {
+    positions: &[f32],
+    utr_length: f32,
+    resolution: f32,
+) -> (Vec<f32>, Vec<f32>) {
     let n_bins = (utr_length / resolution).ceil() as usize;
     let mut counts = vec![0.0; n_bins];
 
@@ -79,7 +79,7 @@ pub fn coverage_histogram(
         }
     }
 
-    let positions: Vec<f64> = (0..n_bins).map(|i| (i as f64 + 0.5) * resolution).collect();
+    let positions: Vec<f32> = (0..n_bins).map(|i| (i as f32 + 0.5) * resolution).collect();
 
     (positions, counts)
 }

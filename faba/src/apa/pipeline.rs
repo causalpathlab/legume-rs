@@ -8,7 +8,7 @@ use crate::common::*;
 use crate::data::poly_a_stat_map::PolyASiteMap;
 use crate::run_count_apa::CountApaArgs;
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
+use arrow::array::{ArrayRef, Float32Array, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use dashmap::DashMap;
 use genomic_data::bed::BedWithGene;
@@ -449,11 +449,11 @@ fn load_utrs(args: &CountApaArgs) -> anyhow::Result<Vec<UtrRegion>> {
 }
 
 /// Load pre-identified sites from a BED file.
-fn load_pre_sites(path: &str) -> anyhow::Result<fnv::FnvHashMap<Box<str>, Vec<f64>>> {
+fn load_pre_sites(path: &str) -> anyhow::Result<fnv::FnvHashMap<Box<str>, Vec<f32>>> {
     use std::io::BufRead;
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
-    let mut sites: fnv::FnvHashMap<Box<str>, Vec<f64>> = fnv::FnvHashMap::default();
+    let mut sites: fnv::FnvHashMap<Box<str>, Vec<f32>> = fnv::FnvHashMap::default();
 
     for line in reader.lines() {
         let line = line?;
@@ -466,7 +466,7 @@ fn load_pre_sites(path: &str) -> anyhow::Result<fnv::FnvHashMap<Box<str>, Vec<f6
         if fields.len() >= 4 {
             let name = fields[3];
             if let Some((utr_name, pos_str)) = name.rsplit_once('@') {
-                if let Ok(pos) = pos_str.parse::<f64>() {
+                if let Ok(pos) = pos_str.parse::<f32>() {
                     sites.entry(utr_name.into()).or_default().push(pos);
                 }
             }
@@ -480,7 +480,7 @@ fn load_pre_sites(path: &str) -> anyhow::Result<fnv::FnvHashMap<Box<str>, Vec<f6
 fn process_utr(
     utr: &UtrRegion,
     bam_files: &[Box<str>],
-    pre_sites: Option<&fnv::FnvHashMap<Box<str>, Vec<f64>>>,
+    pre_sites: Option<&fnv::FnvHashMap<Box<str>, Vec<f32>>>,
     args: &CountApaArgs,
 ) -> anyhow::Result<(Vec<CellSiteCount>, Vec<ApaSiteAnnotation>)> {
     let mut all_fragments = Vec::new();
@@ -524,7 +524,7 @@ fn process_utr(
         } else {
             let bandwidth = 100.0;
             let coverage_sites =
-                discover_sites_from_coverage(&all_fragments, utr.utr_length as f64, bandwidth);
+                discover_sites_from_coverage(&all_fragments, utr.utr_length as f32, bandwidth);
             merge_nearby_sites(&coverage_sites, &all_fragments, args.merge_distance)
         }
     };
@@ -543,10 +543,10 @@ fn process_utr(
 
     let lik_params = args.lik_params();
     let (theta_lik_matrix, theta_grid) =
-        precompute_theta_lik_matrix(&all_fragments, utr.utr_length as f64, &lik_params);
+        precompute_theta_lik_matrix(&all_fragments, utr.utr_length as f32, &lik_params);
 
     let default_beta = (args.min_beta + args.max_beta) / 2.0;
-    let beta_arr: Vec<f64> = vec![default_beta; candidate_sites.len()];
+    let beta_arr: Vec<f32> = vec![default_beta; candidate_sites.len()];
 
     let em_params = args.em_params();
     let em_result = fixed_inference(
@@ -554,7 +554,7 @@ fn process_utr(
         &beta_arr,
         &theta_lik_matrix,
         &theta_grid,
-        utr.utr_length as f64,
+        utr.utr_length as f32,
         lik_params.max_polya,
         &em_params,
     );
@@ -684,13 +684,13 @@ fn write_apa_annotations(annotations: &[ApaSiteAnnotation], path: &str) -> anyho
         arrow::datatypes::Field::new("gene_name", arrow::datatypes::DataType::Utf8, false),
         arrow::datatypes::Field::new("chr", arrow::datatypes::DataType::Utf8, false),
         arrow::datatypes::Field::new("genomic_alpha", arrow::datatypes::DataType::Int64, false),
-        arrow::datatypes::Field::new("beta", arrow::datatypes::DataType::Float64, false),
+        arrow::datatypes::Field::new("beta", arrow::datatypes::DataType::Float32, false),
         arrow::datatypes::Field::new("genomic_start", arrow::datatypes::DataType::Int64, false),
         arrow::datatypes::Field::new("genomic_stop", arrow::datatypes::DataType::Int64, false),
-        arrow::datatypes::Field::new("pi_weight", arrow::datatypes::DataType::Float64, false),
+        arrow::datatypes::Field::new("pi_weight", arrow::datatypes::DataType::Float32, false),
         arrow::datatypes::Field::new(
             "expected_tail_length",
-            arrow::datatypes::DataType::Float64,
+            arrow::datatypes::DataType::Float32,
             false,
         ),
     ]);
@@ -702,11 +702,11 @@ fn write_apa_annotations(annotations: &[ApaSiteAnnotation], path: &str) -> anyho
             Arc::new(StringArray::from(gene_names)) as ArrayRef,
             Arc::new(StringArray::from(chrs)) as ArrayRef,
             Arc::new(Int64Array::from(genomic_alphas)) as ArrayRef,
-            Arc::new(Float64Array::from(betas)) as ArrayRef,
+            Arc::new(Float32Array::from(betas)) as ArrayRef,
             Arc::new(Int64Array::from(genomic_starts)) as ArrayRef,
             Arc::new(Int64Array::from(genomic_stops)) as ArrayRef,
-            Arc::new(Float64Array::from(pi_weights)) as ArrayRef,
-            Arc::new(Float64Array::from(expected_tails)) as ArrayRef,
+            Arc::new(Float32Array::from(pi_weights)) as ArrayRef,
+            Arc::new(Float32Array::from(expected_tails)) as ArrayRef,
         ],
     )?;
 

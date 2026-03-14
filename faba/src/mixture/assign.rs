@@ -1,6 +1,6 @@
 /// Hard-assign each observation to the component with highest posterior probability.
 /// Returns (observation_index, component_index) pairs.
-pub fn hard_assign(gamma: &[Vec<f64>]) -> Vec<(usize, usize)> {
+pub fn hard_assign(gamma: &[Vec<f32>]) -> Vec<(usize, usize)> {
     gamma
         .iter()
         .enumerate()
@@ -29,7 +29,7 @@ mod tests {
 
     #[test]
     fn test_hard_assign_empty() {
-        let gamma: Vec<Vec<f64>> = vec![];
+        let gamma: Vec<Vec<f32>> = vec![];
         let assignments = hard_assign(&gamma);
         assert!(assignments.is_empty());
     }

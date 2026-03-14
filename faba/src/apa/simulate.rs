@@ -9,27 +9,27 @@ use rand_distr::StandardNormal;
 /// Parameters for generating synthetic fragments following the SCAPE model (Section 2.1).
 pub struct ScapeSimParams {
     /// UTR length L
-    pub utr_length: f64,
+    pub utr_length: f32,
     /// Mixture weights [pi_0 (noise), pi_1, ..., pi_K]
-    pub weights: Vec<f64>,
+    pub weights: Vec<f32>,
     /// APA site positions [alpha_1, ..., alpha_K]
-    pub alphas: Vec<f64>,
+    pub alphas: Vec<f32>,
     /// APA site dispersions [beta_1, ..., beta_K]
-    pub betas: Vec<f64>,
+    pub betas: Vec<f32>,
     /// Fragment length mean
-    pub mu_f: f64,
+    pub mu_f: f32,
     /// Fragment length std dev
-    pub sigma_f: f64,
+    pub sigma_f: f32,
     /// Minimum polyA tail length
-    pub min_polya: f64,
+    pub min_polya: f32,
     /// Maximum polyA tail length
-    pub max_polya: f64,
+    pub max_polya: f32,
     /// Number of fragments to generate
     pub n_fragments: usize,
     /// Number of cells (for cell barcode assignment)
     pub n_cells: usize,
     /// Probability a fragment from an APA component is a junction read
-    pub junction_prob: f64,
+    pub junction_prob: f32,
     /// Random seed
     pub seed: u64,
 }
@@ -77,13 +77,13 @@ pub fn simulate_fragments(params: &ScapeSimParams) -> (Vec<FragmentRecord>, Vec<
 
         if k == 0 {
             // Noise component: uniform over UTR
-            let x_dist = Uniform::new(1.0, params.utr_length + 1.0).unwrap();
+            let x_dist = Uniform::new(1.0f32, params.utr_length + 1.0).unwrap();
             let x = x_dist.sample(&mut rng);
             let max_l = params.utr_length - x + 1.0;
             if max_l < 1.0 {
                 continue;
             }
-            let l_dist = Uniform::new(1.0, max_l + 1.0).unwrap();
+            let l_dist = Uniform::new(1.0f32, max_l + 1.0).unwrap();
             let l = l_dist.sample(&mut rng).floor();
 
             fragments.push(FragmentRecord {
@@ -102,7 +102,8 @@ pub fn simulate_fragments(params: &ScapeSimParams) -> (Vec<FragmentRecord>, Vec<
             let beta = params.betas[k - 1];
 
             // Sample theta ~ N(alpha, beta^2)
-            let z: f64 = StandardNormal.sample(&mut rng);
+            let z: f32 =
+                <StandardNormal as Distribution<f64>>::sample(&StandardNormal, &mut rng) as f32;
             let theta = alpha + beta * z;
 
             // Sample s ~ U(min_polya, max_polya)
@@ -110,7 +111,8 @@ pub fn simulate_fragments(params: &ScapeSimParams) -> (Vec<FragmentRecord>, Vec<
             let s = s_dist.sample(&mut rng);
 
             // Fragment length f ~ N(mu_f, sigma_f^2)
-            let z_f: f64 = StandardNormal.sample(&mut rng);
+            let z_f: f32 =
+                <StandardNormal as Distribution<f64>>::sample(&StandardNormal, &mut rng) as f32;
             let f_len = params.mu_f + params.sigma_f * z_f;
 
             // Break position: x = theta - (f - s) + 1
@@ -121,8 +123,8 @@ pub fn simulate_fragments(params: &ScapeSimParams) -> (Vec<FragmentRecord>, Vec<
             if max_l < 1.0 || x < 1.0 || x + max_l > params.utr_length + 1.0 {
                 continue;
             }
-            let l_dist = Uniform::new(1.0f64, max_l + 1.0).unwrap();
-            let l: f64 = l_dist.sample(&mut rng).floor().min(max_l);
+            let l_dist = Uniform::new(1.0f32, max_l + 1.0).unwrap();
+            let l: f32 = l_dist.sample(&mut rng).floor().min(max_l);
 
             // Junction read with probability junction_prob
             let is_junction = rng_bool(&mut rng, params.junction_prob);
@@ -154,9 +156,9 @@ pub fn simulate_fragments(params: &ScapeSimParams) -> (Vec<FragmentRecord>, Vec<
     (fragments, labels)
 }
 
-fn rng_bool(rng: &mut StdRng, p: f64) -> bool {
+fn rng_bool(rng: &mut StdRng, p: f32) -> bool {
     use rand::Rng;
-    rng.random_bool(p)
+    rng.random_bool(p as f64)
 }
 
 #[cfg(test)]

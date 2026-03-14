@@ -5,9 +5,9 @@ pub struct EmParams {
     /// Maximum number of EM iterations
     pub max_iter: usize,
     /// Convergence tolerance for log-likelihood change
-    pub tol: f64,
+    pub tol: f32,
     /// Minimum component weight before pruning
-    pub min_weight: f64,
+    pub min_weight: f32,
 }
 
 impl Default for EmParams {
@@ -23,17 +23,17 @@ impl Default for EmParams {
 /// Result of EM inference for one UTR.
 pub struct EmResult {
     /// Estimated mixing weights pi_0..pi_K (pi_0 = noise)
-    pub weights: Vec<f64>,
+    pub weights: Vec<f32>,
     /// pA site positions alpha_k (for k=1..K)
-    pub alphas: Vec<f64>,
+    pub alphas: Vec<f32>,
     /// pA site dispersions beta_k (for k=1..K)
-    pub betas: Vec<f64>,
+    pub betas: Vec<f32>,
     /// Posterior assignment probabilities gamma[n][k] (k=0 is noise)
-    pub gamma: Vec<Vec<f64>>,
+    pub gamma: Vec<Vec<f32>>,
     /// Final log-likelihood
-    pub log_lik: f64,
+    pub log_lik: f32,
     /// BIC
-    pub bic: f64,
+    pub bic: f32,
     /// Number of iterations
     pub n_iter: usize,
 }
@@ -49,12 +49,12 @@ pub struct EmResult {
 /// * `max_polya` - Maximum polyA length (LA)
 /// * `params` - EM parameters
 pub fn fixed_inference(
-    alpha_arr: &[f64],
-    beta_arr: &[f64],
-    theta_lik_matrix: &[Vec<f64>],
-    theta_grid: &[f64],
-    utr_length: f64,
-    max_polya: f64,
+    alpha_arr: &[f32],
+    beta_arr: &[f32],
+    theta_lik_matrix: &[Vec<f32>],
+    theta_grid: &[f32],
+    utr_length: f32,
+    max_polya: f32,
     params: &EmParams,
 ) -> EmResult {
     let n_frag = theta_lik_matrix.len();

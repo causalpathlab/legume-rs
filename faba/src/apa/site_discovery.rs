@@ -7,7 +7,7 @@ use fnv::FnvHashMap as HashMap;
 pub fn discover_sites_from_junctions(
     fragments: &[FragmentRecord],
     min_coverage: usize,
-) -> Vec<f64> {
+) -> Vec<f32> {
     let mut site_counts: HashMap<i64, usize> = HashMap::default();
 
     for frag in fragments {
@@ -17,10 +17,10 @@ pub fn discover_sites_from_junctions(
         }
     }
 
-    let mut sites: Vec<f64> = site_counts
+    let mut sites: Vec<f32> = site_counts
         .into_iter()
         .filter(|(_, count)| *count >= min_coverage)
-        .map(|(pos, _)| pos as f64)
+        .map(|(pos, _)| pos as f32)
         .collect();
 
     sites.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -32,15 +32,15 @@ pub fn discover_sites_from_junctions(
 /// Uses read 3'-end positions (which pile up near pA sites) to find peaks.
 pub fn discover_sites_from_coverage(
     fragments: &[FragmentRecord],
-    utr_length: f64,
-    bandwidth: f64,
-) -> Vec<f64> {
+    utr_length: f32,
+    bandwidth: f32,
+) -> Vec<f32> {
     if fragments.is_empty() || utr_length <= 0.0 {
         return Vec::new();
     }
 
     // Collect fragment end positions (x + l = approximate 3' end in UTR coords)
-    let end_positions: Vec<f64> = fragments.iter().map(|f| f.x + f.l).collect();
+    let end_positions: Vec<f32> = fragments.iter().map(|f| f.x + f.l).collect();
 
     // Create coverage histogram at 1bp resolution (or 10bp for speed)
     let resolution = 10.0;
@@ -53,7 +53,7 @@ pub fn discover_sites_from_coverage(
     let mode_indices = find_modes(&smoothed);
 
     // Convert mode indices back to UTR positions
-    let mut sites: Vec<f64> = mode_indices
+    let mut sites: Vec<f32> = mode_indices
         .into_iter()
         .filter(|&i| smoothed[i] > 0.0)
         .map(|i| hist_x[i])
@@ -66,10 +66,10 @@ pub fn discover_sites_from_coverage(
 /// Merge nearby candidate sites within a given distance.
 /// Keeps the site with the highest count as the representative.
 pub fn merge_nearby_sites(
-    sites: &[f64],
+    sites: &[f32],
     fragments: &[FragmentRecord],
-    merge_dist: f64,
-) -> Vec<f64> {
+    merge_dist: f32,
+) -> Vec<f32> {
     if sites.is_empty() {
         return Vec::new();
     }
@@ -113,7 +113,7 @@ pub fn merge_nearby_sites(
 }
 
 /// Count fragments near a position within a window.
-fn nearby_count(counts: &HashMap<i64, usize>, pos: f64, window: f64) -> usize {
+fn nearby_count(counts: &HashMap<i64, usize>, pos: f32, window: f32) -> usize {
     let lo = (pos - window).round() as i64;
     let hi = (pos + window).round() as i64;
     (lo..=hi).filter_map(|p| counts.get(&p)).sum()
@@ -124,7 +124,7 @@ mod tests {
     use super::*;
     use genomic_data::sam::{CellBarcode, UmiBarcode};
 
-    fn make_junction_frag(pa_pos: f64) -> FragmentRecord {
+    fn make_junction_frag(pa_pos: f32) -> FragmentRecord {
         FragmentRecord {
             x: pa_pos - 200.0,
             l: 200.0,
@@ -141,12 +141,12 @@ mod tests {
         let mut fragments = Vec::new();
         // 50 junction reads near alpha=300 (scattered ±10bp)
         for i in 0..50 {
-            let offset = (i % 5) as f64 - 2.0; // -2..+2
+            let offset = (i % 5) as f32 - 2.0; // -2..+2
             fragments.push(make_junction_frag(300.0 + offset));
         }
         // 50 junction reads near alpha=700
         for i in 0..50 {
-            let offset = (i % 5) as f64 - 2.0;
+            let offset = (i % 5) as f32 - 2.0;
             fragments.push(make_junction_frag(700.0 + offset));
         }
 
