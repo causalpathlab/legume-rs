@@ -125,11 +125,10 @@ enum Commands {
     ReadDepth(ReadDepthArgs),
 
     /// Detect and quantify A-to-I RNA editing sites
-    #[command(aliases = ["atoi", "a2i", "editing"],
+    #[command(name = "atoi", aliases = ["a2i", "editing"],
         long_about = "Detect A-to-I (adenosine-to-inosine) RNA editing sites\n\n\
-            Discovers editing sites by comparing A->G (forward) or T->C\n\
-            (reverse) conversion rates between wild-type and mutant BAM\n\
-            files using binomial tests, then quantifies per-cell editing\n\
+            Discovers editing sites from A->G (forward) or T->C (reverse)\n\
+            conversions in BAM files, then quantifies per-cell editing\n\
             at discovered sites.\n\n\
             Output: atoi_sites.parquet (site annotations) + sparse matrix\n\
             (cells x sites). The parquet file can be used as --atoi-mask\n\

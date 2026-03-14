@@ -239,12 +239,19 @@ fn find_sites_with_bulk_stats(
     let wt_freq = wt_base_freq_map
         .marginal_frequency_map()
         .ok_or_else(|| anyhow::anyhow!("failed to count wt freq"))?;
-    let mut_freq = mut_base_freq_map
-        .marginal_frequency_map()
-        .ok_or_else(|| anyhow::anyhow!("failed to count mut freq"))?;
+
+    let mut_freq = if params.mut_bam_files.is_empty() {
+        None
+    } else {
+        Some(
+            mut_base_freq_map
+                .marginal_frequency_map()
+                .ok_or_else(|| anyhow::anyhow!("failed to count mut freq"))?,
+        )
+    };
 
     let forward = matches!(strand, Strand::Forward);
-    sifter.scan(&positions, wt_freq, Some(mut_freq), forward);
+    sifter.scan(&positions, wt_freq, mut_freq, forward);
 
     let mut candidate_sites = sifter.candidate_sites;
     candidate_sites.sort();
