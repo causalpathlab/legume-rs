@@ -13,6 +13,9 @@ pub fn check_all_bam_indices(bam_files: &[Box<str>]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Build gene key as `{gene_id}_{symbol}` for feature naming.
+///
+/// Feature naming convention: `{gene_key}/{modality}/{detail}`
 pub fn create_gene_key_function(
     gff_map: &GffRecordMap,
 ) -> impl Fn(&BedWithGene) -> Box<str> + Send + Sync + '_ {

@@ -109,16 +109,16 @@ pub struct GeneCountArgs {
     )]
     pub(crate) output: Box<str>,
 
-    /// Count spliced and unspliced reads separately
+    /// Disable spliced/unspliced separation (output total counts only)
     #[arg(
-        long,
+        long = "no-splice",
         default_value_t = false,
-        help = "Count spliced/unspliced separately (RNA velocity)",
-        long_help = "Produce separate spliced and unspliced count matrices\n\
-                     for RNA velocity analysis. Requires exon annotations in\n\
-                     the GFF file."
+        help = "Disable spliced/unspliced separation",
+        long_help = "By default, faba produces separate spliced and unspliced\n\
+                     count matrices. Use this flag to output a single total\n\
+                     count matrix instead."
     )]
-    pub(crate) splice: bool,
+    pub(crate) no_splice: bool,
 
     /// Exon boundary buffer zone (bp) for splice classification
     #[arg(
@@ -152,9 +152,9 @@ pub fn run_gene_count(args: &GeneCountArgs) -> anyhow::Result<()> {
     let backend = args.backend.clone();
     info!("parsing GFF file: {}", args.gff_file);
 
-    if args.splice {
-        crate::gene_count::pipeline::run_splice_aware(args, &backend, &batch_names)
-    } else {
+    if args.no_splice {
         crate::gene_count::pipeline::run_simple(args, &backend, &batch_names)
+    } else {
+        crate::gene_count::pipeline::run_splice_aware(args, &backend, &batch_names)
     }
 }
