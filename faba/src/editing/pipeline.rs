@@ -30,7 +30,6 @@ pub struct ConversionParams {
     pub min_conversion: usize,
     pub pseudocount: usize,
     pub pvalue_cutoff: f32,
-    pub resolution_kb: Option<f32>,
     pub backend: SparseIoBackend,
     pub output: Box<str>,
     pub output_value_type: MethFeatureType,
@@ -437,7 +436,7 @@ fn estimate_conversion_stat(
                 return Ok(Vec::new());
             };
 
-            let (start, stop) = bin_position_kb(*conversion_pos, params.resolution_kb);
+            let (start, stop) = (*conversion_pos, *conversion_pos + 1);
 
             let stats = meth_stat
                 .iter()
@@ -493,7 +492,7 @@ fn estimate_conversion_stat(
                 return Ok(Vec::new());
             };
 
-            let (start, stop) = bin_position_kb(*editing_pos, params.resolution_kb);
+            let (start, stop) = (*editing_pos, *editing_pos + 1);
 
             let stats = meth_stat
                 .iter()
