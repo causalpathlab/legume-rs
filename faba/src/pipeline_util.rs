@@ -4,20 +4,6 @@ use crate::data::util_htslib::*;
 
 use dashmap::DashMap as HashMap;
 
-/// Bin a position based on resolution (in kb)
-/// Returns (start, stop) where start is inclusive and stop is exclusive: [start, stop)
-#[inline]
-pub fn bin_position_kb(position: i64, resolution_kb: Option<f32>) -> (i64, i64) {
-    if let Some(r) = resolution_kb {
-        let r = (r * 1000.0) as usize;
-        let start = ((position as usize) / r * r) as i64;
-        let stop = start + r as i64;
-        (start, stop)
-    } else {
-        (position, position + 1)
-    }
-}
-
 /// Check BAM indices for all files
 pub fn check_all_bam_indices(bam_files: &[Box<str>]) -> anyhow::Result<()> {
     for bam_file in bam_files {

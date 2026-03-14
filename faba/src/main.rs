@@ -8,19 +8,19 @@ mod hypothesis_tests;
 mod mixture;
 mod pipeline_util;
 mod read_depth;
+mod run_apa;
 mod run_atoi;
-mod run_count_apa;
-mod run_dartseq_count;
 mod run_gene_count;
+mod run_m6a;
 mod run_read_depth;
 mod site_analysis;
 
 use crate::common::*;
 use colored::Colorize;
+use run_apa::*;
 use run_atoi::*;
-use run_count_apa::*;
-use run_dartseq_count::*;
 use run_gene_count::*;
+use run_m6a::*;
 use run_read_depth::*;
 use site_analysis::metagene::*;
 use site_analysis::scan_pwm::*;
@@ -81,8 +81,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Quantify DART-seq m6A sites from C-to-T conversions
-    #[command(aliases = ["count-dart", "dart"],
+    #[command(name = "dartseq", aliases = ["dart", "m6a"],
+        about = "Quantify DART-seq m6A sites from C-to-T conversions",
         long_about = "Quantify DART-seq m6A sites from C-to-T conversions\n\n\
             Discovers m6A methylation sites by comparing C->T (forward) or\n\
             G->A (reverse) conversion rates between wild-type and mutant BAM\n\
@@ -92,18 +92,10 @@ enum Commands {
             Meyer, \"DART-seq: an antibody-free method for global m6A\n  \
             detection\", Nature Methods, 16(12):1275-1280, 2019.\n  \
             https://doi.org/10.1038/s41592-019-0570-0")]
-    CountDartSeq(DartSeqCountArgs),
+    DartSeq(DartSeqCountArgs),
 
-    /// Count reads per gene for single-cell or bulk RNA-seq
-    #[command(
-        long_about = "Count reads per gene for single-cell or bulk RNA-seq\n\n\
-            Produces a sparse (cells x genes) count matrix from BAM files\n\
-            using GFF gene annotations. Supports 10x-style cell barcodes."
-    )]
-    CountGenes(GeneCountArgs),
-
-    /// Quantify alternative polyadenylation (APA) sites per cell
-    #[command(aliases = ["count-polya", "polya", "apa-mix", "apamix", "apa"],
+    #[command(name = "apa", aliases = ["polya"],
+        about = "Quantify alternative polyadenylation (APA) sites per cell",
         long_about = "Quantify alternative polyadenylation (APA) sites per cell\n\n\
             Discovers and quantifies poly(A) site usage from 3'-end sequencing\n\
             data. The mixture mode implements the SCAPE model.\n\n\
@@ -113,19 +105,10 @@ enum Commands {
             differentiation and reprogramming\",\n  \
             Nucleic Acids Research, 50(11):e66, 2022.\n  \
             https://doi.org/10.1093/nar/gkac167")]
-    CountApa(CountApaArgs),
+    Apa(CountApaArgs),
 
-    /// Compute read depth over genomic intervals
-    #[command(
-        alias = "rd",
-        long_about = "Compute read depth over genomic intervals\n\n\
-            Bins the genome at a given resolution and counts read coverage\n\
-            per cell, producing a sparse (cells x bins) matrix."
-    )]
-    ReadDepth(ReadDepthArgs),
-
-    /// Detect and quantify A-to-I RNA editing sites
     #[command(name = "atoi", aliases = ["a2i", "editing"],
+        about = "Detect and quantify A-to-I RNA editing sites",
         long_about = "Detect A-to-I (adenosine-to-inosine) RNA editing sites\n\n\
             Discovers editing sites from A->G (forward) or T->C (reverse)\n\
             conversions in BAM files, then quantifies per-cell editing\n\
@@ -135,19 +118,35 @@ enum Commands {
             input for `faba dart` or `faba apa`.")]
     AtoI(AtoICountArgs),
 
-    /// Build position weight matrix around genomic sites
-    #[command(
-        alias = "pwm",
+    #[command(name = "genes", aliases = ["count-genes"],
+        about = "Count reads per gene for single-cell or bulk RNA-seq",
+        long_about = "Count reads per gene for single-cell or bulk RNA-seq\n\n\
+            Produces a sparse (cells x genes) count matrix from BAM files\n\
+            using GFF gene annotations. Supports 10x-style cell barcodes."
+    )]
+    Genes(GeneCountArgs),
+
+    #[command(name = "depth", aliases = ["read-depth", "rd"],
+        about = "Compute read depth over genomic intervals",
+        long_about = "Compute read depth over genomic intervals\n\n\
+            Bins the genome at a given resolution and counts read coverage\n\
+            per cell, producing a sparse (cells x bins) matrix."
+    )]
+    Depth(ReadDepthArgs),
+
+    #[command(name = "pwm", aliases = ["scan-pwm"],
+        about = "Build position weight matrix around genomic sites",
         long_about = "Build position weight matrix around genomic sites\n\n\
             Reads site-level parquet files from dart or apa output, collects\n\
             base frequencies in a +/- window around each site, and outputs\n\
             a position weight matrix as TSV."
     )]
-    ScanPwm(ScanPwmArgs),
+    Pwm(ScanPwmArgs),
 
-    /// Metagene histogram of site positions across gene features
     #[command(
+        name = "metagene",
         alias = "mg",
+        about = "Metagene histogram of site positions across gene features",
         long_about = "Metagene histogram of site positions across gene features\n\n\
             Maps sites from a parquet file onto gene features (5'UTR, CDS,\n\
             3'UTR, non-coding) using GFF annotations, and produces a binned\n\
@@ -169,27 +168,13 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     match &cli.commands {
-        Commands::CountDartSeq(args) => {
-            run_count_dartseq(args)?;
-        }
-        Commands::ReadDepth(args) => {
-            run_read_depth(args)?;
-        }
-        Commands::CountGenes(args) => {
-            run_gene_count(args)?;
-        }
-        Commands::CountApa(args) => {
-            run_count_apa(args)?;
-        }
-        Commands::AtoI(args) => {
-            run_atoi(args)?;
-        }
-        Commands::ScanPwm(args) => {
-            run_scan_pwm(args)?;
-        }
-        Commands::Metagene(args) => {
-            run_metagene(args)?;
-        }
+        Commands::DartSeq(args) => run_m6a(args)?,
+        Commands::Apa(args) => run_apa(args)?,
+        Commands::AtoI(args) => run_atoi(args)?,
+        Commands::Genes(args) => run_gene_count(args)?,
+        Commands::Depth(args) => run_read_depth(args)?,
+        Commands::Pwm(args) => run_scan_pwm(args)?,
+        Commands::Metagene(args) => run_metagene(args)?,
     }
 
     Ok(())

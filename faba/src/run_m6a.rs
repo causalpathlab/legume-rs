@@ -61,16 +61,6 @@ pub struct DartSeqCountArgs {
     pub gff_file: Box<str>,
 
     #[arg(
-        short = 'r',
-        long,
-        help = "resolution (in kb)",
-        long_help = "Resolution for binning in kilobases (kb). \n\
-		     Determines the size of site-level reports. \n\
-		     Example: 1.0"
-    )]
-    pub resolution_kb: Option<f32>,
-
-    #[arg(
         long,
         default_value = "CB",
         help = "Cell barcode tag",
@@ -467,7 +457,6 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             min_conversion: args.min_conversion,
             pseudocount: args.pseudocount,
             pvalue_cutoff: args.pvalue_cutoff,
-            resolution_kb: args.resolution_kb,
             backend: args.backend.clone(),
             output: args.output.clone(),
             output_value_type: args.output_value_type.clone(),
@@ -498,7 +487,6 @@ impl DartSeqCountArgs {
             min_conversion: self.atoi_min_conversion,
             pseudocount: self.pseudocount,
             pvalue_cutoff: self.atoi_pvalue_cutoff,
-            resolution_kb: self.resolution_kb,
             backend: self.backend.clone(),
             output: self.output.clone(),
             output_value_type: self.output_value_type.clone(),
@@ -513,9 +501,8 @@ impl DartSeqCountArgs {
     }
 }
 
-/// Count possibly methylated A positions in DART-seq bam files to
-/// quantify m6A β values
-pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
+/// Detect and quantify DART-seq m6A sites
+pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     mkdir(&args.output)?;
 
     // Setup thread pool

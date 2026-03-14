@@ -414,8 +414,8 @@ impl CountApaArgs {
     }
 }
 
-/// Main entry point for `count-apa`.
-pub fn run_count_apa(args: &CountApaArgs) -> anyhow::Result<()> {
+/// Detect and quantify alternative polyadenylation (APA) sites
+pub fn run_apa(args: &CountApaArgs) -> anyhow::Result<()> {
     mkdir(&args.output)?;
 
     let max_threads = num_cpus::get().min(args.max_threads);

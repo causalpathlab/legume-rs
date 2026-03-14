@@ -49,15 +49,6 @@ pub struct AtoICountArgs {
     )]
     pub output: Box<str>,
 
-    #[arg(
-        short = 'r',
-        long,
-        help = "Resolution (in kb)",
-        long_help = "Resolution for binning in kilobases (kb).\n\
-                     Determines the size of site-level reports."
-    )]
-    pub resolution_kb: Option<f32>,
-
     #[arg(long, default_value = "CB", help = "Cell barcode tag")]
     pub cell_barcode_tag: Box<str>,
 
@@ -208,7 +199,6 @@ impl From<&AtoICountArgs> for ConversionParams {
             min_conversion: args.min_conversion,
             pseudocount: args.pseudocount,
             pvalue_cutoff: args.pvalue_cutoff,
-            resolution_kb: args.resolution_kb,
             backend: args.backend.clone(),
             output: args.output.clone(),
             output_value_type: args.output_value_type.clone(),

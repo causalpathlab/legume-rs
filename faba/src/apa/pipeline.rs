@@ -6,7 +6,7 @@ use crate::apa::site_discovery::*;
 use crate::apa::utr_region::*;
 use crate::common::*;
 use crate::data::poly_a_stat_map::PolyASiteMap;
-use crate::run_count_apa::CountApaArgs;
+use crate::run_apa::CountApaArgs;
 
 use arrow::array::{ArrayRef, Float32Array, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch;
