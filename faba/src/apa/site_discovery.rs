@@ -1,5 +1,5 @@
-use crate::apa_mix::fragment::FragmentRecord;
-use crate::apa_mix::kernel_smooth::*;
+use crate::apa::fragment::FragmentRecord;
+use crate::apa::kernel_smooth::*;
 use fnv::FnvHashMap as HashMap;
 
 /// Discover candidate pA sites from junction reads in fragment records.

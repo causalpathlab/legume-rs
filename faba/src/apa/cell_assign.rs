@@ -1,6 +1,6 @@
-use crate::apa_mix::em::EmResult;
-use crate::apa_mix::fragment::FragmentRecord;
-use crate::apa_mix::utr_region::UtrRegion;
+use crate::apa::em::EmResult;
+use crate::apa::fragment::FragmentRecord;
+use crate::apa::utr_region::UtrRegion;
 use fnv::FnvHashMap as HashMap;
 use genomic_data::sam::CellBarcode;
 
@@ -14,6 +14,7 @@ pub struct CellSiteCount {
 }
 
 /// Metadata for one APA site (for Parquet annotation output).
+#[derive(Clone)]
 pub struct ApaSiteAnnotation {
     pub site_id: Box<str>,
     pub gene_name: Box<str>,
@@ -63,11 +64,12 @@ pub fn assign_fragments_to_sites(
     }
 
     // Build site_id for each active component
+    // Format: GENE/pA/k (0-indexed component within gene)
     let make_site_id = |component_k: usize| -> (Box<str>, i64, i64) {
         let alpha = em_result.alphas[component_k - 1];
         let beta = em_result.betas[component_k - 1];
         let (gstart, gstop) = utr.alpha_to_genomic_range(alpha, beta);
-        let site_id: Box<str> = format!("{}_{}_{}_{}/pA", utr.name, utr.chr, gstart, gstop).into();
+        let site_id: Box<str> = format!("{}/pA/{}", utr.name, component_k - 1).into();
         (site_id, gstart, gstop)
     };
 
@@ -96,7 +98,7 @@ pub fn assign_fragments_to_sites(
             genomic_data::sam::Strand::Forward => utr.start + alpha as i64,
             genomic_data::sam::Strand::Backward => utr.end - alpha as i64,
         };
-        let site_id: Box<str> = format!("{}_{}_{}_{}/pA", utr.name, utr.chr, gstart, gstop).into();
+        let site_id: Box<str> = format!("{}/pA/{}", utr.name, k).into();
         let expected_tail_length = utr.utr_length as f64 - alpha;
         annotations.push(ApaSiteAnnotation {
             site_id,
@@ -117,7 +119,7 @@ pub fn assign_fragments_to_sites(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::apa_mix::em::EmResult;
+    use crate::apa::em::EmResult;
     use genomic_data::sam::{CellBarcode, Strand, UmiBarcode};
 
     #[test]

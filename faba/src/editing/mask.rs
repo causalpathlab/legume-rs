@@ -1,24 +1,24 @@
-use crate::atoi::sifter::AtoISite;
+use crate::editing::ConversionSite;
 use dashmap::DashMap;
 use genomic_data::gff::{GeneId, GffRecordMap};
 use genomic_data::sam::Strand;
 use std::collections::HashSet;
 
-use crate::dartseq::sifter::MethylatedSite;
-
 /// Build a set of (chr, pos) for all A-to-I sites, used to mask m6A candidates
 pub fn build_atoi_mask(
-    atoi_sites: &DashMap<GeneId, Vec<AtoISite>>,
+    sites: &DashMap<GeneId, Vec<ConversionSite>>,
     gff_map: &GffRecordMap,
 ) -> HashSet<(Box<str>, i64)> {
     let mut mask = HashSet::new();
-    for entry in atoi_sites.iter() {
+    for entry in sites.iter() {
         let gene_id = entry.key();
         let sites = entry.value();
         if let Some(gff) = gff_map.get(gene_id) {
             let chr: Box<str> = format!("{}", gff.seqname).into();
             for site in sites {
-                mask.insert((chr.clone(), site.editing_pos));
+                if let ConversionSite::AtoI { editing_pos, .. } = site {
+                    mask.insert((chr.clone(), *editing_pos));
+                }
             }
         }
     }
@@ -29,7 +29,7 @@ pub fn build_atoi_mask(
 /// For forward strand RAC: positions [conv-2, conv-1, conv] = (R, A, C)
 /// For backward strand GTY: positions [conv, conv+1, conv+2] = (G, T, Y)
 pub fn filter_m6a_by_atoi_mask(
-    gene_sites: &DashMap<GeneId, Vec<MethylatedSite>>,
+    gene_sites: &DashMap<GeneId, Vec<ConversionSite>>,
     atoi_mask: &HashSet<(Box<str>, i64)>,
     gff_map: &GffRecordMap,
 ) {
@@ -46,22 +46,22 @@ pub fn filter_m6a_by_atoi_mask(
 
             if let Some(mut sites) = gene_sites.get_mut(gene_id) {
                 sites.retain(|site| {
-                    let positions_to_check: [i64; 3] = match strand {
-                        Strand::Forward => [
-                            site.conversion_pos - 2,
-                            site.conversion_pos - 1,
-                            site.conversion_pos,
-                        ],
-                        Strand::Backward => [
-                            site.conversion_pos,
-                            site.conversion_pos + 1,
-                            site.conversion_pos + 2,
-                        ],
-                    };
-
-                    !positions_to_check
-                        .iter()
-                        .any(|&pos| atoi_mask.contains(&(chr.clone(), pos)))
+                    match site {
+                        ConversionSite::M6A { conversion_pos, .. } => {
+                            let positions_to_check: [i64; 3] = match strand {
+                                Strand::Forward => {
+                                    [conversion_pos - 2, conversion_pos - 1, *conversion_pos]
+                                }
+                                Strand::Backward => {
+                                    [*conversion_pos, conversion_pos + 1, conversion_pos + 2]
+                                }
+                            };
+                            !positions_to_check
+                                .iter()
+                                .any(|&pos| atoi_mask.contains(&(chr.clone(), pos)))
+                        }
+                        ConversionSite::AtoI { .. } => true, // keep AtoI sites
+                    }
                 });
             }
         }

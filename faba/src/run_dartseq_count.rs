@@ -1,20 +1,20 @@
-use crate::atoi::io::load_atoi_mask_from_parquet;
-use crate::atoi::io::ToParquet as AtoIToParquet;
-use crate::atoi::mask::{build_atoi_mask, filter_m6a_by_atoi_mask};
-use crate::atoi::pipeline::*;
 use crate::cell_clustering::{cluster_cells_from_bam, ClusteringParams};
 use crate::common::*;
-use crate::dartseq::io::ToParquet;
-use crate::dartseq::pipeline::*;
-use crate::dartseq::sifter::*;
+use crate::data::cell_membership::CellMembership;
 use crate::data::methylation::*;
+use crate::editing::io::{load_atoi_mask_from_parquet, ToParquet};
+use crate::editing::mask::{build_atoi_mask, filter_m6a_by_atoi_mask};
+use crate::editing::mixture::MixtureParams;
+use crate::editing::pipeline::{
+    find_all_conversion_sites, process_all_bam_files_to_backend, process_all_bam_files_to_bed,
+    run_mixture_model, ConversionParams,
+};
+use crate::editing::sifter::ModificationType;
 use crate::pipeline_util::*;
 
-use crate::data::cell_membership::CellMembership;
 use genomic_data::gff::FeatureType as GffFeatureType;
 use genomic_data::gff::GeneType as GffGeneType;
 use genomic_data::gff::GffRecordMap;
-use rust_htslib::faidx;
 
 use rayon::ThreadPoolBuilder;
 
@@ -298,14 +298,15 @@ pub struct DartSeqCountArgs {
     pub output_cell_types: bool,
 
     #[arg(
-        long = "check-r-site",
+        long = "no-check-r-site",
         default_value_t = false,
-        help = "Validate R site (A/G for RAC, C/T for GTY) in reference",
-        long_help = "Validate the R position in RAC/GTY motifs against the\n\
-                     reference genome. When enabled, requires R=A/G on the\n\
-                     forward strand and Y=C/T on the reverse strand."
+        help = "Disable R site (RAC/GTY) validation in reference",
+        long_help = "By default, faba validates the R position in RAC/GTY\n\
+                     motifs against the reference genome (requires R=A/G on\n\
+                     forward strand and Y=C/T on reverse strand). Use this\n\
+                     flag to disable that check."
     )]
-    pub check_r_site: bool,
+    pub no_check_r_site: bool,
 
     // ========== A-to-I editing detection ==========
     #[arg(
@@ -350,6 +351,40 @@ pub struct DartSeqCountArgs {
                      Implies --detect-atoi behavior for masking."
     )]
     pub atoi_mask_file: Option<Box<str>>,
+
+    // ========== Mixture model options ==========
+    #[arg(
+        long = "no-mixture",
+        default_value_t = false,
+        help = "Disable 1D Gaussian mixture clustering of modification sites",
+        long_help = "Disable 1D Gaussian mixture clustering of modification sites.\n\
+                     By default, faba fits a mixture of Gaussians + uniform noise\n\
+                     to the discovered site positions per gene, selecting K by BIC.\n\
+                     This outputs a sparse (cells x mixture_components) count matrix\n\
+                     and a mixture_annotations.parquet file."
+    )]
+    pub no_mixture: bool,
+
+    #[arg(
+        long = "mixture-min-sites",
+        default_value_t = 3,
+        help = "Min distinct positions per gene to attempt mixture (default: 3)"
+    )]
+    pub mixture_min_sites: usize,
+
+    #[arg(
+        long = "mixture-max-k",
+        default_value_t = 5,
+        help = "Max components to test via BIC (default: 5)"
+    )]
+    pub mixture_max_k: usize,
+
+    #[arg(
+        long = "mixture-initial-sigma",
+        default_value_t = 0.0,
+        help = "Initial sigma, or 0 for auto (default: 0)"
+    )]
+    pub mixture_initial_sigma: f64,
 
     // ========== Cell clustering options ==========
     #[arg(
@@ -418,77 +453,20 @@ pub struct DartSeqCountArgs {
     cluster_min_col_nnz: usize,
 }
 
-impl DartSeqCountArgs {
-    /// Create backend file path for a given batch name
-    pub fn backend_file_path(&self, batch_name: &str) -> Box<str> {
-        match self.backend {
-            SparseIoBackend::HDF5 => format!("{}/{}.h5", &self.output, batch_name),
-            SparseIoBackend::Zarr => format!("{}/{}.zarr", &self.output, batch_name),
-        }
-        .into_boxed_str()
-    }
-
-    /// Create BED file path for a given batch name
-    pub fn bed_file_path(&self, batch_name: &str) -> Box<str> {
-        format!("{}/{}.bed.gz", &self.output, batch_name).into_boxed_str()
-    }
-
-    /// Get QC cutoffs
-    pub fn qc_cutoffs(&self) -> SqueezeCutoffs {
-        SqueezeCutoffs {
-            row: self.row_nnz_cutoff.unwrap_or(0),
-            column: self.column_nnz_cutoff.unwrap_or(0),
-        }
-    }
-
-    /// Create value extraction function based on output type
-    pub fn value_extractor(&self) -> impl Fn(&MethylationData) -> f32 {
-        let output_type = self.output_value_type.clone();
-        move |dat: &MethylationData| -> f32 {
-            match output_type {
-                MethFeatureType::Beta => {
-                    let tot = (dat.methylated + dat.unmethylated) as f32;
-                    (dat.methylated as f32) / tot.max(1.)
-                }
-                MethFeatureType::Methylated => dat.methylated as f32,
-                MethFeatureType::Unmethylated => dat.unmethylated as f32,
-            }
-        }
-    }
-
-    /// Create DartSeqSifter with current arguments
-    pub fn create_sifter<'a>(
-        &self,
-        faidx: &'a faidx::Reader,
-        chr: &'a str,
-        capacity: usize,
-    ) -> DartSeqSifter<'a> {
-        DartSeqSifter {
-            faidx,
-            chr,
-            min_coverage: self.min_coverage,
-            min_conversion: self.min_conversion,
-            pseudocount: self.pseudocount,
-            max_pvalue_cutoff: self.pvalue_cutoff,
-            check_r_site: self.check_r_site,
-            candidate_sites: Vec::with_capacity(capacity),
-        }
-    }
-}
-
-impl From<&DartSeqCountArgs> for AtoIParams {
+/// Create m6A ConversionParams from DartSeqCountArgs
+impl From<&DartSeqCountArgs> for ConversionParams {
     fn from(args: &DartSeqCountArgs) -> Self {
-        AtoIParams {
+        ConversionParams {
             genome_file: args.genome_file.clone(),
             wt_bam_files: args.wt_bam_files.clone(),
             mut_bam_files: args.mut_bam_files.clone(),
             gene_barcode_tag: args.gene_barcode_tag.clone(),
             cell_barcode_tag: args.cell_barcode_tag.clone(),
             include_missing_barcode: args.include_missing_barcode,
-            min_coverage: args.atoi_min_coverage,
-            min_conversion: args.atoi_min_conversion,
+            min_coverage: args.min_coverage,
+            min_conversion: args.min_conversion,
             pseudocount: args.pseudocount,
-            pvalue_cutoff: args.atoi_pvalue_cutoff,
+            pvalue_cutoff: args.pvalue_cutoff,
             resolution_kb: args.resolution_kb,
             backend: args.backend.clone(),
             output: args.output.clone(),
@@ -499,6 +477,38 @@ impl From<&DartSeqCountArgs> for AtoIParams {
             membership_barcode_col: args.membership_barcode_col,
             membership_celltype_col: args.membership_celltype_col,
             exact_barcode_match: args.exact_barcode_match,
+            mod_type: ModificationType::M6A {
+                check_r_site: !args.no_check_r_site,
+            },
+        }
+    }
+}
+
+impl DartSeqCountArgs {
+    /// Create A-to-I ConversionParams from DartSeqCountArgs
+    fn atoi_params(&self) -> ConversionParams {
+        ConversionParams {
+            genome_file: self.genome_file.clone(),
+            wt_bam_files: self.wt_bam_files.clone(),
+            mut_bam_files: self.mut_bam_files.clone(),
+            gene_barcode_tag: self.gene_barcode_tag.clone(),
+            cell_barcode_tag: self.cell_barcode_tag.clone(),
+            include_missing_barcode: self.include_missing_barcode,
+            min_coverage: self.atoi_min_coverage,
+            min_conversion: self.atoi_min_conversion,
+            pseudocount: self.pseudocount,
+            pvalue_cutoff: self.atoi_pvalue_cutoff,
+            resolution_kb: self.resolution_kb,
+            backend: self.backend.clone(),
+            output: self.output.clone(),
+            output_value_type: self.output_value_type.clone(),
+            row_nnz_cutoff: self.row_nnz_cutoff,
+            column_nnz_cutoff: self.column_nnz_cutoff,
+            cell_membership_file: self.cell_membership_file.clone(),
+            membership_barcode_col: self.membership_barcode_col,
+            membership_celltype_col: self.membership_celltype_col,
+            exact_barcode_match: self.exact_barcode_match,
+            mod_type: ModificationType::AtoI,
         }
     }
 }
@@ -580,7 +590,7 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     /////////////////////////////////
 
     // Detect A-to-I editing sites first (if requested), or load pre-computed mask
-    let atoi_params = AtoIParams::from(args);
+    let atoi_params = args.atoi_params();
     let atoi_mask = if let Some(ref mask_file) = args.atoi_mask_file {
         // Load pre-computed A-to-I mask from parquet
         info!("Loading A-to-I mask from {}", mask_file);
@@ -588,12 +598,12 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         info!("Loaded A-to-I mask with {} positions", mask.len());
         Some((None, mask))
     } else if args.detect_atoi {
-        let atoi_sites = find_all_atoi_sites(&gff_map, &atoi_params)?;
+        let atoi_sites = find_all_conversion_sites(&gff_map, &atoi_params, None)?;
         let n_atoi: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
         info!("Found {} A-to-I editing sites", n_atoi);
 
         if !atoi_sites.is_empty() {
-            AtoIToParquet::to_parquet(
+            ToParquet::to_parquet(
                 &atoi_sites,
                 &gff_map,
                 format!("{}/atoi_sites.parquet", args.output),
@@ -609,7 +619,8 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         None
     };
 
-    let gene_sites = find_all_methylated_sites(&gff_map, args, membership.as_ref())?;
+    let m6a_params = ConversionParams::from(args);
+    let gene_sites = find_all_conversion_sites(&gff_map, &m6a_params, membership.as_ref())?;
 
     // Apply A-to-I mask to filter m6A candidates
     if let Some((_, ref mask)) = atoi_mask {
@@ -641,17 +652,41 @@ pub fn run_count_dartseq(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     //////////////////////////////////////////
 
     if args.output_bed_file {
-        process_all_bam_files_to_bed(args, &gene_sites, &gff_map)?;
+        process_all_bam_files_to_bed(
+            &m6a_params,
+            &gene_sites,
+            &gff_map,
+            args.output_cell_types,
+            args.output_null_data,
+        )?;
     } else {
-        process_all_bam_files_to_backend(args, &gene_sites, &gff_map)?;
+        process_all_bam_files_to_backend(
+            &m6a_params,
+            &gene_sites,
+            &gff_map,
+            args.gene_level_output,
+            args.output_null_data,
+        )?;
     }
 
     // A-to-I second pass: quantify editing sites into sparse matrices
     if let Some((Some(ref atoi_sites), _)) = atoi_mask {
         if !atoi_sites.is_empty() {
             info!("Second pass: A-to-I count matrix");
-            process_all_bam_files_to_backend_atoi(&atoi_params, atoi_sites, &gff_map)?;
+            process_all_bam_files_to_backend(&atoi_params, atoi_sites, &gff_map, false, false)?;
         }
+    }
+
+    // Mixture model: cluster modification sites per gene
+    if !args.no_mixture {
+        info!("Running 1D Gaussian mixture model on m6A sites...");
+        let mix_params = MixtureParams {
+            min_sites: args.mixture_min_sites,
+            max_k: args.mixture_max_k,
+            initial_sigma: args.mixture_initial_sigma,
+            ..Default::default()
+        };
+        run_mixture_model(&m6a_params, &gene_sites, &gff_map, &mix_params)?;
     }
 
     info!("done");

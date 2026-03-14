@@ -1,7 +1,9 @@
-use crate::atoi::io::ToParquet;
-use crate::atoi::pipeline::*;
 use crate::common::*;
 use crate::data::methylation::*;
+use crate::editing::io::ToParquet;
+use crate::editing::mixture::MixtureParams;
+use crate::editing::pipeline::*;
+use crate::editing::sifter::ModificationType;
 use crate::pipeline_util::check_all_bam_indices;
 
 use genomic_data::gff::FeatureType as GffFeatureType;
@@ -180,11 +182,40 @@ pub struct AtoICountArgs {
 
     #[arg(long, default_value_t = 16, help = "Maximum number of threads")]
     max_threads: usize,
+
+    // ========== Mixture model options ==========
+    #[arg(
+        long = "no-mixture",
+        default_value_t = false,
+        help = "Disable 1D Gaussian mixture clustering of editing sites"
+    )]
+    pub no_mixture: bool,
+
+    #[arg(
+        long = "mixture-min-sites",
+        default_value_t = 3,
+        help = "Min distinct positions per gene to attempt mixture"
+    )]
+    pub mixture_min_sites: usize,
+
+    #[arg(
+        long = "mixture-max-k",
+        default_value_t = 5,
+        help = "Max components to test via BIC"
+    )]
+    pub mixture_max_k: usize,
+
+    #[arg(
+        long = "mixture-initial-sigma",
+        default_value_t = 0.0,
+        help = "Initial sigma, or 0 for auto"
+    )]
+    pub mixture_initial_sigma: f64,
 }
 
-impl From<&AtoICountArgs> for AtoIParams {
+impl From<&AtoICountArgs> for ConversionParams {
     fn from(args: &AtoICountArgs) -> Self {
-        AtoIParams {
+        ConversionParams {
             genome_file: args.genome_file.clone(),
             wt_bam_files: args.wt_bam_files.clone(),
             mut_bam_files: args.mut_bam_files.clone(),
@@ -205,6 +236,7 @@ impl From<&AtoICountArgs> for AtoIParams {
             membership_barcode_col: args.membership_barcode_col,
             membership_celltype_col: args.membership_celltype_col,
             exact_barcode_match: args.exact_barcode_match,
+            mod_type: ModificationType::AtoI,
         }
     }
 }
@@ -240,10 +272,13 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let params = AtoIParams::from(args);
+    let params = ConversionParams::from(args);
+
+    // Load cell membership for filtering
+    let membership = params.load_membership()?;
 
     // FIRST PASS: discover A-to-I sites
-    let atoi_sites = find_all_atoi_sites(&gff_map, &params)?;
+    let atoi_sites = find_all_conversion_sites(&gff_map, &params, membership.as_ref())?;
     let n_atoi: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
     info!("Found {} A-to-I editing sites", n_atoi);
 
@@ -258,7 +293,19 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
 
     // SECOND PASS: quantify into sparse matrix
     info!("Second pass: A-to-I count matrix");
-    process_all_bam_files_to_backend_atoi(&params, &atoi_sites, &gff_map)?;
+    process_all_bam_files_to_backend(&params, &atoi_sites, &gff_map, false, false)?;
+
+    // Mixture model: cluster editing sites per gene
+    if !args.no_mixture {
+        info!("Running 1D Gaussian mixture model on A-to-I sites...");
+        let mix_params = MixtureParams {
+            min_sites: args.mixture_min_sites,
+            max_k: args.mixture_max_k,
+            initial_sigma: args.mixture_initial_sigma,
+            ..Default::default()
+        };
+        run_mixture_model(&params, &atoi_sites, &gff_map, &mix_params)?;
+    }
 
     info!("done");
     Ok(())

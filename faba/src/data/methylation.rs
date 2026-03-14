@@ -31,8 +31,8 @@ impl std::fmt::Display for MethFeatureType {
 pub struct MethylationData {
     pub methylated: usize,
     pub unmethylated: usize,
-    /// 0-based m6A position (the adenine site), used for BED annotation
-    pub m6a_pos: i64,
+    /// 0-based site position, used for BED annotation
+    pub site_pos: i64,
 }
 
 pub trait UpdateMethData {

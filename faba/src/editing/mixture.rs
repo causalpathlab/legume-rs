@@ -1,0 +1,270 @@
+use crate::mixture::assign::hard_assign;
+use crate::mixture::em::{gaussian_mixture_em, EmParams, GmmResult};
+
+/// Parameters for per-gene mixture model
+pub struct MixtureParams {
+    /// Minimum distinct positions per gene to attempt mixture
+    pub min_sites: usize,
+    /// Maximum components to test via BIC
+    pub max_k: usize,
+    /// Initial sigma (0 = auto: gene_length / (2*K))
+    pub initial_sigma: f64,
+    /// EM parameters
+    pub em_params: EmParams,
+}
+
+impl Default for MixtureParams {
+    fn default() -> Self {
+        Self {
+            min_sites: 3,
+            max_k: 5,
+            initial_sigma: 0.0,
+            em_params: EmParams {
+                max_iter: 200,
+                tol: 1e-6,
+                min_weight: 0.01,
+            },
+        }
+    }
+}
+
+/// Annotation for one mixture component
+pub struct MixtureComponentAnnotation {
+    /// Gene name
+    pub gene_name: Box<str>,
+    /// Component index within gene
+    pub component_idx: usize,
+    /// Learned mean position
+    pub mu: f64,
+    /// Learned standard deviation
+    pub sigma: f64,
+    /// Mixing weight
+    pub pi: f64,
+}
+
+/// Result of per-gene mixture model
+pub struct GeneMixtureResult {
+    /// Best K (number of Gaussian components, not including noise)
+    #[cfg(test)]
+    pub best_k: usize,
+    /// GMM result for best K
+    pub gmm: GmmResult,
+    /// Per-(cell_index, component) count
+    pub cell_component_counts: Vec<(usize, usize, usize)>,
+}
+
+/// Cell-level observation for the mixture model
+pub struct CellObservation {
+    /// Index of the cell in the cell list
+    pub cell_idx: usize,
+    /// Genomic position of the modification
+    pub position: f64,
+}
+
+/// Run per-gene GMM model selection over K=1..max_k, pick best by BIC.
+///
+/// * `observations` - expanded observations (one per count)
+/// * `gene_length` - length of the gene for uniform noise component
+/// * `params` - mixture parameters
+///
+/// Returns None if fewer than min_sites distinct positions.
+pub fn fit_gene_mixture(
+    observations: &[CellObservation],
+    gene_length: f64,
+    params: &MixtureParams,
+) -> Option<GeneMixtureResult> {
+    if observations.is_empty() {
+        return None;
+    }
+
+    // Check distinct positions
+    let mut distinct: Vec<i64> = observations.iter().map(|o| o.position as i64).collect();
+    distinct.sort();
+    distinct.dedup();
+    if distinct.len() < params.min_sites {
+        return None;
+    }
+
+    let positions: Vec<f64> = observations.iter().map(|o| o.position).collect();
+    let gene_start = distinct[0] as f64;
+
+    let mut best_result: Option<(usize, GmmResult)> = None;
+
+    for k in 1..=params.max_k {
+        // Initialize means at regular intervals
+        let initial_mus: Vec<f64> = (0..k)
+            .map(|i| gene_start + (i as f64 + 1.0) * gene_length / (k as f64 + 1.0))
+            .collect();
+
+        let initial_sigma = if params.initial_sigma > 0.0 {
+            params.initial_sigma
+        } else {
+            gene_length / (2.0 * k as f64)
+        };
+
+        let result = gaussian_mixture_em(
+            &positions,
+            &initial_mus,
+            initial_sigma,
+            gene_length,
+            &params.em_params,
+        );
+
+        let is_better = match &best_result {
+            None => true,
+            Some((_, prev)) => result.bic < prev.bic,
+        };
+
+        if is_better {
+            best_result = Some((k, result));
+        }
+    }
+
+    let (_best_k, gmm) = best_result?;
+
+    // Hard assignment
+    let assignments = hard_assign(&gmm.gamma);
+
+    // Count per (cell_idx, component)
+    let mut counts: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::new();
+    for (obs_idx, &(_, component)) in assignments.iter().enumerate() {
+        let cell_idx = observations[obs_idx].cell_idx;
+        *counts.entry((cell_idx, component)).or_default() += 1;
+    }
+
+    let cell_component_counts: Vec<(usize, usize, usize)> = counts
+        .into_iter()
+        .map(|((cell, comp), cnt)| (cell, comp, cnt))
+        .collect();
+
+    Some(GeneMixtureResult {
+        #[cfg(test)]
+        best_k: _best_k,
+        gmm,
+        cell_component_counts,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_single_cluster() {
+        // All observations near position 50
+        let obs: Vec<CellObservation> = (0..50)
+            .map(|i| CellObservation {
+                cell_idx: i % 5,
+                position: 50.0 + (i as f64 - 25.0) * 0.2,
+            })
+            .collect();
+
+        let params = MixtureParams {
+            min_sites: 3,
+            max_k: 3,
+            ..Default::default()
+        };
+
+        let result = fit_gene_mixture(&obs, 100.0, &params).unwrap();
+        // BIC should prefer K=1
+        assert_eq!(
+            result.best_k, 1,
+            "expected K=1 for single cluster, got K={}",
+            result.best_k
+        );
+    }
+
+    #[test]
+    fn test_two_clusters() {
+        // Two well-separated groups
+        let mut obs = Vec::new();
+        for i in 0..30 {
+            obs.push(CellObservation {
+                cell_idx: i % 5,
+                position: 20.0 + (i as f64 - 15.0) * 0.3,
+            });
+        }
+        for i in 0..30 {
+            obs.push(CellObservation {
+                cell_idx: i % 5,
+                position: 80.0 + (i as f64 - 15.0) * 0.3,
+            });
+        }
+
+        let params = MixtureParams {
+            min_sites: 3,
+            max_k: 4,
+            ..Default::default()
+        };
+
+        let result = fit_gene_mixture(&obs, 100.0, &params).unwrap();
+        assert!(
+            result.best_k >= 2,
+            "expected K>=2 for two clusters, got K={}",
+            result.best_k
+        );
+
+        // Check that means are near 20 and 80
+        let mut mus = result.gmm.mus.clone();
+        mus.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // Filter out noise-assigned mus
+        let active_mus: Vec<f64> = mus
+            .iter()
+            .zip(result.gmm.weights.iter().skip(1))
+            .filter(|(_, &w)| w > 0.01)
+            .map(|(&m, _)| m)
+            .collect();
+        assert!(
+            active_mus.len() >= 2,
+            "expected at least 2 active components"
+        );
+    }
+
+    #[test]
+    fn test_too_few_sites() {
+        let obs = vec![
+            CellObservation {
+                cell_idx: 0,
+                position: 50.0,
+            },
+            CellObservation {
+                cell_idx: 1,
+                position: 50.0,
+            },
+        ];
+
+        let params = MixtureParams {
+            min_sites: 3,
+            ..Default::default()
+        };
+
+        assert!(fit_gene_mixture(&obs, 100.0, &params).is_none());
+    }
+
+    #[test]
+    fn test_cell_component_counts() {
+        // 10 observations from 2 cells, all at same position
+        let obs: Vec<CellObservation> = (0..10)
+            .map(|i| CellObservation {
+                cell_idx: i % 2,
+                position: 30.0 + i as f64,
+            })
+            .collect();
+
+        let params = MixtureParams {
+            min_sites: 3,
+            max_k: 1,
+            ..Default::default()
+        };
+
+        let result = fit_gene_mixture(&obs, 100.0, &params).unwrap();
+        // All observations should be assigned to some component
+        let total_count: usize = result.cell_component_counts.iter().map(|(_, _, c)| c).sum();
+        assert_eq!(
+            total_count, 10,
+            "total count should be 10, got {}",
+            total_count
+        );
+    }
+}

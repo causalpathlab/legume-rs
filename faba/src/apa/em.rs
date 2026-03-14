@@ -1,5 +1,4 @@
-use crate::apa_mix::likelihood::{log_lik_fragment_given_site, log_lik_noise, log_sum_exp};
-use log::info;
+use crate::apa::likelihood::{log_lik_fragment_given_site, log_lik_noise};
 
 /// EM algorithm parameters.
 pub struct EmParams {
@@ -81,94 +80,32 @@ pub fn fixed_inference(
         }
     }
 
-    // Initialize weights uniformly
-    let mut weights = vec![1.0 / n_total as f64; n_total];
-    let mut gamma = vec![vec![0.0; n_total]; n_frag];
-    let mut prev_ll = f64::NEG_INFINITY;
+    // Use generic fixed EM
+    let generic_params = crate::mixture::em::EmParams {
+        max_iter: params.max_iter,
+        tol: params.tol,
+        min_weight: params.min_weight,
+    };
 
-    let mut iter = 0;
-    loop {
-        // E-step: compute gamma_nk = pi_k * p(x,l,r|alpha_k,beta_k) / sum_j(...)
-        let mut total_ll = 0.0;
+    let n_free_params = 3 * n_components + 1;
+    let result = crate::mixture::em::fixed_em(&component_log_liks, n_free_params, &generic_params);
 
-        for n in 0..n_frag {
-            // Compute log(pi_k * p(x,l,r|k)) for each component
-            let mut log_probs = vec![f64::NEG_INFINITY; n_total];
-            for k in 0..n_total {
-                if weights[k] > 0.0 {
-                    log_probs[k] = weights[k].ln() + component_log_liks[n][k];
-                }
-            }
-
-            // Log-sum-exp for normalization
-            let log_norm = log_probs
-                .iter()
-                .fold(f64::NEG_INFINITY, |acc, &x| log_sum_exp(acc, x));
-
-            total_ll += log_norm;
-
-            // Normalize to get gamma
-            for (k, lp) in log_probs.iter().enumerate().take(n_total) {
-                gamma[n][k] = (lp - log_norm).exp();
-            }
-        }
-
-        iter += 1;
-
-        // Check convergence
-        let ll_change = (total_ll - prev_ll).abs();
-        if iter > 1 && (ll_change < params.tol || iter >= params.max_iter) {
-            info!(
-                "EM converged after {} iterations, log-lik = {:.2}, change = {:.6}",
-                iter, total_ll, ll_change
-            );
-
-            // Compute BIC: -2*logL + (3K+1)*log(N)
-            let n_params = 3 * n_components + 1;
-            let bic = -2.0 * total_ll + n_params as f64 * (n_frag as f64).ln();
-
-            return EmResult {
-                weights,
-                alphas: alpha_arr.to_vec(),
-                betas: beta_arr.to_vec(),
-                gamma,
-                log_lik: total_ll,
-                bic,
-                n_iter: iter,
-            };
-        }
-
-        prev_ll = total_ll;
-
-        // M-step: update weights (alpha, beta fixed)
-        // pi_k = (1/N) * sum_n gamma_nk
-        for k in 0..n_total {
-            let sum_gamma: f64 = gamma.iter().map(|g| g[k]).sum();
-            weights[k] = sum_gamma / n_frag as f64;
-        }
-
-        // Prune components with weight below threshold
-        for w in weights.iter_mut().take(n_total).skip(1) {
-            if *w < params.min_weight {
-                *w = 0.0;
-            }
-        }
-
-        // Renormalize weights
-        let w_sum: f64 = weights.iter().sum();
-        if w_sum > 0.0 {
-            for w in weights.iter_mut() {
-                *w /= w_sum;
-            }
-        }
+    EmResult {
+        weights: result.weights,
+        alphas: alpha_arr.to_vec(),
+        betas: beta_arr.to_vec(),
+        gamma: result.gamma,
+        log_lik: result.log_lik,
+        bic: result.bic,
+        n_iter: result.n_iter,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::apa_mix::likelihood::{precompute_theta_lik_matrix, LikelihoodParams};
-    use crate::apa_mix::simulate::{simulate_fragments, ScapeSimParams};
+    use crate::apa::likelihood::{precompute_theta_lik_matrix, LikelihoodParams};
+    use crate::apa::simulate::{simulate_fragments, ScapeSimParams};
 
     fn run_em_on_sim(params: &ScapeSimParams) -> EmResult {
         let (fragments, _labels) = simulate_fragments(params);
