@@ -70,7 +70,16 @@ fn print_logo() {
 /// Feature statistics Accumulator for Base-pair-level Analysis
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None, term_width = 80,
-    after_help = "Use `faba <COMMAND> --help` for detailed options on each subcommand.")]
+    after_help = "\
+Feature naming convention:\n\
+  All sparse matrix row names follow: {gene_key}/{modality}/{detail}\n\
+  where gene_key = {gene_id}_{symbol} (e.g. ENSG00001234_BRCA2)\n\n\
+  genes:   gene_key/count/spliced, gene_key/count/unspliced\n\
+  dartseq: gene_key/m6A/{component} (mixture), gene_key/m6A/{chr}:{pos} (site)\n\
+  atoi:    gene_key/A2I/{component} (mixture), gene_key/A2I/{chr}:{pos} (site)\n\
+  apa:     gene_key/pA/{component} (mixture), gene_key/pA/{chr}:{pos} (site)\n\n\
+  Split on '/' to extract (gene_key, modality, detail) for cross-modal joins.\n\n\
+Use `faba <COMMAND> --help` for detailed options on each subcommand.")]
 struct Cli {
     #[arg(short = 'v', long, global = true, help = "Enable verbose logging")]
     verbose: bool,

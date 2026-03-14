@@ -9,9 +9,11 @@ pub struct SplicedUnsplicedTriplets {
     pub unspliced: Vec<(CellBarcode, Box<str>, f32)>,
 }
 
-/// Format row name as `"{gene_id}_{gene_symbol}"` consistent with data-beans.
-/// Falls back to gene_id alone if symbol is missing.
-pub fn format_row_name(rec: &GffRecord) -> Box<str> {
+/// Format gene key as `"{gene_id}_{gene_symbol}"`.
+///
+/// Feature naming convention: `{gene_key}/{modality}/{detail}`
+/// e.g. `ENSG00001234_BRCA2/count/spliced`
+pub fn format_gene_key(rec: &GffRecord) -> Box<str> {
     match &rec.gene_name {
         GeneSymbol::Symbol(sym) if !sym.is_empty() => {
             format!("{}_{}", rec.gene_id, sym).into_boxed_str()
@@ -30,7 +32,8 @@ pub fn count_read_per_gene(
         return Ok(vec![]);
     }
 
-    let row_name = format_row_name(rec);
+    let gene_name = format_gene_key(rec);
+    let row_name: Box<str> = format!("{}/count/total", gene_name).into();
     let mut read_counter = ReadCounter::new(cell_barcode_tag);
 
     bam_io::for_each_record_in_gene(bam_file, rec, gene_barcode_tag, false, |bam_record| {
@@ -70,7 +73,9 @@ pub fn count_read_per_gene_splice(
         }
     };
 
-    let row_name = format_row_name(rec);
+    let gene_name = format_gene_key(rec);
+    let spliced_name: Box<str> = format!("{}/count/spliced", gene_name).into();
+    let unspliced_name: Box<str> = format!("{}/count/unspliced", gene_name).into();
     let mut counter = SpliceAwareReadCounter::new(cell_barcode_tag, exons, intron_buffer);
 
     bam_io::for_each_record_in_gene(bam_file, rec, gene_barcode_tag, false, |bam_record| {
@@ -80,13 +85,13 @@ pub fn count_read_per_gene_splice(
     let spliced = counter
         .spliced
         .into_iter()
-        .map(|(cb, x)| (cb, row_name.clone(), x as f32))
+        .map(|(cb, x)| (cb, spliced_name.clone(), x as f32))
         .collect();
 
     let unspliced = counter
         .unspliced
         .into_iter()
-        .map(|(cb, x)| (cb, row_name.clone(), x as f32))
+        .map(|(cb, x)| (cb, unspliced_name.clone(), x as f32))
         .collect();
 
     Ok(SplicedUnsplicedTriplets { spliced, unspliced })
