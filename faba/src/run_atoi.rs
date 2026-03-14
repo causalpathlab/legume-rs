@@ -14,29 +14,11 @@ use rayon::ThreadPoolBuilder;
 #[derive(Args, Debug)]
 pub struct AtoICountArgs {
     #[arg(
-        short = 'w',
-        long = "wt",
-        alias = "observed",
         value_delimiter = ',',
         required = true,
-        help = "Observed (wild-type) BAM files.",
-        long_help = "Comma-separated list of observed (wild-type) BAM files.\n\
-                     These files contain A->G (forward) or T->C (reverse) conversions\n\
-                     representing A-to-I RNA editing events."
+        help = "Input BAM files (comma-separated)"
     )]
-    pub wt_bam_files: Vec<Box<str>>,
-
-    #[arg(
-        short = 'm',
-        long = "mut",
-        alias = "background",
-        value_delimiter = ',',
-        required = true,
-        help = "Background/control (mutant) BAM files.",
-        long_help = "Comma-separated list of control (mutant) BAM files.\n\
-                     Used to calibrate background A->G conversion rates."
-    )]
-    pub mut_bam_files: Vec<Box<str>>,
+    pub bam_files: Vec<Box<str>>,
 
     #[arg(
         short = 'g',
@@ -217,8 +199,8 @@ impl From<&AtoICountArgs> for ConversionParams {
     fn from(args: &AtoICountArgs) -> Self {
         ConversionParams {
             genome_file: args.genome_file.clone(),
-            wt_bam_files: args.wt_bam_files.clone(),
-            mut_bam_files: args.mut_bam_files.clone(),
+            wt_bam_files: args.bam_files.clone(),
+            mut_bam_files: Vec::new(),
             gene_barcode_tag: args.gene_barcode_tag.clone(),
             cell_barcode_tag: args.cell_barcode_tag.clone(),
             include_missing_barcode: args.include_missing_barcode,
@@ -252,12 +234,11 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
         .ok();
     info!("will use {} threads", rayon::current_num_threads());
 
-    if args.wt_bam_files.is_empty() || args.mut_bam_files.is_empty() {
-        return Err(anyhow::anyhow!("need pairs of BAM files (--wt and --mut)"));
+    if args.bam_files.is_empty() {
+        return Err(anyhow::anyhow!("need at least one BAM file"));
     }
 
-    check_all_bam_indices(&args.wt_bam_files)?;
-    check_all_bam_indices(&args.mut_bam_files)?;
+    check_all_bam_indices(&args.bam_files)?;
 
     info!("parsing GFF file: {}", args.gff_file);
     let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
