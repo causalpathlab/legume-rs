@@ -83,10 +83,10 @@ pub fn run_simple(args: &CountApaArgs) -> anyhow::Result<()> {
     let cutoffs = args.qc_cutoffs();
     let batch_names = uniq_batch_names(&args.bam_files)?;
 
-    for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names) {
+    for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names.iter()) {
         process_simple_bam(
             bam_file,
-            &batch_name,
+            batch_name,
             &gene_sites,
             args,
             &gff_map,
@@ -221,31 +221,22 @@ fn collect_gene_stats(
     gene_id: &GeneId,
     positions: &[i64],
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, usize)>> {
-    let mut all_stats = Vec::new();
-
-    for &position in positions {
-        let stats = collect_polya_counts_at_site(args, bam_file, gff_record, gene_id, position)?;
-        all_stats.extend(stats);
+    if positions.is_empty() {
+        return Ok(Vec::new());
     }
 
-    Ok(all_stats)
-}
-
-fn collect_polya_counts_at_site(
-    args: &CountApaArgs,
-    bam_file: &str,
-    gff_record: &GffRecord,
-    gene_id: &GeneId,
-    position: i64,
-) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, usize)>> {
     const PADDING: i64 = 100;
 
+    // Read the gene region ONCE for all sites instead of once per site
     let mut polya_map =
         PolyASiteMap::new_with_cell_barcode(args.polya_site_args(), &args.cell_barcode_tag);
 
+    let min_pos = positions.iter().copied().min().unwrap();
+    let max_pos = positions.iter().copied().max().unwrap();
+
     let mut gff = gff_record.clone();
-    gff.start = (position - PADDING).max(0);
-    gff.stop = position + PADDING;
+    gff.start = (min_pos - PADDING).max(0);
+    gff.stop = max_pos + PADDING;
 
     polya_map.update_from_gene(
         bam_file,
@@ -254,33 +245,37 @@ fn collect_polya_counts_at_site(
         args.include_missing_barcode,
     )?;
 
-    let Some(cell_counts) = polya_map.get_cell_counts_at(position) else {
-        return Ok(Vec::new());
-    };
-
-    let (start, stop) = bin_position(position, args.resolution_bp);
     let chr = gff_record.seqname.as_ref();
     let strand = &gff_record.strand;
+    let mut all_stats = Vec::new();
 
-    let stats = cell_counts
-        .iter()
-        .filter(|(cb, _)| args.include_missing_barcode || *cb != &CellBarcode::Missing)
-        .map(|(cell_barcode, count)| {
-            (
-                cell_barcode.clone(),
-                BedWithGene {
-                    chr: chr.into(),
-                    start,
-                    stop,
-                    gene: gene_id.clone(),
-                    strand: *strand,
-                },
-                *count,
-            )
-        })
-        .collect();
+    for &position in positions {
+        let Some(cell_counts) = polya_map.get_cell_counts_at(position) else {
+            continue;
+        };
 
-    Ok(stats)
+        let (start, stop) = bin_position(position, args.resolution_bp);
+
+        let stats = cell_counts
+            .iter()
+            .filter(|(cb, _)| args.include_missing_barcode || *cb != &CellBarcode::Missing)
+            .map(|(cell_barcode, count)| {
+                (
+                    cell_barcode.clone(),
+                    BedWithGene {
+                        chr: chr.into(),
+                        start,
+                        stop,
+                        gene: gene_id.clone(),
+                        strand: *strand,
+                    },
+                    *count,
+                )
+            });
+        all_stats.extend(stats);
+    }
+
+    Ok(all_stats)
 }
 
 fn summarize_simple_stats<F, T>(
@@ -291,15 +286,25 @@ where
     F: Fn(&BedWithGene) -> T + Send + Sync,
     T: Clone + Send + Sync + ToString + std::hash::Hash + std::cmp::Eq + std::cmp::Ord,
 {
-    let combined_data: DashMap<(CellBarcode, T), usize> = DashMap::default();
-
-    stats.par_iter().for_each(|(cb, bed, count)| {
-        let key = (cb.clone(), feature_key_func(bed));
-        combined_data
-            .entry(key)
-            .and_modify(|c| *c += count)
-            .or_insert(*count);
-    });
+    let combined_data = stats
+        .par_iter()
+        .fold(
+            fnv::FnvHashMap::<(CellBarcode, T), usize>::default,
+            |mut acc, (cb, bed, count)| {
+                let key = (cb.clone(), feature_key_func(bed));
+                *acc.entry(key).or_default() += count;
+                acc
+            },
+        )
+        .reduce(
+            fnv::FnvHashMap::default,
+            |mut a, b| {
+                for (k, v) in b {
+                    *a.entry(k).or_default() += v;
+                }
+                a
+            },
+        );
 
     let combined_data = combined_data
         .into_iter()
@@ -314,6 +319,12 @@ where
 // ─────────────────────────────────────────────────────────
 
 pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
+    // Get primary BAM basename for output file naming
+    let batch_names = uniq_batch_names(&args.bam_files)?;
+    let primary_batch_name = batch_names
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no BAM files provided"))?;
+
     let utrs = load_utrs(args)?;
 
     if utrs.is_empty() {
@@ -369,7 +380,13 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
 
     // Compute PDUI before consuming all_counts
     if args.compute_pdui {
-        compute_and_write_pdui(&all_counts, &all_annotations, &utrs, args)?;
+        compute_and_write_pdui(
+            &all_counts,
+            &all_annotations,
+            &utrs,
+            args,
+            primary_batch_name,
+        )?;
     }
 
     // Rows=sites, cols=cells
@@ -379,7 +396,8 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
         .collect();
 
     let triplets = format_data_triplets(triplets_data);
-    let output_file = args.backend_file_path("count_apa");
+    let output_name = format!("{}_apa", primary_batch_name);
+    let output_file = args.backend_file_path(&output_name);
     let data = triplets.to_backend(&output_file)?;
     data.qc(args.qc_cutoffs())?;
     info!("created output: {}", &output_file);
@@ -570,6 +588,7 @@ fn compute_and_write_pdui(
     all_annotations: &[ApaSiteAnnotation],
     utrs: &[UtrRegion],
     args: &CountApaArgs,
+    primary_batch_name: &str,
 ) -> anyhow::Result<()> {
     use crate::apa::pdui::compute_pdui;
     use fnv::FnvHashMap;
@@ -647,7 +666,8 @@ fn compute_and_write_pdui(
     }
 
     let triplets = format_data_triplets(pdui_triplets);
-    let output_file = args.backend_file_path("pdui");
+    let output_name = format!("{}_pdui", primary_batch_name);
+    let output_file = args.backend_file_path(&output_name);
     let data = triplets.to_backend(&output_file)?;
     data.qc(args.qc_cutoffs())?;
     info!("PDUI: created {}", &output_file);
