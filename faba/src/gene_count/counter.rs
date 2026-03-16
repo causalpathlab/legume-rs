@@ -4,7 +4,8 @@
 //! both run_gene_count and cell clustering.
 
 use crate::common::*;
-use genomic_data::gff::{parse_ensembl_id, GeneId, GffRecord, GffRecordMap};
+use crate::data::bam_io;
+use genomic_data::gff::{GeneId, GffRecord, GffRecordMap};
 
 use fnv::FnvHashMap;
 use rust_htslib::bam::{self, record::Aux, Read};
@@ -99,16 +100,8 @@ fn count_reads_in_bam_for_gene(
             continue;
         }
 
-        // Check if this read belongs to this gene
-        let read_gene_id = match record.aux(gene_barcode_tag.as_bytes()) {
-            Ok(Aux::String(id)) => match parse_ensembl_id(id) {
-                Some(id) => GeneId::Ensembl(id.into()),
-                _ => continue,
-            },
-            _ => continue,
-        };
-
-        if read_gene_id != rec.gene_id {
+        // Check if this read belongs to this gene (str comparison, no allocation)
+        if !bam_io::matches_gene(&record, gene_barcode_tag, &rec.gene_id, false) {
             continue;
         }
 

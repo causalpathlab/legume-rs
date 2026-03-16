@@ -145,6 +145,10 @@ impl DnaBaseCount {
     pub fn count_c(&self) -> usize {
         self.data[3].1
     }
+
+    pub fn total(&self) -> usize {
+        self.data[0].1 + self.data[1].1 + self.data[2].1 + self.data[3].1
+    }
 }
 
 use std::ops::AddAssign;

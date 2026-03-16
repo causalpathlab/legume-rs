@@ -263,6 +263,9 @@ fn find_sites_with_bulk_stats(
 }
 
 /// Find conversion sites using per-cell-type statistics (m6A only).
+///
+/// Reads WT BAM files once (per-cell mode), then aggregates marginal frequencies
+/// per cell type in memory instead of re-reading BAM K times.
 fn find_sites_with_celltype_stats(
     gff_record: &GffRecord,
     params: &ConversionParams,
@@ -274,6 +277,24 @@ fn find_sites_with_celltype_stats(
     let cell_types = membership.cell_types();
 
     if cell_types.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Read WT BAM files ONCE, tracking per-cell frequencies
+    let mut wt_per_cell_map =
+        DnaBaseFreqMap::new_with_cell_barcode(&params.cell_barcode_tag, Some(membership));
+    wt_per_cell_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+    for wt_file in &params.wt_bam_files {
+        wt_per_cell_map.update_from_gene(
+            wt_file,
+            gff_record,
+            &params.gene_barcode_tag,
+            params.include_missing_barcode,
+        )?;
+    }
+
+    let all_positions = wt_per_cell_map.sorted_positions();
+    if all_positions.len() < params.min_length_for_testing() {
         return Ok(Vec::new());
     }
 
@@ -290,41 +311,42 @@ fn find_sites_with_celltype_stats(
     }
     let mut_freq = mut_base_freq_map.marginal_frequency_map();
 
-    // Find sites for each cell type
+    let forward = matches!(strand, Strand::Forward);
     let mut all_candidate_sites = Vec::new();
 
+    // For each cell type, aggregate per-cell data into marginal frequencies
     for cell_type in &cell_types {
-        // Create frequency map for this cell type only
-        let mut wt_base_freq_map =
-            DnaBaseFreqMap::new_for_celltype(&params.cell_barcode_tag, membership, cell_type);
-        wt_base_freq_map
-            .set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+        use crate::data::dna::DnaBaseCount;
 
-        for wt_file in &params.wt_bam_files {
-            wt_base_freq_map.update_from_gene(
-                wt_file,
-                gff_record,
-                &params.gene_barcode_tag,
-                params.include_missing_barcode,
-            )?;
+        let mut celltype_freq: fnv::FnvHashMap<i64, DnaBaseCount> = fnv::FnvHashMap::default();
+
+        for &pos in &all_positions {
+            if let Some(cell_map) = wt_per_cell_map.stratified_frequency_at(pos) {
+                let mut agg = DnaBaseCount::default();
+                for (cb, counts) in cell_map {
+                    if membership.matches_celltype(cb, cell_type) {
+                        agg += counts;
+                    }
+                }
+                if agg.total() > 0 {
+                    celltype_freq.insert(pos, agg);
+                }
+            }
         }
 
-        let positions = wt_base_freq_map.sorted_positions();
+        if celltype_freq.is_empty() {
+            continue;
+        }
+
+        let mut positions: Vec<i64> = celltype_freq.keys().copied().collect();
+        positions.sort_unstable();
 
         if positions.len() < params.min_length_for_testing() {
             continue;
         }
 
-        let wt_freq = match wt_base_freq_map.marginal_frequency_map() {
-            Some(freq) => freq,
-            None => continue,
-        };
-
         let mut sifter = params.create_sifter(faidx_reader, chr, positions.len());
-
-        let forward = matches!(strand, Strand::Forward);
-        sifter.scan(&positions, wt_freq, mut_freq, forward);
-
+        sifter.scan(&positions, &celltype_freq, mut_freq, forward);
         all_candidate_sites.extend(sifter.candidate_sites);
     }
 
