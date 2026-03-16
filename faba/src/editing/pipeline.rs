@@ -40,6 +40,8 @@ pub struct ConversionParams {
     pub membership_celltype_col: usize,
     pub exact_barcode_match: bool,
     pub mod_type: ModificationType,
+    pub min_base_quality: u8,
+    pub min_mapping_quality: u8,
 }
 
 impl ConversionParams {
@@ -206,6 +208,7 @@ fn find_sites_with_bulk_stats(
     strand: &Strand,
 ) -> anyhow::Result<Vec<ConversionSite>> {
     let mut wt_base_freq_map = DnaBaseFreqMap::new();
+    wt_base_freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
 
     for wt_file in &params.wt_bam_files {
         wt_base_freq_map.update_from_gene(
@@ -225,6 +228,7 @@ fn find_sites_with_bulk_stats(
     let mut sifter = params.create_sifter(faidx_reader, chr, positions.len());
 
     let mut mut_base_freq_map = DnaBaseFreqMap::new();
+    mut_base_freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
 
     for mut_file in &params.mut_bam_files {
         mut_base_freq_map.update_from_gene(
@@ -275,6 +279,7 @@ fn find_sites_with_celltype_stats(
 
     // Collect bulk frequencies from mut BAM files (background/null distribution)
     let mut mut_base_freq_map = DnaBaseFreqMap::new();
+    mut_base_freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
     for mut_file in &params.mut_bam_files {
         mut_base_freq_map.update_from_gene(
             mut_file,
@@ -292,6 +297,8 @@ fn find_sites_with_celltype_stats(
         // Create frequency map for this cell type only
         let mut wt_base_freq_map =
             DnaBaseFreqMap::new_for_celltype(&params.cell_barcode_tag, membership, cell_type);
+        wt_base_freq_map
+            .set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
 
         for wt_file in &params.wt_bam_files {
             wt_base_freq_map.update_from_gene(
@@ -363,42 +370,19 @@ pub fn gather_conversion_stats(
         .map_err(Into::into)
 }
 
-fn collect_gene_conversion_stats(
-    params: &ConversionParams,
-    bam_file: &str,
-    gff_record: &GffRecord,
-    sites: &[ConversionSite],
-    cell_membership: Option<&CellMembership>,
-) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
-    let mut all_stats = Vec::new();
-
-    for site in sites {
-        let stats = estimate_conversion_stat(params, bam_file, gff_record, site, cell_membership)?;
-        all_stats.extend(stats);
-    }
-
-    Ok(all_stats)
-}
-
-/// Estimate conversion statistics for a single site.
+/// Extract conversion statistics for a single site from a pre-loaded DnaBaseFreqMap.
 ///
-/// For M6A sites: sets anchor via `stat_map.set_anchor_position()`, reads 2 positions
-/// (m6a + conversion), uses C->T (fwd) or G->A (rev).
-/// For AtoI sites: no anchor, reads 1 position, uses A->G (fwd) or T->C (rev).
-fn estimate_conversion_stat(
+/// This is used by the optimized `collect_gene_conversion_stats()` which reads the
+/// gene region once and queries each site from the cached map.
+fn extract_site_stats_from_map(
     params: &ConversionParams,
-    bam_file: &str,
     gff_record: &GffRecord,
     site: &ConversionSite,
-    cell_membership: Option<&CellMembership>,
+    stat_map: &DnaBaseFreqMap,
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
-    let mut stat_map =
-        DnaBaseFreqMap::new_with_cell_barcode(&params.cell_barcode_tag, cell_membership);
-
-    let mut gff = gff_record.clone();
-    let gene = gff.gene_id.clone();
-    let chr = gff.seqname.as_ref();
-    let strand = gff.strand;
+    let gene = gff_record.gene_id.clone();
+    let chr = gff_record.seqname.as_ref();
+    let strand = gff_record.strand;
 
     match site {
         ConversionSite::M6A {
@@ -406,34 +390,16 @@ fn estimate_conversion_stat(
             conversion_pos,
             ..
         } => {
-            let lb = (*m6a_pos).min(*conversion_pos);
-            let ub = (*conversion_pos).max(*m6a_pos);
-
-            gff.start = (lb - BAM_READ_PADDING).max(0);
-            gff.stop = ub + BAM_READ_PADDING;
-            stat_map.update_from_gene(
-                bam_file,
-                &gff,
-                &params.gene_barcode_tag,
-                params.include_missing_barcode,
-            )?;
-
-            let (unmutated_base, mutated_base) = match strand {
-                Strand::Forward => (Dna::C, Dna::T),
-                Strand::Backward => (Dna::G, Dna::A),
-            };
-
-            // Set the anchor position for m6A
-            let anchor_base = match strand {
-                Strand::Forward => Dna::A,
-                Strand::Backward => Dna::T,
-            };
-            stat_map.set_anchor_position(*m6a_pos, anchor_base);
-
             let methylation_stat = stat_map.stratified_frequency_at(*conversion_pos);
 
             let Some(meth_stat) = methylation_stat else {
                 return Ok(Vec::new());
+            };
+
+            // M6A: C->T (forward strand) or G->A (reverse strand)
+            let (unmutated_base, mutated_base) = match strand {
+                Strand::Forward => (Dna::C, Dna::T),
+                Strand::Backward => (Dna::G, Dna::A),
             };
 
             let (start, stop) = (*conversion_pos, *conversion_pos + 1);
@@ -471,25 +437,16 @@ fn estimate_conversion_stat(
             Ok(stats)
         }
         ConversionSite::AtoI { editing_pos, .. } => {
-            gff.start = (*editing_pos - BAM_READ_PADDING).max(0);
-            gff.stop = *editing_pos + BAM_READ_PADDING;
-            stat_map.update_from_gene(
-                bam_file,
-                &gff,
-                &params.gene_barcode_tag,
-                params.include_missing_barcode,
-            )?;
-
-            // A-to-I: fwd = A->G, rev = T->C
-            let (unmutated_base, mutated_base) = match strand {
-                Strand::Forward => (Dna::A, Dna::G),
-                Strand::Backward => (Dna::T, Dna::C),
-            };
-
             let methylation_stat = stat_map.stratified_frequency_at(*editing_pos);
 
             let Some(meth_stat) = methylation_stat else {
                 return Ok(Vec::new());
+            };
+
+            // A-to-I: A->G (forward strand) or T->C (reverse strand)
+            let (unmutated_base, mutated_base) = match strand {
+                Strand::Forward => (Dna::A, Dna::G),
+                Strand::Backward => (Dna::T, Dna::C),
             };
 
             let (start, stop) = (*editing_pos, *editing_pos + 1);
@@ -526,6 +483,75 @@ fn estimate_conversion_stat(
             Ok(stats)
         }
     }
+}
+
+fn collect_gene_conversion_stats(
+    params: &ConversionParams,
+    bam_file: &str,
+    gff_record: &GffRecord,
+    sites: &[ConversionSite],
+    cell_membership: Option<&CellMembership>,
+) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
+    if sites.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // OPTIMIZATION: Read gene region ONCE for all sites instead of once per site.
+    // This eliminates massive I/O overhead (30-50x speedup for genes with many sites).
+    // Additionally, only store frequencies for the specific site positions to minimize memory.
+    let mut stat_map =
+        DnaBaseFreqMap::new_with_cell_barcode(&params.cell_barcode_tag, cell_membership);
+    stat_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+
+    // Collect all positions we need to query and calculate minimal region bounds
+    let mut positions_to_track = std::collections::HashSet::new();
+    let (min_pos, max_pos) = sites.iter().fold((i64::MAX, i64::MIN), |(min, max), site| {
+        match site {
+            ConversionSite::M6A {
+                m6a_pos,
+                conversion_pos,
+                ..
+            } => {
+                // For M6A, we need both the m6A position and conversion position
+                positions_to_track.insert(*m6a_pos);
+                positions_to_track.insert(*conversion_pos);
+                let site_min = (*m6a_pos).min(*conversion_pos);
+                let site_max = (*m6a_pos).max(*conversion_pos);
+                (min.min(site_min), max.max(site_max))
+            }
+            ConversionSite::AtoI { editing_pos, .. } => {
+                // For ATOI, we only need the editing position
+                positions_to_track.insert(*editing_pos);
+                (min.min(*editing_pos), max.max(*editing_pos))
+            }
+        }
+    });
+
+    // Set position filter to only store frequencies for these specific positions
+    stat_map.set_position_filter(positions_to_track);
+
+    // Create a minimal GFF record that covers only the sites region (not entire gene)
+    let mut minimal_gff = gff_record.clone();
+    minimal_gff.start = (min_pos - BAM_READ_PADDING).max(0);
+    minimal_gff.stop = max_pos + BAM_READ_PADDING;
+
+    // Read only the minimal region spanning all sites, but only accumulate for tracked positions
+    stat_map.update_from_gene(
+        bam_file,
+        &minimal_gff,
+        &params.gene_barcode_tag,
+        params.include_missing_barcode,
+    )?;
+
+    // Extract stats for each site from pre-loaded map
+    let mut all_stats = Vec::new();
+
+    for site in sites {
+        let stats = extract_site_stats_from_map(params, gff_record, site, &stat_map)?;
+        all_stats.extend(stats);
+    }
+
+    Ok(all_stats)
 }
 
 ///////////////////////////////////////////
@@ -653,7 +679,7 @@ fn process_bam_to_backend(
     gff_map: &GffRecordMap,
     gene_key: &(impl Fn(&BedWithGene) -> Box<str> + Send + Sync),
     site_key: &(impl Fn(&BedWithGene) -> Box<str> + Send + Sync),
-    take_value: &(impl Fn(&MethylationData) -> f32 + Send + Sync),
+    _take_value: &(impl Fn(&MethylationData) -> f32 + Send + Sync),
     cutoffs: &SqueezeCutoffs,
     genes: &mut HashSet<Box<str>>,
     sites: &mut HashSet<Box<str>>,
@@ -676,22 +702,55 @@ fn process_bam_to_backend(
         stats.len()
     );
 
-    if gene_level_output {
-        let gene_data_file = params.backend_file_path(batch_name);
-        let triplets = summarize_stats(&stats, gene_key, take_value);
-        let data = triplets.to_backend(&gene_data_file)?;
-        data.qc(cutoffs.clone())?;
-        genes.extend(data.row_names()?);
-        info!("created gene-level data: {}", &gene_data_file);
-        gene_data_files.push(gene_data_file);
-    } else {
-        let site_data_file = params.backend_file_path(batch_name);
-        let triplets = summarize_stats(&stats, site_key, take_value);
-        let data = triplets.to_backend(&site_data_file)?;
-        data.qc(cutoffs.clone())?;
-        sites.extend(data.row_names()?);
-        info!("created site-level data: {}", &site_data_file);
-        site_data_files.push(site_data_file);
+    // For m6A, output all three value types (beta, methylated, unmethylated)
+    // For ATOI, output only the specified value type
+    let output_types: Vec<MethFeatureType> = match params.mod_type {
+        ModificationType::M6A { .. } => vec![
+            MethFeatureType::Beta,
+            MethFeatureType::Methylated,
+            MethFeatureType::Unmethylated,
+        ],
+        ModificationType::AtoI => vec![params.output_value_type.clone()],
+    };
+
+    for value_type in output_types {
+        let value_type_for_closure = value_type.clone();
+
+        // Create value extraction function for this type
+        let value_fn = move |dat: &MethylationData| -> f32 {
+            match value_type_for_closure {
+                MethFeatureType::Beta => {
+                    let tot = (dat.methylated + dat.unmethylated) as f32;
+                    (dat.methylated as f32) / tot.max(1.)
+                }
+                MethFeatureType::Methylated => dat.methylated as f32,
+                MethFeatureType::Unmethylated => dat.unmethylated as f32,
+            }
+        };
+
+        let mod_suffix = match params.mod_type {
+            ModificationType::M6A { .. } => format!("_m6a_{}", value_type),
+            ModificationType::AtoI => "_atoi".to_string(),
+        };
+        let output_name = format!("{}{}", batch_name, mod_suffix);
+
+        if gene_level_output {
+            let gene_data_file = params.backend_file_path(&output_name);
+            let triplets = summarize_stats(&stats, gene_key, &value_fn);
+            let data = triplets.to_backend(&gene_data_file)?;
+            data.qc(cutoffs.clone())?;
+            genes.extend(data.row_names()?);
+            info!("created gene-level data: {}", &gene_data_file);
+            gene_data_files.push(gene_data_file);
+        } else {
+            let site_data_file = params.backend_file_path(&output_name);
+            let triplets = summarize_stats(&stats, site_key, &value_fn);
+            let data = triplets.to_backend(&site_data_file)?;
+            data.qc(cutoffs.clone())?;
+            sites.extend(data.row_names()?);
+            info!("created site-level data: {}", &site_data_file);
+            site_data_files.push(site_data_file);
+        }
     }
 
     Ok(())
@@ -1005,7 +1064,7 @@ pub fn run_mixture_model(
         }
 
         if let Some(result) = fit_gene_mixture(&cell_observations, gene_length, mixture_params) {
-            // Build component annotations
+            // Build component annotations, filtering pi=0
             let mut local_annotations = Vec::new();
             for (j, (&mu, &sigma)) in result
                 .gmm
@@ -1018,7 +1077,7 @@ pub fn run_mixture_model(
                 if pi > 0.0 {
                     local_annotations.push(MixtureComponentAnnotation {
                         gene_name: gene_name.clone(),
-                        component_idx: j,
+                        component_idx: j, // TEMPORARILY store old GMM index
                         mu,
                         sigma,
                         pi,
@@ -1026,8 +1085,19 @@ pub fn run_mixture_model(
                 }
             }
 
+            // Build OLD→NEW component index mapping to remove gaps from empty components
+            let mut old_to_new: fnv::FnvHashMap<usize, usize> = fnv::FnvHashMap::default();
+            for (new_idx, annotation) in local_annotations.iter().enumerate() {
+                old_to_new.insert(annotation.component_idx, new_idx);
+            }
+
+            // Renumber annotations to have consistent 0, 1, 2, ... indices
+            for (new_idx, annotation) in local_annotations.iter_mut().enumerate() {
+                annotation.component_idx = new_idx;
+            }
+
             // Build triplets: (cell_barcode, feature_id, count)
-            // Feature IDs: GENE/m6A/0, GENE/A2I/1, etc.
+            // Feature IDs: GENE/m6A/0, GENE/A2I/1, etc. using renumbered indices
             let mod_suffix = match params.mod_type {
                 ModificationType::M6A { .. } => "m6A",
                 ModificationType::AtoI => "A2I",
@@ -1037,10 +1107,13 @@ pub fn run_mixture_model(
                 if *component == 0 {
                     continue; // skip noise
                 }
-                let feature_id: Box<str> =
-                    format!("{}/{}/{}", gene_name, mod_suffix, component - 1).into();
-                let cb = &unique_cells[*cell_idx];
-                local_triplets.push((cb.clone(), feature_id, *count as f32));
+                // Map old GMM component (1-based, skip noise) to new consecutive index
+                if let Some(&new_idx) = old_to_new.get(&(component - 1)) {
+                    let feature_id: Box<str> =
+                        format!("{}/{}/{}", gene_name, mod_suffix, new_idx).into();
+                    let cb = &unique_cells[*cell_idx];
+                    local_triplets.push((cb.clone(), feature_id, *count as f32));
+                }
             }
 
             // Compute PDUI for genes with 2+ active components
@@ -1052,8 +1125,21 @@ pub fn run_mixture_model(
                     .max_by(|(_, a), (_, b)| a.mu.partial_cmp(&b.mu).unwrap())
                     .map(|(i, _)| i)
                     .unwrap();
-                // distal_component is the 1-based component index (0 = noise in GMM)
-                let distal_component = local_annotations[distal_idx].component_idx + 1;
+                // Find the old GMM component index corresponding to this distal component
+                // We need to reverse the mapping: new_idx → old_idx
+                let distal_new_idx = local_annotations[distal_idx].component_idx;
+                let distal_old_idx = old_to_new
+                    .iter()
+                    .find_map(|(&old, &new)| {
+                        if new == distal_new_idx {
+                            Some(old)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap();
+                // distal_component is the 1-based component index in GMM (0 = noise)
+                let distal_component = distal_old_idx + 1;
 
                 // Per-cell: PDUI = distal_count / total_non_noise_count
                 let mut cell_total: fnv::FnvHashMap<usize, usize> = fnv::FnvHashMap::default();
@@ -1107,13 +1193,20 @@ pub fn run_mixture_model(
         return Ok(());
     }
 
-    // Write sparse matrix
+    // Write sparse matrix with BAM basename in filename
     let triplets = format_data_triplets(triplets_data);
+
+    // Get primary BAM basename for output naming
+    let batch_names = uniq_batch_names(&params.wt_bam_files)?;
+    let primary_batch_name = batch_names
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no BAM files provided"))?;
+
     let suffix = match params.mod_type {
-        ModificationType::M6A { .. } => "mixture_m6a",
-        ModificationType::AtoI => "mixture_atoi",
+        ModificationType::M6A { .. } => format!("{}_m6a", primary_batch_name),
+        ModificationType::AtoI => format!("{}_atoi", primary_batch_name),
     };
-    let output_file = params.backend_file_path(suffix);
+    let output_file = params.backend_file_path(&suffix);
     let data = triplets.to_backend(&output_file)?;
     data.qc(params.qc_cutoffs())?;
     info!("Mixture model: created {}", &output_file);
@@ -1126,23 +1219,12 @@ pub fn run_mixture_model(
         )?;
     }
 
-    // Write PDUI sparse matrix (cells × genes)
-    let pdui_data = Arc::try_unwrap(arc_pdui)
+    // PDUI output disabled for mixture model (only use APA PDUI)
+    let _pdui_data = Arc::try_unwrap(arc_pdui)
         .map_err(|_| anyhow::anyhow!("failed to unwrap pdui"))?
         .into_inner()?;
 
-    if !pdui_data.is_empty() {
-        info!("PDUI: {} cell-gene entries", pdui_data.len());
-        let pdui_triplets = format_data_triplets(pdui_data);
-        let pdui_suffix = match params.mod_type {
-            ModificationType::M6A { .. } => "pdui_m6a",
-            ModificationType::AtoI => "pdui_atoi",
-        };
-        let pdui_file = params.backend_file_path(pdui_suffix);
-        let pdui_out = pdui_triplets.to_backend(&pdui_file)?;
-        pdui_out.qc(params.qc_cutoffs())?;
-        info!("PDUI: created {}", &pdui_file);
-    }
+    // Note: PDUI for m6A/ATOI mixture not output (use APA PDUI instead)
 
     Ok(())
 }

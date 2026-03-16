@@ -32,6 +32,9 @@ pub enum CountMode<'a> {
 pub struct DnaBaseFreqMap<'a> {
     mode: CountMode<'a>,
     anchor: Option<(i64, Dna)>,
+    position_filter: Option<std::collections::HashSet<i64>>,
+    min_base_quality: u8,
+    min_mapping_quality: u8,
 }
 
 impl<'a> Default for DnaBaseFreqMap<'a> {
@@ -49,6 +52,9 @@ impl<'a> DnaBaseFreqMap<'a> {
                 counts: HashMap::default(),
             },
             anchor: None,
+            position_filter: None,
+            min_base_quality: 20,
+            min_mapping_quality: 20,
         }
     }
 
@@ -67,6 +73,9 @@ impl<'a> DnaBaseFreqMap<'a> {
                 cell_membership,
             },
             anchor: None,
+            position_filter: None,
+            min_base_quality: 20,
+            min_mapping_quality: 20,
         }
     }
 
@@ -89,6 +98,9 @@ impl<'a> DnaBaseFreqMap<'a> {
                 target_celltype: target_celltype.into(),
             },
             anchor: None,
+            position_filter: None,
+            min_base_quality: 20,
+            min_mapping_quality: 20,
         }
     }
 
@@ -97,6 +109,22 @@ impl<'a> DnaBaseFreqMap<'a> {
     /// - `base` can be the corresponding DNA base, such as `A`
     pub fn set_anchor_position(&mut self, loc: i64, base: Dna) {
         self.anchor = Some((loc, base));
+    }
+
+    /// Set position filter to only accumulate frequencies for specific positions.
+    /// This dramatically reduces memory usage when processing many sites in a large gene.
+    /// If None, all positions in the region are stored (default behavior).
+    pub fn set_position_filter(&mut self, positions: std::collections::HashSet<i64>) {
+        self.position_filter = Some(positions);
+    }
+
+    /// Set quality thresholds for filtering bases and reads.
+    ///
+    /// * `min_base_quality` - minimum Phred base quality score (default: 20)
+    /// * `min_mapping_quality` - minimum MAPQ score (default: 20)
+    pub fn set_quality_thresholds(&mut self, min_base_quality: u8, min_mapping_quality: u8) {
+        self.min_base_quality = min_base_quality;
+        self.min_mapping_quality = min_mapping_quality;
     }
 
     /// Update from BAM records in a BED region
@@ -128,8 +156,24 @@ impl<'a> DnaBaseFreqMap<'a> {
         seq: &[u8],
         bam_record: &bam::Record,
         counts: &mut HashMap<i64, DnaBaseCount>,
+        position_filter: Option<&std::collections::HashSet<i64>>,
+        min_base_quality: u8,
     ) {
+        let quals = bam_record.qual();
+
         for [rpos, gpos] in bam_record.aligned_pairs() {
+            // Skip positions not in filter (if filter is set)
+            if let Some(filter) = position_filter {
+                if !filter.contains(&gpos) {
+                    continue;
+                }
+            }
+
+            // Filter by base quality
+            if quals[rpos as usize] < min_base_quality {
+                continue;
+            }
+
             let base = Dna::from_byte(seq[rpos as usize]);
             let freq = counts.entry(gpos).or_default();
             freq.add(base.as_ref(), 1);
@@ -137,11 +181,39 @@ impl<'a> DnaBaseFreqMap<'a> {
     }
 
     fn add_bam_record(&mut self, bam_record: bam::Record) {
+        // Quality filters (consistent with gene counting)
+
+        // 1. Mapping quality
+        if bam_record.mapq() < self.min_mapping_quality {
+            return;
+        }
+
+        // 2. Skip PCR duplicates
+        if bam_record.is_duplicate() {
+            return;
+        }
+
+        // 3. Skip secondary/supplementary alignments (multi-mappers)
+        if bam_record.is_secondary() || bam_record.is_supplementary() {
+            return;
+        }
+
+        // 4. For paired-end reads, skip if not properly paired
+        if bam_record.is_paired() && !bam_record.is_proper_pair() {
+            return;
+        }
+
         let seq = bam_record.seq().as_bytes();
 
         match &mut self.mode {
             CountMode::Marginal { counts } => {
-                Self::accumulate_marginal(&seq, &bam_record, counts);
+                Self::accumulate_marginal(
+                    &seq,
+                    &bam_record,
+                    counts,
+                    self.position_filter.as_ref(),
+                    self.min_base_quality,
+                );
             }
 
             CountMode::PerCell {
@@ -166,8 +238,21 @@ impl<'a> DnaBaseFreqMap<'a> {
                 let anchor = self.anchor;
                 let mut anchor_matched = anchor.is_none();
                 let mut pending: Vec<(i64, Option<Dna>)> = Vec::new();
+                let quals = bam_record.qual();
 
                 for [rpos, gpos] in bam_record.aligned_pairs() {
+                    // Skip positions not in filter (if filter is set)
+                    if let Some(filter) = &self.position_filter {
+                        if !filter.contains(&gpos) {
+                            continue;
+                        }
+                    }
+
+                    // Filter by base quality
+                    if quals[rpos as usize] < self.min_base_quality {
+                        continue;
+                    }
+
                     let base = Dna::from_byte(seq[rpos as usize]);
                     pending.push((gpos, base));
                     if let Some((anchor_pos, anchor_base)) = anchor {
@@ -196,7 +281,13 @@ impl<'a> DnaBaseFreqMap<'a> {
                 let cell_barcode = bam_io::extract_cell_barcode(&bam_record, cell_barcode_tag);
 
                 if cell_membership.matches_celltype(&cell_barcode, target_celltype) {
-                    Self::accumulate_marginal(&seq, &bam_record, counts);
+                    Self::accumulate_marginal(
+                        &seq,
+                        &bam_record,
+                        counts,
+                        self.position_filter.as_ref(),
+                        self.min_base_quality,
+                    );
                 }
             }
         }
