@@ -13,11 +13,12 @@ pub struct GenomicSite {
     pub strand: Strand,
 }
 
-/// Read sites from a parquet file, auto-detecting dart vs apa format.
+/// Read sites from a parquet file, auto-detecting dart vs apa vs atoi format.
 pub fn read_sites(site_file: &str) -> anyhow::Result<Vec<GenomicSite>> {
     let field_names = matrix_util::parquet::peek_parquet_field_names(site_file)?;
     let has_m6a_pos = field_names.iter().any(|f| f.as_ref() == "m6a_pos");
     let has_genomic_alpha = field_names.iter().any(|f| f.as_ref() == "genomic_alpha");
+    let has_primary_pos = field_names.iter().any(|f| f.as_ref() == "primary_pos");
 
     let file = File::open(site_file)?;
     let reader = SerializedFileReader::new(file)?;
@@ -75,9 +76,36 @@ pub fn read_sites(site_file: &str) -> anyhow::Result<Vec<GenomicSite>> {
                 strand: Strand::Forward,
             });
         }
+    } else if has_primary_pos {
+        // ATOI format: chr, primary_pos, strand
+        let pos_idx = field_names
+            .iter()
+            .position(|f| f.as_ref() == "primary_pos")
+            .unwrap();
+        let strand_idx = field_names
+            .iter()
+            .position(|f| f.as_ref() == "strand")
+            .ok_or_else(|| anyhow::anyhow!("missing 'strand' column in {}", site_file))?;
+
+        for record in row_iter {
+            let row = record?;
+            let chr: Box<str> = row.get_string(chr_idx)?.clone().into_boxed_str();
+            let position = row.get_long(pos_idx)?;
+            let strand_str = row.get_string(strand_idx)?;
+            let strand = if strand_str == "+" {
+                Strand::Forward
+            } else {
+                Strand::Backward
+            };
+            sites.push(GenomicSite {
+                chr,
+                position,
+                strand,
+            });
+        }
     } else {
         return Err(anyhow::anyhow!(
-            "unrecognized parquet format: expected 'm6a_pos' (dart) or 'genomic_alpha' (apa) column"
+            "unrecognized parquet format: expected 'm6a_pos' (dart), 'genomic_alpha' (apa), or 'primary_pos' (atoi) column"
         ));
     }
 

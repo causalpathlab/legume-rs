@@ -84,24 +84,20 @@ pub fn extract_fragments(
             _ => UmiBarcode::Missing,
         };
 
-        // Determine if this is a junction read (has poly-A/T soft-clip)
+        // Determine if this is a valid junction read (poly-A/T tail passes all checks)
         let poly_tail_len = get_polya_tail_length(&rec);
-        let is_junction = poly_tail_len >= polya.min_tail as i64;
-
-        // Check internal priming for junction reads
-        if is_junction {
-            let num_at = count_a_or_t_bases_in_tail(&rec);
-            let non_at = poly_tail_len as usize - num_at;
-            if non_at > polya.max_non_at {
-                // Treat as non-junction (poly-A tail too noisy)
-            } else if check_internal_prime(
-                &rec,
-                polya.internal_prime_window,
-                polya.internal_prime_count,
-            ) {
-                // Internal priming — skip as junction but still use as regular fragment
-            }
-        }
+        let is_valid_junction = if poly_tail_len >= polya.min_tail as i64 {
+            let at_count = count_a_or_t_bases_in_tail(&rec);
+            let non_at = poly_tail_len as usize - at_count;
+            non_at <= polya.max_non_at
+                && !check_internal_prime(
+                    &rec,
+                    polya.internal_prime_window,
+                    polya.internal_prime_count,
+                )
+        } else {
+            false
+        };
 
         // Compute UTR-relative coordinates based on strand
         let (x, l, r, pa_pos) = match utr.strand {
@@ -116,27 +112,14 @@ pub fn extract_fragments(
                     return;
                 }
 
-                let r_val = if is_junction {
+                let r_val = if is_valid_junction {
                     poly_tail_len as f32
                 } else {
                     0.0
                 };
 
-                // Junction read pA position: reference_end for forward
-                let pa = if is_junction && poly_tail_len >= polya.min_tail as i64 {
-                    let at_count = count_a_or_t_bases_in_tail(&rec);
-                    let non_at = poly_tail_len as usize - at_count;
-                    if non_at <= polya.max_non_at
-                        && !check_internal_prime(
-                            &rec,
-                            polya.internal_prime_window,
-                            polya.internal_prime_count,
-                        )
-                    {
-                        Some((ref_end - utr_start) as f32)
-                    } else {
-                        None
-                    }
+                let pa = if is_valid_junction {
+                    Some((ref_end - utr_start) as f32)
                 } else {
                     None
                 };
@@ -154,27 +137,14 @@ pub fn extract_fragments(
                     return;
                 }
 
-                let r_val = if is_junction {
+                let r_val = if is_valid_junction {
                     poly_tail_len as f32
                 } else {
                     0.0
                 };
 
-                // Junction read pA position: reference_start for reverse
-                let pa = if is_junction && poly_tail_len >= polya.min_tail as i64 {
-                    let at_count = count_a_or_t_bases_in_tail(&rec);
-                    let non_at = poly_tail_len as usize - at_count;
-                    if non_at <= polya.max_non_at
-                        && !check_internal_prime(
-                            &rec,
-                            polya.internal_prime_window,
-                            polya.internal_prime_count,
-                        )
-                    {
-                        Some((utr_end - ref_start) as f32)
-                    } else {
-                        None
-                    }
+                let pa = if is_valid_junction {
+                    Some((utr_end - ref_start) as f32)
                 } else {
                     None
                 };

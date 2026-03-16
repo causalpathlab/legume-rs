@@ -12,6 +12,7 @@ mod run_apa;
 mod run_atoi;
 mod run_gene_count;
 mod run_m6a;
+mod run_pipeline;
 mod run_read_depth;
 mod site_analysis;
 
@@ -21,6 +22,7 @@ use run_apa::*;
 use run_atoi::*;
 use run_gene_count::*;
 use run_m6a::*;
+use run_pipeline::*;
 use run_read_depth::*;
 use site_analysis::metagene::*;
 use site_analysis::scan_pwm::*;
@@ -162,6 +164,20 @@ enum Commands {
             histogram showing the distribution of sites across the metagene."
     )]
     Metagene(MetageneArgs),
+
+    #[command(
+        name = "pipeline",
+        aliases = ["full", "magic"],
+        about = "Run unified RNA-seq pipeline: genes → ATOI → APA → DART",
+        long_about = "Run unified RNA-seq analysis pipeline\n\n\
+            Orchestrates the complete analysis workflow:\n  \
+            1. Gene expression filtering (identify expressed genes)\n  \
+            2. ATOI detection (A-to-I editing sites)\n  \
+            3. APA quantification (alternative polyadenylation, masked)\n  \
+            4. DART analysis (m6A methylation, masked, requires --mut)\n\n\
+            Applies gene filtering after step 1 and ATOI masking to steps 3-4."
+    )]
+    Pipeline(PipelineArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -184,6 +200,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Depth(args) => run_read_depth(args)?,
         Commands::Pwm(args) => run_scan_pwm(args)?,
         Commands::Metagene(args) => run_metagene(args)?,
+        Commands::Pipeline(args) => run_pipeline(args)?,
     }
 
     Ok(())
