@@ -58,6 +58,7 @@ pub fn cluster_cells_from_bam(
         gff_map,
         params.cell_barcode_tag,
         params.gene_barcode_tag,
+        20, // min_mapq: consistent with ATOI/APA/DART quality filters
     )?;
 
     if gene_counts.is_empty() {

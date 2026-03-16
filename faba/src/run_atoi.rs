@@ -57,17 +57,31 @@ pub struct AtoICountArgs {
 
     #[arg(
         long,
-        default_value_t = 10,
+        default_value_t = 5,
         help = "Minimum coverage for A-to-I site detection"
     )]
     pub min_coverage: usize,
 
     #[arg(
         long = "min-conversion",
-        default_value_t = 5,
+        default_value_t = 3,
         help = "Minimum A-to-G conversions for A-to-I detection"
     )]
     pub min_conversion: usize,
+
+    #[arg(
+        long = "min-base-quality",
+        default_value_t = 20,
+        help = "Minimum base quality (Phred score) to include a base"
+    )]
+    pub min_base_quality: u8,
+
+    #[arg(
+        long = "min-mapping-quality",
+        default_value_t = 20,
+        help = "Minimum mapping quality (MAPQ) to include a read"
+    )]
+    pub min_mapping_quality: u8,
 
     #[arg(
         long = "pseudocount",
@@ -209,6 +223,8 @@ impl From<&AtoICountArgs> for ConversionParams {
             membership_celltype_col: args.membership_celltype_col,
             exact_barcode_match: args.exact_barcode_match,
             mod_type: ModificationType::AtoI,
+            min_base_quality: args.min_base_quality,
+            min_mapping_quality: args.min_mapping_quality,
         }
     }
 }
