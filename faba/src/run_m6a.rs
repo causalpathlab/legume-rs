@@ -469,6 +469,8 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             mod_type: ModificationType::M6A {
                 check_r_site: !args.no_check_r_site,
             },
+            min_base_quality: 20,
+            min_mapping_quality: 20,
         }
     }
 }
@@ -497,6 +499,8 @@ impl DartSeqCountArgs {
             membership_celltype_col: self.membership_celltype_col,
             exact_barcode_match: self.exact_barcode_match,
             mod_type: ModificationType::AtoI,
+            min_base_quality: 20,
+            min_mapping_quality: 20,
         }
     }
 }
