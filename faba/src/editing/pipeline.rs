@@ -998,7 +998,9 @@ pub fn run_mixture_model(
     gff_map: &GffRecordMap,
     mixture_params: &crate::editing::mixture::MixtureParams,
 ) -> anyhow::Result<()> {
-    use crate::editing::mixture::{fit_gene_mixture, CellObservation, MixtureComponentAnnotation};
+    use crate::editing::mixture::{
+        fit_gene_mixture, MixtureComponentAnnotation, WeightedObservation,
+    };
 
     let membership = params.load_membership()?;
 
@@ -1077,13 +1079,14 @@ pub fn run_mixture_model(
             .map(|gff| (gff.stop - gff.start) as f32)
             .unwrap_or(1000.0);
 
-        // Expand observations by count
-        let mut cell_observations = Vec::new();
-        for &(cell_idx, position, count) in obs_list {
-            for _ in 0..count {
-                cell_observations.push(CellObservation { cell_idx, position });
-            }
-        }
+        let cell_observations: Vec<WeightedObservation> = obs_list
+            .iter()
+            .map(|&(cell_idx, position, count)| WeightedObservation {
+                cell_idx,
+                position,
+                count,
+            })
+            .collect();
 
         if let Some(result) = fit_gene_mixture(&cell_observations, gene_length, mixture_params) {
             // Build component annotations, filtering pi=0

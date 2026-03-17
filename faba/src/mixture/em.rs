@@ -158,18 +158,38 @@ fn gaussian_log_pdf(x: f32, mu: f32, sigma: f32) -> f32 {
     -0.5 * z * z - sigma.ln() - 0.5 * std::f32::consts::TAU.ln()
 }
 
-/// Full 1D Gaussian mixture EM with a uniform noise component.
+/// Full 1D Gaussian mixture EM with a uniform noise component (unit weights).
 ///
-/// * `observations` - 1D data points
-/// * `initial_mus` - initial means for K Gaussian components
-/// * `initial_sigma` - shared initial sigma for all components
-/// * `domain_length` - length of domain for uniform noise component
-/// * `params` - EM parameters
+/// Convenience wrapper around `weighted_gaussian_mixture_em` with all weights = 1.
+#[allow(dead_code)]
+pub fn gaussian_mixture_em(
+    observations: &[f32],
+    initial_mus: &[f32],
+    initial_sigma: f32,
+    domain_length: f32,
+    params: &EmParams,
+) -> GmmResult {
+    let unit_weights = vec![1.0_f32; observations.len()];
+    weighted_gaussian_mixture_em(
+        observations,
+        &unit_weights,
+        initial_mus,
+        initial_sigma,
+        domain_length,
+        params,
+    )
+}
+
+/// Weighted 1D Gaussian mixture EM with a uniform noise component.
+///
+/// Each observation has an associated weight (e.g. count), avoiding
+/// the need to expand repeated observations into individual entries.
 ///
 /// Component 0 is always uniform noise over `[0, domain_length]`.
 /// Components 1..K are Gaussians.
-pub fn gaussian_mixture_em(
+pub fn weighted_gaussian_mixture_em(
     observations: &[f32],
+    obs_weights: &[f32],
     initial_mus: &[f32],
     initial_sigma: f32,
     domain_length: f32,
@@ -189,11 +209,14 @@ pub fn gaussian_mixture_em(
         };
     }
 
+    let total_weight: f32 = obs_weights.iter().sum();
+
     let mut weights = vec![1.0 / n_total as f32; n_total];
     let mut mus = initial_mus.to_vec();
     let mut sigmas = vec![initial_sigma; k];
     let mut gamma = vec![vec![0.0; n_total]; n];
     let mut prev_ll = f32::NEG_INFINITY;
+    let mut log_probs = vec![f32::NEG_INFINITY; n_total];
 
     let noise_log_lik = if domain_length > 0.0 {
         -(domain_length.ln())
@@ -210,7 +233,11 @@ pub fn gaussian_mixture_em(
 
         for i in 0..n {
             let x = observations[i];
-            let mut log_probs = vec![f32::NEG_INFINITY; n_total];
+            let w = obs_weights[i];
+
+            for lp in log_probs.iter_mut() {
+                *lp = f32::NEG_INFINITY;
+            }
 
             // Noise component
             if weights[0] > 0.0 {
@@ -224,13 +251,13 @@ pub fn gaussian_mixture_em(
                 }
             }
 
-            let log_norm = log_probs
+            let log_norm = log_probs[..n_total]
                 .iter()
                 .fold(f32::NEG_INFINITY, |acc, &lp| log_sum_exp(acc, lp));
 
-            total_ll += log_norm;
+            total_ll += w * log_norm;
 
-            for (kk, lp) in log_probs.iter().enumerate() {
+            for (kk, lp) in log_probs.iter().enumerate().take(n_total) {
                 gamma[i][kk] = (lp - log_norm).exp();
             }
         }
@@ -239,9 +266,8 @@ pub fn gaussian_mixture_em(
 
         let ll_change = (total_ll - prev_ll).abs();
         if iter > 1 && (ll_change < params.tol || iter >= params.max_iter) {
-            // BIC: 3K (mu, sigma, weight per Gaussian) + 1 (noise weight) - 1 (constraint)
             let n_params = 3 * k;
-            let bic = -2.0 * total_ll + n_params as f32 * (n as f32).ln();
+            let bic = -2.0 * total_ll + n_params as f32 * total_weight.ln();
 
             return GmmResult {
                 weights,
@@ -257,20 +283,25 @@ pub fn gaussian_mixture_em(
         // M-step: update weights, mus, sigmas
         for j in 0..k {
             let kk = j + 1; // skip noise
-            let sum_gamma: f32 = gamma.iter().map(|g| g[kk]).sum();
+            let sum_gamma: f32 = gamma
+                .iter()
+                .zip(obs_weights.iter())
+                .map(|(g, &w)| w * g[kk])
+                .sum();
 
             if sum_gamma < 1e-10 {
                 weights[kk] = 0.0;
                 continue;
             }
 
-            weights[kk] = sum_gamma / n as f32;
+            weights[kk] = sum_gamma / total_weight;
 
             // Update mu
             let mu_new: f32 = gamma
                 .iter()
                 .zip(observations.iter())
-                .map(|(g, &x)| g[kk] * x)
+                .zip(obs_weights.iter())
+                .map(|((g, &x), &w)| w * g[kk] * x)
                 .sum::<f32>()
                 / sum_gamma;
             mus[j] = mu_new;
@@ -279,15 +310,20 @@ pub fn gaussian_mixture_em(
             let var_new: f32 = gamma
                 .iter()
                 .zip(observations.iter())
-                .map(|(g, &x)| g[kk] * (x - mu_new).powi(2))
+                .zip(obs_weights.iter())
+                .map(|((g, &x), &w)| w * g[kk] * (x - mu_new).powi(2))
                 .sum::<f32>()
                 / sum_gamma;
             sigmas[j] = var_new.sqrt().max(sigma_floor);
         }
 
         // Update noise weight
-        let noise_sum: f32 = gamma.iter().map(|g| g[0]).sum();
-        weights[0] = noise_sum / n as f32;
+        let noise_sum: f32 = gamma
+            .iter()
+            .zip(obs_weights.iter())
+            .map(|(g, &w)| w * g[0])
+            .sum();
+        weights[0] = noise_sum / total_weight;
 
         // Prune low-weight Gaussian components
         for w in weights.iter_mut().skip(1) {
