@@ -325,6 +325,11 @@ impl GffRecordMap {
             .retain(|_, rec| rec.gene_type == target_gene_type);
     }
 
+    /// Retain only genes whose IDs are in the given set
+    pub fn retain_by_ids(&mut self, gene_ids: &std::collections::HashSet<GeneId>) {
+        self.records.retain(|gene_id, _| gene_ids.contains(gene_id));
+    }
+
     pub fn add_padding(&mut self, padding: i64) {
         self.records.par_iter_mut().for_each(|mut entry| {
             let rec = entry.value_mut();

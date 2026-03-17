@@ -296,15 +296,12 @@ where
                 acc
             },
         )
-        .reduce(
-            fnv::FnvHashMap::default,
-            |mut a, b| {
-                for (k, v) in b {
-                    *a.entry(k).or_default() += v;
-                }
-                a
-            },
-        );
+        .reduce(fnv::FnvHashMap::default, |mut a, b| {
+            for (k, v) in b {
+                *a.entry(k).or_default() += v;
+            }
+            a
+        });
 
     let combined_data = combined_data
         .into_iter()
@@ -344,32 +341,23 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
     let njobs = utrs.len();
     info!("processing {} UTRs...", njobs);
 
-    let arc_results: Arc<Mutex<Vec<CellSiteCount>>> =
-        Arc::new(Mutex::new(Vec::with_capacity(njobs * 10)));
-    let arc_annotations: Arc<Mutex<Vec<ApaSiteAnnotation>>> =
-        Arc::new(Mutex::new(Vec::with_capacity(njobs * 3)));
-
-    utrs.par_iter()
+    let results: Vec<(Vec<CellSiteCount>, Vec<ApaSiteAnnotation>)> = utrs
+        .par_iter()
         .progress_count(njobs as u64)
-        .try_for_each(|utr| -> anyhow::Result<()> {
-            let (cell_counts, site_annots) =
-                process_utr(utr, &args.bam_files, pre_sites.as_ref(), args)?;
-            if !cell_counts.is_empty() {
-                arc_results.lock().expect("lock").extend(cell_counts);
-            }
-            if !site_annots.is_empty() {
-                arc_annotations.lock().expect("lock").extend(site_annots);
-            }
-            Ok(())
-        })?;
+        .map(|utr| process_utr(utr, &args.bam_files, pre_sites.as_ref(), args))
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let all_counts = Arc::try_unwrap(arc_results)
-        .map_err(|_| anyhow::anyhow!("failed to unwrap results"))?
-        .into_inner()?;
+    info!("processed {} UTRs", utrs.len());
 
-    let all_annotations = Arc::try_unwrap(arc_annotations)
-        .map_err(|_| anyhow::anyhow!("failed to unwrap annotations"))?
-        .into_inner()?;
+    let total_counts: usize = results.iter().map(|(c, _)| c.len()).sum();
+    let total_annots: usize = results.iter().map(|(_, a)| a.len()).sum();
+
+    let mut all_counts = Vec::with_capacity(total_counts);
+    let mut all_annotations = Vec::with_capacity(total_annots);
+    for (counts, annots) in results {
+        all_counts.extend(counts);
+        all_annotations.extend(annots);
+    }
 
     info!("collected {} cell-site counts", all_counts.len());
 
@@ -519,7 +507,7 @@ fn process_utr(
         all_fragments.extend(frags);
     }
 
-    info!(
+    log::debug!(
         "UTR {} ({}:{}-{}, L={}): {} fragments extracted",
         utr.name,
         utr.chr,
@@ -548,7 +536,7 @@ fn process_utr(
     };
 
     let n_junction = all_fragments.iter().filter(|f| f.is_junction).count();
-    info!(
+    log::debug!(
         "UTR {}: {} candidate sites, {} junction reads",
         utr.name,
         candidate_sites.len(),
