@@ -2,12 +2,16 @@ use crate::common::*;
 use crate::data::methylation::MethFeatureType;
 use crate::editing::io::ToParquet;
 use crate::editing::mask::{build_atoi_mask, filter_m6a_by_atoi_mask};
+use crate::editing::mixture::MixtureParams;
 use crate::editing::pipeline::{
-    find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams,
+    find_all_conversion_sites, process_all_bam_files_to_backend, run_mixture_model,
+    ConversionParams,
 };
 use crate::editing::sifter::ModificationType;
+use crate::gene_count::splice::{count_read_per_gene, format_gene_key};
 use crate::pipeline_util::check_all_bam_indices;
 
+use fnv::FnvHashMap;
 use genomic_data::gff::GffRecordMap;
 use log::info;
 use rayon::ThreadPoolBuilder;
@@ -235,10 +239,8 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
 }
 
 // Helper structures
-#[allow(dead_code)] // TODO: Implement gene filtering
 struct ExpressedGenes {
-    gene_ids: HashSet<Box<str>>,
-    total_genes: usize,
+    gene_ids: HashSet<GeneId>,
 }
 
 struct AtoiMaskData {
@@ -248,24 +250,104 @@ struct AtoiMaskData {
 
 // Step 1: Gene expression filtering
 fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<ExpressedGenes>> {
-    // TODO: Build GeneCountArgs and run gene counting
-    // For now, return None (no filtering applied)
-    info!("Gene counting step: TODO - implement gene filtering");
+    let gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
+    info!("Loaded {} genes for expression filtering", gff_map.len());
+
+    // Combine all BAM files (WT + mut)
+    let mut all_bam_files = args.bam_files.clone();
+    if let Some(ref mut_files) = args.mut_bam_files {
+        all_bam_files.extend_from_slice(mut_files);
+    }
+
+    info!("Gene counting across {} BAM files:", all_bam_files.len());
+    for bam in &all_bam_files {
+        info!("  {}", bam);
+    }
+
+    let batch_names = uniq_batch_names(&all_bam_files)?;
+    let records = gff_map.records();
+    let cutoffs = SqueezeCutoffs {
+        row: args.gene_min_cells,
+        column: args.cell_min_genes,
+    };
+
+    // Build gene_key → GeneId mapping for reverse lookup after QC
+    let gene_key_to_id: FnvHashMap<Box<str>, GeneId> = records
+        .iter()
+        .map(|rec| (format_gene_key(rec), rec.gene_id.clone()))
+        .collect();
+
+    let mut expressed_gene_ids: HashSet<GeneId> = HashSet::new();
+
+    for (bam_file, batch_name) in all_bam_files.iter().zip(batch_names.iter()) {
+        let njobs = records.len() as u64;
+        info!("Counting genes in {} ({} genes)", batch_name, njobs);
+
+        let gene_level_stats: Vec<(CellBarcode, Box<str>, f32)> = records
+            .par_iter()
+            .progress_count(njobs)
+            .map(|rec| {
+                count_read_per_gene(
+                    bam_file,
+                    rec,
+                    &args.cell_barcode_tag,
+                    &args.gene_barcode_tag,
+                )
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        let backend_file = match args.backend {
+            SparseIoBackend::HDF5 => format!("{}/{}_genes.h5", &args.output, batch_name),
+            SparseIoBackend::Zarr => format!("{}/{}_genes.zarr", &args.output, batch_name),
+        };
+
+        format_data_triplets(gene_level_stats)
+            .to_backend(&backend_file)?
+            .qc(cutoffs.clone())?;
+
+        // Read back surviving row names after QC
+        let data = open_sparse_matrix(&backend_file, &args.backend)?;
+        let row_names = data.row_names()?;
+        info!("{}: {} genes passed QC", batch_name, row_names.len());
+
+        // Map row names back to GeneIds
+        // Row name format: {gene_key}/count/total
+        for row_name in &row_names {
+            if let Some(gene_key) = row_name.split('/').next() {
+                if let Some(gene_id) = gene_key_to_id.get(gene_key) {
+                    expressed_gene_ids.insert(gene_id.clone());
+                }
+            }
+        }
+    }
+
     info!(
-        "  Would filter genes by min_cells={}, min_genes={}",
-        args.gene_min_cells, args.cell_min_genes
+        "Gene filtering: {} genes expressed across {} BAM files",
+        expressed_gene_ids.len(),
+        all_bam_files.len()
     );
-    Ok(None)
+
+    Ok(Some(ExpressedGenes {
+        gene_ids: expressed_gene_ids,
+    }))
 }
 
 // Step 2: ATOI detection
 fn run_atoi_step(
     args: &PipelineArgs,
-    _expressed_genes: &Option<ExpressedGenes>,
+    expressed_genes: &Option<ExpressedGenes>,
 ) -> anyhow::Result<AtoiMaskData> {
-    // Load GFF
-    let gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
-    info!("Loaded {} genes", gff_map.len());
+    // Load GFF and filter to expressed genes
+    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
+    if let Some(ref eg) = expressed_genes {
+        gff_map.retain_by_ids(&eg.gene_ids);
+        info!("Filtered to {} expressed genes", gff_map.len());
+    } else {
+        info!("Loaded {} genes (no expression filter)", gff_map.len());
+    }
 
     // Build ConversionParams for ATOI
     let mut_bams = args.mut_bam_files.as_ref().cloned().unwrap_or_default();
@@ -399,11 +481,16 @@ fn run_dart_step(
     args: &PipelineArgs,
     mut_bams: &[Box<str>],
     atoi_mask: &Option<AtoiMaskData>,
-    _expressed_genes: &Option<ExpressedGenes>,
+    expressed_genes: &Option<ExpressedGenes>,
 ) -> anyhow::Result<()> {
-    // Load GFF
-    let gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
-    info!("Loaded {} genes", gff_map.len());
+    // Load GFF and filter to expressed genes
+    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
+    if let Some(ref eg) = expressed_genes {
+        gff_map.retain_by_ids(&eg.gene_ids);
+        info!("Filtered to {} expressed genes", gff_map.len());
+    } else {
+        info!("Loaded {} genes (no expression filter)", gff_map.len());
+    }
 
     // Build ConversionParams for m6A (DART)
     let params = ConversionParams {
@@ -458,6 +545,11 @@ fn run_dart_step(
     // Second pass: quantification
     info!("Quantifying m6A sites per cell...");
     process_all_bam_files_to_backend(&params, &m6a_sites, &gff_map, false, false)?;
+
+    // Mixture model: cluster modification sites per gene
+    info!("Running 1D Gaussian mixture model on m6A sites...");
+    let mix_params = MixtureParams::default();
+    run_mixture_model(&params, &m6a_sites, &gff_map, &mix_params)?;
 
     Ok(())
 }

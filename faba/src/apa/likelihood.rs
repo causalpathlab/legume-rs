@@ -139,16 +139,15 @@ pub fn precompute_theta_lik_matrix(
         .map(|t| t as f32)
         .collect();
 
-    let n_frag = fragments.len();
-    let n_theta = theta_grid.len();
-
-    let mut lik_matrix = vec![vec![f32::NEG_INFINITY; n_theta]; n_frag];
-
-    for (n, frag) in fragments.iter().enumerate() {
-        for (t, &theta) in theta_grid.iter().enumerate() {
-            lik_matrix[n][t] = log_lik_fragment_given_theta(frag, theta, utr_length, params);
-        }
-    }
+    let lik_matrix: Vec<Vec<f32>> = fragments
+        .iter()
+        .map(|frag| {
+            theta_grid
+                .iter()
+                .map(|&theta| log_lik_fragment_given_theta(frag, theta, utr_length, params))
+                .collect()
+        })
+        .collect();
 
     (lik_matrix, theta_grid)
 }

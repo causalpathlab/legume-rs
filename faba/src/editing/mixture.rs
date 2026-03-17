@@ -1,5 +1,5 @@
 use crate::mixture::assign::hard_assign;
-use crate::mixture::em::{gaussian_mixture_em, EmParams, GmmResult};
+use crate::mixture::em::{weighted_gaussian_mixture_em, EmParams, GmmResult};
 
 /// Parameters for per-gene mixture model
 pub struct MixtureParams {
@@ -53,23 +53,25 @@ pub struct GeneMixtureResult {
     pub cell_component_counts: Vec<(usize, usize, usize)>,
 }
 
-/// Cell-level observation for the mixture model
-pub struct CellObservation {
+/// Weighted observation for the mixture model: unique (cell, position) with count.
+pub struct WeightedObservation {
     /// Index of the cell in the cell list
     pub cell_idx: usize,
     /// Genomic position of the modification
     pub position: f32,
+    /// Number of reads at this (cell, position)
+    pub count: usize,
 }
 
 /// Run per-gene GMM model selection over K=1..max_k, pick best by BIC.
 ///
-/// * `observations` - expanded observations (one per count)
+/// * `observations` - weighted observations (unique per cell+position)
 /// * `gene_length` - length of the gene for uniform noise component
 /// * `params` - mixture parameters
 ///
 /// Returns None if fewer than min_sites distinct positions.
 pub fn fit_gene_mixture(
-    observations: &[CellObservation],
+    observations: &[WeightedObservation],
     gene_length: f32,
     params: &MixtureParams,
 ) -> Option<GeneMixtureResult> {
@@ -86,12 +88,13 @@ pub fn fit_gene_mixture(
     }
 
     let positions: Vec<f32> = observations.iter().map(|o| o.position).collect();
+    let obs_weights: Vec<f32> = observations.iter().map(|o| o.count as f32).collect();
     let gene_start = distinct[0] as f32;
 
     let mut best_result: Option<(usize, GmmResult)> = None;
+    let mut n_worse = 0u32;
 
     for k in 1..=params.max_k {
-        // Initialize means at regular intervals
         let initial_mus: Vec<f32> = (0..k)
             .map(|i| gene_start + (i as f32 + 1.0) * gene_length / (k as f32 + 1.0))
             .collect();
@@ -102,8 +105,9 @@ pub fn fit_gene_mixture(
             gene_length / (2.0 * k as f32)
         };
 
-        let result = gaussian_mixture_em(
+        let result = weighted_gaussian_mixture_em(
             &positions,
+            &obs_weights,
             &initial_mus,
             initial_sigma,
             gene_length,
@@ -117,20 +121,28 @@ pub fn fit_gene_mixture(
 
         if is_better {
             best_result = Some((k, result));
+            n_worse = 0;
+        } else {
+            n_worse += 1;
+            if n_worse >= 2 {
+                break;
+            }
         }
     }
 
     let (_best_k, gmm) = best_result?;
 
-    // Hard assignment
+    // Hard assignment: gamma[i] gives posterior for observation i,
+    // distribute count to the best component
     let assignments = hard_assign(&gmm.gamma);
 
-    // Count per (cell_idx, component)
+    // Count per (cell_idx, component), weighted by observation count
     let mut counts: std::collections::HashMap<(usize, usize), usize> =
         std::collections::HashMap::new();
     for (obs_idx, &(_, component)) in assignments.iter().enumerate() {
         let cell_idx = observations[obs_idx].cell_idx;
-        *counts.entry((cell_idx, component)).or_default() += 1;
+        let count = observations[obs_idx].count;
+        *counts.entry((cell_idx, component)).or_default() += count;
     }
 
     let cell_component_counts: Vec<(usize, usize, usize)> = counts
@@ -153,10 +165,11 @@ mod tests {
     #[test]
     fn test_single_cluster() {
         // All observations near position 50
-        let obs: Vec<CellObservation> = (0..50)
-            .map(|i| CellObservation {
+        let obs: Vec<WeightedObservation> = (0..50)
+            .map(|i| WeightedObservation {
                 cell_idx: i % 5,
                 position: 50.0 + (i as f32 - 25.0) * 0.2,
+                count: 1,
             })
             .collect();
 
@@ -180,15 +193,17 @@ mod tests {
         // Two well-separated groups
         let mut obs = Vec::new();
         for i in 0..30 {
-            obs.push(CellObservation {
+            obs.push(WeightedObservation {
                 cell_idx: i % 5,
                 position: 20.0 + (i as f32 - 15.0) * 0.3,
+                count: 1,
             });
         }
         for i in 0..30 {
-            obs.push(CellObservation {
+            obs.push(WeightedObservation {
                 cell_idx: i % 5,
                 position: 80.0 + (i as f32 - 15.0) * 0.3,
+                count: 1,
             });
         }
 
@@ -224,13 +239,15 @@ mod tests {
     #[test]
     fn test_too_few_sites() {
         let obs = vec![
-            CellObservation {
+            WeightedObservation {
                 cell_idx: 0,
                 position: 50.0,
+                count: 1,
             },
-            CellObservation {
+            WeightedObservation {
                 cell_idx: 1,
                 position: 50.0,
+                count: 1,
             },
         ];
 
@@ -245,10 +262,11 @@ mod tests {
     #[test]
     fn test_cell_component_counts() {
         // 10 observations from 2 cells, all at same position
-        let obs: Vec<CellObservation> = (0..10)
-            .map(|i| CellObservation {
+        let obs: Vec<WeightedObservation> = (0..10)
+            .map(|i| WeightedObservation {
                 cell_idx: i % 2,
                 position: 30.0 + i as f32,
+                count: 1,
             })
             .collect();
 
