@@ -322,7 +322,25 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
         .first()
         .ok_or_else(|| anyhow::anyhow!("no BAM files provided"))?;
 
-    let utrs = load_utrs(args)?;
+    let mut utrs = load_utrs(args)?;
+
+    // Filter UTRs to expressed genes if available
+    if let Some(ref valid_gene_ids) = args.valid_gene_ids {
+        let before = utrs.len();
+        let valid_prefixes: Vec<String> =
+            valid_gene_ids.iter().map(|gid| gid.to_string()).collect();
+        utrs.retain(|utr| {
+            // UTR name format: "GENE_ID_SYMBOL" or "GENE_ID"
+            valid_prefixes
+                .iter()
+                .any(|prefix| utr.name.starts_with(prefix.as_str()))
+        });
+        info!(
+            "filtered UTRs to expressed genes: {} -> {}",
+            before,
+            utrs.len()
+        );
+    }
 
     if utrs.is_empty() {
         info!("no UTR regions found");
@@ -387,7 +405,10 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
     let output_name = format!("{}_apa", primary_batch_name);
     let output_file = args.backend_file_path(&output_name);
     let data = triplets.to_backend(&output_file)?;
-    data.qc(args.qc_cutoffs())?;
+    data.qc(SqueezeCutoffs {
+        row: args.row_nnz_cutoff,
+        column: args.column_nnz_cutoff,
+    })?;
     info!("created output: {}", &output_file);
 
     // Write APA site annotation Parquet
@@ -657,7 +678,10 @@ fn compute_and_write_pdui(
     let output_name = format!("{}_pdui", primary_batch_name);
     let output_file = args.backend_file_path(&output_name);
     let data = triplets.to_backend(&output_file)?;
-    data.qc(args.qc_cutoffs())?;
+    data.qc(SqueezeCutoffs {
+        row: args.row_nnz_cutoff,
+        column: args.column_nnz_cutoff,
+    })?;
     info!("PDUI: created {}", &output_file);
 
     Ok(())

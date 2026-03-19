@@ -1,7 +1,6 @@
 use crate::common::*;
 use crate::gene_count::splice::*;
 use crate::run_gene_count::GeneCountArgs;
-use matrix_util::traits::RunningStatOps;
 
 use fnv::FnvHashMap as HashMap;
 
@@ -82,6 +81,10 @@ pub fn run_splice_aware(
     // Convert DashMap exon intervals to FnvHashMap for fast per-gene lookup
     let exon_intervals: HashMap<GeneId, Vec<(i64, i64)>> = exon_map.into_iter().collect();
     let records = gff_map.records();
+    let cutoffs = SqueezeCutoffs {
+        row: args.row_nnz_cutoff,
+        column: args.column_nnz_cutoff,
+    };
 
     for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names) {
         let njobs = records.len() as u64;
@@ -119,7 +122,75 @@ pub fn run_splice_aware(
             unspliced_triplets.len()
         );
 
-        // Collect union of cells and genes across both matrices
+        // Build total counts (spliced + unspliced) for QC
+        // Gene key: strip "/count/spliced" or "/count/unspliced" suffix, use "/count/total"
+        let total_triplets: Vec<(CellBarcode, Box<str>, f32)> = {
+            let mut totals: fnv::FnvHashMap<(CellBarcode, Box<str>), f32> =
+                fnv::FnvHashMap::default();
+            for (cb, feat, val) in spliced_triplets.iter().chain(unspliced_triplets.iter()) {
+                let gene_key = feat
+                    .rfind("/count/")
+                    .map(|pos| &feat[..pos])
+                    .unwrap_or(feat.as_ref());
+                let total_key: Box<str> = format!("{}/count/total", gene_key).into();
+                *totals.entry((cb.clone(), total_key)).or_default() += val;
+            }
+            totals.into_iter().map(|((c, k), v)| (c, k, v)).collect()
+        };
+
+        // QC on total counts
+        let total_file = match backend {
+            SparseIoBackend::HDF5 => format!("{}/{}.h5", &args.output, batch_name),
+            SparseIoBackend::Zarr => format!("{}/{}.zarr", &args.output, batch_name),
+        };
+        info!("writing total counts to {}", total_file);
+        format_data_triplets(total_triplets)
+            .to_backend(&total_file)?
+            .qc(cutoffs.clone())?;
+
+        // Read back surviving genes and cells from total counts QC
+        let total_data = open_sparse_matrix(&total_file, backend)?;
+        let qc_row_names = total_data.row_names()?;
+        let qc_col_names = total_data.column_names()?;
+        info!(
+            "after Q/C on total counts: {} genes x {} cells",
+            qc_row_names.len(),
+            qc_col_names.len()
+        );
+
+        // Build index maps for the QC-passing names
+        // Map total row names back to spliced/unspliced feature names
+        let qc_gene_keys: fnv::FnvHashSet<Box<str>> = qc_row_names
+            .iter()
+            .filter_map(|name| {
+                name.rfind("/count/")
+                    .map(|pos| name[..pos].to_string().into_boxed_str())
+            })
+            .collect();
+
+        let qc_cells: fnv::FnvHashSet<CellBarcode> = qc_col_names
+            .iter()
+            .map(|name| CellBarcode::Barcode(name.clone()))
+            .collect();
+
+        // Filter spliced/unspliced triplets to QC-passing genes and cells
+        let filter_triplets = |triplets: Vec<(CellBarcode, Box<str>, f32)>| -> Vec<_> {
+            triplets
+                .into_iter()
+                .filter(|(cb, feat, _)| {
+                    let gene_key = feat
+                        .rfind("/count/")
+                        .map(|pos| feat[..pos].to_string().into_boxed_str())
+                        .unwrap_or_else(|| feat.clone());
+                    qc_gene_keys.contains(&gene_key) && qc_cells.contains(cb)
+                })
+                .collect()
+        };
+
+        let spliced_triplets = filter_triplets(spliced_triplets);
+        let unspliced_triplets = filter_triplets(unspliced_triplets);
+
+        // Use shared names from QC-passing set for consistent dimensions
         let UnionNames {
             col_names,
             cell_to_index,
@@ -128,18 +199,17 @@ pub fn run_splice_aware(
         } = collect_union_names(&spliced_triplets, &unspliced_triplets);
 
         info!(
-            "union: {} genes x {} cells",
+            "writing spliced/unspliced: {} genes x {} cells",
             row_names.len(),
             col_names.len()
         );
 
-        // Write spliced matrix with shared names
+        // Write spliced matrix
         let spliced_file = match backend {
             SparseIoBackend::HDF5 => format!("{}/{}_spliced.h5", &args.output, batch_name),
             SparseIoBackend::Zarr => format!("{}/{}_spliced.zarr", &args.output, batch_name),
         };
-        info!("writing spliced counts to {}", spliced_file);
-        let spliced_data = format_data_triplets_shared(
+        format_data_triplets_shared(
             spliced_triplets,
             &feature_to_index,
             &cell_to_index,
@@ -147,14 +217,14 @@ pub fn run_splice_aware(
             col_names.clone(),
         )
         .to_backend(&spliced_file)?;
+        info!("wrote spliced counts to {}", spliced_file);
 
-        // Write unspliced matrix with shared names
+        // Write unspliced matrix
         let unspliced_file = match backend {
             SparseIoBackend::HDF5 => format!("{}/{}_unspliced.h5", &args.output, batch_name),
             SparseIoBackend::Zarr => format!("{}/{}_unspliced.zarr", &args.output, batch_name),
         };
-        info!("writing unspliced counts to {}", unspliced_file);
-        let unspliced_data = format_data_triplets_shared(
+        format_data_triplets_shared(
             unspliced_triplets,
             &feature_to_index,
             &cell_to_index,
@@ -162,58 +232,7 @@ pub fn run_splice_aware(
             col_names,
         )
         .to_backend(&unspliced_file)?;
-
-        // Union QC: keep a row/col if it passes the cutoff in either matrix
-        info!("union Q/C across spliced and unspliced matrices");
-        let block_size = 100;
-
-        let spliced_row = collect_row_stat(spliced_data.as_ref(), block_size)?;
-        let unspliced_row = collect_row_stat(unspliced_data.as_ref(), block_size)?;
-        let spliced_col = collect_column_stat(spliced_data.as_ref(), block_size)?;
-        let unspliced_col = collect_column_stat(unspliced_data.as_ref(), block_size)?;
-
-        let s_row_nnz = spliced_row.count_positives();
-        let u_row_nnz = unspliced_row.count_positives();
-        let s_col_nnz = spliced_col.count_positives();
-        let u_col_nnz = unspliced_col.count_positives();
-
-        let row_cutoff = args.row_nnz_cutoff;
-        let col_cutoff = args.column_nnz_cutoff;
-
-        let row_idx: Vec<usize> = (0..s_row_nnz.len())
-            .filter(|&i| {
-                (s_row_nnz[i] as usize) >= row_cutoff || (u_row_nnz[i] as usize) >= row_cutoff
-            })
-            .collect();
-
-        let col_idx: Vec<usize> = (0..s_col_nnz.len())
-            .filter(|&i| {
-                (s_col_nnz[i] as usize) >= col_cutoff || (u_col_nnz[i] as usize) >= col_cutoff
-            })
-            .collect();
-
-        info!(
-            "after union Q/C: {} genes x {} cells",
-            row_idx.len(),
-            col_idx.len()
-        );
-
-        let col_ref = if col_idx.len() < s_col_nnz.len() {
-            Some(&col_idx)
-        } else {
-            None
-        };
-        let row_ref = if row_idx.len() < s_row_nnz.len() {
-            Some(&row_idx)
-        } else {
-            None
-        };
-
-        let mut spliced_data = open_sparse_matrix(&spliced_file, backend)?;
-        spliced_data.subset_columns_rows(col_ref, row_ref)?;
-
-        let mut unspliced_data = open_sparse_matrix(&unspliced_file, backend)?;
-        unspliced_data.subset_columns_rows(col_ref, row_ref)?;
+        info!("wrote unspliced counts to {}", unspliced_file);
     }
 
     Ok(())

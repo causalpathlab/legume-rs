@@ -1,7 +1,7 @@
 use crate::cell_clustering::{cluster_cells_from_bam, ClusteringParams};
 use crate::common::*;
 use crate::data::cell_membership::CellMembership;
-use crate::data::methylation::*;
+use crate::data::conversion::*;
 use crate::editing::io::{load_atoi_mask_from_parquet, ToParquet};
 use crate::editing::mask::{build_atoi_mask, filter_m6a_by_atoi_mask};
 use crate::editing::mixture::MixtureParams;
@@ -164,14 +164,14 @@ pub struct DartSeqCountArgs {
         short = 't',
         long,
         value_enum,
-        default_value = "beta",
+        default_value = "ratio",
         help = "Type of output value to report",
         long_help = "Type of output value to report.\n\
-		     beta: methylation fraction (methylated / total),\n\
-		     methylated: raw methylated read count,\n\
-		     unmethylated: raw unmethylated read count."
+		     ratio: conversion fraction (converted / total),\n\
+		     converted: raw converted read count,\n\
+		     unconverted: raw unconverted read count."
     )]
-    pub output_value_type: MethFeatureType,
+    pub output_value_type: ConversionValueType,
 
     #[arg(
         long,
