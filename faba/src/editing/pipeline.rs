@@ -365,6 +365,7 @@ pub fn gather_conversion_stats(
     gff_map: &GffRecordMap,
     bam_file: &str,
     cell_membership: Option<&CellMembership>,
+    valid_cell_barcodes: Option<&fnv::FnvHashSet<CellBarcode>>,
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, ConversionData)>> {
     let ndata = gene_sites.iter().map(|x| x.value().len()).sum::<usize>();
     let arc_ret = Arc::new(Mutex::new(Vec::with_capacity(ndata)));
@@ -385,10 +386,21 @@ pub fn gather_conversion_stats(
             Ok(())
         })?;
 
-    Arc::try_unwrap(arc_ret)
+    let mut stats = Arc::try_unwrap(arc_ret)
         .map_err(|_| anyhow::anyhow!("failed to release stats"))?
-        .into_inner()
-        .map_err(Into::into)
+        .into_inner()?;
+
+    if let Some(valid_cells) = valid_cell_barcodes {
+        let before = stats.len();
+        stats.retain(|(cb, _, _)| valid_cells.contains(cb));
+        info!(
+            "filtered to QC-passing cells: {} -> {} conversion stats",
+            before,
+            stats.len()
+        );
+    }
+
+    Ok(stats)
 }
 
 /// Extract conversion statistics for a single site from a pre-loaded DnaBaseFreqMap.
@@ -582,13 +594,12 @@ fn collect_gene_conversion_stats(
 /// Unified backend output for conversion sites (m6A or A-to-I).
 ///
 /// Uses `site_suffix()` from ConversionSite for feature IDs.
-/// Gene-level output is only supported for m6A.
 pub fn process_all_bam_files_to_backend(
     params: &ConversionParams,
     gene_sites: &HashMap<GeneId, Vec<ConversionSite>>,
     gff_map: &GffRecordMap,
-    gene_level_output: bool,
     output_null_data: bool,
+    valid_cell_barcodes: Option<&fnv::FnvHashSet<CellBarcode>>,
 ) -> anyhow::Result<()> {
     let membership = params.load_membership()?;
 
@@ -607,11 +618,8 @@ pub fn process_all_bam_files_to_backend(
     let take_value = params.value_extractor();
     let cutoffs = params.qc_cutoffs();
 
-    let mut genes = HashSet::<Box<str>>::default();
     let mut sites = HashSet::<Box<str>>::default();
-    let mut gene_data_files: Vec<Box<str>> = vec![];
     let mut site_data_files: Vec<Box<str>> = vec![];
-    let mut null_gene_data_files: Vec<Box<str>> = vec![];
     let mut null_site_data_files: Vec<Box<str>> = vec![];
 
     let wt_batch_names = uniq_batch_names(&params.wt_bam_files)?;
@@ -623,16 +631,13 @@ pub fn process_all_bam_files_to_backend(
             gene_sites,
             params,
             gff_map,
-            &gene_key,
             &site_key,
             &take_value,
             &cutoffs,
-            &mut genes,
             &mut sites,
-            &mut gene_data_files,
             &mut site_data_files,
             membership.as_ref(),
-            gene_level_output,
+            valid_cell_barcodes,
         )?;
     }
 
@@ -647,16 +652,13 @@ pub fn process_all_bam_files_to_backend(
                 gene_sites,
                 params,
                 gff_map,
-                &gene_key,
                 &site_key,
                 &take_value,
                 &cutoffs,
-                &mut genes,
                 &mut sites,
-                &mut null_gene_data_files,
                 &mut null_site_data_files,
                 membership.as_ref(),
-                gene_level_output,
+                valid_cell_barcodes,
             )?;
         }
     }
@@ -679,11 +681,8 @@ pub fn process_all_bam_files_to_backend(
     // Reorder rows to ensure consistency across files
     reorder_all_matrices(
         params,
-        genes,
         sites,
-        gene_data_files,
         site_data_files,
-        null_gene_data_files,
         null_site_data_files,
         output_null_data,
     )?;
@@ -698,16 +697,13 @@ fn process_bam_to_backend(
     gene_sites: &HashMap<GeneId, Vec<ConversionSite>>,
     params: &ConversionParams,
     gff_map: &GffRecordMap,
-    gene_key: &(impl Fn(&BedWithGene) -> Box<str> + Send + Sync),
     site_key: &(impl Fn(&BedWithGene) -> Box<str> + Send + Sync),
     _take_value: &(impl Fn(&ConversionData) -> f32 + Send + Sync),
     cutoffs: &SqueezeCutoffs,
-    genes: &mut HashSet<Box<str>>,
     sites: &mut HashSet<Box<str>>,
-    gene_data_files: &mut Vec<Box<str>>,
     site_data_files: &mut Vec<Box<str>>,
     cell_membership: Option<&CellMembership>,
-    gene_level_output: bool,
+    valid_cell_barcodes: Option<&fnv::FnvHashSet<CellBarcode>>,
 ) -> anyhow::Result<()> {
     info!(
         "collecting data over {} sites from {} ...",
@@ -715,7 +711,14 @@ fn process_bam_to_backend(
         bam_file
     );
 
-    let stats = gather_conversion_stats(gene_sites, params, gff_map, bam_file, cell_membership)?;
+    let stats = gather_conversion_stats(
+        gene_sites,
+        params,
+        gff_map,
+        bam_file,
+        cell_membership,
+        valid_cell_barcodes,
+    )?;
 
     info!(
         "aggregating the '{}' triplets over {} stats...",
@@ -755,53 +758,26 @@ fn process_bam_to_backend(
         };
         let output_name = format!("{}{}", batch_name, mod_suffix);
 
-        if gene_level_output {
-            let gene_data_file = params.backend_file_path(&output_name);
-            let triplets = summarize_stats(&stats, gene_key, &value_fn);
-            let data = triplets.to_backend(&gene_data_file)?;
-            data.qc(cutoffs.clone())?;
-            genes.extend(data.row_names()?);
-            info!("created gene-level data: {}", &gene_data_file);
-            gene_data_files.push(gene_data_file);
-        } else {
-            let site_data_file = params.backend_file_path(&output_name);
-            let triplets = summarize_stats(&stats, site_key, &value_fn);
-            let data = triplets.to_backend(&site_data_file)?;
-            data.qc(cutoffs.clone())?;
-            sites.extend(data.row_names()?);
-            info!("created site-level data: {}", &site_data_file);
-            site_data_files.push(site_data_file);
-        }
+        let site_data_file = params.backend_file_path(&output_name);
+        let triplets = summarize_stats(&stats, site_key, &value_fn);
+        let data = triplets.to_backend(&site_data_file)?;
+        data.qc(cutoffs.clone())?;
+        sites.extend(data.row_names()?);
+        info!("created site-level data: {}", &site_data_file);
+        site_data_files.push(site_data_file);
     }
 
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reorder_all_matrices(
     params: &ConversionParams,
-    genes: HashSet<Box<str>>,
     sites: HashSet<Box<str>>,
-    gene_data_files: Vec<Box<str>>,
     site_data_files: Vec<Box<str>>,
-    null_gene_data_files: Vec<Box<str>>,
     null_site_data_files: Vec<Box<str>>,
     output_null_data: bool,
 ) -> anyhow::Result<()> {
-    let mut genes_sorted: Vec<_> = genes.into_iter().collect();
-    genes_sorted.sort();
-
     let backend = &params.backend;
-
-    for data_file in gene_data_files {
-        open_sparse_matrix(&data_file, backend)?.reorder_rows(&genes_sorted)?;
-    }
-
-    if output_null_data {
-        for data_file in null_gene_data_files {
-            open_sparse_matrix(&data_file, backend)?.reorder_rows(&genes_sorted)?;
-        }
-    }
 
     let mut sites_sorted: Vec<_> = sites.into_iter().collect();
     sites_sorted.sort();
@@ -835,8 +811,14 @@ pub fn process_all_bam_files_to_bed(
     let wt_batch_names = uniq_batch_names(&params.wt_bam_files)?;
 
     for (bam_file, batch_name) in params.wt_bam_files.iter().zip(wt_batch_names) {
-        let mut stats =
-            gather_conversion_stats(gene_sites, params, gff_map, bam_file, membership.as_ref())?;
+        let mut stats = gather_conversion_stats(
+            gene_sites,
+            params,
+            gff_map,
+            bam_file,
+            membership.as_ref(),
+            None,
+        )?;
         let bed_path = format!("{}/{}.bed.gz", &params.output, batch_name);
         write_bed(
             &mut stats,
@@ -858,6 +840,7 @@ pub fn process_all_bam_files_to_bed(
                 gff_map,
                 bam_file,
                 membership.as_ref(),
+                None,
             )?;
             let bed_path = format!("{}/{}.bed.gz", &params.output, batch_name);
             write_bed(
@@ -1006,8 +989,14 @@ pub fn run_mixture_model(
     // Collect cell-level stats from all WT BAM files
     let mut all_stats: Vec<(CellBarcode, BedWithGene, ConversionData)> = Vec::new();
     for bam_file in &params.wt_bam_files {
-        let stats =
-            gather_conversion_stats(gene_sites, params, gff_map, bam_file, membership.as_ref())?;
+        let stats = gather_conversion_stats(
+            gene_sites,
+            params,
+            gff_map,
+            bam_file,
+            membership.as_ref(),
+            None,
+        )?;
         all_stats.extend(stats);
     }
 
@@ -1037,7 +1026,7 @@ pub fn run_mixture_model(
         fnv::FnvHashMap::default();
     for (cb, bed, meth) in &all_stats {
         let cell_idx = cell_to_idx[cb];
-        let count = meth.converted + meth.unconverted;
+        let count = meth.converted;
         // Convert absolute site_pos to strand-aware relative position
         let rel_pos = if let Some(gff) = gff_map.get(&bed.gene) {
             let lb = (gff.start - 1).max(0); // GFF 1-based -> 0-based

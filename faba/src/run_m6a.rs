@@ -10,7 +10,7 @@ use crate::editing::pipeline::{
     run_mixture_model, ConversionParams,
 };
 use crate::editing::sifter::ModificationType;
-use crate::pipeline_util::*;
+use crate::pipeline_util::{check_all_bam_indices, run_gene_count_qc};
 
 use genomic_data::gff::FeatureType as GffFeatureType;
 use genomic_data::gff::GeneType as GffGeneType;
@@ -206,15 +206,6 @@ pub struct DartSeqCountArgs {
         long_help = "Output results in BED file format for genomic intervals."
     )]
     output_bed_file: bool,
-
-    #[arg(
-        long = "gene-level",
-        default_value_t = false,
-        help = "Output results at a gene level (default: a site level)",
-        long_help = "Output results at a gene level (default: a site level).\n\
-		     The counts will be aggregated within a gene."
-    )]
-    pub gene_level_output: bool,
 
     #[arg(
         short,
@@ -441,6 +432,37 @@ pub struct DartSeqCountArgs {
                      before clustering."
     )]
     cluster_min_col_nnz: usize,
+
+    // ========== Gene expression QC ==========
+    #[arg(
+        long = "gene-min-cells",
+        default_value_t = 10,
+        help = "Min cells per gene for expression QC",
+        long_help = "Minimum number of cells with non-zero expression for a gene\n\
+                     to pass QC. Genes below this threshold are excluded before\n\
+                     site discovery."
+    )]
+    pub gene_min_cells: usize,
+
+    #[arg(
+        long = "cell-min-genes",
+        default_value_t = 10,
+        help = "Min genes per cell for expression QC",
+        long_help = "Minimum number of genes with non-zero expression for a cell\n\
+                     to pass QC. Cells below this threshold are excluded from\n\
+                     quantification."
+    )]
+    pub cell_min_genes: usize,
+
+    #[arg(
+        long = "skip-gene-qc",
+        default_value_t = false,
+        help = "Skip gene expression QC step",
+        long_help = "Skip the a priori gene expression QC step.\n\
+                     By default, faba counts reads per gene and filters to\n\
+                     expressed genes/cells before site discovery."
+    )]
+    pub skip_gene_qc: bool,
 }
 
 /// Create m6A ConversionParams from DartSeqCountArgs
@@ -539,6 +561,29 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Gene expression QC: filter to expressed genes and valid cells
+    let gene_qc = if !args.skip_gene_qc {
+        let mut all_bam_files = args.wt_bam_files.clone();
+        all_bam_files.extend_from_slice(&args.mut_bam_files);
+        let qc = run_gene_count_qc(
+            &args.gff_file,
+            &all_bam_files,
+            &args.cell_barcode_tag,
+            &args.gene_barcode_tag,
+            args.gene_min_cells,
+            args.cell_min_genes,
+        )?;
+        gff_map.retain_by_ids(&qc.gene_ids);
+        info!("After gene QC: {} genes retained", gff_map.len());
+        if gff_map.is_empty() {
+            info!("no genes passed QC");
+            return Ok(());
+        }
+        Some(qc)
+    } else {
+        None
+    };
+
     // Load cell membership: from file, from clustering, or none
     let membership = if let Some(ref path) = args.cell_membership_file {
         // Load from file
@@ -636,7 +681,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     let ndata: usize = gene_sites.iter().map(|x| x.value().len()).sum();
     info!("Found {} m6A sites", ndata);
 
-    gene_sites.to_parquet(&gff_map, format!("{}/sites.parquet", args.output))?;
+    gene_sites.to_parquet(&gff_map, format!("{}/m6a_sites.parquet", args.output))?;
 
     //////////////////////////////////////////
     // SECOND PASS: Collect cell-level data //
@@ -651,12 +696,13 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             args.output_null_data,
         )?;
     } else {
+        let valid_cells = gene_qc.as_ref().map(|qc| &qc.cell_barcodes);
         process_all_bam_files_to_backend(
             &m6a_params,
             &gene_sites,
             &gff_map,
-            args.gene_level_output,
             args.output_null_data,
+            valid_cells,
         )?;
     }
 
@@ -664,7 +710,14 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     if let Some((Some(ref atoi_sites), _)) = atoi_mask {
         if !atoi_sites.is_empty() {
             info!("Second pass: A-to-I count matrix");
-            process_all_bam_files_to_backend(&atoi_params, atoi_sites, &gff_map, false, false)?;
+            let valid_cells = gene_qc.as_ref().map(|qc| &qc.cell_barcodes);
+            process_all_bam_files_to_backend(
+                &atoi_params,
+                atoi_sites,
+                &gff_map,
+                false,
+                valid_cells,
+            )?;
         }
     }
 

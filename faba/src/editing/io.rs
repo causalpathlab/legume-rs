@@ -7,7 +7,6 @@ use genomic_data::gff::{GeneId, GffRecordMap};
 use genomic_data::sam::Strand;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use std::collections::HashSet;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -216,14 +215,16 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
 /// Returns a set of (chr, position) tuples for masking known A-to-I sites.
 /// Tries "primary_pos" column first (new unified format), falls back to "editing_pos"
 /// (legacy atoi format) for backward compatibility.
-pub fn load_atoi_mask_from_parquet<P: AsRef<Path>>(path: P) -> Result<HashSet<(Box<str>, i64)>> {
+pub fn load_atoi_mask_from_parquet<P: AsRef<Path>>(
+    path: P,
+) -> Result<fnv::FnvHashSet<(Box<str>, i64)>> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let file = File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
     let reader = builder.build()?;
 
-    let mut mask = HashSet::new();
+    let mut mask = fnv::FnvHashSet::default();
 
     for batch in reader {
         let batch = batch?;

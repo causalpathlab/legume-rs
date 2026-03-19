@@ -2,14 +2,12 @@ use crate::editing::ConversionSite;
 use dashmap::DashMap;
 use genomic_data::gff::{GeneId, GffRecordMap};
 use genomic_data::sam::Strand;
-use std::collections::HashSet;
-
 /// Build a set of (chr, pos) for all A-to-I sites, used to mask m6A candidates
 pub fn build_atoi_mask(
     sites: &DashMap<GeneId, Vec<ConversionSite>>,
     gff_map: &GffRecordMap,
-) -> HashSet<(Box<str>, i64)> {
-    let mut mask = HashSet::new();
+) -> fnv::FnvHashSet<(Box<str>, i64)> {
+    let mut mask = fnv::FnvHashSet::default();
     for entry in sites.iter() {
         let gene_id = entry.key();
         let sites = entry.value();
@@ -30,7 +28,7 @@ pub fn build_atoi_mask(
 /// For backward strand GTY: positions [conv, conv+1, conv+2] = (G, T, Y)
 pub fn filter_m6a_by_atoi_mask(
     gene_sites: &DashMap<GeneId, Vec<ConversionSite>>,
-    atoi_mask: &HashSet<(Box<str>, i64)>,
+    atoi_mask: &fnv::FnvHashSet<(Box<str>, i64)>,
     gff_map: &GffRecordMap,
 ) {
     if atoi_mask.is_empty() {
@@ -75,7 +73,7 @@ pub fn filter_m6a_by_atoi_mask(
 /// Each poly-A site is a single position, so just check direct (chr, pos) membership.
 pub fn filter_polya_by_atoi_mask(
     gene_sites: &DashMap<GeneId, Vec<i64>>,
-    atoi_mask: &HashSet<(Box<str>, i64)>,
+    atoi_mask: &fnv::FnvHashSet<(Box<str>, i64)>,
     gff_map: &GffRecordMap,
 ) {
     if atoi_mask.is_empty() {

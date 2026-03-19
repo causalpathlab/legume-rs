@@ -8,15 +8,14 @@ use crate::editing::pipeline::{
     ConversionParams,
 };
 use crate::editing::sifter::ModificationType;
-use crate::gene_count::splice::{count_read_per_gene, format_gene_key};
-use crate::pipeline_util::check_all_bam_indices;
+use crate::gene_count::splice::{count_read_per_gene_splice, format_gene_key};
+use crate::pipeline_util::{check_all_bam_indices, extract_gene_key, qc_passing_keys, GeneCountQc};
 
 use fnv::FnvHashMap;
 use genomic_data::gff::GffRecordMap;
 use genomic_data::sam::CellBarcode;
 use log::info;
 use rayon::ThreadPoolBuilder;
-use std::collections::HashSet;
 
 #[derive(Args, Debug)]
 #[command(
@@ -182,7 +181,7 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
     }
 
     // 1. Gene Expression Filtering
-    let expressed_genes = if !args.skip_genes {
+    let gene_count_qc = if !args.skip_genes {
         info!("=== Step 1/4: Gene expression filtering ===");
         run_gene_counting_step(args)?
     } else {
@@ -193,7 +192,7 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
     // 2. ATOI Detection
     let atoi_mask = if !args.skip_atoi {
         info!("=== Step 2/4: ATOI detection ===");
-        match run_atoi_step(args, &expressed_genes) {
+        match run_atoi_step(args, &gene_count_qc) {
             Ok(mask_data) => {
                 info!(
                     "ATOI complete: {} sites, {} mask positions",
@@ -215,7 +214,7 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
     // 3. APA Analysis
     if !args.skip_apa {
         info!("=== Step 3/4: APA analysis ===");
-        match run_apa_step(args, &atoi_mask, &expressed_genes) {
+        match run_apa_step(args, &atoi_mask, &gene_count_qc) {
             Ok(_) => info!("APA complete"),
             Err(e) => log::warn!("APA step failed: {}. Continuing to DART.", e),
         }
@@ -226,7 +225,7 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
     // 4. DART Analysis (conditional on mutant data)
     if let Some(ref mut_bams) = args.mut_bam_files {
         info!("=== Step 4/4: DART analysis ===");
-        match run_dart_step(args, mut_bams, &atoi_mask, &expressed_genes) {
+        match run_dart_step(args, mut_bams, &atoi_mask, &gene_count_qc) {
             Ok(_) => info!("DART complete"),
             Err(e) => log::warn!("DART step failed: {}", e),
         }
@@ -239,19 +238,20 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-// Helper structures
-struct ExpressedGenes {
-    gene_ids: HashSet<GeneId>,
-}
-
 struct AtoiMaskData {
-    mask: HashSet<(Box<str>, i64)>,
+    mask: fnv::FnvHashSet<(Box<str>, i64)>,
     n_sites: usize,
 }
 
-// Step 1: Gene expression filtering
-fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<ExpressedGenes>> {
-    let gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
+// Step 1: Gene expression filtering (splice-aware: spliced + unspliced in one backend)
+fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCountQc>> {
+    // Parse GFF once to get both gene map and exon intervals
+    let all_records = read_gff_record_vec(args.gff_file.as_ref())?;
+    let gene_map = build_gene_map(&all_records, Some(&FeatureType::Gene))?;
+    let exon_map = build_exon_intervals(&all_records);
+    let exon_intervals: FnvHashMap<GeneId, Vec<(i64, i64)>> = exon_map.into_iter().collect();
+
+    let gff_map = GffRecordMap::from_map(gene_map);
     info!("Loaded {} genes for expression filtering", gff_map.len());
 
     // Combine all BAM files (WT + mut)
@@ -267,10 +267,6 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<Expresse
 
     let batch_names = uniq_batch_names(&all_bam_files)?;
     let records = gff_map.records();
-    let cutoffs = SqueezeCutoffs {
-        row: args.gene_min_cells,
-        column: args.cell_min_genes,
-    };
 
     // Build gene_key → GeneId mapping for reverse lookup after QC
     let gene_key_to_id: FnvHashMap<Box<str>, GeneId> = records
@@ -278,57 +274,116 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<Expresse
         .map(|rec| (format_gene_key(rec), rec.gene_id.clone()))
         .collect();
 
-    let mut expressed_gene_ids: HashSet<GeneId> = HashSet::new();
+    let mut expressed_gene_ids: fnv::FnvHashSet<GeneId> = fnv::FnvHashSet::default();
+    let mut valid_cell_barcodes: fnv::FnvHashSet<CellBarcode> = fnv::FnvHashSet::default();
 
     for (bam_file, batch_name) in all_bam_files.iter().zip(batch_names.iter()) {
         let njobs = records.len() as u64;
-        info!("Counting genes in {} ({} genes)", batch_name, njobs);
+        info!(
+            "Counting genes (splice-aware) in {} ({} genes)",
+            batch_name, njobs
+        );
 
-        let gene_level_stats: Vec<(CellBarcode, Box<str>, f32)> = records
+        // Splice-aware counting via par_iter
+        let results: Vec<_> = records
             .par_iter()
             .progress_count(njobs)
             .map(|rec| {
-                count_read_per_gene(
+                count_read_per_gene_splice(
                     bam_file,
                     rec,
+                    &exon_intervals,
                     &args.cell_barcode_tag,
                     &args.gene_barcode_tag,
                 )
             })
-            .collect::<anyhow::Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect();
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let mut spliced_triplets = Vec::new();
+        let mut unspliced_triplets = Vec::new();
+        for r in results {
+            spliced_triplets.extend(r.spliced);
+            unspliced_triplets.extend(r.unspliced);
+        }
+
+        info!(
+            "{}: {} spliced, {} unspliced triplets",
+            batch_name,
+            spliced_triplets.len(),
+            unspliced_triplets.len()
+        );
+
+        // In-memory QC on total counts
+        let (passing_genes, passing_cells) = qc_passing_keys(
+            &spliced_triplets,
+            &unspliced_triplets,
+            args.gene_min_cells,
+            args.cell_min_genes,
+        );
+
+        info!(
+            "{}: {} genes, {} cells passed QC",
+            batch_name,
+            passing_genes.len(),
+            passing_cells.len()
+        );
+
+        // Filter triplets to QC-passing genes and cells (par_iter)
+        let filter_triplets =
+            |triplets: Vec<(CellBarcode, Box<str>, f32)>| -> Vec<(CellBarcode, Box<str>, f32)> {
+                triplets
+                    .into_par_iter()
+                    .filter(|(cb, feat, _)| {
+                        let gk: Box<str> = extract_gene_key(feat).into();
+                        passing_genes.contains(&gk) && passing_cells.contains(cb)
+                    })
+                    .collect()
+            };
+
+        let spliced_triplets = filter_triplets(spliced_triplets);
+        let unspliced_triplets = filter_triplets(unspliced_triplets);
+
+        // Merge spliced + unspliced into one backend
+        let UnionNames {
+            col_names,
+            cell_to_index,
+            row_names,
+            feature_to_index,
+        } = collect_union_names(&spliced_triplets, &unspliced_triplets);
 
         let backend_file = match args.backend {
             SparseIoBackend::HDF5 => format!("{}/{}_genes.h5", &args.output, batch_name),
             SparseIoBackend::Zarr => format!("{}/{}_genes.zarr", &args.output, batch_name),
         };
 
-        format_data_triplets(gene_level_stats)
-            .to_backend(&backend_file)?
-            .qc(cutoffs.clone())?;
+        let merged: Vec<_> = spliced_triplets
+            .into_iter()
+            .chain(unspliced_triplets)
+            .collect();
 
-        // Read back surviving row/column names after QC
-        let data = open_sparse_matrix(&backend_file, &args.backend)?;
-        let row_names = data.row_names()?;
-        let col_names = data.column_names()?;
+        format_data_triplets_shared(
+            merged,
+            &feature_to_index,
+            &cell_to_index,
+            row_names,
+            col_names,
+        )
+        .to_backend(&backend_file)?;
+
         info!(
-            "{}: {} genes, {} cells passed QC",
-            batch_name,
-            row_names.len(),
-            col_names.len()
+            "{}: wrote spliced + unspliced to {}",
+            batch_name, backend_file
         );
 
-        // Map row names back to GeneIds
-        // Row name format: {gene_key}/count/total
-        for row_name in &row_names {
-            if let Some(gene_key) = row_name.split('/').next() {
-                if let Some(gene_id) = gene_key_to_id.get(gene_key) {
-                    expressed_gene_ids.insert(gene_id.clone());
-                }
+        // Map passing gene keys back to GeneIds
+        for gene_key in &passing_genes {
+            if let Some(gene_id) = gene_key_to_id.get(gene_key) {
+                expressed_gene_ids.insert(gene_id.clone());
             }
         }
+
+        // Collect QC-passing cell barcodes
+        valid_cell_barcodes.extend(passing_cells);
     }
 
     info!(
@@ -337,19 +392,26 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<Expresse
         all_bam_files.len()
     );
 
-    Ok(Some(ExpressedGenes {
+    info!(
+        "Cell filtering: {} cells passed QC across {} BAM files",
+        valid_cell_barcodes.len(),
+        all_bam_files.len()
+    );
+
+    Ok(Some(GeneCountQc {
         gene_ids: expressed_gene_ids,
+        cell_barcodes: valid_cell_barcodes,
     }))
 }
 
 // Step 2: ATOI detection
 fn run_atoi_step(
     args: &PipelineArgs,
-    expressed_genes: &Option<ExpressedGenes>,
+    gene_count_qc: &Option<GeneCountQc>,
 ) -> anyhow::Result<AtoiMaskData> {
     // Load GFF and filter to expressed genes
     let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
-    if let Some(ref eg) = expressed_genes {
+    if let Some(ref eg) = gene_count_qc {
         gff_map.retain_by_ids(&eg.gene_ids);
         info!("Filtered to {} expressed genes", gff_map.len());
     } else {
@@ -407,7 +469,14 @@ fn run_atoi_step(
     } else {
         info!("Quantifying ATOI sites per cell (WT files only)...");
     }
-    process_all_bam_files_to_backend(&params, &atoi_sites, &gff_map, false, has_mut_files)?;
+    let valid_cells = gene_count_qc.as_ref().map(|qc| &qc.cell_barcodes);
+    process_all_bam_files_to_backend(
+        &params,
+        &atoi_sites,
+        &gff_map,
+        has_mut_files,
+        valid_cells,
+    )?;
 
     // Mixture model: cluster editing sites per gene
     info!("Running 1D Gaussian mixture model on A-to-I sites...");
@@ -421,7 +490,7 @@ fn run_atoi_step(
 fn run_apa_step(
     args: &PipelineArgs,
     atoi_mask: &Option<AtoiMaskData>,
-    expressed_genes: &Option<ExpressedGenes>,
+    gene_count_qc: &Option<GeneCountQc>,
 ) -> anyhow::Result<()> {
     use crate::run_apa::{run_apa, ApaMethod, CountApaArgs};
 
@@ -447,17 +516,21 @@ fn run_apa_step(
         }
     }
 
-    // Extract valid gene IDs from gene count QC
-    let valid_gene_ids = match expressed_genes {
-        Some(eg) => {
-            info!("APA will restrict to {} expressed genes", eg.gene_ids.len());
-            Some(eg.gene_ids.clone())
+    // Extract valid gene IDs and cell barcodes from gene count QC
+    let (valid_gene_ids, valid_cell_barcodes) = match gene_count_qc {
+        Some(qc) => {
+            info!(
+                "APA will restrict to {} genes, {} cells",
+                qc.gene_ids.len(),
+                qc.cell_barcodes.len()
+            );
+            (Some(qc.gene_ids.clone()), Some(qc.cell_barcodes.clone()))
         }
-        None => None,
+        None => (None, None),
     };
 
     // Build CountApaArgs from PipelineArgs
-    let apa_args = CountApaArgs {
+    let mut apa_args = CountApaArgs {
         bam_files: all_bam_files,
         gff_file: Some(args.gff_file.clone()),
         cell_barcode_tag: args.cell_barcode_tag.clone(),
@@ -491,10 +564,14 @@ fn run_apa_step(
         min_fragments: 50,
         merge_distance: 50.0,
         compute_pdui: true,
+        gene_min_cells: args.gene_min_cells,
+        cell_min_genes: args.cell_min_genes,
+        skip_gene_qc: true, // Pipeline already did gene QC in step 1
         valid_gene_ids,
+        valid_cell_barcodes,
     };
 
-    run_apa(&apa_args)?;
+    run_apa(&mut apa_args)?;
     Ok(())
 }
 
@@ -503,11 +580,11 @@ fn run_dart_step(
     args: &PipelineArgs,
     mut_bams: &[Box<str>],
     atoi_mask: &Option<AtoiMaskData>,
-    expressed_genes: &Option<ExpressedGenes>,
+    gene_count_qc: &Option<GeneCountQc>,
 ) -> anyhow::Result<()> {
     // Load GFF and filter to expressed genes
     let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
-    if let Some(ref eg) = expressed_genes {
+    if let Some(ref eg) = gene_count_qc {
         gff_map.retain_by_ids(&eg.gene_ids);
         info!("Filtered to {} expressed genes", gff_map.len());
     } else {
@@ -566,7 +643,8 @@ fn run_dart_step(
 
     // Second pass: quantification
     info!("Quantifying m6A sites per cell...");
-    process_all_bam_files_to_backend(&params, &m6a_sites, &gff_map, false, false)?;
+    let valid_cells = gene_count_qc.as_ref().map(|qc| &qc.cell_barcodes);
+    process_all_bam_files_to_backend(&params, &m6a_sites, &gff_map, false, valid_cells)?;
 
     // Mixture model: cluster modification sites per gene
     info!("Running 1D Gaussian mixture model on m6A sites...");
