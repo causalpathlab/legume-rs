@@ -1,5 +1,5 @@
 use crate::common::*;
-use crate::data::methylation::*;
+use crate::data::conversion::*;
 use crate::data::util_htslib::*;
 
 use dashmap::DashMap as HashMap;
@@ -29,16 +29,16 @@ pub fn create_gene_key_function(
 }
 
 pub fn summarize_stats<F, V, T>(
-    stats: &[(CellBarcode, BedWithGene, MethylationData)],
+    stats: &[(CellBarcode, BedWithGene, ConversionData)],
     feature_key_func: F,
     value_func: V,
 ) -> TripletsRowsCols
 where
     F: Fn(&BedWithGene) -> T + Send + Sync,
     T: Clone + Send + Sync + ToString + std::hash::Hash + std::cmp::Eq + std::cmp::Ord,
-    V: Fn(&MethylationData) -> f32 + Send + Sync,
+    V: Fn(&ConversionData) -> f32 + Send + Sync,
 {
-    let combined_data: HashMap<(CellBarcode, T), MethylationData> = HashMap::default();
+    let combined_data: HashMap<(CellBarcode, T), ConversionData> = HashMap::default();
 
     stats.par_iter().for_each(|(cb, k, dat)| {
         let key = (cb.clone(), feature_key_func(k));

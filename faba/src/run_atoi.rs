@@ -1,5 +1,5 @@
 use crate::common::*;
-use crate::data::methylation::*;
+use crate::data::conversion::*;
 use crate::editing::io::ToParquet;
 use crate::editing::mixture::MixtureParams;
 use crate::editing::pipeline::*;
@@ -103,10 +103,10 @@ pub struct AtoICountArgs {
         short = 't',
         long,
         value_enum,
-        default_value = "beta",
+        default_value = "ratio",
         help = "Type of output value to report"
     )]
-    pub output_value_type: MethFeatureType,
+    pub output_value_type: ConversionValueType,
 
     #[arg(
         long,
