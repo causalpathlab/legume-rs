@@ -351,7 +351,7 @@ pub struct DartSeqCountArgs {
                      By default, faba fits a mixture of Gaussians + uniform noise\n\
                      to the discovered site positions per gene, selecting K by BIC.\n\
                      This outputs a sparse (cells x mixture_components) count matrix\n\
-                     and a mixture_annotations.parquet file."
+                     and a m6a_components.parquet file."
     )]
     pub no_mixture: bool,
 
