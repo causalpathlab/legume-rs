@@ -3,10 +3,11 @@ use crate::apa::likelihood::*;
 use crate::common::*;
 use crate::data::poly_a_stat_map::PolyASiteArgs;
 use crate::data::util_htslib::*;
+use crate::pipeline_util::run_gene_count_qc;
 
 use genomic_data::gff::{FeatureType as GffFeatureType, GeneId, GeneType as GffGeneType};
+use genomic_data::sam::CellBarcode;
 use rayon::ThreadPoolBuilder;
-use std::collections::HashSet;
 
 /// APA quantification method
 #[derive(clap::ValueEnum, Clone, Debug, Default)]
@@ -371,9 +372,35 @@ pub struct CountApaArgs {
     )]
     pub(crate) compute_pdui: bool,
 
-    /// Valid gene IDs from gene count QC (pipeline mode only, not CLI)
+    // ========== Gene expression QC ==========
+    #[arg(
+        long = "gene-min-cells",
+        default_value_t = 10,
+        help = "Min cells per gene for expression QC"
+    )]
+    pub(crate) gene_min_cells: usize,
+
+    #[arg(
+        long = "cell-min-genes",
+        default_value_t = 10,
+        help = "Min genes per cell for expression QC"
+    )]
+    pub(crate) cell_min_genes: usize,
+
+    #[arg(
+        long = "skip-gene-qc",
+        default_value_t = false,
+        help = "Skip gene expression QC step"
+    )]
+    pub(crate) skip_gene_qc: bool,
+
+    /// Valid gene IDs from gene count QC (pipeline mode or QC step)
     #[arg(skip)]
-    pub(crate) valid_gene_ids: Option<HashSet<GeneId>>,
+    pub(crate) valid_gene_ids: Option<fnv::FnvHashSet<GeneId>>,
+
+    /// Valid cell barcodes from gene count QC (pipeline mode or QC step)
+    #[arg(skip)]
+    pub(crate) valid_cell_barcodes: Option<fnv::FnvHashSet<CellBarcode>>,
 }
 
 impl CountApaArgs {
@@ -419,7 +446,7 @@ impl CountApaArgs {
 }
 
 /// Detect and quantify alternative polyadenylation (APA) sites
-pub fn run_apa(args: &CountApaArgs) -> anyhow::Result<()> {
+pub fn run_apa(args: &mut CountApaArgs) -> anyhow::Result<()> {
     mkdir(&args.output)?;
 
     let max_threads = num_cpus::get().min(args.max_threads);
@@ -436,6 +463,27 @@ pub fn run_apa(args: &CountApaArgs) -> anyhow::Result<()> {
     for bam_file in &args.bam_files {
         info!("checking .bai file for {}...", bam_file);
         check_bam_index(bam_file, None)?;
+    }
+
+    // Gene expression QC: populate valid_gene_ids and valid_cell_barcodes
+    if !args.skip_gene_qc && args.valid_gene_ids.is_none() {
+        if let Some(ref gff_file) = args.gff_file {
+            let qc = run_gene_count_qc(
+                gff_file,
+                &args.bam_files,
+                &args.cell_barcode_tag,
+                &args.gene_barcode_tag,
+                args.gene_min_cells,
+                args.cell_min_genes,
+            )?;
+            info!(
+                "After gene QC: {} genes, {} cells retained",
+                qc.gene_ids.len(),
+                qc.cell_barcodes.len()
+            );
+            args.valid_gene_ids = Some(qc.gene_ids);
+            args.valid_cell_barcodes = Some(qc.cell_barcodes);
+        }
     }
 
     match args.method {

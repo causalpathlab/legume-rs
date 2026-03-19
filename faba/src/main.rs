@@ -166,10 +166,10 @@ enum Commands {
     Metagene(MetageneArgs),
 
     #[command(
-        name = "pipeline",
-        aliases = ["full", "magic"],
-        about = "Run unified RNA-seq pipeline: genes → ATOI → APA → DART",
-        long_about = "Run unified RNA-seq analysis pipeline\n\n\
+        name = "all",
+        aliases = ["pipeline", "full", "magic"],
+        about = "Run all RNA-seq analyses: genes → ATOI → APA → DART",
+        long_about = "Run all RNA-seq analyses in a unified pipeline\n\n\
             Orchestrates the complete analysis workflow:\n  \
             1. Gene expression filtering (identify expressed genes)\n  \
             2. ATOI detection (A-to-I editing sites)\n  \
@@ -177,7 +177,7 @@ enum Commands {
             4. DART analysis (m6A methylation, masked, requires --mut)\n\n\
             Applies gene filtering after step 1 and ATOI masking to steps 3-4."
     )]
-    Pipeline(PipelineArgs),
+    All(PipelineArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -192,15 +192,15 @@ fn main() -> anyhow::Result<()> {
     }
     env_logger::init();
 
-    match &cli.commands {
-        Commands::DartSeq(args) => run_m6a(args)?,
-        Commands::Apa(args) => run_apa(args)?,
-        Commands::AtoI(args) => run_atoi(args)?,
-        Commands::Genes(args) => run_gene_count(args)?,
-        Commands::Depth(args) => run_read_depth(args)?,
-        Commands::Pwm(args) => run_scan_pwm(args)?,
-        Commands::Metagene(args) => run_metagene(args)?,
-        Commands::Pipeline(args) => run_pipeline(args)?,
+    match cli.commands {
+        Commands::DartSeq(ref args) => run_m6a(args)?,
+        Commands::Apa(mut args) => run_apa(&mut args)?,
+        Commands::AtoI(ref args) => run_atoi(args)?,
+        Commands::Genes(ref args) => run_gene_count(args)?,
+        Commands::Depth(ref args) => run_read_depth(args)?,
+        Commands::Pwm(ref args) => run_scan_pwm(args)?,
+        Commands::Metagene(ref args) => run_metagene(args)?,
+        Commands::All(ref args) => run_pipeline(args)?,
     }
 
     Ok(())

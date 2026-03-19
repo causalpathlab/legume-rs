@@ -1,6 +1,6 @@
 use crate::common::*;
 use crate::data::bam_io;
-use rust_htslib::bam::{self, ext::BamRecordExtensions, record::Cigar};
+use rust_htslib::bam::{self, ext::BamRecordExtensions};
 
 use fnv::FnvHashMap as HashMap;
 
@@ -53,7 +53,6 @@ pub fn count_read_per_gene_splice(
     exon_intervals: &HashMap<GeneId, Vec<(i64, i64)>>,
     cell_barcode_tag: &str,
     gene_barcode_tag: &str,
-    intron_buffer: i64,
 ) -> anyhow::Result<SplicedUnsplicedTriplets> {
     if rec.gene_id == GeneId::Missing {
         return Ok(SplicedUnsplicedTriplets {
@@ -76,7 +75,7 @@ pub fn count_read_per_gene_splice(
     let gene_name = format_gene_key(rec);
     let spliced_name: Box<str> = format!("{}/count/spliced", gene_name).into();
     let unspliced_name: Box<str> = format!("{}/count/unspliced", gene_name).into();
-    let mut counter = SpliceAwareReadCounter::new(cell_barcode_tag, exons, intron_buffer);
+    let mut counter = SpliceAwareReadCounter::new(cell_barcode_tag, exons);
 
     bam_io::for_each_record_in_gene(bam_file, rec, gene_barcode_tag, false, |bam_record| {
         counter.classify_and_count(&bam_record);
@@ -128,7 +127,6 @@ impl<'a> ReadCounter<'a> {
 enum SpliceClass {
     Spliced,
     Unspliced,
-    Ambiguous,
 }
 
 struct SpliceAwareReadCounter<'a> {
@@ -136,82 +134,52 @@ struct SpliceAwareReadCounter<'a> {
     unspliced: HashMap<CellBarcode, usize>,
     cell_barcode_tag: &'a str,
     exons: &'a [(i64, i64)], // sorted, merged, 0-based half-open
-    intron_buffer: i64,
 }
 
 impl<'a> SpliceAwareReadCounter<'a> {
-    fn new(cell_barcode_tag: &'a str, exons: &'a [(i64, i64)], intron_buffer: i64) -> Self {
+    fn new(cell_barcode_tag: &'a str, exons: &'a [(i64, i64)]) -> Self {
         Self {
             spliced: HashMap::default(),
             unspliced: HashMap::default(),
             cell_barcode_tag,
             exons,
-            intron_buffer,
         }
     }
 
     fn classify_and_count(&mut self, bam_record: &bam::Record) {
-        let class = self.classify(bam_record);
-        if class == SpliceClass::Ambiguous {
-            return;
-        }
-
         let cell_barcode =
             bam_io::extract_cell_barcode(bam_record, self.cell_barcode_tag.as_bytes());
 
-        match class {
+        // Skip reads without a valid cell barcode
+        if cell_barcode == CellBarcode::Missing {
+            return;
+        }
+
+        match self.classify(bam_record) {
             SpliceClass::Spliced => {
                 *self.spliced.entry(cell_barcode).or_default() += 1;
             }
             SpliceClass::Unspliced => {
                 *self.unspliced.entry(cell_barcode).or_default() += 1;
             }
-            SpliceClass::Ambiguous => unreachable!(),
         }
     }
 
+    /// Classify a read as spliced or unspliced.
+    ///
+    /// - **Unspliced**: any aligned block has intronic extent > 0
+    /// - **Spliced**: everything else (exon-only reads lumped into spliced,
+    ///   following the alevin-fry S+A convention)
     fn classify(&self, bam_record: &bam::Record) -> SpliceClass {
-        let has_splice_junction = bam_record
-            .cigar()
-            .iter()
-            .any(|op| matches!(op, Cigar::RefSkip(_)));
-
-        // Get aligned blocks: 0-based half-open [start, end)
         let blocks: Vec<[i64; 2]> = bam_record.aligned_blocks().collect();
 
-        if blocks.is_empty() {
-            return SpliceClass::Ambiguous;
-        }
-
-        let mut any_intronic = false;
-        let mut all_exonic = true;
-
         for &[b_start, b_end] in &blocks {
-            let intronic_bp = self.intronic_extent(b_start, b_end);
-            if intronic_bp >= self.intron_buffer {
-                any_intronic = true;
-                all_exonic = false;
-            } else if intronic_bp > 0 {
-                // Within buffer zone — not fully exonic but not definitively intronic
-                all_exonic = false;
+            if self.intronic_extent(b_start, b_end) > 0 {
+                return SpliceClass::Unspliced;
             }
         }
 
-        if any_intronic {
-            return SpliceClass::Unspliced;
-        }
-
-        if has_splice_junction && all_exonic {
-            return SpliceClass::Spliced;
-        }
-
-        // Multi-exon read without N in CIGAR but all blocks exonic and
-        // spanning multiple exons → spliced
-        if all_exonic && self.spans_multiple_exons(&blocks) {
-            return SpliceClass::Spliced;
-        }
-
-        SpliceClass::Ambiguous
+        SpliceClass::Spliced
     }
 
     /// Returns the number of base pairs in `[b_start, b_end)` that fall
@@ -230,26 +198,5 @@ impl<'a> SpliceAwareReadCounter<'a> {
             covered += overlap_end - overlap_start;
         }
         (b_end - b_start) - covered
-    }
-
-    /// Check if the aligned blocks span multiple distinct exons.
-    fn spans_multiple_exons(&self, blocks: &[[i64; 2]]) -> bool {
-        let mut exons_hit = 0usize;
-        let read_start = blocks.first().map_or(0, |b| b[0]);
-        let read_end = blocks.last().map_or(0, |b| b[1]);
-
-        for &(e_start, e_end) in self.exons {
-            if e_start >= read_end {
-                break;
-            }
-            if e_end <= read_start {
-                continue;
-            }
-            exons_hit += 1;
-            if exons_hit >= 2 {
-                return true;
-            }
-        }
-        false
     }
 }

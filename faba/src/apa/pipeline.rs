@@ -379,6 +379,17 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
 
     info!("collected {} cell-site counts", all_counts.len());
 
+    // Filter to QC-passing cells from gene count step
+    if let Some(ref valid_cells) = args.valid_cell_barcodes {
+        let before = all_counts.len();
+        all_counts.retain(|c| valid_cells.contains(&c.cell_barcode));
+        info!(
+            "filtered to QC-passing cells: {} -> {} counts",
+            before,
+            all_counts.len()
+        );
+    }
+
     if all_counts.is_empty() {
         info!("no counts to output");
         return Ok(());

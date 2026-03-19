@@ -326,7 +326,10 @@ impl GffRecordMap {
     }
 
     /// Retain only genes whose IDs are in the given set
-    pub fn retain_by_ids(&mut self, gene_ids: &std::collections::HashSet<GeneId>) {
+    pub fn retain_by_ids<S: std::hash::BuildHasher>(
+        &mut self,
+        gene_ids: &std::collections::HashSet<GeneId, S>,
+    ) {
         self.records.retain(|gene_id, _| gene_ids.contains(gene_id));
     }
 
