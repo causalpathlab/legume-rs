@@ -392,7 +392,7 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
 
     // Write APA site annotation Parquet
     if !all_annotations.is_empty() {
-        let parquet_path = format!("{}/apa_site_annotations.parquet", &args.output);
+        let parquet_path = format!("{}/apa_components.parquet", &args.output);
         write_apa_annotations(&all_annotations, &parquet_path)?;
         info!(
             "wrote {} site annotations to {}",

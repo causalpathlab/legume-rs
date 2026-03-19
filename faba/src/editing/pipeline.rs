@@ -991,7 +991,7 @@ pub fn write_bed(
 /// fits a GMM via BIC model selection, and outputs:
 /// - A sparse (cells x mixture_components) count matrix
 ///   with feature IDs like `GENE/m6A/0`, `GENE/A2I/1`
-/// - A mixture_annotations.parquet file
+/// - A `{m6a,atoi}_components.parquet` file
 pub fn run_mixture_model(
     params: &ConversionParams,
     gene_sites: &HashMap<GeneId, Vec<ConversionSite>>,
@@ -1238,9 +1238,13 @@ pub fn run_mixture_model(
 
     // Write annotations parquet
     if !annotations.is_empty() {
+        let components_name = match params.mod_type {
+            ModificationType::M6A { .. } => "m6a_components",
+            ModificationType::AtoI => "atoi_components",
+        };
         write_mixture_annotations(
             &annotations,
-            &format!("{}/mixture_annotations.parquet", &params.output),
+            &format!("{}/{}.parquet", &params.output, components_name),
         )?;
     }
 
