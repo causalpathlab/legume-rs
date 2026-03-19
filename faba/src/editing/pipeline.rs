@@ -1,8 +1,8 @@
 use crate::common::*;
 use crate::data::cell_membership::CellMembership;
+use crate::data::conversion::*;
 use crate::data::dna::Dna;
 use crate::data::dna_stat_map::*;
-use crate::data::methylation::*;
 use crate::data::util_htslib::*;
 use crate::editing::sifter::*;
 use crate::editing::ConversionSite;
@@ -10,7 +10,6 @@ use crate::pipeline_util::*;
 
 use dashmap::DashMap as HashMap;
 use dashmap::DashSet as HashSet;
-use fnv;
 use genomic_data::gff::{GeneId, GffRecordMap};
 use rust_htslib::faidx;
 use std::sync::{Arc, Mutex};
@@ -32,7 +31,7 @@ pub struct ConversionParams {
     pub pvalue_cutoff: f32,
     pub backend: SparseIoBackend,
     pub output: Box<str>,
-    pub output_value_type: MethFeatureType,
+    pub output_value_type: ConversionValueType,
     pub row_nnz_cutoff: Option<usize>,
     pub column_nnz_cutoff: Option<usize>,
     pub cell_membership_file: Option<Box<str>>,
@@ -73,7 +72,7 @@ impl ConversionParams {
         .into_boxed_str()
     }
 
-    /// Get QC cutoffs
+    /// Get QC cutoffs.
     pub fn qc_cutoffs(&self) -> SqueezeCutoffs {
         SqueezeCutoffs {
             row: self.row_nnz_cutoff.unwrap_or(0),
@@ -82,16 +81,16 @@ impl ConversionParams {
     }
 
     /// Create value extraction function based on output type
-    pub fn value_extractor(&self) -> impl Fn(&MethylationData) -> f32 {
+    pub fn value_extractor(&self) -> impl Fn(&ConversionData) -> f32 {
         let output_type = self.output_value_type.clone();
-        move |dat: &MethylationData| -> f32 {
+        move |dat: &ConversionData| -> f32 {
             match output_type {
-                MethFeatureType::Beta => {
-                    let tot = (dat.methylated + dat.unmethylated) as f32;
-                    (dat.methylated as f32) / tot.max(1.)
+                ConversionValueType::Ratio => {
+                    let tot = (dat.converted + dat.unconverted) as f32;
+                    (dat.converted as f32) / tot.max(1.)
                 }
-                MethFeatureType::Methylated => dat.methylated as f32,
-                MethFeatureType::Unmethylated => dat.unmethylated as f32,
+                ConversionValueType::Converted => dat.converted as f32,
+                ConversionValueType::Unconverted => dat.unconverted as f32,
             }
         }
     }
@@ -366,7 +365,7 @@ pub fn gather_conversion_stats(
     gff_map: &GffRecordMap,
     bam_file: &str,
     cell_membership: Option<&CellMembership>,
-) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
+) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, ConversionData)>> {
     let ndata = gene_sites.iter().map(|x| x.value().len()).sum::<usize>();
     let arc_ret = Arc::new(Mutex::new(Vec::with_capacity(ndata)));
 
@@ -401,7 +400,7 @@ fn extract_site_stats_from_map(
     gff_record: &GffRecord,
     site: &ConversionSite,
     stat_map: &DnaBaseFreqMap,
-) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
+) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, ConversionData)>> {
     let gene = gff_record.gene_id.clone();
     let chr = gff_record.seqname.as_ref();
     let strand = gff_record.strand;
@@ -412,9 +411,9 @@ fn extract_site_stats_from_map(
             conversion_pos,
             ..
         } => {
-            let methylation_stat = stat_map.stratified_frequency_at(*conversion_pos);
+            let conversion_stat = stat_map.stratified_frequency_at(*conversion_pos);
 
-            let Some(meth_stat) = methylation_stat else {
+            let Some(conv_stat) = conversion_stat else {
                 return Ok(Vec::new());
             };
 
@@ -426,14 +425,14 @@ fn extract_site_stats_from_map(
 
             let (start, stop) = (*conversion_pos, *conversion_pos + 1);
 
-            let stats = meth_stat
+            let stats = conv_stat
                 .iter()
                 .filter_map(|(cb, counts)| {
-                    let methylated = counts.get(Some(&mutated_base));
-                    let unmethylated = counts.get(Some(&unmutated_base));
+                    let converted = counts.get(Some(&mutated_base));
+                    let unconverted = counts.get(Some(&unmutated_base));
 
                     if (params.include_missing_barcode || cb != &CellBarcode::Missing)
-                        && methylated > 0
+                        && converted > 0
                     {
                         Some((
                             cb.clone(),
@@ -444,9 +443,9 @@ fn extract_site_stats_from_map(
                                 gene: gene.clone(),
                                 strand,
                             },
-                            MethylationData {
-                                methylated,
-                                unmethylated,
+                            ConversionData {
+                                converted,
+                                unconverted,
                                 site_pos: *m6a_pos,
                             },
                         ))
@@ -459,9 +458,9 @@ fn extract_site_stats_from_map(
             Ok(stats)
         }
         ConversionSite::AtoI { editing_pos, .. } => {
-            let methylation_stat = stat_map.stratified_frequency_at(*editing_pos);
+            let conversion_stat = stat_map.stratified_frequency_at(*editing_pos);
 
-            let Some(meth_stat) = methylation_stat else {
+            let Some(conv_stat) = conversion_stat else {
                 return Ok(Vec::new());
             };
 
@@ -473,7 +472,7 @@ fn extract_site_stats_from_map(
 
             let (start, stop) = (*editing_pos, *editing_pos + 1);
 
-            let stats = meth_stat
+            let stats = conv_stat
                 .iter()
                 .filter_map(|(cb, counts)| {
                     let edited = counts.get(Some(&mutated_base));
@@ -490,9 +489,9 @@ fn extract_site_stats_from_map(
                                 gene: gene.clone(),
                                 strand,
                             },
-                            MethylationData {
-                                methylated: edited,
-                                unmethylated: unedited,
+                            ConversionData {
+                                converted: edited,
+                                unconverted: unedited,
                                 site_pos: *editing_pos,
                             },
                         ))
@@ -513,7 +512,7 @@ fn collect_gene_conversion_stats(
     gff_record: &GffRecord,
     sites: &[ConversionSite],
     cell_membership: Option<&CellMembership>,
-) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, MethylationData)>> {
+) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, ConversionData)>> {
     if sites.is_empty() {
         return Ok(Vec::new());
     }
@@ -701,7 +700,7 @@ fn process_bam_to_backend(
     gff_map: &GffRecordMap,
     gene_key: &(impl Fn(&BedWithGene) -> Box<str> + Send + Sync),
     site_key: &(impl Fn(&BedWithGene) -> Box<str> + Send + Sync),
-    _take_value: &(impl Fn(&MethylationData) -> f32 + Send + Sync),
+    _take_value: &(impl Fn(&ConversionData) -> f32 + Send + Sync),
     cutoffs: &SqueezeCutoffs,
     genes: &mut HashSet<Box<str>>,
     sites: &mut HashSet<Box<str>>,
@@ -724,13 +723,13 @@ fn process_bam_to_backend(
         stats.len()
     );
 
-    // For m6A, output all three value types (beta, methylated, unmethylated)
+    // For m6A, output all three value types (ratio, converted, unconverted)
     // For ATOI, output only the specified value type
-    let output_types: Vec<MethFeatureType> = match params.mod_type {
+    let output_types: Vec<ConversionValueType> = match params.mod_type {
         ModificationType::M6A { .. } => vec![
-            MethFeatureType::Beta,
-            MethFeatureType::Methylated,
-            MethFeatureType::Unmethylated,
+            ConversionValueType::Ratio,
+            ConversionValueType::Converted,
+            ConversionValueType::Unconverted,
         ],
         ModificationType::AtoI => vec![params.output_value_type.clone()],
     };
@@ -739,20 +738,20 @@ fn process_bam_to_backend(
         let value_type_for_closure = value_type.clone();
 
         // Create value extraction function for this type
-        let value_fn = move |dat: &MethylationData| -> f32 {
+        let value_fn = move |dat: &ConversionData| -> f32 {
             match value_type_for_closure {
-                MethFeatureType::Beta => {
-                    let tot = (dat.methylated + dat.unmethylated) as f32;
-                    (dat.methylated as f32) / tot.max(1.)
+                ConversionValueType::Ratio => {
+                    let tot = (dat.converted + dat.unconverted) as f32;
+                    (dat.converted as f32) / tot.max(1.)
                 }
-                MethFeatureType::Methylated => dat.methylated as f32,
-                MethFeatureType::Unmethylated => dat.unmethylated as f32,
+                ConversionValueType::Converted => dat.converted as f32,
+                ConversionValueType::Unconverted => dat.unconverted as f32,
             }
         };
 
         let mod_suffix = match params.mod_type {
             ModificationType::M6A { .. } => format!("_m6a_{}", value_type),
-            ModificationType::AtoI => "_atoi".to_string(),
+            ModificationType::AtoI => format!("_atoi_{}", value_type),
         };
         let output_name = format!("{}{}", batch_name, mod_suffix);
 
@@ -890,7 +889,7 @@ pub fn process_all_bam_files_to_bed(
 }
 
 pub fn write_bed(
-    stats: &mut [(CellBarcode, BedWithGene, MethylationData)],
+    stats: &mut [(CellBarcode, BedWithGene, ConversionData)],
     gff_map: &GffRecordMap,
     file_path: &str,
     cell_membership: Option<&CellMembership>,
@@ -924,8 +923,8 @@ pub fn write_bed(
                         bg.stop,
                         bg.strand,
                         gene_string,
-                        data.methylated,
-                        data.unmethylated,
+                        data.converted,
+                        data.unconverted,
                         cb,
                         data.site_pos,
                         cell_type
@@ -939,8 +938,8 @@ pub fn write_bed(
                         bg.stop,
                         bg.strand,
                         gene_string,
-                        data.methylated,
-                        data.unmethylated,
+                        data.converted,
+                        data.unconverted,
                         cb,
                         data.site_pos
                     )
@@ -954,8 +953,8 @@ pub fn write_bed(
                     bg.stop,
                     bg.strand,
                     gene_string,
-                    data.methylated,
-                    data.unmethylated,
+                    data.converted,
+                    data.unconverted,
                     cb,
                     data.site_pos
                 )
@@ -965,9 +964,9 @@ pub fn write_bed(
         .collect();
 
     let header: &[u8] = if output_cell_types {
-        b"#chr\tstart\tstop\tstrand\tgene\tmethylated\tunmethylated\tbarcode\tsite_pos\tcell_type\n"
+        b"#chr\tstart\tstop\tstrand\tgene\tconverted\tunconverted\tbarcode\tsite_pos\tcell_type\n"
     } else {
-        b"#chr\tstart\tstop\tstrand\tgene\tmethylated\tunmethylated\tbarcode\tsite_pos\n"
+        b"#chr\tstart\tstop\tstrand\tgene\tconverted\tunconverted\tbarcode\tsite_pos\n"
     };
 
     let mut writer = BWriter::from_path(file_path)?;
@@ -1005,7 +1004,7 @@ pub fn run_mixture_model(
     let membership = params.load_membership()?;
 
     // Collect cell-level stats from all WT BAM files
-    let mut all_stats: Vec<(CellBarcode, BedWithGene, MethylationData)> = Vec::new();
+    let mut all_stats: Vec<(CellBarcode, BedWithGene, ConversionData)> = Vec::new();
     for bam_file in &params.wt_bam_files {
         let stats =
             gather_conversion_stats(gene_sites, params, gff_map, bam_file, membership.as_ref())?;
@@ -1038,7 +1037,7 @@ pub fn run_mixture_model(
         fnv::FnvHashMap::default();
     for (cb, bed, meth) in &all_stats {
         let cell_idx = cell_to_idx[cb];
-        let count = meth.methylated + meth.unmethylated;
+        let count = meth.converted + meth.unconverted;
         // Convert absolute site_pos to strand-aware relative position
         let rel_pos = if let Some(gff) = gff_map.get(&bed.gene) {
             let lb = (gff.start - 1).max(0); // GFF 1-based -> 0-based

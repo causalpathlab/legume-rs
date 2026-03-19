@@ -4,9 +4,9 @@ use crate::common::*;
 use crate::data::poly_a_stat_map::PolyASiteArgs;
 use crate::data::util_htslib::*;
 
-use genomic_data::gff::FeatureType as GffFeatureType;
-use genomic_data::gff::GeneType as GffGeneType;
+use genomic_data::gff::{FeatureType as GffFeatureType, GeneId, GeneType as GffGeneType};
 use rayon::ThreadPoolBuilder;
+use std::collections::HashSet;
 
 /// APA quantification method
 #[derive(clap::ValueEnum, Clone, Debug, Default)]
@@ -370,6 +370,10 @@ pub struct CountApaArgs {
                      Only used in mixture mode."
     )]
     pub(crate) compute_pdui: bool,
+
+    /// Valid gene IDs from gene count QC (pipeline mode only, not CLI)
+    #[arg(skip)]
+    pub(crate) valid_gene_ids: Option<HashSet<GeneId>>,
 }
 
 impl CountApaArgs {

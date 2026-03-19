@@ -1,5 +1,5 @@
 use crate::common::*;
-use crate::data::methylation::MethFeatureType;
+use crate::data::conversion::ConversionValueType;
 use crate::editing::io::ToParquet;
 use crate::editing::mask::{build_atoi_mask, filter_m6a_by_atoi_mask};
 use crate::editing::mixture::MixtureParams;
@@ -13,6 +13,7 @@ use crate::pipeline_util::check_all_bam_indices;
 
 use fnv::FnvHashMap;
 use genomic_data::gff::GffRecordMap;
+use genomic_data::sam::CellBarcode;
 use log::info;
 use rayon::ThreadPoolBuilder;
 use std::collections::HashSet;
@@ -308,10 +309,16 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<Expresse
             .to_backend(&backend_file)?
             .qc(cutoffs.clone())?;
 
-        // Read back surviving row names after QC
+        // Read back surviving row/column names after QC
         let data = open_sparse_matrix(&backend_file, &args.backend)?;
         let row_names = data.row_names()?;
-        info!("{}: {} genes passed QC", batch_name, row_names.len());
+        let col_names = data.column_names()?;
+        info!(
+            "{}: {} genes, {} cells passed QC",
+            batch_name,
+            row_names.len(),
+            col_names.len()
+        );
 
         // Map row names back to GeneIds
         // Row name format: {gene_key}/count/total
@@ -325,7 +332,7 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<Expresse
     }
 
     info!(
-        "Gene filtering: {} genes expressed across {} BAM files",
+        "Gene filtering: {} genes passed QC across {} BAM files",
         expressed_gene_ids.len(),
         all_bam_files.len()
     );
@@ -367,7 +374,7 @@ fn run_atoi_step(
         pvalue_cutoff: args.atoi_pvalue_cutoff,
         backend: args.backend.clone(),
         output: args.output.clone(),
-        output_value_type: MethFeatureType::Beta,
+        output_value_type: ConversionValueType::Ratio,
         row_nnz_cutoff: None,
         column_nnz_cutoff: None,
         cell_membership_file: None,
@@ -402,6 +409,11 @@ fn run_atoi_step(
     }
     process_all_bam_files_to_backend(&params, &atoi_sites, &gff_map, false, has_mut_files)?;
 
+    // Mixture model: cluster editing sites per gene
+    info!("Running 1D Gaussian mixture model on A-to-I sites...");
+    let mix_params = MixtureParams::default();
+    run_mixture_model(&params, &atoi_sites, &gff_map, &mix_params)?;
+
     Ok(AtoiMaskData { mask, n_sites })
 }
 
@@ -409,7 +421,7 @@ fn run_atoi_step(
 fn run_apa_step(
     args: &PipelineArgs,
     atoi_mask: &Option<AtoiMaskData>,
-    _expressed_genes: &Option<ExpressedGenes>,
+    expressed_genes: &Option<ExpressedGenes>,
 ) -> anyhow::Result<()> {
     use crate::run_apa::{run_apa, ApaMethod, CountApaArgs};
 
@@ -434,6 +446,15 @@ fn run_apa_step(
             all_bam_files.extend_from_slice(mut_files);
         }
     }
+
+    // Extract valid gene IDs from gene count QC
+    let valid_gene_ids = match expressed_genes {
+        Some(eg) => {
+            info!("APA will restrict to {} expressed genes", eg.gene_ids.len());
+            Some(eg.gene_ids.clone())
+        }
+        None => None,
+    };
 
     // Build CountApaArgs from PipelineArgs
     let apa_args = CountApaArgs {
@@ -470,6 +491,7 @@ fn run_apa_step(
         min_fragments: 50,
         merge_distance: 50.0,
         compute_pdui: true,
+        valid_gene_ids,
     };
 
     run_apa(&apa_args)?;
@@ -507,7 +529,7 @@ fn run_dart_step(
         pvalue_cutoff: args.m6a_pvalue_cutoff,
         backend: args.backend.clone(),
         output: args.output.clone(),
-        output_value_type: MethFeatureType::Beta,
+        output_value_type: ConversionValueType::Ratio,
         row_nnz_cutoff: None,
         column_nnz_cutoff: None,
         cell_membership_file: None,
