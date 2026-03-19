@@ -89,8 +89,8 @@ pub fn run_splice_aware(
     for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names) {
         let njobs = records.len() as u64;
         info!(
-            "Combining reads (splice-aware) for {} over {} genes, intron_buffer={}",
-            batch_name, njobs, args.intron_buffer
+            "Combining reads (splice-aware) for {} over {} genes",
+            batch_name, njobs
         );
 
         let results: Vec<SplicedUnsplicedTriplets> = records
@@ -103,7 +103,6 @@ pub fn run_splice_aware(
                     &exon_intervals,
                     &args.cell_barcode_tag,
                     &args.gene_barcode_tag,
-                    args.intron_buffer,
                 )
             })
             .collect::<anyhow::Result<Vec<_>>>()?;

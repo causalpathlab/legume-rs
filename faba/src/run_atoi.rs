@@ -4,7 +4,7 @@ use crate::editing::io::ToParquet;
 use crate::editing::mixture::MixtureParams;
 use crate::editing::pipeline::*;
 use crate::editing::sifter::ModificationType;
-use crate::pipeline_util::check_all_bam_indices;
+use crate::pipeline_util::{check_all_bam_indices, run_gene_count_qc};
 
 use genomic_data::gff::FeatureType as GffFeatureType;
 use genomic_data::gff::GeneType as GffGeneType;
@@ -198,6 +198,28 @@ pub struct AtoICountArgs {
         help = "Initial sigma, or 0 for auto"
     )]
     pub mixture_initial_sigma: f32,
+
+    // ========== Gene expression QC ==========
+    #[arg(
+        long = "gene-min-cells",
+        default_value_t = 10,
+        help = "Min cells per gene for expression QC"
+    )]
+    pub gene_min_cells: usize,
+
+    #[arg(
+        long = "cell-min-genes",
+        default_value_t = 10,
+        help = "Min genes per cell for expression QC"
+    )]
+    pub cell_min_genes: usize,
+
+    #[arg(
+        long = "skip-gene-qc",
+        default_value_t = false,
+        help = "Skip gene expression QC step"
+    )]
+    pub skip_gene_qc: bool,
 }
 
 impl From<&AtoICountArgs> for ConversionParams {
@@ -259,6 +281,27 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Gene expression QC: filter to expressed genes and valid cells
+    let gene_qc = if !args.skip_gene_qc {
+        let qc = run_gene_count_qc(
+            &args.gff_file,
+            &args.bam_files,
+            &args.cell_barcode_tag,
+            &args.gene_barcode_tag,
+            args.gene_min_cells,
+            args.cell_min_genes,
+        )?;
+        gff_map.retain_by_ids(&qc.gene_ids);
+        info!("After gene QC: {} genes retained", gff_map.len());
+        if gff_map.is_empty() {
+            info!("no genes passed QC");
+            return Ok(());
+        }
+        Some(qc)
+    } else {
+        None
+    };
+
     let params = ConversionParams::from(args);
 
     // Load cell membership for filtering
@@ -280,7 +323,8 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
 
     // SECOND PASS: quantify into sparse matrix
     info!("Second pass: A-to-I count matrix");
-    process_all_bam_files_to_backend(&params, &atoi_sites, &gff_map, false, false)?;
+    let valid_cells = gene_qc.as_ref().map(|qc| &qc.cell_barcodes);
+    process_all_bam_files_to_backend(&params, &atoi_sites, &gff_map, false, valid_cells)?;
 
     // Mixture model: cluster editing sites per gene
     if !args.no_mixture {
