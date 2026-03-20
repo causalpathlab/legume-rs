@@ -566,18 +566,24 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         .flatten()
         .collect();
 
+    let save_ctx = SaveContext {
+        collapsed_levels: &collapsed_levels,
+        encoder: &encoder,
+        train_config: &train_config,
+        coarsenings: &coarsenings,
+        n_features_full: &n_features_full,
+        gene_names: &gene_names,
+        data_stack: &data_stack,
+        dev: &dev,
+        args,
+        feature_selections: &feature_selections,
+    };
+
     match args.decoder_type {
         JointDecoderType::Independent => {
-            let decoder = JointTopicDecoder::new(
-                &n_features,
-                args.n_latent_topics,
-                param_builder.clone(),
-            )?;
-            train_and_save(
-                &decoder, &collapsed_levels, &encoder, &train_config,
-                &coarsenings, &n_features_full, &gene_names,
-                &data_stack, &dev, args, &feature_selections,
-            )?;
+            let decoder =
+                JointTopicDecoder::new(&n_features, args.n_latent_topics, param_builder.clone())?;
+            train_and_save(&decoder, &save_ctx)?;
         }
         JointDecoderType::Delta => {
             let shared_d = n_features[0];
@@ -591,11 +597,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
                 args.n_latent_topics,
                 param_builder.clone(),
             )?;
-            train_and_save(
-                &decoder, &collapsed_levels, &encoder, &train_config,
-                &coarsenings, &n_features_full, &gene_names,
-                &data_stack, &dev, args, &feature_selections,
-            )?;
+            train_and_save(&decoder, &save_ctx)?;
 
             // Gene names for base/delta: reference modality names (no suffix)
             let base_gene_names: Vec<Box<str>> = if let Some(sel) = &feature_selections[0] {
@@ -636,31 +638,51 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Context needed for training + saving results.
+struct SaveContext<'a> {
+    collapsed_levels: &'a [Vec<CollapsedOut>],
+    encoder: &'a LogSoftmaxJointEncoder,
+    train_config: &'a ProgressiveTrainConfig<'a>,
+    coarsenings: &'a [Option<FeatureCoarsening>],
+    n_features_full: &'a [usize],
+    gene_names: &'a [Box<str>],
+    data_stack: &'a SparseIoStack,
+    dev: &'a candle_core::Device,
+    args: &'a JointTopicArgs,
+    feature_selections: &'a [Option<FeatureSelection>],
+}
+
 /// Train decoder, write dictionaries, log-likelihood, and latent states.
 fn train_and_save<Dec: JointDecoderModuleT>(
     decoder: &Dec,
-    collapsed_levels: &[Vec<CollapsedOut>],
-    encoder: &LogSoftmaxJointEncoder,
-    train_config: &ProgressiveTrainConfig,
-    coarsenings: &[Option<FeatureCoarsening>],
-    n_features_full: &[usize],
-    gene_names: &[Box<str>],
-    data_stack: &SparseIoStack,
-    dev: &candle_core::Device,
-    args: &JointTopicArgs,
-    feature_selections: &[Option<FeatureSelection>],
+    ctx: &SaveContext,
 ) -> anyhow::Result<()> {
-    let scores =
-        train_encoder_decoder_progressive(collapsed_levels, encoder, decoder, train_config)?;
+    let scores = train_encoder_decoder_progressive(
+        ctx.collapsed_levels,
+        ctx.encoder,
+        decoder,
+        ctx.train_config,
+    )?;
 
     info!("Writing down the model parameters");
-    write_joint_dictionaries(decoder, coarsenings, n_features_full, gene_names, &args.out)?;
-    scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
+    write_joint_dictionaries(
+        decoder,
+        ctx.coarsenings,
+        ctx.n_features_full,
+        ctx.gene_names,
+        &ctx.args.out,
+    )?;
+    scores.to_parquet(&format!("{}.log_likelihood.parquet", &ctx.args.out))?;
 
     info!("Writing down the latent states");
     write_latent_states(
-        data_stack, encoder, collapsed_levels.last().unwrap(), dev, args,
-        feature_selections, coarsenings,
+        ctx.data_stack,
+        ctx.encoder,
+        ctx.collapsed_levels.last().unwrap(),
+        ctx.dev,
+        ctx.args,
+        ctx.feature_selections,
+        ctx.coarsenings,
     )?;
     Ok(())
 }
