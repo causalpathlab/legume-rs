@@ -1,7 +1,6 @@
 mod common;
-mod input;
-mod run_cis_linking;
-mod run_trans_linking;
+mod run_embed;
+mod run_spectral;
 
 use crate::common::*;
 use colored::Colorize;
@@ -31,13 +30,12 @@ fn print_logo() {
     }
     println!(
         " {}",
-        "Cis-regulatory Hi-C and Chromatin-linked Kinetics for Peak-gene Enrichment Analysis"
-            .bold()
+        "Bipartite Embedding for Single-Cell Multi-Omic Analysis".bold()
     );
     println!();
 }
 
-/// Cis-regulatory Hi-C and Chromatin-linked Kinetics for Peak-gene Enrichment Analysis
+/// Bipartite Embedding for Single-Cell Multi-Omic Analysis
 #[derive(Parser, Debug)]
 #[command(version, about, long_about, term_width = 80)]
 struct Cli {
@@ -47,16 +45,17 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Cis-regulatory linking from peaks to target genes
-    #[command(alias = "cis")]
-    CisLinking,
+    /// Bipartite spectral SVD — fast cell + feature embeddings
+    #[command(alias = "svd")]
+    Spectral(run_spectral::SpectralArgs),
 
-    /// Trans-regulatory linking from peaks to target genes
-    #[command(alias = "trans")]
-    TransLinking,
+    /// Bipartite VAE — joint embedding via bilateral coarsening
+    Embed(run_embed::EmbedArgs),
 }
 
 fn main() -> anyhow::Result<()> {
+    env_logger::init();
+
     if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
         print_logo();
     }
@@ -64,11 +63,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match &cli.commands {
-        Commands::CisLinking => {
-            todo!("cis-linking not yet implemented");
-        }
-        Commands::TransLinking => {
-            todo!("trans-linking not yet implemented");
-        }
+        Commands::Spectral(args) => run_spectral::run_spectral(args),
+        Commands::Embed(args) => run_embed::run_embed(args),
     }
 }
