@@ -34,6 +34,16 @@ pub use data_beans_alg::collapse_data::*;
 pub use data_beans_alg::feature_coarsening::*;
 pub use data_beans_alg::random_projection::*;
 
+/// Multi-level training schedule
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+pub enum LevelSchedule {
+    /// Progressive: coarse→fine, more epochs for coarser levels
+    Progressive,
+    /// Mixed: all levels trained simultaneously each epoch
+    Mixed,
+}
+
 /// Shared compute device enum for candle-based models
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]

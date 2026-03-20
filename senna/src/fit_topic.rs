@@ -114,6 +114,14 @@ pub struct TopicArgs {
 
     #[arg(
         long,
+        value_enum,
+        default_value = "progressive",
+        help = "Multi-level training schedule"
+    )]
+    level_schedule: LevelSchedule,
+
+    #[arg(
+        long,
         default_value_t = 30,
         help = "Optimization iterations",
         long_help = "Number of optimization iterations.\n\
@@ -490,13 +498,22 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 args,
                 stop: &stop,
             };
-            let scores = train_encoder_decoder_progressive(
-                &collapsed_levels,
-                &mut encoder,
-                &decoders,
-                &level_coarsenings,
-                &train_config,
-            )?;
+            let scores = match args.level_schedule {
+                LevelSchedule::Progressive => train_progressive(
+                    &collapsed_levels,
+                    &mut encoder,
+                    &decoders,
+                    &level_coarsenings,
+                    &train_config,
+                )?,
+                LevelSchedule::Mixed => train_mixed(
+                    &collapsed_levels,
+                    &mut encoder,
+                    &decoders,
+                    &level_coarsenings,
+                    &train_config,
+                )?,
+            };
 
             info!("Writing down the model parameters");
 
@@ -567,13 +584,22 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 args,
                 stop: &stop,
             };
-            let scores = train_encoder_decoder_progressive(
-                &collapsed_levels,
-                &mut encoder,
-                &decoders,
-                &level_coarsenings,
-                &train_config,
-            )?;
+            let scores = match args.level_schedule {
+                LevelSchedule::Progressive => train_progressive(
+                    &collapsed_levels,
+                    &mut encoder,
+                    &decoders,
+                    &level_coarsenings,
+                    &train_config,
+                )?,
+                LevelSchedule::Mixed => train_mixed(
+                    &collapsed_levels,
+                    &mut encoder,
+                    &decoders,
+                    &level_coarsenings,
+                    &train_config,
+                )?,
+            };
 
             info!("Writing down the model parameters");
 
@@ -663,13 +689,13 @@ struct ProgressiveTrainConfig<'a> {
     stop: &'a AtomicBool,
 }
 
-/// Joint multi-level VAE training.
+/// Mixed multi-level VAE training.
 ///
 /// Encoder operates at D_coarse (finest level's feature coarsening).
 /// Per-level decoders operate at D_l. All levels are trained simultaneously
 /// each epoch — the shared encoder sees data from all levels, while each
 /// decoder handles its own feature resolution.
-fn train_encoder_decoder_progressive<Enc, Dec>(
+fn train_mixed<Enc, Dec>(
     collapsed_levels: &[CollapsedOut],
     encoder: &mut Enc,
     decoders: &[Dec],
@@ -697,7 +723,7 @@ where
     }
 
     info!(
-        "Joint multi-level training: {} levels, {} epochs",
+        "Mixed multi-level training: {} levels, {} epochs",
         num_levels, total_epochs
     );
 
@@ -857,7 +883,180 @@ where
     }
 
     pb.finish_and_clear();
-    info!("done joint multi-level training");
+    info!("done mixed multi-level training");
+    Ok(TrainScores {
+        llik: llik_trace,
+        kl: kl_trace,
+    })
+}
+
+/// Progressive training: coarse→fine, more epochs for coarser levels.
+fn train_progressive<Enc, Dec>(
+    collapsed_levels: &[CollapsedOut],
+    encoder: &mut Enc,
+    decoders: &[Dec],
+    level_coarsenings: &[Option<FeatureCoarsening>],
+    config: &ProgressiveTrainConfig,
+) -> anyhow::Result<TrainScores>
+where
+    Enc: EncoderModuleT,
+    Dec: DecoderModuleT,
+{
+    let num_levels = collapsed_levels.len();
+    let total_epochs = config.args.epochs;
+
+    // Encoder coarsening = finest level's coarsening
+    let enc_coarsening = level_coarsenings.last().and_then(|c| c.as_ref());
+
+    let total_weight: usize = (1..=num_levels).sum();
+    let level_epochs: Vec<usize> = (0..num_levels)
+        .map(|i| {
+            let w = num_levels - i;
+            (total_epochs * w / total_weight).max(1)
+        })
+        .collect();
+
+    for (level, (collapsed, decoder)) in collapsed_levels.iter().zip(decoders.iter()).enumerate() {
+        info!(
+            "Level {}/{}: {} epochs, {} samples, decoder dim {}",
+            level + 1,
+            num_levels,
+            level_epochs[level],
+            collapsed.mu_observed.ncols(),
+            decoder.dim_obs(),
+        );
+    }
+
+    info!(
+        "Progressive training: {} levels, epoch allocation: {:?} (total {})",
+        num_levels,
+        level_epochs,
+        level_epochs.iter().sum::<usize>()
+    );
+
+    let mut adam = AdamW::new_lr(
+        config.parameters.all_vars(),
+        config.args.learning_rate as f64,
+    )?;
+
+    let total_actual_epochs: usize = level_epochs.iter().sum();
+    let pb = ProgressBar::new(total_actual_epochs as u64);
+
+    let mut llik_trace = Vec::with_capacity(total_actual_epochs);
+    let mut kl_trace = Vec::with_capacity(total_actual_epochs);
+    let mut global_epoch: usize = 0;
+
+    for (level, (collapsed, &level_ep)) in
+        collapsed_levels.iter().zip(level_epochs.iter()).enumerate()
+    {
+        let decoder = &decoders[level];
+        let dec_coarsening = level_coarsenings[level].as_ref();
+
+        for epoch in (0..level_ep).step_by(config.args.jitter_interval) {
+            let full_mixed = collapsed.mu_observed.posterior_sample()?.transpose();
+
+            let enc_nd = if let Some(fc) = enc_coarsening {
+                fc.aggregate_columns_nd(&full_mixed)
+            } else {
+                full_mixed.clone()
+            };
+
+            let batch_nd = collapsed.mu_residual.as_ref().map(|x| {
+                let mut ret: Mat = x.posterior_sample().unwrap();
+                ret = ret.transpose();
+                if let Some(fc) = enc_coarsening {
+                    ret = fc.aggregate_columns_nd(&ret);
+                }
+                ret
+            });
+
+            let target_full = if let Some(adj) = &collapsed.mu_adjusted {
+                adj.posterior_sample()?.transpose()
+            } else {
+                full_mixed.clone()
+            };
+
+            let dec_target = if let Some(fc) = dec_coarsening {
+                fc.aggregate_columns_nd(&target_full)
+            } else {
+                target_full
+            };
+
+            let mut data_loader = InMemoryData::from(InMemoryArgs {
+                input: &enc_nd,
+                input_null: batch_nd.as_ref(),
+                output: Some(&dec_target),
+                output_null: None,
+            })?;
+
+            data_loader.shuffle_minibatch(config.args.minibatch_size)?;
+
+            let kl_weight = if config.args.kl_warmup_epochs > 0.0 {
+                1.0 - (-(global_epoch as f64) / config.args.kl_warmup_epochs).exp()
+            } else {
+                1.0
+            };
+
+            let jitter_end = config.args.jitter_interval.min(level_ep - epoch);
+            for _jitter in 0..jitter_end {
+                let mut llik_tot = 0f32;
+                let mut kl_tot = 0f32;
+                let mut count_tot = 0f32;
+
+                for b in 0..data_loader.num_minibatch() {
+                    let mb = data_loader.minibatch_shuffled(b, config.dev)?;
+                    let (log_z_nk, kl) =
+                        encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
+
+                    let log_z_nk = smooth_topics(log_z_nk, config.args.topic_smoothing)?;
+
+                    let y_nd = mb.output.unwrap_or(mb.input);
+                    let (_, llik) =
+                        decoder.forward_with_llik(&log_z_nk, &y_nd, &topic_likelihood)?;
+
+                    let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
+                    adam.backward_step(&loss)?;
+
+                    llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+                    kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
+                    count_tot += y_nd.sum_all()?.to_scalar::<f32>()?;
+                }
+
+                let n = data_loader.num_data() as f32;
+                llik_trace.push(llik_tot / count_tot);
+                kl_trace.push(kl_tot / n);
+
+                pb.inc(1);
+                global_epoch += 1;
+
+                info!(
+                    "[level {}/{}][epoch {}] llik={} kl={}",
+                    level + 1,
+                    num_levels,
+                    epoch,
+                    llik_trace.last().unwrap(),
+                    kl_trace.last().unwrap()
+                );
+
+                if config.stop.load(Ordering::SeqCst) {
+                    pb.finish_and_clear();
+                    info!(
+                        "Stopping early at level {}/{}, epoch {}",
+                        level + 1,
+                        num_levels,
+                        epoch
+                    );
+                    return Ok(TrainScores {
+                        llik: llik_trace,
+                        kl: kl_trace,
+                    });
+                }
+            }
+        }
+    }
+
+    pb.finish_and_clear();
+    info!("done progressive multi-level training");
     Ok(TrainScores {
         llik: llik_trace,
         kl: kl_trace,
