@@ -2,9 +2,10 @@ use crate::candle_data_loader_util::Minibatches;
 
 use candle_core::{Device, Tensor};
 use matrix_util::traits::CandleDataLoaderOps;
-use std::collections::{BTreeSet, HashMap};
+use rayon::prelude::*;
 
 /// Per-sample: top-K features selected from dense data
+#[derive(Clone)]
 pub struct IndexedSample {
     pub indices: Vec<u32>,
     pub values: Vec<f32>,
@@ -77,47 +78,51 @@ pub fn top_k_indices(row: &[f32], k: usize) -> (Vec<u32>, Vec<f32>) {
     (indices, values)
 }
 
-/// Extract dense row as Vec<f32> from a tensor
-fn tensor_to_row(t: &Tensor) -> Vec<f32> {
-    t.flatten_all().unwrap().to_vec1::<f32>().unwrap()
-}
-
 struct UnionScatterOut {
     union_indices: Tensor,
     indexed_x: Tensor,
     union_vec: Vec<u32>,
-    pos_map: HashMap<u32, usize>,
+    /// Lookup table: feature_id -> position in union_vec. Indexed by feature_id,
+    /// entries are usize::MAX for features not in the union.
+    pos_lookup: Vec<usize>,
 }
 
 /// Build union indices and scattered [N, S] matrix from IndexedSamples.
 fn build_union_scatter(
     samples: &[IndexedSample],
     sample_indices: &[usize],
+    n_features: usize,
     target_device: &Device,
 ) -> anyhow::Result<UnionScatterOut> {
     let n_batch = sample_indices.len();
 
-    let mut union_set = BTreeSet::new();
+    // Single-pass: build position lookup and sorted union vec together
+    let mut pos_lookup = vec![usize::MAX; n_features];
+    let mut union_vec = Vec::new();
     for &si in sample_indices {
         for &idx in &samples[si].indices {
-            union_set.insert(idx);
+            let fi = idx as usize;
+            if pos_lookup[fi] == usize::MAX {
+                pos_lookup[fi] = union_vec.len();
+                union_vec.push(idx);
+            }
         }
     }
-    let union_vec: Vec<u32> = union_set.into_iter().collect();
+    // Sort union by feature index for deterministic output
+    union_vec.sort_unstable();
+    for (pos, &idx) in union_vec.iter().enumerate() {
+        pos_lookup[idx as usize] = pos;
+    }
     let s = union_vec.len();
 
-    let pos_map: HashMap<u32, usize> = union_vec
-        .iter()
-        .enumerate()
-        .map(|(pos, &idx)| (idx, pos))
-        .collect();
-
+    // Scatter values into [N, S] buffer
     let mut x_data = vec![0.0f32; n_batch * s];
     for (row, &si) in sample_indices.iter().enumerate() {
         let sample = &samples[si];
+        let row_offset = row * s;
         for (k, &feat_idx) in sample.indices.iter().enumerate() {
-            let col = pos_map[&feat_idx];
-            x_data[row * s + col] = sample.values[k];
+            let col = pos_lookup[feat_idx as usize];
+            x_data[row_offset + col] = sample.values[k];
         }
     }
 
@@ -129,8 +134,24 @@ fn build_union_scatter(
         union_indices,
         indexed_x,
         union_vec,
-        pos_map,
+        pos_lookup,
     })
+}
+
+/// Build IndexedSamples from a data source in parallel.
+fn build_indexed_samples<D: CandleDataLoaderOps + Sync>(
+    data: &D,
+    n_samples: usize,
+    context_size: usize,
+) -> Vec<IndexedSample> {
+    (0..n_samples)
+        .into_par_iter()
+        .map(|i| {
+            let row = data.row_to_f32_vec(i);
+            let (indices, values) = top_k_indices(&row, context_size);
+            IndexedSample { indices, values }
+        })
+        .collect()
 }
 
 impl IndexedInMemoryData {
@@ -139,36 +160,24 @@ impl IndexedInMemoryData {
     /// Input and output get independent top-K selections from their respective sources.
     pub fn from_dense<D>(args: IndexedInMemoryArgs<D>) -> anyhow::Result<Self>
     where
-        D: CandleDataLoaderOps,
+        D: CandleDataLoaderOps + Sync,
     {
-        let input_rows = args.input.rows_to_tensor_vec();
-        let output_rows = args.output.rows_to_tensor_vec();
-        let n_samples = input_rows.len();
-        let n_input_features = input_rows[0].flatten_all()?.to_vec1::<f32>()?.len();
-        let n_output_features = output_rows[0].flatten_all()?.to_vec1::<f32>()?.len();
+        let (n_samples, n_input_features) = args.input.data_shape();
+        let (_, n_output_features) = args.output.data_shape();
         let input_context_size = args.input_context_size.min(n_input_features);
         let output_context_size = args.output_context_size.min(n_output_features);
 
-        // Pre-extract null rows
-        let null_rows: Option<Vec<Vec<f32>>> = args
-            .input_null
-            .map(|d| d.rows_to_tensor_vec().iter().map(tensor_to_row).collect());
+        let input_samples = build_indexed_samples(args.input, n_samples, input_context_size);
+        let output_samples = build_indexed_samples(args.output, n_samples, output_context_size);
 
-        // Build input indexed samples
-        let mut input_samples = Vec::with_capacity(n_samples);
-        for row_tensor in &input_rows {
-            let row = tensor_to_row(row_tensor);
-            let (indices, values) = top_k_indices(&row, input_context_size);
-            input_samples.push(IndexedSample { indices, values });
-        }
-
-        // Build output indexed samples
-        let mut output_samples = Vec::with_capacity(n_samples);
-        for row_tensor in &output_rows {
-            let row = tensor_to_row(row_tensor);
-            let (indices, values) = top_k_indices(&row, output_context_size);
-            output_samples.push(IndexedSample { indices, values });
-        }
+        // Pre-extract null rows in parallel
+        let null_rows: Option<Vec<Vec<f32>>> = args.input_null.map(|d| {
+            let (n, _) = d.data_shape();
+            (0..n)
+                .into_par_iter()
+                .map(|i| d.row_to_f32_vec(i))
+                .collect()
+        });
 
         let rows: Vec<usize> = (0..n_samples).collect();
 
@@ -185,6 +194,35 @@ impl IndexedInMemoryData {
                 chunks: vec![],
             },
         })
+    }
+
+    /// Build indexed data from pre-computed samples (e.g., from sparse I/O).
+    ///
+    /// Both input and output share the same samples (encoder = decoder target).
+    pub fn from_samples(
+        samples: Vec<IndexedSample>,
+        n_features: usize,
+        context_size: usize,
+    ) -> Self {
+        let n = samples.len();
+        let rows: Vec<usize> = (0..n).collect();
+        // Split: output gets the original, input gets a clone.
+        // Both are needed because the struct stores two separate Vecs.
+        let output_samples = samples;
+        let input_samples = output_samples.clone();
+        IndexedInMemoryData {
+            input_samples,
+            input_null_rows: None,
+            output_samples,
+            n_input_features: n_features,
+            n_output_features: n_features,
+            input_context_size: context_size,
+            output_context_size: context_size,
+            minibatches: Minibatches {
+                samples: rows,
+                chunks: vec![],
+            },
+        }
     }
 
     pub fn shuffle_minibatch(&mut self, batch_size: usize) {
@@ -224,7 +262,12 @@ impl IndexedInMemoryData {
         let n_batch = sample_indices.len();
 
         // Build input side (encoder)
-        let input_out = build_union_scatter(&self.input_samples, sample_indices, target_device)?;
+        let input_out = build_union_scatter(
+            &self.input_samples,
+            sample_indices,
+            self.n_input_features,
+            target_device,
+        )?;
 
         // Scatter null data at input union positions
         let input_indexed_x_null = if let Some(ref null_data) = self.input_null_rows {
@@ -232,9 +275,10 @@ impl IndexedInMemoryData {
             let mut buf = vec![0.0f32; n_batch * s];
             for (row, &si) in sample_indices.iter().enumerate() {
                 let null_row = &null_data[si];
+                let row_offset = row * s;
                 for &feat_idx in &input_out.union_vec {
-                    let col = input_out.pos_map[&feat_idx];
-                    buf[row * s + col] = null_row[feat_idx as usize];
+                    let col = input_out.pos_lookup[feat_idx as usize];
+                    buf[row_offset + col] = null_row[feat_idx as usize];
                 }
             }
             Some(Tensor::from_vec(buf, (n_batch, s), target_device)?)
@@ -243,7 +287,12 @@ impl IndexedInMemoryData {
         };
 
         // Build output side (decoder)
-        let output_out = build_union_scatter(&self.output_samples, sample_indices, target_device)?;
+        let output_out = build_union_scatter(
+            &self.output_samples,
+            sample_indices,
+            self.n_output_features,
+            target_device,
+        )?;
 
         Ok(IndexedMinibatchData {
             input_union_indices: input_out.union_indices,
