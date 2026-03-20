@@ -1129,16 +1129,10 @@ where
         let union_vec: Vec<u32> = enc_union.to_vec1()?;
         let s = union_vec.len();
         let n_batch = ub - lb;
-        let pos_map: HashMap<u32, usize> = union_vec
-            .iter()
-            .enumerate()
-            .map(|(pos, &idx)| (idx, pos))
-            .collect();
         let x0_vec: Vec<Vec<f32>> = x0.to_vec2()?;
         let mut x0_data = vec![0.0f32; n_batch * s];
         for (row, x0_row) in x0_vec.iter().enumerate() {
-            for &feat_idx in &union_vec {
-                let col = pos_map[&feat_idx];
+            for (col, &feat_idx) in union_vec.iter().enumerate() {
                 x0_data[row * s + col] = x0_row[feat_idx as usize];
             }
         }

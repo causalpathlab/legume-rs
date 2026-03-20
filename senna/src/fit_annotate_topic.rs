@@ -7,7 +7,6 @@ use crate::interactive_markers::{
 use crate::vmf::{vmf_assign, vmf_assign_averaged};
 use matrix_util::common_io::*;
 
-use fnv::FnvHashMap as HashMap;
 use fnv::FnvHashSet as HashSet;
 
 #[derive(Args, Debug)]
@@ -191,9 +190,9 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
 
     // 3. Prepare data
     let training_data = TrainingData {
-        data: log_dict_dk.clone(),
+        data: log_dict_dk,
         membership: membership_ga.clone(),
-        gene_names: row_names.clone(),
+        gene_names: row_names,
     };
 
     // Compute kappa range: start from sqrt(n_genes/2), double up to 1024
@@ -218,32 +217,34 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
         args.kappa.clone()
     };
 
+    // Pre-compute topic profiles (exp of log-probs) — reused across assignment calls
+    let topic_profiles = training_data.data.map(|x| x.exp());
+
     // Closure: compute topic-celltype assignment with given membership matrix
     let compute_assignment = |membership: &Mat| -> anyhow::Result<Mat> {
-        // Convert log-probs to probs for topic profiles
-        let topic_profiles = training_data.data.map(|x| x.exp());
-
         // Add background frequency if requested
-        let membership_with_bg = if args.background > 0.0 {
+        let membership_bg;
+        let membership_ref = if args.background > 0.0 {
             info!(
                 "Adding background frequency {} to membership matrix",
                 args.background
             );
-            membership.map(|x| if x == 0.0 { args.background } else { x })
+            membership_bg = membership.map(|x| if x == 0.0 { args.background } else { x });
+            &membership_bg
         } else {
-            membership.clone()
+            membership
         };
 
         // Compute assignment probabilities
         let probs = if kappa_range.len() == 1 {
             info!("Computing vMF assignment with κ={}", kappa_range[0]);
-            vmf_assign(&topic_profiles, &membership_with_bg, kappa_range[0])
+            vmf_assign(&topic_profiles, membership_ref, kappa_range[0])
         } else {
             info!(
                 "Computing vMF assignment with Bayesian averaging over κ={:?}",
                 kappa_range
             );
-            vmf_assign_averaged(&topic_profiles, &membership_with_bg, &kappa_range)
+            vmf_assign_averaged(&topic_profiles, membership_ref, &kappa_range)
         };
 
         // Result is Topic × CellType, transpose to CellType × Topic for consistency
@@ -336,10 +337,11 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
     }
 
     // Interactive mode or direct computation
+    let mut n_iterations: usize = if all_new_markers.is_empty() { 0 } else { 1 };
     let pip_mat = if args.interactive {
-        let mut iteration = 1;
         loop {
-            info!("=== Interactive round {} ===", iteration);
+            n_iterations += 1;
+            info!("=== Interactive round {} ===", n_iterations);
             let pip = compute_assignment(&membership)?;
 
             let candidates = find_candidate_markers(
@@ -359,7 +361,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
                 break pip;
             }
 
-            let result = run_interactive_round(&candidates, iteration)?;
+            let result = run_interactive_round(&candidates, n_iterations)?;
 
             if !result.proceed && result.new_markers.is_empty() {
                 return Ok(());
@@ -383,8 +385,6 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
                 info!("Final computation with augmented markers...");
                 break compute_assignment(&membership)?;
             }
-
-            iteration += 1;
         }
     } else {
         compute_assignment(&membership)?
@@ -394,7 +394,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
     if !all_new_markers.is_empty() {
         let marker_file = format!("{}.augmented_markers.tsv", args.out);
         save_augmented_markers(&original_markers, &all_new_markers, &marker_file)?;
-        print_augmentation_summary(&all_new_markers, all_new_markers.len());
+        print_augmentation_summary(&all_new_markers, n_iterations);
         info!("Saved augmented markers to {}", marker_file);
     }
 
@@ -588,7 +588,7 @@ fn display_annotation_histogram(annot: &Mat, annot_names: &[Box<str>]) {
     eprintln!();
 }
 
-fn read_marker_gene_info(file_path: &str) -> anyhow::Result<HashMap<Box<str>, Box<str>>> {
+fn read_marker_gene_info(file_path: &str) -> anyhow::Result<Vec<(Box<str>, Box<str>)>> {
     let ReadLinesOut { lines, header: _ } = read_lines_of_words_delim(file_path, &['\t', ','], -1)?;
 
     Ok(lines
@@ -607,22 +607,22 @@ pub(crate) fn build_annotation_matrix(
     marker_gene_path: &str,
     row_names: &[Box<str>],
 ) -> anyhow::Result<AnnotInfo> {
-    let gene_to_type = read_marker_gene_info(marker_gene_path)?;
+    let marker_pairs = read_marker_gene_info(marker_gene_path)?;
 
-    if gene_to_type.is_empty() {
+    if marker_pairs.is_empty() {
         return Err(anyhow::anyhow!("empty/invalid marker gene information"));
     }
 
     // Collect unique cell types
     let mut annot_set: HashSet<Box<str>> = HashSet::default();
-    for cell_type in gene_to_type.values() {
+    for (_, cell_type) in &marker_pairs {
         let normalized = cell_type.replace(" ", "_");
         annot_set.insert(normalized.into_boxed_str());
     }
     let mut annot_names: Vec<Box<str>> = annot_set.into_iter().collect();
     annot_names.sort();
 
-    // Build membership matrix
+    // Build membership matrix (a gene can map to multiple cell types)
     let n_genes = row_names.len();
     let n_annots = annot_names.len();
     let mut membership = Mat::zeros(n_genes, n_annots);
@@ -630,7 +630,7 @@ pub(crate) fn build_annotation_matrix(
     let mut matched = 0;
     let mut unmatched = Vec::new();
 
-    for (gene, cell_type) in &gene_to_type {
+    for (gene, cell_type) in &marker_pairs {
         let normalized_type = cell_type.replace(" ", "_");
         let annot_idx = annot_names
             .iter()
@@ -658,7 +658,7 @@ pub(crate) fn build_annotation_matrix(
     info!(
         "Matched {}/{} marker genes to {} cell types",
         matched,
-        gene_to_type.len(),
+        marker_pairs.len(),
         n_annots
     );
 
