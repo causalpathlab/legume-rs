@@ -59,34 +59,13 @@ impl JointDecoderModuleT for JointTopicDecoder {
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
     {
-        // Compute log-space reconstructions for each modality
         let log_recon_vec: Vec<Tensor> = self
             .dictionary
             .iter()
             .map(|x| x.forward_log(z_nk))
             .collect::<Result<Vec<_>>>()?;
 
-        let recon_vec: Vec<Tensor> = log_recon_vec
-            .iter()
-            .map(|x| x.exp())
-            .collect::<Result<Vec<_>>>()?;
-
-        let llik_vec = x_nd_vec
-            .iter()
-            .zip(&log_recon_vec)
-            .map(|(x, log_recon)| -> Result<Tensor> {
-                let ret = x
-                    .clamp(0.0, f64::INFINITY)?
-                    .mul(log_recon)?
-                    .sum(x.rank() - 1)?;
-                ret.unsqueeze(ret.rank())
-            })
-            .collect::<Result<Vec<Tensor>>>()?;
-
-        let k = llik_vec[0].rank();
-        let llik = Tensor::cat(&llik_vec, k - 1)?.sum(k - 1)?;
-
-        Ok((recon_vec, llik))
+        joint_multinomial_llik(log_recon_vec, x_nd_vec)
     }
 
     fn dim_obs(&self) -> &[usize] {

@@ -5,6 +5,7 @@ use nalgebra::DMatrix;
 type CscMat = nalgebra_sparse::CscMatrix<f32>;
 
 /// Maps D fine features to d coarse meta-features and back.
+#[derive(Clone)]
 pub struct FeatureCoarsening {
     /// For each original feature, the coarse group index it belongs to.
     pub fine_to_coarse: Vec<usize>,
