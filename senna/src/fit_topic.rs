@@ -698,7 +698,7 @@ where
             let mixed_nd = if let Some(fc) = config.feature_coarsening {
                 fc.aggregate_columns_nd(&full_mixed_nd)
             } else {
-                full_mixed_nd.clone()
+                full_mixed_nd
             };
 
             let clean_nd = collapsed.mu_adjusted.as_ref().map(|x| {
@@ -864,13 +864,11 @@ where
         feature_coarsening: config.feature_coarsening,
         decoder: config.decoder,
         refine_config: config.refine_config,
+        adj_method: config.adj_method.clone(),
     };
 
     let eval_block = |block| -> anyhow::Result<(usize, Mat)> {
-        match config.adj_method {
-            AdjMethod::Residual => evaluate_with_residuals(block, data_vec, encoder, &block_config),
-            AdjMethod::Batch => evaluate_with_batch(block, data_vec, encoder, &block_config),
-        }
+        evaluate_block(block, data_vec, encoder, &block_config)
     };
 
     // GPU forward passes are not thread-safe — run sequentially on Metal/CUDA,
@@ -913,9 +911,10 @@ pub(crate) struct EvaluateBlockConfig<'a, Dec> {
     pub feature_coarsening: Option<&'a FeatureCoarsening>,
     pub decoder: Option<&'a Dec>,
     pub refine_config: Option<&'a TopicRefinementConfig>,
+    pub adj_method: AdjMethod,
 }
 
-pub(crate) fn evaluate_with_batch<Enc, Dec>(
+pub(crate) fn evaluate_block<Enc, Dec>(
     block: (usize, usize),
     data_vec: &SparseIoVec,
     encoder: &Enc,
@@ -926,59 +925,25 @@ where
     Dec: DecoderModuleT,
 {
     let (lb, ub) = block;
-    let x0_nd = config.delta.map(|delta_bm| {
-        let batches = data_vec
-            .get_batch_membership(lb..ub)
-            .into_iter()
-            .map(|x| x as u32);
-        let batches = Tensor::from_iter(batches, config.dev).unwrap();
-        delta_bm.index_select(&batches, 0).expect("expand delta")
-    });
-
-    let x_dn = data_vec.read_columns_csc(lb..ub)?;
-
-    // Coarsen to D_coarse for encoder (same resolution as decoder)
-    let x_enc_nd = if let Some(fc) = config.feature_coarsening {
-        fc.aggregate_sparse_csc(&x_dn)
-            .to_tensor(config.dev)?
-            .transpose(0, 1)?
-    } else {
-        x_dn.to_tensor(config.dev)?.transpose(0, 1)?
-    };
-
-    let (log_z_nk, _) = encoder.forward_t(&x_enc_nd, x0_nd.as_ref(), false)?;
-
-    // Apply per-cell refinement (data already at D_coarse)
-    let log_z_nk = if let (Some(dec), Some(cfg)) = (config.decoder, config.refine_config) {
-        refine_topic_proportions(&log_z_nk, &x_enc_nd, dec, cfg)?
-    } else {
-        log_z_nk
-    };
-
-    let z_nk = log_z_nk.to_device(&candle_core::Device::Cpu)?;
-    Ok((lb, Mat::from_tensor(&z_nk)?))
-}
-
-pub(crate) fn evaluate_with_residuals<Enc, Dec>(
-    block: (usize, usize),
-    data_vec: &SparseIoVec,
-    encoder: &Enc,
-    config: &EvaluateBlockConfig<Dec>,
-) -> anyhow::Result<(usize, Mat)>
-where
-    Enc: EncoderModuleT,
-    Dec: DecoderModuleT,
-{
-    let (lb, ub) = block;
-    let x0_nd = config.delta.map(|delta_bm| {
-        let groups = data_vec
-            .get_group_membership(lb..ub)
-            .expect("failed to get group membership")
-            .into_iter()
-            .map(|x| x as u32);
-        let groups = Tensor::from_iter(groups, config.dev).unwrap();
-        delta_bm.index_select(&groups, 0).expect("expand delta")
-    });
+    let x0_nd = config
+        .delta
+        .map(|delta_bm| -> anyhow::Result<Tensor> {
+            let membership: Vec<u32> = match config.adj_method {
+                AdjMethod::Batch => data_vec
+                    .get_batch_membership(lb..ub)
+                    .into_iter()
+                    .map(|x| x as u32)
+                    .collect(),
+                AdjMethod::Residual => data_vec
+                    .get_group_membership(lb..ub)?
+                    .into_iter()
+                    .map(|x| x as u32)
+                    .collect(),
+            };
+            let indices = Tensor::from_iter(membership.into_iter(), config.dev)?;
+            Ok(delta_bm.index_select(&indices, 0)?)
+        })
+        .transpose()?;
 
     let x_dn = data_vec.read_columns_csc(lb..ub)?;
 

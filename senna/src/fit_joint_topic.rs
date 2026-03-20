@@ -6,12 +6,13 @@ use candle_nn::AdamW;
 use candle_nn::Optimizer;
 
 use candle_core::Device;
-use candle_util::candle_decoder_multimodal_topic::*;
-use candle_util::candle_encoder_multimodal_softmax::*;
+use candle_util::candle_decoder_joint_topic::*;
+use candle_util::candle_encoder_joint_softmax::*;
 use candle_util::candle_joint_data_loader::*;
 use candle_util::candle_loss_functions::topic_likelihood;
 use candle_util::candle_model_traits::*;
 use indicatif::{ParallelProgressIterator, ProgressBar};
+use matrix_util::dmatrix_util::concatenate_vertical;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -242,6 +243,18 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
+        default_value_t = 5000,
+        help = "Cap feature dimension by coarsening",
+        long_help = "Cap the feature dimension by grouping co-expressed features into\n\
+		     meta-features. The model trains at this reduced resolution.\n\
+		     On output, the dictionary is expanded back to full resolution.\n\
+		     Set to 0 to disable. Default: 5000.\n\
+		     Applied after --max-features selection if both are specified."
+    )]
+    max_coarse_features: usize,
+
+    #[arg(
+        long,
         default_value_t = false,
         help = "Preload all columns data.",
         long_help = "Preload all the columns data into memory.\n\
@@ -327,6 +340,49 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     // After reversing, the finest level (most groups) is the last element.
     let collapsed_data_vec = collapsed_levels.last().unwrap();
 
+    // 3b. Feature coarsening per modality (if D > max_coarse_features)
+    let n_features_full: Vec<usize> = collapsed_data_vec
+        .iter()
+        .zip(&feature_selections)
+        .map(|(x, sel)| {
+            sel.as_ref()
+                .map(|s| s.selected_indices.len())
+                .unwrap_or_else(|| x.mu_observed.nrows())
+        })
+        .collect();
+
+    let coarsenings: Vec<Option<FeatureCoarsening>> =
+        if args.max_coarse_features > 0 {
+            collapsed_data_vec
+            .iter()
+            .zip(&feature_selections)
+            .zip(&n_features_full)
+            .enumerate()
+            .map(|(d, ((collapsed, sel), &n_full))| -> anyhow::Result<Option<FeatureCoarsening>> {
+                if n_full > args.max_coarse_features {
+                    let sketch = if let Some(sel) = sel {
+                        collapsed
+                            .mu_observed
+                            .posterior_mean()
+                            .select_rows(&sel.selected_indices)
+                    } else {
+                        collapsed.mu_observed.posterior_mean().clone()
+                    };
+                    let fc = compute_feature_coarsening(&sketch, args.max_coarse_features)?;
+                    info!(
+                        "Modality {}: coarsened {} → {} meta-features",
+                        d, n_full, fc.num_coarse
+                    );
+                    Ok(Some(fc))
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+        } else {
+            collapsed_data_vec.iter().map(|_| None).collect()
+        };
+
     // 4. output batch effect information
     for (d, collapsed) in collapsed_data_vec.iter().enumerate() {
         if let Some(batch_db) = &collapsed.delta {
@@ -355,18 +411,14 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
-    let n_features: Vec<usize> = collapsed_data_vec
+    let n_features: Vec<usize> = n_features_full
         .iter()
-        .zip(&feature_selections)
-        .map(|(x, sel)| {
-            sel.as_ref()
-                .map(|s| s.selected_indices.len())
-                .unwrap_or_else(|| x.mu_observed.nrows())
-        })
+        .zip(&coarsenings)
+        .map(|(&n, fc)| fc.as_ref().map(|c| c.num_coarse).unwrap_or(n))
         .collect();
 
-    let encoder = LogSoftmaxMultimodalEncoder::new(
-        LogSoftmaxMultimodalEncoderArgs {
+    let encoder = LogSoftmaxJointEncoder::new(
+        LogSoftmaxJointEncoderArgs {
             n_features: n_features.clone(),
             n_topics,
             layers: &args.encoder_layers,
@@ -374,7 +426,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         param_builder.clone(),
     )?;
 
-    let decoder = MultimodalTopicDecoder::new(
+    let decoder = JointTopicDecoder::new(
         &n_features.clone(),
         args.n_latent_topics,
         param_builder.clone(),
@@ -396,6 +448,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         dev: &dev,
         args,
         feature_selections: &feature_selections,
+        coarsenings: &coarsenings,
         stop: &stop,
     };
     let scores =
@@ -423,10 +476,24 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     let dictionaries = decoder
         .get_dictionary()?
         .into_iter()
-        .map(|x| x.to_device(&candle_core::Device::Cpu))
-        .collect::<candle_core::Result<Vec<_>>>()?;
+        .zip(&coarsenings)
+        .zip(&n_features_full)
+        .map(|((dict, fc), &n_full)| -> anyhow::Result<Mat> {
+            let dict = dict.to_device(&candle_core::Device::Cpu)?;
+            let dict_mat = Mat::from_tensor(&dict)?;
+            if let Some(fc) = fc {
+                info!(
+                    "Expanding dictionary from {} to {} features",
+                    fc.num_coarse, n_full
+                );
+                Ok(fc.expand_log_dict_dk(&dict_mat, n_full))
+            } else {
+                Ok(dict_mat)
+            }
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
-    candle_core::Tensor::cat(&dictionaries, 0)?.to_parquet_with_names(
+    concatenate_vertical(&dictionaries)?.to_parquet_with_names(
         &(args.out.to_string() + ".dictionary.parquet"),
         (Some(&gene_names), Some("gene")),
         None,
@@ -447,6 +514,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         &dev,
         args,
         &feature_selections,
+        &coarsenings,
     )?;
     let cell_names = data_stack.column_names()?;
     z_nk.to_parquet_with_names(
@@ -466,9 +534,10 @@ fn evaluate_latent_by_encoder<Enc>(
     dev: &candle_core::Device,
     args: &JointTopicArgs,
     feature_selections: &[Option<FeatureSelection>],
+    coarsenings: &[Option<FeatureCoarsening>],
 ) -> anyhow::Result<Mat>
 where
-    Enc: MultimodalEncoderModuleT + Send + Sync,
+    Enc: JointEncoderModuleT + Send + Sync,
 {
     let ntot = data_stack.num_columns()?;
     let kk = encoder.dim_latent();
@@ -477,42 +546,36 @@ where
 
     let jobs = create_jobs(ntot, Some(block_size));
     let njobs = jobs.len() as u64;
-    // potential batch effects
+    // Delta coarsened to D_coarse — encoder operates at D_coarse
     let delta = collapsed_vec
         .iter()
-        .map(|x| {
+        .zip(coarsenings)
+        .map(|(x, fc)| {
             match args.adj_method {
                 AdjMethod::Residual => x.mu_residual.as_ref(),
                 AdjMethod::Batch => x.delta.as_ref(),
             }
             .map(|delta| -> anyhow::Result<Tensor> {
-                Ok(delta
-                    .posterior_mean()
-                    .clone()
-                    .to_tensor(dev)?
-                    .transpose(0, 1)?)
+                let mut delta_mat = delta.posterior_mean().clone();
+                if let Some(fc) = fc {
+                    delta_mat = fc.aggregate_rows_ds(&delta_mat);
+                }
+                Ok(delta_mat.to_tensor(dev)?.transpose(0, 1)?)
             })
             .transpose()
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let eval_block = |&block: &(usize, usize)| match args.adj_method {
-        AdjMethod::Residual => evaluate_with_residuals(
-            block,
-            data_stack,
-            encoder,
-            dev,
-            delta.as_ref(),
-            feature_selections,
-        ),
-        AdjMethod::Batch => evaluate_with_batch(
-            block,
-            data_stack,
-            encoder,
-            dev,
-            delta.as_ref(),
-            feature_selections,
-        ),
+    let eval_config = JointEvalConfig {
+        dev,
+        delta: &delta,
+        feature_selections,
+        coarsenings,
+    };
+
+    let adj_method = args.adj_method.clone();
+    let eval_block = |&block: &(usize, usize)| {
+        evaluate_block(block, data_stack, encoder, &eval_config, &adj_method)
     };
 
     // Metal/CUDA don't support parallel dispatch to the same device
@@ -552,122 +615,79 @@ where
     Ok(ret)
 }
 
-fn evaluate_with_batch<Enc>(
-    block: (usize, usize),
-    data_stack: &SparseIoStack,
-    encoder: &Enc,
-    dev: &Device,
-    delta_bd_vec: &[Option<Tensor>],
-    feature_selections: &[Option<FeatureSelection>],
-) -> anyhow::Result<(usize, Mat)>
-where
-    Enc: MultimodalEncoderModuleT,
-{
-    let (lb, ub) = block;
-
-    let x_vec = data_stack
-        .stack
-        .iter()
-        .zip(feature_selections.iter())
-        .map(|(dv, sel)| -> anyhow::Result<Tensor> {
-            let x = dv.read_columns_tensor(lb..ub)?;
-            let x = if let Some(sel) = sel {
-                let indices =
-                    Tensor::from_iter(sel.selected_indices.iter().map(|&i| i as u32), dev)?;
-                x.index_select(&indices, 0)?
-            } else {
-                x
-            };
-            Ok(x.to_device(dev)?.transpose(0, 1)?)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    let x0_vec = data_stack
-        .stack
-        .iter()
-        .zip(delta_bd_vec)
-        .zip(feature_selections.iter())
-        .map(|((dv, delta), sel)| {
-            delta
-                .as_ref()
-                .map(|delta| -> anyhow::Result<Tensor> {
-                    let batches = dv
-                        .get_batch_membership(lb..ub)
-                        .into_iter()
-                        .map(|j| j as u32);
-                    let batches = Tensor::from_iter(batches, dev)?;
-                    let selected_delta = delta.index_select(&batches, 0)?;
-                    // Also select features from delta if feature selection is active
-                    if let Some(sel) = sel {
-                        let indices =
-                            Tensor::from_iter(sel.selected_indices.iter().map(|&i| i as u32), dev)?;
-                        Ok(selected_delta.index_select(&indices, 1)?)
-                    } else {
-                        Ok(selected_delta)
-                    }
-                })
-                .transpose()
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    let (log_z_nk, _) = encoder.forward_t(&x_vec, &x0_vec, false)?;
-    let z_nk = log_z_nk.to_device(&candle_core::Device::Cpu)?;
-    Ok((lb, Mat::from_tensor(&z_nk)?))
+struct JointEvalConfig<'a> {
+    dev: &'a Device,
+    delta: &'a [Option<Tensor>],
+    feature_selections: &'a [Option<FeatureSelection>],
+    coarsenings: &'a [Option<FeatureCoarsening>],
 }
 
-fn evaluate_with_residuals<Enc>(
+fn read_block_tensors(
+    data_stack: &SparseIoStack,
+    lb: usize,
+    ub: usize,
+    config: &JointEvalConfig,
+) -> anyhow::Result<Vec<Tensor>> {
+    data_stack
+        .stack
+        .iter()
+        .zip(config.feature_selections.iter())
+        .zip(config.coarsenings.iter())
+        .map(|((dv, sel), fc)| -> anyhow::Result<Tensor> {
+            let x_dn = dv.read_columns_csc(lb..ub)?;
+            let selected = if let Some(sel) = sel {
+                &sel.selection_matrix * &x_dn
+            } else {
+                x_dn
+            };
+            let x_nd = if let Some(fc) = fc {
+                fc.aggregate_sparse_csc(&selected)
+                    .to_tensor(config.dev)?
+                    .transpose(0, 1)?
+            } else {
+                selected.to_tensor(config.dev)?.transpose(0, 1)?
+            };
+            Ok(x_nd)
+        })
+        .collect()
+}
+
+fn evaluate_block<Enc>(
     block: (usize, usize),
     data_stack: &SparseIoStack,
     encoder: &Enc,
-    dev: &Device,
-    delta_bd_vec: &[Option<Tensor>],
-    feature_selections: &[Option<FeatureSelection>],
+    config: &JointEvalConfig,
+    adj_method: &AdjMethod,
 ) -> anyhow::Result<(usize, Mat)>
 where
-    Enc: MultimodalEncoderModuleT,
+    Enc: JointEncoderModuleT,
 {
     let (lb, ub) = block;
+    let x_vec = read_block_tensors(data_stack, lb, ub, config)?;
 
-    let x_vec = data_stack
-        .stack
-        .iter()
-        .zip(feature_selections.iter())
-        .map(|(dv, sel)| -> anyhow::Result<Tensor> {
-            let x = dv.read_columns_tensor(lb..ub)?;
-            let x = if let Some(sel) = sel {
-                let indices =
-                    Tensor::from_iter(sel.selected_indices.iter().map(|&i| i as u32), dev)?;
-                x.index_select(&indices, 0)?
-            } else {
-                x
-            };
-            Ok(x.to_device(dev)?.transpose(0, 1)?)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
+    // Delta is already coarsened before conversion to Tensor
     let x0_vec = data_stack
         .stack
         .iter()
-        .zip(delta_bd_vec)
-        .zip(feature_selections.iter())
-        .map(|((dv, delta), sel)| {
+        .zip(config.delta)
+        .map(|(dv, delta)| {
             delta
                 .as_ref()
                 .map(|delta| -> anyhow::Result<Tensor> {
-                    let groups = dv
-                        .get_group_membership(lb..ub)?
-                        .into_iter()
-                        .map(|j| j as u32);
-                    let groups = Tensor::from_iter(groups, dev)?;
-                    let selected_delta = delta.index_select(&groups, 0)?;
-                    // Also select features from delta if feature selection is active
-                    if let Some(sel) = sel {
-                        let indices =
-                            Tensor::from_iter(sel.selected_indices.iter().map(|&i| i as u32), dev)?;
-                        Ok(selected_delta.index_select(&indices, 1)?)
-                    } else {
-                        Ok(selected_delta)
-                    }
+                    let membership: Vec<u32> = match *adj_method {
+                        AdjMethod::Batch => dv
+                            .get_batch_membership(lb..ub)
+                            .into_iter()
+                            .map(|j| j as u32)
+                            .collect(),
+                        AdjMethod::Residual => dv
+                            .get_group_membership(lb..ub)?
+                            .into_iter()
+                            .map(|j| j as u32)
+                            .collect(),
+                    };
+                    let indices = Tensor::from_iter(membership.into_iter(), config.dev)?;
+                    Ok(delta.index_select(&indices, 0)?)
                 })
                 .transpose()
         })
@@ -688,6 +708,7 @@ struct ProgressiveTrainConfig<'a> {
     dev: &'a candle_core::Device,
     args: &'a JointTopicArgs,
     feature_selections: &'a [Option<FeatureSelection>],
+    coarsenings: &'a [Option<FeatureCoarsening>],
     stop: &'a AtomicBool,
 }
 
@@ -701,8 +722,8 @@ fn train_encoder_decoder_progressive<Enc, Dec>(
     config: &ProgressiveTrainConfig,
 ) -> anyhow::Result<TrainScores>
 where
-    Enc: MultimodalEncoderModuleT,
-    Dec: MultimodalDecoderModuleT,
+    Enc: JointEncoderModuleT,
+    Dec: JointDecoderModuleT,
 {
     let num_levels = collapsed_levels.len();
     let total_epochs = config.args.epochs;
@@ -762,7 +783,8 @@ where
             let input = collapsed_data_vec
                 .iter()
                 .zip(config.feature_selections)
-                .map(|(x, sel)| -> anyhow::Result<Mat> {
+                .zip(config.coarsenings)
+                .map(|((x, sel), fc)| -> anyhow::Result<Mat> {
                     let mat = x
                         .mu_observed
                         .posterior_sample()?
@@ -773,14 +795,21 @@ where
                     } else {
                         mat
                     };
-                    Ok(mat.transpose())
+                    let mat = mat.transpose();
+                    let mat = if let Some(fc) = fc {
+                        fc.aggregate_columns_nd(&mat)
+                    } else {
+                        mat
+                    };
+                    Ok(mat)
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
 
             let input_null = collapsed_data_vec
                 .iter()
                 .zip(config.feature_selections)
-                .map(|(x, sel)| -> anyhow::Result<Option<Mat>> {
+                .zip(config.coarsenings)
+                .map(|((x, sel), fc)| -> anyhow::Result<Option<Mat>> {
                     x.mu_residual
                         .as_ref()
                         .map(|y| {
@@ -790,7 +819,11 @@ where
                             } else {
                                 mat
                             };
-                            Ok(mat.transpose())
+                            let mut mat = mat.transpose();
+                            if let Some(fc) = fc {
+                                mat = fc.aggregate_columns_nd(&mat);
+                            }
+                            Ok(mat)
                         })
                         .transpose()
                 })
@@ -799,7 +832,8 @@ where
             let output = collapsed_data_vec
                 .iter()
                 .zip(config.feature_selections)
-                .map(|(x, sel)| -> anyhow::Result<Option<Mat>> {
+                .zip(config.coarsenings)
+                .map(|((x, sel), fc)| -> anyhow::Result<Option<Mat>> {
                     Ok(x.mu_adjusted
                         .as_ref()
                         .map(|y| y.posterior_sample())
@@ -811,7 +845,11 @@ where
                             } else {
                                 mat
                             };
-                            mat.transpose()
+                            let mut mat = mat.transpose();
+                            if let Some(fc) = fc {
+                                mat = fc.aggregate_columns_nd(&mat);
+                            }
+                            mat
                         }))
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;

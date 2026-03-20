@@ -312,7 +312,7 @@ pub fn run_interactive_round(
 
 /// Save augmented markers to file
 pub fn save_augmented_markers(
-    original_markers: &HashMap<Box<str>, Box<str>>,
+    original_markers: &[(Box<str>, Box<str>)],
     new_markers: &[(Box<str>, Box<str>)],
     output_path: &str,
 ) -> anyhow::Result<()> {
