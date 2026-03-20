@@ -9,13 +9,13 @@ use candle_nn::{Module, VarBuilder};
 // Topic Model Decoder //
 /////////////////////////
 
-pub struct MultimodalTopicDecoder {
+pub struct JointTopicDecoder {
     n_features: Vec<usize>,
     n_topics: usize,
     dictionary: Vec<SoftmaxLinear>,
 }
 
-impl MultimodalTopicDecoder {
+impl JointTopicDecoder {
     /// Will create a new topic model decoder with the following parameters:
     /// * `dictionary.weight`
     pub fn new(n_features: &[usize], n_topics: usize, vs: VarBuilder) -> Result<Self> {
@@ -37,7 +37,7 @@ impl MultimodalTopicDecoder {
     }
 }
 
-impl MultimodalDecoderModuleT for MultimodalTopicDecoder {
+impl JointDecoderModuleT for JointTopicDecoder {
     fn get_dictionary(&self) -> Result<Vec<Tensor>> {
         self.dictionary
             .iter()

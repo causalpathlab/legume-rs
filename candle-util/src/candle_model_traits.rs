@@ -21,7 +21,7 @@ pub trait EncoderModuleT {
     fn dim_latent(&self) -> usize;
 }
 
-pub trait MultimodalEncoderModuleT {
+pub trait JointEncoderModuleT {
     /// An encoder that spits out two results (latent inference, KL loss)
     ///
     /// # Arguments
@@ -67,7 +67,7 @@ pub trait DecoderModuleT {
     fn dim_latent(&self) -> usize;
 }
 
-pub trait MultimodalDecoderModuleT {
+pub trait JointDecoderModuleT {
     /// A decoder that spits out reconstruction
     fn forward(&self, z_nk: &Tensor) -> Result<Vec<Tensor>>;
 

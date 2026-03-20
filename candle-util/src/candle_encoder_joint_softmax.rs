@@ -4,7 +4,7 @@ use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, BatchNorm, Linear, Module, ModuleT, VarBuilder};
 
-pub struct LogSoftmaxMultimodalEncoder {
+pub struct LogSoftmaxJointEncoder {
     n_features: Vec<usize>,
     n_topics: usize,
     fc: Vec<StackLayers<Linear>>,
@@ -13,7 +13,7 @@ pub struct LogSoftmaxMultimodalEncoder {
     z_lnvar: Vec<Linear>,
 }
 
-impl MultimodalEncoderModuleT for LogSoftmaxMultimodalEncoder {
+impl JointEncoderModuleT for LogSoftmaxJointEncoder {
     /// Returns (log_prob, kl) where log_prob is log-probabilities on the simplex
     fn forward_t(
         &self,
@@ -31,7 +31,7 @@ impl MultimodalEncoderModuleT for LogSoftmaxMultimodalEncoder {
     }
 }
 
-impl LogSoftmaxMultimodalEncoder {
+impl LogSoftmaxJointEncoder {
     fn preprocess_input(
         &self,
         x_nd_vec: &[Tensor],
@@ -138,7 +138,7 @@ impl LogSoftmaxMultimodalEncoder {
     /// # Arguments
     /// * `args` - encoder arguments
     /// * `vb` - variable builder
-    pub fn new(args: LogSoftmaxMultimodalEncoderArgs, vb: VarBuilder) -> Result<Self> {
+    pub fn new(args: LogSoftmaxJointEncoderArgs, vb: VarBuilder) -> Result<Self> {
         debug_assert!(!args.layers.is_empty());
 
         let bn_config = candle_nn::BatchNormConfig {
@@ -199,7 +199,7 @@ impl LogSoftmaxMultimodalEncoder {
     }
 }
 
-pub struct LogSoftmaxMultimodalEncoderArgs<'a> {
+pub struct LogSoftmaxJointEncoderArgs<'a> {
     pub n_features: Vec<usize>,
     pub n_topics: usize,
     pub layers: &'a [usize],
