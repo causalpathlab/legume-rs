@@ -11,6 +11,83 @@ use rand::SeedableRng;
 use rand_distr::{Distribution, Normal, Poisson, Uniform};
 use rayon::prelude::*;
 
+/// Sample topic proportions [K, N] with hard assignments softened by PVE.
+pub(crate) fn sample_theta_kn(
+    kk: usize,
+    nn: usize,
+    pve_topic: f32,
+    rng: &mut impl rand::Rng,
+) -> anyhow::Result<DMatrix<f32>> {
+    let runif = Uniform::new(0, kk)?;
+    let k_membership: Vec<usize> = (0..nn).map(|_| runif.sample(rng)).collect();
+    let mut theta_kn: DMatrix<f32> = row_membership_matrix(k_membership)?.transpose();
+
+    let pve_topic = pve_topic.clamp(0., 1.);
+    if kk > 1 && pve_topic < 1. {
+        let denom = (kk - 1) as f32;
+        let p_background = (1.0 - pve_topic) / denom;
+        let theta_null = DMatrix::<f32>::from_element(kk, nn, p_background);
+        theta_kn = (theta_kn * pve_topic) + theta_null;
+    }
+
+    Ok(theta_kn)
+}
+
+/// Sample Poisson count triplets from `Y(i,j) ~ Poisson(depth * delta(i,B(j)) * sum_k beta(i,k) * theta(k,j))`.
+pub(crate) fn sample_poisson_triplets(
+    beta_dk: &DMatrix<f32>,
+    theta_kn: &DMatrix<f32>,
+    delta_db: Option<&DMatrix<f32>>,
+    batch_membership: &[usize],
+    depth: usize,
+    rseed: u64,
+    seed_offset: u64,
+) -> Vec<(u64, u64, f32)> {
+    let nn = theta_kn.ncols();
+    let eps = 1e-8_f32;
+    let threshold = 0.5_f32;
+    let has_batch = delta_db.is_some();
+
+    theta_kn
+        .column_iter()
+        .enumerate()
+        .par_bridge()
+        .progress_count(nn as u64)
+        .map(|(j, theta_j)| {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(rseed + seed_offset + j as u64);
+
+            let lambda_j = if has_batch {
+                let b = batch_membership[j];
+                (beta_dk * theta_j).component_mul(&delta_db.unwrap().column(b))
+            } else {
+                beta_dk * theta_j
+            };
+
+            let tot = lambda_j.sum();
+            let scale = (depth as f32) / tot;
+
+            lambda_j
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &l_ij)| {
+                    let l_ij = (l_ij * scale).max(eps);
+                    if let Ok(rpois) = Poisson::new(l_ij) {
+                        let y_ij: f32 = rpois.sample(&mut rng);
+                        if y_ij > threshold {
+                            Some((i as u64, j as u64, y_ij))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .flatten()
+        .collect()
+}
+
 pub struct SimArgs {
     pub rows: usize,
     pub cols: usize,
@@ -130,8 +207,6 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
     let overdisp = args.overdisp;
     let pve_topic = args.pve_topic.clamp(0., 1.);
     let pve_batch = args.pve_batch.clamp(0., 1.);
-    let threshold = 0.5_f32;
-    let eps = 1e-8;
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(rseed);
 
@@ -206,62 +281,19 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
         beta_dk
     };
 
-    let runif = Uniform::new(0, kk)?;
-    let k_membership: Vec<usize> = (0..nn).map(|_| runif.sample(&mut rng)).collect();
-
-    let mut theta_kn: DMatrix<f32> = row_membership_matrix(k_membership)?.transpose();
-
-    if kk > 1 && pve_topic < 1. {
-        let denom = (kk - 1) as f32;
-        let p_background = (1.0 - pve_topic) / denom;
-        let theta_null = DMatrix::<f32>::from_element(kk, nn, p_background);
-        theta_kn = (theta_kn * pve_topic) + theta_null;
-    }
-
-    // let (a, b) = (1. / overdisp, (kk as f32).sqrt() * overdisp);
-    // let theta_kn = DMatrix::<f32>::rgamma(kk, nn, (a, b));
+    let theta_kn = sample_theta_kn(kk, nn, pve_topic, &mut rng)?;
 
     // 4. putting them all together
-    // let mut triplets = vec![];
-
-    let triplets = theta_kn
-        .column_iter()
-        .enumerate()
-        .par_bridge()
-        .progress_count(nn as u64)
-        .map(|(j, theta_j)| {
-            let mut rng = rand::rngs::StdRng::seed_from_u64(rseed + j as u64);
-            let b = batch_membership[j]; // batch index
-
-            let lambda_j = if bb > 1 {
-                (&beta_dk * theta_j).component_mul(&delta_db.column(b))
-            } else {
-                &beta_dk * theta_j
-            };
-
-            let tot = lambda_j.sum();
-            let scale = (nnz as f32) / tot;
-
-            lambda_j
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &l_ij)| {
-                    let l_ij = (l_ij * scale).max(eps);
-                    if let Ok(rpois) = Poisson::new(l_ij) {
-                        let y_ij = rpois.sample(&mut rng);
-                        if y_ij > threshold {
-                            Some((i as u64, j as u64, y_ij))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .flatten()
-        .collect::<Vec<_>>();
+    let delta_ref = if bb > 1 { Some(&delta_db) } else { None };
+    let triplets = sample_poisson_triplets(
+        &beta_dk,
+        &theta_kn,
+        delta_ref,
+        &batch_membership,
+        nnz,
+        rseed,
+        0,
+    );
 
     info!(
         "sampled Poisson data with {} non-zero elements",
@@ -289,7 +321,7 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
 /// Returns `(beta_dk, node_probs_d_by_numnodes)`:
 /// - `beta_dk`: [D, K] leaf dictionary (each column sums to ~1)
 /// - `node_probs`: [D, num_nodes] all node probabilities (col 0 = root, etc.)
-fn generate_hierarchical_dictionary(
+pub(crate) fn generate_hierarchical_dictionary(
     dd: usize,
     tree_depth: usize,
     overdisp: f32,
