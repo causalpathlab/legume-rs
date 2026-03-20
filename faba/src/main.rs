@@ -25,6 +25,7 @@ use run_m6a::*;
 use run_pipeline::*;
 use run_read_depth::*;
 use site_analysis::metagene::*;
+use site_analysis::pileup::*;
 use site_analysis::scan_pwm::*;
 
 const LOGO: &str = include_str!("../logo.txt");
@@ -155,6 +156,18 @@ enum Commands {
     Pwm(ScanPwmArgs),
 
     #[command(
+        name = "pileup",
+        alias = "inspect",
+        about = "ASCII pileup plot for a single gene's modification sites",
+        long_about = "ASCII pileup plot for a single gene's modification sites\n\n\
+            Reads a sparse matrix (zarr/h5) from faba output, filters to a\n\
+            specific gene, bins positions along the gene body, and renders a\n\
+            vertical ASCII histogram showing signal density across genomic\n\
+            position. No GFF file required."
+    )]
+    Pileup(PileupArgs),
+
+    #[command(
         name = "metagene",
         alias = "mg",
         about = "Metagene histogram of site positions across gene features",
@@ -199,6 +212,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Genes(ref args) => run_gene_count(args)?,
         Commands::Depth(ref args) => run_read_depth(args)?,
         Commands::Pwm(ref args) => run_scan_pwm(args)?,
+        Commands::Pileup(ref args) => run_pileup(args)?,
         Commands::Metagene(ref args) => run_metagene(args)?,
         Commands::All(ref args) => run_pipeline(args)?,
     }

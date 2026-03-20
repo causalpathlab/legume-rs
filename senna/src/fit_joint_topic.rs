@@ -6,6 +6,7 @@ use candle_nn::AdamW;
 use candle_nn::Optimizer;
 
 use candle_core::Device;
+use candle_util::candle_decoder_delta_topic::*;
 use candle_util::candle_decoder_joint_topic::*;
 use candle_util::candle_encoder_joint_softmax::*;
 use candle_util::candle_joint_data_loader::*;
@@ -15,6 +16,14 @@ use indicatif::{ParallelProgressIterator, ProgressBar};
 use matrix_util::dmatrix_util::concatenate_vertical;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+pub enum JointDecoderType {
+    /// Each modality has its own topic-to-feature dictionary
+    Independent,
+    /// Shared base dictionary + cumulative deltas between consecutive modalities
+    Delta,
+}
 
 #[derive(Args, Debug)]
 pub struct JointTopicArgs {
@@ -46,11 +55,14 @@ pub struct JointTopicArgs {
         short,
         required = true,
         help = "Output header",
-        long_help = "Output header for results.\n\
-		     Specify the output file or prefix for generated files:\n\
-		     - {out}.delta.parquet\n\
-		     - {out}.dictionary.parquet\n\
-		     - {out}.latent.parquet (log-softmax topic proportions)\n"
+        long_help = "Output file prefix. Generated files:\n\
+		     - {out}.dictionary.parquet (effective topic dictionaries)\n\
+		     - {out}.latent.parquet (log-softmax topic proportions)\n\
+		     - {out}.log_likelihood.parquet (training metrics)\n\
+		     - {out}_{d}.delta.parquet (batch effects per modality)\n\n\
+		     With --decoder-type delta, additionally:\n\
+		     - {out}.base_dictionary.parquet (shared base dictionary)\n\
+		     - {out}_{m}.delta_logits.parquet (delta logits per modality)\n"
     )]
     out: Box<str>,
 
@@ -136,9 +148,11 @@ pub struct JointTopicArgs {
     #[arg(
         long,
         help = "Maximum number of highly variable features per modality.",
-        long_help = "Select top N features by log-variance for each modality.\n\
+        long_help = "Select top N features by log-variance.\n\
 		     If not specified, all features are used.\n\
-		     Applied independently to each data modality."
+		     Independent mode: applied separately to each modality.\n\
+		     Delta mode: computed on the reference modality (first),\n\
+		     then shared across all modalities."
     )]
     max_features: Option<usize>,
 
@@ -249,7 +263,9 @@ pub struct JointTopicArgs {
 		     meta-features. The model trains at this reduced resolution.\n\
 		     On output, the dictionary is expanded back to full resolution.\n\
 		     Set to 0 to disable. Default: 5000.\n\
-		     Applied after --max-features selection if both are specified."
+		     Applied after --max-features selection if both are specified.\n\
+		     Independent mode: computed per modality.\n\
+		     Delta mode: computed on the reference modality, shared across all."
     )]
     max_coarse_features: usize,
 
@@ -261,6 +277,24 @@ pub struct JointTopicArgs {
 		     Improves performance for large datasets."
     )]
     preload_data: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "independent",
+        help = "Joint decoder type.",
+        long_help = "Joint decoder type:\n\
+		     - independent: each modality has its own topic dictionary.\n\
+		       Modalities can have different features.\n\
+		     - delta: shared base dictionary + cumulative chain deltas.\n\
+		       Modality 0 = softmax(z @ W_base)\n\
+		       Modality m = softmax(z @ (W_base + sum of delta_1..delta_m))\n\
+		       All modalities must share the same features (genes).\n\
+		       Feature selection and coarsening are shared from the\n\
+		       reference modality (first). Delta logits are initialized\n\
+		       to zero and diverge during training."
+    )]
+    decoder_type: JointDecoderType,
 }
 
 pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
@@ -275,9 +309,54 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         preload: args.preload_data,
     })?;
 
+    // 1a. For delta decoder, validate shared features across modalities
+    if args.decoder_type == JointDecoderType::Delta {
+        let ref_names = data_stack.stack[0].row_names()?;
+        for (d, dv) in data_stack.stack.iter().enumerate().skip(1) {
+            let names = dv.row_names()?;
+            if names != ref_names {
+                return Err(anyhow::anyhow!(
+                    "Delta decoder requires shared features across modalities, \
+                     but modality 0 and modality {} have different row names. \
+                     Consider using `data-beans align` to align data first.",
+                    d
+                ));
+            }
+        }
+        info!(
+            "Delta decoder: all {} modalities share {} features",
+            args.num_modalities,
+            ref_names.len()
+        );
+    }
+
     // 1b. Feature selection per modality (if requested)
     let feature_selections: Vec<Option<FeatureSelection>> =
-        if let Some(max_feat) = args.max_features {
+        if args.decoder_type == JointDecoderType::Delta {
+            // Delta mode: shared selection from reference modality
+            if let Some(max_feat) = args.max_features {
+                info!(
+                    "Selecting top {} shared features from reference modality by log-variance",
+                    max_feat
+                );
+                let sel = select_highly_variable_features(
+                    &data_stack.stack[0],
+                    Some(max_feat),
+                    None,
+                    false,
+                    &format!("{}_shared", args.out),
+                    args.block_size,
+                    None,
+                )?;
+                info!(
+                    "Shared feature selection: {} features",
+                    sel.selected_indices.len()
+                );
+                vec![Some(sel); args.num_modalities]
+            } else {
+                vec![None; args.num_modalities]
+            }
+        } else if let Some(max_feat) = args.max_features {
             info!(
                 "Selecting top {} features per modality by log-variance",
                 max_feat
@@ -352,7 +431,31 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         .collect();
 
     let coarsenings: Vec<Option<FeatureCoarsening>> =
-        if args.max_coarse_features > 0 {
+        if args.max_coarse_features > 0 && args.decoder_type == JointDecoderType::Delta {
+            // Delta mode: shared coarsening from reference modality
+            let n_full = n_features_full[0];
+            if n_full > args.max_coarse_features {
+                let collapsed_ref = &collapsed_data_vec[0];
+                let sel_ref = &feature_selections[0];
+                let sketch = if let Some(sel) = sel_ref {
+                    collapsed_ref
+                        .mu_observed
+                        .posterior_mean()
+                        .select_rows(&sel.selected_indices)
+                } else {
+                    collapsed_ref.mu_observed.posterior_mean().clone()
+                };
+                let fc = compute_feature_coarsening(&sketch, args.max_coarse_features)?;
+                info!(
+                    "Shared coarsening: {} → {} meta-features",
+                    n_full, fc.num_coarse
+                );
+                vec![Some(fc); args.num_modalities]
+            } else {
+                vec![None; args.num_modalities]
+            }
+        } else if args.max_coarse_features > 0 {
+            // Independent mode: per-modality coarsening
             collapsed_data_vec
             .iter()
             .zip(&feature_selections)
@@ -426,12 +529,6 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         param_builder.clone(),
     )?;
 
-    let decoder = JointTopicDecoder::new(
-        &n_features.clone(),
-        args.n_latent_topics,
-        param_builder.clone(),
-    )?;
-
     // Set up graceful stop flag for SIGINT/SIGTERM
     let stop = Arc::new(AtomicBool::new(false));
     {
@@ -451,10 +548,6 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         coarsenings: &coarsenings,
         stop: &stop,
     };
-    let scores =
-        train_encoder_decoder_progressive(&collapsed_levels, &encoder, &decoder, &train_config)?;
-
-    info!("Writing down the model parameters");
 
     // Get gene names - use selected names if feature selection was applied
     let gene_names: Vec<Box<str>> = data_stack
@@ -473,11 +566,119 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         .flatten()
         .collect();
 
+    match args.decoder_type {
+        JointDecoderType::Independent => {
+            let decoder = JointTopicDecoder::new(
+                &n_features,
+                args.n_latent_topics,
+                param_builder.clone(),
+            )?;
+            train_and_save(
+                &decoder, &collapsed_levels, &encoder, &train_config,
+                &coarsenings, &n_features_full, &gene_names,
+                &data_stack, &dev, args, &feature_selections,
+            )?;
+        }
+        JointDecoderType::Delta => {
+            let shared_d = n_features[0];
+            debug_assert!(
+                n_features.iter().all(|&d| d == shared_d),
+                "Delta decoder requires uniform feature dimensions across modalities"
+            );
+            let decoder = DeltaTopicDecoder::new(
+                args.num_modalities,
+                shared_d,
+                args.n_latent_topics,
+                param_builder.clone(),
+            )?;
+            train_and_save(
+                &decoder, &collapsed_levels, &encoder, &train_config,
+                &coarsenings, &n_features_full, &gene_names,
+                &data_stack, &dev, args, &feature_selections,
+            )?;
+
+            // Gene names for base/delta: reference modality names (no suffix)
+            let base_gene_names: Vec<Box<str>> = if let Some(sel) = &feature_selections[0] {
+                sel.selected_names.clone()
+            } else {
+                data_stack.stack[0].row_names()?
+            };
+
+            // Write base dictionary
+            let base_dict = decoder.get_base_dictionary()?;
+            let base_dict = base_dict.to_device(&candle_core::Device::Cpu)?;
+            let base_mat = Mat::from_tensor(&base_dict)?;
+            let base_mat = if let Some(fc) = &coarsenings[0] {
+                fc.expand_log_dict_dk(&base_mat, n_features_full[0])
+            } else {
+                base_mat
+            };
+            base_mat.to_parquet_with_names(
+                &format!("{}.base_dictionary.parquet", args.out),
+                (Some(&base_gene_names), Some("gene")),
+                None,
+            )?;
+
+            // Write per-modality delta logits [K, D] with gene names as columns
+            for (i, delta) in decoder.get_deltas().iter().enumerate() {
+                let delta = delta.to_device(&candle_core::Device::Cpu)?;
+                let delta_mat = Mat::from_tensor(&delta)?;
+                delta_mat.to_parquet_with_names(
+                    &format!("{}_{}.delta_logits.parquet", args.out, i + 1),
+                    (None, Some("topic")),
+                    Some(&base_gene_names),
+                )?;
+            }
+        }
+    }
+
+    info!("Done");
+    Ok(())
+}
+
+/// Train decoder, write dictionaries, log-likelihood, and latent states.
+fn train_and_save<Dec: JointDecoderModuleT>(
+    decoder: &Dec,
+    collapsed_levels: &[Vec<CollapsedOut>],
+    encoder: &LogSoftmaxJointEncoder,
+    train_config: &ProgressiveTrainConfig,
+    coarsenings: &[Option<FeatureCoarsening>],
+    n_features_full: &[usize],
+    gene_names: &[Box<str>],
+    data_stack: &SparseIoStack,
+    dev: &candle_core::Device,
+    args: &JointTopicArgs,
+    feature_selections: &[Option<FeatureSelection>],
+) -> anyhow::Result<()> {
+    let scores =
+        train_encoder_decoder_progressive(collapsed_levels, encoder, decoder, train_config)?;
+
+    info!("Writing down the model parameters");
+    write_joint_dictionaries(decoder, coarsenings, n_features_full, gene_names, &args.out)?;
+    scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
+
+    info!("Writing down the latent states");
+    write_latent_states(
+        data_stack, encoder, collapsed_levels.last().unwrap(), dev, args,
+        feature_selections, coarsenings,
+    )?;
+    Ok(())
+}
+
+/// Write effective dictionaries for any JointDecoderModuleT, expanding
+/// coarsening if needed and stacking vertically across modalities.
+fn write_joint_dictionaries<Dec: JointDecoderModuleT>(
+    decoder: &Dec,
+    coarsenings: &[Option<FeatureCoarsening>],
+    n_features_full: &[usize],
+    gene_names: &[Box<str>],
+    out: &str,
+) -> anyhow::Result<()> {
     let dictionaries = decoder
         .get_dictionary()?
         .into_iter()
-        .zip(&coarsenings)
-        .zip(&n_features_full)
+        .zip(coarsenings)
+        .zip(n_features_full)
         .map(|((dict, fc), &n_full)| -> anyhow::Result<Mat> {
             let dict = dict.to_device(&candle_core::Device::Cpu)?;
             let dict_mat = Mat::from_tensor(&dict)?;
@@ -494,27 +695,31 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     concatenate_vertical(&dictionaries)?.to_parquet_with_names(
-        &(args.out.to_string() + ".dictionary.parquet"),
-        (Some(&gene_names), Some("gene")),
+        &(out.to_string() + ".dictionary.parquet"),
+        (Some(gene_names), Some("gene")),
         None,
     )?;
+    Ok(())
+}
 
-    scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
-
-    /////////////////////////////////////////////////////
-    // evaluate latent states while adjusting the bias //
-    /////////////////////////////////////////////////////
-
-    info!("Writing down the latent states");
-
+/// Evaluate latent states and write to parquet.
+fn write_latent_states<Enc: JointEncoderModuleT + Send + Sync>(
+    data_stack: &SparseIoStack,
+    encoder: &Enc,
+    collapsed_data_vec: &[CollapsedOut],
+    dev: &candle_core::Device,
+    args: &JointTopicArgs,
+    feature_selections: &[Option<FeatureSelection>],
+    coarsenings: &[Option<FeatureCoarsening>],
+) -> anyhow::Result<()> {
     let z_nk = evaluate_latent_by_encoder(
-        &data_stack,
-        &encoder,
+        data_stack,
+        encoder,
         collapsed_data_vec,
-        &dev,
+        dev,
         args,
-        &feature_selections,
-        &coarsenings,
+        feature_selections,
+        coarsenings,
     )?;
     let cell_names = data_stack.column_names()?;
     z_nk.to_parquet_with_names(
@@ -522,8 +727,6 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         (Some(&cell_names), Some("cell")),
         None,
     )?;
-
-    info!("Done");
     Ok(())
 }
 

@@ -142,10 +142,18 @@ enum Commands {
 
     #[command(
         about = "Embedding data by topic modelling on multiple data types",
-        long_about = "Estimate a probabilistic topic model in the three stages: \n\
+        long_about = "Estimate a joint probabilistic topic model across multiple modalities:\n\
 		      (1) Collapse sparse data while adjusting batch effects\n\
 		      (2) Estimate encoder-decoder architecture via SGD\n\
-		      (3) Estimate latent states on the original data.\n"
+		      (3) Estimate latent states on the original data.\n\n\
+		      Decoder types:\n\
+		      - independent: each modality gets its own topic-to-feature dictionary\n\
+		      - delta: shared base dictionary + cumulative chain deltas between \n\
+		        consecutive modalities (first=reference, second=base+delta_1, etc.).\n\
+		        All modalities must share the same features (genes).\n\n\
+		      Data files are organized in a row-major table:\n\
+		      files are grouped by modality (rows), sharing cells (columns).\n\
+		      Use -m to specify the number of modality rows.\n"
     )]
     JointTopic(JointTopicArgs),
 

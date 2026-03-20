@@ -67,6 +67,34 @@ pub trait DecoderModuleT {
     fn dim_latent(&self) -> usize;
 }
 
+/// Compute joint multinomial log-likelihood from per-modality log-reconstructions.
+/// Returns (recon_vec, total_llik) where total_llik sums across modalities.
+pub fn joint_multinomial_llik(
+    log_recon_vec: Vec<Tensor>,
+    x_nd_vec: &[Tensor],
+) -> Result<(Vec<Tensor>, Tensor)> {
+    let recon_vec: Vec<Tensor> = log_recon_vec
+        .iter()
+        .map(|x| x.exp())
+        .collect::<Result<Vec<_>>>()?;
+
+    let llik_vec = x_nd_vec
+        .iter()
+        .zip(&log_recon_vec)
+        .map(|(x, log_recon)| -> Result<Tensor> {
+            let ret = x
+                .clamp(0.0, f64::INFINITY)?
+                .mul(log_recon)?
+                .sum(x.rank() - 1)?;
+            ret.unsqueeze(ret.rank())
+        })
+        .collect::<Result<Vec<Tensor>>>()?;
+
+    let k = llik_vec[0].rank();
+    let llik = Tensor::cat(&llik_vec, k - 1)?.sum(k - 1)?;
+    Ok((recon_vec, llik))
+}
+
 pub trait JointDecoderModuleT {
     /// A decoder that spits out reconstruction
     fn forward(&self, z_nk: &Tensor) -> Result<Vec<Tensor>>;
