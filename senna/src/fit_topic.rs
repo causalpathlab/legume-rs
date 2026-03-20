@@ -376,28 +376,47 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    // 4. Feature coarsening (if D > max_coarse_features)
+    // 4. Per-level feature coarsenings for decoders.
+    //    Dense encoder operates at D_coarse (finest level's coarsening).
+    //    Decoders at coarser levels use fewer feature groups.
     let n_features_full = data_vec.num_rows();
+    let num_levels = collapsed_levels.len();
 
-    let coarsening: Option<FeatureCoarsening> =
-        if args.max_coarse_features > 0 && n_features_full > args.max_coarse_features {
-            let sketch_ds = finest_collapsed.mu_observed.posterior_mean().clone();
-            Some(compute_feature_coarsening(
-                &sketch_ds,
-                args.max_coarse_features,
-            )?)
-        } else {
-            None
-        };
+    let level_coarsenings: Vec<Option<FeatureCoarsening>> = if args.max_coarse_features > 0
+        && n_features_full > args.max_coarse_features
+    {
+        let sketch_ds = finest_collapsed.mu_observed.posterior_mean().clone();
+        let finest_target = args.max_coarse_features;
+        let min_target = (finest_target / num_levels).max(50);
+        (0..num_levels)
+            .map(|i| {
+                let frac = if num_levels > 1 {
+                    i as f64 / (num_levels - 1) as f64
+                } else {
+                    1.0
+                };
+                let log_min = (min_target as f64).ln();
+                let log_max = (finest_target as f64).ln();
+                let target = (log_min + frac * (log_max - log_min)).exp().round() as usize;
+                let target = target.clamp(min_target, finest_target);
+                Some(compute_feature_coarsening(&sketch_ds, target).expect("feature coarsening"))
+            })
+            .collect()
+    } else {
+        vec![None; num_levels]
+    };
+
+    // Finest-level coarsening (used for encoder, evaluation, dictionary output)
+    let finest_coarsening: Option<&FeatureCoarsening> =
+        level_coarsenings.last().and_then(|c| c.as_ref());
 
     // 5. Train a topic model on the collapsed data
     let n_topics = args.n_latent_topics;
 
-    let n_features_decoder = coarsening
-        .as_ref()
+    // Encoder at finest level's D_coarse (dense ops are O(D))
+    let n_features_encoder = finest_coarsening
         .map(|c| c.num_coarse)
         .unwrap_or(n_features_full);
-    let n_features_encoder = n_features_decoder;
 
     let dev = match args.device {
         ComputeDevice::Metal => candle_core::Device::new_metal(args.device_no)?,
@@ -418,9 +437,14 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         param_builder.clone(),
     )?;
 
+    let level_decoder_dims: Vec<usize> = level_coarsenings
+        .iter()
+        .map(|fc| fc.as_ref().map(|c| c.num_coarse).unwrap_or(n_features_full))
+        .collect();
+
     info!(
-        "input: {} -> encoder -> decoder ({:?}) -> output: {}",
-        n_features_encoder, args.decoder, n_features_decoder
+        "input: {} -> encoder -> {:?} decoder(s) (dims {:?}) -> finest: {}",
+        n_features_encoder, args.decoder, level_decoder_dims, n_features_encoder,
     );
 
     let gene_names = data_vec.row_names()?;
@@ -448,39 +472,49 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         None
     };
 
-    // Build decoder, train, save dictionary, and evaluate.
+    // Build per-level decoders, train, save dictionary, and evaluate.
     let (scores, z_nk) = match args.decoder {
         DecoderType::Nb => {
-            let decoder = NbTopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
+            let decoders: Vec<NbTopicDecoder> = level_decoder_dims
+                .iter()
+                .enumerate()
+                .map(|(i, &d_l)| {
+                    NbTopicDecoder::new(d_l, n_topics, param_builder.pp(format!("dec_{i}")))
+                        .expect("decoder creation")
+                })
+                .collect();
 
             let train_config = ProgressiveTrainConfig {
                 parameters: &parameters,
                 dev: &dev,
                 args,
-                feature_coarsening: coarsening.as_ref(),
                 stop: &stop,
             };
             let scores = train_encoder_decoder_progressive(
                 &collapsed_levels,
                 &mut encoder,
-                &decoder,
+                &decoders,
+                &level_coarsenings,
                 &train_config,
             )?;
 
             info!("Writing down the model parameters");
 
+            let finest_decoder = decoders.last().unwrap();
             write_dictionary_expanded(
-                &decoder,
-                coarsening.as_ref(),
+                finest_decoder,
+                finest_coarsening,
                 n_features_full,
                 &output_gene_names,
                 &args.out,
             )?;
 
             // Save per-gene dispersion φ_g
-            let log_phi = decoder.log_phi().to_device(&candle_core::Device::Cpu)?;
+            let log_phi = finest_decoder
+                .log_phi()
+                .to_device(&candle_core::Device::Cpu)?;
             let phi_vec: Vec<f32> = log_phi.exp()?.flatten_all()?.to_vec1()?;
-            let phi_expanded: Vec<f32> = if let Some(fc) = coarsening.as_ref() {
+            let phi_expanded: Vec<f32> = if let Some(fc) = finest_coarsening {
                 let mut full = vec![0.0f32; n_features_full];
                 for (c, group) in fc.coarse_to_fine.iter().enumerate() {
                     for &f in group {
@@ -508,8 +542,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 dev: &dev,
                 adj_method: &args.adj_method,
                 minibatch_size: args.minibatch_size,
-                feature_coarsening: coarsening.as_ref(),
-                decoder: Some(&decoder),
+                feature_coarsening: finest_coarsening,
+                decoder: Some(finest_decoder),
                 refine_config: refine_config.as_ref(),
             };
             let z_nk =
@@ -518,27 +552,35 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             (scores, z_nk)
         }
         DecoderType::Multinom => {
-            let decoder = TopicDecoder::new(n_features_decoder, n_topics, param_builder.clone())?;
+            let decoders: Vec<TopicDecoder> = level_decoder_dims
+                .iter()
+                .enumerate()
+                .map(|(i, &d_l)| {
+                    TopicDecoder::new(d_l, n_topics, param_builder.pp(format!("dec_{i}")))
+                        .expect("decoder creation")
+                })
+                .collect();
 
             let train_config = ProgressiveTrainConfig {
                 parameters: &parameters,
                 dev: &dev,
                 args,
-                feature_coarsening: coarsening.as_ref(),
                 stop: &stop,
             };
             let scores = train_encoder_decoder_progressive(
                 &collapsed_levels,
                 &mut encoder,
-                &decoder,
+                &decoders,
+                &level_coarsenings,
                 &train_config,
             )?;
 
             info!("Writing down the model parameters");
 
+            let finest_decoder = decoders.last().unwrap();
             write_dictionary_expanded(
-                &decoder,
-                coarsening.as_ref(),
+                finest_decoder,
+                finest_coarsening,
                 n_features_full,
                 &output_gene_names,
                 &args.out,
@@ -549,8 +591,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 dev: &dev,
                 adj_method: &args.adj_method,
                 minibatch_size: args.minibatch_size,
-                feature_coarsening: coarsening.as_ref(),
-                decoder: Some(&decoder),
+                feature_coarsening: finest_coarsening,
+                decoder: Some(finest_decoder),
                 refine_config: refine_config.as_ref(),
             };
             let z_nk =
@@ -618,21 +660,20 @@ struct ProgressiveTrainConfig<'a> {
     parameters: &'a candle_nn::VarMap,
     dev: &'a Device,
     args: &'a TopicArgs,
-    feature_coarsening: Option<&'a FeatureCoarsening>,
     stop: &'a AtomicBool,
 }
 
-/// Progressive multi-level VAE training.
+/// Joint multi-level VAE training.
 ///
-/// Allocates epochs across levels with weights inversely proportional to
-/// level index: level `i` gets `total_epochs * (num_levels - i) / sum(1..=num_levels)`.
-/// Coarse levels have fewer samples so each epoch is cheap — train longer
-/// there for a solid warm start, then fine-tune briefly on finer data.
-/// A single optimizer is created once and carries state across levels.
+/// Encoder operates at D_coarse (finest level's feature coarsening).
+/// Per-level decoders operate at D_l. All levels are trained simultaneously
+/// each epoch — the shared encoder sees data from all levels, while each
+/// decoder handles its own feature resolution.
 fn train_encoder_decoder_progressive<Enc, Dec>(
     collapsed_levels: &[CollapsedOut],
     encoder: &mut Enc,
-    decoder: &Dec,
+    decoders: &[Dec],
+    level_coarsenings: &[Option<FeatureCoarsening>],
     config: &ProgressiveTrainConfig,
 ) -> anyhow::Result<TrainScores>
 where
@@ -642,22 +683,22 @@ where
     let num_levels = collapsed_levels.len();
     let total_epochs = config.args.epochs;
 
-    // Compute per-level epoch allocation: w[i] = num_levels - i
-    // Coarse levels are cheap per epoch, so train longer there for
-    // a solid warm start, then fine-tune briefly on finer data.
-    let total_weight: usize = (1..=num_levels).sum();
-    let level_epochs: Vec<usize> = (0..num_levels)
-        .map(|i| {
-            let w = num_levels - i;
-            (total_epochs * w / total_weight).max(1)
-        })
-        .collect();
+    // Encoder coarsening = finest level's coarsening
+    let enc_coarsening = level_coarsenings.last().and_then(|c| c.as_ref());
+
+    for (level, (collapsed, decoder)) in collapsed_levels.iter().zip(decoders.iter()).enumerate() {
+        info!(
+            "Level {}/{}: {} samples, decoder dim {}",
+            level + 1,
+            num_levels,
+            collapsed.mu_observed.ncols(),
+            decoder.dim_obs(),
+        );
+    }
 
     info!(
-        "Progressive training: {} levels, epoch allocation: {:?} (total {})",
-        num_levels,
-        level_epochs,
-        level_epochs.iter().sum::<usize>()
+        "Joint multi-level training: {} levels, {} epochs",
+        num_levels, total_epochs
     );
 
     let mut adam = AdamW::new_lr(
@@ -665,95 +706,122 @@ where
         config.args.learning_rate as f64,
     )?;
 
-    let total_actual_epochs: usize = level_epochs.iter().sum();
-    let pb = ProgressBar::new(total_actual_epochs as u64);
+    let pb = ProgressBar::new(total_epochs as u64);
 
-    let mut llik_trace = Vec::with_capacity(total_actual_epochs);
-    let mut kl_trace = Vec::with_capacity(total_actual_epochs);
-    let mut global_epoch: usize = 0;
+    let mut llik_trace = Vec::with_capacity(total_epochs);
+    let mut kl_trace = Vec::with_capacity(total_epochs);
 
-    for (level, (collapsed, &level_ep)) in
-        collapsed_levels.iter().zip(level_epochs.iter()).enumerate()
-    {
-        let label = if level == 0 {
-            "coarsest"
-        } else if level + 1 == num_levels {
-            "finest"
+    // Budget: 2^sort_dim total samples per epoch, weighted inversely by level size.
+    // Coarser levels (fewer, higher-quality samples) get more budget.
+    let target_total = 1usize << config.args.sort_dim;
+    let level_sizes: Vec<usize> = collapsed_levels
+        .iter()
+        .map(|c| c.mu_observed.ncols())
+        .collect();
+    let level_budgets = compute_level_budgets(&level_sizes, target_total);
+    info!(
+        "Sample budget per epoch: {} total, per level: {:?} (from {:?})",
+        target_total, level_budgets, level_sizes
+    );
+
+    let mut rng = rand::rng();
+
+    for epoch in (0..total_epochs).step_by(config.args.jitter_interval) {
+        // Sample at full D, subsample rows BEFORE coarsening (avoids wasted work)
+        let level_data: Vec<(Mat, Option<Mat>, Mat)> = collapsed_levels
+            .iter()
+            .zip(level_coarsenings.iter())
+            .zip(level_budgets.iter())
+            .map(|((collapsed, dec_fc), &budget)| {
+                let full_mixed = collapsed
+                    .mu_observed
+                    .posterior_sample()
+                    .unwrap()
+                    .transpose();
+
+                let full_batch = collapsed.mu_residual.as_ref().map(|x| {
+                    let ret: Mat = x.posterior_sample().unwrap();
+                    ret.transpose()
+                });
+
+                let target_full = if let Some(adj) = &collapsed.mu_adjusted {
+                    adj.posterior_sample().unwrap().transpose()
+                } else {
+                    full_mixed.clone()
+                };
+
+                // Subsample rows BEFORE coarsening
+                let (sub_mixed, sub_batch, sub_target) =
+                    subsample_rows((full_mixed, full_batch, target_full), budget, &mut rng);
+
+                // Coarsen encoder input to D_coarse (finest level)
+                let enc_nd = if let Some(fc) = enc_coarsening {
+                    fc.aggregate_columns_nd(&sub_mixed)
+                } else {
+                    sub_mixed
+                };
+
+                let batch_nd = sub_batch.map(|b| {
+                    if let Some(fc) = enc_coarsening {
+                        fc.aggregate_columns_nd(&b)
+                    } else {
+                        b
+                    }
+                });
+
+                // Coarsen decoder target to D_l
+                let dec_target = if let Some(fc) = dec_fc.as_ref() {
+                    fc.aggregate_columns_nd(&sub_target)
+                } else {
+                    sub_target
+                };
+
+                (enc_nd, batch_nd, dec_target)
+            })
+            .collect();
+
+        // Build per-level data loaders
+        let data_loaders: Vec<InMemoryData> = level_data
+            .iter()
+            .map(|(enc, batch, target)| {
+                let mut loader = InMemoryData::from(InMemoryArgs {
+                    input: enc,
+                    input_null: batch.as_ref(),
+                    output: Some(target),
+                    output_null: None,
+                })
+                .expect("data loader creation");
+                loader
+                    .shuffle_minibatch(config.args.minibatch_size)
+                    .expect("shuffle");
+                loader
+            })
+            .collect();
+
+        let kl_weight = if config.args.kl_warmup_epochs > 0.0 {
+            1.0 - (-(epoch as f64) / config.args.kl_warmup_epochs).exp()
         } else {
-            ""
+            1.0
         };
-        info!(
-            "Level {}/{}: {} epochs, {} samples {}",
-            level + 1,
-            num_levels,
-            level_ep,
-            collapsed.mu_observed.ncols(),
-            label,
-        );
 
-        for epoch in (0..level_ep).step_by(config.args.jitter_interval) {
-            let full_mixed_nd = collapsed.mu_observed.posterior_sample()?.transpose();
+        let jitter_end = config.args.jitter_interval.min(total_epochs - epoch);
+        for _jitter in 0..jitter_end {
+            let mut llik_tot = 0f32;
+            let mut kl_tot = 0f32;
+            let mut count_tot = 0f32;
+            let mut n_tot = 0usize;
 
-            // Coarsen everything to D_coarse (encoder and decoder both at D_coarse)
-            let mixed_nd = if let Some(fc) = config.feature_coarsening {
-                fc.aggregate_columns_nd(&full_mixed_nd)
-            } else {
-                full_mixed_nd
-            };
+            // Train on all levels each epoch
+            for (level, loader) in data_loaders.iter().enumerate() {
+                let decoder = &decoders[level];
+                n_tot += loader.num_data();
 
-            let clean_nd = collapsed.mu_adjusted.as_ref().map(|x| {
-                let mut ret: Mat = x.posterior_sample().unwrap();
-                ret = ret.transpose();
-                if let Some(fc) = config.feature_coarsening {
-                    ret = fc.aggregate_columns_nd(&ret);
-                }
-                ret
-            });
-
-            // Encoder null: coarsened (encoder operates at D_coarse)
-            let batch_nd = collapsed.mu_residual.as_ref().map(|x| {
-                let mut ret: Mat = x.posterior_sample().unwrap();
-                ret = ret.transpose();
-                if let Some(fc) = config.feature_coarsening {
-                    ret = fc.aggregate_columns_nd(&ret);
-                }
-                ret
-            });
-
-            let mut data_loader = InMemoryData::from(InMemoryArgs {
-                input: &mixed_nd,
-                input_null: batch_nd.as_ref(),
-                output: clean_nd.as_ref(),
-                output_null: None,
-            })?;
-
-            data_loader.shuffle_minibatch(config.args.minibatch_size)?;
-
-            let kl_weight = if config.args.kl_warmup_epochs > 0.0 {
-                1.0 - (-(global_epoch as f64) / config.args.kl_warmup_epochs).exp()
-            } else {
-                1.0
-            };
-
-            let jitter_end = config.args.jitter_interval.min(level_ep - epoch);
-            for jitter in 0..jitter_end {
-                let mut llik_tot = 0f32;
-                let mut kl_tot = 0f32;
-                let mut count_tot = 0f32;
-
-                for b in 0..data_loader.num_minibatch() {
-                    let mb = data_loader.minibatch_shuffled(b, config.dev)?;
+                for b in 0..loader.num_minibatch() {
+                    let mb = loader.minibatch_shuffled(b, config.dev)?;
                     let (log_z_nk, kl) =
                         encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
 
-                    // Smoothing in log-space: exp→mix→log
-                    let log_z_nk = if config.args.topic_smoothing > 0.0 {
-                        let alpha = config.args.topic_smoothing;
-                        let kk = log_z_nk.dim(1)? as f64;
-                        ((log_z_nk.exp()? * (1.0 - alpha))? + alpha / kk)?.log()?
-                    } else {
-                        log_z_nk
-                    };
+                    let log_z_nk = smooth_topics(log_z_nk, config.args.topic_smoothing)?;
 
                     let y_nd = mb.output.unwrap_or(mb.input);
                     let (_, llik) =
@@ -762,52 +830,34 @@ where
                     let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
                     adam.backward_step(&loss)?;
 
-                    let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
-                    let kl_val = kl.sum_all()?.to_scalar::<f32>()?;
-                    let count_val = y_nd.sum_all()?.to_scalar::<f32>()?;
-                    llik_tot += llik_val;
-                    kl_tot += kl_val;
-                    count_tot += count_val;
+                    llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+                    kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
+                    count_tot += y_nd.sum_all()?.to_scalar::<f32>()?;
                 }
+            }
 
-                let n = data_loader.num_data() as f32;
-                let llik_avg = llik_tot / count_tot;
-                let kl_avg = kl_tot / n;
-                llik_trace.push(llik_avg);
-                kl_trace.push(kl_avg);
+            let llik_avg = llik_tot / count_tot;
+            let kl_avg = kl_tot / n_tot as f32;
+            llik_trace.push(llik_avg);
+            kl_trace.push(kl_avg);
 
-                pb.inc(1);
-                global_epoch += 1;
+            pb.inc(1);
 
-                info!(
-                    "[level {}/{}][{}][{}] {} {}",
-                    level + 1,
-                    num_levels,
-                    epoch,
-                    jitter,
-                    llik_avg,
-                    kl_avg
-                );
+            info!("[epoch {}] llik={} kl={}", epoch, llik_avg, kl_avg);
 
-                if config.stop.load(Ordering::SeqCst) {
-                    pb.finish_and_clear();
-                    info!(
-                        "Stopping training early at level {}/{}, epoch {}",
-                        level + 1,
-                        num_levels,
-                        epoch
-                    );
-                    return Ok(TrainScores {
-                        llik: llik_trace,
-                        kl: kl_trace,
-                    });
-                }
+            if config.stop.load(Ordering::SeqCst) {
+                pb.finish_and_clear();
+                info!("Stopping early at epoch {}", epoch);
+                return Ok(TrainScores {
+                    llik: llik_trace,
+                    kl: kl_trace,
+                });
             }
         }
     }
 
     pb.finish_and_clear();
-    info!("done progressive model training");
+    info!("done joint multi-level training");
     Ok(TrainScores {
         llik: llik_trace,
         kl: kl_trace,
