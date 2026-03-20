@@ -14,7 +14,8 @@ use regex::Regex;
 use std::sync::Arc;
 
 // Import the argument structs from main.rs
-use crate::{RunSimulateArgs, RunStatArgs, SparseIoBackend, StatDim};
+use crate::simulate_multimodal;
+use crate::{RunSimulateArgs, RunSimulateMultimodalArgs, RunStatArgs, SparseIoBackend, StatDim};
 
 /// Compute statistics across sparse matrix data
 ///
@@ -263,6 +264,119 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
 
     data.register_row_names_vec(&rows);
     data.register_column_names_vec(&cols);
+
+    info!("done");
+    Ok(())
+}
+
+/// Run multimodal simulation with shared base + delta dictionaries.
+pub fn run_simulate_multimodal(cmd_args: &RunSimulateMultimodalArgs) -> anyhow::Result<()> {
+    let output = cmd_args.output.clone();
+    mkdir(&output)?;
+
+    let sim_args = simulate_multimodal::MultimodalSimArgs {
+        rows: cmd_args.rows,
+        cols: cmd_args.cols,
+        depth_per_modality: cmd_args.depth.clone(),
+        factors: cmd_args.factors,
+        batches: cmd_args.batches,
+        base_scale: cmd_args.base_scale,
+        delta_scale: cmd_args.delta_scale,
+        n_delta_features: cmd_args.n_delta_features,
+        pve_topic: cmd_args.pve_topic,
+        pve_batch: cmd_args.pve_batch,
+        rseed: cmd_args.rseed,
+        shared_batch_effects: cmd_args.shared_batch_effects,
+        hierarchical_depth: cmd_args.hierarchical_depth,
+        overdisp: cmd_args.overdisp,
+        n_housekeeping: cmd_args.n_housekeeping,
+        housekeeping_fold: cmd_args.housekeeping_fold,
+    };
+
+    let mm = sim_args.depth_per_modality.len();
+    let sim = simulate_multimodal::generate_multimodal_data(&sim_args)?;
+    info!("generated multimodal data: {} modalities", mm);
+
+    let rows: Vec<Box<str>> = (0..cmd_args.rows)
+        .map(|i| i.to_string().into_boxed_str())
+        .collect();
+    let cols: Vec<Box<str>> = (0..cmd_args.cols)
+        .map(|i| i.to_string().into_boxed_str())
+        .collect();
+
+    // Shared outputs
+    let prop_file = format!("{}.prop.parquet", output);
+    sim.theta_kn.transpose().to_parquet_with_names(
+        &prop_file,
+        (Some(&cols), Some("cell")),
+        None,
+    )?;
+
+    let batch_file = format!("{}.batch.gz", output);
+    let batch_out: Vec<Box<str>> = sim
+        .batch_membership
+        .iter()
+        .map(|&x| Box::from(x.to_string()))
+        .collect();
+    write_lines(&batch_out, &batch_file)?;
+
+    // W_base
+    let base_file = format!("{}.w_base.parquet", output);
+    sim.w_base_kd
+        .to_parquet_with_names(&base_file, (None, None), None)?;
+
+    // Per-modality outputs
+    let backend = cmd_args.backend.clone();
+    for m in 0..mm {
+        let suffix = format!(".m{}", m);
+        let backend_file = match backend {
+            SparseIoBackend::HDF5 => format!("{}{}.h5", output, suffix),
+            SparseIoBackend::Zarr => format!("{}{}.zarr", output, suffix),
+        };
+
+        let mtx_shape = (cmd_args.rows, cmd_args.cols, sim.triplets[m].len());
+
+        // Dictionary
+        let dict_file = format!("{}{}.dict.parquet", output, suffix);
+        sim.beta_dk[m].to_parquet_with_names(&dict_file, (Some(&rows), Some("feature")), None)?;
+
+        // Batch effects
+        let ln_batch_file = format!("{}{}.ln_batch.parquet", output, suffix);
+        sim.ln_delta_db[m].to_parquet_with_names(
+            &ln_batch_file,
+            (Some(&rows), Some("feature")),
+            None,
+        )?;
+
+        // Delta (non-reference only)
+        if m > 0 {
+            let delta_file = format!("{}.w_delta{}.parquet", output, suffix);
+            sim.w_delta_kd[m - 1].to_parquet_with_names(&delta_file, (None, None), None)?;
+
+            let mask_file = format!("{}.spike_mask{}.parquet", output, suffix);
+            sim.spike_mask_kd[m - 1].to_parquet_with_names(&mask_file, (None, None), None)?;
+        }
+
+        // MTX
+        if cmd_args.save_mtx {
+            let mtx_file = format!("{}{}.mtx.gz", output, suffix);
+            let mut triplets = sim.triplets[m].clone();
+            triplets.par_sort_by_key(|&(row, col, _)| (col, row));
+            mtx_io::write_mtx_triplets(&triplets, cmd_args.rows, cmd_args.cols, &mtx_file)?;
+        }
+
+        // Sparse backend
+        let mut data = create_sparse_from_triplets(
+            &sim.triplets[m],
+            mtx_shape,
+            Some(&backend_file),
+            Some(&backend),
+        )?;
+
+        data.register_row_names_vec(&rows);
+        data.register_column_names_vec(&cols);
+        info!("modality {}: {}", m, backend_file);
+    }
 
     info!("done");
     Ok(())
