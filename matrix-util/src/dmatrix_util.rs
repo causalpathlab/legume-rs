@@ -1229,4 +1229,18 @@ where
         idx_data.sort_by_key(|(i, _)| *i);
         idx_data.into_iter().map(|(_, t)| t).collect()
     }
+
+    fn data_shape(&self) -> (usize, usize) {
+        (self.nrows(), self.ncols())
+    }
+
+    fn row_to_f32_vec(&self, i: usize) -> Vec<f32> {
+        let row_data: Vec<T> = self.row(i).iter().copied().collect();
+        let t = candle_core::Tensor::from_vec(row_data, self.ncols(), &candle_core::Device::Cpu)
+            .expect("tensor from row");
+        t.to_dtype(candle_core::DType::F32)
+            .expect("to f32")
+            .to_vec1::<f32>()
+            .expect("to vec")
+    }
 }
