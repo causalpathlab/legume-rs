@@ -470,13 +470,7 @@ fn run_atoi_step(
         info!("Quantifying ATOI sites per cell (WT files only)...");
     }
     let valid_cells = gene_count_qc.as_ref().map(|qc| &qc.cell_barcodes);
-    process_all_bam_files_to_backend(
-        &params,
-        &atoi_sites,
-        &gff_map,
-        has_mut_files,
-        valid_cells,
-    )?;
+    process_all_bam_files_to_backend(&params, &atoi_sites, &gff_map, has_mut_files, valid_cells)?;
 
     // Mixture model: cluster editing sites per gene
     info!("Running 1D Gaussian mixture model on A-to-I sites...");
@@ -641,10 +635,10 @@ fn run_dart_step(
     m6a_sites.to_parquet(&gff_map, &sites_output)?;
     info!("Saved m6A sites to {}", sites_output);
 
-    // Second pass: quantification
+    // Second pass: quantification (wt + mut)
     info!("Quantifying m6A sites per cell...");
     let valid_cells = gene_count_qc.as_ref().map(|qc| &qc.cell_barcodes);
-    process_all_bam_files_to_backend(&params, &m6a_sites, &gff_map, false, valid_cells)?;
+    process_all_bam_files_to_backend(&params, &m6a_sites, &gff_map, true, valid_cells)?;
 
     // Mixture model: cluster modification sites per gene
     info!("Running 1D Gaussian mixture model on m6A sites...");

@@ -205,18 +205,7 @@ impl SoftmaxLinear {
     ///
     /// Input `log_h_nk` is already in log-space (from encoder's log_softmax).
     pub fn forward_log(&self, log_h_nk: &Tensor) -> Result<Tensor> {
-        let log_w_kd = match *log_h_nk.dims() {
-            [b1, b2, _, _] => self.biased_weight_kd()?.broadcast_left((b1, b2))?,
-            [bsize, _, _] => self.biased_weight_kd()?.broadcast_left(bsize)?,
-            _ => self.biased_weight_kd()?,
-        };
-
-        let log_h = log_h_nk.unsqueeze(2)?; // [N, K, 1] — already log-space
-        let log_w = log_w_kd.unsqueeze(0)?; // [1, K, D]
-        let log_terms = log_h.broadcast_add(&log_w)?; // [N, K, D]
-
-        // logsumexp over K dimension → [N, D]
-        log_terms.log_sum_exp(1)
+        logsumexp_forward(log_h_nk, &self.biased_weight_kd()?)
     }
 }
 
@@ -225,6 +214,19 @@ impl Module for SoftmaxLinear {
     fn forward(&self, log_h_nk: &Tensor) -> Result<Tensor> {
         self.forward_log(log_h_nk)?.exp()
     }
+}
+
+/// Log-space forward: log(Σ_k z_nk * β_kd) = logsumexp_k(log_z_nk + log_β_kd).
+/// Handles broadcasting for batched inputs (2D, 3D, 4D).
+pub fn logsumexp_forward(log_h_nk: &Tensor, log_w_kd: &Tensor) -> Result<Tensor> {
+    let log_w_kd = match *log_h_nk.dims() {
+        [b1, b2, _, _] => log_w_kd.broadcast_left((b1, b2))?,
+        [bsize, _, _] => log_w_kd.broadcast_left(bsize)?,
+        _ => log_w_kd.clone(),
+    };
+    let log_h = log_h_nk.unsqueeze(2)?;
+    let log_w = log_w_kd.unsqueeze(0)?;
+    log_h.broadcast_add(&log_w)?.log_sum_exp(1)
 }
 
 /// create a softmax linear layer

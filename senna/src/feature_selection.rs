@@ -6,6 +6,7 @@ use matrix_util::ndarray_stat::RunningStatistics;
 use ndarray::Ix1;
 
 /// Feature selection result with selected indices, names, and selection matrix
+#[derive(Clone)]
 pub struct FeatureSelection {
     pub selected_indices: Vec<usize>, // Sorted indices of selected features
     pub selected_names: Vec<Box<str>>, // Names of selected features
