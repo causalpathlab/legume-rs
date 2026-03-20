@@ -521,4 +521,16 @@ pub trait CandleDataLoaderOps {
     // fn transpose(&self) -> Self::Mat;
     /// take each row vector as a sample
     fn rows_to_tensor_vec(&self) -> Vec<Tensor>;
+
+    /// Return (nrows, ncols) dimensions
+    fn data_shape(&self) -> (usize, usize);
+
+    /// Extract row i as Vec<f32>.
+    ///
+    /// WARNING: default creates ALL row tensors then picks one — O(N*D) for O(D) work.
+    /// Implementors should override this.
+    fn row_to_f32_vec(&self, i: usize) -> Vec<f32> {
+        let t = &self.rows_to_tensor_vec()[i];
+        t.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    }
 }

@@ -306,4 +306,12 @@ where
         idx_data.sort_by_key(|(i, _)| *i);
         idx_data.into_iter().map(|(_, t)| t).collect()
     }
+
+    fn data_shape(&self) -> (usize, usize) {
+        (self.nrows(), self.ncols())
+    }
+
+    fn row_to_f32_vec(&self, i: usize) -> Vec<f32> {
+        self.row(i).iter().map(|v| v.to_f32().unwrap()).collect()
+    }
 }
