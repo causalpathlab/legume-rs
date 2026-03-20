@@ -4,6 +4,7 @@ mod misc;
 mod qc;
 mod simulate;
 mod simulate_deconv;
+mod simulate_multimodal;
 mod sparse_data_visitors;
 mod sparse_io;
 mod sparse_io_vector;
@@ -12,7 +13,7 @@ mod sparse_matrix_zarr;
 mod sparse_util;
 mod utilities;
 
-use crate::handlers::analysis::{run_simulate, run_stat};
+use crate::handlers::analysis::{run_simulate, run_simulate_multimodal, run_stat};
 use crate::handlers::builders::{
     run_build_from_10x_matrix, run_build_from_10x_molecule, run_build_from_h5ad,
     run_build_from_mtx, run_build_from_zarr_triplets,
@@ -65,6 +66,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::SimulateConv(args) => {
             generate_convoluted_data(args)?;
+        }
+        Commands::SimulateMultimodal(args) => {
+            run_simulate_multimodal(args)?;
         }
         Commands::Info(args) => {
             show_info(args)?;
@@ -322,6 +326,14 @@ enum Commands {
 
     #[command(about = "Simulate convoluted data matrix (experimental)")]
     SimulateConv(SimConvArgs),
+
+    #[command(
+        about = "Simulate multimodal count data with shared base + delta dictionaries",
+        long_about = "Generate M count matrices from shared latent topics with modality-specific\n\
+                      dictionaries: reference = softmax(W_base), others = softmax(W_base + W_delta_m).\n\
+                      Delta is sparse (spike-and-slab): n_delta_features genes per topic are perturbed."
+    )]
+    SimulateMultimodal(RunSimulateMultimodalArgs),
 }
 
 #[derive(Args, Debug)]
@@ -1532,6 +1544,82 @@ pub struct RunSimulateArgs {
     backend: SparseIoBackend,
 }
 
+#[derive(Args, Debug)]
+pub struct RunSimulateMultimodalArgs {
+    #[arg(short, long, help = "Number of features (shared across modalities)")]
+    rows: usize,
+
+    #[arg(short, long, help = "Number of cells")]
+    cols: usize,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Depth per modality (comma-separated, e.g., 1000,500)"
+    )]
+    depth: Vec<usize>,
+
+    #[arg(short, long, default_value_t = 5, help = "Number of topics")]
+    factors: usize,
+
+    #[arg(short, long, default_value_t = 1, help = "Number of batches")]
+    batches: usize,
+
+    #[arg(long, default_value_t = 1.0, help = "Scale of base dictionary logits")]
+    base_scale: f32,
+
+    #[arg(long, default_value_t = 1.0, help = "Scale of non-zero delta entries")]
+    delta_scale: f32,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "Number of non-zero delta genes per topic"
+    )]
+    n_delta_features: usize,
+
+    #[arg(long, default_value_t = 1.0, help = "PVE by topic membership")]
+    pve_topic: f32,
+
+    #[arg(long, default_value_t = 1.0, help = "PVE by batch effects")]
+    pve_batch: f32,
+
+    #[arg(long, default_value_t = 42, help = "Random seed")]
+    rseed: u64,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Share batch effects across modalities"
+    )]
+    shared_batch_effects: bool,
+
+    #[arg(long, help = "Hierarchical tree depth for base dictionary")]
+    hierarchical_depth: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = 10.0,
+        help = "Overdispersion for hierarchical dictionary"
+    )]
+    overdisp: f32,
+
+    #[arg(long, default_value_t = 0, help = "Number of housekeeping genes")]
+    n_housekeeping: usize,
+
+    #[arg(long, default_value_t = 10.0, help = "Housekeeping fold change")]
+    housekeeping_fold: f32,
+
+    #[arg(short, long, help = "Output file header")]
+    output: Box<str>,
+
+    #[arg(long, default_value_t = false, help = "Save output in MTX format")]
+    save_mtx: bool,
+
+    #[arg(long, value_enum, default_value = "zarr", help = "Backend format")]
+    backend: SparseIoBackend,
+}
+
 /////////////////////
 // implementations //
 /////////////////////
@@ -1543,4 +1631,4 @@ pub struct RunSimulateArgs {
 // - show_info, take_columns, take_rows, take_column_names, take_row_names -> handlers/inspection.rs
 // - run_merge_backend, run_merge_mtx, align_backends -> handlers/merging.rs
 // - reorder_rows, subset_columns, run_squeeze -> handlers/transformation.rs
-// - run_stat, run_simulate -> handlers/analysis.rs
+// - run_stat, run_simulate, run_simulate_multimodal -> handlers/analysis.rs
