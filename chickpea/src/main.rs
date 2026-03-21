@@ -1,5 +1,4 @@
 mod common;
-mod run_embed;
 mod run_spectral;
 
 use crate::common::*;
@@ -48,9 +47,6 @@ enum Commands {
     /// Bipartite spectral SVD — fast cell + feature embeddings
     #[command(alias = "svd")]
     Spectral(run_spectral::SpectralArgs),
-
-    /// Bipartite VAE — joint embedding via bilateral coarsening
-    Embed(run_embed::EmbedArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -64,6 +60,5 @@ fn main() -> anyhow::Result<()> {
 
     match &cli.commands {
         Commands::Spectral(args) => run_spectral::run_spectral(args),
-        Commands::Embed(args) => run_embed::run_embed(args),
     }
 }
