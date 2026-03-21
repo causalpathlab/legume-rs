@@ -82,6 +82,11 @@ impl IndexedEmbeddingEncoder {
         self.embedding_dim
     }
 
+    /// Access the learnable feature embedding table [D, H].
+    pub fn feature_embeddings(&self) -> &Tensor {
+        &self.feature_embeddings
+    }
+
     /// Preprocess indexed input into embedding space.
     ///
     /// 1. E_sh = feature_embeddings.index_select(union_indices, 0) → [S, H]

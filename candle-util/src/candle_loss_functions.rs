@@ -71,7 +71,7 @@ pub fn dirichlet_likelihood(x_nd: &Tensor, mass_nd: &Tensor) -> Result<Tensor> {
 }
 
 /// -0.0810614667f - x - log(x) + (0.5f + x) * log(1.0f + x);
-fn approx_lgamma(x: &Tensor) -> Result<Tensor> {
+pub fn approx_lgamma(x: &Tensor) -> Result<Tensor> {
     // let x = (x + 1e-8)?;
     let term1 = (x.neg()? - 0.0810614667)?;
     let term2 = x.log()?.neg()?;
