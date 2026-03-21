@@ -58,6 +58,24 @@ impl LinkProfileStore {
         }
         LinkProfileStore::new(profiles, n, m)
     }
+
+    /// Collapse columns by module assignment.
+    ///
+    /// Each column `p` is mapped to `assignments[p]`, and values are summed
+    /// within each module. Returns a new store with `n_modules` columns.
+    pub fn collapse_modules(&self, assignments: &[usize]) -> Self {
+        let n_modules = assignments.iter().copied().max().unwrap_or(0) + 1;
+        let n = self.n_edges;
+        let mut new_profiles = vec![0.0f32; n * n_modules];
+        for e in 0..n {
+            let row = self.profile(e);
+            let base = e * n_modules;
+            for (p, &module) in assignments.iter().enumerate() {
+                new_profiles[base + module] += row[p];
+            }
+        }
+        LinkProfileStore::new(new_profiles, n, n_modules)
+    }
 }
 
 /// Sufficient statistics for the link community model.
@@ -229,6 +247,114 @@ impl LinkCommunityStats {
             }
         }
         score
+    }
+}
+
+/// Amortized classifier for link community assignments.
+///
+/// Extracts posterior log-rates from converged sufficient statistics and
+/// predicts community assignments for new edge profiles via matrix multiply.
+///
+/// The collapsed Poisson-Gamma posterior gives rates:
+///   μ_{g,k} = (a0 + gene_sum[k,g]) / (b0 + size_sum[k])
+///
+/// The predictive log-probability for assigning edge e to community k is:
+///   log P(z_e = k | y_e) ≈ Σ_g y_e^g · log(μ_{g,k}) - s_e · Σ_g μ_{g,k} + log(n_k)
+///
+/// This is a linear classifier in the profile space, trained analytically
+/// from the Gibbs posterior — no gradient descent needed.
+pub struct LinkCommunityClassifier {
+    /// log(μ_{g,k}): [k × m] row-major.
+    pub log_rates: Vec<f64>,
+    /// Σ_g μ_{g,k} per community (rate totals for size-factor correction).
+    pub rate_totals: Vec<f64>,
+    /// log(edge_count[k]) per community (prior from empirical frequencies).
+    pub log_prior: Vec<f64>,
+    pub k: usize,
+    pub m: usize,
+}
+
+impl LinkCommunityClassifier {
+    /// Extract a classifier from converged sufficient statistics.
+    pub fn from_stats(stats: &LinkCommunityStats, a0: f64, b0: f64) -> Self {
+        let k = stats.k;
+        let m = stats.m;
+        let mut log_rates = vec![0.0f64; k * m];
+        let mut rate_totals = vec![0.0f64; k];
+
+        for c in 0..k {
+            let denom = b0 + stats.size_sum[c];
+            let base = c * m;
+            let mut rate_sum = 0.0f64;
+            for g in 0..m {
+                let mu = (a0 + stats.gene_sum[base + g]) / denom;
+                log_rates[base + g] = mu.ln();
+                rate_sum += mu;
+            }
+            rate_totals[c] = rate_sum;
+        }
+
+        // Empirical prior: log(edge_count + 1) to avoid -inf for empty communities
+        let log_prior: Vec<f64> = stats
+            .edge_count
+            .iter()
+            .map(|&n| ((n as f64) + 1.0).ln())
+            .collect();
+
+        LinkCommunityClassifier {
+            log_rates,
+            rate_totals,
+            log_prior,
+            k,
+            m,
+        }
+    }
+
+    /// Predict community assignment for a single edge profile.
+    ///
+    /// Returns the argmax community index.
+    #[inline]
+    pub fn predict_one(&self, profile: &[f32], size_factor: f32) -> usize {
+        let sf = size_factor as f64;
+        let mut best_k = 0;
+        let mut best_score = f64::NEG_INFINITY;
+        for c in 0..self.k {
+            let base = c * self.m;
+            let mut score = self.log_prior[c] - sf * self.rate_totals[c];
+            for g in 0..self.m {
+                score += profile[g] as f64 * self.log_rates[base + g];
+            }
+            if score > best_score {
+                best_score = score;
+                best_k = c;
+            }
+        }
+        best_k
+    }
+
+    /// Predict community assignments for all edges in a profile store.
+    ///
+    /// Returns a label vector of length `profiles.n_edges`.
+    pub fn predict_labels(&self, profiles: &LinkProfileStore) -> Vec<usize> {
+        (0..profiles.n_edges)
+            .map(|e| self.predict_one(profiles.profile(e), profiles.size_factors[e]))
+            .collect()
+    }
+
+    /// Predict community assignments in parallel using rayon.
+    pub fn predict_labels_parallel(&self, profiles: &LinkProfileStore) -> Vec<usize> {
+        use rayon::prelude::*;
+        let chunk_size = std::cmp::max(256, profiles.n_edges / rayon::current_num_threads().max(1));
+        let indices: Vec<usize> = (0..profiles.n_edges).collect();
+        indices
+            .par_chunks(chunk_size)
+            .flat_map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|&e| self.predict_one(profiles.profile(e), profiles.size_factors[e]))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 }
 
@@ -460,5 +586,94 @@ mod tests {
         let store = LinkProfileStore::new(profiles, 2, 3);
         assert_eq!(store.size_factors[0], 6.0);
         assert_eq!(store.size_factors[1], 15.0);
+    }
+
+    #[test]
+    fn test_classifier_recovers_planted() {
+        // Create planted profiles: K=3 communities with distinct gene signatures
+        let k = 3;
+        let m = 6;
+        let n_edges = 60;
+
+        let (store, labels) = make_synthetic_profiles(n_edges, m, k);
+        let stats = LinkCommunityStats::from_profiles(&store, k, &labels);
+
+        let classifier = LinkCommunityClassifier::from_stats(&stats, 1.0, 1.0);
+        let predicted = classifier.predict_labels(&store);
+
+        // Classifier should recover the planted labels exactly
+        // (since it's trained on the same data)
+        assert_eq!(
+            predicted, labels,
+            "Classifier should recover planted labels exactly"
+        );
+    }
+
+    #[test]
+    fn test_classifier_generalizes() {
+        // Train classifier on one set of edges, test on another
+        let k = 2;
+        let m = 8;
+        let n_train = 100;
+        let n_test = 50;
+
+        // Training: planted profiles
+        let mut train_profiles = vec![0.0f32; n_train * m];
+        let mut train_labels = vec![0usize; n_train];
+        for e in 0..n_train {
+            let c = e % k;
+            train_labels[e] = c;
+            for g in 0..m {
+                let signal = if (g < m / 2) == (c == 0) { 10.0 } else { 1.0 };
+                train_profiles[e * m + g] = signal;
+            }
+        }
+        let train_store = LinkProfileStore::new(train_profiles, n_train, m);
+        let stats = LinkCommunityStats::from_profiles(&train_store, k, &train_labels);
+
+        let classifier = LinkCommunityClassifier::from_stats(&stats, 1.0, 1.0);
+
+        // Test: similar profiles with noise
+        let mut test_profiles = vec![0.0f32; n_test * m];
+        let mut test_labels = vec![0usize; n_test];
+        for e in 0..n_test {
+            let c = e % k;
+            test_labels[e] = c;
+            for g in 0..m {
+                let signal = if (g < m / 2) == (c == 0) { 8.0 } else { 2.0 };
+                test_profiles[e * m + g] = signal;
+            }
+        }
+        let test_store = LinkProfileStore::new(test_profiles, n_test, m);
+
+        let predicted = classifier.predict_labels(&test_store);
+        let correct: usize = predicted
+            .iter()
+            .zip(test_labels.iter())
+            .filter(|(&p, &t)| p == t)
+            .count();
+
+        assert!(
+            correct == n_test,
+            "Classifier should generalize to noisy test data: {}/{}",
+            correct,
+            n_test
+        );
+    }
+
+    #[test]
+    fn test_classifier_parallel_matches_sequential() {
+        let k = 3;
+        let m = 6;
+        let n_edges = 120;
+
+        let (store, labels) = make_synthetic_profiles(n_edges, m, k);
+        let stats = LinkCommunityStats::from_profiles(&store, k, &labels);
+        let classifier = LinkCommunityClassifier::from_stats(&stats, 1.0, 1.0);
+
+        let seq = classifier.predict_labels(&store);
+        let par = classifier.predict_labels_parallel(&store);
+
+        assert_eq!(seq, par, "Parallel predictions should match sequential");
     }
 }
