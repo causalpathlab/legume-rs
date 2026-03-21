@@ -4,6 +4,7 @@ mod fit_srt_gene_pair_link_community;
 mod fit_srt_gene_pair_svd;
 mod fit_srt_link_community;
 mod fit_srt_propensity;
+mod link_community_encoder;
 mod link_community_gibbs;
 mod link_community_model;
 mod srt_cell_pairs;
