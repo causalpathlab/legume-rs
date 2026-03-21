@@ -5,9 +5,18 @@ use candle_util::candle_encoder_softmax::{LogSoftmaxEncoder, LogSoftmaxEncoderAr
 use candle_util::candle_model_traits::EncoderModuleT;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use data_beans::convert::try_open_or_convert;
-use data_beans_alg::collapse_data::MultilevelParams;
+use data_beans_alg::collapse_data::{CollapsedOut, MultilevelParams};
 use matrix_util::traits::IoOps;
 use rayon::prelude::*;
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+#[clap(rename_all = "lowercase")]
+pub enum LevelSchedule {
+    /// All levels trained simultaneously each epoch
+    Mixed,
+    /// Coarse→fine, more epochs for coarser levels
+    Progressive,
+}
 
 #[derive(Args, Debug)]
 pub struct EmbedArgs {
@@ -81,6 +90,14 @@ pub struct EmbedArgs {
         help = "Jitter interval (resample collapsed data)"
     )]
     jitter_interval: usize,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "progressive",
+        help = "Multi-level training schedule"
+    )]
+    level_schedule: LevelSchedule,
 
     #[arg(
         long,
@@ -293,149 +310,39 @@ pub fn run_embed(args: &EmbedArgs) -> anyhow::Result<()> {
 
     // 6. Training
     let total_epochs = args.epochs;
-    info!("Training: {} levels, {} epochs", num_levels, total_epochs);
 
-    for epoch in (0..total_epochs).step_by(args.jitter_interval) {
-        // Resample finest collapsed data for encoder inputs
-        let finest_sample = finest_collapsed.mu_observed.posterior_sample()?; // [D × S]
-
-        // Batch correction: sample residual for encoder null subtraction
-        let finest_batch = finest_collapsed
-            .mu_residual
-            .as_ref()
-            .map(|x| x.posterior_sample())
-            .transpose()?;
-
-        // Decoder target: use batch-adjusted if available
-        // Coarsen once, derive both encoder inputs
-        let coarsened_sample = maybe_coarsen_rows(&finest_sample, finest_coarsening);
-        let coarsened_batch = finest_batch
-            .as_ref()
-            .map(|b| maybe_coarsen_rows(b, finest_coarsening));
-
-        // Cell encoder input: [S × D_enc] (transposed)
-        let cell_input = coarsened_sample.transpose();
-        let cell_input_null = coarsened_batch.as_ref().map(|b| b.transpose());
-
-        // Feature encoder input: [D_enc × S]
-        let feat_input = coarsened_sample;
-        let feat_input_null = coarsened_batch;
-
-        // Per-level decoder targets (batch-corrected)
-        let level_targets: Vec<Mat> = collapsed_levels
-            .iter()
-            .zip(level_coarsenings.iter())
-            .map(|(collapsed, fc)| {
-                let target = if let Some(adj) = &collapsed.mu_adjusted {
-                    adj.posterior_sample().unwrap()
-                } else {
-                    collapsed.mu_observed.posterior_sample().unwrap()
-                };
-                if let Some(fc) = fc {
-                    fc.aggregate_rows_ds(&target)
-                } else {
-                    target
-                }
-            })
-            .collect();
-
-        // Convert to tensors
-        let cell_input_t = Tensor::from_slice(
-            cell_input.as_slice(),
-            (cell_input.nrows(), cell_input.ncols()),
+    match args.level_schedule {
+        LevelSchedule::Mixed => train_mixed(
+            &collapsed_levels,
+            &level_coarsenings,
+            finest_coarsening,
+            &cell_encoder,
+            &feat_encoder,
+            &decoders,
+            d_encoder,
+            n_supercells,
+            &mut adam,
+            total_epochs,
+            args.jitter_interval,
+            args.kl_warmup,
             &dev,
-        )?;
-        let cell_null_t = cell_input_null
-            .as_ref()
-            .map(|b| Tensor::from_slice(b.as_slice(), (b.nrows(), b.ncols()), &dev))
-            .transpose()?;
-        let feat_input_t = Tensor::from_slice(
-            feat_input.as_slice(),
-            (feat_input.nrows(), feat_input.ncols()),
+        )?,
+        LevelSchedule::Progressive => train_progressive(
+            &collapsed_levels,
+            &level_coarsenings,
+            finest_coarsening,
+            &cell_encoder,
+            &feat_encoder,
+            &decoders,
+            d_encoder,
+            n_supercells,
+            &mut adam,
+            total_epochs,
+            args.jitter_interval,
+            args.kl_warmup,
             &dev,
-        )?;
-        let feat_null_t = feat_input_null
-            .as_ref()
-            .map(|b| Tensor::from_slice(b.as_slice(), (b.nrows(), b.ncols()), &dev))
-            .transpose()?;
-
-        let jitter_end = args.jitter_interval.min(total_epochs - epoch);
-        for jitter in 0..jitter_end {
-            let ep = epoch + jitter;
-            let kl_weight = if args.kl_warmup > 0.0 {
-                (1.0 - (-(ep as f64) / args.kl_warmup).exp()) as f32
-            } else {
-                1.0
-            };
-
-            // Cell encoder: [S × D_enc] → z_c [S, K]
-            let (log_z_c, kl_c) =
-                cell_encoder.forward_t(&cell_input_t, cell_null_t.as_ref(), true)?;
-
-            // Feature encoder: [D_enc × S] → z_f [D_enc, K]
-            let (log_z_f, kl_f) =
-                feat_encoder.forward_t(&feat_input_t, feat_null_t.as_ref(), true)?;
-
-            // Accumulate reconstruction loss across all decoder levels
-            let mut llik_total_val = 0f32;
-            let mut n_entries_total = 0f32;
-            let mut llik_sum: Option<Tensor> = None;
-
-            for (level, (dec_target, decoder)) in
-                level_targets.iter().zip(decoders.iter()).enumerate()
-            {
-                let d_l = dec_target.nrows();
-                let s_l = dec_target.ncols();
-
-                // Coarsen feature embeddings: D_enc → D_l
-                let log_z_f_l = if let Some(fc) = &level_coarsenings[level] {
-                    if fc.num_coarse < d_encoder {
-                        coarsen_embeddings(&log_z_f, &fc.fine_to_coarse, d_l, &dev)?
-                    } else {
-                        log_z_f.clone()
-                    }
-                } else {
-                    log_z_f.clone()
-                };
-
-                // Cell embeddings: z_c is [S_finest, K].
-                // Coarser levels have fewer super-cells.
-                let log_z_c_l = if s_l < n_supercells {
-                    log_z_c.narrow(0, 0, s_l)?
-                } else {
-                    log_z_c.clone()
-                };
-
-                let a_tensor = Tensor::from_slice(dec_target.as_slice(), (d_l, s_l), &dev)?;
-                let (llik_col, llik_row) =
-                    decoder.forward_symmetric_llik(&log_z_f_l, &log_z_c_l, &a_tensor)?;
-
-                let llik = (&llik_col + &llik_row)?;
-
-                llik_total_val += llik.to_scalar::<f32>()?;
-                n_entries_total += (d_l * s_l) as f32;
-                llik_sum = Some(match llik_sum {
-                    Some(prev) => (prev + llik)?,
-                    None => llik,
-                });
-            }
-
-            // Single backward step: KL once + summed reconstruction across levels
-            let kl = (kl_c.sum_all()? + kl_f.sum_all()?)?;
-            let loss = ((kl * kl_weight as f64)? - llik_sum.unwrap())?;
-            adam.backward_step(&loss)?;
-
-            if ep % 50 == 0 || ep == total_epochs - 1 {
-                info!(
-                    "  epoch {}/{}: llik/entry={:.4}, kl_w={:.3}",
-                    ep + 1,
-                    total_epochs,
-                    llik_total_val / n_entries_total,
-                    kl_weight,
-                );
-            }
-        }
-    }
+        )?,
+    };
 
     // 7. Per-cell embeddings: project all N original cells through trained encoder
     info!("Evaluating per-cell embeddings ({} cells)...", n_full);
@@ -587,4 +494,329 @@ fn coarsen_embeddings(
 
     let coarse = Tensor::from_vec(sums, (n_groups, k), dev)?;
     candle_util::candle_nn::ops::log_softmax(&coarse, 1)
+}
+
+/// Sample encoder inputs from a collapsed level.
+/// Returns (cell_input [S × D_enc], cell_null, feat_input [D_enc × S], feat_null).
+fn sample_encoder_inputs(
+    collapsed: &CollapsedOut,
+    finest_coarsening: Option<&FeatureCoarsening>,
+) -> anyhow::Result<(Mat, Option<Mat>, Mat, Option<Mat>)> {
+    let sample = collapsed.mu_observed.posterior_sample()?;
+    let batch = collapsed
+        .mu_residual
+        .as_ref()
+        .map(|x| x.posterior_sample())
+        .transpose()?;
+
+    let coarsened = maybe_coarsen_rows(&sample, finest_coarsening);
+    let coarsened_batch = batch
+        .as_ref()
+        .map(|b| maybe_coarsen_rows(b, finest_coarsening));
+
+    let cell_input = coarsened.transpose();
+    let cell_null = coarsened_batch.as_ref().map(|b| b.transpose());
+    let feat_input = coarsened;
+    let feat_null = coarsened_batch;
+
+    Ok((cell_input, cell_null, feat_input, feat_null))
+}
+
+/// Sample decoder target from a collapsed level.
+fn sample_decoder_target(
+    collapsed: &CollapsedOut,
+    fc: Option<&FeatureCoarsening>,
+) -> anyhow::Result<Mat> {
+    let target = if let Some(adj) = &collapsed.mu_adjusted {
+        adj.posterior_sample()?
+    } else {
+        collapsed.mu_observed.posterior_sample()?
+    };
+    Ok(if let Some(fc) = fc {
+        fc.aggregate_rows_ds(&target)
+    } else {
+        target
+    })
+}
+
+/// Run one training step: encode → decode across given decoders → backward.
+/// Returns (llik_total, n_entries_total).
+#[allow(clippy::too_many_arguments)]
+fn train_step(
+    cell_encoder: &LogSoftmaxEncoder,
+    feat_encoder: &LogSoftmaxEncoder,
+    decoders: &[(usize, &BipartiteDecoder, &Mat)], // (level_idx, decoder, target)
+    level_coarsenings: &[Option<FeatureCoarsening>],
+    d_encoder: usize,
+    n_supercells: usize,
+    cell_input_t: &Tensor,
+    cell_null_t: Option<&Tensor>,
+    feat_input_t: &Tensor,
+    feat_null_t: Option<&Tensor>,
+    kl_weight: f32,
+    adam: &mut AdamW,
+    dev: &Device,
+) -> anyhow::Result<(f32, f32)> {
+    let (log_z_c, kl_c) = cell_encoder.forward_t(cell_input_t, cell_null_t, true)?;
+    let (log_z_f, kl_f) = feat_encoder.forward_t(feat_input_t, feat_null_t, true)?;
+
+    let mut llik_total = 0f32;
+    let mut n_entries_total = 0f32;
+    let mut llik_sum: Option<Tensor> = None;
+
+    for &(level, decoder, dec_target) in decoders {
+        let d_l = dec_target.nrows();
+        let s_l = dec_target.ncols();
+
+        let log_z_f_l = if let Some(fc) = &level_coarsenings[level] {
+            if fc.num_coarse < d_encoder {
+                coarsen_embeddings(&log_z_f, &fc.fine_to_coarse, d_l, dev)?
+            } else {
+                log_z_f.clone()
+            }
+        } else {
+            log_z_f.clone()
+        };
+
+        let log_z_c_l = if s_l < n_supercells {
+            log_z_c.narrow(0, 0, s_l)?
+        } else {
+            log_z_c.clone()
+        };
+
+        let a_tensor = Tensor::from_slice(dec_target.as_slice(), (d_l, s_l), dev)?;
+        let (llik_col, llik_row) =
+            decoder.forward_symmetric_llik(&log_z_f_l, &log_z_c_l, &a_tensor)?;
+
+        let llik = (&llik_col + &llik_row)?;
+        llik_total += llik.to_scalar::<f32>()?;
+        n_entries_total += (d_l * s_l) as f32;
+        llik_sum = Some(match llik_sum {
+            Some(prev) => (prev + llik)?,
+            None => llik,
+        });
+    }
+
+    let kl = (kl_c.sum_all()? + kl_f.sum_all()?)?;
+    let loss = ((kl * kl_weight as f64)? - llik_sum.unwrap())?;
+    adam.backward_step(&loss)?;
+
+    Ok((llik_total, n_entries_total))
+}
+
+/// Mixed training: all levels simultaneously each epoch.
+#[allow(clippy::too_many_arguments)]
+fn train_mixed(
+    collapsed_levels: &[CollapsedOut],
+    level_coarsenings: &[Option<FeatureCoarsening>],
+    finest_coarsening: Option<&FeatureCoarsening>,
+    cell_encoder: &LogSoftmaxEncoder,
+    feat_encoder: &LogSoftmaxEncoder,
+    decoders: &[BipartiteDecoder],
+    d_encoder: usize,
+    n_supercells: usize,
+    adam: &mut AdamW,
+    total_epochs: usize,
+    jitter_interval: usize,
+    kl_warmup: f64,
+    dev: &Device,
+) -> anyhow::Result<()> {
+    let num_levels = collapsed_levels.len();
+    info!(
+        "Mixed training: {} levels, {} epochs",
+        num_levels, total_epochs
+    );
+
+    let finest_collapsed = collapsed_levels.last().unwrap();
+
+    for epoch in (0..total_epochs).step_by(jitter_interval) {
+        let (cell_input, cell_null, feat_input, feat_null) =
+            sample_encoder_inputs(finest_collapsed, finest_coarsening)?;
+
+        let level_targets: Vec<Mat> = collapsed_levels
+            .iter()
+            .zip(level_coarsenings.iter())
+            .map(|(c, fc)| sample_decoder_target(c, fc.as_ref()).unwrap())
+            .collect();
+
+        let cell_input_t = Tensor::from_slice(
+            cell_input.as_slice(),
+            (cell_input.nrows(), cell_input.ncols()),
+            dev,
+        )?;
+        let cell_null_t = cell_null
+            .as_ref()
+            .map(|b| Tensor::from_slice(b.as_slice(), (b.nrows(), b.ncols()), dev))
+            .transpose()?;
+        let feat_input_t = Tensor::from_slice(
+            feat_input.as_slice(),
+            (feat_input.nrows(), feat_input.ncols()),
+            dev,
+        )?;
+        let feat_null_t = feat_null
+            .as_ref()
+            .map(|b| Tensor::from_slice(b.as_slice(), (b.nrows(), b.ncols()), dev))
+            .transpose()?;
+
+        let decoder_refs: Vec<(usize, &BipartiteDecoder, &Mat)> = decoders
+            .iter()
+            .zip(level_targets.iter())
+            .enumerate()
+            .map(|(i, (d, t))| (i, d, t))
+            .collect();
+
+        let jitter_end = jitter_interval.min(total_epochs - epoch);
+        for jitter in 0..jitter_end {
+            let ep = epoch + jitter;
+            let kl_weight = if kl_warmup > 0.0 {
+                (1.0 - (-(ep as f64) / kl_warmup).exp()) as f32
+            } else {
+                1.0
+            };
+
+            let (llik, n_entries) = train_step(
+                cell_encoder,
+                feat_encoder,
+                &decoder_refs,
+                level_coarsenings,
+                d_encoder,
+                n_supercells,
+                &cell_input_t,
+                cell_null_t.as_ref(),
+                &feat_input_t,
+                feat_null_t.as_ref(),
+                kl_weight,
+                adam,
+                dev,
+            )?;
+
+            if ep % 50 == 0 || ep == total_epochs - 1 {
+                info!(
+                    "  epoch {}/{}: llik/entry={:.4}, kl_w={:.3}",
+                    ep + 1,
+                    total_epochs,
+                    llik / n_entries,
+                    kl_weight,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Progressive training: coarse→fine, more epochs for coarser levels.
+#[allow(clippy::too_many_arguments)]
+fn train_progressive(
+    collapsed_levels: &[CollapsedOut],
+    level_coarsenings: &[Option<FeatureCoarsening>],
+    finest_coarsening: Option<&FeatureCoarsening>,
+    cell_encoder: &LogSoftmaxEncoder,
+    feat_encoder: &LogSoftmaxEncoder,
+    decoders: &[BipartiteDecoder],
+    d_encoder: usize,
+    n_supercells: usize,
+    adam: &mut AdamW,
+    total_epochs: usize,
+    jitter_interval: usize,
+    kl_warmup: f64,
+    dev: &Device,
+) -> anyhow::Result<()> {
+    let num_levels = collapsed_levels.len();
+
+    let total_weight: usize = (1..=num_levels).sum();
+    let level_epochs: Vec<usize> = (0..num_levels)
+        .map(|i| {
+            let w = num_levels - i;
+            (total_epochs * w / total_weight).max(1)
+        })
+        .collect();
+
+    info!(
+        "Progressive training: {} levels, epoch allocation: {:?}",
+        num_levels, level_epochs
+    );
+
+    let mut global_epoch = 0usize;
+
+    for (level, &level_ep) in level_epochs.iter().enumerate() {
+        let collapsed = &collapsed_levels[level];
+        let decoder = &decoders[level];
+
+        info!(
+            "Level {}/{}: {} epochs, {} super-cells",
+            level + 1,
+            num_levels,
+            level_ep,
+            collapsed.mu_observed.ncols()
+        );
+
+        for epoch in (0..level_ep).step_by(jitter_interval) {
+            // Encoder always sees finest collapsed data
+            let (cell_input, cell_null, feat_input, feat_null) =
+                sample_encoder_inputs(collapsed_levels.last().unwrap(), finest_coarsening)?;
+
+            let dec_target = sample_decoder_target(collapsed, level_coarsenings[level].as_ref())?;
+
+            let cell_input_t = Tensor::from_slice(
+                cell_input.as_slice(),
+                (cell_input.nrows(), cell_input.ncols()),
+                dev,
+            )?;
+            let cell_null_t = cell_null
+                .as_ref()
+                .map(|b| Tensor::from_slice(b.as_slice(), (b.nrows(), b.ncols()), dev))
+                .transpose()?;
+            let feat_input_t = Tensor::from_slice(
+                feat_input.as_slice(),
+                (feat_input.nrows(), feat_input.ncols()),
+                dev,
+            )?;
+            let feat_null_t = feat_null
+                .as_ref()
+                .map(|b| Tensor::from_slice(b.as_slice(), (b.nrows(), b.ncols()), dev))
+                .transpose()?;
+
+            let decoder_refs = vec![(level, decoder, &dec_target)];
+
+            let jitter_end = jitter_interval.min(level_ep - epoch);
+            for _jitter in 0..jitter_end {
+                let kl_weight = if kl_warmup > 0.0 {
+                    (1.0 - (-(global_epoch as f64) / kl_warmup).exp()) as f32
+                } else {
+                    1.0
+                };
+
+                let (llik, n_entries) = train_step(
+                    cell_encoder,
+                    feat_encoder,
+                    &decoder_refs,
+                    level_coarsenings,
+                    d_encoder,
+                    n_supercells,
+                    &cell_input_t,
+                    cell_null_t.as_ref(),
+                    &feat_input_t,
+                    feat_null_t.as_ref(),
+                    kl_weight,
+                    adam,
+                    dev,
+                )?;
+
+                if global_epoch % 50 == 0 {
+                    info!(
+                        "  [level {}/{}] epoch {}: llik/entry={:.4}, kl_w={:.3}",
+                        level + 1,
+                        num_levels,
+                        global_epoch + 1,
+                        llik / n_entries,
+                        kl_weight,
+                    );
+                }
+                global_epoch += 1;
+            }
+        }
+    }
+
+    info!("Progressive training done ({} total epochs)", global_epoch);
+    Ok(())
 }
