@@ -7,6 +7,7 @@ use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use data_beans::convert::try_open_or_convert;
 use data_beans_alg::collapse_data::MultilevelParams;
 use matrix_util::traits::IoOps;
+use rayon::prelude::*;
 
 #[derive(Args, Debug)]
 pub struct EmbedArgs {
@@ -436,70 +437,102 @@ pub fn run_embed(args: &EmbedArgs) -> anyhow::Result<()> {
         }
     }
 
-    // 7. Final embeddings (eval mode)
+    // 7. Per-cell embeddings: project all N original cells through trained encoder
+    info!("Evaluating per-cell embeddings ({} cells)...", n_full);
+
+    // Precompute batch delta for encoder null subtraction
+    let delta_tensor = finest_collapsed
+        .mu_residual
+        .as_ref()
+        .map(|x| {
+            let mut delta_ds = x.posterior_mean().clone();
+            if let Some(fc) = finest_coarsening {
+                delta_ds = fc.aggregate_rows_ds(&delta_ds);
+            }
+            delta_ds.to_tensor(&dev).and_then(|t| {
+                t.transpose(0, 1)
+                    .map_err(|e| anyhow::anyhow!("transpose: {}", e))
+            })
+        })
+        .transpose()?;
+
+    let block_size = 256usize;
+    let jobs: Vec<(usize, usize)> = (0..n_full)
+        .step_by(block_size)
+        .map(|lb| (lb, (lb + block_size).min(n_full)))
+        .collect();
+
+    let cell_chunks: Vec<(usize, Mat)> = jobs
+        .par_iter()
+        .map(|&(lb, ub)| -> anyhow::Result<(usize, Mat)> {
+            // Batch delta lookup for this block
+            let x0_nd = delta_tensor
+                .as_ref()
+                .map(|delta_bm| -> anyhow::Result<Tensor> {
+                    let membership: Vec<u32> = data_vec
+                        .get_group_membership(lb..ub)?
+                        .into_iter()
+                        .map(|x| x as u32)
+                        .collect();
+                    let indices = Tensor::from_iter(membership.into_iter(), &dev)?;
+                    Ok(delta_bm.index_select(&indices, 0)?)
+                })
+                .transpose()?;
+
+            // Read sparse columns and coarsen features
+            let x_dn = data_vec.read_columns_csc(lb..ub)?;
+            let x_enc_nd = if let Some(fc) = finest_coarsening {
+                fc.aggregate_sparse_csc(&x_dn)
+                    .to_tensor(&dev)?
+                    .transpose(0, 1)?
+            } else {
+                x_dn.to_tensor(&dev)?.transpose(0, 1)?
+            };
+
+            let (log_z_nk, _) = cell_encoder.forward_t(&x_enc_nd, x0_nd.as_ref(), false)?;
+            let z_nk = log_z_nk.to_device(&dev)?;
+            Ok((lb, Mat::from_tensor(&z_nk)?))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let mut cell_embed = Mat::zeros(n_full, k);
+    for (lb, z) in &cell_chunks {
+        let ub = lb + z.nrows();
+        cell_embed.rows_range_mut(*lb..ub).copy_from(z);
+    }
+
+    // 8. Per-feature embeddings: expand D_enc → D_full
+    info!("Evaluating per-feature embeddings...");
     let final_sample = finest_collapsed.mu_observed.posterior_mean();
-    let cell_final = if let Some(fc) = finest_coarsening {
-        fc.aggregate_rows_ds(final_sample).transpose()
-    } else {
-        final_sample.transpose()
-    };
-    let feat_final = if let Some(fc) = finest_coarsening {
-        fc.aggregate_rows_ds(final_sample)
-    } else {
-        final_sample.clone()
-    };
-
-    let cell_t = Tensor::from_slice(
-        cell_final.as_slice(),
-        (cell_final.nrows(), cell_final.ncols()),
-        &dev,
-    )?;
+    let feat_input = maybe_coarsen_rows(final_sample, finest_coarsening);
     let feat_t = Tensor::from_slice(
-        feat_final.as_slice(),
-        (feat_final.nrows(), feat_final.ncols()),
+        feat_input.as_slice(),
+        (feat_input.nrows(), feat_input.ncols()),
         &dev,
     )?;
-
-    let (log_z_c, _) = cell_encoder.forward_t(&cell_t, None, false)?;
     let (log_z_f, _) = feat_encoder.forward_t(&feat_t, None, false)?;
+    let z_f_mat = Mat::from_tensor(&log_z_f.to_device(&dev)?)?;
 
-    let z_c: Vec<f32> = log_z_c
-        .exp()?
-        .to_vec2::<f32>()?
-        .into_iter()
-        .flatten()
-        .collect();
-    let z_f: Vec<f32> = log_z_f
-        .exp()?
-        .to_vec2::<f32>()?
-        .into_iter()
-        .flatten()
-        .collect();
-
-    let cell_embed = Mat::from_column_slice(n_supercells, k, &z_c);
-    let feat_embed = Mat::from_column_slice(d_encoder, k, &z_f);
-
-    // 8. Save
-    let gene_names = data_vec.row_names()?;
-    let feat_names: Vec<Box<str>> = if let Some(fc) = finest_coarsening {
-        (0..d_encoder)
-            .map(|c| gene_names[fc.coarse_to_fine[c][0]].clone())
-            .collect()
+    // Expand from D_enc to D_full
+    let feat_embed = if let Some(fc) = finest_coarsening {
+        // z_f_mat is [D_enc, K] in log-softmax space → expand to [D_full, K]
+        fc.expand_log_dict_dk(&z_f_mat, d_full)
     } else {
-        gene_names.clone()
+        z_f_mat
     };
-    let sc_names: Vec<Box<str>> = (0..n_supercells)
-        .map(|c| format!("sc_{}", c).into())
-        .collect();
+
+    // 9. Save
+    let gene_names = data_vec.row_names()?;
+    let cell_names = data_vec.column_names()?;
 
     feat_embed.to_parquet_with_names(
         &(args.out.to_string() + ".feature_embedding.parquet"),
-        (Some(&feat_names), Some("feature")),
+        (Some(&gene_names), Some("feature")),
         None,
     )?;
     cell_embed.to_parquet_with_names(
         &(args.out.to_string() + ".cell_embedding.parquet"),
-        (Some(&sc_names), Some("cell")),
+        (Some(&cell_names), Some("cell")),
         None,
     )?;
 
