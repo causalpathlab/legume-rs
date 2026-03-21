@@ -10,8 +10,9 @@ use crate::edge_profiles::*;
 use crate::fit_srt_link_community::{
     link_community_histogram, write_link_communities, write_score_trace,
 };
+use crate::link_community_encoder::LinkCommunityEncoder;
 use crate::link_community_gibbs::{ComponentGibbsArgs, LinkGibbsSampler};
-use crate::link_community_model::{LinkCommunityStats, LinkProfileStore};
+use crate::link_community_model::{LinkCommunityClassifier, LinkCommunityStats, LinkProfileStore};
 use crate::srt_cell_pairs::*;
 use crate::srt_common::*;
 use crate::srt_estimate_batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
@@ -42,9 +43,9 @@ pub struct SrtGenePairLinkCommunityArgs {
     #[arg(
         long,
         default_value_t = 100,
-        help = "Gibbs sampling sweeps per coarsening level"
+        help = "Gibbs iterations at the coarsest level"
     )]
-    num_sweeps: usize,
+    num_gibbs: usize,
 
     #[arg(
         long,
@@ -52,6 +53,25 @@ pub struct SrtGenePairLinkCommunityArgs {
         help = "Max greedy refinement sweeps after Gibbs"
     )]
     num_greedy: usize,
+
+    #[arg(
+        long,
+        help = "EM Gibbs sweeps on full edge set after encoder prediction (0 = skip)"
+    )]
+    num_em: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Encoder training epochs at coarsest level"
+    )]
+    encoder_epochs: usize,
+
+    #[arg(long, default_value_t = 0.01, help = "Encoder learning rate")]
+    encoder_lr: f64,
+
+    #[arg(long, help = "Encoder hidden layer dimension (default = same as M)")]
+    encoder_hidden: Option<usize>,
 
     #[arg(
         long,
@@ -332,23 +352,7 @@ pub fn fit_srt_gene_pair_link_community(args: &SrtGenePairLinkCommunityArgs) -> 
     info!("Building COARSE gene-pair profiles at coarsest level...");
     let coarsest_labels = &ml.all_cell_labels[0];
 
-    // Build super-edges at coarsest level
-    let mut super_edge_map: HashMap<(usize, usize), usize> = HashMap::new();
-    let mut super_edges: Vec<(usize, usize)> = Vec::new();
-    let mut fine_to_super = Vec::with_capacity(n_edges);
-
-    for &(i, j) in edges {
-        let li = coarsest_labels[i];
-        let lj = coarsest_labels[j];
-        let key = (li.min(lj), li.max(lj));
-        let se = *super_edge_map.entry(key).or_insert_with(|| {
-            let s = super_edges.len();
-            super_edges.push(key);
-            s
-        });
-        fine_to_super.push(se);
-    }
-
+    let (super_edges, fine_to_super) = build_super_edges(edges, coarsest_labels);
     let n_super = super_edges.len();
     info!(
         "Coarsest level: {} super-edges from {} fine edges",
@@ -433,13 +437,11 @@ pub fn fit_srt_gene_pair_link_community(args: &SrtGenePairLinkCommunityArgs) -> 
     // 12. Gibbs on coarsest level
     let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(c.seed));
 
-    // Random initial labels for coarsest
     let init_labels: Vec<usize> = (0..coarse_profiles.n_edges).map(|e| e % k).collect();
-
     let mut coarse_stats = LinkCommunityStats::from_profiles(&coarse_profiles, k, &init_labels);
 
-    info!("Gibbs on coarsest ({} sweeps)...", args.num_sweeps);
-    let moves = sampler.run_parallel(&mut coarse_stats, &coarse_profiles, a0, b0, args.num_sweeps);
+    info!("Gibbs on coarsest ({} sweeps)...", args.num_gibbs);
+    let moves = sampler.run_parallel(&mut coarse_stats, &coarse_profiles, a0, b0, args.num_gibbs);
     info!(
         "Coarsest Gibbs: {} total moves, score={:.2}",
         moves,
@@ -447,19 +449,95 @@ pub fn fit_srt_gene_pair_link_community(args: &SrtGenePairLinkCommunityArgs) -> 
     );
     score_trace.push(coarse_stats.total_score(a0, b0));
 
-    // Transfer to fine level
-    let mut current_labels = transfer_labels(&fine_to_super, &coarse_stats.membership);
+    // 12b. Progressive Gibbs + encoder training across all coarsening levels
+    let m_dim = coarse_profiles.m;
+    let num_levels = ml.all_cell_labels.len();
+    let hidden_dim = args.encoder_hidden.unwrap_or(m_dim);
+    let gibbs_per_level = (args.num_gibbs / 5).max(10);
 
-    // 13. Refinement on fine edges with full profile building
-    let num_fine_sweeps = (args.num_sweeps / 2).max(10);
-    info!("EM Gibbs on full edge set ({} sweeps)...", num_fine_sweeps);
+    let classifier = LinkCommunityClassifier::from_stats(&coarse_stats, a0, b0);
+    let mut encoder = LinkCommunityEncoder::from_classifier(&classifier, hidden_dim)?;
+    info!(
+        "Encoder: input={}, hidden={}, output={} ({} params)",
+        m_dim,
+        hidden_dim,
+        k,
+        m_dim * hidden_dim + hidden_dim + hidden_dim * k + k,
+    );
 
-    // Create profile builder closure
+    let loss = encoder.train(
+        &coarse_profiles,
+        &coarse_stats.membership,
+        args.encoder_epochs,
+        args.encoder_lr,
+    );
+    info!(
+        "Level 0: {} super-edges, encoder loss={:.4}",
+        coarse_profiles.n_edges, loss
+    );
+
+    // Profile builder for gene-pair profiles at any super-edge set
     let data_ref = &data_vec;
     let gene_adj_ref = &gene_adj;
     let gene_means_ref = &gene_means;
-    let edges_ref = edges;
     let n_gene_pairs_ref = final_n_gene_pairs;
+
+    let build_profiles_for_super_edges =
+        |super_edges: &[(usize, usize)]| -> anyhow::Result<LinkProfileStore> {
+            let mut store = build_edge_profiles_by_gene_pairs(
+                data_ref,
+                super_edges,
+                gene_adj_ref,
+                gene_means_ref,
+                n_gene_pairs_ref,
+                c.block_size,
+            )?;
+
+            if let Some(ref assignments) = module_collapse {
+                store = store.collapse_modules(assignments);
+            }
+
+            Ok(store)
+        };
+
+    for level in 1..num_levels {
+        let level_labels = &ml.all_cell_labels[level];
+        let (level_super_edges, _) = build_super_edges(edges, level_labels);
+        let n_level_super = level_super_edges.len();
+
+        let level_profiles = build_profiles_for_super_edges(&level_super_edges)?;
+
+        let level_membership = encoder.predict_labels(&level_profiles);
+        let mut level_stats =
+            LinkCommunityStats::from_profiles(&level_profiles, k, &level_membership);
+
+        let level_moves =
+            sampler.run_parallel(&mut level_stats, &level_profiles, a0, b0, gibbs_per_level);
+
+        let level_score = level_stats.total_score(a0, b0);
+        score_trace.push(level_score);
+
+        let level_lr = args.encoder_lr * (0.5_f64).powi(level as i32);
+        let level_epochs = (args.encoder_epochs / (level + 1)).max(10);
+
+        let level_classifier = LinkCommunityClassifier::from_stats(&level_stats, a0, b0);
+        encoder = LinkCommunityEncoder::from_classifier(&level_classifier, hidden_dim)?;
+
+        let level_loss = encoder.train(
+            &level_profiles,
+            &level_stats.membership,
+            level_epochs,
+            level_lr,
+        );
+
+        info!(
+            "Level {}: {} super-edges, {} Gibbs moves, score={:.2}, encoder({} epochs, lr={:.4}): loss={:.4}",
+            level, n_level_super, level_moves, level_score, level_epochs, level_lr, level_loss,
+        );
+    }
+
+    // 13. Build full fine profiles and predict with trained encoder
+    let edges_ref = edges;
 
     let profile_builder = |edge_indices: &[usize]| -> LinkProfileStore {
         let mut store = build_gene_pair_profiles_for_edges(
@@ -472,33 +550,13 @@ pub fn fit_srt_gene_pair_link_community(args: &SrtGenePairLinkCommunityArgs) -> 
         )
         .expect("profile build failed");
 
-        // Apply module collapse if needed
         if let Some(ref assignments) = module_collapse {
-            let n_edges = store.n_edges;
-            let n_modules = *assignments.iter().max().unwrap_or(&0) + 1;
-            let mut new_profiles = vec![0.0f32; n_edges * n_modules];
-            for e in 0..n_edges {
-                let profile = store.profile(e);
-                let base = e * n_modules;
-                for (p, &module) in assignments.iter().enumerate() {
-                    new_profiles[base + module] += profile[p];
-                }
-            }
-            store = LinkProfileStore::new(new_profiles, n_edges, n_modules);
+            store = store.collapse_modules(assignments);
         }
 
         store
     };
 
-    let comp_args = ComponentGibbsArgs {
-        graph: &srt_cell_pairs.graph,
-        edges,
-        k,
-        a0,
-        b0,
-    };
-
-    // Build all profiles upfront
     info!("Building full edge profiles...");
     let full_profiles = profile_builder(&(0..n_edges).collect::<Vec<_>>());
 
@@ -509,13 +567,42 @@ pub fn fit_srt_gene_pair_link_community(args: &SrtGenePairLinkCommunityArgs) -> 
         (full_profiles.profiles.len() * std::mem::size_of::<f32>()) as f64 / 1_048_576.0
     );
 
-    let moves = sampler.run_components_em(
-        &mut current_labels,
-        &full_profiles,
-        &comp_args,
-        num_fine_sweeps,
+    let mut current_labels = encoder.predict_labels(&full_profiles);
+
+    let transfer_labels_vec = transfer_labels(&fine_to_super, &coarse_stats.membership);
+    let n_differ = current_labels
+        .iter()
+        .zip(transfer_labels_vec.iter())
+        .filter(|(&a, &b)| a != b)
+        .count();
+    info!(
+        "Encoder vs transfer: {} / {} edges differ ({:.1}%)",
+        n_differ,
+        n_edges,
+        100.0 * n_differ as f64 / n_edges as f64,
     );
-    info!("EM Gibbs: {} moves", moves);
+
+    let comp_args = ComponentGibbsArgs {
+        graph: &srt_cell_pairs.graph,
+        edges,
+        k,
+        a0,
+        b0,
+    };
+
+    let num_fine_sweeps = args.num_em.unwrap_or((args.num_gibbs / 4).max(5));
+    if num_fine_sweeps > 0 {
+        info!("EM Gibbs on full edge set ({} sweeps)...", num_fine_sweeps);
+        let moves = sampler.run_components_em(
+            &mut current_labels,
+            &full_profiles,
+            &comp_args,
+            num_fine_sweeps,
+        );
+        info!("EM Gibbs: {} moves", moves);
+    } else {
+        info!("Skipping EM Gibbs (--num-em 0)");
+    }
 
     // Greedy finalization
     info!("Greedy finalization ({} max sweeps)...", args.num_greedy);

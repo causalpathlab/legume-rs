@@ -248,6 +248,33 @@ pub fn build_edge_profiles(
     Ok(LinkProfileStore::new(profiles, n_edges, m))
 }
 
+/// Map fine edges to canonical super-edges defined by cell cluster labels.
+///
+/// Each edge (i, j) is mapped to (min(label[i], label[j]), max(...)).
+/// Returns (super_edges list, fine_to_super mapping).
+pub fn build_super_edges(
+    edges: &[(usize, usize)],
+    cell_labels: &[usize],
+) -> (Vec<(usize, usize)>, Vec<usize>) {
+    let mut key_to_super: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut super_edges: Vec<(usize, usize)> = Vec::new();
+    let mut fine_to_super = Vec::with_capacity(edges.len());
+
+    for &(i, j) in edges {
+        let li = cell_labels[i];
+        let lj = cell_labels[j];
+        let key = (li.min(lj), li.max(lj));
+        let se = *key_to_super.entry(key).or_insert_with(|| {
+            let s = super_edges.len();
+            super_edges.push(key);
+            s
+        });
+        fine_to_super.push(se);
+    }
+
+    (super_edges, fine_to_super)
+}
+
 /// Coarsen link profiles by cell-level cluster labels.
 ///
 /// Each edge (i, j) maps to a super-edge key (min(label[i], label[j]), max(...)).
@@ -262,24 +289,8 @@ pub fn coarsen_edge_profiles(
     let m = profiles.m;
     let n_edges = edges.len();
 
-    // Map each edge to a canonical super-edge key
-    let mut key_to_super: HashMap<(usize, usize), usize> = HashMap::new();
-    let mut next_super = 0usize;
-    let mut fine_to_super = Vec::with_capacity(n_edges);
-
-    for &(i, j) in edges {
-        let li = cell_labels[i];
-        let lj = cell_labels[j];
-        let key = (li.min(lj), li.max(lj));
-        let se = *key_to_super.entry(key).or_insert_with(|| {
-            let s = next_super;
-            next_super += 1;
-            s
-        });
-        fine_to_super.push(se);
-    }
-
-    let n_super = next_super;
+    let (super_edges, fine_to_super) = build_super_edges(edges, cell_labels);
+    let n_super = super_edges.len();
     let mut super_profiles = vec![0.0f32; n_super * m];
 
     // Accumulate fine link profiles into super-link profiles
