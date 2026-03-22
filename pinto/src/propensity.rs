@@ -1,5 +1,5 @@
-use crate::srt_common::*;
-use crate::srt_input::read_expr_data;
+use crate::util::common::*;
+use crate::util::input::read_expr_data;
 use clap::Parser;
 use dmatrix_gamma::GammaMatrix;
 use matrix_param::dmatrix_gamma;

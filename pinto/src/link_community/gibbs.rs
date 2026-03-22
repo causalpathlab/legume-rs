@@ -1,0 +1,781 @@
+//! Collapsed Gibbs sampler for the link community model.
+//!
+//! Adapted from `hsblock/src/gibbs.rs` but simplified: flat K communities
+//! (no tree/LCA), and edge-level rather than vertex-level assignments.
+
+use crate::link_community::model::*;
+use crate::util::cell_pairs::connected_components;
+use crate::util::common::new_progress_bar;
+use crate::util::knn_graph::KnnGraph;
+use log::info;
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
+
+/// Controls how edges are reassigned in component-partitioned sweeps.
+#[derive(Clone, Copy)]
+enum MoveStrategy {
+    /// Gibbs sampling: stochastic, runs all sweeps.
+    Sample,
+    /// Greedy argmax: deterministic, early exit when converged.
+    Greedy,
+}
+
+/// Parameters for component-partitioned Gibbs/greedy methods.
+pub struct ComponentGibbsArgs<'a> {
+    pub graph: &'a KnnGraph,
+    pub edges: &'a [(usize, usize)],
+    pub k: usize,
+    pub a0: f64,
+    pub b0: f64,
+}
+
+/// Collapsed Gibbs sampler for link community assignments.
+pub struct LinkGibbsSampler {
+    rng: SmallRng,
+    parallel_seed: u64,
+}
+
+impl LinkGibbsSampler {
+    /// Create a new sampler with the given RNG.
+    pub fn new(rng: SmallRng) -> Self {
+        LinkGibbsSampler {
+            rng,
+            parallel_seed: 0,
+        }
+    }
+
+    /// Run `num_sweeps` sequential Gibbs sweeps over all edges.
+    ///
+    /// Returns the total number of edge moves across all sweeps.
+    #[cfg(test)]
+    pub fn run(
+        &mut self,
+        stats: &mut LinkCommunityStats,
+        profiles: &LinkProfileStore,
+        a0: f64,
+        b0: f64,
+        num_sweeps: usize,
+    ) -> usize {
+        let k = stats.k;
+        let n = stats.n_edges;
+        let mut log_probs = vec![0.0f64; k];
+
+        let mut total_moves = 0;
+
+        let pb = new_progress_bar(
+            num_sweeps as u64,
+            "Gibbs {bar:40} {pos}/{len} sweeps ({eta})",
+        );
+
+        for _sweep in 0..num_sweeps {
+            for e in 0..n {
+                let old_c = stats.membership[e];
+
+                compute_log_probs_for_edge(e, stats, profiles, a0, b0, &mut log_probs);
+
+                let new_c = sample_categorical_log(&log_probs, &mut self.rng);
+
+                if new_c != old_c {
+                    stats.delta_move(e, old_c, new_c, profiles);
+                    total_moves += 1;
+                }
+            }
+            pb.inc(1);
+        }
+        pb.finish_and_clear();
+
+        total_moves
+    }
+
+    /// Run `num_sweeps` Gibbs sweeps with parallel proposal computation.
+    ///
+    /// Jacobi-style: all edges compute proposals against a frozen snapshot
+    /// of the stats using rayon `par_chunks`, then moves are applied sequentially.
+    ///
+    /// Returns the total number of edge moves across all sweeps.
+    pub fn run_parallel(
+        &mut self,
+        stats: &mut LinkCommunityStats,
+        profiles: &LinkProfileStore,
+        a0: f64,
+        b0: f64,
+        num_sweeps: usize,
+    ) -> usize {
+        let k = stats.k;
+        let n = stats.n_edges;
+
+        if self.parallel_seed == 0 {
+            self.parallel_seed = self.rng.random::<u64>() | 1;
+        }
+        let base_seed = self.parallel_seed;
+
+        let mut total_moves = 0;
+
+        let edge_order: Vec<usize> = (0..n).collect();
+        let chunk_size = std::cmp::max(256, n / rayon::current_num_threads().max(1));
+
+        let pb = new_progress_bar(
+            num_sweeps as u64,
+            "Gibbs {bar:40} {pos}/{len} sweeps ({eta})",
+        );
+
+        for sweep in 0..num_sweeps {
+            let sweep_seed = base_seed.wrapping_mul(sweep as u64 + 1);
+
+            let proposals: Vec<usize> = edge_order
+                .par_chunks(chunk_size)
+                .flat_map(|chunk| {
+                    let mut log_probs = vec![0.0f64; k];
+                    chunk
+                        .iter()
+                        .map(|&e| {
+                            compute_log_probs_for_edge(e, stats, profiles, a0, b0, &mut log_probs);
+                            let vertex_seed = sweep_seed ^ (e as u64).wrapping_mul(2654435761);
+                            let mut rng = SmallRng::seed_from_u64(vertex_seed);
+                            sample_categorical_log(&log_probs, &mut rng)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+
+            for (e, &new_c) in proposals.iter().enumerate() {
+                let old_c = stats.membership[e];
+                if new_c != old_c {
+                    stats.delta_move(e, old_c, new_c, profiles);
+                    total_moves += 1;
+                }
+            }
+            pb.inc(1);
+        }
+        pb.finish_and_clear();
+
+        total_moves
+    }
+
+    /// Run greedy (argmax) sweeps with early exit on convergence.
+    ///
+    /// Returns the total number of edge moves across all sweeps.
+    #[cfg(test)]
+    pub fn run_greedy(
+        &mut self,
+        stats: &mut LinkCommunityStats,
+        profiles: &LinkProfileStore,
+        a0: f64,
+        b0: f64,
+        max_sweeps: usize,
+    ) -> usize {
+        let k = stats.k;
+        let n = stats.n_edges;
+        let mut log_probs = vec![0.0f64; k];
+
+        let mut total_moves = 0;
+
+        let pb = new_progress_bar(
+            max_sweeps as u64,
+            "Greedy {bar:40} {pos}/{len} sweeps ({eta})",
+        );
+
+        for _sweep in 0..max_sweeps {
+            let mut sweep_moves = 0;
+            for e in 0..n {
+                let old_c = stats.membership[e];
+
+                compute_log_probs_for_edge(e, stats, profiles, a0, b0, &mut log_probs);
+
+                let new_c = argmax_log(&log_probs);
+
+                if new_c != old_c {
+                    stats.delta_move(e, old_c, new_c, profiles);
+                    sweep_moves += 1;
+                }
+            }
+            total_moves += sweep_moves;
+            pb.inc(1);
+            if sweep_moves == 0 {
+                break;
+            }
+        }
+        pb.finish_and_clear();
+
+        total_moves
+    }
+
+    /// Memoized component-partitioned sweeps with configurable move strategy.
+    ///
+    /// Edges are partitioned by connected component (balanced across threads).
+    /// Each sweep: partitions run sequential edge updates in parallel using a
+    /// frozen snapshot of global stats, then global stats are patched with
+    /// per-partition deltas.
+    ///
+    /// `strategy` controls how edges are reassigned:
+    /// - `Sample`: Gibbs sampling (stochastic)
+    /// - `Greedy`: argmax (deterministic, early exit when no moves)
+    fn run_components(
+        &mut self,
+        membership: &mut [usize],
+        profiles: &LinkProfileStore,
+        args: &ComponentGibbsArgs,
+        num_sweeps: usize,
+        strategy: MoveStrategy,
+    ) -> usize {
+        let ComponentGibbsArgs {
+            graph,
+            edges,
+            k,
+            a0,
+            b0,
+        } = args;
+        let (k, a0, b0) = (*k, *a0, *b0);
+
+        let (comp_labels, n_comp) = connected_components(graph);
+        let comp_edges = partition_edges_balanced(edges, &comp_labels, n_comp);
+        let n_parts = comp_edges.len();
+
+        let sub_stores: Vec<LinkProfileStore> = comp_edges
+            .iter()
+            .map(|indices| profiles.subset(indices))
+            .collect();
+
+        let label = match strategy {
+            MoveStrategy::Sample => "EM Gibbs",
+            MoveStrategy::Greedy => "Greedy",
+        };
+
+        if matches!(strategy, MoveStrategy::Sample) {
+            info!(
+                "Memoized {}: {} components -> {} partitions (edges: {})",
+                label,
+                n_comp,
+                n_parts,
+                comp_edges
+                    .iter()
+                    .map(|e| e.len().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        let mut global_stats = LinkCommunityStats::from_profiles(profiles, k, membership);
+        let mut memo_stats: Vec<_> = comp_edges
+            .iter()
+            .map(|indices| LinkCommunityStats::component_stats(profiles, k, indices, membership))
+            .collect();
+
+        let mut total_moves = 0usize;
+        let base_seed = self.rng.random::<u64>() | 1;
+
+        let pb = new_progress_bar(
+            (num_sweeps * n_parts) as u64,
+            &format!("{label} {{bar:40}} {{pos}}/{{len}} jobs ({{eta}})"),
+        );
+
+        for sweep in 0..num_sweeps {
+            let sweep_seed = base_seed.wrapping_mul(sweep as u64 + 1);
+            let gene_sum_snap = &global_stats.gene_sum;
+            let size_sum_snap = &global_stats.size_sum;
+            let edge_count_snap = &global_stats.edge_count;
+
+            let local_results: Vec<ComponentResult> = (0..n_parts)
+                .into_par_iter()
+                .map(|c| {
+                    let indices = &comp_edges[c];
+                    if indices.is_empty() {
+                        pb.inc(1);
+                        return ComponentResult::empty(k, profiles.m);
+                    }
+
+                    let mut local_stats = LinkCommunityStats {
+                        k,
+                        m: profiles.m,
+                        n_edges: sub_stores[c].n_edges,
+                        gene_sum: gene_sum_snap.clone(),
+                        size_sum: size_sum_snap.clone(),
+                        edge_count: edge_count_snap.clone(),
+                        membership: indices.iter().map(|&e| membership[e]).collect(),
+                    };
+
+                    let comp_seed = sweep_seed ^ (c as u64).wrapping_mul(2654435761);
+                    let mut rng = SmallRng::seed_from_u64(comp_seed);
+                    let mut log_probs = vec![0.0f64; k];
+                    let mut moves = 0usize;
+
+                    for e in 0..indices.len() {
+                        let old_c = local_stats.membership[e];
+                        compute_log_probs_for_edge(
+                            e,
+                            &local_stats,
+                            &sub_stores[c],
+                            a0,
+                            b0,
+                            &mut log_probs,
+                        );
+                        let new_c = match strategy {
+                            MoveStrategy::Sample => sample_categorical_log(&log_probs, &mut rng),
+                            MoveStrategy::Greedy => argmax_log(&log_probs),
+                        };
+                        if new_c != old_c {
+                            local_stats.delta_move(e, old_c, new_c, &sub_stores[c]);
+                            moves += 1;
+                        }
+                    }
+
+                    let new_comp_stats =
+                        LinkCommunityStats::local_stats(&sub_stores[c], k, &local_stats.membership);
+
+                    pb.inc(1);
+
+                    ComponentResult {
+                        membership: local_stats.membership,
+                        new_stats: new_comp_stats,
+                        moves,
+                    }
+                })
+                .collect();
+
+            let mut sweep_moves = 0usize;
+            for (c, result) in local_results.into_iter().enumerate() {
+                sweep_moves += result.moves;
+
+                for (local_e, &global_e) in comp_edges[c].iter().enumerate() {
+                    membership[global_e] = result.membership[local_e];
+                }
+
+                let old = (
+                    memo_stats[c].0.as_slice(),
+                    memo_stats[c].1.as_slice(),
+                    memo_stats[c].2.as_slice(),
+                );
+                let new = (
+                    result.new_stats.0.as_slice(),
+                    result.new_stats.1.as_slice(),
+                    result.new_stats.2.as_slice(),
+                );
+                global_stats.apply_delta(old, new);
+                memo_stats[c] = result.new_stats;
+            }
+
+            total_moves += sweep_moves;
+            if matches!(strategy, MoveStrategy::Greedy) && sweep_moves == 0 {
+                break;
+            }
+        }
+        pb.finish_and_clear();
+
+        total_moves
+    }
+
+    /// Memoized EM Gibbs sampling across balanced partitions.
+    pub fn run_components_em(
+        &mut self,
+        membership: &mut [usize],
+        profiles: &LinkProfileStore,
+        args: &ComponentGibbsArgs,
+        num_sweeps: usize,
+    ) -> usize {
+        self.run_components(membership, profiles, args, num_sweeps, MoveStrategy::Sample)
+    }
+
+    /// Memoized greedy finalization across balanced partitions.
+    pub fn run_greedy_by_components(
+        &mut self,
+        membership: &mut [usize],
+        profiles: &LinkProfileStore,
+        args: &ComponentGibbsArgs,
+        max_sweeps: usize,
+    ) -> usize {
+        self.run_components(membership, profiles, args, max_sweeps, MoveStrategy::Greedy)
+    }
+}
+
+/// Result from a single component's Gibbs/greedy sweep.
+struct ComponentResult {
+    membership: Vec<usize>,
+    new_stats: (Vec<f64>, Vec<f64>, Vec<usize>),
+    moves: usize,
+}
+
+impl ComponentResult {
+    fn empty(k: usize, m: usize) -> Self {
+        ComponentResult {
+            membership: Vec::new(),
+            new_stats: (vec![0.0; k * m], vec![0.0; k], vec![0; k]),
+            moves: 0,
+        }
+    }
+}
+
+/// Partition edge indices by connected component.
+///
+/// Returns `n_comp` vectors, each containing the global edge indices belonging
+/// to that component. Edge `(i, j)` is assigned to the component of node `i`.
+fn partition_edges_by_component(
+    edges: &[(usize, usize)],
+    comp_labels: &[usize],
+    n_comp: usize,
+) -> Vec<Vec<usize>> {
+    let mut comp_edges: Vec<Vec<usize>> = vec![Vec::new(); n_comp];
+    for (e, &(i, _j)) in edges.iter().enumerate() {
+        comp_edges[comp_labels[i]].push(e);
+    }
+    comp_edges
+}
+
+/// Balanced partitioning: partition by connected component, then split large
+/// components so no partition exceeds `total_edges / n_threads`.
+///
+/// This ensures the memoized EM approach works even for single-component graphs
+/// and avoids bottlenecks from imbalanced component sizes.
+fn partition_edges_balanced(
+    edges: &[(usize, usize)],
+    comp_labels: &[usize],
+    n_comp: usize,
+) -> Vec<Vec<usize>> {
+    let n_threads = rayon::current_num_threads().max(1);
+    let target_size = (edges.len() / n_threads).max(256);
+
+    let mut comp_edges = partition_edges_by_component(edges, comp_labels, n_comp);
+
+    let mut balanced = Vec::new();
+    for group in comp_edges.drain(..) {
+        if group.len() <= target_size {
+            if !group.is_empty() {
+                balanced.push(group);
+            }
+        } else {
+            for chunk in group.chunks(target_size) {
+                balanced.push(chunk.to_vec());
+            }
+        }
+    }
+    balanced
+}
+
+/// Pick the index with the highest value.
+fn argmax_log(log_probs: &[f64]) -> usize {
+    let mut best = 0;
+    let mut best_val = log_probs[0];
+    for (i, &v) in log_probs.iter().enumerate().skip(1) {
+        if v > best_val {
+            best_val = v;
+            best = i;
+        }
+    }
+    best
+}
+
+/// Sample from a categorical distribution given log-probabilities.
+///
+/// Uses the log-sum-exp trick for numerical stability.
+fn sample_categorical_log(log_probs: &[f64], rng: &mut SmallRng) -> usize {
+    let max = log_probs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+    // Compute total weight without allocating a Vec
+    let total: f64 = log_probs.iter().map(|lp| (lp - max).exp()).sum();
+
+    if total <= 0.0 || !total.is_finite() {
+        return rng.random_range(0..log_probs.len());
+    }
+
+    let u: f64 = rng.random::<f64>() * total;
+    let mut cum = 0.0;
+    for (i, lp) in log_probs.iter().enumerate() {
+        cum += (lp - max).exp();
+        if cum >= u {
+            return i;
+        }
+    }
+
+    log_probs.len() - 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra_sparse::{CooMatrix, CscMatrix};
+
+    fn make_test_graph(n_nodes: usize, edges: Vec<(usize, usize)>) -> KnnGraph {
+        let distances = vec![1.0; edges.len()];
+        let mut coo = CooMatrix::new(n_nodes, n_nodes);
+        for &(i, j) in &edges {
+            coo.push(i, j, 1.0f32);
+            coo.push(j, i, 1.0f32);
+        }
+        let adjacency = CscMatrix::from(&coo);
+        KnnGraph {
+            adjacency,
+            edges,
+            distances,
+            n_nodes,
+        }
+    }
+
+    /// Create a planted partition: edges 0..n/2 belong to community 0,
+    /// edges n/2..n belong to community 1, with distinct gene signatures.
+    fn make_planted_profiles(n_edges: usize, m: usize) -> (LinkProfileStore, Vec<usize>) {
+        let mut profiles = vec![0.0f32; n_edges * m];
+        let mut true_labels = vec![0usize; n_edges];
+
+        for e in 0..n_edges {
+            let c = if e < n_edges / 2 { 0 } else { 1 };
+            true_labels[e] = c;
+            for g in 0..m {
+                // Strong signal in first half of genes for c=0, second half for c=1
+                let signal = if (g < m / 2) == (c == 0) { 10.0 } else { 1.0 };
+                profiles[e * m + g] = signal;
+            }
+        }
+
+        (LinkProfileStore::new(profiles, n_edges, m), true_labels)
+    }
+
+    #[test]
+    fn test_gibbs_convergence() {
+        let (store, _true_labels) = make_planted_profiles(100, 10);
+        let k = 2;
+
+        // Start with random labels
+        let random_labels: Vec<usize> = (0..100).map(|e| e % k).collect();
+        let mut stats = LinkCommunityStats::from_profiles(&store, k, &random_labels);
+
+        let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
+
+        let moves1 = sampler.run(&mut stats, &store, 1.0, 1.0, 1);
+        let _moves_mid = sampler.run(&mut stats, &store, 1.0, 1.0, 20);
+        let moves_late = sampler.run(&mut stats, &store, 1.0, 1.0, 1);
+
+        assert!(
+            moves_late <= moves1 || moves1 == 0,
+            "Expected convergence: early={}, late={}",
+            moves1,
+            moves_late
+        );
+    }
+
+    #[test]
+    fn test_greedy_recovers_planted() {
+        let (store, true_labels) = make_planted_profiles(100, 10);
+        let k = 2;
+
+        // Start with random labels
+        let random_labels: Vec<usize> = (0..100).map(|e| (e * 7) % k).collect();
+        let mut stats = LinkCommunityStats::from_profiles(&store, k, &random_labels);
+
+        let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
+        sampler.run(&mut stats, &store, 1.0, 1.0, 50);
+        sampler.run_greedy(&mut stats, &store, 1.0, 1.0, 20);
+
+        // Check that the partition matches the planted one (up to label permutation)
+        let match_direct: usize = (0..100)
+            .filter(|&e| stats.membership[e] == true_labels[e])
+            .count();
+        let match_flipped: usize = (0..100)
+            .filter(|&e| stats.membership[e] == 1 - true_labels[e])
+            .count();
+
+        let best_match = match_direct.max(match_flipped);
+        assert!(
+            best_match >= 90,
+            "Planted partition recovery: {}/100",
+            best_match
+        );
+    }
+
+    #[test]
+    fn test_parallel_gibbs() {
+        let (store, _true_labels) = make_planted_profiles(100, 10);
+        let k = 2;
+
+        let random_labels: Vec<usize> = (0..100).map(|e| e % k).collect();
+        let mut stats = LinkCommunityStats::from_profiles(&store, k, &random_labels);
+
+        let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
+
+        let moves1 = sampler.run_parallel(&mut stats, &store, 1.0, 1.0, 1);
+        let _moves_mid = sampler.run_parallel(&mut stats, &store, 1.0, 1.0, 20);
+        let moves_late = sampler.run_parallel(&mut stats, &store, 1.0, 1.0, 1);
+
+        assert!(
+            moves_late <= moves1 || moves1 == 0,
+            "Parallel: expected convergence: early={}, late={}",
+            moves1,
+            moves_late
+        );
+    }
+
+    #[test]
+    fn test_sample_categorical_log() {
+        let mut rng = SmallRng::seed_from_u64(42);
+
+        let log_probs = vec![-100.0, 0.0, -100.0];
+        let mut counts = [0usize; 3];
+        for _ in 0..1000 {
+            let idx = sample_categorical_log(&log_probs, &mut rng);
+            counts[idx] += 1;
+        }
+        assert!(counts[1] > 990, "Expected mostly index 1, got {:?}", counts);
+    }
+
+    /// Test memoized EM Gibbs on a 2-component graph with planted partition.
+    ///
+    /// Component 0: nodes 0-4, edges among them → community 0 (high in genes 0..m/2)
+    /// Component 1: nodes 5-9, edges among them → community 1 (high in genes m/2..m)
+    #[test]
+    fn test_memoized_em_two_components() {
+        let m = 10;
+        let k = 2;
+
+        // Two disconnected cliques: nodes 0-4 and nodes 5-9
+        let edges_list = vec![
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 2),
+            (1, 3),
+            (2, 3),
+            (2, 4),
+            (3, 4),
+            (5, 6),
+            (5, 7),
+            (5, 8),
+            (6, 7),
+            (6, 8),
+            (7, 8),
+            (7, 9),
+            (8, 9),
+        ];
+        let n_edges = edges_list.len();
+        let graph = make_test_graph(10, edges_list.clone());
+
+        // Build profiles: edges in component 0 → community 0 signal,
+        //                  edges in component 1 → community 1 signal
+        let mut profiles = vec![0.0f32; n_edges * m];
+        let mut true_labels = vec![0usize; n_edges];
+        for (e, &(i, _j)) in edges_list.iter().enumerate() {
+            let c = if i < 5 { 0 } else { 1 };
+            true_labels[e] = c;
+            for g in 0..m {
+                let signal = if (g < m / 2) == (c == 0) { 10.0 } else { 1.0 };
+                profiles[e * m + g] = signal;
+            }
+        }
+        let store = LinkProfileStore::new(profiles, n_edges, m);
+
+        // Start with random labels
+        let mut membership: Vec<usize> = (0..n_edges).map(|e| (e * 7) % k).collect();
+
+        let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
+
+        // Run memoized EM Gibbs
+        let comp_args = ComponentGibbsArgs {
+            graph: &graph,
+            edges: &edges_list,
+            k,
+            a0: 1.0,
+            b0: 1.0,
+        };
+        let moves = sampler.run_components_em(&mut membership, &store, &comp_args, 50);
+        assert!(moves > 0, "Expected some moves");
+
+        // Run memoized greedy
+        let greedy_moves =
+            sampler.run_greedy_by_components(&mut membership, &store, &comp_args, 20);
+        let _ = greedy_moves;
+
+        // Check planted recovery (up to label permutation)
+        let match_direct: usize = (0..n_edges)
+            .filter(|&e| membership[e] == true_labels[e])
+            .count();
+        let match_flipped: usize = (0..n_edges)
+            .filter(|&e| membership[e] == 1 - true_labels[e])
+            .count();
+        let best_match = match_direct.max(match_flipped);
+        assert!(
+            best_match >= n_edges - 2,
+            "Two-component planted recovery: {}/{}",
+            best_match,
+            n_edges
+        );
+    }
+
+    /// Test memoized EM on a single-component graph (balanced partitioning splits it).
+    #[test]
+    fn test_memoized_em_single_component() {
+        let (store, _true_labels) = make_planted_profiles(100, 10);
+        let k = 2;
+
+        // Build a connected graph for edges 0..100
+        // Edges need a graph with nodes. Let's make a simple chain.
+        let n_nodes = 101;
+        let edges: Vec<(usize, usize)> = (0..100).map(|i| (i, i + 1)).collect();
+        let graph = make_test_graph(n_nodes, edges.clone());
+
+        let mut membership: Vec<usize> = (0..100).map(|e| e % k).collect();
+
+        let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
+
+        let comp_args = ComponentGibbsArgs {
+            graph: &graph,
+            edges: &edges,
+            k,
+            a0: 1.0,
+            b0: 1.0,
+        };
+        let moves = sampler.run_components_em(&mut membership, &store, &comp_args, 10);
+        // Should converge (fewer moves over time, similar to parallel test)
+        assert!(moves > 0 || membership.iter().all(|&m| m < k));
+    }
+
+    /// Test that memoized stats delta preserves exact global stats.
+    #[test]
+    fn test_memoized_stats_consistency() {
+        let m = 6;
+        let k = 3;
+        let n_edges = 30;
+
+        let (store, labels) = {
+            let mut profiles = vec![0.0f32; n_edges * m];
+            let mut labels = vec![0usize; n_edges];
+            for e in 0..n_edges {
+                let c = e % k;
+                labels[e] = c;
+                for g in 0..m {
+                    let signal = if g % k == c { 5.0 } else { 1.0 };
+                    profiles[e * m + g] = signal;
+                }
+            }
+            (LinkProfileStore::new(profiles, n_edges, m), labels)
+        };
+
+        let global = LinkCommunityStats::from_profiles(&store, k, &labels);
+
+        // Partition into 2 fake components: edges 0..15 and 15..30
+        let comp0: Vec<usize> = (0..15).collect();
+        let comp1: Vec<usize> = (15..30).collect();
+
+        let (gs0, ss0, ec0) = LinkCommunityStats::component_stats(&store, k, &comp0, &labels);
+        let (gs1, ss1, ec1) = LinkCommunityStats::component_stats(&store, k, &comp1, &labels);
+
+        // Verify: sum of component stats == global stats
+        for i in 0..k * m {
+            assert!(
+                (gs0[i] + gs1[i] - global.gene_sum[i]).abs() < 1e-10,
+                "gene_sum mismatch at {}",
+                i
+            );
+        }
+        for c in 0..k {
+            assert!(
+                (ss0[c] + ss1[c] - global.size_sum[c]).abs() < 1e-10,
+                "size_sum mismatch at {}",
+                c
+            );
+            assert_eq!(
+                ec0[c] + ec1[c],
+                global.edge_count[c],
+                "edge_count mismatch at {}",
+                c
+            );
+        }
+    }
+}

@@ -1,19 +1,16 @@
-#![allow(dead_code)]
-#![allow(clippy::needless_range_loop)]
 //! Link profile construction, coarsening, and projection refinement.
 //!
 //! Builds projected link profiles from sparse expression data and KNN edges,
 //! coarsens them by cell-level cluster labels, and refines the projection
 //! basis via community centroids.
 
-use crate::link_community_model::LinkProfileStore;
-use crate::srt_common::*;
-use crate::srt_gene_pairs::visit_gene_pair_deltas_with_buffer;
+use crate::gene_network::pairs::visit_gene_pair_deltas_with_buffer;
+use crate::link_community::model::LinkProfileStore;
+use crate::util::common::*;
 use matrix_param::io::ParamIo;
 use matrix_util::utils::generate_minibatch_intervals;
 use nalgebra_sparse::csc::CscMatrix;
 use rayon::prelude::*;
-use std::sync::Mutex;
 
 /// Compute per-gene total counts from sparse data.
 ///
@@ -52,8 +49,8 @@ pub fn compute_gene_totals(data: &SparseIoVec, block_size: usize) -> anyhow::Res
 /// Returns the number of genes that were kept (not zeroed).
 pub fn filter_basis_by_gene_count(basis: &mut Mat, gene_totals: &[f64], min_count: f32) -> usize {
     let mut n_kept = 0usize;
-    for g in 0..basis.nrows() {
-        if gene_totals[g] < min_count as f64 {
+    for (g, &total) in gene_totals.iter().enumerate().take(basis.nrows()) {
+        if total < min_count as f64 {
             basis.row_mut(g).fill(0.0);
         } else {
             n_kept += 1;
@@ -109,15 +106,16 @@ pub fn build_projection_profiles_for_edges(
 
     let mut profiles = vec![0.0f32; n_edges * m];
     let n_genes = x_dn.nrows();
+    let basis_t = basis.transpose(); // [m × n_genes] — row-major for dot products
+    let mut temp_g = DVec::zeros(n_genes);
 
     for (e_idx, &(ci, cj)) in edges.iter().enumerate() {
         let col_i = cell_to_col[&ci];
         let col_j = cell_to_col[&cj];
 
         // Dense accumulation: x_i + x_j → temp_g
-        let mut temp_g = vec![0.0f32; n_genes];
+        temp_g.fill(0.0);
 
-        // Accumulate from sparse column i
         let col_slice_i = x_dn.col(col_i);
         for (&row, &val) in col_slice_i
             .row_indices()
@@ -127,7 +125,6 @@ pub fn build_projection_profiles_for_edges(
             temp_g[row] += val;
         }
 
-        // Accumulate from sparse column j
         let col_slice_j = x_dn.col(col_j);
         for (&row, &val) in col_slice_j
             .row_indices()
@@ -137,14 +134,11 @@ pub fn build_projection_profiles_for_edges(
             temp_g[row] += val;
         }
 
-        // Project: profile[e] = basis^T * temp_g
+        // Project: profile[e] = basis^T * temp_g (BLAS-backed)
+        let proj = &basis_t * &temp_g;
         let base = e_idx * m;
-        for d in 0..m {
-            let mut dot = 0.0f32;
-            for g in 0..n_genes {
-                dot += basis[(g, d)] * temp_g[g];
-            }
-            profiles[base + d] = dot.max(0.0); // ReLU to keep non-negative
+        for (d, &v) in proj.iter().enumerate() {
+            profiles[base + d] = v.max(0.0);
         }
     }
 
@@ -166,11 +160,11 @@ pub fn build_edge_profiles(
     data: &SparseIoVec,
     edges: &[(usize, usize)],
     basis: &Mat,
-    _batch_effect: Option<&Mat>,
     block_size: usize,
 ) -> anyhow::Result<LinkProfileStore> {
     let n_edges = edges.len();
     let m = basis.ncols(); // proj_dim
+    let basis_t = basis.transpose(); // precompute once, shared across blocks
 
     let jobs = generate_minibatch_intervals(n_edges, block_size);
 
@@ -187,18 +181,16 @@ pub fn build_edge_profiles(
 
             let (x_dn, cell_to_col) = read_unique_cells_for_edges(data, chunk_edges)?;
 
-            // For each edge, project sum of the two cells
             let mut chunk_profiles = vec![0.0f32; chunk_size * m];
             let n_genes = x_dn.nrows();
+            let mut temp_g = DVec::zeros(n_genes);
 
             for (e_idx, &(ci, cj)) in chunk_edges.iter().enumerate() {
                 let col_i = cell_to_col[&ci];
                 let col_j = cell_to_col[&cj];
 
-                // Dense accumulation: x_i + x_j → temp_g
-                let mut temp_g = vec![0.0f32; n_genes];
+                temp_g.fill(0.0);
 
-                // Accumulate from sparse column i
                 let col_slice_i = x_dn.col(col_i);
                 for (&row, &val) in col_slice_i
                     .row_indices()
@@ -208,7 +200,6 @@ pub fn build_edge_profiles(
                     temp_g[row] += val;
                 }
 
-                // Accumulate from sparse column j
                 let col_slice_j = x_dn.col(col_j);
                 for (&row, &val) in col_slice_j
                     .row_indices()
@@ -218,14 +209,11 @@ pub fn build_edge_profiles(
                     temp_g[row] += val;
                 }
 
-                // Project: profile[e] = basis^T * temp_g
+                // Project: profile[e] = basis^T * temp_g (BLAS-backed)
+                let proj = &basis_t * &temp_g;
                 let base = e_idx * m;
-                for d in 0..m {
-                    let mut dot = 0.0f32;
-                    for g in 0..n_genes {
-                        dot += basis[(g, d)] * temp_g[g];
-                    }
-                    chunk_profiles[base + d] = dot.max(0.0); // ReLU to keep non-negative
+                for (d, &v) in proj.iter().enumerate() {
+                    chunk_profiles[base + d] = v.max(0.0);
                 }
             }
 
@@ -237,12 +225,8 @@ pub fn build_edge_profiles(
     // Assemble into single profiles buffer
     let mut profiles = vec![0.0f32; n_edges * m];
     for (lb, chunk) in partial_results {
-        let chunk_edges_count = chunk.len() / m;
-        for e in 0..chunk_edges_count {
-            let src_base = e * m;
-            let dst_base = (lb + e) * m;
-            profiles[dst_base..dst_base + m].copy_from_slice(&chunk[src_base..src_base + m]);
-        }
+        let dst_start = lb * m;
+        profiles[dst_start..dst_start + chunk.len()].copy_from_slice(&chunk);
     }
 
     Ok(LinkProfileStore::new(profiles, n_edges, m))
@@ -281,6 +265,7 @@ pub fn build_super_edges(
 /// Super-link profiles are the element-wise sum of all fine edges mapping to them.
 ///
 /// Returns (super-link profiles, fine-edge → super-edge mapping).
+#[cfg(test)]
 pub fn coarsen_edge_profiles(
     profiles: &LinkProfileStore,
     edges: &[(usize, usize)],
@@ -315,6 +300,7 @@ pub fn coarsen_edge_profiles(
 /// assigned to k, then normalizes by edge count.
 ///
 /// Returns [n_genes × k] centroid matrix.
+#[cfg(test)]
 pub fn compute_community_centroids(
     data: &SparseIoVec,
     edges: &[(usize, usize)],
@@ -398,6 +384,7 @@ pub fn compute_community_centroids(
 ///
 /// Takes the [n_genes × K] centroid matrix, runs SVD, and returns
 /// the top `m` left singular vectors as [n_genes × m].
+#[cfg(test)]
 pub fn refine_projection_basis(centroids: &Mat, m: usize) -> anyhow::Result<Mat> {
     let n_genes = centroids.nrows();
     let k = centroids.ncols();
@@ -472,9 +459,9 @@ pub fn compute_node_membership(
     }
 
     // Normalize each row
-    for i in 0..n_cells {
-        if degrees[i] > 0 {
-            let scale = 1.0 / degrees[i] as f32;
+    for (i, &deg) in degrees.iter().enumerate().take(n_cells) {
+        if deg > 0 {
+            let scale = 1.0 / deg as f32;
             counts.row_mut(i).scale_mut(scale);
         }
     }
@@ -586,31 +573,34 @@ pub fn build_module_profiles_for_edges(
 
     let mut profiles = vec![0.0f32; n_edges * n_modules];
 
-    for (e_idx, &(ci, cj)) in edges.iter().enumerate() {
-        let col_i = cell_to_col[&ci];
-        let col_j = cell_to_col[&cj];
-        let base = e_idx * n_modules;
+    // Split profiles into per-edge slices for parallel writes
+    let profile_chunks: Vec<&mut [f32]> = profiles.chunks_mut(n_modules).collect();
 
-        // Accumulate from sparse column i
-        let col_slice_i = x_dn.col(col_i);
-        for (&row, &val) in col_slice_i
-            .row_indices()
-            .iter()
-            .zip(col_slice_i.values().iter())
-        {
-            profiles[base + gene_to_module[row]] += val;
-        }
+    profile_chunks
+        .into_par_iter()
+        .zip(edges.par_iter())
+        .for_each(|(profile_slice, &(ci, cj))| {
+            let col_i = cell_to_col[&ci];
+            let col_j = cell_to_col[&cj];
 
-        // Accumulate from sparse column j
-        let col_slice_j = x_dn.col(col_j);
-        for (&row, &val) in col_slice_j
-            .row_indices()
-            .iter()
-            .zip(col_slice_j.values().iter())
-        {
-            profiles[base + gene_to_module[row]] += val;
-        }
-    }
+            let col_slice_i = x_dn.col(col_i);
+            for (&row, &val) in col_slice_i
+                .row_indices()
+                .iter()
+                .zip(col_slice_i.values().iter())
+            {
+                profile_slice[gene_to_module[row]] += val;
+            }
+
+            let col_slice_j = x_dn.col(col_j);
+            for (&row, &val) in col_slice_j
+                .row_indices()
+                .iter()
+                .zip(col_slice_j.values().iter())
+            {
+                profile_slice[gene_to_module[row]] += val;
+            }
+        });
 
     Ok(LinkProfileStore::new(profiles, n_edges, n_modules))
 }
@@ -892,74 +882,61 @@ pub fn build_gene_pair_profiles_for_edges(
 
     let (x_dn, cell_to_col) = read_unique_cells_for_edges(data, &edges)?;
 
-    let profiles = vec![0.0f32; n_edges * n_gene_pairs];
+    let mut profiles = vec![0.0f32; n_edges * n_gene_pairs];
     let n_genes = gene_means.len();
-    let profiles_mutex = Mutex::new(profiles);
 
     let pb = new_progress_bar(
         n_edges as u64,
         "Building profiles {bar:40} {pos}/{len} edges ({per_sec}, {eta})",
     );
 
-    edges.par_iter().enumerate().for_each(|(e_idx, &(ci, cj))| {
-        let base = e_idx * n_gene_pairs;
-        let mut gene_vals_buffer = vec![-1.0f32; n_genes];
+    // Split profiles into per-edge slices for lock-free parallel writes
+    let profile_chunks: Vec<&mut [f32]> = profiles.chunks_mut(n_gene_pairs).collect();
 
-        // Accumulate δ⁺ from cell i
-        let col_i = cell_to_col[&ci];
-        let col_slice_i = x_dn.col(col_i);
+    profile_chunks
+        .into_par_iter()
+        .zip(edges.par_iter())
+        .for_each(|(profile_slice, &(ci, cj))| {
+            let mut gene_vals_buffer = vec![-1.0f32; n_genes];
 
-        let mut deltas_i = Vec::new();
-        visit_gene_pair_deltas_with_buffer(
-            col_slice_i.row_indices(),
-            col_slice_i.values(),
-            gene_adj,
-            gene_means,
-            false,
-            &mut gene_vals_buffer,
-            |edge_idx, delta| {
-                if delta > 0.0 {
-                    deltas_i.push((edge_idx, delta));
-                }
-            },
-        );
+            // Accumulate δ⁺ from cell i directly into output slice
+            let col_i = cell_to_col[&ci];
+            let col_slice_i = x_dn.col(col_i);
+            visit_gene_pair_deltas_with_buffer(
+                col_slice_i.row_indices(),
+                col_slice_i.values(),
+                gene_adj,
+                gene_means,
+                false,
+                &mut gene_vals_buffer,
+                |edge_idx, delta| {
+                    if delta > 0.0 {
+                        profile_slice[edge_idx] += delta;
+                    }
+                },
+            );
 
-        // Accumulate δ⁺ from cell j
-        let col_j = cell_to_col[&cj];
-        let col_slice_j = x_dn.col(col_j);
+            // Accumulate δ⁺ from cell j
+            let col_j = cell_to_col[&cj];
+            let col_slice_j = x_dn.col(col_j);
+            visit_gene_pair_deltas_with_buffer(
+                col_slice_j.row_indices(),
+                col_slice_j.values(),
+                gene_adj,
+                gene_means,
+                false,
+                &mut gene_vals_buffer,
+                |edge_idx, delta| {
+                    if delta > 0.0 {
+                        profile_slice[edge_idx] += delta;
+                    }
+                },
+            );
 
-        let mut deltas_j = Vec::new();
-        visit_gene_pair_deltas_with_buffer(
-            col_slice_j.row_indices(),
-            col_slice_j.values(),
-            gene_adj,
-            gene_means,
-            false,
-            &mut gene_vals_buffer,
-            |edge_idx, delta| {
-                if delta > 0.0 {
-                    deltas_j.push((edge_idx, delta));
-                }
-            },
-        );
-
-        // Write to shared profiles array
-        {
-            let mut profiles = profiles_mutex.lock().unwrap();
-            for (edge_idx, delta) in deltas_i {
-                profiles[base + edge_idx] += delta;
-            }
-            for (edge_idx, delta) in deltas_j {
-                profiles[base + edge_idx] += delta;
-            }
-        }
-
-        pb.inc(1);
-    });
+            pb.inc(1);
+        });
 
     pb.finish_and_clear();
-
-    let profiles = profiles_mutex.into_inner().unwrap();
 
     Ok(LinkProfileStore::new(profiles, n_edges, n_gene_pairs))
 }
