@@ -1,28 +1,14 @@
-mod edge_profiles;
-mod fit_srt_delta_svd;
-mod fit_srt_gene_pair_link_community;
-mod fit_srt_gene_pair_svd;
-mod fit_srt_link_community;
-mod fit_srt_propensity;
-mod link_community_encoder;
-mod link_community_gibbs;
-mod link_community_model;
-mod srt_cell_pairs;
-mod srt_common;
-mod srt_estimate_batch_effects;
-mod srt_gene_graph;
-mod srt_gene_pairs;
-mod srt_graph_coarsen;
-mod srt_input;
-mod srt_knn_graph;
+mod gene_network;
+mod link_community;
+mod propensity;
+mod svd;
+mod util;
 
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use fit_srt_delta_svd::*;
-use fit_srt_gene_pair_link_community::*;
-use fit_srt_gene_pair_svd::*;
-use fit_srt_link_community::*;
-use fit_srt_propensity::*;
+use link_community::fit::*;
+use propensity::*;
+use svd::fit::*;
 
 const LOGO: &str = include_str!("../logo.txt");
 
@@ -83,18 +69,15 @@ fn print_logo() {
                      pinto dsvd data.zarr -c coords.csv -o out\n\n\
                   2. SVD-based cell-level analysis (expression only):\n\
                      pinto dsvd data.zarr -o out\n\n\
-                  3. SVD-based gene-pair interaction analysis:\n\
-                     pinto gpsvd data.zarr -c coords.csv -o out\n\n\
-                  4. Link community model (gene module-based):\n\
+                  3. Link community model (gene module-based):\n\
                      pinto lc data.zarr -c coords.csv -k 20 -o out\n\n\
-                  5. Gene-pair link community model:\n\
-                     pinto gplc data.zarr -c coords.csv -o out\n\n\
+                  4. Link community with gene-pair network:\n\
+                     pinto lc data.zarr -c coords.csv -o out --gene-network net.tsv\n\n\
                   All subcommands accept --coord or work without it.\n\
                   Use prop subcommand for re-clustering with different K.\n\n\
-                  Choose dsvd for cell-level shared/difference patterns, gpsvd for\n\
-                  gene-pair co-expression networks, lc for probabilistic link\n\
-                  community detection with gene modules, or gplc for gene-pair\n\
-                  link communities.",
+                  Choose dsvd for cell-level shared/difference patterns, or lc for\n\
+                  probabilistic link community detection (with gene modules or\n\
+                  gene-pair interaction profiles via --gene-network).",
     term_width = 80
 )]
 struct Cli {
@@ -152,61 +135,15 @@ enum Commands {
     DeltaSvd(SrtDeltaSvdArgs),
 
     #[command(
-        alias = "gpsvd",
-        about = "Gene-pair interaction patterns analysis by SVD",
-        long_about = "Gene-pair interaction analysis by randomized SVD.\n\n\
-                      Discovers gene-pair co-expression patterns within cell\n\
-                      neighbourhoods by building a gene-gene graph and decomposing\n\
-                      interaction deltas via SVD.\n\n\
-                      Model:\n\
-                      \x20 Gene-gene graph: edges (g1,g2) from KNN on posterior\n\
-                      \x20 means or external network (e.g., BioGRID).\n\
-                      \x20 For each cell j and gene pair (g1,g2):\n\
-                      \x20   delta_j = (x_{g1,j} - mu_g1) * (x_{g2,j} - mu_g2)\n\
-                      \x20   delta_j^+ = max(delta_j, 0)   positive interaction\n\
-                      \x20 Aggregate per sample s:\n\
-                      \x20   Y_s^{g1,g2} = sum_{j in s} delta_j^+\n\
-                      \x20   Y_s | mu ~ Poisson(n_s * mu), mu ~ Gamma(a0, b0)\n\n\
-                      Algorithm:\n\
-                      \x20 1. Load data X [G x N] and coordinates [N x D]\n\
-                      \x20    (if no coordinates, use expression embeddings)\n\
-                      \x20 2. Build KNN graph -> E cell pairs\n\
-                      \x20    (spatial KNN from coordinates, or expression KNN\n\
-                      \x20     from random-projected gene expression)\n\
-                      \x20 3. Random projection + binary sort -> S samples\n\
-                      \x20 4. Preliminary collapse: gene x sample sums\n\
-                      \x20 5. Poisson-Gamma on gene sums -> posterior means\n\
-                      \x20 6. Build gene-gene KNN graph from posterior means\n\
-                      \x20    (or load external network)\n\
-                      \x20 7. For each cell j, each gene pair (g1,g2):\n\
-                      \x20    delta_j = (x_{g1,j}-mu_g1)*(x_{g2,j}-mu_g2)\n\
-                      \x20    accumulate delta^+ into sample s(j)\n\
-                      \x20 8. Poisson-Gamma on gene-pair stats -> log means\n\
-                      \x20 9. Randomized SVD on [n_edges x S] log means\n\
-                      \x20 10. Nystrom: per-cell projection, average to pairs\n\
-                      \x20     z_j = sum_{(g1,g2)} delta_j^+ * basis[g1:g2]\n\
-                      \x20     z_e = (z_i + z_j) / 2, then L2 normalize\n\n\
-                      Outputs:\n\
-                      - {out}.coord_pairs.parquet: cell pair coordinates\n\
-                      - {out}.gene_graph.parquet: gene-gene graph edges\n\
-                      - {out}.basis.parquet: SVD basis (n_edges x T)\n\
-                      - {out}.latent.parquet: per-pair latent codes (E x T)\n\
-                      - {out}.propensity.parquet: cell propensity (N x K)\n\
-                      - {out}.gene_topic.parquet: gene-topic Poisson-Gamma statistics (G x K)"
-    )]
-    GenePairDeltaSvd(SrtGenePairSvdArgs),
-
-    #[command(
         alias = "prop",
         about = "Estimate vertex propensity from edge clusters (standalone)",
         long_about = "Estimate vertex (cell) propensity scores from edge\n\
                       (cell-pair) cluster assignments.\n\n\
-                      NOTE: dsvd and gpsvd now produce propensity and edge\n\
-                      cluster outputs inline. Use this subcommand only when\n\
-                      you need a different K or separate expression data.\n\n\
+                      NOTE: dsvd now produces propensity and edge cluster\n\
+                      outputs inline. Use this subcommand only when you need\n\
+                      a different K or separate expression data.\n\n\
                       Model:\n\
-                      \x20 Given latent codes z_e [E x T] from delta-svd or\n\
-                      \x20 gene-pair-delta-svd:\n\
+                      \x20 Given latent codes z_e [E x T] from delta-svd:\n\
                       \x20   c_e = argmin_k ||z_e - centroid_k||  K-means cluster\n\
                       \x20 For each vertex i:\n\
                       \x20   p_i[k] = |{e incident to i : c_e = k}| / degree(i)\n\
@@ -222,7 +159,7 @@ enum Commands {
                       \x20 6. If expression data provided:\n\
                       \x20    weighted gene sums per cluster -> Poisson-Gamma\n\n\
                       Inputs:\n\
-                      - .latent.parquet (from delta-svd or gene-pair-delta-svd)\n\
+                      - .latent.parquet (from delta-svd)\n\
                       - .coord_pairs.parquet (cell pair names)\n\
                       - Optionally, expression data (.zarr or .h5)\n\n\
                       Outputs:\n\
@@ -242,10 +179,14 @@ enum Commands {
                       conjugate model.\n\n\
                       Supports spatial coordinates or expression-only mode\n\
                       (omit --coord to build KNN from expression embeddings).\n\n\
+                      Edge profiles can be built in three ways:\n\
+                      \x20 1. Gene modules (default): genes clustered into M modules,\n\
+                      \x20    y_e[m] = sum_{g in module m} (x_{g,i} + x_{g,j})\n\
+                      \x20 2. Gene-pair network (--gene-network): interaction deltas\n\
+                      \x20    y_e[p] = sum of positive co-expression deltas per pair\n\
+                      \x20 3. Random projection (--n-gene-modules 0): y_e = W^T(x_i+x_j)\n\n\
                       Model:\n\
                       \x20 Given N cells, G genes, KNN graph with E edges.\n\
-                      \x20 For each edge e=(i,j), build module-count profile:\n\
-                      \x20   y_e[m] = sum_{g in module m} (x_{g,i} + x_{g,j})\n\
                       \x20 Link community assignment:\n\
                       \x20   z_e in {1..K}\n\
                       \x20   y_e^m | z_e=k ~ Poisson(s_e * mu_{m,k})\n\
@@ -253,60 +194,24 @@ enum Commands {
                       \x20   s_e = sum_m y_e^m          link size factor\n\n\
                       Algorithm:\n\
                       \x20 1. Load data X [G x N] and coordinates [N x D]\n\
-                      \x20    (if no coordinates, use expression embeddings)\n\
-                      \x20 2. Estimate batch effects delta [G x B]\n\
-                      \x20 3. Build KNN graph -> E edges\n\
-                      \x20    (spatial or expression-based)\n\
-                      \x20 4. Discover gene modules via random sketch clustering\n\
-                      \x20 5. Build edge profiles: y_e[m] = sum of module m counts\n\
-                      \x20 6. Coarsen: cell KMeans -> super-edges, sum profiles\n\
-                      \x20 7. Collapsed Gibbs sampling on coarsest super-edges:\n\
-                      \x20    for each sweep:\n\
-                      \x20      for each edge e:\n\
-                      \x20        remove e from community z_e\n\
-                      \x20        for t = 1..K:\n\
-                      \x20          delta_t = sum_m [score(a0+E_{t,m}+y_e^m,\n\
-                      \x20            b0+T_t+s_e) - score(a0+E_{t,m}, b0+T_t)]\n\
-                      \x20        z_e ~ Categorical(softmax(delta))\n\
-                      \x20        add e to community z_e\n\
-                      \x20 8. Transfer labels to finer levels, refine\n\
-                      \x20 9. Greedy finalization (argmax instead of sample)\n\
-                      \x20 10. Output:\n\
-                      \x20     node_membership[i,k] = frac of i's edges in k\n\
-                      \x20     gene_to_module[g] = module assignment per gene\n\n\
+                      \x20 2. Build KNN graph -> E edges\n\
+                      \x20 3. Estimate batch effects (multi-batch only)\n\
+                      \x20 4. Build edge profiles (gene modules, gene-pair, or projection)\n\
+                      \x20 5. Multi-level coarsening -> super-edges\n\
+                      \x20 6. Collapsed Gibbs sampling on coarsest super-edges\n\
+                      \x20 7. Progressive encoder training (coarse to fine)\n\
+                      \x20 8. EM refinement + greedy finalization on full edges\n\
+                      \x20 9. Output: cell propensity, gene-topic stats, assignments\n\n\
                       Outputs:\n\
                       - {out}.propensity.parquet: soft membership (N x K)\n\
-                      - {out}.gene_modules.parquet: gene module assignments (G x 1)\n\
+                      - {out}.gene_modules.parquet: gene module assignments (when using modules)\n\
+                      - {out}.gene_graph.parquet: gene-gene edges (when using --gene-network)\n\
                       - {out}.link_community.parquet: link community assignments\n\
                       - {out}.scores.parquet: score trace\n\
                       - {out}.coord_pairs.parquet: cell pair coordinates\n\
                       - {out}.delta.parquet: batch effects (when multi-batch)"
     )]
     LinkCommunity(SrtLinkCommunityArgs),
-
-    #[command(
-        alias = "gplc",
-        about = "Gene pair link community model via collapsed Gibbs sampling",
-        long_about = "Gene-pair link community model for cell-cell interaction analysis.\n\n\
-                      Combines gene-pair interaction deltas with collapsed Gibbs link\n\
-                      community sampling. For each edge (i,j), the profile is a vector\n\
-                      of δ⁺ values across gene pairs from a gene-gene graph, capturing\n\
-                      which gene-gene interactions are active on that edge.\n\n\
-                      Supports spatial coordinates or expression-only mode\n\
-                      (omit --coord to build KNN from expression embeddings).\n\n\
-                      When the number of gene pairs exceeds --n-edge-modules,\n\
-                      gene pairs are clustered into modules via K-means to reduce\n\
-                      dimensionality of edge profiles.\n\n\
-                      Outputs:\n\
-                      - {out}.propensity.parquet: soft membership (N x K)\n\
-                      - {out}.gene_topic.parquet: gene-topic statistics (G x K)\n\
-                      - {out}.gene_graph.parquet: gene-gene graph edges\n\
-                      - {out}.link_community.parquet: link community assignments\n\
-                      - {out}.scores.parquet: score trace\n\
-                      - {out}.coord_pairs.parquet: cell pair coordinates\n\
-                      - {out}.delta.parquet: batch effects (when multi-batch)"
-    )]
-    GenePairLinkCommunity(SrtGenePairLinkCommunityArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -316,7 +221,7 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    srt_common::init_logger(cli.verbose);
+    crate::util::common::init_logger(cli.verbose);
 
     match &cli.commands {
         Commands::Propensity(args) => {
@@ -325,14 +230,8 @@ fn main() -> anyhow::Result<()> {
         Commands::DeltaSvd(args) => {
             fit_srt_delta_svd(args)?;
         }
-        Commands::GenePairDeltaSvd(args) => {
-            fit_srt_gene_pair_svd(args)?;
-        }
         Commands::LinkCommunity(args) => {
             fit_srt_link_community(args)?;
-        }
-        Commands::GenePairLinkCommunity(args) => {
-            fit_srt_gene_pair_link_community(args)?;
         }
     }
 

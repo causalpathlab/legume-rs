@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-#![allow(clippy::needless_range_loop)]
 //! Link community model: sufficient statistics and collapsed Poisson-Gamma scoring.
 //!
 //! Each edge e has a profile vector y_e ∈ R^M (projected gene counts) and a
@@ -109,8 +107,7 @@ impl LinkCommunityStats {
         let mut size_sum = vec![0.0f64; k];
         let mut edge_count = vec![0usize; k];
 
-        for e in 0..n_edges {
-            let c = labels[e];
+        for (e, &c) in labels.iter().enumerate().take(n_edges) {
             debug_assert!(c < k);
             let row = profiles.profile(e);
             let base = c * m;
@@ -146,12 +143,13 @@ impl LinkCommunityStats {
         let row = profiles.profile(e);
         let sf = profiles.size_factors[e] as f64;
 
-        let old_base = old_k * m;
-        let new_base = new_k * m;
-        for g in 0..m {
-            let v = row[g] as f64;
-            self.gene_sum[old_base + g] -= v;
-            self.gene_sum[new_base + g] += v;
+        let old_slice = &mut self.gene_sum[old_k * m..(old_k + 1) * m];
+        for (dst, &v) in old_slice.iter_mut().zip(row.iter()) {
+            *dst -= v as f64;
+        }
+        let new_slice = &mut self.gene_sum[new_k * m..(new_k + 1) * m];
+        for (dst, &v) in new_slice.iter_mut().zip(row.iter()) {
+            *dst += v as f64;
         }
 
         self.size_sum[old_k] -= sf;
@@ -164,8 +162,7 @@ impl LinkCommunityStats {
     /// Build sufficient statistics for a subset of edges (no membership vector).
     ///
     /// Returns only the aggregate stats (gene_sum, size_sum, edge_count) for the
-    /// given edge indices, using their assignments from `membership`.
-    /// This is used for memoized per-component stats.
+    /// Compute aggregate stats for a subset of edges (identified by global indices).
     pub fn component_stats(
         profiles: &LinkProfileStore,
         k: usize,
@@ -179,6 +176,31 @@ impl LinkCommunityStats {
 
         for &e in edge_indices {
             let c = membership[e];
+            debug_assert!(c < k);
+            let row = profiles.profile(e);
+            let base = c * m;
+            for g in 0..m {
+                gene_sum[base + g] += row[g] as f64;
+            }
+            size_sum[c] += profiles.size_factors[e] as f64;
+            edge_count[c] += 1;
+        }
+
+        (gene_sum, size_sum, edge_count)
+    }
+
+    /// Compute aggregate stats for a contiguous sub-store with local membership.
+    pub fn local_stats(
+        profiles: &LinkProfileStore,
+        k: usize,
+        membership: &[usize],
+    ) -> (Vec<f64>, Vec<f64>, Vec<usize>) {
+        let m = profiles.m;
+        let mut gene_sum = vec![0.0f64; k * m];
+        let mut size_sum = vec![0.0f64; k];
+        let mut edge_count = vec![0usize; k];
+
+        for (e, &c) in membership.iter().enumerate() {
             debug_assert!(c < k);
             let row = profiles.profile(e);
             let base = c * m;
@@ -225,9 +247,9 @@ impl LinkCommunityStats {
             let c = self.membership[e];
             debug_assert!(c < k);
             let row = profiles.profile(e);
-            let base = c * m;
-            for g in 0..m {
-                self.gene_sum[base + g] += row[g] as f64;
+            let slice = &mut self.gene_sum[c * m..(c + 1) * m];
+            for (dst, &v) in slice.iter_mut().zip(row.iter()) {
+                *dst += v as f64;
             }
             self.size_sum[c] += profiles.size_factors[e] as f64;
             self.edge_count[c] += 1;
@@ -282,16 +304,17 @@ impl LinkCommunityClassifier {
         let mut log_rates = vec![0.0f64; k * m];
         let mut rate_totals = vec![0.0f64; k];
 
-        for c in 0..k {
+        for (c, rt) in rate_totals.iter_mut().enumerate().take(k) {
             let denom = b0 + stats.size_sum[c];
-            let base = c * m;
+            let gene_slice = &stats.gene_sum[c * m..(c + 1) * m];
+            let lr_slice = &mut log_rates[c * m..(c + 1) * m];
             let mut rate_sum = 0.0f64;
-            for g in 0..m {
-                let mu = (a0 + stats.gene_sum[base + g]) / denom;
-                log_rates[base + g] = mu.ln();
+            for (lr, &gs) in lr_slice.iter_mut().zip(gene_slice.iter()) {
+                let mu = (a0 + gs) / denom;
+                *lr = mu.ln();
                 rate_sum += mu;
             }
-            rate_totals[c] = rate_sum;
+            *rt = rate_sum;
         }
 
         // Empirical prior: log(edge_count + 1) to avoid -inf for empty communities
@@ -313,6 +336,7 @@ impl LinkCommunityClassifier {
     /// Predict community assignment for a single edge profile.
     ///
     /// Returns the argmax community index.
+    #[cfg(test)]
     #[inline]
     pub fn predict_one(&self, profile: &[f32], size_factor: f32) -> usize {
         let sf = size_factor as f64;
@@ -335,6 +359,7 @@ impl LinkCommunityClassifier {
     /// Predict community assignments for all edges in a profile store.
     ///
     /// Returns a label vector of length `profiles.n_edges`.
+    #[cfg(test)]
     pub fn predict_labels(&self, profiles: &LinkProfileStore) -> Vec<usize> {
         (0..profiles.n_edges)
             .map(|e| self.predict_one(profiles.profile(e), profiles.size_factors[e]))
@@ -342,6 +367,7 @@ impl LinkCommunityClassifier {
     }
 
     /// Predict community assignments in parallel using rayon.
+    #[cfg(test)]
     pub fn predict_labels_parallel(&self, profiles: &LinkProfileStore) -> Vec<usize> {
         use rayon::prelude::*;
         let chunk_size = std::cmp::max(256, profiles.n_edges / rayon::current_num_threads().max(1));
@@ -355,6 +381,30 @@ impl LinkCommunityClassifier {
                     .collect::<Vec<_>>()
             })
             .collect()
+    }
+}
+
+/// Precomputed Poisson-Gamma hyperparameter constants for hot-loop scoring.
+struct PoissonScoreParams {
+    a0: f64,
+    b0: f64,
+    /// a0 * ln(b0) - lgamma(a0), constant across all calls
+    base_term: f64,
+}
+
+impl PoissonScoreParams {
+    fn new(a0: f64, b0: f64) -> Self {
+        Self {
+            a0,
+            b0,
+            base_term: a0 * b0.ln() - SpecialGamma::ln_gamma(a0).0,
+        }
+    }
+
+    #[inline]
+    fn score(&self, edge: f64, total: f64) -> f64 {
+        self.base_term + SpecialGamma::ln_gamma(self.a0 + edge).0
+            - (self.a0 + edge) * (self.b0 + total).ln()
     }
 }
 
@@ -389,40 +439,33 @@ pub fn compute_log_probs_for_edge(
     let row = profiles.profile(e);
     let sf = profiles.size_factors[e] as f64;
 
-    // Current community stats (before removal)
     let old_size = stats.size_sum[current_c];
     let new_size_removed = old_size - sf;
 
-    for t in 0..k {
+    let src_slice = &stats.gene_sum[current_c * m..(current_c + 1) * m];
+
+    let ps = PoissonScoreParams::new(a0, b0);
+
+    for (t, lp) in log_probs.iter_mut().enumerate().take(k) {
         if t == current_c {
-            log_probs[t] = 0.0;
+            *lp = 0.0;
             continue;
         }
 
         let target_size = stats.size_sum[t];
         let new_target_size = target_size + sf;
+        let tgt_slice = &stats.gene_sum[t * m..(t + 1) * m];
 
         let mut delta = 0.0f64;
-        let src_base = current_c * m;
-        let tgt_base = t * m;
-
-        for g in 0..m {
-            let y = row[g] as f64;
-
-            // Score change for source community (edge removed)
-            let old_e_src = stats.gene_sum[src_base + g];
-            let new_e_src = old_e_src - y;
-            delta += poisson_score(a0, b0, new_e_src, new_size_removed)
-                - poisson_score(a0, b0, old_e_src, old_size);
-
-            // Score change for target community (edge added)
-            let old_e_tgt = stats.gene_sum[tgt_base + g];
-            let new_e_tgt = old_e_tgt + y;
-            delta += poisson_score(a0, b0, new_e_tgt, new_target_size)
-                - poisson_score(a0, b0, old_e_tgt, target_size);
+        for ((&y_f32, &old_e_src), &old_e_tgt) in
+            row.iter().zip(src_slice.iter()).zip(tgt_slice.iter())
+        {
+            let y = y_f32 as f64;
+            delta += ps.score(old_e_src - y, new_size_removed) - ps.score(old_e_src, old_size);
+            delta += ps.score(old_e_tgt + y, new_target_size) - ps.score(old_e_tgt, target_size);
         }
 
-        log_probs[t] = delta;
+        *lp = delta;
     }
 }
 

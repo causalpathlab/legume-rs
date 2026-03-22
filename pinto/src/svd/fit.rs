@@ -1,9 +1,9 @@
-use crate::edge_profiles::compute_propensity_and_gene_topic_stat;
-use crate::srt_cell_pairs::*;
-use crate::srt_common::*;
-use crate::srt_estimate_batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
-use crate::srt_graph_coarsen::*;
-use crate::srt_input::{self, *};
+use crate::link_community::profiles::compute_propensity_and_gene_topic_stat;
+use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
+use crate::util::cell_pairs::*;
+use crate::util::common::*;
+use crate::util::graph_coarsen::*;
+use crate::util::input::*;
 use data_beans_alg::random_projection::*;
 
 use clap::Parser;
@@ -13,7 +13,7 @@ use matrix_param::traits::*;
 #[derive(Parser, Debug, Clone)]
 pub struct SrtDeltaSvdArgs {
     #[command(flatten)]
-    pub common: srt_input::SrtInputArgs,
+    pub common: crate::util::input::SrtInputArgs,
 
     #[arg(
         long,
@@ -181,7 +181,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
 
     // Auto-detect batches from connected components (opt-in via --auto-batch)
     if c.auto_batch && c.batch_files.is_none() {
-        srt_input::auto_batch_from_components(&graph, &mut batch_membership);
+        crate::util::input::auto_batch_from_components(&graph, &mut batch_membership);
     }
 
     // 3. Estimate batch effects
