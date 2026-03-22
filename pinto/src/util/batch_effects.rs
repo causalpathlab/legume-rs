@@ -41,7 +41,7 @@
 //! ensure both coarse global corrections and fine-grained local
 //! adjustments.
 
-use crate::srt_common::*;
+use crate::util::common::*;
 use data_beans_alg::collapse_data::*;
 use data_beans_alg::random_projection::*;
 use matrix_param::dmatrix_gamma::GammaMatrix;

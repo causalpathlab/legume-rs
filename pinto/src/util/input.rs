@@ -1,6 +1,6 @@
-use crate::srt_cell_pairs::connected_components;
-use crate::srt_common::*;
-use crate::srt_knn_graph::KnnGraph;
+use crate::util::cell_pairs::connected_components;
+use crate::util::common::*;
+use crate::util::knn_graph::KnnGraph;
 use clap::Parser;
 use data_beans::convert::try_open_or_convert;
 

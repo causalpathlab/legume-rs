@@ -1,5 +1,5 @@
-use crate::srt_common::*;
-use crate::srt_knn_graph::{KnnGraph, KnnGraphArgs};
+use crate::util::common::*;
+use crate::util::knn_graph::{KnnGraph, KnnGraphArgs};
 use dashmap::DashMap;
 use matrix_util::parquet::*;
 use matrix_util::traits::RandomizedAlgs;

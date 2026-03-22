@@ -1,5 +1,5 @@
-use crate::srt_common::*;
-use crate::srt_knn_graph::KnnGraph;
+use crate::util::common::*;
+use crate::util::knn_graph::KnnGraph;
 use std::cmp::Ordering;
 
 #[derive(Clone)]
