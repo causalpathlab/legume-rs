@@ -1,4 +1,3 @@
-pub mod encoder;
 pub mod fit;
 pub mod gibbs;
 pub mod model;

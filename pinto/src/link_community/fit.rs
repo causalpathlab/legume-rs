@@ -5,16 +5,14 @@
 
 use crate::gene_network::graph::*;
 use crate::gene_network::pairs::*;
-use crate::link_community::encoder::{IndexedLinkCommunityEncoder, LinkCommunityEncoder};
 use crate::link_community::gibbs::{ComponentGibbsArgs, LinkGibbsSampler};
-use crate::link_community::model::{LinkCommunityClassifier, LinkCommunityStats, LinkProfileStore};
+use crate::link_community::model::{LinkCommunityStats, LinkProfileStore};
 use crate::link_community::profiles::*;
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
 use crate::util::input::*;
-use crate::util::node_indexed::build_node_indexed_samples;
 
 /// Gene-pair profile construction state, built from an external gene network.
 struct GenePairProfileState {
@@ -47,15 +45,21 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
-        default_value_t = 50,
-        help = "Number of gene modules for edge profiles (0 = skip gene modules)",
+        help = "Number of gene modules (default: sqrt of median cell nnz)",
         long_help = "Number of gene modules (M) for edge profile construction.\n\
                        Genes are clustered into M modules via K-means on gene embeddings.\n\
                        Edge profiles are M-dimensional module-count vectors.\n\
-                       Set to 0 to skip gene modules and use random-projection edge profiles\n\
-                       of dimension --proj-dim instead."
+                       Default: auto-determined as sqrt(median cell nnz).\n\
+                       Use --no-gene-modules to skip and use random-projection profiles."
     )]
-    n_gene_modules: usize,
+    n_gene_modules: Option<usize>,
+
+    #[arg(
+        long,
+        conflicts_with = "n_gene_modules",
+        help = "Skip gene modules, use projection profiles"
+    )]
+    no_gene_modules: bool,
 
     #[arg(
         long,
@@ -91,80 +95,23 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
-        help = "EM Gibbs sweeps on full edge set after encoder prediction",
-        long_help = "Number of EM Gibbs sweeps on full-resolution edges after\n\
-                       encoder initialization. Set to 0 to skip EM entirely and\n\
-                       use only greedy refinement (fastest). If omitted, defaults\n\
-                       to num_gibbs/4 (minimum 5)."
+        help = "EM Gibbs sweeps on full edge set",
+        long_help = "Number of EM Gibbs sweeps on full-resolution edges.\n\
+                       Set to 0 to skip EM entirely and use only greedy refinement.\n\
+                       If omitted, defaults to num_gibbs/4 (minimum 5)."
     )]
     num_em: Option<usize>,
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Encoder training epochs at coarsest level",
-        long_help = "Number of AdamW epochs to train the MLP encoder at the coarsest\n\
-                       coarsening level. Decays as epochs/(level+1) at deeper levels."
+        default_value_t = 1.0,
+        help = "Dirichlet concentration for community mixing weights",
+        long_help = "Concentration parameter α for the symmetric Dirichlet prior\n\
+                       on community mixing weights. Enables variational truncation:\n\
+                       communities with few edges are naturally pruned.\n\
+                       Set to 0 to disable (uniform prior)."
     )]
-    encoder_epochs: usize,
-
-    #[arg(
-        long,
-        default_value_t = 0.01,
-        help = "Encoder learning rate",
-        long_help = "AdamW learning rate for encoder training. The coarsest level\n\
-                       uses this value; decays as lr*0.5^level at deeper levels."
-    )]
-    encoder_lr: f64,
-
-    #[arg(
-        long,
-        help = "Encoder hidden layer dimension (default = same as M)",
-        long_help = "Hidden dimension of the MLP encoder. If omitted, uses M\n\
-                       (number of gene modules). Larger values increase capacity\n\
-                       but may overfit on small coarsening levels."
-    )]
-    encoder_hidden: Option<usize>,
-
-    #[arg(
-        long,
-        default_value = "false",
-        help = "Use indexed encoder with per-cell top-K gene embeddings",
-        long_help = "When set, uses a Siamese indexed encoder that embeds each cell\n\
-                       via top-K gene selection + learnable feature embeddings.\n\
-                       Edge representation = [h_left + h_right; |h_left - h_right|].\n\
-                       Replaces gene module profiles with adaptive gene selection."
-    )]
-    indexed_encoder: bool,
-
-    #[arg(
-        long,
-        default_value_t = 256,
-        help = "Top-K genes per node for indexed encoder",
-        long_help = "Number of top genes selected per cell/super-node for the\n\
-                       indexed encoder. Only used with --indexed-encoder."
-    )]
-    context_size: usize,
-
-    #[arg(
-        long,
-        default_value_t = 64,
-        help = "Feature embedding dimension for indexed encoder",
-        long_help = "Dimension H of learnable gene embeddings [G, H].\n\
-                       Only used with --indexed-encoder."
-    )]
-    embedding_dim: usize,
-
-    #[arg(
-        long,
-        value_delimiter(','),
-        default_values_t = vec![128],
-        help = "Indexed encoder hidden layers (comma-separated)",
-        long_help = "Hidden layer dimensions for the indexed encoder classifier.\n\
-                       E.g., '128,64' builds: 2H → 128 → ReLU → 64 → ReLU → K.\n\
-                       Only used with --indexed-encoder."
-    )]
-    encoder_layers: Vec<usize>,
+    alpha: f32,
 
     #[arg(
         long,
@@ -242,7 +189,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     let a0 = args.a0 as f64;
     let b0 = args.b0 as f64;
     let k = args.n_communities;
-    let n_gm = args.n_gene_modules; // 0 = skip gene modules
+    // n_gene_modules resolved after data loading (may need median cell nnz)
 
     // 1. Load data (with or without coordinates)
     info!("Loading data files...");
@@ -263,7 +210,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     let n_genes = data_vec.num_rows();
     let n_cells = data_vec.num_columns();
-    let gene_pair_mode = args.gene_network.is_some();
 
     anyhow::ensure!(c.proj_dim > 0, "proj_dim must be > 0");
     anyhow::ensure!(args.n_communities > 0, "n_communities must be > 0");
@@ -274,9 +220,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         c.knn_spatial,
         n_cells
     );
-    if gene_pair_mode && args.indexed_encoder {
-        anyhow::bail!("--indexed-encoder is not supported with --gene-network");
-    }
 
     // 2. Build KNN graph (spatial or expression-based)
     let graph;
@@ -333,6 +276,27 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         },
         &c.out,
     )?;
+
+    // Resolve gene module count
+    let n_gm: Option<usize> = if args.no_gene_modules {
+        None
+    } else if let Some(n) = args.n_gene_modules {
+        Some(n)
+    } else {
+        // Auto: sqrt(median cell nnz)
+        info!("Auto-determining gene module count from median cell nnz...");
+        let col_stat =
+            data_beans::qc::collect_column_stat_across_vec(&data_vec, None, c.block_size)?;
+        let mut cell_nnz: Vec<f32> = col_stat.count_positives();
+        cell_nnz.sort_unstable_by(f32::total_cmp);
+        let median_nnz = cell_nnz.get(cell_nnz.len() / 2).copied().unwrap_or(0.0) as f64;
+        let n = (median_nnz.sqrt().round() as usize).max(10);
+        info!(
+            "Auto n_gene_modules = {} (sqrt of median nnz {:.0})",
+            n, median_nnz
+        );
+        Some(n)
+    };
 
     // Gene-pair mode: load external network before borrowing data_vec
     let mut gene_pair_state: Option<(GenePairGraph, DVec)> = None;
@@ -493,7 +457,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         });
         gene_to_module = None;
         proj_basis = None;
-    } else if n_gm > 0 {
+    } else if let Some(n_gm) = n_gm {
         // Gene module discovery via sketch + K-means
         let finest_cell_labels = &ml.all_cell_labels[ml.all_cell_labels.len() - 1];
         let n_finest_clusters = finest_cell_labels.iter().copied().max().unwrap_or(0) + 1;
@@ -572,14 +536,8 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     );
     score_trace.push(coarse_stats.total_score(a0, b0));
 
-    // 7b. Progressive encoder training across all coarsening levels
+    // 7b. Transfer labels to full resolution and build profiles
     let m_dim = coarse_profiles.m;
-    let num_levels = ml.all_cell_labels.len();
-    let hidden_dim = args.encoder_hidden.unwrap_or(m_dim);
-    let gibbs_per_level = (args.num_gibbs / 5).max(10);
-
-    let mut current_labels;
-    let full_profiles;
 
     let data_ref = &data_vec;
     let edges_ref = edges;
@@ -609,202 +567,26 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         }
     };
 
-    if args.indexed_encoder {
-        // === Indexed (Siamese) encoder path ===
-        let emb_dim = args.embedding_dim;
-        let ctx = args.context_size;
-        info!(
-            "Indexed encoder: G={}, H={}, ctx={}, layers={:?}, K={}",
-            n_genes, emb_dim, ctx, args.encoder_layers, k,
-        );
+    // Transfer coarse labels to fine edges
+    let mut current_labels = transfer_labels(&fine_to_super, &coarse_stats.membership);
 
-        let mut idx_encoder =
-            IndexedLinkCommunityEncoder::new(n_genes, emb_dim, &args.encoder_layers, k)?;
+    info!("Building full edge profiles...");
+    let full_profiles = profile_builder(&(0..n_edges).collect::<Vec<_>>());
+    info!(
+        "Full profiles: {} edges × {} dims ({:.1} MB)",
+        full_profiles.n_edges,
+        full_profiles.m,
+        (full_profiles.profiles.len() * std::mem::size_of::<f32>()) as f64 / 1_048_576.0
+    );
 
-        // Build node samples at coarsest level and train on Gibbs labels
-        let coarsest_labels = &ml.all_cell_labels[0];
-        let n_coarsest_nodes = coarsest_labels.iter().copied().max().unwrap_or(0) + 1;
-        info!(
-            "Building coarsest node samples ({} nodes)...",
-            n_coarsest_nodes
-        );
-        let coarsest_node_samples = build_node_indexed_samples(
-            &data_vec,
-            coarsest_labels,
-            n_coarsest_nodes,
-            ctx,
-            c.block_size,
-        )?;
-
-        let loss = idx_encoder.train_on_edges_indexed(
-            &coarsest_node_samples,
-            &super_edges,
-            &coarse_stats.membership,
-            args.encoder_epochs,
-            args.encoder_lr,
-        );
-        info!(
-            "Level 0: {} super-edges, {} nodes, encoder loss={:.4}",
-            super_edges.len(),
-            n_coarsest_nodes,
-            loss,
-        );
-
-        // Progressive levels
-        for level in 1..num_levels {
-            let level_labels = &ml.all_cell_labels[level];
-            let n_level_nodes = level_labels.iter().copied().max().unwrap_or(0) + 1;
-            let (level_super_edges, _) = build_super_edges(edges, level_labels);
-            let n_level_super = level_super_edges.len();
-
-            info!(
-                "Building level {} node samples ({} nodes)...",
-                level, n_level_nodes
-            );
-            let level_node_samples = build_node_indexed_samples(
-                &data_vec,
-                level_labels,
-                n_level_nodes,
-                ctx,
-                c.block_size,
-            )?;
-
-            // Predict and retrain
-            let level_membership =
-                idx_encoder.predict_edges_indexed(&level_node_samples, &level_super_edges);
-
-            let level_lr = args.encoder_lr * (0.5_f64).powi(level as i32);
-            let level_epochs = (args.encoder_epochs / (level + 1)).max(10);
-
-            let level_loss = idx_encoder.train_on_edges_indexed(
-                &level_node_samples,
-                &level_super_edges,
-                &level_membership,
-                level_epochs,
-                level_lr,
-            );
-
-            info!(
-                "Level {}: {} super-edges, encoder({} epochs, lr={:.4}): loss={:.4}",
-                level, n_level_super, level_epochs, level_lr, level_loss,
-            );
-        }
-
-        // Fine level: identity labels (each cell = its own node)
-        info!("Building fine node samples ({} cells)...", n_cells);
-        let identity_labels: Vec<usize> = (0..n_cells).collect();
-        let fine_node_samples =
-            build_node_indexed_samples(&data_vec, &identity_labels, n_cells, ctx, c.block_size)?;
-        current_labels = idx_encoder.predict_edges_indexed(&fine_node_samples, edges);
-
-        info!("Building full edge profiles for refinement...");
-        full_profiles = profile_builder(&(0..n_edges).collect::<Vec<_>>());
-    } else {
-        // === Module/projection encoder path (existing) ===
-
-        // Initialize encoder from coarsest-level analytic classifier
-        let classifier = LinkCommunityClassifier::from_stats(&coarse_stats, a0, b0);
-        let mut encoder = LinkCommunityEncoder::from_classifier(&classifier, hidden_dim)?;
-        info!(
-            "Encoder: input={}, hidden={}, output={} ({} params)",
-            m_dim,
-            hidden_dim,
-            k,
-            m_dim * hidden_dim + hidden_dim + hidden_dim * k + k,
-        );
-
-        // Train encoder on coarsest Gibbs output
-        let loss = encoder.train(
-            &coarse_profiles,
-            &coarse_stats.membership,
-            args.encoder_epochs,
-            args.encoder_lr,
-        );
-        info!(
-            "Level 0: {} super-edges, encoder loss={:.4}",
-            coarse_profiles.n_edges, loss,
-        );
-
-        // Iterate through all remaining coarsening levels (1 .. num_levels-1)
-        for level in 1..num_levels {
-            let level_labels = &ml.all_cell_labels[level];
-            let (level_super_edges, _) = build_super_edges(edges, level_labels);
-            let n_level_super = level_super_edges.len();
-
-            let level_profiles = build_super_edge_profiles(
-                &data_vec,
-                &level_super_edges,
-                &gp_profile_state,
-                gene_to_module.as_deref(),
-                m_dim,
-                proj_basis.as_ref(),
-                c.block_size,
-            )?;
-
-            // Predict labels using current encoder
-            let level_membership = encoder.predict_labels(&level_profiles);
-
-            // Corrective Gibbs
-            let mut level_stats =
-                LinkCommunityStats::from_profiles(&level_profiles, k, &level_membership);
-
-            let level_moves =
-                sampler.run_parallel(&mut level_stats, &level_profiles, a0, b0, gibbs_per_level);
-
-            let level_score = level_stats.total_score(a0, b0);
-            score_trace.push(level_score);
-
-            // Re-warm-start encoder from this level's analytic classifier, then train
-            let level_lr = args.encoder_lr * (0.5_f64).powi(level as i32);
-            let level_epochs = (args.encoder_epochs / (level + 1)).max(10);
-
-            let level_classifier = LinkCommunityClassifier::from_stats(&level_stats, a0, b0);
-            encoder = LinkCommunityEncoder::from_classifier(&level_classifier, hidden_dim)?;
-
-            let level_loss = encoder.train(
-                &level_profiles,
-                &level_stats.membership,
-                level_epochs,
-                level_lr,
-            );
-
-            info!(
-                "Level {}: {} super-edges, {} Gibbs moves, score={:.2}, encoder({} epochs, lr={:.4}): loss={:.4}",
-                level, n_level_super, level_moves, level_score, level_epochs, level_lr, level_loss,
-            );
-        }
-
-        info!("Building full edge profiles...");
-        full_profiles = profile_builder(&(0..n_edges).collect::<Vec<_>>());
-        info!(
-            "Full profiles: {} edges × {} dims ({:.1} MB)",
-            full_profiles.n_edges,
-            full_profiles.m,
-            (full_profiles.profiles.len() * std::mem::size_of::<f32>()) as f64 / 1_048_576.0
-        );
-        current_labels = encoder.predict_labels(&full_profiles);
-
-        // Compare encoder vs transfer predictions
-        let transfer_labels_vec = transfer_labels(&fine_to_super, &coarse_stats.membership);
-        let n_differ = current_labels
-            .iter()
-            .zip(transfer_labels_vec.iter())
-            .filter(|(&a, &b)| a != b)
-            .count();
-        info!(
-            "Encoder vs transfer: {} / {} edges differ ({:.1}%)",
-            n_differ,
-            n_edges,
-            100.0 * n_differ as f64 / n_edges as f64,
-        );
-    }
-
+    let alpha = args.alpha as f64;
     let comp_args = ComponentGibbsArgs {
         graph: &srt_cell_pairs.graph,
         edges,
         k,
         a0,
         b0,
+        alpha,
     };
 
     // Optional EM refinement
@@ -872,7 +654,8 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     // 9c. Gene module assignments [G × 1] (only when gene modules are used)
     if let Some(ref g2m) = gene_to_module {
-        info!("Writing gene module assignments ({} modules)...", n_gm);
+        let n_modules = g2m.iter().copied().max().unwrap_or(0) + 1;
+        info!("Writing gene module assignments ({} modules)...", n_modules);
         let gene_modules = Mat::from_fn(n_genes, 1, |g, _| g2m[g] as f32);
         let module_col_names: Vec<Box<str>> = vec!["module".into()];
         gene_modules.to_parquet_with_names(
@@ -897,38 +680,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     info!("Done");
     Ok(())
-}
-
-/// Build edge profiles for a set of super-edges, dispatching to the correct
-/// profile builder based on which mode is active (gene-pair, module, projection).
-fn build_super_edge_profiles(
-    data: &SparseIoVec,
-    super_edges: &[(usize, usize)],
-    gp_state: &Option<GenePairProfileState>,
-    gene_to_module: Option<&[usize]>,
-    n_modules: usize,
-    proj_basis: Option<&Mat>,
-    block_size: usize,
-) -> anyhow::Result<LinkProfileStore> {
-    if let Some(ref gp) = gp_state {
-        let mut store = build_edge_profiles_by_gene_pairs(
-            data,
-            super_edges,
-            &gp.gene_adj,
-            &gp.gene_means,
-            gp.n_gene_pairs,
-            block_size,
-        )?;
-        if let Some(ref assignments) = gp.module_collapse {
-            store = store.collapse_modules(assignments);
-        }
-        Ok(store)
-    } else if let Some(g2m) = gene_to_module {
-        build_edge_profiles_by_module(data, super_edges, g2m, n_modules, block_size)
-    } else {
-        let basis = proj_basis.expect("basis missing");
-        build_edge_profiles(data, super_edges, basis, block_size)
-    }
 }
 
 /// Write link community assignments to parquet.
