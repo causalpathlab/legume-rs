@@ -25,6 +25,9 @@ pub struct CaviSusieParams {
     pub prior_variance: f64,
     /// Whether to estimate residual variance
     pub estimate_residual_variance: bool,
+    /// Prior inclusion weights π_j (length p). If None, uniform 1/p.
+    /// Will be normalized to sum to 1.
+    pub prior_weights: Option<Vec<f64>>,
 }
 
 impl Default for CaviSusieParams {
@@ -35,6 +38,7 @@ impl Default for CaviSusieParams {
             tol: 1e-3,
             prior_variance: 0.2,
             estimate_residual_variance: true,
+            prior_weights: None,
         }
     }
 }
@@ -123,6 +127,15 @@ pub fn cavi_susie(x: &Tensor, y: &Tensor, params: &CaviSusieParams) -> Result<Ca
     let n = x.dim(0)?;
     let p = x.dim(1)?;
     let l = params.num_components;
+
+    // Prior inclusion weights (log scale)
+    let log_prior: Vec<f64> = match &params.prior_weights {
+        Some(w) => {
+            let sum: f64 = w.iter().sum();
+            w.iter().map(|&v| (v / sum).max(1e-30).ln()).collect()
+        }
+        None => vec![-(p as f64).ln(); p], // uniform: log(1/p)
+    };
 
     // Extract X as row-major (n, p) and y as (n,)
     let x_data: Vec<f64> = x.flatten_all()?.to_vec1()?;
@@ -219,7 +232,12 @@ pub fn cavi_susie(x: &Tensor, y: &Tensor, params: &CaviSusieParams) -> Result<Ca
                     * (-(1.0 + d[j] * sigma2_0 / sigma2).ln() + mu[ll][j] * mu[ll][j] / s2[ll][j]);
             }
 
-            // α_l = softmax(log_BF) using logsumexp trick
+            // Add log prior: α_l ∝ π_j * BF_j
+            for j in 0..p {
+                log_bf[j] += log_prior[j];
+            }
+
+            // α_l = softmax(log_BF + log_prior) using logsumexp trick
             let max_bf = log_bf.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let mut sum_exp = 0.0f64;
             for (j, &lbf) in log_bf.iter().enumerate() {
@@ -278,6 +296,7 @@ pub fn cavi_susie(x: &Tensor, y: &Tensor, params: &CaviSusieParams) -> Result<Ca
             &s2,
             &d,
             &fitted,
+            &log_prior,
         );
         elbo_trace.push(elbo);
 
@@ -354,6 +373,7 @@ fn compute_elbo_cavi(
     s2: &[Vec<f64>],
     d: &[f64],
     fitted: &[f64],
+    log_prior: &[f64],
 ) -> f64 {
     // Expected log-likelihood: -n/2 * log(2πσ²) - 1/(2σ²) * E[||y - Xβ||²]
     let ln_2pi = (2.0 * std::f64::consts::PI).ln();
@@ -394,11 +414,11 @@ fn compute_elbo_cavi(
                 alpha[ll][j] * 0.5 * (ratio + mu[ll][j] * mu[ll][j] / sigma2_0 - 1.0 - ratio.ln());
         }
 
-        // Categorical KL: Σ_j α_{l,j} * ln(α_{l,j} * p)
+        // Categorical KL: Σ_j α_{l,j} * ln(α_{l,j} / π_j)
         let mut kl_cat = 0.0f64;
-        for j in 0..p {
+        for (j, &lp) in log_prior.iter().enumerate() {
             if alpha[ll][j] > 1e-15 {
-                kl_cat += alpha[ll][j] * (alpha[ll][j] * p as f64).ln();
+                kl_cat += alpha[ll][j] * (alpha[ll][j].ln() - lp);
             }
         }
 
