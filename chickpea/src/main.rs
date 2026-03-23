@@ -1,5 +1,8 @@
 mod common;
-mod run_spectral;
+mod fit_linking_models;
+mod input;
+mod linking;
+mod run_sim_link;
 
 use crate::common::*;
 use colored::Colorize;
@@ -27,14 +30,11 @@ fn print_logo() {
     for line in LOGO.lines() {
         println!("  {}", colorize_logo_line(line));
     }
-    println!(
-        " {}",
-        "Bipartite Embedding for Single-Cell Multi-Omic Analysis".bold()
-    );
+    println!(" {}", "Multi-Omic Linkage Analysis".bold());
     println!();
 }
 
-/// Bipartite Embedding for Single-Cell Multi-Omic Analysis
+/// Multi-Omic Linkage Analysis
 #[derive(Parser, Debug)]
 #[command(version, about, long_about, term_width = 80)]
 struct Cli {
@@ -44,9 +44,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Bipartite spectral SVD — fast cell + feature embeddings
-    #[command(alias = "svd")]
-    Spectral(run_spectral::SpectralArgs),
+    /// Multi-omic linkage analysis — peak-gene regulatory links
+    Link(fit_linking_models::LinkArgs),
+
+    /// Simulate paired RNA + ATAC data with ground-truth peak-gene links
+    SimLink(run_sim_link::SimLinkArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -59,6 +61,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match &cli.commands {
-        Commands::Spectral(args) => run_spectral::run_spectral(args),
+        Commands::Link(args) => fit_linking_models::run_link(args),
+        Commands::SimLink(args) => run_sim_link::run_sim_link(args),
     }
 }
