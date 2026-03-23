@@ -1,31 +1,29 @@
+## Multi-Resolution Cascade SuSiE for Peak-Gene Linking
 
-Two types of regression analysis + simulation codes
+X (ATAC peaks, 100k-1M) -> Y (RNA genes)
 
-# task 1. regressing each gene on the genotypes found in cis-regulatory regions
+### Architecture
 
-- we can take two data: (1) data backend for single cell data (2) genotype matrix, at first just consider plink bed, bim, fam format or plink2 format (don't try to parse yourself use existing crate.io)
+- Sequential coarse-to-fine cascade with per-level SuSiE
+- Feature coarsening (D peaks → d modules) + VariantTree hierarchy over modules
+- Each tree level: aggregate X at that resolution, run SuSiE, prune low-PIP branches
+- Final level: expand to individual peaks, run SuSiE with parent PIP as prior
+- Per-gene tasks, parallelized with rayon
 
-- additionally we can take cell type annotations, or probabilistic annotation matrix which we can obtain from senna analysis
+### Done
 
-- we also need to take cell to individual assignment file so that we can map cells to individuals, while stratifying by cell types, into pseudo bulk data. to be matched with genotype data
+1. `CascadeTask`, `CascadeResult`, `CascadeParams` structs
+2. `aggregate_modules_by_tree_level()` — sum module pseudobulk by tree grouping
+3. `build_child_prior()` — cascade PIP from parent to children (hard mask + soft prior)
+4. `run_cascade()` — the level-by-level loop
+5. `run_susie_level_gaussian()` — CAVI SuSiE wrapper per level
+6. `run_susie_level_sgvb()` — SGVB SuSiE wrapper per level
+7. `simulate_link_data()` — simulation for testing
+8. Prior weights support in `cavi_susie` (candle-util)
+9. All 8 tests passing
 
-- since we tried different types of regression approaches in the candle-util, we can start using them with sgd-based model fitting in parallel across all the genes (or a minbatch of genes, or chromsome-by-chromosome, and so on)
+### Future
 
-- of course we would want susie prior
-
-- we would want a seprate simulation cli based on geontpyes
-  - there, we can take heritability parameters
-  - we can take number of causal variants
-
-# task 2. probably similar, but want to mach peaks to genes in multiome data
-
-- we can take two series (vectors) of data backend files 
-
-- we can construct pseudobulk data on both sides
-
-- then, we can fit regression models on the psuedobulk data 
-
-- of course we would want simulation routine separate cli
-
-
-
+- Multi-gene blocks: group genes by cis-window overlap + expression correlation
+- Shared vs independent α across genes in a block
+- Better coarsening that accounts for signal (not purely data-driven)
