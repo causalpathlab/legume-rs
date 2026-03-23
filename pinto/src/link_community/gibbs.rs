@@ -28,6 +28,8 @@ pub struct ComponentGibbsArgs<'a> {
     pub k: usize,
     pub a0: f64,
     pub b0: f64,
+    /// Dirichlet concentration for mixing weight prior (0.0 = no prior).
+    pub alpha: f64,
 }
 
 /// Collapsed Gibbs sampler for link community assignments.
@@ -72,7 +74,7 @@ impl LinkGibbsSampler {
             for e in 0..n {
                 let old_c = stats.membership[e];
 
-                compute_log_probs_for_edge(e, stats, profiles, a0, b0, &mut log_probs);
+                compute_log_probs_for_edge(e, stats, profiles, a0, b0, None, &mut log_probs);
 
                 let new_c = sample_categorical_log(&log_probs, &mut self.rng);
 
@@ -130,7 +132,15 @@ impl LinkGibbsSampler {
                     chunk
                         .iter()
                         .map(|&e| {
-                            compute_log_probs_for_edge(e, stats, profiles, a0, b0, &mut log_probs);
+                            compute_log_probs_for_edge(
+                                e,
+                                stats,
+                                profiles,
+                                a0,
+                                b0,
+                                None,
+                                &mut log_probs,
+                            );
                             let vertex_seed = sweep_seed ^ (e as u64).wrapping_mul(2654435761);
                             let mut rng = SmallRng::seed_from_u64(vertex_seed);
                             sample_categorical_log(&log_probs, &mut rng)
@@ -181,7 +191,7 @@ impl LinkGibbsSampler {
             for e in 0..n {
                 let old_c = stats.membership[e];
 
-                compute_log_probs_for_edge(e, stats, profiles, a0, b0, &mut log_probs);
+                compute_log_probs_for_edge(e, stats, profiles, a0, b0, None, &mut log_probs);
 
                 let new_c = argmax_log(&log_probs);
 
@@ -225,8 +235,9 @@ impl LinkGibbsSampler {
             k,
             a0,
             b0,
+            alpha,
         } = args;
-        let (k, a0, b0) = (*k, *a0, *b0);
+        let (k, a0, b0, alpha) = (*k, *a0, *b0, *alpha);
 
         let (comp_labels, n_comp) = connected_components(graph);
         let comp_edges = partition_edges_balanced(edges, &comp_labels, n_comp);
@@ -276,6 +287,14 @@ impl LinkGibbsSampler {
             let size_sum_snap = &global_stats.size_sum;
             let edge_count_snap = &global_stats.edge_count;
 
+            // Dirichlet log-weights snapshot (recomputed each sweep)
+            let lw_snap = if alpha > 0.0 {
+                Some(global_stats.compute_log_weights(alpha))
+            } else {
+                None
+            };
+            let lw_ref = lw_snap.as_deref();
+
             let local_results: Vec<ComponentResult> = (0..n_parts)
                 .into_par_iter()
                 .map(|c| {
@@ -308,6 +327,7 @@ impl LinkGibbsSampler {
                             &sub_stores[c],
                             a0,
                             b0,
+                            lw_ref,
                             &mut log_probs,
                         );
                         let new_c = match strategy {
@@ -673,6 +693,7 @@ mod tests {
             k,
             a0: 1.0,
             b0: 1.0,
+            alpha: 0.0,
         };
         let moves = sampler.run_components_em(&mut membership, &store, &comp_args, 50);
         assert!(moves > 0, "Expected some moves");
@@ -720,6 +741,7 @@ mod tests {
             k,
             a0: 1.0,
             b0: 1.0,
+            alpha: 0.0,
         };
         let moves = sampler.run_components_em(&mut membership, &store, &comp_args, 10);
         // Should converge (fewer moves over time, similar to parallel test)

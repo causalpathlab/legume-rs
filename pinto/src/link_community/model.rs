@@ -256,6 +256,18 @@ impl LinkCommunityStats {
         }
     }
 
+    /// Compute Dirichlet-smoothed log mixing weights from edge counts.
+    ///
+    /// `log_weights[k] = digamma(edge_count[k] + alpha/K) - digamma(n_edges + alpha)`
+    pub fn compute_log_weights(&self, alpha: f64) -> Vec<f64> {
+        let alpha_k = alpha / self.k as f64;
+        let total = self.n_edges as f64 + alpha;
+        let dg_total = SpecialGamma::digamma(total);
+        (0..self.k)
+            .map(|c| SpecialGamma::digamma(self.edge_count[c] as f64 + alpha_k) - dg_total)
+            .collect()
+    }
+
     /// Total collapsed Poisson-Gamma score across all communities and genes.
     pub fn total_score(&self, a0: f64, b0: f64) -> f64 {
         let m = self.m;
@@ -272,6 +284,7 @@ impl LinkCommunityStats {
     }
 }
 
+#[cfg(test)]
 /// Amortized classifier for link community assignments.
 ///
 /// Extracts posterior log-rates from converged sufficient statistics and
@@ -296,6 +309,7 @@ pub struct LinkCommunityClassifier {
     pub m: usize,
 }
 
+#[cfg(test)]
 impl LinkCommunityClassifier {
     /// Extract a classifier from converged sufficient statistics.
     pub fn from_stats(stats: &LinkCommunityStats, a0: f64, b0: f64) -> Self {
@@ -424,6 +438,9 @@ pub fn poisson_score(a0: f64, b0: f64, edge: f64, total: f64) -> f64 {
 /// if edge e were moved from its current community to t.
 /// The current community gets delta = 0.0 (baseline).
 ///
+/// When `log_weights` is provided, adds `log_weights[t] - log_weights[current_c]`
+/// as a Dirichlet prior contribution to each candidate.
+///
 /// Complexity: O(K × M).
 pub fn compute_log_probs_for_edge(
     e: usize,
@@ -431,6 +448,7 @@ pub fn compute_log_probs_for_edge(
     profiles: &LinkProfileStore,
     a0: f64,
     b0: f64,
+    log_weights: Option<&[f64]>,
     log_probs: &mut [f64],
 ) {
     let k = stats.k;
@@ -445,6 +463,8 @@ pub fn compute_log_probs_for_edge(
     let src_slice = &stats.gene_sum[current_c * m..(current_c + 1) * m];
 
     let ps = PoissonScoreParams::new(a0, b0);
+
+    let lw_current = log_weights.map(|w| w[current_c]).unwrap_or(0.0);
 
     for (t, lp) in log_probs.iter_mut().enumerate().take(k) {
         if t == current_c {
@@ -463,6 +483,11 @@ pub fn compute_log_probs_for_edge(
             let y = y_f32 as f64;
             delta += ps.score(old_e_src - y, new_size_removed) - ps.score(old_e_src, old_size);
             delta += ps.score(old_e_tgt + y, new_target_size) - ps.score(old_e_tgt, target_size);
+        }
+
+        // Dirichlet prior: log(π_t / π_current)
+        if let Some(w) = log_weights {
+            delta += w[t] - lw_current;
         }
 
         *lp = delta;
@@ -571,7 +596,7 @@ mod tests {
         for e in 0..stats.n_edges {
             let current_c = stats.membership[e];
 
-            compute_log_probs_for_edge(e, &stats, &store, a0, b0, &mut log_probs);
+            compute_log_probs_for_edge(e, &stats, &store, a0, b0, None, &mut log_probs);
 
             // Current community should have delta = 0
             assert!(
