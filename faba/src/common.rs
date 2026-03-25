@@ -9,7 +9,7 @@ pub use log::info;
 pub use matrix_util::common_io::*;
 pub use rayon::prelude::*;
 
-use fnv::{FnvHashMap, FnvHashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub struct TripletsRowsCols {
     pub triplets: Vec<(u64, u64, f32)>,
@@ -23,8 +23,8 @@ where
     Val: Into<f32>,
 {
     // identify unique samples and sites
-    let mut unique_cells = FnvHashSet::default();
-    let mut unique_features = FnvHashSet::default();
+    let mut unique_cells = FxHashSet::default();
+    let mut unique_features = FxHashSet::default();
 
     for (cb, f, _) in stats.iter() {
         unique_features.insert(f.clone());
@@ -34,7 +34,7 @@ where
     let mut unique_cells = unique_cells.into_iter().collect::<Vec<_>>();
     unique_cells.par_sort();
 
-    let cell_to_index: FnvHashMap<CellBarcode, usize> = unique_cells
+    let cell_to_index: FxHashMap<CellBarcode, usize> = unique_cells
         .into_iter()
         .enumerate()
         .map(|(i, sample)| (sample, i))
@@ -43,7 +43,7 @@ where
     let mut unique_features = unique_features.into_iter().collect::<Vec<_>>();
     unique_features.par_sort();
 
-    let feature_to_index: FnvHashMap<Feat, usize> = unique_features
+    let feature_to_index: FxHashMap<Feat, usize> = unique_features
         .into_iter()
         .enumerate()
         .map(|(i, f)| (f, i))
@@ -78,8 +78,8 @@ where
 /// This ensures two matrices end up with identical dimensions.
 pub fn format_data_triplets_shared<Feat, Val>(
     stats: Vec<(CellBarcode, Feat, Val)>,
-    feature_to_index: &FnvHashMap<Feat, usize>,
-    cell_to_index: &FnvHashMap<CellBarcode, usize>,
+    feature_to_index: &FxHashMap<Feat, usize>,
+    cell_to_index: &FxHashMap<CellBarcode, usize>,
     rows: Vec<Box<str>>,
     cols: Vec<Box<str>>,
 ) -> TripletsRowsCols
@@ -103,9 +103,9 @@ where
 
 pub struct UnionNames<Feat> {
     pub col_names: Vec<Box<str>>,
-    pub cell_to_index: FnvHashMap<CellBarcode, usize>,
+    pub cell_to_index: FxHashMap<CellBarcode, usize>,
     pub row_names: Vec<Box<str>>,
-    pub feature_to_index: FnvHashMap<Feat, usize>,
+    pub feature_to_index: FxHashMap<Feat, usize>,
 }
 
 /// Collect the union of cells and features from two sets of triplets,
@@ -117,8 +117,8 @@ pub fn collect_union_names<Feat>(
 where
     Feat: std::hash::Hash + std::cmp::Eq + std::cmp::Ord + Clone + Send + ToString,
 {
-    let mut unique_cells = FnvHashSet::default();
-    let mut unique_features = FnvHashSet::default();
+    let mut unique_cells = FxHashSet::default();
+    let mut unique_features = FxHashSet::default();
 
     for (cb, f, _) in triplets_a.iter().chain(triplets_b.iter()) {
         unique_cells.insert(cb.clone());
@@ -127,7 +127,7 @@ where
 
     let mut unique_cells = unique_cells.into_iter().collect::<Vec<_>>();
     unique_cells.par_sort();
-    let cell_to_index: FnvHashMap<CellBarcode, usize> = unique_cells
+    let cell_to_index: FxHashMap<CellBarcode, usize> = unique_cells
         .iter()
         .enumerate()
         .map(|(i, cb)| (cb.clone(), i))
@@ -139,7 +139,7 @@ where
 
     let mut unique_features = unique_features.into_iter().collect::<Vec<_>>();
     unique_features.par_sort();
-    let feature_to_index: FnvHashMap<Feat, usize> = unique_features
+    let feature_to_index: FxHashMap<Feat, usize> = unique_features
         .iter()
         .enumerate()
         .map(|(i, f)| (f.clone(), i))
@@ -164,8 +164,8 @@ pub fn uniq_batch_names(bam_files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>>
         .map(|x| basename(x))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let unique_bams: FnvHashSet<_> = bam_files.iter().cloned().collect();
-    let unique_names: FnvHashSet<_> = batch_names.iter().cloned().collect();
+    let unique_bams: FxHashSet<_> = bam_files.iter().cloned().collect();
+    let unique_names: FxHashSet<_> = batch_names.iter().cloned().collect();
 
     if unique_names.len() == bam_files.len() && unique_bams.len() == bam_files.len() {
         Ok(batch_names)

@@ -396,11 +396,11 @@ pub struct CountApaArgs {
 
     /// Valid gene IDs from gene count QC (pipeline mode or QC step)
     #[arg(skip)]
-    pub(crate) valid_gene_ids: Option<fnv::FnvHashSet<GeneId>>,
+    pub(crate) valid_gene_ids: Option<rustc_hash::FxHashSet<GeneId>>,
 
     /// Valid cell barcodes from gene count QC (pipeline mode or QC step)
     #[arg(skip)]
-    pub(crate) valid_cell_barcodes: Option<fnv::FnvHashSet<CellBarcode>>,
+    pub(crate) valid_cell_barcodes: Option<rustc_hash::FxHashSet<CellBarcode>>,
 }
 
 impl CountApaArgs {

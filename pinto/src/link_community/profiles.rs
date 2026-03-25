@@ -65,7 +65,7 @@ pub(crate) fn read_unique_cells_for_edges(
     data: &SparseIoVec,
     chunk_edges: &[(usize, usize)],
 ) -> anyhow::Result<(CscMatrix<f32>, HashMap<usize, usize>)> {
-    let mut unique_set: HashSet<usize> = HashSet::new();
+    let mut unique_set: HashSet<usize> = Default::default();
     for &(i, j) in chunk_edges {
         unique_set.insert(i);
         unique_set.insert(j);
@@ -240,7 +240,7 @@ pub fn build_super_edges(
     edges: &[(usize, usize)],
     cell_labels: &[usize],
 ) -> (Vec<(usize, usize)>, Vec<usize>) {
-    let mut key_to_super: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut key_to_super: HashMap<(usize, usize), usize> = Default::default();
     let mut super_edges: Vec<(usize, usize)> = Vec::new();
     let mut fine_to_super = Vec::with_capacity(edges.len());
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::fmt::{Debug, Display};
 
 use anndists::dist::DistL2;
@@ -182,7 +182,7 @@ where
         Self {
             hnsw: Hnsw::<f32, DistL2>::new(16, 1, 1, 100, DistL2 {}),
             data_vec: vec![],
-            name2index: HashMap::new(),
+            name2index: Default::default(),
             names: vec![],
         }
     }
@@ -197,7 +197,7 @@ where
 
         let data_vec: Vec<VecPoint> = (0..nn).map(|j| data[j].to_vp()).collect();
 
-        let mut name2index = HashMap::<T, usize>::new();
+        let mut name2index: HashMap<T, usize> = Default::default();
 
         names.iter().enumerate().for_each(|(j, x)| {
             name2index.insert(x.clone(), j);

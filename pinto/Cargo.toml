@@ -38,3 +38,4 @@ indicatif-log-bridge = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 colored = { workspace = true }
+rustc-hash = { workspace = true }

@@ -137,8 +137,7 @@ pub fn fit_gene_mixture(
     let assignments = hard_assign(&gmm.gamma);
 
     // Count per (cell_idx, component), weighted by observation count
-    let mut counts: std::collections::HashMap<(usize, usize), usize> =
-        std::collections::HashMap::new();
+    let mut counts: rustc_hash::FxHashMap<(usize, usize), usize> = rustc_hash::FxHashMap::default();
     for (obs_idx, &(_, component)) in assignments.iter().enumerate() {
         let cell_idx = observations[obs_idx].cell_idx;
         let count = observations[obs_idx].count;

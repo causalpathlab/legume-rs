@@ -1,7 +1,7 @@
 //! Parallelized louvain clustering.
 use crate::{Clustering, Network, ZeroVec};
-use fxhash::FxHasher;
 use rayon::prelude::*;
+use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 #[derive(Default)]
 pub(crate) struct ParallelLocalMoving {

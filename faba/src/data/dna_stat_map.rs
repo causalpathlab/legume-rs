@@ -9,7 +9,7 @@ use genomic_data::sam::*;
 
 use rust_htslib::bam::{self, ext::BamRecordExtensions};
 
-pub use fnv::FnvHashMap as HashMap;
+pub use rustc_hash::FxHashMap as HashMap;
 
 pub enum CountMode<'a> {
     /// Marginal/bulk statistics only — no cell barcode tracking
@@ -32,7 +32,7 @@ pub enum CountMode<'a> {
 pub struct DnaBaseFreqMap<'a> {
     mode: CountMode<'a>,
     anchor: Option<(i64, Dna)>,
-    position_filter: Option<std::collections::HashSet<i64>>,
+    position_filter: Option<rustc_hash::FxHashSet<i64>>,
     min_base_quality: u8,
     min_mapping_quality: u8,
 }
@@ -114,7 +114,7 @@ impl<'a> DnaBaseFreqMap<'a> {
     /// Set position filter to only accumulate frequencies for specific positions.
     /// This dramatically reduces memory usage when processing many sites in a large gene.
     /// If None, all positions in the region are stored (default behavior).
-    pub fn set_position_filter(&mut self, positions: std::collections::HashSet<i64>) {
+    pub fn set_position_filter(&mut self, positions: rustc_hash::FxHashSet<i64>) {
         self.position_filter = Some(positions);
     }
 
@@ -156,7 +156,7 @@ impl<'a> DnaBaseFreqMap<'a> {
         seq: &[u8],
         bam_record: &bam::Record,
         counts: &mut HashMap<i64, DnaBaseCount>,
-        position_filter: Option<&std::collections::HashSet<i64>>,
+        position_filter: Option<&rustc_hash::FxHashSet<i64>>,
         min_base_quality: u8,
     ) {
         let quals = bam_record.qual();

@@ -2,7 +2,7 @@ use crate::common::*;
 use crate::gene_count::splice::*;
 use crate::run_gene_count::GeneCountArgs;
 
-use fnv::FnvHashMap as HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 pub fn run_simple(
     args: &GeneCountArgs,
@@ -78,7 +78,7 @@ pub fn run_splice_aware(
         return Ok(());
     }
 
-    // Convert DashMap exon intervals to FnvHashMap for fast per-gene lookup
+    // Convert DashMap exon intervals to FxHashMap for fast per-gene lookup
     let exon_intervals: HashMap<GeneId, Vec<(i64, i64)>> = exon_map.into_iter().collect();
     let records = gff_map.records();
     let cutoffs = SqueezeCutoffs {
@@ -124,8 +124,8 @@ pub fn run_splice_aware(
         // Build total counts (spliced + unspliced) for QC
         // Gene key: strip "/count/spliced" or "/count/unspliced" suffix, use "/count/total"
         let total_triplets: Vec<(CellBarcode, Box<str>, f32)> = {
-            let mut totals: fnv::FnvHashMap<(CellBarcode, Box<str>), f32> =
-                fnv::FnvHashMap::default();
+            let mut totals: rustc_hash::FxHashMap<(CellBarcode, Box<str>), f32> =
+                rustc_hash::FxHashMap::default();
             for (cb, feat, val) in spliced_triplets.iter().chain(unspliced_triplets.iter()) {
                 let gene_key = feat
                     .rfind("/count/")
@@ -159,7 +159,7 @@ pub fn run_splice_aware(
 
         // Build index maps for the QC-passing names
         // Map total row names back to spliced/unspliced feature names
-        let qc_gene_keys: fnv::FnvHashSet<Box<str>> = qc_row_names
+        let qc_gene_keys: rustc_hash::FxHashSet<Box<str>> = qc_row_names
             .iter()
             .filter_map(|name| {
                 name.rfind("/count/")
@@ -167,7 +167,7 @@ pub fn run_splice_aware(
             })
             .collect();
 
-        let qc_cells: fnv::FnvHashSet<CellBarcode> = qc_col_names
+        let qc_cells: rustc_hash::FxHashSet<CellBarcode> = qc_col_names
             .iter()
             .map(|name| CellBarcode::Barcode(name.clone()))
             .collect();

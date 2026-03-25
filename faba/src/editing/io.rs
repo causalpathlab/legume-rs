@@ -217,14 +217,14 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
 /// (legacy atoi format) for backward compatibility.
 pub fn load_atoi_mask_from_parquet<P: AsRef<Path>>(
     path: P,
-) -> Result<fnv::FnvHashSet<(Box<str>, i64)>> {
+) -> Result<rustc_hash::FxHashSet<(Box<str>, i64)>> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let file = File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
     let reader = builder.build()?;
 
-    let mut mask = fnv::FnvHashSet::default();
+    let mut mask = rustc_hash::FxHashSet::default();
 
     for batch in reader {
         let batch = batch?;

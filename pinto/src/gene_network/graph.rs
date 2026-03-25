@@ -53,7 +53,7 @@ impl GenePairGraph {
         let read_out = read_lines_of_words_delim(file_path, file_delim, -1)?;
 
         // Match edges
-        let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
+        let mut edge_set: HashSet<(usize, usize)> = Default::default();
         let mut n_matched = 0usize;
         let mut n_skipped = 0usize;
 

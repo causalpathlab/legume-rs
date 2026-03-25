@@ -1,6 +1,6 @@
 use crate::common::*;
 use data_beans::convert::try_open_or_convert;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// Paired RNA + ATAC data with matched barcodes.
 pub struct DualModalityData {
@@ -155,7 +155,7 @@ pub fn load_gene_tss(
 
     let records = read_gff_record_vec(gff_file)?;
 
-    let mut tss_map: HashMap<Box<str>, GeneTss> = HashMap::new();
+    let mut tss_map: HashMap<Box<str>, GeneTss> = Default::default();
     for rec in &records {
         if rec.feature_type != FeatureType::Gene {
             continue;

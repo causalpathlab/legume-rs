@@ -4,11 +4,11 @@ use nalgebra::DMatrix;
 
 /// Load additional covariate files and return their matrices, matched and centered.
 pub fn load_covariate_files(
-    covariate_files: &[String],
+    covariate_files: &[Box<str>],
     matched_individual_ids: &[&str],
     n_matched: usize,
 ) -> Result<Vec<DMatrix<f32>>> {
-    let ind_lookup: std::collections::HashMap<&str, usize> = matched_individual_ids
+    let ind_lookup: rustc_hash::FxHashMap<&str, usize> = matched_individual_ids
         .iter()
         .enumerate()
         .map(|(i, &id)| (id, i))

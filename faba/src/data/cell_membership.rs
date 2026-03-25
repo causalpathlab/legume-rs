@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-use fnv::FnvHashMap as HashMap;
 use genomic_data::sam::CellBarcode;
 use matrix_util::membership::Membership;
+use rustc_hash::FxHashMap as HashMap;
 use std::sync::Mutex;
 
 /// Cell membership data structure for filtering BAM records by cell barcode

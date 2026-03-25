@@ -34,4 +34,5 @@ special = { workspace = true }
 indicatif = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+rustc-hash = { workspace = true }
 

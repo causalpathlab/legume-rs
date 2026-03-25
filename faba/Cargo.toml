@@ -44,7 +44,7 @@ coitrees = { workspace = true }
 parquet = { workspace = true }
 
 colored = { workspace = true }
-fnv = "1.0.7"
+rustc-hash = { workspace = true }
 dashmap = { version = "6.1.0", features = ["rayon"] }
 rust-htslib = { workspace = true }
 arrow = "56"

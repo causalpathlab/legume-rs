@@ -51,7 +51,7 @@ pub fn load_gtf(
 
     // Apply filters and convert to Gene structs
     let mut genes = Vec::new();
-    let mut seen_genes = std::collections::HashSet::new();
+    let mut seen_genes = rustc_hash::FxHashSet::default();
 
     for rec in gene_records {
         // Apply chromosome filter
@@ -110,7 +110,7 @@ pub fn load_bed_annotations(
         matrix_util::common_io::read_lines_of_words_delim(bed_path, &['\t', ',', ' '], -1)?;
 
     let mut genes = Vec::new();
-    let mut seen_genes = std::collections::HashSet::new();
+    let mut seen_genes = rustc_hash::FxHashSet::default();
 
     for words in &parsed.lines {
         if words.len() < 4 {

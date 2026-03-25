@@ -317,7 +317,8 @@ fn find_sites_with_celltype_stats(
     for cell_type in &cell_types {
         use crate::data::dna::DnaBaseCount;
 
-        let mut celltype_freq: fnv::FnvHashMap<i64, DnaBaseCount> = fnv::FnvHashMap::default();
+        let mut celltype_freq: rustc_hash::FxHashMap<i64, DnaBaseCount> =
+            rustc_hash::FxHashMap::default();
 
         for &pos in &all_positions {
             if let Some(cell_map) = wt_per_cell_map.stratified_frequency_at(pos) {
@@ -365,7 +366,7 @@ pub fn gather_conversion_stats(
     gff_map: &GffRecordMap,
     bam_file: &str,
     cell_membership: Option<&CellMembership>,
-    valid_cell_barcodes: Option<&fnv::FnvHashSet<CellBarcode>>,
+    valid_cell_barcodes: Option<&rustc_hash::FxHashSet<CellBarcode>>,
 ) -> anyhow::Result<Vec<(CellBarcode, BedWithGene, ConversionData)>> {
     let ndata = gene_sites.iter().map(|x| x.value().len()).sum::<usize>();
     let arc_ret = Arc::new(Mutex::new(Vec::with_capacity(ndata)));
@@ -537,7 +538,7 @@ fn collect_gene_conversion_stats(
     stat_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
 
     // Collect all positions we need to query and calculate minimal region bounds
-    let mut positions_to_track = std::collections::HashSet::new();
+    let mut positions_to_track = rustc_hash::FxHashSet::default();
     let (min_pos, max_pos) = sites.iter().fold((i64::MAX, i64::MIN), |(min, max), site| {
         match site {
             ConversionSite::M6A {
@@ -599,7 +600,7 @@ pub fn process_all_bam_files_to_backend(
     gene_sites: &HashMap<GeneId, Vec<ConversionSite>>,
     gff_map: &GffRecordMap,
     output_null_data: bool,
-    valid_cell_barcodes: Option<&fnv::FnvHashSet<CellBarcode>>,
+    valid_cell_barcodes: Option<&rustc_hash::FxHashSet<CellBarcode>>,
 ) -> anyhow::Result<()> {
     let membership = params.load_membership()?;
 
@@ -703,7 +704,7 @@ fn process_bam_to_backend(
     sites: &mut HashSet<Box<str>>,
     site_data_files: &mut Vec<Box<str>>,
     cell_membership: Option<&CellMembership>,
-    valid_cell_barcodes: Option<&fnv::FnvHashSet<CellBarcode>>,
+    valid_cell_barcodes: Option<&rustc_hash::FxHashSet<CellBarcode>>,
 ) -> anyhow::Result<()> {
     info!(
         "collecting data over {} sites from {} ...",
@@ -1015,15 +1016,15 @@ pub fn run_mixture_model(
         all_stats.iter().map(|(cb, _, _)| cb.clone()).collect();
     unique_cells.sort();
     unique_cells.dedup();
-    let cell_to_idx: fnv::FnvHashMap<CellBarcode, usize> = unique_cells
+    let cell_to_idx: rustc_hash::FxHashMap<CellBarcode, usize> = unique_cells
         .iter()
         .enumerate()
         .map(|(i, cb)| (cb.clone(), i))
         .collect();
 
     // Group observations by gene, converting to strand-aware relative position
-    let mut gene_obs: fnv::FnvHashMap<GeneId, Vec<(usize, f32, usize)>> =
-        fnv::FnvHashMap::default();
+    let mut gene_obs: rustc_hash::FxHashMap<GeneId, Vec<(usize, f32, usize)>> =
+        rustc_hash::FxHashMap::default();
     for (cb, bed, meth) in &all_stats {
         let cell_idx = cell_to_idx[cb];
         let count = meth.converted;
@@ -1099,7 +1100,8 @@ pub fn run_mixture_model(
             }
 
             // Build OLD→NEW component index mapping to remove gaps from empty components
-            let mut old_to_new: fnv::FnvHashMap<usize, usize> = fnv::FnvHashMap::default();
+            let mut old_to_new: rustc_hash::FxHashMap<usize, usize> =
+                rustc_hash::FxHashMap::default();
             for (new_idx, annotation) in local_annotations.iter().enumerate() {
                 old_to_new.insert(annotation.component_idx, new_idx);
             }
@@ -1155,8 +1157,10 @@ pub fn run_mixture_model(
                 let distal_component = distal_old_idx + 1;
 
                 // Per-cell: PDUI = distal_count / total_non_noise_count
-                let mut cell_total: fnv::FnvHashMap<usize, usize> = fnv::FnvHashMap::default();
-                let mut cell_distal: fnv::FnvHashMap<usize, usize> = fnv::FnvHashMap::default();
+                let mut cell_total: rustc_hash::FxHashMap<usize, usize> =
+                    rustc_hash::FxHashMap::default();
+                let mut cell_distal: rustc_hash::FxHashMap<usize, usize> =
+                    rustc_hash::FxHashMap::default();
                 for &(cell_idx, component, count) in &result.cell_component_counts {
                     if component == 0 {
                         continue;

@@ -13,7 +13,7 @@ use matrix_util::traits::MatOps;
 use nalgebra::DMatrix;
 use rand::prelude::*;
 use rand_distr::Normal;
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 /// Generate X (n × p) with block-LD structure.
 /// Within each block of `block_size` SNPs, pairwise r² ≈ 0.5.
@@ -128,6 +128,7 @@ fn test_cavi_fp_vs_num_components() -> Result<()> {
             tol: 1e-6,
             prior_variance: 1.0,
             estimate_residual_variance: true,
+            prior_weights: None,
         };
 
         let result = cavi_susie(&x_t, &y_t, &params)?;
@@ -190,7 +191,6 @@ fn test_sgvb_fp_vs_num_components() -> Result<()> {
             prior_vars: vec![0.2],
             elbo_window: 50,
             seed: 42,
-            ml_block_size: 50,
             sigma2_inf: 0.0,
             prior_alpha: 1.0,
         };

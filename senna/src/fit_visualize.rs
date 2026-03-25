@@ -465,7 +465,7 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
 /// Load latent file and validate/reorder to match data columns
 fn load_latent_file(path: &str, data_vec: &SparseIoVec) -> anyhow::Result<Mat> {
     use matrix_util::common_io::*;
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap as HashMap;
 
     let ext = file_ext(path)?;
     let MatWithNames {

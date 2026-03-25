@@ -7,8 +7,8 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::file::writer::{SerializedFileWriter, SerializedRowGroupWriter};
 use parquet::record::RowAccessor;
 use parquet::schema::types::Type as SchemaType;
+use rustc_hash::FxHashSet as HashSet;
 use std::any::TypeId;
-use std::collections::HashSet;
 use std::fs::File;
 use std::sync::Arc;
 
@@ -54,7 +54,7 @@ impl ParquetReader {
         let fields = metadata.file_metadata().schema().get_fields();
 
         let select_columns: HashSet<usize> = {
-            let mut indices = HashSet::new();
+            let mut indices: HashSet<usize> = Default::default();
 
             // Add indices from `select_columns_index` if provided
             if let Some(select) = select_columns_index {

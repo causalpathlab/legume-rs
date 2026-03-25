@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::random_projection::{binary_sort_columns, RandProjOps};
 
-use fnv::FnvHashMap as HashMap;
+use rustc_hash::FxHashMap as HashMap;
 type CscMat = nalgebra_sparse::CscMatrix<f32>;
 
 pub const DEFAULT_KNN: usize = 10;

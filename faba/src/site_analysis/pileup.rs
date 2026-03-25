@@ -2,9 +2,9 @@ use arrow::array::{Float32Array, Int64Array, StringArray, UInt64Array};
 use clap::Args;
 use data_beans::misc::resolve_backend_file;
 use data_beans::sparse_io::open_sparse_matrix;
-use fnv::FnvHashMap;
 use log::info;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use rustc_hash::FxHashMap;
 use std::io::Write;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -150,7 +150,7 @@ fn read_site_annotation(
     let mut gene_start: Option<i64> = None;
     let mut gene_stop: Option<i64> = None;
     let mut positions: Vec<(i64, f64)> = Vec::new();
-    let mut distinct_genes: FnvHashMap<Box<str>, usize> = FnvHashMap::default();
+    let mut distinct_genes: FxHashMap<Box<str>, usize> = FxHashMap::default();
 
     // Resolve signal column names once
     let signal_cols: &[&str] = match site_signal {
@@ -308,7 +308,7 @@ fn read_matrix_positions(
     let row_names = data.row_names()?;
 
     let mut matched_rows: Vec<(usize, &str, &str, i64)> = Vec::new();
-    let mut distinct_genes: FnvHashMap<&str, usize> = FnvHashMap::default();
+    let mut distinct_genes: FxHashMap<&str, usize> = FxHashMap::default();
 
     for (idx, name) in row_names.iter().enumerate() {
         if let Some((gene_part, chr, pos)) = parse_row_name(name) {
@@ -358,7 +358,7 @@ fn read_matrix_positions(
     let row_indices: Vec<usize> = matched_rows.iter().map(|(idx, _, _, _)| *idx).collect();
     let (_nrow, _ncol, triplets) = data.read_triplets_by_rows(row_indices)?;
 
-    let mut pos_agg: FnvHashMap<i64, PosAgg> = FnvHashMap::default();
+    let mut pos_agg: FxHashMap<i64, PosAgg> = FxHashMap::default();
 
     for &pos in &local_to_pos {
         pos_agg.entry(pos).or_insert(PosAgg { sum: 0.0, nnz: 0 });

@@ -1,9 +1,9 @@
 use crate::embed_common::*;
 use data_beans::sparse_data_visitors::VisitColumnsOps;
-use fnv::FnvHashMap;
 use matrix_util::common_io::read_lines;
 use matrix_util::ndarray_stat::RunningStatistics;
 use ndarray::Ix1;
+use rustc_hash::FxHashMap;
 
 /// Feature selection result with selected indices, names, and selection matrix
 #[derive(Clone)]
@@ -11,7 +11,7 @@ pub struct FeatureSelection {
     pub selected_indices: Vec<usize>, // Sorted indices of selected features
     pub selected_names: Vec<Box<str>>, // Names of selected features
     #[allow(dead_code)]
-    pub index_map: FnvHashMap<usize, usize>, // old_idx -> new_idx mapping
+    pub index_map: FxHashMap<usize, usize>, // old_idx -> new_idx mapping
     pub selection_matrix: CscMat,     // Sparse selection matrix: S[new_i, old_i] = 1.0
 }
 
@@ -208,7 +208,7 @@ fn load_feature_list_from_file(
     }
 
     // Create a map from feature name to index
-    let name_to_idx: FnvHashMap<&str, usize> = all_feature_names
+    let name_to_idx: FxHashMap<&str, usize> = all_feature_names
         .iter()
         .enumerate()
         .map(|(i, name)| (name.as_ref(), i))

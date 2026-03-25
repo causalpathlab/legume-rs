@@ -2,7 +2,7 @@ use crate::common::*;
 use crate::data::bam_io;
 use rust_htslib::bam::{self, ext::BamRecordExtensions};
 
-use fnv::FnvHashMap as HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 pub struct SplicedUnsplicedTriplets {
     pub spliced: Vec<(CellBarcode, Box<str>, f32)>,

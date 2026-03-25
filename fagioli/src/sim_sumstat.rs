@@ -21,10 +21,10 @@ use fagioli::summary_stats::{
 pub struct SimSumstatArgs {
     // ── Input ────────────────────────────────────────────────────────────
     #[arg(long, help = "PLINK BED file prefix (without .bed/.bim/.fam)")]
-    pub bed_prefix: String,
+    pub bed_prefix: Box<str>,
 
     #[arg(long, help = "Chromosome to simulate from")]
-    pub chromosome: String,
+    pub chromosome: Box<str>,
 
     #[arg(long, help = "Left genomic position bound (bp)")]
     pub left_bound: Option<u64>,
@@ -106,7 +106,7 @@ pub struct SimSumstatArgs {
         long_help = "External LD block file in BED format (chr, start, end).\n\
             If omitted, blocks are estimated from the genotype data via Nystrom + rSVD."
     )]
-    pub ld_block_file: Option<String>,
+    pub ld_block_file: Option<Box<str>>,
 
     #[arg(
         long,
@@ -130,7 +130,7 @@ pub struct SimSumstatArgs {
 
     // ── Output ───────────────────────────────────────────────────────────
     #[arg(short, long, help = "Output prefix for summary stats and LD files")]
-    pub output: String,
+    pub output: Box<str>,
 }
 
 const SEED_CONFOUNDERS: u64 = 100;

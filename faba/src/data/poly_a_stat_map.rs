@@ -2,11 +2,11 @@
 
 use crate::data::bam_io;
 use crate::data::polya_utils::*;
-use fnv::FnvHashMap as HashMap;
 use genomic_data::gff::GffRecord;
 use genomic_data::sam::*;
 use rust_htslib::bam::record::Cigar;
 use rust_htslib::bam::{self, ext::BamRecordExtensions};
+use rustc_hash::FxHashMap as HashMap;
 
 pub struct PolyASiteMap {
     position_to_count_with_cell: Option<HashMap<i64, HashMap<CellBarcode, usize>>>,
