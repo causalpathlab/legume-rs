@@ -80,7 +80,7 @@ pub struct IndexedTopicArgs {
     #[arg(
         long,
         value_enum,
-        default_value = "progressive",
+        default_value = "mixed",
         help = "Multi-level training schedule"
     )]
     level_schedule: LevelSchedule,
