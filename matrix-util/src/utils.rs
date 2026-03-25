@@ -1,6 +1,6 @@
-use fnv::FnvHashMap as HashMap;
 use rand::prelude::SliceRandom;
 use rayon::prelude::*;
+use rustc_hash::FxHashMap as HashMap;
 use std::hash::Hash;
 
 /// partition membership vector into groups of indexes

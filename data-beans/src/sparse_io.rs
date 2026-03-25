@@ -19,7 +19,7 @@ use log::info;
 use matrix_util::mtx_io::*;
 use matrix_util::traits::*;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
@@ -810,7 +810,7 @@ pub fn take_subset_indices_names(
     ntot: usize,
     old_names: Vec<Box<str>>,
 ) -> (HashMap<u64, u64>, Vec<Box<str>>) {
-    let mut old2new: HashMap<u64, u64> = HashMap::new();
+    let mut old2new: HashMap<u64, u64> = Default::default();
     let mut new2old = vec![];
     debug_assert!(ntot == old_names.len());
     let mut k = 0_u64;

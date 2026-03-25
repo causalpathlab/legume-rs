@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use anyhow::{bail, Result};
 use log::info;
@@ -22,9 +22,9 @@ pub fn read_cell_annotations(path: &str) -> Result<CellAnnotations> {
 
     let parsed = read_lines_of_words_delim(path, &['\t', ',', ' '], 0)?;
 
-    let mut individual_to_idx: HashMap<Box<str>, usize> = HashMap::new();
+    let mut individual_to_idx: HashMap<Box<str>, usize> = Default::default();
     let mut individual_ids: Vec<Box<str>> = Vec::new();
-    let mut cell_to_individual: HashMap<Box<str>, usize> = HashMap::new();
+    let mut cell_to_individual: HashMap<Box<str>, usize> = Default::default();
 
     for words in &parsed.lines {
         if words.len() < 2 {
@@ -62,9 +62,9 @@ pub fn read_cell_annotations(path: &str) -> Result<CellAnnotations> {
 pub fn infer_cell_annotations(column_names: &[Box<str>]) -> CellAnnotations {
     info!("Inferring individuals from cell names (barcode@indiv)");
 
-    let mut individual_to_idx: HashMap<Box<str>, usize> = HashMap::new();
+    let mut individual_to_idx: HashMap<Box<str>, usize> = Default::default();
     let mut individual_ids: Vec<Box<str>> = Vec::new();
-    let mut cell_to_individual: HashMap<Box<str>, usize> = HashMap::new();
+    let mut cell_to_individual: HashMap<Box<str>, usize> = Default::default();
 
     for cell_name in column_names {
         let indiv: Box<str> = if let Some(pos) = cell_name.rfind('@') {
@@ -100,9 +100,9 @@ pub fn build_onehot_membership(path: &str, column_names: &[Box<str>]) -> Result<
 
     let parsed = read_lines_of_words_delim(path, &['\t', ',', ' '], 0)?;
 
-    let mut celltype_to_idx: HashMap<Box<str>, usize> = HashMap::new();
+    let mut celltype_to_idx: HashMap<Box<str>, usize> = Default::default();
     let mut cell_type_names: Vec<Box<str>> = Vec::new();
-    let mut cell_to_ct: HashMap<Box<str>, usize> = HashMap::new();
+    let mut cell_to_ct: HashMap<Box<str>, usize> = Default::default();
 
     for words in &parsed.lines {
         if words.len() < 3 {

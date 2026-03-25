@@ -30,6 +30,7 @@ indicatif = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 
+rustc-hash = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
 parquet = { workspace = true }

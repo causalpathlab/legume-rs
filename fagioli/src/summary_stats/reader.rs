@@ -2,7 +2,7 @@ use anyhow::Result;
 use log::{info, warn};
 use nalgebra::DMatrix;
 use rust_htslib::bgzf;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::io::{BufRead, BufReader};
 
 use crate::util::{alleles_match, chr_stripped, AlleleMatch};
@@ -121,7 +121,7 @@ pub fn read_sumstat_zscores_with_n(
     let has_alleles = ref_allele1.len() == m && ref_allele2.len() == m;
 
     // Build chr+pos lookup: (chr_stripped, position) → ref index
-    let mut pos_to_idx: HashMap<(&str, u64), usize> = HashMap::new();
+    let mut pos_to_idx: HashMap<(&str, u64), usize> = Default::default();
     if has_pos {
         for i in 0..m {
             let key = (chr_stripped(&ref_chromosomes[i]), ref_positions[i]);
@@ -276,7 +276,7 @@ pub fn read_sumstat_zscores_with_n(
     let n_unique_snps = records
         .iter()
         .map(|(s, _, _)| s)
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<rustc_hash::FxHashSet<_>>()
         .len();
 
     info!(

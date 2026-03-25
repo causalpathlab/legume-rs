@@ -2,7 +2,7 @@ use crate::standard_local_moving::StandardLocalMoving;
 use crate::{Clustering, Graph, Network};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 /// Perform the Louvain clustering algorithm
 pub struct Louvain {
@@ -64,7 +64,7 @@ impl Louvain {
         for _ in 0..n_nodes {
             node_indices.push(graph.add_node(1.0));
         }
-        let mut seen = vec![HashSet::<u32>::new(); n_nodes];
+        let mut seen: Vec<HashSet<u32>> = vec![Default::default(); n_nodes];
         let mut node_weights = vec![0.0; n_nodes];
         for (i, j) in adjacency {
             let (i, j) = if i < j { (i, j) } else { (j, i) };

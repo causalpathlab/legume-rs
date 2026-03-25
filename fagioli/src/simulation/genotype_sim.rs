@@ -24,7 +24,7 @@ pub struct WrightFisherParams {
     /// Maximum initial minor allele frequency
     pub maf_max: f32,
     /// Chromosome label
-    pub chromosome: String,
+    pub chromosome: Box<str>,
     /// Random seed
     pub seed: u64,
 }
@@ -142,7 +142,7 @@ pub fn simulate_wright_fisher(params: &WrightFisherParams) -> Result<GenotypeMat
         genotypes: filtered,
         individual_ids,
         snp_ids,
-        chromosomes: vec![params.chromosome.clone().into(); m_kept],
+        chromosomes: vec![params.chromosome.clone(); m_kept],
         positions,
         allele1: vec!["A".into(); m_kept],
         allele2: vec!["T".into(); m_kept],
@@ -227,7 +227,7 @@ mod tests {
             snp_spacing: 1000,
             maf_min: 0.05,
             maf_max: 0.5,
-            chromosome: "1".to_string(),
+            chromosome: "1".into(),
             seed: 42,
         };
 
@@ -264,7 +264,7 @@ mod tests {
             snp_spacing: 1000,
             maf_min: 0.1,
             maf_max: 0.5,
-            chromosome: "1".to_string(),
+            chromosome: "1".into(),
             seed: 123,
         };
 

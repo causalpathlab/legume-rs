@@ -13,7 +13,7 @@ pub use matrix_util::dmatrix_util::*;
 pub use matrix_util::traits::*;
 pub use rayon::prelude::*;
 
-pub use std::collections::{HashMap, HashSet};
+pub use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub use std::sync::{Arc, LazyLock, Mutex};
 

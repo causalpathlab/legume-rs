@@ -2,7 +2,7 @@ use crate::common::*;
 
 use data_beans_alg::collapse_data::CollapsingOps;
 use data_beans_alg::random_projection::RandProjOps;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 pub trait RandPartitionOps {
     fn assign_pseudobulk_individuals<T>(
@@ -72,7 +72,7 @@ impl RandPartitionOps for SparseIoVec {
         );
 
         // Build individual name -> row index mapping
-        let mut indv_to_row: HashMap<String, usize> = HashMap::new();
+        let mut indv_to_row: HashMap<String, usize> = Default::default();
         for i in 0..confounder_v.nrows() {
             indv_to_row.insert(i.to_string(), i);
         }

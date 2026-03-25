@@ -1,7 +1,7 @@
 // #![allow(dead_code)]
 use crate::common::*;
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::ops::Div;
 
 use clap::Parser;
@@ -200,8 +200,7 @@ impl GlmSimulator {
         indv_ncells_triplets.par_sort_by_key(|&(indv, _, _)| indv);
 
         let mut cumsum = 0_u64;
-        let mut indv_offset: HashMap<usize, u64> =
-            HashMap::with_capacity(indv_ncells_triplets.len());
+        let mut indv_offset: HashMap<usize, u64> = Default::default();
         for &(indv, ncells, _) in &indv_ncells_triplets {
             indv_offset.insert(indv, cumsum);
             cumsum += ncells as u64;

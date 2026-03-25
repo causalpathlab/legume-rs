@@ -1,6 +1,6 @@
-use fnv::FnvHashSet;
 use genomic_data::sam::Strand;
 use log::info;
+use rustc_hash::FxHashSet;
 
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::RowAccessor;
@@ -110,7 +110,7 @@ pub fn read_sites(site_file: &str) -> anyhow::Result<Vec<GenomicSite>> {
     }
 
     // Deduplicate by (chr, position)
-    let mut seen = FnvHashSet::default();
+    let mut seen = FxHashSet::default();
     sites.retain(|s| seen.insert((s.chr.clone(), s.position)));
 
     info!("loaded {} unique sites from {}", sites.len(), site_file);

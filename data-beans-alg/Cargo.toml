@@ -26,7 +26,7 @@ nalgebra = { workspace = true }
 nalgebra-sparse = { workspace = true }
 approx = { workspace = true }
 
-fnv = { workspace = true }
+rustc-hash = { workspace = true }
 special = { workspace = true }
 indicatif = { workspace = true }
 env_logger = { workspace = true }

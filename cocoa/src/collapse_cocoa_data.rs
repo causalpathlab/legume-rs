@@ -2,7 +2,7 @@ use crate::common::*;
 use crate::stat::*;
 use matrix_util::utils::partition_by_membership;
 use rayon::iter::{ParallelBridge, ParallelIterator};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::sync::{Arc, Mutex};
 
 pub struct CocoaCollapseIn<'a> {
@@ -363,7 +363,7 @@ fn replay_one_sample(
 
         // Filter matches: keep only those NOT from same-exposure batches
         let y1_to_y0: HashMap<usize, Vec<usize>> = {
-            let mut map: HashMap<usize, Vec<usize>> = HashMap::new();
+            let mut map: HashMap<usize, Vec<usize>> = Default::default();
             for (a, &src) in indv_cache.matched_source.iter().enumerate() {
                 if !same_exposure.contains(&indv_cache.matched_batch[a]) {
                     map.entry(src).or_default().push(a);

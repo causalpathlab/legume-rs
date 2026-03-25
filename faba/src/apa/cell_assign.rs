@@ -1,8 +1,8 @@
 use crate::apa::em::EmResult;
 use crate::apa::fragment::FragmentRecord;
 use crate::apa::utr_region::UtrRegion;
-use fnv::FnvHashMap as HashMap;
 use genomic_data::sam::CellBarcode;
+use rustc_hash::FxHashMap as HashMap;
 
 /// A cell-level count at a specific pA site.
 pub struct CellSiteCount {

@@ -3,8 +3,8 @@
 //! Supports reading membership files (TSV/CSV) and matching with prefix support.
 
 use crate::common_io::{read_lines_of_words_delim, ReadLinesOut};
-use fnv::FnvHashMap as HashMap;
 use log::info;
+use rustc_hash::FxHashMap as HashMap;
 
 /// A membership mapping from keys to groups/categories.
 ///

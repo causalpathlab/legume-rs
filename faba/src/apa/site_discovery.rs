@@ -1,6 +1,6 @@
 use crate::apa::fragment::FragmentRecord;
 use crate::apa::kernel_smooth::*;
-use fnv::FnvHashMap as HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// Discover candidate pA sites from junction reads in fragment records.
 /// Returns sorted positions (UTR-relative) with counts above min_coverage.

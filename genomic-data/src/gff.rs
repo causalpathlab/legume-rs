@@ -37,7 +37,7 @@ pub fn build_gene_map(
     records: &[GffRecord],
     feature_type: Option<&FeatureType>,
 ) -> anyhow::Result<HashMap<GeneId, GffRecord>> {
-    let ret: HashMap<GeneId, GffRecord> = HashMap::new();
+    let ret: HashMap<GeneId, GffRecord> = Default::default();
 
     for new_rec in records.iter() {
         let gene_id = &new_rec.gene_id;
@@ -67,7 +67,7 @@ pub fn build_codon_map(
     records: &[GffRecord],
     feature_type: &FeatureType,
 ) -> anyhow::Result<HashMap<GeneId, GffRecord>> {
-    let ret: HashMap<GeneId, GffRecord> = HashMap::new();
+    let ret: HashMap<GeneId, GffRecord> = Default::default();
 
     let is_start_codon = *feature_type == FeatureType::StartCodon;
 
@@ -169,7 +169,7 @@ fn build_cds_map(
     start_codons: &HashMap<GeneId, GffRecord>,
     stop_codons: &HashMap<GeneId, GffRecord>,
 ) -> HashMap<GeneId, GffRecord> {
-    let cds: HashMap<GeneId, GffRecord> = HashMap::new();
+    let cds: HashMap<GeneId, GffRecord> = Default::default();
 
     // First, collect existing CDS annotations
     for rec in records.iter() {
@@ -202,8 +202,8 @@ fn build_utr_maps(
     start_codons: &HashMap<GeneId, GffRecord>,
     stop_codons: &HashMap<GeneId, GffRecord>,
 ) -> (HashMap<GeneId, GffRecord>, HashMap<GeneId, GffRecord>) {
-    let five_prime_utr: HashMap<GeneId, GffRecord> = HashMap::new();
-    let three_prime_utr: HashMap<GeneId, GffRecord> = HashMap::new();
+    let five_prime_utr: HashMap<GeneId, GffRecord> = Default::default();
+    let three_prime_utr: HashMap<GeneId, GffRecord> = Default::default();
 
     for rec in records.iter() {
         let gene_id = &rec.gene_id;
@@ -295,7 +295,7 @@ impl GffRecordMap {
     }
 
     pub fn count_gene_types(&self) -> HashMap<GeneType, usize> {
-        let gene_type_counts = HashMap::new();
+        let gene_type_counts: HashMap<GeneType, usize> = Default::default();
 
         self.records.par_iter().for_each(|entry| {
             let record = entry.value();
@@ -308,7 +308,7 @@ impl GffRecordMap {
     }
 
     pub fn count_feature_types(&self) -> HashMap<FeatureType, usize> {
-        let feature_type_counts = HashMap::new();
+        let feature_type_counts: HashMap<FeatureType, usize> = Default::default();
 
         self.records.par_iter().for_each(|entry| {
             let record = entry.value();
@@ -344,7 +344,7 @@ impl GffRecordMap {
     /// Create a new empty `GffRecordMap`
     pub fn new() -> Self {
         Self {
-            records: HashMap::new(),
+            records: Default::default(),
         }
     }
 
@@ -519,7 +519,7 @@ pub struct GffRecord {
 /// overlapping or adjacent. Only records with `FeatureType::Exon` are
 /// considered.
 pub fn build_exon_intervals(records: &[GffRecord]) -> HashMap<GeneId, Vec<(i64, i64)>> {
-    let map: HashMap<GeneId, Vec<(i64, i64)>> = HashMap::new();
+    let map: HashMap<GeneId, Vec<(i64, i64)>> = Default::default();
 
     for rec in records.iter() {
         if rec.feature_type != FeatureType::Exon {

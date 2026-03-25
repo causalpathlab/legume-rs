@@ -374,7 +374,7 @@ fn fused_pair_delta_visitor(
             .map(|(&g, &v)| (g, v.ln_1p()))
             .collect();
 
-        let mut left_visited = HashSet::new();
+        let mut left_visited: HashSet<usize> = Default::default();
 
         for (&gene, &val) in left_col.row_indices().iter().zip(left_col.values().iter()) {
             let log_left = val.ln_1p();
@@ -463,7 +463,7 @@ fn nystrom_pair_delta_visitor(
             .collect();
 
         let mut proj_k = DVec::zeros(n_topics);
-        let mut left_visited = HashSet::new();
+        let mut left_visited: HashSet<usize> = Default::default();
 
         for (&gene, &val) in left_col.row_indices().iter().zip(left_col.values().iter()) {
             let log_left = val.ln_1p();

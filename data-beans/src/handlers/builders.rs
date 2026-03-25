@@ -702,13 +702,13 @@ pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result
     info!("Read {} barcodes, {} features", barcodes.len(), n_features);
 
     // 3. Parse library_info and filter by library type
-    let valid_libraries: std::collections::HashSet<u16> = {
+    let valid_libraries: rustc_hash::FxHashSet<u16> = {
         let lib_info_ds = file.dataset("library_info")?;
         let lib_info_raw = read_hdf5_strings(lib_info_ds)?;
         let lib_info_json: String = lib_info_raw.iter().map(|s| s.as_ref()).collect();
         let lib_entries: Vec<serde_json::Value> = serde_json::from_str(&lib_info_json)?;
 
-        let mut valid = std::collections::HashSet::new();
+        let mut valid = rustc_hash::FxHashSet::default();
         for entry in &lib_entries {
             if let (Some(lib_id), Some(lib_type)) = (
                 entry.get("library_id").and_then(|v| v.as_u64()),
@@ -729,9 +729,9 @@ pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result
     };
 
     // 4. Read pass_filter if needed
-    let valid_cells: Option<std::collections::HashSet<(u64, u16)>> = if !args.no_pass_filter {
+    let valid_cells: Option<rustc_hash::FxHashSet<(u64, u16)>> = if !args.no_pass_filter {
         let pf = file.dataset("barcode_info/pass_filter")?.read_2d::<u64>()?;
-        let mut cells = std::collections::HashSet::new();
+        let mut cells = rustc_hash::FxHashSet::default();
         for row in pf.rows() {
             let bc_idx = row[0];
             let lib_idx = row[1] as u16;
@@ -748,10 +748,11 @@ pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result
 
     // 5. Filter molecules and aggregate into triplets
     //    Column key = (barcode_idx, gem_group)
-    use std::collections::{BTreeSet, HashMap};
+    use rustc_hash::FxHashMap as HashMap;
+    use std::collections::BTreeSet;
 
     let mut col_keys = BTreeSet::new();
-    let mut triplet_map: HashMap<(u64, u64), f32> = HashMap::new();
+    let mut triplet_map: HashMap<(u64, u64), f32> = Default::default();
 
     for i in 0..n_molecules {
         // Filter by library type

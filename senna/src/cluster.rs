@@ -463,11 +463,11 @@ mod tests {
 
         // Each ground-truth group should NOT share labels with other groups.
         // Collect the set of labels for each ground-truth group.
-        let mut group_labels: Vec<std::collections::HashSet<usize>> = Vec::new();
+        let mut group_labels: Vec<rustc_hash::FxHashSet<usize>> = Vec::new();
         for c in 0..TEST_N_GROUPS {
             let start = c * TEST_N_PER_CLUSTER;
             let end = start + TEST_N_PER_CLUSTER;
-            let labels: std::collections::HashSet<usize> =
+            let labels: rustc_hash::FxHashSet<usize> =
                 result.labels[start..end].iter().copied().collect();
             group_labels.push(labels);
         }

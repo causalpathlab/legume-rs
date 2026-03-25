@@ -44,5 +44,5 @@ indicatif = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 dashmap = { workspace = true }
-fnv = { workspace = true }
+rustc-hash = { workspace = true }
 zip = { workspace = true }

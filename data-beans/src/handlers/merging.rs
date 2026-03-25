@@ -9,7 +9,7 @@ use matrix_util::common_io::*;
 use matrix_util::mtx_io;
 use rayon::prelude::*;
 
-use fnv::FnvHashMap as HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 // Import the argument structs and run_squeeze function from main
 use crate::run_squeeze;
@@ -454,7 +454,7 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
 /// If basenames are unique, use them as-is
 /// If duplicates exist, add numeric suffixes
 pub fn generate_unique_batch_names(files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap as HashMap;
 
     // Extract basenames
     let basenames: Vec<_> = files
@@ -463,13 +463,13 @@ pub fn generate_unique_batch_names(files: &[Box<str>]) -> anyhow::Result<Vec<Box
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     // Count occurrences of each basename
-    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut counts: HashMap<&str, usize> = Default::default();
     for name in &basenames {
         *counts.entry(name.as_ref()).or_insert(0) += 1;
     }
 
     // Generate unique names
-    let mut name_counters: HashMap<&str, usize> = HashMap::new();
+    let mut name_counters: HashMap<&str, usize> = Default::default();
     let unique_names: Vec<Box<str>> = basenames
         .iter()
         .map(|name| {
@@ -495,8 +495,8 @@ pub fn find_aligned_rows(
     data_vec: &[&dyn SparseIo<IndexIter = Vec<usize>>],
     mode: crate::RowAlignMode,
 ) -> anyhow::Result<Vec<Box<str>>> {
-    use fnv::FnvHashMap as HashMap;
     use rayon::prelude::*;
+    use rustc_hash::FxHashMap as HashMap;
 
     let fully_shared = data_vec.len();
     let mut row_counts: HashMap<Box<str>, usize> = HashMap::default();

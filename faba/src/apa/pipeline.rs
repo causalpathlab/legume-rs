@@ -289,14 +289,14 @@ where
     let combined_data = stats
         .par_iter()
         .fold(
-            fnv::FnvHashMap::<(CellBarcode, T), usize>::default,
+            rustc_hash::FxHashMap::<(CellBarcode, T), usize>::default,
             |mut acc, (cb, bed, count)| {
                 let key = (cb.clone(), feature_key_func(bed));
                 *acc.entry(key).or_default() += count;
                 acc
             },
         )
-        .reduce(fnv::FnvHashMap::default, |mut a, b| {
+        .reduce(rustc_hash::FxHashMap::default, |mut a, b| {
             for (k, v) in b {
                 *a.entry(k).or_default() += v;
             }
@@ -487,11 +487,11 @@ fn load_utrs(args: &CountApaArgs) -> anyhow::Result<Vec<UtrRegion>> {
 }
 
 /// Load pre-identified sites from a BED file.
-fn load_pre_sites(path: &str) -> anyhow::Result<fnv::FnvHashMap<Box<str>, Vec<f32>>> {
+fn load_pre_sites(path: &str) -> anyhow::Result<rustc_hash::FxHashMap<Box<str>, Vec<f32>>> {
     use std::io::BufRead;
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
-    let mut sites: fnv::FnvHashMap<Box<str>, Vec<f32>> = fnv::FnvHashMap::default();
+    let mut sites: rustc_hash::FxHashMap<Box<str>, Vec<f32>> = rustc_hash::FxHashMap::default();
 
     for line in reader.lines() {
         let line = line?;
@@ -518,7 +518,7 @@ fn load_pre_sites(path: &str) -> anyhow::Result<fnv::FnvHashMap<Box<str>, Vec<f3
 fn process_utr(
     utr: &UtrRegion,
     bam_files: &[Box<str>],
-    pre_sites: Option<&fnv::FnvHashMap<Box<str>, Vec<f32>>>,
+    pre_sites: Option<&rustc_hash::FxHashMap<Box<str>, Vec<f32>>>,
     args: &CountApaArgs,
 ) -> anyhow::Result<(Vec<CellSiteCount>, Vec<ApaSiteAnnotation>)> {
     let mut all_fragments = Vec::new();
@@ -611,16 +611,16 @@ fn compute_and_write_pdui(
     primary_batch_name: &str,
 ) -> anyhow::Result<()> {
     use crate::apa::pdui::compute_pdui;
-    use fnv::FnvHashMap;
+    use rustc_hash::FxHashMap;
 
     info!("Computing PDUI...");
 
     // Build a strand lookup from UTRs by gene name
-    let strand_by_gene: FnvHashMap<Box<str>, genomic_data::sam::Strand> =
+    let strand_by_gene: FxHashMap<Box<str>, genomic_data::sam::Strand> =
         utrs.iter().map(|u| (u.name.clone(), u.strand)).collect();
 
     // Group annotations and counts by gene_name
-    let mut annots_by_gene: FnvHashMap<Box<str>, Vec<ApaSiteAnnotation>> = FnvHashMap::default();
+    let mut annots_by_gene: FxHashMap<Box<str>, Vec<ApaSiteAnnotation>> = FxHashMap::default();
     for a in all_annotations {
         annots_by_gene
             .entry(a.gene_name.clone())
@@ -628,7 +628,7 @@ fn compute_and_write_pdui(
             .push(a.clone());
     }
 
-    let mut counts_by_gene: FnvHashMap<Box<str>, Vec<&CellSiteCount>> = FnvHashMap::default();
+    let mut counts_by_gene: FxHashMap<Box<str>, Vec<&CellSiteCount>> = FxHashMap::default();
     for c in all_counts {
         // Extract gene name from site_id (format: "GENE/pA/k")
         let gene_name = c

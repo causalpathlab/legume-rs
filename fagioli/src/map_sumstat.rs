@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 use anyhow::{ensure, Result};
 use clap::Args;
@@ -24,13 +24,13 @@ use fagioli::summary_stats::{
 pub struct MapSumstatArgs {
     // ── Input ────────────────────────────────────────────────────────────
     #[arg(long, help = "Summary statistics file (.sumstats.bed.gz)")]
-    pub sumstat_file: String,
+    pub sumstat_file: Box<str>,
 
     #[arg(long, help = "PLINK BED file prefix (without .bed/.bim/.fam)")]
-    pub bed_prefix: String,
+    pub bed_prefix: Box<str>,
 
     #[arg(long, help = "Chromosome to analyze")]
-    pub chromosome: String,
+    pub chromosome: Box<str>,
 
     #[arg(long, help = "Left genomic position bound (bp)")]
     pub left_bound: Option<u64>,
@@ -55,7 +55,7 @@ pub struct MapSumstatArgs {
               --keep samples.txt\n  \
               --keep ind1,ind2,ind3"
     )]
-    pub keep: Option<String>,
+    pub keep: Option<Box<str>>,
 
     #[arg(
         long,
@@ -70,7 +70,7 @@ pub struct MapSumstatArgs {
               --remove samples.txt\n  \
               --remove ind1,ind2,ind3"
     )]
-    pub remove: Option<String>,
+    pub remove: Option<Box<str>>,
 
     // ── LD block parameters ──────────────────────────────────────────────
     #[arg(
@@ -79,7 +79,7 @@ pub struct MapSumstatArgs {
         long_help = "External LD block file in BED format (chr, start, end).\n\
             If omitted, blocks are estimated from the genotype data via Nystrom + rSVD."
     )]
-    pub ld_block_file: Option<String>,
+    pub ld_block_file: Option<Box<str>>,
 
     #[arg(
         long,
@@ -117,9 +117,9 @@ pub struct MapSumstatArgs {
     #[arg(
         long,
         default_value = "susie",
-        help = "Fine-mapping model: susie, bisusie, multilevel-susie"
+        help = "Fine-mapping model: susie, bisusie"
     )]
-    pub model: String,
+    pub model: Box<str>,
 
     #[arg(
         long,
@@ -140,7 +140,7 @@ pub struct MapSumstatArgs {
               --prior-var 0.05,0.1,0.2,0.3,0.5\n  \
               (empty) = adaptive from LDSC h²"
     )]
-    pub prior_var: String,
+    pub prior_var: Box<str>,
 
     // ── SGVB training ────────────────────────────────────────────────────
     #[arg(
@@ -169,13 +169,6 @@ pub struct MapSumstatArgs {
         help = "ELBO values to average for convergence"
     )]
     pub elbo_window: usize,
-
-    #[arg(
-        long,
-        default_value = "50",
-        help = "Block size for MultiLevelSusieVar tree"
-    )]
-    pub ml_block_size: usize,
 
     #[arg(
         long,
@@ -237,7 +230,7 @@ pub struct MapSumstatArgs {
     pub seed: u64,
 
     #[arg(short, long, help = "Output prefix for results and parameters")]
-    pub output: String,
+    pub output: Box<str>,
 }
 
 pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
@@ -443,7 +436,6 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         prior_vars,
         elbo_window: args.elbo_window,
         seed: args.seed,
-        ml_block_size: args.ml_block_size,
         sigma2_inf: args.sigma2_inf,
         prior_alpha: args.prior_alpha,
     };
@@ -677,19 +669,20 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
 /// If the value contains a comma or doesn't point to an existing file,
 /// it is treated as a comma-separated list of IIDs.
 /// Otherwise, the file is read line-by-line (FID IID or just IID per line).
-fn parse_individual_ids(value: &str) -> Result<HashSet<String>> {
+fn parse_individual_ids(value: &str) -> Result<HashSet<Box<str>>> {
     if value.contains(',') || !std::path::Path::new(value).is_file() {
-        let ids: HashSet<String> = value
+        let ids: HashSet<Box<str>> = value
             .split(',')
-            .map(|s| s.trim().to_string())
+            .map(|s| s.trim())
             .filter(|s| !s.is_empty())
+            .map(Box::from)
             .collect();
         ensure!(!ids.is_empty(), "Empty individual ID list");
         info!("Parsed {} individual IDs from command line", ids.len());
         Ok(ids)
     } else {
         let lines = read_lines(value)?;
-        let mut ids = HashSet::new();
+        let mut ids: HashSet<Box<str>> = Default::default();
         for line in &lines {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -703,7 +696,7 @@ fn parse_individual_ids(value: &str) -> Result<HashSet<String>> {
             } else {
                 fields[0]
             };
-            ids.insert(iid.to_string());
+            ids.insert(iid.into());
         }
         ensure!(!ids.is_empty(), "No individual IDs found in {}", value);
         info!("Read {} individual IDs from {}", ids.len(), value);

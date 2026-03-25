@@ -6,8 +6,8 @@ use genomic_data::sam::Strand;
 pub fn build_atoi_mask(
     sites: &DashMap<GeneId, Vec<ConversionSite>>,
     gff_map: &GffRecordMap,
-) -> fnv::FnvHashSet<(Box<str>, i64)> {
-    let mut mask = fnv::FnvHashSet::default();
+) -> rustc_hash::FxHashSet<(Box<str>, i64)> {
+    let mut mask = rustc_hash::FxHashSet::default();
     for entry in sites.iter() {
         let gene_id = entry.key();
         let sites = entry.value();
@@ -28,7 +28,7 @@ pub fn build_atoi_mask(
 /// For backward strand GTY: positions [conv, conv+1, conv+2] = (G, T, Y)
 pub fn filter_m6a_by_atoi_mask(
     gene_sites: &DashMap<GeneId, Vec<ConversionSite>>,
-    atoi_mask: &fnv::FnvHashSet<(Box<str>, i64)>,
+    atoi_mask: &rustc_hash::FxHashSet<(Box<str>, i64)>,
     gff_map: &GffRecordMap,
 ) {
     if atoi_mask.is_empty() {
@@ -73,7 +73,7 @@ pub fn filter_m6a_by_atoi_mask(
 /// Each poly-A site is a single position, so just check direct (chr, pos) membership.
 pub fn filter_polya_by_atoi_mask(
     gene_sites: &DashMap<GeneId, Vec<i64>>,
-    atoi_mask: &fnv::FnvHashSet<(Box<str>, i64)>,
+    atoi_mask: &rustc_hash::FxHashSet<(Box<str>, i64)>,
     gff_map: &GffRecordMap,
 ) {
     if atoi_mask.is_empty() {

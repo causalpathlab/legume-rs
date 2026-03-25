@@ -138,7 +138,7 @@ fn sample_gene_effects(
 
     // Shared causal SNPs
     let shared_sampled = rand::seq::index::sample(&mut rng, cis_snps.len(), num_shared);
-    let shared_set: std::collections::HashSet<usize> = shared_sampled.iter().collect();
+    let shared_set: rustc_hash::FxHashSet<usize> = shared_sampled.iter().collect();
 
     let (shared_causal_indices, shared_effect_sizes) = if num_shared > 0 {
         let effect_std = (shared_var / (num_cell_types as f32 * num_shared as f32)).sqrt();

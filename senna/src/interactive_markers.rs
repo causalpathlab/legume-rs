@@ -3,9 +3,9 @@
 //! This module provides an iterative human-in-the-loop workflow for
 //! discovering and adding marker genes based on topic-celltype associations.
 
-use fnv::FnvHashMap as HashMap;
-use fnv::FnvHashSet as HashSet;
 use matrix_util::common_io::open_buf_reader;
+use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::FxHashSet as HashSet;
 use std::io::{self, BufRead, Write};
 
 use crate::embed_common::Mat;

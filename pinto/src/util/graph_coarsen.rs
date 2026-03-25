@@ -119,7 +119,7 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
     let mut uf = UnionFind::new(n);
 
     // Build adjacency lists
-    let mut adj: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    let mut adj: Vec<HashSet<usize>> = vec![Default::default(); n];
     for &(i, j) in &graph.edges {
         adj[i].insert(j);
         adj[j].insert(i);
@@ -239,7 +239,7 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
 /// Each pair (i,j) maps to a canonical sample key `(min(label[i], label[j]), max(...))`.
 /// Returns `(pair_to_sample, n_samples)`.
 pub fn cell_labels_to_pair_samples(cell_labels: &[usize], pairs: &[Pair]) -> (Vec<usize>, usize) {
-    let mut pair_key_to_sample: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut pair_key_to_sample: HashMap<(usize, usize), usize> = Default::default();
     let mut next_sample = 0usize;
 
     let pair_to_sample: Vec<usize> = pairs
@@ -327,7 +327,7 @@ pub fn graph_coarsen_multilevel(
             merge_idx += 1;
         }
         // Compact labels
-        let mut rep_to_label: HashMap<usize, usize> = HashMap::new();
+        let mut rep_to_label: HashMap<usize, usize> = Default::default();
         let mut next_label = 0usize;
         let cell_labels: Vec<usize> = (0..n)
             .map(|i| {

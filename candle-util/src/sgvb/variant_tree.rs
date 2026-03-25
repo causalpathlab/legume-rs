@@ -359,7 +359,7 @@ mod tests {
         // Every variant should have a unique path at the leaf level
         let tree = VariantTree::regular(25, 5);
         let leaf = tree.levels.last().unwrap();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = rustc_hash::FxHashSet::default();
         for j in 0..25 {
             assert!(
                 seen.insert(leaf.flat_path_indices[j]),

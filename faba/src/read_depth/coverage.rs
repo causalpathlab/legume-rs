@@ -2,8 +2,8 @@ use crate::data::bam_io;
 use genomic_data::sam::CellBarcode;
 
 use coitrees::{COITree, Interval, IntervalTree};
-use fnv::FnvHashMap as HashMap;
 use rust_htslib::bam::{self, ext::BamRecordExtensions};
+use rustc_hash::FxHashMap as HashMap;
 
 /// Read coverage tracker that organizes genomic intervals by cell barcode and chromosome.
 ///

@@ -36,13 +36,13 @@ pub struct MetageneArgs {
 /// Per-chromosome sorted interval index for mapping positions to gene features.
 struct FeatureIndex {
     /// (start, stop, strand) sorted by start within each chromosome
-    intervals: fnv::FnvHashMap<Box<str>, Vec<(i64, i64, Strand)>>,
+    intervals: rustc_hash::FxHashMap<Box<str>, Vec<(i64, i64, Strand)>>,
 }
 
 impl FeatureIndex {
     fn from_feature_map(map: &HashMap<GeneId, GffRecord>) -> Self {
-        let mut by_chr: fnv::FnvHashMap<Box<str>, Vec<(i64, i64, Strand)>> =
-            fnv::FnvHashMap::default();
+        let mut by_chr: rustc_hash::FxHashMap<Box<str>, Vec<(i64, i64, Strand)>> =
+            rustc_hash::FxHashMap::default();
         for entry in map.iter() {
             let rec = entry.value();
             by_chr

@@ -5,7 +5,7 @@ use candle_util::sgvb::cavi_susie::{cavi_susie, CaviSusieParams};
 use candle_util::sgvb::variant_tree::VariantTree;
 use candle_util::sgvb::VariationalDistribution;
 use matrix_util::traits::ConvertMatOps;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum LinkModel {
@@ -90,16 +90,16 @@ impl TreeLevelMaps {
             let mc = tree_level.max_children;
 
             if level == 0 {
-                child_to_parent.push(HashMap::new());
-                parent_child_count.push(HashMap::new());
+                child_to_parent.push(Default::default());
+                parent_child_count.push(Default::default());
                 continue;
             }
 
             let prev = &tree.levels[level - 1];
             let prev_mc = prev.max_children;
 
-            let mut c2p: HashMap<usize, usize> = HashMap::new();
-            let mut pcc: HashMap<usize, usize> = HashMap::new();
+            let mut c2p: HashMap<usize, usize> = Default::default();
+            let mut pcc: HashMap<usize, usize> = Default::default();
 
             for j in 0..d {
                 let child_g = tree_level.flat_path_indices[j] / mc;
@@ -171,7 +171,7 @@ pub fn expand_module_candidates(
     let num_genes = gene_coarsening.fine_to_coarse.len();
     let mut gene_candidates: Vec<Vec<usize>> = vec![Vec::new(); num_genes];
 
-    let mut module_links: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut module_links: HashMap<usize, Vec<usize>> = Default::default();
     for &(gm, pm) in &screen.candidate_pairs {
         module_links.entry(gm).or_default().push(pm);
     }
@@ -326,7 +326,7 @@ fn build_fine_prior(
         .map(|(&g, &p)| (g, p))
         .collect();
 
-    let mut module_peak_count: HashMap<usize, usize> = HashMap::new();
+    let mut module_peak_count: HashMap<usize, usize> = Default::default();
     for &pi in fine_peaks {
         *module_peak_count.entry(fc.fine_to_coarse[pi]).or_insert(0) += 1;
     }

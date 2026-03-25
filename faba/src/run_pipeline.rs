@@ -11,11 +11,11 @@ use crate::editing::sifter::ModificationType;
 use crate::gene_count::splice::{count_read_per_gene_splice, format_gene_key};
 use crate::pipeline_util::{check_all_bam_indices, extract_gene_key, qc_passing_keys, GeneCountQc};
 
-use fnv::FnvHashMap;
 use genomic_data::gff::GffRecordMap;
 use genomic_data::sam::CellBarcode;
 use log::info;
 use rayon::ThreadPoolBuilder;
+use rustc_hash::FxHashMap;
 
 #[derive(Args, Debug)]
 #[command(
@@ -239,7 +239,7 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
 }
 
 struct AtoiMaskData {
-    mask: fnv::FnvHashSet<(Box<str>, i64)>,
+    mask: rustc_hash::FxHashSet<(Box<str>, i64)>,
     n_sites: usize,
 }
 
@@ -249,7 +249,7 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
     let all_records = read_gff_record_vec(args.gff_file.as_ref())?;
     let gene_map = build_gene_map(&all_records, Some(&FeatureType::Gene))?;
     let exon_map = build_exon_intervals(&all_records);
-    let exon_intervals: FnvHashMap<GeneId, Vec<(i64, i64)>> = exon_map.into_iter().collect();
+    let exon_intervals: FxHashMap<GeneId, Vec<(i64, i64)>> = exon_map.into_iter().collect();
 
     let gff_map = GffRecordMap::from_map(gene_map);
     info!("Loaded {} genes for expression filtering", gff_map.len());
@@ -269,13 +269,14 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
     let records = gff_map.records();
 
     // Build gene_key → GeneId mapping for reverse lookup after QC
-    let gene_key_to_id: FnvHashMap<Box<str>, GeneId> = records
+    let gene_key_to_id: FxHashMap<Box<str>, GeneId> = records
         .iter()
         .map(|rec| (format_gene_key(rec), rec.gene_id.clone()))
         .collect();
 
-    let mut expressed_gene_ids: fnv::FnvHashSet<GeneId> = fnv::FnvHashSet::default();
-    let mut valid_cell_barcodes: fnv::FnvHashSet<CellBarcode> = fnv::FnvHashSet::default();
+    let mut expressed_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
+    let mut valid_cell_barcodes: rustc_hash::FxHashSet<CellBarcode> =
+        rustc_hash::FxHashSet::default();
 
     for (bam_file, batch_name) in all_bam_files.iter().zip(batch_names.iter()) {
         let njobs = records.len() as u64;
