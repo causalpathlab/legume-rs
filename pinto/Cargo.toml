@@ -6,7 +6,7 @@ description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version = "0.2.0"
+version = "0.2.1"
 
 [[bin]]
 name = "pinto"
@@ -17,7 +17,6 @@ data-beans = { workspace = true }
 data-beans-alg = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
-candle-util = { workspace = true }
 parquet = { workspace = true }
 
 dashmap = { workspace = true }

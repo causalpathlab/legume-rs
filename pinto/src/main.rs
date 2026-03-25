@@ -35,49 +35,37 @@ fn print_logo() {
 #[derive(Parser, Debug)]
 #[command(
     version,
-    about = "PINTO",
-    long_about = "Proximity-based Interaction Network analysis to dissect Tissue Organizations\n\n\
-                  PINTO discovers cell-cell interaction patterns from transcriptomics\n\
-                  data via link community detection. Communities are assigned to edges\n\
-                  (cell-cell interactions) using gene module-based profiles or\n\
-                  dimensionality reduction (SVD).\n\n\
-                  PINTO supports two modes:\n\
-                  - Spatial mode (recommended): provide coordinate files to build\n\
-                    a spatial KNN graph from cell positions.\n\
-                  - Expression mode: omit --coord to build a KNN graph from\n\
-                    random-projected gene expression embeddings. 2D coordinates\n\
-                    are generated via force-directed layout for visualization.\n\n\
-                  FILE FORMATS:\n\n\
-                  Data files:\n\
-                  - Must be `.zarr` or `.h5` (HDF5) format\n\
-                  - Convert from `.mtx` using: data-beans from-mtx input.mtx output.zarr\n\
-                  - Multiple files can be provided (comma-separated)\n\n\
-                  Coordinate files (recommended, one per data file):\n\
-                  - CSV, TSV, or space-delimited text files (or .parquet)\n\
-                  - First column: cell/barcode names (must match data file)\n\
-                  - Subsequent columns: spatial coordinates (x, y, etc.)\n\
-                  - Header row optional (auto-detected or specify with --coord-header-row)\n\
-                  - Default column names: pxl_row_in_fullres, pxl_col_in_fullres (10X Visium)\n\
-                  - Use --coord-column-names for different column headers\n\
-                  - When omitted, KNN graph is built from expression embeddings\n\n\
-                  Batch files (optional, one per data file):\n\
-                  - Plain text file, one batch label per line\n\
-                  - Must have one line for each cell in the corresponding data file\n\
-                  - If not provided, each data file is treated as a separate batch\n\n\
-                  WORKFLOWS:\n\n\
-                  1. SVD-based cell-level analysis (spatial):\n\
-                     pinto dsvd data.zarr -c coords.csv -o out\n\n\
-                  2. SVD-based cell-level analysis (expression only):\n\
-                     pinto dsvd data.zarr -o out\n\n\
-                  3. Link community model (gene module-based):\n\
-                     pinto lc data.zarr -c coords.csv -k 20 -o out\n\n\
-                  4. Link community with gene-pair network:\n\
-                     pinto lc data.zarr -c coords.csv -o out --gene-network net.tsv\n\n\
-                  All subcommands accept --coord or work without it.\n\
-                  Use prop subcommand for re-clustering with different K.\n\n\
-                  Choose dsvd for cell-level shared/difference patterns, or lc for\n\
-                  probabilistic link community detection (with gene modules or\n\
-                  gene-pair interaction profiles via --gene-network).",
+    about = "PINTO - Proximity-based Interaction Network for Tissue Organization",
+    long_about = "PINTO discovers cell-cell interaction patterns from spatial\n\
+                  transcriptomics via link community detection on cell-pair graphs.\n\n\
+                  SUBCOMMANDS:\n\n\
+                  \x20 lc    Link community model (recommended)\n\
+                  \x20       Assigns each cell-cell edge to a community via collapsed\n\
+                  \x20       Gibbs sampling on gene module profiles.\n\n\
+                  \x20 dsvd  Delta-SVD model\n\
+                  \x20       Cell-pair shared/difference analysis via Poisson-Gamma\n\
+                  \x20       SVD on pseudobulk co-expression.\n\n\
+                  \x20 prop  Propensity (standalone)\n\
+                  \x20       Re-cluster edge latent codes from dsvd with different K.\n\n\
+                  QUICK START:\n\n\
+                  \x20 # Prepare data (convert MTX to HDF5):\n\
+                  \x20 data-beans from-mtx -r features.tsv.gz -c barcodes.tsv.gz \\\n\
+                  \x20   matrix.mtx.gz --backend hdf5 -o data.h5\n\n\
+                  \x20 # Link community (spatial, 10x Visium):\n\
+                  \x20 pinto lc data.h5 -c tissue_positions.csv -o results\n\n\
+                  \x20 # Link community (expression-only, no coordinates):\n\
+                  \x20 pinto lc data.h5 -o results\n\n\
+                  \x20 # Delta-SVD:\n\
+                  \x20 pinto dsvd data.h5 -c coords.csv -o results\n\n\
+                  INPUT FILES:\n\n\
+                  \x20 Data:   .h5 or .zarr (genes x cells, sparse). Multiple files\n\
+                  \x20         comma-separated for multi-sample: s1.h5,s2.h5\n\
+                  \x20 Coords: CSV/TSV/parquet, first column = barcode, rest = x,y,...\n\
+                  \x20         Default columns: pxl_row_in_fullres,pxl_col_in_fullres\n\
+                  \x20         Omit -c for expression-only mode.\n\
+                  \x20 Batch:  -b labels.txt (one label per cell per line, optional)\n\n\
+                  OUTPUT: All outputs are .parquet files with {out} prefix.\n\
+                  \x20 Use --help on each subcommand for output file details.",
     term_width = 80
 )]
 struct Cli {
@@ -172,44 +160,68 @@ enum Commands {
     #[command(
         alias = "lc",
         about = "Link community model via collapsed Gibbs sampling",
-        long_about = "Link community model for cell-cell interaction analysis.\n\n\
-                      Treats transcriptomics data as G separate weighted networks\n\
-                      on N cells. Community membership is assigned at the link\n\
-                      level via collapsed Gibbs sampling with a Poisson-Gamma\n\
-                      conjugate model.\n\n\
-                      Supports spatial coordinates or expression-only mode\n\
-                      (omit --coord to build KNN from expression embeddings).\n\n\
-                      Edge profiles can be built in three ways:\n\
-                      \x20 1. Gene modules (default): genes clustered into M modules,\n\
-                      \x20    y_e[m] = sum_{g in module m} (x_{g,i} + x_{g,j})\n\
-                      \x20 2. Gene-pair network (--gene-network): interaction deltas\n\
-                      \x20    y_e[p] = sum of positive co-expression deltas per pair\n\
-                      \x20 3. Random projection (--n-gene-modules 0): y_e = W^T(x_i+x_j)\n\n\
-                      Model:\n\
-                      \x20 Given N cells, G genes, KNN graph with E edges.\n\
-                      \x20 Link community assignment:\n\
-                      \x20   z_e in {1..K}\n\
-                      \x20   y_e^m | z_e=k ~ Poisson(s_e * mu_{m,k})\n\
-                      \x20   mu_{m,k} ~ Gamma(a0, b0)   collapsed out analytically\n\
-                      \x20   s_e = sum_m y_e^m          link size factor\n\n\
-                      Algorithm:\n\
-                      \x20 1. Load data X [G x N] and coordinates [N x D]\n\
-                      \x20 2. Build KNN graph -> E edges\n\
-                      \x20 3. Estimate batch effects (multi-batch only)\n\
-                      \x20 4. Build edge profiles (gene modules, gene-pair, or projection)\n\
-                      \x20 5. Multi-level coarsening -> super-edges\n\
-                      \x20 6. Collapsed Gibbs sampling on coarsest super-edges\n\
-                      \x20 7. Progressive encoder training (coarse to fine)\n\
-                      \x20 8. EM refinement + greedy finalization on full edges\n\
-                      \x20 9. Output: cell propensity, gene-topic stats, assignments\n\n\
-                      Outputs:\n\
-                      - {out}.propensity.parquet: soft membership (N x K)\n\
-                      - {out}.gene_modules.parquet: gene module assignments (when using modules)\n\
-                      - {out}.gene_graph.parquet: gene-gene edges (when using --gene-network)\n\
-                      - {out}.link_community.parquet: link community assignments\n\
-                      - {out}.scores.parquet: score trace\n\
-                      - {out}.coord_pairs.parquet: cell pair coordinates\n\
-                      - {out}.delta.parquet: batch effects (when multi-batch)"
+        long_about = "Link community detection for spatial transcriptomics.\n\n\
+                      Assigns each cell-cell edge to one of K communities based on\n\
+                      gene expression profiles, then derives per-cell soft membership.\n\n\
+                      QUICK START:\n\n\
+                      \x20 # Typical spatial run (10x Visium):\n\
+                      \x20 pinto lc data.h5 -c tissue_positions.csv -o out\n\n\
+                      \x20 # More communities, iterative module refinement:\n\
+                      \x20 pinto lc data.h5 -c coords.csv -o out \\\n\
+                      \x20   --n-communities 25 --n-outer-iter 3\n\n\
+                      \x20 # Leiden modules instead of K-means:\n\
+                      \x20 pinto lc data.h5 -c coords.csv -o out \\\n\
+                      \x20   --module-method leiden --n-outer-iter 3\n\n\
+                      \x20 # Expression-only (no coordinates):\n\
+                      \x20 pinto lc data.h5 -o out\n\n\
+                      \x20 # With external gene-pair network:\n\
+                      \x20 pinto lc data.h5 -c coords.csv -o out \\\n\
+                      \x20   --gene-network biogrid_pairs.tsv\n\n\
+                      \x20 # Multi-sample with batch correction:\n\
+                      \x20 pinto lc s1.h5,s2.h5 -c c1.csv,c2.csv -o out\n\n\
+                      INPUT FILES:\n\n\
+                      \x20 data.h5 / data.zarr   Genes-by-cells sparse matrix.\n\
+                      \x20                        Convert from MTX: data-beans from-mtx in.mtx out.h5\n\
+                      \x20 -c coords.csv          Cell coordinates (barcode,x,y).\n\
+                      \x20                        Omit for expression-only mode.\n\n\
+                      EDGE PROFILE MODES:\n\n\
+                      \x20 Gene modules (default):\n\
+                      \x20   Genes clustered into M modules; edge profile =\n\
+                      \x20   module-count vector y_e[m] = sum_{g in m} (x_{g,i} + x_{g,j}).\n\
+                      \x20   M auto-determined as sqrt(median cell nnz).\n\
+                      \x20   Module clustering method: --module-method kmeans|leiden.\n\n\
+                      \x20 Gene-pair network (--gene-network file.tsv):\n\
+                      \x20   External gene-gene edges (two-column TSV).\n\
+                      \x20   Edge profile = positive co-expression deltas per pair.\n\
+                      \x20   Pairs collapsed into modules if count > --n-edge-modules.\n\n\
+                      \x20 Random projection (--no-gene-modules):\n\
+                      \x20   y_e = W^T(x_i + x_j), W = random Gaussian basis.\n\n\
+                      ALGORITHM:\n\n\
+                      \x20 1. Build spatial KNN graph (or expression KNN if no coords)\n\
+                      \x20 2. Batch effect estimation (multi-sample only)\n\
+                      \x20 3. Gene module discovery (sketch + cluster)\n\
+                      \x20 4. Multi-level graph coarsening\n\
+                      \x20 5. Collapsed Gibbs on coarsest super-edges\n\
+                      \x20 6. Transfer labels to full resolution\n\
+                      \x20 7. Outer EM loop (--n-outer-iter > 1):\n\
+                      \x20    E-step: EM Gibbs + greedy refinement\n\
+                      \x20    M-step: re-cluster modules from community centroids\n\
+                      \x20 8. Extract cell propensity + gene-topic statistics\n\n\
+                      KEY PARAMETERS:\n\n\
+                      \x20 --n-communities K      Number of link communities [20]\n\
+                      \x20 --n-outer-iter N       Module re-estimation iterations [1]\n\
+                      \x20 --module-method M      kmeans or leiden [kmeans]\n\
+                      \x20 -k, --knn-spatial K    Neighbours per cell [5]\n\
+                      \x20 --n-gene-modules M     Gene modules (auto if omitted)\n\
+                      \x20 --alpha A              Dirichlet concentration [1.0]\n\n\
+                      OUTPUT FILES:\n\n\
+                      \x20 {out}.propensity.parquet      Cell community membership [N x K]\n\
+                      \x20 {out}.gene_topic.parquet      Gene-topic rates [G x K]\n\
+                      \x20 {out}.gene_modules.parquet    Gene-to-module assignments [G x 1]\n\
+                      \x20 {out}.link_community.parquet  Edge community assignments [E x 3]\n\
+                      \x20 {out}.coord_pairs.parquet     Cell pair coordinates [E x cols]\n\
+                      \x20 {out}.scores.parquet          Score trace per iteration\n\
+                      \x20 {out}.delta.parquet           Batch effects (multi-sample only)"
     )]
     LinkCommunity(SrtLinkCommunityArgs),
 }
