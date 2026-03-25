@@ -6,11 +6,9 @@
 use crate::embed_common::*;
 use hsblock::{Hsblock, HsbmOptions};
 use leiden::clustering::SimpleClustering;
-use leiden::leiden::Leiden;
-use leiden::network::Graph;
-use leiden::{Clustering, Network};
+use leiden::Clustering;
 use matrix_util::clustering::{Kmeans, KmeansArgs};
-use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
+use matrix_util::knn_graph::{self, KnnGraph, KnnGraphArgs};
 use matrix_util::traits::MatOps;
 
 /// Clustering method
@@ -229,61 +227,36 @@ pub fn leiden_clustering(
     info!("KNN graph has {} connected component(s)", n_components);
 
     // Step 2: Convert to Leiden Network with modularity objective
-    //
-    // Modularity quality increment: Δ = w_jl - γ · k_j · K_l / (2m)
-    // The Leiden crate uses CPM form: Δ = w_jl - node_w · cluster_w · res
-    // Setting node weights = degree and res = γ/(2m) gives modularity.
-    let weights = graph.fuzzy_kernel_weights();
-    info!("Converting KNN graph to Leiden network (modularity, fuzzy kernel weights) ...");
-
-    // Compute node degrees (sum of edge weights per node)
-    let mut node_degree = vec![0.0f32; n];
-    let mut total_edge_weight = 0.0f64;
-    let mut min_w = f32::MAX;
-    let mut max_w = f32::MIN;
-    for (&(i, j), &w) in graph.edges.iter().zip(weights.iter()) {
-        min_w = min_w.min(w);
-        max_w = max_w.max(w);
-        node_degree[i] += w;
-        node_degree[j] += w;
-        total_edge_weight += w as f64;
-    }
-
-    let mut leiden_graph = Graph::with_capacity(n, graph.num_edges());
-    for nd in node_degree.iter() {
-        leiden_graph.add_node(*nd);
-    }
-    for (&(i, j), &w) in graph.edges.iter().zip(weights.iter()) {
-        leiden_graph.add_edge((i as u32).into(), (j as u32).into(), w);
-    }
-    let network = Network::new_from_graph(leiden_graph);
-
-    // Scale resolution: modularity γ → CPM resolution = γ / (2m)
-    let resolution_scaled = resolution / (2.0 * total_edge_weight);
+    let ln = graph.to_leiden_network();
+    let resolution_scaled = ln.scale_resolution(resolution);
     info!(
-        "Edge weights: min={:.4}, max={:.4}, total={:.1}",
-        min_w, max_w, total_edge_weight
-    );
-    info!(
-        "Modularity resolution={:.4} → scaled={:.6e}",
-        resolution, resolution_scaled
+        "Modularity resolution={:.4} → scaled={:.6e}, total_edge_weight={:.1}",
+        resolution, resolution_scaled, ln.total_edge_weight
     );
 
     // Step 3: Run Leiden — with optional resolution tuning
     let seed_val = seed.map(|s| s as usize);
 
-    let result = if let Some(target_k) = target_clusters {
+    let labels = if let Some(target_k) = target_clusters {
         info!(
             "Auto-tuning resolution to target ~{} clusters ...",
             target_k
         );
-        tune_leiden_resolution(&network, n, target_k, resolution_scaled, seed_val)?
+        knn_graph::tune_leiden_resolution(&ln.network, n, target_k, resolution_scaled, seed_val)
     } else {
         info!(
             "Running Leiden at scaled resolution={:.6e} ...",
             resolution_scaled
         );
-        run_leiden(&network, n, resolution_scaled, seed_val)
+        knn_graph::run_leiden(&ln.network, n, resolution_scaled, seed_val)
+    };
+
+    let mut compact = labels;
+    knn_graph::compact_labels(&mut compact);
+    let n_clusters = compact.iter().copied().max().unwrap_or(0) + 1;
+    let result = ClusterResult {
+        labels: compact,
+        n_clusters,
     };
 
     let sizes = result.cluster_sizes();
@@ -358,23 +331,9 @@ pub fn hsblock_clustering(
         mean_degree
     );
 
-    // Step 2: Convert to leiden::Network (same as leiden_clustering)
-    let weights = graph.fuzzy_kernel_weights();
-
-    let mut node_degree = vec![0.0f32; n];
-    for (&(i, j), &w) in graph.edges.iter().zip(weights.iter()) {
-        node_degree[i] += w;
-        node_degree[j] += w;
-    }
-
-    let mut leiden_graph = Graph::with_capacity(n, graph.num_edges());
-    for nd in node_degree.iter() {
-        leiden_graph.add_node(*nd);
-    }
-    for (&(i, j), &w) in graph.edges.iter().zip(weights.iter()) {
-        leiden_graph.add_edge((i as u32).into(), (j as u32).into(), w);
-    }
-    let network = Network::new_from_graph(leiden_graph);
+    // Step 2: Convert to leiden::Network
+    let ln = graph.to_leiden_network();
+    let network = ln.network;
 
     // Step 3: Run HSBM
     let options = HsbmOptions {
@@ -417,105 +376,6 @@ pub fn hsblock_clustering(
     );
 
     Ok(result)
-}
-
-/// Run Leiden at a fixed resolution and return the result.
-fn run_leiden(network: &Network, n: usize, resolution: f64, seed: Option<usize>) -> ClusterResult {
-    let mut leiden = Leiden::new(resolution, 0.01, seed);
-    let mut clustering = SimpleClustering::init_different_clusters(n);
-
-    let max_outer = 10;
-    for iter in 0..max_outer {
-        let updated = leiden.iterate(network, &mut clustering);
-        info!(
-            "  iteration {}: {} clusters{}",
-            iter + 1,
-            clustering.num_clusters(),
-            if !updated { " (converged)" } else { "" }
-        );
-        if !updated {
-            break;
-        }
-    }
-
-    let labels: Vec<usize> = (0..n).map(|i| clustering.get(i)).collect();
-    ClusterResult {
-        labels,
-        n_clusters: clustering.num_clusters(),
-    }
-}
-
-/// Binary search on resolution to get close to `target_k` clusters.
-///
-/// Lower resolution → fewer clusters; higher → more clusters.
-fn tune_leiden_resolution(
-    network: &Network,
-    n: usize,
-    target_k: usize,
-    initial_resolution: f64,
-    seed: Option<usize>,
-) -> anyhow::Result<ClusterResult> {
-    let mut lo = 1e-6_f64;
-    let mut hi = 10.0_f64;
-    let mut best = run_leiden(network, n, initial_resolution, seed);
-    let mut best_res = initial_resolution;
-
-    info!(
-        "  resolution={:.6} → {} clusters (target {})",
-        initial_resolution, best.n_clusters, target_k
-    );
-
-    if best.n_clusters == target_k {
-        return Ok(best);
-    }
-
-    // Adjust initial bounds based on first result
-    if best.n_clusters > target_k {
-        hi = initial_resolution;
-    } else {
-        lo = initial_resolution;
-    }
-
-    const MAX_SEARCH: usize = 20;
-
-    for step in 0..MAX_SEARCH {
-        let mid = (lo + hi) / 2.0;
-        let result = run_leiden(network, n, mid, seed);
-
-        info!(
-            "  step {}: resolution={:.6} → {} clusters",
-            step + 1,
-            mid,
-            result.n_clusters
-        );
-
-        // Binary search direction based on result at mid
-        // (too many clusters → lower resolution, too few → raise it)
-        if result.n_clusters > target_k {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-
-        // Update best if closer to target
-        let cur_diff = (result.n_clusters as isize - target_k as isize).unsigned_abs();
-        let best_diff = (best.n_clusters as isize - target_k as isize).unsigned_abs();
-        if cur_diff < best_diff {
-            best = result;
-            best_res = mid;
-        }
-
-        if best.n_clusters == target_k || (hi - lo) / hi.max(1e-10) < 1e-4 {
-            break;
-        }
-    }
-
-    info!(
-        "  best resolution={:.6} → {} clusters (target {})",
-        best_res, best.n_clusters, target_k
-    );
-
-    Ok(best)
 }
 
 /// Count connected components in the KNN graph using BFS.

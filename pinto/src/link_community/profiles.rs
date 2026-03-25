@@ -300,7 +300,6 @@ pub fn coarsen_edge_profiles(
 /// assigned to k, then normalizes by edge count.
 ///
 /// Returns [n_genes × k] centroid matrix.
-#[cfg(test)]
 pub fn compute_community_centroids(
     data: &SparseIoVec,
     edges: &[(usize, usize)],
@@ -370,14 +369,38 @@ pub fn compute_community_centroids(
     }
 
     // Normalize by count
-    for c in 0..k {
-        if total_count[c] > 0 {
-            let scale = 1.0 / total_count[c] as f32;
+    for (c, &cnt) in total_count.iter().enumerate().take(k) {
+        if cnt > 0 {
+            let scale = 1.0 / cnt as f32;
             total_sum.column_mut(c).scale_mut(scale);
         }
     }
 
     Ok(total_sum)
+}
+
+/// Extract module-community rate matrix [M × K] from sufficient statistics.
+///
+/// `rate[m, k] = (a0 + gene_sum[k*M + m]) / (b0 + size_sum[k])`
+///
+/// Rows are modules (or gene-pairs), columns are communities. Used as
+/// input features for re-clustering modules in the outer EM M-step.
+pub fn compute_module_rate_matrix(
+    stats: &crate::link_community::model::LinkCommunityStats,
+    a0: f64,
+    b0: f64,
+) -> Mat {
+    let m = stats.m;
+    let k = stats.k;
+    let mut rates = Mat::zeros(m, k);
+    for c in 0..k {
+        let denom = b0 + stats.size_sum[c];
+        let base = c * m;
+        for g in 0..m {
+            rates[(g, c)] = ((a0 + stats.gene_sum[base + g]) / denom) as f32;
+        }
+    }
+    rates
 }
 
 /// Refine projection basis via SVD on community centroids.
@@ -1062,19 +1085,18 @@ pub fn filter_profile_columns(store: &LinkProfileStore, keep: &[usize]) -> LinkP
     LinkProfileStore::new(new_profiles, n_edges, new_m)
 }
 
-/// Collapse gene-pair columns into modules via K-means clustering.
+/// Collapse gene-pair columns into modules via a pluggable clustering method.
 ///
 /// Given a `LinkProfileStore` with `n_edges × n_gene_pairs`, clusters the
-/// gene-pair dimension (columns) into `n_modules` groups via K-means on
-/// the column profiles (each column is a vector of length `n_edges`).
+/// gene-pair dimension (columns) using the provided `ModuleClusterer` on
+/// the column profiles (each column = a vector of length `n_edges`).
 /// Returns a new store with `n_edges × n_modules` where each module's
 /// value is the sum of its member gene-pair columns, plus the
 /// gene-pair-to-module assignment vector.
-pub fn collapse_profile_columns_by_module(
+pub fn collapse_profile_columns(
     store: &LinkProfileStore,
-    n_modules: usize,
+    clusterer: &dyn super::module_cluster::ModuleClusterer,
 ) -> (LinkProfileStore, Vec<usize>) {
-    use matrix_util::clustering::Kmeans;
     use matrix_util::traits::SampleOps;
 
     let n_edges = store.n_edges;
@@ -1089,7 +1111,7 @@ pub fn collapse_profile_columns_by_module(
         }
     }
 
-    // Random project to low dim for faster K-means when n_edges is large
+    // Random project to low dim for faster clustering when n_edges is large
     let proj_dim = 50.min(n_edges);
     let projected = if n_edges > proj_dim {
         let rng_proj = Mat::rnorm(n_edges, proj_dim);
@@ -1101,11 +1123,10 @@ pub fn collapse_profile_columns_by_module(
         col_profiles.clone()
     };
 
-    // K-means on rows → gene_pair_to_module
-    let assignments = projected.kmeans_rows(matrix_util::clustering::KmeansArgs {
-        num_clusters: n_modules,
-        max_iter: 100,
-    });
+    // Cluster rows → gene_pair_to_module
+    let mut assignments = clusterer.cluster(&projected);
+    super::module_cluster::compact_labels(&mut assignments);
+    let n_modules = assignments.iter().copied().max().unwrap_or(0) + 1;
 
     // Sum per-module
     let mut new_profiles = vec![0.0f32; n_edges * n_modules];

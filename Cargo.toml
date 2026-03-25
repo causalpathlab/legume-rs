@@ -22,7 +22,7 @@ description = "Library for Expedited Genomics data analysis with Unsupervised Ma
 repository = "https://github.com/causalpathlab/legume-rs"
 homepage = "https://github.com/causalpathlab/legume-rs"
 edition = "2021"
-version = "0.1.1"
+version = "0.2.0"
 
 [workspace.dependencies]
 
