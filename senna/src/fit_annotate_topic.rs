@@ -7,7 +7,7 @@ use crate::interactive_markers::{
 use crate::vmf::{vmf_assign, vmf_assign_averaged};
 use matrix_util::common_io::*;
 
-use fnv::FnvHashSet as HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 #[derive(Args, Debug)]
 pub struct AnnotateTopicArgs {

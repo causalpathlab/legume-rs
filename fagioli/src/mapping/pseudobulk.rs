@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::ops::AddAssign;
 use std::sync::{Arc, Mutex};
 
@@ -340,7 +340,7 @@ mod tests {
         backend.register_row_names_vec(&gene_names);
         backend.register_column_names_vec(&cell_names);
 
-        let mut cell_to_individual = HashMap::new();
+        let mut cell_to_individual: HashMap<Box<str>, usize> = Default::default();
         cell_to_individual.insert(Box::from("cell_0"), 0); // IND_A
         cell_to_individual.insert(Box::from("cell_1"), 0); // IND_A
         cell_to_individual.insert(Box::from("cell_2"), 0); // IND_A

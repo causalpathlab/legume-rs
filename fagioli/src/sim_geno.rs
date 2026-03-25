@@ -8,7 +8,7 @@ use fagioli::simulation::genotype_sim::{simulate_wright_fisher, WrightFisherPara
 #[derive(Args, Debug, Clone)]
 pub struct SimGenoArgs {
     #[arg(short, long, help = "Output prefix for PLINK files (.bed/.bim/.fam)")]
-    pub output: String,
+    pub output: Box<str>,
 
     #[arg(long, default_value = "200", help = "Number of diploid individuals")]
     pub num_individuals: usize,
@@ -21,7 +21,7 @@ pub struct SimGenoArgs {
     pub num_snps: usize,
 
     #[arg(long, default_value = "1", help = "Chromosome label")]
-    pub chromosome: String,
+    pub chromosome: Box<str>,
 
     #[arg(long, default_value = "1000", help = "Effective population size")]
     pub ne: usize,

@@ -1,7 +1,7 @@
 use crate::common::*;
 use crate::run_sim_one_type::sample_logits_each_row;
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use indicatif::ParallelProgressIterator;
 use matrix_util::common_io::{mkdir, write_lines, write_types};
@@ -373,7 +373,7 @@ impl ColliderSimulator {
         sorted.sort_by_key(|r| r.0);
 
         let mut cumsum = 0_u64;
-        let mut indv_offset: HashMap<usize, u64> = HashMap::with_capacity(sorted.len());
+        let mut indv_offset: HashMap<usize, u64> = Default::default();
         for &(indv, nn, _, _, _, _) in &sorted {
             indv_offset.insert(indv, cumsum);
             cumsum += nn as u64;

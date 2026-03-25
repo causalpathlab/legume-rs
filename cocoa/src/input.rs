@@ -4,7 +4,7 @@ use matrix_util::common_io::*;
 use matrix_util::dmatrix_util::*;
 use matrix_util::parquet::*;
 use matrix_util::traits::*;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::sync::Arc;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -84,7 +84,7 @@ fn collect_all_topic_names(
 ) -> anyhow::Result<TopicIndex> {
     info!("Looking into the topic files...");
 
-    let mut topic_names = HashSet::<Box<str>>::new();
+    let mut topic_names: HashSet<Box<str>> = Default::default();
 
     for (a_file, p_file) in topic_assignment_files
         .iter()

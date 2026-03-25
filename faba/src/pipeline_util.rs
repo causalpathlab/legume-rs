@@ -4,9 +4,9 @@ use crate::data::util_htslib::*;
 use crate::gene_count::splice::{count_read_per_gene_splice, format_gene_key};
 
 use dashmap::DashMap as HashMap;
-use fnv::FnvHashMap;
 use genomic_data::gff::GffRecordMap;
 use genomic_data::sam::CellBarcode;
+use rustc_hash::FxHashMap;
 
 /// Check BAM indices for all files
 pub fn check_all_bam_indices(bam_files: &[Box<str>]) -> anyhow::Result<()> {
@@ -60,8 +60,8 @@ where
 // ========== Gene count QC ==========
 
 pub struct GeneCountQc {
-    pub gene_ids: fnv::FnvHashSet<GeneId>,
-    pub cell_barcodes: fnv::FnvHashSet<CellBarcode>,
+    pub gene_ids: rustc_hash::FxHashSet<GeneId>,
+    pub cell_barcodes: rustc_hash::FxHashSet<CellBarcode>,
 }
 
 /// Extract gene_key from a feature name like `"GENE_SYM/count/spliced"` → `"GENE_SYM"`.
@@ -79,9 +79,12 @@ pub fn qc_passing_keys(
     unspliced: &[(CellBarcode, Box<str>, f32)],
     gene_min_cells: usize,
     cell_min_genes: usize,
-) -> (fnv::FnvHashSet<Box<str>>, fnv::FnvHashSet<CellBarcode>) {
+) -> (
+    rustc_hash::FxHashSet<Box<str>>,
+    rustc_hash::FxHashSet<CellBarcode>,
+) {
     // Collect unique (cell, gene_key) pairs with nonzero total
-    let cell_gene_pairs: fnv::FnvHashSet<(CellBarcode, Box<str>)> = spliced
+    let cell_gene_pairs: rustc_hash::FxHashSet<(CellBarcode, Box<str>)> = spliced
         .par_iter()
         .chain(unspliced.par_iter())
         .map(|(cb, feat, _)| {
@@ -91,30 +94,30 @@ pub fn qc_passing_keys(
         .collect();
 
     // Count nnz per gene (how many distinct cells)
-    let gene_nnz: FnvHashMap<Box<str>, usize> =
+    let gene_nnz: FxHashMap<Box<str>, usize> =
         cell_gene_pairs
             .iter()
-            .fold(FnvHashMap::default(), |mut acc, (_, gk)| {
+            .fold(FxHashMap::default(), |mut acc, (_, gk)| {
                 *acc.entry(gk.clone()).or_default() += 1;
                 acc
             });
 
     // Count nnz per cell (how many distinct genes)
-    let cell_nnz: FnvHashMap<CellBarcode, usize> =
+    let cell_nnz: FxHashMap<CellBarcode, usize> =
         cell_gene_pairs
             .iter()
-            .fold(FnvHashMap::default(), |mut acc, (cb, _)| {
+            .fold(FxHashMap::default(), |mut acc, (cb, _)| {
                 *acc.entry(cb.clone()).or_default() += 1;
                 acc
             });
 
-    let passing_genes: fnv::FnvHashSet<Box<str>> = gene_nnz
+    let passing_genes: rustc_hash::FxHashSet<Box<str>> = gene_nnz
         .into_iter()
         .filter(|(_, n)| *n >= gene_min_cells)
         .map(|(gk, _)| gk)
         .collect();
 
-    let passing_cells: fnv::FnvHashSet<CellBarcode> = cell_nnz
+    let passing_cells: rustc_hash::FxHashSet<CellBarcode> = cell_nnz
         .into_iter()
         .filter(|(_, n)| *n >= cell_min_genes)
         .map(|(cb, _)| cb)
@@ -139,7 +142,7 @@ pub fn run_gene_count_qc(
     let all_records = read_gff_record_vec(gff_file)?;
     let gene_map = build_gene_map(&all_records, Some(&FeatureType::Gene))?;
     let exon_map = build_exon_intervals(&all_records);
-    let exon_intervals: FnvHashMap<GeneId, Vec<(i64, i64)>> = exon_map.into_iter().collect();
+    let exon_intervals: FxHashMap<GeneId, Vec<(i64, i64)>> = exon_map.into_iter().collect();
 
     let gff_map = GffRecordMap::from_map(gene_map);
     info!("Loaded {} genes for expression QC", gff_map.len());
@@ -147,13 +150,14 @@ pub fn run_gene_count_qc(
     let records = gff_map.records();
 
     // Build gene_key → GeneId mapping for reverse lookup after QC
-    let gene_key_to_id: FnvHashMap<Box<str>, GeneId> = records
+    let gene_key_to_id: FxHashMap<Box<str>, GeneId> = records
         .iter()
         .map(|rec| (format_gene_key(rec), rec.gene_id.clone()))
         .collect();
 
-    let mut expressed_gene_ids: fnv::FnvHashSet<GeneId> = fnv::FnvHashSet::default();
-    let mut valid_cell_barcodes: fnv::FnvHashSet<CellBarcode> = fnv::FnvHashSet::default();
+    let mut expressed_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
+    let mut valid_cell_barcodes: rustc_hash::FxHashSet<CellBarcode> =
+        rustc_hash::FxHashSet::default();
 
     for bam_file in bam_files {
         let njobs = records.len() as u64;

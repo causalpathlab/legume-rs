@@ -20,13 +20,13 @@ use matrix_param::traits::Inference;
 /// Per-gene specification: which pseudobulk row, gene ID, and cis SNP indices.
 pub struct GeneSpec {
     pub gene_idx: usize,
-    pub gene_id: String,
+    pub gene_id: Box<str>,
     pub cis_indices: Vec<usize>,
 }
 
 /// Per-gene result from fine-mapping.
 pub struct GeneResult {
-    pub gene_id: String,
+    pub gene_id: Box<str>,
     pub cis_snp_indices: Vec<usize>,
     pub detailed: BlockFitResultDetailed,
     pub z_marginal: DMatrix<f32>,
@@ -42,7 +42,7 @@ pub struct MatchedIndividuals {
 
 /// Match individuals between pseudobulk and genotype data by ID.
 pub fn match_individuals(pb_ids: &[Box<str>], geno_ids: &[Box<str>]) -> MatchedIndividuals {
-    let geno_id_lookup: std::collections::HashMap<&str, usize> = geno_ids
+    let geno_id_lookup: rustc_hash::FxHashMap<&str, usize> = geno_ids
         .iter()
         .enumerate()
         .map(|(i, id)| (id.as_ref(), i))
@@ -192,7 +192,7 @@ pub fn build_gene_specs(
 
                 Some(GeneSpec {
                     gene_idx: pb_gene_idx,
-                    gene_id: gene_id_str.to_string(),
+                    gene_id: gene_id_str.into(),
                     cis_indices,
                 })
             })
@@ -202,7 +202,7 @@ pub fn build_gene_specs(
         (0..n_genes)
             .map(|g| GeneSpec {
                 gene_idx: g,
-                gene_id: collapsed.gene_names[g].to_string(),
+                gene_id: collapsed.gene_names[g].clone(),
                 cis_indices: all_snp_indices.clone(),
             })
             .collect()

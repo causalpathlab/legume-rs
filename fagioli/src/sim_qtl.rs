@@ -12,21 +12,21 @@ use fagioli::simulation::{
 pub struct SimulationArgs {
     // ── Input / Output ───────────────────────────────────────────────────
     #[arg(long, help = "PLINK BED file prefix (without .bed/.bim/.fam)")]
-    pub bed_prefix: String,
+    pub bed_prefix: Box<str>,
 
     #[arg(short, long, help = "Output prefix for all generated files")]
-    pub output: String,
+    pub output: Box<str>,
 
     #[arg(
         long,
         default_value = "parquet",
         help = "Output format: parquet or tsv"
     )]
-    pub format: String,
+    pub format: Box<str>,
 
     // ── Genomic region ───────────────────────────────────────────────────
     #[arg(long, help = "Chromosome to simulate from")]
-    pub chromosome: String,
+    pub chromosome: Box<str>,
 
     #[arg(long, help = "Left genomic position bound (bp)")]
     pub left_bound: Option<u64>,
@@ -45,7 +45,7 @@ pub struct SimulationArgs {
         long,
         help = "GFF/GTF file for gene annotations (overrides --num-genes)"
     )]
-    pub gff_file: Option<String>,
+    pub gff_file: Option<Box<str>>,
 
     #[arg(
         long,
@@ -155,7 +155,7 @@ pub struct SimulationArgs {
         default_value = "zarr",
         help = "Sparse matrix backend: zarr or hdf5"
     )]
-    pub backend: String,
+    pub backend: Box<str>,
 }
 
 const SEED_FACTOR_MODEL: u64 = 100;

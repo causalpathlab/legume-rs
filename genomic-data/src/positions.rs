@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 pub use crate::gff::GeneId as Gene;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 #[derive(Hash, Eq, PartialEq, Clone, PartialOrd, Ord)]
 pub struct SiteInGene {
@@ -38,7 +38,7 @@ pub trait Stratify {
 
 impl Stratify for Vec<&SiteInGene> {
     fn stratify_by_gene(&self) -> HashMap<Gene, Vec<SiteInGene>> {
-        let mut ret: HashMap<Gene, Vec<SiteInGene>> = HashMap::new();
+        let mut ret: HashMap<Gene, Vec<SiteInGene>> = Default::default();
         for &sg in self.iter() {
             ret.entry(sg.gene.clone()).or_default().push(sg.clone());
         }

@@ -2,13 +2,13 @@
 
 use crate::sparse_io::*;
 
-use fnv::FnvHashMap as HashMap;
 use log::info;
 use matrix_util::knn_match::ColumnDict;
 use matrix_util::knn_match::MakeVecPoint;
 use matrix_util::traits::*;
 use matrix_util::utils::*;
 use rayon::prelude::*;
+use rustc_hash::FxHashMap as HashMap;
 use std::ops::Index;
 use std::sync::Arc;
 

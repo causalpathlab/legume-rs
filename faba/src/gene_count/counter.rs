@@ -7,8 +7,8 @@ use crate::common::*;
 use crate::data::bam_io;
 use genomic_data::gff::{GeneId, GffRecord, GffRecordMap};
 
-use fnv::FnvHashMap;
 use rust_htslib::bam::{self, record::Aux, Read};
+use rustc_hash::FxHashMap;
 
 /// Count reads per cell for a single gene
 ///
@@ -34,7 +34,7 @@ pub fn count_reads_per_gene(
         return Ok(vec![]);
     }
 
-    let mut cell_counts: FnvHashMap<CellBarcode, usize> = FnvHashMap::default();
+    let mut cell_counts: FxHashMap<CellBarcode, usize> = FxHashMap::default();
 
     for bam_file in bam_files {
         count_reads_in_bam_for_gene(
@@ -60,7 +60,7 @@ fn count_reads_in_bam_for_gene(
     cell_barcode_tag: &str,
     gene_barcode_tag: &str,
     min_mapq: u8,
-    cell_counts: &mut FnvHashMap<CellBarcode, usize>,
+    cell_counts: &mut FxHashMap<CellBarcode, usize>,
 ) -> anyhow::Result<()> {
     let mut reader = bam::IndexedReader::from_path(bam_file)?;
     let chr = rec.seqname.as_ref();

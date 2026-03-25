@@ -28,14 +28,14 @@ impl GenotypeMatrix {
 /// Genomic region filter for efficient SNP loading
 #[derive(Debug, Clone)]
 pub struct GenomicRegion {
-    pub chromosome: Option<String>,
+    pub chromosome: Option<Box<str>>,
     pub left_bound: Option<u64>,
     pub right_bound: Option<u64>,
 }
 
 impl GenomicRegion {
     pub fn new(
-        chromosome: Option<String>,
+        chromosome: Option<Box<str>>,
         left_bound: Option<u64>,
         right_bound: Option<u64>,
     ) -> Self {
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn test_genomic_region_contains() {
-        let region = GenomicRegion::new(Some("chr1".to_string()), Some(1000), Some(2000));
+        let region = GenomicRegion::new(Some("chr1".into()), Some(1000), Some(2000));
 
         assert!(region.contains("chr1", 1500));
         assert!(!region.contains("chr2", 1500));
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn test_genomic_region_chr_only() {
-        let region = GenomicRegion::new(Some("chr1".to_string()), None, None);
+        let region = GenomicRegion::new(Some("chr1".into()), None, None);
 
         assert!(region.contains("chr1", 100));
         assert!(region.contains("chr1", 999999));
@@ -120,11 +120,11 @@ mod tests {
     #[test]
     fn test_genomic_region_cross_prefix() {
         // "chr1" region should match SNPs labeled "1" and vice versa
-        let region_with = GenomicRegion::new(Some("chr1".to_string()), Some(1000), Some(2000));
+        let region_with = GenomicRegion::new(Some("chr1".into()), Some(1000), Some(2000));
         assert!(region_with.contains("1", 1500));
         assert!(!region_with.contains("2", 1500));
 
-        let region_without = GenomicRegion::new(Some("1".to_string()), Some(1000), Some(2000));
+        let region_without = GenomicRegion::new(Some("1".into()), Some(1000), Some(2000));
         assert!(region_without.contains("chr1", 1500));
         assert!(!region_without.contains("chr2", 1500));
     }

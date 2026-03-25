@@ -6,7 +6,7 @@ use crate::{Clustering, Graph, Network, SimpleClustering};
 use flate2::read::GzDecoder;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::time::{Duration, Instant};
@@ -172,7 +172,7 @@ fn run_louvain() -> std::io::Result<()> {
         let file = BufReader::new(GzDecoder::new(File::open(
             "testdata/louvain/adjacency.txt.gz",
         )?));
-        let mut nodes = HashSet::new();
+        let mut nodes: HashSet<u32> = Default::default();
         let mut adjacency = Vec::new();
         for line in file.lines() {
             let line = line?;
@@ -244,7 +244,7 @@ fn run_louvain_parallel() -> std::io::Result<()> {
         .bytes()
         .collect::<Result<_, _>>()?;
 
-        let mut nodes = HashSet::new();
+        let mut nodes: HashSet<u32> = Default::default();
         let mut adjacency = Vec::new();
         let mut max_orig_node = 0;
         for line in BufReader::new(data.as_slice()).lines() {

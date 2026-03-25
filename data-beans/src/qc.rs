@@ -10,7 +10,7 @@ use matrix_util::utils::partition_by_membership;
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
-use fnv::FnvHashMap as HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 #[derive(Clone)]
 pub struct SqueezeCutoffs {

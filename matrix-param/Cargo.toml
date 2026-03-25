@@ -24,6 +24,7 @@ num-traits = { workspace = true }
 approx = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
+rustc-hash = { workspace = true }
 
 ndarray = { workspace = true }
 ndarray-rand = { workspace = true }

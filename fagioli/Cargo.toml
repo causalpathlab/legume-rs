@@ -38,6 +38,7 @@ indicatif = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 dashmap = { workspace = true }
+rustc-hash = { workspace = true }
 
 colored = { workspace = true }
 rust-htslib = { workspace = true }

@@ -28,7 +28,6 @@ indicatif = { workspace = true }
 parquet = { workspace = true }
 matrix-util = { workspace = true }
 
-fnv = { workspace = true }
 # zip = "5.1.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]

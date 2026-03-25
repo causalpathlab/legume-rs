@@ -1,6 +1,6 @@
 use crate::apa::cell_assign::{ApaSiteAnnotation, CellSiteCount};
-use fnv::FnvHashMap as HashMap;
 use genomic_data::sam::{CellBarcode, Strand};
+use rustc_hash::FxHashMap as HashMap;
 
 /// Result of PDUI computation for one gene/UTR
 pub struct PduiResult {
@@ -62,7 +62,7 @@ pub fn compute_pdui(
     }
 
     // Compute PDUI per cell (for cells with any count at either site)
-    let mut all_cells: fnv::FnvHashSet<CellBarcode> = fnv::FnvHashSet::default();
+    let mut all_cells: rustc_hash::FxHashSet<CellBarcode> = rustc_hash::FxHashSet::default();
     all_cells.extend(proximal_counts.keys().cloned());
     all_cells.extend(distal_counts.keys().cloned());
 

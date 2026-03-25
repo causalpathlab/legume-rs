@@ -1,12 +1,10 @@
 use anyhow::Result;
 use candle_util::candle_core::{DType, Device, Tensor};
 use candle_util::candle_nn::{AdamW, Optimizer, VarBuilder, VarMap};
-use candle_util::sgvb::variant_tree::VariantTree;
 use candle_util::sgvb::{
     samples_local_reparam_loss, AnalyticalKL, BiSusieVar, FixedGaussianLikelihood,
-    FixedGaussianPrior, LinearModelSGVB, LinearRegressionSGVB, LocalReparamSample,
-    MultiLevelSusieVar, RssLikelihood, RssSvd, SGVBConfig, SusieVar, VariationalDistribution,
-    WeightedGaussianLikelihood,
+    FixedGaussianPrior, LinearModelSGVB, LinearRegressionSGVB, LocalReparamSample, RssLikelihood,
+    RssSvd, SGVBConfig, SusieVar, VariationalDistribution, WeightedGaussianLikelihood,
 };
 use clap::ValueEnum;
 use log::info;
@@ -40,7 +38,6 @@ impl ComputeDevice {
 pub enum ModelType {
     Susie,
     BiSusie,
-    MultiLevelSusie,
 }
 
 impl std::str::FromStr for ModelType {
@@ -49,9 +46,6 @@ impl std::str::FromStr for ModelType {
         match s.to_lowercase().as_str() {
             "susie" => Ok(Self::Susie),
             "bisusie" => Ok(Self::BiSusie),
-            "multilevel-susie" | "ml-susie" | "multilevel_susie" | "ml_susie" => {
-                Ok(Self::MultiLevelSusie)
-            }
             _ => anyhow::bail!("Unknown model type: {}", s),
         }
     }
@@ -69,8 +63,6 @@ pub struct FitConfig {
     pub prior_vars: Vec<f32>,
     pub elbo_window: usize,
     pub seed: u64,
-    /// Block size for MultiLevelSusieVar tree.
-    pub ml_block_size: usize,
     /// Infinitesimal prior variance σ²_inf for polygenic background.
     /// When > 0, a dense `LinearRegressionSGVB` with prior variance
     /// σ²_inf / p is fitted alongside the sparse SuSiE term.
@@ -93,7 +85,6 @@ impl Default for FitConfig {
             prior_vars: vec![0.05, 0.1, 0.12, 0.15, 0.18, 0.2, 0.25, 0.3, 0.5],
             elbo_window: 50,
             seed: 42,
-            ml_block_size: 50,
             sigma2_inf: 0.0,
             prior_alpha: 1.0,
         }
@@ -291,7 +282,6 @@ fn fit_single_prior(
         tensors.x.clone(),
         prior,
         sgvb_config,
-        config.ml_block_size,
     )?;
 
     let mut optimizer = AdamW::new_lr(varmap.all_vars(), config.learning_rate)?;
@@ -388,7 +378,6 @@ fn fit_single_prior(
 enum GeneticModel {
     Susie(LinearModelSGVB<SusieVar, FixedGaussianPrior>),
     BiSusie(LinearModelSGVB<BiSusieVar, FixedGaussianPrior>),
-    MultiLevelSusie(LinearModelSGVB<MultiLevelSusieVar, FixedGaussianPrior>),
 }
 
 impl GeneticModel {
@@ -402,7 +391,6 @@ impl GeneticModel {
         x_design: Tensor,
         prior: FixedGaussianPrior,
         config: SGVBConfig,
-        ml_block_size: usize,
     ) -> Result<Self> {
         Ok(match model_type {
             ModelType::Susie => {
@@ -417,14 +405,6 @@ impl GeneticModel {
                     var_dist, x_design, prior, config,
                 ))
             }
-            ModelType::MultiLevelSusie => {
-                let tree = VariantTree::regular(p, ml_block_size);
-                let var_dist =
-                    MultiLevelSusieVar::new(vb.pp("mlsusie"), tree, num_components, k, 1.0)?;
-                Self::MultiLevelSusie(LinearModelSGVB::from_variational(
-                    var_dist, x_design, prior, config,
-                ))
-            }
         })
     }
 
@@ -436,14 +416,13 @@ impl GeneticModel {
         match self {
             Self::Susie(m) => local_reparam_with_design(m, num_samples, x_batch),
             Self::BiSusie(m) => local_reparam_with_design(m, num_samples, x_batch),
-            Self::MultiLevelSusie(m) => local_reparam_with_design(m, num_samples, x_batch),
         }
     }
 
     fn kl_categorical(&self, prior_alpha: f64, device: &Device) -> Result<Tensor> {
         match self {
             Self::Susie(m) => Ok(m.variational.kl_categorical(prior_alpha)?),
-            _ => Ok(Tensor::zeros(
+            Self::BiSusie(_) => Ok(Tensor::zeros(
                 (),
                 candle_util::candle_core::DType::F32,
                 device,
@@ -460,12 +439,6 @@ impl GeneticModel {
                 Ok((pip, eff_mean, eff_std))
             }
             Self::BiSusie(m) => {
-                let pip = m.variational.pip()?;
-                let eff_mean = m.variational.theta_mean()?;
-                let eff_std = m.variational.var()?.sqrt()?;
-                Ok((pip, eff_mean, eff_std))
-            }
-            Self::MultiLevelSusie(m) => {
                 let pip = m.variational.pip()?;
                 let eff_mean = m.variational.theta_mean()?;
                 let eff_std = m.variational.var()?.sqrt()?;
@@ -638,7 +611,6 @@ pub fn fit_block_rss(
             x_design.clone(),
             prior,
             sgvb_config.clone(),
-            config.ml_block_size,
         )?;
 
         // Optional intercept: 1 variational param per trait, design = D̃⁻¹V'1

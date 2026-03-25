@@ -502,8 +502,8 @@ fn run_merge_then_squeeze(
     col_nnz_cutoff: usize,
 ) -> anyhow::Result<()> {
     use data_beans::sparse_data_visitors::create_jobs;
-    use fnv::FnvHashMap as HashMap;
     use rayon::prelude::*;
+    use rustc_hash::FxHashMap as HashMap;
 
     let output_prefix = cmd_args.output.as_ref().unwrap();
     info!("Union mode: merge first, then squeeze");
@@ -515,7 +515,7 @@ fn run_merge_then_squeeze(
     // Step 1: Build union of all row names across all files
     info!("Building union of row names...");
     let mut all_row_names: Vec<Box<str>> = Vec::new();
-    let mut row_name_set: std::collections::HashSet<Box<str>> = std::collections::HashSet::new();
+    let mut row_name_set: rustc_hash::FxHashSet<Box<str>> = rustc_hash::FxHashSet::default();
 
     for data_file_arg in &cmd_args.data_files {
         let (backend, data_file) = resolve_backend_file(data_file_arg, None)?;

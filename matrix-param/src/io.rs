@@ -344,7 +344,7 @@ mod tests {
     use crate::dmatrix_gamma::GammaMatrix;
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::record::RowAccessor;
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap as HashMap;
 
     #[test]
     fn test_param_io_to_parquet() -> anyhow::Result<()> {
@@ -374,7 +374,7 @@ mod tests {
         let mut iter = reader.get_row_iter(None)?;
 
         // Collect all rows into a map keyed by (row, col)
-        let mut results: HashMap<(String, String), (f32, f32, f32, f32)> = HashMap::new();
+        let mut results: HashMap<(String, String), (f32, f32, f32, f32)> = Default::default();
         while let Some(row) = iter.next() {
             let row = row?;
             let row_name = row.get_string(0)?.to_string();
@@ -528,7 +528,8 @@ mod tests {
         let mut iter = reader.get_row_iter(None)?;
 
         // Collect results keyed by (row, col, factor)
-        let mut results: HashMap<(String, String, String), (f32, f32, f32, f32)> = HashMap::new();
+        let mut results: HashMap<(String, String, String), (f32, f32, f32, f32)> =
+            Default::default();
         while let Some(row) = iter.next() {
             let row = row?;
             let row_name = row.get_string(0)?.to_string();

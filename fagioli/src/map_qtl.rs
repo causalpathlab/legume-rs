@@ -48,10 +48,10 @@ pub struct MapQtlArgs {
 
     // ── Genotype ─────────────────────────────────────────────────────────
     #[arg(long, help = "PLINK BED file prefix (without .bed/.bim/.fam)")]
-    pub bed_prefix: String,
+    pub bed_prefix: Box<str>,
 
     #[arg(long, help = "Chromosome to analyze")]
-    pub chromosome: String,
+    pub chromosome: Box<str>,
 
     #[arg(long, help = "Left genomic position bound (bp)")]
     pub left_bound: Option<u64>,
@@ -64,13 +64,13 @@ pub struct MapQtlArgs {
 
     // ── Gene annotations ─────────────────────────────────────────────────
     #[arg(long, help = "GTF/GFF gene annotation file for cis-eQTL windows")]
-    pub gtf_file: Option<String>,
+    pub gtf_file: Option<Box<str>>,
 
     #[arg(
         long,
         help = "BED gene annotation file: chr, start, end, gene_id[, name[, strand]]"
     )]
-    pub gene_bed_file: Option<String>,
+    pub gene_bed_file: Option<Box<str>>,
 
     #[arg(
         long,
@@ -105,9 +105,9 @@ pub struct MapQtlArgs {
     #[arg(
         long,
         default_value = "susie",
-        help = "Fine-mapping model: susie, bisusie, multilevel-susie"
+        help = "Fine-mapping model: susie, bisusie"
     )]
-    pub model: String,
+    pub model: Box<str>,
 
     #[arg(
         long,
@@ -121,7 +121,7 @@ pub struct MapQtlArgs {
         default_value = "0.05,0.1,0.12,0.15,0.18,0.2,0.25,0.3,0.5",
         help = "Comma-separated prior variances for coordinate search"
     )]
-    pub prior_var: String,
+    pub prior_var: Box<str>,
 
     // ── SGVB training ────────────────────────────────────────────────────
     #[arg(
@@ -151,13 +151,6 @@ pub struct MapQtlArgs {
     )]
     pub elbo_window: usize,
 
-    #[arg(
-        long,
-        default_value = "50",
-        help = "Block size for MultiLevelSusieVar tree"
-    )]
-    pub ml_block_size: usize,
-
     // ── Empirical Bayes ──────────────────────────────────────────────────
     #[arg(long, help = "Enable cross-gene empirical Bayes for prior variance")]
     pub empirical_bayes: bool,
@@ -178,7 +171,7 @@ pub struct MapQtlArgs {
             Multiple files can be specified. Covariates are concatenated with\n\
             composition covariates and centered before fitting."
     )]
-    pub covariate_files: Vec<String>,
+    pub covariate_files: Vec<Box<str>>,
 
     // ── Device ───────────────────────────────────────────────────────────
     #[arg(
@@ -204,7 +197,7 @@ pub struct MapQtlArgs {
     pub seed: u64,
 
     #[arg(short, long, help = "Output prefix for results and parameters")]
-    pub output: String,
+    pub output: Box<str>,
 }
 
 pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
@@ -403,7 +396,6 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
         prior_vars,
         elbo_window: args.elbo_window,
         seed: args.seed,
-        ml_block_size: args.ml_block_size,
         sigma2_inf: 0.0,
         prior_alpha: 1.0,
     };
@@ -646,10 +638,7 @@ fn build_qtl_variant_rows(
             for ct_idx in 0..n_ct {
                 rows.push(VariantRow {
                     snp_idx: global_snp,
-                    labels: vec![
-                        Box::from(gr.gene_id.as_str()),
-                        cell_type_names[ct_idx].clone(),
-                    ],
+                    labels: vec![gr.gene_id.clone(), cell_type_names[ct_idx].clone()],
                     pip: pip[(snp_j, ct_idx)],
                     effect_mean: eff_mean[(snp_j, ct_idx)],
                     effect_std: eff_std[(snp_j, ct_idx)],
