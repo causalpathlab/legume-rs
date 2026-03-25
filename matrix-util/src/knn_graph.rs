@@ -620,6 +620,174 @@ mod tests {
     }
 }
 
+//////////////////////////////
+// Leiden integration       //
+//////////////////////////////
+
+/// Leiden network built from a KNN graph with fuzzy kernel weights.
+pub struct LeidenNetwork {
+    pub network: leiden::Network,
+    pub total_edge_weight: f64,
+}
+
+impl LeidenNetwork {
+    /// Scale a modularity resolution to the CPM scale for this network.
+    ///
+    /// CPM resolution = modularity_gamma / (2 * total_edge_weight).
+    /// Guards against division by zero for degenerate graphs.
+    pub fn scale_resolution(&self, modularity_gamma: f64) -> f64 {
+        modularity_gamma / (2.0 * self.total_edge_weight).max(1.0)
+    }
+}
+
+impl KnnGraph {
+    /// Convert this KNN graph to a Leiden `Network` with modularity objective.
+    ///
+    /// Node weights = weighted degree, edge weights = fuzzy kernel weights.
+    /// Use `resolution / (2 * total_edge_weight)` to convert a modularity
+    /// resolution to the CPM scale expected by the Leiden crate.
+    pub fn to_leiden_network(&self) -> LeidenNetwork {
+        let n = self.n_nodes;
+        let weights = self.fuzzy_kernel_weights();
+
+        let mut node_degree = vec![0.0f32; n];
+        let mut total_edge_weight = 0.0f64;
+        for (&(i, j), &w) in self.edges.iter().zip(weights.iter()) {
+            node_degree[i] += w;
+            node_degree[j] += w;
+            total_edge_weight += w as f64;
+        }
+
+        let mut graph = leiden::Graph::with_capacity(n, self.num_edges());
+        for &nd in &node_degree {
+            graph.add_node(nd);
+        }
+        for (&(i, j), &w) in self.edges.iter().zip(weights.iter()) {
+            graph.add_edge((i as u32).into(), (j as u32).into(), w);
+        }
+
+        LeidenNetwork {
+            network: leiden::Network::new_from_graph(graph),
+            total_edge_weight,
+        }
+    }
+}
+
+/// Run Leiden clustering at a fixed (already-scaled) resolution.
+///
+/// Returns cluster labels as `Vec<usize>` (not necessarily contiguous).
+pub fn run_leiden(
+    network: &leiden::Network,
+    n: usize,
+    resolution: f64,
+    seed: Option<usize>,
+) -> Vec<usize> {
+    use leiden::clustering::SimpleClustering;
+    use leiden::leiden::Leiden;
+    use leiden::Clustering;
+
+    let mut leiden = Leiden::new(resolution, 0.01, seed);
+    let mut clustering = SimpleClustering::init_different_clusters(n);
+
+    for iter in 0..10 {
+        let updated = leiden.iterate(network, &mut clustering);
+        info!(
+            "  Leiden iter {}: {} clusters{}",
+            iter + 1,
+            clustering.num_clusters(),
+            if !updated { " (converged)" } else { "" }
+        );
+        if !updated {
+            break;
+        }
+    }
+
+    (0..n).map(|i| clustering.get(i)).collect()
+}
+
+/// Binary search on Leiden resolution to approximate `target_k` clusters.
+///
+/// `initial_resolution` should already be on the CPM scale
+/// (i.e., `modularity_gamma / (2 * total_edge_weight)`).
+/// Returns cluster labels (not necessarily contiguous).
+pub fn tune_leiden_resolution(
+    network: &leiden::Network,
+    n: usize,
+    target_k: usize,
+    initial_resolution: f64,
+    seed: Option<usize>,
+) -> Vec<usize> {
+    let mut lo = 1e-6_f64;
+    let mut hi = 10.0_f64;
+    let mut best = run_leiden(network, n, initial_resolution, seed);
+    let best_k = count_distinct(&best);
+
+    info!(
+        "  resolution={:.6e} → {} clusters (target {})",
+        initial_resolution, best_k, target_k
+    );
+
+    if best_k == target_k {
+        return best;
+    }
+    if best_k > target_k {
+        hi = initial_resolution;
+    } else {
+        lo = initial_resolution;
+    }
+
+    let mut best_diff = best_k.abs_diff(target_k);
+
+    for _ in 0..20 {
+        let mid = (lo + hi) / 2.0;
+        let result = run_leiden(network, n, mid, seed);
+        let k = count_distinct(&result);
+        info!("  resolution={:.6e} → {} clusters", mid, k);
+
+        if k > target_k {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+
+        let diff = k.abs_diff(target_k);
+        if diff < best_diff {
+            best = result;
+            best_diff = diff;
+        }
+
+        if k == target_k || (hi - lo) / hi.max(1e-10) < 1e-4 {
+            break;
+        }
+    }
+
+    best
+}
+
+/// Count distinct values in a label vector.
+fn count_distinct(labels: &[usize]) -> usize {
+    let max = labels.iter().copied().max().unwrap_or(0);
+    let mut seen = vec![false; max + 1];
+    for &l in labels {
+        seen[l] = true;
+    }
+    seen.iter().filter(|&&s| s).count()
+}
+
+/// Remap labels to contiguous 0..k.
+pub fn compact_labels(labels: &mut [usize]) {
+    let max = labels.iter().copied().max().unwrap_or(0);
+    let mut mapping = vec![usize::MAX; max + 1];
+    let mut next = 0usize;
+    for l in labels.iter_mut() {
+        if mapping[*l] == usize::MAX {
+            mapping[*l] = next;
+            next += 1;
+        }
+        *l = mapping[*l];
+    }
+}
+
 fn create_jobs(ntot: usize, block_size: usize) -> Vec<(usize, usize)> {
     let block_size = if block_size == 0 {
         DEFAULT_BLOCK_SIZE

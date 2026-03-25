@@ -236,6 +236,7 @@ impl LinkCommunityStats {
     }
 
     /// Recompute all statistics from scratch (drift correction).
+    #[allow(dead_code)]
     pub fn recompute(&mut self, profiles: &LinkProfileStore) {
         let m = self.m;
         let k = self.k;
