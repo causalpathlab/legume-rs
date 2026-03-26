@@ -160,13 +160,25 @@ pub struct DiffArgs {
 
     #[arg(
         long,
-        help = "Known confounder matrix file (tsv.gz, n_indv x n_covar).",
-        long_help = "Provide a known individual-level confounder matrix V instead of\n\
+        help = "Known covariate matrix file (tsv.gz, n_indv x n_covar).",
+        long_help = "Provide a known individual-level covariate matrix V instead of\n\
                      discovering confounders by random projection. The file should be\n\
                      a tab-delimited matrix (n_indv x n_covar) in .tsv.gz format.\n\
                      Rows correspond to individuals 0, 1, 2, ... in order."
     )]
-    confounder_file: Option<Box<str>>,
+    #[arg(conflicts_with = "adjustment_data_files")]
+    covariate_file: Option<Box<str>>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Separate SC data files (.zarr/.h5) for confounder adjustment.",
+        long_help = "Provide separate single-cell data (e.g., scRNA-seq) for computing\n\
+                     the confounder-adjustment projection. KNN matching will be based on\n\
+                     these data, while y1/y0 counts come from the primary data files.\n\
+                     Both datasets must have the same cells in the same column order."
+    )]
+    adjustment_data_files: Option<Vec<Box<str>>>,
 
     #[arg(
         long,
@@ -269,16 +281,32 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
 
     info!("Assign cells to pseudobulk samples to calibrate the null distribution");
 
-    if let Some(ref conf_file) = args.confounder_file {
-        info!("Loading known confounders from: {}", conf_file);
-        let confounder_v = Mat::from_tsv(conf_file, None)?;
+    if let Some(ref cov_file) = args.covariate_file {
+        info!("Loading known covariates from: {}", cov_file);
+        let covariate_v = Mat::from_tsv(cov_file, None)?;
         info!(
-            "Confounder matrix: {} individuals x {} covariates",
-            confounder_v.nrows(),
-            confounder_v.ncols()
+            "Covariate matrix: {} individuals x {} covariates",
+            covariate_v.nrows(),
+            covariate_v.ncols()
         );
         data.sparse_data
-            .assign_pseudobulk_with_known_confounders(&confounder_v, &data.cell_to_indv)?;
+            .assign_pseudobulk_with_known_confounders(&covariate_v, &data.cell_to_indv)?;
+    } else if let Some(ref adj_files) = args.adjustment_data_files {
+        info!("Loading adjustment data from {} file(s)", adj_files.len());
+        let adj_data = read_adjustment_data(adj_files, args.preload_data)?;
+        if adj_data.num_columns() != data.sparse_data.num_columns() {
+            return Err(anyhow::anyhow!(
+                "Adjustment data has {} cells but test data has {} cells — they must match",
+                adj_data.num_columns(),
+                data.sparse_data.num_columns()
+            ));
+        }
+        data.sparse_data.assign_pseudobulk_from_adjustment_data(
+            &adj_data,
+            args.proj_dim,
+            args.block_size,
+            &data.cell_to_indv,
+        )?;
     } else {
         data.sparse_data.assign_pseudobulk_individuals(
             args.proj_dim,
