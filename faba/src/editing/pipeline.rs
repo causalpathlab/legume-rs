@@ -80,21 +80,6 @@ impl ConversionParams {
         }
     }
 
-    /// Create value extraction function based on output type
-    pub fn value_extractor(&self) -> impl Fn(&ConversionData) -> f32 {
-        let output_type = self.output_value_type.clone();
-        move |dat: &ConversionData| -> f32 {
-            match output_type {
-                ConversionValueType::Ratio => {
-                    let tot = (dat.converted + dat.unconverted) as f32;
-                    (dat.converted as f32) / tot.max(1.)
-                }
-                ConversionValueType::Converted => dat.converted as f32,
-                ConversionValueType::Unconverted => dat.unconverted as f32,
-            }
-        }
-    }
-
     /// Minimum number of positions required to attempt site discovery.
     /// m6A requires a triplet (3 consecutive positions), A-to-I needs only 1.
     fn min_length_for_testing(&self) -> usize {
@@ -616,8 +601,17 @@ pub fn process_all_bam_files_to_backend(
         let gene_part = gene_key(x);
         format!("{}/{}/{}:{}", gene_part, suffix, x.chr, x.start).into_boxed_str()
     };
-    let take_value = params.value_extractor();
     let cutoffs = params.qc_cutoffs();
+
+    let ctx = BamProcessContext {
+        gene_sites,
+        params,
+        gff_map,
+        site_key: &site_key,
+        cutoffs: &cutoffs,
+        cell_membership: membership.as_ref(),
+        valid_cell_barcodes,
+    };
 
     let mut sites = HashSet::<Box<str>>::default();
     let mut site_data_files: Vec<Box<str>> = vec![];
@@ -629,16 +623,9 @@ pub fn process_all_bam_files_to_backend(
         process_bam_to_backend(
             bam_file,
             &batch_name,
-            gene_sites,
-            params,
-            gff_map,
-            &site_key,
-            &take_value,
-            &cutoffs,
+            &ctx,
             &mut sites,
             &mut site_data_files,
-            membership.as_ref(),
-            valid_cell_barcodes,
         )?;
     }
 
@@ -650,16 +637,9 @@ pub fn process_all_bam_files_to_backend(
             process_bam_to_backend(
                 bam_file,
                 &batch_name,
-                gene_sites,
-                params,
-                gff_map,
-                &site_key,
-                &take_value,
-                &cutoffs,
+                &ctx,
                 &mut sites,
                 &mut null_site_data_files,
-                membership.as_ref(),
-                valid_cell_barcodes,
             )?;
         }
     }
@@ -691,51 +671,57 @@ pub fn process_all_bam_files_to_backend(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Shared immutable context for BAM-to-backend processing.
+struct BamProcessContext<'a, SK: Fn(&BedWithGene) -> Box<str> + Send + Sync> {
+    gene_sites: &'a HashMap<GeneId, Vec<ConversionSite>>,
+    params: &'a ConversionParams,
+    gff_map: &'a GffRecordMap,
+    site_key: &'a SK,
+    cutoffs: &'a SqueezeCutoffs,
+    cell_membership: Option<&'a CellMembership>,
+    valid_cell_barcodes: Option<&'a rustc_hash::FxHashSet<CellBarcode>>,
+}
+
 fn process_bam_to_backend(
     bam_file: &str,
     batch_name: &str,
-    gene_sites: &HashMap<GeneId, Vec<ConversionSite>>,
-    params: &ConversionParams,
-    gff_map: &GffRecordMap,
-    site_key: &(impl Fn(&BedWithGene) -> Box<str> + Send + Sync),
-    _take_value: &(impl Fn(&ConversionData) -> f32 + Send + Sync),
-    cutoffs: &SqueezeCutoffs,
+    ctx: &BamProcessContext<'_, impl Fn(&BedWithGene) -> Box<str> + Send + Sync>,
     sites: &mut HashSet<Box<str>>,
     site_data_files: &mut Vec<Box<str>>,
-    cell_membership: Option<&CellMembership>,
-    valid_cell_barcodes: Option<&rustc_hash::FxHashSet<CellBarcode>>,
 ) -> anyhow::Result<()> {
     info!(
         "collecting data over {} sites from {} ...",
-        gene_sites.iter().map(|x| x.value().len()).sum::<usize>(),
+        ctx.gene_sites
+            .iter()
+            .map(|x| x.value().len())
+            .sum::<usize>(),
         bam_file
     );
 
     let stats = gather_conversion_stats(
-        gene_sites,
-        params,
-        gff_map,
+        ctx.gene_sites,
+        ctx.params,
+        ctx.gff_map,
         bam_file,
-        cell_membership,
-        valid_cell_barcodes,
+        ctx.cell_membership,
+        ctx.valid_cell_barcodes,
     )?;
 
     info!(
         "aggregating the '{}' triplets over {} stats...",
-        params.output_value_type,
+        ctx.params.output_value_type,
         stats.len()
     );
 
     // For m6A, output all three value types (ratio, converted, unconverted)
     // For ATOI, output only the specified value type
-    let output_types: Vec<ConversionValueType> = match params.mod_type {
+    let output_types: Vec<ConversionValueType> = match ctx.params.mod_type {
         ModificationType::M6A { .. } => vec![
             ConversionValueType::Ratio,
             ConversionValueType::Converted,
             ConversionValueType::Unconverted,
         ],
-        ModificationType::AtoI => vec![params.output_value_type.clone()],
+        ModificationType::AtoI => vec![ctx.params.output_value_type.clone()],
     };
 
     for value_type in output_types {
@@ -753,16 +739,16 @@ fn process_bam_to_backend(
             }
         };
 
-        let mod_suffix = match params.mod_type {
+        let mod_suffix = match ctx.params.mod_type {
             ModificationType::M6A { .. } => format!("_m6a_{}", value_type),
             ModificationType::AtoI => format!("_atoi_{}", value_type),
         };
         let output_name = format!("{}{}", batch_name, mod_suffix);
 
-        let site_data_file = params.backend_file_path(&output_name);
-        let triplets = summarize_stats(&stats, site_key, &value_fn);
+        let site_data_file = ctx.params.backend_file_path(&output_name);
+        let triplets = summarize_stats(&stats, ctx.site_key, &value_fn);
         let data = triplets.to_backend(&site_data_file)?;
-        data.qc(cutoffs.clone())?;
+        data.qc(ctx.cutoffs.clone())?;
         sites.extend(data.row_names()?);
         info!("created site-level data: {}", &site_data_file);
         site_data_files.push(site_data_file);

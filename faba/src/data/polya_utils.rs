@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use rust_htslib::bam;
-use rust_htslib::bam::ext::BamRecordExtensions;
 use rust_htslib::bam::record::Cigar;
 
 /// Get the query alignment boundaries from CIGAR string
@@ -116,14 +115,5 @@ pub fn get_polya_tail_length(bam_record: &bam::Record) -> i64 {
             Some(Cigar::SoftClip(len)) => *len as i64,
             _ => 0,
         }
-    }
-}
-
-/// Calculate the genomic position of a poly-A cleavage site from a BAM record.
-pub fn get_polya_position(bam_record: &bam::Record) -> i64 {
-    if bam_record.is_reverse() {
-        bam_record.reference_start()
-    } else {
-        bam_record.reference_end()
     }
 }

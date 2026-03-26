@@ -83,44 +83,31 @@ pub fn qc_passing_keys(
     rustc_hash::FxHashSet<Box<str>>,
     rustc_hash::FxHashSet<CellBarcode>,
 ) {
-    // Collect unique (cell, gene_key) pairs with nonzero total
-    let cell_gene_pairs: rustc_hash::FxHashSet<(CellBarcode, Box<str>)> = spliced
+    // Collect unique (cell, gene_key) pairs using references (no per-triplet allocation)
+    let cell_gene_pairs: rustc_hash::FxHashSet<(&CellBarcode, &str)> = spliced
         .par_iter()
         .chain(unspliced.par_iter())
-        .map(|(cb, feat, _)| {
-            let gk: Box<str> = extract_gene_key(feat).into();
-            (cb.clone(), gk)
-        })
+        .map(|(cb, feat, _)| (cb, extract_gene_key(feat)))
         .collect();
 
-    // Count nnz per gene (how many distinct cells)
-    let gene_nnz: FxHashMap<Box<str>, usize> =
-        cell_gene_pairs
-            .iter()
-            .fold(FxHashMap::default(), |mut acc, (_, gk)| {
-                *acc.entry(gk.clone()).or_default() += 1;
-                acc
-            });
-
-    // Count nnz per cell (how many distinct genes)
-    let cell_nnz: FxHashMap<CellBarcode, usize> =
-        cell_gene_pairs
-            .iter()
-            .fold(FxHashMap::default(), |mut acc, (cb, _)| {
-                *acc.entry(cb.clone()).or_default() += 1;
-                acc
-            });
+    // Single pass: count nnz per gene and per cell
+    let mut gene_nnz: FxHashMap<&str, usize> = FxHashMap::default();
+    let mut cell_nnz: FxHashMap<&CellBarcode, usize> = FxHashMap::default();
+    for &(cb, gk) in &cell_gene_pairs {
+        *gene_nnz.entry(gk).or_default() += 1;
+        *cell_nnz.entry(cb).or_default() += 1;
+    }
 
     let passing_genes: rustc_hash::FxHashSet<Box<str>> = gene_nnz
         .into_iter()
         .filter(|(_, n)| *n >= gene_min_cells)
-        .map(|(gk, _)| gk)
+        .map(|(gk, _)| Box::from(gk))
         .collect();
 
     let passing_cells: rustc_hash::FxHashSet<CellBarcode> = cell_nnz
         .into_iter()
         .filter(|(_, n)| *n >= cell_min_genes)
-        .map(|(cb, _)| cb)
+        .map(|(cb, _)| cb.clone())
         .collect();
 
     (passing_genes, passing_cells)

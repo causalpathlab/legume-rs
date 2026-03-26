@@ -3,6 +3,7 @@
 use genomic_data::sam::CellBarcode;
 use matrix_util::membership::Membership;
 use rustc_hash::FxHashMap as HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// Cell membership data structure for filtering BAM records by cell barcode
@@ -14,14 +15,9 @@ pub struct CellMembership {
     /// Cache for matched BAM barcodes (thread-safe for parallel processing)
     match_cache: Mutex<HashMap<Box<str>, Option<Box<str>>>>,
 
-    /// Statistics tracking
-    stats: Mutex<MatchStats>,
-}
-
-#[derive(Default)]
-struct MatchStats {
-    matched: usize,
-    total_checked: usize,
+    /// Statistics tracking (lock-free)
+    matched: AtomicUsize,
+    total_checked: AtomicUsize,
 }
 
 impl CellMembership {
@@ -43,7 +39,8 @@ impl CellMembership {
         Ok(Self {
             inner,
             match_cache: Mutex::new(HashMap::default()),
-            stats: Mutex::new(MatchStats::default()),
+            matched: AtomicUsize::new(0),
+            total_checked: AtomicUsize::new(0),
         })
     }
 
@@ -61,42 +58,35 @@ impl CellMembership {
         let bam_bc = match barcode {
             CellBarcode::Barcode(bc) => bc,
             CellBarcode::Missing => {
-                let mut stats = self.stats.lock().unwrap();
-                stats.total_checked += 1;
+                self.total_checked.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
         };
 
-        // Update stats
-        {
-            let mut stats = self.stats.lock().unwrap();
-            stats.total_checked += 1;
-        }
+        self.total_checked.fetch_add(1, Ordering::Relaxed);
 
-        // Check cache first
+        // Check cache (short lock)
         {
             let cache = self.match_cache.lock().unwrap();
             if let Some(result) = cache.get(bam_bc) {
                 if result.is_some() {
-                    let mut stats = self.stats.lock().unwrap();
-                    stats.matched += 1;
+                    self.matched.fetch_add(1, Ordering::Relaxed);
                 }
                 return result.clone();
             }
         }
 
-        // Use inner membership for lookup
+        // Compute outside lock (prefix scan can be O(n))
         let result = self.inner.get(bam_bc).map(Box::from);
 
-        // Cache the result
+        // Insert into cache
         self.match_cache
             .lock()
             .unwrap()
             .insert(bam_bc.clone(), result.clone());
 
         if result.is_some() {
-            let mut stats = self.stats.lock().unwrap();
-            stats.matched += 1;
+            self.matched.fetch_add(1, Ordering::Relaxed);
         }
 
         result
@@ -112,8 +102,10 @@ impl CellMembership {
     /// # Returns
     /// * `(matched, total_checked)` - Number of matched barcodes and total checked
     pub fn match_stats(&self) -> (usize, usize) {
-        let stats = self.stats.lock().unwrap();
-        (stats.matched, stats.total_checked)
+        (
+            self.matched.load(Ordering::Relaxed),
+            self.total_checked.load(Ordering::Relaxed),
+        )
     }
 
     /// Get all unique cell types in the membership
@@ -149,7 +141,8 @@ impl CellMembership {
         Self {
             inner,
             match_cache: Mutex::new(HashMap::default()),
-            stats: Mutex::new(MatchStats::default()),
+            matched: AtomicUsize::new(0),
+            total_checked: AtomicUsize::new(0),
         }
     }
 }
