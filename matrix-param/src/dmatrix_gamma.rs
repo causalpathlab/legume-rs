@@ -85,12 +85,6 @@ impl TwoStatParam for GammaMatrix {
     // fn len(&self) -> usize {
     //     self.num_rows * self.num_columns
     // }
-    fn calibrate(&mut self) {
-        self.map_calibrate_mean();
-        self.map_calibrate_log_mean();
-        self.map_calibrate_sd();
-        self.map_calibrate_log_sd();
-    }
     fn map_calibrate_mean(&mut self) {
         self.estimated_mean = self.a_stat.zip_map(&self.b_stat, |a, b| a / b);
     }

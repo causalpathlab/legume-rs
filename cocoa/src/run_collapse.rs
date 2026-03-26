@@ -1,13 +1,11 @@
 use crate::common::*;
 use crate::input::*;
 
+use auxiliary_data::cell_annotations::{CellAnnotations, CellTypeMembership};
 use clap::Parser;
-use matrix_param::dmatrix_gamma::GammaMatrix;
+use data_beans_alg::pseudobulk::collapse_pseudobulk;
 use matrix_param::io::ParamIo;
-use matrix_param::traits::TwoStatParam;
-use matrix_util::dmatrix_util::concatenate_horizontal;
-use matrix_util::dmatrix_util::subset_rows;
-use std::sync::{Arc, Mutex};
+use rustc_hash::FxHashMap as HashMap;
 
 #[derive(Parser, Debug, Clone)]
 pub struct CollapseArgs {
@@ -64,52 +62,34 @@ pub struct CollapseArgs {
     topic_proportion_value: TopicValue,
 
     #[arg(
-        long = "block-size",
-        default_value_t = 100,
-        help = "Block size for parallel processing.",
-        long_help = "Block size for parallel processing."
-    )]
-    block_size: usize,
-
-    #[arg(
         long = "a0",
         default_value_t = 1.0,
-        help = "Hyperparameter a0 in Gamma(a0, b0).",
-        long_help = "Hyperparameter a0 in Gamma(a0, b0)."
+        help = "Hyperparameter a0 in Gamma(a0, b0)."
     )]
     a0: f32,
 
     #[arg(
         long = "b0",
         default_value_t = 1.0,
-        help = "Hyperparameter b0 in Gamma(a0, b0).",
-        long_help = "Hyperparameter b0 in Gamma(a0, b0)."
+        help = "Hyperparameter b0 in Gamma(a0, b0)."
     )]
     b0: f32,
 
-    #[arg(
-        short,
-        long = "out",
-        required = true,
-        help = "Output file name.",
-        long_help = "Output file name."
-    )]
+    #[arg(short, long = "out", required = true, help = "Output file name.")]
     out: Box<str>,
 
     #[arg(
         long = "preload-data",
         default_value_t = false,
-        help = "Preload all the columns data.",
-        long_help = "Preload all the columns data."
+        help = "Preload all the columns data."
     )]
     preload_data: bool,
 }
 
 pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
-    // read data without `exposure`
     let data = read_input_data(InputDataArgs {
-        data_files: args.data_files.clone(),
-        indv_files: args.indv_files.clone(),
+        data_files: args.data_files,
+        indv_files: args.indv_files,
         topic_assignment_files: args.topic_assignment_files,
         topic_proportion_files: args.topic_proportion_files,
         exposure_assignment_file: None,
@@ -119,148 +99,78 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
 
     info!("Read the full data");
 
-    let cell_topic = &data.cell_topic;
-    let ngenes = data.sparse_data.num_rows();
-    let ntopics = cell_topic.ncols();
+    let column_names = data.sparse_data.column_names()?;
 
-    // break down into individual level collapsing
-    if let Some(indv_names) = data.sparse_data.group_keys() {
-        let nindv = indv_names.len();
+    // Convert cocoa's cell_to_indv into CellAnnotations
+    let annotations = build_cell_annotations(&data.cell_to_indv, &column_names);
 
-        let mut topic_indv_stat = TopicIndvStat {
-            count_gene_topic_indv: Mat::zeros(ngenes, ntopics * nindv),
-            count_topic_indv: DVec::zeros(ntopics * nindv),
-        };
+    // Convert cocoa's cell_topic matrix into CellTypeMembership
+    let membership = CellTypeMembership {
+        matrix: data.cell_topic,
+        cell_type_names: data.sorted_topic_names,
+    };
 
-        data.sparse_data.visit_columns_by_group(
-            &collect_topic_indv_stat_visitor,
-            cell_topic,
-            &mut topic_indv_stat,
-        )?;
+    // Delegate to data-beans-alg's collapse_pseudobulk
+    let collapsed = collapse_pseudobulk(
+        data.sparse_data,
+        &annotations,
+        &membership,
+        args.a0,
+        args.b0,
+    )?;
 
-        let mut gamma = GammaMatrix::new((ngenes, ntopics * nindv), args.a0, args.b0);
-        gamma.update_stat(
-            &topic_indv_stat.count_gene_topic_indv,
-            &concatenate_horizontal(&vec![topic_indv_stat.count_topic_indv; ngenes])?.transpose(),
-        );
-        gamma.calibrate();
+    // Write per cell type
+    for (ct_idx, ct_name) in collapsed.cell_type_names.iter().enumerate() {
+        let out_path = format!("{}.{}.parquet", args.out, ct_name);
+        info!("Writing {} to {}", ct_name, out_path);
 
-        let gene_names = data.sparse_data.row_names()?;
-        let out_file = format!("{}.indv.parquet", args.out.replace(".parquet", ""));
-
-        // Create column names with {indv}_{topic} format
-        let indv_topic_names: Vec<Box<str>> = indv_names
-            .iter()
-            .flat_map(|indv| {
-                (0..ntopics)
-                    .map(|topic| format!("{}_{}", indv, topic).into_boxed_str())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-
-        gamma.to_melted_parquet(
-            &out_file,
-            (Some(&gene_names), Some("gene")),
-            (Some(&indv_topic_names), Some("individual_topic")),
+        collapsed.gamma_params[ct_idx].to_melted_parquet(
+            &out_path,
+            (Some(&collapsed.gene_names), Some("gene")),
+            (Some(&collapsed.individual_ids), Some("individual")),
         )?;
     }
 
-    {
-        let mut topic_stat = TopicStat {
-            count_gene_topic: Mat::zeros(ngenes, ntopics),
-            count_topic: DVec::zeros(ntopics),
-        };
-
-        data.sparse_data.visit_columns_by_block(
-            &collect_topic_stat_visitor,
-            cell_topic,
-            &mut topic_stat,
-            Some(args.block_size),
-        )?;
-
-        let mut gamma = GammaMatrix::new((ngenes, ntopics), args.a0, args.b0);
-        gamma.update_stat(
-            &topic_stat.count_gene_topic,
-            &concatenate_horizontal(&vec![topic_stat.count_topic; ngenes])?.transpose(),
-        );
-        gamma.calibrate();
-
-        let gene_names = data.sparse_data.row_names()?;
-        let out_file = format!("{}.parquet", args.out.replace(".parquet", ""));
-        gamma.to_melted_parquet(
-            &out_file,
-            (Some(&gene_names), Some("gene")),
-            (None, Some("topic")),
-        )?;
-    }
+    info!(
+        "Collapse complete: {} cell types, {} individuals, {} genes",
+        collapsed.cell_type_names.len(),
+        collapsed.individual_ids.len(),
+        collapsed.gene_names.len(),
+    );
 
     Ok(())
 }
 
-//////////////////////////////////////////////////////
-// collapsing within each topic and individual pair //
-//////////////////////////////////////////////////////
+/// Convert cocoa's per-cell individual labels into CellAnnotations.
+fn build_cell_annotations(cell_to_indv: &[Box<str>], column_names: &[Box<str>]) -> CellAnnotations {
+    // Collect unique individual names in sorted order
+    let mut indv_set: Vec<Box<str>> = cell_to_indv
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    indv_set.retain(|s| !s.is_empty() && s.as_ref() != "NA");
 
-struct TopicIndvStat {
-    count_gene_topic_indv: Mat,
-    count_topic_indv: DVec,
-}
+    let indv_to_idx: HashMap<Box<str>, usize> = indv_set
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.clone(), i))
+        .collect();
 
-fn collect_topic_indv_stat_visitor(
-    indv_id: usize,  // individual id
-    cells: &[usize], // cells within this individual
-    data: &SparseIoVec,
-    cell_topic_nk: &Mat,
-    arc_stat: Arc<Mutex<&mut TopicIndvStat>>,
-) -> anyhow::Result<()> {
-    let y_gn = data.read_columns_csc(cells.iter().cloned())?;
+    // Map each cell (by column name) to its individual index
+    let cell_to_individual: HashMap<Box<str>, usize> = column_names
+        .iter()
+        .zip(cell_to_indv.iter())
+        .filter_map(|(cell_name, indv_name)| {
+            indv_to_idx
+                .get(indv_name)
+                .map(|&idx| (cell_name.clone(), idx))
+        })
+        .collect();
 
-    let z_nk = subset_rows(cell_topic_nk, cells.iter().cloned())?;
-    let z_k = z_nk.row_sum().transpose();
-    let y_gk = y_gn * z_nk;
-
-    let kk = cell_topic_nk.ncols();
-
-    let mut stat = arc_stat.lock().expect("lock");
-
-    let lb = kk * indv_id;
-    let ub = kk * (indv_id + 1);
-
-    let mut y_gk_target = stat.count_gene_topic_indv.columns_range_mut(lb..ub);
-    y_gk_target += &y_gk;
-
-    for (j, p) in (lb..ub).enumerate() {
-        stat.count_topic_indv[p] += z_k[j];
+    CellAnnotations {
+        cell_to_individual,
+        individual_ids: indv_set,
     }
-
-    Ok(())
-}
-
-//////////////////////////////////
-// collapsing within each topic //
-//////////////////////////////////
-
-struct TopicStat {
-    count_gene_topic: Mat,
-    count_topic: DVec,
-}
-
-fn collect_topic_stat_visitor(
-    bound: (usize, usize),
-    data: &SparseIoVec,
-    cell_topic_nk: &Mat,
-    arc_stat: Arc<Mutex<&mut TopicStat>>,
-) -> anyhow::Result<()> {
-    let (lb, ub) = bound;
-
-    let y_gn = data.read_columns_csc(lb..ub)?;
-    let z_nk = subset_rows(cell_topic_nk, lb..ub)?;
-
-    let z_k = z_nk.row_sum().transpose();
-    let y_gk = y_gn * z_nk;
-
-    let mut stat = arc_stat.lock().expect("lock");
-    stat.count_gene_topic += y_gk;
-    stat.count_topic += z_k;
-    Ok(())
 }

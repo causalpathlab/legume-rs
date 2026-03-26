@@ -10,6 +10,8 @@ use matrix_util::common_io::write_lines;
 use matrix_util::traits::{IoOps, MatOps};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use rayon::prelude::*;
+use rustc_hash::FxHashMap as HashMap;
 
 #[derive(Parser, Debug, Clone)]
 pub struct DiffArgs {
@@ -165,6 +167,20 @@ pub struct DiffArgs {
                      Rows correspond to individuals 0, 1, 2, ... in order."
     )]
     confounder_file: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Disable residual collider adjustment of topic proportions.",
+        long_help = "By default, the exposure-driven shift is removed from topic logits\n\
+                     before analysis to break collider bias (X -> A <- U). Use this flag\n\
+                     to disable this adjustment, e.g. when cell type is known not to be\n\
+                     a collider or for comparison experiments.\n\
+                     \n\
+                     Reference: adapted from residual collider stratification,\n\
+                     Hartwig et al. (2023) Eur J Epidemiol."
+    )]
+    no_residualize_topics: bool,
 }
 
 /////////////////////////////////////
@@ -181,6 +197,70 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         preload_data: args.preload_data,
         topic_value: args.topic_proportion_value,
     })?;
+
+    // Build individual name -> index mapping early (needed for residualization)
+    let indv_to_exposure = data
+        .indv_to_exposure
+        .take()
+        .ok_or(anyhow::anyhow!("Missing exposure information"))?;
+    let exposure_id = data
+        .exposure_id
+        .take()
+        .ok_or(anyhow::anyhow!("Missing exposure information"))?;
+    let n_exposure = exposure_id.len();
+
+    // Map individual names to numeric indices (filter unmatched "NA" cells)
+    let unique_indv_names: Vec<Box<str>> = data
+        .cell_to_indv
+        .iter()
+        .filter(|s| !s.is_empty() && s.as_ref() != "NA")
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let indv_name_to_index: HashMap<Box<str>, usize> = unique_indv_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.clone(), i))
+        .collect();
+    // Cell -> individual index mapping (usize::MAX for unmatched cells)
+    let cell_to_individual_index: Vec<usize> = data
+        .cell_to_indv
+        .iter()
+        .map(|name| indv_name_to_index.get(name).copied().unwrap_or(usize::MAX))
+        .collect();
+
+    // Individual -> exposure group mapping
+    let individual_exposure_group: Vec<usize> = unique_indv_names
+        .iter()
+        .map(|indv| {
+            if let Some(exposure) = indv_to_exposure.get(indv) {
+                exposure_id[exposure]
+            } else {
+                n_exposure // unassigned individuals kept for confounding control
+            }
+        })
+        .collect();
+
+    // Residual collider adjustment: remove the exposure-driven shift from
+    // topic proportions to break collider bias (X -> A <- U).
+    //
+    // By default ON. Use --no-residualize-topics to disable.
+    //
+    // Reference: adapted from residual collider stratification,
+    //   Hartwig et al. (2023) Eur J Epidemiol
+    //   "Avoiding collider bias in MR when performing stratified analyses"
+    if !args.no_residualize_topics && data.cell_topic.ncols() > 1 {
+        info!("Residualizing topic proportions to remove exposure-driven collider bias");
+        let shifts = remove_exposure_effect_from_topic_proportions(
+            &mut data.cell_topic,
+            &cell_to_individual_index,
+            &individual_exposure_group,
+        );
+        for (k, &shift) in shifts.iter().enumerate() {
+            info!("  topic {}: max exposure shift removed = {:.4}", k, shift);
+        }
+    }
 
     if data.cell_topic.ncols() > 1 {
         info!("normalizing cell topic proportion");
@@ -208,15 +288,9 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     }
 
     let indv_names = data.sparse_data.batch_names().unwrap();
-    let indv_to_exposure = data
-        .indv_to_exposure
-        .ok_or(anyhow::anyhow!("Missing exposure information"))?;
-    let exposure_id = data
-        .exposure_id
-        .ok_or(anyhow::anyhow!("Missing exposure information"))?;
-    let n_exposure = exposure_id.len();
     let topic_names = data.sorted_topic_names;
 
+    // Build exposure assignment indexed by batch order (for downstream use)
     let exposure_assignment: Vec<usize> = indv_names
         .iter()
         .map(|indv| {
@@ -295,31 +369,49 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         );
         let cache = MatchCache::build(&data.sparse_data, args.knn)?;
 
+        // Pre-generate shuffled exposure assignments (sequential, for reproducibility)
+        let mut rng = rand::rngs::StdRng::seed_from_u64(args.permutation_seed);
+        let permuted_exposures: Vec<Vec<usize>> = (0..args.n_permutations)
+            .map(|_| {
+                let mut perm = exposure_assignment.clone();
+                perm.shuffle(&mut rng);
+                perm
+            })
+            .collect();
+
+        // Run permutations in parallel — MatchCache is thread-safe (&self)
+        let hyper_param = Some((args.a0, args.b0));
+        let num_opt_iter = args.num_opt_iter;
+        let cell_topic = &cocoa_input.cell_topic_nk;
+        let n_perm = args.n_permutations;
+
+        let perm_contrasts: Vec<Vec<f32>> = permuted_exposures
+            .into_par_iter()
+            .enumerate()
+            .map(|(p, perm_exposure)| -> anyhow::Result<Vec<f32>> {
+                let perm_stat = cache.replay_with_exposure(
+                    cell_topic,
+                    &perm_exposure,
+                    n_genes,
+                    n_topics,
+                    num_opt_iter,
+                    hyper_param,
+                )?;
+                let perm_params = perm_stat.estimate_parameters()?;
+                let contrast = compute_exposure_contrast(&perm_params, &perm_exposure);
+                info!("Permutation {}/{}", p + 1, n_perm);
+                Ok(contrast)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        // Reduce: accumulate null distribution statistics
         let mut null_sum = vec![0f32; n_genes];
         let mut null_sum_sq = vec![0f32; n_genes];
-
-        let mut rng = rand::rngs::StdRng::seed_from_u64(args.permutation_seed);
-
-        for p in 0..args.n_permutations {
-            let mut perm_exposure = exposure_assignment.clone();
-            perm_exposure.shuffle(&mut rng);
-
-            let perm_stat = cache.replay_with_exposure(
-                &cocoa_input.cell_topic_nk,
-                &perm_exposure,
-                n_genes,
-                n_topics,
-                args.num_opt_iter,
-                Some((args.a0, args.b0)),
-            )?;
-            let perm_params = perm_stat.estimate_parameters()?;
-            let perm_contrast = compute_exposure_contrast(&perm_params, &perm_exposure);
-
+        for contrast in &perm_contrasts {
             for g in 0..n_genes {
-                null_sum[g] += perm_contrast[g];
-                null_sum_sq[g] += perm_contrast[g] * perm_contrast[g];
+                null_sum[g] += contrast[g];
+                null_sum_sq[g] += contrast[g] * contrast[g];
             }
-            info!("Permutation {}/{}", p + 1, args.n_permutations);
         }
 
         // Compute z-scores and p-values

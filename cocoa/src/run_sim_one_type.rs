@@ -239,43 +239,34 @@ impl GlmSimulator {
 
 #[derive(Parser, Debug, Clone)]
 pub struct SimOneTypeArgs {
-    #[arg(
-        short = 'r',
-        required = true,
-        help = "number of genes",
-        long_help = "Number of genes"
-    )]
+    #[arg(short = 'r', required = true, help = "Number of genes (G)")]
     n_genes: usize,
 
     #[arg(
         short = 'c',
         required = true,
-        help = "number of cells",
-        long_help = "Number of cells. It can have more or less number of cells."
+        help = "Total number of cells (distributed across individuals via Poisson)"
     )]
     n_cells: usize,
 
     #[arg(
         short = 'a',
         required = true,
-        help = "number of causal genes per cell type",
-        long_help = "Number of causal genes per cell type"
+        help = "Number of causal genes with X -> Y effect (each assigned a random exposure category)"
     )]
     n_causal_genes: usize,
 
     #[arg(
         long,
         default_value_t = 1,
-        help = "number of covariates",
-        long_help = "Number of covariates"
+        help = "Dimensions of W_i, the individual-level confounder (W -> X and W -> Y)"
     )]
     n_covariates: usize,
 
     #[arg(
         long,
         default_value_t = 5,
-        help = "number of samples/individuals per exposure group",
-        long_help = "Number of samples/individuals per exposure group"
+        help = "Individuals per exposure group (total N = n_exposure * n_samples_per_exposure)"
     )]
     n_samples_per_exposure: usize,
 
@@ -283,40 +274,35 @@ pub struct SimOneTypeArgs {
         short,
         long,
         default_value_t = 2,
-        help = "number of exposure groups",
-        long_help = "Number of exposure groups"
+        help = "Number of exposure categories for X_i"
     )]
     n_exposure: usize,
 
     #[arg(
         long,
         default_value_t = 0.5,
-        help = "proportion of variance explained by confounding to exposure",
-        long_help = "Proportion of variance explained by confounding to exposure"
+        help = "PVE for W -> X edge: how strongly W confounds exposure assignment"
     )]
     pve_covar_exposure: f32,
 
     #[arg(
         long,
         default_value_t = 0.3,
-        help = "proportion of expression variance explained by causal exposure",
-        long_help = "Proportion of expression variance explained by causal exposure"
+        help = "PVE for X -> Y edge: causal effect of exposure on gene expression (causal genes only)"
     )]
     pve_exposure_gene: f32,
 
     #[arg(
         long,
         default_value_t = 0.5,
-        help = "proportion of expression variance explained by covariates",
-        long_help = "Proportion of expression variance explained by covariates"
+        help = "PVE for W -> Y edge: confounder effect on gene expression"
     )]
     pve_covar_gene: f32,
 
     #[arg(
         long,
         default_value_t = DEFAULT_EFFECT_SIZE,
-        help = "effect size for causal genes",
-        long_help = "Effect size for causal genes (differential expression magnitude)"
+        help = "Standardized effect size for causal genes (+effect if matching category, -effect otherwise)"
     )]
     effect_size: f32,
 
@@ -324,43 +310,29 @@ pub struct SimOneTypeArgs {
         long,
         value_delimiter = ',',
         default_value = "1.0,1.0",
-        help = "hyperparameter for gamma distribution",
-        long_help = "Hyperparameter for gamma distribution"
+        help = "Gamma(shape,rate) hyperparameters for cell depth factor ρ_j"
     )]
     gamma_hyperparam: Vec<f32>,
 
-    #[arg(
-        long,
-        default_value_t = 42,
-        help = "random seed",
-        long_help = "Random seed"
-    )]
+    #[arg(long, default_value_t = 42, help = "Random seed")]
     rseed: u64,
 
     #[arg(
         long,
         value_enum,
         default_value = "zarr",
-        help = "backend",
-        long_help = "Backend"
+        help = "Sparse matrix backend for output counts"
     )]
     backend: SparseIoBackend,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "save mtx",
-        long_help = "Save mtx"
+        help = "Also save counts in MatrixMarket (.mtx.gz) format"
     )]
     save_mtx: bool,
 
-    #[arg(
-        long,
-        short,
-        required = true,
-        help = "Output header",
-        long_help = "Output header"
-    )]
+    #[arg(long, short, required = true, help = "Output file path prefix")]
     out: Box<str>,
 }
 

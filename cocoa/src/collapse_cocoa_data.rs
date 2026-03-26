@@ -125,34 +125,32 @@ fn collect_matched_stat_visitor(
                 None => continue, // no matches at all — skip y1 and y0
             };
 
+            // Cache exp(-distance) once per matched cell (reused across topics)
+            let exp_neg_dist: Vec<f32> = y0_cols.iter().map(|&a| (-distances[a]).exp()).collect();
+
             for (k, &z_jk) in z_j.iter().enumerate() {
                 if z_jk < 1e-8 {
                     continue;
                 }
 
-                // Weight by both distance and matched cell's topic membership
-                let weights: Vec<f32> = y0_cols
+                let denom: f32 = y0_cols
                     .iter()
-                    .map(|&a| {
-                        let z_matched_k = input.cell_topic_nk[(matched_glob[a], k)];
-                        (-distances[a]).exp() * z_matched_k
-                    })
-                    .collect();
-                let denom = weights.iter().sum::<f32>();
+                    .zip(exp_neg_dist.iter())
+                    .map(|(&a, &ed)| ed * input.cell_topic_nk[(matched_glob[a], k)])
+                    .sum();
                 if denom < 1e-8 {
-                    continue; // no same-type matches — skip both y1 and y0
+                    continue;
                 }
 
-                // Accumulate y0
-                y0_cols.iter().zip(weights.iter()).for_each(|(&a, &w_j)| {
+                for (idx, &a) in y0_cols.iter().enumerate() {
+                    let z_matched_k = input.cell_topic_nk[(matched_glob[a], k)];
+                    let w_j = exp_neg_dist[idx] * z_matched_k;
                     let y0_a = y0_mat.get_col(a).expect("cell a");
-                    y0_a.row_indices()
-                        .iter()
-                        .zip(y0_a.values().iter())
-                        .for_each(|(&g, &y0_gj)| {
-                            y0_dk[(g, k)] += z_jk * y0_gj * w_j / denom;
-                        });
-                });
+                    let scale = z_jk * w_j / denom;
+                    for (&g, &y0_gj) in y0_a.row_indices().iter().zip(y0_a.values().iter()) {
+                        y0_dk[(g, k)] += scale * y0_gj;
+                    }
+                }
 
                 // Accumulate y1 symmetrically
                 if let Some(y1_j) = y1_all.get_col(cell_pos) {
@@ -185,10 +183,8 @@ fn collect_matched_stat_visitor(
 
     for (indv_index, indv_y1, indv_size) in &indv_stats {
         for k in 0..n_topics {
-            let y1_di = stat.indv_y1_stat_mut(k);
-            for g in 0..n_genes {
-                y1_di[(g, *indv_index)] += indv_y1[(g, k)];
-            }
+            let mut col = stat.indv_y1_stat_mut(k).column_mut(*indv_index);
+            col += &indv_y1.column(k);
             stat.indv_size_stat_mut(k)[(*indv_index, this_sample)] += indv_size[k];
         }
     }
@@ -384,33 +380,34 @@ fn replay_one_sample(
                 None => continue,
             };
 
+            let exp_neg_dist: Vec<f32> = y0_cols
+                .iter()
+                .map(|&a| (-indv_cache.distances[a]).exp())
+                .collect();
+
             for (k, &z_jk) in z_j.iter().enumerate() {
                 if z_jk < 1e-8 {
                     continue;
                 }
 
-                let weights: Vec<f32> = y0_cols
+                let denom: f32 = y0_cols
                     .iter()
-                    .map(|&a| {
-                        let z_matched_k = cell_topic_nk[(indv_cache.matched_glob[a], k)];
-                        (-indv_cache.distances[a]).exp() * z_matched_k
-                    })
-                    .collect();
-                let denom = weights.iter().sum::<f32>();
+                    .zip(exp_neg_dist.iter())
+                    .map(|(&a, &ed)| ed * cell_topic_nk[(indv_cache.matched_glob[a], k)])
+                    .sum();
                 if denom < 1e-8 {
                     continue;
                 }
 
-                // Accumulate y0
-                y0_cols.iter().zip(weights.iter()).for_each(|(&a, &w_j)| {
+                for (idx, &a) in y0_cols.iter().enumerate() {
+                    let z_matched_k = cell_topic_nk[(indv_cache.matched_glob[a], k)];
+                    let w_j = exp_neg_dist[idx] * z_matched_k;
                     let y0_a = indv_cache.y0_mat.get_col(a).expect("cell a");
-                    y0_a.row_indices()
-                        .iter()
-                        .zip(y0_a.values().iter())
-                        .for_each(|(&g, &y0_gj)| {
-                            y0_dk[(g, k)] += z_jk * y0_gj * w_j / denom;
-                        });
-                });
+                    let scale = z_jk * w_j / denom;
+                    for (&g, &y0_gj) in y0_a.row_indices().iter().zip(y0_a.values().iter()) {
+                        y0_dk[(g, k)] += scale * y0_gj;
+                    }
+                }
 
                 // Accumulate y1
                 if let Some(y1_j) = cache.y1_all.get_col(cell_pos) {
@@ -442,10 +439,8 @@ fn replay_one_sample(
 
     for (indv_index, indv_y1, indv_size) in &indv_stats {
         for k in 0..n_topics {
-            let y1_di = stat.indv_y1_stat_mut(k);
-            for g in 0..n_genes {
-                y1_di[(g, *indv_index)] += indv_y1[(g, k)];
-            }
+            let mut col = stat.indv_y1_stat_mut(k).column_mut(*indv_index);
+            col += &indv_y1.column(k);
             stat.indv_size_stat_mut(k)[(*indv_index, this_sample)] += indv_size[k];
         }
     }

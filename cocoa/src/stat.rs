@@ -1,8 +1,9 @@
 use crate::common::*;
-use indicatif::ProgressIterator;
 use matrix_param::dmatrix_gamma::GammaMatrix;
+use matrix_param::traits::CalibrateTarget;
 use matrix_param::traits::Inference;
 use matrix_param::traits::*;
+use rayon::prelude::*;
 use special::Error;
 
 pub struct CocoaStat {
@@ -98,11 +99,12 @@ impl CocoaStat {
     }
 
     pub fn estimate_parameters(&self) -> anyhow::Result<Vec<CocoaGammaOut>> {
-        let mut ret = vec![];
-        for k in 0..self.n_topics {
-            ret.push(self.optimize_each_topic(k)?);
-            info!("finished optimization {}/{}", k + 1, self.n_topics);
-        }
+        let ret: Result<Vec<_>, _> = (0..self.n_topics)
+            .into_par_iter()
+            .map(|k| self.optimize_each_topic(k))
+            .collect();
+        let ret = ret?;
+        info!("finished optimization for {} topics", self.n_topics);
         Ok(ret)
     }
 
@@ -126,7 +128,7 @@ impl CocoaStat {
         let mut denom_dp = Mat::zeros(n_genes, n_pb);
         let mut denom_di = Mat::zeros(n_genes, n_indv);
 
-        (0..self.n_opt_iter).progress().for_each(|_opt_iter| {
+        for _opt_iter in 0..self.n_opt_iter {
             // shared component μ(d,p)
             //
             // y1(d,p) + y0(d,p)
@@ -136,14 +138,15 @@ impl CocoaStat {
             let gamma_dp = gamma_param_dp.posterior_mean();
             let tau_di = tau_param_di.posterior_mean();
 
+            // γ(d,p) * n(p): scale each column p by size_p[p]
             denom_dp.copy_from(gamma_dp);
-            denom_dp.row_iter_mut().for_each(|mut row| {
-                row.component_mul_assign(&size_p.transpose());
-            });
+            for p in 0..n_pb {
+                denom_dp.column_mut(p).scale_mut(size_p[p]);
+            }
             denom_dp += tau_di * size_ip;
 
             mu_param_dp.update_stat(&y10_dp, &denom_dp);
-            mu_param_dp.calibrate();
+            mu_param_dp.calibrate_with(CalibrateTarget::MeanOnly);
 
             // matched component γ(d,p)
             //
@@ -153,13 +156,14 @@ impl CocoaStat {
 
             let mu_dp = mu_param_dp.posterior_mean();
 
+            // μ(d,p) * n(p): scale each column p by size_p[p]
             denom_dp.copy_from(mu_dp);
-            denom_dp.row_iter_mut().for_each(|mut row| {
-                row.component_mul_assign(&size_p.transpose());
-            });
+            for p in 0..n_pb {
+                denom_dp.column_mut(p).scale_mut(size_p[p]);
+            }
 
             gamma_param_dp.update_stat(y0_dp, &denom_dp);
-            gamma_param_dp.calibrate();
+            gamma_param_dp.calibrate_with(CalibrateTarget::MeanOnly);
 
             // individual-specific effect τ(d,i)
             //
@@ -169,8 +173,14 @@ impl CocoaStat {
 
             denom_di.copy_from(&(mu_dp * size_ip.transpose()));
             tau_param_di.update_stat(y1_di, &denom_di);
-            tau_param_di.calibrate();
-        });
+            tau_param_di.calibrate_with(CalibrateTarget::MeanOnly);
+        }
+
+        // Final full calibration for downstream use (log_mean needed
+        // for exposure contrast, all quantities needed for I/O export)
+        mu_param_dp.calibrate();
+        gamma_param_dp.calibrate();
+        tau_param_di.calibrate();
 
         Ok(CocoaGammaOut {
             shared: mu_param_dp,
@@ -220,4 +230,179 @@ pub fn z_to_pvalue(z: f32) -> f32 {
     // p = erfc(|z| / sqrt(2))
     let p = (z.abs() as f64 / std::f64::consts::SQRT_2).compl_error();
     p as f32
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Residual collider adjustment for topic proportions
+//
+// When cell type A is a collider (X -> A <- U), conditioning on A
+// opens the spurious path X -> A <- U -> Y. We remove the exposure-
+// driven component of topic logits before matching, breaking the
+// X -> A edge.
+//
+// Method: adapted from residual collider stratification.
+//   Hartwig et al. (2023) Eur J Epidemiol
+//   "Avoiding collider bias in MR when performing stratified analyses"
+//
+// Background on collider bias with continuous conditioning:
+//   Akimova et al. (2021) Sci Rep
+//   "Gene-environment dependencies lead to collider bias in models
+//    with polygenic scores"
+//
+// See also:
+//   Cole et al. (2010) Int J Epidemiol
+//   "Illustrating bias due to conditioning on a collider"
+//
+//   Davey Smith & Munafò (2019) Int J Epidemiol
+//   "Contextualizing selection bias in Mendelian randomization"
+///////////////////////////////////////////////////////////////////////////
+
+/// Average each topic's log-proportion across cells belonging to the
+/// same individual.
+///
+/// Returns (n_individuals x n_topics) matrix of per-individual means.
+fn average_topic_log_proportions_per_individual(
+    cell_topic_proportions: &Mat, // n_cells x n_topics (probability space)
+    cell_to_individual: &[usize], // which individual each cell belongs to
+    n_individuals: usize,
+) -> Mat {
+    let n_topics = cell_topic_proportions.ncols();
+    let mut sum = Mat::zeros(n_individuals, n_topics);
+    let mut count = vec![0usize; n_individuals];
+
+    for (j, &indv) in cell_to_individual.iter().enumerate() {
+        if indv >= n_individuals {
+            continue; // skip unmatched cells
+        }
+        count[indv] += 1;
+        for k in 0..n_topics {
+            let val = cell_topic_proportions[(j, k)].max(1e-30).ln();
+            sum[(indv, k)] += val;
+        }
+    }
+
+    for i in 0..n_individuals {
+        if count[i] > 0 {
+            let n = count[i] as f32;
+            for k in 0..n_topics {
+                sum[(i, k)] /= n;
+            }
+        }
+    }
+
+    sum
+}
+
+/// For each topic, compute the mean log-proportion within each exposure
+/// group and the grand mean across all individuals.
+///
+/// Returns:
+///   - exposure_group_means: (n_exposure_groups x n_topics)
+///   - grand_mean: (1 x n_topics)
+fn average_topic_logits_per_exposure_group(
+    individual_topic_logits: &Mat,       // n_individuals x n_topics
+    individual_exposure_group: &[usize], // exposure group of each individual
+) -> (Mat, Mat) {
+    let n_individuals = individual_topic_logits.nrows();
+    let n_topics = individual_topic_logits.ncols();
+    let n_groups = individual_exposure_group.iter().max().map_or(0, |&m| m + 1);
+
+    let mut group_sum = Mat::zeros(n_groups, n_topics);
+    let mut group_count = vec![0usize; n_groups];
+    let mut grand_sum = Mat::zeros(1, n_topics);
+
+    for i in 0..n_individuals {
+        let g = individual_exposure_group[i];
+        group_count[g] += 1;
+        for k in 0..n_topics {
+            let val = individual_topic_logits[(i, k)];
+            group_sum[(g, k)] += val;
+            grand_sum[(0, k)] += val;
+        }
+    }
+
+    for g in 0..n_groups {
+        if group_count[g] > 0 {
+            let n = group_count[g] as f32;
+            for k in 0..n_topics {
+                group_sum[(g, k)] /= n;
+            }
+        }
+    }
+
+    let n_total = n_individuals as f32;
+    for k in 0..n_topics {
+        grand_sum[(0, k)] /= n_total;
+    }
+
+    (group_sum, grand_sum)
+}
+
+/// Remove the exposure-driven shift from each cell's topic proportions.
+///
+/// For cell j in individual i with exposure group x:
+///   log z'_jk = log z_jk - (group_mean_xk - grand_mean_k)
+///
+/// This breaks the X -> A (exposure -> cell type) edge in the collider
+/// DAG while preserving within-individual cell-level variation.
+///
+/// The input `cell_topic_proportions` is in probability space (after
+/// exp of logits). We take log, subtract the exposure-group shift,
+/// and exp back. The downstream `sum_to_one_rows_inplace()` will
+/// re-normalize to valid proportions.
+///
+/// Works for any number of exposure groups (binary or multi-category).
+///
+/// Returns per-topic max absolute shift across groups for logging.
+pub fn remove_exposure_effect_from_topic_proportions(
+    cell_topic_proportions: &mut Mat, // n_cells x n_topics, modified in place
+    cell_to_individual: &[usize],     // which individual each cell belongs to
+    individual_exposure_group: &[usize], // exposure group of each individual
+) -> Vec<f32> {
+    let n_topics = cell_topic_proportions.ncols();
+    let n_cells = cell_topic_proportions.nrows();
+    let n_individuals = individual_exposure_group.len();
+
+    // Step 1: individual-level mean log-proportions
+    let individual_topic_logits = average_topic_log_proportions_per_individual(
+        cell_topic_proportions,
+        cell_to_individual,
+        n_individuals,
+    );
+
+    // Step 2: per-exposure-group means and grand mean
+    let (group_means, grand_mean) = average_topic_logits_per_exposure_group(
+        &individual_topic_logits,
+        individual_exposure_group,
+    );
+
+    // Precompute multiplicative factors: exp(-(group_mean - grand_mean))
+    // Since exp(log(z) - shift) = z * exp(-shift), we avoid per-cell log/exp
+    let n_groups = group_means.nrows();
+    let mut scale_per_group_topic = Mat::zeros(n_groups, n_topics);
+    let mut max_shift_per_topic = vec![0f32; n_topics];
+    for g in 0..n_groups {
+        for k in 0..n_topics {
+            let shift = group_means[(g, k)] - grand_mean[(0, k)];
+            scale_per_group_topic[(g, k)] = (-shift).exp();
+            let abs_shift = shift.abs();
+            if abs_shift > max_shift_per_topic[k] {
+                max_shift_per_topic[k] = abs_shift;
+            }
+        }
+    }
+
+    // Step 3: multiply each cell's proportions by the precomputed scale factor
+    for j in 0..n_cells {
+        let indv = cell_to_individual[j];
+        if indv >= n_individuals {
+            continue; // skip unmatched cells
+        }
+        let exp_group = individual_exposure_group[indv];
+        for k in 0..n_topics {
+            cell_topic_proportions[(j, k)] *= scale_per_group_topic[(exp_group, k)];
+        }
+    }
+
+    max_shift_per_topic
 }
