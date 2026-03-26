@@ -269,6 +269,22 @@ fn get_backend_from_extension(file_path: &str) -> anyhow::Result<SparseIoBackend
     }
 }
 
+/// Load sparse SC data for confounder adjustment only (no annotations).
+pub fn read_adjustment_data(data_files: &[Box<str>], preload: bool) -> anyhow::Result<SparseIoVec> {
+    let mut sparse_data = SparseIoVec::new();
+    for this_data_file in data_files {
+        info!("Importing adjustment data: {}", this_data_file);
+        let backend = get_backend_from_extension(this_data_file)?;
+        let mut this_data = open_sparse_matrix(this_data_file, &backend)?;
+        if preload {
+            this_data.preload_columns()?;
+        }
+        let data_name = basename(this_data_file)?;
+        sparse_data.push(Arc::from(this_data), Some(data_name))?;
+    }
+    Ok(sparse_data)
+}
+
 pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
     // Validate input arguments
     if let Some(indv_files) = args.indv_files.as_ref() {
