@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::data::bam_io;
 use crate::data::cell_membership::CellMembership;
 use crate::data::dna::*;
@@ -19,13 +17,6 @@ pub enum CountMode<'a> {
         counts: HashMap<i64, HashMap<CellBarcode, DnaBaseCount>>,
         cell_barcode_tag: Vec<u8>,
         cell_membership: Option<&'a CellMembership>,
-    },
-    /// Aggregated marginal counts filtered to a specific cell type
-    CellTypeFiltered {
-        counts: HashMap<i64, DnaBaseCount>,
-        cell_barcode_tag: Vec<u8>,
-        cell_membership: &'a CellMembership,
-        target_celltype: Box<str>,
     },
 }
 
@@ -79,34 +70,9 @@ impl<'a> DnaBaseFreqMap<'a> {
         }
     }
 
-    /// Frequency map for a specific cell type only.
-    /// Only cells matching the target cell type will be included.
-    ///
-    /// * `cell_barcode_tag` - tag word, e.g., "CB" in 10x
-    /// * `cell_membership` - cell membership for filtering
-    /// * `target_celltype` - only include cells of this type
-    pub fn new_for_celltype(
-        cell_barcode_tag: &str,
-        cell_membership: &'a CellMembership,
-        target_celltype: &str,
-    ) -> Self {
-        Self {
-            mode: CountMode::CellTypeFiltered {
-                counts: HashMap::default(),
-                cell_barcode_tag: cell_barcode_tag.as_bytes().to_vec(),
-                cell_membership,
-                target_celltype: target_celltype.into(),
-            },
-            anchor: None,
-            position_filter: None,
-            min_base_quality: 20,
-            min_mapping_quality: 20,
-        }
-    }
-
     /// Set the anchor location and base for m6A counting:
-    /// - `pos` can be m6A genomic position
-    /// - `base` can be the corresponding DNA base, such as `A`
+    /// only count bases on reads that cover the anchor position with the expected base.
+    #[allow(dead_code)]
     pub fn set_anchor_position(&mut self, loc: i64, base: Dna) {
         self.anchor = Some((loc, base));
     }
@@ -271,25 +237,6 @@ impl<'a> DnaBaseFreqMap<'a> {
                     }
                 }
             }
-
-            CountMode::CellTypeFiltered {
-                counts,
-                cell_barcode_tag,
-                cell_membership,
-                target_celltype,
-            } => {
-                let cell_barcode = bam_io::extract_cell_barcode(&bam_record, cell_barcode_tag);
-
-                if cell_membership.matches_celltype(&cell_barcode, target_celltype) {
-                    Self::accumulate_marginal(
-                        &seq,
-                        &bam_record,
-                        counts,
-                        self.position_filter.as_ref(),
-                        self.min_base_quality,
-                    );
-                }
-            }
         }
     }
 
@@ -298,7 +245,6 @@ impl<'a> DnaBaseFreqMap<'a> {
         let mut ret: Vec<i64> = match &self.mode {
             CountMode::Marginal { counts } => counts.keys().copied().collect(),
             CountMode::PerCell { counts, .. } => counts.keys().copied().collect(),
-            CountMode::CellTypeFiltered { counts, .. } => counts.keys().copied().collect(),
         };
         ret.sort();
         ret
@@ -312,22 +258,10 @@ impl<'a> DnaBaseFreqMap<'a> {
         }
     }
 
-    /// Marginal frequency on a genomic position `pos`
-    pub fn marginal_frequency_at(&self, pos: i64) -> Option<&DnaBaseCount> {
-        match &self.mode {
-            CountMode::Marginal { counts } | CountMode::CellTypeFiltered { counts, .. } => {
-                counts.get(&pos)
-            }
-            _ => None,
-        }
-    }
-
     /// Marginal frequency map
     pub fn marginal_frequency_map(&self) -> Option<&HashMap<i64, DnaBaseCount>> {
         match &self.mode {
-            CountMode::Marginal { counts } | CountMode::CellTypeFiltered { counts, .. } => {
-                Some(counts)
-            }
+            CountMode::Marginal { counts } => Some(counts),
             _ => None,
         }
     }

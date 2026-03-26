@@ -587,14 +587,47 @@ fn process_utr(
     let beta_arr: Vec<f32> = vec![default_beta; candidate_sites.len()];
 
     let em_params = args.em_params();
-    let em_result = fixed_inference(
-        &candidate_sites,
-        &beta_arr,
-        &theta_lik_matrix,
-        &theta_grid,
-        utr.utr_length as f32,
-        lik_params.max_polya,
-        &em_params,
+
+    // Rank candidate sites by fragment coverage (descending) for BIC model selection
+    let merge_dist = args.merge_distance;
+    let site_order = {
+        let mut scored: Vec<(usize, usize)> = candidate_sites
+            .iter()
+            .enumerate()
+            .map(|(i, &site)| {
+                let count = all_fragments
+                    .iter()
+                    .filter(|f| {
+                        f.pa_site
+                            .map(|pa| (pa - site).abs() < merge_dist)
+                            .unwrap_or(false)
+                    })
+                    .count();
+                (i, count)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.into_iter().map(|(i, _)| i).collect::<Vec<_>>()
+    };
+
+    let site_data = SiteModelData {
+        alpha_arr: &candidate_sites,
+        beta_arr: &beta_arr,
+        theta_lik_matrix: &theta_lik_matrix,
+        theta_grid: &theta_grid,
+        utr_length: utr.utr_length as f32,
+        max_polya: lik_params.max_polya,
+    };
+    let em_result = select_sites_by_bic(&site_data, &em_params, &site_order);
+
+    log::debug!(
+        "UTR {}: BIC selected {} sites (from {} candidates), BIC={:.1}, LL={:.1}, {} iters",
+        utr.name,
+        em_result.alphas.len(),
+        candidate_sites.len(),
+        em_result.bic,
+        em_result.log_lik,
+        em_result.n_iter,
     );
 
     let (cell_counts, annotations) = assign_fragments_to_sites(&all_fragments, &em_result, utr);

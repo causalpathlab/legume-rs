@@ -1,5 +1,6 @@
 use crate::common::*;
 use crate::gene_count::splice::*;
+use crate::pipeline_util::extract_gene_key;
 use crate::run_gene_count::GeneCountArgs;
 
 use rustc_hash::FxHashMap as HashMap;
@@ -123,18 +124,22 @@ pub fn run_splice_aware(
 
         // Build total counts (spliced + unspliced) for QC
         // Gene key: strip "/count/spliced" or "/count/unspliced" suffix, use "/count/total"
+        // Pre-build gene_key → total_key map to avoid per-triplet format! allocation
         let total_triplets: Vec<(CellBarcode, Box<str>, f32)> = {
-            let mut totals: rustc_hash::FxHashMap<(CellBarcode, Box<str>), f32> =
+            let mut total_key_cache: HashMap<Box<str>, Box<str>> = HashMap::default();
+            let mut totals: rustc_hash::FxHashMap<(CellBarcode, &str), f32> =
                 rustc_hash::FxHashMap::default();
             for (cb, feat, val) in spliced_triplets.iter().chain(unspliced_triplets.iter()) {
-                let gene_key = feat
-                    .rfind("/count/")
-                    .map(|pos| &feat[..pos])
-                    .unwrap_or(feat.as_ref());
-                let total_key: Box<str> = format!("{}/count/total", gene_key).into();
-                *totals.entry((cb.clone(), total_key)).or_default() += val;
+                let gene_key = extract_gene_key(feat);
+                total_key_cache
+                    .entry(gene_key.into())
+                    .or_insert_with(|| format!("{}/count/total", gene_key).into());
+                *totals.entry((cb.clone(), gene_key)).or_default() += val;
             }
-            totals.into_iter().map(|((c, k), v)| (c, k, v)).collect()
+            totals
+                .into_iter()
+                .map(|((c, gk), v)| (c, total_key_cache[gk].clone(), v))
+                .collect()
         };
 
         // QC on total counts
@@ -161,10 +166,7 @@ pub fn run_splice_aware(
         // Map total row names back to spliced/unspliced feature names
         let qc_gene_keys: rustc_hash::FxHashSet<Box<str>> = qc_row_names
             .iter()
-            .filter_map(|name| {
-                name.rfind("/count/")
-                    .map(|pos| name[..pos].to_string().into_boxed_str())
-            })
+            .map(|name| extract_gene_key(name).into())
             .collect();
 
         let qc_cells: rustc_hash::FxHashSet<CellBarcode> = qc_col_names
@@ -177,11 +179,8 @@ pub fn run_splice_aware(
             triplets
                 .into_iter()
                 .filter(|(cb, feat, _)| {
-                    let gene_key = feat
-                        .rfind("/count/")
-                        .map(|pos| feat[..pos].to_string().into_boxed_str())
-                        .unwrap_or_else(|| feat.clone());
-                    qc_gene_keys.contains(&gene_key) && qc_cells.contains(cb)
+                    let gene_key: &str = extract_gene_key(feat);
+                    qc_gene_keys.contains(gene_key) && qc_cells.contains(cb)
                 })
                 .collect()
         };
