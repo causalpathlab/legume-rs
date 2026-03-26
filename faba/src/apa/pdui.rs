@@ -3,6 +3,7 @@ use genomic_data::sam::{CellBarcode, Strand};
 use rustc_hash::FxHashMap as HashMap;
 
 /// Result of PDUI computation for one gene/UTR
+#[allow(dead_code)]
 pub struct PduiResult {
     /// Gene/UTR name
     pub gene_name: Box<str>,

@@ -48,6 +48,7 @@ pub fn find_modes(y: &[f32]) -> Vec<usize> {
 
 /// Find local valleys (minima) in a smoothed signal.
 /// Returns indices where y[i] < y[i-1] and y[i] < y[i+1].
+#[allow(dead_code)]
 pub fn find_valleys(y: &[f32]) -> Vec<usize> {
     if y.len() < 3 {
         return Vec::new();

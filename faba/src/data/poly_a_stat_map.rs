@@ -177,20 +177,6 @@ impl PolyASiteMap {
             .and_then(|map| map.get(&position))
     }
 
-    /// Get total count at a specific position (aggregated across all cells)
-    /// Returns 0 if position doesn't exist
-    pub fn get_total_count_at(&self, position: i64) -> usize {
-        if let Some(map) = &self.position_to_count_with_cell {
-            map.get(&position)
-                .map(|cell_map| cell_map.values().sum())
-                .unwrap_or(0)
-        } else if let Some(map) = &self.position_to_count {
-            map.get(&position).copied().unwrap_or(0)
-        } else {
-            0
-        }
-    }
-
     /// Get all positions with their total counts
     /// Returns a vector of (position, count) tuples sorted by position
     pub fn positions_with_counts(&self) -> Vec<(i64, usize)> {
