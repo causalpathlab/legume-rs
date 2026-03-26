@@ -12,7 +12,6 @@ use crate::editing::pipeline::{
 use crate::editing::sifter::ModificationType;
 use crate::pipeline_util::{check_all_bam_indices, run_gene_count_qc};
 
-use genomic_data::gff::FeatureType as GffFeatureType;
 use genomic_data::gff::GeneType as GffGeneType;
 use genomic_data::gff::GffRecordMap;
 
@@ -21,17 +20,14 @@ use rayon::ThreadPoolBuilder;
 #[derive(Args, Debug)]
 pub struct DartSeqCountArgs {
     #[arg(
-        short = 'w',
-        long = "wt",
-        alias = "observed",
-        alias = "deamination",
         value_delimiter = ',',
         required = true,
-        help = "Observed (wild-type) BAM files.",
-        long_help = "Comma-separated list of observed (wild-type) BAM files. \n\
-		       These files contain C->U (C->T) conversions, \n\
-		       representing the editing events in the wild-type sample. \n\
-		       Example: file1.bam,file2.bam"
+        help = "Signal BAM files (APOBEC1-YTH fusion / wild-type)",
+        long_help = "Comma-separated list of signal (wild-type / APOBEC1-YTH fusion) BAM files.\n\
+                     These contain the C->T conversions at m6A sites.\n\
+                     In DART-seq, the WT sample carries the APOBEC1-YTH fusion that\n\
+                     deaminates C-to-U near m6A sites; the mutant is the catalytically\n\
+                     dead control used to estimate background conversion rates."
     )]
     pub wt_bam_files: Vec<Box<str>>,
 
@@ -39,13 +35,14 @@ pub struct DartSeqCountArgs {
         short = 'm',
         long = "mut",
         alias = "background",
+        alias = "control",
         value_delimiter = ',',
         required = true,
-        help = "Background/control (mutant) BAM files.",
-        long_help = "Comma-separated list of control (mutant) BAM files. \n\
-		     These files are used to calibrate background mutation rates \n\
-		     to identify disrupted C->U (C->T) conversions in the mutant sample. \n\
-		     Example: mut1.bam,mut2.bam"
+        help = "Control BAM files (catalytically dead mutant)",
+        long_help = "Comma-separated list of control (catalytically dead mutant) BAM files.\n\
+                     Used to estimate background C->T conversion rates.\n\
+                     Sites are called where the signal BAMs show significantly higher\n\
+                     conversion than these controls (binomial test)."
     )]
     pub mut_bam_files: Vec<Box<str>>,
 
@@ -117,16 +114,6 @@ pub struct DartSeqCountArgs {
 		     Sites with p-values above this threshold will be excluded."
     )]
     pub pvalue_cutoff: f32,
-
-    #[arg(
-        long,
-        value_enum,
-        help = "GFF feature type filter (gene, transcript, exon, utr)",
-        long_help = "Filter GFF records by feature type.\n\
-		     Common values: gene, transcript, exon, utr.\n\
-		     Note: currently unused, reserved for future use."
-    )]
-    record_type: Option<GffFeatureType>,
 
     #[arg(
         long,
@@ -325,7 +312,7 @@ pub struct DartSeqCountArgs {
 
     #[arg(
         long = "atoi-mask",
-        help = "Pre-computed A-to-I mask parquet file (from `faba atoi` or `faba dart --detect-atoi`)",
+        help = "Pre-computed A-to-I mask parquet file (from `faba atoi` or `faba dartseq --detect-atoi`)",
         long_help = "Path to a pre-computed A-to-I sites parquet file.\n\
                      When provided, skips A-to-I discovery and loads the mask\n\
                      directly from this file to filter m6A candidates.\n\

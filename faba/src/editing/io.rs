@@ -209,7 +209,7 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
     }
 }
 
-/// Load an A-to-I mask from a parquet file (output of `faba atoi`, `faba dart --detect-atoi`,
+/// Load an A-to-I mask from a parquet file (output of `faba atoi`, `faba dartseq --detect-atoi`,
 /// or the unified `faba editing` pipeline).
 ///
 /// Returns a set of (chr, position) tuples for masking known A-to-I sites.
