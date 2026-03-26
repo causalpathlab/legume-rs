@@ -441,7 +441,7 @@ fn optimize(
 
                 mu_adj_param
                     .update_stat(&(&stat.observed_sum_ds + &stat.imputed_sum_ds), &denom_ds);
-                mu_adj_param.calibrate();
+                mu_adj_param.calibrate_with(CalibrateTarget::MeanOnly);
 
                 let mu_ds = mu_adj_param.posterior_mean();
 
@@ -454,9 +454,13 @@ fn optimize(
                     row.component_mul_assign(&stat.size_s.transpose());
                 });
                 gamma_param.update_stat(&stat.imputed_sum_ds, &denom_ds);
-                gamma_param.calibrate();
+                gamma_param.calibrate_with(CalibrateTarget::MeanOnly);
             });
         pb.finish_and_clear();
+
+        // Full calibration after loop for output/export
+        mu_adj_param.calibrate();
+        gamma_param.calibrate();
 
         //      observed_db
         // δ = ---------------------
