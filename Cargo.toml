@@ -11,7 +11,7 @@ members = [
 	"cocoa",
 	"faba",
 	"chickpea",
-	"fagioli", "genomic-data", "leiden", "hsblock"]
+	"fagioli", "genomic-data", "leiden", "hsblock", "auxiliary-data"]
 
 resolver = "3"
 
@@ -78,3 +78,4 @@ genomic-data = { path = "genomic-data" }
 faba = { path = "faba" }
 leiden = { path = "leiden" }
 hsblock = { path = "hsblock" }
+auxiliary-data = { path = "auxiliary-data" }

@@ -7,6 +7,7 @@
 //! - Genomic positions
 
 pub mod bed;
+pub mod coordinates;
 pub mod gff;
 pub mod plink;
 pub mod positions;

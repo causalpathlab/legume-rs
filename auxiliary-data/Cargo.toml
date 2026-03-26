@@ -1,0 +1,21 @@
+[package]
+name = "auxiliary-data"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Auxiliary data types: cell annotations, batch metadata, and pseudobulk routines"
+
+[dependencies]
+data-beans = { workspace = true }
+matrix-param = { workspace = true }
+matrix-util = { workspace = true }
+
+anyhow = { workspace = true }
+log = { workspace = true }
+nalgebra = { workspace = true }
+nalgebra-sparse = { workspace = true }
+rustc-hash = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

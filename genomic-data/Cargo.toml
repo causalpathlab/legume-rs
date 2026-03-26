@@ -11,6 +11,7 @@ version.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 dashmap = { workspace = true }
+log = { workspace = true }
 rustc-hash = { workspace = true }
 rayon = { workspace = true }
 nalgebra = { workspace = true }

@@ -7,6 +7,7 @@ version.workspace = true
 description = "random projection and collapsing routines"
 
 [dependencies]
+auxiliary-data = { workspace = true }
 data-beans = { workspace = true }
 candle-util = { workspace = true }
 matrix-util = { workspace = true }
