@@ -1,6 +1,6 @@
 [package]
 name = "cocoa"
-version.workspace = true
+version = "0.2.1"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,7 @@ name = "cocoa"
 path = "src/main.rs"
 
 [dependencies]
+auxiliary-data = { workspace = true }
 data-beans = { workspace = true }
 data-beans-alg = { workspace = true }
 matrix-util = { workspace = true }

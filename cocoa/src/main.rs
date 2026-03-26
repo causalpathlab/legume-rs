@@ -34,38 +34,114 @@ struct Cli {
 enum Commands {
     #[command(
         about = "Differential expression analysis with pseudobulk",
-        long_about = "Differential expression analysis on pseudobulk data \n\
-		      while adjusting confounding effects by cross-condition \n\
-		      or cross-exposure/treatment matching (Park & Kellis, 2020).\n\
-		      \n"
+        long_about = "\
+Differential expression analysis on pseudobulk data
+while adjusting confounding effects by cross-condition
+or cross-exposure/treatment matching (Park & Kellis, 2021).
+
+By default, topic proportions are residualized to remove the
+exposure-driven shift before analysis. This breaks collider bias
+when cell type A is a common effect of exposure X and cell-level
+confounder U (X -> A <- U). Use --no-residualize-topics to disable.
+
+References:
+  Park & Kellis (2021) Genome Biol — CoCoA-diff framework
+  Hartwig et al. (2023) Eur J Epidemiol — residual collider stratification
+"
     )]
     Diff(DiffArgs),
 
     #[command(
-        about = "Collapse data into individual- and topic-level data",
-        long_about = "Collapse cell-level data into individual- and topic-level data\n\
-		      \n"
+        about = "Collapse single-cell counts into pseudobulk per individual and cell type",
+        alias = "pseudobulk"
     )]
     Collapse(CollapseArgs),
 
     #[command(
-        about = "Simulate expression data with one cell type",
-        long_about = "Simulate expression data with one cell type.\n\
-		      First generate individual-level data by\n\
-		      a generalized linear model with confounding effects.\n\
-		      Then, sample cell-level Poisson data.\n\
-		      \n",
+        about = "Simulate single-cell data with confounded exposure (one cell type)",
+        long_about = "\
+Simulate single-cell count data with confounded exposure assignment (one cell type).
+
+Causal DAG:
+
+    W ──→ X ──→ Y
+    └──────────↗
+
+  Edges: W->X, W->Y, X->Y (causal, causal genes only)
+
+  W is a confounder: it affects both exposure assignment X and
+  gene expression Y, creating a spurious X-Y association even
+  for non-causal genes.
+
+Generative model:
+
+  Phase 1 — individual level (i = 1..N):
+    W_i  ~ N(0, I)                        [--n-covariates dims]
+    X_i  ~ Cat(softmax(√pve_wx · W·α + √(1-pve_wx) · ε))
+                                           [--n-exposure categories]
+
+  Phase 2 — individual-level gene expression (gene g = 1..G):
+    log μ_ig = √pve_xy · β_g·X̃_i         (causal, causal genes only)
+             + √pve_wy · W_i·γ_g          (confounding)
+             + √pve_res · ε_g             (noise)
+
+  Phase 3 — cell-level counts (cell j in individual i):
+    Y_ijg ~ Poisson(ρ_j · exp(log μ_ig))
+    ρ_j   ~ Gamma(shape, rate)            [--gamma-hyperparam]
+
+PVE parameters control signal strength at each DAG edge.
+",
         alias = "sim-v1"
     )]
     SimulateOne(SimOneTypeArgs),
 
     #[command(
-        about = "Simulate expression data with many cell types",
-        long_about = "Simulate expression data with many cell type.\n\
-		      First generate individual-level data by\n\
-		      a generalized linear model with confounding effects.\n\
-		      Then, sample cell-level Poisson data.\n\
-		      \n",
+        about = "Simulate single-cell data with collider bias (X -> A <- U)",
+        long_about = "\
+Simulate single-cell count data under a collider bias model.
+
+Causal DAG:
+
+    ┌──→ A ←───┐
+    │          │
+    X ──→ Y ←─ U
+    ↑     ↑
+    └─ V ─┘
+
+  Edges: V->X, V->Y, X->Y (causal), X->A, U->A, U->Y
+
+  A is a collider (X -> A <- U). Conditioning on cell type A
+  opens the spurious path X -> A <- U -> Y, inducing a non-causal
+  association between exposure X and expression Y through U.
+
+Generative model:
+
+  Phase 1 — individual level (i = 1..N):
+    V_i  ~ N(0, I)                        [--n-covariates dims]
+    X_i  ~ Cat(softmax(√pve_vx · V·α + √(1-pve_vx) · ε))
+                                           [--n-exposure categories]
+
+  Phase 2 — cell level (j = 1..n_j for individual i):
+    U_j  ~ N(0, I)                        [--n-cell-covariates dims]
+    A_ij ~ Cat(softmax(√pve_ua · U·δ + √pve_xa · X·η + √pve_res · ε))
+           where A is the collider variable [--n-cell-types categories]
+
+  Phase 3 — gene expression (gene g = 1..G):
+    log μ_ijg = √pve_xy · β_g·X̃_i        (causal, causal genes only)
+              + √pve_vy · V_i·γ_g         (individual confounding)
+              + √pve_uy · U_j·ξ_g         (cell confounding)
+              + √pve_res · ε_g            (noise)
+    Y_ijg ~ Poisson(ρ_j · exp(log μ))
+    ρ_j   ~ Gamma(shape, rate)            [--gamma-hyperparam]
+
+PVE parameters control signal strength at each DAG edge.
+
+References:
+  Cole et al. (2010) Int J Epidemiol — collider bias via DAGs
+  Davey Smith & Munafò (2019) Int J Epidemiol — selection bias severity
+  Akimova et al. (2021) Sci Rep — continuous conditioning on a collider
+  Hartwig et al. (2023) Eur J Epidemiol — residual collider stratification
+",
         aliases = ["simulate", "sim-v2"]
     )]
     SimulateCollider(SimColliderArgs),
