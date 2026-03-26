@@ -103,7 +103,14 @@ enum Commands {
             Reference:\n  \
             Meyer, \"DART-seq: an antibody-free method for global m6A\n  \
             detection\", Nature Methods, 16(12):1275-1280, 2019.\n  \
-            https://doi.org/10.1038/s41592-019-0570-0")]
+            https://doi.org/10.1038/s41592-019-0570-0",
+        after_long_help = "\
+Example:\n  \
+  faba dartseq wt.bam --mut ctrl.bam -g genes.gff -f genome.fa -o out/\n  \
+  faba dartseq wt1.bam,wt2.bam --mut ctrl.bam -g genes.gff -f genome.fa -o out/ \\\n    \
+    --detect-atoi --min-coverage 20\n  \
+  faba dartseq wt.bam --mut ctrl.bam -g genes.gff -f genome.fa -o out/ \\\n    \
+    --atoi-mask out/atoi_sites.parquet")]
     DartSeq(DartSeqCountArgs),
 
     #[command(name = "apa", aliases = ["polya"],
@@ -116,7 +123,13 @@ enum Commands {
             polyadenylation diversity and cellular dynamics during cell\n  \
             differentiation and reprogramming\",\n  \
             Nucleic Acids Research, 50(11):e66, 2022.\n  \
-            https://doi.org/10.1093/nar/gkac167")]
+            https://doi.org/10.1093/nar/gkac167",
+        after_long_help = "\
+Example:\n  \
+  faba apa sample.bam -g genes.gff -o out/\n  \
+  faba apa sample.bam -g genes.gff -o out/ --method simple\n  \
+  faba apa sample.bam --utr-bed utrs.bed -o out/ --compute-pdui\n  \
+  faba apa sample.bam -g genes.gff -o out/ --atoi-mask out/atoi_sites.parquet")]
     Apa(CountApaArgs),
 
     #[command(name = "atoi", aliases = ["a2i", "editing"],
@@ -127,14 +140,22 @@ enum Commands {
             at discovered sites.\n\n\
             Output: atoi_sites.parquet (site annotations) + sparse matrix\n\
             (cells x sites). The parquet file can be used as --atoi-mask\n\
-            input for `faba dart` or `faba apa`.")]
+            input for `faba dartseq` or `faba apa`.",
+        after_long_help = "\
+Example:\n  \
+  faba atoi sample.bam -g genes.gff -f genome.fa -o out/\n  \
+  faba atoi s1.bam,s2.bam -g genes.gff -f genome.fa -o out/ --min-coverage 10")]
     AtoI(AtoICountArgs),
 
     #[command(name = "genes", aliases = ["count-genes"],
         about = "Count reads per gene for single-cell or bulk RNA-seq",
         long_about = "Count reads per gene for single-cell or bulk RNA-seq\n\n\
             Produces a sparse (cells x genes) count matrix from BAM files\n\
-            using GFF gene annotations. Supports 10x-style cell barcodes."
+            using GFF gene annotations. Supports 10x-style cell barcodes.",
+        after_long_help = "\
+Example:\n  \
+  faba genes sample.bam -g genes.gff -o out/\n  \
+  faba genes sample.bam -g genes.gff -o out/ --no-splice --backend hdf5"
     )]
     Genes(GeneCountArgs),
 
@@ -142,16 +163,24 @@ enum Commands {
         about = "Compute read depth over genomic intervals",
         long_about = "Compute read depth over genomic intervals\n\n\
             Bins the genome at a given resolution and counts read coverage\n\
-            per cell, producing a sparse (cells x bins) matrix."
+            per cell, producing a sparse (cells x bins) matrix.",
+        after_long_help = "\
+Example:\n  \
+  faba depth sample.bam -r 10 -o out/\n  \
+  faba depth sample.bam -r 100 -o out/ --backend hdf5"
     )]
     Depth(ReadDepthArgs),
 
     #[command(name = "pwm", aliases = ["scan-pwm"],
         about = "Build position weight matrix around genomic sites",
         long_about = "Build position weight matrix around genomic sites\n\n\
-            Reads site-level parquet files from dart or apa output, collects\n\
+            Reads site-level parquet files from dartseq or apa output, collects\n\
             base frequencies in a +/- window around each site, and outputs\n\
-            a position weight matrix as TSV."
+            a position weight matrix as TSV.",
+        after_long_help = "\
+Example:\n  \
+  faba pwm -s out/m6a_sites.parquet -f genome.fa -o pwm.tsv\n  \
+  faba pwm -s out/m6a_sites.parquet sample.bam --source reads -o pwm.tsv"
     )]
     Pwm(ScanPwmArgs),
 
@@ -163,7 +192,11 @@ enum Commands {
             Reads a sparse matrix (zarr/h5) from faba output, filters to a\n\
             specific gene, bins positions along the gene body, and renders a\n\
             vertical ASCII histogram showing signal density across genomic\n\
-            position. No GFF file required."
+            position. No GFF file required.",
+        after_long_help = "\
+Example:\n  \
+  faba pileup out/m6a.zarr -q BRCA2\n  \
+  faba pileup out/m6a.zarr -q BRCA2 -s out/m6a_sites.parquet --signal nnz"
     )]
     Pileup(PileupArgs),
 
@@ -174,7 +207,11 @@ enum Commands {
         long_about = "Metagene histogram of site positions across gene features\n\n\
             Maps sites from a parquet file onto gene features (5'UTR, CDS,\n\
             3'UTR, non-coding) using GFF annotations, and produces a binned\n\
-            histogram showing the distribution of sites across the metagene."
+            histogram showing the distribution of sites across the metagene.",
+        after_long_help = "\
+Example:\n  \
+  faba metagene -s out/m6a_sites.parquet -g genes.gff -o metagene.tsv --print\n  \
+  faba metagene -s out/atoi_sites.parquet -g genes.gff -o metagene.tsv -n 30"
     )]
     Metagene(MetageneArgs),
 
@@ -188,7 +225,12 @@ enum Commands {
             2. ATOI detection (A-to-I editing sites)\n  \
             3. APA quantification (alternative polyadenylation, masked)\n  \
             4. DART analysis (m6A methylation, masked, requires --mut)\n\n\
-            Applies gene filtering after step 1 and ATOI masking to steps 3-4."
+            Applies gene filtering after step 1 and ATOI masking to steps 3-4.",
+        after_long_help = "\
+Example:\n  \
+  faba all sample.bam -g genes.gff -f genome.fa -o out/\n  \
+  faba all sample.bam -g genes.gff -f genome.fa -o out/ --mut ctrl.bam\n  \
+  faba all s1.bam,s2.bam -g genes.gff -f genome.fa -o out/ --skip-apa"
     )]
     All(PipelineArgs),
 }

@@ -18,7 +18,7 @@ pub enum PwmSource {
 
 #[derive(Args, Debug)]
 pub struct ScanPwmArgs {
-    /// Site-level parquet file (from dart or apa output)
+    /// Site-level parquet file (from dartseq or apa output)
     #[arg(short = 's', long = "sites", required = true)]
     site_file: Box<str>,
 

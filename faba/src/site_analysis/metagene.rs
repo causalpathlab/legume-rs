@@ -8,7 +8,7 @@ use std::io::Write;
 
 #[derive(Args, Debug)]
 pub struct MetageneArgs {
-    /// Site-level parquet file (from dart or apa output)
+    /// Site-level parquet file (from dartseq or apa output)
     #[arg(short = 's', long = "sites", required = true)]
     site_file: Box<str>,
 
@@ -16,8 +16,17 @@ pub struct MetageneArgs {
     #[arg(short = 'g', long = "gff", required = true)]
     gff_file: Box<str>,
 
-    /// Total number of bins across the metagene
-    #[arg(short = 'n', long = "bins", default_value_t = 57)]
+    /// Total bins across the metagene (default: 19 per region × 3 regions)
+    #[arg(
+        short = 'n',
+        long = "bins",
+        default_value_t = 57,
+        help = "Total bins across the metagene (default: 19 per region x 3 regions)",
+        long_help = "Total number of bins across the metagene profile.\n\
+                     Bins are split equally among the three gene regions:\n\
+                     5'UTR, CDS, and 3'UTR. Default 57 = 19 bins per region.\n\
+                     Choose a multiple of 3 for equal region widths."
+    )]
     num_bins: usize,
 
     /// Output TSV file path
