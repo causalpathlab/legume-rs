@@ -1,73 +1,11 @@
+pub use genomic_data::coordinates::{Gene, GeneAnnotations};
+
 use log::info;
 use rand::Rng;
 use rand::SeedableRng;
 
 use genomic_data::gff::GeneId;
 use genomic_data::sam::Strand;
-
-use crate::util::chr_eq;
-
-/// Gene annotation simplified for eQTL simulation
-#[derive(Debug, Clone)]
-pub struct Gene {
-    pub gene_id: GeneId,
-    pub gene_name: Option<Box<str>>,
-    pub chromosome: Box<str>,
-    pub tss: u64, // Transcription start site
-    pub strand: Strand,
-}
-
-/// Collection of gene annotations with cis window utilities
-#[derive(Debug, Clone)]
-pub struct GeneAnnotations {
-    pub genes: Vec<Gene>,
-    pub cis_window: u64, // Default: 1,000,000 bp (1Mb)
-}
-
-impl GeneAnnotations {
-    /// Get cis-regulatory window for a gene (TSS ± cis_window)
-    pub fn cis_region(&self, gene_idx: usize) -> (u64, u64) {
-        let gene = &self.genes[gene_idx];
-        let start = gene.tss.saturating_sub(self.cis_window);
-        let end = gene.tss + self.cis_window;
-        (start, end)
-    }
-
-    /// Get SNP indices within cis window for a gene
-    pub fn cis_snp_indices(
-        &self,
-        gene_idx: usize,
-        snp_positions: &[u64],
-        snp_chromosomes: &[Box<str>],
-    ) -> Vec<usize> {
-        let gene = &self.genes[gene_idx];
-        let (start, end) = self.cis_region(gene_idx);
-
-        snp_positions
-            .iter()
-            .enumerate()
-            .filter(|(idx, &pos)| {
-                chr_eq(&snp_chromosomes[*idx], &gene.chromosome) && pos >= start && pos <= end
-            })
-            .map(|(idx, _)| idx)
-            .collect()
-    }
-
-    /// Filter genes to a specific genomic region
-    pub fn filter_to_region(&self, chromosome: &str, start: u64, end: u64) -> GeneAnnotations {
-        let filtered_genes: Vec<Gene> = self
-            .genes
-            .iter()
-            .filter(|g| chr_eq(g.chromosome.as_ref(), chromosome) && g.tss >= start && g.tss <= end)
-            .cloned()
-            .collect();
-
-        GeneAnnotations {
-            genes: filtered_genes,
-            cis_window: self.cis_window,
-        }
-    }
-}
 
 /// Simulate gene annotations for testing (random positions in region)
 pub fn simulate_gene_annotations(
