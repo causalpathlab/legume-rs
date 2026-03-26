@@ -1,17 +1,4 @@
-/// Compare chromosome names ignoring optional "chr" prefix.
-///
-/// Handles mixed conventions (e.g., "chr1" vs "1", "chrX" vs "X").
-pub fn chr_eq(a: &str, b: &str) -> bool {
-    fn strip(s: &str) -> &str {
-        s.strip_prefix("chr").unwrap_or(s)
-    }
-    strip(a) == strip(b)
-}
-
-/// Strip the "chr" prefix from a chromosome name for use as a lookup key.
-pub fn chr_stripped(s: &str) -> &str {
-    s.strip_prefix("chr").unwrap_or(s)
-}
+pub use genomic_data::coordinates::{chr_eq, chr_stripped};
 
 /// Result of comparing sumstat alleles against reference panel alleles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
