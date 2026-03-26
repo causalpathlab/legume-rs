@@ -59,7 +59,7 @@ pub struct PileupArgs {
     #[arg(short = 'q', long = "gene", required = true)]
     gene_query: Box<str>,
 
-    /// Site-level parquet file (from dart or atoi output)
+    /// Site-level parquet file (from dartseq or atoi output)
     #[arg(short = 's', long = "sites")]
     site_file: Option<Box<str>>,
 

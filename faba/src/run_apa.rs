@@ -42,10 +42,12 @@ pub struct CountApaArgs {
     #[arg(
         short = 'g',
         long = "gff",
+        required_unless_present = "utr_bed",
         help = "Gene annotation file (GFF/GTF)",
         long_help = "Path to gene annotation file in GFF/GTF format.\n\
-                     Required for simple mode; in mixture mode, used to\n\
-                     extract 3'-UTR regions unless --utr-bed is provided."
+                     Required unless --utr-bed is provided.\n\
+                     In simple mode, defines gene boundaries for counting.\n\
+                     In mixture mode, used to extract 3'-UTR regions."
     )]
     pub(crate) gff_file: Option<Box<str>>,
 
@@ -181,7 +183,7 @@ pub struct CountApaArgs {
     /// Pre-computed A-to-I mask parquet file
     #[arg(
         long = "atoi-mask",
-        help = "A-to-I mask parquet (from `faba atoi` or `faba dart --detect-atoi`)",
+        help = "A-to-I mask parquet (from `faba atoi` or `faba dartseq --detect-atoi`)",
         long_help = "Path to a pre-computed A-to-I sites parquet file.\n\
                      When provided, poly(A) sites that overlap A-to-I editing\n\
                      positions are removed before quantification."

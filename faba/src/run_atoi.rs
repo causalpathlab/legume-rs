@@ -6,7 +6,6 @@ use crate::editing::pipeline::*;
 use crate::editing::sifter::ModificationType;
 use crate::pipeline_util::{check_all_bam_indices, run_gene_count_qc};
 
-use genomic_data::gff::FeatureType as GffFeatureType;
 use genomic_data::gff::GeneType as GffGeneType;
 use genomic_data::gff::GffRecordMap;
 use rayon::ThreadPoolBuilder;
@@ -153,16 +152,6 @@ pub struct AtoICountArgs {
         help = "Require exact cell barcode matching"
     )]
     pub exact_barcode_match: bool,
-
-    #[arg(
-        long,
-        value_enum,
-        help = "GFF feature type filter",
-        long_help = "Filter GFF records by feature type.\n\
-                     Common values: gene, transcript, exon, utr.\n\
-                     Note: currently unused, reserved for future use."
-    )]
-    record_type: Option<GffFeatureType>,
 
     #[arg(long, value_enum, help = "Gene type filter")]
     gene_type: Option<GffGeneType>,
