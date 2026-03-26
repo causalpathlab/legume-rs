@@ -24,6 +24,56 @@ pub trait RandPartitionOps {
     ) -> anyhow::Result<()>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
+
+    /// Use separate SC data (e.g., scRNA-seq) to compute projections for
+    /// confounder adjustment, then apply the resulting pseudobulk partitioning
+    /// and HNSW index to self. Both datasets must have the same cells.
+    fn assign_pseudobulk_from_adjustment_data<T>(
+        &mut self,
+        adjustment_data: &SparseIoVec,
+        proj_dim: usize,
+        block_size: usize,
+        cell_to_indv: &[T],
+    ) -> anyhow::Result<()>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
+}
+
+/// Apply pre-computed projections: centred for pseudobulk partitioning,
+/// raw (uncentred) for HNSW matching.
+fn apply_projections<T>(
+    target: &mut SparseIoVec,
+    centred_proj: &Mat,
+    raw_proj: &Mat,
+    cell_to_indv: &[T],
+) -> anyhow::Result<()>
+where
+    T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+{
+    target.partition_columns_to_groups(centred_proj, None, None)?;
+    target.build_hnsw_per_batch(raw_proj, cell_to_indv)?;
+    Ok(())
+}
+
+/// Project `source` data and apply the resulting pseudobulk partitioning
+/// and HNSW index to `target`.
+fn project_and_partition<T>(
+    target: &mut SparseIoVec,
+    source: &SparseIoVec,
+    proj_dim: usize,
+    block_size: usize,
+    cell_to_indv: &[T],
+) -> anyhow::Result<()>
+where
+    T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+{
+    let centred = source.project_columns_with_batch_correction(
+        proj_dim,
+        Some(block_size),
+        Some(cell_to_indv),
+    )?;
+    let raw = source.project_columns(proj_dim, Some(block_size))?;
+    apply_projections(target, &centred.proj, &raw.proj, cell_to_indv)
 }
 
 impl RandPartitionOps for SparseIoVec {
@@ -36,21 +86,14 @@ impl RandPartitionOps for SparseIoVec {
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
-        // Centred projection for pseudobulk partitioning
-        // (needs cells mixed across individuals within each group)
+        // Compute both projections (immutable borrows) before mutating self
         let centred = self.project_columns_with_batch_correction(
             proj_dim,
             Some(block_size),
             Some(cell_to_indv),
         )?;
-        self.partition_columns_to_groups(&centred.proj, None, None)?;
-
-        // Uncentred projection for HNSW matching
-        // (preserves individual-level signal V for confounder adjustment)
         let raw = self.project_columns(proj_dim, Some(block_size))?;
-        self.build_hnsw_per_batch(&raw.proj, cell_to_indv)?;
-
-        Ok(())
+        apply_projections(self, &centred.proj, &raw.proj, cell_to_indv)
     }
 
     fn assign_pseudobulk_with_known_confounders<T>(
@@ -92,5 +135,23 @@ impl RandPartitionOps for SparseIoVec {
         self.build_hnsw_per_batch(&proj_kn, cell_to_indv)?;
 
         Ok(())
+    }
+
+    fn assign_pseudobulk_from_adjustment_data<T>(
+        &mut self,
+        adjustment_data: &SparseIoVec,
+        proj_dim: usize,
+        block_size: usize,
+        cell_to_indv: &[T],
+    ) -> anyhow::Result<()>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
+        info!(
+            "Projecting adjustment data ({} features x {} cells) for confounder adjustment",
+            adjustment_data.num_rows(),
+            adjustment_data.num_columns()
+        );
+        project_and_partition(self, adjustment_data, proj_dim, block_size, cell_to_indv)
     }
 }
