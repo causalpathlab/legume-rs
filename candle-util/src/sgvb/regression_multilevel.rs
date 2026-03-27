@@ -144,7 +144,39 @@ impl<P: Prior + AnalyticalKL> MultilevelSusieSGVB<P> {
 
         let p = x_design.dim(1)?;
         let partitions = BlockPartition::build_hierarchy(p, block_size);
+        Self::from_partitions(vb, x_design, prior, &partitions, num_components, k, config)
+    }
 
+    /// Build a multilevel model from pre-computed partitions.
+    ///
+    /// Unlike `new()`, this accepts explicit `BlockPartition`s (e.g. from LD
+    /// block estimation) instead of computing regular fixed-size partitions.
+    ///
+    /// `partitions` contains levels 0..D-1 (finest to coarsest). A terminal
+    /// level is appended automatically. When `partitions` is empty, creates a
+    /// single flat SusieVar (no hierarchy).
+    pub fn new_with_partitions(
+        vb: VarBuilder,
+        x_design: Tensor,
+        prior: P,
+        partitions: Vec<BlockPartition>,
+        num_components: usize,
+        k: usize,
+        config: SGVBConfig,
+    ) -> Result<Self> {
+        Self::from_partitions(vb, x_design, prior, &partitions, num_components, k, config)
+    }
+
+    fn from_partitions(
+        vb: VarBuilder,
+        x_design: Tensor,
+        prior: P,
+        partitions: &[BlockPartition],
+        num_components: usize,
+        k: usize,
+        config: SGVBConfig,
+    ) -> Result<Self> {
+        let p = x_design.dim(1)?;
         let mut levels = Vec::new();
 
         if partitions.is_empty() {

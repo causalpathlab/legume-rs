@@ -21,61 +21,105 @@ use fagioli::io::results::{
 };
 use fagioli::mapping::map_qtl_helpers::*;
 use fagioli::mapping::pseudobulk::{collapse_pseudobulk, Membership};
-use fagioli::sgvb::{fit_block_weighted, ComputeDevice, FitConfig, ModelType};
+use fagioli::sgvb::{
+    fit_block_weighted, ComputeDevice, FitConfig, ModelType, MultilevelConfig, SnpCoordinates,
+};
 use matrix_util::common_io::basename;
 
 #[derive(Args, Debug, Clone)]
 pub struct MapQtlArgs {
     // ── Single-cell input ────────────────────────────────────────────────
-    #[arg(long, num_args = 1.., help = "Single-cell count matrices (Zarr, HDF5, or mtx; multiple supported)")]
+    #[arg(
+        long, num_args = 1..,
+        help = "Single-cell count matrix files (Zarr, HDF5, or mtx)",
+        long_help = "One or more single-cell count matrix files. Supported formats:\n\
+            Zarr (.zarr), HDF5 (.h5), or Matrix Market (.mtx).\n\
+            Multiple files are merged by cell ID. Genes (rows) must match\n\
+            across files. Cells (columns) are the union of all files."
+    )]
     pub sc_backend_files: Vec<Box<str>>,
 
     #[arg(
         long,
-        help = "Cell annotations TSV: cell_id, individual_id[, cell_type]",
-        long_help = "Cell annotations file (TSV or TSV.GZ).\n\
-            Columns: cell_id, individual_id, and optionally cell_type.\n\
-            If cell_type column is present, hard cell-type assignments are used.\n\
-            Use --membership-parquet for soft assignments instead."
+        help = "Cell annotations file mapping cells to individuals",
+        long_help = "Cell annotations file (TSV or TSV.GZ) with columns:\n\
+            - cell_id: must match column names in --sc-backend-files\n\
+            - individual_id: donor/sample ID, must match IIDs in --bed-prefix .fam\n\
+            - cell_type (optional): hard cell-type label for stratified pseudobulk\n\n\
+            If cell_type column is present, pseudobulk is computed per (individual, cell_type).\n\
+            For soft/probabilistic cell-type assignments, use --membership-parquet instead."
     )]
     pub cell_annotations: Option<Box<str>>,
 
     #[arg(
         long,
-        help = "Soft membership proportions (parquet, alternative to cell_type column)"
+        help = "Soft cell-type membership proportions (parquet)",
+        long_help = "Parquet file with soft/probabilistic cell-type membership proportions.\n\
+            Rows = cells (indexed by cell_id), columns = cell types.\n\
+            Each row sums to 1.0. Alternative to hard cell_type column in\n\
+            --cell-annotations. Enables fractional pseudobulk aggregation."
     )]
     pub membership_parquet: Option<Box<str>>,
 
     // ── Genotype ─────────────────────────────────────────────────────────
-    #[arg(long, help = "PLINK BED file prefix (without .bed/.bim/.fam)")]
+    #[arg(
+        long,
+        help = "PLINK BED file prefix (without .bed/.bim/.fam)",
+        long_help = "Path prefix for PLINK binary genotype files. The tool reads\n\
+            {prefix}.bed, {prefix}.bim, and {prefix}.fam. Individual IDs (IID\n\
+            column in .fam) are matched against individual_id in cell annotations."
+    )]
     pub bed_prefix: Box<str>,
 
-    #[arg(long, help = "Chromosome to analyze")]
+    #[arg(long, help = "Chromosome to analyze (must match chr column in .bim)")]
     pub chromosome: Box<str>,
 
-    #[arg(long, help = "Left genomic position bound (bp)")]
+    #[arg(
+        long,
+        help = "Left genomic position bound in bp (inclusive, filters SNPs)"
+    )]
     pub left_bound: Option<u64>,
 
-    #[arg(long, help = "Right genomic position bound (bp)")]
+    #[arg(
+        long,
+        help = "Right genomic position bound in bp (inclusive, filters SNPs)"
+    )]
     pub right_bound: Option<u64>,
 
-    #[arg(long, help = "Max individuals to use from genotype file")]
+    #[arg(
+        long,
+        help = "Subsample to at most N individuals from the genotype file"
+    )]
     pub max_individuals: Option<usize>,
 
     // ── Gene annotations ─────────────────────────────────────────────────
-    #[arg(long, help = "GTF/GFF gene annotation file for cis-eQTL windows")]
+    #[arg(
+        long,
+        help = "GTF/GFF gene annotation file for defining cis-eQTL windows",
+        long_help = "GTF or GFF3 gene annotation file. Gene TSS (transcription start site)\n\
+            is extracted and a cis-window of --cis-window bp is placed around it.\n\
+            Only SNPs within the cis-window are tested for each gene.\n\
+            Provide either --gtf-file or --gene-bed-file (not both)."
+    )]
     pub gtf_file: Option<Box<str>>,
 
     #[arg(
         long,
-        help = "BED gene annotation file: chr, start, end, gene_id[, name[, strand]]"
+        help = "BED gene annotation file (chr, start, end, gene_id[, name[, strand]])",
+        long_help = "BED-format gene annotation file with columns:\n\
+            chr, start, end, gene_id, [name], [strand].\n\
+            The cis-window (--cis-window) is placed around gene start (or TSS\n\
+            if strand is provided). Alternative to --gtf-file."
     )]
     pub gene_bed_file: Option<Box<str>>,
 
     #[arg(
         long,
         default_value = "1000000",
-        help = "Cis window size in bp (default: 1Mb)"
+        help = "Cis-window size in bp around each gene TSS",
+        long_help = "Size of the cis-window in base pairs, placed symmetrically around\n\
+            each gene's TSS. Only SNPs within [TSS - window, TSS + window] are\n\
+            included in the per-gene fine-mapping model. Default: 1000000 (1 Mb)."
     )]
     pub cis_window: u64,
 
@@ -83,21 +127,30 @@ pub struct MapQtlArgs {
     #[arg(
         long,
         default_value = "1.0",
-        help = "Gamma prior shape (a0) for pseudobulk"
+        help = "Gamma prior shape parameter (a0) for Poisson-Gamma pseudobulk",
+        long_help = "Shape parameter (a0) of the Gamma prior on per-individual expression\n\
+            rates in the Poisson-Gamma pseudobulk model. Larger values = stronger\n\
+            shrinkage toward the prior mean. Default: 1.0."
     )]
     pub gamma_a0: f32,
 
     #[arg(
         long,
         default_value = "1.0",
-        help = "Gamma prior rate (b0) for pseudobulk"
+        help = "Gamma prior rate parameter (b0) for Poisson-Gamma pseudobulk",
+        long_help = "Rate parameter (b0) of the Gamma prior on per-individual expression\n\
+            rates. The prior mean is a0/b0. Default: 1.0."
     )]
     pub gamma_b0: f32,
 
     #[arg(
         long,
         default_value = "1.0",
-        help = "Min effective cell weight per individual-celltype pair"
+        help = "Min effective cells per individual-celltype pair to include",
+        long_help = "Minimum effective cell weight (sum of membership proportions) per\n\
+            (individual, cell_type) pair. Pairs below this threshold are excluded\n\
+            from the pseudobulk. Prevents noisy estimates from individuals with\n\
+            very few cells of a given type. Default: 1.0."
     )]
     pub min_cell_weight: f32,
 
@@ -105,21 +158,35 @@ pub struct MapQtlArgs {
     #[arg(
         long,
         default_value = "susie",
-        help = "Fine-mapping model: susie, bisusie"
+        help = "Fine-mapping model: 'susie' (univariate) or 'bisusie' (bivariate)",
+        long_help = "Fine-mapping model to use:\n\
+            - susie: Sum of Single Effects, each component selects one causal SNP\n\
+            - bisusie: Bivariate SuSiE, each component has a pair of effects\n\
+            Default: susie. Multilevel mode (--multilevel) only supports susie."
     )]
     pub model: Box<str>,
 
     #[arg(
         long,
         default_value = "10",
-        help = "Number of SuSiE/BiSuSiE components (L)"
+        help = "Number of SuSiE components L (max causal SNPs per gene)",
+        long_help = "Number of single-effect components (L) in the SuSiE model.\n\
+            Each component can select one causal SNP, so L is the maximum number\n\
+            of causal variants the model can identify per gene. Higher L increases\n\
+            model capacity but slows optimization. Default: 10."
     )]
     pub num_components: usize,
 
     #[arg(
         long,
         default_value = "0.05,0.1,0.12,0.15,0.18,0.2,0.25,0.3,0.5",
-        help = "Comma-separated prior variances for coordinate search"
+        help = "Prior variance grid for effect sizes (comma-separated)",
+        long_help = "Comma-separated list of prior variances for the effect size distribution.\n\
+            The model is fit once for each value, and the best is selected by ELBO.\n\
+            Prior variance controls expected effect size magnitude:\n\
+            - smaller values (0.01-0.05): small effects, conservative\n\
+            - larger values (0.3-1.0): large effects, liberal\n\
+            Default: 0.05,0.1,0.12,0.15,0.18,0.2,0.25,0.3,0.5"
     )]
     pub prior_var: Box<str>,
 
@@ -127,49 +194,117 @@ pub struct MapQtlArgs {
     #[arg(
         long,
         default_value = "20",
-        help = "SGVB Monte Carlo samples per iteration"
+        help = "Monte Carlo samples per SGVB gradient step",
+        long_help = "Number of Monte Carlo samples (S) drawn per gradient step in\n\
+            Stochastic Gradient Variational Bayes. More samples reduce gradient\n\
+            variance but increase per-step cost. Default: 20."
     )]
     pub num_sgvb_samples: usize,
 
-    #[arg(long, default_value = "0.01", help = "AdamW learning rate")]
+    #[arg(long, default_value = "0.01", help = "AdamW optimizer learning rate")]
     pub learning_rate: f64,
 
-    #[arg(long, default_value = "500", help = "Training iterations per gene")]
+    #[arg(
+        long,
+        default_value = "500",
+        help = "Max gradient steps per gene per prior variance"
+    )]
     pub num_iterations: usize,
 
     #[arg(
         long,
         default_value = "1000",
-        help = "Minibatch size (full batch if N <= batch_size)"
+        help = "Row minibatch size (full batch when N <= this value)",
+        long_help = "Number of individuals sampled per gradient step. When the total\n\
+            number of individuals N exceeds this value, random minibatches of\n\
+            this size are drawn each iteration. When N <= batch_size, all\n\
+            individuals are used (full batch). Disabled for multilevel models.\n\
+            Default: 1000."
     )]
     pub batch_size: usize,
 
     #[arg(
         long,
         default_value = "50",
-        help = "ELBO values to average for convergence"
+        help = "Trailing window size for averaging ELBO (convergence diagnostic)",
+        long_help = "Number of recent ELBO (evidence lower bound) values to average\n\
+            for the reported convergence diagnostic. The average ELBO over the\n\
+            last elbo_window iterations is reported per gene. This value is used\n\
+            for prior variance selection (best ELBO wins). Default: 50."
     )]
     pub elbo_window: usize,
 
+    #[arg(
+        long,
+        help = "Use multilevel SuSiE with LD-aware hierarchical variable selection",
+        long_help = "Enable multilevel SuSiE with LD-aware hierarchical softmax.\n\n\
+            When enabled, LD sub-blocks are estimated within each gene's cis-window\n\
+            using Nystrom + rSVD on the genotype matrix, and used as the level-0\n\
+            partition for a recursive multilevel SuSiE model.\n\n\
+            Benefits: improves optimization for large cis-windows (p > 200 SNPs)\n\
+            by replacing a single flat softmax over all SNPs with a hierarchy of\n\
+            smaller softmaxes that respect LD structure.\n\n\
+            Constraints: only works with --model susie (not bisusie).\n\
+            Automatically falls back to flat SuSiE for genes with < 200 cis-SNPs.\n\
+            Disables minibatch training (uses full batch)."
+    )]
+    pub multilevel: bool,
+
+    #[arg(
+        long,
+        default_value = "20",
+        help = "Min SNPs per LD sub-block in multilevel hierarchy",
+        long_help = "Minimum number of SNPs per LD sub-block when estimating the\n\
+            level-0 partition for multilevel SuSiE. Blocks smaller than this\n\
+            are merged with neighbors. Only used when --multilevel is set.\n\
+            Default: 20."
+    )]
+    pub multilevel_min_block: usize,
+
+    #[arg(
+        long,
+        default_value = "500",
+        help = "Max SNPs per LD sub-block in multilevel hierarchy",
+        long_help = "Maximum number of SNPs per LD sub-block when estimating the\n\
+            level-0 partition for multilevel SuSiE. Blocks larger than this\n\
+            are split into uniform sub-blocks. Only used when --multilevel is set.\n\
+            Default: 500."
+    )]
+    pub multilevel_max_block: usize,
+
     // ── Empirical Bayes ──────────────────────────────────────────────────
-    #[arg(long, help = "Enable cross-gene empirical Bayes for prior variance")]
+    #[arg(
+        long,
+        help = "Re-weight prior variances across genes via empirical Bayes",
+        long_help = "Enable cross-gene empirical Bayes for prior variance selection.\n\
+            Instead of selecting the best prior variance per gene independently,\n\
+            learns a shared prior variance distribution across all genes and\n\
+            re-weights per-gene results accordingly. Useful when many genes are\n\
+            tested and effect sizes are expected to be similar across genes."
+    )]
     pub empirical_bayes: bool,
 
     // ── Covariates ───────────────────────────────────────────────────────
     #[arg(
         long,
         default_value = "true",
-        help = "Include cell-type composition as covariates"
+        help = "Include cell-type composition fractions as covariates",
+        long_help = "When true, per-individual cell-type composition fractions are\n\
+            included as covariates in the linear model. This adjusts for\n\
+            compositional confounding (individuals with different cell-type\n\
+            proportions). Default: true."
     )]
     pub composition_covariates: bool,
 
     #[arg(
         long,
-        help = "Additional covariate TSV/CSV files (individual_id + values)",
-        long_help = "Additional covariate file(s) in TSV/CSV format.\n\
-            First column = individual ID, remaining columns = covariate values.\n\
-            Multiple files can be specified. Covariates are concatenated with\n\
-            composition covariates and centered before fitting."
+        help = "Additional covariate files (TSV/CSV: individual_id + values)",
+        long_help = "Additional covariate file(s) in TSV or CSV format.\n\
+            First column = individual ID (must match .fam IIDs),\n\
+            remaining columns = numeric covariate values.\n\
+            Multiple files can be specified (repeated --covariate-files).\n\
+            All covariates are concatenated with composition covariates\n\
+            and column-centered before fitting."
     )]
     pub covariate_files: Vec<Box<str>>,
 
@@ -178,25 +313,36 @@ pub struct MapQtlArgs {
         long,
         value_enum,
         default_value = "cpu",
-        help = "Compute device: cpu, cuda, metal"
+        help = "Hardware device for tensor computation: cpu, cuda, or metal"
     )]
     pub device: ComputeDevice,
 
-    #[arg(long, default_value_t = 0, help = "Device number for cuda or metal")]
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "GPU device index (for cuda or metal, 0-indexed)"
+    )]
     pub device_no: usize,
 
     #[arg(
         long,
         default_value_t = 0,
-        help = "Parallel jobs (0 = auto: all CPUs for cpu, 1 for gpu)"
+        help = "Number of parallel gene-fitting jobs (0 = auto)",
+        long_help = "Number of genes to fit in parallel.\n\
+            0 = automatic: uses all CPU cores for --device cpu, or 1 for GPU.\n\
+            Set to 1 for sequential execution (useful for debugging)."
     )]
     pub jobs: usize,
 
     // ── Misc ─────────────────────────────────────────────────────────────
-    #[arg(long, default_value = "42", help = "Random seed")]
+    #[arg(long, default_value = "42", help = "Random seed for reproducibility")]
     pub seed: u64,
 
-    #[arg(short, long, help = "Output prefix for results and parameters")]
+    #[arg(
+        short,
+        long,
+        help = "Output file prefix (produces {prefix}.results.bed.gz and {prefix}.parameters.json)"
+    )]
     pub output: Box<str>,
 }
 
@@ -398,6 +544,15 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
         seed: args.seed,
         sigma2_inf: 0.0,
         prior_alpha: 1.0,
+        multilevel: if args.multilevel {
+            Some(MultilevelConfig {
+                min_block_snps: args.multilevel_min_block,
+                max_block_snps: args.multilevel_max_block,
+                ..Default::default()
+            })
+        } else {
+            None
+        },
     };
 
     info!(
@@ -430,6 +585,25 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
         let mut gene_config = fit_config.clone();
         gene_config.seed = fit_config.seed.wrapping_add(spec_idx as u64);
 
+        // Build SNP coordinates for multilevel LD estimation (skip if not enabled)
+        let coords = if gene_config.multilevel.is_some() {
+            let pos: Vec<u64> = valid_cis_indices
+                .iter()
+                .map(|&i| geno.positions[i])
+                .collect();
+            let chr: Vec<Box<str>> = valid_cis_indices
+                .iter()
+                .map(|&i| geno.chromosomes[i].clone())
+                .collect();
+            Some((pos, chr))
+        } else {
+            None
+        };
+        let coords_ref = coords.as_ref().map(|(p, c)| SnpCoordinates {
+            positions: p,
+            chromosomes: c,
+        });
+
         let detailed = match fit_block_weighted(
             &x_g,
             &y_g,
@@ -437,6 +611,7 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
             covariates.as_ref(),
             &gene_config,
             &device,
+            coords_ref.as_ref(),
         ) {
             Ok(d) => d,
             Err(e) => {

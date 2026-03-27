@@ -26,6 +26,18 @@ impl BlockPartition {
     pub fn num_features(&self) -> usize {
         self.block_ranges.last().map_or(0, |r| r.end)
     }
+
+    /// Map each feature index to its block index. O(p).
+    pub fn feature_to_block(&self) -> Vec<u32> {
+        let p = self.num_features();
+        let mut mapping = vec![0u32; p];
+        for (b, range) in self.block_ranges.iter().enumerate() {
+            for j in range.clone() {
+                mapping[j] = b as u32;
+            }
+        }
+        mapping
+    }
 }
 
 impl BlockPartition {

@@ -193,6 +193,7 @@ fn test_sgvb_fp_vs_num_components() -> Result<()> {
             seed: 42,
             sigma2_inf: 0.0,
             prior_alpha: 1.0,
+            multilevel: None,
         };
 
         let result: BlockFitResult = fit_block(&x, &y, None, &config, &device)?;
