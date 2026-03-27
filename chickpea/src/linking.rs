@@ -418,7 +418,7 @@ fn run_susie_sgvb(
 ) -> Option<(Vec<f64>, Vec<f64>)> {
     use candle_util::candle_nn::{Optimizer, VarBuilder, VarMap};
     use candle_util::sgvb::{
-        local_reparam_loss, GaussianPrior, LinearModelSGVB, SGVBConfig, SusieVar,
+        local_reparam_loss, GaussianPrior, RegressionSGVB, SGVBConfig, SusieVar,
     };
 
     let p = x.nrows();
@@ -434,7 +434,7 @@ fn run_susie_sgvb(
     let susie = SusieVar::new(vb.pp("susie"), params.num_components, p, k).ok()?;
     let prior = GaussianPrior::new(vb.pp("prior"), params.prior_var as f32).ok()?;
     let config = SGVBConfig::new(params.sgvb.num_samples);
-    let sgvb_model = LinearModelSGVB::from_variational(susie, x_tensor, prior, config);
+    let sgvb_model = RegressionSGVB::from_variational(susie, x_tensor, prior, config);
 
     let y_mean: f32 = (0..n)
         .map(|s| (0..k).map(|ki| y[(ki, s)]).sum::<f32>())
