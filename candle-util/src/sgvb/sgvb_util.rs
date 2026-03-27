@@ -1,8 +1,9 @@
-use candle_core::{Result, Tensor};
+use candle_core::{DType, Result, Tensor};
 
-use super::recursive_multilevel_sgvb::generic_local_reparam_loss;
-use super::regression_linear::LinearModelSGVB;
-use super::traits::{AnalyticalKL, BlackBoxLikelihood, Prior, VariationalDistribution};
+use super::regression_linear::RegressionSGVB;
+use super::traits::{
+    AnalyticalKL, BlackBoxLikelihood, LocalReparamModel, Prior, VariationalDistribution,
+};
 
 /// Configuration for SGVB estimator.
 #[derive(Debug, Clone)]
@@ -32,11 +33,57 @@ impl SGVBConfig {
     }
 }
 
+/// Antithetic sampling for variance reduction in the local reparameterization trick.
+///
+/// Draws S/2 noise vectors epsilon, pairs each with its mirror -epsilon so the empirical
+/// mean of noise is exactly zero. This strictly reduces variance of the MC
+/// log likelihood estimate with no hyperparameters to tune.
+///
+/// Returns epsilon of shape (num_samples, n, k).
+pub fn antithetic_epsilon(
+    num_samples: usize,
+    n: usize,
+    k: usize,
+    device: &candle_core::Device,
+    dtype: DType,
+) -> Result<Tensor> {
+    let half_s = num_samples / 2;
+    if half_s > 0 {
+        let eps_half = Tensor::randn(0f32, 1f32, (half_s, n, k), device)?.to_dtype(dtype)?;
+        let eps_neg = eps_half.neg()?;
+        if num_samples % 2 == 1 {
+            let eps_extra = Tensor::randn(0f32, 1f32, (1, n, k), device)?.to_dtype(dtype)?;
+            Tensor::cat(&[eps_half, eps_neg, eps_extra], 0)
+        } else {
+            Tensor::cat(&[eps_half, eps_neg], 0)
+        }
+    } else {
+        Tensor::randn(0f32, 1f32, (1, n, k), device)?.to_dtype(dtype)
+    }
+}
+
+/// Compute ELBO loss for any model implementing `LocalReparamModel`.
+///
+/// loss = -E[log p(y|eta)] + beta * KL
+pub fn generic_local_reparam_loss<M: LocalReparamModel, L: BlackBoxLikelihood>(
+    model: &M,
+    likelihood: &L,
+    num_samples: usize,
+    kl_weight: f64,
+) -> Result<Tensor> {
+    let sample = model.forward(num_samples)?;
+    let llik = likelihood.log_likelihood(&[&sample.eta])?;
+    let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
+
+    let elbo = (llik.mean(0)? - (sample.kl * kl_weight)?)?;
+    elbo.neg()
+}
+
 /// Compute loss using the local reparameterization trick.
 ///
 /// Delegates to `generic_local_reparam_loss` via the `LocalReparamModel` trait.
 pub fn local_reparam_loss<V, P, L>(
-    model: &LinearModelSGVB<V, P>,
+    model: &RegressionSGVB<V, P>,
     likelihood: &L,
     num_samples: usize,
     kl_weight: f64,
@@ -52,7 +99,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sgvb::{GaussianPrior, LinearRegressionSGVB};
+    use crate::sgvb::{GaussianPrior, GaussianRegressionSGVB};
     use candle_core::{DType, Device, Tensor};
     use candle_nn::{Optimizer, VarBuilder, VarMap};
 
@@ -111,7 +158,7 @@ mod tests {
         let likelihood = GaussianLikelihood::new(y, 0.5);
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::new(50);
-        let model = LinearRegressionSGVB::new(vb.pp("model"), x, k, prior, config)?;
+        let model = GaussianRegressionSGVB::new(vb.pp("model"), x, k, prior, config)?;
 
         let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.01)?;
 

@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn test_vmf_susie_sparse_recovery() -> Result<()> {
         use crate::sgvb::{
-            local_reparam_loss, GaussianPrior, LinearModelSGVB, SGVBConfig, SusieVar,
+            local_reparam_loss, GaussianPrior, RegressionSGVB, SGVBConfig, SusieVar,
         };
         use candle_core::DType;
         use candle_nn::{Optimizer, VarBuilder, VarMap};
@@ -576,7 +576,7 @@ mod tests {
         let susie = SusieVar::new(vb.pp("susie"), n_components, n_annotations, n_topics)?;
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::new(num_samples);
-        let model = LinearModelSGVB::from_variational(susie, x_norm, prior, config.clone());
+        let model = RegressionSGVB::from_variational(susie, x_norm, prior, config.clone());
 
         let likelihood = VmfFixedKappaLikelihood::from_normalized(y, kappa)?;
 
@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn test_vmf_kappa_comparison() -> Result<()> {
         use crate::sgvb::{
-            local_reparam_loss, GaussianPrior, LinearModelSGVB, SGVBConfig, SusieVar,
+            local_reparam_loss, GaussianPrior, RegressionSGVB, SGVBConfig, SusieVar,
         };
         use candle_core::DType;
         use candle_nn::{Optimizer, VarBuilder, VarMap};
@@ -690,7 +690,7 @@ mod tests {
             let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
             let config = SGVBConfig::new(num_samples);
             let model =
-                LinearModelSGVB::from_variational(susie, x_norm.clone(), prior, config.clone());
+                RegressionSGVB::from_variational(susie, x_norm.clone(), prior, config.clone());
 
             let likelihood = VmfFixedKappaLikelihood::from_normalized(y.clone(), kappa)?;
 
