@@ -1,5 +1,6 @@
 use candle_core::{Result, Tensor};
 
+use super::recursive_multilevel_sgvb::generic_local_reparam_loss;
 use super::regression_linear::LinearModelSGVB;
 use super::traits::{AnalyticalKL, BlackBoxLikelihood, Prior, VariationalDistribution};
 
@@ -33,12 +34,7 @@ impl SGVBConfig {
 
 /// Compute loss using the local reparameterization trick.
 ///
-/// Instead of sampling θ in p-space (which accumulates O(p) variance),
-/// samples η directly in n-space where variance is controlled.
-///
-/// loss = -E[log p(y|η)] + β·KL(q‖p)
-///
-/// where KL is computed analytically, not via MC samples.
+/// Delegates to `generic_local_reparam_loss` via the `LocalReparamModel` trait.
 pub fn local_reparam_loss<V, P, L>(
     model: &LinearModelSGVB<V, P>,
     likelihood: &L,
@@ -50,13 +46,7 @@ where
     P: Prior + AnalyticalKL,
     L: BlackBoxLikelihood,
 {
-    let sample = model.local_reparam_sample(num_samples)?;
-    let llik = likelihood.log_likelihood(&[&sample.eta])?;
-    let llik = if llik.rank() > 1 { llik.sum(1)? } else { llik };
-
-    // ELBO = E[log p(y|η)] − β·KL
-    let elbo = (llik.mean(0)? - (sample.kl * kl_weight)?)?;
-    elbo.neg()
+    generic_local_reparam_loss(model, likelihood, num_samples, kl_weight)
 }
 
 #[cfg(test)]

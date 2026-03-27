@@ -1,6 +1,7 @@
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 
+use super::recursive_multilevel_sgvb::pip_from_alpha;
 use super::traits::VariationalDistribution;
 
 /// Bi-directional Susie (Sum of Single Effects) variational distribution.
@@ -117,11 +118,7 @@ impl BiSusieVar {
     /// PIP[p,k] = 1 - Π_l (1 - α_p[l,p] * α_k[l,k])
     /// Returns shape (P, K)
     pub fn pip(&self) -> Result<Tensor> {
-        let joint = self.alpha_joint()?;
-        let one_minus_joint = (1.0 - &joint)?.clamp(1e-10, 1.0)?;
-        let log_one_minus = one_minus_joint.log()?;
-        let sum_log = log_one_minus.sum(0)?;
-        1.0 - sum_log.exp()?
+        pip_from_alpha(&self.alpha_joint()?)
     }
 
     pub fn beta_mean(&self) -> &Tensor {
