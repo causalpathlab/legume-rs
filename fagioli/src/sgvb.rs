@@ -3,7 +3,7 @@ use candle_util::candle_core::{DType, Device, Tensor};
 use candle_util::candle_nn::{AdamW, Optimizer, VarBuilder, VarMap};
 use candle_util::sgvb::{
     samples_local_reparam_loss, AnalyticalKL, BiSusieVar, FixedGaussianLikelihood,
-    FixedGaussianPrior, LinearModelSGVB, LinearRegressionSGVB, LocalReparamSample, RssLikelihood,
+    FixedGaussianPrior, RegressionSGVB, GaussianRegressionSGVB, LocalReparamSample, RssLikelihood,
     RssSvd, SGVBConfig, SusieVar, VariationalDistribution, WeightedGaussianLikelihood,
 };
 use clap::ValueEnum;
@@ -64,7 +64,7 @@ pub struct FitConfig {
     pub elbo_window: usize,
     pub seed: u64,
     /// Infinitesimal prior variance σ²_inf for polygenic background.
-    /// When > 0, a dense `LinearRegressionSGVB` with prior variance
+    /// When > 0, a dense `GaussianRegressionSGVB` with prior variance
     /// σ²_inf / p is fitted alongside the sparse SuSiE term.
     pub sigma2_inf: f32,
     /// Prior concentration for SuSiE alpha (PIP prior).
@@ -258,10 +258,10 @@ fn fit_single_prior(
     };
 
     // Build confounder model if needed
-    let conf_model: Option<LinearRegressionSGVB<FixedGaussianPrior>> =
+    let conf_model: Option<GaussianRegressionSGVB<FixedGaussianPrior>> =
         if let Some(ref ct) = tensors.conf {
             let conf_prior = FixedGaussianPrior::new(1.0);
-            Some(LinearRegressionSGVB::new(
+            Some(GaussianRegressionSGVB::new(
                 vb.pp("conf"),
                 ct.clone(),
                 tensors.k,
@@ -332,7 +332,7 @@ fn fit_single_prior(
                     conf_batch.as_ref().unwrap(),
                 )?
             } else {
-                cm.local_reparam_sample(config.num_sgvb_samples)?
+                cm.forward(config.num_sgvb_samples)?
             };
             samples.push(conf_sample);
         }
@@ -376,8 +376,8 @@ fn fit_single_prior(
 // ---------------------------------------------------------------------------
 
 enum GeneticModel {
-    Susie(LinearModelSGVB<SusieVar, FixedGaussianPrior>),
-    BiSusie(LinearModelSGVB<BiSusieVar, FixedGaussianPrior>),
+    Susie(RegressionSGVB<SusieVar, FixedGaussianPrior>),
+    BiSusie(RegressionSGVB<BiSusieVar, FixedGaussianPrior>),
 }
 
 impl GeneticModel {
@@ -395,13 +395,13 @@ impl GeneticModel {
         Ok(match model_type {
             ModelType::Susie => {
                 let var_dist = SusieVar::new(vb.pp("susie"), num_components, p, k)?;
-                Self::Susie(LinearModelSGVB::from_variational(
+                Self::Susie(RegressionSGVB::from_variational(
                     var_dist, x_design, prior, config,
                 ))
             }
             ModelType::BiSusie => {
                 let var_dist = BiSusieVar::new(vb.pp("bisusie"), num_components, p, k)?;
-                Self::BiSusie(LinearModelSGVB::from_variational(
+                Self::BiSusie(RegressionSGVB::from_variational(
                     var_dist, x_design, prior, config,
                 ))
             }
@@ -614,10 +614,10 @@ pub fn fit_block_rss(
         )?;
 
         // Optional intercept: 1 variational param per trait, design = D̃⁻¹V'1
-        let intercept_model: Option<LinearRegressionSGVB<FixedGaussianPrior>> =
+        let intercept_model: Option<GaussianRegressionSGVB<FixedGaussianPrior>> =
             if let Some(ref int_design) = intercept_design {
                 let int_prior = FixedGaussianPrior::new(config.sigma2_inf);
-                Some(LinearRegressionSGVB::new(
+                Some(GaussianRegressionSGVB::new(
                     vb.pp("intercept"),
                     int_design.clone(),
                     k,
@@ -637,7 +637,7 @@ pub fn fit_block_rss(
 
             let mut samples = vec![gen_sample];
             if let Some(ref im) = intercept_model {
-                samples.push(im.local_reparam_sample(config.num_sgvb_samples)?);
+                samples.push(im.forward(config.num_sgvb_samples)?);
             }
 
             let loss = samples_local_reparam_loss(&samples, &rss, 1.0)?;
@@ -705,7 +705,7 @@ pub fn elbo_argmax(elbos: &[f32]) -> usize {
 
 /// Compute local reparameterization sample with a custom design matrix (for minibatch).
 fn local_reparam_with_design<V: VariationalDistribution, P: AnalyticalKL>(
-    model: &LinearModelSGVB<V, P>,
+    model: &RegressionSGVB<V, P>,
     num_samples: usize,
     x_batch: &Tensor,
 ) -> Result<LocalReparamSample> {
