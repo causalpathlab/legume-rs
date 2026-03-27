@@ -1,6 +1,6 @@
 # Fagioli
 
-Faceted Associations of Genotype Information via Omics-based Locus Identification
+Faceted Associations of Genotype Information in Omics-based Locus Investigation
 
 ## Features
 
@@ -14,10 +14,17 @@ Faceted Associations of Genotype Information via Omics-based Locus Identificatio
   - Block-level causal architecture (shared + independent causal SNPs per LD block)
   - Optional low-rank confounders
   - Marginal OLS summary statistics and within-block LD scores
-- **Fine-Mapping** (`map-sumstat`): Summary-statistics-based multi-trait fine-mapping
-  - RSS likelihood with rSVD-compressed LD
-  - SuSiE, BiSuSiE, and MultiLevel-SuSiE variational models
-  - SGVB optimization with coordinate search over prior variance grid
+- **Fine-Mapping from Summary Statistics** (`map-sumstat`): Multi-trait fine-mapping from GWAS z-scores
+  - RSS likelihood with rSVD-compressed LD (Zhu & Stephens 2017 eigenspace approach)
+  - SuSiE and BiSuSiE variational models with SGVB optimization
+  - Optional multilevel SuSiE (`--multilevel`) with LD-aware hierarchical softmax for large blocks
+  - Adaptive prior variance grid from LDSC h² estimation
+  - Local LDSC intercept correction and PVE adjustment
+- **Fine-Mapping from Single-Cell Data** (`map-qtl`): Cis-eQTL fine-mapping with cell type heterogeneity
+  - Poisson-Gamma pseudobulk aggregation per (individual, cell type) pair
+  - Weighted Gaussian likelihood with per-observation variance
+  - Optional multilevel SuSiE (`--multilevel`) for large cis-windows
+  - Cross-gene empirical Bayes for prior variance reweighting
 - **Pseudobulk** (`pseudobulk`): Collapse single-cell counts into Poisson-Gamma pseudobulk profiles
 
 ## Generative Models
@@ -221,11 +228,60 @@ fagioli map-sumstat \
   --seed 42
 ```
 
-Available models: `susie`, `bisusie`, `multilevel-susie`.
+With multilevel SuSiE for large blocks (LD-aware hierarchical variable selection):
+
+```bash
+fagioli map-sumstat \
+  --sumstat-file ./results/sim.sumstats.bed.gz \
+  --bed-prefix /path/to/genotypes \
+  --chromosome 22 \
+  --output ./results/map_ml \
+  --model susie \
+  --multilevel \
+  --num-iterations 500
+```
+
+Available models: `susie`, `bisusie`. Add `--multilevel` for hierarchical SuSiE (susie only).
 
 **Output files:**
 - `map.results.bed.gz` — Per-SNP-trait PIPs, posterior effect mean/std, marginal z-scores
 - `map.parameters.json` — All mapping parameters
+
+### eQTL Fine-Mapping from Single-Cell Data
+
+Fine-map cis-eQTL from single-cell RNA-seq with cell type heterogeneity:
+
+```bash
+fagioli map-qtl \
+  --sc-backend-files /path/to/counts.zarr \
+  --cell-annotations /path/to/cells.tsv.gz \
+  --bed-prefix /path/to/genotypes \
+  --chromosome 22 \
+  --gtf-file /path/to/genes.gtf \
+  --output ./results/qtl \
+  --model susie \
+  --num-components 10 \
+  --seed 42
+```
+
+With multilevel SuSiE for large cis-windows:
+
+```bash
+fagioli map-qtl \
+  --sc-backend-files /path/to/counts.zarr \
+  --cell-annotations /path/to/cells.tsv.gz \
+  --bed-prefix /path/to/genotypes \
+  --chromosome 22 \
+  --gtf-file /path/to/genes.gtf \
+  --output ./results/qtl_ml \
+  --multilevel \
+  --seed 42
+```
+
+**Output files:**
+- `qtl.results.bed.gz` — Per-SNP-trait PIPs, posterior effect mean/std, marginal z-scores
+- `qtl.gene_summary.tsv.gz` — Per-gene summary (best ELBO, top PIP SNPs)
+- `qtl.parameters.json` — All mapping parameters
 
 ### Pseudobulk Aggregation
 

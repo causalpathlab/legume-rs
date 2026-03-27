@@ -13,7 +13,7 @@ use fagioli::genotype::{BedReader, GenomicRegion, GenotypeMatrix, GenotypeReader
 use fagioli::io::results::{write_parameters, write_variant_results, VariantRow};
 use fagioli::sgvb::{
     adaptive_prior_grid, estimate_block_h2, fit_block_rss, BlockFitResult, BlockFitResultDetailed,
-    ComputeDevice, FitConfig, ModelType,
+    ComputeDevice, FitConfig, ModelType, MultilevelConfig, RssParams, SnpCoordinates,
 };
 use fagioli::summary_stats::{
     estimate_ld_blocks, load_ld_blocks_from_file, read_sumstat_zscores_with_n, LdBlock,
@@ -23,30 +23,57 @@ use fagioli::summary_stats::{
 #[derive(Args, Debug, Clone)]
 pub struct MapSumstatArgs {
     // ── Input ────────────────────────────────────────────────────────────
-    #[arg(long, help = "Summary statistics file (.sumstats.bed.gz)")]
+    #[arg(
+        long,
+        help = "GWAS summary statistics file (.sumstats.bed.gz)",
+        long_help = "BGZF-compressed summary statistics file in BED-like format.\n\
+            Required columns: chr, end (or pos), z (or zscore).\n\
+            Optional columns: start, snp_id, a1/ea, a2/nea, trait_idx, n, beta, se, pvalue.\n\
+            SNPs are matched to the reference panel by chr+position.\n\
+            Strand-ambiguous alleles (A/T, C/G) are automatically dropped."
+    )]
     pub sumstat_file: Box<str>,
 
-    #[arg(long, help = "PLINK BED file prefix (without .bed/.bim/.fam)")]
+    #[arg(
+        long,
+        help = "PLINK BED file prefix for LD reference panel (without .bed/.bim/.fam)",
+        long_help = "Path prefix for PLINK binary genotype files used as the LD reference panel.\n\
+            Reads {prefix}.bed, {prefix}.bim, and {prefix}.fam.\n\
+            The LD matrix R = X'X/n is computed from these genotypes.\n\
+            SNP positions in .bim are used to match against summary statistics."
+    )]
     pub bed_prefix: Box<str>,
 
-    #[arg(long, help = "Chromosome to analyze")]
+    #[arg(
+        long,
+        help = "Chromosome to analyze (must match chr column in .bim and sumstats)"
+    )]
     pub chromosome: Box<str>,
 
-    #[arg(long, help = "Left genomic position bound (bp)")]
+    #[arg(
+        long,
+        help = "Left genomic position bound in bp (inclusive, filters SNPs)"
+    )]
     pub left_bound: Option<u64>,
 
-    #[arg(long, help = "Right genomic position bound (bp)")]
+    #[arg(
+        long,
+        help = "Right genomic position bound in bp (inclusive, filters SNPs)"
+    )]
     pub right_bound: Option<u64>,
 
     // ── Individual filtering ─────────────────────────────────────────────
-    #[arg(long, help = "Max individuals to use from reference panel")]
+    #[arg(
+        long,
+        help = "Subsample to at most N individuals from the reference panel"
+    )]
     pub max_individuals: Option<usize>,
 
     #[arg(
         long,
         conflicts_with = "remove",
-        help = "Keep only these individuals (like plink --keep)",
-        long_help = "Keep only these individuals (like plink --keep).\n\n\
+        help = "Keep only these individuals in the reference panel",
+        long_help = "Keep only these individuals in the LD reference panel (like plink --keep).\n\n\
             Accepts a file path or a comma-separated list of IIDs.\n\
             File format: one individual per line, either \"FID IID\" (two columns)\n\
             or just \"IID\" (one column). Lines starting with # are skipped.\n\
@@ -60,8 +87,8 @@ pub struct MapSumstatArgs {
     #[arg(
         long,
         conflicts_with = "keep",
-        help = "Remove these individuals (like plink --remove)",
-        long_help = "Remove these individuals (like plink --remove).\n\n\
+        help = "Remove these individuals from the reference panel",
+        long_help = "Remove these individuals from the LD reference panel (like plink --remove).\n\n\
             Accepts a file path or a comma-separated list of IIDs.\n\
             File format: one individual per line, either \"FID IID\" (two columns)\n\
             or just \"IID\" (one column). Lines starting with # are skipped.\n\
@@ -75,40 +102,66 @@ pub struct MapSumstatArgs {
     // ── LD block parameters ──────────────────────────────────────────────
     #[arg(
         long,
-        help = "External LD block file (BED: chr, start, end)",
+        help = "External LD block boundary file (BED: chr, start, end)",
         long_help = "External LD block file in BED format (chr, start, end).\n\
-            If omitted, blocks are estimated from the genotype data via Nystrom + rSVD."
+            Each block defines an independent fine-mapping region.\n\
+            If omitted, LD blocks are automatically estimated from the\n\
+            reference genotypes using Nystrom + rSVD embedding distances."
     )]
     pub ld_block_file: Option<Box<str>>,
 
     #[arg(
         long,
         default_value = "500",
-        help = "Landmark SNPs for Nystrom LD block estimation"
+        help = "Number of landmark SNPs for Nystrom LD block estimation",
+        long_help = "Number of randomly sampled landmark SNPs for the Nystrom\n\
+            approximation used in LD block estimation. The landmarks form\n\
+            the basis for projecting all SNPs into an embedding space where\n\
+            LD breaks are detected as distance peaks. Default: 500."
     )]
     pub num_landmarks: usize,
 
     #[arg(
         long,
         default_value = "20",
-        help = "rSVD components for LD block estimation"
+        help = "Number of rSVD components for LD block estimation",
+        long_help = "Rank of the randomized SVD computed on the landmark genotype\n\
+            matrix. Defines the dimensionality of the SNP embedding space\n\
+            for LD block boundary detection. Default: 20."
     )]
     pub num_ld_components: usize,
 
-    #[arg(long, default_value = "50", help = "Minimum LD block size in SNPs")]
+    #[arg(
+        long,
+        default_value = "50",
+        help = "Minimum LD block size in SNPs (smaller blocks are merged)"
+    )]
     pub min_block_snps: usize,
 
-    #[arg(long, default_value = "5000", help = "Maximum LD block size in SNPs")]
+    #[arg(
+        long,
+        default_value = "5000",
+        help = "Maximum LD block size in SNPs (larger blocks are split)"
+    )]
     pub max_block_snps: usize,
 
     // ── RSS SVD parameters ───────────────────────────────────────────────
-    #[arg(long, help = "Max rank for rSVD per LD block (default: sample size n)")]
+    #[arg(
+        long,
+        help = "Max rank for per-block rSVD (default: reference panel sample size n)",
+        long_help = "Maximum rank for the randomized SVD of X/sqrt(n) within each LD block.\n\
+            The RSS likelihood operates in this eigenspace (Zhu & Stephens 2017).\n\
+            Default: sample size n (full rank). Lower values speed up fitting\n\
+            for large reference panels at the cost of approximation accuracy."
+    )]
     pub max_rank: Option<usize>,
 
     #[arg(
         long,
-        help = "Regularization lambda; default: 0.1 / max_rank",
-        long_help = "Regularization lambda for D_tilde = sqrt(D^2 + lambda).\n\
+        help = "SVD regularization lambda (default: 0.1 / max_rank)",
+        long_help = "Regularization parameter for the RSS eigenspace.\n\
+            Applied as D_tilde = sqrt(D^2 + lambda) to the singular values,\n\
+            preventing numerical instability from near-zero eigenvalues.\n\
             Default: 0.1 / max_rank."
     )]
     pub lambda: Option<f64>,
@@ -117,28 +170,37 @@ pub struct MapSumstatArgs {
     #[arg(
         long,
         default_value = "susie",
-        help = "Fine-mapping model: susie, bisusie"
+        help = "Fine-mapping model: 'susie' (univariate) or 'bisusie' (bivariate)",
+        long_help = "Fine-mapping model to use:\n\
+            - susie: Sum of Single Effects, each component selects one causal SNP\n\
+            - bisusie: Bivariate SuSiE, each component has a pair of effects\n\
+            Default: susie. Multilevel mode (--multilevel) only supports susie."
     )]
     pub model: Box<str>,
 
     #[arg(
         long,
         default_value = "10",
-        help = "Number of SuSiE/BiSuSiE components (L)"
+        help = "Number of SuSiE components L (max causal SNPs per block)",
+        long_help = "Number of single-effect components (L) in the SuSiE model.\n\
+            Each component can select one causal SNP, so L is the maximum number\n\
+            of causal variants the model can identify per LD block. Default: 10."
     )]
     pub num_components: usize,
 
     #[arg(
         long,
         default_value = "",
-        help = "Prior variances for grid search (comma-separated)",
-        long_help = "Comma-separated prior variances for effect size grid search.\n\
-            If empty (default), an adaptive grid is built from LDSC h² estimation:\n\
-            the chromosome-wide h² is estimated via LDSC regression, then a grid\n\
-            of 9 points is placed around h²/L using log-spaced multipliers.\n\n\
+        help = "Prior variance grid for effect sizes (comma-separated, empty = adaptive)",
+        long_help = "Comma-separated prior variances for the effect size distribution.\n\
+            The model is fit once for each value, and the best is selected by ELBO.\n\n\
+            If empty (default), an adaptive grid is built automatically:\n\
+            1. LDSC h² is estimated from z-scores and LD structure\n\
+            2. A grid of 9 log-spaced points is placed around h²/L\n\
+            3. Grid is scaled by n (sample size) for z-score-scale effects\n\n\
             Examples:\n  \
-              --prior-var 0.05,0.1,0.2,0.3,0.5\n  \
-              (empty) = adaptive from LDSC h²"
+              --prior-var 0.05,0.1,0.2,0.3,0.5  (fixed grid)\n  \
+              --prior-var ''  (adaptive from LDSC h², the default)"
     )]
     pub prior_var: Box<str>,
 
@@ -146,41 +208,103 @@ pub struct MapSumstatArgs {
     #[arg(
         long,
         default_value = "20",
-        help = "SGVB Monte Carlo samples per iteration"
+        help = "Monte Carlo samples per SGVB gradient step",
+        long_help = "Number of Monte Carlo samples (S) drawn per gradient step in\n\
+            Stochastic Gradient Variational Bayes. More samples reduce gradient\n\
+            variance but increase per-step cost. Default: 20."
     )]
     pub num_sgvb_samples: usize,
 
-    #[arg(long, default_value = "0.01", help = "AdamW learning rate")]
+    #[arg(long, default_value = "0.01", help = "AdamW optimizer learning rate")]
     pub learning_rate: f64,
 
-    #[arg(long, default_value = "1000", help = "Training iterations per block")]
+    #[arg(
+        long,
+        default_value = "1000",
+        help = "Max gradient steps per LD block per prior variance"
+    )]
     pub num_iterations: usize,
 
     #[arg(
         long,
         default_value = "1000",
-        help = "Minibatch size (full batch if N <= batch_size)"
+        help = "Row minibatch size (full batch when N <= this value)",
+        long_help = "Number of individuals sampled per gradient step. When the total\n\
+            number of individuals N exceeds this value, random minibatches are\n\
+            drawn each iteration. The RSS eigenspace is already compact (K << N),\n\
+            so minibatch is rarely needed here. Default: 1000."
     )]
     pub batch_size: usize,
 
     #[arg(
         long,
         default_value = "50",
-        help = "ELBO values to average for convergence"
+        help = "Trailing window size for averaging ELBO (convergence diagnostic)",
+        long_help = "Number of recent ELBO (evidence lower bound) values to average\n\
+            for the reported convergence diagnostic. The average ELBO over the\n\
+            last elbo_window iterations is used for prior variance selection\n\
+            (best ELBO wins). Default: 50."
     )]
     pub elbo_window: usize,
 
     #[arg(
         long,
+        help = "Use multilevel SuSiE with LD-aware hierarchical variable selection",
+        long_help = "Enable multilevel SuSiE with LD-aware hierarchical softmax.\n\n\
+            When enabled, LD sub-blocks are estimated within each outer LD block\n\
+            using Nystrom + rSVD on the genotype matrix, and used as the level-0\n\
+            partition for a recursive multilevel SuSiE model.\n\n\
+            Benefits: improves optimization for large LD blocks (p > 200 SNPs)\n\
+            by replacing a single flat softmax over all SNPs with a hierarchy of\n\
+            smaller softmaxes that respect LD structure.\n\n\
+            Constraints: only works with --model susie (not bisusie).\n\
+            Automatically falls back to flat SuSiE for blocks with < 200 SNPs."
+    )]
+    pub multilevel: bool,
+
+    #[arg(
+        long,
+        default_value = "20",
+        help = "Min SNPs per LD sub-block in multilevel hierarchy",
+        long_help = "Minimum number of SNPs per LD sub-block when estimating the\n\
+            level-0 partition for multilevel SuSiE. Blocks smaller than this\n\
+            are merged with neighbors. Only used when --multilevel is set.\n\
+            Default: 20."
+    )]
+    pub multilevel_min_block: usize,
+
+    #[arg(
+        long,
+        default_value = "500",
+        help = "Max SNPs per LD sub-block in multilevel hierarchy",
+        long_help = "Maximum number of SNPs per LD sub-block when estimating the\n\
+            level-0 partition for multilevel SuSiE. Blocks larger than this\n\
+            are split into uniform sub-blocks. Only used when --multilevel is set.\n\
+            Default: 500."
+    )]
+    pub multilevel_max_block: usize,
+
+    #[arg(
+        long,
         default_value = "0.0",
-        help = "Infinitesimal prior variance for polygenic background (0 = off, scaled by 1/p internally)"
+        help = "Infinitesimal polygenic prior variance (0 = disabled)",
+        long_help = "Prior variance for the infinitesimal polygenic background term.\n\
+            When > 0, a dense Gaussian regression is fit alongside the sparse\n\
+            SuSiE term to absorb polygenic signal. The per-SNP prior variance\n\
+            is sigma2_inf / p (total variance spread across all SNPs).\n\
+            Set to 0 to disable (default). Typical values: 0.001-0.01."
     )]
     pub sigma2_inf: f32,
 
     #[arg(
         long,
         default_value = "1.0",
-        help = "Prior alpha for SuSiE PIP prior (each SNP gets prior_alpha/p)"
+        help = "Dirichlet concentration for SuSiE selection prior (1.0 = uniform)",
+        long_help = "Concentration parameter for the per-SNP selection prior in SuSiE.\n\
+            Each SNP gets prior inclusion probability prior_alpha / p.\n\
+            - 1.0 (default): uniform prior, all SNPs equally likely a priori\n\
+            - < 1.0: sparser prior, encourages fewer selected SNPs\n\
+            - > 1.0: denser prior, more permissive selection"
     )]
     pub prior_alpha: f64,
 
@@ -189,17 +313,24 @@ pub struct MapSumstatArgs {
         long,
         value_enum,
         default_value = "cpu",
-        help = "Compute device: cpu, cuda, metal"
+        help = "Hardware device for tensor computation: cpu, cuda, or metal"
     )]
     pub device: ComputeDevice,
 
-    #[arg(long, default_value_t = 0, help = "Device number for cuda or metal")]
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "GPU device index (for cuda or metal, 0-indexed)"
+    )]
     pub device_no: usize,
 
     #[arg(
         long,
         default_value_t = 0,
-        help = "Parallel jobs (0 = auto: all CPUs for cpu, 1 for gpu)"
+        help = "Number of parallel block-fitting jobs (0 = auto)",
+        long_help = "Number of LD blocks to fit in parallel.\n\
+            0 = automatic: uses all CPU cores for --device cpu, or 1 for GPU.\n\
+            Set to 1 for sequential execution (useful for debugging)."
     )]
     pub jobs: usize,
 
@@ -207,29 +338,48 @@ pub struct MapSumstatArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Disable PVE adjustment on z-scores"
+        help = "Disable PVE (proportion of variance explained) adjustment on z-scores",
+        long_help = "Disable the PVE adjustment that shrinks z-scores toward zero:\n\
+            z_adj = z * sqrt((n-1) / (z^2 + n - 2)).\n\
+            This adjustment corrects for winner's curse by accounting for the\n\
+            fact that large z-scores overestimate true effect sizes.\n\
+            Enabled by default. Disable with this flag if z-scores are already adjusted."
     )]
     pub no_pve_adjust: bool,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Disable local LDSC intercept correction per block"
+        help = "Disable per-block LDSC intercept correction on z-scores",
+        long_help = "Disable local LDSC (LD Score regression) intercept correction.\n\
+            When enabled (default), the LDSC intercept is estimated per LD block\n\
+            and z-scores are rescaled by 1/sqrt(intercept) to correct for\n\
+            confounding or population stratification. Disable if z-scores are\n\
+            already corrected (e.g., from a BOLT-LMM or SAIGE GWAS)."
     )]
     pub no_ldsc_intercept: bool,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Use per-block prior selection instead of global (default is global)"
+        help = "Select best prior variance per block instead of globally",
+        long_help = "Use per-block prior variance selection instead of global selection.\n\
+            Default (false): the prior variance with the best total ELBO summed\n\
+            across all blocks is used for all blocks.\n\
+            When set: each block independently selects its best prior variance.\n\
+            Per-block selection is more flexible but can overfit with few blocks."
     )]
     pub local_prior: bool,
 
     // ── Misc ─────────────────────────────────────────────────────────────
-    #[arg(long, default_value = "42", help = "Random seed")]
+    #[arg(long, default_value = "42", help = "Random seed for reproducibility")]
     pub seed: u64,
 
-    #[arg(short, long, help = "Output prefix for results and parameters")]
+    #[arg(
+        short,
+        long,
+        help = "Output file prefix (produces {prefix}.results.bed.gz and {prefix}.parameters.json)"
+    )]
     pub output: Box<str>,
 }
 
@@ -438,6 +588,15 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         seed: args.seed,
         sigma2_inf: args.sigma2_inf,
         prior_alpha: args.prior_alpha,
+        multilevel: if args.multilevel {
+            Some(MultilevelConfig {
+                min_block_snps: args.multilevel_min_block,
+                max_block_snps: args.multilevel_max_block,
+                ..Default::default()
+            })
+        } else {
+            None
+        },
     };
 
     info!(
@@ -481,24 +640,28 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         // λ: user-specified or default 0.1/K
         let block_lambda = args.lambda.unwrap_or(0.1 / max_rank as f64);
 
-        let result = fit_block_rss(
-            &x_block,
-            &z_block,
-            &block_config,
+        let block_coords = SnpCoordinates {
+            positions: &geno.positions[block.snp_start..block.snp_end],
+            chromosomes: &geno.chromosomes[block.snp_start..block.snp_end],
+        };
+
+        let rss_params = RssParams {
             max_rank,
-            block_lambda,
-            &device,
-            !args.no_ldsc_intercept,
-        )
-        .unwrap_or_else(|e| {
-            log::warn!("Block {} failed: {}, using zeros", block_idx, e);
-            BlockFitResultDetailed {
-                per_prior_elbos: vec![f32::NEG_INFINITY; num_priors],
-                per_prior_pips: vec![DMatrix::<f32>::zeros(block_m, t); num_priors],
-                per_prior_effects: vec![DMatrix::<f32>::zeros(block_m, t); num_priors],
-                per_prior_stds: vec![DMatrix::<f32>::zeros(block_m, t); num_priors],
-            }
-        });
+            lambda: block_lambda,
+            ldsc_intercept: !args.no_ldsc_intercept,
+            coords: Some(&block_coords),
+        };
+
+        let result = fit_block_rss(&x_block, &z_block, &block_config, &rss_params, &device)
+            .unwrap_or_else(|e| {
+                log::warn!("Block {} failed: {}, using zeros", block_idx, e);
+                BlockFitResultDetailed {
+                    per_prior_elbos: vec![f32::NEG_INFINITY; num_priors],
+                    per_prior_pips: vec![DMatrix::<f32>::zeros(block_m, t); num_priors],
+                    per_prior_effects: vec![DMatrix::<f32>::zeros(block_m, t); num_priors],
+                    per_prior_stds: vec![DMatrix::<f32>::zeros(block_m, t); num_priors],
+                }
+            });
 
         info!(
             "Block {}/{}: {} SNPs, avg_elbo={:.2}",

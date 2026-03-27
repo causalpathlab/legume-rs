@@ -145,7 +145,7 @@ pub fn simulate_wright_fisher(params: &WrightFisherParams) -> Result<GenotypeMat
         chromosomes: vec![params.chromosome.clone(); m_kept],
         positions,
         allele1: vec!["A".into(); m_kept],
-        allele2: vec!["T".into(); m_kept],
+        allele2: vec!["C".into(); m_kept],
     })
 }
 
