@@ -1,7 +1,7 @@
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 
-use super::recursive_multilevel_sgvb::pip_from_alpha;
+use super::susie_util::pip_from_alpha;
 use super::traits::VariationalDistribution;
 
 /// Bi-directional Susie (Sum of Single Effects) variational distribution.
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn test_bisusie_regression_recovers_sparse_mapping() -> Result<()> {
         use crate::sgvb::traits::BlackBoxLikelihood;
-        use crate::sgvb::{local_reparam_loss, GaussianPrior, LinearModelSGVB, SGVBConfig};
+        use crate::sgvb::{local_reparam_loss, GaussianPrior, RegressionSGVB, SGVBConfig};
         use candle_nn::{AdamW, Optimizer};
 
         let device = Device::Cpu;
@@ -230,7 +230,7 @@ mod tests {
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::new(20);
 
-        let model = LinearModelSGVB::from_variational(bisusie, x.clone(), prior, config);
+        let model = RegressionSGVB::from_variational(bisusie, x.clone(), prior, config);
 
         // Gaussian likelihood
         struct GaussianLik {
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn test_bisusie_with_linear_model() -> Result<()> {
         use crate::sgvb::traits::BlackBoxLikelihood;
-        use crate::sgvb::{local_reparam_loss, GaussianPrior, LinearModelSGVB, SGVBConfig};
+        use crate::sgvb::{local_reparam_loss, GaussianPrior, RegressionSGVB, SGVBConfig};
 
         let device = Device::Cpu;
         let dtype = DType::F32;
@@ -316,7 +316,7 @@ mod tests {
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::default();
 
-        let model = LinearModelSGVB::from_variational(bisusie, x, prior, config);
+        let model = RegressionSGVB::from_variational(bisusie, x, prior, config);
 
         struct GaussianLik {
             y: Tensor,

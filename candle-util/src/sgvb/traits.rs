@@ -55,10 +55,28 @@ pub trait AnalyticalKL {
     fn kl_from_gaussian(&self, mean: &Tensor, var: &Tensor) -> Result<Tensor>;
 }
 
+/// Variational distribution with L mixture components, each with selection
+/// probabilities and per-component effect sizes.
+///
+/// Extends `VariationalDistribution` with the structure needed by the
+/// multilevel regression model.
+pub trait ComponentVariational: VariationalDistribution {
+    /// Selection probabilities per component, shape (L, p, k).
+    fn alpha(&self) -> Result<Tensor>;
+    /// Effect size means per component, shape (L, p, k).
+    fn beta_mean(&self) -> &Tensor;
+    /// Effect size standard deviations per component, shape (L, p, k).
+    fn beta_std(&self) -> Result<Tensor>;
+    /// KL divergence of categorical selection from a uniform prior.
+    fn kl_categorical(&self, prior_alpha: f64) -> Result<Tensor>;
+    /// Number of mixture components L.
+    fn num_components(&self) -> usize;
+}
+
 /// Trait for models that support local reparameterization sampling.
 pub trait LocalReparamModel {
     /// Sample η in n-space using the local reparameterization trick.
-    fn local_reparam_sample(&self, num_samples: usize) -> Result<LocalReparamSample>;
+    fn forward(&self, num_samples: usize) -> Result<LocalReparamSample>;
 }
 
 /// Sample output from local reparameterization (sampling in n-space, not p-space).

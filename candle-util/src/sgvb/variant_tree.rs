@@ -1,3 +1,5 @@
+use super::block_partition::BlockPartition;
+
 /// Hierarchical tree structure for grouping variants in multi-level SuSiE.
 ///
 /// Variants (leaves) are organized into groups at multiple levels.
@@ -32,8 +34,8 @@ pub struct VariantTree {
 impl VariantTree {
     /// Create a tree with equal-sized contiguous blocks.
     ///
-    /// For depth=1 with block_size=50 and p=2500: 50 groups of 50.
-    /// For depth=2: recursively splits groups into sub-blocks.
+    /// Delegates hierarchy construction to `BlockPartition::build_hierarchy`,
+    /// then converts range-based partitions to per-variant assignments.
     ///
     /// # Arguments
     /// * `num_variants` - Total number of leaf variants (p)
@@ -42,32 +44,54 @@ impl VariantTree {
         assert!(block_size > 1, "block_size must be > 1");
         assert!(num_variants > 0, "num_variants must be > 0");
 
-        let mut current_count = num_variants;
+        let partitions = BlockPartition::build_hierarchy(num_variants, block_size);
 
-        // Build levels bottom-up: each level groups `current_count` items into blocks
-        let mut level_assignments_stack = Vec::new();
-
-        while current_count > block_size {
-            let num_groups = current_count.div_ceil(block_size);
-            // Assignment: item i -> group i / block_size
-            let assignments: Vec<usize> = (0..current_count).map(|i| i / block_size).collect();
-            level_assignments_stack.push((current_count, assignments));
-            current_count = num_groups;
+        if partitions.is_empty() {
+            // Single group containing everything
+            let assignments = vec![vec![0usize; num_variants]];
+            return Self::from_assignments(num_variants, &assignments);
         }
 
-        // If we still have > 1 items at the top, add a root level grouping them all
-        if current_count > 1 {
-            let assignments: Vec<usize> = (0..current_count).map(|_| 0).collect();
-            level_assignments_stack.push((current_count, assignments));
+        // Convert range-based partitions to per-variant assignments.
+        // Level 0 partition operates over p features directly.
+        // Level d partition operates over num_blocks(d-1) items.
+        // We compose through levels to get per-variant assignments.
+        let mut assignments = Vec::with_capacity(partitions.len());
+
+        // Finest level: directly over variants
+        let mut assign = vec![0usize; num_variants];
+        for (block_idx, range) in partitions[0].block_ranges.iter().enumerate() {
+            for j in range.clone() {
+                assign[j] = block_idx;
+            }
+        }
+        assignments.push(assign);
+
+        // Coarser levels: compose through previous
+        for d in 1..partitions.len() {
+            let prev_assign = &assignments[d - 1];
+            let mut block_to_group = vec![0usize; partitions[d - 1].num_blocks()];
+            for (group_idx, range) in partitions[d].block_ranges.iter().enumerate() {
+                for b in range.clone() {
+                    block_to_group[b] = group_idx;
+                }
+            }
+            let assign: Vec<usize> = (0..num_variants)
+                .map(|j| block_to_group[prev_assign[j]])
+                .collect();
+            assignments.push(assign);
         }
 
-        // Now build tree levels from top to bottom
-        // level_assignments_stack is bottom-up, we need top-down
-        level_assignments_stack.reverse();
+        // Add root level if top still has > 1 group
+        let top_groups = partitions.last().unwrap().num_blocks();
+        if top_groups > 1 {
+            assignments.push(vec![0usize; num_variants]);
+        }
 
-        // Convert stacked assignments into TreeLevels
-        // We need to map variant-level indices through each level
-        Self::build_from_stacked_assignments(num_variants, &level_assignments_stack)
+        // Reverse so level 0 is coarsest (VariantTree convention)
+        assignments.reverse();
+
+        Self::from_assignments(num_variants, &assignments)
     }
 
     /// Create a tree from per-level group assignments.
@@ -180,66 +204,6 @@ impl VariantTree {
             num_variants,
             levels,
         }
-    }
-
-    /// Build tree from stacked (count, assignments) pairs.
-    /// Each pair describes grouping at one level of the hierarchy.
-    fn build_from_stacked_assignments(
-        num_variants: usize,
-        stacked: &[(usize, Vec<usize>)],
-    ) -> Self {
-        if stacked.is_empty() {
-            // Trivial: single level with one group containing everything
-            let assignments = vec![vec![0usize; num_variants]];
-            return Self::from_assignments(num_variants, &assignments);
-        }
-
-        // For a multi-level tree built from regular blocks, we need to compose
-        // the assignments. stacked[0] groups the items at the top level,
-        // stacked[1] groups items within those groups, etc.
-        //
-        // We need to convert this into per-variant assignments at each level.
-        // stacked[0] has `stacked[0].0` items (which are groups from stacked[1])
-        // The final stacked level has `num_variants` items.
-
-        let depth = stacked.len();
-        let mut per_variant_assignments = Vec::with_capacity(depth);
-
-        if depth == 1 {
-            // Simple case: one level of grouping directly over variants
-            per_variant_assignments.push(stacked[0].1.clone());
-        } else {
-            // Multi-level: compose assignments
-            // stacked[last] maps variants to groups at the finest level
-            // stacked[last-1] maps those groups to coarser groups, etc.
-
-            // Start from the finest level and propagate upward
-            // stacked[d] maps items at level d+1 to groups at level d
-            // For the finest level (last), items are variants
-            let finest = &stacked[depth - 1].1; // maps variants to finest groups
-            per_variant_assignments.push(finest.clone());
-
-            // For coarser levels, compose: variant -> finest_group -> coarser_group -> ...
-            for d in (0..depth - 1).rev() {
-                let coarser = &stacked[d].1; // maps items at level d+1 to groups at level d
-                                             // The items at level d+1 are the groups from level d+1
-                                             // We need: for each variant j, find its group at level d
-                                             // = coarser[variant_group_at_d+1[j]]
-                let finer_assignments = per_variant_assignments.last().unwrap();
-
-                // finer_assignments[j] = group of variant j at the next-finer level
-                // coarser maps those groups to coarser groups
-                let composed: Vec<usize> = (0..num_variants)
-                    .map(|j| coarser[finer_assignments[j]])
-                    .collect();
-                per_variant_assignments.push(composed);
-            }
-
-            // Reverse so level 0 is coarsest
-            per_variant_assignments.reverse();
-        }
-
-        Self::from_assignments(num_variants, &per_variant_assignments)
     }
 }
 

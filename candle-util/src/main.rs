@@ -1,5 +1,5 @@
 use anyhow::Result;
-use candle_util::cli::{regression, Cli, Commands};
+use candle_util::cli::{fit_regression, Cli, Commands};
 use clap::Parser;
 
 fn main() -> Result<()> {
@@ -12,7 +12,7 @@ fn main() -> Result<()> {
 
     match &cli.command {
         Commands::Regression(args) => {
-            regression::run(args)?;
+            fit_regression::run(args)?;
         }
     }
 

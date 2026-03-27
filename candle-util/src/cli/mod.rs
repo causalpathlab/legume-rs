@@ -1,8 +1,8 @@
-pub mod regression;
+pub mod fit_regression;
 
 use clap::{Parser, Subcommand};
 
-pub use regression::{LikelihoodType, RegressionArgs, VariationalType};
+pub use fit_regression::{LikelihoodType, RegressionArgs, VariationalType};
 
 #[derive(Parser)]
 #[command(name = "candle-util")]

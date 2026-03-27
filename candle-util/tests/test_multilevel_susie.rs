@@ -4,7 +4,9 @@ use candle_nn::{Optimizer, VarBuilder, VarMap};
 use matrix_util::traits::IoOps;
 
 use candle_util::sgvb::BlackBoxLikelihood;
-use candle_util::sgvb::{multilevel_loss, GaussianPrior, RecursiveMultilevelSGVB, SGVBConfig};
+use candle_util::sgvb::{
+    multilevel_loss, GaussianPrior, MultilevelParams, MultilevelSusieSGVB, SGVBConfig,
+};
 
 struct GaussianLik {
     y: Tensor,
@@ -52,7 +54,13 @@ fn test_susie_example_multilevel() -> Result<()> {
     let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
     let config = SGVBConfig::new(30);
 
-    let model = RecursiveMultilevelSGVB::auto(vb.pp("ml"), x, l, k, block_size, prior, config)?;
+    let params = MultilevelParams {
+        num_components: l,
+        k,
+        block_size,
+        config,
+    };
+    let model = MultilevelSusieSGVB::new(vb.pp("ml"), x, prior, params)?;
 
     println!(
         "Multilevel: {} levels, L={}, block_size={}",
@@ -155,12 +163,12 @@ fn test_n_much_less_than_p() -> Result<()> {
     let varmap_flat = VarMap::new();
     let vb_flat = VarBuilder::from_varmap(&varmap_flat, DType::F32, &device);
     {
-        use candle_util::sgvb::{local_reparam_loss, LinearModelSGVB, SusieVar};
+        use candle_util::sgvb::{local_reparam_loss, RegressionSGVB, SusieVar};
 
         let susie = SusieVar::new(vb_flat.pp("susie"), l, p, k)?;
         let prior = GaussianPrior::new(vb_flat.pp("prior"), 1.0)?;
         let config = SGVBConfig::new(30);
-        let model = LinearModelSGVB::from_variational(susie, x.clone(), prior, config);
+        let model = RegressionSGVB::from_variational(susie, x.clone(), prior, config);
         let likelihood = GaussianLik { y: y.clone() };
         let mut optimizer = candle_nn::AdamW::new_lr(varmap_flat.all_vars(), 0.05)?;
 
@@ -196,15 +204,13 @@ fn test_n_much_less_than_p() -> Result<()> {
     let prior_ml = GaussianPrior::new(vb_ml.pp("prior"), 1.0)?;
     let config_ml = SGVBConfig::new(30);
 
-    let model_ml = RecursiveMultilevelSGVB::auto(
-        vb_ml.pp("ml"),
-        x.clone(),
-        l,
+    let params_ml = MultilevelParams {
+        num_components: l,
         k,
-        100, // 2000 → 20 groups → terminal
-        prior_ml,
-        config_ml,
-    )?;
+        block_size: 100, // 2000 → 20 groups → terminal
+        config: config_ml,
+    };
+    let model_ml = MultilevelSusieSGVB::new(vb_ml.pp("ml"), x.clone(), prior_ml, params_ml)?;
 
     println!("Multilevel: {} levels", model_ml.num_levels());
 
