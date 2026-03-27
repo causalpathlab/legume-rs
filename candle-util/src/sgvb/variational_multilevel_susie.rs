@@ -1,7 +1,7 @@
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 
-use super::recursive_multilevel_sgvb::pip_from_alpha;
+use super::susie_util::pip_from_alpha;
 use super::traits::VariationalDistribution;
 use super::variant_tree::VariantTree;
 
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn test_with_linear_model() -> Result<()> {
         use crate::sgvb::traits::BlackBoxLikelihood;
-        use crate::sgvb::{local_reparam_loss, GaussianPrior, LinearModelSGVB, SGVBConfig};
+        use crate::sgvb::{local_reparam_loss, GaussianPrior, RegressionSGVB, SGVBConfig};
 
         let device = Device::Cpu;
         let dtype = DType::F32;
@@ -410,7 +410,7 @@ mod tests {
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::default();
 
-        let model = LinearModelSGVB::from_variational(susie, x, prior, config);
+        let model = RegressionSGVB::from_variational(susie, x, prior, config);
 
         struct GaussianLik {
             y: Tensor,

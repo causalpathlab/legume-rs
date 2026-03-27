@@ -50,8 +50,8 @@
 //! let rss1 = RssLikelihood::new(&svd, &z_trait1)?;
 //! let rss2 = RssLikelihood::new(&svd, &z_trait2)?;
 //!
-//! // Use svd.x_design() as the design matrix in LinearModelSGVB
-//! let model = LinearModelSGVB::from_variational(susie, svd.x_design().clone(), prior, config);
+//! // Use svd.x_design() as the design matrix in RegressionSGVB
+//! let model = RegressionSGVB::from_variational(susie, svd.x_design().clone(), prior, config);
 //! let loss = local_reparam_loss(&model, &rss1, num_samples, kl_weight)?;
 //! ```
 
@@ -523,7 +523,7 @@ mod tests {
     #[test]
     fn test_rss_susie_recovery() -> Result<()> {
         use crate::sgvb::{
-            local_reparam_loss, GaussianPrior, LinearModelSGVB, SGVBConfig, SusieVar,
+            local_reparam_loss, GaussianPrior, RegressionSGVB, SGVBConfig, SusieVar,
         };
         use candle_nn::{Optimizer, VarBuilder, VarMap};
 
@@ -554,7 +554,7 @@ mod tests {
         let susie = SusieVar::new(vb.pp("susie"), l, p, t)?;
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::new(50);
-        let model = LinearModelSGVB::from_variational(susie, svd.x_design().clone(), prior, config);
+        let model = RegressionSGVB::from_variational(susie, svd.x_design().clone(), prior, config);
 
         let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.01)?;
         for i in 0..300 {

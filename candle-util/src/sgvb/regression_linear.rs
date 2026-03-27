@@ -1,19 +1,19 @@
 use candle_core::{Result, Tensor};
 use candle_nn::VarBuilder;
 
-use super::recursive_multilevel_sgvb::antithetic_epsilon;
-use super::sgvb::SGVBConfig;
+use super::sgvb_util::{antithetic_epsilon, SGVBConfig};
 use super::traits::{
     AnalyticalKL, LocalReparamModel, LocalReparamSample, Prior, VariationalDistribution,
 };
 use super::variational_gaussian::GaussianVar;
+use super::variational_susie::SusieVar;
 
 /// Generic linear model SGVB: η = X * θ where θ ~ q(θ)
 ///
 /// This is a generic wrapper that works with any variational distribution:
 /// - V: VariationalDistribution for the regression coefficients
 /// - P: Prior distribution for coefficients
-pub struct LinearModelSGVB<V, P> {
+pub struct RegressionSGVB<V, P> {
     /// Variational distribution for coefficients θ
     pub variational: V,
     /// Prior distribution p(θ)
@@ -24,7 +24,7 @@ pub struct LinearModelSGVB<V, P> {
     pub config: SGVBConfig,
 }
 
-impl<V: VariationalDistribution, P: Prior> LinearModelSGVB<V, P> {
+impl<V: VariationalDistribution, P: Prior> RegressionSGVB<V, P> {
     /// Create a new linear model with a given variational distribution.
     ///
     /// # Arguments
@@ -63,7 +63,7 @@ impl<V: VariationalDistribution, P: Prior> LinearModelSGVB<V, P> {
     }
 }
 
-impl<V: VariationalDistribution, P: Prior + AnalyticalKL> LinearModelSGVB<V, P> {
+impl<V: VariationalDistribution, P: Prior + AnalyticalKL> RegressionSGVB<V, P> {
     /// Sample in n-space using the local reparameterization trick.
     ///
     /// Instead of sampling θ (p-dimensional) and computing η = Xθ,
@@ -74,7 +74,7 @@ impl<V: VariationalDistribution, P: Prior + AnalyticalKL> LinearModelSGVB<V, P> 
     /// Uses antithetic sampling by default: pairs each ε with −ε so the
     /// empirical mean of noise is exactly zero. This strictly reduces
     /// variance of the MC log-likelihood estimate with no hyperparameters.
-    pub fn local_reparam_sample(&self, num_samples: usize) -> Result<LocalReparamSample> {
+    pub fn forward(&self, num_samples: usize) -> Result<LocalReparamSample> {
         let theta_mean = self.variational.mean()?; // (p, k)
         let theta_var = self.variational.var()?; // (p, k)
 
@@ -105,19 +105,20 @@ impl<V: VariationalDistribution, P: Prior + AnalyticalKL> LinearModelSGVB<V, P> 
 }
 
 impl<V: VariationalDistribution, P: Prior + AnalyticalKL> LocalReparamModel
-    for LinearModelSGVB<V, P>
+    for RegressionSGVB<V, P>
 {
-    fn local_reparam_sample(&self, num_samples: usize) -> Result<LocalReparamSample> {
-        self.local_reparam_sample(num_samples)
+    fn forward(&self, num_samples: usize) -> Result<LocalReparamSample> {
+        self.forward(num_samples)
     }
 }
 
 /// Linear regression SGVB model with Gaussian variational distribution.
-///
-/// Convenience type alias for LinearModelSGVB with GaussianVar.
-pub type LinearRegressionSGVB<P> = LinearModelSGVB<GaussianVar, P>;
+pub type GaussianRegressionSGVB<P> = RegressionSGVB<GaussianVar, P>;
 
-impl<P: Prior> LinearRegressionSGVB<P> {
+/// SuSiE regression SGVB model with sparse mixture variational distribution.
+pub type SusieRegressionSGVB<P> = RegressionSGVB<SusieVar, P>;
+
+impl<P: Prior> GaussianRegressionSGVB<P> {
     /// Create a new linear regression SGVB model with Gaussian variational distribution.
     ///
     /// # Arguments
@@ -196,7 +197,7 @@ mod tests {
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::default();
 
-        let model = LinearRegressionSGVB::new(vb.pp("model"), x, k, prior, config)?;
+        let model = GaussianRegressionSGVB::new(vb.pp("model"), x, k, prior, config)?;
 
         // Check shapes
         assert_eq!(model.coef_mean()?.dims(), &[p, k]);
@@ -230,7 +231,7 @@ mod tests {
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::new(50);
 
-        let model = LinearRegressionSGVB::new(vb.pp("model"), x, k, prior, config)?;
+        let model = GaussianRegressionSGVB::new(vb.pp("model"), x, k, prior, config)?;
 
         let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.01)?;
 
@@ -298,7 +299,7 @@ mod tests {
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::default();
 
-        let model = LinearModelSGVB::from_variational(susie, x, prior, config);
+        let model = RegressionSGVB::from_variational(susie, x, prior, config);
 
         // Check shapes
         assert_eq!(model.coef_mean()?.dims(), &[p, k]);
@@ -340,7 +341,7 @@ mod tests {
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::new(50);
 
-        let model = LinearModelSGVB::from_variational(susie, x, prior, config);
+        let model = RegressionSGVB::from_variational(susie, x, prior, config);
 
         let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.05)?;
 

@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use candle_util::sgvb::{LinearRegressionSGVB, GaussianPrior, SGVBConfig, local_reparam_loss, BlackBoxLikelihood};
+//! use candle_util::sgvb::{GaussianRegressionSGVB, GaussianPrior, SGVBConfig, local_reparam_loss, BlackBoxLikelihood};
 //!
 //! // Define your black-box likelihood
 //! struct MyLikelihood { /* ... */ }
@@ -25,7 +25,7 @@
 //! }
 //!
 //! // Create the model (encapsulates variational distribution, prior, design matrix)
-//! let model = LinearRegressionSGVB::new(vb, x_design, k, prior, config.clone())?;
+//! let model = GaussianRegressionSGVB::new(vb, x_design, k, prior, config.clone())?;
 //!
 //! // Training loop
 //! for _ in 0..num_iters {
@@ -42,10 +42,10 @@ pub mod cavi_susie;
 mod composite_model;
 mod gaussian_prior;
 pub mod likelihood;
-pub mod recursive_multilevel_sgvb;
 mod regression_linear;
-#[allow(clippy::module_inception)]
-mod sgvb;
+pub mod regression_multilevel;
+mod sgvb_util;
+mod susie_util;
 mod traits;
 pub mod variant_tree;
 mod variational_bisusie;
@@ -64,15 +64,17 @@ pub use likelihood::{
     OffsetPoissonLikelihood, PoissonLikelihood, RssLikelihood, RssSvd, VmfFixedKappaLikelihood,
     WeightedGaussianLikelihood,
 };
-pub use recursive_multilevel_sgvb::{
-    antithetic_epsilon, generic_local_reparam_loss, multilevel_loss, pip_from_alpha,
-    RecursiveMultilevelSGVB,
+pub use regression_linear::{GaussianRegressionSGVB, RegressionSGVB, SusieRegressionSGVB};
+pub use regression_multilevel::{
+    multilevel_loss, MultilevelParams, MultilevelRegressionSGVB, MultilevelSusieSGVB,
 };
-pub use regression_linear::{LinearModelSGVB, LinearRegressionSGVB};
-pub use sgvb::{local_reparam_loss, SGVBConfig};
+pub use sgvb_util::{
+    antithetic_epsilon, generic_local_reparam_loss, local_reparam_loss, SGVBConfig,
+};
+pub use susie_util::pip_from_alpha;
 pub use traits::{
-    AnalyticalKL, BlackBoxLikelihood, LocalReparamModel, LocalReparamSample, Prior,
-    VariationalDistribution,
+    AnalyticalKL, BlackBoxLikelihood, ComponentVariational, LocalReparamModel, LocalReparamSample,
+    Prior, VariationalDistribution,
 };
 pub use variational_bisusie::BiSusieVar;
 pub use variational_gaussian::GaussianVar;

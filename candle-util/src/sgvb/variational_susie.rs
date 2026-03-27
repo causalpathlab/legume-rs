@@ -1,8 +1,8 @@
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 
-use super::recursive_multilevel_sgvb::pip_from_alpha;
-use super::traits::VariationalDistribution;
+use super::susie_util::pip_from_alpha;
+use super::traits::{ComponentVariational, VariationalDistribution};
 
 /// Susie (Sum of Single Effects) variational distribution.
 ///
@@ -11,7 +11,7 @@ use super::traits::VariationalDistribution;
 /// - β_l ~ N(μ_l, σ_l²) - effect sizes, shape (p, k)
 ///
 /// Each output dimension k has its own independent feature selection.
-/// This can be used with LinearModelSGVB for Susie regression.
+/// This can be used with RegressionSGVB for Susie regression.
 pub struct SusieVar {
     /// Selection logits, shape (L, p, k)
     logits: Tensor,
@@ -181,6 +181,24 @@ impl VariationalDistribution for SusieVar {
     }
 }
 
+impl ComponentVariational for SusieVar {
+    fn alpha(&self) -> Result<Tensor> {
+        self.alpha()
+    }
+    fn beta_mean(&self) -> &Tensor {
+        self.beta_mean()
+    }
+    fn beta_std(&self) -> Result<Tensor> {
+        self.beta_std()
+    }
+    fn kl_categorical(&self, prior_alpha: f64) -> Result<Tensor> {
+        self.kl_categorical(prior_alpha)
+    }
+    fn num_components(&self) -> usize {
+        self.num_components()
+    }
+}
+
 impl SusieVar {
     /// Get the actual mean of θ: E[θ] = Σ_l (α_l ⊙ μ_l)
     ///
@@ -296,7 +314,7 @@ mod tests {
     #[test]
     fn test_susie_with_linear_model() -> Result<()> {
         use crate::sgvb::traits::BlackBoxLikelihood;
-        use crate::sgvb::{local_reparam_loss, GaussianPrior, LinearModelSGVB, SGVBConfig};
+        use crate::sgvb::{local_reparam_loss, GaussianPrior, RegressionSGVB, SGVBConfig};
         use candle_core::Tensor;
 
         let device = Device::Cpu;
@@ -321,8 +339,8 @@ mod tests {
         let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
         let config = SGVBConfig::default();
 
-        // Combine into generic LinearModelSGVB
-        let model = LinearModelSGVB::from_variational(susie, x, prior, config);
+        // Combine into generic RegressionSGVB
+        let model = RegressionSGVB::from_variational(susie, x, prior, config);
 
         // Simple Gaussian likelihood
         struct GaussianLik {

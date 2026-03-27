@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use crate::sgvb::{
     composite_local_reparam_loss, local_reparam_loss, samples_local_reparam_loss, CompositeModel,
-    GaussianLikelihood, GaussianPrior, LinearModelSGVB, LinearRegressionSGVB,
-    NegativeBinomialLikelihood, PoissonLikelihood, SGVBConfig, SparseVariationalOutput, SusieVar,
+    GaussianLikelihood, GaussianPrior, GaussianRegressionSGVB, NegativeBinomialLikelihood,
+    PoissonLikelihood, RegressionSGVB, SGVBConfig, SparseVariationalOutput, SusieVar,
     VariationalOutput,
 };
 
@@ -293,14 +293,14 @@ fn run_gaussian_gaussian(ctx: RegressionContext) -> Result<()> {
     let x_var = load_x_var(&args.x_var, n, DType::F32, x.device(), args.with_row_names)?;
     let p_var = x_var.dim(1)?;
 
-    let model_mean = LinearRegressionSGVB::new(
+    let model_mean = GaussianRegressionSGVB::new(
         vb.pp("mean"),
         x,
         k,
         GaussianPrior::new(vb.pp("prior_mean"), 1.0)?,
         config.clone(),
     )?;
-    let model_var = LinearRegressionSGVB::new(
+    let model_var = GaussianRegressionSGVB::new(
         vb.pp("var"),
         x_var,
         k,
@@ -371,13 +371,13 @@ fn run_gaussian_susie(ctx: RegressionContext) -> Result<()> {
     let p_var = x_var.dim(1)?;
 
     let susie = SusieVar::new(vb.pp("susie_mean"), args.susie_layers, p, k)?;
-    let model_mean = LinearModelSGVB::from_variational(
+    let model_mean = RegressionSGVB::from_variational(
         susie,
         x,
         GaussianPrior::new(vb.pp("prior_mean"), 1.0)?,
         config.clone(),
     );
-    let model_var = LinearRegressionSGVB::new(
+    let model_var = GaussianRegressionSGVB::new(
         vb.pp("var"),
         x_var,
         k,
@@ -400,8 +400,8 @@ fn run_gaussian_susie(ctx: RegressionContext) -> Result<()> {
         &mut optimizer,
         || {
             let lr_samples = vec![
-                model_mean.local_reparam_sample(config.num_samples)?,
-                model_var.local_reparam_sample(config.num_samples)?,
+                model_mean.forward(config.num_samples)?,
+                model_var.forward(config.num_samples)?,
             ];
             Ok(samples_local_reparam_loss(&lr_samples, &likelihood, 1.0)?)
         },
@@ -445,7 +445,7 @@ fn run_poisson_gaussian(ctx: RegressionContext) -> Result<()> {
         output_names,
     } = ctx;
     let k = y.dim(1)?;
-    let model = LinearRegressionSGVB::new(
+    let model = GaussianRegressionSGVB::new(
         vb.pp("model"),
         x,
         k,
@@ -494,7 +494,7 @@ fn run_poisson_susie(ctx: RegressionContext) -> Result<()> {
     } = ctx;
     let (p, k) = (x.dim(1)?, y.dim(1)?);
     let susie = SusieVar::new(vb.pp("susie"), args.susie_layers, p, k)?;
-    let model = LinearModelSGVB::from_variational(
+    let model = RegressionSGVB::from_variational(
         susie,
         x,
         GaussianPrior::new(vb.pp("prior"), 1.0)?,
@@ -544,14 +544,14 @@ fn run_negbin_gaussian(ctx: RegressionContext) -> Result<()> {
     let x_var = load_x_var(&args.x_var, n, DType::F32, x.device(), args.with_row_names)?;
     let p_var = x_var.dim(1)?;
 
-    let model_mean = LinearRegressionSGVB::new(
+    let model_mean = GaussianRegressionSGVB::new(
         vb.pp("mean"),
         x,
         k,
         GaussianPrior::new(vb.pp("prior_mean"), 1.0)?,
         config.clone(),
     )?;
-    let model_disp = LinearRegressionSGVB::new(
+    let model_disp = GaussianRegressionSGVB::new(
         vb.pp("disp"),
         x_var,
         k,
@@ -622,13 +622,13 @@ fn run_negbin_susie(ctx: RegressionContext) -> Result<()> {
     let p_var = x_var.dim(1)?;
 
     let susie = SusieVar::new(vb.pp("susie_mean"), args.susie_layers, p, k)?;
-    let model_mean = LinearModelSGVB::from_variational(
+    let model_mean = RegressionSGVB::from_variational(
         susie,
         x,
         GaussianPrior::new(vb.pp("prior_mean"), 1.0)?,
         config.clone(),
     );
-    let model_disp = LinearRegressionSGVB::new(
+    let model_disp = GaussianRegressionSGVB::new(
         vb.pp("disp"),
         x_var,
         k,
@@ -651,8 +651,8 @@ fn run_negbin_susie(ctx: RegressionContext) -> Result<()> {
         &mut optimizer,
         || {
             let lr_samples = vec![
-                model_mean.local_reparam_sample(config.num_samples)?,
-                model_disp.local_reparam_sample(config.num_samples)?,
+                model_mean.forward(config.num_samples)?,
+                model_disp.forward(config.num_samples)?,
             ];
             Ok(samples_local_reparam_loss(&lr_samples, &likelihood, 1.0)?)
         },

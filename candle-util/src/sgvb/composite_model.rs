@@ -8,7 +8,7 @@
 
 use candle_core::{Result, Tensor};
 
-use super::regression_linear::LinearModelSGVB;
+use super::regression_linear::RegressionSGVB;
 use super::traits::{
     AnalyticalKL, BlackBoxLikelihood, LocalReparamSample, Prior, VariationalDistribution,
 };
@@ -18,12 +18,12 @@ use super::traits::{
 /// Each module produces its own eta from potentially different
 /// design matrices and variational distributions.
 pub struct CompositeModel<V, P> {
-    pub modules: Vec<LinearModelSGVB<V, P>>,
+    pub modules: Vec<RegressionSGVB<V, P>>,
 }
 
 impl<V: VariationalDistribution, P: Prior> CompositeModel<V, P> {
     /// Create a composite model from a vector of modules.
-    pub fn new(modules: Vec<LinearModelSGVB<V, P>>) -> Self {
+    pub fn new(modules: Vec<RegressionSGVB<V, P>>) -> Self {
         assert!(
             !modules.is_empty(),
             "CompositeModel requires at least one module"
@@ -54,7 +54,7 @@ where
     let samples: Vec<LocalReparamSample> = model
         .modules
         .iter()
-        .map(|m| m.local_reparam_sample(num_samples))
+        .map(|m| m.forward(num_samples))
         .collect::<Result<_>>()?;
 
     samples_local_reparam_loss(&samples, likelihood, kl_weight)
@@ -89,7 +89,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sgvb::{GaussianPrior, LinearRegressionSGVB, SGVBConfig};
+    use crate::sgvb::{GaussianPrior, GaussianRegressionSGVB, SGVBConfig};
     use candle_core::{DType, Device, Tensor};
     use candle_nn::{Optimizer, VarBuilder, VarMap};
 
@@ -150,9 +150,9 @@ mod tests {
         let config = SGVBConfig::default();
 
         let model_mean =
-            LinearRegressionSGVB::new(vb.pp("mean"), x_mean, k, prior_mean, config.clone())?;
+            GaussianRegressionSGVB::new(vb.pp("mean"), x_mean, k, prior_mean, config.clone())?;
         let model_var =
-            LinearRegressionSGVB::new(vb.pp("var"), x_var, k, prior_var, config.clone())?;
+            GaussianRegressionSGVB::new(vb.pp("var"), x_var, k, prior_var, config.clone())?;
 
         let composite = CompositeModel::new(vec![model_mean, model_var]);
 
@@ -162,7 +162,7 @@ mod tests {
         let samples: Vec<LocalReparamSample> = composite
             .modules
             .iter()
-            .map(|m| m.local_reparam_sample(10))
+            .map(|m| m.forward(10))
             .collect::<Result<_>>()?;
         assert_eq!(samples.len(), 2);
         assert_eq!(samples[0].eta.dims(), &[10, n, k]);
@@ -203,9 +203,9 @@ mod tests {
         let config = SGVBConfig::new(30);
 
         let model_mean =
-            LinearRegressionSGVB::new(vb.pp("mean"), x_mean, k, prior_mean, config.clone())?;
+            GaussianRegressionSGVB::new(vb.pp("mean"), x_mean, k, prior_mean, config.clone())?;
         let model_var =
-            LinearRegressionSGVB::new(vb.pp("var"), x_var, k, prior_var, config.clone())?;
+            GaussianRegressionSGVB::new(vb.pp("var"), x_var, k, prior_var, config.clone())?;
 
         let composite = CompositeModel::new(vec![model_mean, model_var]);
         let likelihood = TestGaussianLikelihood::new(y);
