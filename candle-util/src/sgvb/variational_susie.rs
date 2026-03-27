@@ -1,6 +1,7 @@
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 
+use super::recursive_multilevel_sgvb::pip_from_alpha;
 use super::traits::VariationalDistribution;
 
 /// Susie (Sum of Single Effects) variational distribution.
@@ -116,13 +117,7 @@ impl SusieVar {
     /// # Returns
     /// PIPs, shape (p, k)
     pub fn pip(&self) -> Result<Tensor> {
-        let alpha = self.alpha()?; // (L, p, k)
-                                   // Clamp to avoid log(0) when alpha ≈ 1
-        let one_minus_alpha = (1.0 - &alpha)?.clamp(1e-10, 1.0)?;
-        let log_one_minus_alpha = one_minus_alpha.log()?;
-        let sum_log = log_one_minus_alpha.sum(0)?; // (p, k)
-        let prod = sum_log.exp()?;
-        1.0 - prod
+        pip_from_alpha(&self.alpha()?)
     }
 
     /// Get effect size means per component.

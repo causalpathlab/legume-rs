@@ -1,6 +1,7 @@
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 
+use super::recursive_multilevel_sgvb::pip_from_alpha;
 use super::traits::VariationalDistribution;
 use super::variant_tree::VariantTree;
 
@@ -165,11 +166,7 @@ impl MultiLevelSusieVar {
     /// PIP[j, k] = 1 - Π_l (1 - α[l, j, k])
     /// Returns shape (p, k).
     pub fn pip(&self) -> Result<Tensor> {
-        let alpha = self.alpha()?;
-        let one_minus_alpha = (1.0 - &alpha)?.clamp(1e-10, 1.0)?;
-        let log_one_minus = one_minus_alpha.log()?;
-        let sum_log = log_one_minus.sum(0)?; // (p, k)
-        1.0 - sum_log.exp()?
+        pip_from_alpha(&self.alpha()?)
     }
 
     /// Get the mean of θ: E[θ_j] = Σ_l α_l[j] · μ_l[j]
