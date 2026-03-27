@@ -472,7 +472,7 @@ mod tests {
                 .map(|i| format!("snp_{i}").into_boxed_str())
                 .collect(),
             allele1: vec![Box::from("A"); num_snps],
-            allele2: vec![Box::from("T"); num_snps],
+            allele2: vec![Box::from("C"); num_snps],
             genotypes,
             positions,
             chromosomes,
