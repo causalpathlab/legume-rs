@@ -37,10 +37,12 @@
 //! let predictions = model.eta_mean()?;
 //! ```
 
+pub mod block_partition;
 pub mod cavi_susie;
 mod composite_model;
 mod gaussian_prior;
 pub mod likelihood;
+pub mod recursive_multilevel_sgvb;
 mod regression_linear;
 #[allow(clippy::module_inception)]
 mod sgvb;
@@ -62,10 +64,15 @@ pub use likelihood::{
     OffsetPoissonLikelihood, PoissonLikelihood, RssLikelihood, RssSvd, VmfFixedKappaLikelihood,
     WeightedGaussianLikelihood,
 };
+pub use recursive_multilevel_sgvb::{
+    antithetic_epsilon, generic_local_reparam_loss, multilevel_loss, pip_from_alpha,
+    RecursiveMultilevelSGVB,
+};
 pub use regression_linear::{LinearModelSGVB, LinearRegressionSGVB};
 pub use sgvb::{local_reparam_loss, SGVBConfig};
 pub use traits::{
-    AnalyticalKL, BlackBoxLikelihood, LocalReparamSample, Prior, VariationalDistribution,
+    AnalyticalKL, BlackBoxLikelihood, LocalReparamModel, LocalReparamSample, Prior,
+    VariationalDistribution,
 };
 pub use variational_bisusie::BiSusieVar;
 pub use variational_gaussian::GaussianVar;

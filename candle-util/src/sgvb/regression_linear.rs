@@ -1,8 +1,11 @@
 use candle_core::{Result, Tensor};
 use candle_nn::VarBuilder;
 
+use super::recursive_multilevel_sgvb::antithetic_epsilon;
 use super::sgvb::SGVBConfig;
-use super::traits::{AnalyticalKL, LocalReparamSample, Prior, VariationalDistribution};
+use super::traits::{
+    AnalyticalKL, LocalReparamModel, LocalReparamSample, Prior, VariationalDistribution,
+};
 use super::variational_gaussian::GaussianVar;
 
 /// Generic linear model SGVB: η = X * θ where θ ~ q(θ)
@@ -86,23 +89,7 @@ impl<V: VariationalDistribution, P: Prior + AnalyticalKL> LinearModelSGVB<V, P> 
         let device = eta_mean.device();
         let dtype = eta_mean.dtype();
 
-        // Antithetic sampling: draw S/2 noise vectors, mirror them
-        // For each ε_i, also use −ε_i → sample mean of noise is exactly 0
-        let half_s = num_samples / 2;
-        let epsilon = if half_s > 0 {
-            let eps_half = Tensor::randn(0f32, 1f32, (half_s, n, k), device)?.to_dtype(dtype)?;
-            let eps_neg = eps_half.neg()?;
-            if num_samples % 2 == 1 {
-                // Odd: add one extra independent sample
-                let eps_extra = Tensor::randn(0f32, 1f32, (1, n, k), device)?.to_dtype(dtype)?;
-                Tensor::cat(&[eps_half, eps_neg, eps_extra], 0)?
-            } else {
-                Tensor::cat(&[eps_half, eps_neg], 0)?
-            }
-        } else {
-            // num_samples == 1: single sample, no antithetic partner
-            Tensor::randn(0f32, 1f32, (1, n, k), device)?.to_dtype(dtype)?
-        };
+        let epsilon = antithetic_epsilon(num_samples, n, k, device, dtype)?;
 
         // η = E[η] + √V[η] ⊙ ε
         let eta_std = (eta_var + 1e-8)?.sqrt()?; // (n, k)
@@ -114,6 +101,14 @@ impl<V: VariationalDistribution, P: Prior + AnalyticalKL> LinearModelSGVB<V, P> 
         let kl = self.prior.kl_from_gaussian(&theta_mean, &theta_var)?;
 
         Ok(LocalReparamSample { eta, kl })
+    }
+}
+
+impl<V: VariationalDistribution, P: Prior + AnalyticalKL> LocalReparamModel
+    for LinearModelSGVB<V, P>
+{
+    fn local_reparam_sample(&self, num_samples: usize) -> Result<LocalReparamSample> {
+        self.local_reparam_sample(num_samples)
     }
 }
 

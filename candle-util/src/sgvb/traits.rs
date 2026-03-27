@@ -55,6 +55,12 @@ pub trait AnalyticalKL {
     fn kl_from_gaussian(&self, mean: &Tensor, var: &Tensor) -> Result<Tensor>;
 }
 
+/// Trait for models that support local reparameterization sampling.
+pub trait LocalReparamModel {
+    /// Sample η in n-space using the local reparameterization trick.
+    fn local_reparam_sample(&self, num_samples: usize) -> Result<LocalReparamSample>;
+}
+
 /// Sample output from local reparameterization (sampling in n-space, not p-space).
 pub struct LocalReparamSample {
     /// Linear predictor samples, shape (S, n, k) — sampled in n-space
