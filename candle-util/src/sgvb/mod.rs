@@ -66,7 +66,8 @@ pub use likelihood::{
 };
 pub use regression_linear::{GaussianRegressionSGVB, RegressionSGVB, SusieRegressionSGVB};
 pub use regression_multilevel::{
-    multilevel_loss, MultilevelParams, MultilevelRegressionSGVB, MultilevelSusieSGVB,
+    multilevel_loss, MultilevelParams, MultilevelPartitionParams, MultilevelRegressionSGVB,
+    MultilevelSusieSGVB,
 };
 pub use sgvb_util::{
     antithetic_epsilon, generic_local_reparam_loss, local_reparam_loss, SGVBConfig,
@@ -80,4 +81,4 @@ pub use variational_bisusie::BiSusieVar;
 pub use variational_gaussian::GaussianVar;
 pub use variational_io::{SparseVariationalOutput, VariationalOutput};
 pub use variational_multilevel_susie::MultiLevelSusieVar;
-pub use variational_susie::SusieVar;
+pub use variational_susie::{smoothed_sigmoid, SusieVar};
