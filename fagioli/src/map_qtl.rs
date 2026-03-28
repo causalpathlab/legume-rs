@@ -156,11 +156,15 @@ pub struct MapQtlArgs {
     #[arg(
         long,
         default_value = "susie",
-        help = "Fine-mapping model: 'susie' (univariate) or 'bisusie' (bivariate)",
-        long_help = "Fine-mapping model to use:\n\
-            - susie: Sum of Single Effects, each component selects one causal SNP\n\
-            - bisusie: Bivariate SuSiE, each component has a pair of effects\n\
-            Default: susie. Multilevel mode (--multilevel) only supports susie."
+        help = "Fine-mapping model: 'susie', 'bisusie', or 'spike-slab'",
+        long_help = "Fine-mapping model to use:\n\n\
+            - susie: Sum of Single Effects with null absorber. Each of L components\n\
+              selects one causal SNP via softmax over p+1 positions — p real SNPs\n\
+              plus a null position that absorbs mass when there is no signal.\n\n\
+            - bisusie: Bivariate SuSiE with separate predictor/outcome softmaxes.\n\n\
+            - spike-slab: Independent per-SNP Bernoulli inclusion gates with\n\
+              Gaussian slab. No component structure.\n\n\
+            Default: susie."
     )]
     pub model: Box<str>,
 
@@ -168,10 +172,11 @@ pub struct MapQtlArgs {
         long,
         default_value = "10",
         help = "Number of SuSiE components L (max causal SNPs per gene)",
-        long_help = "Number of single-effect components (L) in the SuSiE model.\n\
+        long_help = "Number of single-effect components (L) in the SuSiE/BiSuSiE model.\n\
             Each component can select one causal SNP, so L is the maximum number\n\
             of causal variants the model can identify per gene. Higher L increases\n\
-            model capacity but slows optimization. Default: 10."
+            model capacity but slows optimization.\n\
+            Ignored for spike-slab. Default: 10."
     )]
     pub num_components: usize,
 
