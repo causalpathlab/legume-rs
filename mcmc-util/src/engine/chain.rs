@@ -1,4 +1,4 @@
-use crate::traits::{EssParam, EssParamSummary};
+use super::traits::{EssParam, EssParamSummary};
 
 /// Collected MCMC samples with log-likelihoods.
 pub struct McmcChain<P: EssParam> {
