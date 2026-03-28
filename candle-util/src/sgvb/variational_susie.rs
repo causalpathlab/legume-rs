@@ -294,10 +294,6 @@ impl VariationalDistribution for SusieVar {
         // Var[θ] = E[θ²] - E[θ]², clamped to avoid negative values from numerical precision
         (second_moment - first_moment_sq)?.clamp(1e-8, f64::INFINITY)
     }
-
-    fn kl_selection(&self) -> Result<Option<Tensor>> {
-        Ok(Some(self.kl_categorical(1.0)?))
-    }
 }
 
 impl ComponentVariational for SusieVar {

@@ -359,11 +359,9 @@ impl<V: ComponentVariational, P: Prior + AnalyticalKL> MultilevelRegressionSGVB<
 
     /// Total KL divergence summed across all hierarchy levels.
     ///
-    /// Each level contributes two terms:
-    ///   1. Categorical KL: how far α deviates from uniform selection
-    ///   2. Gaussian slab KL: how far the effect size posterior deviates from the prior
-    ///
-    /// KL = Σ_d [KL_categorical(αᵈ || uniform) + KL_gaussian(βᵈ || prior)]
+    /// Uses Gaussian KL on the aggregate marginal moments at each level.
+    /// The categorical selection is implicitly regularized through α-weighted
+    /// mean/var — no explicit categorical KL needed.
     fn compute_kl(&self) -> Result<Tensor> {
         let device = self.x_design.device();
         let dtype = self.x_design.dtype();
@@ -374,9 +372,6 @@ impl<V: ComponentVariational, P: Prior + AnalyticalKL> MultilevelRegressionSGVB<
             let var = level.variational.var()?;
             let gaussian_kl = self.prior.kl_from_gaussian(&mean, &var)?;
             total_kl = (total_kl + gaussian_kl)?;
-
-            let cat_kl = level.variational.kl_categorical(1.0)?;
-            total_kl = (total_kl + cat_kl)?;
         }
 
         Ok(total_kl)
