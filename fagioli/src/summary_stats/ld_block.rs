@@ -28,8 +28,10 @@ impl LdBlock {
 pub struct LdBlockParams {
     pub num_landmarks: usize,
     pub num_components: usize,
-    pub min_block_snps: usize,
-    pub max_block_snps: usize,
+    /// Merge blocks smaller than this. `None` disables merging.
+    pub min_block_snps: Option<usize>,
+    /// Split blocks larger than this. `None` disables splitting.
+    pub max_block_snps: Option<usize>,
     pub seed: u64,
 }
 
@@ -302,10 +304,9 @@ fn build_blocks_from_cuts(
     num_snps: usize,
     positions: &[u64],
     chromosomes: &[Box<str>],
-    min_block_snps: usize,
-    max_block_snps: usize,
+    min_block_snps: Option<usize>,
+    max_block_snps: Option<usize>,
 ) -> Vec<LdBlock> {
-    // Merge all cut points, add boundaries
     let mut boundaries: Vec<usize> = Vec::new();
     boundaries.push(0);
     for &cp in cut_points {
@@ -317,34 +318,42 @@ fn build_blocks_from_cuts(
     boundaries.sort_unstable();
     boundaries.dedup();
 
-    // Split blocks that are too large
-    let mut refined: Vec<usize> = vec![0];
-    for w in boundaries.windows(2) {
-        let (start, end) = (w[0], w[1]);
-        let size = end - start;
-        if size > max_block_snps {
-            let num_sub = size.div_ceil(max_block_snps);
-            let sub_size = size / num_sub;
-            for i in 1..num_sub {
-                refined.push(start + i * sub_size);
+    // Split blocks that exceed max size (boundaries are already sorted,
+    // and sub-boundaries are inserted in order, so no re-sort needed)
+    let refined = if let Some(max_snps) = max_block_snps {
+        let mut r: Vec<usize> = vec![0];
+        for w in boundaries.windows(2) {
+            let (start, end) = (w[0], w[1]);
+            let size = end - start;
+            if size > max_snps {
+                let num_sub = size.div_ceil(max_snps);
+                let sub_size = size / num_sub;
+                for i in 1..num_sub {
+                    r.push(start + i * sub_size);
+                }
             }
+            r.push(end);
         }
-        refined.push(end);
-    }
-    refined.sort_unstable();
-    refined.dedup();
+        r
+    } else {
+        boundaries
+    };
 
-    // Merge blocks that are too small
-    let mut merged: Vec<usize> = vec![refined[0]];
-    for i in 1..refined.len() {
-        let prev = *merged.last().unwrap();
-        let cur = refined[i];
-        if cur - prev < min_block_snps && i < refined.len() - 1 {
-            // Skip this boundary (merge with next)
-            continue;
+    // Merge blocks that are below min size
+    let merged = if let Some(min_snps) = min_block_snps {
+        let mut m: Vec<usize> = vec![refined[0]];
+        for i in 1..refined.len() {
+            let prev = *m.last().unwrap();
+            let cur = refined[i];
+            if cur - prev < min_snps && i < refined.len() - 1 {
+                continue;
+            }
+            m.push(cur);
         }
-        merged.push(cur);
-    }
+        m
+    } else {
+        refined
+    };
 
     // Build LdBlock structs
     let mut blocks = Vec::new();
@@ -428,8 +437,8 @@ mod tests {
             &LdBlockParams {
                 num_landmarks: 50,
                 num_components: 10,
-                min_block_snps: 20,
-                max_block_snps: 100,
+                min_block_snps: Some(20),
+                max_block_snps: Some(100),
                 seed: 42,
             },
         )

@@ -1,9 +1,10 @@
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::{FxHashMap, FxHashSet as HashSet};
 
 use anyhow::{ensure, Result};
 use clap::Args;
 use log::info;
 use matrix_util::common_io::read_lines;
+use matrix_util::dmatrix_util::{subset_columns, subset_rows};
 use matrix_util::traits::MatOps;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
@@ -133,17 +134,10 @@ pub struct MapSumstatArgs {
 
     #[arg(
         long,
-        default_value = "50",
+        default_value = "200",
         help = "Minimum LD block size in SNPs (smaller blocks are merged)"
     )]
     pub min_block_snps: usize,
-
-    #[arg(
-        long,
-        default_value = "100",
-        help = "Maximum LD block size in SNPs (larger blocks are split)"
-    )]
-    pub max_block_snps: usize,
 
     // ── RSS SVD parameters ───────────────────────────────────────────────
     #[arg(
@@ -333,6 +327,26 @@ pub struct MapSumstatArgs {
     )]
     pub no_ldsc_intercept: bool,
 
+    // ── Refinement ────────────────────────────────────────────────────────
+    #[arg(
+        long,
+        help = "Enable joint refinement of high-PIP variants across blocks",
+        long_help = "After block-level fine-mapping, select variants using an elbow rule\n\
+            on the sorted PIP distribution, then refit a single joint model that\n\
+            captures cross-block LD. This resolves spurious signals near block\n\
+            boundaries where moderate LD can inflate PIPs in adjacent blocks.\n\
+            The elbow automatically determines how many variants to include.\n\
+            Disabled by default."
+    )]
+    pub refine: bool,
+
+    #[arg(
+        long,
+        default_value = "3000",
+        help = "Max variants to include in joint refinement step"
+    )]
+    pub max_refine_variants: usize,
+
     // ── Misc ─────────────────────────────────────────────────────────────
     #[arg(long, default_value = "42", help = "Random seed for reproducibility")]
     pub seed: u64,
@@ -468,8 +482,8 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
             &LdBlockParams {
                 num_landmarks: args.num_landmarks,
                 num_components: args.num_ld_components,
-                min_block_snps: args.min_block_snps,
-                max_block_snps: args.max_block_snps,
+                min_block_snps: Some(args.min_block_snps),
+                max_block_snps: None,
                 seed: args.seed,
             },
         )?
@@ -576,21 +590,17 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
             return (block_idx, empty);
         }
 
-        // Standardize block genotypes
         let mut x_block = geno
             .genotypes
             .columns(block.snp_start, block_m)
             .clone_owned();
         x_block.scale_columns_inplace();
 
-        // Extract z-scores for this block
         let z_block = zscores.rows(block.snp_start, block_m).clone_owned();
 
-        // Per-block seed for reproducibility
         let mut block_config = fit_config.clone();
         block_config.seed = fit_config.seed.wrapping_add(block_idx as u64);
 
-        // λ: user-specified or default 0.1/K
         let block_lambda = args.lambda.unwrap_or(0.1 / max_rank as f64);
 
         let rss_params = RssParams {
@@ -630,15 +640,11 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         pool.install(|| blocks.par_iter().enumerate().map(fit_block_fn).collect())
     };
 
-    // Sort by block index for deterministic output
     let mut sorted_results = block_results;
     sorted_results.sort_by_key(|(idx, _)| *idx);
 
     // ── Step 6: Prior aggregation ──────────────────────────────────────
-    // Bayesian model averaging (BMA) over the prior variance grid per block.
-    // Each block's per-prior results are combined using softmax(ELBO) weights.
     let globally_averaged: Vec<(usize, BlockFitResult)> = {
-        // Log global ELBO summary
         let num_priors = fit_config.prior_vars.len();
         let mut global_elbos = vec![0.0f32; num_priors];
         for (_idx, detailed) in &sorted_results {
@@ -694,6 +700,25 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         }
     }
 
+    // ── Step 6b: Joint refinement of high-PIP variants ──────────────────
+    let globally_averaged = if args.refine {
+        refine_high_pip_variants(
+            globally_averaged,
+            &blocks,
+            &geno.genotypes,
+            &zscores,
+            &geno.snp_ids,
+            t,
+            args.max_refine_variants,
+            &fit_config,
+            args.lambda,
+            !args.no_ldsc_intercept,
+            &device,
+        )?
+    } else {
+        globally_averaged
+    };
+
     let variant_rows = build_sumstat_variant_rows(&globally_averaged, &blocks, &zscores, t);
     write_variant_results(
         &format!("{}.results.bed.gz", args.output),
@@ -728,6 +753,8 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         "sigma2_inf": args.sigma2_inf,
         "pve_adjust": !args.no_pve_adjust,
         "ldsc_intercept": !args.no_ldsc_intercept,
+        "refine": args.refine,
+        "max_refine_variants": args.max_refine_variants,
     });
     write_parameters(&format!("{}.parameters.json", args.output), &params)?;
 
@@ -783,6 +810,185 @@ fn filter_individuals(geno: &mut GenotypeMatrix, indices: &[usize]) {
         .iter()
         .map(|&i| geno.individual_ids[i].clone())
         .collect();
+}
+
+/// Find the elbow/knee point in sorted (descending) candidates.
+///
+/// First truncates to variants above the null level (2x median PIP, floor 0.01),
+/// then uses the max-perpendicular-distance-to-line (kneedle) method.
+/// Returns the index (exclusive upper bound) of the cutoff.
+fn find_pip_elbow(candidates: &[(usize, f32)]) -> usize {
+    let n = candidates.len();
+    if n < 3 {
+        return n;
+    }
+    debug_assert!(
+        candidates.windows(2).all(|w| w[0].1 >= w[1].1),
+        "find_pip_elbow requires descending-sorted input"
+    );
+
+    // 2x midpoint PIP approximates where signal ends and null begins
+    let mid_pip = candidates[n / 2].1;
+    let null_thresh = (2.0 * mid_pip).max(0.01);
+    let above_null = candidates.partition_point(|&(_, p)| p >= null_thresh);
+    if above_null < 3 {
+        return above_null;
+    }
+
+    let y1 = candidates[0].1 as f64;
+    let x2 = (above_null - 1) as f64;
+    let y2 = candidates[above_null - 1].1 as f64;
+
+    let dy = y2 - y1;
+    let line_len = (x2 * x2 + dy * dy).sqrt();
+    if line_len < 1e-12 {
+        return above_null;
+    }
+
+    let mut max_dist = 0.0f64;
+    let mut elbow_idx = 0;
+    for (i, &(_, pip)) in candidates.iter().enumerate().take(above_null - 1).skip(1) {
+        let px = i as f64;
+        let py = pip as f64 - y1;
+        let dist = (px * dy - py * x2).abs() / line_len;
+        if dist > max_dist {
+            max_dist = dist;
+            elbow_idx = i;
+        }
+    }
+
+    elbow_idx + 1
+}
+
+/// Joint refinement: refit a single model on high-PIP variants selected by elbow.
+///
+/// Collects all per-variant max PIPs, sorts descending, finds the elbow/knee in the
+/// PIP distribution, and refits a joint RSS model on the selected variants. This
+/// captures cross-block LD that block-level fitting misses.
+#[allow(clippy::too_many_arguments)]
+fn refine_high_pip_variants(
+    mut globally_averaged: Vec<(usize, BlockFitResult)>,
+    blocks: &[LdBlock],
+    genotypes: &DMatrix<f32>,
+    zscores: &DMatrix<f32>,
+    snp_ids: &[Box<str>],
+    t: usize,
+    max_variants: usize,
+    fit_config: &FitConfig,
+    user_lambda: Option<f64>,
+    ldsc_intercept: bool,
+    device: &candle_util::candle_core::Device,
+) -> Result<Vec<(usize, BlockFitResult)>> {
+    let mut candidates: Vec<(usize, f32)> = Vec::new();
+    for (block_idx, result) in &globally_averaged {
+        let block = &blocks[*block_idx];
+        for snp_j in 0..block.num_snps() {
+            let max_pip = (0..t).map(|k| result.pip[(snp_j, k)]).fold(0f32, f32::max);
+            candidates.push((block.snp_start + snp_j, max_pip));
+        }
+    }
+
+    candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    let elbow_n = find_pip_elbow(&candidates);
+    let elbow_pip = candidates
+        .get(elbow_n.saturating_sub(1))
+        .map_or(0.0, |c| c.1);
+    candidates.truncate(elbow_n);
+
+    if candidates.len() < 2 {
+        info!(
+            "Refinement: elbow at {} variants (PIP >= {:.4}), too few — skipping",
+            elbow_n, elbow_pip,
+        );
+        return Ok(globally_averaged);
+    }
+
+    if candidates.len() > max_variants {
+        log::warn!(
+            "Refinement: elbow selected {} variants, capping at {}",
+            candidates.len(),
+            max_variants,
+        );
+        candidates.truncate(max_variants);
+    }
+
+    let p_sel = candidates.len();
+    info!(
+        "Refinement: elbow at {} variants (PIP >= {:.4}), fitting joint model",
+        p_sel, elbow_pip,
+    );
+
+    let sel_indices = candidates.iter().map(|&(j, _)| j);
+    let mut x_joint = subset_columns(genotypes, sel_indices)?;
+    let sel_indices = candidates.iter().map(|&(j, _)| j);
+    let z_joint = subset_rows(zscores, sel_indices)?;
+    x_joint.scale_columns_inplace();
+
+    let n = genotypes.nrows();
+    let joint_max_rank = n.min(p_sel);
+    let joint_lambda = user_lambda.unwrap_or(0.1 / joint_max_rank as f64);
+
+    let mut joint_config = fit_config.clone();
+    // Each SuSiE component selects one causal — cap L at half the candidates
+    // to avoid over-parameterization in the joint model
+    joint_config.num_components = joint_config.num_components.min(p_sel / 2).max(1);
+    // Distinct seed so refinement doesn't replay block-level initialization
+    joint_config.seed = fit_config.seed.wrapping_add(999);
+
+    let rss_params = RssParams {
+        max_rank: joint_max_rank,
+        lambda: joint_lambda,
+        ldsc_intercept,
+    };
+
+    let joint_result = fit_block_rss(&x_joint, &z_joint, &joint_config, &rss_params, device)?;
+    let refined = joint_result.best_result();
+
+    info!(
+        "Refinement: joint ELBO={:.2}, L={}",
+        refined.avg_elbo, joint_config.num_components,
+    );
+
+    let mut hits: Vec<(f32, usize, usize)> = Vec::new();
+    for (j_new, &(j_global, _)) in candidates.iter().enumerate() {
+        for trait_k in 0..t {
+            let pip = refined.pip[(j_new, trait_k)];
+            if pip >= 0.5 {
+                hits.push((pip, j_global, trait_k));
+            }
+        }
+    }
+    hits.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for &(pip, global_snp, trait_k) in hits.iter().take(10) {
+        let z = zscores[(global_snp, trait_k)];
+        info!(
+            "  ** refined {}: trait={}, pip={:.4}, z={:.2}",
+            snp_ids[global_snp], trait_k, pip, z,
+        );
+    }
+
+    let sel_lookup: FxHashMap<usize, usize> = candidates
+        .iter()
+        .enumerate()
+        .map(|(j_new, &(j_global, _))| (j_global, j_new))
+        .collect();
+
+    for (block_idx, result) in &mut globally_averaged {
+        let block = &blocks[*block_idx];
+        for snp_j in 0..block.num_snps() {
+            let global_snp = block.snp_start + snp_j;
+            if let Some(&j_new) = sel_lookup.get(&global_snp) {
+                for trait_k in 0..t {
+                    result.pip[(snp_j, trait_k)] = refined.pip[(j_new, trait_k)];
+                    result.effect_mean[(snp_j, trait_k)] = refined.effect_mean[(j_new, trait_k)];
+                    result.effect_std[(snp_j, trait_k)] = refined.effect_std[(j_new, trait_k)];
+                }
+            }
+        }
+    }
+
+    Ok(globally_averaged)
 }
 
 /// Build variant result rows from block-level RSS fine-mapping output.
