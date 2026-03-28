@@ -2,7 +2,7 @@ use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 
 use super::susie_util::pip_from_alpha;
-use super::traits::VariationalDistribution;
+use super::traits::{ComponentVariational, VariationalDistribution};
 use super::variant_tree::VariantTree;
 
 /// Multi-level SuSiE variational distribution with hierarchical softmax.
@@ -211,6 +211,72 @@ impl MultiLevelSusieVar {
     pub fn dtype(&self) -> DType {
         self.logits_per_level[0].dtype()
     }
+
+    /// Categorical KL summed across tree levels.
+    ///
+    /// At each level d, the per-group softmax over children gives α_d.
+    /// KL = Σ_d Σ_{l,g,c,k} α_d[l,g,c,k] * (log α_d[l,g,c,k] - log(1/C_g))
+    /// where C_g is the number of valid children in group g at level d.
+    pub fn kl_categorical(&self, _prior_alpha: f64) -> Result<Tensor> {
+        let device = self.logits_per_level[0].device();
+        let dtype = self.logits_per_level[0].dtype();
+        let mut total_kl = Tensor::new(0f32, device)?.to_dtype(dtype)?;
+
+        for d in 0..self.tree.depth {
+            let logits = &self.logits_per_level[d]; // (L, G_d, C_d, k)
+            let mask = &self.masks_per_level[d]; // (G_d, C_d)
+
+            let scaled = if (self.temperature - 1.0).abs() > 1e-10 {
+                (logits / self.temperature)?
+            } else {
+                logits.clone()
+            };
+
+            let neg_inf_mask = ((1.0 - mask)? * (-1e30))?.unsqueeze(0)?.unsqueeze(3)?;
+            let masked_logits = scaled.broadcast_add(&neg_inf_mask)?;
+            let log_sm = candle_nn::ops::log_softmax(&masked_logits, 2)?; // (L, G_d, C_d, k)
+            let alpha_d = log_sm.exp()?;
+
+            // log(uniform prior) = -log(C_g) per group g
+            // C_g = sum of mask[g, :] (number of valid children)
+            let children_count = mask.sum(1)?; // (G_d,)
+            let log_prior = children_count.log()?.unsqueeze(0)?.unsqueeze(2)?; // (1, G_d, 1)
+                                                                               // Need shape (1, G_d, 1, 1) for broadcast with (L, G_d, C_d, k)
+            let log_prior = log_prior.unsqueeze(3)?;
+
+            // KL = Σ α (log α + log C_g) = Σ α log α + Σ_g (log C_g) Σ_{l,c,k} α[l,g,c,k]
+            // But Σ_c α[l,g,c,k] = 1 for each (l,g,k), so:
+            // KL = Σ α log α + Σ_g log(C_g) * L * k
+            // Easier: KL = Σ α * (log α - log(1/C_g)) = Σ α * (log α + log C_g)
+            // Mask out invalid children (α=0 there due to -inf logits)
+            let mask_4d = mask.unsqueeze(0)?.unsqueeze(3)?.to_dtype(dtype)?;
+            let kl_elements = alpha_d
+                .broadcast_mul(&log_sm.broadcast_add(&log_prior)?)?
+                .broadcast_mul(&mask_4d)?;
+            let level_kl = kl_elements.sum_all()?;
+            total_kl = (total_kl + level_kl)?;
+        }
+
+        Ok(total_kl)
+    }
+}
+
+impl ComponentVariational for MultiLevelSusieVar {
+    fn alpha(&self) -> Result<Tensor> {
+        self.alpha()
+    }
+    fn beta_mean(&self) -> Result<Tensor> {
+        Ok(self.beta_mean().clone())
+    }
+    fn beta_std(&self) -> Result<Tensor> {
+        self.beta_std()
+    }
+    fn kl_categorical(&self, prior_alpha: f64) -> Result<Tensor> {
+        self.kl_categorical(prior_alpha)
+    }
+    fn num_components(&self) -> usize {
+        self.num_components()
+    }
 }
 
 impl VariationalDistribution for MultiLevelSusieVar {
@@ -238,6 +304,10 @@ impl VariationalDistribution for MultiLevelSusieVar {
         let first_moment_sq = first_moment.sqr()?;
 
         (second_moment - first_moment_sq)?.clamp(1e-8, f64::INFINITY)
+    }
+
+    fn kl_selection(&self) -> Result<Option<Tensor>> {
+        Ok(Some(self.kl_categorical(1.0)?))
     }
 }
 
