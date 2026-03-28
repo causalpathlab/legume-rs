@@ -74,6 +74,22 @@ pub trait ComponentVariational: VariationalDistribution {
     fn num_components(&self) -> usize;
 }
 
+/// Variational distribution with independent per-variable Bernoulli gates
+/// (spike-and-slab). Each variable is included/excluded independently.
+///
+/// Unlike `ComponentVariational` (SuSiE), there is no component structure —
+/// just per-variable inclusion indicators and effect sizes.
+pub trait IndependentGateVariational: VariationalDistribution {
+    /// Per-variable inclusion probabilities, shape (p, k).
+    fn inclusion_prob(&self) -> Result<Tensor>;
+    /// Per-variable effect size means, shape (p, k).
+    fn effect_mean(&self) -> &Tensor;
+    /// Per-variable effect size stds, shape (p, k).
+    fn effect_std(&self) -> Result<Tensor>;
+    /// KL divergence of Bernoulli gates from prior.
+    fn kl_bernoulli(&self, prior_inclusion: f64) -> Result<Tensor>;
+}
+
 /// Trait for models that support local reparameterization sampling.
 pub trait LocalReparamModel {
     /// Sample η in n-space using the local reparameterization trick.
