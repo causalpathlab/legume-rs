@@ -98,8 +98,8 @@ impl IndependentGateVariational for SpikeSlabVar {
         self.inclusion_prob()
     }
 
-    fn effect_mean(&self) -> &Tensor {
-        &self.beta_mean
+    fn effect_mean(&self) -> Result<Tensor> {
+        Ok(self.beta_mean.clone())
     }
 
     fn effect_std(&self) -> Result<Tensor> {

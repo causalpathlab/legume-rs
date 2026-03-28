@@ -83,7 +83,7 @@ pub trait IndependentGateVariational: VariationalDistribution {
     /// Per-variable inclusion probabilities, shape (p, k).
     fn inclusion_prob(&self) -> Result<Tensor>;
     /// Per-variable effect size means, shape (p, k).
-    fn effect_mean(&self) -> &Tensor;
+    fn effect_mean(&self) -> Result<Tensor>;
     /// Per-variable effect size stds, shape (p, k).
     fn effect_std(&self) -> Result<Tensor>;
     /// KL divergence of Bernoulli gates from prior.
