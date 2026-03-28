@@ -173,8 +173,8 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
             &LdBlockParams {
                 num_landmarks: args.num_landmarks,
                 num_components: args.num_ld_components,
-                min_block_snps: args.min_block_snps,
-                max_block_snps: args.max_block_snps,
+                min_block_snps: Some(args.min_block_snps),
+                max_block_snps: Some(args.max_block_snps),
                 seed: args.seed,
             },
         )?
