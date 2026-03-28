@@ -3,8 +3,8 @@ use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use std::f32::consts::PI;
 
-use crate::chain::McmcChain;
-use crate::traits::EssParam;
+use super::chain::McmcChain;
+use super::traits::EssParam;
 
 /// One ESS transition. Returns `(new_params, new_lnpdf)`.
 ///
