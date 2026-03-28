@@ -1,24 +1,27 @@
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 
-use super::susie_util::pip_from_alpha;
+use super::susie_util::{kl_categorical_uniform, pip_from_alpha};
 use super::traits::{ComponentVariational, VariationalDistribution};
+use super::variational_susie::smoothed_sigmoid;
 
 /// Bi-directional Susie (Sum of Single Effects) variational distribution.
 ///
-/// θ[p,k] = Σ_l α_p[l,p] * α_k[l,k] * β[l,p,k]
+/// θ[p,k] = Σ_l α_p[l,p] * π_k[l,k] * β[l,p,k]
 ///
 /// where:
-/// - α_p[l,:] = softmax over predictors (dim P) - each component selects one predictor
-/// - α_k[l,:] = softmax over outcomes (dim K) - each component selects one outcome
-/// - β[l,p,k] ~ N(μ[l,p,k], σ[l,p,k]²) - per-feature effect size
+/// - α_p[l,:] = softmax over predictors (dim P) — single-effect selection with null
+/// - π_k[l,:] = smoothed sigmoid per outcome (dim K) — independent trait inclusion
+/// - β[l,p,k] ~ N(μ[l,p,k], σ[l,p,k]²) — per-feature effect size
 ///
-/// This creates an outer-product structure where each component l selects
-/// a (predictor, outcome) pair, enforcing sparsity in both dimensions.
+/// The predictor axis uses softmax (enforcing single-effect per component),
+/// while the outcome axis uses independent sigmoid gates (allowing each component
+/// to affect multiple traits). This avoids outer-product PIP dilution: a causal
+/// SNP can have PIP close to 1 on each affected trait independently.
 pub struct BiSusieVar {
-    /// Selection logits for predictors, shape (L, P)
+    /// Selection logits for predictors, shape (L, P) or (L, P+1) with null
     logits_predictor: Tensor,
-    /// Selection logits for outcomes, shape (L, K)
+    /// Inclusion logits for outcomes, shape (L, K) — independent sigmoid gates
     logits_outcome: Tensor,
     /// Effect size means per component, shape (L, P, K)
     beta_mean: Tensor,
@@ -26,28 +29,52 @@ pub struct BiSusieVar {
     beta_ln_std: Tensor,
     /// Number of components L
     num_components: usize,
-    /// Number of predictors P
+    /// Number of real predictors P (excluding null)
     num_predictors: usize,
     /// Number of outcomes K
     num_outcomes: usize,
+    /// Whether null absorber is appended to the predictor softmax
+    has_null: bool,
+    /// Smoothing epsilon for outcome sigmoid: π ∈ [ε, 1-ε]
+    gate_epsilon: f64,
 }
 
 impl BiSusieVar {
-    /// Create a new Bi-directional Susie variational distribution.
-    ///
-    /// # Arguments
-    /// * `vb` - VarBuilder for creating trainable parameters
-    /// * `num_components` - Number of single-effect components L
-    /// * `num_predictors` - Number of predictors P
-    /// * `num_outcomes` - Number of outcomes K
+    /// Create a new BiSusie variational distribution (no null on predictor axis).
     pub fn new(
         vb: VarBuilder,
         num_components: usize,
         num_predictors: usize,
         num_outcomes: usize,
     ) -> Result<Self> {
+        Self::new_inner(vb, num_components, num_predictors, num_outcomes, false)
+    }
+
+    /// Create a new BiSusie with null absorber on the predictor softmax.
+    ///
+    /// The predictor axis gets a (P+1)th null position (same as SusieVar).
+    /// The outcome axis uses independent sigmoid gates — no null needed
+    /// since each gate can independently go to ε ≈ 0.
+    pub fn new_with_null(
+        vb: VarBuilder,
+        num_components: usize,
+        num_predictors: usize,
+        num_outcomes: usize,
+    ) -> Result<Self> {
+        Self::new_inner(vb, num_components, num_predictors, num_outcomes, true)
+    }
+
+    fn new_inner(
+        vb: VarBuilder,
+        num_components: usize,
+        num_predictors: usize,
+        num_outcomes: usize,
+        has_null: bool,
+    ) -> Result<Self> {
+        let p_logits = num_predictors + has_null as usize;
+
         let logits_predictor = vb.get_with_hints(
-            (num_components, num_predictors),
+            (num_components, p_logits),
             "logits_predictor",
             candle_nn::Init::Const(0.0),
         )?;
@@ -81,42 +108,44 @@ impl BiSusieVar {
             num_components,
             num_predictors,
             num_outcomes,
+            has_null,
+            gate_epsilon: 0.01,
         })
     }
 
-    /// Get predictor log-selection probabilities log(α_p).
+    /// Predictor log-selection probabilities log(α_p), shape (L, P).
+    /// Softmax with null excluded when present.
     pub fn log_alpha_predictor(&self) -> Result<Tensor> {
-        candle_nn::ops::log_softmax(&self.logits_predictor, 1)
+        let full = candle_nn::ops::log_softmax(&self.logits_predictor, 1)?;
+        if self.has_null {
+            full.narrow(1, 0, self.num_predictors)
+        } else {
+            Ok(full)
+        }
     }
 
-    /// Get outcome log-selection probabilities log(α_k).
-    pub fn log_alpha_outcome(&self) -> Result<Tensor> {
-        candle_nn::ops::log_softmax(&self.logits_outcome, 1)
-    }
-
-    /// Get predictor selection probabilities α_p.
+    /// Predictor selection probabilities α_p, shape (L, P).
     pub fn alpha_predictor(&self) -> Result<Tensor> {
         self.log_alpha_predictor()?.exp()
     }
 
-    /// Get outcome selection probabilities α_k.
-    pub fn alpha_outcome(&self) -> Result<Tensor> {
-        self.log_alpha_outcome()?.exp()
+    /// Outcome inclusion probabilities π_k, shape (L, K).
+    /// Independent smoothed sigmoid per outcome.
+    pub fn pi_outcome(&self) -> Result<Tensor> {
+        smoothed_sigmoid(&self.logits_outcome, self.gate_epsilon)
     }
 
-    /// Get joint selection probabilities for each (predictor, outcome) pair per component.
-    /// Returns shape (L, P, K)
+    /// Joint selection weights for each (predictor, outcome) pair per component.
+    /// α_p[l,p] * π_k[l,k], shape (L, P, K).
     pub fn alpha_joint(&self) -> Result<Tensor> {
-        let alpha_p = self.alpha_predictor()?;
-        let alpha_k = self.alpha_outcome()?;
-        let alpha_p_expanded = alpha_p.unsqueeze(2)?;
-        let alpha_k_expanded = alpha_k.unsqueeze(1)?;
-        alpha_p_expanded.broadcast_mul(&alpha_k_expanded)
+        let alpha_p = self.alpha_predictor()?; // (L, P)
+        let pi_k = self.pi_outcome()?; // (L, K)
+        alpha_p.unsqueeze(2)?.broadcast_mul(&pi_k.unsqueeze(1)?)
     }
 
-    /// Get the posterior inclusion probabilities (PIPs) for each (predictor, outcome) pair.
-    /// PIP[p,k] = 1 - Π_l (1 - α_p[l,p] * α_k[l,k])
-    /// Returns shape (P, K)
+    /// Posterior inclusion probabilities for each (predictor, outcome) pair.
+    /// PIP[p,k] = 1 - Π_l (1 - α_p[l,p] * π_k[l,k])
+    /// Returns shape (P, K).
     pub fn pip(&self) -> Result<Tensor> {
         pip_from_alpha(&self.alpha_joint()?)
     }
@@ -149,30 +178,31 @@ impl BiSusieVar {
         self.num_outcomes
     }
 
-    /// Get the mean of θ: E[θ[p,k]] = Σ_l α_p[l,p] * α_k[l,k] * μ[l,p,k]
-    /// Returns shape (P, K)
+    /// E[θ[p,k]] = Σ_l α_p[l,p] * π_k[l,k] * μ[l,p,k]
     pub fn theta_mean(&self) -> Result<Tensor> {
-        let joint = self.alpha_joint()?; // (L, P, K)
-        joint.broadcast_mul(&self.beta_mean)?.sum(0) // beta_mean is (L, P, K)
+        let joint = self.alpha_joint()?;
+        joint.broadcast_mul(&self.beta_mean)?.sum(0)
     }
 
-    /// Categorical KL: sum of predictor-axis and outcome-axis categorical KLs.
+    /// Selection KL: categorical on predictor axis + Bernoulli on outcome axis.
     ///
-    /// KL = Σ_l [KL(α_p[l] || Uniform(P)) + KL(α_k[l] || Uniform(K))]
+    /// Predictor: KL(softmax(logits_p) || Uniform(P_logits))
+    /// Outcome: Σ_l Σ_k KL(Bernoulli(π_k[l,k]) || Bernoulli(π₀))
+    ///   where π₀ = prior_alpha / K
     pub fn kl_categorical(&self, prior_alpha: f64) -> Result<Tensor> {
-        let log_alpha_p = self.log_alpha_predictor()?; // (L, P)
-        let alpha_p = log_alpha_p.exp()?;
-        let p = self.num_predictors as f64;
-        let log_prior_p = (prior_alpha / p).ln();
-        let neg_ent_p = alpha_p.broadcast_mul(&log_alpha_p)?.sum_all()?;
-        let kl_p = (neg_ent_p - log_prior_p * self.num_components as f64)?;
+        // Predictor axis: categorical KL (includes null if present)
+        let kl_p = kl_categorical_uniform(&self.logits_predictor, prior_alpha)?;
 
-        let log_alpha_k = self.log_alpha_outcome()?; // (L, K)
-        let alpha_k = log_alpha_k.exp()?;
+        // Outcome axis: Bernoulli KL per (component, outcome)
+        let pi = self.pi_outcome()?; // (L, K)
+        let one_minus_pi = (1.0 - &pi)?;
         let k = self.num_outcomes as f64;
-        let log_prior_k = (prior_alpha / k).ln();
-        let neg_ent_k = alpha_k.broadcast_mul(&log_alpha_k)?.sum_all()?;
-        let kl_k = (neg_ent_k - log_prior_k * self.num_components as f64)?;
+        let pi_0 = (prior_alpha / k).clamp(1e-10, 1.0 - 1e-10);
+        let log_pi_0 = pi_0.ln();
+        let log_1_minus_pi_0 = (1.0 - pi_0).ln();
+        let term1 = (&pi * (pi.log()? - log_pi_0)?)?;
+        let term2 = (&one_minus_pi * (one_minus_pi.log()? - log_1_minus_pi_0)?)?;
+        let kl_k = (term1 + term2)?.sum_all()?;
 
         kl_p + kl_k
     }
@@ -201,16 +231,14 @@ impl VariationalDistribution for BiSusieVar {
     fn var(&self) -> Result<Tensor> {
         let joint = self.alpha_joint()?; // (L, P, K)
 
-        let mu = &self.beta_mean; // (L, P, K)
-        let sigma_sq = (&self.beta_ln_std * 2.0)?.exp()?; // (L, P, K)
+        let mu = &self.beta_mean;
+        let sigma_sq = (&self.beta_ln_std * 2.0)?.exp()?;
 
         let mu_sq = mu.sqr()?;
         let second_moment_term = (&sigma_sq + &mu_sq)?;
-        let second_moment_l = joint.broadcast_mul(&second_moment_term)?;
-        let second_moment = second_moment_l.sum(0)?; // (P, K)
+        let second_moment = joint.broadcast_mul(&second_moment_term)?.sum(0)?;
 
-        let first_moment_l = joint.broadcast_mul(mu)?;
-        let first_moment = first_moment_l.sum(0)?; // (P, K)
+        let first_moment = joint.broadcast_mul(mu)?.sum(0)?;
         let first_moment_sq = first_moment.sqr()?;
 
         (second_moment - first_moment_sq)?.clamp(1e-8, f64::INFINITY)
@@ -231,34 +259,24 @@ mod tests {
         let device = Device::Cpu;
         let dtype = DType::F32;
 
-        // Problem size: N observations, P predictors, K outcomes
         let n = 800;
-        let p = 5; // predictors (e.g., cell types)
-        let k = 10; // outcomes (e.g., topics)
-        let l = 3; // number of true effects (and BiSusie components)
+        let p = 5;
+        let k = 10;
+        let l = 3;
 
-        // True sparse mapping: 3 (predictor, outcome) pairs
-        // predictor 0 -> outcome 2, effect = 2.0
-        // predictor 2 -> outcome 5, effect = 1.5
-        // predictor 4 -> outcome 8, effect = 1.8
         let true_pairs = [(0usize, 2usize, 2.0f32), (2, 5, 1.5), (4, 8, 1.8)];
 
-        // Build true theta matrix (P x K)
         let mut theta_true_data = vec![0.0f32; p * k];
         for &(pi, ki, effect) in &true_pairs {
             theta_true_data[pi * k + ki] = effect;
         }
         let theta_true = Tensor::from_vec(theta_true_data, (p, k), &device)?;
 
-        // Generate design matrix X (N x P)
         let x = Tensor::randn(0f32, 1f32, (n, p), &device)?;
-
-        // Generate Y = X @ theta_true + noise
         let y_mean = x.matmul(&theta_true)?;
         let noise = Tensor::randn(0f32, 0.5f32, (n, k), &device)?;
         let y = (&y_mean + &noise)?;
 
-        // Create BiSusie model
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
 
@@ -268,7 +286,6 @@ mod tests {
 
         let model = RegressionSGVB::from_variational(bisusie, x.clone(), prior, config);
 
-        // Gaussian likelihood
         struct GaussianLik {
             y: Tensor,
         }
@@ -281,7 +298,6 @@ mod tests {
         }
         let likelihood = GaussianLik { y };
 
-        // Train (more iterations needed with categorical KL active)
         let mut optimizer = AdamW::new_lr(varmap.all_vars(), 0.05)?;
 
         for _epoch in 0..1000 {
@@ -289,10 +305,8 @@ mod tests {
             optimizer.backward_step(&loss)?;
         }
 
-        // Check PIPs
-        let pip = model.variational.pip()?; // (P, K)
+        let pip = model.variational.pip()?;
 
-        // For each true pair, PIP should be high
         for &(pi, ki, _) in &true_pairs {
             let pip_val: f32 = pip.get(pi)?.get(ki)?.to_scalar()?;
             assert!(
@@ -304,7 +318,6 @@ mod tests {
             );
         }
 
-        // Check that most other entries have low PIP
         let mut low_pip_count = 0;
         let mut total_null = 0;
         for pi in 0..p {
@@ -366,11 +379,9 @@ mod tests {
         }
         let likelihood = GaussianLik { y };
 
-        // Test loss computation works
         let loss = local_reparam_loss(&model, &likelihood, 10, 1.0)?;
         assert!(loss.dims().is_empty());
 
-        // Test model outputs
         let eta_mean = model.eta_mean()?;
         assert_eq!(eta_mean.dims(), &[n, k]);
 
@@ -398,7 +409,7 @@ mod tests {
         let bisusie = BiSusieVar::new(vb, l, p, k)?;
 
         assert_eq!(bisusie.alpha_predictor()?.dims(), &[l, p]);
-        assert_eq!(bisusie.alpha_outcome()?.dims(), &[l, k]);
+        assert_eq!(bisusie.pi_outcome()?.dims(), &[l, k]);
         assert_eq!(bisusie.alpha_joint()?.dims(), &[l, p, k]);
         assert_eq!(bisusie.pip()?.dims(), &[p, k]);
 
@@ -409,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn test_alpha_sums_to_one() -> Result<()> {
+    fn test_predictor_alpha_sums_to_one() -> Result<()> {
         let device = Device::Cpu;
         let dtype = DType::F64;
 
@@ -423,37 +434,16 @@ mod tests {
         let bisusie = BiSusieVar::new(vb, l, p, k)?;
 
         let alpha_p_sum = bisusie.alpha_predictor()?.sum(1)?;
-        let alpha_k_sum = bisusie.alpha_outcome()?.sum(1)?;
-
         for i in 0..l {
             let sum_p: f64 = alpha_p_sum.get(i)?.to_scalar()?;
-            let sum_k: f64 = alpha_k_sum.get(i)?.to_scalar()?;
             assert!((sum_p - 1.0).abs() < 1e-5);
-            assert!((sum_k - 1.0).abs() < 1e-5);
         }
 
-        Ok(())
-    }
-
-    #[test]
-    fn test_joint_sums_to_one() -> Result<()> {
-        let device = Device::Cpu;
-        let dtype = DType::F64;
-
-        let l = 2;
-        let p = 3;
-        let k = 4;
-
-        let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
-
-        let bisusie = BiSusieVar::new(vb, l, p, k)?;
-        let joint = bisusie.alpha_joint()?;
-
-        for i in 0..l {
-            let slice = joint.get(i)?;
-            let sum: f64 = slice.sum_all()?.to_scalar()?;
-            assert!((sum - 1.0).abs() < 1e-5);
+        // Outcome axis uses sigmoid — each π ∈ [ε, 1-ε], does NOT sum to 1
+        let pi_k = bisusie.pi_outcome()?;
+        let pi_vals: Vec<f64> = pi_k.flatten_all()?.to_vec1()?;
+        for &v in &pi_vals {
+            assert!(v >= 0.01 && v <= 0.99, "π_k={} out of bounds", v);
         }
 
         Ok(())

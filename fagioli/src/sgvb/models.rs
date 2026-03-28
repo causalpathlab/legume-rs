@@ -45,8 +45,12 @@ impl GeneticModel {
                 ))
             }
             ModelType::BiSusie => {
-                let var_dist =
-                    BiSusieVar::new(spec.vb.pp("bisusie"), spec.num_components, spec.p, spec.k)?;
+                let var_dist = BiSusieVar::new_with_null(
+                    spec.vb.pp("bisusie"),
+                    spec.num_components,
+                    spec.p,
+                    spec.k,
+                )?;
                 Self::BiSusie(RegressionSGVB::from_variational(
                     var_dist,
                     spec.x_design,
