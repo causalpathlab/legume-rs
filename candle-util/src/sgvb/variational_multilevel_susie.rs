@@ -109,6 +109,22 @@ impl MultiLevelSusieVar {
         })
     }
 
+    /// Masked log-softmax at a single tree level, shape (L, G_d, C_d, k).
+    /// Temperature-scaled, invalid children set to -inf before softmax.
+    fn level_log_softmax(&self, d: usize) -> Result<Tensor> {
+        let logits = &self.logits_per_level[d];
+        let mask = &self.masks_per_level[d];
+
+        let scaled = if (self.temperature - 1.0).abs() > 1e-10 {
+            (logits / self.temperature)?
+        } else {
+            logits.clone()
+        };
+
+        let neg_inf_mask = ((1.0 - mask)? * (-1e30))?.unsqueeze(0)?.unsqueeze(3)?;
+        candle_nn::ops::log_softmax(&scaled.broadcast_add(&neg_inf_mask)?, 2)
+    }
+
     /// Compute log selection probabilities via hierarchical softmax.
     ///
     /// log α[l, j, k] = Σ_d log_softmax(logits_d / τ)[l, group_d(j), child_d(j), k]
@@ -123,32 +139,12 @@ impl MultiLevelSusieVar {
         let mut total = Tensor::zeros((l_dim, p, k), dtype, device)?;
 
         for d in 0..self.tree.depth {
-            let logits = &self.logits_per_level[d]; // (L, G_d, C_d, k)
-            let mask = &self.masks_per_level[d]; // (G_d, C_d)
-            let indices = &self.path_indices[d]; // (p,) u32
+            let log_sm = self.level_log_softmax(d)?;
+            let indices = &self.path_indices[d];
 
-            // Apply temperature
-            let scaled = if (self.temperature - 1.0).abs() > 1e-10 {
-                (logits / self.temperature)?
-            } else {
-                logits.clone()
-            };
-
-            // Apply mask: set invalid children to -inf before softmax
-            // mask is (G_d, C_d), need to broadcast to (L, G_d, C_d, k)
-            let neg_inf_mask = ((1.0 - mask)? * (-1e30))?.unsqueeze(0)?.unsqueeze(3)?; // (1, G_d, C_d, 1)
-            let masked_logits = scaled.broadcast_add(&neg_inf_mask)?; // (L, G_d, C_d, k)
-
-            // Log-softmax over children dimension (dim=2)
-            let log_sm = candle_nn::ops::log_softmax(&masked_logits, 2)?; // (L, G_d, C_d, k)
-
-            // Reshape to (L, G_d * C_d, k) for gather
             let (_, g_d, c_d, _) = log_sm.dims4()?;
-            let flat = log_sm.reshape((l_dim, g_d * c_d, k))?; // (L, G_d*C_d, k)
-
-            // Gather: select flat[l, indices[j], k] for each variant j
-            // index_select on dim=1 with indices of shape (p,)
-            let gathered = flat.index_select(indices, 1)?; // (L, p, k)
+            let flat = log_sm.reshape((l_dim, g_d * c_d, k))?;
+            let gathered = flat.index_select(indices, 1)?;
 
             total = (total + gathered)?;
         }
@@ -223,18 +219,8 @@ impl MultiLevelSusieVar {
         let mut total_kl = Tensor::new(0f32, device)?.to_dtype(dtype)?;
 
         for d in 0..self.tree.depth {
-            let logits = &self.logits_per_level[d]; // (L, G_d, C_d, k)
-            let mask = &self.masks_per_level[d]; // (G_d, C_d)
-
-            let scaled = if (self.temperature - 1.0).abs() > 1e-10 {
-                (logits / self.temperature)?
-            } else {
-                logits.clone()
-            };
-
-            let neg_inf_mask = ((1.0 - mask)? * (-1e30))?.unsqueeze(0)?.unsqueeze(3)?;
-            let masked_logits = scaled.broadcast_add(&neg_inf_mask)?;
-            let log_sm = candle_nn::ops::log_softmax(&masked_logits, 2)?; // (L, G_d, C_d, k)
+            let mask = &self.masks_per_level[d];
+            let log_sm = self.level_log_softmax(d)?;
             let alpha_d = log_sm.exp()?;
 
             // log(uniform prior) = -log(C_g) per group g
