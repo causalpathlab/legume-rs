@@ -2,9 +2,9 @@ use anyhow::Result;
 use candle_util::candle_core::{DType, Device, Tensor};
 use candle_util::candle_nn::{AdamW, Optimizer, VarBuilder, VarMap};
 use candle_util::sgvb::{
-    block_partition::BlockPartition, samples_local_reparam_loss, AnalyticalKL,
-    FixedGaussianLikelihood, FixedGaussianPrior, GaussianRegressionSGVB, LocalReparamSample,
-    RegressionSGVB, SGVBConfig, VariationalDistribution, WeightedGaussianLikelihood,
+    samples_local_reparam_loss, AnalyticalKL, FixedGaussianLikelihood, FixedGaussianPrior,
+    GaussianRegressionSGVB, LocalReparamSample, RegressionSGVB, SGVBConfig,
+    VariationalDistribution, WeightedGaussianLikelihood,
 };
 use matrix_util::traits::ConvertMatOps;
 use nalgebra::DMatrix;
@@ -60,17 +60,14 @@ pub(crate) fn fit_single_prior(
     prior_var: f32,
     config: &FitConfig,
     device: &Device,
-    partitions: Option<&[BlockPartition]>,
 ) -> Result<PriorFitResult> {
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
 
-    let prior = FixedGaussianPrior::new(prior_var.sqrt());
     let sgvb_config = SGVBConfig {
         num_samples: config.num_sgvb_samples,
         kl_weight: 1.0,
     };
-
     // Build confounder model if needed
     let conf_model: Option<GaussianRegressionSGVB<FixedGaussianPrior>> =
         if let Some(ref ct) = tensors.conf {
@@ -89,13 +86,12 @@ pub(crate) fn fit_single_prior(
     let genetic = GeneticModel::new(GeneticModelSpec {
         vb: &vb,
         x_design: tensors.x.clone(),
-        prior,
         sgvb_config,
         model_type: config.model_type,
         num_components: config.num_components,
         p: tensors.p,
         k: tensors.k,
-        partitions,
+        init_prior_std: prior_var.sqrt(),
     })?;
 
     let mut optimizer = AdamW::new_lr(varmap.all_vars(), config.learning_rate)?;
@@ -151,14 +147,15 @@ pub(crate) fn fit_single_prior(
                 samples.push(conf_sample);
             }
 
-            if let Some(ref vb) = var_batch {
+            let base_loss = if let Some(ref vb) = var_batch {
                 let likelihood = WeightedGaussianLikelihood::new(y_batch, vb)?;
-                samples_local_reparam_loss(&samples, &likelihood, 1.0)
+                samples_local_reparam_loss(&samples, &likelihood, 1.0)?
             } else {
                 let likelihood = FixedGaussianLikelihood::new(y_batch, 1.0);
-                samples_local_reparam_loss(&samples, &likelihood, 1.0)
-            }
-            .map_err(Into::into)
+                samples_local_reparam_loss(&samples, &likelihood, 1.0)?
+            };
+            let kl_sel = genetic.kl_selection(config.prior_alpha)?;
+            Ok((base_loss + kl_sel)?)
         },
     )?;
 

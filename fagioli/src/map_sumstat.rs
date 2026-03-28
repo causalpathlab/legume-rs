@@ -13,7 +13,7 @@ use fagioli::genotype::{BedReader, GenomicRegion, GenotypeMatrix, GenotypeReader
 use fagioli::io::results::{write_parameters, write_variant_results, VariantRow};
 use fagioli::sgvb::{
     adaptive_prior_grid, estimate_block_h2, fit_block_rss, BlockFitResult, BlockFitResultDetailed,
-    ComputeDevice, FitConfig, ModelType, MultilevelConfig, RssParams, SnpCoordinates,
+    ComputeDevice, FitConfig, ModelType, RssParams,
 };
 use fagioli::summary_stats::{
     estimate_ld_blocks, load_ld_blocks_from_file, read_sumstat_zscores_with_n, LdBlock,
@@ -140,7 +140,7 @@ pub struct MapSumstatArgs {
 
     #[arg(
         long,
-        default_value = "5000",
+        default_value = "100",
         help = "Maximum LD block size in SNPs (larger blocks are split)"
     )]
     pub max_block_snps: usize,
@@ -170,7 +170,7 @@ pub struct MapSumstatArgs {
     #[arg(
         long,
         default_value = "susie",
-        help = "Fine-mapping model: 'susie' (univariate) or 'bisusie' (bivariate)",
+        help = "Fine-mapping model: 'susie', 'bisusie' (bivariate), or 'spike-slab'",
         long_help = "Fine-mapping model to use:\n\
             - susie: Sum of Single Effects, each component selects one causal SNP\n\
             - bisusie: Bivariate SuSiE, each component has a pair of effects\n\
@@ -249,43 +249,6 @@ pub struct MapSumstatArgs {
 
     #[arg(
         long,
-        help = "Use multilevel SuSiE with LD-aware hierarchical variable selection",
-        long_help = "Enable multilevel SuSiE with LD-aware hierarchical softmax.\n\n\
-            When enabled, LD sub-blocks are estimated within each outer LD block\n\
-            using Nystrom + rSVD on the genotype matrix, and used as the level-0\n\
-            partition for a recursive multilevel SuSiE model.\n\n\
-            Benefits: improves optimization for large LD blocks (p > 200 SNPs)\n\
-            by replacing a single flat softmax over all SNPs with a hierarchy of\n\
-            smaller softmaxes that respect LD structure.\n\n\
-            Constraints: only works with --model susie (not bisusie).\n\
-            Automatically falls back to flat SuSiE for blocks with < 200 SNPs."
-    )]
-    pub multilevel: bool,
-
-    #[arg(
-        long,
-        default_value = "20",
-        help = "Min SNPs per LD sub-block in multilevel hierarchy",
-        long_help = "Minimum number of SNPs per LD sub-block when estimating the\n\
-            level-0 partition for multilevel SuSiE. Blocks smaller than this\n\
-            are merged with neighbors. Only used when --multilevel is set.\n\
-            Default: 20."
-    )]
-    pub multilevel_min_block: usize,
-
-    #[arg(
-        long,
-        default_value = "500",
-        help = "Max SNPs per LD sub-block in multilevel hierarchy",
-        long_help = "Maximum number of SNPs per LD sub-block when estimating the\n\
-            level-0 partition for multilevel SuSiE. Blocks larger than this\n\
-            are split into uniform sub-blocks. Only used when --multilevel is set.\n\
-            Default: 500."
-    )]
-    pub multilevel_max_block: usize,
-
-    #[arg(
-        long,
         default_value = "0.0",
         help = "Infinitesimal polygenic prior variance (0 = disabled)",
         long_help = "Prior variance for the infinitesimal polygenic background term.\n\
@@ -358,18 +321,6 @@ pub struct MapSumstatArgs {
             already corrected (e.g., from a BOLT-LMM or SAIGE GWAS)."
     )]
     pub no_ldsc_intercept: bool,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Select best prior variance per block instead of globally",
-        long_help = "Use per-block prior variance selection instead of global selection.\n\
-            Default (false): the prior variance with the best total ELBO summed\n\
-            across all blocks is used for all blocks.\n\
-            When set: each block independently selects its best prior variance.\n\
-            Per-block selection is more flexible but can overfit with few blocks."
-    )]
-    pub local_prior: bool,
 
     // ── Misc ─────────────────────────────────────────────────────────────
     #[arg(long, default_value = "42", help = "Random seed for reproducibility")]
@@ -588,15 +539,6 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         seed: args.seed,
         sigma2_inf: args.sigma2_inf,
         prior_alpha: args.prior_alpha,
-        multilevel: if args.multilevel {
-            Some(MultilevelConfig {
-                min_block_snps: args.multilevel_min_block,
-                max_block_snps: args.multilevel_max_block,
-                ..Default::default()
-            })
-        } else {
-            None
-        },
     };
 
     info!(
@@ -640,16 +582,10 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
         // λ: user-specified or default 0.1/K
         let block_lambda = args.lambda.unwrap_or(0.1 / max_rank as f64);
 
-        let block_coords = SnpCoordinates {
-            positions: &geno.positions[block.snp_start..block.snp_end],
-            chromosomes: &geno.chromosomes[block.snp_start..block.snp_end],
-        };
-
         let rss_params = RssParams {
             max_rank,
             lambda: block_lambda,
             ldsc_intercept: !args.no_ldsc_intercept,
-            coords: Some(&block_coords),
         };
 
         let result = fit_block_rss(&x_block, &z_block, &block_config, &rss_params, &device)
@@ -687,27 +623,20 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
     let mut sorted_results = block_results;
     sorted_results.sort_by_key(|(idx, _)| *idx);
 
-    // ── Step 6: Prior selection via ELBO argmax ─────────────────────────
-    let num_priors = fit_config.prior_vars.len();
-
-    let globally_averaged: Vec<(usize, BlockFitResult)> = if !args.local_prior {
-        // Global: sum ELBOs across all blocks, pick single best prior_var
+    // ── Step 6: Prior aggregation ──────────────────────────────────────
+    // Bayesian model averaging (BMA) over the prior variance grid per block.
+    // Each block's per-prior results are combined using softmax(ELBO) weights.
+    let globally_averaged: Vec<(usize, BlockFitResult)> = {
+        // Log global ELBO summary
+        let num_priors = fit_config.prior_vars.len();
         let mut global_elbos = vec![0.0f32; num_priors];
         for (_idx, detailed) in &sorted_results {
             for (j, &e) in detailed.per_prior_elbos.iter().enumerate() {
                 global_elbos[j] += e;
             }
         }
-        let best_idx = global_elbos
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(i, _)| i)
-            .unwrap_or(0);
         info!(
-            "Global prior: prior_var={:.3} (total_elbo={:.1}), all: {:?}",
-            fit_config.prior_vars[best_idx],
-            global_elbos[best_idx],
+            "Prior grid ELBOs (total): {:?}",
             fit_config
                 .prior_vars
                 .iter()
@@ -715,42 +644,10 @@ pub fn map_sumstat(args: &MapSumstatArgs) -> Result<()> {
                 .map(|(v, e)| format!("{:.3}:{:.1}", v, e))
                 .collect::<Vec<_>>()
         );
+
         sorted_results
             .iter()
-            .map(|(idx, d)| {
-                (
-                    *idx,
-                    BlockFitResult {
-                        pip: d.per_prior_pips[best_idx].clone(),
-                        effect_mean: d.per_prior_effects[best_idx].clone(),
-                        effect_std: d.per_prior_stds[best_idx].clone(),
-                        avg_elbo: d.per_prior_elbos[best_idx],
-                    },
-                )
-            })
-            .collect()
-    } else {
-        // Local (default): each block picks its own best prior_var by ELBO argmax
-        sorted_results
-            .iter()
-            .map(|(idx, d)| {
-                let best_idx = d
-                    .per_prior_elbos
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                (
-                    *idx,
-                    BlockFitResult {
-                        pip: d.per_prior_pips[best_idx].clone(),
-                        effect_mean: d.per_prior_effects[best_idx].clone(),
-                        effect_std: d.per_prior_stds[best_idx].clone(),
-                        avg_elbo: d.per_prior_elbos[best_idx],
-                    },
-                )
-            })
+            .map(|(idx, d)| (*idx, d.best_result()))
             .collect()
     };
 

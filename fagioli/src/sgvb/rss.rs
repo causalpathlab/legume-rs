@@ -11,7 +11,6 @@ use nalgebra::DMatrix;
 
 use super::config::{BlockFitResultDetailed, FitConfig, PriorFitResult, RssParams};
 use super::models::{GeneticModel, GeneticModelSpec};
-use super::partition::estimate_multilevel_partitions;
 use super::training::run_sgvb_loop;
 
 /// Estimate per-trait LDSC h² (slope) for a single LD block.
@@ -86,8 +85,6 @@ pub fn fit_block_rss(
     let p = x_block.ncols();
     let k = z_block.ncols();
 
-    let partitions = estimate_multilevel_partitions(x_block, config, rss.coords)?;
-
     let x_tensor = x_block.to_tensor(device)?;
     let mut z_tensor = z_block.to_tensor(device)?;
 
@@ -152,7 +149,6 @@ pub fn fit_block_rss(
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
 
-        let prior = FixedGaussianPrior::new(prior_var.sqrt());
         let sgvb_config = SGVBConfig {
             num_samples: config.num_sgvb_samples,
             kl_weight: 1.0,
@@ -161,13 +157,12 @@ pub fn fit_block_rss(
         let genetic = GeneticModel::new(GeneticModelSpec {
             vb: &vb,
             x_design: x_design.clone(),
-            prior,
             sgvb_config: sgvb_config.clone(),
             model_type: config.model_type,
             num_components: config.num_components,
             p,
             k,
-            partitions: partitions.as_deref(),
+            init_prior_std: prior_var.sqrt(),
         })?;
 
         let intercept_model: Option<GaussianRegressionSGVB<FixedGaussianPrior>> =
@@ -199,7 +194,7 @@ pub fn fit_block_rss(
                 }
 
                 let loss = samples_local_reparam_loss(&samples, &rss_lik, 1.0)?;
-                let kl_cat = genetic.kl_categorical(config.prior_alpha, device)?;
+                let kl_cat = genetic.kl_selection(config.prior_alpha)?;
                 Ok((loss + kl_cat)?)
             },
         )?;
