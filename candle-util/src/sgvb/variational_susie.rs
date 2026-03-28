@@ -1,7 +1,7 @@
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 
-use super::susie_util::pip_from_alpha;
+use super::susie_util::{kl_categorical_uniform, pip_from_alpha};
 use super::traits::{ComponentVariational, VariationalDistribution};
 
 /// Affine-smoothed sigmoid: ε + (1 - 2ε) · σ(x).
@@ -186,16 +186,7 @@ impl SusieVar {
     ///
     /// Returns a scalar tensor.
     pub fn kl_categorical(&self, prior_alpha: f64) -> Result<Tensor> {
-        // Categorical KL over full softmax (including null if present).
-        // Prior is uniform over all positions (p or p+1).
-        let full_log_softmax = self.log_softmax_full()?;
-        let full_softmax = full_log_softmax.exp()?; // (L, p_logits, k)
-        let p_logits = full_softmax.dim(1)?;
-        let log_prior = (prior_alpha / p_logits as f64).ln();
-        let neg_entropy = full_softmax.broadcast_mul(&full_log_softmax)?.sum_all()?;
-        let lk = self.num_components as f64 * full_softmax.dim(2)? as f64;
-        let cat_kl = (neg_entropy - log_prior * lk)?;
-
+        let cat_kl = kl_categorical_uniform(&self.logits, prior_alpha)?;
         match &self.gate {
             None => Ok(cat_kl),
             Some(g) => cat_kl + Self::kl_bernoulli(g),
