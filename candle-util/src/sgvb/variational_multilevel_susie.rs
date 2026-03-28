@@ -257,9 +257,6 @@ impl ComponentVariational for MultiLevelSusieVar {
     fn beta_std(&self) -> Result<Tensor> {
         self.beta_std()
     }
-    fn kl_categorical(&self, prior_alpha: f64) -> Result<Tensor> {
-        self.kl_categorical(prior_alpha)
-    }
     fn num_components(&self) -> usize {
         self.num_components()
     }

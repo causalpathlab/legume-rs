@@ -68,8 +68,6 @@ pub trait ComponentVariational: VariationalDistribution {
     fn beta_mean(&self) -> Result<Tensor>;
     /// Effect size standard deviations per component, shape (L, p, k).
     fn beta_std(&self) -> Result<Tensor>;
-    /// KL divergence of categorical selection from a uniform prior.
-    fn kl_categorical(&self, prior_alpha: f64) -> Result<Tensor>;
     /// Number of mixture components L.
     fn num_components(&self) -> usize;
 }
