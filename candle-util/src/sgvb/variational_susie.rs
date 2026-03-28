@@ -4,11 +4,34 @@ use candle_nn::VarBuilder;
 use super::susie_util::pip_from_alpha;
 use super::traits::{ComponentVariational, VariationalDistribution};
 
+/// Affine-smoothed sigmoid: ε + (1 - 2ε) · σ(x).
+///
+/// Maps logits to (ε, 1-ε), ensuring gradients never fully vanish.
+/// At x=0, returns 0.5 regardless of ε.
+pub fn smoothed_sigmoid(logits: &Tensor, epsilon: f64) -> Result<Tensor> {
+    let scale = 1.0 - 2.0 * epsilon;
+    (candle_nn::ops::sigmoid(logits)? * scale)? + epsilon
+}
+
+/// Per-component gate parameters for SusieVar.
+struct GateParams {
+    /// Gate logits, shape (L,)
+    logits: Tensor,
+    /// Smoothing epsilon: π_l = ε + (1-2ε) · σ(logit_l)
+    epsilon: f64,
+}
+
 /// Susie (Sum of Single Effects) variational distribution.
 ///
-/// θ = Σ_l (α_l ⊙ β_l) where:
+/// θ = Σ_l γ_l · (α_l ⊙ β_l) where:
+/// - γ_l ~ Bernoulli(π_l) - component gate (optional), scalar per component
 /// - α_l = softmax(logits_l, dim=p) - selection probabilities, shape (p, k)
 /// - β_l ~ N(μ_l, σ_l²) - effect sizes, shape (p, k)
+///
+/// When component gates are enabled, the effective selection probability is
+/// π_l · α_{l,j,k}, allowing unused components to be pruned (π_l → ε).
+/// The gate uses affine-smoothed sigmoid: π_l = ε + (1-2ε) · σ(logit_l)
+/// to prevent vanishing gradients at saturation.
 ///
 /// Each output dimension k has its own independent feature selection.
 /// This can be used with RegressionSGVB for Susie regression.
@@ -21,26 +44,53 @@ pub struct SusieVar {
     beta_ln_std: Tensor,
     /// Number of components L
     num_components: usize,
+    /// Per-component Bernoulli gate. None = all components always active.
+    gate: Option<GateParams>,
 }
 
 impl SusieVar {
-    /// Create a new Susie variational distribution.
+    /// Create a new Susie variational distribution (no component gates).
     ///
-    /// # Arguments
-    /// * `vb` - VarBuilder for creating trainable parameters
-    /// * `num_components` - Number of single-effect components L
-    /// * `p` - Number of features
-    /// * `k` - Number of output dimensions
+    /// All L components are always active. Use [`new_gated`] to enable
+    /// per-component Bernoulli gates for automatic component pruning.
     pub fn new(vb: VarBuilder, num_components: usize, p: usize, k: usize) -> Result<Self> {
-        // Initialize logits to uniform (zeros -> equal softmax probs)
-        // Shape: (L, p, k) - separate selection for each output dimension
+        Self::new_maybe_gated(vb, num_components, p, k, None)
+    }
+
+    /// Create a new Susie variational distribution with per-component gates.
+    ///
+    /// Each component l has a Bernoulli gate γ_l with inclusion probability
+    /// π_l = ε + (1-2ε) · σ(logit_l). The effective selection probability
+    /// becomes π_l · α_{l,j,k}.
+    ///
+    /// Set L generously — unused components will be pruned (π_l → ε).
+    ///
+    /// `gate_epsilon` is the smoothing epsilon for sigmoid (e.g., 0.01).
+    /// Ensures π ∈ [ε, 1-ε] so gradients never fully vanish.
+    pub fn new_gated(
+        vb: VarBuilder,
+        num_components: usize,
+        p: usize,
+        k: usize,
+        gate_epsilon: f64,
+    ) -> Result<Self> {
+        Self::new_maybe_gated(vb, num_components, p, k, Some(gate_epsilon))
+    }
+
+    /// Unified constructor: `None` = ungated, `Some(ε)` = gated with smoothing ε.
+    pub fn new_maybe_gated(
+        vb: VarBuilder,
+        num_components: usize,
+        p: usize,
+        k: usize,
+        gate_epsilon: Option<f64>,
+    ) -> Result<Self> {
         let logits = vb.get_with_hints(
             (num_components, p, k),
             "logits",
             candle_nn::Init::Const(0.0),
         )?;
 
-        // Initialize beta_mean to small random values
         let beta_mean = vb.get_with_hints(
             (num_components, p, k),
             "beta_mean",
@@ -50,64 +100,129 @@ impl SusieVar {
             },
         )?;
 
-        // Initialize beta_ln_std to 0 (std = 1)
         let beta_ln_std = vb.get_with_hints(
             (num_components, p, k),
             "beta_ln_std",
             candle_nn::Init::Const(0.0),
         )?;
 
+        // Gate logits initialize to 0 → π = 0.5 at init
+        let gate = match gate_epsilon {
+            Some(eps) => Some(GateParams {
+                logits: vb.get_with_hints(
+                    (num_components,),
+                    "component_logits",
+                    candle_nn::Init::Const(0.0),
+                )?,
+                epsilon: eps,
+            }),
+            None => None,
+        };
+
         Ok(Self {
             logits,
             beta_mean,
             beta_ln_std,
             num_components,
+            gate,
         })
     }
 
-    /// Compute categorical KL divergence: KL(α || prior).
+    /// Compute KL divergence for the selection distribution.
     ///
-    /// `KL = Σ_l Σ_j Σ_k α_{l,j,k} * log(α_{l,j,k} / prior_j)`
+    /// Returns the sum of:
+    /// 1. Categorical KL: `Σ_l Σ_j Σ_k α̃_{l,j,k} (log α̃_{l,j,k} - log(prior_alpha/p))`
+    ///    where α̃ is the softmax selection (before gating).
+    /// 2. Bernoulli KL (if gated): `Σ_l KL(Bernoulli(π_l) || Bernoulli(0.5))`
+    ///    using an uninformative Bernoulli(0.5) prior on component inclusion.
     ///
-    /// where `prior_j = prior_alpha / p` (uniform when `prior_alpha = 1`).
+    /// `prior_alpha` controls the categorical prior: uniform `1/p` per SNP
+    /// when `prior_alpha = 1`.
     ///
-    /// Returns a scalar tensor.
-    /// Compute categorical KL divergence: KL(q(α) || prior).
-    ///
-    /// `KL = Σ_l Σ_j Σ_k α_{l,j,k} * (log α_{l,j,k} - log(prior_alpha / p))`
-    ///
-    /// where `prior_alpha / p` is the per-SNP prior probability
-    /// (uniform when `prior_alpha = 1`).
-    ///
-    /// Uses `log_softmax` for numerical stability.
     /// Returns a scalar tensor.
     pub fn kl_categorical(&self, prior_alpha: f64) -> Result<Tensor> {
-        let alpha = self.alpha()?; // (L, p, k)
-        let log_alpha = self.log_alpha()?; // (L, p, k) via log_softmax
-        let p = alpha.dim(1)?;
+        // Categorical KL (always present, uses raw softmax α̃ not gated α)
+        let softmax_alpha = self.softmax_alpha()?; // (L, p, k)
+        let log_softmax_alpha = self.log_softmax_alpha()?; // (L, p, k)
+        let p = softmax_alpha.dim(1)?;
         let log_prior = (prior_alpha / p as f64).ln();
-        // KL = Σ α * (log α - log_prior)
-        //    = Σ α * log α  -  log_prior * Σ α
-        // Σ_j α_{l,j,k} = 1 for each (l,k), so Σ α = L * k
-        let neg_entropy = alpha.broadcast_mul(&log_alpha)?.sum_all()?; // Σ α log α
-        let lk = self.num_components as f64 * alpha.dim(2)? as f64;
-        neg_entropy - log_prior * lk
+        let neg_entropy = softmax_alpha.broadcast_mul(&log_softmax_alpha)?.sum_all()?;
+        let lk = self.num_components as f64 * softmax_alpha.dim(2)? as f64;
+        let cat_kl = (neg_entropy - log_prior * lk)?;
+
+        match &self.gate {
+            None => Ok(cat_kl),
+            Some(g) => cat_kl + Self::kl_bernoulli(g),
+        }
     }
 
-    /// Get selection probabilities α = softmax(logits, dim=1) for each component.
-    /// Softmax is applied over the p dimension for each (l, k) pair.
+    /// KL(Bernoulli(π_l) || Bernoulli(0.5)) summed over components.
     ///
-    /// # Returns
-    /// Selection probabilities, shape (L, p, k)
+    /// Simplifies to: Σ_l [π log π + (1-π) log(1-π) + ln2]
+    fn kl_bernoulli(gate: &GateParams) -> Result<Tensor> {
+        let pi = smoothed_sigmoid(&gate.logits, gate.epsilon)?; // (L,)
+        let one_minus_pi = (1.0 - &pi)?;
+        let neg_entropy = ((&pi * pi.log()?)? + (&one_minus_pi * one_minus_pi.log()?)?)?;
+        (neg_entropy + 2.0f64.ln())?.sum_all()
+    }
+
+    /// Get component inclusion probabilities π_l = ε + (1-2ε) · σ(logit_l).
+    ///
+    /// Returns shape (L,). Panics if not gated.
+    pub fn component_pi(&self) -> Result<Tensor> {
+        let g = self
+            .gate
+            .as_ref()
+            .expect("component_pi called on ungated SusieVar");
+        smoothed_sigmoid(&g.logits, g.epsilon)
+    }
+
+    /// Whether this SusieVar has per-component gates.
+    pub fn is_gated(&self) -> bool {
+        self.gate.is_some()
+    }
+
+    /// Get effective selection probabilities (gated α).
+    ///
+    /// - Ungated: α = softmax(logits, dim=p), shape (L, p, k)
+    /// - Gated: α = π_l · softmax(logits, dim=p), shape (L, p, k)
+    ///
+    /// The softmax within each component still sums to 1 over p,
+    /// but the per-component gate scales the whole distribution.
     pub fn alpha(&self) -> Result<Tensor> {
-        self.log_alpha()?.exp()
+        let softmax = self.softmax_alpha()?;
+        match &self.gate {
+            None => Ok(softmax),
+            Some(_) => {
+                let pi = self.component_pi()?.unsqueeze(1)?.unsqueeze(2)?;
+                softmax.broadcast_mul(&pi)
+            }
+        }
     }
 
-    /// Get log selection probabilities log(α) = log_softmax(logits, dim=1).
+    /// Get log effective selection probabilities.
     ///
-    /// # Returns
-    /// Log selection probabilities, shape (L, p, k)
+    /// - Ungated: log_softmax(logits, dim=p)
+    /// - Gated: log(π_l) + log_softmax(logits, dim=p)
     pub fn log_alpha(&self) -> Result<Tensor> {
+        let log_sm = self.log_softmax_alpha()?;
+        match &self.gate {
+            None => Ok(log_sm),
+            Some(_) => {
+                let log_pi = self.component_pi()?.log()?.unsqueeze(1)?.unsqueeze(2)?;
+                log_sm.broadcast_add(&log_pi)
+            }
+        }
+    }
+
+    /// Raw softmax selection probabilities (before gating).
+    /// Shape (L, p, k). Always sums to 1 over p.
+    fn softmax_alpha(&self) -> Result<Tensor> {
+        self.log_softmax_alpha()?.exp()
+    }
+
+    /// Raw log-softmax selection probabilities (before gating).
+    fn log_softmax_alpha(&self) -> Result<Tensor> {
         candle_nn::ops::log_softmax(&self.logits, 1)
     }
 
@@ -243,7 +358,7 @@ impl SusieVar {
 mod tests {
     use super::*;
     use candle_core::Device;
-    use candle_nn::{VarBuilder, VarMap};
+    use candle_nn::{Optimizer, VarBuilder, VarMap};
 
     #[test]
     fn test_susie_variational_shapes() -> Result<()> {
@@ -366,6 +481,291 @@ mod tests {
 
         let coef_mean = model.coef_mean()?;
         assert_eq!(coef_mean.dims(), &[p, k]);
+
+        Ok(())
+    }
+
+    // --- Gated SusieVar tests ---
+
+    #[test]
+    fn test_smoothed_sigmoid_bounds() -> Result<()> {
+        let device = Device::Cpu;
+        // Test at extreme logits
+        let logits = Tensor::from_vec(vec![-100.0f64, -10.0, 0.0, 10.0, 100.0], (5,), &device)?;
+        let eps = 0.01;
+        let pi = smoothed_sigmoid(&logits, eps)?;
+        let vals: Vec<f64> = pi.to_vec1()?;
+
+        for &v in &vals {
+            assert!(v >= eps, "π should be >= ε={}, got {}", eps, v);
+            assert!(
+                v <= 1.0 - eps,
+                "π should be <= 1-ε={}, got {}",
+                1.0 - eps,
+                v
+            );
+        }
+        // At logit=0, sigmoid=0.5, so π = ε + (1-2ε)*0.5 = 0.5
+        assert!(
+            (vals[2] - 0.5).abs() < 1e-10,
+            "π at logit=0 should be 0.5, got {}",
+            vals[2]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gated_susie_shapes() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let l = 3;
+        let p = 20;
+        let k = 2;
+
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
+
+        let susie = SusieVar::new_gated(vb, l, p, k, 0.01)?;
+
+        assert!(susie.is_gated());
+        assert_eq!(susie.alpha()?.dims(), &[l, p, k]);
+        assert_eq!(susie.pip()?.dims(), &[p, k]);
+        assert_eq!(susie.component_pi()?.dims(), &[l]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gated_alpha_scaled_by_pi() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F64;
+
+        let l = 3;
+        let p = 20;
+        let k = 1;
+
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
+
+        let susie = SusieVar::new_gated(vb, l, p, k, 0.01)?;
+
+        let alpha = susie.alpha()?; // (L, p, k)
+        let pi = susie.component_pi()?; // (L,)
+        let softmax_alpha = susie.softmax_alpha()?; // (L, p, k)
+
+        // Gated α should equal π_l · softmax_α
+        for comp in 0..l {
+            let pi_l: f64 = pi.get(comp)?.to_scalar()?;
+            let alpha_sum: f64 = alpha.get(comp)?.sum_all()?.to_scalar()?;
+            let softmax_sum: f64 = softmax_alpha.get(comp)?.sum_all()?.to_scalar()?;
+
+            // softmax sums to k (=1 per output dim), so gated α sums to π_l * k
+            assert!(
+                (alpha_sum - pi_l * k as f64).abs() < 1e-5,
+                "Gated α should sum to π_l * k = {:.4}, got {:.4}",
+                pi_l * k as f64,
+                alpha_sum
+            );
+            assert!(
+                (softmax_sum - k as f64).abs() < 1e-5,
+                "Softmax α should sum to k = {}, got {:.4}",
+                k,
+                softmax_sum
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gated_kl_nonnegative() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F64;
+
+        let l = 5;
+        let p = 50;
+        let k = 1;
+
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
+
+        let susie = SusieVar::new_gated(vb, l, p, k, 0.01)?;
+        let kl: f64 = susie.kl_categorical(1.0)?.to_scalar()?;
+
+        // KL divergence is non-negative
+        assert!(kl >= -1e-10, "KL should be non-negative, got {}", kl);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gated_gradient_flow() -> Result<()> {
+        use crate::sgvb::traits::BlackBoxLikelihood;
+        use crate::sgvb::{local_reparam_loss, GaussianPrior, RegressionSGVB, SGVBConfig};
+        use candle_core::Tensor;
+
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let n = 30;
+        let p = 10;
+        let k = 1;
+        let l = 4; // intentionally more components than true effects
+
+        let x = Tensor::randn(0f32, 1f32, (n, p), &device)?;
+        let y = Tensor::randn(0f32, 1f32, (n, k), &device)?;
+
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
+
+        let susie = SusieVar::new_gated(vb.pp("susie"), l, p, k, 0.01)?;
+        let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
+        let config = SGVBConfig::default();
+
+        let model = RegressionSGVB::from_variational(susie, x, prior, config);
+
+        struct GaussianLik {
+            y: Tensor,
+        }
+        impl BlackBoxLikelihood for GaussianLik {
+            fn log_likelihood(&self, etas: &[&Tensor]) -> Result<Tensor> {
+                let eta = etas[0];
+                let diff_sq = eta.broadcast_sub(&self.y)?.sqr()?;
+                (diff_sq * (-0.5))?.sum(2)?.sum(1)
+            }
+        }
+        let likelihood = GaussianLik { y };
+
+        // Verify loss is finite and gradient step works
+        let loss = local_reparam_loss(&model, &likelihood, 10, 1.0)?;
+        assert!(loss.to_scalar::<f32>()?.is_finite());
+
+        let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.01)?;
+        optimizer.backward_step(&loss)?;
+
+        let loss2 = local_reparam_loss(&model, &likelihood, 10, 1.0)?;
+        let l1: f32 = loss.to_scalar()?;
+        let l2: f32 = loss2.to_scalar()?;
+        assert!(
+            (l1 - l2).abs() > 1e-8,
+            "Loss should change after gradient step: {} vs {}",
+            l1,
+            l2
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gated_sparse_recovery() -> Result<()> {
+        use crate::sgvb::traits::BlackBoxLikelihood;
+        use crate::sgvb::{local_reparam_loss, FixedGaussianPrior, RegressionSGVB, SGVBConfig};
+        use candle_core::Tensor;
+
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let n = 200;
+        let p = 20;
+        let k = 1;
+        let l = 6; // way more than 1 true effect
+
+        let x = Tensor::randn(0f32, 1f32, (n, p), &device)?;
+        let x_5 = x.narrow(1, 5, 1)?;
+        let noise = Tensor::randn(0f32, 0.3f32, (n, k), &device)?;
+        let y = ((x_5 * 3.0)? + noise)?;
+
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
+
+        let susie = SusieVar::new_gated(vb.pp("susie"), l, p, k, 0.01)?;
+        let prior = FixedGaussianPrior::new(0.5);
+        let config = SGVBConfig::new(30);
+
+        let model = RegressionSGVB::from_variational(susie, x, prior, config);
+
+        struct GaussianLik {
+            y: Tensor,
+        }
+        impl BlackBoxLikelihood for GaussianLik {
+            fn log_likelihood(&self, etas: &[&Tensor]) -> Result<Tensor> {
+                let eta = etas[0];
+                let diff_sq = eta.broadcast_sub(&self.y)?.sqr()?;
+                (diff_sq * (-0.5))?.sum(2)?.sum(1)
+            }
+        }
+        let likelihood = GaussianLik { y };
+
+        let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), 0.05)?;
+
+        for _ in 0..500 {
+            let loss = local_reparam_loss(&model, &likelihood, 30, 1.0)?;
+            optimizer.backward_step(&loss)?;
+        }
+
+        // π values may stay near 0.5 with Bernoulli(0.5) prior — that's OK.
+        // The important thing is that PIP concentrates on the true variable.
+        let pi = model.variational.component_pi()?;
+        let pi_vals: Vec<f32> = pi.to_vec1()?;
+        println!("Component π values: {:?}", pi_vals);
+
+        // All π should be in [ε, 1-ε]
+        for &v in &pi_vals {
+            assert!(v >= 0.01 && v <= 0.99, "π out of bounds: {}", v);
+        }
+
+        // Check PIP concentrates on feature 5
+        let pip = model.variational.pip()?;
+        let pip_5: f32 = pip.get(5)?.get(0)?.to_scalar()?;
+        let mut other_sum = 0.0f32;
+        for j in 0..p {
+            if j != 5 {
+                other_sum += pip.get(j)?.get(0)?.to_scalar::<f32>()?;
+            }
+        }
+        let other_mean = other_sum / (p - 1) as f32;
+        println!("PIP[5] = {:.4}, other mean PIP = {:.4}", pip_5, other_mean);
+        assert!(
+            pip_5 > other_mean * 2.0,
+            "PIP[5] ({:.4}) should be > 2x other mean ({:.4})",
+            pip_5,
+            other_mean
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ungated_unchanged() -> Result<()> {
+        // Verify that ungated SusieVar behaves exactly as before
+        let device = Device::Cpu;
+        let dtype = DType::F64;
+
+        let l = 2;
+        let p = 10;
+        let k = 1;
+
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
+
+        let susie = SusieVar::new(vb, l, p, k)?;
+        assert!(!susie.is_gated());
+
+        // Alpha should sum to 1 (no gating)
+        let alpha = susie.alpha()?;
+        let alpha_sum: f64 = alpha.get(0)?.sum_all()?.to_scalar()?;
+        assert!(
+            (alpha_sum - 1.0).abs() < 1e-5,
+            "Ungated alpha should sum to 1, got {}",
+            alpha_sum
+        );
+
+        // KL should be purely categorical (no Bernoulli term)
+        let kl: f64 = susie.kl_categorical(1.0)?.to_scalar()?;
+        assert!(kl.is_finite());
+        assert!(kl >= -1e-10);
 
         Ok(())
     }

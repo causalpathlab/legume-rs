@@ -5,7 +5,8 @@ use matrix_util::traits::IoOps;
 
 use candle_util::sgvb::BlackBoxLikelihood;
 use candle_util::sgvb::{
-    multilevel_loss, GaussianPrior, MultilevelParams, MultilevelSusieSGVB, SGVBConfig,
+    multilevel_loss, GaussianPrior, MultilevelParams, MultilevelPartitionParams,
+    MultilevelSusieSGVB, SGVBConfig,
 };
 
 struct GaussianLik {
@@ -55,10 +56,13 @@ fn test_susie_example_multilevel() -> Result<()> {
     let config = SGVBConfig::new(30);
 
     let params = MultilevelParams {
-        num_components: l,
-        k,
+        base: MultilevelPartitionParams {
+            num_components: l,
+            k,
+            config,
+            gate_epsilon: None,
+        },
         block_size,
-        config,
     };
     let model = MultilevelSusieSGVB::new(vb.pp("ml"), x, prior, params)?;
 
@@ -205,10 +209,13 @@ fn test_n_much_less_than_p() -> Result<()> {
     let config_ml = SGVBConfig::new(30);
 
     let params_ml = MultilevelParams {
-        num_components: l,
-        k,
+        base: MultilevelPartitionParams {
+            num_components: l,
+            k,
+            config: config_ml,
+            gate_epsilon: None,
+        },
         block_size: 100, // 2000 → 20 groups → terminal
-        config: config_ml,
     };
     let model_ml = MultilevelSusieSGVB::new(vb_ml.pp("ml"), x.clone(), prior_ml, params_ml)?;
 
