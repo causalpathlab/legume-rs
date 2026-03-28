@@ -52,6 +52,7 @@ mod variational_bisusie;
 mod variational_gaussian;
 mod variational_io;
 mod variational_multilevel_susie;
+mod variational_spike_slab;
 mod variational_susie;
 
 pub use composite_model::{
@@ -74,11 +75,12 @@ pub use sgvb_util::{
 };
 pub use susie_util::pip_from_alpha;
 pub use traits::{
-    AnalyticalKL, BlackBoxLikelihood, ComponentVariational, LocalReparamModel, LocalReparamSample,
-    Prior, VariationalDistribution,
+    AnalyticalKL, BlackBoxLikelihood, ComponentVariational, IndependentGateVariational,
+    LocalReparamModel, LocalReparamSample, Prior, VariationalDistribution,
 };
 pub use variational_bisusie::BiSusieVar;
 pub use variational_gaussian::GaussianVar;
 pub use variational_io::{SparseVariationalOutput, VariationalOutput};
 pub use variational_multilevel_susie::MultiLevelSusieVar;
+pub use variational_spike_slab::SpikeSlabVar;
 pub use variational_susie::{smoothed_sigmoid, SusieVar};
