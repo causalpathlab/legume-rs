@@ -52,16 +52,24 @@ use super::traits::{
 };
 use super::variational_susie::SusieVar;
 
-/// Parameters for constructing a `MultilevelSusieSGVB`.
-pub struct MultilevelParams {
+/// Per-level SuSiE model parameters (shared between constructors).
+pub struct MultilevelPartitionParams {
     /// Number of mixture components (L)
     pub num_components: usize,
     /// Output dimension per response
     pub k: usize,
-    /// Max features per block before creating a new hierarchy level
-    pub block_size: usize,
     /// SGVB training configuration
     pub config: SGVBConfig,
+    /// If Some(ε), enable per-component Bernoulli gates with smoothing epsilon ε.
+    pub gate_epsilon: Option<f64>,
+}
+
+/// Parameters for constructing a `MultilevelSusieSGVB` with automatic partitioning.
+pub struct MultilevelParams {
+    /// Per-level model parameters
+    pub base: MultilevelPartitionParams,
+    /// Max features per block before creating a new hierarchy level
+    pub block_size: usize,
 }
 
 /// One level of the collapse hierarchy.
@@ -135,16 +143,9 @@ impl<P: Prior + AnalyticalKL> MultilevelSusieSGVB<P> {
         prior: P,
         params: MultilevelParams,
     ) -> Result<Self> {
-        let MultilevelParams {
-            num_components,
-            k,
-            block_size,
-            config,
-        } = params;
-
         let p = x_design.dim(1)?;
-        let partitions = BlockPartition::build_hierarchy(p, block_size);
-        Self::from_partitions(vb, x_design, prior, &partitions, num_components, k, config)
+        let partitions = BlockPartition::build_hierarchy(p, params.block_size);
+        Self::from_partitions(vb, x_design, prior, &partitions, params.base)
     }
 
     /// Build a multilevel model from pre-computed partitions.
@@ -160,11 +161,9 @@ impl<P: Prior + AnalyticalKL> MultilevelSusieSGVB<P> {
         x_design: Tensor,
         prior: P,
         partitions: Vec<BlockPartition>,
-        num_components: usize,
-        k: usize,
-        config: SGVBConfig,
+        params: MultilevelPartitionParams,
     ) -> Result<Self> {
-        Self::from_partitions(vb, x_design, prior, &partitions, num_components, k, config)
+        Self::from_partitions(vb, x_design, prior, &partitions, params)
     }
 
     fn from_partitions(
@@ -172,22 +171,28 @@ impl<P: Prior + AnalyticalKL> MultilevelSusieSGVB<P> {
         x_design: Tensor,
         prior: P,
         partitions: &[BlockPartition],
-        num_components: usize,
-        k: usize,
-        config: SGVBConfig,
+        params: MultilevelPartitionParams,
     ) -> Result<Self> {
+        let MultilevelPartitionParams {
+            num_components,
+            k,
+            config,
+            gate_epsilon,
+        } = params;
         let p = x_design.dim(1)?;
         let mut levels = Vec::new();
 
         if partitions.is_empty() {
-            let variational = SusieVar::new(vb.pp("level_0"), num_components, p, k)?;
+            let variational =
+                SusieVar::new_maybe_gated(vb.pp("level_0"), num_components, p, k, gate_epsilon)?;
             let partition = BlockPartition::regular(p, p);
             levels.push(CollapseLevel {
                 variational,
                 partition,
             });
         } else {
-            let var_0 = SusieVar::new(vb.pp("level_0"), num_components, p, k)?;
+            let var_0 =
+                SusieVar::new_maybe_gated(vb.pp("level_0"), num_components, p, k, gate_epsilon)?;
             levels.push(CollapseLevel {
                 variational: var_0,
                 partition: partitions[0].clone(),
@@ -195,7 +200,13 @@ impl<P: Prior + AnalyticalKL> MultilevelSusieSGVB<P> {
 
             for (d, part) in partitions.iter().enumerate().skip(1) {
                 let g_d = partitions[d - 1].num_blocks();
-                let var_d = SusieVar::new(vb.pp(format!("level_{}", d)), num_components, g_d, k)?;
+                let var_d = SusieVar::new_maybe_gated(
+                    vb.pp(format!("level_{}", d)),
+                    num_components,
+                    g_d,
+                    k,
+                    gate_epsilon,
+                )?;
                 levels.push(CollapseLevel {
                     variational: var_d,
                     partition: part.clone(),
@@ -204,8 +215,13 @@ impl<P: Prior + AnalyticalKL> MultilevelSusieSGVB<P> {
 
             let g_top = partitions.last().unwrap().num_blocks();
             let d_top = partitions.len();
-            let var_top =
-                SusieVar::new(vb.pp(format!("level_{}", d_top)), num_components, g_top, k)?;
+            let var_top = SusieVar::new_maybe_gated(
+                vb.pp(format!("level_{}", d_top)),
+                num_components,
+                g_top,
+                k,
+                gate_epsilon,
+            )?;
             let terminal_partition = BlockPartition::regular(g_top, g_top);
             levels.push(CollapseLevel {
                 variational: var_top,
@@ -548,10 +564,13 @@ mod tests {
         let config = SGVBConfig::default();
 
         let params = MultilevelParams {
-            num_components: l,
-            k,
+            base: MultilevelPartitionParams {
+                num_components: l,
+                k,
+                config,
+                gate_epsilon: None,
+            },
             block_size: 100,
-            config,
         };
         let model = MultilevelRegressionSGVB::new(vb.pp("ml"), x, prior, params)?;
 
@@ -583,10 +602,13 @@ mod tests {
         let config = SGVBConfig::default();
 
         let params = MultilevelParams {
-            num_components: l,
-            k,
+            base: MultilevelPartitionParams {
+                num_components: l,
+                k,
+                config,
+                gate_epsilon: None,
+            },
             block_size: 10,
-            config,
         };
         let model = MultilevelRegressionSGVB::new(vb.pp("ml"), x, prior, params)?;
 
@@ -622,10 +644,13 @@ mod tests {
         let config = SGVBConfig::default();
 
         let params = MultilevelParams {
-            num_components: l,
-            k,
+            base: MultilevelPartitionParams {
+                num_components: l,
+                k,
+                config,
+                gate_epsilon: None,
+            },
             block_size: 10,
-            config,
         };
         let model = MultilevelRegressionSGVB::new(vb.pp("ml"), x, prior, params)?;
 
@@ -658,10 +683,13 @@ mod tests {
         let config = SGVBConfig::default();
 
         let params = MultilevelParams {
-            num_components: l,
-            k,
+            base: MultilevelPartitionParams {
+                num_components: l,
+                k,
+                config,
+                gate_epsilon: None,
+            },
             block_size: 10,
-            config,
         };
         let model = MultilevelRegressionSGVB::new(vb.pp("ml"), x, prior, params)?;
 
@@ -695,10 +723,13 @@ mod tests {
         let config = SGVBConfig::default();
 
         let params = MultilevelParams {
-            num_components: l,
-            k,
+            base: MultilevelPartitionParams {
+                num_components: l,
+                k,
+                config,
+                gate_epsilon: None,
+            },
             block_size: 10,
-            config,
         };
         let model = MultilevelRegressionSGVB::new(vb.pp("ml"), x, prior, params)?;
         let likelihood = GaussianLik { y };
@@ -746,10 +777,13 @@ mod tests {
         let config = SGVBConfig::new(30);
 
         let params = MultilevelParams {
-            num_components: l,
-            k,
+            base: MultilevelPartitionParams {
+                num_components: l,
+                k,
+                config,
+                gate_epsilon: None,
+            },
             block_size: 10,
-            config,
         };
         let model = MultilevelRegressionSGVB::new(vb.pp("ml"), x, prior, params)?;
         let likelihood = GaussianLik { y };
@@ -801,6 +835,53 @@ mod tests {
             pip_50,
             other_mean
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gated_multilevel_forward() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let n = 30;
+        let p = 100;
+        let k = 1;
+        let l = 4;
+
+        let x = Tensor::randn(0f32, 1f32, (n, p), &device)?;
+
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
+        let prior = GaussianPrior::new(vb.pp("prior"), 1.0)?;
+        let config = SGVBConfig::default();
+
+        let params = MultilevelParams {
+            base: MultilevelPartitionParams {
+                num_components: l,
+                k,
+                config,
+                gate_epsilon: Some(0.01),
+            },
+            block_size: 10,
+        };
+        let model = MultilevelRegressionSGVB::new(vb.pp("ml"), x, prior, params)?;
+
+        assert_eq!(model.num_levels(), 2);
+
+        // Verify all levels are gated
+        for d in 0..model.num_levels() {
+            assert!(model.level(d).variational.is_gated());
+        }
+
+        // Forward pass should work
+        let sample = model.forward(5)?;
+        assert_eq!(sample.eta.dims(), &[5, n, k]);
+        assert!(sample.kl.to_scalar::<f32>()?.is_finite());
+
+        // KL should include Bernoulli terms (larger than ungated)
+        let kl: f32 = sample.kl.to_scalar()?;
+        assert!(kl > 0.0, "KL should be positive, got {}", kl);
 
         Ok(())
     }
