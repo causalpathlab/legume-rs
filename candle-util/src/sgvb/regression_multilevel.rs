@@ -287,7 +287,7 @@ impl<V: ComponentVariational, P: Prior + AnalyticalKL> MultilevelRegressionSGVB<
         //   V[η] = E[η²] - E[η]²
         let top_alpha = &alphas[num_levels - 1];
         let top_var = &self.levels[num_levels - 1].variational;
-        let top_beta_mean = top_var.beta_mean();
+        let top_beta_mean = top_var.beta_mean()?;
         let top_beta_std = top_var.beta_std()?;
 
         let (eta_mean, eta_var) = if k == 1 {

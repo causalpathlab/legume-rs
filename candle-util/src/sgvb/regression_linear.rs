@@ -97,8 +97,11 @@ impl<V: VariationalDistribution, P: Prior + AnalyticalKL> RegressionSGVB<V, P> {
             .unsqueeze(0)?
             .broadcast_add(&epsilon.broadcast_mul(&eta_std.unsqueeze(0)?)?)?; // (S, n, k)
 
-        // Analytical KL
-        let kl = self.prior.kl_from_gaussian(&theta_mean, &theta_var)?;
+        // Analytical KL: Gaussian slab + optional selection KL (categorical, Bernoulli, etc.)
+        let mut kl = self.prior.kl_from_gaussian(&theta_mean, &theta_var)?;
+        if let Some(sel_kl) = self.variational.kl_selection()? {
+            kl = (kl + sel_kl)?;
+        }
 
         Ok(LocalReparamSample { eta, kl })
     }

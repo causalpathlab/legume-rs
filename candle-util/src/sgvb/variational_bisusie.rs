@@ -2,7 +2,7 @@ use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 
 use super::susie_util::pip_from_alpha;
-use super::traits::VariationalDistribution;
+use super::traits::{ComponentVariational, VariationalDistribution};
 
 /// Bi-directional Susie (Sum of Single Effects) variational distribution.
 ///
@@ -155,6 +155,45 @@ impl BiSusieVar {
         let joint = self.alpha_joint()?; // (L, P, K)
         joint.broadcast_mul(&self.beta_mean)?.sum(0) // beta_mean is (L, P, K)
     }
+
+    /// Categorical KL: sum of predictor-axis and outcome-axis categorical KLs.
+    ///
+    /// KL = Σ_l [KL(α_p[l] || Uniform(P)) + KL(α_k[l] || Uniform(K))]
+    pub fn kl_categorical(&self, prior_alpha: f64) -> Result<Tensor> {
+        let log_alpha_p = self.log_alpha_predictor()?; // (L, P)
+        let alpha_p = log_alpha_p.exp()?;
+        let p = self.num_predictors as f64;
+        let log_prior_p = (prior_alpha / p).ln();
+        let neg_ent_p = alpha_p.broadcast_mul(&log_alpha_p)?.sum_all()?;
+        let kl_p = (neg_ent_p - log_prior_p * self.num_components as f64)?;
+
+        let log_alpha_k = self.log_alpha_outcome()?; // (L, K)
+        let alpha_k = log_alpha_k.exp()?;
+        let k = self.num_outcomes as f64;
+        let log_prior_k = (prior_alpha / k).ln();
+        let neg_ent_k = alpha_k.broadcast_mul(&log_alpha_k)?.sum_all()?;
+        let kl_k = (neg_ent_k - log_prior_k * self.num_components as f64)?;
+
+        kl_p + kl_k
+    }
+}
+
+impl ComponentVariational for BiSusieVar {
+    fn alpha(&self) -> Result<Tensor> {
+        self.alpha_joint()
+    }
+    fn beta_mean(&self) -> Result<Tensor> {
+        Ok(self.beta_mean.clone())
+    }
+    fn beta_std(&self) -> Result<Tensor> {
+        self.beta_std()
+    }
+    fn kl_categorical(&self, prior_alpha: f64) -> Result<Tensor> {
+        self.kl_categorical(prior_alpha)
+    }
+    fn num_components(&self) -> usize {
+        self.num_components
+    }
 }
 
 impl VariationalDistribution for BiSusieVar {
@@ -179,6 +218,10 @@ impl VariationalDistribution for BiSusieVar {
 
         (second_moment - first_moment_sq)?.clamp(1e-8, f64::INFINITY)
     }
+
+    fn kl_selection(&self) -> Result<Option<Tensor>> {
+        Ok(Some(self.kl_categorical(1.0)?))
+    }
 }
 
 #[cfg(test)]
@@ -196,7 +239,7 @@ mod tests {
         let dtype = DType::F32;
 
         // Problem size: N observations, P predictors, K outcomes
-        let n = 400;
+        let n = 800;
         let p = 5; // predictors (e.g., cell types)
         let k = 10; // outcomes (e.g., topics)
         let l = 3; // number of true effects (and BiSusie components)
@@ -245,10 +288,10 @@ mod tests {
         }
         let likelihood = GaussianLik { y };
 
-        // Train
+        // Train (more iterations needed with categorical KL active)
         let mut optimizer = AdamW::new_lr(varmap.all_vars(), 0.05)?;
 
-        for _epoch in 0..500 {
+        for _epoch in 0..1000 {
             let loss = local_reparam_loss(&model, &likelihood, 20, 1.0)?;
             optimizer.backward_step(&loss)?;
         }

@@ -26,6 +26,14 @@ pub trait VariationalDistribution {
     /// # Returns
     /// Variance tensor, shape (p, k)
     fn var(&self) -> Result<Tensor>;
+
+    /// Extra KL divergence beyond the Gaussian slab (e.g. categorical selection KL).
+    ///
+    /// Returns `None` by default. Override for distributions with additional
+    /// structure (SuSiE categorical, spike-and-slab Bernoulli gates, etc.).
+    fn kl_selection(&self) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
 }
 
 /// Prior distribution trait.
@@ -64,7 +72,8 @@ pub trait ComponentVariational: VariationalDistribution {
     /// Selection probabilities per component, shape (L, p, k).
     fn alpha(&self) -> Result<Tensor>;
     /// Effect size means per component, shape (L, p, k).
-    fn beta_mean(&self) -> &Tensor;
+    /// May be computed (e.g. broadcast from scalar effects), hence `Result<Tensor>`.
+    fn beta_mean(&self) -> Result<Tensor>;
     /// Effect size standard deviations per component, shape (L, p, k).
     fn beta_std(&self) -> Result<Tensor>;
     /// KL divergence of categorical selection from a uniform prior.
