@@ -36,25 +36,48 @@ struct GateParams {
 /// Each output dimension k has its own independent feature selection.
 /// This can be used with RegressionSGVB for Susie regression.
 pub struct SusieVar {
-    /// Selection logits, shape (L, p, k)
+    /// Selection logits, shape (L, p_logits, k) where p_logits = p + has_null as usize.
+    /// When `has_null`, position p is the null (no-effect) absorber.
     logits: Tensor,
     /// Effect size means, shape (L, p, k)
     beta_mean: Tensor,
     /// Effect size log-stds, shape (L, p, k)
     beta_ln_std: Tensor,
+    /// Number of real features (excluding null)
+    p: usize,
     /// Number of components L
     num_components: usize,
+    /// Whether a null position is appended to the softmax
+    has_null: bool,
     /// Per-component Bernoulli gate. None = all components always active.
     gate: Option<GateParams>,
 }
 
 impl SusieVar {
-    /// Create a new Susie variational distribution (no component gates).
+    /// Create a new Susie variational distribution (no component gates, no null).
     ///
     /// All L components are always active. Use [`new_gated`] to enable
     /// per-component Bernoulli gates for automatic component pruning.
     pub fn new(vb: VarBuilder, num_components: usize, p: usize, k: usize) -> Result<Self> {
-        Self::new_maybe_gated(vb, num_components, p, k, None)
+        Self::new_inner(vb, num_components, p, k, None, false)
+    }
+
+    /// Create a new Susie variational distribution with a null absorber.
+    ///
+    /// Appends a (p+1)th "null" position to the softmax. When a component
+    /// has no signal, mass flows to null (zero effect, zero KL cost) instead
+    /// of being forced onto a noise SNP. The null position has no associated
+    /// effect parameters — it simply absorbs probability mass.
+    ///
+    /// `alpha()` and `pip()` return only the p real positions; the null mass
+    /// is excluded. Use [`null_mass`] to inspect per-component null absorption.
+    pub fn new_with_null(
+        vb: VarBuilder,
+        num_components: usize,
+        p: usize,
+        k: usize,
+    ) -> Result<Self> {
+        Self::new_inner(vb, num_components, p, k, None, true)
     }
 
     /// Create a new Susie variational distribution with per-component gates.
@@ -74,19 +97,24 @@ impl SusieVar {
         k: usize,
         gate_epsilon: f64,
     ) -> Result<Self> {
-        Self::new_maybe_gated(vb, num_components, p, k, Some(gate_epsilon))
+        Self::new_inner(vb, num_components, p, k, Some(gate_epsilon), false)
     }
 
-    /// Unified constructor: `None` = ungated, `Some(ε)` = gated with smoothing ε.
-    pub fn new_maybe_gated(
+    /// Unified constructor with all options.
+    ///
+    /// `gate_epsilon`: `None` = ungated, `Some(ε)` = gated with smoothing ε.
+    /// `has_null`: whether to append a null absorber position to the softmax.
+    pub(crate) fn new_inner(
         vb: VarBuilder,
         num_components: usize,
         p: usize,
         k: usize,
         gate_epsilon: Option<f64>,
+        has_null: bool,
     ) -> Result<Self> {
+        let p_logits = p + has_null as usize;
         let logits = vb.get_with_hints(
-            (num_components, p, k),
+            (num_components, p_logits, k),
             "logits",
             candle_nn::Init::Const(0.0),
         )?;
@@ -123,7 +151,9 @@ impl SusieVar {
             logits,
             beta_mean,
             beta_ln_std,
+            p,
             num_components,
+            has_null,
             gate,
         })
     }
@@ -141,13 +171,14 @@ impl SusieVar {
     ///
     /// Returns a scalar tensor.
     pub fn kl_categorical(&self, prior_alpha: f64) -> Result<Tensor> {
-        // Categorical KL (always present, uses raw softmax α̃ not gated α)
-        let softmax_alpha = self.softmax_alpha()?; // (L, p, k)
-        let log_softmax_alpha = self.log_softmax_alpha()?; // (L, p, k)
-        let p = softmax_alpha.dim(1)?;
-        let log_prior = (prior_alpha / p as f64).ln();
-        let neg_entropy = softmax_alpha.broadcast_mul(&log_softmax_alpha)?.sum_all()?;
-        let lk = self.num_components as f64 * softmax_alpha.dim(2)? as f64;
+        // Categorical KL over full softmax (including null if present).
+        // Prior is uniform over all positions (p or p+1).
+        let full_log_softmax = self.log_softmax_full()?;
+        let full_softmax = full_log_softmax.exp()?; // (L, p_logits, k)
+        let p_logits = full_softmax.dim(1)?;
+        let log_prior = (prior_alpha / p_logits as f64).ln();
+        let neg_entropy = full_softmax.broadcast_mul(&full_log_softmax)?.sum_all()?;
+        let lk = self.num_components as f64 * full_softmax.dim(2)? as f64;
         let cat_kl = (neg_entropy - log_prior * lk)?;
 
         match &self.gate {
@@ -215,15 +246,43 @@ impl SusieVar {
         }
     }
 
-    /// Raw softmax selection probabilities (before gating).
-    /// Shape (L, p, k). Always sums to 1 over p.
+    /// Raw softmax selection probabilities for real features (before gating).
+    /// Shape (L, p, k). Sums to ≤ 1 over p (< 1 when null absorbs mass).
     fn softmax_alpha(&self) -> Result<Tensor> {
         self.log_softmax_alpha()?.exp()
     }
 
-    /// Raw log-softmax selection probabilities (before gating).
+    /// Raw log-softmax selection probabilities for real features (before gating).
+    /// Shape (L, p, k).
     fn log_softmax_alpha(&self) -> Result<Tensor> {
+        let full = self.log_softmax_full()?;
+        if self.has_null {
+            full.narrow(1, 0, self.p)
+        } else {
+            Ok(full)
+        }
+    }
+
+    /// Full log-softmax over all positions including null.
+    /// Shape (L, p_logits, k) where p_logits = p + has_null.
+    fn log_softmax_full(&self) -> Result<Tensor> {
         candle_nn::ops::log_softmax(&self.logits, 1)
+    }
+
+    /// Whether this SusieVar has a null absorber position.
+    pub fn has_null(&self) -> bool {
+        self.has_null
+    }
+
+    /// Per-component probability mass on the null position.
+    ///
+    /// Returns shape (L, k). Panics if `!has_null`.
+    pub fn null_mass(&self) -> Result<Tensor> {
+        assert!(self.has_null, "null_mass called on SusieVar without null");
+        self.log_softmax_full()?
+            .narrow(1, self.p, 1)?
+            .exp()?
+            .squeeze(1) // (L, k)
     }
 
     /// Get the posterior inclusion probabilities (PIPs) for each feature and output.

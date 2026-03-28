@@ -62,6 +62,8 @@ pub struct MultilevelPartitionParams {
     pub config: SGVBConfig,
     /// If Some(ε), enable per-component Bernoulli gates with smoothing epsilon ε.
     pub gate_epsilon: Option<f64>,
+    /// Whether to add a null absorber position to each level's softmax.
+    pub has_null: bool,
 }
 
 /// Parameters for constructing a `MultilevelSusieSGVB` with automatic partitioning.
@@ -178,21 +180,25 @@ impl<P: Prior + AnalyticalKL> MultilevelSusieSGVB<P> {
             k,
             config,
             gate_epsilon,
+            has_null,
         } = params;
         let p = x_design.dim(1)?;
         let mut levels = Vec::new();
 
+        // Helper to build SusieVar with the right options
+        let build_var = |vb: VarBuilder, p: usize| -> Result<SusieVar> {
+            SusieVar::new_inner(vb, num_components, p, k, gate_epsilon, has_null)
+        };
+
         if partitions.is_empty() {
-            let variational =
-                SusieVar::new_maybe_gated(vb.pp("level_0"), num_components, p, k, gate_epsilon)?;
+            let variational = build_var(vb.pp("level_0"), p)?;
             let partition = BlockPartition::regular(p, p);
             levels.push(CollapseLevel {
                 variational,
                 partition,
             });
         } else {
-            let var_0 =
-                SusieVar::new_maybe_gated(vb.pp("level_0"), num_components, p, k, gate_epsilon)?;
+            let var_0 = build_var(vb.pp("level_0"), p)?;
             levels.push(CollapseLevel {
                 variational: var_0,
                 partition: partitions[0].clone(),
@@ -200,13 +206,7 @@ impl<P: Prior + AnalyticalKL> MultilevelSusieSGVB<P> {
 
             for (d, part) in partitions.iter().enumerate().skip(1) {
                 let g_d = partitions[d - 1].num_blocks();
-                let var_d = SusieVar::new_maybe_gated(
-                    vb.pp(format!("level_{}", d)),
-                    num_components,
-                    g_d,
-                    k,
-                    gate_epsilon,
-                )?;
+                let var_d = build_var(vb.pp(format!("level_{}", d)), g_d)?;
                 levels.push(CollapseLevel {
                     variational: var_d,
                     partition: part.clone(),
@@ -215,13 +215,7 @@ impl<P: Prior + AnalyticalKL> MultilevelSusieSGVB<P> {
 
             let g_top = partitions.last().unwrap().num_blocks();
             let d_top = partitions.len();
-            let var_top = SusieVar::new_maybe_gated(
-                vb.pp(format!("level_{}", d_top)),
-                num_components,
-                g_top,
-                k,
-                gate_epsilon,
-            )?;
+            let var_top = build_var(vb.pp(format!("level_{}", d_top)), g_top)?;
             let terminal_partition = BlockPartition::regular(g_top, g_top);
             levels.push(CollapseLevel {
                 variational: var_top,
@@ -467,35 +461,20 @@ fn collapse_with_alpha(
 ) -> Result<Tensor> {
     let alpha_l = alpha.get(component)?; // (G_prev, k)
 
-    if k == 1 {
-        let mut cols = Vec::with_capacity(block_ranges.len());
-        for range in block_ranges {
-            let x_sub = x.narrow(1, range.start, range.len())?.contiguous()?;
-            let a_sub = alpha_l.narrow(0, range.start, range.len())?.contiguous()?;
-            cols.push(x_sub.matmul(&a_sub)?);
+    // Shared design: x is (n, p), alpha is (p, k).
+    // Each output dim kk has its own alpha weights but the same x columns.
+    // Collapse per output dim: x̃_{kk} = Σ_{j∈block} α_{j,kk} · x_j
+    // Result: (n, B*k) interleaved as [b0k0, b0k1, ..., b1k0, b1k1, ...]
+    let mut cols = Vec::with_capacity(block_ranges.len() * k);
+    for range in block_ranges {
+        let x_sub = x.narrow(1, range.start, range.len())?.contiguous()?; // (n, |g|)
+        let a_sub = alpha_l.narrow(0, range.start, range.len())?.contiguous()?; // (|g|, k)
+        for kk in 0..k {
+            let a_k = a_sub.narrow(1, kk, 1)?.contiguous()?; // (|g|, 1)
+            cols.push(x_sub.matmul(&a_k)?); // (n, 1)
         }
-        Tensor::cat(&cols, 1)
-    } else {
-        // k > 1: collapse per output dimension using tensor ops (no scalar extraction)
-        let mut cols = Vec::with_capacity(block_ranges.len() * k);
-        for range in block_ranges {
-            let x_sub_full = x
-                .narrow(1, range.start * k, range.len() * k)?
-                .contiguous()?;
-            let a_sub = alpha_l.narrow(0, range.start, range.len())?.contiguous()?; // (|g|, k)
-            for kk in 0..k {
-                // Extract kk-th columns from x_sub: stride by k
-                let mut x_k_cols = Vec::with_capacity(range.len());
-                for j_local in 0..range.len() {
-                    x_k_cols.push(x_sub_full.narrow(1, j_local * k + kk, 1)?);
-                }
-                let x_k = Tensor::cat(&x_k_cols, 1)?.contiguous()?; // (n, |g|)
-                let a_k = a_sub.narrow(1, kk, 1)?.contiguous()?; // (|g|, 1)
-                cols.push(x_k.matmul(&a_k)?); // (n, 1)
-            }
-        }
-        Tensor::cat(&cols, 1)
     }
+    Tensor::cat(&cols, 1) // (n, B*k)
 }
 
 /// Extract the kk-th output slice from a multi output design matrix.
@@ -564,6 +543,7 @@ mod tests {
                 k,
                 config,
                 gate_epsilon: None,
+                has_null: false,
             },
             block_size: 100,
         };
@@ -602,6 +582,7 @@ mod tests {
                 k,
                 config,
                 gate_epsilon: None,
+                has_null: false,
             },
             block_size: 10,
         };
@@ -644,6 +625,7 @@ mod tests {
                 k,
                 config,
                 gate_epsilon: None,
+                has_null: false,
             },
             block_size: 10,
         };
@@ -683,6 +665,7 @@ mod tests {
                 k,
                 config,
                 gate_epsilon: None,
+                has_null: false,
             },
             block_size: 10,
         };
@@ -723,6 +706,7 @@ mod tests {
                 k,
                 config,
                 gate_epsilon: None,
+                has_null: false,
             },
             block_size: 10,
         };
@@ -777,6 +761,7 @@ mod tests {
                 k,
                 config,
                 gate_epsilon: None,
+                has_null: false,
             },
             block_size: 10,
         };
@@ -857,6 +842,7 @@ mod tests {
                 k,
                 config,
                 gate_epsilon: Some(0.01),
+                has_null: false,
             },
             block_size: 10,
         };

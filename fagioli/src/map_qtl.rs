@@ -21,9 +21,7 @@ use fagioli::io::results::{
 };
 use fagioli::mapping::map_qtl_helpers::*;
 use fagioli::mapping::pseudobulk::{collapse_pseudobulk, Membership};
-use fagioli::sgvb::{
-    fit_block_weighted, ComputeDevice, FitConfig, ModelType, MultilevelConfig, SnpCoordinates,
-};
+use fagioli::sgvb::{fit_block_weighted, ComputeDevice, FitConfig, ModelType};
 use matrix_util::common_io::basename;
 
 #[derive(Args, Debug, Clone)]
@@ -233,44 +231,6 @@ pub struct MapQtlArgs {
             for prior variance selection (best ELBO wins). Default: 50."
     )]
     pub elbo_window: usize,
-
-    #[arg(
-        long,
-        help = "Use multilevel SuSiE with LD-aware hierarchical variable selection",
-        long_help = "Enable multilevel SuSiE with LD-aware hierarchical softmax.\n\n\
-            When enabled, LD sub-blocks are estimated within each gene's cis-window\n\
-            using Nystrom + rSVD on the genotype matrix, and used as the level-0\n\
-            partition for a recursive multilevel SuSiE model.\n\n\
-            Benefits: improves optimization for large cis-windows (p > 200 SNPs)\n\
-            by replacing a single flat softmax over all SNPs with a hierarchy of\n\
-            smaller softmaxes that respect LD structure.\n\n\
-            Constraints: only works with --model susie (not bisusie).\n\
-            Automatically falls back to flat SuSiE for genes with < 200 cis-SNPs.\n\
-            Disables minibatch training (uses full batch)."
-    )]
-    pub multilevel: bool,
-
-    #[arg(
-        long,
-        default_value = "20",
-        help = "Min SNPs per LD sub-block in multilevel hierarchy",
-        long_help = "Minimum number of SNPs per LD sub-block when estimating the\n\
-            level-0 partition for multilevel SuSiE. Blocks smaller than this\n\
-            are merged with neighbors. Only used when --multilevel is set.\n\
-            Default: 20."
-    )]
-    pub multilevel_min_block: usize,
-
-    #[arg(
-        long,
-        default_value = "500",
-        help = "Max SNPs per LD sub-block in multilevel hierarchy",
-        long_help = "Maximum number of SNPs per LD sub-block when estimating the\n\
-            level-0 partition for multilevel SuSiE. Blocks larger than this\n\
-            are split into uniform sub-blocks. Only used when --multilevel is set.\n\
-            Default: 500."
-    )]
-    pub multilevel_max_block: usize,
 
     // ── Empirical Bayes ──────────────────────────────────────────────────
     #[arg(
@@ -544,15 +504,6 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
         seed: args.seed,
         sigma2_inf: 0.0,
         prior_alpha: 1.0,
-        multilevel: if args.multilevel {
-            Some(MultilevelConfig {
-                min_block_snps: args.multilevel_min_block,
-                max_block_snps: args.multilevel_max_block,
-                ..Default::default()
-            })
-        } else {
-            None
-        },
     };
 
     info!(
@@ -585,25 +536,6 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
         let mut gene_config = fit_config.clone();
         gene_config.seed = fit_config.seed.wrapping_add(spec_idx as u64);
 
-        // Build SNP coordinates for multilevel LD estimation (skip if not enabled)
-        let coords = if gene_config.multilevel.is_some() {
-            let pos: Vec<u64> = valid_cis_indices
-                .iter()
-                .map(|&i| geno.positions[i])
-                .collect();
-            let chr: Vec<Box<str>> = valid_cis_indices
-                .iter()
-                .map(|&i| geno.chromosomes[i].clone())
-                .collect();
-            Some((pos, chr))
-        } else {
-            None
-        };
-        let coords_ref = coords.as_ref().map(|(p, c)| SnpCoordinates {
-            positions: p,
-            chromosomes: c,
-        });
-
         let detailed = match fit_block_weighted(
             &x_g,
             &y_g,
@@ -611,7 +543,6 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
             covariates.as_ref(),
             &gene_config,
             &device,
-            coords_ref.as_ref(),
         ) {
             Ok(d) => d,
             Err(e) => {

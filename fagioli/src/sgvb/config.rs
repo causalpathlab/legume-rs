@@ -28,6 +28,7 @@ impl ComputeDevice {
 pub enum ModelType {
     Susie,
     BiSusie,
+    SpikeSlab,
 }
 
 impl std::str::FromStr for ModelType {
@@ -36,6 +37,7 @@ impl std::str::FromStr for ModelType {
         match s.to_lowercase().as_str() {
             "susie" => Ok(Self::Susie),
             "bisusie" => Ok(Self::BiSusie),
+            "spike-slab" | "spikeslab" | "ss" => Ok(Self::SpikeSlab),
             _ => anyhow::bail!("Unknown model type: {}", s),
         }
     }
@@ -61,36 +63,6 @@ pub struct FitConfig {
     /// Each SNP gets prior probability prior_alpha / p.
     /// Default 1.0 (uniform prior).
     pub prior_alpha: f64,
-    /// Multilevel configuration. When set, uses `MultilevelSusieSGVB` with
-    /// LD-aware hierarchical softmax. Only supported with `ModelType::Susie`.
-    pub multilevel: Option<MultilevelConfig>,
-}
-
-/// Configuration for LD-aware multilevel SuSiE.
-#[derive(Debug, Clone)]
-pub struct MultilevelConfig {
-    /// Minimum SNPs per LD sub-block in level-0 partition.
-    pub min_block_snps: usize,
-    /// Maximum SNPs per LD sub-block in level-0 partition.
-    pub max_block_snps: usize,
-    /// Minimum p to trigger multilevel (below this, fall back to flat SuSiE).
-    pub min_p: usize,
-}
-
-impl Default for MultilevelConfig {
-    fn default() -> Self {
-        Self {
-            min_block_snps: 20,
-            max_block_snps: 500,
-            min_p: 200,
-        }
-    }
-}
-
-/// SNP genomic coordinates for LD-aware multilevel partition estimation.
-pub struct SnpCoordinates<'a> {
-    pub positions: &'a [u64],
-    pub chromosomes: &'a [Box<str>],
 }
 
 impl Default for FitConfig {
@@ -107,7 +79,6 @@ impl Default for FitConfig {
             seed: 42,
             sigma2_inf: 0.0,
             prior_alpha: 1.0,
-            multilevel: None,
         }
     }
 }
@@ -149,8 +120,14 @@ impl BlockFitResultDetailed {
 }
 
 /// Select the best prior by ELBO argmax from a `BlockFitResultDetailed`.
-pub fn select_best_prior(detailed: &BlockFitResultDetailed) -> BlockFitResult {
-    let best_idx = elbo_argmax(&detailed.per_prior_elbos);
+fn select_best_prior(detailed: &BlockFitResultDetailed) -> BlockFitResult {
+    let best_idx = detailed
+        .per_prior_elbos
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
     BlockFitResult {
         pip: detailed.per_prior_pips[best_idx].clone(),
         effect_mean: detailed.per_prior_effects[best_idx].clone(),
@@ -159,20 +136,9 @@ pub fn select_best_prior(detailed: &BlockFitResultDetailed) -> BlockFitResult {
     }
 }
 
-/// Return the index of the maximum value (argmax).
-pub fn elbo_argmax(elbos: &[f32]) -> usize {
-    elbos
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        .map(|(i, _)| i)
-        .unwrap_or(0)
-}
-
 /// RSS-specific parameters for `fit_block_rss`.
-pub struct RssParams<'a> {
+pub struct RssParams {
     pub max_rank: usize,
     pub lambda: f64,
     pub ldsc_intercept: bool,
-    pub coords: Option<&'a SnpCoordinates<'a>>,
 }
