@@ -64,10 +64,25 @@ impl SusieVar {
 
     /// Create a new Susie variational distribution with a null absorber.
     ///
-    /// Appends a (p+1)th "null" position to the softmax. When a component
-    /// has no signal, mass flows to null (zero effect, zero KL cost) instead
-    /// of being forced onto a noise SNP. The null position has no associated
-    /// effect parameters — it simply absorbs probability mass.
+    /// # Why null?
+    ///
+    /// Standard SuSiE softmax forces `Σ_j α_j = 1` per component, so every
+    /// component must select *some* SNP — even in LD blocks with no signal.
+    /// With gradient-based SGVB, this causes false positives: noise
+    /// correlations push α toward spurious concentration, and the Gaussian
+    /// KL penalty alone isn't enough to prevent it.
+    ///
+    /// # How it works
+    ///
+    /// Appends a (p+1)th "null" position to the softmax logits. The null has
+    /// no associated β parameters — selecting null means zero contribution to
+    /// the linear predictor. In the ELBO:
+    ///
+    /// - **Signal blocks**: causal SNPs get strong, consistent likelihood
+    ///   gradients that overcome the null. Mass concentrates on real SNPs.
+    /// - **Null blocks**: no SNP gets consistent positive gradient. The null
+    ///   is the lowest-cost option (no Gaussian KL for fitting noise), so
+    ///   mass naturally flows there.
     ///
     /// `alpha()` and `pip()` return only the p real positions; the null mass
     /// is excluded. Use [`null_mass`] to inspect per-component null absorption.

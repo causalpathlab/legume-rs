@@ -170,11 +170,21 @@ pub struct MapSumstatArgs {
     #[arg(
         long,
         default_value = "susie",
-        help = "Fine-mapping model: 'susie', 'bisusie' (bivariate), or 'spike-slab'",
-        long_help = "Fine-mapping model to use:\n\
-            - susie: Sum of Single Effects, each component selects one causal SNP\n\
-            - bisusie: Bivariate SuSiE, each component has a pair of effects\n\
-            Default: susie. Multilevel mode (--multilevel) only supports susie."
+        help = "Fine-mapping model: 'susie', 'bisusie', or 'spike-slab'",
+        long_help = "Fine-mapping model to use:\n\n\
+            - susie: Sum of Single Effects with null absorber. Each of L components\n\
+              selects one causal SNP via softmax over p+1 positions — p real SNPs\n\
+              plus a null position. When a component has no signal, mass flows to\n\
+              the null (zero effect, zero KL cost) instead of being forced onto a\n\
+              noise SNP. This prevents false positives in null LD blocks where the\n\
+              standard softmax would concentrate on noise due to the sum-to-one\n\
+              constraint. PIPs are computed from the real p positions only.\n\n\
+            - bisusie: Bivariate SuSiE with separate predictor/outcome softmaxes.\n\n\
+            - spike-slab: Independent per-SNP Bernoulli inclusion gates with\n\
+              Gaussian slab. No component structure — each SNP is independently\n\
+              included or excluded. Simpler than SuSiE but can select multiple\n\
+              SNPs in the same LD block (no single-effect constraint).\n\n\
+            Default: susie."
     )]
     pub model: Box<str>,
 
@@ -182,9 +192,10 @@ pub struct MapSumstatArgs {
         long,
         default_value = "10",
         help = "Number of SuSiE components L (max causal SNPs per block)",
-        long_help = "Number of single-effect components (L) in the SuSiE model.\n\
+        long_help = "Number of single-effect components (L) in the SuSiE/BiSuSiE model.\n\
             Each component can select one causal SNP, so L is the maximum number\n\
-            of causal variants the model can identify per LD block. Default: 10."
+            of causal variants the model can identify per LD block.\n\
+            Ignored for spike-slab (which has no component structure). Default: 10."
     )]
     pub num_components: usize,
 
