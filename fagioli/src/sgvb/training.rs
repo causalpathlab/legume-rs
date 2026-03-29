@@ -3,7 +3,7 @@ use candle_util::candle_core::{DType, Device, Tensor};
 use candle_util::candle_nn::{AdamW, Optimizer, VarBuilder, VarMap};
 use candle_util::sgvb::{
     samples_local_reparam_loss, AnalyticalKL, FixedGaussianLikelihood, FixedGaussianPrior,
-    GaussianRegressionSGVB, LocalReparamSample, RegressionSGVB, SGVBConfig,
+    GaussianRegressionSGVB, LocalReparamSample, PriorKind, RegressionSGVB, SGVBConfig,
     VariationalDistribution, WeightedGaussianLikelihood,
 };
 use matrix_util::traits::ConvertMatOps;
@@ -54,10 +54,10 @@ pub(crate) fn run_sgvb_loop(
     })
 }
 
-/// Train with a single prior_var. Returns (avg_elbo, pip, effect_mean, effect_std).
-pub(crate) fn fit_single_prior(
+/// Train with a given prior. Returns (avg_elbo, pip, effect_mean, effect_std).
+pub(crate) fn fit_with_prior(
     tensors: &BlockTensors,
-    prior_var: f32,
+    make_prior: &dyn Fn(&VarBuilder) -> Result<PriorKind>,
     config: &FitConfig,
     device: &Device,
 ) -> Result<PriorFitResult> {
@@ -68,7 +68,7 @@ pub(crate) fn fit_single_prior(
         num_samples: config.num_sgvb_samples,
         kl_weight: 1.0,
     };
-    // Build confounder model if needed
+
     let conf_model: Option<GaussianRegressionSGVB<FixedGaussianPrior>> =
         if let Some(ref ct) = tensors.conf {
             let conf_prior = FixedGaussianPrior::new(1.0);
@@ -91,7 +91,7 @@ pub(crate) fn fit_single_prior(
         num_components: config.num_components,
         p: tensors.p,
         k: tensors.k,
-        init_prior_std: prior_var.sqrt(),
+        prior: make_prior(&vb)?,
     })?;
 
     let mut optimizer = AdamW::new_lr(varmap.all_vars(), config.learning_rate)?;
@@ -102,7 +102,6 @@ pub(crate) fn fit_single_prior(
         config.num_iterations,
         config.elbo_window,
         || {
-            // Optionally subsample rows with replacement
             let (x_batch, y_batch, var_batch, conf_batch) = if tensors.use_minibatch {
                 let indices: Vec<u32> = (0..config.batch_size)
                     .map(|_| rng.random_range(0..tensors.n as u32))

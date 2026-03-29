@@ -6,7 +6,7 @@ description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version.workspace = true
+version = "0.1.1"
 
 [[bin]]
 name = "fagioli"
@@ -18,6 +18,7 @@ data-beans = { workspace = true }
 data-beans-alg = { workspace = true }
 candle-util = { workspace = true }
 matrix-util = { workspace = true }
+mcmc-util = { workspace = true }
 matrix-param = { workspace = true }
 genomic-data = { workspace = true }
 
