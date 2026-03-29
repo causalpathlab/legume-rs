@@ -164,11 +164,7 @@ impl DecoderModuleT for NbTopicDecoder {
         self.n_topics
     }
 
-    #[allow(clippy::type_complexity)]
-    fn build_ess_llik<'a>(
-        &'a self,
-        x_nd: &'a Tensor,
-    ) -> Result<Box<dyn Fn(&Tensor) -> Result<Tensor> + 'a>> {
+    fn build_ess_llik<'a>(&'a self, x_nd: &'a Tensor) -> Result<EssLlikFn<'a>> {
         let log_dict_dk = self.get_dictionary()?.detach();
         let beta_kd = log_dict_dk.t()?.exp()?.contiguous()?;
         let log_phi = self.log_phi_1d.detach();

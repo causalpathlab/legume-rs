@@ -1,6 +1,10 @@
 use candle_core::{Result, Tensor};
 use candle_nn::ops;
 
+/// Boxed log-likelihood closure for ESS evaluation.
+/// Maps `z_nk [N, K]` to per-sample log-likelihood `[N]`.
+pub type EssLlikFn<'a> = Box<dyn Fn(&Tensor) -> Result<Tensor> + 'a>;
+
 pub trait EncoderModuleT {
     /// An encoder that spits out two results (latent inference, KL loss)
     ///
@@ -75,11 +79,7 @@ pub trait DecoderModuleT {
     ///
     /// Default implementation pre-computes the dictionary and uses multinomial
     /// log-likelihood. Override for decoders with different likelihoods (e.g. NB).
-    #[allow(clippy::type_complexity)]
-    fn build_ess_llik<'a>(
-        &'a self,
-        x_nd: &'a Tensor,
-    ) -> Result<Box<dyn Fn(&Tensor) -> Result<Tensor> + 'a>> {
+    fn build_ess_llik<'a>(&'a self, x_nd: &'a Tensor) -> Result<EssLlikFn<'a>> {
         use crate::candle_loss_functions::topic_likelihood;
 
         let log_dict_dk = self.get_dictionary()?.detach();
