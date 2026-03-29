@@ -57,4 +57,29 @@ pub trait IndexedDecoderT {
     fn dim_obs(&self) -> usize;
 
     fn dim_latent(&self) -> usize;
+
+    /// Build a lightweight log-likelihood closure for ESS evaluation.
+    ///
+    /// Pre-computes the dictionary slice for the given union indices,
+    /// avoiding repeated softmax and index_select across ESS iterations.
+    #[allow(clippy::type_complexity)]
+    fn build_ess_llik<'a>(
+        &'a self,
+        union_indices: &'a Tensor,
+        indexed_x: &'a Tensor,
+    ) -> Result<Box<dyn Fn(&Tensor) -> Result<Tensor> + 'a>> {
+        use crate::candle_loss_functions::topic_likelihood;
+        use candle_nn::ops;
+
+        let log_dict_dk = self.get_dictionary()?.detach();
+        let log_dict_sk = log_dict_dk.index_select(union_indices, 0)?;
+        let beta_ks = log_dict_sk.t()?.exp()?.contiguous()?; // [K, S]
+        let x_clamped = indexed_x.clamp(0.0, f64::INFINITY)?;
+
+        Ok(Box::new(move |z_nk: &Tensor| {
+            let z = ops::log_softmax(z_nk, 1)?.exp()?;
+            let recon = z.matmul(&beta_ks)?; // [N, S]
+            topic_likelihood(&x_clamped, &recon)
+        }))
+    }
 }

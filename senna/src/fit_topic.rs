@@ -6,7 +6,8 @@ use candle_nn::AdamW;
 use candle_nn::Optimizer;
 use candle_util::candle_data_loader::*;
 use candle_util::candle_decoder_topic::*;
-use candle_util::candle_loss_functions::topic_likelihood;
+use candle_util::candle_ess::batched_ess_steps;
+use candle_util::candle_loss_functions::{gaussian_neg_log_prob, topic_likelihood};
 use candle_util::candle_model_traits::*;
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
@@ -284,6 +285,25 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 0,
+        help = "ESS steps for variational contrastive divergence",
+        long_help = "Number of elliptical slice sampling steps per minibatch during training.\n\
+		     When > 0, uses variational contrastive divergence (VCD) instead of SGVB:\n\
+		     the encoder proposes initial z, ESS refines toward the true posterior,\n\
+		     and the encoder is trained to match ESS-refined samples (inclusive KL).\n\
+		     Set to 0 to use standard SGVB (default)."
+    )]
+    ess_steps: usize,
+
+    #[arg(
+        long,
+        default_value_t = 50,
+        help = "Max shrink iterations per ESS step"
+    )]
+    ess_max_shrink: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
         help = "Per-cell refinement steps at inference",
         long_help = "Number of gradient steps for per-cell topic refinement at inference time.\n\
 		     Optimizes topic logits against the frozen decoder likelihood,\n\
@@ -498,15 +518,22 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 args,
                 stop: &stop,
             };
-            let scores = match args.level_schedule {
-                LevelSchedule::Progressive => train_progressive(
+            let scores = match (&args.level_schedule, args.ess_steps > 0) {
+                (LevelSchedule::Progressive, _) => train_progressive(
                     &collapsed_levels,
                     &mut encoder,
                     &decoders,
                     &level_coarsenings,
                     &train_config,
                 )?,
-                LevelSchedule::Mixed => train_mixed(
+                (LevelSchedule::Mixed, false) => train_mixed(
+                    &collapsed_levels,
+                    &mut encoder,
+                    &decoders,
+                    &level_coarsenings,
+                    &train_config,
+                )?,
+                (LevelSchedule::Mixed, true) => train_mixed_vcd(
                     &collapsed_levels,
                     &mut encoder,
                     &decoders,
@@ -584,15 +611,22 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 args,
                 stop: &stop,
             };
-            let scores = match args.level_schedule {
-                LevelSchedule::Progressive => train_progressive(
+            let scores = match (&args.level_schedule, args.ess_steps > 0) {
+                (LevelSchedule::Progressive, _) => train_progressive(
                     &collapsed_levels,
                     &mut encoder,
                     &decoders,
                     &level_coarsenings,
                     &train_config,
                 )?,
-                LevelSchedule::Mixed => train_mixed(
+                (LevelSchedule::Mixed, false) => train_mixed(
+                    &collapsed_levels,
+                    &mut encoder,
+                    &decoders,
+                    &level_coarsenings,
+                    &train_config,
+                )?,
+                (LevelSchedule::Mixed, true) => train_mixed_vcd(
                     &collapsed_levels,
                     &mut encoder,
                     &decoders,
@@ -884,6 +918,220 @@ where
 
     pb.finish_and_clear();
     info!("done mixed multi-level training");
+    Ok(TrainScores {
+        llik: llik_trace,
+        kl: kl_trace,
+    })
+}
+
+/// Mixed multi-level VCD training.
+///
+/// Like `train_mixed`, but uses elliptical slice sampling (ESS) to refine
+/// latent z toward the true posterior, then trains the encoder to match
+/// ESS-refined samples (inclusive KL / wake-phase update).
+fn train_mixed_vcd<Dec>(
+    collapsed_levels: &[CollapsedOut],
+    encoder: &mut LogSoftmaxEncoder,
+    decoders: &[Dec],
+    level_coarsenings: &[Option<FeatureCoarsening>],
+    config: &ProgressiveTrainConfig,
+) -> anyhow::Result<TrainScores>
+where
+    Dec: DecoderModuleT,
+{
+    let num_levels = collapsed_levels.len();
+    let total_epochs = config.args.epochs;
+    let ess_steps = config.args.ess_steps;
+    let ess_max_shrink = config.args.ess_max_shrink;
+
+    let enc_coarsening = level_coarsenings.last().and_then(|c| c.as_ref());
+
+    for (level, (collapsed, decoder)) in collapsed_levels.iter().zip(decoders.iter()).enumerate() {
+        info!(
+            "Level {}/{}: {} samples, decoder dim {}",
+            level + 1,
+            num_levels,
+            collapsed.mu_observed.ncols(),
+            decoder.dim_obs(),
+        );
+    }
+
+    info!(
+        "VCD mixed training: {} levels, {} epochs, {} ESS steps/batch",
+        num_levels, total_epochs, ess_steps
+    );
+
+    let mut adam = AdamW::new_lr(
+        config.parameters.all_vars(),
+        config.args.learning_rate as f64,
+    )?;
+
+    let pb = ProgressBar::new(total_epochs as u64);
+
+    let mut llik_trace = Vec::with_capacity(total_epochs);
+    let mut kl_trace = Vec::with_capacity(total_epochs);
+
+    let target_total = 1usize << config.args.sort_dim;
+    let level_sizes: Vec<usize> = collapsed_levels
+        .iter()
+        .map(|c| c.mu_observed.ncols())
+        .collect();
+    let level_budgets = compute_level_budgets(&level_sizes, target_total);
+
+    let mut rng = rand::rng();
+
+    for epoch in (0..total_epochs).step_by(config.args.jitter_interval) {
+        // Data prep — identical to train_mixed
+        let level_data: Vec<(Mat, Option<Mat>, Mat)> = collapsed_levels
+            .iter()
+            .zip(level_coarsenings.iter())
+            .zip(level_budgets.iter())
+            .map(|((collapsed, dec_fc), &budget)| {
+                let full_mixed = collapsed
+                    .mu_observed
+                    .posterior_sample()
+                    .unwrap()
+                    .transpose();
+
+                let full_batch = collapsed.mu_residual.as_ref().map(|x| {
+                    let ret: Mat = x.posterior_sample().unwrap();
+                    ret.transpose()
+                });
+
+                let target_full = if let Some(adj) = &collapsed.mu_adjusted {
+                    adj.posterior_sample().unwrap().transpose()
+                } else {
+                    full_mixed.clone()
+                };
+
+                let (sub_mixed, sub_batch, sub_target) =
+                    subsample_rows((full_mixed, full_batch, target_full), budget, &mut rng);
+
+                let enc_nd = if let Some(fc) = enc_coarsening {
+                    fc.aggregate_columns_nd(&sub_mixed)
+                } else {
+                    sub_mixed
+                };
+
+                let batch_nd = sub_batch.map(|b| {
+                    if let Some(fc) = enc_coarsening {
+                        fc.aggregate_columns_nd(&b)
+                    } else {
+                        b
+                    }
+                });
+
+                let dec_target = if let Some(fc) = dec_fc.as_ref() {
+                    fc.aggregate_columns_nd(&sub_target)
+                } else {
+                    sub_target
+                };
+
+                (enc_nd, batch_nd, dec_target)
+            })
+            .collect();
+
+        let data_loaders: Vec<InMemoryData> = level_data
+            .iter()
+            .map(|(enc, batch, target)| {
+                let mut loader = InMemoryData::from(InMemoryArgs {
+                    input: enc,
+                    input_null: batch.as_ref(),
+                    output: Some(target),
+                    output_null: None,
+                })
+                .expect("data loader creation");
+                loader
+                    .shuffle_minibatch(config.args.minibatch_size)
+                    .expect("shuffle");
+                loader
+            })
+            .collect();
+
+        let kl_weight = if config.args.kl_warmup_epochs > 0.0 {
+            1.0 - (-(epoch as f64) / config.args.kl_warmup_epochs).exp()
+        } else {
+            1.0
+        };
+
+        let jitter_end = config.args.jitter_interval.min(total_epochs - epoch);
+        for _jitter in 0..jitter_end {
+            let mut llik_tot = 0f32;
+            let mut enc_score_tot = 0f32;
+            let mut n_tot = 0usize;
+
+            for (level, loader) in data_loaders.iter().enumerate() {
+                let decoder = &decoders[level];
+                n_tot += loader.num_data();
+
+                for b in 0..loader.num_minibatch() {
+                    let mb = loader.minibatch_shuffled(b, config.dev)?;
+
+                    // 1. Encoder forward: get μ, log σ²
+                    let (z_mean, z_lnvar) =
+                        encoder.latent_gaussian_params(&mb.input, mb.input_null.as_ref(), true)?;
+
+                    // 2. Sample z₀ from encoder (reparameterization)
+                    let z_init = encoder.reparameterize(&z_mean, &z_lnvar, true)?;
+
+                    // 3. ESS refinement: z₀ → z_refined via batched ESS
+                    let y_nd = mb.output.unwrap_or(mb.input);
+                    // Pre-compute detached dictionary for lightweight ESS evaluation
+                    let ess_llik = decoder.build_ess_llik(&y_nd)?;
+
+                    let (z_refined, _) = batched_ess_steps(
+                        &z_init.detach(),
+                        &|z: &Tensor| ess_llik(z),
+                        ess_steps,
+                        ess_max_shrink,
+                    )?;
+                    let z_refined = z_refined.detach();
+
+                    // 4. Decoder loss: -log p(x | softmax(z_refined))
+                    let log_z_refined = candle_nn::ops::log_softmax(&z_refined, 1)?;
+                    let log_z_refined = smooth_topics(log_z_refined, config.args.topic_smoothing)?;
+                    let (_, llik) =
+                        decoder.forward_with_llik(&log_z_refined, &y_nd, &topic_likelihood)?;
+                    let dec_loss = llik.neg()?.mean_all()?;
+
+                    // 5. Encoder loss: -log q(z_refined | x; φ) (inclusive KL)
+                    let enc_nll_n = gaussian_neg_log_prob(&z_refined, &z_mean, &z_lnvar)?;
+                    let enc_loss = enc_nll_n.mean_all()?;
+
+                    // 6. Combined loss
+                    let loss = (dec_loss + enc_loss * kl_weight)?;
+                    adam.backward_step(&loss)?;
+
+                    llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+                    enc_score_tot += enc_nll_n.sum_all()?.to_scalar::<f32>()?;
+                }
+            }
+
+            let llik_avg = llik_tot / n_tot as f32;
+            let enc_score_avg = enc_score_tot / n_tot as f32;
+            llik_trace.push(llik_avg);
+            kl_trace.push(enc_score_avg);
+
+            pb.inc(1);
+
+            info!(
+                "[epoch {}] llik={} enc_score={}",
+                epoch, llik_avg, enc_score_avg
+            );
+
+            if config.stop.load(Ordering::SeqCst) {
+                pb.finish_and_clear();
+                info!("Stopping early at epoch {}", epoch);
+                return Ok(TrainScores {
+                    llik: llik_trace,
+                    kl: kl_trace,
+                });
+            }
+        }
+    }
+
+    pb.finish_and_clear();
+    info!("done VCD mixed multi-level training");
     Ok(TrainScores {
         llik: llik_trace,
         kl: kl_trace,

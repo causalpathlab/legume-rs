@@ -1,4 +1,5 @@
 use candle_core::{Result, Tensor};
+use candle_nn::ops;
 
 pub trait EncoderModuleT {
     /// An encoder that spits out two results (latent inference, KL loss)
@@ -65,6 +66,32 @@ pub trait DecoderModuleT {
     fn dim_obs(&self) -> usize;
 
     fn dim_latent(&self) -> usize;
+
+    /// Build a lightweight log-likelihood closure for ESS evaluation.
+    ///
+    /// Returns a boxed closure `|z_nk [N,K]| -> llik [N]` that uses
+    /// **detached** snapshots of decoder weights. No gradient graph is built,
+    /// and no redundant softmax recomputation occurs across ESS iterations.
+    ///
+    /// Default implementation pre-computes the dictionary and uses multinomial
+    /// log-likelihood. Override for decoders with different likelihoods (e.g. NB).
+    #[allow(clippy::type_complexity)]
+    fn build_ess_llik<'a>(
+        &'a self,
+        x_nd: &'a Tensor,
+    ) -> Result<Box<dyn Fn(&Tensor) -> Result<Tensor> + 'a>> {
+        use crate::candle_loss_functions::topic_likelihood;
+
+        let log_dict_dk = self.get_dictionary()?.detach();
+        let beta_kd = log_dict_dk.t()?.exp()?.contiguous()?;
+        let x_clamped = x_nd.clamp(0.0, f64::INFINITY)?;
+
+        Ok(Box::new(move |z_nk: &Tensor| {
+            let z = ops::log_softmax(z_nk, 1)?.exp()?;
+            let recon = z.matmul(&beta_kd)?;
+            topic_likelihood(&x_clamped, &recon)
+        }))
+    }
 }
 
 /// Compute joint multinomial log-likelihood from per-modality log-reconstructions.

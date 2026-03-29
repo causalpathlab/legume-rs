@@ -219,12 +219,7 @@ impl MixtureGaussianPrior {
     /// * `num_grid` - Number of mixture components M (including the spike)
     /// * `tau_sq_min` - Smallest non-spike variance (e.g., 0.001)
     /// * `tau_sq_max` - Largest variance (e.g., 1.0)
-    pub fn new(
-        vb: VarBuilder,
-        num_grid: usize,
-        tau_sq_min: f64,
-        tau_sq_max: f64,
-    ) -> Result<Self> {
+    pub fn new(vb: VarBuilder, num_grid: usize, tau_sq_min: f64, tau_sq_max: f64) -> Result<Self> {
         assert!(num_grid >= 2, "need at least 2 grid points");
         let mut tau_sq = Vec::with_capacity(num_grid);
         tau_sq.push(1e-10); // near point-mass at zero
@@ -251,11 +246,8 @@ impl MixtureGaussianPrior {
     pub fn from_grid(vb: VarBuilder, tau_sq: Vec<f64>) -> Result<Self> {
         let m = tau_sq.len();
         assert!(m >= 1, "need at least 1 grid point");
-        let weight_logits = vb.get_with_hints(
-            (m,),
-            "mix_weight_logits",
-            candle_nn::Init::Const(0.0),
-        )?;
+        let weight_logits =
+            vb.get_with_hints((m,), "mix_weight_logits", candle_nn::Init::Const(0.0))?;
         Ok(Self {
             tau_sq,
             weight_logits,
@@ -293,8 +285,7 @@ impl Prior for MixtureGaussianPrior {
         for (m, &tau2) in self.tau_sq.iter().enumerate() {
             let ln_tau2 = tau2.ln();
             // log N(θ; 0, τ²) = -0.5 [θ²/τ² + ln(τ²) + ln(2π)]
-            let log_n = ((theta.sqr()? / tau2)?.broadcast_add(&ln_2pi)? + ln_tau2)?
-                * (-0.5);
+            let log_n = ((theta.sqr()? / tau2)?.broadcast_add(&ln_2pi)? + ln_tau2)? * (-0.5);
             let log_w_m = log_w.get(m)?;
             log_components.push(log_n?.broadcast_add(&log_w_m)?);
         }
@@ -446,10 +437,20 @@ mod tests {
         let prior = MixtureGaussianPrior::new(vb, 10, 0.001, 1.0)?;
 
         assert_eq!(prior.num_components(), 10);
-        assert!(prior.tau_sq_grid()[0] < 1e-9, "first component should be near-zero spike");
-        assert!((prior.tau_sq_grid()[1] - 0.001).abs() < 1e-6, "second should be tau_sq_min");
+        assert!(
+            prior.tau_sq_grid()[0] < 1e-9,
+            "first component should be near-zero spike"
+        );
+        assert!(
+            (prior.tau_sq_grid()[1] - 0.001).abs() < 1e-6,
+            "second should be tau_sq_min"
+        );
         let last = *prior.tau_sq_grid().last().unwrap();
-        assert!((last - 1.0).abs() < 1e-6, "last should be tau_sq_max, got {}", last);
+        assert!(
+            (last - 1.0).abs() < 1e-6,
+            "last should be tau_sq_max, got {}",
+            last
+        );
 
         // Weights should be uniform at init
         let w = prior.weights()?;
@@ -514,15 +515,15 @@ mod tests {
         let var = (Tensor::ones((p, k), DType::F64, &Device::Cpu)? * 0.2)?;
 
         let kl_mix: f64 = mixture.kl_from_gaussian(&mean, &var)?.to_scalar()?;
-        let kl_fixed: f64 = fixed.kl_from_gaussian(
-            &mean.to_dtype(DType::F64)?,
-            &var.to_dtype(DType::F64)?,
-        )?.to_scalar()?;
+        let kl_fixed: f64 = fixed
+            .kl_from_gaussian(&mean.to_dtype(DType::F64)?, &var.to_dtype(DType::F64)?)?
+            .to_scalar()?;
 
         assert!(
             (kl_mix - kl_fixed).abs() < 1e-4,
             "Single-component mixture KL ({}) should match fixed ({})",
-            kl_mix, kl_fixed
+            kl_mix,
+            kl_fixed
         );
         Ok(())
     }
