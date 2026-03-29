@@ -23,6 +23,27 @@ impl ComputeDevice {
     }
 }
 
+/// Prior type for effect sizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriorType {
+    /// Fixed single-Gaussian prior; grid search over prior_vars, pick best ELBO.
+    Single,
+    /// Mixture-of-Gaussians (ash) prior; prior_vars grid becomes the τ² mixture
+    /// components with learnable weights. Single fit, no grid search.
+    Ash,
+}
+
+impl std::str::FromStr for PriorType {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "single" | "fixed" => Ok(Self::Single),
+            "ash" | "mixture" | "mix" => Ok(Self::Ash),
+            _ => anyhow::bail!("Unknown prior type: {} (expected: single, ash)", s),
+        }
+    }
+}
+
 /// Model type for SGVB fine-mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelType {
@@ -47,6 +68,7 @@ impl std::str::FromStr for ModelType {
 #[derive(Debug, Clone)]
 pub struct FitConfig {
     pub model_type: ModelType,
+    pub prior_type: PriorType,
     pub num_components: usize,
     pub num_sgvb_samples: usize,
     pub learning_rate: f64,
@@ -69,6 +91,7 @@ impl Default for FitConfig {
     fn default() -> Self {
         Self {
             model_type: ModelType::Susie,
+            prior_type: PriorType::Single,
             num_components: 10,
             num_sgvb_samples: 20,
             learning_rate: 0.01,
@@ -83,23 +106,22 @@ impl Default for FitConfig {
     }
 }
 
+impl FitConfig {
+    /// Number of result slots: prior_vars.len() for grid search, 1 for ash.
+    pub fn num_prior_results(&self) -> usize {
+        match self.prior_type {
+            PriorType::Single => self.prior_vars.len(),
+            PriorType::Ash => 1,
+        }
+    }
+}
+
+use crate::summary_stats::common::BlockFitResult;
+
 /// Internal result tuple: (avg_elbo, pip, effect_mean, effect_std).
 pub(crate) type PriorFitResult = (f32, DMatrix<f32>, DMatrix<f32>, DMatrix<f32>);
 
-/// Result from fitting a single block.
-#[derive(Debug)]
-pub struct BlockFitResult {
-    /// Per-(SNP, trait) posterior inclusion probabilities, shape (p, k).
-    pub pip: DMatrix<f32>,
-    /// Posterior mean effect sizes, shape (p, k).
-    pub effect_mean: DMatrix<f32>,
-    /// Posterior std of effect sizes, shape (p, k).
-    pub effect_std: DMatrix<f32>,
-    /// Model-averaged ELBO (log scale, for diagnostics).
-    pub avg_elbo: f32,
-}
-
-/// Result from fitting a single block with per-prior-var results.
+/// Result from fitting a single block with per-prior-var results (SGVB-specific).
 #[derive(Debug)]
 pub struct BlockFitResultDetailed {
     /// Per-prior-var average ELBOs.
@@ -134,11 +156,4 @@ fn select_best_prior(detailed: &BlockFitResultDetailed) -> BlockFitResult {
         effect_std: detailed.per_prior_stds[best_idx].clone(),
         avg_elbo: detailed.per_prior_elbos[best_idx],
     }
-}
-
-/// RSS-specific parameters for `fit_block_rss`.
-pub struct RssParams {
-    pub max_rank: usize,
-    pub lambda: f64,
-    pub ldsc_intercept: bool,
 }

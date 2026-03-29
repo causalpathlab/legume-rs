@@ -3,10 +3,11 @@ mod models;
 mod rss;
 mod training;
 
-pub use config::{
-    BlockFitResult, BlockFitResultDetailed, ComputeDevice, FitConfig, ModelType, RssParams,
-};
-pub use rss::{adaptive_prior_grid, estimate_block_h2, fit_block_rss};
+pub use config::{BlockFitResultDetailed, ComputeDevice, FitConfig, ModelType, PriorType};
+pub use rss::{estimate_block_h2, fit_block_rss};
+
+// Re-export shared types that were moved to summary_stats::common
+pub use crate::summary_stats::common::{adaptive_prior_grid, BlockFitResult, RssParams};
 
 use anyhow::Result;
 use candle_util::candle_core::Device;
@@ -14,7 +15,10 @@ use log::info;
 use matrix_util::traits::ConvertMatOps;
 use nalgebra::DMatrix;
 
-use training::{fit_single_prior, BlockTensors};
+use candle_util::candle_nn::VarBuilder;
+use candle_util::sgvb::{FixedGaussianPrior, MixtureGaussianPrior, PriorKind};
+
+use training::{fit_with_prior, BlockTensors};
 
 /// Fit a fine-mapping model for a single LD block.
 pub fn fit_block(
@@ -48,6 +52,36 @@ pub fn fit_block_weighted(
         config,
         device,
     )
+}
+
+type PriorFactory = Box<dyn Fn(&VarBuilder) -> anyhow::Result<PriorKind>>;
+
+/// Build prior-construction closures from config: one per grid point for Single,
+/// one mixture for Ash.
+pub(crate) fn make_priors_for_config(config: &FitConfig) -> Vec<(PriorFactory, String)> {
+    match config.prior_type {
+        PriorType::Single => config
+            .prior_vars
+            .iter()
+            .map(|&pv| {
+                let factory: PriorFactory = Box::new(move |_vb: &VarBuilder| {
+                    Ok(PriorKind::Fixed(FixedGaussianPrior::new(pv.sqrt())))
+                });
+                (factory, format!("prior_var={:.3}", pv))
+            })
+            .collect(),
+        PriorType::Ash => {
+            let prior_vars = config.prior_vars.clone();
+            let factory: PriorFactory = Box::new(move |vb: &VarBuilder| {
+                let tau_sq: Vec<f64> = std::iter::once(1e-10)
+                    .chain(prior_vars.iter().map(|&v| v as f64))
+                    .collect();
+                let mixture = MixtureGaussianPrior::from_grid(vb.pp("mix_prior"), tau_sq)?;
+                Ok(PriorKind::Mixture(mixture))
+            });
+            vec![(factory, "ash prior".to_string())]
+        }
+    }
 }
 
 fn fit_block_inner(
@@ -89,10 +123,10 @@ fn fit_block_inner(
     let mut effects_vec: Vec<DMatrix<f32>> = Vec::new();
     let mut stds_vec: Vec<DMatrix<f32>> = Vec::new();
 
-    for &prior_var in &config.prior_vars {
+    for (make_prior, label) in make_priors_for_config(config) {
         let (avg_elbo, pip, eff_mean, eff_std) =
-            fit_single_prior(&tensors, prior_var, config, device)?;
-        info!("  prior_var={:.3}, avg_elbo={:.2}", prior_var, avg_elbo);
+            fit_with_prior(&tensors, &make_prior, config, device)?;
+        info!("  {}, avg_elbo={:.2}", label, avg_elbo);
         elbos_vec.push(avg_elbo);
         pips_vec.push(pip);
         effects_vec.push(eff_mean);

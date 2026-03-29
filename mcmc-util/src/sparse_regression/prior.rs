@@ -143,3 +143,108 @@ pub(crate) fn softmax(v: &DVector<f32>) -> Vec<f32> {
     }
     out
 }
+
+/// Element-wise sigmoid: 1 / (1 + exp(-x)).
+pub(crate) fn sigmoid(v: &DVector<f32>) -> Vec<f32> {
+    v.iter()
+        .map(|&x| {
+            if x >= 0.0 {
+                let e = (-x).exp();
+                1.0 / (1.0 + e)
+            } else {
+                let e = x.exp();
+                e / (1.0 + e)
+            }
+        })
+        .collect()
+}
+
+/// Spike-and-slab prior: logits ~ N(0, logit_var * I), alpha = sigmoid(logits).
+/// Effect size: beta ~ N(0, effect_var). Single-output (k=1).
+///
+/// Unlike [`SoftmaxNormalPrior`] which enforces a single-effect constraint
+/// via softmax (sum-to-one), this prior uses independent per-SNP Bernoulli
+/// gates via sigmoid, allowing multiple SNPs to be simultaneously active
+/// within a single component.
+#[derive(Clone)]
+pub struct BernoulliNormalPrior {
+    pub logit_var: f32,
+    pub effect_var: f32,
+}
+
+impl BernoulliNormalPrior {
+    pub fn new(logit_var: f32, effect_var: f32) -> Self {
+        Self {
+            logit_var,
+            effect_var,
+        }
+    }
+}
+
+impl ComponentPrior for BernoulliNormalPrior {
+    type Inclusion = DVector<f32>;
+    type Effect = DVector<f32>; // length 1 for single-output
+    type Theta = DVector<f32>; // length p
+
+    fn draw_inclusion(&self, p: usize, rng: &mut impl Rng) -> DVector<f32> {
+        let std = self.logit_var.sqrt();
+        DVector::from_fn(p, |_, _| {
+            let v: f64 = StandardNormal.sample(rng);
+            v as f32 * std
+        })
+    }
+
+    fn draw_effect(&self, rng: &mut impl Rng) -> DVector<f32> {
+        let std = self.effect_var.sqrt();
+        let v: f64 = StandardNormal.sample(rng);
+        DVector::from_element(1, v as f32 * std)
+    }
+
+    fn to_alpha(&self, raw: &DVector<f32>) -> Vec<f32> {
+        sigmoid(raw)
+    }
+
+    fn combine(&self, alphas: &[Vec<f32>], effects: &[Self::Effect]) -> DVector<f32> {
+        let p = alphas[0].len();
+        let mut theta = DVector::from_element(p, 0.0f32);
+        for (alpha, effect) in alphas.iter().zip(effects.iter()) {
+            let beta = effect[0];
+            for (j, &a) in alpha.iter().enumerate() {
+                theta[j] += a * beta;
+            }
+        }
+        theta
+    }
+
+    fn remove_component_inplace(
+        &self,
+        theta: &mut DVector<f32>,
+        alpha: &[f32],
+        effect: &DVector<f32>,
+    ) {
+        let beta = effect[0];
+        for (j, &a) in alpha.iter().enumerate() {
+            theta[j] -= a * beta;
+        }
+    }
+
+    fn add_component_inplace(
+        &self,
+        theta: &mut DVector<f32>,
+        alpha: &[f32],
+        effect: &DVector<f32>,
+    ) {
+        let beta = effect[0];
+        for (j, &a) in alpha.iter().enumerate() {
+            theta[j] += a * beta;
+        }
+    }
+
+    fn effect_var(&self) -> f32 {
+        self.effect_var
+    }
+
+    fn zero_theta(&self, p: usize) -> DVector<f32> {
+        DVector::from_element(p, 0.0f32)
+    }
+}

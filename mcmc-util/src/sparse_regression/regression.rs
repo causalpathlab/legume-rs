@@ -13,6 +13,8 @@ pub struct RegressionConfig {
     pub estimate_residual_var: bool,
     /// Initial (or fixed) residual variance.
     pub residual_var: f32,
+    /// Whether to Gibbs-sample the effect size prior variance.
+    pub estimate_effect_var: bool,
 }
 
 /// Linear regression sparse model for the MCMC engine: y = X * theta + eps.
@@ -33,6 +35,7 @@ pub(crate) struct RegressionState {
     alphas: Vec<Vec<f32>>,
     betas: Vec<f32>,
     sigma2_eps: f32,
+    effect_var: f32,
     residual: DVector<f32>,
     xa_buf: DVector<f32>,
 }
@@ -60,6 +63,7 @@ where
             alphas,
             betas: vec![0.0f32; self.num_components],
             sigma2_eps: self.reg.residual_var,
+            effect_var: self.prior.effect_var(),
             residual: self.y.clone(),
             xa_buf: DVector::from_element(n, 0.0f32),
         }
@@ -96,6 +100,7 @@ where
         }
 
         // --- Conjugate Gaussian update of beta ---
+        let effect_var = state.effect_var;
         for l in 0..self.num_components {
             let old_beta = state.betas[l];
 
@@ -107,7 +112,7 @@ where
             let ztz = state.xa_buf.dot(&state.xa_buf);
             let ztr = state.xa_buf.dot(&state.residual);
 
-            let sigma2_post = 1.0 / (ztz / state.sigma2_eps + 1.0 / self.prior.effect_var());
+            let sigma2_post = 1.0 / (ztz / state.sigma2_eps + 1.0 / effect_var);
             let mu_post = sigma2_post * ztr / state.sigma2_eps;
 
             let normal = Normal::new(mu_post, sigma2_post.sqrt()).unwrap();
@@ -125,6 +130,17 @@ where
             let gamma = rand_distr::Gamma::new(a_post as f64, (1.0 / b_post) as f64).unwrap();
             state.sigma2_eps = 1.0 / gamma.sample(rng) as f32;
         }
+
+        // --- Conjugate InvGamma update of effect_var ---
+        // beta_l ~ N(0, effect_var), so effect_var | betas ~ InvGamma
+        if self.reg.estimate_effect_var {
+            let l = self.num_components;
+            let ss: f32 = state.betas.iter().map(|&b| b * b).sum();
+            let a_post = 0.01 + l as f32 / 2.0;
+            let b_post = 0.01 + ss / 2.0;
+            let gamma = rand_distr::Gamma::new(a_post as f64, (1.0 / b_post) as f64).unwrap();
+            state.effect_var = 1.0 / gamma.sample(rng) as f32;
+        }
     }
 
     fn collect(&self, state: &RegressionState) -> SparseSample {
@@ -132,20 +148,23 @@ where
             alphas: state.alphas.clone(),
             betas: state.betas.clone(),
             sigma2_eps: state.sigma2_eps,
+            effect_var: state.effect_var,
         }
     }
 
     fn summarize(&self, samples: Vec<SparseSample>) -> SparseResult {
         let p = self.x.ncols();
+        let t = samples.len() as f32;
         let pip = compute_pip(&samples, p);
         let posterior_mean_beta = compute_posterior_mean_beta(&samples, p);
-        let sigma2_eps_mean =
-            samples.iter().map(|s| s.sigma2_eps).sum::<f32>() / samples.len() as f32;
+        let sigma2_eps_mean = samples.iter().map(|s| s.sigma2_eps).sum::<f32>() / t;
+        let effect_var_mean = samples.iter().map(|s| s.effect_var).sum::<f32>() / t;
         SparseResult {
             samples,
             pip,
             posterior_mean_beta,
             sigma2_eps_mean,
+            effect_var_mean,
         }
     }
 }

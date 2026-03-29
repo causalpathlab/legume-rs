@@ -2,7 +2,7 @@ use anyhow::Result;
 use candle_util::candle_core::Tensor;
 use candle_util::candle_nn::VarBuilder;
 use candle_util::sgvb::{
-    BiSusieVar, FixedGaussianPrior, IndependentGateVariational, LocalReparamSample, RegressionSGVB,
+    BiSusieVar, IndependentGateVariational, LocalReparamSample, PriorKind, RegressionSGVB,
     SGVBConfig, SpikeSlabVar, SusieVar, VariationalDistribution,
 };
 
@@ -10,9 +10,9 @@ use super::config::ModelType;
 use super::training::local_reparam_with_design;
 
 pub(crate) enum GeneticModel {
-    Susie(RegressionSGVB<SusieVar, FixedGaussianPrior>),
-    BiSusie(RegressionSGVB<BiSusieVar, FixedGaussianPrior>),
-    SpikeSlab(RegressionSGVB<SpikeSlabVar, FixedGaussianPrior>),
+    Susie(RegressionSGVB<SusieVar, PriorKind>),
+    BiSusie(RegressionSGVB<BiSusieVar, PriorKind>),
+    SpikeSlab(RegressionSGVB<SpikeSlabVar, PriorKind>),
 }
 
 pub(crate) struct GeneticModelSpec<'a> {
@@ -23,12 +23,12 @@ pub(crate) struct GeneticModelSpec<'a> {
     pub num_components: usize,
     pub p: usize,
     pub k: usize,
-    pub init_prior_std: f32,
+    pub prior: PriorKind,
 }
 
 impl GeneticModel {
     pub fn new(spec: GeneticModelSpec) -> Result<Self> {
-        let prior = FixedGaussianPrior::new(spec.init_prior_std);
+        let prior = spec.prior;
         Ok(match spec.model_type {
             ModelType::Susie => {
                 let var_dist = SusieVar::new_with_null(
