@@ -12,7 +12,7 @@ mod prior;
 mod regression;
 mod sampler;
 
-pub use prior::{ComponentPrior, SoftmaxNormalPrior};
+pub use prior::{BernoulliNormalPrior, ComponentPrior, SoftmaxNormalPrior};
 pub use regression::{mcmc_sparse_regression, RegressionConfig};
 pub use sampler::mcmc_sparse;
 
@@ -24,6 +24,8 @@ pub struct SparseSample {
     pub betas: Vec<f32>,
     /// Residual variance (NaN for blackbox sampler).
     pub sigma2_eps: f32,
+    /// Effect size prior variance (NaN when not estimated).
+    pub effect_var: f32,
 }
 
 /// Credible set for one component.
@@ -44,6 +46,8 @@ pub struct SparseResult {
     pub posterior_mean_beta: Vec<f32>,
     /// Posterior mean of residual variance (NaN for blackbox).
     pub sigma2_eps_mean: f32,
+    /// Posterior mean of effect size prior variance (NaN when not estimated).
+    pub effect_var_mean: f32,
 }
 
 impl SparseResult {
@@ -125,6 +129,30 @@ pub(crate) fn compute_posterior_mean_beta(samples: &[SparseSample], p: usize) ->
         *v /= t;
     }
     mean
+}
+
+/// Std[sum_l alpha_l * beta_l] across posterior samples, length p.
+pub fn compute_posterior_std_beta(samples: &[SparseSample], p: usize) -> Vec<f32> {
+    let t = samples.len() as f32;
+    let mut mean = vec![0.0f32; p];
+    let mut mean_sq = vec![0.0f32; p];
+    for sample in samples {
+        for j in 0..p {
+            let mut theta_j = 0.0f32;
+            for (alpha_l, &beta_l) in sample.alphas.iter().zip(sample.betas.iter()) {
+                theta_j += alpha_l[j] * beta_l;
+            }
+            mean[j] += theta_j;
+            mean_sq[j] += theta_j * theta_j;
+        }
+    }
+    mean.iter()
+        .zip(mean_sq.iter())
+        .map(|(&m, &m2)| {
+            let mu = m / t;
+            ((m2 / t) - mu * mu).max(0.0).sqrt()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -226,6 +254,7 @@ mod tests {
         let reg = RegressionConfig {
             estimate_residual_var: false,
             residual_var: noise_var,
+            estimate_effect_var: false,
         };
 
         let result = mcmc_sparse_regression(&x, &y, &prior, &config, 1, &reg);
@@ -274,6 +303,7 @@ mod tests {
         let reg = RegressionConfig {
             estimate_residual_var: false,
             residual_var: noise_var,
+            estimate_effect_var: false,
         };
 
         let result = mcmc_sparse_regression(&x, &y, &prior, &config, 5, &reg);
@@ -311,6 +341,7 @@ mod tests {
         let reg = RegressionConfig {
             estimate_residual_var: true,
             residual_var: 1.0, // start far from truth
+            estimate_effect_var: false,
         };
 
         let result = mcmc_sparse_regression(&x, &y, &prior, &config, 1, &reg);
@@ -345,6 +376,7 @@ mod tests {
         let reg = RegressionConfig {
             estimate_residual_var: false,
             residual_var: noise_var,
+            estimate_effect_var: false,
         };
 
         let result = mcmc_sparse_regression(&x, &y, &prior, &config, 1, &reg);
@@ -382,5 +414,73 @@ mod tests {
         for &val in &s {
             assert!((val - 0.25).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn test_sigmoid_stability() {
+        use super::prior::sigmoid;
+
+        let v = DVector::from_vec(vec![0.0, 1.0, -1.0, 10.0, -10.0]);
+        let s = sigmoid(&v);
+        assert!((s[0] - 0.5).abs() < 1e-6);
+        assert!(s[1] > 0.5 && s[1] < 1.0);
+        assert!(s[2] < 0.5 && s[2] > 0.0);
+        assert!(s[3] > 0.99);
+        assert!(s[4] < 0.01);
+
+        // Large values — should not overflow
+        let v = DVector::from_vec(vec![100.0, -100.0]);
+        let s = sigmoid(&v);
+        assert!((s[0] - 1.0).abs() < 1e-6);
+        assert!(s[1].abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_spike_slab_regression_single_signal() {
+        let n = 200;
+        let p = 50;
+        let causal = 17;
+        let beta_true = 2.0f32;
+        let noise_var = 1.0f32;
+
+        let x = random_x(n, p, 42);
+        let noise = random_noise(n, noise_var, 43);
+        let y = x.column(causal) * beta_true + &noise;
+
+        let prior = BernoulliNormalPrior::new(1.0, 10.0);
+        let config = McmcConfig {
+            n_samples: 2_000,
+            warmup: 1_000,
+            thin: 2,
+            seed: 123,
+        };
+        let reg = RegressionConfig {
+            estimate_residual_var: false,
+            residual_var: noise_var,
+            estimate_effect_var: false,
+        };
+
+        let result = mcmc_sparse_regression(&x, &y, &prior, &config, 1, &reg);
+
+        let max_pip_idx = result
+            .pip
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+
+        assert_eq!(max_pip_idx, causal, "max PIP should be at causal SNP");
+        assert!(
+            result.pip[causal] > 0.3,
+            "PIP at causal should be > 0.3, got {}",
+            result.pip[causal]
+        );
+
+        let std_beta = compute_posterior_std_beta(&result.samples, p);
+        assert!(
+            std_beta[causal] > 0.0,
+            "posterior std at causal should be positive"
+        );
     }
 }

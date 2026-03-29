@@ -21,7 +21,7 @@ use fagioli::io::results::{
 };
 use fagioli::mapping::map_qtl_helpers::*;
 use fagioli::mapping::pseudobulk::{collapse_pseudobulk, Membership};
-use fagioli::sgvb::{fit_block_weighted, ComputeDevice, FitConfig, ModelType};
+use fagioli::sgvb::{fit_block_weighted, ComputeDevice, FitConfig, ModelType, PriorType};
 use matrix_util::common_io::basename;
 
 #[derive(Args, Debug, Clone)]
@@ -167,6 +167,19 @@ pub struct MapQtlArgs {
             Default: susie."
     )]
     pub model: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "single",
+        help = "Prior type: 'single' (grid search) or 'ash' (mixture-of-Gaussians)",
+        long_help = "Prior type for effect sizes:\n\n\
+            - single: Fixed single-Gaussian prior. The model is fit once for each\n\
+              value in --prior-var, and the best is selected by ELBO. Default.\n\n\
+            - ash: Mixture-of-Gaussians (adaptive shrinkage) prior. The --prior-var\n\
+              grid becomes mixture components with learnable weights, plus a near-zero\n\
+              spike component. Single fit, no grid search."
+    )]
+    pub prior_type: Box<str>,
 
     #[arg(
         long,
@@ -491,6 +504,7 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
 
     // ── Build fit config ─────────────────────────────────────────────────
     let model_type: ModelType = args.model.parse()?;
+    let prior_type: PriorType = args.prior_type.parse()?;
     let prior_vars: Vec<f32> = args
         .prior_var
         .split(',')
@@ -499,6 +513,7 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
 
     let fit_config = FitConfig {
         model_type,
+        prior_type,
         num_components: args.num_components,
         num_sgvb_samples: args.num_sgvb_samples,
         learning_rate: args.learning_rate,

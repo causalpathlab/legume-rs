@@ -9,9 +9,10 @@ use log::info;
 use matrix_util::traits::ConvertMatOps;
 use nalgebra::DMatrix;
 
-use super::config::{BlockFitResultDetailed, FitConfig, PriorFitResult, RssParams};
+use super::config::{BlockFitResultDetailed, FitConfig, PriorFitResult};
 use super::models::{GeneticModel, GeneticModelSpec};
 use super::training::run_sgvb_loop;
+use crate::summary_stats::common::RssParams;
 
 /// Estimate per-trait LDSC h² (slope) for a single LD block.
 ///
@@ -51,20 +52,6 @@ pub fn estimate_block_h2(
 
     let (_intercepts, slopes) = RssSvd::estimate_ldsc_intercept(&d_sq, &y_raw, k);
     Ok(slopes.iter().map(|&s| (s / n).max(0.0)).collect())
-}
-
-/// Build an adaptive prior_var grid centered on `h2 / num_components`.
-///
-/// When `n` is provided (RSS mode), the grid is scaled by `n` to convert
-/// from per-SD variance to z-score–scale variance, since the RSS eigenspace
-/// model parameterises effects on the z-score scale (β_z ≈ √n · β_sd).
-pub fn adaptive_prior_grid(h2_estimate: f32, num_components: usize, n: Option<u64>) -> Vec<f32> {
-    let center = (h2_estimate / num_components as f32).max(0.01);
-    let scale = n.unwrap_or(1) as f32;
-    let multipliers = [0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0];
-    let mut grid: Vec<f32> = multipliers.iter().map(|&m| center * scale * m).collect();
-    grid.iter_mut().for_each(|v| *v = v.clamp(0.001, 1e6));
-    grid
 }
 
 /// Fit a fine-mapping model for a single LD block using RSS likelihood.
@@ -145,7 +132,7 @@ pub fn fit_block_rss(
         None
     };
 
-    for &prior_var in &config.prior_vars {
+    for (make_prior, label) in super::make_priors_for_config(config) {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
 
@@ -162,7 +149,7 @@ pub fn fit_block_rss(
             num_components: config.num_components,
             p,
             k,
-            init_prior_std: prior_var.sqrt(),
+            prior: make_prior(&vb)?,
         })?;
 
         let intercept_model: Option<GaussianRegressionSGVB<FixedGaussianPrior>> =
@@ -205,7 +192,7 @@ pub fn fit_block_rss(
             <DMatrix<f32> as ConvertMatOps>::from_tensor(&eff_mean_tensor)?;
         let eff_std: DMatrix<f32> = <DMatrix<f32> as ConvertMatOps>::from_tensor(&eff_std_tensor)?;
 
-        info!("  prior_var={:.3}, avg_elbo={:.2}", prior_var, avg_elbo);
+        info!("  {}, avg_elbo={:.2}", label, avg_elbo);
         results.push((avg_elbo, pip, eff_mean, eff_std));
     }
 

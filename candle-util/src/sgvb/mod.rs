@@ -58,7 +58,7 @@ mod variational_susie;
 pub use composite_model::{
     composite_local_reparam_loss, samples_local_reparam_loss, CompositeModel,
 };
-pub use gaussian_prior::{FixedGaussianPrior, GaussianPrior};
+pub use gaussian_prior::{FixedGaussianPrior, GaussianPrior, MixtureGaussianPrior, PriorKind};
 pub use likelihood::{
     estimate_kappa_mle, l2_normalize_dim, lgamma_approx, log_bessel_i, suggest_kappa_init,
     vmf_log_normalizer, FixedGaussianLikelihood, GaussianLikelihood, NegativeBinomialLikelihood,

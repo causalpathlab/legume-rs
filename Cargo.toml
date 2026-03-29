@@ -78,4 +78,5 @@ genomic-data = { path = "genomic-data" }
 faba = { path = "faba" }
 leiden = { path = "leiden" }
 hsblock = { path = "hsblock" }
+mcmc-util = { path = "mcmc-util" }
 auxiliary-data = { path = "auxiliary-data" }

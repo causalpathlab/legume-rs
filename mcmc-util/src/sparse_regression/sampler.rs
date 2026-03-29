@@ -110,6 +110,7 @@ impl<P: ComponentPrior, F: Fn(&P::Theta) -> f32> McmcModel for SparseModel<P, F>
             alphas: state.alphas.clone(),
             betas: state.effects.iter().map(|e| e.as_slice()[0]).collect(),
             sigma2_eps: f32::NAN,
+            effect_var: f32::NAN,
         }
     }
 
@@ -121,6 +122,7 @@ impl<P: ComponentPrior, F: Fn(&P::Theta) -> f32> McmcModel for SparseModel<P, F>
             pip,
             posterior_mean_beta,
             sigma2_eps_mean: f32::NAN,
+            effect_var_mean: f32::NAN,
         }
     }
 }

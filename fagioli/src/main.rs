@@ -1,5 +1,6 @@
 mod map_qtl;
 mod map_sumstat;
+mod mcmc_sumstat;
 mod pseudobulk_cmd;
 mod sim_geno;
 mod sim_qtl;
@@ -7,6 +8,7 @@ mod sim_sumstat;
 
 use map_qtl::*;
 use map_sumstat::*;
+use mcmc_sumstat::*;
 use pseudobulk_cmd::*;
 use sim_geno::*;
 use sim_qtl::*;
@@ -62,6 +64,8 @@ enum Commands {
     SimSumstat(SimSumstatArgs),
     /// Fine-map causal variants from GWAS summary statistics using variational SuSiE
     MapSumstat(MapSumstatArgs),
+    /// Fine-map causal variants from GWAS summary statistics using MCMC (ESS)
+    McmcSumstat(McmcSumstatArgs),
     /// Fine-map cis-eQTL from single-cell RNA-seq with Poisson-Gamma pseudobulk
     MapQtl(MapQtlArgs),
     /// Collapse single-cell counts into Poisson-Gamma pseudobulk per individual and cell type
@@ -93,6 +97,9 @@ fn main() -> Result<()> {
         }
         Commands::MapSumstat(args) => {
             map_sumstat(args)?;
+        }
+        Commands::McmcSumstat(args) => {
+            mcmc_sumstat(args)?;
         }
         Commands::MapQtl(args) => {
             map_qtl(args)?;
