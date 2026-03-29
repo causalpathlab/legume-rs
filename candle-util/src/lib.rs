@@ -13,6 +13,7 @@ pub mod candle_encoder_indexed;
 pub mod candle_encoder_joint_softmax;
 pub mod candle_encoder_softmax;
 pub mod candle_encoder_softmax_iaf;
+pub mod candle_ess;
 pub mod candle_indexed_data_loader;
 pub mod candle_indexed_model_traits;
 pub mod candle_inference;

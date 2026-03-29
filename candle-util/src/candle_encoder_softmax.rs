@@ -61,7 +61,7 @@ impl LogSoftmaxEncoder {
     ///
     /// Evaluate latent Gaussian parameters: mu and log_var
     /// z ~ (mu(x), log_var(x))
-    fn latent_gaussian_params(
+    pub fn latent_gaussian_params(
         &self,
         x_nd: &Tensor,
         x0_nd: Option<&Tensor>,
@@ -90,7 +90,7 @@ impl LogSoftmaxEncoder {
     /// # Arguments
     /// * `z_mean` - mean of Gaussian distribution
     /// * `z_lnvar` - log variance of Gaussian distribution
-    fn reparameterize(&self, z_mean: &Tensor, z_lnvar: &Tensor, train: bool) -> Result<Tensor> {
+    pub fn reparameterize(&self, z_mean: &Tensor, z_lnvar: &Tensor, train: bool) -> Result<Tensor> {
         if train {
             let eps = Tensor::randn_like(z_mean, 0., 1.)?;
             z_mean + (z_lnvar * 0.5)?.exp()? * eps
