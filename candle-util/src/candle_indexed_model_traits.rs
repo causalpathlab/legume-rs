@@ -67,19 +67,23 @@ pub trait IndexedDecoderT {
         &'a self,
         union_indices: &'a Tensor,
         indexed_x: &'a Tensor,
+        topic_smoothing: f64,
     ) -> Result<EssLlikFn<'a>> {
-        use crate::candle_loss_functions::topic_likelihood;
         use candle_nn::ops;
 
         let log_dict_dk = self.get_dictionary()?.detach();
         let log_dict_sk = log_dict_dk.index_select(union_indices, 0)?;
         let beta_ks = log_dict_sk.t()?.exp()?.contiguous()?; // [K, S]
-        let x_clamped = indexed_x.clamp(0.0, f64::INFINITY)?;
+        let x_pos = indexed_x.clamp(0.0, f64::INFINITY)?;
+        let k = self.dim_latent() as f64;
 
         Ok(Box::new(move |z_nk: &Tensor| {
-            let z = ops::log_softmax(z_nk, 1)?.exp()?;
+            let mut z = ops::softmax(z_nk, 1)?;
+            if topic_smoothing > 0.0 {
+                z = ((z * (1.0 - topic_smoothing))? + topic_smoothing / k)?;
+            }
             let recon = z.matmul(&beta_ks)?; // [N, S]
-            topic_likelihood(&x_clamped, &recon)
+            x_pos.mul(&(recon + 1e-8)?.log()?)?.sum(x_pos.rank() - 1)
         }))
     }
 }
