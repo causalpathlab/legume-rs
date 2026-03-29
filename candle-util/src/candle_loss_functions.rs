@@ -17,6 +17,18 @@ pub fn gaussian_kl_loss(z_mean: &Tensor, z_lnvar: &Tensor) -> Result<Tensor> {
     (z_var - 1. + z_mean.powf(2.)? - z_lnvar)?.sum(z_mean.rank() - 1)? * 0.5
 }
 
+/// Negative log-probability of z under N(mean, diag(exp(lnvar))), up to constant.
+///
+/// Returns 0.5 * Σ_k [(z_k - μ_k)² / σ²_k + log σ²_k] per sample.
+///
+/// In VCD training, z is detached (from ESS) and gradients flow through
+/// mean and lnvar to update the encoder.
+pub fn gaussian_neg_log_prob(z: &Tensor, mean: &Tensor, lnvar: &Tensor) -> Result<Tensor> {
+    let var = lnvar.exp()?;
+    let diff = (z - mean)?;
+    ((&diff * &diff)?.div(&var)? + lnvar)?.sum(z.rank() - 1)? * 0.5
+}
+
 /// Topic model log-likelihood of multinomial data (probability-scale input)
 ///
 /// llik(i) = sum_w x(i,w) * log(pr(i,w) + eps)

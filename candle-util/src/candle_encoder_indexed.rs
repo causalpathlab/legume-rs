@@ -123,7 +123,7 @@ impl IndexedEmbeddingEncoder {
         }
     }
 
-    fn reparameterize(&self, z_mean: &Tensor, z_lnvar: &Tensor, train: bool) -> Result<Tensor> {
+    pub fn reparameterize(&self, z_mean: &Tensor, z_lnvar: &Tensor, train: bool) -> Result<Tensor> {
         if train {
             let eps = Tensor::randn_like(z_mean, 0., 1.)?;
             z_mean + (z_lnvar * 0.5)?.exp()? * eps
@@ -133,8 +133,11 @@ impl IndexedEmbeddingEncoder {
     }
 }
 
-impl IndexedEncoderT for IndexedEmbeddingEncoder {
-    fn forward_indexed_t(
+impl IndexedEmbeddingEncoder {
+    /// Compute latent Gaussian parameters from indexed input.
+    ///
+    /// Returns (z_mean [N, K], z_lnvar [N, K]).
+    pub fn latent_gaussian_params_indexed(
         &self,
         union_indices: &Tensor,
         indexed_x: &Tensor,
@@ -153,6 +156,21 @@ impl IndexedEncoderT for IndexedEmbeddingEncoder {
             .z_lnvar
             .forward_t(&bn_nl, train)?
             .clamp(min_lv, max_lv)?;
+
+        Ok((z_mean_nk, z_lnvar_nk))
+    }
+}
+
+impl IndexedEncoderT for IndexedEmbeddingEncoder {
+    fn forward_indexed_t(
+        &self,
+        union_indices: &Tensor,
+        indexed_x: &Tensor,
+        indexed_x_null: Option<&Tensor>,
+        train: bool,
+    ) -> Result<(Tensor, Tensor)> {
+        let (z_mean_nk, z_lnvar_nk) =
+            self.latent_gaussian_params_indexed(union_indices, indexed_x, indexed_x_null, train)?;
 
         let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
         let log_prob = ops::log_softmax(&z_nk, 1)?;

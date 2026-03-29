@@ -5,8 +5,10 @@ use candle_core::{Device, Tensor, Var};
 use candle_nn::{ops, AdamW, Optimizer};
 use candle_util::candle_decoder_indexed_topic::*;
 use candle_util::candle_encoder_indexed::*;
+use candle_util::candle_ess::batched_ess_steps;
 use candle_util::candle_indexed_data_loader::*;
 use candle_util::candle_indexed_model_traits::*;
+use candle_util::candle_loss_functions::gaussian_neg_log_prob;
 use candle_util::candle_topic_refinement::TopicRefinementConfig;
 use indicatif::ParallelProgressIterator;
 use indicatif::ProgressBar;
@@ -172,6 +174,23 @@ pub struct IndexedTopicArgs {
                      instead of dense [N, D] × [D, M] in the standard encoder."
     )]
     embedding_dim: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "ESS steps for variational contrastive divergence",
+        long_help = "Number of elliptical slice sampling steps per minibatch during training.\n\
+		     When > 0, uses variational contrastive divergence (VCD) instead of SGVB.\n\
+		     Set to 0 to use standard SGVB (default)."
+    )]
+    ess_steps: usize,
+
+    #[arg(
+        long,
+        default_value_t = 50,
+        help = "Max shrink iterations per ESS step"
+    )]
+    ess_max_shrink: usize,
 
     #[arg(
         long,
@@ -399,6 +418,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         enc_context_size: args.context_size,
         dec_context_size,
         sort_dim_budget: 1usize << args.sort_dim,
+        ess_steps: args.ess_steps,
+        ess_max_shrink: args.ess_max_shrink,
         stop: &stop,
     };
 
@@ -407,21 +428,24 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         _ => None,
     };
 
-    let scores = match args.level_schedule {
-        LevelSchedule::Progressive => train_progressive(
+    let scores = match (&args.level_schedule, args.ess_steps > 0) {
+        (LevelSchedule::Progressive, _) => train_progressive(
             &collapsed_levels,
             &base_encoder,
             &decoders,
             &train_config,
             bulk_with_deltas,
         )?,
-        LevelSchedule::Mixed => train_mixed(
+        (LevelSchedule::Mixed, false) => train_mixed(
             &collapsed_levels,
             &base_encoder,
             &decoders,
             &train_config,
             bulk_with_deltas,
         )?,
+        (LevelSchedule::Mixed, true) => {
+            train_mixed_vcd(&collapsed_levels, &base_encoder, &decoders, &train_config)?
+        }
     };
 
     info!("Writing down the model parameters");
@@ -630,6 +654,8 @@ struct ProgressiveTrainConfig<'a> {
     enc_context_size: usize,
     dec_context_size: usize,
     sort_dim_budget: usize,
+    ess_steps: usize,
+    ess_max_shrink: usize,
     stop: &'a AtomicBool,
 }
 
@@ -849,6 +875,176 @@ where
 
     pb.finish_and_clear();
     info!("done mixed multi-level training");
+    Ok(TrainScores {
+        llik: llik_trace,
+        kl: kl_trace,
+    })
+}
+
+/// Mixed multi-level VCD training for indexed topic models.
+///
+/// Uses elliptical slice sampling to refine latent z, then trains
+/// encoder to match ESS-refined samples (inclusive KL).
+fn train_mixed_vcd<Dec>(
+    collapsed_levels: &[CollapsedOut],
+    encoder: &IndexedEmbeddingEncoder,
+    decoders: &[Dec],
+    config: &ProgressiveTrainConfig,
+) -> anyhow::Result<TrainScores>
+where
+    Dec: IndexedDecoderT,
+{
+    let num_levels = collapsed_levels.len();
+    let total_epochs = config.epochs;
+    let ess_steps = config.ess_steps;
+    let ess_max_shrink = config.ess_max_shrink;
+
+    for (level, (collapsed, decoder)) in collapsed_levels.iter().zip(decoders.iter()).enumerate() {
+        info!(
+            "Level {}/{}: {} samples, decoder dim {}",
+            level + 1,
+            num_levels,
+            collapsed.mu_observed.ncols(),
+            decoder.dim_obs(),
+        );
+    }
+
+    info!(
+        "VCD mixed training: {} levels, {} epochs, {} ESS steps/batch",
+        num_levels, total_epochs, ess_steps
+    );
+
+    let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.learning_rate as f64)?;
+    let pb = ProgressBar::new(total_epochs as u64);
+
+    let mut llik_trace = Vec::with_capacity(total_epochs);
+    let mut kl_trace = Vec::with_capacity(total_epochs);
+
+    let target_total = config.sort_dim_budget;
+    let level_sizes: Vec<usize> = collapsed_levels
+        .iter()
+        .map(|c| c.mu_observed.ncols())
+        .collect();
+    let level_budgets = compute_level_budgets(&level_sizes, target_total);
+
+    let mut rng = rand::rng();
+
+    for epoch in (0..total_epochs).step_by(config.jitter_interval) {
+        let level_data: Vec<(Mat, Option<Mat>, Mat)> = collapsed_levels
+            .iter()
+            .zip(level_budgets.iter())
+            .map(|(collapsed, &budget)| {
+                let data = sample_collapsed_data(collapsed)?;
+                Ok(subsample_rows(data, budget, &mut rng))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let data_loaders: Vec<IndexedInMemoryData> = level_data
+            .iter()
+            .map(|(mixed, batch, target)| {
+                let mut loader = IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
+                    input: mixed,
+                    input_null: batch.as_ref(),
+                    output: target,
+                    input_context_size: config.enc_context_size,
+                    output_context_size: config.dec_context_size,
+                })
+                .expect("data loader creation");
+                loader.shuffle_minibatch(config.minibatch_size);
+                loader
+            })
+            .collect();
+
+        let kl_weight = if config.kl_warmup_epochs > 0.0 {
+            1.0 - (-(epoch as f64) / config.kl_warmup_epochs).exp()
+        } else {
+            1.0
+        };
+
+        let jitter_end = config.jitter_interval.min(total_epochs - epoch);
+        for _jitter in 0..jitter_end {
+            let mut llik_tot = 0f32;
+            let mut enc_score_tot = 0f32;
+            let mut n_tot = 0usize;
+
+            for (level, loader) in data_loaders.iter().enumerate() {
+                let decoder = &decoders[level];
+                n_tot += loader.num_data();
+
+                for b in 0..loader.num_minibatch() {
+                    let mb = loader.minibatch_shuffled(b, config.dev)?;
+
+                    // 1. Encoder: get μ, log σ²
+                    let (z_mean, z_lnvar) = encoder.latent_gaussian_params_indexed(
+                        &mb.input_union_indices,
+                        &mb.input_indexed_x,
+                        mb.input_indexed_x_null.as_ref(),
+                        true,
+                    )?;
+
+                    // 2. Sample z₀ from encoder
+                    let z_init = encoder.reparameterize(&z_mean, &z_lnvar, true)?;
+
+                    // 3. ESS refinement with pre-computed detached dictionary
+                    let ess_llik =
+                        decoder.build_ess_llik(&mb.output_union_indices, &mb.output_indexed_x)?;
+
+                    let (z_refined, _) = batched_ess_steps(
+                        &z_init.detach(),
+                        &|z: &Tensor| ess_llik(z),
+                        ess_steps,
+                        ess_max_shrink,
+                    )?;
+                    let z_refined = z_refined.detach();
+
+                    // 4. Decoder loss
+                    let log_z_refined = ops::log_softmax(&z_refined, 1)?;
+                    let log_z_refined = smooth_topics(log_z_refined, config.topic_smoothing)?;
+                    let (_, llik) = decoder.forward_indexed(
+                        &log_z_refined,
+                        &mb.output_union_indices,
+                        &mb.output_indexed_x,
+                    )?;
+                    let dec_loss = llik.neg()?.mean_all()?;
+
+                    // 5. Encoder loss: inclusive KL
+                    let enc_nll_n = gaussian_neg_log_prob(&z_refined, &z_mean, &z_lnvar)?;
+                    let enc_loss = enc_nll_n.mean_all()?;
+
+                    // 6. Combined loss
+                    let loss = (dec_loss + enc_loss * kl_weight)?;
+                    adam.backward_step(&loss)?;
+
+                    llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+                    enc_score_tot += enc_nll_n.sum_all()?.to_scalar::<f32>()?;
+                }
+            }
+
+            llik_trace.push(llik_tot / n_tot as f32);
+            kl_trace.push(enc_score_tot / n_tot as f32);
+
+            pb.inc(1);
+
+            info!(
+                "[epoch {}] llik={} enc_score={}",
+                epoch,
+                llik_trace.last().unwrap(),
+                kl_trace.last().unwrap()
+            );
+
+            if config.stop.load(Ordering::SeqCst) {
+                pb.finish_and_clear();
+                info!("Stopping early at epoch {}", epoch);
+                return Ok(TrainScores {
+                    llik: llik_trace,
+                    kl: kl_trace,
+                });
+            }
+        }
+    }
+
+    pb.finish_and_clear();
+    info!("done VCD mixed multi-level training");
     Ok(TrainScores {
         llik: llik_trace,
         kl: kl_trace,
