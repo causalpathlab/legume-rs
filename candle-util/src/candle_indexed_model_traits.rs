@@ -1,3 +1,4 @@
+use crate::candle_model_traits::EssLlikFn;
 use candle_core::{Result, Tensor};
 
 /// Indexed encoder: takes (indices, values) input from adaptive feature window.
@@ -62,12 +63,11 @@ pub trait IndexedDecoderT {
     ///
     /// Pre-computes the dictionary slice for the given union indices,
     /// avoiding repeated softmax and index_select across ESS iterations.
-    #[allow(clippy::type_complexity)]
     fn build_ess_llik<'a>(
         &'a self,
         union_indices: &'a Tensor,
         indexed_x: &'a Tensor,
-    ) -> Result<Box<dyn Fn(&Tensor) -> Result<Tensor> + 'a>> {
+    ) -> Result<EssLlikFn<'a>> {
         use crate::candle_loss_functions::topic_likelihood;
         use candle_nn::ops;
 
