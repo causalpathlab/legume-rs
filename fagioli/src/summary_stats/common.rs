@@ -66,6 +66,7 @@ pub struct CommonSumstatArgs {
     // ── Input ────────────────────────────────────────────────────────────
     #[arg(
         long,
+        help_heading = "Input",
         help = "GWAS summary statistics file (.sumstats.bed.gz)",
         long_help = "BGZF-compressed summary statistics file in BED-like format.\n\
             Required columns: chr, end (or pos), z (or zscore).\n\
@@ -77,6 +78,7 @@ pub struct CommonSumstatArgs {
 
     #[arg(
         long,
+        help_heading = "Input",
         help = "PLINK BED file prefix for LD reference panel (without .bed/.bim/.fam)",
         long_help = "Path prefix for PLINK binary genotype files used as the LD reference panel.\n\
             Reads {prefix}.bed, {prefix}.bim, and {prefix}.fam.\n\
@@ -87,18 +89,21 @@ pub struct CommonSumstatArgs {
 
     #[arg(
         long,
+        help_heading = "Input",
         help = "Chromosome to analyze (must match chr column in .bim and sumstats)"
     )]
     pub chromosome: Box<str>,
 
     #[arg(
         long,
+        help_heading = "Input",
         help = "Left genomic position bound in bp (inclusive, filters SNPs)"
     )]
     pub left_bound: Option<u64>,
 
     #[arg(
         long,
+        help_heading = "Input",
         help = "Right genomic position bound in bp (inclusive, filters SNPs)"
     )]
     pub right_bound: Option<u64>,
@@ -106,12 +111,14 @@ pub struct CommonSumstatArgs {
     // ── Individual filtering ─────────────────────────────────────────────
     #[arg(
         long,
+        help_heading = "Individual Filtering",
         help = "Subsample to at most N individuals from the reference panel"
     )]
     pub max_individuals: Option<usize>,
 
     #[arg(
         long,
+        help_heading = "Individual Filtering",
         conflicts_with = "remove",
         help = "Keep only these individuals in the reference panel",
         long_help = "Keep only these individuals in the LD reference panel (like plink --keep).\n\n\
@@ -127,6 +134,7 @@ pub struct CommonSumstatArgs {
 
     #[arg(
         long,
+        help_heading = "Individual Filtering",
         conflicts_with = "keep",
         help = "Remove these individuals from the reference panel",
         long_help = "Remove these individuals from the LD reference panel (like plink --remove).\n\n\
@@ -143,6 +151,7 @@ pub struct CommonSumstatArgs {
     // ── LD block parameters ──────────────────────────────────────────────
     #[arg(
         long,
+        help_heading = "LD Blocks",
         help = "External LD block boundary file (BED: chr, start, end)",
         long_help = "External LD block file in BED format (chr, start, end).\n\
             Each block defines an independent fine-mapping region.\n\
@@ -153,6 +162,7 @@ pub struct CommonSumstatArgs {
 
     #[arg(
         long,
+        help_heading = "LD Blocks",
         default_value = "500",
         help = "Number of landmark SNPs for Nystrom LD block estimation"
     )]
@@ -160,6 +170,7 @@ pub struct CommonSumstatArgs {
 
     #[arg(
         long,
+        help_heading = "LD Blocks",
         default_value = "20",
         help = "Number of rSVD components for LD block estimation"
     )]
@@ -167,6 +178,7 @@ pub struct CommonSumstatArgs {
 
     #[arg(
         long,
+        help_heading = "LD Blocks",
         default_value = "200",
         help = "Minimum LD block size in SNPs (smaller blocks are merged)"
     )]
@@ -175,16 +187,22 @@ pub struct CommonSumstatArgs {
     // ── RSS SVD parameters ───────────────────────────────────────────────
     #[arg(
         long,
+        help_heading = "RSS Eigenspace",
         help = "Max rank for per-block rSVD (default: reference panel sample size n)"
     )]
     pub max_rank: Option<usize>,
 
-    #[arg(long, help = "SVD regularization lambda (default: 0.1 / max_rank)")]
+    #[arg(
+        long,
+        help_heading = "RSS Eigenspace",
+        help = "SVD regularization lambda (default: 0.1 / max_rank)"
+    )]
     pub lambda: Option<f64>,
 
     // ── Model parameters ─────────────────────────────────────────────────
     #[arg(
         long,
+        help_heading = "Model",
         default_value = "10",
         help = "Number of sparse components L (max causal SNPs per block)",
         long_help = "Number of sparse components (L) in the model.\n\
@@ -196,6 +214,7 @@ pub struct CommonSumstatArgs {
 
     #[arg(
         long,
+        help_heading = "Model",
         default_value = "",
         help = "Prior variance for effect sizes (comma-separated, empty = adaptive)",
         long_help = "Prior variance(s) for the effect size distribution.\n\n\
@@ -210,6 +229,7 @@ pub struct CommonSumstatArgs {
     // ── Z-score adjustments ─────────────────────────────────────────────
     #[arg(
         long,
+        help_heading = "Z-score Adjustments",
         default_value_t = false,
         help = "Disable PVE adjustment on z-scores"
     )]
@@ -217,6 +237,7 @@ pub struct CommonSumstatArgs {
 
     #[arg(
         long,
+        help_heading = "Z-score Adjustments",
         default_value_t = false,
         help = "Disable per-block LDSC intercept correction on z-scores"
     )]

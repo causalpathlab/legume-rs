@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Args;
 use log::info;
 
-use fagioli::mcmc::{McmcFitConfig, McmcSampler, McmcPriorType};
+use fagioli::mcmc::{McmcFitConfig, McmcPriorType, McmcSampler};
 use fagioli::summary_stats::common::{
     estimate_adaptive_prior_vars, parse_prior_vars, prepare_sumstat_input, run_blocks_and_write,
     CommonSumstatArgs,
@@ -17,6 +17,7 @@ pub struct McmcSumstatArgs {
     #[arg(
         long,
         value_enum,
+        help_heading = "MCMC Sampler",
         default_value = "susie",
         help = "MCMC prior: 'susie' or 'spike-slab'",
         long_help = "Sparse prior for MCMC fine-mapping:\n\n\
@@ -30,6 +31,7 @@ pub struct McmcSumstatArgs {
 
     #[arg(
         long,
+        help_heading = "MCMC Sampler",
         default_value = "2000",
         help = "Number of posterior samples to collect",
         long_help = "Number of posterior samples to collect after warmup.\n\
@@ -40,6 +42,7 @@ pub struct McmcSumstatArgs {
 
     #[arg(
         long,
+        help_heading = "MCMC Sampler",
         default_value = "1000",
         help = "Warmup (burn-in) iterations before collecting samples",
         long_help = "Number of burn-in sweeps discarded before sample collection.\n\
@@ -49,6 +52,7 @@ pub struct McmcSumstatArgs {
 
     #[arg(
         long,
+        help_heading = "MCMC Sampler",
         default_value = "2",
         help = "Thinning interval (collect every N-th sweep)",
         long_help = "Collect a sample every N-th sweep after warmup to reduce\n\
@@ -58,6 +62,7 @@ pub struct McmcSumstatArgs {
 
     #[arg(
         long,
+        help_heading = "MCMC Sampler",
         default_value = "1.0",
         help = "Prior variance on inclusion logits",
         long_help = "Prior variance for the Gaussian prior on raw inclusion logits.\n\
@@ -68,6 +73,7 @@ pub struct McmcSumstatArgs {
 
     #[arg(
         long,
+        help_heading = "MCMC Sampler",
         default_value_t = false,
         help = "Estimate the effect size prior variance via Gibbs",
         long_help = "When enabled, the effect size prior variance is sampled via a\n\
