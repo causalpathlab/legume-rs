@@ -18,6 +18,7 @@ use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_model_traits::DecoderModuleT;
 use candle_util::candle_topic_refinement::*;
 use indicatif::ProgressBar;
+use log::warn;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -499,6 +500,10 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     } else {
         None
     };
+
+    if args.ess_steps > 0 && matches!(args.level_schedule, LevelSchedule::Progressive) {
+        warn!("--ess-steps is only supported with --level-schedule mixed; ignoring VCD");
+    }
 
     // Build per-level decoders, train, save dictionary, and evaluate.
     let (scores, z_nk) = match args.decoder {
@@ -1076,8 +1081,7 @@ where
 
                     // 3. ESS refinement: z₀ → z_refined via batched ESS
                     let y_nd = mb.output.unwrap_or(mb.input);
-                    // Pre-compute detached dictionary for lightweight ESS evaluation
-                    let ess_llik = decoder.build_ess_llik(&y_nd)?;
+                    let ess_llik = decoder.build_ess_llik(&y_nd, config.args.topic_smoothing)?;
 
                     let (z_refined, _) = batched_ess_steps(
                         &z_init.detach(),

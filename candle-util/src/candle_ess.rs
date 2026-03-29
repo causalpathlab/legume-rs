@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use candle_core::{DType, Result, Tensor};
-use std::f32::consts::PI;
+use std::f64::consts::PI;
 
 /// One batched elliptical slice sampling transition.
 ///
@@ -32,8 +32,8 @@ pub fn batched_ess_step(
     let hh = (u.log()? + cur_lnpdf)?;
 
     // 2. Initial angle and bracket
-    let phi = Tensor::rand(0f32, 1f32, &[n], dev)?.affine(2.0 * PI as f64, 0.0)?;
-    let mut phi_min = (&phi - (2.0 * PI) as f64)?;
+    let phi = Tensor::rand(0f32, 1f32, &[n], dev)?.affine(2.0 * PI, 0.0)?;
+    let mut phi_min = (&phi - 2.0 * PI)?;
     let mut phi_max = phi.clone();
     let mut angle = phi;
 
