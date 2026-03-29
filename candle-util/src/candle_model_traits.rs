@@ -79,17 +79,23 @@ pub trait DecoderModuleT {
     ///
     /// Default implementation pre-computes the dictionary and uses multinomial
     /// log-likelihood. Override for decoders with different likelihoods (e.g. NB).
-    fn build_ess_llik<'a>(&'a self, x_nd: &'a Tensor) -> Result<EssLlikFn<'a>> {
-        use crate::candle_loss_functions::topic_likelihood;
-
+    fn build_ess_llik<'a>(
+        &'a self,
+        x_nd: &'a Tensor,
+        topic_smoothing: f64,
+    ) -> Result<EssLlikFn<'a>> {
         let log_dict_dk = self.get_dictionary()?.detach();
         let beta_kd = log_dict_dk.t()?.exp()?.contiguous()?;
-        let x_clamped = x_nd.clamp(0.0, f64::INFINITY)?;
+        let x_pos = x_nd.clamp(0.0, f64::INFINITY)?;
+        let k = self.dim_latent() as f64;
 
         Ok(Box::new(move |z_nk: &Tensor| {
-            let z = ops::log_softmax(z_nk, 1)?.exp()?;
+            let mut z = ops::softmax(z_nk, 1)?;
+            if topic_smoothing > 0.0 {
+                z = ((z * (1.0 - topic_smoothing))? + topic_smoothing / k)?;
+            }
             let recon = z.matmul(&beta_kd)?;
-            topic_likelihood(&x_clamped, &recon)
+            x_pos.mul(&(recon + 1e-8)?.log()?)?.sum(x_pos.rank() - 1)
         }))
     }
 }

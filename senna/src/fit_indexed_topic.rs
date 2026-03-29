@@ -428,6 +428,10 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         _ => None,
     };
 
+    if args.ess_steps > 0 && matches!(args.level_schedule, LevelSchedule::Progressive) {
+        log::warn!("--ess-steps is only supported with --level-schedule mixed; ignoring VCD");
+    }
+
     let scores = match (&args.level_schedule, args.ess_steps > 0) {
         (LevelSchedule::Progressive, _) => train_progressive(
             &collapsed_levels,
@@ -986,8 +990,11 @@ where
                     let z_init = encoder.reparameterize(&z_mean, &z_lnvar, true)?;
 
                     // 3. ESS refinement with pre-computed detached dictionary
-                    let ess_llik =
-                        decoder.build_ess_llik(&mb.output_union_indices, &mb.output_indexed_x)?;
+                    let ess_llik = decoder.build_ess_llik(
+                        &mb.output_union_indices,
+                        &mb.output_indexed_x,
+                        config.topic_smoothing,
+                    )?;
 
                     let (z_refined, _) = batched_ess_steps(
                         &z_init.detach(),
