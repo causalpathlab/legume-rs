@@ -11,7 +11,7 @@ use crate::editing::sifter::ModificationType;
 use crate::gene_count::splice::{count_read_per_gene_splice, format_gene_key};
 use crate::pipeline_util::{check_all_bam_indices, extract_gene_key, qc_passing_keys, GeneCountQc};
 use crate::snp::genotyper::GenotypeParams;
-use crate::snp::io::load_known_snps;
+use crate::snp::io::load_known_snps_auto;
 use crate::snp::pipeline::{run_snp_pipeline, SnpParams};
 
 use genomic_data::gff::GffRecordMap;
@@ -24,14 +24,15 @@ use rustc_hash::{FxHashMap, FxHashSet};
 #[command(
     about = "Run unified RNA-seq pipeline: SNP → genes → ATOI → APA → DART",
     long_about = "Orchestrates the complete RNA-seq analysis pipeline:\n\n\
-        0. SNP genotyping at known sites (optional, requires --known-snps)\n\
+        0. SNP genotyping (de novo discovery + optional known sites)\n\
         1. Gene expression filtering (identify expressed genes)\n\
         2. ATOI detection (A-to-I editing, masked by SNP)\n\
         3. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\
         4. DART analysis (m6A methylation, masked by SNP+ATOI, requires --mut)\n\n\
-        When --known-snps is provided, genetic variants are filtered from all\n\
-        downstream modification detection steps.\n\
-        All outputs are saved to a flat directory structure with prefix-based naming."
+        Step 0 discovers variants de novo and optionally force-calls at known\n\
+        sites (--known-snps, VCF/BCF/Parquet). De novo variants are VAF-filtered\n\
+        (--snp-mask-min-vaf) so RNA editing sites are preserved in the mask.\n\
+        UMI deduplication is applied to all pileup steps (disable with --no-umi-dedup)."
 )]
 pub struct PipelineArgs {
     // === Required inputs ===
@@ -162,12 +163,14 @@ pub struct PipelineArgs {
     // === SNP parameters ===
     #[arg(
         long = "known-snps",
-        help = "Known SNP sites VCF for SNP masking",
-        long_help = "Path to a VCF/BCF file with known SNP sites.\n\
-                     When provided, runs SNP genotyping as Step 0 and builds\n\
-                     a mask that filters genetic variants from ATOI/APA/DART."
+        help = "Known SNP sites VCF/BCF/Parquet for SNP masking",
+        long_help = "Path to known SNP sites. Accepts:\n\
+                     - VCF/BCF (.vcf, .vcf.gz, .bcf): standard variant calls\n\
+                     - Parquet (.parquet): output from a previous `faba snp` run\n\
+                     When provided, force-calls genotypes at these positions in addition\n\
+                     to de novo discovery, and builds a mask for ATOI/APA/DART filtering."
     )]
-    pub known_snps_vcf: Option<Box<str>>,
+    pub known_snps: Option<Box<str>>,
 
     #[arg(long, default_value_t = 5, help = "Minimum depth for SNP calling")]
     pub snp_min_depth: usize,
@@ -178,6 +181,54 @@ pub struct PipelineArgs {
         help = "Minimum genotype quality for SNP mask"
     )]
     pub snp_min_gq: f32,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Minimum coverage for de novo SNP discovery"
+    )]
+    pub snp_min_coverage: usize,
+
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "Minimum alt allele reads for SNP discovery"
+    )]
+    pub snp_min_alt_count: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.1,
+        help = "Minimum alt allele frequency for SNP discovery"
+    )]
+    pub snp_min_alt_freq: f64,
+
+    #[arg(
+        long,
+        default_value_t = 0.35,
+        help = "Minimum VAF for SNP mask (filters RNA editing from de novo variants)",
+        long_help = "Minimum variant allele fraction for a de novo discovered variant\n\
+                     to enter the SNP mask. Het sites need VAF in [min_vaf, 1-min_vaf],\n\
+                     hom-alt sites need VAF >= 1-min_vaf. Sites with lower VAF are likely\n\
+                     RNA editing (A-to-I or m6A) rather than germline SNPs. Set to 0 to\n\
+                     disable VAF filtering (mask all called variants)."
+    )]
+    pub snp_mask_min_vaf: f32,
+
+    // === UMI deduplication (applies to all steps) ===
+    #[arg(
+        long = "umi-tag",
+        default_value = "UB",
+        help = "UMI barcode BAM tag for deduplication (all steps)"
+    )]
+    pub umi_tag: Box<str>,
+
+    #[arg(
+        long = "no-umi-dedup",
+        default_value_t = false,
+        help = "Disable UMI deduplication (for bulk data without UMIs)"
+    )]
+    pub no_umi_dedup: bool,
 
     // === Step control ===
     #[arg(long, default_value_t = false, help = "Skip SNP genotyping step")]
@@ -209,22 +260,19 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
 
     let n_steps = 5;
 
-    // Step 0: SNP genotyping (optional, if --known-snps provided)
+    // Step 0: SNP genotyping (de novo discovery + optional known sites).
+    // VAF filtering prevents masking true RNA editing sites from de novo variants.
     let snp_mask = if !args.skip_snp {
-        if let Some(ref vcf_path) = args.known_snps_vcf {
-            info!("=== Step 0/{}: SNP genotyping ===", n_steps);
-            match run_snp_step(args, vcf_path) {
-                Ok(mask) => {
-                    info!("SNP complete: {} variant positions in mask", mask.len());
-                    Some(mask)
-                }
-                Err(e) => {
-                    log::warn!("SNP step failed: {}. Continuing without SNP mask.", e);
-                    None
-                }
+        info!("=== Step 0/{}: SNP genotyping ===", n_steps);
+        match run_snp_step(args) {
+            Ok(mask) => {
+                info!("SNP complete: {} variant positions in mask", mask.len());
+                Some(mask)
             }
-        } else {
-            None
+            Err(e) => {
+                log::warn!("SNP step failed: {}. Continuing without SNP mask.", e);
+                None
+            }
         }
     } else {
         info!("=== Step 0/{}: SKIPPED (--skip-snp) ===", n_steps);
@@ -294,13 +342,32 @@ struct AtoiMaskData {
     n_sites: usize,
 }
 
-// Step 0: SNP genotyping at known variant sites
-fn run_snp_step(args: &PipelineArgs, vcf_path: &str) -> anyhow::Result<FxHashSet<(Box<str>, i64)>> {
-    info!("Loading known SNPs from: {}", vcf_path);
-    let known_snps = load_known_snps(vcf_path)?;
-    info!("{} known biallelic SNPs loaded", known_snps.num_sites());
+// Step 0: SNP genotyping (discovery + optional known sites).
+// VAF filter ensures de novo variants only enter the mask if they have
+// germline-like allele fractions, preserving RNA editing sites.
+fn run_snp_step(args: &PipelineArgs) -> anyhow::Result<FxHashSet<(Box<str>, i64)>> {
+    let known_snps = if let Some(ref path) = args.known_snps {
+        info!("Loading known SNPs from: {}", path);
+        let snps = load_known_snps_auto(path)?;
+        info!("{} known biallelic SNPs loaded", snps.num_sites());
+        Some(snps)
+    } else {
+        None
+    };
 
     let gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
+
+    let umi_tag = if args.no_umi_dedup {
+        None
+    } else {
+        Some(args.umi_tag.clone())
+    };
+
+    let min_vaf = if args.snp_mask_min_vaf > 0.0 {
+        Some(args.snp_mask_min_vaf)
+    } else {
+        None
+    };
 
     let params = SnpParams {
         bam_files: args.bam_files.clone(),
@@ -313,15 +380,21 @@ fn run_snp_step(args: &PipelineArgs, vcf_path: &str) -> anyhow::Result<FxHashSet
         genotype_params: GenotypeParams {
             min_depth: args.snp_min_depth,
             min_gq: args.snp_min_gq,
+            min_coverage: args.snp_min_coverage,
+            min_alt_count: args.snp_min_alt_count,
+            min_alt_freq: args.snp_min_alt_freq,
             ..GenotypeParams::default()
         },
         backend: args.backend.clone(),
         output: args.output.clone(),
-        bulk: true, // Pipeline only needs the mask, skip per-cell output
+        bulk: true,
+        umi_tag,
+        use_base_quality: true,
+        min_vaf,
     };
 
-    // Known-sites only in pipeline mode (discovery would be too slow for full pipeline)
-    run_snp_pipeline(Some(&known_snps), Some(&gff_map), &params, false)
+    // Discover de novo + force-call known sites if provided
+    run_snp_pipeline(known_snps.as_ref(), Some(&gff_map), &params, true)
 }
 
 // Step 1: Gene expression filtering (splice-aware: spliced + unspliced in one backend)

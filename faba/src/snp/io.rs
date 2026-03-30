@@ -108,15 +108,38 @@ pub fn load_known_snps(vcf_path: &str) -> Result<KnownSnps> {
 }
 
 /// Build a SNP mask from called sites (het or hom-alt above GQ threshold).
-pub fn build_snp_mask(sites: &[SnpSite], min_gq: f32) -> FxHashSet<(Box<str>, i64)> {
+///
+/// When `min_vaf` is Some, only sites with germline-like allele fractions
+/// enter the mask: het sites need VAF in [min_vaf, 1-min_vaf], hom-alt
+/// sites need VAF >= 1-min_vaf. This prevents masking true RNA editing
+/// sites (low/variable VAF) discovered de novo from RNA-seq data.
+pub fn build_snp_mask(
+    sites: &[SnpSite],
+    min_gq: f32,
+    min_vaf: Option<f32>,
+) -> FxHashSet<(Box<str>, i64)> {
     sites
         .iter()
         .filter(|s| {
-            s.gq >= min_gq
-                && matches!(
-                    s.genotype,
-                    crate::snp::SnpGenotype::Het | crate::snp::SnpGenotype::HomAlt
-                )
+            if s.gq < min_gq {
+                return false;
+            }
+            let depth = s.depth();
+            if depth == 0 {
+                return false;
+            }
+            let vaf = s.alt_count() as f32 / depth as f32;
+            match s.genotype {
+                crate::snp::SnpGenotype::Het => match min_vaf {
+                    Some(v) => vaf >= v && vaf <= (1.0 - v),
+                    None => true,
+                },
+                crate::snp::SnpGenotype::HomAlt => match min_vaf {
+                    Some(v) => vaf >= (1.0 - v),
+                    None => true,
+                },
+                _ => false,
+            }
         })
         .map(|s| (s.chr.clone(), s.pos))
         .collect()
@@ -195,6 +218,226 @@ pub fn write_snp_sites_parquet<P: AsRef<Path>>(sites: &[SnpSite], path: P) -> Re
     writer.close()?;
 
     Ok(())
+}
+
+/// Load known SNP sites from a parquet file (output of `faba snp`).
+/// Reads chr, pos, ref_allele, alt_allele, rsid columns.
+pub fn load_known_snps_from_parquet<P: AsRef<Path>>(path: P) -> Result<KnownSnps> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let file = File::open(path.as_ref())?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let reader = builder.build()?;
+
+    let mut by_chr: FxHashMap<Box<str>, FxHashMap<i64, SnpAlleles>> = FxHashMap::default();
+
+    for batch in reader {
+        let batch = batch?;
+
+        let chr_col = batch
+            .column_by_name("chr")
+            .ok_or_else(|| anyhow::anyhow!("missing 'chr' column"))?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| anyhow::anyhow!("'chr' is not a string array"))?;
+
+        let pos_col = batch
+            .column_by_name("pos")
+            .ok_or_else(|| anyhow::anyhow!("missing 'pos' column"))?
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| anyhow::anyhow!("'pos' is not Int64"))?;
+
+        let ref_col = batch
+            .column_by_name("ref_allele")
+            .ok_or_else(|| anyhow::anyhow!("missing 'ref_allele' column"))?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| anyhow::anyhow!("'ref_allele' is not a string array"))?;
+
+        let alt_col = batch
+            .column_by_name("alt_allele")
+            .ok_or_else(|| anyhow::anyhow!("missing 'alt_allele' column"))?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| anyhow::anyhow!("'alt_allele' is not a string array"))?;
+
+        let rsid_col = batch
+            .column_by_name("rsid")
+            .ok_or_else(|| anyhow::anyhow!("missing 'rsid' column"))?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| anyhow::anyhow!("'rsid' is not a string array"))?;
+
+        for i in 0..batch.num_rows() {
+            let chr: Box<str> = chr_col.value(i).into();
+            let pos = pos_col.value(i);
+
+            let ref_str = ref_col.value(i);
+            let alt_str = alt_col.value(i);
+            if ref_str.len() != 1 || alt_str.len() != 1 {
+                continue;
+            }
+            let ref_byte = ref_str.as_bytes()[0].to_ascii_uppercase();
+            let alt_byte = alt_str.as_bytes()[0].to_ascii_uppercase();
+
+            if !matches!(ref_byte, b'A' | b'T' | b'G' | b'C')
+                || !matches!(alt_byte, b'A' | b'T' | b'G' | b'C')
+            {
+                continue;
+            }
+
+            let rsid_str = rsid_col.value(i);
+            let rsid = if rsid_str == "." {
+                None
+            } else {
+                Some(rsid_str.to_string().into_boxed_str())
+            };
+
+            by_chr
+                .entry(chr)
+                .or_default()
+                .insert(pos, (ref_byte, alt_byte, rsid));
+        }
+    }
+
+    let n_sites: usize = by_chr.values().map(|m| m.len()).sum();
+    info!(
+        "loaded {} known biallelic SNPs from {}",
+        n_sites,
+        path.as_ref().display()
+    );
+
+    Ok(KnownSnps { by_chr })
+}
+
+/// Load known SNPs from VCF/BCF or Parquet, auto-detected by file extension.
+pub fn load_known_snps_auto(path: &str) -> Result<KnownSnps> {
+    if path.ends_with(".parquet") {
+        load_known_snps_from_parquet(path)
+    } else {
+        load_known_snps(path)
+    }
+}
+
+/// Write SNP sites to a bgzipped VCF file (.vcf.gz).
+///
+/// Produces a single-sample VCF with GT, GQ, AD, and DP fields.
+/// Contig info is passed as (name, length) pairs from the BAM header or FASTA index.
+pub fn write_snp_sites_vcf(
+    sites: &[SnpSite],
+    path: &str,
+    contigs: &[(Box<str>, u64)],
+) -> Result<()> {
+    use rust_htslib::bcf::{self, Format, Header, Writer};
+
+    let mut header = Header::new();
+
+    // Add contig lines
+    for (name, len) in contigs {
+        let line = format!("##contig=<ID={},length={}>", name, len);
+        header.push_record(line.as_bytes());
+    }
+
+    // FORMAT fields
+    header.push_record(b"##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">");
+    header.push_record(
+        b"##FORMAT=<ID=GQ,Number=1,Type=Integer,Description=\"Genotype Quality (Phred)\">",
+    );
+    header.push_record(
+        b"##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"Allelic depths (ref, alt)\">",
+    );
+    header.push_record(b"##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Total read depth\">");
+
+    header.push_sample(b"SAMPLE");
+
+    let mut writer = Writer::from_path(path, &header, false, Format::Vcf)?;
+
+    for site in sites {
+        let mut record = writer.empty_record();
+
+        // Set chromosome
+        let rid = writer.header().name2rid(site.chr.as_bytes()).unwrap_or(0);
+        record.set_rid(Some(rid));
+        record.set_pos(site.pos);
+
+        // Set alleles
+        let ref_str = [site.ref_allele];
+        let alt_str = [site.alt_allele];
+        record
+            .set_alleles(&[&ref_str, &alt_str])
+            .map_err(|e| anyhow::anyhow!("set_alleles: {}", e))?;
+
+        // Set ID (rsid)
+        if let Some(ref rsid) = site.rsid {
+            record.set_id(rsid.as_bytes()).ok();
+        }
+
+        // GT
+        let gt = match site.genotype {
+            crate::snp::SnpGenotype::HomRef => vec![
+                bcf::record::GenotypeAllele::Unphased(0),
+                bcf::record::GenotypeAllele::Unphased(0),
+            ],
+            crate::snp::SnpGenotype::Het => vec![
+                bcf::record::GenotypeAllele::Unphased(0),
+                bcf::record::GenotypeAllele::Unphased(1),
+            ],
+            crate::snp::SnpGenotype::HomAlt => vec![
+                bcf::record::GenotypeAllele::Unphased(1),
+                bcf::record::GenotypeAllele::Unphased(1),
+            ],
+            crate::snp::SnpGenotype::NoCall => vec![
+                bcf::record::GenotypeAllele::UnphasedMissing,
+                bcf::record::GenotypeAllele::UnphasedMissing,
+            ],
+        };
+        record
+            .push_genotypes(&gt)
+            .map_err(|e| anyhow::anyhow!("push_genotypes: {}", e))?;
+
+        // GQ
+        record
+            .push_format_integer(b"GQ", &[site.gq as i32])
+            .map_err(|e| anyhow::anyhow!("push GQ: {}", e))?;
+
+        // AD (ref, alt)
+        let ref_count = site.ref_count() as i32;
+        let alt_count = site.alt_count() as i32;
+        record
+            .push_format_integer(b"AD", &[ref_count, alt_count])
+            .map_err(|e| anyhow::anyhow!("push AD: {}", e))?;
+
+        // DP
+        let dp = site.depth() as i32;
+        record
+            .push_format_integer(b"DP", &[dp])
+            .map_err(|e| anyhow::anyhow!("push DP: {}", e))?;
+
+        writer
+            .write(&record)
+            .map_err(|e| anyhow::anyhow!("write record: {}", e))?;
+    }
+
+    Ok(())
+}
+
+/// Load contig info from a FASTA index (.fai) file.
+pub fn load_contigs_from_fai(genome_file: &str) -> Result<Vec<(Box<str>, u64)>> {
+    let fai_path = format!("{}.fai", genome_file);
+    let contents = std::fs::read_to_string(&fai_path)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {}", fai_path, e))?;
+
+    let mut contigs = Vec::new();
+    for line in contents.lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() >= 2 {
+            let name: Box<str> = fields[0].into();
+            let len: u64 = fields[1].parse().unwrap_or(0);
+            contigs.push((name, len));
+        }
+    }
+    Ok(contigs)
 }
 
 /// Load a SNP mask from a parquet file (output of `faba snp`).

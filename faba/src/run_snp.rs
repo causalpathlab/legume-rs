@@ -1,7 +1,7 @@
 use crate::common::*;
 use crate::pipeline_util::check_all_bam_indices;
 use crate::snp::genotyper::GenotypeParams;
-use crate::snp::io::load_known_snps;
+use crate::snp::io::load_known_snps_auto;
 use crate::snp::pipeline::{run_snp_pipeline, SnpParams};
 
 use genomic_data::gff::GeneType as GffGeneType;
@@ -38,19 +38,21 @@ pub struct SnpArgs {
     )]
     pub genome_file: Box<str>,
 
-    /// Known SNP sites in VCF/BCF format. Optional.
+    /// Known SNP sites in VCF/BCF/Parquet format. Optional.
     /// When provided, genotypes are force-called at these positions.
     /// When omitted, only de novo discovery is performed.
     #[arg(
         long = "known-snps",
-        help = "Known SNP sites VCF/BCF (optional)",
-        long_help = "Path to a VCF/BCF file containing known SNP sites (e.g., dbSNP).\n\
+        help = "Known SNP sites VCF/BCF/Parquet (optional)",
+        long_help = "Path to known SNP sites. Accepts:\n\
+                     - VCF/BCF (.vcf, .vcf.gz, .bcf): standard variant calls\n\
+                     - Parquet (.parquet): output from a previous `faba snp` run\n\
                      Only biallelic SNPs are used; indels and multi-allelic sites are skipped.\n\
                      When provided, genotypes are force-called at these positions regardless\n\
                      of alt allele evidence. Can be combined with de novo discovery.\n\
                      When omitted, only de novo discovery from the reference genome is used."
     )]
-    pub known_snps_vcf: Option<Box<str>>,
+    pub known_snps: Option<Box<str>>,
 
     /// Gene annotation in GFF format. Optional.
     /// Enables gene-centric processing and per-cell output.
@@ -221,6 +223,42 @@ pub struct SnpArgs {
     )]
     pub min_mapping_quality: u8,
 
+    // ========== UMI deduplication ==========
+    /// UMI barcode tag for deduplication. Reads sharing the same UMI at the
+    /// same position (and cell barcode) are counted once.
+    #[arg(
+        long = "umi-tag",
+        default_value = "UB",
+        help = "UMI barcode BAM tag for deduplication",
+        long_help = "BAM auxiliary tag for UMI barcodes (e.g., \"UB\" for 10x).\n\
+                     Reads with the same UMI at the same genomic position are\n\
+                     deduplicated to a single observation. Disable with --no-umi-dedup."
+    )]
+    pub umi_tag: Box<str>,
+
+    /// Disable UMI-based deduplication. Use for bulk data without UMIs.
+    #[arg(
+        long = "no-umi-dedup",
+        default_value_t = false,
+        help = "Disable UMI deduplication",
+        long_help = "Skip UMI-based read deduplication. Use this for bulk WGS/RNA-seq\n\
+                     data that does not have UMI barcodes. BAM-flag duplicate filtering\n\
+                     still applies."
+    )]
+    pub no_umi_dedup: bool,
+
+    // ========== Quality model ==========
+    /// Use per-base quality scores for genotype likelihoods (Li 2011 model).
+    #[arg(
+        long = "use-base-quality",
+        default_value_t = true,
+        help = "Use per-base quality in genotype model",
+        long_help = "When enabled, genotype likelihoods use per-read Phred quality\n\
+                     scores (Li 2011 model) instead of a constant error rate.\n\
+                     More accurate but slightly slower."
+    )]
+    pub use_base_quality: bool,
+
     // ========== Output options ==========
     /// Backend format for sparse matrix output.
     #[arg(
@@ -283,23 +321,17 @@ pub fn run_snp(args: &SnpArgs) -> anyhow::Result<()> {
 
     check_all_bam_indices(&args.bam_files)?;
 
-    // Determine discovery mode
     let discover = !args.skip_discovery;
-    if args.skip_discovery && args.known_snps_vcf.is_none() {
+    if !discover && args.known_snps.is_none() {
         return Err(anyhow::anyhow!(
             "--skip-discovery requires --known-snps to be provided"
         ));
     }
-    if !discover && args.known_snps_vcf.is_none() {
-        return Err(anyhow::anyhow!(
-            "either --known-snps or de novo discovery (default) must be enabled"
-        ));
-    }
 
-    // Load known SNPs if provided
-    let known_snps = if let Some(ref vcf_path) = args.known_snps_vcf {
-        info!("Loading known SNPs from: {}", vcf_path);
-        let snps = load_known_snps(vcf_path)?;
+    // Load known SNPs if provided (VCF/BCF/Parquet auto-detected)
+    let known_snps = if let Some(ref path) = args.known_snps {
+        info!("Loading known SNPs from: {}", path);
+        let snps = load_known_snps_auto(path)?;
         info!("{} known biallelic SNPs loaded", snps.num_sites());
         Some(snps)
     } else {
@@ -318,6 +350,12 @@ pub fn run_snp(args: &SnpArgs) -> anyhow::Result<()> {
     } else {
         info!("no GFF provided, using region-centric mode");
         None
+    };
+
+    let umi_tag = if args.no_umi_dedup {
+        None
+    } else {
+        Some(args.umi_tag.clone())
     };
 
     let params = SnpParams {
@@ -340,6 +378,9 @@ pub fn run_snp(args: &SnpArgs) -> anyhow::Result<()> {
         backend: args.backend.clone(),
         output: args.output.clone(),
         bulk: args.bulk,
+        umi_tag,
+        use_base_quality: args.use_base_quality,
+        min_vaf: None, // standalone genotyping — no VAF filter on mask
     };
 
     let snp_mask = run_snp_pipeline(known_snps.as_ref(), gff_map.as_ref(), &params, discover)?;
