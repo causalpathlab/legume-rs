@@ -1,4 +1,4 @@
-use crate::data::dna::{Dna, DnaBaseCount};
+use crate::data::dna::{Dna, DnaBaseCount, DnaBaseQual};
 use crate::snp::{SnpGenotype, SnpSite};
 
 /// Log-likelihoods for each genotype hypothesis
@@ -136,32 +136,60 @@ pub fn call_genotype(gl: &GenotypeLikelihoods, params: &GenotypeParams) -> (SnpG
     (gt, gq.max(0.0))
 }
 
-/// Genotype a single known SNP site from pileup counts.
-pub fn genotype_site(
-    chr: Box<str>,
-    pos: i64,
+/// Compute genotype log-likelihoods from pre-accumulated per-base quality stats
+/// (Li 2011 model). Uses quality-weighted sums stored in `DnaBaseQual`.
+pub fn compute_genotype_likelihoods_qual(
+    qual: &DnaBaseQual,
     ref_allele: u8,
     alt_allele: u8,
-    rsid: Option<Box<str>>,
-    counts: DnaBaseCount,
-    params: &GenotypeParams,
-) -> SnpSite {
-    let depth = counts.total();
+) -> GenotypeLikelihoods {
+    GenotypeLikelihoods {
+        ll_ref: qual.ll_hom(ref_allele),
+        ll_het: qual.ll_het(ref_allele, alt_allele),
+        ll_alt: qual.ll_hom(alt_allele),
+    }
+}
+
+/// Input data for genotyping a single SNP site.
+pub struct SiteInput {
+    pub chr: Box<str>,
+    pub pos: i64,
+    pub ref_allele: u8,
+    pub alt_allele: u8,
+    pub rsid: Option<Box<str>>,
+    pub counts: DnaBaseCount,
+    pub qual: Option<DnaBaseQual>,
+}
+
+/// Genotype a single known SNP site from pileup counts.
+/// When `qual` is provided, uses the Li 2011 per-base quality model;
+/// otherwise falls back to the simplified constant-error-rate model.
+pub fn genotype_site(input: SiteInput, params: &GenotypeParams) -> SnpSite {
+    let depth = input.counts.total();
 
     if depth < params.min_depth {
         return SnpSite {
-            chr,
-            pos,
-            ref_allele,
-            alt_allele,
-            rsid,
-            counts,
+            chr: input.chr,
+            pos: input.pos,
+            ref_allele: input.ref_allele,
+            alt_allele: input.alt_allele,
+            rsid: input.rsid,
+            counts: input.counts,
             genotype: SnpGenotype::NoCall,
             gq: 0.0,
         };
     }
 
-    let gl = compute_genotype_likelihoods(&counts, ref_allele, alt_allele, params.base_error_rate);
+    let gl = if let Some(ref q) = input.qual {
+        compute_genotype_likelihoods_qual(q, input.ref_allele, input.alt_allele)
+    } else {
+        compute_genotype_likelihoods(
+            &input.counts,
+            input.ref_allele,
+            input.alt_allele,
+            params.base_error_rate,
+        )
+    };
     let (genotype, gq) = call_genotype(&gl, params);
 
     let genotype = if gq < params.min_gq {
@@ -171,12 +199,12 @@ pub fn genotype_site(
     };
 
     SnpSite {
-        chr,
-        pos,
-        ref_allele,
-        alt_allele,
-        rsid,
-        counts,
+        chr: input.chr,
+        pos: input.pos,
+        ref_allele: input.ref_allele,
+        alt_allele: input.alt_allele,
+        rsid: input.rsid,
+        counts: input.counts,
         genotype,
         gq,
     }
@@ -221,51 +249,88 @@ mod tests {
         counts
     }
 
+    fn call(counts: DnaBaseCount) -> SnpSite {
+        let params = GenotypeParams::default();
+        genotype_site(
+            SiteInput {
+                chr: "chr1".into(),
+                pos: 100,
+                ref_allele: b'A',
+                alt_allele: b'G',
+                rsid: None,
+                counts,
+                qual: None,
+            },
+            &params,
+        )
+    }
+
     #[test]
     fn test_hom_ref_call() {
-        // 30 ref (A), 0 alt (G) -> should be HomRef
-        let counts = make_counts(30, 0, 0, 0);
-        let params = GenotypeParams::default();
-        let site = genotype_site("chr1".into(), 100, b'A', b'G', None, counts, &params);
+        let site = call(make_counts(30, 0, 0, 0));
         assert_eq!(site.genotype, SnpGenotype::HomRef);
         assert!(site.gq > 20.0);
     }
 
     #[test]
     fn test_het_call() {
-        // 15 ref (A), 15 alt (G) -> should be Het
-        let counts = make_counts(15, 0, 15, 0);
-        let params = GenotypeParams::default();
-        let site = genotype_site("chr1".into(), 100, b'A', b'G', None, counts, &params);
+        let site = call(make_counts(15, 0, 15, 0));
         assert_eq!(site.genotype, SnpGenotype::Het);
         assert!(site.gq > 20.0);
     }
 
     #[test]
     fn test_hom_alt_call() {
-        // 0 ref (A), 30 alt (G) -> should be HomAlt
-        let counts = make_counts(0, 0, 30, 0);
-        let params = GenotypeParams::default();
-        let site = genotype_site("chr1".into(), 100, b'A', b'G', None, counts, &params);
+        let site = call(make_counts(0, 0, 30, 0));
         assert_eq!(site.genotype, SnpGenotype::HomAlt);
         assert!(site.gq > 20.0);
     }
 
     #[test]
     fn test_no_call_low_depth() {
-        // Only 2 reads -> below min_depth=5, should be NoCall
-        let counts = make_counts(1, 0, 1, 0);
-        let params = GenotypeParams::default();
-        let site = genotype_site("chr1".into(), 100, b'A', b'G', None, counts, &params);
+        let site = call(make_counts(1, 0, 1, 0));
         assert_eq!(site.genotype, SnpGenotype::NoCall);
     }
 
     #[test]
     fn test_no_call_zero_depth() {
-        let counts = DnaBaseCount::new();
-        let params = GenotypeParams::default();
-        let site = genotype_site("chr1".into(), 100, b'A', b'G', None, counts, &params);
+        let site = call(DnaBaseCount::new());
         assert_eq!(site.genotype, SnpGenotype::NoCall);
+    }
+
+    #[test]
+    fn test_qual_model_matches_count_at_uniform_quality() {
+        // At uniform Q20 (ε=0.01), quality model should give same calls as count model
+        let phred = 20u8;
+        let mut qual = DnaBaseQual::default();
+        for _ in 0..30 {
+            qual.add(Some(&Dna::A), phred);
+        }
+        let counts = make_counts(30, 0, 0, 0);
+        let gl_count = compute_genotype_likelihoods(&counts, b'A', b'G', 0.01);
+        let gl_qual = compute_genotype_likelihoods_qual(&qual, b'A', b'G');
+
+        // Both should agree ref >> het >> alt
+        assert!(gl_count.ll_ref > gl_count.ll_het);
+        assert!(gl_qual.ll_ref > gl_qual.ll_het);
+        assert!(gl_count.ll_ref > gl_count.ll_alt);
+        assert!(gl_qual.ll_ref > gl_qual.ll_alt);
+
+        // Values should be close (not exact due to het model difference)
+        assert!((gl_count.ll_ref - gl_qual.ll_ref).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_qual_model_het_call() {
+        let phred = 30u8;
+        let mut qual = DnaBaseQual::default();
+        for _ in 0..15 {
+            qual.add(Some(&Dna::A), phred);
+            qual.add(Some(&Dna::G), phred);
+        }
+        let gl = compute_genotype_likelihoods_qual(&qual, b'A', b'G');
+        assert!(gl.ll_het > gl.ll_ref);
+        assert!(gl.ll_het > gl.ll_alt);
     }
 
     #[test]
