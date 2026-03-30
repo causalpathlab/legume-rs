@@ -1,10 +1,12 @@
 use crate::common::*;
 use crate::data::conversion::*;
 use crate::editing::io::ToParquet;
+use crate::editing::mask::filter_conversion_sites_by_mask;
 use crate::editing::mixture::MixtureParams;
 use crate::editing::pipeline::*;
 use crate::editing::sifter::ModificationType;
 use crate::pipeline_util::{check_all_bam_indices, run_gene_count_qc};
+use crate::snp::io::load_snp_mask_from_parquet;
 
 use genomic_data::gff::GeneType as GffGeneType;
 use genomic_data::gff::GffRecordMap;
@@ -153,6 +155,15 @@ pub struct AtoICountArgs {
     )]
     pub exact_barcode_match: bool,
 
+    #[arg(
+        long = "snp-mask",
+        help = "SNP mask parquet from `faba snp` to filter genetic variants",
+        long_help = "Path to snp_sites.parquet from `faba snp`. A-to-I candidates\n\
+                     at known SNP positions (het or hom-alt) are removed before\n\
+                     quantification, eliminating A/G SNPs that mimic editing."
+    )]
+    pub snp_mask_file: Option<Box<str>>,
+
     #[arg(long, value_enum, help = "Gene type filter")]
     gene_type: Option<GffGeneType>,
 
@@ -300,6 +311,21 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
     let atoi_sites = find_all_conversion_sites(&gff_map, &params, membership.as_ref())?;
     let n_atoi: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
     info!("Found {} A-to-I editing sites", n_atoi);
+
+    // Apply SNP mask if provided
+    if let Some(ref mask_file) = args.snp_mask_file {
+        info!("Loading SNP mask from {}", mask_file);
+        let snp_mask = load_snp_mask_from_parquet(mask_file.as_ref())?;
+        let n_before: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
+        filter_conversion_sites_by_mask(&atoi_sites, &snp_mask, &gff_map);
+        let n_after: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
+        info!(
+            "SNP masking: {} → {} A-to-I sites ({} removed)",
+            n_before,
+            n_after,
+            n_before - n_after
+        );
+    }
 
     if atoi_sites.is_empty() {
         info!("no A-to-I sites found");

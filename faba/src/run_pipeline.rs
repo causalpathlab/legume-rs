@@ -1,7 +1,7 @@
 use crate::common::*;
 use crate::data::conversion::ConversionValueType;
 use crate::editing::io::ToParquet;
-use crate::editing::mask::{build_atoi_mask, filter_m6a_by_atoi_mask};
+use crate::editing::mask::{build_atoi_mask, filter_conversion_sites_by_mask, filter_m6a_by_mask};
 use crate::editing::mixture::MixtureParams;
 use crate::editing::pipeline::{
     find_all_conversion_sites, process_all_bam_files_to_backend, run_mixture_model,
@@ -10,23 +10,27 @@ use crate::editing::pipeline::{
 use crate::editing::sifter::ModificationType;
 use crate::gene_count::splice::{count_read_per_gene_splice, format_gene_key};
 use crate::pipeline_util::{check_all_bam_indices, extract_gene_key, qc_passing_keys, GeneCountQc};
+use crate::snp::genotyper::GenotypeParams;
+use crate::snp::io::load_known_snps;
+use crate::snp::pipeline::{run_snp_pipeline, SnpParams};
 
 use genomic_data::gff::GffRecordMap;
 use genomic_data::sam::CellBarcode;
 use log::info;
 use rayon::ThreadPoolBuilder;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Args, Debug)]
 #[command(
-    about = "Run unified RNA-seq pipeline: gene counts → ATOI → APA → DART",
+    about = "Run unified RNA-seq pipeline: SNP → genes → ATOI → APA → DART",
     long_about = "Orchestrates the complete RNA-seq analysis pipeline:\n\n\
+        0. SNP genotyping at known sites (optional, requires --known-snps)\n\
         1. Gene expression filtering (identify expressed genes)\n\
-        2. ATOI detection (A-to-I editing sites)\n\
-        3. APA quantification (alternative polyadenylation, masked by ATOI)\n\
-        4. DART analysis (m6A methylation, masked by ATOI, requires --mut)\n\n\
-        The pipeline filters the GFF to expressed genes after step 1,\n\
-        builds an ATOI mask after step 2, and applies it to steps 3 and 4.\n\
+        2. ATOI detection (A-to-I editing, masked by SNP)\n\
+        3. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\
+        4. DART analysis (m6A methylation, masked by SNP+ATOI, requires --mut)\n\n\
+        When --known-snps is provided, genetic variants are filtered from all\n\
+        downstream modification detection steps.\n\
         All outputs are saved to a flat directory structure with prefix-based naming."
 )]
 pub struct PipelineArgs {
@@ -155,7 +159,30 @@ pub struct PipelineArgs {
     #[arg(long, default_value_t = 0.05, help = "m6A detection p-value cutoff")]
     pub m6a_pvalue_cutoff: f32,
 
+    // === SNP parameters ===
+    #[arg(
+        long = "known-snps",
+        help = "Known SNP sites VCF for SNP masking",
+        long_help = "Path to a VCF/BCF file with known SNP sites.\n\
+                     When provided, runs SNP genotyping as Step 0 and builds\n\
+                     a mask that filters genetic variants from ATOI/APA/DART."
+    )]
+    pub known_snps_vcf: Option<Box<str>>,
+
+    #[arg(long, default_value_t = 5, help = "Minimum depth for SNP calling")]
+    pub snp_min_depth: usize,
+
+    #[arg(
+        long,
+        default_value_t = 20.0,
+        help = "Minimum genotype quality for SNP mask"
+    )]
+    pub snp_min_gq: f32,
+
     // === Step control ===
+    #[arg(long, default_value_t = false, help = "Skip SNP genotyping step")]
+    pub skip_snp: bool,
+
     #[arg(long, default_value_t = false, help = "Skip gene counting step")]
     pub skip_genes: bool,
 
@@ -180,19 +207,43 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
         check_all_bam_indices(mut_bams)?;
     }
 
-    // 1. Gene Expression Filtering
-    let gene_count_qc = if !args.skip_genes {
-        info!("=== Step 1/4: Gene expression filtering ===");
-        run_gene_counting_step(args)?
+    let n_steps = 5;
+
+    // Step 0: SNP genotyping (optional, if --known-snps provided)
+    let snp_mask = if !args.skip_snp {
+        if let Some(ref vcf_path) = args.known_snps_vcf {
+            info!("=== Step 0/{}: SNP genotyping ===", n_steps);
+            match run_snp_step(args, vcf_path) {
+                Ok(mask) => {
+                    info!("SNP complete: {} variant positions in mask", mask.len());
+                    Some(mask)
+                }
+                Err(e) => {
+                    log::warn!("SNP step failed: {}. Continuing without SNP mask.", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
     } else {
-        info!("=== Step 1/4: SKIPPED (--skip-genes) ===");
+        info!("=== Step 0/{}: SKIPPED (--skip-snp) ===", n_steps);
         None
     };
 
-    // 2. ATOI Detection
+    // Step 1: Gene Expression Filtering
+    let gene_count_qc = if !args.skip_genes {
+        info!("=== Step 1/{}: Gene expression filtering ===", n_steps);
+        run_gene_counting_step(args)?
+    } else {
+        info!("=== Step 1/{}: SKIPPED (--skip-genes) ===", n_steps);
+        None
+    };
+
+    // Step 2: ATOI Detection
     let atoi_mask = if !args.skip_atoi {
-        info!("=== Step 2/4: ATOI detection ===");
-        match run_atoi_step(args, &gene_count_qc) {
+        info!("=== Step 2/{}: ATOI detection ===", n_steps);
+        match run_atoi_step(args, &gene_count_qc, &snp_mask) {
             Ok(mask_data) => {
                 info!(
                     "ATOI complete: {} sites, {} mask positions",
@@ -207,30 +258,30 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
             }
         }
     } else {
-        info!("=== Step 2/4: SKIPPED (--skip-atoi) ===");
+        info!("=== Step 2/{}: SKIPPED (--skip-atoi) ===", n_steps);
         None
     };
 
-    // 3. APA Analysis
+    // Step 3: APA Analysis
     if !args.skip_apa {
-        info!("=== Step 3/4: APA analysis ===");
-        match run_apa_step(args, &atoi_mask, &gene_count_qc) {
+        info!("=== Step 3/{}: APA analysis ===", n_steps);
+        match run_apa_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
             Ok(_) => info!("APA complete"),
             Err(e) => log::warn!("APA step failed: {}. Continuing to DART.", e),
         }
     } else {
-        info!("=== Step 3/4: SKIPPED (--skip-apa) ===");
+        info!("=== Step 3/{}: SKIPPED (--skip-apa) ===", n_steps);
     }
 
-    // 4. DART Analysis (conditional on mutant data)
+    // Step 4: DART Analysis (conditional on mutant data)
     if let Some(ref mut_bams) = args.mut_bam_files {
-        info!("=== Step 4/4: DART analysis ===");
-        match run_dart_step(args, mut_bams, &atoi_mask, &gene_count_qc) {
+        info!("=== Step 4/{}: DART analysis ===", n_steps);
+        match run_dart_step(args, mut_bams, &atoi_mask, &snp_mask, &gene_count_qc) {
             Ok(_) => info!("DART complete"),
             Err(e) => log::warn!("DART step failed: {}", e),
         }
     } else {
-        info!("=== Step 4/4: SKIPPED (no --mut BAM files) ===");
+        info!("=== Step 4/{}: SKIPPED (no --mut BAM files) ===", n_steps);
     }
 
     write_pipeline_summary(args)?;
@@ -241,6 +292,36 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
 struct AtoiMaskData {
     mask: rustc_hash::FxHashSet<(Box<str>, i64)>,
     n_sites: usize,
+}
+
+// Step 0: SNP genotyping at known variant sites
+fn run_snp_step(args: &PipelineArgs, vcf_path: &str) -> anyhow::Result<FxHashSet<(Box<str>, i64)>> {
+    info!("Loading known SNPs from: {}", vcf_path);
+    let known_snps = load_known_snps(vcf_path)?;
+    info!("{} known biallelic SNPs loaded", known_snps.num_sites());
+
+    let gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
+
+    let params = SnpParams {
+        bam_files: args.bam_files.clone(),
+        genome_file: args.genome_file.clone(),
+        cell_barcode_tag: args.cell_barcode_tag.clone(),
+        gene_barcode_tag: args.gene_barcode_tag.clone(),
+        include_missing_barcode: false,
+        min_base_quality: 20,
+        min_mapping_quality: 20,
+        genotype_params: GenotypeParams {
+            min_depth: args.snp_min_depth,
+            min_gq: args.snp_min_gq,
+            ..GenotypeParams::default()
+        },
+        backend: args.backend.clone(),
+        output: args.output.clone(),
+        bulk: true, // Pipeline only needs the mask, skip per-cell output
+    };
+
+    // Known-sites only in pipeline mode (discovery would be too slow for full pipeline)
+    run_snp_pipeline(Some(&known_snps), Some(&gff_map), &params, false)
 }
 
 // Step 1: Gene expression filtering (splice-aware: spliced + unspliced in one backend)
@@ -409,6 +490,7 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
 fn run_atoi_step(
     args: &PipelineArgs,
     gene_count_qc: &Option<GeneCountQc>,
+    snp_mask: &Option<FxHashSet<(Box<str>, i64)>>,
 ) -> anyhow::Result<AtoiMaskData> {
     // Load GFF and filter to expressed genes
     let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
@@ -452,6 +534,19 @@ fn run_atoi_step(
     info!("Discovering ATOI sites...");
     let atoi_sites = find_all_conversion_sites(&gff_map, &params, None)?;
 
+    // Apply SNP mask if available
+    if let Some(ref mask) = snp_mask {
+        let n_before: usize = atoi_sites.iter().map(|e| e.value().len()).sum();
+        filter_conversion_sites_by_mask(&atoi_sites, mask, &gff_map);
+        let n_after: usize = atoi_sites.iter().map(|e| e.value().len()).sum();
+        info!(
+            "SNP masking: {} → {} ATOI sites ({} removed)",
+            n_before,
+            n_after,
+            n_before - n_after
+        );
+    }
+
     // Count total sites
     let n_sites: usize = atoi_sites.iter().map(|entry| entry.value().len()).sum();
     info!("Found {} ATOI sites", n_sites);
@@ -485,6 +580,7 @@ fn run_atoi_step(
 fn run_apa_step(
     args: &PipelineArgs,
     atoi_mask: &Option<AtoiMaskData>,
+    snp_mask: &Option<FxHashSet<(Box<str>, i64)>>,
     gene_count_qc: &Option<GeneCountQc>,
 ) -> anyhow::Result<()> {
     use crate::run_apa::{run_apa, ApaMethod, CountApaArgs};
@@ -493,6 +589,15 @@ fn run_apa_step(
     let atoi_mask_file = if let Some(ref _mask_data) = atoi_mask {
         let mask_path = format!("{}/atoi_sites.parquet", args.output);
         info!("APA will use ATOI mask from: {}", mask_path);
+        Some(mask_path.into_boxed_str())
+    } else {
+        None
+    };
+
+    // SNP mask file path if SNP step was run
+    let snp_mask_file = if snp_mask.is_some() {
+        let mask_path = format!("{}/snp_sites.parquet", args.output);
+        info!("APA will use SNP mask from: {}", mask_path);
         Some(mask_path.into_boxed_str())
     } else {
         None
@@ -541,6 +646,7 @@ fn run_apa_step(
         backend: args.backend.clone(),
         method: ApaMethod::Mixture, // Always use mixture mode (more robust)
         atoi_mask_file,
+        snp_mask_file,
         gene_barcode_tag: args.gene_barcode_tag.clone(),
         resolution_bp: 10,
         include_missing_barcode: false,
@@ -575,6 +681,7 @@ fn run_dart_step(
     args: &PipelineArgs,
     mut_bams: &[Box<str>],
     atoi_mask: &Option<AtoiMaskData>,
+    snp_mask: &Option<FxHashSet<(Box<str>, i64)>>,
     gene_count_qc: &Option<GeneCountQc>,
 ) -> anyhow::Result<()> {
     // Load GFF and filter to expressed genes
@@ -622,12 +729,25 @@ fn run_dart_step(
     // Apply ATOI mask if available
     if let Some(ref mask_data) = atoi_mask {
         info!("Applying ATOI mask to m6A sites...");
-        filter_m6a_by_atoi_mask(&m6a_sites, &mask_data.mask, &gff_map);
+        filter_m6a_by_mask(&m6a_sites, &mask_data.mask, &gff_map);
         let n_sites_after: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
         info!(
             "Retained {} m6A sites after ATOI masking (removed {})",
             n_sites_after,
             n_sites_before - n_sites_after
+        );
+    }
+
+    // Apply SNP mask if available
+    if let Some(ref mask) = snp_mask {
+        let n_before: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
+        filter_m6a_by_mask(&m6a_sites, mask, &gff_map);
+        let n_after: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
+        info!(
+            "SNP masking: {} → {} m6A sites ({} removed)",
+            n_before,
+            n_after,
+            n_before - n_after
         );
     }
 
