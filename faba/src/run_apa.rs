@@ -190,6 +190,14 @@ pub struct CountApaArgs {
     )]
     pub(crate) atoi_mask_file: Option<Box<str>>,
 
+    #[arg(
+        long = "snp-mask",
+        help = "SNP mask parquet from `faba snp` to filter genetic variants",
+        long_help = "Path to snp_sites.parquet from `faba snp`. Poly(A) sites\n\
+                     at known SNP positions (het or hom-alt) are removed."
+    )]
+    pub(crate) snp_mask_file: Option<Box<str>>,
+
     // --- Simple-mode args ---
     /// Gene barcode BAM tag (simple mode)
     #[arg(

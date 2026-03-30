@@ -14,7 +14,9 @@ mod run_gene_count;
 mod run_m6a;
 mod run_pipeline;
 mod run_read_depth;
+mod run_snp;
 mod site_analysis;
+mod snp;
 
 use crate::common::*;
 use colored::Colorize;
@@ -24,6 +26,7 @@ use run_gene_count::*;
 use run_m6a::*;
 use run_pipeline::*;
 use run_read_depth::*;
+use run_snp::*;
 use site_analysis::metagene::*;
 use site_analysis::pileup::*;
 use site_analysis::scan_pwm::*;
@@ -81,6 +84,7 @@ Feature naming convention:\n\
   dartseq: gene_key/m6A/{component} (mixture), gene_key/m6A/{chr}:{pos} (site)\n\
   atoi:    gene_key/A2I/{component} (mixture), gene_key/A2I/{chr}:{pos} (site)\n\
   apa:     gene_key/pA/{component} (mixture), gene_key/pA/{chr}:{pos} (site)\n\n\
+  snp:     gene_key/SNP/{chr}:{pos} (alt allele count per cell)\n\n\
   Split on '/' to extract (gene_key, modality, detail) for cross-modal joins.\n\n\
 Use `faba <COMMAND> --help` for detailed options on each subcommand.")]
 struct Cli {
@@ -215,6 +219,53 @@ Example:\n  \
     )]
     Metagene(MetageneArgs),
 
+    #[command(name = "snp", aliases = ["genotype"],
+        about = "Discover and genotype SNP variants from BAM pileup",
+        long_about = "Discover and genotype SNP variants from BAM pileup\n\n\
+            Two modes of operation:\n\
+            1. De novo discovery (default): compare reads to reference genome,\n\
+               call variants where alt allele evidence exceeds thresholds.\n\
+            2. Known-site genotyping (--known-snps): force-call at VCF positions.\n\
+            Both modes can be combined.\n\n\
+            Supports 10x single-cell (per-cell allele counts + depth for BAF)\n\
+            and bulk WGS/RNA-seq modes.\n\n\
+            Outputs:\n\
+            - snp_sites.parquet: genotype calls with allele counts and GQ\n\
+            - {batch}_snp_alt.zarr: per-cell alt allele count matrix (10x)\n\
+            - {batch}_snp_depth.zarr: per-cell total depth matrix (10x)\n\
+            BAF = alt / depth per cell per site.\n\n\
+            Uses a binomial genotype likelihood model (cellSNP-lite;\n\
+            Huang & Huang, Bioinformatics 2021).\n\n\
+            The SNP mask output can be used with --snp-mask in `faba atoi`,\n\
+            `faba dartseq`, and `faba apa` to filter genetic variants that\n\
+            masquerade as base modifications.",
+        after_long_help = "\
+Example:\n  \
+  # De novo discovery\n  \
+  faba snp sample.bam -f genome.fa -g genes.gff -o out/\n\n  \
+  # Known-site genotyping only\n  \
+  faba snp sample.bam -f genome.fa --known-snps dbsnp.vcf.gz -o out/ --skip-discovery\n\n  \
+  # Both: discover + force-call at known sites\n  \
+  faba snp sample.bam -f genome.fa --known-snps dbsnp.vcf.gz -g genes.gff -o out/\n\n  \
+  # Bulk mode (genotype calls only, no per-cell matrices)\n  \
+  faba snp sample.bam -f genome.fa -o out/ --bulk\n\n\
+Known SNP reference files:\n\n  \
+  dbSNP common variants (hg38):\n    \
+    wget https://ftp.ncbi.nih.gov/snp/organisms/human_9606/VCF/00-common_all.vcf.gz\n    \
+    wget https://ftp.ncbi.nih.gov/snp/organisms/human_9606/VCF/00-common_all.vcf.gz.tbi\n\n  \
+  1000 Genomes (hg38):\n    \
+    wget https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/\\\n      \
+    1000G_2504_high_coverage/working/20220422_3202_phased_SNV_INDEL_SV/\\\n      \
+    1kGP_high_coverage_Illumina.sites.vcf.gz\n\n  \
+  gnomAD v4 sites (hg38, per-chromosome):\n    \
+    wget https://storage.googleapis.com/gcp-public-data--gnomad/\\\n      \
+    release/4.1/vcf/genomes/gnomad.genomes.v4.1.sites.chr{1..22}.vcf.bgz\n\n  \
+  Mouse Genomes Project (mm10/mm39):\n    \
+    wget https://ftp.ebi.ac.uk/pub/databases/mousegenomes/\\\n      \
+    REL-2112-v8-SNPs_Indels/mgp_REL2021_snps.vcf.gz"
+    )]
+    Snp(SnpArgs),
+
     #[command(
         name = "all",
         aliases = ["pipeline", "full", "magic"],
@@ -256,6 +307,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Pwm(ref args) => run_scan_pwm(args)?,
         Commands::Pileup(ref args) => run_pileup(args)?,
         Commands::Metagene(ref args) => run_metagene(args)?,
+        Commands::Snp(ref args) => run_snp(args)?,
         Commands::All(ref args) => run_pipeline(args)?,
     }
 

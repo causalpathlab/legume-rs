@@ -16,6 +16,15 @@ impl Dna {
             _ => None,
         }
     }
+
+    pub fn to_byte(self) -> u8 {
+        match self {
+            Dna::A => b'A',
+            Dna::T => b'T',
+            Dna::G => b'G',
+            Dna::C => b'C',
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]

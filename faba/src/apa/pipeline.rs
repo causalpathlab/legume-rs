@@ -46,14 +46,14 @@ pub fn run_simple(args: &CountApaArgs) -> anyhow::Result<()> {
     // Apply A-to-I mask if provided
     if let Some(ref mask_file) = args.atoi_mask_file {
         use crate::editing::io::load_atoi_mask_from_parquet;
-        use crate::editing::mask::filter_polya_by_atoi_mask;
+        use crate::editing::mask::filter_polya_by_mask;
 
         info!("Loading A-to-I mask from {}", mask_file);
         let atoi_mask = load_atoi_mask_from_parquet(mask_file.as_ref())?;
         info!("Loaded A-to-I mask with {} positions", atoi_mask.len());
 
         let n_before: usize = gene_sites.iter().map(|x| x.value().len()).sum();
-        filter_polya_by_atoi_mask(&gene_sites, &atoi_mask, &gff_map);
+        filter_polya_by_mask(&gene_sites, &atoi_mask, &gff_map);
         let n_after: usize = gene_sites.iter().map(|x| x.value().len()).sum();
         info!(
             "A-to-I masking: {} → {} poly-A sites ({} removed)",
@@ -64,6 +64,30 @@ pub fn run_simple(args: &CountApaArgs) -> anyhow::Result<()> {
 
         if gene_sites.is_empty() {
             info!("no poly-A sites remaining after A-to-I masking");
+            return Ok(());
+        }
+    }
+
+    // Apply SNP mask if provided
+    if let Some(ref mask_file) = args.snp_mask_file {
+        use crate::editing::mask::filter_polya_by_mask;
+        use crate::snp::io::load_snp_mask_from_parquet;
+
+        info!("Loading SNP mask from {}", mask_file);
+        let snp_mask = load_snp_mask_from_parquet(mask_file.as_ref())?;
+
+        let n_before: usize = gene_sites.iter().map(|x| x.value().len()).sum();
+        filter_polya_by_mask(&gene_sites, &snp_mask, &gff_map);
+        let n_after: usize = gene_sites.iter().map(|x| x.value().len()).sum();
+        info!(
+            "SNP masking: {} → {} poly-A sites ({} removed)",
+            n_before,
+            n_after,
+            n_before - n_after
+        );
+
+        if gene_sites.is_empty() {
+            info!("no poly-A sites remaining after SNP masking");
             return Ok(());
         }
     }
