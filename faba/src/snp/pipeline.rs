@@ -4,8 +4,10 @@ use crate::data::dna::Dna;
 use crate::data::dna_stat_map::DnaBaseFreqMap;
 use crate::data::util_htslib::{fetch_reference_base, load_fasta_index};
 use crate::pipeline_util::create_gene_key_function;
-use crate::snp::genotyper::{find_top_alt_allele, genotype_site, GenotypeParams};
-use crate::snp::io::{build_snp_mask, write_snp_sites_parquet, KnownSnps};
+use crate::snp::genotyper::{find_top_alt_allele, genotype_site, GenotypeParams, SiteInput};
+use crate::snp::io::{
+    build_snp_mask, load_contigs_from_fai, write_snp_sites_parquet, write_snp_sites_vcf, KnownSnps,
+};
 use crate::snp::{SnpGenotype, SnpSite};
 
 use dashmap::DashMap;
@@ -28,6 +30,13 @@ pub struct SnpParams {
     pub backend: SparseIoBackend,
     pub output: Box<str>,
     pub bulk: bool,
+    /// UMI tag for deduplication (e.g., "UB"). None = no UMI dedup.
+    pub umi_tag: Option<Box<str>>,
+    /// Use per-base quality model (Li 2011) instead of constant error rate.
+    pub use_base_quality: bool,
+    /// Minimum VAF for a site to enter the SNP mask. Sites with lower VAF
+    /// (likely RNA editing, not germline SNPs) are excluded. None = no filter.
+    pub min_vaf: Option<f32>,
 }
 
 impl SnpParams {
@@ -37,6 +46,32 @@ impl SnpParams {
             SparseIoBackend::Zarr => format!("{}/{}.zarr", &self.output, batch_name),
         }
         .into_boxed_str()
+    }
+
+    /// Create a marginal DnaBaseFreqMap configured with this pipeline's thresholds,
+    /// UMI dedup, and quality accumulation settings.
+    pub fn new_freq_map(&self) -> DnaBaseFreqMap<'_> {
+        let mut m = DnaBaseFreqMap::new();
+        m.set_quality_thresholds(self.min_base_quality, self.min_mapping_quality);
+        if let Some(ref tag) = self.umi_tag {
+            m.set_umi_tag(tag);
+        }
+        m.set_use_base_quality(self.use_base_quality);
+        m
+    }
+
+    /// Create a per-cell DnaBaseFreqMap configured with this pipeline's thresholds
+    /// and UMI dedup settings.
+    pub fn new_freq_map_percell<'a>(
+        &self,
+        cell_membership: Option<&'a CellMembership>,
+    ) -> DnaBaseFreqMap<'a> {
+        let mut m = DnaBaseFreqMap::new_with_cell_barcode(&self.cell_barcode_tag, cell_membership);
+        m.set_quality_thresholds(self.min_base_quality, self.min_mapping_quality);
+        if let Some(ref tag) = self.umi_tag {
+            m.set_umi_tag(tag);
+        }
+        m
     }
 }
 
@@ -86,8 +121,7 @@ pub fn pileup_known_snps_by_gene(
                 return Ok(());
             }
 
-            let mut freq_map = DnaBaseFreqMap::new();
-            freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+            let mut freq_map = params.new_freq_map();
             freq_map.set_position_filter(gene_positions.clone());
 
             for bam_file in &params.bam_files {
@@ -102,18 +136,23 @@ pub fn pileup_known_snps_by_gene(
             let freq = freq_map
                 .marginal_frequency_map()
                 .ok_or_else(|| anyhow::anyhow!("expected marginal frequency map"))?;
+            let qual_map = freq_map.quality_map();
 
             let mut local_sites = Vec::new();
             for &pos in &gene_positions {
                 if let Some(&(ref_allele, alt_allele, ref rsid)) = chr_snps.get(&pos) {
                     let counts = freq.get(&pos).cloned().unwrap_or_default();
+                    let qual = qual_map.get(&pos);
                     let site = genotype_site(
-                        chr.into(),
-                        pos,
-                        ref_allele,
-                        alt_allele,
-                        rsid.clone(),
-                        counts,
+                        SiteInput {
+                            chr: chr.into(),
+                            pos,
+                            ref_allele,
+                            alt_allele,
+                            rsid: rsid.clone(),
+                            counts,
+                            qual: qual.cloned(),
+                        },
                         &params.genotype_params,
                     );
                     local_sites.push(site);
@@ -181,8 +220,7 @@ pub fn pileup_known_snps_by_region(
                 stop: max_pos + 1,
             };
 
-            let mut freq_map = DnaBaseFreqMap::new();
-            freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+            let mut freq_map = params.new_freq_map();
             freq_map.set_position_filter(positions.clone());
 
             for bam_file in &params.bam_files {
@@ -192,17 +230,22 @@ pub fn pileup_known_snps_by_region(
             let freq = freq_map
                 .marginal_frequency_map()
                 .ok_or_else(|| anyhow::anyhow!("expected marginal frequency map"))?;
+            let qual_map = freq_map.quality_map();
 
             let mut local_sites = Vec::new();
             for (&pos, &(ref_allele, alt_allele, ref rsid)) in chr_snps.iter() {
                 let counts = freq.get(&pos).cloned().unwrap_or_default();
+                let qual = qual_map.get(&pos);
                 let site = genotype_site(
-                    chr.clone(),
-                    pos,
-                    ref_allele,
-                    alt_allele,
-                    rsid.clone(),
-                    counts,
+                    SiteInput {
+                        chr: chr.clone(),
+                        pos,
+                        ref_allele,
+                        alt_allele,
+                        rsid: rsid.clone(),
+                        counts,
+                        qual: qual.cloned(),
+                    },
                     &params.genotype_params,
                 );
                 local_sites.push(site);
@@ -252,8 +295,7 @@ pub fn discover_snps_by_gene(
             let faidx = load_fasta_index(&params.genome_file)?;
 
             // Pileup all positions in the gene (no position filter)
-            let mut freq_map = DnaBaseFreqMap::new();
-            freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+            let mut freq_map = params.new_freq_map();
 
             for bam_file in &params.bam_files {
                 freq_map.update_from_gene(
@@ -267,6 +309,7 @@ pub fn discover_snps_by_gene(
             let freq = freq_map
                 .marginal_frequency_map()
                 .ok_or_else(|| anyhow::anyhow!("expected marginal frequency map"))?;
+            let qual_map = freq_map.quality_map();
 
             let gp = &params.genotype_params;
             let mut local_sites = Vec::new();
@@ -277,14 +320,12 @@ pub fn discover_snps_by_gene(
                     continue;
                 }
 
-                // Fetch reference base at this position
                 let ref_dna = match fetch_reference_base(&faidx, chr, pos)? {
                     Some(b) => b,
                     None => continue,
                 };
                 let ref_byte = ref_dna.to_byte();
 
-                // Find top non-reference allele
                 let (alt_byte, alt_count) = match find_top_alt_allele(counts, ref_byte) {
                     Some(x) => x,
                     None => continue,
@@ -297,13 +338,17 @@ pub fn discover_snps_by_gene(
                     continue;
                 }
 
+                let qual = qual_map.get(&pos);
                 let site = genotype_site(
-                    chr.into(),
-                    pos,
-                    ref_byte,
-                    alt_byte,
-                    None, // no rsID for discovered variants
-                    counts.clone(),
+                    SiteInput {
+                        chr: chr.into(),
+                        pos,
+                        ref_allele: ref_byte,
+                        alt_allele: alt_byte,
+                        rsid: None,
+                        counts: counts.clone(),
+                        qual: qual.cloned(),
+                    },
                     gp,
                 );
                 local_sites.push(site);
@@ -358,8 +403,7 @@ pub fn discover_snps_by_region(params: &SnpParams) -> anyhow::Result<Vec<SnpSite
                 stop: *stop,
             };
 
-            let mut freq_map = DnaBaseFreqMap::new();
-            freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+            let mut freq_map = params.new_freq_map();
 
             for bam_file in &params.bam_files {
                 freq_map.update_from_region(bam_file, &bed)?;
@@ -368,6 +412,7 @@ pub fn discover_snps_by_region(params: &SnpParams) -> anyhow::Result<Vec<SnpSite
             let freq = freq_map
                 .marginal_frequency_map()
                 .ok_or_else(|| anyhow::anyhow!("expected marginal frequency map"))?;
+            let qual_map = freq_map.quality_map();
 
             let gp = &params.genotype_params;
             let mut local_sites = Vec::new();
@@ -396,13 +441,17 @@ pub fn discover_snps_by_region(params: &SnpParams) -> anyhow::Result<Vec<SnpSite
                     continue;
                 }
 
+                let qual = qual_map.get(&pos);
                 let site = genotype_site(
-                    chr.clone(),
-                    pos,
-                    ref_byte,
-                    alt_byte,
-                    None,
-                    counts.clone(),
+                    SiteInput {
+                        chr: chr.clone(),
+                        pos,
+                        ref_allele: ref_byte,
+                        alt_allele: alt_byte,
+                        rsid: None,
+                        counts: counts.clone(),
+                        qual: qual.cloned(),
+                    },
                     gp,
                 );
                 local_sites.push(site);
@@ -467,9 +516,7 @@ pub fn gather_snp_allele_counts_by_gene(
 
             let positions: FxHashSet<i64> = sites.iter().map(|s| s.pos).collect();
 
-            let mut stat_map =
-                DnaBaseFreqMap::new_with_cell_barcode(&params.cell_barcode_tag, cell_membership);
-            stat_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+            let mut stat_map = params.new_freq_map_percell(cell_membership);
             stat_map.set_position_filter(positions);
 
             stat_map.update_from_gene(
@@ -619,8 +666,20 @@ pub fn run_snp_pipeline(
     write_snp_sites_parquet(&all_sites, &parquet_path)?;
     info!("Wrote {}", parquet_path);
 
+    // Write VCF.gz
+    match load_contigs_from_fai(&params.genome_file) {
+        Ok(contigs) => {
+            let vcf_path = format!("{}/snp_sites.vcf.gz", params.output);
+            match write_snp_sites_vcf(&all_sites, &vcf_path, &contigs) {
+                Ok(()) => info!("Wrote {}", vcf_path),
+                Err(e) => log::warn!("Failed to write VCF: {}", e),
+            }
+        }
+        Err(e) => log::warn!("Cannot load .fai for VCF contigs: {}", e),
+    }
+
     // Build mask
-    let snp_mask = build_snp_mask(&all_sites, params.genotype_params.min_gq);
+    let snp_mask = build_snp_mask(&all_sites, params.genotype_params.min_gq, params.min_vaf);
     info!("SNP mask: {} variant positions", snp_mask.len());
 
     // Pass 2: Per-cell allele counts (single-cell mode only)

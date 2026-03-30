@@ -25,6 +25,23 @@ impl Dna {
             Dna::C => b'C',
         }
     }
+
+    /// Array index: A=0, T=1, G=2, C=3.
+    #[inline]
+    pub fn to_index(self) -> usize {
+        match self {
+            Dna::A => 0,
+            Dna::T => 1,
+            Dna::G => 2,
+            Dna::C => 3,
+        }
+    }
+
+    /// Array index from raw byte. Returns None for non-ATGC bytes.
+    #[inline]
+    pub fn byte_to_index(b: u8) -> Option<usize> {
+        Self::from_byte(b).map(|d| d.to_index())
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
@@ -52,21 +69,13 @@ impl DnaBaseCount {
 
     pub fn add(&mut self, b: Option<&Dna>, val: usize) {
         if let Some(base) = b {
-            match base {
-                Dna::A => self.data[0].1 += val,
-                Dna::T => self.data[1].1 += val,
-                Dna::G => self.data[2].1 += val,
-                Dna::C => self.data[3].1 += val,
-            }
+            self.data[base.to_index()].1 += val;
         }
     }
 
     pub fn get(&self, b: Option<&Dna>) -> usize {
         match b {
-            Some(Dna::A) => self.data[0].1,
-            Some(Dna::T) => self.data[1].1,
-            Some(Dna::G) => self.data[2].1,
-            Some(Dna::C) => self.data[3].1,
+            Some(base) => self.data[base.to_index()].1,
             None => 0,
         }
     }
@@ -89,6 +98,109 @@ impl DnaBaseCount {
 
     pub fn total(&self) -> usize {
         self.data[0].1 + self.data[1].1 + self.data[2].1 + self.data[3].1
+    }
+}
+
+/// Precomputed log-likelihood terms for a single Phred quality score.
+struct PhredEntry {
+    log_correct: f64, // log(1 - ε)
+    log_error3: f64,  // log(ε / 3)
+    log_het: f64,     // log(0.5 * (1 - 2ε/3))
+}
+
+static PHRED_TABLE: std::sync::LazyLock<[PhredEntry; 256]> = std::sync::LazyLock::new(|| {
+    let zero = PhredEntry {
+        log_correct: 0.0,
+        log_error3: 0.0,
+        log_het: 0.0,
+    };
+    // Initialize with zeros, then fill
+    let mut table: [PhredEntry; 256] = std::array::from_fn(|_| PhredEntry { ..zero });
+    for (q, entry) in table.iter_mut().enumerate() {
+        let eps = (10.0_f64)
+            .powf(-(q as f64) / 10.0)
+            .clamp(1e-10, 1.0 - 1e-10);
+        entry.log_correct = (1.0 - eps).ln();
+        entry.log_error3 = (eps / 3.0).ln();
+        entry.log_het = (0.5 * (1.0 - 2.0 * eps / 3.0)).ln();
+    }
+    table
+});
+
+/// Per-base quality accumulator for the Li 2011 genotype likelihood model.
+///
+/// For each base b ∈ {A, T, G, C}, accumulates log-likelihood terms from
+/// individual read quality scores so that genotype likelihoods can be computed
+/// in O(1) at call time without storing per-read data.
+///
+/// Given a read with base b and Phred quality q, ε = 10^(-q/10):
+///   sum_log_correct[b] += log(1 - ε)       — read matches true allele
+///   sum_log_error3[b]  += log(ε / 3)        — read is a sequencing error
+///   sum_log_het[b]     += log(0.5·(1-2ε/3)) — read from a het (ref or alt)
+///
+/// Reference: Li H, Bioinformatics 27(21):2987-2993, 2011.
+#[derive(Clone, Debug)]
+pub struct DnaBaseQual {
+    sum_log_correct: [f64; 4],
+    sum_log_error3: [f64; 4],
+    sum_log_het: [f64; 4],
+}
+
+impl Default for DnaBaseQual {
+    fn default() -> Self {
+        Self {
+            sum_log_correct: [0.0; 4],
+            sum_log_error3: [0.0; 4],
+            sum_log_het: [0.0; 4],
+        }
+    }
+}
+
+impl DnaBaseQual {
+    /// Accumulate one base observation with its Phred quality score.
+    #[inline]
+    pub fn add(&mut self, base: Option<&Dna>, phred: u8) {
+        let idx = match base {
+            Some(b) => b.to_index(),
+            None => return,
+        };
+        let entry = &PHRED_TABLE[phred as usize];
+        self.sum_log_correct[idx] += entry.log_correct;
+        self.sum_log_error3[idx] += entry.log_error3;
+        self.sum_log_het[idx] += entry.log_het;
+    }
+
+    /// Compute quality-weighted log-likelihood for homozygous genotype.
+    pub fn ll_hom(&self, allele: u8) -> f64 {
+        let target = match Dna::byte_to_index(allele) {
+            Some(i) => i,
+            None => return f64::NEG_INFINITY,
+        };
+        let mut ll = self.sum_log_correct[target];
+        for (i, &v) in self.sum_log_error3.iter().enumerate() {
+            if i != target {
+                ll += v;
+            }
+        }
+        ll
+    }
+
+    /// Compute quality-weighted log-likelihood for het genotype.
+    pub fn ll_het(&self, ref_allele: u8, alt_allele: u8) -> f64 {
+        let (ri, ai) = match (
+            Dna::byte_to_index(ref_allele),
+            Dna::byte_to_index(alt_allele),
+        ) {
+            (Some(r), Some(a)) => (r, a),
+            _ => return f64::NEG_INFINITY,
+        };
+        let mut ll = self.sum_log_het[ri] + self.sum_log_het[ai];
+        for (i, &v) in self.sum_log_error3.iter().enumerate() {
+            if i != ri && i != ai {
+                ll += v;
+            }
+        }
+        ll
     }
 }
 
