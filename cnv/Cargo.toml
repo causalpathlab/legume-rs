@@ -1,0 +1,27 @@
+[package]
+name = "cnv"
+license.workspace = true
+authors.workspace = true
+description = "Copy number variation detection from single-cell expression data"
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+version = "0.1.0"
+
+[lib]
+name = "cnv"
+path = "src/lib.rs"
+
+[dependencies]
+nalgebra = { workspace = true }
+matrix-util = { workspace = true }
+mcmc-util = { workspace = true }
+log = { workspace = true }
+anyhow = { workspace = true }
+rayon = { workspace = true }
+rustc-hash = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
