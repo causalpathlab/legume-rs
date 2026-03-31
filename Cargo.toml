@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
+	"cnv",
 	"data-beans",
 	"data-beans-alg",
 	"matrix-util",
@@ -69,6 +70,7 @@ clustering = { version = "0.2.1", features = ["parallel"] }
 colored = { version = "2" }
 ctrlc = { version = "3", features = ["termination"] }
 
+cnv = { path = "cnv" }
 data-beans = { path = "data-beans"}
 data-beans-alg = { path = "data-beans-alg"}
 matrix-param = { path = "matrix-param" }

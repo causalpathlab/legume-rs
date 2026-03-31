@@ -212,6 +212,11 @@ fn simulate() -> anyhow::Result<()> {
         hierarchical_depth: None,
         n_housekeeping: 0,
         housekeeping_fold: 10.0,
+        n_chromosomes: 0,
+        cnv_events_per_chr: 0.5,
+        cnv_block_frac: 0.15,
+        cnv_gain_fold: 2.0,
+        cnv_loss_fold: 0.5,
     };
 
     let mtx_file = create_temp_dir_file(".mtx.gz")?;

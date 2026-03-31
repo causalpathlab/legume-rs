@@ -34,6 +34,8 @@ pub(crate) fn sample_theta_kn(
 }
 
 /// Sample Poisson count triplets from `Y(i,j) ~ Poisson(depth * delta(i,B(j)) * sum_k beta(i,k) * theta(k,j))`.
+///
+/// CNV effects should be pre-multiplied into `beta_dk` before calling.
 pub(crate) fn sample_poisson_triplets(
     beta_dk: &DMatrix<f32>,
     theta_kn: &DMatrix<f32>,
@@ -47,7 +49,6 @@ pub(crate) fn sample_poisson_triplets(
     let eps = 1e-8_f32;
     let threshold = 0.5_f32;
     let has_batch = delta_db.is_some();
-
     theta_kn
         .column_iter()
         .enumerate()
@@ -109,6 +110,21 @@ pub struct SimArgs {
     /// Expression fold-change of housekeeping genes relative to the mean
     /// topic-specific gene. Default: 10.0
     pub housekeeping_fold: f32,
+    /// CNV simulation: number of chromosomes to distribute genes across.
+    /// Set to 0 to disable CNV simulation. Default: 0.
+    pub n_chromosomes: usize,
+    /// CNV simulation: expected number of CNV events per chromosome.
+    /// Default: 0.5
+    pub cnv_events_per_chr: f32,
+    /// CNV simulation: mean block size as fraction of genes per chromosome.
+    /// Default: 0.15
+    pub cnv_block_frac: f32,
+    /// CNV simulation: fold-change for gain events (e.g., 2.0 = 2x expression).
+    /// Default: 2.0
+    pub cnv_gain_fold: f32,
+    /// CNV simulation: fold-change for loss events (e.g., 0.5 = half expression).
+    /// Default: 0.5
+    pub cnv_loss_fold: f32,
 }
 
 pub struct SimOut {
@@ -119,6 +135,97 @@ pub struct SimOut {
     pub triplets: Vec<(u64, u64, f32)>,
     /// If hierarchical: all node probabilities [D, num_nodes] (1-indexed by column)
     pub hierarchy_node_probs: Option<DMatrix<f32>>,
+    /// CNV: per-gene chromosome assignment (length D). None if n_chromosomes == 0.
+    pub gene_chromosomes: Option<Vec<Box<str>>>,
+    /// CNV: per-gene position within chromosome (length D). None if n_chromosomes == 0.
+    pub gene_positions: Option<Vec<u64>>,
+    /// CNV: per-gene CN state (0=loss, 1=neutral, 2=gain). None if n_chromosomes == 0.
+    pub cnv_states: Option<Vec<u8>>,
+}
+
+/// CNV block simulation output.
+pub(crate) struct CnvSimOut {
+    pub(crate) cnv_multiplier: Vec<f32>,
+    pub(crate) cnv_states: Vec<u8>,
+    pub(crate) chromosomes: Vec<Box<str>>,
+    pub(crate) positions: Vec<u64>,
+}
+
+pub(crate) struct CnvSimParams {
+    pub(crate) n_genes: usize,
+    pub(crate) n_chr: usize,
+    pub(crate) events_per_chr: f32,
+    pub(crate) block_frac: f32,
+    pub(crate) gain_fold: f32,
+    pub(crate) loss_fold: f32,
+}
+
+/// Generate CNV blocks: assign genes to chromosomes with positions,
+/// then place contiguous gain/loss events.
+pub(crate) fn sample_cnv_blocks(params: &CnvSimParams, rng: &mut impl rand::Rng) -> CnvSimOut {
+    let dd = params.n_genes;
+    let n_chr = params.n_chr;
+    let genes_per_chr = dd / n_chr;
+    let spacing = 10_000u64; // bp between genes
+
+    let mut chromosomes = Vec::with_capacity(dd);
+    let mut positions = Vec::with_capacity(dd);
+    let mut cnv_states = vec![1u8; dd]; // neutral by default
+    let mut cnv_multiplier = vec![1.0f32; dd];
+
+    let poisson_events =
+        Poisson::new(params.events_per_chr as f64).unwrap_or_else(|_| Poisson::new(0.5).unwrap());
+
+    for chr_idx in 0..n_chr {
+        let chr_name: Box<str> = format!("chr{}", chr_idx + 1).into();
+        let chr_start = chr_idx * genes_per_chr;
+        let chr_end = if chr_idx == n_chr - 1 {
+            dd
+        } else {
+            (chr_idx + 1) * genes_per_chr
+        };
+        let chr_len = chr_end - chr_start;
+
+        for g in chr_start..chr_end {
+            chromosomes.push(chr_name.clone());
+            positions.push((g - chr_start) as u64 * spacing);
+        }
+
+        // Sample number of CNV events on this chromosome
+        let n_events = poisson_events.sample(rng) as usize;
+        let block_size = ((chr_len as f32 * params.block_frac) as usize).max(3);
+
+        for _ in 0..n_events {
+            let start = rng.random_range(0..chr_len);
+            let end = (start + block_size).min(chr_len);
+            let is_gain: bool = rng.random_bool(0.5);
+            let (state, mult) = if is_gain {
+                (2u8, params.gain_fold)
+            } else {
+                (0u8, params.loss_fold)
+            };
+
+            for g in (chr_start + start)..(chr_start + end) {
+                cnv_states[g] = state;
+                cnv_multiplier[g] = mult;
+            }
+        }
+    }
+
+    info!(
+        "CNV simulation: {} genes, {} chromosomes, {} gain, {} loss",
+        dd,
+        n_chr,
+        cnv_states.iter().filter(|&&s| s == 2).count(),
+        cnv_states.iter().filter(|&&s| s == 0).count(),
+    );
+
+    CnvSimOut {
+        cnv_multiplier,
+        cnv_states,
+        chromosomes,
+        positions,
+    }
 }
 
 /// Generate a simulated dataset with a factored gamma model
@@ -283,7 +390,37 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
 
     let theta_kn = sample_theta_kn(kk, nn, pve_topic, &mut rng)?;
 
-    // 4. putting them all together
+    // 4. CNV simulation (optional)
+    let cnv_out = if args.n_chromosomes > 0 {
+        Some(sample_cnv_blocks(
+            &CnvSimParams {
+                n_genes: dd,
+                n_chr: args.n_chromosomes,
+                events_per_chr: args.cnv_events_per_chr,
+                block_frac: args.cnv_block_frac,
+                gain_fold: args.cnv_gain_fold,
+                loss_fold: args.cnv_loss_fold,
+            },
+            &mut rng,
+        ))
+    } else {
+        None
+    };
+    // Pre-multiply CNV into dictionary if present
+    let beta_dk = if let Some(ref cnv) = cnv_out {
+        let mut beta = beta_dk;
+        for i in 0..dd {
+            let scale = cnv.cnv_multiplier[i];
+            for k in 0..kk {
+                beta[(i, k)] *= scale;
+            }
+        }
+        beta
+    } else {
+        beta_dk
+    };
+
+    // 5. putting them all together
     let delta_ref = if bb > 1 { Some(&delta_db) } else { None };
     let triplets = sample_poisson_triplets(
         &beta_dk,
@@ -300,6 +437,15 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
         triplets.len()
     );
 
+    let (gene_chromosomes, gene_positions, cnv_states) = match cnv_out {
+        Some(cnv) => (
+            Some(cnv.chromosomes),
+            Some(cnv.positions),
+            Some(cnv.cnv_states),
+        ),
+        None => (None, None, None),
+    };
+
     Ok(SimOut {
         ln_delta_db,
         beta_dk,
@@ -307,6 +453,9 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
         batch_membership,
         triplets,
         hierarchy_node_probs,
+        gene_chromosomes,
+        gene_positions,
+        cnv_states,
     })
 }
 

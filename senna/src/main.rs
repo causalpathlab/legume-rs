@@ -3,6 +3,7 @@ mod embed_common;
 mod feature_selection;
 mod fit_annotate_topic;
 mod fit_clustering;
+mod fit_cnv;
 mod fit_indexed_topic;
 mod fit_joint_svd;
 mod fit_joint_topic;
@@ -18,6 +19,7 @@ mod visualization_alg;
 use embed_common::*;
 use fit_annotate_topic::*;
 use fit_clustering::*;
+use fit_cnv::*;
 use fit_indexed_topic::*;
 use fit_joint_svd::*;
 use fit_joint_topic::*;
@@ -178,6 +180,17 @@ enum Commands {
 		     Output: cluster assignments in parquet format"
     )]
     Clustering(ClusteringArgs),
+
+    #[command(
+        about = "CNV calling from single-cell expression data",
+        long_about = "Detect copy number variations from expression data:\n\
+		      (1) Collapse sparse data into pseudobulk with batch adjustment\n\
+		      (2) Genome-order genes, greedy coarsening by correlation\n\
+		      (3) Mixture Gibbs HMM (ESS + forward-backward) on coarsened blocks\n\
+		      (4) Output Viterbi states and posteriors per gene\n\n\
+		      Requires a GFF/GTF annotation file for gene coordinates."
+    )]
+    Cnv(CnvStandaloneArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -218,6 +231,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Clustering(args) => {
             run_clustering(args)?;
+        }
+        Commands::Cnv(args) => {
+            run_cnv_standalone(args)?;
         }
     }
 
