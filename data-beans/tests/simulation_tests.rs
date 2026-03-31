@@ -17,6 +17,11 @@ fn sparse_matrix_simulation_and_loading() -> anyhow::Result<()> {
         hierarchical_depth: None,
         n_housekeeping: 0,
         housekeeping_fold: 10.0,
+        n_chromosomes: 0,
+        cnv_events_per_chr: 0.5,
+        cnv_block_frac: 0.15,
+        cnv_gain_fold: 2.0,
+        cnv_loss_fold: 0.5,
     };
 
     let _out = generate_factored_poisson_gamma_data(&args)?;
@@ -45,6 +50,11 @@ fn hierarchical_simulation_and_loading() -> anyhow::Result<()> {
         hierarchical_depth: Some(3), // K = 2^(3-1) = 4 leaf topics
         n_housekeeping: 0,
         housekeeping_fold: 10.0,
+        n_chromosomes: 0,
+        cnv_events_per_chr: 0.5,
+        cnv_block_frac: 0.15,
+        cnv_gain_fold: 2.0,
+        cnv_loss_fold: 0.5,
     };
 
     let out = generate_factored_poisson_gamma_data(&args)?;
@@ -138,6 +148,69 @@ fn multimodal_simulation() -> anyhow::Result<()> {
     // Reference vs non-reference dictionaries should differ
     let diff = (&out.beta_dk[0] - &out.beta_dk[1]).abs().sum();
     assert!(diff > 0.0, "dictionaries should differ between modalities");
+
+    Ok(())
+}
+
+#[test]
+fn cnv_simulation_ground_truth() -> anyhow::Result<()> {
+    // Simulate with strong CNV effects: 500 genes, 3 chromosomes, 2000 cells, 3 topics
+    let args = SimArgs {
+        rows: 500,
+        cols: 2000,
+        depth: 200,
+        factors: 3,
+        batches: 2,
+        overdisp: 1.0,
+        pve_topic: 0.8,
+        pve_batch: 0.3,
+        rseed: 42,
+        hierarchical_depth: None,
+        n_housekeeping: 0,
+        housekeeping_fold: 10.0,
+        n_chromosomes: 3,
+        cnv_events_per_chr: 1.0,
+        cnv_block_frac: 0.2,
+        cnv_gain_fold: 2.0,
+        cnv_loss_fold: 0.5,
+    };
+
+    let out = generate_factored_poisson_gamma_data(&args)?;
+
+    // Should have CNV output
+    let states = out.cnv_states.as_ref().unwrap();
+    let chroms = out.gene_chromosomes.as_ref().unwrap();
+    let positions = out.gene_positions.as_ref().unwrap();
+
+    assert_eq!(states.len(), 500);
+    assert_eq!(chroms.len(), 500);
+    assert_eq!(positions.len(), 500);
+
+    // Should have some non-neutral genes
+    let n_gain = states.iter().filter(|&&s| s == 2).count();
+    let n_loss = states.iter().filter(|&&s| s == 0).count();
+    let n_neutral = states.iter().filter(|&&s| s == 1).count();
+    eprintln!(
+        "CNV states: {} gain, {} loss, {} neutral",
+        n_gain, n_loss, n_neutral
+    );
+    assert!(n_gain + n_loss > 0, "should have some CNV events");
+    assert!(n_neutral > 0, "should have some neutral genes");
+
+    // Genes on the same chromosome should have contiguous positions
+    for chr_idx in 0..3 {
+        let chr_name: Box<str> = format!("chr{}", chr_idx + 1).into();
+        let chr_positions: Vec<u64> = (0..500)
+            .filter(|&g| chroms[g] == chr_name)
+            .map(|g| positions[g])
+            .collect();
+        // Positions should be monotonically increasing
+        for w in chr_positions.windows(2) {
+            assert!(w[0] < w[1], "positions should be sorted within chromosome");
+        }
+    }
+
+    assert!(!out.triplets.is_empty());
 
     Ok(())
 }

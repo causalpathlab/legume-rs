@@ -191,6 +191,11 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         hierarchical_depth: cmd_args.hierarchical_depth,
         n_housekeeping: cmd_args.n_housekeeping,
         housekeeping_fold: cmd_args.housekeeping_fold,
+        n_chromosomes: 0,
+        cnv_events_per_chr: 0.5,
+        cnv_block_frac: 0.15,
+        cnv_gain_fold: 2.0,
+        cnv_loss_fold: 0.5,
     };
 
     let sim = simulate::generate_factored_poisson_gamma_data(&sim_args)?;

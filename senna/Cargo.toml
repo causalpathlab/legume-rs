@@ -18,8 +18,10 @@ path = "src/main.rs"
 
 [dependencies]
 auxiliary-data = { workspace = true }
+cnv = { workspace = true }
 data-beans = { workspace = true }
 data-beans-alg = { workspace = true }
+genomic-data = { workspace = true }
 candle-util = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
