@@ -61,6 +61,7 @@ fn test_susie_example_multilevel() -> Result<()> {
             k,
             config,
             gate_epsilon: None,
+            has_null: false,
         },
         block_size,
     };
@@ -214,6 +215,7 @@ fn test_n_much_less_than_p() -> Result<()> {
             k,
             config: config_ml,
             gate_epsilon: None,
+            has_null: false,
         },
         block_size: 100, // 2000 → 20 groups → terminal
     };

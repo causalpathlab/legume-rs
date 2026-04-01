@@ -47,7 +47,7 @@ impl TSne {
         let y_init: Vec<f32> = match init {
             Some(coords) => coords.to_vec(),
             None => {
-                use rand::Rng;
+                use rand::RngExt;
                 let mut rng = rand::rng();
                 (0..n * 2).map(|_| rng.random::<f32>() * 0.01).collect()
             }

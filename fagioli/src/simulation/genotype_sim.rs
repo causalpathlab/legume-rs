@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use nalgebra::DMatrix;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_distr::{Distribution, Poisson, Uniform};
 
 use crate::genotype::GenotypeMatrix;

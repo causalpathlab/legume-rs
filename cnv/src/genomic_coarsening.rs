@@ -49,14 +49,10 @@ impl GenomicCoarsening {
         let s = log_resid.ncols();
         let mut out = DMatrix::<f32>::zeros(self.num_blocks(), s);
         for (b, block) in self.blocks.iter().enumerate() {
-            let n = block.len() as f32;
-            if n > 0.0 {
-                for g in block.start..block.end {
-                    for j in 0..s {
-                        out[(b, j)] += log_resid[(g, j)];
-                    }
-                }
-                out.row_mut(b).scale_mut(1.0 / n);
+            let n = block.len();
+            if n > 0 {
+                out.row_mut(b)
+                    .copy_from(&log_resid.rows(block.start, n).row_mean());
             }
         }
         out
@@ -281,9 +277,12 @@ pub fn greedy_coarsen(
         // Merge r into l
         let new_size = sizes[l] + sizes[r];
         // Update profile: weighted mean
-        for s in 0..n_samples {
-            profiles[l][s] = (profiles[l][s] * sizes[l] as f32 + profiles[r][s] * sizes[r] as f32)
-                / new_size as f32;
+        let r_profile: Vec<f32> = profiles[r][..n_samples].to_vec();
+        let wl = sizes[l] as f32;
+        let wr = sizes[r] as f32;
+        let wt = new_size as f32;
+        for (pl, &pr) in profiles[l][..n_samples].iter_mut().zip(&r_profile) {
+            *pl = (*pl * wl + pr * wr) / wt;
         }
         ranges[l].1 = ranges[r].1;
         sizes[l] = new_size;

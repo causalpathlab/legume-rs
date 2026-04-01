@@ -147,8 +147,8 @@ impl VariantTree {
                 // Build mask
                 let mut mask = vec![vec![false; max_children]; num_groups];
                 for g in 0..num_groups {
-                    for idx in 0..group_children[g].len() {
-                        mask[g][idx] = true;
+                    for m in mask[g].iter_mut().take(group_children[g].len()) {
+                        *m = true;
                     }
                 }
 

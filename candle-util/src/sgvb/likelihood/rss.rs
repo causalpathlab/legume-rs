@@ -182,24 +182,18 @@ impl RssSvd {
         let mean_x: f32 = d_sq.iter().sum::<f32>() / k as f32;
         let var_x: f32 = d_sq.iter().map(|&x| (x - mean_x) * (x - mean_x)).sum();
 
-        let mut intercepts = Vec::with_capacity(num_traits);
-        let mut slopes = Vec::with_capacity(num_traits);
-
-        for tt in 0..num_traits {
-            // y²_k for this trait
-            let y2: Vec<f32> = (0..k).map(|kk| y_raw[kk][tt] * y_raw[kk][tt]).collect();
-            let mean_y: f32 = y2.iter().sum::<f32>() / k as f32;
-
-            let cov: f32 = (0..k)
-                .map(|kk| (d_sq[kk] - mean_x) * (y2[kk] - mean_y))
-                .sum();
-
-            let slope = if var_x > 1e-12 { cov / var_x } else { 0.0 };
-            let intercept = (mean_y - slope * mean_x).max(1.0);
-
-            intercepts.push(intercept);
-            slopes.push(slope);
-        }
+        let (intercepts, slopes): (Vec<f32>, Vec<f32>) = (0..num_traits)
+            .map(|tt| {
+                let y2: Vec<f32> = (0..k).map(|kk| y_raw[kk][tt] * y_raw[kk][tt]).collect();
+                let mean_y: f32 = y2.iter().sum::<f32>() / k as f32;
+                let cov: f32 = (0..k)
+                    .map(|kk| (d_sq[kk] - mean_x) * (y2[kk] - mean_y))
+                    .sum();
+                let slope = if var_x > 1e-12 { cov / var_x } else { 0.0 };
+                let intercept = (mean_y - slope * mean_x).max(1.0);
+                (intercept, slope)
+            })
+            .unzip();
 
         (intercepts, slopes)
     }
@@ -234,11 +228,13 @@ impl RssSvd {
                 }
                 let coeff = 1.0 - dk2; // dσ²/dλ
                 let inv_s = 1.0 / sigma_sq;
-                let mut sum_y2 = 0.0f64;
-                for tt in 0..t {
-                    let y = y_raw[kk][tt] as f64;
-                    sum_y2 += y * y;
-                }
+                let sum_y2: f64 = y_raw[kk][..t]
+                    .iter()
+                    .map(|&y| {
+                        let y = y as f64;
+                        y * y
+                    })
+                    .sum();
                 g += coeff * (t as f64 * inv_s - sum_y2 * inv_s * inv_s);
             }
             0.5 * g
@@ -620,7 +616,7 @@ mod tests {
         // For each trait, y_kt ~ N(0, h*d²_k + a), so y²_kt ~ (h*d²_k + a) * chi²(1)
         // With many eigenvalues, the OLS should recover (a, h) reasonably.
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
         let mut rng = StdRng::seed_from_u64(42);
 
         let y_raw: Vec<Vec<f32>> = (0..k)
@@ -681,7 +677,7 @@ mod tests {
         let d_sq: Vec<f32> = (0..k).map(|i| 0.5 + 5.0 * (i as f32 / k as f32)).collect();
 
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
         let mut rng = StdRng::seed_from_u64(123);
 
         // y ~ N(0, 1) — no LD-driven signal, no inflation

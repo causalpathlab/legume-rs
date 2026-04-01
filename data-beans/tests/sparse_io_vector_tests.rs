@@ -413,8 +413,8 @@ fn register_batches_and_metadata() -> anyhow::Result<()> {
     assert_eq!(names.len(), 2);
 
     let name_map = vec.batch_name_map().unwrap();
-    assert!(name_map.contains_key("batch0".into()));
-    assert!(name_map.contains_key("batch1".into()));
+    assert!(name_map.contains_key::<Box<str>>(&"batch0".into()));
+    assert!(name_map.contains_key::<Box<str>>(&"batch1".into()));
 
     // Check batch membership roundtrip
     let membership = vec.get_batch_membership(0..ncol);

@@ -131,27 +131,22 @@ impl RssSvdNal {
         let mean_x: f32 = d_sq.iter().sum::<f32>() / k as f32;
         let var_x: f32 = d_sq.iter().map(|&x| (x - mean_x) * (x - mean_x)).sum();
 
-        let mut intercepts = Vec::with_capacity(num_traits);
-        let mut slopes = Vec::with_capacity(num_traits);
-
-        for tt in 0..num_traits {
-            let y2: Vec<f32> = (0..k).map(|kk| y_raw[kk][tt] * y_raw[kk][tt]).collect();
-            let mean_y: f32 = y2.iter().sum::<f32>() / k as f32;
-
-            let cov: f32 = (0..k)
-                .map(|kk| (d_sq[kk] - mean_x) * (y2[kk] - mean_y))
-                .sum();
-
-            let slope = if var_x.abs() > 1e-12 {
-                cov / var_x
-            } else {
-                0.0
-            };
-            let intercept = (mean_y - slope * mean_x).max(1.0);
-
-            intercepts.push(intercept);
-            slopes.push(slope);
-        }
+        let (intercepts, slopes): (Vec<_>, Vec<_>) = (0..num_traits)
+            .map(|tt| {
+                let y2: Vec<f32> = (0..k).map(|kk| y_raw[kk][tt] * y_raw[kk][tt]).collect();
+                let mean_y: f32 = y2.iter().sum::<f32>() / k as f32;
+                let cov: f32 = (0..k)
+                    .map(|kk| (d_sq[kk] - mean_x) * (y2[kk] - mean_y))
+                    .sum();
+                let slope = if var_x.abs() > 1e-12 {
+                    cov / var_x
+                } else {
+                    0.0
+                };
+                let intercept = (mean_y - slope * mean_x).max(1.0);
+                (intercept, slope)
+            })
+            .unzip();
 
         (intercepts, slopes)
     }

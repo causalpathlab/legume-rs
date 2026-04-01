@@ -115,7 +115,7 @@ impl CaviSusieResult {
 /// # Returns
 /// CaviSusieResult with fitted variational parameters
 pub fn cavi_susie(x: &Tensor, y: &Tensor, params: &CaviSusieParams) -> Result<CaviSusieResult> {
-    // Extract dimensions and convert to f64 vecs for the inner loop
+    let dev = x.device();
     let x = x.to_dtype(DType::F64)?;
     let y_tensor = if y.dims().len() == 2 && y.dim(1)? == 1 {
         y.squeeze(1)?
@@ -128,166 +128,108 @@ pub fn cavi_susie(x: &Tensor, y: &Tensor, params: &CaviSusieParams) -> Result<Ca
     let p = x.dim(1)?;
     let l = params.num_components;
 
-    // Prior inclusion weights (log scale)
     let log_prior: Vec<f64> = match &params.prior_weights {
         Some(w) => {
             let sum: f64 = w.iter().sum();
             w.iter().map(|&v| (v / sum).max(1e-30).ln()).collect()
         }
-        None => vec![-(p as f64).ln(); p], // uniform: log(1/p)
+        None => vec![-(p as f64).ln(); p],
     };
 
-    // Extract X as row-major (n, p) and y as (n,)
-    let x_data: Vec<f64> = x.flatten_all()?.to_vec1()?;
-    let y_data: Vec<f64> = y_tensor.flatten_all()?.to_vec1()?;
-
     // Center y
-    let y_mean: f64 = y_data.iter().sum::<f64>() / n as f64;
-    let y_centered: Vec<f64> = y_data.iter().map(|&v| v - y_mean).collect();
+    let y_mean = y_tensor.mean_all()?.to_scalar::<f64>()?;
+    let y_centered = (y_tensor - y_mean)?;
 
-    // Precompute d_j = ||x_j||² (column norms squared)
-    let mut d = vec![0.0f64; p];
-    for i in 0..n {
-        for j in 0..p {
-            let xij = x_data[i * p + j];
-            d[j] += xij * xij;
-        }
-    }
+    // Precompute d_j = ||x_j||² (column norms squared) — tensor op
+    let d_tensor = x.sqr()?.sum(0)?;
+    let d: Vec<f64> = d_tensor.to_vec1()?;
+
+    // x_t = X' precomputed for X'r products
+    let x_t = x.t()?;
 
     // Initialize variational parameters
     let mut alpha = vec![vec![1.0 / p as f64; p]; l];
     let mut mu = vec![vec![0.0f64; p]; l];
     let mut s2 = vec![vec![0.0f64; p]; l];
 
-    // Initialize residual variance from data
-    let y_var: f64 = y_centered.iter().map(|&v| v * v).sum::<f64>() / n as f64;
+    let y_var: f64 = y_centered.sqr()?.mean_all()?.to_scalar()?;
     let mut sigma2 = y_var;
 
-    // E[β] = Σ_l (α_l ⊙ μ_l), accumulated across components
-    let mut fitted = vec![0.0f64; p]; // fitted[j] = E[β_j]
+    // Pre-shape y as column vector for matmul residual computation
+    let y_col = y_centered.reshape((n, 1))?;
 
-    // Workspace for X'r computation
-    let mut xtr = vec![0.0f64; p];
-    // Workspace for X @ E[β]
-    let mut x_fitted = vec![0.0f64; n];
+    let mut fitted = vec![0.0f64; p];
 
     let mut elbo_trace = Vec::with_capacity(params.max_iter);
     let mut prev_elbo = f64::NEG_INFINITY;
 
+    /// Helper: &[f64] → Tensor column vector [len, 1]
+    fn to_col(v: &[f64], dev: &Device) -> Result<Tensor> {
+        Ok(Tensor::from_slice(v, (v.len(), 1), dev)?)
+    }
+
     for iter in 0..params.max_iter {
         for ll in 0..l {
-            // Add back component l's contribution to fitted
-            let mut old_contrib = vec![0.0f64; p];
-            for (j, oc) in old_contrib.iter_mut().enumerate() {
-                *oc = alpha[ll][j] * mu[ll][j];
-            }
+            let old_contrib: Vec<f64> = (0..p).map(|j| alpha[ll][j] * mu[ll][j]).collect();
 
-            // r_l = y_centered - X @ (E[β] - old_contrib_l)
-            // Compute X @ fitted and X @ old_contrib simultaneously
-            // residual_i = y_centered_i - Σ_j x_ij * (fitted_j - old_contrib_j)
-            // X'r_j = Σ_i x_ij * residual_i
+            // r = y - X @ (fitted - old_contrib): fuse into one matmul
+            let net: Vec<f64> = (0..p).map(|j| fitted[j] - old_contrib[j]).collect();
+            let r = (&y_col - x.matmul(&to_col(&net, dev)?)?)?;
 
-            // Update x_fitted: x_fitted = X @ fitted
-            // But it's cheaper to compute X'r directly:
-            // r_i = y_centered_i - Σ_j x_ij * fitted_j + Σ_j x_ij * old_contrib_j
-            //      = y_centered_i - x_fitted_i + Σ_j x_ij * old_contrib_j
+            // xtr = X' @ r  [p, 1] → Vec
+            let xtr: Vec<f64> = x_t.matmul(&r)?.flatten_all()?.to_vec1()?;
 
-            // Recompute x_fitted = X @ fitted
-            for i in 0..n {
-                x_fitted[i] = 0.0;
-                for j in 0..p {
-                    x_fitted[i] += x_data[i * p + j] * fitted[j];
-                }
-            }
-
-            // Compute X'r where r = y_centered - x_fitted + X @ old_contrib
-            for v in xtr.iter_mut() {
-                *v = 0.0;
-            }
-            for i in 0..n {
-                // r_i = y_centered_i - x_fitted_i + Σ_j x_ij * old_contrib_j
-                let mut x_old_i = 0.0;
-                for j in 0..p {
-                    x_old_i += x_data[i * p + j] * old_contrib[j];
-                }
-                let r_i = y_centered[i] - x_fitted[i] + x_old_i;
-                for j in 0..p {
-                    xtr[j] += x_data[i * p + j] * r_i;
-                }
-            }
-
-            // SER update for each feature j
+            // SER update (scalar — involves log/exp/branching, not worth tensorizing)
             let sigma2_0 = params.prior_variance;
             let mut log_bf = vec![0.0f64; p];
 
             for j in 0..p {
-                // Posterior variance: s²_j = 1 / (d_j/σ² + 1/σ²_0)
                 s2[ll][j] = 1.0 / (d[j] / sigma2 + 1.0 / sigma2_0);
-
-                // Posterior mean: μ_j = s²_j * Xtr_j / σ²
                 mu[ll][j] = s2[ll][j] * xtr[j] / sigma2;
-
-                // Log Bayes factor: 0.5 * [-log(1 + d_j*σ²_0/σ²) + μ²_j/s²_j]
                 log_bf[j] = 0.5
-                    * (-(1.0 + d[j] * sigma2_0 / sigma2).ln() + mu[ll][j] * mu[ll][j] / s2[ll][j]);
+                    * (-(1.0 + d[j] * sigma2_0 / sigma2).ln() + mu[ll][j] * mu[ll][j] / s2[ll][j])
+                    + log_prior[j];
             }
 
-            // Add log prior: α_l ∝ π_j * BF_j
-            for j in 0..p {
-                log_bf[j] += log_prior[j];
-            }
-
-            // α_l = softmax(log_BF + log_prior) using logsumexp trick
+            // Softmax: α_l = softmax(log_bf)
             let max_bf = log_bf.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let mut sum_exp = 0.0f64;
             for (j, &lbf) in log_bf.iter().enumerate() {
                 alpha[ll][j] = (lbf - max_bf).exp();
                 sum_exp += alpha[ll][j];
             }
-            for j in 0..p {
-                alpha[ll][j] /= sum_exp;
+            for a in alpha[ll].iter_mut().take(p) {
+                *a /= sum_exp;
             }
 
-            // Update fitted: remove old contribution, add new
+            // Update fitted
             for j in 0..p {
-                fitted[j] -= old_contrib[j];
-                fitted[j] += alpha[ll][j] * mu[ll][j];
+                fitted[j] += alpha[ll][j] * mu[ll][j] - old_contrib[j];
             }
         }
 
-        // Update σ² if estimating
+        // Update σ²
         if params.estimate_residual_variance {
-            // Recompute x_fitted = X @ fitted
-            for i in 0..n {
-                x_fitted[i] = 0.0;
-                for j in 0..p {
-                    x_fitted[i] += x_data[i * p + j] * fitted[j];
-                }
-            }
+            let residual = (&y_col - x.matmul(&to_col(&fitted, dev)?)?)?;
+            let rss: f64 = residual.sqr()?.sum_all()?.to_scalar()?;
 
-            // σ² = (||y - X @ E[β]||² + Σ_l Σ_j α_{l,j} * s²_{l,j} * d_j) / n
-            let mut rss = 0.0f64;
-            for i in 0..n {
-                let r = y_centered[i] - x_fitted[i];
-                rss += r * r;
-            }
-
-            let mut var_correction = 0.0f64;
-            for ll in 0..l {
-                for (j, &dj) in d.iter().enumerate() {
-                    var_correction += alpha[ll][j] * s2[ll][j] * dj;
-                }
-            }
+            let var_correction: f64 = (0..l)
+                .map(|ll| {
+                    d.iter()
+                        .enumerate()
+                        .map(|(j, &dj)| alpha[ll][j] * s2[ll][j] * dj)
+                        .sum::<f64>()
+                })
+                .sum();
 
             sigma2 = (rss + var_correction) / n as f64;
         }
 
-        // Compute ELBO for convergence check
+        // ELBO
         let elbo = compute_elbo_cavi(
-            &y_centered,
-            &x_data,
+            &x,
+            &y_col,
             n,
-            p,
             l,
             sigma2,
             params.prior_variance,
@@ -297,11 +239,10 @@ pub fn cavi_susie(x: &Tensor, y: &Tensor, params: &CaviSusieParams) -> Result<Ca
             &d,
             &fitted,
             &log_prior,
-        );
+        )?;
         elbo_trace.push(elbo);
 
         if iter % 10 == 0 || iter == params.max_iter - 1 {
-            // Find top PIP features for logging
             let pip = compute_pip(&alpha, p);
             let mut top: Vec<(usize, f64)> = pip.iter().enumerate().map(|(j, &v)| (j, v)).collect();
             top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
@@ -319,7 +260,6 @@ pub fn cavi_susie(x: &Tensor, y: &Tensor, params: &CaviSusieParams) -> Result<Ca
             );
         }
 
-        // Check convergence
         if iter > 0 && (elbo - prev_elbo).abs() < params.tol {
             info!(
                 "CAVI converged at iteration {} (ΔELBO = {:.2e})",
@@ -361,10 +301,9 @@ fn compute_pip(alpha: &[Vec<f64>], p: usize) -> Vec<f64> {
 /// Compute ELBO for CAVI SuSiE.
 #[allow(clippy::too_many_arguments)]
 fn compute_elbo_cavi(
-    y: &[f64],
-    x: &[f64],
+    x: &Tensor,
+    y_col: &Tensor,
     n: usize,
-    p: usize,
     l: usize,
     sigma2: f64,
     sigma2_0: f64,
@@ -374,23 +313,16 @@ fn compute_elbo_cavi(
     d: &[f64],
     fitted: &[f64],
     log_prior: &[f64],
-) -> f64 {
-    // Expected log-likelihood: -n/2 * log(2πσ²) - 1/(2σ²) * E[||y - Xβ||²]
+) -> Result<f64> {
+    let dev = x.device();
     let ln_2pi = (2.0 * std::f64::consts::PI).ln();
 
-    // Compute x_fitted = X @ fitted
-    let mut rss = 0.0f64;
-    for i in 0..n {
-        let mut xf = 0.0;
-        for j in 0..p {
-            xf += x[i * p + j] * fitted[j];
-        }
-        let r = y[i] - xf;
-        rss += r * r;
-    }
+    // RSS via tensor matmul: ||y - X @ fitted||²
+    let fitted_t = Tensor::from_slice(fitted, (fitted.len(), 1), dev)?;
+    let residual = (y_col - x.matmul(&fitted_t)?)?;
+    let rss: f64 = residual.sqr()?.sum_all()?.to_scalar()?;
 
-    // E[||y - Xβ||²] = ||y - X E[β]||² + Σ_l Σ_j α_{l,j} * (s²_{l,j} + μ²_{l,j}) * d_j
-    //                   - Σ_l Σ_j (α_{l,j} * μ_{l,j})² * d_j
+    // E[||y - Xβ||²] correction terms (scalar — small per-component work)
     let mut expected_rss = rss;
     for ll in 0..l {
         for (j, &dj) in d.iter().enumerate() {
@@ -401,20 +333,16 @@ fn compute_elbo_cavi(
 
     let ell = -0.5 * n as f64 * (ln_2pi + sigma2.ln()) - 0.5 / sigma2 * expected_rss;
 
-    // KL divergence for each component
+    // KL divergence (scalar — involves log/branching per element)
     let mut kl = 0.0f64;
     for ll in 0..l {
-        // KL(q(b_l) || p(b_l)) where q is the SER posterior and p is the spike-and-slab prior
-        // For the Gaussian slab part:
-        // Σ_j α_{l,j} * [0.5 * (s²_{l,j}/σ²_0 + μ²_{l,j}/σ²_0 - 1 - ln(s²_{l,j}/σ²_0))]
         let mut kl_gauss = 0.0f64;
-        for j in 0..p {
+        for j in 0..d.len() {
             let ratio = s2[ll][j] / sigma2_0;
             kl_gauss +=
                 alpha[ll][j] * 0.5 * (ratio + mu[ll][j] * mu[ll][j] / sigma2_0 - 1.0 - ratio.ln());
         }
 
-        // Categorical KL: Σ_j α_{l,j} * ln(α_{l,j} / π_j)
         let mut kl_cat = 0.0f64;
         for (j, &lp) in log_prior.iter().enumerate() {
             if alpha[ll][j] > 1e-15 {
@@ -425,7 +353,7 @@ fn compute_elbo_cavi(
         kl += kl_gauss + kl_cat;
     }
 
-    ell - kl
+    Ok(ell - kl)
 }
 
 /// Write CAVI SuSiE results to parquet in melted format compatible with existing output.

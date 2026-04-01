@@ -5,15 +5,14 @@ use log::info;
 use matrix_util::common_io::*;
 use std::ops::Range;
 use std::sync::Arc;
-use zarrs::array::DataType;
-use zarrs::array_subset::ArraySubset;
+use zarrs::array::{data_type, ArraySubset, DataType};
 use zarrs::filesystem::FilesystemStore;
 use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
 
 use anyhow::anyhow;
 
-const NUM_CHUNKS: usize = 1000;
-const MIN_CHUNK_SIZE: usize = 8192;
+use crate::utilities::io_helpers::chunk_elems;
+
 const COMPRESSION_LEVEL: i32 = 5;
 
 /// 10x-like cell-feature matrix with `zarr` backend (feature x cell)
@@ -175,7 +174,9 @@ impl SparseMtxData {
 
     /// Show the hierarchy of the zarr store
     pub fn print_hierarchy(&self) -> anyhow::Result<()> {
-        let node = zarrs::node::Node::open(&self.store, "/")?;
+        use zarrs::config::MetadataRetrieveVersion;
+        let node =
+            zarrs::node::Node::open_opt(&self.store, "/", &MetadataRetrieveVersion::Default)?;
         let tree = node.hierarchy_tree();
         info!("hierarchy_tree:\n{}", tree);
         Ok(())
@@ -218,18 +219,19 @@ impl SparseMtxData {
     {
         use zarrs::array::codec::ZstdCodec;
         use zarrs::array::ArrayBuilder;
-        use zarrs::array::DataType;
         use zarrs::array::FillValue;
 
         let nelem = vec.len();
-        let nchunks = NUM_CHUNKS;
-        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
+        let chunk_size = chunk_elems(nelem, std::mem::size_of::<V>());
 
-        let fill = match dt {
-            DataType::Float32 => FillValue::from(zarrs::array::ZARR_NAN_F32),
-            DataType::UInt64 => FillValue::from(0u64),
-            DataType::String => FillValue::from(""),
-            _ => FillValue::from(0),
+        let fill = if dt == data_type::float32() {
+            FillValue::from(zarrs::array::ZARR_NAN_F32)
+        } else if dt == data_type::uint64() {
+            FillValue::from(0u64)
+        } else if dt == data_type::string() {
+            FillValue::from("")
+        } else {
+            FillValue::from(0)
         };
 
         let array = ArrayBuilder::new(
@@ -244,7 +246,7 @@ impl SparseMtxData {
         array.store_metadata()?;
 
         let subset = Self::create_subset(0..vec.len() as u64);
-        array.store_array_subset_elements(&subset, vec)?;
+        array.store_array_subset(&subset, vec)?;
 
         Ok(())
     }
@@ -283,7 +285,7 @@ impl SparseMtxData {
         let data = self._open_vector(key)?;
         let ntot = data.shape()[0];
         let subset = Self::create_subset(0..ntot);
-        Ok(data.retrieve_array_subset_elements::<V>(&subset)?)
+        Ok(data.retrieve_array_subset::<Vec<V>>(&subset)?)
     }
 
     /////////////////////////////
@@ -359,7 +361,7 @@ impl SparseIo for SparseMtxData {
         use zarrs::array::Array as Zarray;
         let key = "/by_row/indptr";
         if let Ok(indptr) = Zarray::open(self.store.clone(), key) {
-            let indptr_vec = indptr.retrieve_array_subset_elements::<u64>(&indptr.subset_all())?;
+            let indptr_vec = indptr.retrieve_array_subset::<Vec<u64>>(&indptr.subset_all())?;
             self.by_row_indptr.clear();
             self.by_row_indptr.extend(indptr_vec);
         }
@@ -371,7 +373,7 @@ impl SparseIo for SparseMtxData {
         use zarrs::array::Array as ZArray;
         let key = "/by_column/indptr";
         if let Ok(indptr) = ZArray::open(self.store.clone(), key) {
-            let indptr_vec = indptr.retrieve_array_subset_elements::<u64>(&indptr.subset_all())?;
+            let indptr_vec = indptr.retrieve_array_subset::<Vec<u64>>(&indptr.subset_all())?;
             self.by_column_indptr.clear();
             self.by_column_indptr.extend(indptr_vec);
         }
@@ -392,8 +394,8 @@ impl SparseIo for SparseMtxData {
         let key = "/by_column/indices";
         let indices = ZArray::open(self.store.clone(), key)?;
 
-        let data = data.retrieve_array_subset_elements::<f32>(&data.subset_all())?;
-        let indices = indices.retrieve_array_subset_elements::<u64>(&indices.subset_all())?;
+        let data = data.retrieve_array_subset::<Vec<f32>>(&data.subset_all())?;
+        let indices = indices.retrieve_array_subset::<Vec<u64>>(&indices.subset_all())?;
 
         self.by_column_indices = Some(indices);
         self.by_column_data = Some(data);
@@ -478,19 +480,19 @@ impl SparseIo for SparseMtxData {
             writeln!(buf, "{}\t{}\t{}", nrow, ncol, nnz)?;
 
             let (indptr, data, indices) = self.open_csc_triplets()?;
-            let indptr = indptr.retrieve_array_subset_ndarray::<u64>(&indptr.subset_all())?;
+            let indptr = indptr.retrieve_array_subset::<Vec<u64>>(&indptr.subset_all())?;
             debug_assert!(indptr.len() == ncol + 1);
 
             for jj in 0..ncol {
                 let (start, end) = (indptr[jj], indptr[jj + 1]);
                 let subset = Self::create_subset(start..end);
-                let data_slice = data.retrieve_array_subset_ndarray::<f32>(&subset)?;
-                let indices_slice = indices.retrieve_array_subset_ndarray::<u64>(&subset)?;
+                let data_slice = data.retrieve_array_subset::<Vec<f32>>(&subset)?;
+                let indices_slice = indices.retrieve_array_subset::<Vec<u64>>(&subset)?;
 
                 // write them with 1-based indices
-                for k in 0..(end - start) {
-                    let val = data_slice[k as usize];
-                    let ii = indices_slice[k as usize] as usize;
+                for k in 0..(end - start) as usize {
+                    let val = data_slice[k];
+                    let ii = indices_slice[k] as usize;
                     writeln!(buf, "{}\t{}\t{}", ii + 1, jj + 1, val)?;
                 }
             }
@@ -578,7 +580,7 @@ impl SparseIo for SparseMtxData {
             })
             .collect();
 
-        self.new_filled_vector(key, DataType::String, &names)?;
+        self.new_filled_vector(key, data_type::string(), &names)?;
         Ok(())
     }
 
@@ -587,7 +589,7 @@ impl SparseIo for SparseMtxData {
     /// * `names`: a file each line contains name words
     fn register_names_vec(&mut self, key: &str, names: &[Box<str>]) -> anyhow::Result<()> {
         let names_vec: Vec<String> = names.iter().map(|x| x.to_string()).collect();
-        self.new_filled_vector(key, DataType::String, &names_vec)?;
+        self.new_filled_vector(key, data_type::string(), &names_vec)?;
         Ok(())
     }
 
@@ -661,8 +663,8 @@ impl SparseIo for SparseMtxData {
 
             if start < end {
                 let subset = Self::create_subset(start..end);
-                let data_slice = data.retrieve_array_subset_elements::<f32>(&subset)?;
-                let indices_slice = indices.retrieve_array_subset_elements::<u64>(&subset)?;
+                let data_slice = data.retrieve_array_subset::<Vec<f32>>(&subset)?;
+                let indices_slice = indices.retrieve_array_subset::<Vec<u64>>(&subset)?;
 
                 for k in 0..(end - start) {
                     let x_ij = data_slice[k as usize];
@@ -745,9 +747,8 @@ impl SparseIo for SparseMtxData {
 
                     if start < end {
                         let subset = Self::create_subset(start..end);
-                        let data_slice = data.retrieve_array_subset_elements::<f32>(&subset)?;
-                        let indices_slice =
-                            indices.retrieve_array_subset_elements::<u64>(&subset)?;
+                        let data_slice = data.retrieve_array_subset::<Vec<f32>>(&subset)?;
+                        let indices_slice = indices.retrieve_array_subset::<Vec<u64>>(&subset)?;
 
                         for k in 0..(end - start) {
                             let x_ij = data_slice[k as usize];
@@ -810,9 +811,8 @@ impl SparseIo for SparseMtxData {
 
                     if start < end {
                         let subset = Self::create_subset(start..end);
-                        let data_slice = data.retrieve_array_subset_elements::<f32>(&subset)?;
-                        let indices_slice =
-                            indices.retrieve_array_subset_elements::<u64>(&subset)?;
+                        let data_slice = data.retrieve_array_subset::<Vec<f32>>(&subset)?;
+                        let indices_slice = indices.retrieve_array_subset::<Vec<u64>>(&subset)?;
 
                         for k in 0..(end - start) {
                             let x_ij = data_slice[k as usize];
@@ -847,11 +847,11 @@ impl SparseIo for SparseMtxData {
         self._add_group(key)?;
 
         let key = "/by_row/data";
-        self.new_filled_vector(key, DataType::Float32, csr_vals)?;
+        self.new_filled_vector(key, data_type::float32(), csr_vals)?;
         let key = "/by_row/indices";
-        self.new_filled_vector(key, DataType::UInt64, csr_cols)?;
+        self.new_filled_vector(key, data_type::uint64(), csr_cols)?;
         let key = "/by_row/indptr";
-        self.new_filled_vector(key, DataType::UInt64, csr_rowptr)?;
+        self.new_filled_vector(key, data_type::uint64(), csr_rowptr)?;
 
         Ok(())
     }
@@ -876,11 +876,11 @@ impl SparseIo for SparseMtxData {
         self._add_group(key)?;
 
         let key = "/by_column/data";
-        self.new_filled_vector(key, DataType::Float32, csc_vals)?;
+        self.new_filled_vector(key, data_type::float32(), csc_vals)?;
         let key = "/by_column/indices";
-        self.new_filled_vector(key, DataType::UInt64, csc_rows)?;
+        self.new_filled_vector(key, data_type::uint64(), csc_rows)?;
         let key = "/by_column/indptr";
-        self.new_filled_vector(key, DataType::UInt64, csc_colptr)?;
+        self.new_filled_vector(key, data_type::uint64(), csc_colptr)?;
 
         Ok(())
     }

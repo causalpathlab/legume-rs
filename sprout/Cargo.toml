@@ -39,11 +39,11 @@ rustyline = { workspace = true }
 indicatif = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { version = "0.9.1", features = ["metal", "accelerate"] }
-candle-nn = { version = "0.9.1", features = ["metal", "accelerate"] }
-candle-transformers = { version = "0.9.1", features = ["metal", "accelerate"] }
+candle-core = { version = "0.10", features = ["metal", "accelerate"] }
+candle-nn = { version = "0.10", features = ["metal", "accelerate"] }
+candle-transformers = { version = "0.10", features = ["metal", "accelerate"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-candle-core = { version = "0.9.1", features = ["cuda", "cudnn"] }
-candle-nn = { version = "0.9.1", features = ["cuda"] }
-candle-transformers = { version = "0.9.1", features = ["cuda"] }
+candle-core = { version = "0.10", features = ["cuda", "cudnn"] }
+candle-nn = { version = "0.10", features = ["cuda"] }
+candle-transformers = { version = "0.10", features = ["cuda"] }

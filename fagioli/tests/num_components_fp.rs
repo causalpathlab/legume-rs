@@ -183,6 +183,7 @@ fn test_sgvb_fp_vs_num_components() -> Result<()> {
     for &l in &l_values {
         let config = FitConfig {
             model_type: ModelType::Susie,
+            prior_type: fagioli::sgvb::PriorType::Single,
             num_components: l,
             num_sgvb_samples: 20,
             learning_rate: 0.01,

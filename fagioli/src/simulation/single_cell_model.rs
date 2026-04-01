@@ -2,7 +2,7 @@ use anyhow::Result;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
 use log::info;
 use nalgebra::DMatrix;
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_distr::{weighted::WeightedIndex, Distribution, Normal, Poisson};
 use rayon::prelude::*;
@@ -440,7 +440,7 @@ mod tests {
     use super::super::factor_model::simulate_factor_model;
     use super::super::gene_annotations::simulate_gene_annotations;
     use super::*;
-    use rand::Rng;
+    use rand::RngExt;
 
     #[test]
     fn test_sample_sc_counts() {

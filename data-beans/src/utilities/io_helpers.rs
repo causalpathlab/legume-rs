@@ -45,3 +45,17 @@ pub fn read_col_names(
 
 // Re-export constants for convenience
 pub use crate::sparse_io::{MAX_COLUMN_NAME_IDX, MAX_ROW_NAME_IDX};
+
+/// Target ~1 MB per chunk: big enough for good compression, small enough for
+/// fast random-access reads of individual columns/rows.
+const TARGET_CHUNK_BYTES: usize = 1024 * 1024;
+/// Never fewer than this many elements in a chunk.
+const MIN_CHUNK_ELEMS: usize = 8192;
+
+/// Compute the chunk size (in elements) for a 1-D array of `nelem` elements,
+/// each `elem_bytes` wide. Returns at least 1 even for empty arrays.
+pub fn chunk_elems(nelem: usize, elem_bytes: usize) -> usize {
+    (TARGET_CHUNK_BYTES / elem_bytes.max(1))
+        .max(MIN_CHUNK_ELEMS)
+        .min(nelem.max(1))
+}

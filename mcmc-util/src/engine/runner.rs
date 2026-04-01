@@ -25,7 +25,7 @@ pub fn run_mcmc<M: McmcModel>(model: &M, config: &McmcConfig) -> M::Result {
 
     for iter in 0..total {
         model.sweep(&mut state, &mut rng);
-        if iter >= config.warmup && (iter - config.warmup) % config.thin == 0 {
+        if iter >= config.warmup && (iter - config.warmup).is_multiple_of(config.thin) {
             samples.push(model.collect(&state));
         }
     }

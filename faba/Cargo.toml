@@ -47,4 +47,4 @@ colored = { workspace = true }
 rustc-hash = { workspace = true }
 dashmap = { version = "6.1.0", features = ["rayon"] }
 rust-htslib = { workspace = true }
-arrow = "56"
+arrow = "58"

@@ -11,7 +11,7 @@ use matrix_util::traits::MatWithNames;
 use nalgebra::DMatrix;
 use rand_distr::num_traits::FromPrimitive;
 use std::sync::Arc;
-use zarrs::array::Array as ZArray;
+use zarrs::array::{data_type, Array as ZArray};
 use zarrs::config::MetadataRetrieveVersion;
 use zarrs::filesystem::FilesystemStore;
 use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
@@ -91,31 +91,31 @@ pub fn read_zarr_flat_f32(
     store: Arc<dyn ZStorageTraits>,
     key: &str,
 ) -> anyhow::Result<(Vec<f32>, Vec<u64>)> {
-    use zarrs::array::data_type::DataType;
-
     update_zarr_to_v3(store.clone(), key)?;
     let arr = ZArray::open_opt(store, key, &MetadataRetrieveVersion::Default)?;
     let shape = arr.shape().to_vec();
     let subset = arr.subset_all();
 
-    let data = match arr.data_type() {
-        DataType::Float32 => arr.retrieve_array_subset_elements::<f32>(&subset)?,
-        DataType::Float64 => arr
-            .retrieve_array_subset_elements::<f64>(&subset)?
+    let dt = arr.data_type();
+    let data = if *dt == data_type::float32() {
+        arr.retrieve_array_subset::<Vec<f32>>(&subset)?
+    } else if *dt == data_type::float64() {
+        arr.retrieve_array_subset::<Vec<f64>>(&subset)?
             .into_iter()
             .map(|x| x as f32)
-            .collect(),
-        DataType::UInt32 => arr
-            .retrieve_array_subset_elements::<u32>(&subset)?
+            .collect()
+    } else if *dt == data_type::uint32() {
+        arr.retrieve_array_subset::<Vec<u32>>(&subset)?
             .into_iter()
             .map(|x| x as f32)
-            .collect(),
-        DataType::UInt64 => arr
-            .retrieve_array_subset_elements::<u64>(&subset)?
+            .collect()
+    } else if *dt == data_type::uint64() {
+        arr.retrieve_array_subset::<Vec<u64>>(&subset)?
             .into_iter()
             .map(|x| x as f32)
-            .collect(),
-        dt => anyhow::bail!("unsupported zarr data type: {:?}", dt),
+            .collect()
+    } else {
+        anyhow::bail!("unsupported zarr data type: {:?}", dt)
     };
 
     Ok((data, shape))
@@ -126,21 +126,21 @@ pub fn read_zarr_flat_u32(
     store: Arc<dyn ZStorageTraits>,
     key: &str,
 ) -> anyhow::Result<(Vec<u32>, Vec<u64>)> {
-    use zarrs::array::data_type::DataType;
-
     update_zarr_to_v3(store.clone(), key)?;
     let arr = ZArray::open_opt(store, key, &MetadataRetrieveVersion::Default)?;
     let shape = arr.shape().to_vec();
     let subset = arr.subset_all();
 
-    let data = match arr.data_type() {
-        DataType::UInt32 => arr.retrieve_array_subset_elements::<u32>(&subset)?,
-        DataType::UInt64 => arr
-            .retrieve_array_subset_elements::<u64>(&subset)?
+    let dt = arr.data_type();
+    let data = if *dt == data_type::uint32() {
+        arr.retrieve_array_subset::<Vec<u32>>(&subset)?
+    } else if *dt == data_type::uint64() {
+        arr.retrieve_array_subset::<Vec<u64>>(&subset)?
             .into_iter()
             .map(|x| x as u32)
-            .collect(),
-        dt => anyhow::bail!("unsupported zarr data type for u32: {:?}", dt),
+            .collect()
+    } else {
+        anyhow::bail!("unsupported zarr data type for u32: {:?}", dt)
     };
 
     Ok((data, shape))
@@ -156,33 +156,28 @@ pub fn read_zarr_ndarray<T>(
 where
     T: zarrs::array::ElementOwned + FromPrimitive,
 {
-    use zarrs::array::data_type::DataType;
-
     update_zarr_to_v3(store.clone(), key_name)?;
     let arr = ZArray::open_opt(store.clone(), key_name, &MetadataRetrieveVersion::Default)?;
 
-    match arr.data_type() {
-        DataType::Float32 => {
-            let array: ndarray::ArrayD<f32> =
-                arr.retrieve_array_subset_ndarray::<f32>(&arr.subset_all())?;
-            Ok(array.mapv(|x| T::from_f32(x).unwrap()))
-        }
-        DataType::Float64 => {
-            let array: ndarray::ArrayD<f64> =
-                arr.retrieve_array_subset_ndarray::<f64>(&arr.subset_all())?;
-            Ok(array.mapv(|x| T::from_f64(x).unwrap()))
-        }
-        DataType::UInt32 => {
-            let array: ndarray::ArrayD<u32> =
-                arr.retrieve_array_subset_ndarray::<u32>(&arr.subset_all())?;
-            Ok(array.mapv(|x| T::from_u32(x).unwrap()))
-        }
-        DataType::UInt64 => {
-            let array: ndarray::ArrayD<u64> =
-                arr.retrieve_array_subset_ndarray::<u64>(&arr.subset_all())?;
-            Ok(array.mapv(|x| T::from_u64(x).unwrap()))
-        }
-        _ => Err(anyhow::anyhow!("not supported data type")),
+    let dt = arr.data_type();
+    if *dt == data_type::float32() {
+        let array: ndarray::ArrayD<f32> =
+            arr.retrieve_array_subset::<ndarray::ArrayD<f32>>(&arr.subset_all())?;
+        Ok(array.mapv(|x| T::from_f32(x).unwrap()))
+    } else if *dt == data_type::float64() {
+        let array: ndarray::ArrayD<f64> =
+            arr.retrieve_array_subset::<ndarray::ArrayD<f64>>(&arr.subset_all())?;
+        Ok(array.mapv(|x| T::from_f64(x).unwrap()))
+    } else if *dt == data_type::uint32() {
+        let array: ndarray::ArrayD<u32> =
+            arr.retrieve_array_subset::<ndarray::ArrayD<u32>>(&arr.subset_all())?;
+        Ok(array.mapv(|x| T::from_u32(x).unwrap()))
+    } else if *dt == data_type::uint64() {
+        let array: ndarray::ArrayD<u64> =
+            arr.retrieve_array_subset::<ndarray::ArrayD<u64>>(&arr.subset_all())?;
+        Ok(array.mapv(|x| T::from_u64(x).unwrap()))
+    } else {
+        anyhow::bail!("unsupported zarr data type: {:?}", dt)
     }
 }
 
@@ -194,33 +189,32 @@ pub fn read_zarr_numerics<T>(
 where
     T: zarrs::array::ElementOwned + FromPrimitive,
 {
-    use zarrs::array::data_type::DataType;
-
     update_zarr_to_v3(store.clone(), key_name)?;
     let arr = ZArray::open_opt(store.clone(), key_name, &MetadataRetrieveVersion::Default)?;
 
-    let ret = match arr.data_type() {
-        DataType::Float32 => arr
-            .retrieve_array_subset_elements::<f32>(&arr.subset_all())?
+    let dt = arr.data_type();
+    let ret = if *dt == data_type::float32() {
+        arr.retrieve_array_subset::<Vec<f32>>(&arr.subset_all())?
             .into_iter()
             .map(|x| T::from_f32(x).unwrap())
-            .collect(),
-        DataType::Float64 => arr
-            .retrieve_array_subset_elements::<f64>(&arr.subset_all())?
+            .collect()
+    } else if *dt == data_type::float64() {
+        arr.retrieve_array_subset::<Vec<f64>>(&arr.subset_all())?
             .into_iter()
             .map(|x| T::from_f64(x).unwrap())
-            .collect(),
-        DataType::UInt32 => arr
-            .retrieve_array_subset_elements::<u32>(&arr.subset_all())?
+            .collect()
+    } else if *dt == data_type::uint32() {
+        arr.retrieve_array_subset::<Vec<u32>>(&arr.subset_all())?
             .into_iter()
             .map(|x| T::from_u32(x).unwrap())
-            .collect(),
-        DataType::UInt64 => arr
-            .retrieve_array_subset_elements::<u64>(&arr.subset_all())?
+            .collect()
+    } else if *dt == data_type::uint64() {
+        arr.retrieve_array_subset::<Vec<u64>>(&arr.subset_all())?
             .into_iter()
             .map(|x| T::from_u64(x).unwrap())
-            .collect(),
-        _ => return Err(anyhow::anyhow!("not supported data type")),
+            .collect()
+    } else {
+        anyhow::bail!("unsupported zarr data type: {:?}", dt);
     };
 
     Ok(ret)
@@ -281,7 +275,7 @@ pub fn read_zarr_strings(
     let arr = ZArray::open_opt(store.clone(), key_name, &MetadataRetrieveVersion::Default)?;
 
     Ok(arr
-        .retrieve_array_subset_elements::<String>(&arr.subset_all())?
+        .retrieve_array_subset::<Vec<String>>(&arr.subset_all())?
         .into_iter()
         .map(|x| x.into_boxed_str())
         .collect())
