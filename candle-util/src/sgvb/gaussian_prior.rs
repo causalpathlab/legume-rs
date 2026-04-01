@@ -180,12 +180,6 @@ impl AnalyticalKL for FixedGaussianPrior {
     }
 }
 
-/// Numerically stable logsumexp over dimension 0: log Σ_m exp(x_m).
-fn logsumexp_dim0(stacked: &Tensor) -> Result<Tensor> {
-    let max_val = stacked.max(0)?;
-    stacked.broadcast_sub(&max_val)?.exp()?.sum(0)?.log()? + max_val
-}
-
 /// Mixture-of-Gaussians prior (ash-style): p(β) = Σ_m w_m · N(β; 0, τ²_m).
 ///
 /// Uses a fixed variance grid with learnable mixture weights. The near-zero
@@ -291,7 +285,7 @@ impl Prior for MixtureGaussianPrior {
         }
 
         // Stack to (M, S, p, k), logsumexp over M -> (S, p, k), sum over (p, k) -> (S,)
-        let lse = logsumexp_dim0(&Tensor::stack(&log_components, 0)?)?;
+        let lse = Tensor::stack(&log_components, 0)?.log_sum_exp(0)?;
         lse.sum(2)?.sum(1)
     }
 }
@@ -327,7 +321,7 @@ impl AnalyticalKL for MixtureGaussianPrior {
         }
 
         // Stack to (M, p, k), logsumexp over dim 0 -> (p, k), negate and sum
-        let lse = logsumexp_dim0(&Tensor::stack(&neg_kl_plus_logw, 0)?)?;
+        let lse = Tensor::stack(&neg_kl_plus_logw, 0)?.log_sum_exp(0)?;
         lse.neg()?.sum_all()
     }
 }

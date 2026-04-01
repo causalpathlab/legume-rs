@@ -7,7 +7,7 @@ use matrix_util::mtx_io::write_mtx_triplets;
 use matrix_util::traits::*;
 use matrix_util::{common_io::write_lines, dmatrix_util::row_membership_matrix};
 use nalgebra::ComplexField;
-use rand::SeedableRng;
+use rand::{RngExt, SeedableRng};
 use rand_distr::{Distribution, Normal, Poisson, Uniform};
 use rayon::prelude::*;
 

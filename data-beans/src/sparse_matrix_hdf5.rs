@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 
-const NUM_CHUNKS: usize = 1000;
-const MIN_CHUNK_SIZE: usize = 8192;
+use crate::utilities::io_helpers::chunk_elems;
+
 const COMPRESSION_LEVEL: u8 = 5;
 
 /// 10x-like cell-feature matrix with hdf5 (feature x cell)
@@ -717,35 +717,23 @@ impl SparseIo for SparseMtxData {
 
         let csr = self.backend.group("/by_row")?;
 
-        let nelem = csr_vals.len();
-        let nchunks = NUM_CHUNKS;
-        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
-
         csr.new_dataset::<f32>()
             .shape(csr_vals.len())
-            .chunk([chunk_size])
+            .chunk([chunk_elems(csr_vals.len(), std::mem::size_of::<f32>())])
             .blosc_blosclz(COMPRESSION_LEVEL, true)
             .create("data")?
             .write(&csr_vals)?;
 
-        let nelem = csr_rowptr.len();
-        let nchunks = NUM_CHUNKS;
-        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
-
         csr.new_dataset::<u64>()
             .shape(csr_rowptr.len())
-            .chunk([chunk_size])
+            .chunk([chunk_elems(csr_rowptr.len(), std::mem::size_of::<u64>())])
             .blosc_blosclz(COMPRESSION_LEVEL, true)
             .create("indptr")?
             .write(&csr_rowptr)?;
 
-        let nelem = csr_cols.len();
-        let nchunks = NUM_CHUNKS;
-        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
-
         csr.new_dataset::<u64>()
             .shape(csr_cols.len())
-            .chunk([chunk_size])
+            .chunk([chunk_elems(csr_cols.len(), std::mem::size_of::<u64>())])
             .blosc_blosclz(COMPRESSION_LEVEL, true)
             .create("indices")?
             .write(&csr_cols)?;
@@ -783,35 +771,23 @@ impl SparseIo for SparseMtxData {
 
         let csc = self.backend.group("/by_column")?;
 
-        let nelem = csc_vals.len();
-        let nchunks = NUM_CHUNKS;
-        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
-
         csc.new_dataset::<f32>()
             .shape(csc_vals.len())
-            .chunk([chunk_size])
+            .chunk([chunk_elems(csc_vals.len(), std::mem::size_of::<f32>())])
             .blosc_blosclz(COMPRESSION_LEVEL, true)
             .create("data")?
             .write(&csc_vals)?;
 
-        let nelem = csc_colptr.len();
-        let nchunks = NUM_CHUNKS;
-        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
-
         csc.new_dataset::<u64>()
             .shape(csc_colptr.len())
-            .chunk([chunk_size])
+            .chunk([chunk_elems(csc_colptr.len(), std::mem::size_of::<u64>())])
             .blosc_blosclz(COMPRESSION_LEVEL, true)
             .create("indptr")?
             .write(&csc_colptr)?;
 
-        let nelem = csc_rows.len();
-        let nchunks = NUM_CHUNKS;
-        let chunk_size = (nelem / nchunks).max(MIN_CHUNK_SIZE).min(nelem);
-
         csc.new_dataset::<u64>()
             .shape(csc_rows.len())
-            .chunk([chunk_size])
+            .chunk([chunk_elems(csc_rows.len(), std::mem::size_of::<u64>())])
             .blosc_blosclz(COMPRESSION_LEVEL, true)
             .create("indices")?
             .write(&csc_rows)?;

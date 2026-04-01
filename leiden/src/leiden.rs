@@ -55,11 +55,12 @@ impl Leiden {
         for i in 0..subnetworks.len() {
             let sub_clustering = local_merging.run(&subnetworks[i], &mut self.rng);
 
-            for j in 0..subnetworks[i].nodes() {
-                c.set(
-                    nodes_per_cluster[i][j],
-                    cluster_counter + sub_clustering.get(j),
-                )
+            for (j, &node) in nodes_per_cluster[i]
+                .iter()
+                .enumerate()
+                .take(subnetworks[i].nodes())
+            {
+                c.set(node, cluster_counter + sub_clustering.get(j));
             }
 
             cluster_counter += sub_clustering.num_clusters();

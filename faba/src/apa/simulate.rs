@@ -157,7 +157,7 @@ pub fn simulate_fragments(params: &ScapeSimParams) -> (Vec<FragmentRecord>, Vec<
 }
 
 fn rng_bool(rng: &mut StdRng, p: f32) -> bool {
-    use rand::Rng;
+    use rand::RngExt;
     rng.random_bool(p as f64)
 }
 

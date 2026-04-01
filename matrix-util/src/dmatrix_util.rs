@@ -2,7 +2,7 @@ use nalgebra::{ComplexField, DMatrix, Matrix};
 use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
 
 use num_traits::Float;
-use rand::Rng;
+use rand::RngExt;
 use rand_distr::{Distribution, Gamma, StandardNormal, Uniform};
 use rayon::prelude::*;
 
