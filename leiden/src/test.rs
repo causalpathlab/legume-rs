@@ -5,7 +5,7 @@ use crate::objective::{cpm, par_cpm};
 use crate::{Clustering, Graph, Network, SimpleClustering};
 use flate2::read::GzDecoder;
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};

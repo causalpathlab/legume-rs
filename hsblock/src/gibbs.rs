@@ -10,7 +10,7 @@ use crate::btree::{BTree, GammaPoissonParam};
 use crate::model::poisson_score_cpu;
 use crate::sufficient_stats::{SufficientStats, WeightedEdge};
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rayon::prelude::*;
 
 /// Collapsed Gibbs sampler for HSBM cluster assignments.

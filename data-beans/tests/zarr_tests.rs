@@ -40,7 +40,7 @@ fn temp_array_zarrs() -> anyhow::Result<()> {
     // storage::store,
     // let COMPRESSION_LEVEL = 5;
     // use std::fs::File;
-    use zarrs::array::{DataType, FillValue};
+    use zarrs::array::{data_type, FillValue};
 
     let backend_file = create_temp_dir_file(".zarr")?;
     let temp_filename = backend_file.to_str().expect("to_str failed");
@@ -57,7 +57,7 @@ fn temp_array_zarrs() -> anyhow::Result<()> {
     let array = zarrs::array::ArrayBuilder::new(
         vec![10, 10],                                // array shape
         vec![3_u64, 3_u64],                          // regular chunk shape
-        DataType::Float32,                           // f32
+        data_type::float32(),                         // f32
         FillValue::from(zarrs::array::ZARR_NAN_F32), // nan
     )
     // .bytes_to_bytes_codecs(vec![Arc::new(ZstdCodec::new(COMPRESSION_LEVEL, false))])
@@ -73,22 +73,23 @@ fn temp_array_zarrs() -> anyhow::Result<()> {
     );
 
     let subset_all = array.subset_all();
-    let data_all = array.retrieve_array_subset_ndarray::<f32>(&subset_all)?;
+    let data_all = array.retrieve_array_subset::<ndarray::ArrayD<f32>>(&subset_all)?;
 
     println!("ndarray::ArrayD:\n{data_all}");
 
     let chunk = array![[1_f32, 2., 3.], [4., 5., 6.], [7., 8., 9.]];
     let chunk = chunk.into_iter().collect::<Vec<_>>();
 
-    array.store_chunk_elements(&[0, 0], &chunk)?;
-    array.store_chunk_elements(&[0, 1], &chunk)?;
-    array.store_chunk_elements(&[0, 2], &chunk)?;
-    array.store_chunk_elements(&[0, 3], &chunk)?;
+    array.store_chunk(&[0, 0], &chunk)?;
+    array.store_chunk(&[0, 1], &chunk)?;
+    array.store_chunk(&[0, 2], &chunk)?;
+    array.store_chunk(&[0, 3], &chunk)?;
 
     let chunk = array![[1_f32, 2., 3.], [4., 5., 6.], [7., 8., 9.]];
-    array.store_array_subset_ndarray(&[1, 0], chunk)?;
+    let subset = zarrs::array::ArraySubset::new_with_start_shape(vec![1, 0], vec![3, 3])?;
+    array.store_array_subset(&subset, chunk)?;
 
-    let data_all = array.retrieve_array_subset_ndarray::<f32>(&subset_all)?;
+    let data_all = array.retrieve_array_subset::<ndarray::ArrayD<f32>>(&subset_all)?;
     println!("ndarray::ArrayD:\n{data_all}");
 
     Ok(())

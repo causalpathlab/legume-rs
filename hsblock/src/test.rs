@@ -9,7 +9,7 @@ use leiden::leiden::Leiden;
 use leiden::network::{Graph, Network};
 use leiden::Clustering;
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// Build a planted partition graph as a leiden Network.
 ///

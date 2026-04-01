@@ -1,5 +1,5 @@
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rayon::prelude::*;
 use std::f32::consts::PI;
 

@@ -1,7 +1,7 @@
 pub use genomic_data::coordinates::{Gene, GeneAnnotations};
 
 use log::info;
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 
 use genomic_data::gff::GeneId;

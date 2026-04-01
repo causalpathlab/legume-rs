@@ -13,7 +13,6 @@ use crate::run_diff::*;
 use crate::run_sim_collider::*;
 use crate::run_sim_one_type::*;
 
-use clap::command;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]

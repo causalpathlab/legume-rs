@@ -553,14 +553,17 @@ pub fn fit_em(
         let mut mean_weights = DVector::<f32>::zeros(k);
         for s in 0..n_samples {
             let alpha = sample_alpha[s];
-            for t in 0..n_segments {
-                let y_st = sample_rows[s][t];
+            let post = &results[s].posteriors;
+            let y_vec = DVector::from_row_slice(&sample_rows[s][..n_segments]);
+            // mean_weights += column sums of posteriors
+            for j in 0..k {
+                mean_weights[j] += post.column(j).sum();
+            }
+            // new_means += posteriors' @ (y / alpha)  per state
+            if alpha.abs() > 1e-10 {
+                let y_scaled = &y_vec / alpha;
                 for j in 0..k {
-                    let w = results[s].posteriors[(t, j)];
-                    if alpha.abs() > 1e-10 {
-                        new_means[j] += w * y_st / alpha;
-                    }
-                    mean_weights[j] += w;
+                    new_means[j] += post.column(j).dot(&y_scaled);
                 }
             }
         }

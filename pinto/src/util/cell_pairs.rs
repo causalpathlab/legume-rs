@@ -297,7 +297,7 @@ fn pca_2d(embedding: &Mat) -> anyhow::Result<Mat> {
 /// existing KNN graph, producing a visually informative 2D embedding.
 fn force_directed_layout(embedding: &Mat, graph: &KnnGraph) -> anyhow::Result<Mat> {
     use rand::rngs::SmallRng;
-    use rand::Rng;
+    use rand::RngExt;
     use rand::SeedableRng;
 
     let n = graph.n_nodes;

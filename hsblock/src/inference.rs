@@ -12,7 +12,7 @@ use crate::sufficient_stats::{SufficientStats, WeightedEdge};
 use leiden::{Clustering, Network};
 use log::info;
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// Options for HSBM inference.
 #[derive(Debug, Clone)]

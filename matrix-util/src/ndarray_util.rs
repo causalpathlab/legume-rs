@@ -1,7 +1,7 @@
 use crate::traits::*;
 use ndarray::prelude::*;
 use num_traits::{Float, FromPrimitive};
-use rand::Rng;
+use rand::RngExt;
 use rand_distr::{Distribution, Gamma, StandardNormal, Uniform};
 use rayon::prelude::*;
 

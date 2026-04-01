@@ -9,7 +9,7 @@ use crate::util::common::new_progress_bar;
 use crate::util::knn_graph::KnnGraph;
 use log::info;
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rayon::prelude::*;
 
 /// Controls how edges are reassigned in component-partitioned sweeps.
