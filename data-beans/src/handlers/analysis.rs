@@ -191,11 +191,11 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         hierarchical_depth: cmd_args.hierarchical_depth,
         n_housekeeping: cmd_args.n_housekeeping,
         housekeeping_fold: cmd_args.housekeeping_fold,
-        n_chromosomes: 0,
-        cnv_events_per_chr: 0.5,
-        cnv_block_frac: 0.15,
-        cnv_gain_fold: 2.0,
-        cnv_loss_fold: 0.5,
+        n_chromosomes: cmd_args.n_chromosomes,
+        cnv_events_per_chr: cmd_args.cnv_events_per_chr,
+        cnv_block_frac: cmd_args.cnv_block_frac,
+        cnv_gain_fold: cmd_args.cnv_gain_fold,
+        cnv_loss_fold: cmd_args.cnv_loss_fold,
     };
 
     let sim = simulate::generate_factored_poisson_gamma_data(&sim_args)?;
@@ -234,6 +234,26 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         let hierarchy_file = mtx_file.replace(".mtx.gz", ".hierarchy.parquet");
         node_probs.to_parquet_with_names(&hierarchy_file, (Some(&rows), Some("feature")), None)?;
         info!("wrote hierarchy node probabilities: {:?}", &hierarchy_file);
+    }
+
+    if let (Some(ref chromosomes), Some(ref positions), Some(ref states)) =
+        (&sim.gene_chromosomes, &sim.gene_positions, &sim.cnv_states)
+    {
+        let cnv_file = mtx_file.replace(".mtx.gz", ".cnv_ground_truth.tsv.gz");
+        let state_labels = ["loss", "neutral", "gain"];
+        let cnv_lines: Vec<Box<str>> = std::iter::once("gene\tchromosome\tposition\tstate".into())
+            .chain(
+                rows.iter()
+                    .zip(chromosomes.iter())
+                    .zip(positions.iter())
+                    .zip(states.iter())
+                    .map(|(((g, chr), pos), &st)| {
+                        format!("{}\t{}\t{}\t{}", g, chr, pos, state_labels[st as usize]).into()
+                    }),
+            )
+            .collect();
+        write_lines(&cnv_lines, &cnv_file)?;
+        info!("wrote CNV ground truth: {:?}", &cnv_file);
     }
 
     info!(

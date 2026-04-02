@@ -1526,6 +1526,43 @@ pub struct RunSimulateArgs {
 
     #[arg(
         long,
+        default_value_t = 0,
+        help = "Number of chromosomes for CNV simulation (0 = disabled)",
+        long_help = "Distribute genes across this many chromosomes and simulate \n\
+		     contiguous copy-number gain/loss blocks. Set to 0 to disable."
+    )]
+    n_chromosomes: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Expected CNV events per chromosome"
+    )]
+    cnv_events_per_chr: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.15,
+        help = "CNV block size as fraction of genes per chromosome"
+    )]
+    cnv_block_frac: f32,
+
+    #[arg(
+        long,
+        default_value_t = 2.0,
+        help = "Fold-change for CNV gain events"
+    )]
+    cnv_gain_fold: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Fold-change for CNV loss events"
+    )]
+    cnv_loss_fold: f32,
+
+    #[arg(
+        long,
         default_value_t = false,
         help = "Save output in MTX format",
         long_help = "Enable this option to save the simulated matrix in MTX format \n\
