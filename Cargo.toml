@@ -1,6 +1,24 @@
 [workspace]
 
-members = ["data-beans", "data-beans-alg", "matrix-util", "matrix-param", "mcmc-util", "senna", "pinto", "cocoa", "faba", "chickpea", "fagioli", "cnv", "genomic-data", "leiden", "hsblock", "auxiliary-data"]
+members = [
+    "auxiliary-data",
+    "candle-util",
+    "chickpea",
+    "cnv",
+    "cocoa",
+    "data-beans",
+    "data-beans-alg",
+    "faba",
+    "fagioli",
+    "genomic-data",
+    "hsblock",
+    "leiden",
+    "matrix-param",
+    "matrix-util",
+    "mcmc-util",
+    "pinto",
+    "senna",
+]
 
 resolver = "3"
 
@@ -15,58 +33,68 @@ version = "0.2.0"
 
 [workspace.dependencies]
 
+# Core / CLI
 anyhow = "1.0"
-flate2 = { version = "1.0.34" }
 clap = { version = "4.5.20", features = ["derive"] }
+ctrlc = { version = "3", features = ["termination"] }
+env_logger = "0.11"
+log = "0.4"
+
+# Parallelism
 num_cpus = "1.16.0"
 rayon = "1.10.0"
 
-tempfile = "3.2"
+# Randomness
 rand = "0.10"
 rand_distr = "0.6"
+tempfile = "3.2"
 
-ndarray = { version = "0.17", features = ["rayon","serde","approx","blas"]}
-ndarray-rand = { version = "0.16" }
-
+# Numeric / linear algebra
 approx = "0.5.1"
-special = "0.13"
-serde_json = "1.0"
-serde = "1.0"
-
-nalgebra = { version = "0.34" }
-nalgebra-sparse = { version = "0.11" }
+nalgebra = "0.34"
+nalgebra-sparse = "0.11"
+ndarray = { version = "0.17", features = ["rayon", "serde", "approx", "blas"] }
+ndarray-rand = "0.16"
 num-traits = "0.2.19"
+special = "0.13"
+statrs = "0.18"
 
+# Data structures / hashing
 dashmap = { version = "6.1.0", features = ["rayon"] }
-rustc-hash = { version = "2.1" }
+rustc-hash = "2.1"
 
-hnsw_rs = "0.3"
-anndists = "0.1"
-indicatif = { version = "^0.18", features = ["rayon"] }
-indicatif-log-bridge = { version = "0.2" }
+# Serialization / IO
+flate2 = "1.0.34"
+parquet = "58"
+regex = "1"
+serde = "1.0"
+serde_json = "1.0"
+zip = "8"
 
-parquet = { version = "58" }
+# Bioinformatics
+coitrees = "0.4"
 rust-htslib = "1.0"
-env_logger = { version = "0.11" }
-log = { version = "0.4" }
-regex = { version = "1" }
-zip = { version = "8" }
 
-statrs = { version = "0.18" }
-coitrees = { version = "0.4" }
+# Nearest neighbours / clustering
+anndists = "0.1"
 clustering = { version = "0.2.1", features = ["parallel"] }
-colored = { version = "3" }
-ctrlc = { version = "3", features = ["termination"] }
+hnsw_rs = "0.3"
 
+# Progress / display
+colored = "3"
+indicatif = { version = "^0.18", features = ["rayon"] }
+indicatif-log-bridge = "0.2"
+
+# Internal crates
+auxiliary-data = { path = "auxiliary-data" }
+candle-util = { path = "candle-util" }
 cnv = { path = "cnv" }
-data-beans = { path = "data-beans"}
-data-beans-alg = { path = "data-beans-alg"}
+data-beans = { path = "data-beans" }
+data-beans-alg = { path = "data-beans-alg" }
+faba = { path = "faba" }
+genomic-data = { path = "genomic-data" }
+hsblock = { path = "hsblock" }
+leiden = { path = "leiden" }
 matrix-param = { path = "matrix-param" }
 matrix-util = { path = "matrix-util" }
-candle-util = { path = "candle-util" }
-genomic-data = { path = "genomic-data" }
-faba = { path = "faba" }
-leiden = { path = "leiden" }
-hsblock = { path = "hsblock" }
 mcmc-util = { path = "mcmc-util" }
-auxiliary-data = { path = "auxiliary-data" }
