@@ -210,7 +210,8 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 1e-3,
+        default_value_t = 0.05,
+        alias = "lr",
         help = "Learning rate.",
         long_help = "Learning rate for optimization.\n\
 		     Controls the step size for parameter updates."
