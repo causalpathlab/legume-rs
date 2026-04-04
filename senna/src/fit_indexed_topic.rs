@@ -131,7 +131,7 @@ pub struct IndexedTopicArgs {
     #[arg(long, default_value_t = 100, help = "Minibatch size")]
     minibatch_size: usize,
 
-    #[arg(long, default_value_t = 1e-3, help = "Learning rate")]
+    #[arg(long, alias = "lr", default_value_t = 0.05, help = "Learning rate")]
     learning_rate: f32,
 
     #[arg(long, value_enum, default_value = "cpu", help = "Candle device")]
