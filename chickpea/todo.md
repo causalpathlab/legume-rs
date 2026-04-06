@@ -2,28 +2,32 @@
 
 X (ATAC peaks, 100k-1M) -> Y (RNA genes)
 
-### Architecture
+### Simulation scheme
 
-- Sequential coarse-to-fine cascade with per-level SuSiE
-- Feature coarsening (D peaks → d modules) + VariantTree hierarchy over modules
-- Each tree level: aggregate X at that resolution, run SuSiE, prune low-PIP branches
-- Final level: expand to individual peaks, run SuSiE with parent PIP as prior
-- Per-gene tasks, parallelized with rayon
 
-### Done
+* $A_{ir}$: ATAC for a peak $r \in [p]$ in a cell $i \in [n]$
 
-1. `CascadeTask`, `CascadeResult`, `CascadeParams` structs
-2. `aggregate_modules_by_tree_level()` — sum module pseudobulk by tree grouping
-3. `build_child_prior()` — cascade PIP from parent to children (hard mask + soft prior)
-4. `run_cascade()` — the level-by-level loop
-5. `run_susie_level_gaussian()` — CAVI SuSiE wrapper per level
-6. `run_susie_level_sgvb()` — SGVB SuSiE wrapper per level
-7. `simulate_link_data()` — simulation for testing
-8. Prior weights support in `cavi_susie` (candle-util)
-9. All 8 tests passing
+* $X_{ig}$: gene expression for a gene $g \in [m]$ in a cell $i \in [n]$
 
-### Future
+1. generation of ATAC data
 
-- Multi-gene blocks: group genes by cis-window overlap + expression correlation
-- Shared vs independent α across genes in a block
-- Better coarsening that accounts for signal (not purely data-driven)
+$$A_{ir} \sim \text{Poisson}\left(\rho_{i} \sum_{t} \theta_{it} \beta_{tr} \right)$$
+
+where multiplicative noise $\ln \rho_{i} \sim \mathcal{N}\!\left(0,\sigma_{\rho}^{2}\right)$
+
+2. generation of RNA data
+
+$$X_{ig} \sim \text{Poisson}\left(\tau_{i} \sum_{t} \theta_{it} \sum_{r} \beta_{tr} M_{gr} \right)$$
+
+where multiplicative noise $\ln \tau_{i} \sim \mathcal{N}\!\left(0,\sigma_{\tau}^{2}\right)$
+
+* We have an indicator matrix $M_{gr}$ that maps a region $r$ to a target gene $g$.
+
+* We can restrict to cis-regulatory regions per gene
+
+* We can make $M_{gr}(t)$ per topic $t$. 
+
+* Need to provide GTFs
+
+* Think about consistent gene and peak naming across workspace
+
