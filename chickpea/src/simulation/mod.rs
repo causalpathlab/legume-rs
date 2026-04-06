@@ -152,6 +152,11 @@ pub fn run_sim_link(args: &SimLinkArgs) -> anyhow::Result<()> {
     let theta_kn = sample::sample_topic_proportions(k, n, args.pve_topic, &mut rng);
     let beta_atac = sample::sample_dictionary(p, k, &mut rng);
 
+    // ---- Names (needed for zarr metadata) ----
+    let peak_names = generate_peak_names(p);
+    let gene_names = generate_indexed_names(g, "gene");
+    let cell_names = generate_indexed_names(n, "cell");
+
     // ---- ATAC counts ----
     let rho = sample::sample_cell_depths(n, args.depth_atac, args.cell_sd_log_depth_atac, &mut rng);
     info!("Sampling ATAC counts: {} peaks x {} cells", p, n);
@@ -160,12 +165,14 @@ pub fn run_sim_link(args: &SimLinkArgs) -> anyhow::Result<()> {
     info!("ATAC: {} non-zeros", atac_triplets.len());
 
     let atac_path = format!("{}.atac.{}", args.out, args.backend);
-    create_sparse_from_triplets(
+    let mut atac_data = create_sparse_from_triplets(
         &atac_triplets,
         (p, n, atac_triplets.len()),
         Some(&atac_path),
         Some(&backend),
     )?;
+    atac_data.register_row_names_vec(&peak_names);
+    atac_data.register_column_names_vec(&cell_names);
     info!("Wrote ATAC to {}", atac_path);
 
     // ---- Indicator matrix M[G × P] ----
@@ -202,18 +209,17 @@ pub fn run_sim_link(args: &SimLinkArgs) -> anyhow::Result<()> {
     info!("RNA: {} non-zeros", rna_triplets.len());
 
     let rna_path = format!("{}.rna.{}", args.out, args.backend);
-    create_sparse_from_triplets(
+    let mut rna_data = create_sparse_from_triplets(
         &rna_triplets,
         (g, n, rna_triplets.len()),
         Some(&rna_path),
         Some(&backend),
     )?;
+    rna_data.register_row_names_vec(&gene_names);
+    rna_data.register_column_names_vec(&cell_names);
     info!("Wrote RNA to {}", rna_path);
 
     // ---- Write parameters to parquet ----
-    let peak_names = generate_peak_names(p);
-    let gene_names = generate_indexed_names(g, "gene");
-    let cell_names = generate_indexed_names(n, "cell");
 
     let dict_file = format!("{}.dict.parquet", args.out);
     beta_atac.to_parquet_with_names(&dict_file, (Some(&peak_names), Some("peak")), None)?;
