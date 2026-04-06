@@ -251,12 +251,13 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        default_value_t = 5000,
+        default_value_t = 1000,
+        alias = "max-features",
         help = "Cap feature dimension by coarsening",
         long_help = "Cap the feature dimension by grouping co-expressed features into\n\
 		     meta-features. The model trains at this reduced resolution.\n\
 		     On output, the dictionary is expanded back to full resolution.\n\
-		     Set to 0 to disable. Default: 5000.\n\
+		     Set to 0 to disable. Default: 1000.\n\
 		     Applied after --max-features selection if both are specified."
     )]
     max_coarse_features: usize,
@@ -274,27 +275,34 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0.01,
+        default_value_t = 1e-4,
         help = "Topic smoothing during training",
         long_help = "Mix encoder topic proportions with uniform distribution during training:\n\
 		     z_smooth = (1 - α) * z_nk + α / K\n\
 		     Ensures every topic receives gradient signal through the decoder,\n\
 		     preventing dead topics. Only applied during training.\n\
-		     Typical values: 0.05-0.2. Set to 0 to disable."
+		     Typical values: 0.01-0.2. Set to 0 to disable."
     )]
     topic_smoothing: f64,
 
     #[arg(
         long,
         default_value_t = 0,
-        help = "ESS steps for variational contrastive divergence",
-        long_help = "Number of elliptical slice sampling steps per minibatch during training.\n\
-		     When > 0, uses variational contrastive divergence (VCD) instead of SGVB:\n\
-		     the encoder proposes initial z, ESS refines toward the true posterior,\n\
-		     and the encoder is trained to match ESS-refined samples (inclusive KL).\n\
-		     Set to 0 to use standard SGVB (default)."
+        help = "Epochs of VCD training before switching to SGVB",
+        long_help = "Number of initial epochs using variational contrastive divergence (VCD).\n\
+		     VCD refines encoder samples via elliptical slice sampling (ESS),\n\
+		     then switches to standard SGVB for remaining epochs.\n\
+		     Set to 0 to use SGVB only (default)."
     )]
-    ess_steps: usize,
+    vcd_epochs: usize,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        alias = "ess-steps",
+        help = "ESS steps per minibatch during VCD epochs"
+    )]
+    vcd_ess_steps: usize,
 
     #[arg(
         long,
@@ -502,8 +510,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         None
     };
 
-    if args.ess_steps > 0 && matches!(args.level_schedule, LevelSchedule::Progressive) {
-        warn!("--ess-steps is only supported with --level-schedule mixed; ignoring VCD");
+    if args.vcd_epochs > 0 && matches!(args.level_schedule, LevelSchedule::Progressive) {
+        warn!("--vcd-epochs is only supported with --level-schedule mixed; ignoring VCD");
     }
 
     // Build per-level decoders, train, save dictionary, and evaluate.
@@ -524,7 +532,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 args,
                 stop: &stop,
             };
-            let scores = match (&args.level_schedule, args.ess_steps > 0) {
+            let scores = match (&args.level_schedule, args.vcd_epochs > 0) {
                 (LevelSchedule::Progressive, _) => train_progressive(
                     &collapsed_levels,
                     &mut encoder,
@@ -617,7 +625,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 args,
                 stop: &stop,
             };
-            let scores = match (&args.level_schedule, args.ess_steps > 0) {
+            let scores = match (&args.level_schedule, args.vcd_epochs > 0) {
                 (LevelSchedule::Progressive, _) => train_progressive(
                     &collapsed_levels,
                     &mut encoder,
@@ -947,7 +955,8 @@ where
 {
     let num_levels = collapsed_levels.len();
     let total_epochs = config.args.epochs;
-    let ess_steps = config.args.ess_steps;
+    let vcd_epochs = config.args.vcd_epochs;
+    let vcd_ess_steps = config.args.vcd_ess_steps;
     let ess_max_shrink = config.args.ess_max_shrink;
 
     let enc_coarsening = level_coarsenings.last().and_then(|c| c.as_ref());
@@ -963,8 +972,12 @@ where
     }
 
     info!(
-        "VCD mixed training: {} levels, {} epochs, {} ESS steps/batch",
-        num_levels, total_epochs, ess_steps
+        "Mixed training: {} levels, {} epochs ({} VCD + {} SGVB), {} ESS steps/batch",
+        num_levels,
+        total_epochs,
+        vcd_epochs,
+        total_epochs.saturating_sub(vcd_epochs),
+        vcd_ess_steps
     );
 
     let mut adam = AdamW::new_lr(
@@ -1061,9 +1074,12 @@ where
         };
 
         let jitter_end = config.args.jitter_interval.min(total_epochs - epoch);
-        for _jitter in 0..jitter_end {
+        for jitter in 0..jitter_end {
+            let cur_epoch = epoch + jitter;
+            let use_vcd = cur_epoch < vcd_epochs;
+
             let mut llik_tot = 0f32;
-            let mut enc_score_tot = 0f32;
+            let mut kl_tot = 0f32;
             let mut n_tot = 0usize;
 
             for (level, loader) in data_loaders.iter().enumerate() {
@@ -1073,56 +1089,68 @@ where
                 for b in 0..loader.num_minibatch() {
                     let mb = loader.minibatch_shuffled(b, config.dev)?;
 
-                    // 1. Encoder forward: get μ, log σ²
-                    let (z_mean, z_lnvar) =
-                        encoder.latent_gaussian_params(&mb.input, mb.input_null.as_ref(), true)?;
+                    if use_vcd {
+                        // VCD: encoder proposes, ESS refines, encoder matches
+                        let (z_mean, z_lnvar) = encoder.latent_gaussian_params(
+                            &mb.input,
+                            mb.input_null.as_ref(),
+                            true,
+                        )?;
+                        let z_init = encoder.reparameterize(&z_mean, &z_lnvar, true)?;
 
-                    // 2. Sample z₀ from encoder (reparameterization)
-                    let z_init = encoder.reparameterize(&z_mean, &z_lnvar, true)?;
+                        let y_nd = mb.output.unwrap_or(mb.input);
+                        let ess_llik =
+                            decoder.build_ess_llik(&y_nd, config.args.topic_smoothing)?;
+                        let (z_refined, _) = batched_ess_steps(
+                            &z_init.detach(),
+                            &|z: &Tensor| ess_llik(z),
+                            vcd_ess_steps,
+                            ess_max_shrink,
+                        )?;
+                        let z_refined = z_refined.detach();
 
-                    // 3. ESS refinement: z₀ → z_refined via batched ESS
-                    let y_nd = mb.output.unwrap_or(mb.input);
-                    let ess_llik = decoder.build_ess_llik(&y_nd, config.args.topic_smoothing)?;
+                        let log_z_refined = candle_nn::ops::log_softmax(&z_refined, 1)?;
+                        let log_z_refined =
+                            smooth_topics(log_z_refined, config.args.topic_smoothing)?;
+                        let (_, llik) =
+                            decoder.forward_with_llik(&log_z_refined, &y_nd, &topic_likelihood)?;
+                        let dec_loss = llik.neg()?.mean_all()?;
 
-                    let (z_refined, _) = batched_ess_steps(
-                        &z_init.detach(),
-                        &|z: &Tensor| ess_llik(z),
-                        ess_steps,
-                        ess_max_shrink,
-                    )?;
-                    let z_refined = z_refined.detach();
+                        let enc_nll_n = gaussian_neg_log_prob(&z_refined, &z_mean, &z_lnvar)?;
+                        let enc_loss = enc_nll_n.mean_all()?;
 
-                    // 4. Decoder loss: -log p(x | softmax(z_refined))
-                    let log_z_refined = candle_nn::ops::log_softmax(&z_refined, 1)?;
-                    let log_z_refined = smooth_topics(log_z_refined, config.args.topic_smoothing)?;
-                    let (_, llik) =
-                        decoder.forward_with_llik(&log_z_refined, &y_nd, &topic_likelihood)?;
-                    let dec_loss = llik.neg()?.mean_all()?;
+                        let loss = (dec_loss + enc_loss * kl_weight)?;
+                        adam.backward_step(&loss)?;
 
-                    // 5. Encoder loss: -log q(z_refined | x; φ) (inclusive KL)
-                    let enc_nll_n = gaussian_neg_log_prob(&z_refined, &z_mean, &z_lnvar)?;
-                    let enc_loss = enc_nll_n.mean_all()?;
+                        llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+                        kl_tot += enc_nll_n.sum_all()?.to_scalar::<f32>()?;
+                    } else {
+                        // SGVB: standard encoder + decoder
+                        let (log_z_nk, kl) =
+                            encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
+                        let y_nd = mb.output.unwrap_or(mb.input);
+                        let log_z_nk = smooth_topics(log_z_nk, config.args.topic_smoothing)?;
 
-                    // 6. Combined loss
-                    let loss = (dec_loss + enc_loss * kl_weight)?;
-                    adam.backward_step(&loss)?;
+                        let (_, llik) =
+                            decoder.forward_with_llik(&log_z_nk, &y_nd, &topic_likelihood)?;
 
-                    llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
-                    enc_score_tot += enc_nll_n.sum_all()?.to_scalar::<f32>()?;
+                        let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
+                        adam.backward_step(&loss)?;
+
+                        llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+                        kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
+                    }
                 }
             }
 
             let llik_avg = llik_tot / n_tot as f32;
-            let enc_score_avg = enc_score_tot / n_tot as f32;
+            let kl_avg = kl_tot / n_tot as f32;
             llik_trace.push(llik_avg);
-            kl_trace.push(enc_score_avg);
+            kl_trace.push(kl_avg);
 
             pb.inc(1);
 
-            info!(
-                "[epoch {}] llik={} enc_score={}",
-                epoch, llik_avg, enc_score_avg
-            );
+            info!("[epoch {}] llik={} kl={}", cur_epoch, llik_avg, kl_avg);
 
             if config.stop.load(Ordering::SeqCst) {
                 pb.finish_and_clear();
@@ -1136,7 +1164,7 @@ where
     }
 
     pb.finish_and_clear();
-    info!("done VCD mixed multi-level training");
+    info!("done mixed multi-level training (VCD + SGVB)");
     Ok(TrainScores {
         llik: llik_trace,
         kl: kl_trace,
@@ -1358,6 +1386,8 @@ where
             .expect("delta to tensor")
             .transpose(0, 1)
             .expect("transpose")
+            .contiguous()
+            .expect("contiguous")
     });
 
     let block_config = EvaluateBlockConfig {

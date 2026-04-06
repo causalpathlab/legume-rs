@@ -23,6 +23,8 @@ pub struct IndexedMinibatchData {
     pub output_union_indices: Tensor,
     /// [N, S_out] f32 — decoder target values at union positions
     pub output_indexed_x: Tensor,
+    /// [S_out] f32 — log selection frequency at union positions for importance weighting
+    pub output_log_q_s: Tensor,
 }
 
 /// Adaptive feature window data loader with decoupled encoder/decoder windows.
@@ -30,6 +32,9 @@ pub struct IndexedMinibatchData {
 /// Each sample keeps its top-K features by value independently for input (encoder)
 /// and output (decoder) sides. Batches use the union of selected indices within
 /// each side, producing separate [N, S_in] and [N, S_out] tensors.
+///
+/// Call `precompute_all_minibatches` after `shuffle_minibatch` to cache all
+/// minibatch tensors for the jitter interval. Use `minibatch_cached` to retrieve.
 pub struct IndexedInMemoryData {
     input_samples: Vec<IndexedSample>,
     input_null_rows: Option<Vec<Vec<f32>>>,
@@ -38,7 +43,11 @@ pub struct IndexedInMemoryData {
     n_output_features: usize,
     input_context_size: usize,
     output_context_size: usize,
+    /// Per-feature log selection frequency: log(q_d) where q_d = P(feature d in top-K).
+    /// Used for importance-weighted conditional softmax (Jean et al., 2015).
+    output_log_q: Vec<f32>,
     minibatches: Minibatches,
+    cached_batches: Vec<IndexedMinibatchData>,
 }
 
 pub struct IndexedInMemoryArgs<'a, D>
@@ -154,6 +163,27 @@ fn build_indexed_samples<D: CandleDataLoaderOps + Sync>(
         .collect()
 }
 
+/// Compute log selection frequency for each feature from indexed samples.
+///
+/// q_d = (# samples containing feature d) / (total samples), clamped to [1/n, 1].
+/// Returns log(q_d) for each of n_features features.
+///
+/// Used for importance-weighted conditional softmax (Jean et al., 2015,
+/// "On Using Very Large Target Vocabulary for Neural Machine Translation").
+fn compute_log_selection_freq(samples: &[IndexedSample], n_features: usize) -> Vec<f32> {
+    let n = samples.len().max(1) as f32;
+    let mut counts = vec![0u32; n_features];
+    for sample in samples {
+        for &idx in &sample.indices {
+            counts[idx as usize] += 1;
+        }
+    }
+    counts
+        .iter()
+        .map(|&c| ((c.max(1) as f32) / n).ln())
+        .collect()
+}
+
 impl IndexedInMemoryData {
     /// Build indexed data from dense matrices.
     ///
@@ -169,6 +199,8 @@ impl IndexedInMemoryData {
 
         let input_samples = build_indexed_samples(args.input, n_samples, input_context_size);
         let output_samples = build_indexed_samples(args.output, n_samples, output_context_size);
+
+        let output_log_q = compute_log_selection_freq(&output_samples, n_output_features);
 
         // Pre-extract null rows in parallel
         let null_rows: Option<Vec<Vec<f32>>> = args.input_null.map(|d| {
@@ -189,10 +221,12 @@ impl IndexedInMemoryData {
             n_output_features,
             input_context_size,
             output_context_size,
+            output_log_q,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
             },
+            cached_batches: vec![],
         })
     }
 
@@ -210,6 +244,7 @@ impl IndexedInMemoryData {
         // Both are needed because the struct stores two separate Vecs.
         let output_samples = samples;
         let input_samples = output_samples.clone();
+        let output_log_q = compute_log_selection_freq(&output_samples, n_features);
         IndexedInMemoryData {
             input_samples,
             input_null_rows: None,
@@ -218,15 +253,38 @@ impl IndexedInMemoryData {
             n_output_features: n_features,
             input_context_size: context_size,
             output_context_size: context_size,
+            output_log_q,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
             },
+            cached_batches: vec![],
         }
     }
 
     pub fn shuffle_minibatch(&mut self, batch_size: usize) {
         self.minibatches.shuffle_minibatch(batch_size);
+        self.cached_batches.clear();
+    }
+
+    /// Pre-build all minibatch tensors for the current shuffle order.
+    ///
+    /// Call this once after `shuffle_minibatch` to avoid rebuilding
+    /// union+scatter on every `minibatch_cached` call within a jitter interval.
+    pub fn precompute_all_minibatches(&mut self, target_device: &Device) -> anyhow::Result<()> {
+        self.cached_batches = (0..self.minibatches.chunks.len())
+            .map(|b| {
+                let sample_indices = &self.minibatches.chunks[b];
+                self.build_minibatch(sample_indices, target_device)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(())
+    }
+
+    /// Retrieve a pre-computed minibatch. Panics if `precompute_all_minibatches`
+    /// was not called after the last `shuffle_minibatch`.
+    pub fn minibatch_cached(&self, batch_idx: usize) -> &IndexedMinibatchData {
+        &self.cached_batches[batch_idx]
     }
 
     pub fn num_data(&self) -> usize {
@@ -294,12 +352,22 @@ impl IndexedInMemoryData {
             target_device,
         )?;
 
+        // Slice log selection frequency at output union positions
+        let log_q_s: Vec<f32> = output_out
+            .union_vec
+            .iter()
+            .map(|&idx| self.output_log_q[idx as usize])
+            .collect();
+        let s_out = output_out.union_vec.len();
+        let output_log_q_s = Tensor::from_vec(log_q_s, (1, s_out), target_device)?;
+
         Ok(IndexedMinibatchData {
             input_union_indices: input_out.union_indices,
             input_indexed_x: input_out.indexed_x,
             input_indexed_x_null,
             output_union_indices: output_out.union_indices,
             output_indexed_x: output_out.indexed_x,
+            output_log_q_s,
         })
     }
 

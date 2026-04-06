@@ -786,7 +786,7 @@ where
                 if let Some(fc) = fc {
                     delta_mat = fc.aggregate_rows_ds(&delta_mat);
                 }
-                Ok(delta_mat.to_tensor(dev)?.transpose(0, 1)?)
+                Ok(delta_mat.to_tensor(dev)?.transpose(0, 1)?.contiguous()?)
             })
             .transpose()
         })
