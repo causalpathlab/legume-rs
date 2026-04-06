@@ -114,9 +114,6 @@ pub struct IndexedTopicArgs {
     )]
     encoder_layers: Vec<usize>,
 
-    #[arg(long, default_value_t = 0.0, help = "KL annealing warmup epochs")]
-    kl_warmup_epochs: f64,
-
     #[arg(
         long,
         short = 'i',
@@ -422,7 +419,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         jitter_interval: args.jitter_interval,
         minibatch_size: args.minibatch_size,
         learning_rate: args.learning_rate,
-        kl_warmup_epochs: args.kl_warmup_epochs,
         topic_smoothing: args.topic_smoothing,
         enc_context_size: args.context_size,
         dec_context_size,
@@ -663,7 +659,6 @@ struct ProgressiveTrainConfig<'a> {
     jitter_interval: usize,
     minibatch_size: usize,
     learning_rate: f32,
-    kl_warmup_epochs: f64,
     topic_smoothing: f64,
     enc_context_size: usize,
     dec_context_size: usize,
@@ -786,12 +781,6 @@ where
             })
             .collect();
 
-        let kl_weight = if config.kl_warmup_epochs > 0.0 {
-            1.0 - (-(epoch as f64) / config.kl_warmup_epochs).exp()
-        } else {
-            1.0
-        };
-
         let jitter_end = config.jitter_interval.min(total_epochs - epoch);
         for jitter in 0..jitter_end {
             let cur_epoch = epoch + jitter;
@@ -852,7 +841,7 @@ where
                         let enc_nll_n = gaussian_neg_log_prob(&z_refined, &z_mean, &z_lnvar)?;
                         let enc_loss = enc_nll_n.mean_all()?;
 
-                        let loss = (dec_loss + enc_loss * kl_weight)?;
+                        let loss = (dec_loss + enc_loss)?;
                         adam.backward_step(&loss)?;
 
                         llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -873,7 +862,7 @@ where
                             &mb.output_indexed_x,
                             &mb.output_log_q_s,
                         )?;
-                        let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
+                        let loss = (&kl - &llik)?.mean_all()?;
 
                         adam.backward_step(&loss)?;
 
@@ -924,7 +913,7 @@ where
                         &mb.output_indexed_x,
                         &mb.output_log_q_s,
                     )?;
-                    let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
+                    let loss = (&kl - &llik)?.mean_all()?;
                     adam.backward_step(&loss)?;
 
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -1012,7 +1001,6 @@ where
 
     let mut llik_trace = Vec::with_capacity(total_actual_epochs);
     let mut kl_trace = Vec::with_capacity(total_actual_epochs);
-    let mut global_epoch: usize = 0;
 
     for (level, (collapsed, &level_ep)) in
         collapsed_levels.iter().zip(level_epochs.iter()).enumerate()
@@ -1032,12 +1020,6 @@ where
 
             data_loader.shuffle_minibatch(config.minibatch_size);
             data_loader.precompute_all_minibatches(config.dev)?;
-
-            let kl_weight = if config.kl_warmup_epochs > 0.0 {
-                1.0 - (-(global_epoch as f64) / config.kl_warmup_epochs).exp()
-            } else {
-                1.0
-            };
 
             let jitter_end = config.jitter_interval.min(level_ep - epoch);
             for _jitter in 0..jitter_end {
@@ -1063,7 +1045,7 @@ where
                         &mb.output_log_q_s,
                     )?;
 
-                    let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
+                    let loss = (&kl - &llik)?.mean_all()?;
                     adam.backward_step(&loss)?;
 
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -1111,7 +1093,7 @@ where
                                 &mb.output_indexed_x,
                                 &mb.output_log_q_s,
                             )?;
-                            let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
+                            let loss = (&kl - &llik)?.mean_all()?;
                             adam.backward_step(&loss)?;
 
                             llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -1126,7 +1108,6 @@ where
                 kl_trace.push(kl_tot / n);
 
                 pb.inc(1);
-                global_epoch += 1;
 
                 info!(
                     "[level {}/{}][epoch {}] llik={} kl={}",

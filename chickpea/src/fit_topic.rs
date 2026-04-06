@@ -133,17 +133,6 @@ pub struct FitTopicArgs {
     )]
     minibatch_size: usize,
 
-    #[arg(
-        long,
-        default_value_t = 10.0,
-        help = "KL warmup epochs",
-        long_help = "Encoder KL annealing schedule.\n\
-                     KL weight = 1 - exp(-epoch / kl_warmup_epochs).\n\
-                     Larger values delay the KL penalty, allowing\n\
-                     the encoder to explore before being regularized."
-    )]
-    kl_warmup_epochs: f64,
-
     // ---- Output ----
     #[arg(
         long,
@@ -275,14 +264,12 @@ pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
         ("S1 ATAC-only", stage1_epochs, false),
         ("S2 Joint", stage2_epochs, true),
     ] {
-        let epoch_offset = if include_rna { stage1_epochs } else { 0 };
         info!(
             "=== {} ({} epochs x {} levels) ===",
             stage, stage_epochs, num_levels
         );
 
         for epoch in 0..stage_epochs {
-            let kl_weight = 1.0 - (-((epoch_offset + epoch) as f64) / args.kl_warmup_epochs).exp();
             let (mut la_tot, mut lr_tot, mut kl_tot, mut n_tot) = (0f32, 0f32, 0f32, 0usize);
 
             for (level_data, dec) in collapsed.iter().zip(decoders.iter()) {
@@ -310,7 +297,7 @@ pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
                     )?;
 
                     let llik_atac = dec.forward_atac(&log_z, &mb_atac)?;
-                    let mut loss = ((&kl_enc * kl_weight)? - &llik_atac)?.mean_all()?;
+                    let mut loss = (&kl_enc - &llik_atac)?.mean_all()?;
 
                     if include_rna {
                         let llik_rna = dec.forward_rna(&log_z, &mb_rna, &m_gc)?;
