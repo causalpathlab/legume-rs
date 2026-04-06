@@ -1,8 +1,5 @@
 mod common;
-mod fit_linking_models;
-mod input;
-mod linking;
-mod run_sim_link;
+mod simulation;
 
 use crate::common::*;
 use colored::Colorize;
@@ -44,11 +41,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Multi-omic linkage analysis — peak-gene regulatory links
-    Link(fit_linking_models::LinkArgs),
-
     /// Simulate paired RNA + ATAC data with ground-truth peak-gene links
-    SimLink(run_sim_link::SimLinkArgs),
+    SimLink(simulation::SimLinkArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -61,7 +55,6 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match &cli.commands {
-        Commands::Link(args) => fit_linking_models::run_link(args),
-        Commands::SimLink(args) => run_sim_link::run_sim_link(args),
+        Commands::SimLink(args) => simulation::run_sim_link(args),
     }
 }
