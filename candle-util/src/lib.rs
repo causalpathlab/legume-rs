@@ -19,8 +19,6 @@ pub mod candle_indexed_model_traits;
 pub mod candle_inference;
 pub mod candle_joint_data_loader;
 pub mod candle_loss_functions;
-pub mod candle_marker_decoder;
-pub mod candle_marker_encoder;
 pub mod candle_model_traits;
 pub mod candle_topic_refinement;
 pub mod candle_vae_inference;

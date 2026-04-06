@@ -39,6 +39,17 @@ impl SGVBConfig {
 /// mean of noise is exactly zero. This strictly reduces variance of the MC
 /// log likelihood estimate with no hyperparameters to tune.
 ///
+/// # References
+///
+/// - Hammersley, J. M. & Morton, K. W. (1956). A new Monte Carlo technique:
+///   antithetic variates. *Math. Proc. Cambridge Phil. Soc.*, 52(3), 449-475.
+/// - Kucukelbir, A., Tran, D., Ranganath, R., Gelman, A. & Blei, D. M. (2017).
+///   Automatic differentiation variational inference. *JMLR*, 18(14), 1-45.
+/// - Ruiz, F. R., Titsias, M. K. & Blei, D. M. (2016). The generalized
+///   reparameterization gradient. *NeurIPS*.
+/// - Roeder, G., Wu, Y. & Duvenaud, D. (2017). Sticking the landing: simple,
+///   lower-variance gradient estimators for variational inference. *NeurIPS*.
+///
 /// Returns epsilon of shape (num_samples, n, k).
 pub fn antithetic_epsilon(
     num_samples: usize,
