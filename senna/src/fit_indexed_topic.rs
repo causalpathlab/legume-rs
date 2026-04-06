@@ -178,12 +178,21 @@ pub struct IndexedTopicArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "ESS steps for variational contrastive divergence",
-        long_help = "Number of elliptical slice sampling steps per minibatch during training.\n\
-		     When > 0, uses variational contrastive divergence (VCD) instead of SGVB.\n\
-		     Set to 0 to use standard SGVB (default)."
+        help = "Epochs of VCD training before switching to SGVB",
+        long_help = "Number of initial epochs using variational contrastive divergence (VCD).\n\
+		     VCD refines encoder samples via elliptical slice sampling (ESS),\n\
+		     then switches to standard SGVB for remaining epochs.\n\
+		     Set to 0 to use SGVB only (default)."
     )]
-    ess_steps: usize,
+    vcd_epochs: usize,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        alias = "ess-steps",
+        help = "ESS steps per minibatch during VCD epochs"
+    )]
+    vcd_ess_steps: usize,
 
     #[arg(
         long,
@@ -418,7 +427,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         enc_context_size: args.context_size,
         dec_context_size,
         sort_dim_budget: 1usize << args.sort_dim,
-        ess_steps: args.ess_steps,
+        vcd_epochs: args.vcd_epochs,
+        vcd_ess_steps: args.vcd_ess_steps,
         ess_max_shrink: args.ess_max_shrink,
         stop: &stop,
     };
@@ -428,28 +438,25 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         _ => None,
     };
 
-    if args.ess_steps > 0 && matches!(args.level_schedule, LevelSchedule::Progressive) {
-        log::warn!("--ess-steps is only supported with --level-schedule mixed; ignoring VCD");
+    if args.vcd_epochs > 0 && matches!(args.level_schedule, LevelSchedule::Progressive) {
+        log::warn!("--vcd-epochs is only supported with --level-schedule mixed; ignoring VCD");
     }
 
-    let scores = match (&args.level_schedule, args.ess_steps > 0) {
-        (LevelSchedule::Progressive, _) => train_progressive(
+    let scores = match args.level_schedule {
+        LevelSchedule::Progressive => train_progressive(
             &collapsed_levels,
             &base_encoder,
             &decoders,
             &train_config,
             bulk_with_deltas,
         )?,
-        (LevelSchedule::Mixed, false) => train_mixed(
+        LevelSchedule::Mixed => train_mixed(
             &collapsed_levels,
             &base_encoder,
             &decoders,
             &train_config,
             bulk_with_deltas,
         )?,
-        (LevelSchedule::Mixed, true) => {
-            train_mixed_vcd(&collapsed_levels, &base_encoder, &decoders, &train_config)?
-        }
     };
 
     info!("Writing down the model parameters");
@@ -554,10 +561,13 @@ where
             .to_dtype(candle_core::DType::F32)?;
         let (dec_union, dec_indexed_x) =
             dense_to_indexed(&corrected_tensor, config.dec_context_size, config.dev)?;
+        let s = dec_union.dim(0)?;
+        let log_q_s = Tensor::zeros((1, s), candle_core::DType::F32, config.dev)?;
         refine_indexed_topic_proportions(
             &log_z_nk,
             &dec_union,
             &dec_indexed_x,
+            &log_q_s,
             config.decoder,
             cfg,
         )?
@@ -658,7 +668,8 @@ struct ProgressiveTrainConfig<'a> {
     enc_context_size: usize,
     dec_context_size: usize,
     sort_dim_budget: usize,
-    ess_steps: usize,
+    vcd_epochs: usize,
+    vcd_ess_steps: usize,
     ess_max_shrink: usize,
     stop: &'a AtomicBool,
 }
@@ -684,15 +695,14 @@ fn sample_collapsed_data(collapsed: &CollapsedOut) -> anyhow::Result<(Mat, Optio
     Ok((mixed_nd, batch_nd, target_nd))
 }
 
-fn train_mixed<Enc, Dec>(
+fn train_mixed<Dec>(
     collapsed_levels: &[CollapsedOut],
-    encoder: &Enc,
+    encoder: &IndexedEmbeddingEncoder,
     decoders: &[Dec],
     config: &ProgressiveTrainConfig,
     bulk_with_deltas: Option<(&Mat, &[GammaMatrix])>,
 ) -> anyhow::Result<TrainScores>
 where
-    Enc: IndexedEncoderT,
     Dec: IndexedDecoderT,
 {
     let num_levels = collapsed_levels.len();
@@ -708,10 +718,21 @@ where
         );
     }
 
-    info!(
-        "Mixed multi-level training: {} levels, {} epochs",
-        num_levels, total_epochs
-    );
+    let vcd_epochs = config.vcd_epochs;
+    let vcd_ess_steps = config.vcd_ess_steps;
+    let ess_max_shrink = config.ess_max_shrink;
+
+    if vcd_epochs > 0 {
+        info!(
+            "Mixed multi-level training: {} levels, {} epochs ({} VCD + {} SGVB), {} ESS steps/batch",
+            num_levels, total_epochs, vcd_epochs, total_epochs.saturating_sub(vcd_epochs), vcd_ess_steps
+        );
+    } else {
+        info!(
+            "Mixed multi-level training: {} levels, {} epochs",
+            num_levels, total_epochs
+        );
+    }
 
     let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.learning_rate as f64)?;
     let pb = ProgressBar::new(total_epochs as u64);
@@ -759,6 +780,9 @@ where
                 .expect("data loader creation");
                 loader.shuffle_minibatch(config.minibatch_size);
                 loader
+                    .precompute_all_minibatches(config.dev)
+                    .expect("precompute");
+                loader
             })
             .collect();
 
@@ -769,7 +793,10 @@ where
         };
 
         let jitter_end = config.jitter_interval.min(total_epochs - epoch);
-        for _jitter in 0..jitter_end {
+        for jitter in 0..jitter_end {
+            let cur_epoch = epoch + jitter;
+            let use_vcd = vcd_epochs > 0 && cur_epoch < vcd_epochs;
+
             let mut llik_tot = 0f32;
             let mut kl_tot = 0f32;
             let mut count_tot = 0f32;
@@ -781,32 +808,83 @@ where
                 n_tot += loader.num_data();
 
                 for b in 0..loader.num_minibatch() {
-                    let mb = loader.minibatch_shuffled(b, config.dev)?;
-                    let (log_z_nk, kl) = encoder.forward_indexed_t(
-                        &mb.input_union_indices,
-                        &mb.input_indexed_x,
-                        mb.input_indexed_x_null.as_ref(),
-                        true,
-                    )?;
+                    let mb = loader.minibatch_cached(b);
 
-                    let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;
+                    if use_vcd {
+                        // VCD: encoder proposes, ESS refines, encoder matches
+                        let (z_mean, z_lnvar) = encoder.latent_gaussian_params_indexed(
+                            &mb.input_union_indices,
+                            &mb.input_indexed_x,
+                            mb.input_indexed_x_null.as_ref(),
+                            true,
+                        )?;
+                        let z_init = encoder.reparameterize(&z_mean, &z_lnvar, true)?;
 
-                    let (_, llik) = decoder.forward_indexed(
-                        &log_z_nk,
-                        &mb.output_union_indices,
-                        &mb.output_indexed_x,
-                    )?;
+                        let (log_beta_ks, beta_ks) = decoder.prepare_dictionary_slice(
+                            &mb.output_union_indices,
+                            &mb.output_log_q_s,
+                        )?;
 
-                    let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
-                    adam.backward_step(&loss)?;
+                        let ess_llik = Dec::build_ess_llik_from_beta(
+                            beta_ks,
+                            &mb.output_indexed_x,
+                            config.topic_smoothing,
+                            decoder.dim_latent(),
+                        )?;
 
-                    llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
-                    kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
+                        let (z_refined, _) = batched_ess_steps(
+                            &z_init.detach(),
+                            &|z: &Tensor| ess_llik(z),
+                            vcd_ess_steps,
+                            ess_max_shrink,
+                        )?;
+                        let z_refined = z_refined.detach();
+
+                        let log_z_refined = ops::log_softmax(&z_refined, 1)?;
+                        let log_z_refined = smooth_topics(log_z_refined, config.topic_smoothing)?;
+                        let (_, llik) = decoder.forward_indexed_with_log_beta(
+                            &log_z_refined,
+                            &log_beta_ks,
+                            &mb.output_indexed_x,
+                        )?;
+                        let dec_loss = llik.neg()?.mean_all()?;
+
+                        let enc_nll_n = gaussian_neg_log_prob(&z_refined, &z_mean, &z_lnvar)?;
+                        let enc_loss = enc_nll_n.mean_all()?;
+
+                        let loss = (dec_loss + enc_loss * kl_weight)?;
+                        adam.backward_step(&loss)?;
+
+                        llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+                        kl_tot += enc_nll_n.sum_all()?.to_scalar::<f32>()?;
+                    } else {
+                        // SGVB: standard encoder + decoder
+                        let (log_z_nk, kl) = encoder.forward_indexed_t(
+                            &mb.input_union_indices,
+                            &mb.input_indexed_x,
+                            mb.input_indexed_x_null.as_ref(),
+                            true,
+                        )?;
+                        let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;
+
+                        let (_, llik) = decoder.forward_indexed(
+                            &log_z_nk,
+                            &mb.output_union_indices,
+                            &mb.output_indexed_x,
+                            &mb.output_log_q_s,
+                        )?;
+                        let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
+
+                        adam.backward_step(&loss)?;
+
+                        llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+                        kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
+                    }
                     count_tot += mb.output_indexed_x.sum_all()?.to_scalar::<f32>()?;
                 }
             }
 
-            // Bulk training step (if present) — use finest decoder
+            // Bulk training step (if present) — use finest decoder, SGVB only
             if let Some((bulk_full, bulk_deltas)) = &bulk_with_deltas {
                 let finest_idx = num_levels - 1;
                 let finest_decoder = &decoders[finest_idx];
@@ -844,6 +922,7 @@ where
                         &log_z_nk,
                         &mb.output_union_indices,
                         &mb.output_indexed_x,
+                        &mb.output_log_q_s,
                     )?;
                     let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
                     adam.backward_step(&loss)?;
@@ -861,7 +940,7 @@ where
 
             info!(
                 "[epoch {}] llik={} kl={}",
-                epoch,
+                cur_epoch,
                 llik_trace.last().unwrap(),
                 kl_trace.last().unwrap()
             );
@@ -879,179 +958,6 @@ where
 
     pb.finish_and_clear();
     info!("done mixed multi-level training");
-    Ok(TrainScores {
-        llik: llik_trace,
-        kl: kl_trace,
-    })
-}
-
-/// Mixed multi-level VCD training for indexed topic models.
-///
-/// Uses elliptical slice sampling to refine latent z, then trains
-/// encoder to match ESS-refined samples (inclusive KL).
-fn train_mixed_vcd<Dec>(
-    collapsed_levels: &[CollapsedOut],
-    encoder: &IndexedEmbeddingEncoder,
-    decoders: &[Dec],
-    config: &ProgressiveTrainConfig,
-) -> anyhow::Result<TrainScores>
-where
-    Dec: IndexedDecoderT,
-{
-    let num_levels = collapsed_levels.len();
-    let total_epochs = config.epochs;
-    let ess_steps = config.ess_steps;
-    let ess_max_shrink = config.ess_max_shrink;
-
-    for (level, (collapsed, decoder)) in collapsed_levels.iter().zip(decoders.iter()).enumerate() {
-        info!(
-            "Level {}/{}: {} samples, decoder dim {}",
-            level + 1,
-            num_levels,
-            collapsed.mu_observed.ncols(),
-            decoder.dim_obs(),
-        );
-    }
-
-    info!(
-        "VCD mixed training: {} levels, {} epochs, {} ESS steps/batch",
-        num_levels, total_epochs, ess_steps
-    );
-
-    let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.learning_rate as f64)?;
-    let pb = ProgressBar::new(total_epochs as u64);
-
-    let mut llik_trace = Vec::with_capacity(total_epochs);
-    let mut kl_trace = Vec::with_capacity(total_epochs);
-
-    let target_total = config.sort_dim_budget;
-    let level_sizes: Vec<usize> = collapsed_levels
-        .iter()
-        .map(|c| c.mu_observed.ncols())
-        .collect();
-    let level_budgets = compute_level_budgets(&level_sizes, target_total);
-
-    let mut rng = rand::rng();
-
-    for epoch in (0..total_epochs).step_by(config.jitter_interval) {
-        let level_data: Vec<(Mat, Option<Mat>, Mat)> = collapsed_levels
-            .iter()
-            .zip(level_budgets.iter())
-            .map(|(collapsed, &budget)| {
-                let data = sample_collapsed_data(collapsed)?;
-                Ok(subsample_rows(data, budget, &mut rng))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-
-        let data_loaders: Vec<IndexedInMemoryData> = level_data
-            .iter()
-            .map(|(mixed, batch, target)| {
-                let mut loader = IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
-                    input: mixed,
-                    input_null: batch.as_ref(),
-                    output: target,
-                    input_context_size: config.enc_context_size,
-                    output_context_size: config.dec_context_size,
-                })
-                .expect("data loader creation");
-                loader.shuffle_minibatch(config.minibatch_size);
-                loader
-            })
-            .collect();
-
-        let kl_weight = if config.kl_warmup_epochs > 0.0 {
-            1.0 - (-(epoch as f64) / config.kl_warmup_epochs).exp()
-        } else {
-            1.0
-        };
-
-        let jitter_end = config.jitter_interval.min(total_epochs - epoch);
-        for _jitter in 0..jitter_end {
-            let mut llik_tot = 0f32;
-            let mut enc_score_tot = 0f32;
-            let mut n_tot = 0usize;
-
-            for (level, loader) in data_loaders.iter().enumerate() {
-                let decoder = &decoders[level];
-                n_tot += loader.num_data();
-
-                for b in 0..loader.num_minibatch() {
-                    let mb = loader.minibatch_shuffled(b, config.dev)?;
-
-                    // 1. Encoder: get μ, log σ²
-                    let (z_mean, z_lnvar) = encoder.latent_gaussian_params_indexed(
-                        &mb.input_union_indices,
-                        &mb.input_indexed_x,
-                        mb.input_indexed_x_null.as_ref(),
-                        true,
-                    )?;
-
-                    // 2. Sample z₀ from encoder
-                    let z_init = encoder.reparameterize(&z_mean, &z_lnvar, true)?;
-
-                    // 3. ESS refinement with pre-computed detached dictionary
-                    let ess_llik = decoder.build_ess_llik(
-                        &mb.output_union_indices,
-                        &mb.output_indexed_x,
-                        config.topic_smoothing,
-                    )?;
-
-                    let (z_refined, _) = batched_ess_steps(
-                        &z_init.detach(),
-                        &|z: &Tensor| ess_llik(z),
-                        ess_steps,
-                        ess_max_shrink,
-                    )?;
-                    let z_refined = z_refined.detach();
-
-                    // 4. Decoder loss
-                    let log_z_refined = ops::log_softmax(&z_refined, 1)?;
-                    let log_z_refined = smooth_topics(log_z_refined, config.topic_smoothing)?;
-                    let (_, llik) = decoder.forward_indexed(
-                        &log_z_refined,
-                        &mb.output_union_indices,
-                        &mb.output_indexed_x,
-                    )?;
-                    let dec_loss = llik.neg()?.mean_all()?;
-
-                    // 5. Encoder loss: inclusive KL
-                    let enc_nll_n = gaussian_neg_log_prob(&z_refined, &z_mean, &z_lnvar)?;
-                    let enc_loss = enc_nll_n.mean_all()?;
-
-                    // 6. Combined loss
-                    let loss = (dec_loss + enc_loss * kl_weight)?;
-                    adam.backward_step(&loss)?;
-
-                    llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
-                    enc_score_tot += enc_nll_n.sum_all()?.to_scalar::<f32>()?;
-                }
-            }
-
-            llik_trace.push(llik_tot / n_tot as f32);
-            kl_trace.push(enc_score_tot / n_tot as f32);
-
-            pb.inc(1);
-
-            info!(
-                "[epoch {}] llik={} enc_score={}",
-                epoch,
-                llik_trace.last().unwrap(),
-                kl_trace.last().unwrap()
-            );
-
-            if config.stop.load(Ordering::SeqCst) {
-                pb.finish_and_clear();
-                info!("Stopping early at epoch {}", epoch);
-                return Ok(TrainScores {
-                    llik: llik_trace,
-                    kl: kl_trace,
-                });
-            }
-        }
-    }
-
-    pb.finish_and_clear();
-    info!("done VCD mixed multi-level training");
     Ok(TrainScores {
         llik: llik_trace,
         kl: kl_trace,
@@ -1125,6 +1031,7 @@ where
             })?;
 
             data_loader.shuffle_minibatch(config.minibatch_size);
+            data_loader.precompute_all_minibatches(config.dev)?;
 
             let kl_weight = if config.kl_warmup_epochs > 0.0 {
                 1.0 - (-(global_epoch as f64) / config.kl_warmup_epochs).exp()
@@ -1139,7 +1046,7 @@ where
                 let mut count_tot = 0f32;
 
                 for b in 0..data_loader.num_minibatch() {
-                    let mb = data_loader.minibatch_shuffled(b, config.dev)?;
+                    let mb = data_loader.minibatch_cached(b);
                     let (log_z_nk, kl) = encoder.forward_indexed_t(
                         &mb.input_union_indices,
                         &mb.input_indexed_x,
@@ -1153,6 +1060,7 @@ where
                         &log_z_nk,
                         &mb.output_union_indices,
                         &mb.output_indexed_x,
+                        &mb.output_log_q_s,
                     )?;
 
                     let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
@@ -1186,9 +1094,10 @@ where
                                 output_context_size: config.dec_context_size,
                             })?;
                         bulk_loader.shuffle_minibatch(config.minibatch_size);
+                        bulk_loader.precompute_all_minibatches(config.dev)?;
 
                         for b in 0..bulk_loader.num_minibatch() {
-                            let mb = bulk_loader.minibatch_shuffled(b, config.dev)?;
+                            let mb = bulk_loader.minibatch_cached(b);
                             let (log_z_nk, kl) = encoder.forward_indexed_t(
                                 &mb.input_union_indices,
                                 &mb.input_indexed_x,
@@ -1200,6 +1109,7 @@ where
                                 &log_z_nk,
                                 &mb.output_union_indices,
                                 &mb.output_indexed_x,
+                                &mb.output_log_q_s,
                             )?;
                             let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
                             adam.backward_step(&loss)?;
@@ -1259,12 +1169,36 @@ fn dense_to_indexed(
     dev: &Device,
 ) -> anyhow::Result<(Tensor, Tensor)> {
     let rows: Vec<Vec<f32>> = x_nd.to_vec2()?;
+    dense_rows_to_indexed(&rows, context_size, dev)
+}
+
+/// Convert a dense [N, D] tensor to two indexed forms with a single host copy.
+///
+/// Returns `((enc_union, enc_x), (dec_union, dec_x))` using one `to_vec2()` call.
+fn dense_to_indexed_pair(
+    x_nd: &Tensor,
+    enc_context_size: usize,
+    dec_context_size: usize,
+    dev: &Device,
+) -> anyhow::Result<((Tensor, Tensor), (Tensor, Tensor))> {
+    let rows: Vec<Vec<f32>> = x_nd.to_vec2()?;
+    let enc = dense_rows_to_indexed(&rows, enc_context_size, dev)?;
+    let dec = dense_rows_to_indexed(&rows, dec_context_size, dev)?;
+    Ok((enc, dec))
+}
+
+/// Build indexed representation from pre-extracted rows (avoids repeated to_vec2).
+fn dense_rows_to_indexed(
+    rows: &[Vec<f32>],
+    context_size: usize,
+    dev: &Device,
+) -> anyhow::Result<(Tensor, Tensor)> {
     let n_batch = rows.len();
 
     let mut union_set = BTreeSet::new();
     let mut all_top_k: Vec<(Vec<u32>, Vec<f32>)> = Vec::with_capacity(n_batch);
 
-    for row in &rows {
+    for row in rows {
         let (indices, values) = top_k_indices(row, context_size);
         for &idx in &indices {
             union_set.insert(idx);
@@ -1340,6 +1274,8 @@ where
             .expect("delta to tensor")
             .transpose(0, 1)
             .expect("transpose")
+            .contiguous()
+            .expect("contiguous")
     });
 
     let block_config = EvaluateBlockConfig {
@@ -1435,8 +1371,21 @@ where
         }
     });
 
-    // Encoder: indexed
-    let (enc_union, enc_indexed_x) = dense_to_indexed(&x_nd, config.enc_context_size, config.dev)?;
+    // Convert dense to indexed: single host copy when refinement needs both
+    let need_decoder = config.refine_config.is_some();
+    let (enc_result, dec_result) = if need_decoder {
+        let ((eu, ex), (du, dx)) = dense_to_indexed_pair(
+            &x_nd,
+            config.enc_context_size,
+            config.dec_context_size,
+            config.dev,
+        )?;
+        ((eu, ex), Some((du, dx)))
+    } else {
+        let enc = dense_to_indexed(&x_nd, config.enc_context_size, config.dev)?;
+        (enc, None)
+    };
+    let (enc_union, enc_indexed_x) = enc_result;
 
     // Scatter batch correction at encoder union positions if available
     let enc_indexed_x_null = if let Some(x0) = &x0_nd {
@@ -1462,14 +1411,16 @@ where
         false,
     )?;
 
-    // Decoder refinement
+    // Decoder refinement (inference — uniform log_q_s)
     let log_z_nk = if let Some(cfg) = config.refine_config {
-        let (dec_union, dec_indexed_x) =
-            dense_to_indexed(&x_nd, config.dec_context_size, config.dev)?;
+        let (dec_union, dec_indexed_x) = dec_result.unwrap();
+        let s = dec_union.dim(0)?;
+        let log_q_s = Tensor::zeros((1, s), candle_core::DType::F32, config.dev)?;
         refine_indexed_topic_proportions(
             &log_z_nk,
             &dec_union,
             &dec_indexed_x,
+            &log_q_s,
             config.decoder,
             cfg,
         )?
@@ -1486,6 +1437,7 @@ fn refine_indexed_topic_proportions<Dec: IndexedDecoderT>(
     log_z_nk: &Tensor,
     union_indices: &Tensor,
     indexed_x: &Tensor,
+    log_q_s: &Tensor,
     decoder: &Dec,
     config: &TopicRefinementConfig,
 ) -> candle_core::Result<Tensor> {
@@ -1494,7 +1446,7 @@ fn refine_indexed_topic_proportions<Dec: IndexedDecoderT>(
 
     for _step in 0..config.num_steps {
         let log_z = ops::log_softmax(z_var.as_tensor(), 1)?;
-        let (_, llik) = decoder.forward_indexed(&log_z, union_indices, indexed_x)?;
+        let (_, llik) = decoder.forward_indexed(&log_z, union_indices, indexed_x, log_q_s)?;
 
         let diff = (z_var.as_tensor() - &z_logits_init)?;
         let reg = (&diff * &diff)?.sum_all()?;

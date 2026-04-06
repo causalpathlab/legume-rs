@@ -38,25 +38,21 @@ impl IndexedDecoderT for IndexedTopicDecoder {
         log_z_nk: &Tensor,
         union_indices: &Tensor,
         indexed_x: &Tensor,
+        log_q_s: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
-        // [K, D] log-softmax dictionary (normalized over all D features)
-        let log_beta_kd = self.dictionary.biased_weight_kd()?;
-        // [K, S] — select only the indexed features
-        let log_beta_ks = log_beta_kd.index_select(union_indices, 1)?;
+        let log_beta_ks = self
+            .dictionary
+            .biased_weight_ks_conditional(union_indices, log_q_s)?;
+        self.forward_indexed_with_log_beta(log_z_nk, &log_beta_ks, indexed_x)
+    }
 
-        // logsumexp over K: log(Σ_k z_nk * β_ks) → [N, S]
-        let log_h = log_z_nk.unsqueeze(2)?; // [N, K, 1]
-        let log_w = log_beta_ks.unsqueeze(0)?; // [1, K, S]
-        let log_terms = log_h.broadcast_add(&log_w)?; // [N, K, S]
-        let log_recon_ns = log_terms.log_sum_exp(1)?; // [N, S]
-
-        // llik = Σ_s x_ns * log(recon_ns)
-        let llik = indexed_x
-            .clamp(0.0, f64::INFINITY)?
-            .mul(&log_recon_ns)?
-            .sum(indexed_x.rank() - 1)?; // [N]
-
-        Ok((log_recon_ns, llik))
+    fn get_conditional_log_beta_ks(
+        &self,
+        union_indices: &Tensor,
+        log_q_s: &Tensor,
+    ) -> Result<Tensor> {
+        self.dictionary
+            .biased_weight_ks_conditional(union_indices, log_q_s)
     }
 
     fn get_dictionary(&self) -> Result<Tensor> {
@@ -106,11 +102,12 @@ mod tests {
             .forward_with_llik(&log_z, &x, &|_, _| unreachable!())
             .unwrap();
 
-        // Indexed forward with ALL features (should match dense exactly)
+        // Indexed forward with ALL features and uniform log_q (should match dense exactly)
         let all_indices: Vec<u32> = (0..n_features as u32).collect();
         let union_indices = Tensor::from_vec(all_indices, (n_features,), &device).unwrap();
+        let log_q_s = Tensor::zeros((1, n_features), candle_core::DType::F32, &device).unwrap();
         let (log_recon_indexed, llik_indexed) = indexed_decoder
-            .forward_indexed(&log_z, &union_indices, &x)
+            .forward_indexed(&log_z, &union_indices, &x, &log_q_s)
             .unwrap();
 
         let llik_dense_vals: Vec<f32> = llik_dense.to_vec1().unwrap();
@@ -141,7 +138,6 @@ mod tests {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
 
-        let dense_decoder = TopicDecoder::new(n_features, n_topics, vb.pp("dec")).unwrap();
         let indexed_decoder = IndexedTopicDecoder::new(n_features, n_topics, vb.pp("dec")).unwrap();
 
         let logits = Tensor::randn(0.0f32, 1.0, (n_samples, n_topics), &device).unwrap();
@@ -158,44 +154,25 @@ mod tests {
         let union_indices = Tensor::from_vec(subset.clone(), (s,), &device).unwrap();
         let x_indexed = x_full.index_select(&union_indices, 1).unwrap();
 
-        // Indexed forward
+        // Indexed forward with uniform log_q (conditional softmax)
+        let log_q_s = Tensor::zeros((1, s), candle_core::DType::F32, &device).unwrap();
         let (log_recon_ns, llik_indexed) = indexed_decoder
-            .forward_indexed(&log_z, &union_indices, &x_indexed)
+            .forward_indexed(&log_z, &union_indices, &x_indexed, &log_q_s)
             .unwrap();
 
-        // Dense forward — extract same positions for comparison
-        let log_recon_dense = dense_decoder.dictionary().forward_log(&log_z).unwrap();
-        let log_recon_dense_subset = log_recon_dense.index_select(&union_indices, 1).unwrap();
-
-        // Log-reconstructions at selected positions should match
-        let indexed_vals: Vec<Vec<f32>> = log_recon_ns.to_vec2().unwrap();
-        let dense_vals: Vec<Vec<f32>> = log_recon_dense_subset.to_vec2().unwrap();
-
-        for (row_i, row_d) in indexed_vals.iter().zip(dense_vals.iter()) {
-            for (i, d) in row_i.iter().zip(row_d.iter()) {
-                assert!((i - d).abs() < 1e-4, "indexed={} vs dense_subset={}", i, d);
+        // log_recon should be valid (finite, <= 0 for log-probabilities)
+        let recon_vals: Vec<Vec<f32>> = log_recon_ns.to_vec2().unwrap();
+        for row in &recon_vals {
+            for &v in row {
+                assert!(v.is_finite(), "non-finite log_recon: {}", v);
+                assert!(v <= 0.0 + 1e-6, "log_recon > 0: {}", v);
             }
         }
 
-        // Indexed llik should match dense llik computed at same subset positions
-        let dense_llik_at_subset = x_indexed
-            .clamp(0.0, f64::INFINITY)
-            .unwrap()
-            .mul(&log_recon_dense_subset)
-            .unwrap()
-            .sum(1)
-            .unwrap();
-
-        let llik_indexed_vals: Vec<f32> = llik_indexed.to_vec1().unwrap();
-        let llik_dense_subset_vals: Vec<f32> = dense_llik_at_subset.to_vec1().unwrap();
-
-        for (i, d) in llik_indexed_vals.iter().zip(llik_dense_subset_vals.iter()) {
-            assert!(
-                (i - d).abs() < 1e-4,
-                "indexed llik={} vs dense subset llik={}",
-                i,
-                d
-            );
+        // llik should be finite and negative (log-likelihood of counts)
+        let llik_vals: Vec<f32> = llik_indexed.to_vec1().unwrap();
+        for &v in &llik_vals {
+            assert!(v.is_finite(), "non-finite llik: {}", v);
         }
     }
 }

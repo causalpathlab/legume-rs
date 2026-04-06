@@ -45,14 +45,70 @@ pub trait IndexedDecoderT {
     /// # Returns `(log_recon_ns, llik_n)`
     /// * `log_recon_ns` - [N, S] log-reconstruction at indexed positions
     /// * `llik_n` - [N] per-sample log-likelihood
+    /// # Arguments
+    /// * `log_q_s` - [1, S] log selection frequency for importance weighting
     fn forward_indexed(
         &self,
         log_z_nk: &Tensor,
         union_indices: &Tensor,
         indexed_x: &Tensor,
+        log_q_s: &Tensor,
     ) -> Result<(Tensor, Tensor)>;
 
-    /// Get the full dictionary matrix [D, K] in log-space
+    /// Forward pass using a pre-computed log-dictionary slice [K, S].
+    ///
+    /// Uses matmul `z @ exp(beta)` instead of logsumexp to reduce
+    /// autograd graph depth (1 matmul vs 4 broadcast ops).
+    fn forward_indexed_with_log_beta(
+        &self,
+        log_z_nk: &Tensor,
+        log_beta_ks: &Tensor,
+        indexed_x: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let z_nk = log_z_nk.exp()?; // [N, K] — log-probs to probs
+        let beta_ks = log_beta_ks.exp()?; // [K, S]
+        let recon_ns = z_nk.matmul(&beta_ks)?; // [N, S]
+        let log_recon_ns = (recon_ns + 1e-8)?.log()?;
+
+        let llik = indexed_x
+            .clamp(0.0, f64::INFINITY)?
+            .mul(&log_recon_ns)?
+            .sum(indexed_x.rank() - 1)?;
+
+        Ok((log_recon_ns, llik))
+    }
+
+    /// Compute the log-dictionary slice [K, S] at union indices.
+    ///
+    /// Returns `(log_beta_ks, beta_ks_detached)` — the live slice for gradient
+    /// and the detached+exp'd version for ESS.
+    fn prepare_dictionary_slice(
+        &self,
+        union_indices: &Tensor,
+        log_q_s: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let log_beta_ks = self.get_conditional_log_beta_ks(union_indices, log_q_s)?;
+        let beta_ks = log_beta_ks.detach().exp()?;
+        Ok((log_beta_ks, beta_ks))
+    }
+
+    /// Get the importance-weighted conditional log-dictionary [K, S].
+    ///
+    /// Default slices the full [D, K] dictionary. Override for O(K·S)
+    /// conditional softmax with importance weighting.
+    fn get_conditional_log_beta_ks(
+        &self,
+        union_indices: &Tensor,
+        _log_q_s: &Tensor,
+    ) -> Result<Tensor> {
+        let log_dict_dk = self.get_dictionary()?;
+        let log_dict_sk = log_dict_dk.index_select(union_indices, 0)?;
+        log_dict_sk.t()?.contiguous()
+    }
+
+    /// Get the full dictionary matrix [D, K] in log-space (O(K·D) softmax).
+    ///
+    /// Used for output/evaluation. Prefer `get_conditional_log_beta_ks` for training.
     fn get_dictionary(&self) -> Result<Tensor>;
 
     fn dim_obs(&self) -> usize;
@@ -67,15 +123,31 @@ pub trait IndexedDecoderT {
         &'a self,
         union_indices: &'a Tensor,
         indexed_x: &'a Tensor,
+        log_q_s: &Tensor,
         topic_smoothing: f64,
+    ) -> Result<EssLlikFn<'a>> {
+        let log_beta_ks = self
+            .get_conditional_log_beta_ks(union_indices, log_q_s)?
+            .detach();
+        let beta_ks = log_beta_ks.exp()?.contiguous()?; // [K, S]
+        Self::build_ess_llik_from_beta(beta_ks, indexed_x, topic_smoothing, self.dim_latent())
+    }
+
+    /// Build ESS log-likelihood closure from a pre-computed β [K, S] matrix.
+    ///
+    /// Use this when the caller has already computed the dictionary slice
+    /// (e.g., shared with the decoder forward pass) to avoid redundant
+    /// log_softmax over [K, D].
+    fn build_ess_llik_from_beta<'a>(
+        beta_ks: Tensor,
+        indexed_x: &'a Tensor,
+        topic_smoothing: f64,
+        dim_latent: usize,
     ) -> Result<EssLlikFn<'a>> {
         use candle_nn::ops;
 
-        let log_dict_dk = self.get_dictionary()?.detach();
-        let log_dict_sk = log_dict_dk.index_select(union_indices, 0)?;
-        let beta_ks = log_dict_sk.t()?.exp()?.contiguous()?; // [K, S]
         let x_pos = indexed_x.clamp(0.0, f64::INFINITY)?;
-        let k = self.dim_latent() as f64;
+        let k = dim_latent as f64;
 
         Ok(Box::new(move |z_nk: &Tensor| {
             let mut z = ops::softmax(z_nk, 1)?;

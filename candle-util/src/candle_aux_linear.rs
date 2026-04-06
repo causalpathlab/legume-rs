@@ -177,7 +177,9 @@ impl SoftmaxLinear {
     }
 
     pub fn weight_dk(&self) -> Result<Tensor> {
-        ops::log_softmax(&self.weight_kd, self.weight_kd.rank() - 1)?.transpose(0, 1)
+        ops::log_softmax(&self.weight_kd, self.weight_kd.rank() - 1)?
+            .transpose(0, 1)?
+            .contiguous()
     }
 
     /// Raw logits with optional bias applied (before softmax normalization).
@@ -189,6 +191,34 @@ impl SoftmaxLinear {
         }
     }
 
+    /// Importance-weighted conditional log-softmax over selected features.
+    ///
+    /// Computes `log_softmax(w_ks - log_q_s)` where `log_q_s` is the log
+    /// selection frequency of each feature. This corrects for the sampling
+    /// bias of top-K feature selection, approximating full-vocabulary softmax.
+    ///
+    /// Reference: Jean et al. (2015), "On Using Very Large Target Vocabulary
+    /// for Neural Machine Translation", ACL.
+    ///
+    /// O(K·S) forward and backward — no [K, D] materialization.
+    pub(crate) fn biased_weight_ks_conditional(
+        &self,
+        union_indices: &Tensor,
+        log_q_s: &Tensor,
+    ) -> Result<Tensor> {
+        let w_ks = self.weight_kd.index_select(union_indices, 1)?;
+        let w_ks = match &self.bias_1d {
+            Some(bias) => {
+                let bias_s = bias.index_select(union_indices, 1)?;
+                w_ks.broadcast_add(&bias_s)?
+            }
+            _ => w_ks,
+        };
+        // Importance correction: subtract log selection frequency before softmax
+        let w_ks = w_ks.broadcast_sub(log_q_s)?;
+        ops::log_softmax(&w_ks, w_ks.rank() - 1)
+    }
+
     pub(crate) fn biased_weight_kd(&self) -> Result<Tensor> {
         match &self.bias_1d {
             Some(bias) => ops::log_softmax(
@@ -196,7 +226,8 @@ impl SoftmaxLinear {
                 self.weight_kd.rank() - 1,
             ),
             _ => ops::log_softmax(&self.weight_kd, self.weight_kd.rank() - 1),
-        }
+        }?
+        .contiguous()
     }
 
     /// Log-space forward: log(recon_nd) via logsumexp
@@ -274,7 +305,7 @@ impl SparsemaxLinear {
     }
 
     pub fn weight_dk(&self) -> Result<Tensor> {
-        sparsemax(&self.weight_kd)?.transpose(0, 1)
+        sparsemax(&self.weight_kd)?.transpose(0, 1)?.contiguous()
     }
 
     fn biased_weight_kd(&self) -> Result<Tensor> {
