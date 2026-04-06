@@ -29,3 +29,5 @@ pub use data_beans_alg::random_projection::*;
 
 pub use matrix_param::io::ParamIo;
 pub use matrix_param::traits::Inference;
+
+pub use candle_util::{candle_core, candle_nn};

@@ -1,5 +1,8 @@
+mod chickpea_input;
 mod common;
+mod fit_topic;
 mod simulation;
+mod topic;
 
 use crate::common::*;
 use colored::Colorize;
@@ -43,6 +46,8 @@ struct Cli {
 enum Commands {
     /// Simulate paired RNA + ATAC data with ground-truth peak-gene links
     SimLink(simulation::SimLinkArgs),
+    /// Fit joint topic model to paired RNA + ATAC data
+    FitTopic(fit_topic::FitTopicArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -56,5 +61,6 @@ fn main() -> anyhow::Result<()> {
 
     match &cli.commands {
         Commands::SimLink(args) => simulation::run_sim_link(args),
+        Commands::FitTopic(args) => fit_topic::fit_topic_model(args),
     }
 }

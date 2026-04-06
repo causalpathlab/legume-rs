@@ -15,7 +15,7 @@ use rayon::prelude::*;
 use std::ops::AddAssign;
 use std::sync::{Arc, Mutex};
 
-use crate::random_projection::{binary_sort_columns, RandProjOps};
+use crate::random_projection::binary_sort_columns;
 
 use rustc_hash::FxHashMap as HashMap;
 type CscMat = nalgebra_sparse::CscMatrix<f32>;
@@ -1171,21 +1171,73 @@ impl MultilevelCollapsingOps for SparseIoStack {
         let col_to_batch: Vec<usize> = self.stack[0].get_batch_membership(0..ncols);
 
         if num_batches < 2 {
-            // No batch effects — single-level collapsing per layer
-            self.partition_columns_to_groups(proj_kn, Some(sort_dim), None)?;
+            // No batch effects — multi-level collapsing without batch correction
+            let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
 
+            info!(
+                "Multi-level stack collapsing (no batch): {} levels, sort_dims={:?}",
+                level_dims.len(),
+                level_dims,
+            );
+
+            // Partition at finest level
+            let finest_dim = level_dims[0];
+            let kk = proj_kn.nrows().min(finest_dim).min(ncols);
+            let fine_codes = binary_sort_columns(proj_kn, kk)?;
+
+            for layer in self.stack.iter_mut() {
+                layer.assign_groups(&fine_codes, None);
+            }
+
+            let group_to_cols = self.stack[0]
+                .take_grouped_columns()
+                .ok_or(anyhow::anyhow!("columns not assigned"))?;
+
+            // Finest level stats
+            let mut fine_stats: Vec<CollapsedStat> = Vec::with_capacity(num_layers);
             let mut layer_results = Vec::with_capacity(num_layers);
             for layer in self.stack.iter() {
-                let group_to_cols = layer
-                    .take_grouped_columns()
-                    .ok_or(anyhow::anyhow!("columns not assigned"))?;
-                let num_groups = group_to_cols.len();
                 let num_features = layer.num_rows();
+                let num_groups = group_to_cols.len();
                 let mut stat = CollapsedStat::new(num_features, num_groups, 0);
                 layer.collect_basic_stat(&mut stat)?;
                 layer_results.push(optimize(&stat, (1.0, 1.0), opt_iter)?);
+                fine_stats.push(stat);
             }
-            return Ok(vec![layer_results]);
+
+            let mut results = vec![layer_results];
+
+            // Agglomeratively merge for coarser levels
+            let mut prev_stats = fine_stats;
+            let mut prev_group_to_cols = group_to_cols.clone();
+
+            for &level_sort_dim in level_dims.iter().skip(1) {
+                let level_opt_iter = (opt_iter / 2).max(10);
+                let (fine_to_coarse, num_coarse) = compute_fine_to_coarse_mapping(
+                    &prev_group_to_cols,
+                    &fine_codes,
+                    level_sort_dim,
+                );
+
+                let mut layer_results = Vec::with_capacity(num_layers);
+                let mut coarse_stats = Vec::with_capacity(num_layers);
+                for prev_stat in prev_stats.iter() {
+                    let coarse_stat = merge_stat(prev_stat, &fine_to_coarse, num_coarse);
+                    layer_results.push(optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?);
+                    coarse_stats.push(coarse_stat);
+                }
+                results.push(layer_results);
+
+                let mut coarse_group_to_cols = vec![vec![]; num_coarse];
+                for (fine_g, &coarse_g) in fine_to_coarse.iter().enumerate() {
+                    coarse_group_to_cols[coarse_g]
+                        .extend_from_slice(&prev_group_to_cols[fine_g]);
+                }
+                prev_stats = coarse_stats;
+                prev_group_to_cols = coarse_group_to_cols;
+            }
+
+            return Ok(results);
         }
 
         // Level dims: [finest, ..., coarsest]

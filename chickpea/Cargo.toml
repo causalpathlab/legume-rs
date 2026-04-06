@@ -13,6 +13,7 @@ name = "chickpea"
 path = "src/main.rs"
 
 [dependencies]
+auxiliary-data = { workspace = true }
 data-beans = { workspace = true }
 data-beans-alg = { workspace = true }
 candle-util = { workspace = true }
