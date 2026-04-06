@@ -170,16 +170,6 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0.0,
-        help = "KL annealing warmup epochs",
-        long_help = "Number of epochs for KL weight to warm up from 0 to 1.\n\
-		     Standard warm-up: kl_weight = 1 - exp(-epoch / warmup)\n\
-		     Larger value = slower warm-up. Set to 0 to disable annealing."
-    )]
-    kl_warmup_epochs: f64,
-
-    #[arg(
-        long,
         short = 'i',
         default_value_t = 1000,
         help = "Number of training epochs.",
@@ -980,7 +970,6 @@ where
 
     let mut llik_trace = Vec::with_capacity(total_actual_epochs);
     let mut kl_trace = Vec::with_capacity(total_actual_epochs);
-    let mut global_epoch: usize = 0;
 
     for (level, (collapsed_data_vec, &level_ep)) in
         collapsed_levels.iter().zip(level_epochs.iter()).enumerate()
@@ -1089,12 +1078,6 @@ where
 
             data_loader.shuffle_minibatch(config.args.minibatch_size)?;
 
-            let kl_weight = if config.args.kl_warmup_epochs > 0.0 {
-                1.0 - (-(global_epoch as f64) / config.args.kl_warmup_epochs).exp()
-            } else {
-                1.0
-            };
-
             let jitter_end = config.args.jitter_interval.min(level_ep - epoch);
             for jitter in 0..jitter_end {
                 let mut llik_tot = 0f32;
@@ -1114,7 +1097,7 @@ where
 
                     let (_, llik) = decoder.forward_with_llik(&z_nk, &y_vec, &topic_likelihood)?;
 
-                    let loss = ((&kl * kl_weight)? - &llik)?.mean_all()?;
+                    let loss = (&kl - &llik)?.mean_all()?;
                     adam.backward_step(&loss)?;
 
                     let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
@@ -1128,7 +1111,6 @@ where
                 llik_trace.push(llik_tot / n_mb);
 
                 pb.inc(1);
-                global_epoch += 1;
 
                 info!(
                     "[level {}/{}][{}][{}] {} {}",
