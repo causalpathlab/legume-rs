@@ -1,6 +1,7 @@
 mod map_qtl;
 mod map_sumstat;
 mod mcmc_sumstat;
+mod prs_susie;
 mod pseudobulk_cmd;
 mod sim_geno;
 mod sim_qtl;
@@ -9,6 +10,7 @@ mod sim_sumstat;
 use map_qtl::*;
 use map_sumstat::*;
 use mcmc_sumstat::*;
+use prs_susie::*;
 use pseudobulk_cmd::*;
 use sim_geno::*;
 use sim_qtl::*;
@@ -68,6 +70,8 @@ enum Commands {
     McmcSumstat(McmcSumstatArgs),
     /// Fine-map cis-eQTL from single-cell RNA-seq with Poisson-Gamma pseudobulk
     MapQtl(MapQtlArgs),
+    /// Ridge PRS from z-scores + SuSiE fine-mapping on predicted phenotypes
+    PrsSusie(PrsSusieArgs),
     /// Collapse single-cell counts into Poisson-Gamma pseudobulk per individual and cell type
     Pseudobulk(PseudobulkArgs),
 }
@@ -103,6 +107,9 @@ fn main() -> Result<()> {
         }
         Commands::MapQtl(args) => {
             map_qtl(args)?;
+        }
+        Commands::PrsSusie(args) => {
+            prs_susie(args)?;
         }
         Commands::Pseudobulk(args) => {
             pseudobulk(args)?;
