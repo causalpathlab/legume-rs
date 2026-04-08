@@ -2,6 +2,7 @@ use candle_util::candle_core::{DType, Result, Tensor};
 use candle_util::candle_nn::{self, ops, VarBuilder};
 
 const NEG_INF_FILL: f64 = -1e9;
+const GATE_EPS: f64 = 1e-4;
 
 /// Single Effect Regression (SER) component.
 struct SingleEffect {
@@ -12,11 +13,12 @@ struct SingleEffect {
 
 /// SuSiE (Sum of Single Effects) for gene-peak linkage M[G, C_max].
 ///
-/// Decomposes M as a sum of L SER components, each selecting one peak per gene.
-/// Sparsity is structural (softmax forces each component to pick one peak).
-/// Regularized by exact per-component KL: categorical on selection + Gaussian on effects.
+/// Each gene has a learned inclusion gate π_g ∈ (ε, 1-ε) that scales the
+/// linkage effect. Null genes learn gate≈0 (no causal peaks).
+/// Within included genes, L SER components each select one peak via softmax.
 pub struct SuSiE {
     components: Vec<SingleEffect>,
+    gate_logit: Tensor, // [G, 1] per-gene inclusion gate
     neg_inf_mask: Option<Tensor>,
     log_cg: Tensor, // [G] precomputed log(valid peaks per gene) for categorical KL
     pub n_genes: usize,
@@ -51,6 +53,9 @@ impl SuSiE {
             components.push(SingleEffect { logit, mu, lnvar });
         }
 
+        let gate_logit =
+            vs.get_with_hints((n_genes, 1), "gate_logit", candle_nn::Init::Const(0.0))?;
+
         let dev = components[0].logit.device();
 
         let neg_inf_mask = match mask {
@@ -69,6 +74,7 @@ impl SuSiE {
 
         Ok(Self {
             components,
+            gate_logit,
             neg_inf_mask,
             log_cg,
             n_genes,
@@ -76,7 +82,12 @@ impl SuSiE {
         })
     }
 
-    /// Log-softmax selection probabilities, respecting mask.
+    /// Per-gene inclusion gate π_g ∈ (ε, 1-ε), smoothed sigmoid.
+    fn gate(&self) -> Result<Tensor> {
+        let sig = ops::sigmoid(&self.gate_logit)?;
+        (sig * (1.0 - 2.0 * GATE_EPS))? + GATE_EPS
+    }
+
     fn log_alpha(&self, comp: &SingleEffect) -> Result<Tensor> {
         match &self.neg_inf_mask {
             Some(neg_inf) => ops::log_softmax(&(&comp.logit + neg_inf)?, 1),
@@ -84,28 +95,23 @@ impl SuSiE {
         }
     }
 
-    /// Softmax selection probabilities, respecting mask.
     fn alpha(&self, comp: &SingleEffect) -> Result<Tensor> {
         self.log_alpha(comp)?.exp()
     }
 
-    /// Forward: returns deterministic M[G, C_max] = Σ_l α_gl · μ_gl (posterior mean).
+    /// Forward: returns gated M[G, C_max] = π_g · Σ_l α_gl · μ_gl.
     pub fn forward(&self) -> Result<Tensor> {
-        self.posterior_mean()
+        let raw = self.posterior_mean_raw()?;
+        raw.broadcast_mul(&self.gate()?)
     }
 
-    /// Exact SuSiE KL divergence, summed over L components and G genes.
-    ///
-    /// Per component l, per gene g:
-    /// - Categorical: KL(Cat(α_l[g,:]) || Uniform(1/C_g)) where C_g = unmasked peaks
-    /// - Gaussian:    KL(N(μ_l[g], exp(lnvar_l[g])) || N(0, prior_var))
-    ///
-    /// Returns a scalar.
-    pub fn kl(&self, prior_var: f64) -> Result<Tensor> {
+    /// KL divergence: per-component categorical + Gaussian, plus gate Bernoulli KL.
+    pub fn kl(&self, prior_var: f64, gate_prior: f64) -> Result<Tensor> {
         let dev = self.components[0].logit.device();
         let mut total = Tensor::new(0f32, dev)?;
         let ln_prior_var = prior_var.ln();
 
+        /* Per-component KL */
         for comp in &self.components {
             let log_alpha = self.log_alpha(comp)?;
             let alpha = log_alpha.exp()?;
@@ -122,10 +128,20 @@ impl SuSiE {
             total = ((&total + &cat_kl)? + &gauss_kl)?;
         }
 
+        /* Gate Bernoulli KL: Σ_g [π log(π/π₀) + (1-π) log((1-π)/(1-π₀))] */
+        let pi = self.gate()?;
+        let one_minus_pi = (1.0 - &pi)?;
+        let log_p0 = gate_prior.ln();
+        let log_1mp0 = (1.0 - gate_prior).ln();
+        let term1 = (&pi * (pi.log()? - log_p0)?)?;
+        let term2 = (&one_minus_pi * (one_minus_pi.log()? - log_1mp0)?)?;
+        let gate_kl = (term1 + term2)?.sum_all()?;
+        total = (&total + &gate_kl)?;
+
         Ok(total)
     }
 
-    /// PIP: 1 - Π_l (1 - α_gl[p]).
+    /// PIP: π_g · [1 - Π_l (1 - α_gl[p])].
     pub fn pip(&self) -> Result<Tensor> {
         let dev = self.components[0].logit.device();
         let ones = Tensor::ones((self.n_genes, self.c_max), DType::F32, dev)?;
@@ -136,11 +152,12 @@ impl SuSiE {
             log_complement = (log_complement + (&ones - &alpha)?.log()?)?;
         }
 
-        &ones - log_complement.exp()?
+        let raw_pip = (&ones - log_complement.exp()?)?;
+        raw_pip.broadcast_mul(&self.gate()?)
     }
 
-    /// Posterior mean: Σ_l α_gl · μ_gl.
-    pub fn posterior_mean(&self) -> Result<Tensor> {
+    /// Ungated posterior mean: Σ_l α_gl · μ_gl.
+    fn posterior_mean_raw(&self) -> Result<Tensor> {
         let dev = self.components[0].logit.device();
         let mut total = Tensor::zeros((self.n_genes, self.c_max), DType::F32, dev)?;
 
@@ -152,7 +169,12 @@ impl SuSiE {
         Ok(total)
     }
 
-    /// Posterior variance: Σ_l α_gl · exp(lnvar_gl).
+    /// Gated posterior mean.
+    pub fn posterior_mean(&self) -> Result<Tensor> {
+        self.posterior_mean_raw()?.broadcast_mul(&self.gate()?)
+    }
+
+    /// Gated posterior variance.
     pub fn posterior_var(&self) -> Result<Tensor> {
         let dev = self.components[0].logit.device();
         let mut total = Tensor::zeros((self.n_genes, self.c_max), DType::F32, dev)?;
@@ -162,6 +184,7 @@ impl SuSiE {
             total = (total + alpha.broadcast_mul(&comp.lnvar.exp()?)?)?;
         }
 
-        Ok(total)
+        let gate = self.gate()?;
+        total.broadcast_mul(&(&gate * &gate)?)
     }
 }

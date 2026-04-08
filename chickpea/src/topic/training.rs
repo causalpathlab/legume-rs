@@ -33,6 +33,7 @@ pub struct TrainingParams {
     pub minibatch_size: usize,
     pub jitter_interval: usize,
     pub topic_smoothing: f64,
+    pub gate_prior: f64,
     pub row_budget: usize,
     pub sort_dim: usize,
 }
@@ -367,7 +368,7 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
                 } else {
                     rna_dictionary_from_m(&m_gc, &dec.log_beta_atac, ctx.flat_cis_indices)?
                 };
-                let kl_susie = susie.kl(params.prior_var)?;
+                let kl_susie = susie.kl(params.prior_var, params.gate_prior)?;
 
                 /* Minibatch loop */
                 for b in 0..n_batches(ns, mb) {

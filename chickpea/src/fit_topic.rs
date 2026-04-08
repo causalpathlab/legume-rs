@@ -76,6 +76,16 @@ pub struct FitTopicArgs {
 
     #[arg(
         long,
+        default_value_t = 0.5,
+        help = "Gate prior inclusion probability",
+        long_help = "Prior probability π₀ for the per-gene inclusion gate.\n\
+                     Controls how aggressively null genes are excluded.\n\
+                     0.5 = uninformative (default), lower = sparser."
+    )]
+    gate_prior: f64,
+
+    #[arg(
+        long,
         default_value_t = 50,
         help = "Max cis-candidates per gene",
         long_help = "Maximum number of cis-candidate peaks per gene.\n\
@@ -371,6 +381,7 @@ pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
         minibatch_size: args.minibatch_size,
         jitter_interval: args.jitter_interval,
         topic_smoothing: args.topic_smoothing,
+        gate_prior: args.gate_prior,
         row_budget: args.row_budget,
         sort_dim: args.sort_dim,
     };
