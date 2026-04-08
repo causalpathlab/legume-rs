@@ -55,6 +55,25 @@ pub struct FitTopicArgs {
 
     #[arg(
         long,
+        default_value_t = 128,
+        help = "Encoder embedding dimension",
+        long_help = "Dimension of per-feature embeddings in the indexed encoder.\n\
+                     Both gene and ATAC experts use this dimension."
+    )]
+    embedding_dim: usize,
+
+    #[arg(
+        long,
+        default_value_t = 512,
+        help = "Top-K features per sample for encoder",
+        long_help = "Number of top features selected per sample for the indexed encoder.\n\
+                     Union of top-K across samples forms the sparse feature set.\n\
+                     Larger values use more features but increase computation."
+    )]
+    context_size: usize,
+
+    #[arg(
+        long,
         default_value_t = 1,
         help = "SER components per gene",
         long_help = "Number of Single Effect Regression (SER) components\n\
@@ -384,6 +403,8 @@ pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
         gate_prior: args.gate_prior,
         row_budget: args.row_budget,
         sort_dim: args.sort_dim,
+        embedding_dim: args.embedding_dim,
+        context_size: args.context_size,
     };
 
     let model = crate::topic::training::train(&ctx, &params)?;

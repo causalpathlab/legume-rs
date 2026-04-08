@@ -36,6 +36,8 @@ pub struct TrainingParams {
     pub gate_prior: f64,
     pub row_budget: usize,
     pub sort_dim: usize,
+    pub embedding_dim: usize,
+    pub context_size: usize,
 }
 
 pub struct TrainedModel {
@@ -201,6 +203,8 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
         ctx.n_genes,
         ctx.n_peaks,
         params.n_topics,
+        params.embedding_dim,
+        params.context_size,
         &[128],
         vs.pp("encoder"),
     )?;
