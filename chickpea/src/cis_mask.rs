@@ -1,8 +1,8 @@
 use crate::common::*;
 use candle_util::candle_core::{DType, Device, Tensor};
+use genomic_data::coordinates::find_cis_peaks;
 pub use genomic_data::coordinates::load_gene_tss;
 pub use genomic_data::coordinates::GeneTss;
-use genomic_data::coordinates::{find_cis_peaks, parse_peak_coordinates};
 
 /// Load gene TSS positions from a simple TSV file (gene\tchr\ttss).
 /// Produced by sim-link as {out}.gene_coords.tsv.gz.
@@ -55,51 +55,59 @@ pub fn load_gene_coords_tsv(
 
 /// Build cis-mask using genomic distance from gene TSS to peak midpoints.
 pub fn build_cis_mask_by_distance(
-    peak_names: &[Box<str>],
+    peak_coords: &[Option<genomic_data::coordinates::PeakCoord>],
     gene_tss: &[Option<GeneTss>],
     cis_window: i64,
     max_cis: usize,
     dev: &Device,
 ) -> anyhow::Result<(Tensor, Tensor)> {
     let n_genes = gene_tss.len();
-    let n_peaks = peak_names.len();
+    let n_peaks = peak_coords.len();
     let c = max_cis.min(n_peaks);
 
-    let peak_coords = parse_peak_coordinates(peak_names);
+    use rayon::prelude::*;
 
-    let mut all_indices: Vec<u32> = Vec::with_capacity(n_genes * c);
-    let mut all_mask: Vec<f32> = Vec::with_capacity(n_genes * c);
+    // Per-gene: find cis-peaks, sort by distance, select top-c (parallel)
+    let per_gene: Vec<(Vec<u32>, Vec<f32>)> = gene_tss
+        .par_iter()
+        .map(|gt| {
+            let mut indices = Vec::with_capacity(c);
+            let mut mask_vals = Vec::with_capacity(c);
 
-    let mut n_matched = 0usize;
-    for gt in gene_tss.iter() {
-        let mut candidates: Vec<(u32, i64)> = match gt {
-            Some(tss) => {
-                n_matched += 1;
-                find_cis_peaks(tss, &peak_coords, cis_window)
+            let mut candidates: Vec<(u32, i64)> = match gt {
+                Some(tss) => find_cis_peaks(tss, peak_coords, cis_window)
                     .into_iter()
                     .map(|idx| {
                         let mid = peak_coords[idx]
                             .as_ref()
-                            .map(|c| (c.start + c.end) / 2)
+                            .map(|pc| (pc.start + pc.end) / 2)
                             .unwrap_or(0);
                         (idx as u32, (mid - tss.tss).abs())
                     })
-                    .collect()
-            }
-            None => Vec::new(),
-        };
+                    .collect(),
+                None => Vec::new(),
+            };
+            candidates.sort_unstable_by_key(|&(_, d)| d);
 
-        candidates.sort_unstable_by_key(|&(_, d)| d);
-
-        for i in 0..c {
-            if i < candidates.len() {
-                all_indices.push(candidates[i].0);
-                all_mask.push(1.0);
-            } else {
-                all_indices.push(0);
-                all_mask.push(0.0);
+            for i in 0..c {
+                if i < candidates.len() {
+                    indices.push(candidates[i].0);
+                    mask_vals.push(1.0);
+                } else {
+                    indices.push(0);
+                    mask_vals.push(0.0);
+                }
             }
-        }
+            (indices, mask_vals)
+        })
+        .collect();
+
+    let n_matched = gene_tss.iter().filter(|g| g.is_some()).count();
+    let mut all_indices = Vec::with_capacity(n_genes * c);
+    let mut all_mask = Vec::with_capacity(n_genes * c);
+    for (idx, msk) in &per_gene {
+        all_indices.extend_from_slice(idx);
+        all_mask.extend_from_slice(msk);
     }
 
     info!(
@@ -112,59 +120,90 @@ pub fn build_cis_mask_by_distance(
     Ok((cis_indices, mask))
 }
 
-/// Build cis-mask by ranking peaks by absolute Pearson correlation with each gene.
+/// Convert values to fractional ranks (average rank for ties).
+fn rank_transform(vals: &[f32]) -> Vec<f32> {
+    let n = vals.len();
+    let mut indexed: Vec<(usize, f32)> = vals.iter().copied().enumerate().collect();
+    indexed.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+
+    let mut ranks = vec![0.0f32; n];
+    let mut i = 0;
+    while i < n {
+        let mut j = i;
+        while j < n && indexed[j].1.total_cmp(&indexed[i].1).is_eq() {
+            j += 1;
+        }
+        let avg_rank = (i + j) as f32 / 2.0;
+        for k in i..j {
+            ranks[indexed[k].0] = avg_rank;
+        }
+        i = j;
+    }
+    ranks
+}
+
+/// Rank-transform, center, and compute L2 norm.
+fn rank_center_norm(row: &[f32]) -> (Vec<f32>, f32) {
+    let ranked = rank_transform(row);
+    let n = ranked.len() as f32;
+    let mean: f32 = ranked.iter().sum::<f32>() / n;
+    let centered: Vec<f32> = ranked.iter().map(|&v| v - mean).collect();
+    let norm: f32 = centered.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-8);
+    (centered, norm)
+}
+
+/// Build cis-mask by ranking peaks by absolute Spearman correlation with each gene.
 pub fn build_cis_mask_by_correlation(
     rna_mat: &nalgebra::DMatrix<f32>,
     atac_mat: &nalgebra::DMatrix<f32>,
     max_c: usize,
     dev: &Device,
 ) -> anyhow::Result<(Tensor, Tensor)> {
+    use rayon::prelude::*;
+
     let n_genes = rna_mat.nrows();
     let n_peaks = atac_mat.nrows();
-    let n_samples = rna_mat.ncols();
     let c = max_c.min(n_peaks);
 
     info!(
-        "Gene-peak correlations ({} x {} x {} samples)...",
-        n_genes, n_peaks, n_samples
+        "Spearman gene-peak correlations ({} x {} x {} samples)...",
+        n_genes,
+        n_peaks,
+        rna_mat.ncols()
     );
 
-    let mut peak_centered: Vec<Vec<f32>> = Vec::with_capacity(n_peaks);
-    let mut peak_norms: Vec<f32> = Vec::with_capacity(n_peaks);
-    for p in 0..n_peaks {
-        let row: Vec<f32> = atac_mat.row(p).iter().copied().collect();
-        let mean: f32 = row.iter().sum::<f32>() / n_samples as f32;
-        let centered: Vec<f32> = row.iter().map(|&v| v - mean).collect();
-        let norm: f32 = centered.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-8);
-        peak_centered.push(centered);
-        peak_norms.push(norm);
-    }
+    // Rank-transform and center ATAC peaks (parallel over peaks)
+    let peak_data: Vec<(Vec<f32>, f32)> = (0..n_peaks)
+        .into_par_iter()
+        .map(|p| {
+            let row: Vec<f32> = atac_mat.row(p).iter().copied().collect();
+            rank_center_norm(&row)
+        })
+        .collect();
 
-    let mut all_indices: Vec<u32> = Vec::with_capacity(n_genes * c);
+    // Per-gene: rank, correlate with all peaks, select top-c (parallel over genes)
+    let all_indices: Vec<Vec<u32>> = (0..n_genes)
+        .into_par_iter()
+        .map(|g| {
+            let row: Vec<f32> = rna_mat.row(g).iter().copied().collect();
+            let (centered, norm) = rank_center_norm(&row);
 
-    for g in 0..n_genes {
-        let row: Vec<f32> = rna_mat.row(g).iter().copied().collect();
-        let mean: f32 = row.iter().sum::<f32>() / n_samples as f32;
-        let centered: Vec<f32> = row.iter().map(|&v| v - mean).collect();
-        let norm: f32 = centered.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-8);
+            let mut corrs: Vec<(u32, f32)> = (0..n_peaks)
+                .map(|p| {
+                    let (ref pc, pn) = peak_data[p];
+                    let dot: f32 = centered.iter().zip(pc).map(|(a, b)| a * b).sum();
+                    (p as u32, (dot / (norm * pn)).abs())
+                })
+                .collect();
 
-        let mut corrs: Vec<(u32, f32)> = (0..n_peaks)
-            .map(|p| {
-                let dot: f32 = centered
-                    .iter()
-                    .zip(&peak_centered[p])
-                    .map(|(a, b)| a * b)
-                    .sum();
-                (p as u32, (dot / (norm * peak_norms[p])).abs())
-            })
-            .collect();
+            corrs.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+            corrs[..c].iter().map(|&(idx, _)| idx).collect()
+        })
+        .collect();
 
-        corrs.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        all_indices.extend(corrs[..c].iter().map(|&(idx, _)| idx));
-    }
-
-    let cis_indices = Tensor::from_vec(all_indices, (n_genes, c), dev)?;
+    let flat: Vec<u32> = all_indices.into_iter().flatten().collect();
+    let cis_indices = Tensor::from_vec(flat, (n_genes, c), dev)?;
     let mask = Tensor::ones((n_genes, c), DType::F32, dev)?;
-    info!("Cis-mask: {} genes x {} candidates", n_genes, c);
+    info!("Cis-mask (Spearman): {} genes x {} candidates", n_genes, c);
     Ok((cis_indices, mask))
 }

@@ -3,6 +3,17 @@ use candle_util::candle_core::{Result, Tensor};
 use candle_util::candle_loss_functions::gaussian_kl_loss;
 use candle_util::candle_nn::{self, ops, BatchNorm, Linear, ModuleT, VarBuilder};
 
+/// Inputs for the encoder forward pass.
+pub struct EncoderInput<'a> {
+    pub x_rna: &'a Tensor,
+    pub x_atac: &'a Tensor,
+    pub batch_rna: Option<&'a Tensor>,
+    pub batch_atac: Option<&'a Tensor>,
+    pub m_weights: &'a Tensor,
+    pub flat_cis_indices: &'a Tensor,
+    pub c_max: usize,
+}
+
 /// Shared MLP head: FC → BN → z_mean, z_lnvar.
 struct MlpHead {
     fc: StackLayers<Linear>,
@@ -53,6 +64,19 @@ fn log1p_normalize(x: &Tensor, n_features: usize) -> Result<Tensor> {
     lx.broadcast_div(&(&denom + 1e-8)?)? * (n_features as f64)
 }
 
+/// log1p normalize, then subtract batch correction in the same normalized space.
+fn log1p_normalize_corrected(
+    x: &Tensor,
+    batch: Option<&Tensor>,
+    n_features: usize,
+) -> Result<Tensor> {
+    let h = log1p_normalize(x, n_features)?;
+    match batch {
+        Some(b) => h - log1p_normalize(b, n_features)?,
+        None => Ok(h),
+    }
+}
+
 fn reparameterize(z_mean: &Tensor, z_lnvar: &Tensor, train: bool) -> Result<Tensor> {
     if train {
         let eps = Tensor::randn_like(z_mean, 0., 1.)?;
@@ -96,28 +120,24 @@ impl GeneFusedEncoder {
         })
     }
 
-    /// `m_weights`: pre-computed exp(SuSiE M) [G, C_max].
-    fn forward(
-        &self,
-        x_rna: &Tensor,
-        x_atac: &Tensor,
-        m_weights: &Tensor,
-        flat_cis_indices: &Tensor,
-        c_max: usize,
-        train: bool,
-    ) -> Result<(Tensor, Tensor)> {
-        let n = x_rna.dim(0)?;
+    fn forward(&self, inp: &EncoderInput, train: bool) -> Result<(Tensor, Tensor)> {
+        let n = inp.x_rna.dim(0)?;
 
-        // Gather ATAC for cis-candidates, weighted sum by M
-        let atac_gathered = x_atac.index_select(flat_cis_indices, 1)?;
-        let atac_gathered = atac_gathered.reshape((n, self.n_genes, c_max))?;
+        let atac_gathered = inp.x_atac.index_select(inp.flat_cis_indices, 1)?;
+        let atac_gathered = atac_gathered.reshape((n, self.n_genes, inp.c_max))?;
         let agg = atac_gathered
-            .broadcast_mul(&m_weights.unsqueeze(0)?)?
+            .broadcast_mul(&inp.m_weights.unsqueeze(0)?)?
             .sum(2)?;
 
-        // Fuse + normalize
-        let fused = ((x_rna + 1.0)?.log()? + (agg + 1.0)?.log()?)?;
-        let normalized = log1p_normalize(&fused, self.n_genes)?;
+        let log_agg = (&agg + 1.0)?.log()?;
+        let fused = ((inp.x_rna + 1.0)?.log()? + &log_agg)?;
+        let normalized = match inp.batch_rna {
+            Some(b) => {
+                let fused_b = ((b + 1.0)?.log()? + &log_agg)?;
+                (log1p_normalize(&fused, self.n_genes)? - log1p_normalize(&fused_b, self.n_genes)?)?
+            }
+            None => log1p_normalize(&fused, self.n_genes)?,
+        };
 
         self.head.forward(&normalized, train)
     }
@@ -136,8 +156,13 @@ impl AtacEncoder {
         })
     }
 
-    fn forward(&self, x_atac: &Tensor, train: bool) -> Result<(Tensor, Tensor)> {
-        let normalized = log1p_normalize(x_atac, self.n_peaks)?;
+    fn forward(
+        &self,
+        x_atac: &Tensor,
+        batch_atac: Option<&Tensor>,
+        train: bool,
+    ) -> Result<(Tensor, Tensor)> {
+        let normalized = log1p_normalize_corrected(x_atac, batch_atac, self.n_peaks)?;
         self.head.forward(&normalized, train)
     }
 }
@@ -166,20 +191,11 @@ impl ChickpeaEncoder {
         })
     }
 
-    /// Forward pass. `m_weights` = exp(SuSiE M), pre-computed once per minibatch.
-    pub fn forward(
-        &self,
-        x_rna: &Tensor,
-        x_atac: &Tensor,
-        m_weights: &Tensor,
-        flat_cis_indices: &Tensor,
-        c_max: usize,
-        train: bool,
-    ) -> Result<(Tensor, Tensor)> {
-        let (z_gene_mean, z_gene_lnvar) =
-            self.gene_expert
-                .forward(x_rna, x_atac, m_weights, flat_cis_indices, c_max, train)?;
-        let (z_atac_mean, z_atac_lnvar) = self.atac_expert.forward(x_atac, train)?;
+    pub fn forward(&self, inp: &EncoderInput, train: bool) -> Result<(Tensor, Tensor)> {
+        let (z_gene_mean, z_gene_lnvar) = self.gene_expert.forward(inp, train)?;
+        let (z_atac_mean, z_atac_lnvar) =
+            self.atac_expert
+                .forward(inp.x_atac, inp.batch_atac, train)?;
 
         // MoE gating
         let gate = ops::sigmoid(&self.gate_logit)?;

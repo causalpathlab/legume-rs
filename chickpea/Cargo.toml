@@ -37,6 +37,7 @@ nalgebra = { workspace = true }
 nalgebra-sparse = { workspace = true }
 approx = { workspace = true }
 
+rust-htslib = { workspace = true }
 ctrlc = { workspace = true }
 colored = { workspace = true }
 special = { workspace = true }
