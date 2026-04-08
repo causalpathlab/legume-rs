@@ -6,7 +6,7 @@ description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version = "0.1.1"
+version = "0.1.3"
 
 [[bin]]
 name = "chickpea"
@@ -37,6 +37,7 @@ nalgebra = { workspace = true }
 nalgebra-sparse = { workspace = true }
 approx = { workspace = true }
 
+ctrlc = { workspace = true }
 colored = { workspace = true }
 special = { workspace = true }
 indicatif = { workspace = true }

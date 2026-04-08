@@ -2,6 +2,7 @@ mod sample;
 
 use crate::common::*;
 use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
+use genomic_data::coordinates::GeneTss;
 use rand::prelude::*;
 
 #[derive(Args, Debug)]
@@ -19,13 +20,34 @@ pub struct SimLinkArgs {
     )]
     out: Box<str>,
 
-    #[arg(long, default_value_t = 2000, help = "Number of genes")]
+    #[arg(
+        long,
+        default_value_t = 2000,
+        help = "Number of genes",
+        long_help = "Number of genes G in the RNA count matrix.\n\
+                     Only a fraction (--linked-gene-fraction) will have\n\
+                     non-zero rows in the indicator matrix M."
+    )]
     n_genes: usize,
 
-    #[arg(long, default_value_t = 10000, help = "Number of ATAC peaks")]
+    #[arg(
+        long,
+        default_value_t = 10000,
+        help = "Number of ATAC peaks",
+        long_help = "Number of ATAC peaks P.\n\
+                     Peaks are named in genomic coordinate format: chr{N}:{start}-{end}.\n\
+                     The ATAC dictionary beta[P,K] is sampled from Dirichlet."
+    )]
     n_peaks: usize,
 
-    #[arg(long, default_value_t = 5000, help = "Number of cells")]
+    #[arg(
+        long,
+        default_value_t = 5000,
+        help = "Number of cells",
+        long_help = "Number of cells N.\n\
+                     Each cell gets a topic assignment, per-cell depth noise,\n\
+                     and Poisson-sampled counts for both RNA and ATAC."
+    )]
     n_cells: usize,
 
     #[arg(
@@ -110,7 +132,7 @@ pub struct SimLinkArgs {
         long,
         default_value_t = 0.0,
         help = "Gene-topic effect SD (0 = disabled)",
-        long_help = "Standard deviation of log-normal gene-topic effects gamma[G,K].\n\
+        long_help = "Standard deviation of log-normal gene-topic effects gamma[G,K_total].\n\
                      When > 0, gamma(g,t) ~ LogNormal(0, sd^2) modulates\n\
                      how much each topic contributes to each gene's expression,\n\
                      independent of the peak-gene mapping.\n\
@@ -118,7 +140,37 @@ pub struct SimLinkArgs {
     )]
     gene_topic_sd: f32,
 
-    #[arg(long, default_value_t = 42, help = "Random seed")]
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Subtypes per coarse topic",
+        long_help = "Number of RNA subtypes K_sub nested within each coarse topic K.\n\
+                     K_total = K × K_sub. ATAC sees K coarse topics (marginalized);\n\
+                     RNA sees K_total fine topics through peak-gene linkage.\n\
+                     Set to 1 for flat topics (current behavior, no nesting).\n\
+                     Example: --n-topics 5 --n-sub-topics 3 → 15 RNA topics."
+    )]
+    n_sub_topics: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.8,
+        help = "PVE for subtype assignment within coarse topic",
+        long_help = "Proportion of variance explained by subtype assignment\n\
+                     within each coarse topic. Each cell's dominant coarse topic\n\
+                     is further split into K_sub subtypes with this PVE.\n\
+                     Only used when --n-sub-topics > 1."
+    )]
+    pve_sub_topic: f32,
+
+    #[arg(
+        long,
+        default_value_t = 42,
+        help = "Random seed",
+        long_help = "Random seed for reproducibility.\n\
+                     Gene-level simulations use seed wrapping:\n\
+                     seed.wrapping_add(gene_idx) for parallel determinism."
+    )]
     rseed: u64,
 
     #[arg(
@@ -136,6 +188,8 @@ pub fn run_sim_link(args: &SimLinkArgs) -> anyhow::Result<()> {
     let p = args.n_peaks;
     let n = args.n_cells;
     let k = args.n_topics;
+    let k_sub = args.n_sub_topics;
+    let k_total = k * k_sub;
     let mut rng = StdRng::seed_from_u64(args.rseed);
 
     let backend = match args.backend.as_str() {
@@ -144,24 +198,39 @@ pub fn run_sim_link(args: &SimLinkArgs) -> anyhow::Result<()> {
     };
 
     info!(
-        "Simulating: {} genes, {} peaks, {} cells, {} topics (pve={}, gene_topic_sd={})",
-        g, p, n, k, args.pve_topic, args.gene_topic_sd
+        "Simulating: {} genes, {} peaks, {} cells, {} topics x {} subtypes = {} total (pve_coarse={}, pve_sub={}, gene_topic_sd={})",
+        g, p, n, k, k_sub, k_total, args.pve_topic, args.pve_sub_topic, args.gene_topic_sd
     );
 
-    // ---- Shared parameters ----
-    let theta_kn = sample::sample_topic_proportions(k, n, args.pve_topic, &mut rng);
-    let beta_atac = sample::sample_dictionary(p, k, &mut rng);
+    // ---- Topic proportions (nested) ----
+    let theta_seed: u64 = rng.next_u64();
+    let (theta_full, theta_coarse) = sample::sample_nested_topic_proportions(
+        k,
+        k_sub,
+        n,
+        args.pve_topic,
+        args.pve_sub_topic,
+        theta_seed,
+    );
 
-    // ---- Names (needed for zarr metadata) ----
+    // ---- Dictionaries ----
+    // β_ext[P, K_total] — full fine-grained dictionary
+    let beta_ext = sample::sample_dictionary(p, k_total, &mut rng);
+    // β_atac[P, K] — marginalized for ATAC (sums over subtypes)
+    let beta_atac = sample::marginalize_dictionary(&beta_ext, k, k_sub);
+
+    // ---- Names ----
     let peak_names = generate_peak_names(p);
     let gene_names = generate_indexed_names(g, "gene");
+    let gene_coords = generate_gene_coords(g);
     let cell_names = generate_indexed_names(n, "cell");
 
-    // ---- ATAC counts ----
+    // ---- ATAC counts: β_atac × θ_coarse ----
     let rho = sample::sample_cell_depths(n, args.depth_atac, args.cell_sd_log_depth_atac, &mut rng);
     info!("Sampling ATAC counts: {} peaks x {} cells", p, n);
     let atac_seed: u64 = rng.next_u64();
-    let atac_triplets = sample::sample_poisson_counts(&beta_atac, &theta_kn, &rho, None, atac_seed);
+    let atac_triplets =
+        sample::sample_poisson_counts(&beta_atac, &theta_coarse, &rho, None, atac_seed);
     info!("ATAC: {} non-zeros", atac_triplets.len());
 
     let atac_path = format!("{}.atac.{}", args.out, args.backend);
@@ -177,23 +246,27 @@ pub fn run_sim_link(args: &SimLinkArgs) -> anyhow::Result<()> {
 
     // ---- Indicator matrix M[G × P] ----
     let n_linked = (g as f32 * args.linked_gene_fraction) as usize;
-    let (indicator_genes, indicator_peaks) =
-        sample::sample_indicator_matrix(g, p, n_linked, args.n_causal_per_gene, &mut rng);
+    let (indicator_genes, indicator_peaks) = sample::sample_indicator_matrix(
+        g,
+        p,
+        n_linked,
+        args.n_causal_per_gene,
+        N_CHROMOSOMES,
+        &mut rng,
+    );
     info!(
         "{} linked genes, {} total entries in M",
         n_linked,
         indicator_genes.len()
     );
 
-    // ---- RNA counts ----
-    // W[G × K] = M × β_atac  (derived dictionary)
-    let w_gk = sample::build_derived_dictionary(&indicator_genes, &indicator_peaks, &beta_atac, g);
+    // ---- RNA counts: W × θ_full where W = M × β_ext ----
+    let w_gk = sample::build_derived_dictionary(&indicator_genes, &indicator_peaks, &beta_ext, g);
 
-    // Optional gene-topic effects γ[G × K]
     let gamma_gk = if args.gene_topic_sd > 0.0 {
         Some(sample::sample_gene_topic_effects(
             g,
-            k,
+            k_total,
             args.gene_topic_sd,
             &mut rng,
         ))
@@ -205,7 +278,7 @@ pub fn run_sim_link(args: &SimLinkArgs) -> anyhow::Result<()> {
     info!("Sampling RNA counts: {} genes x {} cells", g, n);
     let rna_seed: u64 = rng.next_u64();
     let rna_triplets =
-        sample::sample_poisson_counts(&w_gk, &theta_kn, &tau, gamma_gk.as_ref(), rna_seed);
+        sample::sample_poisson_counts(&w_gk, &theta_full, &tau, gamma_gk.as_ref(), rna_seed);
     info!("RNA: {} non-zeros", rna_triplets.len());
 
     let rna_path = format!("{}.rna.{}", args.out, args.backend);
@@ -223,19 +296,33 @@ pub fn run_sim_link(args: &SimLinkArgs) -> anyhow::Result<()> {
 
     let dict_file = format!("{}.dict.parquet", args.out);
     beta_atac.to_parquet_with_names(&dict_file, (Some(&peak_names), Some("peak")), None)?;
-    info!("Wrote dictionary to {}", dict_file);
+    info!("Wrote ATAC dictionary (marginalized) to {}", dict_file);
 
     let prop_file = format!("{}.prop.parquet", args.out);
-    theta_kn.transpose().to_parquet_with_names(
+    theta_coarse.transpose().to_parquet_with_names(
         &prop_file,
         (Some(&cell_names), Some("cell")),
         None,
     )?;
-    info!("Wrote proportions to {}", prop_file);
+    info!("Wrote coarse proportions to {}", prop_file);
 
     let derived_file = format!("{}.derived_dict.parquet", args.out);
     w_gk.to_parquet_with_names(&derived_file, (Some(&gene_names), Some("gene")), None)?;
     info!("Wrote derived dictionary to {}", derived_file);
+
+    if k_sub > 1 {
+        let ext_file = format!("{}.beta_ext.parquet", args.out);
+        beta_ext.to_parquet_with_names(&ext_file, (Some(&peak_names), Some("peak")), None)?;
+        info!("Wrote extended dictionary to {}", ext_file);
+
+        let full_prop_file = format!("{}.theta_full.parquet", args.out);
+        theta_full.transpose().to_parquet_with_names(
+            &full_prop_file,
+            (Some(&cell_names), Some("cell")),
+            None,
+        )?;
+        info!("Wrote full (nested) proportions to {}", full_prop_file);
+    }
 
     if let Some(ref gamma) = gamma_gk {
         let gamma_file = format!("{}.gamma.parquet", args.out);
@@ -243,7 +330,7 @@ pub fn run_sim_link(args: &SimLinkArgs) -> anyhow::Result<()> {
         info!("Wrote gene-topic effects to {}", gamma_file);
     }
 
-    // ---- Ground truth & names ----
+    // ---- Ground truth, names & gene annotations ----
     write_ground_truth(
         &indicator_genes,
         &indicator_peaks,
@@ -252,6 +339,7 @@ pub fn run_sim_link(args: &SimLinkArgs) -> anyhow::Result<()> {
         &args.out,
     )?;
     write_names(&args.out, &peak_names, &gene_names, &cell_names)?;
+    write_gene_coords(&gene_names, &gene_coords, &args.out)?;
 
     info!(
         "Done. Outputs at {}.{{rna,atac}}.{}",
@@ -281,6 +369,46 @@ fn generate_indexed_names(n: usize, prefix: &str) -> Vec<Box<str>> {
     (0..n)
         .map(|i| format!("{}_{}", prefix, i).into_boxed_str())
         .collect()
+}
+
+/// Generate genomic coordinates for simulated genes.
+///
+/// Genes are placed on chromosomes (round-robin) at positions interleaved
+/// with peak bins so that each gene has nearby peaks for a valid cis-window.
+fn generate_gene_coords(n_genes: usize) -> Vec<GeneTss> {
+    (0..n_genes)
+        .map(|i| {
+            let chr = (i % N_CHROMOSOMES) + 1;
+            let gene_on_chr = i / N_CHROMOSOMES;
+            let tss =
+                gene_on_chr as i64 * (PEAK_BIN_WIDTH + PEAK_GAP) as i64 + PEAK_BIN_WIDTH as i64 / 2;
+            GeneTss {
+                chr: format!("chr{}", chr).into(),
+                tss,
+            }
+        })
+        .collect()
+}
+
+/// Write gene annotations: gene_name \t chr \t tss
+fn write_gene_coords(
+    gene_names: &[Box<str>],
+    coords: &[GeneTss],
+    out_prefix: &str,
+) -> anyhow::Result<()> {
+    use matrix_util::common_io::open_buf_writer;
+    use std::io::Write;
+
+    let path = format!("{}.gene_coords.tsv.gz", out_prefix);
+    let mut writer = open_buf_writer(&path)?;
+
+    writeln!(writer, "gene\tchr\ttss")?;
+    for (name, coord) in gene_names.iter().zip(coords.iter()) {
+        writeln!(writer, "{}\t{}\t{}", name, coord.chr, coord.tss)?;
+    }
+
+    info!("Wrote gene coordinates to {}", path);
+    Ok(())
 }
 
 fn write_ground_truth(
