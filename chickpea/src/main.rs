@@ -100,7 +100,8 @@ enum Commands {
             - PREFIX.barcodes.txt           Cell barcodes\n\n\
             Example:\n\
               chickpea sim-link -o test_sim --n-topics 5 --n-sub-topics 3 --n-genes 500",
-        after_long_help = ENV_HELP
+        after_long_help = ENV_HELP,
+	alias = "simulate"
     )]
     SimLink(simulation::SimLinkArgs),
 
@@ -117,7 +118,7 @@ enum Commands {
             - PREFIX.atac_dict.parquet   ATAC dictionary exp(log_beta)[P,K]\n\
             - PREFIX.rna_dict.parquet    Derived RNA dictionary M × beta[G,K]\n\
             - PREFIX.log_beta.parquet    Log-scale ATAC dictionary\n\
-            - PREFIX.linkage.parquet     SuSiE results: PIP, posterior mean/var per gene-peak pair\n\
+            - PREFIX.results.bed.gz      SuSiE results: PIP, effect mean/std per gene-peak pair\n\
             - PREFIX.prop.parquet        Inferred topic proportions[N,K]\n\n\
             Example:\n\
               chickpea fit-topic \\\n\

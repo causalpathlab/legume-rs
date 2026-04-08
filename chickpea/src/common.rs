@@ -17,7 +17,16 @@ pub use data_beans::sparse_io::*;
 pub use data_beans::sparse_io_stack::*;
 pub use data_beans::sparse_io_vector::*;
 
-pub use clap::{Args, Parser, Subcommand};
+pub use clap::{Args, Parser, Subcommand, ValueEnum};
+
+/// Compute device for candle-based models.
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+pub enum ComputeDevice {
+    Cpu,
+    Cuda,
+    Metal,
+}
 
 pub use matrix_param::traits::TwoStatParam;
 pub use matrix_util::common_io::remove_file;
