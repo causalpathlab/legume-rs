@@ -1,21 +1,11 @@
 use crate::embed_common::*;
-use crate::feature_selection::*;
 use crate::senna_input::*;
+use crate::topic::common::*;
+use crate::topic::train_joint::*;
 
-use candle_nn::AdamW;
-use candle_nn::Optimizer;
-
-use candle_core::Device;
 use candle_util::candle_decoder_delta_topic::*;
 use candle_util::candle_decoder_joint_topic::*;
 use candle_util::candle_encoder_joint_softmax::*;
-use candle_util::candle_joint_data_loader::*;
-use candle_util::candle_loss_functions::topic_likelihood;
-use candle_util::candle_model_traits::*;
-use indicatif::{ParallelProgressIterator, ProgressBar};
-use matrix_util::dmatrix_util::concatenate_vertical;
-use rayon::prelude::*;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 pub enum JointDecoderType {
@@ -35,7 +25,7 @@ pub struct JointTopicArgs {
 		     Each file should be specified as a path.\n\
 		     Multiple files can be provided (space or comma separated)."
     )]
-    data_files: Vec<Box<str>>,
+    pub(crate) data_files: Vec<Box<str>>,
 
     #[arg(
         short = 'm',
@@ -48,7 +38,7 @@ pub struct JointTopicArgs {
 		     or the number of rows in the data table.",
         required = true
     )]
-    num_modalities: usize,
+    pub(crate) num_modalities: usize,
 
     #[arg(
         long,
@@ -64,7 +54,7 @@ pub struct JointTopicArgs {
 		     - {out}.base_dictionary.parquet (shared base dictionary)\n\
 		     - {out}_{m}.delta_logits.parquet (delta logits per modality)\n"
     )]
-    out: Box<str>,
+    pub(crate) out: Box<str>,
 
     #[arg(
         long,
@@ -74,7 +64,7 @@ pub struct JointTopicArgs {
         long_help = "Random projection dimension to project the data.\n\
 		     Controls the dimensionality of the random projection step."
     )]
-    proj_dim: usize,
+    pub(crate) proj_dim: usize,
 
     #[arg(
         long,
@@ -84,7 +74,7 @@ pub struct JointTopicArgs {
         long_help = "Use top {d} components of projection.\n\
 		     Number of samples will be less than `2^{d}+1`."
     )]
-    sort_dim: usize,
+    pub(crate) sort_dim: usize,
 
     #[arg(
         long,
@@ -95,7 +85,7 @@ pub struct JointTopicArgs {
 		     Each batch file should correspond to each data file.\n\
 		     Example: batch1.csv,batch2.csv"
     )]
-    batch_files: Option<Vec<Box<str>>>,
+    pub(crate) batch_files: Option<Vec<Box<str>>>,
 
     #[arg(
         short = 'c',
@@ -105,7 +95,7 @@ pub struct JointTopicArgs {
         long_help = "Column sum normalization scale (affects decoder only).\n\
 		     Adjusts normalization of columns in the decoder."
     )]
-    column_sum_norm: f32,
+    pub(crate) column_sum_norm: f32,
 
     #[arg(
         long,
@@ -115,7 +105,7 @@ pub struct JointTopicArgs {
 		     Controls the number of cells considered \n\
 		     for nearest neighbour search within each batch."
     )]
-    knn_cells: usize,
+    pub(crate) knn_cells: usize,
 
     #[arg(
         long,
@@ -124,7 +114,7 @@ pub struct JointTopicArgs {
         long_help = "Number of optimization iterations.\n\
 		     Controls the number of steps for model optimization."
     )]
-    iter_opt: usize,
+    pub(crate) iter_opt: usize,
 
     #[arg(
         long,
@@ -133,7 +123,7 @@ pub struct JointTopicArgs {
         long_help = "Block size (number of columns) for parallel processing.\n\
 		     Controls the granularity of parallel computation."
     )]
-    block_size: usize,
+    pub(crate) block_size: usize,
 
     #[arg(
         short = 't',
@@ -143,18 +133,7 @@ pub struct JointTopicArgs {
         long_help = "Number of latent topics.\n\
 		     Controls the dimensionality of the latent topic space."
     )]
-    n_latent_topics: usize,
-
-    #[arg(
-        long,
-        help = "Maximum number of highly variable features per modality.",
-        long_help = "Select top N features by log-variance.\n\
-		     If not specified, all features are used.\n\
-		     Independent mode: applied separately to each modality.\n\
-		     Delta mode: computed on the reference modality (first),\n\
-		     then shared across all modalities."
-    )]
-    max_features: Option<usize>,
+    pub(crate) n_latent_topics: usize,
 
     #[arg(
         long,
@@ -166,7 +145,7 @@ pub struct JointTopicArgs {
 		     Specify the size of each layer in the encoder model.\n\
 		     Example: 128,1024,128"
     )]
-    encoder_layers: Vec<usize>,
+    pub(crate) encoder_layers: Vec<usize>,
 
     #[arg(
         long,
@@ -176,7 +155,7 @@ pub struct JointTopicArgs {
         long_help = "Number of training epochs.\n\
 		     Controls how many times the model is trained over the data."
     )]
-    epochs: usize,
+    pub(crate) epochs: usize,
 
     #[arg(
         long,
@@ -187,7 +166,7 @@ pub struct JointTopicArgs {
 		     Controls the interval for adding jitter to the collapsed data\n\
 		     by posterior resampling during VAE training."
     )]
-    jitter_interval: usize,
+    pub(crate) jitter_interval: usize,
 
     #[arg(
         long,
@@ -196,7 +175,7 @@ pub struct JointTopicArgs {
         long_help = "Minibatch size for training.\n\
 		     Controls the number of samples per training batch."
     )]
-    minibatch_size: usize,
+    pub(crate) minibatch_size: usize,
 
     #[arg(
         long,
@@ -206,7 +185,7 @@ pub struct JointTopicArgs {
         long_help = "Learning rate for optimization.\n\
 		     Controls the step size for parameter updates."
     )]
-    learning_rate: f32,
+    pub(crate) learning_rate: f32,
 
     #[arg(
         long,
@@ -216,7 +195,7 @@ pub struct JointTopicArgs {
         long_help = "Candle device to use for computation.\n\
 		     Options: cpu, cuda, metal."
     )]
-    device: ComputeDevice,
+    pub(crate) device: ComputeDevice,
 
     #[arg(
         long,
@@ -224,7 +203,7 @@ pub struct JointTopicArgs {
         help = "A device for cuda.",
         long_help = "For cuda or meta, we may want to choose a different device."
     )]
-    device_no: usize,
+    pub(crate) device_no: usize,
 
     #[arg(
         long,
@@ -234,7 +213,7 @@ pub struct JointTopicArgs {
         long_help = "Adjust by batch or residual.\n\
 		     Choose the method for batch adjustment."
     )]
-    adj_method: AdjMethod,
+    pub(crate) adj_method: AdjMethod,
 
     #[arg(
         long,
@@ -244,7 +223,7 @@ pub struct JointTopicArgs {
 		     More levels = coarser-to-finer batch correction.\n\
 		     Set to 1 to disable multi-level."
     )]
-    num_levels: usize,
+    pub(crate) num_levels: usize,
 
     #[arg(
         long,
@@ -258,7 +237,7 @@ pub struct JointTopicArgs {
 		     Independent mode: computed per modality.\n\
 		     Delta mode: computed on the reference modality, shared across all."
     )]
-    max_coarse_features: usize,
+    pub(crate) max_coarse_features: usize,
 
     #[arg(
         long,
@@ -267,7 +246,7 @@ pub struct JointTopicArgs {
         long_help = "Preload all the columns data into memory.\n\
 		     Improves performance for large datasets."
     )]
-    preload_data: bool,
+    pub(crate) preload_data: bool,
 
     #[arg(
         long,
@@ -285,7 +264,7 @@ pub struct JointTopicArgs {
 		       reference modality (first). Delta logits are initialized\n\
 		       to zero and diverge during training."
     )]
-    decoder_type: JointDecoderType,
+    pub(crate) decoder_type: JointDecoderType,
 }
 
 pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
@@ -320,63 +299,6 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             ref_names.len()
         );
     }
-
-    // 1b. Feature selection per modality (if requested)
-    let feature_selections: Vec<Option<FeatureSelection>> =
-        if args.decoder_type == JointDecoderType::Delta {
-            // Delta mode: shared selection from reference modality
-            if let Some(max_feat) = args.max_features {
-                info!(
-                    "Selecting top {} shared features from reference modality by log-variance",
-                    max_feat
-                );
-                let sel = select_highly_variable_features(
-                    &data_stack.stack[0],
-                    Some(max_feat),
-                    None,
-                    false,
-                    &format!("{}_shared", args.out),
-                    args.block_size,
-                    None,
-                )?;
-                info!(
-                    "Shared feature selection: {} features",
-                    sel.selected_indices.len()
-                );
-                vec![Some(sel); args.num_modalities]
-            } else {
-                vec![None; args.num_modalities]
-            }
-        } else if let Some(max_feat) = args.max_features {
-            info!(
-                "Selecting top {} features per modality by log-variance",
-                max_feat
-            );
-            data_stack
-                .stack
-                .iter()
-                .enumerate()
-                .map(|(d, data_vec)| {
-                    let sel = select_highly_variable_features(
-                        data_vec,
-                        Some(max_feat),
-                        None,
-                        false,
-                        &format!("{}_{}", args.out, d),
-                        args.block_size,
-                        None,
-                    )?;
-                    info!(
-                        "Modality {}: selected {} features",
-                        d,
-                        sel.selected_indices.len()
-                    );
-                    Ok(Some(sel))
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?
-        } else {
-            data_stack.stack.iter().map(|_| None).collect()
-        };
 
     // 2. Concatenate projections
     let proj_dim = args.proj_dim.max(args.n_latent_topics);
@@ -413,12 +335,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     // 3b. Feature coarsening per modality (if D > max_coarse_features)
     let n_features_full: Vec<usize> = collapsed_data_vec
         .iter()
-        .zip(&feature_selections)
-        .map(|(x, sel)| {
-            sel.as_ref()
-                .map(|s| s.selected_indices.len())
-                .unwrap_or_else(|| x.mu_observed.nrows())
-        })
+        .map(|x| x.mu_observed.nrows())
         .collect();
 
     let coarsenings: Vec<Option<FeatureCoarsening>> =
@@ -427,15 +344,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             let n_full = n_features_full[0];
             if n_full > args.max_coarse_features {
                 let collapsed_ref = &collapsed_data_vec[0];
-                let sel_ref = &feature_selections[0];
-                let sketch = if let Some(sel) = sel_ref {
-                    collapsed_ref
-                        .mu_observed
-                        .posterior_mean()
-                        .select_rows(&sel.selected_indices)
-                } else {
-                    collapsed_ref.mu_observed.posterior_mean().clone()
-                };
+                let sketch = collapsed_ref.mu_observed.posterior_mean().clone();
                 let fc = compute_feature_coarsening(&sketch, args.max_coarse_features)?;
                 info!(
                     "Shared coarsening: {} → {} meta-features",
@@ -448,31 +357,25 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         } else if args.max_coarse_features > 0 {
             // Independent mode: per-modality coarsening
             collapsed_data_vec
-            .iter()
-            .zip(&feature_selections)
-            .zip(&n_features_full)
-            .enumerate()
-            .map(|(d, ((collapsed, sel), &n_full))| -> anyhow::Result<Option<FeatureCoarsening>> {
-                if n_full > args.max_coarse_features {
-                    let sketch = if let Some(sel) = sel {
-                        collapsed
-                            .mu_observed
-                            .posterior_mean()
-                            .select_rows(&sel.selected_indices)
-                    } else {
-                        collapsed.mu_observed.posterior_mean().clone()
-                    };
-                    let fc = compute_feature_coarsening(&sketch, args.max_coarse_features)?;
-                    info!(
-                        "Modality {}: coarsened {} → {} meta-features",
-                        d, n_full, fc.num_coarse
-                    );
-                    Ok(Some(fc))
-                } else {
-                    Ok(None)
-                }
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?
+                .iter()
+                .zip(&n_features_full)
+                .enumerate()
+                .map(
+                    |(d, (collapsed, &n_full))| -> anyhow::Result<Option<FeatureCoarsening>> {
+                        if n_full > args.max_coarse_features {
+                            let sketch = collapsed.mu_observed.posterior_mean().clone();
+                            let fc = compute_feature_coarsening(&sketch, args.max_coarse_features)?;
+                            info!(
+                                "Modality {}: coarsened {} → {} meta-features",
+                                d, n_full, fc.num_coarse
+                            );
+                            Ok(Some(fc))
+                        } else {
+                            Ok(None)
+                        }
+                    },
+                )
+                .collect::<anyhow::Result<Vec<_>>>()?
         } else {
             collapsed_data_vec.iter().map(|_| None).collect()
         };
@@ -495,11 +398,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     // 5. Train a joint topic model on the collapsed data (progressive)
     let n_topics = args.n_latent_topics;
 
-    let dev = match args.device {
-        ComputeDevice::Metal => candle_core::Device::new_metal(args.device_no)?,
-        ComputeDevice::Cuda => candle_core::Device::new_cuda(args.device_no)?,
-        _ => candle_core::Device::Cpu,
-    };
+    let dev = create_device(&args.device, args.device_no)?;
 
     let parameters = candle_nn::VarMap::new();
     let param_builder =
@@ -520,38 +419,20 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         param_builder.clone(),
     )?;
 
-    // Set up graceful stop flag for SIGINT/SIGTERM
-    let stop = Arc::new(AtomicBool::new(false));
-    {
-        let stop = Arc::clone(&stop);
-        ctrlc::set_handler(move || {
-            info!("Interrupt received — stopping training early and saving results...");
-            stop.store(true, Ordering::SeqCst);
-        })
-        .expect("failed to set signal handler");
-    }
+    let stop = setup_stop_handler();
 
     let train_config = ProgressiveTrainConfig {
         parameters: &parameters,
         dev: &dev,
         args,
-        feature_selections: &feature_selections,
         coarsenings: &coarsenings,
         stop: &stop,
     };
 
-    // Get gene names - use selected names if feature selection was applied
     let gene_names: Vec<Box<str>> = data_stack
         .stack
         .iter()
-        .zip(&feature_selections)
-        .map(|(dv, sel)| -> anyhow::Result<Vec<Box<str>>> {
-            if let Some(sel) = sel {
-                Ok(sel.selected_names.clone())
-            } else {
-                dv.row_names()
-            }
-        })
+        .map(|dv| dv.row_names())
         .collect::<anyhow::Result<Vec<_>>>()?
         .into_iter()
         .flatten()
@@ -567,7 +448,6 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         data_stack: &data_stack,
         dev: &dev,
         args,
-        feature_selections: &feature_selections,
     };
 
     match args.decoder_type {
@@ -590,12 +470,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             )?;
             train_and_save(&decoder, &save_ctx)?;
 
-            // Gene names for base/delta: reference modality names (no suffix)
-            let base_gene_names: Vec<Box<str>> = if let Some(sel) = &feature_selections[0] {
-                sel.selected_names.clone()
-            } else {
-                data_stack.stack[0].row_names()?
-            };
+            let base_gene_names: Vec<Box<str>> = data_stack.stack[0].row_names()?;
 
             // Write base dictionary
             let base_dict = decoder.get_base_dictionary()?;
@@ -627,522 +502,4 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
 
     info!("Done");
     Ok(())
-}
-
-/// Context needed for training + saving results.
-struct SaveContext<'a> {
-    collapsed_levels: &'a [Vec<CollapsedOut>],
-    encoder: &'a LogSoftmaxJointEncoder,
-    train_config: &'a ProgressiveTrainConfig<'a>,
-    coarsenings: &'a [Option<FeatureCoarsening>],
-    n_features_full: &'a [usize],
-    gene_names: &'a [Box<str>],
-    data_stack: &'a SparseIoStack,
-    dev: &'a candle_core::Device,
-    args: &'a JointTopicArgs,
-    feature_selections: &'a [Option<FeatureSelection>],
-}
-
-/// Train decoder, write dictionaries, log-likelihood, and latent states.
-fn train_and_save<Dec: JointDecoderModuleT>(
-    decoder: &Dec,
-    ctx: &SaveContext,
-) -> anyhow::Result<()> {
-    let scores = train_encoder_decoder_progressive(
-        ctx.collapsed_levels,
-        ctx.encoder,
-        decoder,
-        ctx.train_config,
-    )?;
-
-    info!("Writing down the model parameters");
-    write_joint_dictionaries(
-        decoder,
-        ctx.coarsenings,
-        ctx.n_features_full,
-        ctx.gene_names,
-        &ctx.args.out,
-    )?;
-    scores.to_parquet(&format!("{}.log_likelihood.parquet", &ctx.args.out))?;
-
-    info!("Writing down the latent states");
-    write_latent_states(
-        ctx.data_stack,
-        ctx.encoder,
-        ctx.collapsed_levels.last().unwrap(),
-        ctx.dev,
-        ctx.args,
-        ctx.feature_selections,
-        ctx.coarsenings,
-    )?;
-    Ok(())
-}
-
-/// Write effective dictionaries for any JointDecoderModuleT, expanding
-/// coarsening if needed and stacking vertically across modalities.
-fn write_joint_dictionaries<Dec: JointDecoderModuleT>(
-    decoder: &Dec,
-    coarsenings: &[Option<FeatureCoarsening>],
-    n_features_full: &[usize],
-    gene_names: &[Box<str>],
-    out: &str,
-) -> anyhow::Result<()> {
-    let dictionaries = decoder
-        .get_dictionary()?
-        .into_iter()
-        .zip(coarsenings)
-        .zip(n_features_full)
-        .map(|((dict, fc), &n_full)| -> anyhow::Result<Mat> {
-            let dict = dict.to_device(&candle_core::Device::Cpu)?;
-            let dict_mat = Mat::from_tensor(&dict)?;
-            if let Some(fc) = fc {
-                info!(
-                    "Expanding dictionary from {} to {} features",
-                    fc.num_coarse, n_full
-                );
-                Ok(fc.expand_log_dict_dk(&dict_mat, n_full))
-            } else {
-                Ok(dict_mat)
-            }
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    concatenate_vertical(&dictionaries)?.to_parquet_with_names(
-        &(out.to_string() + ".dictionary.parquet"),
-        (Some(gene_names), Some("gene")),
-        None,
-    )?;
-    Ok(())
-}
-
-/// Evaluate latent states and write to parquet.
-fn write_latent_states<Enc: JointEncoderModuleT + Send + Sync>(
-    data_stack: &SparseIoStack,
-    encoder: &Enc,
-    collapsed_data_vec: &[CollapsedOut],
-    dev: &candle_core::Device,
-    args: &JointTopicArgs,
-    feature_selections: &[Option<FeatureSelection>],
-    coarsenings: &[Option<FeatureCoarsening>],
-) -> anyhow::Result<()> {
-    let z_nk = evaluate_latent_by_encoder(
-        data_stack,
-        encoder,
-        collapsed_data_vec,
-        dev,
-        args,
-        feature_selections,
-        coarsenings,
-    )?;
-    let cell_names = data_stack.column_names()?;
-    z_nk.to_parquet_with_names(
-        &(args.out.to_string() + ".latent.parquet"),
-        (Some(&cell_names), Some("cell")),
-        None,
-    )?;
-    Ok(())
-}
-
-fn evaluate_latent_by_encoder<Enc>(
-    data_stack: &SparseIoStack,
-    encoder: &Enc,
-    collapsed_vec: &[CollapsedOut],
-    dev: &candle_core::Device,
-    args: &JointTopicArgs,
-    feature_selections: &[Option<FeatureSelection>],
-    coarsenings: &[Option<FeatureCoarsening>],
-) -> anyhow::Result<Mat>
-where
-    Enc: JointEncoderModuleT + Send + Sync,
-{
-    let ntot = data_stack.num_columns()?;
-    let kk = encoder.dim_latent();
-
-    let block_size = args.minibatch_size;
-
-    let jobs = create_jobs(ntot, Some(block_size));
-    let njobs = jobs.len() as u64;
-    // Delta coarsened to D_coarse — encoder operates at D_coarse
-    let delta = collapsed_vec
-        .iter()
-        .zip(coarsenings)
-        .map(|(x, fc)| {
-            match args.adj_method {
-                AdjMethod::Residual => x.mu_residual.as_ref(),
-                AdjMethod::Batch => x.delta.as_ref(),
-            }
-            .map(|delta| -> anyhow::Result<Tensor> {
-                let mut delta_mat = delta.posterior_mean().clone();
-                if let Some(fc) = fc {
-                    delta_mat = fc.aggregate_rows_ds(&delta_mat);
-                }
-                Ok(delta_mat.to_tensor(dev)?.transpose(0, 1)?.contiguous()?)
-            })
-            .transpose()
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    let eval_config = JointEvalConfig {
-        dev,
-        delta: &delta,
-        feature_selections,
-        coarsenings,
-    };
-
-    let adj_method = args.adj_method.clone();
-    let eval_block = |&block: &(usize, usize)| {
-        evaluate_block(block, data_stack, encoder, &eval_config, &adj_method)
-    };
-
-    // Metal/CUDA don't support parallel dispatch to the same device
-    let use_sequential = !dev.is_cpu();
-
-    let mut chunks: Vec<(usize, Mat)> = if use_sequential {
-        let pb = ProgressBar::new(njobs);
-        let result = jobs
-            .iter()
-            .map(|block| {
-                let r = eval_block(block);
-                pb.inc(1);
-                r
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        pb.finish_and_clear();
-        result
-    } else {
-        jobs.par_iter()
-            .progress_count(njobs)
-            .map(eval_block)
-            .collect::<anyhow::Result<Vec<_>>>()?
-    };
-
-    chunks.sort_by_key(|&(lb, _)| lb);
-    let chunks = chunks.into_iter().map(|(_, z_nk)| z_nk).collect::<Vec<_>>();
-
-    let mut ret = Mat::zeros(ntot, kk);
-    {
-        let mut lb = 0;
-        for z in chunks {
-            let ub = lb + z.nrows();
-            ret.rows_range_mut(lb..ub).copy_from(&z);
-            lb = ub;
-        }
-    }
-    Ok(ret)
-}
-
-struct JointEvalConfig<'a> {
-    dev: &'a Device,
-    delta: &'a [Option<Tensor>],
-    feature_selections: &'a [Option<FeatureSelection>],
-    coarsenings: &'a [Option<FeatureCoarsening>],
-}
-
-fn read_block_tensors(
-    data_stack: &SparseIoStack,
-    lb: usize,
-    ub: usize,
-    config: &JointEvalConfig,
-) -> anyhow::Result<Vec<Tensor>> {
-    data_stack
-        .stack
-        .iter()
-        .zip(config.feature_selections.iter())
-        .zip(config.coarsenings.iter())
-        .map(|((dv, sel), fc)| -> anyhow::Result<Tensor> {
-            let x_dn = dv.read_columns_csc(lb..ub)?;
-            let selected = if let Some(sel) = sel {
-                &sel.selection_matrix * &x_dn
-            } else {
-                x_dn
-            };
-            let x_nd = if let Some(fc) = fc {
-                fc.aggregate_sparse_csc(&selected)
-                    .to_tensor(config.dev)?
-                    .transpose(0, 1)?
-            } else {
-                selected.to_tensor(config.dev)?.transpose(0, 1)?
-            };
-            Ok(x_nd)
-        })
-        .collect()
-}
-
-fn evaluate_block<Enc>(
-    block: (usize, usize),
-    data_stack: &SparseIoStack,
-    encoder: &Enc,
-    config: &JointEvalConfig,
-    adj_method: &AdjMethod,
-) -> anyhow::Result<(usize, Mat)>
-where
-    Enc: JointEncoderModuleT,
-{
-    let (lb, ub) = block;
-    let x_vec = read_block_tensors(data_stack, lb, ub, config)?;
-
-    // Delta is already coarsened before conversion to Tensor
-    let x0_vec = data_stack
-        .stack
-        .iter()
-        .zip(config.delta)
-        .map(|(dv, delta)| {
-            delta
-                .as_ref()
-                .map(|delta| -> anyhow::Result<Tensor> {
-                    let membership: Vec<u32> = match *adj_method {
-                        AdjMethod::Batch => dv
-                            .get_batch_membership(lb..ub)
-                            .into_iter()
-                            .map(|j| j as u32)
-                            .collect(),
-                        AdjMethod::Residual => dv
-                            .get_group_membership(lb..ub)?
-                            .into_iter()
-                            .map(|j| j as u32)
-                            .collect(),
-                    };
-                    let indices = Tensor::from_iter(membership.into_iter(), config.dev)?;
-                    Ok(delta.index_select(&indices, 0)?)
-                })
-                .transpose()
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    let (log_z_nk, _) = encoder.forward_t(&x_vec, &x0_vec, false)?;
-    let z_nk = log_z_nk.to_device(&candle_core::Device::Cpu)?;
-    Ok((lb, Mat::from_tensor(&z_nk)?))
-}
-
-///////////////////////
-// training routines //
-///////////////////////
-
-/// Configuration for progressive training
-struct ProgressiveTrainConfig<'a> {
-    parameters: &'a candle_nn::VarMap,
-    dev: &'a candle_core::Device,
-    args: &'a JointTopicArgs,
-    feature_selections: &'a [Option<FeatureSelection>],
-    coarsenings: &'a [Option<FeatureCoarsening>],
-    stop: &'a AtomicBool,
-}
-
-/// Progressive multi-level training: coarse levels get more epochs for
-/// warm start, finer levels for fine-tuning.
-/// Epoch allocation: level `i` gets `total_epochs * (num_levels - i) / sum(1..=num_levels)`.
-fn train_encoder_decoder_progressive<Enc, Dec>(
-    collapsed_levels: &[Vec<CollapsedOut>],
-    encoder: &Enc,
-    decoder: &Dec,
-    config: &ProgressiveTrainConfig,
-) -> anyhow::Result<TrainScores>
-where
-    Enc: JointEncoderModuleT,
-    Dec: JointDecoderModuleT,
-{
-    let num_levels = collapsed_levels.len();
-    let total_epochs = config.args.epochs;
-
-    // Compute per-level epoch allocation: w[i] = num_levels - i
-    let total_weight: usize = (1..=num_levels).sum();
-    let level_epochs: Vec<usize> = (0..num_levels)
-        .map(|i| {
-            let w = num_levels - i;
-            (total_epochs * w / total_weight).max(1)
-        })
-        .collect();
-
-    info!(
-        "Progressive training: {} levels, epoch allocation: {:?} (total {})",
-        num_levels,
-        level_epochs,
-        level_epochs.iter().sum::<usize>()
-    );
-
-    let mut adam = AdamW::new_lr(
-        config.parameters.all_vars(),
-        config.args.learning_rate as f64,
-    )?;
-
-    let total_actual_epochs: usize = level_epochs.iter().sum();
-    let pb = ProgressBar::new(total_actual_epochs as u64);
-
-    let mut llik_trace = Vec::with_capacity(total_actual_epochs);
-    let mut kl_trace = Vec::with_capacity(total_actual_epochs);
-
-    for (level, (collapsed_data_vec, &level_ep)) in
-        collapsed_levels.iter().zip(level_epochs.iter()).enumerate()
-    {
-        let label = if level == 0 {
-            "coarsest"
-        } else if level + 1 == num_levels {
-            "finest"
-        } else {
-            ""
-        };
-        info!(
-            "Level {}/{}: {} epochs, {} samples {}",
-            level + 1,
-            num_levels,
-            level_ep,
-            collapsed_data_vec[0].mu_observed.ncols(),
-            label,
-        );
-
-        for epoch in (0..level_ep).step_by(config.args.jitter_interval) {
-            //////////////////////////////////////////
-            // every jitter interval, resample data //
-            //////////////////////////////////////////
-
-            let input = collapsed_data_vec
-                .iter()
-                .zip(config.feature_selections)
-                .zip(config.coarsenings)
-                .map(|((x, sel), fc)| -> anyhow::Result<Mat> {
-                    let mat = x
-                        .mu_observed
-                        .posterior_sample()?
-                        .sum_to_one_columns()
-                        .scale(config.args.column_sum_norm);
-                    let mat = if let Some(sel) = sel {
-                        mat.select_rows(&sel.selected_indices)
-                    } else {
-                        mat
-                    };
-                    let mat = mat.transpose();
-                    let mat = if let Some(fc) = fc {
-                        fc.aggregate_columns_nd(&mat)
-                    } else {
-                        mat
-                    };
-                    Ok(mat)
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
-
-            let input_null = collapsed_data_vec
-                .iter()
-                .zip(config.feature_selections)
-                .zip(config.coarsenings)
-                .map(|((x, sel), fc)| -> anyhow::Result<Option<Mat>> {
-                    x.mu_residual
-                        .as_ref()
-                        .map(|y| {
-                            let mat = y.posterior_sample()?;
-                            let mat = if let Some(sel) = sel {
-                                mat.select_rows(&sel.selected_indices)
-                            } else {
-                                mat
-                            };
-                            let mut mat = mat.transpose();
-                            if let Some(fc) = fc {
-                                mat = fc.aggregate_columns_nd(&mat);
-                            }
-                            Ok(mat)
-                        })
-                        .transpose()
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
-
-            let output = collapsed_data_vec
-                .iter()
-                .zip(config.feature_selections)
-                .zip(config.coarsenings)
-                .map(|((x, sel), fc)| -> anyhow::Result<Option<Mat>> {
-                    Ok(x.mu_adjusted
-                        .as_ref()
-                        .map(|y| y.posterior_sample())
-                        .transpose()?
-                        .map(|y| {
-                            let mat = y.sum_to_one_columns().scale(config.args.column_sum_norm);
-                            let mat = if let Some(sel) = sel {
-                                mat.select_rows(&sel.selected_indices)
-                            } else {
-                                mat
-                            };
-                            let mut mat = mat.transpose();
-                            if let Some(fc) = fc {
-                                mat = fc.aggregate_columns_nd(&mat);
-                            }
-                            mat
-                        }))
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
-
-            let mut data_loader = JointInMemoryData::from(JointInMemoryArgs {
-                input: &input,
-                input_null: &input_null,
-                output: &output,
-                output_null: &vec![None; input.len()],
-            })?;
-
-            data_loader.shuffle_minibatch(config.args.minibatch_size)?;
-
-            let jitter_end = config.args.jitter_interval.min(level_ep - epoch);
-            for jitter in 0..jitter_end {
-                let mut llik_tot = 0f32;
-                let mut kl_tot = 0f32;
-
-                for b in 0..data_loader.num_minibatch() {
-                    let mb = data_loader.minibatch_shuffled(b, config.dev)?;
-
-                    let (z_nk, kl) = encoder.forward_t(&mb.input, &mb.input_null, true)?;
-
-                    let y_vec = mb
-                        .output
-                        .into_iter()
-                        .zip(mb.input)
-                        .map(|(y, x)| y.unwrap_or(x))
-                        .collect::<Vec<_>>();
-
-                    let (_, llik) = decoder.forward_with_llik(&z_nk, &y_vec, &topic_likelihood)?;
-
-                    let loss = (&kl - &llik)?.mean_all()?;
-                    adam.backward_step(&loss)?;
-
-                    let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
-                    let kl_val = kl.sum_all()?.to_scalar::<f32>()?;
-                    llik_tot += llik_val;
-                    kl_tot += kl_val;
-                }
-
-                let n_mb = data_loader.num_minibatch() as f32;
-                kl_trace.push(kl_tot / n_mb);
-                llik_trace.push(llik_tot / n_mb);
-
-                pb.inc(1);
-
-                info!(
-                    "[level {}/{}][{}][{}] {} {}",
-                    level + 1,
-                    num_levels,
-                    epoch,
-                    jitter,
-                    llik_tot / n_mb,
-                    kl_tot / n_mb
-                );
-
-                if config.stop.load(Ordering::SeqCst) {
-                    pb.finish_and_clear();
-                    info!(
-                        "Stopping training early at level {}/{}, epoch {}",
-                        level + 1,
-                        num_levels,
-                        epoch
-                    );
-                    return Ok(TrainScores {
-                        llik: llik_trace,
-                        kl: kl_trace,
-                    });
-                }
-            }
-        }
-    }
-    pb.finish_and_clear();
-
-    info!("done model training");
-    Ok(TrainScores {
-        llik: llik_trace,
-        kl: kl_trace,
-    })
 }

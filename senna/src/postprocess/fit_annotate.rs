@@ -1,10 +1,10 @@
-use crate::embed_common::*;
-use crate::interactive_markers::{
+use super::interactive_markers::{
     augment_membership_matrix, auto_suggest_markers, find_candidate_markers, flexible_gene_match,
     print_augmentation_summary, read_suggestions_json, run_interactive_round,
     save_augmented_markers, write_candidates_json, MarkerDatabase,
 };
-use crate::vmf::{vmf_assign, vmf_assign_averaged};
+use super::vmf::{vmf_assign, vmf_assign_averaged};
+use crate::embed_common::*;
 use matrix_util::common_io::*;
 
 use rustc_hash::FxHashSet as HashSet;
