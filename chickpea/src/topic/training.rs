@@ -363,10 +363,10 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
                 let m_gc = susie.forward()?;
                 let rna_fc = ctx.rna_coarsenings[i].as_ref();
                 let atac_fc = ctx.atac_coarsenings[i].as_ref();
-                let w_gk = if rna_fc.is_some() || atac_fc.is_some() {
-                    m_gc.exp()?.matmul(&dec.log_beta_atac.exp()?)?
+                let log_w_linked = if rna_fc.is_some() || atac_fc.is_some() {
+                    m_gc.exp()?.matmul(&dec.log_beta_atac.exp()?)?.log()?
                 } else {
-                    rna_dictionary_from_m(&m_gc, &dec.log_beta_atac, ctx.flat_cis_indices)?
+                    rna_dictionary_from_m(&m_gc, &dec.log_beta_atac, ctx.flat_cis_indices)?.log()?
                 };
                 let kl_susie = susie.kl(params.prior_var, params.gate_prior)?;
 
@@ -417,7 +417,7 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
                     };
 
                     let llik_atac = dec.forward_atac(&log_z, &atac_target)?;
-                    let llik_rna = dec.forward_rna(&log_z, &rna_target, &w_gk)?;
+                    let llik_rna = dec.forward_rna(&log_z, &rna_target, &log_w_linked)?;
 
                     let nb = len as f64;
                     let elbo = (&kl_enc - &llik_atac - &llik_rna)?.sum_all()?;
