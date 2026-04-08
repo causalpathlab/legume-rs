@@ -7,180 +7,92 @@ use rand::prelude::*;
 
 #[derive(Args, Debug)]
 pub struct SimLinkArgs {
-    #[arg(
-        long,
-        short,
-        required = true,
-        help = "Output prefix",
-        long_help = "Output prefix for all generated files.\n\
-                     Produces: {out}.atac.{backend}, {out}.rna.{backend},\n\
-                     {out}.dict.parquet, {out}.prop.parquet,\n\
-                     {out}.derived_dict.parquet, {out}.ground_truth.tsv.gz,\n\
-                     {out}.gene_names.txt, {out}.peak_names.txt, {out}.barcodes.txt"
-    )]
+    #[arg(long, short, required = true, help = "Output prefix for all files")]
     out: Box<str>,
 
-    #[arg(
-        long,
-        default_value_t = 2000,
-        help = "Number of genes",
-        long_help = "Number of genes G in the RNA count matrix.\n\
-                     Only a fraction (--linked-gene-fraction) will have\n\
-                     non-zero rows in the indicator matrix M."
-    )]
+    #[arg(long, default_value_t = 2000, help = "Number of genes (G)")]
     n_genes: usize,
 
-    #[arg(
-        long,
-        default_value_t = 10000,
-        help = "Number of ATAC peaks",
-        long_help = "Number of ATAC peaks P.\n\
-                     Peaks are named in genomic coordinate format: chr{N}:{start}-{end}.\n\
-                     The ATAC dictionary beta[P,K] is sampled from Dirichlet."
-    )]
+    #[arg(long, default_value_t = 10000, help = "Number of ATAC peaks (P)")]
     n_peaks: usize,
 
-    #[arg(
-        long,
-        default_value_t = 5000,
-        help = "Number of cells",
-        long_help = "Number of cells N.\n\
-                     Each cell gets a topic assignment, per-cell depth noise,\n\
-                     and Poisson-sampled counts for both RNA and ATAC."
-    )]
+    #[arg(long, default_value_t = 5000, help = "Number of cells (N)")]
     n_cells: usize,
 
     #[arg(
         long,
         default_value_t = 10,
-        help = "Number of latent topics",
-        long_help = "Number of latent topics K.\n\
-                     Shared between ATAC and RNA modalities.\n\
-                     Controls the rank of the topic proportion matrix theta[K,N]."
+        help = "Coarse topics (K), shared by ATAC and RNA"
     )]
     n_topics: usize,
 
     #[arg(
         long,
-        default_value_t = 3,
-        help = "Causal peaks per linked gene",
-        long_help = "Number of ATAC peaks linked to each causal gene\n\
-                     in the indicator matrix M[G,P].\n\
-                     Peaks are sampled uniformly without replacement."
+        default_value_t = 1,
+        help = "RNA subtypes per coarse topic; K_total = K × K_sub. Set 1 for flat"
     )]
+    n_sub_topics: usize,
+
+    #[arg(long, default_value_t = 3, help = "Causal peaks per linked gene")]
     n_causal_per_gene: usize,
 
     #[arg(
         long,
         default_value_t = 0.3,
-        help = "Fraction of genes with causal peak links",
-        long_help = "Fraction of genes that have non-zero rows in M.\n\
-                     Remaining genes have W[g,:] = 0 and produce no RNA counts."
+        help = "Fraction of genes with causal peak links"
     )]
     linked_gene_fraction: f32,
 
-    #[arg(
-        long,
-        default_value_t = 5000,
-        help = "RNA sequencing depth per cell",
-        long_help = "Baseline RNA depth d_X per cell.\n\
-                     Actual per-cell depth is tau_i = d_X * exp(N(0, sigma_tau^2))."
-    )]
+    #[arg(long, default_value_t = 5000, help = "Baseline RNA depth per cell")]
     depth_rna: usize,
 
-    #[arg(
-        long,
-        default_value_t = 2000,
-        help = "ATAC sequencing depth per cell",
-        long_help = "Baseline ATAC depth d_A per cell.\n\
-                     Actual per-cell depth is rho_i = d_A * exp(N(0, sigma_rho^2))."
-    )]
+    #[arg(long, default_value_t = 2000, help = "Baseline ATAC depth per cell")]
     depth_atac: usize,
 
     #[arg(
         long,
         default_value_t = 0.5,
-        help = "Per-cell ATAC depth noise SD",
-        long_help = "Standard deviation of per-cell log-normal ATAC depth noise.\n\
-                     Controls sigma_rho in: ln(rho_i) ~ N(ln(d_A), sigma_rho^2).\n\
-                     Larger values increase cell-to-cell depth variability."
+        help = "SD of log-normal per-cell depth noise (ATAC)"
     )]
     cell_sd_log_depth_atac: f32,
 
     #[arg(
         long,
         default_value_t = 0.5,
-        help = "Per-cell RNA depth noise SD",
-        long_help = "Standard deviation of per-cell log-normal RNA depth noise.\n\
-                     Controls sigma_tau in: ln(tau_i) ~ N(ln(d_X), sigma_tau^2).\n\
-                     Larger values increase cell-to-cell depth variability."
+        help = "SD of log-normal per-cell depth noise (RNA)"
     )]
     cell_sd_log_depth_rna: f32,
 
     #[arg(
         long,
         default_value_t = 0.8,
-        help = "PVE for topic structure",
-        long_help = "Proportion of variance explained by topic assignments.\n\
-                     Each cell is assigned a dominant topic; theta is then\n\
-                     mixed as: pve * one_hot + (1-pve)/(K-1) * background.\n\
-                     Higher PVE gives sharper, more separable cell clusters."
+        help = "PVE for coarse topic assignment. Higher = sharper clusters"
     )]
     pve_topic: f32,
 
     #[arg(
         long,
-        default_value_t = 0.0,
-        help = "Gene-topic effect SD (0 = disabled)",
-        long_help = "Standard deviation of log-normal gene-topic effects gamma[G,K_total].\n\
-                     When > 0, gamma(g,t) ~ LogNormal(0, sd^2) modulates\n\
-                     how much each topic contributes to each gene's expression,\n\
-                     independent of the peak-gene mapping.\n\
-                     Set to 0 to disable (gamma = 1 for all g,t)."
-    )]
-    gene_topic_sd: f32,
-
-    #[arg(
-        long,
-        default_value_t = 1,
-        help = "Subtypes per coarse topic",
-        long_help = "Number of RNA subtypes K_sub nested within each coarse topic K.\n\
-                     K_total = K × K_sub. ATAC sees K coarse topics (marginalized);\n\
-                     RNA sees K_total fine topics through peak-gene linkage.\n\
-                     Set to 1 for flat topics (current behavior, no nesting).\n\
-                     Example: --n-topics 5 --n-sub-topics 3 → 15 RNA topics."
-    )]
-    n_sub_topics: usize,
-
-    #[arg(
-        long,
         default_value_t = 0.8,
-        help = "PVE for subtype assignment within coarse topic",
-        long_help = "Proportion of variance explained by subtype assignment\n\
-                     within each coarse topic. Each cell's dominant coarse topic\n\
-                     is further split into K_sub subtypes with this PVE.\n\
-                     Only used when --n-sub-topics > 1."
+        help = "PVE for subtype within coarse topic. Only used when K_sub > 1"
     )]
     pve_sub_topic: f32,
 
     #[arg(
         long,
-        default_value_t = 42,
-        help = "Random seed",
-        long_help = "Random seed for reproducibility.\n\
-                     Gene-level simulations use seed wrapping:\n\
-                     seed.wrapping_add(gene_idx) for parallel determinism."
+        default_value_t = 0.0,
+        help = "Gene-topic effect SD; LogNormal modulation. 0 = disabled"
     )]
+    gene_topic_sd: f32,
+
+    #[arg(long, default_value_t = 42, help = "Random seed for reproducibility")]
     rseed: u64,
 
     #[arg(
         long,
         default_value = "zarr",
-        help = "Sparse backend format",
-        long_help = "Output format for sparse count matrices.\n\
-                     Options: zarr (default), h5/hdf5."
+        help = "Sparse matrix backend: zarr or h5"
     )]
-    backend: String,
+    backend: Box<str>,
 }
 
 pub fn run_sim_link(args: &SimLinkArgs) -> anyhow::Result<()> {
@@ -192,7 +104,7 @@ pub fn run_sim_link(args: &SimLinkArgs) -> anyhow::Result<()> {
     let k_total = k * k_sub;
     let mut rng = StdRng::seed_from_u64(args.rseed);
 
-    let backend = match args.backend.as_str() {
+    let backend = match &*args.backend {
         "h5" | "hdf5" => SparseIoBackend::HDF5,
         _ => SparseIoBackend::Zarr,
     };
