@@ -49,12 +49,22 @@ fn save_parameters(
     let m_gc = finest_susie.forward()?;
     let is_coarsened = ctx.rna_coarsenings.last().unwrap().is_some()
         || ctx.atac_coarsenings.last().unwrap().is_some();
-    let w_gk = if is_coarsened {
-        m_gc.exp()?.matmul(&finest_dec.log_beta_atac.exp()?)?
+    let log_w_linked = if is_coarsened {
+        m_gc.exp()?
+            .matmul(&finest_dec.log_beta_atac.exp()?)?
+            .log()?
     } else {
-        rna_dictionary_from_m(&m_gc, &finest_dec.log_beta_atac, ctx.flat_cis_indices)?
+        rna_dictionary_from_m(&m_gc, &finest_dec.log_beta_atac, ctx.flat_cis_indices)?.log()?
     };
-    w_gk.to_parquet(&format!("{}.rna_dict.parquet", out_prefix))?;
+    finest_dec
+        .gated_log_rna_dictionary(&log_w_linked)?
+        .exp()?
+        .to_parquet(&format!("{}.rna_dict.parquet", out_prefix))?;
+
+    finest_dec
+        .gate_alpha()?
+        .unsqueeze(1)?
+        .to_parquet(&format!("{}.gate_alpha.parquet", out_prefix))?;
 
     finest_dec
         .log_beta_atac
