@@ -34,6 +34,12 @@ impl TopicDecoder {
     }
 }
 
+impl NewDecoder for TopicDecoder {
+    fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
+        TopicDecoder::new(n_features, n_topics, vs)
+    }
+}
+
 impl DecoderModuleT for TopicDecoder {
     /// Input z_nk is already on the probability simplex (from softmax/sparsemax)
     fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
@@ -118,6 +124,12 @@ impl NbTopicDecoder {
     /// Return log(φ_g) as [1, D]
     pub fn log_phi(&self) -> &Tensor {
         &self.log_phi_1d
+    }
+}
+
+impl NewDecoder for NbTopicDecoder {
+    fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
+        NbTopicDecoder::new(n_features, n_topics, vs)
     }
 }
 

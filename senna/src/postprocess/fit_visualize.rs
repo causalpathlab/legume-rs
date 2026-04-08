@@ -370,7 +370,7 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
             args.tree_decay,
         )?,
         LayoutMethod::Tsne => {
-            use crate::visualization_alg::{similarity_to_distance, TSne};
+            use super::visualization_alg::{similarity_to_distance, TSne};
 
             let pb_spectral = spectral_embed(&similarity_pp, args.num_eigen)?;
             let init = reduce_to_2d(&pb_spectral);
