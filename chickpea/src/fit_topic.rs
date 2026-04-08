@@ -9,15 +9,12 @@ use data_beans_alg::collapse_data::MultilevelParams;
 
 #[derive(Args, Debug)]
 pub struct FitTopicArgs {
-    /* Input files */
+    /* Input */
     #[arg(
         long,
         required = true,
         value_delimiter = ',',
-        help = "RNA count matrix files",
-        long_help = "Comma-separated paths to RNA count matrices (sparse zarr/h5).\n\
-                     Multiple files are merged on shared row names (genes).\n\
-                     Example: --rna-files sample1.rna.zarr,sample2.rna.zarr"
+        help = "RNA sparse matrices (zarr/h5), comma-separated"
     )]
     rna_files: Vec<Box<str>>,
 
@@ -25,127 +22,76 @@ pub struct FitTopicArgs {
         long,
         required = true,
         value_delimiter = ',',
-        help = "ATAC count matrix files",
-        long_help = "Comma-separated paths to ATAC count matrices (sparse zarr/h5).\n\
-                     Multiple files are merged on shared row names (peaks).\n\
-                     Cell barcodes must match the RNA files exactly."
+        help = "ATAC sparse matrices (zarr/h5), comma-separated"
     )]
     atac_files: Vec<Box<str>>,
 
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Batch membership files",
-        long_help = "One file per data file, in RNA-then-ATAC order.\n\
-                     Each file has one batch label per cell (one per line).\n\
-                     If omitted, each data file is treated as its own batch."
+        help = "Batch label files, one per data file in RNA-then-ATAC order"
     )]
     batch_files: Option<Vec<Box<str>>>,
 
     /* Model */
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Number of latent topics",
-        long_help = "Number of latent topics K, shared between RNA and ATAC.\n\
-                     Controls the rank of the topic proportion matrix theta[K,N]\n\
-                     and the ATAC dictionary beta[P,K]."
-    )]
+    #[arg(long, default_value_t = 10, help = "Number of latent topics (K)")]
     n_topics: usize,
 
     #[arg(
         long,
         default_value_t = 128,
-        help = "Encoder embedding dimension",
-        long_help = "Dimension of per-feature embeddings in the indexed encoder.\n\
-                     Both gene and ATAC experts use this dimension."
+        help = "Per-feature embedding dimension for indexed encoder"
     )]
     embedding_dim: usize,
 
     #[arg(
         long,
         default_value_t = 512,
-        help = "Top-K features per sample for encoder",
-        long_help = "Number of top features selected per sample for the indexed encoder.\n\
-                     Union of top-K across samples forms the sparse feature set.\n\
-                     Larger values use more features but increase computation."
+        help = "Top-K genes per sample for encoder context"
     )]
     context_size: usize,
 
     #[arg(
         long,
         default_value_t = 1,
-        help = "SER components per gene",
-        long_help = "Number of Single Effect Regression (SER) components\n\
-                     in the SuSiE model for gene-peak linkage.\n\
-                     Each component selects one peak per gene via softmax.\n\
-                     Sets the maximum number of causal peaks per gene."
+        help = "SuSiE SER components per gene (max causal peaks)"
     )]
     n_ser_components: usize,
 
     #[arg(
         long,
         default_value_t = 10.0,
-        help = "SuSiE prior variance on effect sizes",
-        long_help = "Prior variance σ₀² for the Gaussian prior N(0, σ₀²)\n\
-                     on SuSiE effect sizes. Larger values allow stronger\n\
-                     peak-gene linkage effects."
+        help = "SuSiE prior variance on effect sizes"
     )]
     prior_var: f64,
 
     #[arg(
         long,
         default_value_t = 0.5,
-        help = "Gate prior inclusion probability",
-        long_help = "Prior probability π₀ for the per-gene inclusion gate.\n\
-                     Controls how aggressively null genes are excluded.\n\
-                     0.5 = uninformative (default), lower = sparser."
+        help = "Per-gene gate prior (0.5=uninformative, lower=sparser)"
     )]
     gate_prior: f64,
 
-    #[arg(
-        long,
-        default_value_t = 50,
-        help = "Max cis-candidates per gene",
-        long_help = "Maximum number of cis-candidate peaks per gene.\n\
-                     When using distance-based filtering (--cis-window),\n\
-                     peaks within the window are ranked by distance and\n\
-                     the closest max_cis are selected.\n\
-                     When using correlation-based filtering (--cis-window 0),\n\
-                     peaks are ranked by absolute Pearson correlation."
-    )]
+    /* Cis-window */
+    #[arg(long, default_value_t = 50, help = "Max cis-candidate peaks per gene")]
     max_cis: usize,
 
     #[arg(
         long,
         default_value_t = 500000,
-        help = "Cis-window size in bp",
-        long_help = "Genomic distance window (in base pairs) around each gene's\n\
-                     TSS for selecting candidate peaks.\n\
-                     Only peaks on the same chromosome within ±cis_window bp\n\
-                     of the gene TSS are considered.\n\
-                     Set to 0 to fall back to correlation-based selection."
+        help = "Cis-window in bp around TSS. 0 = correlation-based"
     )]
     cis_window: i64,
 
     #[arg(
         long,
-        help = "Gene coordinates file (TSV: gene, chr, tss)",
-        long_help = "Path to a TSV file with gene coordinates.\n\
-                     Expected columns: gene, chr, tss (tab-separated, with header).\n\
-                     Gene names must match the RNA matrix row names.\n\
-                     Produced by sim-link as {out}.gene_coords.tsv.gz.\n\
-                     Mutually exclusive with --gff-file."
+        help = "Gene coordinates TSV (gene, chr, tss). From sim-link gene_coords.tsv.gz"
     )]
     gene_coords: Option<Box<str>>,
 
     #[arg(
         long,
-        help = "GFF/GTF file for gene TSS positions",
-        long_help = "Path to a GFF3 or GTF annotation file.\n\
-                     Gene TSS positions are extracted and matched to\n\
-                     RNA matrix row names by gene_name or gene_id.\n\
-                     Mutually exclusive with --gene-coords."
+        help = "GFF/GTF annotation for gene TSS. Alternative to --gene-coords"
     )]
     gff_file: Option<Box<str>>,
 
@@ -153,47 +99,32 @@ pub struct FitTopicArgs {
     #[arg(
         long,
         default_value_t = 64,
-        help = "Projection dimension",
-        long_help = "Dimension of the shared random projection for\n\
-                     cell grouping across both modalities.\n\
-                     Higher values preserve more cell-cell distance structure."
+        help = "Random projection dimension for cell grouping"
     )]
     proj_dim: usize,
 
     #[arg(
         long,
         default_value_t = 14,
-        help = "Sort dimension",
-        long_help = "Binary partitioning dimension for pseudobulk grouping.\n\
-                     Produces up to 2^sort_dim super-cell groups.\n\
-                     Higher values give more samples but noisier estimates."
+        help = "Binary sort dimension. Yields ~2^sort_dim pseudobulk samples"
     )]
     sort_dim: usize,
 
     #[arg(
         long,
         default_value_t = 3,
-        help = "Coarsening levels",
-        long_help = "Number of hierarchical coarsening levels.\n\
-                     Level 0 is coarsest, last level is finest.\n\
-                     Training uses the finest level."
+        help = "Multi-level coarsening depth (coarse → fine)"
     )]
     num_levels: usize,
 
     /* Training */
-    #[arg(
-        long,
-        default_value_t = 100,
-        help = "Training epochs",
-        long_help = "Total training epochs."
-    )]
+    #[arg(long, default_value_t = 100, help = "Training epochs")]
     epochs: usize,
 
     #[arg(
         long,
         default_value_t = 0.01,
-        help = "Learning rate",
-        long_help = "AdamW learning rate for all parameters.",
+        help = "AdamW learning rate",
         alias = "lr"
     )]
     learning_rate: f64,
@@ -201,9 +132,7 @@ pub struct FitTopicArgs {
     #[arg(
         long,
         default_value_t = 256,
-        help = "Minibatch size",
-        long_help = "Number of pseudobulk samples per minibatch.\n\
-                     Clamped to total sample count if larger."
+        help = "Minibatch size (clamped to sample count)"
     )]
     minibatch_size: usize,
 
@@ -211,31 +140,21 @@ pub struct FitTopicArgs {
         long,
         short = 'j',
         default_value_t = 5,
-        help = "Data jitter interval",
-        long_help = "Data jitter interval.\n\
-                     Controls how often pseudobulk data is resampled from\n\
-                     the posterior during training. Samples are reused for\n\
-                     this many epochs before refreshing."
+        help = "Epochs between RNA posterior resampling"
     )]
     jitter_interval: usize,
 
     #[arg(
         long,
         default_value_t = 1e-4,
-        help = "Topic smoothing alpha",
-        long_help = "Mix encoder topic proportions with uniform to prevent\n\
-                     dead topics: z_smooth = (1-α)*z + α/K.\n\
-                     Set to 0 to disable."
+        help = "Topic smoothing: z = (1-α)z + α/K. 0 = off"
     )]
     topic_smoothing: f64,
 
     #[arg(
         long,
         default_value_t = 0,
-        help = "Per-level row budget (0 = no subsampling)",
-        long_help = "Maximum pseudobulk samples per level per jitter interval.\n\
-                     Each level is capped at this many samples.\n\
-                     Set to 0 to use all samples (default)."
+        help = "Max pseudobulk samples per level. 0 = all"
     )]
     row_budget: usize,
 
@@ -243,29 +162,21 @@ pub struct FitTopicArgs {
     #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
     device: ComputeDevice,
 
-    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda)")]
+    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
     device_no: usize,
 
     /* Feature coarsening */
     #[arg(
         long,
         default_value_t = 0,
-        help = "Max coarsened gene features (0 = disabled)",
-        long_help = "Maximum number of coarsened gene modules at the finest level.\n\
-                     Coarser levels use log-spaced smaller targets.\n\
-                     Gene features are grouped by co-expression in pseudobulk.\n\
-                     Set to 0 to disable feature coarsening (full resolution)."
+        help = "Max coarsened gene modules at finest level. 0 = off"
     )]
     max_coarse_genes: usize,
 
     #[arg(
         long,
         default_value_t = 0,
-        help = "Max coarsened peak features (0 = disabled)",
-        long_help = "Maximum number of coarsened peak modules at the finest level.\n\
-                     Coarser levels use log-spaced smaller targets.\n\
-                     Peak features are grouped by genomic proximity.\n\
-                     Set to 0 to disable feature coarsening (full resolution)."
+        help = "Max coarsened peak modules at finest level. 0 = off"
     )]
     max_coarse_peaks: usize,
 
