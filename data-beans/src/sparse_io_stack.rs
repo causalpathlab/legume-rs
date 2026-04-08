@@ -72,7 +72,7 @@ impl SparseIoStack {
     }
 
     /// Get the row names combined across all the types. We will
-    /// append additional data type index: `format!({}_{}, x, d)`
+    /// append additional data type index: `format!("{}/{}", x, d)`
     ///
     pub fn row_names(&self) -> anyhow::Result<Vec<Box<str>>> {
         Ok(self
@@ -82,7 +82,7 @@ impl SparseIoStack {
             .map(|(d, x)| {
                 x.row_names().map(|x| {
                     x.into_iter()
-                        .map(|y| format!("{}_{}", y, d).into_boxed_str())
+                        .map(|y| format!("{}/{}", y, d).into_boxed_str())
                         .collect::<Vec<_>>()
                 })
             })

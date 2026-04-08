@@ -4,3 +4,4 @@ pub mod susie;
 
 pub use decoder::ChickpeaDecoder;
 pub use encoder::ChickpeaEncoder;
+pub use susie::SuSiE;
