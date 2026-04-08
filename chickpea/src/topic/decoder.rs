@@ -1,7 +1,6 @@
-use candle_util::candle_core::Result;
-use candle_util::candle_core::Tensor;
+use candle_util::candle_core::{Result, Tensor};
 use candle_util::candle_loss_functions::nb_log_likelihood;
-use candle_util::candle_nn::{self, VarBuilder};
+use candle_util::candle_nn::{self, ops, VarBuilder};
 
 pub struct DecoderArgs {
     pub n_features_atac: usize,
@@ -11,12 +10,18 @@ pub struct DecoderArgs {
 
 /// Chickpea decoder: ATAC (NB) + RNA (NB) likelihood module.
 ///
-/// ATAC has its own learnable dictionary log_beta_atac[P, K].
-/// RNA dictionary W[G, K] is provided externally (from SuSiE linkage M × β).
+/// ATAC: learnable log_beta_atac[P, K].
+/// RNA: gated mixture in log-space between linked dictionary (from SuSiE M × β)
+/// and independent log_beta_rna[G, K].
+///
+///   log W[g,k] = α[g] · log W_linked[g,k] + (1-α[g]) · log β_rna[g,k]
+///
+/// where α[g] = sigmoid(gate_logit[g]) controls per-gene mix.
 pub struct ChickpeaDecoder {
     pub log_beta_atac: Tensor, // [d_peaks_l, K]
+    log_beta_rna: Tensor,      // [d_genes_l, K]
+    gate_logit: Tensor,        // [d_genes_l, 1]
     bias_k: Tensor,            // [1, K]
-    intercept_g: Tensor,       // [1, d_genes_l]
     log_phi_atac: Tensor,      // [1, d_peaks_l]
     log_phi_rna: Tensor,       // [1, d_genes_l]
 }
@@ -35,13 +40,15 @@ impl ChickpeaDecoder {
         };
         let log_beta_atac =
             vs.get_with_hints((n_features_atac, n_topics), "log_beta_atac", beta_init)?;
-
-        let bias_k = vs.get_with_hints((1, n_topics), "bias_k", candle_nn::Init::Const(0.0))?;
-        let intercept_g = vs.get_with_hints(
-            (1, n_features_rna),
-            "intercept_g",
+        let log_beta_rna =
+            vs.get_with_hints((n_features_rna, n_topics), "log_beta_rna", beta_init)?;
+        let gate_logit = vs.get_with_hints(
+            (n_features_rna, 1),
+            "gate_logit",
             candle_nn::Init::Const(0.0),
         )?;
+
+        let bias_k = vs.get_with_hints((1, n_topics), "bias_k", candle_nn::Init::Const(0.0))?;
         let log_phi_atac = vs.get_with_hints(
             (1, n_features_atac),
             "log_phi_atac",
@@ -55,8 +62,9 @@ impl ChickpeaDecoder {
 
         Ok(Self {
             log_beta_atac,
+            log_beta_rna,
+            gate_logit,
             bias_k,
-            intercept_g,
             log_phi_atac,
             log_phi_rna,
         })
@@ -79,16 +87,37 @@ impl ChickpeaDecoder {
         nb_log_likelihood(x_atac, &mu, &self.log_phi_atac)
     }
 
-    /// RNA NB log-likelihood with externally provided dictionary W[G,K].
-    pub fn forward_rna(&self, log_z_nk: &Tensor, x_rna: &Tensor, w_gk: &Tensor) -> Result<Tensor> {
+    /// RNA NB log-likelihood with gated log-space mixture.
+    ///
+    /// log W[g,k] = α[g] · log W_linked[g,k] + (1-α[g]) · log β_rna[g,k]
+    /// where W_linked is provided externally (from SuSiE M × ATAC β).
+    pub fn forward_rna(
+        &self,
+        log_z_nk: &Tensor,
+        x_rna: &Tensor,
+        log_w_linked: &Tensor,
+    ) -> Result<Tensor> {
+        let w = self.gated_log_rna_dictionary(log_w_linked)?.exp()?;
         let z_nk = self.biased_z(log_z_nk)?;
-        let recon = z_nk.matmul(&w_gk.t()?)?;
-        let recon = recon.broadcast_add(&self.intercept_g.exp()?)?;
+        let recon = z_nk.matmul(&w.t()?)?;
         let lib = x_rna.sum(1)?.unsqueeze(1)?;
         let recon_sum = recon.sum(1)?.unsqueeze(1)?;
         let mu = recon
             .broadcast_mul(&lib)?
             .broadcast_div(&(&recon_sum + 1e-8)?)?;
         nb_log_likelihood(x_rna, &mu, &self.log_phi_rna)
+    }
+
+    /// Per-gene gate values α[G] = sigmoid(gate_logit). For diagnostics.
+    pub fn gate_alpha(&self) -> Result<Tensor> {
+        ops::sigmoid(&self.gate_logit)?.squeeze(1)
+    }
+
+    /// Gated RNA dictionary in log-space:
+    ///   log W[g,k] = α[g] · log_w_linked[g,k] + (1-α[g]) · log_beta_rna[g,k]
+    pub fn gated_log_rna_dictionary(&self, log_w_linked: &Tensor) -> Result<Tensor> {
+        let alpha = ops::sigmoid(&self.gate_logit)?;
+        let one_minus_alpha = (1.0 - &alpha)?;
+        alpha.broadcast_mul(log_w_linked)? + one_minus_alpha.broadcast_mul(&self.log_beta_rna)?
     }
 }
