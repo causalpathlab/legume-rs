@@ -287,7 +287,7 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
     let mut rng = rand::rng();
 
     'outer: for jitter_start in (0..n_epochs).step_by(jitter) {
-        /* Sample from posterior once per jitter interval */
+        /* Sample RNA from posterior (jittered); ATAC uses posterior mean (stable) */
         let sampled: Vec<(ModalityData, ModalityData)> = ctx
             .collapsed
             .iter()
@@ -297,7 +297,7 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
                 let atac_fc = ctx.atac_coarsenings[i].as_ref();
                 Ok((
                     ModalityData::from_collapsed(&ld[0], true, rna_fc, dev)?,
-                    ModalityData::from_collapsed(&ld[1], true, atac_fc, dev)?,
+                    ModalityData::from_collapsed(&ld[1], false, atac_fc, dev)?,
                 ))
             })
             .collect::<anyhow::Result<_>>()?;
