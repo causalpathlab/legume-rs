@@ -23,7 +23,6 @@ pub struct EncoderInput<'a> {
 pub struct ChickpeaEncoder {
     gene_expert: IndexedEmbeddingEncoder,
     atac_expert: IndexedEmbeddingEncoder,
-    n_genes: usize,
     context_size: usize,
 }
 
@@ -60,39 +59,37 @@ impl ChickpeaEncoder {
         Ok(Self {
             gene_expert,
             atac_expert,
-            n_genes,
             context_size,
         })
     }
 
     pub fn forward(&self, inp: &EncoderInput, train: bool) -> Result<(Tensor, Tensor)> {
-        let n = inp.x_rna.dim(0)?;
+        // Select top-K genes and derive their cis-peak union
+        let sel = select_genes_and_peaks(inp, self.context_size)?;
 
-        // Step 1: Select top-K genes per sample by RNA expression
-        let (gene_union_idx, selected_genes_per_row) =
-            top_k_gene_indices(inp.x_rna, self.context_size)?;
-
-        // Step 2: Gene expert — fused RNA+ATAC values for selected genes
-        let (gene_values, gene_null) =
-            self.prepare_gene_values(inp, n, &gene_union_idx, &selected_genes_per_row)?;
+        // Gene expert: fused RNA+ATAC for selected genes only
+        let (gene_values, gene_null) = self.prepare_gene_values(inp, &sel)?;
         let (z_gene_mean, z_gene_lnvar) = self.gene_expert.latent_gaussian_params_indexed(
-            &gene_union_idx,
+            &sel.gene_idx,
             &gene_values,
             gene_null.as_ref(),
             train,
         )?;
 
-        // Step 3: ATAC expert — cis-window peaks of selected genes
-        let (atac_peak_idx, atac_values, atac_null) =
-            self.prepare_atac_from_genes(inp, n, &selected_genes_per_row)?;
+        // ATAC expert: cis-window peaks of selected genes
+        let atac_values = inp.x_atac.index_select(&sel.peak_idx, 1)?;
+        let atac_null = inp
+            .batch_atac
+            .map(|b| b.index_select(&sel.peak_idx, 1))
+            .transpose()?;
         let (z_atac_mean, z_atac_lnvar) = self.atac_expert.latent_gaussian_params_indexed(
-            &atac_peak_idx,
+            &sel.peak_idx,
             &atac_values,
             atac_null.as_ref(),
             train,
         )?;
 
-        // Simple average of experts
+        // Average experts
         let z_mean = ((&z_gene_mean + &z_atac_mean)? * 0.5)?;
         let combined_var = ((z_gene_lnvar.exp()? + z_atac_lnvar.exp()?)? * 0.25)?;
         let z_lnvar = (combined_var + 1e-8)?.log()?;
@@ -103,110 +100,121 @@ impl ChickpeaEncoder {
         } else {
             z_mean.clone()
         };
-        let log_z = ops::log_softmax(&z, 1)?;
-        let kl = gaussian_kl_loss(&z_mean, &z_lnvar)?;
 
-        Ok((log_z, kl))
+        Ok((
+            ops::log_softmax(&z, 1)?,
+            gaussian_kl_loss(&z_mean, &z_lnvar)?,
+        ))
     }
 
-    /// Prepare gene expert values: fuse RNA with SuSiE-weighted ATAC for selected genes.
+    /// Fuse RNA + SuSiE-weighted ATAC for union-selected genes only.
     fn prepare_gene_values(
         &self,
         inp: &EncoderInput,
-        n: usize,
-        gene_union_idx: &Tensor,
-        _selected_per_row: &[Vec<usize>],
+        sel: &GeneSelection,
     ) -> Result<(Tensor, Option<Tensor>)> {
-        // Gather ATAC for cis-candidates of ALL genes, weighted sum by M → [N, G]
-        let atac_gathered = inp.x_atac.index_select(inp.flat_cis_indices, 1)?;
-        let atac_gathered = atac_gathered.reshape((n, self.n_genes, inp.c_max))?;
-        let agg = atac_gathered
-            .broadcast_mul(&inp.m_weights.unsqueeze(0)?)?
-            .sum(2)?; // [N, G]
+        let n = inp.x_rna.dim(0)?;
+        let s = sel.gene_union.len();
 
-        // Fuse in log-space
-        let fused = ((inp.x_rna + 1.0)?.log()? + (&agg + 1.0)?.log()?)?; // [N, G]
+        // Gather cis-peak ATAC only for union genes → [N, S, C_max]
+        let union_cis: Vec<u32> = sel
+            .gene_union
+            .iter()
+            .flat_map(|&g| {
+                let base = g * inp.c_max;
+                (0..inp.c_max).map(move |c| sel.cis_raw[base + c])
+            })
+            .collect();
+        let union_cis_t = Tensor::from_vec(union_cis, s * inp.c_max, inp.x_atac.device())?;
+        let atac_gathered = inp
+            .x_atac
+            .index_select(&union_cis_t, 1)?
+            .reshape((n, s, inp.c_max))?;
 
-        // Gather only the union-selected gene columns
-        let values = fused.index_select(gene_union_idx, 1)?; // [N, S_genes]
+        let m_data: Vec<f32> = inp.m_weights.flatten_all()?.to_vec1()?;
+        let m_ref = &m_data;
+        let union_m: Vec<f32> = sel
+            .gene_union
+            .iter()
+            .flat_map(|&g| {
+                let base = g * inp.c_max;
+                (0..inp.c_max).map(move |c| m_ref[base + c])
+            })
+            .collect();
+        let m_union =
+            Tensor::from_vec(union_m, (s, inp.c_max), inp.x_atac.device())?.unsqueeze(0)?;
+
+        let agg = atac_gathered.broadcast_mul(&m_union)?.sum(2)?; // [N, S]
+
+        // Fuse in log-space: log(rna+1) + log(atac_agg+1)
+        let rna_sel = inp.x_rna.index_select(&sel.gene_idx, 1)?; // [N, S]
+        let fused = ((rna_sel + 1.0)?.log()? + (&agg + 1.0)?.log()?)?;
 
         let null = match inp.batch_rna {
             Some(b) => {
-                let fused_b = ((b + 1.0)?.log()? + (&agg + 1.0)?.log()?)?;
-                Some(fused_b.index_select(gene_union_idx, 1)?)
+                let b_sel = b.index_select(&sel.gene_idx, 1)?;
+                Some(((b_sel + 1.0)?.log()? + (&agg + 1.0)?.log()?)?)
             }
             None => None,
         };
 
-        Ok((values, null))
-    }
-
-    /// Prepare ATAC expert input: gather cis-window peaks for the selected genes.
-    /// For each sample's top-K genes, collect their cis-candidate peak indices,
-    /// take union across samples, and gather ATAC counts + optional batch.
-    fn prepare_atac_from_genes(
-        &self,
-        inp: &EncoderInput,
-        _n: usize,
-        selected_per_row: &[Vec<usize>],
-    ) -> Result<(Tensor, Tensor, Option<Tensor>)> {
-        let cis_raw: Vec<u32> = inp.flat_cis_indices.to_vec1()?;
-
-        // Union of peak indices across all samples' selected genes' cis-windows
-        let mut peak_union = rustc_hash::FxHashSet::default();
-        for genes in selected_per_row {
-            for &g in genes {
-                let base = g * inp.c_max;
-                for c in 0..inp.c_max {
-                    peak_union.insert(cis_raw[base + c] as usize);
-                }
-            }
-        }
-        let mut peak_indices: Vec<usize> = peak_union.into_iter().collect();
-        peak_indices.sort_unstable();
-
-        let idx_u32: Vec<u32> = peak_indices.iter().map(|&i| i as u32).collect();
-        let peak_idx_tensor = Tensor::from_vec(idx_u32, peak_indices.len(), inp.x_atac.device())?;
-
-        // Gather ATAC counts for union peaks
-        let values = inp.x_atac.index_select(&peak_idx_tensor, 1)?;
-
-        let null = match inp.batch_atac {
-            Some(b) => Some(b.index_select(&peak_idx_tensor, 1)?),
-            None => None,
-        };
-
-        Ok((peak_idx_tensor, values, null))
+        Ok((fused, null))
     }
 }
 
-/// Select top-K genes per sample by value. Returns:
-/// - union_indices: [S] u32 tensor of union gene indices across all samples
-/// - per_row: Vec<Vec<usize>> of selected gene indices per sample
-fn top_k_gene_indices(x_rna: &Tensor, k: usize) -> Result<(Tensor, Vec<Vec<usize>>)> {
-    let (n, d) = (x_rna.dim(0)?, x_rna.dim(1)?);
-    let k = k.min(d);
-    let data: Vec<f32> = x_rna.flatten_all()?.to_vec1()?;
+/// Precomputed gene and peak selections for the encoder.
+struct GeneSelection {
+    gene_idx: Tensor,       // [S_genes] u32 union of selected genes
+    gene_union: Vec<usize>, // same as gene_idx but as Vec for indexing
+    peak_idx: Tensor,       // [S_peaks] u32 union of cis-peaks of selected genes
+    cis_raw: Vec<u32>,      // flat cis indices (cached to avoid repeated to_vec1)
+}
 
-    let mut union_set = rustc_hash::FxHashSet::default();
-    let mut per_row = Vec::with_capacity(n);
+/// Select top-K genes per sample (partial sort), compute gene union and peak union.
+fn select_genes_and_peaks(inp: &EncoderInput, k: usize) -> Result<GeneSelection> {
+    let (n, d) = (inp.x_rna.dim(0)?, inp.x_rna.dim(1)?);
+    let k = k.min(d);
+    let data: Vec<f32> = inp.x_rna.flatten_all()?.to_vec1()?;
+    let cis_raw: Vec<u32> = inp.flat_cis_indices.to_vec1()?;
+
+    let mut gene_set = rustc_hash::FxHashSet::default();
+    let mut peak_set = rustc_hash::FxHashSet::default();
 
     for row in 0..n {
         let row_data = &data[row * d..(row + 1) * d];
         let mut idx_val: Vec<(usize, f32)> = row_data.iter().copied().enumerate().collect();
-        idx_val.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        let selected: Vec<usize> = idx_val.iter().take(k).map(|&(i, _)| i).collect();
-        for &i in &selected {
-            union_set.insert(i);
+
+        // Partial sort: O(d) average to find top-K
+        if k < idx_val.len() {
+            idx_val.select_nth_unstable_by(k, |a, b| b.1.partial_cmp(&a.1).unwrap());
+            idx_val.truncate(k);
         }
-        per_row.push(selected);
+
+        for &(g, _) in &idx_val {
+            if gene_set.insert(g) {
+                // New gene — add its cis-peaks to peak union
+                let base = g * inp.c_max;
+                for c in 0..inp.c_max {
+                    peak_set.insert(cis_raw[base + c] as usize);
+                }
+            }
+        }
     }
 
-    let mut union_indices: Vec<usize> = union_set.into_iter().collect();
-    union_indices.sort_unstable();
+    let mut gene_union: Vec<usize> = gene_set.into_iter().collect();
+    gene_union.sort_unstable();
+    let gene_u32: Vec<u32> = gene_union.iter().map(|&i| i as u32).collect();
+    let gene_idx = Tensor::from_vec(gene_u32, gene_union.len(), inp.x_rna.device())?;
 
-    let idx_u32: Vec<u32> = union_indices.iter().map(|&i| i as u32).collect();
-    let tensor = Tensor::from_vec(idx_u32, union_indices.len(), x_rna.device())?;
+    let mut peak_union: Vec<usize> = peak_set.into_iter().collect();
+    peak_union.sort_unstable();
+    let peak_u32: Vec<u32> = peak_union.iter().map(|&i| i as u32).collect();
+    let peak_idx = Tensor::from_vec(peak_u32, peak_union.len(), inp.x_atac.device())?;
 
-    Ok((tensor, per_row))
+    Ok(GeneSelection {
+        gene_idx,
+        gene_union,
+        peak_idx,
+        cis_raw,
+    })
 }

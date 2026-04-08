@@ -363,10 +363,7 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
                 let s_rna = rna.subsample(&perm_t, rna_fc)?;
                 let s_atac = atac.subsample(&perm_t, atac_fc)?;
 
-                /* SuSiE + RNA dictionary (once per level) */
                 let m_gc = susie.forward()?;
-                let rna_fc = ctx.rna_coarsenings[i].as_ref();
-                let atac_fc = ctx.atac_coarsenings[i].as_ref();
                 let log_w_linked = if rna_fc.is_some() || atac_fc.is_some() {
                     m_gc.exp()?.matmul(&dec.log_beta_atac.exp()?)?.log()?
                 } else {
