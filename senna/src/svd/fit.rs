@@ -1,5 +1,5 @@
+use super::feature_selection::*;
 use crate::embed_common::*;
-use crate::feature_selection::*;
 use crate::senna_input::*;
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 

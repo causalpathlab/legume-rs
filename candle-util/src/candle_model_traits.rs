@@ -1,5 +1,6 @@
 use candle_core::{Result, Tensor};
 use candle_nn::ops;
+use candle_nn::VarBuilder;
 
 /// Boxed log-likelihood closure for ESS evaluation.
 /// Maps `z_nk [N, K]` to per-sample log-likelihood `[N]`.
@@ -98,6 +99,11 @@ pub trait DecoderModuleT {
             x_pos.mul(&(recon + 1e-8)?.log()?)?.sum(x_pos.rank() - 1)
         }))
     }
+}
+
+/// Shared constructor for topic decoders: `new(n_features, n_topics, VarBuilder)`.
+pub trait NewDecoder: Sized {
+    fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self>;
 }
 
 /// Compute joint multinomial log-likelihood from per-modality log-reconstructions.
