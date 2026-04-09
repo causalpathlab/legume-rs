@@ -9,7 +9,7 @@ use fagioli::summary_stats::common::{
 };
 
 #[derive(Args, Debug, Clone)]
-pub struct McmcSumstatArgs {
+pub struct FitSumstatMcmcArgs {
     #[command(flatten)]
     pub common: CommonSumstatArgs,
 
@@ -85,8 +85,8 @@ pub struct McmcSumstatArgs {
     pub estimate_prior_var: bool,
 }
 
-pub fn mcmc_sumstat(args: &McmcSumstatArgs) -> Result<()> {
-    info!("Starting mcmc-sumstat");
+pub fn fit_sumstat_mcmc(args: &FitSumstatMcmcArgs) -> Result<()> {
+    info!("Starting fit-sumstat-mcmc");
 
     let input = prepare_sumstat_input(&args.common)?;
 
@@ -127,7 +127,7 @@ pub fn mcmc_sumstat(args: &McmcSumstatArgs) -> Result<()> {
     });
 
     let extra_params = serde_json::json!({
-        "command": "mcmc-sumstat",
+        "command": "fit-sumstat-mcmc",
         "method": "mcmc",
         "prior": format!("{:?}", prior_type),
         "prior_var": prior_var,
@@ -140,6 +140,6 @@ pub fn mcmc_sumstat(args: &McmcSumstatArgs) -> Result<()> {
 
     run_blocks_and_write(&input, &fitter, &args.common, extra_params)?;
 
-    info!("mcmc-sumstat completed successfully");
+    info!("fit-sumstat-mcmc completed successfully");
     Ok(())
 }

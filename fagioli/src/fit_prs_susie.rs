@@ -5,6 +5,7 @@ use matrix_util::traits::MatOps;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 
+use fagioli::sgvb::cavi_fit::fit_block_cavi;
 use fagioli::sgvb::{fit_block, BlockFitResult, ComputeDevice, FitConfig, ModelType, PriorType};
 use fagioli::summary_stats::common::{
     estimate_adaptive_prior_vars, parse_prior_vars, prepare_sumstat_input, report_top_hits,
@@ -24,7 +25,7 @@ pub enum SusieMethod {
 }
 
 #[derive(Args, Debug, Clone)]
-pub struct PrsSusieArgs {
+pub struct FitPrsSusieArgs {
     #[command(flatten)]
     pub common: CommonSumstatArgs,
 
@@ -92,8 +93,8 @@ pub struct PrsSusieArgs {
     pub device_no: usize,
 }
 
-pub fn prs_susie(args: &PrsSusieArgs) -> Result<()> {
-    info!("Starting prs-susie");
+pub fn fit_prs_susie(args: &FitPrsSusieArgs) -> Result<()> {
+    info!("Starting fit-prs-susie");
 
     // ── Step 1: Load genotypes, z-scores, LD blocks ─────────────────────
     let input = prepare_sumstat_input(&args.common)?;
@@ -170,7 +171,14 @@ pub fn prs_susie(args: &PrsSusieArgs) -> Result<()> {
         let seed = args.common.seed.wrapping_add(block_idx as u64);
 
         let result = match args.method {
-            SusieMethod::Cavi => fit_block_cavi(&x_block, &yhat, args, &prior_vars),
+            SusieMethod::Cavi => fit_block_cavi(
+                &x_block,
+                &yhat,
+                args.common.num_components,
+                args.max_cavi_iter,
+                args.cavi_tol,
+                &prior_vars,
+            ),
             SusieMethod::Sgvb => {
                 let config = build_sgvb_config(args, &prior_vars, seed);
                 fit_block(&x_block, &yhat, None, &config, &device)
@@ -226,7 +234,7 @@ pub fn prs_susie(args: &PrsSusieArgs) -> Result<()> {
 
     // ── Step 5: Write output ──────────────────────────────────────────────
     let extra_params = serde_json::json!({
-        "command": "prs-susie",
+        "command": "fit-prs-susie",
         "method": format!("{:?}", args.method),
         "ridge_lambda": args.ridge_lambda,
         "prior_vars": &prior_vars,
@@ -234,88 +242,12 @@ pub fn prs_susie(args: &PrsSusieArgs) -> Result<()> {
 
     write_sumstat_output(&input, &block_results, &args.common, extra_params)?;
 
-    info!("prs-susie completed successfully");
+    info!("fit-prs-susie completed successfully");
     Ok(())
 }
 
-/// Fit a single block using CAVI SuSiE on individual-level data.
-///
-/// Uses median of prior_vars grid (CAVI is deterministic, no grid search needed).
-fn fit_block_cavi(
-    x_block: &DMatrix<f32>,
-    y_block: &DMatrix<f32>,
-    args: &PrsSusieArgs,
-    prior_vars: &[f32],
-) -> Result<BlockFitResult> {
-    use candle_util::candle_core::Device;
-    use candle_util::sgvb::cavi_susie::{cavi_susie, CaviSusieParams};
-    use matrix_util::traits::ConvertMatOps;
-
-    let p = x_block.ncols();
-    let t = y_block.ncols();
-    let device = Device::Cpu;
-
-    let x_tensor = x_block.to_tensor(&device)?;
-
-    let prior_var = if prior_vars.is_empty() {
-        0.2
-    } else {
-        let mut sorted = prior_vars.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        sorted[sorted.len() / 2] as f64
-    };
-
-    let params = CaviSusieParams {
-        num_components: args.common.num_components,
-        max_iter: args.max_cavi_iter,
-        tol: args.cavi_tol,
-        prior_variance: prior_var,
-        estimate_residual_variance: true,
-        prior_weights: None,
-    };
-
-    let mut pip_mat = DMatrix::<f32>::zeros(p, t);
-    let mut eff_mean_mat = DMatrix::<f32>::zeros(p, t);
-    let mut eff_std_mat = DMatrix::<f32>::zeros(p, t);
-    let mut total_elbo = 0.0f32;
-
-    for tt in 0..t {
-        let y_col = y_block.column(tt);
-        let y_tensor = candle_util::candle_core::Tensor::from_slice(
-            y_col.as_slice(),
-            (y_col.len(),),
-            &device,
-        )?;
-
-        let result = cavi_susie(&x_tensor, &y_tensor, &params)?;
-        let beta = result.beta_mean();
-
-        for j in 0..p {
-            pip_mat[(j, tt)] = result.pip[j] as f32;
-            eff_mean_mat[(j, tt)] = beta[j] as f32;
-            let mut var_j = 0.0f64;
-            for l in 0..result.alpha.len() {
-                var_j += result.alpha[l][j] * (result.s2[l][j] + result.mu[l][j].powi(2));
-            }
-            var_j -= (beta[j]).powi(2);
-            eff_std_mat[(j, tt)] = var_j.max(0.0).sqrt() as f32;
-        }
-
-        if let Some(&last_elbo) = result.elbo_trace.last() {
-            total_elbo += last_elbo as f32;
-        }
-    }
-
-    Ok(BlockFitResult {
-        pip: pip_mat,
-        effect_mean: eff_mean_mat,
-        effect_std: eff_std_mat,
-        avg_elbo: total_elbo / t as f32,
-    })
-}
-
 /// Build SGVB FitConfig from CLI args.
-fn build_sgvb_config(args: &PrsSusieArgs, prior_vars: &[f32], block_seed: u64) -> FitConfig {
+fn build_sgvb_config(args: &FitPrsSusieArgs, prior_vars: &[f32], block_seed: u64) -> FitConfig {
     FitConfig {
         model_type: ModelType::Susie,
         prior_type: PriorType::Single,
