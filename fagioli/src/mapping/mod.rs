@@ -1,2 +1,2 @@
-pub mod map_qtl_helpers;
+pub mod fit_qtl_helpers;
 pub mod pseudobulk;

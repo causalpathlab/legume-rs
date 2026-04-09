@@ -16,16 +16,14 @@ use fagioli::io::cell_annotations::{
 };
 use fagioli::io::covariates::load_covariate_files;
 use fagioli::io::gene_annotations::{load_bed_annotations, load_gtf};
-use fagioli::io::results::{
-    write_gene_summary, write_parameters, write_variant_results, VariantRow,
-};
-use fagioli::mapping::map_qtl_helpers::*;
+use fagioli::io::results::{write_gene_summary, write_parameters, write_variant_results};
+use fagioli::mapping::fit_qtl_helpers::*;
 use fagioli::mapping::pseudobulk::{collapse_pseudobulk, Membership};
 use fagioli::sgvb::{fit_block_weighted, ComputeDevice, FitConfig, ModelType, PriorType};
 use matrix_util::common_io::basename;
 
 #[derive(Args, Debug, Clone)]
-pub struct MapQtlArgs {
+pub struct FitQtlSgvbArgs {
     // ── Single-cell input ────────────────────────────────────────────────
     #[arg(
         long, num_args = 1..,
@@ -324,8 +322,8 @@ pub struct MapQtlArgs {
     pub output: Box<str>,
 }
 
-pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
-    info!("Starting map-qtl");
+pub fn fit_qtl_sgvb(args: &FitQtlSgvbArgs) -> Result<()> {
+    info!("Starting fit-qtl-sgvb");
 
     let device = args.device.to_device(args.device_no)?;
     let use_gpu = args.device != ComputeDevice::Cpu;
@@ -637,7 +635,7 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
     )?;
 
     let params = serde_json::json!({
-        "command": "map-qtl",
+        "command": "fit-qtl-sgvb",
         "sc_backend_files": args.sc_backend_files,
         "bed_prefix": args.bed_prefix,
         "chromosome": args.chromosome,
@@ -669,110 +667,6 @@ pub fn map_qtl(args: &MapQtlArgs) -> Result<()> {
     });
     write_parameters(&format!("{}.parameters.json", args.output), &params)?;
 
-    info!("map-qtl completed successfully");
+    info!("fit-qtl-sgvb completed successfully");
     Ok(())
-}
-
-// ── Statistical inference helpers ────────────────────────────────────────────
-
-/// Compute weighted OLS marginal z-scores per (SNP, cell_type).
-///
-/// For each (SNP j, cell type k):
-///   `β̂ = (x_j' W_k x_j)⁻¹ x_j' W_k y_k`, with `W_k = diag(1/V_ik)`
-///   `SE = 1 / √(x_j' W_k x_j)`
-///   `z_jk = β̂_jk / SE_jk`
-fn compute_marginal_z(x: &DMatrix<f32>, y: &DMatrix<f32>, var: &DMatrix<f32>) -> DMatrix<f32> {
-    let p = x.ncols();
-    let k = y.ncols();
-    let n = x.nrows();
-
-    let mut z = DMatrix::<f32>::zeros(p, k);
-
-    for j in 0..p {
-        for ct in 0..k {
-            let mut xwx = 0.0f32;
-            let mut xwy = 0.0f32;
-
-            for i in 0..n {
-                let w = 1.0 / var[(i, ct)];
-                let xv = x[(i, j)];
-                xwx += xv * xv * w;
-                xwy += xv * w * y[(i, ct)];
-            }
-
-            if xwx > 1e-10 {
-                let beta = xwy / xwx;
-                let se = 1.0 / xwx.sqrt();
-                z[(j, ct)] = beta / se;
-            }
-        }
-    }
-
-    z
-}
-
-/// Compute empirical Bayes weights across genes for prior variance selection.
-fn compute_eb_weights(gene_results: &[GeneResult]) -> Option<Vec<f32>> {
-    if gene_results.len() < 2 {
-        return None;
-    }
-
-    let n_priors = gene_results[0].detailed.per_prior_elbos.len();
-    info!(
-        "Computing empirical Bayes weights across {} genes",
-        gene_results.len()
-    );
-
-    let mut sum_elbos = vec![0.0f64; n_priors];
-    for gr in gene_results {
-        for (v_idx, &elbo) in gr.detailed.per_prior_elbos.iter().enumerate() {
-            sum_elbos[v_idx] += elbo as f64;
-        }
-    }
-
-    let max_sum = sum_elbos.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let weights: Vec<f64> = sum_elbos.iter().map(|e| (e - max_sum).exp()).collect();
-    let sum_w: f64 = weights.iter().sum();
-    let eb_w: Vec<f32> = weights.iter().map(|w| (*w / sum_w) as f32).collect();
-
-    info!("EB weights: {:?}", eb_w);
-    Some(eb_w)
-}
-
-/// Build variant result rows from gene-level fine-mapping output,
-/// optionally applying empirical Bayes reweighting.
-fn build_qtl_variant_rows(
-    gene_results: &[GeneResult],
-    cell_type_names: &[Box<str>],
-    eb_weights: Option<&[f32]>,
-) -> Vec<VariantRow> {
-    let n_ct = cell_type_names.len();
-    let mut rows = Vec::new();
-
-    for gr in gene_results {
-        let (pip, eff_mean, eff_std) = if let Some(eb_w) = eb_weights {
-            eb_reweight(gr, eb_w, n_ct)
-        } else {
-            (
-                gr.detailed.best_result().pip.clone(),
-                gr.detailed.best_result().effect_mean.clone(),
-                gr.detailed.best_result().effect_std.clone(),
-            )
-        };
-
-        for (snp_j, &global_snp) in gr.cis_snp_indices.iter().enumerate() {
-            for ct_idx in 0..n_ct {
-                rows.push(VariantRow {
-                    snp_idx: global_snp,
-                    labels: vec![gr.gene_id.clone(), cell_type_names[ct_idx].clone()],
-                    pip: pip[(snp_j, ct_idx)],
-                    effect_mean: eff_mean[(snp_j, ct_idx)],
-                    effect_std: eff_std[(snp_j, ct_idx)],
-                    z_marginal: gr.z_marginal[(snp_j, ct_idx)],
-                });
-            }
-        }
-    }
-
-    rows
 }
