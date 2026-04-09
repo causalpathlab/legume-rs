@@ -241,6 +241,67 @@ pub fn sample_cell_type_genetic_effects(
     })
 }
 
+/// Compute raw genetic values G (N x T) from block genotypes and effects.
+///
+/// For each trait t:
+///   G_t = X_shared * beta_shared_t + X_indep_t * beta_indep_t
+pub fn compute_genetic_values(
+    x_block: &DMatrix<f32>,
+    effects: &CellTypeGeneticEffects,
+) -> DMatrix<f32> {
+    let n = x_block.nrows();
+    let t = effects.num_cell_types;
+    let mut g = DMatrix::zeros(n, t);
+
+    // Shared effects
+    if !effects.shared_causal_indices.is_empty() {
+        let s = effects.shared_causal_indices.len();
+        let mut x_shared = DMatrix::zeros(n, s);
+        for (j, &snp_idx) in effects.shared_causal_indices.iter().enumerate() {
+            x_shared.set_column(j, &x_block.column(snp_idx));
+        }
+
+        // effects.shared_effect_sizes is T x S
+        // We want G_shared = X_shared (N x S) * beta_shared^T (S x T)
+        let beta_shared = effects.shared_effect_sizes.transpose(); // S x T
+        g += x_shared * beta_shared;
+    }
+
+    // Independent effects
+    for trait_idx in 0..t {
+        if effects.independent_causal_indices[trait_idx].is_empty() {
+            continue;
+        }
+
+        let indep_idx = &effects.independent_causal_indices[trait_idx];
+        let num_indep = indep_idx.len();
+
+        let mut x_indep = DMatrix::zeros(n, num_indep);
+        for (j, &snp_idx) in indep_idx.iter().enumerate() {
+            x_indep.set_column(j, &x_block.column(snp_idx));
+        }
+
+        // Extract effect sizes for this trait
+        let beta: DMatrix<f32> = DMatrix::from_iterator(
+            num_indep,
+            1,
+            effects
+                .independent_effect_sizes
+                .row(trait_idx)
+                .iter()
+                .take(num_indep)
+                .copied(),
+        );
+
+        let g_indep = x_indep * beta;
+        for i in 0..n {
+            g[(i, trait_idx)] += g_indep[(i, 0)];
+        }
+    }
+
+    g
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

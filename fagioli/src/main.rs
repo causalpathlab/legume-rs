@@ -1,17 +1,17 @@
-mod map_qtl;
-mod map_sumstat;
-mod mcmc_sumstat;
-mod prs_susie;
-mod pseudobulk_cmd;
+mod fit_prs_susie;
+mod fit_qtl_sgvb;
+mod fit_sumstat_mcmc;
+mod fit_sumstat_sgvb;
+mod pseudobulk;
 mod sim_geno;
 mod sim_qtl;
 mod sim_sumstat;
 
-use map_qtl::*;
-use map_sumstat::*;
-use mcmc_sumstat::*;
-use prs_susie::*;
-use pseudobulk_cmd::*;
+use fit_prs_susie::*;
+use fit_qtl_sgvb::*;
+use fit_sumstat_mcmc::*;
+use fit_sumstat_sgvb::*;
+use pseudobulk::*;
 use sim_geno::*;
 use sim_qtl::*;
 use sim_sumstat::*;
@@ -61,17 +61,17 @@ enum Commands {
     /// Simulate genotype data via Wright-Fisher forward simulation → PLINK BED
     SimGeno(SimGenoArgs),
     /// Simulate single-cell eQTL data with cell-type-specific genetic effects
-    SimQtl(SimulationArgs),
+    SimQtl(SimQtlArgs),
     /// Simulate multi-trait GWAS summary statistics with LD blocks and confounders
     SimSumstat(SimSumstatArgs),
     /// Fine-map causal variants from GWAS summary statistics using variational SuSiE
-    MapSumstat(MapSumstatArgs),
+    FitSumstatSgvb(FitSumstatSgvbArgs),
     /// Fine-map causal variants from GWAS summary statistics using MCMC (ESS)
-    McmcSumstat(McmcSumstatArgs),
+    FitSumstatMcmc(FitSumstatMcmcArgs),
     /// Fine-map cis-eQTL from single-cell RNA-seq with Poisson-Gamma pseudobulk
-    MapQtl(MapQtlArgs),
+    FitQtlSgvb(FitQtlSgvbArgs),
     /// Ridge PRS from z-scores + SuSiE fine-mapping on predicted phenotypes
-    PrsSusie(PrsSusieArgs),
+    FitPrsSusie(FitPrsSusieArgs),
     /// Collapse single-cell counts into Poisson-Gamma pseudobulk per individual and cell type
     Pseudobulk(PseudobulkArgs),
 }
@@ -99,17 +99,17 @@ fn main() -> Result<()> {
         Commands::SimSumstat(args) => {
             sim_sumstat(args)?;
         }
-        Commands::MapSumstat(args) => {
-            map_sumstat(args)?;
+        Commands::FitSumstatSgvb(args) => {
+            fit_sumstat_sgvb(args)?;
         }
-        Commands::McmcSumstat(args) => {
-            mcmc_sumstat(args)?;
+        Commands::FitSumstatMcmc(args) => {
+            fit_sumstat_mcmc(args)?;
         }
-        Commands::MapQtl(args) => {
-            map_qtl(args)?;
+        Commands::FitQtlSgvb(args) => {
+            fit_qtl_sgvb(args)?;
         }
-        Commands::PrsSusie(args) => {
-            prs_susie(args)?;
+        Commands::FitPrsSusie(args) => {
+            fit_prs_susie(args)?;
         }
         Commands::Pseudobulk(args) => {
             pseudobulk(args)?;

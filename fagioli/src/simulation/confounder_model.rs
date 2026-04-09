@@ -120,6 +120,75 @@ pub fn compose_phenotype(
     Ok(y)
 }
 
+/// Compose phenotype with separate sparse and polygenic genetic components.
+///
+/// Unlike [`compose_phenotype`], standardizes sparse and polygenic genetic
+/// values independently before combining, so each contributes its specified PVE.
+#[allow(clippy::too_many_arguments)]
+pub fn compose_phenotype_with_polygenic(
+    g_sparse: &DMatrix<f32>,
+    g_poly: &DMatrix<f32>,
+    confounder_matrix: &DMatrix<f32>,
+    h2_sparse: f32,
+    h2_poly: f32,
+    pve_conf: f32,
+    num_traits: usize,
+    seed: u64,
+) -> Result<DMatrix<f32>> {
+    let n = g_sparse.nrows();
+    let t = num_traits;
+
+    let h2_total = h2_sparse + h2_poly;
+    if h2_total + pve_conf > 1.0 + 1e-6 {
+        anyhow::bail!(
+            "h2_sparse ({}) + h2_poly ({}) + pve_conf ({}) cannot exceed 1.0",
+            h2_sparse,
+            h2_poly,
+            pve_conf,
+        );
+    }
+    let pve_noise = (1.0 - h2_total - pve_conf).max(0.0);
+
+    info!(
+        "Composing phenotype: h2_sparse={:.3}, h2_poly={:.3}, pve_conf={:.3}, pve_noise={:.3}",
+        h2_sparse, h2_poly, pve_conf, pve_noise
+    );
+
+    // Standardize each genetic component independently
+    let mut gs = g_sparse.clone();
+    gs.scale_columns_inplace();
+    gs *= h2_sparse.sqrt();
+
+    let mut gp = g_poly.clone();
+    gp.scale_columns_inplace();
+    gp *= h2_poly.sqrt();
+
+    // Confounder contribution (same logic as compose_phenotype)
+    let mut conf_component = DMatrix::zeros(n, t);
+    if pve_conf > 0.0 && confounder_matrix.ncols() > 0 {
+        let l = confounder_matrix.ncols();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let normal = Normal::new(0.0, (1.0 / l as f64).sqrt()).unwrap();
+
+        let gamma = DMatrix::from_fn(l, t, |_, _| normal.sample(&mut rng) as f32);
+        conf_component = confounder_matrix * gamma;
+        conf_component.scale_columns_inplace();
+        conf_component *= pve_conf.sqrt();
+    }
+
+    let mut eps = DMatrix::<f32>::rnorm(n, t);
+    eps.scale_columns_inplace();
+    eps *= pve_noise.sqrt();
+
+    // Y = G_sparse + G_poly + C + eps
+    gs += &gp;
+    gs += &conf_component;
+    gs += &eps;
+
+    info!("Composed phenotype matrix: {} x {}", gs.nrows(), gs.ncols());
+    Ok(gs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

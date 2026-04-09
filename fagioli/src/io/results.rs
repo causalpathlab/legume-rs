@@ -5,7 +5,7 @@ use rust_htslib::tpool::ThreadPool;
 use std::io::Write;
 
 use crate::genotype::GenotypeMatrix;
-use crate::mapping::map_qtl_helpers::GeneResult;
+use crate::mapping::fit_qtl_helpers::GeneResult;
 
 /// A single row of variant-level fine-mapping results.
 pub struct VariantRow {

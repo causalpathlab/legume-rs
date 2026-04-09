@@ -1,5 +1,7 @@
+pub mod cavi_fit;
 mod config;
 mod models;
+pub mod refinement;
 mod rss;
 mod training;
 
