@@ -1,9 +1,17 @@
+use clap::Args;
 use log::info;
 use matrix_util::common_io::file_ext;
 use std::sync::Arc;
 
-// Import Args from main.rs
-use crate::{ListH5Args, ListZarrArgs};
+#[derive(Args, Debug)]
+pub struct ListH5Args {
+    pub h5_file: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct ListZarrArgs {
+    pub zarr_file: Box<str>,
+}
 
 /// List contents of a Zarr file (either .zarr directory or .zip archive)
 pub fn list_zarr(cmd_args: &ListZarrArgs) -> anyhow::Result<()> {

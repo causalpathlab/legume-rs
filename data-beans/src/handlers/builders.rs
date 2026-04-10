@@ -1,22 +1,556 @@
-use crate::misc::*;
+use crate::handlers::transformation::{run_squeeze, RowAlignMode, RunSqueezeArgs};
+use crate::hdf5_io::*;
 use crate::sparse_io::*;
 use crate::sparse_util::*;
 use crate::utilities::io_helpers::read_row_names;
-use crate::utilities::name_matching::{compose_id_name, make_names_unique};
+use crate::utilities::name_matching::{
+    compose_id_name, filter_row_indices_by_type, make_names_unique,
+};
 use data_beans::zarr_io::*;
 
+use clap::Args;
 use log::info;
 use matrix_util::common_io::*;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-// Import the argument structs from main
-use crate::{
-    From10xMatrixArgs, From10xMoleculeArgs, FromH5adArgs, FromMtxArgs, FromZarrArgs, RunSqueezeArgs,
-};
+#[derive(Args, Debug)]
+pub struct FromMtxArgs {
+    /// matrix market-formatted data file (`.mtx.gz` or `.mtx`)
+    pub mtx: Box<str>,
 
-// Import the run_squeeze function from main
-use crate::run_squeeze;
+    /// row/feature name file (name per each line; `.tsv.gz` or `.tsv`)
+    #[arg(short, long)]
+    pub row: Option<Box<str>>,
+
+    /// column/cell/barcode file (name per each line; `.tsv.gz` or `.tsv`)
+    #[arg(short, long)]
+    pub col: Option<Box<str>>,
+
+    /// backend for the output file
+    #[arg(long, value_enum, default_value = "zarr")]
+    pub backend: SparseIoBackend,
+
+    /// output file header: {output}.{backend}
+    #[arg(short, long)]
+    pub output: Box<str>,
+
+    /// maximum number of columns to read from the row/feature name file
+    /// (columns are joined with '_'); e.g. 2 reads "ENSG…<tab>SYMBOL"
+    #[arg(long, default_value_t = 2)]
+    pub row_name_columns: usize,
+
+    /// squeeze
+    #[arg(long, default_value_t = false)]
+    pub do_squeeze: bool,
+
+    /// minimum number of non-zero cutoff for rows
+    #[arg(long, default_value_t = 1)]
+    pub row_nnz_cutoff: usize,
+
+    /// minimum number of non-zero cutoff for columns
+    #[arg(long, default_value_t = 1)]
+    pub column_nnz_cutoff: usize,
+}
+
+#[derive(Args, Debug)]
+pub struct From10xMatrixArgs {
+    #[arg(
+        help = "Input HDF5 file containing sparse matrix triplets",
+        long_help = "Specify the HDF5 file where triplets of sparse matrix data are stored. \n\
+		     Supports 10X Genomics and H5AD formats."
+    )]
+    pub h5_file: Box<str>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "zarr",
+        help = "Backend format for output",
+        long_help = "Choose the backend format for the output file. \n\
+		     Supported formats include 'zarr' and 'h5'"
+    )]
+    pub backend: SparseIoBackend,
+
+    #[arg(
+        short,
+        long,
+        help = "Output file header or name",
+        long_help = "Specify the output file header. \n\
+		     The output will be named as {output}.{backend}.\n\
+		     Redundant {backend} names will be ignored."
+    )]
+    pub output: Box<str>,
+
+    #[arg(
+        short = 'x',
+        long,
+        default_value = "matrix",
+        help = "Root group name for sparse data triplets",
+        long_help = "Set the root group name under which sparse data triplets are stored in the HDF5 file. \n\
+		     Use the 'list-h5' command to inspect available groups."
+    )]
+    pub root_group_name: Box<str>,
+
+    #[arg(
+        short = 'd',
+        long,
+        default_value = "data",
+        help = "Data field name",
+        long_help = "Name of the dataset containing triplet values X(i,j) under the root group."
+    )]
+    pub data_field: Box<str>,
+
+    #[arg(
+        short = 'i',
+        long,
+        default_value = "indices",
+        help = "Indices field name",
+        long_help = "Name of the dataset containing indices. \n\
+		     Row indices for CSC, column indices for CSR, under the root group."
+    )]
+    pub indices_field: Box<str>,
+
+    #[arg(
+        short = 'p',
+        long,
+        default_value = "indptr",
+        help = "Indptr field name",
+        long_help = "Name of the dataset containing indptr. \n\
+		     Column pointers for CSC, row pointers for CSR, under the root group."
+    )]
+    pub indptr_field: Box<str>,
+
+    #[arg(
+        short = 't',
+        long,
+        value_enum,
+        default_value = "column",
+        help = "Pointer type (row or column)",
+        long_help = "Specify whether the pointers are for row (gene) or column (cell) indices."
+    )]
+    pub pointer_type: IndexPointerType,
+
+    #[arg(
+        short = 'r',
+        long,
+        default_value = "features/id",
+        help = "Row ID field name",
+        long_help = "Group or dataset name for row, gene, or feature IDs under the root group."
+    )]
+    pub row_id_field: Box<str>,
+
+    #[arg(
+        short = 'n',
+        long,
+        default_value = "features/name",
+        help = "Row name field name",
+        long_help = "Group or dataset name for row, gene, or feature names under the root group."
+    )]
+    pub row_name_field: Box<str>,
+
+    #[arg(
+        short = 'f',
+        long,
+        default_value = "features/feature_type",
+        help = "Row type field name",
+        long_help = "Group or dataset name for row, gene, or feature types under the root group."
+    )]
+    pub row_type_field: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "gene",
+        help = "Select row type",
+        long_help = "Select row type for inclusion. Rows are included if their type contains this value."
+    )]
+    pub select_row_type: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "aggregate",
+        help = "Remove row type",
+        long_help = "Remove rows if their type contains this value."
+    )]
+    pub remove_row_type: Box<str>,
+
+    #[arg(
+        short = 'c',
+        long,
+        default_value = "barcodes",
+        help = "Column name field",
+        long_help = "Group or dataset name for columns or cells under the root group."
+    )]
+    pub column_name_field: Box<str>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Squeeze sparse rows or columns",
+        long_help = "Enable squeezing to remove rows and columns with too few non-zeros. \n\
+		     This can help reduce file size and improve performance."
+    )]
+    pub do_squeeze: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Row non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for rows. \n\
+		     Rows with fewer non-zeros will be removed if squeezing is enabled."
+    )]
+    pub row_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Column non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for columns. \n\
+		     Columns with fewer non-zeros will be removed if squeezing is enabled."
+    )]
+    pub column_nnz_cutoff: usize,
+}
+
+#[derive(Args, Debug)]
+pub struct FromH5adArgs {
+    #[arg(
+        help = "Input AnnData h5ad file",
+        long_help = "Specify the AnnData h5ad file (CELLxGENE schema v7).\n\
+		     Expected layout: X/{data,indices,indptr}, obs/, var/.\n\
+		     Prefers raw/X over X when available."
+    )]
+    pub h5ad_file: Box<str>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "zarr",
+        help = "Backend format for output",
+        long_help = "Choose the backend format for the output file."
+    )]
+    pub backend: SparseIoBackend,
+
+    #[arg(
+        short,
+        long,
+        help = "Output file header or name",
+        long_help = "Specify the output file header.\n\
+		     The output will be named as {output}.{backend}.\n\
+		     Metadata files will be named {output}.cell_metadata.tsv.gz, etc."
+    )]
+    pub output: Box<str>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_values_t = [Box::<str>::from("_index"), Box::from("gene_id")],
+        help = "var/ field(s) for feature ID (fallback list)",
+        long_help = "Comma-separated list of var/ dataset names to try for the feature ID (e.g. Ensembl ID).\n\
+		     The first one found is used. Default: '_index,gene_id'."
+    )]
+    pub row_id_field: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_values_t = [Box::<str>::from("feature_name"), Box::from("gene_name")],
+        help = "var/ field(s) for gene symbol (fallback list)",
+        long_help = "Comma-separated list of var/ column names to try for the gene symbol.\n\
+		     The first column found is used. Joined with the ID to form 'ID_SYMBOL' row names.\n\
+		     Default: 'feature_name,gene_name'."
+    )]
+    pub row_name_field: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_values_t = [Box::<str>::from("_index"), Box::from("cell")],
+        help = "obs/ field(s) for cell barcode (fallback list)",
+        long_help = "Comma-separated list of obs/ dataset names to try for the cell barcode.\n\
+		     The first one found is used. Default: '_index,cell'."
+    )]
+    pub col_name_field: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        default_value = "",
+        help = "Select row type (biotype) for filtering",
+        long_help = "Filter features by biotype (e.g., 'protein_coding', 'lncRNA').\n\
+		     Leave empty to keep all features (default).\n\
+		     CELLxGENE uses biotype annotations rather than 'Gene Expression'."
+    )]
+    pub select_row_type: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "",
+        help = "Remove row type",
+        long_help = "Remove rows if their biotype contains this value."
+    )]
+    pub remove_row_type: Box<str>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Squeeze sparse rows or columns",
+        long_help = "Enable squeezing to remove rows and columns with too few non-zeros."
+    )]
+    pub do_squeeze: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Row non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for rows."
+    )]
+    pub row_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Column non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for columns."
+    )]
+    pub column_nnz_cutoff: usize,
+}
+
+#[derive(Args, Debug)]
+pub struct From10xMoleculeArgs {
+    #[arg(
+        help = "Input 10X molecule_info.h5 file",
+        long_help = "Specify the molecule_info.h5 file from Cell Ranger count/multi.\n\
+		     Contains per-molecule data: barcode_idx, feature_idx, count, gem_group, etc."
+    )]
+    pub h5_file: Box<str>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "zarr",
+        help = "Backend format for output",
+        long_help = "Choose the backend format for the output file."
+    )]
+    pub backend: SparseIoBackend,
+
+    #[arg(
+        short,
+        long,
+        help = "Output file header or name",
+        long_help = "Specify the output file header.\n\
+		     The output will be named as {output}.{backend}."
+    )]
+    pub output: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "Gene Expression",
+        help = "Library type to include",
+        long_help = "Filter molecules to only those from libraries of this type.\n\
+		     Common types: 'Gene Expression', 'Antibody Capture', 'CRISPR Guide Capture'.\n\
+		     Reads library_info JSON to determine which library indices match."
+    )]
+    pub library_type: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "",
+        help = "Select row type (feature_type)",
+        long_help = "Filter features by type. Rows are included if their type contains this value.\n\
+		     Empty (default) keeps all features. 10X uses 'Gene Expression', 'Antibody Capture', etc."
+    )]
+    pub select_row_type: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "",
+        help = "Remove row type",
+        long_help = "Remove rows if their type contains this value. Empty (default) removes nothing."
+    )]
+    pub remove_row_type: Box<str>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Skip pass_filter and include all barcodes",
+        long_help = "By default, only barcodes that passed Cell Ranger cell calling are included.\n\
+		     Set this flag to include ALL barcodes with at least one molecule."
+    )]
+    pub no_pass_filter: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Squeeze sparse rows or columns",
+        long_help = "Enable squeezing to remove rows and columns with too few non-zeros."
+    )]
+    pub do_squeeze: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Row non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for rows."
+    )]
+    pub row_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Column non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for columns."
+    )]
+    pub column_nnz_cutoff: usize,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct FromZarrArgs {
+    #[arg(
+        help = "Input Zarr file containing sparse matrix triplets",
+        long_help = "Specify the Zarr file where triplets of sparse matrix data are stored. \n\
+		     For example, 10X Genomics Xenium's 'cell_feature_matrix.zarr.zip'."
+    )]
+    pub zarr_file: Box<str>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "zarr",
+        help = "Backend format for output",
+        long_help = "Choose the backend format for the output file. \n\
+		     Supported formats include 'zarr' and 'h5'."
+    )]
+    pub backend: SparseIoBackend,
+
+    #[arg(
+        short,
+        long,
+        help = "Output file header or name",
+        long_help = "Specify the output file header. \n\
+		     The output will be named as {output}.{backend}.\n\
+		     Redundant {backend} names will be ignored."
+    )]
+    pub output: Box<str>,
+
+    #[arg(
+        short = 'd',
+        long,
+        default_value = "/cell_features/data",
+        help = "Data field path",
+        long_help = "Path to the dataset containing triplet values. \n\
+		     Use the 'list-zarr' subcommand to inspect available fields."
+    )]
+    pub data_field: Box<str>,
+
+    #[arg(
+        short = 'i',
+        long,
+        default_value = "/cell_features/indices",
+        help = "Indices field path",
+        long_help = "Path to the dataset containing indices. \n\
+		     Row indices for CSC, column indices for CSR."
+    )]
+    pub indices_field: Box<str>,
+
+    #[arg(
+        short = 'p',
+        long,
+        default_value = "/cell_features/indptr",
+        help = "Indptr field path",
+        long_help = "Path to the dataset containing indptr. \n\
+		     Column pointers for CSC, row pointers for CSR."
+    )]
+    pub indptr_field: Box<str>,
+
+    #[arg(
+        short = 't',
+        long,
+        value_enum,
+        default_value = "row",
+        help = "Pointer type (row or column)",
+        long_help = "Specify whether the pointers keep track of row (gene) or column (cell) indices."
+    )]
+    pub pointer_type: IndexPointerType,
+
+    #[arg(
+        short = 'r',
+        long,
+        default_value = "/cell_features/feature_ids",
+        help = "Row ID field path",
+        long_help = "Path to the group or dataset for row, gene, or feature IDs."
+    )]
+    pub row_id_field: Box<str>,
+
+    #[arg(
+        short = 'n',
+        long,
+        default_value = "/cell_features/feature_keys",
+        help = "Row name field path",
+        long_help = "Path to the group or dataset for row, gene, or feature names."
+    )]
+    pub row_name_field: Box<str>,
+
+    #[arg(
+        short = 'f',
+        long,
+        default_value = "/cell_features/feature_types",
+        help = "Row type field path",
+        long_help = "Path to the group or dataset for row, gene, or feature types."
+    )]
+    pub row_type_field: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "gene",
+        help = "Select row type",
+        long_help = "Select row type for inclusion. Rows are included if their type contains this value."
+    )]
+    pub select_row_type: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "aggregate",
+        help = "Remove row type",
+        long_help = "Remove rows if their type contains this value."
+    )]
+    pub remove_row_type: Box<str>,
+
+    #[arg(
+        short = 'c',
+        long,
+        default_value = "/cell_features/cell_id",
+        help = "Column name field path",
+        long_help = "Path to the group or dataset for columns or cells. \n\
+		     Will first attempt Xenium's Cell ID format mapping."
+    )]
+    pub column_name_field: Box<str>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Squeeze sparse rows or columns",
+        long_help = "Enable squeezing to remove rows and columns with too few non-zeros. \n\
+		     This can help reduce file size and improve performance."
+    )]
+    pub do_squeeze: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Row non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for rows. \n\
+		     Rows with fewer non-zeros will be removed if squeezing is enabled."
+    )]
+    pub row_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Column non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for columns. \n\
+		     Columns with fewer non-zeros will be removed if squeezing is enabled."
+    )]
+    pub column_nnz_cutoff: usize,
+}
 
 pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
     let mtx_file = args.mtx.as_ref();
@@ -63,7 +597,7 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
             dry_run: false,
             interactive: false,
             output: None,
-            row_align: crate::RowAlignMode::Common,
+            row_align: RowAlignMode::Common,
         };
 
         run_squeeze(&squeeze_args)?;
@@ -154,21 +688,8 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     }
     assert_eq!(nrows, row_types.len());
 
-    let select_pattern = args.select_row_type.to_lowercase();
-    let remove_pattern = args.remove_row_type.to_lowercase();
-    let select_rows = row_types
-        .iter()
-        .enumerate()
-        .filter_map(|(i, x)| {
-            if x.to_lowercase().contains(&select_pattern)
-                && !x.to_lowercase().contains(&remove_pattern)
-            {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
+    let select_rows =
+        filter_row_indices_by_type(&row_types, &args.select_row_type, &args.remove_row_type);
 
     let mut column_names =
         parse_10x_cell_id(read_zarr_ndarray::<u32>(store.clone(), &args.column_name_field)?.view())
@@ -212,7 +733,7 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
             dry_run: false,
             interactive: false,
             output: None,
-            row_align: crate::RowAlignMode::Common,
+            row_align: RowAlignMode::Common,
         };
 
         run_squeeze(&squeeze_args)?;
@@ -321,20 +842,8 @@ pub fn run_build_from_10x_matrix(args: &From10xMatrixArgs) -> anyhow::Result<()>
     out.register_row_names_vec(&row_ids);
     out.register_column_names_vec(&column_names);
 
-    let select_pattern = args.select_row_type.to_lowercase();
-    let remove_pattern = args.remove_row_type.to_lowercase();
-    let select_rows = row_types
-        .iter()
-        .enumerate()
-        .filter_map(|(i, x)| {
-            let low = x.to_lowercase();
-            if low.contains(&select_pattern) && !low.contains(&remove_pattern) {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
+    let select_rows =
+        filter_row_indices_by_type(&row_types, &args.select_row_type, &args.remove_row_type);
 
     if select_rows.len() < nrows {
         info!("filtering in features of `{}` type", args.select_row_type);
@@ -483,28 +992,8 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
         info!("Feature types: {:?}", type_counts);
     }
 
-    // Filter by feature type only if user explicitly provides --select-row-type
-    let select_rows: Vec<usize> = if !args.select_row_type.is_empty() {
-        let select_pattern = args.select_row_type.to_lowercase();
-        let remove_pattern = args.remove_row_type.to_lowercase();
-        row_types
-            .iter()
-            .enumerate()
-            .filter_map(|(i, x)| {
-                let low = x.to_lowercase();
-                let selected = low.contains(&select_pattern);
-                let removed = !remove_pattern.is_empty() && low.contains(&remove_pattern);
-                if selected && !removed {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    } else {
-        // Keep all features for AnnData (data is already curated)
-        (0..nrows).collect()
-    };
+    let select_rows =
+        filter_row_indices_by_type(&row_types, &args.select_row_type, &args.remove_row_type);
 
     // Read all obs metadata columns
     let obs_df = read_h5ad_dataframe(&obs_group)?;
@@ -817,22 +1306,8 @@ pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result
         row_types.truncate(nrows);
     }
 
-    let select_pattern = args.select_row_type.to_lowercase();
-    let remove_pattern = args.remove_row_type.to_lowercase();
-    let select_rows: Vec<usize> = row_types
-        .iter()
-        .enumerate()
-        .filter_map(|(i, x)| {
-            let low = x.to_lowercase();
-            let selected = low.contains(&select_pattern);
-            let removed = !remove_pattern.is_empty() && low.contains(&remove_pattern);
-            if selected && !removed {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .collect();
+    let select_rows =
+        filter_row_indices_by_type(&row_types, &args.select_row_type, &args.remove_row_type);
 
     if select_rows.len() < nrows {
         info!(
@@ -874,7 +1349,7 @@ fn run_squeeze_if_needed(
             dry_run: false,
             interactive: false,
             output: None,
-            row_align: crate::RowAlignMode::Common,
+            row_align: RowAlignMode::Common,
         };
         run_squeeze(&squeeze_args)?;
     }

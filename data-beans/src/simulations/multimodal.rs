@@ -5,7 +5,7 @@ use rand::seq::index::sample;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal, Uniform};
 
-use crate::simulate::{generate_hierarchical_dictionary, sample_poisson_triplets, sample_theta_kn};
+use super::core::{generate_hierarchical_dictionary, sample_poisson_triplets, sample_theta_kn};
 
 pub struct MultimodalSimArgs {
     /// Number of features (genes), shared across modalities

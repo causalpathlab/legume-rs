@@ -1,6 +1,6 @@
 use arrow::array::{Float32Array, Int64Array, StringArray, UInt64Array};
 use clap::Args;
-use data_beans::misc::resolve_backend_file;
+use data_beans::hdf5_io::resolve_backend_file;
 use data_beans::sparse_io::open_sparse_matrix;
 use log::info;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
