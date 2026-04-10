@@ -1,6 +1,8 @@
 use crate::misc::*;
 use crate::sparse_io::*;
 use crate::sparse_util::*;
+use crate::utilities::io_helpers::{read_row_names, MAX_ROW_NAME_IDX};
+use crate::utilities::name_matching::{compose_id_name, make_names_unique};
 use data_beans::zarr_io::*;
 
 use log::info;
@@ -34,7 +36,9 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
     let mut data = create_sparse_from_mtx_file(mtx_file, Some(&backend_file), Some(&backend))?;
 
     if let Some(row_file) = row_file {
-        data.register_row_names_file(row_file);
+        let mut row_names = read_row_names(row_file.clone(), MAX_ROW_NAME_IDX)?;
+        make_names_unique(&mut row_names);
+        data.register_row_names_vec(&row_names);
     } else if let Some(nrow) = data.num_rows() {
         let row_names: Vec<Box<str>> = (1..(nrow + 1)).map(|i| format!("{}", i).into()).collect();
         data.register_row_names_vec(&row_names);
@@ -138,17 +142,8 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     assert_eq!(nrows, row_names.len());
 
     // have composite row names
-    let row_ids: Vec<Box<str>> = row_ids
-        .into_iter()
-        .zip(row_names)
-        .map(|(id, name)| {
-            if !name.is_empty() {
-                format!("{}_{}", id, name).into_boxed_str()
-            } else {
-                id
-            }
-        })
-        .collect();
+    let mut row_ids = compose_id_name(row_ids, row_names);
+    make_names_unique(&mut row_ids);
 
     let mut row_types = read_zarr_group_attr::<Vec<Box<str>>>(store.clone(), &args.row_type_field)
         .or_else(|_| read_zarr_strings(store.clone(), args.row_type_field.as_ref()))
@@ -288,17 +283,8 @@ pub fn run_build_from_10x_matrix(args: &From10xMatrixArgs) -> anyhow::Result<()>
     assert_eq!(nrows, row_ids.len());
     assert_eq!(nrows, row_names.len());
 
-    let row_ids: Vec<Box<str>> = row_ids
-        .into_iter()
-        .zip(row_names)
-        .map(|(id, name)| {
-            if !name.is_empty() {
-                format!("{}_{}", id, name).into_boxed_str()
-            } else {
-                id
-            }
-        })
-        .collect();
+    let mut row_ids = compose_id_name(row_ids, row_names);
+    make_names_unique(&mut row_ids);
 
     let mut row_types: Vec<Box<str>> = match root.dataset(args.row_type_field.as_ref()) {
         Ok(rows) => read_hdf5_strings(rows)?,
@@ -453,17 +439,8 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
     assert_eq!(nrows, row_names.len());
 
     // Composite row names: id_name
-    let row_ids: Vec<Box<str>> = row_ids
-        .into_iter()
-        .zip(row_names)
-        .map(|(id, name)| {
-            if !name.is_empty() {
-                format!("{}_{}", id, name).into_boxed_str()
-            } else {
-                id
-            }
-        })
-        .collect();
+    let mut row_ids = compose_id_name(row_ids, row_names);
+    make_names_unique(&mut row_ids);
 
     // Feature types from var/feature_type (often categorical)
     let mut row_types: Vec<Box<str>> =
@@ -830,17 +807,8 @@ pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result
         row_names.truncate(nrows);
     }
 
-    let row_id_names: Vec<Box<str>> = row_ids
-        .into_iter()
-        .zip(row_names)
-        .map(|(id, name)| {
-            if !name.is_empty() {
-                format!("{}_{}", id, name).into_boxed_str()
-            } else {
-                id
-            }
-        })
-        .collect();
+    let mut row_id_names = compose_id_name(row_ids, row_names);
+    make_names_unique(&mut row_id_names);
 
     out.register_row_names_vec(&row_id_names);
     out.register_column_names_vec(&column_names);
