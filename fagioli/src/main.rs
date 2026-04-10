@@ -4,6 +4,7 @@ mod fit_sumstat_mcmc;
 mod fit_sumstat_sgvb;
 mod pseudobulk;
 mod sim_geno;
+mod sim_mediation;
 mod sim_qtl;
 mod sim_sumstat;
 
@@ -13,6 +14,7 @@ use fit_sumstat_mcmc::*;
 use fit_sumstat_sgvb::*;
 use pseudobulk::*;
 use sim_geno::*;
+use sim_mediation::*;
 use sim_qtl::*;
 use sim_sumstat::*;
 
@@ -64,6 +66,8 @@ enum Commands {
     SimQtl(SimQtlArgs),
     /// Simulate multi-trait GWAS summary statistics with LD blocks and confounders
     SimSumstat(SimSumstatArgs),
+    /// Simulate mediation analysis data: SNP → Expression → Phenotype with confounders
+    SimMediation(SimMediationArgs),
     /// Fine-map causal variants from GWAS summary statistics using variational SuSiE
     FitSumstatSgvb(FitSumstatSgvbArgs),
     /// Fine-map causal variants from GWAS summary statistics using MCMC (ESS)
@@ -98,6 +102,9 @@ fn main() -> Result<()> {
         }
         Commands::SimSumstat(args) => {
             sim_sumstat(args)?;
+        }
+        Commands::SimMediation(args) => {
+            sim_mediation(args)?;
         }
         Commands::FitSumstatSgvb(args) => {
             fit_sumstat_sgvb(args)?;
