@@ -569,3 +569,138 @@ fn test_winner_curse_inflation() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_collider_selection_changes_gwas() -> Result<()> {
+    // Selecting individuals on collider expression should inflate GWAS z-scores
+    // at collider eQTL SNPs compared to the full-sample GWAS.
+    let n = 1000;
+    let m = 200;
+
+    let geno = make_test_genotypes(n, m, 77);
+    let genes = simulate_gene_annotations(
+        20,
+        "22",
+        20_000_000,
+        20_000_000 + (m as u64) * 5000,
+        100_000,
+        77,
+    );
+
+    let effects = sample_mediation_effects(&MediationEffectParams {
+        genes: &genes,
+        snp_positions: &geno.positions,
+        snp_chromosomes: &geno.chromosomes,
+        n_eqtl_per_gene: 3,
+        num_causal: 3,
+        num_observed_causal: 3,
+        num_collider: 5,
+        seed: 177,
+    })?;
+
+    let conf_params = ConfounderParams {
+        num_confounders: 10,
+        num_hidden_factors: 5,
+        pve_confounders: 0.3,
+    };
+    let confounders = generate_confounder_matrix(n, &conf_params, 100)?;
+    let gamma_y = sample_confounder_mixing_y(confounders.ncols(), 150);
+
+    let expressions = generate_gene_expressions(&ExpressionParams {
+        genotypes: &geno.genotypes,
+        effects: &effects,
+        confounders: &confounders,
+        gamma_y: &gamma_y,
+        h2_eqtl: 0.3,
+        h2_conf_m: 0.3,
+        collider_correlation: 0.9,
+        seed: 200,
+    })?;
+
+    let y = generate_mediated_phenotype(&PhenotypeParams {
+        expressions: &expressions,
+        effects: &effects,
+        genotypes: &geno.genotypes,
+        confounders: &confounders,
+        gamma_y: &gamma_y,
+        h2_mediated: 0.2,
+        h2_direct: 0.0,
+        h2_conf_y: 0.3,
+        seed: 300,
+    })?;
+
+    // Condition on first collider gene via liability threshold
+    let cond_gene = effects.iter().find(|e| e.is_collider()).unwrap();
+    let std_expr = fagioli::simulation::standardize_dvector(&expressions[cond_gene.gene_idx]);
+
+    // Select top 50% (above median)
+    let mut scratch: Vec<f32> = std_expr.iter().copied().collect();
+    let mid = n / 2;
+    scratch.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
+    let threshold = scratch[mid];
+
+    let selected_idx: Vec<usize> = (0..n).filter(|&i| std_expr[i] >= threshold).collect();
+    let n_sel = selected_idx.len();
+    eprintln!(
+        "Selected {}/{} individuals for collider bias test",
+        n_sel, n
+    );
+
+    // Direct collider bias test: genetically predicted expression (Xα) for the
+    // conditioned collider gene should become correlated with Y after selection,
+    // even though β=0 (no causal mediation effect).
+    //
+    // In the full sample: Cor(Xα, Y) ≈ 0 (no causal path from this gene to Y)
+    // In the selected sample: Cor(Xα, Y) ≠ 0 (selection opens backdoor through U)
+    let mut xalpha = nalgebra::DVector::<f32>::zeros(n);
+    for (j, &snp_idx) in cond_gene.eqtl_snp_indices.iter().enumerate() {
+        let col = geno.genotypes.column(snp_idx);
+        for i in 0..n {
+            xalpha[i] += col[i] * cond_gene.alpha[j];
+        }
+    }
+
+    // Full sample correlation
+    let cor = |a: &[f32], b: &[f32]| -> f32 {
+        let nn = a.len() as f32;
+        let ma = a.iter().sum::<f32>() / nn;
+        let mb = b.iter().sum::<f32>() / nn;
+        let mut cov = 0.0f32;
+        let mut va = 0.0f32;
+        let mut vb = 0.0f32;
+        for i in 0..a.len() {
+            let da = a[i] - ma;
+            let db = b[i] - mb;
+            cov += da * db;
+            va += da * da;
+            vb += db * db;
+        }
+        if va < 1e-10 || vb < 1e-10 {
+            0.0
+        } else {
+            cov / (va.sqrt() * vb.sqrt())
+        }
+    };
+
+    let full_cor = cor(xalpha.as_slice(), y.as_slice()).abs();
+
+    // Selected sample correlation
+    let xalpha_sel = subset_dvector(&xalpha, &selected_idx);
+    let y_sel_vec = subset_dvector(&y, &selected_idx);
+    let sel_cor = cor(xalpha_sel.as_slice(), y_sel_vec.as_slice()).abs();
+
+    eprintln!(
+        "Cor(Xα_collider, Y): full={:.4}, selected={:.4}",
+        full_cor, sel_cor,
+    );
+
+    // Selection should induce a spurious correlation
+    assert!(
+        sel_cor > full_cor,
+        "Selection on collider should induce Cor(Xα, Y): full={:.4}, selected={:.4}",
+        full_cor,
+        sel_cor,
+    );
+
+    Ok(())
+}
