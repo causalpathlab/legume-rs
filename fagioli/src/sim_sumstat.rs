@@ -15,7 +15,7 @@ use fagioli::simulation::{
 use fagioli::summary_stats::{
     compute_block_ld_scores, compute_block_sumstats, compute_yty_diagonal, create_uniform_blocks,
     estimate_ld_blocks, load_ld_blocks_from_file, write_confounders, write_ground_truth,
-    write_ld_blocks, LdBlock, LdBlockParams, LdScoreWriter, SumstatWriter,
+    write_ld_blocks, LdBlock, LdBlockParams, LdScoreWriter, SnpWriterParams, SumstatWriter,
 };
 
 #[derive(Args, Debug, Clone)]
@@ -344,16 +344,16 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
     info!("Computing summary statistics block by block");
 
     let sumstat_file = format!("{}.sumstats.bed.gz", args.output);
-    let mut sumstat_writer = SumstatWriter::new(
-        &sumstat_file,
-        &geno.snp_ids,
-        &geno.chromosomes,
-        &geno.positions,
-        &geno.allele1,
-        &geno.allele2,
-        n,
-        Some(&tpool),
-    )?;
+    let mut sumstat_writer = SumstatWriter::new(&SnpWriterParams {
+        path: &sumstat_file,
+        snp_ids: &geno.snp_ids,
+        chromosomes: &geno.chromosomes,
+        positions: &geno.positions,
+        allele1: &geno.allele1,
+        allele2: &geno.allele2,
+        num_individuals: n,
+        tpool: Some(&tpool),
+    })?;
 
     let ld_score_file = format!("{}.ld_scores.bed.gz", args.output);
     let mut ld_writer = LdScoreWriter::new(
