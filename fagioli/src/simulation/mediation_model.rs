@@ -472,7 +472,7 @@ pub fn subset_dvector(v: &DVector<f32>, indices: &[usize]) -> DVector<f32> {
 
 /// Standardize a DVector to mean 0, variance 1.
 /// Returns zeros if variance is near-zero.
-fn standardize_dvector(v: &DVector<f32>) -> DVector<f32> {
+pub fn standardize_dvector(v: &DVector<f32>) -> DVector<f32> {
     let n = v.len() as f32;
     let mean = v.sum() / n;
     let centered: DVector<f32> = v.map(|x| x - mean);
