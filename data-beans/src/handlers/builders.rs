@@ -1,7 +1,7 @@
 use crate::misc::*;
 use crate::sparse_io::*;
 use crate::sparse_util::*;
-use crate::utilities::io_helpers::{read_row_names, MAX_ROW_NAME_IDX};
+use crate::utilities::io_helpers::read_row_names;
 use crate::utilities::name_matching::{compose_id_name, make_names_unique};
 use data_beans::zarr_io::*;
 
@@ -36,7 +36,7 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
     let mut data = create_sparse_from_mtx_file(mtx_file, Some(&backend_file), Some(&backend))?;
 
     if let Some(row_file) = row_file {
-        let mut row_names = read_row_names(row_file.clone(), MAX_ROW_NAME_IDX)?;
+        let mut row_names = read_row_names(row_file.clone(), args.row_name_columns)?;
         make_names_unique(&mut row_names);
         data.register_row_names_vec(&row_names);
     } else if let Some(nrow) = data.num_rows() {
@@ -416,18 +416,19 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
     let TripletsShape { nrows, ncols, nnz } = shape;
     info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
 
-    // Feature IDs from var/_index
-    let mut row_ids: Vec<Box<str>> = match var_group.dataset("_index") {
-        Ok(ds) => read_hdf5_strings(ds)?,
-        _ => {
-            info!("var/_index not found, using numeric IDs");
+    // Feature IDs from var/ (try each candidate in order)
+    let mut row_ids: Vec<Box<str>> =
+        resolve_h5ad_field(&var_group, &args.row_id_field, "feature IDs").unwrap_or_else(|| {
+            info!("No feature ID column found in var/; using numeric IDs");
             (0..nrows).map(|x| x.to_string().into_boxed_str()).collect()
-        }
-    };
+        });
 
-    // Feature names from var/feature_name (often categorical)
+    // Feature names from var/ (try each candidate in order)
     let mut row_names: Vec<Box<str>> =
-        read_h5ad_column(&var_group, "feature_name").unwrap_or_else(|_| vec![Box::from(""); nrows]);
+        resolve_h5ad_field(&var_group, &args.row_name_field, "gene symbols").unwrap_or_else(|| {
+            info!("No gene symbol column found in var/; using index only");
+            vec![Box::from(""); nrows]
+        });
 
     if nrows < row_ids.len() {
         row_ids.truncate(nrows);
@@ -450,14 +451,12 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
     }
     assert_eq!(nrows, row_types.len());
 
-    // Cell barcodes from obs/_index
-    let mut column_names: Vec<Box<str>> = match obs_group.dataset("_index") {
-        Ok(ds) => read_hdf5_strings(ds)?,
-        _ => {
-            info!("obs/_index not found, using numeric IDs");
+    // Cell barcodes from obs/ (try each candidate in order)
+    let mut column_names: Vec<Box<str>> =
+        resolve_h5ad_field(&obs_group, &args.col_name_field, "barcodes").unwrap_or_else(|| {
+            info!("No barcode column found in obs/; using numeric IDs");
             (0..ncols).map(|x| x.to_string().into_boxed_str()).collect()
-        }
-    };
+        });
     info!("Read {} barcodes", column_names.len());
     if ncols < column_names.len() {
         column_names.truncate(ncols);
