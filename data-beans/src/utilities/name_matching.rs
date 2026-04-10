@@ -1,3 +1,45 @@
+use rustc_hash::FxHashMap as HashMap;
+
+/// Make duplicate names unique by appending `-1`, `-2`, etc. to repeated entries.
+/// Similar to scanpy's `var_names_make_unique()`.
+pub fn make_names_unique(names: &mut [Box<str>]) -> usize {
+    let mut counts: HashMap<Box<str>, usize> = HashMap::default();
+    let mut num_duped = 0usize;
+    for name in names.iter_mut() {
+        if let Some(count) = counts.get_mut(name.as_ref()) {
+            if *count == 1 {
+                num_duped += 1;
+            }
+            *name = format!("{}-{}", name, count).into_boxed_str();
+            *count += 1;
+        } else {
+            counts.insert(name.clone(), 1);
+        }
+    }
+    if num_duped > 0 {
+        log::warn!(
+            "{} names had duplicates and were made unique with -N suffixes",
+            num_duped
+        );
+    }
+    num_duped
+}
+
+/// Combine feature IDs and names into composite `id_name` strings.
+/// If a name is empty, the ID is used as-is.
+pub fn compose_id_name(ids: Vec<Box<str>>, names: Vec<Box<str>>) -> Vec<Box<str>> {
+    ids.into_iter()
+        .zip(names)
+        .map(|(id, name)| {
+            if !name.is_empty() {
+                format!("{}_{}", id, name).into_boxed_str()
+            } else {
+                id
+            }
+        })
+        .collect()
+}
+
 /// Flexible gene name matching (case-insensitive, underscore-delimited)
 /// Returns true if `query` matches `target` with these rules:
 /// - Exact match (case-insensitive)

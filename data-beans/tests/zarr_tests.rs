@@ -57,7 +57,7 @@ fn temp_array_zarrs() -> anyhow::Result<()> {
     let array = zarrs::array::ArrayBuilder::new(
         vec![10, 10],                                // array shape
         vec![3_u64, 3_u64],                          // regular chunk shape
-        data_type::float32(),                         // f32
+        data_type::float32(),                        // f32
         FillValue::from(zarrs::array::ZARR_NAN_F32), // nan
     )
     // .bytes_to_bytes_codecs(vec![Arc::new(ZstdCodec::new(COMPRESSION_LEVEL, false))])
