@@ -1547,18 +1547,10 @@ pub struct RunSimulateArgs {
     )]
     cnv_block_frac: f32,
 
-    #[arg(
-        long,
-        default_value_t = 2.0,
-        help = "Fold-change for CNV gain events"
-    )]
+    #[arg(long, default_value_t = 2.0, help = "Fold-change for CNV gain events")]
     cnv_gain_fold: f32,
 
-    #[arg(
-        long,
-        default_value_t = 0.5,
-        help = "Fold-change for CNV loss events"
-    )]
+    #[arg(long, default_value_t = 0.5, help = "Fold-change for CNV loss events")]
     cnv_loss_fold: f32,
 
     #[arg(
