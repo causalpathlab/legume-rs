@@ -2,9 +2,10 @@ use anyhow::Result;
 use clap::Args;
 use log::info;
 use nalgebra::{DMatrix, DVector};
-use rust_htslib::tpool::ThreadPool;
-
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use rayon::prelude::*;
+use rust_htslib::tpool::ThreadPool;
 
 use fagioli::genotype::{BedReader, GenomicRegion, GenotypeReader};
 use fagioli::io::gene_annotations::{load_bed_annotations, load_gtf};
@@ -215,6 +216,39 @@ const SEED_EXPRESSION: u64 = 400;
 const SEED_GAMMA_Y: u64 = 500;
 const SEED_SPLIT: u64 = 600;
 const SEED_COLLIDER_SELECTION: u64 = 700;
+
+/// Compute GWAS summary statistics block by block (parallel compute, sequential write).
+fn write_gwas_blocks(
+    genotypes: &DMatrix<f32>,
+    y_matrix: &DMatrix<f32>,
+    yty_diag: &[f32],
+    blocks: &[LdBlock],
+    batch_size: usize,
+    writer: &mut SumstatWriter,
+) -> Result<()> {
+    let num_blocks = blocks.len();
+    for batch_start in (0..num_blocks).step_by(batch_size) {
+        let batch_end = (batch_start + batch_size).min(num_blocks);
+
+        let batch_results: Vec<_> = (batch_start..batch_end)
+            .into_par_iter()
+            .map(|block_idx| {
+                let block = &blocks[block_idx];
+                let x_block = genotypes
+                    .columns(block.snp_start, block.num_snps())
+                    .clone_owned();
+                let sumstats =
+                    compute_block_sumstats(&x_block, y_matrix, yty_diag, block.snp_start);
+                (block_idx, sumstats)
+            })
+            .collect();
+
+        for (_, sumstats) in batch_results {
+            writer.write_block(&sumstats)?;
+        }
+    }
+    Ok(())
+}
 
 /// Remap local cis-SNP indices back to global SNP indices.
 fn remap_sumstat_indices(records: Vec<SumstatRecord>, cis_snps: &[usize]) -> Vec<SumstatRecord> {
@@ -484,10 +518,7 @@ pub fn sim_mediation(args: &SimMediationArgs) -> Result<()> {
 
     // ── Step 10b: Collider-biased GWAS (liability threshold selection) ──
     if args.induce_collider_bias {
-        use rand::seq::SliceRandom;
-        use rand::SeedableRng;
-
-        let collider_genes: Vec<usize> = effects
+        let mut collider_genes: Vec<usize> = effects
             .iter()
             .enumerate()
             .filter(|(_, eff)| eff.is_collider())
@@ -500,11 +531,9 @@ pub fn sim_mediation(args: &SimMediationArgs) -> Result<()> {
             "--induce-collider-bias requires at least one collider gene (set --num-collider-genes)"
         );
 
-        // Pick which collider genes to condition on
         let mut rng = rand::rngs::StdRng::seed_from_u64(args.seed + SEED_COLLIDER_SELECTION);
-        let mut cond_pool = collider_genes.clone();
-        cond_pool.shuffle(&mut rng);
-        let conditioned: Vec<usize> = cond_pool.into_iter().take(n_cond).collect();
+        collider_genes.shuffle(&mut rng);
+        let conditioned = &collider_genes[..n_cond];
 
         info!(
             "Inducing collider bias: conditioning on {} collider gene(s), selection quantile={:.2}",
@@ -513,32 +542,33 @@ pub fn sim_mediation(args: &SimMediationArgs) -> Result<()> {
 
         // Liability = sum of standardized collider expressions
         let mut liability = DVector::<f32>::zeros(n);
-        for &gi in &conditioned {
+        for &gi in conditioned {
             let g = effects[gi].gene_idx;
-            let expr = &expressions[g];
-            let mu = expr.sum() / n as f32;
-            let var = expr.iter().map(|&x| (x - mu).powi(2)).sum::<f32>() / n as f32;
-            let sd = var.sqrt().max(1e-10);
-            for i in 0..n {
-                liability[i] += (expr[i] - mu) / sd;
-            }
+            let std_expr = fagioli::simulation::standardize_dvector(&expressions[g]);
+            liability += &std_expr;
         }
 
-        // Select individuals above the quantile threshold
-        let mut sorted_liability: Vec<f32> = liability.iter().copied().collect();
-        sorted_liability.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // Find threshold via partial sort (O(n) instead of O(n log n))
+        let mut scratch: Vec<f32> = liability.iter().copied().collect();
         let threshold_idx = (args.collider_selection_quantile * n as f64).floor() as usize;
-        let threshold = sorted_liability[threshold_idx.min(n - 1)];
+        let threshold_idx = threshold_idx.min(n - 1);
+        scratch.select_nth_unstable_by(threshold_idx, |a, b| a.partial_cmp(b).unwrap());
+        let threshold = scratch[threshold_idx];
 
         let selected_idx: Vec<usize> = (0..n).filter(|&i| liability[i] >= threshold).collect();
         let n_selected = selected_idx.len();
+
+        anyhow::ensure!(
+            n_selected > 0,
+            "Collider selection yielded 0 individuals (quantile={} too strict)",
+            args.collider_selection_quantile,
+        );
 
         info!(
             "Selected {}/{} individuals (liability threshold={:.3})",
             n_selected, n, threshold,
         );
 
-        // Subset genotypes and phenotype for the selected individuals
         let x_selected = subset_rows(&geno.genotypes, &selected_idx);
         let y_selected = subset_dvector(&phenotype, &selected_idx);
         let y_sel_mat = DMatrix::from_column_slice(n_selected, 1, y_selected.as_slice());
@@ -556,27 +586,16 @@ pub fn sim_mediation(args: &SimMediationArgs) -> Result<()> {
             tpool: Some(&tpool),
         })?;
 
-        for batch_start in (0..num_blocks).step_by(batch_size) {
-            let batch_end = (batch_start + batch_size).min(num_blocks);
-
-            let batch_results: Vec<_> = (batch_start..batch_end)
-                .into_par_iter()
-                .map(|block_idx| {
-                    let block = &blocks[block_idx];
-                    let block_m = block.num_snps();
-                    let x_block = x_selected.columns(block.snp_start, block_m).clone_owned();
-                    let sumstats =
-                        compute_block_sumstats(&x_block, &y_sel_mat, &yty_sel, block.snp_start);
-                    (block_idx, sumstats)
-                })
-                .collect();
-
-            for (_, sumstats) in batch_results {
-                biased_writer.write_block(&sumstats)?;
-            }
-        }
-
+        write_gwas_blocks(
+            &x_selected,
+            &y_sel_mat,
+            &yty_sel,
+            &blocks,
+            batch_size,
+            &mut biased_writer,
+        )?;
         biased_writer.finish()?;
+
         info!(
             "Wrote collider-biased GWAS sumstats ({} individuals) to {}",
             n_selected, biased_file,
