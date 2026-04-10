@@ -1,21 +1,210 @@
-use crate::handlers::merging::{find_aligned_rows, generate_unique_batch_names, run_merge_backend};
+use crate::handlers::merging::{
+    find_aligned_rows, generate_unique_batch_names, run_merge_backend, MergeBackendArgs,
+};
+use crate::hdf5_io::*;
 use crate::interactive::{confirm, prompt_user_action, UserAction};
-use crate::misc::*;
 use crate::qc::*;
 use crate::sparse_io::*;
 use crate::utilities::io_helpers::{
     read_col_names, read_row_names, MAX_COLUMN_NAME_IDX, MAX_ROW_NAME_IDX,
 };
-use crate::MergeBackendArgs;
 
+use clap::Args;
 use log::info;
 use matrix_util::common_io::*;
 use matrix_util::membership::Membership;
 use matrix_util::traits::RunningStatOps;
 
-// Import the argument structs from main.rs
-// These will need to be public in main.rs
-use crate::{ReorderRowsArgs, RunSqueezeArgs, SubsetColumnsArgs, SubsetRowsArgs};
+#[derive(Args, Debug)]
+pub struct ReorderRowsArgs {
+    /// Data file -- either `.zarr` or `.h5`
+    pub data_file: Box<str>,
+
+    /// Row/feature name file (name per each line; `.tsv.gz` or `.tsv`)
+    #[arg(short, long, required = true)]
+    pub row_file: Box<str>,
+
+    /// output header
+    #[arg(short, long, required = true)]
+    pub output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct SubsetColumnsArgs {
+    /// data file -- either `.zarr` or `.h5`
+    pub data_file: Box<str>,
+
+    /// column indices to take: e.g., `0,1,2,3`
+    #[arg(short = 'i', long, value_delimiter = ',')]
+    pub column_indices: Option<Vec<usize>>,
+
+    /// column name file where each line is a column name
+    #[arg(short = 'f', long)]
+    pub name_file: Option<Box<str>>,
+
+    /// delimiter for base-key extraction (e.g., '@' to match "ACGT-1@batch" with "ACGT-1")
+    #[arg(short = 'd', long, default_value = "@")]
+    pub delimiter: char,
+
+    /// enable prefix matching (stored name is prefix of query or vice versa)
+    #[arg(long, default_value_t = true)]
+    pub allow_prefix: bool,
+
+    /// squeeze
+    #[arg(long, default_value_t = false)]
+    pub do_squeeze: bool,
+
+    /// minimum number of non-zero cutoff for rows
+    #[arg(long, default_value_t = 1)]
+    pub row_nnz_cutoff: usize,
+
+    /// minimum number of non-zero cutoff for columns
+    #[arg(long, default_value_t = 1)]
+    pub column_nnz_cutoff: usize,
+
+    /// output file
+    #[arg(short, long, required = true)]
+    pub output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct SubsetRowsArgs {
+    /// data file -- either `.zarr` or `.h5`
+    pub data_file: Box<str>,
+
+    /// row indices to take: e.g., `0,1,2,3`
+    #[arg(short = 'i', long, value_delimiter = ',')]
+    pub row_indices: Option<Vec<usize>>,
+
+    /// row name file where each line is a row name
+    #[arg(short = 'f', long)]
+    pub name_file: Option<Box<str>>,
+
+    /// delimiter for base-key extraction (e.g., '@' to match "gene@batch" with "gene")
+    #[arg(short = 'd', long, default_value = "@")]
+    pub delimiter: char,
+
+    /// enable prefix matching (stored name is prefix of query or vice versa)
+    #[arg(long, default_value_t = true)]
+    pub allow_prefix: bool,
+
+    /// squeeze
+    #[arg(long, default_value_t = false)]
+    pub do_squeeze: bool,
+
+    /// minimum number of non-zero cutoff for rows
+    #[arg(long, default_value_t = 1)]
+    pub row_nnz_cutoff: usize,
+
+    /// minimum number of non-zero cutoff for columns
+    #[arg(long, default_value_t = 1)]
+    pub column_nnz_cutoff: usize,
+
+    /// output file
+    #[arg(short, long, required = true)]
+    pub output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+#[command(about)]
+pub struct RunSqueezeArgs {
+    /// data files -- either `.zarr` or `.h5`
+    #[arg(required = true, value_delimiter = ',')]
+    pub data_files: Vec<Box<str>>,
+
+    /// number of non-zero cutoff for rows
+    #[arg(short, long, default_value = "0")]
+    pub row_nnz_cutoff: usize,
+
+    /// number of non-zero cutoff for columns
+    #[arg(short, long, default_value = "0")]
+    pub column_nnz_cutoff: usize,
+
+    /// block_size for parallel processing
+    #[arg(long, default_value = "100")]
+    pub block_size: usize,
+
+    /// preload data into memory for faster processing
+    #[arg(
+        long,
+        alias = "preload-data",
+        default_value_t = true,
+        help = "Preload data into memory for faster processing",
+        long_help = "Preload all column data into memory before squeezing. \n\
+		     This can significantly speed up processing but requires more memory."
+    )]
+    pub preload: bool,
+
+    /// show nnz histogram before squeezing
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Show ASCII histogram of row/column nnz distributions",
+        long_help = "Display log1p-transformed ASCII histograms of row and column \n\
+		     non-zero counts before squeezing. Helps determine appropriate cutoff values."
+    )]
+    pub show_histogram: bool,
+
+    /// save histogram data to files
+    #[arg(
+        long,
+        help = "Output file prefix for saving histogram data",
+        long_help = "Save histogram data to {prefix}.row_nnz.txt and {prefix}.col_nnz.txt files. \n\
+		     Each file contains nnz counts that can be used for further analysis."
+    )]
+    pub save_histogram: Option<Box<str>>,
+
+    /// dry run - only show histograms without performing squeeze
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Preview mode - show histograms without squeezing",
+        long_help = "Only display histograms and statistics without actually performing the squeeze operation. \n\
+		     Useful for determining appropriate cutoff values."
+    )]
+    pub dry_run: bool,
+
+    /// interactive mode - prompt user after showing histogram
+    #[arg(
+        short,
+        long,
+        default_value_t = false,
+        help = "Interactive mode - ask for confirmation after showing histogram",
+        long_help = "Show histogram and prompt user to proceed, adjust cutoffs, or cancel. \n\
+		     Automatically enables --show-histogram."
+    )]
+    pub interactive: bool,
+
+    /// output file for squeezed data
+    #[arg(
+        short,
+        long,
+        help = "Output file for squeezed data",
+        long_help = "Save squeezed data to a new file instead of modifying in-place. \n\
+		     With multiple inputs, all files will be squeezed and merged into {output}.{backend}. \n\
+		     If not specified, modifies files in-place (requires confirmation in interactive mode)."
+    )]
+    pub output: Option<Box<str>>,
+
+    /// row alignment strategy for merging multiple files
+    #[arg(
+        long,
+        value_enum,
+        default_value = "common",
+        help = "Row alignment strategy when merging multiple files",
+        long_help = "How to align rows across files after squeezing:\n\
+		     - common: Keep only rows present in ALL files (intersection)\n\
+		     - union: Keep rows present in ANY file (union, fills missing with zeros)"
+    )]
+    pub row_align: RowAlignMode,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+pub enum RowAlignMode {
+    Common,
+    Union,
+}
 
 /// Subset columns from a sparse matrix data file
 ///
@@ -126,7 +315,7 @@ pub fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
             dry_run: false,
             interactive: false,
             output: None,
-            row_align: crate::RowAlignMode::Common,
+            row_align: RowAlignMode::Common,
         };
         run_squeeze(&squeeze_args)?;
     }
@@ -240,7 +429,7 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
             dry_run: false,
             interactive: false,
             output: None,
-            row_align: crate::RowAlignMode::Common,
+            row_align: RowAlignMode::Common,
         };
         run_squeeze(&squeeze_args)?;
     }
@@ -486,12 +675,8 @@ fn run_squeeze_and_merge(
     }
 
     match cmd_args.row_align {
-        crate::RowAlignMode::Union => {
-            run_merge_then_squeeze(cmd_args, row_nnz_cutoff, col_nnz_cutoff)
-        }
-        crate::RowAlignMode::Common => {
-            run_squeeze_then_merge(cmd_args, row_nnz_cutoff, col_nnz_cutoff)
-        }
+        RowAlignMode::Union => run_merge_then_squeeze(cmd_args, row_nnz_cutoff, col_nnz_cutoff),
+        RowAlignMode::Common => run_squeeze_then_merge(cmd_args, row_nnz_cutoff, col_nnz_cutoff),
     }
 }
 
@@ -761,7 +946,7 @@ fn run_squeeze_then_merge(
 
     let data_refs: Vec<&dyn SparseIo<IndexIter = Vec<usize>>> =
         squeezed_data.iter().map(|d| d.as_ref()).collect();
-    let aligned_rows = find_aligned_rows(&data_refs, crate::RowAlignMode::Common)?;
+    let aligned_rows = find_aligned_rows(&data_refs, RowAlignMode::Common)?;
 
     info!(
         "Found {} common rows across {} files",

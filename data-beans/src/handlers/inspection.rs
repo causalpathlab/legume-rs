@@ -1,14 +1,87 @@
-use crate::misc::*;
+use crate::hdf5_io::*;
 use crate::sparse_io::*;
 use crate::utilities::io_helpers::{read_col_names, MAX_COLUMN_NAME_IDX, MAX_ROW_NAME_IDX};
 use crate::utilities::name_matching::match_by_substring;
+use clap::Args;
 use matrix_util::common_io::*;
 use matrix_util::traits::IoOps;
 use ndarray::Array2;
 use std::io::Write;
 
-// Import the argument types from main
-use crate::{InfoArgs, TakeColumnNamesArgs, TakeColumnsArgs, TakeRowNamesArgs, TakeRowsArgs};
+/// A quick information of the underlying matrix of a backend file.
+#[derive(Args, Debug)]
+pub struct InfoArgs {
+    /// data file -- .zarr or .h5 file
+    pub data_file: Box<str>,
+
+    /// file header for {output}.{rows.gz,columns.gz}
+    #[arg(short, long, default_value = "")]
+    pub output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct TakeColumnsArgs {
+    /// data file -- either `.zarr` or `.h5`
+    pub data_file: Box<str>,
+
+    /// column indices to take: e.g., `0,1,2,3`
+    #[arg(short = 'i', long, value_delimiter = ',')]
+    pub column_indices: Option<Vec<usize>>,
+
+    /// column name file where each line is a column name
+    #[arg(short = 'f', long)]
+    pub name_file: Option<Box<str>>,
+
+    /// column names to take: e.g., `col1,col2,col3` (supports substring matching)
+    #[arg(short = 'n', long, value_delimiter = ',')]
+    pub column_names: Option<Vec<Box<str>>>,
+
+    /// output `parquet` file
+    #[arg(short, long, default_value = "stdout")]
+    pub output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct TakeRowsArgs {
+    /// data file -- either `.zarr` or `.h5`
+    pub data_file: Box<str>,
+
+    /// row indices to take: e.g., `0,1,2,3`
+    #[arg(short = 'i', long, value_delimiter = ',')]
+    pub row_indices: Option<Vec<usize>>,
+
+    /// row name file where each line is a row name
+    #[arg(short = 'f', long)]
+    pub name_file: Option<Box<str>>,
+
+    /// row names to take: e.g., `gene1,gene2,gene3` (supports substring matching)
+    #[arg(short = 'n', long, value_delimiter = ',')]
+    pub row_names: Option<Vec<Box<str>>>,
+
+    /// output `parquet` file
+    #[arg(short, long, default_value = "stdout")]
+    pub output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct TakeColumnNamesArgs {
+    /// data file -- either `.zarr` or `.h5`
+    pub data_file: Box<str>,
+
+    /// output file
+    #[arg(short, long, default_value = "stdout")]
+    pub output: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct TakeRowNamesArgs {
+    /// data file -- either `.zarr` or `.h5`
+    pub data_file: Box<str>,
+
+    /// output file
+    #[arg(short, long, default_value = "stdout")]
+    pub output: Box<str>,
+}
 
 /// Write an Array2 as TSV with optional row/column names.
 /// Arguments mirror `to_parquet_with_names`:

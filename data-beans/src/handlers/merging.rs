@@ -1,7 +1,9 @@
-use crate::misc::*;
+use crate::handlers::transformation::{run_squeeze, RowAlignMode, RunSqueezeArgs};
+use crate::hdf5_io::*;
 use crate::sparse_io::*;
 use crate::utilities::io_helpers::{read_col_names, read_row_names};
 
+use clap::Args;
 use data_beans::sparse_data_visitors::create_jobs;
 use indicatif::{ParallelProgressIterator, ProgressBar};
 use log::info;
@@ -11,9 +13,202 @@ use rayon::prelude::*;
 
 use rustc_hash::FxHashMap as HashMap;
 
-// Import the argument structs and run_squeeze function from main
-use crate::run_squeeze;
-use crate::{AlignDataArgs, MergeBackendArgs, MergeMtxArgs, RunSqueezeArgs};
+#[derive(Args, Debug)]
+pub struct AlignDataArgs {
+    /// data file -- either `.zarr` or `.h5`
+    #[arg(required = true, value_delimiter = ',')]
+    pub data_files: Vec<Box<str>>,
+
+    /// Data types (treating them as different rows)
+    #[arg(short = 'r', long, required = true)]
+    pub num_data_types: usize,
+
+    /// output directory
+    #[arg(short, long, required = true)]
+    pub output_directory: Box<str>,
+}
+
+#[derive(Args, Debug)]
+pub struct MergeBackendArgs {
+    #[arg(
+        value_delimiter = ',',
+        help = "Input data files",
+        long_help = "Data files to be merged into a single backend. \n\
+		     Provide one or more files in supported formats."
+    )]
+    pub data_files: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "zarr",
+        help = "Backend format",
+        long_help = "Specify the backend format to use for the merged data. \n\
+		     Supported formats include 'zarr', 'h5', etc."
+    )]
+    pub backend: SparseIoBackend,
+
+    #[arg(
+        short,
+        long,
+        required = true,
+        help = "Output file header",
+        long_help = "Output file header: {output}.{backend} and {output}.batch.gz. \n\
+		     The backend will contain everything. \n\
+		     Batch assignment information will be saved in a separate file \n\
+		     and is needed for embedding steps later."
+    )]
+    pub output: Box<str>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Squeeze sparse rows/columns",
+        long_help = "Enable squeezing to remove rows and columns with too few non-zeros. \n\
+		     This can help reduce file size and improve performance."
+    )]
+    pub do_squeeze: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Row non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for rows. \n\
+		     Rows with fewer non-zeros will be removed if squeezing is enabled."
+    )]
+    pub row_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Column non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for columns. \n\
+		     Columns with fewer non-zeros will be removed if squeezing is enabled."
+    )]
+    pub column_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value = "100",
+        help = "Block size for parallel processing",
+        long_help = "Block size for parallel processing. \n\
+		     Adjust this value to optimize performance for your hardware."
+    )]
+    pub block_size: usize,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct MergeMtxArgs {
+    #[arg(
+        value_delimiter = ',',
+        required = true,
+        help = "Input data directories",
+        long_help = "Within each directory and its sub-directories, \n\
+		     the program will search for files named as specified by \n\
+                     (1) `mtx_file_name`, \n\
+		     (2) `feature_file_name`, \n\
+		     and (3) `barcode_file_name` \n\
+		     to merge into one backend file."
+    )]
+    pub data_directories: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "zarr",
+        help = "Backend format",
+        long_help = "Specify the backend format for the merged data. \n\
+                     Supported formats include 'zarr', 'h5', etc."
+    )]
+    pub backend: SparseIoBackend,
+
+    #[arg(
+        short,
+        long,
+        required = true,
+        help = "Output file header",
+        long_help = "Output file header: {output}.{backend} and {output}.batch.gz. \n\
+                     The backend will contain all merged data. \n\
+                     Batch assignment information will be saved in a separate file and \n\
+		     is needed for embedding steps later."
+    )]
+    pub output: Box<str>,
+
+    #[arg(
+        short,
+        long,
+        default_value = "matrix.mtx",
+        help = "Matrix file name",
+        long_help = "Name of the matrix file to search for in each directory. \n\
+                     The default for 10x data is 'matrix.mtx'."
+    )]
+    pub mtx_file_name: Box<str>,
+
+    #[arg(
+        short,
+        long,
+        default_value = "genes.tsv.gz",
+        help = "Feature/row file name",
+        long_help = "Name of the feature (row) file to search for in each directory. \n\
+                     The default is 'genes.tsv.gz'."
+    )]
+    pub feature_file_name: Box<str>,
+
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Number of words for feature names",
+        long_help = "Number of words to use when parsing feature names from the feature file. \n\
+                     Adjust this to match your data format."
+    )]
+    pub num_feature_name_words: usize,
+
+    #[arg(
+        short,
+        long,
+        default_value = "barcodes.tsv.gz",
+        help = "Barcode/column file name",
+        long_help = "Name of the barcode (column) file to search for in each directory. \n\
+                     The default is 'barcodes.tsv.gz'."
+    )]
+    pub barcode_file_name: Box<str>,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "Number of words for barcode names",
+        long_help = "Number of words to use when parsing barcode names from the barcode file. \n\
+                     Adjust this to match your data format."
+    )]
+    pub num_barcode_name_words: usize,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Squeeze sparse rows/columns",
+        long_help = "Enable squeezing to remove rows and columns with too few non-zeros. \n\
+                     This can help reduce file size and improve performance."
+    )]
+    pub do_squeeze: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Row non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for rows. \n\
+                     Rows with fewer non-zeros will be removed if squeezing is enabled."
+    )]
+    pub row_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Column non-zero cutoff",
+        long_help = "Minimum number of non-zero elements required for columns. \n\
+                     Columns with fewer non-zeros will be removed if squeezing is enabled."
+    )]
+    pub column_nnz_cutoff: usize,
+}
 
 pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     if args.data_files.len() <= 1 {
@@ -137,7 +332,7 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
             dry_run: false,
             interactive: false,
             output: None,
-            row_align: crate::RowAlignMode::Common,
+            row_align: RowAlignMode::Common,
         };
 
         run_squeeze(&squeeze_args)?;
@@ -429,7 +624,7 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
             dry_run: false,
             interactive: false,
             output: None,
-            row_align: crate::RowAlignMode::Common,
+            row_align: RowAlignMode::Common,
         };
 
         run_squeeze(&squeeze_args)?;
@@ -493,7 +688,7 @@ pub fn generate_unique_batch_names(files: &[Box<str>]) -> anyhow::Result<Vec<Box
 /// Find common or union rows across multiple sparse matrices
 pub fn find_aligned_rows(
     data_vec: &[&dyn SparseIo<IndexIter = Vec<usize>>],
-    mode: crate::RowAlignMode,
+    mode: RowAlignMode,
 ) -> anyhow::Result<Vec<Box<str>>> {
     use rayon::prelude::*;
     use rustc_hash::FxHashMap as HashMap;
@@ -510,7 +705,7 @@ pub fn find_aligned_rows(
 
     // Filter based on mode
     let mut aligned_rows: Vec<Box<str>> = match mode {
-        crate::RowAlignMode::Common => {
+        RowAlignMode::Common => {
             // Intersection: only rows present in ALL files
             row_counts
                 .into_iter()
@@ -523,7 +718,7 @@ pub fn find_aligned_rows(
                 })
                 .collect()
         }
-        crate::RowAlignMode::Union => {
+        RowAlignMode::Union => {
             // Union: rows present in ANY file
             row_counts.into_keys().collect()
         }
