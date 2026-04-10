@@ -40,6 +40,35 @@ pub fn compose_id_name(ids: Vec<Box<str>>, names: Vec<Box<str>>) -> Vec<Box<str>
         .collect()
 }
 
+/// Return indices of rows whose type passes select/remove filtering.
+/// - `select`: if empty, all rows pass; otherwise row type must contain the pattern (case-insensitive)
+/// - `remove`: if empty, nothing excluded; otherwise row type must NOT contain the pattern (case-insensitive)
+pub fn filter_row_indices_by_type(
+    row_types: &[Box<str>],
+    select: &str,
+    remove: &str,
+) -> Vec<usize> {
+    let sel = select.to_ascii_lowercase();
+    let rem = remove.to_ascii_lowercase();
+    if sel.is_empty() && rem.is_empty() {
+        return (0..row_types.len()).collect();
+    }
+    row_types
+        .iter()
+        .enumerate()
+        .filter_map(|(i, x)| {
+            let low = x.to_ascii_lowercase();
+            let selected = sel.is_empty() || low.contains(&sel);
+            let removed = !rem.is_empty() && low.contains(&rem);
+            if selected && !removed {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Flexible gene name matching (case-insensitive, underscore-delimited)
 /// Returns true if `query` matches `target` with these rules:
 /// - Exact match (case-insensitive)

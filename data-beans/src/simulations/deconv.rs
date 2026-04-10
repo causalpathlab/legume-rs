@@ -5,7 +5,7 @@ use nalgebra::DVector;
 use dashmap::DashMap as HashMap;
 use indicatif::ParallelProgressIterator;
 
-use data_beans::sparse_io::*;
+use crate::sparse_io::*;
 use matrix_util::common_io::file_ext;
 use matrix_util::dmatrix_util::concatenate_horizontal;
 use matrix_util::traits::*;

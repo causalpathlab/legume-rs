@@ -1,9 +1,11 @@
-use crate::misc::*;
+use crate::hdf5_io::*;
 use crate::qc::*;
-use crate::simulate;
+use crate::simulations::core as simulate;
+use crate::simulations::multimodal as simulate_multimodal;
 use crate::sparse_io::*;
 use crate::sparse_io_vector::*;
 
+use clap::{Args, ValueEnum};
 use log::info;
 use matrix_util::common_io::*;
 use matrix_util::membership::Membership;
@@ -13,9 +15,276 @@ use rayon::prelude::*;
 use regex::Regex;
 use std::sync::Arc;
 
-// Import the argument structs from main.rs
-use crate::simulate_multimodal;
-use crate::{RunSimulateArgs, RunSimulateMultimodalArgs, RunStatArgs, SparseIoBackend, StatDim};
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+pub enum StatDim {
+    Row,
+    Column,
+}
+
+#[derive(Args, Debug)]
+pub struct RunStatArgs {
+    #[arg(
+        required = true,
+        value_delimiter = ',',
+        help = "Input data files in '.zarr' or '.h5' format",
+        long_help = "Provide data files in either '.zarr' or '.h5' format. \n\
+		     You can convert '.mtx' files to '.zarr' or '.h5' using\n\
+		     the 'data-beans from-mtx' command."
+    )]
+    pub data_files: Vec<Box<str>>,
+
+    #[arg(
+        short,
+        long,
+        value_enum,
+        help = "Statistics dimension (row or column)",
+        long_help = "Choose whether to compute statistics over rows or columns."
+    )]
+    pub stat_dim: StatDim,
+
+    #[arg(
+        short,
+        long,
+        help = "Row name regex pattern for column statistics",
+        long_help = "Specify a regex pattern to select row names \n\
+		     when accumulating statistics over columns.\n\
+		     Only rows matching this pattern will be included.\n\
+		     Examples: '^MT-' (starts with MT-), 'GAPDH$' (ends with GAPDH),\n\
+		     '^(MT|RPL|RPS)-' (mitochondrial or ribosomal genes).\n\
+		     Matching is case-insensitive."
+    )]
+    pub row_name_pattern: Option<Box<str>>,
+
+    #[arg(
+        short = 'g',
+        long,
+        help = "Column group membership file for row statistics",
+        long_help = "Provide a file that defines column group membership \n\
+		     when accumulating statistics over rows. \n\
+		     This provides statistics computed for group-wise analysis."
+    )]
+    pub column_group_file: Option<Box<str>>,
+
+    #[arg(
+        short = 'd',
+        long,
+        default_value = "@",
+        help = "Delimiter for extracting base barcode from column names",
+        long_help = "Delimiter character used to extract base barcode for matching. \n\
+		     For example, with delimiter '@', column 'ACGT-1@batch1' matches \n\
+		     membership key 'ACGT-1@batch2' via base key 'ACGT-1'."
+    )]
+    pub delimiter: char,
+
+    #[arg(
+        long,
+        alias = "preload-data",
+        default_value_t = false,
+        help = "Preload data into memory for faster processing",
+        long_help = "Preload all column data into memory before computing statistics. \n\
+		     This can significantly speed up processing but requires more memory."
+    )]
+    pub preload: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "100",
+        help = "Block size for processing",
+        long_help = "Set the block size for processing data. \n\
+		     Adjust this value to optimize performance for your hardware."
+    )]
+    pub block_size: usize,
+
+    #[arg(
+        short,
+        long,
+        default_value = "stdout",
+        help = "Output statistics file",
+        long_help = "Specify the output file for statistics. \n\
+		     You can provide a '.parquet' file for efficient storage, \n\
+		     or use 'stdout' to print results to the console."
+    )]
+    pub output: Box<str>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct RunSimulateArgs {
+    #[arg(short, long, help = "Number of rows, genes, or features")]
+    pub rows: usize,
+
+    #[arg(short, long, help = "Number of columns or cells")]
+    pub cols: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1000,
+        help = "Depth per column (expected non-zero genes per cell)"
+    )]
+    pub depth: usize,
+
+    #[arg(
+        short,
+        long,
+        default_value_t = 1,
+        help = "Number of factors (cell types, topics, states, etc.)"
+    )]
+    pub factors: usize,
+
+    #[arg(short, long, default_value_t = 1, help = "Number of batches")]
+    pub batches: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Proportion of variance explained by topic membership"
+    )]
+    pub pve_topic: f32,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Proportion of variance explained by batch effects"
+    )]
+    pub pve_batch: f32,
+
+    #[arg(short, long, help = "Output file header")]
+    pub output: Box<str>,
+
+    #[arg(
+        long,
+        default_value_t = 10.0,
+        help = "Overdispersion parameter for Gamma dictionary"
+    )]
+    pub overdisp: f32,
+
+    #[arg(long, default_value_t = 42, help = "Random seed")]
+    pub rseed: u64,
+
+    #[arg(long, help = "Hierarchical tree depth for binary tree dictionary")]
+    pub hierarchical_depth: Option<usize>,
+
+    #[arg(long, default_value_t = 0, help = "Number of housekeeping genes")]
+    pub n_housekeeping: usize,
+
+    #[arg(long, default_value_t = 10.0, help = "Housekeeping fold change")]
+    pub housekeeping_fold: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Number of chromosomes for CNV simulation (0 = disabled)"
+    )]
+    pub n_chromosomes: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Expected CNV events per chromosome"
+    )]
+    pub cnv_events_per_chr: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.15,
+        help = "CNV block size as fraction of genes per chromosome"
+    )]
+    pub cnv_block_frac: f32,
+
+    #[arg(long, default_value_t = 2.0, help = "Fold-change for CNV gain events")]
+    pub cnv_gain_fold: f32,
+
+    #[arg(long, default_value_t = 0.5, help = "Fold-change for CNV loss events")]
+    pub cnv_loss_fold: f32,
+
+    #[arg(long, default_value_t = false, help = "Save output in MTX format")]
+    pub save_mtx: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "zarr",
+        help = "Backend format for output"
+    )]
+    pub backend: SparseIoBackend,
+}
+
+#[derive(Args, Debug)]
+pub struct RunSimulateMultimodalArgs {
+    #[arg(short, long, help = "Number of features (shared across modalities)")]
+    pub rows: usize,
+
+    #[arg(short, long, help = "Number of cells")]
+    pub cols: usize,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Depth per modality (comma-separated, e.g., 1000,500)"
+    )]
+    pub depth: Vec<usize>,
+
+    #[arg(short, long, default_value_t = 5, help = "Number of topics")]
+    pub factors: usize,
+
+    #[arg(short, long, default_value_t = 1, help = "Number of batches")]
+    pub batches: usize,
+
+    #[arg(long, default_value_t = 1.0, help = "Scale of base dictionary logits")]
+    pub base_scale: f32,
+
+    #[arg(long, default_value_t = 1.0, help = "Scale of non-zero delta entries")]
+    pub delta_scale: f32,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "Number of non-zero delta genes per topic"
+    )]
+    pub n_delta_features: usize,
+
+    #[arg(long, default_value_t = 1.0, help = "PVE by topic membership")]
+    pub pve_topic: f32,
+
+    #[arg(long, default_value_t = 1.0, help = "PVE by batch effects")]
+    pub pve_batch: f32,
+
+    #[arg(long, default_value_t = 42, help = "Random seed")]
+    pub rseed: u64,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Share batch effects across modalities"
+    )]
+    pub shared_batch_effects: bool,
+
+    #[arg(long, help = "Hierarchical tree depth for base dictionary")]
+    pub hierarchical_depth: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = 10.0,
+        help = "Overdispersion for hierarchical dictionary"
+    )]
+    pub overdisp: f32,
+
+    #[arg(long, default_value_t = 0, help = "Number of housekeeping genes")]
+    pub n_housekeeping: usize,
+
+    #[arg(long, default_value_t = 10.0, help = "Housekeeping fold change")]
+    pub housekeeping_fold: f32,
+
+    #[arg(short, long, help = "Output file header")]
+    pub output: Box<str>,
+
+    #[arg(long, default_value_t = false, help = "Save output in MTX format")]
+    pub save_mtx: bool,
+
+    #[arg(long, value_enum, default_value = "zarr", help = "Backend format")]
+    pub backend: SparseIoBackend,
+}
 
 /// Compute statistics across sparse matrix data
 ///

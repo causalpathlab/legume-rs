@@ -1,5 +1,5 @@
-use data_beans::misc::read_hdf5_strings;
-use data_beans::misc::resolve_backend_file;
+use data_beans::hdf5_io::read_hdf5_strings;
+use data_beans::hdf5_io::resolve_backend_file;
 use data_beans::sparse_io::create_sparse_from_triplets;
 use data_beans::sparse_io::SparseIo;
 use data_beans::sparse_io::SparseIoBackend;

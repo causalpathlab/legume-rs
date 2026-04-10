@@ -1,8 +1,7 @@
 pub mod convert; // data format conversion (h5/zarr → backend)
-pub mod misc; //miscellaneous helper functions
+pub mod hdf5_io; // HDF5/h5ad reading helpers
 pub mod qc; // functions needed to perform quality control
-pub mod simulate; // helper function for simulation
-pub mod simulate_multimodal; // multimodal simulation with shared base + delta dictionaries
+pub mod simulations; // simulation helpers (core, deconv, multimodal)
 pub mod sparse_data_visitors; // visitor
 pub mod sparse_io; // traits for sparse matrix
 pub mod sparse_io_stack; // tall sparse io stack of vectors
