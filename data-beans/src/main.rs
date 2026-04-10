@@ -526,6 +526,11 @@ pub struct FromMtxArgs {
     #[arg(short, long)]
     output: Box<str>,
 
+    /// maximum number of columns to read from the row/feature name file
+    /// (columns are joined with '_'); e.g. 2 reads "ENSG…<tab>SYMBOL"
+    #[arg(long, default_value_t = 2)]
+    row_name_columns: usize,
+
     /// squeeze
     #[arg(long, default_value_t = false)]
     do_squeeze: bool,
@@ -735,6 +740,37 @@ pub struct FromH5adArgs {
 		     Metadata files will be named {output}.cell_metadata.tsv.gz, etc."
     )]
     output: Box<str>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_values_t = [Box::<str>::from("_index"), Box::from("gene_id")],
+        help = "var/ field(s) for feature ID (fallback list)",
+        long_help = "Comma-separated list of var/ dataset names to try for the feature ID (e.g. Ensembl ID).\n\
+		     The first one found is used. Default: '_index,gene_id'."
+    )]
+    row_id_field: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_values_t = [Box::<str>::from("feature_name"), Box::from("gene_name")],
+        help = "var/ field(s) for gene symbol (fallback list)",
+        long_help = "Comma-separated list of var/ column names to try for the gene symbol.\n\
+		     The first column found is used. Joined with the ID to form 'ID_SYMBOL' row names.\n\
+		     Default: 'feature_name,gene_name'."
+    )]
+    row_name_field: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_values_t = [Box::<str>::from("_index"), Box::from("cell")],
+        help = "obs/ field(s) for cell barcode (fallback list)",
+        long_help = "Comma-separated list of obs/ dataset names to try for the cell barcode.\n\
+		     The first one found is used. Default: '_index,cell'."
+    )]
+    col_name_field: Vec<Box<str>>,
 
     #[arg(
         long,
