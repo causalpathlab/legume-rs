@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Args;
 use log::info;
-use nalgebra::DMatrix;
+use nalgebra::{DMatrix, DVector};
 use rust_htslib::tpool::ThreadPool;
 
 use rayon::prelude::*;
@@ -139,6 +139,27 @@ pub struct SimMediationArgs {
     )]
     pub collider_confounder_correlation: f32,
 
+    // ── Collider bias induction ─────────────────────────────────────────
+    #[arg(
+        long,
+        help = "Induce collider bias by selecting individuals on collider gene expression"
+    )]
+    pub induce_collider_bias: bool,
+
+    #[arg(
+        long,
+        default_value = "1",
+        help = "Number of collider genes to condition on (liability = sum of expressions)"
+    )]
+    pub num_conditioned_colliders: usize,
+
+    #[arg(
+        long,
+        default_value = "0.5",
+        help = "Selection quantile: keep individuals above this quantile of the liability"
+    )]
+    pub collider_selection_quantile: f64,
+
     // ── Winner's curse ───────────────────────────────────────────────────
     #[arg(
         long,
@@ -193,6 +214,7 @@ const SEED_EFFECTS: u64 = 300;
 const SEED_EXPRESSION: u64 = 400;
 const SEED_GAMMA_Y: u64 = 500;
 const SEED_SPLIT: u64 = 600;
+const SEED_COLLIDER_SELECTION: u64 = 700;
 
 /// Remap local cis-SNP indices back to global SNP indices.
 fn remap_sumstat_indices(records: Vec<SumstatRecord>, cis_snps: &[usize]) -> Vec<SumstatRecord> {
@@ -460,6 +482,107 @@ pub fn sim_mediation(args: &SimMediationArgs) -> Result<()> {
     gwas_writer.finish()?;
     ld_writer.finish()?;
 
+    // ── Step 10b: Collider-biased GWAS (liability threshold selection) ──
+    if args.induce_collider_bias {
+        use rand::seq::SliceRandom;
+        use rand::SeedableRng;
+
+        let collider_genes: Vec<usize> = effects
+            .iter()
+            .enumerate()
+            .filter(|(_, eff)| eff.is_collider())
+            .map(|(i, _)| i)
+            .collect();
+
+        let n_cond = args.num_conditioned_colliders.min(collider_genes.len());
+        anyhow::ensure!(
+            n_cond > 0,
+            "--induce-collider-bias requires at least one collider gene (set --num-collider-genes)"
+        );
+
+        // Pick which collider genes to condition on
+        let mut rng = rand::rngs::StdRng::seed_from_u64(args.seed + SEED_COLLIDER_SELECTION);
+        let mut cond_pool = collider_genes.clone();
+        cond_pool.shuffle(&mut rng);
+        let conditioned: Vec<usize> = cond_pool.into_iter().take(n_cond).collect();
+
+        info!(
+            "Inducing collider bias: conditioning on {} collider gene(s), selection quantile={:.2}",
+            n_cond, args.collider_selection_quantile,
+        );
+
+        // Liability = sum of standardized collider expressions
+        let mut liability = DVector::<f32>::zeros(n);
+        for &gi in &conditioned {
+            let g = effects[gi].gene_idx;
+            let expr = &expressions[g];
+            let mu = expr.sum() / n as f32;
+            let var = expr.iter().map(|&x| (x - mu).powi(2)).sum::<f32>() / n as f32;
+            let sd = var.sqrt().max(1e-10);
+            for i in 0..n {
+                liability[i] += (expr[i] - mu) / sd;
+            }
+        }
+
+        // Select individuals above the quantile threshold
+        let mut sorted_liability: Vec<f32> = liability.iter().copied().collect();
+        sorted_liability.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let threshold_idx = (args.collider_selection_quantile * n as f64).floor() as usize;
+        let threshold = sorted_liability[threshold_idx.min(n - 1)];
+
+        let selected_idx: Vec<usize> = (0..n).filter(|&i| liability[i] >= threshold).collect();
+        let n_selected = selected_idx.len();
+
+        info!(
+            "Selected {}/{} individuals (liability threshold={:.3})",
+            n_selected, n, threshold,
+        );
+
+        // Subset genotypes and phenotype for the selected individuals
+        let x_selected = subset_rows(&geno.genotypes, &selected_idx);
+        let y_selected = subset_dvector(&phenotype, &selected_idx);
+        let y_sel_mat = DMatrix::from_column_slice(n_selected, 1, y_selected.as_slice());
+        let yty_sel = compute_yty_diagonal(&y_sel_mat);
+
+        let biased_file = format!("{}.gwas.collider_biased.sumstats.bed.gz", args.output);
+        let mut biased_writer = SumstatWriter::new(&SnpWriterParams {
+            path: &biased_file,
+            snp_ids: &geno.snp_ids,
+            chromosomes: &geno.chromosomes,
+            positions: &geno.positions,
+            allele1: &geno.allele1,
+            allele2: &geno.allele2,
+            num_individuals: n_selected,
+            tpool: Some(&tpool),
+        })?;
+
+        for batch_start in (0..num_blocks).step_by(batch_size) {
+            let batch_end = (batch_start + batch_size).min(num_blocks);
+
+            let batch_results: Vec<_> = (batch_start..batch_end)
+                .into_par_iter()
+                .map(|block_idx| {
+                    let block = &blocks[block_idx];
+                    let block_m = block.num_snps();
+                    let x_block = x_selected.columns(block.snp_start, block_m).clone_owned();
+                    let sumstats =
+                        compute_block_sumstats(&x_block, &y_sel_mat, &yty_sel, block.snp_start);
+                    (block_idx, sumstats)
+                })
+                .collect();
+
+            for (_, sumstats) in batch_results {
+                biased_writer.write_block(&sumstats)?;
+            }
+        }
+
+        biased_writer.finish()?;
+        info!(
+            "Wrote collider-biased GWAS sumstats ({} individuals) to {}",
+            n_selected, biased_file,
+        );
+    }
+
     // ── Step 11: eQTL summary statistics ─────────────────────────────────
     let observed_genes: Vec<usize> = effects
         .iter()
@@ -609,6 +732,9 @@ pub fn sim_mediation(args: &SimMediationArgs) -> Result<()> {
         "h2_conf_y": args.h2_conf_y,
         "num_confounders": args.num_confounders,
         "num_hidden_factors": args.num_hidden_factors,
+        "induce_collider_bias": args.induce_collider_bias,
+        "num_conditioned_colliders": args.num_conditioned_colliders,
+        "collider_selection_quantile": args.collider_selection_quantile,
         "n_eqtl_discovery": args.n_eqtl_discovery,
         "eqtl_pvalue_threshold": args.eqtl_pvalue_threshold,
         "ld_block_file": args.ld_block_file,
