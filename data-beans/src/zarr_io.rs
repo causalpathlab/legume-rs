@@ -43,6 +43,27 @@ pub fn update_zarr_to_v3(store: Arc<dyn ZStorageTraits>, key_name: &str) -> anyh
 /// A read store paired with an optional write store (present for directories, `None` for zips).
 pub type ZarrStoreRw = (Arc<dyn ZReadStorageTraits>, Option<Arc<FilesystemStore>>);
 
+/// Detect the path prefix inside a zarr zip (empty if entries are at root).
+fn detect_zip_zarr_prefix(zip_path: &std::path::Path) -> anyhow::Result<Box<str>> {
+    let filename = zip_path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid zip path: {:?}", zip_path))?;
+    let expected_prefix = format!("{}/", filename.strip_suffix(".zip").unwrap_or(""));
+
+    let file = std::fs::File::open(zip_path)?;
+    let archive = zip::ZipArchive::new(std::io::BufReader::new(file))?;
+    let has_prefix = archive
+        .file_names()
+        .any(|name| name.starts_with(&expected_prefix));
+
+    Ok(if has_prefix {
+        expected_prefix.into()
+    } else {
+        "".into()
+    })
+}
+
 /// Open a zarr store, returning both a read store and an optional write store.
 ///
 /// Supports both `.zarr` directories and `.zarr.zip` archives.
@@ -61,13 +82,15 @@ pub fn open_zarr_store_rw(path: &str) -> anyhow::Result<ZarrStoreRw> {
             .ok_or_else(|| anyhow::anyhow!("no filename for {}", path))?
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("non-UTF8 filename in {}", path))?;
-        // The zarr directory prefix inside the zip (e.g., "foo.zarr/" from "foo.zarr.zip")
-        let zarr_prefix = format!("{}/", filename.strip_suffix(".zip").unwrap_or(""));
+        let zarr_prefix = detect_zip_zarr_prefix(p)?;
         let fs = Arc::new(FilesystemStore::new(parent)?);
         let key = zarrs::storage::StoreKey::new(filename)?;
-        info!("Opening zarr zip store: {}", path);
+        info!(
+            "Opening zarr zip store: {} (prefix: {:?})",
+            path, zarr_prefix
+        );
         Ok((
-            Arc::new(ZipStorageAdapter::new_with_path(fs, key, zarr_prefix)?),
+            Arc::new(ZipStorageAdapter::new_with_path(fs, key, &*zarr_prefix)?),
             None,
         ))
     } else {
