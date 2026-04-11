@@ -1230,8 +1230,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
 
                 let mut coarse_group_to_cols = vec![vec![]; num_coarse];
                 for (fine_g, &coarse_g) in fine_to_coarse.iter().enumerate() {
-                    coarse_group_to_cols[coarse_g]
-                        .extend_from_slice(&prev_group_to_cols[fine_g]);
+                    coarse_group_to_cols[coarse_g].extend_from_slice(&prev_group_to_cols[fine_g]);
                 }
                 prev_stats = coarse_stats;
                 prev_group_to_cols = coarse_group_to_cols;

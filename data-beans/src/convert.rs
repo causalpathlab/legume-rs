@@ -5,8 +5,6 @@ use crate::zarr_io::*;
 
 use log::info;
 use matrix_util::common_io::*;
-use std::sync::Arc;
-use tempfile::TempDir;
 
 /// Convert a 10x-format HDF5 file (Cell Ranger / h5ad) to a data-beans backend.
 ///
@@ -165,7 +163,8 @@ pub fn convert_h5_to_backend(h5_file: &str, output: &str) -> anyhow::Result<()> 
         out.subset_columns_rows(None, Some(&select_rows))?;
     }
 
-    info!("Conversion done: {}", backend_file);
+    finalize_zarr_output(&backend_file, output)?;
+    info!("Conversion done: {}", output);
     Ok(())
 }
 
@@ -184,19 +183,8 @@ pub fn convert_zarr_to_backend(zarr_file: &str, output: &str) -> anyhow::Result<
         remove_file(&backend_file)?;
     }
 
-    let (_dir, base, ext) = dir_base_ext(zarr_file)?;
-    let temp_dir = TempDir::new()?;
-
-    let store = if ext.as_ref() == "zip" {
-        let temp_path = std::path::PathBuf::from(temp_dir.path());
-        let temp_zarr = format!("{}/{}", temp_path.to_str().unwrap(), base);
-        unzip_dir(zarr_file, Some(temp_zarr.as_ref()))?;
-        info!("Unzipped to {}", temp_zarr);
-        Arc::new(zarrs::filesystem::FilesystemStore::new(temp_zarr)?)
-    } else {
-        info!("Store at {}", zarr_file);
-        Arc::new(zarrs::filesystem::FilesystemStore::new(zarr_file)?)
-    };
+    let store = open_zarr_store(zarr_file)?;
+    info!("Opened zarr store: {}", zarr_file);
 
     let indices: Vec<u64> = read_zarr_numerics(store.clone(), "/cell_features/indices")?;
     let indptr: Vec<u64> = read_zarr_numerics(store.clone(), "/cell_features/indptr")?;
@@ -303,7 +291,8 @@ pub fn convert_zarr_to_backend(zarr_file: &str, output: &str) -> anyhow::Result<
         out.subset_columns_rows(None, Some(&select_rows))?;
     }
 
-    info!("Conversion done: {}", backend_file);
+    finalize_zarr_output(&backend_file, output)?;
+    info!("Conversion done: {}", output);
     Ok(())
 }
 
@@ -324,7 +313,8 @@ pub fn try_open_or_convert(
     match open_sparse_matrix(data_file, &backend) {
         Ok(data) => Ok(data),
         Err(original_err) => {
-            let converted = format!("{}.db.zarr", data_file);
+            let base = strip_backend_suffix(data_file);
+            let converted = format!("{}.db.zarr", base);
 
             if std::path::Path::new(&converted).exists() {
                 info!("Using cached conversion: {}", converted);

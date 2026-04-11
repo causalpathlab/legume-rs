@@ -6,7 +6,6 @@
 //! matching the parquet reader interface in matrix-util.
 
 use log::info;
-use matrix_util::common_io::{dir_base_ext, unzip_dir};
 use matrix_util::traits::MatWithNames;
 use nalgebra::DMatrix;
 use rand_distr::num_traits::FromPrimitive;
@@ -14,7 +13,9 @@ use std::sync::Arc;
 use zarrs::array::{data_type, Array as ZArray};
 use zarrs::config::MetadataRetrieveVersion;
 use zarrs::filesystem::FilesystemStore;
+use zarrs::storage::ReadableListableStorageTraits as ZReadStorageTraits;
 use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
+use zarrs_zip::ZipStorageAdapter;
 
 // ── V2 → V3 migration ──────────────────────────────────────────────────
 
@@ -39,24 +40,67 @@ pub fn update_zarr_to_v3(store: Arc<dyn ZStorageTraits>, key_name: &str) -> anyh
 
 // ── Store management ────────────────────────────────────────────────────
 
-/// Open a zarr filesystem store, unzipping `.zarr.zip` to a temp directory
-/// if needed.  Returns `(store, _temp_dir)` — caller must keep `_temp_dir`
-/// alive for the store to remain valid.
-pub fn open_zarr_store(
-    path: &str,
-) -> anyhow::Result<(Arc<FilesystemStore>, Option<tempfile::TempDir>)> {
-    let (_dir, _base, ext) = dir_base_ext(path)?;
+/// A read store paired with an optional write store (present for directories, `None` for zips).
+pub type ZarrStoreRw = (Arc<dyn ZReadStorageTraits>, Option<Arc<FilesystemStore>>);
 
-    if ext.as_ref() == "zip" {
-        let temp_dir = tempfile::TempDir::new()?;
-        let extracted = unzip_dir(path, Some(temp_dir.path().to_str().unwrap()))?;
-        info!("Unzipped zarr to {}", extracted);
-        let store = Arc::new(FilesystemStore::new(extracted.as_ref())?);
-        Ok((store, Some(temp_dir)))
+/// Open a zarr store, returning both a read store and an optional write store.
+///
+/// Supports both `.zarr` directories and `.zarr.zip` archives.
+/// For zip archives, uses [`ZipStorageAdapter`] for direct random-access
+/// reads without extracting to a temp directory; the write store is `None`.
+pub fn open_zarr_store_rw(path: &str) -> anyhow::Result<ZarrStoreRw> {
+    let p = std::path::Path::new(path);
+    let is_zip = p.extension().is_some_and(|e| e == "zip");
+
+    if is_zip {
+        let parent = p
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("no parent directory for {}", path))?;
+        let filename = p
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("no filename for {}", path))?
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-UTF8 filename in {}", path))?;
+        // The zarr directory prefix inside the zip (e.g., "foo.zarr/" from "foo.zarr.zip")
+        let zarr_prefix = format!("{}/", filename.strip_suffix(".zip").unwrap_or(""));
+        let fs = Arc::new(FilesystemStore::new(parent)?);
+        let key = zarrs::storage::StoreKey::new(filename)?;
+        info!("Opening zarr zip store: {}", path);
+        Ok((
+            Arc::new(ZipStorageAdapter::new_with_path(fs, key, zarr_prefix)?),
+            None,
+        ))
     } else {
-        let store = Arc::new(FilesystemStore::new(path)?);
-        Ok((store, None))
+        let fs = Arc::new(FilesystemStore::new(path)?);
+        Ok((fs.clone(), Some(fs)))
     }
+}
+
+/// Open a zarr store for reading (convenience wrapper around [`open_zarr_store_rw`]).
+pub fn open_zarr_store(path: &str) -> anyhow::Result<Arc<dyn ZReadStorageTraits>> {
+    open_zarr_store_rw(path).map(|(r, _)| r)
+}
+
+/// If `zip` is true, ensure the output path ends with `.zarr.zip`.
+/// Otherwise pass through unchanged.
+pub fn apply_zip_flag(output: &str, zip: bool) -> Box<str> {
+    if zip && !output.ends_with(".zarr.zip") {
+        let base = crate::hdf5_io::strip_backend_suffix(output);
+        format!("{}.zarr.zip", base).into()
+    } else {
+        output.into()
+    }
+}
+
+/// If `target_path` ends with `.zarr.zip`, zip the `zarr_dir` into it and
+/// remove the directory. Otherwise this is a no-op (the directory IS the target).
+pub fn finalize_zarr_output(zarr_dir: &str, target_path: &str) -> anyhow::Result<()> {
+    if target_path.ends_with(".zarr.zip") {
+        info!("Zipping zarr output: {} → {}", zarr_dir, target_path);
+        matrix_util::common_io::zip_dir(zarr_dir, target_path)?;
+        std::fs::remove_dir_all(zarr_dir)?;
+    }
+    Ok(())
 }
 
 // ── Attribute reading ───────────────────────────────────────────────────
@@ -67,7 +111,7 @@ pub fn open_zarr_store(
 /// read_zarr_array_attr::<Vec<String>>(store, "/cell_summary", "column_names")
 /// ```
 pub fn read_zarr_array_attr<V: serde::de::DeserializeOwned>(
-    store: Arc<dyn ZStorageTraits>,
+    store: Arc<dyn ZReadStorageTraits>,
     array_path: &str,
     attr_name: &str,
 ) -> anyhow::Result<V> {
@@ -88,10 +132,9 @@ pub fn read_zarr_array_attr<V: serde::de::DeserializeOwned>(
 ///
 /// Handles f32, f64, u32, u64 source types with automatic conversion.
 pub fn read_zarr_flat_f32(
-    store: Arc<dyn ZStorageTraits>,
+    store: Arc<dyn ZReadStorageTraits>,
     key: &str,
 ) -> anyhow::Result<(Vec<f32>, Vec<u64>)> {
-    update_zarr_to_v3(store.clone(), key)?;
     let arr = ZArray::open_opt(store, key, &MetadataRetrieveVersion::Default)?;
     let shape = arr.shape().to_vec();
     let subset = arr.subset_all();
@@ -123,10 +166,9 @@ pub fn read_zarr_flat_f32(
 
 /// Retrieve a zarr array as a flat `Vec<u32>` and its shape.
 pub fn read_zarr_flat_u32(
-    store: Arc<dyn ZStorageTraits>,
+    store: Arc<dyn ZReadStorageTraits>,
     key: &str,
 ) -> anyhow::Result<(Vec<u32>, Vec<u64>)> {
-    update_zarr_to_v3(store.clone(), key)?;
     let arr = ZArray::open_opt(store, key, &MetadataRetrieveVersion::Default)?;
     let shape = arr.shape().to_vec();
     let subset = arr.subset_all();
@@ -150,14 +192,13 @@ pub fn read_zarr_flat_u32(
 
 /// Read a full ndarray from zarr storage.
 pub fn read_zarr_ndarray<T>(
-    store: Arc<dyn ZStorageTraits>,
+    store: Arc<dyn ZReadStorageTraits>,
     key_name: &str,
 ) -> anyhow::Result<ndarray::ArrayD<T>>
 where
     T: zarrs::array::ElementOwned + FromPrimitive,
 {
-    update_zarr_to_v3(store.clone(), key_name)?;
-    let arr = ZArray::open_opt(store.clone(), key_name, &MetadataRetrieveVersion::Default)?;
+    let arr = ZArray::open_opt(store, key_name, &MetadataRetrieveVersion::Default)?;
 
     let dt = arr.data_type();
     if *dt == data_type::float32() {
@@ -183,14 +224,13 @@ where
 
 /// Read a numeric vector from zarr storage.
 pub fn read_zarr_numerics<T>(
-    store: Arc<dyn ZStorageTraits>,
+    store: Arc<dyn ZReadStorageTraits>,
     key_name: &str,
 ) -> anyhow::Result<Vec<T>>
 where
     T: zarrs::array::ElementOwned + FromPrimitive,
 {
-    update_zarr_to_v3(store.clone(), key_name)?;
-    let arr = ZArray::open_opt(store.clone(), key_name, &MetadataRetrieveVersion::Default)?;
+    let arr = ZArray::open_opt(store, key_name, &MetadataRetrieveVersion::Default)?;
 
     let dt = arr.data_type();
     let ret = if *dt == data_type::float32() {
@@ -224,7 +264,10 @@ where
 ///
 /// `key_name` is parsed as `"group_path/attr_name"`, e.g.
 /// `"/cell_features/features/id"` → group `"/cell_features/features"`, attr `"id"`.
-pub fn read_zarr_group_attr<V>(store: Arc<dyn ZStorageTraits>, key_name: &str) -> anyhow::Result<V>
+pub fn read_zarr_group_attr<V>(
+    store: Arc<dyn ZReadStorageTraits>,
+    key_name: &str,
+) -> anyhow::Result<V>
 where
     V: serde::de::DeserializeOwned,
 {
@@ -268,11 +311,10 @@ where
 
 /// Read a string array from zarr storage.
 pub fn read_zarr_strings(
-    store: Arc<FilesystemStore>,
+    store: Arc<dyn ZReadStorageTraits>,
     key_name: &str,
 ) -> anyhow::Result<Vec<Box<str>>> {
-    update_zarr_to_v3(store.clone(), key_name)?;
-    let arr = ZArray::open_opt(store.clone(), key_name, &MetadataRetrieveVersion::Default)?;
+    let arr = ZArray::open_opt(store, key_name, &MetadataRetrieveVersion::Default)?;
 
     Ok(arr
         .retrieve_array_subset::<Vec<String>>(&arr.subset_all())?
@@ -406,7 +448,7 @@ pub fn read_zarr_matrix(
     column_indices: &[usize],
     column_names: &[Box<str>],
 ) -> anyhow::Result<MatWithNames<DMatrix<f32>>> {
-    let (store, _temp_dir) = open_zarr_store(file_path)?;
+    let store = open_zarr_store(file_path)?;
 
     // Read the data array
     let (flat, shape) = read_zarr_flat_f32(store.clone(), data_array)?;
@@ -577,7 +619,7 @@ mod tests {
     #[test]
     fn test_read_zarr_array_attr() {
         let Some(p) = xenium_path() else { return };
-        let (store, _tmp) = open_zarr_store(p.to_str().unwrap()).unwrap();
+        let store = open_zarr_store(p.to_str().unwrap()).unwrap();
         let names: Vec<Box<str>> =
             read_zarr_array_attr(store, "/cell_summary", "column_names").unwrap();
         assert!(names.len() > 0);

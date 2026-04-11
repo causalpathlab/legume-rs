@@ -1,7 +1,4 @@
-#![allow(dead_code)]
-
-use crate::sparse_matrix_hdf5;
-use crate::sparse_matrix_zarr;
+#![allow(dead_code, unused_imports)]
 
 pub use candle_util::candle_core::Tensor;
 pub use nalgebra::DMatrix;
@@ -12,6 +9,8 @@ pub const MAX_ROW_NAME_IDX: usize = 3;
 pub const MAX_COLUMN_NAME_IDX: usize = 10;
 pub const COLUMN_SEP: &str = "@";
 pub const ROW_SEP: &str = "_";
+
+use super::helpers::*;
 
 use clap::ValueEnum;
 use indicatif::ParallelProgressIterator;
@@ -28,128 +27,6 @@ use std::sync::{Arc, Mutex};
 pub enum SparseIoBackend {
     Zarr,
     HDF5,
-}
-
-/// Open a sparse matrix io (backend)
-/// * `backend_file`: file path to the sparse matrix
-/// * `backend`: backend type (HDF5 or Zarr)
-pub fn open_sparse_matrix(
-    backend_file: &str,
-    backend: &SparseIoBackend,
-) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
-    match backend {
-        SparseIoBackend::Zarr => Ok(Box::new(sparse_matrix_zarr::SparseMtxData::open(
-            backend_file,
-        )?)),
-        SparseIoBackend::HDF5 => Ok(Box::new(sparse_matrix_hdf5::SparseMtxData::open(
-            backend_file,
-        )?)),
-    }
-}
-
-/// Open a sparse matrix io (backend)
-/// * `backend_file`: file path to the sparse matrix
-/// * `backend`: backend type (HDF5 or Zarr)
-pub fn create_sparse_from_triplets(
-    triplets: &[(u64, u64, f32)],
-    mtx_shape: (usize, usize, usize),
-    backend_file: Option<&str>,
-    backend: Option<&SparseIoBackend>,
-) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
-    let mut triplets: Vec<(u64, u64, f32)> = triplets.to_vec();
-
-    match backend {
-        Some(SparseIoBackend::HDF5) => {
-            let mut ret = Box::new(sparse_matrix_hdf5::SparseMtxData::new(backend_file)?);
-
-            ret.record_mtx_shape(Some(mtx_shape))?;
-            ret.record_triplets_by_col(&mut triplets)?;
-            ret.record_triplets_by_row(&mut triplets)?;
-            ret.read_column_indptr()?;
-            ret.read_row_indptr()?;
-            Ok(ret)
-        }
-
-        Some(SparseIoBackend::Zarr) | None => {
-            let mut ret = Box::new(sparse_matrix_zarr::SparseMtxData::new(backend_file)?);
-            ret.record_mtx_shape(Some(mtx_shape))?;
-            ret.record_triplets_by_col(&mut triplets)?;
-            ret.record_triplets_by_row(&mut triplets)?;
-            ret.read_column_indptr()?;
-            ret.read_row_indptr()?;
-            Ok(ret)
-        }
-    }
-}
-
-/// Create a sparse matrix io (backend) with 10x mtx
-/// * `mtx_file`: file path to the 10x mtx
-/// * `backend_file`: file path to the sparse matrix
-/// * `backend`: backend type (HDF5 or Zarr)
-pub fn create_sparse_from_mtx_file(
-    mtx_file: &str,
-    backend_file: Option<&str>,
-    backend: Option<&SparseIoBackend>,
-) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
-    match backend {
-        Some(SparseIoBackend::HDF5) => Ok(Box::new(
-            sparse_matrix_hdf5::SparseMtxData::from_mtx_file(mtx_file, backend_file, Some(true))?,
-        )),
-
-        Some(SparseIoBackend::Zarr) | None => Ok(Box::new(
-            sparse_matrix_zarr::SparseMtxData::from_mtx_file(mtx_file, backend_file, Some(true))?,
-        )),
-    }
-}
-
-/// Create a sparse matrix io (backend) with dense `Array2`
-/// * `data`: data matrix
-/// * `backend_file`: file path to the sparse matrix
-/// * `backend`: backend type (HDF5 or Zarr)
-pub fn create_sparse_from_ndarray(
-    data: &Array2<f32>,
-    backend_file: Option<&str>,
-    backend: Option<&SparseIoBackend>,
-) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
-    match backend {
-        Some(SparseIoBackend::HDF5) => Ok(Box::new(
-            sparse_matrix_hdf5::SparseMtxData::from_ndarray(data, backend_file, Some(true))?,
-        )),
-
-        Some(SparseIoBackend::Zarr) | None => Ok(Box::new(
-            sparse_matrix_zarr::SparseMtxData::from_ndarray(data, backend_file, Some(true))?,
-        )),
-    }
-}
-
-/// Create a sparse matrix io (backend) with dense `DMatrix`
-/// * `data`: data matrix
-/// * `backend_file`: file path to the sparse matrix
-/// * `backend`: backend type (HDF5 or Zarr)
-pub fn create_sparse_from_dmatrix(
-    data: &DMatrix<f32>,
-    backend_file: Option<&str>,
-    backend: Option<&SparseIoBackend>,
-) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
-    match backend {
-        Some(SparseIoBackend::HDF5) => Ok(Box::new(
-            sparse_matrix_hdf5::SparseMtxData::from_dmatrix(data, backend_file, Some(true))?,
-        )),
-
-        Some(SparseIoBackend::Zarr) | None => Ok(Box::new(
-            sparse_matrix_zarr::SparseMtxData::from_dmatrix(data, backend_file, Some(true))?,
-        )),
-    }
-}
-
-/////////////////////
-// type conversion //
-/////////////////////
-
-pub fn sparse_io_box_to_arc<T>(
-    boxed: Box<dyn SparseIo<IndexIter = T>>,
-) -> Arc<dyn SparseIo<IndexIter = T>> {
-    Arc::from(boxed)
 }
 
 pub trait SparseIo: Sync + Send {
@@ -782,91 +659,4 @@ pub trait SparseIo: Sync + Send {
 
     /// backend file type
     fn backend_type(&self) -> SparseIoBackend;
-}
-
-//////////////////////
-// helper functions //
-//////////////////////
-
-// fn iter_len<I>(iter: &I) -> usize
-// where
-//     I: IntoIterator,
-// {
-//     for j in &iter {
-//     }
-//     // iter.clone().into_iter().count()
-// }
-
-pub fn build_name2index_map(_names: &[Box<str>]) -> HashMap<Box<str>, usize> {
-    _names
-        .iter()
-        .enumerate()
-        .map(|(r, name)| (name.clone(), r))
-        .collect()
-}
-
-pub fn take_subset_indices_names(
-    new_indices: &[usize],
-    ntot: usize,
-    old_names: Vec<Box<str>>,
-) -> (HashMap<u64, u64>, Vec<Box<str>>) {
-    let mut old2new: HashMap<u64, u64> = Default::default();
-    let mut new2old = vec![];
-    debug_assert!(ntot == old_names.len());
-    let mut k = 0_u64;
-    for idx in new_indices.iter() {
-        if *idx < ntot {
-            old2new.insert(*idx as u64, k);
-            new2old.push(*idx);
-            k += 1;
-        }
-    }
-
-    let new_names = new2old
-        .iter()
-        .map(|&i| old_names[i].clone())
-        .collect::<Vec<Box<str>>>();
-
-    (old2new, new_names)
-}
-
-pub fn take_subset_indices_names_if_needed(
-    new_indices: Option<&Vec<usize>>,
-    ntot: Option<usize>,
-    old_names: Vec<Box<str>>,
-) -> (HashMap<u64, u64>, Vec<Box<str>>) {
-    let ntot = ntot.unwrap_or(old_names.len());
-    if let Some(new_indices) = new_indices {
-        take_subset_indices_names(new_indices, ntot, old_names)
-    } else {
-        let names = old_names;
-        let identity = (0..(ntot as u64))
-            .zip(0..(ntot as u64))
-            .collect::<HashMap<u64, u64>>();
-        (identity, names)
-    }
-}
-
-pub fn ndarray_to_triplets(array: &Array2<f32>) -> Vec<(u64, u64, f32)> {
-    let eps = 1e-6;
-    array
-        .indexed_iter()
-        .filter(|(_, &elem)| elem.abs() > eps)
-        .map(|((row, col), &value)| (row as u64, col as u64, value))
-        .collect::<Vec<(u64, u64, f32)>>()
-}
-
-pub fn dmatrix_to_triplets(matrix: &DMatrix<f32>) -> Vec<(u64, u64, f32)> {
-    let (nrow, _) = matrix.shape();
-    let eps = 1e-6;
-    matrix
-        .iter() // column-major
-        .enumerate()
-        .filter(|(_, &elem)| elem.abs() > eps)
-        .map(|(idx, &value)| {
-            let row = idx % nrow;
-            let col = idx / nrow;
-            (row as u64, col as u64, value)
-        })
-        .collect::<Vec<(u64, u64, f32)>>()
 }

@@ -3,13 +3,14 @@ mod hdf5_io;
 mod interactive;
 mod qc;
 mod simulations;
+mod sparse_backend;
 mod sparse_data_visitors;
 mod sparse_io;
 mod sparse_io_vector;
-mod sparse_matrix_hdf5;
-mod sparse_matrix_zarr;
 mod sparse_util;
 mod utilities;
+#[allow(dead_code)]
+mod zarr_io;
 
 use crate::handlers::analysis::{
     run_simulate, run_simulate_multimodal, run_stat, RunSimulateArgs, RunSimulateMultimodalArgs,

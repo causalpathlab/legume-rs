@@ -11,6 +11,15 @@ pub struct H5adDataFrame {
     pub col_data: Vec<Vec<Box<str>>>,
 }
 
+/// Strip known backend extensions (`.zarr.zip`, `.zarr`, `.h5`) from a path,
+/// returning the bare output prefix.
+pub fn strip_backend_suffix(path: &str) -> &str {
+    path.strip_suffix(".zarr.zip")
+        .or_else(|| path.strip_suffix(".zarr"))
+        .or_else(|| path.strip_suffix(".h5"))
+        .unwrap_or(path)
+}
+
 /// Resolve the backend type and the corresponding file path
 ///
 /// If you want to decide the backend by the file name:
@@ -41,8 +50,16 @@ pub fn resolve_backend_file(
             "h5" => {
                 resolved_backend = SparseIoBackend::HDF5;
             }
+            "zip" if file_path.ends_with(".zarr.zip") => {
+                resolved_backend = SparseIoBackend::Zarr;
+                // strip .zip — write to .zarr dir, caller finalizes via finalize_zarr_output
+                backend_file = file_path
+                    .strip_suffix(".zip")
+                    .unwrap_or(file_path)
+                    .to_string();
+            }
             _ => {
-                // there is no extension
+                // there is no recognized extension — append based on backend
                 backend_file = match resolved_backend {
                     SparseIoBackend::HDF5 => format!("{}.h5", file_path),
                     SparseIoBackend::Zarr => format!("{}.zarr", file_path),
@@ -56,13 +73,13 @@ pub fn resolve_backend_file(
         let resolved_backend = match ext.as_ref() {
             "zarr" => SparseIoBackend::Zarr,
             "h5" => SparseIoBackend::HDF5,
+            "zip" if file_path.ends_with(".zarr.zip") => SparseIoBackend::Zarr,
             _ => return Err(anyhow::anyhow!("Unknown file format: {}", file_path)),
         };
 
-        let backend_file = match resolved_backend {
-            SparseIoBackend::HDF5 => file_path.to_string(),
-            SparseIoBackend::Zarr => file_path.to_string(),
-        };
+        // For reads, keep the full path (e.g., "foo.zarr.zip") so
+        // SparseMtxData::open can use ZipStorageAdapter directly.
+        let backend_file = file_path.to_string();
 
         Ok((resolved_backend, backend_file.into_boxed_str()))
     }
