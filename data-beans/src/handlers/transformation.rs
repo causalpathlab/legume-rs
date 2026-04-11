@@ -983,6 +983,7 @@ fn run_squeeze_then_merge(
         data_files: temp_files.clone(),
         backend,
         output: cmd_args.output.clone().unwrap(),
+        zip: false,
         do_squeeze: false,
         row_nnz_cutoff: 0,
         column_nnz_cutoff: 0,

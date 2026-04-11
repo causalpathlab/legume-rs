@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use zarrs::array::{data_type, ArraySubset, DataType};
 use zarrs::filesystem::FilesystemStore;
-use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
+use zarrs::storage::ReadableListableStorageTraits as ZReadStorageTraits;
 
 use anyhow::anyhow;
 
@@ -33,7 +33,8 @@ const COMPRESSION_LEVEL: i32 = 5;
 ///
 #[derive(Clone)]
 pub struct SparseMtxData {
-    pub store: Arc<dyn ZStorageTraits>,
+    read_store: Arc<dyn ZReadStorageTraits>,
+    write_store: Option<Arc<FilesystemStore>>,
     file_name: String,
     max_row_name_idx: usize,
     max_column_name_idx: usize,
@@ -41,6 +42,15 @@ pub struct SparseMtxData {
     by_row_indptr: Vec<u64>,
     by_column_indices: Option<Vec<u64>>,
     by_column_data: Option<Vec<f32>>,
+}
+
+impl SparseMtxData {
+    /// Get the writable store, or error if this is a read-only backend (e.g. zip archive).
+    fn write_store(&self) -> anyhow::Result<&Arc<FilesystemStore>> {
+        self.write_store
+            .as_ref()
+            .ok_or_else(|| anyhow!("store is read-only (zip archive)"))
+    }
 }
 
 impl SparseMtxData {
@@ -68,21 +78,22 @@ impl SparseMtxData {
     }
 
     /// Create `SparseMtxData` instance from an existing zarr backend file
-    /// * `zarr_file` - zarr backend file
+    /// * `zarr_file` - zarr backend file (directory or `.zarr.zip`)
     pub fn open(backend_file: &str) -> anyhow::Result<Self> {
-        let store = Arc::new(FilesystemStore::new(backend_file)?);
+        let (read_store, write_store) = crate::zarr_io::open_zarr_store_rw(backend_file)?;
 
         if (
-            Self::_num_rows(store.clone()),
-            Self::_num_columns(store.clone()),
-            Self::_num_nnz(store.clone()),
+            Self::_num_rows(read_store.clone()),
+            Self::_num_columns(read_store.clone()),
+            Self::_num_nnz(read_store.clone()),
         ) == (None, None, None)
         {
             anyhow::bail!("Couldn't figure out the size of this sparse matrix data");
         }
 
         let mut ret = Self {
-            store: store.clone(),
+            read_store,
+            write_store,
             file_name: backend_file.to_string(),
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
@@ -176,7 +187,7 @@ impl SparseMtxData {
     pub fn print_hierarchy(&self) -> anyhow::Result<()> {
         use zarrs::config::MetadataRetrieveVersion;
         let node =
-            zarrs::node::Node::open_opt(&self.store, "/", &MetadataRetrieveVersion::Default)?;
+            zarrs::node::Node::open_opt(&self.read_store, "/", &MetadataRetrieveVersion::Default)?;
         let tree = node.hierarchy_tree();
         info!("hierarchy_tree:\n{}", tree);
         Ok(())
@@ -190,7 +201,8 @@ impl SparseMtxData {
         root.store_metadata()?;
 
         Ok(Self {
-            store: store.clone(),
+            read_store: store.clone(),
+            write_store: Some(store),
             file_name: zarr_file.to_string(),
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
@@ -221,6 +233,8 @@ impl SparseMtxData {
         use zarrs::array::ArrayBuilder;
         use zarrs::array::FillValue;
 
+        let ws = self.write_store()?;
+
         let nelem = vec.len();
         let chunk_size = chunk_elems(nelem, std::mem::size_of::<V>());
 
@@ -241,7 +255,7 @@ impl SparseMtxData {
             fill,                    //
         )
         .bytes_to_bytes_codecs(vec![Arc::new(ZstdCodec::new(COMPRESSION_LEVEL, false))])
-        .build(self.store.clone(), key)?;
+        .build(ws.clone(), key)?;
 
         array.store_metadata()?;
 
@@ -251,9 +265,12 @@ impl SparseMtxData {
         Ok(())
     }
 
-    fn _open_vector(&self, key: &str) -> anyhow::Result<zarrs::array::Array<dyn ZStorageTraits>> {
+    fn _open_vector(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<zarrs::array::Array<dyn ZReadStorageTraits>> {
         use zarrs::array::Array as ZArray;
-        let ret = ZArray::open(self.store.clone(), key)?;
+        let ret = ZArray::open(self.read_store.clone(), key)?;
         Ok(ret)
     }
 
@@ -261,9 +278,9 @@ impl SparseMtxData {
     fn open_csc_triplets(
         &self,
     ) -> anyhow::Result<(
-        zarrs::array::Array<dyn ZStorageTraits>,
-        zarrs::array::Array<dyn ZStorageTraits>,
-        zarrs::array::Array<dyn ZStorageTraits>,
+        zarrs::array::Array<dyn ZReadStorageTraits>,
+        zarrs::array::Array<dyn ZReadStorageTraits>,
+        zarrs::array::Array<dyn ZReadStorageTraits>,
     )> {
         Ok((
             self._open_vector("/by_column/indptr")?,
@@ -294,7 +311,7 @@ impl SparseMtxData {
 
     /// Helper function to set an attribute from a group named `group_name`
     fn _set_group_attr<V>(
-        store: Arc<dyn ZStorageTraits>,
+        store: Arc<FilesystemStore>,
         group_name: &str,
         attr_name: &str,
         value: &V,
@@ -315,7 +332,7 @@ impl SparseMtxData {
 
     /// Helper function to get an attribute from a group named `group_name`
     fn _get_group_attr<V>(
-        store: Arc<dyn ZStorageTraits>,
+        store: Arc<dyn ZReadStorageTraits>,
         group_name: &str,
         attr_name: &str,
     ) -> Option<V>
@@ -328,24 +345,25 @@ impl SparseMtxData {
             .and_then(|attr| serde_json::from_value(attr).ok())
     }
 
-    fn _num_nnz(store: Arc<dyn ZStorageTraits>) -> Option<usize> {
-        Self::_get_group_attr::<usize>(store.clone(), "/", "nnz")
+    fn _num_nnz(store: Arc<dyn ZReadStorageTraits>) -> Option<usize> {
+        Self::_get_group_attr::<usize>(store, "/", "nnz")
     }
 
-    fn _num_rows(store: Arc<dyn ZStorageTraits>) -> Option<usize> {
-        Self::_get_group_attr::<usize>(store.clone(), "/", "nrow")
+    fn _num_rows(store: Arc<dyn ZReadStorageTraits>) -> Option<usize> {
+        Self::_get_group_attr::<usize>(store, "/", "nrow")
     }
 
-    fn _num_columns(store: Arc<dyn ZStorageTraits>) -> Option<usize> {
-        Self::_get_group_attr::<usize>(store.clone(), "/", "ncol")
+    fn _num_columns(store: Arc<dyn ZReadStorageTraits>) -> Option<usize> {
+        Self::_get_group_attr::<usize>(store, "/", "ncol")
     }
-    /// Helper function to add a group in `self.store`
+
+    /// Helper function to add a group in the writable store
     fn _add_group(&mut self, group_name: &str) -> anyhow::Result<()> {
         use zarrs::group::Group;
+        let ws = self.write_store()?;
 
-        if Group::open(self.store.clone(), group_name).is_err() {
-            let new_group =
-                zarrs::group::GroupBuilder::new().build(self.store.clone(), group_name)?;
+        if Group::open(ws.clone(), group_name).is_err() {
+            let new_group = zarrs::group::GroupBuilder::new().build(ws.clone(), group_name)?;
             new_group.store_metadata()?;
         }
 
@@ -360,7 +378,7 @@ impl SparseIo for SparseMtxData {
     fn read_row_indptr(&mut self) -> anyhow::Result<()> {
         use zarrs::array::Array as Zarray;
         let key = "/by_row/indptr";
-        if let Ok(indptr) = Zarray::open(self.store.clone(), key) {
+        if let Ok(indptr) = Zarray::open(self.read_store.clone(), key) {
             let indptr_vec = indptr.retrieve_array_subset::<Vec<u64>>(&indptr.subset_all())?;
             self.by_row_indptr.clear();
             self.by_row_indptr.extend(indptr_vec);
@@ -372,7 +390,7 @@ impl SparseIo for SparseMtxData {
     fn read_column_indptr(&mut self) -> anyhow::Result<()> {
         use zarrs::array::Array as ZArray;
         let key = "/by_column/indptr";
-        if let Ok(indptr) = ZArray::open(self.store.clone(), key) {
+        if let Ok(indptr) = ZArray::open(self.read_store.clone(), key) {
             let indptr_vec = indptr.retrieve_array_subset::<Vec<u64>>(&indptr.subset_all())?;
             self.by_column_indptr.clear();
             self.by_column_indptr.extend(indptr_vec);
@@ -390,9 +408,9 @@ impl SparseIo for SparseMtxData {
         use zarrs::array::Array as ZArray;
 
         let key = "/by_column/data";
-        let data = ZArray::open(self.store.clone(), key)?;
+        let data = ZArray::open(self.read_store.clone(), key)?;
         let key = "/by_column/indices";
-        let indices = ZArray::open(self.store.clone(), key)?;
+        let indices = ZArray::open(self.read_store.clone(), key)?;
 
         let data = data.retrieve_array_subset::<Vec<f32>>(&data.subset_all())?;
         let indices = indices.retrieve_array_subset::<Vec<u64>>(&indices.subset_all())?;
@@ -404,24 +422,27 @@ impl SparseIo for SparseMtxData {
 
     /// Helper function to keep the matrix shape
     fn record_mtx_shape(&mut self, mtx_shape: Option<(usize, usize, usize)>) -> anyhow::Result<()> {
-        let check_set_attr = |attr_name: &str, value: usize| -> anyhow::Result<()> {
-            let old_value = Self::_get_group_attr::<usize>(self.store.clone(), "/", attr_name);
-            let new_value = serde_json::to_value(value)?;
+        if let Some((nrow, ncol, nnz)) = mtx_shape {
+            let ws = self.write_store()?;
+            let read_store = self.read_store.clone();
 
-            match old_value {
-                Some(old_value) => {
-                    if old_value != new_value {
-                        return Err(anyhow!("{} mismatch", attr_name));
+            let check_set_attr = |attr_name: &str, value: usize| -> anyhow::Result<()> {
+                let old_value = Self::_get_group_attr::<usize>(read_store.clone(), "/", attr_name);
+                let new_value = serde_json::to_value(value)?;
+
+                match old_value {
+                    Some(old_value) => {
+                        if old_value != new_value {
+                            return Err(anyhow!("{} mismatch", attr_name));
+                        }
+                    }
+                    _ => {
+                        Self::_set_group_attr(ws.clone(), "/", attr_name, &new_value)?;
                     }
                 }
-                _ => {
-                    Self::_set_group_attr(self.store.clone(), "/", attr_name, &new_value)?;
-                }
-            }
-            Ok(())
-        };
+                Ok(())
+            };
 
-        if let Some((nrow, ncol, nnz)) = mtx_shape {
             check_set_attr("nrow", nrow)?;
             check_set_attr("ncol", ncol)?;
             check_set_attr("nnz", nnz)?;
@@ -439,7 +460,8 @@ impl SparseIo for SparseMtxData {
         let root = GroupBuilder::new().build(store.clone(), "/")?;
         root.store_metadata()?;
 
-        self.store = store;
+        self.read_store = store.clone();
+        self.write_store = Some(store);
         self.file_name = zarr_file.to_string();
         self.max_column_name_idx = MAX_COLUMN_NAME_IDX;
         self.max_row_name_idx = MAX_ROW_NAME_IDX;
@@ -539,17 +561,17 @@ impl SparseIo for SparseMtxData {
 
     /// Number of rows in the matrix
     fn num_rows(&self) -> Option<usize> {
-        Self::_num_rows(self.store.clone())
+        Self::_num_rows(self.read_store.clone())
     }
 
     /// Number of columns in the matrix
     fn num_columns(&self) -> Option<usize> {
-        Self::_num_columns(self.store.clone())
+        Self::_num_columns(self.read_store.clone())
     }
 
     /// Number of non-zero elements in the matrix
     fn num_non_zeros(&self) -> Option<usize> {
-        Self::_num_nnz(self.store.clone())
+        Self::_num_nnz(self.read_store.clone())
     }
 
     /// Add arbitrary names (a vector of strings)
@@ -648,9 +670,9 @@ impl SparseIo for SparseMtxData {
             Ok((nrow, ncol_out, ret))
         } else {
             let key = "/by_column/data";
-            let data = ZArray::open(self.store.clone(), key)?;
+            let data = ZArray::open(self.read_store.clone(), key)?;
             let key = "/by_column/indices";
-            let indices = ZArray::open(self.store.clone(), key)?;
+            let indices = ZArray::open(self.read_store.clone(), key)?;
 
             let ncol_out = 1;
             let jj = 0;
@@ -730,9 +752,9 @@ impl SparseIo for SparseMtxData {
             Ok((nrow, ncol_out, ret))
         } else {
             let key = "/by_column/data";
-            let data = ZArray::open(self.store.clone(), key)?;
+            let data = ZArray::open(self.read_store.clone(), key)?;
             let key = "/by_column/indices";
-            let indices = ZArray::open(self.store.clone(), key)?;
+            let indices = ZArray::open(self.read_store.clone(), key)?;
 
             let ncol_out = columns_vec.len();
 
@@ -779,9 +801,9 @@ impl SparseIo for SparseMtxData {
         let rows_vec = rows.into_iter().collect::<Vec<_>>();
 
         let key = "/by_row/data";
-        let data = ZArray::open(self.store.clone(), key)?;
+        let data = ZArray::open(self.read_store.clone(), key)?;
         let key = "/by_row/indices";
-        let indices = ZArray::open(self.store.clone(), key)?;
+        let indices = ZArray::open(self.read_store.clone(), key)?;
 
         if let (Some(nrow), Some(ncol)) = (self.num_rows(), self.num_columns()) {
             let nrow_out = rows_vec.len();

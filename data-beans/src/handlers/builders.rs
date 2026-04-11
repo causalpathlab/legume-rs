@@ -11,8 +11,6 @@ use data_beans::zarr_io::*;
 use clap::Args;
 use log::info;
 use matrix_util::common_io::*;
-use std::sync::Arc;
-use tempfile::TempDir;
 
 #[derive(Args, Debug)]
 pub struct FromMtxArgs {
@@ -34,6 +32,10 @@ pub struct FromMtxArgs {
     /// output file header: {output}.{backend}
     #[arg(short, long)]
     pub output: Box<str>,
+
+    /// produce a `.zarr.zip` archive instead of a `.zarr` directory
+    #[arg(long, default_value_t = false)]
+    pub zip: bool,
 
     /// maximum number of columns to read from the row/feature name file
     /// (columns are joined with '_'); e.g. 2 reads "ENSG…<tab>SYMBOL"
@@ -81,6 +83,10 @@ pub struct From10xMatrixArgs {
 		     Redundant {backend} names will be ignored."
     )]
     pub output: Box<str>,
+
+    /// produce a `.zarr.zip` archive instead of a `.zarr` directory
+    #[arg(long, default_value_t = false)]
+    pub zip: bool,
 
     #[arg(
         short = 'x',
@@ -240,6 +246,10 @@ pub struct FromH5adArgs {
     )]
     pub output: Box<str>,
 
+    /// produce a `.zarr.zip` archive instead of a `.zarr` directory
+    #[arg(long, default_value_t = false)]
+    pub zip: bool,
+
     #[arg(
         long,
         value_delimiter = ',',
@@ -341,6 +351,10 @@ pub struct From10xMoleculeArgs {
     )]
     pub output: Box<str>,
 
+    /// produce a `.zarr.zip` archive instead of a `.zarr` directory
+    #[arg(long, default_value_t = false)]
+    pub zip: bool,
+
     #[arg(
         long,
         default_value = "Gene Expression",
@@ -430,6 +444,10 @@ pub struct FromZarrArgs {
 		     Redundant {backend} names will be ignored."
     )]
     pub output: Box<str>,
+
+    /// produce a `.zarr.zip` archive instead of a `.zarr` directory
+    #[arg(long, default_value_t = false)]
+    pub zip: bool,
 
     #[arg(
         short = 'd',
@@ -557,7 +575,9 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
     let row_file = args.row.as_ref();
     let col_file = args.col.as_ref();
 
-    let (backend, backend_file) = resolve_backend_file(&args.output, Some(args.backend.clone()))?;
+    let effective_output = apply_zip_flag(&args.output, args.zip);
+    let (backend, backend_file) =
+        resolve_backend_file(&effective_output, Some(args.backend.clone()))?;
 
     if std::path::Path::new(backend_file.as_ref()).exists() {
         info!(
@@ -603,6 +623,7 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
         run_squeeze(&squeeze_args)?;
     }
 
+    finalize_zarr_output(&backend_file, &effective_output)?;
     info!("done");
     Ok(())
 }
@@ -610,7 +631,9 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
 pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     let source_zarr_file_path = args.zarr_file.clone();
 
-    let (backend, backend_file) = resolve_backend_file(&args.output, Some(args.backend.clone()))?;
+    let effective_output = apply_zip_flag(&args.output, args.zip);
+    let (backend, backend_file) =
+        resolve_backend_file(&effective_output, Some(args.backend.clone()))?;
 
     if std::path::Path::new(backend_file.as_ref()).exists() {
         info!(
@@ -620,23 +643,8 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         remove_file(&backend_file)?;
     }
 
-    let (_dir, base, ext) = dir_base_ext(&source_zarr_file_path)?;
-
-    let temp_dir = TempDir::new()?; // should be kept outside
-
-    let store = if ext.as_ref() == "zip" {
-        let temp_path = std::path::PathBuf::from(temp_dir.path());
-        let temp_zarr = format!("{}/{}", temp_path.to_str().unwrap(), base);
-        // let temp_zarr = format!("{}/{}", dir, base);
-        unzip_dir(&source_zarr_file_path, Some(temp_zarr.as_ref()))?;
-        info!("Unzipped to {}", temp_zarr);
-        Arc::new(zarrs::filesystem::FilesystemStore::new(temp_zarr)?)
-    } else {
-        info!("Store at {}", source_zarr_file_path);
-        Arc::new(zarrs::filesystem::FilesystemStore::new(
-            source_zarr_file_path.as_ref(),
-        )?)
-    };
+    let store = open_zarr_store(&source_zarr_file_path)?;
+    info!("Opened zarr store: {}", source_zarr_file_path);
 
     let indices: Vec<u64> = read_zarr_numerics(store.clone(), args.indices_field.as_ref())?;
     let indptr: Vec<u64> = read_zarr_numerics(store.clone(), args.indptr_field.as_ref())?;
@@ -739,6 +747,7 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         run_squeeze(&squeeze_args)?;
     }
 
+    finalize_zarr_output(&backend_file, &effective_output)?;
     info!("done");
     Ok(())
 }
@@ -747,7 +756,9 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
 pub fn run_build_from_10x_matrix(args: &From10xMatrixArgs) -> anyhow::Result<()> {
     let file = hdf5::File::open(args.h5_file.to_string())?;
     info!("Opened 10X H5 file: {}", args.h5_file);
-    let (backend, backend_file) = resolve_backend_file(&args.output, Some(args.backend.clone()))?;
+    let effective_output = apply_zip_flag(&args.output, args.zip);
+    let (backend, backend_file) =
+        resolve_backend_file(&effective_output, Some(args.backend.clone()))?;
 
     if std::path::Path::new(backend_file.as_ref()).exists() {
         info!("Removing existing backend file: {}", &backend_file);
@@ -856,6 +867,7 @@ pub fn run_build_from_10x_matrix(args: &From10xMatrixArgs) -> anyhow::Result<()>
         args.column_nnz_cutoff,
         &backend_file,
     )?;
+    finalize_zarr_output(&backend_file, &effective_output)?;
     info!("done");
     Ok(())
 }
@@ -869,7 +881,9 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
     let file = hdf5::File::open(args.h5ad_file.to_string())?;
     info!("Opened AnnData h5ad file: {}", args.h5ad_file);
 
-    let (backend, backend_file) = resolve_backend_file(&args.output, Some(args.backend.clone()))?;
+    let effective_output = apply_zip_flag(&args.output, args.zip);
+    let (backend, backend_file) =
+        resolve_backend_file(&effective_output, Some(args.backend.clone()))?;
 
     if std::path::Path::new(backend_file.as_ref()).exists() {
         info!("Removing existing backend file: {}", &backend_file);
@@ -1079,6 +1093,7 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
         args.column_nnz_cutoff,
         &backend_file,
     )?;
+    finalize_zarr_output(&backend_file, &effective_output)?;
     info!("done");
     Ok(())
 }
@@ -1140,7 +1155,9 @@ pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result
     let file = hdf5::File::open(args.h5_file.to_string())?;
     info!("Opened molecule_info.h5: {}", args.h5_file);
 
-    let (backend, backend_file) = resolve_backend_file(&args.output, Some(args.backend.clone()))?;
+    let effective_output = apply_zip_flag(&args.output, args.zip);
+    let (backend, backend_file) =
+        resolve_backend_file(&effective_output, Some(args.backend.clone()))?;
 
     if std::path::Path::new(backend_file.as_ref()).exists() {
         info!("Removing existing backend file: {}", &backend_file);
@@ -1326,6 +1343,7 @@ pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result
         args.column_nnz_cutoff,
         &backend_file,
     )?;
+    finalize_zarr_output(&backend_file, &effective_output)?;
     info!("done");
     Ok(())
 }
