@@ -399,6 +399,52 @@ pub fn unzip_dir(zip_path: &str, extract_path: Option<&str>) -> anyhow::Result<B
     Ok(extract_path.into_boxed_str())
 }
 
+/// Zip a directory into a zip archive using `Stored` compression
+/// (zarr chunks are already zstd-compressed internally).
+pub fn zip_dir(source_dir: &str, zip_path: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    let file = std::fs::File::create(zip_path)?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let source = Path::new(source_dir);
+    let base = source.parent().unwrap_or(source);
+
+    fn collect_entries(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            out.push(path.clone());
+            // Use entry.file_type() (does not follow symlinks) to avoid
+            // infinite recursion on circular symlinks.
+            if entry.file_type()?.is_dir() {
+                collect_entries(&path, out)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut entries = vec![];
+    collect_entries(source, &mut entries)?;
+    entries.sort();
+
+    for path in &entries {
+        let rel = path.strip_prefix(base).unwrap_or(path);
+        if path.symlink_metadata()?.is_dir() {
+            zip.add_directory(format!("{}/", rel.display()), options)?;
+        } else {
+            zip.start_file(rel.display().to_string(), options)?;
+            let data = std::fs::read(path)?;
+            zip.write_all(&data)?;
+        }
+    }
+
+    zip.finish()?;
+    Ok(())
+}
+
 /// just get the directory (parent) name
 pub fn dirname(file_path: &str) -> Option<Box<str>> {
     Path::new(file_path).parent().map(|x| x.into_boxed_str())

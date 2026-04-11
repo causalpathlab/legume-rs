@@ -4,6 +4,7 @@ use crate::simulations::core as simulate;
 use crate::simulations::multimodal as simulate_multimodal;
 use crate::sparse_io::*;
 use crate::sparse_io_vector::*;
+use data_beans::zarr_io::{apply_zip_flag, finalize_zarr_output};
 
 use clap::{Args, ValueEnum};
 use log::info;
@@ -208,6 +209,10 @@ pub struct RunSimulateArgs {
         help = "Backend format for output"
     )]
     pub backend: SparseIoBackend,
+
+    /// produce a `.zarr.zip` archive instead of a `.zarr` directory
+    #[arg(long, default_value_t = false)]
+    pub zip: bool,
 }
 
 #[derive(Args, Debug)]
@@ -284,6 +289,10 @@ pub struct RunSimulateMultimodalArgs {
 
     #[arg(long, value_enum, default_value = "zarr", help = "Backend format")]
     pub backend: SparseIoBackend,
+
+    /// produce a `.zarr.zip` archive instead of a `.zarr` directory
+    #[arg(long, default_value_t = false)]
+    pub zip: bool,
 }
 
 /// Compute statistics across sparse matrix data
@@ -418,15 +427,13 @@ pub fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
 /// (cell type) structure. Output is saved in the specified backend format
 /// (.zarr or .h5) along with parameter files.
 pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
-    let output = cmd_args.output.clone();
-    mkdir(&output)?;
+    let effective_output = apply_zip_flag(&cmd_args.output, cmd_args.zip);
+    let output: Box<str> = strip_backend_suffix(&effective_output).into();
+
+    dirname(&output).as_deref().map(mkdir).transpose()?;
 
     let backend = cmd_args.backend.clone();
-
-    let backend_file = match backend {
-        SparseIoBackend::HDF5 => output.to_string() + ".h5",
-        SparseIoBackend::Zarr => output.to_string() + ".zarr",
-    };
+    let (_, backend_file) = resolve_backend_file(&effective_output, Some(backend.clone()))?;
 
     let mtx_file = output.to_string() + ".mtx.gz";
     let row_file = output.to_string() + ".rows.gz";
@@ -438,7 +445,7 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     let ln_batch_file = mtx_file.replace(".mtx.gz", ".ln_batch.parquet");
 
     remove_all_files(&vec![
-        backend_file.clone().into_boxed_str(),
+        backend_file.clone(),
         mtx_file.clone().into_boxed_str(),
         dict_file.clone().into_boxed_str(),
         prop_file.clone().into_boxed_str(),
@@ -559,6 +566,7 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     data.register_row_names_vec(&rows);
     data.register_column_names_vec(&cols);
 
+    finalize_zarr_output(&backend_file, &effective_output)?;
     info!("done");
     Ok(())
 }
@@ -566,7 +574,7 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
 /// Run multimodal simulation with shared base + delta dictionaries.
 pub fn run_simulate_multimodal(cmd_args: &RunSimulateMultimodalArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
-    mkdir(&output)?;
+    dirname(&output).as_deref().map(mkdir).transpose()?;
 
     let sim_args = simulate_multimodal::MultimodalSimArgs {
         rows: cmd_args.rows,
@@ -623,10 +631,8 @@ pub fn run_simulate_multimodal(cmd_args: &RunSimulateMultimodalArgs) -> anyhow::
     let backend = cmd_args.backend.clone();
     for m in 0..mm {
         let suffix = format!(".m{}", m);
-        let backend_file = match backend {
-            SparseIoBackend::HDF5 => format!("{}{}.h5", output, suffix),
-            SparseIoBackend::Zarr => format!("{}{}.zarr", output, suffix),
-        };
+        let modality_output = apply_zip_flag(&format!("{}{}", output, suffix), cmd_args.zip);
+        let (_, backend_file) = resolve_backend_file(&modality_output, Some(backend.clone()))?;
 
         let mtx_shape = (cmd_args.rows, cmd_args.cols, sim.triplets[m].len());
 
@@ -669,6 +675,8 @@ pub fn run_simulate_multimodal(cmd_args: &RunSimulateMultimodalArgs) -> anyhow::
 
         data.register_row_names_vec(&rows);
         data.register_column_names_vec(&cols);
+
+        finalize_zarr_output(&backend_file, &modality_output)?;
         info!("modality {}: {}", m, backend_file);
     }
 

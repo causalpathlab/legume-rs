@@ -5,6 +5,7 @@ use crate::utilities::io_helpers::{read_col_names, read_row_names};
 
 use clap::Args;
 use data_beans::sparse_data_visitors::create_jobs;
+use data_beans::zarr_io::{apply_zip_flag, finalize_zarr_output};
 use indicatif::{ParallelProgressIterator, ProgressBar};
 use log::info;
 use matrix_util::common_io::*;
@@ -59,6 +60,10 @@ pub struct MergeBackendArgs {
 		     and is needed for embedding steps later."
     )]
     pub output: Box<str>,
+
+    /// produce a `.zarr.zip` archive instead of a `.zarr` directory
+    #[arg(long, default_value_t = false)]
+    pub zip: bool,
 
     #[arg(
         long,
@@ -133,6 +138,10 @@ pub struct MergeMtxArgs {
 		     is needed for embedding steps later."
     )]
     pub output: Box<str>,
+
+    /// produce a `.zarr.zip` archive instead of a `.zarr` directory
+    #[arg(long, default_value_t = false)]
+    pub zip: bool,
 
     #[arg(
         short,
@@ -289,7 +298,9 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
 
     info!("Found {} columns/barcodes ...", column_names.len());
 
-    let (backend, backend_file) = resolve_backend_file(&args.output, Some(args.backend.clone()))?;
+    let effective_output = apply_zip_flag(&args.output, args.zip);
+    let (backend, backend_file) =
+        resolve_backend_file(&effective_output, Some(args.backend.clone()))?;
 
     if std::path::Path::new(backend_file.as_ref()).exists() {
         info!(
@@ -350,6 +361,7 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
 
     write_lines(&column_batch_names, &batch_memb_file)?;
 
+    finalize_zarr_output(&backend_file, &args.output)?;
     info!("done");
     Ok(())
 }
@@ -575,13 +587,12 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
     info!("Done with creating triplets from {} mtx files", num_batches);
 
     let backend = args.backend.clone();
+    let effective_output = apply_zip_flag(&args.output, args.zip);
     let output = args.output.clone();
     let batch_memb_file = (output.to_string() + ".batch.gz").into_boxed_str();
 
-    let backend_file = match backend {
-        SparseIoBackend::HDF5 => format!("{}.h5", &output),
-        SparseIoBackend::Zarr => format!("{}.zarr", &output),
-    };
+    let (_, backend_file) = resolve_backend_file(&effective_output, Some(backend.clone()))?;
+    let backend_file: String = backend_file.to_string();
 
     if std::path::Path::new(&backend_file).exists() {
         info!(
@@ -641,6 +652,7 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
     write_lines(&column_batch_names, &batch_memb_file)?;
 
+    finalize_zarr_output(&backend_file, &effective_output)?;
     info!("done");
     Ok(())
 }

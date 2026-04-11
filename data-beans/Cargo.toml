@@ -46,3 +46,4 @@ log = { workspace = true }
 dashmap = { workspace = true }
 rustc-hash = { workspace = true }
 zip = { workspace = true }
+zarrs_zip = "0.5"
