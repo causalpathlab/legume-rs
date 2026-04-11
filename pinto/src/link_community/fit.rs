@@ -122,14 +122,15 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
         help = "Dirichlet concentration for community mixing weights",
         long_help = "Concentration parameter α for the symmetric Dirichlet prior\n\
                        on community mixing weights. Enables variational truncation:\n\
                        communities with few edges are naturally pruned.\n\
-                       Set to 0 to disable (uniform prior)."
+                       Set to 0 to disable (uniform prior).\n\
+                       If omitted, auto-scaled from edge profile sparsity:\n\
+                       α = mean_size_factor / K, so sparser data gets a weaker prior."
     )]
-    alpha: f32,
+    alpha: Option<f32>,
 
     #[arg(
         long,
@@ -143,17 +144,22 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Gamma shape prior for Poisson-Gamma model"
+        help = "Gamma shape prior for Poisson-Gamma model",
+        long_help = "Shape parameter a0 for the Gamma(a0, b0) prior on Poisson rates.\n\
+                       If omitted, auto-scaled from edge profile counts:\n\
+                       a0 = 1e-4 × mean_count_per_dim, ensuring the prior is\n\
+                       negligible relative to the data signal."
     )]
-    a0: f32,
+    a0: Option<f32>,
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Gamma rate prior for Poisson-Gamma model"
+        help = "Gamma rate prior for Poisson-Gamma model",
+        long_help = "Rate parameter b0 for the Gamma(a0, b0) prior on Poisson rates.\n\
+                       If omitted, auto-scaled to match a0: b0 = a0 / mean_rate,\n\
+                       centering the prior on the empirical mean rate."
     )]
-    b0: f32,
+    b0: Option<f32>,
 
     #[arg(
         long,
@@ -236,7 +242,8 @@ pub struct SrtLinkCommunityArgs {
                        Default 1 = fixed modules (no re-estimation).\n\
                        Set to 2-5 to let modules adapt to discovered communities.\n\
                        Stops early if score plateaus (<0.1% improvement).\n\
-                       Applies to both gene-module and gene-pair-module paths."
+                       Applies to gene-module and gene-pair-module paths only;\n\
+                       ignored with --no-gene-modules (no M-step to iterate)."
     )]
     n_outer_iter: usize,
 }
@@ -253,8 +260,6 @@ pub struct SrtLinkCommunityArgs {
 /// 8.  Extract and write outputs
 pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()> {
     let c = &args.common;
-    let a0 = args.a0 as f64;
-    let b0 = args.b0 as f64;
     let k = args.n_communities;
     let n_outer_iter = args.n_outer_iter.max(1);
     // n_gene_modules resolved after data loading (may need median cell nnz)
@@ -604,11 +609,32 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         gp_profile_state = None;
     }
 
+    let mean_sf = coarse_profiles.size_factors.iter().sum::<f32>() / coarse_profiles.n_edges as f32;
+    let m = coarse_profiles.m;
     info!(
         "Coarse edge profiles: {} super-edges × {} dims, mean size factor: {:.1}",
-        coarse_profiles.n_edges,
-        coarse_profiles.m,
-        coarse_profiles.size_factors.iter().sum::<f32>() / coarse_profiles.n_edges as f32
+        coarse_profiles.n_edges, m, mean_sf
+    );
+
+    // Resolve a0/b0: auto-scale from coarse edge profile counts when not set.
+    // mean_count_per_dim = mean_sf / m; prior mean a0/b0 = 1/m (empirical rate).
+    let mean_cpd = mean_sf as f64 / m as f64;
+    let a0: f64 = args.a0.map_or_else(
+        || {
+            let v = (1e-4 * mean_cpd).max(1e-6);
+            info!("Auto a0 = {:.6} (1e-4 × mean count/dim {:.1})", v, mean_cpd);
+            v
+        },
+        |v| v as f64,
+    );
+    // b0 = a0 * m so that prior mean a0/b0 = 1/m (matches empirical rate)
+    let b0: f64 = args.b0.map_or_else(
+        || {
+            let v = (a0 * m as f64).max(1e-6);
+            info!("Auto b0 = {:.4} (a0 × m={})", v, m);
+            v
+        },
+        |v| v as f64,
     );
 
     // 7. Gibbs on coarsest level
@@ -648,7 +674,21 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         (full_profiles.profiles.len() * std::mem::size_of::<f32>()) as f64 / 1_048_576.0
     );
 
-    let alpha = args.alpha as f64;
+    // Resolve alpha: auto-scale from full-resolution (not coarse) edge sparsity,
+    // so the Dirichlet prior reflects the actual per-edge signal strength.
+    let alpha: f64 = args.alpha.map_or_else(
+        || {
+            let full_mean_sf = full_profiles.size_factors.iter().sum::<f32>()
+                / full_profiles.n_edges.max(1) as f32;
+            let v = (full_mean_sf as f64 / k as f64).max(0.01);
+            info!(
+                "Auto alpha = {:.4} (mean_size_factor {:.1} / K={})",
+                v, full_mean_sf, k
+            );
+            v
+        },
+        |v| v as f64,
+    );
     let comp_args = ComponentGibbsArgs {
         graph: &srt_cell_pairs.graph,
         edges,
@@ -660,15 +700,23 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     let num_fine_sweeps = args.num_em.unwrap_or((args.num_gibbs / 4).max(5));
 
-    // 8. Outer EM loop: E-step (Gibbs+greedy) → M-step (re-cluster modules)
+    // 8. Outer EM loop: E-step (Gibbs+greedy) → M-step (re-cluster modules).
+    //    Without gene modules the M-step is a no-op, so one iteration suffices.
+    let has_mstep = gene_to_module.is_some()
+        || gp_profile_state
+            .as_ref()
+            .is_some_and(|gp| gp.module_collapse.is_some());
+    let effective_outer = if has_mstep { n_outer_iter } else { 1 };
     let mut prev_score = f64::NEG_INFINITY;
 
-    for outer_iter in 0..n_outer_iter {
-        info!(
-            "=== Outer iteration {}/{} ===",
-            outer_iter + 1,
-            n_outer_iter
-        );
+    for outer_iter in 0..effective_outer {
+        if effective_outer > 1 {
+            info!(
+                "=== Outer iteration {}/{} ===",
+                outer_iter + 1,
+                effective_outer
+            );
+        }
 
         // --- E-step: EM Gibbs + greedy ---
         if num_fine_sweeps > 0 {
