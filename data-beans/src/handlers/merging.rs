@@ -55,6 +55,7 @@ pub struct MergeBackendArgs {
         required = true,
         help = "Output file header",
         long_help = "Output file header: {output}.{backend} and {output}.batch.gz. \n\
+		     With --zip, zarr backend produces {output}.zarr.zip instead of {output}.zarr.\n\
 		     The backend will contain everything. \n\
 		     Batch assignment information will be saved in a separate file \n\
 		     and is needed for embedding steps later."
@@ -133,6 +134,7 @@ pub struct MergeMtxArgs {
         required = true,
         help = "Output file header",
         long_help = "Output file header: {output}.{backend} and {output}.batch.gz. \n\
+                     With --zip, zarr backend produces {output}.zarr.zip instead of {output}.zarr.\n\
                      The backend will contain all merged data. \n\
                      Batch assignment information will be saved in a separate file and \n\
 		     is needed for embedding steps later."

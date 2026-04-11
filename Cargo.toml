@@ -29,7 +29,7 @@ description = "Library for Exploring Genomics Using Machine learning Essentials 
 repository = "https://github.com/causalpathlab/legume-rs"
 homepage = "https://github.com/causalpathlab/legume-rs"
 edition = "2021"
-version = "0.2.0"
+version = "0.2.1"
 
 [workspace.dependencies]
 
