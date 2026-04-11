@@ -29,7 +29,7 @@ pub struct FromMtxArgs {
     #[arg(long, value_enum, default_value = "zarr")]
     pub backend: SparseIoBackend,
 
-    /// output file header: {output}.{backend}
+    /// output file header: {output}.{backend} (or {output}.zarr.zip with --zip)
     #[arg(short, long)]
     pub output: Box<str>,
 
@@ -80,6 +80,7 @@ pub struct From10xMatrixArgs {
         help = "Output file header or name",
         long_help = "Specify the output file header. \n\
 		     The output will be named as {output}.{backend}.\n\
+		     With --zip, zarr backend produces {output}.zarr.zip instead of {output}.zarr.\n\
 		     Redundant {backend} names will be ignored."
     )]
     pub output: Box<str>,
@@ -242,6 +243,7 @@ pub struct FromH5adArgs {
         help = "Output file header or name",
         long_help = "Specify the output file header.\n\
 		     The output will be named as {output}.{backend}.\n\
+		     With --zip, zarr backend produces {output}.zarr.zip instead of {output}.zarr.\n\
 		     Metadata files will be named {output}.cell_metadata.tsv.gz, etc."
     )]
     pub output: Box<str>,
@@ -347,7 +349,8 @@ pub struct From10xMoleculeArgs {
         long,
         help = "Output file header or name",
         long_help = "Specify the output file header.\n\
-		     The output will be named as {output}.{backend}."
+		     The output will be named as {output}.{backend}.\n\
+		     With --zip, zarr backend produces {output}.zarr.zip instead of {output}.zarr."
     )]
     pub output: Box<str>,
 
@@ -441,6 +444,7 @@ pub struct FromZarrArgs {
         help = "Output file header or name",
         long_help = "Specify the output file header. \n\
 		     The output will be named as {output}.{backend}.\n\
+		     With --zip, zarr backend produces {output}.zarr.zip instead of {output}.zarr.\n\
 		     Redundant {backend} names will be ignored."
     )]
     pub output: Box<str>,
