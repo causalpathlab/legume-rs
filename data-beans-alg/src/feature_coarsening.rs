@@ -21,9 +21,11 @@ impl FeatureCoarsening {
     pub fn aggregate_columns_nd(&self, data_nd: &DMatrix<f32>) -> DMatrix<f32> {
         let n = data_nd.nrows();
         let mut out = DMatrix::<f32>::zeros(n, self.num_coarse);
-        for (fine, &coarse) in self.fine_to_coarse.iter().enumerate() {
-            for i in 0..n {
-                out[(i, coarse)] += data_nd[(i, fine)];
+        // Group fine columns by coarse target to keep output column hot in cache
+        for (c, fine_indices) in self.coarse_to_fine.iter().enumerate() {
+            let mut col = out.column_mut(c);
+            for &fine in fine_indices {
+                col += data_nd.column(fine);
             }
         }
         out
@@ -34,9 +36,12 @@ impl FeatureCoarsening {
     pub fn aggregate_rows_ds(&self, data_ds: &DMatrix<f32>) -> DMatrix<f32> {
         let s = data_ds.ncols();
         let mut out = DMatrix::<f32>::zeros(self.num_coarse, s);
-        for (fine, &coarse) in self.fine_to_coarse.iter().enumerate() {
-            for j in 0..s {
-                out[(coarse, j)] += data_ds[(fine, j)];
+        // Iterate columns (contiguous in column-major) in inner loop
+        for j in 0..s {
+            let src_col = data_ds.column(j);
+            let mut dst_col = out.column_mut(j);
+            for (fine, &coarse) in self.fine_to_coarse.iter().enumerate() {
+                dst_col[coarse] += src_col[fine];
             }
         }
         out
@@ -52,11 +57,14 @@ impl FeatureCoarsening {
     pub fn expand_log_dict_dk(&self, log_dict_dk: &DMatrix<f32>, d_fine: usize) -> DMatrix<f32> {
         let k = log_dict_dk.ncols();
         let mut expanded = DMatrix::<f32>::zeros(d_fine, k);
-        for (c, fine_indices) in self.coarse_to_fine.iter().enumerate() {
-            let ln_g = (fine_indices.len() as f32).ln();
-            for &f in fine_indices {
-                for kk in 0..k {
-                    expanded[(f, kk)] = log_dict_dk[(c, kk)] - ln_g;
+        // Iterate columns (contiguous in column-major) in outer loop
+        for kk in 0..k {
+            let src_col = log_dict_dk.column(kk);
+            let mut dst_col = expanded.column_mut(kk);
+            for (c, fine_indices) in self.coarse_to_fine.iter().enumerate() {
+                let val = src_col[c] - (fine_indices.len() as f32).ln();
+                for &f in fine_indices {
+                    dst_col[f] = val;
                 }
             }
         }

@@ -407,9 +407,9 @@ fn optimize(
         //            1_d * size_s'
 
         {
-            denom_ds.row_iter_mut().for_each(|mut row| {
-                row += &stat.size_s.transpose();
-            });
+            for s in 0..num_samples {
+                denom_ds.column_mut(s).add_scalar_mut(stat.size_s[s]);
+            }
             mu_resid_param.update_stat(&stat.residual_sum_ds, &denom_ds);
             mu_resid_param.calibrate();
         };
@@ -435,9 +435,9 @@ fn optimize(
                 //      (μ_resid + γ) .* (1_d * size_s')
 
                 denom_ds.copy_from(&(resid_ds + gamma_ds));
-                denom_ds.row_iter_mut().for_each(|mut row| {
-                    row.component_mul_assign(&stat.size_s.transpose());
-                });
+                for s in 0..num_samples {
+                    denom_ds.column_mut(s).scale_mut(stat.size_s[s]);
+                }
 
                 mu_adj_param
                     .update_stat(&(&stat.observed_sum_ds + &stat.imputed_sum_ds), &denom_ds);
@@ -450,9 +450,9 @@ fn optimize(
                 //      μ .* (1_d * size_s')
 
                 denom_ds.copy_from(mu_ds);
-                denom_ds.row_iter_mut().for_each(|mut row| {
-                    row.component_mul_assign(&stat.size_s.transpose());
-                });
+                for s in 0..num_samples {
+                    denom_ds.column_mut(s).scale_mut(stat.size_s[s]);
+                }
                 gamma_param.update_stat(&stat.imputed_sum_ds, &denom_ds);
                 gamma_param.calibrate_with(CalibrateTarget::MeanOnly);
             });
@@ -473,8 +473,10 @@ fn optimize(
 
         // Take the observed mean
         {
-            let denom_ds: nalgebra::DMatrix<f32> =
-                nalgebra::DVector::<f32>::from_element(num_genes, 1_f32) * stat.size_s.transpose();
+            let mut denom_ds = DMatrix::<f32>::zeros(num_genes, num_samples);
+            for s in 0..num_samples {
+                denom_ds.column_mut(s).add_scalar_mut(stat.size_s[s]);
+            }
             mu_param.update_stat(&stat.observed_sum_ds, &denom_ds);
             mu_param.calibrate();
         };
@@ -487,8 +489,10 @@ fn optimize(
             delta: Some(delta_param),
         })
     } else {
-        let denom_ds: nalgebra::DMatrix<f32> =
-            nalgebra::DVector::<f32>::from_element(num_genes, 1_f32) * stat.size_s.transpose();
+        let mut denom_ds = DMatrix::<f32>::zeros(num_genes, num_samples);
+        for s in 0..num_samples {
+            denom_ds.column_mut(s).add_scalar_mut(stat.size_s[s]);
+        }
         mu_param.update_stat(&stat.observed_sum_ds, &denom_ds);
         mu_param.calibrate();
         Ok(CollapsedOut {

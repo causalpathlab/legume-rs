@@ -229,6 +229,10 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         &srt_cell_pairs.pairs,
         c.n_pseudobulk,
         c.num_levels,
+        has_coords.then(|| SeedingParams {
+            coordinates: &coordinates,
+            batch_membership: Some(&batch_membership),
+        }),
     );
 
     let mut all_stats: Vec<PairDeltaCollapsedStat> = ml
