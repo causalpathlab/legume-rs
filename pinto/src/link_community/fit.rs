@@ -62,11 +62,11 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
-        help = "Number of gene modules (default: sqrt of median cell nnz)",
+        help = "Number of gene modules (default: sqrt of number of genes)",
         long_help = "Number of gene modules (M) for edge profile construction.\n\
                        Genes are clustered into M modules via --module-method (kmeans\n\
                        or leiden) on gene embeddings. Edge profiles are M-dimensional\n\
-                       module-count vectors. Default: auto = sqrt(median cell nnz).\n\
+                       module-count vectors. Default: auto = sqrt(number of genes).\n\
                        With leiden, this is a target (actual count may differ slightly).\n\
                        Use --no-gene-modules to skip and use random-projection profiles."
     )]
@@ -356,18 +356,11 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     } else if let Some(n) = args.n_gene_modules {
         Some(n)
     } else {
-        // Auto: sqrt(median cell nnz)
-        info!("Auto-determining gene module count from median cell nnz...");
-        let col_stat =
-            data_beans::qc::collect_column_stat_across_vec(&data_vec, None, c.block_size)?;
-        let mut cell_nnz: Vec<f32> = col_stat.count_positives();
-        cell_nnz.sort_unstable_by(f32::total_cmp);
-        let median_nnz = cell_nnz.get(cell_nnz.len() / 2).copied().unwrap_or(0.0) as f64;
-        let n = (median_nnz.sqrt().round() as usize).max(10);
-        info!(
-            "Auto n_gene_modules = {} (sqrt of median nnz {:.0})",
-            n, median_nnz
-        );
+        // Auto: sqrt(number of genes)
+        let n_genes = data_vec.num_rows();
+        let n = (n_genes as f64).sqrt().round() as usize;
+        let n = n.max(10);
+        info!("Auto n_gene_modules = {} (sqrt of {} genes)", n, n_genes);
         Some(n)
     };
 
@@ -451,6 +444,10 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &srt_cell_pairs.pairs,
         c.n_pseudobulk,
         c.num_levels,
+        has_coords.then(|| SeedingParams {
+            coordinates: &coordinates,
+            batch_membership: Some(&batch_membership),
+        }),
     );
 
     // 5-6. Build COARSE edge profiles first

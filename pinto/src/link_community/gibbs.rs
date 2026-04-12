@@ -70,11 +70,12 @@ impl LinkGibbsSampler {
             "Gibbs {bar:40} {pos}/{len} sweeps ({eta})",
         );
 
+        let ps = PoissonScoreParams::new(a0, b0);
         for _sweep in 0..num_sweeps {
             for e in 0..n {
                 let old_c = stats.membership[e];
 
-                compute_log_probs_for_edge(e, stats, profiles, a0, b0, None, &mut log_probs);
+                compute_log_probs_for_edge(e, stats, profiles, &ps, None, &mut log_probs);
 
                 let new_c = sample_categorical_log(&log_probs, &mut self.rng);
 
@@ -122,6 +123,7 @@ impl LinkGibbsSampler {
             "Gibbs {bar:40} {pos}/{len} sweeps ({eta})",
         );
 
+        let ps = PoissonScoreParams::new(a0, b0);
         for sweep in 0..num_sweeps {
             let sweep_seed = base_seed.wrapping_mul(sweep as u64 + 1);
 
@@ -136,8 +138,7 @@ impl LinkGibbsSampler {
                                 e,
                                 stats,
                                 profiles,
-                                a0,
-                                b0,
+                                &ps,
                                 None,
                                 &mut log_probs,
                             );
@@ -186,12 +187,13 @@ impl LinkGibbsSampler {
             "Greedy {bar:40} {pos}/{len} sweeps ({eta})",
         );
 
+        let ps = PoissonScoreParams::new(a0, b0);
         for _sweep in 0..max_sweeps {
             let mut sweep_moves = 0;
             for e in 0..n {
                 let old_c = stats.membership[e];
 
-                compute_log_probs_for_edge(e, stats, profiles, a0, b0, None, &mut log_probs);
+                compute_log_probs_for_edge(e, stats, profiles, &ps, None, &mut log_probs);
 
                 let new_c = argmax_log(&log_probs);
 
@@ -314,6 +316,7 @@ impl LinkGibbsSampler {
                         membership: indices.iter().map(|&e| membership[e]).collect(),
                     };
 
+                    let ps = PoissonScoreParams::new(a0, b0);
                     let comp_seed = sweep_seed ^ (c as u64).wrapping_mul(2654435761);
                     let mut rng = SmallRng::seed_from_u64(comp_seed);
                     let mut log_probs = vec![0.0f64; k];
@@ -325,8 +328,7 @@ impl LinkGibbsSampler {
                             e,
                             &local_stats,
                             &sub_stores[c],
-                            a0,
-                            b0,
+                            &ps,
                             lw_ref,
                             &mut log_probs,
                         );

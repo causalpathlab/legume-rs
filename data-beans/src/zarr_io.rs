@@ -433,18 +433,20 @@ fn resolve_columns(
     if !column_indices.is_empty() {
         Ok(column_indices.to_vec())
     } else if !column_names.is_empty() {
-        column_names
+        // Keep only names that exist — allows generous defaults
+        // covering multiple platforms (e.g. Visium + Xenium).
+        let matched: Vec<usize> = column_names
             .iter()
-            .map(|name| {
-                all_col_names.iter().position(|c| c == name).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "column '{}' not found (available: {:?})",
-                        name,
-                        all_col_names
-                    )
-                })
-            })
-            .collect()
+            .filter_map(|name| all_col_names.iter().position(|c| c == name))
+            .collect();
+        if matched.is_empty() {
+            anyhow::bail!(
+                "none of the requested columns {:?} found (available: {:?})",
+                column_names,
+                all_col_names
+            );
+        }
+        Ok(matched)
     } else {
         Ok(default_cols.to_vec())
     }
@@ -637,6 +639,28 @@ mod tests {
             &["nonexistent".to_string().into_boxed_str()],
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_zarr_coordinates_mixed_defaults() {
+        // Simulates pinto's generous defaults: Visium names that won't match
+        // plus Xenium names that will — only matching names should be kept.
+        let Some(p) = xenium_path() else { return };
+        let result = read_zarr_coordinates(
+            p.to_str().unwrap(),
+            &[],
+            &[
+                "pxl_row_in_fullres".into(),
+                "pxl_col_in_fullres".into(),
+                "cell_centroid_x".into(),
+                "cell_centroid_y".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(result.mat.ncols(), 2);
+        assert_eq!(result.cols[0].as_ref(), "cell_centroid_x");
+        assert_eq!(result.cols[1].as_ref(), "cell_centroid_y");
+        assert!(result.mat.nrows() > 0);
     }
 
     #[test]

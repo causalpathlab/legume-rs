@@ -1,6 +1,8 @@
 use crate::util::common::*;
 use crate::util::knn_graph::KnnGraph;
+use nalgebra_sparse::{CooMatrix, CscMatrix};
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 
 #[derive(Clone)]
 struct CoarsenLevelResult {
@@ -53,11 +55,6 @@ impl UnionFind {
         }
         big
     }
-
-    #[inline]
-    fn is_root(&self, x: usize) -> bool {
-        self.parent[x] == x
-    }
 }
 
 /// Result of graph coarsening: a sequence of merges forming a dendrogram.
@@ -86,15 +83,23 @@ fn normalize_column_inplace(features: &mut Mat, col: usize) {
     }
 }
 
-/// Dot product of two columns (zero allocation).
 #[inline]
 fn dot_columns(features: &Mat, a: usize, b: usize) -> f32 {
-    let dim = features.nrows();
-    let mut s = 0.0f32;
-    for r in 0..dim {
-        s += features[(r, a)] * features[(r, b)];
+    features.column(a).dot(&features.column(b))
+}
+
+/// Build symmetric adjacency lists from edge pairs.
+fn build_adjacency(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(i, j) in edges {
+        adj[i].push(j);
+        adj[j].push(i);
     }
-    s
+    for a in adj.iter_mut() {
+        a.sort_unstable();
+        a.dedup();
+    }
+    adj
 }
 
 /// Parallel graph-constrained agglomerative coarsening.
@@ -117,14 +122,9 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
     }
 
     let mut uf = UnionFind::new(n);
+    let mut adj = build_adjacency(n, &graph.edges);
 
-    // Build adjacency lists
-    let mut adj: Vec<HashSet<usize>> = vec![Default::default(); n];
-    for &(i, j) in &graph.edges {
-        adj[i].insert(j);
-        adj[j].insert(i);
-    }
-
+    let mut alive = vec![true; n]; // false once absorbed
     let max_merges = n.saturating_sub(1);
     let mut merges = Vec::with_capacity(max_merges);
 
@@ -133,31 +133,30 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
         "Coarsening {bar:40} {pos}/{len} merges ({eta})",
     );
 
+    // Working edge list — shrinks each round as intra-cluster edges vanish.
+    let mut edges: Vec<(usize, usize)> = graph.edges.clone();
+    // Reusable HashSet for edge dedup (FxHashSet via common)
+    let mut edge_set: HashSet<(usize, usize)> = HashSet::default();
+
+    let mut active: Vec<usize> = (0..n).filter(|&i| !adj[i].is_empty()).collect();
+    let mut taken = vec![false; n];
     let mut n_rounds = 0u32;
 
     loop {
-        // Collect active roots with at least one neighbor
-        let active_roots: Vec<usize> = (0..n)
-            .filter(|&i| uf.is_root(i) && !adj[i].is_empty())
-            .collect();
-
-        if active_roots.is_empty() {
+        if active.is_empty() {
             break;
         }
 
-        // Parallel: each root finds its best neighbor by cosine similarity.
-        // Uses read-only find (no path compression) so &uf is safely shared.
+        // Parallel: each active node finds its best neighbor by cosine similarity.
         let features_ref = &*cell_features;
         let adj_ref = &adj;
-        let uf_ref = &uf;
 
-        let proposals: Vec<(usize, usize, f32)> = active_roots
+        let proposals: Vec<(usize, usize, f32)> = active
             .par_iter()
             .filter_map(|&i| {
                 let mut best_j = 0usize;
                 let mut best_sim = f32::NEG_INFINITY;
                 for &j in &adj_ref[i] {
-                    debug_assert!(uf_ref.is_root(j));
                     let sim = dot_columns(features_ref, i, j);
                     if sim > best_sim || (sim == best_sim && j < best_j) {
                         best_sim = sim;
@@ -173,9 +172,7 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
         sorted.sort_unstable_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(Ordering::Equal));
 
         // Greedy matching: accept merges where neither endpoint is already taken
-        let mut taken = vec![false; n];
         let mut round_merges: Vec<(usize, usize)> = Vec::new();
-
         for (a, b, _) in sorted {
             if !taken[a] && !taken[b] {
                 taken[a] = true;
@@ -183,12 +180,16 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
                 round_merges.push((a, b));
             }
         }
+        for &(a, b) in &round_merges {
+            taken[a] = false;
+            taken[b] = false;
+        }
 
         if round_merges.is_empty() {
             break;
         }
 
-        // Apply merges: update UF, features, adjacency
+        // UF merges + feature updates (sequential)
         for &(a, b) in &round_merges {
             merges.push((a, b));
             pb.inc(1);
@@ -200,25 +201,50 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
             let new_rep = uf.union(a, b);
             let absorbed = if new_rep == a { b } else { a };
 
-            // Weighted average of feature vectors
             for r in 0..dim {
                 cell_features[(r, new_rep)] =
                     (cell_features[(r, a)] * size_a + cell_features[(r, b)] * size_b) / total;
             }
             normalize_column_inplace(cell_features, new_rep);
 
-            // Merge adjacency
-            let absorbed_neighbors = std::mem::take(&mut adj[absorbed]);
-            for c in absorbed_neighbors {
-                adj[c].remove(&absorbed);
-                if c != new_rep {
-                    adj[c].insert(new_rep);
-                    adj[new_rep].insert(c);
-                }
-            }
-            adj[new_rep].remove(&absorbed);
-            adj[new_rep].remove(&new_rep);
+            alive[absorbed] = false;
         }
+
+        // Flatten UF for O(1) lookups
+        for i in 0..n {
+            uf.parent[i] = uf.find(i);
+        }
+
+        // Rebuild edge list (Leiden-style): resolve endpoints, drop
+        // intra-cluster edges, deduplicate via FxHashSet.
+        edge_set.clear();
+        let mut write = 0;
+        for read in 0..edges.len() {
+            let (i, j) = edges[read];
+            let ri = uf.parent[i];
+            let rj = uf.parent[j];
+            if ri == rj {
+                continue;
+            }
+            let key = (ri.min(rj), ri.max(rj));
+            if edge_set.insert(key) {
+                edges[write] = key;
+                write += 1;
+            }
+        }
+        edges.truncate(write);
+
+        // Rebuild adjacency from clean edge list
+        for &i in &active {
+            adj[i].clear();
+        }
+        for &(i, j) in &edges {
+            adj[i].push(j);
+            adj[j].push(i);
+        }
+
+        // Update active set
+        active.retain(|&i| alive[i] && !adj[i].is_empty());
 
         n_rounds += 1;
     }
@@ -276,6 +302,233 @@ pub fn compute_level_n_clusters(n_clusters: usize, num_levels: usize) -> Vec<usi
     result
 }
 
+/// Threshold: if n_nodes > this, use spatial seeding pre-pass.
+const SEEDING_THRESHOLD: usize = 20_000;
+
+/// Assign cells to spatially-seeded super-nodes via BFS flood-fill.
+///
+/// Places seeds on a regular grid over each batch's bounding box
+/// (different batches have independent coordinate systems), then
+/// expands all seeds simultaneously along graph edges.
+///
+/// Returns `(labels, num_super_nodes)` where `labels[cell] = super_node_id`.
+fn spatial_seed_labels(
+    coordinates: &Mat,
+    graph: &KnnGraph,
+    target_super: usize,
+    batch_membership: Option<&[Box<str>]>,
+) -> (Vec<usize>, usize) {
+    let n = graph.n_nodes;
+    let n_dims = coordinates.ncols();
+
+    // Partition cells by batch (single pass over cells)
+    let n_batches: usize;
+    let mut batch_cells: Vec<Vec<usize>>;
+    if let Some(batches) = batch_membership {
+        let mut batch_map: HashMap<&str, usize> = Default::default();
+        let mut next_id = 0usize;
+        batch_cells = Vec::new();
+        for (i, b) in batches.iter().enumerate() {
+            let bid = *batch_map.entry(b.as_ref()).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                batch_cells.push(Vec::new());
+                id
+            });
+            batch_cells[bid].push(i);
+        }
+        n_batches = next_id;
+    } else {
+        batch_cells = vec![(0..n).collect()];
+        n_batches = 1;
+    }
+
+    let mut seeds: Vec<usize> = Vec::new();
+    let mut labels = vec![usize::MAX; n];
+    let mut num_super = 0usize;
+
+    for cells in &batch_cells {
+        let batch_target = (target_super as f64 * cells.len() as f64 / n as f64).ceil() as usize;
+        let batch_target = batch_target.max(1);
+
+        // Bounding box for this batch
+        let mut mins = vec![f32::INFINITY; n_dims];
+        let mut maxs = vec![f32::NEG_INFINITY; n_dims];
+        for &i in cells {
+            for d in 0..n_dims {
+                let v = coordinates[(i, d)];
+                if v < mins[d] {
+                    mins[d] = v;
+                }
+                if v > maxs[d] {
+                    maxs[d] = v;
+                }
+            }
+        }
+
+        // Grid dimensions
+        let side = (batch_target as f64).powf(1.0 / n_dims as f64).ceil() as usize;
+        let side = side.max(1);
+        let mut tile_strides = vec![1usize; n_dims];
+        for d in (0..n_dims - 1).rev() {
+            tile_strides[d] = tile_strides[d + 1] * side;
+        }
+        let total_tiles = tile_strides[0] * side;
+
+        // Assign cells in this batch to tiles, pick one seed per tile
+        let mut tile_seed: Vec<Option<usize>> = vec![None; total_tiles];
+        for &i in cells {
+            let mut tile_id = 0usize;
+            for d in 0..n_dims {
+                let range = (maxs[d] - mins[d]).max(1e-12);
+                let frac = ((coordinates[(i, d)] - mins[d]) / range).clamp(0.0, 0.999999);
+                let bin = (frac * side as f32) as usize;
+                tile_id += bin * tile_strides[d];
+            }
+            if tile_seed[tile_id].is_none() {
+                tile_seed[tile_id] = Some(i);
+            }
+        }
+
+        for seed in tile_seed.into_iter().flatten() {
+            labels[seed] = num_super;
+            seeds.push(seed);
+            num_super += 1;
+        }
+    }
+
+    // Capacity-limited multi-source BFS: each super-node absorbs at most
+    // 2× the average cell count to keep sizes uniform across density variation.
+    let max_cells = (n / num_super.max(1)) * 2;
+    let mut seed_counts = vec![1usize; num_super]; // each seed is one cell
+
+    let mut queue = VecDeque::with_capacity(n);
+    let mut spillover: VecDeque<usize> = VecDeque::new();
+    for &cell in &seeds {
+        queue.push_back(cell);
+    }
+    let csc = &graph.adjacency;
+
+    while let Some(cell) = queue.pop_front() {
+        let label = labels[cell];
+        if seed_counts[label] >= max_cells {
+            continue;
+        }
+        let col = csc.col(cell);
+        for &nb in col.row_indices() {
+            if labels[nb] == usize::MAX {
+                labels[nb] = label;
+                seed_counts[label] += 1;
+                if seed_counts[label] < max_cells {
+                    queue.push_back(nb);
+                } else {
+                    // Seed is now full — collect overflow for uncapped spillover
+                    spillover.push_back(nb);
+                }
+            }
+        }
+    }
+
+    // Propagate remaining unassigned cells without capacity limit.
+    while let Some(cell) = spillover.pop_front() {
+        let label = labels[cell];
+        let col = csc.col(cell);
+        for &nb in col.row_indices() {
+            if labels[nb] == usize::MAX {
+                labels[nb] = label;
+                spillover.push_back(nb);
+            }
+        }
+    }
+
+    // Truly disconnected cells get their own singleton super-node
+    for label in labels.iter_mut() {
+        if *label == usize::MAX {
+            *label = num_super;
+            num_super += 1;
+        }
+    }
+
+    info!(
+        "Spatial seeding: {} cells, {} batches → {} super-nodes (target {})",
+        n, n_batches, num_super, target_super
+    );
+
+    (labels, num_super)
+}
+
+/// Build a super-graph from seed labels.
+///
+/// Averages cell features per super-node and creates edges between
+/// adjacent super-nodes (from original graph edges crossing boundaries).
+fn build_super_graph(
+    seed_labels: &[usize],
+    num_super: usize,
+    graph: &KnnGraph,
+    cell_features: &Mat,
+) -> (KnnGraph, Mat) {
+    let dim = cell_features.nrows();
+
+    // Aggregate features: sum columns per super-node via column ops
+    let mut super_features = Mat::zeros(dim, num_super);
+    let mut counts = vec![0usize; num_super];
+    for (cell, &label) in seed_labels.iter().enumerate() {
+        counts[label] += 1;
+        let mut col = super_features.column_mut(label);
+        col += cell_features.column(cell);
+    }
+    for (s, &c) in counts.iter().enumerate() {
+        if c > 0 {
+            super_features.column_mut(s).scale_mut(1.0 / c as f32);
+        }
+    }
+
+    let est_edges = graph.edges.len();
+    let mut edge_set: HashSet<(usize, usize)> =
+        HashSet::with_capacity_and_hasher(est_edges, Default::default());
+    let mut super_edges: Vec<(usize, usize)> = Vec::with_capacity(est_edges);
+    for &(i, j) in &graph.edges {
+        let si = seed_labels[i];
+        let sj = seed_labels[j];
+        if si != sj {
+            let key = (si.min(sj), si.max(sj));
+            if edge_set.insert(key) {
+                super_edges.push(key);
+            }
+        }
+    }
+
+    let distances = vec![1.0f32; super_edges.len()];
+
+    let mut coo = CooMatrix::new(num_super, num_super);
+    for &(i, j) in &super_edges {
+        coo.push(i, j, 1.0f32);
+        coo.push(j, i, 1.0f32);
+    }
+    let adjacency = CscMatrix::from(&coo);
+
+    let super_graph = KnnGraph {
+        adjacency,
+        edges: super_edges,
+        distances,
+        n_nodes: num_super,
+    };
+
+    info!(
+        "Super-graph: {} nodes, {} edges",
+        num_super,
+        super_graph.edges.len()
+    );
+
+    (super_graph, super_features)
+}
+
+/// Optional spatial seeding parameters for large datasets.
+pub struct SeedingParams<'a> {
+    pub coordinates: &'a Mat,
+    pub batch_membership: Option<&'a [Box<str>]>,
+}
+
 /// Multi-level graph coarsening result.
 pub struct MultiLevelCoarsenResult {
     /// Per-level pair-to-sample mapping (coarse → fine).
@@ -292,6 +545,10 @@ pub struct MultiLevelCoarsenResult {
 /// then cuts the dendrogram at `num_levels` linearly-spaced cluster
 /// counts from coarsest to `n_clusters`.
 ///
+/// When `coordinates` is provided and n > 20k, a spatial grid seeding
+/// pre-pass reduces the problem to ~8× n_clusters super-nodes before
+/// running the expression-guided agglomerative coarsening.
+///
 /// Returns per-level pair-to-sample mappings ready for the fused or
 /// per-sample visitors.
 pub fn graph_coarsen_multilevel(
@@ -300,14 +557,31 @@ pub fn graph_coarsen_multilevel(
     pairs: &[Pair],
     n_clusters: usize,
     num_levels: usize,
+    seeding: Option<SeedingParams<'_>>,
 ) -> MultiLevelCoarsenResult {
-    let result = graph_coarsen(graph, cell_features);
+    let n_original = graph.n_nodes;
+
+    // Optional seeding pre-pass for large datasets
+    let seed_labels: Option<Vec<usize>>;
+    let coarsen_result;
+
+    if let Some(sp) = seeding.filter(|_| n_original > SEEDING_THRESHOLD) {
+        let target_super = (n_clusters * 8).min(n_original / 4).max(n_clusters + 1);
+        let (labels, num_super) =
+            spatial_seed_labels(sp.coordinates, graph, target_super, sp.batch_membership);
+        let (super_graph, mut super_features) =
+            build_super_graph(&labels, num_super, graph, cell_features);
+        coarsen_result = graph_coarsen(&super_graph, &mut super_features);
+        seed_labels = Some(labels);
+    } else {
+        coarsen_result = graph_coarsen(graph, cell_features);
+        seed_labels = None;
+    }
+
     let level_n_clusters = compute_level_n_clusters(n_clusters, num_levels);
 
     // Extract all levels with a single incremental UF pass.
-    // Process from finest (most clusters = fewest merges) to coarsest,
-    // then reverse to restore coarse→fine order.
-    let n = result.n_nodes;
+    let n_coarsen = coarsen_result.n_nodes; // super-nodes if seeded, cells otherwise
     let mut sorted: Vec<(usize, usize)> = level_n_clusters
         .iter()
         .enumerate()
@@ -315,21 +589,23 @@ pub fn graph_coarsen_multilevel(
         .collect();
     sorted.sort_unstable_by(|a, b| b.0.cmp(&a.0)); // descending n_clusters
 
-    let mut uf = UnionFind::new(n);
+    let mut uf = UnionFind::new(n_coarsen);
     let mut merge_idx = 0usize;
     let mut results: Vec<Option<CoarsenLevelResult>> = vec![None; level_n_clusters.len()];
 
     for (nc, orig_idx) in sorted {
-        let target = n.saturating_sub(nc).min(result.merges.len());
+        let target = n_coarsen
+            .saturating_sub(nc)
+            .min(coarsen_result.merges.len());
         while merge_idx < target {
-            let (a, b) = result.merges[merge_idx];
+            let (a, b) = coarsen_result.merges[merge_idx];
             uf.union(a, b);
             merge_idx += 1;
         }
-        // Compact labels
+        // Compact labels at the coarsened level
         let mut rep_to_label: HashMap<usize, usize> = Default::default();
         let mut next_label = 0usize;
-        let cell_labels: Vec<usize> = (0..n)
+        let coarse_labels: Vec<usize> = (0..n_coarsen)
             .map(|i| {
                 let r = uf.find(i);
                 *rep_to_label.entry(r).or_insert_with(|| {
@@ -340,6 +616,13 @@ pub fn graph_coarsen_multilevel(
             })
             .collect();
         rep_to_label.clear();
+
+        // Compose with seed labels to get original-cell-level labels
+        let cell_labels: Vec<usize> = if let Some(ref sl) = seed_labels {
+            (0..n_original).map(|i| coarse_labels[sl[i]]).collect()
+        } else {
+            coarse_labels
+        };
 
         let (p2s, ns) = cell_labels_to_pair_samples(&cell_labels, pairs);
         results[orig_idx] = Some(CoarsenLevelResult {
@@ -449,6 +732,7 @@ mod tests {
             &pairs,
             3,
             1,
+            None,
         );
         let unique: HashSet<usize> = ml.all_pair_to_sample[0].iter().cloned().collect();
         assert!(unique.len() <= ml.all_num_samples[0]);
@@ -475,7 +759,7 @@ mod tests {
             .map(|&(i, j)| Pair { left: i, right: j })
             .collect();
 
-        let ml = graph_coarsen_multilevel(&graph, &mut features, &pairs, 2, 1);
+        let ml = graph_coarsen_multilevel(&graph, &mut features, &pairs, 2, 1, None);
         // With 2 clusters the two cliques should separate
         let p2s = &ml.all_pair_to_sample[0];
         // Intra-clique pairs should share a sample pattern
@@ -537,7 +821,7 @@ mod tests {
         }
 
         // 2 levels, finest = 3 clusters
-        let ml = graph_coarsen_multilevel(&graph, &mut features, &pairs, 3, 2);
+        let ml = graph_coarsen_multilevel(&graph, &mut features, &pairs, 3, 2, None);
 
         assert_eq!(ml.all_pair_to_sample.len(), 2);
         assert_eq!(ml.all_num_samples.len(), 2);
@@ -560,8 +844,116 @@ mod tests {
             &pairs,
             3,
             1,
+            None,
         );
         assert_eq!(ml1.all_pair_to_sample.len(), 1);
         assert_eq!(ml1.all_num_samples.len(), 1);
+    }
+
+    #[test]
+    fn test_spatial_seeding() {
+        // 100 nodes on a 10×10 grid, KNN edges to 4-neighbors
+        let n = 100;
+        let mut coords = Mat::zeros(n, 2);
+        let mut edges = Vec::new();
+        for row in 0..10 {
+            for col in 0..10 {
+                let i = row * 10 + col;
+                coords[(i, 0)] = col as f32;
+                coords[(i, 1)] = row as f32;
+                if col + 1 < 10 {
+                    edges.push((i, i + 1));
+                }
+                if row + 1 < 10 {
+                    edges.push((i, i + 10));
+                }
+            }
+        }
+        let graph = make_test_graph(n, edges.clone());
+
+        // Seed with target ~25 super-nodes (5×5 grid)
+        let (labels, num_super) = spatial_seed_labels(&coords, &graph, 25, None);
+        assert_eq!(labels.len(), n);
+        assert!(num_super > 0 && num_super <= 30);
+        // Every cell assigned
+        assert!(labels.iter().all(|&l| l < num_super));
+
+        // Build super-graph
+        let dim = 4;
+        let mut features = Mat::from_fn(dim, n, |r, c| if r == c % dim { 1.0 } else { 0.0 });
+        let (super_graph, super_features) =
+            build_super_graph(&labels, num_super, &graph, &features);
+        assert_eq!(super_features.nrows(), dim);
+        assert_eq!(super_features.ncols(), num_super);
+        assert!(!super_graph.edges.is_empty());
+        assert_eq!(super_graph.n_nodes, num_super);
+
+        // Full multilevel with seeding
+        let pairs: Vec<Pair> = edges
+            .iter()
+            .map(|&(i, j)| Pair { left: i, right: j })
+            .collect();
+        let sp = SeedingParams {
+            coordinates: &coords,
+            batch_membership: None,
+        };
+        let ml = graph_coarsen_multilevel(&graph, &mut features, &pairs, 10, 2, Some(sp));
+        assert_eq!(ml.all_cell_labels.len(), 2);
+        for level_labels in &ml.all_cell_labels {
+            assert_eq!(level_labels.len(), n);
+        }
+    }
+
+    #[test]
+    fn test_spatial_seeding_capacity_limit() {
+        // Dense cluster of 80 cells at (0,0) plus 20 cells spread across (1..20, 0).
+        // Without capacity limits, the dense cluster would all join one super-node.
+        let n = 100;
+        let mut coords = Mat::zeros(n, 2);
+        let mut edges = Vec::new();
+
+        // Dense cluster: cells 0..80 all at (0, 0) with chain edges
+        for i in 0..80 {
+            coords[(i, 0)] = 0.0;
+            coords[(i, 1)] = (i as f32) * 0.01; // tiny offsets so they're nearby
+            if i + 1 < 80 {
+                edges.push((i, i + 1));
+            }
+        }
+        // Connect dense cluster to spread region
+        edges.push((79, 80));
+
+        // Spread region: cells 80..100 at increasing x
+        for i in 80..100 {
+            coords[(i, 0)] = (i - 79) as f32;
+            coords[(i, 1)] = 0.0;
+            if i + 1 < 100 {
+                edges.push((i, i + 1));
+            }
+        }
+
+        let graph = make_test_graph(n, edges);
+
+        // Target 10 super-nodes → avg 10 cells each, max_cells = 20
+        let (labels, num_super) = spatial_seed_labels(&coords, &graph, 10, None);
+        assert_eq!(labels.len(), n);
+        assert!(labels.iter().all(|&l| l < num_super));
+
+        // Count cells per super-node
+        let mut counts = vec![0usize; num_super];
+        for &l in &labels {
+            counts[l] += 1;
+        }
+
+        // No super-node should have more than 2× the average
+        let max_cells = (n / num_super) * 2;
+        let largest = *counts.iter().max().unwrap();
+        assert!(
+            largest <= max_cells + 1, // +1 for rounding
+            "largest super-node has {} cells, limit is {} (avg={})",
+            largest,
+            max_cells,
+            n / num_super
+        );
     }
 }
