@@ -56,12 +56,12 @@ pub struct SrtInputArgs {
     #[arg(
         long = "coord-column-names",
         value_delimiter(','),
-        default_value = "pxl_row_in_fullres,pxl_col_in_fullres",
+        default_value = "pxl_row_in_fullres,pxl_col_in_fullres,cell_centroid_x,cell_centroid_y",
         help = "Column names for spatial coordinates in coord files",
         long_help = "Column names to select as spatial coordinates (comma separated).\n\
-                       Looked up in the header row of each coord file.\n\
-                       Default suits 10x Visium tissue_positions files.\n\
-                       For generic x,y data, use: --coord-column-names x,y"
+                       Names that don't exist in a given file are silently skipped,\n\
+                       so the default covers both Visium and Xenium layouts.\n\
+                       Default: pxl_row_in_fullres,pxl_col_in_fullres,cell_centroid_x,cell_centroid_y"
     )]
     pub coord_column_names: Vec<Box<str>>,
 

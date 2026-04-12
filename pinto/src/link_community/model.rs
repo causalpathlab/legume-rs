@@ -400,7 +400,7 @@ impl LinkCommunityClassifier {
 }
 
 /// Precomputed Poisson-Gamma hyperparameter constants for hot-loop scoring.
-struct PoissonScoreParams {
+pub struct PoissonScoreParams {
     a0: f64,
     b0: f64,
     /// a0 * ln(b0) - lgamma(a0), constant across all calls
@@ -408,7 +408,7 @@ struct PoissonScoreParams {
 }
 
 impl PoissonScoreParams {
-    fn new(a0: f64, b0: f64) -> Self {
+    pub fn new(a0: f64, b0: f64) -> Self {
         Self {
             a0,
             b0,
@@ -447,8 +447,7 @@ pub fn compute_log_probs_for_edge(
     e: usize,
     stats: &LinkCommunityStats,
     profiles: &LinkProfileStore,
-    a0: f64,
-    b0: f64,
+    ps: &PoissonScoreParams,
     log_weights: Option<&[f64]>,
     log_probs: &mut [f64],
 ) {
@@ -462,9 +461,6 @@ pub fn compute_log_probs_for_edge(
     let new_size_removed = old_size - sf;
 
     let src_slice = &stats.gene_sum[current_c * m..(current_c + 1) * m];
-
-    let ps = PoissonScoreParams::new(a0, b0);
-
     let lw_current = log_weights.map(|w| w[current_c]).unwrap_or(0.0);
 
     for (t, lp) in log_probs.iter_mut().enumerate().take(k) {
@@ -597,7 +593,8 @@ mod tests {
         for e in 0..stats.n_edges {
             let current_c = stats.membership[e];
 
-            compute_log_probs_for_edge(e, &stats, &store, a0, b0, None, &mut log_probs);
+            let ps = PoissonScoreParams::new(a0, b0);
+            compute_log_probs_for_edge(e, &stats, &store, &ps, None, &mut log_probs);
 
             // Current community should have delta = 0
             assert!(
