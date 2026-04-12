@@ -87,9 +87,12 @@ fn push_two_datasets() -> anyhow::Result<()> {
 }
 
 #[test]
-fn push_mismatched_rows_errors() {
+fn push_mismatched_rows_uses_intersection() -> anyhow::Result<()> {
+    // dataset A rows: gene0..gene4
+    // dataset B rows: gene0..gene4 with gene0 and gene1 swapped — same set of
+    // names, but at different local positions. Intersection should still be
+    // all 5 genes.
     let rows_a = str_vec(5, "gene");
-    // Same number of rows but in different positions (gene0 at pos 0 vs pos 1)
     let mut rows_b = str_vec(5, "gene");
     rows_b.swap(0, 1);
 
@@ -100,9 +103,47 @@ fn push_mismatched_rows_errors() {
     let sp_b = make_named_sparse(&raw_b, &rows_b, &str_vec(4, "b"));
 
     let mut vec = SparseIoVec::new();
-    vec.push(sp_a, None).unwrap();
-    let result = vec.push(sp_b, None);
-    assert!(result.is_err(), "should fail on mismatched row names");
+    vec.push(sp_a, None)?;
+    vec.push(sp_b, None)?;
+    assert_eq!(vec.num_rows(), 5);
+    assert_eq!(vec.row_names()?, rows_a);
+    Ok(())
+}
+
+#[test]
+fn push_disjoint_rows_uses_intersection() -> anyhow::Result<()> {
+    // dataset A: gene0..gene3 (4 rows), dataset B: gene2..gene5 (4 rows).
+    // Intersection: {gene2, gene3}.
+    let rows_a: Vec<Box<str>> = (0..4).map(|i| format!("gene{i}").into()).collect();
+    let rows_b: Vec<Box<str>> = (2..6).map(|i| format!("gene{i}").into()).collect();
+
+    let raw_a = Array2::<f32>::runif(4, 3);
+    let raw_b = Array2::<f32>::runif(4, 2);
+    let sp_a = make_named_sparse(&raw_a, &rows_a, &str_vec(3, "a"));
+    let sp_b = make_named_sparse(&raw_b, &rows_b, &str_vec(2, "b"));
+
+    let mut vec = SparseIoVec::new();
+    vec.push(sp_a, Some("A".into()))?;
+    vec.push(sp_b, Some("B".into()))?;
+    assert_eq!(vec.num_rows(), 2);
+    let names = vec.row_names()?;
+    assert_eq!(names, vec![Box::from("gene2"), Box::from("gene3")]);
+
+    // Compact rows must reflect the actual row identity in each backend.
+    let mat = vec.read_columns_ndarray((0..vec.num_columns()).into_iter())?;
+    assert_eq!(mat.nrows(), 2);
+    assert_eq!(mat.ncols(), 5);
+    // dataset A columns 0..3 → rows 2,3 of A
+    for j in 0..3 {
+        assert!((mat[(0, j)] - raw_a[(2, j)]).abs() < 1e-6);
+        assert!((mat[(1, j)] - raw_a[(3, j)]).abs() < 1e-6);
+    }
+    // dataset B columns 0..2 → rows 0,1 of B (gene2 and gene3)
+    for j in 0..2 {
+        assert!((mat[(0, 3 + j)] - raw_b[(0, j)]).abs() < 1e-6);
+        assert!((mat[(1, 3 + j)] - raw_b[(1, j)]).abs() < 1e-6);
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────

@@ -20,7 +20,15 @@ pub struct SparseIoVec {
     data_to_cols: HashMap<usize, Vec<usize>>,
     col_glob_to_loc: Vec<usize>,
     offset: usize,
+    // Row-name alignment across backends. Each backend may have a
+    // different subset/ordering of rows; we keep only the intersection
+    // and remap local indices through `data_local_to_global_row` and
+    // `global_to_compact_row` at read time.
     row_name_position: HashMap<Box<str>, usize>,
+    row_names_by_global: Vec<Box<str>>,
+    data_local_to_global_row: Vec<Vec<usize>>,
+    row_count_by_global: Vec<usize>,
+    global_to_compact_row: Vec<Option<usize>>,
     column_names_with_data_tag: Vec<Box<str>>,
     col_to_group: Option<HashMap<usize, usize>>,
     group_to_cols: Option<Vec<Vec<usize>>>,
@@ -66,6 +74,10 @@ impl SparseIoVec {
             col_glob_to_loc: vec![],
             offset: 0,
             row_name_position: HashMap::default(),
+            row_names_by_global: vec![],
+            data_local_to_global_row: vec![],
+            row_count_by_global: vec![],
+            global_to_compact_row: vec![],
             column_names_with_data_tag: vec![],
             col_to_group: None,
             group_to_cols: None,
@@ -225,34 +237,60 @@ impl SparseIoVec {
                     .collect::<Vec<_>>(),
             );
 
-            info!("Checking row names...");
-            for (data_row_pos, row) in data.row_names()?.iter().enumerate() {
-                let glob_row_pos = self
-                    .row_name_position
-                    .entry(row.clone())
-                    .or_insert(data_row_pos);
-                if *glob_row_pos != data_row_pos {
-                    return Err(anyhow::anyhow!(
-                        "Row names mismatched: {} vs. {}",
-                        *glob_row_pos,
-                        data_row_pos
-                    ));
-                }
+            let row_names = data.row_names()?;
+            let mut local_to_global = Vec::with_capacity(row_names.len());
+            for row in row_names.iter() {
+                let glob_row = match self.row_name_position.get(row) {
+                    Some(&g) => g,
+                    None => {
+                        let next_global = self.row_names_by_global.len();
+                        self.row_name_position.insert(row.clone(), next_global);
+                        self.row_names_by_global.push(row.clone());
+                        self.row_count_by_global.push(0);
+                        next_global
+                    }
+                };
+                local_to_global.push(glob_row);
             }
+            for &g in &local_to_global {
+                self.row_count_by_global[g] += 1;
+            }
+            self.data_local_to_global_row.push(local_to_global);
 
             self.data_vec.push(data.clone());
             self.offset += ncol_data;
 
-            // Update cached values
             self.cached_num_columns += ncol_data;
-            let nrow_data = data.num_rows().unwrap_or(0);
-            self.cached_num_rows = self.cached_num_rows.max(nrow_data);
+            self.recompute_intersection_rows();
 
-            info!("Added {} columns", self.offset);
+            info!(
+                "Added {} columns; row intersection = {}",
+                self.offset, self.cached_num_rows
+            );
         } else {
             return Err(anyhow::anyhow!("data file has no columns"));
         }
         Ok(())
+    }
+
+    /// Recompute the intersection of row names across all currently
+    /// pushed backends. Rows present in every backend get a compact
+    /// index in raw-global order; everything else maps to `None`.
+    fn recompute_intersection_rows(&mut self) {
+        let n_datasets = self.data_local_to_global_row.len();
+        let n_global = self.row_names_by_global.len();
+
+        self.global_to_compact_row.clear();
+        self.global_to_compact_row.resize(n_global, None);
+
+        let mut next_compact = 0usize;
+        for g in 0..n_global {
+            if self.row_count_by_global[g] == n_datasets {
+                self.global_to_compact_row[g] = Some(next_compact);
+                next_compact += 1;
+            }
+        }
+        self.cached_num_rows = next_compact;
     }
 
     pub fn num_columns_by_data(&self) -> anyhow::Result<Vec<usize>> {
@@ -306,7 +344,13 @@ impl SparseIoVec {
         let (_, loc_ncol, loc_triplets) =
             self.data_vec[didx].read_triplets_by_single_column(loc)?;
         let off = *col_offset as u64;
-        triplets.extend(loc_triplets.into_iter().map(|(i, j, v)| (i, j + off, v)));
+        let l2g = self.data_local_to_global_row[didx].as_slice();
+        let g2c = self.global_to_compact_row.as_slice();
+        for (i, j, v) in loc_triplets {
+            if let Some(c) = g2c[l2g[i as usize]] {
+                triplets.push((c as u64, j + off, v));
+            }
+        }
         *col_offset += loc_ncol;
         Ok(())
     }
@@ -332,17 +376,19 @@ impl SparseIoVec {
         }
 
         let mut triplets = Vec::new();
+        let g2c = self.global_to_compact_row.as_slice();
         for (&didx, group) in &backend_groups {
             let local_cols: Vec<usize> = group.iter().map(|&(loc, _)| loc).collect();
             let (_, _, group_triplets) =
                 self.data_vec[didx].read_triplets_by_columns(local_cols)?;
 
-            // Remap: group_triplets columns are 0..group.len(),
-            // map each to the original output column position
-            triplets.extend(group_triplets.into_iter().map(|(i, j, v)| {
-                let out_col = group[j as usize].1 as u64;
-                (i, out_col, v)
-            }));
+            let l2g = self.data_local_to_global_row[didx].as_slice();
+            for (i, j, v) in group_triplets {
+                if let Some(c) = g2c[l2g[i as usize]] {
+                    let out_col = group[j as usize].1 as u64;
+                    triplets.push((c as u64, out_col, v));
+                }
+            }
         }
 
         Ok(((nrow, ncol), triplets))
@@ -1277,12 +1323,15 @@ impl SparseIoVec {
 
     pub fn row_names(&self) -> anyhow::Result<Vec<Box<str>>> {
         let ntot = self.num_rows();
-        debug_assert_eq!(ntot, self.row_name_position.len());
         let mut ret = vec![Box::from(""); ntot];
-        for (row, &index) in &self.row_name_position {
-            debug_assert!(index < ntot);
-            if index < ntot {
-                ret[index] = row.clone();
+        for (raw_global, name) in self.row_names_by_global.iter().enumerate() {
+            if let Some(compact) = self
+                .global_to_compact_row
+                .get(raw_global)
+                .copied()
+                .flatten()
+            {
+                ret[compact] = name.clone();
             }
         }
         Ok(ret)
