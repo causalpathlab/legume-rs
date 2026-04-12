@@ -45,6 +45,16 @@ fn main() -> anyhow::Result<()> {
     }
     env_logger::init();
 
+    if let Some(n) = cli.n_threads {
+        if n == 0 {
+            anyhow::bail!("--n-threads must be >= 1");
+        }
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build_global()
+            .ok();
+    }
+
     match &cli.commands {
         Commands::FromMtx(args) => {
             run_build_from_mtx(args)?;
@@ -146,6 +156,19 @@ For more details on each command, use '--help' after the command name."
 struct Cli {
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
+
+    #[arg(
+        long = "n-threads",
+        visible_aliases = ["threads", "num-threads"],
+        global = true,
+        value_name = "N",
+        help = "Limit the number of CPU threads",
+        long_help = "Limit the global rayon thread pool and HDF5/blosc compression threads. \n\
+		     Useful for bounding peak memory on `from-*` and `merge-*` subcommands, \n\
+		     since each rayon worker may hold its own intermediate buffers. \n\
+		     Defaults to all logical CPUs when unset."
+    )]
+    n_threads: Option<usize>,
 
     #[command(subcommand)]
     commands: Commands,

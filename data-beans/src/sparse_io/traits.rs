@@ -29,6 +29,19 @@ pub enum SparseIoBackend {
     HDF5,
 }
 
+/// Identifies one of the six 1-D datasets inside a sparse backend.
+/// Used by the streaming write API so we don't have to add six separate
+/// abstract methods per dtype × (csc|csr) × (data|indices|indptr).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CsKey {
+    CscData,
+    CscIndices,
+    CscIndptr,
+    CsrData,
+    CsrIndices,
+    CsrIndptr,
+}
+
 pub trait SparseIo: Sync + Send {
     type IndexIter: IntoIterator<Item = usize> + FromIterator<usize>;
 
@@ -519,7 +532,12 @@ pub trait SparseIo: Sync + Send {
         &mut self,
         row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
     ) -> anyhow::Result<()> {
-        assert!(!row_col_val_triplets.is_empty());
+        let nrow = self.num_rows().expect("should have `nrow`");
+
+        if row_col_val_triplets.is_empty() {
+            let csr_rowptr = vec![0u64; nrow + 1];
+            return self.record_csr_dataset_backend(&[], &[], &csr_rowptr);
+        }
 
         row_col_val_triplets.par_sort_by_key(|&(_, col, _)| col);
         row_col_val_triplets.par_sort_by_key(|&(row, _, _)| row);
@@ -528,17 +546,11 @@ pub trait SparseIo: Sync + Send {
         let mut csr_cols = vec![];
         let mut csr_vals = vec![];
 
-        let nrow = self.num_rows().expect("should have `nrow`");
         let nnz = row_col_val_triplets.len();
 
-        // fill in rowptr 0 to the first row index
         let first = row_col_val_triplets[0].0 as usize;
         csr_rowptr.resize(first, 0);
-        // for _ in 0..first {
-        //     csr_rowptr.push(0);
-        // }
 
-        // for the first row/triplet
         csr_rowptr.push(0);
         csr_cols.push(row_col_val_triplets[0].1);
         csr_vals.push(row_col_val_triplets[0].2);
@@ -553,7 +565,6 @@ pub trait SparseIo: Sync + Send {
             csr_vals.push(row_col_val_triplets[i].2);
         }
 
-        // fill in the rest of the rowptr
         let last = row_col_val_triplets[nnz - 1].0 as usize;
         for _ in last..nrow {
             csr_rowptr.push(nnz as u64);
@@ -566,27 +577,25 @@ pub trait SparseIo: Sync + Send {
         &mut self,
         row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
     ) -> anyhow::Result<()> {
-        assert!(!row_col_val_triplets.is_empty());
+        let ncol = self.num_columns().expect("should have `ncol`");
+
+        if row_col_val_triplets.is_empty() {
+            let csc_colptr = vec![0u64; ncol + 1];
+            return self.record_csc_dataset_backend(&[], &[], &csc_colptr);
+        }
 
         row_col_val_triplets.par_sort_by_key(|&(row, _, _)| row);
         row_col_val_triplets.par_sort_by_key(|&(_, col, _)| col);
-        // dbg!(&row_col_val_triplets);
 
         let mut csc_colptr: Vec<u64> = vec![];
         let mut csc_rows: Vec<u64> = vec![];
         let mut csc_vals: Vec<f32> = vec![];
 
-        let ncol = self.num_columns().expect("should have `ncol`");
         let nnz = row_col_val_triplets.len();
 
-        // fill in colptr 0 to the first column index
         let first = row_col_val_triplets[0].1 as usize;
         csc_colptr.resize(first, 0);
-        // for _ in 0..first {
-        //     csc_colptr.push(0);
-        // }
 
-        // for the first column/triplet
         csc_colptr.push(0);
         csc_rows.push(row_col_val_triplets[0].0);
         csc_vals.push(row_col_val_triplets[0].2);
@@ -601,12 +610,10 @@ pub trait SparseIo: Sync + Send {
             csc_vals.push(row_col_val_triplets[i].2);
         }
 
-        // fill in the rest of the colptr
         let last = row_col_val_triplets[nnz - 1].1 as usize;
         for _ in last..ncol {
             csc_colptr.push(nnz as u64);
         }
-        // dbg!(&csc_colptr);
 
         self.record_csc_dataset_backend(&csc_rows, &csc_vals, &csc_colptr)
     }
@@ -641,6 +648,186 @@ pub trait SparseIo: Sync + Send {
         csc_vals: &[f32],
         csc_colptr: &[u64],
     ) -> anyhow::Result<()>;
+
+    /// Create a fixed-size 1-D backend dataset of `len` elements for the
+    /// given CSC/CSR slot. No data is written yet.
+    fn cs_create(&mut self, key: CsKey, len: usize) -> anyhow::Result<()>;
+
+    /// Write a `u64` slab at `offset` in the specified dataset.
+    /// Used for CSC/CSR `indices` and `indptr`.
+    fn cs_write_u64(&mut self, key: CsKey, offset: u64, data: &[u64]) -> anyhow::Result<()>;
+
+    /// Write an `f32` slab at `offset` in the specified dataset.
+    /// Used for CSC/CSR `data`.
+    fn cs_write_f32(&mut self, key: CsKey, offset: u64, data: &[f32]) -> anyhow::Result<()>;
+
+    /// Begin a streaming CSC build for a sparse matrix of known shape.
+    /// Pre-creates `/by_column/{data, indices, indptr}` at their final sizes
+    /// so subsequent [`append_csc_slab`](Self::append_csc_slab) calls write
+    /// into disjoint hyperslabs without further allocation.
+    fn begin_streaming_csc(&mut self, shape: (usize, usize, usize)) -> anyhow::Result<()> {
+        let (_, ncol, nnz) = shape;
+        self.record_mtx_shape(Some(shape))?;
+        self.cs_create(CsKey::CscData, nnz)?;
+        self.cs_create(CsKey::CscIndices, nnz)?;
+        self.cs_create(CsKey::CscIndptr, ncol + 1)?;
+        Ok(())
+    }
+
+    /// Append one contiguous CSC column band.
+    ///
+    /// * `col_offset` — global column index where this band starts
+    /// * `nnz_offset` — global nnz offset where this band's values land
+    /// * `local_colptr` — length `batch_ncol`, values in `[0, batch_nnz]`,
+    ///   will be shifted by `nnz_offset` before writing
+    /// * `row_indices` — length `batch_nnz`
+    /// * `values`      — length `batch_nnz`
+    fn append_csc_slab(
+        &mut self,
+        col_offset: u64,
+        nnz_offset: u64,
+        local_colptr: &[u64],
+        row_indices: &[u64],
+        values: &[f32],
+    ) -> anyhow::Result<()> {
+        debug_assert_eq!(row_indices.len(), values.len());
+        let shifted: Vec<u64> = local_colptr.iter().map(|&p| p + nnz_offset).collect();
+        self.cs_write_u64(CsKey::CscIndptr, col_offset, &shifted)?;
+        self.cs_write_u64(CsKey::CscIndices, nnz_offset, row_indices)?;
+        self.cs_write_f32(CsKey::CscData, nnz_offset, values)?;
+        Ok(())
+    }
+
+    /// Finalize CSC streaming by writing the final indptr sentinel at
+    /// position `ncol`, equal to the total nnz.
+    fn finalize_streaming_csc(&mut self) -> anyhow::Result<()> {
+        let ncol = self
+            .num_columns()
+            .ok_or_else(|| anyhow::anyhow!("ncol not set before finalize_streaming_csc"))?;
+        let nnz = self
+            .num_non_zeros()
+            .ok_or_else(|| anyhow::anyhow!("nnz not set before finalize_streaming_csc"))?;
+        self.cs_write_u64(CsKey::CscIndptr, ncol as u64, &[nnz as u64])?;
+        self.read_column_indptr()?;
+        Ok(())
+    }
+
+    /// Build `/by_row/{data, indices, indptr}` by transposing the already-
+    /// written CSC data on disk. Uses two passes over CSC with bounded
+    /// auxiliary memory (~`24 B × nrow` plus one row-band worth of CSR).
+    fn build_csr_from_csc_streaming(&mut self) -> anyhow::Result<()> {
+        let nrow = self
+            .num_rows()
+            .ok_or_else(|| anyhow::anyhow!("nrow not set before build_csr_from_csc_streaming"))?;
+        let ncol = self
+            .num_columns()
+            .ok_or_else(|| anyhow::anyhow!("ncol not set before build_csr_from_csc_streaming"))?;
+        let nnz = self
+            .num_non_zeros()
+            .ok_or_else(|| anyhow::anyhow!("nnz not set before build_csr_from_csc_streaming"))?;
+
+        if nnz == 0 {
+            self.cs_create(CsKey::CsrData, 0)?;
+            self.cs_create(CsKey::CsrIndices, 0)?;
+            self.cs_create(CsKey::CsrIndptr, nrow + 1)?;
+            let zeros = vec![0u64; nrow + 1];
+            self.cs_write_u64(CsKey::CsrIndptr, 0, &zeros)?;
+            self.read_row_indptr()?;
+            return Ok(());
+        }
+
+        info!("transpose pass 1: counting row nnz");
+        let mut row_counts = vec![0u64; nrow];
+        const COL_BLOCK: usize = 1024;
+        let mut col_lo = 0usize;
+        while col_lo < ncol {
+            let col_hi = (col_lo + COL_BLOCK).min(ncol);
+            let cols: Self::IndexIter = (col_lo..col_hi).collect();
+            let (_, _, triplets) = self.read_triplets_by_columns(cols)?;
+            for (row_i, _, _) in &triplets {
+                row_counts[*row_i as usize] += 1;
+            }
+            col_lo = col_hi;
+        }
+
+        let mut rowptr = vec![0u64; nrow + 1];
+        let mut acc = 0u64;
+        for i in 0..nrow {
+            rowptr[i] = acc;
+            acc += row_counts[i];
+        }
+        rowptr[nrow] = acc;
+        debug_assert_eq!(acc, nnz as u64);
+
+        self.cs_create(CsKey::CsrData, nnz)?;
+        self.cs_create(CsKey::CsrIndices, nnz)?;
+        self.cs_create(CsKey::CsrIndptr, nrow + 1)?;
+        self.cs_write_u64(CsKey::CsrIndptr, 0, &rowptr)?;
+
+        // Per-band buffers carry 12 B/nnz (u64 col + f32 val); cap aggregate
+        // at ~256 MB so the row-banded scatter stays within a fixed budget
+        // regardless of nnz.
+        const TRANSPOSE_BAND_BYTES: usize = 256 * 1024 * 1024;
+        let avg_density = nnz.div_ceil(nrow.max(1));
+        let band_rows = (TRANSPOSE_BAND_BYTES / (12 * avg_density.max(1)))
+            .max(1)
+            .min(nrow);
+
+        info!(
+            "transpose pass 2: scatter (band of {} rows, {} bands)",
+            band_rows,
+            nrow.div_ceil(band_rows)
+        );
+
+        let mut band_lo = 0usize;
+        while band_lo < nrow {
+            let band_hi = (band_lo + band_rows).min(nrow);
+            let band_nnz_start = rowptr[band_lo];
+            let band_nnz_end = rowptr[band_hi];
+            let band_nnz = (band_nnz_end - band_nnz_start) as usize;
+
+            if band_nnz == 0 {
+                band_lo = band_hi;
+                continue;
+            }
+
+            let mut out_indices = vec![0u64; band_nnz];
+            let mut out_values = vec![0f32; band_nnz];
+            let mut cursor = vec![0u64; band_hi - band_lo];
+
+            let mut col_lo = 0usize;
+            while col_lo < ncol {
+                let col_hi = (col_lo + COL_BLOCK).min(ncol);
+                let cols: Self::IndexIter = (col_lo..col_hi).collect();
+                let (_, _, triplets) = self.read_triplets_by_columns(cols)?;
+                for &(row_i, col_j_local, x) in &triplets {
+                    let row_i_us = row_i as usize;
+                    if row_i_us >= band_lo && row_i_us < band_hi {
+                        let band_idx = row_i_us - band_lo;
+                        // col_j_local is already the global column index because
+                        // read_triplets_by_columns returns columns in the passed order
+                        // (0..batch for standalone call). We passed col_lo..col_hi,
+                        // which returns local indices 0..(col_hi - col_lo) — so add col_lo.
+                        let col_j_global = col_j_local + col_lo as u64;
+                        let offset_in_band =
+                            (rowptr[band_lo + band_idx] - band_nnz_start) + cursor[band_idx];
+                        out_indices[offset_in_band as usize] = col_j_global;
+                        out_values[offset_in_band as usize] = x;
+                        cursor[band_idx] += 1;
+                    }
+                }
+                col_lo = col_hi;
+            }
+
+            self.cs_write_u64(CsKey::CsrIndices, band_nnz_start, &out_indices)?;
+            self.cs_write_f32(CsKey::CsrData, band_nnz_start, &out_values)?;
+
+            band_lo = band_hi;
+        }
+
+        self.read_row_indptr()?;
+        Ok(())
+    }
 
     /// preload row index pointers
     fn read_row_indptr(&mut self) -> anyhow::Result<()>;

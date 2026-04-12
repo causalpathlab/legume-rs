@@ -10,6 +10,19 @@ use std::fmt::Display;
 use std::iter::Sum;
 use std::ops::AddAssign;
 
+const STAT_COLUMN_NAMES: [&str; 4] = ["nnz", "tot", "mu", "sig"];
+
+/// Denominator for mean/variance: clamp to a tiny positive to avoid
+/// divide-by-zero when no samples have been accumulated yet.
+fn safe_denom<T: Float>(n: usize) -> T {
+    let n = T::from(n).unwrap_or(T::one());
+    if n > T::zero() {
+        n
+    } else {
+        T::from(1e-8).unwrap_or(T::one())
+    }
+}
+
 /// Running statistics that accepts sparse column input but stores
 /// sufficient statistics in dense vectors.
 ///
@@ -48,12 +61,8 @@ where
         }
     }
 
-    /// Add a sparse column to the running statistics
-    ///
-    /// # Arguments
-    /// * `row_indices` - Row indices of non-zero values
-    /// * `values` - Non-zero values
-    ///
+    /// Add a sparse column (row indices + values) to the running
+    /// statistics. The column advances `ncols_processed` by one.
     pub fn add_sparse_column(&mut self, row_indices: &[usize], values: &[T]) {
         debug_assert_eq!(row_indices.len(), values.len());
 
@@ -69,43 +78,16 @@ where
         self.ncols_processed += 1;
     }
 
-    /// Add from sparse triplets (row, col, value)
-    ///
-    /// # Arguments
-    /// * `ncols` - Number of columns in this batch
-    /// * `triplets` - Vector of (row, col, value) triplets
-    ///
-    pub fn add_triplets(&mut self, ncols: usize, triplets: &[(usize, usize, T)]) {
-        for &(row, _, val) in triplets {
-            if val.is_finite() {
-                if val > T::zero() {
-                    self.npos[row] += T::one();
-                }
-                self.s1[row] += val;
-                self.s2[row] += val * val;
-            }
-        }
-        self.ncols_processed += ncols;
-    }
-
-    /// Number of rows
     pub fn nrows(&self) -> usize {
         self.nrows
     }
 
-    /// Number of columns processed so far
     pub fn ncols_processed(&self) -> usize {
         self.ncols_processed
     }
 
-    /// Get the denominator for mean/variance calculations
     fn denom(&self) -> T {
-        let n = T::from(self.ncols_processed).unwrap_or(T::one());
-        if n > T::zero() {
-            n
-        } else {
-            T::from(1e-8).unwrap_or(T::one())
-        }
+        safe_denom::<T>(self.ncols_processed)
     }
 
     /// Convert to owned vectors (npos, sum, mean, std)
@@ -131,114 +113,31 @@ impl<T> SparseRunningStatistics<T>
 where
     T: Float + AddAssign + Sum + Zero + Display + ToPrimitive,
 {
-    /// Save the statistics to a file
-    /// # Arguments
-    /// * `filename` - The name of the file to save the statistics to
-    /// * `names` - The names of the rows
-    /// * `sep` - Separator string
+    /// Save the statistics to a file (parquet if `filename` ends with
+    /// `.parquet`, otherwise a separator-delimited text file).
     pub fn save(&self, filename: &str, names: &[Box<str>], sep: &str) -> anyhow::Result<()> {
-        match file_ext(filename).unwrap_or(Box::from("")).as_ref() {
-            "parquet" => {
-                self.save_parquet(filename, names)?;
-            }
-            _ => {
-                let mut out = self.to_string_vec(names, sep)?;
-                let header = format!("#name{}nnz{}tot{}mu{}sig", sep, sep, sep, sep);
-                out.insert(0, header.into_boxed_str());
-                write_lines(&out, filename)?;
-            }
-        };
-        Ok(())
-    }
-
-    /// Save statistics to a parquet file
-    fn save_parquet(&self, filename: &str, names: &[Box<str>]) -> anyhow::Result<()> {
-        if names.len() != self.nrows {
-            anyhow::bail!(
-                "The number of names ({}) does not match nrows ({})",
-                names.len(),
-                self.nrows
-            );
-        }
-
-        let nnz: Vec<f32> = self
-            .count_positives()
-            .iter()
-            .map(|v| v.to_f32().unwrap_or(0.0))
-            .collect();
-        let tot: Vec<f32> = self
-            .sum()
-            .iter()
-            .map(|v| v.to_f32().unwrap_or(0.0))
-            .collect();
-        let mu: Vec<f32> = self
-            .mean()
-            .iter()
-            .map(|v| v.to_f32().unwrap_or(0.0))
-            .collect();
-        let sig: Vec<f32> = self
-            .std()
-            .iter()
-            .map(|v| v.to_f32().unwrap_or(0.0))
-            .collect();
-
-        let column_names: Vec<Box<str>> = vec!["nnz", "tot", "mu", "sig"]
-            .into_iter()
-            .map(|s| s.into())
-            .collect();
-
-        let column_types = vec![
-            ParquetType::FLOAT,
-            ParquetType::FLOAT,
-            ParquetType::FLOAT,
-            ParquetType::FLOAT,
-        ];
-
-        let parquet_writer = ParquetWriter::new(
+        let (nnz, tot, mu, sig) = self.to_f32_vecs();
+        write_stat_file(
             filename,
-            (self.nrows, 4),
-            (Some(names), Some(&column_names)),
-            Some(&column_types),
-            None,
-        )?;
-
-        let mut writer = parquet_writer.get_writer()?;
-        let mut row_group_writer = writer.next_row_group()?;
-
-        parquet_add_string_column(&mut row_group_writer, names)?;
-        parquet_add_numeric_column(&mut row_group_writer, &nnz)?;
-        parquet_add_numeric_column(&mut row_group_writer, &tot)?;
-        parquet_add_numeric_column(&mut row_group_writer, &mu)?;
-        parquet_add_numeric_column(&mut row_group_writer, &sig)?;
-
-        row_group_writer.close()?;
-        writer.close()?;
-
-        Ok(())
+            names,
+            sep,
+            StatColumns {
+                nnz: &nnz,
+                tot: &tot,
+                mu: &mu,
+                sig: &sig,
+            },
+        )
     }
 
     /// Get statistics as vectors (nnz, tot, mu, sig) converted to f32
     pub fn to_f32_vecs(&self) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
-        let nnz: Vec<f32> = self
-            .count_positives()
-            .iter()
-            .map(|v| v.to_f32().unwrap_or(0.0))
-            .collect();
-        let tot: Vec<f32> = self
-            .sum()
-            .iter()
-            .map(|v| v.to_f32().unwrap_or(0.0))
-            .collect();
-        let mu: Vec<f32> = self
-            .mean()
-            .iter()
-            .map(|v| v.to_f32().unwrap_or(0.0))
-            .collect();
-        let sig: Vec<f32> = self
-            .std()
-            .iter()
-            .map(|v| v.to_f32().unwrap_or(0.0))
-            .collect();
+        let to_f32_slice =
+            |v: &[T]| -> Vec<f32> { v.iter().map(|x| x.to_f32().unwrap_or(0.0)).collect() };
+        let nnz = to_f32_slice(&self.npos);
+        let tot = to_f32_slice(&self.s1);
+        let mu = to_f32_slice(&self.mean());
+        let sig = to_f32_slice(&self.std());
         (nnz, tot, mu, sig)
     }
 
@@ -276,6 +175,261 @@ where
             .collect();
         Ok(out)
     }
+}
+
+/// Running statistics computed per-column directly from sparse (CSC) input.
+///
+/// Unlike [`SparseRunningStatistics`] which tracks per-row statistics across
+/// columns, this tracks per-column statistics: nnz, sum, and sum-of-squares
+/// for each column. Mean/variance use `nrows` as the denominator (implicit
+/// zeros contribute zero values).
+///
+/// CSC slabs are consumed directly — no triplet materialization — and each
+/// slab only needs to know its starting column offset in the global index
+/// space.
+#[derive(Clone)]
+pub struct SparseColumnRunningStatistics<T>
+where
+    T: Float,
+{
+    nrows: usize,
+    npos: Vec<T>,
+    s1: Vec<T>,
+    s2: Vec<T>,
+}
+
+impl<T> SparseColumnRunningStatistics<T>
+where
+    T: Float + AddAssign + Sum + Zero,
+{
+    /// Create a new per-column running statistics accumulator.
+    ///
+    /// # Arguments
+    /// * `ncols` — total number of columns whose statistics will be tracked
+    /// * `nrows` — row denominator used for mean/variance (number of rows
+    ///   considered; for a row-filtered scan this should be the number of
+    ///   rows kept)
+    pub fn new(ncols: usize, nrows: usize) -> Self {
+        Self {
+            nrows,
+            npos: vec![T::zero(); ncols],
+            s1: vec![T::zero(); ncols],
+            s2: vec![T::zero(); ncols],
+        }
+    }
+
+    /// Accumulate statistics from a CSC slab. `col_offset` is the global
+    /// column index of the slab's local column 0.
+    pub fn add_csc(&mut self, csc: &CscMatrix<T>, col_offset: usize) {
+        self.add_csc_inner(csc, col_offset, None);
+    }
+
+    /// Accumulate statistics from a CSC slab, keeping only rows where
+    /// `row_mask[row]` is `true`. `row_mask` must cover every row index
+    /// appearing in the CSC (length ≥ csc.nrows()).
+    pub fn add_csc_masked(&mut self, csc: &CscMatrix<T>, col_offset: usize, row_mask: &[bool]) {
+        debug_assert!(row_mask.len() >= csc.nrows());
+        self.add_csc_inner(csc, col_offset, Some(row_mask));
+    }
+
+    fn add_csc_inner(
+        &mut self,
+        csc: &CscMatrix<T>,
+        col_offset: usize,
+        row_mask: Option<&[bool]>,
+    ) {
+        for (local_col, col) in csc.col_iter().enumerate() {
+            let c = col_offset + local_col;
+            let rows = col.row_indices();
+            let vals = col.values();
+            for (&row, &val) in rows.iter().zip(vals.iter()) {
+                if let Some(mask) = row_mask {
+                    if !mask[row] {
+                        continue;
+                    }
+                }
+                if !val.is_finite() {
+                    continue;
+                }
+                if val > T::zero() {
+                    self.npos[c] += T::one();
+                }
+                self.s1[c] += val;
+                self.s2[c] += val * val;
+            }
+        }
+    }
+
+    pub fn ncols(&self) -> usize {
+        self.npos.len()
+    }
+
+    pub fn nrows(&self) -> usize {
+        self.nrows
+    }
+
+    fn denom(&self) -> T {
+        safe_denom::<T>(self.nrows)
+    }
+}
+
+impl<T> SparseColumnRunningStatistics<T>
+where
+    T: Float + AddAssign + Sum + Zero + Display + ToPrimitive,
+{
+    /// Save the per-column statistics to a file (parquet if `filename`
+    /// ends with `.parquet`, otherwise a separator-delimited text file).
+    pub fn save(&self, filename: &str, names: &[Box<str>], sep: &str) -> anyhow::Result<()> {
+        let (nnz, tot, mu, sig) = self.to_f32_vecs();
+        write_stat_file(
+            filename,
+            names,
+            sep,
+            StatColumns {
+                nnz: &nnz,
+                tot: &tot,
+                mu: &mu,
+                sig: &sig,
+            },
+        )
+    }
+
+    /// Get statistics as vectors (nnz, tot, mu, sig) converted to f32
+    pub fn to_f32_vecs(&self) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+        let to_f32_slice =
+            |v: &[T]| -> Vec<f32> { v.iter().map(|x| x.to_f32().unwrap_or(0.0)).collect() };
+        let nnz = to_f32_slice(&self.npos);
+        let tot = to_f32_slice(&self.s1);
+        let mu = to_f32_slice(&self.mean());
+        let sig = to_f32_slice(&self.std());
+        (nnz, tot, mu, sig)
+    }
+}
+
+impl<T> RunningStatOps<T> for SparseColumnRunningStatistics<T>
+where
+    T: Float + AddAssign + Sum + Zero,
+{
+    type Output = Vec<T>;
+
+    fn clear(&mut self) {
+        self.npos.fill(T::zero());
+        self.s1.fill(T::zero());
+        self.s2.fill(T::zero());
+    }
+
+    fn count_positives(&self) -> Vec<T> {
+        self.npos.clone()
+    }
+
+    fn sum(&self) -> Vec<T> {
+        self.s1.clone()
+    }
+
+    fn mean(&self) -> Vec<T> {
+        let n = self.denom();
+        self.s1.iter().map(|&s| s / n).collect()
+    }
+
+    fn variance(&self) -> Vec<T> {
+        let n = self.denom();
+        self.s1
+            .iter()
+            .zip(self.s2.iter())
+            .map(|(&s1, &s2)| {
+                let mu = s1 / n;
+                s2 / n - mu * mu
+            })
+            .collect()
+    }
+
+    fn std(&self) -> Vec<T> {
+        self.variance().into_iter().map(|v| v.sqrt()).collect()
+    }
+}
+
+/// Four-column stat table (nnz, tot, mu, sig) to be written by
+/// [`write_stat_file`]. All slices must have the same length.
+struct StatColumns<'a> {
+    nnz: &'a [f32],
+    tot: &'a [f32],
+    mu: &'a [f32],
+    sig: &'a [f32],
+}
+
+impl StatColumns<'_> {
+    fn len(&self) -> usize {
+        self.nnz.len()
+    }
+}
+
+/// Shared parquet/TSV writer for per-entity stat tables with the
+/// standard (name, nnz, tot, mu, sig) schema.
+fn write_stat_file(
+    filename: &str,
+    names: &[Box<str>],
+    sep: &str,
+    stats: StatColumns<'_>,
+) -> anyhow::Result<()> {
+    let n = stats.len();
+    if names.len() != n {
+        anyhow::bail!(
+            "The number of names ({}) does not match stat length ({})",
+            names.len(),
+            n
+        );
+    }
+
+    match file_ext(filename).unwrap_or(Box::from("")).as_ref() {
+        "parquet" => {
+            let column_names: Vec<Box<str>> =
+                STAT_COLUMN_NAMES.iter().map(|s| (*s).into()).collect();
+            let column_types = vec![ParquetType::FLOAT; STAT_COLUMN_NAMES.len()];
+
+            let parquet_writer = ParquetWriter::new(
+                filename,
+                (n, 4),
+                (Some(names), Some(&column_names)),
+                Some(&column_types),
+                None,
+            )?;
+
+            let mut writer = parquet_writer.get_writer()?;
+            let mut row_group_writer = writer.next_row_group()?;
+
+            parquet_add_string_column(&mut row_group_writer, names)?;
+            parquet_add_numeric_column(&mut row_group_writer, stats.nnz)?;
+            parquet_add_numeric_column(&mut row_group_writer, stats.tot)?;
+            parquet_add_numeric_column(&mut row_group_writer, stats.mu)?;
+            parquet_add_numeric_column(&mut row_group_writer, stats.sig)?;
+
+            row_group_writer.close()?;
+            writer.close()?;
+        }
+        _ => {
+            let mut out: Vec<Box<str>> = (0..n)
+                .map(|i| {
+                    format!(
+                        "{}{}{}{}{}{}{}{}{}",
+                        names[i],
+                        sep,
+                        format_value(stats.nnz[i]),
+                        sep,
+                        format_value(stats.tot[i]),
+                        sep,
+                        format_value(stats.mu[i]),
+                        sep,
+                        format_value(stats.sig[i])
+                    )
+                    .into_boxed_str()
+                })
+                .collect();
+            let header = format!("#name{}nnz{}tot{}mu{}sig", sep, sep, sep, sep);
+            out.insert(0, header.into_boxed_str());
+            write_lines(&out, filename)?;
+        }
+    }
+    Ok(())
 }
 
 /// Save multiple group statistics to a single parquet file with a group column
@@ -517,5 +671,87 @@ mod tests {
         let mean = stat.mean();
         assert!((mean[0] - 2.0).abs() < 1e-10);
         assert!((mean[1] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_sparse_column_running_stat_csc() {
+        use nalgebra_sparse::CooMatrix;
+
+        // 3 rows x 4 columns:
+        // col0 = [1, 0, 3]
+        // col1 = [0, 2, 0]
+        // col2 = [0, 0, 0]
+        // col3 = [4, 5, 0]
+        let mut coo: CooMatrix<f32> = CooMatrix::new(3, 4);
+        coo.push(0, 0, 1.0);
+        coo.push(2, 0, 3.0);
+        coo.push(1, 1, 2.0);
+        coo.push(0, 3, 4.0);
+        coo.push(1, 3, 5.0);
+        let csc = CscMatrix::from(&coo);
+
+        let mut stat = SparseColumnRunningStatistics::<f32>::new(4, 3);
+        stat.add_csc(&csc, 0);
+
+        assert_eq!(stat.count_positives(), vec![2.0, 1.0, 0.0, 2.0]);
+        assert_eq!(stat.sum(), vec![4.0, 2.0, 0.0, 9.0]);
+
+        // mean = sum / nrows (denominator = 3)
+        let mean = stat.mean();
+        assert!((mean[0] - 4.0 / 3.0).abs() < 1e-6);
+        assert!((mean[1] - 2.0 / 3.0).abs() < 1e-6);
+        assert!((mean[2] - 0.0).abs() < 1e-6);
+        assert!((mean[3] - 9.0 / 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sparse_column_running_stat_block_offset() {
+        use nalgebra_sparse::CooMatrix;
+
+        // Simulate processing columns in two blocks of a 3x4 matrix:
+        // Block A (cols 0..2): col0=[1,0,3], col1=[0,2,0]
+        // Block B (cols 2..4): col2=[0,0,0], col3=[4,5,0]
+        let mut coo_a: CooMatrix<f32> = CooMatrix::new(3, 2);
+        coo_a.push(0, 0, 1.0);
+        coo_a.push(2, 0, 3.0);
+        coo_a.push(1, 1, 2.0);
+        let csc_a = CscMatrix::from(&coo_a);
+
+        let mut coo_b: CooMatrix<f32> = CooMatrix::new(3, 2);
+        coo_b.push(0, 1, 4.0);
+        coo_b.push(1, 1, 5.0);
+        let csc_b = CscMatrix::from(&coo_b);
+
+        let mut stat = SparseColumnRunningStatistics::<f32>::new(4, 3);
+        stat.add_csc(&csc_a, 0);
+        stat.add_csc(&csc_b, 2);
+
+        assert_eq!(stat.count_positives(), vec![2.0, 1.0, 0.0, 2.0]);
+        assert_eq!(stat.sum(), vec![4.0, 2.0, 0.0, 9.0]);
+    }
+
+    #[test]
+    fn test_sparse_column_running_stat_masked() {
+        use nalgebra_sparse::CooMatrix;
+
+        // 4 rows x 2 columns, keep only rows [0, 2]
+        // col0 = [1, 2, 3, 4] → kept: 1+3 = 4, nnz=2
+        // col1 = [0, 5, 0, 6] → kept: 0, nnz=0
+        let mut coo: CooMatrix<f32> = CooMatrix::new(4, 2);
+        coo.push(0, 0, 1.0);
+        coo.push(1, 0, 2.0);
+        coo.push(2, 0, 3.0);
+        coo.push(3, 0, 4.0);
+        coo.push(1, 1, 5.0);
+        coo.push(3, 1, 6.0);
+        let csc = CscMatrix::from(&coo);
+
+        let row_mask = vec![true, false, true, false];
+
+        let mut stat = SparseColumnRunningStatistics::<f32>::new(2, 2);
+        stat.add_csc_masked(&csc, 0, &row_mask);
+
+        assert_eq!(stat.count_positives(), vec![2.0, 0.0]);
+        assert_eq!(stat.sum(), vec![4.0, 0.0]);
     }
 }

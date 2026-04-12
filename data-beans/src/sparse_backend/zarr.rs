@@ -274,6 +274,83 @@ impl SparseMtxData {
         Ok(ret)
     }
 
+    /// Create an empty fixed-shape 1-D array with the given data type,
+    /// chunk layout, and fill value. No data is written.
+    ///
+    /// Used by the streaming write path to pre-create `/by_column/*` and
+    /// `/by_row/*` arrays at their final size before any triplets land.
+    fn create_shaped_vector(
+        &mut self,
+        key: &str,
+        dt: DataType,
+        elem_bytes: usize,
+        nelem: usize,
+    ) -> anyhow::Result<()> {
+        use zarrs::array::codec::ZstdCodec;
+        use zarrs::array::ArrayBuilder;
+        use zarrs::array::FillValue;
+
+        let ws = self.write_store()?;
+
+        let chunk_size = chunk_elems(nelem, elem_bytes);
+
+        let fill = if dt == data_type::float32() {
+            FillValue::from(zarrs::array::ZARR_NAN_F32)
+        } else if dt == data_type::uint64() {
+            FillValue::from(0u64)
+        } else {
+            FillValue::from(0)
+        };
+
+        let array = ArrayBuilder::new(
+            vec![nelem.max(1) as u64],
+            vec![chunk_size.max(1) as u64],
+            dt,
+            fill,
+        )
+        .bytes_to_bytes_codecs(vec![Arc::new(ZstdCodec::new(COMPRESSION_LEVEL, false))])
+        .build(ws.clone(), key)?;
+
+        array.store_metadata()?;
+        Ok(())
+    }
+
+    /// Open an existing array through the writable filesystem store.
+    /// `_open_vector` uses the read-only handle, so it can't be used
+    /// to stage streaming writes.
+    fn _open_writable_vector(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<zarrs::array::Array<FilesystemStore>> {
+        use zarrs::array::Array as ZArray;
+        let ws = self.write_store()?.clone();
+        let ret = ZArray::open(ws, key)?;
+        Ok(ret)
+    }
+
+    /// Write a `u64` slab at the given offset. The target array must
+    /// already exist (see [`create_shaped_vector`]).
+    fn write_slab_u64(&mut self, key: &str, offset: u64, data: &[u64]) -> anyhow::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let array = self._open_writable_vector(key)?;
+        let subset = Self::create_subset(offset..offset + data.len() as u64);
+        array.store_array_subset(&subset, data)?;
+        Ok(())
+    }
+
+    /// Write an `f32` slab at the given offset.
+    fn write_slab_f32(&mut self, key: &str, offset: u64, data: &[f32]) -> anyhow::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let array = self._open_writable_vector(key)?;
+        let subset = Self::create_subset(offset..offset + data.len() as u64);
+        array.store_array_subset(&subset, data)?;
+        Ok(())
+    }
+
     #[allow(clippy::type_complexity)]
     fn open_csc_triplets(
         &self,
@@ -475,7 +552,11 @@ impl SparseIo for SparseMtxData {
     fn remove_backend_file(&self) -> anyhow::Result<()> {
         let backend = std::path::Path::new(&self.file_name);
         if backend.exists() {
-            std::fs::remove_dir_all(backend)?;
+            if backend.is_file() {
+                std::fs::remove_file(backend)?;
+            } else {
+                std::fs::remove_dir_all(backend)?;
+            }
         }
         Ok(())
     }
@@ -905,5 +986,72 @@ impl SparseIo for SparseMtxData {
         self.new_filled_vector(key, data_type::uint64(), csc_colptr)?;
 
         Ok(())
+    }
+
+    fn cs_create(&mut self, key: CsKey, len: usize) -> anyhow::Result<()> {
+        let (group, path, dt, elem_bytes) = match key {
+            CsKey::CscData => (
+                "/by_column",
+                "/by_column/data",
+                data_type::float32(),
+                std::mem::size_of::<f32>(),
+            ),
+            CsKey::CscIndices => (
+                "/by_column",
+                "/by_column/indices",
+                data_type::uint64(),
+                std::mem::size_of::<u64>(),
+            ),
+            CsKey::CscIndptr => (
+                "/by_column",
+                "/by_column/indptr",
+                data_type::uint64(),
+                std::mem::size_of::<u64>(),
+            ),
+            CsKey::CsrData => (
+                "/by_row",
+                "/by_row/data",
+                data_type::float32(),
+                std::mem::size_of::<f32>(),
+            ),
+            CsKey::CsrIndices => (
+                "/by_row",
+                "/by_row/indices",
+                data_type::uint64(),
+                std::mem::size_of::<u64>(),
+            ),
+            CsKey::CsrIndptr => (
+                "/by_row",
+                "/by_row/indptr",
+                data_type::uint64(),
+                std::mem::size_of::<u64>(),
+            ),
+        };
+        self._add_group(group)?;
+        self.create_shaped_vector(path, dt, elem_bytes, len)
+    }
+
+    fn cs_write_u64(&mut self, key: CsKey, offset: u64, data: &[u64]) -> anyhow::Result<()> {
+        let path = match key {
+            CsKey::CscIndices => "/by_column/indices",
+            CsKey::CscIndptr => "/by_column/indptr",
+            CsKey::CsrIndices => "/by_row/indices",
+            CsKey::CsrIndptr => "/by_row/indptr",
+            CsKey::CscData | CsKey::CsrData => {
+                return Err(anyhow!("cs_write_u64 called on f32 slot {:?}", key));
+            }
+        };
+        self.write_slab_u64(path, offset, data)
+    }
+
+    fn cs_write_f32(&mut self, key: CsKey, offset: u64, data: &[f32]) -> anyhow::Result<()> {
+        let path = match key {
+            CsKey::CscData => "/by_column/data",
+            CsKey::CsrData => "/by_row/data",
+            _ => {
+                return Err(anyhow!("cs_write_f32 called on u64 slot {:?}", key));
+            }
+        };
+        self.write_slab_f32(path, offset, data)
     }
 }
