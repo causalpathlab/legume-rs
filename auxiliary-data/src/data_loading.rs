@@ -43,15 +43,17 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
         data_vec.push(Arc::from(data), data_name)?;
     }
 
-    // check if row names are the same
-    let row_names = data_vec[0].row_names()?;
-
-    for j in 1..data_vec.len() {
-        let row_names_j = data_vec[j].row_names()?;
-        if row_names != row_names_j {
-            return Err(anyhow::anyhow!(
-                "Row names are not the same. Consider using `data-beans sort-rows` to make sure that the row names are consistent across data sets."
-            ));
+    // SparseIoVec already aligns rows to the intersection of row names
+    // across all backends; warn if any backend introduced new rows that
+    // had to be dropped.
+    let intersection_size = data_vec.num_rows();
+    for j in 0..data_vec.len() {
+        let backend_rows = data_vec[j].num_rows().unwrap_or(0);
+        if backend_rows != intersection_size {
+            info!(
+                "Backend {} has {} rows; using {} shared rows for fitting",
+                j, backend_rows, intersection_size
+            );
         }
     }
 
