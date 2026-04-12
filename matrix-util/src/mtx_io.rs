@@ -41,6 +41,41 @@ where
     Ok(())
 }
 
+/// Read only the shape header of a MatrixMarket file — returns
+/// `(nrow, ncol, nnz)` without parsing any triplets.
+///
+/// Skips `%`-prefixed comment lines and blank lines, then parses the
+/// first remaining line as the coordinate-format shape triple. Useful
+/// for streaming merge paths that need to pre-size backend datasets
+/// before reading the body.
+pub fn read_mtx_header(mtx_file: &str) -> anyhow::Result<(usize, usize, usize)> {
+    use std::io::BufRead;
+
+    let reader = crate::common_io::open_buf_reader(mtx_file)?;
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('%') {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let nrow: usize = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("mtx header missing nrow in {}", mtx_file))?
+            .parse()?;
+        let ncol: usize = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("mtx header missing ncol in {}", mtx_file))?
+            .parse()?;
+        let nnz: usize = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("mtx header missing nnz in {}", mtx_file))?
+            .parse()?;
+        return Ok((nrow, ncol, nnz));
+    }
+    Err(anyhow::anyhow!("no shape header found in {}", mtx_file))
+}
+
 /// Read a matrix market file and return a vector of triplets (row, col, val)
 /// * `mtx_file` - Path to the matrix market file
 #[allow(clippy::type_complexity)]

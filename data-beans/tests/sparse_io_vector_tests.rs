@@ -149,7 +149,7 @@ fn columns_triplets_two_backends() -> anyhow::Result<()> {
 
     // Global columns: 0..4 from backend A, 4..10 from backend B
     // Read columns spanning both backends in mixed order
-    let sel = vec![0, 5, 3, 7];
+    let sel = [0, 5, 3, 7];
     let mat = vec.read_columns_ndarray(sel.iter().copied())?;
 
     // Build expected manually: col0=A[:,0], col1=B[:,1], col2=A[:,3], col3=B[:,3]
@@ -227,7 +227,7 @@ fn read_columns_across_three_backends() -> anyhow::Result<()> {
     assert_eq!(vec.len(), 3);
 
     // Read one column from each backend: global 1 (d0), 5 (d1), 10 (d2)
-    let sel = vec![1, 5, 10];
+    let sel = [1, 5, 10];
     let mat = vec.read_columns_ndarray(sel.iter().copied())?;
 
     let expected = ndarray::stack(
@@ -264,7 +264,7 @@ fn read_columns_dmatrix_matches_ndarray() -> anyhow::Result<()> {
     let mut vec = SparseIoVec::new();
     vec.push(sp, None)?;
 
-    let sel = vec![1, 3, 7];
+    let sel = [1, 3, 7];
     let nd = vec.read_columns_ndarray(sel.iter().copied())?;
     let dm = vec.read_columns_dmatrix(sel.iter().copied())?;
 
@@ -284,7 +284,7 @@ fn read_columns_csc_nnz_correct() -> anyhow::Result<()> {
     let mut vec = SparseIoVec::new();
     vec.push(sp, None)?;
 
-    let sel = vec![0, 2, 4];
+    let sel = [0, 2, 4];
     let csc = vec.read_columns_csc(sel.iter().copied())?;
 
     assert_eq!(csc.nrows(), nrow);
@@ -423,11 +423,11 @@ fn register_batches_and_metadata() -> anyhow::Result<()> {
     let b0 = membership[0];
     let b1 = membership[15];
     assert_ne!(b0, b1);
-    for i in 0..15 {
-        assert_eq!(membership[i], b0);
+    for m in &membership[0..15] {
+        assert_eq!(*m, b0);
     }
-    for i in 15..30 {
-        assert_eq!(membership[i], b1);
+    for m in &membership[15..30] {
+        assert_eq!(*m, b1);
     }
 
     Ok(())

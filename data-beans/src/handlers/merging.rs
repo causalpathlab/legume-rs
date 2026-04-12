@@ -5,8 +5,8 @@ use crate::utilities::io_helpers::{read_col_names, read_row_names};
 
 use clap::Args;
 use data_beans::sparse_data_visitors::create_jobs;
-use data_beans::zarr_io::{apply_zip_flag, finalize_zarr_output};
-use indicatif::{ParallelProgressIterator, ProgressBar};
+use data_beans::zarr_io::{apply_zip_flag, finalize_zarr_output, materialize_writable_backend};
+use indicatif::ProgressBar;
 use log::info;
 use matrix_util::common_io::*;
 use matrix_util::mtx_io;
@@ -219,6 +219,43 @@ pub struct MergeMtxArgs {
                      Columns with fewer non-zeros will be removed if squeezing is enabled."
     )]
     pub column_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Block size for parallel processing and squeeze pass",
+        long_help = "Number of columns handled per rayon job during triplet read \n\
+                     and the post-merge squeeze pass. \n\
+                     Smaller values bound peak memory at the cost of extra scheduling overhead."
+    )]
+    pub block_size: usize,
+}
+
+/// Sort triplets into CSC layout and split into (colptr, row indices, values).
+///
+/// `colptr[j]` is the local offset of column `j`'s first entry; the trailing
+/// sentinel is written by `finalize_streaming_csc`.
+fn build_csc_slab(
+    mut triplets: Vec<(u64, u64, f32)>,
+    ncol: usize,
+) -> (Vec<u64>, Vec<u64>, Vec<f32>) {
+    triplets.par_sort_by_key(|&(row, col, _)| (col, row));
+
+    let mut local_colptr = vec![0u64; ncol];
+    let mut col_counts = vec![0u64; ncol];
+    for &(_, col_local, _) in &triplets {
+        col_counts[col_local as usize] += 1;
+    }
+    let mut acc: u64 = 0;
+    for j in 0..ncol {
+        local_colptr[j] = acc;
+        acc += col_counts[j];
+    }
+    debug_assert_eq!(acc as usize, triplets.len());
+
+    let row_indices: Vec<u64> = triplets.iter().map(|&(r, _, _)| r).collect();
+    let values: Vec<f32> = triplets.iter().map(|&(_, _, v)| v).collect();
+    (local_colptr, row_indices, values)
 }
 
 pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
@@ -230,18 +267,26 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     let num_batches = args.data_files.len();
     info!("merging over {} batches ...", num_batches);
 
-    // Generate unique batch names
     let batch_names = generate_unique_batch_names(&args.data_files)?;
     info!("Batch names: {:?}", batch_names);
 
-    let mut row_names = vec![];
-    let mut column_names = vec![];
-    let mut column_batch_names = vec![];
-    let mut triplets = vec![];
+    struct BatchHandle {
+        path: Box<str>,
+        backend: SparseIoBackend,
+        ncol: usize,
+        col_offset: u64,
+        nnz_offset: u64,
+    }
 
-    let mut ntot = 0;
+    let mut batches: Vec<BatchHandle> = Vec::with_capacity(num_batches);
+    let mut row_names: Vec<Box<str>> = vec![];
+    let mut column_names: Vec<Box<str>> = vec![];
+    let mut column_batch_names: Vec<Box<str>> = vec![];
+    let mut col_offset: u64 = 0;
+    let mut nnz_offset: u64 = 0;
+
     for (batch_idx, data_file) in args.data_files.iter().enumerate() {
-        info!("Importing data file: {}", data_file);
+        info!("inventorying data file: {}", data_file);
 
         let backend = match file_ext(data_file)?.to_string().as_str() {
             "h5" => SparseIoBackend::HDF5,
@@ -249,8 +294,13 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
             _ => SparseIoBackend::Zarr,
         };
 
-        let mut data = open_sparse_matrix(data_file, &backend)?;
-        data.preload_columns()?;
+        let data = open_sparse_matrix(data_file, &backend)?;
+        let ncol = data
+            .num_columns()
+            .ok_or_else(|| anyhow::anyhow!("missing ncol in {}", data_file))?;
+        let nnz = data
+            .num_non_zeros()
+            .ok_or_else(|| anyhow::anyhow!("missing nnz in {}", data_file))?;
 
         if row_names.is_empty() {
             row_names = data.row_names()?;
@@ -259,46 +309,34 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
             assert_eq!(row_names, data.row_names()?);
         }
 
-        if let Some(ntot_curr) = data.num_columns() {
-            // 1. read triplets
-            let jobs = create_jobs(ntot_curr, Some(args.block_size));
-            let triplets_curr = jobs
-                .par_iter()
-                .progress_count(jobs.len() as u64)
-                .filter_map(|(lb, ub)| {
-                    if let Ok((_, _, triplets)) =
-                        data.read_triplets_by_columns((*lb..*ub).collect())
-                    {
-                        let offset = (*lb + ntot) as u64;
-                        Some(
-                            triplets
-                                .iter()
-                                .map(|&(i, j, x_ij)| (i, j + offset, x_ij))
-                                .collect::<Vec<_>>(),
-                        )
-                    } else {
-                        None
-                    }
-                })
-                .flatten()
-                .collect::<Vec<_>>();
+        let _names = data.column_names()?;
+        let batch_name = &batch_names[batch_idx];
+        column_names.extend(
+            _names
+                .into_iter()
+                .map(|x| format!("{}{}{}", x, COLUMN_SEP, batch_name).into_boxed_str()),
+        );
+        column_batch_names.extend(vec![batch_name.clone(); ncol]);
 
-            let _names = data.column_names()?;
-            let batch_name = &batch_names[batch_idx];
-            column_names.extend(
-                _names
-                    .into_iter()
-                    .map(|x| format!("{}{}{}", x, COLUMN_SEP, batch_name).into_boxed_str())
-                    .collect::<Vec<_>>(),
-            );
+        batches.push(BatchHandle {
+            path: data_file.clone(),
+            backend,
+            ncol,
+            col_offset,
+            nnz_offset,
+        });
 
-            triplets.extend(triplets_curr);
-            column_batch_names.extend(vec![batch_name.clone(); ntot_curr]);
-            ntot += ntot_curr;
-        }
+        col_offset += ncol as u64;
+        nnz_offset += nnz as u64;
     }
 
-    info!("Found {} columns/barcodes ...", column_names.len());
+    let total_ncol = col_offset as usize;
+    let total_nnz = nnz_offset as usize;
+    let total_nrow = row_names.len();
+    info!(
+        "Found {} columns/barcodes across {} batches (total nnz = {})",
+        total_ncol, num_batches, total_nnz
+    );
 
     let effective_output = apply_zip_flag(&args.output, args.zip);
     let (backend, backend_file) =
@@ -312,15 +350,48 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
         remove_file(&backend_file)?;
     }
 
-    let mut data = create_sparse_from_triplets(
-        &triplets,
-        (row_names.len(), column_names.len(), triplets.len()),
-        Some(&backend_file),
-        Some(&backend),
-    )?;
+    let mut out = create_sparse_streaming_empty(Some(&backend_file), Some(&backend))?;
+    out.begin_streaming_csc((total_nrow, total_ncol, total_nnz))?;
 
-    data.register_row_names_vec(&row_names);
-    data.register_column_names_vec(&column_names);
+    let pb = ProgressBar::new(num_batches as u64);
+    for h in &batches {
+        let src = open_sparse_matrix(&h.path, &h.backend)?;
+        let jobs = create_jobs(h.ncol, Some(args.block_size));
+        let triplets_batch: Vec<(u64, u64, f32)> = jobs
+            .par_iter()
+            .filter_map(|(lb, ub)| {
+                src.read_triplets_by_columns((*lb..*ub).collect())
+                    .ok()
+                    .map(|(_, _, t)| {
+                        let lb_u64 = *lb as u64;
+                        t.into_iter()
+                            .map(move |(i, j_local, x)| (i, j_local + lb_u64, x))
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .flatten()
+            .collect();
+
+        let (local_colptr, row_indices, values) = build_csc_slab(triplets_batch, h.ncol);
+        out.append_csc_slab(
+            h.col_offset,
+            h.nnz_offset,
+            &local_colptr,
+            &row_indices,
+            &values,
+        )?;
+
+        pb.inc(1);
+    }
+    pb.finish_and_clear();
+
+    out.finalize_streaming_csc()?;
+    info!("transposing CSC → CSR on disk");
+    out.build_csr_from_csc_streaming()?;
+
+    out.register_row_names_vec(&row_names);
+    out.register_column_names_vec(&column_names);
+    drop(out);
 
     info!(
         "Successfully created a sparse backend file: {}",
@@ -516,10 +587,12 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
     let mut column_names = vec![];
     let mut column_batch_names = vec![];
+    let mut batch_ncols: Vec<usize> = Vec::with_capacity(num_batches);
 
     for (col_file, batch_name) in col_files.iter().zip(batch_names.iter()) {
         let _names = read_col_names(col_file.clone(), args.num_barcode_name_words)?;
         let nn = _names.len();
+        batch_ncols.push(nn);
         column_names.extend(
             _names
                 .into_iter()
@@ -532,61 +605,37 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
     info!("Found {} columns/barcodes ...", column_names.len());
 
-    info!("Renaming triplets...");
-
-    let mut renamed_triplets = vec![];
-    let mut offset = 0;
-    let mut nnz_tot = 0;
-
-    let pb = ProgressBar::new(num_batches as u64);
-
+    info!("Sizing per-batch nnz ...");
+    let mut batch_nnz: Vec<usize> = Vec::with_capacity(num_batches);
+    let pb1 = ProgressBar::new(num_batches as u64);
     for b in 0..num_batches {
         let row_names = read_row_names(row_files[b].clone(), args.num_feature_name_words)?;
+        let (_nrow, _ncol, header_nnz) = mtx_io::read_mtx_header(&mtx_files[b])?;
 
-        let (triplets, shape) = mtx_io::read_mtx_triplets(&mtx_files[b].clone())?;
-
-        if let Some((nrow, ncol, nnz)) = shape {
-            info!(
-                "{}: {} rows, {} columns, {} non-zeros",
-                &mtx_files[b], nrow, ncol, nnz
-            );
-
-            let triplets = triplets
-                .into_iter()
-                .filter_map(|(batch_i, batch_j, x_ij)| {
-                    if let Some(i) = row_pos.get(&row_names[batch_i as usize]) {
-                        let i = *i as u64;
-                        let j = batch_j + offset;
-                        Some((i, j, x_ij))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            nnz_tot += triplets.len();
-            renamed_triplets.extend(triplets);
-
-            let batch_col_names =
-                read_col_names(col_files[b].clone(), args.num_barcode_name_words)?;
-            let batch_name = batch_names[b].clone();
-
-            (0..ncol).for_each(|batch_j| {
-                let loc = format!("{}{}{}", batch_col_names[batch_j], COLUMN_SEP, batch_name)
-                    .into_boxed_str();
-
-                let glob_j = offset as usize + batch_j;
-                let glob = column_names[glob_j].clone();
-                debug_assert_eq!(glob, loc);
-            });
-
-            offset += ncol as u64;
-            pb.inc(1);
-        }
+        // Skip the parse if every row in this batch is kept — header nnz is exact.
+        let no_filter = row_names.iter().all(|n| row_pos.contains_key(n));
+        let count = if no_filter {
+            header_nnz
+        } else {
+            let (triplets, _shape) = mtx_io::read_mtx_triplets(&mtx_files[b].clone())?;
+            triplets
+                .iter()
+                .filter(|(batch_i, _, _)| row_pos.contains_key(&row_names[*batch_i as usize]))
+                .count()
+        };
+        batch_nnz.push(count);
+        pb1.inc(1);
     }
-    pb.finish_and_clear();
+    pb1.finish_and_clear();
 
-    info!("Done with creating triplets from {} mtx files", num_batches);
+    let total_nnz: usize = batch_nnz.iter().sum();
+    let total_ncol: usize = batch_ncols.iter().sum();
+    let total_nrow = common_rows.len();
+
+    info!(
+        "Total filtered nnz = {} across {} batches",
+        total_nnz, num_batches
+    );
 
     let backend = args.backend.clone();
     let effective_output = apply_zip_flag(&args.output, args.zip);
@@ -604,15 +653,44 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
         remove_file(&backend_file)?;
     }
 
-    let mut data = create_sparse_from_triplets(
-        &renamed_triplets,
-        (row_pos.len(), offset as usize, nnz_tot),
-        Some(&backend_file),
-        Some(&backend),
-    )?;
+    let mut out = create_sparse_streaming_empty(Some(&backend_file), Some(&backend))?;
+    out.begin_streaming_csc((total_nrow, total_ncol, total_nnz))?;
 
-    data.register_row_names_vec(&common_rows);
-    data.register_column_names_vec(&column_names);
+    let mut col_offset: u64 = 0;
+    let mut nnz_offset: u64 = 0;
+    let pb2 = ProgressBar::new(num_batches as u64);
+    for b in 0..num_batches {
+        let row_names = read_row_names(row_files[b].clone(), args.num_feature_name_words)?;
+        let (triplets, _shape) = mtx_io::read_mtx_triplets(&mtx_files[b].clone())?;
+
+        let triplets_batch: Vec<(u64, u64, f32)> = triplets
+            .into_iter()
+            .filter_map(|(batch_i, batch_j, x_ij)| {
+                row_pos
+                    .get(&row_names[batch_i as usize])
+                    .map(|i| (*i as u64, batch_j, x_ij))
+            })
+            .collect();
+
+        debug_assert_eq!(triplets_batch.len(), batch_nnz[b]);
+
+        let ncol_b = batch_ncols[b];
+        let (local_colptr, row_indices, values) = build_csc_slab(triplets_batch, ncol_b);
+        out.append_csc_slab(col_offset, nnz_offset, &local_colptr, &row_indices, &values)?;
+
+        col_offset += ncol_b as u64;
+        nnz_offset += batch_nnz[b] as u64;
+        pb2.inc(1);
+    }
+    pb2.finish_and_clear();
+
+    out.finalize_streaming_csc()?;
+    info!("transposing CSC → CSR on disk");
+    out.build_csr_from_csc_streaming()?;
+
+    out.register_row_names_vec(&common_rows);
+    out.register_column_names_vec(&column_names);
+    drop(out);
 
     info!(
         "Successfully created a sparse backend file: {}",
@@ -630,7 +708,7 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
             data_files: vec![backend_file.clone().into_boxed_str()],
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
-            block_size: 100,
+            block_size: args.block_size,
             preload: true,
             show_histogram: false,
             save_histogram: None,
@@ -765,17 +843,24 @@ pub fn align_backends(args: &AlignDataArgs) -> anyhow::Result<()> {
         .iter()
         .enumerate()
         .map(|(i, a_file)| -> anyhow::Result<_> {
-            let ext = file_ext(a_file)?;
+            // Use a writable extension (`.zarr`/`.h5`) regardless of whether
+            // the input is `.zarr.zip`, since `subset_columns_rows` below
+            // mutates the backend and read-only zip stores cannot absorb writes.
+            let dst_ext = if a_file.ends_with(".zarr.zip") || a_file.ends_with(".zarr") {
+                "zarr"
+            } else {
+                "h5"
+            };
             let base = basename(a_file)?;
 
             let data_col_id = i % n_data_columns + 1;
             let data_row_id = i / n_data_columns + 1;
             let dst_path = format!(
                 "{}/{}_{}_{}.{}",
-                args.output_directory, data_row_id, data_col_id, base, ext
+                args.output_directory, data_row_id, data_col_id, base, dst_ext
             );
-            info!("renaming files for easier sorting: {}", dst_path);
-            recursive_copy(a_file, &dst_path)?;
+            info!("staging aligned copy: {}", dst_path);
+            materialize_writable_backend(a_file, &dst_path)?;
             let (backend, a_copied_file) = resolve_backend_file(&dst_path, None)?;
             open_sparse_matrix(&a_copied_file, &backend)
         })

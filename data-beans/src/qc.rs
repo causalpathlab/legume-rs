@@ -4,7 +4,7 @@ use crate::sparse_io_vector::*;
 
 use indicatif::ParallelProgressIterator;
 use log::warn;
-use matrix_util::sparse_stat::SparseRunningStatistics;
+use matrix_util::sparse_stat::{SparseColumnRunningStatistics, SparseRunningStatistics};
 use matrix_util::traits::RunningStatOps;
 use matrix_util::utils::partition_by_membership;
 use rayon::prelude::*;
@@ -170,12 +170,28 @@ pub fn collect_column_stat_across_vec(
     data: &SparseIoVec,
     select_rows: Option<&[usize]>,
     block_size: usize,
-) -> anyhow::Result<SparseRunningStatistics<f32>> {
-    let mut col_stat = SparseRunningStatistics::new(data.num_columns());
+) -> anyhow::Result<SparseColumnRunningStatistics<f32>> {
+    let ncols = data.num_columns();
+    let nrows_total = data.num_rows();
 
+    let row_mask: Option<Vec<bool>> = select_rows.map(|sel| {
+        let mut m = vec![false; nrows_total];
+        for &r in sel {
+            if r < nrows_total {
+                m[r] = true;
+            }
+        }
+        m
+    });
+    let nrows_denom = row_mask
+        .as_ref()
+        .map(|m| m.iter().filter(|x| **x).count())
+        .unwrap_or(nrows_total);
+
+    let mut col_stat = SparseColumnRunningStatistics::<f32>::new(ncols, nrows_denom);
     data.visit_columns_by_block(
-        &col_stat_selected_rows_visitor,
-        select_rows.unwrap_or(&[]),
+        &col_stat_visitor,
+        &row_mask,
         &mut col_stat,
         Some(block_size),
     )?;
@@ -188,9 +204,10 @@ pub fn collect_column_stat_across_vec(
 pub fn collect_column_stat(
     data: &dyn SparseIo<IndexIter = Vec<usize>>,
     block_size: usize,
-) -> anyhow::Result<SparseRunningStatistics<f32>> {
+) -> anyhow::Result<SparseColumnRunningStatistics<f32>> {
     let ncols = data.num_columns().unwrap_or(0);
-    let mut col_stat = SparseRunningStatistics::new(ncols);
+    let nrows = data.num_rows().unwrap_or(0);
+    let mut col_stat = SparseColumnRunningStatistics::<f32>::new(ncols, nrows);
     let arc_stat = Arc::new(Mutex::new(&mut col_stat));
 
     let jobs = create_jobs(ncols, Some(block_size));
@@ -198,22 +215,11 @@ pub fn collect_column_stat(
     jobs.par_iter()
         .progress_count(jobs.len() as u64)
         .for_each(|&(lb, ub)| {
-            let batch_ncols = ub - lb;
             let csc = data
                 .read_columns_csc((lb..ub).collect())
                 .expect("failed to read data");
-
-            // Build column-indexed triplets
-            let mut col_triplets: Vec<(usize, usize, f32)> = Vec::new();
-            for (local_col, col) in csc.col_iter().enumerate() {
-                let global_col = lb + local_col;
-                for &val in col.values() {
-                    col_triplets.push((global_col, 0, val));
-                }
-            }
-
             let mut stat = arc_stat.lock().expect("failed to lock col_stat");
-            stat.add_triplets(batch_ncols, &col_triplets);
+            stat.add_csc(&csc, lb);
         });
 
     Ok(col_stat)
@@ -235,41 +241,18 @@ fn row_stat_vec_visitor(
     Ok(())
 }
 
-fn col_stat_selected_rows_visitor(
+fn col_stat_visitor(
     job: (usize, usize),
     data: &SparseIoVec,
-    select_row_indices: &[usize],
-    arc_stat: Arc<Mutex<&mut SparseRunningStatistics<f32>>>,
+    row_mask: &Option<Vec<bool>>,
+    arc_stat: Arc<Mutex<&mut SparseColumnRunningStatistics<f32>>>,
 ) -> anyhow::Result<()> {
     let (lb, ub) = job;
-    let batch_ncols = ub - lb;
-
     let csc = data.read_columns_csc(lb..ub)?;
-
-    // Build column-indexed triplets: for each column in csc, accumulate stats at that column index
-    let mut col_triplets: Vec<(usize, usize, f32)> = Vec::new();
-
-    for (local_col, col) in csc.col_iter().enumerate() {
-        let global_col = lb + local_col;
-        let rows = col.row_indices();
-        let vals = col.values();
-
-        if select_row_indices.is_empty() {
-            for (&_row, &val) in rows.iter().zip(vals.iter()) {
-                // For column stats: index by column, dummy row index
-                col_triplets.push((global_col, 0, val));
-            }
-        } else {
-            for (&row, &val) in rows.iter().zip(vals.iter()) {
-                if select_row_indices.contains(&row) {
-                    col_triplets.push((global_col, 0, val));
-                }
-            }
-        }
-    }
-
     let mut stat = arc_stat.lock().expect("failed to lock col_stat");
-    stat.add_triplets(batch_ncols, &col_triplets);
-
+    match row_mask {
+        Some(mask) => stat.add_csc_masked(&csc, lb, mask),
+        None => stat.add_csc(&csc, lb),
+    }
     Ok(())
 }

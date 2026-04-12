@@ -8,6 +8,7 @@ use crate::sparse_io::*;
 use crate::utilities::io_helpers::{
     read_col_names, read_row_names, MAX_COLUMN_NAME_IDX, MAX_ROW_NAME_IDX,
 };
+use crate::zarr_io::{finalize_zarr_output, materialize_writable_backend};
 
 use clap::Args;
 use log::info;
@@ -206,6 +207,49 @@ pub enum RowAlignMode {
     Union,
 }
 
+type EditStage = (
+    SparseIoBackend,
+    Box<str>,
+    Box<dyn SparseIo<IndexIter = Vec<usize>>>,
+);
+
+/// Resolve `(backend, working_path, opened_data)` for an in-place edit handler:
+/// stage the input at the output location (extracting `.zarr.zip` if needed),
+/// mkdir the output parent, and open the backend for read/write.
+///
+/// Pair with [`finalize_zarr_output`] at the end of the handler so `.zarr.zip`
+/// output paths get re-zipped.
+fn stage_for_edit(input: &str, output: &str) -> anyhow::Result<EditStage> {
+    let (backend, data_file) = resolve_backend_file(input, None)?;
+    let (_, output_file) = resolve_backend_file(output, Some(backend.clone()))?;
+
+    if let Some(out_dir) = dirname(&output_file) {
+        mkdir(&out_dir)?;
+    }
+
+    materialize_writable_backend(&data_file, &output_file)?;
+    info!("staged working copy at {}", output_file);
+
+    let data = open_sparse_matrix(&output_file, &backend)?;
+    Ok((backend, output_file, data))
+}
+
+fn build_squeeze_args(output_file: Box<str>, args_cols: usize, args_rows: usize) -> RunSqueezeArgs {
+    RunSqueezeArgs {
+        data_files: vec![output_file],
+        row_nnz_cutoff: args_rows,
+        column_nnz_cutoff: args_cols,
+        block_size: 100,
+        preload: true,
+        show_histogram: false,
+        save_histogram: None,
+        dry_run: false,
+        interactive: false,
+        output: None,
+        row_align: RowAlignMode::Common,
+    }
+}
+
 /// Subset columns from a sparse matrix data file
 ///
 /// This function takes a subset of columns from the input data file and writes
@@ -216,18 +260,7 @@ pub fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
     let columns_indices = args.column_indices.clone();
     let column_name_file = args.name_file.clone();
 
-    let (backend, data_file) = resolve_backend_file(&args.data_file, None)?;
-
-    let (_, output_file) = resolve_backend_file(&args.output, Some(backend.clone()))?;
-
-    if let Some(out_dir) = dirname(&output_file) {
-        mkdir(&out_dir)?;
-    }
-
-    recursive_copy(&data_file, &output_file)?;
-    info!("copied the existing data file {}", data_file);
-
-    let mut data = open_sparse_matrix(&output_file, &backend)?;
+    let (_backend, output_file, mut data) = stage_for_edit(&args.data_file, &args.output)?;
 
     let original_ncol = data.num_columns().unwrap_or(0);
     info!("original data: {} columns", original_ncol);
@@ -246,8 +279,6 @@ pub fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
             .column_names()
             .expect("column names not found in data file");
 
-        // Build membership from column names in file (these are the ones we want to keep)
-        // The keys are the column names from the file, values are their indices
         let membership = Membership::from_pairs(
             col_names
                 .iter()
@@ -257,7 +288,6 @@ pub fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
         )
         .with_delimiter(args.delimiter);
 
-        // Match data columns against the membership to find which ones to keep
         let (matched, stats) = membership.match_keys(&data_col_names);
 
         info!(
@@ -279,7 +309,6 @@ pub fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
             ));
         }
 
-        // Build index list: for each data column that matched, include its index
         let idx: Vec<usize> = data_col_names
             .iter()
             .enumerate()
@@ -295,31 +324,20 @@ pub fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
     };
 
     data.subset_columns_rows(Some(&selected_columns), None)?;
-
-    // Verify by re-opening the file
+    info!("after subset: {} columns", selected_columns.len());
     drop(data);
-    let data = open_sparse_matrix(&output_file, &backend)?;
-    let new_ncol = data.num_columns().unwrap_or(0);
-    info!("after subset: {} columns (verified)", new_ncol);
 
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &output_file);
-        let squeeze_args = RunSqueezeArgs {
-            data_files: vec![output_file],
-            row_nnz_cutoff: args.row_nnz_cutoff,
-            column_nnz_cutoff: args.column_nnz_cutoff,
-            block_size: 100,
-            preload: true,
-            show_histogram: false,
-            save_histogram: None,
-            dry_run: false,
-            interactive: false,
-            output: None,
-            row_align: RowAlignMode::Common,
-        };
+        let squeeze_args = build_squeeze_args(
+            output_file.clone(),
+            args.column_nnz_cutoff,
+            args.row_nnz_cutoff,
+        );
         run_squeeze(&squeeze_args)?;
     }
 
+    finalize_zarr_output(&output_file, &args.output)?;
     info!("done");
     Ok(())
 }
@@ -334,18 +352,7 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
     let row_indices = args.row_indices.clone();
     let row_name_file = args.name_file.clone();
 
-    let (backend, data_file) = resolve_backend_file(&args.data_file, None)?;
-
-    let (_, output_file) = resolve_backend_file(&args.output, Some(backend.clone()))?;
-
-    if let Some(out_dir) = dirname(&output_file) {
-        mkdir(&out_dir)?;
-    }
-
-    recursive_copy(&data_file, &output_file)?;
-    info!("copied the existing data file {}", data_file);
-
-    let mut data = open_sparse_matrix(&output_file, &backend)?;
+    let (_backend, output_file, mut data) = stage_for_edit(&args.data_file, &args.output)?;
 
     let original_nrow = data.num_rows().unwrap_or(0);
     info!("original data: {} rows", original_nrow);
@@ -362,7 +369,6 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
 
         let data_row_names = data.row_names().expect("row names not found in data file");
 
-        // Build membership from row names in file (these are the ones we want to keep)
         let membership = Membership::from_pairs(
             row_names
                 .iter()
@@ -372,7 +378,6 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
         )
         .with_delimiter(args.delimiter);
 
-        // Match data rows against the membership to find which ones to keep
         let (matched, stats) = membership.match_keys(&data_row_names);
 
         info!(
@@ -392,7 +397,6 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
             return Err(anyhow::anyhow!("Found empty rows - no matching row names"));
         }
 
-        // Build index list: for each data row that matched, include its index
         let idx: Vec<usize> = data_row_names
             .iter()
             .enumerate()
@@ -407,33 +411,21 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
         ));
     };
 
-    info!("subsetting to {} rows", selected_rows.len());
     data.subset_columns_rows(None, Some(&selected_rows))?;
-
-    // Verify by re-opening the file
+    info!("after subset: {} rows", selected_rows.len());
     drop(data);
-    let data = open_sparse_matrix(&output_file, &backend)?;
-    let new_nrow = data.num_rows().unwrap_or(0);
-    info!("after subset: {} rows (verified)", new_nrow);
 
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &output_file);
-        let squeeze_args = RunSqueezeArgs {
-            data_files: vec![output_file],
-            row_nnz_cutoff: args.row_nnz_cutoff,
-            column_nnz_cutoff: args.column_nnz_cutoff,
-            block_size: 100,
-            preload: true,
-            show_histogram: false,
-            save_histogram: None,
-            dry_run: false,
-            interactive: false,
-            output: None,
-            row_align: RowAlignMode::Common,
-        };
+        let squeeze_args = build_squeeze_args(
+            output_file.clone(),
+            args.column_nnz_cutoff,
+            args.row_nnz_cutoff,
+        );
         run_squeeze(&squeeze_args)?;
     }
 
+    finalize_zarr_output(&output_file, &args.output)?;
     info!("done");
     Ok(())
 }
@@ -445,19 +437,12 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
 pub fn reorder_rows(args: &ReorderRowsArgs) -> anyhow::Result<()> {
     let row_names_order: Vec<Box<str>> = read_row_names(args.row_file.clone(), MAX_ROW_NAME_IDX)?;
 
-    let (backend, data_file) = resolve_backend_file(&args.data_file, None)?;
-    let (_, output_file) = resolve_backend_file(&args.output, Some(backend.clone()))?;
+    let (_backend, output_file, mut data) = stage_for_edit(&args.data_file, &args.output)?;
 
-    if let Some(out_dir) = dirname(&output_file) {
-        mkdir(&out_dir)?;
-    }
-
-    recursive_copy(&data_file, &output_file)?;
-    info!("copied the existing data file {}", data_file);
-
-    let mut data = open_sparse_matrix(&output_file, &backend)?;
     data.reorder_rows(&row_names_order)?;
+    drop(data);
 
+    finalize_zarr_output(&output_file, &args.output)?;
     info!("done");
     Ok(())
 }
@@ -482,17 +467,21 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         // Determine target file
         let target_file = if let Some(output_prefix) = &cmd_args.output {
             let (_, output_file) = resolve_backend_file(output_prefix, Some(backend.clone()))?;
-            // Copy to output location first
             if std::path::Path::new(output_file.as_ref()).exists() {
                 return Err(anyhow::anyhow!(
                     "Output file already exists: {}. Please remove it first or choose a different name.",
                     output_file
                 ));
             }
-            info!("Copying {} to {}", data_file, output_file);
-            recursive_copy(&data_file, &output_file)?;
+            info!("Staging {} -> {}", data_file, output_file);
+            materialize_writable_backend(&data_file, &output_file)?;
             output_file
         } else {
+            if data_file.ends_with(".zarr.zip") {
+                return Err(anyhow::anyhow!(
+                    "In-place squeeze is not supported for `.zarr.zip` archives (write store is read-only). Pass `--output <prefix>` to produce a new backend."
+                ));
+            }
             data_file.clone()
         };
 
@@ -607,6 +596,11 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
             data.num_rows().unwrap(),
             data.num_columns().unwrap()
         );
+        drop(data);
+
+        if let Some(output_prefix) = &cmd_args.output {
+            finalize_zarr_output(&target_file, output_prefix)?;
+        }
     }
 
     Ok(())
@@ -802,9 +796,10 @@ fn run_merge_then_squeeze(
         remove_file(&backend_file)?;
     }
 
-    let mut merged_data = create_sparse_from_triplets(
-        &all_triplets,
-        (all_row_names.len(), column_names.len(), all_triplets.len()),
+    let shape = (all_row_names.len(), column_names.len(), all_triplets.len());
+    let mut merged_data = create_sparse_from_triplets_owned(
+        all_triplets,
+        shape,
         Some(&backend_file),
         Some(&backend),
     )?;
@@ -909,8 +904,8 @@ fn run_squeeze_then_merge(
         };
         let temp_file = format!("{}/{}.{}", temp_dir_path, batch_names[idx], backend_ext);
 
-        info!("Copying to temp: {}", temp_file);
-        recursive_copy(&data_file, &temp_file)?;
+        info!("Staging to temp: {}", temp_file);
+        materialize_writable_backend(&data_file, &temp_file)?;
 
         let temp_data = open_sparse_matrix(&temp_file, &backend)?;
         squeeze_by_nnz(
