@@ -53,6 +53,12 @@ pub struct FromMtxArgs {
     /// minimum number of non-zero cutoff for columns
     #[arg(long, default_value_t = 1)]
     pub column_nnz_cutoff: usize,
+
+    /// block size for the post-build squeeze pass (columns per rayon job).
+    /// Smaller values bound peak memory on very wide matrices at the cost of
+    /// extra scheduling overhead.
+    #[arg(long, default_value_t = 100)]
+    pub block_size: usize,
 }
 
 #[derive(Args, Debug)]
@@ -216,6 +222,16 @@ pub struct From10xMatrixArgs {
 		     Columns with fewer non-zeros will be removed if squeezing is enabled."
     )]
     pub column_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Block size for the post-build squeeze pass",
+        long_help = "Number of columns handled per rayon job during the squeeze pass. \n\
+		     Smaller values bound peak memory on very wide matrices at the cost \n\
+		     of extra scheduling overhead."
+    )]
+    pub block_size: usize,
 }
 
 #[derive(Args, Debug)]
@@ -324,6 +340,16 @@ pub struct FromH5adArgs {
         long_help = "Minimum number of non-zero elements required for columns."
     )]
     pub column_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Block size for the post-build squeeze pass",
+        long_help = "Number of columns handled per rayon job during the squeeze pass. \n\
+		     Smaller values bound peak memory on very wide matrices at the cost \n\
+		     of extra scheduling overhead."
+    )]
+    pub block_size: usize,
 }
 
 #[derive(Args, Debug)]
@@ -417,6 +443,16 @@ pub struct From10xMoleculeArgs {
         long_help = "Minimum number of non-zero elements required for columns."
     )]
     pub column_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Block size for the post-build squeeze pass",
+        long_help = "Number of columns handled per rayon job during the squeeze pass. \n\
+		     Smaller values bound peak memory on very wide matrices at the cost \n\
+		     of extra scheduling overhead."
+    )]
+    pub block_size: usize,
 }
 
 #[derive(clap::Args, Debug)]
@@ -572,6 +608,16 @@ pub struct FromZarrArgs {
 		     Columns with fewer non-zeros will be removed if squeezing is enabled."
     )]
     pub column_nnz_cutoff: usize,
+
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Block size for the post-build squeeze pass",
+        long_help = "Number of columns handled per rayon job during the squeeze pass. \n\
+		     Smaller values bound peak memory on very wide matrices at the cost \n\
+		     of extra scheduling overhead."
+    )]
+    pub block_size: usize,
 }
 
 pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
@@ -609,23 +655,13 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
         data.register_column_names_vec(&col_names);
     }
 
-    if args.do_squeeze {
-        let squeeze_args = RunSqueezeArgs {
-            data_files: vec![backend_file.clone()],
-            row_nnz_cutoff: args.row_nnz_cutoff,
-            column_nnz_cutoff: args.column_nnz_cutoff,
-            block_size: 100,
-            preload: true,
-            show_histogram: false,
-            save_histogram: None,
-            dry_run: false,
-            interactive: false,
-            output: None,
-            row_align: RowAlignMode::Common,
-        };
-
-        run_squeeze(&squeeze_args)?;
-    }
+    run_squeeze_if_needed(
+        args.do_squeeze,
+        args.row_nnz_cutoff,
+        args.column_nnz_cutoff,
+        args.block_size,
+        &backend_file,
+    )?;
 
     finalize_zarr_output(&backend_file, &effective_output)?;
     info!("done");
@@ -660,7 +696,7 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         indices: &indices,
         indptr: &indptr,
     }
-    .to_coo(args.pointer_type.clone())?;
+    .to_coo(args.pointer_type)?;
 
     let TripletsShape { nrows, ncols, nnz } = shape;
     info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
@@ -717,8 +753,8 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     }
     assert_eq!(ncols, column_names.len());
 
-    let mut out = create_sparse_from_triplets(
-        &triplets,
+    let mut out = create_sparse_from_triplets_owned(
+        triplets,
         (nrows, ncols, nnz),
         Some(&backend_file),
         Some(&backend),
@@ -732,24 +768,13 @@ pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
         out.subset_columns_rows(None, Some(&select_rows))?;
     }
 
-    if args.do_squeeze {
-        info!("Squeeze the backend data {}", &backend_file);
-        let squeeze_args = RunSqueezeArgs {
-            data_files: vec![backend_file.clone()],
-            row_nnz_cutoff: args.row_nnz_cutoff,
-            column_nnz_cutoff: args.column_nnz_cutoff,
-            block_size: 100,
-            preload: true,
-            show_histogram: false,
-            save_histogram: None,
-            dry_run: false,
-            interactive: false,
-            output: None,
-            row_align: RowAlignMode::Common,
-        };
-
-        run_squeeze(&squeeze_args)?;
-    }
+    run_squeeze_if_needed(
+        args.do_squeeze,
+        args.row_nnz_cutoff,
+        args.column_nnz_cutoff,
+        args.block_size,
+        &backend_file,
+    )?;
 
     finalize_zarr_output(&backend_file, &effective_output)?;
     info!("done");
@@ -776,20 +801,24 @@ pub fn run_build_from_10x_matrix(args: &From10xMatrixArgs) -> anyhow::Result<()>
         )
     })?;
 
-    let CooTripletsShape { triplets, shape } = if let (Ok(values), Ok(indices), Ok(indptr)) = (
-        root.dataset(args.data_field.as_ref()),
-        root.dataset(args.indices_field.as_ref()),
-        root.dataset(args.indptr_field.as_ref()),
-    ) {
-        ValuesIndicesPointers {
-            values: &values.read_1d::<f32>()?.to_vec(),
-            indices: &indices.read_1d::<u64>()?.to_vec(),
-            indptr: &indptr.read_1d::<u64>()?.to_vec(),
-        }
-        .to_coo(args.pointer_type.clone())?
-    } else {
-        return Err(anyhow::anyhow!("unable to read triplets"));
-    };
+    let CooTripletsShape { triplets, shape } =
+        if let (Ok(values_ds), Ok(indices_ds), Ok(indptr_ds)) = (
+            root.dataset(args.data_field.as_ref()),
+            root.dataset(args.indices_field.as_ref()),
+            root.dataset(args.indptr_field.as_ref()),
+        ) {
+            let values = values_ds.read_1d::<f32>()?;
+            let indices = indices_ds.read_1d::<u64>()?;
+            let indptr = indptr_ds.read_1d::<u64>()?;
+            ValuesIndicesPointers {
+                values: values.as_slice().expect("values not contiguous"),
+                indices: indices.as_slice().expect("indices not contiguous"),
+                indptr: indptr.as_slice().expect("indptr not contiguous"),
+            }
+            .to_coo(args.pointer_type)?
+        } else {
+            return Err(anyhow::anyhow!("unable to read triplets"));
+        };
 
     let TripletsShape { nrows, ncols, nnz } = shape;
     info!("Read {} non-zero elements in {} x {}", nnz, nrows, ncols);
@@ -847,8 +876,8 @@ pub fn run_build_from_10x_matrix(args: &From10xMatrixArgs) -> anyhow::Result<()>
     }
     assert_eq!(ncols, column_names.len());
 
-    let mut out = create_sparse_from_triplets(
-        &triplets,
+    let mut out = create_sparse_from_triplets_owned(
+        triplets,
         (nrows, ncols, nnz),
         Some(&backend_file),
         Some(&backend),
@@ -869,6 +898,7 @@ pub fn run_build_from_10x_matrix(args: &From10xMatrixArgs) -> anyhow::Result<()>
         args.do_squeeze,
         args.row_nnz_cutoff,
         args.column_nnz_cutoff,
+        args.block_size,
         &backend_file,
     )?;
     finalize_zarr_output(&backend_file, &effective_output)?;
@@ -929,13 +959,13 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
 
     // Read triplets
     let CooTripletsShape { triplets, shape } = {
-        let values = x_group.dataset("data")?.read_1d::<f32>()?.to_vec();
-        let indices = x_group.dataset("indices")?.read_1d::<u64>()?.to_vec();
-        let indptr = x_group.dataset("indptr")?.read_1d::<u64>()?.to_vec();
+        let values = x_group.dataset("data")?.read_1d::<f32>()?;
+        let indices = x_group.dataset("indices")?.read_1d::<u64>()?;
+        let indptr = x_group.dataset("indptr")?.read_1d::<u64>()?;
         ValuesIndicesPointers {
-            values: &values,
-            indices: &indices,
-            indptr: &indptr,
+            values: values.as_slice().expect("values not contiguous"),
+            indices: indices.as_slice().expect("indices not contiguous"),
+            indptr: indptr.as_slice().expect("indptr not contiguous"),
         }
         .to_coo(pointer_type)?
     };
@@ -991,8 +1021,8 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
     assert_eq!(ncols, column_names.len());
 
     // Create sparse backend
-    let mut out = create_sparse_from_triplets(
-        &triplets,
+    let mut out = create_sparse_from_triplets_owned(
+        triplets,
         (nrows, ncols, nnz),
         Some(&backend_file),
         Some(&backend),
@@ -1095,6 +1125,7 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
         args.do_squeeze,
         args.row_nnz_cutoff,
         args.column_nnz_cutoff,
+        args.block_size,
         &backend_file,
     )?;
     finalize_zarr_output(&backend_file, &effective_output)?;
@@ -1168,12 +1199,13 @@ pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result
         remove_file(&backend_file)?;
     }
 
-    // 1. Read per-molecule arrays
-    let barcode_idx = file.dataset("barcode_idx")?.read_1d::<u64>()?.to_vec();
-    let feature_idx = file.dataset("feature_idx")?.read_1d::<u32>()?.to_vec();
-    let count = file.dataset("count")?.read_1d::<u32>()?.to_vec();
-    let gem_group = file.dataset("gem_group")?.read_1d::<u16>()?.to_vec();
-    let library_idx = file.dataset("library_idx")?.read_1d::<u16>()?.to_vec();
+    // 1. Read per-molecule arrays. Keep ndarray `Array1` owners — don't
+    // `.to_vec()` them, as that doubles peak memory on large molecule files.
+    let barcode_idx = file.dataset("barcode_idx")?.read_1d::<u64>()?;
+    let feature_idx = file.dataset("feature_idx")?.read_1d::<u32>()?;
+    let count = file.dataset("count")?.read_1d::<u32>()?;
+    let gem_group = file.dataset("gem_group")?.read_1d::<u16>()?;
+    let library_idx = file.dataset("library_idx")?.read_1d::<u16>()?;
     let n_molecules = barcode_idx.len();
     info!("Read {} molecules", n_molecules);
 
@@ -1240,28 +1272,47 @@ pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result
     let mut col_keys = BTreeSet::new();
     let mut triplet_map: HashMap<(u64, u64), f32> = Default::default();
 
-    for i in 0..n_molecules {
-        // Filter by library type
-        if !valid_libraries.contains(&library_idx[i]) {
-            continue;
-        }
+    {
+        // Borrow raw arrays as slices once; avoids repeated bounds-checked
+        // indexing through `Array1::Index` in the hot loop.
+        let barcode_idx_s = barcode_idx.as_slice().expect("barcode_idx not contiguous");
+        let feature_idx_s = feature_idx.as_slice().expect("feature_idx not contiguous");
+        let count_s = count.as_slice().expect("count not contiguous");
+        let gem_group_s = gem_group.as_slice().expect("gem_group not contiguous");
+        let library_idx_s = library_idx.as_slice().expect("library_idx not contiguous");
 
-        // Filter by pass_filter
-        if let Some(ref cells) = valid_cells {
-            if !cells.contains(&(barcode_idx[i], library_idx[i])) {
+        for i in 0..n_molecules {
+            // Filter by library type
+            if !valid_libraries.contains(&library_idx_s[i]) {
                 continue;
             }
+
+            // Filter by pass_filter
+            if let Some(ref cells) = valid_cells {
+                if !cells.contains(&(barcode_idx_s[i], library_idx_s[i])) {
+                    continue;
+                }
+            }
+
+            let col_key = (barcode_idx_s[i], gem_group_s[i]);
+            col_keys.insert(col_key);
+
+            // Will remap column index after collecting all keys
+            let row = feature_idx_s[i] as u64;
+            *triplet_map
+                .entry((row, barcode_idx_s[i] * 65536 + gem_group_s[i] as u64))
+                .or_insert(0.0) += count_s[i] as f32;
         }
-
-        let col_key = (barcode_idx[i], gem_group[i]);
-        col_keys.insert(col_key);
-
-        // Will remap column index after collecting all keys
-        let row = feature_idx[i] as u64;
-        *triplet_map
-            .entry((row, barcode_idx[i] * 65536 + gem_group[i] as u64))
-            .or_insert(0.0) += count[i] as f32;
     }
+
+    // Free the raw per-molecule arrays before we materialize the (huge)
+    // triplets Vec. These can easily be multiple GB on 10X Aggr outputs.
+    drop(barcode_idx);
+    drop(feature_idx);
+    drop(count);
+    drop(gem_group);
+    drop(library_idx);
+    drop(valid_cells);
 
     // Build dense column index mapping
     let col_keys_vec: Vec<(u64, u16)> = col_keys.into_iter().collect();
@@ -1299,8 +1350,8 @@ pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result
     info!("Built {} triplets in {} x {} matrix", nnz, nrows, ncols);
 
     // 6. Build backend
-    let mut out = create_sparse_from_triplets(
-        &triplets,
+    let mut out = create_sparse_from_triplets_owned(
+        triplets,
         (nrows, ncols, nnz),
         Some(&backend_file),
         Some(&backend),
@@ -1345,6 +1396,7 @@ pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result
         args.do_squeeze,
         args.row_nnz_cutoff,
         args.column_nnz_cutoff,
+        args.block_size,
         &backend_file,
     )?;
     finalize_zarr_output(&backend_file, &effective_output)?;
@@ -1356,6 +1408,7 @@ fn run_squeeze_if_needed(
     do_squeeze: bool,
     row_nnz_cutoff: usize,
     column_nnz_cutoff: usize,
+    block_size: usize,
     backend_file: &str,
 ) -> anyhow::Result<()> {
     if do_squeeze {
@@ -1364,7 +1417,7 @@ fn run_squeeze_if_needed(
             data_files: vec![backend_file.into()],
             row_nnz_cutoff,
             column_nnz_cutoff,
-            block_size: 100,
+            block_size,
             preload: true,
             show_histogram: false,
             save_histogram: None,

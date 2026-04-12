@@ -115,6 +115,64 @@ pub fn apply_zip_flag(output: &str, zip: bool) -> Box<str> {
     }
 }
 
+/// Extract a `.zarr.zip` archive into `target_dir`, transparently stripping
+/// any internal prefix produced by [`matrix_util::common_io::zip_dir`] so
+/// the result is a flat `.zarr` directory regardless of the zip's filename.
+pub fn extract_zarr_zip(zip_path: &str, target_dir: &str) -> anyhow::Result<()> {
+    let zip_file = std::fs::File::open(zip_path)?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))?;
+
+    // Detect prefix directly from the already-opened archive (avoids a
+    // second open + central-directory parse).
+    let filename = std::path::Path::new(zip_path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid zip path: {}", zip_path))?;
+    let expected_prefix = format!("{}/", filename.strip_suffix(".zip").unwrap_or(""));
+    let prefix: &str = if archive
+        .file_names()
+        .any(|n| n.starts_with(&expected_prefix))
+    {
+        &expected_prefix
+    } else {
+        ""
+    };
+
+    std::fs::create_dir_all(target_dir)?;
+    let target = std::path::Path::new(target_dir);
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let rel = file.name().strip_prefix(prefix).unwrap_or(file.name());
+        if rel.is_empty() {
+            continue;
+        }
+        let out_path = target.join(rel);
+        if file.is_dir() {
+            std::fs::create_dir_all(&out_path)?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut outfile = std::fs::File::create(&out_path)?;
+            std::io::copy(&mut file, &mut outfile)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy input backend to a writable output location. Transparently extracts
+/// `.zarr.zip` archives into a `.zarr` directory so the output can be opened
+/// read/write.
+pub fn materialize_writable_backend(src: &str, dst: &str) -> anyhow::Result<()> {
+    if src.ends_with(".zarr.zip") {
+        info!("extracting {} → {}", src, dst);
+        extract_zarr_zip(src, dst)
+    } else {
+        matrix_util::common_io::recursive_copy(src, dst)
+    }
+}
+
 /// If `target_path` ends with `.zarr.zip`, zip the `zarr_dir` into it and
 /// remove the directory. Otherwise this is a no-op (the directory IS the target).
 pub fn finalize_zarr_output(zarr_dir: &str, target_path: &str) -> anyhow::Result<()> {
@@ -669,7 +727,7 @@ mod tests {
         let store = open_zarr_store(p.to_str().unwrap()).unwrap();
         let names: Vec<Box<str>> =
             read_zarr_array_attr(store, "/cell_summary", "column_names").unwrap();
-        assert!(names.len() > 0);
+        assert!(!names.is_empty());
         assert!(names.contains(&"cell_centroid_x".to_string().into_boxed_str()));
     }
 

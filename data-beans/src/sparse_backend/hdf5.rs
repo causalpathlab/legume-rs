@@ -711,8 +711,10 @@ impl SparseIo for SparseMtxData {
         }
 
         {
-            let num_threads = num_cpus::get(); // Gets the number of logical CPUs
-            blosc_set_nthreads(num_threads as u8); // Set the number of threads for Blosc
+            // Match Blosc compression threads to the active rayon pool so
+            // `--n-threads` (and `RAYON_NUM_THREADS`) cap total CPU usage.
+            let num_threads = rayon::current_num_threads().max(1);
+            blosc_set_nthreads(num_threads as u8);
         }
 
         let csr = self.backend.group("/by_row")?;
@@ -743,6 +745,91 @@ impl SparseIo for SparseMtxData {
         Ok(())
     }
 
+    fn cs_create(&mut self, key: CsKey, len: usize) -> anyhow::Result<()> {
+        let (group_path, ds_name) = match key {
+            CsKey::CscData => ("/by_column", "data"),
+            CsKey::CscIndices => ("/by_column", "indices"),
+            CsKey::CscIndptr => ("/by_column", "indptr"),
+            CsKey::CsrData => ("/by_row", "data"),
+            CsKey::CsrIndices => ("/by_row", "indices"),
+            CsKey::CsrIndptr => ("/by_row", "indptr"),
+        };
+
+        if self.backend.group(group_path).is_err() {
+            self.backend.create_group(group_path)?;
+        }
+
+        {
+            // Match Blosc compression threads to the active rayon pool so
+            // `--n-threads` (and `RAYON_NUM_THREADS`) cap total CPU usage.
+            let num_threads = rayon::current_num_threads().max(1);
+            blosc_set_nthreads(num_threads as u8);
+        }
+
+        let group = self.backend.group(group_path)?;
+        let shape_len = len.max(1);
+        match key {
+            CsKey::CscData | CsKey::CsrData => {
+                group
+                    .new_dataset::<f32>()
+                    .shape(shape_len)
+                    .chunk([chunk_elems(shape_len, std::mem::size_of::<f32>())])
+                    .blosc_blosclz(COMPRESSION_LEVEL, true)
+                    .create(ds_name)?;
+            }
+            _ => {
+                group
+                    .new_dataset::<u64>()
+                    .shape(shape_len)
+                    .chunk([chunk_elems(shape_len, std::mem::size_of::<u64>())])
+                    .blosc_blosclz(COMPRESSION_LEVEL, true)
+                    .create(ds_name)?;
+            }
+        }
+        self.backend.flush()?;
+        Ok(())
+    }
+
+    fn cs_write_u64(&mut self, key: CsKey, offset: u64, data: &[u64]) -> anyhow::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let (group_path, ds_name) = match key {
+            CsKey::CscIndices => ("/by_column", "indices"),
+            CsKey::CscIndptr => ("/by_column", "indptr"),
+            CsKey::CsrIndices => ("/by_row", "indices"),
+            CsKey::CsrIndptr => ("/by_row", "indptr"),
+            CsKey::CscData | CsKey::CsrData => {
+                return Err(anyhow!("cs_write_u64 called on f32 slot {:?}", key));
+            }
+        };
+        let group = self.backend.group(group_path)?;
+        let ds = group.dataset(ds_name)?;
+        let lo = offset as usize;
+        let hi = lo + data.len();
+        ds.write_slice(data, ndarray::s![lo..hi])?;
+        Ok(())
+    }
+
+    fn cs_write_f32(&mut self, key: CsKey, offset: u64, data: &[f32]) -> anyhow::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let (group_path, ds_name) = match key {
+            CsKey::CscData => ("/by_column", "data"),
+            CsKey::CsrData => ("/by_row", "data"),
+            _ => {
+                return Err(anyhow!("cs_write_f32 called on u64 slot {:?}", key));
+            }
+        };
+        let group = self.backend.group(group_path)?;
+        let ds = group.dataset(ds_name)?;
+        let lo = offset as usize;
+        let hi = lo + data.len();
+        ds.write_slice(data, ndarray::s![lo..hi])?;
+        Ok(())
+    }
+
     /// Helper function to add CSC dataset to HDF5 backend
     ///
     /// ```text
@@ -765,8 +852,10 @@ impl SparseIo for SparseMtxData {
         }
 
         {
-            let num_threads = num_cpus::get(); // Gets the number of logical CPUs
-            blosc_set_nthreads(num_threads as u8); // Set the number of threads for Blosc
+            // Match Blosc compression threads to the active rayon pool so
+            // `--n-threads` (and `RAYON_NUM_THREADS`) cap total CPU usage.
+            let num_threads = rayon::current_num_threads().max(1);
+            blosc_set_nthreads(num_threads as u8);
         }
 
         let csc = self.backend.group("/by_column")?;
