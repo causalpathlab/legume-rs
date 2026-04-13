@@ -72,8 +72,6 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
             }
         }
     } else {
-        // Extract batch info from column names and/or file names
-        let num_files = args.data_files.len();
         let column_counts = data_vec.num_columns_by_data()?;
         let column_names = data_vec.column_names()?;
         let mut col_start = 0usize;
@@ -85,38 +83,25 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
             let col_end = col_start + ncols;
             let file_columns = &column_names[col_start..col_end];
 
-            // Check if column names contain '@' (embedded batch info)
-            let has_embedded_batch = file_columns.first().is_some_and(|name| name.contains('@'));
-
-            if has_embedded_batch {
-                // Parse batch from column names
-                for col_name in file_columns {
-                    let embedded_batch = col_name.rsplit('@').next().unwrap_or(col_name.as_ref());
-
-                    // If multiple files, combine embedded batch with file name
-                    let batch = if num_files > 1 {
-                        format!("{}@{}", embedded_batch, file_base).into_boxed_str()
-                    } else {
-                        embedded_batch.to_string().into_boxed_str()
-                    };
-                    batch_membership.push(batch);
-                }
-                if num_files > 1 {
-                    info!(
-                        "File {}: combining embedded batch with file name '{}'",
-                        file_idx, file_base
-                    );
-                } else {
-                    info!("Extracting batch from column names (detected '@' separator)");
-                }
+            let appended_suffix =
+                attach_data_name.then(|| format!("@{}", file_base).into_boxed_str());
+            let (tags, used_embedded) = infer_batch_from_columns(
+                file_columns,
+                file_base.as_ref(),
+                appended_suffix.as_deref(),
+            );
+            if used_embedded {
+                info!(
+                    "File {}: using embedded batch from column names (file '{}')",
+                    file_idx, file_base
+                );
             } else {
-                // Use file name as batch
                 info!(
                     "File {}: using file name '{}' as batch",
                     file_idx, file_base
                 );
-                batch_membership.extend(vec![file_base; ncols]);
             }
+            batch_membership.extend(tags);
             col_start = col_end;
         }
     }
@@ -133,4 +118,119 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
         data: data_vec,
         batch: batch_membership,
     })
+}
+
+/// Infer per-cell batch labels for one file's column names.
+///
+/// `appended_suffix` is the `@{file_base}` barcode disambiguator that
+/// `SparseIoVec::push` tacks onto every column when multiple files are
+/// loaded; it must be stripped *before* searching for a real embedded
+/// `@batch` tag, otherwise `rsplit('@')` picks up the basename and every
+/// cell in a file collapses to one wrong batch label.
+///
+/// Returns `(tags, used_embedded)` where `used_embedded=true` means the
+/// raw column names already contained an `@batch` tag.
+fn infer_batch_from_columns(
+    file_columns: &[Box<str>],
+    file_base: &str,
+    appended_suffix: Option<&str>,
+) -> (Vec<Box<str>>, bool) {
+    fn raw_of<'a>(name: &'a str, suffix: Option<&str>) -> &'a str {
+        match suffix {
+            Some(sfx) => name.strip_suffix(sfx).unwrap_or(name),
+            None => name,
+        }
+    }
+
+    let has_embedded_batch = file_columns
+        .first()
+        .is_some_and(|name| raw_of(name.as_ref(), appended_suffix).contains('@'));
+
+    if has_embedded_batch {
+        let tags = file_columns
+            .iter()
+            .map(|col_name| {
+                let raw = raw_of(col_name.as_ref(), appended_suffix);
+                let embedded = raw.rsplit('@').next().unwrap_or(raw);
+                embedded.to_string().into_boxed_str()
+            })
+            .collect();
+        (tags, true)
+    } else {
+        let fallback: Box<str> = file_base.to_string().into_boxed_str();
+        (vec![fallback; file_columns.len()], false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cols(v: &[&str]) -> Vec<Box<str>> {
+        v.iter()
+            .map(|s| (*s).to_string().into_boxed_str())
+            .collect()
+    }
+
+    #[test]
+    fn embedded_donor_survives_push_suffix() {
+        // Simulates `SparseIoVec::push` appending `@mix` to each column name
+        // when multiple files are loaded. Raw names are `ACGT-1@donorA`,
+        // `ACGT-2@donorB`.
+        let names = cols(&[
+            "ACGT-1@donorA@mix",
+            "ACGT-2@donorB@mix",
+            "ACGT-3@donorA@mix",
+            "ACGT-4@donorB@mix",
+        ]);
+        let (tags, used_embedded) = infer_batch_from_columns(&names, "mix", Some("@mix"));
+        assert!(used_embedded);
+        assert_eq!(
+            tags.iter().map(|b| b.as_ref()).collect::<Vec<_>>(),
+            vec!["donorA", "donorB", "donorA", "donorB"]
+        );
+    }
+
+    #[test]
+    fn no_embedded_batch_falls_back_to_file_base() {
+        // Barcodes without any embedded `@`.
+        let names = cols(&["AAAA@s1", "CCCC@s1"]);
+        let (tags, used_embedded) = infer_batch_from_columns(&names, "s1", Some("@s1"));
+        assert!(!used_embedded);
+        assert_eq!(
+            tags.iter().map(|b| b.as_ref()).collect::<Vec<_>>(),
+            vec!["s1", "s1"]
+        );
+    }
+
+    #[test]
+    fn single_file_embedded_batch() {
+        // Single file → no `@file_base` suffix was appended.
+        let names = cols(&["ACGT-1@donorA", "ACGT-2@donorB"]);
+        let (tags, used_embedded) = infer_batch_from_columns(&names, "only", None);
+        assert!(used_embedded);
+        assert_eq!(
+            tags.iter().map(|b| b.as_ref()).collect::<Vec<_>>(),
+            vec!["donorA", "donorB"]
+        );
+    }
+
+    #[test]
+    fn single_file_no_embedded_batch() {
+        let names = cols(&["AAAA", "CCCC"]);
+        let (tags, used_embedded) = infer_batch_from_columns(&names, "only", None);
+        assert!(!used_embedded);
+        assert_eq!(
+            tags.iter().map(|b| b.as_ref()).collect::<Vec<_>>(),
+            vec!["only", "only"]
+        );
+    }
+
+    #[test]
+    fn empty_file_columns() {
+        let names: Vec<Box<str>> = vec![];
+        let (tags, used_embedded) = infer_batch_from_columns(&names, "x", Some("@x"));
+        assert!(!used_embedded);
+        assert!(tags.is_empty());
+    }
 }

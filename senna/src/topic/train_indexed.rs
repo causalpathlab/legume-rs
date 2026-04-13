@@ -1,6 +1,7 @@
 use super::common::{apply_column_delta, compute_level_epochs, sample_collapsed_data};
 use super::eval_indexed::{dense_to_indexed, refine_indexed_topic_proportions};
 use crate::embed_common::*;
+use crate::logging::new_progress_bar;
 
 use candle_core::{Device, Tensor};
 use candle_nn::{ops, AdamW, Optimizer};
@@ -10,7 +11,6 @@ use candle_util::candle_indexed_data_loader::*;
 use candle_util::candle_indexed_model_traits::*;
 use candle_util::candle_loss_functions::gaussian_neg_log_prob;
 use candle_util::candle_topic_refinement::TopicRefinementConfig;
-use indicatif::ProgressBar;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -102,7 +102,7 @@ where
     }
 
     let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.learning_rate as f64)?;
-    let pb = ProgressBar::new(total_epochs as u64);
+    let pb = new_progress_bar(total_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_epochs);
     let mut kl_trace = Vec::with_capacity(total_epochs);
@@ -347,7 +347,7 @@ where
 
     let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.learning_rate as f64)?;
     let total_actual_epochs: usize = level_epochs.iter().sum();
-    let pb = ProgressBar::new(total_actual_epochs as u64);
+    let pb = new_progress_bar(total_actual_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_actual_epochs);
     let mut kl_trace = Vec::with_capacity(total_actual_epochs);
