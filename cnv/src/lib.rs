@@ -10,6 +10,9 @@
 //! Ploidy is not identifiable from expression alone; states represent relative CN
 //! (loss/neutral/gain).
 
+pub mod coarsening_tree;
+pub mod detect;
+pub mod factorial_tree;
 pub mod genome_order;
 pub mod genomic_coarsening;
 pub mod gibbs_hmm;

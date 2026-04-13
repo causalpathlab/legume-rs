@@ -83,6 +83,15 @@ impl GenomicCoarsening {
         out
     }
 
+    /// Expand a block-level f32 vector (length B) to gene-level (length G).
+    pub fn expand_vec_f32_to_genes(&self, block_vals: &[f32], n_genes: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; n_genes];
+        for (b, block) in self.blocks.iter().enumerate() {
+            out[block.start..block.end].fill(block_vals[b]);
+        }
+        out
+    }
+
     /// Chromosome boundaries in block space.
     ///
     /// Returns `[(chr_name, block_start, block_end)]` analogous to

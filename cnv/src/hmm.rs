@@ -241,7 +241,7 @@ pub fn infer_sample(params: &CnvHmmParams, y: &[f32], alpha: f32, sigma_sq: f32)
 }
 
 /// Forward-backward with precomputed emissions.
-fn forward_backward_with_emit(
+pub fn forward_backward_with_emit(
     params: &CnvHmmParams,
     log_emit: &DMatrix<f32>,
 ) -> (DMatrix<f32>, f32) {
@@ -304,7 +304,7 @@ fn forward_backward_with_emit(
 }
 
 /// Viterbi with precomputed emissions.
-fn viterbi_with_emit(params: &CnvHmmParams, log_emit: &DMatrix<f32>) -> Vec<usize> {
+pub fn viterbi_with_emit(params: &CnvHmmParams, log_emit: &DMatrix<f32>) -> Vec<usize> {
     let n = log_emit.nrows();
     let k = params.n_states();
 
