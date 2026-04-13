@@ -61,6 +61,58 @@ pub enum AdjMethod {
     Residual,
 }
 
+/// Shared CNV detection CLI args (used by SVD, topic, indexed-topic)
+#[derive(Args, Debug, Clone)]
+pub struct CnvArgs {
+    #[arg(
+        long,
+        help = "GFF/GTF annotation file for CNV detection",
+        long_help = "GFF/GTF annotation file with gene coordinates.\n\
+                     When provided, runs factorial tree model on pseudobulk \n\
+                     log-ratios to detect copy number variations."
+    )]
+    pub gff: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "CNV ground truth TSV (from data-beans simulate)",
+        long_help = "Alternative to --gff: read gene coordinates from the\n\
+                     .cnv_ground_truth.tsv.gz file produced by data-beans simulate.\n\
+                     Enables CNV detection with simulation data."
+    )]
+    pub cnv_ground_truth: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value = "3",
+        help = "Number of CNV factors",
+        long_help = "Number of factors in the factorial tree model.\n\
+                     Each factor represents an independent CNV event pattern."
+    )]
+    pub cnv_factors: usize,
+
+    #[arg(
+        long,
+        default_value = "3",
+        help = "Number of CN states per factor (e.g. del/neutral/gain)"
+    )]
+    pub cnv_states: usize,
+
+    #[arg(
+        long,
+        default_value = "0.7,0.4",
+        value_delimiter = ',',
+        help = "Coarsening correlation thresholds for CNV (multi-level)"
+    )]
+    pub cnv_corr_thresholds: Vec<f32>,
+
+    #[arg(long, default_value_t = 500, help = "CNV Gibbs sampling iterations")]
+    pub cnv_iter: usize,
+
+    #[arg(long, default_value_t = 200, help = "CNV Gibbs warmup iterations")]
+    pub cnv_warmup: usize,
+}
+
 /// Training score tracker for topic models
 pub struct TrainScores {
     pub llik: Vec<f32>,

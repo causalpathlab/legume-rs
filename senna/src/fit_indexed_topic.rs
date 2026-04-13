@@ -224,6 +224,10 @@ pub struct IndexedTopicArgs {
         help = "Bulk data files for joint deconvolution (.parquet, .tsv.gz)"
     )]
     bulk_data_files: Option<Vec<Box<str>>>,
+
+    // CNV detection args
+    #[command(flatten)]
+    cnv: CnvArgs,
 }
 
 pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
@@ -419,6 +423,29 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         (Some(&cell_names), Some("cell")),
         None,
     )?;
+
+    // CNV detection using topic proportions
+    let gene_names = data_vec.row_names()?;
+    let cnv_positions = crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?;
+
+    if let Some(positions) = cnv_positions {
+        if let Some(batch_labels) = crate::cnv_pseudobulk::reconstruct_batch_labels(&data_vec) {
+            let topic_probs = z_nk.map(|x| x.exp());
+            let cnv_config = crate::cnv_pseudobulk::build_cnv_config(&args.cnv);
+
+            let cnv_result = crate::cnv_pseudobulk::detect_cnv_topic_informed(
+                data_vec,
+                &topic_probs,
+                &batch_labels,
+                &positions,
+                &cnv_config,
+            )?;
+
+            crate::cnv_pseudobulk::write_cnv_results(&cnv_result, &args.out, &gene_names)?;
+        } else {
+            info!("CNV detection: skipped (no batch information)");
+        }
+    }
 
     info!("Done");
     Ok(())

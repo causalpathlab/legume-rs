@@ -177,6 +177,9 @@ pub struct SvdArgs {
         long_help = "Save computed log-variance for all features to {out}.feature_variance.parquet"
     )]
     save_feature_variance: bool,
+
+    #[command(flatten)]
+    cnv: CnvArgs,
 }
 
 pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
@@ -300,6 +303,12 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         )?;
     }
 
+    // 4b. Load gene positions for CNV (if requested)
+    let cnv_positions = {
+        let gene_names = data_vec.row_names()?;
+        crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?
+    };
+
     // 5. Nystrom projection
     let x_dn = match collapse_out.mu_adjusted.as_ref() {
         Some(adj) => adj,
@@ -347,6 +356,22 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             sel.selected_names.len(),
             feature_file
         );
+    }
+
+    // 6. Cluster-informed CNV detection (after SVD, using latent for clustering)
+    if let Some(positions) = cnv_positions {
+        let cnv_config = crate::cnv_pseudobulk::build_cnv_config(&args.cnv);
+
+        let cnv_result = crate::cnv_pseudobulk::detect_cnv_cluster_informed(
+            data_vec,
+            &nystrom_out.latent_nk,
+            &batch_membership,
+            &positions,
+            args.cnv.cnv_factors.max(3), // use at least 3 clusters
+            &cnv_config,
+        )?;
+
+        crate::cnv_pseudobulk::write_cnv_results(&cnv_result, &args.out, &gene_names)?;
     }
 
     Ok(())
