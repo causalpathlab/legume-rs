@@ -1,5 +1,6 @@
 use crate::embed_common::*;
 use crate::fit_topic::TopicArgs;
+use crate::logging::new_progress_bar;
 
 use candle_core::Device;
 use candle_nn::AdamW;
@@ -9,7 +10,6 @@ use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_ess::batched_ess_steps;
 use candle_util::candle_loss_functions::{gaussian_neg_log_prob, topic_likelihood};
 use candle_util::candle_model_traits::*;
-use indicatif::ProgressBar;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::common::{compute_level_epochs, sample_collapsed_data};
@@ -65,7 +65,7 @@ where
         config.args.learning_rate as f64,
     )?;
 
-    let pb = ProgressBar::new(total_epochs as u64);
+    let pb = new_progress_bar(total_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_epochs);
     let mut kl_trace = Vec::with_capacity(total_epochs);
@@ -243,7 +243,7 @@ where
         config.args.learning_rate as f64,
     )?;
 
-    let pb = ProgressBar::new(total_epochs as u64);
+    let pb = new_progress_bar(total_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_epochs);
     let mut kl_trace = Vec::with_capacity(total_epochs);
@@ -449,7 +449,7 @@ where
     )?;
 
     let total_actual_epochs: usize = level_epochs.iter().sum();
-    let pb = ProgressBar::new(total_actual_epochs as u64);
+    let pb = new_progress_bar(total_actual_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_actual_epochs);
     let mut kl_trace = Vec::with_capacity(total_actual_epochs);

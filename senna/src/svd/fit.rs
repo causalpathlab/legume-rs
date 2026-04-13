@@ -80,7 +80,7 @@ pub struct SvdArgs {
 
     #[arg(
         long,
-        default_value_t = 1,
+        default_value_t = 3,
         help = "Number of multi-level coarsening levels",
         long_help = "Number of multi-level coarsening levels for batch correction.\n\
 		     Higher values add intermediate refinement steps.\n\

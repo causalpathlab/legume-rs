@@ -1,8 +1,9 @@
 use crate::embed_common::*;
+use crate::logging::new_progress_bar;
 use crate::senna_input::*;
 
 use candle_core::{Device, Tensor};
-use indicatif::{ParallelProgressIterator, ProgressBar};
+use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -31,7 +32,7 @@ where
             .map(|&block| eval_block(block))
             .collect::<anyhow::Result<Vec<_>>>()?
     } else {
-        let pb = ProgressBar::new(njobs);
+        let pb = new_progress_bar(njobs);
         let result = jobs
             .iter()
             .map(|&block| {

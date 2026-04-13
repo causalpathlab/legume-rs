@@ -2,7 +2,6 @@ use crate::handlers::transformation::{run_squeeze, RowAlignMode, RunSqueezeArgs}
 use crate::hdf5_io::*;
 use crate::sparse_io::*;
 use crate::sparse_util::*;
-use crate::utilities::io_helpers::read_row_names;
 use crate::utilities::name_matching::{
     compose_id_name, filter_row_indices_by_type, make_names_unique,
 };
@@ -17,7 +16,10 @@ pub struct FromMtxArgs {
     /// matrix market-formatted data file (`.mtx.gz` or `.mtx`)
     pub mtx: Box<str>,
 
-    /// row/feature name file (name per each line; `.tsv.gz` or `.tsv`)
+    /// row/feature name file (name per each line; `.tsv.gz` or `.tsv`).
+    /// For 10x `features.tsv[.gz]` the columns are `id`, `name`, `feature_type`;
+    /// the third column, when present, is used for `--select-row-type` /
+    /// `--remove-row-type` / `--hto-row-type` filtering.
     #[arg(short, long)]
     pub row: Option<Box<str>>,
 
@@ -41,6 +43,25 @@ pub struct FromMtxArgs {
     /// (columns are joined with '_'); e.g. 2 reads "ENSG…<tab>SYMBOL"
     #[arg(long, default_value_t = 2)]
     pub row_name_columns: usize,
+
+    /// Keep only rows whose feature_type (column 3 of `--row`) contains this
+    /// string. Default `Gene Expression` matches the 10x mtx default. Set to
+    /// empty to keep everything.
+    #[arg(long, default_value = "Gene Expression")]
+    pub select_row_type: Box<str>,
+
+    /// Drop rows whose feature_type contains this string. Applied after
+    /// `--select-row-type`.
+    #[arg(long, default_value = "")]
+    pub remove_row_type: Box<str>,
+
+    /// Feature type used as HTO/multiplexing tags (e.g. `Antibody Capture`).
+    /// When set, each cell is assigned a batch label `barcode@{id}_{name}`
+    /// based on the HTO row with the highest count. HTO rows are then
+    /// removed from the final backend and cells with zero HTO signal are
+    /// dropped.
+    #[arg(long, default_value = "")]
+    pub hto_row_type: Box<str>,
 
     /// squeeze
     #[arg(long, default_value_t = false)]
@@ -639,10 +660,20 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
 
     let mut data = create_sparse_from_mtx_file(mtx_file, Some(&backend_file), Some(&backend))?;
 
-    if let Some(row_file) = row_file {
-        let mut row_names = read_row_names(row_file.clone(), args.row_name_columns)?;
-        make_names_unique(&mut row_names);
-        data.register_row_names_vec(&row_names);
+    // Row names + (optional) ids + feature types — parsed together from the
+    // features.tsv file so we can support the 10x 3-column layout.
+    //   col 1: id        col 2: name        col 3: feature_type (optional)
+    let parsed_rows = if let Some(row_file) = row_file {
+        let rows = read_mtx_feature_rows(row_file.as_ref(), args.row_name_columns)?;
+        Some(rows)
+    } else {
+        None
+    };
+
+    if let Some(rows) = parsed_rows.as_ref() {
+        let mut display = rows.build_display_names();
+        make_names_unique(&mut display);
+        data.register_row_names_vec(&display);
     } else if let Some(nrow) = data.num_rows() {
         let row_names: Vec<Box<str>> = (1..(nrow + 1)).map(|i| format!("{}", i).into()).collect();
         data.register_row_names_vec(&row_names);
@@ -653,6 +684,159 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
     } else if let Some(ncol) = data.num_columns() {
         let col_names: Vec<Box<str>> = (1..(ncol + 1)).map(|i| format!("{}", i).into()).collect();
         data.register_column_names_vec(&col_names);
+    }
+
+    let nrow_backend = data.num_rows().unwrap_or(0);
+    let ncol_backend = data.num_columns().unwrap_or(0);
+    if let Some(rows) = parsed_rows.as_ref() {
+        if let Some(row_types) = rows.types.as_ref() {
+            log_feature_type_histogram(mtx_file, row_types);
+
+            // Single pass: classify each row as HTO, keep, or drop.
+            let sel_lc = args.select_row_type.to_ascii_lowercase();
+            let rem_lc = args.remove_row_type.to_ascii_lowercase();
+            let hto_lc = args.hto_row_type.to_ascii_lowercase();
+            let hto_enabled = !hto_lc.is_empty();
+
+            let mut keep_rows: Vec<usize> = Vec::new();
+            let mut hto_rows: Vec<usize> = Vec::new();
+            for (i, t) in row_types.iter().enumerate() {
+                let low = t.to_ascii_lowercase();
+                if hto_enabled && low.contains(&hto_lc) {
+                    hto_rows.push(i);
+                    continue;
+                }
+                let selected = sel_lc.is_empty() || low.contains(&sel_lc);
+                let removed = !rem_lc.is_empty() && low.contains(&rem_lc);
+                if selected && !removed {
+                    keep_rows.push(i);
+                }
+            }
+
+            let keep_cols: Option<Vec<usize>> = if hto_enabled && !hto_rows.is_empty() {
+                info!(
+                    "HTO: {} multiplexing rows matching '{}'",
+                    hto_rows.len(),
+                    args.hto_row_type
+                );
+
+                // HTO matrices are tiny (<~20 rows), so dense is fine.
+                let hto_dense = data.read_rows_dmatrix(hto_rows.clone())?;
+                assert_eq!(hto_dense.nrows(), hto_rows.len());
+                assert_eq!(hto_dense.ncols(), ncol_backend);
+
+                struct HtoAssign {
+                    col: usize,
+                    hto_row: usize,
+                    count: f32,
+                }
+                let mut assigns: Vec<HtoAssign> = Vec::with_capacity(ncol_backend);
+                let mut zero_cells = 0usize;
+                for j in 0..ncol_backend {
+                    let col = hto_dense.column(j);
+                    let mut best = 0usize;
+                    let mut best_val = col[0];
+                    let mut col_sum = 0.0f32;
+                    for (k, &v) in col.iter().enumerate() {
+                        col_sum += v;
+                        if v > best_val {
+                            best_val = v;
+                            best = k;
+                        }
+                    }
+                    if col_sum <= 0.0 {
+                        zero_cells += 1;
+                        continue;
+                    }
+                    assigns.push(HtoAssign {
+                        col: j,
+                        hto_row: hto_rows[best],
+                        count: best_val,
+                    });
+                }
+
+                let dropped_frac = if ncol_backend > 0 {
+                    zero_cells as f64 / ncol_backend as f64
+                } else {
+                    0.0
+                };
+                info!(
+                    "HTO: {}/{} cells have zero HTO signal and will be dropped ({:.1}%)",
+                    zero_cells,
+                    ncol_backend,
+                    dropped_frac * 100.0
+                );
+                if dropped_frac > 0.5 {
+                    log::warn!(
+                        "HTO: dropped more than half of cells ({}/{}); \
+                         check that the HTO library is consistently present",
+                        zero_cells,
+                        ncol_backend
+                    );
+                }
+
+                let tag_for = |hto_row: usize| -> String {
+                    let id = rows.ids[hto_row].as_ref();
+                    let name = rows.names[hto_row].as_ref();
+                    if name.is_empty() {
+                        id.to_string()
+                    } else {
+                        format!("{}_{}", id, name)
+                    }
+                };
+
+                let mut col_names = data.column_names()?;
+
+                let output_stem = backend_file
+                    .strip_suffix(".zarr")
+                    .or_else(|| backend_file.strip_suffix(".h5"))
+                    .unwrap_or(&backend_file);
+                let hto_file = format!("{}.barcode_to_hto.tsv.gz", output_stem);
+                {
+                    use std::io::Write;
+                    let mut w = open_buf_writer(&hto_file)?;
+                    writeln!(w, "barcode\tid\tname\tcount")?;
+                    for a in &assigns {
+                        let bc = col_names[a.col].as_ref();
+                        let id = rows.ids[a.hto_row].as_ref();
+                        let name = rows.names[a.hto_row].as_ref();
+                        writeln!(w, "{}\t{}\t{}\t{}", bc, id, name, a.count)?;
+                    }
+                    w.flush()?;
+                }
+                info!("Wrote {}", hto_file);
+
+                for a in &assigns {
+                    col_names[a.col] =
+                        format!("{}@{}", col_names[a.col], tag_for(a.hto_row)).into_boxed_str();
+                }
+                data.register_column_names_vec(&col_names);
+
+                Some(assigns.into_iter().map(|a| a.col).collect::<Vec<_>>())
+            } else {
+                if hto_enabled {
+                    info!(
+                        "HTO: no rows match feature type '{}'; skipping multiplexing",
+                        args.hto_row_type
+                    );
+                }
+                None
+            };
+
+            let need_row_subset = keep_rows.len() < nrow_backend;
+            let need_col_subset = keep_cols.as_ref().is_some_and(|v| v.len() < ncol_backend);
+
+            if need_row_subset || need_col_subset {
+                info!(
+                    "from-mtx subset: rows {} -> {}, cols {} -> {}",
+                    nrow_backend,
+                    keep_rows.len(),
+                    ncol_backend,
+                    keep_cols.as_ref().map(|v| v.len()).unwrap_or(ncol_backend),
+                );
+                data.subset_columns_rows(keep_cols.as_ref(), Some(&keep_rows))?;
+            }
+        }
     }
 
     run_squeeze_if_needed(
@@ -666,6 +850,78 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
     finalize_zarr_output(&backend_file, &effective_output)?;
     info!("done");
     Ok(())
+}
+
+struct MtxFeatureRows {
+    ids: Vec<Box<str>>,
+    names: Vec<Box<str>>,
+    /// Tab-separated third column when present. `None` when the file had
+    /// fewer than three columns (row-type filtering is then skipped).
+    types: Option<Vec<Box<str>>>,
+    row_name_columns: usize,
+}
+
+impl MtxFeatureRows {
+    /// Build the composite `id{ROW_SEP}name{...}` display names used when
+    /// registering rows on the backend. Derived on demand so the struct
+    /// doesn't carry a third parallel vector.
+    fn build_display_names(&self) -> Vec<Box<str>> {
+        let take = self.row_name_columns.max(1);
+        self.ids
+            .iter()
+            .zip(self.names.iter())
+            .map(|(id, name)| {
+                let id = id.as_ref();
+                let name = name.as_ref();
+                let joined = if take >= 2 && !name.is_empty() {
+                    let mut s = String::with_capacity(id.len() + ROW_SEP.len() + name.len());
+                    s.push_str(id);
+                    s.push_str(ROW_SEP);
+                    s.push_str(name);
+                    s
+                } else {
+                    id.to_string()
+                };
+                joined.into_boxed_str()
+            })
+            .collect()
+    }
+}
+
+fn read_mtx_feature_rows(
+    row_file: &str,
+    row_name_columns: usize,
+) -> anyhow::Result<MtxFeatureRows> {
+    use matrix_util::common_io::read_lines_of_words_delim;
+
+    // 10x features.tsv is tab-separated and the 3rd column (feature_type)
+    // can contain spaces ("Gene Expression", "Antibody Capture"), so
+    // whitespace splitting would corrupt it.
+    let lines = read_lines_of_words_delim(row_file, &['\t'], -1)?.lines;
+    let n = lines.len();
+    let mut ids = Vec::with_capacity(n);
+    let mut names = Vec::with_capacity(n);
+    let mut types = Vec::with_capacity(n);
+    let mut any_type = false;
+
+    for words in lines.into_iter() {
+        let id: Box<str> = words.first().cloned().unwrap_or_else(|| "".into());
+        let name: Box<str> = words.get(1).cloned().unwrap_or_else(|| "".into());
+        let ty: Box<str> = words.get(2).cloned().unwrap_or_else(|| "".into());
+        if !ty.is_empty() {
+            any_type = true;
+        }
+        ids.push(id);
+        names.push(name);
+        types.push(ty);
+    }
+
+    Ok(MtxFeatureRows {
+        ids,
+        names,
+        types: any_type.then_some(types),
+        row_name_columns,
+    })
 }
 
 pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
@@ -1030,15 +1286,7 @@ pub fn run_build_from_h5ad(args: &FromH5adArgs) -> anyhow::Result<()> {
     info!("created sparse matrix: {}", backend_file);
     out.register_row_names_vec(&row_ids);
 
-    // Log feature type distribution (AnnData uses biotypes, not "Gene Expression")
-    {
-        let mut type_counts: std::collections::BTreeMap<&str, usize> =
-            std::collections::BTreeMap::new();
-        for t in &row_types {
-            *type_counts.entry(t.as_ref()).or_insert(0) += 1;
-        }
-        info!("Feature types: {:?}", type_counts);
-    }
+    log_feature_type_histogram(args.h5ad_file.as_ref(), &row_types);
 
     let select_rows =
         filter_row_indices_by_type(&row_types, &args.select_row_type, &args.remove_row_type);
@@ -1402,6 +1650,14 @@ pub fn run_build_from_10x_molecule(args: &From10xMoleculeArgs) -> anyhow::Result
     finalize_zarr_output(&backend_file, &effective_output)?;
     info!("done");
     Ok(())
+}
+
+fn log_feature_type_histogram(label: &str, row_types: &[Box<str>]) {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for t in row_types {
+        *counts.entry(t.as_ref()).or_insert(0) += 1;
+    }
+    info!("Feature types in {}: {:?}", label, counts);
 }
 
 fn run_squeeze_if_needed(
