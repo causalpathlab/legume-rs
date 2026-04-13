@@ -529,7 +529,66 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
             )
             .collect();
         write_lines(&cnv_lines, &cnv_file)?;
-        info!("wrote CNV ground truth: {:?}", &cnv_file);
+        info!("wrote CNV ground truth (union): {:?}", &cnv_file);
+
+        // Per-batch ground truth (for CNV detection validation)
+        if let (Some(ref states_db), Some(ref clone_parent)) =
+            (&sim.cnv_states_per_batch, &sim.cnv_clone_parent)
+        {
+            let per_batch_file = mtx_file.replace(".mtx.gz", ".cnv_per_batch_ground_truth.tsv.gz");
+            let mut lines: Vec<Box<str>> = vec!["gene\tchromosome\tposition\tbatch\tstate".into()];
+            for (b, batch_states) in states_db.iter().enumerate() {
+                for (g, &st) in batch_states.iter().enumerate() {
+                    if st != 1 {
+                        // Only write non-neutral entries (sparse)
+                        lines.push(
+                            format!(
+                                "{}\t{}\t{}\t{}\t{}",
+                                g, chromosomes[g], positions[g], b, state_labels[st as usize]
+                            )
+                            .into(),
+                        );
+                    }
+                }
+            }
+            write_lines(&lines, &per_batch_file)?;
+            info!("wrote per-batch CNV ground truth: {:?}", &per_batch_file);
+
+            // Clone tree
+            let tree_file = mtx_file.replace(".mtx.gz", ".cnv_clone_tree.tsv.gz");
+            let tree_lines: Vec<Box<str>> = std::iter::once("clone\tparent".into())
+                .chain(
+                    clone_parent
+                        .iter()
+                        .enumerate()
+                        .map(|(b, &p)| format!("{}\t{}", b, p).into()),
+                )
+                .collect();
+            write_lines(&tree_lines, &tree_file)?;
+            info!("wrote clone tree: {:?}", &tree_file);
+        }
+
+        // Write minimal GFF for gene coordinates (so --gff works with simulated data)
+        let gff_file = mtx_file.replace(".mtx.gz", ".genes.gff.gz");
+        let gff_lines: Vec<Box<str>> = std::iter::once("##gff-version 3".into())
+            .chain(
+                rows.iter()
+                    .zip(chromosomes.iter())
+                    .zip(positions.iter())
+                    .map(|((gene_name, chr), &pos)| {
+                        // GFF3: seqname source feature start end score strand frame attributes
+                        let start = pos + 1; // GFF is 1-based
+                        let end = start + 1000; // dummy gene length
+                        format!(
+                            "{}\tsimulation\tgene\t{}\t{}\t.\t+\t.\tgene_name={}",
+                            chr, start, end, gene_name,
+                        )
+                        .into()
+                    }),
+            )
+            .collect();
+        write_lines(&gff_lines, &gff_file)?;
+        info!("wrote gene annotations: {:?}", &gff_file);
     }
 
     info!(
