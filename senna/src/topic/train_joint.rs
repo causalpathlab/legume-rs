@@ -1,6 +1,7 @@
 use super::common::{compute_level_epochs, process_blocks};
 use crate::embed_common::*;
 use crate::fit_joint_topic::JointTopicArgs;
+use crate::logging::new_progress_bar;
 
 use candle_core::Device;
 use candle_nn::AdamW;
@@ -9,7 +10,6 @@ use candle_util::candle_encoder_joint_softmax::*;
 use candle_util::candle_joint_data_loader::*;
 use candle_util::candle_loss_functions::topic_likelihood;
 use candle_util::candle_model_traits::*;
-use indicatif::ProgressBar;
 use matrix_util::dmatrix_util::concatenate_vertical;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -287,7 +287,7 @@ where
     )?;
 
     let total_actual_epochs: usize = level_epochs.iter().sum();
-    let pb = ProgressBar::new(total_actual_epochs as u64);
+    let pb = new_progress_bar(total_actual_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_actual_epochs);
     let mut kl_trace = Vec::with_capacity(total_actual_epochs);

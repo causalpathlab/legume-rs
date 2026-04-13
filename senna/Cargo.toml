@@ -42,6 +42,7 @@ approx = { workspace = true }
 
 special = { workspace = true }
 indicatif = { workspace = true }
+indicatif-log-bridge = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 dashmap = { workspace = true }

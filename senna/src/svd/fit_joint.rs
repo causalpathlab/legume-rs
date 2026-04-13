@@ -122,7 +122,7 @@ pub struct JointSvdArgs {
 
     #[arg(
         long,
-        default_value_t = 2,
+        default_value_t = 3,
         help = "Number of multi-level collapsing levels.",
         long_help = "Number of multi-level collapsing levels.\n\
 		     More levels = coarser-to-finer batch correction.\n\

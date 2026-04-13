@@ -4,6 +4,7 @@ mod fit_clustering;
 mod fit_indexed_topic;
 mod fit_joint_topic;
 mod fit_topic;
+mod logging;
 mod postprocess;
 mod senna_input;
 mod svd;
@@ -178,10 +179,7 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    if cli.verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
+    logging::init_logger(cli.verbose);
 
     match &cli.commands {
         Commands::Svd(args) => {
