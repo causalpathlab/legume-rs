@@ -1,4 +1,5 @@
 mod cluster;
+mod cnv_pseudobulk;
 mod embed_common;
 mod fit_clustering;
 mod fit_indexed_topic;
