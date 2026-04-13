@@ -314,6 +314,10 @@ pub struct TopicArgs {
         help = "L2 regularization strength for refinement"
     )]
     pub(crate) refine_reg: f64,
+
+    // CNV detection args
+    #[command(flatten)]
+    pub(crate) cnv: CnvArgs,
 }
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
@@ -456,6 +460,29 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         (Some(&cell_names), Some("cell")),
         None,
     )?;
+
+    // CNV detection using topic proportions as cell-type membership
+    let gene_names = data_vec.row_names()?;
+    let cnv_positions = crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?;
+
+    if let Some(positions) = cnv_positions {
+        if let Some(batch_labels) = crate::cnv_pseudobulk::reconstruct_batch_labels(&data_vec) {
+            let topic_probs = z_nk.map(|x| x.exp());
+            let cnv_config = crate::cnv_pseudobulk::build_cnv_config(&args.cnv);
+
+            let cnv_result = crate::cnv_pseudobulk::detect_cnv_topic_informed(
+                data_vec,
+                &topic_probs,
+                &batch_labels,
+                &positions,
+                &cnv_config,
+            )?;
+
+            crate::cnv_pseudobulk::write_cnv_results(&cnv_result, &args.out, &gene_names)?;
+        } else {
+            info!("CNV detection: skipped (no batch information)");
+        }
+    }
 
     info!("Done");
     Ok(())

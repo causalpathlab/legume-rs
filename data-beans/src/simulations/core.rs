@@ -139,13 +139,23 @@ pub struct SimOut {
     pub gene_chromosomes: Option<Vec<Box<str>>>,
     /// CNV: per-gene position within chromosome (length D). None if n_chromosomes == 0.
     pub gene_positions: Option<Vec<u64>>,
-    /// CNV: per-gene CN state (0=loss, 1=neutral, 2=gain). None if n_chromosomes == 0.
+    /// CNV: per-gene CN state union across batches (0=loss, 1=neutral, 2=gain).
     pub cnv_states: Option<Vec<u8>>,
+    /// CNV: per-batch, per-gene CN states. `cnv_states_per_batch[b][g]`.
+    pub cnv_states_per_batch: Option<Vec<Vec<u8>>>,
+    /// CNV: clone tree parent indices. `clone_parent[b]` = parent of clone b.
+    pub cnv_clone_parent: Option<Vec<usize>>,
 }
 
 /// CNV block simulation output.
 pub(crate) struct CnvSimOut {
-    pub(crate) cnv_multiplier: Vec<f32>,
+    /// Per-gene, per-batch CN multiplier `[D × B]`.
+    pub(crate) cnv_multiplier_db: DMatrix<f32>,
+    /// Per-gene, per-batch CN state: `cnv_states_db[b][g]` (0=loss, 1=neutral, 2=gain).
+    pub(crate) cnv_states_db: Vec<Vec<u8>>,
+    /// Clone tree: `clone_parent[b]` = parent clone index for batch b.
+    pub(crate) clone_parent: Vec<usize>,
+    /// Union across batches (for backwards compat ground truth).
     pub(crate) cnv_states: Vec<u8>,
     pub(crate) chromosomes: Vec<Box<str>>,
     pub(crate) positions: Vec<u64>,
@@ -153,6 +163,7 @@ pub(crate) struct CnvSimOut {
 
 pub(crate) struct CnvSimParams {
     pub(crate) n_genes: usize,
+    pub(crate) n_batches: usize,
     pub(crate) n_chr: usize,
     pub(crate) events_per_chr: f32,
     pub(crate) block_frac: f32,
@@ -160,22 +171,24 @@ pub(crate) struct CnvSimParams {
     pub(crate) loss_fold: f32,
 }
 
-/// Generate CNV blocks: assign genes to chromosomes with positions,
-/// then place contiguous gain/loss events.
+/// Generate clonal CNV blocks with a binary clonal tree.
+///
+/// - Clone 0 (batch 0) = normal reference (CN=2, no CNV events)
+/// - Each subsequent clone inherits its parent's CN profile + adds new events
+/// - Binary tree: parent of clone `b` = `(b - 1) / 2`
+///
+/// This mirrors the COMPASS simulation design: a clonal tree where deeper
+/// clones accumulate more CNV events, and related clones share ancestral events.
 pub(crate) fn sample_cnv_blocks(params: &CnvSimParams, rng: &mut impl rand::Rng) -> CnvSimOut {
     let dd = params.n_genes;
+    let bb = params.n_batches.max(1);
     let n_chr = params.n_chr;
     let genes_per_chr = dd / n_chr;
-    let spacing = 10_000u64; // bp between genes
+    let spacing = 10_000u64;
 
+    // 1. Gene coordinates (shared across all clones/batches)
     let mut chromosomes = Vec::with_capacity(dd);
     let mut positions = Vec::with_capacity(dd);
-    let mut cnv_states = vec![1u8; dd]; // neutral by default
-    let mut cnv_multiplier = vec![1.0f32; dd];
-
-    let poisson_events =
-        Poisson::new(params.events_per_chr as f64).unwrap_or_else(|_| Poisson::new(0.5).unwrap());
-
     for chr_idx in 0..n_chr {
         let chr_name: Box<str> = format!("chr{}", chr_idx + 1).into();
         let chr_start = chr_idx * genes_per_chr;
@@ -184,44 +197,117 @@ pub(crate) fn sample_cnv_blocks(params: &CnvSimParams, rng: &mut impl rand::Rng)
         } else {
             (chr_idx + 1) * genes_per_chr
         };
-        let chr_len = chr_end - chr_start;
-
         for g in chr_start..chr_end {
             chromosomes.push(chr_name.clone());
             positions.push((g - chr_start) as u64 * spacing);
         }
+    }
 
-        // Sample number of CNV events on this chromosome
-        let n_events = poisson_events.sample(rng) as usize;
-        let block_size = ((chr_len as f32 * params.block_frac) as usize).max(3);
+    // 2. Binary clonal tree: clone 0 = normal root
+    let clone_parent: Vec<usize> = (0..bb)
+        .map(|b| if b == 0 { 0 } else { (b - 1) / 2 })
+        .collect();
 
-        for _ in 0..n_events {
-            let start = rng.random_range(0..chr_len);
-            let end = (start + block_size).min(chr_len);
-            let is_gain: bool = rng.random_bool(0.5);
-            let (state, mult) = if is_gain {
-                (2u8, params.gain_fold)
+    // 3. Build CN profiles by traversing the tree top-down
+    let mut cnv_multiplier_db = DMatrix::<f32>::from_element(dd, bb, 1.0);
+
+    let poisson_events =
+        Poisson::new(params.events_per_chr as f64).unwrap_or_else(|_| Poisson::new(0.5).unwrap());
+
+    let mut total_gain = 0usize;
+    let mut total_loss = 0usize;
+
+    // Clone 0 stays all-neutral (normal reference). Process clones 1..bb.
+    for b in 1..bb {
+        // Inherit parent's profile
+        let parent = clone_parent[b];
+        let parent_col = cnv_multiplier_db.column(parent).clone_owned();
+        cnv_multiplier_db.column_mut(b).copy_from(&parent_col);
+
+        // Add new CNV events for this clone
+        for chr_idx in 0..n_chr {
+            let chr_start = chr_idx * genes_per_chr;
+            let chr_end = if chr_idx == n_chr - 1 {
+                dd
             } else {
-                (0u8, params.loss_fold)
+                (chr_idx + 1) * genes_per_chr
             };
+            let chr_len = chr_end - chr_start;
 
-            for g in (chr_start + start)..(chr_start + end) {
-                cnv_states[g] = state;
-                cnv_multiplier[g] = mult;
+            let n_events = poisson_events.sample(rng) as usize;
+            let block_size = ((chr_len as f32 * params.block_frac) as usize).max(3);
+
+            for _ in 0..n_events {
+                let start = rng.random_range(0..chr_len);
+                let end = (start + block_size).min(chr_len);
+                let is_gain: bool = rng.random_bool(0.5);
+                let mult = if is_gain {
+                    total_gain += end - start;
+                    params.gain_fold
+                } else {
+                    total_loss += end - start;
+                    params.loss_fold
+                };
+
+                for g in (chr_start + start)..(chr_start + end) {
+                    // Multiply on top of inherited profile (allows compound events)
+                    cnv_multiplier_db[(g, b)] *= mult;
+                }
             }
         }
     }
 
+    // 4. Per-batch CN states from multipliers
+    let cnv_states_db: Vec<Vec<u8>> = (0..bb)
+        .map(|b| {
+            (0..dd)
+                .map(|g| {
+                    let m = cnv_multiplier_db[(g, b)];
+                    if m > 1.0 + 1e-6 {
+                        2u8 // gain
+                    } else if m < 1.0 - 1e-6 {
+                        0u8 // loss
+                    } else {
+                        1u8 // neutral
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    // Union across batches (backwards compat)
+    let cnv_states: Vec<u8> = (0..dd)
+        .map(|g| {
+            let has_gain = (0..bb).any(|b| cnv_states_db[b][g] == 2);
+            let has_loss = (0..bb).any(|b| cnv_states_db[b][g] == 0);
+            if has_gain {
+                2u8
+            } else if has_loss {
+                0u8
+            } else {
+                1u8
+            }
+        })
+        .collect();
+
     info!(
-        "CNV simulation: {} genes, {} chromosomes, {} gain, {} loss",
-        dd,
-        n_chr,
-        cnv_states.iter().filter(|&&s| s == 2).count(),
-        cnv_states.iter().filter(|&&s| s == 0).count(),
+        "CNV simulation: {} genes × {} batches (clonal tree), {} chromosomes, ~{} gain, ~{} loss gene-events",
+        dd, bb, n_chr, total_gain, total_loss,
+    );
+    info!(
+        "Clone tree: {:?}",
+        clone_parent
+            .iter()
+            .enumerate()
+            .map(|(b, &p)| format!("{}←{}", b, p))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     CnvSimOut {
-        cnv_multiplier,
+        cnv_multiplier_db,
+        cnv_states_db,
+        clone_parent,
         cnv_states,
         chromosomes,
         positions,
@@ -334,7 +420,7 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
         ln_delta_d += &ln_null_d.column(0);
     }
 
-    let delta_db = ln_delta_db.map(|x| x.exp());
+    let mut delta_db = ln_delta_db.map(|x| x.exp());
     info!("simulated batch effects");
 
     // 3. factorization model
@@ -390,11 +476,12 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
 
     let theta_kn = sample_theta_kn(kk, nn, pve_topic, &mut rng)?;
 
-    // 4. CNV simulation (optional)
+    // 4. CNV simulation (optional) — per-batch CNV folded into delta
     let cnv_out = if args.n_chromosomes > 0 {
         Some(sample_cnv_blocks(
             &CnvSimParams {
                 n_genes: dd,
+                n_batches: bb,
                 n_chr: args.n_chromosomes,
                 events_per_chr: args.cnv_events_per_chr,
                 block_frac: args.cnv_block_frac,
@@ -406,19 +493,15 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
     } else {
         None
     };
-    // Pre-multiply CNV into dictionary if present
-    let beta_dk = if let Some(ref cnv) = cnv_out {
-        let mut beta = beta_dk;
-        for i in 0..dd {
-            let scale = cnv.cnv_multiplier[i];
-            for k in 0..kk {
-                beta[(i, k)] *= scale;
+    // Fold per-batch CNV multiplier into delta (batch effect)
+    // delta_effective[g,b] = delta[g,b] * cnv[g,b]
+    if let Some(ref cnv) = cnv_out {
+        for b in 0..bb {
+            for g in 0..dd {
+                delta_db[(g, b)] *= cnv.cnv_multiplier_db[(g, b)];
             }
         }
-        beta
-    } else {
-        beta_dk
-    };
+    }
 
     // 5. putting them all together
     let delta_ref = if bb > 1 { Some(&delta_db) } else { None };
@@ -437,14 +520,17 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
         triplets.len()
     );
 
-    let (gene_chromosomes, gene_positions, cnv_states) = match cnv_out {
-        Some(cnv) => (
-            Some(cnv.chromosomes),
-            Some(cnv.positions),
-            Some(cnv.cnv_states),
-        ),
-        None => (None, None, None),
-    };
+    let (gene_chromosomes, gene_positions, cnv_states, cnv_states_per_batch, cnv_clone_parent) =
+        match cnv_out {
+            Some(cnv) => (
+                Some(cnv.chromosomes),
+                Some(cnv.positions),
+                Some(cnv.cnv_states),
+                Some(cnv.cnv_states_db),
+                Some(cnv.clone_parent),
+            ),
+            None => (None, None, None, None, None),
+        };
 
     Ok(SimOut {
         ln_delta_db,
@@ -456,6 +542,8 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
         gene_chromosomes,
         gene_positions,
         cnv_states,
+        cnv_states_per_batch,
+        cnv_clone_parent,
     })
 }
 
