@@ -35,10 +35,10 @@ pub struct TopicArgs {
     #[arg(
         required = true,
         value_delimiter = ',',
-        help = "Data files",
-        long_help = "Data files to be processed.\n\
-		     Each file should be specified as a path.\n\
-		     Multiple files can be provided (space or comma separated)."
+        help = "Input data files (.zarr or .h5)",
+        long_help = "Sparse backends produced by `data-beans from-mtx`.\n\
+                     Multiple files may be passed (comma- or space-separated)\n\
+                     and are concatenated column-wise on a shared feature set."
     )]
     pub(crate) data_files: Vec<Box<str>>,
 
@@ -46,12 +46,16 @@ pub struct TopicArgs {
         long,
         short,
         required = true,
-        help = "Output header",
-        long_help = "Output header for results.\n\
-		     Specify the output file or prefix for generated files:\n\
-		     - {out}.delta.parquet\n\
-		     - {out}.dictionary.parquet\n\
-		     - {out}.latent.parquet (log-softmax topic proportions)\n"
+        help = "Output file prefix",
+        long_help = "Prefix for generated files:\n  \
+                     {out}.dictionary.parquet       gene × topic loadings (log-prob)\n  \
+                     {out}.latent.parquet           cell × topic log-softmax proportions\n  \
+                     {out}.delta.parquet            per-batch effects (if --batch-files)\n  \
+                     {out}.log_likelihood.parquet   training loss trace\n  \
+                     {out}.safetensors              encoder+decoder weights\n  \
+                     {out}.metadata.json            model metadata (for `senna eval-topic`)\n  \
+                     {out}.dispersion.parquet       NB dispersion (if --decoder nb)\n\n\
+                     With --decoder a,b,c: per-decoder dictionaries written as {out}.{name}.dictionary.parquet."
     )]
     pub(crate) out: Box<str>,
 
@@ -60,8 +64,8 @@ pub struct TopicArgs {
         short = 'p',
         default_value_t = 50,
         help = "Random projection dimension",
-        long_help = "Random projection dimension to project the data.\n\
-		     Controls the dimensionality of the random projection step."
+        long_help = "Target rank of the initial random sketch used to seed\n\
+                     batch correction and multi-level pseudobulk collapsing."
     )]
     pub(crate) proj_dim: usize,
 
@@ -69,9 +73,9 @@ pub struct TopicArgs {
         long,
         short = 'd',
         default_value_t = 10,
-        help = "Top {d} components of projection",
-        long_help = "Use top {d} components of projection.\n\
-		     Number of samples will be less than `2^{d}+1`."
+        help = "Partition depth: ≤ 2^d + 1 pseudobulk groups",
+        long_help = "Binary-tree partitioning over the top d projection components.\n\
+                     Produces at most 2^d + 1 pseudobulk leaves."
     )]
     pub(crate) sort_dim: usize,
 
@@ -79,39 +83,36 @@ pub struct TopicArgs {
         long,
         short,
         value_delimiter(','),
-        help = "Batch membership files",
-        long_help = "Batch membership files (comma-separated names).\n\
-		     Each batch file should correspond to each data file.\n\
-		     Example: batch1.csv,batch2.csv"
+        help = "Batch membership files, one per data file",
+        long_help = "Each file lists a batch label per cell in the same order as its\n\
+                     matching data file. Example: batch1.tsv,batch2.tsv"
     )]
     pub(crate) batch_files: Option<Vec<Box<str>>>,
 
     #[arg(
         short = 'w',
         long = "warm-start",
-        help = "Warm start projection file",
-        long_help = "Warm start from the previous projection (cell x k).\n\
-		     Provide a file to initialize the projection."
+        help = "Warm-start projection file (cell × k)",
+        long_help = "Skip random projection and use this matrix instead.\n\
+                     Rows must match the concatenated cell order of the inputs."
     )]
     pub(crate) warm_start_proj_file: Option<Box<str>>,
 
     #[arg(
         long,
         default_value_t = 10,
-        help = "Number of k-nearest neighbours within each batch",
-        long_help = "Number of k-nearest neighbours within each batch.\n\
-		     Controls the number of neighbours for \n\
-		     nearest neighbour search."
+        help = "In-batch k-NN for super-cell merging",
+        long_help = "Number of within-batch nearest neighbours used when\n\
+                     aggregating cells into pseudobulk super-cells."
     )]
     pub(crate) knn_cells: usize,
 
     #[arg(
         long,
         default_value_t = 3,
-        help = "Number of multi-level coarsening levels",
-        long_help = "Number of multi-level coarsening levels for batch correction.\n\
-		     Higher values add intermediate refinement steps.\n\
-		     Level sort dimensions are linearly spaced from 4 to sort_dim."
+        help = "Multi-level coarsening levels",
+        long_help = "Hierarchical pseudobulk refinement passes. Level sort dims are\n\
+                     linearly spaced from 4 to --sort-dim. Set to 1 to disable."
     )]
     pub(crate) num_levels: usize,
 
@@ -119,25 +120,26 @@ pub struct TopicArgs {
         long,
         value_enum,
         default_value = "mixed",
-        help = "Multi-level training schedule"
+        help = "Multi-level training schedule (mixed|progressive)",
+        long_help = "mixed       — every level trained simultaneously each epoch.\n\
+                     progressive — coarse→fine, more epochs for coarser levels."
     )]
     pub(crate) level_schedule: LevelSchedule,
 
     #[arg(
         long,
         default_value_t = 30,
-        help = "Optimization iterations",
-        long_help = "Number of optimization iterations.\n\
-		     Controls the number of steps for model optimization."
+        help = "Batch-correction optimizer iterations",
+        long_help = "Coordinate-descent steps when fitting the per-batch delta."
     )]
     pub(crate) iter_opt: usize,
 
     #[arg(
         long,
         default_value_t = 100,
-        help = "Block size for parallel processing",
-        long_help = "Block size (number of columns) for parallel processing.\n\
-		     Controls the granularity of parallel computation."
+        help = "Column block size for parallel I/O",
+        long_help = "Columns streamed per worker. Trades parallel granularity\n\
+                     against per-block memory."
     )]
     pub(crate) block_size: usize,
 
@@ -145,9 +147,7 @@ pub struct TopicArgs {
         short = 't',
         long,
         default_value_t = 10,
-        help = "Number of latent topics",
-        long_help = "Number of latent topics.\n\
-		     Controls the dimensionality of the latent topic space."
+        help = "Number of latent topics (K)"
     )]
     pub(crate) n_latent_topics: usize,
 
@@ -156,10 +156,8 @@ pub struct TopicArgs {
         short = 'e',
         value_delimiter(','),
         default_values_t = vec![128, 1024, 128],
-        help = "Encoder layers",
-        long_help = "Encoder layers (comma-separated).\n\
-		     Specify the size of each layer in the encoder model.\n\
-		     Example: 128,1024,128"
+        help = "Encoder hidden layer sizes (comma-separated)",
+        long_help = "Example: 128,1024,128 (input → 128 → 1024 → 128 → topics)."
     )]
     pub(crate) encoder_layers: Vec<usize>,
 
@@ -167,9 +165,7 @@ pub struct TopicArgs {
         long,
         short = 'i',
         default_value_t = 1000,
-        help = "Number of training epochs",
-        long_help = "Number of training epochs.\n\
-		     Controls how many times the model is trained over the data."
+        help = "Training epochs"
     )]
     pub(crate) epochs: usize,
 
@@ -177,19 +173,16 @@ pub struct TopicArgs {
         long,
         short = 'j',
         default_value_t = 5,
-        help = "Data jitter interval",
-        long_help = "Data jitter interval.\n\
-		     Controls the interval for adding jitter to the collapsed data\n\
-		     by posterior resampling during VAE training."
+        help = "Posterior resampling interval (epochs)",
+        long_help = "How often to jitter the collapsed targets by posterior resampling\n\
+                     during VAE training."
     )]
     pub(crate) jitter_interval: usize,
 
     #[arg(
         long,
         default_value_t = 100,
-        help = "Minibatch size",
-        long_help = "Minibatch size for training.\n\
-		     Controls the number of samples per training batch."
+        help = "Training minibatch size"
     )]
     pub(crate) minibatch_size: usize,
 
@@ -197,9 +190,7 @@ pub struct TopicArgs {
         long,
         default_value_t = 0.05,
         alias = "lr",
-        help = "Learning rate",
-        long_help = "Learning rate for optimization.\n\
-		     Controls the step size for parameter updates."
+        help = "Adam learning rate"
     )]
     pub(crate) learning_rate: f32,
 
@@ -207,17 +198,14 @@ pub struct TopicArgs {
         long,
         value_enum,
         default_value = "cpu",
-        help = "Candle device",
-        long_help = "Candle device to use for computation.\n\
-		     Options: cpu, cuda, metal."
+        help = "Compute device (cpu|cuda|metal)"
     )]
     pub(crate) device: ComputeDevice,
 
     #[arg(
         long,
         default_value_t = 0,
-        help = "A device for cuda",
-        long_help = "For cuda or meta, we may want to choose a different device."
+        help = "CUDA/Metal device index"
     )]
     pub(crate) device_no: usize,
 
@@ -225,18 +213,16 @@ pub struct TopicArgs {
         long,
         value_enum,
         default_value = "residual",
-        help = "Adjustment method",
-        long_help = "Adjust by batch or residual.\n\
-		     Choose the method for batch adjustment."
+        help = "Batch adjustment (batch|residual)",
+        long_help = "batch    — subtract per-batch pseudobulk mean.\n\
+                     residual — divide by fitted delta per pseudobulk group."
     )]
     pub(crate) adj_method: AdjMethod,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Preload all columns data",
-        long_help = "Preload all the columns data into memory.\n\
-		     Improves performance for large datasets."
+        help = "Load all columns into memory before training"
     )]
     pub(crate) preload_data: bool,
 
@@ -244,12 +230,10 @@ pub struct TopicArgs {
         long,
         default_value_t = 1000,
         alias = "max-features",
-        help = "Cap feature dimension by coarsening",
-        long_help = "Cap the feature dimension by grouping co-expressed features into\n\
-		     meta-features. The model trains at this reduced resolution.\n\
-		     On output, the dictionary is expanded back to full resolution.\n\
-		     Set to 0 to disable. Default: 1000.\n\
-		     Applied after --max-features selection if both are specified."
+        help = "Cap feature dim by meta-feature coarsening (0 to disable)",
+        long_help = "Groups co-expressed features into ≤N meta-features so the model\n\
+                     trains at reduced resolution. The dictionary is expanded back to\n\
+                     full resolution on output."
     )]
     pub(crate) max_coarse_features: usize,
 
@@ -258,13 +242,12 @@ pub struct TopicArgs {
         value_enum,
         value_delimiter = ',',
         default_value = "multinom",
-        help = "Decoder type(s), comma-separated for multi-decoder",
-        long_help = "Topic decoder type(s):\n\
-		     multinom: softmax dictionary with multinomial likelihood\n\
-		     nb: negative binomial with per-gene dispersion and library size\n\
-		     vmf: von Mises-Fisher mixture on unit hypersphere\n\
-		     Multiple decoders can be specified (e.g., --decoder multinom,vmf)\n\
-		     to train them simultaneously with shared encoder."
+        help = "Decoder type(s) [multinom|nb|vmf], comma-separated",
+        long_help = "multinom — softmax dictionary with multinomial likelihood.\n\
+                     nb       — negative binomial with per-gene dispersion.\n\
+                     vmf      — von Mises-Fisher mixture on the unit hypersphere.\n\n\
+                     Multiple types (e.g. --decoder multinom,vmf) train jointly with\n\
+                     a shared encoder; see --decoder-weights for loss weighting."
     )]
     pub(crate) decoder: Vec<DecoderType>,
 
@@ -278,23 +261,19 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 1e-4,
-        help = "Topic smoothing during training",
-        long_help = "Mix encoder topic proportions with uniform distribution during training:\n\
-		     z_smooth = (1 - α) * z_nk + α / K\n\
-		     Ensures every topic receives gradient signal through the decoder,\n\
-		     preventing dead topics. Only applied during training.\n\
-		     Typical values: 0.01-0.2. Set to 0 to disable."
+        help = "Uniform smoothing of topic proportions during training",
+        long_help = "z_smooth = (1-α) z + α/K. Keeps every topic on the gradient path\n\
+                     and prevents dead topics. Typical: 0.01–0.2. Set 0 to disable."
     )]
     pub(crate) topic_smoothing: f64,
 
     #[arg(
         long,
         default_value_t = 0,
-        help = "Epochs of VCD training before switching to SGVB",
-        long_help = "Number of initial epochs using variational contrastive divergence (VCD).\n\
-		     VCD refines encoder samples via elliptical slice sampling (ESS),\n\
-		     then switches to standard SGVB for remaining epochs.\n\
-		     Set to 0 to use SGVB only (default)."
+        help = "VCD warm-up epochs before switching to SGVB",
+        long_help = "Variational contrastive divergence refines encoder samples via\n\
+                     elliptical slice sampling for the first N epochs, then switches\n\
+                     to standard SGVB. Only supported with --level-schedule mixed."
     )]
     pub(crate) vcd_epochs: usize,
 
@@ -316,25 +295,22 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "Per-cell refinement steps at inference",
-        long_help = "Number of gradient steps for per-cell topic refinement at inference time.\n\
-		     Optimizes topic logits against the frozen decoder likelihood,\n\
-		     anchored to the encoder output via L2 regularization.\n\
-		     Set to 0 to disable (default)."
+        help = "Per-cell refinement steps at inference (0 = off)",
+        long_help = "Gradient steps that optimize topic logits against the frozen\n\
+                     decoder likelihood, anchored to the encoder output by L2."
     )]
     pub(crate) refine_steps: usize,
 
-    #[arg(long, default_value_t = 0.01, help = "Learning rate for refinement")]
+    #[arg(long, default_value_t = 0.01, help = "Learning rate for inference-time refinement")]
     pub(crate) refine_lr: f64,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "L2 regularization strength for refinement"
+        help = "L2 anchor strength for inference-time refinement"
     )]
     pub(crate) refine_reg: f64,
 
-    // CNV detection args
     #[command(flatten)]
     pub(crate) cnv: CnvArgs,
 }

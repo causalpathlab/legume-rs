@@ -71,13 +71,13 @@ fn print_logo() {
 #[derive(Parser, Debug)]
 #[command(
     version,
-    about = "SENNA",
-    long_about = "Stochastic data Embedding with Nearest Neighbourhood Adjustment\n\
-		  Data files of either `.zarr` or `.h5` format. \n\
-		  We can convert `.mtx` to `.zarr` or `.h5` using `data-beans from-mtx`"
+    about = "SENNA — Stochastic data Embedding with Nearest Neighbourhood Adjustment",
+    long_about = "SENNA — Stochastic data Embedding with Nearest Neighbourhood Adjustment.\n\n\
+                  Input: sparse backends in `.zarr` or `.h5` format.\n\
+                  Convert from Matrix Market with `data-beans from-mtx`."
 )]
 struct Cli {
-    #[arg(short = 'v', long, global = true)]
+    #[arg(short = 'v', long, global = true, help = "Verbose logging")]
     verbose: bool,
 
     #[command(subcommand)]
@@ -87,99 +87,94 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     #[command(
-        about = "Embedding data by singular value decomposition",
-        long_about = "Estimate Nystrom projection (SVD) in the three stages: \n\
-		      (1) Collapse sparse data while adjusting batch effects\n\
-		      (2) Estimate an orthogonal basis matrix\n\
-		      (3) Project the original data onto the basis vectors.\n"
+        about = "Embed cells by Nyström SVD with batch-aware pseudobulk collapsing",
+        long_about = "Nyström SVD embedding in three stages:\n\
+                      (1) batch-aware multi-level pseudobulk collapsing,\n\
+                      (2) randomized SVD on the collapsed matrix,\n\
+                      (3) projection of every cell onto the learned basis."
     )]
     Svd(SvdArgs),
 
     #[command(
-        about = "Embedding data by topic modelling",
-        long_about = "Estimate a probabilistic topic model in the three stages: \n\
-		      (1) Collapse sparse data while adjusting batch effects\n\
-		      (2) Estimate encoder-decoder architecture via SGD\n\
-		      (3) Estimate latent states on the original data.\n"
+        about = "Embed cells by probabilistic topic modelling (VAE, multi-decoder)",
+        long_about = "Topic-model embedding in three stages:\n\
+                      (1) batch-aware multi-level pseudobulk collapsing,\n\
+                      (2) encoder-decoder VAE training via SGD,\n\
+                      (3) encoder inference of per-cell latent topic proportions.\n\n\
+                      Supports multinomial, negative-binomial, and vMF decoders\n\
+                      (jointly when comma-separated via --decoder)."
     )]
     Topic(TopicArgs),
 
     #[command(
-        about = "Embedding data by indexed topic modelling (adaptive feature windows)",
-        long_about = "Estimate a probabilistic topic model with indexed encoder/decoder: \n\
-		      (1) Collapse sparse data while adjusting batch effects\n\
-		      (2) Estimate indexed encoder-decoder via SGD (top-K feature windows)\n\
-		      (3) Estimate latent states on the original data.\n\
-		      Uses per-sample adaptive feature selection for ~4-7x decoder speedup.\n",
+        about = "Topic model with adaptive top-K feature windows (~4-7× faster decoder)",
+        long_about = "Same three-stage pipeline as `topic`, but the encoder and\n\
+                      decoder operate on a per-cell top-K feature window instead\n\
+                      of the dense D × K dictionary. Useful for very large gene sets.",
         visible_alias = "itopic"
     )]
     IndexedTopic(IndexedTopicArgs),
 
     #[command(
         about = "Annotate topics using marker genes (vMF cosine similarity)",
-        long_about = "Assign cell type probabilities to topics via vMF softmax on cosine similarity.\n\n\
-              Modes:\n\
-              - Direct:      senna annotate -g dict.parquet -z latent.parquet -m markers.tsv -o out\n\
-              - Interactive: add -I to iteratively augment markers\n\
-              - LLM-assist:  --suggest-only out.json, then --apply-suggestions in.json",
+        long_about = "Assign cell-type probabilities to topics via vMF softmax on\n\
+                      cosine similarity between the topic dictionary and marker sets.\n\n\
+                      Modes:\n\
+                        direct      — senna annotate -g dict -z latent -m markers -o out\n\
+                        interactive — add -I to iteratively augment markers\n\
+                        LLM-assist  — --suggest-only out.json, then --apply-suggestions in.json",
         visible_alias = "annotate"
     )]
     AnnotateTopic(AnnotateTopicArgs),
 
     #[command(
-        about = "Evaluate a trained topic model on new data",
-        long_about = "Apply a previously trained topic model to new data files.\n\
-                      Handles gene alignment (new data may have different genes),\n\
-                      estimates batch effects from the dictionary, and runs\n\
-                      encoder inference on CPU with rayon parallelism.",
-        visible_alias = "eval-topic"
+        about = "Apply a trained topic model to new data",
+        long_about = "Run encoder inference with a previously trained topic model.\n\
+                      Handles gene-set misalignment, re-estimates per-batch delta\n\
+                      from the frozen dictionary, and runs on CPU with rayon."
     )]
     EvalTopic(EvalTopicArgs),
 
     #[command(
-        about = "Embedding data by singular value decomposition on multiple data types",
-        long_about = "Estimate Nystrom projection (SVD) in the three stages: \n\
-		      (1) Collapse sparse data while adjusting batch effects\n\
-		      (2) Estimate an orthogonal basis matrix\n\
-		      (3) Project the original data onto the basis vectors.\n"
+        about = "Joint Nyström SVD across multiple modalities",
+        long_about = "Nyström SVD on a stack of modalities sharing the same cells.\n\
+                      Data files are arranged row-major as a (modality × batch) table;\n\
+                      use -m to set the number of modality rows."
     )]
     JointSvd(JointSvdArgs),
 
     #[command(
-        about = "Embedding data by topic modelling on multiple data types",
-        long_about = "Estimate a joint probabilistic topic model across multiple modalities:\n\
-		      (1) Collapse sparse data while adjusting batch effects\n\
-		      (2) Estimate encoder-decoder architecture via SGD\n\
-		      (3) Estimate latent states on the original data.\n\n\
-		      Decoder types:\n\
-		      - independent: each modality gets its own topic-to-feature dictionary\n\
-		      - delta: shared base dictionary + cumulative chain deltas between \n\
-		        consecutive modalities (first=reference, second=base+delta_1, etc.).\n\
-		        All modalities must share the same features (genes).\n\n\
-		      Data files are organized in a row-major table:\n\
-		      files are grouped by modality (rows), sharing cells (columns).\n\
-		      Use -m to specify the number of modality rows.\n"
+        about = "Joint topic model across multiple modalities (independent or delta decoder)",
+        long_about = "Joint topic-model embedding across a stack of modalities.\n\n\
+                      Data files are arranged row-major as a (modality × batch) table;\n\
+                      use -m to set the number of modality rows.\n\n\
+                      Decoder types:\n\
+                        independent — each modality has its own topic dictionary;\n\
+                                      features may differ across modalities.\n\
+                        delta       — shared base dictionary + cumulative chain deltas;\n\
+                                      modality m = softmax(z @ (W_base + Σ δ_1..m)).\n\
+                                      Requires shared features across all modalities."
     )]
     JointTopic(JointTopicArgs),
 
     #[command(
-        about = "Visualize topic/SVD results with spectral embedding",
-        long_about = "Create 2D visualization coordinates using spectral embedding.\n\
-		      (1) Collapse data into pseudobulk samples\n\
-		      (2) Compute PB-PB similarity from expression profiles\n\
-		      (3) Spectral embedding of PB samples\n\
-		      (4) Project cells via soft assignment to PB samples.\n",
+        about = "2D visualization by pseudobulk spectral / tree / t-SNE layout",
+        long_about = "Build 2D coordinates in four stages:\n\
+                      (1) partition cells into pseudobulk samples,\n\
+                      (2) compute PB-PB similarity from expression profiles,\n\
+                      (3) lay out PB samples (spectral, tree, or t-SNE),\n\
+                      (4) project cells by soft assignment to their nearest PB samples.",
         visible_alias = "viz"
     )]
     Visualize(VisualizeArgs),
 
     #[command(
-        about = "Cluster cells based on latent representations",
-        long_about = "Cluster cells using latent topic proportions or SVD embeddings.\n\n\
-		     Supports multiple clustering algorithms:\n\
-		     - K-means (default)\n\
-		     - Leiden (graph-based community detection)\n\
-		     Output: cluster assignments in parquet format"
+        about = "Cluster cells on latent topic / SVD representations",
+        long_about = "Cluster cells using a latent matrix from `senna topic` or `senna svd`.\n\n\
+                      Algorithms:\n\
+                        kmeans  — k-means (default; requires -k)\n\
+                        leiden  — graph-based community detection (auto-k)\n\
+                        hsblock — hierarchical stochastic block model (2^(depth-1) clusters)"
     )]
     Clustering(ClusteringArgs),
 }

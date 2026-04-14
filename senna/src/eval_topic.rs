@@ -16,46 +16,73 @@ pub struct EvalTopicArgs {
     #[arg(
         required = true,
         value_delimiter = ',',
-        help = "Data files (same format as training)"
+        help = "Input data files (.zarr or .h5)",
+        long_help = "Sparse backends to embed with the pre-trained model.\n\
+                     Gene sets may differ from training; missing genes are padded\n\
+                     and batch delta is re-estimated from the frozen dictionary."
     )]
     pub(crate) data_files: Vec<Box<str>>,
 
-    #[arg(long, required = true, help = "Model prefix from training")]
+    #[arg(
+        long,
+        required = true,
+        help = "Trained model prefix",
+        long_help = "Prefix passed to `senna topic -o`. Loads:\n  \
+                     {model}.dictionary.parquet   frozen gene × topic dictionary\n  \
+                     {model}.metadata.json        model architecture metadata\n  \
+                     {model}.safetensors          encoder+decoder weights\n  \
+                     {model}.coarsening.json      feature coarsening (if used)"
+    )]
     pub(crate) model: Box<str>,
 
-    #[arg(short, long, required = true, help = "Output prefix")]
+    #[arg(
+        short,
+        long,
+        required = true,
+        help = "Output file prefix",
+        long_help = "Writes {out}.latent.parquet (cell × topic log-softmax proportions)."
+    )]
     pub(crate) out: Box<str>,
 
-    #[arg(short, long, value_delimiter = ',', help = "Batch membership files")]
+    #[arg(
+        short,
+        long,
+        value_delimiter = ',',
+        help = "Batch membership files, one per data file",
+        long_help = "Each file lists a batch label per cell in the same order as its\n\
+                     matching data file. Example: batch1.tsv,batch2.tsv"
+    )]
     pub(crate) batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(long, default_value_t = 500, help = "Minibatch size for evaluation")]
+    #[arg(long, default_value_t = 500, help = "Evaluation minibatch size")]
     pub(crate) minibatch_size: usize,
 
     #[arg(
         long,
         default_value_t = 100,
-        help = "Block size for delta estimation streaming"
+        help = "Column block size for delta-estimation streaming"
     )]
     pub(crate) block_size: usize,
 
-    #[arg(long, help = "Preload all column data into memory")]
+    #[arg(long, help = "Load all columns into memory before evaluation")]
     pub(crate) preload_data: bool,
 
     #[arg(
         long,
         default_value_t = 0,
-        help = "Per-cell refinement steps (0 = disabled)"
+        help = "Per-cell refinement steps at inference (0 = off)",
+        long_help = "Gradient steps that optimize topic logits against the frozen\n\
+                     decoder likelihood, anchored to the encoder output by L2."
     )]
     pub(crate) refine_steps: usize,
 
-    #[arg(long, default_value_t = 0.01, help = "Refinement learning rate")]
+    #[arg(long, default_value_t = 0.01, help = "Learning rate for inference-time refinement")]
     pub(crate) refine_lr: f64,
 
-    #[arg(long, default_value_t = 1.0, help = "Refinement L2 regularization")]
+    #[arg(long, default_value_t = 1.0, help = "L2 anchor strength for inference-time refinement")]
     pub(crate) refine_reg: f64,
 
-    #[arg(short, long, help = "Verbose output")]
+    #[arg(short, long, help = "Verbose logging")]
     pub(crate) verbose: bool,
 }
 
