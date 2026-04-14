@@ -76,10 +76,18 @@ pub struct EvalTopicArgs {
     )]
     pub(crate) refine_steps: usize,
 
-    #[arg(long, default_value_t = 0.01, help = "Learning rate for inference-time refinement")]
+    #[arg(
+        long,
+        default_value_t = 0.01,
+        help = "Learning rate for inference-time refinement"
+    )]
     pub(crate) refine_lr: f64,
 
-    #[arg(long, default_value_t = 1.0, help = "L2 anchor strength for inference-time refinement")]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "L2 anchor strength for inference-time refinement"
+    )]
     pub(crate) refine_reg: f64,
 
     #[arg(short, long, help = "Verbose logging")]

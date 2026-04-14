@@ -157,7 +157,10 @@ pub struct SvdArgs {
     )]
     exclude_high_expression_sd: Option<f32>,
 
-    #[arg(long, help = "Write per-feature log-variance to {out}.feature_variance.parquet")]
+    #[arg(
+        long,
+        help = "Write per-feature log-variance to {out}.feature_variance.parquet"
+    )]
     save_feature_variance: bool,
 
     #[command(flatten)]

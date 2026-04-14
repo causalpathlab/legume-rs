@@ -1,14 +1,25 @@
+use super::phate::{phate_layout_2d, PhateArgs};
+use super::viz_cell_layout::{project_cells_nystrom, refine_cells_local, LocalRefineArgs};
+use super::viz_prep::{
+    compute_pb_latent, compute_whitening, load_dictionary, load_latent_file, select_pb_coverage,
+    whiten_pb_features,
+};
+use super::viz_similarity::{
+    compute_cosine_similarity, local_scale_similarity, regularize_similarity, threshold_similarity,
+};
 use crate::embed_common::*;
 use crate::senna_input::*;
-use matrix_util::knn_match::{ColumnDict, VecPoint};
 
 #[derive(ValueEnum, Clone, Debug, Default, PartialEq)]
 #[clap(rename_all = "lowercase")]
 pub enum LayoutMethod {
-    Spectral,
+    /// t-SNE (Rtsne-style update rule, PHATE-initialized) in reconstruction
+    /// space.
     #[default]
-    Tree,
     Tsne,
+    /// PHATE diffusion embedding — trajectory / branch structure via
+    /// heat-diffusion potential distances + metric MDS.
+    Phate,
 }
 
 #[derive(Args, Debug)]
@@ -56,6 +67,22 @@ pub struct VisualizeArgs {
 		     2. Weighted average of PB positions using temperature-scaled softmax"
     )]
     latent: Box<str>,
+
+    #[arg(
+        long,
+        required = true,
+        help = "Dictionary file (genes × K)",
+        long_help = "Dictionary matrix β (genes × K) from `senna topic` or `senna svd`.\n\
+			     PB features are whitened so distances in the K-dim latent\n\
+			     space equal reconstruction distances in gene space:\n\
+			     z = chol(β^T β) · μ̄_pb.\n\n\
+			     Redundant dictionary atoms (near-identical columns) collapse\n\
+			     through the Cholesky factor, so similarity is invariant to\n\
+			     redundancy. Works for both topic proportions (simplex latent)\n\
+			     and Gaussian latents (SVD, autoencoder).\n\n\
+			     Expected file: {prefix}.dictionary.parquet"
+    )]
+    dictionary: Box<str>,
 
     #[arg(
         long,
@@ -107,17 +134,6 @@ pub struct VisualizeArgs {
 
     #[arg(
         long,
-        default_value_t = 2,
-        help = "Number of eigenvectors for spectral embedding",
-        long_help = "Number of non-trivial eigenvectors to use.\n\
-		     If > 2, eigenvectors are weighted by 1/eigenvalue (diffusion map style)\n\
-		     and PCA is applied to reduce to 2D.\n\
-		     Default 2 uses 2nd and 3rd smallest eigenvectors directly."
-    )]
-    num_eigen: usize,
-
-    #[arg(
-        long,
         default_value_t = 0.1,
         help = "Softmax temperature for cell projection",
         long_help = "Temperature for softmax weighting when projecting cells.\n\
@@ -148,21 +164,21 @@ pub struct VisualizeArgs {
     #[arg(
         long,
         value_enum,
-        default_value = "tree",
+        default_value = "tsne",
         help = "Layout method for PB samples",
         long_help = "Layout algorithm for positioning PB samples:\n\n\
-		     spectral:\n\
-		       Best for general-purpose visualization.\n\
-		       Uses normalized Laplacian eigenvectors (diffusion map style).\n\
-		       Preserves local neighborhood structure.\n\n\
-		     tree (default):\n\
-		       Best for hierarchical/developmental trajectories.\n\
-		       Creates MST-based radial tree showing branching structure.\n\
-		       Root at center, branches spread radially.\n\n\
-		     tsne:\n\
-		       Best for emphasizing local cluster separation.\n\
-		       Initialized with spectral, refined with t-SNE.\n\
-		       More computationally expensive."
+		     tsne (default):\n\
+		       t-SNE with an Rtsne-aligned update rule (adaptive gains,\n\
+		       momentum switch, strong early exaggeration, init rescaled\n\
+		       to std = 1e-4). Initialized from a PHATE embedding of the\n\
+		       whitened PB features so the global trajectory backbone is\n\
+		       preserved while local clusters sharpen.\n\n\
+		     phate:\n\
+		       Pure PHATE diffusion embedding (Moon et al. 2019). Alpha-\n\
+		       decay kernel over whitened reconstruction features, heat\n\
+		       diffusion in time, then metric MDS (SMACOF). Reveals\n\
+		       continuous trajectories and branching structure without\n\
+		       the extra t-SNE cluster sharpening."
     )]
     layout: LayoutMethod,
 
@@ -180,60 +196,105 @@ pub struct VisualizeArgs {
 
     #[arg(
         long,
-        help = "Root node index for tree layout",
-        long_help = "Index of the PB sample to use as tree root.\n\
-		     If not specified, uses the node with highest total similarity (most central)."
+        default_value_t = 0.95,
+        help = "Keep the smallest set of PBs that covers this fraction of cells",
+        long_help = "Drop PB samples in the long tail until the remaining set\n\
+		     contains at least this fraction of the total cells. Removes\n\
+		     outlier singletons / near-isolated PBs that would otherwise\n\
+		     distort spectral / MDS / diffusion layouts.\n\n\
+		     Cells whose dominant PB is dropped still appear in the\n\
+		     output — they are re-projected via the Nyström kernel over\n\
+		     the surviving PBs.\n\n\
+		     - 1.0: keep every PB (no filtering)\n\
+		     - 0.99: drop the tail holding 1 % of cells\n\
+		     - 0.95 (default): more aggressive, removes minor subpopulations"
     )]
-    tree_root: Option<usize>,
+    pb_coverage: f32,
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Radius scaling for tree layout",
-        long_help = "Scale factor for radial distance between tree levels.\n\
-		     Larger values spread the tree more."
+        default_value_t = 30,
+        help = "Local cell-refinement iterations (parallel kNN fine-tune). 0 = off",
+        long_help = "After the global PB layout and Nyström cell initialization,\n\
+		     run a local t-SNE-style fine-tune per PB in parallel. For\n\
+		     each PB, its cells are refined against cells in the K=5\n\
+		     nearest PBs (in the 2D layout) as fixed context anchors, so\n\
+		     within-PB and across-PB-boundary structure both sharpen.\n\n\
+		     Set to 0 to skip refinement and keep pure Nyström positions."
     )]
-    tree_radius: f32,
+    local_iter: usize,
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Decay/growth factor for tree layout",
-        long_help = "Factor for radius increment at each level.\n\
-		     Level n step = radius × decay^n.\n\
-		     - < 1.0: compress outer branches (decay)\n\
-		     - > 1.0: expand outer branches (growth)\n\
-		     - = 1.0: constant spacing"
+        default_value_t = 20.0,
+        help = "Learning rate for the local MST-DFS refinement step",
+        long_help = "Step size for the manual t-SNE gradient descent inside\n\
+		     local cell refinement. Lower than the standard t-SNE rate\n\
+		     (200) because each local batch is small (a few hundred cells)\n\
+		     and runs for few iterations; large LR otherwise exaggerates\n\
+		     outliers, especially on tight t-SNE clusters.\n\n\
+		     Typical values: 5–50."
     )]
-    tree_decay: f32,
+    local_lr: f32,
 
     #[arg(
         long,
-        help = "Clip outliers beyond ±N standard deviations",
-        long_help = "For spectral layout, clip coordinates beyond ±N standard deviations.\n\
-		     Helps prevent outlier PB samples from distorting the visualization.\n\
-		     Typical values: 2.0 or 3.0. If not set, no clipping is applied."
+        default_value_t = 0.0,
+        help = "densMAP density-preservation strength (λ) for t-SNE",
+        long_help = "Strength of the density-preservation auxiliary loss added\n\
+		     to t-SNE (Narayan, Berger, Cho, Nat Biotechnol 2021). For each\n\
+		     point, pins the soft low-D local radius R_i = Σ_j P_ij · d_ij(Y)\n\
+		     to ∝ 1/√n_i so dense regions stay dense and sparse regions\n\
+		     spread out.\n\n\
+		     - 0 (default, disabled): pure weighted t-SNE\n\
+		     - 0.1–0.5 (mild): subtle density emphasis, safe on t-SNE\n\
+		     - >1: aggressive — often dominates the KL and distorts the layout"
     )]
-    outlier_sd: Option<f32>,
+    tsne_density_lambda: f32,
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Repulsion iterations to spread out points",
-        long_help = "After spectral embedding, apply N iterations of repulsion forces\n\
-		     to push overlapping points apart. Helps reduce crowding.\n\
-		     Typical values: 50-200. Set to 0 to disable."
+        default_value_t = 20,
+        help = "PHATE diffusion time t (powers the diffusion operator P^t)",
+        long_help = "Number of diffusion steps for PHATE.\n\
+		     Larger t smooths more aggressively and exposes global structure;\n\
+		     smaller t preserves finer local structure. Typical values: 10-40."
     )]
-    repulsion_iter: usize,
+    phate_t: usize,
 
     #[arg(
         long,
-        default_value_t = 0.01,
-        help = "Repulsion strength",
-        long_help = "Strength of repulsion force between nearby points.\n\
-		     Higher values push points apart more aggressively."
+        default_value_t = 5,
+        help = "PHATE adaptive-bandwidth neighbor index",
+        long_help = "σᵢ = distance from PB i to its knn-th nearest neighbor, used\n\
+		     as the local kernel bandwidth. Typical values: 5-15."
     )]
-    repulsion_strength: f32,
+    phate_knn: usize,
+
+    #[arg(
+        long,
+        default_value_t = 10.0,
+        help = "PHATE alpha-decay kernel exponent",
+        long_help = "Exponent α in the alpha-decay kernel\n\
+		     K[i,j] ∝ exp(-(d/σ)^α).\n\
+		     α = 2 gives a Gaussian kernel; α ≥ 10 gives sharper, more\n\
+		     locality-preserving affinities (the PHATE default is 10)."
+    )]
+    phate_alpha: f32,
+
+    #[arg(
+        long,
+        default_value_t = 300,
+        help = "Max SMACOF iterations for PHATE metric MDS"
+    )]
+    phate_mds_iter: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1e-4,
+        help = "Relative-stress tolerance for SMACOF early exit"
+    )]
+    phate_mds_tol: f32,
 
     #[arg(
         long,
@@ -274,27 +335,68 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
     let nsamp = data_vec.partition_columns_to_groups(&proj_kn, Some(args.sort_dim), None)?;
     info!("Partitioned cells into {} pseudobulk samples", nsamp);
 
-    // 4. Collapse to get PB expression (no batch adjustment for simplicity)
-    let collapsed = data_vec.collapse_columns(None, None, None, None)?;
+    // 4. Load dictionary β and compute whitening L such that L L^T = β^T β.
+    //    Euclidean on z-space = reconstruction distance in gene space.
+    let beta = load_dictionary(&args.dictionary, latent_nk.ncols())?;
+    let l_kk = compute_whitening(&beta);
 
-    let pb_expr = collapsed
-        .mu_adjusted
-        .as_ref()
-        .unwrap_or(&collapsed.mu_observed);
+    // 5. Average latent per PB; whiten every cell into reconstruction space.
+    let pb_latent_mean_full = compute_pb_latent(&latent_nk, &data_vec)?;
+    let cell_z = &latent_nk * l_kk.transpose();
 
-    let mut pb_log_expr = pb_expr.posterior_log_mean().clone();
+    // 5b. Coverage-based tail pruning. Drop PBs in the long tail until the
+    //     surviving set still covers `pb_coverage` of all cells. Orphaned
+    //     cells re-project through the Nyström kernel onto the kept PBs.
+    let n_pb_full = pb_latent_mean_full.nrows();
+    let membership_full = data_vec.get_group_membership(0..latent_nk.nrows())?;
+    let pb_size_full: Vec<usize> = {
+        let mut counts = vec![0usize; n_pb_full];
+        for &g in &membership_full {
+            if g < n_pb_full {
+                counts[g] += 1;
+            }
+        }
+        counts
+    };
+    let kept_indices: Vec<usize> = select_pb_coverage(&pb_size_full, args.pb_coverage);
+    let dropped = n_pb_full - kept_indices.len();
+    let covered: usize = kept_indices.iter().map(|&i| pb_size_full[i]).sum();
+    let total_cells: usize = pb_size_full.iter().sum();
     info!(
-        "PB expression matrix: {} genes × {} samples",
-        pb_log_expr.nrows(),
-        pb_log_expr.ncols()
+        "Coverage filter: kept {} / {} PBs covering {} / {} cells ({:.1}%); dropped {}",
+        kept_indices.len(),
+        n_pb_full,
+        covered,
+        total_cells,
+        100.0 * covered as f32 / total_cells.max(1) as f32,
+        dropped
     );
 
-    // 5. Scale columns (center and normalize) before computing similarity
-    pb_log_expr.scale_columns_inplace();
+    let pb_latent_mean = pb_latent_mean_full.select_rows(kept_indices.iter());
+    let pb_size: Vec<usize> = kept_indices.iter().map(|&i| pb_size_full[i]).collect();
+    let pb_z = whiten_pb_features(&pb_latent_mean, &l_kk);
 
-    // 6. Compute PB-PB similarity (cosine on scaled log expression)
-    let similarity_pp = compute_cosine_similarity(&pb_log_expr);
-    info!("Computed PB-PB similarity matrix");
+    // Map each cell's original PB index → new index in the kept set.
+    // Orphan cells (dominant PB was dropped) get `usize::MAX` and are skipped
+    // by the local refinement step.
+    let mut old_to_new = vec![usize::MAX; n_pb_full];
+    for (new_i, &old_i) in kept_indices.iter().enumerate() {
+        old_to_new[old_i] = new_i;
+    }
+    let pb_membership_kept: Vec<usize> = membership_full
+        .iter()
+        .map(|&g| {
+            if g < n_pb_full {
+                old_to_new[g]
+            } else {
+                usize::MAX
+            }
+        })
+        .collect();
+
+    // 6. Compute PB-PB similarity in reconstruction space (cosine on rows).
+    let similarity_pp = compute_cosine_similarity(&pb_z.transpose());
+    info!("Computed PB-PB similarity matrix in reconstruction space");
 
     // 7. Apply threshold if specified
     let similarity_pp = if args.similarity_threshold > 0.0 {
@@ -345,44 +447,70 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
         None
     };
 
-    // 9. Compute PB latent for cell projection
-    let pb_latent = compute_pb_latent(&latent_nk, &data_vec)?;
-
     // 10. Compute 2D coordinates for visualization
+    //     (reuses pb_latent_mean from step 5 for cell projection below)
     let pb_coords = match args.layout {
-        LayoutMethod::Spectral => {
-            let pb_spectral = spectral_embed(&similarity_pp, args.num_eigen)?;
-            let mut coords = reduce_to_2d(&pb_spectral);
-            if let Some(sd_threshold) = args.outlier_sd {
-                clip_outliers(&mut coords, sd_threshold);
-                info!("Clipped outliers beyond ±{} SD", sd_threshold);
-            }
-            if args.repulsion_iter > 0 {
-                apply_repulsion(&mut coords, args.repulsion_iter, args.repulsion_strength);
-                info!("Applied {} repulsion iterations", args.repulsion_iter);
-            }
+        LayoutMethod::Phate => {
+            let coords = phate_layout_2d(
+                &pb_z,
+                &PhateArgs {
+                    t: args.phate_t,
+                    knn: args.phate_knn,
+                    alpha: args.phate_alpha,
+                    mds_iter: args.phate_mds_iter,
+                    mds_tol: args.phate_mds_tol,
+                },
+            );
+            info!(
+                "Computed PHATE embedding (t={}, knn={}, α={}, SMACOF iter≤{})",
+                args.phate_t, args.phate_knn, args.phate_alpha, args.phate_mds_iter
+            );
             coords
         }
-        LayoutMethod::Tree => tree_layout_2d(
-            &similarity_pp,
-            args.tree_root,
-            args.tree_radius,
-            args.tree_decay,
-        )?,
         LayoutMethod::Tsne => {
             use super::visualization_alg::{similarity_to_distance, TSne};
 
-            let pb_spectral = spectral_embed(&similarity_pp, args.num_eigen)?;
-            let init = reduce_to_2d(&pb_spectral);
-            let init_flat: Vec<f32> = init.iter().cloned().collect();
+            // Initialize t-SNE from a PHATE embedding of the whitened PB
+            // features. PHATE gives a trajectory/branching-aware starting
+            // basin — much better global structure than PCA, and cheap at
+            // this scale (162 PBs → <100 ms).
+            let init = phate_layout_2d(
+                &pb_z,
+                &PhateArgs {
+                    t: args.phate_t,
+                    knn: args.phate_knn,
+                    alpha: args.phate_alpha,
+                    mds_iter: args.phate_mds_iter,
+                    mds_tol: args.phate_mds_tol,
+                },
+            );
+            info!("Initialized t-SNE from PHATE embedding on pb_z");
 
+            // nalgebra's DMatrix is column-major, but `TSne::fit` expects a
+            // row-major flat Vec of [(x0, y0), (x1, y1), ...]. Pack it
+            // explicitly so the init isn't scrambled.
             let n = similarity_pp.nrows();
-            let sim_flat: Vec<f32> = similarity_pp.iter().cloned().collect();
+            let mut init_flat = Vec::with_capacity(n * 2);
+            for i in 0..n {
+                init_flat.push(init[(i, 0)]);
+                init_flat.push(init[(i, 1)]);
+            }
+
+            // Similarly, pack `similarity_pp` (column-major DMatrix) into the
+            // row-major flat layout `similarity_to_distance` expects.
+            let mut sim_flat = Vec::with_capacity(n * n);
+            for i in 0..n {
+                for j in 0..n {
+                    sim_flat.push(similarity_pp[(i, j)]);
+                }
+            }
             let distances = similarity_to_distance(&sim_flat, n);
 
             let tsne = TSne::default()
                 .perplexity(args.perplexity)
-                .n_iter(args.tsne_iter);
+                .n_iter(args.tsne_iter)
+                .weights(&pb_size)
+                .density_lambda(args.tsne_density_lambda);
             let result = tsne
                 .fit(&distances, n, Some(&init_flat))
                 .map_err(|e| anyhow::anyhow!("t-SNE failed: {}", e))?;
@@ -400,14 +528,29 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
         }
     };
 
-    // 12. Project cells to 2D for visualization
-    let cell_coords = project_cells_to_embedding(
-        &latent_nk,
-        &pb_latent,
-        &pb_coords,
-        args.knn,
-        args.temperature,
-    )?;
+    // 12. Project cells to 2D via Nyström: weighted average of PB
+    //     coordinates using the same alpha-decay kernel PHATE uses internally.
+    let mut cell_coords =
+        project_cells_nystrom(&cell_z, &pb_z, &pb_coords, args.phate_knn, args.phate_alpha);
+
+    // 12b. Optional local parallel refinement of cell positions.
+    if args.local_iter > 0 {
+        refine_cells_local(
+            &mut cell_coords,
+            &LocalRefineArgs {
+                cell_z: &cell_z,
+                pb_coords: &pb_coords,
+                pb_membership: &pb_membership_kept,
+                iters: args.local_iter,
+                perplexity: args.perplexity,
+                learning_rate: args.local_lr,
+            },
+        );
+        info!(
+            "Local parallel refinement: {} iters per PB (lr={})",
+            args.local_iter, args.local_lr
+        );
+    }
     info!("Projected cells to 2D for visualization");
 
     // 13. Save outputs
@@ -460,628 +603,4 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
     );
 
     Ok(())
-}
-
-/// Load latent file and validate/reorder to match data columns
-fn load_latent_file(path: &str, data_vec: &SparseIoVec) -> anyhow::Result<Mat> {
-    use matrix_util::common_io::*;
-    use rustc_hash::FxHashMap as HashMap;
-
-    let ext = file_ext(path)?;
-    let MatWithNames {
-        rows: latent_cells,
-        cols: _,
-        mat: latent_nk,
-    } = match ext.as_ref() {
-        "parquet" => Mat::from_parquet_with_row_names(path, Some(0))?,
-        _ => Mat::read_data_with_names(path, &['\t', ',', ' '], Some(0), Some(0))?,
-    };
-
-    let data_cells = data_vec.column_names()?;
-
-    // Build index map: cell_name -> row index in latent
-    let latent_idx: HashMap<&str, usize> = latent_cells
-        .iter()
-        .enumerate()
-        .map(|(i, name)| (name.as_ref(), i))
-        .collect();
-
-    // Check all data cells exist in latent
-    let missing: Vec<_> = data_cells
-        .iter()
-        .filter(|c| !latent_idx.contains_key(c.as_ref()))
-        .take(5)
-        .collect();
-
-    if !missing.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Latent file missing {} cells from data (e.g., {:?})",
-            data_cells
-                .iter()
-                .filter(|c| !latent_idx.contains_key(c.as_ref()))
-                .count(),
-            missing
-        ));
-    }
-
-    // Reorder latent rows to match data column order
-    let k = latent_nk.ncols();
-    let mut reordered = Mat::zeros(data_cells.len(), k);
-    for (i, cell) in data_cells.iter().enumerate() {
-        let src_idx = latent_idx[cell.as_ref()];
-        reordered.row_mut(i).copy_from(&latent_nk.row(src_idx));
-    }
-
-    if latent_cells.len() != data_cells.len() {
-        info!(
-            "Latent has {} cells, data has {} cells; using {} common cells",
-            latent_cells.len(),
-            data_cells.len(),
-            data_cells.len()
-        );
-    }
-
-    Ok(reordered)
-}
-
-/// Compute cosine similarity between columns of a matrix
-fn compute_cosine_similarity(x_dp: &Mat) -> Mat {
-    let n = x_dp.ncols();
-
-    // Normalize columns to unit vectors
-    let mut x_norm = x_dp.clone();
-    for j in 0..n {
-        let col = x_norm.column(j);
-        let norm = col.norm();
-        if norm > 1e-10 {
-            x_norm.column_mut(j).scale_mut(1.0 / norm);
-        }
-    }
-
-    // Similarity = X^T X
-    x_norm.transpose() * &x_norm
-}
-
-/// Threshold similarity matrix
-fn threshold_similarity(s: &Mat, threshold: f32) -> Mat {
-    let mut result = s.clone();
-    for val in result.iter_mut() {
-        if *val < threshold {
-            *val = 0.0;
-        }
-    }
-    result
-}
-
-/// Local scaling of similarity matrix (Zelnik-Manor & Perona, 2004)
-/// Scales similarity by local density: S_scaled(i,j) = S(i,j) / sqrt(σ_i × σ_j)
-/// where σ_i = 1 - similarity to k-th most similar neighbor
-fn local_scale_similarity(s: &Mat, k: usize) -> Mat {
-    let n = s.nrows();
-    let k = k.min(n - 1).max(1);
-
-    // For each point, find the k-th highest similarity (excluding self)
-    let mut sigma = vec![0.0f32; n];
-    for i in 0..n {
-        let mut sims: Vec<f32> = (0..n).filter(|&j| j != i).map(|j| s[(i, j)]).collect();
-        // Sort descending to get k-th highest
-        sims.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-
-        // σ_i = 1 - (similarity to k-th neighbor), i.e., distance to k-th neighbor
-        // Use small epsilon to avoid division by zero
-        let kth_sim = if k <= sims.len() {
-            sims[k - 1]
-        } else {
-            sims.last().copied().unwrap_or(0.0)
-        };
-        sigma[i] = (1.0 - kth_sim).max(1e-6);
-    }
-
-    // Apply local scaling
-    let mut result = Mat::zeros(n, n);
-    for i in 0..n {
-        for j in 0..n {
-            if i == j {
-                result[(i, j)] = 1.0; // Self-similarity stays 1
-            } else {
-                // S_scaled = S / sqrt(σ_i * σ_j)
-                let scale = (sigma[i] * sigma[j]).sqrt();
-                result[(i, j)] = s[(i, j)] / scale;
-            }
-        }
-    }
-
-    result
-}
-
-/// Clip outliers beyond ±N standard deviations
-fn clip_outliers(coords: &mut Mat, sd_threshold: f32) {
-    let n = coords.nrows();
-
-    for col in 0..coords.ncols() {
-        // Compute mean and std for this coordinate
-        let values: Vec<f32> = (0..n).map(|i| coords[(i, col)]).collect();
-        let mean: f32 = values.iter().sum::<f32>() / n as f32;
-        let variance: f32 = values.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n as f32;
-        let sd = variance.sqrt();
-
-        let lower = mean - sd_threshold * sd;
-        let upper = mean + sd_threshold * sd;
-
-        // Clip values
-        for i in 0..n {
-            coords[(i, col)] = coords[(i, col)].clamp(lower, upper);
-        }
-    }
-}
-
-/// Apply repulsion forces to spread out overlapping points
-fn apply_repulsion(coords: &mut Mat, iterations: usize, strength: f32) {
-    let n = coords.nrows();
-    if n < 2 {
-        return;
-    }
-
-    // Compute median pairwise distance for adaptive scaling
-    let mut distances = Vec::new();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let dx = coords[(i, 0)] - coords[(j, 0)];
-            let dy = coords[(i, 1)] - coords[(j, 1)];
-            distances.push((dx * dx + dy * dy).sqrt());
-        }
-    }
-    distances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median_dist = distances[distances.len() / 2].max(1e-6);
-
-    for _iter in 0..iterations {
-        let mut forces = vec![(0.0f32, 0.0f32); n];
-
-        // Compute repulsion forces (inverse square law)
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let dx = coords[(i, 0)] - coords[(j, 0)];
-                let dy = coords[(i, 1)] - coords[(j, 1)];
-                let dist_sq = dx * dx + dy * dy;
-                let dist = dist_sq.sqrt().max(1e-6);
-
-                // Repulsion force: stronger when closer
-                // Scale by median distance so force is relative to point cloud size
-                let force = strength * median_dist * median_dist / dist_sq;
-
-                // Unit direction from j to i
-                let fx = force * dx / dist;
-                let fy = force * dy / dist;
-
-                forces[i].0 += fx;
-                forces[i].1 += fy;
-                forces[j].0 -= fx;
-                forces[j].1 -= fy;
-            }
-        }
-
-        // Apply forces with damping
-        let damping = 0.5;
-        for i in 0..n {
-            coords[(i, 0)] += damping * forces[i].0;
-            coords[(i, 1)] += damping * forces[i].1;
-        }
-    }
-
-    // Re-center coordinates
-    let mean_x: f32 = (0..n).map(|i| coords[(i, 0)]).sum::<f32>() / n as f32;
-    let mean_y: f32 = (0..n).map(|i| coords[(i, 1)]).sum::<f32>() / n as f32;
-    for i in 0..n {
-        coords[(i, 0)] -= mean_x;
-        coords[(i, 1)] -= mean_y;
-    }
-}
-
-/// Helper to sort eigenvalue indices
-fn argsort(vals: &DVec, asc: bool) -> Vec<usize> {
-    let mut idx: Vec<usize> = (0..vals.len()).collect();
-    idx.sort_by(|&a, &b| {
-        let c = vals[a].partial_cmp(&vals[b]).unwrap();
-        if asc {
-            c
-        } else {
-            c.reverse()
-        }
-    });
-    idx
-}
-
-/// Regularize similarity matrix: add small self-loops to prevent isolated nodes
-/// S_reg = S + ε * I ensures minimum degree ≥ ε
-fn regularize_similarity(similarity: &Mat, eps: f32) -> Mat {
-    let n = similarity.nrows();
-    let mut sim_reg = similarity.clone();
-    for i in 0..n {
-        sim_reg[(i, i)] += eps;
-    }
-
-    // Warn about low-degree nodes
-    let low_degree_count = (0..n)
-        .filter(|&i| sim_reg.row(i).iter().sum::<f32>() < eps * 2.0)
-        .count();
-    if low_degree_count > 0 {
-        info!(
-            "Warning: {} PB samples have very low similarity to others.",
-            low_degree_count
-        );
-    }
-
-    sim_reg
-}
-
-/// Spectral embedding: compute k-dimensional embedding from similarity matrix
-/// Uses symmetric normalized Laplacian: L_sym = I - D^{-1/2} S D^{-1/2}
-/// Returns weighted eigenvectors (1/λ) for clustering
-fn spectral_embed(similarity: &Mat, num_eigen: usize) -> anyhow::Result<Mat> {
-    let n = similarity.nrows();
-    let k = num_eigen.clamp(2, n - 1);
-    anyhow::ensure!(n > k, "Need {} PB samples, got {}", k + 1, n);
-
-    // Build normalized Laplacian: L_sym = I - D^{-1/2} S D^{-1/2}
-    let degree: DVec = DVec::from_iterator(n, similarity.row_iter().map(|r| r.sum()));
-    let d_inv_sqrt = Mat::from_diagonal(&degree.map(|d| 1.0 / d.sqrt()));
-    let laplacian = Mat::identity(n, n) - &d_inv_sqrt * similarity * &d_inv_sqrt;
-
-    // Eigen decomposition, extract k eigenvectors (skip trivial), weight by 1/λ
-    let eig = laplacian.symmetric_eigen();
-    let idx = argsort(&eig.eigenvalues, true);
-    let mut emb = Mat::zeros(n, k);
-    for (j, &i) in idx[1..=k].iter().enumerate() {
-        let w = 1.0 / eig.eigenvalues[i].max(1e-10);
-        emb.column_mut(j)
-            .copy_from(&(w * eig.eigenvectors.column(i)));
-    }
-
-    Ok(emb)
-}
-
-/// Reduce k-dimensional embedding to 2D via PCA
-fn reduce_to_2d(emb: &Mat) -> Mat {
-    let n = emb.nrows();
-    let k = emb.ncols();
-
-    if k == 2 {
-        return emb.clone();
-    }
-
-    // PCA to 2D
-    let mut centered = emb.clone();
-    centered.centre_columns_inplace();
-    let pca = (centered.transpose() * &centered).symmetric_eigen();
-    let pca_idx = argsort(&pca.eigenvalues, false);
-    let mut coords = Mat::zeros(n, 2);
-    coords
-        .column_mut(0)
-        .copy_from(&(&centered * pca.eigenvectors.column(pca_idx[0])));
-    coords
-        .column_mut(1)
-        .copy_from(&(&centered * pca.eigenvectors.column(pca_idx[1])));
-    coords
-}
-
-/// MST-based radial tree layout
-fn tree_layout_2d(
-    similarity: &Mat,
-    root: Option<usize>,
-    radius_scale: f32,
-    growth: f32,
-) -> anyhow::Result<Mat> {
-    let n = similarity.nrows();
-    if n < 2 {
-        return Err(anyhow::anyhow!("Need at least 2 nodes for tree layout"));
-    }
-
-    // 1. Build MST using Prim's algorithm (maximum spanning tree for similarity)
-    let mst = build_mst(similarity);
-
-    // 2. Choose root: user-specified or node with highest total similarity
-    let root_node = root.unwrap_or_else(|| {
-        (0..n)
-            .max_by(|&a, &b| {
-                let sum_a: f32 = similarity.row(a).iter().sum();
-                let sum_b: f32 = similarity.row(b).iter().sum();
-                sum_a
-                    .partial_cmp(&sum_b)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .unwrap_or(0)
-    });
-
-    // 3. Build adjacency list from MST edges
-    let mut adj: Vec<Vec<usize>> = vec![vec![]; n];
-    for &(u, v) in &mst {
-        adj[u].push(v);
-        adj[v].push(u);
-    }
-
-    // 4. Compute tree structure via BFS from root
-    let (parent, depth, subtree_size) = tree_structure(&adj, root_node);
-
-    // 5. Radial layout with growth factor
-    let coords = radial_layout(
-        &adj,
-        &parent,
-        &depth,
-        &subtree_size,
-        root_node,
-        radius_scale,
-        growth,
-    );
-
-    Ok(coords)
-}
-
-/// Build maximum spanning tree using Prim's algorithm
-fn build_mst(similarity: &Mat) -> Vec<(usize, usize)> {
-    let n = similarity.nrows();
-    let mut in_tree = vec![false; n];
-    let mut edges = Vec::with_capacity(n - 1);
-
-    // Start from node 0
-    in_tree[0] = true;
-    let mut nodes_in_tree = 1;
-
-    while nodes_in_tree < n {
-        // Find the maximum weight edge connecting tree to non-tree
-        let mut best_edge: Option<(usize, usize, f32)> = None;
-
-        for u in 0..n {
-            if !in_tree[u] {
-                continue;
-            }
-            for v in 0..n {
-                if in_tree[v] {
-                    continue;
-                }
-                let w = similarity[(u, v)];
-                if best_edge.is_none_or(|(_, _, bw)| w > bw) {
-                    best_edge = Some((u, v, w));
-                }
-            }
-        }
-
-        if let Some((u, v, _)) = best_edge {
-            edges.push((u, v));
-            in_tree[v] = true;
-            nodes_in_tree += 1;
-        } else {
-            // Graph might be disconnected; find an unvisited node and continue
-            if let Some(start) = in_tree.iter().position(|&x| !x) {
-                in_tree[start] = true;
-                nodes_in_tree += 1;
-            }
-        }
-    }
-
-    edges
-}
-
-/// Compute tree structure: parent, depth, and subtree sizes via BFS
-fn tree_structure(adj: &[Vec<usize>], root: usize) -> (Vec<Option<usize>>, Vec<usize>, Vec<usize>) {
-    let n = adj.len();
-    let mut parent: Vec<Option<usize>> = vec![None; n];
-    let mut depth = vec![0usize; n];
-    let mut subtree_size = vec![1usize; n];
-
-    // BFS to compute parent and depth
-    let mut queue = std::collections::VecDeque::new();
-    let mut visited = vec![false; n];
-
-    queue.push_back(root);
-    visited[root] = true;
-
-    while let Some(u) = queue.pop_front() {
-        for &v in &adj[u] {
-            if !visited[v] {
-                visited[v] = true;
-                parent[v] = Some(u);
-                depth[v] = depth[u] + 1;
-                queue.push_back(v);
-            }
-        }
-    }
-
-    // Compute subtree sizes (post-order traversal)
-    // Sort nodes by depth descending, then accumulate
-    let mut nodes_by_depth: Vec<usize> = (0..n).collect();
-    nodes_by_depth.sort_by(|&a, &b| depth[b].cmp(&depth[a]));
-
-    for &u in &nodes_by_depth {
-        if let Some(p) = parent[u] {
-            subtree_size[p] += subtree_size[u];
-        }
-    }
-
-    (parent, depth, subtree_size)
-}
-
-/// Radial layout: root at center, children spread radially
-fn radial_layout(
-    adj: &[Vec<usize>],
-    parent: &[Option<usize>],
-    depth: &[usize],
-    subtree_size: &[usize],
-    root: usize,
-    radius_scale: f32,
-    decay: f32,
-) -> Mat {
-    let n = adj.len();
-    let mut coords = Mat::zeros(n, 2);
-
-    // Precompute cumulative radius for each depth level
-    // r(d) = radius_scale * (1 + decay + decay^2 + ... + decay^(d-1))
-    //      = radius_scale * (1 - decay^d) / (1 - decay)  for decay != 1
-    let max_depth = *depth.iter().max().unwrap_or(&0);
-    let cumulative_radius: Vec<f32> = (0..=max_depth)
-        .map(|d| {
-            if (decay - 1.0).abs() < 1e-6 {
-                // decay ≈ 1.0, use linear
-                d as f32 * radius_scale
-            } else {
-                // Geometric series sum
-                radius_scale * (1.0 - decay.powi(d as i32)) / (1.0 - decay)
-            }
-        })
-        .collect();
-
-    // Root at origin
-    coords[(root, 0)] = 0.0;
-    coords[(root, 1)] = 0.0;
-
-    // Assign angular ranges to each node
-    let mut angle_start = vec![0.0f32; n];
-    let mut angle_end = vec![std::f32::consts::TAU; n]; // TAU = 2*PI
-
-    // BFS to assign positions
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back(root);
-
-    while let Some(u) = queue.pop_front() {
-        let r = cumulative_radius[depth[u]];
-
-        if u != root {
-            // Position at midpoint of angular range
-            let angle = (angle_start[u] + angle_end[u]) / 2.0;
-            coords[(u, 0)] = r * angle.cos();
-            coords[(u, 1)] = r * angle.sin();
-        }
-
-        // Get children (neighbors that have u as parent)
-        let children: Vec<usize> = adj[u]
-            .iter()
-            .filter(|&&v| parent[v] == Some(u))
-            .cloned()
-            .collect();
-
-        if children.is_empty() {
-            continue;
-        }
-
-        // Distribute angular range among children proportional to subtree size
-        let total_size: usize = children.iter().map(|&c| subtree_size[c]).sum();
-        let mut current_angle = angle_start[u];
-
-        for &child in &children {
-            let child_fraction = subtree_size[child] as f32 / total_size as f32;
-            let child_range = (angle_end[u] - angle_start[u]) * child_fraction;
-
-            angle_start[child] = current_angle;
-            angle_end[child] = current_angle + child_range;
-            current_angle += child_range;
-
-            queue.push_back(child);
-        }
-    }
-
-    coords
-}
-
-/// Compute average latent for each PB sample
-fn compute_pb_latent(latent_nk: &Mat, data_vec: &SparseIoVec) -> anyhow::Result<Mat> {
-    let n_cells = latent_nk.nrows();
-    let k = latent_nk.ncols();
-
-    // Get PB membership for all cells
-    let pb_membership = data_vec.get_group_membership(0..n_cells)?;
-    let n_pb = *pb_membership.iter().max().unwrap_or(&0) + 1;
-
-    // Accumulate latent vectors per PB
-    let mut pb_sum = Mat::zeros(n_pb, k);
-    let mut pb_count = vec![0usize; n_pb];
-
-    for (cell_idx, &pb_idx) in pb_membership.iter().enumerate() {
-        for col in 0..k {
-            pb_sum[(pb_idx, col)] += latent_nk[(cell_idx, col)];
-        }
-        pb_count[pb_idx] += 1;
-    }
-
-    // Average
-    for (pb_idx, &count) in pb_count.iter().enumerate().take(n_pb) {
-        if count > 0 {
-            pb_sum.row_mut(pb_idx).scale_mut(1.0 / count as f32);
-        }
-    }
-
-    Ok(pb_sum)
-}
-
-/// Project cells to 2D using kNN to nearest PB samples
-fn project_cells_to_embedding(
-    cell_latent: &Mat,
-    pb_latent: &Mat,
-    pb_coords: &Mat,
-    knn: usize,
-    temperature: f32,
-) -> anyhow::Result<Mat> {
-    use rayon::prelude::*;
-
-    let n_cells = cell_latent.nrows();
-    let n_pb = pb_latent.nrows();
-    let k = knn.min(n_pb);
-
-    // Build HNSW index for PB latent vectors
-    let pb_names: Vec<usize> = (0..n_pb).collect();
-    let pb_dict: ColumnDict<usize> = ColumnDict::from_dmatrix(pb_latent.transpose(), pb_names);
-
-    // Process cells in parallel
-    let coords: Vec<_> = (0..n_cells)
-        .into_par_iter()
-        .map(|i| {
-            // Get cell's latent vector as VecPoint
-            let cell_vec: Vec<f32> = cell_latent.row(i).iter().cloned().collect();
-            let query = VecPoint { data: cell_vec };
-
-            // Find k nearest PB samples
-            let (neighbors, distances) = pb_dict
-                .search_by_query_data(&query, k)
-                .unwrap_or_else(|_| (vec![], vec![]));
-
-            if neighbors.is_empty() {
-                return (0.0f32, 0.0f32);
-            }
-
-            // Convert distances to weights (inverse distance with softmax)
-            let weights: Vec<f32> = if distances.iter().any(|&d| d < 1e-10) {
-                // If any distance is ~0, use hard assignment to that neighbor
-                distances
-                    .iter()
-                    .map(|&d| if d < 1e-10 { 1.0 } else { 0.0 })
-                    .collect()
-            } else {
-                // Softmax on negative distances (closer = higher weight)
-                let neg_dists: Vec<f32> = distances.iter().map(|&d| -d / temperature).collect();
-                let max_neg = neg_dists.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                let exp_vals: Vec<f32> = neg_dists.iter().map(|&x| (x - max_neg).exp()).collect();
-                let sum_exp: f32 = exp_vals.iter().sum();
-                if sum_exp < 1e-10 {
-                    return (0.0, 0.0);
-                }
-                exp_vals.iter().map(|&e| e / sum_exp).collect()
-            };
-
-            // Weighted average of neighbor PB coordinates
-            let mut x = 0.0f32;
-            let mut y = 0.0f32;
-            for (j, &pb_idx) in neighbors.iter().enumerate() {
-                x += weights[j] * pb_coords[(pb_idx, 0)];
-                y += weights[j] * pb_coords[(pb_idx, 1)];
-            }
-            (x, y)
-        })
-        .collect();
-
-    // Convert to matrix
-    let mut cell_coords = Mat::zeros(n_cells, 2);
-    for (i, (x, y)) in coords.into_iter().enumerate() {
-        cell_coords[(i, 0)] = x;
-        cell_coords[(i, 1)] = y;
-    }
-
-    Ok(cell_coords)
 }
