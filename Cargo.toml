@@ -67,7 +67,7 @@ rustc-hash = "2.1"
 flate2 = "1.0.34"
 parquet = "58"
 regex = "1"
-serde = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 zip = "8"
 

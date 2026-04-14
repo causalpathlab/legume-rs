@@ -244,6 +244,20 @@ pub(crate) fn create_device(
     }
 }
 
+/// Move all parameters in a VarMap to CPU.
+///
+/// This enables multi-threaded rayon inference in `process_blocks()`.
+pub(crate) fn move_varmap_to_cpu(parameters: &candle_nn::VarMap) -> anyhow::Result<()> {
+    let data = parameters.data().lock().expect("VarMap lock");
+    for (_name, var) in data.iter() {
+        if !var.device().is_cpu() {
+            let cpu_tensor = var.to_device(&Device::Cpu)?;
+            var.set(&cpu_tensor)?;
+        }
+    }
+    Ok(())
+}
+
 /// Set up a graceful stop flag for SIGINT/SIGTERM.
 pub(crate) fn setup_stop_handler() -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
