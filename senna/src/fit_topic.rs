@@ -161,12 +161,7 @@ pub struct TopicArgs {
     )]
     pub(crate) encoder_layers: Vec<usize>,
 
-    #[arg(
-        long,
-        short = 'i',
-        default_value_t = 1000,
-        help = "Training epochs"
-    )]
+    #[arg(long, short = 'i', default_value_t = 1000, help = "Training epochs")]
     pub(crate) epochs: usize,
 
     #[arg(
@@ -179,11 +174,7 @@ pub struct TopicArgs {
     )]
     pub(crate) jitter_interval: usize,
 
-    #[arg(
-        long,
-        default_value_t = 100,
-        help = "Training minibatch size"
-    )]
+    #[arg(long, default_value_t = 100, help = "Training minibatch size")]
     pub(crate) minibatch_size: usize,
 
     #[arg(
@@ -202,11 +193,7 @@ pub struct TopicArgs {
     )]
     pub(crate) device: ComputeDevice,
 
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "CUDA/Metal device index"
-    )]
+    #[arg(long, default_value_t = 0, help = "CUDA/Metal device index")]
     pub(crate) device_no: usize,
 
     #[arg(
@@ -301,7 +288,11 @@ pub struct TopicArgs {
     )]
     pub(crate) refine_steps: usize,
 
-    #[arg(long, default_value_t = 0.01, help = "Learning rate for inference-time refinement")]
+    #[arg(
+        long,
+        default_value_t = 0.01,
+        help = "Learning rate for inference-time refinement"
+    )]
     pub(crate) refine_lr: f64,
 
     #[arg(

@@ -152,10 +152,20 @@ pub struct IndexedTopicArgs {
     #[arg(long, default_value_t = 100, help = "Training minibatch size")]
     minibatch_size: usize,
 
-    #[arg(long, alias = "lr", default_value_t = 0.05, help = "Adam learning rate")]
+    #[arg(
+        long,
+        alias = "lr",
+        default_value_t = 0.05,
+        help = "Adam learning rate"
+    )]
     learning_rate: f32,
 
-    #[arg(long, value_enum, default_value = "cpu", help = "Compute device (cpu|cuda|metal)")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "cpu",
+        help = "Compute device (cpu|cuda|metal)"
+    )]
     device: ComputeDevice,
 
     #[arg(long, default_value_t = 0, help = "CUDA/Metal device index")]
@@ -171,7 +181,11 @@ pub struct IndexedTopicArgs {
     )]
     adj_method: AdjMethod,
 
-    #[arg(long, default_value_t = false, help = "Load all columns into memory before training")]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Load all columns into memory before training"
+    )]
     preload_data: bool,
 
     #[arg(
@@ -219,7 +233,11 @@ pub struct IndexedTopicArgs {
     )]
     vcd_ess_steps: usize,
 
-    #[arg(long, default_value_t = 50, help = "Max shrink iterations per ESS step")]
+    #[arg(
+        long,
+        default_value_t = 50,
+        help = "Max shrink iterations per ESS step"
+    )]
     ess_max_shrink: usize,
 
     #[arg(
@@ -231,10 +249,18 @@ pub struct IndexedTopicArgs {
     )]
     refine_steps: usize,
 
-    #[arg(long, default_value_t = 0.01, help = "Learning rate for inference-time refinement")]
+    #[arg(
+        long,
+        default_value_t = 0.01,
+        help = "Learning rate for inference-time refinement"
+    )]
     refine_lr: f64,
 
-    #[arg(long, default_value_t = 1.0, help = "L2 anchor strength for inference-time refinement")]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "L2 anchor strength for inference-time refinement"
+    )]
     refine_reg: f64,
 
     #[arg(

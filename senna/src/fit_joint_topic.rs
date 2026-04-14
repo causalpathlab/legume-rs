@@ -152,10 +152,20 @@ pub struct JointTopicArgs {
     #[arg(long, default_value_t = 100, help = "Training minibatch size")]
     pub(crate) minibatch_size: usize,
 
-    #[arg(long, default_value_t = 0.05, alias = "lr", help = "Adam learning rate")]
+    #[arg(
+        long,
+        default_value_t = 0.05,
+        alias = "lr",
+        help = "Adam learning rate"
+    )]
     pub(crate) learning_rate: f32,
 
-    #[arg(long, value_enum, default_value = "cpu", help = "Compute device (cpu|cuda|metal)")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "cpu",
+        help = "Compute device (cpu|cuda|metal)"
+    )]
     pub(crate) device: ComputeDevice,
 
     #[arg(long, default_value_t = 0, help = "CUDA/Metal device index")]
