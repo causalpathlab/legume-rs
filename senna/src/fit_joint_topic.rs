@@ -446,7 +446,6 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         n_features_full: &n_features_full,
         gene_names: &gene_names,
         data_stack: &data_stack,
-        dev: &dev,
         args,
     };
 

@@ -10,6 +10,7 @@ pub mod candle_decoder_joint_topic;
 pub mod candle_decoder_poisson;
 pub mod candle_decoder_topic;
 pub mod candle_decoder_vmf_topic;
+pub mod candle_dyn_decoder;
 pub mod candle_encoder_indexed;
 pub mod candle_encoder_joint_softmax;
 pub mod candle_encoder_softmax;
