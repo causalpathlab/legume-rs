@@ -21,7 +21,6 @@ pub(crate) struct SaveContext<'a> {
     pub n_features_full: &'a [usize],
     pub gene_names: &'a [Box<str>],
     pub data_stack: &'a SparseIoStack,
-    pub dev: &'a candle_core::Device,
     pub args: &'a JointTopicArgs,
 }
 
@@ -47,12 +46,16 @@ pub(crate) fn train_and_save<Dec: JointDecoderModuleT>(
     )?;
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &ctx.args.out))?;
 
+    info!("Moving parameters to CPU for multi-threaded inference");
+    let cpu_dev = candle_core::Device::Cpu;
+    super::common::move_varmap_to_cpu(ctx.train_config.parameters)?;
+
     info!("Writing down the latent states");
     write_latent_states(
         ctx.data_stack,
         ctx.encoder,
         ctx.collapsed_levels.last().unwrap(),
-        ctx.dev,
+        &cpu_dev,
         ctx.args,
         ctx.coarsenings,
     )?;

@@ -5,7 +5,6 @@ use crate::topic::train_indexed::*;
 
 use candle_util::candle_decoder_indexed_topic::*;
 use candle_util::candle_encoder_indexed::*;
-use candle_util::candle_topic_refinement::TopicRefinementConfig;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 
 #[derive(Args, Debug)]
@@ -319,16 +318,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         })
         .transpose()?;
 
-    let refine_config = if args.refine_steps > 0 {
-        Some(TopicRefinementConfig {
-            num_steps: args.refine_steps,
-            learning_rate: args.refine_lr,
-            regularization: args.refine_reg,
-        })
-    } else {
-        None
-    };
-
     let stop = setup_stop_handler();
 
     // Bulk data at full D
@@ -383,15 +372,19 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let finest_decoder = decoders.last().unwrap();
     write_indexed_dictionary(finest_decoder, &gene_names, &args.out)?;
 
+    info!("Moving parameters to CPU for multi-threaded inference");
+    let cpu_dev = candle_core::Device::Cpu;
+    move_varmap_to_cpu(&parameters)?;
+
     info!("Writing down the latent states");
     let eval_config = EvaluateLatentConfig {
-        dev: &dev,
+        dev: &cpu_dev,
         adj_method: &args.adj_method,
         minibatch_size: args.minibatch_size,
         enc_context_size: args.context_size,
         dec_context_size,
         decoder: finest_decoder,
-        refine_config: refine_config.as_ref(),
+        refine_config: None,
     };
     let z_nk = evaluate_latent_by_indexed_encoder(
         &data_vec,
@@ -403,10 +396,10 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // Evaluate bulk with standard encoder/decoder
     if let (Some(bulk), Some(bulk_deltas)) = (&bulk, &bulk_deltas) {
         let bulk_config = BulkEvalConfig {
-            dev: &dev,
+            dev: &cpu_dev,
             enc_context_size: args.context_size,
             dec_context_size,
-            refine_config: refine_config.as_ref(),
+            refine_config: None,
             decoder: finest_decoder,
             gene_names: &gene_names,
             out_prefix: &args.out,
