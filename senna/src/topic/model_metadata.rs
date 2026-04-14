@@ -38,7 +38,6 @@ impl TopicModelMetadata {
         Ok(())
     }
 
-    #[allow(dead_code)] // for future eval-topic CLI
     pub fn load(prefix: &str) -> anyhow::Result<Self> {
         let path = format!("{}.model.json", prefix);
         let json = std::fs::read_to_string(&path)?;
@@ -57,7 +56,6 @@ pub fn save_coarsening(coarsening: &FeatureCoarsening, prefix: &str) -> anyhow::
 }
 
 /// Load feature coarsening from JSON.
-#[allow(dead_code)] // for future eval-topic CLI
 pub fn load_coarsening(prefix: &str) -> anyhow::Result<Option<FeatureCoarsening>> {
     let path = format!("{}.coarsening.json", prefix);
     match std::fs::read_to_string(&path) {
@@ -68,6 +66,20 @@ pub fn load_coarsening(prefix: &str) -> anyhow::Result<Option<FeatureCoarsening>
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Load dictionary parquet, returning gene names and the beta matrix [D × K].
+pub fn load_dictionary(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, nalgebra::DMatrix<f32>)> {
+    use matrix_util::traits::IoOps;
+    let path = format!("{}.dictionary.parquet", prefix);
+    let result = nalgebra::DMatrix::<f32>::from_parquet_with_row_names(&path, Some(0))?;
+    log::info!(
+        "Loaded dictionary: {} genes × {} topics from {}",
+        result.rows.len(),
+        result.mat.ncols(),
+        path
+    );
+    Ok((result.rows, result.mat))
 }
 
 /// Save VarMap parameters as safetensors.
