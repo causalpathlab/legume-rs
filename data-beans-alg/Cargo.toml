@@ -32,3 +32,4 @@ special = { workspace = true }
 indicatif = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
+serde = { workspace = true }

@@ -1,6 +1,7 @@
 mod cluster;
 mod cnv_pseudobulk;
 mod embed_common;
+mod eval_topic;
 mod fit_clustering;
 mod fit_indexed_topic;
 mod fit_joint_topic;
@@ -12,6 +13,7 @@ mod svd;
 mod topic;
 
 use embed_common::*;
+use eval_topic::*;
 use fit_clustering::*;
 use fit_indexed_topic::*;
 use fit_joint_topic::*;
@@ -125,6 +127,16 @@ enum Commands {
     AnnotateTopic(AnnotateTopicArgs),
 
     #[command(
+        about = "Evaluate a trained topic model on new data",
+        long_about = "Apply a previously trained topic model to new data files.\n\
+                      Handles gene alignment (new data may have different genes),\n\
+                      estimates batch effects from the dictionary, and runs\n\
+                      encoder inference on CPU with rayon parallelism.",
+        visible_alias = "eval-topic"
+    )]
+    EvalTopic(EvalTopicArgs),
+
+    #[command(
         about = "Embedding data by singular value decomposition on multiple data types",
         long_about = "Estimate Nystrom projection (SVD) in the three stages: \n\
 		      (1) Collapse sparse data while adjusting batch effects\n\
@@ -198,6 +210,9 @@ fn main() -> anyhow::Result<()> {
 
         Commands::AnnotateTopic(args) => {
             annotate_topics(args)?;
+        }
+        Commands::EvalTopic(args) => {
+            eval_topic_model(args)?;
         }
         Commands::JointSvd(args) => {
             fit_joint_svd(args)?;
