@@ -157,35 +157,3 @@ impl Inference for GammaMatrix {
         self.num_columns
     }
 }
-
-impl GammaMatrix {
-    /// Create a GammaMatrix from sufficient statistics.
-    ///
-    /// Sets `a_stat` and `b_stat` directly, then calibrates all derived fields.
-    /// The posterior is `Gamma(a_stat, 1/b_stat)` with mean `a/b`.
-    ///
-    /// Useful for wrapping computed matrices (e.g. residual pseudobulk)
-    /// into the Gamma posterior framework so that `posterior_sample()` works.
-    pub fn from_sufficient_stats(a_stat: DMatrix<f32>, b_stat: DMatrix<f32>) -> Self {
-        assert_eq!(a_stat.shape(), b_stat.shape());
-        let (nrows, ncols) = a_stat.shape();
-        let mut gm = Self {
-            num_rows: nrows,
-            num_columns: ncols,
-            a0: 1.0,
-            b0: 1.0,
-            a_stat,
-            b_stat,
-            estimated_mean: DMatrix::zeros(nrows, ncols),
-            estimated_sd: DMatrix::zeros(nrows, ncols),
-            estimated_log_mean: DMatrix::zeros(nrows, ncols),
-            estimated_log_sd: DMatrix::zeros(nrows, ncols),
-        };
-        use crate::traits::TwoStatParam;
-        gm.map_calibrate_mean();
-        gm.map_calibrate_sd();
-        gm.map_calibrate_log_mean();
-        gm.map_calibrate_log_sd();
-        gm
-    }
-}

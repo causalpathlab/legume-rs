@@ -30,7 +30,7 @@ impl DecoderType {
     }
 }
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug)]
 pub struct TopicArgs {
     #[arg(
         required = true,
