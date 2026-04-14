@@ -334,16 +334,6 @@ pub struct TopicArgs {
     )]
     pub(crate) refine_reg: f64,
 
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "Residual model training epochs (0 = disabled)",
-        long_help = "Train a second topic model on residuals (what the main model\n\
-		     didn't explain). Uses the same model class and number of topics.\n\
-		     Set to 0 to disable (default), >0 to train."
-    )]
-    pub(crate) residual_epochs: usize,
-
     // CNV detection args
     #[command(flatten)]
     pub(crate) cnv: CnvArgs,
@@ -462,7 +452,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         stop: &stop,
     };
 
-    let (scores, z_nk, dict_dk) = if args.decoder.len() == 1 {
+    let (scores, z_nk) = if args.decoder.len() == 1 {
         // Single decoder: monomorphic dispatch (zero overhead)
         match args.decoder[0] {
             DecoderType::Nb => run_topic_pipeline::<NbTopicDecoder>(&ctx, &mut encoder)?,
@@ -483,21 +473,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         (Some(&cell_names), Some("cell")),
         None,
     )?;
-
-    // Residual model training
-    if args.residual_epochs > 0 {
-        let decoder_weights = compute_decoder_weights(&args.decoder, &args.decoder_weights);
-
-        crate::topic::residual::fit_residual_model(&crate::topic::residual::ResidualModelInput {
-            dict_dk: &dict_dk,
-            coarsening: finest_coarsening,
-            args,
-            decoder_weights: &decoder_weights,
-            finest_collapsed,
-            data_vec: &data_vec,
-            cell_names: &cell_names,
-        })?;
-    }
 
     // CNV detection using topic proportions as cell-type membership
     let gene_names = data_vec.row_names()?;
@@ -681,7 +656,7 @@ struct PipelineCtx<'a> {
 fn run_topic_pipeline<Dec>(
     ctx: &PipelineCtx,
     encoder: &mut LogSoftmaxEncoder,
-) -> anyhow::Result<(TrainScores, Mat, Mat)>
+) -> anyhow::Result<(TrainScores, Mat)>
 where
     Dec: DecoderModuleT + DecoderExtras + NewDecoder + Send + Sync,
 {
@@ -741,16 +716,9 @@ where
         &ctx.args.out,
     )?;
 
-    // Extract dictionary on CPU for residual computation
-    let dict_dk = Mat::from_tensor(
-        &finest_decoder
-            .get_dictionary()?
-            .to_device(&candle_core::Device::Cpu)?,
-    )?;
-
     let weights = compute_decoder_weights(&ctx.args.decoder, &ctx.args.decoder_weights);
     let z_nk = save_metadata_and_evaluate(ctx, encoder, &weights)?;
-    Ok((scores, z_nk, dict_dk))
+    Ok((scores, z_nk))
 }
 
 /// Write dictionary tensor with optional expansion from coarse to fine resolution.
@@ -867,7 +835,7 @@ fn save_metadata_and_evaluate(
 fn run_multi_decoder_pipeline(
     ctx: &PipelineCtx,
     encoder: &mut LogSoftmaxEncoder,
-) -> anyhow::Result<(TrainScores, Mat, Mat)> {
+) -> anyhow::Result<(TrainScores, Mat)> {
     use crate::topic::train::train_mixed_multi_decoder;
     use candle_util::candle_dyn_decoder::*;
 
@@ -914,17 +882,10 @@ fn run_multi_decoder_pipeline(
 
     // Write per-decoder dictionaries at finest level
     info!("Writing down the model parameters");
-    let finest_decoders = decoders_per_level.last().unwrap();
-    let mut first_dict_dk = None;
-    for dec in finest_decoders {
+    for dec in decoders_per_level.last().unwrap() {
         let name = dec.decoder_name();
         let out_prefix = format!("{}.{}", ctx.args.out, name);
         let dict_tensor = dec.get_dictionary()?;
-        if first_dict_dk.is_none() {
-            first_dict_dk = Some(Mat::from_tensor(
-                &dict_tensor.to_device(&candle_core::Device::Cpu)?,
-            )?);
-        }
         write_dictionary_tensor(
             &dict_tensor,
             ctx.finest_coarsening,
@@ -933,8 +894,7 @@ fn run_multi_decoder_pipeline(
             &out_prefix,
         )?;
     }
-    let dict_dk = first_dict_dk.expect("at least one decoder");
 
     let z_nk = save_metadata_and_evaluate(ctx, encoder, &decoder_weights)?;
-    Ok((scores, z_nk, dict_dk))
+    Ok((scores, z_nk))
 }
