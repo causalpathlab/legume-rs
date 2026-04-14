@@ -8,23 +8,20 @@ pub struct JointSvdArgs {
     #[arg(
         required = true,
         value_delimiter = ',',
-        help = "Data files",
-        long_help = "Data files to be processed.\n\
-		     Each file should be specified as a path.\n\
-		     Multiple files can be provided (space or comma separated)."
+        help = "Input data files (.zarr or .h5), row-major (modality × batch)",
+        long_help = "Sparse backends produced by `data-beans from-mtx`.\n\
+                     Files are arranged as a row-major (modality × batch) table;\n\
+                     use -m to set the number of modality rows."
     )]
     data_files: Vec<Box<str>>,
 
     #[arg(
         short = 'm',
         long = "modalities",
-        help = "Data modalities",
-        long_help = "We will treat the provided data files as\n\
-		     a table of data sets in a row-major order.\n\
-		     This number of modalities will determine \n\
-		     how many different data types are assumed,\n\
-		     or the number of rows in the data table.",
-        required = true
+        required = true,
+        help = "Number of modalities (rows of the data-file table)",
+        long_help = "The input files are interpreted row-major as modality × batch.\n\
+                     This value sets the number of modality rows."
     )]
     num_modalities: usize,
 
@@ -32,12 +29,11 @@ pub struct JointSvdArgs {
         long,
         short,
         required = true,
-        help = "Output header",
-        long_help = "Output header for results.\n\
-		     Specify the output file or prefix for generated files:\n\
-		     - {out}.delta.parquet\n\
-		     - {out}.dictionary.parquet\n\
-		     - {out}.latent.parquet\n"
+        help = "Output file prefix",
+        long_help = "Prefix for generated files:\n  \
+                     {out}.dictionary.parquet  gene × component loadings\n  \
+                     {out}.latent.parquet      cell × component scores\n  \
+                     {out}_{d}.delta.parquet   per-batch effects for modality d"
     )]
     out: Box<str>,
 
@@ -45,9 +41,9 @@ pub struct JointSvdArgs {
         long,
         short = 'p',
         default_value_t = 50,
-        help = "Random projection dimension.",
-        long_help = "Random projection dimension to project the data.\n\
-		     Controls the dimensionality of the random projection step."
+        help = "Random projection dimension",
+        long_help = "Target rank of the initial random sketch used to seed\n\
+                     batch correction and multi-level pseudobulk collapsing."
     )]
     proj_dim: usize,
 
@@ -55,9 +51,9 @@ pub struct JointSvdArgs {
         long,
         short = 'd',
         default_value_t = 10,
-        help = "Top {d} components of projection.",
-        long_help = "Use top {d} components of projection.\n\
-		     Number of samples will be less than `2^{d}+1`."
+        help = "Partition depth: ≤ 2^d + 1 pseudobulk groups",
+        long_help = "Binary-tree partitioning over the top d projection components.\n\
+                     Produces at most 2^d + 1 pseudobulk leaves."
     )]
     sort_dim: usize,
 
@@ -65,10 +61,9 @@ pub struct JointSvdArgs {
         long,
         short,
         value_delimiter(','),
-        help = "Batch membership files.",
-        long_help = "Batch membership files (comma-separated names).\n\
-		     Each batch file should correspond to each data file.\n\
-		     Example: batch1.csv,batch2.csv"
+        help = "Batch membership files, one per data file",
+        long_help = "Each file lists a batch label per cell in the same order as its\n\
+                     matching data file. Example: batch1.tsv,batch2.tsv"
     )]
     batch_files: Option<Vec<Box<str>>>,
 
@@ -76,37 +71,34 @@ pub struct JointSvdArgs {
         short = 'c',
         long,
         default_value_t = 1e4,
-        help = "Column sum normalization scale.",
-        long_help = "Column sum normalization scale (affects decoder only).\n\
-		     Adjusts normalization of columns in the decoder."
+        help = "Column-sum normalization scale",
+        long_help = "Target library size after per-cell normalization."
     )]
     column_sum_norm: f32,
 
     #[arg(
         long,
         default_value_t = 10,
-        help = "Number of k-nearest neighbours within each batch.",
-        long_help = "Number of k-nearest neighbours within each batch.\n\
-		     Controls the number of cells considered \n\
-		     for nearest neighbour search within each batch."
+        help = "In-batch k-NN for super-cell merging",
+        long_help = "Number of within-batch nearest neighbours used when\n\
+                     aggregating cells into pseudobulk super-cells."
     )]
     knn_cells: usize,
 
     #[arg(
         long,
         default_value_t = 30,
-        help = "Optimization iterations.",
-        long_help = "Number of optimization iterations.\n\
-		     Controls the number of steps for model optimization."
+        help = "Batch-correction optimizer iterations",
+        long_help = "Coordinate-descent steps when fitting the per-batch delta."
     )]
     iter_opt: usize,
 
     #[arg(
         long,
         default_value_t = 100,
-        help = "Block size for parallel processing.",
-        long_help = "Block size (number of columns) for parallel processing.\n\
-		     Controls the granularity of parallel computation."
+        help = "Column block size for parallel I/O",
+        long_help = "Columns streamed per worker. Trades parallel granularity\n\
+                     against per-block memory."
     )]
     block_size: usize,
 
@@ -114,28 +106,23 @@ pub struct JointSvdArgs {
         short = 't',
         long,
         default_value_t = 10,
-        help = "Number of latent topics.",
-        long_help = "Number of latent topics.\n\
-		     Controls the dimensionality of the latent topic space."
+        help = "Number of latent components (K)"
     )]
     n_latent_topics: usize,
 
     #[arg(
         long,
         default_value_t = 3,
-        help = "Number of multi-level collapsing levels.",
-        long_help = "Number of multi-level collapsing levels.\n\
-		     More levels = coarser-to-finer batch correction.\n\
-		     Set to 1 to disable multi-level."
+        help = "Multi-level coarsening levels",
+        long_help = "Hierarchical pseudobulk refinement passes. Level sort dims are\n\
+                     linearly spaced from 4 to --sort-dim. Set to 1 to disable."
     )]
     num_levels: usize,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Preload all columns data.",
-        long_help = "Preload all the columns data into memory.\n\
-		     Improves performance for large datasets."
+        help = "Load all columns into memory before training"
     )]
     preload_data: bool,
 }
