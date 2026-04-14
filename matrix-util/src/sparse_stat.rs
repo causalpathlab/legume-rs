@@ -232,12 +232,7 @@ where
         self.add_csc_inner(csc, col_offset, Some(row_mask));
     }
 
-    fn add_csc_inner(
-        &mut self,
-        csc: &CscMatrix<T>,
-        col_offset: usize,
-        row_mask: Option<&[bool]>,
-    ) {
+    fn add_csc_inner(&mut self, csc: &CscMatrix<T>, col_offset: usize, row_mask: Option<&[bool]>) {
         for (local_col, col) in csc.col_iter().enumerate() {
             let c = col_offset + local_col;
             let rows = col.row_indices();

@@ -7,10 +7,9 @@ use candle_util::candle_decoder_topic::*;
 use candle_util::candle_decoder_vmf_topic::*;
 use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_model_traits::*;
-use candle_util::candle_topic_refinement::*;
 use log::warn;
 
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
 pub(crate) enum DecoderType {
     /// Softmax dictionary with multinomial likelihood
@@ -19,6 +18,16 @@ pub(crate) enum DecoderType {
     Nb,
     /// Von Mises-Fisher mixture on unit hypersphere
     Vmf,
+}
+
+impl DecoderType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DecoderType::Multinom => "multinom",
+            DecoderType::Nb => "nb",
+            DecoderType::Vmf => "vmf",
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -247,14 +256,24 @@ pub struct TopicArgs {
     #[arg(
         long,
         value_enum,
+        value_delimiter = ',',
         default_value = "multinom",
-        help = "Decoder type",
-        long_help = "Topic decoder type:\n\
+        help = "Decoder type(s), comma-separated for multi-decoder",
+        long_help = "Topic decoder type(s):\n\
 		     multinom: softmax dictionary with multinomial likelihood\n\
 		     nb: negative binomial with per-gene dispersion and library size\n\
-		     vmf: von Mises-Fisher mixture on unit hypersphere"
+		     vmf: von Mises-Fisher mixture on unit hypersphere\n\
+		     Multiple decoders can be specified (e.g., --decoder multinom,vmf)\n\
+		     to train them simultaneously with shared encoder."
     )]
-    pub(crate) decoder: DecoderType,
+    pub(crate) decoder: Vec<DecoderType>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Per-decoder loss weights (default: equal)"
+    )]
+    pub(crate) decoder_weights: Option<Vec<f64>>,
 
     #[arg(
         long,
@@ -411,17 +430,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     let stop = setup_stop_handler();
 
-    // Build refinement config (None if disabled)
-    let refine_config = if args.refine_steps > 0 {
-        Some(TopicRefinementConfig {
-            num_steps: args.refine_steps,
-            learning_rate: args.refine_lr,
-            regularization: args.refine_reg,
-        })
-    } else {
-        None
-    };
-
     if args.vcd_epochs > 0 && matches!(args.level_schedule, LevelSchedule::Progressive) {
         warn!("--vcd-epochs is only supported with --level-schedule mixed; ignoring VCD");
     }
@@ -442,13 +450,18 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         dev: &dev,
         args,
         stop: &stop,
-        refine_config: refine_config.as_ref(),
     };
 
-    let (scores, z_nk) = match args.decoder {
-        DecoderType::Nb => run_topic_pipeline::<NbTopicDecoder>(&ctx, &mut encoder)?,
-        DecoderType::Multinom => run_topic_pipeline::<TopicDecoder>(&ctx, &mut encoder)?,
-        DecoderType::Vmf => run_topic_pipeline::<VmfTopicDecoder>(&ctx, &mut encoder)?,
+    let (scores, z_nk) = if args.decoder.len() == 1 {
+        // Single decoder: monomorphic dispatch (zero overhead)
+        match args.decoder[0] {
+            DecoderType::Nb => run_topic_pipeline::<NbTopicDecoder>(&ctx, &mut encoder)?,
+            DecoderType::Multinom => run_topic_pipeline::<TopicDecoder>(&ctx, &mut encoder)?,
+            DecoderType::Vmf => run_topic_pipeline::<VmfTopicDecoder>(&ctx, &mut encoder)?,
+        }
+    } else {
+        // Multiple decoders: dynamic dispatch
+        run_multi_decoder_pipeline(&ctx, &mut encoder)?
     };
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
@@ -638,7 +651,6 @@ struct PipelineCtx<'a> {
     dev: &'a candle_core::Device,
     args: &'a TopicArgs,
     stop: &'a std::sync::atomic::AtomicBool,
-    refine_config: Option<&'a TopicRefinementConfig>,
 }
 
 fn run_topic_pipeline<Dec>(
@@ -704,35 +716,22 @@ where
         &ctx.args.out,
     )?;
 
-    info!("Writing down the latent states");
-    let eval_config = EvaluateLatentConfig {
-        dev: ctx.dev,
-        adj_method: &ctx.args.adj_method,
-        minibatch_size: ctx.args.minibatch_size,
-        feature_coarsening: ctx.finest_coarsening,
-        decoder: Some(finest_decoder),
-        refine_config: ctx.refine_config,
-    };
-    let z_nk =
-        evaluate_latent_by_encoder(ctx.data_vec, encoder, ctx.finest_collapsed, &eval_config)?;
-
+    let weights = compute_decoder_weights(&ctx.args.decoder, &ctx.args.decoder_weights);
+    let z_nk = save_metadata_and_evaluate(ctx, encoder, &weights)?;
     Ok((scores, z_nk))
 }
 
-/// Write dictionary with optional expansion from coarse to fine resolution.
-fn write_dictionary_expanded<Dec: DecoderModuleT + ?Sized>(
-    decoder: &Dec,
+/// Write dictionary tensor with optional expansion from coarse to fine resolution.
+fn write_dictionary_tensor(
+    dict_tensor: &candle_core::Tensor,
     coarsening: Option<&FeatureCoarsening>,
     n_features_full: usize,
     gene_names: &[Box<str>],
     out_prefix: &str,
 ) -> anyhow::Result<()> {
-    let dict_tensor = decoder
-        .get_dictionary()?
-        .to_device(&candle_core::Device::Cpu)?;
+    let dict_tensor = dict_tensor.to_device(&candle_core::Device::Cpu)?;
 
     if let Some(fc) = coarsening {
-        // Dictionary is [d, K] in log-probability space; expand to [D', K]
         let dict_dk: Mat = Mat::from_tensor(&dict_tensor)?;
         let expanded_dk = fc.expand_log_dict_dk(&dict_dk, n_features_full);
         expanded_dk.to_parquet_with_names(
@@ -752,4 +751,150 @@ fn write_dictionary_expanded<Dec: DecoderModuleT + ?Sized>(
         )?;
     }
     Ok(())
+}
+
+/// Write dictionary from a decoder implementing `DecoderModuleT`.
+fn write_dictionary_expanded<Dec: DecoderModuleT + ?Sized>(
+    decoder: &Dec,
+    coarsening: Option<&FeatureCoarsening>,
+    n_features_full: usize,
+    gene_names: &[Box<str>],
+    out_prefix: &str,
+) -> anyhow::Result<()> {
+    let dict_tensor = decoder.get_dictionary()?;
+    write_dictionary_tensor(
+        &dict_tensor,
+        coarsening,
+        n_features_full,
+        gene_names,
+        out_prefix,
+    )
+}
+
+/// Compute normalized decoder weights. If user provided weights, normalize
+/// them to sum to 1. Otherwise, use equal weights.
+fn compute_decoder_weights(decoders: &[DecoderType], user_weights: &Option<Vec<f64>>) -> Vec<f64> {
+    if let Some(w) = user_weights {
+        let sum: f64 = w.iter().sum();
+        w.iter().map(|x| x / sum).collect()
+    } else {
+        let n = decoders.len() as f64;
+        vec![1.0 / n; decoders.len()]
+    }
+}
+
+/// Save model metadata/weights, move parameters to CPU, and evaluate latent states.
+fn save_metadata_and_evaluate(
+    ctx: &PipelineCtx,
+    encoder: &LogSoftmaxEncoder,
+    decoder_weights: &[f64],
+) -> anyhow::Result<Mat> {
+    use crate::topic::model_metadata::*;
+
+    save_parameters(ctx.parameters, &ctx.args.out)?;
+
+    let metadata = TopicModelMetadata {
+        model_type: "topic".into(),
+        decoder_types: ctx.args.decoder.iter().map(|d| d.as_str().into()).collect(),
+        decoder_weights: decoder_weights.to_vec(),
+        n_features_encoder: *ctx
+            .level_decoder_dims
+            .last()
+            .unwrap_or(&ctx.n_features_full),
+        n_features_full: ctx.n_features_full,
+        n_topics: ctx.n_topics,
+        encoder_hidden: ctx.args.encoder_layers.clone(),
+        num_levels: ctx.level_decoder_dims.len(),
+        level_decoder_dims: ctx.level_decoder_dims.to_vec(),
+        adj_method: ctx.args.adj_method.as_str().into(),
+        has_coarsening: ctx.finest_coarsening.is_some(),
+    };
+    metadata.save(&ctx.args.out)?;
+
+    if let Some(fc) = ctx.finest_coarsening {
+        save_coarsening(fc, &ctx.args.out)?;
+    }
+
+    info!("Moving parameters to CPU for multi-threaded inference");
+    let cpu_dev = candle_core::Device::Cpu;
+    move_varmap_to_cpu(ctx.parameters)?;
+
+    let eval_config = EvaluateLatentConfig {
+        dev: &cpu_dev,
+        adj_method: &ctx.args.adj_method,
+        minibatch_size: ctx.args.minibatch_size,
+        feature_coarsening: ctx.finest_coarsening,
+        decoder: None::<&TopicDecoder>,
+        refine_config: None,
+    };
+    evaluate_latent_by_encoder(ctx.data_vec, encoder, ctx.finest_collapsed, &eval_config)
+}
+
+/// Multi-decoder pipeline: builds multiple decoder types per level,
+/// trains with weighted multi-decoder loss, saves per-decoder dictionaries.
+fn run_multi_decoder_pipeline(
+    ctx: &PipelineCtx,
+    encoder: &mut LogSoftmaxEncoder,
+) -> anyhow::Result<(TrainScores, Mat)> {
+    use crate::topic::train::train_mixed_multi_decoder;
+    use candle_util::candle_dyn_decoder::*;
+
+    let decoder_weights = compute_decoder_weights(&ctx.args.decoder, &ctx.args.decoder_weights);
+
+    // Build per-level × per-decoder-type grid
+    let decoders_per_level: Vec<Vec<Box<dyn DynDecoderModuleT>>> = ctx
+        .level_decoder_dims
+        .iter()
+        .enumerate()
+        .map(|(level_i, &d_l)| {
+            ctx.args
+                .decoder
+                .iter()
+                .map(|dec_type| {
+                    let name = dec_type.as_str();
+                    let prefix = format!("dec_{level_i}.{name}");
+                    create_dyn_decoder(name, d_l, ctx.n_topics, ctx.param_builder.pp(prefix))
+                        .expect("decoder creation")
+                })
+                .collect()
+        })
+        .collect();
+
+    let train_config = TrainConfig {
+        parameters: ctx.parameters,
+        dev: ctx.dev,
+        args: ctx.args,
+        stop: ctx.stop,
+    };
+
+    if ctx.args.vcd_epochs > 0 {
+        warn!("--vcd-epochs is not supported with multi-decoder; ignoring VCD");
+    }
+
+    let scores = train_mixed_multi_decoder(
+        ctx.collapsed_levels,
+        encoder,
+        &decoders_per_level,
+        ctx.level_coarsenings,
+        &decoder_weights,
+        &train_config,
+    )?;
+
+    // Write per-decoder dictionaries at finest level
+    info!("Writing down the model parameters");
+    for dec in decoders_per_level.last().unwrap() {
+        let name = dec.decoder_name();
+        let out_prefix = format!("{}.{}", ctx.args.out, name);
+        let dict_tensor = dec.get_dictionary()?;
+        write_dictionary_tensor(
+            &dict_tensor,
+            ctx.finest_coarsening,
+            ctx.n_features_full,
+            ctx.gene_names,
+            &out_prefix,
+        )?;
+    }
+
+    let z_nk = save_metadata_and_evaluate(ctx, encoder, &decoder_weights)?;
+    Ok((scores, z_nk))
 }
