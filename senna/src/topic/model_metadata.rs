@@ -38,6 +38,7 @@ impl TopicModelMetadata {
         Ok(())
     }
 
+    #[allow(dead_code)] // for future eval-topic CLI
     pub fn load(prefix: &str) -> anyhow::Result<Self> {
         let path = format!("{}.model.json", prefix);
         let json = std::fs::read_to_string(&path)?;
@@ -56,6 +57,7 @@ pub fn save_coarsening(coarsening: &FeatureCoarsening, prefix: &str) -> anyhow::
 }
 
 /// Load feature coarsening from JSON.
+#[allow(dead_code)] // for future eval-topic CLI
 pub fn load_coarsening(prefix: &str) -> anyhow::Result<Option<FeatureCoarsening>> {
     let path = format!("{}.coarsening.json", prefix);
     match std::fs::read_to_string(&path) {
