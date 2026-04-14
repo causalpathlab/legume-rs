@@ -20,23 +20,20 @@ pub struct JointTopicArgs {
     #[arg(
         required = true,
         value_delimiter = ',',
-        help = "Data files",
-        long_help = "Data files to be processed.\n\
-		     Each file should be specified as a path.\n\
-		     Multiple files can be provided (space or comma separated)."
+        help = "Input data files (.zarr or .h5), row-major (modality × batch)",
+        long_help = "Sparse backends produced by `data-beans from-mtx`.\n\
+                     Files are arranged as a row-major (modality × batch) table;\n\
+                     use -m to set the number of modality rows."
     )]
     pub(crate) data_files: Vec<Box<str>>,
 
     #[arg(
         short = 'm',
         long = "modalities",
-        help = "Data modalities",
-        long_help = "We will treat the provided data files as\n\
-		     a table of data sets in a row-major order.\n\
-		     This number of modalities will determine \n\
-		     how many different data types are assumed,\n\
-		     or the number of rows in the data table.",
-        required = true
+        required = true,
+        help = "Number of modalities (rows of the data-file table)",
+        long_help = "The input files are interpreted row-major as modality × batch.\n\
+                     This value sets the number of modality rows."
     )]
     pub(crate) num_modalities: usize,
 
@@ -44,15 +41,15 @@ pub struct JointTopicArgs {
         long,
         short,
         required = true,
-        help = "Output header",
-        long_help = "Output file prefix. Generated files:\n\
-		     - {out}.dictionary.parquet (effective topic dictionaries)\n\
-		     - {out}.latent.parquet (log-softmax topic proportions)\n\
-		     - {out}.log_likelihood.parquet (training metrics)\n\
-		     - {out}_{d}.delta.parquet (batch effects per modality)\n\n\
-		     With --decoder-type delta, additionally:\n\
-		     - {out}.base_dictionary.parquet (shared base dictionary)\n\
-		     - {out}_{m}.delta_logits.parquet (delta logits per modality)\n"
+        help = "Output file prefix",
+        long_help = "Prefix for generated files:\n  \
+                     {out}.dictionary.parquet       effective topic dictionary\n  \
+                     {out}.latent.parquet           cell × topic log-softmax proportions\n  \
+                     {out}.log_likelihood.parquet   training loss trace\n  \
+                     {out}_{d}.delta.parquet        per-batch effects for modality d\n\n\
+                     With --decoder-type delta, additionally:\n  \
+                     {out}.base_dictionary.parquet  shared base dictionary\n  \
+                     {out}_{m}.delta_logits.parquet delta logits for modality m"
     )]
     pub(crate) out: Box<str>,
 
@@ -60,9 +57,9 @@ pub struct JointTopicArgs {
         long,
         short = 'p',
         default_value_t = 50,
-        help = "Random projection dimension.",
-        long_help = "Random projection dimension to project the data.\n\
-		     Controls the dimensionality of the random projection step."
+        help = "Random projection dimension",
+        long_help = "Target rank of the initial random sketch used to seed\n\
+                     batch correction and multi-level pseudobulk collapsing."
     )]
     pub(crate) proj_dim: usize,
 
@@ -70,9 +67,9 @@ pub struct JointTopicArgs {
         long,
         short = 'd',
         default_value_t = 10,
-        help = "Top {d} components of projection.",
-        long_help = "Use top {d} components of projection.\n\
-		     Number of samples will be less than `2^{d}+1`."
+        help = "Partition depth: ≤ 2^d + 1 pseudobulk groups",
+        long_help = "Binary-tree partitioning over the top d projection components.\n\
+                     Produces at most 2^d + 1 pseudobulk leaves."
     )]
     pub(crate) sort_dim: usize,
 
@@ -80,10 +77,9 @@ pub struct JointTopicArgs {
         long,
         short,
         value_delimiter(','),
-        help = "Batch membership files.",
-        long_help = "Batch membership files (comma-separated names).\n\
-		     Each batch file should correspond to each data file.\n\
-		     Example: batch1.csv,batch2.csv"
+        help = "Batch membership files, one per data file",
+        long_help = "Each file lists a batch label per cell in the same order as its\n\
+                     matching data file. Example: batch1.tsv,batch2.tsv"
     )]
     pub(crate) batch_files: Option<Vec<Box<str>>>,
 
@@ -91,37 +87,34 @@ pub struct JointTopicArgs {
         short = 'c',
         long,
         default_value_t = 1e4,
-        help = "Column sum normalization scale.",
-        long_help = "Column sum normalization scale (affects decoder only).\n\
-		     Adjusts normalization of columns in the decoder."
+        help = "Column-sum normalization scale",
+        long_help = "Target library size after per-cell normalization (decoder only)."
     )]
     pub(crate) column_sum_norm: f32,
 
     #[arg(
         long,
         default_value_t = 10,
-        help = "Number of k-nearest neighbours within each batch.",
-        long_help = "Number of k-nearest neighbours within each batch.\n\
-		     Controls the number of cells considered \n\
-		     for nearest neighbour search within each batch."
+        help = "In-batch k-NN for super-cell merging",
+        long_help = "Number of within-batch nearest neighbours used when\n\
+                     aggregating cells into pseudobulk super-cells."
     )]
     pub(crate) knn_cells: usize,
 
     #[arg(
         long,
         default_value_t = 30,
-        help = "Optimization iterations.",
-        long_help = "Number of optimization iterations.\n\
-		     Controls the number of steps for model optimization."
+        help = "Batch-correction optimizer iterations",
+        long_help = "Coordinate-descent steps when fitting the per-batch delta."
     )]
     pub(crate) iter_opt: usize,
 
     #[arg(
         long,
         default_value_t = 100,
-        help = "Block size for parallel processing.",
-        long_help = "Block size (number of columns) for parallel processing.\n\
-		     Controls the granularity of parallel computation."
+        help = "Column block size for parallel I/O",
+        long_help = "Columns streamed per worker. Trades parallel granularity\n\
+                     against per-block memory."
     )]
     pub(crate) block_size: usize,
 
@@ -129,9 +122,7 @@ pub struct JointTopicArgs {
         short = 't',
         long,
         default_value_t = 10,
-        help = "Number of latent topics.",
-        long_help = "Number of latent topics.\n\
-		     Controls the dimensionality of the latent topic space."
+        help = "Number of latent topics (K)"
     )]
     pub(crate) n_latent_topics: usize,
 
@@ -140,111 +131,70 @@ pub struct JointTopicArgs {
         short = 'e',
         value_delimiter(','),
         default_values_t = vec![128, 1024, 128],
-        help = "Encoder layers.",
-        long_help = "Encoder layers (comma-separated).\n\
-		     Specify the size of each layer in the encoder model.\n\
-		     Example: 128,1024,128"
+        help = "Encoder hidden layer sizes (comma-separated)",
+        long_help = "Example: 128,1024,128 (input → 128 → 1024 → 128 → topics)."
     )]
     pub(crate) encoder_layers: Vec<usize>,
 
-    #[arg(
-        long,
-        short = 'i',
-        default_value_t = 1000,
-        help = "Number of training epochs.",
-        long_help = "Number of training epochs.\n\
-		     Controls how many times the model is trained over the data."
-    )]
+    #[arg(long, short = 'i', default_value_t = 1000, help = "Training epochs")]
     pub(crate) epochs: usize,
 
     #[arg(
         long,
         short = 'j',
         default_value_t = 5,
-        help = "Data jitter interval.",
-        long_help = "Data jitter interval.\n\
-		     Controls the interval for adding jitter to the collapsed data\n\
-		     by posterior resampling during VAE training."
+        help = "Posterior resampling interval (epochs)",
+        long_help = "How often to jitter the collapsed targets by posterior resampling\n\
+                     during VAE training."
     )]
     pub(crate) jitter_interval: usize,
 
-    #[arg(
-        long,
-        default_value_t = 100,
-        help = "Minibatch size.",
-        long_help = "Minibatch size for training.\n\
-		     Controls the number of samples per training batch."
-    )]
+    #[arg(long, default_value_t = 100, help = "Training minibatch size")]
     pub(crate) minibatch_size: usize,
 
-    #[arg(
-        long,
-        default_value_t = 0.05,
-        alias = "lr",
-        help = "Learning rate.",
-        long_help = "Learning rate for optimization.\n\
-		     Controls the step size for parameter updates."
-    )]
+    #[arg(long, default_value_t = 0.05, alias = "lr", help = "Adam learning rate")]
     pub(crate) learning_rate: f32,
 
-    #[arg(
-        long,
-        value_enum,
-        default_value = "cpu",
-        help = "Candle device.",
-        long_help = "Candle device to use for computation.\n\
-		     Options: cpu, cuda, metal."
-    )]
+    #[arg(long, value_enum, default_value = "cpu", help = "Compute device (cpu|cuda|metal)")]
     pub(crate) device: ComputeDevice,
 
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "A device for cuda.",
-        long_help = "For cuda or meta, we may want to choose a different device."
-    )]
+    #[arg(long, default_value_t = 0, help = "CUDA/Metal device index")]
     pub(crate) device_no: usize,
 
     #[arg(
         long,
         value_enum,
         default_value = "residual",
-        help = "Adjustment method.",
-        long_help = "Adjust by batch or residual.\n\
-		     Choose the method for batch adjustment."
+        help = "Batch adjustment (batch|residual)",
+        long_help = "batch    — subtract per-batch pseudobulk mean.\n\
+                     residual — divide by fitted delta per pseudobulk group."
     )]
     pub(crate) adj_method: AdjMethod,
 
     #[arg(
         long,
         default_value_t = 2,
-        help = "Number of multi-level collapsing levels.",
-        long_help = "Number of multi-level collapsing levels.\n\
-		     More levels = coarser-to-finer batch correction.\n\
-		     Set to 1 to disable multi-level."
+        help = "Multi-level coarsening levels",
+        long_help = "Hierarchical pseudobulk refinement passes. Set to 1 to disable."
     )]
     pub(crate) num_levels: usize,
 
     #[arg(
         long,
         default_value_t = 5000,
-        help = "Cap feature dimension by coarsening",
-        long_help = "Cap the feature dimension by grouping co-expressed features into\n\
-		     meta-features. The model trains at this reduced resolution.\n\
-		     On output, the dictionary is expanded back to full resolution.\n\
-		     Set to 0 to disable. Default: 5000.\n\
-		     Applied after --max-features selection if both are specified.\n\
-		     Independent mode: computed per modality.\n\
-		     Delta mode: computed on the reference modality, shared across all."
+        help = "Cap feature dim by meta-feature coarsening (0 to disable)",
+        long_help = "Groups co-expressed features into ≤N meta-features so the model\n\
+                     trains at reduced resolution. The dictionary is expanded back to\n\
+                     full resolution on output.\n\
+                     Independent mode: computed per modality.\n\
+                     Delta mode: computed on the reference modality and shared."
     )]
     pub(crate) max_coarse_features: usize,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Preload all columns data.",
-        long_help = "Preload all the columns data into memory.\n\
-		     Improves performance for large datasets."
+        help = "Load all columns into memory before training"
     )]
     pub(crate) preload_data: bool,
 
@@ -252,17 +202,14 @@ pub struct JointTopicArgs {
         long,
         value_enum,
         default_value = "independent",
-        help = "Joint decoder type.",
-        long_help = "Joint decoder type:\n\
-		     - independent: each modality has its own topic dictionary.\n\
-		       Modalities can have different features.\n\
-		     - delta: shared base dictionary + cumulative chain deltas.\n\
-		       Modality 0 = softmax(z @ W_base)\n\
-		       Modality m = softmax(z @ (W_base + sum of delta_1..delta_m))\n\
-		       All modalities must share the same features (genes).\n\
-		       Feature selection and coarsening are shared from the\n\
-		       reference modality (first). Delta logits are initialized\n\
-		       to zero and diverge during training."
+        help = "Joint decoder (independent|delta)",
+        long_help = "independent — each modality has its own topic dictionary; features\n\
+                                   may differ across modalities.\n\
+                     delta       — shared base dictionary + cumulative chain deltas.\n\
+                                   Modality 0 = softmax(z @ W_base)\n\
+                                   Modality m = softmax(z @ (W_base + Σ δ_1..m))\n\
+                                   Requires shared features; reference is modality 0.\n\
+                                   Delta logits start at zero and diverge during training."
     )]
     pub(crate) decoder_type: JointDecoderType,
 }

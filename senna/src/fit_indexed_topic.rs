@@ -12,10 +12,10 @@ pub struct IndexedTopicArgs {
     #[arg(
         required = true,
         value_delimiter = ',',
-        help = "Data files",
-        long_help = "Data files to be processed.\n\
-		     Each file should be specified as a path.\n\
-		     Multiple files can be provided (space or comma separated)."
+        help = "Input data files (.zarr or .h5)",
+        long_help = "Sparse backends produced by `data-beans from-mtx`.\n\
+                     Multiple files may be passed (comma- or space-separated)\n\
+                     and are concatenated column-wise on a shared feature set."
     )]
     data_files: Vec<Box<str>>,
 
@@ -23,12 +23,14 @@ pub struct IndexedTopicArgs {
         long,
         short,
         required = true,
-        help = "Output header",
-        long_help = "Output header for results.\n\
-		     Specify the output file or prefix for generated files:\n\
-		     - {out}.delta.parquet\n\
-		     - {out}.dictionary.parquet\n\
-		     - {out}.latent.parquet (log-softmax topic proportions)\n"
+        help = "Output file prefix",
+        long_help = "Prefix for generated files:\n  \
+                     {out}.dictionary.parquet       gene × topic loadings (log-prob)\n  \
+                     {out}.latent.parquet           cell × topic log-softmax proportions\n  \
+                     {out}.delta.parquet            per-batch effects (if --batch-files)\n  \
+                     {out}.log_likelihood.parquet   training loss trace\n  \
+                     {out}.safetensors              encoder+decoder weights\n\n\
+                     With -x bulk files: {out}.bulk_latent.parquet additionally."
     )]
     out: Box<str>,
 
@@ -36,7 +38,9 @@ pub struct IndexedTopicArgs {
         long,
         short = 'p',
         default_value_t = 50,
-        help = "Random projection dimension"
+        help = "Random projection dimension",
+        long_help = "Target rank of the initial random sketch used to seed\n\
+                     batch correction and multi-level pseudobulk collapsing."
     )]
     proj_dim: usize,
 
@@ -44,27 +48,46 @@ pub struct IndexedTopicArgs {
         long,
         short = 'd',
         default_value_t = 10,
-        help = "Top {d} components of projection"
+        help = "Partition depth: ≤ 2^d + 1 pseudobulk groups",
+        long_help = "Binary-tree partitioning over the top d projection components.\n\
+                     Produces at most 2^d + 1 pseudobulk leaves."
     )]
     sort_dim: usize,
 
-    #[arg(long, short, value_delimiter(','), help = "Batch membership files")]
+    #[arg(
+        long,
+        short,
+        value_delimiter(','),
+        help = "Batch membership files, one per data file",
+        long_help = "Each file lists a batch label per cell in the same order as its\n\
+                     matching data file. Example: batch1.tsv,batch2.tsv"
+    )]
     batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(short = 'w', long = "warm-start", help = "Warm start projection file")]
+    #[arg(
+        short = 'w',
+        long = "warm-start",
+        help = "Warm-start projection file (cell × k)",
+        long_help = "Skip random projection and use this matrix instead.\n\
+                     Rows must match the concatenated cell order of the inputs."
+    )]
     warm_start_proj_file: Option<Box<str>>,
 
     #[arg(
         long,
         default_value_t = 10,
-        help = "Number of k-nearest neighbours within each batch"
+        help = "In-batch k-NN for super-cell merging",
+        long_help = "Number of within-batch nearest neighbours used when\n\
+                     aggregating cells into pseudobulk super-cells."
     )]
     knn_cells: usize,
 
     #[arg(
         long,
         default_value_t = 3,
-        help = "Number of multi-level coarsening levels"
+        help = "Multi-level coarsening levels",
+        long_help = "Hierarchical pseudobulk refinement passes. Level sort dims are\n\
+                     linearly spaced from 4 to --sort-dim. Set to 1 to disable."
     )]
     num_levels: usize,
 
@@ -72,17 +95,26 @@ pub struct IndexedTopicArgs {
         long,
         value_enum,
         default_value = "mixed",
-        help = "Multi-level training schedule"
+        help = "Multi-level training schedule (mixed|progressive)",
+        long_help = "mixed       — every level trained simultaneously each epoch.\n\
+                     progressive — coarse→fine, more epochs for coarser levels."
     )]
     level_schedule: LevelSchedule,
 
-    #[arg(long, default_value_t = 30, help = "Optimization iterations")]
+    #[arg(
+        long,
+        default_value_t = 30,
+        help = "Batch-correction optimizer iterations",
+        long_help = "Coordinate-descent steps when fitting the per-batch delta."
+    )]
     iter_opt: usize,
 
     #[arg(
         long,
         default_value_t = 100,
-        help = "Block size for parallel processing"
+        help = "Column block size for parallel I/O",
+        long_help = "Columns streamed per worker. Trades parallel granularity\n\
+                     against per-block memory."
     )]
     block_size: usize,
 
@@ -90,7 +122,7 @@ pub struct IndexedTopicArgs {
         short = 't',
         long,
         default_value_t = 10,
-        help = "Number of latent topics"
+        help = "Number of latent topics (K)"
     )]
     n_latent_topics: usize,
 
@@ -99,76 +131,83 @@ pub struct IndexedTopicArgs {
         short = 'e',
         value_delimiter(','),
         default_values_t = vec![128, 1024, 128],
-        help = "Encoder layers (comma-separated)"
+        help = "Encoder hidden layer sizes (comma-separated)",
+        long_help = "Example: 128,1024,128 (input → 128 → 1024 → 128 → topics)."
     )]
     encoder_layers: Vec<usize>,
 
-    #[arg(
-        long,
-        short = 'i',
-        default_value_t = 1000,
-        help = "Number of training epochs"
-    )]
+    #[arg(long, short = 'i', default_value_t = 1000, help = "Training epochs")]
     epochs: usize,
 
-    #[arg(long, short = 'j', default_value_t = 5, help = "Data jitter interval")]
+    #[arg(
+        long,
+        short = 'j',
+        default_value_t = 5,
+        help = "Posterior resampling interval (epochs)",
+        long_help = "How often to jitter the collapsed targets by posterior resampling\n\
+                     during VAE training."
+    )]
     jitter_interval: usize,
 
-    #[arg(long, default_value_t = 100, help = "Minibatch size")]
+    #[arg(long, default_value_t = 100, help = "Training minibatch size")]
     minibatch_size: usize,
 
-    #[arg(long, alias = "lr", default_value_t = 0.05, help = "Learning rate")]
+    #[arg(long, alias = "lr", default_value_t = 0.05, help = "Adam learning rate")]
     learning_rate: f32,
 
-    #[arg(long, value_enum, default_value = "cpu", help = "Candle device")]
+    #[arg(long, value_enum, default_value = "cpu", help = "Compute device (cpu|cuda|metal)")]
     device: ComputeDevice,
 
-    #[arg(long, default_value_t = 0, help = "A device for cuda")]
+    #[arg(long, default_value_t = 0, help = "CUDA/Metal device index")]
     device_no: usize,
 
     #[arg(
         long,
         value_enum,
         default_value = "residual",
-        help = "Adjustment method"
+        help = "Batch adjustment (batch|residual)",
+        long_help = "batch    — subtract per-batch pseudobulk mean.\n\
+                     residual — divide by fitted delta per pseudobulk group."
     )]
     adj_method: AdjMethod,
 
-    #[arg(long, default_value_t = false, help = "Preload all columns data")]
+    #[arg(long, default_value_t = false, help = "Load all columns into memory before training")]
     preload_data: bool,
 
-    #[arg(long, default_value_t = 0.01, help = "Topic smoothing during training")]
+    #[arg(
+        long,
+        default_value_t = 0.01,
+        help = "Uniform smoothing of topic proportions during training",
+        long_help = "z_smooth = (1-α) z + α/K. Keeps every topic on the gradient path\n\
+                     and prevents dead topics. Typical: 0.01–0.2. Set 0 to disable."
+    )]
     topic_smoothing: f64,
 
-    // Indexed-specific args
     #[arg(
         long,
         default_value_t = 512,
-        help = "Top-K features per sample (context window size)",
-        long_help = "Number of top features to keep per sample by value.\n\
-                     Each sample selects its top-K features; minibatches use\n\
-                     the union of selected indices. Smaller K = faster decoder."
+        help = "Encoder context window (top-K features per cell)",
+        long_help = "Each cell keeps its top-K features by value; minibatches use the\n\
+                     union of selected indices. Smaller K = faster decoder."
     )]
     context_size: usize,
 
     #[arg(
         long,
         default_value_t = 128,
-        help = "Feature embedding dimension",
-        long_help = "Dimensionality of per-feature embeddings.\n\
-                     Features are aggregated via [N, S] × [S, H] matmul\n\
-                     instead of dense [N, D] × [D, M] in the standard encoder."
+        help = "Per-feature embedding dimension",
+        long_help = "Features are pooled via [N,S] × [S,H] instead of the dense\n\
+                     [N,D] × [D,M] used by the standard encoder."
     )]
     embedding_dim: usize,
 
     #[arg(
         long,
         default_value_t = 0,
-        help = "Epochs of VCD training before switching to SGVB",
-        long_help = "Number of initial epochs using variational contrastive divergence (VCD).\n\
-		     VCD refines encoder samples via elliptical slice sampling (ESS),\n\
-		     then switches to standard SGVB for remaining epochs.\n\
-		     Set to 0 to use SGVB only (default)."
+        help = "VCD warm-up epochs before switching to SGVB",
+        long_help = "Variational contrastive divergence refines encoder samples via\n\
+                     elliptical slice sampling for the first N epochs, then switches\n\
+                     to standard SGVB. Only supported with --level-schedule mixed."
     )]
     vcd_epochs: usize,
 
@@ -180,38 +219,28 @@ pub struct IndexedTopicArgs {
     )]
     vcd_ess_steps: usize,
 
-    #[arg(
-        long,
-        default_value_t = 50,
-        help = "Max shrink iterations per ESS step"
-    )]
+    #[arg(long, default_value_t = 50, help = "Max shrink iterations per ESS step")]
     ess_max_shrink: usize,
 
     #[arg(
         long,
         default_value_t = 0,
-        help = "Per-cell refinement steps at inference",
-        long_help = "Number of gradient steps for per-cell topic refinement at inference time.\n\
-		     Optimizes topic logits against the frozen decoder likelihood,\n\
-		     anchored to the encoder output via L2 regularization.\n\
-		     Set to 0 to disable (default)."
+        help = "Per-cell refinement steps at inference (0 = off)",
+        long_help = "Gradient steps that optimize topic logits against the frozen\n\
+                     decoder likelihood, anchored to the encoder output by L2."
     )]
     refine_steps: usize,
 
-    #[arg(long, default_value_t = 0.01, help = "Learning rate for refinement")]
+    #[arg(long, default_value_t = 0.01, help = "Learning rate for inference-time refinement")]
     refine_lr: f64,
 
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "L2 regularization strength for refinement"
-    )]
+    #[arg(long, default_value_t = 1.0, help = "L2 anchor strength for inference-time refinement")]
     refine_reg: f64,
 
     #[arg(
         long,
-        help = "Decoder context window size (defaults to --context-size)",
-        long_help = "Top-K features per sample for the decoder side.\n\
+        help = "Decoder context window (default: --context-size)",
+        long_help = "Top-K features per sample used on the decoder side.\n\
                      Defaults to the encoder's --context-size when not set."
     )]
     decoder_context_size: Option<usize>,
@@ -220,11 +249,12 @@ pub struct IndexedTopicArgs {
         short = 'x',
         long,
         value_delimiter = ',',
-        help = "Bulk data files for joint deconvolution (.parquet, .tsv.gz)"
+        help = "Bulk expression files for joint deconvolution",
+        long_help = "Accepts .parquet or .tsv.gz; rows are aligned to the SC gene set.\n\
+                     Bulk samples are embedded using the trained encoder/decoder."
     )]
     bulk_data_files: Option<Vec<Box<str>>>,
 
-    // CNV detection args
     #[command(flatten)]
     cnv: CnvArgs,
 }

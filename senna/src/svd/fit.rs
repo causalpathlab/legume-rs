@@ -8,10 +8,10 @@ pub struct SvdArgs {
     #[arg(
         required = true,
         value_delimiter = ',',
-        help = "Data files",
-        long_help = "Data files to be processed.\n\
-		     Each file should be specified as a path.\n\
-		     Multiple files can be provided (space or comma separated)."
+        help = "Input data files (.zarr or .h5)",
+        long_help = "Sparse backends produced by `data-beans from-mtx`.\n\
+                     Multiple files may be passed (comma- or space-separated)\n\
+                     and are concatenated column-wise on a shared feature set."
     )]
     data_files: Vec<Box<str>>,
 
@@ -19,12 +19,14 @@ pub struct SvdArgs {
         long,
         short,
         required = true,
-        help = "Output header",
-        long_help = "Output header for results.\n\
-		     Specify the output file or prefix for generated files:\n\
-		     - {out}.delta.parquet\n\
-		     - {out}.dictionary.parquet\n\
-		     - {out}.latent.parquet\n"
+        help = "Output file prefix",
+        long_help = "Prefix for generated files:\n  \
+                     {out}.dictionary.parquet         gene × component loadings\n  \
+                     {out}.latent.parquet             cell × component scores\n  \
+                     {out}.delta.parquet              per-batch effects (if --batch-files)\n  \
+                     {out}.adjusted.zarr              batch-adjusted backend (if --save-adjusted)\n  \
+                     {out}.feature_variance.parquet   log-variance per feature (if --save-feature-variance)\n  \
+                     {out}.selected_features.txt      selected feature names (if feature selection ran)"
     )]
     out: Box<str>,
 
@@ -33,8 +35,8 @@ pub struct SvdArgs {
         short = 'p',
         default_value_t = 50,
         help = "Random projection dimension",
-        long_help = "Random projection dimension to project the data.\n\
-		     Controls the dimensionality of the random projection step."
+        long_help = "Target rank of the initial random sketch used to seed\n\
+                     batch correction and multi-level pseudobulk collapsing."
     )]
     proj_dim: usize,
 
@@ -42,9 +44,9 @@ pub struct SvdArgs {
         long,
         short = 'd',
         default_value_t = 10,
-        help = "Top {d} components of projection",
-        long_help = "Use top {d} components of projection.\n\
-		     Number of samples will be less than `2^{d}+1`."
+        help = "Partition depth: ≤ 2^d + 1 pseudobulk groups",
+        long_help = "Binary-tree partitioning over the top d projection components.\n\
+                     Produces at most 2^d + 1 pseudobulk leaves."
     )]
     sort_dim: usize,
 
@@ -52,57 +54,54 @@ pub struct SvdArgs {
         long,
         short,
         value_delimiter(','),
-        help = "Batch membership files",
-        long_help = "Batch membership files (comma-separated names).\n\
-		     Each batch file should correspond to each data file.\n\
-		     Example: batch1.csv,batch2.csv"
+        help = "Batch membership files, one per data file",
+        long_help = "Each file lists a batch label per cell in the same order as its\n\
+                     matching data file. Example: batch1.tsv,batch2.tsv"
     )]
     batch_files: Option<Vec<Box<str>>>,
 
     #[arg(
         short = 'w',
         long = "warm-start",
-        help = "Warm start projection file",
-        long_help = "Warm start from the previous projection (cell x k).\n\
-		     Provide a file to initialize the projection."
+        help = "Warm-start projection file (cell × k)",
+        long_help = "Skip random projection and use this matrix instead.\n\
+                     Rows must match the concatenated cell order of the inputs.\n\
+                     Disables feature selection."
     )]
     warm_start_proj_file: Option<Box<str>>,
 
     #[arg(
         long,
         default_value_t = 10,
-        help = "Number of k-nearest neighbours within each batch",
-        long_help = "Number of k-nearest neighbours within each batch.\n\
-		     Controls the number of neighbours for \n\
-		     nearest neighbour search."
+        help = "In-batch k-NN for super-cell merging",
+        long_help = "Number of within-batch nearest neighbours used when\n\
+                     aggregating cells into pseudobulk super-cells."
     )]
     knn_cells: usize,
 
     #[arg(
         long,
         default_value_t = 3,
-        help = "Number of multi-level coarsening levels",
-        long_help = "Number of multi-level coarsening levels for batch correction.\n\
-		     Higher values add intermediate refinement steps.\n\
-		     Level sort dimensions are linearly spaced from 4 to sort_dim."
+        help = "Multi-level coarsening levels",
+        long_help = "Hierarchical pseudobulk refinement passes. Level sort dims are\n\
+                     linearly spaced from 4 to --sort-dim. Set to 1 to disable."
     )]
     num_levels: usize,
 
     #[arg(
         long,
         default_value_t = 30,
-        help = "Optimization iterations",
-        long_help = "Number of optimization iterations.\n\
-		     Controls the number of steps for model optimization."
+        help = "Batch-correction optimizer iterations",
+        long_help = "Coordinate-descent steps when fitting the per-batch delta."
     )]
     iter_opt: usize,
 
     #[arg(
         long,
         default_value_t = 100,
-        help = "Block size for parallel processing",
-        long_help = "Block size (number of columns) for parallel processing.\n\
-		     Controls the granularity of parallel computation."
+        help = "Column block size for parallel I/O",
+        long_help = "Columns streamed per worker. Trades parallel granularity\n\
+                     against per-block memory."
     )]
     block_size: usize,
 
@@ -110,9 +109,8 @@ pub struct SvdArgs {
         short = 'c',
         long,
         default_value_t = 1e4,
-        help = "Column sum normalization scale",
-        long_help = "Column sum normalization scale.\n\
-		     Adjusts normalization of columns during processing."
+        help = "Column-sum normalization scale",
+        long_help = "Target library size after per-cell normalization."
     )]
     column_sum_norm: f32,
 
@@ -120,62 +118,46 @@ pub struct SvdArgs {
         short = 't',
         long,
         default_value_t = 10,
-        help = "Number of latent topics",
-        long_help = "Number of latent topics.\n\
-		     Controls the dimensionality of the latent topic space."
+        help = "Number of latent components (K)"
     )]
     n_latent_topics: usize,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Preload all columns data",
-        long_help = "Preload all the columns data into memory.\n\
-		     Improves performance for large datasets."
+        help = "Load all columns into memory before training"
     )]
     preload_data: bool,
 
-    #[arg(
-        long,
-        help = "Save batch-adjusted data",
-        long_help = "If set, save the batch-adjusted data creating a new backend."
-    )]
+    #[arg(long, help = "Write the batch-adjusted data to a new zarr backend")]
     save_adjusted: bool,
 
     #[arg(
         long,
-        help = "Maximum number of highly variable features",
-        long_help = "Select top N features by log-variance.\n\
-		     If not specified, all features are used.\n\
-		     Skipped if --warm-start is provided."
+        help = "Keep top N highly variable features",
+        long_help = "Select top N features by log-variance before SVD.\n\
+                     Ignored when --warm-start is set."
     )]
     max_features: Option<usize>,
 
     #[arg(
         long,
-        help = "Pre-computed feature selection file",
-        long_help = "Path to file with pre-selected feature names (one per line).\n\
-		     Takes precedence over --max-features.\n\
-		     Skipped if --warm-start is provided."
+        help = "Pre-computed feature list (one feature name per line)",
+        long_help = "Takes precedence over --max-features.\n\
+                     Ignored when --warm-start is set."
     )]
     feature_list_file: Option<Box<str>>,
 
     #[arg(
         long,
         alias = "high-sd",
-        help = "Exclude highly expressed features (SD threshold)",
-        long_help = "Exclude features with high mean expression before feature selection.\n\
-		     Features with log1p(mean) > mean + threshold*SD are excluded.\n\
-		     Typical values: 4 or 5.\n\
-		     If not specified, no features are excluded based on expression level."
+        help = "Exclude highly expressed features beyond N SD above the mean",
+        long_help = "Drop features with log1p(mean) > mean + N·SD before feature selection.\n\
+                     Typical values: 4–5."
     )]
     exclude_high_expression_sd: Option<f32>,
 
-    #[arg(
-        long,
-        help = "Save feature variance statistics",
-        long_help = "Save computed log-variance for all features to {out}.feature_variance.parquet"
-    )]
+    #[arg(long, help = "Write per-feature log-variance to {out}.feature_variance.parquet")]
     save_feature_variance: bool,
 
     #[command(flatten)]
