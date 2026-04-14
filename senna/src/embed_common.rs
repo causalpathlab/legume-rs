@@ -61,6 +61,15 @@ pub enum AdjMethod {
     Residual,
 }
 
+impl AdjMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AdjMethod::Batch => "batch",
+            AdjMethod::Residual => "residual",
+        }
+    }
+}
+
 /// Shared CNV detection CLI args (used by SVD, topic, indexed-topic)
 #[derive(Args, Debug, Clone)]
 pub struct CnvArgs {
