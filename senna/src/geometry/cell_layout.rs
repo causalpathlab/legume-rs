@@ -20,7 +20,7 @@ const LOCAL_CONTEXT_KNN: usize = 5;
 ///   K_cp = exp(-(‖z_c − z_p‖ / σ_c)^α)
 ///   w_cp = K_cp / Σ_p' K_cp'
 ///   (x_c, y_c) = Σ_p w_cp · pb_coord[p]
-pub(super) fn project_cells_nystrom(
+pub(crate) fn project_cells_nystrom(
     cell_z: &Mat,
     pb_z: &Mat,
     pb_coords: &Mat,
@@ -96,7 +96,7 @@ pub(super) fn project_cells_nystrom(
 }
 
 /// Bundled inputs for the local cell-refinement step.
-pub(super) struct LocalRefineArgs<'a> {
+pub(crate) struct LocalRefineArgs<'a> {
     pub cell_z: &'a Mat,
     pub pb_coords: &'a Mat,
     pub pb_membership: &'a [usize],
@@ -112,7 +112,7 @@ pub(super) struct LocalRefineArgs<'a> {
 /// PBs), so there's no write contention. Only cells whose dominant PB is in
 /// `pb_membership` (i.e. belongs to a kept PB after coverage filtering) are
 /// refined; orphaned cells keep their Nyström positions.
-pub(super) fn refine_cells_local(coords: &mut Mat, a: &LocalRefineArgs) {
+pub(crate) fn refine_cells_local(coords: &mut Mat, a: &LocalRefineArgs) {
     use rayon::prelude::*;
 
     let n_pb = a.pb_coords.nrows();
@@ -274,8 +274,14 @@ fn local_tsne_step(
         .collect();
 
     // Manual t-SNE gradient descent. Only focus rows move; context rows stay.
-    // `q` is reused across iterations to avoid per-iter allocation churn.
+    // `q` and `grads` are reused across iterations to avoid allocation churn.
+    //
+    // Update rule: Jacobi, not Gauss-Seidel. All focus gradients are computed
+    // against the *same* snapshot of y, then applied synchronously. The old
+    // in-place loop updated y[i] mid-iteration so later i's computed their
+    // gradient against already-moved anchors — a subtle correctness bug.
     let mut q = vec![0.0f32; n * n];
+    let mut grads: Vec<(f32, f32)> = vec![(0.0, 0.0); n_focus];
     for _ in 0..iters {
         q.fill(0.0);
         let mut q_sum = 0.0f32;
@@ -291,6 +297,7 @@ fn local_tsne_step(
         }
         let q_norm = q_sum.max(1e-12);
 
+        // Phase 1: compute gradients from the frozen y snapshot.
         // ∂KL/∂y_i = 4 Σ_j (P_ij − Q_ij) · q_unnorm_ij · (y_i − y_j)
         for i in 0..n_focus {
             let mut gx = 0.0f32;
@@ -306,8 +313,13 @@ fn local_tsne_step(
                 gx += coef * (y[i].0 - y[j].0);
                 gy += coef * (y[i].1 - y[j].1);
             }
-            y[i].0 -= learning_rate * gx;
-            y[i].1 -= learning_rate * gy;
+            grads[i] = (gx, gy);
+        }
+
+        // Phase 2: synchronous update.
+        for i in 0..n_focus {
+            y[i].0 -= learning_rate * grads[i].0;
+            y[i].1 -= learning_rate * grads[i].1;
         }
     }
 

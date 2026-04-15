@@ -1,13 +1,13 @@
-use super::phate::{phate_layout_2d, PhateArgs};
-use super::viz_cell_layout::{project_cells_nystrom, refine_cells_local, LocalRefineArgs};
 use super::viz_prep::{
     compute_pb_latent, compute_whitening, load_dictionary, load_latent_file, select_pb_coverage,
     whiten_pb_features,
 };
-use super::viz_similarity::{
+use crate::embed_common::*;
+use crate::geometry::cell_layout::{project_cells_nystrom, refine_cells_local, LocalRefineArgs};
+use crate::geometry::phate::{phate_layout_2d, PhateArgs};
+use crate::geometry::similarity::{
     compute_cosine_similarity, local_scale_similarity, regularize_similarity, threshold_similarity,
 };
-use crate::embed_common::*;
 use crate::senna_input::*;
 
 #[derive(ValueEnum, Clone, Debug, Default, PartialEq)]
@@ -468,7 +468,7 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
             coords
         }
         LayoutMethod::Tsne => {
-            use super::visualization_alg::{similarity_to_distance, TSne};
+            use crate::geometry::tsne::{similarity_to_distance, TSne};
 
             // Initialize t-SNE from a PHATE embedding of the whitened PB
             // features. PHATE gives a trajectory/branching-aware starting

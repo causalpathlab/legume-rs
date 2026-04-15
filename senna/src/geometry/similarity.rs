@@ -7,7 +7,7 @@ use crate::embed_common::*;
 /// Cosine similarity between columns of `x_dp`. Columns are L2-normalized
 /// (with a tiny epsilon floor on zero-norm columns) and then the gram
 /// matrix is formed: `S = X̂ᵀ X̂`.
-pub(super) fn compute_cosine_similarity(x_dp: &Mat) -> Mat {
+pub(crate) fn compute_cosine_similarity(x_dp: &Mat) -> Mat {
     let n = x_dp.ncols();
     let mut x_norm = x_dp.clone();
     for j in 0..n {
@@ -20,7 +20,7 @@ pub(super) fn compute_cosine_similarity(x_dp: &Mat) -> Mat {
 }
 
 /// Zero out entries below `threshold`.
-pub(super) fn threshold_similarity(s: &Mat, threshold: f32) -> Mat {
+pub(crate) fn threshold_similarity(s: &Mat, threshold: f32) -> Mat {
     let mut result = s.clone();
     for val in result.iter_mut() {
         if *val < threshold {
@@ -33,7 +33,7 @@ pub(super) fn threshold_similarity(s: &Mat, threshold: f32) -> Mat {
 /// Zelnik-Manor & Perona (2004) local scaling: `S_scaled(i,j) = S(i,j) /
 /// √(σ_i σ_j)` where `σ_i = 1 − S(i, k-th most similar neighbor)`. Compresses
 /// dense regions and spreads sparse ones.
-pub(super) fn local_scale_similarity(s: &Mat, k: usize) -> Mat {
+pub(crate) fn local_scale_similarity(s: &Mat, k: usize) -> Mat {
     let n = s.nrows();
     let k = k.min(n - 1).max(1);
 
@@ -66,7 +66,7 @@ pub(super) fn local_scale_similarity(s: &Mat, k: usize) -> Mat {
 /// Add `eps` to the diagonal so isolated nodes can't collapse downstream
 /// Laplacian / MDS computations. Logs a warning if any node still has very
 /// low total similarity after regularization.
-pub(super) fn regularize_similarity(similarity: &Mat, eps: f32) -> Mat {
+pub(crate) fn regularize_similarity(similarity: &Mat, eps: f32) -> Mat {
     let n = similarity.nrows();
     let mut sim_reg = similarity.clone();
     for i in 0..n {

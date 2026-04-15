@@ -1,3 +1,4 @@
+pub(crate) mod anchor_prior;
 pub(crate) mod common;
 pub(crate) mod eval;
 pub(crate) mod eval_indexed;
