@@ -14,29 +14,7 @@ use zarrs::array::{data_type, Array as ZArray};
 use zarrs::config::MetadataRetrieveVersion;
 use zarrs::filesystem::FilesystemStore;
 use zarrs::storage::ReadableListableStorageTraits as ZReadStorageTraits;
-use zarrs::storage::ReadableWritableListableStorageTraits as ZStorageTraits;
 use zarrs_zip::ZipStorageAdapter;
-
-// ── V2 → V3 migration ──────────────────────────────────────────────────
-
-/// Upgrade a zarr v2 array to v3 format in-place (no-op if already v3).
-pub fn update_zarr_to_v3(store: Arc<dyn ZStorageTraits>, key_name: &str) -> anyhow::Result<()> {
-    use anyhow::Context;
-    use zarrs::config::MetadataEraseVersion;
-    use zarrs::metadata::ArrayMetadata;
-
-    let arr = ZArray::open_opt(store.clone(), key_name, &MetadataRetrieveVersion::Default)?;
-
-    if let ArrayMetadata::V2(_v2) = arr.metadata() {
-        let arr = arr.to_v3().with_context(|| "unable to convert to v3")?;
-        arr.store_metadata()
-            .with_context(|| "failed to store meta data")?;
-        arr.erase_metadata_opt(MetadataEraseVersion::V2)
-            .with_context(|| "failed to erase the old one")?;
-    };
-
-    Ok(())
-}
 
 // ── Store management ────────────────────────────────────────────────────
 
