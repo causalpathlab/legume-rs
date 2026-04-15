@@ -302,6 +302,35 @@ pub struct TopicArgs {
     )]
     pub(crate) refine_reg: f64,
 
+    #[arg(
+        long,
+        help = "Marker TSV (gene<TAB>celltype) — labels data-driven anchors",
+        long_help = "Optional marker file used to label the anchor pseudobulks\n\
+                     found by the data-driven Arora vertex-selection step.\n\
+                     When absent, anchors are still discovered from the data\n\
+                     and used for β initialization; they're just labeled\n\
+                     `novel_{i}` instead of a celltype name."
+    )]
+    pub(crate) markers: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Margin between top1 and top2 marker-fit z-scores to call an anchor"
+    )]
+    pub(crate) anchor_margin: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Cross-entropy penalty on β toward the anchor prior (0 = off)",
+        long_help = "When > 0, adds `-λ · Σ w_gk · log β_kg` to the training loss\n\
+                     so the learned dictionary is pulled toward the anchor PB\n\
+                     expression profiles. Used together with the anchor β init\n\
+                     for strong marker-aware supervision. Ignored by vMF decoder."
+    )]
+    pub(crate) anchor_penalty: f32,
+
     #[command(flatten)]
     pub(crate) cnv: CnvArgs,
 }
@@ -401,6 +430,27 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         warn!("--vcd-epochs is only supported with --level-schedule mixed; ignoring VCD");
     }
 
+    // Data-driven anchor β prior. Built unconditionally — the prior is
+    // useful for β init even without markers. The marker file, when given,
+    // is used only to label the anchors and emit the expansion table.
+    let markers = args
+        .markers
+        .as_deref()
+        .map(|p| crate::marker_support::load_marker_info(p, &gene_names))
+        .transpose()?;
+    let anchor_prior = crate::topic::anchor_prior::AnchorPrior::from_pseudobulk(
+        finest_collapsed,
+        n_topics,
+        markers.as_ref(),
+        args.anchor_margin,
+        finest_coarsening,
+    )?;
+    anchor_prior.write_side_outputs(&args.out, &gene_names, markers.as_ref())?;
+
+    // Per-level [K, D_l] anchor tensors on the training device. Built once
+    // here, held alive for the entire fit via the outer scope.
+    let anchor_tensors = anchor_prior.per_level_device_tensors(&level_coarsenings, &dev)?;
+
     // Build per-level decoders, train, save dictionary, and evaluate.
     let ctx = PipelineCtx {
         level_decoder_dims: &level_decoder_dims,
@@ -417,6 +467,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         dev: &dev,
         args,
         stop: &stop,
+        anchor_prior: Some(&anchor_prior),
+        anchor_prior_per_level: Some(&anchor_tensors),
     };
 
     let (scores, z_nk) = if args.decoder.len() == 1 {
@@ -618,6 +670,11 @@ struct PipelineCtx<'a> {
     dev: &'a candle_core::Device,
     args: &'a TopicArgs,
     stop: &'a std::sync::atomic::AtomicBool,
+    /// Data-driven β prior — present whenever `--markers` was given OR
+    /// `--anchor-penalty > 0`. Used for β init and (when λ > 0) training.
+    anchor_prior: Option<&'a crate::topic::anchor_prior::AnchorPrior>,
+    /// Per-level `[D_l, K]` anchor tensors pre-built on `dev`.
+    anchor_prior_per_level: Option<&'a [candle_core::Tensor]>,
 }
 
 fn run_topic_pipeline<Dec>(
@@ -637,11 +694,19 @@ where
         })
         .collect();
 
+    // Overwrite the freshly-created dictionary Vars with the anchor β prior
+    // at every decoder level. Only runs when the caller built one.
+    if let Some(ap) = ctx.anchor_prior {
+        ap.init_decoder_dictionary(ctx.parameters, ctx.level_coarsenings, ctx.dev)?;
+    }
+
     let train_config = TrainConfig {
         parameters: ctx.parameters,
         dev: ctx.dev,
         args: ctx.args,
         stop: ctx.stop,
+        anchor_prior_per_level: ctx.anchor_prior_per_level,
+        anchor_penalty: ctx.args.anchor_penalty,
     };
     let scores = match (&ctx.args.level_schedule, ctx.args.vcd_epochs > 0) {
         (LevelSchedule::Progressive, _) => train_progressive(
@@ -832,10 +897,15 @@ fn run_multi_decoder_pipeline(
         dev: ctx.dev,
         args: ctx.args,
         stop: ctx.stop,
+        anchor_prior_per_level: None,
+        anchor_penalty: 0.0,
     };
 
     if ctx.args.vcd_epochs > 0 {
         warn!("--vcd-epochs is not supported with multi-decoder; ignoring VCD");
+    }
+    if ctx.anchor_prior.is_some() {
+        warn!("anchor prior is not applied in multi-decoder mode; β init + penalty skipped");
     }
 
     let scores = train_mixed_multi_decoder(

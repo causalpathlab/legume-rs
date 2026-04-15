@@ -1,13 +1,13 @@
 use super::interactive_markers::{
-    augment_membership_matrix, auto_suggest_markers, find_candidate_markers, flexible_gene_match,
+    augment_membership_matrix, auto_suggest_markers, find_candidate_markers,
     print_augmentation_summary, read_suggestions_json, run_interactive_round,
     save_augmented_markers, write_candidates_json, MarkerDatabase,
 };
-use super::vmf::{vmf_assign, vmf_assign_averaged};
 use crate::embed_common::*;
-use matrix_util::common_io::*;
-
-use rustc_hash::FxHashSet as HashSet;
+use crate::geometry::vmf::{vmf_assign, vmf_assign_averaged};
+use crate::marker_support::{
+    build_annotation_matrix, flexible_gene_match, read_marker_gene_info, AnnotInfo,
+};
 
 #[derive(Args, Debug)]
 pub struct AnnotateTopicArgs {
@@ -104,11 +104,6 @@ struct TrainingData {
     membership: Mat,
     /// Gene names
     gene_names: Vec<Box<str>>,
-}
-
-pub(crate) struct AnnotInfo {
-    pub membership_ga: Mat,
-    pub annot_names: Vec<Box<str>>,
 }
 
 pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
@@ -586,84 +581,4 @@ fn display_annotation_histogram(annot: &Mat, annot_names: &[Box<str>]) {
         );
     }
     eprintln!();
-}
-
-fn read_marker_gene_info(file_path: &str) -> anyhow::Result<Vec<(Box<str>, Box<str>)>> {
-    let ReadLinesOut { lines, header: _ } = read_lines_of_words_delim(file_path, &['\t', ','], -1)?;
-
-    Ok(lines
-        .into_iter()
-        .filter_map(|words| {
-            if words.len() < 2 {
-                None
-            } else {
-                Some((words[0].clone(), words[1].clone()))
-            }
-        })
-        .collect())
-}
-
-pub(crate) fn build_annotation_matrix(
-    marker_gene_path: &str,
-    row_names: &[Box<str>],
-) -> anyhow::Result<AnnotInfo> {
-    let marker_pairs = read_marker_gene_info(marker_gene_path)?;
-
-    if marker_pairs.is_empty() {
-        return Err(anyhow::anyhow!("empty/invalid marker gene information"));
-    }
-
-    // Collect unique cell types
-    let mut annot_set: HashSet<Box<str>> = HashSet::default();
-    for (_, cell_type) in &marker_pairs {
-        let normalized = cell_type.replace(" ", "_");
-        annot_set.insert(normalized.into_boxed_str());
-    }
-    let mut annot_names: Vec<Box<str>> = annot_set.into_iter().collect();
-    annot_names.sort();
-
-    // Build membership matrix (a gene can map to multiple cell types)
-    let n_genes = row_names.len();
-    let n_annots = annot_names.len();
-    let mut membership = Mat::zeros(n_genes, n_annots);
-
-    let mut matched = 0;
-    let mut unmatched = Vec::new();
-
-    for (gene, cell_type) in &marker_pairs {
-        let normalized_type = cell_type.replace(" ", "_");
-        let annot_idx = annot_names
-            .iter()
-            .position(|n| n.as_ref() == normalized_type)
-            .unwrap();
-
-        // Find matching gene using flexible matching
-        if let Some(gene_idx) = row_names
-            .iter()
-            .position(|dict_gene| flexible_gene_match(gene, dict_gene))
-        {
-            membership[(gene_idx, annot_idx)] = 1.0;
-            matched += 1;
-        } else {
-            unmatched.push(gene.clone());
-        }
-    }
-
-    if !unmatched.is_empty() && unmatched.len() <= 10 {
-        info!("Unmatched marker genes: {:?}", unmatched);
-    } else if !unmatched.is_empty() {
-        info!("{} marker genes not found in dictionary", unmatched.len());
-    }
-
-    info!(
-        "Matched {}/{} marker genes to {} cell types",
-        matched,
-        marker_pairs.len(),
-        n_annots
-    );
-
-    Ok(AnnotInfo {
-        membership_ga: membership,
-        annot_names,
-    })
 }

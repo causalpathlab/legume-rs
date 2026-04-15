@@ -2,7 +2,7 @@ use crate::embed_common::*;
 use crate::fit_topic::TopicArgs;
 use crate::logging::new_progress_bar;
 
-use candle_core::Device;
+use candle_core::{Device, Tensor};
 use candle_nn::AdamW;
 use candle_nn::Optimizer;
 use candle_util::candle_data_loader::*;
@@ -12,6 +12,7 @@ use candle_util::candle_loss_functions::{gaussian_neg_log_prob, topic_likelihood
 use candle_util::candle_model_traits::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::anchor_prior::anchor_penalty_at_level;
 use super::common::{compute_level_epochs, sample_collapsed_data};
 
 /// Configuration for training
@@ -20,6 +21,25 @@ pub(crate) struct TrainConfig<'a> {
     pub dev: &'a Device,
     pub args: &'a TopicArgs,
     pub stop: &'a AtomicBool,
+    /// Per-level `[K, D_l]` anchor β prior tensors (pre-transposed and on
+    /// device). `None` means no anchor prior is attached — training runs
+    /// unchanged.
+    pub anchor_prior_per_level: Option<&'a [Tensor]>,
+    /// Cross-entropy penalty strength λ applied per minibatch.
+    pub anchor_penalty: f32,
+}
+
+impl<'a> TrainConfig<'a> {
+    #[inline]
+    fn add_anchor_penalty(&self, loss: Tensor, level: usize) -> anyhow::Result<Tensor> {
+        anchor_penalty_at_level(
+            loss,
+            self.parameters,
+            self.anchor_prior_per_level,
+            self.anchor_penalty,
+            level,
+        )
+    }
 }
 
 /// Mixed multi-level VAE training.
@@ -160,6 +180,7 @@ where
                         decoder.forward_with_llik(&log_z_nk, &y_nd, &topic_likelihood)?;
 
                     let loss = (&kl - &llik)?.mean_all()?;
+                    let loss = config.add_anchor_penalty(loss, level)?;
                     adam.backward_step(&loss)?;
 
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -356,6 +377,7 @@ where
                         let enc_loss = enc_nll_n.mean_all()?;
 
                         let loss = (dec_loss + enc_loss)?;
+                        let loss = config.add_anchor_penalty(loss, level)?;
                         adam.backward_step(&loss)?;
 
                         llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -370,6 +392,7 @@ where
                             decoder.forward_with_llik(&log_z_nk, &y_nd, &topic_likelihood)?;
 
                         let loss = (&kl - &llik)?.mean_all()?;
+                        let loss = config.add_anchor_penalty(loss, level)?;
                         adam.backward_step(&loss)?;
 
                         llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -510,6 +533,7 @@ where
                         decoder.forward_with_llik(&log_z_nk, &y_nd, &topic_likelihood)?;
 
                     let loss = (&kl - &llik)?.mean_all()?;
+                    let loss = config.add_anchor_penalty(loss, level)?;
                     adam.backward_step(&loss)?;
 
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
