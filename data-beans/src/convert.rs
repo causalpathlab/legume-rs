@@ -183,6 +183,16 @@ pub fn convert_zarr_to_backend(zarr_file: &str, output: &str) -> anyhow::Result<
         remove_file(&backend_file)?;
     }
 
+    if !std::path::Path::new(zarr_file).exists() {
+        let zip_variant = format!("{}.zip", zarr_file);
+        let hint: Box<str> = if std::path::Path::new(&zip_variant).exists() {
+            format!(" (did you mean {}?)", zip_variant).into()
+        } else {
+            Box::from("")
+        };
+        anyhow::bail!("Zarr file not found: {}{}", zarr_file, hint);
+    }
+
     let store = open_zarr_store(zarr_file)?;
     info!("Opened zarr store: {}", zarr_file);
 
