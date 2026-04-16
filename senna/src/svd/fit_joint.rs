@@ -162,6 +162,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
             num_levels: args.num_levels,
             sort_dim: args.sort_dim,
             num_opt_iter: args.iter_opt,
+            oversample: false,
         },
     )?;
 

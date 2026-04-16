@@ -206,6 +206,7 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
         params.embedding_dim,
         params.context_size,
         &[128],
+        &varmap,
         vs.pp("encoder"),
     )?;
 

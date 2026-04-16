@@ -1,7 +1,7 @@
 use crate::embed_common::*;
 use crate::topic::common::*;
 use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
-use crate::topic::train::{train_mixed, train_mixed_vcd, train_progressive, TrainConfig};
+use crate::topic::train::{train_mixed, train_progressive, TrainConfig};
 
 use candle_util::candle_decoder_topic::*;
 use candle_util::candle_decoder_vmf_topic::*;
@@ -174,6 +174,13 @@ pub struct TopicArgs {
     )]
     pub(crate) jitter_interval: usize,
 
+    #[arg(
+        long = "no-oversample-pb",
+        default_value_t = false,
+        help = "Disable pseudobulk oversampling (2× groups with jitter subsampling)"
+    )]
+    pub(crate) no_oversample_pb: bool,
+
     #[arg(long, default_value_t = 100, help = "Training minibatch size")]
     pub(crate) minibatch_size: usize,
 
@@ -257,31 +264,6 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "VCD warm-up epochs before switching to SGVB",
-        long_help = "Variational contrastive divergence refines encoder samples via\n\
-                     elliptical slice sampling for the first N epochs, then switches\n\
-                     to standard SGVB. Only supported with --level-schedule mixed."
-    )]
-    pub(crate) vcd_epochs: usize,
-
-    #[arg(
-        long,
-        default_value_t = 5,
-        alias = "ess-steps",
-        help = "ESS steps per minibatch during VCD epochs"
-    )]
-    pub(crate) vcd_ess_steps: usize,
-
-    #[arg(
-        long,
-        default_value_t = 50,
-        help = "Max shrink iterations per ESS step"
-    )]
-    pub(crate) ess_max_shrink: usize,
-
-    #[arg(
-        long,
-        default_value_t = 0,
         help = "Per-cell refinement steps at inference (0 = off)",
         long_help = "Gradient steps that optimize topic logits against the frozen\n\
                      decoder likelihood, anchored to the encoder output by L2."
@@ -322,7 +304,7 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0.0,
+        default_value_t = 1.0,
         help = "Cross-entropy penalty on β toward the anchor prior (0 = off)",
         long_help = "When > 0, adds `-λ · Σ w_gk · log β_kg` to the training loss\n\
                      so the learned dictionary is pulled toward the anchor PB\n\
@@ -351,6 +333,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         iter_opt: args.iter_opt,
         block_size: args.block_size,
         out: &args.out,
+        oversample: !args.no_oversample_pb,
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
@@ -403,15 +386,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
-    let mut encoder = LogSoftmaxEncoder::new(
-        LogSoftmaxEncoderArgs {
-            n_features: n_features_encoder,
-            n_topics,
-            layers: &args.encoder_layers,
-        },
-        param_builder.clone(),
-    )?;
-
     let level_decoder_dims: Vec<usize> = level_coarsenings
         .iter()
         .map(|fc| fc.as_ref().map(|c| c.num_coarse).unwrap_or(n_features_full))
@@ -425,10 +399,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let gene_names = data_vec.row_names()?;
 
     let stop = setup_stop_handler();
-
-    if args.vcd_epochs > 0 && matches!(args.level_schedule, LevelSchedule::Progressive) {
-        warn!("--vcd-epochs is only supported with --level-schedule mixed; ignoring VCD");
-    }
 
     // Data-driven anchor β prior. Built unconditionally — the prior is
     // useful for β init even without markers. The marker file, when given,
@@ -471,17 +441,25 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         anchor_prior_per_level: Some(&anchor_tensors),
     };
 
+    let mut encoder = LogSoftmaxEncoder::new(
+        LogSoftmaxEncoderArgs {
+            n_features: n_features_encoder,
+            n_topics,
+            layers: &args.encoder_layers,
+        },
+        &parameters,
+        param_builder.clone(),
+    )?;
+
     let (scores, z_nk) = if args.decoder.len() == 1 {
-        // Single decoder: monomorphic dispatch (zero overhead)
         match args.decoder[0] {
-            DecoderType::Nb => run_topic_pipeline::<NbTopicDecoder>(&ctx, &mut encoder)?,
+            DecoderType::Nb => run_topic_pipeline::<_, NbTopicDecoder>(&ctx, &mut encoder)?,
             DecoderType::Multinom => {
-                run_topic_pipeline::<MultinomTopicDecoder>(&ctx, &mut encoder)?
+                run_topic_pipeline::<_, MultinomTopicDecoder>(&ctx, &mut encoder)?
             }
-            DecoderType::Vmf => run_topic_pipeline::<VmfTopicDecoder>(&ctx, &mut encoder)?,
+            DecoderType::Vmf => run_topic_pipeline::<_, VmfTopicDecoder>(&ctx, &mut encoder)?,
         }
     } else {
-        // Multiple decoders: dynamic dispatch
         run_multi_decoder_pipeline(&ctx, &mut encoder)?
     };
 
@@ -679,11 +657,12 @@ struct PipelineCtx<'a> {
     anchor_prior_per_level: Option<&'a [candle_core::Tensor]>,
 }
 
-fn run_topic_pipeline<Dec>(
+fn run_topic_pipeline<Enc, Dec>(
     ctx: &PipelineCtx,
-    encoder: &mut LogSoftmaxEncoder,
+    encoder: &mut Enc,
 ) -> anyhow::Result<(TrainScores, Mat)>
 where
+    Enc: EncoderModuleT + Send + Sync,
     Dec: DecoderModuleT + DecoderExtras + NewDecoder + Send + Sync,
 {
     let decoders: Vec<Dec> = ctx
@@ -696,11 +675,10 @@ where
         })
         .collect();
 
-    // Overwrite the freshly-created dictionary Vars with the anchor β prior
-    // at every decoder level. Only runs when the caller built one.
-    if let Some(ap) = ctx.anchor_prior {
-        ap.init_decoder_dictionary(ctx.parameters, ctx.level_coarsenings, ctx.dev)?;
-    }
+    // β init from anchor prior is disabled — random (Kaiming) initialisation
+    // works well when the anchor penalty (default 1.0) pulls β toward the
+    // prior during training. Warm-starting logits with log(anchor) can lock
+    // the dictionary too early.
 
     let train_config = TrainConfig {
         parameters: ctx.parameters,
@@ -710,22 +688,15 @@ where
         anchor_prior_per_level: ctx.anchor_prior_per_level,
         anchor_penalty: ctx.args.anchor_penalty,
     };
-    let scores = match (&ctx.args.level_schedule, ctx.args.vcd_epochs > 0) {
-        (LevelSchedule::Progressive, _) => train_progressive(
+    let scores = match &ctx.args.level_schedule {
+        LevelSchedule::Progressive => train_progressive(
             ctx.collapsed_levels,
             encoder,
             &decoders,
             ctx.level_coarsenings,
             &train_config,
         )?,
-        (LevelSchedule::Mixed, false) => train_mixed(
-            ctx.collapsed_levels,
-            encoder,
-            &decoders,
-            ctx.level_coarsenings,
-            &train_config,
-        )?,
-        (LevelSchedule::Mixed, true) => train_mixed_vcd(
+        LevelSchedule::Mixed => train_mixed(
             ctx.collapsed_levels,
             encoder,
             &decoders,
@@ -789,7 +760,7 @@ where
     )?;
 
     let weights = compute_decoder_weights(&ctx.args.decoder, &ctx.args.decoder_weights);
-    let z_nk = save_metadata_and_evaluate::<Dec>(ctx, encoder, &weights)?;
+    let z_nk = save_metadata_and_evaluate::<Dec>(ctx, &weights)?;
     Ok((scores, z_nk))
 }
 
@@ -861,7 +832,6 @@ fn compute_decoder_weights(decoders: &[DecoderType], user_weights: &Option<Vec<f
 /// uses it for per-cell likelihood refinement during evaluation.
 fn save_metadata_and_evaluate<Dec>(
     ctx: &PipelineCtx,
-    encoder: &LogSoftmaxEncoder,
     decoder_weights: &[f64],
 ) -> anyhow::Result<Mat>
 where
@@ -894,11 +864,28 @@ where
         save_coarsening(fc, &ctx.args.out)?;
     }
 
+    // Move VarMap to CPU, then rebuild encoder from CPU Vars.
+    // The old encoder still holds Metal/CUDA Vars and must not be reused.
     info!("Moving parameters to CPU for multi-threaded inference");
     let cpu_dev = candle_core::Device::Cpu;
     move_varmap_to_cpu(ctx.parameters)?;
 
-    // Rebuild finest decoder on CPU for refinement (if requested)
+    let n_features_encoder = ctx
+        .finest_coarsening
+        .map(|c| c.num_coarse)
+        .unwrap_or(ctx.n_features_full);
+    let cpu_vb =
+        candle_nn::VarBuilder::from_varmap(ctx.parameters, candle_core::DType::F32, &cpu_dev);
+    let cpu_encoder = LogSoftmaxEncoder::new(
+        LogSoftmaxEncoderArgs {
+            n_features: n_features_encoder,
+            n_topics: ctx.n_topics,
+            layers: &ctx.args.encoder_layers,
+        },
+        ctx.parameters,
+        cpu_vb.clone(),
+    )?;
+
     let refine_config = if ctx.args.refine_steps > 0 {
         Some(TopicRefinementConfig {
             num_steps: ctx.args.refine_steps,
@@ -914,9 +901,9 @@ where
         .last()
         .unwrap_or(&ctx.n_features_full);
     let finest_dec_idx = ctx.level_decoder_dims.len().saturating_sub(1);
-    let cpu_vb =
-        candle_nn::VarBuilder::from_varmap(ctx.parameters, candle_core::DType::F32, &cpu_dev);
     let refine_decoder = if refine_config.is_some() {
+        let cpu_vb =
+            candle_nn::VarBuilder::from_varmap(ctx.parameters, candle_core::DType::F32, &cpu_dev);
         Some(Dec::new(
             finest_dec_dim,
             ctx.n_topics,
@@ -934,14 +921,19 @@ where
         decoder: refine_decoder.as_ref(),
         refine_config: refine_config.as_ref(),
     };
-    evaluate_latent_by_encoder(ctx.data_vec, encoder, ctx.finest_collapsed, &eval_config)
+    evaluate_latent_by_encoder(
+        ctx.data_vec,
+        &cpu_encoder,
+        ctx.finest_collapsed,
+        &eval_config,
+    )
 }
 
 /// Multi-decoder pipeline: builds multiple decoder types per level,
 /// trains with weighted multi-decoder loss, saves per-decoder dictionaries.
-fn run_multi_decoder_pipeline(
+fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
     ctx: &PipelineCtx,
-    encoder: &mut LogSoftmaxEncoder,
+    encoder: &mut Enc,
 ) -> anyhow::Result<(TrainScores, Mat)> {
     use crate::topic::train::train_mixed_multi_decoder;
     use candle_util::candle_dyn_decoder::*;
@@ -976,9 +968,6 @@ fn run_multi_decoder_pipeline(
         anchor_penalty: 0.0,
     };
 
-    if ctx.args.vcd_epochs > 0 {
-        warn!("--vcd-epochs is not supported with multi-decoder; ignoring VCD");
-    }
     if ctx.anchor_prior.is_some() {
         warn!("anchor prior is not applied in multi-decoder mode; β init + penalty skipped");
     }
@@ -1007,6 +996,6 @@ fn run_multi_decoder_pipeline(
         )?;
     }
 
-    let z_nk = save_metadata_and_evaluate::<MultinomTopicDecoder>(ctx, encoder, &decoder_weights)?;
+    let z_nk = save_metadata_and_evaluate::<MultinomTopicDecoder>(ctx, &decoder_weights)?;
     Ok((scores, z_nk))
 }

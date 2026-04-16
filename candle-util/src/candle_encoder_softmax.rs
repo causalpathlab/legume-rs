@@ -1,14 +1,15 @@
 use crate::candle_aux_layers::*;
+use crate::candle_batch_norm;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, BatchNorm, Linear, ModuleT, VarBuilder};
+use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 
 pub struct LogSoftmaxEncoder {
     n_features: usize,
     n_topics: usize,
     fc: StackLayers<Linear>,
-    bn_z: BatchNorm,
+    bn_z: candle_batch_norm::BatchNorm,
     z_mean: Linear,
     z_lnvar: Linear,
 }
@@ -67,18 +68,21 @@ impl LogSoftmaxEncoder {
         x0_nd: Option<&Tensor>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
-        let min_lv = -10.; // clamp log variance
-        let max_lv = 10.; //
+        let clamp_lo = -8.;
+        let clamp_hi = 8.;
 
         let xx_nd = self.preprocess_input(x_nd, x0_nd, train)?;
         let fc_nl = self.fc.forward_t(&xx_nd, train)?;
         let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
 
-        let z_mean_nk = self.z_mean.forward_t(&bn_nl, train)?;
+        let z_mean_nk = self
+            .z_mean
+            .forward_t(&bn_nl, train)?
+            .clamp(clamp_lo, clamp_hi)?;
         let z_lnvar_nk = self
             .z_lnvar
             .forward_t(&bn_nl, train)?
-            .clamp(min_lv, max_lv)?;
+            .clamp(clamp_lo, clamp_hi)?;
 
         Ok((z_mean_nk, z_lnvar_nk))
     }
@@ -104,8 +108,8 @@ impl LogSoftmaxEncoder {
     /// # Arguments
     /// * `args` - encoder arguments
     /// * `vb` - variable builder
-    pub fn new(args: LogSoftmaxEncoderArgs, vb: VarBuilder) -> Result<Self> {
-        let bn_config = candle_nn::BatchNormConfig {
+    pub fn new(args: LogSoftmaxEncoderArgs, varmap: &VarMap, vb: VarBuilder) -> Result<Self> {
+        let bn_config = candle_batch_norm::BatchNormConfig {
             eps: 1e-4,
             remove_mean: true,
             affine: true,
@@ -120,7 +124,7 @@ impl LogSoftmaxEncoder {
         let out_dim = *args.layers.last().unwrap();
         let fc = stack_relu_linear(in_dim, out_dim, &fc_dims, vb.pp("nn.enc.fc"))?;
 
-        let bn_z = candle_nn::batch_norm(out_dim, bn_config, vb.pp("nn.enc.bn_z"))?;
+        let bn_z = candle_batch_norm::batch_norm(out_dim, bn_config, varmap, vb.pp("nn.enc.bn_z"))?;
 
         // fc -> K
         let z_mean = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.mean"))?;
