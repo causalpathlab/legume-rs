@@ -136,6 +136,8 @@ pub(crate) fn sample_collapsed_data(
 pub(crate) struct PreparedData {
     pub data_vec: SparseIoVec,
     pub collapsed_levels: Vec<CollapsedOut>,
+    /// Per-gene mask for anchor selection: true = informative, false = outlier.
+    pub gene_filter_mask: Vec<bool>,
 }
 
 pub(crate) struct LoadCollapseArgs<'a> {
@@ -165,6 +167,21 @@ pub(crate) fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<Prepa
         batch_files: args.batch_files.clone(),
         preload: args.preload,
     })?;
+
+    // 1.5 Filter hyper-variable outlier genes (Ig/TCR) for anchor selection.
+    // Compute per-gene CV from sparse cell data, k-means into 2-3 clusters,
+    // keep the majority. The mask is stored and passed to anchor_prior only;
+    // the full gene set flows through SVD, collapsing, and training.
+    let gene_filter_mask = {
+        let row_stat = data_beans::qc::collect_row_stat_across_vec(&data_vec, args.block_size)?;
+        let (_, _, mu, sd) = row_stat.to_vecs();
+        let cv: Vec<f32> = mu
+            .iter()
+            .zip(sd.iter())
+            .map(|(&m, &s)| if m.abs() > 1e-8 { s / m.abs() } else { 0.0 })
+            .collect();
+        super::anchor_prior::kmeans_cv_filter(&cv)
+    };
 
     // 2. Take projection results by warm start or projecting it again
     let proj_kn = if let Some(proj_file) = args.warm_start_proj_file {
@@ -229,6 +246,7 @@ pub(crate) fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<Prepa
     Ok(PreparedData {
         data_vec,
         collapsed_levels,
+        gene_filter_mask,
     })
 }
 
@@ -244,16 +262,41 @@ pub(crate) fn create_device(
     }
 }
 
+/// Collect trainable Vars for Adam, excluding the BGM decoder's fixed
+/// `.bgm_profile` and `.pi_topic` (both frozen; π is set data-driven at init).
+pub(crate) fn trainable_vars(parameters: &candle_nn::VarMap) -> Vec<candle_core::Var> {
+    let data = parameters.data().lock().expect("VarMap lock");
+    data.iter()
+        .filter_map(|(name, var)| {
+            if name.ends_with(".bgm_profile") {
+                None
+            } else {
+                Some(var.clone())
+            }
+        })
+        .collect()
+}
+
 /// Move all parameters in a VarMap to CPU.
 ///
 /// This enables multi-threaded rayon inference in `process_blocks()`.
+///
+/// `Var::set` requires the source tensor to live on the same device as
+/// the existing Var (it copies into the Var's storage), so for non-CPU
+/// Vars we have to drop the old Var and insert a freshly-constructed
+/// CPU Var under the same name.
 pub(crate) fn move_varmap_to_cpu(parameters: &candle_nn::VarMap) -> anyhow::Result<()> {
-    let data = parameters.data().lock().expect("VarMap lock");
-    for (_name, var) in data.iter() {
-        if !var.device().is_cpu() {
-            let cpu_tensor = var.to_device(&Device::Cpu)?;
-            var.set(&cpu_tensor)?;
-        }
+    let mut data = parameters.data().lock().expect("VarMap lock");
+    let names_to_move: Vec<String> = data
+        .iter()
+        .filter(|(_, v)| !v.device().is_cpu())
+        .map(|(k, _)| k.clone())
+        .collect();
+    for name in names_to_move {
+        let old = data.remove(&name).expect("var present");
+        let cpu_tensor = old.as_tensor().to_device(&Device::Cpu)?;
+        let cpu_var = candle_core::Var::from_tensor(&cpu_tensor)?;
+        data.insert(name, cpu_var);
     }
     Ok(())
 }

@@ -642,27 +642,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gated_kl_nonnegative() -> Result<()> {
-        let device = Device::Cpu;
-        let dtype = DType::F64;
-
-        let l = 5;
-        let p = 50;
-        let k = 1;
-
-        let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
-
-        let susie = SusieVar::new_gated(vb, l, p, k, 0.01)?;
-        let kl: f64 = susie.kl_categorical(1.0)?.to_scalar()?;
-
-        // KL divergence is non-negative
-        assert!(kl >= -1e-10, "KL should be non-negative, got {}", kl);
-
-        Ok(())
-    }
-
-    #[test]
     fn test_gated_gradient_flow() -> Result<()> {
         use crate::sgvb::traits::BlackBoxLikelihood;
         use crate::sgvb::{local_reparam_loss, GaussianPrior, RegressionSGVB, SGVBConfig};

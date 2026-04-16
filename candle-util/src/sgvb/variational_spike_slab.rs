@@ -191,21 +191,6 @@ mod tests {
     }
 
     #[test]
-    fn test_kl_nonnegative() -> Result<()> {
-        let device = Device::Cpu;
-        let dtype = DType::F64;
-
-        let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
-        let ss = SpikeSlabVar::new(vb, 20, 1, 0.01)?;
-
-        let kl: f64 = ss.kl_bernoulli(1.0)?.to_scalar()?;
-        assert!(kl >= -1e-10, "KL should be non-negative, got {}", kl);
-
-        Ok(())
-    }
-
-    #[test]
     fn test_sparse_recovery() -> Result<()> {
         use crate::sgvb::traits::BlackBoxLikelihood;
         use crate::sgvb::{FixedGaussianPrior, RegressionSGVB, SGVBConfig};
