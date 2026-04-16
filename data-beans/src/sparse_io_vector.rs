@@ -1321,6 +1321,43 @@ impl SparseIoVec {
         Ok(self.column_names_with_data_tag.clone())
     }
 
+    /// Exclude rows (genes) from the working set. `keep[compact_row]`
+    /// is `true` for rows to keep, `false` for rows to exclude.
+    /// The compact row indices are renumbered after filtering.
+    /// This affects all downstream operations (projection, collapse,
+    /// training, inference).
+    pub fn mask_rows(&mut self, keep: &[bool]) -> anyhow::Result<()> {
+        let n_compact = self.cached_num_rows;
+        if keep.len() != n_compact {
+            return Err(anyhow::anyhow!(
+                "mask_rows: keep.len()={} != num_rows={}",
+                keep.len(),
+                n_compact
+            ));
+        }
+        // Build old_compact → new_compact mapping
+        let mut old_to_new: Vec<Option<usize>> = vec![None; n_compact];
+        let mut next = 0usize;
+        for (old, &k) in keep.iter().enumerate() {
+            if k {
+                old_to_new[old] = Some(next);
+                next += 1;
+            }
+        }
+        // Update global_to_compact_row
+        for entry in self.global_to_compact_row.iter_mut() {
+            *entry = entry.and_then(|old_compact| old_to_new[old_compact]);
+        }
+        self.cached_num_rows = next;
+        log::info!(
+            "mask_rows: {} → {} rows ({} excluded)",
+            n_compact,
+            next,
+            n_compact - next
+        );
+        Ok(())
+    }
+
     pub fn row_names(&self) -> anyhow::Result<Vec<Box<str>>> {
         let ntot = self.num_rows();
         let mut ret = vec![Box::from(""); ntot];

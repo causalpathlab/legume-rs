@@ -1,14 +1,11 @@
 use crate::candle_aux_linear::*;
+use crate::candle_decoder_topic::{bgm_log_reconstruction, BgmState};
 use crate::candle_indexed_model_traits::*;
 use candle_core::{Result, Tensor};
-use candle_nn::VarBuilder;
+use candle_nn::{ops, VarBuilder};
 
-/// Indexed topic model decoder.
-///
-/// Computes likelihood only at selected feature positions by slicing the
-/// dictionary [K, D] to [K, S] via `index_select`, reducing the intermediate
-/// tensor from N×K×D to N×K×S. The softmax normalization is computed over
-/// all D features, so gradients flow to all logits through the partition function.
+/// Indexed topic decoder: computes likelihood only at selected feature positions
+/// via `index_select`, while the softmax normalizer still covers all D features.
 pub struct IndexedTopicDecoder {
     n_features: usize,
     n_topics: usize,
@@ -68,10 +65,96 @@ impl IndexedDecoderT for IndexedTopicDecoder {
     }
 }
 
+/// Indexed BGM topic decoder: `p_ng = π_n · hk_g + (1-π_n) · Σ_k z_nk β_kg`
+/// evaluated on the union feature indices.
+pub struct BgmIndexedTopicDecoder {
+    n_features: usize,
+    n_topics: usize,
+    dictionary: SoftmaxLinear,
+    bgm: BgmState,
+}
+
+impl BgmIndexedTopicDecoder {
+    pub fn new(n_features: usize, n_topics: usize, vs: VarBuilder) -> Result<Self> {
+        let dictionary = log_softmax_linear_nobias(n_topics, n_features, vs.pp("dictionary"))?;
+        let bgm = BgmState::new(n_features, &vs)?;
+        Ok(Self {
+            n_features,
+            n_topics,
+            dictionary,
+            bgm,
+        })
+    }
+
+    pub fn pi(&self) -> Result<f32> {
+        self.bgm.pi()
+    }
+
+    /// `log hk` re-normalized over the union indices `S`, with the same
+    /// importance-correction (`- log_q_s`) applied to `log β`.
+    fn log_bgm_conditional_s(&self, union_indices: &Tensor, log_q_s: &Tensor) -> Result<Tensor> {
+        let log_bgm_s = self
+            .bgm
+            .log_bgm_1d
+            .index_select(union_indices, 1)?
+            .broadcast_sub(log_q_s)?;
+        ops::log_softmax(&log_bgm_s, log_bgm_s.rank() - 1)
+    }
+}
+
+impl IndexedDecoderT for BgmIndexedTopicDecoder {
+    fn forward_indexed(
+        &self,
+        log_z_nk: &Tensor,
+        union_indices: &Tensor,
+        indexed_x: &Tensor,
+        log_q_s: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let log_beta_ks = self
+            .dictionary
+            .biased_weight_ks_conditional(union_indices, log_q_s)?;
+        let log_beta_tilde_ns = {
+            let z_nk = log_z_nk.exp()?;
+            let beta_ks = log_beta_ks.exp()?;
+            (z_nk.matmul(&beta_ks)? + 1e-8)?.log()?
+        };
+        let log_bgm_1s = self.log_bgm_conditional_s(union_indices, log_q_s)?;
+        let log_recon_ns =
+            bgm_log_reconstruction(&log_beta_tilde_ns, &log_bgm_1s, &self.bgm.logit_pi)?;
+
+        let llik = indexed_x
+            .clamp(0.0, f64::INFINITY)?
+            .mul(&log_recon_ns)?
+            .sum(indexed_x.rank() - 1)?;
+        Ok((log_recon_ns, llik))
+    }
+
+    fn get_conditional_log_beta_ks(
+        &self,
+        union_indices: &Tensor,
+        log_q_s: &Tensor,
+    ) -> Result<Tensor> {
+        self.dictionary
+            .biased_weight_ks_conditional(union_indices, log_q_s)
+    }
+
+    fn get_dictionary(&self) -> Result<Tensor> {
+        self.dictionary.weight_dk()
+    }
+
+    fn dim_obs(&self) -> usize {
+        self.n_features
+    }
+
+    fn dim_latent(&self) -> usize {
+        self.n_topics
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::candle_decoder_topic::TopicDecoder;
+    use crate::candle_decoder_topic::MultinomTopicDecoder;
     use crate::candle_model_traits::DecoderModuleT;
     use candle_core::Device;
     use candle_nn::VarMap;
@@ -86,7 +169,7 @@ mod tests {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
 
-        let dense_decoder = TopicDecoder::new(n_features, n_topics, vb.pp("dec")).unwrap();
+        let dense_decoder = MultinomTopicDecoder::new(n_features, n_topics, vb.pp("dec")).unwrap();
         let indexed_decoder = IndexedTopicDecoder::new(n_features, n_topics, vb.pp("dec")).unwrap();
 
         let logits = Tensor::randn(0.0f32, 1.0, (n_samples, n_topics), &device).unwrap();
