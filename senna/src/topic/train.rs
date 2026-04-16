@@ -11,8 +11,7 @@ use candle_util::candle_model_traits::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::anchor_prior::anchor_penalty_at_level;
-use super::common::{compute_level_epochs, resample_levels, sample_collapsed_data};
-use data_beans_alg::collapse_data::resample_and_optimize;
+use super::common::{compute_level_epochs, sample_collapsed_data, sample_overresolved};
 
 /// Configuration for training
 pub(crate) struct TrainConfig<'a> {
@@ -104,16 +103,15 @@ where
     let mut rng = rand::rng();
 
     for epoch in (0..total_epochs).step_by(config.args.jitter_interval) {
-        let resampled = resample_levels(collapsed_levels, &mut rng);
-        let effective_levels = resampled.as_deref().unwrap_or(collapsed_levels);
-
-        let level_data: Vec<(Mat, Option<Mat>, Mat)> = effective_levels
+        let level_data: Vec<(Mat, Option<Mat>, Mat)> = collapsed_levels
             .iter()
             .zip(level_coarsenings.iter())
             .zip(level_budgets.iter())
             .map(|((collapsed, dec_fc), &budget)| {
                 let (full_mixed, full_batch, target_full) =
-                    sample_collapsed_data(collapsed).unwrap();
+                    sample_overresolved(collapsed, &mut rng)
+                        .unwrap_or_else(|| sample_collapsed_data(collapsed))
+                        .unwrap();
 
                 let (sub_mixed, sub_batch, sub_target) =
                     subsample_rows((full_mixed, full_batch, target_full), budget, &mut rng);
@@ -279,12 +277,8 @@ where
         let dec_coarsening = level_coarsenings[level].as_ref();
 
         for epoch in (0..level_ep).step_by(config.args.jitter_interval) {
-            let resampled_one = collapsed
-                .overresolved_stat
-                .as_ref()
-                .map(|s| resample_and_optimize(s, &mut rng, 20).expect("resample"));
-            let effective = resampled_one.as_ref().unwrap_or(collapsed);
-            let (full_mixed, full_batch, target_full) = sample_collapsed_data(effective)?;
+            let (full_mixed, full_batch, target_full) = sample_overresolved(collapsed, &mut rng)
+                .unwrap_or_else(|| sample_collapsed_data(collapsed))?;
 
             let enc_nd = if let Some(fc) = enc_coarsening {
                 fc.aggregate_columns_nd(&full_mixed)
@@ -448,16 +442,15 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
     let mut rng = rand::rng();
 
     for epoch in (0..total_epochs).step_by(config.args.jitter_interval) {
-        let resampled = resample_levels(collapsed_levels, &mut rng);
-        let effective_levels = resampled.as_deref().unwrap_or(collapsed_levels);
-
-        let level_data: Vec<(Mat, Option<Mat>, Mat)> = effective_levels
+        let level_data: Vec<(Mat, Option<Mat>, Mat)> = collapsed_levels
             .iter()
             .zip(level_coarsenings.iter())
             .zip(level_budgets.iter())
             .map(|((collapsed, dec_fc), &budget)| {
                 let (full_mixed, full_batch, target_full) =
-                    sample_collapsed_data(collapsed).unwrap();
+                    sample_overresolved(collapsed, &mut rng)
+                        .unwrap_or_else(|| sample_collapsed_data(collapsed))
+                        .unwrap();
 
                 let (sub_mixed, sub_batch, sub_target) =
                     subsample_rows((full_mixed, full_batch, target_full), budget, &mut rng);
