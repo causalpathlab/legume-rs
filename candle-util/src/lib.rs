@@ -1,6 +1,7 @@
 pub mod candle_aux_layers;
 pub mod candle_aux_linear;
 pub mod candle_aux_module;
+pub mod candle_batch_norm;
 pub mod candle_bipartite_decoder;
 pub mod candle_data_loader;
 pub mod candle_data_loader_util;

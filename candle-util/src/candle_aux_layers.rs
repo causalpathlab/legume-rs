@@ -24,11 +24,11 @@ where
 {
     fn iaf_step(&self, h: &Tensor, depth: usize, train: bool) -> Result<(Tensor, Tensor)> {
         if depth == 0 {
-            let min_lv = -10.; // clamp log variance
-            let max_lv = 10.; //
+            let clamp_lo = -8.;
+            let clamp_hi = 8.;
 
-            let z_mean = self.z_mean.forward(h)?;
-            let z_lnvar = self.z_lnvar.forward(h)?.clamp(min_lv, max_lv)?;
+            let z_mean = self.z_mean.forward(h)?.clamp(clamp_lo, clamp_hi)?;
+            let z_lnvar = self.z_lnvar.forward(h)?.clamp(clamp_lo, clamp_hi)?;
             let kl = gaussian_kl_loss(&z_mean, &z_lnvar)?;
             let z = if train {
                 let eps = Tensor::randn_like(&z_mean, 0., 1.)?;

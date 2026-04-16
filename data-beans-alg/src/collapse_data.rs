@@ -29,6 +29,11 @@ pub struct MultilevelParams {
     pub num_levels: usize,
     pub sort_dim: usize,
     pub num_opt_iter: usize,
+    /// When true, add 1 bit to each level's sort dimension to create
+    /// ~2× more pseudobulk groups, and store the over-resolved
+    /// `CollapsedStat` in each `CollapsedOut` for jitter-time
+    /// resampling.
+    pub oversample: bool,
 }
 
 impl MultilevelParams {
@@ -38,6 +43,7 @@ impl MultilevelParams {
             num_levels: DEFAULT_NUM_LEVELS,
             sort_dim: proj_dim.min(12),
             num_opt_iter: DEFAULT_OPT_ITER,
+            oversample: false,
         }
     }
 }
@@ -487,6 +493,7 @@ fn optimize(
             mu_residual: Some(mu_resid_param),
             gamma: Some(gamma_param),
             delta: Some(delta_param),
+            overresolved_stat: None,
         })
     } else {
         let mut denom_ds = DMatrix::<f32>::zeros(num_genes, num_samples);
@@ -501,6 +508,7 @@ fn optimize(
             mu_residual: None,
             gamma: None,
             delta: None,
+            overresolved_stat: None,
         })
     }
 }
@@ -513,9 +521,14 @@ pub struct CollapsedOut {
     pub mu_residual: Option<GammaMatrix>,
     pub gamma: Option<GammaMatrix>,
     pub delta: Option<GammaMatrix>,
+    /// Over-resolved sufficient statistics for pseudobulk augmentation.
+    /// When present, the training loop can randomly subsample groups at
+    /// each jitter boundary to improve generalisability.
+    pub overresolved_stat: Option<Box<CollapsedStat>>,
 }
 
 /// a struct to hold the sufficient statistics for the model
+#[derive(Debug, Clone)]
 pub struct CollapsedStat {
     pub observed_sum_ds: nalgebra::DMatrix<f32>, // observed sum within each sample
     pub imputed_sum_ds: nalgebra::DMatrix<f32>,  // counterfactual sum within each sample
@@ -557,6 +570,49 @@ impl CollapsedStat {
         self.size_s.fill(0_f32);
         self.n_bs.fill(0_f32);
     }
+
+    /// Select a subset of sample columns (groups) by index.
+    pub fn select_columns(&self, indices: &[usize]) -> Self {
+        let n_new = indices.len();
+        let ng = self.num_genes();
+        let nb = self.num_batches();
+        let mut out = Self::new(ng, n_new, nb);
+        for (new_col, &old_col) in indices.iter().enumerate() {
+            out.observed_sum_ds
+                .column_mut(new_col)
+                .copy_from(&self.observed_sum_ds.column(old_col));
+            out.imputed_sum_ds
+                .column_mut(new_col)
+                .copy_from(&self.imputed_sum_ds.column(old_col));
+            out.residual_sum_ds
+                .column_mut(new_col)
+                .copy_from(&self.residual_sum_ds.column(old_col));
+            out.size_s[new_col] = self.size_s[old_col];
+            for b in 0..nb {
+                out.n_bs[(b, new_col)] = self.n_bs[(b, old_col)];
+            }
+        }
+        out.observed_sum_db.copy_from(&self.observed_sum_db);
+        out
+    }
+}
+
+/// Resample from over-resolved sufficient statistics: randomly select
+/// ~half the groups, then optimise to produce a fresh `CollapsedOut`.
+pub fn resample_and_optimize(
+    stat: &CollapsedStat,
+    rng: &mut impl rand::Rng,
+    opt_iter: usize,
+) -> anyhow::Result<CollapsedOut> {
+    use rand::seq::SliceRandom;
+    let n = stat.num_samples();
+    let target = n / 2;
+    let mut indices: Vec<usize> = (0..n).collect();
+    indices.shuffle(rng);
+    indices.truncate(target);
+    indices.sort_unstable();
+    let sub_stat = stat.select_columns(&indices);
+    optimize(&sub_stat, (1.0, 1.0), opt_iter)
 }
 
 /////////////////////////////////////////////////////////////
@@ -1024,6 +1080,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
         let sort_dim = params.sort_dim;
         let knn = params.knn_super_cells;
         let opt_iter = params.num_opt_iter;
+        let oversample = params.oversample;
 
         // Register batch membership (lightweight, no HNSW per batch)
         self.register_batch_membership(batch_membership);
@@ -1032,13 +1089,20 @@ impl MultilevelCollapsingOps for SparseIoVec {
         let num_batches = self.num_batches();
 
         // Level dims: [finest, ..., coarsest]
-        let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
+        // When oversampling, add 1 bit to each level → ~2× groups
+        let base_dims = compute_level_sort_dims(sort_dim, params.num_levels);
+        let level_dims: Vec<usize> = if oversample {
+            base_dims.iter().map(|&d| d + 1).collect()
+        } else {
+            base_dims
+        };
 
         info!(
-            "Multi-level collapsing (fine→coarse): {} levels, sort_dims={:?}, {} batches",
+            "Multi-level collapsing (fine→coarse): {} levels, sort_dims={:?}, {} batches{}",
             level_dims.len(),
             level_dims,
-            num_batches
+            num_batches,
+            if oversample { " [oversample 2×]" } else { "" },
         );
 
         // Compute binary codes at finest resolution once
@@ -1087,7 +1151,12 @@ impl MultilevelCollapsingOps for SparseIoVec {
 
         // Optimize finest level
         info!("Optimizing parameters ...");
-        let mut results = vec![optimize(&fine_stat, (1.0, 1.0), opt_iter)?];
+        let mut result = optimize(&fine_stat, (1.0, 1.0), opt_iter)?;
+        if oversample {
+            result.overresolved_stat = Some(Box::new(fine_stat.clone()));
+        }
+        #[allow(unused_mut)]
+        let mut results = vec![result];
 
         // Agglomeratively merge for coarser levels
         let mut prev_stat = fine_stat;
@@ -1111,7 +1180,10 @@ impl MultilevelCollapsingOps for SparseIoVec {
             let coarse_stat = merge_stat(&prev_stat, &fine_to_coarse, num_coarse);
 
             info!("Optimizing parameters ...");
-            results.push(optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?);
+            let mut coarse_result = optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?;
+            if oversample {
+                coarse_result.overresolved_stat = Some(Box::new(coarse_stat.clone()));
+            }
 
             let mut coarse_group_to_cols = vec![vec![]; num_coarse];
             for (fine_g, &coarse_g) in fine_to_coarse.iter().enumerate() {

@@ -1,8 +1,9 @@
 use crate::candle_aux_layers::*;
+use crate::candle_batch_norm;
 use crate::candle_indexed_model_traits::*;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use candle_core::{Result, Tensor};
-use candle_nn::{ops, BatchNorm, Linear, ModuleT, VarBuilder};
+use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 
 /// Indexed embedding encoder.
 ///
@@ -16,7 +17,7 @@ pub struct IndexedEmbeddingEncoder {
     embedding_dim: usize,
     feature_embeddings: Tensor, // [D, H] learnable
     fc: StackLayers<Linear>,
-    bn_z: BatchNorm,
+    bn_z: candle_batch_norm::BatchNorm,
     z_mean: Linear,
     z_lnvar: Linear,
 }
@@ -29,8 +30,8 @@ pub struct IndexedEmbeddingEncoderArgs<'a> {
 }
 
 impl IndexedEmbeddingEncoder {
-    pub fn new(args: IndexedEmbeddingEncoderArgs, vb: VarBuilder) -> Result<Self> {
-        let bn_config = candle_nn::BatchNormConfig {
+    pub fn new(args: IndexedEmbeddingEncoderArgs, varmap: &VarMap, vb: VarBuilder) -> Result<Self> {
+        let bn_config = candle_batch_norm::BatchNormConfig {
             eps: 1e-4,
             remove_mean: true,
             affine: true,
@@ -53,7 +54,7 @@ impl IndexedEmbeddingEncoder {
         let out_dim = *args.layers.last().unwrap();
         let fc = stack_relu_linear(in_dim, out_dim, &fc_dims, vb.pp("nn.enc.fc"))?;
 
-        let bn_z = candle_nn::batch_norm(out_dim, bn_config, vb.pp("nn.enc.bn_z"))?;
+        let bn_z = candle_batch_norm::batch_norm(out_dim, bn_config, varmap, vb.pp("nn.enc.bn_z"))?;
 
         let z_mean = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.mean"))?;
         let z_lnvar = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.lnvar"))?;
@@ -144,18 +145,21 @@ impl IndexedEmbeddingEncoder {
         indexed_x_null: Option<&Tensor>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
-        let min_lv = -10.;
-        let max_lv = 10.;
+        let clamp_lo = -8.;
+        let clamp_hi = 8.;
 
         let h_nh = self.preprocess_indexed(union_indices, indexed_x, indexed_x_null)?;
         let fc_nl = self.fc.forward_t(&h_nh, train)?;
         let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
 
-        let z_mean_nk = self.z_mean.forward_t(&bn_nl, train)?;
+        let z_mean_nk = self
+            .z_mean
+            .forward_t(&bn_nl, train)?
+            .clamp(clamp_lo, clamp_hi)?;
         let z_lnvar_nk = self
             .z_lnvar
             .forward_t(&bn_nl, train)?
-            .clamp(min_lv, max_lv)?;
+            .clamp(clamp_lo, clamp_hi)?;
 
         Ok((z_mean_nk, z_lnvar_nk))
     }

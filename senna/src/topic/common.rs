@@ -132,6 +132,32 @@ pub(crate) fn sample_collapsed_data(
     Ok((mixed_nd, batch_nd, target_nd))
 }
 
+/// Resample collapsed levels from over-resolved sufficient statistics.
+/// Returns `None` if no overresolved stats are present (use original levels).
+pub(crate) fn resample_levels(
+    collapsed_levels: &[CollapsedOut],
+    rng: &mut impl rand::Rng,
+) -> Option<Vec<CollapsedOut>> {
+    use data_beans_alg::collapse_data::resample_and_optimize;
+    if collapsed_levels
+        .first()
+        .and_then(|c| c.overresolved_stat.as_ref())
+        .is_some()
+    {
+        Some(
+            collapsed_levels
+                .iter()
+                .map(|c| {
+                    resample_and_optimize(c.overresolved_stat.as_ref().unwrap(), rng, 20)
+                        .expect("resample collapsed")
+                })
+                .collect(),
+        )
+    } else {
+        None
+    }
+}
+
 /// Result of loading and collapsing input data for topic model training.
 pub(crate) struct PreparedData {
     pub data_vec: SparseIoVec,
@@ -150,6 +176,7 @@ pub(crate) struct LoadCollapseArgs<'a> {
     pub iter_opt: usize,
     pub block_size: usize,
     pub out: &'a str,
+    pub oversample: bool,
 }
 
 /// Load sparse data, project, multi-level collapse, and write delta output.
@@ -209,6 +236,7 @@ pub(crate) fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<Prepa
             num_levels: args.num_levels,
             sort_dim: args.sort_dim,
             num_opt_iter: args.iter_opt,
+            oversample: args.oversample,
         },
     )?;
     collapsed_levels.reverse();
@@ -244,27 +272,38 @@ pub(crate) fn create_device(
     }
 }
 
-/// Move all parameters in a VarMap to CPU.
+/// Replace every non-CPU Var in the VarMap with a CPU copy.
 ///
-/// This enables multi-threaded rayon inference in `process_blocks()`.
+/// After this call, a fresh encoder/decoder built from the VarMap
+/// will operate on CPU. The old model structs still hold Metal/CUDA
+/// Vars and must NOT be reused — rebuild them from the updated VarMap.
 pub(crate) fn move_varmap_to_cpu(parameters: &candle_nn::VarMap) -> anyhow::Result<()> {
-    let data = parameters.data().lock().expect("VarMap lock");
-    for (_name, var) in data.iter() {
+    use candle_core::Var;
+    let mut data = parameters.data().lock().expect("VarMap lock");
+    for (_name, var) in data.iter_mut() {
         if !var.device().is_cpu() {
             let cpu_tensor = var.to_device(&Device::Cpu)?;
-            var.set(&cpu_tensor)?;
+            *var = Var::from_tensor(&cpu_tensor)?;
         }
     }
     Ok(())
 }
 
 /// Set up a graceful stop flag for SIGINT/SIGTERM.
+/// First Ctrl+C sets the flag for graceful exit after the current
+/// minibatch. Second Ctrl+C forces an immediate abort.
 pub(crate) fn setup_stop_handler() -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = Arc::clone(&stop);
         ctrlc::set_handler(move || {
-            info!("Interrupt received — stopping training early and saving results...");
+            if stop.load(Ordering::SeqCst) {
+                eprintln!("\nSecond interrupt — aborting immediately");
+                std::process::exit(1);
+            }
+            // Use eprintln, not info! — log macros hold internal locks
+            // and will deadlock if the main thread is mid-log.
+            eprintln!("\nInterrupt received — stopping after current minibatch (Ctrl+C again to force)...");
             stop.store(true, Ordering::SeqCst);
         })
         .expect("failed to set signal handler");

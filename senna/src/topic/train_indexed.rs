@@ -1,7 +1,10 @@
-use super::common::{apply_column_delta, compute_level_epochs, sample_collapsed_data};
+use super::common::{
+    apply_column_delta, compute_level_epochs, resample_levels, sample_collapsed_data,
+};
 use super::eval_indexed::{dense_to_indexed, refine_indexed_topic_proportions};
 use crate::embed_common::*;
 use crate::logging::new_progress_bar;
+use data_beans_alg::collapse_data::resample_and_optimize;
 
 use candle_core::{Device, Tensor};
 use candle_nn::{ops, AdamW, Optimizer};
@@ -138,7 +141,10 @@ where
     let mut rng = rand::rng();
 
     for epoch in (0..total_epochs).step_by(config.jitter_interval) {
-        let level_data: Vec<(Mat, Option<Mat>, Mat)> = collapsed_levels
+        let resampled = resample_levels(collapsed_levels, &mut rng);
+        let effective_levels = resampled.as_deref().unwrap_or(collapsed_levels);
+
+        let level_data: Vec<(Mat, Option<Mat>, Mat)> = effective_levels
             .iter()
             .zip(level_budgets.iter())
             .map(|(collapsed, &budget)| {
@@ -254,6 +260,10 @@ where
                         kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
                     }
                     count_tot += mb.output_indexed_x.sum_all()?.to_scalar::<f32>()?;
+
+                    if config.stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                 }
             }
 
@@ -297,6 +307,10 @@ where
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
                     kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
                     count_tot += mb.output_indexed_x.sum_all()?.to_scalar::<f32>()?;
+
+                    if config.stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                 }
             }
 
@@ -371,6 +385,7 @@ where
 
     let mut llik_trace = Vec::with_capacity(total_actual_epochs);
     let mut kl_trace = Vec::with_capacity(total_actual_epochs);
+    let mut rng = rand::rng();
 
     for (level, (collapsed, &level_ep)) in
         collapsed_levels.iter().zip(level_epochs.iter()).enumerate()
@@ -378,7 +393,12 @@ where
         let decoder = &decoders[level];
 
         for epoch in (0..level_ep).step_by(config.jitter_interval) {
-            let (mixed_nd, batch_nd, target_nd) = sample_collapsed_data(collapsed)?;
+            let resampled_one = collapsed
+                .overresolved_stat
+                .as_ref()
+                .map(|s| resample_and_optimize(s, &mut rng, 20).expect("resample"));
+            let effective = resampled_one.as_ref().unwrap_or(collapsed);
+            let (mixed_nd, batch_nd, target_nd) = sample_collapsed_data(effective)?;
 
             let mut data_loader = IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
                 input: &mixed_nd,
@@ -422,6 +442,10 @@ where
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
                     kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
                     count_tot += mb.output_indexed_x.sum_all()?.to_scalar::<f32>()?;
+
+                    if config.stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                 }
 
                 // Bulk training step — use finest decoder
@@ -464,6 +488,10 @@ where
                             llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
                             kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
                             count_tot += mb.output_indexed_x.sum_all()?.to_scalar::<f32>()?;
+
+                            if config.stop.load(Ordering::Relaxed) {
+                                break;
+                            }
                         }
                     }
                 }

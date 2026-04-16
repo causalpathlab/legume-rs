@@ -149,6 +149,13 @@ pub struct IndexedTopicArgs {
     )]
     jitter_interval: usize,
 
+    #[arg(
+        long = "no-oversample-pb",
+        default_value_t = false,
+        help = "Disable pseudobulk oversampling (2× groups with jitter subsampling)"
+    )]
+    no_oversample_pb: bool,
+
     #[arg(long, default_value_t = 100, help = "Training minibatch size")]
     minibatch_size: usize,
 
@@ -296,7 +303,7 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0.0,
+        default_value_t = 1.0,
         help = "Cross-entropy penalty on β toward the anchor prior (0 = off)"
     )]
     anchor_penalty: f32,
@@ -321,6 +328,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         iter_opt: args.iter_opt,
         block_size: args.block_size,
         out: &args.out,
+        oversample: !args.no_oversample_pb,
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
@@ -349,6 +357,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             embedding_dim: args.embedding_dim,
             layers: &args.encoder_layers,
         },
+        &parameters,
         param_builder.pp("enc"),
     )?;
 
@@ -397,7 +406,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let level_coarsenings_none: Vec<Option<FeatureCoarsening>> =
         (0..num_levels).map(|_| None).collect();
     let anchor_tensors = anchor_prior.per_level_device_tensors(&level_coarsenings_none, &dev)?;
-    anchor_prior.init_decoder_dictionary(&parameters, &level_coarsenings_none, &dev)?;
+    // β init from anchor prior disabled — random init + anchor penalty
+    // during training avoids locking the dictionary too early.
 
     // Read bulk data aligned to SC genes
     let bulk = args
