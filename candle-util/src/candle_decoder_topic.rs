@@ -41,6 +41,9 @@ pub struct MultinomTopicDecoder {
     n_features: usize,
     n_topics: usize,
     dictionary: SoftmaxLinear,
+    /// Optional per-feature weights `[1, D]` applied to the per-feature
+    /// log-likelihood before summing to per-sample llik.
+    feature_weights: Option<Tensor>,
 }
 
 impl MultinomTopicDecoder {
@@ -53,6 +56,7 @@ impl MultinomTopicDecoder {
             n_features,
             n_topics,
             dictionary,
+            feature_weights: None,
         })
     }
 
@@ -89,11 +93,14 @@ impl DecoderModuleT for MultinomTopicDecoder {
         let log_recon_nd = self.dictionary.forward_log(z_nk)?;
         let recon_nd = log_recon_nd.exp()?;
 
-        // Direct log-space likelihood: llik = Σ_d x_d * log(recon_d)
-        let llik = x_nd
-            .clamp(0.0, f64::INFINITY)?
-            .mul(&log_recon_nd)?
-            .sum(x_nd.rank() - 1)?;
+        // Per-gene log-likelihood: x_d * log(recon_d)
+        let per_gene = x_nd.clamp(0.0, f64::INFINITY)?.mul(&log_recon_nd)?;
+
+        // Apply per-feature weights [1, D] before summing to per-sample llik
+        let llik = match &self.feature_weights {
+            Some(w) => per_gene.broadcast_mul(w)?.sum(x_nd.rank() - 1)?,
+            None => per_gene.sum(x_nd.rank() - 1)?,
+        };
 
         Ok((recon_nd, llik))
     }
@@ -104,6 +111,10 @@ impl DecoderModuleT for MultinomTopicDecoder {
 
     fn dim_latent(&self) -> usize {
         self.n_topics
+    }
+
+    fn set_feature_weights(&mut self, weights: Option<Tensor>) {
+        self.feature_weights = weights;
     }
 }
 

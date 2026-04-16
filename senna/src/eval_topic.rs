@@ -213,6 +213,7 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
         feature_coarsening: coarsening.as_ref(),
         decoder: decoder.as_ref(),
         refine_config: refine_config.as_ref(),
+        feature_weights: None, // eval-topic doesn't have weights; encoder was trained with them
     };
 
     info!("Evaluating latent states on CPU");
