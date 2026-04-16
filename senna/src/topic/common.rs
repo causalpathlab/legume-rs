@@ -136,13 +136,6 @@ pub(crate) fn sample_collapsed_data(
 pub(crate) struct PreparedData {
     pub data_vec: SparseIoVec,
     pub collapsed_levels: Vec<CollapsedOut>,
-    /// Binary CV filter: true = informative. Used for encoder input and
-    /// projection basis (hard mask on encoder signal).
-    pub gene_filter_mask: Vec<bool>,
-    /// Continuous inverse-mean weights `w_g = 1/(1 + mean_g)`.
-    /// Used for decoder loss weighting, Leiden β init gene selection,
-    /// and NB phi initialization.
-    pub feature_weights: Vec<f32>,
 }
 
 pub(crate) struct LoadCollapseArgs<'a> {
@@ -173,26 +166,6 @@ pub(crate) fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<Prepa
         preload: args.preload,
     })?;
 
-    // 1.5a Binary CV filter: k-means on per-gene CV separates absent,
-    // informative, and hyper-variable genes. The majority cluster (informative)
-    // is kept. Used for encoder input masking and projection basis.
-    let row_stat = data_beans::qc::collect_row_stat_across_vec(&data_vec, args.block_size)?;
-    let (_, _, mu, sd) = row_stat.to_vecs();
-    let gene_filter_mask = {
-        let cv: Vec<f32> = mu
-            .iter()
-            .zip(sd.iter())
-            .map(|(&m, &s)| if m.abs() > 1e-8 { s / m.abs() } else { 0.0 })
-            .collect();
-        super::gene_filter::kmeans_cv_filter(&cv)
-    };
-
-    // 1.5b Continuous inverse-mean weights for decoder loss and NB phi.
-    let feature_weights: Vec<f32> = mu
-        .iter()
-        .map(|&m| 1.0 / (1.0 + m.max(0.0)))
-        .collect();
-
     // 2. Take projection results by warm start or projecting it again
     let proj_kn = if let Some(proj_file) = args.warm_start_proj_file {
         use matrix_util::common_io::*;
@@ -215,16 +188,10 @@ pub(crate) fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<Prepa
 
         proj_nk.transpose()
     } else {
-        // Binary mask for projection: informative=1, filtered=0.
-        let proj_weights: Vec<f32> = gene_filter_mask
-            .iter()
-            .map(|&keep| if keep { 1.0 } else { 0.0 })
-            .collect();
-        let proj_out = data_vec.project_columns_weighted(
+        let proj_out = data_vec.project_columns_with_batch_correction(
             args.proj_dim,
             Some(args.block_size),
             Some(&batch_membership),
-            &proj_weights,
         )?;
 
         proj_out.proj
@@ -262,8 +229,6 @@ pub(crate) fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<Prepa
     Ok(PreparedData {
         data_vec,
         collapsed_levels,
-        gene_filter_mask,
-        feature_weights,
     })
 }
 
@@ -279,42 +244,16 @@ pub(crate) fn create_device(
     }
 }
 
-/// Collect trainable Vars for Adam, excluding frozen parameters:
-/// - `.bgm_profile` — BGM decoder fixed profile
-/// - `.logit_bias`  — per-gene baseline (initialized from PB mean, frozen)
-pub(crate) fn trainable_vars(parameters: &candle_nn::VarMap) -> Vec<candle_core::Var> {
-    let data = parameters.data().lock().expect("VarMap lock");
-    data.iter()
-        .filter_map(|(name, var)| {
-            if name.ends_with(".bgm_profile") || name.ends_with(".logit_bias") {
-                None
-            } else {
-                Some(var.clone())
-            }
-        })
-        .collect()
-}
-
 /// Move all parameters in a VarMap to CPU.
 ///
 /// This enables multi-threaded rayon inference in `process_blocks()`.
-///
-/// `Var::set` requires the source tensor to live on the same device as
-/// the existing Var (it copies into the Var's storage), so for non-CPU
-/// Vars we have to drop the old Var and insert a freshly-constructed
-/// CPU Var under the same name.
 pub(crate) fn move_varmap_to_cpu(parameters: &candle_nn::VarMap) -> anyhow::Result<()> {
-    let mut data = parameters.data().lock().expect("VarMap lock");
-    let names_to_move: Vec<String> = data
-        .iter()
-        .filter(|(_, v)| !v.device().is_cpu())
-        .map(|(k, _)| k.clone())
-        .collect();
-    for name in names_to_move {
-        let old = data.remove(&name).expect("var present");
-        let cpu_tensor = old.as_tensor().to_device(&Device::Cpu)?;
-        let cpu_var = candle_core::Var::from_tensor(&cpu_tensor)?;
-        data.insert(name, cpu_var);
+    let data = parameters.data().lock().expect("VarMap lock");
+    for (_name, var) in data.iter() {
+        if !var.device().is_cpu() {
+            let cpu_tensor = var.to_device(&Device::Cpu)?;
+            var.set(&cpu_tensor)?;
+        }
     }
     Ok(())
 }

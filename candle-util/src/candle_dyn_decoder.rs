@@ -1,7 +1,5 @@
-use crate::candle_decoder_topic::{
-    BgmMultinomTopicDecoder, BgmNbTopicDecoder, MultinomTopicDecoder, NbTopicDecoder,
-};
-use crate::candle_decoder_vmf_topic::{BgmVmfTopicDecoder, VmfTopicDecoder};
+use crate::candle_decoder_topic::{MultinomTopicDecoder, NbTopicDecoder};
+use crate::candle_decoder_vmf_topic::VmfTopicDecoder;
 use crate::candle_model_traits::{DecoderModuleT, EssLlikFn, NewDecoder};
 use candle_core::{Result, Tensor};
 use candle_nn::VarBuilder;
@@ -19,7 +17,6 @@ pub trait DynDecoderModuleT: Send + Sync {
     fn dim_latent(&self) -> usize;
     fn build_ess_llik<'a>(&'a self, x_nd: &'a Tensor, smoothing: f64) -> Result<EssLlikFn<'a>>;
     fn decoder_name(&self) -> &str;
-    fn set_feature_weights(&mut self, weights: Option<Tensor>);
 }
 
 fn dummy_llik(_: &Tensor, _: &Tensor) -> Result<Tensor> {
@@ -52,9 +49,6 @@ macro_rules! impl_dyn_decoder {
             fn decoder_name(&self) -> &str {
                 $name
             }
-            fn set_feature_weights(&mut self, weights: Option<Tensor>) {
-                DecoderModuleT::set_feature_weights(self, weights)
-            }
         }
     };
 }
@@ -62,9 +56,6 @@ macro_rules! impl_dyn_decoder {
 impl_dyn_decoder!(MultinomTopicDecoder, "multinom");
 impl_dyn_decoder!(NbTopicDecoder, "nb");
 impl_dyn_decoder!(VmfTopicDecoder, "vmf");
-impl_dyn_decoder!(BgmMultinomTopicDecoder, "bgm");
-impl_dyn_decoder!(BgmNbTopicDecoder, "nbbgm");
-impl_dyn_decoder!(BgmVmfTopicDecoder, "vmfbgm");
 
 /// Create a boxed dynamic decoder by name.
 pub fn create_dyn_decoder(
@@ -79,11 +70,6 @@ pub fn create_dyn_decoder(
         )?)),
         "nb" => Ok(Box::new(NbTopicDecoder::new(n_features, n_topics, vs)?)),
         "vmf" => Ok(Box::new(VmfTopicDecoder::new(n_features, n_topics, vs)?)),
-        "bgm" => Ok(Box::new(BgmMultinomTopicDecoder::new(
-            n_features, n_topics, vs,
-        )?)),
-        "nbbgm" => Ok(Box::new(BgmNbTopicDecoder::new(n_features, n_topics, vs)?)),
-        "vmfbgm" => Ok(Box::new(BgmVmfTopicDecoder::new(n_features, n_topics, vs)?)),
         other => Err(candle_core::Error::Msg(format!(
             "unknown decoder type: {other}"
         ))),

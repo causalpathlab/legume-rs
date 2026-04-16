@@ -103,7 +103,7 @@ enum Commands {
                       (1) batch-aware multi-level pseudobulk collapsing,\n\
                       (2) encoder-decoder VAE training via SGD,\n\
                       (3) encoder inference of per-cell latent topic proportions.\n\n\
-                      Supports multinomial and negative-binomial decoders\n\
+                      Supports multinomial, negative-binomial, and vMF decoders\n\
                       (jointly when comma-separated via --decoder)."
     )]
     Topic(TopicArgs),

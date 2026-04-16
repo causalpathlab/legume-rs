@@ -70,8 +70,10 @@ pub trait IndexedDecoderT {
         let recon_ns = z_nk.matmul(&beta_ks)?; // [N, S]
         let log_recon_ns = (recon_ns + 1e-8)?.log()?;
 
-        let llik = indexed_x
-            .clamp(0.0, f64::INFINITY)?
+        // Log1p-weighted likelihood: log(1 + x) compresses dynamic range
+        // so marker genes contribute comparably to housekeeping.
+        let llik = (indexed_x + 1.0)?
+            .log()?
             .mul(&log_recon_ns)?
             .sum(indexed_x.rank() - 1)?;
 
