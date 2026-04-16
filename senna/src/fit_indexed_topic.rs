@@ -281,33 +281,6 @@ pub struct IndexedTopicArgs {
     )]
     bulk_data_files: Option<Vec<Box<str>>>,
 
-    #[arg(
-        long,
-        help = "Marker TSV (gene<TAB>celltype) — labels data-driven anchors"
-    )]
-    markers: Option<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = 0.5,
-        help = "Margin between top1 and top2 marker-fit z-scores to call an anchor"
-    )]
-    anchor_margin: f32,
-
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "Cross-entropy penalty pulling β toward anchor gene profiles"
-    )]
-    anchor_penalty: f32,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Anchor genes per topic (Gram-Schmidt vertex + nearest neighbors)"
-    )]
-    anchor_knn: usize,
-
     #[command(flatten)]
     cnv: CnvArgs,
 }
@@ -316,7 +289,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let PreparedData {
         data_vec,
         collapsed_levels,
-        gene_filter_mask,
+        gene_filter_mask: _gene_filter_mask,
+        feature_weights: _feature_weights,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &args.data_files,
         batch_files: &args.batch_files,
@@ -381,31 +355,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
 
     let gene_names = data_vec.row_names()?;
 
-    // Data-driven anchor β prior. Indexed decoders all run at D_full, so
-    // there's no finest-level coarsening to adapt anchor selection to.
-    let markers = args
-        .markers
-        .as_deref()
-        .map(|p| crate::marker_support::load_marker_info(p, &gene_names))
-        .transpose()?;
-    let anchor_prior = crate::topic::anchor_prior::AnchorPrior::from_pseudobulk(
-        finest_collapsed,
-        n_topics,
-        markers.as_ref(),
-        args.anchor_margin,
-        None,
-        args.anchor_knn,
-        &gene_filter_mask,
-    )?;
-    anchor_prior.write_side_outputs(&args.out, &gene_names, markers.as_ref())?;
-
-    // Per-level anchor tensors. Indexed decoders all run at D_full, so
-    // no feature coarsening applies — one `None` per level.
-    let level_coarsenings_none: Vec<Option<FeatureCoarsening>> =
-        (0..num_levels).map(|_| None).collect();
-    let anchor_tensors = anchor_prior.per_level_device_tensors(&level_coarsenings_none, &dev)?;
-    anchor_prior.init_decoder_dictionary(&parameters, &level_coarsenings_none, &dev)?;
-
     // Read bulk data aligned to SC genes
     let bulk = args
         .bulk_data_files
@@ -444,8 +393,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         vcd_ess_steps: args.vcd_ess_steps,
         ess_max_shrink: args.ess_max_shrink,
         stop: &stop,
-        anchor_prior_per_level: Some(&anchor_tensors),
-        anchor_penalty: args.anchor_penalty,
     };
 
     let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd_full, &bulk_deltas) {
