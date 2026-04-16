@@ -7,12 +7,10 @@ use crate::logging::new_progress_bar;
 use data_beans_alg::collapse_data::resample_and_optimize;
 
 use candle_core::{Device, Tensor};
-use candle_nn::{ops, AdamW, Optimizer};
+use candle_nn::{AdamW, Optimizer};
 use candle_util::candle_encoder_indexed::*;
-use candle_util::candle_ess::batched_ess_steps;
 use candle_util::candle_indexed_data_loader::*;
 use candle_util::candle_indexed_model_traits::*;
-use candle_util::candle_loss_functions::gaussian_neg_log_prob;
 use candle_util::candle_topic_refinement::TopicRefinementConfig;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,9 +26,6 @@ pub(crate) struct IndexedTrainConfig<'a> {
     pub enc_context_size: usize,
     pub dec_context_size: usize,
     pub sort_dim_budget: usize,
-    pub vcd_epochs: usize,
-    pub vcd_ess_steps: usize,
-    pub ess_max_shrink: usize,
     pub stop: &'a AtomicBool,
     /// Per-level `[K, D_l]` anchor β prior tensors (pre-transposed, on device).
     pub anchor_prior_per_level: Option<&'a [Tensor]>,
@@ -105,21 +100,10 @@ where
         );
     }
 
-    let vcd_epochs = config.vcd_epochs;
-    let vcd_ess_steps = config.vcd_ess_steps;
-    let ess_max_shrink = config.ess_max_shrink;
-
-    if vcd_epochs > 0 {
-        info!(
-            "Mixed multi-level training: {} levels, {} epochs ({} VCD + {} SGVB), {} ESS steps/batch",
-            num_levels, total_epochs, vcd_epochs, total_epochs.saturating_sub(vcd_epochs), vcd_ess_steps
-        );
-    } else {
-        info!(
-            "Mixed multi-level training: {} levels, {} epochs",
-            num_levels, total_epochs
-        );
-    }
+    info!(
+        "Mixed multi-level training: {} levels, {} epochs",
+        num_levels, total_epochs
+    );
 
     let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.learning_rate as f64)?;
     let pb = new_progress_bar(total_epochs as u64);
@@ -175,7 +159,6 @@ where
         let jitter_end = config.jitter_interval.min(total_epochs - epoch);
         for jitter in 0..jitter_end {
             let cur_epoch = epoch + jitter;
-            let use_vcd = vcd_epochs > 0 && cur_epoch < vcd_epochs;
 
             let mut llik_tot = 0f32;
             let mut kl_tot = 0f32;
@@ -189,54 +172,7 @@ where
                 for b in 0..loader.num_minibatch() {
                     let mb = loader.minibatch_cached(b);
 
-                    if use_vcd {
-                        let (z_mean, z_lnvar) = encoder.latent_gaussian_params_indexed(
-                            &mb.input_union_indices,
-                            &mb.input_indexed_x,
-                            mb.input_indexed_x_null.as_ref(),
-                            true,
-                        )?;
-                        let z_init = encoder.reparameterize(&z_mean, &z_lnvar, true)?;
-
-                        let (log_beta_ks, beta_ks) = decoder.prepare_dictionary_slice(
-                            &mb.output_union_indices,
-                            &mb.output_log_q_s,
-                        )?;
-
-                        let ess_llik = Dec::build_ess_llik_from_beta(
-                            beta_ks,
-                            &mb.output_indexed_x,
-                            config.topic_smoothing,
-                            decoder.dim_latent(),
-                        )?;
-
-                        let (z_refined, _) = batched_ess_steps(
-                            &z_init.detach(),
-                            &|z: &Tensor| ess_llik(z),
-                            vcd_ess_steps,
-                            ess_max_shrink,
-                        )?;
-                        let z_refined = z_refined.detach();
-
-                        let log_z_refined = ops::log_softmax(&z_refined, 1)?;
-                        let log_z_refined = smooth_topics(log_z_refined, config.topic_smoothing)?;
-                        let (_, llik) = decoder.forward_indexed_with_log_beta(
-                            &log_z_refined,
-                            &log_beta_ks,
-                            &mb.output_indexed_x,
-                        )?;
-                        let dec_loss = llik.neg()?.mean_all()?;
-
-                        let enc_nll_n = gaussian_neg_log_prob(&z_refined, &z_mean, &z_lnvar)?;
-                        let enc_loss = enc_nll_n.mean_all()?;
-
-                        let loss = (dec_loss + enc_loss)?;
-                        let loss = config.add_anchor_penalty(loss, level)?;
-                        adam.backward_step(&loss)?;
-
-                        llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
-                        kl_tot += enc_nll_n.sum_all()?.to_scalar::<f32>()?;
-                    } else {
+                    {
                         let (log_z_nk, kl) = encoder.forward_indexed_t(
                             &mb.input_union_indices,
                             &mb.input_indexed_x,
