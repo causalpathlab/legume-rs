@@ -72,6 +72,11 @@ pub trait DecoderModuleT {
 
     fn dim_latent(&self) -> usize;
 
+    /// Set per-feature weights `[1, D]` that scale each feature's contribution
+    /// to the log-likelihood before the final sum. `None` disables weighting.
+    /// Default: no-op (decoders that don't support feature weights ignore this).
+    fn set_feature_weights(&mut self, _weights: Option<Tensor>) {}
+
     /// Build a lightweight log-likelihood closure for ESS evaluation.
     ///
     /// Returns a boxed closure `|z_nk [N,K]| -> llik [N]` that uses

@@ -12,9 +12,21 @@ use candle_util::candle_loss_functions::{gaussian_neg_log_prob, topic_likelihood
 use candle_util::candle_model_traits::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::anchor_prior::{anchor_penalty_at_level, encoder_anchor_penalty};
 use super::common::{compute_level_epochs, sample_collapsed_data, trainable_vars};
-use candle_util::candle_model_traits::EncoderModuleT;
+
+/// Apply per-feature weights `[D]` to a `[N, D]` matrix in place.
+fn apply_feature_weights_nd(mat: &mut Mat, weights: &[f32]) {
+    let d = mat.ncols();
+    assert_eq!(weights.len(), d);
+    for j in 0..d {
+        let w = weights[j];
+        if (w - 1.0).abs() > 1e-8 {
+            for i in 0..mat.nrows() {
+                mat[(i, j)] *= w;
+            }
+        }
+    }
+}
 
 /// Configuration for training
 pub(crate) struct TrainConfig<'a> {
@@ -22,44 +34,8 @@ pub(crate) struct TrainConfig<'a> {
     pub dev: &'a Device,
     pub args: &'a TopicArgs,
     pub stop: &'a AtomicBool,
-    /// Per-level `[K, D_l]` anchor β prior tensors (pre-transposed and on
-    /// device). `None` means no anchor prior is attached — training runs
-    /// unchanged.
-    pub anchor_prior_per_level: Option<&'a [Tensor]>,
-    /// Cross-entropy penalty strength λ applied per minibatch.
-    pub anchor_penalty: f32,
-    /// `[K, D_enc]` encoder-side anchor input tensor on device. None =
-    /// encoder-side anchoring disabled.
-    pub encoder_anchor_input: Option<&'a Tensor>,
-    /// Encoder-side anchor loss strength.
-    pub encoder_anchor_penalty: f32,
-}
-
-impl<'a> TrainConfig<'a> {
-    #[inline]
-    fn add_anchor_penalty(&self, loss: Tensor, level: usize) -> anyhow::Result<Tensor> {
-        anchor_penalty_at_level(
-            loss,
-            self.parameters,
-            self.anchor_prior_per_level,
-            self.anchor_penalty,
-            level,
-        )
-    }
-
-    #[inline]
-    fn add_encoder_anchor_penalty<E: EncoderModuleT>(
-        &self,
-        loss: Tensor,
-        encoder: &E,
-    ) -> anyhow::Result<Tensor> {
-        encoder_anchor_penalty(
-            loss,
-            encoder,
-            self.encoder_anchor_input,
-            self.encoder_anchor_penalty,
-        )
-    }
+    /// `[D_full]` feature weights applied to encoder input before coarsening.
+    pub encoder_feature_weights: Option<&'a [f32]>,
 }
 
 /// Mixed multi-level VAE training.
@@ -136,10 +112,16 @@ where
                 let (sub_mixed, sub_batch, sub_target) =
                     subsample_rows((full_mixed, full_batch, target_full), budget, &mut rng);
 
-                let enc_nd = if let Some(fc) = enc_coarsening {
-                    fc.aggregate_columns_nd(&sub_mixed)
-                } else {
-                    sub_mixed
+                let enc_nd = {
+                    let mut input = sub_mixed;
+                    if let Some(w) = config.encoder_feature_weights {
+                        apply_feature_weights_nd(&mut input, w);
+                    }
+                    if let Some(fc) = enc_coarsening {
+                        fc.aggregate_columns_nd(&input)
+                    } else {
+                        input
+                    }
                 };
 
                 let batch_nd = sub_batch.map(|b| {
@@ -200,8 +182,6 @@ where
                         decoder.forward_with_llik(&log_z_nk, &y_nd, &topic_likelihood)?;
 
                     let loss = (&kl - &llik)?.mean_all()?;
-                    let loss = config.add_anchor_penalty(loss, level)?;
-                    let loss = config.add_encoder_anchor_penalty(loss, encoder)?;
                     adam.backward_step(&loss)?;
 
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -311,10 +291,16 @@ where
                 let (sub_mixed, sub_batch, sub_target) =
                     subsample_rows((full_mixed, full_batch, target_full), budget, &mut rng);
 
-                let enc_nd = if let Some(fc) = enc_coarsening {
-                    fc.aggregate_columns_nd(&sub_mixed)
-                } else {
-                    sub_mixed
+                let enc_nd = {
+                    let mut input = sub_mixed;
+                    if let Some(w) = config.encoder_feature_weights {
+                        apply_feature_weights_nd(&mut input, w);
+                    }
+                    if let Some(fc) = enc_coarsening {
+                        fc.aggregate_columns_nd(&input)
+                    } else {
+                        input
+                    }
                 };
 
                 let batch_nd = sub_batch.map(|b| {
@@ -398,8 +384,6 @@ where
                         let enc_loss = enc_nll_n.mean_all()?;
 
                         let loss = (dec_loss + enc_loss)?;
-                        let loss = config.add_anchor_penalty(loss, level)?;
-                        let loss = config.add_encoder_anchor_penalty(loss, encoder)?;
                         adam.backward_step(&loss)?;
 
                         llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -414,8 +398,6 @@ where
                             decoder.forward_with_llik(&log_z_nk, &y_nd, &topic_likelihood)?;
 
                         let loss = (&kl - &llik)?.mean_all()?;
-                        let loss = config.add_anchor_penalty(loss, level)?;
-                        let loss = config.add_encoder_anchor_penalty(loss, encoder)?;
                         adam.backward_step(&loss)?;
 
                         llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -509,10 +491,16 @@ where
         for epoch in (0..level_ep).step_by(config.args.jitter_interval) {
             let (full_mixed, full_batch, target_full) = sample_collapsed_data(collapsed)?;
 
-            let enc_nd = if let Some(fc) = enc_coarsening {
-                fc.aggregate_columns_nd(&full_mixed)
-            } else {
-                full_mixed
+            let enc_nd = {
+                let mut input = full_mixed;
+                if let Some(w) = config.encoder_feature_weights {
+                    apply_feature_weights_nd(&mut input, w);
+                }
+                if let Some(fc) = enc_coarsening {
+                    fc.aggregate_columns_nd(&input)
+                } else {
+                    input
+                }
             };
 
             let batch_nd = full_batch.map(|b| {
@@ -556,8 +544,6 @@ where
                         decoder.forward_with_llik(&log_z_nk, &y_nd, &topic_likelihood)?;
 
                     let loss = (&kl - &llik)?.mean_all()?;
-                    let loss = config.add_anchor_penalty(loss, level)?;
-                    let loss = config.add_encoder_anchor_penalty(loss, encoder)?;
                     adam.backward_step(&loss)?;
 
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -683,10 +669,16 @@ pub(crate) fn train_mixed_multi_decoder(
                 let (sub_mixed, sub_batch, sub_target) =
                     subsample_rows((full_mixed, full_batch, target_full), budget, &mut rng);
 
-                let enc_nd = if let Some(fc) = enc_coarsening {
-                    fc.aggregate_columns_nd(&sub_mixed)
-                } else {
-                    sub_mixed
+                let enc_nd = {
+                    let mut input = sub_mixed;
+                    if let Some(w) = config.encoder_feature_weights {
+                        apply_feature_weights_nd(&mut input, w);
+                    }
+                    if let Some(fc) = enc_coarsening {
+                        fc.aggregate_columns_nd(&input)
+                    } else {
+                        input
+                    }
                 };
 
                 let batch_nd = sub_batch.map(|b| {

@@ -61,6 +61,19 @@ pub trait RandProjOps {
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 
+    /// Like `project_columns_with_batch_correction` but with per-row
+    /// (per-feature) weights applied to the random basis. Features with
+    /// weight 0 are excluded from the projection geometry.
+    fn project_columns_weighted<T>(
+        &self,
+        target_dim: usize,
+        block_size: Option<usize>,
+        batch_membership: Option<&[T]>,
+        row_weights: &[f32],
+    ) -> anyhow::Result<RandColProjOut>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
+
     /// Assign each column/cell to random group by binary encoding
     ///
     /// # Arguments
@@ -157,6 +170,42 @@ impl RandProjOps for SparseIoStack {
         Ok(RandColProjOut { basis, proj })
     }
 
+    fn project_columns_weighted<T>(
+        &self,
+        target_dim: usize,
+        block_size: Option<usize>,
+        batch_membership: Option<&[T]>,
+        row_weights: &[f32],
+    ) -> anyhow::Result<RandColProjOut>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
+        let ncols = self.num_columns()?;
+        let batch_membership = batch_membership.and_then(|x| x.get(0..ncols));
+
+        let proj_vec = self
+            .stack
+            .iter()
+            .map(|data_vec| -> anyhow::Result<_> {
+                data_vec.project_columns_weighted(
+                    target_dim,
+                    block_size,
+                    batch_membership,
+                    row_weights,
+                )
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let basis = concatenate_vertical(
+            &proj_vec.iter().map(|x| x.basis.to_owned()).collect::<Vec<_>>(),
+        )?;
+        let proj = concatenate_vertical(
+            &proj_vec.iter().map(|x| x.proj.to_owned()).collect::<Vec<_>>(),
+        )?;
+
+        Ok(RandColProjOut { basis, proj })
+    }
+
     fn partition_columns_to_groups(
         &mut self,
         proj_kn: &nalgebra::DMatrix<f32>,
@@ -243,6 +292,79 @@ impl RandProjOps for SparseIoVec {
 
         if proj_kn.max() > ub || proj_kn.min() < lb {
             // info!("Clamping values [{}, {}] after standardization", lb, ub);
+            proj_kn.iter_mut().for_each(|x| {
+                *x = x.clamp(lb, ub);
+            });
+            proj_kn.scale_columns_inplace();
+        }
+        Ok(RandColProjOut {
+            basis: basis_dk,
+            proj: proj_kn,
+        })
+    }
+
+    /// Like `project_columns_with_batch_correction` but with per-row
+    /// (per-feature) weights applied to the random basis. Features with
+    /// weight 0 are excluded from the projection geometry.
+    fn project_columns_weighted<T>(
+        &self,
+        target_dim: usize,
+        block_size: Option<usize>,
+        batch_membership: Option<&[T]>,
+        row_weights: &[f32],
+    ) -> anyhow::Result<RandColProjOut>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
+        let nrows = self.num_rows();
+        let ncols = self.num_columns();
+
+        assert_eq!(row_weights.len(), nrows, "row_weights length mismatch");
+
+        let mut proj_kn = nalgebra::DMatrix::<f32>::zeros(target_dim, ncols);
+
+        let mut basis_dk = nalgebra::DMatrix::<f32>::rnorm(nrows, target_dim);
+
+        // Zero out basis rows for filtered features
+        for (r, &w) in row_weights.iter().enumerate() {
+            if w <= 0.0 {
+                basis_dk.row_mut(r).fill(0.0);
+            } else if (w - 1.0).abs() > 1e-6 {
+                basis_dk.row_mut(r).scale_mut(w);
+            }
+        }
+
+        self.visit_columns_by_block(
+            &project_columns_visitor,
+            &basis_dk,
+            &mut proj_kn,
+            block_size,
+        )?;
+
+        if let Some(col_to_batch) = batch_membership {
+            info!("adjusting batch biases ...");
+
+            if col_to_batch.len() == ncols {
+                let batches = partition_by_membership(col_to_batch, None);
+                for (_, cols) in batches.iter() {
+                    let xx = subset_columns(&proj_kn, cols.iter().cloned())?
+                        .transpose()
+                        .centre_columns()
+                        .transpose();
+                    assign_columns(&xx, cols.iter().cloned(), &mut proj_kn);
+                }
+            } else {
+                warn!(
+                    "row_weights projection: batch size {} != ncols {}",
+                    col_to_batch.len(),
+                    ncols
+                );
+            }
+        }
+
+        let (lb, ub) = (-4., 4.);
+        proj_kn.scale_columns_inplace();
+        if proj_kn.max() > ub || proj_kn.min() < lb {
             proj_kn.iter_mut().for_each(|x| {
                 *x = x.clamp(lb, ub);
             });

@@ -136,8 +136,13 @@ pub(crate) fn sample_collapsed_data(
 pub(crate) struct PreparedData {
     pub data_vec: SparseIoVec,
     pub collapsed_levels: Vec<CollapsedOut>,
-    /// Per-gene mask for anchor selection: true = informative, false = outlier.
+    /// Binary CV filter: true = informative. Used for encoder input and
+    /// projection basis (hard mask on encoder signal).
     pub gene_filter_mask: Vec<bool>,
+    /// Continuous inverse-mean weights `w_g = 1/(1 + mean_g)`.
+    /// Used for decoder loss weighting, Leiden β init gene selection,
+    /// and NB phi initialization.
+    pub feature_weights: Vec<f32>,
 }
 
 pub(crate) struct LoadCollapseArgs<'a> {
@@ -168,20 +173,25 @@ pub(crate) fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<Prepa
         preload: args.preload,
     })?;
 
-    // 1.5 Filter hyper-variable outlier genes (Ig/TCR) for anchor selection.
-    // Compute per-gene CV from sparse cell data, k-means into 2-3 clusters,
-    // keep the majority. The mask is stored and passed to anchor_prior only;
-    // the full gene set flows through SVD, collapsing, and training.
+    // 1.5a Binary CV filter: k-means on per-gene CV separates absent,
+    // informative, and hyper-variable genes. The majority cluster (informative)
+    // is kept. Used for encoder input masking and projection basis.
+    let row_stat = data_beans::qc::collect_row_stat_across_vec(&data_vec, args.block_size)?;
+    let (_, _, mu, sd) = row_stat.to_vecs();
     let gene_filter_mask = {
-        let row_stat = data_beans::qc::collect_row_stat_across_vec(&data_vec, args.block_size)?;
-        let (_, _, mu, sd) = row_stat.to_vecs();
         let cv: Vec<f32> = mu
             .iter()
             .zip(sd.iter())
             .map(|(&m, &s)| if m.abs() > 1e-8 { s / m.abs() } else { 0.0 })
             .collect();
-        super::anchor_prior::kmeans_cv_filter(&cv)
+        super::gene_filter::kmeans_cv_filter(&cv)
     };
+
+    // 1.5b Continuous inverse-mean weights for decoder loss and NB phi.
+    let feature_weights: Vec<f32> = mu
+        .iter()
+        .map(|&m| 1.0 / (1.0 + m.max(0.0)))
+        .collect();
 
     // 2. Take projection results by warm start or projecting it again
     let proj_kn = if let Some(proj_file) = args.warm_start_proj_file {
@@ -205,10 +215,16 @@ pub(crate) fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<Prepa
 
         proj_nk.transpose()
     } else {
-        let proj_out = data_vec.project_columns_with_batch_correction(
+        // Binary mask for projection: informative=1, filtered=0.
+        let proj_weights: Vec<f32> = gene_filter_mask
+            .iter()
+            .map(|&keep| if keep { 1.0 } else { 0.0 })
+            .collect();
+        let proj_out = data_vec.project_columns_weighted(
             args.proj_dim,
             Some(args.block_size),
             Some(&batch_membership),
+            &proj_weights,
         )?;
 
         proj_out.proj
@@ -247,6 +263,7 @@ pub(crate) fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<Prepa
         data_vec,
         collapsed_levels,
         gene_filter_mask,
+        feature_weights,
     })
 }
 
@@ -262,13 +279,14 @@ pub(crate) fn create_device(
     }
 }
 
-/// Collect trainable Vars for Adam, excluding the BGM decoder's fixed
-/// `.bgm_profile` and `.pi_topic` (both frozen; π is set data-driven at init).
+/// Collect trainable Vars for Adam, excluding frozen parameters:
+/// - `.bgm_profile` — BGM decoder fixed profile
+/// - `.logit_bias`  — per-gene baseline (initialized from PB mean, frozen)
 pub(crate) fn trainable_vars(parameters: &candle_nn::VarMap) -> Vec<candle_core::Var> {
     let data = parameters.data().lock().expect("VarMap lock");
     data.iter()
         .filter_map(|(name, var)| {
-            if name.ends_with(".bgm_profile") {
+            if name.ends_with(".bgm_profile") || name.ends_with(".logit_bias") {
                 None
             } else {
                 Some(var.clone())

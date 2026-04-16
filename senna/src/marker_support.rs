@@ -1,7 +1,6 @@
 //! Shared parsing and alignment utilities for `gene<TAB>celltype` marker
-//! files. Used both by the `annotate` subcommand (to build the membership
-//! matrix for vMF assignment) and by the anchor-based topic-model prior
-//! (to label data-driven anchor pseudobulks against user-provided markers).
+//! files. Used by the `annotate` subcommand to build the membership
+//! matrix for vMF assignment.
 
 use crate::embed_common::Mat;
 use matrix_util::common_io::{read_lines_of_words_delim, ReadLinesOut};
@@ -18,14 +17,6 @@ pub use data_beans::utilities::name_matching::flexible_name_match as flexible_ge
 pub(crate) struct AnnotInfo {
     pub membership_ga: Mat,
     pub annot_names: Vec<Box<str>>,
-}
-
-/// Aligned marker table for the anchor-based topic-model prior. The
-/// `membership_gc` matrix is the only thing the anchor scoring step
-/// actually needs; celltypes index its columns.
-pub(crate) struct MarkerInfo {
-    pub celltypes: Vec<Box<str>>,
-    pub membership_gc: Mat,
 }
 
 /// Parse a gene/celltype TSV or CSV into `(gene, celltype)` pairs. Blank and
@@ -112,55 +103,3 @@ pub(crate) fn build_annotation_matrix(
     })
 }
 
-/// Load a marker TSV and align it to the dictionary in the richer form used
-/// by the anchor-based prior. Keeps the raw `(gene, celltype)` pairs so the
-/// caller can iterate markers per celltype at scoring time without another
-/// file read.
-pub(crate) fn load_marker_info(
-    marker_gene_path: &str,
-    row_names: &[Box<str>],
-) -> anyhow::Result<MarkerInfo> {
-    let pairs = read_marker_gene_info(marker_gene_path)?;
-    if pairs.is_empty() {
-        return Err(anyhow::anyhow!("empty/invalid marker gene information"));
-    }
-
-    let mut celltype_set: HashSet<Box<str>> = HashSet::default();
-    for (_, ct) in &pairs {
-        celltype_set.insert(ct.replace(" ", "_").into_boxed_str());
-    }
-    let mut celltypes: Vec<Box<str>> = celltype_set.into_iter().collect();
-    celltypes.sort();
-
-    let n_genes = row_names.len();
-    let n_ct = celltypes.len();
-    let mut membership_gc = Mat::zeros(n_genes, n_ct);
-
-    let mut matched = 0usize;
-    for (gene, ct) in &pairs {
-        let normalized = ct.replace(" ", "_");
-        let c = celltypes
-            .iter()
-            .position(|n| n.as_ref() == normalized)
-            .unwrap();
-        if let Some(g) = row_names
-            .iter()
-            .position(|dict_gene| flexible_gene_match(gene, dict_gene))
-        {
-            membership_gc[(g, c)] = 1.0;
-            matched += 1;
-        }
-    }
-
-    log::info!(
-        "MarkerInfo: matched {}/{} markers across {} celltypes",
-        matched,
-        pairs.len(),
-        n_ct
-    );
-
-    Ok(MarkerInfo {
-        celltypes,
-        membership_gc,
-    })
-}

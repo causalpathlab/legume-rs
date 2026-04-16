@@ -19,6 +19,7 @@ pub trait DynDecoderModuleT: Send + Sync {
     fn dim_latent(&self) -> usize;
     fn build_ess_llik<'a>(&'a self, x_nd: &'a Tensor, smoothing: f64) -> Result<EssLlikFn<'a>>;
     fn decoder_name(&self) -> &str;
+    fn set_feature_weights(&mut self, weights: Option<Tensor>);
 }
 
 fn dummy_llik(_: &Tensor, _: &Tensor) -> Result<Tensor> {
@@ -50,6 +51,9 @@ macro_rules! impl_dyn_decoder {
             }
             fn decoder_name(&self) -> &str {
                 $name
+            }
+            fn set_feature_weights(&mut self, weights: Option<Tensor>) {
+                DecoderModuleT::set_feature_weights(self, weights)
             }
         }
     };

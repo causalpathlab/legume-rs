@@ -31,23 +31,6 @@ pub(crate) struct IndexedTrainConfig<'a> {
     pub vcd_ess_steps: usize,
     pub ess_max_shrink: usize,
     pub stop: &'a AtomicBool,
-    /// Per-level `[K, D_l]` anchor β prior tensors (pre-transposed, on device).
-    pub anchor_prior_per_level: Option<&'a [Tensor]>,
-    /// Cross-entropy penalty strength λ applied per minibatch.
-    pub anchor_penalty: f32,
-}
-
-impl<'a> IndexedTrainConfig<'a> {
-    #[inline]
-    fn add_anchor_penalty(&self, loss: Tensor, level: usize) -> anyhow::Result<Tensor> {
-        crate::topic::anchor_prior::anchor_penalty_at_level(
-            loss,
-            self.parameters,
-            self.anchor_prior_per_level,
-            self.anchor_penalty,
-            level,
-        )
-    }
 }
 
 /// Estimate bulk-vs-SC bias as a GammaMatrix [D_sc, 1].
@@ -230,7 +213,6 @@ where
                         let enc_loss = enc_nll_n.mean_all()?;
 
                         let loss = (dec_loss + enc_loss)?;
-                        let loss = config.add_anchor_penalty(loss, level)?;
                         adam.backward_step(&loss)?;
 
                         llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -251,8 +233,6 @@ where
                             &mb.output_log_q_s,
                         )?;
                         let loss = (&kl - &llik)?.mean_all()?;
-                        let loss = config.add_anchor_penalty(loss, level)?;
-
                         adam.backward_step(&loss)?;
 
                         llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -296,7 +276,6 @@ where
                         &mb.output_log_q_s,
                     )?;
                     let loss = (&kl - &llik)?.mean_all()?;
-                    let loss = config.add_anchor_penalty(loss, finest_idx)?;
                     adam.backward_step(&loss)?;
 
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -424,7 +403,6 @@ where
                     )?;
 
                     let loss = (&kl - &llik)?.mean_all()?;
-                    let loss = config.add_anchor_penalty(loss, level)?;
                     adam.backward_step(&loss)?;
 
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -466,7 +444,6 @@ where
                                 &mb.output_log_q_s,
                             )?;
                             let loss = (&kl - &llik)?.mean_all()?;
-                            let loss = config.add_anchor_penalty(loss, level)?;
                             adam.backward_step(&loss)?;
 
                             llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
