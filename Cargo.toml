@@ -29,7 +29,7 @@ description = "Library for Exploring Genomics Using Machine learning Essentials 
 repository = "https://github.com/causalpathlab/legume-rs"
 homepage = "https://github.com/causalpathlab/legume-rs"
 edition = "2021"
-version = "0.2.1"
+version = "0.2.2"
 
 [workspace.dependencies]
 
@@ -77,7 +77,7 @@ rust-htslib = "1.0"
 
 # Nearest neighbours / clustering
 anndists = "0.1"
-clustering = { version = "0.2.1", features = ["parallel"] }
+clustering = { version = "0.2", features = ["parallel"] }
 hnsw_rs = "0.3"
 
 # Progress / display

@@ -12,8 +12,9 @@ use candle_util::candle_loss_functions::{gaussian_neg_log_prob, topic_likelihood
 use candle_util::candle_model_traits::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::anchor_prior::anchor_penalty_at_level;
-use super::common::{compute_level_epochs, sample_collapsed_data};
+use super::anchor_prior::{anchor_penalty_at_level, encoder_anchor_penalty};
+use super::common::{compute_level_epochs, sample_collapsed_data, trainable_vars};
+use candle_util::candle_model_traits::EncoderModuleT;
 
 /// Configuration for training
 pub(crate) struct TrainConfig<'a> {
@@ -27,6 +28,11 @@ pub(crate) struct TrainConfig<'a> {
     pub anchor_prior_per_level: Option<&'a [Tensor]>,
     /// Cross-entropy penalty strength λ applied per minibatch.
     pub anchor_penalty: f32,
+    /// `[K, D_enc]` encoder-side anchor input tensor on device. None =
+    /// encoder-side anchoring disabled.
+    pub encoder_anchor_input: Option<&'a Tensor>,
+    /// Encoder-side anchor loss strength.
+    pub encoder_anchor_penalty: f32,
 }
 
 impl<'a> TrainConfig<'a> {
@@ -38,6 +44,20 @@ impl<'a> TrainConfig<'a> {
             self.anchor_prior_per_level,
             self.anchor_penalty,
             level,
+        )
+    }
+
+    #[inline]
+    fn add_encoder_anchor_penalty<E: EncoderModuleT>(
+        &self,
+        loss: Tensor,
+        encoder: &E,
+    ) -> anyhow::Result<Tensor> {
+        encoder_anchor_penalty(
+            loss,
+            encoder,
+            self.encoder_anchor_input,
+            self.encoder_anchor_penalty,
         )
     }
 }
@@ -81,7 +101,7 @@ where
     );
 
     let mut adam = AdamW::new_lr(
-        config.parameters.all_vars(),
+        trainable_vars(config.parameters),
         config.args.learning_rate as f64,
     )?;
 
@@ -181,6 +201,7 @@ where
 
                     let loss = (&kl - &llik)?.mean_all()?;
                     let loss = config.add_anchor_penalty(loss, level)?;
+                    let loss = config.add_encoder_anchor_penalty(loss, encoder)?;
                     adam.backward_step(&loss)?;
 
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -260,7 +281,7 @@ where
     );
 
     let mut adam = AdamW::new_lr(
-        config.parameters.all_vars(),
+        trainable_vars(config.parameters),
         config.args.learning_rate as f64,
     )?;
 
@@ -378,6 +399,7 @@ where
 
                         let loss = (dec_loss + enc_loss)?;
                         let loss = config.add_anchor_penalty(loss, level)?;
+                        let loss = config.add_encoder_anchor_penalty(loss, encoder)?;
                         adam.backward_step(&loss)?;
 
                         llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -393,6 +415,7 @@ where
 
                         let loss = (&kl - &llik)?.mean_all()?;
                         let loss = config.add_anchor_penalty(loss, level)?;
+                        let loss = config.add_encoder_anchor_penalty(loss, encoder)?;
                         adam.backward_step(&loss)?;
 
                         llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -467,7 +490,7 @@ where
     );
 
     let mut adam = AdamW::new_lr(
-        config.parameters.all_vars(),
+        trainable_vars(config.parameters),
         config.args.learning_rate as f64,
     )?;
 
@@ -534,6 +557,7 @@ where
 
                     let loss = (&kl - &llik)?.mean_all()?;
                     let loss = config.add_anchor_penalty(loss, level)?;
+                    let loss = config.add_encoder_anchor_penalty(loss, encoder)?;
                     adam.backward_step(&loss)?;
 
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -625,7 +649,7 @@ pub(crate) fn train_mixed_multi_decoder(
     );
 
     let mut adam = AdamW::new_lr(
-        config.parameters.all_vars(),
+        trainable_vars(config.parameters),
         config.args.learning_rate as f64,
     )?;
 

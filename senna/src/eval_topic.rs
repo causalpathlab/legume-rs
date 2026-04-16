@@ -3,7 +3,7 @@ use crate::topic::eval::*;
 use crate::topic::model_metadata::*;
 
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
-use candle_util::candle_decoder_topic::TopicDecoder;
+use candle_util::candle_decoder_topic::MultinomTopicDecoder;
 use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_topic_refinement::*;
 use data_beans::sparse_io_vector::SparseIoVec;
@@ -177,10 +177,14 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
             .level_decoder_dims
             .last()
             .unwrap_or(&metadata.n_features_encoder);
-        Some(TopicDecoder::new(d, metadata.n_topics, vb.pp("dec_0"))?)
+        Some(MultinomTopicDecoder::new(
+            d,
+            metadata.n_topics,
+            vb.pp("dec_0"),
+        )?)
     } else {
         for (i, &d_l) in metadata.level_decoder_dims.iter().enumerate() {
-            let _ = TopicDecoder::new(d_l, metadata.n_topics, vb.pp(format!("dec_{i}")))?;
+            let _ = MultinomTopicDecoder::new(d_l, metadata.n_topics, vb.pp(format!("dec_{i}")))?;
         }
         None
     };

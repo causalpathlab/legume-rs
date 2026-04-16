@@ -1,4 +1,6 @@
-use super::common::{apply_column_delta, compute_level_epochs, sample_collapsed_data};
+use super::common::{
+    apply_column_delta, compute_level_epochs, sample_collapsed_data, trainable_vars,
+};
 use super::eval_indexed::{dense_to_indexed, refine_indexed_topic_proportions};
 use crate::embed_common::*;
 use crate::logging::new_progress_bar;
@@ -118,7 +120,10 @@ where
         );
     }
 
-    let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.learning_rate as f64)?;
+    let mut adam = AdamW::new_lr(
+        trainable_vars(config.parameters),
+        config.learning_rate as f64,
+    )?;
     let pb = new_progress_bar(total_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_epochs);
@@ -365,7 +370,10 @@ where
         level_epochs.iter().sum::<usize>()
     );
 
-    let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.learning_rate as f64)?;
+    let mut adam = AdamW::new_lr(
+        trainable_vars(config.parameters),
+        config.learning_rate as f64,
+    )?;
     let total_actual_epochs: usize = level_epochs.iter().sum();
     let pb = new_progress_bar(total_actual_epochs as u64);
 

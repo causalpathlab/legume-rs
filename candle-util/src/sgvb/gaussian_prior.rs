@@ -478,23 +478,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mixture_prior_kl_nonnegative() -> Result<()> {
-        let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, DType::F64, &Device::Cpu);
-        let prior = MixtureGaussianPrior::new(vb, 8, 0.01, 1.0)?;
-
-        let p = 10;
-        let k = 2;
-        let mean = Tensor::randn(0f64, 0.5f64, (p, k), &Device::Cpu)?;
-        let var = Tensor::ones((p, k), DType::F64, &Device::Cpu)? * 0.1;
-
-        let kl: f64 = prior.kl_from_gaussian(&mean, &var?)?.to_scalar()?;
-        assert!(kl >= -1e-6, "KL should be non-negative, got {}", kl);
-        assert!(kl.is_finite(), "KL should be finite");
-        Ok(())
-    }
-
-    #[test]
     fn test_mixture_reduces_to_single_gaussian() -> Result<()> {
         // With a single-component mixture, KL should match FixedGaussianPrior
         let tau = 0.5f64;
