@@ -1,10 +1,9 @@
 use super::common::{
-    apply_column_delta, compute_level_epochs, resample_levels, sample_collapsed_data,
+    apply_column_delta, compute_level_epochs, sample_collapsed_data, sample_overresolved,
 };
 use super::eval_indexed::{dense_to_indexed, refine_indexed_topic_proportions};
 use crate::embed_common::*;
 use crate::logging::new_progress_bar;
-use data_beans_alg::collapse_data::resample_and_optimize;
 
 use candle_core::{Device, Tensor};
 use candle_nn::{AdamW, Optimizer};
@@ -125,14 +124,12 @@ where
     let mut rng = rand::rng();
 
     for epoch in (0..total_epochs).step_by(config.jitter_interval) {
-        let resampled = resample_levels(collapsed_levels, &mut rng);
-        let effective_levels = resampled.as_deref().unwrap_or(collapsed_levels);
-
-        let level_data: Vec<(Mat, Option<Mat>, Mat)> = effective_levels
+        let level_data: Vec<(Mat, Option<Mat>, Mat)> = collapsed_levels
             .iter()
             .zip(level_budgets.iter())
             .map(|(collapsed, &budget)| {
-                let data = sample_collapsed_data(collapsed)?;
+                let data = sample_overresolved(collapsed, &mut rng)
+                    .unwrap_or_else(|| sample_collapsed_data(collapsed))?;
                 Ok(subsample_rows(data, budget, &mut rng))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -329,12 +326,8 @@ where
         let decoder = &decoders[level];
 
         for epoch in (0..level_ep).step_by(config.jitter_interval) {
-            let resampled_one = collapsed
-                .overresolved_stat
-                .as_ref()
-                .map(|s| resample_and_optimize(s, &mut rng, 20).expect("resample"));
-            let effective = resampled_one.as_ref().unwrap_or(collapsed);
-            let (mixed_nd, batch_nd, target_nd) = sample_collapsed_data(effective)?;
+            let (mixed_nd, batch_nd, target_nd) = sample_overresolved(collapsed, &mut rng)
+                .unwrap_or_else(|| sample_collapsed_data(collapsed))?;
 
             let mut data_loader = IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
                 input: &mixed_nd,

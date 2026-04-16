@@ -132,30 +132,33 @@ pub(crate) fn sample_collapsed_data(
     Ok((mixed_nd, batch_nd, target_nd))
 }
 
-/// Resample collapsed levels from over-resolved sufficient statistics.
-/// Returns `None` if no overresolved stats are present (use original levels).
-pub(crate) fn resample_levels(
-    collapsed_levels: &[CollapsedOut],
+/// Sample from over-resolved collapsed data and randomly drop ~half the
+/// pseudobulk rows. Returns `None` if no overresolved stats are present.
+///
+/// This is much faster than re-optimizing from stats — the Gamma
+/// posteriors are already fitted for all 2× groups.
+pub(crate) fn sample_overresolved(
+    collapsed: &CollapsedOut,
     rng: &mut impl rand::Rng,
-) -> Option<Vec<CollapsedOut>> {
-    use data_beans_alg::collapse_data::resample_and_optimize;
-    if collapsed_levels
-        .first()
-        .and_then(|c| c.overresolved_stat.as_ref())
-        .is_some()
-    {
-        Some(
-            collapsed_levels
-                .iter()
-                .map(|c| {
-                    resample_and_optimize(c.overresolved_stat.as_ref().unwrap(), rng, 20)
-                        .expect("resample collapsed")
-                })
-                .collect(),
-        )
-    } else {
-        None
-    }
+) -> Option<anyhow::Result<(Mat, Option<Mat>, Mat)>> {
+    use rand::seq::SliceRandom;
+    collapsed.overresolved_stat.as_ref()?;
+    // Sample from the full 2× CollapsedOut (already fitted)
+    let result = (|| {
+        let (mixed, batch, target) = sample_collapsed_data(collapsed)?;
+        let n = mixed.nrows();
+        let keep = n / 2;
+        let mut indices: Vec<usize> = (0..n).collect();
+        indices.shuffle(rng);
+        indices.truncate(keep);
+        indices.sort_unstable();
+
+        let mixed_sub = mixed.select_rows(indices.iter());
+        let batch_sub = batch.map(|b| b.select_rows(indices.iter()));
+        let target_sub = target.select_rows(indices.iter());
+        Ok((mixed_sub, batch_sub, target_sub))
+    })();
+    Some(result)
 }
 
 /// Result of loading and collapsing input data for topic model training.
