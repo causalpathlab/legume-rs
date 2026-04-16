@@ -4,6 +4,7 @@ use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
 use crate::topic::train::{train_mixed, train_mixed_vcd, train_progressive, TrainConfig};
 
 use candle_util::candle_decoder_topic::*;
+use candle_util::candle_decoder_vmf_topic::*;
 use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_model_traits::*;
 use log::warn;
@@ -15,6 +16,8 @@ pub(crate) enum DecoderType {
     Multinom,
     /// Negative binomial with per-gene dispersion and library size
     Nb,
+    /// Von Mises-Fisher mixture on unit hypersphere
+    Vmf,
 }
 
 impl DecoderType {
@@ -22,6 +25,7 @@ impl DecoderType {
         match self {
             DecoderType::Multinom => "multinom",
             DecoderType::Nb => "nb",
+            DecoderType::Vmf => "vmf",
         }
     }
 }
@@ -224,11 +228,12 @@ pub struct TopicArgs {
         long,
         value_enum,
         value_delimiter = ',',
-        default_value = "multinom",
-        help = "Decoder type(s) [multinom|nb], comma-separated",
-        long_help = "multinom — softmax dictionary with multinomial likelihood.\n\
-                     nb       — negative binomial with per-gene dispersion.\n\n\
-                     Multiple types (e.g. --decoder multinom,nb) train jointly with\n\
+        default_value = "nb",
+        help = "Decoder type(s) [multinom|nb|vmf], comma-separated",
+        long_help = "nb       — negative binomial with per-gene dispersion (default).\n\
+                     multinom — softmax dictionary with log1p-weighted likelihood.\n\
+                     vmf      — von Mises-Fisher mixture on the unit hypersphere.\n\n\
+                     Multiple types (e.g. --decoder multinom,vmf) train jointly with\n\
                      a shared encoder; see --decoder-weights for loss weighting."
     )]
     pub(crate) decoder: Vec<DecoderType>,
@@ -242,8 +247,10 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0.05,
-        help = "Uniform smoothing: z = (1-α)z + α/K. Prevents dead topics"
+        default_value_t = 1e-4,
+        help = "Uniform smoothing of topic proportions during training",
+        long_help = "z_smooth = (1-α) z + α/K. Keeps every topic on the gradient path\n\
+                     and prevents dead topics. Typical: 0.01–0.2. Set 0 to disable."
     )]
     pub(crate) topic_smoothing: f64,
 
@@ -295,6 +302,35 @@ pub struct TopicArgs {
     )]
     pub(crate) refine_reg: f64,
 
+    #[arg(
+        long,
+        help = "Marker TSV (gene<TAB>celltype) — labels data-driven anchors",
+        long_help = "Optional marker file used to label the anchor pseudobulks\n\
+                     found by the data-driven Arora vertex-selection step.\n\
+                     When absent, anchors are still discovered from the data\n\
+                     and used for β initialization; they're just labeled\n\
+                     `novel_{i}` instead of a celltype name."
+    )]
+    pub(crate) markers: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Margin between top1 and top2 marker-fit z-scores to call an anchor"
+    )]
+    pub(crate) anchor_margin: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Cross-entropy penalty on β toward the anchor prior (0 = off)",
+        long_help = "When > 0, adds `-λ · Σ w_gk · log β_kg` to the training loss\n\
+                     so the learned dictionary is pulled toward the anchor PB\n\
+                     expression profiles. Used together with the anchor β init\n\
+                     for strong marker-aware supervision. Ignored by vMF decoder."
+    )]
+    pub(crate) anchor_penalty: f32,
+
     #[command(flatten)]
     pub(crate) cnv: CnvArgs,
 }
@@ -303,8 +339,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let PreparedData {
         data_vec,
         collapsed_levels,
-        gene_filter_mask,
-        feature_weights,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &args.data_files,
         batch_files: &args.batch_files,
@@ -396,6 +430,27 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         warn!("--vcd-epochs is only supported with --level-schedule mixed; ignoring VCD");
     }
 
+    // Data-driven anchor β prior. Built unconditionally — the prior is
+    // useful for β init even without markers. The marker file, when given,
+    // is used only to label the anchors and emit the expansion table.
+    let markers = args
+        .markers
+        .as_deref()
+        .map(|p| crate::marker_support::load_marker_info(p, &gene_names))
+        .transpose()?;
+    let anchor_prior = crate::topic::anchor_prior::AnchorPrior::from_pseudobulk(
+        finest_collapsed,
+        n_topics,
+        markers.as_ref(),
+        args.anchor_margin,
+        finest_coarsening,
+    )?;
+    anchor_prior.write_side_outputs(&args.out, &gene_names, markers.as_ref())?;
+
+    // Per-level [K, D_l] anchor tensors on the training device. Built once
+    // here, held alive for the entire fit via the outer scope.
+    let anchor_tensors = anchor_prior.per_level_device_tensors(&level_coarsenings, &dev)?;
+
     // Build per-level decoders, train, save dictionary, and evaluate.
     let ctx = PipelineCtx {
         level_decoder_dims: &level_decoder_dims,
@@ -412,8 +467,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         dev: &dev,
         args,
         stop: &stop,
-        gene_filter_mask: &gene_filter_mask,
-        feature_weights: &feature_weights,
+        anchor_prior: Some(&anchor_prior),
+        anchor_prior_per_level: Some(&anchor_tensors),
     };
 
     let (scores, z_nk) = if args.decoder.len() == 1 {
@@ -423,6 +478,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             DecoderType::Multinom => {
                 run_topic_pipeline::<MultinomTopicDecoder>(&ctx, &mut encoder)?
             }
+            DecoderType::Vmf => run_topic_pipeline::<VmfTopicDecoder>(&ctx, &mut encoder)?,
         }
     } else {
         // Multiple decoders: dynamic dispatch
@@ -538,6 +594,65 @@ impl DecoderExtras for NbTopicDecoder {
     }
 }
 
+impl DecoderExtras for VmfTopicDecoder {
+    /// vMF dictionary: expand coarse directions to full resolution and re-normalize.
+    fn write_dictionary(
+        &self,
+        coarsening: Option<&FeatureCoarsening>,
+        n_features_full: usize,
+        gene_names: &[Box<str>],
+        out_prefix: &str,
+    ) -> anyhow::Result<()> {
+        let dict_tensor = self
+            .get_dictionary()?
+            .to_device(&candle_core::Device::Cpu)?;
+        let dict_dk: Mat = Mat::from_tensor(&dict_tensor)?;
+
+        let out_dk = if let Some(fc) = coarsening {
+            let k = dict_dk.ncols();
+            let mut expanded = Mat::zeros(n_features_full, k);
+            for (c, fine_indices) in fc.coarse_to_fine.iter().enumerate() {
+                for &f in fine_indices {
+                    for kk in 0..k {
+                        expanded[(f, kk)] = dict_dk[(c, kk)];
+                    }
+                }
+            }
+            // Re-normalize each column to unit length
+            for kk in 0..k {
+                let col = expanded.column(kk);
+                let norm = col.dot(&col).sqrt();
+                if norm > 1e-12 {
+                    expanded.column_mut(kk).scale_mut(1.0 / norm);
+                }
+            }
+            expanded
+        } else {
+            dict_dk
+        };
+
+        out_dk.to_parquet_with_names(
+            &(out_prefix.to_string() + ".dictionary.parquet"),
+            (Some(gene_names), Some("gene")),
+            None,
+        )?;
+        Ok(())
+    }
+
+    fn write_extras(
+        &self,
+        _coarsening: Option<&FeatureCoarsening>,
+        _n_features_full: usize,
+        _gene_names: &[Box<str>],
+        _out_prefix: &str,
+    ) -> anyhow::Result<()> {
+        let kappas = self.kappa_vec()?;
+        let kappa_strs: Vec<String> = kappas.iter().map(|k| format!("{:.2}", k)).collect();
+        info!("vMF concentration κ = [{}]", kappa_strs.join(", "));
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Generic topic pipeline
 // ---------------------------------------------------------------------------
@@ -557,10 +672,11 @@ struct PipelineCtx<'a> {
     dev: &'a candle_core::Device,
     args: &'a TopicArgs,
     stop: &'a std::sync::atomic::AtomicBool,
-    /// Binary CV filter for encoder input (true = informative).
-    gene_filter_mask: &'a [bool],
-    /// Continuous inverse-mean weights for decoder loss.
-    feature_weights: &'a [f32],
+    /// Data-driven β prior — present whenever `--markers` was given OR
+    /// `--anchor-penalty > 0`. Used for β init and (when λ > 0) training.
+    anchor_prior: Option<&'a crate::topic::anchor_prior::AnchorPrior>,
+    /// Per-level `[D_l, K]` anchor tensors pre-built on `dev`.
+    anchor_prior_per_level: Option<&'a [candle_core::Tensor]>,
 }
 
 fn run_topic_pipeline<Dec>(
@@ -570,7 +686,7 @@ fn run_topic_pipeline<Dec>(
 where
     Dec: DecoderModuleT + DecoderExtras + NewDecoder + Send + Sync,
 {
-    let mut decoders: Vec<Dec> = ctx
+    let decoders: Vec<Dec> = ctx
         .level_decoder_dims
         .iter()
         .enumerate()
@@ -580,40 +696,19 @@ where
         })
         .collect();
 
-    // Leiden-based β init: cluster PBs, use per-cluster mean as decoder logits.
-    // Also initializes logit_bias (frozen baseline) and NB log_phi.
-    crate::topic::beta_init::leiden_beta_init(
-        ctx.finest_collapsed,
-        ctx.n_topics,
-        ctx.feature_weights,
-        ctx.parameters,
-        ctx.level_coarsenings,
-        ctx.dev,
-    )?;
-
-    // Decoder: continuous inverse-mean weights (for multinomial loss).
-    for (level, decoder) in decoders.iter_mut().enumerate() {
-        let w = crate::topic::beta_init::coarsen_weights_for_level(
-            ctx.feature_weights,
-            ctx.level_coarsenings[level].as_ref(),
-            ctx.dev,
-        )?;
-        decoder.set_feature_weights(Some(w));
+    // Overwrite the freshly-created dictionary Vars with the anchor β prior
+    // at every decoder level. Only runs when the caller built one.
+    if let Some(ap) = ctx.anchor_prior {
+        ap.init_decoder_dictionary(ctx.parameters, ctx.level_coarsenings, ctx.dev)?;
     }
-
-    // Encoder: binary CV mask (hard mask on encoder input before coarsening).
-    let enc_mask: Vec<f32> = ctx
-        .gene_filter_mask
-        .iter()
-        .map(|&keep| if keep { 1.0 } else { 0.0 })
-        .collect();
 
     let train_config = TrainConfig {
         parameters: ctx.parameters,
         dev: ctx.dev,
         args: ctx.args,
         stop: ctx.stop,
-        encoder_feature_weights: Some(&enc_mask),
+        anchor_prior_per_level: ctx.anchor_prior_per_level,
+        anchor_penalty: ctx.args.anchor_penalty,
     };
     let scores = match (&ctx.args.level_schedule, ctx.args.vcd_epochs > 0) {
         (LevelSchedule::Progressive, _) => train_progressive(
@@ -639,6 +734,44 @@ where
         )?,
     };
 
+    // Diagnostic: PB-level topic usage after training
+    {
+        let enc_fc = ctx.level_coarsenings.last().and_then(|c| c.as_ref());
+        let (mixed, batch, _) = crate::topic::common::sample_collapsed_data(ctx.finest_collapsed)?;
+        let enc_nd = if let Some(fc) = enc_fc {
+            fc.aggregate_columns_nd(&mixed)
+        } else {
+            mixed
+        };
+        let batch_nd = batch.map(|b| {
+            if let Some(fc) = enc_fc {
+                fc.aggregate_columns_nd(&b)
+            } else {
+                b
+            }
+        });
+        let enc_t = enc_nd.to_tensor(ctx.dev)?;
+        let batch_t = batch_nd.map(|b| b.to_tensor(ctx.dev)).transpose()?;
+        let (log_z, _) = encoder.forward_t(&enc_t, batch_t.as_ref(), false)?;
+        let theta: Vec<Vec<f32>> = log_z.exp()?.to_vec2()?;
+        let n_pb = theta.len();
+        let k = theta[0].len();
+        let mean_t: Vec<f32> = (0..k)
+            .map(|ki| theta.iter().map(|r| r[ki]).sum::<f32>() / n_pb as f32)
+            .collect();
+        let active = mean_t.iter().filter(|&&v| v > 0.01).count();
+        info!(
+            "PB topic usage ({} PBs): mean_θ={:?}, active={}/{}",
+            n_pb,
+            mean_t
+                .iter()
+                .map(|v| format!("{:.3}", v))
+                .collect::<Vec<_>>(),
+            active,
+            k,
+        );
+    }
+
     info!("Writing down the model parameters");
 
     let finest_decoder = decoders.last().unwrap();
@@ -656,7 +789,7 @@ where
     )?;
 
     let weights = compute_decoder_weights(&ctx.args.decoder, &ctx.args.decoder_weights);
-    let z_nk = save_metadata_and_evaluate(ctx, encoder, &weights)?;
+    let z_nk = save_metadata_and_evaluate::<Dec>(ctx, encoder, &weights)?;
     Ok((scores, z_nk))
 }
 
@@ -723,12 +856,19 @@ fn compute_decoder_weights(decoders: &[DecoderType], user_weights: &Option<Vec<f
 }
 
 /// Save model metadata/weights, move parameters to CPU, and evaluate latent states.
-fn save_metadata_and_evaluate(
+///
+/// When `--refine-steps > 0`, rebuilds the finest-level decoder on CPU and
+/// uses it for per-cell likelihood refinement during evaluation.
+fn save_metadata_and_evaluate<Dec>(
     ctx: &PipelineCtx,
     encoder: &LogSoftmaxEncoder,
     decoder_weights: &[f64],
-) -> anyhow::Result<Mat> {
+) -> anyhow::Result<Mat>
+where
+    Dec: DecoderModuleT + NewDecoder + Send + Sync,
+{
     use crate::topic::model_metadata::*;
+    use candle_util::candle_topic_refinement::TopicRefinementConfig;
 
     save_parameters(ctx.parameters, &ctx.args.out)?;
 
@@ -754,62 +894,47 @@ fn save_metadata_and_evaluate(
         save_coarsening(fc, &ctx.args.out)?;
     }
 
-    // Move parameters to CPU and rebuild encoder for multi-threaded inference.
-    // VarMap swap replaces GPU tensors with CPU copies; rebuilding the encoder
-    // from the same VarMap picks up the CPU handles.
+    info!("Moving parameters to CPU for multi-threaded inference");
     let cpu_dev = candle_core::Device::Cpu;
-    let use_cpu = !ctx.dev.is_cpu();
-    if use_cpu {
-        info!("Moving parameters to CPU for multi-threaded inference");
-        move_varmap_to_cpu(ctx.parameters)?;
-    }
-    let infer_dev = if use_cpu { &cpu_dev } else { ctx.dev };
-    let cpu_encoder = if use_cpu {
-        let cpu_vb =
-            candle_nn::VarBuilder::from_varmap(ctx.parameters, candle_core::DType::F32, &cpu_dev);
-        Some(LogSoftmaxEncoder::new(
-            LogSoftmaxEncoderArgs {
-                n_features: *ctx
-                    .level_decoder_dims
-                    .last()
-                    .unwrap_or(&ctx.n_features_full),
-                n_topics: ctx.n_topics,
-                layers: &ctx.args.encoder_layers,
-            },
-            cpu_vb,
+    move_varmap_to_cpu(ctx.parameters)?;
+
+    // Rebuild finest decoder on CPU for refinement (if requested)
+    let refine_config = if ctx.args.refine_steps > 0 {
+        Some(TopicRefinementConfig {
+            num_steps: ctx.args.refine_steps,
+            learning_rate: ctx.args.refine_lr,
+            regularization: ctx.args.refine_reg,
+        })
+    } else {
+        None
+    };
+
+    let finest_dec_dim = *ctx
+        .level_decoder_dims
+        .last()
+        .unwrap_or(&ctx.n_features_full);
+    let finest_dec_idx = ctx.level_decoder_dims.len().saturating_sub(1);
+    let cpu_vb =
+        candle_nn::VarBuilder::from_varmap(ctx.parameters, candle_core::DType::F32, &cpu_dev);
+    let refine_decoder = if refine_config.is_some() {
+        Some(Dec::new(
+            finest_dec_dim,
+            ctx.n_topics,
+            cpu_vb.pp(format!("dec_{finest_dec_idx}")),
         )?)
     } else {
         None
     };
-    let infer_encoder = cpu_encoder.as_ref().unwrap_or(encoder);
-
-    // Binary CV mask for evaluation (same as encoder training)
-    let eval_weights_vec: Vec<f32> = ctx
-        .gene_filter_mask
-        .iter()
-        .map(|&keep| if keep { 1.0 } else { 0.0 })
-        .collect();
-    let eval_weights = candle_core::Tensor::from_vec(
-        eval_weights_vec,
-        (1, ctx.gene_filter_mask.len()),
-        infer_dev,
-    )?;
 
     let eval_config = EvaluateLatentConfig {
-        dev: infer_dev,
+        dev: &cpu_dev,
         adj_method: &ctx.args.adj_method,
         minibatch_size: ctx.args.minibatch_size,
         feature_coarsening: ctx.finest_coarsening,
-        decoder: None::<&MultinomTopicDecoder>,
-        refine_config: None,
-        feature_weights: Some(&eval_weights),
+        decoder: refine_decoder.as_ref(),
+        refine_config: refine_config.as_ref(),
     };
-    evaluate_latent_by_encoder(
-        ctx.data_vec,
-        infer_encoder,
-        ctx.finest_collapsed,
-        &eval_config,
-    )
+    evaluate_latent_by_encoder(ctx.data_vec, encoder, ctx.finest_collapsed, &eval_config)
 }
 
 /// Multi-decoder pipeline: builds multiple decoder types per level,
@@ -842,22 +967,20 @@ fn run_multi_decoder_pipeline(
         })
         .collect();
 
-    let enc_mask_multi: Vec<f32> = ctx
-        .gene_filter_mask
-        .iter()
-        .map(|&keep| if keep { 1.0 } else { 0.0 })
-        .collect();
-
     let train_config = TrainConfig {
         parameters: ctx.parameters,
         dev: ctx.dev,
         args: ctx.args,
         stop: ctx.stop,
-        encoder_feature_weights: Some(&enc_mask_multi),
+        anchor_prior_per_level: None,
+        anchor_penalty: 0.0,
     };
 
     if ctx.args.vcd_epochs > 0 {
         warn!("--vcd-epochs is not supported with multi-decoder; ignoring VCD");
+    }
+    if ctx.anchor_prior.is_some() {
+        warn!("anchor prior is not applied in multi-decoder mode; β init + penalty skipped");
     }
 
     let scores = train_mixed_multi_decoder(
@@ -884,6 +1007,6 @@ fn run_multi_decoder_pipeline(
         )?;
     }
 
-    let z_nk = save_metadata_and_evaluate(ctx, encoder, &decoder_weights)?;
+    let z_nk = save_metadata_and_evaluate::<MultinomTopicDecoder>(ctx, encoder, &decoder_weights)?;
     Ok((scores, z_nk))
 }

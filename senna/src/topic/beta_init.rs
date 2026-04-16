@@ -28,6 +28,8 @@ fn decoder_var_path(level: usize, suffix: &str) -> String {
 /// 2. Leiden cluster PB profiles targeting K clusters.
 /// 3. Global mean → `logit_bias` (baseline per gene, fixed).
 /// 4. Per-cluster mean centered by global mean → `logits` (topic-specific).
+/// Returns `Ok(Some(labels))` with per-PB cluster labels (length = n_pb),
+/// or `Ok(None)` if clustering was skipped.
 pub(crate) fn leiden_beta_init(
     finest: &CollapsedOut,
     n_topics: usize,
@@ -35,7 +37,7 @@ pub(crate) fn leiden_beta_init(
     parameters: &VarMap,
     level_coarsenings: &[Option<FeatureCoarsening>],
     dev: &Device,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<Vec<usize>>> {
     let mu_gp: &Mat = match finest.mu_adjusted.as_ref() {
         Some(adj) => {
             log::info!("β init: using mu_adjusted (batch-corrected)");
@@ -50,7 +52,7 @@ pub(crate) fn leiden_beta_init(
     let d_full = mu_gp.nrows();
     if n_pb < 2 {
         log::warn!("β init: need ≥2 pseudobulks, got {}; skipping", n_pb);
-        return Ok(());
+        return Ok(None);
     }
 
     // Depth-normalize → log1p
@@ -92,7 +94,7 @@ pub(crate) fn leiden_beta_init(
             n_topics
         );
         set_bias_all_levels(parameters, &global_mean, level_coarsenings, dev)?;
-        return Ok(());
+        return Ok(None);
     }
 
     // Build filtered PB matrix [n_pb, n_kept] — rows are PBs, columns are genes
@@ -215,7 +217,7 @@ pub(crate) fn leiden_beta_init(
         }
     }
 
-    Ok(())
+    Ok(Some(cluster_result.labels))
 }
 
 /// Set only the logit_bias at every level (fallback when clustering fails).
