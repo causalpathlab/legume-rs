@@ -1,6 +1,5 @@
-pub(crate) mod beta_init;
+pub(crate) mod anchor_prior;
 pub(crate) mod common;
-pub(crate) mod gene_filter;
 pub(crate) mod eval;
 pub(crate) mod eval_indexed;
 pub(crate) mod model_metadata;

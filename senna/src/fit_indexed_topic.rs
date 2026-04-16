@@ -3,11 +3,9 @@ use crate::topic::common::*;
 use crate::topic::eval_indexed::*;
 use crate::topic::train_indexed::*;
 
-use candle_util::candle_decoder_indexed_topic::IndexedTopicDecoder;
+use candle_util::candle_decoder_indexed_topic::*;
 use candle_util::candle_encoder_indexed::*;
 use matrix_param::dmatrix_gamma::GammaMatrix;
-
-type IndexedDecoderKind = IndexedTopicDecoder;
 
 #[derive(Args, Debug)]
 pub struct IndexedTopicArgs {
@@ -192,8 +190,10 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0.05,
-        help = "Uniform smoothing: z = (1-α)z + α/K. Prevents dead topics"
+        default_value_t = 0.01,
+        help = "Uniform smoothing of topic proportions during training",
+        long_help = "z_smooth = (1-α) z + α/K. Keeps every topic on the gradient path\n\
+                     and prevents dead topics. Typical: 0.01–0.2. Set 0 to disable."
     )]
     topic_smoothing: f64,
 
@@ -281,6 +281,26 @@ pub struct IndexedTopicArgs {
     )]
     bulk_data_files: Option<Vec<Box<str>>>,
 
+    #[arg(
+        long,
+        help = "Marker TSV (gene<TAB>celltype) — labels data-driven anchors"
+    )]
+    markers: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Margin between top1 and top2 marker-fit z-scores to call an anchor"
+    )]
+    anchor_margin: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Cross-entropy penalty on β toward the anchor prior (0 = off)"
+    )]
+    anchor_penalty: f32,
+
     #[command(flatten)]
     cnv: CnvArgs,
 }
@@ -289,8 +309,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let PreparedData {
         data_vec,
         collapsed_levels,
-        gene_filter_mask: _gene_filter_mask,
-        feature_weights: _feature_weights,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &args.data_files,
         batch_files: &args.batch_files,
@@ -334,12 +352,15 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         param_builder.pp("enc"),
     )?;
 
-    // Per-level decoders: plain or housekeeping-inflated, wrapped in
-    // the shared enum so downstream code stays generic.
-    let decoders: Vec<IndexedDecoderKind> = (0..num_levels)
+    // Per-level decoders: all at D_full, levels differ in N (sample coarsening)
+    let decoders: Vec<IndexedTopicDecoder> = (0..num_levels)
         .map(|i| {
-            let vs = param_builder.pp(format!("dec_{i}"));
-            IndexedTopicDecoder::new(n_features_full, n_topics, vs).expect("decoder creation")
+            IndexedTopicDecoder::new(
+                n_features_full,
+                n_topics,
+                param_builder.pp(format!("dec_{i}")),
+            )
+            .expect("decoder creation")
         })
         .collect();
 
@@ -354,6 +375,29 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     );
 
     let gene_names = data_vec.row_names()?;
+
+    // Data-driven anchor β prior. Indexed decoders all run at D_full, so
+    // there's no finest-level coarsening to adapt anchor selection to.
+    let markers = args
+        .markers
+        .as_deref()
+        .map(|p| crate::marker_support::load_marker_info(p, &gene_names))
+        .transpose()?;
+    let anchor_prior = crate::topic::anchor_prior::AnchorPrior::from_pseudobulk(
+        finest_collapsed,
+        n_topics,
+        markers.as_ref(),
+        args.anchor_margin,
+        None,
+    )?;
+    anchor_prior.write_side_outputs(&args.out, &gene_names, markers.as_ref())?;
+
+    // Per-level anchor tensors. Indexed decoders all run at D_full, so
+    // no feature coarsening applies — one `None` per level.
+    let level_coarsenings_none: Vec<Option<FeatureCoarsening>> =
+        (0..num_levels).map(|_| None).collect();
+    let anchor_tensors = anchor_prior.per_level_device_tensors(&level_coarsenings_none, &dev)?;
+    anchor_prior.init_decoder_dictionary(&parameters, &level_coarsenings_none, &dev)?;
 
     // Read bulk data aligned to SC genes
     let bulk = args
@@ -393,6 +437,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         vcd_ess_steps: args.vcd_ess_steps,
         ess_max_shrink: args.ess_max_shrink,
         stop: &stop,
+        anchor_prior_per_level: Some(&anchor_tensors),
+        anchor_penalty: args.anchor_penalty,
     };
 
     let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd_full, &bulk_deltas) {
@@ -427,61 +473,35 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let finest_decoder = decoders.last().unwrap();
     write_indexed_dictionary(finest_decoder, &gene_names, &args.out)?;
 
-    // Move to CPU and rebuild encoder for multi-threaded inference.
+    info!("Moving parameters to CPU for multi-threaded inference");
     let cpu_dev = candle_core::Device::Cpu;
-    let use_cpu = !dev.is_cpu();
-    if use_cpu {
-        info!("Moving parameters to CPU for multi-threaded inference");
-        move_varmap_to_cpu(&parameters)?;
-    }
-    let infer_dev = if use_cpu { &cpu_dev } else { &dev };
-    let cpu_encoder = if use_cpu {
-        let cpu_vb =
-            candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &cpu_dev);
-        Some(IndexedEmbeddingEncoder::new(
-            IndexedEmbeddingEncoderArgs {
-                n_features: n_features_full,
-                n_topics,
-                embedding_dim: args.embedding_dim,
-                layers: &args.encoder_layers,
-            },
-            cpu_vb.pp("enc"),
-        )?)
-    } else {
-        None
-    };
-    let infer_encoder = cpu_encoder.as_ref().unwrap_or(&base_encoder);
-    // Rebuild decoder on CPU too for indexed eval
-    let cpu_decoder = if use_cpu {
-        let cpu_vb =
-            candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &cpu_dev);
-        let last_level = num_levels - 1;
+    move_varmap_to_cpu(&parameters)?;
+
+    let refine_config = if args.refine_steps > 0 {
         Some(
-            IndexedTopicDecoder::new(
-                n_features_full,
-                n_topics,
-                cpu_vb.pp(format!("dec_{last_level}")),
-            )
-            .expect("decoder creation"),
+            candle_util::candle_topic_refinement::TopicRefinementConfig {
+                num_steps: args.refine_steps,
+                learning_rate: args.refine_lr,
+                regularization: args.refine_reg,
+            },
         )
     } else {
         None
     };
-    let infer_decoder = cpu_decoder.as_ref().unwrap_or(finest_decoder);
 
     info!("Writing down the latent states");
     let eval_config = EvaluateLatentConfig {
-        dev: infer_dev,
+        dev: &cpu_dev,
         adj_method: &args.adj_method,
         minibatch_size: args.minibatch_size,
         enc_context_size: args.context_size,
         dec_context_size,
-        decoder: infer_decoder,
-        refine_config: None,
+        decoder: finest_decoder,
+        refine_config: refine_config.as_ref(),
     };
     let z_nk = evaluate_latent_by_indexed_encoder(
         &data_vec,
-        infer_encoder,
+        &base_encoder,
         finest_collapsed,
         &eval_config,
     )?;
@@ -489,15 +509,15 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // Evaluate bulk with standard encoder/decoder
     if let (Some(bulk), Some(bulk_deltas)) = (&bulk, &bulk_deltas) {
         let bulk_config = BulkEvalConfig {
-            dev: infer_dev,
+            dev: &cpu_dev,
             enc_context_size: args.context_size,
             dec_context_size,
-            refine_config: None,
-            decoder: infer_decoder,
+            refine_config: refine_config.as_ref(),
+            decoder: finest_decoder,
             gene_names: &gene_names,
             out_prefix: &args.out,
         };
-        evaluate_bulk_samples(bulk, bulk_deltas, infer_encoder, &bulk_config)?;
+        evaluate_bulk_samples(bulk, bulk_deltas, &base_encoder, &bulk_config)?;
     }
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;

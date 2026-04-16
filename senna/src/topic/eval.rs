@@ -13,9 +13,6 @@ pub(crate) struct EvaluateLatentConfig<'a, Dec> {
     pub feature_coarsening: Option<&'a FeatureCoarsening>,
     pub decoder: Option<&'a Dec>,
     pub refine_config: Option<&'a TopicRefinementConfig>,
-    /// Optional `[1, D_full]` feature weights applied to encoder input
-    /// (before coarsening, so `Σ_g w_g * x_g` is correctly aggregated).
-    pub feature_weights: Option<&'a Tensor>,
 }
 
 pub(crate) fn evaluate_latent_by_encoder<Enc, Dec>(
@@ -58,7 +55,6 @@ where
         refine_config: config.refine_config,
         adj_method: config.adj_method.clone(),
         gene_remap: None,
-        feature_weights: config.feature_weights,
     };
 
     process_blocks(ntot, kk, config.minibatch_size, config.dev, |block| {
@@ -147,7 +143,6 @@ where
         refine_config: config.refine_config,
         adj_method: config.adj_method.clone(),
         gene_remap,
-        feature_weights: config.feature_weights,
     };
 
     process_blocks(ntot, kk, config.minibatch_size, config.dev, |block| {
@@ -179,7 +174,6 @@ struct EvaluateBlockConfig<'a, Dec> {
     refine_config: Option<&'a TopicRefinementConfig>,
     adj_method: AdjMethod,
     gene_remap: Option<&'a GeneRemap>,
-    feature_weights: Option<&'a Tensor>,
 }
 
 fn evaluate_block<Enc, Dec>(
@@ -202,21 +196,8 @@ where
 
     let x_dn_csc = data_vec.read_columns_csc(lb..ub)?;
 
-    // Apply feature weights at full resolution BEFORE coarsening so that
-    // coarsened values are Σ_g(w_g * x_g), not mean(w_g) * Σ_g(x_g).
     let x_enc_nd = if let Some(remap) = config.gene_remap {
-        let mut x_dn_train = remap_csc_to_dense(&x_dn_csc, remap);
-        if let Some(w) = config.feature_weights {
-            // weights are [1, D_full] tensor; x_dn_train is [D, N] nalgebra Mat
-            let w_vec: Vec<f32> = w.flatten_all()?.to_vec1()?;
-            for g in 0..x_dn_train.nrows() {
-                if let Some(&wg) = w_vec.get(g) {
-                    if (wg - 1.0).abs() > 1e-8 {
-                        x_dn_train.row_mut(g).scale_mut(wg);
-                    }
-                }
-            }
-        }
+        let x_dn_train = remap_csc_to_dense(&x_dn_csc, remap);
         if let Some(fc) = config.feature_coarsening {
             fc.aggregate_rows_ds(&x_dn_train)
                 .to_tensor(config.dev)?
@@ -224,30 +205,12 @@ where
         } else {
             x_dn_train.to_tensor(config.dev)?.transpose(0, 1)?
         }
+    } else if let Some(fc) = config.feature_coarsening {
+        fc.aggregate_sparse_csc(&x_dn_csc)
+            .to_tensor(config.dev)?
+            .transpose(0, 1)?
     } else {
-        // Convert sparse CSC to dense, apply weights, coarsen
-        let x_dn_dense: Mat = Mat::from(&x_dn_csc);
-        let x_dn_weighted = if let Some(w) = config.feature_weights {
-            let w_vec: Vec<f32> = w.flatten_all()?.to_vec1()?;
-            let mut out = x_dn_dense;
-            for g in 0..out.nrows() {
-                if let Some(&wg) = w_vec.get(g) {
-                    if (wg - 1.0).abs() > 1e-8 {
-                        out.row_mut(g).scale_mut(wg);
-                    }
-                }
-            }
-            out
-        } else {
-            x_dn_dense
-        };
-        if let Some(fc) = config.feature_coarsening {
-            fc.aggregate_rows_ds(&x_dn_weighted)
-                .to_tensor(config.dev)?
-                .transpose(0, 1)?
-        } else {
-            x_dn_weighted.to_tensor(config.dev)?.transpose(0, 1)?
-        }
+        x_dn_csc.to_tensor(config.dev)?.transpose(0, 1)?
     };
 
     let (log_z_nk, _) = encoder.forward_t(&x_enc_nd, x0_nd.as_ref(), false)?;

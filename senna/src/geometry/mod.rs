@@ -3,7 +3,7 @@
 //! layout refinement, and vMF topic-to-celltype assignment. These are pure
 //! functions on `nalgebra` matrices with no I/O and no CLI dependencies, so
 //! they can be consumed freely by `postprocess::*` (visualize, annotate) and
-//! by training-time helpers.
+//! by training-time helpers like `topic::anchor_prior`.
 
 pub(crate) mod cell_layout;
 pub(crate) mod phate;
