@@ -168,6 +168,7 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
             n_topics: metadata.n_topics,
             layers: &metadata.encoder_hidden,
         },
+        &parameters,
         vb.clone(),
     )?;
 

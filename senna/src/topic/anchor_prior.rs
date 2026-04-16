@@ -26,7 +26,6 @@ use std::io::Write;
 /// Suffix on the per-level VarMap path where softmax-based decoders store
 /// their `[K, D]` pre-softmax logits.
 const DICT_LOGITS_VAR_SUFFIX: &str = "dictionary.logits";
-
 /// Full VarMap path for decoder level `i`'s logit tensor.
 fn decoder_logits_var_path(level: usize) -> String {
     format!("dec_{level}.{DICT_LOGITS_VAR_SUFFIX}")
@@ -186,10 +185,9 @@ impl AnchorPrior {
     }
 
     /// Overwrite the dictionary logits for each level's decoder with
-    /// `log(anchor + eps)`. The convention matches both `fit_topic` and
-    /// `fit_indexed_topic`: the decoder at level `i` lives under the
-    /// VarBuilder path `dec_{i}`, so its logit tensor is at
-    /// `dec_{i}.dictionary.logits` (`{n_topics}, {d_level}`).
+    /// `log(anchor + eps)`. Currently unused — random init + anchor
+    /// penalty during training is preferred. Kept for experimentation.
+    #[allow(dead_code)]
     ///
     /// Vars that aren't registered (e.g. the vMF decoder which uses a
     /// different path) are skipped with a warning so the caller can mix
@@ -317,6 +315,9 @@ pub(crate) fn anchor_penalty_at_level(
     // Hold the guard just long enough to clone the logits Tensor handle.
     // Clone is a cheap Arc bump that preserves TensorId and is_variable,
     // so gradients still flow back to the underlying Var through Adam.
+    // Bias is intentionally excluded — it captures the gene-level base
+    // rate from the data likelihood; the anchor penalty should only
+    // shape the topic-specific logits.
     let logits_kd = {
         let data = parameters.data().lock().expect("VarMap lock");
         let name = decoder_logits_var_path(level);

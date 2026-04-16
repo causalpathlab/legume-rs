@@ -1,7 +1,7 @@
 use candle_util::candle_core::{Result, Tensor};
 use candle_util::candle_encoder_indexed::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
 use candle_util::candle_loss_functions::gaussian_kl_loss;
-use candle_util::candle_nn::{ops, VarBuilder};
+use candle_util::candle_nn::{ops, VarBuilder, VarMap};
 
 /// Inputs for the encoder forward pass.
 pub struct EncoderInput<'a> {
@@ -34,6 +34,7 @@ impl ChickpeaEncoder {
         embedding_dim: usize,
         context_size: usize,
         hidden_layers: &[usize],
+        varmap: &VarMap,
         vs: VarBuilder,
     ) -> Result<Self> {
         let gene_expert = IndexedEmbeddingEncoder::new(
@@ -43,6 +44,7 @@ impl ChickpeaEncoder {
                 embedding_dim,
                 layers: hidden_layers,
             },
+            varmap,
             vs.pp("gene_expert"),
         )?;
 
@@ -53,6 +55,7 @@ impl ChickpeaEncoder {
                 embedding_dim,
                 layers: hidden_layers,
             },
+            varmap,
             vs.pp("atac_expert"),
         )?;
 

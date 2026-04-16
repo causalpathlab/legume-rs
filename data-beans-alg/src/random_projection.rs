@@ -197,10 +197,16 @@ impl RandProjOps for SparseIoStack {
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         let basis = concatenate_vertical(
-            &proj_vec.iter().map(|x| x.basis.to_owned()).collect::<Vec<_>>(),
+            &proj_vec
+                .iter()
+                .map(|x| x.basis.to_owned())
+                .collect::<Vec<_>>(),
         )?;
         let proj = concatenate_vertical(
-            &proj_vec.iter().map(|x| x.proj.to_owned()).collect::<Vec<_>>(),
+            &proj_vec
+                .iter()
+                .map(|x| x.proj.to_owned())
+                .collect::<Vec<_>>(),
         )?;
 
         Ok(RandColProjOut { basis, proj })
