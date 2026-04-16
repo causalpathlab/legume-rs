@@ -177,7 +177,7 @@ pub struct TopicArgs {
     #[arg(
         long = "no-oversample-pb",
         default_value_t = false,
-        help = "Disable pseudobulk oversampling (2× groups with jitter subsampling)"
+        help = "Disable PB augmentation (default: 2× groups, subsample each jitter)"
     )]
     pub(crate) no_oversample_pb: bool,
 
@@ -255,9 +255,9 @@ pub struct TopicArgs {
     #[arg(
         long,
         default_value_t = 1e-4,
-        help = "Uniform smoothing of topic proportions during training",
-        long_help = "z_smooth = (1-α) z + α/K. Keeps every topic on the gradient path\n\
-                     and prevents dead topics. Typical: 0.01–0.2. Set 0 to disable."
+        help = "Uniform smoothing α for topic proportions (0 = off)",
+        long_help = "θ = (1-α) softmax(z) + α/K. Prevents dead topics by keeping\n\
+                     every topic on the gradient path. Set 0 to disable."
     )]
     pub(crate) topic_smoothing: f64,
 
@@ -270,46 +270,35 @@ pub struct TopicArgs {
     )]
     pub(crate) refine_steps: usize,
 
-    #[arg(
-        long,
-        default_value_t = 0.01,
-        help = "Learning rate for inference-time refinement"
-    )]
+    #[arg(long, default_value_t = 0.01, help = "Refinement learning rate")]
     pub(crate) refine_lr: f64,
 
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "L2 anchor strength for inference-time refinement"
-    )]
+    #[arg(long, default_value_t = 1.0, help = "Refinement L2 regularization")]
     pub(crate) refine_reg: f64,
 
     #[arg(
+        short = 'm',
         long,
-        help = "Marker TSV (gene<TAB>celltype) — labels data-driven anchors",
-        long_help = "Optional marker file used to label the anchor pseudobulks\n\
-                     found by the data-driven Arora vertex-selection step.\n\
-                     When absent, anchors are still discovered from the data\n\
-                     and used for β initialization; they're just labeled\n\
-                     `novel_{i}` instead of a celltype name."
+        help = "Marker TSV (gene<TAB>celltype) — labels anchors",
+        long_help = "Optional marker file to label the data-driven anchor PBs.\n\
+                     When absent, anchors are labeled `novel_{i}`."
     )]
     pub(crate) markers: Option<Box<str>>,
 
     #[arg(
         long,
         default_value_t = 0.5,
-        help = "Margin between top1 and top2 marker-fit z-scores to call an anchor"
+        help = "Min z-score margin to assign a celltype to an anchor"
     )]
     pub(crate) anchor_margin: f32,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Cross-entropy penalty on β toward the anchor prior (0 = off)",
-        long_help = "When > 0, adds `-λ · Σ w_gk · log β_kg` to the training loss\n\
-                     so the learned dictionary is pulled toward the anchor PB\n\
-                     expression profiles. Used together with the anchor β init\n\
-                     for strong marker-aware supervision. Ignored by vMF decoder."
+        help = "Cross-entropy penalty λ on β toward anchor prior (0 = off)",
+        long_help = "Pulls the decoder dictionary toward anchor PB expression\n\
+                     profiles during training. β starts from random init;\n\
+                     the penalty guides it. Ignored by vMF decoder."
     )]
     pub(crate) anchor_penalty: f32,
 

@@ -152,7 +152,7 @@ pub struct IndexedTopicArgs {
     #[arg(
         long = "no-oversample-pb",
         default_value_t = false,
-        help = "Disable pseudobulk oversampling (2× groups with jitter subsampling)"
+        help = "Disable PB augmentation (default: 2× groups, subsample each jitter)"
     )]
     no_oversample_pb: bool,
 
@@ -225,49 +225,16 @@ pub struct IndexedTopicArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "VCD warm-up epochs before switching to SGVB",
-        long_help = "Variational contrastive divergence refines encoder samples via\n\
-                     elliptical slice sampling for the first N epochs, then switches\n\
-                     to standard SGVB. Only supported with --level-schedule mixed."
-    )]
-    vcd_epochs: usize,
-
-    #[arg(
-        long,
-        default_value_t = 5,
-        alias = "ess-steps",
-        help = "ESS steps per minibatch during VCD epochs"
-    )]
-    vcd_ess_steps: usize,
-
-    #[arg(
-        long,
-        default_value_t = 50,
-        help = "Max shrink iterations per ESS step"
-    )]
-    ess_max_shrink: usize,
-
-    #[arg(
-        long,
-        default_value_t = 0,
         help = "Per-cell refinement steps at inference (0 = off)",
         long_help = "Gradient steps that optimize topic logits against the frozen\n\
                      decoder likelihood, anchored to the encoder output by L2."
     )]
     refine_steps: usize,
 
-    #[arg(
-        long,
-        default_value_t = 0.01,
-        help = "Learning rate for inference-time refinement"
-    )]
+    #[arg(long, default_value_t = 0.01, help = "Refinement learning rate")]
     refine_lr: f64,
 
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "L2 anchor strength for inference-time refinement"
-    )]
+    #[arg(long, default_value_t = 1.0, help = "Refinement L2 regularization")]
     refine_reg: f64,
 
     #[arg(
@@ -289,22 +256,23 @@ pub struct IndexedTopicArgs {
     bulk_data_files: Option<Vec<Box<str>>>,
 
     #[arg(
+        short = 'm',
         long,
-        help = "Marker TSV (gene<TAB>celltype) — labels data-driven anchors"
+        help = "Marker TSV (gene<TAB>celltype) — labels anchors"
     )]
     markers: Option<Box<str>>,
 
     #[arg(
         long,
         default_value_t = 0.5,
-        help = "Margin between top1 and top2 marker-fit z-scores to call an anchor"
+        help = "Min z-score margin to assign a celltype to an anchor"
     )]
     anchor_margin: f32,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Cross-entropy penalty on β toward the anchor prior (0 = off)"
+        help = "Cross-entropy penalty λ on β toward anchor prior (0 = off)"
     )]
     anchor_penalty: f32,
 
@@ -443,9 +411,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         enc_context_size: args.context_size,
         dec_context_size,
         sort_dim_budget: 1usize << args.sort_dim,
-        vcd_epochs: args.vcd_epochs,
-        vcd_ess_steps: args.vcd_ess_steps,
-        ess_max_shrink: args.ess_max_shrink,
         stop: &stop,
         anchor_prior_per_level: Some(&anchor_tensors),
         anchor_penalty: args.anchor_penalty,
@@ -455,10 +420,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         (Some(full), Some(deltas)) => Some((full, deltas)),
         _ => None,
     };
-
-    if args.vcd_epochs > 0 && matches!(args.level_schedule, LevelSchedule::Progressive) {
-        log::warn!("--vcd-epochs is only supported with --level-schedule mixed; ignoring VCD");
-    }
 
     let scores = match args.level_schedule {
         LevelSchedule::Progressive => train_progressive(
