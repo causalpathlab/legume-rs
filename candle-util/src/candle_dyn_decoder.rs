@@ -1,3 +1,4 @@
+use crate::candle_decoder_nb_mixture::{NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME};
 use crate::candle_decoder_topic::{MultinomTopicDecoder, NbTopicDecoder};
 use crate::candle_decoder_vmf_topic::VmfTopicDecoder;
 use crate::candle_model_traits::{DecoderModuleT, EssLlikFn, NewDecoder};
@@ -56,6 +57,7 @@ macro_rules! impl_dyn_decoder {
 impl_dyn_decoder!(MultinomTopicDecoder, "multinom");
 impl_dyn_decoder!(NbTopicDecoder, "nb");
 impl_dyn_decoder!(VmfTopicDecoder, "vmf");
+impl_dyn_decoder!(NbMixtureTopicDecoder, NBMIXTURE_NAME);
 
 /// Create a boxed dynamic decoder by name.
 pub fn create_dyn_decoder(
@@ -70,6 +72,9 @@ pub fn create_dyn_decoder(
         )?)),
         "nb" => Ok(Box::new(NbTopicDecoder::new(n_features, n_topics, vs)?)),
         "vmf" => Ok(Box::new(VmfTopicDecoder::new(n_features, n_topics, vs)?)),
+        NBMIXTURE_NAME => Ok(Box::new(NbMixtureTopicDecoder::new(
+            n_features, n_topics, vs,
+        )?)),
         other => Err(candle_core::Error::Msg(format!(
             "unknown decoder type: {other}"
         ))),

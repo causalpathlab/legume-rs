@@ -10,7 +10,7 @@ use candle_util::candle_loss_functions::topic_likelihood;
 use candle_util::candle_model_traits::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::anchor_prior::anchor_penalty_at_level;
+use super::anchor_prior::{ambient_penalty_at_level, anchor_penalty_at_level};
 use super::common::{compute_level_epochs, sample_collapsed_data, sample_overresolved};
 
 /// Configuration for training
@@ -25,6 +25,13 @@ pub(crate) struct TrainConfig<'a> {
     pub anchor_prior_per_level: Option<&'a [Tensor]>,
     /// Cross-entropy penalty strength λ applied per minibatch.
     pub anchor_penalty: f32,
+    /// Per-level `[1, D_l]` empirical gene-frequency tensors on device.
+    /// Used by the NbMixture decoder to anchor α toward the empirical
+    /// profile. `None` disables the penalty; non-NbMixture levels are
+    /// silently skipped (log_alpha not in VarMap).
+    pub ambient_prior_per_level: Option<&'a [Tensor]>,
+    /// Ambient KL-penalty strength (0 disables).
+    pub ambient_penalty: f32,
 }
 
 impl<'a> TrainConfig<'a> {
@@ -35,6 +42,17 @@ impl<'a> TrainConfig<'a> {
             self.parameters,
             self.anchor_prior_per_level,
             self.anchor_penalty,
+            level,
+        )
+    }
+
+    #[inline]
+    fn add_ambient_penalty(&self, loss: Tensor, level: usize) -> anyhow::Result<Tensor> {
+        ambient_penalty_at_level(
+            loss,
+            self.parameters,
+            self.ambient_prior_per_level,
+            self.ambient_penalty,
             level,
         )
     }
@@ -181,6 +199,7 @@ where
 
                     let loss = (&kl - &llik)?.mean_all()?;
                     let loss = config.add_anchor_penalty(loss, level)?;
+                    let loss = config.add_ambient_penalty(loss, level)?;
                     adam.backward_step(&loss)?;
 
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -328,6 +347,7 @@ where
 
                     let loss = (&kl - &llik)?.mean_all()?;
                     let loss = config.add_anchor_penalty(loss, level)?;
+                    let loss = config.add_ambient_penalty(loss, level)?;
                     adam.backward_step(&loss)?;
 
                     llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
