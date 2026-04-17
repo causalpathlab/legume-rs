@@ -1,7 +1,8 @@
 //! Shared parsing and alignment utilities for `gene<TAB>celltype` marker
-//! files. Used both by the `annotate` subcommand (to build the membership
-//! matrix for vMF assignment) and by the anchor-based topic-model prior
-//! (to label data-driven anchor pseudobulks against user-provided markers).
+//! files. Used by the `annotate` subcommand (to build the gene×celltype
+//! membership matrix used for anchor margin scoring) and by the
+//! training-time anchor-based topic-model prior (to label data-driven
+//! anchor pseudobulks against user-provided markers).
 
 use crate::embed_common::Mat;
 use matrix_util::common_io::{read_lines_of_words_delim, ReadLinesOut};
@@ -21,8 +22,9 @@ pub(crate) struct AnnotInfo {
 }
 
 /// Aligned marker table for the anchor-based topic-model prior. The
-/// `membership_gc` matrix is the only thing the anchor scoring step
-/// actually needs; celltypes index its columns.
+/// `membership_gc` matrix holds TF-IDF weights `w_g = ln(C / c_g)` for
+/// each (gene, celltype) pair; non-markers and genes shared by all
+/// celltypes are 0. Celltypes index its columns.
 pub(crate) struct MarkerInfo {
     pub celltypes: Vec<Box<str>>,
     pub membership_gc: Mat,
@@ -152,11 +154,30 @@ pub(crate) fn load_marker_info(
         }
     }
 
+    // Re-weight binary membership in place: w_g = ln(C / c_g) where
+    // c_g is the number of celltypes claiming gene g. Genes shared by
+    // all celltypes get w = 0 (the soft form of dropping).
+    let c_total = n_ct as f32;
+    let row_c_g = membership_gc.column_sum();
+    for g in 0..n_genes {
+        let c_g = row_c_g[g];
+        if c_g <= 0.0 {
+            continue;
+        }
+        let w = (c_total / c_g).ln();
+        for c in 0..n_ct {
+            if membership_gc[(g, c)] > 0.0 {
+                membership_gc[(g, c)] = w;
+            }
+        }
+    }
+
     log::info!(
-        "MarkerInfo: matched {}/{} markers across {} celltypes",
+        "MarkerInfo: matched {}/{} markers across {} celltypes (TF-IDF max ln(C) = {:.3})",
         matched,
         pairs.len(),
-        n_ct
+        n_ct,
+        c_total.ln(),
     );
 
     Ok(MarkerInfo {

@@ -260,10 +260,17 @@ pub fn logsumexp_forward(log_h_nk: &Tensor, log_w_kd: &Tensor) -> Result<Tensor>
     log_h.broadcast_add(&log_w)?.log_sum_exp(1)
 }
 
-/// create a softmax linear layer
-/// `output_nd <- log( input_nk * t(β_dk) )`
-/// where
-/// `Σ_j β_jk = 1` for all `k`
+/// Create a softmax linear layer with a per-output `logit_bias`:
+///   `β_kd = softmax_d(logits_kd + bias_d)`
+///   `output_nd = log( input_nk · β_kd )`
+///
+/// The per-output bias is load-bearing: it absorbs baseline gene-frequency
+/// offsets so the per-topic logits encode *deviations* from baseline.
+/// Empirically, removing it leaves the multinom decoder near-degenerate
+/// (≈7× worse train llik on BMMNC). NB-family decoders tolerate `_nobias`
+/// because the per-gene dispersion / NbMixture's α absorb baseline
+/// instead, but they still benefit slightly from the bias term.
+/// Default to `log_softmax_linear` unless you have a specific reason.
 pub fn log_softmax_linear(
     in_dim: usize,
     out_dim: usize,
@@ -275,10 +282,9 @@ pub fn log_softmax_linear(
     Ok(SoftmaxLinear::new(ws_kd, Some(b_1d)))
 }
 
-/// create a softmax linear layer
-/// `output_nd <- log( input_nk * t(β_dk) )`
-/// where
-/// `Σ_j β_jk = 1` for all `k`
+/// Bias-free variant — see [`log_softmax_linear`] for the bias rationale.
+/// Currently only used by the indexed-topic decoder where top-K masking
+/// already breaks per-gene baseline absorption.
 pub fn log_softmax_linear_nobias(
     in_dim: usize,
     out_dim: usize,
