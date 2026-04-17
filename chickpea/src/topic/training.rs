@@ -38,6 +38,10 @@ pub struct TrainingParams {
     pub sort_dim: usize,
     pub embedding_dim: usize,
     pub context_size: usize,
+    pub rna_ambient: bool,
+    pub rho_prior_weight: f32,
+    pub rho_prior_alpha: f32,
+    pub rho_prior_beta: f32,
 }
 
 pub struct TrainedModel {
@@ -155,7 +159,7 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
         .iter()
         .enumerate()
         .map(|(i, &(dg, dp))| {
-            ChickpeaDecoder::new(
+            let mut dec = ChickpeaDecoder::new(
                 DecoderArgs {
                     n_features_atac: dp,
                     n_features_rna: dg,
@@ -163,7 +167,14 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
                 },
                 vs.pp(format!("dec_{i}")),
             )
-            .expect("decoder creation")
+            .expect("decoder creation");
+            dec.set_ambient(params.rna_ambient);
+            dec.set_rho_prior(
+                params.rho_prior_weight,
+                params.rho_prior_alpha,
+                params.rho_prior_beta,
+            );
+            dec
         })
         .collect();
 
@@ -200,12 +211,14 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
         .map(|c| c.fine_to_coarse.clone());
 
     let encoder = ChickpeaEncoder::new(
-        ctx.n_genes,
-        ctx.n_peaks,
-        params.n_topics,
-        params.embedding_dim,
-        params.context_size,
-        &[128],
+        crate::topic::encoder::EncoderArgs {
+            n_genes: ctx.n_genes,
+            n_peaks: ctx.n_peaks,
+            n_topics: params.n_topics,
+            embedding_dim: params.embedding_dim,
+            context_size: params.context_size,
+            hidden_layers: &[128],
+        },
         &varmap,
         vs.pp("encoder"),
     )?;

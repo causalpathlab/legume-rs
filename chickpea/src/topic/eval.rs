@@ -66,6 +66,13 @@ fn save_parameters(
         .unsqueeze(1)?
         .to_parquet(&format!("{}.gate_alpha.parquet", out_prefix))?;
 
+    if finest_dec.ambient_enabled() {
+        finest_dec
+            .alpha_amb()?
+            .t()?
+            .to_parquet(&format!("{}.alpha_amb.parquet", out_prefix))?;
+    }
+
     finest_dec
         .log_beta_atac
         .to_parquet(&format!("{}.log_beta.parquet", out_prefix))?;
@@ -96,6 +103,7 @@ fn save_parameters(
 /// Evaluate encoder on original cells and save per-cell topic proportions.
 fn save_latent(model: &TrainedModel, ctx: &EvalContext, out_prefix: &str) -> anyhow::Result<()> {
     let finest_susie = model.susies.last().unwrap();
+    let finest_dec = model.decoders.last().unwrap();
     let m_gc = finest_susie.forward()?;
 
     let enc_weights = match &model.enc_expand_indices {
@@ -111,6 +119,12 @@ fn save_latent(model: &TrainedModel, ctx: &EvalContext, out_prefix: &str) -> any
     let block_size = 4096usize;
     let n_blocks = ncells.div_ceil(block_size);
     let mut all_prop: Vec<Tensor> = Vec::with_capacity(n_blocks);
+    let collect_rho = finest_dec.ambient_enabled();
+    let mut all_rho: Vec<Tensor> = if collect_rho {
+        Vec::with_capacity(n_blocks)
+    } else {
+        Vec::new()
+    };
 
     info!("Evaluating {} cells in {} blocks...", ncells, n_blocks);
 
@@ -127,6 +141,11 @@ fn save_latent(model: &TrainedModel, ctx: &EvalContext, out_prefix: &str) -> any
             .t()?
             .contiguous()?;
 
+        if collect_rho {
+            let lib_n1 = rna_block.sum(1)?.unsqueeze(1)?;
+            all_rho.push(finest_dec.rho_from_lib(&lib_n1)?);
+        }
+
         let enc_inp = EncoderInput {
             x_rna: &rna_block,
             x_atac: &atac_block,
@@ -141,5 +160,8 @@ fn save_latent(model: &TrainedModel, ctx: &EvalContext, out_prefix: &str) -> any
     }
 
     Tensor::cat(&all_prop, 0)?.to_parquet(&format!("{}.prop.parquet", out_prefix))?;
+    if collect_rho {
+        Tensor::cat(&all_rho, 0)?.to_parquet(&format!("{}.rho.parquet", out_prefix))?;
+    }
     Ok(())
 }
