@@ -8,6 +8,7 @@ pub mod candle_data_loader_util;
 pub mod candle_decoder_delta_topic;
 pub mod candle_decoder_indexed_topic;
 pub mod candle_decoder_joint_topic;
+pub mod candle_decoder_nb_mixture;
 pub mod candle_decoder_poisson;
 pub mod candle_decoder_topic;
 pub mod candle_decoder_vmf_topic;

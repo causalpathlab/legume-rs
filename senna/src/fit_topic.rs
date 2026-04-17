@@ -3,6 +3,9 @@ use crate::topic::common::*;
 use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
 use crate::topic::train::{train_mixed, train_progressive, TrainConfig};
 
+use candle_util::candle_decoder_nb_mixture::{
+    NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME,
+};
 use candle_util::candle_decoder_topic::*;
 use candle_util::candle_decoder_vmf_topic::*;
 use candle_util::candle_encoder_softmax::*;
@@ -18,6 +21,8 @@ pub(crate) enum DecoderType {
     Nb,
     /// Von Mises-Fisher mixture on unit hypersphere
     Vmf,
+    /// NB with an ambient-RNA mixture (α_g) and per-sample ρ from library size
+    NbMixture,
 }
 
 impl DecoderType {
@@ -26,6 +31,7 @@ impl DecoderType {
             DecoderType::Multinom => "multinom",
             DecoderType::Nb => "nb",
             DecoderType::Vmf => "vmf",
+            DecoderType::NbMixture => NBMIXTURE_NAME,
         }
     }
 }
@@ -302,6 +308,32 @@ pub struct TopicArgs {
     )]
     pub(crate) anchor_penalty: f32,
 
+    #[arg(
+        long,
+        default_value_t = 0.1,
+        help = "Cross-entropy penalty λ on α toward empirical gene profile (0 = off)",
+        long_help = "NbMixture-only. Pulls the ambient gene profile α toward the\n\
+                     empirical marginal gene frequency so it doesn't drift into\n\
+                     a biological topic. Ignored by non-NbMixture decoders."
+    )]
+    pub(crate) ambient_penalty: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Beta(α,β) prior weight on ρ (0 = off)",
+        long_help = "NbMixture-only. Scales the per-sample log Beta prior on ρ_n.\n\
+                     Without it the decoder often drives ρ → 0 (β absorbs ambient).\n\
+                     Try 10.0 to push per-cell ρ toward the prior mean."
+    )]
+    pub(crate) rho_prior_weight: f32,
+
+    #[arg(long, default_value_t = 2.0, help = "Beta(α,·) shape on ρ prior")]
+    pub(crate) rho_prior_alpha: f32,
+
+    #[arg(long, default_value_t = 18.0, help = "Beta(·,β) shape on ρ prior")]
+    pub(crate) rho_prior_beta: f32,
+
     #[command(flatten)]
     pub(crate) cnv: CnvArgs,
 }
@@ -410,6 +442,15 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     // here, held alive for the entire fit via the outer scope.
     let anchor_tensors = anchor_prior.per_level_device_tensors(&level_coarsenings, &dev)?;
 
+    // Per-level [1, D_l] empirical gene-frequency tensors for the NbMixture
+    // α penalty. Simplex over D_l, built from the finest PB posterior mean.
+    let ambient_tensors = build_empirical_profiles_per_level(
+        finest_collapsed,
+        &level_coarsenings,
+        n_features_full,
+        &dev,
+    )?;
+
     // Build per-level decoders, train, save dictionary, and evaluate.
     let ctx = PipelineCtx {
         level_decoder_dims: &level_decoder_dims,
@@ -428,6 +469,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         stop: &stop,
         anchor_prior: Some(&anchor_prior),
         anchor_prior_per_level: Some(&anchor_tensors),
+        ambient_prior_per_level: Some(&ambient_tensors),
     };
 
     let mut encoder = LogSoftmaxEncoder::new(
@@ -447,6 +489,9 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 run_topic_pipeline::<_, MultinomTopicDecoder>(&ctx, &mut encoder)?
             }
             DecoderType::Vmf => run_topic_pipeline::<_, VmfTopicDecoder>(&ctx, &mut encoder)?,
+            DecoderType::NbMixture => {
+                run_topic_pipeline::<_, NbMixtureTopicDecoder>(&ctx, &mut encoder)?
+            }
         }
     } else {
         run_multi_decoder_pipeline(&ctx, &mut encoder)?
@@ -523,7 +568,85 @@ trait DecoderExtras {
     }
 }
 
+/// Trait for optional per-run hyperparameter configuration from CLI args.
+/// Default is no-op; NbMixtureTopicDecoder overrides to set Beta(ρ) prior.
+trait ConfigureDecoder {
+    fn configure(&mut self, _args: &TopicArgs) {}
+}
+
+impl ConfigureDecoder for MultinomTopicDecoder {}
+impl ConfigureDecoder for NbTopicDecoder {}
+impl ConfigureDecoder for VmfTopicDecoder {}
+impl ConfigureDecoder for NbMixtureTopicDecoder {
+    fn configure(&mut self, args: &TopicArgs) {
+        self.set_rho_prior(
+            args.rho_prior_weight,
+            args.rho_prior_alpha,
+            args.rho_prior_beta,
+        );
+    }
+}
+
 impl DecoderExtras for MultinomTopicDecoder {}
+
+/// Expand a coarsened per-feature vector `[D_coarse]` back to `[n_features_full]`
+/// by broadcasting each coarse value across its fine-feature group. For
+/// simplex-valued vectors set `split_mass=true` so the expanded vector sums
+/// to the same total as the coarse one; for scalar-per-gene values (φ, dispersions)
+/// keep `split_mass=false`.
+fn expand_coarsened_feature_vec(
+    coarse_vec: Vec<f32>,
+    coarsening: Option<&FeatureCoarsening>,
+    n_features_full: usize,
+    split_mass: bool,
+) -> Vec<f32> {
+    let Some(fc) = coarsening else {
+        return coarse_vec;
+    };
+    let mut full = vec![0.0f32; n_features_full];
+    for (c, group) in fc.coarse_to_fine.iter().enumerate() {
+        let per_feat = if split_mass {
+            coarse_vec[c] / group.len().max(1) as f32
+        } else {
+            coarse_vec[c]
+        };
+        for &f in group {
+            full[f] = per_feat;
+        }
+    }
+    full
+}
+
+/// Write a `[D]` per-gene parameter vector as `{out}.{name}.parquet`.
+fn write_per_gene_param(
+    values: Vec<f32>,
+    coarsening: Option<&FeatureCoarsening>,
+    n_features_full: usize,
+    gene_names: &[Box<str>],
+    out_prefix: &str,
+    file_suffix: &str,
+    col_name: &str,
+    split_mass: bool,
+) -> anyhow::Result<()> {
+    let expanded = expand_coarsened_feature_vec(values, coarsening, n_features_full, split_mass);
+    let mat = Mat::from_column_slice(expanded.len(), 1, &expanded);
+    let col = vec![col_name.to_string().into_boxed_str()];
+    mat.to_parquet_with_names(
+        &format!("{out_prefix}.{file_suffix}.parquet"),
+        (Some(gene_names), Some("gene")),
+        Some(&col),
+    )?;
+    Ok(())
+}
+
+/// Pull `log_phi` from device, exp it, and flatten into a plain Vec<f32>.
+fn phi_vec_from_tensor(log_phi: &candle_core::Tensor) -> anyhow::Result<Vec<f32>> {
+    Ok(log_phi
+        .to_device(&candle_core::Device::Cpu)?
+        .exp()?
+        .flatten_all()?
+        .to_vec1()?)
+}
 
 impl DecoderExtras for NbTopicDecoder {
     fn write_extras(
@@ -533,29 +656,73 @@ impl DecoderExtras for NbTopicDecoder {
         gene_names: &[Box<str>],
         out_prefix: &str,
     ) -> anyhow::Result<()> {
-        let log_phi = self.log_phi().to_device(&candle_core::Device::Cpu)?;
-        let phi_vec: Vec<f32> = log_phi.exp()?.flatten_all()?.to_vec1()?;
-        let phi_expanded: Vec<f32> = if let Some(fc) = coarsening {
-            let mut full = vec![0.0f32; n_features_full];
-            for (c, group) in fc.coarse_to_fine.iter().enumerate() {
-                for &f in group {
-                    full[f] = phi_vec[c];
-                }
-            }
-            full
-        } else {
-            phi_vec
-        };
-        let phi_mat = Mat::from_column_slice(phi_expanded.len(), 1, &phi_expanded);
-        let col_names = vec!["dispersion_phi".to_string().into_boxed_str()];
-        phi_mat.to_parquet_with_names(
-            &(out_prefix.to_string() + ".dispersion.parquet"),
-            (Some(gene_names), Some("gene")),
-            Some(&col_names),
+        let phi_vec = phi_vec_from_tensor(self.log_phi())?;
+        write_per_gene_param(
+            phi_vec,
+            coarsening,
+            n_features_full,
+            gene_names,
+            out_prefix,
+            "dispersion",
+            "dispersion_phi",
+            false,
         )?;
         info!(
             "Saved dispersion parameters to {}.dispersion.parquet",
             out_prefix
+        );
+        Ok(())
+    }
+}
+
+impl DecoderExtras for NbMixtureTopicDecoder {
+    fn write_extras(
+        &self,
+        coarsening: Option<&FeatureCoarsening>,
+        n_features_full: usize,
+        gene_names: &[Box<str>],
+        out_prefix: &str,
+    ) -> anyhow::Result<()> {
+        let cpu = candle_core::Device::Cpu;
+
+        write_per_gene_param(
+            phi_vec_from_tensor(self.log_phi())?,
+            coarsening,
+            n_features_full,
+            gene_names,
+            out_prefix,
+            "dispersion",
+            "dispersion_phi",
+            false,
+        )?;
+
+        let alpha_vec: Vec<f32> = self.alpha()?.to_device(&cpu)?.flatten_all()?.to_vec1()?;
+        write_per_gene_param(
+            alpha_vec,
+            coarsening,
+            n_features_full,
+            gene_names,
+            out_prefix,
+            "alpha",
+            "ambient_alpha",
+            true,
+        )?;
+
+        let rho_a: f32 = self.rho_a().to_device(&cpu)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let rho_b: f32 = self.rho_b().to_device(&cpu)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let rho_mat = Mat::from_column_slice(2, 1, &[rho_a, rho_b]);
+        let row_names = vec![
+            "rho_a".to_string().into_boxed_str(),
+            "rho_b".to_string().into_boxed_str(),
+        ];
+        rho_mat.to_parquet_with_names(
+            &(out_prefix.to_string() + ".rho.parquet"),
+            (Some(&row_names), Some("param")),
+            Some(&["value".to_string().into_boxed_str()]),
+        )?;
+        info!(
+            "Saved ambient parameters: {}.dispersion.parquet, {}.alpha.parquet, {}.rho.parquet (a={:.3}, b={:.3})",
+            out_prefix, out_prefix, out_prefix, rho_a, rho_b
         );
         Ok(())
     }
@@ -644,6 +811,9 @@ struct PipelineCtx<'a> {
     anchor_prior: Option<&'a crate::topic::anchor_prior::AnchorPrior>,
     /// Per-level `[D_l, K]` anchor tensors pre-built on `dev`.
     anchor_prior_per_level: Option<&'a [candle_core::Tensor]>,
+    /// Per-level `[1, D_l]` empirical gene-frequency tensors on `dev`,
+    /// used by the NbMixture α penalty.
+    ambient_prior_per_level: Option<&'a [candle_core::Tensor]>,
 }
 
 fn run_topic_pipeline<Enc, Dec>(
@@ -652,9 +822,9 @@ fn run_topic_pipeline<Enc, Dec>(
 ) -> anyhow::Result<(TrainScores, Mat)>
 where
     Enc: EncoderModuleT + Send + Sync,
-    Dec: DecoderModuleT + DecoderExtras + NewDecoder + Send + Sync,
+    Dec: DecoderModuleT + DecoderExtras + NewDecoder + ConfigureDecoder + Send + Sync,
 {
-    let decoders: Vec<Dec> = ctx
+    let mut decoders: Vec<Dec> = ctx
         .level_decoder_dims
         .iter()
         .enumerate()
@@ -663,6 +833,9 @@ where
                 .expect("decoder creation")
         })
         .collect();
+    for dec in decoders.iter_mut() {
+        dec.configure(ctx.args);
+    }
 
     // β init from anchor prior is disabled — random (Kaiming) initialisation
     // works well when the anchor penalty (default 1.0) pulls β toward the
@@ -676,6 +849,8 @@ where
         stop: ctx.stop,
         anchor_prior_per_level: ctx.anchor_prior_per_level,
         anchor_penalty: ctx.args.anchor_penalty,
+        ambient_prior_per_level: ctx.ambient_prior_per_level,
+        ambient_penalty: ctx.args.ambient_penalty,
     };
     let scores = match &ctx.args.level_schedule {
         LevelSchedule::Progressive => train_progressive(
@@ -801,6 +976,60 @@ fn write_dictionary_expanded<Dec: DecoderModuleT + ?Sized>(
         gene_names,
         out_prefix,
     )
+}
+
+/// Per-level `[1, D_l]` empirical gene-frequency tensors on `dev`.
+///
+/// Computes the empirical marginal gene profile at full D (mean across
+/// pseudobulks of the finest collapsed posterior), then aggregates it into
+/// each level's feature dim via the matching coarsening. Each returned
+/// tensor is a simplex over D_l (sums to 1).
+fn build_empirical_profiles_per_level(
+    finest: &CollapsedOut,
+    level_coarsenings: &[Option<FeatureCoarsening>],
+    n_features_full: usize,
+    dev: &candle_core::Device,
+) -> anyhow::Result<Vec<candle_core::Tensor>> {
+    let mu_gp = finest.mu_observed.posterior_mean();
+    let n_pb = mu_gp.ncols().max(1) as f32;
+
+    let mut p_emp_full: Vec<f32> = vec![0.0; n_features_full];
+    for j in 0..mu_gp.ncols() {
+        for i in 0..mu_gp.nrows() {
+            p_emp_full[i] += mu_gp[(i, j)];
+        }
+    }
+    for v in p_emp_full.iter_mut() {
+        *v /= n_pb;
+    }
+    let s: f32 = p_emp_full.iter().sum();
+    if s > 0.0 {
+        for v in p_emp_full.iter_mut() {
+            *v /= s;
+        }
+    }
+    let p_full_d1 = Mat::from_column_slice(n_features_full, 1, &p_emp_full);
+
+    level_coarsenings
+        .iter()
+        .map(|fc| {
+            let p_d1: Mat = match fc {
+                Some(fc) => fc.aggregate_rows_ds(&p_full_d1),
+                None => p_full_d1.clone(),
+            };
+            // Renormalize and reshape to [1, D_l].
+            let s: f32 = p_d1.as_slice().iter().sum();
+            let mut vec: Vec<f32> = p_d1.as_slice().to_vec();
+            if s > 1e-12 {
+                for v in vec.iter_mut() {
+                    *v /= s;
+                }
+            }
+            let d_l = vec.len();
+            let t = candle_core::Tensor::from_vec(vec, (1, d_l), dev)?;
+            Ok(t)
+        })
+        .collect()
 }
 
 /// Compute normalized decoder weights. If user provided weights, normalize
@@ -955,6 +1184,8 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
         stop: ctx.stop,
         anchor_prior_per_level: None,
         anchor_penalty: 0.0,
+        ambient_prior_per_level: None,
+        ambient_penalty: 0.0,
     };
 
     if ctx.anchor_prior.is_some() {
