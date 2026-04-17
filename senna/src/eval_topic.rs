@@ -3,8 +3,13 @@ use crate::topic::eval::*;
 use crate::topic::model_metadata::*;
 
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
-use candle_util::candle_decoder_topic::MultinomTopicDecoder;
+use candle_util::candle_decoder_nb_mixture::{
+    NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME,
+};
+use candle_util::candle_decoder_topic::{MultinomTopicDecoder, NbTopicDecoder};
+use candle_util::candle_decoder_vmf_topic::VmfTopicDecoder;
 use candle_util::candle_encoder_softmax::*;
+use candle_util::candle_model_traits::{DecoderModuleT, NewDecoder};
 use candle_util::candle_topic_refinement::*;
 use data_beans::sparse_io_vector::SparseIoVec;
 use log::info;
@@ -172,28 +177,6 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
         vb.clone(),
     )?;
 
-    // Register decoder params so safetensors keys match
-    let decoder = if args.refine_steps > 0 {
-        let d = *metadata
-            .level_decoder_dims
-            .last()
-            .unwrap_or(&metadata.n_features_encoder);
-        Some(MultinomTopicDecoder::new(
-            d,
-            metadata.n_topics,
-            vb.pp("dec_0"),
-        )?)
-    } else {
-        for (i, &d_l) in metadata.level_decoder_dims.iter().enumerate() {
-            let _ = MultinomTopicDecoder::new(d_l, metadata.n_topics, vb.pp(format!("dec_{i}")))?;
-        }
-        None
-    };
-
-    let safetensors_path = format!("{}.safetensors", &args.model);
-    info!("Loading weights from {}", safetensors_path);
-    parameters.load(&safetensors_path)?;
-
     let refine_config = if args.refine_steps > 0 {
         Some(TopicRefinementConfig {
             num_steps: args.refine_steps,
@@ -203,27 +186,43 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
     } else {
         None
     };
-
-    // Always use Batch adjustment — group membership from collapsing is unavailable
     let adj_method = AdjMethod::Batch;
 
-    let eval_config = EvaluateLatentConfig {
-        dev: &cpu_dev,
+    let eval_inputs = EvalInputs {
+        metadata: &metadata,
+        parameters: &mut parameters,
+        vb: &vb,
+        model_prefix: &args.model,
+        encoder: &encoder,
+        data_vec: &data_vec,
+        delta_db: delta_db.as_ref(),
+        gene_remap: gene_remap_opt.as_ref(),
+        coarsening: coarsening.as_ref(),
+        cpu_dev: &cpu_dev,
         adj_method: &adj_method,
         minibatch_size: args.minibatch_size,
-        feature_coarsening: coarsening.as_ref(),
-        decoder: decoder.as_ref(),
         refine_config: refine_config.as_ref(),
     };
 
-    info!("Evaluating latent states on CPU");
-    let z_nk = evaluate_latent_with_gene_remap(
-        &data_vec,
-        &encoder,
-        delta_db.as_ref(),
-        gene_remap_opt.as_ref(),
-        &eval_config,
-    )?;
+    // Dispatch on trained decoder type so the right concrete type is
+    // registered in the VarMap (safetensors keys must match) and used for
+    // refinement. Multi-decoder models use the first decoder type —
+    // refinement against the primary dictionary.
+    let decoder_name = metadata
+        .decoder_types
+        .first()
+        .map(|s| s.as_ref())
+        .unwrap_or("multinom");
+    info!("Evaluating latent states on CPU (decoder: {})", decoder_name);
+    let z_nk = match decoder_name {
+        "multinom" => eval_with_decoder::<MultinomTopicDecoder>(eval_inputs)?,
+        "nb" => eval_with_decoder::<NbTopicDecoder>(eval_inputs)?,
+        name if name == NBMIXTURE_NAME => {
+            eval_with_decoder::<NbMixtureTopicDecoder>(eval_inputs)?
+        }
+        "vmf" => eval_with_decoder::<VmfTopicDecoder>(eval_inputs)?,
+        other => anyhow::bail!("unsupported decoder type in metadata: {other}"),
+    };
 
     let cell_names = data_vec.column_names()?;
     z_nk.to_parquet_with_names(
@@ -236,6 +235,74 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
 }
 
 /// Estimate per-batch delta from new data pseudobulk and trained dictionary.
+/// Shared inputs for the decoder-dispatch path.
+struct EvalInputs<'a> {
+    metadata: &'a TopicModelMetadata,
+    parameters: &'a mut candle_nn::VarMap,
+    vb: &'a candle_nn::VarBuilder<'a>,
+    model_prefix: &'a str,
+    encoder: &'a LogSoftmaxEncoder,
+    data_vec: &'a SparseIoVec,
+    delta_db: Option<&'a Mat>,
+    gene_remap: Option<&'a GeneRemap>,
+    coarsening: Option<&'a FeatureCoarsening>,
+    cpu_dev: &'a candle_core::Device,
+    adj_method: &'a AdjMethod,
+    minibatch_size: usize,
+    refine_config: Option<&'a TopicRefinementConfig>,
+}
+
+/// Register decoder params, load safetensors, and run latent evaluation
+/// with the concrete decoder type matching the trained model.
+fn eval_with_decoder<Dec>(inputs: EvalInputs<'_>) -> anyhow::Result<Mat>
+where
+    Dec: DecoderModuleT + NewDecoder + Send + Sync,
+{
+    let EvalInputs {
+        metadata,
+        parameters,
+        vb,
+        model_prefix,
+        encoder,
+        data_vec,
+        delta_db,
+        gene_remap,
+        coarsening,
+        cpu_dev,
+        adj_method,
+        minibatch_size,
+        refine_config,
+    } = inputs;
+
+    // Register decoders at every level so safetensors keys match the
+    // training layout. Refinement only uses the finest.
+    let mut decoders: Vec<Dec> = Vec::with_capacity(metadata.level_decoder_dims.len());
+    for (i, &d_l) in metadata.level_decoder_dims.iter().enumerate() {
+        decoders.push(Dec::new(d_l, metadata.n_topics, vb.pp(format!("dec_{i}")))?);
+    }
+
+    let safetensors_path = format!("{}.safetensors", model_prefix);
+    info!("Loading weights from {}", safetensors_path);
+    parameters.load(&safetensors_path)?;
+
+    let decoder_ref = if refine_config.is_some() {
+        decoders.last()
+    } else {
+        None
+    };
+
+    let eval_config = EvaluateLatentConfig {
+        dev: cpu_dev,
+        adj_method,
+        minibatch_size,
+        feature_coarsening: coarsening,
+        decoder: decoder_ref,
+        refine_config,
+    };
+
+    evaluate_latent_with_gene_remap(data_vec, encoder, delta_db, gene_remap, &eval_config)
+}
+
 ///
 /// `delta[d,b] = (pb[d,b] / lib_b) / predicted[d]` where predicted is the
 /// marginal gene proportion from the dictionary.

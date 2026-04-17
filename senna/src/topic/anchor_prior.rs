@@ -31,6 +31,12 @@ fn decoder_logits_var_path(level: usize) -> String {
     format!("dec_{level}.{DICT_LOGITS_VAR_SUFFIX}")
 }
 
+/// Suffix for the NbMixture decoder's ambient-profile logits `[1, D]`.
+const AMBIENT_LOGITS_VAR_SUFFIX: &str = "log_alpha";
+fn ambient_logits_var_path(level: usize) -> String {
+    format!("dec_{level}.{AMBIENT_LOGITS_VAR_SUFFIX}")
+}
+
 /// Everything the anchor pipeline produces in one pass.
 pub(crate) struct AnchorPrior {
     /// `[D_full, K]`, each column on the gene simplex.
@@ -299,6 +305,54 @@ impl AnchorPrior {
 /// change `--minibatch-size`, you will typically want to rescale
 /// `--anchor-penalty` in inverse proportion (or rely on Adam's adaptive
 /// step size plus linear-LR scaling to absorb the difference).
+/// Cross-entropy penalty `−λ · mean(Σ · log softmax(logits))` for a
+/// named Var at level `level`. Shared between anchor β and ambient α:
+/// both are `−Σ prior · log softmax(var_logits)` against a simplex prior.
+///
+/// **Batch-size semantics** (same for anchor and ambient): the penalty is
+/// a fixed scalar per minibatch step — it does not depend on the sample
+/// count. The main VAE loss uses `mean_all()` over the minibatch, so both
+/// terms are per-sample-averaged within a step and their ratio is
+/// batch-size invariant. Over an epoch the penalty is applied once per
+/// minibatch, so its cumulative gradient contribution scales with
+/// `M = N_total / N_batch`; rescale `--anchor-penalty` /
+/// `--ambient-penalty` inversely with `--minibatch-size` if you change it
+/// (or rely on Adam's adaptive step to absorb the difference).
+fn ce_penalty_at_level(
+    loss: Tensor,
+    parameters: &VarMap,
+    priors_per_level: Option<&[Tensor]>,
+    lambda: f32,
+    level: usize,
+    var_path: &str,
+    reduce_dim: usize,
+) -> anyhow::Result<Tensor> {
+    let Some(priors) = priors_per_level else {
+        return Ok(loss);
+    };
+    if lambda <= 0.0 {
+        return Ok(loss);
+    }
+    // Clone the logits Tensor handle under the lock — a cheap Arc bump
+    // that preserves TensorId / is_variable so gradients still flow.
+    let logits = {
+        let data = parameters.data().lock().expect("VarMap lock");
+        match data.get(var_path) {
+            Some(var) => var.as_tensor().clone(),
+            None => return Ok(loss),
+        }
+    };
+    let prior = &priors[level];
+    let log_prob = candle_nn::ops::log_softmax(&logits, logits.rank() - 1)?;
+    let ce = (prior * &log_prob)?.sum(reduce_dim)?.neg()?;
+    let pen = (ce.mean_all()? * lambda as f64)?;
+    Ok((loss + pen)?)
+}
+
+/// Apply the β prior cross-entropy penalty for one decoder level to an
+/// existing loss. No-op when the prior isn't attached, when λ ≤ 0, or when
+/// the level's decoder doesn't register its dictionary under
+/// `dec_{level}.dictionary.logits` (e.g. the vMF decoder).
 pub(crate) fn anchor_penalty_at_level(
     loss: Tensor,
     parameters: &VarMap,
@@ -306,34 +360,38 @@ pub(crate) fn anchor_penalty_at_level(
     lambda: f32,
     level: usize,
 ) -> anyhow::Result<Tensor> {
-    let Some(priors) = anchor_prior_per_level else {
-        return Ok(loss);
-    };
-    if lambda <= 0.0 {
-        return Ok(loss);
-    }
-    // Hold the guard just long enough to clone the logits Tensor handle.
-    // Clone is a cheap Arc bump that preserves TensorId and is_variable,
-    // so gradients still flow back to the underlying Var through Adam.
-    // Bias is intentionally excluded — it captures the gene-level base
-    // rate from the data likelihood; the anchor penalty should only
-    // shape the topic-specific logits.
-    let logits_kd = {
-        let data = parameters.data().lock().expect("VarMap lock");
-        let name = decoder_logits_var_path(level);
-        match data.get(&name) {
-            Some(var) => var.as_tensor().clone(),
-            None => return Ok(loss),
-        }
-    };
-    // Both `anchor_kd` and `log_beta_kd` are [K, D_l]. The anchor tensors
-    // are pre-transposed at build time so no per-minibatch transpose is
-    // needed here. Cross-entropy is summed over D and averaged over K.
-    let anchor_kd = &priors[level];
-    let log_beta_kd = candle_nn::ops::log_softmax(&logits_kd, logits_kd.rank() - 1)?;
-    let ce = (anchor_kd * &log_beta_kd)?.sum(1)?.neg()?;
-    let pen = (ce.mean_all()? * lambda as f64)?;
-    Ok((loss + pen)?)
+    // [K, D_l] anchor vs [K, D_l] log-β → sum over D then mean over K.
+    ce_penalty_at_level(
+        loss,
+        parameters,
+        anchor_prior_per_level,
+        lambda,
+        level,
+        &decoder_logits_var_path(level),
+        1,
+    )
+}
+
+/// Ambient cross-entropy penalty `-Σ_d p_emp_d · log α_d` for the
+/// NbMixture decoder. No-op when `p_emp_per_level` is `None`, λ ≤ 0,
+/// or the level's decoder isn't NbMixture (`log_alpha` not registered).
+pub(crate) fn ambient_penalty_at_level(
+    loss: Tensor,
+    parameters: &VarMap,
+    p_emp_per_level: Option<&[Tensor]>,
+    lambda: f32,
+    level: usize,
+) -> anyhow::Result<Tensor> {
+    // [1, D_l] prior vs [1, D_l] log-α → sum over D, mean is trivial.
+    ce_penalty_at_level(
+        loss,
+        parameters,
+        p_emp_per_level,
+        lambda,
+        level,
+        &ambient_logits_var_path(level),
+        1,
+    )
 }
 
 // ---------------------------------------------------------------------------
