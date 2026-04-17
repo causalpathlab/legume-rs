@@ -44,6 +44,9 @@ pub struct VisualizeArgs {
 		     {out}.pb_coords.parquet:\n\
 		       Pseudobulk sample coordinates (n_pb × 2)\n\
 		       Columns: row (PB ID), x, y\n\n\
+		     {out}.pb_mean_latent.parquet:\n\
+		       Per-PB mean latent (n_pb × K), rows aligned with pb_coords.\n\
+		       Consumed by `senna annotate` to build anchor PBs.\n\n\
 		     {out}.cell_coords.parquet:\n\
 		       Cell coordinates (n_cells × 2 or 3)\n\
 		       Columns: row (cell ID), x, y, [cluster]\n\
@@ -569,6 +572,18 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
         Some(&coord_cols),
     )?;
 
+    // Persist per-PB mean latent (post-coverage-filter) so `senna annotate`
+    // can build anchor PBs without re-running partition/whitening. Row names
+    // match pb_coords so downstream joins work by row ID.
+    let latent_col_names: Vec<Box<str>> = (0..pb_latent_mean.ncols())
+        .map(|i| format!("topic_{}", i).into_boxed_str())
+        .collect();
+    pb_latent_mean.to_parquet_with_names(
+        &(args.out.to_string() + ".pb_mean_latent.parquet"),
+        (Some(&pb_names), Some("pb")),
+        Some(&latent_col_names),
+    )?;
+
     let cell_names = data_vec.column_names()?;
 
     // Add cluster column if clustering was performed
@@ -598,8 +613,8 @@ pub fn fit_visualize(args: &VisualizeArgs) -> anyhow::Result<()> {
     }
 
     info!(
-        "Saved embeddings to {}.pb_coords.parquet and {}.cell_coords.parquet",
-        args.out, args.out
+        "Saved embeddings to {}.pb_coords.parquet, {}.pb_mean_latent.parquet and {}.cell_coords.parquet",
+        args.out, args.out, args.out
     );
 
     Ok(())

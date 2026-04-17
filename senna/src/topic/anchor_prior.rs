@@ -13,6 +13,9 @@
 //! different path and are silently skipped by `init_decoder_dictionary` /
 //! `anchor_penalty_at_level`.
 
+use crate::anchor_common::{
+    base_celltype_label, gram_schmidt_anchors, label_anchors, softmax_col_into, zscore_columns,
+};
 use crate::embed_common::*;
 use crate::marker_support::MarkerInfo;
 
@@ -29,12 +32,6 @@ const DICT_LOGITS_VAR_SUFFIX: &str = "dictionary.logits";
 /// Full VarMap path for decoder level `i`'s logit tensor.
 fn decoder_logits_var_path(level: usize) -> String {
     format!("dec_{level}.{DICT_LOGITS_VAR_SUFFIX}")
-}
-
-/// Suffix for the NbMixture decoder's ambient-profile logits `[1, D]`.
-const AMBIENT_LOGITS_VAR_SUFFIX: &str = "log_alpha";
-fn ambient_logits_var_path(level: usize) -> String {
-    format!("dec_{level}.{AMBIENT_LOGITS_VAR_SUFFIX}")
 }
 
 /// Everything the anchor pipeline produces in one pass.
@@ -79,7 +76,7 @@ impl AnchorPrior {
         // no transpose needed. `aggregate_rows_ds` operates on [D, S] so we
         // feed it directly, and softmax columns of `anchor_weight_gk` are
         // read from `x_gp` column views (PBs live in columns).
-        let mu_gp: &Mat = finest.mu_observed.posterior_mean();
+        let mu_gp: &Mat = crate::topic::common::preferred_posterior_mean(finest);
         let n_pb = mu_gp.ncols();
         let d_full = mu_gp.nrows();
         if n_pb < 2 {
@@ -188,38 +185,6 @@ impl AnchorPrior {
             }
         }
         w
-    }
-
-    /// Overwrite the dictionary logits for each level's decoder with
-    /// `log(anchor + eps)`. Currently unused — random init + anchor
-    /// penalty during training is preferred. Kept for experimentation.
-    #[allow(dead_code)]
-    ///
-    /// Vars that aren't registered (e.g. the vMF decoder which uses a
-    /// different path) are skipped with a warning so the caller can mix
-    /// decoder kinds safely.
-    pub(crate) fn init_decoder_dictionary(
-        &self,
-        parameters: &VarMap,
-        level_coarsenings: &[Option<FeatureCoarsening>],
-        dev: &Device,
-    ) -> anyhow::Result<()> {
-        let data = parameters.data().lock().expect("VarMap lock");
-        for (level, fc) in level_coarsenings.iter().enumerate() {
-            let name = decoder_logits_var_path(level);
-            let Some(var) = data.get(&name) else {
-                log::warn!("anchor prior: var {name} not in VarMap; skipping β init");
-                continue;
-            };
-            // log_softmax is shift-invariant, so raw log(w + eps) works as
-            // initial logits — no centering needed.
-            let w_dk = self.coarsened_weight(fc.as_ref());
-            let eps = 1e-8f32;
-            let log_w_dk = w_dk.map(|x| (x + eps).ln());
-            let log_w_kd = log_w_dk.transpose();
-            var.set(&log_w_kd.to_tensor(dev)?)?;
-        }
-        Ok(())
     }
 
     /// Write per-anchor label + score TSV and, when markers are given,
@@ -372,220 +337,6 @@ pub(crate) fn anchor_penalty_at_level(
     )
 }
 
-/// Ambient cross-entropy penalty `-Σ_d p_emp_d · log α_d` for the
-/// NbMixture decoder. No-op when `p_emp_per_level` is `None`, λ ≤ 0,
-/// or the level's decoder isn't NbMixture (`log_alpha` not registered).
-pub(crate) fn ambient_penalty_at_level(
-    loss: Tensor,
-    parameters: &VarMap,
-    p_emp_per_level: Option<&[Tensor]>,
-    lambda: f32,
-    level: usize,
-) -> anyhow::Result<Tensor> {
-    // [1, D_l] prior vs [1, D_l] log-α → sum over D, mean is trivial.
-    ce_penalty_at_level(
-        loss,
-        parameters,
-        p_emp_per_level,
-        lambda,
-        level,
-        &ambient_logits_var_path(level),
-        1,
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/// Write `softmax(col)` from a source column view into a destination column
-/// view of the same length. Used per anchor when building
-/// `anchor_weight_gk`.
-fn softmax_col_into(src: nalgebra::DVectorView<f32>, mut dst: nalgebra::DVectorViewMut<f32>) {
-    let max = src.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0f32;
-    for (i, &v) in src.iter().enumerate() {
-        let e = (v - max).exp();
-        dst[i] = e;
-        sum += e;
-    }
-    if sum > 1e-12 {
-        dst /= sum;
-    }
-}
-
-/// Return a column-z-scored copy of `x_pg` (PB rows × gene columns).
-/// Each gene column is shifted and scaled so its mean is 0 and its std is 1.
-/// Constant columns get zero (their contribution to residuals is nil anyway).
-fn zscore_columns(x_pg: &Mat) -> Mat {
-    let mut out = x_pg.clone();
-    let n = out.nrows() as f32;
-    if n < 2.0 {
-        return out;
-    }
-    for mut col in out.column_iter_mut() {
-        let mean = col.iter().sum::<f32>() / n;
-        let var = col.iter().map(|&v| (v - mean).powi(2)).sum::<f32>() / n;
-        let sd = var.sqrt();
-        if sd > 1e-8 {
-            for v in col.iter_mut() {
-                *v = (*v - mean) / sd;
-            }
-        } else {
-            col.fill(0.0);
-        }
-    }
-    out
-}
-
-/// Greedy Gram-Schmidt vertex selection. Returns `k` row indices of
-/// `x_pg` (PB rows × gene columns) chosen to maximize residual norm at
-/// each step. Rows are projected out of all remaining rows after each pick.
-///
-/// Uses nalgebra's vectorized row operations (`row_mut() -= ... * row()`)
-/// so the inner loop stays dense and cache-friendly even at D≈36k.
-fn gram_schmidt_anchors(x_pg: &Mat, k: usize) -> Vec<usize> {
-    let n = x_pg.nrows();
-    let k = k.min(n);
-    if k == 0 {
-        return Vec::new();
-    }
-
-    // Residual copy. Rows get orthogonalized against the chosen anchors.
-    let mut residual = x_pg.clone();
-    let mut picked: Vec<usize> = Vec::with_capacity(k);
-    let mut available: Vec<usize> = (0..n).collect();
-
-    for _ in 0..k {
-        // Argmax residual L2 norm over still-available rows.
-        let (best_pos, &best_row) = available
-            .iter()
-            .enumerate()
-            .max_by(|(_, &a), (_, &b)| {
-                let na: f32 = residual.row(a).iter().map(|&v| v * v).sum();
-                let nb: f32 = residual.row(b).iter().map(|&v| v * v).sum();
-                na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .expect("non-empty available");
-        picked.push(best_row);
-        available.swap_remove(best_pos);
-
-        // Normalize the picked anchor row, then project it out of every
-        // other row: r_j ← r_j - (r_j · u) · u, where u is the unit-length
-        // anchor direction.
-        let anchor_row = residual.row(best_row).clone_owned();
-        let norm2: f32 = anchor_row.iter().map(|&v| v * v).sum();
-        if norm2 < 1e-12 {
-            // Degenerate: remaining rows are already orthogonal to this pick.
-            continue;
-        }
-        let norm = norm2.sqrt();
-        let unit = anchor_row / norm; // [1, D]
-        for i in 0..n {
-            if i == best_row {
-                continue;
-            }
-            let dot: f32 = residual
-                .row(i)
-                .iter()
-                .zip(unit.iter())
-                .map(|(a, b)| a * b)
-                .sum();
-            let mut row_i = residual.row_mut(i);
-            for (v, &u) in row_i.iter_mut().zip(unit.iter()) {
-                *v -= dot * u;
-            }
-        }
-        // Zero out the picked row so it isn't re-selected if somehow still
-        // in `available` (defensive — swap_remove already dropped it).
-        residual.row_mut(best_row).fill(0.0);
-    }
-
-    picked
-}
-
-/// Score each anchor PB against every celltype by taking the mean z-score
-/// of the celltype's marker genes within the anchor's PB row. Assign each
-/// anchor the best-scoring celltype iff `top1 - top2 >= margin_threshold`.
-/// Anchors that don't clear the margin — or whose best celltype has no
-/// markers — become `novel_{i}`.
-///
-/// When multiple anchors pick the same celltype, later anchors get a
-/// numeric suffix so the labels stay unique (e.g. `T_cells`, `T_cells_2`).
-fn label_anchors(
-    x_zscored: &Mat,
-    anchor_pb_idx: &[usize],
-    markers: &MarkerInfo,
-    margin_threshold: f32,
-) -> (Vec<Box<str>>, Vec<(f32, f32)>) {
-    // Index marker gene rows by celltype for fast scoring. Iterate
-    // column-by-column so each nonzero test is a cache-friendly column
-    // scan — the membership matrix is usually mostly zeros.
-    let n_ct = markers.celltypes.len();
-    let mut marker_rows_per_ct: Vec<Vec<usize>> = vec![Vec::new(); n_ct];
-    for (c, col) in markers.membership_gc.column_iter().enumerate() {
-        for (g, &v) in col.iter().enumerate() {
-            if v > 0.0 {
-                marker_rows_per_ct[c].push(g);
-            }
-        }
-    }
-
-    let mut used_counts: rustc_hash::FxHashMap<Box<str>, usize> = Default::default();
-    let mut labels: Vec<Box<str>> = Vec::with_capacity(anchor_pb_idx.len());
-    let mut scores: Vec<(f32, f32)> = Vec::with_capacity(anchor_pb_idx.len());
-
-    for (i, &pb) in anchor_pb_idx.iter().enumerate() {
-        let pb_row = x_zscored.row(pb);
-
-        // Score celltype c = mean z-score over its marker genes.
-        let mut per_ct: Vec<(usize, f32)> = (0..n_ct)
-            .filter_map(|c| {
-                let rows = &marker_rows_per_ct[c];
-                if rows.is_empty() {
-                    return None;
-                }
-                let s: f32 = rows.iter().map(|&g| pb_row[g]).sum::<f32>() / rows.len() as f32;
-                Some((c, s))
-            })
-            .collect();
-        per_ct.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        let (top1_ct, top1_z) = per_ct.first().copied().unwrap_or((usize::MAX, 0.0));
-        let top2_z = per_ct.get(1).map(|&(_, s)| s).unwrap_or(f32::NEG_INFINITY);
-        scores.push((top1_z, top2_z));
-
-        let clears_margin = top1_ct != usize::MAX && (top1_z - top2_z) >= margin_threshold;
-        if !clears_margin {
-            labels.push(format!("novel_{i}").into_boxed_str());
-            continue;
-        }
-        let base = markers.celltypes[top1_ct].clone();
-        let n = used_counts.entry(base.clone()).or_insert(0);
-        *n += 1;
-        let label = if *n == 1 {
-            base
-        } else {
-            format!("{}_{}", base, n).into_boxed_str()
-        };
-        labels.push(label);
-    }
-
-    (labels, scores)
-}
-
-/// Strip `_<n>` suffix from disambiguated multi-anchor labels, so we can
-/// look them up in the marker file's celltype list.
-fn base_celltype_label(label: &str) -> &str {
-    if let Some(pos) = label.rfind('_') {
-        let tail = &label[pos + 1..];
-        if tail.parse::<usize>().is_ok() {
-            return &label[..pos];
-        }
-    }
-    label
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -593,40 +344,6 @@ fn base_celltype_label(label: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Three orthogonal PB signatures + three noisy mixtures → FindAnchors
-    /// should recover the three pure rows.
-    #[test]
-    fn anchor_recovery() {
-        let d = 12;
-        let mut x = Mat::zeros(6, d);
-        // Pure signatures: rows 0, 1, 2 each put all mass on a disjoint
-        // 4-gene block.
-        for g in 0..4 {
-            x[(0, g)] = 5.0;
-        }
-        for g in 4..8 {
-            x[(1, g)] = 5.0;
-        }
-        for g in 8..12 {
-            x[(2, g)] = 5.0;
-        }
-        // Noisy mixtures.
-        for g in 0..d {
-            x[(3, g)] = 0.5 * (g as f32).sin();
-            x[(4, g)] = 1.0;
-            x[(5, g)] = 0.3 * (g % 3) as f32;
-        }
-        let picked = gram_schmidt_anchors(&x, 3);
-        let mut sorted = picked.clone();
-        sorted.sort();
-        assert_eq!(
-            sorted,
-            vec![0, 1, 2],
-            "expected pure rows, got {:?}",
-            picked
-        );
-    }
 
     #[test]
     fn coarsened_weight_is_simplex() {
@@ -663,34 +380,5 @@ mod tests {
             let s: f32 = w_coarse.column(kk).iter().sum();
             assert!((s - 1.0).abs() < 1e-5, "column {} sum {} ≠ 1", kk, s);
         }
-    }
-
-    #[test]
-    fn zscore_is_unit_std() {
-        let x = Mat::from_row_slice(
-            4,
-            3,
-            &[1.0, 2.0, 5.0, 2.0, 3.0, 5.0, 3.0, 4.0, 5.0, 4.0, 5.0, 5.0],
-        );
-        let z = zscore_columns(&x);
-        for j in 0..x.ncols() {
-            let col: Vec<f32> = z.column(j).iter().copied().collect();
-            let mean = col.iter().sum::<f32>() / col.len() as f32;
-            assert!(mean.abs() < 1e-5);
-            if j < 2 {
-                let var = col.iter().map(|v| v * v).sum::<f32>() / col.len() as f32;
-                assert!((var - 1.0).abs() < 1e-5);
-            } else {
-                // constant column → all zero
-                assert!(col.iter().all(|&v| v == 0.0));
-            }
-        }
-    }
-
-    #[test]
-    fn base_label_strips_numeric_suffix() {
-        assert_eq!(base_celltype_label("T_cells"), "T_cells");
-        assert_eq!(base_celltype_label("T_cells_2"), "T_cells");
-        assert_eq!(base_celltype_label("novel_5"), "novel"); // caller filters novels anyway
     }
 }
