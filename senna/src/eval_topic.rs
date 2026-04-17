@@ -213,13 +213,14 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
         .first()
         .map(|s| s.as_ref())
         .unwrap_or("multinom");
-    info!("Evaluating latent states on CPU (decoder: {})", decoder_name);
+    info!(
+        "Evaluating latent states on CPU (decoder: {})",
+        decoder_name
+    );
     let z_nk = match decoder_name {
         "multinom" => eval_with_decoder::<MultinomTopicDecoder>(eval_inputs)?,
         "nb" => eval_with_decoder::<NbTopicDecoder>(eval_inputs)?,
-        name if name == NBMIXTURE_NAME => {
-            eval_with_decoder::<NbMixtureTopicDecoder>(eval_inputs)?
-        }
+        name if name == NBMIXTURE_NAME => eval_with_decoder::<NbMixtureTopicDecoder>(eval_inputs)?,
         "vmf" => eval_with_decoder::<VmfTopicDecoder>(eval_inputs)?,
         other => anyhow::bail!("unsupported decoder type in metadata: {other}"),
     };
