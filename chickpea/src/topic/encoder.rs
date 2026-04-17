@@ -14,6 +14,15 @@ pub struct EncoderInput<'a> {
     pub c_max: usize,
 }
 
+pub struct EncoderArgs<'a> {
+    pub n_genes: usize,
+    pub n_peaks: usize,
+    pub n_topics: usize,
+    pub embedding_dim: usize,
+    pub context_size: usize,
+    pub hidden_layers: &'a [usize],
+}
+
 /// Chickpea encoder: averages gene and ATAC indexed experts.
 ///
 /// Gene selection drives both experts:
@@ -27,16 +36,16 @@ pub struct ChickpeaEncoder {
 }
 
 impl ChickpeaEncoder {
-    pub fn new(
-        n_genes: usize,
-        n_peaks: usize,
-        n_topics: usize,
-        embedding_dim: usize,
-        context_size: usize,
-        hidden_layers: &[usize],
-        varmap: &VarMap,
-        vs: VarBuilder,
-    ) -> Result<Self> {
+    pub fn new(args: EncoderArgs, varmap: &VarMap, vs: VarBuilder) -> Result<Self> {
+        let EncoderArgs {
+            n_genes,
+            n_peaks,
+            n_topics,
+            embedding_dim,
+            context_size,
+            hidden_layers,
+        } = args;
+
         let gene_expert = IndexedEmbeddingEncoder::new(
             IndexedEmbeddingEncoderArgs {
                 n_features: n_genes,

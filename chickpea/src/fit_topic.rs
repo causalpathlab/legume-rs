@@ -180,6 +180,33 @@ pub struct FitTopicArgs {
     )]
     max_coarse_peaks: usize,
 
+    /* Ambient RNA mixture */
+    #[arg(
+        long,
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        help = "Enable ambient-RNA mixture in the RNA decoder"
+    )]
+    rna_ambient: bool,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Beta(α,β) prior weight on ρ (0 = off)",
+        long_help = "Scales the per-sample log Beta prior on ρ_n. NOTE: chickpea\n\
+                     trains at the pseudobulk level where ambient fraction averages\n\
+                     out across pooled cells — a small learned ρ is expected. Setting\n\
+                     > 0 forces ρ higher than the PB likelihood supports; prefer 0\n\
+                     unless you have per-cell training or stress injection."
+    )]
+    rho_prior_weight: f32,
+
+    #[arg(long, default_value_t = 2.0, help = "Beta(α,·) shape on ρ prior")]
+    rho_prior_alpha: f32,
+
+    #[arg(long, default_value_t = 18.0, help = "Beta(·,β) shape on ρ prior")]
+    rho_prior_beta: f32,
+
     /* Output */
     #[arg(
         long,
@@ -317,6 +344,10 @@ pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
         sort_dim: args.sort_dim,
         embedding_dim: args.embedding_dim,
         context_size: args.context_size,
+        rna_ambient: args.rna_ambient,
+        rho_prior_weight: args.rho_prior_weight,
+        rho_prior_alpha: args.rho_prior_alpha,
+        rho_prior_beta: args.rho_prior_beta,
     };
 
     let model = crate::topic::training::train(&ctx, &params)?;
