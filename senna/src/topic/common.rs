@@ -83,6 +83,18 @@ pub(crate) fn expand_delta_for_block(
     Ok(delta_bd.index_select(&indices, 0)?)
 }
 
+/// Posterior-mean PB matrix `[D, n_pb]`, preferring the batch-adjusted
+/// estimate when available. Anchor selection and ambient-profile
+/// estimation both want the cleanest cell-type signal — the batch-
+/// adjusted posterior strips per-batch effects out of the mean.
+pub(crate) fn preferred_posterior_mean(collapsed: &CollapsedOut) -> &Mat {
+    collapsed
+        .mu_adjusted
+        .as_ref()
+        .map(|g| g.posterior_mean())
+        .unwrap_or_else(|| collapsed.mu_observed.posterior_mean())
+}
+
 /// Compute per-level epoch allocation for progressive training.
 ///
 /// Coarser levels (lower index) get more epochs: `w[i] = num_levels - i`.

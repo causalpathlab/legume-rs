@@ -1,3 +1,4 @@
+mod anchor_common;
 mod cluster;
 mod cnv_pseudobulk;
 mod embed_common;
@@ -118,11 +119,15 @@ enum Commands {
     IndexedTopic(IndexedTopicArgs),
 
     #[command(
-        about = "Annotate topics using marker genes (vMF cosine similarity)",
-        long_about = "Assign cell-type probabilities to topics via vMF softmax on\n\
-                      cosine similarity between the topic dictionary and marker sets.\n\n\
+        about = "Annotate cells via anchor PBs + marker margin scoring",
+        long_about = "Runs after `senna viz`. Picks anchor pseudobulks by greedy\n\
+                      Gram-Schmidt on the whitened reconstruction features, labels\n\
+                      each anchor against user markers via a margin rule (top1 vs\n\
+                      top2 mean z-score), and soft-assigns cells to anchors by\n\
+                      cosine in whitened latent space. Anchors that miss the\n\
+                      margin become `novel_i` and contribute no celltype mass.\n\n\
                       Modes:\n\
-                        direct      — senna annotate -g dict -z latent -m markers -o out\n\
+                        direct      — senna annotate -g dict -z latent -p pb_mean_latent -m markers -o out\n\
                         interactive — add -I to iteratively augment markers\n\
                         LLM-assist  — --suggest-only out.json, then --apply-suggestions in.json",
         visible_alias = "annotate"

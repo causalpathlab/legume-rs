@@ -60,7 +60,10 @@ pub struct TopicArgs {
                      {out}.log_likelihood.parquet   training loss trace\n  \
                      {out}.safetensors              encoder+decoder weights\n  \
                      {out}.metadata.json            model metadata (for `senna eval-topic`)\n  \
-                     {out}.dispersion.parquet       NB dispersion (if --decoder nb)\n\n\
+                     {out}.anchor_labels.tsv        anchor PB → celltype label table\n  \
+                     {out}.dispersion.parquet       NB dispersion (nb / nbmixture)\n  \
+                     {out}.alpha.parquet            ambient gene profile (nbmixture)\n  \
+                     {out}.rho.parquet              ρ sigmoid coefficients (nbmixture)\n\n\
                      With --decoder a,b,c: per-decoder dictionaries written as {out}.{name}.dictionary.parquet."
     )]
     pub(crate) out: Box<str>,
@@ -241,11 +244,12 @@ pub struct TopicArgs {
         long,
         value_enum,
         value_delimiter = ',',
-        default_value = "nb",
-        help = "Decoder type(s) [multinom|nb|vmf], comma-separated",
-        long_help = "nb       — negative binomial with per-gene dispersion (default).\n\
-                     multinom — softmax dictionary with log1p-weighted likelihood.\n\
-                     vmf      — von Mises-Fisher mixture on the unit hypersphere.\n\n\
+        default_value = "nbmixture",
+        help = "Decoder type(s) [multinom|nb|vmf|nbmixture], comma-separated",
+        long_help = "nbmixture — NB with ambient-RNA mixture α and per-sample ρ (default).\n\
+                     nb        — negative binomial with per-gene dispersion.\n\
+                     multinom  — softmax dictionary with log1p-weighted likelihood.\n\
+                     vmf       — von Mises-Fisher mixture on the unit hypersphere.\n\n\
                      Multiple types (e.g. --decoder multinom,vmf) train jointly with\n\
                      a shared encoder; see --decoder-weights for loss weighting."
     )]
@@ -310,31 +314,25 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0.1,
-        help = "Cross-entropy penalty λ on α toward empirical gene profile (0 = off)",
-        long_help = "NbMixture-only. Pulls the ambient gene profile α toward the\n\
-                     empirical marginal gene frequency so it doesn't drift into\n\
-                     a biological topic. Ignored by non-NbMixture decoders."
-    )]
-    pub(crate) ambient_penalty: f32,
-
-    #[arg(
-        long,
         default_value_t = 0.0,
-        help = "Beta(α,β) prior weight on ρ (0 = off)",
-        long_help = "NbMixture-only. Scales the per-sample log Beta prior on ρ_n.\n\
-                     NOTE: training is at the pseudobulk level where ambient\n\
-                     fraction averages out across pooled cells — a small learned\n\
-                     ρ (~0.5%) is expected and correct. Setting this > 0 forces\n\
-                     ρ higher than the PB likelihood supports; prefer leaving at\n\
-                     0 unless you have per-cell training or stress injection."
+        help = "Beta(α,β) prior weight on ρ (0 = off; nbmixture only, rarely used)"
     )]
     pub(crate) rho_prior_weight: f32,
 
-    #[arg(long, default_value_t = 2.0, help = "Beta(α,·) shape on ρ prior")]
+    #[arg(
+        long,
+        default_value_t = 2.0,
+        hide = true,
+        help = "Beta(α,·) shape on ρ prior"
+    )]
     pub(crate) rho_prior_alpha: f32,
 
-    #[arg(long, default_value_t = 18.0, help = "Beta(·,β) shape on ρ prior")]
+    #[arg(
+        long,
+        default_value_t = 18.0,
+        hide = true,
+        help = "Beta(·,β) shape on ρ prior"
+    )]
     pub(crate) rho_prior_beta: f32,
 
     #[command(flatten)]
@@ -445,16 +443,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     // here, held alive for the entire fit via the outer scope.
     let anchor_tensors = anchor_prior.per_level_device_tensors(&level_coarsenings, &dev)?;
 
-    // Per-level [1, D_l] empirical gene-frequency tensors for the NbMixture
-    // α penalty. Simplex over D_l, built from the finest PB posterior mean.
-    let ambient_tensors = build_empirical_profiles_per_level(
-        finest_collapsed,
-        &level_coarsenings,
-        n_features_full,
-        &dev,
-    )?;
-
-    // Build per-level decoders, train, save dictionary, and evaluate.
     let ctx = PipelineCtx {
         level_decoder_dims: &level_decoder_dims,
         n_topics,
@@ -472,7 +460,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         stop: &stop,
         anchor_prior: Some(&anchor_prior),
         anchor_prior_per_level: Some(&anchor_tensors),
-        ambient_prior_per_level: Some(&ambient_tensors),
     };
 
     let mut encoder = LogSoftmaxEncoder::new(
@@ -820,9 +807,6 @@ struct PipelineCtx<'a> {
     anchor_prior: Option<&'a crate::topic::anchor_prior::AnchorPrior>,
     /// Per-level `[D_l, K]` anchor tensors pre-built on `dev`.
     anchor_prior_per_level: Option<&'a [candle_core::Tensor]>,
-    /// Per-level `[1, D_l]` empirical gene-frequency tensors on `dev`,
-    /// used by the NbMixture α penalty.
-    ambient_prior_per_level: Option<&'a [candle_core::Tensor]>,
 }
 
 fn run_topic_pipeline<Enc, Dec>(
@@ -858,8 +842,6 @@ where
         stop: ctx.stop,
         anchor_prior_per_level: ctx.anchor_prior_per_level,
         anchor_penalty: ctx.args.anchor_penalty,
-        ambient_prior_per_level: ctx.ambient_prior_per_level,
-        ambient_penalty: ctx.args.ambient_penalty,
     };
     let scores = match &ctx.args.level_schedule {
         LevelSchedule::Progressive => train_progressive(
@@ -985,51 +967,6 @@ fn write_dictionary_expanded<Dec: DecoderModuleT + ?Sized>(
         gene_names,
         out_prefix,
     )
-}
-
-/// Per-level `[1, D_l]` empirical gene-frequency tensors on `dev`.
-///
-/// Computes the empirical marginal gene profile at full D (mean across
-/// pseudobulks of the finest collapsed posterior), then aggregates it into
-/// each level's feature dim via the matching coarsening. Each returned
-/// tensor is a simplex over D_l (sums to 1).
-fn build_empirical_profiles_per_level(
-    finest: &CollapsedOut,
-    level_coarsenings: &[Option<FeatureCoarsening>],
-    n_features_full: usize,
-    dev: &candle_core::Device,
-) -> anyhow::Result<Vec<candle_core::Tensor>> {
-    let mu_gp = finest.mu_observed.posterior_mean();
-    debug_assert_eq!(mu_gp.nrows(), n_features_full);
-
-    // Row sums across pseudobulks, then normalize once to a simplex.
-    // (The /N_pb step in the previous version was redundant — the final
-    // renormalize-by-sum absorbs it.)
-    let row_sums = mu_gp.column_sum();
-    let s: f32 = row_sums.iter().sum();
-    let inv_s = if s > 0.0 { 1.0 / s } else { 1.0 };
-    let p_full_d1 = Mat::from_iterator(row_sums.len(), 1, row_sums.iter().map(|&v| v * inv_s));
-
-    level_coarsenings
-        .iter()
-        .map(|fc| {
-            let p_d1: Mat = match fc {
-                Some(fc) => fc.aggregate_rows_ds(&p_full_d1),
-                None => p_full_d1.clone(),
-            };
-            // Renormalize and reshape to [1, D_l].
-            let s: f32 = p_d1.as_slice().iter().sum();
-            let mut vec: Vec<f32> = p_d1.as_slice().to_vec();
-            if s > 1e-12 {
-                for v in vec.iter_mut() {
-                    *v /= s;
-                }
-            }
-            let d_l = vec.len();
-            let t = candle_core::Tensor::from_vec(vec, (1, d_l), dev)?;
-            Ok(t)
-        })
-        .collect()
 }
 
 /// Compute normalized decoder weights. If user provided weights, normalize
@@ -1184,8 +1121,6 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
         stop: ctx.stop,
         anchor_prior_per_level: None,
         anchor_penalty: 0.0,
-        ambient_prior_per_level: None,
-        ambient_penalty: 0.0,
     };
 
     if ctx.anchor_prior.is_some() {
