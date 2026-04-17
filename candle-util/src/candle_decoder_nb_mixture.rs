@@ -220,11 +220,7 @@ impl DecoderModuleT for NbMixtureTopicDecoder {
 
         let lib_n1 = x_nd.sum(last_dim)?.unsqueeze(1)?;
         let log_lib = (&lib_n1 + 1e-8)?.log()?;
-        let rho_n1 = ops::sigmoid(
-            &log_lib
-                .broadcast_mul(&rho_a)?
-                .broadcast_add(&rho_b)?,
-        )?;
+        let rho_n1 = ops::sigmoid(&log_lib.broadcast_mul(&rho_a)?.broadcast_add(&rho_b)?)?;
         let one_minus_rho = rho_n1.affine(-1.0, 1.0)?;
         let k = self.dim_latent() as f64;
 

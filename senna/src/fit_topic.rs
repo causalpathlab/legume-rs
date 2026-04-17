@@ -323,8 +323,11 @@ pub struct TopicArgs {
         default_value_t = 0.0,
         help = "Beta(α,β) prior weight on ρ (0 = off)",
         long_help = "NbMixture-only. Scales the per-sample log Beta prior on ρ_n.\n\
-                     Without it the decoder often drives ρ → 0 (β absorbs ambient).\n\
-                     Try 10.0 to push per-cell ρ toward the prior mean."
+                     NOTE: training is at the pseudobulk level where ambient\n\
+                     fraction averages out across pooled cells — a small learned\n\
+                     ρ (~0.5%) is expected and correct. Setting this > 0 forces\n\
+                     ρ higher than the PB likelihood supports; prefer leaving at\n\
+                     0 unless you have per-cell training or stress injection."
     )]
     pub(crate) rho_prior_weight: f32,
 
@@ -617,23 +620,30 @@ fn expand_coarsened_feature_vec(
     full
 }
 
+/// Shared context when writing several per-gene parameter vectors from a
+/// single decoder (reuses coarsening expansion + output prefix).
+struct GeneParamWriteCtx<'a> {
+    coarsening: Option<&'a FeatureCoarsening>,
+    n_features_full: usize,
+    gene_names: &'a [Box<str>],
+    out_prefix: &'a str,
+}
+
 /// Write a `[D]` per-gene parameter vector as `{out}.{name}.parquet`.
 fn write_per_gene_param(
+    ctx: &GeneParamWriteCtx<'_>,
     values: Vec<f32>,
-    coarsening: Option<&FeatureCoarsening>,
-    n_features_full: usize,
-    gene_names: &[Box<str>],
-    out_prefix: &str,
     file_suffix: &str,
     col_name: &str,
     split_mass: bool,
 ) -> anyhow::Result<()> {
-    let expanded = expand_coarsened_feature_vec(values, coarsening, n_features_full, split_mass);
+    let expanded =
+        expand_coarsened_feature_vec(values, ctx.coarsening, ctx.n_features_full, split_mass);
     let mat = Mat::from_column_slice(expanded.len(), 1, &expanded);
     let col = vec![col_name.to_string().into_boxed_str()];
     mat.to_parquet_with_names(
-        &format!("{out_prefix}.{file_suffix}.parquet"),
-        (Some(gene_names), Some("gene")),
+        &format!("{}.{}.parquet", ctx.out_prefix, file_suffix),
+        (Some(ctx.gene_names), Some("gene")),
         Some(&col),
     )?;
     Ok(())
@@ -656,17 +666,14 @@ impl DecoderExtras for NbTopicDecoder {
         gene_names: &[Box<str>],
         out_prefix: &str,
     ) -> anyhow::Result<()> {
-        let phi_vec = phi_vec_from_tensor(self.log_phi())?;
-        write_per_gene_param(
-            phi_vec,
+        let ctx = GeneParamWriteCtx {
             coarsening,
             n_features_full,
             gene_names,
             out_prefix,
-            "dispersion",
-            "dispersion_phi",
-            false,
-        )?;
+        };
+        let phi_vec = phi_vec_from_tensor(self.log_phi())?;
+        write_per_gene_param(&ctx, phi_vec, "dispersion", "dispersion_phi", false)?;
         info!(
             "Saved dispersion parameters to {}.dispersion.parquet",
             out_prefix
@@ -684,32 +691,34 @@ impl DecoderExtras for NbMixtureTopicDecoder {
         out_prefix: &str,
     ) -> anyhow::Result<()> {
         let cpu = candle_core::Device::Cpu;
-
-        write_per_gene_param(
-            phi_vec_from_tensor(self.log_phi())?,
+        let ctx = GeneParamWriteCtx {
             coarsening,
             n_features_full,
             gene_names,
             out_prefix,
+        };
+
+        write_per_gene_param(
+            &ctx,
+            phi_vec_from_tensor(self.log_phi())?,
             "dispersion",
             "dispersion_phi",
             false,
         )?;
 
         let alpha_vec: Vec<f32> = self.alpha()?.to_device(&cpu)?.flatten_all()?.to_vec1()?;
-        write_per_gene_param(
-            alpha_vec,
-            coarsening,
-            n_features_full,
-            gene_names,
-            out_prefix,
-            "alpha",
-            "ambient_alpha",
-            true,
-        )?;
+        write_per_gene_param(&ctx, alpha_vec, "alpha", "ambient_alpha", true)?;
 
-        let rho_a: f32 = self.rho_a().to_device(&cpu)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let rho_b: f32 = self.rho_b().to_device(&cpu)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let rho_a: f32 = self
+            .rho_a()
+            .to_device(&cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
+        let rho_b: f32 = self
+            .rho_b()
+            .to_device(&cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         let rho_mat = Mat::from_column_slice(2, 1, &[rho_a, rho_b]);
         let row_names = vec![
             "rho_a".to_string().into_boxed_str(),
@@ -991,24 +1000,15 @@ fn build_empirical_profiles_per_level(
     dev: &candle_core::Device,
 ) -> anyhow::Result<Vec<candle_core::Tensor>> {
     let mu_gp = finest.mu_observed.posterior_mean();
-    let n_pb = mu_gp.ncols().max(1) as f32;
+    debug_assert_eq!(mu_gp.nrows(), n_features_full);
 
-    let mut p_emp_full: Vec<f32> = vec![0.0; n_features_full];
-    for j in 0..mu_gp.ncols() {
-        for i in 0..mu_gp.nrows() {
-            p_emp_full[i] += mu_gp[(i, j)];
-        }
-    }
-    for v in p_emp_full.iter_mut() {
-        *v /= n_pb;
-    }
-    let s: f32 = p_emp_full.iter().sum();
-    if s > 0.0 {
-        for v in p_emp_full.iter_mut() {
-            *v /= s;
-        }
-    }
-    let p_full_d1 = Mat::from_column_slice(n_features_full, 1, &p_emp_full);
+    // Row sums across pseudobulks, then normalize once to a simplex.
+    // (The /N_pb step in the previous version was redundant — the final
+    // renormalize-by-sum absorbs it.)
+    let row_sums = mu_gp.column_sum();
+    let s: f32 = row_sums.iter().sum();
+    let inv_s = if s > 0.0 { 1.0 / s } else { 1.0 };
+    let p_full_d1 = Mat::from_iterator(row_sums.len(), 1, row_sums.iter().map(|&v| v * inv_s));
 
     level_coarsenings
         .iter()
