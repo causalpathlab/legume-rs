@@ -2,6 +2,7 @@ use crate::candle_aux_layers::*;
 use crate::candle_batch_norm;
 use crate::candle_indexed_model_traits::*;
 use crate::candle_loss_functions::gaussian_kl_loss;
+use crate::candle_value_transform::anscombe_residual;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 
@@ -91,37 +92,18 @@ impl IndexedEmbeddingEncoder {
     /// Preprocess indexed input into embedding space.
     ///
     /// 1. E_sh = feature_embeddings.index_select(union_indices, 0) → [S, H]
-    /// 2. lx_ns = log1p(indexed_x) → [N, S]
-    /// 3. Normalize: lx / sum(lx) * nnz → [N, S]
-    /// 4. h_nh = normalized @ E_sh → [N, H]
+    /// 2. r_ns = anscombe_residual(indexed_x, indexed_x_null) → [N, S]
+    ///    (variance-stabilized, library-size-matched, outlier-winsorized)
+    /// 3. h_nh = r_ns @ E_sh → [N, H]
     fn preprocess_indexed(
         &self,
         union_indices: &Tensor,
         indexed_x: &Tensor,
         indexed_x_null: Option<&Tensor>,
     ) -> Result<Tensor> {
-        // 1. Look up embeddings for selected features
-        let e_sh = self.feature_embeddings.index_select(union_indices, 0)?; // [S, H]
-
-        // 2. log1p normalization — scale by n_features (constant) like dense encoder
-        let lx_ns = (indexed_x + 1.0)?.log()?; // [N, S]
-        let denom = lx_ns.sum_keepdim(1)?; // [N, 1]
-        let normalized = (lx_ns.broadcast_div(&denom)? * (self.n_features as f64))?; // [N, S]
-
-        // 3. Matmul: [N, S] × [S, H] → [N, H]
-        let h_nh = normalized.matmul(&e_sh)?;
-
-        // 4. Optional null subtraction
-        match indexed_x_null {
-            Some(x0) => {
-                let lx0 = (x0 + 1.0)?.log()?;
-                let denom0 = lx0.sum_keepdim(1)?;
-                let normalized0 = (lx0.broadcast_div(&denom0)? * (self.n_features as f64))?;
-                let h0_nh = normalized0.matmul(&e_sh)?;
-                h_nh - h0_nh
-            }
-            None => Ok(h_nh),
-        }
+        let e_sh = self.feature_embeddings.index_select(union_indices, 0)?;
+        let r_ns = anscombe_residual(indexed_x, indexed_x_null)?;
+        r_ns.matmul(&e_sh)
     }
 
     pub fn reparameterize(&self, z_mean: &Tensor, z_lnvar: &Tensor, train: bool) -> Result<Tensor> {

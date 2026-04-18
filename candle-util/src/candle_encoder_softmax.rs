@@ -2,11 +2,11 @@ use crate::candle_aux_layers::*;
 use crate::candle_batch_norm;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
+use crate::candle_value_transform::anscombe_residual;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 
 pub struct LogSoftmaxEncoder {
-    n_features: usize,
     n_topics: usize,
     fc: StackLayers<Linear>,
     bn_z: candle_batch_norm::BatchNorm,
@@ -41,22 +41,7 @@ impl LogSoftmaxEncoder {
         x0_nd: Option<&Tensor>,
         _train: bool,
     ) -> Result<Tensor> {
-        debug_assert_eq!(x_nd.dims().len(), 2);
-        debug_assert!(x_nd.min_all()?.to_scalar::<f32>()? >= 0_f32);
-
-        let lx_nd = (x_nd + 1.)?.log()?;
-        let denom_n1 = lx_nd.sum_keepdim(lx_nd.rank() - 1)?;
-        let h_nd = (lx_nd.broadcast_div(&denom_n1)? * (self.n_features as f64))?;
-
-        match x0_nd {
-            Some(x0) => {
-                let lx0_nd = (x0 + 1.)?.log()?;
-                let denom0 = lx0_nd.sum_keepdim(lx0_nd.rank() - 1)?;
-                let x0_nd = (lx0_nd.broadcast_div(&denom0)? * (self.n_features as f64))?;
-                h_nd - x0_nd
-            }
-            None => Ok(h_nd),
-        }
+        anscombe_residual(x_nd, x0_nd)
     }
 
     ///
@@ -131,7 +116,6 @@ impl LogSoftmaxEncoder {
         let z_lnvar = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.lnvar"))?;
 
         Ok(Self {
-            n_features: args.n_features,
             n_topics: args.n_topics,
             fc,
             bn_z,
