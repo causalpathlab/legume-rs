@@ -213,6 +213,18 @@ enum Commands {
     },
 
     #[command(
+        about = "Publication scatter plot from `senna viz` coords (SVG/PNG/PDF)",
+        long_about = "Read cell coordinates produced by `senna viz tsne|phate` and\n\
+                      render a publication-quality scatter: per-topic rasterized\n\
+                      layers (tiny-skia, 300 dpi) with transparent background,\n\
+                      optional convex hull polygons, and vector text labels at\n\
+                      per-group medians (fully editable in Illustrator/Inkscape).\n\n\
+                      Color source selectable via --color-by cluster|pb-id|topic.\n\
+                      Outputs: {out}.plot.svg, {out}.plot.png, {out}.plot.pdf."
+    )]
+    Plot(PlotArgs),
+
+    #[command(
         about = "Cluster cells on latent topic / SVD representations",
         long_about = "Cluster cells using a latent matrix from `senna topic` or `senna svd`.\n\n\
                       Algorithms:\n\
@@ -274,6 +286,9 @@ fn main() -> anyhow::Result<()> {
         },
         Commands::Clustering(args) => {
             run_clustering(args)?;
+        }
+        Commands::Plot(args) => {
+            fit_plot(args)?;
         }
     }
 

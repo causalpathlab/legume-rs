@@ -54,3 +54,10 @@ colored = { workspace = true }
 ctrlc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# 2D graphics / SVG (senna plot)
+base64 = { workspace = true }
+resvg = { workspace = true }
+svg2pdf = { workspace = true }
+tiny-skia = { workspace = true }
+usvg = { workspace = true }
