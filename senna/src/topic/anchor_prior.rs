@@ -7,7 +7,7 @@
 //! penalty.
 //!
 //! **Coupling constraint**: the module assumes softmax-based decoders
-//! register their pre-softmax logits under the VarMap path
+//! register their pre-softmax logits under the `VarMap` path
 //! `dec_{level}.dictionary.logits` — the convention used by
 //! `candle_util::candle_aux_linear::log_softmax_linear`. vMF decoders use a
 //! different path and are silently skipped by `init_decoder_dictionary` /
@@ -26,10 +26,10 @@ use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use matrix_util::traits::ConvertMatOps;
 use std::io::Write;
 
-/// Suffix on the per-level VarMap path where softmax-based decoders store
+/// Suffix on the per-level `VarMap` path where softmax-based decoders store
 /// their `[K, D]` pre-softmax logits.
 const DICT_LOGITS_VAR_SUFFIX: &str = "dictionary.logits";
-/// Full VarMap path for decoder level `i`'s logit tensor.
+/// Full `VarMap` path for decoder level `i`'s logit tensor.
 fn decoder_logits_var_path(level: usize) -> String {
     format!("dec_{level}.{DICT_LOGITS_VAR_SUFFIX}")
 }
@@ -81,8 +81,7 @@ impl AnchorPrior {
         let d_full = mu_gp.nrows();
         if n_pb < 2 {
             return Err(anyhow::anyhow!(
-                "anchor prior needs ≥2 pseudobulks, got {}",
-                n_pb
+                "anchor prior needs ≥2 pseudobulks, got {n_pb}"
             ));
         }
 
@@ -216,7 +215,7 @@ impl AnchorPrior {
                 t1 - t2
             )?;
         }
-        log::info!("wrote {}", labels_path);
+        log::info!("wrote {labels_path}");
 
         if let Some(m) = markers {
             let expansion_path = format!("{out_prefix}.marker_expansion.tsv");
@@ -249,7 +248,7 @@ impl AnchorPrior {
                     )?;
                 }
             }
-            log::info!("wrote {}", expansion_path);
+            log::info!("wrote {expansion_path}");
         }
         Ok(())
     }
@@ -266,7 +265,7 @@ impl AnchorPrior {
 /// dimensionally "per-sample-averaged" and their ratio is batch-size
 /// invariant within a step. Over an epoch, however, the penalty is
 /// applied once per minibatch, so its cumulative gradient contribution
-/// scales with the number of minibatches (M = N_total / N_batch). If you
+/// scales with the number of minibatches (M = `N_total` / `N_batch`). If you
 /// change `--minibatch-size`, you will typically want to rescale
 /// `--anchor-penalty` in inverse proportion (or rely on Adam's adaptive
 /// step size plus linear-LR scaling to absorb the difference).
@@ -310,7 +309,7 @@ fn ce_penalty_at_level(
     let prior = &priors[level];
     let log_prob = candle_nn::ops::log_softmax(&logits, logits.rank() - 1)?;
     let ce = (prior * &log_prob)?.sum(reduce_dim)?.neg()?;
-    let pen = (ce.mean_all()? * lambda as f64)?;
+    let pen = (ce.mean_all()? * f64::from(lambda))?;
     Ok((loss + pen)?)
 }
 

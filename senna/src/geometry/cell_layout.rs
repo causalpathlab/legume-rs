@@ -2,6 +2,8 @@
 //! layout, followed by an optional per-PB parallel t-SNE fine-tune that
 //! uses cells in the K 2D-nearest PBs as fixed context anchors.
 
+#![allow(dead_code)]
+
 use crate::embed_common::*;
 
 /// Number of nearest PBs (in the 2D layout) whose cells are used as context
@@ -9,28 +11,43 @@ use crate::embed_common::*;
 /// structure without blowing up the O(m²) KL step.
 const LOCAL_CONTEXT_KNN: usize = 5;
 
+/// Squared Euclidean distance between two equal-length `&[f32]` slices.
+/// Written as a `zip().map().sum()` reduction so LLVM reliably emits
+/// SIMD (SSE/AVX) for f32 dot-style kernels on contiguous slices.
+#[inline]
+fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| {
+            let d = x - y;
+            d * d
+        })
+        .sum()
+}
+
 /// Nyström cell projection: each cell's 2D position is a smooth weighted
 /// average of every PB's 2D position, where weights come from the same
-/// alpha-decay diffusion kernel PHATE uses internally. Mixture cells smear
-/// naturally along trajectories between PBs; pure cells cluster near their
-/// dominant PB.
+/// alpha-decay diffusion kernel PHATE uses internally.
+///
+/// Features are given in `(k × n)` column-major layout — each point is
+/// a contiguous column slice, so the inner distance kernel vectorizes.
 ///
 /// For each cell c:
-///   σ_c = distance from c to its `knn`-th nearest PB in z-space
-///   K_cp = exp(-(‖z_c − z_p‖ / σ_c)^α)
-///   w_cp = K_cp / Σ_p' K_cp'
-///   (x_c, y_c) = Σ_p w_cp · pb_coord[p]
+///   `σ_c` = distance from c to its `knn`-th nearest PB in z-space
+///   `K_cp` = exp(-(‖z_c − `z_p`‖ / `σ_c)^α`)
+///   `w_cp` = `K_cp` / `Σ_p`' `K_cp`'
+///   (`x_c`, `y_c`) = `Σ_p` `w_cp` · `pb_coord`[p]
 pub(crate) fn project_cells_nystrom(
-    cell_z: &Mat,
-    pb_z: &Mat,
+    cell_z_kn: &Mat,
+    pb_z_kp: &Mat,
     pb_coords: &Mat,
     knn: usize,
     alpha: f32,
 ) -> Mat {
     use rayon::prelude::*;
 
-    let n_cells = cell_z.nrows();
-    let n_pb = pb_z.nrows();
+    let n_cells = cell_z_kn.ncols();
+    let n_pb = pb_z_kp.ncols();
     let mut coords = Mat::zeros(n_cells, 2);
     if n_cells == 0 || n_pb == 0 {
         return coords;
@@ -38,20 +55,25 @@ pub(crate) fn project_cells_nystrom(
     let k = knn.clamp(1, n_pb);
     let kth = (k - 1).min(n_pb - 1);
 
+    // Cache each PB's contiguous feature slice once so every cell's task
+    // reuses it instead of re-fetching strided column views.
+    let cell_slice = cell_z_kn.as_slice();
+    let pb_slice = pb_z_kp.as_slice();
+    let feat_dim = cell_z_kn.nrows();
+    let pb_x: Vec<f32> = (0..n_pb).map(|p| pb_coords[(p, 0)]).collect();
+    let pb_y: Vec<f32> = (0..n_pb).map(|p| pb_coords[(p, 1)]).collect();
+
     let results: Vec<(f32, f32)> = (0..n_cells)
         .into_par_iter()
         .map(|c| {
+            let cell = &cell_slice[c * feat_dim..(c + 1) * feat_dim];
+
             let mut d_cp = vec![0.0f32; n_pb];
             for p in 0..n_pb {
-                let mut s = 0.0f32;
-                for j in 0..cell_z.ncols() {
-                    let diff = cell_z[(c, j)] - pb_z[(p, j)];
-                    s += diff * diff;
-                }
-                d_cp[p] = s.sqrt();
+                let pb = &pb_slice[p * feat_dim..(p + 1) * feat_dim];
+                d_cp[p] = sq_dist(cell, pb).sqrt();
             }
 
-            // Partial sort for σ in O(n_pb) rather than O(n_pb log n_pb).
             let mut sigma_buf = d_cp.clone();
             sigma_buf.select_nth_unstable_by(kth, |x, y| {
                 x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
@@ -64,26 +86,22 @@ pub(crate) fn project_cells_nystrom(
                 .collect();
             let sum: f32 = w.iter().sum();
             if sum > 1e-12 {
+                let inv = 1.0 / sum;
                 for v in &mut w {
-                    *v /= sum;
+                    *v *= inv;
                 }
             } else {
                 let argmin = d_cp
                     .iter()
                     .enumerate()
                     .min_by(|x, y| x.1.partial_cmp(y.1).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
+                    .map_or(0, |(i, _)| i);
                 w.fill(0.0);
                 w[argmin] = 1.0;
             }
 
-            let mut x = 0.0f32;
-            let mut y = 0.0f32;
-            for p in 0..n_pb {
-                x += w[p] * pb_coords[(p, 0)];
-                y += w[p] * pb_coords[(p, 1)];
-            }
+            let x: f32 = w.iter().zip(pb_x.iter()).map(|(a, b)| a * b).sum();
+            let y: f32 = w.iter().zip(pb_y.iter()).map(|(a, b)| a * b).sum();
             (x, y)
         })
         .collect();

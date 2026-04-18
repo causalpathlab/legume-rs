@@ -64,7 +64,7 @@ pub(crate) fn build_annotation_matrix(
 
     let mut annot_set: HashSet<Box<str>> = HashSet::default();
     for (_, cell_type) in &marker_pairs {
-        let normalized = cell_type.replace(" ", "_");
+        let normalized = cell_type.replace(' ', "_");
         annot_set.insert(normalized.into_boxed_str());
     }
     let mut annot_names: Vec<Box<str>> = annot_set.into_iter().collect();
@@ -78,7 +78,7 @@ pub(crate) fn build_annotation_matrix(
     let mut unmatched = Vec::new();
 
     for (gene, cell_type) in &marker_pairs {
-        let normalized_type = cell_type.replace(" ", "_");
+        let normalized_type = cell_type.replace(' ', "_");
         let annot_idx = annot_names
             .iter()
             .position(|n| n.as_ref() == normalized_type)
@@ -96,7 +96,7 @@ pub(crate) fn build_annotation_matrix(
     }
 
     if !unmatched.is_empty() && unmatched.len() <= 10 {
-        log::info!("Unmatched marker genes: {:?}", unmatched);
+        log::info!("Unmatched marker genes: {unmatched:?}");
     } else if !unmatched.is_empty() {
         log::info!("{} marker genes not found in dictionary", unmatched.len());
     }
@@ -129,7 +129,7 @@ pub(crate) fn load_marker_info(
 
     let mut celltype_set: HashSet<Box<str>> = HashSet::default();
     for (_, ct) in &pairs {
-        celltype_set.insert(ct.replace(" ", "_").into_boxed_str());
+        celltype_set.insert(ct.replace(' ', "_").into_boxed_str());
     }
     let mut celltypes: Vec<Box<str>> = celltype_set.into_iter().collect();
     celltypes.sort();
@@ -140,7 +140,7 @@ pub(crate) fn load_marker_info(
 
     let mut matched = 0usize;
     for (gene, ct) in &pairs {
-        let normalized = ct.replace(" ", "_");
+        let normalized = ct.replace(' ', "_");
         let c = celltypes
             .iter()
             .position(|n| n.as_ref() == normalized)

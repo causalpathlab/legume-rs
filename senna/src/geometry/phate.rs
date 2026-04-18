@@ -18,6 +18,49 @@
 //! the n ≲ 10³ PB counts we actually see.
 
 use crate::embed_common::Mat;
+use crate::logging::new_progress_bar;
+use log::info;
+use rayon::prelude::*;
+
+/// Build an `n × n` matrix by computing each column in parallel, then
+/// copying the collected column vectors into a column-major `Mat` (one
+/// `column_mut().copy_from_slice` per column — no inner strided writes).
+fn build_nn_matrix<F>(n: usize, build_col: F) -> Mat
+where
+    F: Fn(usize) -> Vec<f32> + Sync + Send,
+{
+    let cols: Vec<Vec<f32>> = (0..n).into_par_iter().map(build_col).collect();
+    let mut m = Mat::zeros(n, n);
+    for (j, col) in cols.iter().enumerate() {
+        m.column_mut(j).copy_from_slice(col);
+    }
+    m
+}
+
+/// Materialize each row of a column-major `(n × d)` matrix into its own
+/// contiguous `Vec<f32>`. Rows of column-major storage are strided by
+/// `n`, so iterating them directly misses SIMD; copying once lets every
+/// downstream inner loop consume a contiguous slice.
+fn rows_as_contiguous(m: &Mat) -> Vec<Vec<f32>> {
+    let n = m.nrows();
+    let d = m.ncols();
+    (0..n)
+        .into_par_iter()
+        .map(|i| (0..d).map(|j| m[(i, j)]).collect())
+        .collect()
+}
+
+/// SIMD-friendly squared L2 distance between two equal-length slices.
+#[inline]
+fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| {
+            let d = x - y;
+            d * d
+        })
+        .sum()
+}
 
 pub struct PhateArgs {
     pub t: usize,
@@ -48,43 +91,59 @@ pub fn phate_layout_2d(pb_z: &Mat, args: &PhateArgs) -> Mat {
         return Mat::zeros(n, 2);
     }
     let knn = args.knn.clamp(1, n - 1);
+    info!(
+        "PHATE start: n={} PBs, features={}, t={}, knn={}, α={}",
+        n,
+        pb_z.ncols(),
+        args.t,
+        knn,
+        args.alpha
+    );
 
-    // 1. Pairwise squared distances in pb_z.
-    let mut dist = Mat::zeros(n, n);
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let diff = pb_z.row(i) - pb_z.row(j);
-            let d2: f32 = diff.iter().map(|&x| x * x).sum();
-            let d = d2.sqrt();
-            dist[(i, j)] = d;
-            dist[(j, i)] = d;
-        }
-    }
+    info!("PHATE 1/6: pairwise distances");
+    // Materialize rows once so every inner distance reads a contiguous
+    // slice; column-major `row()` views are strided and miss SIMD.
+    let rows = rows_as_contiguous(pb_z);
+    let dist = build_nn_matrix(n, |j| {
+        let rj = &rows[j];
+        (0..n)
+            .map(|i| {
+                if i == j {
+                    0.0
+                } else {
+                    sq_dist(&rows[i], rj).sqrt()
+                }
+            })
+            .collect()
+    });
 
-    // 2. Adaptive bandwidth: σᵢ = distance to knn-th nearest neighbor.
+    info!("PHATE 2/6: adaptive bandwidth σᵢ (knn={knn})");
     let sigma: Vec<f32> = (0..n)
+        .into_par_iter()
         .map(|i| {
             let mut row: Vec<f32> = (0..n).filter(|&j| j != i).map(|j| dist[(i, j)]).collect();
-            row.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            row.select_nth_unstable_by(knn - 1, |a, b| {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            });
             row[knn - 1].max(1e-6)
         })
         .collect();
 
-    // 3. Alpha-decay kernel (symmetrized by averaging).
-    let mut k_mat = Mat::zeros(n, n);
-    for i in 0..n {
-        k_mat[(i, i)] = 1.0;
-        for j in (i + 1)..n {
+    info!("PHATE 3/6: alpha-decay kernel + row-normalize to diffusion operator");
+    let k_mat = build_nn_matrix(n, |j| {
+        let mut col = vec![0.0f32; n];
+        col[j] = 1.0;
+        for i in 0..n {
+            if i == j {
+                continue;
+            }
             let d = dist[(i, j)];
             let e1 = (-(d / sigma[i]).powf(args.alpha)).exp();
             let e2 = (-(d / sigma[j]).powf(args.alpha)).exp();
-            let v = 0.5 * (e1 + e2);
-            k_mat[(i, j)] = v;
-            k_mat[(j, i)] = v;
+            col[i] = 0.5 * (e1 + e2);
         }
-    }
-
-    // 4. Row-normalize to the diffusion operator P.
+        col
+    });
     let mut p_mat = k_mat;
     for i in 0..n {
         let s: f32 = p_mat.row(i).iter().sum::<f32>().max(1e-12);
@@ -93,48 +152,43 @@ pub fn phate_layout_2d(pb_z: &Mat, args: &PhateArgs) -> Mat {
         }
     }
 
-    // 5. Diffusion in time: M = P^t (via repeated squaring for efficiency).
+    info!("PHATE 4/6: diffusion M = P^{}", args.t.max(1));
     let m_mat = matrix_power(&p_mat, args.t.max(1));
 
-    // 6. Potential distance: U[i,j] = ‖-log M[i,:] - -log M[j,:]‖₂.
-    let mut log_m = Mat::zeros(n, n);
-    for i in 0..n {
-        for j in 0..n {
-            log_m[(i, j)] = -(m_mat[(i, j)].max(1e-12)).ln();
-        }
-    }
-    let mut pot_d2 = Mat::zeros(n, n);
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let diff = log_m.row(i) - log_m.row(j);
-            let v: f32 = diff.iter().map(|&x| x * x).sum();
-            pot_d2[(i, j)] = v;
-            pot_d2[(j, i)] = v;
-        }
-    }
-
-    // 7a. Classical MDS for initialization (cheap, gets us to a good basin).
+    info!("PHATE 5/6: potential distance + classical MDS init");
+    let log_m = build_nn_matrix(n, |j| {
+        (0..n).map(|i| -(m_mat[(i, j)].max(1e-12)).ln()).collect()
+    });
+    let log_m_rows = rows_as_contiguous(&log_m);
+    let pot_d2 = build_nn_matrix(n, |j| {
+        let rj = &log_m_rows[j];
+        (0..n)
+            .map(|i| {
+                if i == j {
+                    0.0
+                } else {
+                    sq_dist(&log_m_rows[i], rj)
+                }
+            })
+            .collect()
+    });
     let y_init = classical_mds_2d(&pot_d2);
 
-    // 7b. Metric MDS via SMACOF on the (unsquared) potential distances.
-    let mut delta = Mat::zeros(n, n);
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let d = pot_d2[(i, j)].sqrt();
-            delta[(i, j)] = d;
-            delta[(j, i)] = d;
-        }
-    }
+    let delta = build_nn_matrix(n, |j| (0..n).map(|i| pot_d2[(i, j)].sqrt()).collect());
+    info!(
+        "PHATE 6/6: SMACOF metric MDS (max_iter={}, tol={:.0e})",
+        args.mds_iter, args.mds_tol
+    );
     smacof_2d(&delta, &y_init, args.mds_iter, args.mds_tol)
 }
 
-/// Metric MDS via SMACOF (Scaling by MAjorizing a COmplicated Function).
+/// Metric MDS via SMACOF (Scaling by `MAjorizing` a `COmplicated` Function).
 ///
 /// Minimizes the stress
-///     σ(Y) = Σ_{i<j} (δ_ij − d_ij(Y))²
+///     σ(Y) = Σ_{i<j} (`δ_ij` − `d_ij(Y))²`
 /// over Y ∈ ℝ^{n × 2} via the Guttman transform:
-///     Y_{k+1} = (1/n) · B(Y_k) · Y_k,
-/// where B[i,j] = −δ[i,j] / d_ij(Y_k) for i ≠ j (and zero if d_ij(Y_k) is
+///     Y_{k+1} = (1/n) · `B(Y_k)` · `Y_k`,
+/// where B[i,j] = −δ[i,j] / `d_ij(Y_k)` for i ≠ j (and zero if `d_ij(Y_k)` is
 /// numerically zero), B[i,i] = −Σ_{j ≠ i} B[i,j]. Each iteration strictly
 /// decreases stress (majorization), so no learning rate or line search is
 /// needed. Initialized from classical MDS so the basin is sensible.
@@ -142,46 +196,54 @@ fn smacof_2d(delta: &Mat, y_init: &Mat, max_iter: usize, tol: f32) -> Mat {
     let n = delta.nrows();
     let mut y = y_init.clone();
     let mut prev_stress = f32::INFINITY;
-
-    // Reusable scratch matrices. SMACOF allocates n×n twice per iteration
-    // in the naive form; hoisting saves ~600 MB / run at n = 500, t = 300.
-    let mut dy = Mat::zeros(n, n);
-    let mut b_mat = Mat::zeros(n, n);
     let inv_n = 1.0 / n as f32;
 
+    let pb = new_progress_bar(max_iter as u64);
+    pb.set_message("SMACOF");
     for _ in 0..max_iter {
-        // Pairwise distances in the current 2D configuration.
-        for i in 0..n {
-            dy[(i, i)] = 0.0;
-            for j in (i + 1)..n {
-                let dx = y[(i, 0)] - y[(j, 0)];
-                let dz = y[(i, 1)] - y[(j, 1)];
-                let d = (dx * dx + dz * dz).sqrt();
-                dy[(i, j)] = d;
-                dy[(j, i)] = d;
-            }
-        }
+        pb.inc(1);
+        // Pairwise distances in the current 2D configuration (column-parallel).
+        let dy = build_nn_matrix(n, |j| {
+            let (yj0, yj1) = (y[(j, 0)], y[(j, 1)]);
+            (0..n)
+                .map(|i| {
+                    if i == j {
+                        0.0
+                    } else {
+                        let dx = y[(i, 0)] - yj0;
+                        let dz = y[(i, 1)] - yj1;
+                        (dx * dx + dz * dz).sqrt()
+                    }
+                })
+                .collect()
+        });
 
-        // Stress σ(Y).
-        let mut stress = 0.0f32;
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let diff = delta[(i, j)] - dy[(i, j)];
-                stress += diff * diff;
-            }
-        }
+        let stress: f32 = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                (i + 1..n)
+                    .map(|j| {
+                        let diff = delta[(i, j)] - dy[(i, j)];
+                        diff * diff
+                    })
+                    .sum::<f32>()
+            })
+            .sum();
 
-        // Relative-tolerance convergence on stress change.
         let denom = prev_stress.max(1.0);
         if (prev_stress - stress).abs() / denom < tol {
+            pb.set_message(format!("SMACOF converged (stress={stress:.3e})"));
             break;
         }
         prev_stress = stress;
+        pb.set_message(format!("SMACOF stress={stress:.3e}"));
 
-        // B(Y_k). Overwrite in place.
-        for i in 0..n {
+        // B(Y_k) column-parallel. Diagonal = -Σ off-diagonal in the column
+        // (B is symmetric, so column and row sums match).
+        let b_mat = build_nn_matrix(n, |j| {
+            let mut col = vec![0.0f32; n];
             let mut diag = 0.0f32;
-            for j in 0..n {
+            for i in 0..n {
                 if i == j {
                     continue;
                 }
@@ -191,11 +253,12 @@ fn smacof_2d(delta: &Mat, y_init: &Mat, max_iter: usize, tol: f32) -> Mat {
                 } else {
                     0.0
                 };
-                b_mat[(i, j)] = b;
+                col[i] = b;
                 diag -= b;
             }
-            b_mat[(i, i)] = diag;
-        }
+            col[j] = diag;
+            col
+        });
 
         // Guttman update: Y ← (1/n) · B · Y.
         let mut y_new = &b_mat * &y;
@@ -204,6 +267,7 @@ fn smacof_2d(delta: &Mat, y_init: &Mat, max_iter: usize, tol: f32) -> Mat {
         }
         y = y_new;
     }
+    pb.finish_and_clear();
 
     y
 }

@@ -22,7 +22,7 @@ pub(crate) fn softmax_col_into(
     src: nalgebra::DVectorView<f32>,
     mut dst: nalgebra::DVectorViewMut<f32>,
 ) {
-    let max = src.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let max = src.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0f32;
     for (i, &v) in src.iter().enumerate() {
         let e = (v - max).exp();
@@ -160,7 +160,7 @@ pub(crate) fn label_anchors(
         .map(|c| markers.membership_gc.column(c).norm())
         .collect();
 
-    let mut used_counts: rustc_hash::FxHashMap<Box<str>, usize> = Default::default();
+    let mut used_counts = rustc_hash::FxHashMap::<Box<str>, usize>::default();
     let mut labels: Vec<Box<str>> = Vec::with_capacity(anchor_pb_idx.len());
     let mut scores: Vec<(f32, f32)> = Vec::with_capacity(anchor_pb_idx.len());
 
@@ -185,7 +185,7 @@ pub(crate) fn label_anchors(
         per_ct.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let (top1_ct, top1_z) = per_ct.first().copied().unwrap_or((usize::MAX, 0.0));
-        let top2_z = per_ct.get(1).map(|&(_, s)| s).unwrap_or(f32::NEG_INFINITY);
+        let top2_z = per_ct.get(1).map_or(f32::NEG_INFINITY, |&(_, s)| s);
         scores.push((top1_z, top2_z));
 
         let clears_margin = top1_ct != usize::MAX && (top1_z - top2_z) >= margin_threshold;
@@ -199,7 +199,7 @@ pub(crate) fn label_anchors(
         let label = if *n == 1 {
             base
         } else {
-            format!("{}_{}", base, n).into_boxed_str()
+            format!("{base}_{n}").into_boxed_str()
         };
         labels.push(label);
     }

@@ -1,7 +1,7 @@
 //! Gene-vertex anchor annotation.
 //!
 //! Given a trained topic model (`β`, cell latent) and per-PB mean latent
-//! (from `senna viz`), pick K_anchor genes that span the most orthogonal
+//! (from `senna viz`), pick `K_anchor` genes that span the most orthogonal
 //! directions in the reconstructed gene × PB expression space. Each anchor
 //! gene is labeled against a user marker file by direct dictionary lookup
 //! (gene → celltype), disambiguated toward the most *specific* celltype
@@ -9,7 +9,7 @@
 //! also carries a set of top-N correlated genes to show its neighborhood
 //! in the model.
 //!
-//! Cells are soft-assigned to anchors by cosine-softmax on (cell_latent,
+//! Cells are soft-assigned to anchors by cosine-softmax on (`cell_latent`,
 //! β-row-of-anchor-gene); the cell annotation is the product of the
 //! cell→anchor and anchor→celltype matrices, row-normalized.
 
@@ -48,9 +48,12 @@ pub struct AnnotateTopicArgs {
 
     #[arg(
         short = 'p',
-        long = "pb-mean-latent",
+        long = "pb-features",
+        alias = "pb-mean-latent",
         required = true,
-        help = "Per-PB mean latent (n_pb × K) from `senna viz`"
+        help = "Per-PB feature matrix from `senna viz`: either pb_gene_mean.parquet \
+                (n_pb × n_genes, log1p-CPM — preferred) or the legacy pb_mean_latent.parquet \
+                (n_pb × K, back-projected via β)."
     )]
     pb_mean_latent_file: Box<str>,
 
@@ -165,7 +168,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
     let k_topics = topic_nt_raw.ncols();
     let topic_nt = if topic_nt_raw.max() <= 0.0 {
         info!("Detected log-probabilities in latent file, exponentiating");
-        topic_nt_raw.map(|x| x.exp())
+        topic_nt_raw.map(f32::exp)
     } else {
         topic_nt_raw
     };
@@ -182,24 +185,49 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
     let MatWithNames {
         rows: _pb_names,
         cols: _,
-        mat: pb_mean_latent,
+        mat: pb_features,
     } = read_mat(&args.pb_mean_latent_file)?;
-    if pb_mean_latent.ncols() != k_topics {
-        anyhow::bail!(
-            "pb_mean_latent has {} cols but latent has {}",
-            pb_mean_latent.ncols(),
-            k_topics
-        );
+    let n_pb = pb_features.nrows();
+
+    // Accept either legacy per-PB mean latent (n_pb × K, reconstruct via β)
+    // or the new pb_gene_mean (n_pb × n_genes, already log1p-CPM gene-space).
+    enum PbMode {
+        MeanLatent,
+        GeneMean,
     }
-    let n_pb = pb_mean_latent.nrows();
+    // When K ≠ n_genes the column count disambiguates cleanly. On the
+    // rare collision (K == n_genes) prefer the gene-mean path: the new
+    // viz output is the forward direction, and mean-latent is legacy.
+    let pb_mode = if pb_features.ncols() == n_genes {
+        if k_topics == n_genes {
+            log::warn!(
+                "pb-features has {} cols and K == n_genes; assuming gene-mean (log1p-CPM)",
+                pb_features.ncols()
+            );
+        }
+        PbMode::GeneMean
+    } else if pb_features.ncols() == k_topics {
+        PbMode::MeanLatent
+    } else {
+        anyhow::bail!(
+            "pb-features has {} cols; expected K={} (mean-latent) or n_genes={} (gene-mean)",
+            pb_features.ncols(),
+            k_topics,
+            n_genes
+        );
+    };
     info!(
-        "Loaded β: {}×{}, latent: {}×{}, pb_mean_latent: {}×{}",
+        "Loaded β: {}×{}, latent: {}×{}, pb-features: {}×{} ({})",
         n_genes,
         k_topics,
         topic_nt.nrows(),
         k_topics,
         n_pb,
-        k_topics
+        pb_features.ncols(),
+        match pb_mode {
+            PbMode::MeanLatent => "mean-latent mode",
+            PbMode::GeneMean => "gene-mean mode",
+        }
     );
 
     // 2. Marker matrix (gene × celltype 0/1). Drop celltypes with zero
@@ -231,35 +259,36 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
     info!("Markers: {} celltypes kept", annot_names.len());
 
     // 3. Gene × PB reconstruction, log1p-compressed, z-scored for GS.
-    //    β is stored as log-probs; load_dictionary exp's + column-normalizes
-    //    so β·pb_mean_latentᵀ lives on the linear probability simplex.
-    //    log1p compresses the tail without amplifying rare-gene noise the
-    //    way log(· + ε) would. Per-column z-score puts each PB on equal
-    //    footing and kills housekeeping rows (constant across PBs → ≈0
-    //    residual norm).
-    let gene_pb = &beta_prob * pb_mean_latent.transpose();
-    let mut x_gp = gene_pb;
-    for v in x_gp.as_mut_slice() {
-        *v = v.max(0.0).ln_1p();
-    }
+    //    MeanLatent mode: β is stored as log-probs; load_dictionary exp's +
+    //    column-normalizes so β·pb_mean_latentᵀ lives on the linear
+    //    probability simplex — then log1p compresses.
+    //    GeneMean mode: pb-features is already log1p-CPM in gene space, so
+    //    we transpose and use directly; no β reconstruction.
+    //    Per-column z-score puts each PB on equal footing and kills
+    //    housekeeping rows.
+    let x_gp: Mat = match pb_mode {
+        PbMode::MeanLatent => {
+            let gene_pb = &beta_prob * pb_features.transpose();
+            let mut x = gene_pb;
+            for v in x.as_mut_slice() {
+                *v = v.max(0.0).ln_1p();
+            }
+            x
+        }
+        PbMode::GeneMean => pb_features.transpose(),
+    };
     let x_zscored = zscore_columns(&x_gp);
 
     // 4. Gram-Schmidt on GENE rows. Default K_anchor = K (one anchor per
     //    independent dictionary direction).
     let requested = args.num_anchors.unwrap_or(k_topics);
     if requested > n_genes {
-        log::warn!(
-            "Requested K_anchor={} > n_genes={}; clamping",
-            requested,
-            n_genes
-        );
+        log::warn!("Requested K_anchor={requested} > n_genes={n_genes}; clamping");
     }
     if requested > k_topics {
         log::info!(
-            "K_anchor={} > K_topics={}; past K topics the Gram-Schmidt residuals \
-             are ~0 (row space is rank-limited by β). Expect degenerate picks.",
-            requested,
-            k_topics
+            "K_anchor={requested} > K_topics={k_topics}; past K topics the Gram-Schmidt residuals \
+             are ~0 (row space is rank-limited by β). Expect degenerate picks."
         );
     }
     let k_anchor = requested.min(n_genes);
@@ -290,7 +319,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
     // 6. Interactive / suggest / apply modes.
     let original_markers_vec = crate::marker_support::read_marker_gene_info(&args.marker_file)?;
     let marker_db = if let Some(db_path) = &args.marker_db {
-        info!("Loading marker database from {}...", db_path);
+        info!("Loading marker database from {db_path}...");
         Some(MarkerDatabase::load_with_vocab(
             db_path,
             &gene_names,
@@ -327,7 +356,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
             }
         }
         write_candidates_json(&candidates, output_json)?;
-        info!("Wrote candidate markers to {}", output_json);
+        info!("Wrote candidate markers to {output_json}");
         write_anchor_outputs(
             &args.out,
             &records,
@@ -366,7 +395,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
     }
 
     let mut records = records;
-    let mut n_iters = if all_new_markers.is_empty() { 0 } else { 1 };
+    let mut n_iters = usize::from(!all_new_markers.is_empty());
 
     // Relabel whenever membership changes.
     let relabel = |mem: &Mat| {
@@ -387,7 +416,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
     if args.interactive {
         loop {
             n_iters += 1;
-            info!("=== Interactive round {} ===", n_iters);
+            info!("=== Interactive round {n_iters} ===");
             records = relabel(&membership_ga);
 
             let labels: Vec<Box<str>> = records.iter().map(|r| r.label.clone()).collect();
@@ -437,7 +466,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
         let path = format!("{}.augmented_markers.tsv", args.out);
         save_augmented_markers(&original_markers_vec, &all_new_markers, &path)?;
         print_augmentation_summary(&all_new_markers, n_iters);
-        info!("Saved augmented markers to {}", path);
+        info!("Saved augmented markers to {path}");
     }
 
     // 7. Anchor → celltype assignment with --min-pip filter.
@@ -469,7 +498,7 @@ pub fn annotate_topics(args: &AnnotateTopicArgs) -> anyhow::Result<()> {
         (Some(&labels), Some("anchor")),
         Some(&annot_names),
     )?;
-    info!("Wrote anchor-celltype assignment to {}", assignment_file);
+    info!("Wrote anchor-celltype assignment to {assignment_file}");
 
     // 8. Cell → anchor via cosine(cell_latent, β[anchor_gene, :]).
     //    β-rows of anchor genes define each anchor's topic direction;
@@ -535,7 +564,7 @@ fn label_anchor_genes(
         .map(|g| x_zscored.row(g).iter().map(|&v| v * v).sum::<f32>().sqrt())
         .collect();
 
-    let mut used_counts: rustc_hash::FxHashMap<Box<str>, usize> = Default::default();
+    let mut used_counts = rustc_hash::FxHashMap::<Box<str>, usize>::default();
     let mut out: Vec<AnchorRecord> = Vec::with_capacity(anchor_gene_idx.len());
 
     for (i, &g) in anchor_gene_idx.iter().enumerate() {
@@ -543,10 +572,7 @@ fn label_anchor_genes(
         let claims: Vec<usize> = (0..n_ct).filter(|&c| membership_ga[(g, c)] > 0.0).collect();
 
         let (label, primary) = if claims.is_empty() {
-            (
-                format!("{}{}", NOVEL_ANCHOR_PREFIX, i).into_boxed_str(),
-                None,
-            )
+            (format!("{NOVEL_ANCHOR_PREFIX}{i}").into_boxed_str(), None)
         } else {
             // Most-specific = smallest celltype by marker count.
             let primary = *claims
@@ -559,7 +585,7 @@ fn label_anchor_genes(
             let lab = if *n == 1 {
                 base
             } else {
-                format!("{}_{}", base, n).into_boxed_str()
+                format!("{base}_{n}").into_boxed_str()
             };
             (lab, Some(primary))
         };
@@ -670,7 +696,7 @@ fn soft_assign_cosine(cell_z: &Mat, anchor_z: &Mat, temperature: f32) -> Mat {
     let mut out = Mat::zeros(sim.nrows(), sim.ncols());
     for i in 0..sim.nrows() {
         let row = sim.row(i);
-        let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         let mut sum = 0.0f32;
         for j in 0..sim.ncols() {
             let e = ((row[j] - max) * beta).exp();
@@ -698,27 +724,24 @@ fn write_anchor_outputs(
     use std::io::Write;
 
     // Main anchor table.
-    let anchors_path = format!("{}.anchor_genes.tsv", out_prefix);
+    let anchors_path = format!("{out_prefix}.anchor_genes.tsv");
     let mut f = std::fs::File::create(&anchors_path)?;
     writeln!(
         f,
         "anchor_idx\tgene_idx\tgene\tlabel\tprimary_celltype\tn_celltypes_claiming\tspecificity"
     )?;
     for (i, r) in records.iter().enumerate() {
-        let primary = r
-            .primary_celltype
-            .map(|c| annot_names[c].as_ref())
-            .unwrap_or("-");
+        let primary = r.primary_celltype.map_or("-", |c| annot_names[c].as_ref());
         writeln!(
             f,
             "{}\t{}\t{}\t{}\t{}\t{}\t{:.4}",
             i, r.gene_idx, r.gene_name, r.label, primary, r.n_claiming, r.specificity
         )?;
     }
-    info!("wrote {}", anchors_path);
+    info!("wrote {anchors_path}");
 
     // Correlated genes (long format).
-    let corr_path = format!("{}.correlated_genes.tsv", out_prefix);
+    let corr_path = format!("{out_prefix}.correlated_genes.tsv");
     let mut f = std::fs::File::create(&corr_path)?;
     writeln!(
         f,
@@ -738,7 +761,7 @@ fn write_anchor_outputs(
             )?;
         }
     }
-    info!("wrote {}", corr_path);
+    info!("wrote {corr_path}");
     Ok(())
 }
 
@@ -770,7 +793,7 @@ fn write_argmax_assignments(
         let row = annot.row(i);
         let sum: f32 = row.iter().sum();
         if sum < 1e-12 {
-            writeln!(file, "{}\tunassigned\t0.0000", cell_name)?;
+            writeln!(file, "{cell_name}\tunassigned\t0.0000")?;
             continue;
         }
         let (max_idx, max_val) = row
@@ -784,7 +807,7 @@ fn write_argmax_assignments(
             cell_name, annot_names[max_idx], max_val
         )?;
     }
-    info!("Wrote argmax assignments to {}", output_file);
+    info!("Wrote argmax assignments to {output_file}");
     Ok(())
 }
 
@@ -843,7 +866,7 @@ fn display_annotation_histogram(annot: &Mat, annot_names: &[Box<str>]) {
     let above_70 = max_probs.iter().filter(|&&x| x > 0.7).count();
 
     eprintln!();
-    eprintln!("Annotation Summary ({} cells)", n_cells);
+    eprintln!("Annotation Summary ({n_cells} cells)");
     eprintln!(
         "  Mean max-prob (assigned): {:.3}  >0.5: {} ({:.1}%)  >0.7: {} ({:.1}%)",
         mean_prob,

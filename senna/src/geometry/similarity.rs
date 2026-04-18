@@ -3,30 +3,55 @@
 //! regularization).
 
 use crate::embed_common::*;
+use rayon::prelude::*;
+
+/// f32 dot product on two equal-length slices. `zip().map().sum()` is the
+/// form LLVM consistently lowers to SSE/AVX f32 SIMD reductions.
+#[inline]
+fn dot_slice(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
 
 /// Cosine similarity between columns of `x_dp`. Columns are L2-normalized
 /// (with a tiny epsilon floor on zero-norm columns) and then the gram
-/// matrix is formed: `S = X̂ᵀ X̂`.
+/// matrix is formed: `S = X̂ᵀ X̂`. The O(n² · D) gram is built
+/// column-parallel for large D, with SIMD-friendly per-column slices.
 pub(crate) fn compute_cosine_similarity(x_dp: &Mat) -> Mat {
     let n = x_dp.ncols();
-    let mut x_norm = x_dp.clone();
-    for j in 0..n {
-        let norm = x_norm.column(j).norm();
-        if norm > 1e-10 {
-            x_norm.column_mut(j).scale_mut(1.0 / norm);
-        }
+
+    let norms: Vec<Vec<f32>> = (0..n)
+        .into_par_iter()
+        .map(|j| {
+            let col = x_dp.column(j);
+            let norm = col.norm();
+            let inv = if norm > 1e-10 { 1.0 / norm } else { 0.0 };
+            col.iter().map(|v| v * inv).collect()
+        })
+        .collect();
+
+    let cols: Vec<Vec<f32>> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let xi = &norms[i];
+            (0..n).map(|j| dot_slice(xi, &norms[j])).collect()
+        })
+        .collect();
+
+    let mut s = Mat::zeros(n, n);
+    for (i, col) in cols.iter().enumerate() {
+        s.column_mut(i).copy_from_slice(col);
     }
-    x_norm.transpose() * &x_norm
+    s
 }
 
 /// Zero out entries below `threshold`.
 pub(crate) fn threshold_similarity(s: &Mat, threshold: f32) -> Mat {
     let mut result = s.clone();
-    for val in result.iter_mut() {
-        if *val < threshold {
-            *val = 0.0;
+    result.as_mut_slice().par_iter_mut().for_each(|v| {
+        if *v < threshold {
+            *v = 0.0;
         }
-    }
+    });
     result
 }
 
@@ -37,30 +62,41 @@ pub(crate) fn local_scale_similarity(s: &Mat, k: usize) -> Mat {
     let n = s.nrows();
     let k = k.min(n - 1).max(1);
 
-    let mut sigma = vec![0.0f32; n];
-    for i in 0..n {
-        let mut sims: Vec<f32> = (0..n).filter(|&j| j != i).map(|j| s[(i, j)]).collect();
-        sims.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        let kth_sim = if k <= sims.len() {
-            sims[k - 1]
-        } else {
-            sims.last().copied().unwrap_or(0.0)
-        };
-        sigma[i] = (1.0 - kth_sim).max(1e-6);
-    }
+    // σ_i = 1 − (k-th highest similarity to i). `select_nth_unstable_by`
+    // partitions in O(n) without a full sort.
+    let sigma: Vec<f32> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let mut sims: Vec<f32> = (0..n).filter(|&j| j != i).map(|j| s[(i, j)]).collect();
+            let idx = (k - 1).min(sims.len() - 1);
+            sims.select_nth_unstable_by(idx, |a, b| {
+                b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            (1.0 - sims[idx]).max(1e-6)
+        })
+        .collect();
 
-    let mut result = Mat::zeros(n, n);
-    for i in 0..n {
-        for j in 0..n {
-            if i == j {
-                result[(i, j)] = 1.0;
-            } else {
-                let scale = (sigma[i] * sigma[j]).sqrt();
-                result[(i, j)] = s[(i, j)] / scale;
-            }
-        }
+    let cols: Vec<Vec<f32>> = (0..n)
+        .into_par_iter()
+        .map(|j| {
+            (0..n)
+                .map(|i| {
+                    if i == j {
+                        1.0
+                    } else {
+                        let scale = (sigma[i] * sigma[j]).sqrt();
+                        s[(i, j)] / scale
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    let mut out = Mat::zeros(n, n);
+    for (j, col) in cols.iter().enumerate() {
+        out.column_mut(j).copy_from_slice(col);
     }
-    result
+    out
 }
 
 /// Add `eps` to the diagonal so isolated nodes can't collapse downstream
@@ -77,10 +113,7 @@ pub(crate) fn regularize_similarity(similarity: &Mat, eps: f32) -> Mat {
         .filter(|&i| sim_reg.row(i).iter().sum::<f32>() < eps * 2.0)
         .count();
     if low_degree_count > 0 {
-        info!(
-            "Warning: {} PB samples have very low similarity to others.",
-            low_degree_count
-        );
+        info!("Warning: {low_degree_count} PB samples have very low similarity to others.");
     }
     sim_reg
 }

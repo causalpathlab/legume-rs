@@ -1,6 +1,8 @@
-use super::feature_selection::*;
+use super::feature_selection::{
+    filter_csc_by_rows, select_highly_variable_features, FeatureSelection,
+};
 use crate::embed_common::*;
-use crate::senna_input::*;
+use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 
 #[derive(Args, Debug)]
@@ -201,7 +203,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
 
     // 2. Random projection
     let proj_kn = if let Some(proj_file) = args.warm_start_proj_file.as_deref() {
-        use matrix_util::common_io::*;
+        use matrix_util::common_io::file_ext;
         let ext = file_ext(proj_file)?;
 
         let MatWithNames {
@@ -250,7 +252,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     // 4. batch-adjusted data
     let batch_dp = collapse_out.mu_residual.as_ref();
 
-    if let Some(delta_dp) = batch_dp.map(|x| x.posterior_mean()) {
+    if let Some(delta_dp) = batch_dp.map(matrix_param::traits::Inference::posterior_mean) {
         info!("{} x {}", delta_dp.nrows(), delta_dp.ncols());
 
         if args.save_adjusted {
@@ -274,7 +276,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             adjusted_data.register_row_names_vec(&data_vec.row_names()?);
             adjusted_data.register_column_names_vec(&data_vec.column_names()?);
 
-            info!("Batch-adjusted backend: {}", backend_file);
+            info!("Batch-adjusted backend: {backend_file}");
         }
     }
 
@@ -303,7 +305,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
 
     let nystrom_out = do_nystrom_proj(
         x_dn.posterior_log_mean().clone(),
-        batch_dp.map(|x| x.posterior_mean()),
+        batch_dp.map(matrix_param::traits::Inference::posterior_mean),
         &data_vec,
         args.n_latent_topics,
         args.column_sum_norm,
@@ -317,8 +319,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     // Use selected feature names for dictionary if feature selection was applied
     let output_gene_names = selected_features
         .as_ref()
-        .map(|sel| sel.selected_names.clone())
-        .unwrap_or_else(|| gene_names.clone());
+        .map_or_else(|| gene_names.clone(), |sel| sel.selected_names.clone());
 
     nystrom_out.latent_nk.to_parquet_with_names(
         &(args.out.to_string() + ".latent.parquet"),

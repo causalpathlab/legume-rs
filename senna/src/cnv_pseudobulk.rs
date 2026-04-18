@@ -2,7 +2,7 @@
 //!
 //! Shared across SVD, topic, and indexed-topic pipelines:
 //! 1. Cell-type membership from K-means (SVD) or topic proportions (topic/itopic)
-//! 2. Pseudobulk via `collapse_pseudobulk()` → per-(cell_type, individual) GammaMatrix
+//! 2. Pseudobulk via `collapse_pseudobulk()` → per-(cell_type, individual) `GammaMatrix`
 //! 3. Within each cell type: log-ratio vs cross-individual mean → CNV signal
 //! 4. Feed stacked log-ratios to factorial tree for CNV calling
 
@@ -20,7 +20,7 @@ use matrix_util::clustering::{Kmeans, KmeansArgs};
 
 use matrix_util::traits::IoOps;
 
-use crate::embed_common::{CnvArgs, Mat};
+use crate::embed_common::*;
 
 // ---------------------------------------------------------------------------
 // Public entry points
@@ -37,10 +37,7 @@ pub fn detect_cnv_cluster_informed(
 ) -> anyhow::Result<CnvDetectResult> {
     let n_cells = latent_nk.nrows();
 
-    info!(
-        "CNV: clustering {} cells into {} groups",
-        n_cells, n_clusters
-    );
+    info!("CNV: clustering {n_cells} cells into {n_clusters} groups");
     let cluster_labels = latent_nk.kmeans_rows(KmeansArgs::with_clusters(n_clusters));
 
     // One-hot membership from cluster labels
@@ -49,7 +46,7 @@ pub fn detect_cnv_cluster_informed(
         membership_matrix[(i, c)] = 1.0;
     }
     let cell_type_names: Vec<Box<str>> = (0..n_clusters)
-        .map(|c| format!("cluster_{}", c).into())
+        .map(|c| format!("cluster_{c}").into())
         .collect();
     let membership = CellTypeMembership {
         matrix: membership_matrix,
@@ -77,9 +74,8 @@ pub fn detect_cnv_topic_informed(
 ) -> anyhow::Result<CnvDetectResult> {
     let n_topics = topic_proportions.ncols();
 
-    let cell_type_names: Vec<Box<str>> = (0..n_topics)
-        .map(|k| format!("topic_{}", k).into())
-        .collect();
+    let cell_type_names: Vec<Box<str>> =
+        (0..n_topics).map(|k| format!("topic_{k}").into()).collect();
     let membership = CellTypeMembership {
         matrix: topic_proportions.clone(),
         cell_type_names,
@@ -98,7 +94,7 @@ pub fn detect_cnv_topic_informed(
 // Core shared logic
 // ---------------------------------------------------------------------------
 
-/// Core CNV detection: pseudobulk by (cell_type, individual) → log-ratio → factorial tree.
+/// Core CNV detection: pseudobulk by (`cell_type`, individual) → log-ratio → factorial tree.
 fn detect_cnv_with_membership(
     data_vec: SparseIoVec,
     membership: &CellTypeMembership,
@@ -111,10 +107,7 @@ fn detect_cnv_with_membership(
     let n_individuals = annotations.individual_ids.len();
     let n_cell_types = membership.cell_type_names.len();
 
-    info!(
-        "CNV: pseudobulk with {} cell types × {} individuals",
-        n_cell_types, n_individuals,
-    );
+    info!("CNV: pseudobulk with {n_cell_types} cell types × {n_individuals} individuals",);
 
     let collapsed = collapse_pseudobulk(data_vec, &annotations, membership, 1.0, 1.0)?;
 
@@ -165,10 +158,7 @@ fn detect_cnv_with_membership(
         }
     }
 
-    info!(
-        "CNV: log-ratio signal {} genes × {} samples",
-        n_genes, valid_count,
-    );
+    info!("CNV: log-ratio signal {n_genes} genes × {valid_count} samples",);
 
     cnv::detect::detect_cnv(&signal, gene_positions, cnv_config)
 }
@@ -183,12 +173,12 @@ pub fn load_gene_positions(
     gene_names: &[Box<str>],
 ) -> anyhow::Result<Option<Vec<GenePosition>>> {
     if let Some(gt_path) = &cnv_args.cnv_ground_truth {
-        info!("CNV: loading positions from {}", gt_path);
+        info!("CNV: loading positions from {gt_path}");
         Ok(Some(cnv::detect::read_gene_positions_from_cnv_tsv(
             gt_path,
         )?))
     } else if let Some(gff_path) = &cnv_args.gff {
-        info!("CNV: loading gene annotations from {}", gff_path);
+        info!("CNV: loading gene annotations from {gff_path}");
         let gene_tss = genomic_data::coordinates::load_gene_tss(gff_path, gene_names)?;
         Ok(Some(
             gene_tss
@@ -208,7 +198,7 @@ pub fn load_gene_positions(
     }
 }
 
-/// Reconstruct per-cell batch labels from a SparseIoVec.
+/// Reconstruct per-cell batch labels from a `SparseIoVec`.
 ///
 /// Returns `None` if no batch information is available.
 pub fn reconstruct_batch_labels(data_vec: &SparseIoVec) -> Option<Vec<Box<str>>> {
@@ -271,7 +261,7 @@ pub fn write_cnv_results(
     Ok(())
 }
 
-/// Build CellAnnotations from per-cell batch labels (same pattern as cocoa).
+/// Build `CellAnnotations` from per-cell batch labels (same pattern as cocoa).
 fn build_cell_annotations(batch_labels: &[Box<str>], column_names: &[Box<str>]) -> CellAnnotations {
     let mut indv_set: Vec<Box<str>> = batch_labels
         .iter()
