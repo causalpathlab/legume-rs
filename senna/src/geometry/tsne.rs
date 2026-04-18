@@ -139,6 +139,13 @@ impl TSne {
 
         let y = Var::from_tensor(&Tensor::from_vec(y_flat, (n, 2), &device)?)?;
 
+        // Auto-scale learning rate with n (Kobak & Berens 2019). The fixed
+        // lr=200 Rtsne convention diverges for small n: early-exaggeration
+        // gradients grow faster than the Student-t tail can damp them,
+        // blowing Y up to overflow within ~200 iters at n ≈ 70.
+        let lr_auto = (n as f32 / self.early_exaggeration).max(50.0);
+        let learning_rate = self.learning_rate.min(lr_auto);
+
         // Per-parameter velocity and adaptive gains (Jacobs 1988).
         let mut velocity: Vec<f32> = vec![0.0; n * 2];
         let mut gains: Vec<f32> = vec![1.0; n * 2];
@@ -193,7 +200,7 @@ impl TSne {
 
             // v ← momentum · v − lr · gains · grad
             for i in 0..velocity.len() {
-                velocity[i] = momentum * velocity[i] - self.learning_rate * gains[i] * g_flat[i];
+                velocity[i] = momentum * velocity[i] - learning_rate * gains[i] * g_flat[i];
             }
 
             // Y ← Y + v, then center so the mean is at the origin.
