@@ -1,11 +1,11 @@
 use crate::candle_aux_layers::*;
 use crate::candle_loss_functions::gaussian_kl_loss;
 use crate::candle_model_traits::*;
+use crate::candle_value_transform::anscombe_residual;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, BatchNorm, Linear, Module, ModuleT, VarBuilder};
 
 pub struct LogSoftmaxJointEncoder {
-    n_features: Vec<usize>,
     n_topics: usize,
     fc: Vec<StackLayers<Linear>>,
     bn_z: Vec<BatchNorm>,
@@ -41,21 +41,7 @@ impl LogSoftmaxJointEncoder {
         x_nd_vec
             .iter()
             .zip(x0_nd_vec)
-            .enumerate()
-            .map(|(m, (x_nd, x0_nd))| {
-                let lx_nd = (x_nd + 1.)?.log()?;
-                let denom_n1 = lx_nd.sum_keepdim(lx_nd.rank() - 1)?;
-                let h_nd = (lx_nd.broadcast_div(&denom_n1)? * (self.n_features[m] as f64))?;
-
-                if let Some(x0_nd) = x0_nd {
-                    let lx0_nd = (x0_nd + 1.)?.log()?;
-                    let denom0 = lx0_nd.sum_keepdim(lx0_nd.rank() - 1)?;
-                    let x0_nd = (lx0_nd.broadcast_div(&denom0)? * (self.n_features[m] as f64))?;
-                    h_nd - x0_nd
-                } else {
-                    Ok(h_nd)
-                }
-            })
+            .map(|(x_nd, x0_nd)| anscombe_residual(x_nd, x0_nd.as_ref()))
             .collect()
     }
 
@@ -189,7 +175,6 @@ impl LogSoftmaxJointEncoder {
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Self {
-            n_features: args.n_features,
             n_topics: args.n_topics,
             fc,
             bn_z,
