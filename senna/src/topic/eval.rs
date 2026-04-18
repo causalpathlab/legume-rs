@@ -66,7 +66,7 @@ where
 pub(crate) struct GeneRemap {
     /// For each new-data compact row, the training gene position (or None).
     pub new_to_train: Vec<Option<usize>>,
-    /// Number of training genes (D_train).
+    /// Number of training genes (`D_train`).
     pub d_train: usize,
     /// Number of new genes that mapped to training genes.
     pub n_mapped: usize,

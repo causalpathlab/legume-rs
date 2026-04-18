@@ -1,10 +1,12 @@
 use crate::embed_common::*;
-use crate::senna_input::*;
-use crate::topic::common::*;
-use crate::topic::train_joint::*;
+use crate::senna_input::{
+    read_data_on_shared_columns, ReadSharedColumnsArgs, SparseStackWithBatch,
+};
+use crate::topic::common::{create_device, setup_stop_handler};
+use crate::topic::train_joint::{train_and_save, ProgressiveTrainConfig, SaveContext};
 
-use candle_util::candle_decoder_delta_topic::*;
-use candle_util::candle_decoder_joint_topic::*;
+use candle_util::candle_decoder_delta_topic::DeltaTopicDecoder;
+use candle_util::candle_decoder_joint_topic::JointTopicDecoder;
 use candle_util::candle_encoder_joint_softmax::*;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -244,9 +246,8 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             if names != ref_names {
                 return Err(anyhow::anyhow!(
                     "Delta decoder requires shared features across modalities, \
-                     but modality 0 and modality {} have different row names. \
-                     Consider using `data-beans align` to align data first.",
-                    d
+                     but modality 0 and modality {d} have different row names. \
+                     Consider using `data-beans align` to align data first."
                 ));
             }
         }
@@ -365,7 +366,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     let n_features: Vec<usize> = n_features_full
         .iter()
         .zip(&coarsenings)
-        .map(|(&n, fc)| fc.as_ref().map(|c| c.num_coarse).unwrap_or(n))
+        .map(|(&n, fc)| fc.as_ref().map_or(n, |c| c.num_coarse))
         .collect();
 
     let encoder = LogSoftmaxJointEncoder::new(
@@ -390,7 +391,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     let gene_names: Vec<Box<str>> = data_stack
         .stack
         .iter()
-        .map(|dv| dv.row_names())
+        .map(data_beans::sparse_io_vector::SparseIoVec::row_names)
         .collect::<anyhow::Result<Vec<_>>>()?
         .into_iter()
         .flatten()

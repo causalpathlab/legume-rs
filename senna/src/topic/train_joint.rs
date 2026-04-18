@@ -6,7 +6,7 @@ use crate::logging::new_progress_bar;
 use candle_core::Device;
 use candle_nn::AdamW;
 use candle_nn::Optimizer;
-use candle_util::candle_encoder_joint_softmax::*;
+use candle_util::candle_encoder_joint_softmax::LogSoftmaxJointEncoder;
 use candle_util::candle_joint_data_loader::*;
 use candle_util::candle_loss_functions::topic_likelihood;
 use candle_util::candle_model_traits::*;
@@ -62,7 +62,7 @@ pub(crate) fn train_and_save<Dec: JointDecoderModuleT>(
     Ok(())
 }
 
-/// Write effective dictionaries for any JointDecoderModuleT, expanding
+/// Write effective dictionaries for any `JointDecoderModuleT`, expanding
 /// coarsening if needed and stacking vertically across modalities.
 pub(crate) fn write_joint_dictionaries<Dec: JointDecoderModuleT>(
     decoder: &Dec,
@@ -286,7 +286,7 @@ where
 
     let mut adam = AdamW::new_lr(
         config.parameters.all_vars(),
-        config.args.learning_rate as f64,
+        f64::from(config.args.learning_rate),
     )?;
 
     let total_actual_epochs: usize = level_epochs.iter().sum();
@@ -360,7 +360,7 @@ where
                 .map(|(x, fc)| -> anyhow::Result<Option<Mat>> {
                     Ok(x.mu_adjusted
                         .as_ref()
-                        .map(|y| y.posterior_sample())
+                        .map(matrix_param::traits::Inference::posterior_sample)
                         .transpose()?
                         .map(|y| {
                             let mat = y.sum_to_one_columns().scale(config.args.column_sum_norm);

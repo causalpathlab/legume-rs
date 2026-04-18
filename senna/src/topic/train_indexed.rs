@@ -7,7 +7,7 @@ use crate::logging::new_progress_bar;
 
 use candle_core::{Device, Tensor};
 use candle_nn::{AdamW, Optimizer};
-use candle_util::candle_encoder_indexed::*;
+use candle_util::candle_encoder_indexed::IndexedEmbeddingEncoder;
 use candle_util::candle_indexed_data_loader::*;
 use candle_util::candle_indexed_model_traits::*;
 use candle_util::candle_topic_refinement::TopicRefinementConfig;
@@ -32,7 +32,7 @@ pub(crate) struct IndexedTrainConfig<'a> {
     pub anchor_penalty: f32,
 }
 
-impl<'a> IndexedTrainConfig<'a> {
+impl IndexedTrainConfig<'_> {
     #[inline]
     fn add_anchor_penalty(&self, loss: Tensor, level: usize) -> anyhow::Result<Tensor> {
         crate::topic::anchor_prior::anchor_penalty_at_level(
@@ -45,11 +45,8 @@ impl<'a> IndexedTrainConfig<'a> {
     }
 }
 
-/// Estimate bulk-vs-SC bias as a GammaMatrix [D_sc, 1].
-pub(crate) fn estimate_bulk_delta(
-    bulk_dm: &Mat,
-    collapsed: &CollapsedOut,
-) -> anyhow::Result<GammaMatrix> {
+/// Estimate bulk-vs-SC bias as a `GammaMatrix` [`D_sc`, 1].
+pub(crate) fn estimate_bulk_delta(bulk_dm: &Mat, collapsed: &CollapsedOut) -> GammaMatrix {
     let mu_adj = collapsed
         .mu_adjusted
         .as_ref()
@@ -73,7 +70,7 @@ pub(crate) fn estimate_bulk_delta(
     bulk_delta.update_stat(&bulk_sum, &expected);
     bulk_delta.calibrate();
 
-    Ok(bulk_delta)
+    bulk_delta
 }
 
 pub(crate) fn train_mixed<Dec>(
@@ -99,12 +96,12 @@ where
         );
     }
 
-    info!(
-        "Mixed multi-level training: {} levels, {} epochs",
-        num_levels, total_epochs
-    );
+    info!("Mixed multi-level training: {num_levels} levels, {total_epochs} epochs");
 
-    let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.learning_rate as f64)?;
+    let mut adam = AdamW::new_lr(
+        config.parameters.all_vars(),
+        f64::from(config.learning_rate),
+    )?;
     let pb = new_progress_bar(total_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_epochs);
@@ -117,8 +114,7 @@ where
         .collect();
     let level_budgets = compute_level_budgets(&level_sizes, target_total);
     info!(
-        "Sample budget per epoch: {} total, per level: {:?} (from {:?})",
-        target_total, level_budgets, level_sizes
+        "Sample budget per epoch: {target_total} total, per level: {level_budgets:?} (from {level_sizes:?})"
     );
 
     let mut rng = rand::rng();
@@ -261,7 +257,7 @@ where
 
             if config.stop.load(Ordering::SeqCst) {
                 pb.finish_and_clear();
-                info!("Stopping early at epoch {}", epoch);
+                info!("Stopping early at epoch {epoch}");
                 return Ok(TrainScores {
                     llik: llik_trace,
                     kl: kl_trace,
@@ -312,7 +308,10 @@ where
         level_epochs.iter().sum::<usize>()
     );
 
-    let mut adam = AdamW::new_lr(config.parameters.all_vars(), config.learning_rate as f64)?;
+    let mut adam = AdamW::new_lr(
+        config.parameters.all_vars(),
+        f64::from(config.learning_rate),
+    )?;
     let total_actual_epochs: usize = level_epochs.iter().sum();
     let pb = new_progress_bar(total_actual_epochs as u64);
 

@@ -27,7 +27,7 @@ pub(crate) struct TrainConfig<'a> {
     pub anchor_penalty: f32,
 }
 
-impl<'a> TrainConfig<'a> {
+impl TrainConfig<'_> {
     #[inline]
     fn add_anchor_penalty(&self, loss: Tensor, level: usize) -> anyhow::Result<Tensor> {
         anchor_penalty_at_level(
@@ -42,8 +42,8 @@ impl<'a> TrainConfig<'a> {
 
 /// Mixed multi-level VAE training.
 ///
-/// Encoder operates at D_coarse (finest level's feature coarsening).
-/// Per-level decoders operate at D_l. All levels are trained simultaneously
+/// Encoder operates at `D_coarse` (finest level's feature coarsening).
+/// Per-level decoders operate at `D_l`. All levels are trained simultaneously
 /// each epoch — the shared encoder sees data from all levels, while each
 /// decoder handles its own feature resolution.
 pub(crate) fn train_mixed<Enc, Dec>(
@@ -73,14 +73,11 @@ where
         );
     }
 
-    info!(
-        "Mixed multi-level training: {} levels, {} epochs",
-        num_levels, total_epochs
-    );
+    info!("Mixed multi-level training: {num_levels} levels, {total_epochs} epochs");
 
     let mut adam = AdamW::new_lr(
         config.parameters.all_vars(),
-        config.args.learning_rate as f64,
+        f64::from(config.args.learning_rate),
     )?;
 
     let pb = new_progress_bar(total_epochs as u64);
@@ -96,8 +93,7 @@ where
         .collect();
     let level_budgets = compute_level_budgets(&level_sizes, target_total);
     info!(
-        "Sample budget per epoch: {} total, per level: {:?} (from {:?})",
-        target_total, level_budgets, level_sizes
+        "Sample budget per epoch: {target_total} total, per level: {level_budgets:?} (from {level_sizes:?})"
     );
 
     let mut rng = rand::rng();
@@ -204,7 +200,7 @@ where
 
             if config.stop.load(Ordering::SeqCst) {
                 pb.finish_and_clear();
-                info!("Stopping early at epoch {}", epoch);
+                info!("Stopping early at epoch {epoch}");
                 return Ok(TrainScores {
                     llik: llik_trace,
                     kl: kl_trace,
@@ -260,7 +256,7 @@ where
 
     let mut adam = AdamW::new_lr(
         config.parameters.all_vars(),
-        config.args.learning_rate as f64,
+        f64::from(config.args.learning_rate),
     )?;
 
     let total_actual_epochs: usize = level_epochs.iter().sum();
@@ -420,7 +416,7 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
 
     let mut adam = AdamW::new_lr(
         config.parameters.all_vars(),
-        config.args.learning_rate as f64,
+        f64::from(config.args.learning_rate),
     )?;
 
     let pb = new_progress_bar(total_epochs as u64);
@@ -434,10 +430,7 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
         .map(|c| c.mu_observed.ncols())
         .collect();
     let level_budgets = compute_level_budgets(&level_sizes, target_total);
-    info!(
-        "Sample budget per epoch: {} total, per level: {:?}",
-        target_total, level_budgets
-    );
+    info!("Sample budget per epoch: {target_total} total, per level: {level_budgets:?}");
 
     let mut rng = rand::rng();
 
@@ -543,7 +536,7 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
 
             if config.stop.load(Ordering::SeqCst) {
                 pb.finish_and_clear();
-                info!("Stopping early at epoch {}", epoch);
+                info!("Stopping early at epoch {epoch}");
                 return Ok(TrainScores {
                     llik: llik_trace,
                     kl: kl_trace,
