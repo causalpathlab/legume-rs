@@ -64,12 +64,11 @@ impl ClusterResult {
         let n_removed = self.n_clusters - next;
         if n_removed > 0 {
             let n_cells_removed: usize = sizes.iter().filter(|&&s| s < min_size).sum();
-            for label in self.labels.iter_mut() {
+            for label in &mut self.labels {
                 *label = new_label[*label];
             }
             info!(
-                "Removed {} cluster(s) with < {} cells ({} cells unassigned)",
-                n_removed, min_size, n_cells_removed
+                "Removed {n_removed} cluster(s) with < {min_size} cells ({n_cells_removed} cells unassigned)"
             );
             self.n_clusters = next;
         }
@@ -91,7 +90,7 @@ impl ClusterResult {
 
         let n_total = ranked.len();
         let n_show = max_show.min(n_total);
-        let max_size = ranked.first().map(|&(_, s)| s).unwrap_or(1);
+        let max_size = ranked.first().map_or(1, |&(_, s)| s);
 
         let mut lines = Vec::new();
         lines.push(format!(
@@ -107,8 +106,7 @@ impl ClusterResult {
             let bar = "█".repeat(bar_len.max(1));
 
             lines.push(format!(
-                "  Cluster {:3}  {:>6} cells ({:>5.1}%)  {}",
-                cluster_id, size, pct, bar
+                "  Cluster {cluster_id:3}  {size:>6} cells ({pct:>5.1}%)  {bar}"
             ));
         }
 
@@ -135,11 +133,7 @@ pub fn kmeans_clustering(latent: &Mat, k: usize, max_iter: usize) -> anyhow::Res
 
     let n = latent.nrows();
     if k > n {
-        anyhow::bail!(
-            "Number of clusters ({}) exceeds number of samples ({})",
-            k,
-            n
-        );
+        anyhow::bail!("Number of clusters ({k}) exceeds number of samples ({n})");
     }
 
     info!(
@@ -166,10 +160,7 @@ pub fn kmeans_clustering(latent: &Mat, k: usize, max_iter: usize) -> anyhow::Res
     let sizes = result.cluster_sizes();
     let min_size = sizes.iter().copied().min().unwrap_or(0);
     let max_size = sizes.iter().copied().max().unwrap_or(0);
-    info!(
-        "K-means done: {} clusters, cluster sizes min={} max={}",
-        k, min_size, max_size
-    );
+    info!("K-means done: {k} clusters, cluster sizes min={min_size} max={max_size}");
 
     Ok(result)
 }
@@ -191,16 +182,13 @@ pub fn leiden_clustering(
         anyhow::bail!("Need at least 2 cells for Leiden clustering");
     }
 
-    info!(
-        "Leiden: {} cells x {} features, knn={}, seed={:?}",
-        n, d, knn, seed
-    );
+    info!("Leiden: {n} cells x {d} features, knn={knn}, seed={seed:?}");
 
     // Step 1: Column-wise z-score standardization then build KNN graph
     let mut latent_z = latent.clone();
     latent_z.scale_columns_inplace();
 
-    info!("Building KNN graph (k={}) for {} cells ...", knn, n);
+    info!("Building KNN graph (k={knn}) for {n} cells ...");
     let graph = KnnGraph::from_rows(
         &latent_z,
         KnnGraphArgs {
@@ -224,7 +212,7 @@ pub fn leiden_clustering(
 
     // Check connected components
     let n_components = count_components(&graph);
-    info!("KNN graph has {} connected component(s)", n_components);
+    info!("KNN graph has {n_components} connected component(s)");
 
     // Step 2: Convert to Leiden Network with modularity objective
     let ln = graph.to_leiden_network();
@@ -238,16 +226,10 @@ pub fn leiden_clustering(
     let seed_val = seed.map(|s| s as usize);
 
     let labels = if let Some(target_k) = target_clusters {
-        info!(
-            "Auto-tuning resolution to target ~{} clusters ...",
-            target_k
-        );
+        info!("Auto-tuning resolution to target ~{target_k} clusters ...");
         knn_graph::tune_leiden_resolution(&ln.network, n, target_k, resolution_scaled, seed_val)
     } else {
-        info!(
-            "Running Leiden at scaled resolution={:.6e} ...",
-            resolution_scaled
-        );
+        info!("Running Leiden at scaled resolution={resolution_scaled:.6e} ...");
         knn_graph::run_leiden(&ln.network, n, resolution_scaled, seed_val)
     };
 
@@ -269,7 +251,7 @@ pub fn leiden_clustering(
         max_size,
         {
             let mut s = sizes.clone();
-            s.sort();
+            s.sort_unstable();
             s[s.len() / 2]
         }
     );
@@ -301,15 +283,14 @@ pub fn hsblock_clustering(
 
     let k = 1 << (tree_depth - 1);
     info!(
-        "HSBM: {} cells x {} features, knn={}, depth={} (K={}), dc={}, seed={:?}",
-        n, d, knn, tree_depth, k, degree_corrected, seed
+        "HSBM: {n} cells x {d} features, knn={knn}, depth={tree_depth} (K={k}), dc={degree_corrected}, seed={seed:?}"
     );
 
     // Step 1: Column-wise z-score standardization then build KNN graph
     let mut latent_z = latent.clone();
     latent_z.scale_columns_inplace();
 
-    info!("Building KNN graph (k={}) for {} cells ...", knn, n);
+    info!("Building KNN graph (k={knn}) for {n} cells ...");
     let graph = KnnGraph::from_rows(
         &latent_z,
         KnnGraphArgs {
@@ -370,7 +351,7 @@ pub fn hsblock_clustering(
         max_size,
         {
             let mut s = sizes.clone();
-            s.sort();
+            s.sort_unstable();
             s[s.len() / 2]
         }
     );

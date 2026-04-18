@@ -1,6 +1,6 @@
 use crate::embed_common::*;
 use crate::logging::new_progress_bar;
-use crate::senna_input::*;
+use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 
 use candle_core::{Device, Tensor};
 use indicatif::ParallelProgressIterator;
@@ -87,12 +87,11 @@ pub(crate) fn expand_delta_for_block(
 /// estimate when available. Anchor selection and ambient-profile
 /// estimation both want the cleanest cell-type signal — the batch-
 /// adjusted posterior strips per-batch effects out of the mean.
-pub(crate) fn preferred_posterior_mean(collapsed: &CollapsedOut) -> &Mat {
-    collapsed
-        .mu_adjusted
-        .as_ref()
-        .map(|g| g.posterior_mean())
-        .unwrap_or_else(|| collapsed.mu_observed.posterior_mean())
+pub fn preferred_posterior_mean(collapsed: &CollapsedOut) -> &Mat {
+    collapsed.mu_adjusted.as_ref().map_or_else(
+        || collapsed.mu_observed.posterior_mean(),
+        matrix_param::traits::Inference::posterior_mean,
+    )
 }
 
 /// Compute per-level epoch allocation for progressive training.
@@ -124,7 +123,7 @@ pub(crate) fn apply_column_delta(data: &Mat, delta_row: &Mat, min_val: f32) -> M
 
 /// Sample collapsed data for one jitter interval.
 ///
-/// Returns (mixed_nd, batch_nd, target_nd) — all at full D.
+/// Returns (`mixed_nd`, `batch_nd`, `target_nd`) — all at full D.
 pub(crate) fn sample_collapsed_data(
     collapsed: &CollapsedOut,
 ) -> anyhow::Result<(Mat, Option<Mat>, Mat)> {
@@ -174,12 +173,17 @@ pub(crate) fn sample_overresolved(
 }
 
 /// Result of loading and collapsing input data for topic model training.
-pub(crate) struct PreparedData {
+pub struct PreparedData {
     pub data_vec: SparseIoVec,
     pub collapsed_levels: Vec<CollapsedOut>,
+    /// Random-projection feature matrix used for PB partitioning
+    /// (`proj_dim × n_cells`). Kept alongside the collapsed output so
+    /// downstream steps (e.g. viz cell placement) can reuse it without
+    /// recomputing.
+    pub proj_kn: Mat,
 }
 
-pub(crate) struct LoadCollapseArgs<'a> {
+pub struct LoadCollapseArgs<'a> {
     pub data_files: &'a [Box<str>],
     pub batch_files: &'a Option<Vec<Box<str>>>,
     pub preload: bool,
@@ -197,7 +201,7 @@ pub(crate) struct LoadCollapseArgs<'a> {
 /// Load sparse data, project, multi-level collapse, and write delta output.
 ///
 /// Shared pipeline for topic and indexed-topic models.
-pub(crate) fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData> {
+pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData> {
     let SparseDataWithBatch {
         data: mut data_vec,
         batch: batch_membership,
@@ -210,7 +214,7 @@ pub(crate) fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<Prepa
 
     // 2. Take projection results by warm start or projecting it again
     let proj_kn = if let Some(proj_file) = args.warm_start_proj_file {
-        use matrix_util::common_io::*;
+        use matrix_util::common_io::file_ext;
         let ext = file_ext(proj_file)?;
 
         let MatWithNames {
@@ -272,6 +276,7 @@ pub(crate) fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<Prepa
     Ok(PreparedData {
         data_vec,
         collapsed_levels,
+        proj_kn,
     })
 }
 
@@ -283,15 +288,15 @@ pub(crate) fn create_device(
     match device {
         ComputeDevice::Metal => Device::new_metal(device_no),
         ComputeDevice::Cuda => Device::new_cuda(device_no),
-        _ => Ok(Device::Cpu),
+        ComputeDevice::Cpu => Ok(Device::Cpu),
     }
 }
 
-/// Replace every non-CPU Var in the VarMap with a CPU copy.
+/// Replace every non-CPU Var in the `VarMap` with a CPU copy.
 ///
-/// After this call, a fresh encoder/decoder built from the VarMap
+/// After this call, a fresh encoder/decoder built from the `VarMap`
 /// will operate on CPU. The old model structs still hold Metal/CUDA
-/// Vars and must NOT be reused — rebuild them from the updated VarMap.
+/// Vars and must NOT be reused — rebuild them from the updated `VarMap`.
 pub(crate) fn move_varmap_to_cpu(parameters: &candle_nn::VarMap) -> anyhow::Result<()> {
     use candle_core::Var;
     let mut data = parameters.data().lock().expect("VarMap lock");

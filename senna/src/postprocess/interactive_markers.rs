@@ -241,7 +241,7 @@ pub fn run_interactive_round(
     iteration: usize,
 ) -> anyhow::Result<AugmentationResult> {
     eprintln!();
-    eprintln!("--- Marker augmentation (round {}) ---", iteration);
+    eprintln!("--- Marker augmentation (round {iteration}) ---");
 
     if candidates.is_empty() {
         eprintln!("No candidate genes found above threshold.");
@@ -324,12 +324,12 @@ pub fn save_augmented_markers(
 
     // Write original markers
     for (gene, celltype) in original_markers {
-        writeln!(writer, "{}\t{}", gene, celltype)?;
+        writeln!(writer, "{gene}\t{celltype}")?;
     }
 
     // Write new markers
     for (gene, celltype) in new_markers {
-        writeln!(writer, "{}\t{}", gene, celltype)?;
+        writeln!(writer, "{gene}\t{celltype}")?;
     }
 
     writer.flush()?;
@@ -436,12 +436,12 @@ pub fn write_candidates_json(
             } else {
                 ""
             };
-            writeln!(w, "        }}{}", comma)?;
+            writeln!(w, "        }}{comma}")?;
         }
 
         writeln!(w, "      ]")?;
         let comma = if ci + 1 < candidates.len() { "," } else { "" };
-        writeln!(w, "    }}{}", comma)?;
+        writeln!(w, "    }}{comma}")?;
     }
 
     writeln!(w, "  ]")?;
@@ -469,7 +469,7 @@ pub fn read_suggestions_json(path: &str) -> anyhow::Result<Vec<(Box<str>, Box<st
     for line in content.lines() {
         let line = line.trim();
 
-        if line.contains("{") {
+        if line.contains('{') {
             in_obj = true;
             current_gene = None;
             current_celltype = None;
@@ -488,7 +488,7 @@ pub fn read_suggestions_json(path: &str) -> anyhow::Result<Vec<(Box<str>, Box<st
             }
         }
 
-        if line.contains("}") && in_obj {
+        if line.contains('}') && in_obj {
             if let (Some(g), Some(ct)) = (current_gene.take(), current_celltype.take()) {
                 suggestions.push((g.into_boxed_str(), ct.into_boxed_str()));
             }
@@ -520,7 +520,7 @@ pub struct MarkerDatabase {
 
 impl MarkerDatabase {
     /// Load using flexible gene matching and fuzzy cell type matching
-    /// - Genes: uses flexible_gene_match (underscore-delimited segments)
+    /// - Genes: uses `flexible_gene_match` (underscore-delimited segments)
     /// - Cell types: uses fuzzy substring matching for variation tolerance
     pub fn load_with_vocab(
         path: &str,
@@ -531,10 +531,7 @@ impl MarkerDatabase {
 
         let mut db = Self::default();
         for line in open_buf_reader(path)?.lines().map_while(Result::ok) {
-            let tokens: Vec<_> = line
-                .split(['\t', ',', ';', '|'])
-                .map(|s| s.trim())
-                .collect();
+            let tokens: Vec<_> = line.split(['\t', ',', ';', '|']).map(str::trim).collect();
 
             // Find genes using flexible matching
             let found_genes: Vec<(&str, &str)> = tokens
@@ -555,7 +552,7 @@ impl MarkerDatabase {
                     celltypes
                         .iter()
                         .filter(move |ct| fuzzy_match_ct(&tn, &norm(ct)))
-                        .map(|ct| ct.as_ref())
+                        .map(std::convert::AsRef::as_ref)
                 })
                 .collect();
 

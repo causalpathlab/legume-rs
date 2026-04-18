@@ -62,6 +62,7 @@ pub enum AdjMethod {
 }
 
 impl AdjMethod {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             AdjMethod::Batch => "batch",
@@ -161,6 +162,7 @@ pub fn read_mat(file_path: &str) -> anyhow::Result<MatWithNames<Mat>> {
 
 /// Compute per-level sample budgets, weighted inversely by level size.
 /// Coarser levels (fewer, higher-quality samples) get more budget.
+#[must_use]
 pub fn compute_level_budgets(level_sizes: &[usize], target_total: usize) -> Vec<usize> {
     let inv_weights: Vec<f64> = level_sizes.iter().map(|&n| 1.0 / n.max(1) as f64).collect();
     let inv_sum: f64 = inv_weights.iter().sum();
@@ -224,7 +226,7 @@ pub fn read_bulk_data_aligned(
         .collect();
 
     let ngenes = gene_to_position.len();
-    info!("use {} genes as common features", ngenes);
+    info!("use {ngenes} genes as common features");
 
     let mut samples = vec![];
     let mut bulk_data_vec = vec![];

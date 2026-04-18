@@ -55,7 +55,7 @@ pub fn read_data_on_shared_columns(
         let attach_data_name = files.len() > 1;
 
         for (data_idx, data_file) in files.iter().enumerate() {
-            info!("Importing data file: {}", data_file);
+            info!("Importing data file: {data_file}");
 
             let mut data = try_open_or_convert(data_file)?;
 
@@ -76,14 +76,14 @@ pub fn read_data_on_shared_columns(
             let ntot = data_vec.num_columns();
             let mut batch_membership = Vec::with_capacity(ntot);
 
-            info!("Reading batch file: {}", batch_file);
+            info!("Reading batch file: {batch_file}");
             for s in read_lines(batch_file)? {
                 batch_membership.push(s.to_string().into_boxed_str());
             }
             batch_stack.push(batch_membership);
         }
     } else {
-        for data_vec in data_stack.stack.iter_mut() {
+        for data_vec in &mut data_stack.stack {
             let mut batch_membership = Vec::with_capacity(data_vec.num_columns());
             for (id, &nn) in data_vec.num_columns_by_data()?.iter().enumerate() {
                 batch_membership.extend(vec![id.to_string().into_boxed_str(); nn]);

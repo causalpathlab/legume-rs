@@ -1,3 +1,35 @@
+#![allow(
+    // `embed_common` is deliberately shaped as a prelude module.
+    clippy::wildcard_imports,
+    // Counts / dimensions / IDs routinely cross usize↔f32/f64; the
+    // values always fit and the casts are intentional.
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    // Not every `Result`-returning helper needs a `# Errors` stanza.
+    clippy::missing_errors_doc,
+    // Training / fit functions are naturally long; splitting them for
+    // a line-count lint would fragment logical phases.
+    clippy::too_many_lines,
+    // CLI struct fields intentionally share a `phate_` prefix so the
+    // clap flag names (`--phate-t`, `--phate-knn`) are self-documenting.
+    clippy::struct_field_names,
+    // Config / args structs are typically built once at the call site
+    // and consumed — passing by value is part of the ownership-forward
+    // API style used across the crate.
+    clippy::needless_pass_by_value,
+    // Local `use`/`const`/`enum` items scoped to where they're relevant
+    // read more naturally than hoisting them to the top of a function.
+    clippy::items_after_statements,
+    // Binding-name similarity is noisy for domain-driven names like
+    // `dist`/`d`, `stress`/`prev_stress`.
+    clippy::similar_names,
+    // Math code uses short names (`n`, `i`, `j`, `k`, `d`) where the
+    // semantics come from surrounding indices (row/col/dim).
+    clippy::many_single_char_names,
+)]
+
 mod anchor_common;
 mod cluster;
 mod cnv_pseudobulk;
@@ -66,7 +98,7 @@ fn print_logo() {
 
         let text_part = if i < intro.len() { intro[i] } else { "" };
 
-        println!("{}  {}", logo_part, text_part);
+        println!("{logo_part}  {text_part}");
     }
     println!();
 }
@@ -165,15 +197,20 @@ enum Commands {
     JointTopic(JointTopicArgs),
 
     #[command(
-        about = "2D visualization by pseudobulk spectral / tree / t-SNE layout",
-        long_about = "Build 2D coordinates in four stages:\n\
-                      (1) partition cells into pseudobulk samples,\n\
-                      (2) compute PB-PB similarity from expression profiles,\n\
-                      (3) lay out PB samples (spectral, tree, or t-SNE),\n\
-                      (4) project cells by soft assignment to their nearest PB samples.",
-        visible_alias = "viz"
+        about = "2D diagnostic visualization in raw-gene-space (tsne or phate)",
+        long_about = "Topic-agnostic diagnostic viz: build PBs via batch-corrected\n\
+                      multi-level collapsing, compute PB-PB cosine similarity on\n\
+                      log1p-CPM gene vectors, then lay out via t-SNE or PHATE.\n\
+                      Cells placed by cheap Nyström in random-projection space.\n\n\
+                      Pick a layout: `senna visualize tsne ...` or `senna visualize phate ...`.",
+        visible_alias = "viz",
+        subcommand_required = true,
+        arg_required_else_help = true
     )]
-    Visualize(VisualizeArgs),
+    Visualize {
+        #[command(subcommand)]
+        cmd: VisualizeCmd,
+    },
 
     #[command(
         about = "Cluster cells on latent topic / SVD representations",
@@ -184,6 +221,14 @@ enum Commands {
                         hsblock — hierarchical stochastic block model (2^(depth-1) clusters)"
     )]
     Clustering(ClusteringArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum VisualizeCmd {
+    #[command(about = "PB landmarks laid out by t-SNE (PHATE-initialized) on raw-gene similarity")]
+    Tsne(VisualizeTsneArgs),
+    #[command(about = "PB landmarks laid out by PHATE diffusion on raw-gene features")]
+    Phate(VisualizePhateArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -219,9 +264,14 @@ fn main() -> anyhow::Result<()> {
         Commands::JointSvd(args) => {
             fit_joint_svd(args)?;
         }
-        Commands::Visualize(args) => {
-            fit_visualize(args)?;
-        }
+        Commands::Visualize { cmd } => match cmd {
+            VisualizeCmd::Tsne(args) => {
+                fit_visualize_tsne(args)?;
+            }
+            VisualizeCmd::Phate(args) => {
+                fit_visualize_phate(args)?;
+            }
+        },
         Commands::Clustering(args) => {
             run_clustering(args)?;
         }

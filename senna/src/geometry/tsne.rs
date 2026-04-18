@@ -1,4 +1,10 @@
-use candle_util::candle_core::{DType, Device, Result, Tensor, Var, D};
+#![allow(
+    clippy::items_after_statements,
+    clippy::unnecessary_wraps,
+    clippy::unused_self
+)]
+
+use candle_util::candle_core::*;
 
 /// t-SNE with an Rtsne-aligned update rule: per-parameter adaptive gains
 /// (Jacobs 1988), momentum switching, strong early exaggeration, and init
@@ -20,8 +26,8 @@ pub struct TSne {
     n_iter: usize,
     early_exaggeration: f32,
     early_exaggeration_iter: usize,
-    /// Optional per-point weights. When set, P_sym[i,j] is multiplied by
-    /// √(w_i · w_j) before renormalization so that heavier points dominate
+    /// Optional per-point weights. When set, `P_sym`[i,j] is multiplied by
+    /// √(`w_i` · `w_j`) before renormalization so that heavier points dominate
     /// the KL objective. Typically `w_i = pb_cell_count[i]` so big
     /// pseudobulks drive the layout geometry.
     weights: Option<Vec<f32>>,
@@ -109,13 +115,12 @@ impl TSne {
         };
 
         // Initial Y: user-provided init or small random uniform in [-0.5, 0.5].
-        let mut y_flat: Vec<f32> = match init {
-            Some(coords) => coords.to_vec(),
-            None => {
-                use rand::RngExt;
-                let mut rng = rand::rng();
-                (0..n * 2).map(|_| rng.random::<f32>() - 0.5).collect()
-            }
+        let mut y_flat: Vec<f32> = if let Some(coords) = init {
+            coords.to_vec()
+        } else {
+            use rand::RngExt;
+            let mut rng = rand::rng();
+            (0..n * 2).map(|_| rng.random::<f32>() - 0.5).collect()
         };
 
         // Rescale the init to std = 1e-4 (Rtsne / openTSNE convention).
@@ -132,7 +137,7 @@ impl TSne {
                 y_flat.iter().map(|v| v * v).sum::<f32>() / (y_flat.len() as f32).max(1.0);
             let std = var.sqrt().max(1e-12);
             let scale = 1e-4 / std;
-            for v in y_flat.iter_mut() {
+            for v in &mut y_flat {
                 *v *= scale;
             }
         }
@@ -157,7 +162,7 @@ impl TSne {
             } else {
                 1.0
             };
-            let p_scaled = (&p_tensor * p_mult as f64)?;
+            let p_scaled = (&p_tensor * f64::from(p_mult))?;
 
             // KL(+ density). Density term disabled during early exaggeration
             // so gradients through log R don't blow up at tiny distances.
@@ -165,7 +170,7 @@ impl TSne {
             let loss = if iter >= self.early_exaggeration_iter {
                 if let Some(log_target) = &density_target {
                     let dens = self.density_loss(&y, &p_tensor, log_target, n)?;
-                    (&kl + (dens * self.density_lambda as f64)?)?
+                    (&kl + (dens * f64::from(self.density_lambda))?)?
                 } else {
                     kl
                 }
@@ -181,10 +186,10 @@ impl TSne {
             //   sign(grad) ≠ sign(velocity) (oscillating) → gain += 0.2
             //   sign(grad) == sign(velocity) (steady)      → gain *= 0.8
             for i in 0..gains.len() {
-                if (velocity[i] > 0.0) != (g_flat[i] > 0.0) {
-                    gains[i] += 0.2;
-                } else {
+                if (velocity[i] > 0.0) == (g_flat[i] > 0.0) {
                     gains[i] *= 0.8;
+                } else {
+                    gains[i] += 0.2;
                 }
                 if gains[i] < MIN_GAIN {
                     gains[i] = MIN_GAIN;
@@ -303,7 +308,7 @@ impl TSne {
         mut hi: f32,
     ) -> f32 {
         for _ in 0..50 {
-            let mid = (lo + hi) / 2.0;
+            let mid = f32::midpoint(lo, hi);
             let entropy = self.compute_entropy(i, distances, n, mid);
             if entropy > target {
                 hi = mid;
@@ -311,7 +316,7 @@ impl TSne {
                 lo = mid;
             }
         }
-        (lo + hi) / 2.0
+        f32::midpoint(lo, hi)
     }
 
     /// Compute entropy for a given sigma
@@ -372,9 +377,9 @@ impl TSne {
     /// densMAP-style density-preservation loss (Narayan, Berger & Cho,
     /// *Nat Biotechnol* 2021). For each point i, compute a soft local radius
     /// in 2D as a P-weighted mean distance,
-    ///     R_i = Σ_j P_ij · d_ij(Y),
+    ///     `R_i` = `Σ_j` `P_ij` · `d_ij(Y)`,
     /// and penalize the centered log-radius against a centered target
-    /// `log_target_i = -½ log(w_i)` (i.e. target radius ∝ 1/√w_i, so dense
+    /// `log_target_i = -½ log(w_i)` (i.e. target radius ∝ `1/√w_i`, so dense
     /// high-D regions stay dense in 2D). Both sides are mean-centered, so no
     /// absolute scale offset needs to be fit.
     fn density_loss(

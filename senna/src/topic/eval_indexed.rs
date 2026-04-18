@@ -8,7 +8,7 @@ use candle_util::candle_indexed_model_traits::*;
 use candle_util::candle_topic_refinement::TopicRefinementConfig;
 use std::collections::{BTreeSet, HashMap};
 
-/// Convert a dense [N, D] tensor to indexed form: union_indices [S] and indexed_x [N, S].
+/// Convert a dense [N, D] tensor to indexed form: `union_indices` [S] and `indexed_x` [N, S].
 pub(crate) fn dense_to_indexed(
     x_nd: &Tensor,
     context_size: usize,
@@ -33,7 +33,7 @@ pub(crate) fn dense_to_indexed_pair(
     Ok((enc, dec))
 }
 
-/// Build indexed representation from pre-extracted rows (avoids repeated to_vec2).
+/// Build indexed representation from pre-extracted rows (avoids repeated `to_vec2`).
 fn dense_rows_to_indexed(
     rows: &[Vec<f32>],
     context_size: usize,

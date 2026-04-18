@@ -1,5 +1,8 @@
 use crate::embed_common::*;
-use crate::topic::common::*;
+use crate::topic::common::{
+    create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
+    PreparedData,
+};
 use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
 use crate::topic::train::{train_mixed, train_progressive, TrainConfig};
 
@@ -7,7 +10,7 @@ use candle_util::candle_decoder_nb_mixture::{
     NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME,
 };
 use candle_util::candle_decoder_topic::*;
-use candle_util::candle_decoder_vmf_topic::*;
+use candle_util::candle_decoder_vmf_topic::VmfTopicDecoder;
 use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_model_traits::*;
 use log::warn;
@@ -21,12 +24,12 @@ pub(crate) enum DecoderType {
     Nb,
     /// Von Mises-Fisher mixture on unit hypersphere
     Vmf,
-    /// NB with an ambient-RNA mixture (α_g) and per-sample ρ from library size
+    /// NB with an ambient-RNA mixture (`α_g`) and per-sample ρ from library size
     NbMixture,
 }
 
 impl DecoderType {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             DecoderType::Multinom => "multinom",
             DecoderType::Nb => "nb",
@@ -343,6 +346,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let PreparedData {
         data_vec,
         collapsed_levels,
+        ..
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &args.data_files,
         batch_files: &args.batch_files,
@@ -398,9 +402,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let n_topics = args.n_latent_topics;
 
     // Encoder at finest level's D_coarse (dense ops are O(D))
-    let n_features_encoder = finest_coarsening
-        .map(|c| c.num_coarse)
-        .unwrap_or(n_features_full);
+    let n_features_encoder = finest_coarsening.map_or(n_features_full, |c| c.num_coarse);
 
     let dev = create_device(&args.device, args.device_no)?;
 
@@ -410,7 +412,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     let level_decoder_dims: Vec<usize> = level_coarsenings
         .iter()
-        .map(|fc| fc.as_ref().map(|c| c.num_coarse).unwrap_or(n_features_full))
+        .map(|fc| fc.as_ref().map_or(n_features_full, |c| c.num_coarse))
         .collect();
 
     info!(
@@ -503,7 +505,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     if let Some(positions) = cnv_positions {
         if let Some(batch_labels) = crate::cnv_pseudobulk::reconstruct_batch_labels(&data_vec) {
-            let topic_probs = z_nk.map(|x| x.exp());
+            let topic_probs = z_nk.map(f32::exp);
             let cnv_config = crate::cnv_pseudobulk::build_cnv_config(&args.cnv);
 
             let cnv_result = crate::cnv_pseudobulk::detect_cnv_topic_informed(
@@ -559,7 +561,7 @@ trait DecoderExtras {
 }
 
 /// Trait for optional per-run hyperparameter configuration from CLI args.
-/// Default is no-op; NbMixtureTopicDecoder overrides to set Beta(ρ) prior.
+/// Default is no-op; `NbMixtureTopicDecoder` overrides to set Beta(ρ) prior.
 trait ConfigureDecoder {
     fn configure(&mut self, _args: &TopicArgs) {}
 }
@@ -661,10 +663,7 @@ impl DecoderExtras for NbTopicDecoder {
         };
         let phi_vec = phi_vec_from_tensor(self.log_phi())?;
         write_per_gene_param(&ctx, phi_vec, "dispersion", "dispersion_phi", false)?;
-        info!(
-            "Saved dispersion parameters to {}.dispersion.parquet",
-            out_prefix
-        );
+        info!("Saved dispersion parameters to {out_prefix}.dispersion.parquet");
         Ok(())
     }
 }
@@ -717,8 +716,7 @@ impl DecoderExtras for NbMixtureTopicDecoder {
             Some(&["value".to_string().into_boxed_str()]),
         )?;
         info!(
-            "Saved ambient parameters: {}.dispersion.parquet, {}.alpha.parquet, {}.rho.parquet (a={:.3}, b={:.3})",
-            out_prefix, out_prefix, out_prefix, rho_a, rho_b
+            "Saved ambient parameters: {out_prefix}.dispersion.parquet, {out_prefix}.alpha.parquet, {out_prefix}.rho.parquet (a={rho_a:.3}, b={rho_b:.3})"
         );
         Ok(())
     }
@@ -777,7 +775,7 @@ impl DecoderExtras for VmfTopicDecoder {
         _out_prefix: &str,
     ) -> anyhow::Result<()> {
         let kappas = self.kappa_vec()?;
-        let kappa_strs: Vec<String> = kappas.iter().map(|k| format!("{:.2}", k)).collect();
+        let kappa_strs: Vec<String> = kappas.iter().map(|k| format!("{k:.2}")).collect();
         info!("vMF concentration κ = [{}]", kappa_strs.join(", "));
         Ok(())
     }
@@ -826,7 +824,7 @@ where
                 .expect("decoder creation")
         })
         .collect();
-    for dec in decoders.iter_mut() {
+    for dec in &mut decoders {
         dec.configure(ctx.args);
     }
 
@@ -889,10 +887,7 @@ where
         info!(
             "PB topic usage ({} PBs): mean_θ={:?}, active={}/{}",
             n_pb,
-            mean_t
-                .iter()
-                .map(|v| format!("{:.3}", v))
-                .collect::<Vec<_>>(),
+            mean_t.iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>(),
             active,
             k,
         );
@@ -914,7 +909,7 @@ where
         &ctx.args.out,
     )?;
 
-    let weights = compute_decoder_weights(&ctx.args.decoder, &ctx.args.decoder_weights);
+    let weights = compute_decoder_weights(&ctx.args.decoder, ctx.args.decoder_weights.as_ref());
     let z_nk = save_metadata_and_evaluate::<Dec>(ctx, &weights)?;
     Ok((scores, z_nk))
 }
@@ -971,7 +966,7 @@ fn write_dictionary_expanded<Dec: DecoderModuleT + ?Sized>(
 
 /// Compute normalized decoder weights. If user provided weights, normalize
 /// them to sum to 1. Otherwise, use equal weights.
-fn compute_decoder_weights(decoders: &[DecoderType], user_weights: &Option<Vec<f64>>) -> Vec<f64> {
+fn compute_decoder_weights(decoders: &[DecoderType], user_weights: Option<&Vec<f64>>) -> Vec<f64> {
     if let Some(w) = user_weights {
         let sum: f64 = w.iter().sum();
         w.iter().map(|x| x / sum).collect()
@@ -992,7 +987,7 @@ fn save_metadata_and_evaluate<Dec>(
 where
     Dec: DecoderModuleT + NewDecoder + Send + Sync,
 {
-    use crate::topic::model_metadata::*;
+    use crate::topic::model_metadata::{save_coarsening, save_parameters, TopicModelMetadata};
     use candle_util::candle_topic_refinement::TopicRefinementConfig;
 
     save_parameters(ctx.parameters, &ctx.args.out)?;
@@ -1027,8 +1022,7 @@ where
 
     let n_features_encoder = ctx
         .finest_coarsening
-        .map(|c| c.num_coarse)
-        .unwrap_or(ctx.n_features_full);
+        .map_or(ctx.n_features_full, |c| c.num_coarse);
     let cpu_vb =
         candle_nn::VarBuilder::from_varmap(ctx.parameters, candle_core::DType::F32, &cpu_dev);
     let cpu_encoder = LogSoftmaxEncoder::new(
@@ -1091,9 +1085,10 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
     encoder: &mut Enc,
 ) -> anyhow::Result<(TrainScores, Mat)> {
     use crate::topic::train::train_mixed_multi_decoder;
-    use candle_util::candle_dyn_decoder::*;
+    use candle_util::candle_dyn_decoder::{create_dyn_decoder, DynDecoderModuleT};
 
-    let decoder_weights = compute_decoder_weights(&ctx.args.decoder, &ctx.args.decoder_weights);
+    let decoder_weights =
+        compute_decoder_weights(&ctx.args.decoder, ctx.args.decoder_weights.as_ref());
 
     // Build per-level × per-decoder-type grid
     let decoders_per_level: Vec<Vec<Box<dyn DynDecoderModuleT>>> = ctx

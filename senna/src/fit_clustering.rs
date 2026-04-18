@@ -2,7 +2,9 @@
 //!
 //! Cluster cells based on latent representations (topic proportions, SVD embeddings)
 
-use crate::cluster::*;
+use crate::cluster::{
+    hsblock_clustering, kmeans_clustering, leiden_clustering, ClusterMethod, ClusterResult,
+};
 use crate::embed_common::*;
 
 /// Clustering method CLI enum
@@ -154,10 +156,7 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
     // Determine number of clusters
     let k = args.num_clusters.unwrap_or_else(|| {
         let default_k = latent.ncols();
-        info!(
-            "Number of clusters not specified, using {} (number of features)",
-            default_k
-        );
+        info!("Number of clusters not specified, using {default_k} (number of features)");
         default_k
     });
 
@@ -223,7 +222,7 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
     let output_file = format!("{}.clusters.parquet", args.out);
     write_cluster_assignments(&result, &cell_names, &output_file)?;
 
-    info!("Wrote cluster assignments to {}", output_file);
+    info!("Wrote cluster assignments to {output_file}");
 
     Ok(())
 }

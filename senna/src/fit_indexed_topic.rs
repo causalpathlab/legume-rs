@@ -1,9 +1,15 @@
 use crate::embed_common::*;
-use crate::topic::common::*;
-use crate::topic::eval_indexed::*;
-use crate::topic::train_indexed::*;
+use crate::topic::common::{
+    create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
+    PreparedData,
+};
+use crate::topic::eval_indexed::{evaluate_latent_by_indexed_encoder, EvaluateLatentConfig};
+use crate::topic::train_indexed::{
+    estimate_bulk_delta, evaluate_bulk_samples, train_mixed, train_progressive,
+    write_indexed_dictionary, BulkEvalConfig, IndexedTrainConfig,
+};
 
-use candle_util::candle_decoder_indexed_topic::*;
+use candle_util::candle_decoder_indexed_topic::IndexedTopicDecoder;
 use candle_util::candle_encoder_indexed::*;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 
@@ -284,6 +290,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let PreparedData {
         data_vec,
         collapsed_levels,
+        ..
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &args.data_files,
         batch_files: &args.batch_files,
@@ -385,15 +392,12 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         .transpose()?;
 
     // Compute per-level bulk delta
-    let bulk_deltas: Option<Vec<GammaMatrix>> = bulk
-        .as_ref()
-        .map(|b| {
-            collapsed_levels
-                .iter()
-                .map(|collapsed| estimate_bulk_delta(&b.data, collapsed))
-                .collect::<anyhow::Result<Vec<_>>>()
-        })
-        .transpose()?;
+    let bulk_deltas: Option<Vec<GammaMatrix>> = bulk.as_ref().map(|b| {
+        collapsed_levels
+            .iter()
+            .map(|collapsed| estimate_bulk_delta(&b.data, collapsed))
+            .collect::<Vec<_>>()
+    });
 
     let stop = setup_stop_handler();
 
@@ -507,7 +511,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
 
     if let Some(positions) = cnv_positions {
         if let Some(batch_labels) = crate::cnv_pseudobulk::reconstruct_batch_labels(&data_vec) {
-            let topic_probs = z_nk.map(|x| x.exp());
+            let topic_probs = z_nk.map(f32::exp);
             let cnv_config = crate::cnv_pseudobulk::build_cnv_config(&args.cnv);
 
             let cnv_result = crate::cnv_pseudobulk::detect_cnv_topic_informed(

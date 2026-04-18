@@ -1,16 +1,18 @@
 use crate::embed_common::*;
-use crate::topic::eval::*;
-use crate::topic::model_metadata::*;
+use crate::topic::eval::{
+    build_gene_remap, evaluate_latent_with_gene_remap, EvaluateLatentConfig, GeneRemap,
+};
+use crate::topic::model_metadata::{load_coarsening, load_dictionary, TopicModelMetadata};
 
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_util::candle_decoder_nb_mixture::{
     NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME,
 };
-use candle_util::candle_decoder_topic::{MultinomTopicDecoder, NbTopicDecoder};
+use candle_util::candle_decoder_topic::*;
 use candle_util::candle_decoder_vmf_topic::VmfTopicDecoder;
 use candle_util::candle_encoder_softmax::*;
-use candle_util::candle_model_traits::{DecoderModuleT, NewDecoder};
-use candle_util::candle_topic_refinement::*;
+use candle_util::candle_model_traits::*;
+use candle_util::candle_topic_refinement::TopicRefinementConfig;
 use data_beans::sparse_io_vector::SparseIoVec;
 use log::info;
 
@@ -161,7 +163,12 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
         None
     };
 
-    let delta_db = estimate_delta(&data_vec, &beta_dk, &gene_remap_opt, args.block_size)?;
+    let delta_db = estimate_delta(
+        &data_vec,
+        &beta_dk,
+        gene_remap_opt.as_ref(),
+        args.block_size,
+    )?;
 
     let cpu_dev = candle_core::Device::Cpu;
     let mut parameters = candle_nn::VarMap::new();
@@ -211,12 +218,8 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
     let decoder_name = metadata
         .decoder_types
         .first()
-        .map(|s| s.as_ref())
-        .unwrap_or("multinom");
-    info!(
-        "Evaluating latent states on CPU (decoder: {})",
-        decoder_name
-    );
+        .map_or("multinom", std::convert::AsRef::as_ref);
+    info!("Evaluating latent states on CPU (decoder: {decoder_name})");
     let z_nk = match decoder_name {
         "multinom" => eval_with_decoder::<MultinomTopicDecoder>(eval_inputs)?,
         "nb" => eval_with_decoder::<NbTopicDecoder>(eval_inputs)?,
@@ -282,8 +285,8 @@ where
         decoders.push(Dec::new(d_l, metadata.n_topics, vb.pp(format!("dec_{i}")))?);
     }
 
-    let safetensors_path = format!("{}.safetensors", model_prefix);
-    info!("Loading weights from {}", safetensors_path);
+    let safetensors_path = format!("{model_prefix}.safetensors");
+    info!("Loading weights from {safetensors_path}");
     parameters.load(&safetensors_path)?;
 
     let decoder_ref = if refine_config.is_some() {
@@ -310,7 +313,7 @@ where
 fn estimate_delta(
     data_vec: &SparseIoVec,
     beta_dk: &Mat,
-    gene_remap: &Option<GeneRemap>,
+    gene_remap: Option<&GeneRemap>,
     block_size: usize,
 ) -> anyhow::Result<Option<Mat>> {
     let n_batches = data_vec.num_batches();
@@ -323,7 +326,7 @@ fn estimate_delta(
     let k = beta_dk.ncols();
 
     // Predicted marginal gene proportions from dictionary
-    let exp_beta = beta_dk.map(|v| v.exp());
+    let exp_beta = beta_dk.map(f32::exp);
     let mut predicted = nalgebra::DVector::<f32>::zeros(d_train);
     for d in 0..d_train {
         predicted[d] = exp_beta.row(d).sum() / k as f32;
@@ -377,6 +380,6 @@ fn estimate_delta(
         }
     }
 
-    info!("Estimated delta: {} genes × {} batches", d_train, n_batches);
+    info!("Estimated delta: {d_train} genes × {n_batches} batches");
     Ok(Some(delta_db))
 }

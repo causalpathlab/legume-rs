@@ -20,7 +20,7 @@ pub struct FeatureSelection {
 /// # Arguments
 /// * `data_vec` - sparse data vector
 /// * `max_features` - maximum number of features to select by log-variance (if None, all features are used)
-/// * `feature_list_file` - path to file with pre-selected feature names (one per line), takes precedence over max_features
+/// * `feature_list_file` - path to file with pre-selected feature names (one per line), takes precedence over `max_features`
 /// * `save_variance` - whether to save computed log-variance statistics
 /// * `out_prefix` - output prefix for variance file
 /// * `block_size` - block size for parallel processing
@@ -52,7 +52,7 @@ pub fn select_highly_variable_features(
 
         // Step 1: Optionally exclude highly expressed features
         let valid_features = if let Some(sd_threshold) = exclude_high_expression_sd {
-            info!("Computing mean expression to exclude highly expressed features (threshold: {} SD)...", sd_threshold);
+            info!("Computing mean expression to exclude highly expressed features (threshold: {sd_threshold} SD)...");
 
             // Compute mean expression for each gene
             let mut mean_stat = RunningStatistics::new(Ix1(data_vec.num_rows()));
@@ -100,9 +100,9 @@ pub fn select_highly_variable_features(
 
             // Save excluded features to file
             if n_excluded > 0 {
-                let excluded_file = format!("{}.excluded_high_expression.tsv", out_prefix);
+                let excluded_file = format!("{out_prefix}.excluded_high_expression.tsv");
                 save_excluded_features(&excluded_file, &excluded_features, cutoff)?;
-                info!("Saved excluded features to {}", excluded_file);
+                info!("Saved excluded features to {excluded_file}");
             }
 
             valid_features
@@ -135,9 +135,9 @@ pub fn select_highly_variable_features(
 
         // Save variance if requested
         if save_variance {
-            let var_file = format!("{}.feature_variance.parquet", out_prefix);
+            let var_file = format!("{out_prefix}.feature_variance.parquet");
             log_stat.save(&var_file, &feature_names, "\t", None)?;
-            info!("Saved feature variance to {}", var_file);
+            info!("Saved feature variance to {var_file}");
         }
 
         // Rank features by variance (descending), only considering valid features
@@ -204,7 +204,7 @@ fn load_feature_list_from_file(
     let feature_names_from_file = read_lines(file_path)?;
 
     if feature_names_from_file.is_empty() {
-        return Err(anyhow::anyhow!("Feature list file is empty: {}", file_path));
+        return Err(anyhow::anyhow!("Feature list file is empty: {file_path}"));
     }
 
     // Create a map from feature name to index
@@ -230,8 +230,7 @@ fn load_feature_list_from_file(
 
     if selected_indices.is_empty() {
         return Err(anyhow::anyhow!(
-            "No features from file matched data. File: {}",
-            file_path
+            "No features from file matched data. File: {file_path}"
         ));
     }
 
@@ -246,10 +245,7 @@ fn load_feature_list_from_file(
     }
 
     if not_found > 0 {
-        info!(
-            "Warning: {} features from file not found in data",
-            not_found
-        );
+        info!("Warning: {not_found} features from file not found in data");
     }
 
     // Sort indices for efficient .select() operations
@@ -326,7 +322,7 @@ fn log_variance_visitor(
 ///
 /// # Arguments
 /// * `file_path` - output file path
-/// * `excluded_features` - vector of (feature_name, mean_expr, log_mean_expr)
+/// * `excluded_features` - vector of (`feature_name`, `mean_expr`, `log_mean_expr`)
 /// * `cutoff` - the log1p(mean) cutoff threshold used
 ///
 /// # Returns
@@ -342,7 +338,7 @@ fn save_excluded_features(
     let mut file = File::create(file_path)?;
 
     // Write header with cutoff info
-    writeln!(file, "# Excluded features with log1p(mean) > {:.6}", cutoff)?;
+    writeln!(file, "# Excluded features with log1p(mean) > {cutoff:.6}")?;
     writeln!(file, "feature\tmean_expression\tlog1p_mean_expression")?;
 
     // Write data, sorted by log_mean_expr descending
@@ -350,7 +346,7 @@ fn save_excluded_features(
     sorted_features.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
     for (name, mean_expr, log_mean_expr) in sorted_features {
-        writeln!(file, "{}\t{:.6}\t{:.6}", name, mean_expr, log_mean_expr)?;
+        writeln!(file, "{name}\t{mean_expr:.6}\t{log_mean_expr:.6}")?;
     }
 
     Ok(())
@@ -358,15 +354,15 @@ fn save_excluded_features(
 
 /// Create sparse selection matrix from selected row indices
 ///
-/// Creates a sparse matrix S where S[new_i, old_i] = 1.0 for selected indices.
-/// This allows efficient filtering: filtered_data = S * original_data
+/// Creates a sparse matrix S where S[`new_i`, `old_i`] = 1.0 for selected indices.
+/// This allows efficient filtering: `filtered_data` = S * `original_data`
 ///
 /// # Arguments
 /// * `selected_indices` - sorted indices of selected features
 /// * `n_total_rows` - total number of features in original data
 ///
 /// # Returns
-/// * `CscMat` - sparse selection matrix (n_selected × n_total)
+/// * `CscMat` - sparse selection matrix (`n_selected` × `n_total`)
 fn create_selection_matrix(selected_indices: &[usize], n_total_rows: usize) -> CscMat {
     let n_selected = selected_indices.len();
     let mut triplets = Vec::with_capacity(n_selected);
@@ -382,7 +378,7 @@ fn create_selection_matrix(selected_indices: &[usize], n_total_rows: usize) -> C
 /// Filter CSC matrix by selected row indices using pre-computed selection matrix
 ///
 /// # Arguments
-/// * `selection_matrix` - sparse selection matrix (n_selected × n_total)
+/// * `selection_matrix` - sparse selection matrix (`n_selected` × `n_total`)
 /// * `x` - input matrix to filter
 ///
 /// # Returns

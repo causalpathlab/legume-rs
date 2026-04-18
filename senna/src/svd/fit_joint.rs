@@ -1,5 +1,7 @@
 use crate::embed_common::*;
-use crate::senna_input::*;
+use crate::senna_input::{
+    read_data_on_shared_columns, ReadSharedColumnsArgs, SparseStackWithBatch,
+};
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 use matrix_util::dmatrix_util::concatenate_vertical;
 
@@ -190,7 +192,11 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
 
     let delta_vec = collapsed_data_vec
         .iter()
-        .map(|x| x.mu_residual.as_ref().map(|y| y.posterior_mean()))
+        .map(|x| {
+            x.mu_residual
+                .as_ref()
+                .map(matrix_param::traits::Inference::posterior_mean)
+        })
         .collect::<Vec<_>>();
 
     let nystrom_out = do_nystrom_proj(
@@ -231,7 +237,7 @@ fn do_nystrom_proj(
     // 1. construct a tall xx matrix and perform one svd
     let xx_vec = log_xx_dn_vec
         .into_iter()
-        .map(|x| x.scale_columns())
+        .map(matrix_util::traits::MatOps::scale_columns)
         .collect::<Vec<_>>();
 
     let (u_dk, _, vv) = concatenate_vertical(&xx_vec)?.rsvd(rank)?;
