@@ -43,6 +43,7 @@ mod geometry;
 mod logging;
 mod marker_support;
 mod postprocess;
+mod run_manifest;
 mod senna_input;
 mod svd;
 mod topic;
@@ -202,6 +203,13 @@ enum Commands {
                       multi-level collapsing, compute PB-PB cosine similarity on\n\
                       log1p-CPM gene vectors, then lay out via t-SNE or PHATE.\n\
                       Cells placed by cheap Nyström in random-projection space.\n\n\
+                      Preferred invocation uses a run manifest produced by\n\
+                      `senna topic` (or svd / itopic / joint-*):\n    \
+                      senna visualize phate --from run.senna.json\n\
+                      The manifest supplies data files + output prefix, and is\n\
+                      updated in place with `viz.cell_coords`, `viz.pb_coords`,\n\
+                      and `viz.pb_gene_mean` paths — downstream\n\
+                      `senna plot --from run.senna.json` then just works.\n\n\
                       Pick a layout: `senna visualize tsne ...` or `senna visualize phate ...`.",
         visible_alias = "viz",
         subcommand_required = true,
@@ -214,12 +222,19 @@ enum Commands {
 
     #[command(
         about = "Publication scatter plot from `senna viz` coords (SVG/PNG/PDF)",
-        long_about = "Read cell coordinates produced by `senna viz tsne|phate` and\n\
-                      render a publication-quality scatter: per-topic rasterized\n\
+        long_about = "Render a publication-quality scatter: per-group rasterized\n\
                       layers (tiny-skia, 300 dpi) with transparent background,\n\
                       optional convex hull polygons, and vector text labels at\n\
                       per-group medians (fully editable in Illustrator/Inkscape).\n\n\
-                      Color source selectable via --color-by cluster|pb-id|topic.\n\
+                      Preferred invocation uses a run manifest from\n\
+                      `senna topic` + `senna viz`:\n    \
+                      senna plot --from run.senna.json\n\
+                      Everything else (cell_coords, topics, labels, colour_by,\n\
+                      palette) is read from the manifest; individual CLI flags\n\
+                      still override when passed.\n\n\
+                      Group source selectable via --colour-by cluster|pb-id|topic.\n\
+                      Hull polygons are off by default (scRNA groups are rarely\n\
+                      separable in 2D); enable with --hull for debugging.\n\
                       Outputs: {out}.plot.svg, {out}.plot.png, {out}.plot.pdf."
     )]
     Plot(PlotArgs),

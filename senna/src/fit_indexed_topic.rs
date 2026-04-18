@@ -35,7 +35,8 @@ pub struct IndexedTopicArgs {
                      {out}.latent.parquet           cell × topic log-softmax proportions\n  \
                      {out}.delta.parquet            per-batch effects (if --batch-files)\n  \
                      {out}.log_likelihood.parquet   training loss trace\n  \
-                     {out}.safetensors              encoder+decoder weights\n\n\
+                     {out}.safetensors              encoder+decoder weights\n  \
+                     {out}.senna.json               run manifest consumed by `senna viz --from` and `senna plot --from`\n\n\
                      With -x bulk files: {out}.bulk_latent.parquet additionally."
     )]
     out: Box<str>,
@@ -527,6 +528,24 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             info!("CNV detection: skipped (no batch information)");
         }
     }
+
+    let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
+    let batch: Vec<String> = args
+        .batch_files
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        kind: "itopic",
+        prefix: &args.out,
+        data_input: &input,
+        data_batch: &batch,
+        data_input_null: &[],
+        dictionary_suffix: Some("dictionary.parquet"),
+        has_markers: args.markers.is_some(),
+        has_model: true,
+        default_colour_by: "topic",
+    })?;
 
     info!("Done");
     Ok(())

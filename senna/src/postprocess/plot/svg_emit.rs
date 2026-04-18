@@ -1,7 +1,7 @@
 //! Emit a transparent-background SVG wrapping pre-rasterized per-group
 //! PNG layers, convex-hull polygons, and vector text labels.
 //!
-//! Output structure (three named `<g>` groups — easy to toggle in
+//! Output structure (named `<g>` groups — easy to toggle in
 //! Illustrator / Inkscape):
 //!
 //! ```text
@@ -10,7 +10,7 @@
 //!     <image id="topic-0" .../>
 //!     ...
 //!   </g>
-//!   <g id="hulls">          (if enabled)
+//!   <g id="hulls">           (if enabled)
 //!     <polygon id="hull-0" .../>
 //!     ...
 //!   </g>
@@ -29,6 +29,15 @@ use super::palette::Rgb;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use std::fmt::Write;
+
+/// White halo stroke width as a fraction of font size. Matches typical
+/// SVG label-on-dense-raster conventions — wide enough to read over any
+/// background without visibly eating into glyph strokes.
+const LABEL_HALO_WIDTH_FACTOR: f32 = 0.35;
+/// Minimum halo width for a main group label (pixels). Large enough that
+/// even at small --label-font-size the halo still separates text from
+/// raster.
+const MAIN_LABEL_HALO_MIN_PX: f32 = 1.5;
 
 /// Per-topic inputs to the SVG assembler. All coordinates are in pixels,
 /// in the same pixel-space as the rasterized layers.
@@ -119,28 +128,17 @@ pub fn emit_svg(layers: &[TopicLayer], opts: &SvgOpts) -> String {
         let _ = writeln!(&mut s, "  </g>");
     }
 
-    // Labels — white halo stroke + colored fill for legibility over
-    // dense raster regions. Still a single editable `<text>` element.
     if opts.draw_labels {
         let _ = writeln!(&mut s, "  <g id=\"labels\">");
         for (i, layer) in layers.iter().enumerate() {
-            let (lx, ly) = layer.label_xy_px;
-            if !lx.is_finite() || !ly.is_finite() {
-                continue;
-            }
-            let (r, g, b) = layer.color;
-            let esc = escape_xml(&layer.label);
-            let _ = writeln!(
+            emit_halo_text(
                 &mut s,
-                "    <text id=\"label-{i}\" x=\"{lx:.2}\" y=\"{ly:.2}\" \
-                 font-family=\"Helvetica, Arial, sans-serif\" \
-                 font-size=\"{fs}\" text-anchor=\"middle\" \
-                 dominant-baseline=\"central\" \
-                 paint-order=\"stroke\" \
-                 stroke=\"white\" stroke-width=\"{hw}\" stroke-linejoin=\"round\" \
-                 fill=\"rgb({r},{g},{b})\">{esc}</text>",
-                fs = opts.label_font_size_px,
-                hw = (opts.label_font_size_px * 0.35).max(1.5),
+                &format!("label-{i}"),
+                layer.label_xy_px,
+                opts.label_font_size_px,
+                MAIN_LABEL_HALO_MIN_PX,
+                layer.color,
+                &layer.label,
             );
         }
         let _ = writeln!(&mut s, "  </g>");
@@ -148,6 +146,37 @@ pub fn emit_svg(layers: &[TopicLayer], opts: &SvgOpts) -> String {
 
     let _ = writeln!(&mut s, "</svg>");
     s
+}
+
+/// Emit a single `<text>` element with a white halo stroke + colored
+/// fill, centered on `xy`. Skips emission silently for non-finite
+/// positions (a common no-op when a group has no points).
+fn emit_halo_text(
+    s: &mut String,
+    id: &str,
+    xy: Pt,
+    font_size_px: f32,
+    halo_min_px: f32,
+    color: Rgb,
+    text: &str,
+) {
+    let (x, y) = xy;
+    if !x.is_finite() || !y.is_finite() {
+        return;
+    }
+    let (r, g, b) = color;
+    let hw = (font_size_px * LABEL_HALO_WIDTH_FACTOR).max(halo_min_px);
+    let esc = escape_xml(text);
+    let _ = writeln!(
+        s,
+        "    <text id=\"{id}\" x=\"{x:.2}\" y=\"{y:.2}\" \
+         font-family=\"Helvetica, Arial, sans-serif\" \
+         font-size=\"{font_size_px:.2}\" text-anchor=\"middle\" \
+         dominant-baseline=\"central\" \
+         paint-order=\"stroke\" \
+         stroke=\"white\" stroke-width=\"{hw:.2}\" stroke-linejoin=\"round\" \
+         fill=\"rgb({r},{g},{b})\">{esc}</text>",
+    );
 }
 
 fn escape_xml(s: &str) -> String {

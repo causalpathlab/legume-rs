@@ -48,7 +48,8 @@ pub struct JointTopicArgs {
                      {out}.dictionary.parquet       effective topic dictionary\n  \
                      {out}.latent.parquet           cell × topic log-softmax proportions\n  \
                      {out}.log_likelihood.parquet   training loss trace\n  \
-                     {out}_{d}.delta.parquet        per-batch effects for modality d\n\n\
+                     {out}_{d}.delta.parquet        per-batch effects for modality d\n  \
+                     {out}.senna.json               run manifest consumed by `senna viz --from` and `senna plot --from`\n\n\
                      With --decoder-type delta, additionally:\n  \
                      {out}.base_dictionary.parquet  shared base dictionary\n  \
                      {out}_{m}.delta_logits.parquet delta logits for modality m"
@@ -457,6 +458,29 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             }
         }
     }
+
+    let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
+    let batch: Vec<String> = args
+        .batch_files
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        kind: "joint-topic",
+        prefix: &args.out,
+        data_input: &input,
+        data_batch: &batch,
+        data_input_null: &[],
+        // Joint-topic writes `{out}.base_dictionary.parquet` + per-modality
+        // delta files (`{out}_{i}.delta_logits.parquet`). Only the base
+        // dictionary is recorded here — plot doesn't consume deltas.
+        dictionary_suffix: Some("base_dictionary.parquet"),
+        // No markers / anchor labels and no safetensors+metadata path in
+        // joint-topic today.
+        has_markers: false,
+        has_model: false,
+        default_colour_by: "topic",
+    })?;
 
     info!("Done");
     Ok(())
