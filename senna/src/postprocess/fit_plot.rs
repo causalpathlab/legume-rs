@@ -1,9 +1,16 @@
 //! `senna plot` — publication-quality rasterized scatter with vector
 //! labels over transparent background.
 //!
-//! See `plot::` module docs for the overall pipeline. This file is the
-//! clap entry point and glue: reads coord + group-source parquets,
-//! dispatches rasterization, emits SVG / PNG / PDF.
+//! Preferred invocation is `senna plot --from {prefix}.senna.json`
+//! (manifest produced by `senna topic` + enriched by `senna viz`); it
+//! fills in cell-coords / topics / labels / colour-by / palette from
+//! the manifest's `viz{}`, `outputs{}`, and `defaults{}` sections.
+//! Explicit CLI flags still override whatever the manifest provides.
+//!
+//! See `plot::` module docs for the overall SVG→PNG/PDF pipeline. This
+//! file is the clap entry point and glue: resolves manifest + overrides
+//! into a `ResolvedInputs`, buckets cells by group, dispatches per-group
+//! rasterization via rayon, emits SVG, then renders PNG + PDF.
 
 use crate::embed_common::*;
 use crate::postprocess::plot::hull::{
@@ -14,10 +21,11 @@ use crate::postprocess::plot::rasterize::{
     rasterize_group_png, DataBounds, Extent, PointShape,
 };
 use crate::postprocess::plot::svg_emit::{emit_svg, SvgOpts, TopicLayer};
+use crate::run_manifest::{self, RunManifest};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const PT_PER_INCH: f32 = 72.0;
 
@@ -47,32 +55,42 @@ pub enum LabelPosition {
 pub struct PlotArgs {
     #[arg(
         long,
-        short = 'c',
-        required = true,
-        help = "Cell coordinates parquet (from `senna viz`)"
+        short = 'f',
+        help = "Run manifest JSON from `senna topic`/`itopic`/`joint-topic` (+ updated by `senna viz`)",
+        long_help = "If set, fills in --cell-coords, --topics, --labels, --colour-by, \
+                     and --palette from the manifest's viz/outputs/defaults sections. \
+                     Any explicit CLI flag still overrides the manifest value. Paths \
+                     inside the manifest are resolved relative to the manifest's own \
+                     directory so you can move a run directory around freely."
     )]
-    pub cell_coords: Box<str>,
+    pub from: Option<Box<str>>,
+
+    #[arg(
+        long,
+        short = 'c',
+        help = "Cell coordinates parquet (from `senna viz`); required unless --from provides it"
+    )]
+    pub cell_coords: Option<Box<str>>,
 
     #[arg(
         long,
         short = 'o',
-        required = true,
-        help = "Output prefix",
+        help = "Output prefix (defaults to the manifest's `prefix` when --from is used)",
         long_help = "Writes {out}.plot.svg, {out}.plot.png, {out}.plot.pdf."
     )]
-    pub out: Box<str>,
+    pub out: Option<Box<str>>,
 
     #[arg(
-        long,
+        long = "colour-by",
+        alias = "color-by",
         value_enum,
-        default_value_t = ColorBy::Cluster,
-        help = "Color source"
+        help = "Colour source (default: manifest's `defaults.colour_by`, else `cluster`)"
     )]
-    pub color_by: ColorBy,
+    pub colour_by: Option<ColorBy>,
 
     #[arg(
         long,
-        help = "Topic proportions parquet (cells × K); required with --color-by topic"
+        help = "Topic proportions parquet (cells × K); required with --colour-by topic"
     )]
     pub topics: Option<Box<str>>,
 
@@ -81,6 +99,13 @@ pub struct PlotArgs {
         help = "TSV mapping group_id<TAB>display_name (one per line). Missing IDs fall back to T{id}."
     )]
     pub labels: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Drop groups with fewer than N cells (0 = keep all)"
+    )]
+    pub min_topic_cells: usize,
 
     #[arg(long, default_value_t = 6.0, help = "Plot width (inches)")]
     pub width: f32,
@@ -91,7 +116,7 @@ pub struct PlotArgs {
     #[arg(long, default_value_t = 300, help = "Output DPI (raster layers)")]
     pub dpi: u32,
 
-    #[arg(long, default_value_t = 0.5, help = "Point size (pt)")]
+    #[arg(long, default_value_t = 2.0, help = "Point size (pt)")]
     pub point_size: f32,
 
     #[arg(long, default_value_t = 0.6, help = "Point alpha (0..=1)")]
@@ -115,10 +140,9 @@ pub struct PlotArgs {
     #[arg(
         long,
         value_enum,
-        default_value_t = Palette::Auto,
-        help = "Qualitative palette"
+        help = "Qualitative palette (default: manifest's `defaults.palette`, else `auto`)"
     )]
-    pub palette: Palette,
+    pub palette: Option<Palette>,
 
     #[arg(
         long,
@@ -134,17 +158,22 @@ pub struct PlotArgs {
     #[arg(long, default_value_t = false, help = "Suppress vector text labels")]
     pub no_labels: bool,
 
-    #[arg(long, default_value_t = false, help = "Suppress convex hull polygons")]
-    pub no_hull: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Draw convex hull polygons around each group (off by default: scRNA groups are rarely separable in 2D, and hulls overstate that)"
+    )]
+    pub hull: bool,
 
     #[arg(
         long,
         default_value_t = 0.95,
         help = "Fraction of closest-to-median points used for each hull (1.0 = all)",
-        long_help = "For each group, keep only the {coverage} fraction of points\n\
-                     nearest the coordinate-wise median (Euclidean) before computing\n\
-                     the convex hull. Strips a few fringe cells so one outlier can't\n\
-                     drag the polygon across the plot. Set to 1.0 to use every point."
+        long_help = "Only applies when --hull is enabled. For each group, keep only\n\
+                     the {coverage} fraction of points nearest the coordinate-wise\n\
+                     median (Euclidean) before computing the convex hull. Strips a\n\
+                     few fringe cells so one outlier can't drag the polygon across\n\
+                     the plot. Set to 1.0 to use every point."
     )]
     pub hull_coverage: f32,
 
@@ -166,7 +195,8 @@ pub struct PlotArgs {
 }
 
 pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
-    let coords_by_name = read_cell_coords(&args.cell_coords)?;
+    let resolved = resolve_inputs(args)?;
+    let coords_by_name = read_cell_coords(&resolved.cell_coords)?;
     let x = coords_by_name
         .get("x")
         .ok_or_else(|| anyhow::anyhow!("cell_coords parquet missing 'x' column"))?;
@@ -174,15 +204,15 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
         .get("y")
         .ok_or_else(|| anyhow::anyhow!("cell_coords parquet missing 'y' column"))?;
     let n_cells = x.len();
-    info!("Loaded {n_cells} cells from {}", args.cell_coords);
+    info!("Loaded {n_cells} cells from {}", resolved.cell_coords);
 
-    let group_ids = match args.color_by {
+    let group_ids = match resolved.colour_by {
         ColorBy::Cluster => coords_by_name
             .get("cluster")
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "--color-by cluster but cell_coords has no 'cluster' column; \
-                     re-run `senna viz` with --clusters or pick a different --color-by"
+                    "--colour-by cluster but cell_coords has no 'cluster' column; \
+                     re-run `senna viz` with --clusters or pick a different --colour-by"
                 )
             })?
             .iter()
@@ -195,10 +225,10 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
             .map(|&v| if v.is_nan() { -1 } else { v as i64 })
             .collect::<Vec<_>>(),
         ColorBy::Topic => {
-            let topics_path = args
+            let topics_path = resolved
                 .topics
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("--color-by topic requires --topics PATH"))?;
+                .ok_or_else(|| anyhow::anyhow!("--colour-by topic requires --topics PATH (or manifest outputs.topics)"))?;
             argmax_topics(topics_path, n_cells)?
         }
     };
@@ -230,6 +260,24 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
         anyhow::bail!("no valid group assignments found");
     }
 
+    if args.min_topic_cells > 0 {
+        let before = pts_by_group.len();
+        pts_by_group.retain(|_g, pts| pts.len() >= args.min_topic_cells);
+        let dropped = before - pts_by_group.len();
+        if dropped > 0 {
+            info!(
+                "Dropped {dropped} groups with fewer than {} cells",
+                args.min_topic_cells
+            );
+        }
+        if pts_by_group.is_empty() {
+            anyhow::bail!(
+                "--min-topic-cells {} dropped every group",
+                args.min_topic_cells
+            );
+        }
+    }
+
     let mut unique: Vec<i64> = pts_by_group.keys().copied().collect();
     unique.sort_unstable();
     info!("Plotting {} groups", unique.len());
@@ -244,12 +292,17 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
 
     let radius_px = args.point_size * args.dpi as f32 / PT_PER_INCH / 2.0;
     let label_font_px = args.label_font_size * args.dpi as f32 / PT_PER_INCH;
-    let palette = palette::resolve(&args.palette, unique.len());
+    let palette = palette::resolve(&resolved.palette, unique.len());
 
-    let label_map = match &args.labels {
+    let label_map = match &resolved.labels {
         Some(p) => read_labels_tsv(p)?,
         None => FxHashMap::default(),
     };
+
+    // Skip hull/trim computation when nothing needs it — hull polygons
+    // are opt-in now and median is the default label position.
+    let need_hull_geometry =
+        args.hull || args.label_position == LabelPosition::HullCentroid;
 
     // Per-group rasterization + hull + label placement in parallel.
     // Each group is independent and encodes its own PNG — outermost loop
@@ -270,13 +323,18 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
             };
             let png = rasterize_group_png(&pts_px, ext, radius_px, color, args.alpha, shape)?;
 
-            let hull_pts = trim_outliers_by_median(pts, args.hull_coverage);
-            let hull = convex_hull(&hull_pts);
-            let hull_px: Vec<Pt> = hull.iter().map(|&p| to_pixel(p, &bounds, ext)).collect();
+            let (hull_px, hull_data) = if need_hull_geometry {
+                let trimmed = trim_outliers_by_median(pts, args.hull_coverage);
+                let h = convex_hull(&trimmed);
+                let px: Vec<Pt> = h.iter().map(|&p| to_pixel(p, &bounds, ext)).collect();
+                (px, h)
+            } else {
+                (Vec::new(), Vec::new())
+            };
 
             let label_xy_data = match args.label_position {
                 LabelPosition::Median => median_xy(pts),
-                LabelPosition::HullCentroid => hull_centroid(&hull),
+                LabelPosition::HullCentroid => hull_centroid(&hull_data),
             };
             let label_xy_px = to_pixel(label_xy_data, &bounds, ext);
 
@@ -300,7 +358,7 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
         &SvgOpts {
             width_px,
             height_px,
-            draw_hulls: !args.no_hull,
+            draw_hulls: args.hull,
             draw_labels: !args.no_labels,
             label_font_size_px: label_font_px,
             hull_stroke_px: (radius_px * 0.8).max(1.0),
@@ -308,7 +366,7 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
         },
     );
 
-    let base = args.out.to_string();
+    let base = resolved.out.clone();
     if !args.no_svg {
         let svg_path = format!("{base}.plot.svg");
         fs::write(&svg_path, svg.as_bytes())?;
@@ -337,6 +395,129 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolved inputs after merging `--from` manifest defaults with
+/// explicit CLI flags. CLI wins; missing-and-not-in-manifest yields a
+/// clear error. All paths here are absolute (or at least resolved
+/// relative to the manifest's directory) so downstream readers don't
+/// have to guess what they're relative to.
+struct ResolvedInputs {
+    cell_coords: String,
+    topics: Option<String>,
+    labels: Option<String>,
+    out: String,
+    colour_by: ColorBy,
+    palette: Palette,
+}
+
+fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
+    let (manifest, manifest_dir): (Option<RunManifest>, PathBuf) = match &args.from {
+        Some(p) => {
+            let (m, dir) = RunManifest::load(Path::new(p.as_ref()))?;
+            info!("Loaded run manifest {} (kind: {})", p, m.kind);
+            (Some(m), dir)
+        }
+        None => (None, PathBuf::from(".")),
+    };
+
+    let resolve_opt = |s: &str| {
+        run_manifest::resolve(&manifest_dir, s)
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    let cell_coords = args
+        .cell_coords
+        .as_deref()
+        .map(String::from)
+        .or_else(|| {
+            manifest
+                .as_ref()
+                .and_then(|m| m.viz.cell_coords.as_deref())
+                .map(resolve_opt)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no --cell-coords given and manifest {} has no viz.cell_coords \
+                 (did you run `senna viz` against this manifest?)",
+                args.from.as_deref().unwrap_or("(none)")
+            )
+        })?;
+
+    let topics = args
+        .topics
+        .as_deref()
+        .map(String::from)
+        .or_else(|| {
+            manifest
+                .as_ref()
+                .and_then(|m| m.outputs.latent.as_deref())
+                .map(resolve_opt)
+        });
+
+    let labels = args
+        .labels
+        .as_deref()
+        .map(String::from)
+        .or_else(|| {
+            manifest
+                .as_ref()
+                .and_then(|m| m.outputs.anchor_labels.as_deref())
+                .map(resolve_opt)
+        });
+
+    let out = args
+        .out
+        .as_deref()
+        .map(String::from)
+        .or_else(|| manifest.as_ref().map(|m| m.prefix.clone()))
+        .ok_or_else(|| anyhow::anyhow!("no --out given and no manifest prefix available"))?;
+
+    let colour_by = args
+        .colour_by
+        .clone()
+        .or_else(|| {
+            manifest
+                .as_ref()
+                .and_then(|m| m.defaults.colour_by.as_deref())
+                .and_then(parse_colour_by)
+        })
+        .unwrap_or(ColorBy::Cluster);
+
+    let palette = args
+        .palette
+        .clone()
+        .or_else(|| {
+            manifest
+                .as_ref()
+                .and_then(|m| m.defaults.palette.as_deref())
+                .and_then(parse_palette)
+        })
+        .unwrap_or(Palette::Auto);
+
+    Ok(ResolvedInputs {
+        cell_coords,
+        topics,
+        labels,
+        out,
+        colour_by,
+        palette,
+    })
+}
+
+fn parse_colour_by(s: &str) -> Option<ColorBy> {
+    match s {
+        "topic" => Some(ColorBy::Topic),
+        "cluster" => Some(ColorBy::Cluster),
+        "pb-id" | "pb_id" => Some(ColorBy::PbId),
+        _ => None,
+    }
+}
+
+fn parse_palette(s: &str) -> Option<Palette> {
+    use clap::ValueEnum;
+    Palette::from_str(s, true).ok()
 }
 
 /// Data→pixel mapping with y-axis flipped (larger data-y → higher on
