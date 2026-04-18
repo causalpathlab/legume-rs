@@ -85,6 +85,13 @@ colored = "3"
 indicatif = { version = "^0.18", features = ["rayon"] }
 indicatif-log-bridge = "0.2"
 
+# 2D graphics / SVG (senna plot)
+base64 = "0.22"
+resvg = "0.47"
+svg2pdf = "0.13"
+tiny-skia = "0.12"
+usvg = "0.47"
+
 # Internal crates
 auxiliary-data = { path = "auxiliary-data" }
 candle-util = { path = "candle-util" }
