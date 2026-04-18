@@ -35,7 +35,8 @@ pub struct JointSvdArgs {
         long_help = "Prefix for generated files:\n  \
                      {out}.dictionary.parquet  gene × component loadings\n  \
                      {out}.latent.parquet      cell × component scores\n  \
-                     {out}_{d}.delta.parquet   per-batch effects for modality d"
+                     {out}_{d}.delta.parquet   per-batch effects for modality d\n  \
+                     {out}.senna.json          run manifest consumed by `senna viz --from` and `senna plot --from`"
     )]
     out: Box<str>,
 
@@ -222,6 +223,24 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         (Some(&gene_names), Some("gene")),
         None,
     )?;
+
+    let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
+    let batch: Vec<String> = args
+        .batch_files
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        kind: "joint-svd",
+        prefix: &args.out,
+        data_input: &input,
+        data_batch: &batch,
+        data_input_null: &[],
+        dictionary_suffix: Some("dictionary.parquet"),
+        has_markers: false,
+        has_model: false,
+        default_colour_by: "cluster",
+    })?;
 
     Ok(())
 }

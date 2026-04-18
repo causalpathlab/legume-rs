@@ -28,7 +28,8 @@ pub struct SvdArgs {
                      {out}.delta.parquet              per-batch effects (if --batch-files)\n  \
                      {out}.adjusted.zarr              batch-adjusted backend (if --save-adjusted)\n  \
                      {out}.feature_variance.parquet   log-variance per feature (if --save-feature-variance)\n  \
-                     {out}.selected_features.txt      selected feature names (if feature selection ran)"
+                     {out}.selected_features.txt      selected feature names (if feature selection ran)\n  \
+                     {out}.senna.json                 run manifest consumed by `senna viz --from` and `senna plot --from`"
     )]
     out: Box<str>,
 
@@ -360,6 +361,27 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
 
         crate::cnv_pseudobulk::write_cnv_results(&cnv_result, &args.out, &gene_names)?;
     }
+
+    let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
+    let batch: Vec<String> = args
+        .batch_files
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        kind: "svd",
+        prefix: &args.out,
+        data_input: &input,
+        data_batch: &batch,
+        data_input_null: &[],
+        dictionary_suffix: Some("dictionary.parquet"),
+        has_markers: false,
+        has_model: false,
+        // SVD produces no topic / cluster labels on its own; users
+        // typically run `senna clustering` next, so the viz column
+        // `cluster` is the natural default.
+        default_colour_by: "cluster",
+    })?;
 
     Ok(())
 }

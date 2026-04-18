@@ -15,9 +15,11 @@ use crate::geometry::cell_layout::project_cells_nystrom;
 use crate::geometry::similarity::{
     compute_cosine_similarity, local_scale_similarity, regularize_similarity, threshold_similarity,
 };
+use crate::run_manifest::{self, RunManifest};
 use crate::topic::common::{
     load_and_collapse, preferred_posterior_mean, LoadCollapseArgs, PreparedData,
 };
+use std::path::{Path, PathBuf};
 
 /// Counts-per-million target used for log1p-CPM PB features.
 const CPM_SCALE: f32 = 1e4;
@@ -34,20 +36,31 @@ const SELF_LOOP_REG: f32 = 0.01;
 #[derive(Args, Debug, Clone)]
 pub struct VisualizeCommonArgs {
     #[arg(
-        required = true,
+        long,
+        short = 'f',
+        help = "Run manifest JSON from `senna topic` / `itopic` / `joint-topic` / `svd` / `joint-svd`",
+        long_help = "If set, fills in data files, batch files, and (when --out is \
+                     absent) the output prefix from the manifest. The manifest is \
+                     then updated in place: its `viz.cell_coords`, `viz.pb_coords`, \
+                     and `viz.pb_gene_mean` fields are set to the paths just \
+                     written, and saved back. Explicit CLI flags still override \
+                     manifest values when passed."
+    )]
+    pub from: Option<Box<str>>,
+
+    #[arg(
         value_delimiter = ',',
-        help = "Data files",
-        long_help = "Data files to be processed.\n\
-		     Each file should be specified as a path.\n\
-		     Multiple files can be provided (space or comma separated)."
+        help = "Data files (required unless --from supplies them)",
+        long_help = "Sparse backends in `.zarr` or `.h5`. Multiple paths allowed \
+                     (space- or comma-separated). Leave empty and pass --from to \
+                     inherit from the manifest."
     )]
     pub data_files: Vec<Box<str>>,
 
     #[arg(
         long,
         short,
-        required = true,
-        help = "Output header",
+        help = "Output prefix (defaults to the manifest's `prefix` when --from is used)",
         long_help = "Output header for results.\n\n\
 		     {out}.pb_coords.parquet:\n\
 		       Pseudobulk sample coordinates (n_pb × 2)\n\n\
@@ -57,7 +70,7 @@ pub struct VisualizeCommonArgs {
 		       Batch-corrected log1p-CPM per PB (n_pb × n_genes), used as\n\
 		       the diagnostic feature matrix for the PB-PB similarity step."
     )]
-    pub out: Box<str>,
+    pub out: Option<Box<str>>,
 
     #[arg(
         long,
@@ -202,6 +215,95 @@ impl From<&PhateCliArgs> for crate::geometry::phate::PhateArgs {
     }
 }
 
+/// Inputs resolved from the merge of CLI flags and an optional
+/// `--from` run manifest. Held by `prepare_viz` / `finalize_viz` in
+/// place of reaching into `VisualizeCommonArgs` directly, which keeps
+/// the path-resolution logic out of the pipeline body.
+///
+/// When `manifest` is `Some`, `finalize_viz` updates its `viz{}`
+/// section with the files it just wrote and saves back to
+/// `manifest_path`. Without `--from` both stay `None`.
+pub(crate) struct ResolvedViz {
+    pub data_files: Vec<Box<str>>,
+    pub batch_files: Option<Vec<Box<str>>>,
+    pub out: String,
+    pub manifest_path: Option<PathBuf>,
+    pub manifest: Option<RunManifest>,
+}
+
+pub(crate) fn resolve_inputs(args: &VisualizeCommonArgs) -> anyhow::Result<ResolvedViz> {
+    let (manifest, manifest_dir, manifest_path) = match &args.from {
+        Some(p) => {
+            let path = PathBuf::from(p.as_ref());
+            let (m, dir) = RunManifest::load(&path)?;
+            info!("Loaded run manifest {} (kind: {})", p, m.kind);
+            (Some(m), dir, Some(path))
+        }
+        None => (None, PathBuf::from("."), None),
+    };
+
+    let data_files: Vec<Box<str>> = if !args.data_files.is_empty() {
+        args.data_files.clone()
+    } else if let Some(m) = manifest.as_ref() {
+        m.data
+            .input
+            .iter()
+            .map(|s| {
+                run_manifest::resolve(&manifest_dir, s)
+                    .to_string_lossy()
+                    .into_owned()
+                    .into_boxed_str()
+            })
+            .collect()
+    } else {
+        anyhow::bail!(
+            "no data files given and no --from manifest; \
+             pass data files positionally or supply --from PATH"
+        );
+    };
+    if data_files.is_empty() {
+        anyhow::bail!("manifest {:?} has no data.input entries", manifest_path);
+    }
+
+    let batch_files: Option<Vec<Box<str>>> = args.batch_files.clone().or_else(|| {
+        manifest.as_ref().and_then(|m| {
+            if m.data.batch.is_empty() {
+                None
+            } else {
+                Some(
+                    m.data
+                        .batch
+                        .iter()
+                        .map(|s| {
+                            run_manifest::resolve(&manifest_dir, s)
+                                .to_string_lossy()
+                                .into_owned()
+                                .into_boxed_str()
+                        })
+                        .collect(),
+                )
+            }
+        })
+    });
+
+    let out: String = args
+        .out
+        .as_deref()
+        .map(String::from)
+        .or_else(|| manifest.as_ref().map(|m| m.prefix.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("no --out given and no manifest prefix available (use --from or -o)")
+        })?;
+
+    Ok(ResolvedViz {
+        data_files,
+        batch_files,
+        out,
+        manifest_path,
+        manifest,
+    })
+}
+
 /// Everything the layout subcommands need after PB prep.
 pub(crate) struct VizPrep {
     pub data_vec: SparseIoVec,
@@ -220,15 +322,18 @@ pub(crate) struct VizPrep {
     pub pb_proj_kp: Mat,
 }
 
-pub(crate) fn prepare_viz(args: &VisualizeCommonArgs) -> anyhow::Result<VizPrep> {
+pub(crate) fn prepare_viz(
+    args: &VisualizeCommonArgs,
+    resolved: &ResolvedViz,
+) -> anyhow::Result<VizPrep> {
     // 1. Load + project + multi-level collapse (shared w/ topic / svd).
     let PreparedData {
         data_vec,
         collapsed_levels,
         proj_kn,
     } = load_and_collapse(&LoadCollapseArgs {
-        data_files: &args.data_files,
-        batch_files: &args.batch_files,
+        data_files: &resolved.data_files,
+        batch_files: &resolved.batch_files,
         preload: args.preload_data,
         warm_start_proj_file: None,
         proj_dim: args.proj_dim,
@@ -237,7 +342,7 @@ pub(crate) fn prepare_viz(args: &VisualizeCommonArgs) -> anyhow::Result<VizPrep>
         num_levels: args.num_levels.max(1),
         iter_opt: args.iter_opt,
         block_size: args.block_size,
-        out: &args.out,
+        out: &resolved.out,
         oversample: false,
     })?;
 
@@ -358,11 +463,14 @@ pub(crate) fn load_cluster_assignments(
     Ok(clusters)
 }
 
-/// Finalize: place cells via cheap Nyström, write the three output parquet files.
+/// Finalize: place cells via cheap Nyström, write the three output
+/// parquet files, and — when a manifest was loaded via `--from` —
+/// update its `viz{}` section and save it back in place.
 ///
 /// `pb_coords` comes from the layout subcommand.
 pub(crate) fn finalize_viz(
     args: &VisualizeCommonArgs,
+    resolved: &mut ResolvedViz,
     prep: &VizPrep,
     pb_coords: &Mat,
 ) -> anyhow::Result<()> {
@@ -381,15 +489,20 @@ pub(crate) fn finalize_viz(
     let gene_names = prep.data_vec.row_names()?;
     let cell_names = prep.data_vec.column_names()?;
 
+    let out = &resolved.out;
+    let pb_coords_path = format!("{out}.pb_coords.parquet");
+    let pb_gene_mean_path = format!("{out}.pb_gene_mean.parquet");
+    let cell_coords_path = format!("{out}.cell_coords.parquet");
+
     let coord_cols: Vec<Box<str>> = vec!["x".into(), "y".into()];
     pb_coords.to_parquet_with_names(
-        &(args.out.to_string() + ".pb_coords.parquet"),
+        &pb_coords_path,
         (Some(&pb_names), Some("pb")),
         Some(&coord_cols),
     )?;
 
     prep.log_cpm_pb.to_parquet_with_names(
-        &(args.out.to_string() + ".pb_gene_mean.parquet"),
+        &pb_gene_mean_path,
         (Some(&pb_names), Some("pb")),
         Some(&gene_names),
     )?;
@@ -425,14 +538,72 @@ pub(crate) fn finalize_viz(
         col_names.push("cluster".into());
     }
     cell_out.to_parquet_with_names(
-        &(args.out.to_string() + ".cell_coords.parquet"),
+        &cell_coords_path,
         (Some(&cell_names), Some("cell")),
         Some(&col_names),
     )?;
 
     info!(
-        "Saved {}.pb_coords.parquet, {}.pb_gene_mean.parquet, {}.cell_coords.parquet",
-        args.out, args.out, args.out
+        "Saved {pb_coords_path}, {pb_gene_mean_path}, {cell_coords_path}"
     );
+
+    update_manifest_viz(
+        resolved,
+        &cell_coords_path,
+        &pb_coords_path,
+        &pb_gene_mean_path,
+    )?;
+
     Ok(())
+}
+
+/// When `--from` was used, update the loaded manifest's `viz{}` section
+/// to point at the files we just wrote, then save it back. Stores each
+/// path as a *basename relative to the manifest's directory* so it
+/// resolves correctly when the run directory is moved.
+fn update_manifest_viz(
+    resolved: &mut ResolvedViz,
+    cell_coords_path: &str,
+    pb_coords_path: &str,
+    pb_gene_mean_path: &str,
+) -> anyhow::Result<()> {
+    let (Some(manifest), Some(manifest_path)) =
+        (resolved.manifest.as_mut(), resolved.manifest_path.as_ref())
+    else {
+        return Ok(());
+    };
+    let manifest_dir = manifest_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    manifest.viz.cell_coords = Some(rel_to_manifest(manifest_dir, cell_coords_path));
+    manifest.viz.pb_coords = Some(rel_to_manifest(manifest_dir, pb_coords_path));
+    manifest.viz.pb_gene_mean = Some(rel_to_manifest(manifest_dir, pb_gene_mean_path));
+
+    manifest.save(manifest_path)
+}
+
+/// Store `written_path` as a basename-relative string when it lives
+/// inside `manifest_dir`; otherwise leave as absolute. Keeps the
+/// manifest portable across directory moves without accidentally
+/// rewriting paths that point elsewhere (e.g. `-o /tmp/foo` while the
+/// manifest lives in `~/work/run1/`).
+fn rel_to_manifest(manifest_dir: &Path, written_path: &str) -> String {
+    let abs = PathBuf::from(written_path);
+    let abs = if abs.is_absolute() {
+        abs
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&abs))
+            .unwrap_or(abs)
+    };
+    let manifest_abs = manifest_dir
+        .canonicalize()
+        .unwrap_or_else(|_| manifest_dir.to_path_buf());
+    let written_abs = abs.canonicalize().unwrap_or(abs);
+    match written_abs.strip_prefix(&manifest_abs) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => written_abs.to_string_lossy().into_owned(),
+    }
 }

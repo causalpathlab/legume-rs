@@ -1,0 +1,265 @@
+// Several constructors / savers here are consumed by the `senna topic`
+// / `viz` wiring landing in later passes — silence dead-code until then.
+#![allow(dead_code)]
+
+//! Run manifest — the single JSON artifact that ties a senna run
+//! together across subcommands.
+//!
+//! Shape: `senna topic` / `itopic` / `joint-topic` write a fresh
+//! manifest at the end of training. `senna viz` reads it, produces 2D
+//! coords, and updates the `viz{}` section in place. `senna plot` (and
+//! future postprocess commands) read the fully-enriched manifest and
+//! work with zero further flags. CLI flags on those commands stay
+//! available and win over manifest values when both are supplied.
+//!
+//! The schema is deliberately narrow — data paths + output artifact
+//! paths + a couple of UI defaults. Training hyperparameters are
+//! intentionally *not* serialized: the manifest is a run descriptor,
+//! not a config language. If you want to re-run with the same settings,
+//! that's what shell history and Makefiles are for.
+//!
+//! All path values are resolved relative to the manifest file's own
+//! directory, so a run directory can be moved or copied without
+//! breaking downstream reads.
+
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Schema version. Bump only on breaking renames or semantic changes.
+/// Readers accept any version and log a warning for newer-than-known.
+pub const MANIFEST_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunManifest {
+    pub version: u32,
+    /// Subcommand that produced the run: `"topic" | "itopic" | "joint-topic"`.
+    pub kind: String,
+    /// The `--out` prefix the training command was run with.
+    pub prefix: String,
+    #[serde(default)]
+    pub data: RunData,
+    #[serde(default)]
+    pub outputs: RunOutputs,
+    #[serde(default)]
+    pub viz: RunViz,
+    #[serde(default)]
+    pub defaults: RunDefaults,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunData {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_null: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunOutputs {
+    /// `{out}.latent.parquet`: cell × K matrix. For topic runs this is
+    /// log-softmax topic proportions; for SVD runs it's component
+    /// scores. Consumers that argmax (e.g. `senna plot --colour-by
+    /// topic`) should check `kind` before assuming topic semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latent: Option<String>,
+    /// `{out}.dictionary.parquet`: gene × K loadings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dictionary: Option<String>,
+    /// `{out}.anchor_labels.tsv` — topic runs only, and only when a
+    /// marker file was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_labels: Option<String>,
+    /// `{out}.pb_membership.parquet` — Pass-2 output (not written yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pb_membership: Option<String>,
+    /// `{out}.safetensors` — trained VAE weights (topic / itopic /
+    /// joint-topic only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// `{out}.metadata.json` — topic-model metadata for `senna
+    /// eval-topic` (topic / itopic / joint-topic only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunViz {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_coords: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pb_coords: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pb_gene_mean: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunDefaults {
+    /// Default `--colour-by` for `senna plot`: `"topic" | "cluster" | "pb-id"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour_by: Option<String>,
+    /// Default `--palette` for `senna plot`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub palette: Option<String>,
+}
+
+impl RunManifest {
+    pub fn new(kind: &str, prefix: &str) -> Self {
+        Self {
+            version: MANIFEST_VERSION,
+            kind: kind.into(),
+            prefix: prefix.into(),
+            data: RunData::default(),
+            outputs: RunOutputs::default(),
+            viz: RunViz::default(),
+            defaults: RunDefaults::default(),
+        }
+    }
+
+    /// Read the manifest and return it together with its parent
+    /// directory (used to resolve the relative paths inside).
+    pub fn load(path: &Path) -> anyhow::Result<(Self, PathBuf)> {
+        let raw = fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+        let m: Self = serde_json::from_str(&raw)
+            .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
+        if m.version > MANIFEST_VERSION {
+            log::warn!(
+                "manifest {} is v{} but this binary supports up to v{MANIFEST_VERSION}; \
+                 proceeding (unknown fields will be ignored)",
+                path.display(),
+                m.version
+            );
+        }
+        let dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        Ok((m, dir))
+    }
+
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        let s = serde_json::to_string_pretty(self)?;
+        fs::write(path, s)
+            .map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
+        log::info!("wrote {}", path.display());
+        Ok(())
+    }
+}
+
+/// Resolve a path listed in a manifest against the manifest's own
+/// directory. Absolute paths pass through unchanged. Convert the result
+/// to a `String` via `.to_string_lossy().into_owned()` at call sites
+/// that already hold string-typed paths.
+#[must_use]
+pub fn resolve(manifest_dir: &Path, rel: &str) -> PathBuf {
+    let p = Path::new(rel);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        manifest_dir.join(p)
+    }
+}
+
+/// Default manifest filename given a run `--out` prefix.
+#[must_use]
+pub fn default_path(prefix: &str) -> String {
+    format!("{prefix}.senna.json")
+}
+
+/// Per-run description assembled by each training subcommand, handed to
+/// `write_run_manifest` which owns the `RunManifest` / `save` plumbing.
+pub struct RunDescription<'a> {
+    /// One of `"topic" | "itopic" | "joint-topic" | "svd" | "joint-svd"`.
+    pub kind: &'a str,
+    /// The `--out` prefix; used both for the manifest filename and as
+    /// the `prefix` field inside.
+    pub prefix: &'a str,
+    pub data_input: &'a [String],
+    pub data_batch: &'a [String],
+    pub data_input_null: &'a [String],
+    /// Suffix after `{basename}.` for the dictionary parquet, e.g.
+    /// `"dictionary.parquet"` or (joint-topic) `"base_dictionary.parquet"`.
+    /// `None` to omit — SVD runs still produce one, topic runs always do.
+    pub dictionary_suffix: Option<&'a str>,
+    /// True if the run emits `{basename}.anchor_labels.tsv` (topic /
+    /// itopic / joint-topic with `--markers`).
+    pub has_markers: bool,
+    /// True if the run emits `{basename}.safetensors` +
+    /// `{basename}.metadata.json` (topic + itopic; not joint-topic, not
+    /// SVD).
+    pub has_model: bool,
+    /// Default `--colour-by` for downstream plot / viz.
+    pub default_colour_by: &'a str,
+}
+
+/// Write `{prefix}.senna.json` describing the run that just finished.
+///
+/// All artifact paths inside the manifest are stored as *basenames*
+/// (e.g. `"run1.latent.parquet"`) so they resolve correctly relative to
+/// the manifest's own directory — even when the run directory is moved
+/// after writing.
+pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
+    let basename = Path::new(desc.prefix)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| desc.prefix.to_string());
+
+    let mut m = RunManifest::new(desc.kind, desc.prefix);
+    m.data.input = desc.data_input.to_vec();
+    m.data.input_null = desc.data_input_null.to_vec();
+    m.data.batch = desc.data_batch.to_vec();
+
+    m.outputs.latent = Some(format!("{basename}.latent.parquet"));
+    if let Some(suf) = desc.dictionary_suffix {
+        m.outputs.dictionary = Some(format!("{basename}.{suf}"));
+    }
+    if desc.has_markers {
+        m.outputs.anchor_labels = Some(format!("{basename}.anchor_labels.tsv"));
+    }
+    if desc.has_model {
+        m.outputs.model = Some(format!("{basename}.safetensors"));
+        m.outputs.metadata = Some(format!("{basename}.metadata.json"));
+    }
+    m.defaults.colour_by = Some(desc.default_colour_by.into());
+
+    let path = default_path(desc.prefix);
+    m.save(Path::new(&path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip() {
+        let mut m = RunManifest::new("topic", "/tmp/run1");
+        m.data.input = vec!["a.zarr".into(), "b.zarr".into()];
+        m.outputs.latent = Some("run1.latent.parquet".into());
+        m.viz.cell_coords = Some("run1.cell_coords.parquet".into());
+        m.defaults.colour_by = Some("topic".into());
+        let json = serde_json::to_string(&m).unwrap();
+        let back: RunManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, "topic");
+        assert_eq!(back.data.input.len(), 2);
+        assert_eq!(back.outputs.latent.as_deref(), Some("run1.latent.parquet"));
+        assert_eq!(back.viz.cell_coords.as_deref(), Some("run1.cell_coords.parquet"));
+    }
+
+    #[test]
+    fn resolve_respects_absolute_and_relative() {
+        let dir = Path::new("/tmp/runs");
+        assert_eq!(resolve(dir, "x.parquet"), PathBuf::from("/tmp/runs/x.parquet"));
+        assert_eq!(resolve(dir, "/abs/y.parquet"), PathBuf::from("/abs/y.parquet"));
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored() {
+        let raw = r#"{"version":1,"kind":"topic","prefix":"r","extra_future_field":42}"#;
+        let m: RunManifest = serde_json::from_str(raw).unwrap();
+        assert_eq!(m.prefix, "r");
+    }
+}

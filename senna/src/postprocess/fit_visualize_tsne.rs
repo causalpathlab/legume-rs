@@ -2,7 +2,9 @@
 //! an Rtsne-style t-SNE (PHATE-initialized) over the PB-PB cosine
 //! similarity. Cells placed by cheap Nyström in proj space.
 
-use super::fit_visualize_common::{finalize_viz, prepare_viz, PhateCliArgs, VisualizeCommonArgs};
+use super::fit_visualize_common::{
+    finalize_viz, prepare_viz, resolve_inputs, PhateCliArgs, VisualizeCommonArgs,
+};
 use crate::embed_common::*;
 use crate::geometry::phate::phate_layout_2d;
 use crate::geometry::tsne::{similarity_to_distance, TSne};
@@ -30,7 +32,8 @@ pub struct VisualizeTsneArgs {
 }
 
 pub fn fit_visualize_tsne(args: &VisualizeTsneArgs) -> anyhow::Result<()> {
-    let prep = prepare_viz(&args.common)?;
+    let mut resolved = resolve_inputs(&args.common)?;
+    let prep = prepare_viz(&args.common, &resolved)?;
 
     info!("Running PHATE to initialize t-SNE on log1p-CPM PB features ...");
     let init = phate_layout_2d(&prep.log_cpm_pb, &(&args.phate).into());
@@ -73,5 +76,5 @@ pub fn fit_visualize_tsne(args: &VisualizeTsneArgs) -> anyhow::Result<()> {
     }
     info!("t-SNE done");
 
-    finalize_viz(&args.common, &prep, &pb_coords)
+    finalize_viz(&args.common, &mut resolved, &prep, &pb_coords)
 }

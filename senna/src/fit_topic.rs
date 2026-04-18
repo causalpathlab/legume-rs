@@ -66,7 +66,8 @@ pub struct TopicArgs {
                      {out}.anchor_labels.tsv        anchor PB → celltype label table\n  \
                      {out}.dispersion.parquet       NB dispersion (nb / nbmixture)\n  \
                      {out}.alpha.parquet            ambient gene profile (nbmixture)\n  \
-                     {out}.rho.parquet              ρ sigmoid coefficients (nbmixture)\n\n\
+                     {out}.rho.parquet              ρ sigmoid coefficients (nbmixture)\n  \
+                     {out}.senna.json               run manifest consumed by `senna viz --from` and `senna plot --from`\n\n\
                      With --decoder a,b,c: per-decoder dictionaries written as {out}.{name}.dictionary.parquet."
     )]
     pub(crate) out: Box<str>,
@@ -522,8 +523,44 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         }
     }
 
+    write_topic_manifest(
+        "topic",
+        &args.out,
+        &args.data_files,
+        args.batch_files.as_deref(),
+        args.markers.is_some(),
+    )?;
+
     info!("Done");
     Ok(())
+}
+
+/// Assemble + save the `{prefix}.senna.json` manifest for a topic /
+/// itopic / joint-topic run. Factored out so all three callers stay
+/// DRY; SVD runs use a distinct helper because they produce no model
+/// or markers.
+fn write_topic_manifest(
+    kind: &str,
+    prefix: &str,
+    data_files: &[Box<str>],
+    batch_files: Option<&[Box<str>]>,
+    has_markers: bool,
+) -> anyhow::Result<()> {
+    let input: Vec<String> = data_files.iter().map(|s| s.to_string()).collect();
+    let batch: Vec<String> = batch_files
+        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        kind,
+        prefix,
+        data_input: &input,
+        data_batch: &batch,
+        data_input_null: &[],
+        dictionary_suffix: Some("dictionary.parquet"),
+        has_markers,
+        has_model: true,
+        default_colour_by: "topic",
+    })
 }
 
 // ---------------------------------------------------------------------------
