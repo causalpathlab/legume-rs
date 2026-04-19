@@ -36,6 +36,7 @@ pub struct IndexedTopicArgs {
                      {out}.delta.parquet            per-batch effects (if --batch-files)\n  \
                      {out}.log_likelihood.parquet   training loss trace\n  \
                      {out}.safetensors              encoder+decoder weights\n  \
+                     {out}.cell_proj.parquet        cached random projection (consumed by `senna layout`)\n  \
                      {out}.senna.json               run manifest consumed by `senna viz --from` and `senna plot --from`\n\n\
                      With -x bulk files: {out}.bulk_latent.parquet additionally."
     )]
@@ -202,6 +203,9 @@ pub struct IndexedTopicArgs {
     )]
     preload_data: bool,
 
+    #[command(flatten)]
+    hvg: crate::hvg::HvgCliArgs,
+
     #[arg(
         long,
         default_value_t = 0.01,
@@ -305,6 +309,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         block_size: args.block_size,
         out: &args.out,
         oversample: !args.no_oversample_pb,
+        max_features: args.hvg.n_hvg,
+        feature_list_file: args.hvg.feature_list_file.as_deref(),
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();

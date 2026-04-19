@@ -1,7 +1,5 @@
-use super::feature_selection::{
-    filter_csc_by_rows, select_highly_variable_features, FeatureSelection,
-};
 use crate::embed_common::*;
+use crate::hvg::{filter_csc_by_rows, select_hvg_streaming, HvgCliArgs, HvgSelection};
 use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 
@@ -27,8 +25,8 @@ pub struct SvdArgs {
                      {out}.latent.parquet             cell × component scores\n  \
                      {out}.delta.parquet              per-batch effects (if --batch-files)\n  \
                      {out}.adjusted.zarr              batch-adjusted backend (if --save-adjusted)\n  \
-                     {out}.feature_variance.parquet   log-variance per feature (if --save-feature-variance)\n  \
-                     {out}.selected_features.txt      selected feature names (if feature selection ran)\n  \
+                     {out}.selected_features.txt      selected HVG names (if HVG enabled)\n  \
+                     {out}.cell_proj.parquet          cached random projection (consumed by `senna layout`)\n  \
                      {out}.senna.json                 run manifest consumed by `senna viz --from` and `senna plot --from`"
     )]
     out: Box<str>,
@@ -135,36 +133,8 @@ pub struct SvdArgs {
     #[arg(long, help = "Write the batch-adjusted data to a new zarr backend")]
     save_adjusted: bool,
 
-    #[arg(
-        long,
-        help = "Keep top N highly variable features",
-        long_help = "Select top N features by log-variance before SVD.\n\
-                     Ignored when --warm-start is set."
-    )]
-    max_features: Option<usize>,
-
-    #[arg(
-        long,
-        help = "Pre-computed feature list (one feature name per line)",
-        long_help = "Takes precedence over --max-features.\n\
-                     Ignored when --warm-start is set."
-    )]
-    feature_list_file: Option<Box<str>>,
-
-    #[arg(
-        long,
-        alias = "high-sd",
-        help = "Exclude highly expressed features beyond N SD above the mean",
-        long_help = "Drop features with log1p(mean) > mean + N·SD before feature selection.\n\
-                     Typical values: 4–5."
-    )]
-    exclude_high_expression_sd: Option<f32>,
-
-    #[arg(
-        long,
-        help = "Write per-feature log-variance to {out}.feature_variance.parquet"
-    )]
-    save_feature_variance: bool,
+    #[command(flatten)]
+    hvg: HvgCliArgs,
 
     #[command(flatten)]
     cnv: CnvArgs,
@@ -182,21 +152,20 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         preload: args.preload_data,
     })?;
 
-    // Feature selection (if requested)
-    let selected_features: Option<FeatureSelection> = if args.warm_start_proj_file.is_some() {
-        if args.max_features.is_some() || args.feature_list_file.is_some() {
-            info!("Warm-start provided: skipping feature selection (may be incompatible)");
+    // HVG selection (skipped with --warm-start for compatibility)
+    let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();
+    let selected_features: Option<HvgSelection> = if args.warm_start_proj_file.is_some() {
+        if hvg_enabled {
+            info!("Warm-start provided: skipping HVG selection (may be incompatible)");
         }
         None
-    } else if args.max_features.is_some() || args.feature_list_file.is_some() {
-        Some(select_highly_variable_features(
+    } else if hvg_enabled {
+        Some(select_hvg_streaming(
             &data_vec,
-            args.max_features,
-            args.feature_list_file.as_deref(),
-            args.save_feature_variance,
-            &args.out,
+            (args.hvg.n_hvg > 0).then_some(args.hvg.n_hvg),
+            args.hvg.feature_list_file.as_deref(),
             args.block_size,
-            args.exclude_high_expression_sd,
+            None,
         )?)
     } else {
         None
@@ -225,12 +194,23 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         proj_nk.transpose()
     } else {
         let proj_dim = args.proj_dim.max(args.n_latent_topics);
+        let n_rows = data_vec.num_rows();
 
-        let proj_out = data_vec.project_columns_with_batch_correction(
-            proj_dim,
-            Some(args.block_size),
-            Some(&batch_membership),
-        )?;
+        let proj_out = if let Some(sel) = selected_features.as_ref() {
+            let weights = sel.row_weights(n_rows);
+            data_vec.project_columns_weighted(
+                proj_dim,
+                Some(args.block_size),
+                Some(&batch_membership),
+                &weights,
+            )?
+        } else {
+            data_vec.project_columns_with_batch_correction(
+                proj_dim,
+                Some(args.block_size),
+                Some(&batch_membership),
+            )?
+        };
 
         proj_out.proj
     };
@@ -395,7 +375,7 @@ struct NystromParam<'a> {
     basis_dk: &'a Mat,
     delta_dp: Option<&'a Mat>,
     column_sum_norm: f32,
-    feature_selection: Option<&'a FeatureSelection>,
+    feature_selection: Option<&'a HvgSelection>,
 }
 
 struct NystromOut {
@@ -421,7 +401,7 @@ fn do_nystrom_proj(
     rank: usize,
     column_sum_norm: f32,
     block_size: Option<usize>,
-    feature_selection: Option<&FeatureSelection>,
+    feature_selection: Option<&HvgSelection>,
 ) -> anyhow::Result<NystromOut> {
     let mut log_xx_dn = log_xx_dn.clone();
 

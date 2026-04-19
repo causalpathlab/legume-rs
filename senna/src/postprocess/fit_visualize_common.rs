@@ -406,12 +406,17 @@ fn preprocess_layout_data_from_cache(
         cell_names_cached.len(),
         data_cell_names.len()
     );
-    let proj_kn: Mat = proj_nk.transpose();
+    let mut proj_kn: Mat = proj_nk.transpose();
     info!(
         "Loaded cell_proj: {} cells × {} proj-dims",
         proj_kn.ncols(),
         proj_kn.nrows()
     );
+
+    // Per-proj-dim z-score across cells so that no single dim dominates
+    // the PB-centroid cosine similarity. (scale_rows_inplace standardizes
+    // each row to zero-mean/unit-variance across columns.)
+    proj_kn.scale_rows_inplace();
 
     // 3. Partition: binary_sort_columns runs RSVD + sign-hashing on the
     //    projection and returns a per-cell bucket code. Canonicalize
@@ -520,6 +525,10 @@ fn preprocess_layout_data_recompute(
         block_size: args.block_size,
         out: &resolved.out,
         oversample: false,
+        // Layout recompute is the legacy path: match training's default
+        // HVG gate so the projection reflects variable biology.
+        max_features: 5000,
+        feature_list_file: None,
     })?;
 
     let finest = collapsed_levels

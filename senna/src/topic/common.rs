@@ -1,4 +1,5 @@
 use crate::embed_common::*;
+use crate::hvg::{select_hvg_streaming, HvgSelection};
 use crate::logging::new_progress_bar;
 use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 
@@ -205,6 +206,11 @@ pub struct LoadCollapseArgs<'a> {
     pub block_size: usize,
     pub out: &'a str,
     pub oversample: bool,
+    /// Keep top N HVGs (via binned residual variance) for the random
+    /// projection; 0 disables. Collapsing still reads all genes.
+    pub max_features: usize,
+    /// Optional pre-computed feature list (overrides `max_features`).
+    pub feature_list_file: Option<&'a str>,
 }
 
 /// Load sparse data, project, multi-level collapse, and write delta output.
@@ -243,11 +249,37 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
 
         proj_nk.transpose()
     } else {
-        let proj_out = data_vec.project_columns_with_batch_correction(
-            args.proj_dim,
-            Some(args.block_size),
-            Some(&batch_membership),
-        )?;
+        // HVG-weighted projection: down-weight uninformative genes so the
+        // random sketch (and hence the PB partitioning + cached cell_proj)
+        // reflects variable biology. Collapsing still reads all genes.
+        let hvg_enabled = args.max_features > 0 || args.feature_list_file.is_some();
+        let selected: Option<HvgSelection> = if hvg_enabled {
+            Some(select_hvg_streaming(
+                &data_vec,
+                (args.max_features > 0).then_some(args.max_features),
+                args.feature_list_file,
+                args.block_size,
+                None,
+            )?)
+        } else {
+            None
+        };
+
+        let proj_out = if let Some(sel) = selected.as_ref() {
+            let weights = sel.row_weights(data_vec.num_rows());
+            data_vec.project_columns_weighted(
+                args.proj_dim,
+                Some(args.block_size),
+                Some(&batch_membership),
+                &weights,
+            )?
+        } else {
+            data_vec.project_columns_with_batch_correction(
+                args.proj_dim,
+                Some(args.block_size),
+                Some(&batch_membership),
+            )?
+        };
 
         proj_out.proj
     };
