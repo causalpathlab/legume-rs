@@ -291,7 +291,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let PreparedData {
         data_vec,
         collapsed_levels,
-        ..
+        proj_kn,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &args.data_files,
         batch_files: &args.batch_files,
@@ -529,6 +529,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         }
     }
 
+    crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
+
     let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
     let batch: Vec<String> = args
         .batch_files
@@ -544,7 +546,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         dictionary_suffix: Some("dictionary.parquet"),
         has_markers: args.markers.is_some(),
         has_model: true,
-        has_cell_proj: false,
+        has_cell_proj: true,
         default_colour_by: "topic",
     })?;
 
