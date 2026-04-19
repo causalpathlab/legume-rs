@@ -3,7 +3,7 @@
 //! Cells placed by cheap Nyström in proj space.
 
 use super::fit_visualize_common::{
-    finalize_viz, prepare_viz, resolve_inputs, PhateCliArgs, VisualizeCommonArgs,
+    finalize_viz, preprocess_layout_data, resolve_inputs, PhateCliArgs, VisualizeCommonArgs,
 };
 use super::viz_prep::apply_svd_preprocessing;
 use crate::embed_common::*;
@@ -34,7 +34,7 @@ pub struct VisualizePhateArgs {
 
 pub fn fit_visualize_phate(args: &VisualizePhateArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
-    let prep = prepare_viz(&args.common, &resolved)?;
+    let prep = preprocess_layout_data(&args.common, &resolved)?;
 
     // HVG selection: keep top N genes by residual variance (mean-variance corrected)
     let features = if args.n_hvg > 0 && args.n_hvg < prep.log_expr_pb.ncols() {

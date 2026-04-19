@@ -132,6 +132,44 @@ pub(super) fn select_pb_coverage(pb_size: &[usize], coverage: f32) -> Vec<usize>
     kept
 }
 
+/// Persist the per-cell random projection so `senna layout` can reuse it
+/// without re-running `load_and_collapse` on raw data. Writes
+/// `{prefix}.cell_proj.parquet` with cells as rows and projection
+/// dimensions as columns.
+///
+/// `proj_kn` is `(proj_dim × n_cells)` column-major (matches
+/// `PreparedData.proj_kn`); this helper transposes to row-major cells
+/// before serializing.
+pub(crate) fn write_cell_proj(
+    prefix: &str,
+    proj_kn: &Mat,
+    cell_names: &[Box<str>],
+) -> anyhow::Result<String> {
+    let path = format!("{prefix}.cell_proj.parquet");
+    let n_cells = proj_kn.ncols();
+    anyhow::ensure!(
+        cell_names.len() == n_cells,
+        "cell_names len {} != proj_kn cols {}",
+        cell_names.len(),
+        n_cells
+    );
+    let proj_nk = proj_kn.transpose();
+    let col_names: Vec<Box<str>> = (0..proj_nk.ncols())
+        .map(|i| format!("p{i}").into_boxed_str())
+        .collect();
+    proj_nk.to_parquet_with_names(
+        &path,
+        (Some(cell_names), Some("cell")),
+        Some(&col_names),
+    )?;
+    info!(
+        "Wrote cell projection: {} cells × {} dims → {path}",
+        n_cells,
+        proj_nk.ncols()
+    );
+    Ok(path)
+}
+
 /// Apply SVD preprocessing: reduce matrix to top N components.
 /// Returns U * diag(S) where (U, S, V) = rsvd(mat, n_components).
 pub(super) fn apply_svd_preprocessing(mat: &Mat, n_components: usize) -> anyhow::Result<Mat> {

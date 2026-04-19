@@ -1,13 +1,13 @@
 //! `senna layout tsne` — raw-gene-space PB landmarks laid out with
-//! an Rtsne-style t-SNE (PHATE-initialized) over the PB-PB cosine
-//! similarity. Cells placed by cheap Nyström in proj space.
+//! an Rtsne-style t-SNE over the PB-PB cosine similarity. Cells
+//! placed by cheap Nyström in proj space. Initialised from random 2D
+//! coordinates (seeded via the shared `--seed` flag).
 
 use super::fit_visualize_common::{
-    finalize_viz, prepare_viz, resolve_inputs, PhateCliArgs, VisualizeCommonArgs,
+    finalize_viz, preprocess_layout_data, random_init_2d, resolve_inputs, VisualizeCommonArgs,
 };
 use super::viz_prep::apply_svd_preprocessing;
 use crate::embed_common::*;
-use crate::geometry::phate::phate_layout_2d;
 use crate::geometry::tsne::{similarity_to_distance, TSne};
 
 #[derive(Args, Debug)]
@@ -41,14 +41,11 @@ pub struct VisualizeTsneArgs {
         help = "Number of highly variable genes to select (0 = use all genes)"
     )]
     n_hvg: usize,
-
-    #[clap(flatten)]
-    phate: PhateCliArgs,
 }
 
 pub fn fit_visualize_tsne(args: &VisualizeTsneArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
-    let prep = prepare_viz(&args.common, &resolved)?;
+    let prep = preprocess_layout_data(&args.common, &resolved)?;
 
     // HVG selection: keep top N genes by residual variance (mean-variance corrected)
     let features = if args.n_hvg > 0 && args.n_hvg < prep.log_expr_pb.ncols() {
@@ -68,13 +65,15 @@ pub fn fit_visualize_tsne(args: &VisualizeTsneArgs) -> anyhow::Result<()> {
         features
     };
 
-    info!("Running PHATE to initialize t-SNE ...");
-    let init = phate_layout_2d(&features, &(&args.phate).into());
-    info!("PHATE init done");
-
     let n = prep.pb_similarity.nrows();
+    let _ = features; // reserved for future HVG/SVD-aware t-SNE variants
 
-    // nalgebra's DMatrix is column-major; TSne::fit expects row-major flat.
+    info!(
+        "Initialising t-SNE from random 2D coordinates (seed={})",
+        args.common.seed
+    );
+    let init = random_init_2d(n, args.common.seed);
+    // TSne::fit expects row-major flat.
     let mut init_flat = Vec::with_capacity(n * 2);
     for i in 0..n {
         init_flat.push(init[(i, 0)]);
