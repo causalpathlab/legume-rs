@@ -72,9 +72,12 @@ pub struct RunOutputs {
     /// marker file was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_labels: Option<String>,
-    /// `{out}.pb_membership.parquet` — Pass-2 output (not written yet).
+    /// `{out}.cell_proj.parquet` — cell × `proj_dim` random projection
+    /// computed during training. Cached so `senna layout` can re-derive
+    /// PB structure (via RSVD + multi-level collapse on the projection)
+    /// without touching raw data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pb_membership: Option<String>,
+    pub cell_proj: Option<String>,
     /// `{out}.safetensors` — trained VAE weights (topic / itopic /
     /// joint-topic only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,6 +194,11 @@ pub struct RunDescription<'a> {
     /// `{basename}.metadata.json` (topic + itopic; not joint-topic, not
     /// SVD).
     pub has_model: bool,
+    /// True if the run emits `{basename}.cell_proj.parquet` — the
+    /// cached per-cell random projection layout reuses. All training
+    /// subcommands that produce PBs (topic, itopic, joint-topic, svd,
+    /// joint-svd) should set this.
+    pub has_cell_proj: bool,
     /// Default `--colour-by` for downstream plot / layout.
     pub default_colour_by: &'a str,
 }
@@ -222,6 +230,9 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     if desc.has_model {
         m.outputs.model = Some(format!("{basename}.safetensors"));
         m.outputs.metadata = Some(format!("{basename}.metadata.json"));
+    }
+    if desc.has_cell_proj {
+        m.outputs.cell_proj = Some(format!("{basename}.cell_proj.parquet"));
     }
     m.defaults.colour_by = Some(desc.default_colour_by.into());
 

@@ -377,6 +377,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         dictionary_suffix: Some("dictionary.parquet"),
         has_markers: false,
         has_model: false,
+        has_cell_proj: false,
         // SVD produces no topic / cluster labels on its own; users
         // typically run `senna clustering` next, so the viz column
         // `cluster` is the natural default.
