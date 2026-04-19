@@ -754,7 +754,7 @@ mod tests {
 
         // All π should be in [ε, 1-ε]
         for &v in &pi_vals {
-            assert!(v >= 0.01 && v <= 0.99, "π out of bounds: {}", v);
+            assert!((0.01..=0.99).contains(&v), "π out of bounds: {}", v);
         }
 
         // Check PIP concentrates on feature 5

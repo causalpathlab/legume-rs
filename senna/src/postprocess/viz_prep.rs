@@ -1,35 +1,11 @@
-//! Data-preparation helpers for `fit_visualize`:
+//! Data-preparation helpers for `fit_layout` (tsne/phate):
 //! - Per-PB mean-feature accumulation and coverage-based tail pruning.
 //! - Raw-gene-space log1p-CPM construction for PB landmarks.
+//! - SVD preprocessing for dimensionality reduction.
 
 use crate::embed_common::*;
+use matrix_util::traits::RandomizedAlgs;
 use rayon::prelude::*;
-
-/// Column-wise log1p-CPM of a `(D × n_pb)` PB count matrix. Returns
-/// `(D × n_pb)` so `compute_cosine_similarity` (which operates on
-/// *columns*) can be called directly without a transpose.
-///
-/// Columns (PBs) are scaled to sum = `scale` (default 1e4 for CPM),
-/// then `log1p` is applied elementwise. No HVG selection, no z-scoring
-/// — cosine similarity handles the remaining scale.
-pub(super) fn log1p_cpm_pb(mu_dp: &Mat, scale: f32) -> Mat {
-    let d = mu_dp.nrows();
-    let n_pb = mu_dp.ncols();
-    let cols: Vec<Vec<f32>> = (0..n_pb)
-        .into_par_iter()
-        .map(|p| {
-            let src = mu_dp.column(p);
-            let denom = src.iter().sum::<f32>().max(1e-12);
-            let s = scale / denom;
-            (0..d).map(|g| (src[g] * s).ln_1p()).collect()
-        })
-        .collect();
-    let mut out = Mat::zeros(d, n_pb);
-    for (p, col) in cols.iter().enumerate() {
-        out.column_mut(p).copy_from_slice(col);
-    }
-    out
-}
 
 /// Accumulate the mean feature vector for each PB group.
 ///
@@ -154,4 +130,28 @@ pub(super) fn select_pb_coverage(pb_size: &[usize], coverage: f32) -> Vec<usize>
     let mut kept: Vec<usize> = order[..cut].to_vec();
     kept.sort_unstable();
     kept
+}
+
+/// Apply SVD preprocessing: reduce matrix to top N components.
+/// Returns U * diag(S) where (U, S, V) = rsvd(mat, n_components).
+pub(super) fn apply_svd_preprocessing(mat: &Mat, n_components: usize) -> anyhow::Result<Mat> {
+    use anyhow::Context;
+
+    let (n_rows, n_cols) = (mat.nrows(), mat.ncols());
+    let n_components = n_components.min(n_rows).min(n_cols);
+
+    info!(
+        "Running randomized SVD: {} × {} → {} components",
+        n_rows, n_cols, n_components
+    );
+    let (u, s, _v) = mat.rsvd(n_components).context("Randomized SVD failed")?;
+
+    let mut reduced = Mat::zeros(n_rows, n_components);
+    for i in 0..n_components {
+        let col = u.column(i) * s[i];
+        reduced.set_column(i, &col);
+    }
+
+    info!("SVD done, reduced to {} dims", n_components);
+    Ok(reduced)
 }

@@ -360,6 +360,7 @@ impl LinkCommunityClassifier {
         for c in 0..self.k {
             let base = c * self.m;
             let mut score = self.log_prior[c] - sf * self.rate_totals[c];
+            #[allow(clippy::needless_range_loop)]
             for g in 0..self.m {
                 score += profile[g] as f64 * self.log_rates[base + g];
             }
@@ -605,6 +606,7 @@ mod tests {
             );
 
             // Check other communities by brute force
+            #[allow(clippy::needless_range_loop)]
             for t in 0..3 {
                 if t == current_c {
                     continue;

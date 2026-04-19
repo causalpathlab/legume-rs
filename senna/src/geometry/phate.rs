@@ -20,6 +20,7 @@
 use crate::embed_common::Mat;
 use crate::logging::new_progress_bar;
 use log::info;
+use matrix_util::traits::RandomizedAlgs;
 use rayon::prelude::*;
 
 /// Build an `n × n` matrix by computing each column in parallel, then
@@ -77,7 +78,7 @@ impl Default for PhateArgs {
         Self {
             t: 20,
             knn: 5,
-            alpha: 10.0,
+            alpha: 40.0,
             mds_iter: 300,
             mds_tol: 1e-4,
         }
@@ -152,8 +153,17 @@ pub fn phate_layout_2d(pb_z: &Mat, args: &PhateArgs) -> Mat {
         }
     }
 
-    info!("PHATE 4/6: diffusion M = P^{}", args.t.max(1));
-    let m_mat = matrix_power(&p_mat, args.t.max(1));
+    info!("PHATE 4/6: diffusion M = P^{} (via SVD)", args.t.max(1));
+    let m_mat = match matrix_power_via_svd(&p_mat, args.t.max(1), n.min(100)) {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!(
+                "SVD-based matrix power failed: {}, falling back to standard",
+                e
+            );
+            matrix_power(&p_mat, args.t.max(1))
+        }
+    };
 
     info!("PHATE 5/6: potential distance + classical MDS init");
     let log_m = build_nn_matrix(n, |j| {
@@ -274,6 +284,43 @@ fn smacof_2d(delta: &Mat, y_init: &Mat, max_iter: usize, tol: f32) -> Mat {
 
 /// Repeated-squaring power of a square matrix (exponent in units of one
 /// multiplication; result = M^exp).
+/// Fast matrix power via SVD: M^t = U Σ^t V^T
+/// Uses randomized SVD to approximate, much faster for large t and n
+fn matrix_power_via_svd(m: &Mat, exp: usize, rank: usize) -> anyhow::Result<Mat> {
+    use anyhow::Context;
+
+    if exp == 0 {
+        return Ok(Mat::identity(m.nrows(), m.ncols()));
+    }
+    if exp == 1 {
+        return Ok(m.clone());
+    }
+
+    let n = m.nrows();
+    let rank = rank.min(n);
+
+    // Randomized SVD: M ≈ U Σ V^T
+    info!("  RSVD: {} × {} → rank {}", n, n, rank);
+    let (u, s, v) = m.rsvd(rank).context("RSVD failed in matrix_power")?;
+
+    // Reconstruct: M^t ≈ (U · diag(Σ^t)) · V^T
+    // U is n×rank, V is n×rank
+    // First scale U columns by Σ^t (raised to power t)
+    let mut u_scaled = u.clone();
+    for k in 0..rank {
+        let s_pow_k = s[k].powi(exp as i32);
+        for i in 0..n {
+            u_scaled[(i, k)] *= s_pow_k;
+        }
+    }
+
+    // Then compute U_scaled * V^T (using nalgebra's matrix mult)
+    let result = &u_scaled * v.transpose();
+
+    Ok(result)
+}
+
+#[allow(dead_code)]
 fn matrix_power(m: &Mat, exp: usize) -> Mat {
     let n = m.nrows();
     let mut result: Mat = Mat::identity(n, n);
@@ -292,6 +339,7 @@ fn matrix_power(m: &Mat, exp: usize) -> Mat {
 }
 
 /// Classical MDS from a squared-distance matrix D² to a 2D embedding.
+/// Uses randomized SVD for efficiency (matches reference PHATE's randmds).
 fn classical_mds_2d(d2: &Mat) -> Mat {
     let n = d2.nrows();
 
@@ -321,22 +369,49 @@ fn classical_mds_2d(d2: &Mat) -> Mat {
         }
     }
 
-    let eig = b.symmetric_eigen();
-    let mut order: Vec<usize> = (0..eig.eigenvalues.len()).collect();
-    order.sort_by(|&a, &b_| {
-        eig.eigenvalues[b_]
-            .partial_cmp(&eig.eigenvalues[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // Randomized SVD: B ≈ U Σ V^T (for symmetric B, V = U and Σ = eigenvalues)
+    let rank = n.min(10); // Keep top 10 components, skip 1st (often library size)
+    match b.rsvd(rank) {
+        Ok((u, s, _v)) => {
+            // Skip 1st eigenvector (technical variation), use components 2-3
+            let mut coords = Mat::zeros(n, 2);
+            for dim in 0..2 {
+                let k = dim + 1; // Skip first component (k=1,2 instead of 0,1)
+                if k >= rank {
+                    break;
+                }
+                let scale = s[k].max(0.0).sqrt(); // sqrt because SVD gives sqrt(eigenvalue)
+                for i in 0..n {
+                    coords[(i, dim)] = u[(i, k)] * scale;
+                }
+            }
+            coords
+        }
+        Err(_) => {
+            // Fallback to exact eigendecomposition if RSVD fails
+            let eig = b.symmetric_eigen();
+            let mut order: Vec<usize> = (0..eig.eigenvalues.len()).collect();
+            order.sort_by(|&a, &b_| {
+                eig.eigenvalues[b_]
+                    .partial_cmp(&eig.eigenvalues[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
-    let mut coords = Mat::zeros(n, 2);
-    for dim in 0..2 {
-        let lam = eig.eigenvalues[order[dim]].max(0.0);
-        let s = lam.sqrt();
-        let ev = eig.eigenvectors.column(order[dim]);
-        for i in 0..n {
-            coords[(i, dim)] = s * ev[i];
+            // Skip 1st eigenvector (technical variation), use components 2-3
+            let mut coords = Mat::zeros(n, 2);
+            for dim in 0..2 {
+                let k = dim + 1; // Skip first component
+                if k >= order.len() {
+                    break;
+                }
+                let lam = eig.eigenvalues[order[k]].max(0.0);
+                let s = lam.sqrt();
+                let ev = eig.eigenvectors.column(order[k]);
+                for i in 0..n {
+                    coords[(i, dim)] = s * ev[i];
+                }
+            }
+            coords
         }
     }
-    coords
 }

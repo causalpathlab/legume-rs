@@ -538,6 +538,7 @@ mod tests {
         let result = fit_tree_factorial(&tree, &config);
 
         // Null factor loadings should approximate offsets
+        #[allow(clippy::needless_range_loop)]
         for s in 0..n_samples {
             let null_loading = result.loadings[(s, 0)];
             assert!(

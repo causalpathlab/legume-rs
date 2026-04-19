@@ -132,4 +132,3 @@ pub fn hull_centroid(hull: &[Pt]) -> Pt {
     let denom = 3.0 * area2;
     (cx / denom, cy / denom)
 }
-

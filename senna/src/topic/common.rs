@@ -94,6 +94,15 @@ pub fn preferred_posterior_mean(collapsed: &CollapsedOut) -> &Mat {
     )
 }
 
+/// Posterior log-mean PB matrix `[D, n_pb]`, preferring batch-adjusted.
+/// For Gamma(α, β), returns E[log X] = ψ(α) - log(β).
+pub fn preferred_posterior_log_mean(collapsed: &CollapsedOut) -> &Mat {
+    collapsed.mu_adjusted.as_ref().map_or_else(
+        || collapsed.mu_observed.posterior_log_mean(),
+        matrix_param::traits::Inference::posterior_log_mean,
+    )
+}
+
 /// Compute per-level epoch allocation for progressive training.
 ///
 /// Coarser levels (lower index) get more epochs: `w[i] = num_levels - i`.
