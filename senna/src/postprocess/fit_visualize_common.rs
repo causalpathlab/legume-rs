@@ -1,4 +1,4 @@
-//! Shared plumbing for `senna visualize {tsne, phate}`:
+//! Shared plumbing for `senna layout {tsne, phate}`:
 //! - CLI args shared by both layouts.
 //! - Build PBs via the existing batch-corrected collapse pipeline
 //!   (`topic::common::load_and_collapse`), collect raw-gene log1p-CPM
@@ -9,7 +9,7 @@
 //! Both layout subcommands delegate here for everything except the
 //! actual 2D layout algorithm.
 
-use super::viz_prep::{aggregate_features_by_group, log1p_cpm_pb, select_pb_coverage};
+use super::viz_prep::{aggregate_features_by_group, select_pb_coverage};
 use crate::embed_common::*;
 use crate::geometry::cell_layout::project_cells_nystrom;
 use crate::geometry::similarity::{
@@ -17,18 +17,15 @@ use crate::geometry::similarity::{
 };
 use crate::run_manifest::{self, RunManifest};
 use crate::topic::common::{
-    load_and_collapse, preferred_posterior_mean, LoadCollapseArgs, PreparedData,
+    load_and_collapse, preferred_posterior_log_mean, LoadCollapseArgs, PreparedData,
 };
 use std::path::{Path, PathBuf};
-
-/// Counts-per-million target used for log1p-CPM PB features.
-const CPM_SCALE: f32 = 1e4;
 
 /// Self-loop amount added during similarity regularization to prevent
 /// isolated nodes from collapsing the layout.
 const SELF_LOOP_REG: f32 = 0.01;
 
-/// Args shared by `senna visualize tsne` and `senna visualize phate`.
+/// Args shared by `senna layout tsne` and `senna layout phate`.
 ///
 /// These drive the PB construction / batch-correction / similarity /
 /// cell-placement path. Layout-specific args live on the per-command
@@ -41,8 +38,8 @@ pub struct VisualizeCommonArgs {
         help = "Run manifest JSON from `senna topic` / `itopic` / `joint-topic` / `svd` / `joint-svd`",
         long_help = "If set, fills in data files, batch files, and (when --out is \
                      absent) the output prefix from the manifest. The manifest is \
-                     then updated in place: its `viz.cell_coords`, `viz.pb_coords`, \
-                     and `viz.pb_gene_mean` fields are set to the paths just \
+                     then updated in place: its `layout.cell_coords`, `layout.pb_coords`, \
+                     and `layout.pb_gene_mean` fields are set to the paths just \
                      written, and saved back. Explicit CLI flags still override \
                      manifest values when passed."
     )]
@@ -175,8 +172,8 @@ pub struct VisualizeCommonArgs {
     pub clusters: Option<Box<str>>,
 }
 
-/// PHATE diffusion-embedding args. Shared by `visualize phate` (main
-/// layout) and `visualize tsne` (PHATE-based t-SNE initialization).
+/// PHATE diffusion-embedding args. Shared by `layout phate` (main
+/// layout) and `layout tsne` (PHATE-based t-SNE initialization).
 #[derive(Args, Debug, Clone)]
 pub struct PhateCliArgs {
     #[arg(long, default_value_t = 20, help = "PHATE diffusion time t")]
@@ -187,7 +184,7 @@ pub struct PhateCliArgs {
 
     #[arg(
         long,
-        default_value_t = 10.0,
+        default_value_t = 40.0,
         help = "PHATE alpha-decay kernel exponent"
     )]
     pub phate_alpha: f32,
@@ -311,14 +308,14 @@ pub(crate) struct VizPrep {
     pub pb_membership_kept: Vec<usize>,
     /// `(n_pb × D)` log1p-CPM PB features in the row-per-PB convention
     /// expected by PHATE and parquet output.
-    pub log_cpm_pb: Mat,
+    pub log_expr_pb: Mat,
     /// `(n_pb × n_pb)` PB-PB similarity, post threshold / local scaling
     /// / diagonal regularization.
     pub pb_similarity: Mat,
     /// `(proj_dim × n_cells)` per-cell projection features, kept
     /// column-major so each cell is a contiguous slice (SIMD-friendly).
     pub cell_proj_kn: Mat,
-    /// `(proj_dim × n_pb)` PB centroid features, matched to `log_cpm_pb` order.
+    /// `(proj_dim × n_pb)` PB centroid features, matched to `log_expr_pb` order.
     pub pb_proj_kp: Mat,
 }
 
@@ -349,18 +346,17 @@ pub(crate) fn prepare_viz(
     let finest = collapsed_levels
         .last()
         .ok_or_else(|| anyhow::anyhow!("no collapsed levels produced"))?;
-    let mu_dp = preferred_posterior_mean(finest);
 
-    // 2. Raw-gene-space log1p-CPM PB features (diagnostic signal).
+    // 2. Log-space PB features: E[log X] from Gamma posterior (ψ(α) - log(β)).
     //    Build in (D × n_pb) column-major so writes are cache-friendly
     //    and `compute_cosine_similarity` (which wants columns) can be
     //    called directly later with no transpose.
-    let log_cpm_full_dp = log1p_cpm_pb(mu_dp, CPM_SCALE);
-    let n_pb_full = log_cpm_full_dp.ncols();
+    let log_expr_full_dp = preferred_posterior_log_mean(finest);
+    let n_pb_full = log_expr_full_dp.ncols();
     info!(
-        "Built log1p-CPM PB features: {} PBs × {} genes",
+        "Built log-expr PB features: {} PBs × {} genes",
         n_pb_full,
-        log_cpm_full_dp.nrows()
+        log_expr_full_dp.nrows()
     );
 
     // 3. Coverage-based tail pruning.
@@ -387,7 +383,7 @@ pub(crate) fn prepare_viz(
         100.0 * covered as f32 / total_cells.max(1) as f32
     );
 
-    let log_cpm_dp = log_cpm_full_dp.select_columns(kept_indices.iter());
+    let log_expr_dp = log_expr_full_dp.select_columns(kept_indices.iter());
     let pb_size: Vec<usize> = kept_indices.iter().map(|&i| pb_size_full[i]).collect();
 
     let mut old_to_new = vec![usize::MAX; n_pb_full];
@@ -410,9 +406,9 @@ pub(crate) fn prepare_viz(
         aggregate_features_by_group(&proj_kn, &pb_membership_kept, kept_indices.len());
 
     // 5. PB-PB cosine similarity (in log1p-CPM gene space). PBs are
-    //    columns of `log_cpm_dp`, which is exactly what
+    //    columns of `log_expr_dp`, which is exactly what
     //    `compute_cosine_similarity` expects.
-    let sim = compute_cosine_similarity(&log_cpm_dp);
+    let sim = compute_cosine_similarity(&log_expr_dp);
     let sim = if args.similarity_threshold > 0.0 {
         threshold_similarity(&sim, args.similarity_threshold)
     } else {
@@ -431,7 +427,7 @@ pub(crate) fn prepare_viz(
         data_vec,
         pb_size,
         pb_membership_kept,
-        log_cpm_pb: log_cpm_dp.transpose(),
+        log_expr_pb: log_expr_dp.transpose(),
         pb_similarity,
         cell_proj_kn: proj_kn,
         pb_proj_kp: pb_centroids_kn,
@@ -501,7 +497,7 @@ pub(crate) fn finalize_viz(
         Some(&coord_cols),
     )?;
 
-    prep.log_cpm_pb.to_parquet_with_names(
+    prep.log_expr_pb.to_parquet_with_names(
         &pb_gene_mean_path,
         (Some(&pb_names), Some("pb")),
         Some(&gene_names),
@@ -543,9 +539,7 @@ pub(crate) fn finalize_viz(
         Some(&col_names),
     )?;
 
-    info!(
-        "Saved {pb_coords_path}, {pb_gene_mean_path}, {cell_coords_path}"
-    );
+    info!("Saved {pb_coords_path}, {pb_gene_mean_path}, {cell_coords_path}");
 
     update_manifest_viz(
         resolved,
@@ -577,9 +571,9 @@ fn update_manifest_viz(
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
 
-    manifest.viz.cell_coords = Some(rel_to_manifest(manifest_dir, cell_coords_path));
-    manifest.viz.pb_coords = Some(rel_to_manifest(manifest_dir, pb_coords_path));
-    manifest.viz.pb_gene_mean = Some(rel_to_manifest(manifest_dir, pb_gene_mean_path));
+    manifest.layout.cell_coords = Some(rel_to_manifest(manifest_dir, cell_coords_path));
+    manifest.layout.pb_coords = Some(rel_to_manifest(manifest_dir, pb_coords_path));
+    manifest.layout.pb_gene_mean = Some(rel_to_manifest(manifest_dir, pb_gene_mean_path));
 
     manifest.save(manifest_path)
 }

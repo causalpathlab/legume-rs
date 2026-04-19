@@ -744,6 +744,7 @@ mod tests {
 
         // Create per-gene weights (some genes have higher weight)
         let mut weights_vec = vec![1.0f32; n_genes];
+        #[allow(clippy::needless_range_loop)]
         for i in 0..10 {
             weights_vec[i] = 2.0; // First 10 genes have double weight
         }

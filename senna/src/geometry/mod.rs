@@ -2,7 +2,7 @@
 //! reduction (PHATE, t-SNE), pseudobulk similarity construction, and
 //! cell-level layout refinement. Pure functions on `nalgebra` matrices
 //! with no I/O and no CLI dependencies, so they can be consumed freely
-//! by `postprocess::*` (visualize, annotate) and by training-time
+//! by `postprocess::*` (layout, annotate) and by training-time
 //! helpers like `topic::anchor_prior`.
 
 pub(crate) mod cell_layout;

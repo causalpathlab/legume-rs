@@ -371,11 +371,11 @@ mod tests {
         // Read back and verify
         let file = File::open(&file_path)?;
         let reader = SerializedFileReader::new(file)?;
-        let mut iter = reader.get_row_iter(None)?;
+        let iter = reader.get_row_iter(None)?;
 
         // Collect all rows into a map keyed by (row, col)
         let mut results: HashMap<(String, String), (f32, f32, f32, f32)> = Default::default();
-        while let Some(row) = iter.next() {
+        for row in iter {
             let row = row?;
             let row_name = row.get_string(0)?.to_string();
             let col_name = row.get_string(1)?.to_string();
@@ -472,10 +472,10 @@ mod tests {
         // Read back and verify
         let file = File::open(&file_path)?;
         let reader = SerializedFileReader::new(file)?;
-        let mut iter = reader.get_row_iter(None)?;
+        let iter = reader.get_row_iter(None)?;
 
         let mut count = 0;
-        while let Some(row) = iter.next() {
+        for row in iter {
             let row = row?;
             let row_idx: usize = row.get_string(0)?.parse()?;
             let col_idx: usize = row.get_string(1)?.parse()?;
@@ -525,12 +525,13 @@ mod tests {
         // Read back and verify
         let file = File::open(&file_path)?;
         let reader = SerializedFileReader::new(file)?;
-        let mut iter = reader.get_row_iter(None)?;
+        let iter = reader.get_row_iter(None)?;
 
         // Collect results keyed by (row, col, factor)
+        #[allow(clippy::type_complexity)]
         let mut results: HashMap<(String, String, String), (f32, f32, f32, f32)> =
             Default::default();
-        while let Some(row) = iter.next() {
+        for row in iter {
             let row = row?;
             let row_name = row.get_string(0)?.to_string();
             let col_name = row.get_string(1)?.to_string();

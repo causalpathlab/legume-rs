@@ -351,7 +351,7 @@ mod tests {
         let pi_k = bisusie.pi_outcome()?;
         let pi_vals: Vec<f64> = pi_k.flatten_all()?.to_vec1()?;
         for &v in &pi_vals {
-            assert!(v >= 0.01 && v <= 0.99, "π_k={} out of bounds", v);
+            assert!((0.01..=0.99).contains(&v), "π_k={} out of bounds", v);
         }
 
         Ok(())

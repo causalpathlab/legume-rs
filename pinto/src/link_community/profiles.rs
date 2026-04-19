@@ -279,6 +279,7 @@ pub fn coarsen_edge_profiles(
     let mut super_profiles = vec![0.0f32; n_super * m];
 
     // Accumulate fine link profiles into super-link profiles
+    #[allow(clippy::needless_range_loop)]
     for e in 0..n_edges {
         let se = fine_to_super[e];
         let src = profiles.profile(e);
@@ -428,6 +429,7 @@ pub fn refine_projection_basis(centroids: &Mat, m: usize) -> anyhow::Result<Mat>
 
     // Compute left singular vectors: U = C * V * S^{-1}
     let mut basis = Mat::zeros(n_genes, m);
+    #[allow(clippy::needless_range_loop)]
     for j in 0..n_components {
         let idx = sorted_idx[j];
         let sv = eig.eigenvalues[idx].max(0.0).sqrt();
