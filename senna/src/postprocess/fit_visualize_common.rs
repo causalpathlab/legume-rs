@@ -170,6 +170,13 @@ pub struct VisualizeCommonArgs {
 		     If provided, cluster labels are added to cell_coords."
     )]
     pub clusters: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 42,
+        help = "RNG seed for random PB-coordinate initialisation (tsne / mst)"
+    )]
+    pub seed: u64,
 }
 
 /// PHATE diffusion-embedding args. Shared by `layout phate` (main
@@ -213,7 +220,7 @@ impl From<&PhateCliArgs> for crate::geometry::phate::PhateArgs {
 }
 
 /// Inputs resolved from the merge of CLI flags and an optional
-/// `--from` run manifest. Held by `prepare_viz` / `finalize_viz` in
+/// `--from` run manifest. Held by `preprocess_layout_data` / `finalize_viz` in
 /// place of reaching into `VisualizeCommonArgs` directly, which keeps
 /// the path-resolution logic out of the pipeline body.
 ///
@@ -302,7 +309,7 @@ pub(crate) fn resolve_inputs(args: &VisualizeCommonArgs) -> anyhow::Result<Resol
 }
 
 /// Everything the layout subcommands need after PB prep.
-pub(crate) struct VizPrep {
+pub(crate) struct LayoutPrep {
     pub data_vec: SparseIoVec,
     pub pb_size: Vec<usize>,
     pub pb_membership_kept: Vec<usize>,
@@ -319,11 +326,36 @@ pub(crate) struct VizPrep {
     pub pb_proj_kp: Mat,
 }
 
-pub(crate) fn prepare_viz(
+pub(crate) fn preprocess_layout_data(
     args: &VisualizeCommonArgs,
     resolved: &ResolvedViz,
-) -> anyhow::Result<VizPrep> {
-    // 1. Load + project + multi-level collapse (shared w/ topic / svd).
+) -> anyhow::Result<LayoutPrep> {
+    // 1. Load + (maybe warm-start) project + multi-level collapse.
+    //    When the manifest advertises a cached cell_proj (produced by
+    //    a prior `senna topic` / `itopic` / `joint-topic` / `svd` run),
+    //    plumb it through as a warm-start so we skip the expensive
+    //    random-projection + batch-correction step. Pure CLI runs
+    //    (no --from) hit the fallback path.
+    let cell_proj_path: Option<String> = resolved
+        .manifest
+        .as_ref()
+        .and_then(|m| m.outputs.cell_proj.as_ref())
+        .zip(resolved.manifest_path.as_ref())
+        .map(|(p, manifest_path)| {
+            let manifest_dir = manifest_path
+                .parent()
+                .filter(|q| !q.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            run_manifest::resolve(manifest_dir, p)
+                .to_string_lossy()
+                .into_owned()
+        });
+    if let Some(ref p) = cell_proj_path {
+        info!("Layout fast path: warm-starting projection from {p}");
+    } else {
+        info!("Layout: no cached cell_proj in manifest, recomputing projection");
+    }
+
     let PreparedData {
         data_vec,
         collapsed_levels,
@@ -332,7 +364,7 @@ pub(crate) fn prepare_viz(
         data_files: &resolved.data_files,
         batch_files: &resolved.batch_files,
         preload: args.preload_data,
-        warm_start_proj_file: None,
+        warm_start_proj_file: cell_proj_path.as_deref(),
         proj_dim: args.proj_dim,
         sort_dim: args.sort_dim,
         knn_cells: args.knn_cells,
@@ -423,7 +455,7 @@ pub(crate) fn prepare_viz(
     };
     let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
 
-    Ok(VizPrep {
+    Ok(LayoutPrep {
         data_vec,
         pb_size,
         pb_membership_kept,
@@ -459,6 +491,21 @@ pub(crate) fn load_cluster_assignments(
     Ok(clusters)
 }
 
+/// Uniform-random 2D coordinate init for PB-level layouts, in `[-1, 1]²`.
+/// Shared by `layout tsne` and `layout mst` so both are reproducible
+/// via the common `--seed` flag.
+pub(crate) fn random_init_2d(n: usize, seed: u64) -> Mat {
+    use rand::rngs::SmallRng;
+    use rand::{RngExt, SeedableRng};
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut out = Mat::zeros(n, 2);
+    for i in 0..n {
+        out[(i, 0)] = rng.random_range(-1.0..1.0);
+        out[(i, 1)] = rng.random_range(-1.0..1.0);
+    }
+    out
+}
+
 /// Finalize: place cells via cheap Nyström, write the three output
 /// parquet files, and — when a manifest was loaded via `--from` —
 /// update its `viz{}` section and save it back in place.
@@ -467,7 +514,7 @@ pub(crate) fn load_cluster_assignments(
 pub(crate) fn finalize_viz(
     args: &VisualizeCommonArgs,
     resolved: &mut ResolvedViz,
-    prep: &VizPrep,
+    prep: &LayoutPrep,
     pb_coords: &Mat,
 ) -> anyhow::Result<()> {
     let cell_coords = project_cells_nystrom(

@@ -362,6 +362,8 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         crate::cnv_pseudobulk::write_cnv_results(&cnv_result, &args.out, &gene_names)?;
     }
 
+    crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
+
     let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
     let batch: Vec<String> = args
         .batch_files
@@ -377,7 +379,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         dictionary_suffix: Some("dictionary.parquet"),
         has_markers: false,
         has_model: false,
-        has_cell_proj: false,
+        has_cell_proj: true,
         // SVD produces no topic / cluster labels on its own; users
         // typically run `senna clustering` next, so the viz column
         // `cluster` is the natural default.
