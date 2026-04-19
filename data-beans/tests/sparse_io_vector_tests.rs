@@ -130,7 +130,7 @@ fn push_disjoint_rows_uses_intersection() -> anyhow::Result<()> {
     assert_eq!(names, vec![Box::from("gene2"), Box::from("gene3")]);
 
     // Compact rows must reflect the actual row identity in each backend.
-    let mat = vec.read_columns_ndarray((0..vec.num_columns()).into_iter())?;
+    let mat = vec.read_columns_ndarray(0..vec.num_columns())?;
     assert_eq!(mat.nrows(), 2);
     assert_eq!(mat.ncols(), 5);
     // dataset A columns 0..3 → rows 2,3 of A

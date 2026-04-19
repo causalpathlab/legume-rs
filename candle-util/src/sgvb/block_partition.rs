@@ -145,27 +145,18 @@ mod tests {
     }
 
     #[test]
-    fn test_build_hierarchy_two_levels() {
-        // p=1000, block_size=100 → [1000→10 blocks] → 10 ≤ 100, done
+    fn test_build_hierarchy() {
+        // No collapse: p < block_size
+        let levels = BlockPartition::build_hierarchy(50, 100);
+        assert!(levels.is_empty());
+
+        // One level: p=1000, block_size=100 → [1000→10 blocks] → done
         let levels = BlockPartition::build_hierarchy(1000, 100);
         assert_eq!(levels.len(), 1);
         assert_eq!(levels[0].num_features(), 1000);
         assert_eq!(levels[0].num_blocks(), 10);
-    }
 
-    #[test]
-    fn test_build_hierarchy_three_levels() {
-        // p=10000, block_size=100 → [10000→100 blocks] → [100→1 block] → done
-        let levels = BlockPartition::build_hierarchy(10000, 100);
-        assert_eq!(levels.len(), 1); // 100 groups ≤ 100, so only 1 collapse level
-    }
-
-    #[test]
-    fn test_build_hierarchy_deep() {
-        // p=1000000, block_size=100
-        // Level 0: 1M → 10000 blocks
-        // Level 1: 10000 → 100 blocks
-        // 100 ≤ 100, done → 2 levels
+        // Two levels: p=1M → 10k blocks → 100 blocks
         let levels = BlockPartition::build_hierarchy(1_000_000, 100);
         assert_eq!(levels.len(), 2);
         assert_eq!(levels[0].num_features(), 1_000_000);
@@ -175,17 +166,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_hierarchy_small_p() {
-        // p=50, block_size=100 → no collapse needed
-        let levels = BlockPartition::build_hierarchy(50, 100);
-        assert!(levels.is_empty());
-    }
-
-    #[test]
     fn test_contiguous_coverage() {
         let part = BlockPartition::regular(57, 10);
         // Verify all features are covered exactly once
-        let mut covered = vec![false; 57];
+        let mut covered = [false; 57];
         for range in &part.block_ranges {
             for j in range.clone() {
                 assert!(!covered[j], "feature {} covered twice", j);

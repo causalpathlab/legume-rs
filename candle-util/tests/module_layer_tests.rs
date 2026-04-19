@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 
-use std::usize;
-
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Module};
 

@@ -704,6 +704,7 @@ mod tests {
         let params = CnvHmmParams::default_3state();
         // Neutral, then gain
         let mut y = vec![0.0f32; 20];
+        #[allow(clippy::needless_range_loop)]
         for i in 10..20 {
             y[i] = 0.5;
         }

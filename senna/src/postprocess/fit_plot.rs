@@ -17,9 +17,7 @@ use crate::postprocess::plot::hull::{
     convex_hull, hull_centroid, median_xy, trim_outliers_by_median, Pt,
 };
 use crate::postprocess::plot::palette::{self, Palette};
-use crate::postprocess::plot::rasterize::{
-    rasterize_group_png, DataBounds, Extent, PointShape,
-};
+use crate::postprocess::plot::rasterize::{rasterize_group_png, DataBounds, Extent, PointShape};
 use crate::postprocess::plot::svg_emit::{emit_svg, SvgOpts, TopicLayer};
 use crate::run_manifest::{self, RunManifest};
 use rayon::prelude::*;
@@ -225,10 +223,11 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
             .map(|&v| if v.is_nan() { -1 } else { v as i64 })
             .collect::<Vec<_>>(),
         ColorBy::Topic => {
-            let topics_path = resolved
-                .topics
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("--colour-by topic requires --topics PATH (or manifest outputs.topics)"))?;
+            let topics_path = resolved.topics.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--colour-by topic requires --topics PATH (or manifest outputs.topics)"
+                )
+            })?;
             argmax_topics(topics_path, n_cells)?
         }
     };
@@ -301,8 +300,7 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
 
     // Skip hull/trim computation when nothing needs it — hull polygons
     // are opt-in now and median is the default label position.
-    let need_hull_geometry =
-        args.hull || args.label_position == LabelPosition::HullCentroid;
+    let need_hull_geometry = args.hull || args.label_position == LabelPosition::HullCentroid;
 
     // Per-group rasterization + hull + label placement in parallel.
     // Each group is independent and encodes its own PNG — outermost loop
@@ -312,8 +310,7 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
         .enumerate()
         .map(|(i, g)| -> anyhow::Result<TopicLayer> {
             let pts = pts_by_group.get(g).expect("group present");
-            let pts_px: Vec<(f32, f32)> =
-                pts.iter().map(|&p| to_pixel(p, &bounds, ext)).collect();
+            let pts_px: Vec<(f32, f32)> = pts.iter().map(|&p| to_pixel(p, &bounds, ext)).collect();
 
             let color = palette::color(&palette, i);
             let shape = if args.point_shape_cycle {
@@ -338,10 +335,7 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
             };
             let label_xy_px = to_pixel(label_xy_data, &bounds, ext);
 
-            let label = label_map
-                .get(g)
-                .cloned()
-                .unwrap_or_else(|| format!("T{g}"));
+            let label = label_map.get(g).cloned().unwrap_or_else(|| format!("T{g}"));
 
             Ok(TopicLayer {
                 label,
@@ -434,38 +428,30 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
         .or_else(|| {
             manifest
                 .as_ref()
-                .and_then(|m| m.viz.cell_coords.as_deref())
+                .and_then(|m| m.layout.cell_coords.as_deref())
                 .map(resolve_opt)
         })
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "no --cell-coords given and manifest {} has no viz.cell_coords \
-                 (did you run `senna viz` against this manifest?)",
+                "no --cell-coords given and manifest {} has no layout.cell_coords \
+                 (did you run `senna layout` against this manifest?)",
                 args.from.as_deref().unwrap_or("(none)")
             )
         })?;
 
-    let topics = args
-        .topics
-        .as_deref()
-        .map(String::from)
-        .or_else(|| {
-            manifest
-                .as_ref()
-                .and_then(|m| m.outputs.latent.as_deref())
-                .map(resolve_opt)
-        });
+    let topics = args.topics.as_deref().map(String::from).or_else(|| {
+        manifest
+            .as_ref()
+            .and_then(|m| m.outputs.latent.as_deref())
+            .map(resolve_opt)
+    });
 
-    let labels = args
-        .labels
-        .as_deref()
-        .map(String::from)
-        .or_else(|| {
-            manifest
-                .as_ref()
-                .and_then(|m| m.outputs.anchor_labels.as_deref())
-                .map(resolve_opt)
-        });
+    let labels = args.labels.as_deref().map(String::from).or_else(|| {
+        manifest
+            .as_ref()
+            .and_then(|m| m.outputs.anchor_labels.as_deref())
+            .map(resolve_opt)
+    });
 
     let out = args
         .out
@@ -602,7 +588,11 @@ fn render_png(svg: &str, w: u32, h: u32, out: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("usvg parse failed: {e}"))?;
     let mut pixmap = tiny_skia::Pixmap::new(w, h)
         .ok_or_else(|| anyhow::anyhow!("pixmap alloc failed ({w}x{h})"))?;
-    resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
     pixmap
         .save_png(out)
         .map_err(|e| anyhow::anyhow!("PNG save failed: {e}"))?;
@@ -615,8 +605,12 @@ fn render_pdf(svg: &str, out: &str) -> anyhow::Result<()> {
     options.fontdb_mut().load_system_fonts();
     let tree = svg2pdf::usvg::Tree::from_str(svg, &options)
         .map_err(|e| anyhow::anyhow!("svg2pdf/usvg parse failed: {e}"))?;
-    let pdf = svg2pdf::to_pdf(&tree, svg2pdf::ConversionOptions::default(), svg2pdf::PageOptions::default())
-        .map_err(|e| anyhow::anyhow!("svg2pdf render failed: {e}"))?;
+    let pdf = svg2pdf::to_pdf(
+        &tree,
+        svg2pdf::ConversionOptions::default(),
+        svg2pdf::PageOptions::default(),
+    )
+    .map_err(|e| anyhow::anyhow!("svg2pdf render failed: {e}"))?;
     fs::write(out, &pdf)?;
     Ok(())
 }

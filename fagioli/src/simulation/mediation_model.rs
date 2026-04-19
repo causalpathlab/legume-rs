@@ -525,6 +525,7 @@ mod tests {
         .unwrap()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sample_effects(
         genes: &GeneAnnotations,
         positions: &[u64],
@@ -675,6 +676,7 @@ mod tests {
         // Compute C·γ_y for comparison
         let l = confounders.ncols();
         let mut c_gamma_y = DVector::zeros(n);
+        #[allow(clippy::needless_range_loop)]
         for j in 0..l {
             let col = confounders.column(j);
             for i in 0..n {

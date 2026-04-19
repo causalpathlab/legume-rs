@@ -198,36 +198,36 @@ enum Commands {
     JointTopic(JointTopicArgs),
 
     #[command(
-        about = "2D diagnostic visualization in raw-gene-space (tsne or phate)",
-        long_about = "Topic-agnostic diagnostic viz: build PBs via batch-corrected\n\
+        about = "Compute 2D layout in raw-gene-space (tsne or phate)",
+        long_about = "Topic-agnostic 2D layout: build PBs via batch-corrected\n\
                       multi-level collapsing, compute PB-PB cosine similarity on\n\
                       log1p-CPM gene vectors, then lay out via t-SNE or PHATE.\n\
                       Cells placed by cheap Nyström in random-projection space.\n\n\
                       Preferred invocation uses a run manifest produced by\n\
                       `senna topic` (or svd / itopic / joint-*):\n    \
-                      senna visualize phate --from run.senna.json\n\
+                      senna layout phate --from run.senna.json\n\
                       The manifest supplies data files + output prefix, and is\n\
-                      updated in place with `viz.cell_coords`, `viz.pb_coords`,\n\
-                      and `viz.pb_gene_mean` paths — downstream\n\
+                      updated in place with `layout.cell_coords`, `layout.pb_coords`,\n\
+                      and `layout.pb_gene_mean` paths — downstream\n\
                       `senna plot --from run.senna.json` then just works.\n\n\
-                      Pick a layout: `senna visualize tsne ...` or `senna visualize phate ...`.",
-        visible_alias = "viz",
+                      Pick a method: `senna layout tsne ...` or `senna layout phate ...`.",
+        visible_alias = "lay",
         subcommand_required = true,
         arg_required_else_help = true
     )]
-    Visualize {
+    Layout {
         #[command(subcommand)]
-        cmd: VisualizeCmd,
+        cmd: LayoutCmd,
     },
 
     #[command(
-        about = "Publication scatter plot from `senna viz` coords (SVG/PNG/PDF)",
+        about = "Publication scatter plot from `senna layout` coords (SVG/PNG/PDF)",
         long_about = "Render a publication-quality scatter: per-group rasterized\n\
                       layers (tiny-skia, 300 dpi) with transparent background,\n\
                       optional convex hull polygons, and vector text labels at\n\
                       per-group medians (fully editable in Illustrator/Inkscape).\n\n\
                       Preferred invocation uses a run manifest from\n\
-                      `senna topic` + `senna viz`:\n    \
+                      `senna topic` + `senna layout`:\n    \
                       senna plot --from run.senna.json\n\
                       Everything else (cell_coords, topics, labels, colour_by,\n\
                       palette) is read from the manifest; individual CLI flags\n\
@@ -251,11 +251,13 @@ enum Commands {
 }
 
 #[derive(Subcommand, Debug)]
-enum VisualizeCmd {
+enum LayoutCmd {
     #[command(about = "PB landmarks laid out by t-SNE (PHATE-initialized) on raw-gene similarity")]
     Tsne(VisualizeTsneArgs),
     #[command(about = "PB landmarks laid out by PHATE diffusion on raw-gene features")]
     Phate(VisualizePhateArgs),
+    #[command(about = "Cells laid out by (PB ⊗ topic) outer-product features → SVD → t-SNE/PHATE")]
+    TopicPb(LayoutTopicPbArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -291,12 +293,15 @@ fn main() -> anyhow::Result<()> {
         Commands::JointSvd(args) => {
             fit_joint_svd(args)?;
         }
-        Commands::Visualize { cmd } => match cmd {
-            VisualizeCmd::Tsne(args) => {
+        Commands::Layout { cmd } => match cmd {
+            LayoutCmd::Tsne(args) => {
                 fit_visualize_tsne(args)?;
             }
-            VisualizeCmd::Phate(args) => {
+            LayoutCmd::Phate(args) => {
                 fit_visualize_phate(args)?;
+            }
+            LayoutCmd::TopicPb(args) => {
+                fit_layout_topic_pb(args)?;
             }
         },
         Commands::Clustering(args) => {

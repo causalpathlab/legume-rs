@@ -1,13 +1,13 @@
 // Several constructors / savers here are consumed by the `senna topic`
-// / `viz` wiring landing in later passes — silence dead-code until then.
+// / `layout` wiring landing in later passes — silence dead-code until then.
 #![allow(dead_code)]
 
 //! Run manifest — the single JSON artifact that ties a senna run
 //! together across subcommands.
 //!
 //! Shape: `senna topic` / `itopic` / `joint-topic` write a fresh
-//! manifest at the end of training. `senna viz` reads it, produces 2D
-//! coords, and updates the `viz{}` section in place. `senna plot` (and
+//! manifest at the end of training. `senna layout` reads it, produces 2D
+//! coords, and updates the `layout{}` section in place. `senna plot` (and
 //! future postprocess commands) read the fully-enriched manifest and
 //! work with zero further flags. CLI flags on those commands stay
 //! available and win over manifest values when both are supplied.
@@ -42,7 +42,7 @@ pub struct RunManifest {
     #[serde(default)]
     pub outputs: RunOutputs,
     #[serde(default)]
-    pub viz: RunViz,
+    pub layout: RunLayout,
     #[serde(default)]
     pub defaults: RunDefaults,
 }
@@ -86,7 +86,7 @@ pub struct RunOutputs {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RunViz {
+pub struct RunLayout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_coords: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,7 +113,7 @@ impl RunManifest {
             prefix: prefix.into(),
             data: RunData::default(),
             outputs: RunOutputs::default(),
-            viz: RunViz::default(),
+            layout: RunLayout::default(),
             defaults: RunDefaults::default(),
         }
     }
@@ -143,8 +143,7 @@ impl RunManifest {
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         let s = serde_json::to_string_pretty(self)?;
-        fs::write(path, s)
-            .map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
+        fs::write(path, s).map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
         log::info!("wrote {}", path.display());
         Ok(())
     }
@@ -192,7 +191,7 @@ pub struct RunDescription<'a> {
     /// `{basename}.metadata.json` (topic + itopic; not joint-topic, not
     /// SVD).
     pub has_model: bool,
-    /// Default `--colour-by` for downstream plot / viz.
+    /// Default `--colour-by` for downstream plot / layout.
     pub default_colour_by: &'a str,
 }
 
@@ -239,21 +238,30 @@ mod tests {
         let mut m = RunManifest::new("topic", "/tmp/run1");
         m.data.input = vec!["a.zarr".into(), "b.zarr".into()];
         m.outputs.latent = Some("run1.latent.parquet".into());
-        m.viz.cell_coords = Some("run1.cell_coords.parquet".into());
+        m.layout.cell_coords = Some("run1.cell_coords.parquet".into());
         m.defaults.colour_by = Some("topic".into());
         let json = serde_json::to_string(&m).unwrap();
         let back: RunManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.kind, "topic");
         assert_eq!(back.data.input.len(), 2);
         assert_eq!(back.outputs.latent.as_deref(), Some("run1.latent.parquet"));
-        assert_eq!(back.viz.cell_coords.as_deref(), Some("run1.cell_coords.parquet"));
+        assert_eq!(
+            back.layout.cell_coords.as_deref(),
+            Some("run1.cell_coords.parquet")
+        );
     }
 
     #[test]
     fn resolve_respects_absolute_and_relative() {
         let dir = Path::new("/tmp/runs");
-        assert_eq!(resolve(dir, "x.parquet"), PathBuf::from("/tmp/runs/x.parquet"));
-        assert_eq!(resolve(dir, "/abs/y.parquet"), PathBuf::from("/abs/y.parquet"));
+        assert_eq!(
+            resolve(dir, "x.parquet"),
+            PathBuf::from("/tmp/runs/x.parquet")
+        );
+        assert_eq!(
+            resolve(dir, "/abs/y.parquet"),
+            PathBuf::from("/abs/y.parquet")
+        );
     }
 
     #[test]
