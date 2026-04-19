@@ -16,9 +16,11 @@ use crate::geometry::similarity::{
     compute_cosine_similarity, local_scale_similarity, regularize_similarity, threshold_similarity,
 };
 use crate::run_manifest::{self, RunManifest};
+use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 use crate::topic::common::{
     load_and_collapse, preferred_posterior_log_mean, LoadCollapseArgs, PreparedData,
 };
+use data_beans_alg::random_projection::binary_sort_columns;
 use std::path::{Path, PathBuf};
 
 /// Self-loop amount added during similarity regularization to prevent
@@ -313,16 +315,23 @@ pub(crate) struct LayoutPrep {
     pub data_vec: SparseIoVec,
     pub pb_size: Vec<usize>,
     pub pb_membership_kept: Vec<usize>,
-    /// `(n_pb × D)` log1p-CPM PB features in the row-per-PB convention
-    /// expected by PHATE and parquet output.
-    pub log_expr_pb: Mat,
+    /// `(n_pb × D)` per-PB feature matrix in row-per-PB convention,
+    /// used for the diagnostic output parquet. Content depends on
+    /// `pb_feature_kind`: log1p-CPM gene-space in the recompute path,
+    /// proj-space PB centroids in the cached fast path.
+    pub pb_features: Mat,
+    /// Either `"gene"` (D = n_genes, rows are log1p-CPM per PB) or
+    /// `"proj"` (D = proj_dim, rows are mean-projection per PB).
+    /// Controls output filename + column naming in `finalize_viz` and
+    /// whether `manifest.layout.pb_gene_mean` is populated.
+    pub pb_feature_kind: &'static str,
     /// `(n_pb × n_pb)` PB-PB similarity, post threshold / local scaling
     /// / diagonal regularization.
     pub pb_similarity: Mat,
     /// `(proj_dim × n_cells)` per-cell projection features, kept
     /// column-major so each cell is a contiguous slice (SIMD-friendly).
     pub cell_proj_kn: Mat,
-    /// `(proj_dim × n_pb)` PB centroid features, matched to `log_expr_pb` order.
+    /// `(proj_dim × n_pb)` PB centroid features, matched to `pb_features` order.
     pub pb_proj_kp: Mat,
 }
 
@@ -330,12 +339,6 @@ pub(crate) fn preprocess_layout_data(
     args: &VisualizeCommonArgs,
     resolved: &ResolvedViz,
 ) -> anyhow::Result<LayoutPrep> {
-    // 1. Load + (maybe warm-start) project + multi-level collapse.
-    //    When the manifest advertises a cached cell_proj (produced by
-    //    a prior `senna topic` / `itopic` / `joint-topic` / `svd` run),
-    //    plumb it through as a warm-start so we skip the expensive
-    //    random-projection + batch-correction step. Pure CLI runs
-    //    (no --from) hit the fallback path.
     let cell_proj_path: Option<String> = resolved
         .manifest
         .as_ref()
@@ -350,12 +353,156 @@ pub(crate) fn preprocess_layout_data(
                 .to_string_lossy()
                 .into_owned()
         });
-    if let Some(ref p) = cell_proj_path {
-        info!("Layout fast path: warm-starting projection from {p}");
-    } else {
-        info!("Layout: no cached cell_proj in manifest, recomputing projection");
-    }
 
+    match cell_proj_path {
+        Some(ref p) => {
+            info!("Layout fast path: PB partition from cached projection {p}");
+            preprocess_layout_data_from_cache(args, resolved, p)
+        }
+        None => {
+            info!(
+                "Layout: no cached cell_proj in manifest; running full load_and_collapse \
+                 (slow path, includes batch-correction + Gamma posterior)"
+            );
+            preprocess_layout_data_recompute(args, resolved)
+        }
+    }
+}
+
+/// Fast path: given a cached `cell_proj.parquet` from a prior training
+/// run, open the sparse backends lightly (no projection, no collapse),
+/// partition cells by hashing the cached projection, and build PB
+/// features + similarity directly in projection space. Skips super-cell
+/// matching and the Gamma posterior optimization that the recompute
+/// path runs — those are training-side concerns the layout doesn't need.
+fn preprocess_layout_data_from_cache(
+    args: &VisualizeCommonArgs,
+    resolved: &ResolvedViz,
+    cell_proj_path: &str,
+) -> anyhow::Result<LayoutPrep> {
+    // 1. Lightweight data open: no projection, no collapse. Only pays
+    //    for barcode / gene-name metadata + any batch annotation, which
+    //    we need later for output parquet headers.
+    let SparseDataWithBatch {
+        data: data_vec, ..
+    } = read_data_on_shared_rows(ReadSharedRowsArgs {
+        data_files: resolved.data_files.clone(),
+        batch_files: resolved.batch_files.clone(),
+        preload: args.preload_data,
+    })?;
+
+    // 2. Load the cached projection (written as cells × proj_dim). The
+    //    transpose lands us in column-per-cell layout expected by the
+    //    rest of the pipeline.
+    let MatWithNames {
+        rows: cell_names_cached,
+        cols: _,
+        mat: proj_nk,
+    } = Mat::from_parquet_with_row_names(cell_proj_path, Some(0))?;
+    let data_cell_names = data_vec.column_names()?;
+    anyhow::ensure!(
+        data_cell_names == cell_names_cached,
+        "cached cell_proj cells don't match data columns (cache={}, data={})",
+        cell_names_cached.len(),
+        data_cell_names.len()
+    );
+    let proj_kn: Mat = proj_nk.transpose();
+    info!(
+        "Loaded cell_proj: {} cells × {} proj-dims",
+        proj_kn.ncols(),
+        proj_kn.nrows()
+    );
+
+    // 3. Partition: binary_sort_columns runs RSVD + sign-hashing on the
+    //    projection and returns a per-cell bucket code. Canonicalize
+    //    those codes to contiguous PB ids in [0, n_pb). No data_vec
+    //    groups needed — the partition is a pure function of proj_kn.
+    let n_cells = proj_kn.ncols();
+    let kk = args.sort_dim.min(proj_kn.nrows()).min(n_cells);
+    let codes = binary_sort_columns(&proj_kn, kk)?;
+    let (membership_full, n_pb_full) = canonicalize_codes(&codes);
+    info!("Partitioned {} cells into {} PBs", n_cells, n_pb_full);
+
+    // 4. Coverage-prune PBs (same policy as the recompute path).
+    let pb_size_full: Vec<usize> = {
+        let mut counts = vec![0usize; n_pb_full];
+        for &g in &membership_full {
+            if g < n_pb_full {
+                counts[g] += 1;
+            }
+        }
+        counts
+    };
+    let kept_indices = select_pb_coverage(&pb_size_full, args.pb_coverage);
+    let covered: usize = kept_indices.iter().map(|&i| pb_size_full[i]).sum();
+    let total_cells: usize = pb_size_full.iter().sum();
+    info!(
+        "Coverage filter: kept {} / {} PBs covering {} / {} cells ({:.1}%)",
+        kept_indices.len(),
+        n_pb_full,
+        covered,
+        total_cells,
+        100.0 * covered as f32 / total_cells.max(1) as f32
+    );
+
+    let mut old_to_new = vec![usize::MAX; n_pb_full];
+    for (new_i, &old_i) in kept_indices.iter().enumerate() {
+        old_to_new[old_i] = new_i;
+    }
+    let pb_membership_kept: Vec<usize> = membership_full
+        .iter()
+        .map(|&g| {
+            if g < n_pb_full {
+                old_to_new[g]
+            } else {
+                usize::MAX
+            }
+        })
+        .collect();
+    let pb_size: Vec<usize> = kept_indices.iter().map(|&i| pb_size_full[i]).collect();
+
+    // 5. PB centroids in proj space (kp = proj_dim × n_pb_kept).
+    let pb_centroids_kp =
+        aggregate_features_by_group(&proj_kn, &pb_membership_kept, kept_indices.len());
+
+    // 6. PB-PB cosine similarity directly on the proj-space centroids —
+    //    columns of `pb_centroids_kp` are the PB vectors, which is the
+    //    convention `compute_cosine_similarity` expects.
+    let sim = compute_cosine_similarity(&pb_centroids_kp);
+    let sim = if args.similarity_threshold > 0.0 {
+        threshold_similarity(&sim, args.similarity_threshold)
+    } else {
+        sim
+    };
+    let sim = if let Some(k) = args.local_scale_k {
+        let scaled = local_scale_similarity(&sim, k);
+        info!("Applied local scaling with k={k}");
+        scaled
+    } else {
+        sim
+    };
+    let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
+
+    Ok(LayoutPrep {
+        data_vec,
+        pb_size,
+        pb_membership_kept,
+        pb_features: pb_centroids_kp.transpose(),
+        pb_feature_kind: "proj",
+        pb_similarity,
+        cell_proj_kn: proj_kn,
+        pb_proj_kp: pb_centroids_kp,
+    })
+}
+
+/// Slow path (fallback): the original full pipeline. Runs when no
+/// cached projection is available — older manifests, or pure CLI runs
+/// without `--from`. Does the full batch-corrected collapse and
+/// builds gene-space log1p-CPM PB features.
+fn preprocess_layout_data_recompute(
+    args: &VisualizeCommonArgs,
+    resolved: &ResolvedViz,
+) -> anyhow::Result<LayoutPrep> {
     let PreparedData {
         data_vec,
         collapsed_levels,
@@ -364,7 +511,7 @@ pub(crate) fn preprocess_layout_data(
         data_files: &resolved.data_files,
         batch_files: &resolved.batch_files,
         preload: args.preload_data,
-        warm_start_proj_file: cell_proj_path.as_deref(),
+        warm_start_proj_file: None,
         proj_dim: args.proj_dim,
         sort_dim: args.sort_dim,
         knn_cells: args.knn_cells,
@@ -379,10 +526,6 @@ pub(crate) fn preprocess_layout_data(
         .last()
         .ok_or_else(|| anyhow::anyhow!("no collapsed levels produced"))?;
 
-    // 2. Log-space PB features: E[log X] from Gamma posterior (ψ(α) - log(β)).
-    //    Build in (D × n_pb) column-major so writes are cache-friendly
-    //    and `compute_cosine_similarity` (which wants columns) can be
-    //    called directly later with no transpose.
     let log_expr_full_dp = preferred_posterior_log_mean(finest);
     let n_pb_full = log_expr_full_dp.ncols();
     info!(
@@ -391,7 +534,6 @@ pub(crate) fn preprocess_layout_data(
         log_expr_full_dp.nrows()
     );
 
-    // 3. Coverage-based tail pruning.
     let n_cells = data_vec.num_columns();
     let membership_full = data_vec.get_group_membership(0..n_cells)?;
     let pb_size_full: Vec<usize> = {
@@ -433,13 +575,9 @@ pub(crate) fn preprocess_layout_data(
         })
         .collect();
 
-    // 4. PB centroids in proj space for cheap Nyström.
     let pb_centroids_kn =
         aggregate_features_by_group(&proj_kn, &pb_membership_kept, kept_indices.len());
 
-    // 5. PB-PB cosine similarity (in log1p-CPM gene space). PBs are
-    //    columns of `log_expr_dp`, which is exactly what
-    //    `compute_cosine_similarity` expects.
     let sim = compute_cosine_similarity(&log_expr_dp);
     let sim = if args.similarity_threshold > 0.0 {
         threshold_similarity(&sim, args.similarity_threshold)
@@ -459,11 +597,27 @@ pub(crate) fn preprocess_layout_data(
         data_vec,
         pb_size,
         pb_membership_kept,
-        log_expr_pb: log_expr_dp.transpose(),
+        pb_features: log_expr_dp.transpose(),
+        pb_feature_kind: "gene",
         pb_similarity,
         cell_proj_kn: proj_kn,
         pb_proj_kp: pb_centroids_kn,
     })
+}
+
+/// Canonicalize raw bucket codes from `binary_sort_columns` into
+/// contiguous PB ids `[0, n_pb)`. Returns `(membership, n_pb)`.
+fn canonicalize_codes(codes: &[usize]) -> (Vec<usize>, usize) {
+    use std::collections::HashMap;
+    let mut mapping: HashMap<usize, usize> = HashMap::new();
+    let mut membership = Vec::with_capacity(codes.len());
+    for &c in codes {
+        let next_id = mapping.len();
+        let id = *mapping.entry(c).or_insert(next_id);
+        membership.push(id);
+    }
+    let n = mapping.len();
+    (membership, n)
 }
 
 /// Load cluster assignments (one-column parquet of cell IDs) and validate length.
@@ -529,12 +683,10 @@ pub(crate) fn finalize_viz(
     let pb_names: Vec<Box<str>> = (0..pb_coords.nrows())
         .map(|i| format!("PB_{i}").into_boxed_str())
         .collect();
-    let gene_names = prep.data_vec.row_names()?;
     let cell_names = prep.data_vec.column_names()?;
 
     let out = &resolved.out;
     let pb_coords_path = format!("{out}.pb_coords.parquet");
-    let pb_gene_mean_path = format!("{out}.pb_gene_mean.parquet");
     let cell_coords_path = format!("{out}.cell_coords.parquet");
 
     let coord_cols: Vec<Box<str>> = vec!["x".into(), "y".into()];
@@ -544,10 +696,26 @@ pub(crate) fn finalize_viz(
         Some(&coord_cols),
     )?;
 
-    prep.log_expr_pb.to_parquet_with_names(
-        &pb_gene_mean_path,
+    // PB feature matrix lands in one of two files depending on prep
+    // origin: gene-space log1p-CPM (slow path, consumed by
+    // `senna annotate`) or proj-space centroids (fast path, diagnostic).
+    // Only the gene-space output populates `manifest.layout.pb_gene_mean`.
+    let (pb_feat_path, pb_feat_is_gene) = match prep.pb_feature_kind {
+        "gene" => (format!("{out}.pb_gene_mean.parquet"), true),
+        "proj" => (format!("{out}.pb_proj_mean.parquet"), false),
+        other => anyhow::bail!("unexpected pb_feature_kind {other:?}"),
+    };
+    let feat_col_names: Vec<Box<str>> = if pb_feat_is_gene {
+        prep.data_vec.row_names()?
+    } else {
+        (0..prep.pb_features.ncols())
+            .map(|i| format!("p{i}").into_boxed_str())
+            .collect()
+    };
+    prep.pb_features.to_parquet_with_names(
+        &pb_feat_path,
         (Some(&pb_names), Some("pb")),
-        Some(&gene_names),
+        Some(&feat_col_names),
     )?;
 
     let cluster_ids = match &args.clusters {
@@ -586,13 +754,17 @@ pub(crate) fn finalize_viz(
         Some(&col_names),
     )?;
 
-    info!("Saved {pb_coords_path}, {pb_gene_mean_path}, {cell_coords_path}");
+    info!("Saved {pb_coords_path}, {pb_feat_path}, {cell_coords_path}");
 
     update_manifest_viz(
         resolved,
         &cell_coords_path,
         &pb_coords_path,
-        &pb_gene_mean_path,
+        if pb_feat_is_gene {
+            Some(&pb_feat_path)
+        } else {
+            None
+        },
     )?;
 
     Ok(())
@@ -606,7 +778,7 @@ fn update_manifest_viz(
     resolved: &mut ResolvedViz,
     cell_coords_path: &str,
     pb_coords_path: &str,
-    pb_gene_mean_path: &str,
+    pb_gene_mean_path: Option<&str>,
 ) -> anyhow::Result<()> {
     let (Some(manifest), Some(manifest_path)) =
         (resolved.manifest.as_mut(), resolved.manifest_path.as_ref())
@@ -620,7 +792,10 @@ fn update_manifest_viz(
 
     manifest.layout.cell_coords = Some(rel_to_manifest(manifest_dir, cell_coords_path));
     manifest.layout.pb_coords = Some(rel_to_manifest(manifest_dir, pb_coords_path));
-    manifest.layout.pb_gene_mean = Some(rel_to_manifest(manifest_dir, pb_gene_mean_path));
+    // Only the gene-space recompute path produces a proper pb_gene_mean;
+    // the fast path writes a proj-space file that `senna annotate`
+    // would misread, so don't advertise it.
+    manifest.layout.pb_gene_mean = pb_gene_mean_path.map(|p| rel_to_manifest(manifest_dir, p));
 
     manifest.save(manifest_path)
 }

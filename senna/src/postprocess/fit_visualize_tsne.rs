@@ -48,15 +48,15 @@ pub fn fit_visualize_tsne(args: &VisualizeTsneArgs) -> anyhow::Result<()> {
     let prep = preprocess_layout_data(&args.common, &resolved)?;
 
     // HVG selection: keep top N genes by residual variance (mean-variance corrected)
-    let features = if args.n_hvg > 0 && args.n_hvg < prep.log_expr_pb.ncols() {
+    let features = if args.n_hvg > 0 && args.n_hvg < prep.pb_features.ncols() {
         info!(
             "Selecting top {} HVGs from {} genes (mean-variance corrected)",
             args.n_hvg,
-            prep.log_expr_pb.ncols()
+            prep.pb_features.ncols()
         );
-        data_beans_alg::hvg_selection::select_hvg(&prep.log_expr_pb, args.n_hvg, None)
+        data_beans_alg::hvg_selection::select_hvg(&prep.pb_features, args.n_hvg, None)
     } else {
-        prep.log_expr_pb.clone()
+        prep.pb_features.clone()
     };
 
     let features = if args.svd_dims > 0 {
