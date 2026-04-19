@@ -140,7 +140,6 @@ pub(super) fn select_pb_coverage(pb_size: &[usize], coverage: f32) -> Vec<usize>
 /// `proj_kn` is `(proj_dim × n_cells)` column-major (matches
 /// `PreparedData.proj_kn`); this helper transposes to row-major cells
 /// before serializing.
-#[allow(dead_code)] // wired to training subcommands in a follow-up commit
 pub(crate) fn write_cell_proj(
     prefix: &str,
     proj_kn: &Mat,

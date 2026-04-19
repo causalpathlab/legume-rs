@@ -224,6 +224,8 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         None,
     )?;
 
+    crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
+
     let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
     let batch: Vec<String> = args
         .batch_files
@@ -239,7 +241,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         dictionary_suffix: Some("dictionary.parquet"),
         has_markers: false,
         has_model: false,
-        has_cell_proj: false,
+        has_cell_proj: true,
         default_colour_by: "cluster",
     })?;
 

@@ -347,7 +347,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let PreparedData {
         data_vec,
         collapsed_levels,
-        ..
+        proj_kn,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &args.data_files,
         batch_files: &args.batch_files,
@@ -523,6 +523,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         }
     }
 
+    crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
+
     write_topic_manifest(
         "topic",
         &args.out,
@@ -559,7 +561,7 @@ fn write_topic_manifest(
         dictionary_suffix: Some("dictionary.parquet"),
         has_markers,
         has_model: true,
-        has_cell_proj: false,
+        has_cell_proj: true,
         default_colour_by: "topic",
     })
 }
