@@ -559,6 +559,7 @@ fn write_topic_manifest(
         dictionary_suffix: Some("dictionary.parquet"),
         has_markers,
         has_model: true,
+        has_cell_proj: false,
         default_colour_by: "topic",
     })
 }
