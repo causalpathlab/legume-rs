@@ -40,6 +40,7 @@ mod fit_indexed_topic;
 mod fit_joint_topic;
 mod fit_topic;
 mod geometry;
+mod hvg;
 mod logging;
 mod marker_support;
 mod postprocess;

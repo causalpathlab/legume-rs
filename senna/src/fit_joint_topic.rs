@@ -49,6 +49,7 @@ pub struct JointTopicArgs {
                      {out}.latent.parquet           cell × topic log-softmax proportions\n  \
                      {out}.log_likelihood.parquet   training loss trace\n  \
                      {out}_{d}.delta.parquet        per-batch effects for modality d\n  \
+                     {out}.cell_proj.parquet        cached random projection (consumed by `senna layout`)\n  \
                      {out}.senna.json               run manifest consumed by `senna viz --from` and `senna plot --from`\n\n\
                      With --decoder-type delta, additionally:\n  \
                      {out}.base_dictionary.parquet  shared base dictionary\n  \
