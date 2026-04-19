@@ -67,6 +67,7 @@ pub struct TopicArgs {
                      {out}.dispersion.parquet       NB dispersion (nb / nbmixture)\n  \
                      {out}.alpha.parquet            ambient gene profile (nbmixture)\n  \
                      {out}.rho.parquet              ρ sigmoid coefficients (nbmixture)\n  \
+                     {out}.cell_proj.parquet        cached random projection (consumed by `senna layout`)\n  \
                      {out}.senna.json               run manifest consumed by `senna viz --from` and `senna plot --from`\n\n\
                      With --decoder a,b,c: per-decoder dictionaries written as {out}.{name}.dictionary.parquet."
     )]
@@ -233,10 +234,12 @@ pub struct TopicArgs {
     )]
     pub(crate) preload_data: bool,
 
+    #[command(flatten)]
+    pub(crate) hvg: crate::hvg::HvgCliArgs,
+
     #[arg(
         long,
         default_value_t = 1000,
-        alias = "max-features",
         help = "Cap feature dim by meta-feature coarsening (0 to disable)",
         long_help = "Groups co-expressed features into ≤N meta-features so the model\n\
                      trains at reduced resolution. The dictionary is expanded back to\n\
@@ -361,6 +364,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         block_size: args.block_size,
         out: &args.out,
         oversample: !args.no_oversample_pb,
+        max_features: args.hvg.n_hvg,
+        feature_list_file: args.hvg.feature_list_file.as_deref(),
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
