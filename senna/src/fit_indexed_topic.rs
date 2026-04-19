@@ -544,6 +544,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         dictionary_suffix: Some("dictionary.parquet"),
         has_markers: args.markers.is_some(),
         has_model: true,
+        has_cell_proj: false,
         default_colour_by: "topic",
     })?;
 
