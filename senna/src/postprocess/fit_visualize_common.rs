@@ -330,7 +330,32 @@ pub(crate) fn preprocess_layout_data(
     args: &VisualizeCommonArgs,
     resolved: &ResolvedViz,
 ) -> anyhow::Result<LayoutPrep> {
-    // 1. Load + project + multi-level collapse (shared w/ topic / svd).
+    // 1. Load + (maybe warm-start) project + multi-level collapse.
+    //    When the manifest advertises a cached cell_proj (produced by
+    //    a prior `senna topic` / `itopic` / `joint-topic` / `svd` run),
+    //    plumb it through as a warm-start so we skip the expensive
+    //    random-projection + batch-correction step. Pure CLI runs
+    //    (no --from) hit the fallback path.
+    let cell_proj_path: Option<String> = resolved
+        .manifest
+        .as_ref()
+        .and_then(|m| m.outputs.cell_proj.as_ref())
+        .zip(resolved.manifest_path.as_ref())
+        .map(|(p, manifest_path)| {
+            let manifest_dir = manifest_path
+                .parent()
+                .filter(|q| !q.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            run_manifest::resolve(manifest_dir, p)
+                .to_string_lossy()
+                .into_owned()
+        });
+    if let Some(ref p) = cell_proj_path {
+        info!("Layout fast path: warm-starting projection from {p}");
+    } else {
+        info!("Layout: no cached cell_proj in manifest, recomputing projection");
+    }
+
     let PreparedData {
         data_vec,
         collapsed_levels,
@@ -339,7 +364,7 @@ pub(crate) fn preprocess_layout_data(
         data_files: &resolved.data_files,
         batch_files: &resolved.batch_files,
         preload: args.preload_data,
-        warm_start_proj_file: None,
+        warm_start_proj_file: cell_proj_path.as_deref(),
         proj_dim: args.proj_dim,
         sort_dim: args.sort_dim,
         knn_cells: args.knn_cells,
