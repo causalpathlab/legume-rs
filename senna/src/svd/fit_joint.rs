@@ -239,6 +239,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         dictionary_suffix: Some("dictionary.parquet"),
         has_markers: false,
         has_model: false,
+        has_cell_proj: false,
         default_colour_by: "cluster",
     })?;
 

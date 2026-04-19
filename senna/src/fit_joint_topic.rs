@@ -479,6 +479,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         // joint-topic today.
         has_markers: false,
         has_model: false,
+        has_cell_proj: false,
         default_colour_by: "topic",
     })?;
 
