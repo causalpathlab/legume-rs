@@ -257,9 +257,7 @@ enum LayoutCmd {
     Tsne(VisualizeTsneArgs),
     #[command(about = "PB landmarks laid out by PHATE diffusion on raw-gene features")]
     Phate(VisualizePhateArgs),
-    #[command(
-        about = "PB landmarks laid out by MST + Fruchterman–Reingold on PB-PB similarity"
-    )]
+    #[command(about = "PB landmarks laid out by MST + Fruchterman–Reingold on PB-PB similarity")]
     Mst(LayoutMstArgs),
 }
 
