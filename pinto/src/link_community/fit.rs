@@ -144,25 +144,6 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
-        help = "Gamma shape prior for Poisson-Gamma model",
-        long_help = "Shape parameter a0 for the Gamma(a0, b0) prior on Poisson rates.\n\
-                       If omitted, auto-scaled from edge profile counts:\n\
-                       a0 = 1e-4 × mean_count_per_dim, ensuring the prior is\n\
-                       negligible relative to the data signal."
-    )]
-    a0: Option<f32>,
-
-    #[arg(
-        long,
-        help = "Gamma rate prior for Poisson-Gamma model",
-        long_help = "Rate parameter b0 for the Gamma(a0, b0) prior on Poisson rates.\n\
-                       If omitted, auto-scaled to match a0: b0 = a0 / mean_rate,\n\
-                       centering the prior on the empirical mean rate."
-    )]
-    b0: Option<f32>,
-
-    #[arg(
-        long,
         help = "External gene-gene network file (two-column TSV: gene1, gene2)",
         long_help = "External gene-gene network file (two-column TSV: gene1, gene2).\n\
                        When provided, edge profiles are built from gene-pair interaction\n\
@@ -246,6 +227,20 @@ pub struct SrtLinkCommunityArgs {
                        ignored with --no-gene-modules (no M-step to iterate)."
     )]
     n_outer_iter: usize,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Disable IDF background correction (on by default)",
+        long_help = "By default, edge profiles are reweighted by inverse-frequency\n\
+                       w_g = -ln(π_bg,g + ε), where π_bg is the empirical gene-module\n\
+                       marginal over all edges. Housekeeping genes (high π_bg) get\n\
+                       small weight, specific genes (low π_bg) get large weight — so\n\
+                       community assignment is driven by distinctive genes, not by\n\
+                       bulk expression level (DC-SBM degree correction with θ_g = π_bg).\n\
+                       Pass --no-background to disable and use raw counts."
+    )]
+    no_background: bool,
 }
 
 /// Link community model pipeline.
@@ -254,9 +249,11 @@ pub struct SrtLinkCommunityArgs {
 /// 2.  Estimate batch effects
 /// 3.  Build spatial KNN graph
 /// 4.  Multi-level cell coarsening
-/// 5.  Gene module discovery (sketch + K-means)
-/// 6.  Build edge profiles as module counts
-/// 7.  Gibbs on coarsest → transfer → refine at each finer level
+/// 5.  Gene module discovery (sketch + K-means) — or random-projection / gene-pairs
+/// 6.  Build edge profiles; optionally IDF-weight by empirical gene marginal
+///     (DC-SBM degree correction ~ housekeeping frequency)
+/// 7.  Collapsed Gibbs on coarsest → transfer → refine at finer levels
+///     (entropy / multinomial DC-SBM objective)
 /// 8.  Extract and write outputs
 pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()> {
     let c = &args.common;
@@ -613,48 +610,52 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         coarse_profiles.n_edges, m, mean_sf
     );
 
-    // Resolve a0/b0: auto-scale from coarse edge profile counts when not set.
-    // mean_count_per_dim = mean_sf / m; prior mean a0/b0 = 1/m (empirical rate).
-    let mean_cpd = mean_sf as f64 / m as f64;
-    let a0: f64 = args.a0.map_or_else(
-        || {
-            let v = (1e-4 * mean_cpd).max(1e-6);
-            info!("Auto a0 = {:.6} (1e-4 × mean count/dim {:.1})", v, mean_cpd);
-            v
-        },
-        |v| v as f64,
-    );
-    // b0 = a0 * m so that prior mean a0/b0 = 1/m (matches empirical rate)
-    let b0: f64 = args.b0.map_or_else(
-        || {
-            let v = (a0 * m as f64).max(1e-6);
-            info!("Auto b0 = {:.4} (a0 × m={})", v, m);
-            v
-        },
-        |v| v as f64,
-    );
+    // Unless --no-background, compute empirical gene-module marginal from coarse
+    // profiles and apply IDF weighting in-place: y'_eg = w_g · y_eg with
+    // w_g = -ln(π_bg,g + ε). Housekeeping genes (high π_bg) are down-weighted;
+    // rare genes are amplified. This is the DC-SBM degree correction (θ_g = π_bg).
+    let bg: Option<Vec<f64>> = if !args.no_background {
+        let dist = coarse_profiles.empirical_marginal();
+        info!(
+            "Background distribution: min={:.2e}, max={:.2e}, effective_dims={:.1}",
+            dist.iter().cloned().fold(f64::INFINITY, f64::min),
+            dist.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+            (-dist
+                .iter()
+                .map(|&p| if p > 0.0 { p * p.ln() } else { 0.0 })
+                .sum::<f64>())
+            .exp()
+        );
+        Some(dist)
+    } else {
+        None
+    };
+
+    let mut coarse_profiles = coarse_profiles;
+    if let Some(ref bg_dist) = bg {
+        coarse_profiles.weight_by_idf(bg_dist);
+        info!("Applied IDF weighting to coarse profiles (housekeeping genes down-weighted)");
+    }
 
     // 7. Gibbs on coarsest level
     let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(c.seed));
-    // Random initial labels for coarsest
     let init_labels: Vec<usize> = (0..coarse_profiles.n_edges).map(|e| e % k).collect();
 
     let mut coarse_stats = LinkCommunityStats::from_profiles(&coarse_profiles, k, &init_labels);
 
     info!("Gibbs on coarsest ({} sweeps)...", args.num_gibbs);
-    let moves = sampler.run_parallel(&mut coarse_stats, &coarse_profiles, a0, b0, args.num_gibbs);
+    let moves = sampler.run_parallel(&mut coarse_stats, &coarse_profiles, args.num_gibbs);
+    let coarse_score = coarse_stats.total_score();
     info!(
         "Coarsest Gibbs: {} total moves, score={:.2}",
-        moves,
-        coarse_stats.total_score(a0, b0)
+        moves, coarse_score
     );
-    score_trace.push(coarse_stats.total_score(a0, b0));
+    score_trace.push(coarse_score);
 
     // 7b. Transfer labels to full resolution and build profiles
     let mut current_labels = transfer_labels(&fine_to_super, &coarse_stats.membership);
     let all_edge_indices: Vec<usize> = (0..n_edges).collect();
 
-    // Build full edge profiles (inlined, keeping raw GP profiles for M-step)
     let (mut full_profiles, full_raw_gp_profiles) = build_full_profiles_inline(
         &data_vec,
         &all_edge_indices,
@@ -663,6 +664,11 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &gene_to_module,
         &proj_basis,
     )?;
+    if let Some(ref bg_dist) = bg {
+        // Reuse the coarse-derived bg for the full profiles (same M layout when
+        // --no-gene-modules; for module paths the M-step recomputes bg below).
+        full_profiles.weight_by_idf(bg_dist);
+    }
 
     info!(
         "Full profiles: {} edges × {} dims ({:.1} MB)",
@@ -690,8 +696,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         graph: &srt_cell_pairs.graph,
         edges,
         k,
-        a0,
-        b0,
         alpha,
     };
 
@@ -736,7 +740,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         );
 
         let fine_stats = LinkCommunityStats::from_profiles(&full_profiles, k, &current_labels);
-        let score = fine_stats.total_score(a0, b0);
+        let score = fine_stats.total_score();
         info!("Greedy: {} moves, score={:.2}", greedy_moves, score);
         score_trace.push(score);
 
@@ -774,13 +778,17 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 &proj_basis,
             )?;
             full_profiles = new_profiles;
+            if bg.is_some() {
+                let dist = full_profiles.empirical_marginal();
+                full_profiles.weight_by_idf(&dist);
+            }
         } else if let (Some(raw), Some(ref mut gp)) = (&full_raw_gp_profiles, &mut gp_profile_state)
         {
             if gp.module_collapse.is_some() {
                 // Gene-pair-module path: compute rates from raw stats → re-cluster pairs
                 info!("M-step: recomputing gene-pair modules from community rates...");
                 let raw_stats = LinkCommunityStats::from_profiles(raw, k, &current_labels);
-                let rate_mat = compute_module_rate_matrix(&raw_stats, a0, b0);
+                let rate_mat = compute_module_rate_matrix(&raw_stats);
                 let mut new_collapse = edge_clusterer.cluster(&rate_mat);
                 module_cluster::compact_labels(&mut new_collapse);
                 let new_n_mod = new_collapse.iter().copied().max().unwrap_or(0) + 1;
@@ -788,6 +796,10 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
                 // Re-collapse raw profiles (no I/O!)
                 full_profiles = raw.collapse_modules(&new_collapse);
+                if bg.is_some() {
+                    let dist = full_profiles.empirical_marginal();
+                    full_profiles.weight_by_idf(&dist);
+                }
                 gp.module_collapse = Some(new_collapse);
             }
         }
