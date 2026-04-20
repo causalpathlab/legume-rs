@@ -743,10 +743,19 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
 pub fn generate_unique_batch_names(files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
     use rustc_hash::FxHashMap as HashMap;
 
-    // Extract basenames
-    let basenames: Vec<_> = files
+    // Extract basenames and strip backend extensions (.zarr.zip, .zarr, .h5)
+    let basenames: Vec<Box<str>> = files
         .iter()
-        .map(|f| basename(f))
+        .map(|f| {
+            basename(f).map(|b| {
+                let stripped = strip_backend_suffix(&b);
+                if stripped.len() == b.len() {
+                    b // No suffix stripped, reuse original
+                } else {
+                    stripped.into() // Suffix stripped, allocate once
+                }
+            })
+        })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     // Count occurrences of each basename
