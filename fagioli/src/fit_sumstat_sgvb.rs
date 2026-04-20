@@ -65,10 +65,10 @@ pub struct FitSumstatSgvbArgs {
 
     #[arg(
         long,
-        default_value = "1000",
-        help = "Row minibatch size (full batch when N <= this value)"
+        help = "Row minibatch size; omit to auto-scale by variant count \
+                (full batch when N <= this value)"
     )]
-    pub batch_size: usize,
+    pub batch_size: Option<usize>,
 
     #[arg(
         long,
@@ -161,7 +161,9 @@ pub fn fit_sumstat_sgvb(args: &FitSumstatSgvbArgs) -> Result<()> {
         num_sgvb_samples: args.num_sgvb_samples,
         learning_rate: args.learning_rate,
         num_iterations: args.num_iterations,
-        batch_size: args.batch_size,
+        batch_size: args
+            .batch_size
+            .unwrap_or_else(|| matrix_util::utils::default_block_size(input.zscores.nrows())),
         prior_vars,
         elbo_window: args.elbo_window,
         seed: args.common.seed,
@@ -325,7 +327,7 @@ pub fn fit_sumstat_sgvb(args: &FitSumstatSgvbArgs) -> Result<()> {
         "num_sgvb_samples": args.num_sgvb_samples,
         "learning_rate": args.learning_rate,
         "num_iterations": args.num_iterations,
-        "batch_size": args.batch_size,
+        "batch_size": fit_config.batch_size,
         "elbo_window": args.elbo_window,
         "sigma2_inf": args.sigma2_inf,
         "refine": args.refine,

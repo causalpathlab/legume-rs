@@ -36,10 +36,31 @@ where
     pb_elems
 }
 
-/// Generate minibatch intervals
-/// * `ntot` - number of total samples
-/// * `batch_size` - the size of each batch
-pub fn generate_minibatch_intervals(ntot: usize, batch_size: usize) -> Vec<(usize, usize)> {
+/// Pick a per-job cell block size given the feature count.
+/// Target ≈ `MIN_BLOCK_SIZE × 10 000` cells×features of work per job;
+/// clamped to `[MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]`.
+/// `None` passed to `generate_minibatch_intervals` / `create_jobs` resolves through this.
+pub fn default_block_size(num_features: usize) -> usize {
+    const MIN_BLOCK_SIZE: usize = 100;
+    const MAX_BLOCK_SIZE: usize = 10_000;
+    const TARGET_WORK: usize = MIN_BLOCK_SIZE * 10_000;
+    if num_features == 0 {
+        return MIN_BLOCK_SIZE;
+    }
+    (TARGET_WORK / num_features).clamp(MIN_BLOCK_SIZE, MAX_BLOCK_SIZE)
+}
+
+/// Generate minibatch intervals.
+/// * `ntot` - number of total samples (columns/cells/edges/...)
+/// * `num_features` - number of features per sample; used only when `batch_size` is `None`
+///   to derive an adaptive default via [`default_block_size`]
+/// * `batch_size` - `Some(n)` to use `n` explicitly, `None` to auto-scale by feature count
+pub fn generate_minibatch_intervals(
+    ntot: usize,
+    num_features: usize,
+    batch_size: Option<usize>,
+) -> Vec<(usize, usize)> {
+    let batch_size = batch_size.unwrap_or_else(|| default_block_size(num_features));
     let num_batches = ntot.div_ceil(batch_size);
     (0..num_batches)
         .map(|b| {

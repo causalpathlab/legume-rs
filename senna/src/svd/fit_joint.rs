@@ -99,12 +99,9 @@ pub struct JointSvdArgs {
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Column block size for parallel I/O",
-        long_help = "Columns streamed per worker. Trades parallel granularity\n\
-                     against per-block memory."
+        help = "Cells per rayon job (omit for auto-scaling by feature count)"
     )]
-    block_size: usize,
+    block_size: Option<usize>,
 
     #[arg(
         short = 't',
@@ -147,7 +144,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     let proj_dim = args.proj_dim.max(args.n_latent_topics);
     let proj_out = data_stack.project_columns_with_batch_correction(
         proj_dim,
-        Some(args.block_size),
+        args.block_size,
         Some(batch_stack[0].as_ref()),
     )?;
     let proj_kn = proj_out.proj;
@@ -207,7 +204,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         &data_stack,
         n_topics,
         args.column_sum_norm,
-        Some(args.block_size),
+        args.block_size,
     )?;
 
     let cell_names = data_stack.column_names()?;

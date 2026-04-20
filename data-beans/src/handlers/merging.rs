@@ -95,12 +95,9 @@ pub struct MergeBackendArgs {
 
     #[arg(
         long,
-        default_value = "100",
-        help = "Block size for parallel processing",
-        long_help = "Block size for parallel processing. \n\
-		     Adjust this value to optimize performance for your hardware."
+        help = "Cells per rayon job (omit for auto-scaling by feature count)"
     )]
-    pub block_size: usize,
+    pub block_size: Option<usize>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -222,13 +219,10 @@ pub struct MergeMtxArgs {
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Block size for parallel processing and squeeze pass",
-        long_help = "Number of columns handled per rayon job during triplet read \n\
-                     and the post-merge squeeze pass. \n\
-                     Smaller values bound peak memory at the cost of extra scheduling overhead."
+        help = "Cells per rayon job for triplet read and squeeze pass \
+                (omit for auto-scaling by feature count)"
     )]
-    pub block_size: usize,
+    pub block_size: Option<usize>,
 }
 
 /// Sort triplets into CSC layout and split into (colptr, row indices, values).
@@ -356,7 +350,7 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     let pb = ProgressBar::new(num_batches as u64);
     for h in &batches {
         let src = open_sparse_matrix(&h.path, &h.backend)?;
-        let jobs = create_jobs(h.ncol, Some(args.block_size));
+        let jobs = create_jobs(h.ncol, total_nrow, args.block_size);
         let triplets_batch: Vec<(u64, u64, f32)> = jobs
             .par_iter()
             .filter_map(|(lb, ub)| {

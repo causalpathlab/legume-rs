@@ -120,10 +120,9 @@ pub struct VisualizeCommonArgs {
 
     #[arg(
         long,
-        default_value_t = 10_000,
-        help = "Cell block size for projection"
+        help = "Cells per rayon job (omit for auto-scaling by feature count)"
     )]
-    pub block_size: usize,
+    pub block_size: Option<usize>,
 
     #[arg(
         long,
@@ -544,7 +543,7 @@ fn preprocess_layout_data_from_latent(
         &pb_centroids_kp,
         matrix_util::knn_graph::KnnGraphArgs {
             knn,
-            block_size: args.block_size.max(1000),
+            block_size: args.block_size.unwrap_or(1000),
             reciprocal: false,
         },
     )?;

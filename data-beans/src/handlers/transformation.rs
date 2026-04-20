@@ -121,9 +121,9 @@ pub struct RunSqueezeArgs {
     #[arg(short, long, default_value = "0")]
     pub column_nnz_cutoff: usize,
 
-    /// block_size for parallel processing
-    #[arg(long, default_value = "100")]
-    pub block_size: usize,
+    /// Cells per rayon job. Omit for auto-scaling by feature count.
+    #[arg(long)]
+    pub block_size: Option<usize>,
 
     /// preload data into memory for faster processing
     #[arg(
@@ -239,7 +239,7 @@ fn build_squeeze_args(output_file: Box<str>, args_cols: usize, args_rows: usize)
         data_files: vec![output_file],
         row_nnz_cutoff: args_rows,
         column_nnz_cutoff: args_cols,
-        block_size: 100,
+        block_size: None,
         preload: true,
         show_histogram: false,
         save_histogram: None,
@@ -744,7 +744,7 @@ fn run_merge_then_squeeze(
             .collect();
 
         // Read triplets and remap
-        let jobs = create_jobs(ncols, Some(cmd_args.block_size));
+        let jobs = create_jobs(ncols, data.num_rows().unwrap_or(0), cmd_args.block_size);
         let triplets_curr: Vec<(u64, u64, f32)> = jobs
             .par_iter()
             .filter_map(|(lb, ub)| {

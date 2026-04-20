@@ -22,7 +22,7 @@ pub struct SqueezeCutoffs {
 pub fn squeeze_by_nnz(
     data: &dyn SparseIo<IndexIter = Vec<usize>>,
     cutoffs: SqueezeCutoffs,
-    block_size: usize,
+    block_size: Option<usize>,
     preload: bool,
 ) -> anyhow::Result<()> {
     let col_stat = collect_column_stat(data, block_size)?;
@@ -80,14 +80,14 @@ pub fn squeeze_by_nnz(
 /// * `block_size` - a block size for each parallelized job
 pub fn collect_row_stat_across_vec(
     data: &SparseIoVec,
-    block_size: usize,
+    block_size: Option<usize>,
 ) -> anyhow::Result<SparseRunningStatistics<f32>> {
     let mut row_stat = SparseRunningStatistics::new(data.num_rows());
     data.visit_columns_by_block(
         &row_stat_vec_visitor,
         &EmptyArgs {},
         &mut row_stat,
-        Some(block_size),
+        block_size,
     )?;
     Ok(row_stat)
 }
@@ -100,7 +100,7 @@ pub fn collect_row_stat_across_vec(
 pub fn collect_stratified_row_stat_across_vec(
     data: &SparseIoVec,
     column_membership: &HashMap<Box<str>, Box<str>>,
-    block_size: usize,
+    block_size: Option<usize>,
 ) -> anyhow::Result<(Vec<Box<str>>, Vec<SparseRunningStatistics<f32>>)> {
     let column_names = data.column_names()?;
     let default = "".to_string().into_boxed_str();
@@ -112,9 +112,10 @@ pub fn collect_stratified_row_stat_across_vec(
     let partitions = partition_by_membership(&membership, None);
     let mut group_names = Vec::with_capacity(partitions.len());
     let mut group_stats = Vec::with_capacity(partitions.len());
+    let num_features = data.num_rows();
 
     for (k, cols) in partitions {
-        let jobs = create_jobs(cols.len(), Some(block_size));
+        let jobs = create_jobs(cols.len(), num_features, block_size);
         let mut row_stat = SparseRunningStatistics::new(data.num_rows());
         let arc_stat = Arc::new(Mutex::new(&mut row_stat));
 
@@ -141,13 +142,13 @@ pub fn collect_stratified_row_stat_across_vec(
 /// * `block_size` - a block size for each parallelized job
 pub fn collect_row_stat(
     data: &dyn SparseIo<IndexIter = Vec<usize>>,
-    block_size: usize,
+    block_size: Option<usize>,
 ) -> anyhow::Result<SparseRunningStatistics<f32>> {
     let nrows = data.num_rows().unwrap_or(0);
     let mut row_stat = SparseRunningStatistics::new(nrows);
     let arc_stat = Arc::new(Mutex::new(&mut row_stat));
 
-    let jobs = create_jobs(data.num_columns().unwrap_or(0), Some(block_size));
+    let jobs = create_jobs(data.num_columns().unwrap_or(0), nrows, block_size);
 
     jobs.par_iter()
         .progress_count(jobs.len() as u64)
@@ -169,7 +170,7 @@ pub fn collect_row_stat(
 pub fn collect_column_stat_across_vec(
     data: &SparseIoVec,
     select_rows: Option<&[usize]>,
-    block_size: usize,
+    block_size: Option<usize>,
 ) -> anyhow::Result<SparseColumnRunningStatistics<f32>> {
     let ncols = data.num_columns();
     let nrows_total = data.num_rows();
@@ -189,12 +190,7 @@ pub fn collect_column_stat_across_vec(
         .unwrap_or(nrows_total);
 
     let mut col_stat = SparseColumnRunningStatistics::<f32>::new(ncols, nrows_denom);
-    data.visit_columns_by_block(
-        &col_stat_visitor,
-        &row_mask,
-        &mut col_stat,
-        Some(block_size),
-    )?;
+    data.visit_columns_by_block(&col_stat_visitor, &row_mask, &mut col_stat, block_size)?;
     Ok(col_stat)
 }
 
@@ -203,14 +199,14 @@ pub fn collect_column_stat_across_vec(
 /// * `block_size` - a block size for each parallelized job
 pub fn collect_column_stat(
     data: &dyn SparseIo<IndexIter = Vec<usize>>,
-    block_size: usize,
+    block_size: Option<usize>,
 ) -> anyhow::Result<SparseColumnRunningStatistics<f32>> {
     let ncols = data.num_columns().unwrap_or(0);
     let nrows = data.num_rows().unwrap_or(0);
     let mut col_stat = SparseColumnRunningStatistics::<f32>::new(ncols, nrows);
     let arc_stat = Arc::new(Mutex::new(&mut col_stat));
 
-    let jobs = create_jobs(ncols, Some(block_size));
+    let jobs = create_jobs(ncols, nrows, block_size);
 
     jobs.par_iter()
         .progress_count(jobs.len() as u64)

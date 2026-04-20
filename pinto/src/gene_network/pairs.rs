@@ -40,7 +40,10 @@ pub fn visit_gene_pair_deltas_with_buffer(
 /// Compute gene-level raw means: μ_g = E[x_g] across all cells.
 ///
 /// Delegates to `compute_gene_totals` and divides by n_cells.
-pub fn compute_gene_raw_means(data_vec: &SparseIoVec, block_size: usize) -> anyhow::Result<DVec> {
+pub fn compute_gene_raw_means(
+    data_vec: &SparseIoVec,
+    block_size: Option<usize>,
+) -> anyhow::Result<DVec> {
     let n_genes = data_vec.num_rows();
     let n_cells = data_vec.num_columns();
 

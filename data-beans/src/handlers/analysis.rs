@@ -90,13 +90,9 @@ pub struct RunStatArgs {
 
     #[arg(
         long,
-        value_enum,
-        default_value = "100",
-        help = "Block size for processing",
-        long_help = "Set the block size for processing data. \n\
-		     Adjust this value to optimize performance for your hardware."
+        help = "Cells per rayon job (omit for auto-scaling by feature count)"
     )]
-    pub block_size: usize,
+    pub block_size: Option<usize>,
 
     #[arg(
         short,

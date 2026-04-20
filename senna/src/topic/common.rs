@@ -24,7 +24,7 @@ pub(crate) fn process_blocks<F>(
 where
     F: Fn((usize, usize)) -> anyhow::Result<(usize, Mat)> + Send + Sync,
 {
-    let jobs = create_jobs(ntot, Some(block_size));
+    let jobs = create_jobs(ntot, 0, Some(block_size));
     let njobs = jobs.len() as u64;
 
     let mut chunks: Vec<(usize, Mat)> = if dev.is_cpu() {
@@ -203,7 +203,7 @@ pub struct LoadCollapseArgs<'a> {
     pub knn_cells: usize,
     pub num_levels: usize,
     pub iter_opt: usize,
-    pub block_size: usize,
+    pub block_size: Option<usize>,
     pub out: &'a str,
     pub oversample: bool,
     /// Keep top N HVGs (via binned residual variance) for the random
@@ -269,14 +269,14 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
             let weights = sel.row_weights(data_vec.num_rows());
             data_vec.project_columns_weighted(
                 args.proj_dim,
-                Some(args.block_size),
+                args.block_size,
                 Some(&batch_membership),
                 &weights,
             )?
         } else {
             data_vec.project_columns_with_batch_correction(
                 args.proj_dim,
-                Some(args.block_size),
+                args.block_size,
                 Some(&batch_membership),
             )?
         };

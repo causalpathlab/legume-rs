@@ -163,7 +163,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         );
         let cell_proj_pre = data_vec.project_columns_with_batch_correction(
             c.proj_dim,
-            Some(c.block_size),
+            c.block_size,
             None::<&[Box<str>]>,
         )?;
         let (g, embedding) = build_expression_graph(
@@ -211,7 +211,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     info!("Per-cell random projection...");
     let mut cell_proj = data_vec.project_columns_with_batch_correction(
         c.proj_dim,
-        Some(c.block_size),
+        c.block_size,
         Some(&batch_membership),
     )?;
 
