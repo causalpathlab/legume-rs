@@ -68,8 +68,7 @@ pub fn select_hvg_with_indices(
         .map(|j| {
             let col = mat.column(j);
             let mean: f32 = col.iter().sum::<f32>() / n_samples as f32;
-            let var: f32 =
-                col.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n_samples as f32;
+            let var: f32 = col.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n_samples as f32;
             (mean, var)
         })
         .unzip();
