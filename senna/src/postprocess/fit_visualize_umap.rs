@@ -31,7 +31,7 @@ pub struct VisualizeUmapArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
+        default_value_t = 100,
         help = "Cell-level UMAP fine-tune epochs after Nyström (0 = disabled)",
         long_help = "After the PB-level UMAP and Nyström cell placement, run \
                      additional UMAP SGD on a cell-cell fuzzy kNN graph in \
