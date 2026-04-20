@@ -21,6 +21,8 @@ use crate::topic::common::{
     load_and_collapse, preferred_posterior_log_mean, LoadCollapseArgs, PreparedData,
 };
 use data_beans_alg::random_projection::binary_sort_columns;
+use rand::{rngs::SmallRng, SeedableRng};
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 
 /// Self-loop amount added during similarity regularization to prevent
@@ -179,6 +181,18 @@ pub struct VisualizeCommonArgs {
         help = "RNG seed for random PB-coordinate initialisation (tsne / mst)"
     )]
     pub seed: u64,
+
+    #[arg(
+        long,
+        default_value_t = 500,
+        help = "Landmark count for latent-driven layout",
+        long_help = "Only used when a trained latent is available (topic/svd manifest). \
+                     Random subsample of cells used as PB landmarks; each cell is \
+                     assigned to its nearest landmark. Lower = fewer, denser PBs \
+                     (crisper clusters); higher = finer resolution but more blobby. \
+                     Ignored by the projection-space fallback path."
+    )]
+    pub n_landmarks: usize,
 }
 
 /// PHATE diffusion-embedding args. Shared by `layout phate` (main
@@ -339,20 +353,40 @@ pub(crate) fn preprocess_layout_data(
     args: &VisualizeCommonArgs,
     resolved: &ResolvedViz,
 ) -> anyhow::Result<LayoutPrep> {
+    let resolve_from_manifest = |p: &str| -> String {
+        let manifest_path = resolved.manifest_path.as_ref().expect("manifest present");
+        let manifest_dir = manifest_path
+            .parent()
+            .filter(|q| !q.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        run_manifest::resolve(manifest_dir, p)
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    let latent_path: Option<(String, String)> = resolved
+        .manifest
+        .as_ref()
+        .and_then(|m| {
+            m.outputs
+                .latent
+                .as_ref()
+                .map(|p| (p.clone(), m.kind.clone()))
+        })
+        .filter(|_| resolved.manifest_path.is_some())
+        .map(|(p, kind)| (resolve_from_manifest(&p), kind));
+
+    if let Some((p, kind)) = latent_path {
+        info!("Layout latent path: PB + similarity from cached latent {p} (kind={kind})");
+        return preprocess_layout_data_from_latent(args, resolved, &p, &kind);
+    }
+
     let cell_proj_path: Option<String> = resolved
         .manifest
         .as_ref()
         .and_then(|m| m.outputs.cell_proj.as_ref())
-        .zip(resolved.manifest_path.as_ref())
-        .map(|(p, manifest_path)| {
-            let manifest_dir = manifest_path
-                .parent()
-                .filter(|q| !q.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            run_manifest::resolve(manifest_dir, p)
-                .to_string_lossy()
-                .into_owned()
-        });
+        .filter(|_| resolved.manifest_path.is_some())
+        .map(|p| resolve_from_manifest(p));
 
     match cell_proj_path {
         Some(ref p) => {
@@ -361,12 +395,185 @@ pub(crate) fn preprocess_layout_data(
         }
         None => {
             info!(
-                "Layout: no cached cell_proj in manifest; running full load_and_collapse \
+                "Layout: no cached latent/cell_proj in manifest; running full load_and_collapse \
                  (slow path, includes batch-correction + Gamma posterior)"
             );
             preprocess_layout_data_recompute(args, resolved)
         }
     }
+}
+
+/// Latent-driven layout: topic θ is log-softmax on disk, so we apply
+/// Hellinger (`exp().sqrt()`) to make cosine ≡ Bhattacharyya; SVD
+/// scores are z-scored instead. PBs come from a random landmark
+/// subsample (nearest-landmark assignment via HNSW) and PB-PB
+/// similarity uses a UMAP-style fuzzy kNN graph — dense cosine on
+/// Hellinger-θ saturates and collapses the layout to rank-1.
+fn preprocess_layout_data_from_latent(
+    args: &VisualizeCommonArgs,
+    resolved: &ResolvedViz,
+    latent_path: &str,
+    kind: &str,
+) -> anyhow::Result<LayoutPrep> {
+    let SparseDataWithBatch { data: data_vec, .. } =
+        read_data_on_shared_rows(ReadSharedRowsArgs {
+            data_files: resolved.data_files.clone(),
+            batch_files: resolved.batch_files.clone(),
+            preload: args.preload_data,
+        })?;
+
+    let MatWithNames {
+        rows: cell_names_cached,
+        cols: _,
+        mat: latent_nk,
+    } = Mat::from_parquet_with_row_names(latent_path, Some(0))?;
+    let data_cell_names = data_vec.column_names()?;
+    anyhow::ensure!(
+        data_cell_names == cell_names_cached,
+        "cached latent cells don't match data columns (cache={}, data={})",
+        cell_names_cached.len(),
+        data_cell_names.len()
+    );
+
+    let is_topic = matches!(kind, "topic" | "itopic" | "joint-topic");
+    let feat_kn: Mat = if is_topic {
+        let mut m = latent_nk.transpose();
+        for v in m.iter_mut() {
+            *v = v.exp().max(0.0).sqrt();
+        }
+        m
+    } else {
+        let mut m = latent_nk.transpose();
+        m.scale_rows_inplace();
+        m
+    };
+    let n_cells = feat_kn.ncols();
+    info!(
+        "Loaded latent: {n_cells} cells × {} dims ({})",
+        feat_kn.nrows(),
+        if is_topic {
+            "Hellinger-θ"
+        } else {
+            "z-scored scores"
+        }
+    );
+
+    let n_pb_target = args.n_landmarks.min(n_cells).max(1);
+    let landmark_cells: Vec<usize> = {
+        let mut rng = SmallRng::seed_from_u64(args.seed);
+        let mut picked: Vec<usize> = rand::seq::index::sample(&mut rng, n_cells, n_pb_target)
+            .into_iter()
+            .collect();
+        picked.sort_unstable();
+        picked
+    };
+    let n_pb_full = landmark_cells.len();
+    info!(
+        "Landmark subsample: picked {n_pb_full} cells as PBs (seed={})",
+        args.seed
+    );
+
+    let landmark_cols: Vec<nalgebra::DVectorView<f32>> =
+        landmark_cells.iter().map(|&c| feat_kn.column(c)).collect();
+    let landmark_dict = matrix_util::knn_match::ColumnDict::from_dvector_views(
+        landmark_cols,
+        (0..n_pb_full).collect(),
+    );
+
+    let membership_full: Vec<usize> = (0..n_cells)
+        .into_par_iter()
+        .map_init(
+            || matrix_util::knn_match::VecPoint {
+                data: Vec::with_capacity(feat_kn.nrows()),
+            },
+            |query, c| {
+                query.data.clear();
+                query.data.extend(feat_kn.column(c).iter().copied());
+                match landmark_dict.search_by_query_data(query, 1) {
+                    Ok((ids, _)) => ids.first().copied().unwrap_or(usize::MAX),
+                    Err(_) => usize::MAX,
+                }
+            },
+        )
+        .collect();
+
+    let pb_size_full: Vec<usize> = {
+        let mut counts = vec![0usize; n_pb_full];
+        for &g in &membership_full {
+            if g < n_pb_full {
+                counts[g] += 1;
+            }
+        }
+        counts
+    };
+    let kept_indices = select_pb_coverage(&pb_size_full, args.pb_coverage);
+    let covered: usize = kept_indices.iter().map(|&i| pb_size_full[i]).sum();
+    let total_cells: usize = pb_size_full.iter().sum();
+    info!(
+        "Coverage filter: kept {} / {} landmarks covering {} / {} cells ({:.1}%)",
+        kept_indices.len(),
+        n_pb_full,
+        covered,
+        total_cells,
+        100.0 * covered as f32 / total_cells.max(1) as f32
+    );
+
+    let mut old_to_new = vec![usize::MAX; n_pb_full];
+    for (new_i, &old_i) in kept_indices.iter().enumerate() {
+        old_to_new[old_i] = new_i;
+    }
+    let pb_membership_kept: Vec<usize> = membership_full
+        .iter()
+        .map(|&g| {
+            if g < n_pb_full {
+                old_to_new[g]
+            } else {
+                usize::MAX
+            }
+        })
+        .collect();
+    let pb_size: Vec<usize> = kept_indices.iter().map(|&i| pb_size_full[i]).collect();
+
+    let pb_centroids_kp =
+        aggregate_features_by_group(&feat_kn, &pb_membership_kept, kept_indices.len());
+
+    let n_pb = pb_centroids_kp.ncols();
+    let knn = args.knn.clamp(1, n_pb.saturating_sub(1).max(1));
+    info!("Building fuzzy kNN graph on PB centroids: n_pb={n_pb}, knn={knn}");
+    let graph = matrix_util::knn_graph::KnnGraph::from_columns(
+        &pb_centroids_kp,
+        matrix_util::knn_graph::KnnGraphArgs {
+            knn,
+            block_size: args.block_size.max(1000),
+            reciprocal: false,
+        },
+    )?;
+    let fuzzy = graph.fuzzy_kernel_weights();
+
+    // √(sᵢ·sⱼ)/mean_size normalises so weighted mean ≈ 1, keeping fuzzy
+    // magnitudes comparable to the unweighted case.
+    let mean_size = (total_cells as f32) / (n_pb as f32).max(1.0);
+    let sqrt_size: Vec<f32> = pb_size.iter().map(|&s| (s as f32).sqrt()).collect();
+
+    let mut sim = Mat::zeros(n_pb, n_pb);
+    for (&(i, j), &w) in graph.edges.iter().zip(fuzzy.iter()) {
+        let scale = (sqrt_size[i] * sqrt_size[j]) / mean_size.max(1e-6);
+        let ws = w * scale;
+        sim[(i, j)] = ws;
+        sim[(j, i)] = ws;
+    }
+    let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
+
+    Ok(LayoutPrep {
+        data_vec,
+        pb_size,
+        pb_membership_kept,
+        pb_features: pb_centroids_kp.transpose(),
+        pb_feature_kind: "proj",
+        pb_similarity,
+        cell_proj_kn: feat_kn,
+        pb_proj_kp: pb_centroids_kp,
+    })
 }
 
 /// Fast path: given a cached `cell_proj.parquet` from a prior training
@@ -383,13 +590,12 @@ fn preprocess_layout_data_from_cache(
     // 1. Lightweight data open: no projection, no collapse. Only pays
     //    for barcode / gene-name metadata + any batch annotation, which
     //    we need later for output parquet headers.
-    let SparseDataWithBatch {
-        data: data_vec, ..
-    } = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: resolved.data_files.clone(),
-        batch_files: resolved.batch_files.clone(),
-        preload: args.preload_data,
-    })?;
+    let SparseDataWithBatch { data: data_vec, .. } =
+        read_data_on_shared_rows(ReadSharedRowsArgs {
+            data_files: resolved.data_files.clone(),
+            batch_files: resolved.batch_files.clone(),
+            preload: args.preload_data,
+        })?;
 
     // 2. Load the cached projection (written as cells × proj_dim). The
     //    transpose lands us in column-per-cell layout expected by the

@@ -157,11 +157,7 @@ pub(crate) fn write_cell_proj(
     let col_names: Vec<Box<str>> = (0..proj_nk.ncols())
         .map(|i| format!("p{i}").into_boxed_str())
         .collect();
-    proj_nk.to_parquet_with_names(
-        &path,
-        (Some(cell_names), Some("cell")),
-        Some(&col_names),
-    )?;
+    proj_nk.to_parquet_with_names(&path, (Some(cell_names), Some("cell")), Some(&col_names))?;
     info!(
         "Wrote cell projection: {} cells × {} dims → {path}",
         n_cells,

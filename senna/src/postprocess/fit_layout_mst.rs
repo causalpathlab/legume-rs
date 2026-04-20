@@ -17,11 +17,7 @@ pub struct LayoutMstArgs {
     #[clap(flatten)]
     common: VisualizeCommonArgs,
 
-    #[arg(
-        long,
-        default_value_t = 500,
-        help = "Fruchterman–Reingold iterations"
-    )]
+    #[arg(long, default_value_t = 500, help = "Fruchterman–Reingold iterations")]
     mst_iters: usize,
 }
 
