@@ -26,8 +26,6 @@ pub struct ComponentGibbsArgs<'a> {
     pub graph: &'a KnnGraph,
     pub edges: &'a [(usize, usize)],
     pub k: usize,
-    pub a0: f64,
-    pub b0: f64,
     /// Dirichlet concentration for mixing weight prior (0.0 = no prior).
     pub alpha: f64,
 }
@@ -55,8 +53,6 @@ impl LinkGibbsSampler {
         &mut self,
         stats: &mut LinkCommunityStats,
         profiles: &LinkProfileStore,
-        a0: f64,
-        b0: f64,
         num_sweeps: usize,
     ) -> usize {
         let k = stats.k;
@@ -70,12 +66,11 @@ impl LinkGibbsSampler {
             "Gibbs {bar:40} {pos}/{len} sweeps ({eta})",
         );
 
-        let ps = PoissonScoreParams::new(a0, b0);
         for _sweep in 0..num_sweeps {
             for e in 0..n {
                 let old_c = stats.membership[e];
 
-                compute_log_probs_for_edge(e, stats, profiles, &ps, None, &mut log_probs);
+                compute_log_probs_for_edge(e, stats, profiles, None, &mut log_probs);
 
                 let new_c = sample_categorical_log(&log_probs, &mut self.rng);
 
@@ -101,8 +96,6 @@ impl LinkGibbsSampler {
         &mut self,
         stats: &mut LinkCommunityStats,
         profiles: &LinkProfileStore,
-        a0: f64,
-        b0: f64,
         num_sweeps: usize,
     ) -> usize {
         let k = stats.k;
@@ -123,7 +116,6 @@ impl LinkGibbsSampler {
             "Gibbs {bar:40} {pos}/{len} sweeps ({eta})",
         );
 
-        let ps = PoissonScoreParams::new(a0, b0);
         for sweep in 0..num_sweeps {
             let sweep_seed = base_seed.wrapping_mul(sweep as u64 + 1);
 
@@ -134,14 +126,7 @@ impl LinkGibbsSampler {
                     chunk
                         .iter()
                         .map(|&e| {
-                            compute_log_probs_for_edge(
-                                e,
-                                stats,
-                                profiles,
-                                &ps,
-                                None,
-                                &mut log_probs,
-                            );
+                            compute_log_probs_for_edge(e, stats, profiles, None, &mut log_probs);
                             let vertex_seed = sweep_seed ^ (e as u64).wrapping_mul(2654435761);
                             let mut rng = SmallRng::seed_from_u64(vertex_seed);
                             sample_categorical_log(&log_probs, &mut rng)
@@ -172,8 +157,6 @@ impl LinkGibbsSampler {
         &mut self,
         stats: &mut LinkCommunityStats,
         profiles: &LinkProfileStore,
-        a0: f64,
-        b0: f64,
         max_sweeps: usize,
     ) -> usize {
         let k = stats.k;
@@ -187,13 +170,12 @@ impl LinkGibbsSampler {
             "Greedy {bar:40} {pos}/{len} sweeps ({eta})",
         );
 
-        let ps = PoissonScoreParams::new(a0, b0);
         for _sweep in 0..max_sweeps {
             let mut sweep_moves = 0;
             for e in 0..n {
                 let old_c = stats.membership[e];
 
-                compute_log_probs_for_edge(e, stats, profiles, &ps, None, &mut log_probs);
+                compute_log_probs_for_edge(e, stats, profiles, None, &mut log_probs);
 
                 let new_c = argmax_log(&log_probs);
 
@@ -235,11 +217,9 @@ impl LinkGibbsSampler {
             graph,
             edges,
             k,
-            a0,
-            b0,
             alpha,
         } = args;
-        let (k, a0, b0, alpha) = (*k, *a0, *b0, *alpha);
+        let (k, alpha) = (*k, *alpha);
 
         let (comp_labels, n_comp) = connected_components(graph);
         let comp_edges = partition_edges_balanced(edges, &comp_labels, n_comp);
@@ -288,6 +268,8 @@ impl LinkGibbsSampler {
             let gene_sum_snap = &global_stats.gene_sum;
             let size_sum_snap = &global_stats.size_sum;
             let edge_count_snap = &global_stats.edge_count;
+            let log_gene_snap = &global_stats.log_gene;
+            let log_size_offset_snap = &global_stats.log_size_offset;
 
             // Dirichlet log-weights snapshot (recomputed each sweep)
             let lw_snap = if alpha > 0.0 {
@@ -314,9 +296,10 @@ impl LinkGibbsSampler {
                         size_sum: size_sum_snap.clone(),
                         edge_count: edge_count_snap.clone(),
                         membership: indices.iter().map(|&e| membership[e]).collect(),
+                        log_gene: log_gene_snap.clone(),
+                        log_size_offset: log_size_offset_snap.clone(),
                     };
 
-                    let ps = PoissonScoreParams::new(a0, b0);
                     let comp_seed = sweep_seed ^ (c as u64).wrapping_mul(2654435761);
                     let mut rng = SmallRng::seed_from_u64(comp_seed);
                     let mut log_probs = vec![0.0f64; k];
@@ -328,7 +311,6 @@ impl LinkGibbsSampler {
                             e,
                             &local_stats,
                             &sub_stores[c],
-                            &ps,
                             lw_ref,
                             &mut log_probs,
                         );
@@ -562,9 +544,9 @@ mod tests {
 
         let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
 
-        let moves1 = sampler.run(&mut stats, &store, 1.0, 1.0, 1);
-        let _moves_mid = sampler.run(&mut stats, &store, 1.0, 1.0, 20);
-        let moves_late = sampler.run(&mut stats, &store, 1.0, 1.0, 1);
+        let moves1 = sampler.run(&mut stats, &store, 1);
+        let _moves_mid = sampler.run(&mut stats, &store, 20);
+        let moves_late = sampler.run(&mut stats, &store, 1);
 
         assert!(
             moves_late <= moves1 || moves1 == 0,
@@ -584,8 +566,8 @@ mod tests {
         let mut stats = LinkCommunityStats::from_profiles(&store, k, &random_labels);
 
         let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
-        sampler.run(&mut stats, &store, 1.0, 1.0, 50);
-        sampler.run_greedy(&mut stats, &store, 1.0, 1.0, 20);
+        sampler.run(&mut stats, &store, 50);
+        sampler.run_greedy(&mut stats, &store, 20);
 
         // Check that the partition matches the planted one (up to label permutation)
         let match_direct: usize = (0..100)
@@ -613,9 +595,9 @@ mod tests {
 
         let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
 
-        let moves1 = sampler.run_parallel(&mut stats, &store, 1.0, 1.0, 1);
-        let _moves_mid = sampler.run_parallel(&mut stats, &store, 1.0, 1.0, 20);
-        let moves_late = sampler.run_parallel(&mut stats, &store, 1.0, 1.0, 1);
+        let moves1 = sampler.run_parallel(&mut stats, &store, 1);
+        let _moves_mid = sampler.run_parallel(&mut stats, &store, 20);
+        let moves_late = sampler.run_parallel(&mut stats, &store, 1);
 
         assert!(
             moves_late <= moves1 || moves1 == 0,
@@ -693,8 +675,6 @@ mod tests {
             graph: &graph,
             edges: &edges_list,
             k,
-            a0: 1.0,
-            b0: 1.0,
             alpha: 0.0,
         };
         let moves = sampler.run_components_em(&mut membership, &store, &comp_args, 50);
@@ -741,8 +721,6 @@ mod tests {
             graph: &graph,
             edges: &edges,
             k,
-            a0: 1.0,
-            b0: 1.0,
             alpha: 0.0,
         };
         let moves = sampler.run_components_em(&mut membership, &store, &comp_args, 10);

@@ -455,9 +455,30 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let finest_decoder = decoders.last().unwrap();
     write_indexed_dictionary(finest_decoder, &gene_names, &args.out)?;
 
+    // Move VarMap to CPU, then rebuild encoder + finest-level decoder from the
+    // CPU Vars. The original structs still hold CUDA/Metal tensors internally
+    // and will trigger "device mismatch" errors if reused on CPU indices.
     info!("Moving parameters to CPU for multi-threaded inference");
     let cpu_dev = candle_core::Device::Cpu;
     move_varmap_to_cpu(&parameters)?;
+
+    let cpu_vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &cpu_dev);
+    let cpu_encoder = IndexedEmbeddingEncoder::new(
+        IndexedEmbeddingEncoderArgs {
+            n_features: n_features_full,
+            n_topics,
+            embedding_dim: args.embedding_dim,
+            layers: &args.encoder_layers,
+        },
+        &parameters,
+        cpu_vb.pp("enc"),
+    )?;
+    let finest_dec_idx = decoders.len().saturating_sub(1);
+    let cpu_finest_decoder = IndexedTopicDecoder::new(
+        n_features_full,
+        n_topics,
+        cpu_vb.pp(format!("dec_{finest_dec_idx}")),
+    )?;
 
     let refine_config = if args.refine_steps > 0 {
         Some(
@@ -478,28 +499,28 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         minibatch_size: args.minibatch_size,
         enc_context_size: args.context_size,
         dec_context_size,
-        decoder: finest_decoder,
+        decoder: &cpu_finest_decoder,
         refine_config: refine_config.as_ref(),
     };
     let z_nk = evaluate_latent_by_indexed_encoder(
         &data_vec,
-        &base_encoder,
+        &cpu_encoder,
         finest_collapsed,
         &eval_config,
     )?;
 
-    // Evaluate bulk with standard encoder/decoder
+    // Evaluate bulk with the CPU encoder/decoder for consistency.
     if let (Some(bulk), Some(bulk_deltas)) = (&bulk, &bulk_deltas) {
         let bulk_config = BulkEvalConfig {
             dev: &cpu_dev,
             enc_context_size: args.context_size,
             dec_context_size,
             refine_config: refine_config.as_ref(),
-            decoder: finest_decoder,
+            decoder: &cpu_finest_decoder,
             gene_names: &gene_names,
             out_prefix: &args.out,
         };
-        evaluate_bulk_samples(bulk, bulk_deltas, &base_encoder, &bulk_config)?;
+        evaluate_bulk_samples(bulk, bulk_deltas, &cpu_encoder, &bulk_config)?;
     }
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;

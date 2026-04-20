@@ -382,23 +382,20 @@ pub fn compute_community_centroids(
 
 /// Extract module-community rate matrix [M × K] from sufficient statistics.
 ///
-/// `rate[m, k] = (a0 + gene_sum[k*M + m]) / (b0 + size_sum[k])`
-///
-/// Rows are modules (or gene-pairs), columns are communities. Used as
-/// input features for re-clustering modules in the outer EM M-step.
-pub fn compute_module_rate_matrix(
-    stats: &crate::link_community::model::LinkCommunityStats,
-    a0: f64,
-    b0: f64,
-) -> Mat {
+/// `rate[m, k] = (gene_sum[k*M + m] + ε) / (size_sum[k] + M·ε)` — multinomial
+/// MLE with small additive smoothing so empty communities stay finite. Rows
+/// are modules (or gene-pairs), columns are communities. Used as input
+/// features for re-clustering modules in the outer EM M-step.
+pub fn compute_module_rate_matrix(stats: &crate::link_community::model::LinkCommunityStats) -> Mat {
     let m = stats.m;
     let k = stats.k;
+    let eps = 1e-9f64;
     let mut rates = Mat::zeros(m, k);
     for c in 0..k {
-        let denom = b0 + stats.size_sum[c];
+        let denom = stats.size_sum[c] + (m as f64) * eps;
         let base = c * m;
         for g in 0..m {
-            rates[(g, c)] = ((a0 + stats.gene_sum[base + g]) / denom) as f32;
+            rates[(g, c)] = ((stats.gene_sum[base + g] + eps) / denom) as f32;
         }
     }
     rates
