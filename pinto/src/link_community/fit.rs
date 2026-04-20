@@ -7,7 +7,7 @@ use crate::gene_network::graph::*;
 use crate::gene_network::pairs::*;
 use crate::link_community::gibbs::{ComponentGibbsArgs, LinkGibbsSampler};
 use crate::link_community::model::{LinkCommunityStats, LinkProfileStore};
-use crate::link_community::module_cluster::{self, KmeansModules, LeidenModules, ModuleClusterer};
+use crate::link_community::module_cluster::{self, KmeansModules, ModuleClusterer};
 use crate::link_community::profiles::*;
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::util::cell_pairs::*;
@@ -28,22 +28,6 @@ use data_beans_alg::random_projection::RandProjOps;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
-/// Module clustering method for gene/gene-pair module discovery.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum ModuleMethod {
-    Kmeans,
-    Leiden,
-}
-
-impl std::fmt::Display for ModuleMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ModuleMethod::Kmeans => write!(f, "kmeans"),
-            ModuleMethod::Leiden => write!(f, "leiden"),
-        }
-    }
-}
-
 #[derive(Parser, Debug, Clone)]
 pub struct SrtLinkCommunityArgs {
     #[command(flatten)]
@@ -59,37 +43,6 @@ pub struct SrtLinkCommunityArgs {
                        Cell propensity = fraction of edges per community."
     )]
     n_communities: usize,
-
-    #[arg(
-        long,
-        help = "Number of gene modules (default: sqrt of number of genes)",
-        long_help = "Number of gene modules (M) for edge profile construction.\n\
-                       Genes are clustered into M modules via --module-method (kmeans\n\
-                       or leiden) on gene embeddings. Edge profiles are M-dimensional\n\
-                       module-count vectors. Default: auto = sqrt(number of genes).\n\
-                       With leiden, this is a target (actual count may differ slightly).\n\
-                       Use --no-gene-modules to skip and use random-projection profiles."
-    )]
-    n_gene_modules: Option<usize>,
-
-    #[arg(
-        long,
-        conflicts_with = "n_gene_modules",
-        help = "Skip gene modules, use projection profiles"
-    )]
-    no_gene_modules: bool,
-
-    #[arg(
-        long,
-        default_value_t = 50,
-        help = "Sketch dimension for gene module discovery",
-        long_help = "Dimension of random sketches for gene module discovery.\n\
-                       Genes are projected into this many dimensions per pseudobulk\n\
-                       cluster, then clustered via K-means to form gene modules.\n\
-                       Independent of --proj-dim (which is for cell embeddings).\n\
-                       Only used when --n-gene-modules > 0."
-    )]
-    sketch_dim: usize,
 
     #[arg(
         long,
@@ -180,51 +133,14 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
-        default_value_t = ModuleMethod::Kmeans,
-        help = "Module clustering method: kmeans or leiden",
-        long_help = "Clustering algorithm for gene module discovery.\n\
-                       kmeans: fast, deterministic cluster count (= --n-gene-modules).\n\
-                       leiden: graph-based, builds KNN on gene embeddings then\n\
-                       runs Leiden with resolution tuning to approximate the\n\
-                       target module count. Often finds more biologically coherent\n\
-                       modules. Use with --n-outer-iter > 1 for best results."
-    )]
-    module_method: ModuleMethod,
-
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "Resolution for Leiden module clustering",
-        long_help = "Modularity resolution for Leiden module clustering.\n\
-                       Higher values produce more modules, lower values fewer.\n\
-                       When --n-gene-modules is set, resolution is auto-tuned\n\
-                       via binary search to approximate the target count.\n\
-                       Only used with --module-method leiden."
-    )]
-    module_resolution: f64,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "KNN for Leiden module graph",
-        long_help = "Number of nearest neighbours for building the gene-gene\n\
-                       similarity graph used by Leiden module clustering.\n\
-                       Only used with --module-method leiden."
-    )]
-    module_knn: usize,
-
-    #[arg(
-        long,
         default_value_t = 1,
-        help = "Outer EM iterations for module re-estimation",
-        long_help = "Outer EM iterations that alternate:\n\
+        help = "Outer EM iterations for edge-module re-estimation (gene-pair mode only)",
+        long_help = "Outer EM iterations for the gene-pair-module path:\n\
                        E-step: Gibbs + greedy community assignment.\n\
-                       M-step: re-cluster gene modules from community centroids.\n\
+                       M-step: re-cluster gene-pair columns into edge modules\n\
+                       from community-conditioned rates.\n\
                        Default 1 = fixed modules (no re-estimation).\n\
-                       Set to 2-5 to let modules adapt to discovered communities.\n\
-                       Stops early if score plateaus (<0.1% improvement).\n\
-                       Applies to gene-module and gene-pair-module paths only;\n\
-                       ignored with --no-gene-modules (no M-step to iterate)."
+                       Ignored in projection mode (no M-step to iterate)."
     )]
     n_outer_iter: usize,
 
@@ -233,9 +149,9 @@ pub struct SrtLinkCommunityArgs {
         default_value_t = false,
         help = "Disable IDF background correction (on by default)",
         long_help = "By default, edge profiles are reweighted by inverse-frequency\n\
-                       w_g = -ln(π_bg,g + ε), where π_bg is the empirical gene-module\n\
-                       marginal over all edges. Housekeeping genes (high π_bg) get\n\
-                       small weight, specific genes (low π_bg) get large weight — so\n\
+                       w_g = -ln(π_bg,g + ε), where π_bg is the empirical projection\n\
+                       marginal over all edges. Housekeeping signals (high π_bg) get\n\
+                       small weight, specific signals (low π_bg) get large weight — so\n\
                        community assignment is driven by distinctive genes, not by\n\
                        bulk expression level (DC-SBM degree correction with θ_g = π_bg).\n\
                        Pass --no-background to disable and use raw counts."
@@ -347,37 +263,12 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &c.out,
     )?;
 
-    // Resolve gene module count
-    let n_gm: Option<usize> = if args.no_gene_modules {
-        None
-    } else if let Some(n) = args.n_gene_modules {
-        Some(n)
-    } else {
-        // Auto: sqrt(number of genes)
-        let n_genes = data_vec.num_rows();
-        let n = (n_genes as f64).sqrt().round() as usize;
-        let n = n.max(10);
-        info!("Auto n_gene_modules = {} (sqrt of {} genes)", n, n_genes);
-        Some(n)
+    // Edge-module clusterer (only used in gene-pair mode when the raw
+    // gene-pair dimension exceeds --n-edge-modules).
+    let edge_clusterer = KmeansModules {
+        n_modules: args.n_edge_modules.max(2),
+        max_iter: 100,
     };
-
-    // Build module clusterer from CLI args
-    let make_clusterer = |target: usize| -> Box<dyn ModuleClusterer> {
-        match args.module_method {
-            ModuleMethod::Leiden => Box::new(LeidenModules {
-                knn: args.module_knn,
-                resolution: args.module_resolution,
-                target_modules: Some(target),
-                seed: Some(c.seed),
-            }),
-            ModuleMethod::Kmeans => Box::new(KmeansModules {
-                n_modules: target,
-                max_iter: 100,
-            }),
-        }
-    };
-    let gene_clusterer = make_clusterer(n_gm.unwrap_or(10));
-    let edge_clusterer = make_clusterer(args.n_edge_modules.max(2));
 
     // Gene-pair mode: load external network before borrowing data_vec
     let mut gene_pair_state: Option<(GenePairGraph, DVec)> = None;
@@ -445,7 +336,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     );
 
     // 5-6. Build COARSE edge profiles first
-    let mut gene_to_module: Option<Vec<usize>>;
     let coarse_profiles;
     let proj_basis: Option<Mat>;
 
@@ -524,7 +414,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                     final_n_gene_pairs, args.n_edge_modules
                 );
                 let (module_profiles, assignments) =
-                    collapse_profile_columns(&filtered_profiles, &*edge_clusterer);
+                    collapse_profile_columns(&filtered_profiles, &edge_clusterer);
                 (module_profiles, Some(assignments))
             } else {
                 (filtered_profiles, None)
@@ -537,47 +427,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             n_gene_pairs: final_n_gene_pairs,
             module_collapse,
         });
-        gene_to_module = None;
         proj_basis = None;
-    } else if n_gm.is_some() {
-        // Gene module discovery via sketch + clustering
-        let finest_cell_labels = &ml.all_cell_labels[ml.all_cell_labels.len() - 1];
-        let n_finest_clusters = finest_cell_labels.iter().copied().max().unwrap_or(0) + 1;
-
-        info!(
-            "Gene module sketch ({} clusters, {} sketch dims)...",
-            n_finest_clusters, args.sketch_dim
-        );
-        let gene_embed = compute_gene_module_sketch(
-            &data_vec,
-            finest_cell_labels,
-            n_finest_clusters,
-            args.sketch_dim,
-            c.block_size,
-        )?;
-
-        info!(
-            "Clustering gene embeddings ({} genes, method={:?})...",
-            n_genes, args.module_method
-        );
-        let mut g2m = gene_clusterer.cluster(&gene_embed);
-        module_cluster::compact_labels(&mut g2m);
-        let n_gm_actual = g2m.iter().copied().max().unwrap_or(0) + 1;
-        info!("{} gene modules discovered", n_gm_actual);
-
-        info!("Building COARSE module-count edge profiles...");
-        coarse_profiles = build_edge_profiles_by_module(
-            &data_vec,
-            &super_edges,
-            &g2m,
-            n_gm_actual,
-            c.block_size,
-        )?;
-        gene_to_module = Some(g2m);
-        proj_basis = None;
-        gp_profile_state = None;
     } else {
-        // Skip gene modules: use random-projection edge profiles
+        // Random-projection edge profiles (default).
         let mut basis = cell_proj.basis.clone();
 
         if args.min_gene_count > 0.0 {
@@ -595,7 +447,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             c.proj_dim
         );
         coarse_profiles = build_edge_profiles(&data_vec, &super_edges, &basis, c.block_size)?;
-        gene_to_module = None;
         proj_basis = Some(basis);
         gp_profile_state = None;
     }
@@ -658,12 +509,11 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &all_edge_indices,
         edges,
         &gp_profile_state,
-        &gene_to_module,
         &proj_basis,
     )?;
     if let Some(ref bg_dist) = bg {
-        // Reuse the coarse-derived bg for the full profiles (same M layout when
-        // --no-gene-modules; for module paths the M-step recomputes bg below).
+        // Reuse the coarse-derived bg for the full profiles (same M layout;
+        // for gene-pair-module path the M-step recomputes bg below).
         full_profiles.weight_by_idf(bg_dist);
     }
 
@@ -698,12 +548,12 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     let num_fine_sweeps = args.num_em.unwrap_or((args.num_gibbs / 4).max(5));
 
-    // 8. Outer EM loop: E-step (Gibbs+greedy) → M-step (re-cluster modules).
-    //    Without gene modules the M-step is a no-op, so one iteration suffices.
-    let has_mstep = gene_to_module.is_some()
-        || gp_profile_state
-            .as_ref()
-            .is_some_and(|gp| gp.module_collapse.is_some());
+    // 8. Outer EM loop: E-step (Gibbs+greedy) → M-step (re-cluster gene-pair modules).
+    //    The M-step is only meaningful when gene-pair-module collapse is active;
+    //    in projection / raw gene-pair mode a single iteration suffices.
+    let has_mstep = gp_profile_state
+        .as_ref()
+        .is_some_and(|gp| gp.module_collapse.is_some());
     let effective_outer = if has_mstep { n_outer_iter } else { 1 };
     let mut prev_score = f64::NEG_INFINITY;
 
@@ -753,36 +603,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         }
         prev_score = score;
 
-        // --- M-step: re-estimate modules from community-conditioned stats ---
-        if let Some(ref mut g2m) = gene_to_module {
-            // Gene-module path: compute [G × K] centroids → re-cluster genes
-            info!("M-step: recomputing gene modules from community centroids...");
-            let centroids =
-                compute_community_centroids(&data_vec, edges, &current_labels, k, c.block_size)?;
-            let mut new_g2m = gene_clusterer.cluster(&centroids);
-            module_cluster::compact_labels(&mut new_g2m);
-            let new_n_gm = new_g2m.iter().copied().max().unwrap_or(0) + 1;
-            info!("Re-estimated {} gene modules", new_n_gm);
-            *g2m = new_g2m;
-
-            // Rebuild profiles with new modules
-            let (new_profiles, _) = build_full_profiles_inline(
-                &data_vec,
-                &all_edge_indices,
-                edges,
-                &gp_profile_state,
-                &gene_to_module,
-                &proj_basis,
-            )?;
-            full_profiles = new_profiles;
-            if bg.is_some() {
-                let dist = full_profiles.empirical_marginal();
-                full_profiles.weight_by_idf(&dist);
-            }
-        } else if let (Some(raw), Some(ref mut gp)) = (&full_raw_gp_profiles, &mut gp_profile_state)
-        {
+        // --- M-step: re-cluster gene-pair columns into edge modules ---
+        if let (Some(raw), Some(ref mut gp)) = (&full_raw_gp_profiles, &mut gp_profile_state) {
             if gp.module_collapse.is_some() {
-                // Gene-pair-module path: compute rates from raw stats → re-cluster pairs
                 info!("M-step: recomputing gene-pair modules from community rates...");
                 let raw_stats = LinkCommunityStats::from_profiles(raw, k, &current_labels);
                 let rate_mat = compute_module_rate_matrix(&raw_stats);
@@ -791,7 +614,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 let new_n_mod = new_collapse.iter().copied().max().unwrap_or(0) + 1;
                 info!("Re-estimated {} edge modules", new_n_mod);
 
-                // Re-collapse raw profiles (no I/O!)
                 full_profiles = raw.collapse_modules(&new_collapse);
                 if bg.is_some() {
                     let dist = full_profiles.empirical_marginal();
@@ -800,7 +622,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 gp.module_collapse = Some(new_collapse);
             }
         }
-        // else: projection path — no modules to update
+        // else: projection / raw gene-pair path — no modules to update
     }
 
     // Final stats (from_profiles builds fresh — no drift to correct)
@@ -815,7 +637,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     }
 
     // 9. Extract and write outputs
-    let gene_names = data_vec.row_names()?;
     let cell_names = data_vec.column_names()?;
 
     // 9a. cell propensity [N × K]
@@ -831,19 +652,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     // 9b. Gene-topic statistics: Poisson-Gamma profiles per community [G × K]
     compute_gene_topic_stat(&cell_propensity, &data_vec, c.block_size, &c.out)?;
-
-    // 9c. Gene module assignments [G × 1] (only when gene modules are used)
-    if let Some(ref g2m) = gene_to_module {
-        let n_modules = g2m.iter().copied().max().unwrap_or(0) + 1;
-        info!("Writing gene module assignments ({} modules)...", n_modules);
-        let gene_modules = Mat::from_fn(n_genes, 1, |g, _| g2m[g] as f32);
-        let module_col_names: Vec<Box<str>> = vec!["module".into()];
-        gene_modules.to_parquet_with_names(
-            &(c.out.to_string() + ".gene_modules.parquet"),
-            (Some(&gene_names), Some("gene")),
-            Some(&module_col_names),
-        )?;
-    }
 
     // 9c. Link community assignments
     info!("Writing link community assignments...");
@@ -871,7 +679,6 @@ fn build_full_profiles_inline(
     edge_indices: &[usize],
     all_edges: &[(usize, usize)],
     gp_state: &Option<GenePairProfileState>,
-    gene_to_module: &Option<Vec<usize>>,
     proj_basis: &Option<Mat>,
 ) -> anyhow::Result<(LinkProfileStore, Option<LinkProfileStore>)> {
     if let Some(ref gp) = *gp_state {
@@ -889,11 +696,6 @@ fn build_full_profiles_inline(
         } else {
             Ok((raw, None))
         }
-    } else if let Some(ref g2m) = *gene_to_module {
-        let n_modules = g2m.iter().copied().max().unwrap_or(0) + 1;
-        let profiles =
-            build_module_profiles_for_edges(data, edge_indices, all_edges, g2m, n_modules)?;
-        Ok((profiles, None))
     } else {
         let basis = proj_basis.as_ref().expect("projection basis missing");
         let profiles = build_projection_profiles_for_edges(data, edge_indices, all_edges, basis)?;
