@@ -1,5 +1,5 @@
 use crate::embed_common::*;
-use crate::hvg::{filter_csc_by_rows, select_hvg_streaming, HvgCliArgs, HvgSelection};
+use crate::hvg::{select_hvg_streaming, HvgCliArgs, HvgSelection};
 use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 
@@ -291,16 +291,11 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         args.n_latent_topics,
         args.column_sum_norm,
         Some(args.block_size),
-        selected_features.as_ref(),
     )?;
 
     let cell_names = data_vec.column_names()?;
     let gene_names = data_vec.row_names()?;
-
-    // Use selected feature names for dictionary if feature selection was applied
-    let output_gene_names = selected_features
-        .as_ref()
-        .map_or_else(|| gene_names.clone(), |sel| sel.selected_names.clone());
+    let output_gene_names = gene_names.clone();
 
     nystrom_out.latent_nk.to_parquet_with_names(
         &(args.out.to_string() + ".latent.parquet"),
@@ -375,7 +370,6 @@ struct NystromParam<'a> {
     basis_dk: &'a Mat,
     delta_dp: Option<&'a Mat>,
     column_sum_norm: f32,
-    feature_selection: Option<&'a HvgSelection>,
 }
 
 struct NystromOut {
@@ -401,14 +395,8 @@ fn do_nystrom_proj(
     rank: usize,
     column_sum_norm: f32,
     block_size: Option<usize>,
-    feature_selection: Option<&HvgSelection>,
 ) -> anyhow::Result<NystromOut> {
     let mut log_xx_dn = log_xx_dn.clone();
-
-    // Apply feature selection to collapsed data before RSVD
-    if let Some(sel) = feature_selection {
-        log_xx_dn = log_xx_dn.select_rows(&sel.selected_indices);
-    }
 
     log_xx_dn.scale_columns_inplace();
 
@@ -429,7 +417,6 @@ fn do_nystrom_proj(
         basis_dk: &basis_dk,
         delta_dp,
         column_sum_norm,
-        feature_selection,
     };
 
     let mut proj_kn = Mat::zeros(kk, ntot);
@@ -460,22 +447,15 @@ fn nystrom_proj_visitor(
     let basis_dk = proj_basis.basis_dk;
     let delta_dp = proj_basis.delta_dp;
     let column_sum_norm = proj_basis.column_sum_norm;
-    let feature_selection = proj_basis.feature_selection;
 
     let mut x_dn = full_data_vec.read_columns_csc(lb..ub)?;
 
     x_dn.normalize_columns_inplace();
     x_dn *= column_sum_norm;
 
-    // Adjust by batch effects first (before feature selection)
     if let Some(delta_dp) = delta_dp {
         let pseudobulk = full_data_vec.get_group_membership(lb..ub)?;
         x_dn.adjust_by_division_of_selected_inplace(delta_dp, &pseudobulk);
-    }
-
-    // Apply feature selection after adjustment
-    if let Some(sel) = feature_selection {
-        x_dn = filter_csc_by_rows(&sel.selection_matrix, &x_dn);
     }
 
     x_dn.log1p_inplace();
