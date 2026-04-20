@@ -1,9 +1,11 @@
+mod cell_community;
 mod gene_network;
 mod link_community;
 mod propensity;
 mod svd;
 mod util;
 
+use cell_community::fit::*;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use link_community::fit::*;
@@ -224,6 +226,35 @@ enum Commands {
                       \x20 {out}.delta.parquet           Batch effects (multi-sample only)"
     )]
     LinkCommunity(SrtLinkCommunityArgs),
+
+    #[command(
+        alias = "cc",
+        about = "Cell community via flat-K Poisson DC-SBM on per-cell profiles",
+        long_about = "Cell community detection for spatial transcriptomics.\n\n\
+                      Assigns each CELL to one of K communities via collapsed Gibbs on a\n\
+                      Poisson DC-SBM over per-cell gene-module (or random-projection)\n\
+                      profiles. Multi-level graph coarsening (spatial KNN + cosine similarity\n\
+                      on expression) runs Gibbs on super-cells first, then transfers labels\n\
+                      to fine resolution and refines with component-partitioned EM Gibbs + greedy.\n\n\
+                      QUICK START:\n\n\
+                      \x20 pinto cc data.zarr -c cells.zarr.zip -o out \\\n\
+                      \x20   --n-communities 20 --num-gibbs 100\n\n\
+                      KEY PARAMETERS:\n\n\
+                      \x20 --n-communities K               Number of communities [20]\n\
+                      \x20 --num-gibbs N                   Coarsest-level Gibbs sweeps [100]\n\
+                      \x20 --num-em N                      Fine-resolution EM Gibbs sweeps\n\
+                      \x20 --num-greedy N                  Max greedy sweeps [10]\n\
+                      \x20 --n-gene-modules M              Gene-module profile dim (auto = √G)\n\
+                      \x20 --no-gene-modules               Use random-projection profiles instead\n\
+                      \x20 --no-background                 Disable IDF background correction\n\n\
+                      OUTPUT FILES:\n\n\
+                      \x20 {out}.cell_community.parquet   Per-cell community label\n\
+                      \x20 {out}.coord_pairs.parquet      Cell-pair coordinates\n\
+                      \x20 {out}.scores.parquet           Score trace\n\
+                      \x20 {out}.gene_topic.parquet       Per-community gene rates [G × K]\n\
+                      \x20 {out}.gene_modules.parquet     Gene module assignments (if used)"
+    )]
+    CellCommunity(SrtCellCommunityArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -244,6 +275,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::LinkCommunity(args) => {
             fit_srt_link_community(args)?;
+        }
+        Commands::CellCommunity(args) => {
+            fit_srt_cell_community(args)?;
         }
     }
 
