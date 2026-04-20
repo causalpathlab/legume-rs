@@ -875,6 +875,25 @@ pub(crate) fn random_init_2d(n: usize, seed: u64) -> Mat {
     out
 }
 
+/// Cheap Nyström cell placement. Exposed so subcommands that fine-tune
+/// cell coords (e.g. `layout umap`) can init from here and hand the
+/// refined result to [`write_viz_outputs`] directly.
+pub(crate) fn nystrom_cell_coords(
+    args: &VisualizeCommonArgs,
+    prep: &LayoutPrep,
+    pb_coords: &Mat,
+) -> Mat {
+    let coords = project_cells_nystrom(
+        &prep.cell_proj_kn,
+        &prep.pb_proj_kp,
+        pb_coords,
+        args.knn,
+        args.kernel_alpha,
+    );
+    info!("Projected cells to 2D via proj-space Nyström");
+    coords
+}
+
 /// Finalize: place cells via cheap Nyström, write the three output
 /// parquet files, and — when a manifest was loaded via `--from` —
 /// update its `viz{}` section and save it back in place.
@@ -886,15 +905,19 @@ pub(crate) fn finalize_viz(
     prep: &LayoutPrep,
     pb_coords: &Mat,
 ) -> anyhow::Result<()> {
-    let cell_coords = project_cells_nystrom(
-        &prep.cell_proj_kn,
-        &prep.pb_proj_kp,
-        pb_coords,
-        args.knn,
-        args.kernel_alpha,
-    );
-    info!("Projected cells to 2D via proj-space Nyström");
+    let cell_coords = nystrom_cell_coords(args, prep, pb_coords);
+    write_viz_outputs(args, resolved, prep, pb_coords, &cell_coords)
+}
 
+/// Write the three layout parquet files + update manifest. Split out so
+/// a caller can supply custom `cell_coords` (e.g. post-refinement).
+pub(crate) fn write_viz_outputs(
+    args: &VisualizeCommonArgs,
+    resolved: &mut ResolvedViz,
+    prep: &LayoutPrep,
+    pb_coords: &Mat,
+    cell_coords: &Mat,
+) -> anyhow::Result<()> {
     let pb_names: Vec<Box<str>> = (0..pb_coords.nrows())
         .map(|i| format!("PB_{i}").into_boxed_str())
         .collect();
