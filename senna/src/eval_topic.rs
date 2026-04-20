@@ -66,10 +66,9 @@ pub struct EvalTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Column block size for delta-estimation streaming"
+        help = "Cells per delta-estimation block (omit for auto-scaling by feature count)"
     )]
-    pub(crate) block_size: usize,
+    pub(crate) block_size: Option<usize>,
 
     #[arg(long, help = "Load all columns into memory before evaluation")]
     pub(crate) preload_data: bool,
@@ -314,7 +313,7 @@ fn estimate_delta(
     data_vec: &SparseIoVec,
     beta_dk: &Mat,
     gene_remap: Option<&GeneRemap>,
-    block_size: usize,
+    block_size: Option<usize>,
 ) -> anyhow::Result<Option<Mat>> {
     let n_batches = data_vec.num_batches();
     if n_batches <= 1 {
@@ -341,6 +340,8 @@ fn estimate_delta(
     let ntot = data_vec.num_columns();
     let mut pb_new = Mat::zeros(d_new, n_batches);
 
+    let block_size =
+        block_size.unwrap_or_else(|| matrix_util::utils::default_block_size(data_vec.num_rows()));
     for lb in (0..ntot).step_by(block_size) {
         let ub = (lb + block_size).min(ntot);
         let csc = data_vec.read_columns_csc(lb..ub)?;

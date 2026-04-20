@@ -116,7 +116,8 @@ fn save_latent(model: &TrainedModel, ctx: &EvalContext, out_prefix: &str) -> any
     };
 
     let ncells = ctx.data_stack.num_columns()?;
-    let block_size = 4096usize;
+    let num_features: usize = ctx.data_stack.stack.iter().map(|v| v.num_rows()).sum();
+    let block_size = matrix_util::utils::default_block_size(num_features);
     let n_blocks = ncells.div_ceil(block_size);
     let mut all_prop: Vec<Tensor> = Vec::with_capacity(n_blocks);
     let collect_rho = finest_dec.ambient_enabled();

@@ -103,13 +103,9 @@ pub struct SrtInputArgs {
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Number of cell pairs per parallel block",
-        long_help = "Number of cell pairs processed per parallel block.\n\
-                       Larger values use more memory but reduce I/O overhead.\n\
-                       Decrease if running out of memory."
+        help = "Cells per parallel block (omit for auto-scaling by feature count)"
     )]
-    pub block_size: usize,
+    pub block_size: Option<usize>,
 
     #[arg(
         long,

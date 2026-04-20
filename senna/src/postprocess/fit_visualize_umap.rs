@@ -102,7 +102,7 @@ pub fn fit_visualize_umap(args: &VisualizeUmapArgs) -> anyhow::Result<()> {
             args.umap_negative_rate,
             args.umap_lr,
             args.common.seed,
-            args.common.block_size.max(1000),
+            args.common.block_size.unwrap_or(1000),
         )?;
     }
 

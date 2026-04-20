@@ -150,12 +150,9 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Column block size for parallel I/O",
-        long_help = "Columns streamed per worker. Trades parallel granularity\n\
-                     against per-block memory."
+        help = "Cells per rayon job (omit for auto-scaling by feature count)"
     )]
-    pub(crate) block_size: usize,
+    pub(crate) block_size: Option<usize>,
 
     #[arg(
         short = 't',

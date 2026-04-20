@@ -231,7 +231,6 @@ pub trait BackendQc {
 impl BackendQc for Box<dyn SparseIo<IndexIter = Vec<usize>>> {
     fn qc(&self, cutoffs: SqueezeCutoffs) -> anyhow::Result<()> {
         info!("final Q/C to remove excessive zeros");
-        let block_size = 100;
-        squeeze_by_nnz(self.as_ref(), cutoffs, block_size, false)
+        squeeze_by_nnz(self.as_ref(), cutoffs, None, false)
     }
 }

@@ -2,10 +2,9 @@
 
 use crate::sparse_io_vector::SparseIoVec;
 use indicatif::ParallelProgressIterator;
+use matrix_util::utils::generate_minibatch_intervals;
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
-
-const DEFAULT_BLOCK_SIZE: usize = 100;
 
 pub trait VisitColumnsOps {
     /// visit all the columns by sequential blocks.  The visitor
@@ -59,7 +58,8 @@ impl VisitColumnsOps for SparseIoVec {
         SharedOut: Sync + Send,
     {
         let ntot = self.num_columns();
-        let jobs = create_jobs(ntot, block_size);
+        let num_features = self.num_rows();
+        let jobs = create_jobs(ntot, num_features, block_size);
 
         let arc_shared_out = Arc::new(Mutex::new(shared_out));
 
@@ -100,14 +100,12 @@ impl VisitColumnsOps for SparseIoVec {
     }
 }
 
-pub fn create_jobs(ntot: usize, block_size: Option<usize>) -> Vec<(usize, usize)> {
-    let block_size = block_size.unwrap_or(DEFAULT_BLOCK_SIZE);
-    let nblock = ntot.div_ceil(block_size);
-    (0..nblock)
-        .map(|block| {
-            let lb: usize = block * block_size;
-            let ub: usize = ((block + 1) * block_size).min(ntot);
-            (lb, ub)
-        })
-        .collect::<Vec<_>>()
+/// Thin wrapper around [`generate_minibatch_intervals`] kept for in-crate
+/// call sites that predate the matrix-util split.
+pub fn create_jobs(
+    ntot: usize,
+    num_features: usize,
+    block_size: Option<usize>,
+) -> Vec<(usize, usize)> {
+    generate_minibatch_intervals(ntot, num_features, block_size)
 }

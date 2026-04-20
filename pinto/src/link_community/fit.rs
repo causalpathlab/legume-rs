@@ -311,7 +311,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         );
         let cell_proj_pre = data_vec.project_columns_with_batch_correction(
             c.proj_dim,
-            Some(c.block_size),
+            c.block_size,
             None::<&[Box<str>]>,
         )?;
         let (g, embedding) = build_expression_graph(
@@ -429,11 +429,8 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         None
     };
 
-    let cell_proj = data_vec.project_columns_with_batch_correction(
-        c.proj_dim,
-        Some(c.block_size),
-        batch_arg,
-    )?;
+    let cell_proj =
+        data_vec.project_columns_with_batch_correction(c.proj_dim, c.block_size, batch_arg)?;
 
     let ml = graph_coarsen_multilevel(
         &srt_cell_pairs.graph,
