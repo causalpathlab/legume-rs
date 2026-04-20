@@ -184,7 +184,7 @@ pub struct VisualizeCommonArgs {
 
     #[arg(
         long,
-        default_value_t = 500,
+        default_value_t = 1000,
         help = "Landmark count for latent-driven layout",
         long_help = "Only used when a trained latent is available (topic/svd manifest). \
                      Random subsample of cells used as PB landmarks; each cell is \
