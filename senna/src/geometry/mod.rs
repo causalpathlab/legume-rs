@@ -9,3 +9,4 @@ pub(crate) mod cell_layout;
 pub(crate) mod phate;
 pub(crate) mod similarity;
 pub(crate) mod tsne;
+pub(crate) mod umap;
