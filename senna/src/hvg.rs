@@ -3,8 +3,9 @@
 //! Streaming wrapper around `data_beans_alg::hvg_selection::select_hvg_by_stats`:
 //! computes per-gene `(mean, variance)` of raw counts by streaming columns
 //! through a visitor, then delegates the binned residual-variance logic to
-//! the shared dense routine. Also exposes a sparse selection matrix so
-//! downstream visitors can filter CSC matrices cheaply.
+//! the shared dense routine. Used to weight the random-projection sketch
+//! (and for viz-layer feature gating); does not restrict the feature axis
+//! of the Nyström dictionary or the topic decoder.
 
 use crate::embed_common::*;
 use clap::Args;
@@ -48,8 +49,6 @@ pub struct HvgSelection {
     pub selected_names: Vec<Box<str>>,
     #[allow(dead_code)]
     pub index_map: FxHashMap<usize, usize>,
-    /// Sparse `n_selected × n_total` selection matrix.
-    pub selection_matrix: CscMat,
 }
 
 impl HvgSelection {
@@ -169,29 +168,11 @@ fn build_selection(selected_indices: Vec<usize>, feature_names: &[Box<str>]) -> 
         .enumerate()
         .map(|(new_i, &old_i)| (old_i, new_i))
         .collect();
-    let selection_matrix = create_selection_matrix(&selected_indices, feature_names.len());
     HvgSelection {
         selected_indices,
         selected_names,
         index_map,
-        selection_matrix,
     }
-}
-
-fn create_selection_matrix(selected_indices: &[usize], n_total_rows: usize) -> CscMat {
-    let n_selected = selected_indices.len();
-    let mut triplets = Vec::with_capacity(n_selected);
-    for (new_i, &old_i) in selected_indices.iter().enumerate() {
-        triplets.push((new_i as u64, old_i as u64, 1.0_f32));
-    }
-    CscMat::from_nonzero_triplets(n_selected, n_total_rows, &triplets)
-        .expect("Failed to create selection matrix")
-}
-
-/// Filter a CSC matrix to the selected rows: `S * x`.
-#[must_use]
-pub fn filter_csc_by_rows(selection_matrix: &CscMat, x: &CscMat) -> CscMat {
-    selection_matrix * x
 }
 
 /// Running-statistics visitor over raw (un-transformed) column values.
