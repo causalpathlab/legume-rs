@@ -18,7 +18,7 @@ pub struct VisualizeUmapArgs {
 
     #[arg(
         long,
-        default_value_t = 5,
+        default_value_t = 20,
         help = "Negative samples per attractive step"
     )]
     umap_negative_rate: usize,
@@ -40,11 +40,14 @@ pub fn fit_visualize_umap(args: &VisualizeUmapArgs) -> anyhow::Result<()> {
         2.0 * edges.len() as f32 / n.max(1) as f32
     );
 
+    // UMAP reference inits in [-10, 10] so gradient clamps at ±4 don't
+    // dominate the layout scale. random_init_2d returns [-1, 1].
+    const INIT_SCALE: f32 = 10.0;
     let init = random_init_2d(n, args.common.seed);
     let mut init_flat = Vec::with_capacity(n * 2);
     for i in 0..n {
-        init_flat.push(init[(i, 0)]);
-        init_flat.push(init[(i, 1)]);
+        init_flat.push(init[(i, 0)] * INIT_SCALE);
+        init_flat.push(init[(i, 1)] * INIT_SCALE);
     }
 
     let umap = Umap {
