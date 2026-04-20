@@ -75,11 +75,10 @@ pub struct FromMtxArgs {
     #[arg(long, default_value_t = 1)]
     pub column_nnz_cutoff: usize,
 
-    /// block size for the post-build squeeze pass (columns per rayon job).
-    /// Smaller values bound peak memory on very wide matrices at the cost of
-    /// extra scheduling overhead.
-    #[arg(long, default_value_t = 100)]
-    pub block_size: usize,
+    /// Cells per rayon job for the post-build squeeze pass.
+    /// Omit for auto-scaling by feature count.
+    #[arg(long)]
+    pub block_size: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -246,13 +245,10 @@ pub struct From10xMatrixArgs {
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Block size for the post-build squeeze pass",
-        long_help = "Number of columns handled per rayon job during the squeeze pass. \n\
-		     Smaller values bound peak memory on very wide matrices at the cost \n\
-		     of extra scheduling overhead."
+        help = "Cells per rayon job for the post-build squeeze pass \
+                (omit for auto-scaling by feature count)"
     )]
-    pub block_size: usize,
+    pub block_size: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -364,13 +360,10 @@ pub struct FromH5adArgs {
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Block size for the post-build squeeze pass",
-        long_help = "Number of columns handled per rayon job during the squeeze pass. \n\
-		     Smaller values bound peak memory on very wide matrices at the cost \n\
-		     of extra scheduling overhead."
+        help = "Cells per rayon job for the post-build squeeze pass \
+                (omit for auto-scaling by feature count)"
     )]
-    pub block_size: usize,
+    pub block_size: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -467,13 +460,10 @@ pub struct From10xMoleculeArgs {
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Block size for the post-build squeeze pass",
-        long_help = "Number of columns handled per rayon job during the squeeze pass. \n\
-		     Smaller values bound peak memory on very wide matrices at the cost \n\
-		     of extra scheduling overhead."
+        help = "Cells per rayon job for the post-build squeeze pass \
+                (omit for auto-scaling by feature count)"
     )]
-    pub block_size: usize,
+    pub block_size: Option<usize>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -632,13 +622,10 @@ pub struct FromZarrArgs {
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Block size for the post-build squeeze pass",
-        long_help = "Number of columns handled per rayon job during the squeeze pass. \n\
-		     Smaller values bound peak memory on very wide matrices at the cost \n\
-		     of extra scheduling overhead."
+        help = "Cells per rayon job for the post-build squeeze pass \
+                (omit for auto-scaling by feature count)"
     )]
-    pub block_size: usize,
+    pub block_size: Option<usize>,
 }
 
 pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
@@ -1664,7 +1651,7 @@ fn run_squeeze_if_needed(
     do_squeeze: bool,
     row_nnz_cutoff: usize,
     column_nnz_cutoff: usize,
-    block_size: usize,
+    block_size: Option<usize>,
     backend_file: &str,
 ) -> anyhow::Result<()> {
     if do_squeeze {

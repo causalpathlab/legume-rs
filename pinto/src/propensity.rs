@@ -80,10 +80,9 @@ pub struct SrtPropensityArgs {
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Block size for parallel processing"
+        help = "Cells per parallel block (omit for auto-scaling by feature count)"
     )]
-    block_size: usize,
+    block_size: Option<usize>,
 
     #[arg(
         long,
@@ -262,6 +261,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
 
         let jobs = matrix_util::utils::generate_minibatch_intervals(
             data_vec.num_columns(),
+            data_vec.num_rows(),
             args.block_size,
         );
 

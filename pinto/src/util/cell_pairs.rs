@@ -17,7 +17,7 @@ pub struct SrtCellPairs<'a> {
 
 pub struct SrtCellPairsArgs {
     pub knn: usize,
-    pub block_size: usize,
+    pub block_size: Option<usize>,
     pub reciprocal: bool,
 }
 
@@ -167,7 +167,7 @@ impl<'a> SrtCellPairs<'a> {
         visitor: &Visitor,
         shared_in: &SharedIn,
         shared_out: &mut SharedOut,
-        block_size: usize,
+        block_size: Option<usize>,
     ) -> anyhow::Result<()>
     where
         Visitor: Fn(
@@ -183,7 +183,7 @@ impl<'a> SrtCellPairs<'a> {
     {
         let all_pairs = &self.pairs;
         let ntot = all_pairs.len();
-        let jobs = generate_minibatch_intervals(ntot, block_size);
+        let jobs = generate_minibatch_intervals(ntot, self.data.num_rows(), block_size);
         let arc_shared_out = Arc::new(Mutex::new(shared_out));
 
         let pb = new_progress_bar(
@@ -229,7 +229,7 @@ pub fn build_spatial_graph(coordinates: &Mat, args: SrtCellPairsArgs) -> anyhow:
         &points,
         KnnGraphArgs {
             knn: args.knn,
-            block_size: args.block_size,
+            block_size: args.block_size.unwrap_or(1000),
             reciprocal: args.reciprocal,
         },
     )

@@ -230,7 +230,7 @@ pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
     )?;
 
     let ncells = paired.data_stack.num_columns()?;
-    let block_size = Some(ncells.min(4096));
+    let block_size: Option<usize> = None;
 
     /* 2. Shared random projection */
     info!(

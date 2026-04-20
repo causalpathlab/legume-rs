@@ -51,7 +51,7 @@ use matrix_param::traits::Inference;
 pub struct EstimateBatchArgs {
     pub proj_dim: usize,
     pub sort_dim: usize,
-    pub block_size: usize,
+    pub block_size: Option<usize>,
     /// KNN for cross-batch super-cell matching during hierarchical
     /// collapsing. Searches are over coarsened super-cell centroids,
     /// not individual cells, so this stays small.
@@ -76,7 +76,7 @@ pub fn estimate_batch(
 
     let proj_out = data_vec.project_columns_with_batch_correction(
         args.proj_dim,
-        Some(args.block_size),
+        args.block_size,
         Some(batch_membership),
     )?;
 

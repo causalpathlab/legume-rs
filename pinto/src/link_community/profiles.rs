@@ -15,10 +15,13 @@ use rayon::prelude::*;
 /// Compute per-gene total counts from sparse data.
 ///
 /// Returns a vector of length `n_genes` with the sum of all entries per row.
-pub fn compute_gene_totals(data: &SparseIoVec, block_size: usize) -> anyhow::Result<Vec<f64>> {
+pub fn compute_gene_totals(
+    data: &SparseIoVec,
+    block_size: Option<usize>,
+) -> anyhow::Result<Vec<f64>> {
     let n_genes = data.num_rows();
     let n_cells = data.num_columns();
-    let jobs = generate_minibatch_intervals(n_cells, block_size);
+    let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
 
     let partials: Vec<Vec<f64>> = jobs
         .par_iter()
@@ -160,13 +163,13 @@ pub fn build_edge_profiles(
     data: &SparseIoVec,
     edges: &[(usize, usize)],
     basis: &Mat,
-    block_size: usize,
+    block_size: Option<usize>,
 ) -> anyhow::Result<LinkProfileStore> {
     let n_edges = edges.len();
     let m = basis.ncols(); // proj_dim
     let basis_t = basis.transpose(); // precompute once, shared across blocks
 
-    let jobs = generate_minibatch_intervals(n_edges, block_size);
+    let jobs = generate_minibatch_intervals(n_edges, data.num_rows(), block_size);
 
     let pb = new_progress_bar(
         jobs.len() as u64,
@@ -306,12 +309,12 @@ pub fn compute_community_centroids(
     edges: &[(usize, usize)],
     membership: &[usize],
     k: usize,
-    block_size: usize,
+    block_size: Option<usize>,
 ) -> anyhow::Result<Mat> {
     let n_genes = data.num_rows();
     let n_edges = edges.len();
 
-    let jobs = generate_minibatch_intervals(n_edges, block_size);
+    let jobs = generate_minibatch_intervals(n_edges, n_genes, block_size);
 
     let pb = new_progress_bar(
         jobs.len() as u64,
@@ -507,7 +510,7 @@ pub fn compute_gene_module_sketch(
     cell_labels: &[usize],
     n_clusters: usize,
     sketch_dim: usize,
-    block_size: usize,
+    block_size: Option<usize>,
 ) -> anyhow::Result<Mat> {
     let n_genes = data.num_rows();
     let n_cells = data.num_columns();
@@ -515,7 +518,7 @@ pub fn compute_gene_module_sketch(
     // Random sketch matrix [n_clusters × sketch_dim]
     let r_mat = Mat::rnorm(n_clusters, sketch_dim);
 
-    let jobs = generate_minibatch_intervals(n_cells, block_size);
+    let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
 
     let pb = new_progress_bar(
         jobs.len() as u64,
@@ -643,11 +646,11 @@ pub fn build_edge_profiles_by_module(
     edges: &[(usize, usize)],
     gene_to_module: &[usize],
     n_modules: usize,
-    block_size: usize,
+    block_size: Option<usize>,
 ) -> anyhow::Result<LinkProfileStore> {
     let n_edges = edges.len();
 
-    let jobs = generate_minibatch_intervals(n_edges, block_size);
+    let jobs = generate_minibatch_intervals(n_edges, data.num_rows(), block_size);
 
     let pb = new_progress_bar(
         jobs.len() as u64,
@@ -721,7 +724,7 @@ pub fn build_edge_profiles_by_module(
 pub fn compute_gene_topic_stat(
     cell_propensity: &Mat,
     data_vec: &SparseIoVec,
-    block_size: usize,
+    block_size: Option<usize>,
     out_prefix: &str,
 ) -> anyhow::Result<()> {
     use matrix_param::dmatrix_gamma::GammaMatrix;
@@ -734,7 +737,7 @@ pub fn compute_gene_topic_stat(
 
     info!("Computing gene-topic statistics...");
     let prop_kn = cell_propensity.transpose();
-    let jobs = generate_minibatch_intervals(n_cells, block_size);
+    let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
 
     let pb = new_progress_bar(
         jobs.len() as u64,
@@ -792,7 +795,7 @@ pub fn compute_propensity_and_gene_topic_stat(
     data_vec: &SparseIoVec,
     n_cells: usize,
     n_clusters: usize,
-    block_size: usize,
+    block_size: Option<usize>,
     out_prefix: &str,
 ) -> anyhow::Result<()> {
     // 1. K-means on latent edge vectors
@@ -981,11 +984,11 @@ pub fn build_edge_profiles_by_gene_pairs(
     gene_adj: &[Vec<(usize, usize)>],
     gene_means: &DVec,
     n_gene_pairs: usize,
-    block_size: usize,
+    block_size: Option<usize>,
 ) -> anyhow::Result<LinkProfileStore> {
     let n_edges = edges.len();
 
-    let jobs = generate_minibatch_intervals(n_edges, block_size);
+    let jobs = generate_minibatch_intervals(n_edges, data.num_rows(), block_size);
 
     let pb = new_progress_bar(
         jobs.len() as u64,
@@ -1281,7 +1284,8 @@ mod tests {
         let cell_labels = vec![0, 0, 0, 1, 1, 1];
 
         let sketch_dim = 100;
-        let embed = compute_gene_module_sketch(&data, &cell_labels, 2, sketch_dim, 3).unwrap();
+        let embed =
+            compute_gene_module_sketch(&data, &cell_labels, 2, sketch_dim, Some(3)).unwrap();
 
         assert_eq!(embed.nrows(), n_genes);
         assert_eq!(embed.ncols(), sketch_dim);
@@ -1323,7 +1327,8 @@ mod tests {
         let gene_to_module = vec![0, 0, 1, 1];
         let edges = vec![(0, 1), (2, 3)];
 
-        let store = build_edge_profiles_by_module(&data, &edges, &gene_to_module, 2, 10).unwrap();
+        let store =
+            build_edge_profiles_by_module(&data, &edges, &gene_to_module, 2, Some(10)).unwrap();
 
         assert_eq!(store.n_edges, 2);
         assert_eq!(store.m, 2);

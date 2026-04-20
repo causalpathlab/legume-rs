@@ -76,7 +76,7 @@ pub fn select_hvg_streaming(
     data_vec: &SparseIoVec,
     max_features: Option<usize>,
     feature_list_file: Option<&str>,
-    block_size: usize,
+    block_size: Option<usize>,
     n_bins: Option<usize>,
 ) -> anyhow::Result<HvgSelection> {
     let feature_names = data_vec.row_names()?;
@@ -93,12 +93,7 @@ pub fn select_hvg_streaming(
 
     // Streaming pass: accumulate per-gene running mean+variance of raw counts.
     let mut stat = RunningStatistics::new(Ix1(data_vec.num_rows()));
-    data_vec.visit_columns_by_block(
-        &raw_stat_visitor,
-        &EmptyArg {},
-        &mut stat,
-        Some(block_size),
-    )?;
+    data_vec.visit_columns_by_block(&raw_stat_visitor, &EmptyArg {}, &mut stat, block_size)?;
 
     let means = stat.mean().to_vec();
     let vars = stat.variance().to_vec();

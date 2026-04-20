@@ -67,8 +67,11 @@ pub struct FitPrsSusieArgs {
     #[arg(long, default_value = "1000", help = "Max gradient steps per block")]
     pub num_iterations: usize,
 
-    #[arg(long, default_value = "1000", help = "Row minibatch size for SGVB")]
-    pub batch_size: usize,
+    #[arg(
+        long,
+        help = "Row minibatch size for SGVB (omit to auto-scale by variant count)"
+    )]
+    pub batch_size: Option<usize>,
 
     #[arg(long, default_value = "50", help = "Trailing ELBO averaging window")]
     pub elbo_window: usize,
@@ -180,7 +183,7 @@ pub fn fit_prs_susie(args: &FitPrsSusieArgs) -> Result<()> {
                 &prior_vars,
             ),
             SusieMethod::Sgvb => {
-                let config = build_sgvb_config(args, &prior_vars, seed);
+                let config = build_sgvb_config(args, &prior_vars, seed, block_m);
                 fit_block(&x_block, &yhat, None, &config, &device)
             }
         };
@@ -247,7 +250,15 @@ pub fn fit_prs_susie(args: &FitPrsSusieArgs) -> Result<()> {
 }
 
 /// Build SGVB FitConfig from CLI args.
-fn build_sgvb_config(args: &FitPrsSusieArgs, prior_vars: &[f32], block_seed: u64) -> FitConfig {
+fn build_sgvb_config(
+    args: &FitPrsSusieArgs,
+    prior_vars: &[f32],
+    block_seed: u64,
+    num_variants: usize,
+) -> FitConfig {
+    let batch_size = args
+        .batch_size
+        .unwrap_or_else(|| matrix_util::utils::default_block_size(num_variants));
     FitConfig {
         model_type: ModelType::Susie,
         prior_type: PriorType::Single,
@@ -255,7 +266,7 @@ fn build_sgvb_config(args: &FitPrsSusieArgs, prior_vars: &[f32], block_seed: u64
         num_sgvb_samples: args.num_sgvb_samples,
         learning_rate: args.learning_rate,
         num_iterations: args.num_iterations,
-        batch_size: args.batch_size,
+        batch_size,
         prior_vars: prior_vars.to_vec(),
         elbo_window: args.elbo_window,
         seed: block_seed,

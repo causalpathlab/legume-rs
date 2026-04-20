@@ -227,15 +227,15 @@ pub struct FitQtlSgvbArgs {
 
     #[arg(
         long,
-        default_value = "1000",
-        help = "Row minibatch size (full batch when N <= this value)",
+        help = "Row minibatch size (full batch when N <= this value); \
+                omit to auto-scale by variant count",
         long_help = "Number of individuals sampled per gradient step. When the total\n\
             number of individuals N exceeds this value, random minibatches of\n\
             this size are drawn each iteration. When N <= batch_size, all\n\
             individuals are used (full batch). Disabled for multilevel models.\n\
-            Default: 1000."
+            Omit for auto-scaling by variant count."
     )]
-    pub batch_size: usize,
+    pub batch_size: Option<usize>,
 
     #[arg(
         long,
@@ -516,7 +516,9 @@ pub fn fit_qtl_sgvb(args: &FitQtlSgvbArgs) -> Result<()> {
         num_sgvb_samples: args.num_sgvb_samples,
         learning_rate: args.learning_rate,
         num_iterations: args.num_iterations,
-        batch_size: args.batch_size,
+        batch_size: args
+            .batch_size
+            .unwrap_or_else(|| matrix_util::utils::default_block_size(m_snps)),
         prior_vars,
         elbo_window: args.elbo_window,
         seed: args.seed,
@@ -655,7 +657,7 @@ pub fn fit_qtl_sgvb(args: &FitQtlSgvbArgs) -> Result<()> {
         "num_sgvb_samples": args.num_sgvb_samples,
         "learning_rate": args.learning_rate,
         "num_iterations": args.num_iterations,
-        "batch_size": args.batch_size,
+        "batch_size": fit_config.batch_size,
         "elbo_window": args.elbo_window,
         "gamma_a0": args.gamma_a0,
         "gamma_b0": args.gamma_b0,

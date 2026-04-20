@@ -99,12 +99,9 @@ pub struct SvdArgs {
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Column block size for parallel I/O",
-        long_help = "Columns streamed per worker. Trades parallel granularity\n\
-                     against per-block memory."
+        help = "Cells per rayon job (omit for auto-scaling by feature count)"
     )]
-    block_size: usize,
+    block_size: Option<usize>,
 
     #[arg(
         short = 'c',
@@ -200,14 +197,14 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             let weights = sel.row_weights(n_rows);
             data_vec.project_columns_weighted(
                 proj_dim,
-                Some(args.block_size),
+                args.block_size,
                 Some(&batch_membership),
                 &weights,
             )?
         } else {
             data_vec.project_columns_with_batch_correction(
                 proj_dim,
-                Some(args.block_size),
+                args.block_size,
                 Some(&batch_membership),
             )?
         };
@@ -290,7 +287,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         &data_vec,
         args.n_latent_topics,
         args.column_sum_norm,
-        Some(args.block_size),
+        args.block_size,
     )?;
 
     let cell_names = data_vec.column_names()?;
