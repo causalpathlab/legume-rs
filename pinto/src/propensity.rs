@@ -86,6 +86,18 @@ pub struct SrtPropensityArgs {
 
     #[arg(
         long,
+        default_value_t = false,
+        help = "Disable housekeeping adjustment in the genes.parquet report (on by default)",
+        long_help = "By default, the reported gene-cluster sufficient statistics are\n\
+                       scaled row-wise by 1/(bg[g] + ε), where bg[g] is the gene's\n\
+                       share of total mass. This gives housekeeping-adjusted\n\
+                       posterior rates. Pass --no-adjust-housekeeping to disable\n\
+                       and write raw rates."
+    )]
+    no_adjust_housekeeping: bool,
+
+    #[arg(
+        long,
         short,
         required = true,
         help = "Output file prefix",
@@ -296,6 +308,11 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         for (s_dk, n_k1) in partial_stats {
             sum_dk += s_dk;
             n_1k += n_k1.transpose();
+        }
+
+        if !args.no_adjust_housekeeping {
+            info!("Applying IDF housekeeping adjustment to gene-cluster stats");
+            apply_gene_idf_weights(&mut sum_dk);
         }
 
         let mut gamma_param = GammaMatrix::new((sum_dk.nrows(), sum_dk.ncols()), 1.0, 1.0);
