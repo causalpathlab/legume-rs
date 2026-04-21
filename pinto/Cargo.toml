@@ -15,7 +15,6 @@ path = "src/main.rs"
 [dependencies]
 data-beans = { workspace = true }
 data-beans-alg = { workspace = true }
-hsblock = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
 parquet = { workspace = true }
