@@ -133,6 +133,18 @@ pub struct SrtInputArgs {
 
     #[arg(
         long,
+        default_value_t = 5,
+        help = "Refinement sweeps per coarsening level (0 to disable)",
+        long_help = "Leiden-style local-moving sweeps applied to each coarsening level\n\
+                       after the dendrogram cut. Each sweep lets nodes move to graph-adjacent\n\
+                       clusters that improve cosine similarity to centroid; moves that would\n\
+                       disconnect the source cluster are rejected. Converges early when no\n\
+                       node moves; 5 is usually enough. Set to 0 to skip refinement."
+    )]
+    pub refine_iterations: usize,
+
+    #[arg(
+        long,
         short = 'p',
         default_value_t = 50,
         help = "Random projection dimension for cell embeddings",
