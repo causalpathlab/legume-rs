@@ -341,6 +341,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             coordinates: &coordinates,
             batch_membership: Some(&batch_membership),
         }),
+        c.refine_iterations,
     );
 
     //////////////////////////////////////////////////////
