@@ -164,6 +164,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
             sort_dim: args.sort_dim,
             num_opt_iter: args.iter_opt,
             oversample: false,
+            refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
         },
     )?;
 

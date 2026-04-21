@@ -36,4 +36,5 @@ pub mod inference;
 mod test;
 
 pub use btree::GammaPoissonParam;
+pub use gibbs::{compute_log_probs_for_vertex, compute_log_probs_for_vertex_restricted};
 pub use inference::{Hsblock, HsbmOptions};

@@ -42,6 +42,19 @@ pub trait VisitColumnsOps {
         SharedOut: Sync + Send;
 }
 
+/// Shared bar template used by every par-over-column visitor so progress
+/// shows the same `Label {bar:40} {pos}/{len} units ({eta})` format across
+/// random projection, collapsing, and downstream column scans.
+fn styled_progress_bar(total: u64, unit_label: &str) -> indicatif::ProgressBar {
+    use indicatif::{ProgressBar, ProgressStyle};
+    let tmpl = format!("{{bar:40}} {{pos}}/{{len}} {} ({{eta}})", unit_label);
+    ProgressBar::new(total).with_style(
+        ProgressStyle::with_template(&tmpl)
+            .unwrap()
+            .progress_chars("##-"),
+    )
+}
+
 impl VisitColumnsOps for SparseIoVec {
     fn visit_columns_by_block<Visitor, SharedIn, SharedOut>(
         &self,
@@ -62,11 +75,15 @@ impl VisitColumnsOps for SparseIoVec {
         let jobs = create_jobs(ntot, num_features, block_size);
 
         let arc_shared_out = Arc::new(Mutex::new(shared_out));
+        let pb = styled_progress_bar(jobs.len() as u64, "blocks");
 
-        jobs.par_iter()
-            .progress_count(jobs.len() as u64)
+        let result = jobs
+            .par_iter()
+            .progress_with(pb.clone())
             .map(|&(lb, ub)| visitor((lb, ub), self, shared_in, arc_shared_out.clone()))
-            .collect()
+            .collect();
+        pb.finish_and_clear();
+        result
     }
 
     fn visit_columns_by_group<Visitor, SharedIn, SharedOut>(
@@ -88,15 +105,17 @@ impl VisitColumnsOps for SparseIoVec {
 
         let arc_shared_out = Arc::new(Mutex::new(shared_out));
         let num_samples = group_to_cols.len();
-        let num_jobs = num_samples as u64;
+        let pb = styled_progress_bar(num_samples as u64, "groups");
 
-        group_to_cols
+        let result = group_to_cols
             .iter()
             .enumerate()
             .par_bridge()
-            .progress_count(num_jobs)
+            .progress_with(pb.clone())
             .map(|(sample, cells)| visitor(sample, cells, self, shared_in, arc_shared_out.clone()))
-            .collect()
+            .collect();
+        pb.finish_and_clear();
+        result
     }
 }
 

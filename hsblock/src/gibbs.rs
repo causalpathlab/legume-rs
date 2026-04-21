@@ -20,6 +20,10 @@ pub struct GibbsSampler {
     log_probs: Vec<f64>,
     /// Base seed for parallel RNG (derived from main rng on first use)
     parallel_seed: u64,
+    /// Stagnation threshold (fraction of vertices moving per sweep). When
+    /// three consecutive sweeps land below this threshold, Gibbs returns
+    /// early. `0.0` disables.
+    stagnation_frac: f64,
 }
 
 impl GibbsSampler {
@@ -29,7 +33,16 @@ impl GibbsSampler {
             rng,
             log_probs: Vec::new(),
             parallel_seed: 0,
+            stagnation_frac: 0.0,
         }
+    }
+
+    /// Enable Gibbs early-exit when three consecutive sweeps move fewer
+    /// than `frac * n` vertices. `frac = 0.0` keeps the fixed-sweep
+    /// behavior (the default).
+    pub fn with_stagnation(mut self, frac: f64) -> Self {
+        self.stagnation_frac = frac;
+        self
     }
 
     /// Run `num_sweeps` full Gibbs sweeps over all vertices (sequential).
@@ -57,8 +70,12 @@ impl GibbsSampler {
         self.log_probs.resize(k, 0.0);
 
         let mut total_moves = 0;
+        let early_exit = self.stagnation_frac > 0.0;
+        let threshold = (self.stagnation_frac * n as f64).ceil() as usize;
+        let mut low_streak = 0usize;
 
         for _sweep in 0..num_sweeps {
+            let mut sweep_moves = 0;
             for v in 0..n {
                 let old_c = stats.membership[v];
 
@@ -77,7 +94,18 @@ impl GibbsSampler {
 
                 if new_c != old_c {
                     stats.delta_move(v, old_c, new_c, &adj_list[v]);
-                    total_moves += 1;
+                    sweep_moves += 1;
+                }
+            }
+            total_moves += sweep_moves;
+            if early_exit {
+                if sweep_moves < threshold {
+                    low_streak += 1;
+                    if low_streak >= 3 {
+                        break;
+                    }
+                } else {
+                    low_streak = 0;
                 }
             }
         }
@@ -113,6 +141,9 @@ impl GibbsSampler {
         let base_seed = self.parallel_seed;
 
         let mut total_moves = 0;
+        let early_exit = self.stagnation_frac > 0.0;
+        let threshold = (self.stagnation_frac * n as f64).ceil() as usize;
+        let mut low_streak = 0usize;
 
         // Pre-allocate node order for par_chunks
         let node_order: Vec<usize> = (0..n).collect();
@@ -148,12 +179,24 @@ impl GibbsSampler {
                 .collect();
 
             // Phase 2: Sequential apply (mutates stats)
+            let mut sweep_moves = 0;
             for v in 0..n {
                 let old_c = stats.membership[v];
                 let new_c = proposals[v];
                 if new_c != old_c {
                     stats.delta_move(v, old_c, new_c, &adj_list[v]);
-                    total_moves += 1;
+                    sweep_moves += 1;
+                }
+            }
+            total_moves += sweep_moves;
+            if early_exit {
+                if sweep_moves < threshold {
+                    low_streak += 1;
+                    if low_streak >= 3 {
+                        break;
+                    }
+                } else {
+                    low_streak = 0;
                 }
             }
         }
@@ -236,7 +279,8 @@ fn argmax_log(log_probs: &[f64]) -> usize {
 /// Complexity: O(K²) per candidate cluster, O(K³) per vertex.
 ///
 /// This is a free function (not a method) so it can be called from parallel
-/// contexts where `&SufficientStats` is shared across threads.
+/// contexts where `&SufficientStats` is shared across threads. See
+/// [`compute_log_probs_for_vertex_restricted`] for the candidate-subset variant.
 ///
 /// * `vertex` - The vertex to compute proposals for
 /// * `tree` - Binary tree with current variational parameters
@@ -244,7 +288,7 @@ fn argmax_log(log_probs: &[f64]) -> usize {
 /// * `adj_list` - Pre-built adjacency list
 /// * `degree_corrected` - Whether to use degree-corrected model
 /// * `log_probs` - Output buffer of length K (caller-provided)
-fn compute_log_probs_for_vertex(
+pub fn compute_log_probs_for_vertex(
     vertex: usize,
     tree: &BTree<GammaPoissonParam>,
     stats: &SufficientStats,
@@ -252,133 +296,196 @@ fn compute_log_probs_for_vertex(
     degree_corrected: bool,
     log_probs: &mut [f64],
 ) {
+    compute_log_probs_for_vertex_impl(
+        vertex,
+        tree,
+        stats,
+        adj_list,
+        degree_corrected,
+        None,
+        log_probs,
+    );
+}
+
+/// Candidate-restricted variant of [`compute_log_probs_for_vertex`].
+///
+/// Evaluates only the clusters listed in `candidates`. Slots not listed are
+/// left at `f64::NEG_INFINITY`, and the current cluster is always scored as
+/// `0.0`. Use this when the caller has a prior on which destinations are
+/// plausible (e.g., BBKNN neighbors, sibling blocks in an external tree) to
+/// cut per-vertex work from O(K) to O(|candidates|).
+///
+/// * `candidates` - Slice of cluster indices in `0..K` to evaluate.
+pub fn compute_log_probs_for_vertex_restricted(
+    vertex: usize,
+    tree: &BTree<GammaPoissonParam>,
+    stats: &SufficientStats,
+    adj_list: &[Vec<(usize, f64)>],
+    degree_corrected: bool,
+    candidates: &[usize],
+    log_probs: &mut [f64],
+) {
+    compute_log_probs_for_vertex_impl(
+        vertex,
+        tree,
+        stats,
+        adj_list,
+        degree_corrected,
+        Some(candidates),
+        log_probs,
+    );
+}
+
+/// Per-vertex scratch captured once outside the candidate loop so
+/// `evaluate_delta_for_target` stays a small, easy-to-audit signature.
+struct VertexCtx<'a> {
+    current_c: usize,
+    deg: f64,
+    edge_to_cluster: &'a [f64],
+}
+
+fn evaluate_delta_for_target(
+    target: usize,
+    k: usize,
+    tree: &BTree<GammaPoissonParam>,
+    stats: &SufficientStats,
+    ctx: &VertexCtx<'_>,
+    degree_corrected: bool,
+) -> f64 {
+    let current_c = ctx.current_c;
+    let deg = ctx.deg;
+    let edge_to_cluster = ctx.edge_to_cluster;
+    if target == current_c {
+        return 0.0;
+    }
+    let mut delta = 0.0;
+
+    // Hypothetical new stats after moving vertex to `target`.
+    let new_size_s = stats.cluster_size[current_c] - 1.0;
+    let new_size_t = stats.cluster_size[target] + 1.0;
+    let new_vol_s = stats.cluster_volume[current_c] - deg;
+    let new_vol_t = stats.cluster_volume[target] + deg;
+
+    for ci in 0..k {
+        for cj in ci..k {
+            if ci != current_c && ci != target && cj != current_c && cj != target {
+                continue;
+            }
+
+            let lca_node = tree.lca(ci, cj);
+            let (a0, b0) = tree.node_params(lca_node);
+
+            let old_edge = stats.edge_stat(ci, cj);
+            let old_total = stats.total_stat(ci, cj, degree_corrected);
+            let old_s = poisson_score_cpu(a0, b0, old_edge, old_total);
+
+            let mut new_edge = old_edge;
+
+            if ci == current_c && cj == current_c {
+                new_edge -= edge_to_cluster[current_c];
+            } else if ci == target && cj == target {
+                new_edge += edge_to_cluster[target];
+            } else if (ci == current_c && cj == target) || (ci == target && cj == current_c) {
+                new_edge = old_edge - edge_to_cluster[target] + edge_to_cluster[current_c];
+            } else if ci == current_c {
+                new_edge -= edge_to_cluster[cj];
+            } else if cj == current_c {
+                new_edge -= edge_to_cluster[ci];
+            } else if ci == target {
+                new_edge += edge_to_cluster[cj];
+            } else if cj == target {
+                new_edge += edge_to_cluster[ci];
+            }
+
+            let new_total = if degree_corrected {
+                let vol_ci = if ci == current_c {
+                    new_vol_s
+                } else if ci == target {
+                    new_vol_t
+                } else {
+                    stats.cluster_volume[ci]
+                };
+                let vol_cj = if cj == current_c {
+                    new_vol_s
+                } else if cj == target {
+                    new_vol_t
+                } else {
+                    stats.cluster_volume[cj]
+                };
+                if ci == cj {
+                    vol_ci * vol_cj / 2.0
+                } else {
+                    vol_ci * vol_cj
+                }
+            } else {
+                let sz_ci = if ci == current_c {
+                    new_size_s
+                } else if ci == target {
+                    new_size_t
+                } else {
+                    stats.cluster_size[ci]
+                };
+                let sz_cj = if cj == current_c {
+                    new_size_s
+                } else if cj == target {
+                    new_size_t
+                } else {
+                    stats.cluster_size[cj]
+                };
+                if ci == cj {
+                    sz_ci * (sz_ci - 1.0) / 2.0
+                } else {
+                    sz_ci * sz_cj
+                }
+            };
+
+            let new_s = poisson_score_cpu(a0, b0, new_edge, new_total);
+            delta += new_s - old_s;
+        }
+    }
+
+    delta
+}
+
+fn compute_log_probs_for_vertex_impl(
+    vertex: usize,
+    tree: &BTree<GammaPoissonParam>,
+    stats: &SufficientStats,
+    adj_list: &[Vec<(usize, f64)>],
+    degree_corrected: bool,
+    candidates: Option<&[usize]>,
+    log_probs: &mut [f64],
+) {
     let k = stats.k;
     let current_c = stats.membership[vertex];
     let neighbors = &adj_list[vertex];
 
-    // Build per-cluster edge sum from vertex to each cluster
     let mut edge_to_cluster = vec![0.0f64; k];
     for &(nbr, w) in neighbors {
         edge_to_cluster[stats.membership[nbr]] += w;
     }
+    let ctx = VertexCtx {
+        current_c,
+        deg: stats.vertex_degree[vertex],
+        edge_to_cluster: &edge_to_cluster,
+    };
 
-    let deg = stats.vertex_degree[vertex];
-
-    for t in 0..k {
-        if t == current_c {
-            log_probs[t] = 0.0;
-            continue;
-        }
-
-        // Simulate moving vertex from current_c to t:
-        // Compute the change in score for all cluster pairs affected.
-        //
-        // Affected pairs are those involving current_c or t (or both).
-        // For each such pair (ci, cj) with ci <= cj, compute:
-        //   new_score - old_score
-
-        let mut delta = 0.0;
-
-        // Hypothetical new stats after moving vertex to t
-        let new_size_s = stats.cluster_size[current_c] - 1.0; // source shrinks
-        let new_size_t = stats.cluster_size[t] + 1.0; // target grows
-        let new_vol_s = stats.cluster_volume[current_c] - deg;
-        let new_vol_t = stats.cluster_volume[t] + deg;
-
-        for ci in 0..k {
-            for cj in ci..k {
-                // Check if this pair is affected (involves current_c or t)
-                if ci != current_c && ci != t && cj != current_c && cj != t {
+    match candidates {
+        Some(cand) => {
+            log_probs.iter_mut().for_each(|x| *x = f64::NEG_INFINITY);
+            log_probs[current_c] = 0.0;
+            for &t in cand {
+                if t == current_c {
                     continue;
                 }
-
-                let lca_node = tree.lca(ci, cj);
-                let (a0, b0) = tree.node_params(lca_node);
-
-                // Old score for this pair
-                let old_edge = stats.edge_stat(ci, cj);
-                let old_total = stats.total_stat(ci, cj, degree_corrected);
-                let old_s = poisson_score_cpu(a0, b0, old_edge, old_total);
-
-                // New edge count after move
-                let mut new_edge = old_edge;
-
-                if ci == current_c && cj == current_c {
-                    // Self-pair for source: lose edges from v to other vertices in current_c
-                    new_edge -= edge_to_cluster[current_c];
-                } else if ci == t && cj == t {
-                    // Self-pair for target: gain edges from v to other vertices in t
-                    new_edge += edge_to_cluster[t];
-                } else if (ci == current_c && cj == t) || (ci == t && cj == current_c) {
-                    // Cross pair source-target:
-                    // Remove v's edges to t (was counted in current_c-to-t)
-                    // Add v's edges to current_c (now counted in t-to-current_c)
-                    new_edge = old_edge - edge_to_cluster[t] + edge_to_cluster[current_c];
-                } else if ci == current_c {
-                    // Pair (current_c, cj) where cj != t
-                    new_edge -= edge_to_cluster[cj];
-                } else if cj == current_c {
-                    // Pair (ci, current_c) where ci != t: v's edges to ci leave this block
-                    new_edge -= edge_to_cluster[ci];
-                } else if ci == t {
-                    // Pair (t, cj) where cj != current_c: v's edges to cj enter this block
-                    new_edge += edge_to_cluster[cj];
-                } else if cj == t {
-                    // Pair (ci, t) where ci != current_c: v's edges to ci enter this block
-                    new_edge += edge_to_cluster[ci];
-                }
-
-                // New total stat after move.
-                // Must match the total_stat() function exactly for the hypothetical new state.
-                let new_total = if degree_corrected {
-                    let vol_ci = if ci == current_c {
-                        new_vol_s
-                    } else if ci == t {
-                        new_vol_t
-                    } else {
-                        stats.cluster_volume[ci]
-                    };
-                    let vol_cj = if cj == current_c {
-                        new_vol_s
-                    } else if cj == t {
-                        new_vol_t
-                    } else {
-                        stats.cluster_volume[cj]
-                    };
-                    // Degree-corrected: vol_i * vol_j, halved for self-pairs
-                    if ci == cj {
-                        vol_ci * vol_cj / 2.0
-                    } else {
-                        vol_ci * vol_cj
-                    }
-                } else {
-                    let sz_ci = if ci == current_c {
-                        new_size_s
-                    } else if ci == t {
-                        new_size_t
-                    } else {
-                        stats.cluster_size[ci]
-                    };
-                    let sz_cj = if cj == current_c {
-                        new_size_s
-                    } else if cj == t {
-                        new_size_t
-                    } else {
-                        stats.cluster_size[cj]
-                    };
-                    if ci == cj {
-                        sz_ci * (sz_ci - 1.0) / 2.0
-                    } else {
-                        sz_ci * sz_cj
-                    }
-                };
-
-                let new_s = poisson_score_cpu(a0, b0, new_edge, new_total);
-                delta += new_s - old_s;
+                log_probs[t] = evaluate_delta_for_target(t, k, tree, stats, &ctx, degree_corrected);
             }
         }
-
-        log_probs[t] = delta;
+        None => {
+            for (t, slot) in log_probs.iter_mut().enumerate().take(k) {
+                *slot = evaluate_delta_for_target(t, k, tree, stats, &ctx, degree_corrected);
+            }
+        }
     }
 }
 
@@ -728,5 +835,107 @@ mod tests {
         // The result should have a reasonable number of non-empty clusters
         let nonempty = stats.cluster_size.iter().filter(|&&s| s > 0.0).count();
         assert!(nonempty >= 1 && nonempty <= k);
+    }
+
+    #[test]
+    fn test_restricted_kernel_matches_unrestricted_on_candidates() {
+        let (edges, n, _) = planted_partition_graph(5, 3, 0.8, 0.1, 42);
+        let tree = BTree::with_gamma_poisson(3, 2.0, 1.5);
+        let k = tree.num_leaves();
+        let labels: Vec<usize> = (0..n).map(|v| v % k).collect();
+        let stats = SufficientStats::from_edges(&edges, n, k, &labels);
+        let adj_list = build_adj_list(&edges, n);
+
+        let mut full = vec![0f64; k];
+        let mut restricted = vec![0f64; k];
+        let candidates: Vec<usize> = (0..k).collect();
+
+        for v in 0..n {
+            compute_log_probs_for_vertex(v, &tree, &stats, &adj_list, false, &mut full);
+            compute_log_probs_for_vertex_restricted(
+                v,
+                &tree,
+                &stats,
+                &adj_list,
+                false,
+                &candidates,
+                &mut restricted,
+            );
+            for t in 0..k {
+                assert!(
+                    (full[t] - restricted[t]).abs() < 1e-10,
+                    "v={}, t={}: full={}, restricted={}",
+                    v,
+                    t,
+                    full[t],
+                    restricted[t]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_restricted_kernel_narrow_candidates_leaves_others_neg_inf() {
+        let (edges, n, _) = planted_partition_graph(5, 3, 0.8, 0.1, 42);
+        let tree = BTree::with_gamma_poisson(3, 2.0, 1.5);
+        let k = tree.num_leaves();
+        let labels: Vec<usize> = (0..n).map(|v| v % k).collect();
+        let stats = SufficientStats::from_edges(&edges, n, k, &labels);
+        let adj_list = build_adj_list(&edges, n);
+
+        let mut log_probs = vec![0f64; k];
+        let candidates = vec![1usize];
+        compute_log_probs_for_vertex_restricted(
+            0,
+            &tree,
+            &stats,
+            &adj_list,
+            false,
+            &candidates,
+            &mut log_probs,
+        );
+
+        let current_c = stats.membership[0];
+        for (t, &lp) in log_probs.iter().enumerate() {
+            if t == current_c {
+                assert!(lp.abs() < 1e-10);
+            } else if candidates.contains(&t) {
+                assert!(lp.is_finite());
+            } else {
+                assert!(lp.is_infinite() && lp < 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_gibbs_stagnation_early_exit() {
+        // Run Gibbs twice: once with stagnation=0 (fixed sweeps), once with
+        // stagnation=0.5 (should early-exit once the chain is quiet).
+        let (edges, n, _) = planted_partition_graph(20, 2, 0.6, 0.05, 42);
+        let tree = BTree::with_gamma_poisson(2, 1.0, 1.0);
+        let k = tree.num_leaves();
+        let mut rng = SmallRng::seed_from_u64(123);
+        let labels: Vec<usize> = (0..n).map(|_| rng.random_range(0..k)).collect();
+        let mut stats_a = SufficientStats::from_edges(&edges, n, k, &labels);
+        let mut stats_b = SufficientStats::from_edges(&edges, n, k, &labels);
+        let adj_list = build_adj_list(&edges, n);
+
+        let mut sampler_a = GibbsSampler::new(SmallRng::seed_from_u64(7));
+        let mut sampler_b = GibbsSampler::new(SmallRng::seed_from_u64(7)).with_stagnation(0.5);
+
+        // Run first 5 sweeps on both to converge.
+        sampler_a.run(&tree, &mut stats_a, &adj_list, 5, false);
+        sampler_b.run(&tree, &mut stats_b, &adj_list, 5, false);
+
+        // Now both are near-converged. Ask for 100 more sweeps; early-exit
+        // should return fewer moves (fewer sweeps actually executed).
+        let moves_a = sampler_a.run(&tree, &mut stats_a, &adj_list, 100, false);
+        let moves_b = sampler_b.run(&tree, &mut stats_b, &adj_list, 100, false);
+        assert!(
+            moves_b <= moves_a,
+            "stagnation early-exit should not do more work: a={}, b={}",
+            moves_a,
+            moves_b
+        );
     }
 }

@@ -20,6 +20,11 @@ use crate::random_projection::binary_sort_columns;
 use rustc_hash::FxHashMap as HashMap;
 type CscMat = nalgebra_sparse::CscMatrix<f32>;
 
+/// Sparse super-cell gene profile: `rows[sc] = Vec<(gene_idx, sum)>` sorted
+/// by `gene_idx`, as produced by `collect_super_cell_gene_sums` and
+/// consumed by `collect_matched_stat_coarse` and the refinement pass.
+pub type GeneSums = Vec<Vec<(usize, f32)>>;
+
 pub const DEFAULT_KNN: usize = 10;
 pub const DEFAULT_OPT_ITER: usize = 100;
 
@@ -34,6 +39,9 @@ pub struct MultilevelParams {
     /// `CollapsedStat` in each `CollapsedOut` for jitter-time
     /// resampling.
     pub oversample: bool,
+    /// Opt-in BBKNN + Poisson DC-SBM refinement on top of the hash
+    /// partition. `None` preserves legacy behavior.
+    pub refine: Option<crate::refine_multilevel::RefineParams>,
 }
 
 impl MultilevelParams {
@@ -44,6 +52,7 @@ impl MultilevelParams {
             sort_dim: proj_dim.min(12),
             num_opt_iter: DEFAULT_OPT_ITER,
             oversample: false,
+            refine: Some(crate::refine_multilevel::RefineParams::default()),
         }
     }
 }
@@ -624,6 +633,11 @@ const DEFAULT_COARSEST_SORT_DIM: usize = 7;
 
 /// Shared layout for super-cells (batch × group intersections).
 /// Reusable across multiple layers in a `SparseIoStack`.
+///
+/// Cross-batch neighbor queries go through `SparseIoVec::batch_knn_lookup`
+/// (the per-batch HNSW over cells), not a super-cell-level index: the
+/// centroid of a super-cell is used as the query point, results are
+/// deduped to super-cells via `cell_to_sc`.
 pub struct SuperCellLayout {
     /// Centroid matrix: proj_dim x num_super_cells
     pub centroids: DMatrix<f32>,
@@ -635,8 +649,8 @@ pub struct SuperCellLayout {
     pub super_cell_to_group: Vec<usize>,
     /// Maps (batch, group) → super-cell index
     pub bg_to_sc: HashMap<(usize, usize), usize>,
-    /// HNSW index built on super-cell centroids
-    pub knn_lookup: ColumnDict<usize>,
+    /// Global cell index → owning super-cell index.
+    pub cell_to_sc: Vec<usize>,
 }
 
 /// Pre-aggregated super-cell data for fast cross-batch matching.
@@ -743,9 +757,18 @@ fn build_super_cell_layout(
         bg_to_sc.insert((batch, group), i);
     }
 
-    // Build a single HNSW from all super-cell centroids
-    let names: Vec<usize> = (0..num_sc).collect();
-    let knn_lookup = ColumnDict::<usize>::from_dmatrix(centroids.clone(), names);
+    // Cell → super-cell inversion (each cell belongs to exactly one sc via
+    // (batch, group)).
+    let ncols = col_to_batch.len();
+    let mut cell_to_sc = vec![usize::MAX; ncols];
+    for (group, cells) in group_to_cols.iter().enumerate() {
+        for &c in cells {
+            let b = col_to_batch[c];
+            if let Some(&sc) = bg_to_sc.get(&(b, group)) {
+                cell_to_sc[c] = sc;
+            }
+        }
+    }
 
     Ok(SuperCellLayout {
         centroids,
@@ -753,7 +776,7 @@ fn build_super_cell_layout(
         super_cell_to_batch: sc_to_batch,
         super_cell_to_group: sc_to_group,
         bg_to_sc,
-        knn_lookup,
+        cell_to_sc,
     })
 }
 
@@ -768,9 +791,16 @@ fn collect_super_cell_gene_sums(
     bg_to_sc: &HashMap<(usize, usize), usize>,
     num_sc: usize,
 ) -> anyhow::Result<Vec<Vec<(usize, f32)>>> {
+    use indicatif::ParallelProgressIterator;
+    let pb = ProgressBar::new(group_to_cols.len() as u64).with_style(
+        ProgressStyle::with_template("Super-cell gene sums {bar:40} {pos}/{len} groups ({eta})")
+            .unwrap()
+            .progress_chars("##-"),
+    );
     let gene_sum_maps: Vec<(usize, HashMap<usize, f32>)> = group_to_cols
         .par_iter()
         .enumerate()
+        .progress_with(pb.clone())
         .flat_map(|(group, cells)| {
             let yy = data_vec
                 .read_columns_csc(cells.iter().cloned())
@@ -837,41 +867,106 @@ fn build_super_cells(
     })
 }
 
+/// Per-super-cell, for each non-own batch return up to `knn` distinct
+/// super-cells whose member cells are closest to `sc`'s centroid.
+///
+/// Queries `SparseIoVec::batch_knn_lookup` (per-batch HNSW over cells),
+/// then dedups hits to super-cells via `layout.cell_to_sc`. Distances come
+/// back as the minimum over collapsed cells for each super-cell.
+///
+/// Returns: `result[sc] = Vec<(other_sc, distance)>` flattened across all
+/// non-own batches.
+fn per_batch_sc_neighbors(
+    layout: &SuperCellLayout,
+    batch_knn_lookup: &[ColumnDict<usize>],
+    knn: usize,
+) -> anyhow::Result<Vec<Vec<(usize, f32)>>> {
+    use indicatif::ParallelProgressIterator;
+    use matrix_util::knn_match::MakeVecPoint;
+    let num_sc = layout.cell_counts.len();
+    // Oversample cells per batch so dedup-to-sc still yields ~knn uniques.
+    let cell_oversample = (knn * 4 + 1).max(knn);
+
+    let pb = ProgressBar::new(num_sc as u64).with_style(
+        ProgressStyle::with_template("BBKNN match {bar:40} {pos}/{len} super-cells ({eta})")
+            .unwrap()
+            .progress_chars("##-"),
+    );
+    let result: anyhow::Result<Vec<Vec<(usize, f32)>>> = (0..num_sc)
+        .into_par_iter()
+        .progress_with(pb.clone())
+        .map(|sc| -> anyhow::Result<Vec<(usize, f32)>> {
+            let sc_batch = layout.super_cell_to_batch[sc];
+            let centroid = layout.centroids.column(sc).to_vp();
+            let mut all_hits: Vec<(usize, f32)> = Vec::new();
+            for (b, bknn) in batch_knn_lookup.iter().enumerate() {
+                if b == sc_batch {
+                    continue;
+                }
+                let (cell_ids, dists) = bknn.search_by_query_data(&centroid, cell_oversample)?;
+                let mut best: HashMap<usize, f32> = HashMap::default();
+                for (&c, &d) in cell_ids.iter().zip(dists.iter()) {
+                    let other_sc = layout.cell_to_sc[c];
+                    if other_sc == usize::MAX || other_sc == sc {
+                        continue;
+                    }
+                    best.entry(other_sc)
+                        .and_modify(|old| {
+                            if d < *old {
+                                *old = d;
+                            }
+                        })
+                        .or_insert(d);
+                    if best.len() >= knn {
+                        break;
+                    }
+                }
+                let mut per_batch: Vec<(usize, f32)> = best.into_iter().collect();
+                per_batch
+                    .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                per_batch.truncate(knn);
+                all_hits.extend(per_batch);
+            }
+            Ok(all_hits)
+        })
+        .collect();
+    pb.finish_and_clear();
+    result
+}
+
 /// Match super-cells across batches and accumulate counterfactual
 /// statistics into `stat.imputed_sum_ds` and `stat.residual_sum_ds`.
+///
+/// `sc_to_group` is the per-super-cell group assignment to use when writing
+/// into stat columns; callers pass `&layout.super_cell_to_group` for the
+/// hash-partition mapping, or a refined mapping from
+/// `refine_multilevel::refine_assignments`.
+///
+/// `knn` is now the per-other-batch neighbour count: each super-cell draws
+/// up to `knn` distinct foreign super-cells from **each** non-own batch, so
+/// the total match set is up to `knn · (num_batches − 1)`.
 fn collect_matched_stat_coarse(
     layout: &SuperCellLayout,
     gene_sums: &[Vec<(usize, f32)>],
+    sc_to_group: &[usize],
+    batch_knn_lookup: &[ColumnDict<usize>],
     knn: usize,
     stat: &mut CollapsedStat,
 ) -> anyhow::Result<()> {
     let num_sc = layout.cell_counts.len();
+    debug_assert_eq!(sc_to_group.len(), num_sc);
 
-    // Process super-cells (could parallelize with mutex, but
-    // num_sc is typically small enough for sequential processing)
+    let neighbors_per_sc = per_batch_sc_neighbors(layout, batch_knn_lookup, knn)?;
+
     for sc_idx in 0..num_sc {
-        let sc_batch = layout.super_cell_to_batch[sc_idx];
-        let sc_group = layout.super_cell_to_group[sc_idx];
+        let sc_group = sc_to_group[sc_idx];
         let sc_count = layout.cell_counts[sc_idx];
 
         if sc_count < 1.0 {
             continue;
         }
 
-        // Query HNSW for neighbors, oversampling to filter same-batch
-        let oversample = (knn * 3 + 1).min(num_sc);
-        let (neighbors, distances) = layout
-            .knn_lookup
-            .search_by_query_name(&sc_idx, oversample, true)?;
-
-        // Filter to other batches, keep top knn
-        let filtered: Vec<(usize, f32)> = neighbors
-            .iter()
-            .zip(distances.iter())
-            .filter(|(&n, _)| layout.super_cell_to_batch[n] != sc_batch)
-            .map(|(&n, &d)| (n, d))
-            .take(knn)
-            .collect();
+        let filtered: Vec<(usize, f32)> = neighbors_per_sc[sc_idx].clone();
 
         if filtered.is_empty() {
             continue;
@@ -926,6 +1021,460 @@ fn collect_matched_stat_coarse(
     }
 
     Ok(())
+}
+
+/// Format a per-cell group-index vector as fixed-width zero-padded strings
+/// so that `SparseIoVec::assign_groups`' lexicographic key sort agrees with
+/// numeric order. `k` is the number of distinct groups (`group ∈ 0..k`).
+fn pad_numeric_labels(cell_to_group: &[usize], k: usize) -> Vec<String> {
+    let width = {
+        let mut w = 1usize;
+        let mut n = k.max(1) - 1;
+        while n >= 10 {
+            w += 1;
+            n /= 10;
+        }
+        w
+    };
+    cell_to_group
+        .iter()
+        .map(|g| format!("{:0width$}", g, width = width))
+        .collect()
+}
+
+/// Derive a fine→coarse group mapping from two consecutive refined levels.
+///
+/// The refinement pass enforces hierarchy (sibling-constrained moves), so
+/// all super-cells sharing a level-`fine` group also share the same
+/// level-`coarse` group. This picks the first super-cell of each fine group
+/// to read the coarse label.
+fn fine_to_coarse_from_refined(
+    sc_to_fine: &[usize],
+    sc_to_coarse: &[usize],
+    num_fine: usize,
+) -> Vec<usize> {
+    let mut mapping = vec![usize::MAX; num_fine];
+    for sc in 0..sc_to_fine.len() {
+        let f = sc_to_fine[sc];
+        if mapping[f] == usize::MAX {
+            mapping[f] = sc_to_coarse[sc];
+        } else {
+            debug_assert_eq!(
+                mapping[f], sc_to_coarse[sc],
+                "refinement broke hierarchy at fine group {}",
+                f
+            );
+        }
+    }
+    mapping
+}
+
+/// Per-level initial super-cell → group, derived from the finest binary
+/// hash codes by bit-masking each level's sort dim and compacting labels to
+/// `0..k_level`. Each super-cell's finest hash code is read from any of its
+/// member cells (all cells in a super-cell share the same finest group).
+fn initial_per_level_from_hash(
+    fine_codes: &[usize],
+    super_cell_to_cells: &[Vec<usize>],
+    level_dims: &[usize],
+) -> Vec<Vec<usize>> {
+    let num_sc = super_cell_to_cells.len();
+    level_dims
+        .iter()
+        .map(|&d| {
+            let mask = if d >= usize::BITS as usize {
+                usize::MAX
+            } else {
+                (1_usize << d).wrapping_sub(1)
+            };
+            let codes: Vec<usize> = (0..num_sc)
+                .map(|sc| fine_codes[super_cell_to_cells[sc][0]] & mask)
+                .collect();
+            crate::refine_multilevel::compact_labels(&codes).0
+        })
+        .collect()
+}
+
+/// Run refinement when `allow_refine`, else return the compacted initial
+/// mapping unchanged (single-batch → no BBKNN candidates, nothing to refine).
+fn refine_or_identity(
+    allow_refine: bool,
+    inputs: &crate::refine_multilevel::RefineInputs<'_>,
+    refine_params: &crate::refine_multilevel::RefineParams,
+) -> anyhow::Result<crate::refine_multilevel::RefinedAssignment> {
+    if allow_refine {
+        crate::refine_multilevel::refine_assignments(inputs, refine_params)
+    } else {
+        let mut sc_to_group: Vec<Vec<usize>> =
+            Vec::with_capacity(inputs.initial_sc_to_group_per_level.len());
+        let mut num_groups_per_level = Vec::with_capacity(inputs.initial_sc_to_group_per_level.len());
+        for lvl in inputs.initial_sc_to_group_per_level {
+            let (compact, k) = crate::refine_multilevel::compact_labels(lvl);
+            num_groups_per_level.push(k);
+            sc_to_group.push(compact);
+        }
+        Ok(crate::refine_multilevel::RefinedAssignment {
+            sc_to_group,
+            num_groups_per_level,
+        })
+    }
+}
+
+/// Build per-super-cell cell lists from the finest hash partition and batch
+/// membership: sc → list of raw cell indices contained in that super-cell.
+fn build_super_cell_to_cells(
+    layout: &SuperCellLayout,
+    group_to_cols_finest: &[Vec<usize>],
+    col_to_batch: &[usize],
+) -> Vec<Vec<usize>> {
+    let num_sc = layout.cell_counts.len();
+    let mut out: Vec<Vec<usize>> = vec![vec![]; num_sc];
+    for (group, cells) in group_to_cols_finest.iter().enumerate() {
+        for &c in cells {
+            let batch = col_to_batch[c];
+            if let Some(&sc) = layout.bg_to_sc.get(&(batch, group)) {
+                out[sc].push(c);
+            }
+        }
+    }
+    out
+}
+
+/// Shared inputs to both the `SparseIoVec` and `SparseIoStack` refinement
+/// helpers. Keeps call-site signatures compact; every field is derivable
+/// from `MultilevelParams` + the finest-level hash partition.
+#[derive(Clone, Copy)]
+struct RefineCollectCtx<'a> {
+    fine_codes: &'a [usize],
+    group_to_cols_finest: &'a [Vec<usize>],
+    level_dims: &'a [usize],
+    num_features: usize,
+    num_batches: usize,
+    knn: usize,
+    opt_iter: usize,
+    oversample: bool,
+    refine_params: &'a crate::refine_multilevel::RefineParams,
+}
+
+/// Refinement integration path for `SparseIoVec`.
+///
+/// Walks each level of the hash-initialized hierarchy, runs
+/// `refine_multilevel::refine_assignments` over super-cells, then rebuilds
+/// `CollapsedStat` per level from the refined cell → group assignment and
+/// emits `CollapsedOut` with identical shape to the legacy path.
+fn refine_and_collect_single_layer(
+    data_vec: &mut SparseIoVec,
+    proj_kn: &DMatrix<f32>,
+    ctx: &RefineCollectCtx<'_>,
+) -> anyhow::Result<Vec<CollapsedOut>> {
+    let RefineCollectCtx {
+        fine_codes,
+        group_to_cols_finest,
+        level_dims,
+        num_features,
+        num_batches,
+        knn,
+        opt_iter,
+        oversample,
+        refine_params,
+    } = *ctx;
+    info!(
+        "Multi-level refinement path (BBKNN + DC-SBM): {} levels",
+        level_dims.len()
+    );
+
+    // 1. Build super-cells (layout + gene sums) from the finest partition.
+    let super_cells = build_super_cells(data_vec, proj_kn, num_features)?;
+    let num_sc = super_cells.layout.cell_counts.len();
+    let ncells_dbg = proj_kn.ncols();
+    info!(
+        "Built {} super-cells from {} cells (ratio {:.2}; knn={})",
+        num_sc,
+        ncells_dbg,
+        num_sc as f32 / ncells_dbg.max(1) as f32,
+        knn
+    );
+    if num_sc as f32 > 0.8 * ncells_dbg as f32 {
+        warn!(
+            "super-cell count ({}) is close to cell count ({}) — hash partition is too fine \
+             (many 1-cell super-cells). Consider lowering --sort-dim.",
+            num_sc, ncells_dbg
+        );
+    }
+
+    // 2. sc → cells and col → batch.
+    let ncols = proj_kn.ncols();
+    let col_to_batch: Vec<usize> = data_vec.get_batch_membership(0..ncols);
+    let super_cell_to_cells =
+        build_super_cell_to_cells(&super_cells.layout, group_to_cols_finest, &col_to_batch);
+
+    let initial_per_level =
+        initial_per_level_from_hash(fine_codes, &super_cell_to_cells, level_dims);
+    let empty: [ColumnDict<usize>; 0] = [];
+    let batch_knn: &[ColumnDict<usize>] = if num_batches >= 2 {
+        data_vec
+            .batch_knn_lookup()
+            .ok_or_else(|| anyhow::anyhow!("batch_knn_lookup not built"))?
+            .as_slice()
+    } else {
+        &empty
+    };
+    let inputs = crate::refine_multilevel::RefineInputs {
+        layout: &super_cells.layout,
+        gene_sums: &super_cells.gene_sums,
+        num_genes: num_features,
+        super_cell_to_cells: &super_cell_to_cells,
+        batch_knn_lookup: batch_knn,
+        k_per_batch: knn,
+        initial_sc_to_group_per_level: &initial_per_level,
+    };
+    let refined = refine_or_identity(num_batches >= 2, &inputs, refine_params)?;
+
+    // 5. Build finest CollapsedStat once from a full data pass, then derive
+    //    coarser levels by `merge_stat` on column-aggregated sums — avoids
+    //    re-reading all cells at every level (matches legacy merge descent).
+    let num_levels = level_dims.len();
+    let k_finest = refined.num_groups_per_level[0];
+    let mut cell_to_group_finest = vec![0usize; ncols];
+    for (sc, cells) in super_cell_to_cells.iter().enumerate() {
+        let g = refined.sc_to_group[0][sc];
+        for &c in cells {
+            cell_to_group_finest[c] = g;
+        }
+    }
+    let finest_str = pad_numeric_labels(&cell_to_group_finest, k_finest);
+    data_vec.assign_groups(&finest_str, None);
+    debug_assert_eq!(data_vec.num_groups(), k_finest);
+
+    let mut fine_stat = CollapsedStat::new(num_features, k_finest, num_batches);
+    data_vec.collect_basic_stat(&mut fine_stat)?;
+    if num_batches >= 2 {
+        data_vec.collect_batch_stat(&mut fine_stat)?;
+        let batch_knn = data_vec
+            .batch_knn_lookup()
+            .ok_or_else(|| anyhow::anyhow!("batch_knn_lookup not built"))?;
+        collect_matched_stat_coarse(
+            &super_cells.layout,
+            &super_cells.gene_sums,
+            &refined.sc_to_group[0],
+            batch_knn.as_slice(),
+            knn,
+            &mut fine_stat,
+        )?;
+    }
+
+    info!(
+        "Level 1/{}: refined k={} (finest; {} cells read)",
+        num_levels, k_finest, ncols
+    );
+    let mut results: Vec<CollapsedOut> = Vec::with_capacity(num_levels);
+    let mut finest_out = optimize(&fine_stat, (1.0, 1.0), opt_iter)?;
+    if oversample {
+        finest_out.overresolved_stat = Some(Box::new(fine_stat.clone()));
+    }
+    results.push(finest_out);
+
+    let mut prev_stat = fine_stat;
+    for level in 1..num_levels {
+        let k_prev = refined.num_groups_per_level[level - 1];
+        let k_level = refined.num_groups_per_level[level];
+        let fine_to_coarse = fine_to_coarse_from_refined(
+            &refined.sc_to_group[level - 1],
+            &refined.sc_to_group[level],
+            k_prev,
+        );
+        let coarse_stat = merge_stat(&prev_stat, &fine_to_coarse, k_level);
+        info!(
+            "Level {}/{}: refined k={} (merged from {})",
+            level + 1,
+            num_levels,
+            k_level,
+            k_prev
+        );
+        let level_opt_iter = (opt_iter / 2).max(10);
+        let mut out = optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?;
+        if oversample {
+            out.overresolved_stat = Some(Box::new(coarse_stat.clone()));
+        }
+        results.push(out);
+        prev_stat = coarse_stat;
+    }
+
+    Ok(results)
+}
+
+/// Refinement integration path for `SparseIoStack`.
+///
+/// Shares one `RefinedAssignment` across all layers (first-layer-owns the
+/// grouping decision, matching the existing stack convention at line 1337 of
+/// the legacy path). Per level × layer we rebuild `CollapsedStat` and emit
+/// `CollapsedOut`.
+fn refine_and_collect_stack(
+    stack: &mut SparseIoStack,
+    proj_kn: &DMatrix<f32>,
+    ctx: &RefineCollectCtx<'_>,
+) -> anyhow::Result<Vec<Vec<CollapsedOut>>> {
+    let RefineCollectCtx {
+        fine_codes,
+        group_to_cols_finest,
+        level_dims,
+        num_features: _,
+        num_batches,
+        knn,
+        opt_iter,
+        oversample,
+        refine_params,
+    } = *ctx;
+    let num_layers = stack.num_types();
+    info!(
+        "Multi-level stack refinement (BBKNN + DC-SBM): {} layers × {} levels",
+        num_layers,
+        level_dims.len()
+    );
+
+    let ncols = proj_kn.ncols();
+    let col_to_batch: Vec<usize> = stack.stack[0].get_batch_membership(0..ncols);
+
+    // Build shared super-cell layout from layer[0]'s row count and the shared
+    // projection. The layout only uses `proj_kn` + grouping, no raw reads.
+    let layout = build_super_cell_layout(group_to_cols_finest, &col_to_batch, proj_kn)?;
+    let num_sc = layout.cell_counts.len();
+
+    // Gene sums for layer[0] drive the refinement (first-layer-owns).
+    let owner_num_features = stack.stack[0].num_rows();
+    let gene_sums_owner = collect_super_cell_gene_sums(
+        &stack.stack[0],
+        group_to_cols_finest,
+        &col_to_batch,
+        &layout.bg_to_sc,
+        num_sc,
+    )?;
+
+    let super_cell_to_cells =
+        build_super_cell_to_cells(&layout, group_to_cols_finest, &col_to_batch);
+
+    let initial_per_level =
+        initial_per_level_from_hash(fine_codes, &super_cell_to_cells, level_dims);
+    let empty: [ColumnDict<usize>; 0] = [];
+    let batch_knn: &[ColumnDict<usize>] = if num_batches >= 2 {
+        stack.stack[0]
+            .batch_knn_lookup()
+            .ok_or_else(|| anyhow::anyhow!("batch_knn_lookup not built"))?
+            .as_slice()
+    } else {
+        &empty
+    };
+    let inputs = crate::refine_multilevel::RefineInputs {
+        layout: &layout,
+        gene_sums: &gene_sums_owner,
+        num_genes: owner_num_features,
+        super_cell_to_cells: &super_cell_to_cells,
+        batch_knn_lookup: batch_knn,
+        k_per_batch: knn,
+        initial_sc_to_group_per_level: &initial_per_level,
+    };
+    let refined = refine_or_identity(num_batches >= 2, &inputs, refine_params)?;
+
+    // Per-layer gene_sums for the remaining layers (layer 0 reuses `gene_sums_owner`).
+    let mut per_layer_gene_sums: Vec<GeneSums> = Vec::with_capacity(num_layers);
+    for (d, layer) in stack.stack.iter().enumerate() {
+        if d == 0 {
+            per_layer_gene_sums.push(gene_sums_owner.clone());
+        } else {
+            per_layer_gene_sums.push(collect_super_cell_gene_sums(
+                layer,
+                group_to_cols_finest,
+                &col_to_batch,
+                &layout.bg_to_sc,
+                num_sc,
+            )?);
+        }
+    }
+
+    // Finest CollapsedStat per layer via a single data pass, then descend
+    //    into coarser levels by `merge_stat` on column aggregates.
+    let num_levels = level_dims.len();
+    let k_finest = refined.num_groups_per_level[0];
+    let mut cell_to_group_finest = vec![0usize; ncols];
+    for (sc, cells) in super_cell_to_cells.iter().enumerate() {
+        let g = refined.sc_to_group[0][sc];
+        for &c in cells {
+            cell_to_group_finest[c] = g;
+        }
+    }
+    let finest_str = pad_numeric_labels(&cell_to_group_finest, k_finest);
+    for layer in stack.stack.iter_mut() {
+        layer.assign_groups(&finest_str, None);
+    }
+
+    let mut fine_stats: Vec<CollapsedStat> = Vec::with_capacity(num_layers);
+    let mut finest_layer_results = Vec::with_capacity(num_layers);
+    for (d, layer) in stack.stack.iter().enumerate() {
+        let num_features = layer.num_rows();
+        let mut stat = CollapsedStat::new(num_features, k_finest, num_batches);
+        layer.collect_basic_stat(&mut stat)?;
+        if num_batches >= 2 {
+            layer.collect_batch_stat(&mut stat)?;
+            let batch_knn = layer
+                .batch_knn_lookup()
+                .ok_or_else(|| anyhow::anyhow!("batch_knn_lookup not built"))?;
+            collect_matched_stat_coarse(
+                &layout,
+                &per_layer_gene_sums[d],
+                &refined.sc_to_group[0],
+                batch_knn.as_slice(),
+                knn,
+                &mut stat,
+            )?;
+        }
+        let mut out = optimize(&stat, (1.0, 1.0), opt_iter)?;
+        if oversample {
+            out.overresolved_stat = Some(Box::new(stat.clone()));
+        }
+        finest_layer_results.push(out);
+        fine_stats.push(stat);
+    }
+    info!(
+        "Level 1/{}: refined k={} (finest; {} layers × {} cells)",
+        num_levels, k_finest, num_layers, ncols
+    );
+    let mut results: Vec<Vec<CollapsedOut>> = Vec::with_capacity(num_levels);
+    results.push(finest_layer_results);
+
+    let mut prev_stats = fine_stats;
+    for level in 1..num_levels {
+        let k_prev = refined.num_groups_per_level[level - 1];
+        let k_level = refined.num_groups_per_level[level];
+        let fine_to_coarse = fine_to_coarse_from_refined(
+            &refined.sc_to_group[level - 1],
+            &refined.sc_to_group[level],
+            k_prev,
+        );
+        let level_opt_iter = (opt_iter / 2).max(10);
+        let mut layer_results = Vec::with_capacity(num_layers);
+        let mut coarse_stats = Vec::with_capacity(num_layers);
+        for prev_stat in prev_stats.iter() {
+            let coarse_stat = merge_stat(prev_stat, &fine_to_coarse, k_level);
+            let mut out = optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?;
+            if oversample {
+                out.overresolved_stat = Some(Box::new(coarse_stat.clone()));
+            }
+            layer_results.push(out);
+            coarse_stats.push(coarse_stat);
+        }
+        info!(
+            "Level {}/{}: refined k={} (merged from {}, {} layers)",
+            level + 1,
+            num_levels,
+            k_level,
+            k_prev,
+            num_layers
+        );
+        results.push(layer_results);
+        prev_stats = coarse_stats;
+    }
+
+    Ok(results)
 }
 
 /// Compute sort dimensions for each level, linearly spaced from
@@ -1082,11 +1631,12 @@ impl MultilevelCollapsingOps for SparseIoVec {
         let opt_iter = params.num_opt_iter;
         let oversample = params.oversample;
 
-        // Register batch membership (lightweight, no HNSW per batch)
         self.register_batch_membership(batch_membership);
-
         let num_features = self.num_rows();
         let num_batches = self.num_batches();
+        if num_batches >= 2 {
+            self.build_hnsw_per_batch(proj_kn, batch_membership)?;
+        }
 
         // Level dims: [finest, ..., coarsest]
         // When oversampling, add 1 bit to each level → ~2× groups
@@ -1116,8 +1666,28 @@ impl MultilevelCollapsingOps for SparseIoVec {
 
         let group_to_cols = self
             .take_grouped_columns()
-            .ok_or(anyhow::anyhow!("columns not assigned"))?;
+            .ok_or(anyhow::anyhow!("columns not assigned"))?
+            .clone();
         let num_groups = group_to_cols.len();
+
+        //////////////////////////////////////////////////////////////////
+        // Opt-in refinement path: BBKNN + Poisson DC-SBM over super-cells
+        //////////////////////////////////////////////////////////////////
+
+        if let Some(refine_params) = params.refine.as_ref() {
+            let ctx = RefineCollectCtx {
+                fine_codes: &fine_codes,
+                group_to_cols_finest: &group_to_cols,
+                level_dims: &level_dims,
+                num_features,
+                num_batches,
+                knn,
+                opt_iter,
+                oversample,
+                refine_params,
+            };
+            return refine_and_collect_single_layer(self, proj_kn, &ctx);
+        }
 
         // Collect statistics at finest level
         let mut fine_stat = CollapsedStat::new(num_features, num_groups, num_batches);
@@ -1141,9 +1711,14 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 super_cells.layout.cell_counts.len(),
                 knn
             );
+            let batch_knn = self
+                .batch_knn_lookup()
+                .ok_or_else(|| anyhow::anyhow!("batch_knn_lookup not built"))?;
             collect_matched_stat_coarse(
                 &super_cells.layout,
                 &super_cells.gene_sums,
+                &super_cells.layout.super_cell_to_group,
+                batch_knn.as_slice(),
                 knn,
                 &mut fine_stat,
             )?;
@@ -1235,16 +1810,54 @@ impl MultilevelCollapsingOps for SparseIoStack {
         let sort_dim = params.sort_dim;
         let knn = params.knn_super_cells;
         let opt_iter = params.num_opt_iter;
+        let oversample = params.oversample;
 
-        // Register batch membership on all layers
         self.register_batch_membership(batch_membership);
 
         // Use first layer for num_batches (all layers share the same columns)
         let num_batches = self.stack[0].num_batches();
+        if num_batches >= 2 {
+            for layer in self.stack.iter_mut() {
+                layer.build_hnsw_per_batch(proj_kn, batch_membership)?;
+            }
+        }
 
         // Build col_to_batch from the first layer (shared across all layers)
         let ncols = proj_kn.ncols();
         let col_to_batch: Vec<usize> = self.stack[0].get_batch_membership(0..ncols);
+
+        // Opt-in refinement path for the stack.
+        if let Some(refine_params) = params.refine.as_ref() {
+            let base_dims = compute_level_sort_dims(sort_dim, params.num_levels);
+            let level_dims: Vec<usize> = if oversample {
+                base_dims.iter().map(|&d| d + 1).collect()
+            } else {
+                base_dims
+            };
+            let finest_dim = level_dims[0];
+            let kk = proj_kn.nrows().min(finest_dim).min(ncols);
+            let fine_codes = binary_sort_columns(proj_kn, kk)?;
+            for layer in self.stack.iter_mut() {
+                layer.assign_groups(&fine_codes, None);
+            }
+            let group_to_cols = self.stack[0]
+                .take_grouped_columns()
+                .ok_or(anyhow::anyhow!("columns not assigned"))?
+                .clone();
+            let num_features = self.stack[0].num_rows();
+            let ctx = RefineCollectCtx {
+                fine_codes: &fine_codes,
+                group_to_cols_finest: &group_to_cols,
+                level_dims: &level_dims,
+                num_features,
+                num_batches,
+                knn,
+                opt_iter,
+                oversample,
+                refine_params,
+            };
+            return refine_and_collect_stack(self, proj_kn, &ctx);
+        }
 
         if num_batches < 2 {
             // No batch effects — multi-level collapsing without batch correction
@@ -1375,7 +1988,17 @@ impl MultilevelCollapsingOps for SparseIoStack {
             )?;
 
             // Match across batches using shared layout + layer gene sums
-            collect_matched_stat_coarse(&layout, &gene_sums, knn, &mut stat)?;
+            let batch_knn = layer
+                .batch_knn_lookup()
+                .ok_or_else(|| anyhow::anyhow!("batch_knn_lookup not built"))?;
+            collect_matched_stat_coarse(
+                &layout,
+                &gene_sums,
+                &layout.super_cell_to_group,
+                batch_knn.as_slice(),
+                knn,
+                &mut stat,
+            )?;
 
             // Optimize finest-level parameters
             layer_results.push(optimize(&stat, (1.0, 1.0), opt_iter)?);
