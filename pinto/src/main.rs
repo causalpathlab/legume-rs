@@ -1,11 +1,9 @@
-mod cell_community;
 mod gene_network;
 mod link_community;
 mod propensity;
 mod svd;
 mod util;
 
-use cell_community::fit::*;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use link_community::fit::*;
@@ -43,7 +41,7 @@ fn print_logo() {
                   SUBCOMMANDS:\n\n\
                   \x20 lc    Link community model (recommended)\n\
                   \x20       Assigns each cell-cell edge to a community via collapsed\n\
-                  \x20       Gibbs sampling on gene module profiles.\n\n\
+                  \x20       Gibbs sampling on compressed all-gene edge profiles.\n\n\
                   \x20 dsvd  Delta-SVD model\n\
                   \x20       Cell-pair shared/difference analysis via Poisson-Gamma\n\
                   \x20       SVD on pseudobulk co-expression.\n\n\
@@ -164,21 +162,17 @@ enum Commands {
         about = "Link community model via collapsed Gibbs sampling",
         long_about = "Link community detection for spatial transcriptomics.\n\n\
                       Assigns each cell-cell edge to one of K communities based on\n\
-                      gene expression profiles, then derives per-cell soft membership.\n\n\
+                      per-edge expression profiles, then derives per-cell soft membership.\n\n\
                       QUICK START:\n\n\
                       \x20 # Typical spatial run (10x Visium):\n\
                       \x20 pinto lc data.h5 -c tissue_positions.csv -o out\n\n\
-                      \x20 # More communities, iterative module refinement:\n\
-                      \x20 pinto lc data.h5 -c coords.csv -o out \\\n\
-                      \x20   --n-communities 25 --n-outer-iter 3\n\n\
-                      \x20 # Leiden modules instead of K-means:\n\
-                      \x20 pinto lc data.h5 -c coords.csv -o out \\\n\
-                      \x20   --module-method leiden --n-outer-iter 3\n\n\
+                      \x20 # More communities:\n\
+                      \x20 pinto lc data.h5 -c coords.csv -o out --n-communities 25\n\n\
                       \x20 # Expression-only (no coordinates):\n\
                       \x20 pinto lc data.h5 -o out\n\n\
                       \x20 # With external gene-pair network:\n\
                       \x20 pinto lc data.h5 -c coords.csv -o out \\\n\
-                      \x20   --gene-network biogrid_pairs.tsv\n\n\
+                      \x20   --gene-network biogrid_pairs.tsv --n-outer-iter 3\n\n\
                       \x20 # Multi-sample with batch correction:\n\
                       \x20 pinto lc s1.h5,s2.h5 -c c1.csv,c2.csv -o out\n\n\
                       INPUT FILES:\n\n\
@@ -187,74 +181,37 @@ enum Commands {
                       \x20 -c coords.csv          Cell coordinates (barcode,x,y).\n\
                       \x20                        Omit for expression-only mode.\n\n\
                       EDGE PROFILE MODES:\n\n\
-                      \x20 Gene modules (default):\n\
-                      \x20   Genes clustered into M modules; edge profile =\n\
-                      \x20   module-count vector y_e[m] = sum_{g in m} (x_{g,i} + x_{g,j}).\n\
-                      \x20   M auto-determined as sqrt(median cell nnz).\n\
-                      \x20   Module clustering method: --module-method kmeans|leiden.\n\n\
+                      \x20 Compressed all-gene profile (default):\n\
+                      \x20   y_e = W^T(x_i + x_j), W = G × --proj-dim Gaussian basis.\n\
+                      \x20   Every profile dim is a full linear combination of ALL genes\n\
+                      \x20   (no genes dropped); M = proj-dim just compresses the gene axis.\n\
+                      \x20   Optionally zero basis rows for genes below --min-gene-count.\n\n\
                       \x20 Gene-pair network (--gene-network file.tsv):\n\
                       \x20   External gene-gene edges (two-column TSV).\n\
                       \x20   Edge profile = positive co-expression deltas per pair.\n\
-                      \x20   Pairs collapsed into modules if count > --n-edge-modules.\n\n\
-                      \x20 Random projection (--no-gene-modules):\n\
-                      \x20   y_e = W^T(x_i + x_j), W = random Gaussian basis.\n\n\
+                      \x20   Pairs collapsed into modules if count > --n-edge-modules.\n\
+                      \x20   --n-outer-iter > 1 re-estimates modules from community rates.\n\n\
                       ALGORITHM:\n\n\
                       \x20 1. Build spatial KNN graph (or expression KNN if no coords)\n\
                       \x20 2. Batch effect estimation (multi-sample only)\n\
-                      \x20 3. Gene module discovery (sketch + cluster)\n\
-                      \x20 4. Multi-level graph coarsening\n\
-                      \x20 5. Collapsed Gibbs on coarsest super-edges\n\
-                      \x20 6. Transfer labels to full resolution\n\
-                      \x20 7. Outer EM loop (--n-outer-iter > 1):\n\
-                      \x20    E-step: EM Gibbs + greedy refinement\n\
-                      \x20    M-step: re-cluster modules from community centroids\n\
+                      \x20 3. Multi-level graph coarsening\n\
+                      \x20 4. Build edge profiles (projection or gene-pair)\n\
+                      \x20 5. Optional IDF reweighting against empirical marginal\n\
+                      \x20 6. Collapsed Gibbs on coarsest super-edges\n\
+                      \x20 7. Transfer labels to full resolution + EM Gibbs + greedy\n\
+                      \x20    (with gene-pair modules: outer EM re-clusters modules)\n\
                       \x20 8. Extract cell propensity + gene-topic statistics\n\n\
-                      KEY PARAMETERS:\n\n\
-                      \x20 --n-communities K      Number of link communities [20]\n\
-                      \x20 --n-outer-iter N       Module re-estimation iterations [1]\n\
-                      \x20 --module-method M      kmeans or leiden [kmeans]\n\
-                      \x20 -k, --knn-spatial K    Neighbours per cell [5]\n\
-                      \x20 --n-gene-modules M     Gene modules (auto if omitted)\n\
-                      \x20 --alpha A              Dirichlet concentration [1.0]\n\n\
+                      See `pinto lc --help` for individual flag docs.\n\n\
                       OUTPUT FILES:\n\n\
-                      \x20 {out}.propensity.parquet      Cell community membership [N x K]\n\
-                      \x20 {out}.gene_topic.parquet      Gene-topic rates [G x K]\n\
-                      \x20 {out}.gene_modules.parquet    Gene-to-module assignments [G x 1]\n\
-                      \x20 {out}.link_community.parquet  Edge community assignments [E x 3]\n\
-                      \x20 {out}.coord_pairs.parquet     Cell pair coordinates [E x cols]\n\
+                      \x20 {out}.propensity.parquet      Cell community membership [N × K]\n\
+                      \x20 {out}.gene_topic.parquet      Gene-topic rates [G × K]\n\
+                      \x20 {out}.link_community.parquet  Edge community assignments [E × 3]\n\
+                      \x20 {out}.coord_pairs.parquet     Cell pair coordinates\n\
                       \x20 {out}.scores.parquet          Score trace per iteration\n\
-                      \x20 {out}.delta.parquet           Batch effects (multi-sample only)"
+                      \x20 {out}.delta.parquet           Batch effects (multi-sample only)\n\
+                      \x20 {out}.gene_graph.parquet      Gene-gene pairs (gene-pair mode only)"
     )]
     LinkCommunity(SrtLinkCommunityArgs),
-
-    #[command(
-        alias = "cc",
-        about = "Cell community via flat-K Poisson DC-SBM on per-cell profiles",
-        long_about = "Cell community detection for spatial transcriptomics.\n\n\
-                      Assigns each CELL to one of K communities via collapsed Gibbs on a\n\
-                      Poisson DC-SBM over per-cell gene-module (or random-projection)\n\
-                      profiles. Multi-level graph coarsening (spatial KNN + cosine similarity\n\
-                      on expression) runs Gibbs on super-cells first, then transfers labels\n\
-                      to fine resolution and refines with component-partitioned EM Gibbs + greedy.\n\n\
-                      QUICK START:\n\n\
-                      \x20 pinto cc data.zarr -c cells.zarr.zip -o out \\\n\
-                      \x20   --n-communities 20 --num-gibbs 100\n\n\
-                      KEY PARAMETERS:\n\n\
-                      \x20 --n-communities K               Number of communities [20]\n\
-                      \x20 --num-gibbs N                   Coarsest-level Gibbs sweeps [100]\n\
-                      \x20 --num-em N                      Fine-resolution EM Gibbs sweeps\n\
-                      \x20 --num-greedy N                  Max greedy sweeps [10]\n\
-                      \x20 --n-gene-modules M              Gene-module profile dim (auto = √G)\n\
-                      \x20 --no-gene-modules               Use random-projection profiles instead\n\
-                      \x20 --no-background                 Disable IDF background correction\n\n\
-                      OUTPUT FILES:\n\n\
-                      \x20 {out}.cell_community.parquet   Per-cell community label\n\
-                      \x20 {out}.coord_pairs.parquet      Cell-pair coordinates\n\
-                      \x20 {out}.scores.parquet           Score trace\n\
-                      \x20 {out}.gene_topic.parquet       Per-community gene rates [G × K]\n\
-                      \x20 {out}.gene_modules.parquet     Gene module assignments (if used)"
-    )]
-    CellCommunity(SrtCellCommunityArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -275,9 +232,6 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::LinkCommunity(args) => {
             fit_srt_link_community(args)?;
-        }
-        Commands::CellCommunity(args) => {
-            fit_srt_cell_community(args)?;
         }
     }
 

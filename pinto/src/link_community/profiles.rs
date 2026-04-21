@@ -937,5 +937,4 @@ mod tests {
         assert_eq!(basis.nrows(), 10);
         assert_eq!(basis.ncols(), 5);
     }
-
 }
