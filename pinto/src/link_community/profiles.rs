@@ -413,13 +413,16 @@ pub fn compute_node_membership(
 ///
 /// Given cell propensity [N × K] and sparse expression data [G × N],
 /// computes weighted gene sums `X @ propensity^T` and fits a Poisson-Gamma
-/// to get posterior gene expression rates per topic.
+/// to get posterior gene expression rates per topic. When `adjust_housekeeping`
+/// is set, scales the sufficient statistic row-wise by `1/(bg[g] + ε)` before
+/// calibration so ubiquitous genes are discounted (Poisson-offset correction).
 ///
 /// Writes `{out_prefix}.gene_topic.parquet` (genes × K).
 pub fn compute_gene_topic_stat(
     cell_propensity: &Mat,
     data_vec: &SparseIoVec,
     block_size: Option<usize>,
+    adjust_housekeeping: bool,
     out_prefix: &str,
 ) -> anyhow::Result<()> {
     use matrix_param::dmatrix_gamma::GammaMatrix;
@@ -462,6 +465,11 @@ pub fn compute_gene_topic_stat(
         n_1k += n.transpose();
     }
 
+    if adjust_housekeeping {
+        info!("Applying IDF housekeeping adjustment to gene-topic stats");
+        apply_gene_idf_weights(&mut sum_gk);
+    }
+
     let mut gamma_param = GammaMatrix::new((n_genes, k), 1.0, 1.0);
     let denom_gk = DVec::from_element(n_genes, 1.0) * &n_1k;
     gamma_param.update_stat(&sum_gk, &denom_gk);
@@ -483,6 +491,9 @@ pub fn compute_gene_topic_stat(
 /// 2. Propensity: soft cell membership from edge clusters [N_cells × K_clusters]
 /// 3. Gene-topic stat: Poisson-Gamma gene expression rates per topic [G × K_clusters]
 ///
+/// When `adjust_housekeeping` is set, the gene-topic report is scaled by
+/// `1/(bg[g] + ε)` — see [`compute_gene_topic_stat`].
+///
 /// Writes `{out_prefix}.propensity.parquet` and `{out_prefix}.gene_topic.parquet`.
 pub fn compute_propensity_and_gene_topic_stat(
     proj_kn: &Mat,
@@ -491,6 +502,7 @@ pub fn compute_propensity_and_gene_topic_stat(
     n_cells: usize,
     n_clusters: usize,
     block_size: Option<usize>,
+    adjust_housekeeping: bool,
     out_prefix: &str,
 ) -> anyhow::Result<()> {
     // 1. K-means on latent edge vectors
@@ -536,7 +548,13 @@ pub fn compute_propensity_and_gene_topic_stat(
     write_edge_clusters(out_prefix, edges, &edge_membership, &cell_names)?;
 
     // 3. Gene-topic stat
-    compute_gene_topic_stat(&cell_propensity, data_vec, block_size, out_prefix)
+    compute_gene_topic_stat(
+        &cell_propensity,
+        data_vec,
+        block_size,
+        adjust_housekeeping,
+        out_prefix,
+    )
 }
 
 /// Write per-edge K-means cluster assignments to parquet.
