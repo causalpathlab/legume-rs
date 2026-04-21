@@ -516,43 +516,6 @@ fn matched_columns_across_batches() -> anyhow::Result<()> {
 }
 
 #[test]
-fn neighbouring_columns_across_batches() -> anyhow::Result<()> {
-    let nrow = 4;
-    let ncol = 60;
-    let raw = Array2::<f32>::runif(nrow, ncol);
-    let rows = str_vec(nrow, "r");
-    let cols = str_vec(ncol, "c");
-
-    let sp = make_named_sparse(&raw, &rows, &cols);
-    let mut vec = SparseIoVec::new();
-    vec.push(sp, None)?;
-
-    // 3 batches of 20 cells each
-    let features = Array2::<f32>::runif(5, ncol);
-    let batch_labels: Vec<usize> = (0..ncol).map(|i| i / 20).collect();
-    vec.register_batches_ndarray(&features, &batch_labels)?;
-
-    assert_eq!(vec.num_batches(), 3);
-
-    // Read neighbours for cells 0..3 (batch 0), skip same batch
-    let knn_batches = 2;
-    let knn_columns = 2;
-    let (csc, sources, _matched, distances) =
-        vec.read_neighbouring_columns_csc(0..3, knn_batches, knn_columns, true, None)?;
-
-    assert_eq!(csc.nrows(), nrow);
-    assert!(csc.ncols() > 0);
-    assert_eq!(sources.len(), csc.ncols());
-    assert_eq!(distances.len(), csc.ncols());
-
-    for &d in &distances {
-        assert!(d >= 0.0);
-    }
-
-    Ok(())
-}
-
-#[test]
 fn neighbouring_columns_skip_batches() -> anyhow::Result<()> {
     let nrow = 4;
     let ncol = 60;

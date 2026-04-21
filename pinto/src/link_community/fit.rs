@@ -158,6 +158,18 @@ pub struct SrtLinkCommunityArgs {
                        Pass --no-background to disable and use raw counts."
     )]
     no_background: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Modularity-gain resolution for the coarsening merge veto",
+        long_help = "Resolution γ for the degree-corrected merge veto. A proposed\n\
+                       merge (i, j) is rejected when sim(i,j) < γ · deg(i) · deg(j) / (2W),\n\
+                       the Louvain/Leiden modularity-gain criterion adapted to\n\
+                       cosine-weighted edges. γ = 1.0 is the standard modularity\n\
+                       resolution. Set to 0 to disable the veto."
+    )]
+    modularity_gamma: f32,
 }
 
 /// Link community model pipeline.
@@ -342,6 +354,21 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             seeding: has_coords.then(|| SeedingParams {
                 coordinates: &coordinates,
                 batch_membership: Some(&batch_membership),
+            }),
+            modularity_veto: (args.modularity_gamma > 0.0).then(|| ModularityVeto {
+                gamma: args.modularity_gamma,
+            }),
+            dc_poisson: Some(DcPoissonConfig {
+                params: data_beans_alg::dc_poisson::RefineParams {
+                    num_gibbs: 10,
+                    num_greedy: 5,
+                    idf_weighting: true,
+                    seed: c.seed,
+                    gibbs_stagnation: 0.005,
+                    profile_source: data_beans_alg::dc_poisson::ProfileSource::Raw,
+                },
+                data: &data_vec,
+                num_genes: n_genes,
             }),
         },
     );
