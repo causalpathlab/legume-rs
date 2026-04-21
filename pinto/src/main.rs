@@ -4,6 +4,9 @@ mod propensity;
 mod svd;
 mod util;
 
+#[cfg(test)]
+mod test_support;
+
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use link_community::fit::*;

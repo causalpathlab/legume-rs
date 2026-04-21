@@ -440,23 +440,7 @@ pub fn connected_components(graph: &KnnGraph) -> (Vec<usize>, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nalgebra_sparse::{CooMatrix, CscMatrix};
-
-    fn make_test_graph(n_nodes: usize, edges: Vec<(usize, usize)>) -> KnnGraph {
-        let distances = vec![1.0; edges.len()];
-        let mut coo = CooMatrix::new(n_nodes, n_nodes);
-        for &(i, j) in &edges {
-            coo.push(i, j, 1.0f32);
-            coo.push(j, i, 1.0f32);
-        }
-        let adjacency = CscMatrix::from(&coo);
-        KnnGraph {
-            adjacency,
-            edges,
-            distances,
-            n_nodes,
-        }
-    }
+    use crate::test_support::make_test_graph;
 
     #[test]
     fn test_connected_components_single() {

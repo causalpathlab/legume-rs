@@ -496,23 +496,7 @@ fn sample_categorical_log(log_probs: &[f64], rng: &mut SmallRng) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nalgebra_sparse::{CooMatrix, CscMatrix};
-
-    fn make_test_graph(n_nodes: usize, edges: Vec<(usize, usize)>) -> KnnGraph {
-        let distances = vec![1.0; edges.len()];
-        let mut coo = CooMatrix::new(n_nodes, n_nodes);
-        for &(i, j) in &edges {
-            coo.push(i, j, 1.0f32);
-            coo.push(j, i, 1.0f32);
-        }
-        let adjacency = CscMatrix::from(&coo);
-        KnnGraph {
-            adjacency,
-            edges,
-            distances,
-            n_nodes,
-        }
-    }
+    use crate::test_support::make_test_graph;
 
     /// Create a planted partition: edges 0..n/2 belong to community 0,
     /// edges n/2..n belong to community 1, with distinct gene signatures.
