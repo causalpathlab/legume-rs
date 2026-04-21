@@ -13,7 +13,7 @@ fn test_graph_coarsen_small() {
         features[(i, i)] = 1.0;
     }
 
-    let result = graph_coarsen(&graph, &mut features);
+    let result = graph_coarsen(&graph, &mut features, None);
     assert_eq!(result.n_nodes, 6);
     assert_eq!(result.merges.len(), 5);
 
@@ -39,6 +39,8 @@ fn test_graph_coarsen_small() {
             num_levels: 1,
             refine_iterations: 0,
             seeding: None,
+            modularity_veto: None,
+            dc_poisson: None,
         },
     );
     let unique: HashSet<usize> = ml.all_pair_to_sample[0].iter().cloned().collect();
@@ -75,6 +77,8 @@ fn test_graph_coarsen_two_cliques() {
             num_levels: 1,
             refine_iterations: 0,
             seeding: None,
+            modularity_veto: None,
+            dc_poisson: None,
         },
     );
     // With 2 clusters the two cliques should separate
@@ -147,6 +151,8 @@ fn test_graph_coarsen_multilevel() {
             num_levels: 2,
             refine_iterations: 0,
             seeding: None,
+            modularity_veto: None,
+            dc_poisson: None,
         },
     );
 
@@ -174,6 +180,8 @@ fn test_graph_coarsen_multilevel() {
             num_levels: 1,
             refine_iterations: 0,
             seeding: None,
+            modularity_veto: None,
+            dc_poisson: None,
         },
     );
     assert_eq!(ml1.all_pair_to_sample.len(), 1);
@@ -235,6 +243,8 @@ fn test_spatial_seeding() {
             num_levels: 2,
             refine_iterations: 0,
             seeding: Some(sp),
+            modularity_veto: None,
+            dc_poisson: None,
         },
     );
     assert_eq!(ml.all_cell_labels.len(), 2);
@@ -325,6 +335,8 @@ fn test_refine_labels_in_multilevel() {
             num_levels: 1,
             refine_iterations: 5,
             seeding: None,
+            modularity_veto: None,
+            dc_poisson: None,
         },
     );
     // Must still produce the expected (A,A), (B,B), (A,B) sample structure.
@@ -334,4 +346,46 @@ fn test_refine_labels_in_multilevel() {
     assert_eq!(p2s[0], p2s[2]);
     assert_eq!(p2s[4], p2s[5]);
     assert_ne!(p2s[0], p2s[4]);
+}
+
+#[test]
+fn test_modularity_veto_rejects_bridge() {
+    // Two triangles {0,1,2} and {3,4,5} joined by one bridge (2,3). Intra-clique
+    // features are nearly identical (high sim) while the bridge endpoints sit
+    // on orthogonal axes (zero sim). The modularity veto should reject the
+    // bridge merge regardless of how greedy we get.
+    let edges = vec![(0, 1), (0, 2), (1, 2), (2, 3), (3, 4), (3, 5), (4, 5)];
+    let graph = make_test_graph(6, edges.clone());
+
+    let dim = 2;
+    // Clique A lives on axis 0, clique B on axis 1; both L2-normalised.
+    let mut features = Mat::zeros(dim, 6);
+    for i in 0..3 {
+        features[(0, i)] = 1.0;
+    }
+    for i in 3..6 {
+        features[(1, i)] = 1.0;
+    }
+
+    // Without the veto, the greedy coarsener will eventually cross the
+    // bridge — confirm the baseline produces only a single cluster when
+    // asked for one.
+    let result_no_veto = graph_coarsen(&graph, &mut features.clone(), None);
+    assert_eq!(
+        result_no_veto.merges.len(),
+        5,
+        "without veto, coarsening should merge everything"
+    );
+
+    // With γ = 1.0, the bridge edge (orthogonal endpoints, sim = 0) should
+    // fail the modularity-gain test and be vetoed. The two triangles merge
+    // internally (5 intra-clique merges → 2 clusters) but the bridge itself
+    // is never taken.
+    let veto = ModularityVeto { gamma: 1.0 };
+    let result_with_veto = graph_coarsen(&graph, &mut features, Some(&veto));
+    assert_eq!(
+        result_with_veto.merges.len(),
+        4,
+        "with veto, each triangle produces 2 merges (6 nodes → 2 clusters)"
+    );
 }

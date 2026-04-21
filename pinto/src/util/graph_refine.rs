@@ -35,9 +35,13 @@ pub(super) fn would_disconnect_cluster(
     scratch: &mut ArticulationScratch,
 ) -> bool {
     scratch.reset();
-    scratch
-        .nbrs_in_cluster
-        .extend(graph.neighbors(i).iter().copied().filter(|&j| labels[j] == cluster));
+    scratch.nbrs_in_cluster.extend(
+        graph
+            .neighbors(i)
+            .iter()
+            .copied()
+            .filter(|&j| labels[j] == cluster),
+    );
 
     if scratch.nbrs_in_cluster.len() <= 1 {
         return false;
