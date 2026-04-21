@@ -1107,7 +1107,8 @@ fn refine_or_identity(
     } else {
         let mut sc_to_group: Vec<Vec<usize>> =
             Vec::with_capacity(inputs.initial_sc_to_group_per_level.len());
-        let mut num_groups_per_level = Vec::with_capacity(inputs.initial_sc_to_group_per_level.len());
+        let mut num_groups_per_level =
+            Vec::with_capacity(inputs.initial_sc_to_group_per_level.len());
         for lvl in inputs.initial_sc_to_group_per_level {
             let (compact, k) = crate::refine_multilevel::compact_labels(lvl);
             num_groups_per_level.push(k);

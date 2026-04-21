@@ -21,6 +21,28 @@ pub struct CoarsenResult {
     pub(super) n_nodes: usize,
 }
 
+/// Degree-corrected modularity-gain merge veto.
+///
+/// Reject a proposed merge `(i, j)` with similarity `sim(i,j)` when
+/// `sim(i,j) < gamma · deg(i) · deg(j) / (2W)`, the standard Louvain/Leiden
+/// merge-gain criterion adapted to a cosine-weighted adjacency. Weights are
+/// clamped at zero so anti-correlated cell pairs never contribute to the
+/// null.
+///
+/// `gamma = 1.0` is a natural default (modularity resolution). Set to `0.0`
+/// to accept any proposal with non-negative similarity, or pass `None` to
+/// the coarsener to disable the veto entirely.
+#[derive(Clone, Copy, Debug)]
+pub struct ModularityVeto {
+    pub gamma: f32,
+}
+
+impl Default for ModularityVeto {
+    fn default() -> Self {
+        Self { gamma: 1.0 }
+    }
+}
+
 /// Build symmetric adjacency lists from edge pairs.
 fn build_adjacency(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -46,7 +68,14 @@ fn build_adjacency(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
 /// * `graph` - spatial KNN graph
 /// * `cell_features` - `[proj_dim × n_cells]` matrix with L2-normalized columns;
 ///   mutated in place as merged centroids replace absorbed columns.
-pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult {
+/// * `veto` - optional [`ModularityVeto`] — when supplied, proposals are
+///   rejected if their similarity is no better than expected given each
+///   endpoint's weighted degree in the current super-graph.
+pub fn graph_coarsen(
+    graph: &KnnGraph,
+    cell_features: &mut Mat,
+    veto: Option<&ModularityVeto>,
+) -> CoarsenResult {
     let n = graph.n_nodes;
     let dim = cell_features.nrows();
 
@@ -67,6 +96,9 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
 
     let mut active: Vec<usize> = (0..n).filter(|&i| !adj[i].is_empty()).collect();
     let mut taken = vec![false; n];
+    let mut deg_cos = vec![0.0f32; n];
+    let mut total_w = 0.0f32;
+    let mut total_vetoed = 0usize;
     let mut n_rounds = 0u32;
 
     loop {
@@ -74,8 +106,30 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
             break;
         }
 
+        // Recompute per-node weighted degree and total_w from the current
+        // super-graph edge list. Negative cosines clamp to zero so the null
+        // model doesn't credit anti-correlated neighborhoods.
+        if veto.is_some() {
+            for i in 0..n {
+                deg_cos[i] = 0.0;
+            }
+            total_w = 0.0;
+            for &(i, j) in &edges {
+                let s = cell_features
+                    .column(i)
+                    .dot(&cell_features.column(j))
+                    .max(0.0);
+                deg_cos[i] += s;
+                deg_cos[j] += s;
+                total_w += s;
+            }
+        }
+
         let features_ref = &*cell_features;
         let adj_ref = &adj;
+        let veto_ref = veto;
+        let deg_ref = &deg_cos;
+        let total_w_ref = total_w;
 
         let proposals: Vec<(usize, usize, f32)> = active
             .par_iter()
@@ -89,9 +143,33 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
                         best_j = j;
                     }
                 }
-                best_sim.is_finite().then_some((i, best_j, best_sim))
+                if !best_sim.is_finite() {
+                    return None;
+                }
+                // Degree-corrected modularity-gain veto. Require strictly
+                // positive similarity (no merging anti-correlated or
+                // orthogonal pairs) AND strict gain over the null rate.
+                if let Some(v) = veto_ref {
+                    if best_sim <= 0.0 {
+                        return None;
+                    }
+                    let expected = if total_w_ref > 0.0 {
+                        v.gamma * deg_ref[i] * deg_ref[best_j] / (2.0 * total_w_ref)
+                    } else {
+                        0.0
+                    };
+                    if best_sim <= expected {
+                        return None;
+                    }
+                }
+                Some((i, best_j, best_sim))
             })
             .collect();
+
+        let n_accepted_proposals = proposals.len();
+        if veto.is_some() {
+            total_vetoed += active.len() - n_accepted_proposals;
+        }
 
         let mut sorted = proposals;
         sorted.sort_unstable_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(Ordering::Equal));
@@ -170,12 +248,22 @@ pub fn graph_coarsen(graph: &KnnGraph, cell_features: &mut Mat) -> CoarsenResult
     }
 
     pb.finish_and_clear();
-    info!(
-        "Graph coarsening: {} nodes, {} merges in {} rounds",
-        n,
-        merges.len(),
-        n_rounds
-    );
+    if veto.is_some() {
+        info!(
+            "Graph coarsening: {} nodes, {} merges in {} rounds ({} proposals vetoed)",
+            n,
+            merges.len(),
+            n_rounds,
+            total_vetoed
+        );
+    } else {
+        info!(
+            "Graph coarsening: {} nodes, {} merges in {} rounds",
+            n,
+            merges.len(),
+            n_rounds
+        );
+    }
 
     CoarsenResult { merges, n_nodes: n }
 }
@@ -449,6 +537,18 @@ pub struct SeedingParams<'a> {
     pub batch_membership: Option<&'a [Box<str>]>,
 }
 
+/// Inputs required to run DC-Poisson refinement per level.
+///
+/// Bundled as a single struct so the three fields — scoring params, raw
+/// counts, and feature count — are either all present or all absent. No
+/// runtime check needed: `CoarsenConfig::dc_poisson: Option<DcPoissonConfig>`
+/// makes the joint nature explicit in the type.
+pub struct DcPoissonConfig<'a> {
+    pub params: data_beans_alg::dc_poisson::RefineParams,
+    pub data: &'a SparseIoVec,
+    pub num_genes: usize,
+}
+
 /// Configuration for multi-level graph coarsening.
 pub struct CoarsenConfig<'a> {
     /// Finest-level target cluster count.
@@ -459,6 +559,11 @@ pub struct CoarsenConfig<'a> {
     pub refine_iterations: usize,
     /// Spatial grid seeding pre-pass for large datasets (see [`SeedingParams`]).
     pub seeding: Option<SeedingParams<'a>>,
+    /// Optional degree-corrected modularity-gain veto on merge proposals.
+    /// `None` disables the veto (legacy behaviour — accept any sim).
+    pub modularity_veto: Option<ModularityVeto>,
+    /// Optional gene-level DC-Poisson refinement per level.
+    pub dc_poisson: Option<DcPoissonConfig<'a>>,
 }
 
 /// Multi-level graph coarsening result.
@@ -494,7 +599,10 @@ pub fn graph_coarsen_multilevel(
         num_levels,
         refine_iterations,
         seeding,
+        modularity_veto,
+        dc_poisson,
     } = config;
+    let veto_ref = modularity_veto.as_ref();
     let n_original = graph.n_nodes;
 
     // Optional seeding pre-pass for large datasets.
@@ -516,7 +624,7 @@ pub fn graph_coarsen_multilevel(
         super_features.normalize_columns_inplace();
         let snapshot = super_features.clone();
 
-        coarsen_result = graph_coarsen(&super_graph, &mut super_features);
+        coarsen_result = graph_coarsen(&super_graph, &mut super_features, veto_ref);
         coarsen_features = snapshot;
         seed_labels = Some(labels);
         coarsen_graph_owned = Some(super_graph);
@@ -524,7 +632,7 @@ pub fn graph_coarsen_multilevel(
         cell_features.normalize_columns_inplace();
         let snapshot = cell_features.clone();
 
-        coarsen_result = graph_coarsen(graph, cell_features);
+        coarsen_result = graph_coarsen(graph, cell_features, veto_ref);
         coarsen_features = snapshot;
         seed_labels = None;
         coarsen_graph_owned = None;
@@ -546,6 +654,35 @@ pub fn graph_coarsen_multilevel(
     let mut uf = UnionFind::new(n_coarsen);
     let mut merge_idx = 0usize;
     let mut results: Vec<Option<CoarsenLevelResult>> = vec![None; level_n_clusters.len()];
+
+    // Build DC-Poisson context once if configured. The entity axis (super-
+    // nodes when seeded, cells otherwise) and the raw-count-derived profiles
+    // + guard are identical across all levels, so pay the I/O cost once.
+    let dc_poisson_ctx: Option<crate::util::graph_dc_poisson_refine::DcPoissonContext<'_>> =
+        if let Some(cfg) = dc_poisson.as_ref() {
+            let cell_to_entity: Vec<usize> = if let Some(ref sl) = seed_labels {
+                sl.clone()
+            } else {
+                (0..n_original).collect()
+            };
+            Some(
+                crate::util::graph_dc_poisson_refine::DcPoissonContext::build(
+                    cfg.data,
+                    graph,
+                    cell_to_entity,
+                    n_coarsen,
+                    cfg.num_genes,
+                    cfg.params.idf_weighting,
+                )
+                .expect("DC-Poisson context build failed"),
+            )
+        } else {
+            None
+        };
+
+    // Previous (next-coarser) level's refined entity labels drive the sibling
+    // constraint. `None` at the coarsest level.
+    let mut prev_entity_labels: Option<Vec<usize>> = None;
 
     for (nc, orig_idx) in sorted {
         let target = n_coarsen
@@ -582,6 +719,31 @@ pub fn graph_coarsen_multilevel(
                 refine_iterations,
                 seed,
             );
+        }
+
+        // Gene-level DC-Poisson refinement (second opinion on raw counts).
+        if let (Some(ctx), Some(cfg)) = (dc_poisson_ctx.as_ref(), dc_poisson.as_ref()) {
+            use rand::SeedableRng;
+            let level_seed = cfg
+                .params
+                .seed
+                .wrapping_add((orig_idx as u64).wrapping_mul(0x9E3779B97F4A7C15));
+            let mut rng = rand::rngs::SmallRng::seed_from_u64(level_seed);
+            let level_label = format!(
+                "DC-Poisson L{}/{}",
+                level_n_clusters.len() - orig_idx,
+                level_n_clusters.len()
+            );
+            let moves = crate::util::graph_dc_poisson_refine::refine_level_dc_poisson(
+                ctx,
+                &mut coarse_labels,
+                prev_entity_labels.as_deref(),
+                &cfg.params,
+                &mut rng,
+                &level_label,
+            );
+            info!("  level {} DC-Poisson refined: {} moves", orig_idx, moves);
+            prev_entity_labels = Some(coarse_labels.clone());
         }
 
         // Compose with seed labels to get original-cell-level labels
