@@ -121,7 +121,9 @@ enum Commands {
                       - {out}.basis.parquet: SVD basis (2G x T)\n\
                       - {out}.latent.parquet: per-pair latent codes (E x T)\n\
                       - {out}.propensity.parquet: cell propensity (N x K)\n\
-                      - {out}.gene_topic.parquet: gene-topic Poisson-Gamma statistics (G x K)"
+                      - {out}.gene_topic.parquet: gene-topic Poisson-Gamma statistics (G x K).\n\
+                      \x20 Housekeeping-adjusted by default (row-scaled by 1/(bg[g]+ε));\n\
+                      \x20 pass --no-adjust-housekeeping for raw rates"
     )]
     DeltaSvd(SrtDeltaSvdArgs),
 
@@ -156,7 +158,9 @@ enum Commands {
                       Outputs:\n\
                       - {out}.propensity.parquet: per-vertex propensity (N x K)\n\
                       - {out}.edge_cluster.parquet: edge cluster assignments\n\
-                      - {out}.genes.parquet: cluster-specific gene expression (when expr_data_files provided)"
+                      - {out}.genes.parquet: cluster-specific gene expression (when expr_data_files provided).\n\
+                      \x20 Housekeeping-adjusted by default (row-scaled by 1/(bg[g]+ε));\n\
+                      \x20 pass --no-adjust-housekeeping for raw rates"
     )]
     Propensity(SrtPropensityArgs),
 
@@ -208,6 +212,8 @@ enum Commands {
                       OUTPUT FILES:\n\n\
                       \x20 {out}.propensity.parquet      Cell community membership [N × K]\n\
                       \x20 {out}.gene_topic.parquet      Gene-topic rates [G × K]\n\
+                      \x20                                (housekeeping-adjusted by 1/(bg[g]+ε) by default;\n\
+                      \x20                                 pass --no-adjust-housekeeping for raw)\n\
                       \x20 {out}.link_community.parquet  Edge community assignments [E × 3]\n\
                       \x20 {out}.coord_pairs.parquet     Cell pair coordinates\n\
                       \x20 {out}.scores.parquet          Score trace per iteration\n\

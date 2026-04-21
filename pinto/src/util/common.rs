@@ -51,6 +51,25 @@ pub struct Pair {
     pub right: usize,
 }
 
+/// Discount housekeeping genes in a gene × topic sufficient-statistic matrix.
+///
+/// Row `g` is scaled by `w_g = 1 / (bg[g] + ε)` with `bg[g]` the gene's
+/// share of total mass in `sum_gk`. This is the Poisson-offset / DC-SBM
+/// size-factor correction in rate space: after scaling, the calibrated
+/// posterior mean estimates λ_gk adjusted for the per-gene housekeeping
+/// offset θ_g = bg[g]. Weights are always positive, so `GammaMatrix`
+/// sufficient statistics stay non-negative.
+pub fn apply_gene_idf_weights(sum_gk: &mut Mat) {
+    let eps = 1e-12f64;
+    let row_sums = &*sum_gk * DVec::from_element(sum_gk.ncols(), 1.0f32);
+    let total: f64 = row_sums.iter().map(|&x| x as f64).sum::<f64>().max(eps);
+    for (g, &rs) in row_sums.iter().enumerate() {
+        let bg = rs as f64 / total;
+        let w = (1.0 / (bg + eps)) as f32;
+        sum_gk.row_mut(g).scale_mut(w);
+    }
+}
+
 /// take names from parquet file
 /// * `file_path` - file path
 /// * `select_columns` - column names to extract

@@ -161,6 +161,18 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
+        default_value_t = false,
+        help = "Disable housekeeping adjustment in the gene_topic report (on by default)",
+        long_help = "By default, the reported gene-topic sufficient statistics are\n\
+                       scaled row-wise by 1/(bg[g] + ε), where bg[g] is the gene's\n\
+                       share of total mass. This gives housekeeping-adjusted\n\
+                       posterior rates (Poisson-offset / DC-SBM size-factor).\n\
+                       Pass --no-adjust-housekeeping to disable and write raw rates."
+    )]
+    no_adjust_housekeeping: bool,
+
+    #[arg(
+        long,
         default_value_t = 1.0,
         help = "Modularity-gain resolution for the coarsening merge veto",
         long_help = "Resolution γ for the degree-corrected merge veto. A proposed\n\
@@ -700,7 +712,13 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     )?;
 
     // 9b. Gene-topic statistics: Poisson-Gamma profiles per community [G × K]
-    compute_gene_topic_stat(&cell_propensity, &data_vec, c.block_size, &c.out)?;
+    compute_gene_topic_stat(
+        &cell_propensity,
+        &data_vec,
+        c.block_size,
+        !args.no_adjust_housekeeping,
+        &c.out,
+    )?;
 
     // 9c. Link community assignments
     info!("Writing link community assignments...");
