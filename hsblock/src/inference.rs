@@ -35,6 +35,16 @@ pub struct HsbmOptions {
     /// kernel weights from KNN graphs are continuous in (0, 1]. Scaling them
     /// up gives the model more signal to discriminate cluster structure.
     pub edge_scale: f64,
+    /// Early-exit threshold for Gibbs sweeps, expressed as a fraction of
+    /// total vertices that move per sweep. After three consecutive sweeps
+    /// below this fraction the sampler returns early. `0.0` disables
+    /// (default, preserves prior behavior).
+    pub gibbs_stagnation_frac: f64,
+    /// Optional initial cluster labels. When `Some`, skip the random
+    /// initialization and seed `SufficientStats` with these labels. Length
+    /// must equal the network size and entries must lie in `0..K` where
+    /// `K = 2^(tree_depth - 1)`. Default: `None`.
+    pub initial_partition: Option<Vec<usize>>,
 }
 
 impl Default for HsbmOptions {
@@ -47,6 +57,8 @@ impl Default for HsbmOptions {
             init_a0: 1.0,
             init_b0: 1.0,
             edge_scale: 100.0,
+            gibbs_stagnation_frac: 0.0,
+            initial_partition: None,
         }
     }
 }
@@ -94,9 +106,18 @@ impl Hsblock {
 
         let k = 1 << (self.options.tree_depth - 1); // 2^(D-1) clusters
 
-        // Initialize membership: random assignment to K clusters
-        let mut rng = SmallRng::seed_from_u64(self.options.seed);
-        let labels: Vec<usize> = (0..n).map(|_| rng.random_range(0..k)).collect();
+        // Initialize membership: caller-provided labels if any, else random.
+        let labels: Vec<usize> = if let Some(init) = self.options.initial_partition.as_ref() {
+            debug_assert_eq!(init.len(), n, "initial_partition length must equal n");
+            debug_assert!(
+                init.iter().all(|&c| c < k),
+                "initial_partition entries must be < K"
+            );
+            init.clone()
+        } else {
+            let mut rng = SmallRng::seed_from_u64(self.options.seed);
+            (0..n).map(|_| rng.random_range(0..k)).collect()
+        };
 
         // Save initial labels for comparison
         let initial_labels: Vec<usize> = (0..n).map(|i| clustering.get(i)).collect();
@@ -109,7 +130,8 @@ impl Hsblock {
         );
         let mut stats = SufficientStats::from_edges(&edges, n, k, &labels);
         let mut gibbs =
-            GibbsSampler::new(SmallRng::seed_from_u64(self.options.seed.wrapping_add(1)));
+            GibbsSampler::new(SmallRng::seed_from_u64(self.options.seed.wrapping_add(1)))
+                .with_stagnation(self.options.gibbs_stagnation_frac);
 
         let dc = self.options.degree_corrected;
 
@@ -290,6 +312,42 @@ mod tests {
         let changed = hsblock.iterate(&network, &mut clustering);
         assert!(changed);
         assert!(clustering.num_clusters() >= 1);
+    }
+
+    #[test]
+    fn test_initial_partition_is_consumed() {
+        let (network, true_labels) = planted_partition_network(20, 2, 0.6, 0.05, 7);
+        let n = network.nodes();
+
+        // Feeding the ground-truth labels in as the initial partition with
+        // very few sweeps should keep the clustering pinned near truth.
+        let options = HsbmOptions {
+            tree_depth: 2,
+            num_sweeps: 2,
+            degree_corrected: false,
+            seed: 1,
+            initial_partition: Some(true_labels.clone()),
+            ..Default::default()
+        };
+        let mut hsblock = Hsblock::new(options);
+        let mut clustering = SimpleClustering::init_different_clusters(n);
+        hsblock.iterate(&network, &mut clustering);
+
+        let final_labels: Vec<usize> = (0..n).map(|i| clustering.get(i)).collect();
+        // Majority should match one of the two permutations of the truth.
+        let direct_match = (0..n)
+            .filter(|&i| final_labels[i] == true_labels[i])
+            .count();
+        let flipped_match = (0..n)
+            .filter(|&i| final_labels[i] != true_labels[i])
+            .count();
+        let match_count = direct_match.max(flipped_match);
+        assert!(
+            match_count as f64 / n as f64 > 0.8,
+            "initial_partition should anchor near ground truth (match={}/{})",
+            match_count,
+            n
+        );
     }
 
     #[test]

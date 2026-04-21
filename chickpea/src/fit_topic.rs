@@ -255,6 +255,7 @@ pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
                 sort_dim: args.sort_dim,
                 num_opt_iter: DEFAULT_OPT_ITER,
                 oversample: false,
+                refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
             },
         )?
         .into_iter()

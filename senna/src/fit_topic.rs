@@ -130,6 +130,25 @@ pub struct TopicArgs {
     )]
     pub(crate) num_levels: usize,
 
+    #[arg(long, default_value_t = 20, help = "Gibbs sweeps per refinement level")]
+    pub(crate) refine_gibbs: usize,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Greedy sweeps per refinement level"
+    )]
+    pub(crate) refine_greedy: usize,
+
+    #[arg(
+        long,
+        help = "Disable IDF reweighting in refinement (IDF is on by default)"
+    )]
+    pub(crate) no_refine_idf: bool,
+
+    #[arg(long, default_value_t = 42, help = "Seed for refinement Gibbs sampler")]
+    pub(crate) refine_seed: u64,
+
     #[arg(
         long,
         value_enum,
@@ -363,6 +382,13 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         oversample: !args.no_oversample_pb,
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
+        refine: Some(data_beans_alg::refine_multilevel::RefineParams {
+            num_gibbs: args.refine_gibbs,
+            num_greedy: args.refine_greedy,
+            idf_weighting: !args.no_refine_idf,
+            seed: args.refine_seed,
+            ..data_beans_alg::refine_multilevel::RefineParams::default()
+        }),
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();

@@ -211,6 +211,9 @@ pub struct LoadCollapseArgs<'a> {
     pub max_features: usize,
     /// Optional pre-computed feature list (overrides `max_features`).
     pub feature_list_file: Option<&'a str>,
+    /// Opt-in BBKNN + Poisson DC-SBM refinement of the multilevel
+    /// partition. `None` keeps the legacy hash-only behavior.
+    pub refine: Option<data_beans_alg::refine_multilevel::RefineParams>,
 }
 
 /// Load sparse data, project, multi-level collapse, and write delta output.
@@ -297,6 +300,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
             sort_dim: args.sort_dim,
             num_opt_iter: args.iter_opt,
             oversample: args.oversample,
+            refine: args.refine.clone(),
         },
     )?;
     collapsed_levels.reverse();
