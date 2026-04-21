@@ -1263,6 +1263,13 @@ impl SparseIoVec {
         }
     }
 
+    /// Borrow the per-batch HNSW lookups populated by
+    /// `build_hnsw_per_batch` / `register_batches_dmatrix`. Returns `None`
+    /// before the indices have been built.
+    pub fn batch_knn_lookup(&self) -> Option<&Vec<ColumnDict<usize>>> {
+        self.batch_knn_lookup.as_ref()
+    }
+
     /// Register batch membership information without building HNSW
     /// indices. This is a lightweight alternative to `register_batches_dmatrix`
     /// for use with super-cell based batch correction.

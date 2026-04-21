@@ -308,6 +308,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         oversample: !args.no_oversample_pb,
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
+        refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
