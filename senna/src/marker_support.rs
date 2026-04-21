@@ -48,6 +48,29 @@ pub(crate) fn read_marker_gene_info(file_path: &str) -> anyhow::Result<Vec<(Box<
         .collect())
 }
 
+/// Reweight binary membership in place: `w_g = ln(C / c_g)` where `c_g` is
+/// the number of celltypes claiming gene `g`. Genes shared by all celltypes
+/// receive weight 0, which removes them from downstream claim scoring.
+/// Returns `ln(C)` (the maximum possible weight) for logging.
+fn apply_idf_weights(mat: &mut Mat) -> f32 {
+    let n_genes = mat.nrows();
+    let n_ct = mat.ncols();
+    let c_total = n_ct as f32;
+    for g in 0..n_genes {
+        let c_g = mat.row(g).iter().filter(|&&v| v > 0.0).count() as f32;
+        if c_g == 0.0 {
+            continue;
+        }
+        let w = (c_total / c_g).ln();
+        for c in 0..n_ct {
+            if mat[(g, c)] > 0.0 {
+                mat[(g, c)] = w;
+            }
+        }
+    }
+    c_total.ln()
+}
+
 /// Build the `AnnotInfo` form (membership matrix + celltype names) from a
 /// marker TSV and the dictionary's gene-name order. Genes are matched to
 /// `row_names` via `flexible_gene_match`; unmatched markers are logged and
@@ -101,11 +124,13 @@ pub(crate) fn build_annotation_matrix(
         log::info!("{} marker genes not found in dictionary", unmatched.len());
     }
 
+    let max_idf = apply_idf_weights(&mut membership);
     log::info!(
-        "Matched {}/{} marker genes to {} cell types",
+        "Matched {}/{} marker genes to {} cell types (IDF max ln(C) = {:.3})",
         matched,
         marker_pairs.len(),
-        n_annots
+        n_annots,
+        max_idf,
     );
 
     Ok(AnnotInfo {
@@ -154,30 +179,13 @@ pub(crate) fn load_marker_info(
         }
     }
 
-    // Re-weight binary membership in place: w_g = ln(C / c_g) where
-    // c_g is the number of celltypes claiming gene g. Genes shared by
-    // all celltypes get w = 0 (the soft form of dropping).
-    let c_total = n_ct as f32;
-    let row_c_g = membership_gc.column_sum();
-    for g in 0..n_genes {
-        let c_g = row_c_g[g];
-        if c_g <= 0.0 {
-            continue;
-        }
-        let w = (c_total / c_g).ln();
-        for c in 0..n_ct {
-            if membership_gc[(g, c)] > 0.0 {
-                membership_gc[(g, c)] = w;
-            }
-        }
-    }
-
+    let max_idf = apply_idf_weights(&mut membership_gc);
     log::info!(
         "MarkerInfo: matched {}/{} markers across {} celltypes (TF-IDF max ln(C) = {:.3})",
         matched,
         pairs.len(),
         n_ct,
-        c_total.ln(),
+        max_idf,
     );
 
     Ok(MarkerInfo {
