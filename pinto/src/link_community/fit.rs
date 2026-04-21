@@ -88,9 +88,10 @@ pub struct SrtLinkCommunityArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Min total count to include a gene in projection basis",
+        help = "Min total count to include a gene in the projection basis",
         long_help = "Genes with total count below this threshold are zeroed out\n\
-                       in the projection basis. Only used when --n-gene-modules=0.\n\
+                       in the Gaussian projection basis, effectively removing them\n\
+                       from every profile dim. Ignored in gene-pair mode.\n\
                        Set to 0 to include all genes."
     )]
     min_gene_count: f32,
@@ -165,7 +166,7 @@ pub struct SrtLinkCommunityArgs {
 /// 2.  Estimate batch effects
 /// 3.  Build spatial KNN graph
 /// 4.  Multi-level cell coarsening
-/// 5.  Gene module discovery (sketch + K-means) — or random-projection / gene-pairs
+/// 5.  Edge profiles: compressed all-gene (default) or external gene-pairs
 /// 6.  Build edge profiles; optionally IDF-weight by empirical gene marginal
 ///     (DC-SBM degree correction ~ housekeeping frequency)
 /// 7.  Collapsed Gibbs on coarsest → transfer → refine at finer levels
@@ -175,9 +176,10 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     let c = &args.common;
     let k = args.n_communities;
     let n_outer_iter = args.n_outer_iter.max(1);
-    // n_gene_modules resolved after data loading (may need median cell nnz)
 
-    // 1. Load data (with or without coordinates)
+    //////////////////////////////////////////////////////
+    // 1. Load data (with or without coordinates)       //
+    //////////////////////////////////////////////////////
     info!("Loading data files...");
 
     let has_coords = c.has_coordinates();
@@ -207,7 +209,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         n_cells
     );
 
-    // 2. Build KNN graph (spatial or expression-based)
+    //////////////////////////////////////////////////////
+    // 2. Build KNN graph (spatial or expression-based) //
+    //////////////////////////////////////////////////////
     let graph;
 
     if has_coords {
@@ -248,7 +252,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         crate::util::input::auto_batch_from_components(&graph, &mut batch_membership);
     }
 
-    // 3. Estimate batch effects (skipped for single-batch)
+    //////////////////////////////////////////////////////
+    // 3. Estimate batch effects (skipped single-batch) //
+    //////////////////////////////////////////////////////
     let batch_sort_dim = c.proj_dim.min(10);
     let batch_db = estimate_and_write_batch_effects(
         &mut data_vec,
@@ -308,7 +314,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // Track scores
     let mut score_trace: Vec<f64> = Vec::new();
 
-    // 4. Multi-level cell coarsening
+    //////////////////////////////////////////////////////
+    // 4. Multi-level cell coarsening                   //
+    //////////////////////////////////////////////////////
     info!(
         "Graph coarsening ({} levels, {} coarse clusters)...",
         c.num_levels, c.n_pseudobulk
@@ -335,7 +343,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         }),
     );
 
-    // 5-6. Build COARSE edge profiles first
+    //////////////////////////////////////////////////////
+    // 5-6. Build COARSE edge profiles first            //
+    //////////////////////////////////////////////////////
     let coarse_profiles;
     let proj_basis: Option<Mat>;
 
@@ -429,7 +439,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         });
         proj_basis = None;
     } else {
-        // Random-projection edge profiles (default).
+        // Compressed all-gene edge profiles (default): y_e = W^T (x_i + x_j)
+        // with W a G × proj_dim Gaussian basis. Every profile dim is a full
+        // linear combination of ALL genes — no genes dropped.
         let mut basis = cell_proj.basis.clone();
 
         if args.min_gene_count > 0.0 {
@@ -443,7 +455,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         }
 
         info!(
-            "Building COARSE random-projection edge profiles (dim={})...",
+            "Building COARSE compressed all-gene edge profiles (dim={})...",
             c.proj_dim
         );
         coarse_profiles = build_edge_profiles(&data_vec, &super_edges, &basis, c.block_size)?;
@@ -485,7 +497,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         info!("Applied IDF weighting to coarse profiles (housekeeping genes down-weighted)");
     }
 
-    // 7. Gibbs on coarsest level
+    //////////////////////////////////////////////////////
+    // 7. Gibbs on coarsest level                       //
+    //////////////////////////////////////////////////////
     let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(c.seed));
     let init_labels: Vec<usize> = (0..coarse_profiles.n_edges).map(|e| e % k).collect();
 
@@ -548,9 +562,12 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     let num_fine_sweeps = args.num_em.unwrap_or((args.num_gibbs / 4).max(5));
 
-    // 8. Outer EM loop: E-step (Gibbs+greedy) → M-step (re-cluster gene-pair modules).
-    //    The M-step is only meaningful when gene-pair-module collapse is active;
-    //    in projection / raw gene-pair mode a single iteration suffices.
+    //////////////////////////////////////////////////////
+    // 8. Outer EM loop: E-step (Gibbs+greedy) →        //
+    //    M-step (re-cluster gene-pair modules)         //
+    //////////////////////////////////////////////////////
+    // M-step only meaningful when gene-pair-module collapse is active;
+    // projection / raw gene-pair mode runs a single iteration.
     let has_mstep = gp_profile_state
         .as_ref()
         .is_some_and(|gp| gp.module_collapse.is_some());
@@ -636,7 +653,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         eprintln!();
     }
 
-    // 9. Extract and write outputs
+    //////////////////////////////////////////////////////
+    // 9. Extract and write outputs                     //
+    //////////////////////////////////////////////////////
     let cell_names = data_vec.column_names()?;
 
     // 9a. cell propensity [N × K]

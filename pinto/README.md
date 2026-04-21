@@ -1,11 +1,12 @@
 # PINTO
 
-**P**roximity-based **I**nteraction **N**etwork analysis to dissect **T**issue **O**rganizations
+**P**roximity-based **I**nteraction **N**etwork analysis to dissect **T**issue
+**O**rganizations.
 
-PINTO identifies spatial cell-cell interaction patterns from spatially-resolved
-transcriptomics (SRT) data. It constructs spatial cell pairs from KNN graphs,
-decomposes pair-level expression into shared/difference channels, and learns
-latent interaction topics via randomized SVD.
+PINTO segments spatial transcriptomics tissue into coherent regions by
+clustering cell-cell edges of a spatial KNN graph. Each edge carries an
+expression profile, and a collapsed Gibbs sampler assigns edges to communities;
+per-cell soft membership falls out of the edge labels.
 
 ## Installation
 
@@ -13,79 +14,79 @@ latent interaction topics via randomized SVD.
 cargo build --release -p pinto
 ```
 
-The binary will be at `target/release/pinto`.
+The binary lands at `target/release/pinto`.
 
 ## Subcommands
 
-### `delta-svd` — Gene-level shared/difference analysis
+### `lc` (link-community) — recommended
+
+Link community detection. Assigns each spatial edge to one of K communities
+via collapsed Gibbs sampling on compressed all-gene edge profiles, then
+derives per-cell soft membership.
+
+```sh
+# Typical 10x Visium run:
+pinto lc data.h5 -c tissue_positions.csv -o out
+
+# More communities:
+pinto lc data.h5 -c coords.csv -o out --n-communities 25
+
+# External gene-pair network (e.g. BioGRID):
+pinto lc data.h5 -c coords.csv -o out \
+  --gene-network biogrid_pairs.tsv --n-outer-iter 3
+
+# Expression-only (no coordinates):
+pinto lc data.h5 -o out
+```
+
+**Outputs:** `{out}.propensity.parquet` (cell × K), `{out}.gene_topic.parquet`
+(gene × K), `{out}.link_community.parquet` (edge × 3),
+`{out}.coord_pairs.parquet`, `{out}.scores.parquet`, and —
+in gene-pair mode — `{out}.gene_graph.parquet`.
+
+### `dsvd` (delta-svd) — cell-pair shared/difference SVD
 
 Decomposes cell-pair expression into shared and difference channels, fits
-Poisson-Gamma models on pseudobulk samples, and runs SVD to learn latent
+Poisson-Gamma per pseudobulk sample, and runs randomized SVD for latent
 interaction topics.
 
 ```sh
-pinto delta-svd data.zarr --coord coords.tsv -o output -k 10 -t 10
+pinto dsvd data.h5 -c coords.csv -o out
 ```
 
-**Outputs:** `{out}.delta.parquet`, `{out}.coord_pairs.parquet`,
-`{out}.dictionary.parquet`, `{out}.latent.parquet`
+**Outputs:** `{out}.coord_pairs.parquet`, `{out}.dictionary.parquet`,
+`{out}.latent.parquet`, `{out}.propensity.parquet`,
+`{out}.gene_topic.parquet`, `{out}.delta.parquet` (multi-batch only).
 
-### `gene-pair-delta-svd` — Gene-gene interaction patterns
+### `prop` (propensity) — re-cluster dsvd edges at a different K
 
-Discovers gene-gene co-expression patterns within spatial neighbourhoods.
-Builds a gene-gene KNN graph, computes positive interaction deltas, and
-applies SVD + Nystrom projection.
+Given dsvd's edge latent codes, runs K-means and derives per-cell propensity.
 
 ```sh
-pinto gene-pair-delta-svd data.zarr --coord coords.tsv -o output -k 10 -t 10
+pinto prop -z out.latent.parquet -e out.coord_pairs.parquet -o prop
 ```
 
-Optionally supply an external gene network (e.g., BioGRID):
-
-```sh
-pinto gene-pair-delta-svd data.zarr --coord coords.tsv \
-  --gene-network biogrid_edges.tsv -o output
-```
-
-**Outputs:** `{out}.coord_pairs.parquet`, `{out}.gene_graph.parquet`,
-`{out}.dictionary.parquet`, `{out}.latent.parquet`
-
-### `propensity` — Vertex propensity from edge clusters
-
-Estimates per-cell propensity scores from edge cluster assignments.
-
-```sh
-pinto propensity -z output.latent.parquet -e output.coord_pairs.parquet -o prop
-```
-
-**Outputs:** `{out}.propensity.parquet`, `{out}.edge_cluster.parquet`
-
-### `visualize` — Gene network layout
-
-Computes a 2D spectral layout of genes and clusters gene-pair edges by their
-dictionary vectors.
-
-```sh
-pinto visualize -g output.gene_graph.parquet -d output.dictionary.parquet -o viz
-```
-
-**Outputs:** `{out}.gene_coords.parquet`, `{out}.gene_pair_clusters.parquet`
+**Outputs:** `{out}.propensity.parquet`, `{out}.edge_cluster.parquet`,
+and — when expression data is provided — `{out}.genes.parquet`.
 
 ## Input data format
 
-- Expression data: `.zarr` or `.h5` sparse matrices (via `data-beans`).
-  Convert from `.mtx` using `data-beans from-mtx`.
-- Coordinate files: TSV/CSV/parquet with cell barcodes and spatial coordinates.
-- Batch files (optional): one label per cell per line, for batch effect correction.
+- **Expression:** `.h5` or `.zarr` sparse matrices via `data-beans`.
+  Convert from `.mtx`: `data-beans from-mtx -r features.tsv.gz -c barcodes.tsv.gz matrix.mtx.gz --backend hdf5 -o data.h5`.
+  Multiple files comma-separated for multi-sample runs: `s1.h5,s2.h5`.
+- **Coordinates:** CSV/TSV/parquet. First column is the cell barcode; remaining
+  columns are spatial coordinates. Defaults recognize Visium
+  (`pxl_row_in_fullres`, `pxl_col_in_fullres`) and Xenium
+  (`cell_centroid_x`, `cell_centroid_y`) layouts.
+- **Batch labels (optional):** plain text, one label per cell per line
+  (`-b labels.txt`); pass one file per data file.
 
 ## Detailed help
 
-Each subcommand supports `--help` with full pipeline stage descriptions and
-parameter documentation:
+Each subcommand has a full `--help` with algorithm stages, flags, and outputs:
 
 ```sh
-pinto delta-svd --help
-pinto gene-pair-delta-svd --help
-pinto propensity --help
-pinto visualize --help
+pinto lc --help
+pinto dsvd --help
+pinto prop --help
 ```
