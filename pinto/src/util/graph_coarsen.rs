@@ -302,6 +302,216 @@ pub fn compute_level_n_clusters(n_clusters: usize, num_levels: usize) -> Vec<usi
     result
 }
 
+/// L2 norm of a column.
+#[inline]
+fn column_l2_norm(m: &Mat, col: usize) -> f32 {
+    let mut sq = 0.0f32;
+    for r in 0..m.nrows() {
+        let v = m[(r, col)];
+        sq += v * v;
+    }
+    sq.sqrt()
+}
+
+/// Would removing node `i` disconnect the induced subgraph of `cluster`?
+///
+/// BFS from one in-cluster neighbour of `i`, blocking `i` itself and staying
+/// within nodes labelled `cluster`. If every other in-cluster neighbour of `i`
+/// is reachable, `i` is not an articulation point of the cluster's subgraph.
+fn would_disconnect_cluster(
+    i: usize,
+    cluster: usize,
+    csc: &CscMatrix<f32>,
+    labels: &[usize],
+) -> bool {
+    let col = csc.col(i);
+    let nbrs_in_cluster: Vec<usize> = col
+        .row_indices()
+        .iter()
+        .copied()
+        .filter(|&j| labels[j] == cluster)
+        .collect();
+
+    if nbrs_in_cluster.len() <= 1 {
+        return false;
+    }
+
+    let mut visited: HashSet<usize> = Default::default();
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    let start = nbrs_in_cluster[0];
+    visited.insert(start);
+    queue.push_back(start);
+
+    let mut remaining: HashSet<usize> = nbrs_in_cluster[1..].iter().copied().collect();
+
+    while let Some(node) = queue.pop_front() {
+        let nbcol = csc.col(node);
+        for &nb in nbcol.row_indices() {
+            if nb == i || labels[nb] != cluster || !visited.insert(nb) {
+                continue;
+            }
+            remaining.remove(&nb);
+            if remaining.is_empty() {
+                return false;
+            }
+            queue.push_back(nb);
+        }
+    }
+
+    !remaining.is_empty()
+}
+
+/// Refine cluster labels by Leiden-style local moving.
+///
+/// Each sweep visits all nodes in random order. For node `i` in cluster `A`,
+/// the move to a graph-adjacent cluster `B` is accepted iff
+/// `cos(x_i, centroid_B) > cos(x_i, centroid_A)` and removing `i` does not
+/// disconnect `A`'s induced subgraph (BFS articulation check).
+///
+/// Both centroid similarities use the *current* (pre-move) centroids, which
+/// includes `i`'s contribution to `A`. This is the standard convergence-safe
+/// criterion: each accepted move strictly increases the within-cluster cosine
+/// sum (M-step optimality of normalised mean), so the loop terminates.
+///
+/// * `features` – `[D × N]` L2-normalised feature matrix
+/// * `graph` – KNN graph on the same N nodes
+/// * `labels` – cluster labels, mutated in place
+/// * `max_iter` – safety cap on sweeps; converges earlier when no node moves
+/// * `rng_seed` – seed for the random node ordering
+///
+/// Returns total number of moves accepted.
+pub fn refine_labels(
+    features: &Mat,
+    graph: &KnnGraph,
+    labels: &mut [usize],
+    max_iter: usize,
+    rng_seed: u64,
+) -> usize {
+    use rand::rngs::SmallRng;
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+
+    let n = labels.len();
+    let dim = features.nrows();
+    debug_assert_eq!(features.ncols(), n);
+    debug_assert_eq!(graph.n_nodes, n);
+
+    if n == 0 || max_iter == 0 {
+        return 0;
+    }
+
+    let n_clusters = labels.iter().max().copied().map_or(0, |m| m + 1);
+    if n_clusters <= 1 {
+        return 0;
+    }
+
+    // Unnormalised centroid sums and sizes; cosine denominator = ||sum||.
+    let mut centroid_sum = Mat::zeros(dim, n_clusters);
+    let mut cluster_sizes = vec![0usize; n_clusters];
+    for (i, &c) in labels.iter().enumerate() {
+        cluster_sizes[c] += 1;
+        for r in 0..dim {
+            centroid_sum[(r, c)] += features[(r, i)];
+        }
+    }
+    let mut centroid_norm: Vec<f32> = (0..n_clusters)
+        .map(|c| column_l2_norm(&centroid_sum, c))
+        .collect();
+
+    let csc = &graph.adjacency;
+    let mut rng = SmallRng::seed_from_u64(rng_seed);
+    let mut node_order: Vec<usize> = (0..n).collect();
+    let mut nbr_set: HashSet<usize> = Default::default();
+    let mut total_moves = 0usize;
+
+    for _iter in 0..max_iter {
+        node_order.shuffle(&mut rng);
+        let mut moves = 0usize;
+
+        for &i in &node_order {
+            let current = labels[i];
+
+            // Don't drain a singleton — we'd lose the cluster id.
+            if cluster_sizes[current] <= 1 {
+                continue;
+            }
+
+            let dot_curr = features.column(i).dot(&centroid_sum.column(current));
+            let norm_curr = centroid_norm[current];
+            let sim_curr = if norm_curr > 0.0 {
+                dot_curr / norm_curr
+            } else {
+                0.0
+            };
+
+            // Collect unique adjacent foreign clusters.
+            nbr_set.clear();
+            let col = csc.col(i);
+            for &nb in col.row_indices() {
+                let nbc = labels[nb];
+                if nbc != current {
+                    nbr_set.insert(nbc);
+                }
+            }
+            if nbr_set.is_empty() {
+                continue;
+            }
+
+            let mut best_c = current;
+            let mut best_sim = sim_curr;
+            for &c in &nbr_set {
+                let norm = centroid_norm[c];
+                if norm <= 0.0 {
+                    continue;
+                }
+                let dot = features.column(i).dot(&centroid_sum.column(c));
+                let sim = dot / norm;
+                if sim > best_sim {
+                    best_sim = sim;
+                    best_c = c;
+                }
+            }
+
+            if best_c == current {
+                continue;
+            }
+
+            // Connectivity: skip moves that would split the source cluster.
+            if would_disconnect_cluster(i, current, csc, labels) {
+                continue;
+            }
+
+            // Apply move: incremental centroid sum + size + norm updates.
+            for r in 0..dim {
+                let v = features[(r, i)];
+                centroid_sum[(r, current)] -= v;
+                centroid_sum[(r, best_c)] += v;
+            }
+            cluster_sizes[current] -= 1;
+            cluster_sizes[best_c] += 1;
+            centroid_norm[current] = column_l2_norm(&centroid_sum, current);
+            centroid_norm[best_c] = column_l2_norm(&centroid_sum, best_c);
+
+            labels[i] = best_c;
+            moves += 1;
+        }
+
+        if moves == 0 {
+            break;
+        }
+        total_moves += moves;
+    }
+
+    if total_moves > 0 {
+        info!(
+            "Refinement: {} moves over up to {} sweeps",
+            total_moves, max_iter
+        );
+    }
+
+    total_moves
+}
+
 /// Threshold: if n_nodes > this, use spatial seeding pre-pass.
 const SEEDING_THRESHOLD: usize = 20_000;
 
@@ -558,12 +768,18 @@ pub fn graph_coarsen_multilevel(
     n_clusters: usize,
     num_levels: usize,
     seeding: Option<SeedingParams<'_>>,
+    refine_iterations: usize,
 ) -> MultiLevelCoarsenResult {
     let n_original = graph.n_nodes;
 
-    // Optional seeding pre-pass for large datasets
+    // Optional seeding pre-pass for large datasets.
+    // We snapshot the L2-normalised pre-agglomeration features and (if seeded)
+    // the super-graph so refinement can run on the same level the agglomeration
+    // ran on.
     let seed_labels: Option<Vec<usize>>;
     let coarsen_result;
+    let coarsen_features: Mat;
+    let coarsen_graph_owned: Option<KnnGraph>;
 
     if let Some(sp) = seeding.filter(|_| n_original > SEEDING_THRESHOLD) {
         let target_super = (n_clusters * 8).min(n_original / 4).max(n_clusters + 1);
@@ -571,12 +787,29 @@ pub fn graph_coarsen_multilevel(
             spatial_seed_labels(sp.coordinates, graph, target_super, sp.batch_membership);
         let (super_graph, mut super_features) =
             build_super_graph(&labels, num_super, graph, cell_features);
+
+        let mut snapshot = super_features.clone();
+        for i in 0..snapshot.ncols() {
+            normalize_column_inplace(&mut snapshot, i);
+        }
+
         coarsen_result = graph_coarsen(&super_graph, &mut super_features);
+        coarsen_features = snapshot;
         seed_labels = Some(labels);
+        coarsen_graph_owned = Some(super_graph);
     } else {
+        let mut snapshot = cell_features.clone();
+        for i in 0..snapshot.ncols() {
+            normalize_column_inplace(&mut snapshot, i);
+        }
+
         coarsen_result = graph_coarsen(graph, cell_features);
+        coarsen_features = snapshot;
         seed_labels = None;
+        coarsen_graph_owned = None;
     }
+
+    let coarsen_graph: &KnnGraph = coarsen_graph_owned.as_ref().unwrap_or(graph);
 
     let level_n_clusters = compute_level_n_clusters(n_clusters, num_levels);
 
@@ -605,7 +838,7 @@ pub fn graph_coarsen_multilevel(
         // Compact labels at the coarsened level
         let mut rep_to_label: HashMap<usize, usize> = Default::default();
         let mut next_label = 0usize;
-        let coarse_labels: Vec<usize> = (0..n_coarsen)
+        let mut coarse_labels: Vec<usize> = (0..n_coarsen)
             .map(|i| {
                 let r = uf.find(i);
                 *rep_to_label.entry(r).or_insert_with(|| {
@@ -616,6 +849,19 @@ pub fn graph_coarsen_multilevel(
             })
             .collect();
         rep_to_label.clear();
+
+        // Refine this level's clustering. Per-level seed keeps levels reproducible
+        // and independent.
+        if refine_iterations > 0 {
+            let seed = (orig_idx as u64).wrapping_mul(0x9E3779B97F4A7C15);
+            refine_labels(
+                &coarsen_features,
+                coarsen_graph,
+                &mut coarse_labels,
+                refine_iterations,
+                seed,
+            );
+        }
 
         // Compose with seed labels to get original-cell-level labels
         let cell_labels: Vec<usize> = if let Some(ref sl) = seed_labels {
@@ -733,6 +979,7 @@ mod tests {
             3,
             1,
             None,
+            0,
         );
         let unique: HashSet<usize> = ml.all_pair_to_sample[0].iter().cloned().collect();
         assert!(unique.len() <= ml.all_num_samples[0]);
@@ -759,7 +1006,7 @@ mod tests {
             .map(|&(i, j)| Pair { left: i, right: j })
             .collect();
 
-        let ml = graph_coarsen_multilevel(&graph, &mut features, &pairs, 2, 1, None);
+        let ml = graph_coarsen_multilevel(&graph, &mut features, &pairs, 2, 1, None, 0);
         // With 2 clusters the two cliques should separate
         let p2s = &ml.all_pair_to_sample[0];
         // Intra-clique pairs should share a sample pattern
@@ -821,7 +1068,7 @@ mod tests {
         }
 
         // 2 levels, finest = 3 clusters
-        let ml = graph_coarsen_multilevel(&graph, &mut features, &pairs, 3, 2, None);
+        let ml = graph_coarsen_multilevel(&graph, &mut features, &pairs, 3, 2, None, 0);
 
         assert_eq!(ml.all_pair_to_sample.len(), 2);
         assert_eq!(ml.all_num_samples.len(), 2);
@@ -845,6 +1092,7 @@ mod tests {
             3,
             1,
             None,
+            0,
         );
         assert_eq!(ml1.all_pair_to_sample.len(), 1);
         assert_eq!(ml1.all_num_samples.len(), 1);
@@ -897,7 +1145,7 @@ mod tests {
             coordinates: &coords,
             batch_membership: None,
         };
-        let ml = graph_coarsen_multilevel(&graph, &mut features, &pairs, 10, 2, Some(sp));
+        let ml = graph_coarsen_multilevel(&graph, &mut features, &pairs, 10, 2, Some(sp), 0);
         assert_eq!(ml.all_cell_labels.len(), 2);
         for level_labels in &ml.all_cell_labels {
             assert_eq!(level_labels.len(), n);
@@ -955,5 +1203,134 @@ mod tests {
             max_cells,
             n / num_super
         );
+    }
+
+    #[test]
+    fn test_would_disconnect_articulation() {
+        // Path 0-1-2-3-4, all in one cluster.
+        // Removing 2 (middle) disconnects {0,1} from {3,4}.
+        let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
+        let graph = make_test_graph(5, edges);
+        let labels = vec![0, 0, 0, 0, 0];
+
+        // 2 is an articulation point — must report disconnect.
+        assert!(would_disconnect_cluster(2, 0, &graph.adjacency, &labels));
+        // Endpoints (degree 1) are leaves — never disconnect.
+        assert!(!would_disconnect_cluster(0, 0, &graph.adjacency, &labels));
+        assert!(!would_disconnect_cluster(4, 0, &graph.adjacency, &labels));
+    }
+
+    #[test]
+    fn test_would_disconnect_triangle_safe() {
+        // Triangle: every node has two neighbours that are themselves connected,
+        // so removing any node leaves the others connected.
+        let edges = vec![(0, 1), (1, 2), (0, 2)];
+        let graph = make_test_graph(3, edges);
+        let labels = vec![0, 0, 0];
+        for i in 0..3 {
+            assert!(!would_disconnect_cluster(i, 0, &graph.adjacency, &labels));
+        }
+    }
+
+    #[test]
+    fn test_refine_labels_basic_move() {
+        // 4 nodes: two well-separated feature clusters but the *initial* labels
+        // are wrong — node 2 starts in cluster 0 while its features match cluster 1.
+        // Edges: 0-1-2-3 (so node 2 is graph-adjacent to cluster 1 via node 3).
+        let edges = vec![(0, 1), (1, 2), (2, 3)];
+        let graph = make_test_graph(4, edges);
+
+        // Features: nodes 0,1 → e0; nodes 2,3 → e1.
+        let mut features = Mat::zeros(2, 4);
+        features[(0, 0)] = 1.0;
+        features[(0, 1)] = 1.0;
+        features[(1, 2)] = 1.0;
+        features[(1, 3)] = 1.0;
+
+        // Initial wrong labels: 2 is mis-assigned to cluster 0.
+        let mut labels = vec![0, 0, 0, 1];
+
+        let moves = refine_labels(&features, &graph, &mut labels, 10, 42);
+        assert!(moves > 0, "should move at least one node");
+        // Node 2 should join cluster 1 (where its feature lives).
+        assert_eq!(labels[2], labels[3]);
+        assert_ne!(labels[0], labels[2]);
+    }
+
+    #[test]
+    fn test_refine_labels_respects_connectivity() {
+        // Path 0-1-2-3-4 all in cluster 0; node 5 in cluster 1, connected to 2.
+        // Node 2 has features matching cluster 1, so naive refinement would move it,
+        // disconnecting {0,1} from {3,4}. The connectivity check must prevent this.
+        let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4), (2, 5)];
+        let graph = make_test_graph(6, edges);
+
+        // Cluster 0 features (e0); cluster 1 features (e1). Node 2's feature is e1.
+        let mut features = Mat::zeros(2, 6);
+        features[(0, 0)] = 1.0;
+        features[(0, 1)] = 1.0;
+        features[(0, 3)] = 1.0;
+        features[(0, 4)] = 1.0;
+        features[(1, 2)] = 1.0;
+        features[(1, 5)] = 1.0;
+
+        let mut labels = vec![0, 0, 0, 0, 0, 1];
+        let _moves = refine_labels(&features, &graph, &mut labels, 10, 7);
+
+        // Node 2 must remain in cluster 0 because moving it disconnects {0,1} from {3,4}.
+        assert_eq!(
+            labels[2], 0,
+            "node 2 should be blocked by connectivity check"
+        );
+    }
+
+    #[test]
+    fn test_refine_labels_converges_idempotent() {
+        // Two cliques connected by a single bridge — initial labels already optimal.
+        let edges = vec![(0, 1), (0, 2), (1, 2), (2, 3), (3, 4), (3, 5), (4, 5)];
+        let graph = make_test_graph(6, edges);
+
+        let mut features = Mat::zeros(4, 6);
+        for i in 0..3 {
+            features[(0, i)] = 1.0;
+        }
+        for i in 3..6 {
+            features[(1, i)] = 1.0;
+        }
+        let mut labels = vec![0, 0, 0, 1, 1, 1];
+
+        let moves = refine_labels(&features, &graph, &mut labels, 10, 11);
+        assert_eq!(moves, 0, "already-optimal labels should produce no moves");
+        assert_eq!(labels, vec![0, 0, 0, 1, 1, 1]);
+    }
+
+    #[test]
+    fn test_refine_labels_in_multilevel() {
+        // Same two-clique setup as test_graph_coarsen_two_cliques, but turn on refinement.
+        let edges = vec![(0, 1), (0, 2), (1, 2), (2, 3), (3, 4), (3, 5), (4, 5)];
+        let graph = make_test_graph(6, edges.clone());
+
+        let dim = 4;
+        let mut features = Mat::zeros(dim, 6);
+        for i in 0..3 {
+            features[(0, i)] = 1.0;
+        }
+        for i in 3..6 {
+            features[(3, i)] = 1.0;
+        }
+
+        let pairs: Vec<Pair> = edges
+            .iter()
+            .map(|&(i, j)| Pair { left: i, right: j })
+            .collect();
+
+        let ml = graph_coarsen_multilevel(&graph, &mut features, &pairs, 2, 1, None, 5);
+        // Must still produce the expected (A,A), (B,B), (A,B) sample structure.
+        assert_eq!(ml.all_num_samples[0], 3);
+        let p2s = &ml.all_pair_to_sample[0];
+        assert_eq!(p2s[0], p2s[1]);
+        assert_eq!(p2s[0], p2s[2]);
+        assert_eq!(p2s[4], p2s[5]);
+        assert_ne!(p2s[0], p2s[4]);
     }
 }
