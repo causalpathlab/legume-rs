@@ -374,14 +374,16 @@ pub fn refine_level_dc_poisson(
     let proposer = GraphProposer::new(ctx.graph, &ctx.cell_to_entity, entity_labels, siblings);
 
     let moves = refine_with_proposer_guarded(
-        &ctx.profiles,
         entity_labels,
-        k,
         &proposer,
         &ctx.guard,
-        params,
         rng,
-        level_label,
+        &data_beans_alg::dc_poisson::RefineContext {
+            profiles: &ctx.profiles,
+            k,
+            params,
+            level_label,
+        },
     );
 
     let (compact, _new_k) = compact_labels(entity_labels);
