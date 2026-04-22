@@ -104,6 +104,14 @@ pub struct SvdArgs {
     block_size: Option<usize>,
 
     #[arg(
+        long = "weighting",
+        value_enum,
+        default_value_t = crate::refine_weighting::WeightingArg::NbFisherInfo,
+        help = crate::refine_weighting::WEIGHTING_HELP,
+    )]
+    refine_weighting: crate::refine_weighting::WeightingArg,
+
+    #[arg(
         short = 'c',
         long,
         default_value_t = 1e4,
@@ -162,7 +170,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             (args.hvg.n_hvg > 0).then_some(args.hvg.n_hvg),
             args.hvg.feature_list_file.as_deref(),
             args.block_size,
-            None,
         )?)
     } else {
         None
@@ -224,7 +231,10 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             sort_dim: args.sort_dim,
             num_opt_iter: args.iter_opt,
             oversample: false,
-            refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
+            refine: Some(data_beans_alg::refine_multilevel::RefineParams {
+                gene_weighting: args.refine_weighting.into(),
+                ..data_beans_alg::refine_multilevel::RefineParams::default()
+            }),
         },
     )?;
 

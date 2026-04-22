@@ -37,18 +37,6 @@ pub struct SrtDeltaSvdArgs {
         help = "Number of edge clusters for K-means (defaults to n_latent_topics)"
     )]
     n_edge_clusters: Option<usize>,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Disable housekeeping adjustment in the gene_topic report (on by default)",
-        long_help = "By default, the reported gene-topic sufficient statistics are\n\
-                       scaled row-wise by 1/(bg[g] + ε), where bg[g] is the gene's\n\
-                       share of total mass. This gives housekeeping-adjusted\n\
-                       posterior rates. Pass --no-adjust-housekeeping to disable\n\
-                       and write raw rates."
-    )]
-    no_adjust_housekeeping: bool,
 }
 
 /// Input for fused multi-level pair delta visitor.
@@ -350,7 +338,6 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         &PropensityReportConfig {
             n_clusters,
             block_size: c.block_size,
-            adjust_housekeeping: !args.no_adjust_housekeeping,
         },
         &c.out,
     )?;

@@ -6,7 +6,7 @@
 //! - [`ConnectivityGuard`] — rejects moves that would disconnect the
 //!   source cluster's induced subgraph on the entity axis.
 //! - [`DcPoissonContext`] — bundles the reusable per-axis state (entity
-//!   map, IDF-weighted profiles, guard) so it is built once for the whole
+//!   map, gene-weighted profiles, guard) so it is built once for the whole
 //!   coarsening dendrogram and reused per level.
 //!
 //! Entry points: [`DcPoissonContext::build`] + [`refine_level_dc_poisson`].
@@ -15,7 +15,7 @@ use crate::util::common::*;
 use crate::util::knn_graph::KnnGraph;
 use data_beans_alg::dc_poisson::{
     compact_labels, intersect_with_siblings_fallback, refine_with_proposer_guarded,
-    CandidateProposer, MoveGuard, Profiles, RefineParams,
+    CandidateProposer, GeneWeighting, MoveGuard, Profiles, RefineParams,
 };
 use matrix_util::utils::generate_minibatch_intervals;
 use rand::rngs::SmallRng;
@@ -313,7 +313,7 @@ fn compute_siblings_per_entity(
 ///
 /// Entities are fixed across the coarsening dendrogram (typically the
 /// finest-cut cluster IDs); only their group assignment varies by level.
-/// So the IDF-weighted profiles and entity-level adjacency can be built
+/// So the gene-weighted profiles and entity-level adjacency can be built
 /// once and reused for every level's refinement sweep.
 pub struct DcPoissonContext<'a> {
     pub graph: &'a KnnGraph,
@@ -323,24 +323,21 @@ pub struct DcPoissonContext<'a> {
 }
 
 impl<'a> DcPoissonContext<'a> {
-    /// Build the per-axis state once. `idf_weighting` matches
-    /// [`RefineParams::idf_weighting`] — kept explicit here so a
-    /// context can be constructed without a full [`RefineParams`].
+    /// Build the per-axis state once. `gene_weighting` matches
+    /// [`RefineParams::gene_weighting`] — kept explicit here so a context
+    /// can be constructed without a full [`RefineParams`].
     pub fn build(
         data: &SparseIoVec,
         graph: &'a KnnGraph,
         cell_to_entity: Vec<usize>,
         num_entities: usize,
         num_genes: usize,
-        idf_weighting: bool,
+        gene_weighting: GeneWeighting,
     ) -> anyhow::Result<Self> {
         let gene_sums =
             build_entity_gene_sums(data, &cell_to_entity, num_entities, num_genes, None)?;
         let mut profiles = Profiles::from_gene_sums(&gene_sums, num_genes);
-        if idf_weighting {
-            let bg = profiles.empirical_marginal();
-            profiles.weight_by_idf(&bg);
-        }
+        profiles.apply_gene_weighting(gene_weighting);
         let guard = ConnectivityGuard::new(graph, &cell_to_entity, num_entities);
         Ok(Self {
             graph,

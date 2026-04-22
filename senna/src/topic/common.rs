@@ -262,7 +262,6 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
                 (args.max_features > 0).then_some(args.max_features),
                 args.feature_list_file,
                 args.block_size,
-                None,
             )?)
         } else {
             None

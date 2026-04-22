@@ -39,14 +39,29 @@ pub const LOG_EPS: f64 = 1e-9;
 #[derive(Clone, Debug)]
 pub enum ProfileSource {
     /// Sparse entity × gene counts (the existing `gene_sums` format).
-    /// IDF weighting carries its standard "housekeeping gene down-weighting"
-    /// semantics.
+    /// [`GeneWeighting`] is applied per-gene on the sparse profile.
     Raw,
     /// Dense projection: `basis * indicator(entity)` per entity. `basis` is
     /// `proj_dim × num_cells`-shaped; the per-entity profile is the sum over
-    /// its member cells' projection columns. IDF is skipped because the
-    /// feature axis is no longer "genes".
+    /// its member cells' projection columns. [`GeneWeighting`] is skipped
+    /// because the feature axis is no longer "genes".
     Projected { basis: DMatrix<f32> },
+}
+
+/// Per-feature (gene) weighting applied to the sparse profile before DC-Poisson
+/// scoring. All variants multiply each nonzero entry `y_{e,g}` by a scalar
+/// `w_g` and recompute per-row size factors; only the formula for `w_g`
+/// differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeneWeighting {
+    /// No reweighting: `w_g = 1`. Recovers proper DC-Poisson with entity-level
+    /// degree correction (Karrer–Newman MAP under `Gamma(α, 0)` on `θ`).
+    None,
+    /// Fisher-information weight under the fitted NB trend:
+    /// `w_g = 1 / (1 + π_g · s̄ · φ(μ_g))`. Bounded in `(0, 1]`,
+    /// attenuates high-mean / high-dispersion features, recovers
+    /// `w_g = 1` in the Poisson limit (`φ → 0`). Current default.
+    FisherInfoNb,
 }
 
 /// Parameters controlling the refinement pass.
@@ -56,8 +71,8 @@ pub struct RefineParams {
     pub num_gibbs: usize,
     /// Greedy sweeps per level (early-exits on zero moves).
     pub num_greedy: usize,
-    /// Apply IDF reweighting on the profile (only meaningful for `Raw`).
-    pub idf_weighting: bool,
+    /// Per-feature weighting scheme (only meaningful for `Raw` profile source).
+    pub gene_weighting: GeneWeighting,
     /// Seed for Gibbs RNG.
     pub seed: u64,
     /// Gibbs stagnation threshold (fraction of entities moving per sweep).
@@ -73,7 +88,7 @@ impl Default for RefineParams {
         Self {
             num_gibbs: 20,
             num_greedy: 10,
-            idf_weighting: true,
+            gene_weighting: GeneWeighting::FisherInfoNb,
             seed: 42,
             gibbs_stagnation: 0.005,
             profile_source: ProfileSource::Raw,
@@ -125,7 +140,8 @@ impl Profiles {
     /// Build profiles from a dense projection.
     ///
     /// `basis` is `proj_dim × num_cells`; each entity profile is the sum of
-    /// basis columns over the cells constituting it. IDF is not applied.
+    /// basis columns over the cells constituting it. Gene weighting is not
+    /// applied — projection dims aren't gene-aligned.
     pub fn from_projection(basis: &DMatrix<f32>, entity_to_cells: &[Vec<usize>]) -> Self {
         let num_features = basis.nrows();
         let num_entities = entity_to_cells.len();
@@ -157,29 +173,10 @@ impl Profiles {
         }
     }
 
-    /// Empirical marginal p_g = Σ_e y_eg / Σ_{e,g} y_eg.
-    pub fn empirical_marginal(&self) -> Vec<f64> {
-        let mut bg = vec![0f64; self.num_features];
-        let mut total = 0f64;
-        for row in &self.rows {
-            for &(g, v) in row {
-                bg[g as usize] += v as f64;
-                total += v as f64;
-            }
-        }
-        if total > 0.0 {
-            for x in &mut bg {
-                *x /= total;
-            }
-        }
-        bg
-    }
-
-    /// In-place IDF reweighting: y_eg ← y_eg · (−ln(bg_g + ε)). Recomputes
-    /// per-row size factors.
-    pub fn weight_by_idf(&mut self, bg: &[f64]) {
-        debug_assert_eq!(bg.len(), self.num_features);
-        let w: Vec<f32> = bg.iter().map(|&p| (-(p + LOG_EPS).ln()) as f32).collect();
+    /// In-place reweighting by a caller-supplied per-feature weight vector.
+    /// Used by [`Profiles::apply_gene_weighting`] for the NB Fisher-info path.
+    pub fn weight_by_vec(&mut self, w: &[f32]) {
+        debug_assert_eq!(w.len(), self.num_features);
         for (row, sf) in self.rows.iter_mut().zip(self.size_factor.iter_mut()) {
             let mut new_sf = 0f32;
             for (g, v) in row.iter_mut() {
@@ -188,6 +185,66 @@ impl Profiles {
             }
             *sf = new_sf;
         }
+    }
+
+    /// Apply the chosen gene weighting in place.
+    ///
+    /// [`GeneWeighting::None`] is a no-op; [`GeneWeighting::FisherInfoNb`] fits
+    /// an NB dispersion trend from the current profiles and reweights each
+    /// feature by `1 / (1 + π_g · s̄ · φ(μ_g))`.
+    pub fn apply_gene_weighting(&mut self, method: GeneWeighting) {
+        match method {
+            GeneWeighting::None => {}
+            GeneWeighting::FisherInfoNb => {
+                let w = self.nb_fisher_weights();
+                self.weight_by_vec(&w);
+            }
+        }
+    }
+
+    /// Compute per-feature Fisher-info weights under an NB trend fit from
+    /// the current profile contents. Returned vector has length `num_features`
+    /// and is suitable for [`Profiles::weight_by_vec`].
+    pub fn nb_fisher_weights(&self) -> Vec<f32> {
+        use crate::nb_dispersion::DispersionTrend;
+        use matrix_util::sparse_stat::SparseRunningStatistics;
+        use matrix_util::traits::RunningStatOps;
+
+        // One pass: accumulate per-feature sum and sum-of-squares over all
+        // entities. Reuses one scratch buffer per row.
+        let mut stats = SparseRunningStatistics::<f32>::new(self.num_features);
+        let mut col_rows: Vec<usize> = Vec::new();
+        let mut col_vals: Vec<f32> = Vec::new();
+        for row in &self.rows {
+            col_rows.clear();
+            col_vals.clear();
+            for &(g, v) in row {
+                col_rows.push(g as usize);
+                col_vals.push(v);
+            }
+            stats.add_sparse_column(&col_rows, &col_vals);
+        }
+
+        // `π_g = sum[g] / Σ sum` is derived directly from the stats without
+        // a second sparse traversal. `mean_g` uses the entity-count denominator
+        // that `SparseRunningStatistics` already provides.
+        let trend = DispersionTrend::from_sparse_stats(&stats);
+        let means = stats.mean();
+        let sums = stats.sum();
+        let total_mass: f64 = sums.iter().map(|&s| s as f64).sum();
+        let avg_s = if self.num_entities > 0 {
+            (total_mass / self.num_entities as f64) as f32
+        } else {
+            1.0
+        };
+        let inv_total = if total_mass > 0.0 {
+            1.0 / total_mass as f32
+        } else {
+            0.0
+        };
+        (0..self.num_features)
+            .map(|g| trend.fisher_weight(sums[g] * inv_total, avg_s, means[g]))
+            .collect()
     }
 }
 
@@ -787,24 +844,6 @@ mod tests {
                 assert!(lp.is_infinite() && lp < 0.0);
             }
         }
-    }
-
-    #[test]
-    fn test_idf_downweights_housekeeping() {
-        let gs = vec![
-            vec![(0usize, 10.0f32), (1, 10.0)],
-            vec![(0usize, 10.0f32), (1, 0.1)],
-        ];
-        let mut profiles = Profiles::from_gene_sums(&gs, 2);
-        let bg = profiles.empirical_marginal();
-        profiles.weight_by_idf(&bg);
-        let ratio = profiles.rows[0].iter().find(|(g, _)| *g == 1).unwrap().1
-            / profiles.rows[0].iter().find(|(g, _)| *g == 0).unwrap().1;
-        assert!(
-            ratio > 1.0,
-            "IDF should boost the specific feature relative to housekeeping (got ratio={})",
-            ratio
-        );
     }
 
     #[test]

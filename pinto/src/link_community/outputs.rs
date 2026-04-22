@@ -310,7 +310,6 @@ pub fn write_partition_outputs(
     cell_names: &[Box<str>],
     data_vec: &SparseIoVec,
     block_size: Option<usize>,
-    adjust_housekeeping: bool,
 ) -> anyhow::Result<Mat> {
     write_link_communities(
         &format!("{}.link_community.parquet", prefix),
@@ -319,13 +318,7 @@ pub fn write_partition_outputs(
         cell_names,
     )?;
     let propensity = write_propensity_parquet(prefix, edges, fine_labels, n_cells, k, cell_names)?;
-    compute_gene_topic_stat(
-        &propensity,
-        data_vec,
-        block_size,
-        adjust_housekeeping,
-        prefix,
-    )?;
+    compute_gene_topic_stat(&propensity, data_vec, block_size, prefix)?;
     Ok(propensity)
 }
 
@@ -344,7 +337,6 @@ pub fn write_level_outputs(
     cell_names: &[Box<str>],
     data_vec: &SparseIoVec,
     block_size: Option<usize>,
-    adjust_housekeeping: bool,
 ) -> anyhow::Result<()> {
     write_partition_outputs(
         &format!("{}.L{}", out_prefix, level_idx),
@@ -355,7 +347,6 @@ pub fn write_level_outputs(
         cell_names,
         data_vec,
         block_size,
-        adjust_housekeeping,
     )?;
     Ok(())
 }

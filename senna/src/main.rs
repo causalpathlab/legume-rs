@@ -44,6 +44,7 @@ mod hvg;
 mod logging;
 mod marker_support;
 mod postprocess;
+mod refine_weighting;
 mod run_manifest;
 mod senna_input;
 mod svd;

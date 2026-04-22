@@ -46,16 +46,14 @@
 //! exposed via `bhc_cut(merges, k, 0.0)`.
 //!
 //! **Effective sample size = edge count.** Raw `size_sum[k]` is the sum of
-//! IDF-weighted real-valued projection mass and can reach 10⁴–10⁶ for Visium
-//! scale, making the DM posterior absurdly sharp. We rescale `(T_g, S)` per
+//! real-valued projection mass and can reach 10⁴–10⁶ for Visium scale,
+//! making the DM posterior absurdly sharp. We rescale `(T_g, S)` per
 //! cluster so that `S_eff = edge_count[k]`, preserving shape `T_g / S`. This
 //! puts log BF magnitudes in an interpretable range (~n·KL(proportions))
 //! and restores a meaningful sign.
 //!
-//! Housekeeping handling: IDF at the profile stage (see
-//! `LinkProfileStore::weight_by_idf`) downweights housekeeping genes before
-//! `fine_stats` is built. The empirical-Bayes prior here adds a second layer
-//! — the baseline `bg` is derived from the already-IDF-weighted pool.
+//! Housekeeping handling: the empirical-Bayes prior here derives its
+//! baseline `bg` from the fitted `fine_stats` directly.
 //!
 //! A Heller-Ghahramani DP tree prior can be slotted in later: extend with a
 //! `BhcConfig { dp_alpha, ... }` and replace the pure pairwise log-BF rule

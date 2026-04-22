@@ -1,12 +1,12 @@
 //! V-cycle cascade through the coarsening pyramid for link community fitting.
 //!
 //! At each coarsening level `l = 0..L` (coarsest to finest), build super-edges
-//! from the pyramid's cell partition, build edge profiles, apply the shared
-//! IDF weighting, and run Gibbs + plain greedy. Labels propagate coarser →
-//! finer through the fine-edge intermediary: because the pyramid's cell
-//! partitions are nested, every fine edge inside a super-edge at level `l`
-//! shares the same super-edge at level `l-1`, so the label inheritance is a
-//! clean injection (no majority vote).
+//! from the pyramid's cell partition, build edge profiles, and run Gibbs +
+//! plain greedy. Labels propagate coarser → finer through the fine-edge
+//! intermediary: because the pyramid's cell partitions are nested, every
+//! fine edge inside a super-edge at level `l` shares the same super-edge at
+//! level `l-1`, so the label inheritance is a clean injection (no majority
+//! vote).
 //!
 //! The finest pyramid level's labels are broadcast to full fine edges and
 //! returned as the warm start for the downstream component-EM stage.
@@ -38,22 +38,18 @@ pub struct CascadeResult {
     pub score_trace: Vec<ScoreEntry>,
 }
 
-/// Knobs for the V-cycle cascade: sweep budgets, Dirichlet prior, IDF,
-/// and per-level output controls.
+/// Knobs for the V-cycle cascade: sweep budgets, Dirichlet prior, and
+/// per-level output controls.
 pub struct CascadeConfig {
     pub k: usize,
     pub num_gibbs: usize,
     pub num_greedy: usize,
     pub user_alpha: Option<f32>,
     pub block_size: Option<usize>,
-    pub adjust_housekeeping: bool,
     pub no_level_outputs: bool,
 }
 
 /// Run Gibbs + greedy at every pyramid level, emitting per-level outputs.
-///
-/// `bg` is the shared IDF background distribution (from finest-resolution
-/// profiles, computed by the caller). Pass `None` to skip IDF reweighting.
 #[allow(clippy::too_many_arguments)]
 pub fn run_cascade(
     out_prefix: &str,
@@ -62,7 +58,6 @@ pub fn run_cascade(
     data_vec: &SparseIoVec,
     gp_state: Option<&GenePairProfileState>,
     proj_basis: Option<&Mat>,
-    bg: Option<&[f64]>,
     cfg: &CascadeConfig,
     sampler: &mut LinkGibbsSampler,
     cell_names: &[Box<str>],
@@ -78,7 +73,6 @@ pub fn run_cascade(
         num_greedy,
         user_alpha,
         block_size,
-        adjust_housekeeping,
         no_level_outputs,
     } = *cfg;
 
@@ -119,12 +113,8 @@ pub fn run_cascade(
             continue;
         }
 
-        // Build + IDF-weight this level's super-edge profiles.
-        let mut profiles_l =
+        let profiles_l =
             build_profiles_for_edges(data_vec, &super_edges_l, gp_state, proj_basis, block_size)?;
-        if let Some(bg_dist) = bg {
-            profiles_l.weight_by_idf(bg_dist);
-        }
 
         // Initialize labels: round-robin if this is the first level we run
         // (no previous-level state), transfer from previous level otherwise.
@@ -228,7 +218,6 @@ pub fn run_cascade(
                 cell_names,
                 data_vec,
                 block_size,
-                adjust_housekeeping,
             )?;
         }
 
