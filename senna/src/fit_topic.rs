@@ -63,7 +63,6 @@ pub struct TopicArgs {
                      {out}.log_likelihood.parquet   training loss trace\n  \
                      {out}.safetensors              encoder+decoder weights\n  \
                      {out}.metadata.json            model metadata (for `senna eval-topic`)\n  \
-                     {out}.anchor_labels.tsv        anchor PB → celltype label table\n  \
                      {out}.dispersion.parquet       NB dispersion (nb / nbmixture)\n  \
                      {out}.alpha.parquet            ambient gene profile (nbmixture)\n  \
                      {out}.rho.parquet              ρ sigmoid coefficients (nbmixture)\n  \
@@ -312,22 +311,6 @@ pub struct TopicArgs {
     pub(crate) refine_reg: f64,
 
     #[arg(
-        short = 'm',
-        long,
-        help = "Marker TSV (gene<TAB>celltype) — labels anchors",
-        long_help = "Optional marker file to label the data-driven anchor PBs.\n\
-                     When absent, anchors are labeled `novel_{i}`."
-    )]
-    pub(crate) markers: Option<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = 0.5,
-        help = "Min z-score margin to assign a celltype to an anchor"
-    )]
-    pub(crate) anchor_margin: f32,
-
-    #[arg(
         long,
         default_value_t = 1.0,
         help = "Cross-entropy penalty λ on β toward anchor prior (0 = off)",
@@ -455,22 +438,11 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     let stop = setup_stop_handler();
 
-    // Data-driven anchor β prior. Built unconditionally — the prior is
-    // useful for β init even without markers. The marker file, when given,
-    // is used only to label the anchors and emit the expansion table.
-    let markers = args
-        .markers
-        .as_deref()
-        .map(|p| crate::marker_support::load_marker_info(p, &gene_names))
-        .transpose()?;
     let anchor_prior = crate::topic::anchor_prior::AnchorPrior::from_pseudobulk(
         finest_collapsed,
         n_topics,
-        markers.as_ref(),
-        args.anchor_margin,
         finest_coarsening,
     )?;
-    anchor_prior.write_side_outputs(&args.out, &gene_names, markers.as_ref())?;
 
     // Per-level [K, D_l] anchor tensors on the training device. Built once
     // here, held alive for the entire fit via the outer scope.
@@ -560,7 +532,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         &args.out,
         &args.data_files,
         args.batch_files.as_deref(),
-        args.markers.is_some(),
     )?;
 
     info!("Done");
@@ -569,14 +540,12 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
 /// Assemble + save the `{prefix}.senna.json` manifest for a topic /
 /// itopic / joint-topic run. Factored out so all three callers stay
-/// DRY; SVD runs use a distinct helper because they produce no model
-/// or markers.
+/// DRY; SVD runs use a distinct helper because they produce no model.
 fn write_topic_manifest(
     kind: &str,
     prefix: &str,
     data_files: &[Box<str>],
     batch_files: Option<&[Box<str>]>,
-    has_markers: bool,
 ) -> anyhow::Result<()> {
     let input: Vec<String> = data_files.iter().map(|s| s.to_string()).collect();
     let batch: Vec<String> = batch_files
@@ -589,7 +558,6 @@ fn write_topic_manifest(
         data_batch: &batch,
         data_input_null: &[],
         dictionary_suffix: Some("dictionary.parquet"),
-        has_markers,
         has_model: true,
         has_cell_proj: true,
         default_colour_by: "topic",
@@ -870,8 +838,9 @@ struct PipelineCtx<'a> {
     dev: &'a candle_core::Device,
     args: &'a TopicArgs,
     stop: &'a std::sync::atomic::AtomicBool,
-    /// Data-driven β prior — present whenever `--markers` was given OR
-    /// `--anchor-penalty > 0`. Used for β init and (when λ > 0) training.
+    /// Data-driven β prior built from finest-level pseudobulks. Used for
+    /// β init and (when `--anchor-penalty > 0`) as a training-time
+    /// cross-entropy penalty.
     anchor_prior: Option<&'a crate::topic::anchor_prior::AnchorPrior>,
     /// Per-level `[D_l, K]` anchor tensors pre-built on `dev`.
     anchor_prior_per_level: Option<&'a [candle_core::Tensor]>,

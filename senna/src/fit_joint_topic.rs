@@ -490,9 +490,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         // delta files (`{out}_{i}.delta_logits.parquet`). Only the base
         // dictionary is recorded here — plot doesn't consume deltas.
         dictionary_suffix: Some("base_dictionary.parquet"),
-        // No markers / anchor labels and no safetensors+metadata path in
-        // joint-topic today.
-        has_markers: false,
+        // No safetensors+metadata path in joint-topic today.
         has_model: false,
         has_cell_proj: true,
         default_colour_by: "topic",

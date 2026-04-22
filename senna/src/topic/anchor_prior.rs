@@ -13,18 +13,14 @@
 //! different path and are silently skipped by `init_decoder_dictionary` /
 //! `anchor_penalty_at_level`.
 
-use crate::anchor_common::{
-    base_celltype_label, gram_schmidt_anchors, label_anchors, softmax_col_into, zscore_columns,
-};
+use crate::anchor_common::{gram_schmidt_anchors, softmax_col_into, zscore_columns};
 use crate::embed_common::*;
-use crate::marker_support::MarkerInfo;
 
 use candle_core::{Device, Tensor};
 use candle_nn::VarMap;
 use data_beans_alg::collapse_data::CollapsedOut;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use matrix_util::traits::ConvertMatOps;
-use std::io::Write;
 
 /// Suffix on the per-level `VarMap` path where softmax-based decoders store
 /// their `[K, D]` pre-softmax logits.
@@ -34,26 +30,19 @@ fn decoder_logits_var_path(level: usize) -> String {
     format!("dec_{level}.{DICT_LOGITS_VAR_SUFFIX}")
 }
 
-/// Everything the anchor pipeline produces in one pass.
+/// Data-driven β prior built from finest-level pseudobulks.
 pub(crate) struct AnchorPrior {
     /// `[D_full, K]`, each column on the gene simplex.
     pub anchor_weight_gk: Mat,
-    /// Length-K display labels (celltype name or `novel_{i}`).
-    pub topic_labels: Vec<Box<str>>,
-    /// Length-K indices into the finest pseudobulk level.
-    pub anchor_pb_idx: Vec<usize>,
-    /// `(top1_z, top2_z)` marker-fit scores per anchor. All zero when
-    /// markers are unavailable.
-    pub margin_scores: Vec<(f32, f32)>,
 }
 
 impl AnchorPrior {
     /// Build the prior from the finest pseudobulk level.
     ///
-    /// `n_topics` is the requested K (equal to the number of anchors). If
-    /// `markers` is `Some`, anchors get labeled via a margin-based rule
-    /// (`top1 - top2 >= margin_threshold`); otherwise all labels are
-    /// `novel_{i}` and `margin_scores` stays zero.
+    /// `n_topics` is the requested K (equal to the number of anchors).
+    /// Anchors are selected via greedy Gram-Schmidt vertex selection on
+    /// z-scored log1p pseudobulks; the prior columns are softmax of each
+    /// anchor PB's log1p expression at full resolution.
     ///
     /// `finest_coarsening` — when `Some`, anchor *selection* runs in the
     /// coarsened feature space that the encoder and finest decoder
@@ -63,13 +52,10 @@ impl AnchorPrior {
     /// we selected anchors at `D_full`, rare-gene variation could pick
     /// rows that collapse into identical coarse vectors once the model
     /// sees them, and the prior would no longer match the training
-    /// geometry. The marker-labeling z-scores, by contrast, stay at
-    /// `D_full` because the marker file names individual genes.
+    /// geometry.
     pub(crate) fn from_pseudobulk(
         finest: &CollapsedOut,
         n_topics: usize,
-        markers: Option<&MarkerInfo>,
-        margin_threshold: f32,
         finest_coarsening: Option<&FeatureCoarsening>,
     ) -> anyhow::Result<Self> {
         // log1p on [D_full, n_pb] in the posterior's native orientation —
@@ -115,32 +101,7 @@ impl AnchorPrior {
             softmax_col_into(x_gp.column(pb), anchor_weight_gk.column_mut(col));
         }
 
-        // Marker labeling uses D_full z-scores because the marker file
-        // names individual genes; a coarse bin's z-score would average
-        // many genes and lose the signal.
-        let (topic_labels, margin_scores) = match markers {
-            Some(m) => {
-                // Transpose once so zscore_columns can standardize per gene
-                // across PBs. Only done when a marker file is actually
-                // provided — the no-marker path skips this cost entirely.
-                let x_pg = x_gp.transpose();
-                let x_full_zscored = zscore_columns(&x_pg);
-                label_anchors(&x_full_zscored, &anchor_pb_idx, m, margin_threshold)
-            }
-            None => (
-                (0..k)
-                    .map(|i| format!("novel_{i}").into_boxed_str())
-                    .collect(),
-                vec![(0.0, 0.0); k],
-            ),
-        };
-
-        Ok(Self {
-            anchor_weight_gk,
-            topic_labels,
-            anchor_pb_idx,
-            margin_scores,
-        })
+        Ok(Self { anchor_weight_gk })
     }
 
     /// Per-level `[K, D_l]` anchor tensors pre-transposed for direct use as
@@ -184,73 +145,6 @@ impl AnchorPrior {
             }
         }
         w
-    }
-
-    /// Write per-anchor label + score TSV and, when markers are given,
-    /// the candidate-marker expansion table.
-    pub(crate) fn write_side_outputs(
-        &self,
-        out_prefix: &str,
-        gene_names: &[Box<str>],
-        markers: Option<&MarkerInfo>,
-    ) -> anyhow::Result<()> {
-        let labels_path = format!("{out_prefix}.anchor_labels.tsv");
-        let mut f = std::fs::File::create(&labels_path)?;
-        writeln!(f, "topic_idx\tpb_idx\tlabel\ttop1_z\ttop2_z\tmargin")?;
-        for (i, ((&pb, label), (t1, t2))) in self
-            .anchor_pb_idx
-            .iter()
-            .zip(self.topic_labels.iter())
-            .zip(self.margin_scores.iter())
-            .enumerate()
-        {
-            writeln!(
-                f,
-                "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}",
-                i,
-                pb,
-                label,
-                t1,
-                t2,
-                t1 - t2
-            )?;
-        }
-        log::info!("wrote {labels_path}");
-
-        if let Some(m) = markers {
-            let expansion_path = format!("{out_prefix}.marker_expansion.tsv");
-            let mut f = std::fs::File::create(&expansion_path)?;
-            writeln!(f, "celltype\tgene\tanchor_z\tin_user_list")?;
-            let top_n = 50usize;
-            let d = gene_names.len();
-            for (k, label) in self.topic_labels.iter().enumerate() {
-                // Find which celltype this label corresponds to (might be
-                // novel_*; skip). Multiple-anchor labels have a numeric
-                // suffix (T_cells_2) — strip it to recover the base name.
-                let base = base_celltype_label(label);
-                let Some(ct_idx) = m.celltypes.iter().position(|c| c.as_ref() == base) else {
-                    continue;
-                };
-                let mut ranked: Vec<(usize, f32)> =
-                    (0..d).map(|g| (g, self.anchor_weight_gk[(g, k)])).collect();
-                ranked.sort_unstable_by(|a, b| {
-                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                });
-                for (g, z) in ranked.into_iter().take(top_n) {
-                    let in_user = m.membership_gc[(g, ct_idx)] > 0.0;
-                    writeln!(
-                        f,
-                        "{}\t{}\t{:.4}\t{}",
-                        label,
-                        gene_names[g],
-                        z,
-                        if in_user { "yes" } else { "no" }
-                    )?;
-                }
-            }
-            log::info!("wrote {expansion_path}");
-        }
-        Ok(())
     }
 }
 
@@ -350,11 +244,6 @@ mod tests {
         let d_full = 10;
         let mut ap = AnchorPrior {
             anchor_weight_gk: Mat::from_fn(d_full, k, |_, _| 1.0 / d_full as f32),
-            topic_labels: (0..k)
-                .map(|i| format!("topic_{i}").into_boxed_str())
-                .collect(),
-            anchor_pb_idx: (0..k).collect(),
-            margin_scores: vec![(0.0, 0.0); k],
         };
         // Nudge one topic so it isn't perfectly uniform.
         ap.anchor_weight_gk[(0, 0)] *= 2.0;
