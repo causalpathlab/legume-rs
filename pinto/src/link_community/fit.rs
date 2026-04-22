@@ -1,255 +1,48 @@
 //! Link community model pipeline for spatial transcriptomics.
 //!
-//! Discovers link communities from spatial cell-cell KNN graphs via
-//! collapsed Gibbs sampling on gene-projected edge profiles.
+//! Discovers link communities from spatial cell-cell KNN graphs via a V-cycle
+//! through the coarsening pyramid: collapsed Gibbs + greedy at every level
+//! (coarsest → finest) with label inheritance between levels, followed by
+//! component-EM refinement at full fine resolution.
+//!
+//! Pipeline:
+//!   1. Load data + coordinates
+//!   2. Build spatial (or expression) KNN graph
+//!   3. Estimate batch effects
+//!   4. Multi-level cell coarsening (produces the pyramid)
+//!   5. Profile context setup: gene-pair graph + elbow filter + module
+//!      collapse, or projection basis with optional gene filtering
+//!   6. Build full fine-resolution profiles; derive IDF background from them
+//!   7. V-cycle: per-level super-edges → profiles → Gibbs + greedy with
+//!      coarse→fine label inheritance; per-level outputs are written inside
+//!   8. Outer EM loop on full profiles (E: component-EM + greedy; optional M:
+//!      re-cluster gene-pair modules)
+//!   9. Final outputs (propensity, gene_topic, link_community, scores, BHC)
 
 use crate::gene_network::graph::*;
 use crate::gene_network::pairs::*;
+use crate::link_community::cascade::{run_cascade, CascadeConfig, GenePairProfileState};
 use crate::link_community::gibbs::{ComponentGibbsArgs, LinkGibbsSampler};
 use crate::link_community::model::{LinkCommunityStats, LinkProfileStore};
 use crate::link_community::module_cluster::{self, KmeansModules, ModuleClusterer};
+use crate::link_community::outputs::{
+    link_community_histogram, write_bhc_cut, write_bhc_merges, write_link_communities,
+    write_partition_outputs, write_score_trace, ScoreEntry,
+};
 use crate::link_community::profiles::*;
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
 use crate::util::input::*;
-
-/// Gene-pair profile construction state, built from an external gene network.
-struct GenePairProfileState {
-    gene_adj: Vec<Vec<(usize, usize)>>,
-    gene_means: DVec,
-    n_gene_pairs: usize,
-    module_collapse: Option<Vec<usize>>,
-}
-
-use clap::Parser;
 use data_beans_alg::random_projection::RandProjOps;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
-#[derive(Parser, Debug, Clone)]
-pub struct SrtLinkCommunityArgs {
-    #[command(flatten)]
-    pub common: crate::util::input::SrtInputArgs,
+// Re-export args so external callers (main.rs) keep using the old path.
+pub use crate::link_community::args::SrtLinkCommunityArgs;
 
-    #[arg(
-        long,
-        default_value_t = 50,
-        help = "Number of spatial link communities to discover",
-        long_help = "Number of link communities (K). Each edge in the spatial graph\n\
-                       is assigned to one of K communities via collapsed Gibbs sampling.\n\
-                       Communities capture distinct spatial gene expression patterns.\n\
-                       Cell propensity = fraction of edges per community.\n\
-                       Defaulting to 50 and letting the BHC post-pass merge redundant\n\
-                       communities is preferred over under-shooting K."
-    )]
-    n_communities: usize,
-
-    #[arg(
-        long,
-        default_value_t = 100,
-        help = "Gibbs iterations at the coarsest level",
-        long_help = "Number of Gibbs iterations at the coarsest coarsening level.\n\
-                       The finest coarsening level uses num_gibbs/5 (minimum 10).\n\
-                       Full-resolution EM iterations are controlled by --num-em."
-    )]
-    num_gibbs: usize,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Max greedy refinement sweeps after Gibbs",
-        long_help = "Maximum number of greedy (argmax) sweeps after Gibbs sampling.\n\
-                       Each sweep deterministically moves edges to their best community.\n\
-                       Stops early if no edges move. Typically converges in 2-5 sweeps."
-    )]
-    num_greedy: usize,
-
-    #[arg(
-        long,
-        help = "EM Gibbs sweeps on full edge set",
-        long_help = "Number of EM Gibbs sweeps on full-resolution edges.\n\
-                       Set to 0 to skip EM entirely and use only greedy refinement.\n\
-                       If omitted, defaults to num_gibbs/4 (minimum 5)."
-    )]
-    num_em: Option<usize>,
-
-    #[arg(
-        long,
-        help = "Dirichlet concentration for community mixing weights",
-        long_help = "Concentration parameter α for the symmetric Dirichlet prior\n\
-                       on community mixing weights. Enables variational truncation:\n\
-                       communities with few edges are naturally pruned.\n\
-                       Set to 0 to disable (uniform prior).\n\
-                       If omitted, auto-scaled from edge profile sparsity:\n\
-                       α = mean_size_factor / K, so sparser data gets a weaker prior."
-    )]
-    alpha: Option<f32>,
-
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "Min total count to include a gene in the projection basis",
-        long_help = "Genes with total count below this threshold are zeroed out\n\
-                       in the Gaussian projection basis, effectively removing them\n\
-                       from every profile dim. Ignored in gene-pair mode.\n\
-                       Set to 0 to include all genes."
-    )]
-    min_gene_count: f32,
-
-    #[arg(
-        long,
-        help = "External gene-gene network file (two-column TSV: gene1, gene2)",
-        long_help = "External gene-gene network file (two-column TSV: gene1, gene2).\n\
-                       When provided, edge profiles are built from gene-pair interaction\n\
-                       deltas instead of gene modules. Each edge e=(i,j) gets a profile\n\
-                       y_e[p] = sum of positive co-expression deltas for gene pair p."
-    )]
-    gene_network: Option<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Allow prefix matching for gene names in external network"
-    )]
-    gene_network_allow_prefix: bool,
-
-    #[arg(
-        long,
-        default_value = "_",
-        help = "Delimiter for splitting compound gene names"
-    )]
-    gene_network_delimiter: Option<char>,
-
-    #[arg(
-        long,
-        default_value_t = 100,
-        help = "Max gene-pair dimensions; cluster into modules if exceeded",
-        long_help = "Maximum number of gene-pair dimensions for edge profiles.\n\
-                       When the number of gene pairs exceeds this threshold,\n\
-                       gene pairs are clustered into modules via K-means and\n\
-                       edge profiles are summed per module. Set to 0 to disable.\n\
-                       Only used with --gene-network."
-    )]
-    n_edge_modules: usize,
-
-    #[arg(
-        long,
-        default_value_t = 1,
-        help = "Outer EM iterations for edge-module re-estimation (gene-pair mode only)",
-        long_help = "Outer EM iterations for the gene-pair-module path:\n\
-                       E-step: Gibbs + greedy community assignment.\n\
-                       M-step: re-cluster gene-pair columns into edge modules\n\
-                       from community-conditioned rates.\n\
-                       Default 1 = fixed modules (no re-estimation).\n\
-                       Ignored in projection mode (no M-step to iterate)."
-    )]
-    n_outer_iter: usize,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Disable IDF background correction (on by default)",
-        long_help = "By default, edge profiles are reweighted by inverse-frequency\n\
-                       w_g = -ln(π_bg,g + ε), where π_bg is the empirical projection\n\
-                       marginal over all edges. Housekeeping signals (high π_bg) get\n\
-                       small weight, specific signals (low π_bg) get large weight — so\n\
-                       community assignment is driven by distinctive genes, not by\n\
-                       bulk expression level (DC-SBM degree correction with θ_g = π_bg).\n\
-                       Pass --no-background to disable and use raw counts."
-    )]
-    no_background: bool,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Disable housekeeping adjustment in the gene_topic report (on by default)",
-        long_help = "By default, the reported gene-topic sufficient statistics are\n\
-                       scaled row-wise by 1/(bg[g] + ε), where bg[g] is the gene's\n\
-                       share of total mass. This gives housekeeping-adjusted\n\
-                       posterior rates (Poisson-offset / DC-SBM size-factor).\n\
-                       Pass --no-adjust-housekeeping to disable and write raw rates."
-    )]
-    no_adjust_housekeeping: bool,
-
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "Modularity-gain resolution for the coarsening merge veto",
-        long_help = "Resolution γ for the degree-corrected merge veto. A proposed\n\
-                       merge (i, j) is rejected when sim(i,j) < γ · deg(i) · deg(j) / (2W),\n\
-                       the Louvain/Leiden modularity-gain criterion adapted to\n\
-                       cosine-weighted edges. γ = 1.0 is the standard modularity\n\
-                       resolution. Set to 0 to disable the veto."
-    )]
-    modularity_gamma: f32,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Disable the post-hoc BHC merge over the K fitted communities",
-        long_help = "By default, after the K link communities are fit, a Bayesian\n\
-                       hierarchical clustering (BHC) pass runs over the K communities.\n\
-                       Every pair is scored with a log Bayes factor under an empirical-\n\
-                       Bayes Dirichlet-Multinomial model centered on the pooled background:\n\
-                           log_bf > 0  → data favor merging the two communities\n\
-                           log_bf < 0  → data favor keeping them separate\n\
-                           log_bf = 0  → indifferent (the natural consensus-cut boundary)\n\
-                       Magnitude is BIC-like (~ n · KL of proportions); compare only\n\
-                       within a single run. Emits four files under the `.bhc.` prefix:\n\
-                         <out>.bhc.merges.parquet — full merge tree (scipy-linkage-style)\n\
-                         <out>.bhc.cut.parquet    — consensus id per original community\n\
-                         <out>.bhc.link_community.parquet — edges remapped to the cut\n\
-                         <out>.bhc.propensity.parquet    — cell×community propensity,\n\
-                                                           columns collapsed by the cut\n\
-                       Cost is negligible. Pass --no-bhc to skip."
-    )]
-    no_bhc: bool,
-
-    #[arg(
-        long,
-        help = "Total Dirichlet concentration γ for the BHC empirical-Bayes prior",
-        long_help = "Total concentration γ for the empirical-Bayes asymmetric Dirichlet\n\
-                       prior Dir(γ · bg), where bg[g] is the pooled per-gene marginal\n\
-                       (the \"housekeeping baseline\"). Higher γ → stronger prior pull\n\
-                       toward the baseline → smaller |log_bf| per merge. Per-cluster\n\
-                       sufficient stats are rescaled so S_eff = edge_count.\n\
-                       Node log marginal:\n\
-                         f(T, S) = lgamma(γ) − lgamma(γ + S)\n\
-                                 + Σ_g [lgamma(γ·bg[g] + T_g) − lgamma(γ·bg[g])]\n\
-                       Default γ = 1.0 (one effective prior observation; data dominate)."
-    )]
-    bhc_gamma: Option<f64>,
-
-    #[arg(
-        long,
-        default_value_t = 0.0,
-        help = "log BF cutoff for the BHC consensus cut",
-        long_help = "Merges with log_bf ≥ cutoff collapse into one consensus super-\n\
-                       community; merges below the cutoff stay separate. Default 0.0 is\n\
-                       the natural Bayesian break point (positive BF = data prefers\n\
-                       merging). Set higher to be more conservative (only strong-\n\
-                       evidence merges collapse) or lower (e.g. −3) to also collapse\n\
-                       weakly-distinct pairs. Emitted as <out>.bhc.cut.parquet with\n\
-                       columns (community, consensus). Empty communities get\n\
-                       consensus = −1."
-    )]
-    bhc_cut: f64,
-}
-
-/// Link community model pipeline.
-///
-/// 1.  Load data + coordinates
-/// 2.  Estimate batch effects
-/// 3.  Build spatial KNN graph
-/// 4.  Multi-level cell coarsening
-/// 5.  Edge profiles: compressed all-gene (default) or external gene-pairs
-/// 6.  Build edge profiles; optionally IDF-weight by empirical gene marginal
-///     (DC-SBM degree correction ~ housekeeping frequency)
-/// 7.  Collapsed Gibbs on coarsest → transfer → refine at finer levels
-///     (entropy / multinomial DC-SBM objective)
-/// 8.  Extract and write outputs
+/// Main entry point for `pinto lc`.
 pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()> {
     let c = &args.common;
     let k = args.n_communities;
@@ -389,9 +182,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     let n_edges = edges.len();
     info!("{} cells, {} edges", n_cells, n_edges);
 
-    // Track scores
-    let mut score_trace: Vec<f64> = Vec::new();
-
     //////////////////////////////////////////////////////
     // 4. Multi-level cell coarsening                   //
     //////////////////////////////////////////////////////
@@ -440,39 +230,43 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     );
 
     //////////////////////////////////////////////////////
-    // 5-6. Build COARSE edge profiles first            //
+    // 5. Profile context setup                         //
     //////////////////////////////////////////////////////
-    let coarse_profiles;
+    // Two modes:
+    //   - Gene-pair: load the user's external gene-gene network, build a
+    //     raw coarse-level profile to run elbow filtering, optionally cluster
+    //     the remaining gene-pairs into edge modules via K-means.
+    //   - Projection: use the cell embedding's random-projection basis, with
+    //     optional low-count gene filtering.
+    let mut gp_profile_state: Option<GenePairProfileState>;
     let proj_basis: Option<Mat>;
 
-    // Gene-pair profile state: (gene_adj, gene_means, n_gene_pairs, module_collapse)
-    let mut gp_profile_state: Option<GenePairProfileState>;
-
-    // Build super-edges at coarsest level
+    // Coarsest super-edges are needed once for the elbow filter / module
+    // K-means (gene-pair mode). The cascade rebuilds level-0 super-edges
+    // internally when it runs.
     let coarsest_labels = &ml.all_cell_labels[0];
-    let (super_edges, fine_to_super) = build_super_edges(edges, coarsest_labels);
-    let n_super = super_edges.len();
+    let (coarse_super_edges, _) = build_super_edges(edges, coarsest_labels);
+    let n_super = coarse_super_edges.len();
     info!(
         "Coarsest level: {} super-edges from {} fine edges",
         n_super, n_edges
     );
 
     if let Some((ref mut gene_graph, ref gene_means)) = gene_pair_state {
-        // Gene-pair profile path
         let n_gene_pairs = gene_graph.num_edges();
 
-        info!("Building COARSE gene-pair profiles...");
+        info!("Building coarse gene-pair profiles for elbow filter...");
         let gene_adj = gene_graph.build_directed_adjacency();
         let raw_profiles = build_edge_profiles_by_gene_pairs(
             &data_vec,
-            &super_edges,
+            &coarse_super_edges,
             &gene_adj,
             gene_means,
             n_gene_pairs,
             c.block_size,
         )?;
 
-        // Elbow filtering on coarse column sums
+        // Elbow filter on coarse column sums.
         let col_sums: Vec<f32> = (0..n_gene_pairs)
             .map(|p| {
                 let mut s = 0.0f32;
@@ -506,27 +300,24 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             (raw_profiles, n_gene_pairs)
         };
 
-        // Write gene graph
         gene_graph.to_parquet(&(c.out.to_string() + ".gene_graph.parquet"))?;
 
-        // Rebuild gene adjacency after filtering
         let gene_adj = gene_graph.build_directed_adjacency();
 
-        // Collapse gene-pair columns into modules if too many
-        let (final_profiles, module_collapse) =
-            if args.n_edge_modules > 0 && final_n_gene_pairs > args.n_edge_modules {
-                info!(
-                    "Clustering {} gene pairs into {} edge modules...",
-                    final_n_gene_pairs, args.n_edge_modules
-                );
-                let (module_profiles, assignments) =
-                    collapse_profile_columns(&filtered_profiles, &edge_clusterer);
-                (module_profiles, Some(assignments))
-            } else {
-                (filtered_profiles, None)
-            };
+        // Collapse gene-pair columns into modules if too many.
+        let module_collapse = if args.n_edge_modules > 0 && final_n_gene_pairs > args.n_edge_modules
+        {
+            info!(
+                "Clustering {} gene pairs into {} edge modules...",
+                final_n_gene_pairs, args.n_edge_modules
+            );
+            let (_module_profiles, assignments) =
+                collapse_profile_columns(&filtered_profiles, &edge_clusterer);
+            Some(assignments)
+        } else {
+            None
+        };
 
-        coarse_profiles = final_profiles;
         gp_profile_state = Some(GenePairProfileState {
             gene_adj,
             gene_means: gene_means.clone(),
@@ -536,8 +327,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         proj_basis = None;
     } else {
         // Compressed all-gene edge profiles (default): y_e = W^T (x_i + x_j)
-        // with W a G × proj_dim Gaussian basis. Every profile dim is a full
-        // linear combination of ALL genes — no genes dropped.
+        // with W a G × proj_dim Gaussian basis.
         let mut basis = cell_proj.basis.clone();
 
         if args.min_gene_count > 0.0 {
@@ -550,30 +340,28 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             );
         }
 
-        info!(
-            "Building COARSE compressed all-gene edge profiles (dim={})...",
-            c.proj_dim
-        );
-        coarse_profiles = build_edge_profiles(&data_vec, &super_edges, &basis, c.block_size)?;
-        proj_basis = Some(basis);
         gp_profile_state = None;
+        proj_basis = Some(basis);
     }
 
-    let mean_sf = coarse_profiles.size_factors.iter().sum::<f32>() / coarse_profiles.n_edges as f32;
-    let m = coarse_profiles.m;
-    info!(
-        "Coarse edge profiles: {} super-edges × {} dims, mean size factor: {:.1}",
-        coarse_profiles.n_edges, m, mean_sf
-    );
+    //////////////////////////////////////////////////////
+    // 6. Full fine-resolution profiles + IDF background //
+    //////////////////////////////////////////////////////
+    let all_edge_indices: Vec<usize> = (0..n_edges).collect();
+    let (mut full_profiles, full_raw_gp_profiles) = build_full_profiles_inline(
+        &data_vec,
+        &all_edge_indices,
+        edges,
+        &gp_profile_state,
+        &proj_basis,
+    )?;
 
-    // Unless --no-background, compute empirical gene-module marginal from coarse
-    // profiles and apply IDF weighting in-place: y'_eg = w_g · y_eg with
-    // w_g = -ln(π_bg,g + ε). Housekeeping genes (high π_bg) are down-weighted;
-    // rare genes are amplified. This is the DC-SBM degree correction (θ_g = π_bg).
+    // Derive IDF background from the finest-resolution profiles (one-shot) and
+    // reuse it across every cascade level.
     let bg: Option<Vec<f64>> = if !args.no_background {
-        let dist = coarse_profiles.empirical_marginal();
+        let dist = full_profiles.empirical_marginal();
         info!(
-            "Background distribution: min={:.2e}, max={:.2e}, effective_dims={:.1}",
+            "Background distribution (finest profiles): min={:.2e}, max={:.2e}, effective_dims={:.1}",
             dist.iter().cloned().fold(f64::INFINITY, f64::min),
             dist.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
             (-dist
@@ -587,44 +375,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         None
     };
 
-    let mut coarse_profiles = coarse_profiles;
     if let Some(ref bg_dist) = bg {
-        coarse_profiles.weight_by_idf(bg_dist);
-        info!("Applied IDF weighting to coarse profiles (housekeeping genes down-weighted)");
-    }
-
-    //////////////////////////////////////////////////////
-    // 7. Gibbs on coarsest level                       //
-    //////////////////////////////////////////////////////
-    let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(c.seed));
-    let init_labels: Vec<usize> = (0..coarse_profiles.n_edges).map(|e| e % k).collect();
-
-    let mut coarse_stats = LinkCommunityStats::from_profiles(&coarse_profiles, k, &init_labels);
-
-    info!("Gibbs on coarsest ({} sweeps)...", args.num_gibbs);
-    let moves = sampler.run_parallel(&mut coarse_stats, &coarse_profiles, args.num_gibbs);
-    let coarse_score = coarse_stats.total_score();
-    info!(
-        "Coarsest Gibbs: {} total moves, score={:.2}",
-        moves, coarse_score
-    );
-    score_trace.push(coarse_score);
-
-    // 7b. Transfer labels to full resolution and build profiles
-    let mut current_labels = transfer_labels(&fine_to_super, &coarse_stats.membership);
-    let all_edge_indices: Vec<usize> = (0..n_edges).collect();
-
-    let (mut full_profiles, full_raw_gp_profiles) = build_full_profiles_inline(
-        &data_vec,
-        &all_edge_indices,
-        edges,
-        &gp_profile_state,
-        &proj_basis,
-    )?;
-    if let Some(ref bg_dist) = bg {
-        // Reuse the coarse-derived bg for the full profiles (same M layout;
-        // for gene-pair-module path the M-step recomputes bg below).
         full_profiles.weight_by_idf(bg_dist);
+        info!("Applied IDF weighting to full profiles (housekeeping genes down-weighted)");
     }
 
     info!(
@@ -634,15 +387,49 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         (full_profiles.profiles.len() * std::mem::size_of::<f32>()) as f64 / 1_048_576.0
     );
 
-    // Resolve alpha: auto-scale from full-resolution (not coarse) edge sparsity,
-    // so the Dirichlet prior reflects the actual per-edge signal strength.
+    //////////////////////////////////////////////////////
+    // 7. V-cycle cascade through the pyramid            //
+    //////////////////////////////////////////////////////
+    let cell_names = data_vec.column_names()?;
+    let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(c.seed));
+
+    let cascade_cfg = CascadeConfig {
+        k,
+        num_gibbs: args.num_gibbs,
+        num_greedy: args.num_greedy,
+        user_alpha: args.alpha,
+        block_size: c.block_size,
+        adjust_housekeeping: !args.no_adjust_housekeeping,
+        no_level_outputs: args.no_level_outputs,
+    };
+    let cascade_result = run_cascade(
+        &c.out,
+        edges,
+        &ml.all_cell_labels,
+        &data_vec,
+        gp_profile_state.as_ref(),
+        proj_basis.as_ref(),
+        bg.as_deref(),
+        &cascade_cfg,
+        &mut sampler,
+        &cell_names,
+    )?;
+
+    let mut current_labels = cascade_result.fine_labels;
+    let mut score_trace: Vec<ScoreEntry> = cascade_result.score_trace;
+
+    //////////////////////////////////////////////////////
+    // 8. Outer EM loop: E-step (component-EM + greedy) //
+    //    + optional M-step (re-cluster gene-pair mods) //
+    //////////////////////////////////////////////////////
+    // Alpha for EM: auto-scale from full-resolution sparsity (or user override).
     let alpha: f64 = args.alpha.map_or_else(
         || {
             let full_mean_sf = full_profiles.size_factors.iter().sum::<f32>()
                 / full_profiles.n_edges.max(1) as f32;
             let v = (full_mean_sf as f64 / k as f64).max(0.01);
             info!(
-                "Auto alpha = {:.4} (mean_size_factor {:.1} / K={})",
+                "EM α = {:.4} (mean size factor {:.1} / K={})",
                 v, full_mean_sf, k
             );
             v
@@ -658,12 +445,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     let num_fine_sweeps = args.num_em.unwrap_or((args.num_gibbs / 4).max(5));
 
-    //////////////////////////////////////////////////////
-    // 8. Outer EM loop: E-step (Gibbs+greedy) →        //
-    //    M-step (re-cluster gene-pair modules)         //
-    //////////////////////////////////////////////////////
-    // M-step only meaningful when gene-pair-module collapse is active;
-    // projection / raw gene-pair mode runs a single iteration.
+    // M-step only meaningful when gene-pair-module collapse is active.
     let has_mstep = gp_profile_state
         .as_ref()
         .is_some_and(|gp| gp.module_collapse.is_some());
@@ -679,7 +461,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             );
         }
 
-        // --- E-step: EM Gibbs + greedy ---
         if num_fine_sweeps > 0 {
             info!("EM Gibbs on full edge set ({} sweeps)...", num_fine_sweeps);
             let moves = sampler.run_components_em(
@@ -701,22 +482,38 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
         let fine_stats = LinkCommunityStats::from_profiles(&full_profiles, k, &current_labels);
         let score = fine_stats.total_score();
-        info!("Greedy: {} moves, score={:.2}", greedy_moves, score);
-        score_trace.push(score);
+        let total_mass: f64 = fine_stats.size_sum.iter().sum();
+        let mi = fine_stats.mutual_information();
+        info!(
+            "Greedy: {} moves, score={:.4e}, score/mass={:.4e}, MI={:.4} nats",
+            greedy_moves,
+            score,
+            if total_mass > 0.0 {
+                score / total_mass
+            } else {
+                0.0
+            },
+            mi
+        );
+        // Final-phase score rows tagged with level = -1, one per outer EM iter.
+        score_trace.push(ScoreEntry {
+            level: -1,
+            sweep: outer_iter as i32,
+            score,
+            n_edges: fine_stats.n_edges,
+            total_mass,
+            mutual_information: mi,
+        });
 
-        // Last iteration or no modules to update → done
         if outer_iter + 1 >= n_outer_iter {
             break;
         }
-
-        // Score-based early stopping
         if score <= prev_score * 1.001 && prev_score > f64::NEG_INFINITY {
             info!("Outer EM converged (score plateau), stopping early");
             break;
         }
         prev_score = score;
 
-        // --- M-step: re-cluster gene-pair columns into edge modules ---
         if let (Some(raw), Some(ref mut gp)) = (&full_raw_gp_profiles, &mut gp_profile_state) {
             if gp.module_collapse.is_some() {
                 info!("M-step: recomputing gene-pair modules from community rates...");
@@ -729,20 +526,20 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
                 full_profiles = raw.collapse_modules(&new_collapse);
                 if bg.is_some() {
+                    // After module re-collapse the m dimension changes, so the
+                    // finest-level bg is stale — recompute locally.
                     let dist = full_profiles.empirical_marginal();
                     full_profiles.weight_by_idf(&dist);
                 }
                 gp.module_collapse = Some(new_collapse);
             }
         }
-        // else: projection / raw gene-pair path — no modules to update
     }
 
-    // Final stats (from_profiles builds fresh — no drift to correct)
+    // Final stats from current labels (fresh build — no drift).
     let fine_stats = LinkCommunityStats::from_profiles(&full_profiles, k, &current_labels);
     let final_membership = fine_stats.membership.clone();
 
-    // Display link community size histogram
     if log::log_enabled!(log::Level::Info) {
         eprintln!();
         eprintln!("{}", link_community_histogram(&final_membership, k, 50));
@@ -750,44 +547,25 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     }
 
     //////////////////////////////////////////////////////
-    // 9. Extract and write outputs                     //
+    // 9. Extract and write final outputs               //
     //////////////////////////////////////////////////////
-    let cell_names = data_vec.column_names()?;
-
-    // 9a. cell propensity [N × K]
-    info!("Computing cell propensity...");
-    let cell_propensity = compute_node_membership(edges, &final_membership, n_cells, k);
-
-    let topic_names: Vec<Box<str>> = (0..k).map(|i| i.to_string().into_boxed_str()).collect();
-    cell_propensity.to_parquet_with_names(
-        &(c.out.to_string() + ".propensity.parquet"),
-        (Some(&cell_names), Some("cell")),
-        Some(&topic_names),
-    )?;
-
-    // 9b. Gene-topic statistics: Poisson-Gamma profiles per community [G × K]
-    compute_gene_topic_stat(
-        &cell_propensity,
+    info!("Writing final outputs (propensity, gene_topic, link_community)...");
+    let cell_propensity = write_partition_outputs(
+        &c.out,
+        edges,
+        &final_membership,
+        n_cells,
+        k,
+        &cell_names,
         &data_vec,
         c.block_size,
         !args.no_adjust_housekeeping,
-        &c.out,
     )?;
 
-    // 9c. Link community assignments
-    info!("Writing link community assignments...");
-    write_link_communities(
-        &(c.out.to_string() + ".link_community.parquet"),
-        edges,
-        &final_membership,
-        &cell_names,
-    )?;
-
-    // 9d. Score trace
     info!("Writing score trace...");
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
-    // 9e. BHC post-hoc merge (empirical-Bayes DM pairwise Bayes factor) + consensus cut.
+    // BHC post-hoc merge + consensus cut (unchanged semantics).
     if !args.no_bhc {
         let gamma = args.bhc_gamma.unwrap_or(1.0);
         info!(
@@ -810,7 +588,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         );
         write_bhc_cut(&(c.out.to_string() + ".bhc.cut.parquet"), &labels)?;
 
-        // 9f. Consensus outputs reflecting the BHC cut.
         if n_consensus > 0 {
             let consensus_membership: Vec<usize> = final_membership
                 .iter()
@@ -849,7 +626,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 }
 
 /// Build full-resolution edge profiles, optionally keeping raw (un-collapsed)
-/// gene-pair profiles for the M-step.
+/// gene-pair profiles for the outer-EM M-step.
 ///
 /// Returns `(collapsed_profiles, Option<raw_gp_profiles>)`.
 fn build_full_profiles_inline(
@@ -879,240 +656,4 @@ fn build_full_profiles_inline(
         let profiles = build_projection_profiles_for_edges(data, edge_indices, all_edges, basis)?;
         Ok((profiles, None))
     }
-}
-
-/// Write link community assignments to parquet.
-pub(crate) fn write_link_communities(
-    file_path: &str,
-    edges: &[(usize, usize)],
-    membership: &[usize],
-    cell_names: &[Box<str>],
-) -> anyhow::Result<()> {
-    use matrix_util::parquet::*;
-    use parquet::basic::Type as ParquetType;
-
-    let n_edges = edges.len();
-    let left_cells: Vec<Box<str>> = edges.iter().map(|&(i, _)| cell_names[i].clone()).collect();
-    let right_cells: Vec<Box<str>> = edges.iter().map(|&(_, j)| cell_names[j].clone()).collect();
-    let cluster_f32: Vec<f32> = membership.iter().map(|&k| k as f32).collect();
-
-    let col_names: Vec<Box<str>> =
-        vec!["left_cell".into(), "right_cell".into(), "community".into()];
-    let col_types = vec![
-        ParquetType::BYTE_ARRAY,
-        ParquetType::BYTE_ARRAY,
-        ParquetType::FLOAT,
-    ];
-
-    let writer = ParquetWriter::new(
-        file_path,
-        (n_edges, col_names.len()),
-        (None, Some(&col_names)),
-        Some(&col_types),
-        Some("edge"),
-    )?;
-
-    let row_names = writer.row_names_vec();
-    let mut writer = writer.get_writer()?;
-    let mut row_group = writer.next_row_group()?;
-
-    parquet_add_bytearray(&mut row_group, row_names)?;
-    parquet_add_string_column(&mut row_group, &left_cells)?;
-    parquet_add_string_column(&mut row_group, &right_cells)?;
-    parquet_add_numeric_column(&mut row_group, &cluster_f32)?;
-
-    row_group.close()?;
-    writer.close()?;
-
-    Ok(())
-}
-
-/// Write the BHC merge table to parquet.
-///
-/// One row per merge event (K_eff − 1 rows, where K_eff is the number of
-/// non-empty communities). Columns:
-///
-/// | col | meaning |
-/// |---|---|
-/// | merge_id | new node id (K .. 2K_eff − 2); scipy-linkage convention |
-/// | left, right | child node ids (< merge_id) |
-/// | log_bf | log Bayes factor; positive = data favor merging |
-/// | n_edges | total edges under this node |
-///
-/// `log_bf` is produced by the empirical-Bayes Dirichlet-Multinomial model —
-/// positive/negative/magnitude interpretation is in the `bhc` module docstring.
-/// Scores are monotonically non-increasing along the merge sequence (the
-/// algorithm picks max log_bf at each step); the first row with `log_bf < 0`
-/// marks the natural consensus-cut boundary, also emitted in `.bhc.cut.parquet`
-/// when `--bhc-cut 0.0` (the default).
-///
-/// To feed scipy: take `(left, right, −log_bf, n_edges)` as the 4-column Z
-/// matrix. In R: column `-log_bf` can be used as the `height` in ape or as a
-/// cut threshold via `cutree`.
-pub(crate) fn write_bhc_merges(
-    file_path: &str,
-    merges: &[crate::link_community::bhc::BhcMerge],
-) -> anyhow::Result<()> {
-    use matrix_util::parquet::*;
-    use parquet::basic::Type as ParquetType;
-
-    let n_rows = merges.len();
-    let merge_ids: Vec<i32> = merges.iter().map(|m| m.id).collect();
-    let lefts: Vec<i32> = merges.iter().map(|m| m.left).collect();
-    let rights: Vec<i32> = merges.iter().map(|m| m.right).collect();
-    let log_bfs: Vec<f64> = merges.iter().map(|m| m.log_bf).collect();
-    let n_edges: Vec<i32> = merges.iter().map(|m| m.n_edges).collect();
-
-    let col_names: Vec<Box<str>> = vec![
-        "merge_id".into(),
-        "left".into(),
-        "right".into(),
-        "log_bf".into(),
-        "n_edges".into(),
-    ];
-    let col_types = vec![
-        ParquetType::INT32,
-        ParquetType::INT32,
-        ParquetType::INT32,
-        ParquetType::DOUBLE,
-        ParquetType::INT32,
-    ];
-
-    let writer = ParquetWriter::new(
-        file_path,
-        (n_rows, col_names.len()),
-        (None, Some(&col_names)),
-        Some(&col_types),
-        Some("step"),
-    )?;
-
-    let row_names = writer.row_names_vec();
-    let mut writer = writer.get_writer()?;
-    let mut row_group = writer.next_row_group()?;
-
-    parquet_add_bytearray(&mut row_group, row_names)?;
-    parquet_add_numeric_column(&mut row_group, &merge_ids)?;
-    parquet_add_numeric_column(&mut row_group, &lefts)?;
-    parquet_add_numeric_column(&mut row_group, &rights)?;
-    parquet_add_numeric_column(&mut row_group, &log_bfs)?;
-    parquet_add_numeric_column(&mut row_group, &n_edges)?;
-
-    row_group.close()?;
-    writer.close()?;
-
-    Ok(())
-}
-
-/// Write the BHC consensus cut to parquet.
-///
-/// One row per original community (length K). Columns `(community, consensus)`:
-/// `consensus[c]` is the super-community that original community `c` is
-/// collapsed into under the `--bhc-cut` log-BF threshold, or `-1` if the
-/// original community was empty (no edges). The downstream `.bhc.link_community`
-/// and `.bhc.propensity` outputs are the original K-space outputs remapped
-/// through this table.
-pub(crate) fn write_bhc_cut(file_path: &str, labels: &[i32]) -> anyhow::Result<()> {
-    use matrix_util::parquet::*;
-    use parquet::basic::Type as ParquetType;
-
-    let n_rows = labels.len();
-    let communities: Vec<i32> = (0..n_rows as i32).collect();
-
-    let col_names: Vec<Box<str>> = vec!["community".into(), "consensus".into()];
-    let col_types = vec![ParquetType::INT32, ParquetType::INT32];
-
-    let writer = ParquetWriter::new(
-        file_path,
-        (n_rows, col_names.len()),
-        (None, Some(&col_names)),
-        Some(&col_types),
-        Some("row"),
-    )?;
-
-    let row_names = writer.row_names_vec();
-    let mut writer = writer.get_writer()?;
-    let mut row_group = writer.next_row_group()?;
-
-    parquet_add_bytearray(&mut row_group, row_names)?;
-    parquet_add_numeric_column(&mut row_group, &communities)?;
-    parquet_add_numeric_column(&mut row_group, labels)?;
-
-    row_group.close()?;
-    writer.close()?;
-
-    Ok(())
-}
-
-/// ASCII histogram of link community sizes, showing communities with > 1% of edges.
-pub(crate) fn link_community_histogram(membership: &[usize], k: usize, max_width: usize) -> String {
-    let n = membership.len();
-    let mut sizes = vec![0usize; k];
-    for &c in membership {
-        sizes[c] += 1;
-    }
-
-    // Sort non-empty communities by size descending
-    let mut ranked: Vec<(usize, usize)> = sizes
-        .iter()
-        .enumerate()
-        .filter(|(_, &s)| s > 0)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .map(|(id, &s)| (id, s))
-        .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
-
-    let max_size = ranked.first().map(|&(_, s)| s).unwrap_or(1);
-    let min_edges = n / 100; // 1% threshold
-
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "Link communities ({} edges, {} non-empty of {}):",
-        n,
-        ranked.len(),
-        k
-    ));
-    lines.push(String::new());
-
-    let mut shown = 0;
-    for &(community_id, size) in &ranked {
-        if size <= min_edges {
-            break;
-        }
-        let pct = 100.0 * size as f64 / n as f64;
-        let bar_len = ((size as f64 / max_size as f64) * max_width as f64) as usize;
-        let bar = "\u{2588}".repeat(bar_len.max(1));
-        lines.push(format!(
-            "  Community {:3}  {:>7} edges ({:>5.1}%)  {}",
-            community_id, size, pct, bar
-        ));
-        shown += 1;
-    }
-
-    let hidden = ranked.len() - shown;
-    if hidden > 0 {
-        let hidden_edges: usize = ranked[shown..].iter().map(|&(_, s)| s).sum();
-        let hidden_pct = 100.0 * hidden_edges as f64 / n as f64;
-        lines.push(format!(
-            "  ... and {} more ({} edges, {:.1}%)",
-            hidden, hidden_edges, hidden_pct
-        ));
-    }
-
-    lines.join("\n")
-}
-
-/// Write score trace to parquet.
-pub(crate) fn write_score_trace(file_path: &str, scores: &[f64]) -> anyhow::Result<()> {
-    let mat = Mat::from_fn(scores.len(), 1, |i, _| scores[i] as f32);
-    let col_names = vec!["score".to_string().into_boxed_str()];
-    let row_names: Vec<Box<str>> = (0..scores.len())
-        .map(|i| i.to_string().into_boxed_str())
-        .collect();
-
-    mat.to_parquet_with_names(
-        file_path,
-        (Some(&row_names), Some("step")),
-        Some(&col_names),
-    )
 }

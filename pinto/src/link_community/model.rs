@@ -384,17 +384,58 @@ impl LinkCommunityStats {
     /// Total conditional-entropy / plug-in multinomial score (higher = better).
     ///
     /// J = Σ_{k,g} f(T_kg) − Σ_k f(S_k), f(x) = x · ln(x).
-    /// Computed on demand from `gene_sum` / `size_sum` (not a hot-path call).
+    /// Computed on demand from `gene_sum` / `size_sum`. No allocation.
     pub fn total_score(&self) -> f64 {
+        let sum_f_t: f64 = self.gene_sum.iter().map(|&t| f_entropy(t)).sum();
+        let sum_f_s: f64 = self.size_sum.iter().map(|&s| f_entropy(s)).sum();
+        sum_f_t - sum_f_s
+    }
+
+    /// Mutual information between community assignment and gene profile,
+    /// in nats. Granularity-aware: comparable across cascade levels.
+    ///
+    /// `MI = H(p_global) − mean_H(p_k|community) = H(p_global) + J/Total`.
+    /// Range: `[0, H(p_global)]`. Higher = communities more informative.
+    pub fn mutual_information(&self) -> f64 {
+        self.score_and_mi().1
+    }
+
+    /// Fused `(total_score, mutual_information)` in one pass over
+    /// `gene_sum`/`size_sum`. The per-sweep cascade observer needs both, so
+    /// sharing the scans halves the per-sweep accounting cost. The inner
+    /// gene-axis loop uses slice-zip so LLVM auto-vectorizes.
+    pub fn score_and_mi(&self) -> (f64, f64) {
+        let mut p_global = vec![0.0f64; self.m];
         let mut sum_f_t = 0.0f64;
-        for &t in &self.gene_sum {
-            sum_f_t += f_entropy(t);
+        for chunk in self.gene_sum.chunks_exact(self.m) {
+            for (acc, &v) in p_global.iter_mut().zip(chunk.iter()) {
+                *acc += v;
+                sum_f_t += f_entropy(v);
+            }
         }
+        let mut total = 0.0f64;
         let mut sum_f_s = 0.0f64;
         for &s in &self.size_sum {
+            total += s;
             sum_f_s += f_entropy(s);
         }
-        sum_f_t - sum_f_s
+        let score = sum_f_t - sum_f_s;
+        if total <= 0.0 {
+            return (score, 0.0);
+        }
+        let inv_total = 1.0 / total;
+        let h_global: f64 = p_global
+            .iter()
+            .map(|&t| {
+                let p = t * inv_total;
+                if p > 0.0 {
+                    -p * p.ln()
+                } else {
+                    0.0
+                }
+            })
+            .sum();
+        (score, h_global + score * inv_total)
     }
 }
 
