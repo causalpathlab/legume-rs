@@ -360,7 +360,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         data_batch: &batch,
         data_input_null: &[],
         dictionary_suffix: Some("dictionary.parquet"),
-        has_markers: false,
         has_model: false,
         has_cell_proj: true,
         // SVD produces no topic / cluster labels on its own; users

@@ -4,8 +4,8 @@
 //!
 //! The core idea: given a matrix of pseudobulk expression profiles, pick a
 //! small number of "anchor" rows that are maximally orthogonal to one another
-//! via greedy Gram-Schmidt, then optionally label each anchor with a cell-type
-//! name by scoring marker-gene z-scores against a margin threshold.
+//! via greedy Gram-Schmidt. Annotation-side labeling of those anchors against
+//! marker genes lives in `postprocess::fit_annotate`.
 //!
 //! These helpers are intentionally dependency-free beyond `nalgebra` so the
 //! module can sit at the crate root and be imported by both the training and
@@ -13,7 +13,6 @@
 //! graph.
 
 use crate::embed_common::Mat;
-use crate::marker_support::MarkerInfo;
 
 /// Write `softmax(col)` from a source column view into a destination column
 /// view of the same length. Used per anchor when building anchor simplex
@@ -119,92 +118,6 @@ pub(crate) fn gram_schmidt_anchors(x_pg: &Mat, k: usize) -> Vec<usize> {
     }
 
     picked
-}
-
-/// Score each anchor PB against every celltype using a weighted one-sample
-/// z-statistic over the celltype's TF-IDF-weighted markers. Promiscuous
-/// markers contribute less; celltype-unique markers contribute most.
-///
-/// Score for celltype c at PB p:
-///   `score_c = (Σ_g w_g · z_g) / sqrt(Σ_g w_g²)`
-/// where the sum runs over genes with `membership_gc[(g, c)] > 0` and
-/// `w_g = membership_gc[(g, c)]` is the TF-IDF weight set at load time.
-///
-/// Under H0 "marker z-scores are iid N(0,1)" the score is again N(0,1)
-/// regardless of celltype size or weight distribution — so the
-/// `margin_threshold` between top1 and top2 stays comparable across
-/// celltypes.
-///
-/// Assign each anchor the best-scoring celltype iff
-/// `top1 - top2 >= margin_threshold`. Anchors that don't clear the
-/// margin — or whose best celltype has no markers — become `novel_{i}`.
-///
-/// When multiple anchors pick the same celltype, later anchors get a
-/// numeric suffix so the labels stay unique (e.g. `T_cells`, `T_cells_2`).
-pub(crate) fn label_anchors(
-    x_zscored: &Mat,
-    anchor_pb_idx: &[usize],
-    markers: &MarkerInfo,
-    margin_threshold: f32,
-) -> (Vec<Box<str>>, Vec<(f32, f32)>) {
-    let n_ct = markers.celltypes.len();
-    let mut marker_rows_per_ct: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n_ct];
-    for (c, col) in markers.membership_gc.column_iter().enumerate() {
-        for (g, &w) in col.iter().enumerate() {
-            if w > 0.0 {
-                marker_rows_per_ct[c].push((g, w));
-            }
-        }
-    }
-    let denom_per_ct: Vec<f32> = (0..n_ct)
-        .map(|c| markers.membership_gc.column(c).norm())
-        .collect();
-
-    let mut used_counts = rustc_hash::FxHashMap::<Box<str>, usize>::default();
-    let mut labels: Vec<Box<str>> = Vec::with_capacity(anchor_pb_idx.len());
-    let mut scores: Vec<(f32, f32)> = Vec::with_capacity(anchor_pb_idx.len());
-
-    for (i, &pb) in anchor_pb_idx.iter().enumerate() {
-        let pb_row = x_zscored.row(pb);
-
-        let mut per_ct: Vec<(usize, f32)> = (0..n_ct)
-            .filter_map(|c| {
-                let rows = &marker_rows_per_ct[c];
-                if rows.is_empty() {
-                    return None;
-                }
-                let denom = denom_per_ct[c];
-                if denom <= 0.0 {
-                    return None;
-                }
-                let sum_wz: f32 = rows.iter().map(|&(g, w)| w * pb_row[g]).sum();
-                let score = sum_wz / denom;
-                Some((c, score))
-            })
-            .collect();
-        per_ct.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        let (top1_ct, top1_z) = per_ct.first().copied().unwrap_or((usize::MAX, 0.0));
-        let top2_z = per_ct.get(1).map_or(f32::NEG_INFINITY, |&(_, s)| s);
-        scores.push((top1_z, top2_z));
-
-        let clears_margin = top1_ct != usize::MAX && (top1_z - top2_z) >= margin_threshold;
-        if !clears_margin {
-            labels.push(format!("novel_{i}").into_boxed_str());
-            continue;
-        }
-        let base = markers.celltypes[top1_ct].clone();
-        let n = used_counts.entry(base.clone()).or_insert(0);
-        *n += 1;
-        let label = if *n == 1 {
-            base
-        } else {
-            format!("{base}_{n}").into_boxed_str()
-        };
-        labels.push(label);
-    }
-
-    (labels, scores)
 }
 
 /// Strip `_<n>` suffix from disambiguated multi-anchor labels, so we can
