@@ -124,6 +124,14 @@ pub struct IndexedTopicArgs {
     block_size: Option<usize>,
 
     #[arg(
+        long = "weighting",
+        value_enum,
+        default_value_t = crate::refine_weighting::WeightingArg::NbFisherInfo,
+        help = crate::refine_weighting::WEIGHTING_HELP,
+    )]
+    refine_weighting: crate::refine_weighting::WeightingArg,
+
+    #[arg(
         short = 't',
         long,
         default_value_t = 10,
@@ -308,7 +316,10 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         oversample: !args.no_oversample_pb,
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
-        refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
+        refine: Some(data_beans_alg::refine_multilevel::RefineParams {
+            gene_weighting: args.refine_weighting.into(),
+            ..data_beans_alg::refine_multilevel::RefineParams::default()
+        }),
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();

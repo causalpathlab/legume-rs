@@ -69,46 +69,6 @@ impl LinkProfileStore {
         }
     }
 
-    /// Empirical column marginal normalised to a probability distribution (sums to 1).
-    ///
-    /// Uses f64 accumulation for numerical stability.
-    pub(crate) fn empirical_marginal(&self) -> Vec<f64> {
-        let mut col_sum = vec![0.0f64; self.m];
-        for e in 0..self.n_edges {
-            let row = self.profile(e);
-            for g in 0..self.m {
-                col_sum[g] += row[g] as f64;
-            }
-        }
-        let total: f64 = col_sum.iter().sum::<f64>().max(1.0);
-        for v in col_sum.iter_mut() {
-            *v /= total;
-        }
-        col_sum
-    }
-
-    /// Apply inverse-frequency weighting in place (degree correction ~ housekeeping).
-    ///
-    /// Multiplies every profile entry by `w_g = -log(bg[g] + ε)`. Housekeeping
-    /// genes (high bg) get small weight; specific genes (low bg) get large
-    /// weight. Size factors are recomputed. This is the DC-SBM degree
-    /// correction with θ_g = bg[g]: after reweighting, the objective measures
-    /// community specificity relative to background.
-    pub(crate) fn weight_by_idf(&mut self, bg: &[f64]) {
-        debug_assert_eq!(bg.len(), self.m);
-        let eps = 1e-12f64;
-        let w: Vec<f32> = bg.iter().map(|&p| (-((p + eps).ln())) as f32).collect();
-        for e in 0..self.n_edges {
-            let row = &mut self.profiles[e * self.m..(e + 1) * self.m];
-            let mut s = 0.0f32;
-            for (y, &wg) in row.iter_mut().zip(w.iter()) {
-                *y *= wg;
-                s += *y;
-            }
-            self.size_factors[e] = s;
-        }
-    }
-
     /// Get the profile slice for edge `e`.
     #[inline]
     pub fn profile(&self, e: usize) -> &[f32] {

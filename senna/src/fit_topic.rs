@@ -141,10 +141,12 @@ pub struct TopicArgs {
     pub(crate) refine_greedy: usize,
 
     #[arg(
-        long,
-        help = "Disable IDF reweighting in refinement (IDF is on by default)"
+        long = "weighting",
+        value_enum,
+        default_value_t = crate::refine_weighting::WeightingArg::NbFisherInfo,
+        help = crate::refine_weighting::WEIGHTING_HELP,
     )]
-    pub(crate) no_refine_idf: bool,
+    pub(crate) refine_weighting: crate::refine_weighting::WeightingArg,
 
     #[arg(long, default_value_t = 42, help = "Seed for refinement Gibbs sampler")]
     pub(crate) refine_seed: u64,
@@ -385,7 +387,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         refine: Some(data_beans_alg::refine_multilevel::RefineParams {
             num_gibbs: args.refine_gibbs,
             num_greedy: args.refine_greedy,
-            idf_weighting: !args.no_refine_idf,
+            gene_weighting: args.refine_weighting.into(),
             seed: args.refine_seed,
             ..data_beans_alg::refine_multilevel::RefineParams::default()
         }),

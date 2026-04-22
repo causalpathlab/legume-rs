@@ -68,7 +68,7 @@ impl HvgSelection {
 
 /// Stream cells through the sparse backend to compute per-gene mean and
 /// variance of raw expression, then select the top `n_features` HVGs via
-/// the shared binned residual-variance routine.
+/// the shared NB-trend scoring routine.
 ///
 /// If `feature_list_file` is supplied it takes precedence and the HVG
 /// computation is skipped entirely.
@@ -77,7 +77,6 @@ pub fn select_hvg_streaming(
     max_features: Option<usize>,
     feature_list_file: Option<&str>,
     block_size: Option<usize>,
-    n_bins: Option<usize>,
 ) -> anyhow::Result<HvgSelection> {
     let feature_names = data_vec.row_names()?;
 
@@ -98,11 +97,11 @@ pub fn select_hvg_streaming(
     let means = stat.mean().to_vec();
     let vars = stat.variance().to_vec();
 
-    let mut selected_indices = select_hvg_by_stats(&means, &vars, n_features, n_bins);
+    let mut selected_indices = select_hvg_by_stats(&means, &vars, n_features);
     selected_indices.sort_unstable();
 
     info!(
-        "Selected {} / {} highly variable features (binned residual variance)",
+        "Selected {} / {} highly variable features (NB dispersion-trend excess)",
         selected_indices.len(),
         feature_names.len()
     );

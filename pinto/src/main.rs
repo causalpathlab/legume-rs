@@ -203,11 +203,10 @@ enum Commands {
                       \x20 2. Batch effect estimation (multi-sample only)\n\
                       \x20 3. Multi-level graph coarsening\n\
                       \x20 4. Build edge profiles (projection or gene-pair)\n\
-                      \x20 5. Optional IDF reweighting against empirical marginal\n\
-                      \x20 6. Collapsed Gibbs on coarsest super-edges\n\
-                      \x20 7. Transfer labels to full resolution + EM Gibbs + greedy\n\
+                      \x20 5. Collapsed Gibbs on coarsest super-edges\n\
+                      \x20 6. Transfer labels to full resolution + EM Gibbs + greedy\n\
                       \x20    (with gene-pair modules: outer EM re-clusters modules)\n\
-                      \x20 8. Extract cell propensity + gene-topic statistics\n\n\
+                      \x20 7. Extract cell propensity + gene-topic statistics\n\n\
                       See `pinto lc --help` for individual flag docs.\n\n\
                       OUTPUT FILES:\n\n\
                       \x20 {out}.propensity.parquet      Cell community membership [N × K]\n\
