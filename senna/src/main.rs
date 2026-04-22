@@ -32,6 +32,7 @@
 
 mod anchor_common;
 mod cluster;
+mod cluster_bhc;
 mod cnv_pseudobulk;
 mod embed_common;
 mod eval_topic;

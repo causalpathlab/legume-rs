@@ -5,7 +5,9 @@
 use crate::cluster::{
     hsblock_clustering, kmeans_clustering, leiden_clustering, ClusterMethod, ClusterResult,
 };
+use crate::cluster_bhc::{run_cluster_bhc, ClusterBhcConfig};
 use crate::embed_common::*;
+use crate::senna_input::{read_data_on_shared_columns, ReadSharedColumnsArgs};
 
 /// Clustering method CLI enum
 #[derive(ValueEnum, Clone, Debug, Default, PartialEq)]
@@ -134,9 +136,49 @@ pub struct ClusteringArgs {
         help = "Output file prefix",
         long_help = "Output file prefix.\n\n\
 		     Generates:\n\
-		     - {out}.clusters.parquet: Cluster assignments (cell × cluster)"
+		     - {out}.clusters.parquet: Cluster assignments (cell × cluster)\n\
+		     - {out}.bhc.merges.parquet: BHC merge tree (when --data is given)\n\
+		     - {out}.bhc.cut.parquet:    BHC consensus cut (when --data is given)"
     )]
     out: Box<str>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Raw count data files (.zarr or .h5) — enables BHC postprocess",
+        long_help = "When provided, a Bayesian hierarchical clustering pass runs over\n\
+                     the fitted clusters using per-gene sufficient stats\n\
+                     T_{k,g}=Σ_{n∈k} y_{n,g} and an empirical-Bayes Dirichlet prior\n\
+                     centred on the pooled gene marginal bg. Same recipe pinto uses\n\
+                     for link communities. Must match the cell order of --latent.\n\
+                     Omit to skip BHC."
+    )]
+    data_files: Option<Vec<Box<str>>>,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Per-gene prior strength for the BHC empirical-Bayes Dirichlet prior",
+        long_help = "Total Dirichlet concentration γ = bhc_gamma_per_gene × G, where G\n\
+                     is the feature dimension. Default 1.0 = Bayes-Laplace (one prior\n\
+                     count per gene). Larger values pull every cluster more strongly\n\
+                     toward the pooled background, making BHC more eager to merge."
+    )]
+    bhc_gamma_per_gene: f64,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "log-BF cutoff for the BHC consensus cut (0 = natural Bayes break)"
+    )]
+    bhc_cut: f64,
+
+    #[arg(
+        long,
+        default_value_t = 1024,
+        help = "Cells per CSC read block when computing BHC sufficient stats"
+    )]
+    bhc_block_size: usize,
 }
 
 pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
@@ -224,7 +266,53 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
 
     info!("Wrote cluster assignments to {output_file}");
 
+    if let Some(data_files) = args.data_files.as_ref() {
+        run_bhc_postprocess(data_files, &result, &cell_names, args)?;
+    }
+
     Ok(())
+}
+
+fn run_bhc_postprocess(
+    data_files: &[Box<str>],
+    result: &ClusterResult,
+    cell_names: &[Box<str>],
+    args: &ClusteringArgs,
+) -> anyhow::Result<()> {
+    info!(
+        "BHC: loading raw count data from {} file(s)",
+        data_files.len()
+    );
+    let stack = read_data_on_shared_columns(ReadSharedColumnsArgs {
+        data_files: data_files.to_vec(),
+        batch_files: None,
+        num_types: 1,
+        preload: true,
+    })?;
+    anyhow::ensure!(
+        stack.data_stack.stack.len() == 1,
+        "BHC: expected a single data stack, got {}",
+        stack.data_stack.stack.len()
+    );
+    let data_vec = &stack.data_stack.stack[0];
+    anyhow::ensure!(
+        data_vec.num_columns() == cell_names.len(),
+        "BHC: data has {} cells but latent has {}",
+        data_vec.num_columns(),
+        cell_names.len()
+    );
+
+    run_cluster_bhc(
+        data_vec,
+        &result.labels,
+        &result.cluster_sizes(),
+        &args.out,
+        &ClusterBhcConfig {
+            gamma_per_gene: args.bhc_gamma_per_gene,
+            cutoff: args.bhc_cut,
+            block_size: args.bhc_block_size,
+        },
+    )
 }
 
 /// Write cluster assignments to parquet

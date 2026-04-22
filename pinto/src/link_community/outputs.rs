@@ -63,7 +63,7 @@ pub fn write_bhc_merges(
     let lefts: Vec<i32> = merges.iter().map(|m| m.left).collect();
     let rights: Vec<i32> = merges.iter().map(|m| m.right).collect();
     let log_bfs: Vec<f64> = merges.iter().map(|m| m.log_bf).collect();
-    let n_edges: Vec<i32> = merges.iter().map(|m| m.n_edges).collect();
+    let n_edges: Vec<i32> = merges.iter().map(|m| m.n_samples).collect();
 
     let col_names: Vec<Box<str>> = vec![
         "merge_id".into(),
