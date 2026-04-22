@@ -1,18 +1,18 @@
 //! Disjoint-set union (DSU) with union-by-rank and path halving.
 //!
-//! Kept in-tree (not delegated to `petgraph`/`disjoint_sets`) because this
-//! coarsener needs the per-root **size** (member count) for weighted centroid
-//! merging — a field none of the ecosystem crates expose.
+//! Kept in-tree (not delegated to `petgraph`/`disjoint_sets`) because callers
+//! need the per-root **size** (member count) for weighted centroid merging — a
+//! field none of the ecosystem crates expose.
 
 /// Union-Find (disjoint set) with path halving and union by rank.
-pub(crate) struct UnionFind {
+pub struct UnionFind {
     parent: Vec<usize>,
     rank: Vec<usize>,
     size: Vec<usize>,
 }
 
 impl UnionFind {
-    pub(crate) fn new(n: usize) -> Self {
+    pub fn new(n: usize) -> Self {
         Self {
             parent: (0..n).collect(),
             rank: vec![0; n],
@@ -21,7 +21,7 @@ impl UnionFind {
     }
 
     #[inline]
-    pub(crate) fn find(&mut self, mut x: usize) -> usize {
+    pub fn find(&mut self, mut x: usize) -> usize {
         while self.parent[x] != x {
             self.parent[x] = self.parent[self.parent[x]];
             x = self.parent[x];
@@ -31,7 +31,7 @@ impl UnionFind {
 
     /// Union the sets containing `a` and `b`; returns the surviving root.
     #[inline]
-    pub(crate) fn union(&mut self, a: usize, b: usize) -> usize {
+    pub fn union(&mut self, a: usize, b: usize) -> usize {
         let ra = self.find(a);
         let rb = self.find(b);
         if ra == rb {
@@ -53,21 +53,21 @@ impl UnionFind {
     /// Member count of the set whose root is `x` (caller passes a root, typically
     /// `uf.find(...)` — accepting any node index would require an extra find).
     #[inline]
-    pub(crate) fn size(&self, x: usize) -> usize {
+    pub fn size(&self, x: usize) -> usize {
         self.size[x]
     }
 
     /// Direct parent pointer — valid as a final representative only after
-    /// `flatten` has been called. Used in the multilevel extraction hot loop
-    /// to avoid per-call `find` after a batch of unions.
+    /// `flatten` has been called. Used in multilevel extraction hot loops to
+    /// avoid per-call `find` after a batch of unions.
     #[inline]
-    pub(crate) fn parent(&self, x: usize) -> usize {
+    pub fn parent(&self, x: usize) -> usize {
         self.parent[x]
     }
 
     /// Path-compress every node so `parent[i]` is its final representative.
-    /// Call after a batch of unions if subsequent lookups use [`parent`] directly.
-    pub(crate) fn flatten(&mut self) {
+    /// Call after a batch of unions if subsequent lookups use [`Self::parent`] directly.
+    pub fn flatten(&mut self) {
         for i in 0..self.parent.len() {
             self.parent[i] = self.find(i);
         }
