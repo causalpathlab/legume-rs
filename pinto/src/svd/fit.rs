@@ -1,4 +1,6 @@
-use crate::link_community::profiles::compute_propensity_and_gene_topic_stat;
+use crate::link_community::profiles::{
+    compute_propensity_and_gene_topic_stat, PropensityReportConfig,
+};
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::util::cell_pairs::*;
 use crate::util::common::*;
@@ -345,9 +347,11 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         &edges,
         &data_vec,
         n_cells,
-        n_clusters,
-        c.block_size,
-        !args.no_adjust_housekeeping,
+        &PropensityReportConfig {
+            n_clusters,
+            block_size: c.block_size,
+            adjust_housekeeping: !args.no_adjust_housekeeping,
+        },
         &c.out,
     )?;
 

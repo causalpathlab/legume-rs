@@ -533,21 +533,34 @@ pub fn intersect_with_siblings_fallback(
 /// returns `true`. In Gibbs sweeps, a vetoed move leaves the entity in its
 /// current group for this sweep. Greedy sweeps likewise skip the move.
 ///
+/// Shared sweep-driver context bundling the readonly inputs that every
+/// `refine_with_*` variant needs. Kept as a struct so the driver fns don't
+/// exceed clippy's argument-count threshold.
+pub struct RefineContext<'a> {
+    pub profiles: &'a Profiles,
+    pub k: usize,
+    pub params: &'a RefineParams,
+    pub level_label: &'a str,
+}
+
 /// This is the lowest-level driver. Pass [`NoGuard`] to get the unguarded
 /// behavior; most callers should prefer the convenience wrappers
 /// [`refine_with_candidates`] / [`refine_with_proposer`] /
 /// [`refine_with_proposer_guarded`].
 pub fn refine_with_candidates_guarded<G: MoveGuard>(
-    profiles: &Profiles,
     labels: &mut [usize],
-    k: usize,
     candidates: &[Vec<usize>],
     guard: &G,
-    params: &RefineParams,
     rng: &mut SmallRng,
-    level_label: &str,
+    ctx: &RefineContext,
 ) -> usize {
     use indicatif::{ProgressBar, ProgressStyle};
+    let RefineContext {
+        profiles,
+        k,
+        params,
+        level_label,
+    } = *ctx;
     let num_entities = labels.len();
     let mut stats = DcPoissonStats::from_profiles(profiles, k, labels);
     let mut log_probs = vec![f64::NEG_INFINITY; k];
@@ -643,66 +656,39 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
 
 /// Unguarded variant of [`refine_with_candidates_guarded`].
 pub fn refine_with_candidates(
-    profiles: &Profiles,
     labels: &mut [usize],
-    k: usize,
     candidates: &[Vec<usize>],
-    params: &RefineParams,
     rng: &mut SmallRng,
-    level_label: &str,
+    ctx: &RefineContext,
 ) -> usize {
-    refine_with_candidates_guarded(
-        profiles,
-        labels,
-        k,
-        candidates,
-        &NoGuard,
-        params,
-        rng,
-        level_label,
-    )
+    refine_with_candidates_guarded(labels, candidates, &NoGuard, rng, ctx)
 }
 
 /// Generic driver: ask `proposer` for candidates, then run the guarded sweep.
 pub fn refine_with_proposer_guarded<P: CandidateProposer, G: MoveGuard>(
-    profiles: &Profiles,
     labels: &mut [usize],
-    k: usize,
     proposer: &P,
     guard: &G,
-    params: &RefineParams,
     rng: &mut SmallRng,
-    level_label: &str,
+    ctx: &RefineContext,
 ) -> usize {
     let candidates = proposer.propose(labels);
-    let moves = refine_with_candidates_guarded(
-        profiles,
-        labels,
-        k,
-        &candidates,
-        guard,
-        params,
-        rng,
-        level_label,
-    );
-    info!("  {}: {} DC-Poisson moves", level_label, moves);
+    let moves = refine_with_candidates_guarded(labels, &candidates, guard, rng, ctx);
+    info!("  {}: {} DC-Poisson moves", ctx.level_label, moves);
     moves
 }
 
 /// Unguarded generic driver: ask `proposer` for candidates, then run the
 /// sweep with [`NoGuard`].
 pub fn refine_with_proposer<P: CandidateProposer>(
-    profiles: &Profiles,
     labels: &mut [usize],
-    k: usize,
     proposer: &P,
-    params: &RefineParams,
     rng: &mut SmallRng,
-    level_label: &str,
+    ctx: &RefineContext,
 ) -> usize {
     let candidates = proposer.propose(labels);
-    let moves = refine_with_candidates(profiles, labels, k, &candidates, params, rng, level_label);
-    info!("  {}: {} DC-Poisson moves", level_label, moves);
+    let moves = refine_with_candidates(labels, &candidates, rng, ctx);
+    info!("  {}: {} DC-Poisson moves", ctx.level_label, moves);
     moves
 }
 

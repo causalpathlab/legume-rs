@@ -110,8 +110,8 @@ pub fn graph_coarsen(
         // super-graph edge list. Negative cosines clamp to zero so the null
         // model doesn't credit anti-correlated neighborhoods.
         if veto.is_some() {
-            for i in 0..n {
-                deg_cos[i] = 0.0;
+            for d in deg_cos.iter_mut().take(n) {
+                *d = 0.0;
             }
             total_w = 0.0;
             for &(i, j) in &edges {
