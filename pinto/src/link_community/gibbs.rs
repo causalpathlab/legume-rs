@@ -91,13 +91,38 @@ impl LinkGibbsSampler {
     /// Jacobi-style: all edges compute proposals against a frozen snapshot
     /// of the stats using rayon `par_chunks`, then moves are applied sequentially.
     ///
+    /// `alpha` is the Dirichlet concentration on community mixing weights:
+    /// `alpha > 0` enables the prior (log-weights recomputed each sweep from
+    /// the frozen snapshot), `alpha == 0` disables it. Match the prior used
+    /// by the downstream component-EM stage for consistency across levels.
+    ///
     /// Returns the total number of edge moves across all sweeps.
+    #[cfg(test)]
     pub fn run_parallel(
         &mut self,
         stats: &mut LinkCommunityStats,
         profiles: &LinkProfileStore,
         num_sweeps: usize,
+        alpha: f64,
     ) -> usize {
+        self.run_parallel_with_observer(stats, profiles, num_sweeps, alpha, |_, _| {})
+    }
+
+    /// [`Self::run_parallel`] with a per-sweep observer closure called after
+    /// each sweep's stats are patched. The observer receives `(sweep_idx,
+    /// &stats)` — use it to record score / MI / whatever per-sweep diagnostic
+    /// is useful. Called zero-cost when the closure is a no-op.
+    pub fn run_parallel_with_observer<F>(
+        &mut self,
+        stats: &mut LinkCommunityStats,
+        profiles: &LinkProfileStore,
+        num_sweeps: usize,
+        alpha: f64,
+        mut observer: F,
+    ) -> usize
+    where
+        F: FnMut(usize, &LinkCommunityStats),
+    {
         let k = stats.k;
         let n = stats.n_edges;
 
@@ -119,6 +144,9 @@ impl LinkGibbsSampler {
         for sweep in 0..num_sweeps {
             let sweep_seed = base_seed.wrapping_mul(sweep as u64 + 1);
 
+            let lw_snap = (alpha > 0.0).then(|| stats.compute_log_weights(alpha));
+            let lw_ref = lw_snap.as_deref();
+
             let proposals: Vec<usize> = edge_order
                 .par_chunks(chunk_size)
                 .flat_map(|chunk| {
@@ -126,7 +154,7 @@ impl LinkGibbsSampler {
                     chunk
                         .iter()
                         .map(|&e| {
-                            compute_log_probs_for_edge(e, stats, profiles, None, &mut log_probs);
+                            compute_log_probs_for_edge(e, stats, profiles, lw_ref, &mut log_probs);
                             let vertex_seed = sweep_seed ^ (e as u64).wrapping_mul(2654435761);
                             let mut rng = SmallRng::seed_from_u64(vertex_seed);
                             sample_categorical_log(&log_probs, &mut rng)
@@ -142,6 +170,7 @@ impl LinkGibbsSampler {
                     total_moves += 1;
                 }
             }
+            observer(sweep, stats);
             pb.inc(1);
         }
         pb.finish_and_clear();
@@ -149,16 +178,44 @@ impl LinkGibbsSampler {
         total_moves
     }
 
-    /// Run greedy (argmax) sweeps with early exit on convergence.
+    /// Run greedy (argmax) sweeps over all edges with early exit on convergence.
+    ///
+    /// Deterministic, sequential argmax — each edge is reassigned to the
+    /// community with the highest log-probability. Used for per-level
+    /// finalization in the V-cycle cascade where the graph's connected-
+    /// component structure is irrelevant (super-edge resolution has no
+    /// meaningful cell-graph walk). For full fine-resolution greedy with
+    /// component-balanced parallelism, use [`Self::run_greedy_by_components`].
+    ///
+    /// `alpha` is the Dirichlet concentration on community mixing weights;
+    /// pass `0.0` to disable the prior.
     ///
     /// Returns the total number of edge moves across all sweeps.
     #[cfg(test)]
-    pub fn run_greedy(
+    pub fn run_greedy_plain(
         &mut self,
         stats: &mut LinkCommunityStats,
         profiles: &LinkProfileStore,
         max_sweeps: usize,
+        alpha: f64,
     ) -> usize {
+        self.run_greedy_plain_with_observer(stats, profiles, max_sweeps, alpha, |_, _| {})
+    }
+
+    /// [`Self::run_greedy_plain`] with a per-sweep observer closure called
+    /// after each sweep; the observer fires even on the final converged
+    /// sweep so the caller sees the end state of the early-exit.
+    pub fn run_greedy_plain_with_observer<F>(
+        &mut self,
+        stats: &mut LinkCommunityStats,
+        profiles: &LinkProfileStore,
+        max_sweeps: usize,
+        alpha: f64,
+        mut observer: F,
+    ) -> usize
+    where
+        F: FnMut(usize, &LinkCommunityStats),
+    {
         let k = stats.k;
         let n = stats.n_edges;
         let mut log_probs = vec![0.0f64; k];
@@ -170,12 +227,15 @@ impl LinkGibbsSampler {
             "Greedy {bar:40} {pos}/{len} sweeps ({eta})",
         );
 
-        for _sweep in 0..max_sweeps {
+        for sweep in 0..max_sweeps {
+            let lw_snap = (alpha > 0.0).then(|| stats.compute_log_weights(alpha));
+            let lw_ref = lw_snap.as_deref();
+
             let mut sweep_moves = 0;
             for e in 0..n {
                 let old_c = stats.membership[e];
 
-                compute_log_probs_for_edge(e, stats, profiles, None, &mut log_probs);
+                compute_log_probs_for_edge(e, stats, profiles, lw_ref, &mut log_probs);
 
                 let new_c = argmax_log(&log_probs);
 
@@ -185,6 +245,7 @@ impl LinkGibbsSampler {
                 }
             }
             total_moves += sweep_moves;
+            observer(sweep, stats);
             pb.inc(1);
             if sweep_moves == 0 {
                 break;

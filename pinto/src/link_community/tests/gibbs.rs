@@ -57,7 +57,7 @@ fn test_greedy_recovers_planted() {
 
     let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
     sampler.run(&mut stats, &store, 50);
-    sampler.run_greedy(&mut stats, &store, 20);
+    sampler.run_greedy_plain(&mut stats, &store, 20, 0.0);
 
     // Check that the partition matches the planted one (up to label permutation)
     let match_direct: usize = (0..100)
@@ -85,9 +85,9 @@ fn test_parallel_gibbs() {
 
     let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(42));
 
-    let moves1 = sampler.run_parallel(&mut stats, &store, 1);
-    let _moves_mid = sampler.run_parallel(&mut stats, &store, 20);
-    let moves_late = sampler.run_parallel(&mut stats, &store, 1);
+    let moves1 = sampler.run_parallel(&mut stats, &store, 1, 0.0);
+    let _moves_mid = sampler.run_parallel(&mut stats, &store, 20, 0.0);
+    let moves_late = sampler.run_parallel(&mut stats, &store, 1, 0.0);
 
     assert!(
         moves_late <= moves1 || moves1 == 0,
