@@ -377,30 +377,6 @@ pub fn transfer_labels(fine_to_super: &[usize], super_membership: &[usize]) -> V
         .collect()
 }
 
-/// Collapse propensity columns by a label mapping into consensus super-communities.
-///
-/// For each original column `c`, if `labels[c] >= 0` its contribution is added
-/// to output column `labels[c]`. Columns with `labels[c] == -1` (empty originals)
-/// are dropped. Row sums are preserved since each cell's propensity is just
-/// re-binned, not re-weighted.
-pub fn collapse_propensity_columns(propensity: &Mat, labels: &[i32], k_consensus: usize) -> Mat {
-    let n_rows = propensity.nrows();
-    let k = propensity.ncols();
-    debug_assert_eq!(labels.len(), k);
-    let mut out = Mat::zeros(n_rows, k_consensus);
-    for c in 0..k {
-        let lab = labels[c];
-        if lab < 0 {
-            continue;
-        }
-        let j = lab as usize;
-        for i in 0..n_rows {
-            out[(i, j)] += propensity[(i, c)];
-        }
-    }
-    out
-}
-
 /// Extract cell-level soft membership from link community assignments.
 ///
 /// For each cell i, membership[i][k] = (# edges of i assigned to k) / (# edges of i).
@@ -437,16 +413,16 @@ pub fn compute_node_membership(
 ///
 /// Given cell propensity [N × K] and sparse expression data [G × N],
 /// computes weighted gene sums `X @ propensity^T` and fits a Poisson-Gamma
-/// to get posterior gene expression rates per topic. When `adjust_housekeeping`
-/// is set, scales the sufficient statistic row-wise by `1/(bg[g] + ε)` before
-/// calibration so ubiquitous genes are discounted (Poisson-offset correction).
+/// to get posterior gene expression rates per topic. Before calibration the
+/// sufficient statistic is reweighted row-wise by NB Fisher-info weights
+/// `w_g = 1 / (1 + π_g · s̄ · φ(μ_g))`, matching the weighting used during
+/// DC-Poisson clustering so clustering and reporting stay consistent.
 ///
 /// Writes `{out_prefix}.gene_topic.parquet` (genes × K).
 pub fn compute_gene_topic_stat(
     cell_propensity: &Mat,
     data_vec: &SparseIoVec,
     block_size: Option<usize>,
-    adjust_housekeeping: bool,
     out_prefix: &str,
 ) -> anyhow::Result<()> {
     use matrix_param::dmatrix_gamma::GammaMatrix;
@@ -489,10 +465,9 @@ pub fn compute_gene_topic_stat(
         n_1k += n.transpose();
     }
 
-    if adjust_housekeeping {
-        info!("Applying IDF housekeeping adjustment to gene-topic stats");
-        apply_gene_idf_weights(&mut sum_gk);
-    }
+    info!("Applying NB Fisher-info weighting to gene-topic stats");
+    let w = compute_nb_fisher_weights(data_vec, block_size)?;
+    apply_gene_weights(&mut sum_gk, &w);
 
     let mut gamma_param = GammaMatrix::new((n_genes, k), 1.0, 1.0);
     let denom_gk = DVec::from_element(n_genes, 1.0) * &n_1k;
@@ -515,15 +490,11 @@ pub fn compute_gene_topic_stat(
 /// 2. Propensity: soft cell membership from edge clusters [N_cells × K_clusters]
 /// 3. Gene-topic stat: Poisson-Gamma gene expression rates per topic [G × K_clusters]
 ///
-/// When `adjust_housekeeping` is set, the gene-topic report is scaled by
-/// `1/(bg[g] + ε)` — see [`compute_gene_topic_stat`].
-///
 /// Writes `{out_prefix}.propensity.parquet` and `{out_prefix}.gene_topic.parquet`.
 /// Config for `compute_propensity_and_gene_topic_stat`.
 pub struct PropensityReportConfig {
     pub n_clusters: usize,
     pub block_size: Option<usize>,
-    pub adjust_housekeeping: bool,
 }
 
 pub fn compute_propensity_and_gene_topic_stat(
@@ -537,7 +508,6 @@ pub fn compute_propensity_and_gene_topic_stat(
     let PropensityReportConfig {
         n_clusters,
         block_size,
-        adjust_housekeeping,
     } = *cfg;
 
     // 1. K-means on latent edge vectors
@@ -583,13 +553,7 @@ pub fn compute_propensity_and_gene_topic_stat(
     write_edge_clusters(out_prefix, edges, &edge_membership, &cell_names)?;
 
     // 3. Gene-topic stat
-    compute_gene_topic_stat(
-        &cell_propensity,
-        data_vec,
-        block_size,
-        adjust_housekeeping,
-        out_prefix,
-    )
+    compute_gene_topic_stat(&cell_propensity, data_vec, block_size, out_prefix)
 }
 
 /// Write per-edge K-means cluster assignments to parquet.

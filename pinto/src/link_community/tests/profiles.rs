@@ -94,38 +94,3 @@ fn test_refine_more_dims_than_communities() {
     assert_eq!(basis.nrows(), 10);
     assert_eq!(basis.ncols(), 5);
 }
-
-#[test]
-fn test_collapse_propensity_columns() {
-    // 3 cells × 4 original communities. Labels collapse (0,2) → 0, (1) → 1, (3) empty.
-    let propensity = Mat::from_fn(3, 4, |i, c| match (i, c) {
-        (0, 0) => 0.3,
-        (0, 1) => 0.4,
-        (0, 2) => 0.3,
-        (0, 3) => 0.0,
-        (1, 0) => 0.1,
-        (1, 1) => 0.2,
-        (1, 2) => 0.6,
-        (1, 3) => 0.1,
-        (2, 0) => 0.5,
-        (2, 1) => 0.0,
-        (2, 2) => 0.5,
-        (2, 3) => 0.0,
-        _ => 0.0,
-    });
-    let labels = vec![0, 1, 0, -1]; // col 3 empty
-    let consensus = collapse_propensity_columns(&propensity, &labels, 2);
-
-    assert_eq!(consensus.nrows(), 3);
-    assert_eq!(consensus.ncols(), 2);
-
-    // Cell 0: cols 0+2 → 0.6 (consensus 0), col 1 → 0.4 (consensus 1). Row sum 1.0.
-    assert!((consensus[(0, 0)] - 0.6).abs() < 1e-6);
-    assert!((consensus[(0, 1)] - 0.4).abs() < 1e-6);
-    // Cell 1: cols 0+2 → 0.7, col 1 → 0.2. Col 3 (0.1) dropped, so row sum < 1.0.
-    assert!((consensus[(1, 0)] - 0.7).abs() < 1e-6);
-    assert!((consensus[(1, 1)] - 0.2).abs() < 1e-6);
-    // Cell 2: cols 0+2 → 1.0, col 1 → 0.0.
-    assert!((consensus[(2, 0)] - 1.0).abs() < 1e-6);
-    assert!((consensus[(2, 1)] - 0.0).abs() < 1e-6);
-}

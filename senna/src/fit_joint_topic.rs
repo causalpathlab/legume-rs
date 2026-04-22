@@ -120,6 +120,14 @@ pub struct JointTopicArgs {
     pub(crate) block_size: Option<usize>,
 
     #[arg(
+        long = "weighting",
+        value_enum,
+        default_value_t = crate::refine_weighting::WeightingArg::NbFisherInfo,
+        help = crate::refine_weighting::WEIGHTING_HELP,
+    )]
+    pub(crate) refine_weighting: crate::refine_weighting::WeightingArg,
+
+    #[arg(
         short = 't',
         long,
         default_value_t = 10,
@@ -281,7 +289,10 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             sort_dim: args.sort_dim,
             num_opt_iter: args.iter_opt,
             oversample: false,
-            refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
+            refine: Some(data_beans_alg::refine_multilevel::RefineParams {
+                gene_weighting: args.refine_weighting.into(),
+                ..data_beans_alg::refine_multilevel::RefineParams::default()
+            }),
         },
     )?;
     // Reverse so training goes coarse→fine: coarsest (fewest samples)

@@ -43,7 +43,7 @@ pub fn fit_visualize_phate(args: &VisualizePhateArgs) -> anyhow::Result<()> {
             args.n_hvg,
             prep.pb_features.ncols()
         );
-        data_beans_alg::hvg_selection::select_hvg(&prep.pb_features, args.n_hvg, None)
+        data_beans_alg::hvg_selection::select_hvg(&prep.pb_features, args.n_hvg)
     } else {
         prep.pb_features.clone()
     };
