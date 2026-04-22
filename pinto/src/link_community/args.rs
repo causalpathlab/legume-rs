@@ -126,32 +126,6 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
-        default_value_t = false,
-        help = "Disable IDF background correction (on by default)",
-        long_help = "By default, edge profiles are reweighted by inverse-frequency\n\
-                       w_g = -ln(π_bg,g + ε), where π_bg is the empirical projection\n\
-                       marginal over the finest-resolution edges. Housekeeping signals\n\
-                       (high π_bg) get small weight, specific signals (low π_bg) get\n\
-                       large weight — so community assignment is driven by distinctive\n\
-                       genes, not by bulk expression level (DC-SBM degree correction\n\
-                       with θ_g = π_bg). Pass --no-background to disable and use raw counts."
-    )]
-    pub no_background: bool,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Disable housekeeping adjustment in the gene_topic report (on by default)",
-        long_help = "By default, the reported gene-topic sufficient statistics are\n\
-                       scaled row-wise by 1/(bg[g] + ε), where bg[g] is the gene's\n\
-                       share of total mass. This gives housekeeping-adjusted\n\
-                       posterior rates (Poisson-offset / DC-SBM size-factor).\n\
-                       Pass --no-adjust-housekeeping to disable and write raw rates."
-    )]
-    pub no_adjust_housekeeping: bool,
-
-    #[arg(
-        long,
         default_value_t = 1.0,
         help = "Modularity-gain resolution for the coarsening merge veto",
         long_help = "Resolution γ for the degree-corrected merge veto. A proposed\n\

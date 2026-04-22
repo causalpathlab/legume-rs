@@ -4,8 +4,9 @@
 //! `SuperCellLayout` (HNSW over centroids, batch assignments), refine each
 //! level from coarsest to finest by proposing moves that keep each super-cell
 //! under the same parent group (sibling-constrained) and are drawn from the
-//! batch-balanced KNN neighborhood. Moves are scored by an IDF-weighted
-//! Poisson log-likelihood.
+//! batch-balanced KNN neighborhood. Moves are scored by a DC-Poisson
+//! log-likelihood with NB Fisher-info gene weighting (see
+//! [`crate::dc_poisson::GeneWeighting`]).
 //!
 //! Candidate-set construction is BBKNN-specific and lives here ([`BbknnProposer`]).
 //! The generic scoring core lives in [`crate::dc_poisson`] and is shared with
@@ -201,9 +202,8 @@ pub fn refine_assignments(
         ProfileSource::Raw => Profiles::from_gene_sums(gene_sums, num_genes),
         ProfileSource::Projected { basis } => Profiles::from_projection(basis, super_cell_to_cells),
     };
-    if params.idf_weighting && matches!(params.profile_source, ProfileSource::Raw) {
-        let bg = profiles.empirical_marginal();
-        profiles.weight_by_idf(&bg);
+    if matches!(params.profile_source, ProfileSource::Raw) {
+        profiles.apply_gene_weighting(params.gene_weighting);
     }
 
     // BBKNN proposals via the shared per-batch cell HNSW.

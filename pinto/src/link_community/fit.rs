@@ -12,7 +12,7 @@
 //!   4. Multi-level cell coarsening (produces the pyramid)
 //!   5. Profile context setup: gene-pair graph + elbow filter + module
 //!      collapse, or projection basis with optional gene filtering
-//!   6. Build full fine-resolution profiles; derive IDF background from them
+//!   6. Build full fine-resolution profiles
 //!   7. V-cycle: per-level super-edges → profiles → Gibbs + greedy with
 //!      coarse→fine label inheritance; per-level outputs are written inside
 //!   8. Outer EM loop on full profiles (E: component-EM + greedy; optional M:
@@ -26,8 +26,8 @@ use crate::link_community::gibbs::{ComponentGibbsArgs, LinkGibbsSampler};
 use crate::link_community::model::{LinkCommunityStats, LinkProfileStore};
 use crate::link_community::module_cluster::{self, KmeansModules, ModuleClusterer};
 use crate::link_community::outputs::{
-    link_community_histogram, write_bhc_cut, write_bhc_merges, write_link_communities,
-    write_partition_outputs, write_score_trace, ScoreEntry,
+    link_community_histogram, write_bhc_cut, write_bhc_merges, write_partition_outputs,
+    write_score_trace, ScoreEntry,
 };
 use crate::link_community::profiles::*;
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
@@ -218,7 +218,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 params: data_beans_alg::dc_poisson::RefineParams {
                     num_gibbs: 10,
                     num_greedy: 5,
-                    idf_weighting: true,
+                    gene_weighting: data_beans_alg::dc_poisson::GeneWeighting::FisherInfoNb,
                     seed: c.seed,
                     gibbs_stagnation: 0.005,
                     profile_source: data_beans_alg::dc_poisson::ProfileSource::Raw,
@@ -345,7 +345,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     }
 
     //////////////////////////////////////////////////////
-    // 6. Full fine-resolution profiles + IDF background //
+    // 6. Full fine-resolution profiles                  //
     //////////////////////////////////////////////////////
     let all_edge_indices: Vec<usize> = (0..n_edges).collect();
     let (mut full_profiles, full_raw_gp_profiles) = build_full_profiles_inline(
@@ -355,30 +355,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &gp_profile_state,
         &proj_basis,
     )?;
-
-    // Derive IDF background from the finest-resolution profiles (one-shot) and
-    // reuse it across every cascade level.
-    let bg: Option<Vec<f64>> = if !args.no_background {
-        let dist = full_profiles.empirical_marginal();
-        info!(
-            "Background distribution (finest profiles): min={:.2e}, max={:.2e}, effective_dims={:.1}",
-            dist.iter().cloned().fold(f64::INFINITY, f64::min),
-            dist.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
-            (-dist
-                .iter()
-                .map(|&p| if p > 0.0 { p * p.ln() } else { 0.0 })
-                .sum::<f64>())
-            .exp()
-        );
-        Some(dist)
-    } else {
-        None
-    };
-
-    if let Some(ref bg_dist) = bg {
-        full_profiles.weight_by_idf(bg_dist);
-        info!("Applied IDF weighting to full profiles (housekeeping genes down-weighted)");
-    }
 
     info!(
         "Full profiles: {} edges × {} dims ({:.1} MB)",
@@ -399,7 +375,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         num_greedy: args.num_greedy,
         user_alpha: args.alpha,
         block_size: c.block_size,
-        adjust_housekeeping: !args.no_adjust_housekeeping,
         no_level_outputs: args.no_level_outputs,
     };
     let cascade_result = run_cascade(
@@ -409,7 +384,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &data_vec,
         gp_profile_state.as_ref(),
         proj_basis.as_ref(),
-        bg.as_deref(),
         &cascade_cfg,
         &mut sampler,
         &cell_names,
@@ -525,12 +499,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 info!("Re-estimated {} edge modules", new_n_mod);
 
                 full_profiles = raw.collapse_modules(&new_collapse);
-                if bg.is_some() {
-                    // After module re-collapse the m dimension changes, so the
-                    // finest-level bg is stale — recompute locally.
-                    let dist = full_profiles.empirical_marginal();
-                    full_profiles.weight_by_idf(&dist);
-                }
                 gp.module_collapse = Some(new_collapse);
             }
         }
@@ -549,9 +517,22 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     //////////////////////////////////////////////////////
     // 9. Extract and write final outputs               //
     //////////////////////////////////////////////////////
-    info!("Writing final outputs (propensity, gene_topic, link_community)...");
-    let cell_propensity = write_partition_outputs(
-        &c.out,
+    // BHC-collapsed results (when enabled and non-degenerate) are the
+    // authoritative `{out}.*` outputs. The pre-BHC fine partition is
+    // written under `{out}.draft.*` so users can still inspect it.
+    let bhc_enabled = !args.no_bhc;
+    let draft_prefix = if bhc_enabled {
+        format!("{}.draft", c.out)
+    } else {
+        c.out.to_string()
+    };
+    info!(
+        "Writing {} outputs (propensity, gene_topic, link_community) → {}.*",
+        if bhc_enabled { "draft" } else { "final" },
+        draft_prefix
+    );
+    write_partition_outputs(
+        &draft_prefix,
         edges,
         &final_membership,
         n_cells,
@@ -559,14 +540,12 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &cell_names,
         &data_vec,
         c.block_size,
-        !args.no_adjust_housekeeping,
     )?;
 
     info!("Writing score trace...");
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
-    // BHC post-hoc merge + consensus cut (unchanged semantics).
-    if !args.no_bhc {
+    if bhc_enabled {
         let gamma = args.bhc_gamma.unwrap_or(1.0);
         info!(
             "Running BHC merge (γ={:.4}, bg-empirical) over K={} communities...",
@@ -583,7 +562,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             .max()
             .map_or(0, |m| m + 1);
         info!(
-            "BHC consensus cut (log_bf ≥ {:.3}): {} super-communities",
+            "BHC redundancy cut (log_bf ≥ {:.3}): {} merged communities",
             args.bhc_cut, n_consensus
         );
         write_bhc_cut(&(c.out.to_string() + ".bhc.cut.parquet"), &labels)?;
@@ -601,23 +580,25 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                     lab as usize
                 })
                 .collect();
-            write_link_communities(
-                &(c.out.to_string() + ".bhc.link_community.parquet"),
+            info!(
+                "Writing final outputs (propensity, gene_topic, link_community) → {}.*",
+                c.out
+            );
+            write_partition_outputs(
+                &c.out,
                 edges,
                 &consensus_membership,
+                n_cells,
+                n_consensus,
                 &cell_names,
+                &data_vec,
+                c.block_size,
             )?;
-
-            let consensus_propensity =
-                collapse_propensity_columns(&cell_propensity, &labels, n_consensus);
-            let consensus_names: Vec<Box<str>> = (0..n_consensus)
-                .map(|i| i.to_string().into_boxed_str())
-                .collect();
-            consensus_propensity.to_parquet_with_names(
-                &(c.out.to_string() + ".bhc.propensity.parquet"),
-                (Some(&cell_names), Some("cell")),
-                Some(&consensus_names),
-            )?;
+        } else {
+            info!(
+                "BHC produced no merges; draft outputs at {}.* are the final result",
+                draft_prefix
+            );
         }
     }
 
