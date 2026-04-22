@@ -249,7 +249,6 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         data_batch: &batch,
         data_input_null: &[],
         dictionary_suffix: Some("dictionary.parquet"),
-        has_markers: false,
         has_model: false,
         has_cell_proj: true,
         default_colour_by: "cluster",

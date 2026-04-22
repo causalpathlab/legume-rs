@@ -272,20 +272,6 @@ pub struct IndexedTopicArgs {
     bulk_data_files: Option<Vec<Box<str>>>,
 
     #[arg(
-        short = 'm',
-        long,
-        help = "Marker TSV (gene<TAB>celltype) — labels anchors"
-    )]
-    markers: Option<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = 0.5,
-        help = "Min z-score margin to assign a celltype to an anchor"
-    )]
-    anchor_margin: f32,
-
-    #[arg(
         long,
         default_value_t = 1.0,
         help = "Cross-entropy penalty λ on β toward anchor prior (0 = off)"
@@ -376,21 +362,9 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
 
     let gene_names = data_vec.row_names()?;
 
-    // Data-driven anchor β prior. Indexed decoders all run at D_full, so
-    // there's no finest-level coarsening to adapt anchor selection to.
-    let markers = args
-        .markers
-        .as_deref()
-        .map(|p| crate::marker_support::load_marker_info(p, &gene_names))
-        .transpose()?;
-    let anchor_prior = crate::topic::anchor_prior::AnchorPrior::from_pseudobulk(
-        finest_collapsed,
-        n_topics,
-        markers.as_ref(),
-        args.anchor_margin,
-        None,
-    )?;
-    anchor_prior.write_side_outputs(&args.out, &gene_names, markers.as_ref())?;
+    // Indexed decoders run at D_full, so no finest-level coarsening.
+    let anchor_prior =
+        crate::topic::anchor_prior::AnchorPrior::from_pseudobulk(finest_collapsed, n_topics, None)?;
 
     // Per-level anchor tensors. Indexed decoders all run at D_full, so
     // no feature coarsening applies — one `None` per level.
@@ -580,7 +554,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         data_batch: &batch,
         data_input_null: &[],
         dictionary_suffix: Some("dictionary.parquet"),
-        has_markers: args.markers.is_some(),
         has_model: true,
         has_cell_proj: true,
         default_colour_by: "topic",

@@ -909,7 +909,6 @@ fn display_annotation_histogram(annot: &Mat, annot_names: &[Box<str>]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::marker_support::MarkerInfo;
 
     /// 3 orthogonal gene blocks, 3 celltypes each marked by a distinct
     /// gene. GS on (G × n_pb) must pick one gene per block; each must
@@ -951,10 +950,6 @@ mod tests {
                 mem_gc[(t * g_per_block + g, t)] = 1.0;
             }
         }
-        let _ = MarkerInfo {
-            celltypes: celltypes.clone(),
-            membership_gc: mem_gc.clone(),
-        };
 
         // Replicate the gene-vertex pipeline.
         let gene_pb = &beta * pb_latent.transpose();

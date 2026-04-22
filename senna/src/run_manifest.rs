@@ -68,8 +68,8 @@ pub struct RunOutputs {
     /// `{out}.dictionary.parquet`: gene × K loadings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dictionary: Option<String>,
-    /// `{out}.anchor_labels.tsv` — topic runs only, and only when a
-    /// marker file was given.
+    /// Optional `group_id<TAB>display_name` TSV for `senna plot` labels.
+    /// User-populated; no senna subcommand writes this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_labels: Option<String>,
     /// `{out}.cell_proj.parquet` — cell × `proj_dim` random projection
@@ -187,9 +187,6 @@ pub struct RunDescription<'a> {
     /// `"dictionary.parquet"` or (joint-topic) `"base_dictionary.parquet"`.
     /// `None` to omit — SVD runs still produce one, topic runs always do.
     pub dictionary_suffix: Option<&'a str>,
-    /// True if the run emits `{basename}.anchor_labels.tsv` (topic /
-    /// itopic / joint-topic with `--markers`).
-    pub has_markers: bool,
     /// True if the run emits `{basename}.safetensors` +
     /// `{basename}.metadata.json` (topic + itopic; not joint-topic, not
     /// SVD).
@@ -223,9 +220,6 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     m.outputs.latent = Some(format!("{basename}.latent.parquet"));
     if let Some(suf) = desc.dictionary_suffix {
         m.outputs.dictionary = Some(format!("{basename}.{suf}"));
-    }
-    if desc.has_markers {
-        m.outputs.anchor_labels = Some(format!("{basename}.anchor_labels.tsv"));
     }
     if desc.has_model {
         m.outputs.model = Some(format!("{basename}.safetensors"));
