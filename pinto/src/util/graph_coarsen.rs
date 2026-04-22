@@ -1,7 +1,7 @@
 use crate::util::common::*;
 use crate::util::graph_refine::refine_labels;
 use crate::util::knn_graph::KnnGraph;
-use crate::util::union_find::UnionFind;
+use data_beans_alg::union_find::UnionFind;
 use nalgebra_sparse::{CooMatrix, CscMatrix};
 use std::cmp::Ordering;
 use std::collections::VecDeque;

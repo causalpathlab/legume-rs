@@ -6,7 +6,6 @@ pub mod graph_dc_poisson_refine;
 pub mod graph_refine;
 pub mod input;
 pub mod knn_graph;
-pub mod union_find;
 
 #[cfg(test)]
 mod tests;

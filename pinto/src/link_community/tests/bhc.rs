@@ -91,8 +91,8 @@ fn test_three_cluster_ordering() {
         (m1.right, m1.left)
     };
     assert_eq!((lo2, hi2), (2, 3));
-    // And its n_edges should be the total.
-    assert_eq!(m1.n_edges, 3);
+    // And its n_samples should be the total.
+    assert_eq!(m1.n_samples, 3);
 }
 
 #[test]
