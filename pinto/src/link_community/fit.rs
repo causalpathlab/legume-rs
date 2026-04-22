@@ -35,12 +35,14 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
-        default_value_t = 20,
+        default_value_t = 50,
         help = "Number of spatial link communities to discover",
         long_help = "Number of link communities (K). Each edge in the spatial graph\n\
                        is assigned to one of K communities via collapsed Gibbs sampling.\n\
                        Communities capture distinct spatial gene expression patterns.\n\
-                       Cell propensity = fraction of edges per community."
+                       Cell propensity = fraction of edges per community.\n\
+                       Defaulting to 50 and letting the BHC post-pass merge redundant\n\
+                       communities is preferred over under-shooting K."
     )]
     n_communities: usize,
 
@@ -182,6 +184,58 @@ pub struct SrtLinkCommunityArgs {
                        resolution. Set to 0 to disable the veto."
     )]
     modularity_gamma: f32,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Disable the post-hoc BHC merge over the K fitted communities",
+        long_help = "By default, after the K link communities are fit, a Bayesian\n\
+                       hierarchical clustering (BHC) pass runs over the K communities.\n\
+                       Every pair is scored with a log Bayes factor under an empirical-\n\
+                       Bayes Dirichlet-Multinomial model centered on the pooled background:\n\
+                           log_bf > 0  → data favor merging the two communities\n\
+                           log_bf < 0  → data favor keeping them separate\n\
+                           log_bf = 0  → indifferent (the natural consensus-cut boundary)\n\
+                       Magnitude is BIC-like (~ n · KL of proportions); compare only\n\
+                       within a single run. Emits four files under the `.bhc.` prefix:\n\
+                         <out>.bhc.merges.parquet — full merge tree (scipy-linkage-style)\n\
+                         <out>.bhc.cut.parquet    — consensus id per original community\n\
+                         <out>.bhc.link_community.parquet — edges remapped to the cut\n\
+                         <out>.bhc.propensity.parquet    — cell×community propensity,\n\
+                                                           columns collapsed by the cut\n\
+                       Cost is negligible. Pass --no-bhc to skip."
+    )]
+    no_bhc: bool,
+
+    #[arg(
+        long,
+        help = "Total Dirichlet concentration γ for the BHC empirical-Bayes prior",
+        long_help = "Total concentration γ for the empirical-Bayes asymmetric Dirichlet\n\
+                       prior Dir(γ · bg), where bg[g] is the pooled per-gene marginal\n\
+                       (the \"housekeeping baseline\"). Higher γ → stronger prior pull\n\
+                       toward the baseline → smaller |log_bf| per merge. Per-cluster\n\
+                       sufficient stats are rescaled so S_eff = edge_count.\n\
+                       Node log marginal:\n\
+                         f(T, S) = lgamma(γ) − lgamma(γ + S)\n\
+                                 + Σ_g [lgamma(γ·bg[g] + T_g) − lgamma(γ·bg[g])]\n\
+                       Default γ = 1.0 (one effective prior observation; data dominate)."
+    )]
+    bhc_gamma: Option<f64>,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "log BF cutoff for the BHC consensus cut",
+        long_help = "Merges with log_bf ≥ cutoff collapse into one consensus super-\n\
+                       community; merges below the cutoff stay separate. Default 0.0 is\n\
+                       the natural Bayesian break point (positive BF = data prefers\n\
+                       merging). Set higher to be more conservative (only strong-\n\
+                       evidence merges collapse) or lower (e.g. −3) to also collapse\n\
+                       weakly-distinct pairs. Emitted as <out>.bhc.cut.parquet with\n\
+                       columns (community, consensus). Empty communities get\n\
+                       consensus = −1."
+    )]
+    bhc_cut: f64,
 }
 
 /// Link community model pipeline.
@@ -367,7 +421,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 coordinates: &coordinates,
                 batch_membership: Some(&batch_membership),
             }),
-            modularity_veto: (args.modularity_gamma > 0.0).then(|| ModularityVeto {
+            modularity_veto: (args.modularity_gamma > 0.0).then_some(ModularityVeto {
                 gamma: args.modularity_gamma,
             }),
             dc_poisson: Some(DcPoissonConfig {
@@ -733,6 +787,63 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     info!("Writing score trace...");
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
+    // 9e. BHC post-hoc merge (empirical-Bayes DM pairwise Bayes factor) + consensus cut.
+    if !args.no_bhc {
+        let gamma = args.bhc_gamma.unwrap_or(1.0);
+        info!(
+            "Running BHC merge (γ={:.4}, bg-empirical) over K={} communities...",
+            gamma, k
+        );
+        let merges = crate::link_community::bhc::bhc_merge(&fine_stats, gamma);
+        write_bhc_merges(&(c.out.to_string() + ".bhc.merges.parquet"), &merges)?;
+
+        let labels = crate::link_community::bhc::bhc_cut(&merges, k, args.bhc_cut);
+        let n_consensus = labels
+            .iter()
+            .filter(|&&v| v >= 0)
+            .map(|&v| v as usize)
+            .max()
+            .map_or(0, |m| m + 1);
+        info!(
+            "BHC consensus cut (log_bf ≥ {:.3}): {} super-communities",
+            args.bhc_cut, n_consensus
+        );
+        write_bhc_cut(&(c.out.to_string() + ".bhc.cut.parquet"), &labels)?;
+
+        // 9f. Consensus outputs reflecting the BHC cut.
+        if n_consensus > 0 {
+            let consensus_membership: Vec<usize> = final_membership
+                .iter()
+                .map(|&orig| {
+                    let lab = labels[orig];
+                    debug_assert!(
+                        lab >= 0,
+                        "non-empty community {} has no consensus label",
+                        orig
+                    );
+                    lab as usize
+                })
+                .collect();
+            write_link_communities(
+                &(c.out.to_string() + ".bhc.link_community.parquet"),
+                edges,
+                &consensus_membership,
+                &cell_names,
+            )?;
+
+            let consensus_propensity =
+                collapse_propensity_columns(&cell_propensity, &labels, n_consensus);
+            let consensus_names: Vec<Box<str>> = (0..n_consensus)
+                .map(|i| i.to_string().into_boxed_str())
+                .collect();
+            consensus_propensity.to_parquet_with_names(
+                &(c.out.to_string() + ".bhc.propensity.parquet"),
+                (Some(&cell_names), Some("cell")),
+                Some(&consensus_names),
+            )?;
+        }
+    }
+
     info!("Done");
     Ok(())
 }
@@ -809,6 +920,122 @@ pub(crate) fn write_link_communities(
     parquet_add_string_column(&mut row_group, &left_cells)?;
     parquet_add_string_column(&mut row_group, &right_cells)?;
     parquet_add_numeric_column(&mut row_group, &cluster_f32)?;
+
+    row_group.close()?;
+    writer.close()?;
+
+    Ok(())
+}
+
+/// Write the BHC merge table to parquet.
+///
+/// One row per merge event (K_eff − 1 rows, where K_eff is the number of
+/// non-empty communities). Columns:
+///
+/// | col | meaning |
+/// |---|---|
+/// | merge_id | new node id (K .. 2K_eff − 2); scipy-linkage convention |
+/// | left, right | child node ids (< merge_id) |
+/// | log_bf | log Bayes factor; positive = data favor merging |
+/// | n_edges | total edges under this node |
+///
+/// `log_bf` is produced by the empirical-Bayes Dirichlet-Multinomial model —
+/// positive/negative/magnitude interpretation is in the `bhc` module docstring.
+/// Scores are monotonically non-increasing along the merge sequence (the
+/// algorithm picks max log_bf at each step); the first row with `log_bf < 0`
+/// marks the natural consensus-cut boundary, also emitted in `.bhc.cut.parquet`
+/// when `--bhc-cut 0.0` (the default).
+///
+/// To feed scipy: take `(left, right, −log_bf, n_edges)` as the 4-column Z
+/// matrix. In R: column `-log_bf` can be used as the `height` in ape or as a
+/// cut threshold via `cutree`.
+pub(crate) fn write_bhc_merges(
+    file_path: &str,
+    merges: &[crate::link_community::bhc::BhcMerge],
+) -> anyhow::Result<()> {
+    use matrix_util::parquet::*;
+    use parquet::basic::Type as ParquetType;
+
+    let n_rows = merges.len();
+    let merge_ids: Vec<i32> = merges.iter().map(|m| m.id).collect();
+    let lefts: Vec<i32> = merges.iter().map(|m| m.left).collect();
+    let rights: Vec<i32> = merges.iter().map(|m| m.right).collect();
+    let log_bfs: Vec<f64> = merges.iter().map(|m| m.log_bf).collect();
+    let n_edges: Vec<i32> = merges.iter().map(|m| m.n_edges).collect();
+
+    let col_names: Vec<Box<str>> = vec![
+        "merge_id".into(),
+        "left".into(),
+        "right".into(),
+        "log_bf".into(),
+        "n_edges".into(),
+    ];
+    let col_types = vec![
+        ParquetType::INT32,
+        ParquetType::INT32,
+        ParquetType::INT32,
+        ParquetType::DOUBLE,
+        ParquetType::INT32,
+    ];
+
+    let writer = ParquetWriter::new(
+        file_path,
+        (n_rows, col_names.len()),
+        (None, Some(&col_names)),
+        Some(&col_types),
+        Some("step"),
+    )?;
+
+    let row_names = writer.row_names_vec();
+    let mut writer = writer.get_writer()?;
+    let mut row_group = writer.next_row_group()?;
+
+    parquet_add_bytearray(&mut row_group, row_names)?;
+    parquet_add_numeric_column(&mut row_group, &merge_ids)?;
+    parquet_add_numeric_column(&mut row_group, &lefts)?;
+    parquet_add_numeric_column(&mut row_group, &rights)?;
+    parquet_add_numeric_column(&mut row_group, &log_bfs)?;
+    parquet_add_numeric_column(&mut row_group, &n_edges)?;
+
+    row_group.close()?;
+    writer.close()?;
+
+    Ok(())
+}
+
+/// Write the BHC consensus cut to parquet.
+///
+/// One row per original community (length K). Columns `(community, consensus)`:
+/// `consensus[c]` is the super-community that original community `c` is
+/// collapsed into under the `--bhc-cut` log-BF threshold, or `-1` if the
+/// original community was empty (no edges). The downstream `.bhc.link_community`
+/// and `.bhc.propensity` outputs are the original K-space outputs remapped
+/// through this table.
+pub(crate) fn write_bhc_cut(file_path: &str, labels: &[i32]) -> anyhow::Result<()> {
+    use matrix_util::parquet::*;
+    use parquet::basic::Type as ParquetType;
+
+    let n_rows = labels.len();
+    let communities: Vec<i32> = (0..n_rows as i32).collect();
+
+    let col_names: Vec<Box<str>> = vec!["community".into(), "consensus".into()];
+    let col_types = vec![ParquetType::INT32, ParquetType::INT32];
+
+    let writer = ParquetWriter::new(
+        file_path,
+        (n_rows, col_names.len()),
+        (None, Some(&col_names)),
+        Some(&col_types),
+        Some("row"),
+    )?;
+
+    let row_names = writer.row_names_vec();
+    let mut writer = writer.get_writer()?;
+    let mut row_group = writer.next_row_group()?;
+
+    parquet_add_bytearray(&mut row_group, row_names)?;
+    parquet_add_numeric_column(&mut row_group, &communities)?;
+    parquet_add_numeric_column(&mut row_group, labels)?;
 
     row_group.close()?;
     writer.close()?;

@@ -18,7 +18,7 @@
 use crate::collapse_data::SuperCellLayout;
 use crate::dc_poisson::{
     compute_sibling_sets, intersect_with_siblings_fallback, refine_with_proposer,
-    CandidateProposer, ProfileSource, Profiles,
+    CandidateProposer, ProfileSource, Profiles, RefineContext,
 };
 use log::{debug, info};
 use rand::rngs::SmallRng;
@@ -231,13 +231,15 @@ pub fn refine_assignments(
         let sc_to_group = &mut refined[level];
         let label = format!("Refine L{}/{}", num_levels - level, num_levels);
         let moves = refine_with_proposer(
-            &profiles,
             sc_to_group,
-            k,
             &proposer,
-            params,
             &mut rng,
-            &label,
+            &RefineContext {
+                profiles: &profiles,
+                k,
+                params,
+                level_label: &label,
+            },
         );
         info!("  level {} refined: {} moves; k={} groups", level, moves, k);
 
