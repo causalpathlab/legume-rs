@@ -1,29 +1,18 @@
 //! Link community model: sufficient statistics and fast Poisson DC-SBM scoring.
 //!
-//! Each edge e has a profile vector y_e ∈ R^M (projected gene counts) and a
-//! community assignment z_e ∈ {0..K-1}. Assignment score under Poisson DC-SBM
-//! with MLE plug-in rates μ_{kg} = (T_{kg} + ε) / (S_k + M·ε):
+//! Each edge e has a profile vector y_e ∈ R^M (sparsely stored as non-zero
+//! `(col, val)` pairs) and a community assignment z_e ∈ {0..K-1}. Assignment
+//! score under Poisson DC-SBM with MLE plug-in rates
+//! μ_{kg} = (T_{kg} + ε) / (S_k + M·ε):
 //!
-//!   score(e, k) = Σ_g y_{eg} · ln μ_{kg} = Σ_g y_{eg} · log_rate[k, g]
+//!   score(e, k) = Σ_{g: y_eg > 0} y_{eg} · ln μ_{kg}
 //!
-//! where log_rate[k, g] is factored into per-gene and per-community-size parts
-//! for cheap incremental updates:
+//! where log_rate[k, g] = log_gene[k, g] + log_size_offset[k] is factored
+//! into per-gene and per-community-size parts for cheap incremental updates.
 //!
-//!   log_rate[k, g] = log_gene[k, g] + log_size_offset[k]
-//!
-//! with log_gene[k, g] = ln(T_{kg} + ε), log_size_offset[k] = -ln(S_k + M·ε).
-//!
-//! Move delta (edge e from src to tgt) is the conditional log-likelihood
-//! difference:
-//!
-//!   Δ = Σ_g y_{eg} · (log_rate[tgt, g] - log_rate[src, g])
-//!
-//! Hot scoring path uses zero `ln` calls (only lookups + multiplies). Each
-//! move recomputes O(nnz(y_e)) log_gene entries per side and two
-//! log_size_offset entries — much cheaper than a full row rebuild.
-//!
-//! The reporting-only `total_score()` computes the conditional-entropy objective
-//! J(z) = Σ f(T) - Σ f(S) on demand.
+//! Profiles are stored in CSR: for each edge, `(indptr[e]..indptr[e+1])`
+//! slices `indices` and `values` hold the non-zero entries. The hot Gibbs
+//! loop iterates these pairs directly, avoiding zero-skip branches.
 
 use special::Gamma as SpecialGamma;
 
@@ -39,66 +28,146 @@ pub(crate) fn f_entropy(x: f64) -> f64 {
     }
 }
 
-/// Projected link profiles stored in row-major f32.
+/// CSR-backed per-edge profile store.
+///
+/// Row `e` has non-zero column indices in
+/// `indices[indptr[e]..indptr[e+1]]` and matching values in
+/// `values[indptr[e]..indptr[e+1]]`. Indices within a row are sorted
+/// ascending (deterministic iteration) and unique.
 pub struct LinkProfileStore {
-    /// Row-major [n_edges × m] gene profiles.
-    pub profiles: Vec<f32>,
-    /// Size factor per edge: Σ_g profile[e,g].
+    pub indptr: Vec<usize>,
+    pub indices: Vec<u32>,
+    pub values: Vec<f32>,
+    /// Size factor per edge: Σ of non-zero values in that row.
     pub size_factors: Vec<f32>,
-    /// Number of edges.
     pub n_edges: usize,
-    /// Projection dimension.
     pub m: usize,
 }
 
 impl LinkProfileStore {
-    /// Create from a flat row-major buffer.
-    pub fn new(profiles: Vec<f32>, n_edges: usize, m: usize) -> Self {
-        debug_assert_eq!(profiles.len(), n_edges * m);
-        let size_factors: Vec<f32> = (0..n_edges)
-            .map(|e| {
-                let row = &profiles[e * m..(e + 1) * m];
-                row.iter().sum()
-            })
-            .collect();
+    /// Build from per-edge lists of `(column, value)` pairs. Duplicate
+    /// columns in a row are summed; zero values are dropped.
+    pub fn from_sparse_rows(mut rows: Vec<Vec<(u32, f32)>>, m: usize) -> Self {
+        let n_edges = rows.len();
+        let mut indptr = Vec::with_capacity(n_edges + 1);
+        indptr.push(0usize);
+
+        let mut nnz_est = 0usize;
+        for row in &rows {
+            nnz_est += row.len();
+        }
+        let mut indices: Vec<u32> = Vec::with_capacity(nnz_est);
+        let mut values: Vec<f32> = Vec::with_capacity(nnz_est);
+        let mut size_factors: Vec<f32> = Vec::with_capacity(n_edges);
+
+        for row in rows.iter_mut() {
+            row.sort_by_key(|&(c, _)| c);
+            // Merge duplicates and drop zeros.
+            let mut sf = 0.0f32;
+            let mut i = 0usize;
+            while i < row.len() {
+                let col = row[i].0;
+                let mut val = row[i].1;
+                let mut j = i + 1;
+                while j < row.len() && row[j].0 == col {
+                    val += row[j].1;
+                    j += 1;
+                }
+                if val != 0.0 {
+                    indices.push(col);
+                    values.push(val);
+                    sf += val;
+                }
+                i = j;
+            }
+            size_factors.push(sf);
+            indptr.push(indices.len());
+        }
+
         LinkProfileStore {
-            profiles,
+            indptr,
+            indices,
+            values,
             size_factors,
             n_edges,
             m,
         }
     }
 
-    /// Get the profile slice for edge `e`.
+    /// Build from a flat row-major `[n_edges × m]` dense buffer. Non-zero
+    /// entries are converted to CSR (projection mode + tests).
+    pub fn new(dense: Vec<f32>, n_edges: usize, m: usize) -> Self {
+        debug_assert_eq!(dense.len(), n_edges * m);
+        let mut rows: Vec<Vec<(u32, f32)>> = Vec::with_capacity(n_edges);
+        for e in 0..n_edges {
+            let base = e * m;
+            let mut row = Vec::new();
+            for g in 0..m {
+                let v = dense[base + g];
+                if v != 0.0 {
+                    row.push((g as u32, v));
+                }
+            }
+            rows.push(row);
+        }
+        Self::from_sparse_rows(rows, m)
+    }
+
+    /// Sparse row slice for edge `e`: `(columns, values)`.
     #[inline]
-    pub fn profile(&self, e: usize) -> &[f32] {
-        &self.profiles[e * self.m..(e + 1) * self.m]
+    pub fn row(&self, e: usize) -> (&[u32], &[f32]) {
+        let start = self.indptr[e];
+        let end = self.indptr[e + 1];
+        (&self.indices[start..end], &self.values[start..end])
+    }
+
+    /// Total non-zero entries across all rows.
+    #[inline]
+    pub fn nnz(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Materialize row `e` as a dense `Vec<f32>` of length `m`. Test-only.
+    #[cfg(test)]
+    pub fn profile_dense(&self, e: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; self.m];
+        let (cols, vals) = self.row(e);
+        for (&c, &v) in cols.iter().zip(vals.iter()) {
+            out[c as usize] = v;
+        }
+        out
     }
 
     /// Extract a sub-store for the given edge indices.
     pub fn subset(&self, edge_indices: &[usize]) -> Self {
         let n = edge_indices.len();
-        let m = self.m;
-        let mut profiles = vec![0.0f32; n * m];
-        for (local_e, &global_e) in edge_indices.iter().enumerate() {
-            profiles[local_e * m..(local_e + 1) * m].copy_from_slice(self.profile(global_e));
-        }
-        LinkProfileStore::new(profiles, n, m)
-    }
+        let mut indptr = Vec::with_capacity(n + 1);
+        indptr.push(0usize);
 
-    /// Collapse columns by module assignment.
-    pub fn collapse_modules(&self, assignments: &[usize]) -> Self {
-        let n_modules = assignments.iter().copied().max().unwrap_or(0) + 1;
-        let n = self.n_edges;
-        let mut new_profiles = vec![0.0f32; n * n_modules];
-        for e in 0..n {
-            let row = self.profile(e);
-            let base = e * n_modules;
-            for (p, &module) in assignments.iter().enumerate() {
-                new_profiles[base + module] += row[p];
-            }
+        let mut nnz_est = 0usize;
+        for &e in edge_indices {
+            nnz_est += self.indptr[e + 1] - self.indptr[e];
         }
-        LinkProfileStore::new(new_profiles, n, n_modules)
+        let mut indices = Vec::with_capacity(nnz_est);
+        let mut values = Vec::with_capacity(nnz_est);
+        let mut size_factors = Vec::with_capacity(n);
+
+        for &e in edge_indices {
+            let (cols, vals) = self.row(e);
+            indices.extend_from_slice(cols);
+            values.extend_from_slice(vals);
+            size_factors.push(self.size_factors[e]);
+            indptr.push(indices.len());
+        }
+
+        LinkProfileStore {
+            indptr,
+            indices,
+            values,
+            size_factors,
+            n_edges: n,
+            m: self.m,
+        }
     }
 }
 
@@ -106,24 +175,19 @@ impl LinkProfileStore {
 ///
 /// All accumulators are f64 to prevent drift during incremental updates.
 pub struct LinkCommunityStats {
-    /// Number of communities.
     pub k: usize,
-    /// Projection dimension.
     pub m: usize,
-    /// Number of edges.
     pub n_edges: usize,
-    /// Per-community per-gene sum: gene_sum[k * m + g] = Σ_{e: z_e=k} y_e^g.
+    /// Per-community per-gene sum: `gene_sum[k*m + g] = Σ_{e: z_e=k} y_e^g`.
     pub gene_sum: Vec<f64>,
-    /// Per-community size factor sum: size_sum[k] = Σ_{e: z_e=k} s_e.
+    /// Per-community size factor sum: `size_sum[k] = Σ_{e: z_e=k} s_e`.
     pub size_sum: Vec<f64>,
     /// Per-community edge count.
     pub edge_count: Vec<usize>,
-    /// Current community assignment for each edge.
     pub membership: Vec<usize>,
     /// Cached `ln(gene_sum[k*m + g] + ε)`, kept in sync with `gene_sum`.
     pub(crate) log_gene: Vec<f64>,
     /// Cached `-ln(size_sum[k] + M·ε)`, kept in sync with `size_sum`.
-    /// Added to `log_gene[k, g]` this gives `ln(rate_kg)`.
     pub(crate) log_size_offset: Vec<f64>,
 }
 
@@ -140,10 +204,10 @@ impl LinkCommunityStats {
 
         for (e, &c) in labels.iter().enumerate().take(n_edges) {
             debug_assert!(c < k);
-            let row = profiles.profile(e);
+            let (cols, vals) = profiles.row(e);
             let base = c * m;
-            for g in 0..m {
-                gene_sum[base + g] += row[g] as f64;
+            for (&col, &v) in cols.iter().zip(vals.iter()) {
+                gene_sum[base + col as usize] += v as f64;
             }
             size_sum[c] += profiles.size_factors[e] as f64;
             edge_count[c] += 1;
@@ -168,9 +232,8 @@ impl LinkCommunityStats {
 
     /// Move edge `e` from `old_k` to `new_k`, updating stats incrementally.
     ///
-    /// Only the log_gene entries for non-zero profile genes are recomputed
-    /// (O(nnz(y_e)) per side). log_size_offset is recomputed for both
-    /// affected communities (2 `ln` calls total).
+    /// Only log_gene entries for non-zero profile columns are recomputed
+    /// (O(nnz(y_e)) per side).
     #[inline]
     pub fn delta_move(
         &mut self,
@@ -181,28 +244,20 @@ impl LinkCommunityStats {
     ) {
         debug_assert_eq!(self.membership[e], old_k);
         let m = self.m;
-        let row = profiles.profile(e);
+        let (cols, vals) = profiles.row(e);
         let sf = profiles.size_factors[e] as f64;
         let m_eps = (m as f64) * LOG_EPS;
 
         let old_base = old_k * m;
-        for (g, &y) in row.iter().enumerate() {
-            let v = y as f64;
-            if v == 0.0 {
-                continue;
-            }
-            let idx = old_base + g;
-            self.gene_sum[idx] -= v;
+        for (&col, &y) in cols.iter().zip(vals.iter()) {
+            let idx = old_base + col as usize;
+            self.gene_sum[idx] -= y as f64;
             self.log_gene[idx] = (self.gene_sum[idx] + LOG_EPS).ln();
         }
         let new_base = new_k * m;
-        for (g, &y) in row.iter().enumerate() {
-            let v = y as f64;
-            if v == 0.0 {
-                continue;
-            }
-            let idx = new_base + g;
-            self.gene_sum[idx] += v;
+        for (&col, &y) in cols.iter().zip(vals.iter()) {
+            let idx = new_base + col as usize;
+            self.gene_sum[idx] += y as f64;
             self.log_gene[idx] = (self.gene_sum[idx] + LOG_EPS).ln();
         }
 
@@ -215,10 +270,7 @@ impl LinkCommunityStats {
         self.membership[e] = new_k;
     }
 
-    /// Build sufficient statistics for a subset of edges (no membership vector).
-    ///
-    /// Returns only the aggregate stats (gene_sum, size_sum, edge_count) for the
-    /// Compute aggregate stats for a subset of edges (identified by global indices).
+    /// Aggregate stats for a subset of edges (identified by global indices).
     pub fn component_stats(
         profiles: &LinkProfileStore,
         k: usize,
@@ -233,10 +285,10 @@ impl LinkCommunityStats {
         for &e in edge_indices {
             let c = membership[e];
             debug_assert!(c < k);
-            let row = profiles.profile(e);
+            let (cols, vals) = profiles.row(e);
             let base = c * m;
-            for g in 0..m {
-                gene_sum[base + g] += row[g] as f64;
+            for (&col, &v) in cols.iter().zip(vals.iter()) {
+                gene_sum[base + col as usize] += v as f64;
             }
             size_sum[c] += profiles.size_factors[e] as f64;
             edge_count[c] += 1;
@@ -245,7 +297,7 @@ impl LinkCommunityStats {
         (gene_sum, size_sum, edge_count)
     }
 
-    /// Compute aggregate stats for a contiguous sub-store with local membership.
+    /// Aggregate stats for a contiguous sub-store with local membership.
     pub fn local_stats(
         profiles: &LinkProfileStore,
         k: usize,
@@ -258,10 +310,10 @@ impl LinkCommunityStats {
 
         for (e, &c) in membership.iter().enumerate() {
             debug_assert!(c < k);
-            let row = profiles.profile(e);
+            let (cols, vals) = profiles.row(e);
             let base = c * m;
-            for g in 0..m {
-                gene_sum[base + g] += row[g] as f64;
+            for (&col, &v) in cols.iter().zip(vals.iter()) {
+                gene_sum[base + col as usize] += v as f64;
             }
             size_sum[c] += profiles.size_factors[e] as f64;
             edge_count[c] += 1;
@@ -271,9 +323,6 @@ impl LinkCommunityStats {
     }
 
     /// Apply a delta to the sufficient statistics: self += (new - old).
-    ///
-    /// Used in the memoized EM: after a component updates its local stats,
-    /// the global stats are patched with the difference.
     pub fn apply_delta(
         &mut self,
         old: (&[f64], &[f64], &[usize]),
@@ -312,10 +361,10 @@ impl LinkCommunityStats {
             let c = self.membership[e];
             debug_assert!(c < k);
             self.edge_count[c] += 1;
-            let row = profiles.profile(e);
-            let slice = &mut self.gene_sum[c * m..(c + 1) * m];
-            for (dst, &v) in slice.iter_mut().zip(row.iter()) {
-                *dst += v as f64;
+            let (cols, vals) = profiles.row(e);
+            let base = c * m;
+            for (&col, &v) in cols.iter().zip(vals.iter()) {
+                self.gene_sum[base + col as usize] += v as f64;
             }
             self.size_sum[c] += profiles.size_factors[e] as f64;
         }
@@ -330,8 +379,6 @@ impl LinkCommunityStats {
     }
 
     /// Compute Dirichlet-smoothed log mixing weights from edge counts.
-    ///
-    /// `log_weights[k] = digamma(edge_count[k] + alpha/K) - digamma(n_edges + alpha)`
     pub fn compute_log_weights(&self, alpha: f64) -> Vec<f64> {
         let alpha_k = alpha / self.k as f64;
         let total = self.n_edges as f64 + alpha;
@@ -342,28 +389,18 @@ impl LinkCommunityStats {
     }
 
     /// Total conditional-entropy / plug-in multinomial score (higher = better).
-    ///
-    /// J = Σ_{k,g} f(T_kg) − Σ_k f(S_k), f(x) = x · ln(x).
-    /// Computed on demand from `gene_sum` / `size_sum`. No allocation.
     pub fn total_score(&self) -> f64 {
         let sum_f_t: f64 = self.gene_sum.iter().map(|&t| f_entropy(t)).sum();
         let sum_f_s: f64 = self.size_sum.iter().map(|&s| f_entropy(s)).sum();
         sum_f_t - sum_f_s
     }
 
-    /// Mutual information between community assignment and gene profile,
-    /// in nats. Granularity-aware: comparable across cascade levels.
-    ///
-    /// `MI = H(p_global) − mean_H(p_k|community) = H(p_global) + J/Total`.
-    /// Range: `[0, H(p_global)]`. Higher = communities more informative.
+    /// Mutual information between community assignment and gene profile, in nats.
     pub fn mutual_information(&self) -> f64 {
         self.score_and_mi().1
     }
 
-    /// Fused `(total_score, mutual_information)` in one pass over
-    /// `gene_sum`/`size_sum`. The per-sweep cascade observer needs both, so
-    /// sharing the scans halves the per-sweep accounting cost. The inner
-    /// gene-axis loop uses slice-zip so LLVM auto-vectorizes.
+    /// Fused `(total_score, mutual_information)` in one pass.
     pub fn score_and_mi(&self) -> (f64, f64) {
         let mut p_global = vec![0.0f64; self.m];
         let mut sum_f_t = 0.0f64;
@@ -401,15 +438,8 @@ impl LinkCommunityStats {
 
 #[cfg(test)]
 /// Amortized classifier for link community assignments (multinomial naive Bayes).
-///
-/// From converged sufficient stats, π_{kg} = T_{kg} / S_k. For a new edge profile y_e:
-///   log P(z_e = k | y_e) ∝ log_prior[k] + Σ_g y_{eg} · log π_{kg}
-///
-/// Additive ε smoothing keeps log_rates finite for empty communities or zero genes.
 pub struct LinkCommunityClassifier {
-    /// log(π_{g,k}) with ε smoothing: [k × m] row-major.
     pub log_rates: Vec<f64>,
-    /// log(edge_count[k] + 1) per community (empirical prior).
     pub log_prior: Vec<f64>,
     pub k: usize,
     pub m: usize,
@@ -417,11 +447,9 @@ pub struct LinkCommunityClassifier {
 
 #[cfg(test)]
 impl LinkCommunityClassifier {
-    /// Extract a classifier from converged sufficient statistics.
     pub fn from_stats(stats: &LinkCommunityStats) -> Self {
         let k = stats.k;
         let m = stats.m;
-        // log_rate[k, g] = log_gene[k, g] + log_size_offset[k]
         let mut log_rates = vec![0.0f64; k * m];
         for c in 0..k {
             let off = stats.log_size_offset[c];
@@ -431,7 +459,6 @@ impl LinkCommunityClassifier {
             }
         }
 
-        // Empirical prior: log(edge_count + 1) to avoid -inf for empty communities
         let log_prior: Vec<f64> = stats
             .edge_count
             .iter()
@@ -446,18 +473,16 @@ impl LinkCommunityClassifier {
         }
     }
 
-    /// Predict community assignment for a single edge profile.
-    #[cfg(test)]
+    /// Predict community assignment for a single sparse row `(cols, vals)`.
     #[inline]
-    pub fn predict_one(&self, profile: &[f32]) -> usize {
+    pub fn predict_one_sparse(&self, cols: &[u32], vals: &[f32]) -> usize {
         let mut best_k = 0;
         let mut best_score = f64::NEG_INFINITY;
         for c in 0..self.k {
             let base = c * self.m;
             let mut score = self.log_prior[c];
-            #[allow(clippy::needless_range_loop)]
-            for g in 0..self.m {
-                score += profile[g] as f64 * self.log_rates[base + g];
+            for (&col, &y) in cols.iter().zip(vals.iter()) {
+                score += y as f64 * self.log_rates[base + col as usize];
             }
             if score > best_score {
                 best_score = score;
@@ -467,16 +492,15 @@ impl LinkCommunityClassifier {
         best_k
     }
 
-    /// Predict community assignments for all edges in a profile store.
-    #[cfg(test)]
     pub fn predict_labels(&self, profiles: &LinkProfileStore) -> Vec<usize> {
         (0..profiles.n_edges)
-            .map(|e| self.predict_one(profiles.profile(e)))
+            .map(|e| {
+                let (cols, vals) = profiles.row(e);
+                self.predict_one_sparse(cols, vals)
+            })
             .collect()
     }
 
-    /// Predict community assignments in parallel using rayon.
-    #[cfg(test)]
     pub fn predict_labels_parallel(&self, profiles: &LinkProfileStore) -> Vec<usize> {
         use rayon::prelude::*;
         let chunk_size = std::cmp::max(256, profiles.n_edges / rayon::current_num_threads().max(1));
@@ -486,7 +510,10 @@ impl LinkCommunityClassifier {
             .flat_map(|chunk| {
                 chunk
                     .iter()
-                    .map(|&e| self.predict_one(profiles.profile(e)))
+                    .map(|&e| {
+                        let (cols, vals) = profiles.row(e);
+                        self.predict_one_sparse(cols, vals)
+                    })
                     .collect::<Vec<_>>()
             })
             .collect()
@@ -495,16 +522,8 @@ impl LinkCommunityClassifier {
 
 /// Compute log-probabilities for assigning edge `e` to each community.
 ///
-/// Fast Poisson DC-SBM conditional scoring using cached `log_gene` /
-/// `log_size_offset`:
-///
-///   score(e, k) = Σ_{g: y>0} y_eg · log_gene[k, g]  +  s_e · log_size_offset[k]
-///
 /// `log_probs[t] = score(e, t) - score(e, current_c)`, with the current-community
-/// slot set to 0 so categorical sampling / argmax operate on the deltas.
-///
-/// Zero `ln` calls in the hot loop — only lookups, multiplies, and adds.
-/// Complexity per edge: O(K · nnz(y_e)).
+/// slot set to 0 so categorical sampling / argmax operate on deltas.
 pub(crate) fn compute_log_probs_for_edge(
     e: usize,
     stats: &LinkCommunityStats,
@@ -515,13 +534,12 @@ pub(crate) fn compute_log_probs_for_edge(
     let k = stats.k;
     let m = stats.m;
     let current_c = stats.membership[e];
-    let row = profiles.profile(e);
+    let (cols, vals) = profiles.row(e);
     let sf = profiles.size_factors[e] as f64;
     let lw_current = log_weights.map(|w| w[current_c]).unwrap_or(0.0);
 
-    // Hoisted: score for the current community (computed once).
     let src_slice = &stats.log_gene[current_c * m..(current_c + 1) * m];
-    let src_score = edge_score(row, src_slice, sf, stats.log_size_offset[current_c]);
+    let src_score = edge_score(cols, vals, src_slice, sf, stats.log_size_offset[current_c]);
 
     for (t, lp) in log_probs.iter_mut().enumerate().take(k) {
         if t == current_c {
@@ -529,7 +547,7 @@ pub(crate) fn compute_log_probs_for_edge(
             continue;
         }
         let tgt_slice = &stats.log_gene[t * m..(t + 1) * m];
-        let tgt_score = edge_score(row, tgt_slice, sf, stats.log_size_offset[t]);
+        let tgt_score = edge_score(cols, vals, tgt_slice, sf, stats.log_size_offset[t]);
         let mut delta = tgt_score - src_score;
         if let Some(w) = log_weights {
             delta += w[t] - lw_current;
@@ -538,15 +556,18 @@ pub(crate) fn compute_log_probs_for_edge(
     }
 }
 
-/// Inner dot product `Σ_{g: y>0} y · log_gene_slice[g] + sf · log_size_offset_k`.
+/// Sparse inner dot product `Σ y · log_gene_slice[col] + sf · log_size_offset_k`.
 #[inline]
-fn edge_score(row: &[f32], log_gene_slice: &[f64], sf: f64, log_size_offset_k: f64) -> f64 {
+fn edge_score(
+    cols: &[u32],
+    vals: &[f32],
+    log_gene_slice: &[f64],
+    sf: f64,
+    log_size_offset_k: f64,
+) -> f64 {
     let mut s = sf * log_size_offset_k;
-    for (&y_f32, &lg) in row.iter().zip(log_gene_slice.iter()) {
-        let y = y_f32 as f64;
-        if y != 0.0 {
-            s += y * lg;
-        }
+    for (&col, &y) in cols.iter().zip(vals.iter()) {
+        s += y as f64 * log_gene_slice[col as usize];
     }
     s
 }

@@ -177,9 +177,9 @@ enum Commands {
                       \x20 pinto lc data.h5 -c coords.csv -o out --n-communities 25\n\n\
                       \x20 # Expression-only (no coordinates):\n\
                       \x20 pinto lc data.h5 -o out\n\n\
-                      \x20 # With external gene-pair network:\n\
+                      \x20 # With external gene-gene network:\n\
                       \x20 pinto lc data.h5 -c coords.csv -o out \\\n\
-                      \x20   --gene-network biogrid_pairs.tsv --n-outer-iter 3\n\n\
+                      \x20   --gene-network biogrid_pairs.tsv\n\n\
                       \x20 # Multi-sample with batch correction:\n\
                       \x20 pinto lc s1.h5,s2.h5 -c c1.csv,c2.csv -o out\n\n\
                       INPUT FILES:\n\n\
@@ -193,20 +193,22 @@ enum Commands {
                       \x20   Every profile dim is a full linear combination of ALL genes\n\
                       \x20   (no genes dropped); M = proj-dim just compresses the gene axis.\n\
                       \x20   Optionally zero basis rows for genes below --min-gene-count.\n\n\
-                      \x20 Gene-pair network (--gene-network file.tsv):\n\
-                      \x20   External gene-gene edges (two-column TSV).\n\
-                      \x20   Edge profile = positive co-expression deltas per pair.\n\
-                      \x20   Pairs collapsed into modules if count > --n-edge-modules.\n\
-                      \x20   --n-outer-iter > 1 re-estimates modules from community rates.\n\n\
+                      \x20 Gene-network module-pair profile (--gene-network file.tsv):\n\
+                      \x20   External gene-gene edges (two-column TSV), optionally SNN-\n\
+                      \x20   augmented, k-core-trimmed, Leiden-clustered into gene modules.\n\
+                      \x20   Edge profile is SPARSE over module-pairs (a, b) with entries\n\
+                      \x20   max(0, x_{i,a}·x_{j,b} + x_{i,b}·x_{j,a} − X_i·X_j · deg(a)·deg(b)/(2W)²).\n\
+                      \x20   Controls: --snn-min-shared, --gene-trim-min-degree,\n\
+                      \x20   --gene-modules-resolution.\n\n\
                       ALGORITHM:\n\n\
                       \x20 1. Build spatial KNN graph (or expression KNN if no coords)\n\
                       \x20 2. Batch effect estimation (multi-sample only)\n\
                       \x20 3. Multi-level graph coarsening\n\
-                      \x20 4. Build edge profiles (projection or gene-pair)\n\
-                      \x20 5. Collapsed Gibbs on coarsest super-edges\n\
-                      \x20 6. Transfer labels to full resolution + EM Gibbs + greedy\n\
-                      \x20    (with gene-pair modules: outer EM re-clusters modules)\n\
-                      \x20 7. Extract cell propensity + gene-topic statistics\n\n\
+                      \x20 4. Resolve gene modules (projection or SNN + k-core + Leiden)\n\
+                      \x20 5. Build sparse edge profiles (projection or module-pair residual)\n\
+                      \x20 6. V-cycle Gibbs + greedy across coarsening levels\n\
+                      \x20 7. Component-EM + greedy on full fine-resolution edges\n\
+                      \x20 8. Extract cell propensity + gene-topic statistics (+ BHC)\n\n\
                       See `pinto lc --help` for individual flag docs.\n\n\
                       OUTPUT FILES:\n\n\
                       \x20 {out}.propensity.parquet      Cell community membership [N × K]\n\
