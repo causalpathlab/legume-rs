@@ -262,7 +262,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         .map(|v| v.iter().map(|s| s.to_string()).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
-        kind: "joint-svd",
+        kind: crate::run_manifest::RunKind::JointSvd,
         prefix: &args.out,
         data_input: &input,
         data_batch: &batch,
