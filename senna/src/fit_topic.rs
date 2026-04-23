@@ -528,7 +528,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
 
     write_topic_manifest(
-        "topic",
+        crate::run_manifest::RunKind::Topic,
         &args.out,
         &args.data_files,
         args.batch_files.as_deref(),
@@ -542,7 +542,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 /// itopic / joint-topic run. Factored out so all three callers stay
 /// DRY; SVD runs use a distinct helper because they produce no model.
 fn write_topic_manifest(
-    kind: &str,
+    kind: crate::run_manifest::RunKind,
     prefix: &str,
     data_files: &[Box<str>],
     batch_files: Option<&[Box<str>]>,

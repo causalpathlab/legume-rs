@@ -30,11 +30,49 @@ use std::path::{Path, PathBuf};
 /// Readers accept any version and log a warning for newer-than-known.
 pub const MANIFEST_VERSION: u32 = 1;
 
+/// Subcommand that produced the run. Serde-encoded as kebab-case strings
+/// (`"topic"`, `"itopic"`, `"joint-topic"`, `"svd"`, `"joint-svd"`) so the
+/// JSON wire format is stable across renames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunKind {
+    Topic,
+    Itopic,
+    JointTopic,
+    Svd,
+    JointSvd,
+}
+
+impl RunKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunKind::Topic => "topic",
+            RunKind::Itopic => "itopic",
+            RunKind::JointTopic => "joint-topic",
+            RunKind::Svd => "svd",
+            RunKind::JointSvd => "joint-svd",
+        }
+    }
+
+    /// Topic-family kinds (topic / itopic / joint-topic) — produce a
+    /// probability-simplex β. SVD-family kinds produce signed loadings.
+    #[must_use]
+    pub fn is_topic_family(self) -> bool {
+        matches!(self, RunKind::Topic | RunKind::Itopic | RunKind::JointTopic)
+    }
+}
+
+impl std::fmt::Display for RunKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {
     pub version: u32,
-    /// Subcommand that produced the run: `"topic" | "itopic" | "joint-topic"`.
-    pub kind: String,
+    pub kind: RunKind,
     /// The `--out` prefix the training command was run with.
     pub prefix: String,
     #[serde(default)]
@@ -153,10 +191,10 @@ pub struct RunDefaults {
 }
 
 impl RunManifest {
-    pub fn new(kind: &str, prefix: &str) -> Self {
+    pub fn new(kind: RunKind, prefix: &str) -> Self {
         Self {
             version: MANIFEST_VERSION,
-            kind: kind.into(),
+            kind,
             prefix: prefix.into(),
             data: RunData::default(),
             outputs: RunOutputs::default(),
@@ -220,8 +258,7 @@ pub fn default_path(prefix: &str) -> String {
 /// Per-run description assembled by each training subcommand, handed to
 /// `write_run_manifest` which owns the `RunManifest` / `save` plumbing.
 pub struct RunDescription<'a> {
-    /// One of `"topic" | "itopic" | "joint-topic" | "svd" | "joint-svd"`.
-    pub kind: &'a str,
+    pub kind: RunKind,
     /// The `--out` prefix; used both for the manifest filename and as
     /// the `prefix` field inside.
     pub prefix: &'a str,
@@ -304,14 +341,14 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let mut m = RunManifest::new("topic", "/tmp/run1");
+        let mut m = RunManifest::new(RunKind::Topic, "/tmp/run1");
         m.data.input = vec!["a.zarr".into(), "b.zarr".into()];
         m.outputs.latent = Some("run1.latent.parquet".into());
         m.layout.cell_coords = Some("run1.cell_coords.parquet".into());
         m.defaults.colour_by = Some("topic".into());
         let json = serde_json::to_string(&m).unwrap();
         let back: RunManifest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.kind, "topic");
+        assert_eq!(back.kind, RunKind::Topic);
         assert_eq!(back.data.input.len(), 2);
         assert_eq!(back.outputs.latent.as_deref(), Some("run1.latent.parquet"));
         assert_eq!(
