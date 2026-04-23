@@ -2,6 +2,7 @@
 
 use crate::Mat;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpecificityMode {
@@ -20,18 +21,18 @@ pub enum SpecificityMode {
     Abs,
 }
 
-/// Compute per-gene per-group specificity. Output shape matches input
-/// (G × K). Rows with zero mass are left as zero rows (no NaN).
-pub fn compute_specificity(profile_gk: &Mat, mode: SpecificityMode) -> Mat {
+/// Compute per-gene per-group specificity. Returns `Cow::Borrowed` for
+/// `Raw` (no transform — caller can rank `profile_gk` directly) and
+/// `Cow::Owned` for `Simplex` / `Abs`. The borrowed path skips a G × K
+/// allocation per call, which matters in the per-permutation hot loop.
+pub fn compute_specificity<'a>(profile_gk: &'a Mat, mode: SpecificityMode) -> Cow<'a, Mat> {
     let g = profile_gk.nrows();
     let k = profile_gk.ncols();
-    let mut out = Mat::zeros(g, k);
 
     match mode {
-        SpecificityMode::Raw => {
-            out.copy_from(profile_gk);
-        }
+        SpecificityMode::Raw => Cow::Borrowed(profile_gk),
         SpecificityMode::Simplex => {
+            let mut out = Mat::zeros(g, k);
             for gi in 0..g {
                 let s: f32 = (0..k).map(|kj| profile_gk[(gi, kj)].max(0.0)).sum();
                 if s <= 0.0 {
@@ -41,8 +42,10 @@ pub fn compute_specificity(profile_gk: &Mat, mode: SpecificityMode) -> Mat {
                     out[(gi, kj)] = profile_gk[(gi, kj)].max(0.0) / s;
                 }
             }
+            Cow::Owned(out)
         }
         SpecificityMode::Abs => {
+            let mut out = Mat::zeros(g, k);
             for gi in 0..g {
                 let s: f32 = (0..k).map(|kj| profile_gk[(gi, kj)].abs()).sum();
                 if s <= 0.0 {
@@ -52,9 +55,9 @@ pub fn compute_specificity(profile_gk: &Mat, mode: SpecificityMode) -> Mat {
                     out[(gi, kj)] = profile_gk[(gi, kj)].abs() / s;
                 }
             }
+            Cow::Owned(out)
         }
     }
-    out
 }
 
 #[cfg(test)]

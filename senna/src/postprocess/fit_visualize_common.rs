@@ -371,21 +371,16 @@ pub(crate) fn preprocess_layout_data(
             .into_owned()
     };
 
-    let latent_path: Option<(String, String)> = resolved
+    let latent_path: Option<(String, crate::run_manifest::RunKind)> = resolved
         .manifest
         .as_ref()
-        .and_then(|m| {
-            m.outputs
-                .latent
-                .as_ref()
-                .map(|p| (p.clone(), m.kind.clone()))
-        })
+        .and_then(|m| m.outputs.latent.as_ref().map(|p| (p.clone(), m.kind)))
         .filter(|_| resolved.manifest_path.is_some())
         .map(|(p, kind)| (resolve_from_manifest(&p), kind));
 
     if let Some((p, kind)) = latent_path {
         info!("Layout latent path: PB + similarity from cached latent {p} (kind={kind})");
-        return preprocess_layout_data_from_latent(args, resolved, &p, &kind);
+        return preprocess_layout_data_from_latent(args, resolved, &p, kind);
     }
 
     let cell_proj_path: Option<String> = resolved
@@ -420,7 +415,7 @@ fn preprocess_layout_data_from_latent(
     args: &VisualizeCommonArgs,
     resolved: &ResolvedViz,
     latent_path: &str,
-    kind: &str,
+    kind: crate::run_manifest::RunKind,
 ) -> anyhow::Result<LayoutPrep> {
     let SparseDataWithBatch { data: data_vec, .. } =
         read_data_on_shared_rows(ReadSharedRowsArgs {
@@ -442,8 +437,7 @@ fn preprocess_layout_data_from_latent(
         data_cell_names.len()
     );
 
-    let is_topic = matches!(kind, "topic" | "itopic" | "joint-topic");
-    let feat_kn: Mat = if is_topic {
+    let feat_kn: Mat = if kind.is_topic_family() {
         let mut m = latent_nk.transpose();
         for v in m.iter_mut() {
             *v = v.exp().max(0.0).sqrt();
@@ -458,7 +452,7 @@ fn preprocess_layout_data_from_latent(
     info!(
         "Loaded latent: {n_cells} cells × {} dims ({})",
         feat_kn.nrows(),
-        if is_topic {
+        if kind.is_topic_family() {
             "Hellinger-θ"
         } else {
             "z-scored scores"

@@ -2,7 +2,7 @@
 
 use crate::embed_common::Mat;
 use crate::marker_support::build_annotation_matrix;
-use crate::run_manifest::{self, RunManifest};
+use crate::run_manifest::{self, RunKind, RunManifest};
 use enrichment::{GroupInputs, SpecificityMode};
 use matrix_util::traits::IoOps;
 use std::path::Path;
@@ -82,20 +82,14 @@ pub fn load_from_manifest(
         latent.mat.ncols()
     );
 
-    let (profile_kind, spec_mode) = match manifest.kind.as_str() {
-        // Topic kinds: β is already housekeeping-adjusted during training
-        // (NB Fisher weighting). Rank directly by raw β rather than double-
-        // adjusting via specificity transform — avoids over-suppressing
-        // informative high-mean genes.
-        "topic" | "itopic" | "joint-topic" => (Kind::Topic, SpecificityMode::Raw),
-        "svd" | "joint-svd" => (Kind::Svd, SpecificityMode::Abs),
-        other => {
-            anyhow::bail!(
-                "unsupported manifest.kind {:?} — senna annotate supports topic / itopic / \
-                 joint-topic / svd / joint-svd",
-                other
-            )
+    // Topic kinds: β is already housekeeping-adjusted during training (NB
+    // Fisher weighting). Rank directly by raw β rather than double-adjusting
+    // via specificity — avoids over-suppressing informative high-mean genes.
+    let (profile_kind, spec_mode) = match manifest.kind {
+        RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => {
+            (Kind::Topic, SpecificityMode::Raw)
         }
+        RunKind::Svd | RunKind::JointSvd => (Kind::Svd, SpecificityMode::Abs),
     };
 
     let cell_membership_nk: Mat = if matches!(profile_kind, Kind::Topic) && latent.mat.max() <= 0.0

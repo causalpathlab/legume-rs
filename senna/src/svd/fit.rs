@@ -367,7 +367,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         .map(|v| v.iter().map(|s| s.to_string()).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
-        kind: "svd",
+        kind: crate::run_manifest::RunKind::Svd,
         prefix: &args.out,
         data_input: &input,
         data_batch: &batch,
