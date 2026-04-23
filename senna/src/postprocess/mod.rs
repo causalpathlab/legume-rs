@@ -1,15 +1,12 @@
-mod fit_annotate;
 mod fit_layout_mst;
 mod fit_plot;
 mod fit_visualize_common;
 mod fit_visualize_phate;
 mod fit_visualize_tsne;
 mod fit_visualize_umap;
-mod interactive_markers;
 mod plot;
 pub(crate) mod viz_prep;
 
-pub use fit_annotate::*;
 pub use fit_layout_mst::*;
 pub use fit_plot::*;
 pub use fit_visualize_phate::*;

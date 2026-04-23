@@ -516,6 +516,21 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         None,
     )?;
 
+    // pb_latent omitted: indexed encoder's PB-level forward pass isn't
+    // wired here; annotate reconstructs θ_PB from pb_gene · β.
+    {
+        let pb_gene_gp: Mat = finest_collapsed.mu_observed.posterior_mean().clone();
+        let n_pb = pb_gene_gp.ncols();
+        let pb_names: Vec<Box<str>> = (0..n_pb)
+            .map(|i| format!("PB_{i}").into_boxed_str())
+            .collect();
+        pb_gene_gp.to_parquet_with_names(
+            &format!("{}.pb_gene.parquet", args.out),
+            (Some(&gene_names), Some("gene")),
+            Some(&pb_names),
+        )?;
+    }
+
     // CNV detection using topic proportions
     let gene_names = data_vec.row_names()?;
     let cnv_positions = crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?;
@@ -556,6 +571,9 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         dictionary_suffix: Some("dictionary.parquet"),
         has_model: true,
         has_cell_proj: true,
+        pb_gene_suffix: Some("pb_gene.parquet"),
+        pb_latent_suffix: None,
+        dictionary_empirical_suffix: None,
         default_colour_by: "topic",
     })?;
 
