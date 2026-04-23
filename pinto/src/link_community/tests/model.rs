@@ -91,7 +91,7 @@ fn test_delta_score_matches_hand_computed_dot_product() {
 
     for e in 0..stats.n_edges {
         let current_c = stats.membership[e];
-        let row = store.profile(e);
+        let (cols, vals) = store.row(e);
         let sf = store.size_factors[e] as f64;
         compute_log_probs_for_edge(e, &stats, &store, None, &mut log_probs);
         assert!(
@@ -103,11 +103,9 @@ fn test_delta_score_matches_hand_computed_dot_product() {
                 continue;
             }
             let mut expected = sf * (stats.log_size_offset[t] - stats.log_size_offset[current_c]);
-            for (g, &y_f32) in row.iter().enumerate() {
+            for (&col, &y_f32) in cols.iter().zip(vals.iter()) {
                 let y = y_f32 as f64;
-                if y == 0.0 {
-                    continue;
-                }
+                let g = col as usize;
                 expected +=
                     y * (stats.log_gene[t * stats.m + g] - stats.log_gene[current_c * stats.m + g]);
             }

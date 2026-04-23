@@ -1,36 +1,6 @@
-use crate::link_community::model::LinkProfileStore;
+use crate::gene_network::graph::test_graph_from_edges;
 use crate::link_community::profiles::*;
 use crate::util::common::*;
-
-#[test]
-fn test_coarsen_edge_profiles() {
-    // 4 edges, proj_dim=3, 2 clusters of cells
-    let profiles_data = vec![
-        1.0, 2.0, 3.0, // edge 0: cells (0,1) → cluster pair (0,0)
-        4.0, 5.0, 6.0, // edge 1: cells (0,2) → cluster pair (0,1)
-        7.0, 8.0, 9.0, // edge 2: cells (1,2) → cluster pair (0,1)
-        2.0, 3.0, 4.0, // edge 3: cells (2,3) → cluster pair (1,1)
-    ];
-    let store = LinkProfileStore::new(profiles_data, 4, 3);
-    let edges = vec![(0, 1), (0, 2), (1, 2), (2, 3)];
-    let cell_labels = vec![0, 0, 1, 1]; // cells 0,1 → cluster 0; cells 2,3 → cluster 1
-
-    let (super_store, f2s) = coarsen_edge_profiles(&store, &edges, &cell_labels);
-
-    // Edge 0: (0,1) → labels (0,0) → key (0,0) → super 0
-    // Edge 1: (0,2) → labels (0,1) → key (0,1) → super 1
-    // Edge 2: (1,2) → labels (0,1) → key (0,1) → super 1
-    // Edge 3: (2,3) → labels (1,1) → key (1,1) → super 2
-    assert_eq!(super_store.n_edges, 3);
-    assert_eq!(f2s[0], f2s[0]); // trivially
-    assert_eq!(f2s[1], f2s[2]); // same super-edge
-    assert_ne!(f2s[0], f2s[1]); // different super-edges
-
-    // Super-edge 1 should be sum of edges 1 and 2
-    let se1 = f2s[1];
-    let expected: Vec<f32> = vec![4.0 + 7.0, 5.0 + 8.0, 6.0 + 9.0];
-    assert_eq!(super_store.profile(se1), &expected[..]);
-}
 
 #[test]
 fn test_transfer_labels() {
@@ -58,39 +28,88 @@ fn test_compute_node_membership() {
     assert!((nm[(2, 1)] - 2.0 / 3.0).abs() < 1e-6);
 }
 
+use test_graph_from_edges as make_graph;
+
 #[test]
-fn test_refine_projection_basis() {
-    // Create a simple centroid matrix [10 genes × 3 communities]
-    let mut centroids = Mat::zeros(10, 3);
-    // Community 0: genes 0-3 active
-    for g in 0..4 {
-        centroids[(g, 0)] = 5.0;
-    }
-    // Community 1: genes 4-6 active
-    for g in 4..7 {
-        centroids[(g, 1)] = 5.0;
-    }
-    // Community 2: genes 7-9 active
-    for g in 7..10 {
-        centroids[(g, 2)] = 5.0;
-    }
+fn test_module_pair_basis_counts_and_degrees() {
+    // 4 genes, 2 modules: {0,1} -> 0, {2,3} -> 1.
+    // Edges: (0,1) internal to mod 0, (2,3) internal to mod 1, (1,2) cross.
+    let graph = make_graph(&[(0, 1), (2, 3), (1, 2)], 4);
+    let mods = vec![Some(0), Some(0), Some(1), Some(1)];
+    let basis = ModulePairBasis::build(&graph, mods);
 
-    let basis = refine_projection_basis(&centroids, 3).unwrap();
-    assert_eq!(basis.nrows(), 10);
-    assert_eq!(basis.ncols(), 3);
-
-    // All values should be finite
-    for i in 0..basis.nrows() {
-        for j in 0..basis.ncols() {
-            assert!(basis[(i, j)].is_finite());
-        }
-    }
+    assert_eq!(basis.n_modules, 2);
+    assert_eq!(basis.n_pairs, 3);
+    let adj0: Vec<u32> = basis.pair_adj[0].iter().map(|e| e.b).collect();
+    assert!(adj0.contains(&0));
+    assert!(adj0.contains(&1));
+    let adj1: Vec<u32> = basis.pair_adj[1].iter().map(|e| e.b).collect();
+    assert!(adj1.contains(&0));
+    assert!(adj1.contains(&1));
 }
 
 #[test]
-fn test_refine_more_dims_than_communities() {
-    let centroids = Mat::from_fn(10, 2, |g, c| if g % 2 == c { 3.0 } else { 0.5 });
-    let basis = refine_projection_basis(&centroids, 5).unwrap();
-    assert_eq!(basis.nrows(), 10);
-    assert_eq!(basis.ncols(), 5);
+fn test_module_pair_basis_drops_unmodule_genes() {
+    // Gene 3 has no module (e.g., k-core-trimmed). Edges touching it are ignored.
+    let graph = make_graph(&[(0, 1), (0, 3), (1, 3)], 4);
+    let mods = vec![Some(0), Some(0), None, None];
+    let basis = ModulePairBasis::build(&graph, mods);
+    // Only (0,0) from (0,1) survives.
+    assert_eq!(basis.n_pairs, 1);
+}
+
+#[test]
+fn test_coarsen_module_expression() {
+    // 3 cells × 2 modules, cell 0+1 -> super 0, cell 2 -> super 1.
+    let mut expr = Mat::zeros(2, 3);
+    expr[(0, 0)] = 1.0;
+    expr[(1, 0)] = 2.0;
+    expr[(0, 1)] = 3.0;
+    expr[(1, 2)] = 4.0;
+    let (super_expr, super_totals) = coarsen_module_expression(&expr, &[0, 0, 1], 2);
+    assert_eq!(super_expr[(0, 0)], 4.0);
+    assert_eq!(super_expr[(1, 0)], 2.0);
+    assert_eq!(super_expr[(0, 1)], 0.0);
+    assert_eq!(super_expr[(1, 1)], 4.0);
+    assert_eq!(super_totals, vec![6.0, 4.0]);
+}
+
+#[test]
+fn test_module_pair_profiles_residual() {
+    // 2 modules, 2 cells. Pair (0,1) has null_ab = deg(0)*deg(1)/(2W)^2.
+    // Construct so the residual is a known positive value.
+    //
+    // One gene-gene edge crossing modules 0 and 1: (0,1) with genes in each.
+    // deg(0) = 1, deg(1) = 1, 2W = 2, null_{0,1} = 1*1 / 4 = 0.25.
+    //
+    // Cell 0: x_{0,0}=2, x_{0,1}=0 → X_0 = 2
+    // Cell 1: x_{1,0}=0, x_{1,1}=3 → X_1 = 3
+    //
+    // For edge (cell 0, cell 1), pair (0,1):
+    //   y_obs = x_{0,0}*x_{1,1} + x_{0,1}*x_{1,0} = 6
+    //   y_exp = 2 * 3 * 0.25 = 1.5
+    //   y = max(0, 6 - 1.5) = 4.5
+    let graph = make_graph(&[(0, 1)], 2);
+    let mods = vec![Some(0), Some(1)];
+    let basis = ModulePairBasis::build(&graph, mods);
+
+    let mut module_expr = Mat::zeros(2, 2);
+    module_expr[(0, 0)] = 2.0;
+    module_expr[(1, 1)] = 3.0;
+    let cell_totals = vec![2.0, 3.0];
+    let all_edges = vec![(0usize, 1usize)];
+    let edge_indices = vec![0usize];
+
+    let store = build_module_pair_profiles_for_edges(
+        &module_expr,
+        &cell_totals,
+        &all_edges,
+        &edge_indices,
+        &basis,
+    );
+
+    assert_eq!(store.n_edges, 1);
+    let (cols, vals) = store.row(0);
+    assert_eq!(cols.len(), 1);
+    assert!((vals[0] - 4.5).abs() < 1e-5, "got y = {}", vals[0]);
 }
