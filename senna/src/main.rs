@@ -31,10 +31,12 @@
 )]
 
 mod anchor_common;
+mod annotate;
 mod cluster;
 mod cluster_bhc;
 mod cnv_pseudobulk;
 mod embed_common;
+mod empirical_dict;
 mod eval_topic;
 mod fit_clustering;
 mod fit_indexed_topic;
@@ -51,6 +53,7 @@ mod senna_input;
 mod svd;
 mod topic;
 
+use annotate::{annotate_run, AnnotateArgs};
 use embed_common::*;
 use eval_topic::*;
 use fit_clustering::*;
@@ -155,20 +158,20 @@ enum Commands {
     IndexedTopic(IndexedTopicArgs),
 
     #[command(
-        about = "Annotate cells via anchor PBs + marker margin scoring",
-        long_about = "Runs after `senna viz`. Picks anchor pseudobulks by greedy\n\
-                      Gram-Schmidt on the whitened reconstruction features, labels\n\
-                      each anchor against user markers via a margin rule (top1 vs\n\
-                      top2 mean z-score), and soft-assigns cells to anchors by\n\
-                      cosine in whitened latent space. Anchors that miss the\n\
-                      margin become `novel_i` and contribute no celltype mass.\n\n\
-                      Modes:\n\
-                        direct      — senna annotate -g dict -z latent -p pb_mean_latent -m markers -o out\n\
-                        interactive — add -I to iteratively augment markers\n\
-                        LLM-assist  — --suggest-only out.json, then --apply-suggestions in.json",
+        about = "Annotate cells via bipartite enrichment (topic × celltype markers)",
+        long_about = "Reads a run manifest (topic / itopic / joint-topic / svd /\n\
+                      joint-svd), runs a GSEA-style weighted KS enrichment test\n\
+                      between each topic's gene dictionary and each celltype's\n\
+                      marker set, with Efron–Tibshirani restandardization against\n\
+                      a row-randomization null. The FDR-sparse K × C Q matrix is\n\
+                      softmax-normalized per topic; per-cell labels come from\n\
+                      θ_cell · Q (one matmul, no vMF cosine, no anchor genes).\n\n\
+                      Usage: senna annotate --from run.senna.json -m markers.tsv -o out\n\n\
+                      Inputs are read from the manifest (β, θ_cell, pb_gene,\n\
+                      pb_latent). The zarr is never reopened.",
         visible_alias = "annotate"
     )]
-    AnnotateTopic(AnnotateTopicArgs),
+    Annotate(AnnotateArgs),
 
     #[command(
         about = "Apply a trained topic model to new data",
@@ -289,8 +292,8 @@ fn main() -> anyhow::Result<()> {
             fit_joint_topic_model(args)?;
         }
 
-        Commands::AnnotateTopic(args) => {
-            annotate_topics(args)?;
+        Commands::Annotate(args) => {
+            annotate_run(args)?;
         }
         Commands::EvalTopic(args) => {
             eval_topic_model(args)?;

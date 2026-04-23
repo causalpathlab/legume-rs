@@ -317,6 +317,19 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         None,
     )?;
 
+    {
+        let pb_gene_gp: Mat = x_dn.posterior_mean().clone();
+        let n_pb = pb_gene_gp.ncols();
+        let pb_names: Vec<Box<str>> = (0..n_pb)
+            .map(|i| format!("PB_{i}").into_boxed_str())
+            .collect();
+        pb_gene_gp.to_parquet_with_names(
+            &format!("{}.pb_gene.parquet", args.out),
+            (Some(&output_gene_names), Some("gene")),
+            Some(&pb_names),
+        )?;
+    }
+
     // Save selected feature list if feature selection was applied
     if let Some(sel) = &selected_features {
         use matrix_util::common_io::write_lines;
@@ -362,6 +375,9 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         dictionary_suffix: Some("dictionary.parquet"),
         has_model: false,
         has_cell_proj: true,
+        pb_gene_suffix: Some("pb_gene.parquet"),
+        pb_latent_suffix: None,
+        dictionary_empirical_suffix: None,
         // SVD produces no topic / cluster labels on its own; users
         // typically run `senna clustering` next, so the viz column
         // `cluster` is the natural default.

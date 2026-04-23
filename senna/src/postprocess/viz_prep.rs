@@ -56,52 +56,6 @@ pub(super) fn aggregate_features_by_group(
     out
 }
 
-/// Load the dictionary β (features × K) and auto-exponentiate if it was
-/// written in log-probability space. Validates that `K` matches the latent.
-pub(super) fn load_dictionary(path: &str, k: usize) -> anyhow::Result<Mat> {
-    use matrix_util::common_io::file_ext;
-
-    let ext = file_ext(path)?;
-    let MatWithNames { mat: beta, .. } = match ext.as_ref() {
-        "parquet" => Mat::from_parquet_with_row_names(path, Some(0))?,
-        _ => Mat::read_data_with_names(path, &['\t', ',', ' '], Some(0), Some(0))?,
-    };
-
-    if beta.ncols() != k {
-        return Err(anyhow::anyhow!(
-            "Dictionary has {} columns but latent has {} — K must match",
-            beta.ncols(),
-            k
-        ));
-    }
-
-    info!(
-        "Loaded dictionary: {} features × {} atoms",
-        beta.nrows(),
-        beta.ncols()
-    );
-    // If the dictionary was written in log space (all entries ≤ 0),
-    // exp + column-normalize to probabilities.
-    let max_v = beta.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    if max_v > 0.0 {
-        return Ok(beta);
-    }
-    info!(
-        "dictionary: detected log-space input (max={max_v:.3} ≤ 0); exponentiating to probabilities"
-    );
-    let mut beta = beta;
-    for v in beta.iter_mut() {
-        *v = v.exp();
-    }
-    for j in 0..beta.ncols() {
-        let s: f32 = beta.column(j).iter().sum::<f32>().max(1e-12);
-        for i in 0..beta.nrows() {
-            beta[(i, j)] /= s;
-        }
-    }
-    Ok(beta)
-}
-
 /// Return the sorted list of PB indices whose cell counts, taken in
 /// descending size order, cumulatively cover at least `coverage` of the
 /// total cells. Result is in ascending-index order so that downstream

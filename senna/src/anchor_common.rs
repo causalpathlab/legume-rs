@@ -120,18 +120,6 @@ pub(crate) fn gram_schmidt_anchors(x_pg: &Mat, k: usize) -> Vec<usize> {
     picked
 }
 
-/// Strip `_<n>` suffix from disambiguated multi-anchor labels, so we can
-/// look them up in the marker file's celltype list.
-pub(crate) fn base_celltype_label(label: &str) -> &str {
-    if let Some(pos) = label.rfind('_') {
-        let tail = &label[pos + 1..];
-        if tail.parse::<usize>().is_ok() {
-            return &label[..pos];
-        }
-    }
-    label
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,12 +172,5 @@ mod tests {
                 assert!(col.iter().all(|&v| v == 0.0));
             }
         }
-    }
-
-    #[test]
-    fn base_label_strips_numeric_suffix() {
-        assert_eq!(base_celltype_label("T_cells"), "T_cells");
-        assert_eq!(base_celltype_label("T_cells_2"), "T_cells");
-        assert_eq!(base_celltype_label("novel_5"), "novel");
     }
 }
