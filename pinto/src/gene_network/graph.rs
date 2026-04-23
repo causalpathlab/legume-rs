@@ -10,6 +10,7 @@ pub struct GenePairGraph {
     pub gene_edges: Vec<(usize, usize)>,
 }
 
+#[allow(dead_code)]
 impl GenePairGraph {
     /// Build gene-gene graph from an external edge list file (e.g., BioGRID).
     ///
@@ -107,9 +108,18 @@ impl GenePairGraph {
         self.gene_edges.len()
     }
 
-    #[cfg(test)]
     pub fn num_genes(&self) -> usize {
         self.n_genes
+    }
+
+    /// Per-gene (undirected) degree from the canonical edge list.
+    pub fn gene_degrees(&self) -> Vec<usize> {
+        let mut d = vec![0usize; self.n_genes];
+        for &(u, v) in &self.gene_edges {
+            d[u] += 1;
+            d[v] += 1;
+        }
+        d
     }
 
     /// Build directed adjacency list: gene_adj[g] = [(neighbor, edge_idx)]
@@ -120,6 +130,76 @@ impl GenePairGraph {
             gene_adj[g1].push((g2, edge_idx));
         }
         gene_adj
+    }
+
+    /// Augment the edge set with shared-neighbor (SNN) edges.
+    ///
+    /// For any unordered gene pair `(u, v)` with at least `min_shared` common
+    /// undirected neighbors in the current graph, a synthetic edge is added
+    /// (unless one is already present). `min_shared = 0` is a no-op.
+    ///
+    /// Candidates are restricted to two-hop-reachable pairs, so the cost is
+    /// roughly `O(Σ_u deg(u)²)` in the worst case — fine for typical
+    /// biological networks where avg degree is small.
+    pub fn augment_with_snn(&mut self, min_shared: usize) {
+        if min_shared == 0 {
+            return;
+        }
+
+        // Undirected neighbor sets per gene.
+        let mut neighbor_set: Vec<HashSet<usize>> =
+            (0..self.n_genes).map(|_| HashSet::default()).collect();
+        for &(u, v) in &self.gene_edges {
+            neighbor_set[u].insert(v);
+            neighbor_set[v].insert(u);
+        }
+
+        // Existing canonical edges, for O(1) dedup during candidate walk.
+        let mut existing: HashSet<(usize, usize)> = self.gene_edges.iter().copied().collect();
+
+        let mut added = 0usize;
+        for u in 0..self.n_genes {
+            if neighbor_set[u].is_empty() {
+                continue;
+            }
+            // Two-hop candidates: neighbors of u's neighbors. Deduped per u.
+            let mut seen: HashSet<usize> = HashSet::default();
+            for &m in &neighbor_set[u] {
+                for &v in &neighbor_set[m] {
+                    if v <= u {
+                        continue;
+                    }
+                    if !seen.insert(v) {
+                        continue;
+                    }
+                    if existing.contains(&(u, v)) {
+                        continue;
+                    }
+                    // Count shared neighbors via the smaller set.
+                    let (a, b) = if neighbor_set[u].len() <= neighbor_set[v].len() {
+                        (&neighbor_set[u], &neighbor_set[v])
+                    } else {
+                        (&neighbor_set[v], &neighbor_set[u])
+                    };
+                    let shared = a.iter().filter(|n| b.contains(n)).count();
+                    if shared >= min_shared {
+                        self.gene_edges.push((u, v));
+                        existing.insert((u, v));
+                        added += 1;
+                    }
+                }
+            }
+        }
+
+        if added > 0 {
+            self.gene_edges.sort();
+            info!(
+                "SNN augmentation (min_shared={}): +{} edges ({} total)",
+                min_shared,
+                added,
+                self.gene_edges.len()
+            );
+        }
     }
 
     /// Write gene graph as an edge list (gene1, gene2) to parquet
@@ -161,6 +241,25 @@ impl GenePairGraph {
         writer.close()?;
 
         Ok(())
+    }
+}
+
+/// Build a small `GenePairGraph` with synthetic gene names `g0..g{n-1}`
+/// from an unordered edge list — test-only helper reused across the
+/// `gene_network` and `link_community` test modules.
+#[cfg(test)]
+pub(crate) fn test_graph_from_edges(edges: &[(usize, usize)], n_genes: usize) -> GenePairGraph {
+    let names: Vec<Box<str>> = (0..n_genes).map(|i| format!("g{}", i).into()).collect();
+    let mut canonical: Vec<(usize, usize)> = edges
+        .iter()
+        .map(|&(a, b)| if a < b { (a, b) } else { (b, a) })
+        .collect();
+    canonical.sort();
+    canonical.dedup();
+    GenePairGraph {
+        gene_names: names,
+        n_genes,
+        gene_edges: canonical,
     }
 }
 
@@ -305,6 +404,69 @@ mod tests {
         assert_eq!(edge_names.len(), 2);
         assert_eq!(edge_names[0], "TP53:BRCA1");
         assert_eq!(edge_names[1], "BRCA1:EGFR");
+    }
+
+    use super::test_graph_from_edges as graph_from_edges;
+
+    #[test]
+    fn test_gene_degrees() {
+        // g0 - g1, g0 - g2, g1 - g2  (triangle)
+        let graph = graph_from_edges(&[(0, 1), (0, 2), (1, 2)], 3);
+        assert_eq!(graph.gene_degrees(), vec![2, 2, 2]);
+    }
+
+    #[test]
+    fn test_augment_snn_zero_is_noop() {
+        let mut graph = graph_from_edges(&[(0, 1), (1, 2)], 3);
+        let before = graph.gene_edges.clone();
+        graph.augment_with_snn(0);
+        assert_eq!(graph.gene_edges, before);
+    }
+
+    #[test]
+    fn test_augment_snn_adds_two_hop_edges() {
+        // g0 and g2 share neighbor g1; min_shared=1 should link them.
+        let mut graph = graph_from_edges(&[(0, 1), (1, 2)], 3);
+        graph.augment_with_snn(1);
+        assert!(graph.gene_edges.contains(&(0, 2)), "expected (0,2) added");
+        assert_eq!(graph.gene_edges.len(), 3);
+    }
+
+    #[test]
+    fn test_augment_snn_respects_min_shared() {
+        // g0 and g3 share only g1; with min_shared=2 nothing is added.
+        let mut graph = graph_from_edges(&[(0, 1), (1, 3)], 4);
+        graph.augment_with_snn(2);
+        assert_eq!(graph.gene_edges.len(), 2);
+        assert!(!graph.gene_edges.contains(&(0, 3)));
+    }
+
+    #[test]
+    fn test_augment_snn_does_not_duplicate() {
+        // Already-connected pair shouldn't be re-added.
+        let mut graph = graph_from_edges(&[(0, 1), (0, 2), (1, 2)], 3);
+        graph.augment_with_snn(1);
+        let mut dedup = graph.gene_edges.clone();
+        dedup.sort();
+        dedup.dedup();
+        assert_eq!(dedup, graph.gene_edges);
+    }
+
+    #[test]
+    fn test_augment_snn_bridge_pattern() {
+        // Two triangles joined by bridge node: {g0,g1,g2} and {g2,g3,g4}.
+        // g0 and g3 share neighbor g2 (count=1); g1 and g3 share g2 (count=1);
+        // g0 and g4 share g2 (count=1); g1 and g4 share g2 (count=1).
+        // With min_shared=1, all four pairs get edges.
+        let mut graph = graph_from_edges(&[(0, 1), (0, 2), (1, 2), (2, 3), (2, 4), (3, 4)], 5);
+        graph.augment_with_snn(1);
+        for pair in [(0, 3), (0, 4), (1, 3), (1, 4)] {
+            assert!(
+                graph.gene_edges.contains(&pair),
+                "expected SNN edge {:?}",
+                pair
+            );
+        }
     }
 
     #[test]

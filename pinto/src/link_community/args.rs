@@ -101,28 +101,38 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Max gene-pair dimensions; cluster into modules if exceeded",
-        long_help = "Maximum number of gene-pair dimensions for edge profiles.\n\
-                       When the number of gene pairs exceeds this threshold,\n\
-                       gene pairs are clustered into modules via K-means and\n\
-                       edge profiles are summed per module. Set to 0 to disable.\n\
-                       Only used with --gene-network."
+        default_value_t = 3,
+        help = "Shared-neighbor count to add an SNN edge (0 disables)",
+        long_help = "Augment the input gene network with shared-neighbor edges:\n\
+                       add a synthetic edge between any gene pair (u, v) that\n\
+                       shares at least N neighbors in the input graph but is not\n\
+                       already connected. Densifies incomplete networks.\n\
+                       Only used with --gene-network. Set to 0 to disable."
     )]
-    pub n_edge_modules: usize,
+    pub snn_min_shared: usize,
 
     #[arg(
         long,
-        default_value_t = 1,
-        help = "Outer EM iterations for edge-module re-estimation (gene-pair mode only)",
-        long_help = "Outer EM iterations for the gene-pair-module path:\n\
-                       E-step: Gibbs + greedy community assignment.\n\
-                       M-step: re-cluster gene-pair columns into edge modules\n\
-                       from community-conditioned rates.\n\
-                       Default 1 = fixed modules (no re-estimation).\n\
-                       Ignored in projection mode (no M-step to iterate)."
+        default_value_t = 3,
+        help = "Minimum gene degree to keep before Leiden module resolution",
+        long_help = "Iteratively drop genes with current-subgraph degree below\n\
+                       this threshold (k-core trim) before running Leiden on the\n\
+                       gene graph. Genes trimmed at any round do not contribute\n\
+                       to modules or the module-pair basis. Only used with\n\
+                       --gene-network."
     )]
-    pub n_outer_iter: usize,
+    pub gene_trim_min_degree: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Leiden modularity resolution for gene-module clustering",
+        long_help = "Modularity γ passed to Leiden on the SNN-augmented, k-core-\n\
+                       trimmed gene graph. Higher γ yields more, smaller modules;\n\
+                       lower γ yields fewer, larger ones. Only used with\n\
+                       --gene-network."
+    )]
+    pub gene_modules_resolution: f64,
 
     #[arg(
         long,

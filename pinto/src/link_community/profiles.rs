@@ -4,7 +4,7 @@
 //! coarsens them by cell-level cluster labels, and refines the projection
 //! basis via community centroids.
 
-use crate::gene_network::pairs::visit_gene_pair_deltas_with_buffer;
+use crate::gene_network::graph::GenePairGraph;
 use crate::link_community::model::LinkProfileStore;
 use crate::util::common::*;
 use matrix_param::io::ParamIo;
@@ -262,111 +262,6 @@ pub fn build_super_edges(
     (super_edges, fine_to_super)
 }
 
-/// Coarsen link profiles by cell-level cluster labels.
-///
-/// Each edge (i, j) maps to a super-edge key (min(label[i], label[j]), max(...)).
-/// Super-link profiles are the element-wise sum of all fine edges mapping to them.
-///
-/// Returns (super-link profiles, fine-edge → super-edge mapping).
-#[cfg(test)]
-pub fn coarsen_edge_profiles(
-    profiles: &LinkProfileStore,
-    edges: &[(usize, usize)],
-    cell_labels: &[usize],
-) -> (LinkProfileStore, Vec<usize>) {
-    let m = profiles.m;
-    let n_edges = edges.len();
-
-    let (super_edges, fine_to_super) = build_super_edges(edges, cell_labels);
-    let n_super = super_edges.len();
-    let mut super_profiles = vec![0.0f32; n_super * m];
-
-    // Accumulate fine link profiles into super-link profiles
-    #[allow(clippy::needless_range_loop)]
-    for e in 0..n_edges {
-        let se = fine_to_super[e];
-        let src = profiles.profile(e);
-        let base = se * m;
-        for g in 0..m {
-            super_profiles[base + g] += src[g];
-        }
-    }
-
-    (
-        LinkProfileStore::new(super_profiles, n_super, m),
-        fine_to_super,
-    )
-}
-
-/// Extract module-community rate matrix [M × K] from sufficient statistics.
-///
-/// `rate[m, k] = (gene_sum[k*M + m] + ε) / (size_sum[k] + M·ε)` — multinomial
-/// MLE with small additive smoothing so empty communities stay finite. Rows
-/// are modules (or gene-pairs), columns are communities. Used as input
-/// features for re-clustering modules in the outer EM M-step.
-pub fn compute_module_rate_matrix(stats: &crate::link_community::model::LinkCommunityStats) -> Mat {
-    let m = stats.m;
-    let k = stats.k;
-    let eps = 1e-9f64;
-    let mut rates = Mat::zeros(m, k);
-    for c in 0..k {
-        let denom = stats.size_sum[c] + (m as f64) * eps;
-        let base = c * m;
-        for g in 0..m {
-            rates[(g, c)] = ((stats.gene_sum[base + g] + eps) / denom) as f32;
-        }
-    }
-    rates
-}
-
-/// Refine projection basis via SVD on community centroids.
-///
-/// Takes the [n_genes × K] centroid matrix, runs SVD, and returns
-/// the top `m` left singular vectors as [n_genes × m].
-#[cfg(test)]
-pub fn refine_projection_basis(centroids: &Mat, m: usize) -> anyhow::Result<Mat> {
-    let n_genes = centroids.nrows();
-    let k = centroids.ncols();
-
-    // Center columns
-    let mut centered = centroids.clone();
-    centered.centre_columns_inplace();
-
-    // SVD via eigendecomposition of C^T * C [K × K]
-    let ctc = centered.transpose() * &centered;
-    let eig = ctc.symmetric_eigen();
-
-    // Sort eigenvalues descending
-    let mut sorted_idx: Vec<usize> = (0..k).collect();
-    sorted_idx.sort_by(|&a, &b| eig.eigenvalues[b].partial_cmp(&eig.eigenvalues[a]).unwrap());
-
-    let n_components = m.min(k);
-
-    // Compute left singular vectors: U = C * V * S^{-1}
-    let mut basis = Mat::zeros(n_genes, m);
-    #[allow(clippy::needless_range_loop)]
-    for j in 0..n_components {
-        let idx = sorted_idx[j];
-        let sv = eig.eigenvalues[idx].max(0.0).sqrt();
-        if sv > 1e-10 {
-            let u_j = &centered * eig.eigenvectors.column(idx) / sv;
-            basis.column_mut(j).copy_from(&u_j);
-        }
-    }
-
-    // Fill remaining columns with random vectors if m > k
-    if m > n_components {
-        let random_fill = Mat::rnorm(n_genes, m - n_components);
-        for j in n_components..m {
-            basis
-                .column_mut(j)
-                .copy_from(&random_fill.column(j - n_components));
-        }
-    }
-
-    Ok(basis)
-}
-
 /// Transfer super-link community assignments back to fine edges.
 ///
 /// Each fine edge inherits the community of its corresponding super-edge.
@@ -596,264 +491,313 @@ fn write_edge_clusters(
     Ok(())
 }
 
-/// Build gene-pair profiles for a specific subset of edges (for lazy component-wise building).
+/// Gene-network-derived module-pair basis for per-cell-edge features.
 ///
-/// * `data` - Sparse expression data [n_genes × n_cells]
-/// * `edge_indices` - Subset of edge indices to process
-/// * `all_edges` - Full edge list from KNN graph
-/// * `gene_adj` - Directed gene adjacency: gene_adj[g] = [(neighbor, edge_idx)]
-/// * `gene_means` - Per-gene raw means for delta computation
-/// * `n_gene_pairs` - Number of gene-gene edges (profile dimension)
-pub fn build_gene_pair_profiles_for_edges(
-    data: &SparseIoVec,
-    edge_indices: &[usize],
-    all_edges: &[(usize, usize)],
-    gene_adj: &[Vec<(usize, usize)>],
-    gene_means: &DVec,
-    n_gene_pairs: usize,
-) -> anyhow::Result<LinkProfileStore> {
-    let n_edges = edge_indices.len();
-
-    // Extract edges for this subset
-    let edges: Vec<(usize, usize)> = edge_indices.iter().map(|&e| all_edges[e]).collect();
-
-    let (x_dn, cell_to_col) = read_unique_cells_for_edges(data, &edges)?;
-
-    let mut profiles = vec![0.0f32; n_edges * n_gene_pairs];
-    let n_genes = gene_means.len();
-
-    let pb = new_progress_bar(
-        n_edges as u64,
-        "Building profiles {bar:40} {pos}/{len} edges ({per_sec}, {eta})",
-    );
-
-    // Split profiles into per-edge slices for lock-free parallel writes
-    let profile_chunks: Vec<&mut [f32]> = profiles.chunks_mut(n_gene_pairs).collect();
-
-    profile_chunks
-        .into_par_iter()
-        .zip(edges.par_iter())
-        .for_each(|(profile_slice, &(ci, cj))| {
-            let mut gene_vals_buffer = vec![-1.0f32; n_genes];
-
-            // Accumulate δ⁺ from cell i directly into output slice
-            let col_i = cell_to_col[&ci];
-            let col_slice_i = x_dn.col(col_i);
-            visit_gene_pair_deltas_with_buffer(
-                col_slice_i.row_indices(),
-                col_slice_i.values(),
-                gene_adj,
-                gene_means,
-                false,
-                &mut gene_vals_buffer,
-                |edge_idx, delta| {
-                    if delta > 0.0 {
-                        profile_slice[edge_idx] += delta;
-                    }
-                },
-            );
-
-            // Accumulate δ⁺ from cell j
-            let col_j = cell_to_col[&cj];
-            let col_slice_j = x_dn.col(col_j);
-            visit_gene_pair_deltas_with_buffer(
-                col_slice_j.row_indices(),
-                col_slice_j.values(),
-                gene_adj,
-                gene_means,
-                false,
-                &mut gene_vals_buffer,
-                |edge_idx, delta| {
-                    if delta > 0.0 {
-                        profile_slice[edge_idx] += delta;
-                    }
-                },
-            );
-
-            pb.inc(1);
-        });
-
-    pb.finish_and_clear();
-
-    Ok(LinkProfileStore::new(profiles, n_edges, n_gene_pairs))
+/// Constructed once after gene-module resolution: walks the gene-gene edge
+/// list, buckets each edge by its endpoints' module labels, and keeps the
+/// canonical `(a ≤ b)` pairs with positive weight. Each kept pair gets a
+/// contiguous index `0..n_pairs` and a precomputed null factor
+/// `deg(a)·deg(b)/(2W)²` used in the per-edge residual.
+/// Neighbor entry in `ModulePairBasis::pair_adj`.
+#[derive(Copy, Clone, Debug)]
+pub struct PairAdjEntry {
+    /// Neighbor module index.
+    pub b: u32,
+    /// Contiguous pair index into profile columns.
+    pub pair_idx: u32,
+    /// Modularity null factor `deg(a)·deg(b) / (2W)²`.
+    pub null_ab: f32,
 }
 
-/// Build edge profiles from gene-pair interaction deltas.
+pub struct ModulePairBasis {
+    pub n_modules: usize,
+    pub module_of_gene: Vec<Option<usize>>,
+    /// `pair_adj[a]` is the sorted list of neighbor modules that form a
+    /// canonical pair `(min(a,b), max(a,b))`. Stored under BOTH endpoints so
+    /// the per-edge intersection walk can start from either side; a
+    /// canonical-order guard (`a ≤ b`) suppresses double-visits.
+    pub pair_adj: Vec<Vec<PairAdjEntry>>,
+    pub n_pairs: usize,
+}
+
+impl ModulePairBasis {
+    /// Build the basis from the gene network + per-gene module labels.
+    ///
+    /// Genes with `module_of_gene[g] == None` contribute nothing. Gene-gene
+    /// edges with both endpoints in some module accumulate to `B[a,b]`; the
+    /// resulting module degrees seed the modularity null.
+    pub fn build(graph: &GenePairGraph, module_of_gene: Vec<Option<usize>>) -> Self {
+        let n_modules = module_of_gene
+            .iter()
+            .filter_map(|m| *m)
+            .max()
+            .map_or(0, |m| m + 1);
+
+        // Canonical module-pair weights via sorted (a, b).
+        let mut pair_weights: HashMap<(u32, u32), f64> = Default::default();
+        let mut deg = vec![0.0f64; n_modules];
+        for &(u, v) in &graph.gene_edges {
+            let (Some(mu), Some(mv)) = (module_of_gene[u], module_of_gene[v]) else {
+                continue;
+            };
+            let (a, b) = if mu <= mv {
+                (mu as u32, mv as u32)
+            } else {
+                (mv as u32, mu as u32)
+            };
+            *pair_weights.entry((a, b)).or_insert(0.0) += 1.0;
+            // Each undirected gene-gene edge contributes 1 to each endpoint's module degree.
+            deg[mu] += 1.0;
+            deg[mv] += 1.0;
+        }
+        let two_w: f64 = deg.iter().sum();
+        let denom = two_w * two_w;
+
+        // Assign contiguous pair indices in a deterministic order.
+        let mut kept: Vec<((u32, u32), f64)> =
+            pair_weights.into_iter().filter(|&(_, w)| w > 0.0).collect();
+        kept.sort_by_key(|&((a, b), _)| (a, b));
+
+        let mut pair_adj: Vec<Vec<PairAdjEntry>> = vec![Vec::new(); n_modules];
+        for (pair_idx, &((a, b), _w)) in kept.iter().enumerate() {
+            let null_ab = if denom > 0.0 {
+                (deg[a as usize] * deg[b as usize] / denom) as f32
+            } else {
+                0.0
+            };
+            let pair_idx = pair_idx as u32;
+            pair_adj[a as usize].push(PairAdjEntry {
+                b,
+                pair_idx,
+                null_ab,
+            });
+            if a != b {
+                pair_adj[b as usize].push(PairAdjEntry {
+                    b: a,
+                    pair_idx,
+                    null_ab,
+                });
+            }
+        }
+        for adj in pair_adj.iter_mut() {
+            adj.sort_by_key(|e| e.b);
+        }
+
+        let n_pairs = kept.len();
+        info!(
+            "ModulePairBasis: {} modules, {} retained pairs, 2W={:.1}",
+            n_modules, n_pairs, two_w
+        );
+
+        ModulePairBasis {
+            n_modules,
+            module_of_gene,
+            pair_adj,
+            n_pairs,
+        }
+    }
+}
+
+/// Pre-collapse per-cell gene expression into per-cell module expression.
 ///
-/// For each spatial edge (i,j), accumulates positive δ values across
-/// all gene pairs in the gene adjacency list. Each edge profile has
-/// dimension `n_gene_pairs`.
+/// Returns `(module_expr, cell_totals)` where:
+///   - `module_expr` is `n_modules × n_cells` dense (column-major): each
+///     column is `x_{c,m} = Σ_{g ∈ m} x_{c,g}` for cell `c`. Modules with
+///     no surviving genes stay zero.
+///   - `cell_totals[c] = Σ_m x_{c,m}` — the per-cell total used as the null
+///     scale in the residual.
 ///
-/// * `data` - Sparse expression data [n_genes × n_cells]
-/// * `edges` - Sorted spatial edge list from KNN graph
-/// * `gene_adj` - Directed gene adjacency: gene_adj[g] = [(neighbor, edge_idx)]
-/// * `gene_means` - Per-gene raw means for delta computation
-/// * `n_gene_pairs` - Number of gene-gene edges (profile dimension)
-/// * `block_size` - Number of spatial edges per parallel block
-pub fn build_edge_profiles_by_gene_pairs(
+/// One streaming pass over the sparse expression matrix.
+pub fn build_module_expression(
     data: &SparseIoVec,
-    edges: &[(usize, usize)],
-    gene_adj: &[Vec<(usize, usize)>],
-    gene_means: &DVec,
-    n_gene_pairs: usize,
+    module_of_gene: &[Option<usize>],
+    n_modules: usize,
     block_size: Option<usize>,
-) -> anyhow::Result<LinkProfileStore> {
-    let n_edges = edges.len();
+) -> anyhow::Result<(Mat, Vec<f32>)> {
+    let n_cells = data.num_columns();
+    let n_genes = data.num_rows();
+    debug_assert_eq!(module_of_gene.len(), n_genes);
 
-    let jobs = generate_minibatch_intervals(n_edges, data.num_rows(), block_size);
-
+    // Dense column-major: rows = modules, columns = cells. Small compared
+    // to the raw matrix (typical n_modules is 10² range).
+    let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
     let pb = new_progress_bar(
         jobs.len() as u64,
-        "Gene-pair profiles {bar:40} {pos}/{len} blocks ({eta})",
+        "Module expression {bar:40} {pos}/{len} blocks ({eta})",
     );
-    let partial_results: Vec<(usize, Vec<f32>)> = jobs
+
+    let partials: Vec<(usize, Mat, Vec<f32>)> = jobs
         .par_iter()
         .progress_with(pb.clone())
-        .map(|&(lb, ub)| -> anyhow::Result<(usize, Vec<f32>)> {
-            let chunk_edges = &edges[lb..ub];
-            let chunk_size = ub - lb;
-
-            let (x_dn, cell_to_col) = read_unique_cells_for_edges(data, chunk_edges)?;
-
-            let mut chunk_profiles = vec![0.0f32; chunk_size * n_gene_pairs];
-
-            // Pre-allocate reusable buffer for gene_pair_deltas (avoids ~2M allocations!)
-            let n_genes = gene_means.len();
-            let mut gene_vals_buffer = vec![-1.0f32; n_genes];
-
-            for (e_idx, &(ci, cj)) in chunk_edges.iter().enumerate() {
-                let base = e_idx * n_gene_pairs;
-
-                // Accumulate δ⁺ from cell i
-                let col_i = cell_to_col[&ci];
-                let col_slice_i = x_dn.col(col_i);
-                visit_gene_pair_deltas_with_buffer(
-                    col_slice_i.row_indices(),
-                    col_slice_i.values(),
-                    gene_adj,
-                    gene_means,
-                    false,
-                    &mut gene_vals_buffer,
-                    |edge_idx, delta| {
-                        if delta > 0.0 {
-                            chunk_profiles[base + edge_idx] += delta;
-                        }
-                    },
-                );
-
-                // Accumulate δ⁺ from cell j
-                let col_j = cell_to_col[&cj];
-                let col_slice_j = x_dn.col(col_j);
-                visit_gene_pair_deltas_with_buffer(
-                    col_slice_j.row_indices(),
-                    col_slice_j.values(),
-                    gene_adj,
-                    gene_means,
-                    false,
-                    &mut gene_vals_buffer,
-                    |edge_idx, delta| {
-                        if delta > 0.0 {
-                            chunk_profiles[base + edge_idx] += delta;
-                        }
-                    },
-                );
+        .map(|&(lb, ub)| -> anyhow::Result<(usize, Mat, Vec<f32>)> {
+            let x = data.read_columns_csc(lb..ub)?;
+            let block_len = ub - lb;
+            let mut block_expr = Mat::zeros(n_modules, block_len);
+            let mut block_totals = vec![0.0f32; block_len];
+            for col in 0..block_len {
+                let s = x.col(col);
+                for (&row, &val) in s.row_indices().iter().zip(s.values().iter()) {
+                    if let Some(m) = module_of_gene[row] {
+                        block_expr[(m, col)] += val;
+                        block_totals[col] += val;
+                    }
+                }
             }
-
-            Ok((lb, chunk_profiles))
+            Ok((lb, block_expr, block_totals))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     pb.finish_and_clear();
 
-    // Assemble into single profiles buffer
-    let mut profiles = vec![0.0f32; n_edges * n_gene_pairs];
-    for (lb, chunk) in partial_results {
-        let chunk_edges_count = chunk.len() / n_gene_pairs;
-        for e in 0..chunk_edges_count {
-            let src_base = e * n_gene_pairs;
-            let dst_base = (lb + e) * n_gene_pairs;
-            profiles[dst_base..dst_base + n_gene_pairs]
-                .copy_from_slice(&chunk[src_base..src_base + n_gene_pairs]);
+    let mut module_expr = Mat::zeros(n_modules, n_cells);
+    let mut cell_totals = vec![0.0f32; n_cells];
+    for (lb, block_expr, block_totals) in partials {
+        let block_len = block_expr.ncols();
+        for col in 0..block_len {
+            module_expr
+                .column_mut(lb + col)
+                .copy_from(&block_expr.column(col));
+            cell_totals[lb + col] = block_totals[col];
         }
     }
-
-    Ok(LinkProfileStore::new(profiles, n_edges, n_gene_pairs))
+    Ok((module_expr, cell_totals))
 }
 
-/// Filter a LinkProfileStore to keep only the specified column indices.
+/// Aggregate fine-cell module expression to super-cell module expression.
 ///
-/// Rebuilds the store with a reduced profile dimension. Used after
-/// elbow filtering to remove low-signal gene pairs.
-pub fn filter_profile_columns(store: &LinkProfileStore, keep: &[usize]) -> LinkProfileStore {
-    let n_edges = store.n_edges;
-    let new_m = keep.len();
-    let mut new_profiles = vec![0.0f32; n_edges * new_m];
+/// For each fine cell `c` with super-cell label `cell_labels[c] = sc`:
+///   `super_expr[m, sc] += module_expr[m, c]`
+/// Also returns per-super-cell totals.
+pub fn coarsen_module_expression(
+    module_expr: &Mat,
+    cell_labels: &[usize],
+    n_super_cells: usize,
+) -> (Mat, Vec<f32>) {
+    let n_modules = module_expr.nrows();
+    let n_cells = module_expr.ncols();
+    debug_assert_eq!(cell_labels.len(), n_cells);
 
-    for e in 0..n_edges {
-        let old_profile = store.profile(e);
-        let new_base = e * new_m;
-        for (new_col, &old_col) in keep.iter().enumerate() {
-            new_profiles[new_base + new_col] = old_profile[old_col];
+    let mut super_expr = Mat::zeros(n_modules, n_super_cells);
+    let mut super_totals = vec![0.0f32; n_super_cells];
+    for c in 0..n_cells {
+        let sc = cell_labels[c];
+        for m in 0..n_modules {
+            let v = module_expr[(m, c)];
+            if v != 0.0 {
+                super_expr[(m, sc)] += v;
+                super_totals[sc] += v;
+            }
         }
     }
-
-    LinkProfileStore::new(new_profiles, n_edges, new_m)
+    (super_expr, super_totals)
 }
 
-/// Collapse gene-pair columns into modules via a pluggable clustering method.
+/// Build sparse module-pair profiles for a subset of edges.
 ///
-/// Given a `LinkProfileStore` with `n_edges × n_gene_pairs`, clusters the
-/// gene-pair dimension (columns) using the provided `ModuleClusterer` on
-/// the column profiles (each column = a vector of length `n_edges`).
-/// Returns a new store with `n_edges × n_modules` where each module's
-/// value is the sum of its member gene-pair columns, plus the
-/// gene-pair-to-module assignment vector.
-pub fn collapse_profile_columns(
-    store: &LinkProfileStore,
-    clusterer: &dyn super::module_cluster::ModuleClusterer,
-) -> (LinkProfileStore, Vec<usize>) {
-    use matrix_util::traits::SampleOps;
+/// For each edge `e = (i, j) = all_edges[edge_indices[e_idx]]` and canonical
+/// module pair `(a, b)` with `a ≤ b`, emits
+///
+///   y = max(0, x_{i,a}·x_{j,b} + x_{i,b}·x_{j,a}
+///              − X_i·X_j · deg(a)·deg(b)/(2W)²)
+///
+/// (with `a == b` using `x_{i,a}·x_{j,a}` to avoid double-counting).
+///
+/// A pair `(a, b)` can only produce a positive residual when its smaller
+/// endpoint `a` is active (non-zero module expression) in at least one of
+/// the two cells — otherwise `x_{i,a} = x_{j,a} = 0` forces `y_obs = 0`.
+/// So the outer loop merges `A_i ∪ A_j` (sorted active-module lists per
+/// cell) and walks `pair_adj[a]` only for `a` in the union, skipping
+/// non-canonical entries via the `a ≤ b` guard.
+pub fn build_module_pair_profiles_for_edges(
+    module_expr: &Mat,
+    cell_totals: &[f32],
+    all_edges: &[(usize, usize)],
+    edge_indices: &[usize],
+    basis: &ModulePairBasis,
+) -> LinkProfileStore {
+    let n_modules = module_expr.nrows();
+    let n_cells = module_expr.ncols();
+    debug_assert_eq!(basis.n_modules, n_modules);
 
-    let n_edges = store.n_edges;
-    let m = store.m; // n_gene_pairs
+    // Per-cell sorted list of active (non-zero) module indices. One upfront
+    // pass replaces the per-edge O(n_modules) sweep.
+    let active_per_cell: Vec<Vec<u32>> = (0..n_cells)
+        .into_par_iter()
+        .map(|c| {
+            let col = module_expr.column(c);
+            (0..n_modules)
+                .filter(|&m| col[m] != 0.0)
+                .map(|m| m as u32)
+                .collect()
+        })
+        .collect();
 
-    // Build n_gene_pairs × n_edges matrix (each row = one gene pair's profile across edges)
-    let mut col_profiles = Mat::zeros(m, n_edges);
-    for e in 0..n_edges {
-        let profile = store.profile(e);
-        for p in 0..m {
-            col_profiles[(p, e)] = profile[p];
-        }
-    }
+    let rows: Vec<Vec<(u32, f32)>> = edge_indices
+        .par_iter()
+        .map(|&e| {
+            let (i, j) = all_edges[e];
+            let mass = cell_totals[i] as f64 * cell_totals[j] as f64;
+            let a_i = &active_per_cell[i];
+            let a_j = &active_per_cell[j];
+            let mut out: Vec<(u32, f32)> = Vec::new();
 
-    // Random project to low dim for faster clustering when n_edges is large
-    let proj_dim = 50.min(n_edges);
-    let projected = if n_edges > proj_dim {
-        let rng_proj = Mat::rnorm(n_edges, proj_dim);
-        let scale = 1.0 / (proj_dim as f32).sqrt();
-        let mut proj = &col_profiles * &rng_proj;
-        proj *= scale;
-        proj
-    } else {
-        col_profiles.clone()
-    };
+            // Sorted-merge walk of A_i ∪ A_j with dedup (equal indices
+            // advance both cursors so each `a` is visited once).
+            let (mut pi, mut pj) = (0usize, 0usize);
+            while pi < a_i.len() || pj < a_j.len() {
+                let a = match (a_i.get(pi), a_j.get(pj)) {
+                    (Some(&ai), Some(&aj)) if ai < aj => {
+                        pi += 1;
+                        ai
+                    }
+                    (Some(&ai), Some(&aj)) if ai > aj => {
+                        pj += 1;
+                        aj
+                    }
+                    (Some(&ai), Some(_)) => {
+                        pi += 1;
+                        pj += 1;
+                        ai
+                    }
+                    (Some(&ai), None) => {
+                        pi += 1;
+                        ai
+                    }
+                    (None, Some(&aj)) => {
+                        pj += 1;
+                        aj
+                    }
+                    (None, None) => break,
+                };
 
-    // Cluster rows → gene_pair_to_module
-    let mut assignments = clusterer.cluster(&projected);
-    super::module_cluster::compact_labels(&mut assignments);
-    let n_modules = assignments.iter().copied().max().unwrap_or(0) + 1;
+                let au = a as usize;
+                let xi_a = module_expr[(au, i)] as f64;
+                let xj_a = module_expr[(au, j)] as f64;
 
-    // Sum per-module
-    let mut new_profiles = vec![0.0f32; n_edges * n_modules];
-    for e in 0..n_edges {
-        let profile = store.profile(e);
-        let base = e * n_modules;
-        for (p, &module) in assignments.iter().enumerate() {
-            new_profiles[base + module] += profile[p];
-        }
-    }
+                for &entry in &basis.pair_adj[au] {
+                    // Canonical guard: visit each (a, b) with a ≤ b once,
+                    // from the smaller endpoint. Pairs where b < a will be
+                    // visited (if at all) when we reach `b` in the union.
+                    if a > entry.b {
+                        continue;
+                    }
+                    let bu = entry.b as usize;
+                    let y_obs = if bu == au {
+                        xi_a * xj_a
+                    } else {
+                        let xi_b = module_expr[(bu, i)] as f64;
+                        let xj_b = module_expr[(bu, j)] as f64;
+                        xi_a * xj_b + xi_b * xj_a
+                    };
+                    let y = (y_obs - mass * entry.null_ab as f64).max(0.0) as f32;
+                    if y > 0.0 {
+                        out.push((entry.pair_idx, y));
+                    }
+                }
+            }
 
-    (
-        LinkProfileStore::new(new_profiles, n_edges, n_modules),
-        assignments,
-    )
+            out
+        })
+        .collect();
+
+    LinkProfileStore::from_sparse_rows(rows, basis.n_pairs)
 }
