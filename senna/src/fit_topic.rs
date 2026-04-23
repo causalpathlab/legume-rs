@@ -560,6 +560,9 @@ fn write_topic_manifest(
         dictionary_suffix: Some("dictionary.parquet"),
         has_model: true,
         has_cell_proj: true,
+        pb_gene_suffix: Some("pb_gene.parquet"),
+        pb_latent_suffix: Some("pb_latent.parquet"),
+        dictionary_empirical_suffix: Some("dictionary_empirical.parquet"),
         default_colour_by: "topic",
     })
 }
@@ -897,7 +900,9 @@ where
         )?,
     };
 
-    // Diagnostic: PB-level topic usage after training
+    // PB-level topic usage + persistence of pb_gene / pb_latent for
+    // downstream `senna annotate` (enrichment-based annotation works from
+    // PB aggregates, no zarr reopen needed).
     {
         let enc_fc = ctx.level_coarsenings.last().and_then(|c| c.as_ref());
         let (mixed, batch, _) = crate::topic::common::sample_collapsed_data(ctx.finest_collapsed)?;
@@ -929,6 +934,54 @@ where
             mean_t.iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>(),
             active,
             k,
+        );
+
+        let mut pb_latent_pk = Mat::zeros(n_pb, k);
+        for (pi, row) in theta.iter().enumerate() {
+            for (kj, v) in row.iter().enumerate() {
+                pb_latent_pk[(pi, kj)] = *v;
+            }
+        }
+        let pb_names: Vec<Box<str>> = (0..n_pb)
+            .map(|i| format!("PB_{i}").into_boxed_str())
+            .collect();
+        let topic_names: Vec<Box<str>> = (0..k)
+            .map(|i| format!("topic_{i}").into_boxed_str())
+            .collect();
+        pb_latent_pk.to_parquet_with_names(
+            &format!("{}.pb_latent.parquet", ctx.args.out),
+            (Some(&pb_names), Some("pb")),
+            Some(&topic_names),
+        )?;
+
+        let pb_gene_gp: Mat = ctx.finest_collapsed.mu_observed.posterior_mean().clone();
+        pb_gene_gp.to_parquet_with_names(
+            &format!("{}.pb_gene.parquet", ctx.args.out),
+            (Some(ctx.gene_names), Some("gene")),
+            Some(&pb_names),
+        )?;
+
+        // Empirical NB-Fisher-weighted gene × topic dictionary at full gene
+        // resolution. Avoids the lossy expand-from-coarse approximation in
+        // `dictionary.parquet` so rare informative genes survive into the
+        // annotate-side enrichment ranking.
+        info!("Computing NB Fisher gene weights for empirical dictionary");
+        let fisher_w =
+            crate::empirical_dict::compute_nb_fisher_weights(ctx.data_vec, ctx.args.block_size)?;
+        let beta_emp = crate::empirical_dict::build_empirical_dictionary(
+            &pb_gene_gp,
+            &pb_latent_pk,
+            &fisher_w,
+        );
+        beta_emp.to_parquet_with_names(
+            &format!("{}.dictionary_empirical.parquet", ctx.args.out),
+            (Some(ctx.gene_names), Some("gene")),
+            Some(&topic_names),
+        )?;
+        info!(
+            "Wrote empirical dictionary {}×{} (NB-Fisher-weighted, column-simplex)",
+            beta_emp.nrows(),
+            beta_emp.ncols()
         );
     }
 

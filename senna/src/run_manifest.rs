@@ -44,6 +44,8 @@ pub struct RunManifest {
     #[serde(default)]
     pub layout: RunLayout,
     #[serde(default)]
+    pub annotate: RunAnnotate,
+    #[serde(default)]
     pub defaults: RunDefaults,
 }
 
@@ -86,6 +88,25 @@ pub struct RunOutputs {
     /// eval-topic` (topic / itopic / joint-topic only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<String>,
+    /// `{out}.pb_gene.parquet` — G × P pseudobulk gene aggregates at the
+    /// finest collapse level. Consumed by `senna annotate` to build a
+    /// permutation null without touching the raw zarr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pb_gene: Option<String>,
+    /// `{out}.pb_latent.parquet` — P × K PB-level mean topic proportions
+    /// (topic kinds) or mean SVD component scores (svd kinds). For topic
+    /// kinds this is derived from the encoder forward on the finest
+    /// collapse; for SVD it's `proj_kn.transpose()` at the finest level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pb_latent: Option<String>,
+    /// `{out}.dictionary_empirical.parquet` — G × K empirical β at full
+    /// gene resolution: row-scaled by NB Fisher-info weights and column-
+    /// normalized to the topic simplex. Avoids the lossy expand-from-coarse
+    /// approximation in `dictionary` (which ships at the feature-coarsened
+    /// resolution and is interpolated back). `senna annotate` prefers this
+    /// when present; falls back to `dictionary` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dictionary_empirical: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -96,6 +117,29 @@ pub struct RunLayout {
     pub pb_coords: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_gene_mean: Option<String>,
+}
+
+/// Paths to artifacts produced by `senna annotate` — the bipartite-enrichment
+/// annotation pass. Populated by annotate, not by training.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunAnnotate {
+    /// `{annotate_out}.annotation.parquet` — N × C cell posterior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<String>,
+    /// `{annotate_out}.argmax.tsv` — per-cell label + max probability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argmax: Option<String>,
+    /// `{annotate_out}.topic_celltype_q.parquet` — K × C FDR-sparse
+    /// softmax-normalized Q matrix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_celltype_q: Option<String>,
+    /// `{annotate_out}.topic_celltype_es.parquet` — K × C raw + restandardized
+    /// ES diagnostic matrix (long-format: k, c, es, es_std, p, q).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_celltype_es: Option<String>,
+    /// Input marker-gene TSV path (provenance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markers: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -117,6 +161,7 @@ impl RunManifest {
             data: RunData::default(),
             outputs: RunOutputs::default(),
             layout: RunLayout::default(),
+            annotate: RunAnnotate::default(),
             defaults: RunDefaults::default(),
         }
     }
@@ -196,6 +241,16 @@ pub struct RunDescription<'a> {
     /// subcommands that produce PBs (topic, itopic, joint-topic, svd,
     /// joint-svd) should set this.
     pub has_cell_proj: bool,
+    /// Suffix after `{basename}.` for the PB-level gene aggregates parquet,
+    /// e.g. `"pb_gene.parquet"`. `None` to omit.
+    pub pb_gene_suffix: Option<&'a str>,
+    /// Suffix after `{basename}.` for the PB-level latent parquet, e.g.
+    /// `"pb_latent.parquet"`. `None` to omit.
+    pub pb_latent_suffix: Option<&'a str>,
+    /// Suffix after `{basename}.` for the empirical NB-Fisher-weighted
+    /// dictionary parquet, e.g. `"dictionary_empirical.parquet"`. `None`
+    /// to omit.
+    pub dictionary_empirical_suffix: Option<&'a str>,
     /// Default `--colour-by` for downstream plot / layout.
     pub default_colour_by: &'a str,
 }
@@ -227,6 +282,15 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     }
     if desc.has_cell_proj {
         m.outputs.cell_proj = Some(format!("{basename}.cell_proj.parquet"));
+    }
+    if let Some(suf) = desc.pb_gene_suffix {
+        m.outputs.pb_gene = Some(format!("{basename}.{suf}"));
+    }
+    if let Some(suf) = desc.pb_latent_suffix {
+        m.outputs.pb_latent = Some(format!("{basename}.{suf}"));
+    }
+    if let Some(suf) = desc.dictionary_empirical_suffix {
+        m.outputs.dictionary_empirical = Some(format!("{basename}.{suf}"));
     }
     m.defaults.colour_by = Some(desc.default_colour_by.into());
 

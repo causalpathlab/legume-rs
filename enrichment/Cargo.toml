@@ -1,0 +1,25 @@
+[package]
+name = "enrichment"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+
+nalgebra = { workspace = true }
+rand = { workspace = true }
+rayon = { workspace = true }
+rustc-hash = { workspace = true }
+indicatif = { workspace = true }
+
+matrix-util = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }

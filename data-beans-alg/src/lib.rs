@@ -2,6 +2,7 @@ pub mod bhc;
 pub mod collapse_data;
 pub mod dc_poisson;
 pub mod feature_coarsening;
+pub mod gene_weighting;
 pub mod hvg_selection;
 pub mod nb_dispersion;
 pub mod normalization;
