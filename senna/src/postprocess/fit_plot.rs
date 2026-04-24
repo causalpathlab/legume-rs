@@ -318,7 +318,14 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
             } else {
                 args.point_shape
             };
-            let png = rasterize_group_png(&pts_px, ext, radius_px, color, args.alpha, shape)?;
+            let png = rasterize_group_png(
+                &pts_px,
+                ext,
+                plot_utils::RadiusSpec::Scalar(radius_px),
+                color,
+                args.alpha,
+                shape,
+            )?;
 
             let (hull_px, hull_data) = if need_hull_geometry {
                 let trimmed = trim_outliers_by_median(pts, args.hull_coverage);
@@ -373,11 +380,14 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
     let pdf_task = (!args.no_pdf).then(|| format!("{base}.plot.pdf"));
     let (png_res, pdf_res) = rayon::join(
         || match &png_task {
-            Some(p) => render_png(&svg, width_px, height_px, p).map(|()| Some(p.clone())),
+            Some(p) => plot_utils::render_png(&svg, width_px, height_px, std::path::Path::new(p))
+                .map(|()| Some(p.clone())),
             None => Ok(None),
         },
         || match &pdf_task {
-            Some(p) => render_pdf(&svg, p).map(|()| Some(p.clone())),
+            Some(p) => {
+                plot_utils::render_pdf(&svg, std::path::Path::new(p)).map(|()| Some(p.clone()))
+            }
             None => Ok(None),
         },
     );
@@ -576,41 +586,4 @@ fn read_labels_tsv(path: &str) -> anyhow::Result<FxHashMap<i64, String>> {
         map.insert(id, name.to_string());
     }
     Ok(map)
-}
-
-/// Render the SVG to a flattened PNG via usvg + resvg. Loads system
-/// fonts so vector `<text>` labels get rasterized (resvg's default
-/// options ship an empty font database).
-fn render_png(svg: &str, w: u32, h: u32, out: &str) -> anyhow::Result<()> {
-    let mut options = usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
-    let tree = usvg::Tree::from_str(svg, &options)
-        .map_err(|e| anyhow::anyhow!("usvg parse failed: {e}"))?;
-    let mut pixmap = tiny_skia::Pixmap::new(w, h)
-        .ok_or_else(|| anyhow::anyhow!("pixmap alloc failed ({w}x{h})"))?;
-    resvg::render(
-        &tree,
-        tiny_skia::Transform::identity(),
-        &mut pixmap.as_mut(),
-    );
-    pixmap
-        .save_png(out)
-        .map_err(|e| anyhow::anyhow!("PNG save failed: {e}"))?;
-    Ok(())
-}
-
-/// Render the SVG to a true-vector PDF via svg2pdf.
-fn render_pdf(svg: &str, out: &str) -> anyhow::Result<()> {
-    let mut options = svg2pdf::usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
-    let tree = svg2pdf::usvg::Tree::from_str(svg, &options)
-        .map_err(|e| anyhow::anyhow!("svg2pdf/usvg parse failed: {e}"))?;
-    let pdf = svg2pdf::to_pdf(
-        &tree,
-        svg2pdf::ConversionOptions::default(),
-        svg2pdf::PageOptions::default(),
-    )
-    .map_err(|e| anyhow::anyhow!("svg2pdf render failed: {e}"))?;
-    fs::write(out, &pdf)?;
-    Ok(())
 }

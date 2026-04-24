@@ -18,6 +18,7 @@ members = [
     "matrix-util",
     "mcmc-util",
     "pinto",
+    "plot-utils",
     "senna",
 ]
 
@@ -107,3 +108,4 @@ leiden = { path = "leiden" }
 matrix-param = { path = "matrix-param" }
 matrix-util = { path = "matrix-util" }
 mcmc-util = { path = "mcmc-util" }
+plot-utils = { path = "plot-utils" }

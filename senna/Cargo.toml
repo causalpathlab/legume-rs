@@ -28,6 +28,7 @@ matrix-param = { workspace = true }
 leiden = { workspace = true }
 hsblock = { workspace = true }
 enrichment = { workspace = true }
+plot-utils = { workspace = true }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
