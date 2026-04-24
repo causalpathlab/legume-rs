@@ -1,3 +1,4 @@
+use crate::graph::WeightedGraph;
 use crate::knn_match::ColumnDict;
 
 use dashmap::DashMap;
@@ -282,6 +283,28 @@ impl KnnGraph {
             }
         }
         f32::INFINITY
+    }
+}
+
+impl WeightedGraph for KnnGraph {
+    fn num_nodes(&self) -> usize {
+        self.n_nodes
+    }
+
+    fn num_edges(&self) -> usize {
+        self.edges.len()
+    }
+
+    fn neighbors_with_weight<'a>(
+        &'a self,
+        node: usize,
+    ) -> Box<dyn Iterator<Item = (usize, f32)> + 'a> {
+        let offsets = self.adjacency.col_offsets();
+        let start = offsets[node];
+        let end = offsets[node + 1];
+        let rows = &self.adjacency.row_indices()[start..end];
+        let vals = &self.adjacency.values()[start..end];
+        Box::new(rows.iter().zip(vals.iter()).map(|(&i, &w)| (i, w)))
     }
 }
 
