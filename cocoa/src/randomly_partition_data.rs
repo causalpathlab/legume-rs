@@ -1,8 +1,36 @@
 use crate::common::*;
 
-use data_beans_alg::collapse_data::CollapsingOps;
+use data_beans_alg::collapse_data::{
+    CollapsingOps, MultilevelCollapsingOps, MultilevelParams, DEFAULT_KNN, DEFAULT_OPT_ITER,
+};
 use data_beans_alg::random_projection::RandProjOps;
+use data_beans_alg::refine_multilevel::RefineParams;
 use rustc_hash::FxHashMap as HashMap;
+
+/// Opt-in multilevel refinement settings for pseudobulk assignment.
+/// When `Some`, cocoa routes pseudobulk construction through
+/// `collapse_columns_multilevel_vec` (same path senna uses) so each
+/// pseudobulk is DC-Poisson-refined instead of being a raw hash partition.
+#[derive(Clone)]
+pub struct RefineSettings {
+    pub num_levels: usize,
+    pub knn_super_cells: usize,
+    pub sort_dim: usize,
+    pub num_opt_iter: usize,
+    pub refine_params: RefineParams,
+}
+
+impl RefineSettings {
+    pub fn with_proj_dim(proj_dim: usize) -> Self {
+        Self {
+            num_levels: 2,
+            knn_super_cells: DEFAULT_KNN,
+            sort_dim: proj_dim.min(12),
+            num_opt_iter: DEFAULT_OPT_ITER,
+            refine_params: RefineParams::default(),
+        }
+    }
+}
 
 pub trait RandPartitionOps {
     fn assign_pseudobulk_individuals<T>(
@@ -10,6 +38,19 @@ pub trait RandPartitionOps {
         proj_dim: usize,
         block_size: usize,
         cell_to_indv: &[T],
+    ) -> anyhow::Result<()>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
+
+    /// Multilevel DC-Poisson-refined pseudobulk assignment. Mirrors
+    /// senna's `collapse_columns_multilevel_vec` pathway so the refined
+    /// cell→pseudobulk mapping is DC-Poisson coherent across tools.
+    fn assign_pseudobulk_individuals_refined<T>(
+        &mut self,
+        proj_dim: usize,
+        block_size: usize,
+        cell_to_indv: &[T],
+        refine: &RefineSettings,
     ) -> anyhow::Result<()>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
@@ -94,6 +135,45 @@ impl RandPartitionOps for SparseIoVec {
         )?;
         let raw = self.project_columns(proj_dim, Some(block_size))?;
         apply_projections(self, &centred.proj, &raw.proj, cell_to_indv)
+    }
+
+    fn assign_pseudobulk_individuals_refined<T>(
+        &mut self,
+        proj_dim: usize,
+        block_size: usize,
+        cell_to_indv: &[T],
+        refine: &RefineSettings,
+    ) -> anyhow::Result<()>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
+        let centred = self.project_columns_with_batch_correction(
+            proj_dim,
+            Some(block_size),
+            Some(cell_to_indv),
+        )?;
+
+        let params = MultilevelParams {
+            knn_super_cells: refine.knn_super_cells,
+            num_levels: refine.num_levels.max(1),
+            sort_dim: refine.sort_dim,
+            num_opt_iter: refine.num_opt_iter,
+            oversample: false,
+            refine: Some(refine.refine_params.clone()),
+        };
+
+        // collapse_columns_multilevel_vec:
+        // - registers batch membership (cell_to_indv)
+        // - builds per-batch HNSW (raw proj_kn is the centred one here; cocoa's
+        //   KNN matching uses the HNSW index built here)
+        // - hash-partitions at the finest level then DC-Poisson refines
+        //   sibling-constrained moves
+        // - leaves `self.grouped_columns` set to the finest refined level
+        // We drop the returned Vec<CollapsedOut> — cocoa doesn't use the
+        // per-level collapsed Gamma stats; it only needs the refined
+        // cell→group mapping + HNSW.
+        let _levels = self.collapse_columns_multilevel_vec(&centred.proj, cell_to_indv, &params)?;
+        Ok(())
     }
 
     fn assign_pseudobulk_with_known_confounders<T>(
