@@ -3,8 +3,10 @@ use crate::input::*;
 
 use auxiliary_data::cell_annotations::{CellAnnotations, CellTypeMembership};
 use clap::Parser;
-use data_beans_alg::pseudobulk::collapse_pseudobulk;
+use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
+use data_beans_alg::pseudobulk::collapse_pseudobulk_weighted;
 use matrix_param::io::ParamIo;
+use matrix_util::common_io::write_lines;
 use rustc_hash::FxHashMap as HashMap;
 
 #[derive(Parser, Debug, Clone)]
@@ -84,6 +86,25 @@ pub struct CollapseArgs {
         help = "Preload all the columns data."
     )]
     preload_data: bool,
+
+    #[arg(
+        long = "no-adjust-housekeeping",
+        default_value_t = false,
+        help = "Disable NB-Fisher housekeeping gene adjustment.",
+        long_help = "By default, per-(individual, cell_type) count sums are row-scaled by\n\
+                     NB-Fisher weights w_g = 1 / (1 + π_g · s̄ · φ(μ_g)) before the\n\
+                     Gamma posterior update. High-mean / high-dispersion housekeeping\n\
+                     genes get attenuated, matching pinto's gene-topic adjustment.\n\
+                     Use this flag to disable for raw rates."
+    )]
+    no_adjust_housekeeping: bool,
+
+    #[arg(
+        long = "block-size",
+        default_value_t = 1000,
+        help = "Block size for reading cells when fitting the NB trend."
+    )]
+    block_size: usize,
 }
 
 pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
@@ -110,13 +131,43 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
         cell_type_names: data.sorted_topic_names,
     };
 
-    // Delegate to data-beans-alg's collapse_pseudobulk
-    let collapsed = collapse_pseudobulk(
+    // NB-Fisher housekeeping weights (default ON, matches pinto)
+    let gene_weights: Option<Vec<f32>> = if args.no_adjust_housekeeping {
+        None
+    } else {
+        info!("Computing NB-Fisher housekeeping weights (--no-adjust-housekeeping to disable)");
+        let w = compute_nb_fisher_weights(&data.sparse_data, Some(args.block_size))?;
+        let wmin = w.iter().cloned().fold(f32::INFINITY, f32::min);
+        let wmax = w.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        info!(
+            "NB-Fisher weights: {} genes, min={:.4}, max={:.4}",
+            w.len(),
+            wmin,
+            wmax
+        );
+        let gw_path = format!("{}.gene_weights.tsv.gz", args.out);
+        let gene_names_w = data.sparse_data.row_names()?;
+        let gw_lines: Vec<Box<str>> = std::iter::once("gene\tweight".into())
+            .chain(
+                gene_names_w
+                    .iter()
+                    .zip(w.iter())
+                    .map(|(g, &wg)| format!("{}\t{}", g, wg).into()),
+            )
+            .collect();
+        write_lines(&gw_lines, &gw_path)?;
+        info!("Wrote gene weights to {}", gw_path);
+        Some(w)
+    };
+
+    // Delegate to data-beans-alg's collapse_pseudobulk_weighted
+    let collapsed = collapse_pseudobulk_weighted(
         data.sparse_data,
         &annotations,
         &membership,
         args.a0,
         args.b0,
+        gene_weights.as_deref(),
     )?;
 
     // Write per cell type

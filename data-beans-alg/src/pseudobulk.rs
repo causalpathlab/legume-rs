@@ -58,11 +58,27 @@ pub struct CollapsedPseudobulk {
 /// * `a0` - Gamma prior shape parameter (default: 1.0)
 /// * `b0` - Gamma prior rate parameter (default: 1.0)
 pub fn collapse_pseudobulk(
+    data_vec: SparseIoVec,
+    annotations: &CellAnnotations,
+    membership: &CellTypeMembership,
+    a0: f32,
+    b0: f32,
+) -> Result<CollapsedPseudobulk> {
+    collapse_pseudobulk_weighted(data_vec, annotations, membership, a0, b0, None)
+}
+
+/// Same as [`collapse_pseudobulk`], but row-scales the per-(individual,
+/// cell_type) count sums by `gene_weights[g]` before the Gamma update. This
+/// is the NB-Fisher housekeeping adjustment used by pinto (see
+/// `gene_weighting::compute_nb_fisher_weights`); housekeeping genes get
+/// attenuated in the posterior mean while informative genes stay at w≈1.
+pub fn collapse_pseudobulk_weighted(
     mut data_vec: SparseIoVec,
     annotations: &CellAnnotations,
     membership: &CellTypeMembership,
     a0: f32,
     b0: f32,
+    gene_weights: Option<&[f32]>,
 ) -> Result<CollapsedPseudobulk> {
     let num_genes = data_vec.num_rows();
     let num_cells = data_vec.num_columns();
@@ -149,6 +165,16 @@ pub fn collapse_pseudobulk(
         .map(|key| ind_lookup.get(key.as_ref()).copied())
         .collect();
 
+    if let Some(w) = gene_weights {
+        if w.len() != num_genes {
+            bail!(
+                "gene_weights length {} != num_genes {}",
+                w.len(),
+                num_genes
+            );
+        }
+    }
+
     for ct_idx in 0..n_cell_types {
         let mut count_sum_ct = DMatrix::<f32>::zeros(num_genes, n_individuals);
         let mut weight_ct = DVector::<f32>::zeros(n_individuals);
@@ -162,6 +188,12 @@ pub fn collapse_pseudobulk(
                 .column_mut(ind_idx)
                 .add_assign(&stat.count_sum.column(src_col));
             weight_ct[ind_idx] += stat.cell_weight[src_col];
+        }
+
+        if let Some(w) = gene_weights {
+            for (g, &wg) in w.iter().enumerate() {
+                count_sum_ct.row_mut(g).scale_mut(wg);
+            }
         }
 
         let denom = DMatrix::from_fn(num_genes, n_individuals, |_g, i| weight_ct[i]);
