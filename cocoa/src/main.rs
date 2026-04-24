@@ -6,12 +6,17 @@ mod run_collapse;
 mod run_diff;
 mod run_sim_collider;
 mod run_sim_one_type;
+mod run_sim_spatial;
+mod run_spatial_diff;
+mod spatial_match;
 mod stat;
 
 use crate::run_collapse::*;
 use crate::run_diff::*;
 use crate::run_sim_collider::*;
 use crate::run_sim_one_type::*;
+use crate::run_sim_spatial::*;
+use crate::run_spatial_diff::*;
 
 use clap::{Parser, Subcommand};
 
@@ -55,6 +60,107 @@ References:
         alias = "pseudobulk"
     )]
     Collapse(CollapseArgs),
+
+    #[command(
+        about = "Per-topic spatial differential expression",
+        long_about = "\
+Per-topic spatial differential expression with topic-confounder adjustment.
+
+Problem:
+  Given pinto's cell-to-topic propensity θ and spatial coordinates, find
+  genes whose expression differs across *spatial context* within each
+  latent topic. Topic identity is a confounder between location and
+  expression — we condition on topic by stratification rather than by
+  propensity modeling (which is poorly posed when spatial features are
+  high-dimensional and locally smooth).
+
+Algorithm (per topic k):
+  1. Stratify cells on θ_{·,k}:
+        HIGH  if θ ≥ q_high  (default 0.75)
+        LOW   if θ ≤ q_low   (default 0.25)
+        DROP  otherwise
+  2. Build a spatial kNN graph over all cells (--spatial-knn, optionally
+     clipped by --spatial-radius).
+  3. For each HIGH cell, collect its spatial-kNN neighbors that are in
+     the LOW stratum. Weight each (HIGH, LOW_neighbor) pair by
+        w_ij = θ_i · exp(−d_ij) · (1 − θ_j) / Σ_j'
+  4. Accumulate sufficient stats into pseudobulks per individual
+     (or a single cohort bin if --indv-files is absent):
+        y_high[g, i] = Σ_cell∈HIGH θ · y_{g,cell}
+        y_low [g, i] = Σ matched-LOW contributions (same gene, weighted)
+  5. Optionally row-scale y_high / y_low by NB-Fisher housekeeping
+     weights (default ON, --no-adjust-housekeeping disables).
+  6. Fit independent Gamma posteriors τ_high, τ_low per (gene × indv)
+     and report log τ_high − log τ_low as the contrast.
+  7. Hybrid permutation + CLT p-values (--n-permutations N):
+       - Shuffle HIGH/LOW labels within each individual, keeping the
+         spatial graph and DROP cells fixed.
+       - Recompute matching, accumulation, and Gamma fit per permutation.
+       - Estimate null mean/sd per gene via Welford; report
+         z = (observed − null_mean) / null_sd and
+         p = erfc(|z|/√2) (two-sided Gaussian).
+       - 100 reps is usually enough for z-based ranking; increase for
+         stable tail p-values.
+
+Outputs:
+  {out}.spatial_diff.tsv.gz
+      columns: gene, topic, contrast_log, null_mean, null_sd, z, pval
+  {out}.spatial_diff_indiv.tsv.gz  (only when --indv-files is set)
+      columns: gene, topic, individual, log_fold_change
+      — per-individual log τ_high − log τ_low, analogous to cocoa
+        diff's τ_{d,i} output.
+
+References:
+  Park & Kellis (2021) Genome Biol — CoCoA-diff (counterfactual match)
+  Hartwig et al. (2023) Eur J Epidemiol — residual collider stratification
+"
+    )]
+    SpatialDiff(SpatialDiffArgs),
+
+    #[command(
+        about = "Simulate spatial single-cell data with ground-truth within-topic DE markers",
+        long_about = "\
+Minimal spatial-DE simulator for validating `cocoa spatial-diff`.
+
+Generative model:
+  Cells are placed on an integer grid of size --grid-x × --grid-y and
+  split along x into --n-indv contiguous individual blocks. For each
+  cell i:
+    θ_i  ~ Dirichlet(1, …, 1) with --n-topics components
+           (intermixed HIGH/LOW cells so spatial kNN can bridge them)
+    y_{g,i} ~ Poisson(λ_{g,i})
+    λ_{g,i} = --baseline-rate, or --effect-size if cell i is a marker
+              cell for gene g (see below).
+
+Marker injection:
+  --n-spatial-markers random (gene, topic k, region R) triples are
+  drawn. A cell is a \"marker cell\" for gene g iff
+     θ_{i,k} ≥ quantile_{--topic-high-quantile}(θ_{·,k})  AND  (x_i, y_i) ∈ R
+  where R is one of {x<median, x≥median, y<median, y≥median}.
+  Each gene is used at most once.
+
+Outputs (prefixed by --out):
+  {out}.zarr (or .h5)              — sparse G × N counts
+  {out}.topic.parquet              — N × K Dirichlet propensities
+                                     (directly usable as `spatial-diff
+                                     --topic-proportion-files`)
+  {out}.coords.tsv.gz              — row-order `x<TAB>y` (no header)
+  {out}.indv.tsv.gz                — cell<TAB>individual
+  {out}.ground_truth.tsv.gz        — gene<TAB>topic<TAB>region<TAB>effect
+
+Typical workflow:
+  cocoa simulate-spatial --out sim/demo
+  cocoa spatial-diff sim/demo.zarr \\
+        -r sim/demo.topic.parquet \\
+        -i sim/demo.indv.tsv.gz \\
+        --coords-file sim/demo.coords.tsv.gz \\
+        --n-permutations 100 \\
+        --out sim/demo_result
+  # compare sim/demo.ground_truth.tsv.gz to the top-|z| hits per topic
+",
+        aliases = ["sim-spatial"]
+    )]
+    SimulateSpatial(SimSpatialArgs),
 
     #[command(
         about = "Simulate single-cell data with confounded exposure (one cell type)",
@@ -160,6 +266,12 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Collapse(args) => {
             run_collapse(args.clone())?;
+        }
+        Commands::SpatialDiff(args) => {
+            run_cocoa_spatial_diff(args.clone())?;
+        }
+        Commands::SimulateSpatial(args) => {
+            run_sim_spatial(args.clone())?;
         }
         Commands::SimulateOne(args) => {
             run_sim_one_type_data(args.clone())?;

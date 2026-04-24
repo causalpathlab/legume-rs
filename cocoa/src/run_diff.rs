@@ -5,6 +5,7 @@ use crate::randomly_partition_data::*;
 use crate::stat::*;
 
 use clap::Parser;
+use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
 use matrix_param::io::*;
 use matrix_util::common_io::write_lines;
 use matrix_util::traits::{IoOps, MatOps};
@@ -193,6 +194,45 @@ pub struct DiffArgs {
                      Hartwig et al. (2023) Eur J Epidemiol."
     )]
     no_residualize_topics: bool,
+
+    #[arg(
+        long = "no-adjust-housekeeping",
+        default_value_t = false,
+        help = "Disable NB-Fisher housekeeping gene adjustment.",
+        long_help = "By default, y1/y0 sufficient statistics are row-scaled by NB-Fisher\n\
+                     weights w_g = 1 / (1 + π_g · s̄ · φ(μ_g)) after accumulation, so\n\
+                     τ, μ, γ posteriors contract toward the prior for housekeeping\n\
+                     (high-mean / high-dispersion) genes. Matches pinto's adjustment."
+    )]
+    no_adjust_housekeeping: bool,
+
+    #[arg(
+        long = "refine",
+        default_value_t = false,
+        help = "Refine cell→pseudobulk membership via senna's multilevel DC-Poisson pass.",
+        long_help = "When set, cocoa routes pseudobulk assignment through the same\n\
+                     multilevel path senna uses (collapse_columns_multilevel_vec with\n\
+                     BBKNN + DC-Poisson refinement). Cells are reassigned across\n\
+                     sibling pseudobulks by Poisson likelihood under NB-Fisher gene\n\
+                     weighting, so each pseudobulk is more internally coherent.\n\
+                     Only applies when using the default pseudobulk path\n\
+                     (no --covariate-file and no --adjustment-data-files)."
+    )]
+    refine: bool,
+
+    #[arg(
+        long = "refine-num-levels",
+        default_value_t = 2,
+        help = "Number of coarsening levels for multilevel refinement."
+    )]
+    refine_num_levels: usize,
+
+    #[arg(
+        long = "refine-knn-super-cells",
+        default_value_t = 10,
+        help = "BBKNN fan-out for multilevel refinement."
+    )]
+    refine_knn_super_cells: usize,
 }
 
 /////////////////////////////////////
@@ -307,6 +347,21 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
             args.block_size,
             &data.cell_to_indv,
         )?;
+    } else if args.refine {
+        info!(
+            "Refining pseudobulk assignment via multilevel DC-Poisson (num_levels={}, knn_super_cells={})",
+            args.refine_num_levels, args.refine_knn_super_cells
+        );
+        let mut refine_settings =
+            crate::randomly_partition_data::RefineSettings::with_proj_dim(args.proj_dim);
+        refine_settings.num_levels = args.refine_num_levels;
+        refine_settings.knn_super_cells = args.refine_knn_super_cells;
+        data.sparse_data.assign_pseudobulk_individuals_refined(
+            args.proj_dim,
+            args.block_size,
+            &data.cell_to_indv,
+            &refine_settings,
+        )?;
     } else {
         data.sparse_data.assign_pseudobulk_individuals(
             args.proj_dim,
@@ -346,6 +401,22 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     let n_topics = data.cell_topic.ncols();
     let gene_names = data.sparse_data.row_names()?;
 
+    let gene_weights: Option<Vec<f32>> = if args.no_adjust_housekeeping {
+        None
+    } else {
+        info!("Computing NB-Fisher housekeeping weights (--no-adjust-housekeeping to disable)");
+        let w = compute_nb_fisher_weights(&data.sparse_data, Some(args.block_size))?;
+        let wmin = w.iter().cloned().fold(f32::INFINITY, f32::min);
+        let wmax = w.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        info!(
+            "NB-Fisher weights: {} genes, min={:.4}, max={:.4}",
+            w.len(),
+            wmin,
+            wmax
+        );
+        Some(w)
+    };
+
     let cocoa_input = CocoaCollapseIn {
         n_genes,
         n_topics,
@@ -354,6 +425,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         hyper_param: Some((args.a0, args.b0)),
         cell_topic_nk: data.cell_topic,
         exposure_assignment: &exposure_assignment,
+        gene_weights: gene_weights.as_deref(),
     };
 
     info!("Collecting statistics...");
@@ -412,6 +484,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         let num_opt_iter = args.num_opt_iter;
         let cell_topic = &cocoa_input.cell_topic_nk;
         let n_perm = args.n_permutations;
+        let perm_gene_weights = gene_weights.as_deref();
 
         let perm_contrasts: Vec<Vec<f32>> = permuted_exposures
             .into_par_iter()
@@ -424,6 +497,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
                     n_topics,
                     num_opt_iter,
                     hyper_param,
+                    perm_gene_weights,
                 )?;
                 let perm_params = perm_stat.estimate_parameters()?;
                 let contrast = compute_exposure_contrast(&perm_params, &perm_exposure);
