@@ -127,17 +127,6 @@ impl LinkProfileStore {
         self.values.len()
     }
 
-    /// Materialize row `e` as a dense `Vec<f32>` of length `m`. Test-only.
-    #[cfg(test)]
-    pub fn profile_dense(&self, e: usize) -> Vec<f32> {
-        let mut out = vec![0.0f32; self.m];
-        let (cols, vals) = self.row(e);
-        for (&c, &v) in cols.iter().zip(vals.iter()) {
-            out[c as usize] = v;
-        }
-        out
-    }
-
     /// Extract a sub-store for the given edge indices.
     pub fn subset(&self, edge_indices: &[usize]) -> Self {
         let n = edge_indices.len();
