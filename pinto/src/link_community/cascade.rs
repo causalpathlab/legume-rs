@@ -285,7 +285,19 @@ fn build_level_profiles(
             ))
         }
         ProfileMode::Projection { basis } => {
-            build_edge_profiles(data, super_edges, basis, block_size)
+            // Coarsen fine-cell raw expression to super-cells, then project
+            // super-cell aggregates through the basis. Previously this path
+            // passed fine-cell data with cluster-label indices, which read
+            // arbitrary fine cells as if they were super-cells — a bug that
+            // made super-edge profiles decoupled from super-cell biology.
+            let super_expr =
+                coarsen_cell_expression_dense(data, cell_labels, n_super_cells, block_size)?;
+            Ok(build_super_edge_projection_profiles(
+                &super_expr,
+                super_edges,
+                super_edge_indices,
+                basis,
+            ))
         }
     }
 }

@@ -148,91 +148,87 @@ pub fn build_projection_profiles_for_edges(
     Ok(LinkProfileStore::new(profiles, n_edges, m))
 }
 
-/// Build projected link profiles from sparse data, KNN edges, and a random
-/// projection basis.
+/// Coarsen fine-cell raw expression to super-cells.
 ///
-/// For each edge (i, j), computes y_e = W^T (x_i + x_j) where W is the
-/// [n_genes × proj_dim] basis. Visits edges in blocks for I/O efficiency.
+/// Returns an `[n_genes × n_super_cells]` dense matrix whose column `c`
+/// holds `Σ_{i: cell_labels[i] == c} x_fine[:, i]` — i.e. the total
+/// gene counts pooled across every fine cell assigned to super-cell `c`.
 ///
-/// * `data` - Sparse expression data [n_genes × n_cells]
-/// * `edges` - Sorted edge list from KNN graph
-/// * `basis` - Projection basis [n_genes × proj_dim]
-/// * `batch_effect` - Optional batch effect matrix [n_genes × n_batches]
-/// * `block_size` - Number of edges per parallel block
-pub fn build_edge_profiles(
+/// Streams fine cells in blocks for memory efficiency. The return buffer
+/// is dense (not sparse) because the super-cell expression is dense by
+/// construction: any gene expressed in any fine cell within a cluster
+/// contributes to that cluster's column.
+pub fn coarsen_cell_expression_dense(
     data: &SparseIoVec,
-    edges: &[(usize, usize)],
-    basis: &Mat,
+    cell_labels: &[usize],
+    n_super_cells: usize,
     block_size: Option<usize>,
-) -> anyhow::Result<LinkProfileStore> {
-    let n_edges = edges.len();
-    let m = basis.ncols(); // proj_dim
-    let basis_t = basis.transpose(); // precompute once, shared across blocks
+) -> anyhow::Result<Mat> {
+    let n_genes = data.num_rows();
+    let n_cells = data.num_columns();
+    debug_assert_eq!(cell_labels.len(), n_cells);
 
-    let jobs = generate_minibatch_intervals(n_edges, data.num_rows(), block_size);
+    let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
 
-    let pb = new_progress_bar(
-        jobs.len() as u64,
-        "Building edges {bar:40} {pos}/{len} blocks ({eta})",
-    );
-    let partial_results: Vec<(usize, Vec<f32>)> = jobs
+    let partials: Vec<Mat> = jobs
         .par_iter()
-        .progress_with(pb.clone())
-        .map(|&(lb, ub)| -> anyhow::Result<(usize, Vec<f32>)> {
-            let chunk_edges = &edges[lb..ub];
-            let chunk_size = ub - lb;
-
-            let (x_dn, cell_to_col) = read_unique_cells_for_edges(data, chunk_edges)?;
-
-            let mut chunk_profiles = vec![0.0f32; chunk_size * m];
-            let n_genes = x_dn.nrows();
-            let mut temp_g = DVec::zeros(n_genes);
-
-            for (e_idx, &(ci, cj)) in chunk_edges.iter().enumerate() {
-                let col_i = cell_to_col[&ci];
-                let col_j = cell_to_col[&cj];
-
-                temp_g.fill(0.0);
-
-                let col_slice_i = x_dn.col(col_i);
-                for (&row, &val) in col_slice_i
-                    .row_indices()
-                    .iter()
-                    .zip(col_slice_i.values().iter())
-                {
-                    temp_g[row] += val;
-                }
-
-                let col_slice_j = x_dn.col(col_j);
-                for (&row, &val) in col_slice_j
-                    .row_indices()
-                    .iter()
-                    .zip(col_slice_j.values().iter())
-                {
-                    temp_g[row] += val;
-                }
-
-                // Project: profile[e] = basis^T * temp_g (BLAS-backed)
-                let proj = &basis_t * &temp_g;
-                let base = e_idx * m;
-                for (d, &v) in proj.iter().enumerate() {
-                    chunk_profiles[base + d] = v.max(0.0);
+        .map(|&(lb, ub)| -> anyhow::Result<Mat> {
+            let x = data.read_columns_csc(lb..ub)?;
+            let mut local = Mat::zeros(n_genes, n_super_cells);
+            for col in 0..x.ncols() {
+                let sc = cell_labels[lb + col];
+                let s = x.col(col);
+                for (&row, &val) in s.row_indices().iter().zip(s.values().iter()) {
+                    local[(row, sc)] += val;
                 }
             }
-
-            Ok((lb, chunk_profiles))
+            Ok(local)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    pb.finish_and_clear();
 
-    // Assemble into single profiles buffer
+    let mut super_expr = Mat::zeros(n_genes, n_super_cells);
+    for local in partials {
+        super_expr += local;
+    }
+    Ok(super_expr)
+}
+
+/// Build projection profiles for super-edges from pre-coarsened super-cell
+/// expression: `y_e = basis^T · (x_super[:, a] + x_super[:, b])`, with
+/// negative entries clamped to 0.
+///
+/// Used inside the V-cycle cascade when the profile mode is `Projection`.
+/// The alternative is to (incorrectly) read fine-cell columns at indices
+/// equal to cluster labels — which gave arbitrary fine cells as
+/// "super-cells". This function replaces that path.
+pub fn build_super_edge_projection_profiles(
+    super_expr: &Mat,
+    super_edges: &[(usize, usize)],
+    edge_indices: &[usize],
+    basis: &Mat,
+) -> LinkProfileStore {
+    debug_assert_eq!(super_expr.nrows(), basis.nrows());
+    let n_edges = edge_indices.len();
+    let m = basis.ncols();
+    let basis_t = basis.transpose();
+
     let mut profiles = vec![0.0f32; n_edges * m];
-    for (lb, chunk) in partial_results {
-        let dst_start = lb * m;
-        profiles[dst_start..dst_start + chunk.len()].copy_from_slice(&chunk);
+    let mut temp_g = DVec::zeros(super_expr.nrows());
+
+    for (e_idx, &ei) in edge_indices.iter().enumerate() {
+        let (a, b) = super_edges[ei];
+        temp_g.fill(0.0);
+        temp_g += super_expr.column(a);
+        temp_g += super_expr.column(b);
+
+        let proj = &basis_t * &temp_g;
+        let base = e_idx * m;
+        for (d, &v) in proj.iter().enumerate() {
+            profiles[base + d] = v.max(0.0);
+        }
     }
 
-    Ok(LinkProfileStore::new(profiles, n_edges, m))
+    LinkProfileStore::new(profiles, n_edges, m)
 }
 
 /// Map fine edges to canonical super-edges defined by cell cluster labels.
