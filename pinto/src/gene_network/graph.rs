@@ -244,6 +244,16 @@ impl GenePairGraph {
     }
 }
 
+impl GenePairGraph {
+    /// Build a symmetric adjacency-list view that implements
+    /// `matrix_util::graph::WeightedGraph`. Use this once and reuse the
+    /// result — scanning the edge list per call would be O(E) per query.
+    #[allow(dead_code)]
+    pub fn to_adj_list(&self) -> matrix_util::graph::AdjListGraph {
+        matrix_util::graph::AdjListGraph::from_unweighted_edges(self.n_genes, &self.gene_edges)
+    }
+}
+
 /// Build a small `GenePairGraph` with synthetic gene names `g0..g{n-1}`
 /// from an unordered edge list — test-only helper reused across the
 /// `gene_network` and `link_community` test modules.
