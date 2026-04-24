@@ -1,6 +1,6 @@
 use crate::util::common::*;
 use matrix_util::common_io::read_lines_of_words_delim;
-use matrix_util::membership::{detect_delimiter, Membership};
+use matrix_util::membership::{detect_delimiter, GeneIndexResolver};
 use matrix_util::parquet::*;
 use parquet::basic::Type as ParquetType;
 
@@ -25,29 +25,7 @@ impl GenePairGraph {
         delimiter: Option<char>,
     ) -> anyhow::Result<Self> {
         let n_genes = gene_names.len();
-
-        // Build membership: gene_name → gene_index (as string)
-        // When a delimiter is set, also index by each component so that
-        // compound names like "ENSG00000141510_TP53" can be matched by
-        // either the ID ("ENSG00000141510") or the symbol ("TP53").
-        let mut pairs_vec: Vec<(Box<str>, Box<str>)> = gene_names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i.to_string().into_boxed_str()))
-            .collect();
-
-        if let Some(d) = delimiter {
-            for (i, name) in gene_names.iter().enumerate() {
-                let idx_str: Box<str> = i.to_string().into_boxed_str();
-                for part in name.split(d) {
-                    if part != name.as_ref() {
-                        pairs_vec.push((part.into(), idx_str.clone()));
-                    }
-                }
-            }
-        }
-
-        let membership = Membership::from_pairs(pairs_vec, allow_prefix);
+        let resolver = GeneIndexResolver::build(&gene_names, delimiter, allow_prefix);
 
         // Read the edge list file
         let file_delim = detect_delimiter(file_path);
@@ -65,8 +43,8 @@ impl GenePairGraph {
             let name1 = &line[0];
             let name2 = &line[1];
 
-            let idx1 = membership.get(name1).and_then(|s| s.parse::<usize>().ok());
-            let idx2 = membership.get(name2).and_then(|s| s.parse::<usize>().ok());
+            let idx1 = resolver.resolve(name1);
+            let idx2 = resolver.resolve(name2);
 
             match (idx1, idx2) {
                 (Some(i), Some(j)) if i != j => {

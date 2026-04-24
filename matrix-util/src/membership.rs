@@ -346,6 +346,64 @@ pub fn detect_delimiter(file_path: &str) -> &'static str {
     }
 }
 
+/// Gene-name → row-index resolver used across crates.
+///
+/// Gene row names in spatial/scRNA backends commonly arrive as compound
+/// strings like `ENSG00000105329_TGFB1` (`{id}_{symbol}`) or
+/// `TGFB1:ENSG00000105329`. A user-supplied gene list (e.g. an LR pair TSV,
+/// a gene module file, or an external interaction network) almost never uses
+/// the exact compound form, so we match generously:
+///
+/// - exact match on the full compound name wins first,
+/// - when `delimiter` is set, every split component (on that char) is
+///   registered as an alternate alias, so either `"ENSG…"` or `"TGFB1"`
+///   resolves to the same index,
+/// - when `allow_prefix` is `true`, the underlying `Membership` also falls
+///   back to forward / reverse prefix matching.
+///
+/// Ambiguity: if two genes share an alias component, the last registered one
+/// wins (consistent with `HashMap::insert`). Callers that need strict exact-
+/// only matching should pass `delimiter = None, allow_prefix = false`.
+#[derive(Clone)]
+pub struct GeneIndexResolver {
+    mem: Membership,
+    n_genes: usize,
+}
+
+impl GeneIndexResolver {
+    /// Build a resolver over `gene_names`. `delimiter` enables split-component
+    /// aliasing (pass `Some('_')` for `ENSG..._SYMBOL` row names). Passing
+    /// `None` disables aliasing and only the full name is indexed.
+    pub fn build(gene_names: &[Box<str>], delimiter: Option<char>, allow_prefix: bool) -> Self {
+        let mut pairs: Vec<(Box<str>, Box<str>)> = Vec::with_capacity(gene_names.len() * 2);
+        for (i, name) in gene_names.iter().enumerate() {
+            let idx_str: Box<str> = i.to_string().into_boxed_str();
+            pairs.push((name.clone(), idx_str.clone()));
+            if let Some(d) = delimiter {
+                for part in name.split(d) {
+                    if !part.is_empty() && part != name.as_ref() {
+                        pairs.push((part.into(), idx_str.clone()));
+                    }
+                }
+            }
+        }
+        Self {
+            mem: Membership::from_pairs(pairs, allow_prefix),
+            n_genes: gene_names.len(),
+        }
+    }
+
+    /// Resolve a query gene name to its 0-based row index, if any.
+    pub fn resolve(&self, query: &str) -> Option<usize> {
+        self.mem.get(query)?.parse::<usize>().ok()
+    }
+
+    /// Number of genes registered.
+    pub fn n_genes(&self) -> usize {
+        self.n_genes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,5 +463,33 @@ mod tests {
 
         let groups = membership.unique_groups();
         assert_eq!(groups, vec![Box::from("group_A"), Box::from("group_B")]);
+    }
+
+    #[test]
+    fn gene_resolver_matches_full_and_suffix() {
+        let names: Vec<Box<str>> = vec![
+            "ENSG00000105329_TGFB1".into(),
+            "ENSG00000121966_CXCR4".into(),
+            "APOE".into(),
+        ];
+        let r = GeneIndexResolver::build(&names, Some('_'), false);
+        // Full compound name resolves.
+        assert_eq!(r.resolve("ENSG00000105329_TGFB1"), Some(0));
+        // Symbol suffix resolves.
+        assert_eq!(r.resolve("TGFB1"), Some(0));
+        // Ensembl id prefix resolves.
+        assert_eq!(r.resolve("ENSG00000121966"), Some(1));
+        // Plain symbol without any delimiter-composition still resolves.
+        assert_eq!(r.resolve("APOE"), Some(2));
+        // Missing gene.
+        assert_eq!(r.resolve("UNKNOWN"), None);
+    }
+
+    #[test]
+    fn gene_resolver_exact_only_without_delimiter() {
+        let names: Vec<Box<str>> = vec!["ENSG00000105329_TGFB1".into()];
+        let r = GeneIndexResolver::build(&names, None, false);
+        assert_eq!(r.resolve("ENSG00000105329_TGFB1"), Some(0));
+        assert_eq!(r.resolve("TGFB1"), None);
     }
 }
