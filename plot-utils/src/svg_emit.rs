@@ -41,6 +41,7 @@ const MAIN_LABEL_HALO_MIN_PX: f32 = 1.5;
 
 /// Per-topic inputs to the SVG assembler. All coordinates are in pixels,
 /// in the same pixel-space as the rasterized layers.
+#[derive(Clone)]
 pub struct TopicLayer {
     /// Display label, e.g. `"Neuron"` or `"T3"`.
     pub label: String,
