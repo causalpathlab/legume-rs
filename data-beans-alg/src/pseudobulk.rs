@@ -167,11 +167,7 @@ pub fn collapse_pseudobulk_weighted(
 
     if let Some(w) = gene_weights {
         if w.len() != num_genes {
-            bail!(
-                "gene_weights length {} != num_genes {}",
-                w.len(),
-                num_genes
-            );
+            bail!("gene_weights length {} != num_genes {}", w.len(), num_genes);
         }
     }
 
