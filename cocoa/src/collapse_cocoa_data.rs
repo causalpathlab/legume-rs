@@ -13,6 +13,10 @@ pub struct CocoaCollapseIn<'a> {
     pub hyper_param: Option<(f32, f32)>,
     pub cell_topic_nk: Mat,                  // cell x cell type topic
     pub exposure_assignment: &'a Vec<usize>, // exposure assignment
+    /// Optional per-gene NB-Fisher housekeeping weights. If present, y1/y0/y1_di
+    /// sufficient stats are row-scaled by w_g after accumulation so housekeeping
+    /// genes contract toward the prior in τ, μ, γ posteriors.
+    pub gene_weights: Option<&'a [f32]>,
 }
 
 pub trait CocoaCollapseOps {
@@ -57,7 +61,25 @@ impl CocoaCollapseOps for SparseIoVec {
         info!("matching and collecting statistics per topic (cell type)");
         self.visit_columns_by_group(&collect_matched_stat_visitor, cocoa_input, &mut cocoa_stat)?;
 
+        if let Some(w) = cocoa_input.gene_weights {
+            apply_gene_weights_to_stat(&mut cocoa_stat, w);
+        }
+
         Ok(cocoa_stat)
+    }
+}
+
+/// Row-scale every (g, ·) entry of y1, y0, and indv_y1 sufficient stats by
+/// w_g. The denom / size stats are untouched — this is the same pattern as
+/// pinto's `apply_gene_weights` on gene-topic sufficient stats.
+pub(crate) fn apply_gene_weights_to_stat(stat: &mut CocoaStat, weights: &[f32]) {
+    let n_topics = stat.num_topics();
+    for k in 0..n_topics {
+        for (g, &w) in weights.iter().enumerate() {
+            stat.y1_stat_mut(k).row_mut(g).scale_mut(w);
+            stat.y0_stat_mut(k).row_mut(g).scale_mut(w);
+            stat.indv_y1_stat_mut(k).row_mut(g).scale_mut(w);
+        }
     }
 }
 
@@ -255,6 +277,7 @@ impl MatchCache {
         n_topics: usize,
         n_opt_iter: Option<usize>,
         hyper_param: Option<(f32, f32)>,
+        gene_weights: Option<&[f32]>,
     ) -> anyhow::Result<CocoaStat> {
         let n_samples = self.samples.len();
         let n_indv = self.n_indv;
@@ -280,6 +303,10 @@ impl MatchCache {
                 n_indv,
                 &mut cocoa_stat,
             )?;
+        }
+
+        if let Some(w) = gene_weights {
+            apply_gene_weights_to_stat(&mut cocoa_stat, w);
         }
 
         Ok(cocoa_stat)

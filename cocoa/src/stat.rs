@@ -58,6 +58,10 @@ impl CocoaStat {
         }
     }
 
+    pub fn num_topics(&self) -> usize {
+        self.n_topics
+    }
+
     pub fn y1_stat_mut(&mut self, k: usize) -> &mut Mat {
         &mut self.y1_sum_dp_vec[k]
     }
