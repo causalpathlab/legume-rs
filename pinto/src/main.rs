@@ -1,5 +1,6 @@
 mod gene_network;
 mod link_community;
+mod lr_activity;
 mod plot;
 mod propensity;
 mod svd;
@@ -11,6 +12,7 @@ mod test_support;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use link_community::fit::*;
+use lr_activity::{fit_srt_lr_activity, SrtLrActivityArgs};
 use plot::{make_srt_plot, SrtPlotArgs};
 use propensity::*;
 use svd::fit::*;
@@ -248,6 +250,36 @@ enum Commands {
                       written to {out}.plot.manifest.json."
     )]
     Plot(SrtPlotArgs),
+
+    #[command(
+        aliases = ["lra", "test-lr"],
+        about = "Posthoc directional ligand→receptor activity test per link community",
+        long_about = "Tests whether a user-supplied directional ligand→receptor list shows\n\
+                      elevated activity within each link community from a prior `pinto lc`\n\
+                      run. Statistic is conditional entropy H(R_receiver | L_sender)\n\
+                      over edges in each (batch × community × connected component),\n\
+                      aggregated with inverse-variance weights across components and\n\
+                      compared to a gene-swap null matched on (mean expression, global\n\
+                      Moran's I) over the same edge graph.\n\n\
+                      QUICK START:\n\n\
+                      \x20 # After a `pinto lc` run at prefix `out/run1`:\n\
+                      \x20 pinto lr-activity data.h5 -c coords.csv -o out/run1.lr \\\n\
+                      \x20   --lc-prefix out/run1 --lr-pairs cellchat_pairs.tsv\n\n\
+                      INPUTS:\n\n\
+                      \x20 --lc-prefix   prefix of a prior `pinto lc` run (reads its\n\
+                      \x20               {prefix}.link_community.parquet +\n\
+                      \x20               {prefix}.coord_pairs.parquet)\n\
+                      \x20 --lr-pairs    two-column TSV/CSV: ligand gene, receptor gene\n\n\
+                      OUTPUT:\n\n\
+                      \x20 {out}.lr_activity.parquet — columns:\n\
+                      \x20   batch, community, ligand, receptor,\n\
+                      \x20   n_edges, n_components, ce_obs, ce_null_mean, ce_null_sd,\n\
+                      \x20   z, p_empirical, q_bh\n\n\
+                      \x20 The batch column is the shared batch label of an edge's two\n\
+                      \x20 endpoints, or `__meta__` for rows that pool edges across\n\
+                      \x20 batches. BH is applied within each batch stratum."
+    )]
+    LrActivity(SrtLrActivityArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -271,6 +303,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Plot(args) => {
             make_srt_plot(args)?;
+        }
+        Commands::LrActivity(args) => {
+            fit_srt_lr_activity(args)?;
         }
     }
 
