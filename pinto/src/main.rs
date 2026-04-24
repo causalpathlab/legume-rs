@@ -1,5 +1,6 @@
 mod gene_network;
 mod link_community;
+mod plot;
 mod propensity;
 mod svd;
 mod util;
@@ -10,6 +11,7 @@ mod test_support;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use link_community::fit::*;
+use plot::{make_srt_plot, SrtPlotArgs};
 use propensity::*;
 use svd::fit::*;
 
@@ -222,6 +224,30 @@ enum Commands {
                       \x20 {out}.gene_graph.parquet      Gene-gene pairs (gene-pair mode only)"
     )]
     LinkCommunity(SrtLinkCommunityArgs),
+
+    #[command(
+        alias = "p",
+        about = "Plot spatial scatter from pinto lc/dsvd/prop outputs",
+        long_about = "Render publication-quality PDFs (+ SVG/PNG) from pinto\n\
+                      outputs. Works on `pinto lc`, `pinto dsvd`, and\n\
+                      `pinto prop` runs.\n\n\
+                      PLOTS EMITTED (per (level, core)):\n\n\
+                      \x20 community.pdf              one color per community\n\
+                      \x20 propensity.argmax.pdf      size ∝ propensity, color = argmax\n\
+                      \x20 propensity.community{k}.pdf  per-community soft-membership\n\
+                      \x20 mesh.pdf                   cell-cell edges (lc only)\n\
+                      \x20 markers.topic{k}.{gene}.heatmap.pdf      viridis on log1p expr\n\
+                      \x20 markers.topic{k}.{gene}.by-community.pdf color by argmax,\n\
+                      \x20                                          size ∝ log expr\n\n\
+                      Levels: `final`, `L0..Ln` (V-cycle), `bhc`. Cores: one\n\
+                      per batch label (read from coord_pairs.parquet).\n\n\
+                      Outlier handling is robust by default: coordinate\n\
+                      bounds, color scales, and size scales all use\n\
+                      percentile clipping (see --coord-clip, --expr-clip).\n\n\
+                      A JSON manifest listing every emitted file is\n\
+                      written to {out}.plot.manifest.json."
+    )]
+    Plot(SrtPlotArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -242,6 +268,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::LinkCommunity(args) => {
             fit_srt_link_community(args)?;
+        }
+        Commands::Plot(args) => {
+            make_srt_plot(args)?;
         }
     }
 
