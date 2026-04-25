@@ -44,11 +44,19 @@ use render::{
 /// Entry point: auto-discover outputs, partition, emit figures, write
 /// a JSON manifest listing everything produced.
 pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
-    let prefix = args.from.as_ref();
-    let out_prefix = args.out.as_deref().unwrap_or(prefix).to_string();
+    // Auto-detect if --from is a JSON metadata file or a prefix
+    let prefix = if args.from.ends_with(".json") {
+        let meta_path = std::path::Path::new(args.from.as_ref());
+        let meta = crate::util::metadata::PintoMetadata::read(meta_path)?;
+        meta.prefix.into_boxed_str()
+    } else {
+        args.from.clone()
+    };
+
+    let out_prefix = args.out.as_deref().unwrap_or(&prefix).to_string();
 
     let selector = LevelSelector::parse(&args.levels);
-    let levels = discover_levels(prefix, &selector)?;
+    let levels = discover_levels(&prefix, &selector)?;
     info!(
         "discovered {} level(s): {}",
         levels.len(),
@@ -124,10 +132,16 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
     // exclude set from CellTable's known coord column names.
     let excluded: HashSet<Box<str>> = cells.coord_col_names.iter().cloned().collect();
 
+    // Create output subdirectories once before parallel iteration
+    let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
+    std::fs::create_dir_all(&plot_dir)?;
+    let markers_dir = plot_dir.join("markers");
+    std::fs::create_dir_all(&markers_dir)?;
+
     levels
         .par_iter()
         .try_for_each(|level| -> anyhow::Result<()> {
-            let prop_path = level.propensity_path(prefix);
+            let prop_path = level.propensity_path(&prefix);
             let (propensity, dominant, prop_cell_names) = read_propensity(&prop_path, &excluded)?;
 
             // Align propensity rows → global cell index.
@@ -138,7 +152,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
             let colors = ColorBook::new(args, k);
 
             // Per-level link_community (skip if absent — dsvd output).
-            let lc_path = level.link_community_path(prefix);
+            let lc_path = level.link_community_path(&prefix);
             let lc_pair = if !args.no_mesh && lc_path.exists() {
                 Some(read_link_community(&lc_path)?)
             } else {
@@ -146,7 +160,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
             };
 
             // Per-level gene_topic (fall back to global).
-            let level_gt_path = level.gene_topic_path(prefix);
+            let level_gt_path = level.gene_topic_path(&prefix);
             let gene_topic = if level_gt_path.exists() {
                 Some(read_gene_topic(&level_gt_path)?)
             } else {
@@ -156,8 +170,8 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
             for core in &cores {
                 let frame = Frame::new(core, args);
                 let out_stub = |kind: &str| -> PathBuf {
-                    PathBuf::from(format!(
-                        "{out_prefix}.plot.{level}.core{batch}.{kind}",
+                    plot_dir.join(format!(
+                        "{level}.core{batch}.{kind}",
                         level = level.tag,
                         batch = core.name,
                     ))
@@ -432,8 +446,9 @@ fn marker_out_path(
             c => c,
         })
         .collect();
-    PathBuf::from(format!(
-        "{out_prefix}.plot.{level_tag}.core{core_name}.markers.topic{k}.{safe_gname}.{kind}"
+    let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
+    plot_dir.join("markers").join(format!(
+        "{level_tag}.core{core_name}.topic{k}.{safe_gname}.{kind}"
     ))
 }
 

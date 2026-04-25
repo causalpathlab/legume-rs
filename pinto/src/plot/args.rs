@@ -20,7 +20,7 @@ pub struct SrtPlotArgs {
         long,
         short = 'f',
         required = true,
-        help = "Input prefix: reads {prefix}.coord_pairs.parquet, {prefix}.propensity.parquet, {prefix}.link_community.parquet, {prefix}.gene_topic.parquet, and any {prefix}.L{n}.* / {prefix}.bhc.* siblings"
+        help = "Input prefix or JSON metadata file. If path ends with .json or .metadata.json, reads metadata; otherwise discovers {prefix}.*.parquet files"
     )]
     pub from: Box<str>,
 
@@ -57,10 +57,10 @@ pub struct SrtPlotArgs {
     pub max_aspect: f32,
 
     // ─── Scatter / point aesthetics ──────────────────────────────────────
-    #[arg(long, default_value_t = 0.3, help = "Base point size (pt)")]
+    #[arg(long, default_value_t = 1.6, help = "Base point size (pt)")]
     pub point_size: f32,
 
-    #[arg(long, default_value_t = 0.6, help = "Point alpha (0..=1)")]
+    #[arg(long, default_value_t = 1.0, help = "Point alpha (0..=1)")]
     pub alpha: f32,
 
     #[arg(
