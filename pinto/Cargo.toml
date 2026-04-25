@@ -21,6 +21,7 @@ leiden = { workspace = true }
 parquet = { workspace = true }
 plot-utils = { workspace = true }
 regex = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 dashmap = { workspace = true }

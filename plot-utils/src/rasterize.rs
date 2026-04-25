@@ -126,14 +126,14 @@ impl DataBounds {
         }
     }
 
-    /// Data → pixel with y-axis flipped (larger data-y → higher on screen).
+    /// Data → pixel mapping (no y-flip: larger data-y → larger pixel-y).
     /// Shared by every callsite that needs hull vertices or label anchors
     /// aligned with the raster layers.
     #[must_use]
     pub fn to_pixel(&self, p: (f32, f32), ext: Extent) -> (f32, f32) {
         let (w, h) = (ext.w as f32, ext.h as f32);
         let tx = (p.0 - self.xmin) / (self.xmax - self.xmin) * w;
-        let ty = h - (p.1 - self.ymin) / (self.ymax - self.ymin) * h;
+        let ty = (p.1 - self.ymin) / (self.ymax - self.ymin) * h;
         (tx, ty)
     }
 }

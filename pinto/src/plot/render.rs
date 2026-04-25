@@ -37,10 +37,15 @@ pub struct Frame {
 
 impl Frame {
     pub fn new(core: &CoreSpec, args: &SrtPlotArgs) -> Self {
-        let (extent, bounds) = compute_extent(core, args);
-        let radius_px_base = args.point_size * args.dpi as f32 / PT_PER_INCH / 2.0;
-        let label_font_px = 10.0 * args.dpi as f32 / PT_PER_INCH;
-        let stroke_px = args.mesh_stroke * args.dpi as f32 / PT_PER_INCH;
+        // Compute adaptive point size and DPI based on cell density
+        let (point_size, dpi, raw_ar) = compute_adaptive_params(core, args);
+
+        // Now compute extent with the adaptive DPI and aspect ratio
+        let (extent, bounds) = compute_extent(core, args, dpi, raw_ar);
+
+        let radius_px_base = point_size * dpi as f32 / PT_PER_INCH / 2.0;
+        let label_font_px = 10.0 * dpi as f32 / PT_PER_INCH;
+        let stroke_px = args.mesh_stroke * dpi as f32 / PT_PER_INCH;
         Frame {
             bounds,
             extent,
@@ -51,13 +56,75 @@ impl Frame {
     }
 }
 
-/// Derive Extent + (possibly inflated) DataBounds from core bounds +
-/// user width/dpi/max-aspect. Cells outside bounds are kept (they clip
-/// in `to_pixel`); we just refuse to let them warp the frame.
-fn compute_extent(core: &CoreSpec, args: &SrtPlotArgs) -> (Extent, DataBounds) {
+/// Compute adaptive point size and DPI based on cell density.
+///
+/// Density is measured as cells per square inch in the final plot.
+/// Higher density → smaller points + higher DPI to maintain clarity.
+/// Lower density → larger points + standard DPI is sufficient.
+///
+/// Returns (point_size, dpi, aspect_ratio) to avoid recalculation.
+fn compute_adaptive_params(core: &CoreSpec, args: &SrtPlotArgs) -> (f32, u32, f32) {
+    let n_cells = core.n() as f32;
+
+    // Plot area in square inches
+    let width_in = args.width.max(0.5);
     let dx = (core.bounds.xmax - core.bounds.xmin).max(1e-6);
     let dy = (core.bounds.ymax - core.bounds.ymin).max(1e-6);
     let raw_ar = (dy / dx).clamp(1.0 / args.max_aspect, args.max_aspect);
+    let height_in = width_in * raw_ar;
+    let area_sqin = width_in * height_in;
+
+    // Density: cells per square inch
+    let density = n_cells / area_sqin;
+
+    // Reference density: 1000 cells/sqin → baseline params
+    let density_ratio = (density / 1000.0).max(0.01);
+
+    // Point size: inversely proportional to density^0.85 for very aggressive scaling
+    // At very low density (100 cells/sqin), points are ~7.9x larger
+    // At low density (400 cells/sqin), points are ~3.3x larger
+    // At medium density (1k cells/sqin), points = base
+    // At high density (10k cells/sqin), points are ~0.35x smaller
+    let base_point_size = args.point_size;
+    let adaptive_point_size =
+        (base_point_size / density_ratio.powf(0.85)).clamp(0.05, base_point_size * 20.0);
+
+    // DPI: proportional to cbrt(density) to handle extreme densities gracefully
+    // At low density (100 cells/sqin), DPI stays at base
+    // At medium density (1k cells/sqin), DPI = base
+    // At high density (10k cells/sqin), DPI increases ~2.15x
+    // At very high density (100k cells/sqin), DPI increases ~4.64x
+    let base_dpi = args.dpi;
+    let adaptive_dpi = if density_ratio > 1.0 {
+        (base_dpi as f32 * density_ratio.cbrt()).round() as u32
+    } else {
+        base_dpi
+    };
+    let adaptive_dpi = adaptive_dpi.clamp(150, 1200);
+
+    log::debug!(
+        "density-based adaptive params: {:.0} cells/in² → point_size={:.3}pt (base={:.3}), dpi={} (base={})",
+        density,
+        adaptive_point_size,
+        base_point_size,
+        adaptive_dpi,
+        base_dpi
+    );
+
+    (adaptive_point_size, adaptive_dpi, raw_ar)
+}
+
+/// Derive Extent + (possibly inflated) DataBounds from core bounds +
+/// user width/dpi/max-aspect. Cells outside bounds are kept (they clip
+/// in `to_pixel`); we just refuse to let them warp the frame.
+fn compute_extent(
+    core: &CoreSpec,
+    args: &SrtPlotArgs,
+    dpi: u32,
+    raw_ar: f32,
+) -> (Extent, DataBounds) {
+    let dx = (core.bounds.xmax - core.bounds.xmin).max(1e-6);
+    let dy = (core.bounds.ymax - core.bounds.ymin).max(1e-6);
 
     // If the clamp bit, inflate the narrower axis symmetrically so the
     // view still covers all cells.
@@ -81,8 +148,8 @@ fn compute_extent(core: &CoreSpec, args: &SrtPlotArgs) -> (Extent, DataBounds) {
 
     let width_in = args.width.max(0.5);
     let height_in = width_in * raw_ar;
-    let w = (width_in * args.dpi as f32).round() as u32;
-    let h = (height_in * args.dpi as f32).round().max(8.0) as u32;
+    let w = (width_in * dpi as f32).round() as u32;
+    let h = (height_in * dpi as f32).round().max(8.0) as u32;
     (Extent { w, h }, bounds)
 }
 
@@ -265,7 +332,9 @@ pub fn build_propensity_argmax_layers(
             if pts_px.is_empty() {
                 return Ok(empty_layer(format!("C{k}")));
             }
-            let radii = viridis::prop_to_radii(&props, frame.radius_px_base, size_scale);
+            // Cap propensity argmax max size to 1.5× base (same as marker genes)
+            let capped_scale = size_scale.min(1.5);
+            let radii = viridis::prop_to_radii(&props, frame.radius_px_base, capped_scale);
             let color = colors.color(k);
             let png = rasterize_group_png(
                 &pts_px,
@@ -302,7 +371,9 @@ pub fn build_propensity_community_heatmap_layers(
 ) -> anyhow::Result<Vec<TopicLayer>> {
     let props: Vec<f32> = core.cell_ixs.iter().map(|&i| propensity[(i, k)]).collect();
     let pts_px = cells_to_pixels(frame, cells, &core.cell_ixs);
-    let radii = viridis::prop_to_radii(&props, frame.radius_px_base, size_scale);
+    // Cap propensity heatmap max size to 1.5× base (consistent with argmax and markers)
+    let capped_scale = size_scale.min(1.5);
+    let radii = viridis::prop_to_radii(&props, frame.radius_px_base, capped_scale);
     bucket_by_viridis_layers(
         &pts_px, &radii, &props, frame, bins, alpha, shape,
         0.0, /* no clip — propensity is already ∈ [0,1] */
@@ -341,7 +412,9 @@ pub fn build_marker_by_community_layers(
     expr_clip: f32,
 ) -> anyhow::Result<Vec<TopicLayer>> {
     let pts_px = cells_to_pixels(frame, cells, &core.cell_ixs);
-    let radii = viridis::log_expr_to_radii(expr, frame.radius_px_base, size_scale, expr_clip);
+    // Cap marker gene max size to 1.5× base (smaller than propensity's 3×)
+    let marker_scale = size_scale.min(1.5);
+    let radii = viridis::log_expr_to_radii(expr, frame.radius_px_base, marker_scale, expr_clip);
 
     let mut by_k: Vec<(Vec<Pt>, Vec<f32>)> =
         (0..colors.k()).map(|_| (Vec::new(), Vec::new())).collect();
