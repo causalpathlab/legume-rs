@@ -43,8 +43,10 @@ pub enum Palette {
     Category20,
 }
 
+// Okabe-Ito's canonical first stop is black; we drop it because pinto
+// reserves black for the interfaces overlay and uses qualitative palettes
+// for community/topic IDs that should never collide with that signal.
 const OKABE_ITO: &[Rgb] = &[
-    (0, 0, 0),
     (230, 159, 0),
     (86, 180, 233),
     (0, 158, 115),
