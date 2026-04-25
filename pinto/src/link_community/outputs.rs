@@ -1,7 +1,9 @@
 //! Parquet writers, histogram formatter, and per-level output dispatch for the
 //! link community model.
 
-use crate::link_community::profiles::{compute_gene_topic_stat, compute_node_membership};
+use crate::link_community::profiles::{
+    compute_gene_topic_stat, compute_node_membership, shannon_entropy_rows,
+};
 use crate::util::common::*;
 
 /// Write link community assignments to parquet.
@@ -288,11 +290,18 @@ pub fn write_propensity_parquet(
     cell_names: &[Box<str>],
 ) -> anyhow::Result<Mat> {
     let propensity = compute_node_membership(edges, fine_labels, n_cells, k);
-    let topic_names: Vec<Box<str>> = (0..k).map(|i| i.to_string().into_boxed_str()).collect();
-    propensity.to_parquet_with_names(
+
+    let entropy_vec = shannon_entropy_rows(&propensity);
+    let entropy_mat = Mat::from_column_slice(n_cells, 1, entropy_vec.as_slice());
+
+    let mut col_names: Vec<Box<str>> = (0..k).map(|i| i.to_string().into_boxed_str()).collect();
+    col_names.push("entropy".into());
+
+    let combined = concatenate_horizontal(&[propensity.clone(), entropy_mat])?;
+    combined.to_parquet_with_names(
         &format!("{}.propensity.parquet", prefix),
         (Some(cell_names), Some("cell")),
-        Some(&topic_names),
+        Some(&col_names),
     )?;
     Ok(propensity)
 }

@@ -11,6 +11,27 @@ fn test_transfer_labels() {
 }
 
 #[test]
+fn test_shannon_entropy_rows() {
+    let mut p = Mat::zeros(4, 4);
+    // row 0: one-hot → H = 0
+    p[(0, 0)] = 1.0;
+    // row 1: uniform over K=4 → H = ln 4
+    for j in 0..4 {
+        p[(1, j)] = 0.25;
+    }
+    // row 2: [0.5, 0.5, 0, 0] → H = ln 2
+    p[(2, 0)] = 0.5;
+    p[(2, 1)] = 0.5;
+    // row 3: zero row → NaN
+
+    let h = shannon_entropy_rows(&p);
+    assert!(h[0].abs() < 1e-6, "got {}", h[0]);
+    assert!((h[1] - 4.0f32.ln()).abs() < 1e-6, "got {}", h[1]);
+    assert!((h[2] - 2.0f32.ln()).abs() < 1e-6, "got {}", h[2]);
+    assert!(h[3].is_nan(), "got {}", h[3]);
+}
+
+#[test]
 fn test_compute_node_membership() {
     let edges = vec![(0, 1), (0, 2), (1, 2), (2, 3)];
     let membership = vec![0, 0, 1, 1];

@@ -215,6 +215,22 @@ impl SrtInputArgs {
         !self.coord_files.is_empty()
     }
 
+    /// Comma-joined string of coordinate file paths, or `None` when the
+    /// run was without `--coord`. Convenient for metadata.json fields.
+    pub fn coord_files_joined(&self) -> Option<String> {
+        if self.coord_files.is_empty() {
+            None
+        } else {
+            Some(
+                self.coord_files
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+        }
+    }
+
     /// Convert to the internal read args for data loading.
     pub fn to_read_args(&self) -> SRTReadArgs {
         SRTReadArgs {

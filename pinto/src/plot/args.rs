@@ -1,14 +1,27 @@
 //! CLI args for `pinto plot`.
 //!
-//! Auto-discovers pinto output files from a prefix (`--from`),
-//! optionally reading raw expression (`--data`) for marker gene
-//! overlays. Every plot dimension (width, aspect, dot size, etc.) is
-//! user-overridable, with batteries-included defaults.
+//! Auto-discovers pinto output files from a prefix (or its
+//! `{prefix}.metadata.json` manifest, preferred), optionally reading
+//! raw expression (`--data`) for marker-gene overlays AND for per-edge
+//! L→R direction inference in the LR-activity overlay. Every plot
+//! dimension (width, aspect, dot size, etc.) is user-overridable, with
+//! batteries-included defaults.
 //!
 //! Splitting strategy: plots are emitted per-batch × per-data-file
 //! using the `left_batch` / `right_batch` columns already present in
 //! `{prefix}.coord_pairs.parquet` when pinto was fit with multiple
 //! batches or data files. Single-batch runs get a single `all` core.
+//!
+//! Sub-modes:
+//! - Default: community / propensity-argmax / per-community heatmap /
+//!   mesh / marker-gene plots (per (level, core)).
+//! - `--show-interfaces`: per-cell entropy as a grayscale + size
+//!   signal, plus a TSV legend with neighborhood + top-gene info.
+//! - LR-activity overlay (auto when an `lr_activity.json` sidecar is
+//!   linked in the metadata): per significant LR pair, a quiver of
+//!   directional arrows along edges incident to a boundary cell, color
+//!   = diverging blue↔red on per-edge coexpression `sqrt(L·R)` minus
+//!   the per-pair edge mean, plus thin per-community CC convex hulls.
 
 use clap::Args;
 use plot_utils::palette::Palette;
@@ -70,7 +83,7 @@ pub struct SrtPlotArgs {
     )]
     pub size_scale: f32,
 
-    #[arg(long, value_enum, default_value_t = PointShape::Circle, help = "Marker shape")]
+    #[arg(long, value_enum, default_value_t = PointShape::Hexagon, help = "Marker shape")]
     pub point_shape: PointShape,
 
     #[arg(long, value_enum, help = "Qualitative palette (default: auto by K)")]
@@ -143,4 +156,92 @@ pub struct SrtPlotArgs {
 
     #[arg(long, help = "Skip PDF output")]
     pub no_pdf: bool,
+
+    // ─── Interface (high-entropy neighborhood) sub-mode ──────────────────
+    #[arg(
+        long,
+        help = "Render high-entropy cells with their neighborhoods. Requires the propensity parquet to carry an `entropy` column (post-2026-04-25 runs)."
+    )]
+    pub show_interfaces: bool,
+
+    #[arg(
+        long,
+        default_value_t = 0.95,
+        help = "Quantile threshold (within each core) used to pick high-entropy focal cells. 0.95 → top 5%."
+    )]
+    pub entropy_quantile: f32,
+
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Neighborhood depth from each focal cell. 1 = direct neighbors only; 2 = 2-hop (default)."
+    )]
+    pub neighborhood_hops: u8,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "Top-N marker genes per neighbor community shown in interface panel legends."
+    )]
+    pub interface_top_genes: usize,
+
+    #[arg(
+        long,
+        default_value_t = 200,
+        help = "Cap on focal cells rendered per (level, core). When more qualify, top-N by entropy are kept."
+    )]
+    pub max_interface_cells: usize,
+
+    // ─── LR-activity spatial overlay ────────────────────────────────────
+    #[arg(
+        long,
+        help = "Path to a `pinto lr-activity` JSON sidecar.",
+        long_help = "Path to a `pinto lr-activity` JSON sidecar. If omitted,\n\
+                     looks up `outputs.lr_activity` from {prefix}.metadata.json\n\
+                     (or skips silently if neither is present). One LR overlay\n\
+                     PDF is written per (core × significant pair, capped by\n\
+                     --lr-top-pairs)."
+    )]
+    pub lr_activity_json: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Per-stratum cap on significant LR pairs rendered as overlays."
+    )]
+    pub lr_top_pairs: usize,
+
+    #[arg(long, help = "Skip rendering the LR-activity spatial overlays.")]
+    pub no_lr_overlay: bool,
+
+    #[arg(
+        long,
+        default_value_t = 0.9,
+        help = "Propensity threshold above which a cell is `committed` (interior).",
+        long_help = "Cells whose argmax community propensity is ≥ this threshold\n\
+                     are treated as firmly committed (tissue interior) and dropped\n\
+                     from the LR-overlay focal pool. Lower → wider boundary belt;\n\
+                     higher → only the most uncommitted cells qualify. Default 0.9."
+    )]
+    pub lr_commit_threshold: f32,
+
+    #[arg(
+        long,
+        default_value_t = 8,
+        help = "Min cells per community connected-component to render its hull outline."
+    )]
+    pub lr_hull_min_cells: usize,
+
+    #[arg(
+        long,
+        help = "Skip the per-community convex-hull outlines on LR overlays."
+    )]
+    pub no_lr_hulls: bool,
+
+    #[arg(
+        long,
+        default_value_t = 8,
+        help = "Number of bins for the diverging blue↔red coexpression color ramp on LR arrows."
+    )]
+    pub lr_coexpr_bins: usize,
 }

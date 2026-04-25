@@ -1,64 +1,33 @@
 //! Log-scale standardization with robust percentile clipping, plus a
-//! 32-stop viridis LUT. Shared by the marker-gene heatmap plot, the
+//! grayscale color ramp. Shared by the marker-gene heatmap plot, the
 //! per-community propensity heatmap plot, and the size-mapping path
 //! for the community-colored marker plot.
 //!
 //! Every visual mapping (color bin *or* dot radius) runs through this
 //! module so a handful of hot cells cannot blow out either the color
-//! scale or the dot-size scale — the user's outlier concern made
-//! concrete.
+//! scale or the dot-size scale.
+//!
+//! Color mapping: `t = 0` → light gray (near background), `t = 1` →
+//! near-black. "Darker = higher expression" — the user's preference.
 
 use plot_utils::palette::Rgb;
 
-/// 32-stop viridis-like sequential palette. Hand-picked so callers get
-/// reproducible output without pulling in a palette crate. Monotone in
-/// perceived lightness; safe for print.
-const VIRIDIS32: [Rgb; 32] = [
-    (68, 1, 84),
-    (71, 13, 96),
-    (72, 24, 106),
-    (72, 35, 116),
-    (71, 46, 124),
-    (69, 56, 130),
-    (66, 65, 134),
-    (62, 74, 137),
-    (59, 82, 139),
-    (55, 91, 141),
-    (52, 99, 141),
-    (49, 107, 142),
-    (46, 115, 142),
-    (43, 123, 142),
-    (40, 131, 142),
-    (37, 139, 141),
-    (34, 147, 140),
-    (32, 155, 137),
-    (33, 163, 134),
-    (42, 171, 129),
-    (57, 179, 122),
-    (78, 186, 113),
-    (103, 193, 102),
-    (131, 199, 90),
-    (161, 205, 76),
-    (194, 209, 66),
-    (224, 210, 56),
-    (236, 220, 58),
-    (244, 232, 65),
-    (250, 243, 76),
-    (253, 250, 100),
-    (253, 253, 130),
-];
+const GRAY_HIGH: u8 = 235; // t = 0
+const GRAY_LOW: u8 = 25; // t = 1
 
-/// Pick the viridis stop closest to `t` ∈ [0, 1]. Outside the range is
-/// clamped, so callers don't need to pre-bound values.
+/// Grayscale color for `t` ∈ [0, 1]. Outside the range is clamped, so
+/// callers don't need to pre-bound values. Higher `t` → darker.
 #[must_use]
 pub fn viridis_rgb(t: f32) -> Rgb {
     let t = t.clamp(0.0, 1.0);
-    let n = VIRIDIS32.len() as f32;
-    let idx = ((t * (n - 1.0)).round() as usize).min(VIRIDIS32.len() - 1);
-    VIRIDIS32[idx]
+    let v = (GRAY_HIGH as f32 + (GRAY_LOW as f32 - GRAY_HIGH as f32) * t)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    (v, v, v)
 }
 
-/// Viridis color for bin `i` of `bins` (`i` in `0..bins`).
+/// Grayscale color for bin `i` of `bins` (`i` in `0..bins`). Higher
+/// bin → darker.
 #[must_use]
 pub fn viridis_bin(i: usize, bins: usize) -> Rgb {
     let denom = (bins.saturating_sub(1)).max(1) as f32;
@@ -148,25 +117,6 @@ pub fn log_expr_to_radii(values: &[f32], base_size: f32, scale: f32, clip: f32) 
                 base_size * 0.5
             } else {
                 let t = ((v - lo) / range).clamp(0.0, 1.0);
-                base_size + (max_size - base_size) * t
-            }
-        })
-        .collect()
-}
-
-/// Map propensity values ∈ [0, 1] to per-point radii. No log step; the
-/// raw propensity IS the intensity. `base_size` maps to prop = 0,
-/// `base_size * scale` maps to prop = 1.
-#[must_use]
-pub fn prop_to_radii(values: &[f32], base_size: f32, scale: f32) -> Vec<f32> {
-    let max_size = base_size * scale.max(1.0);
-    values
-        .iter()
-        .map(|&v| {
-            if !v.is_finite() {
-                base_size
-            } else {
-                let t = v.clamp(0.0, 1.0);
                 base_size + (max_size - base_size) * t
             }
         })
