@@ -17,7 +17,9 @@
 
 pub mod args;
 pub mod discover;
+pub mod interfaces;
 pub mod load;
+pub mod lr_overlay;
 pub mod markers;
 pub mod partition;
 pub mod render;
@@ -104,10 +106,11 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
         None
     };
 
-    // Open expression data once (read-only; shared across cores / markers).
-    let expr_data = match (&args.data, args.top_markers) {
-        (Some(files), n) if n > 0 => Some(read_expr_data(files)?),
-        _ => None,
+    // Open expression data once. Used by markers (--top-markers > 0) AND
+    // by the LR-overlay direction inference (per-edge L/R expression).
+    let expr_data = match &args.data {
+        Some(files) => Some(read_expr_data(files)?),
+        None => None,
     };
     // Only the cell-name → data-beans column index map is needed at plot
     // time — gene lookup is done per-backend inside `fetch_gene_rows_aligned`
@@ -142,18 +145,25 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
         .par_iter()
         .try_for_each(|level| -> anyhow::Result<()> {
             let prop_path = level.propensity_path(&prefix);
-            let (propensity, dominant, prop_cell_names) = read_propensity(&prop_path, &excluded)?;
+            let (propensity, dominant, entropy_opt, prop_cell_names) =
+                read_propensity(&prop_path, &excluded)?;
 
             // Align propensity rows → global cell index.
             let aligned_dominant = align_dominant(&cells, &prop_cell_names, &dominant);
             let aligned_propensity = align_propensity(&cells, &prop_cell_names, &propensity);
+            let aligned_entropy: Option<Vec<f32>> = entropy_opt
+                .as_ref()
+                .map(|ent| align_entropy(&cells, &prop_cell_names, ent));
 
             let k = aligned_propensity.ncols();
             let colors = ColorBook::new(args, k);
 
             // Per-level link_community (skip if absent — dsvd output).
+            // Loaded eagerly when present because both the mesh plot and
+            // the interfaces sub-mode need the edge list; --no-mesh only
+            // turns off the mesh render, not the edge load.
             let lc_path = level.link_community_path(&prefix);
-            let lc_pair = if !args.no_mesh && lc_path.exists() {
+            let lc_pair = if lc_path.exists() {
                 Some(read_link_community(&lc_path)?)
             } else {
                 None
@@ -239,18 +249,50 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                 }
 
                 // 4. Mesh (cell-cell edges colored by community) if lc data present
-                if let Some((edges, community)) = &lc_pair {
-                    let core_set: HashSet<usize> = core.cell_ixs.iter().copied().collect();
-                    let layers = build_mesh_layers(
-                        &frame,
-                        &cells,
-                        &core_set,
-                        edges,
-                        community,
-                        &colors,
-                        args.mesh_alpha,
-                    )?;
-                    emit_figure(&layers, &frame, args, &out_stub("mesh"), &mut local_emitted)?;
+                if !args.no_mesh {
+                    if let Some((edges, community)) = &lc_pair {
+                        let core_set: HashSet<usize> = core.cell_ixs.iter().copied().collect();
+                        let layers = build_mesh_layers(
+                            &frame,
+                            &cells,
+                            &core_set,
+                            edges,
+                            community,
+                            &colors,
+                            args.mesh_alpha,
+                        )?;
+                        emit_figure(&layers, &frame, args, &out_stub("mesh"), &mut local_emitted)?;
+                    }
+                }
+
+                // 4b. Interfaces (high-entropy + neighborhoods).
+                if args.show_interfaces {
+                    match &aligned_entropy {
+                        Some(ent) => {
+                            let ifc_stub = out_stub("interfaces");
+                            let edges_only = lc_pair.as_ref().map(|(e, _)| e.as_slice());
+                            let written = interfaces::render_interfaces(
+                                args,
+                                &frame,
+                                &cells,
+                                core,
+                                ent,
+                                &aligned_dominant,
+                                edges_only,
+                                gene_topic.as_ref(),
+                                &ifc_stub,
+                            )?;
+                            local_emitted.extend(written);
+                        }
+                        None => {
+                            log::warn!(
+                                "[{}/{}] propensity parquet has no `entropy` column — \
+                                 skipping --show-interfaces; rerun lc/dsvd/prop to populate it",
+                                level.tag,
+                                core.name
+                            );
+                        }
+                    }
                 }
 
                 // 5. Marker genes (requires data + gene_topic)
@@ -303,7 +345,151 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
             Ok(())
         })?;
 
-    let emitted = emitted.into_inner().expect("emitted lock");
+    let mut emitted = emitted.into_inner().expect("emitted lock");
+
+    // Post-pass: LR-activity overlays. Level-independent — one figure per
+    // (core, significant pair), runs after the level loop completes.
+    if !args.no_lr_overlay {
+        if let Some(p) = resolve_lr_json_path(args, &prefix) {
+            match lr_overlay::load_lr_json(&p) {
+                Ok(lr) => {
+                    info!(
+                        "Rendering LR overlays from {} ({} strata, {} results)",
+                        p.display(),
+                        lr.strata.len(),
+                        lr.results.len(),
+                    );
+                    let lr_expr = match (&expr_data, cell_col_index.as_ref()) {
+                        (Some(data), Some(ccol)) => {
+                            lr_overlay::prefetch_lr_expression(data, ccol, &cells, &lr)?
+                        }
+                        _ => {
+                            log::info!(
+                                "LR overlay: --data not provided; arrows use canonical \
+                                 (left → right) orientation only"
+                            );
+                            None
+                        }
+                    };
+
+                    // Load the "final" propensity once. LR-overlay focal
+                    // pool = cells whose top community propensity is
+                    // *below* `commit_threshold` (i.e. uncommitted /
+                    // boundary cells). Cleaner than an entropy quantile.
+                    let (final_aligned_prop, final_dominant): (Option<Mat>, Option<Vec<i64>>) = {
+                        let final_path = PathBuf::from(format!("{prefix}.propensity.parquet"));
+                        if final_path.exists() {
+                            let (prop, dom, _, prop_cell_names) =
+                                load::read_propensity(&final_path, &excluded)?;
+                            let aligned = align_propensity(&cells, &prop_cell_names, &prop);
+                            let aligned_dom = align_dominant(&cells, &prop_cell_names, &dom);
+                            (Some(aligned), Some(aligned_dom))
+                        } else {
+                            (None, None)
+                        }
+                    };
+                    if final_aligned_prop.is_none() {
+                        log::info!(
+                            "LR overlay: no final propensity parquet; arrows will not be \
+                             restricted to boundary cells"
+                        );
+                    }
+
+                    let commit_threshold = args.lr_commit_threshold;
+
+                    // Load the final-level link_community edges once so we
+                    // can expand the boundary belt by one hop (a focal cell
+                    // pulls in all its graph neighbors). Wider belt without
+                    // touching the commitment threshold.
+                    let final_lc_path = PathBuf::from(format!("{prefix}.link_community.parquet"));
+                    let final_lc: Option<(Vec<load::EdgePair>, Vec<i64>)> =
+                        if final_lc_path.exists() {
+                            Some(load::read_link_community(&final_lc_path)?)
+                        } else {
+                            None
+                        };
+
+                    let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
+                    std::fs::create_dir_all(&plot_dir)?;
+                    let per_core: Vec<Vec<PathBuf>> = cores
+                        .par_iter()
+                        .map(|core| -> anyhow::Result<Vec<PathBuf>> {
+                            let frame = render::Frame::new(core, args);
+                            let hulls_by_community: HashMap<
+                                i64,
+                                Vec<plot_utils::svg_emit::TopicLayer>,
+                            > = if args.no_lr_hulls {
+                                HashMap::default()
+                            } else {
+                                match (&final_dominant, final_lc.as_ref()) {
+                                    (Some(dom), Some((edges, _))) => render::community_cc_hulls(
+                                        &frame,
+                                        &cells,
+                                        core,
+                                        dom,
+                                        edges,
+                                        args.lr_hull_min_cells,
+                                    ),
+                                    _ => HashMap::default(),
+                                }
+                            };
+                            let focal_set: Option<HashSet<usize>> =
+                                final_aligned_prop.as_ref().map(|prop| {
+                                    let mut focal: HashSet<usize> =
+                                        interfaces::pick_uncommitted_cells(
+                                            core,
+                                            prop,
+                                            commit_threshold,
+                                        )
+                                        .into_iter()
+                                        .collect();
+                                    if let Some((edges, _)) = final_lc.as_ref() {
+                                        let core_set: HashSet<usize> =
+                                            core.cell_ixs.iter().copied().collect();
+                                        let mut neighbors: HashSet<usize> = HashSet::default();
+                                        for (l, r) in edges {
+                                            let li = match cells.index.get(l) {
+                                                Some(&i) if core_set.contains(&i) => i,
+                                                _ => continue,
+                                            };
+                                            let ri = match cells.index.get(r) {
+                                                Some(&i) if core_set.contains(&i) => i,
+                                                _ => continue,
+                                            };
+                                            if focal.contains(&li) {
+                                                neighbors.insert(ri);
+                                            }
+                                            if focal.contains(&ri) {
+                                                neighbors.insert(li);
+                                            }
+                                        }
+                                        focal.extend(neighbors);
+                                    }
+                                    focal
+                                });
+                            lr_overlay::render_lr_overlays_for_core(
+                                args,
+                                &frame,
+                                &cells,
+                                core,
+                                &lr,
+                                lr_expr.as_ref(),
+                                focal_set.as_ref(),
+                                &hulls_by_community,
+                                &plot_dir,
+                                "lr",
+                            )
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    for v in per_core {
+                        emitted.extend(v);
+                    }
+                }
+                Err(e) => log::warn!("LR-activity JSON load failed ({}): {e}", p.display()),
+            }
+        }
+    }
+
     write_manifest(&out_prefix, &emitted)?;
     info!(
         "wrote {} files total → {}.plot.manifest.json",
@@ -334,6 +520,26 @@ fn align_dominant(cells: &CellTable, prop_cell_names: &[Box<str>], dominant: &[i
     for (src_row, name) in prop_cell_names.iter().enumerate() {
         if let Some(&dst_row) = cells.index.get(name) {
             out[dst_row] = dominant[src_row];
+        }
+    }
+    out
+}
+
+fn resolve_lr_json_path(args: &SrtPlotArgs, prefix: &str) -> Option<PathBuf> {
+    if let Some(p) = args.lr_activity_json.as_deref() {
+        return Some(PathBuf::from(p));
+    }
+    let meta_path = PathBuf::from(format!("{prefix}.metadata.json"));
+    crate::util::metadata::PintoMetadata::read(&meta_path)
+        .ok()
+        .and_then(|m| m.outputs.lr_activity.map(PathBuf::from))
+}
+
+fn align_entropy(cells: &CellTable, prop_cell_names: &[Box<str>], entropy: &[f32]) -> Vec<f32> {
+    let mut out = vec![f32::NAN; cells.n()];
+    for (src_row, name) in prop_cell_names.iter().enumerate() {
+        if let Some(&dst_row) = cells.index.get(name) {
+            out[dst_row] = entropy[src_row];
         }
     }
     out

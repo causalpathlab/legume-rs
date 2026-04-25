@@ -167,14 +167,20 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         .collect();
     let cluster_mat = Mat::from_column_slice(nvertices, 1, &cluster_col);
 
-    // Build propensity column names: propensity_0 .. propensity_{K-1}, cluster
+    // Propensity output (optionally with coordinates)
+    let prop_nk = prop_kn.transpose();
+
+    // Per-vertex Shannon entropy of the propensity distribution.
+    let entropy_vec = crate::link_community::profiles::shannon_entropy_rows(&prop_nk);
+    let entropy_mat = Mat::from_column_slice(nvertices, 1, entropy_vec.as_slice());
+
+    // Build propensity column names: propensity_0 .. propensity_{K-1}, cluster, entropy
     let mut col_names: Vec<Box<str>> = (0..num_clusters)
         .map(|k| format!("propensity_{}", k).into_boxed_str())
         .collect();
     col_names.push("cluster".into());
+    col_names.push("entropy".into());
 
-    // Propensity output (optionally with coordinates)
-    let prop_nk = prop_kn.transpose();
     if let Some(coord_column_names) = &args.coord_column_names {
         info!("Extracting vertex coordinates from coord_pair_file");
 
@@ -205,7 +211,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         }
 
         col_names.extend(coord_column_names.iter().cloned());
-        let combined = concatenate_horizontal(&[prop_nk, cluster_mat, vertex_coords])?;
+        let combined = concatenate_horizontal(&[prop_nk, cluster_mat, entropy_mat, vertex_coords])?;
 
         combined.to_parquet_with_names(
             &(args.out.to_string() + ".propensity.parquet"),
@@ -213,7 +219,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
             Some(&col_names),
         )?;
     } else {
-        let combined = concatenate_horizontal(&[prop_nk, cluster_mat])?;
+        let combined = concatenate_horizontal(&[prop_nk, cluster_mat, entropy_mat])?;
 
         combined.to_parquet_with_names(
             &(args.out.to_string() + ".propensity.parquet"),
@@ -314,6 +320,20 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
             (Some(&genes), Some("gene")),
             (None, Some("topic")),
         )?;
+    }
+
+    {
+        use crate::util::metadata::create_prop_metadata;
+        let meta = create_prop_metadata(
+            args.out.as_ref(),
+            args.expr_data_files.as_deref(),
+            Some(args.coord_pair_file.as_ref()),
+            nvertices,
+            num_clusters,
+        );
+        let meta_path = std::path::PathBuf::from(format!("{}.metadata.json", args.out));
+        meta.write(&meta_path)?;
+        info!("Wrote {}", meta_path.display());
     }
 
     info!("Done");

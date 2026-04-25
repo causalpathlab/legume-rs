@@ -61,7 +61,7 @@ pub fn partition_cells(cells: &CellTable, min_core_cells: usize, coord_clip: f32
 
 /// Replace filename-unsafe characters so a batch label like
 /// `sample 1/slide A` doesn't blow up the output path.
-fn sanitize(s: &str) -> String {
+pub fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | ' ' => '_',

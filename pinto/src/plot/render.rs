@@ -80,14 +80,13 @@ fn compute_adaptive_params(core: &CoreSpec, args: &SrtPlotArgs) -> (f32, u32, f3
     // Reference density: 1000 cells/sqin → baseline params
     let density_ratio = (density / 1000.0).max(0.01);
 
-    // Point size: inversely proportional to density^0.85 for very aggressive scaling
-    // At very low density (100 cells/sqin), points are ~7.9x larger
-    // At low density (400 cells/sqin), points are ~3.3x larger
-    // At medium density (1k cells/sqin), points = base
-    // At high density (10k cells/sqin), points are ~0.35x smaller
+    // Point size: inversely proportional to density^0.85 in dense plots
+    // so crowded scatters don't smear into solid blobs; modestly inflated
+    // in sparse plots so single dots stay visible. Capped at 2× base to
+    // avoid the runaway-balloon look on very sparse cores.
     let base_point_size = args.point_size;
     let adaptive_point_size =
-        (base_point_size / density_ratio.powf(0.85)).clamp(0.05, base_point_size * 20.0);
+        (base_point_size / density_ratio.powf(0.85)).clamp(0.05, base_point_size * 2.0);
 
     // DPI: proportional to cbrt(density) to handle extreme densities gracefully
     // At low density (100 cells/sqin), DPI stays at base
@@ -162,24 +161,29 @@ pub fn emit_figure(
     out_base: &Path,
     emitted: &mut Vec<PathBuf>,
 ) -> anyhow::Result<()> {
-    // Drop empty layers (builders may return placeholders for vacant bins).
+    // Drop layers that carry neither a raster image nor a hull (builders
+    // may return placeholders for vacant bins). Hull-only layers (used
+    // for community-CC outlines) are kept.
     let kept: Vec<TopicLayer> = layers
         .iter()
-        .filter(|l| !l.png.is_empty())
+        .filter(|l| !l.png.is_empty() || l.hull_px.len() >= 3)
         .cloned()
         .collect();
     if kept.is_empty() {
         return Ok(());
     }
+    // Auto-enable hulls when any layer carries hull points; thin stroke
+    // (~0.5 px) so they read as outlines, not visual noise.
+    let any_hull = kept.iter().any(|l| l.hull_px.len() >= 3);
     let svg = emit_svg(
         &kept,
         &SvgOpts {
             width_px: frame.extent.w,
             height_px: frame.extent.h,
-            draw_hulls: false,
+            draw_hulls: any_hull,
             draw_labels: !layers.iter().all(|l| l.label.is_empty()),
             label_font_size_px: frame.label_font_px,
-            hull_stroke_px: frame.stroke_px.max(1.0),
+            hull_stroke_px: 0.5,
             hull_fill_alpha: 0.0,
         },
     );
@@ -332,9 +336,20 @@ pub fn build_propensity_argmax_layers(
             if pts_px.is_empty() {
                 return Ok(empty_layer(format!("C{k}")));
             }
-            // Cap propensity argmax max size to 1.5× base (same as marker genes)
-            let capped_scale = size_scale.min(1.5);
-            let radii = viridis::prop_to_radii(&props, frame.radius_px_base, capped_scale);
+            // Radius scales with propensity from 0 → base_radius. Capping at
+            // base preserves the tight hex tiling (no overlapping neighbors);
+            // ambiguous cells shrink instead of overflowing into neighbors.
+            let _ = size_scale;
+            let radii: Vec<f32> = props
+                .iter()
+                .map(|&v| {
+                    if v.is_finite() {
+                        frame.radius_px_base * v.clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
             let color = colors.color(k);
             let png = rasterize_group_png(
                 &pts_px,
@@ -371,9 +386,19 @@ pub fn build_propensity_community_heatmap_layers(
 ) -> anyhow::Result<Vec<TopicLayer>> {
     let props: Vec<f32> = core.cell_ixs.iter().map(|&i| propensity[(i, k)]).collect();
     let pts_px = cells_to_pixels(frame, cells, &core.cell_ixs);
-    // Cap propensity heatmap max size to 1.5× base (consistent with argmax and markers)
-    let capped_scale = size_scale.min(1.5);
-    let radii = viridis::prop_to_radii(&props, frame.radius_px_base, capped_scale);
+    let _ = size_scale;
+    // Radius scales 0..base with propensity so high-propensity cells fill
+    // their hex tile and ambiguous ones shrink — preserving tight tiling.
+    let radii: Vec<f32> = props
+        .iter()
+        .map(|&v| {
+            if v.is_finite() {
+                frame.radius_px_base * v.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        })
+        .collect();
     bucket_by_viridis_layers(
         &pts_px, &radii, &props, frame, bins, alpha, shape,
         0.0, /* no clip — propensity is already ∈ [0,1] */
@@ -560,6 +585,87 @@ fn bucket_by_viridis_layers(
             })
         })
         .collect()
+}
+
+/// Compute one convex hull (in pixel space) per (community, connected
+/// component) of the within-community subgraph, grouped by community
+/// label. CCs smaller than `min_cc_cells` are skipped. Each
+/// `TopicLayer` carries only `hull_px` + `color`; the SVG emitter
+/// draws them as thin outlines (no fill, no PNG).
+pub fn community_cc_hulls(
+    frame: &Frame,
+    cells: &super::load::CellTable,
+    core: &super::partition::CoreSpec,
+    dominant: &[i64],
+    edges: &[super::load::EdgePair],
+    min_cc_cells: usize,
+) -> HashMap<i64, Vec<TopicLayer>> {
+    use data_beans_alg::union_find::UnionFind;
+    use plot_utils::hull::convex_hull;
+
+    let core_set: HashSet<usize> = core.cell_ixs.iter().copied().collect();
+    let mut uf = UnionFind::new(cells.n());
+    for (l, r) in edges {
+        let li = match cells.index.get(l) {
+            Some(&i) => i,
+            None => continue,
+        };
+        let ri = match cells.index.get(r) {
+            Some(&i) => i,
+            None => continue,
+        };
+        if !core_set.contains(&li) || !core_set.contains(&ri) {
+            continue;
+        }
+        let cl = dominant.get(li).copied().unwrap_or(-1);
+        let cr = dominant.get(ri).copied().unwrap_or(-1);
+        if cl < 0 || cl != cr {
+            continue;
+        }
+        uf.union(li, ri);
+    }
+
+    let mut groups: HashMap<(i64, usize), Vec<usize>> = HashMap::default();
+    for &i in &core.cell_ixs {
+        let c = dominant.get(i).copied().unwrap_or(-1);
+        if c < 0 {
+            continue;
+        }
+        groups.entry((c, uf.find(i))).or_default().push(i);
+    }
+
+    // Per-(community, CC) hull computation — independent across groups.
+    let hulls: Vec<(i64, TopicLayer)> = groups
+        .into_par_iter()
+        .filter_map(|((community, _), members)| {
+            if members.len() < min_cc_cells {
+                return None;
+            }
+            let pts: Vec<Pt> = members
+                .iter()
+                .map(|&i| frame.bounds.to_pixel(cells.coords[i], frame.extent))
+                .collect();
+            let hull = convex_hull(&pts);
+            if hull.len() < 3 {
+                return None;
+            }
+            Some((
+                community,
+                TopicLayer {
+                    label: String::new(),
+                    png: Vec::new(),
+                    hull_px: hull,
+                    label_xy_px: (f32::NAN, f32::NAN),
+                    color: (90, 90, 90),
+                },
+            ))
+        })
+        .collect();
+    let mut out: HashMap<i64, Vec<TopicLayer>> = HashMap::default();
+    for (c, layer) in hulls {
+        out.entry(c).or_default().push(layer);
+    }
+    out
 }
 
 fn empty_layer(label: impl Into<String>) -> TopicLayer {

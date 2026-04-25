@@ -154,20 +154,23 @@ fn strip_left(col: &str) -> &str {
 
 /// Read a propensity parquet. Schemas differ across pinto variants:
 ///
-/// - `pinto lc`: columns named `"0"`, `"1"`, …, `"{K-1}"` (plain numeric
-///   topic ids, no `cluster`, no coord trailer).
-/// - `pinto prop`: columns `propensity_0 … propensity_{K-1}, cluster`,
-///   plus an optional coord trailer (e.g. `pxl_row_in_fullres`,
+/// - `pinto lc`: columns named `"0"`, `"1"`, …, `"{K-1}"` plus optional
+///   `entropy`. No `cluster`, no coord trailer.
+/// - `pinto prop`: columns `propensity_0 … propensity_{K-1}, cluster,
+///   entropy`, plus an optional coord trailer (e.g. `pxl_row_in_fullres`,
 ///   `pxl_col_in_fullres`).
+/// - `pinto dsvd`: columns `0 … K-1, cluster, entropy`.
 ///
 /// This reader keeps every float column as a propensity slot *except*
-/// names that appear in `exclude_cols` (used to drop coord / metadata
-/// columns) and the explicit `cluster` column (consumed separately).
-/// Returns `(propensity[N×K], cluster[N], cell_names[N])`.
+/// names that appear in `exclude_cols`, the explicit `cluster` column,
+/// and the optional `entropy` column (each consumed separately).
+/// Returns `(propensity[N×K], cluster[N], entropy[N] when present, cell_names[N])`.
+pub type PropensityRead = (Mat, Vec<i64>, Option<Vec<f32>>, Vec<Box<str>>);
+
 pub fn read_propensity(
     path: &Path,
     exclude_cols: &HashSet<Box<str>>,
-) -> anyhow::Result<(Mat, Vec<i64>, Vec<Box<str>>)> {
+) -> anyhow::Result<PropensityRead> {
     let MatWithNames { rows, cols, mat } = Mat::from_parquet(
         path.to_str()
             .ok_or_else(|| anyhow::anyhow!("non-UTF8 path: {path:?}"))?,
@@ -175,11 +178,13 @@ pub fn read_propensity(
 
     let mut prop_idx: Vec<usize> = Vec::new();
     let mut cluster_idx: Option<usize> = None;
+    let mut entropy_idx: Option<usize> = None;
     for (j, name) in cols.iter().enumerate() {
-        if name.as_ref() == "cluster" {
-            cluster_idx = Some(j);
-        } else if !exclude_cols.contains(name) {
-            prop_idx.push(j);
+        match name.as_ref() {
+            "cluster" => cluster_idx = Some(j),
+            "entropy" => entropy_idx = Some(j),
+            _ if !exclude_cols.contains(name) => prop_idx.push(j),
+            _ => {}
         }
     }
 
@@ -201,7 +206,9 @@ pub fn read_propensity(
         None => (0..n).map(|i| argmax_row(&mat, i, &prop_idx)).collect(),
     };
 
-    Ok((prop, cluster, rows))
+    let entropy = entropy_idx.map(|j| (0..n).map(|i| mat[(i, j)]).collect::<Vec<_>>());
+
+    Ok((prop, cluster, entropy, rows))
 }
 
 fn argmax_row(mat: &Mat, row: usize, cols: &[usize]) -> i64 {

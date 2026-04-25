@@ -5,7 +5,9 @@ use crate::lr_activity::entropy::{normalised_conditional_entropy, quantile_edges
 use crate::lr_activity::io::*;
 use crate::lr_activity::matcher::{DecoyTarget, MatcherContext};
 use crate::lr_activity::moran::global_moran_per_gene;
-use crate::lr_activity::outputs::{bh_qvalues, write_lr_activity, LrActivityRow};
+use crate::lr_activity::outputs::{
+    bh_qvalues, write_lr_activity, write_lr_activity_json, LrActivityRow, StratumEntry,
+};
 use crate::util::common::*;
 use data_beans::convert::try_open_or_convert;
 use data_beans_alg::union_find::UnionFind;
@@ -14,9 +16,11 @@ use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
 /// Pseudo-batch label written for a single-batch run (no batch labels on file).
-const BATCH_LABEL_ALL: &str = "__all__";
-/// Pseudo-batch label for pooled-across-batches rows emitted in addition to per-batch rows.
-const BATCH_LABEL_META: &str = "__meta__";
+/// Reserved name — collides with a real batch literally named "all".
+pub const BATCH_LABEL_ALL: &str = "all";
+/// Pseudo-batch label for pooled-across-batches rows emitted alongside per-batch rows.
+/// Reserved name — collides with a real batch literally named "pooled".
+pub const BATCH_LABEL_META: &str = "pooled";
 
 pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     let c = &args.common;
@@ -161,17 +165,19 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     //////////////////////////////////////////////////////
     // 7. Stratify edges by (batch, community) and compute
     //////////////////////////////////////////////////////
-    let mut strata: HashMap<(Option<Box<str>>, u32), Vec<usize>> = HashMap::default();
+    let mut strata_idx: HashMap<(Option<Box<str>>, u32), Vec<usize>> = HashMap::default();
     for (idx, (_i, _j, k, b)) in edges.iter().enumerate() {
-        strata.entry((b.clone(), *k)).or_default().push(idx);
+        strata_idx.entry((b.clone(), *k)).or_default().push(idx);
     }
 
     // Collect results into one flat vector, then BH within each batch stratum.
     let mut rows: Vec<LrActivityRow> = Vec::new();
     let base_seed = c.seed;
 
+    let mut strata: Vec<StratumEntry> = Vec::new();
+
     // --- per-batch strata ---
-    let mut stratum_keys: Vec<(Option<Box<str>>, u32)> = strata.keys().cloned().collect();
+    let mut stratum_keys: Vec<(Option<Box<str>>, u32)> = strata_idx.keys().cloned().collect();
     stratum_keys.sort_by(|a, b| {
         let ka = a.0.as_ref().map(|s| s.as_ref()).unwrap_or("");
         let kb = b.0.as_ref().map(|s| s.as_ref()).unwrap_or("");
@@ -179,7 +185,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     });
 
     for stratum_key in &stratum_keys {
-        let edge_ids = &strata[stratum_key];
+        let edge_ids = &strata_idx[stratum_key];
         let (batch_opt, community) = stratum_key.clone();
         let stratum_edges: Vec<(usize, usize)> = edge_ids.iter().map(|&k| edge_only[k]).collect();
         let kept_ccs = extract_kept_ccs(&stratum_edges, n_cells, args.min_cc_edges);
@@ -190,6 +196,13 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
             .as_ref()
             .cloned()
             .unwrap_or_else(|| BATCH_LABEL_ALL.into());
+        let stratum_id = strata.len();
+        strata.push(stratum_entry_from_kept_ccs(
+            &batch_label,
+            community as i32,
+            &kept_ccs,
+            &cell_names,
+        ));
         let mut batch_rows = score_pairs_parallel(
             &batch_label,
             community as i32,
@@ -201,13 +214,25 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
             &known_pairs,
             &real_gene_set,
             &x_gn,
+            &gene_names,
             args,
             base_seed,
+            stratum_id,
         );
         rows.append(&mut batch_rows);
     }
 
     // --- pooled meta rows across batches, one per (community, LR) ---
+    // Skipped when the run has only one real batch: the pooled stratum
+    // would be identical to the per-batch stratum (same edges, same
+    // statistics) and just doubles the JSON / overlay PDFs.
+    let n_real_batches = edges
+        .iter()
+        .filter_map(|e| e.3.as_ref())
+        .collect::<HashSet<_>>()
+        .len();
+    let emit_pooled = n_real_batches > 1;
+
     let mut by_community: HashMap<u32, Vec<usize>> = HashMap::default();
     for (idx, e) in edges.iter().enumerate() {
         by_community.entry(e.2).or_default().push(idx);
@@ -216,13 +241,20 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     community_keys.sort_unstable();
 
     let meta_label: Box<str> = BATCH_LABEL_META.into();
-    for &community in &community_keys {
+    for &community in community_keys.iter().filter(|_| emit_pooled) {
         let edge_ids = &by_community[&community];
         let stratum_edges: Vec<(usize, usize)> = edge_ids.iter().map(|&k| edge_only[k]).collect();
         let kept_ccs = extract_kept_ccs(&stratum_edges, n_cells, args.min_cc_edges);
         if kept_ccs.is_empty() {
             continue;
         }
+        let stratum_id = strata.len();
+        strata.push(stratum_entry_from_kept_ccs(
+            &meta_label,
+            community as i32,
+            &kept_ccs,
+            &cell_names,
+        ));
         let mut meta_rows = score_pairs_parallel(
             &meta_label,
             community as i32,
@@ -234,8 +266,10 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
             &known_pairs,
             &real_gene_set,
             &x_gn,
+            &gene_names,
             args,
             base_seed ^ 0xDEAD_BEEF,
+            stratum_id,
         );
         rows.append(&mut meta_rows);
     }
@@ -252,7 +286,60 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     info!("Writing {} rows to {}", rows.len(), out_path);
     write_lr_activity(&out_path, &rows)?;
 
+    if args.emit_json {
+        let json_path = format!("{}.lr_activity.json", &c.out);
+        let upstream_meta_path = format!("{}.metadata.json", &args.lc_prefix);
+        let upstream_meta =
+            crate::util::metadata::PintoMetadata::read(std::path::Path::new(&upstream_meta_path))
+                .ok();
+        write_lr_activity_json(
+            &json_path,
+            args.lc_prefix.as_ref(),
+            upstream_meta.as_ref().map(|_| upstream_meta_path.as_str()),
+            &rows,
+            &strata,
+            args.json_q_threshold,
+        )?;
+        info!("Wrote {}", json_path);
+
+        // Back-fill the JSON path into the upstream metadata so `pinto plot`
+        // can discover it without an explicit --lr-activity-json flag.
+        if let Some(mut meta) = upstream_meta {
+            meta.outputs.lr_activity = Some(json_path.clone());
+            let _ = meta.write(std::path::Path::new(&upstream_meta_path));
+        }
+    }
+
     Ok(())
+}
+
+fn stratum_entry_from_kept_ccs(
+    batch_label: &str,
+    community: i32,
+    kept_ccs: &[Vec<(usize, usize)>],
+    cell_names: &[Box<str>],
+) -> StratumEntry {
+    let edges_named: Vec<(Box<str>, Box<str>)> = kept_ccs
+        .par_iter()
+        .flat_map_iter(|cc| {
+            cc.iter().map(|&(i, j)| {
+                let l = cell_names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("cell_{i}").into_boxed_str());
+                let r = cell_names
+                    .get(j)
+                    .cloned()
+                    .unwrap_or_else(|| format!("cell_{j}").into_boxed_str());
+                (l, r)
+            })
+        })
+        .collect();
+    StratumEntry {
+        batch: batch_label.to_string().into_boxed_str(),
+        community,
+        edges: edges_named,
+    }
 }
 
 /// Aggregated statistics for one (stratum, LR pair) across its kept CCs.
@@ -439,8 +526,10 @@ fn score_pairs_parallel(
     known_pairs: &HashSet<(usize, usize)>,
     real_gene_set: &HashSet<usize>,
     x_gn: &Mat,
+    gene_names: &[Box<str>],
     args: &SrtLrActivityArgs,
     base_seed: u64,
+    stratum_id: usize,
 ) -> Vec<LrActivityRow> {
     let n_edges_total: usize = kept_ccs.iter().map(|es| es.len()).sum();
     real_pairs
@@ -482,6 +571,8 @@ fn score_pairs_parallel(
                 community,
                 ligand: lname.clone(),
                 receptor: rname.clone(),
+                ligand_resolved: gene_names[*li].clone(),
+                receptor_resolved: gene_names[*ri].clone(),
                 n_edges: n_edges_total as i32,
                 n_components: kept_ccs.len() as i32,
                 ce_obs: agg.ce_obs,
@@ -490,6 +581,7 @@ fn score_pairs_parallel(
                 z: agg.z,
                 p_empirical: agg.p_empirical,
                 q_bh: f32::NAN,
+                stratum_id,
             })
         })
         .collect()
