@@ -4,10 +4,34 @@ use crate::sparse_io::*;
 use log::info;
 use matrix_util::common_io::*;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use zarrs::array::chunk_cache::ChunkCacheDecodedLruChunkLimit;
 use zarrs::array::{data_type, ArraySubset, DataType};
 use zarrs::filesystem::FilesystemStore;
 use zarrs::storage::ReadableListableStorageTraits as ZReadStorageTraits;
+
+/// Decoded-chunk LRU capacity, per zarr array. Keeps cache memory low
+/// per backend so it scales when many backends are loaded simultaneously
+/// (e.g. multi-sample workloads). With ~1 MiB/chunk, default 4 chunks per
+/// array × 4 arrays = ~16 MiB upper bound per backend. Override with the
+/// `LEGUME_ZARR_CACHE_CAP` env var when total backend count × default
+/// would exceed the memory budget.
+const DEFAULT_CACHE_CHUNK_CAP: u64 = 4;
+
+fn cache_chunk_cap() -> u64 {
+    static CAP: OnceLock<u64> = OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("LEGUME_ZARR_CACHE_CAP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_CACHE_CHUNK_CAP)
+    })
+}
+
+const KEY_BY_COLUMN_DATA: &str = "/by_column/data";
+const KEY_BY_COLUMN_INDICES: &str = "/by_column/indices";
+const KEY_BY_ROW_DATA: &str = "/by_row/data";
+const KEY_BY_ROW_INDICES: &str = "/by_row/indices";
 
 use anyhow::anyhow;
 
@@ -42,6 +66,14 @@ pub struct SparseMtxData {
     by_row_indptr: Vec<u64>,
     by_column_indices: Option<Vec<u64>>,
     by_column_data: Option<Vec<f32>>,
+    /// Persistent decoded-chunk LRU caches. `Arc<OnceLock<_>>` so that
+    /// `Clone`s share state, and the underlying `moka::sync::Cache` inside
+    /// `ChunkCacheDecodedLruChunkLimit` is internally thread-safe — no
+    /// external locking needed.
+    by_column_data_cache: Arc<OnceLock<ChunkCacheDecodedLruChunkLimit>>,
+    by_column_indices_cache: Arc<OnceLock<ChunkCacheDecodedLruChunkLimit>>,
+    by_row_data_cache: Arc<OnceLock<ChunkCacheDecodedLruChunkLimit>>,
+    by_row_indices_cache: Arc<OnceLock<ChunkCacheDecodedLruChunkLimit>>,
 }
 
 impl SparseMtxData {
@@ -101,6 +133,10 @@ impl SparseMtxData {
             by_row_indptr: vec![],
             by_column_indices: None,
             by_column_data: None,
+            by_column_data_cache: Arc::new(OnceLock::new()),
+            by_column_indices_cache: Arc::new(OnceLock::new()),
+            by_row_data_cache: Arc::new(OnceLock::new()),
+            by_row_indices_cache: Arc::new(OnceLock::new()),
         };
 
         ret.read_column_indptr()?;
@@ -210,6 +246,10 @@ impl SparseMtxData {
             by_row_indptr: vec![],
             by_column_indices: None,
             by_column_data: None,
+            by_column_data_cache: Arc::new(OnceLock::new()),
+            by_column_indices_cache: Arc::new(OnceLock::new()),
+            by_row_data_cache: Arc::new(OnceLock::new()),
+            by_row_indices_cache: Arc::new(OnceLock::new()),
         })
     }
 
@@ -370,6 +410,95 @@ impl SparseMtxData {
     #[inline]
     fn create_subset(range: Range<u64>) -> ArraySubset {
         ArraySubset::new_with_ranges(&[range])
+    }
+
+    /// Build a decoded-chunk LRU cache for one zarr array. The cache
+    /// short-circuits redundant zstd decompression when the same chunk
+    /// is touched by multiple non-mergeable subset reads, both within
+    /// a single batch and across repeated calls (e.g. minibatch loops
+    /// over the same backend).
+    fn open_chunk_cache(
+        read_store: &Arc<dyn ZReadStorageTraits>,
+        key: &str,
+    ) -> anyhow::Result<ChunkCacheDecodedLruChunkLimit> {
+        use zarrs::array::Array as ZArray;
+        use zarrs::storage::ReadableStorageTraits;
+
+        let storage_readable: Arc<dyn ReadableStorageTraits> = read_store.clone().readable();
+        let arr = ZArray::open(read_store.clone(), key)?;
+        let arr_arc = Arc::new(arr.with_storage(storage_readable));
+        Ok(ChunkCacheDecodedLruChunkLimit::new(
+            arr_arc,
+            cache_chunk_cap(),
+        ))
+    }
+
+    /// Lazily build the persistent decoded-chunk cache. Concurrent
+    /// first-callers may both open the array, but only one `set` wins;
+    /// the loser's cache is dropped and `get` returns the winner.
+    fn cache_for<'a>(
+        &'a self,
+        cell: &'a OnceLock<ChunkCacheDecodedLruChunkLimit>,
+        key: &str,
+    ) -> anyhow::Result<&'a ChunkCacheDecodedLruChunkLimit> {
+        if let Some(cache) = cell.get() {
+            return Ok(cache);
+        }
+        let _ = cell.set(Self::open_chunk_cache(&self.read_store, key)?);
+        Ok(cell.get().expect("OnceLock populated above"))
+    }
+
+    /// Coalesce abutting/overlapping ranges in `tagged` (already sorted
+    /// by `start`), retrieve each merged span through the chunk cache once,
+    /// and emit triplets via `make_triplet(out_tag, inner_idx, value)`.
+    /// Used by both CSC (`out_tag` = output column, `inner_idx` = row) and
+    /// CSR (`out_tag` = output row, `inner_idx` = column) read paths.
+    fn coalesce_and_emit<F>(
+        tagged: &[(u64, u64, u64)],
+        data_cache: &ChunkCacheDecodedLruChunkLimit,
+        indices_cache: &ChunkCacheDecodedLruChunkLimit,
+        inner_bound: usize,
+        make_triplet: F,
+    ) -> anyhow::Result<Vec<(u64, u64, f32)>>
+    where
+        F: Fn(u64, u64, f32) -> (u64, u64, f32),
+    {
+        let opts = zarrs::array::CodecOptions::default();
+        let total: u64 = tagged.iter().map(|&(_, s, e)| e - s).sum();
+        let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity(total as usize);
+
+        let mut i = 0;
+        while i < tagged.len() {
+            let merged_start = tagged[i].1;
+            let mut merged_end = tagged[i].2;
+            let mut j = i + 1;
+            while j < tagged.len() && tagged[j].1 <= merged_end {
+                merged_end = merged_end.max(tagged[j].2);
+                j += 1;
+            }
+
+            let subset = Self::create_subset(merged_start..merged_end);
+            let data_buf = <_ as zarrs::array::chunk_cache::ChunkCache>::retrieve_array_subset::<
+                Vec<f32>,
+            >(data_cache, &subset, &opts)?;
+            let indices_buf = <_ as zarrs::array::chunk_cache::ChunkCache>::retrieve_array_subset::<
+                Vec<u64>,
+            >(indices_cache, &subset, &opts)?;
+
+            for &(tag, start, end) in &tagged[i..j] {
+                let off = (start - merged_start) as usize;
+                let len = (end - start) as usize;
+                for k in 0..len {
+                    let inner = indices_buf[off + k];
+                    let val = data_buf[off + k];
+                    debug_assert!((inner as usize) < inner_bound);
+                    ret.push(make_triplet(tag, inner, val));
+                }
+            }
+
+            i = j;
+        }
+        Ok(ret)
     }
 
     fn _retrieve_vector<V>(&self, key: &str) -> anyhow::Result<Vec<V>>
@@ -788,8 +917,6 @@ impl SparseIo for SparseMtxData {
         &self,
         columns: Self::IndexIter,
     ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
-        use zarrs::array::Array as ZArray;
-
         debug_assert!(!self.by_column_indptr.is_empty());
         let indptr = &self.by_column_indptr;
         let columns_vec = columns.into_iter().collect::<Vec<usize>>();
@@ -804,20 +931,20 @@ impl SparseIo for SparseMtxData {
             .num_columns()
             .ok_or(anyhow!("can't figure out the number of columns"))?;
 
-        let min_start = columns_vec
-            .iter()
-            .map(|&j_data| indptr[j_data])
-            .min()
-            .unwrap_or(0);
-
-        let max_end = columns_vec
-            .iter()
-            .map(|&j_data| indptr[j_data + 1])
-            .max()
-            .unwrap_or(0);
+        let ncol_out = columns_vec.len();
 
         if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indices) {
-            let ncol_out = columns_vec.len();
+            let min_start = columns_vec
+                .iter()
+                .map(|&j_data| indptr[j_data])
+                .min()
+                .unwrap_or(0);
+
+            let max_end = columns_vec
+                .iter()
+                .map(|&j_data| indptr[j_data + 1])
+                .max()
+                .unwrap_or(0);
 
             let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((max_end - min_start) as usize);
 
@@ -832,36 +959,34 @@ impl SparseIo for SparseMtxData {
 
             Ok((nrow, ncol_out, ret))
         } else {
-            let key = "/by_column/data";
-            let data = ZArray::open(self.read_store.clone(), key)?;
-            let key = "/by_column/indices";
-            let indices = ZArray::open(self.read_store.clone(), key)?;
-
-            let ncol_out = columns_vec.len();
-
-            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((max_end - min_start) as usize);
-
-            for (jj, &j_data) in columns_vec.iter().enumerate() {
-                let jj = jj as u64;
-                if j_data < ncol {
-                    // [start, end)
+            // CSC: tag = output column, inner = row. Sort by indptr.start so
+            // abutting/overlapping ranges fuse into one retrieve; across-chunk
+            // redundancy for non-mergeable ranges is caught by the chunk cache.
+            let mut tagged: Vec<(u64, u64, u64)> = columns_vec
+                .iter()
+                .enumerate()
+                .filter_map(|(jj, &j_data)| {
+                    if j_data >= ncol {
+                        return None;
+                    }
                     let start = indptr[j_data];
                     let end = indptr[j_data + 1];
+                    (start < end).then_some((jj as u64, start, end))
+                })
+                .collect();
+            tagged.sort_by_key(|&(_, start, _)| start);
 
-                    if start < end {
-                        let subset = Self::create_subset(start..end);
-                        let data_slice = data.retrieve_array_subset::<Vec<f32>>(&subset)?;
-                        let indices_slice = indices.retrieve_array_subset::<Vec<u64>>(&subset)?;
+            let data_cache = self.cache_for(&self.by_column_data_cache, KEY_BY_COLUMN_DATA)?;
+            let indices_cache =
+                self.cache_for(&self.by_column_indices_cache, KEY_BY_COLUMN_INDICES)?;
 
-                        for k in 0..(end - start) {
-                            let x_ij = data_slice[k as usize];
-                            let ii = indices_slice[k as usize];
-                            debug_assert!((ii as usize) < nrow);
-                            ret.push((ii, jj, x_ij));
-                        }
-                    }
-                }
-            }
+            let ret = Self::coalesce_and_emit(
+                &tagged,
+                data_cache,
+                indices_cache,
+                nrow,
+                |jj, ii, val| (ii, jj, val),
+            )?;
             Ok((nrow, ncol_out, ret))
         }
     }
@@ -873,63 +998,42 @@ impl SparseIo for SparseMtxData {
         &self,
         rows: Self::IndexIter,
     ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
-        use zarrs::array::Array as ZArray;
-
         debug_assert!(!self.by_row_indptr.is_empty());
         let indptr = &self.by_row_indptr;
         debug_assert!(indptr.len() > self.num_rows().unwrap_or(0));
 
         let rows_vec = rows.into_iter().collect::<Vec<_>>();
 
-        let key = "/by_row/data";
-        let data = ZArray::open(self.read_store.clone(), key)?;
-        let key = "/by_row/indices";
-        let indices = ZArray::open(self.read_store.clone(), key)?;
+        let (nrow, ncol) = match (self.num_rows(), self.num_columns()) {
+            (Some(nrow), Some(ncol)) => (nrow, ncol),
+            _ => return Err(anyhow!("Unable to figure out the size of the backend data")),
+        };
+        let nrow_out = rows_vec.len();
 
-        if let (Some(nrow), Some(ncol)) = (self.num_rows(), self.num_columns()) {
-            let nrow_out = rows_vec.len();
-
-            let min_start = rows_vec
-                .iter()
-                .map(|&j_data| indptr[j_data])
-                .min()
-                .unwrap_or(0);
-
-            let max_end = rows_vec
-                .iter()
-                .map(|&j_data| indptr[j_data + 1])
-                .max()
-                .unwrap_or(0);
-
-            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((max_end - min_start) as usize);
-
-            for (ii, &i_data) in rows_vec.iter().enumerate() {
-                let ii = ii as u64;
-                if i_data < nrow {
-                    debug_assert!((i_data + 1) < indptr.len());
-
-                    // [start, end)
-                    let start = indptr[i_data];
-                    let end = indptr[i_data + 1];
-
-                    if start < end {
-                        let subset = Self::create_subset(start..end);
-                        let data_slice = data.retrieve_array_subset::<Vec<f32>>(&subset)?;
-                        let indices_slice = indices.retrieve_array_subset::<Vec<u64>>(&subset)?;
-
-                        for k in 0..(end - start) {
-                            let x_ij = data_slice[k as usize];
-                            let jj = indices_slice[k as usize];
-                            debug_assert!((jj as usize) < ncol);
-                            ret.push((ii, jj, x_ij));
-                        }
-                    }
+        // CSR: tag = output row, inner = column.
+        let mut tagged: Vec<(u64, u64, u64)> = rows_vec
+            .iter()
+            .enumerate()
+            .filter_map(|(ii, &i_data)| {
+                if i_data >= nrow {
+                    return None;
                 }
-            }
-            Ok((nrow_out, ncol, ret))
-        } else {
-            Err(anyhow!("Unable to figure out the size of the backend data"))
-        }
+                debug_assert!((i_data + 1) < indptr.len());
+                let start = indptr[i_data];
+                let end = indptr[i_data + 1];
+                (start < end).then_some((ii as u64, start, end))
+            })
+            .collect();
+        tagged.sort_by_key(|&(_, start, _)| start);
+
+        let data_cache = self.cache_for(&self.by_row_data_cache, KEY_BY_ROW_DATA)?;
+        let indices_cache = self.cache_for(&self.by_row_indices_cache, KEY_BY_ROW_INDICES)?;
+
+        let ret =
+            Self::coalesce_and_emit(&tagged, data_cache, indices_cache, ncol, |ii, jj, val| {
+                (ii, jj, val)
+            })?;
+        Ok((nrow_out, ncol, ret))
     }
     /// CSR data structure in Zarr backend
     ///
