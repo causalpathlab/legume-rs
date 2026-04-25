@@ -87,62 +87,94 @@ pub(crate) fn read_unique_cells_for_edges(
     Ok((x_dn, cell_to_col))
 }
 
-/// Build projection profiles for a specific subset of edges (for lazy component-wise building).
+/// Build projection profiles for a specific subset of edges, chunked and
+/// parallelised across rayon (mirrors the deleted `build_edge_profiles`
+/// pattern that v0.2.0 used for fine-edge profile construction).
+///
+/// Each chunk runs its own `read_unique_cells_for_edges` + per-edge
+/// `basis^T · (x_i + x_j)` projection, then chunks are concatenated in
+/// order. I/O is the dominant cost so chunk size is sized by
+/// `generate_minibatch_intervals` against the gene-axis dimension.
 ///
 /// * `data` - Sparse expression data [n_genes × n_cells]
 /// * `edge_indices` - Subset of edge indices to process
 /// * `all_edges` - Full edge list from KNN graph
 /// * `basis` - Projection basis [n_genes × proj_dim]
+/// * `block_size` - Edges per parallel chunk (None ⇒ adaptive default)
 pub fn build_projection_profiles_for_edges(
     data: &SparseIoVec,
     edge_indices: &[usize],
     all_edges: &[(usize, usize)],
     basis: &Mat,
+    block_size: Option<usize>,
 ) -> anyhow::Result<LinkProfileStore> {
     let n_edges = edge_indices.len();
     let m = basis.ncols(); // proj_dim
+    let basis_t = basis.transpose(); // shared read-only across chunks
 
-    // Extract edges for this subset
+    // Extract this subset's edges once.
     let edges: Vec<(usize, usize)> = edge_indices.iter().map(|&e| all_edges[e]).collect();
 
-    let (x_dn, cell_to_col) = read_unique_cells_for_edges(data, &edges)?;
+    let jobs = generate_minibatch_intervals(n_edges, data.num_rows(), block_size);
+
+    let pb = new_progress_bar(
+        jobs.len() as u64,
+        "Building edges {bar:40} {pos}/{len} blocks ({eta})",
+    );
+
+    let partial_results: Vec<(usize, Vec<f32>)> = jobs
+        .par_iter()
+        .progress_with(pb.clone())
+        .map(|&(lb, ub)| -> anyhow::Result<(usize, Vec<f32>)> {
+            let chunk_edges = &edges[lb..ub];
+            let chunk_size = ub - lb;
+
+            let (x_dn, cell_to_col) = read_unique_cells_for_edges(data, chunk_edges)?;
+
+            let n_genes = x_dn.nrows();
+            let mut chunk_profiles = vec![0.0f32; chunk_size * m];
+            let mut temp_g = DVec::zeros(n_genes);
+
+            for (e_idx, &(ci, cj)) in chunk_edges.iter().enumerate() {
+                let col_i = cell_to_col[&ci];
+                let col_j = cell_to_col[&cj];
+
+                temp_g.fill(0.0);
+
+                let col_slice_i = x_dn.col(col_i);
+                for (&row, &val) in col_slice_i
+                    .row_indices()
+                    .iter()
+                    .zip(col_slice_i.values().iter())
+                {
+                    temp_g[row] += val;
+                }
+
+                let col_slice_j = x_dn.col(col_j);
+                for (&row, &val) in col_slice_j
+                    .row_indices()
+                    .iter()
+                    .zip(col_slice_j.values().iter())
+                {
+                    temp_g[row] += val;
+                }
+
+                let proj = &basis_t * &temp_g;
+                let base = e_idx * m;
+                for (d, &v) in proj.iter().enumerate() {
+                    chunk_profiles[base + d] = v.max(0.0);
+                }
+            }
+
+            Ok((lb, chunk_profiles))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    pb.finish_and_clear();
 
     let mut profiles = vec![0.0f32; n_edges * m];
-    let n_genes = x_dn.nrows();
-    let basis_t = basis.transpose(); // [m × n_genes] — row-major for dot products
-    let mut temp_g = DVec::zeros(n_genes);
-
-    for (e_idx, &(ci, cj)) in edges.iter().enumerate() {
-        let col_i = cell_to_col[&ci];
-        let col_j = cell_to_col[&cj];
-
-        // Dense accumulation: x_i + x_j → temp_g
-        temp_g.fill(0.0);
-
-        let col_slice_i = x_dn.col(col_i);
-        for (&row, &val) in col_slice_i
-            .row_indices()
-            .iter()
-            .zip(col_slice_i.values().iter())
-        {
-            temp_g[row] += val;
-        }
-
-        let col_slice_j = x_dn.col(col_j);
-        for (&row, &val) in col_slice_j
-            .row_indices()
-            .iter()
-            .zip(col_slice_j.values().iter())
-        {
-            temp_g[row] += val;
-        }
-
-        // Project: profile[e] = basis^T * temp_g (BLAS-backed)
-        let proj = &basis_t * &temp_g;
-        let base = e_idx * m;
-        for (d, &v) in proj.iter().enumerate() {
-            profiles[base + d] = v.max(0.0);
-        }
+    for (lb, chunk) in partial_results {
+        let base = lb * m;
+        profiles[base..base + chunk.len()].copy_from_slice(&chunk);
     }
 
     Ok(LinkProfileStore::new(profiles, n_edges, m))
@@ -309,10 +341,14 @@ pub fn compute_node_membership(
 /// `w_g = 1 / (1 + π_g · s̄ · φ(μ_g))`, matching the weighting used during
 /// DC-Poisson clustering so clustering and reporting stay consistent.
 ///
-/// Writes `{out_prefix}.gene_topic.parquet` (genes × K).
+/// Writes `{out_prefix}.gene_topic.parquet` (genes × K). When
+/// `gene_weights` is `Some`, those precomputed NB Fisher-info weights are
+/// applied to the per-(gene, topic) sufficient statistic; otherwise they
+/// are recomputed from the data (extra full-data scan).
 pub fn compute_gene_topic_stat(
     cell_propensity: &Mat,
     data_vec: &SparseIoVec,
+    gene_weights: Option<&[f32]>,
     block_size: Option<usize>,
     out_prefix: &str,
 ) -> anyhow::Result<()> {
@@ -356,9 +392,16 @@ pub fn compute_gene_topic_stat(
         n_1k += n.transpose();
     }
 
-    info!("Applying NB Fisher-info weighting to gene-topic stats");
-    let w = compute_nb_fisher_weights(data_vec, block_size)?;
-    apply_gene_weights(&mut sum_gk, &w);
+    let owned_w;
+    let w: &[f32] = match gene_weights {
+        Some(w) => w,
+        None => {
+            info!("Computing NB Fisher-info weights for gene-topic stats");
+            owned_w = compute_nb_fisher_weights(data_vec, block_size)?;
+            &owned_w
+        }
+    };
+    apply_gene_weights(&mut sum_gk, w);
 
     let mut gamma_param = GammaMatrix::new((n_genes, k), 1.0, 1.0);
     let denom_gk = DVec::from_element(n_genes, 1.0) * &n_1k;
@@ -444,7 +487,7 @@ pub fn compute_propensity_and_gene_topic_stat(
     write_edge_clusters(out_prefix, edges, &edge_membership, &cell_names)?;
 
     // 3. Gene-topic stat
-    compute_gene_topic_stat(&cell_propensity, data_vec, block_size, out_prefix)
+    compute_gene_topic_stat(&cell_propensity, data_vec, None, block_size, out_prefix)
 }
 
 /// Write per-edge K-means cluster assignments to parquet.
@@ -608,11 +651,15 @@ pub fn build_module_expression(
     data: &SparseIoVec,
     module_of_gene: &[Option<usize>],
     n_modules: usize,
+    gene_weights: Option<&[f32]>,
     block_size: Option<usize>,
 ) -> anyhow::Result<(Mat, Vec<f32>)> {
     let n_cells = data.num_columns();
     let n_genes = data.num_rows();
     debug_assert_eq!(module_of_gene.len(), n_genes);
+    if let Some(w) = gene_weights {
+        debug_assert_eq!(w.len(), n_genes);
+    }
 
     // Dense column-major: rows = modules, columns = cells. Small compared
     // to the raw matrix (typical n_modules is 10² range).
@@ -634,8 +681,12 @@ pub fn build_module_expression(
                 let s = x.col(col);
                 for (&row, &val) in s.row_indices().iter().zip(s.values().iter()) {
                     if let Some(m) = module_of_gene[row] {
-                        block_expr[(m, col)] += val;
-                        block_totals[col] += val;
+                        let v = match gene_weights {
+                            Some(w) => val * w[row],
+                            None => val,
+                        };
+                        block_expr[(m, col)] += v;
+                        block_totals[col] += v;
                     }
                 }
             }

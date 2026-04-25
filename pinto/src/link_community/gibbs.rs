@@ -28,6 +28,20 @@ pub struct ComponentGibbsArgs<'a> {
     pub k: usize,
     /// Dirichlet concentration for mixing weight prior (0.0 = no prior).
     pub alpha: f64,
+    /// Optional collapsed K×K incidence (Poisson-Gamma) configuration.
+    pub incidence: Option<IncidenceConfig<'a>>,
+}
+
+/// Frozen incidence configuration consumed by [`run_components`]. Both
+/// `propensity` (`[n_cells × k]` row-major soft propensity, equivalently
+/// the variational `q(c_v)`) and `log_incidence` (`[k × k]` row-major
+/// `E_q[log B[k, k']]` under a `Gamma(a, b)` posterior) are computed once
+/// from the post-V-cycle labels and **frozen** for the duration of EM and
+/// greedy. There is no per-move bookkeeping for either.
+#[derive(Copy, Clone)]
+pub struct IncidenceConfig<'a> {
+    pub propensity: &'a [f64],
+    pub log_incidence: &'a [f64],
 }
 
 /// Collapsed Gibbs sampler for link community assignments.
@@ -70,7 +84,7 @@ impl LinkGibbsSampler {
             for e in 0..n {
                 let old_c = stats.membership[e];
 
-                compute_log_probs_for_edge(e, stats, profiles, None, &mut log_probs);
+                compute_log_probs_for_edge(e, stats, profiles, None, None, &mut log_probs);
 
                 let new_c = sample_categorical_log(&log_probs, &mut self.rng);
 
@@ -154,7 +168,14 @@ impl LinkGibbsSampler {
                     chunk
                         .iter()
                         .map(|&e| {
-                            compute_log_probs_for_edge(e, stats, profiles, lw_ref, &mut log_probs);
+                            compute_log_probs_for_edge(
+                                e,
+                                stats,
+                                profiles,
+                                lw_ref,
+                                None,
+                                &mut log_probs,
+                            );
                             let vertex_seed = sweep_seed ^ (e as u64).wrapping_mul(2654435761);
                             let mut rng = SmallRng::seed_from_u64(vertex_seed);
                             sample_categorical_log(&log_probs, &mut rng)
@@ -235,7 +256,7 @@ impl LinkGibbsSampler {
             for e in 0..n {
                 let old_c = stats.membership[e];
 
-                compute_log_probs_for_edge(e, stats, profiles, lw_ref, &mut log_probs);
+                compute_log_probs_for_edge(e, stats, profiles, lw_ref, None, &mut log_probs);
 
                 let new_c = argmax_log(&log_probs);
 
@@ -279,8 +300,10 @@ impl LinkGibbsSampler {
             edges,
             k,
             alpha,
+            incidence,
         } = args;
         let (k, alpha) = (*k, *alpha);
+        let incidence_cfg = *incidence;
 
         let (comp_labels, n_comp) = connected_components(graph);
         let comp_edges = partition_edges_balanced(edges, &comp_labels, n_comp);
@@ -290,6 +313,18 @@ impl LinkGibbsSampler {
             .iter()
             .map(|indices| profiles.subset(indices))
             .collect();
+
+        // Per-component endpoint slice (indexed by local edge id), only
+        // needed when incidence is enabled — avoids an unconditional
+        // ~|E|·sizeof((usize,usize)) allocation in the baseline path.
+        let local_edges: Vec<Vec<(usize, usize)>> = if incidence_cfg.is_some() {
+            comp_edges
+                .iter()
+                .map(|indices| indices.iter().map(|&e| edges[e]).collect())
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let label = match strategy {
             MoveStrategy::Sample => "EM Gibbs",
@@ -311,6 +346,7 @@ impl LinkGibbsSampler {
         }
 
         let mut global_stats = LinkCommunityStats::from_profiles(profiles, k, membership);
+
         let mut memo_stats: Vec<_> = comp_edges
             .iter()
             .map(|indices| LinkCommunityStats::component_stats(profiles, k, indices, membership))
@@ -361,6 +397,15 @@ impl LinkGibbsSampler {
                         log_size_offset: log_size_offset_snap.clone(),
                     };
 
+                    // Frozen incidence context: log_B and propensity are
+                    // both global read-only weights; the only per-component
+                    // piece is the endpoint slice indexed by local edge id.
+                    let inc_ctx = incidence_cfg.map(|cfg| IncidenceCtx {
+                        edges: local_edges[c].as_slice(),
+                        propensity: cfg.propensity,
+                        log_incidence: cfg.log_incidence,
+                    });
+
                     let comp_seed = sweep_seed ^ (c as u64).wrapping_mul(2654435761);
                     let mut rng = SmallRng::seed_from_u64(comp_seed);
                     let mut log_probs = vec![0.0f64; k];
@@ -373,6 +418,7 @@ impl LinkGibbsSampler {
                             &local_stats,
                             &sub_stores[c],
                             lw_ref,
+                            inc_ctx,
                             &mut log_probs,
                         );
                         let new_c = match strategy {
