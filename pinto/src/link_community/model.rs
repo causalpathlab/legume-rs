@@ -509,15 +509,33 @@ impl LinkCommunityClassifier {
     }
 }
 
+/// Read-only context for the (frozen, VB) incidence term in per-edge scores.
+///
+/// `edges` is indexed the same way as the `LinkProfileStore` rows passed
+/// alongside (so for a per-component sub-store, `edges` is the per-component
+/// `Vec<(usize, usize)>` of cell endpoints, not the global edge list).
+/// `propensity` is row-major `[n_cells × k]`. `log_incidence` is a frozen
+/// row-major `[k × k]` matrix of `E_q[log B[k, k']]`, computed once by
+/// `incidence::fit_log_incidence` from the post-V-cycle labels.
+#[derive(Copy, Clone)]
+pub(crate) struct IncidenceCtx<'a> {
+    pub edges: &'a [(usize, usize)],
+    pub propensity: &'a [f64],
+    pub log_incidence: &'a [f64],
+}
+
 /// Compute log-probabilities for assigning edge `e` to each community.
 ///
 /// `log_probs[t] = score(e, t) - score(e, current_c)`, with the current-community
-/// slot set to 0 so categorical sampling / argmax operate on deltas.
+/// slot set to 0 so categorical sampling / argmax operate on deltas. When
+/// `incidence_ctx` is `Some`, the frozen VB incidence term is folded in
+/// after the standard Poisson + Dirichlet contributions.
 pub(crate) fn compute_log_probs_for_edge(
     e: usize,
     stats: &LinkCommunityStats,
     profiles: &LinkProfileStore,
     log_weights: Option<&[f64]>,
+    incidence_ctx: Option<IncidenceCtx<'_>>,
     log_probs: &mut [f64],
 ) {
     let k = stats.k;
@@ -542,6 +560,18 @@ pub(crate) fn compute_log_probs_for_edge(
             delta += w[t] - lw_current;
         }
         *lp = delta;
+    }
+
+    if let Some(ctx) = incidence_ctx {
+        crate::link_community::incidence::add_incidence_to_log_probs(
+            e,
+            ctx.edges,
+            ctx.propensity,
+            ctx.log_incidence,
+            k,
+            current_c,
+            log_probs,
+        );
     }
 }
 

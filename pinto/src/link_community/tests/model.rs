@@ -93,7 +93,7 @@ fn test_delta_score_matches_hand_computed_dot_product() {
         let current_c = stats.membership[e];
         let (cols, vals) = store.row(e);
         let sf = store.size_factors[e] as f64;
-        compute_log_probs_for_edge(e, &stats, &store, None, &mut log_probs);
+        compute_log_probs_for_edge(e, &stats, &store, None, None, &mut log_probs);
         assert!(
             log_probs[current_c].abs() < 1e-10,
             "current community must score 0"

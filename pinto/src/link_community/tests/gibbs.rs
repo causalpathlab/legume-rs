@@ -166,6 +166,7 @@ fn test_memoized_em_two_components() {
         edges: &edges_list,
         k,
         alpha: 0.0,
+        incidence: None,
     };
     let moves = sampler.run_components_em(&mut membership, &store, &comp_args, 50);
     assert!(moves > 0, "Expected some moves");
@@ -211,6 +212,7 @@ fn test_memoized_em_single_component() {
         edges: &edges,
         k,
         alpha: 0.0,
+        incidence: None,
     };
     let moves = sampler.run_components_em(&mut membership, &store, &comp_args, 10);
     // Should converge (fewer moves over time, similar to parallel test)

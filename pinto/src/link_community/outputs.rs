@@ -301,6 +301,7 @@ pub fn write_propensity_parquet(
 /// cell propensity, gene×topic stats) under a shared prefix. Returns the
 /// propensity matrix so callers can reuse it (e.g. for the BHC consensus
 /// collapse) without recomputing.
+#[allow(clippy::too_many_arguments)]
 pub fn write_partition_outputs(
     prefix: &str,
     edges: &[(usize, usize)],
@@ -309,6 +310,7 @@ pub fn write_partition_outputs(
     k: usize,
     cell_names: &[Box<str>],
     data_vec: &SparseIoVec,
+    gene_weights: Option<&[f32]>,
     block_size: Option<usize>,
 ) -> anyhow::Result<Mat> {
     write_link_communities(
@@ -318,7 +320,7 @@ pub fn write_partition_outputs(
         cell_names,
     )?;
     let propensity = write_propensity_parquet(prefix, edges, fine_labels, n_cells, k, cell_names)?;
-    compute_gene_topic_stat(&propensity, data_vec, block_size, prefix)?;
+    compute_gene_topic_stat(&propensity, data_vec, gene_weights, block_size, prefix)?;
     Ok(propensity)
 }
 
@@ -327,6 +329,7 @@ pub fn write_partition_outputs(
 /// labels here are the super-edge assignment broadcast through
 /// `transfer_labels`, so every per-level file is keyed on the same edge
 /// list as the final output.
+#[allow(clippy::too_many_arguments)]
 pub fn write_level_outputs(
     out_prefix: &str,
     level_idx: usize,
@@ -336,6 +339,7 @@ pub fn write_level_outputs(
     k: usize,
     cell_names: &[Box<str>],
     data_vec: &SparseIoVec,
+    gene_weights: Option<&[f32]>,
     block_size: Option<usize>,
 ) -> anyhow::Result<()> {
     write_partition_outputs(
@@ -346,6 +350,7 @@ pub fn write_level_outputs(
         k,
         cell_names,
         data_vec,
+        gene_weights,
         block_size,
     )?;
     Ok(())
