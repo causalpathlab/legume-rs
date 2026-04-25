@@ -24,7 +24,8 @@
 use crate::gene_network::graph::*;
 use crate::gene_network::modules::{kcore_trim, leiden_gene_modules};
 use crate::link_community::cascade::{run_cascade, CascadeConfig, ModulePairContext, ProfileMode};
-use crate::link_community::gibbs::{ComponentGibbsArgs, LinkGibbsSampler};
+use crate::link_community::gibbs::{ComponentGibbsArgs, IncidenceConfig, LinkGibbsSampler};
+use crate::link_community::incidence::{fit_log_incidence, pack_propensity_row_major};
 use crate::link_community::model::{LinkCommunityStats, LinkProfileStore};
 use crate::link_community::outputs::{
     link_community_histogram, write_bhc_cut, write_bhc_merges, write_partition_outputs,
@@ -141,6 +142,26 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     )?;
 
     //////////////////////////////////////////////////////
+    // 4-pre0. NB Fisher-info gene weights (always)      //
+    //////////////////////////////////////////////////////
+    // Same w_g formula already used at output time in `compute_gene_topic_stat`
+    // and inside the dc_poisson cell coarsening. We compute it once and bake it
+    // into both the module-pair per-cell expression and the projection basis,
+    // so the Gibbs / EM / greedy scoring loop sees gene-weighted profiles
+    // throughout — matching the rest of the data-beans-alg pipeline.
+    info!("Computing NB Fisher-info gene weights for inference...");
+    let gene_weights = compute_nb_fisher_weights(&data_vec, c.block_size)?;
+    info!(
+        "Gene weights w_g: min={:.3e}, mean={:.3e}, max={:.3e}",
+        gene_weights.iter().cloned().fold(f32::INFINITY, f32::min),
+        gene_weights.iter().sum::<f32>() / (gene_weights.len().max(1) as f32),
+        gene_weights
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max),
+    );
+
+    //////////////////////////////////////////////////////
     // 4-pre. Gene network setup (if provided)           //
     //////////////////////////////////////////////////////
     // Resolve gene modules on the SNN-augmented, k-core-trimmed graph before
@@ -180,11 +201,12 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
              --gene-network to use the projection basis."
         );
 
-        info!("Computing per-cell module expression...");
+        info!("Computing per-cell module expression (NB Fisher gene-weighted)...");
         let (module_expr, cell_totals) = build_module_expression(
             &data_vec,
             &basis.module_of_gene,
             basis.n_modules,
+            Some(&gene_weights),
             c.block_size,
         )?;
 
@@ -259,7 +281,11 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     //////////////////////////////////////////////////////
     let proj_basis: Option<Mat> = if module_ctx.is_none() {
         // Projection mode: Gaussian random-projection basis with optional
-        // low-count gene filtering.
+        // low-count gene filtering, then NB Fisher-info gene weighting baked
+        // into the basis: basis'[g, m] = w_g · basis[g, m]. Equivalent to
+        // projecting w·x instead of x — housekeeping / high-mean-high-
+        // dispersion genes get attenuated (w_g → 0), informative genes
+        // recover w_g ≈ 1.
         let mut basis = cell_proj.basis.clone();
         if args.min_gene_count > 0.0 {
             info!("Computing gene totals for filtering...");
@@ -270,6 +296,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 n_kept, n_genes, args.min_gene_count
             );
         }
+        apply_gene_weights(&mut basis, &gene_weights);
         Some(basis)
     } else {
         None
@@ -335,6 +362,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &cascade_cfg,
         &mut sampler,
         &cell_names,
+        Some(&gene_weights),
     )?;
 
     let mut current_labels = cascade_result.fine_labels;
@@ -357,11 +385,45 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         },
         |v| v as f64,
     );
+    // Optional frozen K×K incidence (hybrid: Gibbs for edges, VB for B).
+    // Vertex propensity θ and the variational expected log-incidence
+    // E_q[log B] = ψ(a + S) − log(b + W) are both computed once from the
+    // cascade's fine-resolution labels and held fixed for the duration of
+    // EM + greedy. No per-move bookkeeping; the score gains the term
+    //   Σ_{k'} (θ_L[k'] + θ_R[k']) · log_B[k, k'].
+    let (incidence_propensity, incidence_log_b): (Option<Vec<f64>>, Option<Vec<f64>>) =
+        if !args.no_incidence {
+            let prop_mat = compute_node_membership(edges, &current_labels, n_cells, k);
+            let prop_flat = pack_propensity_row_major(&prop_mat);
+            let log_b = fit_log_incidence(
+                edges,
+                &current_labels,
+                &prop_flat,
+                k,
+                args.incidence_a,
+                args.incidence_b,
+            );
+            info!(
+                "Incidence enabled (VB log B, hybrid Gibbs): K={}, Gamma prior (a={:.3}, b={:.3})",
+                k, args.incidence_a, args.incidence_b
+            );
+            (Some(prop_flat), Some(log_b))
+        } else {
+            (None, None)
+        };
+
     let comp_args = ComponentGibbsArgs {
         graph: &srt_cell_pairs.graph,
         edges,
         k,
         alpha,
+        incidence: match (incidence_propensity.as_deref(), incidence_log_b.as_deref()) {
+            (Some(p), Some(lb)) => Some(IncidenceConfig {
+                propensity: p,
+                log_incidence: lb,
+            }),
+            _ => None,
+        },
     };
 
     let num_fine_sweeps = args.num_em.unwrap_or((args.num_gibbs / 4).max(5));
@@ -439,6 +501,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         k,
         &cell_names,
         &data_vec,
+        Some(&gene_weights),
         c.block_size,
     )?;
 
@@ -492,6 +555,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 n_consensus,
                 &cell_names,
                 &data_vec,
+                Some(&gene_weights),
                 c.block_size,
             )?;
         } else {
@@ -512,7 +576,7 @@ fn build_full_profiles(
     edge_indices: &[usize],
     all_edges: &[(usize, usize)],
     mode: &ProfileMode<'_>,
-    _block_size: Option<usize>,
+    block_size: Option<usize>,
 ) -> anyhow::Result<LinkProfileStore> {
     match *mode {
         ProfileMode::ModulePair {
@@ -527,7 +591,7 @@ fn build_full_profiles(
             basis,
         )),
         ProfileMode::Projection { basis } => {
-            build_projection_profiles_for_edges(data, edge_indices, all_edges, basis)
+            build_projection_profiles_for_edges(data, edge_indices, all_edges, basis, block_size)
         }
     }
 }

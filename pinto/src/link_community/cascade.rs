@@ -73,6 +73,10 @@ pub struct CascadeConfig {
 }
 
 /// Run Gibbs + greedy at every pyramid level, emitting per-level outputs.
+///
+/// `gene_weights` is the precomputed NB Fisher-info weight vector; when
+/// `Some` it is forwarded into per-level `compute_gene_topic_stat` calls
+/// to avoid re-fitting the dispersion trend at every cascade level.
 #[allow(clippy::too_many_arguments)]
 pub fn run_cascade(
     out_prefix: &str,
@@ -83,6 +87,7 @@ pub fn run_cascade(
     cfg: &CascadeConfig,
     sampler: &mut LinkGibbsSampler,
     cell_names: &[Box<str>],
+    gene_weights: Option<&[f32]>,
 ) -> anyhow::Result<CascadeResult> {
     anyhow::ensure!(
         !level_cell_labels.is_empty(),
@@ -228,6 +233,7 @@ pub fn run_cascade(
                 k,
                 cell_names,
                 data_vec,
+                gene_weights,
                 block_size,
             )?;
         }

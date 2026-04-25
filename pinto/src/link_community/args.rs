@@ -212,4 +212,38 @@ pub struct SrtLinkCommunityArgs {
                        pre-V-cycle behaviour). The cascade still runs internally."
     )]
     pub no_level_outputs: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Disable the frozen K×K incidence (RBM-style vertex prior) in the final EM/greedy",
+        long_help = "By default, after the V-cycle pinto derives a vertex propensity\n\
+                       from the cascade-final edge labels and freezes the K×K\n\
+                       incidence matrix\n\
+                           log B[k, k'] = ψ(a + S[k, k']) − log(b + W[k'])\n\
+                       (the variational E_q[log B] under a Gamma(a, b) posterior).\n\
+                       The score in the final EM-Gibbs / greedy gains the term\n\
+                           Σ_{k'} (θ_L[k'] + θ_R[k']) · log B[k, k']\n\
+                       which pulls the labelling toward block-structured solutions\n\
+                       the factorised Poisson rate alone cannot see (~+50% MI on\n\
+                       Xenium leukemia in our smoke test, ~+9% wall time).\n\
+                       Pass --no-incidence to disable."
+    )]
+    pub no_incidence: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        value_name = "A",
+        help = "Gamma prior shape a for the incidence term (no effect with --no-incidence)"
+    )]
+    pub incidence_a: f64,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        value_name = "B",
+        help = "Gamma prior rate b for the incidence term (no effect with --no-incidence)"
+    )]
+    pub incidence_b: f64,
 }
