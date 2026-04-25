@@ -1,6 +1,6 @@
 pub mod args;
-pub mod bhc;
 pub mod cascade;
+pub mod dict_merge;
 pub mod fit;
 pub mod gibbs;
 pub mod incidence;

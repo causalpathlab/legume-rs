@@ -143,7 +143,7 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value = "all",
-        help = "Which levels to plot: `all` | `final` | `bhc` | comma-list like `final,L0,L2,bhc`"
+        help = "Which levels to plot: `all` | `final` | `draft` | comma-list like `final,L0,L2,draft`"
     )]
     pub levels: Box<str>,
 

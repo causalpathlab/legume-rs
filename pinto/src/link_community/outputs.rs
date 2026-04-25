@@ -1,10 +1,12 @@
 //! Parquet writers, histogram formatter, and per-level output dispatch for the
 //! link community model.
 
+use crate::link_community::dict_merge::BhcMerge;
 use crate::link_community::profiles::{
-    compute_gene_topic_stat, compute_node_membership, shannon_entropy_rows,
+    compute_node_membership, fit_gene_topic_param, shannon_entropy_rows, write_gene_topic_param,
 };
 use crate::util::common::*;
+use matrix_param::dmatrix_gamma::GammaMatrix;
 
 /// Write link community assignments to parquet.
 pub fn write_link_communities(
@@ -52,11 +54,14 @@ pub fn write_link_communities(
     Ok(())
 }
 
-/// Write the BHC merge table to parquet. See the BHC module for column semantics.
-pub fn write_bhc_merges(
-    file_path: &str,
-    merges: &[crate::link_community::bhc::BhcMerge],
-) -> anyhow::Result<()> {
+/// Write a dictionary-merge tree (cosine UPGMA) to parquet.
+///
+/// Columns: `merge_id`, `left`, `right`, `score`, `n_leaves`. The `score`
+/// column carries the cosine similarity at which the two children were
+/// merged (higher = more redundant gene programs). Reuses the
+/// `BhcMerge` carrier type from `data_beans_alg::bhc` for the merge tree;
+/// only the score interpretation differs from the original BHC log-BF.
+pub fn write_dict_merges(file_path: &str, merges: &[BhcMerge]) -> anyhow::Result<()> {
     use matrix_util::parquet::*;
     use parquet::basic::Type as ParquetType;
 
@@ -64,15 +69,15 @@ pub fn write_bhc_merges(
     let merge_ids: Vec<i32> = merges.iter().map(|m| m.id).collect();
     let lefts: Vec<i32> = merges.iter().map(|m| m.left).collect();
     let rights: Vec<i32> = merges.iter().map(|m| m.right).collect();
-    let log_bfs: Vec<f64> = merges.iter().map(|m| m.log_bf).collect();
-    let n_edges: Vec<i32> = merges.iter().map(|m| m.n_samples).collect();
+    let scores: Vec<f64> = merges.iter().map(|m| m.log_bf).collect();
+    let n_leaves: Vec<i32> = merges.iter().map(|m| m.n_samples).collect();
 
     let col_names: Vec<Box<str>> = vec![
         "merge_id".into(),
         "left".into(),
         "right".into(),
-        "log_bf".into(),
-        "n_edges".into(),
+        "score".into(),
+        "n_leaves".into(),
     ];
     let col_types = vec![
         ParquetType::INT32,
@@ -98,8 +103,8 @@ pub fn write_bhc_merges(
     parquet_add_numeric_column(&mut row_group, &merge_ids)?;
     parquet_add_numeric_column(&mut row_group, &lefts)?;
     parquet_add_numeric_column(&mut row_group, &rights)?;
-    parquet_add_numeric_column(&mut row_group, &log_bfs)?;
-    parquet_add_numeric_column(&mut row_group, &n_edges)?;
+    parquet_add_numeric_column(&mut row_group, &scores)?;
+    parquet_add_numeric_column(&mut row_group, &n_leaves)?;
 
     row_group.close()?;
     writer.close()?;
@@ -107,8 +112,8 @@ pub fn write_bhc_merges(
     Ok(())
 }
 
-/// Write the BHC consensus cut to parquet.
-pub fn write_bhc_cut(file_path: &str, labels: &[i32]) -> anyhow::Result<()> {
+/// Write the consensus cut from `bhc_cut` to parquet (fine_id → super_id).
+pub fn write_dict_cut(file_path: &str, labels: &[i32]) -> anyhow::Result<()> {
     use matrix_util::parquet::*;
     use parquet::basic::Type as ParquetType;
 
@@ -308,8 +313,9 @@ pub fn write_propensity_parquet(
 
 /// Write the full per-partition output triple (link community edges,
 /// cell propensity, gene×topic stats) under a shared prefix. Returns the
-/// propensity matrix so callers can reuse it (e.g. for the BHC consensus
-/// collapse) without recomputing.
+/// propensity matrix and the fitted gene-topic posterior so callers can
+/// reuse them (e.g. the dictionary-merge step needs the posterior to
+/// compute pairwise topic cosine without re-reading the parquet).
 #[allow(clippy::too_many_arguments)]
 pub fn write_partition_outputs(
     prefix: &str,
@@ -321,7 +327,7 @@ pub fn write_partition_outputs(
     data_vec: &SparseIoVec,
     gene_weights: Option<&[f32]>,
     block_size: Option<usize>,
-) -> anyhow::Result<Mat> {
+) -> anyhow::Result<(Mat, GammaMatrix)> {
     write_link_communities(
         &format!("{}.link_community.parquet", prefix),
         edges,
@@ -329,8 +335,10 @@ pub fn write_partition_outputs(
         cell_names,
     )?;
     let propensity = write_propensity_parquet(prefix, edges, fine_labels, n_cells, k, cell_names)?;
-    compute_gene_topic_stat(&propensity, data_vec, gene_weights, block_size, prefix)?;
-    Ok(propensity)
+    let gene_topic = fit_gene_topic_param(&propensity, data_vec, gene_weights, block_size)?;
+    let gene_names = data_vec.row_names()?;
+    write_gene_topic_param(&gene_topic, &gene_names, prefix)?;
+    Ok((propensity, gene_topic))
 }
 
 /// Write one cascade level's outputs: `.L{l}.link_community.parquet`,

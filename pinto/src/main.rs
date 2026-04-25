@@ -219,7 +219,7 @@ enum Commands {
                       \x20 5. Build sparse edge profiles (projection or module-pair residual)\n\
                       \x20 6. V-cycle Gibbs + greedy across coarsening levels\n\
                       \x20 7. Component-EM + greedy on full fine-resolution edges\n\
-                      \x20 8. Extract cell propensity + gene-topic statistics (+ BHC)\n\n\
+                      \x20 8. Extract cell propensity + gene-topic statistics (+ cosine dictionary merge)\n\n\
                       See `pinto lc --help` for individual flag docs.\n\n\
                       OUTPUT FILES:\n\n\
                       \x20 {out}.propensity.parquet      Cell community membership [N × K]\n\
@@ -234,10 +234,12 @@ enum Commands {
                       \x20 {out}.delta.parquet           Batch effects (multi-sample only)\n\
                       \x20 {out}.gene_graph.parquet      Gene-gene pairs (gene-pair mode only)\n\
                       \x20 {out}.L{l}.*.parquet          Per-cascade-level outputs (unless --no-level-outputs)\n\
-                      \x20 {out}.bhc.*.parquet           BHC consensus outputs (unless --no-bhc)\n\
+                      \x20 {out}.draft.*.parquet         Pre-merge fine partition (when dictionary merge collapsed)\n\
+                      \x20 {out}.dict_merges.parquet     Cosine merge tree over the gene-topic dictionary\n\
+                      \x20 {out}.dict_merges.cut.parquet Fine→super community remap from --merge-cut\n\
                       \x20 {out}.metadata.json           Information-flow manifest:\n\
                       \x20                                lists every parquet, level tags,\n\
-                      \x20                                BHC presence, and (when set by\n\
+                      \x20                                dict-merge presence, and (when set by\n\
                       \x20                                lr-activity) the lr_activity JSON.\n\
                       \x20                                Pass this path to `pinto plot --from`\n\
                       \x20                                or `pinto lr-activity --lc-prefix`."
@@ -253,7 +255,7 @@ enum Commands {
                       that tile tightly; size adapts to plot density.\n\n\
                       INPUT (--from):\n\n\
                       \x20 Pass either a `{prefix}.metadata.json` (preferred —\n\
-                      \x20 carries level list, BHC presence, and any lr_activity\n\
+                      \x20 carries level list, dict-merge presence, and any lr_activity\n\
                       \x20 JSON) or a bare `{prefix}` (auto-globs *.parquet).\n\n\
                       PER-LEVEL × PER-CORE PLOTS (always):\n\n\
                       \x20 community.pdf                one color per community\n\
@@ -296,7 +298,7 @@ enum Commands {
                       \x20            --lr-hull-min-cells, --no-lr-hulls,\n\
                       \x20            --no-lr-overlay, --lr-coexpr-bins,\n\
                       \x20            --lr-activity-json (override path).\n\n\
-                      Levels: `final`, `L0..Ln` (V-cycle), `bhc`. Cores: one\n\
+                      Levels: `final`, `L0..Ln` (V-cycle), `draft`. Cores: one\n\
                       per batch label (read from coord_pairs.parquet).\n\n\
                       Outlier handling is robust by default: coordinate bounds,\n\
                       color scales, and size scales all use percentile clipping\n\
