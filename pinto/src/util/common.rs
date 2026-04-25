@@ -6,7 +6,7 @@ pub use data_beans::sparse_io_vector::*;
 
 pub use indicatif::ParallelProgressIterator;
 pub use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-pub use log::info;
+pub use log::{info, warn};
 pub use matrix_util::clustering::{Kmeans, KmeansArgs};
 pub use matrix_util::common_io::{basename, file_ext, read_lines};
 pub use matrix_util::dmatrix_util::*;

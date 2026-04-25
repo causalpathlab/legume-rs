@@ -320,43 +320,17 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
 
     for (i, coord_file) in args.coord_files.iter().enumerate() {
         info!("Reading coordinate file: {}", coord_file);
-        let ext = file_ext(coord_file)?;
-
-        let is_zarr = coord_file.contains(".zarr");
 
         let MatWithNames {
             rows: coord_cell_names,
             cols: column_names,
             mat: data,
-        } = if is_zarr {
-            data_beans::zarr_io::read_zarr_coordinates(
-                coord_file,
-                &args.coord_columns,
-                &args.coord_column_names,
-            )?
-        } else {
-            match ext.as_ref() {
-                "parquet" => Mat::from_parquet_with_indices_names(
-                    coord_file,
-                    Some(0),
-                    Some(&args.coord_columns),
-                    Some(&args.coord_column_names),
-                )?,
-                _ => {
-                    let header_row = args.header_in_coord.or_else(|| {
-                        detect_header_row(coord_file, &['\t', ',', ' '], &args.coord_column_names)
-                    });
-                    Mat::read_data(
-                        coord_file,
-                        &['\t', ',', ' '],
-                        header_row,
-                        Some(0),
-                        Some(&args.coord_columns),
-                        Some(&args.coord_column_names),
-                    )?
-                }
-            }
-        };
+        } = read_one_coord_file(
+            coord_file,
+            &args.coord_columns,
+            &args.coord_column_names,
+            args.header_in_coord,
+        )?;
 
         let data_cell_names = data_vec[i].column_names()?;
 
@@ -557,6 +531,119 @@ pub fn auto_batch_from_components(graph: &KnnGraph, batch_membership: &mut Vec<B
     n_components
 }
 
+/// Read a single coordinate file with a name-then-index fallback.
+///
+/// Tries to read the requested coordinate columns by name first. When the
+/// caller did NOT pass explicit indices (`user_indices` empty) and the
+/// name-based read either errored or returned fewer than 2 columns, retries
+/// with conventional 0-based indices: `[0, 1]` for zarr (whose
+/// `/cell_summary` array contains only coordinate columns) or `[4, 5]` for
+/// text/parquet files (Visium classic `tissue_positions` layout). Fallback
+/// columns are labeled `x, y`.
+pub fn read_one_coord_file(
+    coord_file: &str,
+    user_indices: &[usize],
+    user_names: &[Box<str>],
+    header_in_coord: Option<usize>,
+) -> anyhow::Result<MatWithNames<Mat>> {
+    let ext = file_ext(coord_file)?;
+    let is_zarr = coord_file.contains(".zarr");
+
+    let read_coord = |indices: &[usize], names: &[Box<str>]| -> anyhow::Result<MatWithNames<Mat>> {
+        if is_zarr {
+            data_beans::zarr_io::read_zarr_coordinates(coord_file, indices, names)
+        } else {
+            match ext.as_ref() {
+                "parquet" => Mat::from_parquet_with_indices_names(
+                    coord_file,
+                    Some(0),
+                    Some(indices),
+                    Some(names),
+                ),
+                _ => {
+                    let header_row = header_in_coord
+                        .or_else(|| detect_header_row(coord_file, &['\t', ',', ' '], names))
+                        .or_else(|| detect_header_row_numeric(coord_file, &['\t', ',', ' ']));
+                    Mat::read_data(
+                        coord_file,
+                        &['\t', ',', ' '],
+                        header_row,
+                        Some(0),
+                        Some(indices),
+                        Some(names),
+                    )
+                }
+            }
+        }
+    };
+
+    let initial = read_coord(user_indices, user_names);
+    let needs_fallback = user_indices.is_empty()
+        && match &initial {
+            Err(_) => true,
+            Ok(r) => r.mat.ncols() < 2,
+        };
+
+    if needs_fallback {
+        // Zarr's `/cell_summary` is coord-only with no barcode column, so
+        // start at index 0. Text/parquet fall back to Visium classic's
+        // `tissue_positions.{csv,parquet}` layout: barcode, in_tissue,
+        // array_row, array_col, pxl_row_in_fullres, pxl_col_in_fullres —
+        // the pixel coordinates sit at indices 4 and 5.
+        let fallback_indices: Vec<usize> = if is_zarr { vec![0, 1] } else { vec![4, 5] };
+        let fallback_names: Vec<Box<str>> = vec!["x".into(), "y".into()];
+        match initial {
+            Err(e) => warn!(
+                "coord file '{}' could not be read by names {:?} ({}); \
+                 falling back to 0-based column indices {:?} as (x, y)",
+                coord_file, user_names, e, fallback_indices,
+            ),
+            Ok(r) => warn!(
+                "coord file '{}' matched {} of the requested column names {:?}; \
+                 falling back to 0-based column indices {:?} as (x, y)",
+                coord_file,
+                r.mat.ncols(),
+                user_names,
+                fallback_indices,
+            ),
+        }
+        let mut r = read_coord(&fallback_indices, &fallback_names)?;
+        // Override column names: the underlying readers use indices when both
+        // are passed and pull names from the file's header/schema, so the
+        // fallback `["x","y"]` hint is otherwise ignored. A stable label is
+        // more useful downstream than whatever the file happened to have.
+        r.cols = fallback_names;
+        Ok(r)
+    } else {
+        initial
+    }
+}
+
+/// Detect a header row by checking whether non-zero columns of the first
+/// line contain any non-numeric tokens. Used as a second-chance fallback
+/// when name-based detection fails (e.g. when reading by index with
+/// non-default headers like `barcode,foo,bar`).
+fn detect_header_row_numeric(file_path: &str, delimiters: &[char]) -> Option<usize> {
+    let first_line = std::io::BufRead::lines(std::io::BufReader::new(
+        std::fs::File::open(file_path).ok()?,
+    ))
+    .next()?
+    .ok()?;
+    let any_non_numeric_after_col0 = first_line
+        .split(delimiters.as_ref())
+        .skip(1)
+        .any(|t| !t.is_empty() && t.parse::<f64>().is_err());
+    if any_non_numeric_after_col0 {
+        info!(
+            "Auto-detected header row in {} (numeric heuristic)",
+            file_path
+        );
+        Some(0)
+    } else {
+        None
+    }
+}
+
 /// Auto-detect whether the first line of a delimited file is a header row
 /// by checking if it contains any of the requested column names.
 fn detect_header_row(
@@ -676,5 +763,97 @@ mod tests {
         let coords = Mat::from_vec(2, 1, vec![0.0, 1.0]);
         let batches = vec!["A"]; // wrong length
         assert!(append_batch_coordinate(&coords, &batches).is_err());
+    }
+
+    use std::io::Write as _;
+
+    fn write_csv(content: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    #[test]
+    fn test_read_one_coord_file_text_match_no_fallback() {
+        let f = write_csv(
+            "barcode,cell_centroid_x,cell_centroid_y\n\
+             cell_a,1.0,2.0\n\
+             cell_b,3.0,4.0\n",
+        );
+        let names: Vec<Box<str>> = vec!["cell_centroid_x".into(), "cell_centroid_y".into()];
+        let r = read_one_coord_file(f.path().to_str().unwrap(), &[], &names, None).unwrap();
+        assert_eq!(r.mat.ncols(), 2);
+        assert_eq!(r.mat.nrows(), 2);
+        assert_eq!(r.cols[0].as_ref(), "cell_centroid_x");
+        assert_eq!(r.cols[1].as_ref(), "cell_centroid_y");
+        assert_eq!(r.rows[0].as_ref(), "cell_a");
+    }
+
+    #[test]
+    fn test_read_one_coord_file_visium_classic_fallback() {
+        // Visium tissue_positions.csv layout: barcode, in_tissue, array_row,
+        // array_col, pxl_row_in_fullres, pxl_col_in_fullres. With unmatched
+        // requested names the fallback must pick indices [4, 5] (the pixel
+        // coords) — NOT [1, 2] (in_tissue, array_row).
+        let f = write_csv(
+            "barcode,in_tissue,array_row,array_col,my_x,my_y\n\
+             cell_a,1,0,0,100.5,200.5\n\
+             cell_b,1,1,1,300.5,400.5\n",
+        );
+        let names: Vec<Box<str>> = vec!["pxl_row_in_fullres".into(), "pxl_col_in_fullres".into()];
+        let r = read_one_coord_file(f.path().to_str().unwrap(), &[], &names, None).unwrap();
+        assert_eq!(r.mat.ncols(), 2);
+        assert_eq!(r.mat[(0, 0)], 100.5);
+        assert_eq!(r.mat[(0, 1)], 200.5);
+        assert_eq!(r.mat[(1, 0)], 300.5);
+        assert_eq!(r.mat[(1, 1)], 400.5);
+        assert_eq!(r.cols[0].as_ref(), "x");
+        assert_eq!(r.cols[1].as_ref(), "y");
+    }
+
+    #[test]
+    fn test_read_one_coord_file_user_indices_skip_fallback() {
+        let f = write_csv(
+            "barcode,foo,bar\n\
+             cell_a,10.0,20.0\n",
+        );
+        let names: Vec<Box<str>> = vec!["nonexistent".into()];
+        let r = read_one_coord_file(f.path().to_str().unwrap(), &[1, 2], &names, None).unwrap();
+        assert_eq!(r.mat.ncols(), 2);
+        // Columns came from indices, so names are "foo","bar" (from header), not "x","y".
+        assert_eq!(r.cols[0].as_ref(), "foo");
+        assert_eq!(r.cols[1].as_ref(), "bar");
+    }
+
+    fn xenium_zarr_path() -> Option<std::path::PathBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("docs/temp/cells.zarr.zip");
+        p.exists().then_some(p)
+    }
+
+    #[test]
+    fn test_read_one_coord_file_zarr_fallback_to_0_1() {
+        // Zarr fixture has cell_centroid_{x,y}; passing only Visium names should
+        // error in the underlying reader and trigger fallback to indices [0, 1].
+        let Some(p) = xenium_zarr_path() else { return };
+        let names: Vec<Box<str>> = vec!["pxl_row_in_fullres".into(), "pxl_col_in_fullres".into()];
+        let r = read_one_coord_file(p.to_str().unwrap(), &[], &names, None).unwrap();
+        assert_eq!(r.mat.ncols(), 2);
+        assert!(r.mat.nrows() > 0);
+        assert_eq!(r.cols[0].as_ref(), "x");
+        assert_eq!(r.cols[1].as_ref(), "y");
+    }
+
+    #[test]
+    fn test_read_one_coord_file_zarr_match_no_fallback() {
+        let Some(p) = xenium_zarr_path() else { return };
+        let names: Vec<Box<str>> = vec!["cell_centroid_x".into(), "cell_centroid_y".into()];
+        let r = read_one_coord_file(p.to_str().unwrap(), &[], &names, None).unwrap();
+        assert_eq!(r.mat.ncols(), 2);
+        assert_eq!(r.cols[0].as_ref(), "cell_centroid_x");
+        assert_eq!(r.cols[1].as_ref(), "cell_centroid_y");
     }
 }
