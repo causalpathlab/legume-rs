@@ -38,10 +38,12 @@ pub enum PointShape {
     Square,
     Triangle,
     Diamond,
+    Hexagon,
 }
 
 impl PointShape {
     const CYCLE: &'static [PointShape] = &[
+        PointShape::Hexagon,
         PointShape::Circle,
         PointShape::Triangle,
         PointShape::Square,
@@ -71,7 +73,6 @@ impl PointShape {
                 pb.close();
             }
             PointShape::Triangle => {
-                // Equilateral pointing up, inscribed in circle of radius r.
                 let h = r * 3f32.sqrt() / 2.0;
                 pb.move_to(0.0, -r);
                 pb.line_to(h, r / 2.0);
@@ -83,6 +84,23 @@ impl PointShape {
                 pb.line_to(r, 0.0);
                 pb.line_to(0.0, r);
                 pb.line_to(-r, 0.0);
+                pb.close();
+            }
+            PointShape::Hexagon => {
+                // Flat-top regular hexagon. Tilted 30° from pointy-top so
+                // neighboring hexagons share full vertical edges and pack
+                // tightly without the star-shaped interstitial gaps that
+                // appear with pointy-top tilings on a square layout.
+                // Apothem = r (matches a Circle of radius r in extent);
+                // circumradius = r · 2/√3.
+                let rr = r * 2.0 / 3f32.sqrt();
+                let a = r;
+                pb.move_to(-rr, 0.0);
+                pb.line_to(-rr / 2.0, -a);
+                pb.line_to(rr / 2.0, -a);
+                pb.line_to(rr, 0.0);
+                pb.line_to(rr / 2.0, a);
+                pb.line_to(-rr / 2.0, a);
                 pb.close();
             }
         }
@@ -256,6 +274,90 @@ pub fn rasterize_segment_layer_png(
     if any {
         if let Some(path) = pb.finish() {
             pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        }
+    }
+    pixmap
+        .encode_png()
+        .map_err(|e| anyhow::anyhow!("PNG encode failed: {e}"))
+}
+
+/// Rasterize a vector field of directed arrows. Each `(start, end)`
+/// segment is drawn as a short shaft + filled triangular arrowhead at
+/// `end`, oriented along the segment direction. Intended for quiver
+/// plots: callers pass *short* segments (e.g. centred on edge midpoints)
+/// rather than full cell-to-cell spans, so the arrows act as direction
+/// glyphs rather than tracks.
+pub fn rasterize_arrow_layer_png(
+    segs_px: &[Segment],
+    ext: Extent,
+    stroke_px: f32,
+    head_len_px: f32,
+    color: Rgb,
+    alpha: f32,
+) -> anyhow::Result<Vec<u8>> {
+    let mut pixmap = Pixmap::new(ext.w, ext.h)
+        .ok_or_else(|| anyhow::anyhow!("pixmap alloc failed ({}x{})", ext.w, ext.h))?;
+
+    let paint = fill_paint(color, alpha);
+    let stroke = Stroke {
+        width: stroke_px.max(0.1),
+        line_cap: LineCap::Round,
+        ..Stroke::default()
+    };
+
+    let head_len = head_len_px.max(1.0);
+    // Slim arrowhead: half-width 35% of length → ~38° tip angle, more
+    // arrow-like than the previous 57°-tip stub.
+    let head_half_w = (head_len * 0.35).max(0.4);
+
+    let mut shafts = PathBuilder::new();
+    let mut heads = PathBuilder::new();
+    let mut any_shaft = false;
+    let mut any_head = false;
+
+    for &((x0, y0), (x1, y1)) in segs_px {
+        if !x0.is_finite() || !y0.is_finite() || !x1.is_finite() || !y1.is_finite() {
+            continue;
+        }
+        let (dx, dy) = (x1 - x0, y1 - y0);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-3 {
+            continue;
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        let (px, py) = (-uy, ux);
+
+        // Shaft stops at the arrowhead base so the head sits cleanly at end.
+        let shaft_len = (len - head_len).max(len * 0.1);
+        let (sx, sy) = (x0 + ux * shaft_len, y0 + uy * shaft_len);
+        shafts.move_to(x0, y0);
+        shafts.line_to(sx, sy);
+        any_shaft = true;
+
+        let (bx, by) = (x1 - ux * head_len, y1 - uy * head_len);
+        let (lx, ly) = (bx + px * head_half_w, by + py * head_half_w);
+        let (rx, ry) = (bx - px * head_half_w, by - py * head_half_w);
+        heads.move_to(x1, y1);
+        heads.line_to(lx, ly);
+        heads.line_to(rx, ry);
+        heads.close();
+        any_head = true;
+    }
+
+    if any_shaft {
+        if let Some(path) = shafts.finish() {
+            pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        }
+    }
+    if any_head {
+        if let Some(path) = heads.finish() {
+            pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
         }
     }
     pixmap
