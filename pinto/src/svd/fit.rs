@@ -342,6 +342,23 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         &c.out,
     )?;
 
+    {
+        use crate::util::metadata::create_dsvd_metadata;
+        let coord_file_str = c.coord_files_joined();
+        let meta = create_dsvd_metadata(
+            &c.out,
+            &c.data_files,
+            coord_file_str.as_deref(),
+            n_cells,
+            data_vec.num_rows(),
+            edges.len(),
+            n_clusters,
+        );
+        let meta_path = std::path::PathBuf::from(format!("{}.metadata.json", c.out));
+        meta.write(&meta_path)?;
+        info!("Wrote {}", meta_path.display());
+    }
+
     info!("Done");
     Ok(())
 }

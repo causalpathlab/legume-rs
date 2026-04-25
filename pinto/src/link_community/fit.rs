@@ -367,6 +367,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     let mut current_labels = cascade_result.fine_labels;
     let mut score_trace: Vec<ScoreEntry> = cascade_result.score_trace;
+    let cascade_level_indices = cascade_result.written_level_indices;
 
     //////////////////////////////////////////////////////
     // 8. Component-EM + greedy on full profiles        //
@@ -508,6 +509,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     info!("Writing score trace...");
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
+    let mut bhc_present_with_consensus = false;
     if bhc_enabled {
         let gamma = args.bhc_gamma.unwrap_or(1.0);
         info!(
@@ -558,12 +560,35 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 Some(&gene_weights),
                 c.block_size,
             )?;
+            bhc_present_with_consensus = true;
         } else {
             info!(
                 "BHC produced no merges; draft outputs at {}.* are the final result",
                 draft_prefix
             );
         }
+    }
+
+    //////////////////////////////////////////////////////
+    // 10. Write metadata.json (information-flow root)  //
+    //////////////////////////////////////////////////////
+    {
+        use crate::util::metadata::create_lc_metadata;
+        let coord_file_str = c.coord_files_joined();
+        let meta = create_lc_metadata(
+            &c.out,
+            &c.data_files,
+            coord_file_str.as_deref(),
+            n_cells,
+            data_vec.num_rows(),
+            edges.len(),
+            k,
+            bhc_present_with_consensus,
+            &cascade_level_indices,
+        );
+        let meta_path = std::path::PathBuf::from(format!("{}.metadata.json", c.out));
+        meta.write(&meta_path)?;
+        info!("Wrote {}", meta_path.display());
     }
 
     info!("Done");

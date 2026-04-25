@@ -59,6 +59,11 @@ pub struct CascadeResult {
     /// One [`ScoreEntry`] per Gibbs + greedy sweep across all cascade levels
     /// that actually ran (skipped too-coarse levels are absent).
     pub score_trace: Vec<ScoreEntry>,
+    /// 0-based indices `l` for which `{out_prefix}.L{l}.*` files were
+    /// actually written (cascade levels that ran AND were not skipped via
+    /// `no_level_outputs`). Empty if the cascade never wrote per-level
+    /// outputs.
+    pub written_level_indices: Vec<usize>,
 }
 
 /// Knobs for the V-cycle cascade: sweep budgets, Dirichlet prior, and
@@ -111,9 +116,9 @@ pub fn run_cascade(
 
     let mut prev_fine_to_super: Option<Vec<usize>> = None;
     let mut prev_super_membership: Option<Vec<usize>> = None;
+    let mut written_level_indices: Vec<usize> = Vec::new();
 
-    for l in 0..n_levels {
-        let cell_labels_l = &level_cell_labels[l];
+    for (l, cell_labels_l) in level_cell_labels.iter().enumerate() {
         let (super_edges_l, fine_to_super_l) = build_super_edges(edges, cell_labels_l);
         let n_super_l = super_edges_l.len();
         let n_cell_groups = 1 + cell_labels_l.iter().copied().max().unwrap_or(0);
@@ -236,6 +241,7 @@ pub fn run_cascade(
                 gene_weights,
                 block_size,
             )?;
+            written_level_indices.push(l);
         }
 
         prev_fine_to_super = Some(fine_to_super_l);
@@ -257,6 +263,7 @@ pub fn run_cascade(
     Ok(CascadeResult {
         fine_labels,
         score_trace,
+        written_level_indices,
     })
 }
 

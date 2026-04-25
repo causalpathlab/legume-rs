@@ -1,5 +1,6 @@
 //! Parquet writer for `pinto lr-activity` results.
 
+use crate::util::common::{HashMap, HashSet};
 use matrix_util::parquet::*;
 use parquet::basic::Type as ParquetType;
 
@@ -8,6 +9,13 @@ pub struct LrActivityRow {
     pub community: i32,
     pub ligand: Box<str>,
     pub receptor: Box<str>,
+    /// Canonical row name of the ligand gene as it appears in the
+    /// expression backend's `row_names()` (e.g. `ENSG00000112715_VEGFA_Gene`).
+    /// May differ from the user-supplied `ligand` (e.g. just `VEGFA`).
+    /// Persisted to the JSON sidecar so downstream tools can look up
+    /// expression directly without re-running the gene resolver.
+    pub ligand_resolved: Box<str>,
+    pub receptor_resolved: Box<str>,
     pub n_edges: i32,
     pub n_components: i32,
     pub ce_obs: f32,
@@ -16,6 +24,9 @@ pub struct LrActivityRow {
     pub z: f32,
     pub p_empirical: f32,
     pub q_bh: f32,
+    /// Index into a per-run `strata` table written to the JSON sidecar.
+    /// Not serialized to parquet — only consulted by the JSON writer.
+    pub stratum_id: usize,
 }
 
 pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Result<()> {
@@ -93,6 +104,115 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
     writer.close()?;
 
     Ok(())
+}
+
+/// One stratum (batch, community) participating in the JSON sidecar.
+/// Edges are encoded as cell-name pairs so the plot consumer can match
+/// them against `coord_pairs.parquet` without depending on edge ordering.
+pub struct StratumEntry {
+    pub batch: Box<str>,
+    pub community: i32,
+    pub edges: Vec<(Box<str>, Box<str>)>,
+}
+
+/// Write the `{out}.lr_activity.json` sidecar. Strata are emitted only
+/// when at least one row in that stratum has `q_bh < q_threshold`.
+pub fn write_lr_activity_json(
+    out_path: &str,
+    lc_prefix: &str,
+    upstream_metadata: Option<&str>,
+    rows: &[LrActivityRow],
+    strata: &[StratumEntry],
+    q_threshold: f32,
+) -> anyhow::Result<()> {
+    use serde_json::{json, Value};
+    let n_total = rows.len();
+    let n_sig = rows
+        .iter()
+        .filter(|r| r.q_bh.is_finite() && r.q_bh < q_threshold)
+        .count();
+
+    let mut sig_strata: HashSet<usize> = HashSet::default();
+    for r in rows {
+        if r.q_bh.is_finite() && r.q_bh < q_threshold {
+            sig_strata.insert(r.stratum_id);
+        }
+    }
+    let keep_strata: Vec<usize> = (0..strata.len())
+        .filter(|s| sig_strata.contains(s))
+        .collect();
+    let renum: HashMap<usize, usize> = keep_strata
+        .iter()
+        .enumerate()
+        .map(|(new_idx, &old_idx)| (old_idx, new_idx))
+        .collect();
+
+    let strata_json: Vec<Value> = keep_strata
+        .iter()
+        .enumerate()
+        .map(|(new_idx, &old_idx)| {
+            let s = &strata[old_idx];
+            let edges_json: Vec<Value> = s
+                .edges
+                .iter()
+                .map(|(l, r)| json!([l.as_ref(), r.as_ref()]))
+                .collect();
+            json!({
+                "stratum_id": new_idx,
+                "batch": s.batch.as_ref(),
+                "community": s.community,
+                "n_edges": s.edges.len(),
+                "edges": edges_json,
+            })
+        })
+        .collect();
+
+    let results_json: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let sig = r.q_bh.is_finite() && r.q_bh < q_threshold;
+            let sid = renum.get(&r.stratum_id).copied();
+            json!({
+                "batch": r.batch.as_ref(),
+                "community": r.community,
+                "ligand": r.ligand.as_ref(),
+                "receptor": r.receptor.as_ref(),
+                "ligand_resolved": r.ligand_resolved.as_ref(),
+                "receptor_resolved": r.receptor_resolved.as_ref(),
+                "n_edges": r.n_edges,
+                "n_components": r.n_components,
+                "ce_obs": opt_finite(r.ce_obs),
+                "ce_null_mean": opt_finite(r.ce_null_mean),
+                "ce_null_sd": opt_finite(r.ce_null_sd),
+                "z": opt_finite(r.z),
+                "p_empirical": opt_finite(r.p_empirical),
+                "q_bh": opt_finite(r.q_bh),
+                "significant": sig,
+                "stratum_id": sid,
+            })
+        })
+        .collect();
+
+    let root = json!({
+        "command": "lr-activity",
+        "lc_prefix": lc_prefix,
+        "input_metadata": upstream_metadata,
+        "n_total_pairs": n_total,
+        "n_significant": n_sig,
+        "q_threshold": q_threshold,
+        "strata": strata_json,
+        "results": results_json,
+    });
+    std::fs::write(out_path, serde_json::to_string_pretty(&root)?)?;
+    Ok(())
+}
+
+fn opt_finite(v: f32) -> serde_json::Value {
+    if v.is_finite() {
+        serde_json::Value::from(v)
+    } else {
+        serde_json::Value::Null
+    }
 }
 
 /// Benjamini-Hochberg FDR within a slice of p-values. Returns `q_bh[i]`

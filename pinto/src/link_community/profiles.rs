@@ -332,6 +332,30 @@ pub fn compute_node_membership(
     counts
 }
 
+/// Row-wise Shannon entropy in nats: H(i) = -Σ_k p[i,k] · ln p[i,k].
+///
+/// Treats `0 · ln 0 = 0`. Rows that sum to ~0 (zero-degree vertices, or
+/// rows that never received any edge mass) are returned as `NaN` so
+/// downstream consumers can filter on `.is_finite()`. Rows are *not*
+/// renormalized — pass in a true probability matrix.
+pub fn shannon_entropy_rows(propensity: &Mat) -> DVec {
+    let n = propensity.nrows();
+    let mut out = DVec::zeros(n);
+    for i in 0..n {
+        let row = propensity.row(i);
+        let mut s = 0.0f32;
+        let mut h = 0.0f32;
+        for &p in row.iter() {
+            s += p;
+            if p > 0.0 {
+                h -= p * p.ln();
+            }
+        }
+        out[i] = if s > 0.0 { h } else { f32::NAN };
+    }
+    out
+}
+
 /// Compute topic-specific gene expression statistics via Poisson-Gamma.
 ///
 /// Given cell propensity [N × K] and sparse expression data [G × N],
@@ -471,12 +495,16 @@ pub fn compute_propensity_and_gene_topic_stat(
         .collect();
     let cluster_mat = Mat::from_column_slice(n_cells, 1, &cluster_col);
 
+    let entropy_vec = shannon_entropy_rows(&cell_propensity);
+    let entropy_mat = Mat::from_column_slice(n_cells, 1, entropy_vec.as_slice());
+
     let mut col_names: Vec<Box<str>> = (0..n_clusters)
         .map(|i| i.to_string().into_boxed_str())
         .collect();
     col_names.push("cluster".into());
+    col_names.push("entropy".into());
 
-    let combined = concatenate_horizontal(&[cell_propensity.clone(), cluster_mat])?;
+    let combined = concatenate_horizontal(&[cell_propensity.clone(), cluster_mat, entropy_mat])?;
     combined.to_parquet_with_names(
         &(out_prefix.to_string() + ".propensity.parquet"),
         (Some(&cell_names), Some("cell")),

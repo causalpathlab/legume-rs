@@ -94,6 +94,20 @@ pub struct SrtLrActivityArgs {
 
     #[arg(
         long,
+        default_value_t = true,
+        help = "Also write a JSON sidecar with per-stratum participating edge lists for significant pairs"
+    )]
+    pub emit_json: bool,
+
+    #[arg(
+        long,
+        default_value_t = 0.1,
+        help = "BH q-value threshold for including a pair's edge participation in the JSON sidecar"
+    )]
+    pub json_q_threshold: f32,
+
+    #[arg(
+        long,
         value_enum,
         default_value_t = NullScheme::Mixed,
         help = "Null scheme: swap both / ligand-only / receptor-only / mixed (default)",
