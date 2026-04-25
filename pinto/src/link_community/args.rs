@@ -17,8 +17,9 @@ pub struct SrtLinkCommunityArgs {
                        is assigned to one of K communities via collapsed Gibbs sampling.\n\
                        Communities capture distinct spatial gene expression patterns.\n\
                        Cell propensity = fraction of edges per community.\n\
-                       Defaulting to 50 and letting the BHC post-pass merge redundant\n\
-                       communities is preferred over under-shooting K."
+                       Defaulting to 50 and letting the cosine dictionary-merge\n\
+                       post-pass collapse redundant gene programs is preferred\n\
+                       over under-shooting K."
     )]
     pub n_communities: usize,
 
@@ -149,54 +150,41 @@ pub struct SrtLinkCommunityArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Disable the post-hoc BHC merge over the K fitted communities",
-        long_help = "By default, after the K link communities are fit, a Bayesian\n\
-                       hierarchical clustering (BHC) pass runs over the K communities.\n\
-                       Every pair is scored with a log Bayes factor under an empirical-\n\
-                       Bayes Dirichlet-Multinomial model centered on the pooled background:\n\
-                           log_bf > 0  → data favor merging the two communities\n\
-                           log_bf < 0  → data favor keeping them separate\n\
-                           log_bf = 0  → indifferent (the natural consensus-cut boundary)\n\
-                       Magnitude is BIC-like (~ n · KL of proportions); compare only\n\
-                       within a single run. Emits four files under the `.bhc.` prefix:\n\
-                         <out>.bhc.merges.parquet — full merge tree (scipy-linkage-style)\n\
-                         <out>.bhc.cut.parquet    — consensus id per original community\n\
-                         <out>.bhc.link_community.parquet — edges remapped to the cut\n\
-                         <out>.bhc.propensity.parquet    — cell×community propensity,\n\
-                                                           columns collapsed by the cut\n\
-                       Cost is negligible. Pass --no-bhc to skip."
+        help = "Disable the post-hoc dictionary-merge over the K fitted communities",
+        long_help = "By default, after the K link communities are fit, an\n\
+                       agglomerative cosine-similarity merge runs over the K\n\
+                       gene-topic posterior columns (the dictionary). Average linkage\n\
+                       (UPGMA) on per-gene-centred log-rates produces a binary merge\n\
+                       tree; the tree is cut at `--merge-cut` to collapse near-\n\
+                       redundant communities into super-communities representing the\n\
+                       same gene program across spatial locations. Emits:\n\
+                         <out>.dict_merges.parquet     — full merge tree\n\
+                         <out>.dict_merges.cut.parquet — fine_id → super_id mapping\n\
+                       and writes the consensus output triple (link_community,\n\
+                       propensity, gene_topic) under the bare `<out>.` prefix.\n\
+                       The pre-merge fine partition is preserved under `<out>.draft.*`\n\
+                       so the location/neighbourhood layer is never lost.\n\
+                       Cost is negligible. Pass --no-merge to skip."
     )]
-    pub no_bhc: bool,
+    pub no_merge: bool,
 
     #[arg(
         long,
-        help = "Total Dirichlet concentration γ for the BHC empirical-Bayes prior",
-        long_help = "Total concentration γ for the empirical-Bayes asymmetric Dirichlet\n\
-                       prior Dir(γ · bg), where bg[g] is the pooled per-gene marginal\n\
-                       (the \"housekeeping baseline\"). Higher γ → stronger prior pull\n\
-                       toward the baseline → smaller |log_bf| per merge. Per-cluster\n\
-                       sufficient stats are rescaled so S_eff = edge_count.\n\
-                       Node log marginal:\n\
-                         f(T, S) = lgamma(γ) − lgamma(γ + S)\n\
-                                 + Σ_g [lgamma(γ·bg[g] + T_g) − lgamma(γ·bg[g])]\n\
-                       Default γ = 1.0 (one effective prior observation; data dominate)."
+        default_value_t = 0.9,
+        help = "Cosine similarity cutoff for the dictionary-merge consensus cut",
+        long_help = "Merges whose cosine similarity ≥ cutoff collapse into one\n\
+                       consensus super-community; merges below the cutoff stay\n\
+                       separate. Cosine is computed on per-gene-centred log-rates\n\
+                       of the NB-Fisher-weighted gene-topic posterior, so it reads\n\
+                       like Pearson on log-fold patterns and is scale-free wrt\n\
+                       housekeeping abundance. Default 0.90 is moderately\n\
+                       conservative (collapses obviously redundant programs while\n\
+                       keeping closely-related cell-state distinctions). Try 0.95\n\
+                       for a finer partition, 0.85 for an aggressive collapse.\n\
+                       Emitted as <out>.dict_merges.cut.parquet with columns\n\
+                       (community, consensus). Empty communities get consensus = −1."
     )]
-    pub bhc_gamma: Option<f64>,
-
-    #[arg(
-        long,
-        default_value_t = 0.0,
-        help = "log BF cutoff for the BHC consensus cut",
-        long_help = "Merges with log_bf ≥ cutoff collapse into one consensus super-\n\
-                       community; merges below the cutoff stay separate. Default 0.0 is\n\
-                       the natural Bayesian break point (positive BF = data prefers\n\
-                       merging). Set higher to be more conservative (only strong-\n\
-                       evidence merges collapse) or lower (e.g. −3) to also collapse\n\
-                       weakly-distinct pairs. Emitted as <out>.bhc.cut.parquet with\n\
-                       columns (community, consensus). Empty communities get\n\
-                       consensus = −1."
-    )]
-    pub bhc_cut: f64,
+    pub merge_cut: f64,
 
     #[arg(
         long,

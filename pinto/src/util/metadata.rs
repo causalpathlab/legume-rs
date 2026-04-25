@@ -57,8 +57,14 @@ pub struct OutputFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_effects: Option<String>,
 
+    /// Cosine dictionary-merge artifacts: the merge tree and its consensus
+    /// cut. Present only when `pinto lc` runs the merge step (skipped with
+    /// `--no-merge` or when no collapses pass `--merge-cut`). The merged
+    /// consensus partition itself is published under the bare prefix
+    /// (`{prefix}.{propensity,link_community,gene_topic}.parquet`), so this
+    /// struct only points at the auxiliary tree + cut files.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bhc: Option<BhcFiles>,
+    pub dict_merge: Option<DictMergeFiles>,
 
     /// JSON sidecar from `pinto lr-activity`. Optional; written only when
     /// the lr-activity subcommand is run against this prefix and emits
@@ -68,11 +74,11 @@ pub struct OutputFiles {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct BhcFiles {
+pub struct DictMergeFiles {
+    /// Full agglomerative merge tree (one row per merge step).
     pub merges: String,
+    /// Per-fine-community consensus label produced by the cut.
     pub cut: String,
-    pub propensity: String,
-    pub link_community: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -130,8 +136,8 @@ pub fn lc_level_info(prefix: &str, level_index: usize) -> LevelInfo {
 /// `{prefix}.L{l}.*` files were actually written by the cascade
 /// (skipped levels are absent — the cascade drops levels with too few
 /// super-edges, so indices need not be contiguous and may not start at 0).
-/// `bhc_present` is `true` when the BHC consensus path wrote
-/// `{prefix}.bhc.*` files.
+/// `merge_present` is `true` when the dictionary-merge step produced a
+/// consensus collapse and its tree + cut files were written.
 #[allow(clippy::too_many_arguments)]
 pub fn create_lc_metadata(
     prefix: &str,
@@ -141,14 +147,12 @@ pub fn create_lc_metadata(
     n_genes: usize,
     n_edges: usize,
     k: usize,
-    bhc_present: bool,
+    merge_present: bool,
     cascade_level_indices: &[usize],
 ) -> PintoMetadata {
-    let bhc = bhc_present.then(|| BhcFiles {
-        merges: format!("{prefix}.bhc.merges.parquet"),
-        cut: format!("{prefix}.bhc.cut.parquet"),
-        propensity: format!("{prefix}.bhc.propensity.parquet"),
-        link_community: format!("{prefix}.bhc.link_community.parquet"),
+    let dict_merge = merge_present.then(|| DictMergeFiles {
+        merges: format!("{prefix}.dict_merges.parquet"),
+        cut: format!("{prefix}.dict_merges.cut.parquet"),
     });
 
     let mut levels: Vec<LevelInfo> = cascade_level_indices
@@ -168,16 +172,6 @@ pub fn create_lc_metadata(
         gene_topic: Some(format!("{prefix}.gene_topic.parquet")),
         entropy_present: Some(true),
     });
-    if bhc_present {
-        levels.push(LevelInfo {
-            tag: "bhc".to_string(),
-            level_index: tail_index + 1,
-            propensity: format!("{prefix}.bhc.propensity.parquet"),
-            link_community: format!("{prefix}.bhc.link_community.parquet"),
-            gene_topic: Some(format!("{prefix}.bhc.gene_topic.parquet")),
-            entropy_present: Some(true),
-        });
-    }
 
     PintoMetadata {
         command: "lc".to_string(),
@@ -197,7 +191,7 @@ pub fn create_lc_metadata(
             gene_topic: Some(format!("{prefix}.gene_topic.parquet")),
             scores: Some(format!("{prefix}.scores.parquet")),
             batch_effects: None,
-            bhc,
+            dict_merge,
             lr_activity: None,
         },
         levels: Some(levels),
@@ -242,7 +236,7 @@ pub fn create_dsvd_metadata(
             gene_topic: Some(format!("{prefix}.gene_topic.parquet")),
             scores: None,
             batch_effects: Some(format!("{prefix}.delta.parquet")),
-            bhc: None,
+            dict_merge: None,
             lr_activity: None,
         },
         levels: Some(levels),
@@ -286,7 +280,7 @@ pub fn create_prop_metadata(
             gene_topic: None,
             scores: None,
             batch_effects: None,
-            bhc: None,
+            dict_merge: None,
             lr_activity: None,
         },
         levels: Some(levels),
@@ -320,18 +314,17 @@ mod tests {
         assert_eq!(back.n_cells, 1234);
         assert_eq!(back.n_communities, Some(12));
         let levels = back.levels.expect("levels");
-        // 3 cascade levels + final + bhc = 5
-        assert_eq!(levels.len(), 5);
+        // 3 cascade levels + final = 4 (final carries the merged consensus)
+        assert_eq!(levels.len(), 4);
         assert_eq!(levels[0].tag, "L0");
         assert_eq!(levels[3].tag, "final");
-        assert_eq!(levels[4].tag, "bhc");
         assert_eq!(levels[3].entropy_present, Some(true));
-        assert!(back.outputs.bhc.is_some());
+        assert!(back.outputs.dict_merge.is_some());
         assert!(back.outputs.lr_activity.is_none());
     }
 
     #[test]
-    fn metadata_roundtrip_lc_no_bhc() {
+    fn metadata_roundtrip_lc_no_merge() {
         let dir = tempfile::tempdir().unwrap();
         let prefix = dir.path().join("run").to_string_lossy().to_string();
         let data_files: Vec<Box<str>> = vec!["a.h5".into()];
@@ -343,6 +336,6 @@ mod tests {
         // 0 cascade levels + final = 1
         assert_eq!(levels.len(), 1);
         assert_eq!(levels[0].tag, "final");
-        assert!(back.outputs.bhc.is_none());
+        assert!(back.outputs.dict_merge.is_none());
     }
 }

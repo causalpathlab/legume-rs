@@ -19,16 +19,18 @@
 //!   7. V-cycle: per-level super-edges → profiles → Gibbs + greedy with
 //!      coarse→fine label inheritance; per-level outputs are written inside
 //!   8. Single-pass component-EM + greedy on full profiles
-//!   9. Final outputs (propensity, gene_topic, link_community, scores, BHC)
+//!   9. Final outputs (propensity, gene_topic, link_community, scores,
+//!      cosine dictionary merge)
 
 use crate::gene_network::graph::*;
 use crate::gene_network::modules::{kcore_trim, leiden_gene_modules};
 use crate::link_community::cascade::{run_cascade, CascadeConfig, ModulePairContext, ProfileMode};
+use crate::link_community::dict_merge::cosine_merge;
 use crate::link_community::gibbs::{ComponentGibbsArgs, IncidenceConfig, LinkGibbsSampler};
 use crate::link_community::incidence::{fit_log_incidence, pack_propensity_row_major};
 use crate::link_community::model::{LinkCommunityStats, LinkProfileStore};
 use crate::link_community::outputs::{
-    link_community_histogram, write_bhc_cut, write_bhc_merges, write_partition_outputs,
+    link_community_histogram, write_dict_cut, write_dict_merges, write_partition_outputs,
     write_score_trace, ScoreEntry,
 };
 use crate::link_community::profiles::*;
@@ -37,6 +39,7 @@ use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
 use crate::util::input::*;
+use data_beans_alg::bhc::bhc_cut;
 use data_beans_alg::random_projection::RandProjOps;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -483,18 +486,18 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     //////////////////////////////////////////////////////
     // 9. Extract and write final outputs               //
     //////////////////////////////////////////////////////
-    let bhc_enabled = !args.no_bhc;
-    let draft_prefix = if bhc_enabled {
+    let merge_enabled = !args.no_merge;
+    let draft_prefix = if merge_enabled {
         format!("{}.draft", c.out)
     } else {
         c.out.to_string()
     };
     info!(
         "Writing {} outputs (propensity, gene_topic, link_community) → {}.*",
-        if bhc_enabled { "draft" } else { "final" },
+        if merge_enabled { "draft" } else { "final" },
         draft_prefix
     );
-    write_partition_outputs(
+    let (_draft_propensity, draft_gene_topic) = write_partition_outputs(
         &draft_prefix,
         edges,
         &final_membership,
@@ -509,17 +512,17 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     info!("Writing score trace...");
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
-    let mut bhc_present_with_consensus = false;
-    if bhc_enabled {
-        let gamma = args.bhc_gamma.unwrap_or(1.0);
+    let mut merge_present_with_consensus = false;
+    if merge_enabled {
+        use matrix_param::traits::Inference;
         info!(
-            "Running BHC merge (γ={:.4}, bg-empirical) over K={} communities...",
-            gamma, k
+            "Running cosine dictionary merge (average linkage) over K={} communities...",
+            k
         );
-        let merges = crate::link_community::bhc::bhc_merge(&fine_stats, gamma);
-        write_bhc_merges(&(c.out.to_string() + ".bhc.merges.parquet"), &merges)?;
+        let merges = cosine_merge(draft_gene_topic.posterior_log_mean());
+        write_dict_merges(&(c.out.to_string() + ".dict_merges.parquet"), &merges)?;
 
-        let labels = crate::link_community::bhc::bhc_cut(&merges, k, args.bhc_cut);
+        let labels = bhc_cut(&merges, k, args.merge_cut);
         let n_consensus = labels
             .iter()
             .filter(|&&v| v >= 0)
@@ -527,12 +530,12 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             .max()
             .map_or(0, |m| m + 1);
         info!(
-            "BHC redundancy cut (log_bf ≥ {:.3}): {} merged communities",
-            args.bhc_cut, n_consensus
+            "Dictionary cut (cosine ≥ {:.3}): {} merged communities",
+            args.merge_cut, n_consensus
         );
-        write_bhc_cut(&(c.out.to_string() + ".bhc.cut.parquet"), &labels)?;
+        write_dict_cut(&(c.out.to_string() + ".dict_merges.cut.parquet"), &labels)?;
 
-        if n_consensus > 0 {
+        if n_consensus > 0 && n_consensus < k {
             let consensus_membership: Vec<usize> = final_membership
                 .iter()
                 .map(|&orig| {
@@ -560,11 +563,11 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 Some(&gene_weights),
                 c.block_size,
             )?;
-            bhc_present_with_consensus = true;
+            merge_present_with_consensus = true;
         } else {
             info!(
-                "BHC produced no merges; draft outputs at {}.* are the final result",
-                draft_prefix
+                "Dictionary merge produced no collapses at cosine ≥ {:.3}; draft outputs at {}.* are the final result",
+                args.merge_cut, draft_prefix
             );
         }
     }
@@ -583,7 +586,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             data_vec.num_rows(),
             edges.len(),
             k,
-            bhc_present_with_consensus,
+            merge_present_with_consensus,
             &cascade_level_indices,
         );
         let meta_path = std::path::PathBuf::from(format!("{}.metadata.json", c.out));
