@@ -4,7 +4,7 @@
 //! the filesystem:
 //! - `{prefix}.propensity.parquet`            → level "final"
 //! - `{prefix}.L{n}.propensity.parquet`       → level "L{n}"
-//! - `{prefix}.bhc.propensity.parquet`        → level "bhc"
+//! - `{prefix}.draft.propensity.parquet`      → level "draft"
 //!
 //! Each level can have matching `.link_community.parquet` (lc / dsvd
 //! runs) and `.gene_topic.parquet` siblings — `Level::*_path()` returns
@@ -17,12 +17,12 @@ use std::path::{Path, PathBuf};
 /// Parsed level tag for one set of sibling pinto outputs.
 #[derive(Clone, Debug)]
 pub struct Level {
-    /// User-facing tag used in output file names: "final", "L0", "bhc", ...
+    /// User-facing tag used in output file names: "final", "L0", "draft", ...
     pub tag: String,
-    /// Sort key (lower = plotted earlier). `final` and `bhc` bracket
+    /// Sort key (lower = plotted earlier). `final` and `draft` bracket
     /// the numeric L-levels for natural ordering in the output dir.
     pub sort_key: i32,
-    /// Infix used in parquet names: "" for final, ".L0", ".bhc", etc.
+    /// Infix used in parquet names: "" for final, ".L0", ".draft", etc.
     pub infix: String,
 }
 
@@ -38,7 +38,7 @@ impl Level {
     }
 }
 
-/// User selector: `all` | `final` | `bhc` | comma-list (`final,L0,bhc`).
+/// User selector: `all` | `final` | `draft` | comma-list (`final,L0,draft`).
 #[derive(Clone, Debug)]
 pub enum LevelSelector {
     All,
@@ -70,12 +70,12 @@ impl LevelSelector {
 
 /// Discover all sibling propensity parquets sharing this prefix.
 ///
-/// Returns levels in natural plotting order: `final` → `L0 … Ln` → `bhc`.
+/// Returns levels in natural plotting order: `final` → `L0 … Ln` → `draft`.
 /// Filters by `selector`. Empty return is an error at the caller level.
 pub fn discover_levels(prefix: &str, selector: &LevelSelector) -> anyhow::Result<Vec<Level>> {
     let (dir, stem) = split_prefix(prefix)?;
     let re = Regex::new(&format!(
-        r"^{}(\.L(?P<lvl>\d+)|\.bhc)?\.propensity\.parquet$",
+        r"^{}(\.L(?P<lvl>\d+)|\.draft)?\.propensity\.parquet$",
         regex::escape(&stem)
     ))?;
 
@@ -97,8 +97,8 @@ pub fn discover_levels(prefix: &str, selector: &LevelSelector) -> anyhow::Result
         let (tag, sort_key, infix) = if let Some(lvl) = caps.name("lvl") {
             let n: i32 = lvl.as_str().parse().unwrap_or(0);
             (format!("L{n}"), n, format!(".L{n}"))
-        } else if name.contains(".bhc.") {
-            ("bhc".to_string(), i32::MAX, ".bhc".to_string())
+        } else if name.contains(".draft.") {
+            ("draft".to_string(), i32::MAX, ".draft".to_string())
         } else {
             ("final".to_string(), i32::MIN, String::new())
         };
