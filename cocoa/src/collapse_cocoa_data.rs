@@ -269,6 +269,7 @@ impl MatchCache {
     /// Replay cached matches with a (possibly permuted) exposure assignment.
     /// Filters matches to exclude same-exposure individuals, then accumulates
     /// statistics exactly as the original visitor does.
+    #[allow(clippy::too_many_arguments)]
     pub fn replay_with_exposure(
         &self,
         cell_topic_nk: &Mat,

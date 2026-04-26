@@ -5,6 +5,7 @@ use rustc_hash::FxHashMap as HashMap;
 use std::ops::Div;
 
 use clap::Parser;
+use data_beans::simulations::core::{sample_cnv_blocks, CnvSimOut, CnvSimParams};
 use indicatif::ParallelProgressIterator;
 use log::info;
 use matrix_util::common_io::{mkdir, write_lines, write_types};
@@ -334,6 +335,44 @@ pub struct SimOneTypeArgs {
 
     #[arg(long, short, required = true, help = "Output file path prefix")]
     out: Box<str>,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "CNV: number of chromosomes (0 disables CNV simulation).",
+        long_help = "When > 0, distributes genes evenly across this many chromosomes\n\
+                     and samples a clonal CN profile per individual. Each individual\n\
+                     is treated as a clone in a binary tree (clone 0 = neutral root)."
+    )]
+    cnv_n_chromosomes: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "CNV: expected number of CN events per chromosome per clone."
+    )]
+    cnv_events_per_chr: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.15,
+        help = "CNV: mean block size as fraction of genes per chromosome."
+    )]
+    cnv_block_frac: f32,
+
+    #[arg(
+        long,
+        default_value_t = 2.0,
+        help = "CNV: fold-change for gain events."
+    )]
+    cnv_gain_fold: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "CNV: fold-change for loss events."
+    )]
+    cnv_loss_fold: f32,
 }
 
 pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
@@ -369,7 +408,33 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
     };
 
     info!("Simulating underlying individual-level data...");
-    let glm = sim.generate_individual_glm()?;
+    let mut glm = sim.generate_individual_glm()?;
+
+    // CNV: clonal per-individual CN events (each individual = a clone)
+    let cnv_out: Option<CnvSimOut> = if args.cnv_n_chromosomes > 0 {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(args.rseed.wrapping_add(1));
+        let params = CnvSimParams {
+            n_genes: args.n_genes,
+            n_batches: n_indv,
+            n_chr: args.cnv_n_chromosomes,
+            events_per_chr: args.cnv_events_per_chr,
+            block_frac: args.cnv_block_frac,
+            gain_fold: args.cnv_gain_fold,
+            loss_fold: args.cnv_loss_fold,
+        };
+        let out = sample_cnv_blocks(&params, &mut rng);
+        // Add ln(CN multiplier) to log μ_{g,i}
+        for i in 0..n_indv {
+            for g in 0..args.n_genes {
+                let m = out.cnv_multiplier_db[(g, i)].max(1e-12);
+                glm.data_mn[(g, i)] += m.ln();
+            }
+        }
+        Some(out)
+    } else {
+        None
+    };
+
     info!("Populating triplets...");
     let sim_out = sim.generate_triplets(&glm.data_mn)?;
     info!("Successfully simulated");
@@ -411,14 +476,61 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
     glm.confounder_nk.to_tsv(&conf_file)?;
     glm.data_mn.to_tsv(&data_file)?;
 
+    // CNV ground truth (matches schema cnv::detect::read_gene_positions_from_cnv_tsv reads)
+    if let Some(ref cnv_out) = cnv_out {
+        let cnv_file = output.to_string() + ".cnv_ground_truth.tsv.gz";
+        let state_labels = ["loss", "neutral", "gain"];
+        let mut lines: Vec<Box<str>> = vec!["gene\tchromosome\tposition\tstate".into()];
+        for g in 0..args.n_genes {
+            lines.push(
+                format!(
+                    "{}\t{}\t{}\t{}",
+                    g,
+                    cnv_out.chromosomes[g],
+                    cnv_out.positions[g],
+                    state_labels[cnv_out.cnv_states[g] as usize]
+                )
+                .into(),
+            );
+        }
+        write_lines(&lines, &cnv_file)?;
+        info!("wrote CNV ground truth (union): {}", cnv_file);
+
+        let per_indv_file = output.to_string() + ".cnv_per_indv_ground_truth.tsv.gz";
+        let mut lines2: Vec<Box<str>> =
+            vec!["gene\tchromosome\tposition\tindividual\tstate".into()];
+        for (b, batch_states) in cnv_out.cnv_states_db.iter().enumerate() {
+            for (g, &st) in batch_states.iter().enumerate() {
+                if st != 1 {
+                    lines2.push(
+                        format!(
+                            "{}\t{}\t{}\t{}\t{}",
+                            g,
+                            cnv_out.chromosomes[g],
+                            cnv_out.positions[g],
+                            b,
+                            state_labels[st as usize]
+                        )
+                        .into(),
+                    );
+                }
+            }
+        }
+        write_lines(&lines2, &per_indv_file)?;
+        info!("wrote per-individual CNV ground truth: {}", per_indv_file);
+    }
+
     info!("registering triplets ...");
     let mtx_shape = sim_out.mtx_shape;
+    // Actual cell count after Poisson dispersion of n_cells_per_indv may
+    // differ from `args.n_cells`; column names must match the realised count.
+    let actual_n_cells = mtx_shape.1;
 
     let rows: Vec<Box<str>> = (0..args.n_genes)
         .map(|i| i.to_string().into_boxed_str())
         .collect();
 
-    let cols: Vec<Box<str>> = (0..args.n_cells)
+    let cols: Vec<Box<str>> = (0..actual_n_cells)
         .map(|i| i.to_string().into_boxed_str())
         .collect();
 
@@ -427,7 +539,7 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
         triplets.sort_by_key(|&(row, _, _)| row);
         triplets.sort_by_key(|&(_, col, _)| col);
 
-        mtx_io::write_mtx_triplets(&triplets, args.n_genes, args.n_cells, &mtx_file)?;
+        mtx_io::write_mtx_triplets(&triplets, args.n_genes, actual_n_cells, &mtx_file)?;
         write_lines(&rows, &row_file)?;
         write_lines(&cols, &col_file)?;
 

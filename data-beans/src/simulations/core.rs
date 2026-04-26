@@ -148,27 +148,27 @@ pub struct SimOut {
 }
 
 /// CNV block simulation output.
-pub(crate) struct CnvSimOut {
+pub struct CnvSimOut {
     /// Per-gene, per-batch CN multiplier `[D × B]`.
-    pub(crate) cnv_multiplier_db: DMatrix<f32>,
+    pub cnv_multiplier_db: DMatrix<f32>,
     /// Per-gene, per-batch CN state: `cnv_states_db[b][g]` (0=loss, 1=neutral, 2=gain).
-    pub(crate) cnv_states_db: Vec<Vec<u8>>,
+    pub cnv_states_db: Vec<Vec<u8>>,
     /// Clone tree: `clone_parent[b]` = parent clone index for batch b.
-    pub(crate) clone_parent: Vec<usize>,
+    pub clone_parent: Vec<usize>,
     /// Union across batches (for backwards compat ground truth).
-    pub(crate) cnv_states: Vec<u8>,
-    pub(crate) chromosomes: Vec<Box<str>>,
-    pub(crate) positions: Vec<u64>,
+    pub cnv_states: Vec<u8>,
+    pub chromosomes: Vec<Box<str>>,
+    pub positions: Vec<u64>,
 }
 
-pub(crate) struct CnvSimParams {
-    pub(crate) n_genes: usize,
-    pub(crate) n_batches: usize,
-    pub(crate) n_chr: usize,
-    pub(crate) events_per_chr: f32,
-    pub(crate) block_frac: f32,
-    pub(crate) gain_fold: f32,
-    pub(crate) loss_fold: f32,
+pub struct CnvSimParams {
+    pub n_genes: usize,
+    pub n_batches: usize,
+    pub n_chr: usize,
+    pub events_per_chr: f32,
+    pub block_frac: f32,
+    pub gain_fold: f32,
+    pub loss_fold: f32,
 }
 
 /// Generate clonal CNV blocks with a binary clonal tree.
@@ -179,7 +179,7 @@ pub(crate) struct CnvSimParams {
 ///
 /// This mirrors the COMPASS simulation design: a clonal tree where deeper
 /// clones accumulate more CNV events, and related clones share ancestral events.
-pub(crate) fn sample_cnv_blocks(params: &CnvSimParams, rng: &mut impl rand::Rng) -> CnvSimOut {
+pub fn sample_cnv_blocks(params: &CnvSimParams, rng: &mut impl rand::Rng) -> CnvSimOut {
     let dd = params.n_genes;
     let bb = params.n_batches.max(1);
     let n_chr = params.n_chr;

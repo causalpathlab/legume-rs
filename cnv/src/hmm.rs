@@ -486,24 +486,21 @@ pub fn fit_em(
     let mut sample_sigma_sq = initial_sample_params
         .map(|p| p.sigma_sq.clone())
         .unwrap_or_else(|| vec![1.0f32; n_samples]);
-    let mut results = Vec::with_capacity(n_samples);
+    let mut results: Vec<HmmResult> = Vec::with_capacity(n_samples);
+    let mut log_emits: Vec<DMatrix<f32>> = Vec::with_capacity(n_samples);
 
     let mut prev_ll = f32::NEG_INFINITY;
 
-    // Pre-extract rows to avoid repeated allocation
     let sample_rows: Vec<Vec<f32>> = (0..n_samples)
         .map(|s| (0..n_segments).map(|t| segment_data[(s, t)]).collect())
         .collect();
 
-    // Reusable xi buffer (hoisted out of inner loop)
     let mut xi = DMatrix::<f32>::zeros(k, k);
 
     for iter in 0..config.max_iter {
-        // E-step: precompute emissions + forward-backward for each sample
         results.clear();
+        log_emits.clear();
         let mut total_ll = 0.0f32;
-        let mut log_emits: Vec<DMatrix<f32>> = Vec::with_capacity(n_samples);
-
         for s in 0..n_samples {
             let log_emit = precompute_log_emissions(
                 &params,
