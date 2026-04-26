@@ -351,7 +351,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             &nystrom_out.latent_nk,
             &batch_membership,
             &positions,
-            args.cnv.cnv_factors.max(3), // use at least 3 clusters
+            args.cnv.cnv_svd_clusters.max(2),
             &cnv_config,
         )?;
 

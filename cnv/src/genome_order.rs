@@ -1,4 +1,5 @@
 use rustc_hash::FxHashMap as HashMap;
+use std::io::BufRead;
 
 /// Canonical chromosome ordering: chr1..22, chrX, chrY, chrM.
 /// Returns None for unrecognized chromosomes.
@@ -111,6 +112,30 @@ pub fn build_genome_order(chromosomes: &[Box<str>], positions: &[u64]) -> Genome
         })
         .collect();
     GenomeOrder::from_positions(&genes)
+}
+
+/// Read gene positions from a TSV file with header `gene\tchromosome\tposition\t...`.
+/// Extra columns (e.g. `state`) are ignored. Path may be plain or gzipped.
+pub fn read_gene_positions_from_tsv(path: &str) -> anyhow::Result<Vec<GenePosition>> {
+    let reader = matrix_util::common_io::open_buf_reader(path)?;
+    let mut positions = Vec::new();
+    for (i, line) in reader.lines().enumerate() {
+        let line = line?;
+        if i == 0 {
+            continue; // header
+        }
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 3 {
+            continue;
+        }
+        positions.push(GenePosition {
+            gene_idx: cols[0].parse()?,
+            chromosome: cols[1].into(),
+            position: cols[2].parse()?,
+        });
+    }
+    log::info!("Read {} gene positions from {}", positions.len(), path);
+    Ok(positions)
 }
 
 #[cfg(test)]

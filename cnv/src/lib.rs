@@ -1,19 +1,15 @@
 //! Copy number variation detection from single-cell expression data.
 //!
-//! Pipeline:
-//! 1. [`genomic_coarsening`] — Greedy bottom-up merging of adjacent genes by
-//!    correlation on `log(mu_resid)` profiles
-//! 2. [`gibbs_hmm`] — Mixture of HMMs with blocked Gibbs sampling (ESS for
-//!    emission params, forward-backward for states)
-//! 3. [`hmm`] — Core HMM primitives (forward-backward, Viterbi, shared Viterbi)
+//! Pipeline (per-sample HMM):
+//! 1. [`hmm`] — core HMM primitives (forward-backward, Viterbi, EM).
+//! 2. [`kmeans_init`] — kmeans+BIC for choosing K and seeding emission params.
+//! 3. [`per_sample`] — top-level per-topic / per-sample HMM driver with
+//!    iterative reference refinement.
 //!
-//! Ploidy is not identifiable from expression alone; states represent relative CN
-//! (loss/neutral/gain).
+//! Ploidy is not identifiable from expression alone; states represent relative
+//! CN (loss/neutral/gain or finer with K=5/6).
 
-pub mod coarsening_tree;
-pub mod detect;
-pub mod factorial_tree;
 pub mod genome_order;
-pub mod genomic_coarsening;
-pub mod gibbs_hmm;
 pub mod hmm;
+pub mod kmeans_init;
+pub mod per_sample;
