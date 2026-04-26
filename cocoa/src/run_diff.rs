@@ -1,3 +1,4 @@
+use crate::cnv_call::{self, CnvArgs};
 use crate::collapse_cocoa_data::*;
 use crate::common::*;
 use crate::input::*;
@@ -7,7 +8,6 @@ use crate::stat::*;
 use clap::Parser;
 use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
 use matrix_param::io::*;
-use matrix_util::common_io::write_lines;
 use matrix_util::traits::{IoOps, MatOps};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -233,6 +233,9 @@ pub struct DiffArgs {
         help = "BBKNN fan-out for multilevel refinement."
     )]
     refine_knn_super_cells: usize,
+
+    #[command(flatten)]
+    cnv: CnvArgs,
 }
 
 /////////////////////////////////////
@@ -434,6 +437,16 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     info!("Optimizing parameters...");
     let parameters = cocoa_stat.estimate_parameters()?;
 
+    // CNV calling on the cocoa-residual (indv × topic) signal
+    let cnv_run = cnv_call::run_cnv_calling(
+        &args.cnv,
+        &parameters,
+        &indv_names,
+        &topic_names,
+        &gene_names,
+        &args.out,
+    )?;
+
     // Compute real contrast before consuming parameters
     let real_contrast = if args.n_permutations > 0 {
         Some(compute_exposure_contrast(&parameters, &exposure_assignment))
@@ -518,20 +531,56 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
 
         // Compute z-scores and p-values
         let np = args.n_permutations as f32;
-        let lines: Vec<Box<str>> = std::iter::once("gene\tcontrast\tz_score\tpvalue".into())
-            .chain((0..n_genes).map(|g| {
-                let null_mean = null_sum[g] / np;
-                let null_var = null_sum_sq[g] / np - null_mean * null_mean;
-                let null_std = null_var.max(1e-10).sqrt();
-                let z = (real_contrast[g] - null_mean) / null_std;
-                let pval = z_to_pvalue(z);
-                let name = &gene_names[g];
-                format!("{}\t{}\t{}\t{}", name, real_contrast[g], z, pval).into()
-            }))
-            .collect();
+        let mut contrast_col = vec![0f32; n_genes];
+        let mut z_col = vec![0f32; n_genes];
+        let mut p_col = vec![0f32; n_genes];
+        for g in 0..n_genes {
+            let null_mean = null_sum[g] / np;
+            let null_var = null_sum_sq[g] / np - null_mean * null_mean;
+            let null_std = null_var.max(1e-10).sqrt();
+            let z = (real_contrast[g] - null_mean) / null_std;
+            contrast_col[g] = real_contrast[g];
+            z_col[g] = z;
+            p_col[g] = z_to_pvalue(z);
+        }
 
-        let perm_file = format!("{}.perm.tsv.gz", args.out);
-        write_lines(&lines, &perm_file)?;
+        // Optional CNV concordance columns
+        let concordance = cnv_run.as_ref().map(|(cnv_result, signal)| {
+            cnv_call::compute_deg_concordance(signal, cnv_result, n_genes)
+        });
+
+        // Assemble [n_genes × n_cols] numeric matrix and write as parquet,
+        // matching the format used elsewhere in cocoa (effect.parquet).
+        let mut col_names: Vec<Box<str>> = vec![
+            "contrast".to_string().into(),
+            "z_score".to_string().into(),
+            "pvalue".to_string().into(),
+        ];
+        let mut columns: Vec<DVec> = vec![
+            DVec::from(contrast_col),
+            DVec::from(z_col),
+            DVec::from(p_col),
+        ];
+        if let Some(c) = concordance.as_ref() {
+            col_names.extend(
+                ["cnv_concordance_r", "cnv_concordance_p", "cnv_state"]
+                    .iter()
+                    .map(|s| (*s).to_string().into()),
+            );
+            columns.push(DVec::from(c.r.clone()));
+            columns.push(DVec::from(c.p.clone()));
+            columns.push(DVec::from_iterator(
+                n_genes,
+                c.state.iter().map(|&x| x as f32),
+            ));
+        }
+        let perm_mat = Mat::from_columns(&columns);
+        let perm_file = format!("{}.perm.parquet", args.out);
+        perm_mat.to_parquet_with_names(
+            &perm_file,
+            (Some(&gene_names), Some("gene")),
+            Some(&col_names),
+        )?;
         info!("Wrote permutation results to {}", perm_file);
     }
 

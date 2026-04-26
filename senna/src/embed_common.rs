@@ -72,54 +72,39 @@ impl AdjMethod {
 }
 
 /// Shared CNV detection CLI args (used by SVD, topic, indexed-topic).
-/// Providing --gff or --cnv-ground-truth turns on the factorial-tree CNV model.
+/// Providing `--gff` or `--cnv-ground-truth` turns on the per-sample HMM CNV
+/// model from `cnv::per_sample`.
 #[derive(Args, Debug, Clone)]
 pub struct CnvArgs {
-    #[arg(
-        long,
-        help = "GFF/GTF annotation for CNV detection",
-        long_help = "GFF/GTF file with gene coordinates. When provided, runs the\n\
-                     factorial-tree CNV model on pseudobulk log-ratios."
-    )]
+    #[arg(long, help = "GFF/GTF annotation for CNV detection.")]
     pub gff: Option<Box<str>>,
 
     #[arg(
         long,
-        help = "CNV ground-truth TSV (from `data-beans simulate`)",
-        long_help = "Alternative to --gff: reads gene coordinates from the\n\
-                     .cnv_ground_truth.tsv.gz file produced by `data-beans simulate`."
+        help = "CNV ground-truth TSV (alternative to --gff; from `data-beans simulate`)."
     )]
     pub cnv_ground_truth: Option<Box<str>>,
 
     #[arg(
         long,
-        default_value = "3",
-        help = "Number of CNV factors",
-        long_help = "Number of latent factors in the factorial-tree model;\n\
-                     each factor represents an independent CNV event pattern."
-    )]
-    pub cnv_factors: usize,
-
-    #[arg(
-        long,
-        default_value = "3",
-        help = "CN states per factor (e.g. del/neutral/gain)"
+        default_value_t = 3,
+        help = "Number of CN states (3 = del/neutral/gain; 5/6 = inferCNV i6-style)."
     )]
     pub cnv_states: usize,
 
     #[arg(
         long,
-        default_value = "0.7,0.4",
-        value_delimiter = ',',
-        help = "Correlation thresholds for multi-level CNV coarsening"
+        default_value_t = 0,
+        help = "If ≥3, BIC-select K ∈ [3..max] via kmeans on the marginal signal."
     )]
-    pub cnv_corr_thresholds: Vec<f32>,
+    pub cnv_gmm_k_max: usize,
 
-    #[arg(long, default_value_t = 500, help = "CNV Gibbs sampling iterations")]
-    pub cnv_iter: usize,
-
-    #[arg(long, default_value_t = 200, help = "CNV Gibbs warm-up iterations")]
-    pub cnv_warmup: usize,
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "(SVD path only) Number of k-means cell clusters used as cell-type proxy."
+    )]
+    pub cnv_svd_clusters: usize,
 }
 
 /// Training score tracker for topic models

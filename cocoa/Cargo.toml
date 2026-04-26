@@ -12,8 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 auxiliary-data = { workspace = true }
+cnv = { workspace = true }
 data-beans = { workspace = true }
 data-beans-alg = { workspace = true }
+genomic-data = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
 
@@ -35,5 +37,6 @@ special = { workspace = true }
 indicatif = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+rust-htslib = { workspace = true }
 rustc-hash = { workspace = true }
 
