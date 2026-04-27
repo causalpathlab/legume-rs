@@ -35,7 +35,7 @@ pub fn render_interfaces(
     entropy: &[f32],
     dominant: &[i64],
     edges: Option<&[EdgePair]>,
-    gene_topic: Option<&(Mat, Vec<Box<str>>)>,
+    gene_community: Option<&(Mat, Vec<Box<str>>)>,
     out_stub: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
     if entropy.len() != cells.n() {
@@ -75,7 +75,7 @@ pub fn render_interfaces(
 
     let mut emitted = Vec::new();
     let layers = build_interface_layers(args, frame, cells, core, entropy)?;
-    emit_figure(&layers, frame, args, out_stub, &mut emitted)?;
+    emit_figure(&layers, frame, args, out_stub, &mut emitted, false)?;
 
     // 5. Write the TSV legend.
     let tsv_path = PathBuf::from(format!("{}.tsv", out_stub.display()));
@@ -86,7 +86,7 @@ pub fn render_interfaces(
         entropy,
         dominant,
         &neighborhoods,
-        gene_topic,
+        gene_community,
         args.interface_top_genes,
     )?;
     emitted.push(tsv_path);
@@ -305,7 +305,7 @@ fn write_interface_tsv(
     entropy: &[f32],
     dominant: &[i64],
     neighborhoods: &[Neighborhood],
-    gene_topic: Option<&(Mat, Vec<Box<str>>)>,
+    gene_community: Option<&(Mat, Vec<Box<str>>)>,
     top_genes: usize,
 ) -> anyhow::Result<()> {
     use std::io::Write;
@@ -334,7 +334,7 @@ fn write_interface_tsv(
             .collect::<Vec<_>>()
             .join(",");
 
-        let genes_str: String = match gene_topic {
+        let genes_str: String = match gene_community {
             Some((gt, names)) => comm_pairs
                 .iter()
                 .filter(|(c, _)| *c >= 0 && (*c as usize) < gt.ncols())

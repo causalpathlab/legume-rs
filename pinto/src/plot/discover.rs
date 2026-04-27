@@ -7,7 +7,7 @@
 //! - `{prefix}.draft.propensity.parquet`      → level "draft"
 //!
 //! Each level can have matching `.link_community.parquet` (lc / dsvd
-//! runs) and `.gene_topic.parquet` siblings — `Level::*_path()` returns
+//! runs) and `.gene_community.parquet` siblings — `Level::*_path()` returns
 //! them when present so downstream code can conditionally emit the
 //! mesh plot or marker plots without re-checking the filesystem.
 
@@ -33,8 +33,8 @@ impl Level {
     pub fn link_community_path(&self, prefix: &str) -> PathBuf {
         PathBuf::from(format!("{}{}.link_community.parquet", prefix, self.infix))
     }
-    pub fn gene_topic_path(&self, prefix: &str) -> PathBuf {
-        PathBuf::from(format!("{}{}.gene_topic.parquet", prefix, self.infix))
+    pub fn gene_community_path(&self, prefix: &str) -> PathBuf {
+        PathBuf::from(format!("{}{}.gene_community.parquet", prefix, self.infix))
     }
 }
 

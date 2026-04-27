@@ -19,7 +19,7 @@
 //!   7. V-cycle: per-level super-edges → profiles → Gibbs + greedy with
 //!      coarse→fine label inheritance; per-level outputs are written inside
 //!   8. Single-pass component-EM + greedy on full profiles
-//!   9. Final outputs (propensity, gene_topic, link_community, scores,
+//!   9. Final outputs (propensity, gene_community, link_community, scores,
 //!      cosine dictionary merge)
 
 use crate::gene_network::graph::*;
@@ -146,7 +146,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     //////////////////////////////////////////////////////
     // 4-pre0. NB Fisher-info gene weights (always)      //
     //////////////////////////////////////////////////////
-    // Same w_g formula already used at output time in `compute_gene_topic_stat`
+    // Same w_g formula already used at output time in `compute_gene_community_stat`
     // and inside the dc_poisson cell coarsening. We compute it once and bake it
     // into both the module-pair per-cell expression and the projection basis,
     // so the Gibbs / EM / greedy scoring loop sees gene-weighted profiles
@@ -487,10 +487,10 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     //////////////////////////////////////////////////////
     let draft_prefix = format!("{}.draft", c.out);
     info!(
-        "Writing draft outputs (propensity, gene_topic, link_community) → {}.*",
+        "Writing draft outputs (propensity, gene_community, link_community) → {}.*",
         draft_prefix
     );
-    let (_draft_propensity, draft_gene_topic) = write_partition_outputs(
+    let (_draft_propensity, draft_gene_community) = write_partition_outputs(
         &draft_prefix,
         edges,
         &final_membership,
@@ -512,7 +512,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             "Running cosine dictionary merge (average linkage) over K={} communities...",
             k
         );
-        let merges = cosine_merge(draft_gene_topic.posterior_log_mean());
+        let merges = cosine_merge(draft_gene_community.posterior_log_mean());
         write_dict_merges(&(c.out.to_string() + ".dict_merges.parquet"), &merges)?;
 
         let labels = cosine_cut(&merges, k, args.merge_cut);
@@ -542,7 +542,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 })
                 .collect();
             info!(
-                "Writing final outputs (propensity, gene_topic, link_community) → {}.*",
+                "Writing final outputs (propensity, gene_community, link_community) → {}.*",
                 c.out
             );
             write_partition_outputs(
@@ -569,17 +569,19 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // 10. Write metadata.json (information-flow root)  //
     //////////////////////////////////////////////////////
     {
-        use crate::util::metadata::create_lc_metadata;
+        use crate::util::metadata::{create_lc_metadata, RunInputs};
         let coord_file_str = c.coord_files_joined();
         let meta = create_lc_metadata(
-            &c.out,
-            &c.data_files,
-            coord_file_str.as_deref(),
-            &coordinate_names,
-            n_cells,
-            data_vec.num_rows(),
-            edges.len(),
-            k,
+            &RunInputs {
+                prefix: &c.out,
+                data_files: &c.data_files,
+                coord_file: coord_file_str.as_deref(),
+                coord_columns: &coordinate_names,
+                n_cells,
+                n_genes: data_vec.num_rows(),
+                n_edges: edges.len(),
+                k,
+            },
             merge_present_with_consensus,
             &cascade_level_indices,
         );

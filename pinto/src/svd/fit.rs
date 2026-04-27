@@ -1,5 +1,5 @@
 use crate::link_community::profiles::{
-    compute_propensity_and_gene_topic_stat, PropensityReportConfig,
+    compute_propensity_and_gene_community_stat, PropensityReportConfig,
 };
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::util::cell_pairs::*;
@@ -330,7 +330,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         .collect();
 
     let n_clusters = args.n_edge_clusters.unwrap_or(args.n_latent_topics);
-    compute_propensity_and_gene_topic_stat(
+    compute_propensity_and_gene_community_stat(
         &proj_kn,
         &edges,
         &data_vec,
@@ -343,18 +343,18 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     )?;
 
     {
-        use crate::util::metadata::create_dsvd_metadata;
+        use crate::util::metadata::{create_dsvd_metadata, RunInputs};
         let coord_file_str = c.coord_files_joined();
-        let meta = create_dsvd_metadata(
-            &c.out,
-            &c.data_files,
-            coord_file_str.as_deref(),
-            &coordinate_names,
+        let meta = create_dsvd_metadata(&RunInputs {
+            prefix: &c.out,
+            data_files: &c.data_files,
+            coord_file: coord_file_str.as_deref(),
+            coord_columns: &coordinate_names,
             n_cells,
-            data_vec.num_rows(),
-            edges.len(),
-            n_clusters,
-        );
+            n_genes: data_vec.num_rows(),
+            n_edges: edges.len(),
+            k: n_clusters,
+        });
         let meta_path = std::path::PathBuf::from(format!("{}.metadata.json", c.out));
         meta.write(&meta_path)?;
         info!("Wrote {}", meta_path.display());

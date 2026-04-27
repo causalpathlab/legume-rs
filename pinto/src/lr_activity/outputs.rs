@@ -173,10 +173,13 @@ pub fn write_lr_activity_json(
         })
         .collect();
 
+    // Only significant rows go in the JSON — full table is already in
+    // {out}.lr_activity.parquet. Plot consumer filters on `significant`
+    // anyway, so non-sig rows would just bloat the file.
     let results_json: Vec<Value> = rows
         .iter()
+        .filter(|r| r.q_bh.is_finite() && r.q_bh < q_threshold)
         .map(|r| {
-            let sig = r.q_bh.is_finite() && r.q_bh < q_threshold;
             let sid = renum.get(&r.stratum_id).copied();
             json!({
                 "batch": r.batch.as_ref(),
@@ -187,13 +190,8 @@ pub fn write_lr_activity_json(
                 "receptor_resolved": r.receptor_resolved.as_ref(),
                 "n_samples": r.n_samples,
                 "stat_obs": opt_finite(r.stat_obs),
-                "null_mean": opt_finite(r.null_mean),
-                "null_sd": opt_finite(r.null_sd),
                 "z": opt_finite(r.z),
-                "p_empirical": opt_finite(r.p_empirical),
-                "p_z": opt_finite(r.p_z),
                 "q_bh": opt_finite(r.q_bh),
-                "significant": sig,
                 "stratum_id": sid,
             })
         })

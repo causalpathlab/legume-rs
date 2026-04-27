@@ -3,7 +3,8 @@
 
 use crate::link_community::dict_merge::BhcMerge;
 use crate::link_community::profiles::{
-    compute_node_membership, fit_gene_topic_param, shannon_entropy_rows, write_gene_topic_param,
+    compute_node_membership, fit_gene_community_param, shannon_entropy_rows,
+    write_gene_community_param,
 };
 use crate::util::common::*;
 use matrix_param::dmatrix_gamma::GammaMatrix;
@@ -285,7 +286,7 @@ pub fn write_score_trace(file_path: &str, entries: &[ScoreEntry]) -> anyhow::Res
 
 /// Write one cascade level's outputs: `.L{l}.link_community.parquet`,
 /// Write `<prefix>.propensity.parquet` from cell-edge labels and return
-/// the propensity matrix (reused to compute gene-topic stats).
+/// the propensity matrix (reused to compute gene-community stats).
 pub fn write_propensity_parquet(
     prefix: &str,
     edges: &[(usize, usize)],
@@ -312,10 +313,10 @@ pub fn write_propensity_parquet(
 }
 
 /// Write the full per-partition output triple (link community edges,
-/// cell propensity, gene×topic stats) under a shared prefix. Returns the
-/// propensity matrix and the fitted gene-topic posterior so callers can
+/// cell propensity, gene×community stats) under a shared prefix. Returns the
+/// propensity matrix and the fitted gene-community posterior so callers can
 /// reuse them (e.g. the dictionary-merge step needs the posterior to
-/// compute pairwise topic cosine without re-reading the parquet).
+/// compute pairwise community cosine without re-reading the parquet).
 #[allow(clippy::too_many_arguments)]
 pub fn write_partition_outputs(
     prefix: &str,
@@ -335,14 +336,14 @@ pub fn write_partition_outputs(
         cell_names,
     )?;
     let propensity = write_propensity_parquet(prefix, edges, fine_labels, n_cells, k, cell_names)?;
-    let gene_topic = fit_gene_topic_param(&propensity, data_vec, gene_weights, block_size)?;
+    let gene_community = fit_gene_community_param(&propensity, data_vec, gene_weights, block_size)?;
     let gene_names = data_vec.row_names()?;
-    write_gene_topic_param(&gene_topic, &gene_names, prefix)?;
-    Ok((propensity, gene_topic))
+    write_gene_community_param(&gene_community, &gene_names, prefix)?;
+    Ok((propensity, gene_community))
 }
 
 /// Write one cascade level's outputs: `.L{l}.link_community.parquet`,
-/// `.L{l}.propensity.parquet`, `.L{l}.gene_topic.parquet`. The fine-edge
+/// `.L{l}.propensity.parquet`, `.L{l}.gene_community.parquet`. The fine-edge
 /// labels here are the super-edge assignment broadcast through
 /// `transfer_labels`, so every per-level file is keyed on the same edge
 /// list as the final output.

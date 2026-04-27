@@ -96,29 +96,3 @@ pub fn standardize_log_to_bins(values: &[f32], bins: usize, clip: f32) -> Vec<u8
         })
         .collect()
 }
-
-/// Map expression (log1p + percentile-clipped) to per-point radii for
-/// the community-colored marker plot.
-///
-/// `base_size` maps to expression ≤ p_lo; `base_size * scale` maps to
-/// expression ≥ p_hi. Zero-expression cells get `base_size * 0.5`
-/// (deliberately smaller than the low bin so they don't look like a
-/// marker). The output has the same length as `values`.
-#[must_use]
-pub fn log_expr_to_radii(values: &[f32], base_size: f32, scale: f32, clip: f32) -> Vec<f32> {
-    let logged = log1p_vec(values);
-    let (lo, hi) = robust_range(&logged, clip);
-    let range = (hi - lo).max(f32::EPSILON);
-    let max_size = base_size * scale.max(1.0);
-    logged
-        .into_iter()
-        .map(|v| {
-            if !v.is_finite() || v <= 0.0 {
-                base_size * 0.5
-            } else {
-                let t = ((v - lo) / range).clamp(0.0, 1.0);
-                base_size + (max_size - base_size) * t
-            }
-        })
-        .collect()
-}

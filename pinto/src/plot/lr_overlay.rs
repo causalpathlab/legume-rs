@@ -93,9 +93,17 @@ pub struct LrResult {
     pub z: Option<f32>,
     #[serde(default)]
     pub q_bh: Option<f32>,
+    /// Defaults to `true` because new JSON sidecars only carry significant
+    /// rows (full table is in `lr_activity.parquet`). Old sidecars still
+    /// deserialize: they set this explicitly per row.
+    #[serde(default = "default_true")]
     pub significant: bool,
     #[serde(default)]
     pub stratum_id: Option<usize>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub fn load_lr_json(path: &Path) -> anyhow::Result<LrJson> {
@@ -147,17 +155,15 @@ pub fn render_lr_overlays_for_core(
     if sig.is_empty() {
         return Ok(emitted);
     }
-    // Sort by |z| descending and cap to --lr-top-pairs *per stratum*.
+    // Global top-N by |z|: 16 strata × per-stratum-cap was exhaustive.
     sig.sort_by(|a, b| {
         b.z.unwrap_or(0.0)
             .abs()
             .partial_cmp(&a.z.unwrap_or(0.0).abs())
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-
-    // Per-stratum cap.
-    let mut per_stratum_count: HashMap<usize, usize> = HashMap::default();
     let cap = args.lr_top_pairs.max(1);
+    sig.truncate(cap);
 
     let core_cell_set: HashSet<usize> = core.cell_ixs.iter().copied().collect();
 
@@ -190,12 +196,6 @@ pub fn render_lr_overlays_for_core(
             Some(s) => s,
             None => continue,
         };
-        let count = per_stratum_count.entry(sid).or_insert(0);
-        if *count >= cap {
-            continue;
-        }
-        *count += 1;
-
         let stratum = match by_id.get(&sid) {
             Some(s) => *s,
             None => continue,
@@ -324,7 +324,7 @@ pub fn render_lr_overlays_for_core(
             layers.push(tl);
         }
         layers.extend(pair_hulls.iter().cloned());
-        emit_figure(&layers, frame, args, &stub, &mut emitted)?;
+        emit_figure(&layers, frame, args, &stub, &mut emitted, false)?;
     }
 
     Ok(emitted)
