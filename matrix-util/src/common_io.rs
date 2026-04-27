@@ -467,7 +467,8 @@ pub fn dir_base_ext(file_path: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<
 
     let base = path
         .file_stem()
-        .map(|x| x.into_boxed_str())
+        .and_then(|x| x.to_str())
+        .map(|x| strip_data_ext(x).to_string().into_boxed_str())
         .ok_or(anyhow::anyhow!("failed to find base here: {}", file_path))?;
 
     Ok((dir, base, ext))
@@ -479,11 +480,23 @@ pub fn dir_base_ext(file_path: &str) -> anyhow::Result<(Box<str>, Box<str>, Box<
 ///
 pub fn basename(file: &str) -> anyhow::Result<Box<str>> {
     let path = Path::new(file);
-    if let Some(base) = path.file_stem() {
-        Ok(base.into_boxed_str())
+    if let Some(base) = path.file_stem().and_then(|s| s.to_str()) {
+        Ok(strip_data_ext(base).to_string().into_boxed_str())
     } else {
         Err(anyhow::anyhow!("no file stem"))
     }
+}
+
+/// Strip a leftover sparse-data extension (`.zarr`, `.h5`, `.h5ad`) that
+/// `Path::file_stem` leaves behind on doubly-extended paths like
+/// `sample.zarr.zip` (file_stem → `sample.zarr`).
+fn strip_data_ext(stem: &str) -> &str {
+    for sfx in [".zarr", ".h5ad", ".h5"] {
+        if let Some(s) = stem.strip_suffix(sfx) {
+            return s;
+        }
+    }
+    stem
 }
 
 ///
