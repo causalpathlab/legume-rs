@@ -349,6 +349,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
             &c.out,
             &c.data_files,
             coord_file_str.as_deref(),
+            &coordinate_names,
             n_cells,
             data_vec.num_rows(),
             edges.len(),

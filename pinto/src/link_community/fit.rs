@@ -25,7 +25,7 @@
 use crate::gene_network::graph::*;
 use crate::gene_network::modules::{kcore_trim, leiden_gene_modules};
 use crate::link_community::cascade::{run_cascade, CascadeConfig, ModulePairContext, ProfileMode};
-use crate::link_community::dict_merge::cosine_merge;
+use crate::link_community::dict_merge::{cosine_cut, cosine_merge};
 use crate::link_community::gibbs::{ComponentGibbsArgs, IncidenceConfig, LinkGibbsSampler};
 use crate::link_community::incidence::{fit_log_incidence, pack_propensity_row_major};
 use crate::link_community::model::{LinkCommunityStats, LinkProfileStore};
@@ -39,7 +39,6 @@ use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
 use crate::util::input::*;
-use data_beans_alg::bhc::bhc_cut;
 use data_beans_alg::random_projection::RandProjOps;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -486,15 +485,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     //////////////////////////////////////////////////////
     // 9. Extract and write final outputs               //
     //////////////////////////////////////////////////////
-    let merge_enabled = !args.no_merge;
-    let draft_prefix = if merge_enabled {
-        format!("{}.draft", c.out)
-    } else {
-        c.out.to_string()
-    };
+    let draft_prefix = format!("{}.draft", c.out);
     info!(
-        "Writing {} outputs (propensity, gene_topic, link_community) → {}.*",
-        if merge_enabled { "draft" } else { "final" },
+        "Writing draft outputs (propensity, gene_topic, link_community) → {}.*",
         draft_prefix
     );
     let (_draft_propensity, draft_gene_topic) = write_partition_outputs(
@@ -513,7 +506,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
     let mut merge_present_with_consensus = false;
-    if merge_enabled {
+    {
         use matrix_param::traits::Inference;
         info!(
             "Running cosine dictionary merge (average linkage) over K={} communities...",
@@ -522,7 +515,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         let merges = cosine_merge(draft_gene_topic.posterior_log_mean());
         write_dict_merges(&(c.out.to_string() + ".dict_merges.parquet"), &merges)?;
 
-        let labels = bhc_cut(&merges, k, args.merge_cut);
+        let labels = cosine_cut(&merges, k, args.merge_cut);
         let n_consensus = labels
             .iter()
             .filter(|&&v| v >= 0)
@@ -582,6 +575,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             &c.out,
             &c.data_files,
             coord_file_str.as_deref(),
+            &coordinate_names,
             n_cells,
             data_vec.num_rows(),
             edges.len(),
