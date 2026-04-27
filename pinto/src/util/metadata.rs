@@ -42,6 +42,15 @@ pub struct OutputFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coord_pairs: Option<String>,
 
+    /// Bare coordinate column basenames (without the `left_`/`right_`
+    /// prefix) that the writer emitted alongside `coord_pairs`. The
+    /// reader uses these in fixed order — `[x, y]` — instead of the
+    /// fragile auto-discovery over `left_*` schema fields.
+    /// `None` for older runs that pre-date this field; readers fall
+    /// back to auto-discovery in that case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coord_columns: Option<Vec<String>>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub propensity: Option<String>,
 
@@ -58,9 +67,9 @@ pub struct OutputFiles {
     pub batch_effects: Option<String>,
 
     /// Cosine dictionary-merge artifacts: the merge tree and its consensus
-    /// cut. Present only when `pinto lc` runs the merge step (skipped with
-    /// `--no-merge` or when no collapses pass `--merge-cut`). The merged
-    /// consensus partition itself is published under the bare prefix
+    /// cut. Absent when no collapses pass `--merge-cut` (in that case the
+    /// draft is the final partition). The merged consensus partition itself
+    /// is published under the bare prefix
     /// (`{prefix}.{propensity,link_community,gene_topic}.parquet`), so this
     /// struct only points at the auxiliary tree + cut files.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -143,6 +152,7 @@ pub fn create_lc_metadata(
     prefix: &str,
     data_files: &[Box<str>],
     coord_file: Option<&str>,
+    coord_columns: &[Box<str>],
     n_cells: usize,
     n_genes: usize,
     n_edges: usize,
@@ -186,6 +196,7 @@ pub fn create_lc_metadata(
         n_communities: Some(k),
         outputs: OutputFiles {
             coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
+            coord_columns: coord_columns_field(coord_columns),
             propensity: Some(format!("{prefix}.propensity.parquet")),
             link_community: Some(format!("{prefix}.link_community.parquet")),
             gene_topic: Some(format!("{prefix}.gene_topic.parquet")),
@@ -198,12 +209,21 @@ pub fn create_lc_metadata(
     }
 }
 
+fn coord_columns_field(cols: &[Box<str>]) -> Option<Vec<String>> {
+    if cols.is_empty() {
+        None
+    } else {
+        Some(cols.iter().map(|s| s.to_string()).collect())
+    }
+}
+
 /// Helper for `pinto dsvd` runs. Only one "final" level is produced;
 /// the cascade does not run.
 pub fn create_dsvd_metadata(
     prefix: &str,
     data_files: &[Box<str>],
     coord_file: Option<&str>,
+    coord_columns: &[Box<str>],
     n_cells: usize,
     n_genes: usize,
     n_edges: usize,
@@ -231,6 +251,7 @@ pub fn create_dsvd_metadata(
         n_communities: Some(n_clusters),
         outputs: OutputFiles {
             coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
+            coord_columns: coord_columns_field(coord_columns),
             propensity: Some(format!("{prefix}.propensity.parquet")),
             link_community: None,
             gene_topic: Some(format!("{prefix}.gene_topic.parquet")),
@@ -275,6 +296,7 @@ pub fn create_prop_metadata(
         n_communities: Some(n_clusters),
         outputs: OutputFiles {
             coord_pairs: coord_pair_file.map(|s| s.to_string()),
+            coord_columns: None,
             propensity: Some(format!("{prefix}.propensity.parquet")),
             link_community: None,
             gene_topic: None,
@@ -296,10 +318,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let prefix = dir.path().join("run").to_string_lossy().to_string();
         let data_files: Vec<Box<str>> = vec!["a.h5".into(), "b.h5".into()];
+        let coord_cols: Vec<Box<str>> =
+            vec!["pxl_row_in_fullres".into(), "pxl_col_in_fullres".into()];
         let meta = create_lc_metadata(
             &prefix,
             &data_files,
             Some("a.tsv,b.tsv"),
+            &coord_cols,
             1234,
             18000,
             55555,
@@ -321,14 +346,34 @@ mod tests {
         assert_eq!(levels[3].entropy_present, Some(true));
         assert!(back.outputs.dict_merge.is_some());
         assert!(back.outputs.lr_activity.is_none());
+        assert_eq!(
+            back.outputs.coord_columns.as_deref(),
+            Some(
+                &[
+                    "pxl_row_in_fullres".to_string(),
+                    "pxl_col_in_fullres".to_string()
+                ][..]
+            )
+        );
     }
 
     #[test]
-    fn metadata_roundtrip_lc_no_merge() {
+    fn metadata_roundtrip_lc_merge_no_collapse() {
         let dir = tempfile::tempdir().unwrap();
         let prefix = dir.path().join("run").to_string_lossy().to_string();
         let data_files: Vec<Box<str>> = vec!["a.h5".into()];
-        let meta = create_lc_metadata(&prefix, &data_files, None, 100, 200, 300, 8, false, &[]);
+        let meta = create_lc_metadata(
+            &prefix,
+            &data_files,
+            None,
+            &[],
+            100,
+            200,
+            300,
+            8,
+            false,
+            &[],
+        );
         let path = dir.path().join("run.metadata.json");
         meta.write(&path).unwrap();
         let back = PintoMetadata::read(&path).unwrap();
