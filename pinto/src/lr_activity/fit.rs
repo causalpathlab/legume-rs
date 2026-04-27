@@ -1,26 +1,66 @@
-//! Orchestration for `pinto lr-activity`.
+//! Pseudobulk + propensity-stratified sample-permutation LR activity test.
+//!
+//! Cells are collapsed into pseudobulk samples = (batch × propensity-bin),
+//! where the propensity bin is the sign-LSH binary-sort code from an
+//! SVD'd random projection of gene expression (within-batch centred).
+//! Each cell carries soft community membership in two roles: `p_send[i, c]`
+//! is the fraction of i's incident edges in community c on which i acts
+//! as sender; `p_recv[i, c]` is the receiver-side analogue. Per (community,
+//! sample) we accumulate role-weighted gene sums for the LR genes, giving
+//! sender and receiver pseudobulk profiles per sample.
+//!
+//! For each (batch, community, LR pair) the statistic is a **weighted
+//! Spearman** rank correlation between sender-pseudobulk L and
+//! receiver-pseudobulk R across the samples in that batch (sample weight
+//! = sqrt(send_weight · recv_weight)). Spearman over rank-transformed
+//! values is used instead of weighted Pearson to suppress saturation when
+//! one or two samples carry most of the community-level mass.
+//!
+//! The null is sample-level permutation of L within propensity-stratified
+//! buckets — shuffles are restricted to samples sharing the top
+//! `shuffle_stratify_dim` bits of the propensity code, so the cell-type
+//! marginal is preserved across permutations. R and per-sample weights are
+//! held fixed. One-sided positive p (parametric Gaussian tail of z plus
+//! empirical 1/(n+1)-floored permutation p); BH on the parametric p
+//! within batch.
 
 use crate::lr_activity::args::SrtLrActivityArgs;
-use crate::lr_activity::entropy::{normalised_conditional_entropy, quantile_edges};
 use crate::lr_activity::io::*;
-use crate::lr_activity::matcher::{DecoyTarget, MatcherContext};
-use crate::lr_activity::moran::global_moran_per_gene;
 use crate::lr_activity::outputs::{
     bh_qvalues, write_lr_activity, write_lr_activity_json, LrActivityRow, StratumEntry,
 };
 use crate::util::common::*;
 use data_beans::convert::try_open_or_convert;
-use data_beans_alg::union_find::UnionFind;
+use data_beans_alg::random_projection::{binary_sort_columns, RandProjOps};
 use matrix_util::membership::GeneIndexResolver;
+use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use special::Error as SpecialError;
 
-/// Pseudo-batch label written for a single-batch run (no batch labels on file).
-/// Reserved name — collides with a real batch literally named "all".
+/// One-sided upper-tail Gaussian p-value: P(Z >= z) for standard normal.
+#[inline]
+fn one_sided_p_z(z: f32) -> f32 {
+    // erfc(z/√2) / 2; numerically stable for large |z|.
+    let z = z as f64;
+    let p = 0.5 * SpecialError::compl_error(z / std::f64::consts::SQRT_2);
+    (p as f32).clamp(0.0, 1.0)
+}
+
+/// Pseudo-batch label written when no per-edge batch is on file.
 pub const BATCH_LABEL_ALL: &str = "all";
 /// Pseudo-batch label for pooled-across-batches rows emitted alongside per-batch rows.
-/// Reserved name — collides with a real batch literally named "pooled".
 pub const BATCH_LABEL_META: &str = "pooled";
+
+/// Pseudocount added to per-(community, sample) role weights when forming
+/// the pseudobulk mean. Keeps low-evidence samples from blowing up.
+const PRIOR_PSEUDOCOUNT: f32 = 1.0;
+/// Floor to avoid div-by-zero when a sample has no presence in a community.
+const EPS: f32 = 1e-8;
+/// Don't compute a statistic when the stratum has fewer than this many
+/// samples — correlation + permutation are too noisy below this.
+const MIN_SAMPLES_PER_STRATUM: usize = 4;
 
 pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     let c = &args.common;
@@ -49,11 +89,11 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     //////////////////////////////////////////////////////
     info!("Reading LR pairs from {}...", &args.lr_pairs);
     let raw_pairs = read_lr_pairs(&args.lr_pairs)?;
-    let mut real_pairs: Vec<(Box<str>, Box<str>, usize, usize)> = Vec::new();
+    let mut resolved_pairs: Vec<(Box<str>, Box<str>, usize, usize)> = Vec::new();
     let mut missing = 0usize;
     for (l, r) in raw_pairs {
         match (gene_resolver.resolve(&l), gene_resolver.resolve(&r)) {
-            (Some(li), Some(ri)) => real_pairs.push((l, r, li, ri)),
+            (Some(li), Some(ri)) => resolved_pairs.push((l, r, li, ri)),
             _ => missing += 1,
         }
     }
@@ -61,10 +101,10 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         info!("Skipped {} LR pairs with unresolved gene names", missing);
     }
     anyhow::ensure!(
-        !real_pairs.is_empty(),
+        !resolved_pairs.is_empty(),
         "no LR pairs resolved against expression row names"
     );
-    info!("Resolved {} LR pairs", real_pairs.len());
+    info!("Resolved {} LR pairs", resolved_pairs.len());
 
     //////////////////////////////////////////////////////
     // 3. Read edges + batches from prior `pinto lc` run
@@ -76,8 +116,6 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     info!("Attaching per-edge batch from {}", &coord_pairs_path);
     attach_batch_from_coord_pairs(&mut edge_records, &coord_pairs_path)?;
 
-    // Map cell names to column indices. Any edge whose endpoints fall outside
-    // the loaded expression is dropped (warn once).
     let mut edges: Vec<(usize, usize, u32, Option<Box<str>>)> =
         Vec::with_capacity(edge_records.len());
     let mut unresolved = 0usize;
@@ -100,187 +138,224 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         !edges.is_empty(),
         "no edges resolved against expression data"
     );
-
-    let edge_only: Vec<(usize, usize)> = edges.iter().map(|e| (e.0, e.1)).collect();
+    let n_communities = (edges.iter().map(|e| e.2).max().unwrap_or(0) as usize) + 1;
+    info!(
+        "{} cells, {} edges, {} communities",
+        n_cells,
+        edges.len(),
+        n_communities
+    );
 
     //////////////////////////////////////////////////////
-    // 4. Identify gene set: real LR genes + decoy pool
+    // 4. Per-gene total counts (filter LR pairs)
     //////////////////////////////////////////////////////
-    let mut gene_needed: HashSet<usize> = HashSet::default();
-    for &(_, _, li, ri) in &real_pairs {
-        gene_needed.insert(li);
-        gene_needed.insert(ri);
-    }
-
-    info!("Materialising expression for {} genes...", n_genes);
-    // For memory headroom, we materialise the full G × N dense matrix once.
-    // Downstream callers slice by gene row index. Accumulate per-gene sums in
-    // the same pass so we never stride the dense matrix.
-    let mut x_gn = Mat::zeros(n_genes, n_cells);
+    info!("Computing per-gene total counts...");
+    const SUM_CHUNK: usize = 512;
     let mut gene_sum = vec![0.0f32; n_genes];
-    {
-        let csc = data_vec.read_columns_csc(0..n_cells)?;
-        for (col, row_slice, val_slice) in csc_column_iter(&csc) {
-            for (row, val) in row_slice.iter().zip(val_slice.iter()) {
-                x_gn[(*row, col)] = *val;
-                gene_sum[*row] += *val;
+    for start in (0..n_genes).step_by(SUM_CHUNK) {
+        let end = (start + SUM_CHUNK).min(n_genes);
+        let mat = data_vec.read_rows_ndarray(start..end)?;
+        for r in 0..(end - start) {
+            gene_sum[start + r] = mat.row(r).iter().sum();
+        }
+    }
+    let pre_filter_n = resolved_pairs.len();
+    let real_pairs: Vec<(Box<str>, Box<str>, usize, usize)> = resolved_pairs
+        .into_iter()
+        .filter(|(_, _, li, ri)| {
+            gene_sum[*li] >= args.min_gene_count && gene_sum[*ri] >= args.min_gene_count
+        })
+        .collect();
+    if pre_filter_n - real_pairs.len() > 0 {
+        info!(
+            "Dropped {} LR pairs whose L or R has < {} total counts",
+            pre_filter_n - real_pairs.len(),
+            args.min_gene_count
+        );
+    }
+    anyhow::ensure!(
+        !real_pairs.is_empty(),
+        "no LR pairs survive --min-gene-count={}",
+        args.min_gene_count
+    );
+
+    //////////////////////////////////////////////////////
+    // 5. Cell→community soft membership (sender / receiver)
+    //////////////////////////////////////////////////////
+    info!("Building cell→community soft membership...");
+    let (p_send, p_recv) = build_role_memberships(&edges, n_cells, n_communities);
+
+    //////////////////////////////////////////////////////
+    // 6. Per-cell batch label (modal incident batch)
+    //////////////////////////////////////////////////////
+    let cell_batch = derive_cell_batch_labels(&edges, n_cells);
+
+    //////////////////////////////////////////////////////
+    // 7. Random projection + propensity binary-sort
+    //////////////////////////////////////////////////////
+    info!(
+        "Random projection (dim {}) + propensity binary-sort...",
+        args.propensity_dim
+    );
+    let proj = data_vec.project_columns_with_batch_correction(
+        args.propensity_dim,
+        c.block_size,
+        Some(&cell_batch),
+    )?;
+    let propbin = binary_sort_columns(&proj.proj, args.propensity_dim)?;
+    let (sample_id_per_cell, sample_batch_label, sample_propbin) =
+        assign_samples(&cell_batch, &propbin);
+    let n_samples = sample_batch_label.len();
+    info!(
+        "{} pseudobulk samples across {} batches",
+        n_samples,
+        sample_batch_label
+            .iter()
+            .map(|b| b.as_ref())
+            .collect::<HashSet<_>>()
+            .len()
+    );
+
+    //////////////////////////////////////////////////////
+    // 8. Read just the LR-gene rows (dense, small)
+    //////////////////////////////////////////////////////
+    let mut lr_genes: Vec<usize> = Vec::new();
+    let mut gene_to_local: HashMap<usize, usize> = HashMap::default();
+    for &(_, _, li, ri) in &real_pairs {
+        for g in [li, ri] {
+            if let std::collections::hash_map::Entry::Vacant(e) = gene_to_local.entry(g) {
+                e.insert(lr_genes.len());
+                lr_genes.push(g);
             }
         }
     }
-    let gene_mean: Vec<f32> = gene_sum.iter().map(|&s| s / (n_cells as f32)).collect();
+    info!("Reading {} LR gene rows from backend...", lr_genes.len());
+    let x_lr = data_vec.read_rows_dmatrix(lr_genes.iter().copied())?;
 
-    // Real-LR genes collapsed into a set to exclude from decoy pool.
-    let mut real_gene_set: HashSet<usize> = HashSet::default();
-    let mut known_pairs: HashSet<(usize, usize)> = HashSet::default();
-    for &(_, _, li, ri) in &real_pairs {
-        real_gene_set.insert(li);
-        real_gene_set.insert(ri);
-        known_pairs.insert((li, ri));
-    }
-
-    // Candidate decoy pool: genes above --min-gene-count, not in real LR set.
-    let candidate_genes: Vec<usize> = (0..n_genes)
-        .filter(|&g| gene_sum[g] >= args.min_gene_count && !real_gene_set.contains(&g))
-        .collect();
-    anyhow::ensure!(
-        !candidate_genes.is_empty(),
-        "candidate decoy pool is empty; lower --min-gene-count"
+    //////////////////////////////////////////////////////
+    // 9. Collapse into per-(community, sample) pseudobulk
+    //////////////////////////////////////////////////////
+    info!(
+        "Collapsing into pseudobulk: {} comm × {} samples × {} LR genes...",
+        n_communities,
+        n_samples,
+        lr_genes.len()
     );
-    info!("Decoy candidate pool: {} genes", candidate_genes.len());
+    let collapse = collapse_role_pseudobulk(
+        &x_lr,
+        &sample_id_per_cell,
+        &p_send,
+        &p_recv,
+        n_communities,
+        n_samples,
+    );
 
     //////////////////////////////////////////////////////
-    // 5. Per-gene Moran's I on the pinto edge graph
+    // 10. Per-stratum scoring (per-batch and pooled)
     //////////////////////////////////////////////////////
-    info!("Computing global Moran's I per gene...");
-    let moran_full_dvec = global_moran_per_gene(&x_gn, &edge_only);
-    let moran_full: Vec<f32> = (0..n_genes).map(|g| moran_full_dvec[g]).collect();
-
-    //////////////////////////////////////////////////////
-    // 6. Matcher context
-    //////////////////////////////////////////////////////
-    let matcher_means: Vec<f32> = candidate_genes.iter().map(|&g| gene_mean[g]).collect();
-    let matcher_moran: Vec<f32> = candidate_genes.iter().map(|&g| moran_full[g]).collect();
-    let matcher = MatcherContext::new(candidate_genes.clone(), matcher_means, matcher_moran);
-
-    //////////////////////////////////////////////////////
-    // 7. Stratify edges by (batch, community) and compute
-    //////////////////////////////////////////////////////
-    let mut strata_idx: HashMap<(Option<Box<str>>, u32), Vec<usize>> = HashMap::default();
-    for (idx, (_i, _j, k, b)) in edges.iter().enumerate() {
-        strata_idx.entry((b.clone(), *k)).or_default().push(idx);
-    }
-
-    // Collect results into one flat vector, then BH within each batch stratum.
     let mut rows: Vec<LrActivityRow> = Vec::new();
-    let base_seed = c.seed;
-
     let mut strata: Vec<StratumEntry> = Vec::new();
 
-    // --- per-batch strata ---
-    let mut stratum_keys: Vec<(Option<Box<str>>, u32)> = strata_idx.keys().cloned().collect();
-    stratum_keys.sort_by(|a, b| {
-        let ka = a.0.as_ref().map(|s| s.as_ref()).unwrap_or("");
-        let kb = b.0.as_ref().map(|s| s.as_ref()).unwrap_or("");
-        (ka, a.1).cmp(&(kb, b.1))
-    });
-
-    for stratum_key in &stratum_keys {
-        let edge_ids = &strata_idx[stratum_key];
-        let (batch_opt, community) = stratum_key.clone();
-        let stratum_edges: Vec<(usize, usize)> = edge_ids.iter().map(|&k| edge_only[k]).collect();
-        let kept_ccs = extract_kept_ccs(&stratum_edges, n_cells, args.min_cc_edges);
-        if kept_ccs.is_empty() {
-            continue;
-        }
-        let batch_label: Box<str> = batch_opt
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| BATCH_LABEL_ALL.into());
-        let stratum_id = strata.len();
-        strata.push(stratum_entry_from_kept_ccs(
-            &batch_label,
-            community as i32,
-            &kept_ccs,
-            &cell_names,
-        ));
-        let mut batch_rows = score_pairs_parallel(
-            &batch_label,
-            community as i32,
-            &kept_ccs,
-            &real_pairs,
-            &gene_mean,
-            &moran_full,
-            &matcher,
-            &known_pairs,
-            &real_gene_set,
-            &x_gn,
-            &gene_names,
-            args,
-            base_seed,
-            stratum_id,
-        );
-        rows.append(&mut batch_rows);
-    }
-
-    // --- pooled meta rows across batches, one per (community, LR) ---
-    // Skipped when the run has only one real batch: the pooled stratum
-    // would be identical to the per-batch stratum (same edges, same
-    // statistics) and just doubles the JSON / overlay PDFs.
-    let n_real_batches = edges
+    let mut unique_batches: Vec<Box<str>> = sample_batch_label
         .iter()
-        .filter_map(|e| e.3.as_ref())
+        .cloned()
         .collect::<HashSet<_>>()
-        .len();
-    let emit_pooled = n_real_batches > 1;
+        .into_iter()
+        .collect();
+    unique_batches.sort();
 
-    let mut by_community: HashMap<u32, Vec<usize>> = HashMap::default();
-    for (idx, e) in edges.iter().enumerate() {
-        by_community.entry(e.2).or_default().push(idx);
-    }
-    let mut community_keys: Vec<u32> = by_community.keys().copied().collect();
-    community_keys.sort_unstable();
+    let n_real_batches = unique_batches
+        .iter()
+        .filter(|b| b.as_ref() != BATCH_LABEL_ALL)
+        .count();
 
-    let meta_label: Box<str> = BATCH_LABEL_META.into();
-    for &community in community_keys.iter().filter(|_| emit_pooled) {
-        let edge_ids = &by_community[&community];
-        let stratum_edges: Vec<(usize, usize)> = edge_ids.iter().map(|&k| edge_only[k]).collect();
-        let kept_ccs = extract_kept_ccs(&stratum_edges, n_cells, args.min_cc_edges);
-        if kept_ccs.is_empty() {
+    let base_seed = c.seed;
+
+    for batch_label in &unique_batches {
+        let samples_in_batch: Vec<usize> = (0..n_samples)
+            .filter(|&s| sample_batch_label[s].as_ref() == batch_label.as_ref())
+            .collect();
+        if samples_in_batch.len() < MIN_SAMPLES_PER_STRATUM {
             continue;
         }
-        let stratum_id = strata.len();
-        strata.push(stratum_entry_from_kept_ccs(
-            &meta_label,
-            community as i32,
-            &kept_ccs,
-            &cell_names,
-        ));
-        let mut meta_rows = score_pairs_parallel(
-            &meta_label,
-            community as i32,
-            &kept_ccs,
-            &real_pairs,
-            &gene_mean,
-            &moran_full,
-            &matcher,
-            &known_pairs,
-            &real_gene_set,
-            &x_gn,
-            &gene_names,
-            args,
-            base_seed ^ 0xDEAD_BEEF,
-            stratum_id,
-        );
-        rows.append(&mut meta_rows);
+        for community in 0..(n_communities as u32) {
+            if !community_present(&collapse, community as usize, &samples_in_batch) {
+                continue;
+            }
+            let stratum_id = strata.len();
+            strata.push(stratum_entry(
+                batch_label,
+                community as i32,
+                &edges,
+                &cell_names,
+                Some(batch_label.as_ref()),
+                community,
+            ));
+            let mut br = score_pairs_for_stratum(
+                batch_label,
+                community,
+                &samples_in_batch,
+                &sample_propbin,
+                &real_pairs,
+                &gene_to_local,
+                &gene_names,
+                &collapse,
+                args.n_permutations,
+                base_seed.wrapping_add(community as u64 * 1_000_003),
+                stratum_id,
+                /*shuffle_within_batch=*/ false,
+                &sample_batch_label,
+                args.shuffle_stratify_dim,
+            );
+            rows.append(&mut br);
+        }
+    }
+
+    if n_real_batches > 1 {
+        let all_samples: Vec<usize> = (0..n_samples).collect();
+        let meta_label: Box<str> = BATCH_LABEL_META.into();
+        for community in 0..(n_communities as u32) {
+            if !community_present(&collapse, community as usize, &all_samples) {
+                continue;
+            }
+            let stratum_id = strata.len();
+            strata.push(stratum_entry(
+                &meta_label,
+                community as i32,
+                &edges,
+                &cell_names,
+                None,
+                community,
+            ));
+            let mut mr = score_pairs_for_stratum(
+                &meta_label,
+                community,
+                &all_samples,
+                &sample_propbin,
+                &real_pairs,
+                &gene_to_local,
+                &gene_names,
+                &collapse,
+                args.n_permutations,
+                base_seed
+                    .wrapping_add(0xDEAD_BEEF)
+                    .wrapping_add(community as u64),
+                stratum_id,
+                /*shuffle_within_batch=*/ true,
+                &sample_batch_label,
+                args.shuffle_stratify_dim,
+            );
+            rows.append(&mut mr);
+        }
     }
 
     //////////////////////////////////////////////////////
-    // 8. BH within each batch stratum
+    // 11. BH within each batch stratum
     //////////////////////////////////////////////////////
     apply_bh_per_batch(&mut rows);
 
     //////////////////////////////////////////////////////
-    // 9. Write output
+    // 12. Write output
     //////////////////////////////////////////////////////
     let out_path = format!("{}.lr_activity.parquet", &c.out);
     info!("Writing {} rows to {}", rows.len(), out_path);
@@ -302,8 +377,6 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         )?;
         info!("Wrote {}", json_path);
 
-        // Back-fill the JSON path into the upstream metadata so `pinto plot`
-        // can discover it without an explicit --lr-activity-json flag.
         if let Some(mut meta) = upstream_meta {
             meta.outputs.lr_activity = Some(json_path.clone());
             let _ = meta.write(std::path::Path::new(&upstream_meta_path));
@@ -311,280 +384,6 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-fn stratum_entry_from_kept_ccs(
-    batch_label: &str,
-    community: i32,
-    kept_ccs: &[Vec<(usize, usize)>],
-    cell_names: &[Box<str>],
-) -> StratumEntry {
-    let edges_named: Vec<(Box<str>, Box<str>)> = kept_ccs
-        .par_iter()
-        .flat_map_iter(|cc| {
-            cc.iter().map(|&(i, j)| {
-                let l = cell_names
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_else(|| format!("cell_{i}").into_boxed_str());
-                let r = cell_names
-                    .get(j)
-                    .cloned()
-                    .unwrap_or_else(|| format!("cell_{j}").into_boxed_str());
-                (l, r)
-            })
-        })
-        .collect();
-    StratumEntry {
-        batch: batch_label.to_string().into_boxed_str(),
-        community,
-        edges: edges_named,
-    }
-}
-
-/// Aggregated statistics for one (stratum, LR pair) across its kept CCs.
-struct AggStat {
-    ce_obs: f32,
-    null_mean: f32,
-    null_sd: f32,
-    z: f32,
-    p_empirical: f32,
-}
-
-/// For each CC: compute `H(R|L)/H(R)` on the real LR pair and on every decoy
-/// pair (sharing the per-CC quantile edges), then aggregate observed and null
-/// statistics across CCs with inverse-variance weights.
-///
-/// Returns `None` if no CC produced a valid statistic.
-fn aggregate_cc_statistics(
-    ccs: &[Vec<(usize, usize)>],
-    li: usize,
-    ri: usize,
-    decoys: &[(usize, usize)],
-    x_gn: &Mat,
-    n_bins: usize,
-) -> Option<AggStat> {
-    let mut per_cc_obs: Vec<f32> = Vec::new();
-    let mut per_cc_null: Vec<Vec<f32>> = Vec::new();
-    let mut per_cc_weight: Vec<f32> = Vec::new();
-
-    let cap = ccs.iter().map(|es| es.len()).max().unwrap_or(0);
-    let mut l_buf: Vec<f32> = Vec::with_capacity(cap);
-    let mut r_buf: Vec<f32> = Vec::with_capacity(cap);
-
-    for edges in ccs {
-        l_buf.clear();
-        r_buf.clear();
-        l_buf.extend(edges.iter().map(|&(s, _)| x_gn[(li, s)]));
-        r_buf.extend(edges.iter().map(|&(_, t)| x_gn[(ri, t)]));
-        let bins_l = quantile_edges(&l_buf, n_bins);
-        let bins_r = quantile_edges(&r_buf, n_bins);
-        let Some(ce_obs) = normalised_conditional_entropy(&l_buf, &r_buf, &bins_l, &bins_r) else {
-            continue;
-        };
-        let mut nulls: Vec<f32> = Vec::with_capacity(decoys.len());
-        for &(dlg, drg) in decoys {
-            l_buf.clear();
-            r_buf.clear();
-            l_buf.extend(edges.iter().map(|&(s, _)| x_gn[(dlg, s)]));
-            r_buf.extend(edges.iter().map(|&(_, t)| x_gn[(drg, t)]));
-            let bins_l_n = quantile_edges(&l_buf, n_bins);
-            let bins_r_n = quantile_edges(&r_buf, n_bins);
-            if let Some(ce) = normalised_conditional_entropy(&l_buf, &r_buf, &bins_l_n, &bins_r_n) {
-                nulls.push(ce);
-            }
-        }
-        if nulls.len() < 10 {
-            continue;
-        }
-        let n = nulls.len() as f32;
-        let mu = nulls.iter().sum::<f32>() / n;
-        let var = nulls.iter().map(|v| (v - mu).powi(2)).sum::<f32>() / (n - 1.0).max(1.0);
-        let weight = if var > 0.0 { 1.0 / var } else { 0.0 };
-        if weight <= 0.0 || !weight.is_finite() {
-            continue;
-        }
-        per_cc_obs.push(ce_obs);
-        per_cc_null.push(nulls);
-        per_cc_weight.push(weight);
-    }
-
-    if per_cc_obs.is_empty() {
-        return None;
-    }
-
-    let w_sum: f32 = per_cc_weight.iter().sum();
-    let ce_obs_agg: f32 = per_cc_obs
-        .iter()
-        .zip(per_cc_weight.iter())
-        .map(|(&o, &w)| o * w)
-        .sum::<f32>()
-        / w_sum;
-
-    // For the aggregated null, combine per-CC nulls by drawing one value per CC
-    // per draw (paired across decoys). Decoys are in the same order for every
-    // CC so this matches a block-wise pairing and preserves within-draw
-    // correlation across CCs.
-    let n_draws = per_cc_null.iter().map(|v| v.len()).min().unwrap_or(0);
-    if n_draws == 0 {
-        return None;
-    }
-    let mut agg_null: Vec<f32> = Vec::with_capacity(n_draws);
-    for d in 0..n_draws {
-        let mut numer = 0.0f32;
-        for (nulls, &w) in per_cc_null.iter().zip(per_cc_weight.iter()) {
-            numer += nulls[d] * w;
-        }
-        agg_null.push(numer / w_sum);
-    }
-
-    let nd = agg_null.len() as f32;
-    let mu = agg_null.iter().sum::<f32>() / nd;
-    let var = agg_null.iter().map(|v| (v - mu).powi(2)).sum::<f32>() / (nd - 1.0).max(1.0);
-    let sd = var.sqrt().max(1e-8);
-    let z = (ce_obs_agg - mu) / sd;
-
-    // One-sided: elevated LR activity ⇒ *lower* CE than null.
-    let n_le_or_eq: usize = agg_null.iter().filter(|&&v| v <= ce_obs_agg).count();
-    let p = ((n_le_or_eq + 1) as f32) / ((n_draws + 1) as f32);
-
-    Some(AggStat {
-        ce_obs: ce_obs_agg,
-        null_mean: mu,
-        null_sd: sd,
-        z,
-        p_empirical: p.clamp(0.0, 1.0),
-    })
-}
-
-/// Iterate a CSC matrix column by column, yielding `(col, row_idx_slice, val_slice)`.
-fn csc_column_iter(
-    csc: &nalgebra_sparse::CscMatrix<f32>,
-) -> impl Iterator<Item = (usize, &[usize], &[f32])> {
-    let offsets = csc.col_offsets();
-    let row_indices = csc.row_indices();
-    let values = csc.values();
-    (0..csc.ncols()).map(move |col| {
-        let start = offsets[col];
-        let end = offsets[col + 1];
-        (col, &row_indices[start..end], &values[start..end])
-    })
-}
-
-/// Assign each node a connected-component id over the given edges, using
-/// `UnionFind` from `data-beans-alg`. Nodes not touched by any edge keep
-/// singleton components (each with a distinct label).
-fn connected_components_from_edges(edges: &[(usize, usize)], n: usize) -> Vec<usize> {
-    let mut uf = UnionFind::new(n);
-    for &(i, j) in edges {
-        uf.union(i, j);
-    }
-    let mut next = 0usize;
-    let mut rep_to_label: HashMap<usize, usize> = HashMap::default();
-    (0..n)
-        .map(|i| {
-            let r = uf.find(i);
-            *rep_to_label.entry(r).or_insert_with(|| {
-                let l = next;
-                next += 1;
-                l
-            })
-        })
-        .collect()
-}
-
-/// Decompose a stratum's edge list into connected components, drop components
-/// below `min_cc_edges`, and return the kept components' edge lists.
-fn extract_kept_ccs(
-    stratum_edges: &[(usize, usize)],
-    n_cells: usize,
-    min_cc_edges: usize,
-) -> Vec<Vec<(usize, usize)>> {
-    let ccs = connected_components_from_edges(stratum_edges, n_cells);
-    let mut cc_edges: HashMap<usize, Vec<(usize, usize)>> = HashMap::default();
-    for &(i, j) in stratum_edges {
-        cc_edges.entry(ccs[i]).or_default().push((i, j));
-    }
-    cc_edges
-        .into_values()
-        .filter(|es| es.len() >= min_cc_edges)
-        .collect()
-}
-
-/// Score every real LR pair against a fixed set of kept connected components
-/// in parallel. Each pair gets a deterministic per-pair RNG seeded from
-/// `base_seed` and the pair index, so results are reproducible.
-#[allow(clippy::too_many_arguments)]
-fn score_pairs_parallel(
-    batch_label: &str,
-    community: i32,
-    kept_ccs: &[Vec<(usize, usize)>],
-    real_pairs: &[(Box<str>, Box<str>, usize, usize)],
-    gene_mean: &[f32],
-    moran_full: &[f32],
-    matcher: &MatcherContext,
-    known_pairs: &HashSet<(usize, usize)>,
-    real_gene_set: &HashSet<usize>,
-    x_gn: &Mat,
-    gene_names: &[Box<str>],
-    args: &SrtLrActivityArgs,
-    base_seed: u64,
-    stratum_id: usize,
-) -> Vec<LrActivityRow> {
-    let n_edges_total: usize = kept_ccs.iter().map(|es| es.len()).sum();
-    real_pairs
-        .par_iter()
-        .enumerate()
-        .filter_map(|(pair_idx, (lname, rname, li, ri))| {
-            let target_l_mean = gene_mean[*li];
-            let target_l_moran = moran_full[*li];
-            let target_r_mean = gene_mean[*ri];
-            let target_r_moran = moran_full[*ri];
-            if !target_l_moran.is_finite() || !target_r_moran.is_finite() {
-                return None;
-            }
-            let mut rng = SmallRng::seed_from_u64(
-                base_seed
-                    .wrapping_add(community as u64 * 1_000_003)
-                    .wrapping_add(pair_idx as u64),
-            );
-            let decoys = matcher.sample_decoys(
-                &DecoyTarget {
-                    real_l: *li,
-                    real_r: *ri,
-                    l_mean: target_l_mean,
-                    l_moran: target_l_moran,
-                    r_mean: target_r_mean,
-                    r_moran: target_r_moran,
-                    expr_tol: args.expr_tol,
-                    moran_tol: args.moran_tol,
-                    n_null: args.n_null,
-                    scheme: args.null_scheme,
-                    known_pairs,
-                    exclude_genes: real_gene_set,
-                },
-                &mut rng,
-            );
-            let agg = aggregate_cc_statistics(kept_ccs, *li, *ri, &decoys, x_gn, args.n_bins)?;
-            Some(LrActivityRow {
-                batch: batch_label.to_string().into_boxed_str(),
-                community,
-                ligand: lname.clone(),
-                receptor: rname.clone(),
-                ligand_resolved: gene_names[*li].clone(),
-                receptor_resolved: gene_names[*ri].clone(),
-                n_edges: n_edges_total as i32,
-                n_components: kept_ccs.len() as i32,
-                ce_obs: agg.ce_obs,
-                ce_null_mean: agg.null_mean,
-                ce_null_sd: agg.null_sd,
-                z: agg.z,
-                p_empirical: agg.p_empirical,
-                q_bh: f32::NAN,
-                stratum_id,
-            })
-        })
-        .collect()
 }
 
 fn load_expr_data(c: &crate::util::input::SrtInputArgs) -> anyhow::Result<SparseIoVec> {
@@ -606,13 +405,421 @@ fn load_expr_data(c: &crate::util::input::SrtInputArgs) -> anyhow::Result<Sparse
     Ok(data_vec)
 }
 
+/// Per-cell soft community membership matrices for the two roles.
+/// Row-normalised so each cell's per-role mass sums to 1 (over communities
+/// that the cell touches in that role).
+fn build_role_memberships(
+    edges: &[(usize, usize, u32, Option<Box<str>>)],
+    n_cells: usize,
+    n_communities: usize,
+) -> (DMatrix<f32>, DMatrix<f32>) {
+    let mut p_send = DMatrix::<f32>::zeros(n_cells, n_communities);
+    let mut p_recv = DMatrix::<f32>::zeros(n_cells, n_communities);
+    for &(i, j, k, _) in edges {
+        p_send[(i, k as usize)] += 1.0;
+        p_recv[(j, k as usize)] += 1.0;
+    }
+    for i in 0..n_cells {
+        let s = p_send.row(i).sum();
+        if s > 0.0 {
+            p_send.row_mut(i).scale_mut(1.0 / s);
+        }
+        let r = p_recv.row(i).sum();
+        if r > 0.0 {
+            p_recv.row_mut(i).scale_mut(1.0 / r);
+        }
+    }
+    (p_send, p_recv)
+}
+
+/// Modal batch among edges incident to each cell. Cells with no batched
+/// edges fall back to `BATCH_LABEL_ALL` (also the default for runs where
+/// `coord_pairs.parquet` carried no batch columns).
+fn derive_cell_batch_labels(
+    edges: &[(usize, usize, u32, Option<Box<str>>)],
+    n_cells: usize,
+) -> Vec<Box<str>> {
+    let mut counts: Vec<HashMap<Box<str>, usize>> =
+        (0..n_cells).map(|_| HashMap::default()).collect();
+    for (i, j, _k, b_opt) in edges {
+        if let Some(b) = b_opt {
+            *counts[*i].entry(b.clone()).or_insert(0) += 1;
+            *counts[*j].entry(b.clone()).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .map(|m| {
+            m.into_iter()
+                .max_by_key(|(_, c)| *c)
+                .map(|(b, _)| b)
+                .unwrap_or_else(|| BATCH_LABEL_ALL.into())
+        })
+        .collect()
+}
+
+/// Group cells into pseudobulk samples = unique (batch, propensity-bin)
+/// combinations. Returns (sample_id_per_cell, per-sample batch label,
+/// per-sample propensity-bin).
+fn assign_samples(
+    cell_batch: &[Box<str>],
+    propbin: &[usize],
+) -> (Vec<usize>, Vec<Box<str>>, Vec<usize>) {
+    let mut key_to_id: HashMap<(Box<str>, usize), usize> = HashMap::default();
+    let mut sample_batch_label: Vec<Box<str>> = Vec::new();
+    let mut sample_propbin: Vec<usize> = Vec::new();
+    let mut sample_id_per_cell: Vec<usize> = Vec::with_capacity(cell_batch.len());
+    for i in 0..cell_batch.len() {
+        let key = (cell_batch[i].clone(), propbin[i]);
+        let id = if let Some(&id) = key_to_id.get(&key) {
+            id
+        } else {
+            let id = sample_batch_label.len();
+            sample_batch_label.push(key.0.clone());
+            sample_propbin.push(key.1);
+            key_to_id.insert(key, id);
+            id
+        };
+        sample_id_per_cell.push(id);
+    }
+    (sample_id_per_cell, sample_batch_label, sample_propbin)
+}
+
+/// Per-(community, sample) role-weighted pseudobulk for the LR genes.
+/// `num_send[c]` is `(n_lr_genes × n_samples)`; `denom_send[c][s]` is the
+/// total p_send weight of cells belonging to sample `s`.
+struct CollapseOut {
+    num_send: Vec<DMatrix<f32>>,
+    denom_send: Vec<Vec<f32>>,
+    num_recv: Vec<DMatrix<f32>>,
+    denom_recv: Vec<Vec<f32>>,
+}
+
+fn collapse_role_pseudobulk(
+    x_lr: &DMatrix<f32>,
+    sample_id: &[usize],
+    p_send: &DMatrix<f32>,
+    p_recv: &DMatrix<f32>,
+    n_communities: usize,
+    n_samples: usize,
+) -> CollapseOut {
+    let n_lr = x_lr.nrows();
+    let n_cells = x_lr.ncols();
+
+    // Communities are independent — accumulate each one in its own thread.
+    // Inverting the loop order (community-outer, cell-inner) lets axpy run
+    // without inter-thread races.
+    type CommunityCollapse = (DMatrix<f32>, DMatrix<f32>, Vec<f32>, Vec<f32>);
+    let per_community: Vec<CommunityCollapse> = (0..n_communities)
+        .into_par_iter()
+        .map(|c| {
+            let mut num_s = DMatrix::<f32>::zeros(n_lr, n_samples);
+            let mut num_r = DMatrix::<f32>::zeros(n_lr, n_samples);
+            let mut den_s = vec![0.0f32; n_samples];
+            let mut den_r = vec![0.0f32; n_samples];
+            for i in 0..n_cells {
+                let s = sample_id[i];
+                let xi = x_lr.column(i);
+                let ps = p_send[(i, c)];
+                if ps > 0.0 {
+                    num_s.column_mut(s).axpy(ps, &xi, 1.0);
+                    den_s[s] += ps;
+                }
+                let pr = p_recv[(i, c)];
+                if pr > 0.0 {
+                    num_r.column_mut(s).axpy(pr, &xi, 1.0);
+                    den_r[s] += pr;
+                }
+            }
+            (num_s, num_r, den_s, den_r)
+        })
+        .collect();
+
+    let mut num_send = Vec::with_capacity(n_communities);
+    let mut num_recv = Vec::with_capacity(n_communities);
+    let mut denom_send = Vec::with_capacity(n_communities);
+    let mut denom_recv = Vec::with_capacity(n_communities);
+    for (ns, nr, ds, dr) in per_community {
+        num_send.push(ns);
+        num_recv.push(nr);
+        denom_send.push(ds);
+        denom_recv.push(dr);
+    }
+    CollapseOut {
+        num_send,
+        denom_send,
+        num_recv,
+        denom_recv,
+    }
+}
+
+fn community_present(collapse: &CollapseOut, c: usize, samples: &[usize]) -> bool {
+    samples
+        .iter()
+        .any(|&s| collapse.denom_send[c][s] > 0.0 && collapse.denom_recv[c][s] > 0.0)
+}
+
+/// Pseudobulk mean: numerator / (denominator + prior). Prior keeps
+/// low-evidence samples from blowing up under low denominator.
+#[inline]
+fn pb_mean(num: f32, denom: f32) -> f32 {
+    num / (denom + PRIOR_PSEUDOCOUNT)
+}
+
+/// Average ranks (1-based, ties → mean rank). Used to convert pseudobulk
+/// expression vectors to a ranks before applying weighted Pearson — gives
+/// a weighted Spearman without the `±1` saturation that weighted Pearson
+/// hits when one sample carries most of the mass.
+fn avg_ranks(v: &[f32]) -> Vec<f32> {
+    let n = v.len();
+    let mut idx: Vec<usize> = (0..n).collect();
+    idx.sort_by(|&a, &b| v[a].partial_cmp(&v[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut rank = vec![0.0f32; n];
+    let mut k = 0;
+    while k < n {
+        let mut j = k + 1;
+        while j < n && v[idx[j]] == v[idx[k]] {
+            j += 1;
+        }
+        let avg = ((k + j - 1) as f32) / 2.0 + 1.0;
+        for &i in &idx[k..j] {
+            rank[i] = avg;
+        }
+        k = j;
+    }
+    rank
+}
+
+/// Weighted Pearson correlation between `l` and `r` using sample weights `w`.
+fn weighted_corr(l: &[f32], r: &[f32], w: &[f32]) -> f32 {
+    let mut sw = 0.0f32;
+    let mut sl = 0.0f32;
+    let mut sr = 0.0f32;
+    for k in 0..l.len() {
+        sw += w[k];
+        sl += w[k] * l[k];
+        sr += w[k] * r[k];
+    }
+    if sw <= EPS {
+        return f32::NAN;
+    }
+    let ml = sl / sw;
+    let mr = sr / sw;
+    let mut cov = 0.0f32;
+    let mut vl = 0.0f32;
+    let mut vr = 0.0f32;
+    for k in 0..l.len() {
+        let dl = l[k] - ml;
+        let dr = r[k] - mr;
+        cov += w[k] * dl * dr;
+        vl += w[k] * dl * dl;
+        vr += w[k] * dr * dr;
+    }
+    if vl <= EPS || vr <= EPS {
+        return 0.0;
+    }
+    cov / (vl.sqrt() * vr.sqrt())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_pairs_for_stratum(
+    batch_label: &str,
+    community: u32,
+    samples_in_stratum: &[usize],
+    sample_propbin: &[usize],
+    real_pairs: &[(Box<str>, Box<str>, usize, usize)],
+    gene_to_local: &HashMap<usize, usize>,
+    gene_names: &[Box<str>],
+    collapse: &CollapseOut,
+    n_perm: usize,
+    base_seed: u64,
+    stratum_id: usize,
+    shuffle_within_batch: bool,
+    sample_batch_label: &[Box<str>],
+    shuffle_stratify_dim: usize,
+) -> Vec<LrActivityRow> {
+    let c = community as usize;
+    let n_s = samples_in_stratum.len();
+    if n_s < MIN_SAMPLES_PER_STRATUM {
+        return Vec::new();
+    }
+
+    let w_send: Vec<f32> = samples_in_stratum
+        .iter()
+        .map(|&s| collapse.denom_send[c][s])
+        .collect();
+    let w_recv: Vec<f32> = samples_in_stratum
+        .iter()
+        .map(|&s| collapse.denom_recv[c][s])
+        .collect();
+    let w_pair: Vec<f32> = (0..n_s).map(|k| (w_send[k] * w_recv[k]).sqrt()).collect();
+
+    // Permutation buckets: rows of `bucket_idx` give the position-indices
+    // (into the stratum's sample list) that may be shuffled together.
+    // Pooled strata always shuffle within batch (to preserve batch-level
+    // confounders); per-batch strata are unconstrained on the batch axis.
+    // When `shuffle_stratify_dim > 0`, we additionally subgroup by the top
+    // bits of the propensity binary code so the cell-population marginal
+    // is preserved across permutations.
+    let strat_mask: usize = if shuffle_stratify_dim == 0 {
+        0
+    } else {
+        (1usize << shuffle_stratify_dim) - 1
+    };
+    let bucket_idx: Vec<Vec<usize>> = {
+        let mut buckets: HashMap<(Box<str>, usize), Vec<usize>> = HashMap::default();
+        for (k, &s) in samples_in_stratum.iter().enumerate() {
+            let batch_key: Box<str> = if shuffle_within_batch {
+                sample_batch_label[s].clone()
+            } else {
+                Box::from("_")
+            };
+            let strat_key = sample_propbin[s] & strat_mask;
+            buckets.entry((batch_key, strat_key)).or_default().push(k);
+        }
+        buckets.into_values().collect()
+    };
+
+    real_pairs
+        .par_iter()
+        .enumerate()
+        .filter_map(|(pair_idx, (lname, rname, li, ri))| {
+            let l_local = *gene_to_local.get(li)?;
+            let r_local = *gene_to_local.get(ri)?;
+
+            let l_vec: Vec<f32> = samples_in_stratum
+                .iter()
+                .map(|&s| {
+                    pb_mean(
+                        collapse.num_send[c][(l_local, s)],
+                        collapse.denom_send[c][s],
+                    )
+                })
+                .collect();
+            let r_vec: Vec<f32> = samples_in_stratum
+                .iter()
+                .map(|&s| {
+                    pb_mean(
+                        collapse.num_recv[c][(r_local, s)],
+                        collapse.denom_recv[c][s],
+                    )
+                })
+                .collect();
+            // Rank-transform once; permutation reshuffles the rank vector
+            // (equivalent to re-ranking after a value permutation, since
+            // permutation only relabels ranks).
+            let l_rank = avg_ranks(&l_vec);
+            let r_rank = avg_ranks(&r_vec);
+            let t_obs = weighted_corr(&l_rank, &r_rank, &w_pair);
+            if !t_obs.is_finite() {
+                return None;
+            }
+
+            let mut rng =
+                SmallRng::seed_from_u64(base_seed.wrapping_add(pair_idx as u64 * 1_000_003));
+            let mut shuffled = l_rank.clone();
+            let mut nulls: Vec<f32> = Vec::with_capacity(n_perm);
+            for _ in 0..n_perm {
+                permute_in_buckets(&mut shuffled, &l_rank, &bucket_idx, &mut rng);
+                let t = weighted_corr(&shuffled, &r_rank, &w_pair);
+                if t.is_finite() {
+                    nulls.push(t);
+                }
+            }
+            if nulls.len() < n_perm.div_ceil(2) {
+                return None;
+            }
+            let n = nulls.len() as f32;
+            let mu = nulls.iter().sum::<f32>() / n;
+            let var = nulls.iter().map(|v| (v - mu).powi(2)).sum::<f32>() / (n - 1.0).max(1.0);
+            let sd = var.sqrt().max(1e-8);
+            let z = (t_obs - mu) / sd;
+
+            // One-sided: positive correlation = LR pair active.
+            let n_ge: usize = nulls.iter().filter(|&&v| v >= t_obs).count();
+            let p_emp = ((n_ge + 1) as f32) / ((nulls.len() + 1) as f32);
+            let p_z = one_sided_p_z(z);
+
+            Some(LrActivityRow {
+                batch: Box::from(batch_label),
+                community: community as i32,
+                ligand: lname.clone(),
+                receptor: rname.clone(),
+                ligand_resolved: gene_names[*li].clone(),
+                receptor_resolved: gene_names[*ri].clone(),
+                n_samples: n_s as i32,
+                stat_obs: t_obs,
+                null_mean: mu,
+                null_sd: sd,
+                z,
+                p_empirical: p_emp.clamp(0.0, 1.0),
+                p_z,
+                q_bh: f32::NAN,
+                stratum_id,
+            })
+        })
+        .collect()
+}
+
+fn permute_in_buckets(out: &mut [f32], src: &[f32], buckets: &[Vec<usize>], rng: &mut SmallRng) {
+    out.copy_from_slice(src);
+    let mut tmp: Vec<f32> = Vec::new();
+    for bucket in buckets {
+        if bucket.len() < 2 {
+            continue;
+        }
+        tmp.clear();
+        tmp.extend(bucket.iter().map(|&k| out[k]));
+        tmp.shuffle(rng);
+        for (slot, &k) in bucket.iter().enumerate() {
+            out[k] = tmp[slot];
+        }
+    }
+}
+
+fn stratum_entry(
+    batch_label: &str,
+    community: i32,
+    edges: &[(usize, usize, u32, Option<Box<str>>)],
+    cell_names: &[Box<str>],
+    batch_filter: Option<&str>,
+    community_filter: u32,
+) -> StratumEntry {
+    let edges_named: Vec<(Box<str>, Box<str>)> = edges
+        .iter()
+        .filter(|(_, _, k, b)| {
+            *k == community_filter
+                && match batch_filter {
+                    Some(bf) => b.as_ref().map(|s| s.as_ref()) == Some(bf),
+                    None => true,
+                }
+        })
+        .map(|(i, j, _, _)| {
+            let l = cell_names
+                .get(*i)
+                .cloned()
+                .unwrap_or_else(|| format!("cell_{i}").into_boxed_str());
+            let r = cell_names
+                .get(*j)
+                .cloned()
+                .unwrap_or_else(|| format!("cell_{j}").into_boxed_str());
+            (l, r)
+        })
+        .collect();
+    StratumEntry {
+        batch: Box::from(batch_label),
+        community,
+        edges: edges_named,
+    }
+}
+
 fn apply_bh_per_batch(rows: &mut [LrActivityRow]) {
     let mut by_batch: HashMap<Box<str>, Vec<usize>> = HashMap::default();
     for (i, r) in rows.iter().enumerate() {
         by_batch.entry(r.batch.clone()).or_default().push(i);
     }
     for (_b, idxs) in by_batch {
-        let p: Vec<f32> = idxs.iter().map(|&i| rows[i].p_empirical).collect();
+        let p: Vec<f32> = idxs.iter().map(|&i| rows[i].p_z).collect();
         let q = bh_qvalues(&p);
         for (k, &i) in idxs.iter().enumerate() {
             rows[i].q_bh = q[k];
