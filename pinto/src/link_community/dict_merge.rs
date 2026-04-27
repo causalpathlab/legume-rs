@@ -10,11 +10,11 @@
 //! similarity of per-gene-centred log-rates.
 //!
 //! The output `Vec<BhcMerge>` reuses the merge-tree node type from
-//! `data_beans_alg::bhc` (a generic binary merge tree carrier — the BHC
-//! module also hosts `bhc_cut`, which works on any monotone score, so we
-//! reuse it directly to cut the cosine tree). The semantic of `log_bf`
-//! changes: here it is the cosine similarity at which the two children
-//! were merged. Higher = more redundant gene programs.
+//! `data_beans_alg::bhc` purely as a binary-merge-tree carrier. The
+//! cut function is the same union-find walk BHC uses; under the
+//! cosine alias, `log_bf` carries cosine similarity and `cutoff` is a
+//! user-chosen similarity threshold rather than a Bayes-factor break
+//! point.
 //!
 //! Linkage: average linkage (UPGMA). When two clusters merge, the
 //! similarity between the new node and any other cluster `o` is the
@@ -22,7 +22,7 @@
 //! which is equivalent to the average pairwise similarity between leaves.
 
 use crate::util::common::Mat;
-pub use data_beans_alg::bhc::BhcMerge;
+pub use data_beans_alg::bhc::{bhc_cut as cosine_cut, BhcMerge};
 
 /// Build an agglomerative average-linkage merge tree over the K columns of
 /// `post_log_mean` (gene × topic posterior log-mean) using cosine
@@ -157,7 +157,6 @@ pub fn cosine_merge(post_log_mean: &Mat) -> Vec<BhcMerge> {
 mod tests {
     use super::*;
     use crate::util::common::Mat;
-    use data_beans_alg::bhc::bhc_cut;
 
     fn col_from(values: &[f32]) -> Vec<f32> {
         values.to_vec()
@@ -248,7 +247,7 @@ mod tests {
         let merges = cosine_merge(&m);
         let k = 5usize;
         // Cut at cosine ≥ 0.5: only within-group merges happen.
-        let labels = bhc_cut(&merges, k, 0.5);
+        let labels = cosine_cut(&merges, k, 0.5);
         assert_eq!(labels.len(), k);
         let n_super: usize = labels.iter().copied().filter(|&v| v >= 0).count();
         let max_label = labels.iter().copied().max().unwrap();

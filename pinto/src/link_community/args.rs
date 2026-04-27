@@ -149,27 +149,6 @@ pub struct SrtLinkCommunityArgs {
 
     #[arg(
         long,
-        default_value_t = false,
-        help = "Disable the post-hoc dictionary-merge over the K fitted communities",
-        long_help = "By default, after the K link communities are fit, an\n\
-                       agglomerative cosine-similarity merge runs over the K\n\
-                       gene-topic posterior columns (the dictionary). Average linkage\n\
-                       (UPGMA) on per-gene-centred log-rates produces a binary merge\n\
-                       tree; the tree is cut at `--merge-cut` to collapse near-\n\
-                       redundant communities into super-communities representing the\n\
-                       same gene program across spatial locations. Emits:\n\
-                         <out>.dict_merges.parquet     — full merge tree\n\
-                         <out>.dict_merges.cut.parquet — fine_id → super_id mapping\n\
-                       and writes the consensus output triple (link_community,\n\
-                       propensity, gene_topic) under the bare `<out>.` prefix.\n\
-                       The pre-merge fine partition is preserved under `<out>.draft.*`\n\
-                       so the location/neighbourhood layer is never lost.\n\
-                       Cost is negligible. Pass --no-merge to skip."
-    )]
-    pub no_merge: bool,
-
-    #[arg(
-        long,
         default_value_t = 0.9,
         help = "Cosine similarity cutoff for the dictionary-merge consensus cut",
         long_help = "Merges whose cosine similarity ≥ cutoff collapse into one\n\
