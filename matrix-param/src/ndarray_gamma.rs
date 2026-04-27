@@ -171,6 +171,32 @@ impl Inference for GammaMatrix {
         )?)
     }
 
+    fn posterior_log_sample(&self) -> anyhow::Result<Self::Mat> {
+        use rand_distr::{Distribution, StandardNormal};
+
+        let m_slice = self.estimated_log_mean.as_slice().ok_or(anyhow::anyhow!(
+            "failed to take slice on estimated_log_mean"
+        ))?;
+        let s_slice = self
+            .estimated_log_sd
+            .as_slice()
+            .ok_or(anyhow::anyhow!("failed to take slice on estimated_log_sd"))?;
+
+        let sampled: Vec<f32> = m_slice
+            .par_iter()
+            .zip(s_slice.par_iter())
+            .map_init(rand::rng, |rng, (&m, &s)| {
+                let z: f32 = StandardNormal.sample(rng);
+                m + s * z
+            })
+            .collect();
+
+        Ok(Self::Mat::from_shape_vec(
+            (self.nrows(), self.ncols()),
+            sampled,
+        )?)
+    }
+
     fn nrows(&self) -> usize {
         self.num_rows
     }
