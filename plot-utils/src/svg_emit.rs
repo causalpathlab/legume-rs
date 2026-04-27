@@ -66,6 +66,9 @@ pub struct SvgOpts {
     pub hull_stroke_px: f32,
     /// Hull fill opacity (0..=1). 0 = no fill.
     pub hull_fill_alpha: f32,
+    /// Outline box stroke width in pixels around the full canvas
+    /// (0 = no frame).
+    pub frame_stroke_px: f32,
 }
 
 /// Assemble a full SVG document as a `String`.
@@ -126,6 +129,24 @@ pub fn emit_svg(layers: &[TopicLayer], opts: &SvgOpts) -> String {
                 sw = opts.hull_stroke_px,
             );
         }
+        let _ = writeln!(&mut s, "  </g>");
+    }
+
+    if opts.frame_stroke_px > 0.0 {
+        let sw = opts.frame_stroke_px;
+        let inset = sw * 0.5;
+        let fw = (opts.width_px as f32 - sw).max(0.0);
+        let fh = (opts.height_px as f32 - sw).max(0.0);
+        let _ = writeln!(&mut s, "  <g id=\"frame\">");
+        let _ = writeln!(
+            &mut s,
+            "    <rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{w:.2}\" height=\"{h:.2}\" \
+             fill=\"none\" stroke=\"black\" stroke-width=\"{sw:.2}\"/>",
+            x = inset,
+            y = inset,
+            w = fw,
+            h = fh,
+        );
         let _ = writeln!(&mut s, "  </g>");
     }
 

@@ -356,39 +356,39 @@ pub fn shannon_entropy_rows(propensity: &Mat) -> DVec {
     out
 }
 
-/// Compute topic-specific gene expression statistics via Poisson-Gamma.
+/// Compute community-specific gene expression statistics via Poisson-Gamma.
 ///
 /// Given cell propensity [N × K] and sparse expression data [G × N],
 /// computes weighted gene sums `X @ propensity^T` and fits a Poisson-Gamma
-/// to get posterior gene expression rates per topic. Before calibration the
+/// to get posterior gene expression rates per community. Before calibration the
 /// sufficient statistic is reweighted row-wise by NB Fisher-info weights
 /// `w_g = 1 / (1 + π_g · s̄ · φ(μ_g))`, matching the weighting used during
 /// DC-Poisson clustering so clustering and reporting stay consistent.
 ///
-/// Writes `{out_prefix}.gene_topic.parquet` (genes × K). When
+/// Writes `{out_prefix}.gene_community.parquet` (genes × K). When
 /// `gene_weights` is `Some`, those precomputed NB Fisher-info weights are
-/// applied to the per-(gene, topic) sufficient statistic; otherwise they
+/// applied to the per-(gene, community) sufficient statistic; otherwise they
 /// are recomputed from the data (extra full-data scan).
-pub fn compute_gene_topic_stat(
+pub fn compute_gene_community_stat(
     cell_propensity: &Mat,
     data_vec: &SparseIoVec,
     gene_weights: Option<&[f32]>,
     block_size: Option<usize>,
     out_prefix: &str,
 ) -> anyhow::Result<()> {
-    let param = fit_gene_topic_param(cell_propensity, data_vec, gene_weights, block_size)?;
+    let param = fit_gene_community_param(cell_propensity, data_vec, gene_weights, block_size)?;
     let gene_names = data_vec.row_names()?;
-    write_gene_topic_param(&param, &gene_names, out_prefix)
+    write_gene_community_param(&param, &gene_names, out_prefix)
 }
 
-/// Fit the Poisson-Gamma posterior over gene × topic without writing to disk.
+/// Fit the Poisson-Gamma posterior over gene × community without writing to disk.
 ///
 /// Returns the calibrated `GammaMatrix` so callers can reuse the posterior
-/// (e.g. to compute pairwise topic similarity for cosine merging) without
+/// (e.g. to compute pairwise community similarity for cosine merging) without
 /// re-reading the parquet output. The sufficient statistic is row-scaled by
 /// NB Fisher-info weights `w_g = 1 / (1 + π_g · s̄ · φ(μ_g))`, matching
-/// `compute_gene_topic_stat`.
-pub fn fit_gene_topic_param(
+/// `compute_gene_community_stat`.
+pub fn fit_gene_community_param(
     cell_propensity: &Mat,
     data_vec: &SparseIoVec,
     gene_weights: Option<&[f32]>,
@@ -401,13 +401,13 @@ pub fn fit_gene_topic_param(
     let n_cells = data_vec.num_columns();
     let k = cell_propensity.ncols();
 
-    info!("Computing gene-topic statistics...");
+    info!("Computing gene-community statistics...");
     let prop_kn = cell_propensity.transpose();
     let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
 
     let pb = new_progress_bar(
         jobs.len() as u64,
-        "Gene-topic {bar:40} {pos}/{len} blocks ({eta})",
+        "Gene-community {bar:40} {pos}/{len} blocks ({eta})",
     );
     let partial_stats: Vec<(Mat, DVec)> = jobs
         .par_iter()
@@ -437,7 +437,7 @@ pub fn fit_gene_topic_param(
     let w: &[f32] = match gene_weights {
         Some(w) => w,
         None => {
-            info!("Computing NB Fisher-info weights for gene-topic stats");
+            info!("Computing NB Fisher-info weights for gene-community stats");
             owned_w = compute_nb_fisher_weights(data_vec, block_size)?;
             &owned_w
         }
@@ -452,38 +452,38 @@ pub fn fit_gene_topic_param(
     Ok(gamma_param)
 }
 
-/// Write a fitted gene-topic posterior to `<out_prefix>.gene_topic.parquet`
-/// in melted (gene, topic, mean, sd, log_mean, log_sd) form.
-pub fn write_gene_topic_param(
+/// Write a fitted gene-community posterior to `<out_prefix>.gene_community.parquet`
+/// in melted (gene, community, mean, sd, log_mean, log_sd) form.
+pub fn write_gene_community_param(
     param: &matrix_param::dmatrix_gamma::GammaMatrix,
     gene_names: &[Box<str>],
     out_prefix: &str,
 ) -> anyhow::Result<()> {
     use matrix_param::traits::Inference;
     let k = param.posterior_mean().ncols();
-    let topic_names: Vec<Box<str>> = (0..k).map(|i| i.to_string().into_boxed_str()).collect();
+    let community_names: Vec<Box<str>> = (0..k).map(|i| i.to_string().into_boxed_str()).collect();
     param.to_melted_parquet(
-        &(out_prefix.to_string() + ".gene_topic.parquet"),
+        &(out_prefix.to_string() + ".gene_community.parquet"),
         (Some(gene_names), Some("gene")),
-        (Some(&topic_names), Some("topic")),
+        (Some(&community_names), Some("community")),
     )?;
     Ok(())
 }
 
-/// Compute propensity and gene-topic statistics from latent pair projections.
+/// Compute propensity and gene-community statistics from latent pair projections.
 ///
 /// 1. K-means on `proj_kn` (K_latent × N_pairs) → edge cluster labels
 /// 2. Propensity: soft cell membership from edge clusters [N_cells × K_clusters]
-/// 3. Gene-topic stat: Poisson-Gamma gene expression rates per topic [G × K_clusters]
+/// 3. Gene-community stat: Poisson-Gamma gene expression rates per community [G × K_clusters]
 ///
-/// Writes `{out_prefix}.propensity.parquet` and `{out_prefix}.gene_topic.parquet`.
-/// Config for `compute_propensity_and_gene_topic_stat`.
+/// Writes `{out_prefix}.propensity.parquet` and `{out_prefix}.gene_community.parquet`.
+/// Config for `compute_propensity_and_gene_community_stat`.
 pub struct PropensityReportConfig {
     pub n_clusters: usize,
     pub block_size: Option<usize>,
 }
 
-pub fn compute_propensity_and_gene_topic_stat(
+pub fn compute_propensity_and_gene_community_stat(
     proj_kn: &Mat,
     edges: &[(usize, usize)],
     data_vec: &SparseIoVec,
@@ -542,8 +542,8 @@ pub fn compute_propensity_and_gene_topic_stat(
     // Edge cluster assignments
     write_edge_clusters(out_prefix, edges, &edge_membership, &cell_names)?;
 
-    // 3. Gene-topic stat
-    compute_gene_topic_stat(&cell_propensity, data_vec, None, block_size, out_prefix)
+    // 3. Gene-community stat
+    compute_gene_community_stat(&cell_propensity, data_vec, None, block_size, out_prefix)
 }
 
 /// Write per-edge K-means cluster assignments to parquet.

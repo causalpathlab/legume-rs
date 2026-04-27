@@ -58,7 +58,7 @@ pub struct OutputFiles {
     pub link_community: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub gene_topic: Option<String>,
+    pub gene_community: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scores: Option<String>,
@@ -70,7 +70,7 @@ pub struct OutputFiles {
     /// cut. Absent when no collapses pass `--merge-cut` (in that case the
     /// draft is the final partition). The merged consensus partition itself
     /// is published under the bare prefix
-    /// (`{prefix}.{propensity,link_community,gene_topic}.parquet`), so this
+    /// (`{prefix}.{propensity,link_community,gene_community}.parquet`), so this
     /// struct only points at the auxiliary tree + cut files.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dict_merge: Option<DictMergeFiles>,
@@ -97,7 +97,7 @@ pub struct LevelInfo {
     pub propensity: String,
     pub link_community: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub gene_topic: Option<String>,
+    pub gene_community: Option<String>,
     /// `Some(true)` if the propensity parquet at this level carries an
     /// `entropy` column (post-Phase-1 runs). `None` for older runs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,9 +134,25 @@ pub fn lc_level_info(prefix: &str, level_index: usize) -> LevelInfo {
         level_index,
         propensity: format!("{prefix}.{tag}.propensity.parquet"),
         link_community: format!("{prefix}.{tag}.link_community.parquet"),
-        gene_topic: Some(format!("{prefix}.{tag}.gene_topic.parquet")),
+        gene_community: Some(format!("{prefix}.{tag}.gene_community.parquet")),
         entropy_present: Some(true),
     }
+}
+
+/// Inputs shared by every metadata builder (`lc` / `dsvd`).
+///
+/// Bundled so call sites stay readable and the builders dodge
+/// `clippy::too_many_arguments`.
+pub struct RunInputs<'a> {
+    pub prefix: &'a str,
+    pub data_files: &'a [Box<str>],
+    pub coord_file: Option<&'a str>,
+    pub coord_columns: &'a [Box<str>],
+    pub n_cells: usize,
+    pub n_genes: usize,
+    pub n_edges: usize,
+    /// Number of communities (lc) / clusters (dsvd) — same K dim either way.
+    pub k: usize,
 }
 
 /// Helper to create metadata for `pinto lc` runs.
@@ -147,19 +163,12 @@ pub fn lc_level_info(prefix: &str, level_index: usize) -> LevelInfo {
 /// super-edges, so indices need not be contiguous and may not start at 0).
 /// `merge_present` is `true` when the dictionary-merge step produced a
 /// consensus collapse and its tree + cut files were written.
-#[allow(clippy::too_many_arguments)]
 pub fn create_lc_metadata(
-    prefix: &str,
-    data_files: &[Box<str>],
-    coord_file: Option<&str>,
-    coord_columns: &[Box<str>],
-    n_cells: usize,
-    n_genes: usize,
-    n_edges: usize,
-    k: usize,
+    inputs: &RunInputs<'_>,
     merge_present: bool,
     cascade_level_indices: &[usize],
 ) -> PintoMetadata {
+    let prefix = inputs.prefix;
     let dict_merge = merge_present.then(|| DictMergeFiles {
         merges: format!("{prefix}.dict_merges.parquet"),
         cut: format!("{prefix}.dict_merges.cut.parquet"),
@@ -179,7 +188,7 @@ pub fn create_lc_metadata(
         level_index: tail_index,
         propensity: format!("{prefix}.propensity.parquet"),
         link_community: format!("{prefix}.link_community.parquet"),
-        gene_topic: Some(format!("{prefix}.gene_topic.parquet")),
+        gene_community: Some(format!("{prefix}.gene_community.parquet")),
         entropy_present: Some(true),
     });
 
@@ -188,18 +197,18 @@ pub fn create_lc_metadata(
         version: env!("CARGO_PKG_VERSION").to_string(),
         timestamp: now_secs(),
         prefix: prefix.to_string(),
-        data_files: Some(data_files.iter().map(|s| s.to_string()).collect()),
-        coord_file: coord_file.map(|s| s.to_string()),
-        n_cells,
-        n_genes,
-        n_edges: Some(n_edges),
-        n_communities: Some(k),
+        data_files: Some(inputs.data_files.iter().map(|s| s.to_string()).collect()),
+        coord_file: inputs.coord_file.map(|s| s.to_string()),
+        n_cells: inputs.n_cells,
+        n_genes: inputs.n_genes,
+        n_edges: Some(inputs.n_edges),
+        n_communities: Some(inputs.k),
         outputs: OutputFiles {
             coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
-            coord_columns: coord_columns_field(coord_columns),
+            coord_columns: coord_columns_field(inputs.coord_columns),
             propensity: Some(format!("{prefix}.propensity.parquet")),
             link_community: Some(format!("{prefix}.link_community.parquet")),
-            gene_topic: Some(format!("{prefix}.gene_topic.parquet")),
+            gene_community: Some(format!("{prefix}.gene_community.parquet")),
             scores: Some(format!("{prefix}.scores.parquet")),
             batch_effects: None,
             dict_merge,
@@ -219,22 +228,14 @@ fn coord_columns_field(cols: &[Box<str>]) -> Option<Vec<String>> {
 
 /// Helper for `pinto dsvd` runs. Only one "final" level is produced;
 /// the cascade does not run.
-pub fn create_dsvd_metadata(
-    prefix: &str,
-    data_files: &[Box<str>],
-    coord_file: Option<&str>,
-    coord_columns: &[Box<str>],
-    n_cells: usize,
-    n_genes: usize,
-    n_edges: usize,
-    n_clusters: usize,
-) -> PintoMetadata {
+pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
+    let prefix = inputs.prefix;
     let levels = vec![LevelInfo {
         tag: "final".to_string(),
         level_index: 0,
         propensity: format!("{prefix}.propensity.parquet"),
         link_community: format!("{prefix}.link_community.parquet"),
-        gene_topic: Some(format!("{prefix}.gene_topic.parquet")),
+        gene_community: Some(format!("{prefix}.gene_community.parquet")),
         entropy_present: Some(true),
     }];
 
@@ -243,18 +244,18 @@ pub fn create_dsvd_metadata(
         version: env!("CARGO_PKG_VERSION").to_string(),
         timestamp: now_secs(),
         prefix: prefix.to_string(),
-        data_files: Some(data_files.iter().map(|s| s.to_string()).collect()),
-        coord_file: coord_file.map(|s| s.to_string()),
-        n_cells,
-        n_genes,
-        n_edges: Some(n_edges),
-        n_communities: Some(n_clusters),
+        data_files: Some(inputs.data_files.iter().map(|s| s.to_string()).collect()),
+        coord_file: inputs.coord_file.map(|s| s.to_string()),
+        n_cells: inputs.n_cells,
+        n_genes: inputs.n_genes,
+        n_edges: Some(inputs.n_edges),
+        n_communities: Some(inputs.k),
         outputs: OutputFiles {
             coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
-            coord_columns: coord_columns_field(coord_columns),
+            coord_columns: coord_columns_field(inputs.coord_columns),
             propensity: Some(format!("{prefix}.propensity.parquet")),
             link_community: None,
-            gene_topic: Some(format!("{prefix}.gene_topic.parquet")),
+            gene_community: Some(format!("{prefix}.gene_community.parquet")),
             scores: None,
             batch_effects: Some(format!("{prefix}.delta.parquet")),
             dict_merge: None,
@@ -279,7 +280,7 @@ pub fn create_prop_metadata(
         level_index: 0,
         propensity: format!("{prefix}.propensity.parquet"),
         link_community: format!("{prefix}.edge_cluster.parquet"),
-        gene_topic: None,
+        gene_community: None,
         entropy_present: Some(true),
     }];
 
@@ -299,7 +300,7 @@ pub fn create_prop_metadata(
             coord_columns: None,
             propensity: Some(format!("{prefix}.propensity.parquet")),
             link_community: None,
-            gene_topic: None,
+            gene_community: None,
             scores: None,
             batch_effects: None,
             dict_merge: None,
@@ -321,14 +322,16 @@ mod tests {
         let coord_cols: Vec<Box<str>> =
             vec!["pxl_row_in_fullres".into(), "pxl_col_in_fullres".into()];
         let meta = create_lc_metadata(
-            &prefix,
-            &data_files,
-            Some("a.tsv,b.tsv"),
-            &coord_cols,
-            1234,
-            18000,
-            55555,
-            12,
+            &RunInputs {
+                prefix: &prefix,
+                data_files: &data_files,
+                coord_file: Some("a.tsv,b.tsv"),
+                coord_columns: &coord_cols,
+                n_cells: 1234,
+                n_genes: 18000,
+                n_edges: 55555,
+                k: 12,
+            },
             true,
             &[0, 1, 2],
         );
@@ -363,14 +366,16 @@ mod tests {
         let prefix = dir.path().join("run").to_string_lossy().to_string();
         let data_files: Vec<Box<str>> = vec!["a.h5".into()];
         let meta = create_lc_metadata(
-            &prefix,
-            &data_files,
-            None,
-            &[],
-            100,
-            200,
-            300,
-            8,
+            &RunInputs {
+                prefix: &prefix,
+                data_files: &data_files,
+                coord_file: None,
+                coord_columns: &[],
+                n_cells: 100,
+                n_genes: 200,
+                n_edges: 300,
+                k: 8,
+            },
             false,
             &[],
         );

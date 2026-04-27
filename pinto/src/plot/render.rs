@@ -2,8 +2,8 @@
 //!
 //! All plot variants funnel through one emitter, [`emit_figure`], which
 //! renders a set of `TopicLayer`s to SVG + (optionally) PNG + PDF. The
-//! per-variant builders below (`build_community_layers`,
-//! `build_propensity_argmax_layers`, etc.) each return a
+//! per-variant builders below (`build_propensity_argmax_layers`,
+//! `build_marker_heatmap_layers`, etc.) each return a
 //! `Vec<TopicLayer>` plus optional metadata so the shared emitter
 //! handles every I/O concern.
 
@@ -154,12 +154,17 @@ fn compute_extent(
 
 /// Shared "layers + labels → SVG → (PNG, PDF)" emitter. Builders below
 /// construct `TopicLayer`s; this handles every file-system concern.
+///
+/// `draw_frame` adds a thin black outline box around the full canvas —
+/// used by propensity plots so the boundary is visible even when most
+/// cells render dim.
 pub fn emit_figure(
     layers: &[TopicLayer],
     frame: &Frame,
     args: &SrtPlotArgs,
     out_base: &Path,
     emitted: &mut Vec<PathBuf>,
+    draw_frame: bool,
 ) -> anyhow::Result<()> {
     // Drop layers that carry neither a raster image nor a hull (builders
     // may return placeholders for vacant bins). Hull-only layers (used
@@ -185,6 +190,7 @@ pub fn emit_figure(
             label_font_size_px: frame.label_font_px,
             hull_stroke_px: 0.5,
             hull_fill_alpha: 0.0,
+            frame_stroke_px: if draw_frame { 0.1 } else { 0.0 },
         },
     );
 
@@ -195,13 +201,13 @@ pub fn emit_figure(
         PathBuf::from(format!("{}.{ext}", out_base.display()))
     };
 
-    if !args.no_svg {
+    if args.svg {
         let p = with_ext("svg");
         std::fs::write(&p, svg.as_bytes())?;
         emitted.push(p);
     }
 
-    let png_task = (!args.no_png).then(|| with_ext("png"));
+    let png_task = args.png.then(|| with_ext("png"));
     let pdf_task = (!args.no_pdf).then(|| with_ext("pdf"));
 
     let (png_res, pdf_res) = rayon::join(
@@ -253,57 +259,8 @@ impl ColorBook {
 
 // ─── Builders: each returns a Vec<TopicLayer> ready for emit_figure ──
 
-/// Community plot: one layer per community, fixed point size.
-pub fn build_community_layers(
-    frame: &Frame,
-    cells: &CellTable,
-    core: &CoreSpec,
-    dominant: &[i64],
-    colors: &ColorBook,
-    shape: PointShape,
-    alpha: f32,
-) -> anyhow::Result<Vec<TopicLayer>> {
-    let mut by_k: Vec<Vec<Pt>> = (0..colors.k()).map(|_| Vec::new()).collect();
-    for &i in &core.cell_ixs {
-        let k = dominant.get(i).copied().unwrap_or(-1);
-        if k < 0 {
-            continue;
-        }
-        let k = k as usize;
-        if k >= by_k.len() {
-            continue;
-        }
-        by_k[k].push(frame.bounds.to_pixel(cells.coords[i], frame.extent));
-    }
-
-    by_k.into_par_iter()
-        .enumerate()
-        .map(|(k, pts_px)| {
-            if pts_px.is_empty() {
-                return Ok(empty_layer(format!("C{k}")));
-            }
-            let color = colors.color(k);
-            let png = rasterize_group_png(
-                &pts_px,
-                frame.extent,
-                RadiusSpec::Scalar(frame.radius_px_base),
-                color,
-                alpha,
-                shape,
-            )?;
-            Ok(TopicLayer {
-                label: String::new(),
-                png,
-                hull_px: Vec::new(),
-                label_xy_px: (f32::NAN, f32::NAN),
-                color,
-            })
-        })
-        .collect()
-}
-
 /// Propensity (argmax) plot: one layer per community, size ∝ propensity
-/// at the cell's argmax topic. All cells rendered.
+/// at the cell's argmax community. All cells rendered.
 pub fn build_propensity_argmax_layers(
     frame: &Frame,
     cells: &CellTable,
@@ -371,7 +328,7 @@ pub fn build_propensity_argmax_layers(
 }
 
 /// Per-community propensity heatmap: ONE community per call. All cells
-/// rendered, size ∝ that topic's propensity, color ∝ propensity (viridis
+/// rendered, size ∝ that community's propensity, color ∝ propensity (viridis
 /// bin). Produces one PDF per (level, core, community) via the caller.
 pub fn build_propensity_community_heatmap_layers(
     frame: &Frame,
@@ -420,63 +377,6 @@ pub fn build_marker_heatmap_layers(
     let pts_px = cells_to_pixels(frame, cells, &core.cell_ixs);
     let radii = vec![frame.radius_px_base; pts_px.len()];
     bucket_by_viridis_layers(&pts_px, &radii, expr, frame, bins, alpha, shape, expr_clip)
-}
-
-/// Marker gene by-community (type 2): color = argmax community, size ∝
-/// log-scale expression.
-pub fn build_marker_by_community_layers(
-    frame: &Frame,
-    cells: &CellTable,
-    core: &CoreSpec,
-    dominant: &[i64],
-    expr: &[f32],
-    colors: &ColorBook,
-    shape: PointShape,
-    alpha: f32,
-    size_scale: f32,
-    expr_clip: f32,
-) -> anyhow::Result<Vec<TopicLayer>> {
-    let pts_px = cells_to_pixels(frame, cells, &core.cell_ixs);
-    // Cap marker gene max size to 1.5× base (smaller than propensity's 3×)
-    let marker_scale = size_scale.min(1.5);
-    let radii = viridis::log_expr_to_radii(expr, frame.radius_px_base, marker_scale, expr_clip);
-
-    let mut by_k: Vec<(Vec<Pt>, Vec<f32>)> =
-        (0..colors.k()).map(|_| (Vec::new(), Vec::new())).collect();
-    for (local, &i) in core.cell_ixs.iter().enumerate() {
-        let k = dominant.get(i).copied().unwrap_or(-1);
-        if k < 0 || (k as usize) >= colors.k() {
-            continue;
-        }
-        let k = k as usize;
-        by_k[k].0.push(pts_px[local]);
-        by_k[k].1.push(radii[local]);
-    }
-
-    by_k.into_par_iter()
-        .enumerate()
-        .map(|(k, (pts, rs))| {
-            if pts.is_empty() {
-                return Ok(empty_layer(format!("C{k}")));
-            }
-            let color = colors.color(k);
-            let png = rasterize_group_png(
-                &pts,
-                frame.extent,
-                RadiusSpec::Per(&rs),
-                color,
-                alpha,
-                shape,
-            )?;
-            Ok(TopicLayer {
-                label: String::new(),
-                png,
-                hull_px: Vec::new(),
-                label_xy_px: (f32::NAN, f32::NAN),
-                color,
-            })
-        })
-        .collect()
 }
 
 /// Mesh plot: cell-cell edges colored by community. Edges with either
@@ -599,6 +499,7 @@ pub fn community_cc_hulls(
     dominant: &[i64],
     edges: &[super::load::EdgePair],
     min_cc_cells: usize,
+    colors: Option<&ColorBook>,
 ) -> HashMap<i64, Vec<TopicLayer>> {
     use data_beans_alg::union_find::UnionFind;
     use plot_utils::hull::convex_hull;
@@ -649,6 +550,10 @@ pub fn community_cc_hulls(
             if hull.len() < 3 {
                 return None;
             }
+            let color = colors
+                .filter(|cb| (community as usize) < cb.k())
+                .map(|cb| cb.color(community as usize))
+                .unwrap_or((90, 90, 90));
             Some((
                 community,
                 TopicLayer {
@@ -656,7 +561,7 @@ pub fn community_cc_hulls(
                     png: Vec::new(),
                     hull_px: hull,
                     label_xy_px: (f32::NAN, f32::NAN),
-                    color: (90, 90, 90),
+                    color,
                 },
             ))
         })

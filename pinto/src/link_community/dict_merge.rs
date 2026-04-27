@@ -2,7 +2,7 @@
 //! dictionary.
 //!
 //! In `pinto lc`, each fitted link community has a posterior gene-expression
-//! profile (the "dictionary atom") produced by `compute_gene_topic_stat`.
+//! profile (the "dictionary atom") produced by `compute_gene_community_stat`.
 //! Many fine link communities share a near-identical profile — they encode
 //! the same cell type or program sitting at different spatial locations or
 //! neighbourhoods. To recover a consistent cell-type-level annotation we
@@ -25,8 +25,8 @@ use crate::util::common::Mat;
 pub use data_beans_alg::bhc::{bhc_cut as cosine_cut, BhcMerge};
 
 /// Build an agglomerative average-linkage merge tree over the K columns of
-/// `post_log_mean` (gene × topic posterior log-mean) using cosine
-/// similarity of per-gene-centred topic vectors.
+/// `post_log_mean` (gene × community posterior log-mean) using cosine
+/// similarity of per-gene-centred community vectors.
 ///
 /// Returns `K - 1` merges in increasing-id order. Each merge records the
 /// cosine similarity at which the two children were joined in `log_bf`.
@@ -42,7 +42,7 @@ pub fn cosine_merge(post_log_mean: &Mat) -> Vec<BhcMerge> {
         return Vec::new();
     }
 
-    // 1. Per-gene centring (subtract row mean across topics).
+    // 1. Per-gene centring (subtract row mean across communities).
     //    Cosine on the centred matrix == Pearson on log-rates.
     let mut z = post_log_mean.clone();
     for g in 0..n_genes {

@@ -7,7 +7,7 @@
 //!
 //! - [`discover`] — find `{prefix}.L*.propensity.parquet` siblings
 //! - [`load`] — read `coord_pairs.parquet` + propensity +
-//!   link_community + gene_topic
+//!   link_community + gene_community
 //! - [`partition`] — split cells by `left_batch` into cores (≥1)
 //! - [`viridis`] — robust-percentile log standardization + viridis LUT
 //! - [`markers`] — top-N gene ranking + chunked row extraction from
@@ -38,7 +38,6 @@ use std::sync::Mutex;
 /// the mkdir loop and the per-plot dispatch stay in sync.
 #[derive(Copy, Clone)]
 enum PlotKind {
-    Community,
     Propensity,
     Mesh,
     Interfaces,
@@ -48,7 +47,6 @@ enum PlotKind {
 
 impl PlotKind {
     const ALL: &'static [PlotKind] = &[
-        PlotKind::Community,
         PlotKind::Propensity,
         PlotKind::Mesh,
         PlotKind::Interfaces,
@@ -58,7 +56,6 @@ impl PlotKind {
 
     fn subdir(self) -> &'static str {
         match self {
-            PlotKind::Community => "community",
             PlotKind::Propensity => "propensity",
             PlotKind::Mesh => "mesh",
             PlotKind::Interfaces => "interfaces",
@@ -68,13 +65,39 @@ impl PlotKind {
     }
 }
 
+/// Coarse level classifier driving the per-level emission profile.
+///
+/// - `Final`: full suite (propensity / per-community heatmaps / mesh /
+///   interfaces / markers).
+/// - `Intermediate` (`L*`): only the propensity argmax — emitting
+///   per-community heatmaps × levels would balloon the output dir.
+/// - `Draft`: mesh + propensity argmax. Drafts are for inspection, not
+///   publication.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum LevelKind {
+    Final,
+    Intermediate,
+    Draft,
+}
+
+impl LevelKind {
+    fn from_tag(tag: &str) -> Self {
+        match tag {
+            "final" => LevelKind::Final,
+            "draft" => LevelKind::Draft,
+            _ => LevelKind::Intermediate,
+        }
+    }
+}
+
 use discover::{discover_levels, LevelSelector};
-use load::{read_cells_from_coord_pairs, read_gene_topic, read_link_community, read_propensity};
+use load::{
+    read_cells_from_coord_pairs, read_gene_community, read_link_community, read_propensity,
+};
 use partition::partition_cells;
 use render::{
-    build_community_layers, build_marker_by_community_layers, build_marker_heatmap_layers,
-    build_mesh_layers, build_propensity_argmax_layers, build_propensity_community_heatmap_layers,
-    emit_figure, ColorBook, Frame,
+    build_marker_heatmap_layers, build_mesh_layers, build_propensity_argmax_layers,
+    build_propensity_community_heatmap_layers, emit_figure, ColorBook, Frame,
 };
 
 /// Entry point: auto-discover outputs, partition, emit figures, write
@@ -83,15 +106,16 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
     // Auto-detect if --from is a JSON metadata file or a prefix.
     // When metadata.json is supplied, capture its coord_columns hint so
     // the coord_pairs reader doesn't have to auto-discover.
-    let (prefix, coord_columns_hint) = if args.from.ends_with(".json") {
+    let (prefix, coord_columns_hint, meta_data_files) = if args.from.ends_with(".json") {
         let meta_path = std::path::Path::new(args.from.as_ref());
         let meta = crate::util::metadata::PintoMetadata::read(meta_path)?;
         (
             meta.prefix.into_boxed_str(),
             meta.outputs.coord_columns.clone(),
+            meta.data_files.clone(),
         )
     } else {
-        (args.from.clone(), None)
+        (args.from.clone(), None, None)
     };
 
     let out_prefix = args.out.as_deref().unwrap_or(&prefix).to_string();
@@ -136,18 +160,32 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
             .join(", ")
     );
 
-    // One gene_topic (shared across all levels) — fine for now; if a
+    // One gene_community (shared across all levels) — fine for now; if a
     // level carries its own, we swap below.
-    let final_gene_topic_path = PathBuf::from(format!("{prefix}.gene_topic.parquet"));
-    let global_gt = if final_gene_topic_path.exists() {
-        Some(read_gene_topic(&final_gene_topic_path)?)
+    let final_gene_community_path = PathBuf::from(format!("{prefix}.gene_community.parquet"));
+    let global_gt = if final_gene_community_path.exists() {
+        Some(read_gene_community(&final_gene_community_path)?)
     } else {
         None
     };
 
     // Open expression data once. Used by markers (--top-markers > 0) AND
     // by the LR-overlay direction inference (per-edge L/R expression).
-    let expr_data = match &args.data {
+    // Falls back to the data_files recorded in metadata.json when --data
+    // is omitted, so `pinto plot --from foo.metadata.json` is enough to
+    // get marker plots without re-passing the original data paths.
+    let resolved_data_files: Option<Vec<Box<str>>> = match (&args.data, &meta_data_files) {
+        (Some(d), _) => Some(d.clone()),
+        (None, Some(meta)) if !meta.is_empty() => {
+            info!(
+                "--data not given; using {} data file(s) from metadata.json",
+                meta.len(),
+            );
+            Some(meta.iter().map(|s| s.clone().into_boxed_str()).collect())
+        }
+        _ => None,
+    };
+    let expr_data = match &resolved_data_files {
         Some(files) => Some(read_expr_data(files)?),
         None => None,
     };
@@ -210,13 +248,15 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                 None
             };
 
-            // Per-level gene_topic (fall back to global).
-            let level_gt_path = level.gene_topic_path(&prefix);
-            let gene_topic = if level_gt_path.exists() {
-                Some(read_gene_topic(&level_gt_path)?)
+            // Per-level gene_community (fall back to global).
+            let level_gt_path = level.gene_community_path(&prefix);
+            let gene_community = if level_gt_path.exists() {
+                Some(read_gene_community(&level_gt_path)?)
             } else {
                 global_gt.clone()
             };
+
+            let level_kind = LevelKind::from_tag(&level.tag);
 
             for core in &cores {
                 let frame = Frame::new(core, args);
@@ -230,25 +270,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                 };
                 let mut local_emitted: Vec<PathBuf> = Vec::new();
 
-                // 1. Community scatter
-                let layers = build_community_layers(
-                    &frame,
-                    &cells,
-                    core,
-                    &aligned_dominant,
-                    &colors,
-                    args.point_shape,
-                    args.alpha,
-                )?;
-                emit_figure(
-                    &layers,
-                    &frame,
-                    args,
-                    &kind_path(PlotKind::Community, ""),
-                    &mut local_emitted,
-                )?;
-
-                // 2. Propensity argmax overlay
+                // Propensity argmax (every level): color = argmax community, size ∝ propensity.
                 let layers = build_propensity_argmax_layers(
                     &frame,
                     &cells,
@@ -264,34 +286,38 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     &layers,
                     &frame,
                     args,
-                    &kind_path(PlotKind::Propensity, "argmax"),
+                    &kind_path(PlotKind::Propensity, "argmax.propensity"),
                     &mut local_emitted,
+                    true,
                 )?;
 
-                // 3. Per-community soft-membership heatmaps
-                for kk in 0..k {
-                    let layers = build_propensity_community_heatmap_layers(
-                        &frame,
-                        &cells,
-                        core,
-                        &aligned_propensity,
-                        kk,
-                        args.heat_bins,
-                        args.alpha,
-                        args.point_shape,
-                        args.size_scale,
-                    )?;
-                    emit_figure(
-                        &layers,
-                        &frame,
-                        args,
-                        &kind_path(PlotKind::Propensity, &format!("community{kk}")),
-                        &mut local_emitted,
-                    )?;
+                // 3. Per-community soft-membership heatmaps (final only)
+                if level_kind == LevelKind::Final {
+                    for kk in 0..k {
+                        let layers = build_propensity_community_heatmap_layers(
+                            &frame,
+                            &cells,
+                            core,
+                            &aligned_propensity,
+                            kk,
+                            args.heat_bins,
+                            args.alpha,
+                            args.point_shape,
+                            args.size_scale,
+                        )?;
+                        emit_figure(
+                            &layers,
+                            &frame,
+                            args,
+                            &kind_path(PlotKind::Propensity, &format!("community{kk}")),
+                            &mut local_emitted,
+                            true,
+                        )?;
+                    }
                 }
 
-                // 4. Mesh (cell-cell edges colored by community) if lc data present
-                if !args.no_mesh {
+                // 4. Mesh (cell-cell edges colored by community) — final + draft
+                if !args.no_mesh && matches!(level_kind, LevelKind::Final | LevelKind::Draft) {
                     if let Some((edges, community)) = &lc_pair {
                         let core_set: HashSet<usize> = core.cell_ixs.iter().copied().collect();
                         let layers = build_mesh_layers(
@@ -309,12 +335,13 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                             args,
                             &kind_path(PlotKind::Mesh, ""),
                             &mut local_emitted,
+                            false,
                         )?;
                     }
                 }
 
-                // 4b. Interfaces (high-entropy + neighborhoods).
-                if args.show_interfaces {
+                // 4b. Interfaces (high-entropy + neighborhoods) — final only
+                if level_kind == LevelKind::Final && args.show_interfaces {
                     match &aligned_entropy {
                         Some(ent) => {
                             let ifc_stub = kind_path(PlotKind::Interfaces, "");
@@ -327,7 +354,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                                 ent,
                                 &aligned_dominant,
                                 edges_only,
-                                gene_topic.as_ref(),
+                                gene_community.as_ref(),
                                 &ifc_stub,
                             )?;
                             local_emitted.extend(written);
@@ -342,22 +369,47 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     }
                 }
 
-                // 5. Marker genes (requires data + gene_topic)
-                if args.top_markers > 0 {
-                    let (gt, gene_names) = match &gene_topic {
+                // Marker genes — final + draft only (intermediate skips per LevelKind).
+                if level_kind != LevelKind::Intermediate && args.top_markers > 0 {
+                    let (gt, gene_names) = match &gene_community {
                         Some(x) => x,
                         None => {
-                            info!("[{}] no gene_topic parquet — skipping markers", level.tag);
+                            log::warn!(
+                                "[{}] no gene_community parquet — skipping markers",
+                                level.tag,
+                            );
                             continue;
                         }
                     };
                     let data = match &expr_data {
                         Some(d) => d,
-                        None => continue,
+                        None => {
+                            log::warn!(
+                                "[{}] --data not supplied — skipping markers \
+                                 (pass `--data <expr.h5/.zarr>` to enable)",
+                                level.tag,
+                            );
+                            continue;
+                        }
                     };
                     let ccol_ix = cell_col_index
                         .as_ref()
                         .expect("cell index built alongside data");
+
+                    // Hulls keyed by community; each marker plot only renders its own.
+                    let marker_hulls_by_c: HashMap<i64, Vec<plot_utils::svg_emit::TopicLayer>> =
+                        match &lc_pair {
+                            Some((edges, _)) => render::community_cc_hulls(
+                                &frame,
+                                &cells,
+                                core,
+                                &aligned_dominant,
+                                edges,
+                                args.lr_hull_min_cells,
+                                Some(&colors),
+                            ),
+                            None => HashMap::default(),
+                        };
 
                     emit_marker_figures(
                         args,
@@ -365,11 +417,12 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                         &cells,
                         core,
                         &aligned_dominant,
+                        &colors,
                         gt,
                         gene_names,
                         data,
                         ccol_ix,
-                        &colors,
+                        &marker_hulls_by_c,
                         &level.tag,
                         &out_prefix,
                         &mut local_emitted,
@@ -450,6 +503,9 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
                     let lr_dir = plot_dir.join(PlotKind::Lr.subdir());
                     std::fs::create_dir_all(&lr_dir)?;
+                    let lr_colors = final_aligned_prop
+                        .as_ref()
+                        .map(|p| ColorBook::new(args, p.ncols()));
                     let per_core: Vec<Vec<PathBuf>> = cores
                         .par_iter()
                         .map(|core| -> anyhow::Result<Vec<PathBuf>> {
@@ -468,6 +524,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                                         dom,
                                         edges,
                                         args.lr_hull_min_cells,
+                                        lr_colors.as_ref(),
                                     ),
                                     _ => HashMap::default(),
                                 }
@@ -590,16 +647,17 @@ fn emit_marker_figures(
     cells: &CellTable,
     core: &partition::CoreSpec,
     dominant: &[i64],
+    colors: &ColorBook,
     gt: &Mat,
     gene_names: &[Box<str>],
     data: &SparseIoVec,
     cell_col_index: &HashMap<Box<str>, usize>,
-    colors: &ColorBook,
+    hulls_by_community: &HashMap<i64, Vec<plot_utils::svg_emit::TopicLayer>>,
     level_tag: &str,
     out_prefix: &str,
     emitted: &mut Vec<PathBuf>,
 ) -> anyhow::Result<()> {
-    // For each topic, gather its top-N markers up-front.
+    // For each community, gather its top-N markers up-front.
     let mut plan: Vec<(usize /*k*/, Box<str>)> = Vec::new();
     for k in 0..gt.ncols() {
         for (_, gname) in markers::top_n_markers(gt, gene_names, k, args.top_markers) {
@@ -610,7 +668,7 @@ fn emit_marker_figures(
         return Ok(());
     }
 
-    // Unique marker names (different topics may pick the same gene).
+    // Unique marker names (different communities may pick the same gene).
     let mut uniq_names: Vec<Box<str>> = plan.iter().map(|(_, g)| g.clone()).collect();
     uniq_names.sort();
     uniq_names.dedup();
@@ -642,7 +700,7 @@ fn emit_marker_figures(
         let expr = &rows[local];
 
         // (a) Heatmap (viridis color, fixed size)
-        let layers = build_marker_heatmap_layers(
+        let mut layers = build_marker_heatmap_layers(
             frame,
             cells,
             core,
@@ -652,35 +710,131 @@ fn emit_marker_figures(
             args.point_shape,
             args.expr_clip,
         )?;
-        let out_stub = marker_out_path(out_prefix, level_tag, k, &gname, "heatmap");
-        emit_figure(&layers, frame, args, &out_stub, emitted)?;
+        if let Some(h) = hulls_by_community.get(&(k as i64)) {
+            layers.extend(h.iter().cloned());
+        }
+        let out_stub = marker_out_path(out_prefix, level_tag, k, &gname);
+        emit_figure(&layers, frame, args, &out_stub, emitted, false)?;
+    }
 
-        // (b) Community-colored (argmax color, size ∝ expression)
-        let layers = build_marker_by_community_layers(
-            frame,
-            cells,
-            core,
-            dominant,
-            expr,
-            colors,
-            args.point_shape,
-            args.alpha,
-            args.size_scale,
-            args.expr_clip,
-        )?;
-        let out_stub = marker_out_path(out_prefix, level_tag, k, &gname, "by-community");
-        emit_figure(&layers, frame, args, &out_stub, emitted)?;
+    emit_marker_summary(
+        args,
+        cells,
+        core,
+        dominant,
+        colors,
+        &uniq_names,
+        &rows,
+        level_tag,
+        out_prefix,
+        emitted,
+    )?;
+    Ok(())
+}
+
+/// Hinton-style summary: union of top markers (rows) × communities (columns),
+/// box area encodes mean expression of that gene in cells dominated by that
+/// community. Rows and columns are diagonalized so high-activity blocks line
+/// up along the main diagonal.
+#[allow(clippy::too_many_arguments)]
+fn emit_marker_summary(
+    args: &SrtPlotArgs,
+    cells: &CellTable,
+    core: &partition::CoreSpec,
+    dominant: &[i64],
+    colors: &ColorBook,
+    gene_names: &[Box<str>],
+    expr_rows: &[Vec<f32>],
+    level_tag: &str,
+    out_prefix: &str,
+    emitted: &mut Vec<PathBuf>,
+) -> anyhow::Result<()> {
+    let n_genes = gene_names.len();
+    let k = colors.k();
+    if n_genes == 0 || k == 0 {
+        return Ok(());
+    }
+
+    // Mean expression per (gene, community), where each cell contributes to
+    // its argmax community only. Cells with no community (-1 / out of range)
+    // are dropped.
+    let mut mean = vec![0.0f32; n_genes * k];
+    let mut cnt = vec![0u32; k];
+    for (local, &i) in core.cell_ixs.iter().enumerate() {
+        let c = dominant.get(i).copied().unwrap_or(-1);
+        if c < 0 || (c as usize) >= k {
+            continue;
+        }
+        let c = c as usize;
+        cnt[c] += 1;
+        for (g, row) in expr_rows.iter().enumerate() {
+            if let Some(&v) = row.get(local) {
+                if v.is_finite() {
+                    mean[g * k + c] += v;
+                }
+            }
+        }
+    }
+    for c in 0..k {
+        if cnt[c] == 0 {
+            continue;
+        }
+        let inv = 1.0 / cnt[c] as f32;
+        for g in 0..n_genes {
+            mean[g * k + c] *= inv;
+        }
+    }
+
+    let (row_order, col_order) = plot_utils::diagonalize_order(&mean, n_genes, k);
+    let _ = cells; // kept for symmetry with other figure emitters; unused
+
+    let col_labels: Vec<Box<str>> = (0..k).map(|c| format!("C{c}").into_boxed_str()).collect();
+    let col_colors: Vec<plot_utils::Rgb> = (0..k).map(|c| colors.color(c)).collect();
+
+    let opts = plot_utils::HintonOpts {
+        row_labels: Some(gene_names),
+        col_labels: Some(&col_labels),
+        row_order: Some(&row_order),
+        col_order: Some(&col_order),
+        col_colors: Some(&col_colors),
+        scale: plot_utils::HintonScale::Sqrt,
+        cell_px: 18.0,
+        font_px: 11.0,
+        title: Some(&format!(
+            "Marker × community (mean expr) — {} cells, level {}",
+            core.n(),
+            level_tag,
+        )),
+    };
+    let svg = plot_utils::render_hinton(&mean, n_genes, k, &opts);
+
+    let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
+    let stub = plot_dir
+        .join(PlotKind::Markers.subdir())
+        .join(format!("{level_tag}.summary"));
+
+    let with_ext = |ext: &str| -> PathBuf { PathBuf::from(format!("{}.{ext}", stub.display())) };
+
+    if args.svg {
+        let p = with_ext("svg");
+        std::fs::write(&p, svg.as_bytes())?;
+        emitted.push(p);
+    }
+    if !args.no_pdf {
+        let p = with_ext("pdf");
+        plot_utils::render_pdf(&svg, &p)?;
+        emitted.push(p);
+    }
+    if args.png {
+        let p = with_ext("png");
+        let size = plot_utils::hinton_size(n_genes, k, &opts);
+        plot_utils::render_png(&svg, size.width_px, size.height_px, &p)?;
+        emitted.push(p);
     }
     Ok(())
 }
 
-fn marker_out_path(
-    out_prefix: &str,
-    level_tag: &str,
-    k: usize,
-    gname: &str,
-    kind: &str,
-) -> PathBuf {
+fn marker_out_path(out_prefix: &str, level_tag: &str, k: usize, gname: &str) -> PathBuf {
     let safe_gname: String = gname
         .chars()
         .map(|c| match c {
@@ -691,7 +845,7 @@ fn marker_out_path(
     let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
     plot_dir
         .join(PlotKind::Markers.subdir())
-        .join(format!("{level_tag}.topic{k}.{safe_gname}.{kind}"))
+        .join(format!("{level_tag}.community{k}.{safe_gname}"))
 }
 
 fn write_manifest(out_prefix: &str, emitted: &[PathBuf]) -> anyhow::Result<()> {

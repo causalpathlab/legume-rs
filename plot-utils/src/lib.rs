@@ -8,13 +8,17 @@
 //! Consumers compose the pieces in this crate (senna plot and pinto plot
 //! share the same primitives; each owns its own CLI wrapper).
 
+pub mod hinton;
 pub mod hull;
+pub mod order;
 pub mod palette;
 pub mod rasterize;
 pub mod render;
 pub mod svg_emit;
 
+pub use hinton::{hinton_size, render_hinton, HintonOpts, HintonScale, HintonSize};
 pub use hull::{convex_hull, hull_centroid, median_xy, trim_outliers_by_median, Pt};
+pub use order::diagonalize_order;
 pub use palette::{color as palette_color, resolve as palette_resolve, Palette, Rgb};
 pub use rasterize::{
     rasterize_arrow_layer_png, rasterize_group_png, rasterize_segment_layer_png, DataBounds,
