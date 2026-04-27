@@ -686,3 +686,279 @@ fn take_backend_columns() -> anyhow::Result<()> {
     assert_eq!(total, 9);
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────
+// rows_triplets / read_rows_* (batch row-read path)
+// ─────────────────────────────────────────────────────
+
+#[test]
+fn rows_triplets_single_backend() -> anyhow::Result<()> {
+    let nrow = 8;
+    let ncol = 10;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let rows = str_vec(nrow, "r");
+    let cols = str_vec(ncol, "c");
+
+    let sp = make_named_sparse(&raw, &rows, &cols);
+    let mut vec = SparseIoVec::new();
+    vec.push(sp, None)?;
+
+    let sel = vec![3, 0, 7, 5];
+    let mat = vec.read_rows_ndarray(sel.iter().copied())?;
+    let expected = raw.select(Axis(0), &sel);
+
+    assert_eq!(mat, expected);
+    Ok(())
+}
+
+#[test]
+fn rows_triplets_two_backends_aligned() -> anyhow::Result<()> {
+    let nrow = 5;
+    let ncol_a = 4;
+    let ncol_b = 6;
+    let rows = str_vec(nrow, "r");
+
+    let raw_a = Array2::<f32>::runif(nrow, ncol_a);
+    let raw_b = Array2::<f32>::runif(nrow, ncol_b);
+
+    let sp_a = make_named_sparse(&raw_a, &rows, &str_vec(ncol_a, "a"));
+    let sp_b = make_named_sparse(&raw_b, &rows, &str_vec(ncol_b, "b"));
+
+    let mut vec = SparseIoVec::new();
+    vec.push(sp_a, None)?;
+    vec.push(sp_b, None)?;
+
+    // Read rows 1 and 4 across both backends. Output columns are
+    // [A's columns | B's columns] = ncol_a + ncol_b.
+    let sel = [1, 4];
+    let mat = vec.read_rows_ndarray(sel.iter().copied())?;
+
+    assert_eq!(mat.nrows(), 2);
+    assert_eq!(mat.ncols(), ncol_a + ncol_b);
+
+    for (out_row, &r) in sel.iter().enumerate() {
+        for j in 0..ncol_a {
+            assert!((mat[(out_row, j)] - raw_a[(r, j)]).abs() < 1e-6);
+        }
+        for j in 0..ncol_b {
+            assert!((mat[(out_row, ncol_a + j)] - raw_b[(r, j)]).abs() < 1e-6);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn rows_triplets_swapped_row_order_in_second_backend() -> anyhow::Result<()> {
+    // Same row name set in both backends, but backend B has rows 0/1
+    // swapped at the local level. Compact rows on the SparseIoVec
+    // must reflect global row identity, not backend-local position.
+    let rows_a = str_vec(5, "gene");
+    let mut rows_b = str_vec(5, "gene");
+    rows_b.swap(0, 1);
+
+    let raw_a = Array2::<f32>::runif(5, 3);
+    let raw_b = Array2::<f32>::runif(5, 4);
+
+    let sp_a = make_named_sparse(&raw_a, &rows_a, &str_vec(3, "a"));
+    let sp_b = make_named_sparse(&raw_b, &rows_b, &str_vec(4, "b"));
+
+    let mut vec = SparseIoVec::new();
+    vec.push(sp_a, None)?;
+    vec.push(sp_b, None)?;
+
+    // Compact row 0 == "gene0", which is local row 0 in A but local
+    // row 1 in B. read_rows_ndarray must remap correctly.
+    let mat = vec.read_rows_ndarray(std::iter::once(0))?;
+    assert_eq!(mat.shape(), &[1, 3 + 4]);
+    for j in 0..3 {
+        assert!((mat[(0, j)] - raw_a[(0, j)]).abs() < 1e-6);
+    }
+    for j in 0..4 {
+        // gene0 lives at local row 1 of B (because rows_b swapped 0,1)
+        assert!((mat[(0, 3 + j)] - raw_b[(1, j)]).abs() < 1e-6);
+    }
+    Ok(())
+}
+
+#[test]
+fn rows_triplets_disjoint_intersection() -> anyhow::Result<()> {
+    // A has gene0..gene3, B has gene2..gene5. Intersection: {gene2, gene3}.
+    // Compact row 0 -> gene2 (local 2 in A, local 0 in B)
+    // Compact row 1 -> gene3 (local 3 in A, local 1 in B)
+    let rows_a: Vec<Box<str>> = (0..4).map(|i| format!("gene{i}").into()).collect();
+    let rows_b: Vec<Box<str>> = (2..6).map(|i| format!("gene{i}").into()).collect();
+
+    let raw_a = Array2::<f32>::runif(4, 3);
+    let raw_b = Array2::<f32>::runif(4, 2);
+    let sp_a = make_named_sparse(&raw_a, &rows_a, &str_vec(3, "a"));
+    let sp_b = make_named_sparse(&raw_b, &rows_b, &str_vec(2, "b"));
+
+    let mut vec = SparseIoVec::new();
+    vec.push(sp_a, Some("A".into()))?;
+    vec.push(sp_b, Some("B".into()))?;
+    assert_eq!(vec.num_rows(), 2);
+
+    let mat = vec.read_rows_ndarray(0..2)?;
+    assert_eq!(mat.shape(), &[2, 5]);
+
+    // Compact row 0 = gene2 = A[2, :] | B[0, :]
+    for j in 0..3 {
+        assert!((mat[(0, j)] - raw_a[(2, j)]).abs() < 1e-6);
+    }
+    for j in 0..2 {
+        assert!((mat[(0, 3 + j)] - raw_b[(0, j)]).abs() < 1e-6);
+    }
+    // Compact row 1 = gene3 = A[3, :] | B[1, :]
+    for j in 0..3 {
+        assert!((mat[(1, j)] - raw_a[(3, j)]).abs() < 1e-6);
+    }
+    for j in 0..2 {
+        assert!((mat[(1, 3 + j)] - raw_b[(1, j)]).abs() < 1e-6);
+    }
+    Ok(())
+}
+
+#[test]
+fn rows_triplets_preserves_order() -> anyhow::Result<()> {
+    let nrow = 6;
+    let ncol = 4;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let rows = str_vec(nrow, "r");
+    let cols = str_vec(ncol, "c");
+
+    let sp = make_named_sparse(&raw, &rows, &cols);
+    let mut vec = SparseIoVec::new();
+    vec.push(sp, None)?;
+
+    let sel: Vec<usize> = (0..nrow).rev().collect();
+    let mat = vec.read_rows_ndarray(sel.iter().copied())?;
+    let expected = raw.select(Axis(0), &sel);
+    assert_eq!(mat, expected);
+    Ok(())
+}
+
+#[test]
+fn read_all_rows_matches_horizontal_concat() -> anyhow::Result<()> {
+    // Reading every compact row from a multi-backend vec should
+    // recover the horizontal concatenation of the underlying matrices.
+    let nrow = 4;
+    let rows = str_vec(nrow, "r");
+    let raw_a = Array2::<f32>::runif(nrow, 3);
+    let raw_b = Array2::<f32>::runif(nrow, 5);
+
+    let sp_a = make_named_sparse(&raw_a, &rows, &str_vec(3, "a"));
+    let sp_b = make_named_sparse(&raw_b, &rows, &str_vec(5, "b"));
+
+    let mut vec = SparseIoVec::new();
+    vec.push(sp_a, None)?;
+    vec.push(sp_b, None)?;
+
+    let mat = vec.read_rows_ndarray(0..nrow)?;
+    let expected = ndarray::concatenate(Axis(1), &[raw_a.view(), raw_b.view()])?;
+    assert_eq!(mat, expected);
+    Ok(())
+}
+
+#[test]
+fn read_rows_matches_read_columns_transposed() -> anyhow::Result<()> {
+    // Sanity: reading all rows then all columns gives the same matrix.
+    let nrow = 5;
+    let rows = str_vec(nrow, "r");
+    let raw_a = Array2::<f32>::runif(nrow, 3);
+    let raw_b = Array2::<f32>::runif(nrow, 4);
+
+    let sp_a = make_named_sparse(&raw_a, &rows, &str_vec(3, "a"));
+    let sp_b = make_named_sparse(&raw_b, &rows, &str_vec(4, "b"));
+
+    let mut vec = SparseIoVec::new();
+    vec.push(sp_a, None)?;
+    vec.push(sp_b, None)?;
+
+    let by_rows = vec.read_rows_ndarray(0..vec.num_rows())?;
+    let by_cols = vec.read_columns_ndarray(0..vec.num_columns())?;
+    assert_eq!(by_rows, by_cols);
+    Ok(())
+}
+
+#[test]
+fn read_rows_dmatrix_matches_ndarray() -> anyhow::Result<()> {
+    let nrow = 6;
+    let ncol = 8;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let rows = str_vec(nrow, "r");
+    let cols = str_vec(ncol, "c");
+
+    let sp = make_named_sparse(&raw, &rows, &cols);
+    let mut vec = SparseIoVec::new();
+    vec.push(sp, None)?;
+
+    let sel = [0, 2, 5];
+    let nd = vec.read_rows_ndarray(sel.iter().copied())?;
+    let dm = vec.read_rows_dmatrix(sel.iter().copied())?;
+    assert_eq!(dm, ndarray_to_dmatrix(&nd));
+    Ok(())
+}
+
+#[test]
+fn read_rows_csc_and_csr_nnz_correct() -> anyhow::Result<()> {
+    let nrow = 5;
+    let ncol = 7;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let rows = str_vec(nrow, "r");
+    let cols = str_vec(ncol, "c");
+
+    let sp = make_named_sparse(&raw, &rows, &cols);
+    let mut vec = SparseIoVec::new();
+    vec.push(sp, None)?;
+
+    let sel = [1, 3];
+    let csc = vec.read_rows_csc(sel.iter().copied())?;
+    let csr = vec.read_rows_csr(sel.iter().copied())?;
+
+    assert_eq!(csc.nrows(), sel.len());
+    assert_eq!(csc.ncols(), ncol);
+    assert_eq!(csr.nrows(), sel.len());
+    assert_eq!(csr.ncols(), ncol);
+    // runif produces non-zero values, so nnz == sel.len() * ncol
+    assert_eq!(csc.nnz(), sel.len() * ncol);
+    assert_eq!(csr.nnz(), sel.len() * ncol);
+    Ok(())
+}
+
+#[test]
+fn rows_triplets_empty_selection() -> anyhow::Result<()> {
+    let nrow = 3;
+    let ncol = 5;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let rows = str_vec(nrow, "r");
+    let cols = str_vec(ncol, "c");
+
+    let sp = make_named_sparse(&raw, &rows, &cols);
+    let mut vec = SparseIoVec::new();
+    vec.push(sp, None)?;
+
+    let ((nr, nc), triplets) = vec.rows_triplets(std::iter::empty())?;
+    assert_eq!(nr, 0);
+    assert_eq!(nc, ncol);
+    assert!(triplets.is_empty());
+    Ok(())
+}
+
+#[test]
+fn rows_triplets_duplicate_row_indices() -> anyhow::Result<()> {
+    let nrow = 4;
+    let ncol = 6;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let rows = str_vec(nrow, "r");
+    let cols = str_vec(ncol, "c");
+
+    let sp = make_named_sparse(&raw, &rows, &cols);
+    let mut vec = SparseIoVec::new();
+    vec.push(sp, None)?;
+
+    let sel = vec![2, 2];
+    let mat = vec.read_rows_ndarray(sel.iter().copied())?;
+    let expected = raw.select(Axis(0), &sel);
+    assert_eq!(mat, expected);
+    Ok(())
+}
