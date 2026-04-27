@@ -423,6 +423,7 @@ pub trait SparseIo: Sync + Send {
         }
 
         self.clean_preloaded_columns();
+        self.clean_preloaded_rows();
         Ok(())
     }
 
@@ -515,6 +516,7 @@ pub trait SparseIo: Sync + Send {
         }
 
         self.clean_preloaded_columns();
+        self.clean_preloaded_rows();
         Ok(())
     }
     // fn reorder_rows(&mut self, row_names_order: &[Box<str>]) -> anyhow::Result<()>;
@@ -840,6 +842,12 @@ pub trait SparseIo: Sync + Send {
 
     /// unload the memory
     fn clean_preloaded_columns(&mut self);
+
+    /// preload all the rows for faster processing
+    fn preload_rows(&mut self) -> anyhow::Result<()>;
+
+    /// unload the row memory
+    fn clean_preloaded_rows(&mut self);
 
     /// backend file name
     fn get_backend_file_name(&self) -> &str;

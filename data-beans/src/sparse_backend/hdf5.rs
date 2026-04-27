@@ -37,8 +37,10 @@ pub struct SparseMtxData {
     max_column_name_idx: usize,
     by_column_indptr: Vec<u64>,
     by_row_indptr: Vec<u64>,
-    by_column_indicies: Option<Vec<u64>>,
+    by_column_indices: Option<Vec<u64>>,
     by_column_data: Option<Vec<f32>>,
+    by_row_indices: Option<Vec<u64>>,
+    by_row_data: Option<Vec<f32>>,
 }
 
 impl SparseMtxData {
@@ -79,8 +81,10 @@ impl SparseMtxData {
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
             by_row_indptr: vec![],
-            by_column_indicies: None,
+            by_column_indices: None,
             by_column_data: None,
+            by_row_indices: None,
+            by_row_data: None,
         };
 
         ret.read_column_indptr()?;
@@ -236,8 +240,10 @@ impl SparseMtxData {
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
             by_row_indptr: vec![],
-            by_column_indicies: None,
+            by_column_indices: None,
             by_column_data: None,
+            by_row_indices: None,
+            by_row_data: None,
         })
     }
 }
@@ -295,13 +301,28 @@ impl SparseIo for SparseMtxData {
         let indices = by_column.dataset("indices")?.read_1d::<u64>()?.to_vec();
 
         self.by_column_data = Some(data);
-        self.by_column_indicies = Some(indices);
+        self.by_column_indices = Some(indices);
         Ok(())
     }
 
     fn clean_preloaded_columns(&mut self) {
         self.by_column_data = None;
-        self.by_column_indicies = None;
+        self.by_column_indices = None;
+    }
+
+    fn preload_rows(&mut self) -> anyhow::Result<()> {
+        let by_row = self.backend.group("/by_row")?;
+        let data = by_row.dataset("data")?.read_1d::<f32>()?.to_vec();
+        let indices = by_row.dataset("indices")?.read_1d::<u64>()?.to_vec();
+
+        self.by_row_data = Some(data);
+        self.by_row_indices = Some(indices);
+        Ok(())
+    }
+
+    fn clean_preloaded_rows(&mut self) {
+        self.by_row_data = None;
+        self.by_row_indices = None;
     }
 
     /// Remove backend file to free up disk space
@@ -514,7 +535,7 @@ impl SparseIo for SparseMtxData {
             .num_rows()
             .ok_or(anyhow!("can't figure out the number of rows"))?;
 
-        if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indicies) {
+        if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indices) {
             let ncol_out = 1;
             let jj = 0;
 
@@ -594,7 +615,7 @@ impl SparseIo for SparseMtxData {
             .max()
             .unwrap_or(0);
 
-        if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indicies) {
+        if let (Some(data), Some(indices)) = (&self.by_column_data, &self.by_column_indices) {
             let ncol_out = columns_vec.len();
 
             let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((max_end - min_start) as usize);
@@ -650,44 +671,67 @@ impl SparseIo for SparseMtxData {
         &self,
         rows: Self::IndexIter,
     ) -> anyhow::Result<(usize, usize, Vec<(u64, u64, f32)>)> {
-        // need to open backend again?
-        // let backend = hdf5::File::open(&self.file_name)?;
-        let by_row = self.backend.group("/by_row")?;
         debug_assert!(!self.by_row_indptr.is_empty());
         let indptr = &self.by_row_indptr;
-        let data = by_row.dataset("data")?;
-        let indices = by_row.dataset("indices")?;
 
         let rows_vec = rows.into_iter().collect::<Vec<usize>>();
 
-        if let (Some(ncol), Some(nrow)) = (self.num_columns(), self.num_rows()) {
-            let mut ret = Vec::new();
-            let nrow_out = rows_vec.len();
-            for (ii, &i_data) in rows_vec.iter().enumerate() {
-                let ii = ii as u64;
-                if i_data < nrow {
-                    debug_assert!((i_data + 1) < indptr.len());
+        let (ncol, nrow) = match (self.num_columns(), self.num_rows()) {
+            (Some(ncol), Some(nrow)) => (ncol, nrow),
+            _ => return Err(anyhow!("Unable to figure out the size of the backend data")),
+        };
+        let nrow_out = rows_vec.len();
 
-                    let start = indptr[i_data] as usize;
-                    let end = indptr[i_data + 1] as usize;
-
-                    if start < end {
-                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
-                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
-
-                        for k in 0..(end - start) {
-                            let x_ij = data_slice[k];
-                            let jj = indices_slice[k];
-                            debug_assert!((jj as usize) < ncol);
-                            ret.push((ii, jj, x_ij));
-                        }
+        if let (Some(data), Some(indices)) = (&self.by_row_data, &self.by_row_indices) {
+            let mut nnz_total: usize = 0;
+            let valid: Vec<(u64, usize)> = rows_vec
+                .iter()
+                .enumerate()
+                .filter_map(|(ii, &i_data)| {
+                    if i_data >= nrow {
+                        return None;
                     }
+                    nnz_total += (indptr[i_data + 1] - indptr[i_data]) as usize;
+                    Some((ii as u64, i_data))
+                })
+                .collect();
+
+            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity(nnz_total);
+            for (ii, i_data) in valid {
+                let start = indptr[i_data] as usize;
+                let end = indptr[i_data + 1] as usize;
+                for (&jj, &x_ij) in indices[start..end].iter().zip(data[start..end].iter()) {
+                    ret.push((ii, jj, x_ij));
                 }
             }
-            Ok((nrow_out, ncol, ret))
-        } else {
-            Err(anyhow!("Unable to figure out the size of the backend data"))
+            return Ok((nrow_out, ncol, ret));
         }
+
+        let by_row = self.backend.group("/by_row")?;
+        let data = by_row.dataset("data")?;
+        let indices = by_row.dataset("indices")?;
+        let mut ret = Vec::new();
+        for (ii, &i_data) in rows_vec.iter().enumerate() {
+            if i_data >= nrow {
+                continue;
+            }
+            debug_assert!((i_data + 1) < indptr.len());
+            let start = indptr[i_data] as usize;
+            let end = indptr[i_data + 1] as usize;
+            if start >= end {
+                continue;
+            }
+            let ii = ii as u64;
+            let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
+            let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+            for k in 0..(end - start) {
+                let x_ij = data_slice[k];
+                let jj = indices_slice[k];
+                debug_assert!((jj as usize) < ncol);
+                ret.push((ii, jj, x_ij));
+            }
+        }
+        Ok((nrow_out, ncol, ret))
     }
 
     /// Helper function to add CSR dataset to HDF5 backend
