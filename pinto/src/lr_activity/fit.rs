@@ -10,24 +10,35 @@
 //! sender and receiver pseudobulk profiles per sample.
 //!
 //! For each (batch, community, LR pair) the statistic is a **weighted
-//! Spearman** rank correlation between sender-pseudobulk L and
-//! receiver-pseudobulk R across the samples in that batch (sample weight
-//! = sqrt(send_weight · recv_weight)). Spearman over rank-transformed
-//! values is used instead of weighted Pearson to suppress saturation when
-//! one or two samples carry most of the community-level mass.
+//! covariance** between `log1p(w_g · pb_mean)`-transformed L and R
+//! pseudobulks across the samples in that batch (sample weight =
+//! sqrt(send_weight · recv_weight)). Per-gene `w_g` are NB-Fisher-info
+//! weights from the same dispersion trend used by propensity / link-
+//! community pipelines; log1p stabilizes variance and breaks the per-gene
+//! multiplicative invariance so Fisher weighting actually bites. Covariance
+//! (rather than correlation) preserves L-R magnitude information so pairs
+//! separate cleanly under restandardization, and is naturally robust to
+//! zero-inflated pseudobulks (tied-zero samples contribute exactly 0).
 //!
 //! The null is sample-level permutation of L within propensity-stratified
 //! buckets — shuffles are restricted to samples sharing the top
 //! `shuffle_stratify_dim` bits of the propensity code, so the cell-type
 //! marginal is preserved across permutations. R and per-sample weights are
-//! held fixed. One-sided positive p (parametric Gaussian tail of z plus
-//! empirical 1/(n+1)-floored permutation p); BH on the parametric p
-//! within batch.
+//! held fixed.
+//!
+//! Inference layers (per stratum):
+//! - `p_empirical` / `p_z` — per-pair permutation diagnostics.
+//! - `z_re` / `p_re` — Efron-Tibshirani restandardization: `(stat_obs - μ) / σ`
+//!   with `(μ, σ)` = robust (median, 1.4826·MAD) of `stat_obs` across pairs.
+//!   Two-sided p; sign restriction (active LR ⇒ positive `z_re`) applied at
+//!   the reporting layer. Strata with MAD ≤ 1e-4 are flagged uncalibrated.
+//! - `fwer_wy` — Westfall-Young single-step minP (FWER); same shuffle σ_k
+//!   applied to every pair so cross-pair dependence is preserved.
 
 use crate::lr_activity::args::SrtLrActivityArgs;
 use crate::lr_activity::io::*;
 use crate::lr_activity::outputs::{
-    bh_qvalues, write_lr_activity, write_lr_activity_json, LrActivityRow, StratumEntry,
+    pvalue_histogram, write_lr_activity, write_lr_activity_json, LrActivityRow, StratumEntry,
 };
 use crate::util::common::*;
 use data_beans::convert::try_open_or_convert;
@@ -146,6 +157,24 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         n_communities
     );
 
+    // Sparse-community filter: communities with too few edges can't
+    // calibrate (most pseudobulk samples will be empty / have constant L
+    // or R, collapsing stat_obs to 0 and breaking restandardization).
+    let mut edges_per_community = vec![0usize; n_communities];
+    for e in &edges {
+        edges_per_community[e.2 as usize] += 1;
+    }
+    let active_communities: HashSet<u32> = (0..n_communities as u32)
+        .filter(|&c| edges_per_community[c as usize] >= args.min_edges_per_community)
+        .collect();
+    let n_skipped = n_communities - active_communities.len();
+    if n_skipped > 0 {
+        info!(
+            "Skipping {} sparse communities (< {} edges each)",
+            n_skipped, args.min_edges_per_community
+        );
+    }
+
     //////////////////////////////////////////////////////
     // 4. Per-gene total counts (filter LR pairs)
     //////////////////////////////////////////////////////
@@ -232,6 +261,19 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     info!("Reading {} LR gene rows from backend...", lr_genes.len());
     let x_lr = data_vec.read_rows_dmatrix(lr_genes.iter().copied())?;
 
+    // Fisher weight is multiplicative on pb_mean *before* log1p — without
+    // the non-linear log step it would cancel out of any correlation /
+    // covariance and have no effect.
+    info!("Computing NB Fisher-info gene weights for LR genes...");
+    let fisher_all = compute_nb_fisher_weights(&data_vec, c.block_size)?;
+    let fisher_lr: Vec<f32> = lr_genes.iter().map(|&g| fisher_all[g]).collect();
+    info!(
+        "Fisher w (LR genes): min={:.3e}, mean={:.3e}, max={:.3e}",
+        fisher_lr.iter().cloned().fold(f32::INFINITY, f32::min),
+        fisher_lr.iter().sum::<f32>() / (fisher_lr.len().max(1) as f32),
+        fisher_lr.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+    );
+
     //////////////////////////////////////////////////////
     // 9. Collapse into per-(community, sample) pseudobulk
     //////////////////////////////////////////////////////
@@ -271,6 +313,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
 
     let base_seed = c.seed;
 
+    let mut plan: Vec<(Box<str>, u32, Vec<usize>, bool)> = Vec::new();
     for batch_label in &unique_batches {
         let samples_in_batch: Vec<usize> = (0..n_samples)
             .filter(|&s| sample_batch_label[s].as_ref() == batch_label.as_ref())
@@ -279,83 +322,102 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
             continue;
         }
         for community in 0..(n_communities as u32) {
+            if !active_communities.contains(&community) {
+                continue;
+            }
             if !community_present(&collapse, community as usize, &samples_in_batch) {
                 continue;
             }
-            let stratum_id = strata.len();
-            strata.push(stratum_entry(
-                batch_label,
-                community as i32,
-                &edges,
-                &cell_names,
-                Some(batch_label.as_ref()),
+            plan.push((
+                batch_label.clone(),
                 community,
+                samples_in_batch.clone(),
+                false,
             ));
-            let mut br = score_pairs_for_stratum(
-                batch_label,
-                community,
-                &samples_in_batch,
-                &sample_propbin,
-                &real_pairs,
-                &gene_to_local,
-                &gene_names,
-                &collapse,
-                args.n_permutations,
-                base_seed.wrapping_add(community as u64 * 1_000_003),
-                stratum_id,
-                /*shuffle_within_batch=*/ false,
-                &sample_batch_label,
-                args.shuffle_stratify_dim,
-            );
-            rows.append(&mut br);
         }
     }
-
     if n_real_batches > 1 {
         let all_samples: Vec<usize> = (0..n_samples).collect();
         let meta_label: Box<str> = BATCH_LABEL_META.into();
         for community in 0..(n_communities as u32) {
+            if !active_communities.contains(&community) {
+                continue;
+            }
             if !community_present(&collapse, community as usize, &all_samples) {
                 continue;
             }
-            let stratum_id = strata.len();
-            strata.push(stratum_entry(
-                &meta_label,
-                community as i32,
-                &edges,
-                &cell_names,
-                None,
-                community,
-            ));
-            let mut mr = score_pairs_for_stratum(
-                &meta_label,
-                community,
-                &all_samples,
-                &sample_propbin,
-                &real_pairs,
-                &gene_to_local,
-                &gene_names,
-                &collapse,
-                args.n_permutations,
-                base_seed
-                    .wrapping_add(0xDEAD_BEEF)
-                    .wrapping_add(community as u64),
-                stratum_id,
-                /*shuffle_within_batch=*/ true,
-                &sample_batch_label,
-                args.shuffle_stratify_dim,
-            );
-            rows.append(&mut mr);
+            plan.push((meta_label.clone(), community, all_samples.clone(), true));
         }
     }
 
-    //////////////////////////////////////////////////////
-    // 11. BH within each batch stratum
-    //////////////////////////////////////////////////////
-    apply_bh_per_batch(&mut rows);
+    let n_strata = plan.len();
+    info!(
+        "Scoring {} strata × {} LR pairs ({} permutations each)...",
+        n_strata,
+        real_pairs.len(),
+        args.n_permutations
+    );
+
+    for (k, (batch_label, community, samples, is_meta)) in plan.into_iter().enumerate() {
+        let stratum_id = strata.len();
+        strata.push(stratum_entry(
+            &batch_label,
+            community as i32,
+            &edges,
+            &cell_names,
+            if is_meta {
+                None
+            } else {
+                Some(batch_label.as_ref())
+            },
+            community,
+        ));
+        let seed = if is_meta {
+            base_seed
+                .wrapping_add(0xDEAD_BEEF)
+                .wrapping_add(community as u64)
+        } else {
+            base_seed.wrapping_add(community as u64 * 1_000_003)
+        };
+        let t0 = std::time::Instant::now();
+        let mut br = score_pairs_for_stratum(
+            &batch_label,
+            community,
+            &samples,
+            &sample_propbin,
+            &real_pairs,
+            &gene_to_local,
+            &gene_names,
+            &collapse,
+            &fisher_lr,
+            args.n_permutations,
+            seed,
+            stratum_id,
+            /*shuffle_within_batch=*/ is_meta,
+            &sample_batch_label,
+            args.shuffle_stratify_dim,
+        );
+        info!(
+            "  [{}/{}] batch={} community={} n_samples={} → {} rows ({:.1}s)",
+            k + 1,
+            n_strata,
+            batch_label,
+            community,
+            samples.len(),
+            br.len(),
+            t0.elapsed().as_secs_f32()
+        );
+        rows.append(&mut br);
+    }
+
+    if log::log_enabled!(log::Level::Info) {
+        eprintln!();
+        eprintln!("{}", pvalue_histogram(&rows, 50));
+        eprintln!();
+    }
 
     //////////////////////////////////////////////////////
-    // 12. Write output
+    // 11. Write output
     //////////////////////////////////////////////////////
     let out_path = format!("{}.lr_activity.parquet", &c.out);
     info!("Writing {} rows to {}", rows.len(), out_path);
@@ -373,7 +435,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
             upstream_meta.as_ref().map(|_| upstream_meta_path.as_str()),
             &rows,
             &strata,
-            args.json_q_threshold,
+            args.json_fwer_threshold,
         )?;
         info!("Wrote {}", json_path);
 
@@ -566,32 +628,14 @@ fn pb_mean(num: f32, denom: f32) -> f32 {
     num / (denom + PRIOR_PSEUDOCOUNT)
 }
 
-/// Average ranks (1-based, ties → mean rank). Used to convert pseudobulk
-/// expression vectors to a ranks before applying weighted Pearson — gives
-/// a weighted Spearman without the `±1` saturation that weighted Pearson
-/// hits when one sample carries most of the mass.
-fn avg_ranks(v: &[f32]) -> Vec<f32> {
-    let n = v.len();
-    let mut idx: Vec<usize> = (0..n).collect();
-    idx.sort_by(|&a, &b| v[a].partial_cmp(&v[b]).unwrap_or(std::cmp::Ordering::Equal));
-    let mut rank = vec![0.0f32; n];
-    let mut k = 0;
-    while k < n {
-        let mut j = k + 1;
-        while j < n && v[idx[j]] == v[idx[k]] {
-            j += 1;
-        }
-        let avg = ((k + j - 1) as f32) / 2.0 + 1.0;
-        for &i in &idx[k..j] {
-            rank[i] = avg;
-        }
-        k = j;
-    }
-    rank
-}
-
-/// Weighted Pearson correlation between `l` and `r` using sample weights `w`.
-fn weighted_corr(l: &[f32], r: &[f32], w: &[f32]) -> f32 {
+/// Weighted covariance between `l` and `r` using sample weights `w`.
+/// Preferred over correlation here: (1) preserves absolute magnitude of
+/// L-R coupling so pairs of different scales separate cleanly under
+/// restandardization (correlation is bounded and piles up at the median);
+/// (2) tied-zero samples (zero-inflated pseudobulks) contribute 0 to the
+/// running sum instead of the spurious ±1 inflation that correlation
+/// suffers when zero-patterns co-occur. Returns NaN when weights sum to 0.
+fn weighted_cov(l: &[f32], r: &[f32], w: &[f32]) -> f32 {
     let mut sw = 0.0f32;
     let mut sl = 0.0f32;
     let mut sr = 0.0f32;
@@ -606,19 +650,10 @@ fn weighted_corr(l: &[f32], r: &[f32], w: &[f32]) -> f32 {
     let ml = sl / sw;
     let mr = sr / sw;
     let mut cov = 0.0f32;
-    let mut vl = 0.0f32;
-    let mut vr = 0.0f32;
     for k in 0..l.len() {
-        let dl = l[k] - ml;
-        let dr = r[k] - mr;
-        cov += w[k] * dl * dr;
-        vl += w[k] * dl * dl;
-        vr += w[k] * dr * dr;
+        cov += w[k] * (l[k] - ml) * (r[k] - mr);
     }
-    if vl <= EPS || vr <= EPS {
-        return 0.0;
-    }
-    cov / (vl.sqrt() * vr.sqrt())
+    cov / sw
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -631,6 +666,7 @@ fn score_pairs_for_stratum(
     gene_to_local: &HashMap<usize, usize>,
     gene_names: &[Box<str>],
     collapse: &CollapseOut,
+    fisher_lr: &[f32],
     n_perm: usize,
     base_seed: u64,
     stratum_id: usize,
@@ -680,67 +716,124 @@ fn score_pairs_for_stratum(
         buckets.into_values().collect()
     };
 
-    real_pairs
+    // Pre-generate K *shared* sample permutations for this stratum. Same
+    // shuffle σ_k applied to every pair → preserves cross-pair dependence
+    // (shared genes, batch confounders) for Westfall-Young joint
+    // inference. Single seeded RNG for determinism.
+    let shared_shuffles: Vec<Vec<usize>> = {
+        let mut rng = SmallRng::seed_from_u64(base_seed);
+        (0..n_perm)
+            .map(|_| {
+                let mut perm: Vec<usize> = (0..n_s).collect();
+                for bucket in &bucket_idx {
+                    if bucket.len() < 2 {
+                        continue;
+                    }
+                    let mut vals: Vec<usize> = bucket.iter().map(|&p| perm[p]).collect();
+                    vals.shuffle(&mut rng);
+                    for (slot_pos, &out_pos) in bucket.iter().enumerate() {
+                        perm[out_pos] = vals[slot_pos];
+                    }
+                }
+                perm
+            })
+            .collect()
+    };
+
+    let pair_results: Vec<(LrActivityRow, Vec<f32>)> = real_pairs
         .par_iter()
-        .enumerate()
-        .filter_map(|(pair_idx, (lname, rname, li, ri))| {
+        .filter_map(|(lname, rname, li, ri)| {
             let l_local = *gene_to_local.get(li)?;
             let r_local = *gene_to_local.get(ri)?;
 
+            // log1p(fisher_w · pb_mean) — Fisher-info weighting attenuates
+            // housekeeping genes; log1p stabilizes variance and prevents one
+            // high-mass sample from saturating the test stat. Without log1p
+            // a per-gene multiplicative weight would scale `weighted_cov`
+            // multiplicatively, which restandardization would still absorb
+            // — but the log1p makes it a non-linear (and thus informative)
+            // attenuation.
+            let w_l = fisher_lr[l_local];
+            let w_r = fisher_lr[r_local];
             let l_vec: Vec<f32> = samples_in_stratum
                 .iter()
                 .map(|&s| {
-                    pb_mean(
+                    let m = pb_mean(
                         collapse.num_send[c][(l_local, s)],
                         collapse.denom_send[c][s],
-                    )
+                    );
+                    (w_l * m).ln_1p()
                 })
                 .collect();
             let r_vec: Vec<f32> = samples_in_stratum
                 .iter()
                 .map(|&s| {
-                    pb_mean(
+                    let m = pb_mean(
                         collapse.num_recv[c][(r_local, s)],
                         collapse.denom_recv[c][s],
-                    )
+                    );
+                    (w_r * m).ln_1p()
                 })
                 .collect();
-            // Rank-transform once; permutation reshuffles the rank vector
-            // (equivalent to re-ranking after a value permutation, since
-            // permutation only relabels ranks).
-            let l_rank = avg_ranks(&l_vec);
-            let r_rank = avg_ranks(&r_vec);
-            let t_obs = weighted_corr(&l_rank, &r_rank, &w_pair);
+            let t_obs = weighted_cov(&l_vec, &r_vec, &w_pair);
             if !t_obs.is_finite() {
                 return None;
             }
 
-            let mut rng =
-                SmallRng::seed_from_u64(base_seed.wrapping_add(pair_idx as u64 * 1_000_003));
-            let mut shuffled = l_rank.clone();
-            let mut nulls: Vec<f32> = Vec::with_capacity(n_perm);
-            for _ in 0..n_perm {
-                permute_in_buckets(&mut shuffled, &l_rank, &bucket_idx, &mut rng);
-                let t = weighted_corr(&shuffled, &r_rank, &w_pair);
-                if t.is_finite() {
-                    nulls.push(t);
+            let mut shuffled = vec![0.0f32; n_s];
+            let mut t_perm: Vec<f32> = Vec::with_capacity(n_perm);
+            for sigma in &shared_shuffles {
+                for s in 0..n_s {
+                    shuffled[s] = l_vec[sigma[s]];
+                }
+                t_perm.push(weighted_cov(&shuffled, &r_vec, &w_pair));
+            }
+            // Single pass over t_perm collects all per-pair null moments.
+            let mut n_finite = 0usize;
+            let mut sum = 0.0f32;
+            let mut sumsq = 0.0f32;
+            let mut n_gt = 0u32;
+            let mut n_eq = 0u32;
+            for &v in &t_perm {
+                if !v.is_finite() {
+                    continue;
+                }
+                n_finite += 1;
+                sum += v;
+                sumsq += v * v;
+                if v > t_obs {
+                    n_gt += 1;
+                } else if v == t_obs {
+                    n_eq += 1;
                 }
             }
-            if nulls.len() < n_perm.div_ceil(2) {
+            if n_finite < n_perm.div_ceil(2) {
                 return None;
             }
-            let n = nulls.len() as f32;
-            let mu = nulls.iter().sum::<f32>() / n;
-            let var = nulls.iter().map(|v| (v - mu).powi(2)).sum::<f32>() / (n - 1.0).max(1.0);
-            let sd = var.sqrt().max(1e-8);
-            let z = (t_obs - mu) / sd;
+            let n_f = n_finite as f32;
+            let mu = sum / n_f;
+            let var = (sumsq - n_f * mu * mu) / (n_f - 1.0).max(1.0);
+            let sd_raw = var.max(0.0).sqrt();
 
-            // One-sided: positive correlation = LR pair active.
-            let n_ge: usize = nulls.iter().filter(|&&v| v >= t_obs).count();
-            let p_emp = ((n_ge + 1) as f32) / ((nulls.len() + 1) as f32);
-            let p_z = one_sided_p_z(z);
+            // Degenerate null: shuffles produce a (near-)constant statistic.
+            // Flag NaN for per-pair stats; t_perm is kept so this pair can
+            // still (not) contribute to the WY min-p downstream.
+            let degenerate = !sd_raw.is_finite() || sd_raw < 1e-6;
 
-            Some(LrActivityRow {
+            let p_emp = if degenerate {
+                f32::NAN
+            } else {
+                (n_gt as f32 + 0.5 * n_eq as f32 + 0.5) / (n_f + 1.0)
+            };
+
+            let (z, p_z) = if degenerate {
+                (f32::NAN, f32::NAN)
+            } else {
+                let zv = (t_obs - mu) / sd_raw;
+                (zv, one_sided_p_z(zv))
+            };
+
+            let row = LrActivityRow {
                 batch: Box::from(batch_label),
                 community: community as i32,
                 ligand: lname.clone(),
@@ -750,31 +843,110 @@ fn score_pairs_for_stratum(
                 n_samples: n_s as i32,
                 stat_obs: t_obs,
                 null_mean: mu,
-                null_sd: sd,
+                null_sd: sd_raw,
                 z,
-                p_empirical: p_emp.clamp(0.0, 1.0),
+                p_empirical: p_emp,
                 p_z,
-                q_bh: f32::NAN,
+                z_re: f32::NAN,
+                p_re: f32::NAN,
+                fwer_wy: f32::NAN,
                 stratum_id,
-            })
+            };
+            Some((row, t_perm))
         })
-        .collect()
-}
+        .collect();
 
-fn permute_in_buckets(out: &mut [f32], src: &[f32], buckets: &[Vec<usize>], rng: &mut SmallRng) {
-    out.copy_from_slice(src);
-    let mut tmp: Vec<f32> = Vec::new();
-    for bucket in buckets {
-        if bucket.len() < 2 {
-            continue;
-        }
-        tmp.clear();
-        tmp.extend(bucket.iter().map(|&k| out[k]));
-        tmp.shuffle(rng);
-        for (slot, &k) in bucket.iter().enumerate() {
-            out[k] = tmp[slot];
+    let (mut rows, perms_per_pair): (Vec<LrActivityRow>, Vec<Vec<f32>>) =
+        pair_results.into_iter().unzip();
+
+    // Efron-Tibshirani restandardization: re-center / re-scale stat_obs
+    // against the across-pair empirical null bulk in this stratum, using
+    // robust moments (median, MAD). Bypasses the per-pair permutation σ
+    // calibration issues. Degenerate pairs (constant L or R → t_obs = 0,
+    // null_sd = 0; flagged via NaN `z` upstream) are excluded both from
+    // moment estimation (else MAD collapses to 0 and σ_emp pegs at the
+    // floor) and from receiving z_re / p_re.
+    let mut stats: Vec<f32> = rows
+        .iter()
+        .filter(|r: &&LrActivityRow| r.stat_obs.is_finite() && r.z.is_finite())
+        .map(|r| r.stat_obs)
+        .collect();
+    if !stats.is_empty() {
+        let cmp = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+        let mid = stats.len() / 2;
+        let (_, med_ref, _) = stats.select_nth_unstable_by(mid, cmp);
+        let med = *med_ref;
+        let mut abs_dev: Vec<f32> = stats.iter().map(|&v| (v - med).abs()).collect();
+        let mid = abs_dev.len() / 2;
+        let (_, mad_ref, _) = abs_dev.select_nth_unstable_by(mid, cmp);
+        let mad = *mad_ref;
+        // If MAD is too small, the empirical null has insufficient spread
+        // to calibrate against — σ_emp would shrink toward the floor and
+        // tiny |stat_obs - med| differences produce extreme z_re values.
+        // Common in sparse/small communities where most pairs collapse to
+        // stat_obs ≈ 0. Leave the stratum's z_re / p_re NaN; WY skips it.
+        if mad > 1e-4 {
+            // 1.4826 is the standard normal-consistent MAD scaling.
+            let sigma_emp = 1.4826 * mad;
+            for r in rows.iter_mut() {
+                if r.stat_obs.is_finite() && r.z.is_finite() {
+                    let zr = (r.stat_obs - med) / sigma_emp;
+                    r.z_re = zr;
+                    // Two-sided p so the null is properly Uniform(0,1)
+                    // regardless of any residual skew in the stat_obs
+                    // distribution; Storey's π₀ estimator stays calibrated.
+                    // Sign restriction (active LR = positive z_re) is
+                    // applied at the reporting layer.
+                    let p_two = 2.0 * one_sided_p_z(zr.abs());
+                    r.p_re = p_two.min(1.0);
+                }
+            }
         }
     }
+
+    // Westfall-Young single-step minP: `min_p[k] = min_i p_perm[k, i]` is
+    // the null distribution of "the most significant pair under shuffle
+    // k". Adjusted p = (1 + #{k : min_p[k] ≤ p_obs[i]}) / (K + 1).
+    // Degenerate pairs don't enter min_p — they can't be most significant.
+    if !perms_per_pair.is_empty() && !perms_per_pair[0].is_empty() {
+        let k_perm = perms_per_pair[0].len();
+        let k_perm_f = k_perm as f32;
+        let mut min_p: Vec<f32> = vec![1.0f32; k_perm];
+        let mut order: Vec<usize> = Vec::with_capacity(k_perm);
+        for (row, t_perm) in rows.iter().zip(perms_per_pair.iter()) {
+            if !row.stat_obs.is_finite() || !row.z.is_finite() {
+                continue;
+            }
+            order.clear();
+            order.extend(0..k_perm);
+            order.sort_by(|&a, &b| {
+                t_perm[b]
+                    .partial_cmp(&t_perm[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for (pos, &k) in order.iter().enumerate() {
+                let p_perm = (pos + 1) as f32 / k_perm_f;
+                if p_perm < min_p[k] {
+                    min_p[k] = p_perm;
+                }
+            }
+        }
+
+        for (row, t_perm) in rows.iter_mut().zip(perms_per_pair.iter()) {
+            if !row.stat_obs.is_finite() || !row.z.is_finite() {
+                continue;
+            }
+            let n_ge = t_perm
+                .iter()
+                .filter(|&&v| v.is_finite() && v >= row.stat_obs)
+                .count();
+            let p_obs = (n_ge as f32 + 1.0) / (k_perm_f + 1.0);
+            let n_le = min_p.iter().filter(|&&v| v <= p_obs).count();
+            let fwer_wy = (n_le as f32 + 1.0) / (k_perm_f + 1.0);
+            row.fwer_wy = fwer_wy.min(1.0);
+        }
+    }
+    rows
 }
 
 fn stratum_entry(
@@ -810,19 +982,5 @@ fn stratum_entry(
         batch: Box::from(batch_label),
         community,
         edges: edges_named,
-    }
-}
-
-fn apply_bh_per_batch(rows: &mut [LrActivityRow]) {
-    let mut by_batch: HashMap<Box<str>, Vec<usize>> = HashMap::default();
-    for (i, r) in rows.iter().enumerate() {
-        by_batch.entry(r.batch.clone()).or_default().push(i);
-    }
-    for (_b, idxs) in by_batch {
-        let p: Vec<f32> = idxs.iter().map(|&i| rows[i].p_z).collect();
-        let q = bh_qvalues(&p);
-        for (k, &i) in idxs.iter().enumerate() {
-            rows[i].q_bh = q[k];
-        }
     }
 }

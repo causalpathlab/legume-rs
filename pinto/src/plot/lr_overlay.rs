@@ -5,7 +5,7 @@
 //! LR pair). The figure is a faint gray scatter of all core cells with
 //! the participating edges (from the pair's stratum) drawn on top in a
 //! palette color. Title carries `batch / community / ligand→receptor /
-//! z, q_bh`.
+//! z, fwer_wy`.
 
 use super::args::SrtPlotArgs;
 use super::load::CellTable;
@@ -91,8 +91,10 @@ pub struct LrResult {
     pub receptor_resolved: Option<String>,
     #[serde(default)]
     pub z: Option<f32>,
-    #[serde(default)]
-    pub q_bh: Option<f32>,
+    /// Westfall-Young FWER-adjusted p (current); falls back to `q_storey`
+    /// / `q_bh` for older sidecars from earlier statistical pipelines.
+    #[serde(default, alias = "q_storey", alias = "q_bh")]
+    pub fwer_wy: Option<f32>,
     /// Defaults to `true` because new JSON sidecars only carry significant
     /// rows (full table is in `lr_activity.parquet`). Old sidecars still
     /// deserialize: they set this explicitly per row.
@@ -307,7 +309,7 @@ pub fn render_lr_overlays_for_core(
             r.batch,
             r.community,
             r.z.unwrap_or(f32::NAN),
-            r.q_bh.unwrap_or(f32::NAN),
+            r.fwer_wy.unwrap_or(f32::NAN),
         );
         let pair_hulls: &[TopicLayer] = hulls_by_community
             .get(&(r.community as i64))

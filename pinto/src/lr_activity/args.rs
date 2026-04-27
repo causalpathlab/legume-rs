@@ -78,6 +78,13 @@ pub struct SrtLrActivityArgs {
 
     #[arg(
         long,
+        default_value_t = 100,
+        help = "Skip communities with fewer than this many edges (sparse communities can't calibrate)"
+    )]
+    pub min_edges_per_community: usize,
+
+    #[arg(
+        long,
         default_value = "_",
         help = "Delimiter used to split compound gene row names (e.g. `_` for ENSG..._SYMBOL)",
         long_help = "Delimiter used to alias compound gene row names. Pass `_` (default)\n\
@@ -103,8 +110,8 @@ pub struct SrtLrActivityArgs {
 
     #[arg(
         long,
-        default_value_t = 0.1,
-        help = "BH q-value threshold for including a pair's edge participation in the JSON sidecar"
+        default_value_t = 0.05,
+        help = "Westfall-Young FWER cutoff for including a pair's edge participation in the JSON sidecar"
     )]
-    pub json_q_threshold: f32,
+    pub json_fwer_threshold: f32,
 }

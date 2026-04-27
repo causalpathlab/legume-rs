@@ -228,7 +228,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                 read_propensity(&prop_path, &excluded)?;
 
             // Align propensity rows → global cell index.
-            let aligned_dominant = align_dominant(&cells, &prop_cell_names, &dominant);
+            let mut aligned_dominant = align_dominant(&cells, &prop_cell_names, &dominant);
             let aligned_propensity = align_propensity(&cells, &prop_cell_names, &propensity);
             let aligned_entropy: Option<Vec<f32>> = entropy_opt
                 .as_ref()
@@ -247,6 +247,40 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
             } else {
                 None
             };
+
+            // Drop sparse communities: cells whose dominant community has
+            // fewer than --min-edges-per-community edges get dominant = -1
+            // and are skipped by hulls / markers / LR overlays downstream.
+            if let Some((_, edge_community)) = lc_pair.as_ref() {
+                let max_c = edge_community.iter().copied().max().unwrap_or(-1);
+                if max_c >= 0 {
+                    let mut counts = vec![0usize; (max_c + 1) as usize];
+                    for &c in edge_community {
+                        if c >= 0 {
+                            counts[c as usize] += 1;
+                        }
+                    }
+                    let n_dropped = counts
+                        .iter()
+                        .filter(|&&n| 0 < n && n < args.min_edges_per_community)
+                        .count();
+                    if n_dropped > 0 {
+                        info!(
+                            "[{}] dropping {} sparse communities (< {} edges)",
+                            level.tag, n_dropped, args.min_edges_per_community
+                        );
+                    }
+                    for c_ref in aligned_dominant.iter_mut() {
+                        let c = *c_ref;
+                        if c >= 0
+                            && (c as usize) < counts.len()
+                            && counts[c as usize] < args.min_edges_per_community
+                        {
+                            *c_ref = -1;
+                        }
+                    }
+                }
+            }
 
             // Per-level gene_community (fall back to global).
             let level_gt_path = level.gene_community_path(&prefix);
