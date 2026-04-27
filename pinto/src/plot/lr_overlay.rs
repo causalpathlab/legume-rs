@@ -12,7 +12,6 @@ use super::load::CellTable;
 use super::markers;
 use super::partition::{sanitize, CoreSpec};
 use super::render::{emit_figure, Frame};
-use crate::lr_activity::fit::{BATCH_LABEL_ALL, BATCH_LABEL_META};
 use crate::util::common::*;
 use plot_utils::hull::Pt;
 use plot_utils::rasterize::{rasterize_arrow_layer_png, rasterize_group_png, RadiusSpec};
@@ -127,32 +126,23 @@ pub fn render_lr_overlays_for_core(
     focal_cells: Option<&HashSet<usize>>,
     hulls_by_community: &HashMap<i64, Vec<TopicLayer>>,
     out_dir: &Path,
-    level_tag: &str,
 ) -> anyhow::Result<Vec<PathBuf>> {
-    // Group sig results by stratum and pick this core's batch.
     let mut emitted = Vec::new();
     if args.no_lr_overlay {
         return Ok(emitted);
     }
 
-    // Map stratum_id → stratum entry.
     let mut by_id: HashMap<usize, &LrStratum> = HashMap::default();
     for s in &lr.strata {
         by_id.insert(s.stratum_id, s);
     }
 
-    // __meta__/__all__ rows aren't tied to a single batch; show them in every core.
-    let core_batch = core.name.as_str();
+    // Render every significant result; the per-pair filename carries
+    // `B{batch}` to disambiguate cross-batch results in the same dir.
     let mut sig: Vec<&LrResult> = lr
         .results
         .iter()
-        .filter(|r| {
-            r.significant
-                && (r.batch == core_batch
-                    || r.batch == BATCH_LABEL_META
-                    || r.batch == BATCH_LABEL_ALL)
-                && r.stratum_id.is_some()
-        })
+        .filter(|r| r.significant && r.stratum_id.is_some())
         .collect();
     if sig.is_empty() {
         return Ok(emitted);
@@ -304,8 +294,7 @@ pub fn render_lr_overlays_for_core(
         )?;
 
         let stub = out_dir.join(format!(
-            "{level_tag}.core{}.lr.B{}.C{}.{}-{}",
-            core.name,
+            "B{}.C{}.{}-{}",
             sanitize(&r.batch),
             r.community,
             sanitize(&r.ligand),
