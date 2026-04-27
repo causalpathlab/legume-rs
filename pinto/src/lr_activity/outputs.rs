@@ -18,18 +18,29 @@ pub struct LrActivityRow {
     pub receptor_resolved: Box<str>,
     /// Number of pseudobulk samples participating in this (batch, community).
     pub n_samples: i32,
-    /// Observed weighted Pearson correlation between sender-pseudobulk L
-    /// and receiver-pseudobulk R across samples.
+    /// Observed weighted covariance between sender-pseudobulk `log1p(w·L)`
+    /// and receiver-pseudobulk `log1p(w·R)` across samples.
     pub stat_obs: f32,
     pub null_mean: f32,
     pub null_sd: f32,
     pub z: f32,
-    /// Empirical permutation p (with `1/(n_perm + 1)` resolution floor).
+    /// Empirical permutation p (mid-p, tie-aware). Diagnostic only.
     pub p_empirical: f32,
-    /// Parametric one-sided p from the Gaussian tail of `z` — no resolution
-    /// floor; used by `q_bh`.
+    /// Parametric one-sided p from the Gaussian tail of per-pair `z`.
+    /// Diagnostic only — `null_sd` is noisy under bucketed permutation.
     pub p_z: f32,
-    pub q_bh: f32,
+    /// Restandardized z (Efron-Tibshirani GSA-style): `(stat_obs - μ_emp) / σ_emp`
+    /// where `μ_emp, σ_emp` are robust (median, MAD) moments of `stat_obs`
+    /// across all pairs in the stratum. Calibrates against the empirical
+    /// null bulk instead of the noisy per-pair permutation null.
+    pub z_re: f32,
+    /// Two-sided Gaussian tail p of `z_re`. Diagnostic.
+    pub p_re: f32,
+    /// Westfall-Young single-step minP adjusted p-value (FWER-controlled).
+    /// Joint sample permutation across all pairs in the stratum preserves
+    /// the dependence structure (shared genes, propensity buckets, batch
+    /// confounders); much cleaner than FDR for individual-pair claims.
+    pub fwer_wy: f32,
     /// Index into a per-run `strata` table written to the JSON sidecar.
     /// Not serialized to parquet — only consulted by the JSON writer.
     pub stratum_id: usize,
@@ -49,7 +60,9 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
     let z: Vec<f32> = rows.iter().map(|r| r.z).collect();
     let p_emp: Vec<f32> = rows.iter().map(|r| r.p_empirical).collect();
     let p_z: Vec<f32> = rows.iter().map(|r| r.p_z).collect();
-    let q_bh: Vec<f32> = rows.iter().map(|r| r.q_bh).collect();
+    let z_re: Vec<f32> = rows.iter().map(|r| r.z_re).collect();
+    let p_re: Vec<f32> = rows.iter().map(|r| r.p_re).collect();
+    let fwer_wy: Vec<f32> = rows.iter().map(|r| r.fwer_wy).collect();
 
     let col_names: Vec<Box<str>> = vec![
         "batch".into(),
@@ -63,7 +76,9 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
         "z".into(),
         "p_empirical".into(),
         "p_z".into(),
-        "q_bh".into(),
+        "z_re".into(),
+        "p_re".into(),
+        "fwer_wy".into(),
     ];
     let col_types = vec![
         ParquetType::BYTE_ARRAY,
@@ -71,6 +86,8 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
         ParquetType::BYTE_ARRAY,
         ParquetType::BYTE_ARRAY,
         ParquetType::INT32,
+        ParquetType::FLOAT,
+        ParquetType::FLOAT,
         ParquetType::FLOAT,
         ParquetType::FLOAT,
         ParquetType::FLOAT,
@@ -104,7 +121,9 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
     parquet_add_numeric_column(&mut row_group, &z)?;
     parquet_add_numeric_column(&mut row_group, &p_emp)?;
     parquet_add_numeric_column(&mut row_group, &p_z)?;
-    parquet_add_numeric_column(&mut row_group, &q_bh)?;
+    parquet_add_numeric_column(&mut row_group, &z_re)?;
+    parquet_add_numeric_column(&mut row_group, &p_re)?;
+    parquet_add_numeric_column(&mut row_group, &fwer_wy)?;
 
     row_group.close()?;
     writer.close()?;
@@ -122,25 +141,26 @@ pub struct StratumEntry {
 }
 
 /// Write the `{out}.lr_activity.json` sidecar. Strata are emitted only
-/// when at least one row in that stratum has `q_bh < q_threshold`.
+/// when at least one row in that stratum has `fwer_wy < fwer_threshold`
+/// (Westfall-Young single-step minP, family-wise error rate).
 pub fn write_lr_activity_json(
     out_path: &str,
     lc_prefix: &str,
     upstream_metadata: Option<&str>,
     rows: &[LrActivityRow],
     strata: &[StratumEntry],
-    q_threshold: f32,
+    fwer_threshold: f32,
 ) -> anyhow::Result<()> {
     use serde_json::{json, Value};
+    let is_sig = |r: &LrActivityRow| {
+        r.fwer_wy.is_finite() && r.fwer_wy < fwer_threshold && r.z_re.is_finite() && r.z_re > 0.0
+    };
     let n_total = rows.len();
-    let n_sig = rows
-        .iter()
-        .filter(|r| r.q_bh.is_finite() && r.q_bh < q_threshold)
-        .count();
+    let n_sig = rows.iter().filter(|r| is_sig(r)).count();
 
     let mut sig_strata: HashSet<usize> = HashSet::default();
     for r in rows {
-        if r.q_bh.is_finite() && r.q_bh < q_threshold {
+        if is_sig(r) {
             sig_strata.insert(r.stratum_id);
         }
     }
@@ -178,7 +198,7 @@ pub fn write_lr_activity_json(
     // anyway, so non-sig rows would just bloat the file.
     let results_json: Vec<Value> = rows
         .iter()
-        .filter(|r| r.q_bh.is_finite() && r.q_bh < q_threshold)
+        .filter(|r| is_sig(r))
         .map(|r| {
             let sid = renum.get(&r.stratum_id).copied();
             json!({
@@ -191,7 +211,8 @@ pub fn write_lr_activity_json(
                 "n_samples": r.n_samples,
                 "stat_obs": opt_finite(r.stat_obs),
                 "z": opt_finite(r.z),
-                "q_bh": opt_finite(r.q_bh),
+                "z_re": opt_finite(r.z_re),
+                "fwer_wy": opt_finite(r.fwer_wy),
                 "stratum_id": sid,
             })
         })
@@ -203,7 +224,7 @@ pub fn write_lr_activity_json(
         "input_metadata": upstream_metadata,
         "n_total_pairs": n_total,
         "n_significant": n_sig,
-        "q_threshold": q_threshold,
+        "fwer_threshold": fwer_threshold,
         "strata": strata_json,
         "results": results_json,
     });
@@ -219,51 +240,49 @@ fn opt_finite(v: f32) -> serde_json::Value {
     }
 }
 
-/// Benjamini-Hochberg FDR within a slice of p-values. Returns `q_bh[i]`
-/// aligned to the input order. `p` must be in `[0, 1]`; `NaN` is propagated.
-pub fn bh_qvalues(p: &[f32]) -> Vec<f32> {
-    let n = p.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| p[a].partial_cmp(&p[b]).unwrap_or(std::cmp::Ordering::Equal));
-    let mut q = vec![0.0f32; n];
-    let mut running_min = f32::INFINITY;
-    for rank_from_top in 0..n {
-        let rank = n - rank_from_top; // 1-based, largest first
-        let i = order[rank - 1];
-        if p[i].is_nan() {
-            q[i] = f32::NAN;
+/// ASCII histogram of restandardized p-values (`p_re`) across all finite
+/// rows — this is what drives Storey's q. Empirical permutation p
+/// (`p_empirical`) is on the parquet for diagnostics.
+pub fn pvalue_histogram(rows: &[LrActivityRow], max_width: usize) -> String {
+    const N_BINS: usize = 20;
+    let mut bins = [0usize; N_BINS];
+    let mut n = 0usize;
+    let mut n_nan = 0usize;
+    for r in rows {
+        if !r.p_re.is_finite() {
+            n_nan += 1;
             continue;
         }
-        let scaled = p[i] * (n as f32) / (rank as f32);
-        running_min = running_min.min(scaled);
-        q[i] = running_min.min(1.0);
-    }
-    q
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bh_monotone() {
-        let p = vec![0.001, 0.01, 0.04, 0.5, 0.9];
-        let q = bh_qvalues(&p);
-        // q should be nondecreasing in sorted-p order and q >= p in this case.
-        for i in 0..p.len() {
-            assert!(q[i] >= p[i] - 1e-6);
+        let p = r.p_re.clamp(0.0, 1.0);
+        let mut b = (p * N_BINS as f32) as usize;
+        if b >= N_BINS {
+            b = N_BINS - 1;
         }
+        bins[b] += 1;
+        n += 1;
     }
+    let max_bin = *bins.iter().max().unwrap_or(&1).max(&1);
 
-    #[test]
-    fn bh_all_ones() {
-        let p = vec![1.0; 5];
-        let q = bh_qvalues(&p);
-        for qi in q {
-            assert!((qi - 1.0).abs() < 1e-6);
-        }
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Two-sided restandardized p-value (p_re) distribution: {} rows  ({} non-finite skipped)",
+        n, n_nan
+    ));
+    lines.push(String::new());
+    for (i, &count) in bins.iter().enumerate() {
+        let lo = i as f32 / N_BINS as f32;
+        let hi = (i + 1) as f32 / N_BINS as f32;
+        let bar_len = ((count as f64 / max_bin as f64) * max_width as f64) as usize;
+        let bar = "\u{2588}".repeat(bar_len);
+        let pct = if n > 0 {
+            100.0 * count as f64 / n as f64
+        } else {
+            0.0
+        };
+        lines.push(format!(
+            "  [{:.2}, {:.2})  {:>7} ({:>5.1}%)  {}",
+            lo, hi, count, pct, bar
+        ));
     }
+    lines.join("\n")
 }

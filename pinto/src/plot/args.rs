@@ -242,6 +242,13 @@ pub struct SrtPlotArgs {
 
     #[arg(
         long,
+        default_value_t = 100,
+        help = "Skip communities with fewer than this many edges (no hulls, markers, or LR overlays)"
+    )]
+    pub min_edges_per_community: usize,
+
+    #[arg(
+        long,
         help = "Skip the per-community convex-hull outlines on LR overlays."
     )]
     pub no_lr_hulls: bool,
