@@ -9,22 +9,31 @@
 //! sample) we accumulate role-weighted gene sums for the LR genes, giving
 //! sender and receiver pseudobulk profiles per sample.
 //!
+//! Per-(community, sample) gene rates are estimated as `Gamma(num + a0,
+//! denom + b0)` posteriors with a `Gamma(1, 1)` prior, calibrated via
+//! `matrix_param::dmatrix_gamma::GammaMatrix`. The variational log mean
+//! `E[log λ] = ψ(a) − log(b)` (rather than `log1p(num/denom)`) is the
+//! input to the test: a sample with `num = 0` and small `denom` lands
+//! well above one with `num = 0` and large `denom`, breaking the
+//! zero-count tie pile-up. NB-Fisher-info gene weights are baked into
+//! these log-mean matrices once at the collapse boundary.
+//!
 //! For each (batch, community, LR pair) the statistic is a **weighted
-//! covariance** between `log1p(w_g · pb_mean)`-transformed L and R
-//! pseudobulks across the samples in that batch (sample weight =
-//! sqrt(send_weight · recv_weight)). Per-gene `w_g` are NB-Fisher-info
-//! weights from the same dispersion trend used by propensity / link-
-//! community pipelines; log1p stabilizes variance and breaks the per-gene
-//! multiplicative invariance so Fisher weighting actually bites. Covariance
-//! (rather than correlation) preserves L-R magnitude information so pairs
-//! separate cleanly under restandardization, and is naturally robust to
-//! zero-inflated pseudobulks (tied-zero samples contribute exactly 0).
+//! covariance** between the sender-pseudobulk log-mean of L and the
+//! receiver-pseudobulk log-mean of R across samples (sample weight =
+//! sqrt(send_weight · recv_weight)). Covariance (rather than correlation)
+//! preserves L-R magnitude information so pairs separate cleanly under
+//! restandardization.
 //!
 //! The null is sample-level permutation of L within propensity-stratified
 //! buckets — shuffles are restricted to samples sharing the top
 //! `shuffle_stratify_dim` bits of the propensity code, so the cell-type
-//! marginal is preserved across permutations. R and per-sample weights are
-//! held fixed.
+//! marginal is preserved across permutations. Per shuffle, a *fresh*
+//! log-posterior sample (delta method: `Normal(ψ(a) − log(b), ψ'(a))`) is
+//! drawn for both L and R rates and used as the per-permutation log
+//! expression. The same draw is shared across all pairs in a given
+//! shuffle so cross-pair dependence (and the WY guarantee) is preserved;
+//! sparse pseudobulks correctly contribute a wider null than dense ones.
 //!
 //! Inference layers (per stratum):
 //! - `p_empirical` / `p_z` — per-pair permutation diagnostics.
@@ -43,6 +52,8 @@ use crate::lr_activity::outputs::{
 use crate::util::common::*;
 use data_beans::convert::try_open_or_convert;
 use data_beans_alg::random_projection::{binary_sort_columns, RandProjOps};
+use matrix_param::dmatrix_gamma::GammaMatrix;
+use matrix_param::traits::{CalibrateTarget, Inference, TwoStatParam};
 use matrix_util::membership::GeneIndexResolver;
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
@@ -64,9 +75,11 @@ pub const BATCH_LABEL_ALL: &str = "all";
 /// Pseudo-batch label for pooled-across-batches rows emitted alongside per-batch rows.
 pub const BATCH_LABEL_META: &str = "pooled";
 
-/// Pseudocount added to per-(community, sample) role weights when forming
-/// the pseudobulk mean. Keeps low-evidence samples from blowing up.
-const PRIOR_PSEUDOCOUNT: f32 = 1.0;
+/// Gamma posterior hyperparameters for pseudobulk rates. `Gamma(1, 1)` is
+/// the standard weak-but-proper prior used elsewhere in pinto (propensity,
+/// link-community profiles, dsvd).
+const GAMMA_A0: f32 = 1.0;
+const GAMMA_B0: f32 = 1.0;
 /// Floor to avoid div-by-zero when a sample has no presence in a community.
 const EPS: f32 = 1e-8;
 /// Don't compute a statistic when the stratum has fewer than this many
@@ -283,7 +296,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         n_samples,
         lr_genes.len()
     );
-    let collapse = collapse_role_pseudobulk(
+    let mut collapse = collapse_role_pseudobulk(
         &x_lr,
         &sample_id_per_cell,
         &p_send,
@@ -291,6 +304,15 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         n_communities,
         n_samples,
     );
+
+    // Bake Fisher weights into log-mean matrices once (per-gene row scale).
+    // Under weighted_cov, per-gene scalars on each side stack as `w_L · w_R`
+    // on stat_obs; precomputing here saves an n_pairs × n_samples mul per
+    // stratum.
+    for c in 0..n_communities {
+        apply_gene_weights(&mut collapse.log_mean_send[c], &fisher_lr);
+        apply_gene_weights(&mut collapse.log_mean_recv[c], &fisher_lr);
+    }
 
     //////////////////////////////////////////////////////
     // 10. Per-stratum scoring (per-batch and pooled)
@@ -547,14 +569,23 @@ fn assign_samples(
     (sample_id_per_cell, sample_batch_label, sample_propbin)
 }
 
-/// Per-(community, sample) role-weighted pseudobulk for the LR genes.
-/// `num_send[c]` is `(n_lr_genes × n_samples)`; `denom_send[c][s]` is the
-/// total p_send weight of cells belonging to sample `s`.
+/// Per-(community, sample) role-weighted pseudobulk for the LR genes,
+/// stored as Gamma posterior log-means: `log_mean_send[c][(g, s)] =
+/// E[log λ | data] = ψ(num + a0) - log(denom + b0)`. Using the variational
+/// log-mean instead of `log1p(num/(denom+1))` breaks the zero-count tie
+/// pile-up: a sample with `num = 0` and small `denom` lands far above one
+/// with `num = 0` and large `denom` (correctly less confident in λ ≈ 0).
 struct CollapseOut {
-    num_send: Vec<DMatrix<f32>>,
+    log_mean_send: Vec<DMatrix<f32>>,
+    log_mean_recv: Vec<DMatrix<f32>>,
     denom_send: Vec<Vec<f32>>,
-    num_recv: Vec<DMatrix<f32>>,
     denom_recv: Vec<Vec<f32>>,
+    /// Calibrated Gamma posteriors per (community, role) used by the
+    /// per-permutation log-posterior draw inside `score_pairs_for_stratum`.
+    /// Fisher weights are NOT pre-applied here (gene-row scaling is
+    /// stacked on top of each draw inside the perm loop).
+    gamma_send: Vec<GammaMatrix>,
+    gamma_recv: Vec<GammaMatrix>,
 }
 
 fn collapse_role_pseudobulk(
@@ -571,7 +602,14 @@ fn collapse_role_pseudobulk(
     // Communities are independent — accumulate each one in its own thread.
     // Inverting the loop order (community-outer, cell-inner) lets axpy run
     // without inter-thread races.
-    type CommunityCollapse = (DMatrix<f32>, DMatrix<f32>, Vec<f32>, Vec<f32>);
+    type CommunityCollapse = (
+        DMatrix<f32>,
+        DMatrix<f32>,
+        Vec<f32>,
+        Vec<f32>,
+        GammaMatrix,
+        GammaMatrix,
+    );
     let per_community: Vec<CommunityCollapse> = (0..n_communities)
         .into_par_iter()
         .map(|c| {
@@ -593,25 +631,47 @@ fn collapse_role_pseudobulk(
                     den_r[s] += pr;
                 }
             }
-            (num_s, num_r, den_s, den_r)
+            let ones_col = nalgebra::DVector::<f32>::from_element(n_lr, 1.0);
+            let den_s_mat = &ones_col
+                * nalgebra::RowDVector::<f32>::from_iterator(n_samples, den_s.iter().copied());
+            let den_r_mat = &ones_col
+                * nalgebra::RowDVector::<f32>::from_iterator(n_samples, den_r.iter().copied());
+
+            let mut g_s = GammaMatrix::new((n_lr, n_samples), GAMMA_A0, GAMMA_B0);
+            g_s.update_stat(&num_s, &den_s_mat);
+            g_s.calibrate_with(CalibrateTarget::All);
+            let log_mean_s = g_s.posterior_log_mean().clone();
+
+            let mut g_r = GammaMatrix::new((n_lr, n_samples), GAMMA_A0, GAMMA_B0);
+            g_r.update_stat(&num_r, &den_r_mat);
+            g_r.calibrate_with(CalibrateTarget::All);
+            let log_mean_r = g_r.posterior_log_mean().clone();
+
+            (log_mean_s, log_mean_r, den_s, den_r, g_s, g_r)
         })
         .collect();
 
-    let mut num_send = Vec::with_capacity(n_communities);
-    let mut num_recv = Vec::with_capacity(n_communities);
+    let mut log_mean_send = Vec::with_capacity(n_communities);
+    let mut log_mean_recv = Vec::with_capacity(n_communities);
     let mut denom_send = Vec::with_capacity(n_communities);
     let mut denom_recv = Vec::with_capacity(n_communities);
-    for (ns, nr, ds, dr) in per_community {
-        num_send.push(ns);
-        num_recv.push(nr);
+    let mut gamma_send = Vec::with_capacity(n_communities);
+    let mut gamma_recv = Vec::with_capacity(n_communities);
+    for (ls, lr, ds, dr, gs, gr) in per_community {
+        log_mean_send.push(ls);
+        log_mean_recv.push(lr);
         denom_send.push(ds);
         denom_recv.push(dr);
+        gamma_send.push(gs);
+        gamma_recv.push(gr);
     }
     CollapseOut {
-        num_send,
+        log_mean_send,
+        log_mean_recv,
         denom_send,
-        num_recv,
         denom_recv,
+        gamma_send,
+        gamma_recv,
     }
 }
 
@@ -619,13 +679,6 @@ fn community_present(collapse: &CollapseOut, c: usize, samples: &[usize]) -> boo
     samples
         .iter()
         .any(|&s| collapse.denom_send[c][s] > 0.0 && collapse.denom_recv[c][s] > 0.0)
-}
-
-/// Pseudobulk mean: numerator / (denominator + prior). Prior keeps
-/// low-evidence samples from blowing up under low denominator.
-#[inline]
-fn pb_mean(num: f32, denom: f32) -> f32 {
-    num / (denom + PRIOR_PSEUDOCOUNT)
 }
 
 /// Weighted covariance between `l` and `r` using sample weights `w`.
@@ -740,54 +793,91 @@ fn score_pairs_for_stratum(
             .collect()
     };
 
-    let pair_results: Vec<(LrActivityRow, Vec<f32>)> = real_pairs
+    // Per-pair fixed quantities (l_local, r_local, t_obs).
+    struct PairCtx {
+        l_local: usize,
+        r_local: usize,
+        lname: Box<str>,
+        rname: Box<str>,
+        li: usize,
+        ri: usize,
+        t_obs: f32,
+    }
+    let pair_ctx: Vec<Option<PairCtx>> = real_pairs
         .par_iter()
-        .filter_map(|(lname, rname, li, ri)| {
+        .map(|(lname, rname, li, ri)| -> Option<PairCtx> {
             let l_local = *gene_to_local.get(li)?;
             let r_local = *gene_to_local.get(ri)?;
-
-            // log1p(fisher_w · pb_mean) — Fisher-info weighting attenuates
-            // housekeeping genes; log1p stabilizes variance and prevents one
-            // high-mass sample from saturating the test stat. Without log1p
-            // a per-gene multiplicative weight would scale `weighted_cov`
-            // multiplicatively, which restandardization would still absorb
-            // — but the log1p makes it a non-linear (and thus informative)
-            // attenuation.
-            let w_l = fisher_lr[l_local];
-            let w_r = fisher_lr[r_local];
             let l_vec: Vec<f32> = samples_in_stratum
                 .iter()
-                .map(|&s| {
-                    let m = pb_mean(
-                        collapse.num_send[c][(l_local, s)],
-                        collapse.denom_send[c][s],
-                    );
-                    (w_l * m).ln_1p()
-                })
+                .map(|&s| collapse.log_mean_send[c][(l_local, s)])
                 .collect();
             let r_vec: Vec<f32> = samples_in_stratum
                 .iter()
-                .map(|&s| {
-                    let m = pb_mean(
-                        collapse.num_recv[c][(r_local, s)],
-                        collapse.denom_recv[c][s],
-                    );
-                    (w_r * m).ln_1p()
-                })
+                .map(|&s| collapse.log_mean_recv[c][(r_local, s)])
                 .collect();
             let t_obs = weighted_cov(&l_vec, &r_vec, &w_pair);
             if !t_obs.is_finite() {
                 return None;
             }
+            Some(PairCtx {
+                l_local,
+                r_local,
+                lname: lname.clone(),
+                rname: rname.clone(),
+                li: *li,
+                ri: *ri,
+                t_obs,
+            })
+        })
+        .collect();
 
-            let mut shuffled = vec![0.0f32; n_s];
-            let mut t_perm: Vec<f32> = Vec::with_capacity(n_perm);
-            for sigma in &shared_shuffles {
-                for s in 0..n_s {
-                    shuffled[s] = l_vec[sigma[s]];
-                }
-                t_perm.push(weighted_cov(&shuffled, &r_vec, &w_pair));
+    // Build per-pair null vectors `t_perm[i]`. Per shuffle (sequential),
+    // draw a fresh log-rate sample (delta method) for both roles, apply
+    // Fisher, then compute t_perm for all pairs in parallel against the
+    // same draw + same shuffle. Sharing the draw across pairs preserves
+    // cross-pair dependence and the WY guarantee.
+    let t_perm_per_pair: Vec<Vec<f32>> = {
+        let mut t_per_pair: Vec<Vec<f32>> = vec![Vec::with_capacity(n_perm); pair_ctx.len()];
+        for sigma in &shared_shuffles {
+            let mut log_s = collapse.gamma_send[c]
+                .posterior_log_sample()
+                .expect("posterior_log_sample (send) failed");
+            let mut log_r = collapse.gamma_recv[c]
+                .posterior_log_sample()
+                .expect("posterior_log_sample (recv) failed");
+            apply_gene_weights(&mut log_s, fisher_lr);
+            apply_gene_weights(&mut log_r, fisher_lr);
+            let t_k: Vec<f32> = pair_ctx
+                .par_iter()
+                .map(|pc_opt| match pc_opt {
+                    None => f32::NAN,
+                    Some(pc) => {
+                        let l_perm: Vec<f32> = samples_in_stratum
+                            .iter()
+                            .map(|&s| log_s[(pc.l_local, sigma[s])])
+                            .collect();
+                        let r_perm: Vec<f32> = samples_in_stratum
+                            .iter()
+                            .map(|&s| log_r[(pc.r_local, s)])
+                            .collect();
+                        weighted_cov(&l_perm, &r_perm, &w_pair)
+                    }
+                })
+                .collect();
+            for (i, t) in t_k.into_iter().enumerate() {
+                t_per_pair[i].push(t);
             }
+        }
+        t_per_pair
+    };
+
+    // Per-pair: aggregate t_perm into stats and build the row.
+    let pair_results: Vec<(LrActivityRow, Vec<f32>)> = pair_ctx
+        .into_par_iter()
+        .zip(t_perm_per_pair.into_par_iter())
+        .filter_map(|(pc_opt, t_perm)| {
+            let pc = pc_opt?;
             // Single pass over t_perm collects all per-pair null moments.
             let mut n_finite = 0usize;
             let mut sum = 0.0f32;
@@ -801,9 +891,9 @@ fn score_pairs_for_stratum(
                 n_finite += 1;
                 sum += v;
                 sumsq += v * v;
-                if v > t_obs {
+                if v > pc.t_obs {
                     n_gt += 1;
-                } else if v == t_obs {
+                } else if v == pc.t_obs {
                     n_eq += 1;
                 }
             }
@@ -816,7 +906,7 @@ fn score_pairs_for_stratum(
             let sd_raw = var.max(0.0).sqrt();
 
             // Degenerate null: shuffles produce a (near-)constant statistic.
-            // Flag NaN for per-pair stats; t_perm is kept so this pair can
+            // Flag NaN for per-pair stats; t_perm stays so this pair can
             // still (not) contribute to the WY min-p downstream.
             let degenerate = !sd_raw.is_finite() || sd_raw < 1e-6;
 
@@ -829,19 +919,19 @@ fn score_pairs_for_stratum(
             let (z, p_z) = if degenerate {
                 (f32::NAN, f32::NAN)
             } else {
-                let zv = (t_obs - mu) / sd_raw;
+                let zv = (pc.t_obs - mu) / sd_raw;
                 (zv, one_sided_p_z(zv))
             };
 
             let row = LrActivityRow {
                 batch: Box::from(batch_label),
                 community: community as i32,
-                ligand: lname.clone(),
-                receptor: rname.clone(),
-                ligand_resolved: gene_names[*li].clone(),
-                receptor_resolved: gene_names[*ri].clone(),
+                ligand: pc.lname.clone(),
+                receptor: pc.rname.clone(),
+                ligand_resolved: gene_names[pc.li].clone(),
+                receptor_resolved: gene_names[pc.ri].clone(),
                 n_samples: n_s as i32,
-                stat_obs: t_obs,
+                stat_obs: pc.t_obs,
                 null_mean: mu,
                 null_sd: sd_raw,
                 z,

@@ -149,6 +149,23 @@ impl Inference for GammaMatrix {
         Ok(Self::Mat::from_vec(self.nrows(), self.ncols(), sampled))
     }
 
+    fn posterior_log_sample(&self) -> anyhow::Result<Self::Mat> {
+        use rand_distr::{Distribution, StandardNormal};
+
+        let sampled: Vec<f32> = self
+            .estimated_log_mean
+            .as_slice()
+            .par_iter()
+            .zip(self.estimated_log_sd.as_slice().par_iter())
+            .map_init(rand::rng, |rng, (&m, &s)| {
+                let z: f32 = StandardNormal.sample(rng);
+                m + s * z
+            })
+            .collect();
+
+        Ok(Self::Mat::from_vec(self.nrows(), self.ncols(), sampled))
+    }
+
     fn nrows(&self) -> usize {
         self.num_rows
     }

@@ -11,6 +11,12 @@ pub trait Inference {
     fn posterior_log_mean(&self) -> &Self::Mat;
     fn posterior_log_sd(&self) -> &Self::Mat;
     fn posterior_sample(&self) -> anyhow::Result<Self::Mat>;
+    /// Draw a fresh sample of `log λ` per element. Delta-method
+    /// approximation: `log λ ≈ Normal(posterior_log_mean,
+    /// posterior_log_sd²)`. Caller must have called
+    /// `calibrate_with(CalibrateTarget::All)` first so log_mean / log_sd
+    /// are populated.
+    fn posterior_log_sample(&self) -> anyhow::Result<Self::Mat>;
 
     fn nrows(&self) -> usize;
     fn ncols(&self) -> usize;
