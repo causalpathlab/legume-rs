@@ -16,13 +16,19 @@ pub struct LrActivityRow {
     /// expression directly without re-running the gene resolver.
     pub ligand_resolved: Box<str>,
     pub receptor_resolved: Box<str>,
-    pub n_edges: i32,
-    pub n_components: i32,
-    pub ce_obs: f32,
-    pub ce_null_mean: f32,
-    pub ce_null_sd: f32,
+    /// Number of pseudobulk samples participating in this (batch, community).
+    pub n_samples: i32,
+    /// Observed weighted Pearson correlation between sender-pseudobulk L
+    /// and receiver-pseudobulk R across samples.
+    pub stat_obs: f32,
+    pub null_mean: f32,
+    pub null_sd: f32,
     pub z: f32,
+    /// Empirical permutation p (with `1/(n_perm + 1)` resolution floor).
     pub p_empirical: f32,
+    /// Parametric one-sided p from the Gaussian tail of `z` — no resolution
+    /// floor; used by `q_bh`.
+    pub p_z: f32,
     pub q_bh: f32,
     /// Index into a per-run `strata` table written to the JSON sidecar.
     /// Not serialized to parquet — only consulted by the JSON writer.
@@ -36,13 +42,13 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
     let communities: Vec<i32> = rows.iter().map(|r| r.community).collect();
     let ligands: Vec<Box<str>> = rows.iter().map(|r| r.ligand.clone()).collect();
     let receptors: Vec<Box<str>> = rows.iter().map(|r| r.receptor.clone()).collect();
-    let n_edges: Vec<i32> = rows.iter().map(|r| r.n_edges).collect();
-    let n_components: Vec<i32> = rows.iter().map(|r| r.n_components).collect();
-    let ce_obs: Vec<f32> = rows.iter().map(|r| r.ce_obs).collect();
-    let ce_null_mean: Vec<f32> = rows.iter().map(|r| r.ce_null_mean).collect();
-    let ce_null_sd: Vec<f32> = rows.iter().map(|r| r.ce_null_sd).collect();
+    let n_samples: Vec<i32> = rows.iter().map(|r| r.n_samples).collect();
+    let stat_obs: Vec<f32> = rows.iter().map(|r| r.stat_obs).collect();
+    let null_mean: Vec<f32> = rows.iter().map(|r| r.null_mean).collect();
+    let null_sd: Vec<f32> = rows.iter().map(|r| r.null_sd).collect();
     let z: Vec<f32> = rows.iter().map(|r| r.z).collect();
     let p_emp: Vec<f32> = rows.iter().map(|r| r.p_empirical).collect();
+    let p_z: Vec<f32> = rows.iter().map(|r| r.p_z).collect();
     let q_bh: Vec<f32> = rows.iter().map(|r| r.q_bh).collect();
 
     let col_names: Vec<Box<str>> = vec![
@@ -50,13 +56,13 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
         "community".into(),
         "ligand".into(),
         "receptor".into(),
-        "n_edges".into(),
-        "n_components".into(),
-        "ce_obs".into(),
-        "ce_null_mean".into(),
-        "ce_null_sd".into(),
+        "n_samples".into(),
+        "stat_obs".into(),
+        "null_mean".into(),
+        "null_sd".into(),
         "z".into(),
         "p_empirical".into(),
+        "p_z".into(),
         "q_bh".into(),
     ];
     let col_types = vec![
@@ -65,7 +71,7 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
         ParquetType::BYTE_ARRAY,
         ParquetType::BYTE_ARRAY,
         ParquetType::INT32,
-        ParquetType::INT32,
+        ParquetType::FLOAT,
         ParquetType::FLOAT,
         ParquetType::FLOAT,
         ParquetType::FLOAT,
@@ -91,13 +97,13 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
     parquet_add_numeric_column(&mut row_group, &communities)?;
     parquet_add_string_column(&mut row_group, &ligands)?;
     parquet_add_string_column(&mut row_group, &receptors)?;
-    parquet_add_numeric_column(&mut row_group, &n_edges)?;
-    parquet_add_numeric_column(&mut row_group, &n_components)?;
-    parquet_add_numeric_column(&mut row_group, &ce_obs)?;
-    parquet_add_numeric_column(&mut row_group, &ce_null_mean)?;
-    parquet_add_numeric_column(&mut row_group, &ce_null_sd)?;
+    parquet_add_numeric_column(&mut row_group, &n_samples)?;
+    parquet_add_numeric_column(&mut row_group, &stat_obs)?;
+    parquet_add_numeric_column(&mut row_group, &null_mean)?;
+    parquet_add_numeric_column(&mut row_group, &null_sd)?;
     parquet_add_numeric_column(&mut row_group, &z)?;
     parquet_add_numeric_column(&mut row_group, &p_emp)?;
+    parquet_add_numeric_column(&mut row_group, &p_z)?;
     parquet_add_numeric_column(&mut row_group, &q_bh)?;
 
     row_group.close()?;
@@ -179,13 +185,13 @@ pub fn write_lr_activity_json(
                 "receptor": r.receptor.as_ref(),
                 "ligand_resolved": r.ligand_resolved.as_ref(),
                 "receptor_resolved": r.receptor_resolved.as_ref(),
-                "n_edges": r.n_edges,
-                "n_components": r.n_components,
-                "ce_obs": opt_finite(r.ce_obs),
-                "ce_null_mean": opt_finite(r.ce_null_mean),
-                "ce_null_sd": opt_finite(r.ce_null_sd),
+                "n_samples": r.n_samples,
+                "stat_obs": opt_finite(r.stat_obs),
+                "null_mean": opt_finite(r.null_mean),
+                "null_sd": opt_finite(r.null_sd),
                 "z": opt_finite(r.z),
                 "p_empirical": opt_finite(r.p_empirical),
+                "p_z": opt_finite(r.p_z),
                 "q_bh": opt_finite(r.q_bh),
                 "significant": sig,
                 "stratum_id": sid,

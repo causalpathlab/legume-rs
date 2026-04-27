@@ -312,12 +312,28 @@ enum Commands {
         aliases = ["lra", "test-lr"],
         about = "Posthoc directional ligand→receptor activity test per link community",
         long_about = "Tests whether a user-supplied directional ligand→receptor list shows\n\
-                      elevated activity within each link community from a prior `pinto lc`\n\
-                      run. Statistic is conditional entropy H(R_receiver | L_sender)\n\
-                      over edges in each (batch × community × connected component),\n\
-                      aggregated with inverse-variance weights across components and\n\
-                      compared to a gene-swap null matched on (mean expression, global\n\
-                      Moran's I) over the same edge graph.\n\n\
+                      coherent activity within each link community from a prior `pinto lc`\n\
+                      run.\n\n\
+                      DESIGN:\n\
+                      \x20 1. Cells are collapsed into pseudobulk samples =\n\
+                      \x20    (batch × propensity-bin), where the propensity bin is the\n\
+                      \x20    sign-LSH binary code of an SVD'd random projection of gene\n\
+                      \x20    expression (data-beans-alg::binary_sort_columns).\n\
+                      \x20 2. Each cell carries soft community membership in two roles:\n\
+                      \x20    p_send[i, c] = fraction of i's incident edges in community c\n\
+                      \x20    on which i is sender; p_recv[i, c] is the receiver analogue.\n\
+                      \x20 3. Per (community, sample) we accumulate role-weighted gene\n\
+                      \x20    sums for the LR genes, giving sender and receiver pseudobulk\n\
+                      \x20    profiles per sample with weights w_send / w_recv.\n\
+                      \x20 4. Statistic per (batch, community, LR pair): weighted Spearman\n\
+                      \x20    rank correlation between L_send and R_recv across samples,\n\
+                      \x20    sample-weighted by sqrt(w_send · w_recv).\n\
+                      \x20 5. Null: sample-level permutation of L within propensity-stratified\n\
+                      \x20    buckets (top --shuffle-stratify-dim bits of the propensity\n\
+                      \x20    code). This preserves the cell-population marginal across\n\
+                      \x20    permutations and avoids anti-conservative across-population\n\
+                      \x20    shuffles. One-sided positive p (parametric Gaussian tail of z\n\
+                      \x20    plus empirical 1/(n+1)-floored permutation p), BH within batch.\n\n\
                       QUICK START:\n\n\
                       \x20 # After a `pinto lc` run at prefix `out/run1`:\n\
                       \x20 pinto lr-activity data.h5 -c coords.csv -o out/run1.lr \\\n\
@@ -332,11 +348,20 @@ enum Commands {
                       \x20               Gene names are resolved against the data\n\
                       \x20               row-names; the resolved canonical names are\n\
                       \x20               persisted in the JSON sidecar.\n\n\
+                      KEY KNOBS:\n\n\
+                      \x20 --propensity-dim         d for binary-sort propensity codes\n\
+                      \x20                          (default 10 → ≤1024 samples per batch).\n\
+                      \x20 --shuffle-stratify-dim   top bits of propensity used for\n\
+                      \x20                          permutation buckets (default 4 → 16\n\
+                      \x20                          buckets; 0 disables stratification).\n\
+                      \x20 --n-permutations         number of sample shuffles (default 1000).\n\n\
                       OUTPUTS:\n\n\
                       \x20 {out}.lr_activity.parquet — columns:\n\
-                      \x20   batch, community, ligand, receptor,\n\
-                      \x20   n_edges, n_components, ce_obs, ce_null_mean, ce_null_sd,\n\
-                      \x20   z, p_empirical, q_bh\n\n\
+                      \x20   batch, community, ligand, receptor, n_samples,\n\
+                      \x20   stat_obs (weighted Spearman ρ), null_mean, null_sd,\n\
+                      \x20   z, p_empirical, p_z, q_bh.\n\
+                      \x20   q_bh is BH on p_z (parametric Gaussian tail; no 1/(n+1)\n\
+                      \x20   floor). p_empirical is the raw permutation p.\n\n\
                       \x20 {out}.lr_activity.json — sidecar consumed by `pinto plot`:\n\
                       \x20   summary stats per pair (with `ligand_resolved` /\n\
                       \x20   `receptor_resolved` row-name aliases) PLUS, for each\n\
