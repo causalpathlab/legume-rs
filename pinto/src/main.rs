@@ -326,15 +326,17 @@ enum Commands {
                       \x20 3. Per (community, sample) we accumulate role-weighted gene\n\
                       \x20    sums for the LR genes, giving sender and receiver pseudobulk\n\
                       \x20    profiles per sample with weights w_send / w_recv.\n\
-                      \x20 4. Statistic per (batch, community, LR pair): weighted Spearman\n\
-                      \x20    rank correlation between L_send and R_recv across samples,\n\
-                      \x20    sample-weighted by sqrt(w_send · w_recv).\n\
+                      \x20 4. Statistic per (batch, community, LR pair): weighted covariance\n\
+                      \x20    of `log1p(w_g · pb_mean)` between L_send and R_recv across\n\
+                      \x20    samples, sample-weighted by sqrt(w_send · w_recv). Per-gene\n\
+                      \x20    `w_g` are NB-Fisher-info weights (same as propensity / lc).\n\
                       \x20 5. Null: sample-level permutation of L within propensity-stratified\n\
                       \x20    buckets (top --shuffle-stratify-dim bits of the propensity\n\
-                      \x20    code). This preserves the cell-population marginal across\n\
-                      \x20    permutations and avoids anti-conservative across-population\n\
-                      \x20    shuffles. One-sided positive p (parametric Gaussian tail of z\n\
-                      \x20    plus empirical 1/(n+1)-floored permutation p), BH within batch.\n\n\
+                      \x20    code). The same shuffle σ_k is applied to every pair so\n\
+                      \x20    cross-pair dependence is preserved.\n\
+                      \x20 6. Inference: Efron-Tibshirani restandardize stat_obs against\n\
+                      \x20    per-stratum (median, MAD) of stat_obs (z_re / p_re), then\n\
+                      \x20    Westfall-Young single-step minP for FWER (fwer_wy).\n\n\
                       QUICK START:\n\n\
                       \x20 # Shortest form — read inputs from a prior pinto lc metadata.json:\n\
                       \x20 pinto lra --from out/run1.metadata.json --lr-pairs cellchat_pairs.tsv\n\n\
@@ -364,22 +366,26 @@ enum Commands {
                       OUTPUTS:\n\n\
                       \x20 {out}.lr_activity.parquet — columns:\n\
                       \x20   batch, community, ligand, receptor, n_samples,\n\
-                      \x20   stat_obs (weighted Spearman ρ), null_mean, null_sd,\n\
-                      \x20   z, p_empirical, p_z, q_bh.\n\
-                      \x20   q_bh is BH on p_z (parametric Gaussian tail; no 1/(n+1)\n\
-                      \x20   floor). p_empirical is the raw permutation p.\n\n\
+                      \x20   stat_obs (weighted covariance of log1p(w·pb)),\n\
+                      \x20   null_mean, null_sd, z, p_empirical, p_z, z_re, p_re,\n\
+                      \x20   fwer_wy.\n\
+                      \x20   z_re/p_re — Efron-Tibshirani restandardization of\n\
+                      \x20     stat_obs against per-stratum (median, MAD).\n\
+                      \x20   fwer_wy — Westfall-Young single-step minP\n\
+                      \x20     (joint sample permutation across pairs in a stratum;\n\
+                      \x20     FWER-controlled).\n\n\
                       \x20 {out}.lr_activity.json — sidecar consumed by `pinto plot`:\n\
                       \x20   summary stats per pair (with `ligand_resolved` /\n\
                       \x20   `receptor_resolved` row-name aliases) PLUS, for each\n\
-                      \x20   significant pair (q_bh < --json-q-threshold), the\n\
+                      \x20   significant pair (fwer_wy < --json-fwer-threshold), the\n\
                       \x20   participating-edge endpoints under a deduped per-stratum\n\
                       \x20   block. Disable with --emit-json=false.\n\n\
                       \x20 BATCH LABELS:\n\
                       \x20   `all`     single-batch run pseudo-label (no --batch-files).\n\
                       \x20   `pooled`  cross-batch pooled rows; emitted only when\n\
                       \x20             ≥ 2 real batches exist (would just duplicate\n\
-                      \x20             the per-batch stats otherwise). BH is applied\n\
-                      \x20             within each batch stratum."
+                      \x20             the per-batch stats otherwise). WY shuffles are\n\
+                      \x20             still bucketed per (batch, propensity-bin)."
     )]
     LrActivity(SrtLrActivityArgs),
 }
