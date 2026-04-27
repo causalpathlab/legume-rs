@@ -34,6 +34,40 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+/// Output sub-directory under `{out}.plots/`. Single source of truth so
+/// the mkdir loop and the per-plot dispatch stay in sync.
+#[derive(Copy, Clone)]
+enum PlotKind {
+    Community,
+    Propensity,
+    Mesh,
+    Interfaces,
+    Markers,
+    Lr,
+}
+
+impl PlotKind {
+    const ALL: &'static [PlotKind] = &[
+        PlotKind::Community,
+        PlotKind::Propensity,
+        PlotKind::Mesh,
+        PlotKind::Interfaces,
+        PlotKind::Markers,
+        PlotKind::Lr,
+    ];
+
+    fn subdir(self) -> &'static str {
+        match self {
+            PlotKind::Community => "community",
+            PlotKind::Propensity => "propensity",
+            PlotKind::Mesh => "mesh",
+            PlotKind::Interfaces => "interfaces",
+            PlotKind::Markers => "markers",
+            PlotKind::Lr => "lr",
+        }
+    }
+}
+
 use discover::{discover_levels, LevelSelector};
 use load::{read_cells_from_coord_pairs, read_gene_topic, read_link_community, read_propensity};
 use partition::partition_cells;
@@ -46,13 +80,18 @@ use render::{
 /// Entry point: auto-discover outputs, partition, emit figures, write
 /// a JSON manifest listing everything produced.
 pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
-    // Auto-detect if --from is a JSON metadata file or a prefix
-    let prefix = if args.from.ends_with(".json") {
+    // Auto-detect if --from is a JSON metadata file or a prefix.
+    // When metadata.json is supplied, capture its coord_columns hint so
+    // the coord_pairs reader doesn't have to auto-discover.
+    let (prefix, coord_columns_hint) = if args.from.ends_with(".json") {
         let meta_path = std::path::Path::new(args.from.as_ref());
         let meta = crate::util::metadata::PintoMetadata::read(meta_path)?;
-        meta.prefix.into_boxed_str()
+        (
+            meta.prefix.into_boxed_str(),
+            meta.outputs.coord_columns.clone(),
+        )
     } else {
-        args.from.clone()
+        (args.from.clone(), None)
     };
 
     let out_prefix = args.out.as_deref().unwrap_or(&prefix).to_string();
@@ -73,7 +112,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
     if !coord_path.exists() {
         anyhow::bail!("{coord_path:?} not found — did you pass the right --from prefix?");
     }
-    let cells = read_cells_from_coord_pairs(&coord_path)?;
+    let cells = read_cells_from_coord_pairs(&coord_path, coord_columns_hint.as_deref())?;
     info!(
         "loaded {} cells; batch column: {}",
         cells.n(),
@@ -135,11 +174,13 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
     // exclude set from CellTable's known coord column names.
     let excluded: HashSet<Box<str>> = cells.coord_col_names.iter().cloned().collect();
 
-    // Create output subdirectories once before parallel iteration
+    // Each plot type lands in its own subdir; filenames carry only the
+    // level tag (and any kind-specific suffix). Single core → no
+    // `core{batch}` infix.
     let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
-    std::fs::create_dir_all(&plot_dir)?;
-    let markers_dir = plot_dir.join("markers");
-    std::fs::create_dir_all(&markers_dir)?;
+    for kind in PlotKind::ALL {
+        std::fs::create_dir_all(plot_dir.join(kind.subdir()))?;
+    }
 
     levels
         .par_iter()
@@ -179,12 +220,13 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
 
             for core in &cores {
                 let frame = Frame::new(core, args);
-                let out_stub = |kind: &str| -> PathBuf {
-                    plot_dir.join(format!(
-                        "{level}.core{batch}.{kind}",
-                        level = level.tag,
-                        batch = core.name,
-                    ))
+                let kind_path = |kind: PlotKind, suffix: &str| -> PathBuf {
+                    let leaf = if suffix.is_empty() {
+                        level.tag.clone()
+                    } else {
+                        format!("{}.{}", level.tag, suffix)
+                    };
+                    plot_dir.join(kind.subdir()).join(leaf)
                 };
                 let mut local_emitted: Vec<PathBuf> = Vec::new();
 
@@ -202,7 +244,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     &layers,
                     &frame,
                     args,
-                    &out_stub("community"),
+                    &kind_path(PlotKind::Community, ""),
                     &mut local_emitted,
                 )?;
 
@@ -222,7 +264,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     &layers,
                     &frame,
                     args,
-                    &out_stub("propensity.argmax"),
+                    &kind_path(PlotKind::Propensity, "argmax"),
                     &mut local_emitted,
                 )?;
 
@@ -243,7 +285,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                         &layers,
                         &frame,
                         args,
-                        &out_stub(&format!("propensity.community{kk}")),
+                        &kind_path(PlotKind::Propensity, &format!("community{kk}")),
                         &mut local_emitted,
                     )?;
                 }
@@ -261,7 +303,13 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                             &colors,
                             args.mesh_alpha,
                         )?;
-                        emit_figure(&layers, &frame, args, &out_stub("mesh"), &mut local_emitted)?;
+                        emit_figure(
+                            &layers,
+                            &frame,
+                            args,
+                            &kind_path(PlotKind::Mesh, ""),
+                            &mut local_emitted,
+                        )?;
                     }
                 }
 
@@ -269,7 +317,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                 if args.show_interfaces {
                     match &aligned_entropy {
                         Some(ent) => {
-                            let ifc_stub = out_stub("interfaces");
+                            let ifc_stub = kind_path(PlotKind::Interfaces, "");
                             let edges_only = lc_pair.as_ref().map(|(e, _)| e.as_slice());
                             let written = interfaces::render_interfaces(
                                 args,
@@ -286,10 +334,9 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                         }
                         None => {
                             log::warn!(
-                                "[{}/{}] propensity parquet has no `entropy` column — \
+                                "[{}] propensity parquet has no `entropy` column — \
                                  skipping --show-interfaces; rerun lc/dsvd/prop to populate it",
                                 level.tag,
-                                core.name
                             );
                         }
                     }
@@ -300,10 +347,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     let (gt, gene_names) = match &gene_topic {
                         Some(x) => x,
                         None => {
-                            info!(
-                                "[{}/{}] no gene_topic parquet — skipping markers",
-                                level.tag, core.name
-                            );
+                            info!("[{}] no gene_topic parquet — skipping markers", level.tag);
                             continue;
                         }
                     };
@@ -327,18 +371,12 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                         ccol_ix,
                         &colors,
                         &level.tag,
-                        &core.name,
                         &out_prefix,
                         &mut local_emitted,
                     )?;
                 }
 
-                info!(
-                    "[{}/{}] wrote {} files",
-                    level.tag,
-                    core.name,
-                    local_emitted.len()
-                );
+                info!("[{}] wrote {} files", level.tag, local_emitted.len());
                 emitted.lock().expect("emitted lock").extend(local_emitted);
             }
 
@@ -410,7 +448,8 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                         };
 
                     let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
-                    std::fs::create_dir_all(&plot_dir)?;
+                    let lr_dir = plot_dir.join(PlotKind::Lr.subdir());
+                    std::fs::create_dir_all(&lr_dir)?;
                     let per_core: Vec<Vec<PathBuf>> = cores
                         .par_iter()
                         .map(|core| -> anyhow::Result<Vec<PathBuf>> {
@@ -476,8 +515,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                                 lr_expr.as_ref(),
                                 focal_set.as_ref(),
                                 &hulls_by_community,
-                                &plot_dir,
-                                "lr",
+                                &lr_dir,
                             )
                         })
                         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -558,7 +596,6 @@ fn emit_marker_figures(
     cell_col_index: &HashMap<Box<str>, usize>,
     colors: &ColorBook,
     level_tag: &str,
-    core_name: &str,
     out_prefix: &str,
     emitted: &mut Vec<PathBuf>,
 ) -> anyhow::Result<()> {
@@ -593,7 +630,7 @@ fn emit_marker_figures(
         .collect();
     let present_count = data_col_ixs.iter().filter(|x| x.is_some()).count();
     if present_count == 0 {
-        log::warn!("[{level_tag}/{core_name}] no core cells found in --data; skipping markers");
+        log::warn!("[{level_tag}] no cells found in --data; skipping markers");
         return Ok(());
     }
 
@@ -615,7 +652,7 @@ fn emit_marker_figures(
             args.point_shape,
             args.expr_clip,
         )?;
-        let out_stub = marker_out_path(out_prefix, level_tag, core_name, k, &gname, "heatmap");
+        let out_stub = marker_out_path(out_prefix, level_tag, k, &gname, "heatmap");
         emit_figure(&layers, frame, args, &out_stub, emitted)?;
 
         // (b) Community-colored (argmax color, size ∝ expression)
@@ -631,7 +668,7 @@ fn emit_marker_figures(
             args.size_scale,
             args.expr_clip,
         )?;
-        let out_stub = marker_out_path(out_prefix, level_tag, core_name, k, &gname, "by-community");
+        let out_stub = marker_out_path(out_prefix, level_tag, k, &gname, "by-community");
         emit_figure(&layers, frame, args, &out_stub, emitted)?;
     }
     Ok(())
@@ -640,7 +677,6 @@ fn emit_marker_figures(
 fn marker_out_path(
     out_prefix: &str,
     level_tag: &str,
-    core_name: &str,
     k: usize,
     gname: &str,
     kind: &str,
@@ -653,9 +689,9 @@ fn marker_out_path(
         })
         .collect();
     let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
-    plot_dir.join("markers").join(format!(
-        "{level_tag}.core{core_name}.topic{k}.{safe_gname}.{kind}"
-    ))
+    plot_dir
+        .join(PlotKind::Markers.subdir())
+        .join(format!("{level_tag}.topic{k}.{safe_gname}.{kind}"))
 }
 
 fn write_manifest(out_prefix: &str, emitted: &[PathBuf]) -> anyhow::Result<()> {
