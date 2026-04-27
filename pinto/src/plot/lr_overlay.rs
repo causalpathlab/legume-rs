@@ -38,11 +38,7 @@ pub fn prefetch_lr_expression(
     let mut needed: HashSet<Box<str>> = HashSet::default();
     for r in &lr.results {
         if r.significant {
-            let l = r.ligand_resolved.as_deref().unwrap_or(r.ligand.as_str());
-            let rr = r
-                .receptor_resolved
-                .as_deref()
-                .unwrap_or(r.receptor.as_str());
+            let (l, rr) = r.keys();
             needed.insert(l.to_string().into_boxed_str());
             needed.insert(rr.to_string().into_boxed_str());
         }
@@ -108,6 +104,22 @@ fn default_true() -> bool {
     true
 }
 
+impl LrResult {
+    /// Backend-row-name keys for `(ligand, receptor)`, falling back to
+    /// the raw symbols when `*_resolved` is absent (older sidecars).
+    pub fn keys(&self) -> (&str, &str) {
+        let l = self
+            .ligand_resolved
+            .as_deref()
+            .unwrap_or(self.ligand.as_str());
+        let r = self
+            .receptor_resolved
+            .as_deref()
+            .unwrap_or(self.receptor.as_str());
+        (l, r)
+    }
+}
+
 pub fn load_lr_json(path: &Path) -> anyhow::Result<LrJson> {
     use anyhow::Context;
     let s = std::fs::read_to_string(path).with_context(|| format!("reading {path:?}"))?;
@@ -134,7 +146,7 @@ pub fn render_lr_overlays_for_core(
     lr: &LrJson,
     lr_expr: Option<&LrExpression>,
     focal_cells: Option<&HashSet<usize>>,
-    hulls_by_community: &HashMap<i64, Vec<TopicLayer>>,
+    dominant: Option<&[i64]>,
     out_dir: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let mut emitted = Vec::new();
@@ -147,17 +159,38 @@ pub fn render_lr_overlays_for_core(
         by_id.insert(s.stratum_id, s);
     }
 
+    let core_cell_set: HashSet<usize> = core.cell_ixs.iter().copied().collect();
+
+    // Pooled-across-LR-pairs orientation per edge — see `pooled_orientations`.
+    // Only computed when --data is available; otherwise fall back to
+    // canonical (left → right) inside the per-edge loop.
+    let pooled_orient: HashMap<usize, HashMap<(usize, usize), bool>> = match lr_expr {
+        Some(le_map) => pooled_orientations(lr, le_map, cells, &core_cell_set),
+        None => HashMap::default(),
+    };
+
     // Render every significant result; the per-pair filename carries
     // `B{batch}` to disambiguate cross-batch results in the same dir.
+    // Homotypic pairs (`L == R`, e.g. CADM3-CADM3, PCDHB3-PCDHB3) usually
+    // dominate the top-of-list because adhesion molecules co-aggregate
+    // — drop them by default so heterotypic signaling stays visible.
     let mut sig: Vec<&LrResult> = lr
         .results
         .iter()
-        .filter(|r| r.significant && r.stratum_id.is_some())
+        .filter(|r| {
+            r.significant
+                && r.stratum_id.is_some()
+                && (args.lr_keep_homotypic || r.ligand != r.receptor)
+        })
         .collect();
     if sig.is_empty() {
         return Ok(emitted);
     }
-    // Global top-N by |z|: 16 strata × per-stratum-cap was exhaustive.
+    // Top-N by |z| *per stratum* — a stratum is (batch, community),
+    // matching the test's natural unit. In single-batch runs this
+    // collapses to per-community; in multi-batch runs each (batch,
+    // community) gets its own budget so high-effect batches don't crowd
+    // out their counterparts in other batches.
     sig.sort_by(|a, b| {
         b.z.unwrap_or(0.0)
             .abs()
@@ -165,9 +198,20 @@ pub fn render_lr_overlays_for_core(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     let cap = args.lr_top_pairs.max(1);
-    sig.truncate(cap);
-
-    let core_cell_set: HashSet<usize> = core.cell_ixs.iter().copied().collect();
+    let mut per_stratum: HashMap<usize, usize> = HashMap::default();
+    sig.retain(|r| {
+        let sid = match r.stratum_id {
+            Some(s) => s,
+            None => return false,
+        };
+        let n = per_stratum.entry(sid).or_insert(0);
+        if *n < cap {
+            *n += 1;
+            true
+        } else {
+            false
+        }
+    });
 
     // Single background layer: faint hex tiling of every core cell so the
     // tissue shape is visible. No focal-cell underlay — arrows are the
@@ -193,6 +237,7 @@ pub fn render_lr_overlays_for_core(
         color: (225, 225, 225),
     };
 
+    let mut empty_strata = 0usize;
     for r in sig.into_iter() {
         let sid = match r.stratum_id {
             Some(s) => s,
@@ -202,19 +247,20 @@ pub fn render_lr_overlays_for_core(
             Some(s) => *s,
             None => continue,
         };
+        if stratum.edges.is_empty() {
+            empty_strata += 1;
+            continue;
+        }
 
         // Per-edge ligand-expression and receptor-expression vectors when
         // we have --data; otherwise fall back to canonical (left → right).
-        let l_key = r.ligand_resolved.as_deref().unwrap_or(r.ligand.as_str());
-        let r_key = r
-            .receptor_resolved
-            .as_deref()
-            .unwrap_or(r.receptor.as_str());
+        let (l_key, r_key) = r.keys();
         let l_expr = lr_expr.and_then(|m| m.get(l_key));
         let r_expr = lr_expr.and_then(|m| m.get(r_key));
 
         // Build full-edge arrows + per-edge coexpression scores.
         let mut segs: Vec<(Pt, Pt)> = Vec::new();
+        let mut seg_cells: Vec<(usize, usize)> = Vec::new();
         let mut coexpr: Vec<f32> = Vec::new();
         for (l_name, r_name) in &stratum.edges {
             let li = match cells.index.get(l_name) {
@@ -240,15 +286,21 @@ pub fn render_lr_overlays_for_core(
                     let r_ri = re.get(ri).copied().unwrap_or(0.0);
                     let l_ri = le.get(ri).copied().unwrap_or(0.0);
                     let r_li = re.get(li).copied().unwrap_or(0.0);
-                    let canon = l_li + r_ri;
-                    let rev = l_ri + r_li;
-                    if canon == 0.0 && rev == 0.0 {
+                    if l_li + r_ri == 0.0 && l_ri + r_li == 0.0 {
                         continue;
                     }
-                    if rev > canon {
-                        (ri, li, (l_ri.max(0.0) * r_li.max(0.0)).sqrt())
-                    } else {
+                    // Use the pooled per-stratum direction when we have
+                    // it; per-pair L+R sum is the fallback when this
+                    // stratum had no orientation entry for this edge
+                    // (e.g. edge dropped from the orientation pool).
+                    let use_canon = match pooled_orient.get(&sid).and_then(|m| m.get(&(li, ri))) {
+                        Some(&v) => v,
+                        None => (l_li + r_ri) >= (l_ri + r_li),
+                    };
+                    if use_canon {
                         (li, ri, (l_li.max(0.0) * r_ri.max(0.0)).sqrt())
+                    } else {
+                        (ri, li, (l_ri.max(0.0) * r_li.max(0.0)).sqrt())
                     }
                 }
                 _ => (li, ri, f32::NAN),
@@ -257,9 +309,10 @@ pub fn render_lr_overlays_for_core(
             let p_src = frame.bounds.to_pixel(cells.coords[src], frame.extent);
             let p_dst = frame.bounds.to_pixel(cells.coords[dst], frame.extent);
             segs.push((p_src, p_dst));
+            seg_cells.push((src, dst));
             coexpr.push(ce_raw);
         }
-        if segs.is_empty() {
+        if segs.len() < args.lr_min_edges {
             continue;
         }
         // Center on the per-pair empirical mean over edges so the
@@ -282,18 +335,60 @@ pub fn render_lr_overlays_for_core(
             }
         }
 
-        // Consistent visual size across edges; per-edge color carries the
-        // coexpression magnitude.
-        let stroke = 2.5f32;
-        let head_len = 11.0f32;
-        let arrow_layers = build_coexpr_arrow_layers(
-            &segs,
-            &coexpr,
-            frame.extent,
-            stroke,
-            head_len,
-            args.lr_coexpr_bins,
-        )?;
+        // Thin shaft + sharper, slightly longer head reads as a clean
+        // directional glyph at slide scale. Per-edge color depends on
+        // --lr-color-mode.
+        let stroke = 1.0f32;
+        let head_len = 13.0f32;
+        let arrow_layers = match args.lr_color_mode {
+            crate::plot::args::LrColorMode::LogRatio => {
+                // log((R + 1) / (L + 1)) — receptor over ligand.
+                // Positive (red): R ≫ L → ligand-limited regime; signal
+                //   scales ~linearly with ligand, the "activating" /
+                //   sensitive direction.
+                // Negative (blue): L ≫ R → receptor-saturation plateau;
+                //   adding ligand does little, signal capped by R.
+                let lr_log: Vec<f32> = seg_cells
+                    .iter()
+                    .map(|&(src, dst)| {
+                        let l_at_src = l_expr
+                            .and_then(|v| v.get(src).copied())
+                            .unwrap_or(0.0)
+                            .max(0.0);
+                        let r_at_dst = r_expr
+                            .and_then(|v| v.get(dst).copied())
+                            .unwrap_or(0.0)
+                            .max(0.0);
+                        ((r_at_dst + 1.0).ln()) - ((l_at_src + 1.0).ln())
+                    })
+                    .collect();
+                build_diverging_arrow_layers(
+                    &segs,
+                    &lr_log,
+                    frame.extent,
+                    stroke,
+                    head_len,
+                    args.lr_coexpr_bins,
+                )?
+            }
+            crate::plot::args::LrColorMode::Coexpr => build_diverging_arrow_layers(
+                &segs,
+                &coexpr,
+                frame.extent,
+                stroke,
+                head_len,
+                args.lr_coexpr_bins,
+            )?,
+            crate::plot::args::LrColorMode::Direction => build_direction_arrow_layers(
+                &segs,
+                &seg_cells,
+                dominant,
+                r.community as i64,
+                frame.extent,
+                stroke,
+                head_len,
+            )?,
+        };
 
         let stub = out_dir.join(format!(
             "B{}.C{}.{}-{}",
@@ -311,12 +406,7 @@ pub fn render_lr_overlays_for_core(
             r.z.unwrap_or(f32::NAN),
             r.fwer_wy.unwrap_or(f32::NAN),
         );
-        let pair_hulls: &[TopicLayer] = hulls_by_community
-            .get(&(r.community as i64))
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        let mut layers: Vec<TopicLayer> =
-            Vec::with_capacity(1 + arrow_layers.len() + pair_hulls.len());
+        let mut layers: Vec<TopicLayer> = Vec::with_capacity(1 + arrow_layers.len());
         layers.push(bg_layer.clone());
         for (i, l) in arrow_layers.into_iter().enumerate() {
             let mut tl = l;
@@ -325,19 +415,28 @@ pub fn render_lr_overlays_for_core(
             }
             layers.push(tl);
         }
-        layers.extend(pair_hulls.iter().cloned());
         emit_figure(&layers, frame, args, &stub, &mut emitted, false)?;
+    }
+
+    if emitted.is_empty() && empty_strata > 0 {
+        log::warn!(
+            "lr-overlay: 0 figures rendered. {empty_strata} of the top \
+             significant pairs reference strata with no edges in the JSON \
+             — re-run `pinto lr-activity` to regenerate the sidecar."
+        );
     }
 
     Ok(emitted)
 }
 
-/// Bin per-edge coexpression scores and rasterize one arrow layer per
-/// bin so each gets a distinct color from the red↔blue ramp (high
-/// coexpression → red, low → blue). NaN coexpression → bin 0.
-fn build_coexpr_arrow_layers(
+/// Bin per-edge values onto a diverging red↔blue ramp (positive = red,
+/// negative = blue). Values are pre-centered by the caller (per-pair
+/// mean for `LrColorMode::Coexpr`, or 0 by definition for
+/// `LrColorMode::LogRatio`). Symmetric scaling via a 98th-percentile
+/// clip on `|values|`; non-finite values land in the mid-bin.
+fn build_diverging_arrow_layers(
     segs: &[(Pt, Pt)],
-    coexpr: &[f32],
+    values: &[f32],
     ext: plot_utils::rasterize::Extent,
     stroke_px: f32,
     head_len_px: f32,
@@ -345,10 +444,7 @@ fn build_coexpr_arrow_layers(
 ) -> anyhow::Result<Vec<TopicLayer>> {
     let bins = bins.max(2);
 
-    // Diverging scale centered at zero — `coexpr` has already been
-    // mean-subtracted by the caller, so 0 = "typical edge of this pair".
-    // Symmetric scale via robust |.| max so red and blue carry equal weight.
-    let mut abs: Vec<f32> = coexpr
+    let mut abs: Vec<f32> = values
         .iter()
         .copied()
         .filter(|x| x.is_finite())
@@ -366,7 +462,7 @@ fn build_coexpr_arrow_layers(
     let mut by_bin: Vec<Vec<(Pt, Pt)>> = (0..bins).map(|_| Vec::new()).collect();
     let half = bins as f32 * 0.5;
     for (i, &seg) in segs.iter().enumerate() {
-        let v = coexpr.get(i).copied().unwrap_or(f32::NAN);
+        let v = values.get(i).copied().unwrap_or(f32::NAN);
         let b = if !v.is_finite() {
             (bins / 2).min(bins - 1)
         } else {
@@ -394,6 +490,161 @@ fn build_coexpr_arrow_layers(
     Ok(layers)
 }
 
+/// Color arrows by their relation to the pair's community hull.
+/// Each edge falls into exactly one of four classes:
+///
+/// * **Outgoing** — sender is in the community, receiver is not
+///   (signal leaving the community).
+/// * **Incoming** — receiver is in the community, sender is not
+///   (signal entering the community).
+/// * **Internal** — both endpoints sit inside the community
+///   (signal staying within the hull).
+/// * **External** — neither endpoint is in the community (rare for
+///   significant edges, since the stratum's edges are by definition
+///   community-incident, but possible when both endpoints are
+///   "uncommitted" boundary cells with a different argmax).
+///
+/// One [`TopicLayer`] per non-empty class; the legend label on each
+/// layer is "out" / "in" / "internal" / "ext" so the figure's title
+/// row carries a small directional key.
+fn build_direction_arrow_layers(
+    segs: &[(Pt, Pt)],
+    seg_cells: &[(usize, usize)],
+    dominant: Option<&[i64]>,
+    target_community: i64,
+    ext: plot_utils::rasterize::Extent,
+    stroke_px: f32,
+    head_len_px: f32,
+) -> anyhow::Result<Vec<TopicLayer>> {
+    // (label, color) buckets; deterministic, slide-friendly palette.
+    let buckets: [(&str, (u8, u8, u8)); 4] = [
+        ("internal", (90, 90, 90)), // gray — within the hull
+        ("out", (215, 70, 50)),     // red-ish — leaving the hull
+        ("in", (40, 100, 200)),     // blue-ish — entering the hull
+        ("ext", (180, 180, 180)),   // light gray — neither endpoint in hull
+    ];
+    let mut by_class: [Vec<(Pt, Pt)>; 4] = Default::default();
+
+    for (i, &seg) in segs.iter().enumerate() {
+        let (src, dst) = seg_cells[i];
+        let src_in = dominant
+            .and_then(|d| d.get(src).copied())
+            .map(|c| c == target_community)
+            .unwrap_or(false);
+        let dst_in = dominant
+            .and_then(|d| d.get(dst).copied())
+            .map(|c| c == target_community)
+            .unwrap_or(false);
+        let class = match (src_in, dst_in) {
+            (true, true) => 0,   // internal
+            (true, false) => 1,  // out
+            (false, true) => 2,  // in
+            (false, false) => 3, // external
+        };
+        by_class[class].push(seg);
+    }
+
+    let mut layers: Vec<TopicLayer> = Vec::new();
+    for (class, segs_class) in by_class.into_iter().enumerate() {
+        if segs_class.is_empty() {
+            continue;
+        }
+        let (label, color) = buckets[class];
+        let png = rasterize_arrow_layer_png(&segs_class, ext, stroke_px, head_len_px, color, 0.9)?;
+        layers.push(TopicLayer {
+            label: label.to_string(),
+            png,
+            hull_px: Vec::new(),
+            label_xy_px: (f32::NAN, f32::NAN),
+            color,
+        });
+    }
+    Ok(layers)
+}
+
+/// Per-stratum, per-edge orientation pooled across every significant
+/// LR pair in the stratum. For edge (i, j), accumulates
+///   Σ_p (log1p(L_p[i]·R_p[j]) - log1p(L_p[j]·R_p[i]))
+/// over all significant pairs `p` in the stratum and returns `true`
+/// (= canonical, i → j) when the sum is non-negative. The log1p
+/// damps single-pair outliers — the part of MI that matters for
+/// direction is preserved, but no individual pair can dictate the
+/// answer. Edges with no expression support across any pair are
+/// omitted from the map (caller falls back to per-pair L+R sum).
+fn pooled_orientations(
+    lr: &LrJson,
+    le_map: &LrExpression,
+    cells: &CellTable,
+    core_cell_set: &HashSet<usize>,
+) -> HashMap<usize, HashMap<(usize, usize), bool>> {
+    let mut by_stratum: HashMap<usize, Vec<&LrResult>> = HashMap::default();
+    for r in &lr.results {
+        if !r.significant {
+            continue;
+        }
+        if let Some(sid) = r.stratum_id {
+            by_stratum.entry(sid).or_default().push(r);
+        }
+    }
+    let strata_by_id: HashMap<usize, &LrStratum> =
+        lr.strata.iter().map(|s| (s.stratum_id, s)).collect();
+
+    let mut out: HashMap<usize, HashMap<(usize, usize), bool>> = HashMap::default();
+    for (sid, results) in by_stratum {
+        let stratum = match strata_by_id.get(&sid) {
+            Some(s) => *s,
+            None => continue,
+        };
+        // Resolve each pair's (l_vec, r_vec) once per stratum; the inner
+        // edge loop then indexes the vectors instead of re-hashing
+        // Box<str> keys per (edge × pair).
+        let pair_vecs: Vec<(&Vec<f32>, &Vec<f32>)> = results
+            .iter()
+            .filter_map(|r| {
+                let (l_key, r_key) = r.keys();
+                Some((le_map.get(l_key)?, le_map.get(r_key)?))
+            })
+            .collect();
+        if pair_vecs.is_empty() {
+            continue;
+        }
+        let mut dirs: HashMap<(usize, usize), bool> = HashMap::default();
+        for (l_name, r_name) in &stratum.edges {
+            let li = match cells.index.get(l_name) {
+                Some(&i) if core_cell_set.contains(&i) => i,
+                _ => continue,
+            };
+            let ri = match cells.index.get(r_name) {
+                Some(&i) if core_cell_set.contains(&i) => i,
+                _ => continue,
+            };
+            let mut score = 0.0f64;
+            let mut any_signal = false;
+            for (l_vec, r_vec) in &pair_vecs {
+                let l_at_li = l_vec.get(li).copied().unwrap_or(0.0).max(0.0);
+                let r_at_ri = r_vec.get(ri).copied().unwrap_or(0.0).max(0.0);
+                let l_at_ri = l_vec.get(ri).copied().unwrap_or(0.0).max(0.0);
+                let r_at_li = r_vec.get(li).copied().unwrap_or(0.0).max(0.0);
+                let canon = (l_at_li * r_at_ri) as f64;
+                let rev = (l_at_ri * r_at_li) as f64;
+                if canon > 0.0 || rev > 0.0 {
+                    any_signal = true;
+                    score += (1.0 + canon).ln() - (1.0 + rev).ln();
+                }
+            }
+            if any_signal {
+                dirs.insert((li, ri), score >= 0.0);
+            }
+        }
+        if !dirs.is_empty() {
+            out.insert(sid, dirs);
+        }
+    }
+    out
+}
+
+/// Bin per-edge coexpression scores and rasterize one arrow layer per
+/// bin so each gets a distinct color from the red↔blue ramp (high
 fn red_blue_bin(bin: usize, bins: usize) -> (u8, u8, u8) {
     let t = (bin as f32) / ((bins.saturating_sub(1)).max(1) as f32);
     let stops: [(f32, (u8, u8, u8)); 3] = [
