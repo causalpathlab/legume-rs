@@ -66,6 +66,8 @@ pub struct SparseMtxData {
     by_row_indptr: Vec<u64>,
     by_column_indices: Option<Vec<u64>>,
     by_column_data: Option<Vec<f32>>,
+    by_row_indices: Option<Vec<u64>>,
+    by_row_data: Option<Vec<f32>>,
     /// Persistent decoded-chunk LRU caches. `Arc<OnceLock<_>>` so that
     /// `Clone`s share state, and the underlying `moka::sync::Cache` inside
     /// `ChunkCacheDecodedLruChunkLimit` is internally thread-safe — no
@@ -133,6 +135,8 @@ impl SparseMtxData {
             by_row_indptr: vec![],
             by_column_indices: None,
             by_column_data: None,
+            by_row_indices: None,
+            by_row_data: None,
             by_column_data_cache: Arc::new(OnceLock::new()),
             by_column_indices_cache: Arc::new(OnceLock::new()),
             by_row_data_cache: Arc::new(OnceLock::new()),
@@ -246,6 +250,8 @@ impl SparseMtxData {
             by_row_indptr: vec![],
             by_column_indices: None,
             by_column_data: None,
+            by_row_indices: None,
+            by_row_data: None,
             by_column_data_cache: Arc::new(OnceLock::new()),
             by_column_indices_cache: Arc::new(OnceLock::new()),
             by_row_data_cache: Arc::new(OnceLock::new()),
@@ -623,6 +629,26 @@ impl SparseIo for SparseMtxData {
 
         self.by_column_indices = Some(indices);
         self.by_column_data = Some(data);
+        Ok(())
+    }
+
+    fn clean_preloaded_rows(&mut self) {
+        self.by_row_data = None;
+        self.by_row_indices = None;
+    }
+
+    /// preload rows' values and indices
+    fn preload_rows(&mut self) -> anyhow::Result<()> {
+        use zarrs::array::Array as ZArray;
+
+        let data = ZArray::open(self.read_store.clone(), KEY_BY_ROW_DATA)?;
+        let indices = ZArray::open(self.read_store.clone(), KEY_BY_ROW_INDICES)?;
+
+        let data = data.retrieve_array_subset::<Vec<f32>>(&data.subset_all())?;
+        let indices = indices.retrieve_array_subset::<Vec<u64>>(&indices.subset_all())?;
+
+        self.by_row_indices = Some(indices);
+        self.by_row_data = Some(data);
         Ok(())
     }
 
@@ -1009,6 +1035,31 @@ impl SparseIo for SparseMtxData {
             _ => return Err(anyhow!("Unable to figure out the size of the backend data")),
         };
         let nrow_out = rows_vec.len();
+
+        if let (Some(data), Some(indices)) = (&self.by_row_data, &self.by_row_indices) {
+            let mut nnz_total: usize = 0;
+            let valid: Vec<(u64, usize)> = rows_vec
+                .iter()
+                .enumerate()
+                .filter_map(|(ii, &i_data)| {
+                    if i_data >= nrow {
+                        return None;
+                    }
+                    nnz_total += (indptr[i_data + 1] - indptr[i_data]) as usize;
+                    Some((ii as u64, i_data))
+                })
+                .collect();
+
+            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity(nnz_total);
+            for (ii, i_data) in valid {
+                let start = indptr[i_data] as usize;
+                let end = indptr[i_data + 1] as usize;
+                for (&jj, &x_ij) in indices[start..end].iter().zip(data[start..end].iter()) {
+                    ret.push((ii, jj, x_ij));
+                }
+            }
+            return Ok((nrow_out, ncol, ret));
+        }
 
         // CSR: tag = output row, inner = column.
         let mut tagged: Vec<(u64, u64, u64)> = rows_vec

@@ -27,8 +27,16 @@ pub struct SparseIoVec {
     row_name_position: HashMap<Box<str>, usize>,
     row_names_by_global: Vec<Box<str>>,
     data_local_to_global_row: Vec<Vec<usize>>,
+    /// Per-backend inverse of `data_local_to_global_row[didx]`.
+    /// Built once at `push` time, never mutated thereafter, so row reads
+    /// don't have to rebuild it per call.
+    data_global_to_local_row: Vec<HashMap<usize, usize>>,
     row_count_by_global: Vec<usize>,
     global_to_compact_row: Vec<Option<usize>>,
+    /// Inverse of `global_to_compact_row` restricted to compact rows.
+    /// `compact_to_global_row[c]` is the raw-global index for compact `c`.
+    /// Kept in sync with `global_to_compact_row` whenever it changes.
+    compact_to_global_row: Vec<usize>,
     column_names_with_data_tag: Vec<Box<str>>,
     col_to_group: Option<HashMap<usize, usize>>,
     group_to_cols: Option<Vec<Vec<usize>>>,
@@ -76,8 +84,10 @@ impl SparseIoVec {
             row_name_position: HashMap::default(),
             row_names_by_global: vec![],
             data_local_to_global_row: vec![],
+            data_global_to_local_row: vec![],
             row_count_by_global: vec![],
             global_to_compact_row: vec![],
+            compact_to_global_row: vec![],
             column_names_with_data_tag: vec![],
             col_to_group: None,
             group_to_cols: None,
@@ -255,6 +265,12 @@ impl SparseIoVec {
             for &g in &local_to_global {
                 self.row_count_by_global[g] += 1;
             }
+            let mut g2l: HashMap<usize, usize> =
+                HashMap::with_capacity_and_hasher(local_to_global.len(), Default::default());
+            for (l, &g) in local_to_global.iter().enumerate() {
+                g2l.insert(g, l);
+            }
+            self.data_global_to_local_row.push(g2l);
             self.data_local_to_global_row.push(local_to_global);
 
             self.data_vec.push(data.clone());
@@ -282,11 +298,13 @@ impl SparseIoVec {
 
         self.global_to_compact_row.clear();
         self.global_to_compact_row.resize(n_global, None);
+        self.compact_to_global_row.clear();
 
         let mut next_compact = 0usize;
         for g in 0..n_global {
             if self.row_count_by_global[g] == n_datasets {
                 self.global_to_compact_row[g] = Some(next_compact);
+                self.compact_to_global_row.push(g);
                 next_compact += 1;
             }
         }
@@ -431,6 +449,102 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let ((nrow, ncol), triplets) = self.columns_triplets(cells)?;
+        Tensor::from_nonzero_triplets(nrow, ncol, &triplets)
+    }
+
+    /// Build (shape, triplets) for the requested compact rows across
+    /// all backends. Output column index is the SparseIoVec-global
+    /// column (concatenation of backends in push order); output row
+    /// index is the position in `rows`.
+    #[allow(clippy::type_complexity)]
+    pub fn rows_triplets<I>(
+        &self,
+        rows: I,
+    ) -> anyhow::Result<((usize, usize), Vec<(u64, u64, f32)>)>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let rows_compact: Vec<usize> = rows.collect();
+        let nrow_out = rows_compact.len();
+        let ncol_out = self.num_columns();
+
+        let n_compact = self.cached_num_rows;
+        let compact_to_global = self.compact_to_global_row.as_slice();
+
+        let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
+        let mut local_to_out: Vec<usize> = Vec::with_capacity(rows_compact.len());
+        for didx in 0..self.data_vec.len() {
+            let g2l = &self.data_global_to_local_row[didx];
+
+            local_to_out.clear();
+            let mut local_rows: Vec<usize> = Vec::with_capacity(rows_compact.len());
+            for (out_row, &c) in rows_compact.iter().enumerate() {
+                if c >= n_compact {
+                    continue;
+                }
+                let g = compact_to_global[c];
+                if let Some(&l) = g2l.get(&g) {
+                    local_rows.push(l);
+                    local_to_out.push(out_row);
+                }
+            }
+            if local_rows.is_empty() {
+                continue;
+            }
+
+            let (_, _, group_triplets) = self.data_vec[didx].read_triplets_by_rows(local_rows)?;
+            let cols_map = self
+                .data_to_cols
+                .get(&didx)
+                .ok_or_else(|| anyhow::anyhow!("missing data_to_cols entry for didx {}", didx))?;
+            triplets.reserve(group_triplets.len());
+            for (i, j, v) in group_triplets {
+                let out_row = local_to_out[i as usize] as u64;
+                let out_col = cols_map[j as usize] as u64;
+                triplets.push((out_row, out_col, v));
+            }
+        }
+
+        Ok(((nrow_out, ncol_out), triplets))
+    }
+
+    pub fn read_rows_ndarray<I>(&self, rows: I) -> anyhow::Result<ndarray::Array2<f32>>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets) = self.rows_triplets(rows)?;
+        ndarray::Array2::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
+    }
+
+    pub fn read_rows_dmatrix<I>(&self, rows: I) -> anyhow::Result<nalgebra::DMatrix<f32>>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets) = self.rows_triplets(rows)?;
+        DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
+    }
+
+    pub fn read_rows_csc<I>(&self, rows: I) -> anyhow::Result<CscMatrix<f32>>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets) = self.rows_triplets(rows)?;
+        nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
+    }
+
+    pub fn read_rows_csr<I>(&self, rows: I) -> anyhow::Result<CsrMatrix<f32>>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets) = self.rows_triplets(rows)?;
+        nalgebra_sparse::CsrMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
+    }
+
+    pub fn read_rows_tensor<I>(&self, rows: I) -> anyhow::Result<Tensor>
+    where
+        I: Iterator<Item = usize>,
+    {
+        let ((nrow, ncol), triplets) = self.rows_triplets(rows)?;
         Tensor::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
@@ -1356,6 +1470,13 @@ impl SparseIoVec {
             *entry = entry.and_then(|old_compact| old_to_new[old_compact]);
         }
         self.cached_num_rows = next;
+        self.compact_to_global_row.clear();
+        self.compact_to_global_row.resize(next, 0);
+        for (g, &c_opt) in self.global_to_compact_row.iter().enumerate() {
+            if let Some(c) = c_opt {
+                self.compact_to_global_row[c] = g;
+            }
+        }
         log::info!(
             "mask_rows: {} → {} rows ({} excluded)",
             n_compact,

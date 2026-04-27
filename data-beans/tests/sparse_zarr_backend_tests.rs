@@ -181,6 +181,21 @@ fn rows_sparse_with_gaps_and_duplicates() -> anyhow::Result<()> {
 }
 
 #[test]
+fn rows_preload_and_zarr_paths_agree() -> anyhow::Result<()> {
+    let raw = Array2::<f32>::runif(15, 7);
+    let sel = vec![1, 4, 4, 9, 0, 14];
+
+    let zarr_only = make_sparse_no_preload(&raw);
+    let mut preloaded = create_sparse_from_ndarray(&raw, None, None)?;
+    preloaded.preload_rows()?;
+
+    let (_, _, t_zarr) = zarr_only.read_triplets_by_rows(sel.clone())?;
+    let (_, _, t_pre) = preloaded.read_triplets_by_rows(sel.clone())?;
+    assert_triplets_match(t_zarr, t_pre);
+    Ok(())
+}
+
+#[test]
 fn rows_reversed() -> anyhow::Result<()> {
     let raw = Array2::<f32>::runif(10, 5);
     let sp = make_sparse_no_preload(&raw);
