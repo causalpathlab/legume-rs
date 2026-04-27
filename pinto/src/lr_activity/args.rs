@@ -1,6 +1,5 @@
 //! CLI arguments for the `pinto lr-activity` subcommand.
 
-use crate::lr_activity::matcher::NullScheme;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
@@ -34,43 +33,46 @@ pub struct SrtLrActivityArgs {
 
     #[arg(
         long,
-        default_value_t = 500,
-        help = "Number of matched decoy gene pairs per real LR pair"
+        default_value_t = 10,
+        help = "Random-projection dimension for propensity binary-sort (samples ≈ batches × 2^d)",
+        long_help = "Number of random-projection axes used to assign each cell to a\n\
+                     propensity bin via binary sort. Each batch gets up to 2^d bins;\n\
+                     pseudobulk samples are (batch × propensity-bin) combinations.\n\
+                     Defaults to 10 (≈1024 bins per batch, typical practice). Larger\n\
+                     d → finer pseudobulk resolution and more permutation power, at\n\
+                     the cost of fewer cells per pseudobulk; d=12 (~4096 bins) starts\n\
+                     to make per-sample pseudobulks too sparse on Visium-scale data."
     )]
-    pub n_null: usize,
+    pub propensity_dim: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1000,
+        help = "Number of sample permutations for the null distribution"
+    )]
+    pub n_permutations: usize,
 
     #[arg(
         long,
         default_value_t = 4,
-        help = "Quantile bins for L and R in the H(R|L) estimator"
+        help = "Number of top propensity bits to stratify the shuffle by (0 = unstratified)",
+        long_help = "Sample permutation reshuffles L only within sample groups\n\
+                     sharing the top --shuffle-stratify-dim bits of the propensity\n\
+                     binary code, preserving the cell-population marginal across\n\
+                     permutations. Without it, free shuffles across populations\n\
+                     pick up cell-type-marginal correlations and become\n\
+                     anti-conservative.\n\
+                     \n\
+                     Default 4 → 16 stratification buckets, holding 2^(d−4) samples\n\
+                     each (e.g. ~64 samples/bucket at d=10). Pick s ≤ d − 3 so each\n\
+                     bucket retains ≥ ~8 samples. 0 disables stratification."
     )]
-    pub n_bins: usize,
-
-    #[arg(
-        long,
-        default_value_t = 20,
-        help = "Minimum edges per connected component to keep in the test"
-    )]
-    pub min_cc_edges: usize,
-
-    #[arg(
-        long,
-        default_value_t = 0.25,
-        help = "Relative tolerance for mean-expression matching of decoys (fraction of pooled σ)"
-    )]
-    pub expr_tol: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0.10,
-        help = "Absolute tolerance for global Moran's I matching of decoys"
-    )]
-    pub moran_tol: f32,
+    pub shuffle_stratify_dim: usize,
 
     #[arg(
         long,
         default_value_t = 50.0,
-        help = "Minimum total count for a gene to enter the decoy candidate pool"
+        help = "Minimum total count for a real LR gene's pair to be tested"
     )]
     pub min_gene_count: f32,
 
@@ -105,22 +107,4 @@ pub struct SrtLrActivityArgs {
         help = "BH q-value threshold for including a pair's edge participation in the JSON sidecar"
     )]
     pub json_q_threshold: f32,
-
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = NullScheme::Mixed,
-        help = "Null scheme: swap both / ligand-only / receptor-only / mixed (default)",
-        long_help = "How decoy pairs are drawn for the gene-swap null:\n\
-                     \x20 both     — swap both ligand and receptor to matched decoys\n\
-                     \x20 ligand   — swap ligand only; receptor stays as the real R\n\
-                     \x20 receptor — swap receptor only; ligand stays as the real L\n\
-                     \x20 mixed    — draw n_null/3 from each and concatenate (default)\n\
-                     \n\
-                     ligand-only and receptor-only nulls test whether the specific\n\
-                     identity of the swapped gene matters given the real counterpart;\n\
-                     both-swap is a stricter composite. The mixed default catches any\n\
-                     of these deviations from the (L, R) identity."
-    )]
-    pub null_scheme: NullScheme,
 }
