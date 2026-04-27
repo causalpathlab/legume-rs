@@ -336,10 +336,77 @@ pub fn read_link_community(path: &Path) -> anyhow::Result<(Vec<EdgePair>, Vec<i6
 }
 
 /// Read a gene_community parquet: G × K. Returns (mat, gene_names).
+///
+/// `pinto lc` writes this file in *melted* form (one row per
+/// gene-community pair, with columns `gene`, `community`, `mean`, `sd`,
+/// `log_mean`, `log_sd`). We pivot the `mean` column back to a wide
+/// G × K matrix here so downstream code can index `gt[(g, k)]` as
+/// "posterior mean for gene g in community k". Communities are sorted
+/// numerically by their string label (the writer emits `"0".."K-1"`).
 pub fn read_gene_community(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> {
-    let MatWithNames { rows, mat, .. } = Mat::from_parquet(
-        path.to_str()
-            .ok_or_else(|| anyhow::anyhow!("non-UTF8 path: {path:?}"))?,
-    )?;
-    Ok((mat, rows))
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-UTF8 path: {path:?}"))?;
+    let file = File::open(path_str)?;
+    let reader = SerializedFileReader::new(file)?;
+    let schema = reader.metadata().file_metadata().schema();
+    let name_to_idx: HashMap<Box<str>, usize> = schema
+        .get_fields()
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.name().to_string().into_boxed_str(), i))
+        .collect();
+    let gene_idx = *name_to_idx
+        .get("gene")
+        .ok_or_else(|| anyhow::anyhow!("{path_str}: missing `gene` column"))?;
+    let community_idx = *name_to_idx
+        .get("community")
+        .ok_or_else(|| anyhow::anyhow!("{path_str}: missing `community` column"))?;
+    let mean_idx = *name_to_idx
+        .get("mean")
+        .ok_or_else(|| anyhow::anyhow!("{path_str}: missing `mean` column"))?;
+
+    let mut gene_pos: HashMap<Box<str>, usize> = HashMap::default();
+    let mut gene_names: Vec<Box<str>> = Vec::new();
+    let mut community_pos: HashMap<Box<str>, usize> = HashMap::default();
+    let mut community_labels: Vec<Box<str>> = Vec::new();
+    let mut triples: Vec<(usize, usize, f32)> = Vec::new();
+
+    for record in reader.get_row_iter(None)? {
+        let row = record?;
+        let gene = row.get_string(gene_idx)?.clone().into_boxed_str();
+        let community = row.get_string(community_idx)?.clone().into_boxed_str();
+        let mean = row
+            .get_float(mean_idx)
+            .or_else(|_| row.get_double(mean_idx).map(|v| v as f32))?;
+        let g_pos = *gene_pos.entry(gene.clone()).or_insert_with(|| {
+            gene_names.push(gene.clone());
+            gene_names.len() - 1
+        });
+        let c_pos = *community_pos.entry(community.clone()).or_insert_with(|| {
+            community_labels.push(community.clone());
+            community_labels.len() - 1
+        });
+        triples.push((g_pos, c_pos, mean));
+    }
+
+    // Sort communities numerically by their string label so column k
+    // in the returned matrix corresponds to community `k` in the
+    // propensity parquet (writer emits "0".."K-1").
+    let mut col_order: Vec<usize> = (0..community_labels.len()).collect();
+    col_order.sort_by_key(|&i| community_labels[i].parse::<i64>().unwrap_or(i64::MAX));
+    let new_index: HashMap<usize, usize> = col_order
+        .iter()
+        .enumerate()
+        .map(|(new_i, &old_i)| (old_i, new_i))
+        .collect();
+
+    let n_genes = gene_names.len();
+    let n_communities = community_labels.len();
+    let mut mat = Mat::zeros(n_genes, n_communities);
+    for (g, c_old, v) in triples {
+        let c_new = new_index[&c_old];
+        mat[(g, c_new)] = v;
+    }
+    Ok((mat, gene_names))
 }

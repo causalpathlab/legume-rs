@@ -1052,7 +1052,14 @@ fn stratum_entry(
         .filter(|(_, _, k, b)| {
             *k == community_filter
                 && match batch_filter {
-                    Some(bf) => b.as_ref().map(|s| s.as_ref()) == Some(bf),
+                    // Edges left unbatched (no `batch` column in coord_pairs)
+                    // are matched by the synthetic `BATCH_LABEL_ALL` stratum
+                    // — `derive_cell_batch_labels` already gave those cells
+                    // that label, so the per-edge filter has to agree.
+                    Some(bf) => match b.as_ref().map(|s| s.as_ref()) {
+                        Some(eb) => eb == bf,
+                        None => bf == BATCH_LABEL_ALL,
+                    },
                     None => true,
                 }
         })

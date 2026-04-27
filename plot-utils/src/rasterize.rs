@@ -306,9 +306,9 @@ pub fn rasterize_arrow_layer_png(
     };
 
     let head_len = head_len_px.max(1.0);
-    // Slim arrowhead: half-width 35% of length → ~38° tip angle, more
-    // arrow-like than the previous 57°-tip stub.
-    let head_half_w = (head_len * 0.35).max(0.4);
+    // Sharp arrowhead: half-width 22% of length → ~25° tip angle, reads
+    // as a directional arrow at slide scale.
+    let head_half_w = (head_len * 0.22).max(0.4);
 
     let mut shafts = PathBuilder::new();
     let mut heads = PathBuilder::new();
