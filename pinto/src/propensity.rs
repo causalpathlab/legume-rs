@@ -318,7 +318,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         gamma_param.to_melted_parquet(
             &(args.out.to_string() + ".genes.parquet"),
             (Some(&genes), Some("gene")),
-            (None, Some("topic")),
+            (None, Some("community")),
         )?;
     }
 

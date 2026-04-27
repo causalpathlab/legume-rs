@@ -126,7 +126,7 @@ enum Commands {
                       - {out}.latent.parquet: per-pair latent codes (E x T)\n\
                       - {out}.propensity.parquet: cell propensity (N x K)\n\
                       \x20 Columns: 0 .. K-1, cluster (argmax), entropy (Shannon, nats).\n\
-                      - {out}.gene_topic.parquet: gene-topic Poisson-Gamma statistics (G x K).\n\
+                      - {out}.gene_community.parquet: gene-community Poisson-Gamma statistics (G x K).\n\
                       \x20 Housekeeping-adjusted by default (row-scaled by 1/(bg[g]+ε));\n\
                       \x20 pass --no-adjust-housekeeping for raw rates\n\
                       - {out}.metadata.json: information-flow manifest used by\n\
@@ -219,13 +219,13 @@ enum Commands {
                       \x20 5. Build sparse edge profiles (projection or module-pair residual)\n\
                       \x20 6. V-cycle Gibbs + greedy across coarsening levels\n\
                       \x20 7. Component-EM + greedy on full fine-resolution edges\n\
-                      \x20 8. Extract cell propensity + gene-topic statistics (+ cosine dictionary merge)\n\n\
+                      \x20 8. Extract cell propensity + gene-community statistics (+ cosine dictionary merge)\n\n\
                       See `pinto lc --help` for individual flag docs.\n\n\
                       OUTPUT FILES:\n\n\
                       \x20 {out}.propensity.parquet      Cell community membership [N × K]\n\
                       \x20                                Columns: 0 .. K-1, plus `entropy`\n\
                       \x20                                (Shannon entropy of each row, nats).\n\
-                      \x20 {out}.gene_topic.parquet      Gene-topic rates [G × K]\n\
+                      \x20 {out}.gene_community.parquet      Gene-community rates [G × K]\n\
                       \x20                                (housekeeping-adjusted by 1/(bg[g]+ε) by default;\n\
                       \x20                                 pass --no-adjust-housekeeping for raw)\n\
                       \x20 {out}.link_community.parquet  Edge community assignments [E × 3]\n\
@@ -235,7 +235,7 @@ enum Commands {
                       \x20 {out}.gene_graph.parquet      Gene-gene pairs (gene-pair mode only)\n\
                       \x20 {out}.L{l}.*.parquet          Per-cascade-level outputs (unless --no-level-outputs)\n\
                       \x20 {out}.draft.*.parquet         Pre-merge fine partition (when dictionary merge collapsed)\n\
-                      \x20 {out}.dict_merges.parquet     Cosine merge tree over the gene-topic dictionary\n\
+                      \x20 {out}.dict_merges.parquet     Cosine merge tree over the gene-community dictionary\n\
                       \x20 {out}.dict_merges.cut.parquet Fine→super community remap from --merge-cut\n\
                       \x20 {out}.metadata.json           Information-flow manifest:\n\
                       \x20                                lists every parquet, level tags,\n\
@@ -257,17 +257,18 @@ enum Commands {
                       \x20 Pass either a `{prefix}.metadata.json` (preferred —\n\
                       \x20 carries level list, dict-merge presence, and any lr_activity\n\
                       \x20 JSON) or a bare `{prefix}` (auto-globs *.parquet).\n\n\
-                      PER-LEVEL × PER-CORE PLOTS (always):\n\n\
-                      \x20 community.pdf                one color per community\n\
-                      \x20 propensity.argmax.pdf        size ∝ propensity (capped at hex tile),\n\
-                      \x20                              color = argmax community\n\
-                      \x20 propensity.community{k}.pdf  per-community soft-membership\n\
-                      \x20                              (size scales 0 → tile by propensity)\n\
-                      \x20 mesh.pdf                     cell-cell edges (lc only; --no-mesh skips)\n\
-                      \x20 markers.topic{k}.{gene}.heatmap.pdf       grayscale on log1p expr\n\
-                      \x20                                           (darker = higher)\n\
-                      \x20 markers.topic{k}.{gene}.by-community.pdf  color by argmax,\n\
-                      \x20                                           size ∝ log expr\n\n\
+                      PER-LEVEL × PER-CORE PLOTS (default = PDF only):\n\n\
+                      Final level (full suite):\n\
+                      \x20 propensity/{level}.argmax.propensity.pdf  size ∝ propensity, color = argmax\n\
+                      \x20 propensity/{level}.community{k}.pdf       per-community soft-membership\n\
+                      \x20 mesh/{level}.pdf                          cell-cell edges (lc only)\n\
+                      \x20 markers/{level}.community{k}.{gene}.pdf   log1p expr heatmap\n\
+                      \x20                                           with that community's hull outline\n\
+                      Intermediate `L*` levels:\n\
+                      \x20 propensity/{level}.argmax.propensity.pdf  only\n\
+                      Draft level:\n\
+                      \x20 propensity/{level}.argmax.propensity.pdf + mesh/{level}.pdf\n\n\
+                      Pass --svg / --png to also emit those formats.\n\n\
                       OPT-IN: --show-interfaces (per (level, core)):\n\n\
                       \x20 interfaces.pdf  All cells; radius scaled by entropy\n\
                       \x20                 quantile rank (within core), single dark\n\
@@ -335,7 +336,12 @@ enum Commands {
                       \x20    shuffles. One-sided positive p (parametric Gaussian tail of z\n\
                       \x20    plus empirical 1/(n+1)-floored permutation p), BH within batch.\n\n\
                       QUICK START:\n\n\
-                      \x20 # After a `pinto lc` run at prefix `out/run1`:\n\
+                      \x20 # Shortest form — read inputs from a prior pinto lc metadata.json:\n\
+                      \x20 pinto lra --from out/run1.metadata.json --lr-pairs cellchat_pairs.tsv\n\n\
+                      \x20   `--from <metadata.json>` auto-fills `--lc-prefix`, `--out` (=\n\
+                      \x20   `<prefix>.lra`), `--coord`, and the positional data files from\n\
+                      \x20   the metadata. Any of those passed explicitly on the CLI win.\n\n\
+                      \x20 # Long form — same effect, fully explicit:\n\
                       \x20 pinto lr-activity data.h5 -c coords.csv -o out/run1.lr \\\n\
                       \x20   --lc-prefix out/run1 --lr-pairs cellchat_pairs.tsv\n\n\
                       INPUTS:\n\n\
@@ -378,12 +384,122 @@ enum Commands {
     LrActivity(SrtLrActivityArgs),
 }
 
+/// Expand `pinto lra --from <metadata.json>` into the full positional /
+/// flag form clap expects.
+///
+/// The user-friendly `--from` is not a real `clap` arg on `pinto lra` — it's
+/// preprocessed here so the rest of the CLI surface (`SrtInputArgs` and
+/// friends) stays unchanged. When `--from foo.metadata.json` is detected
+/// after the `lra` / `lr-activity` / `test-lr` subcommand:
+///
+///   - `--lc-prefix`, `--out`, `--coord`, and the positional `data_files`
+///     are injected from the metadata when not already on the CLI;
+///   - `--from <path>` is removed before clap sees it.
+///
+/// Anything the user explicitly passed wins: only missing fields are filled.
+fn expand_lra_from_metadata(mut args: Vec<String>) -> anyhow::Result<Vec<String>> {
+    const LRA_NAMES: &[&str] = &["lra", "lr-activity", "test-lr"];
+
+    let Some(lra_pos) = args.iter().position(|a| LRA_NAMES.contains(&a.as_str())) else {
+        return Ok(args);
+    };
+
+    let from_pos = (lra_pos + 1..args.len()).find(|&i| {
+        let a = &args[i];
+        a == "--from" || a.starts_with("--from=") || a == "-f"
+    });
+    let Some(from_pos) = from_pos else {
+        return Ok(args);
+    };
+
+    let meta_path: String = if let Some(rest) = args[from_pos].strip_prefix("--from=") {
+        let p = rest.to_string();
+        args.drain(from_pos..from_pos + 1);
+        p
+    } else {
+        if from_pos + 1 >= args.len() {
+            anyhow::bail!("--from requires a path argument");
+        }
+        let p = args[from_pos + 1].clone();
+        args.drain(from_pos..from_pos + 2);
+        p
+    };
+
+    let meta = crate::util::metadata::PintoMetadata::read(std::path::Path::new(&meta_path))?;
+
+    // Inspect what's already on the CLI (post-drain) so we don't clobber
+    // explicit user overrides.
+    let (has_lc_prefix, has_out, has_coord, has_positional) = {
+        let tail = &args[lra_pos + 1..];
+        let has_flag = |needles: &[&str]| -> bool {
+            tail.iter().any(|a| {
+                needles
+                    .iter()
+                    .any(|n| a == n || a.starts_with(&format!("{n}=")))
+            })
+        };
+        let mut positional = false;
+        let mut i = 0;
+        while i < tail.len() {
+            let a = &tail[i];
+            if a.starts_with('-') {
+                // "--flag value" pair → skip both. "--flag=value" or short bool → skip one.
+                if !a.contains('=') && i + 1 < tail.len() && !tail[i + 1].starts_with('-') {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else {
+                positional = true;
+                break;
+            }
+        }
+        (
+            has_flag(&["--lc-prefix"]),
+            has_flag(&["--out", "-o"]),
+            has_flag(&["--coord", "-c"]),
+            positional,
+        )
+    };
+
+    if !has_lc_prefix {
+        args.push("--lc-prefix".to_string());
+        args.push(meta.prefix.clone());
+    }
+    if !has_out {
+        args.push("--out".to_string());
+        args.push(format!("{}.lra", meta.prefix));
+    }
+    if !has_coord {
+        if let Some(coord) = meta.coord_file.as_deref() {
+            args.push("--coord".to_string());
+            args.push(coord.to_string());
+        }
+    }
+    if !has_positional {
+        match meta.data_files.as_ref() {
+            Some(files) if !files.is_empty() => {
+                for f in files {
+                    args.push(f.clone());
+                }
+            }
+            _ => anyhow::bail!(
+                "metadata.json {meta_path} has no data_files; pass them as positional args, \
+                 or re-run pinto lc/dsvd to regenerate metadata"
+            ),
+        }
+    }
+
+    Ok(args)
+}
+
 fn main() -> anyhow::Result<()> {
     if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
         print_logo();
     }
 
-    let cli = Cli::parse();
+    let argv = expand_lra_from_metadata(std::env::args().collect())?;
+    let cli = Cli::parse_from(argv);
 
     crate::util::common::init_logger(cli.verbose);
 

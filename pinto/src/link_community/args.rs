@@ -154,7 +154,7 @@ pub struct SrtLinkCommunityArgs {
         long_help = "Merges whose cosine similarity ≥ cutoff collapse into one\n\
                        consensus super-community; merges below the cutoff stay\n\
                        separate. Cosine is computed on per-gene-centred log-rates\n\
-                       of the NB-Fisher-weighted gene-topic posterior, so it reads\n\
+                       of the NB-Fisher-weighted gene-community posterior, so it reads\n\
                        like Pearson on log-fold patterns and is scale-free wrt\n\
                        housekeeping abundance. Default 0.90 is moderately\n\
                        conservative (collapses obviously redundant programs while\n\
@@ -172,7 +172,7 @@ pub struct SrtLinkCommunityArgs {
         long_help = "By default the V-cycle emits per-level outputs:\n\
                          <out>.L{l}.link_community.parquet\n\
                          <out>.L{l}.propensity.parquet\n\
-                         <out>.L{l}.gene_topic.parquet\n\
+                         <out>.L{l}.gene_community.parquet\n\
                        so the clustering can be inspected at every coarsening\n\
                        resolution. Pass this flag to skip those writes and emit\n\
                        only the final fine-resolution outputs (matches the\n\

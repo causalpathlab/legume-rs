@@ -1,8 +1,8 @@
 //! Marker gene ranking + chunked row extraction.
 //!
-//! Ranking: for topic `k`, rank genes by descending `gene_topic[g, k]`,
+//! Ranking: for community `k`, rank genes by descending `gene_community[g, k]`,
 //! breaking ties by *specificity* (prefer genes with low activity in
-//! other topics). Skips all-zero genes so we don't ship empty PDFs.
+//! other communities). Skips all-zero genes so we don't ship empty PDFs.
 //!
 //! Row extraction: data-beans is column-major (cells are columns), so
 //! a "gene row for N cells" pass reads cells in blocks and harvests
@@ -12,7 +12,7 @@
 use crate::util::common::*;
 
 /// Return up to `n` marker gene indices (into gt row-ids) + names for
-/// topic `k`. Empty if topic has no signal.
+/// community `k`. Empty if community has no signal.
 pub fn top_n_markers(
     gt: &Mat,
     gene_names: &[Box<str>],
@@ -29,7 +29,7 @@ pub fn top_n_markers(
         if !v.is_finite() || v <= 0.0 {
             continue;
         }
-        // Tie-break by "specificity": penalize by mean rate in other topics.
+        // Tie-break by "specificity": penalize by mean rate in other communities.
         let other_sum: f32 = (0..gt.ncols())
             .filter(|&j| j != k)
             .map(|j| gt[(g, j)])

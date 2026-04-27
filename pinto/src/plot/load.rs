@@ -335,8 +335,8 @@ pub fn read_link_community(path: &Path) -> anyhow::Result<(Vec<EdgePair>, Vec<i6
     Ok((pairs, community))
 }
 
-/// Read a gene_topic parquet: G × K. Returns (mat, gene_names).
-pub fn read_gene_topic(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> {
+/// Read a gene_community parquet: G × K. Returns (mat, gene_names).
+pub fn read_gene_community(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> {
     let MatWithNames { rows, mat, .. } = Mat::from_parquet(
         path.to_str()
             .ok_or_else(|| anyhow::anyhow!("non-UTF8 path: {path:?}"))?,

@@ -106,7 +106,7 @@ pub struct SrtPlotArgs {
     // ─── Marker genes ─────────────────────────────────────────────────────
     #[arg(
         long,
-        default_value_t = 5,
+        default_value_t = 3,
         help = "Top-N marker genes per community (0 disables marker plots)"
     )]
     pub top_markers: usize,
@@ -148,11 +148,19 @@ pub struct SrtPlotArgs {
     pub levels: Box<str>,
 
     // ─── Output toggles ──────────────────────────────────────────────────
-    #[arg(long, help = "Skip SVG output")]
-    pub no_svg: bool,
+    // PDF is the default output; SVG/PNG are opt-in to avoid emitting
+    // three copies of every figure on every run.
+    #[arg(
+        long,
+        help = "Also emit SVG output (off by default; PDF is the default)"
+    )]
+    pub svg: bool,
 
-    #[arg(long, help = "Skip flattened PNG output")]
-    pub no_png: bool,
+    #[arg(
+        long,
+        help = "Also emit flattened PNG output (off by default; PDF is the default)"
+    )]
+    pub png: bool,
 
     #[arg(long, help = "Skip PDF output")]
     pub no_pdf: bool,
@@ -207,7 +215,7 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value_t = 10,
-        help = "Per-stratum cap on significant LR pairs rendered as overlays."
+        help = "Global cap on significant LR pairs rendered (top-N by |z|, across all strata)."
     )]
     pub lr_top_pairs: usize,
 
