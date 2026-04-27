@@ -23,9 +23,27 @@
 //!   = diverging blue↔red on per-edge coexpression `sqrt(L·R)` minus
 //!   the per-pair edge mean, plus thin per-community CC convex hulls.
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use plot_utils::palette::Palette;
 use plot_utils::rasterize::PointShape;
+
+/// What the per-edge arrow color encodes in `pinto plot` LR overlays.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum LrColorMode {
+    /// Edge color = `log((R_receiver + 1) / (L_sender + 1))` on a
+    /// diverging red↔blue ramp. Reads the binding-occupancy regime per
+    /// edge: red → R ≫ L (ligand-limited; signal scales with L, the
+    /// activating direction); blue → L ≫ R (receptor-saturated, signal
+    /// plateaued); near zero → balanced and most tunable. Default.
+    LogRatio,
+    /// Edge color = relation to the pair's community hull:
+    /// outgoing (sender in community), incoming (receiver in community),
+    /// internal (both endpoints in community), or external (neither).
+    Direction,
+    /// Edge color = pair-centered coexpression `sqrt(L·R)` deviation
+    /// (red = above this pair's mean, blue = below).
+    Coexpr,
+}
 
 #[derive(Args, Debug)]
 pub struct SrtPlotArgs {
@@ -125,6 +143,13 @@ pub struct SrtPlotArgs {
     )]
     pub expr_clip: f32,
 
+    #[arg(
+        long,
+        default_value_t = 0.02,
+        help = "Min fraction of core cells with non-zero expression for a marker plot to be rendered (default 0.02 = 2%). Skips sparsely-detected genes whose heatmap is mostly empty."
+    )]
+    pub marker_min_frac: f32,
+
     // ─── Partitioning ────────────────────────────────────────────────────
     #[arg(
         long,
@@ -207,17 +232,23 @@ pub struct SrtPlotArgs {
         long_help = "Path to a `pinto lr-activity` JSON sidecar. If omitted,\n\
                      looks up `outputs.lr_activity` from {prefix}.metadata.json\n\
                      (or skips silently if neither is present). One LR overlay\n\
-                     PDF is written per (core × significant pair, capped by\n\
-                     --lr-top-pairs)."
+                     PDF is written per (core × significant pair, top-N\n\
+                     by |z| per stratum via --lr-top-pairs)."
     )]
     pub lr_activity_json: Option<Box<str>>,
 
     #[arg(
         long,
         default_value_t = 10,
-        help = "Global cap on significant LR pairs rendered (top-N by |z|, across all strata)."
+        help = "Per-stratum cap on significant LR pairs rendered (top-N by |z| within each (batch, community); collapses to per-community for single-batch runs)."
     )]
     pub lr_top_pairs: usize,
+
+    #[arg(
+        long,
+        help = "Keep homotypic LR pairs (L == R, e.g. CADM3-CADM3) in the LR overlay. Default drops them — homotypic adhesion pairs tend to dominate the top-of-list and crowd out heterotypic signaling."
+    )]
+    pub lr_keep_homotypic: bool,
 
     #[arg(long, help = "Skip rendering the LR-activity spatial overlays.")]
     pub no_lr_overlay: bool,
@@ -235,28 +266,37 @@ pub struct SrtPlotArgs {
 
     #[arg(
         long,
-        default_value_t = 8,
-        help = "Min cells per community connected-component to render its hull outline."
+        default_value_t = 2,
+        help = "Belt width (in graph hops) around uncommitted cells for the LR overlay focal set. 1 = direct neighbors only; 2 = 2-hop (default)."
     )]
-    pub lr_hull_min_cells: usize,
+    pub lr_belt_hops: u8,
 
     #[arg(
         long,
         default_value_t = 100,
-        help = "Skip communities with fewer than this many edges (no hulls, markers, or LR overlays)"
+        help = "Skip communities with fewer than this many edges (no markers or LR overlays)"
     )]
     pub min_edges_per_community: usize,
 
     #[arg(
         long,
-        help = "Skip the per-community convex-hull outlines on LR overlays."
+        default_value_t = 30,
+        help = "Min number of drawable arrows (edges with non-zero L+R signal in either orientation) for an LR overlay to be rendered. Skips sparse pairs whose plot is a dust cloud."
     )]
-    pub no_lr_hulls: bool,
+    pub lr_min_edges: usize,
 
     #[arg(
         long,
         default_value_t = 8,
-        help = "Number of bins for the diverging blue↔red coexpression color ramp on LR arrows."
+        help = "Number of bins for the diverging blue↔red coexpression color ramp on LR arrows (only used when --lr-color-mode=coexpr)."
     )]
     pub lr_coexpr_bins: usize,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = LrColorMode::LogRatio,
+        help = "How LR-arrow colors are assigned: `log-ratio` (default) → log((R_receiver+1)/(L_sender+1)) on a diverging red↔blue ramp (red = R≫L, ligand-limited / activating; blue = L≫R, receptor-saturated / plateau); `direction` → in/out/internal classes; `coexpr` → pair-centered sqrt(L·R) deviation."
+    )]
+    pub lr_color_mode: LrColorMode,
 }

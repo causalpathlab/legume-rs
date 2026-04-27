@@ -103,24 +103,22 @@ use render::{
 /// Entry point: auto-discover outputs, partition, emit figures, write
 /// a JSON manifest listing everything produced.
 pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
-    // Auto-detect if --from is a JSON metadata file or a prefix.
-    // When metadata.json is supplied, capture its coord_columns hint so
-    // the coord_pairs reader doesn't have to auto-discover.
-    let (prefix, coord_columns_hint, meta_data_files) = if args.from.ends_with(".json") {
-        let meta_path = std::path::Path::new(args.from.as_ref());
-        let meta = crate::util::metadata::PintoMetadata::read(meta_path)?;
-        (
-            meta.prefix.into_boxed_str(),
-            meta.outputs.coord_columns.clone(),
-            meta.data_files.clone(),
-        )
-    } else {
-        (args.from.clone(), None, None)
-    };
+    let resolved = resolve_from(&args.from)?;
+    let prefix = resolved.prefix;
+    let coord_columns_hint = resolved.coord_columns;
+    let meta_data_files = resolved.data_files;
+    let lra_only = resolved.lra_only;
+    let lr_json_override = resolved.lr_json_override;
 
     let out_prefix = args.out.as_deref().unwrap_or(&prefix).to_string();
 
-    let selector = LevelSelector::parse(&args.levels);
+    // LRA mode focuses on the final-level partition (interfaces + LR
+    // overlays only) — intermediate L* levels carry the same info.
+    let selector = if lra_only {
+        LevelSelector::parse("final")
+    } else {
+        LevelSelector::parse(&args.levels)
+    };
     let levels = discover_levels(&prefix, &selector)?;
     info!(
         "discovered {} level(s): {}",
@@ -216,8 +214,13 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
     // level tag (and any kind-specific suffix). Single core → no
     // `core{batch}` infix.
     let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
-    for kind in PlotKind::ALL {
-        std::fs::create_dir_all(plot_dir.join(kind.subdir()))?;
+    if lra_only {
+        std::fs::create_dir_all(plot_dir.join(PlotKind::Interfaces.subdir()))?;
+        std::fs::create_dir_all(plot_dir.join(PlotKind::Lr.subdir()))?;
+    } else {
+        for kind in PlotKind::ALL {
+            std::fs::create_dir_all(plot_dir.join(kind.subdir()))?;
+        }
     }
 
     levels
@@ -305,28 +308,30 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                 let mut local_emitted: Vec<PathBuf> = Vec::new();
 
                 // Propensity argmax (every level): color = argmax community, size ∝ propensity.
-                let layers = build_propensity_argmax_layers(
-                    &frame,
-                    &cells,
-                    core,
-                    &aligned_dominant,
-                    &aligned_propensity,
-                    &colors,
-                    args.point_shape,
-                    args.alpha,
-                    args.size_scale,
-                )?;
-                emit_figure(
-                    &layers,
-                    &frame,
-                    args,
-                    &kind_path(PlotKind::Propensity, "argmax.propensity"),
-                    &mut local_emitted,
-                    true,
-                )?;
+                if !lra_only {
+                    let layers = build_propensity_argmax_layers(
+                        &frame,
+                        &cells,
+                        core,
+                        &aligned_dominant,
+                        &aligned_propensity,
+                        &colors,
+                        args.point_shape,
+                        args.alpha,
+                        args.size_scale,
+                    )?;
+                    emit_figure(
+                        &layers,
+                        &frame,
+                        args,
+                        &kind_path(PlotKind::Propensity, "argmax.propensity"),
+                        &mut local_emitted,
+                        true,
+                    )?;
+                }
 
                 // 3. Per-community soft-membership heatmaps (final only)
-                if level_kind == LevelKind::Final {
+                if !lra_only && level_kind == LevelKind::Final {
                     for kk in 0..k {
                         let layers = build_propensity_community_heatmap_layers(
                             &frame,
@@ -351,7 +356,10 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                 }
 
                 // 4. Mesh (cell-cell edges colored by community) — final + draft
-                if !args.no_mesh && matches!(level_kind, LevelKind::Final | LevelKind::Draft) {
+                if !lra_only
+                    && !args.no_mesh
+                    && matches!(level_kind, LevelKind::Final | LevelKind::Draft)
+                {
                     if let Some((edges, community)) = &lc_pair {
                         let core_set: HashSet<usize> = core.cell_ixs.iter().copied().collect();
                         let layers = build_mesh_layers(
@@ -374,8 +382,10 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     }
                 }
 
-                // 4b. Interfaces (high-entropy + neighborhoods) — final only
-                if level_kind == LevelKind::Final && args.show_interfaces {
+                // 4b. Interfaces (high-entropy + neighborhoods) — final only.
+                // LRA-only mode forces interfaces on (LR analysis cares about
+                // boundary cells; rendering them is the whole point).
+                if level_kind == LevelKind::Final && (args.show_interfaces || lra_only) {
                     match &aligned_entropy {
                         Some(ent) => {
                             let ifc_stub = kind_path(PlotKind::Interfaces, "");
@@ -404,7 +414,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                 }
 
                 // Marker genes — final + draft only (intermediate skips per LevelKind).
-                if level_kind != LevelKind::Intermediate && args.top_markers > 0 {
+                if !lra_only && level_kind != LevelKind::Intermediate && args.top_markers > 0 {
                     let (gt, gene_names) = match &gene_community {
                         Some(x) => x,
                         None => {
@@ -430,20 +440,8 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                         .as_ref()
                         .expect("cell index built alongside data");
 
-                    // Hulls keyed by community; each marker plot only renders its own.
                     let marker_hulls_by_c: HashMap<i64, Vec<plot_utils::svg_emit::TopicLayer>> =
-                        match &lc_pair {
-                            Some((edges, _)) => render::community_cc_hulls(
-                                &frame,
-                                &cells,
-                                core,
-                                &aligned_dominant,
-                                edges,
-                                args.lr_hull_min_cells,
-                                Some(&colors),
-                            ),
-                            None => HashMap::default(),
-                        };
+                        HashMap::default();
 
                     emit_marker_figures(
                         args,
@@ -474,15 +472,23 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
 
     // Post-pass: LR-activity overlays. Level-independent — one figure per
     // (core, significant pair), runs after the level loop completes.
-    if !args.no_lr_overlay {
-        if let Some(p) = resolve_lr_json_path(args, &prefix) {
+    // In `lra_only` mode the user passed an `lr_activity.json` directly,
+    // so the overlay is the whole point — `--no-lr-overlay` is ignored.
+    let render_lr = lra_only || !args.no_lr_overlay;
+    let lr_json_path = lr_json_override
+        .clone()
+        .or_else(|| resolve_lr_json_path(args, &prefix));
+    if render_lr {
+        if let Some(p) = lr_json_path {
             match lr_overlay::load_lr_json(&p) {
                 Ok(lr) => {
+                    let n_sig = lr.results.iter().filter(|r| r.significant).count();
                     info!(
-                        "Rendering LR overlays from {} ({} strata, {} results)",
+                        "Rendering LR overlays from {} ({} strata, {} results, {} significant)",
                         p.display(),
                         lr.strata.len(),
                         lr.results.len(),
+                        n_sig,
                     );
                     let lr_expr = match (&expr_data, cell_col_index.as_ref()) {
                         (Some(data), Some(ccol)) => {
@@ -537,32 +543,10 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
                     let lr_dir = plot_dir.join(PlotKind::Lr.subdir());
                     std::fs::create_dir_all(&lr_dir)?;
-                    let lr_colors = final_aligned_prop
-                        .as_ref()
-                        .map(|p| ColorBook::new(args, p.ncols()));
                     let per_core: Vec<Vec<PathBuf>> = cores
                         .par_iter()
                         .map(|core| -> anyhow::Result<Vec<PathBuf>> {
                             let frame = render::Frame::new(core, args);
-                            let hulls_by_community: HashMap<
-                                i64,
-                                Vec<plot_utils::svg_emit::TopicLayer>,
-                            > = if args.no_lr_hulls {
-                                HashMap::default()
-                            } else {
-                                match (&final_dominant, final_lc.as_ref()) {
-                                    (Some(dom), Some((edges, _))) => render::community_cc_hulls(
-                                        &frame,
-                                        &cells,
-                                        core,
-                                        dom,
-                                        edges,
-                                        args.lr_hull_min_cells,
-                                        lr_colors.as_ref(),
-                                    ),
-                                    _ => HashMap::default(),
-                                }
-                            };
                             let focal_set: Option<HashSet<usize>> =
                                 final_aligned_prop.as_ref().map(|prop| {
                                     let mut focal: HashSet<usize> =
@@ -576,24 +560,31 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                                     if let Some((edges, _)) = final_lc.as_ref() {
                                         let core_set: HashSet<usize> =
                                             core.cell_ixs.iter().copied().collect();
-                                        let mut neighbors: HashSet<usize> = HashSet::default();
-                                        for (l, r) in edges {
-                                            let li = match cells.index.get(l) {
-                                                Some(&i) if core_set.contains(&i) => i,
-                                                _ => continue,
-                                            };
-                                            let ri = match cells.index.get(r) {
-                                                Some(&i) if core_set.contains(&i) => i,
-                                                _ => continue,
-                                            };
-                                            if focal.contains(&li) {
-                                                neighbors.insert(ri);
+                                        let mut frontier: HashSet<usize> = focal.clone();
+                                        for _ in 0..args.lr_belt_hops {
+                                            if frontier.is_empty() {
+                                                break;
                                             }
-                                            if focal.contains(&ri) {
-                                                neighbors.insert(li);
+                                            let mut next: HashSet<usize> = HashSet::default();
+                                            for (l, r) in edges {
+                                                let li = match cells.index.get(l) {
+                                                    Some(&i) if core_set.contains(&i) => i,
+                                                    _ => continue,
+                                                };
+                                                let ri = match cells.index.get(r) {
+                                                    Some(&i) if core_set.contains(&i) => i,
+                                                    _ => continue,
+                                                };
+                                                if frontier.contains(&li) && !focal.contains(&ri) {
+                                                    next.insert(ri);
+                                                }
+                                                if frontier.contains(&ri) && !focal.contains(&li) {
+                                                    next.insert(li);
+                                                }
                                             }
+                                            focal.extend(next.iter().copied());
+                                            frontier = next;
                                         }
-                                        focal.extend(neighbors);
                                     }
                                     focal
                                 });
@@ -605,7 +596,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                                 &lr,
                                 lr_expr.as_ref(),
                                 focal_set.as_ref(),
-                                &hulls_by_community,
+                                final_dominant.as_deref(),
                                 &lr_dir,
                             )
                         })
@@ -614,18 +605,82 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                         emitted.extend(v);
                     }
                 }
-                Err(e) => log::warn!("LR-activity JSON load failed ({}): {e}", p.display()),
+                Err(e) => {
+                    log::warn!("LR-activity JSON load failed ({}): {e}", p.display())
+                }
             }
+        } else if lra_only {
+            log::warn!("pinto plot (lra-only): no LR-activity JSON resolved");
         }
     }
 
-    write_manifest(&out_prefix, &emitted)?;
+    let manifest_suffix = if lra_only { "plot.lra" } else { "plot" };
+    write_manifest(&out_prefix, manifest_suffix, &emitted)?;
     info!(
-        "wrote {} files total → {}.plot.manifest.json",
+        "wrote {} files total → {}.{}.manifest.json",
         emitted.len(),
-        out_prefix
+        out_prefix,
+        manifest_suffix
     );
     Ok(())
+}
+
+struct ResolvedFrom {
+    prefix: Box<str>,
+    coord_columns: Option<Vec<String>>,
+    data_files: Option<Vec<String>>,
+    lra_only: bool,
+    lr_json_override: Option<PathBuf>,
+}
+
+fn resolve_from(from: &str) -> anyhow::Result<ResolvedFrom> {
+    if !from.ends_with(".json") {
+        return Ok(ResolvedFrom {
+            prefix: from.to_string().into_boxed_str(),
+            coord_columns: None,
+            data_files: None,
+            lra_only: false,
+            lr_json_override: None,
+        });
+    }
+    let from_path = std::path::Path::new(from);
+    let raw = std::fs::read_to_string(from_path)
+        .map_err(|e| anyhow::anyhow!("reading {from_path:?}: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("parsing {from_path:?} as JSON: {e}"))?;
+    let cmd = value.get("command").and_then(|c| c.as_str()).unwrap_or("");
+    if cmd == "lr-activity" {
+        let lc_prefix = value
+            .get("lc_prefix")
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| anyhow::anyhow!("{from_path:?}: missing `lc_prefix`"))?;
+        let upstream_meta_path = value
+            .get("input_metadata")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string());
+        let (coord_columns, data_files) = match upstream_meta_path
+            .as_deref()
+            .and_then(|p| crate::util::metadata::PintoMetadata::read(std::path::Path::new(p)).ok())
+        {
+            Some(m) => (m.outputs.coord_columns.clone(), m.data_files.clone()),
+            None => (None, None),
+        };
+        return Ok(ResolvedFrom {
+            prefix: lc_prefix.to_string().into_boxed_str(),
+            coord_columns,
+            data_files,
+            lra_only: true,
+            lr_json_override: Some(from_path.to_path_buf()),
+        });
+    }
+    let meta = crate::util::metadata::PintoMetadata::read(from_path)?;
+    Ok(ResolvedFrom {
+        prefix: meta.prefix.into_boxed_str(),
+        coord_columns: meta.outputs.coord_columns.clone(),
+        data_files: meta.data_files.clone(),
+        lra_only: false,
+        lr_json_override: None,
+    })
 }
 
 /// Align propensity rows (indexed by prop-parquet's row-names) to the
@@ -732,6 +787,21 @@ fn emit_marker_figures(
     for (k, gname) in plan {
         let local = name_to_local[&gname];
         let expr = &rows[local];
+
+        // Skip markers that fire in too few cells — the heatmap is
+        // mostly empty and the resulting plot reads as a sparse dust
+        // cloud (see image-9 from the 2026-04-27 review). Threshold
+        // is on the fraction of *core* cells with non-zero expression.
+        let n_nonzero = expr.iter().filter(|v| v.is_finite() && **v > 0.0).count();
+        let n_core = core.cell_ixs.len().max(1);
+        if (n_nonzero as f32) / (n_core as f32) < args.marker_min_frac {
+            log::info!(
+                "[{level_tag}] community {k}: skipping {gname} ({n_nonzero}/{n_core} = {:.2}% < --marker-min-frac {:.2}%)",
+                100.0 * n_nonzero as f32 / n_core as f32,
+                100.0 * args.marker_min_frac,
+            );
+            continue;
+        }
 
         // (a) Heatmap (viridis color, fixed size)
         let mut layers = build_marker_heatmap_layers(
@@ -882,13 +952,13 @@ fn marker_out_path(out_prefix: &str, level_tag: &str, k: usize, gname: &str) -> 
         .join(format!("{level_tag}.community{k}.{safe_gname}"))
 }
 
-fn write_manifest(out_prefix: &str, emitted: &[PathBuf]) -> anyhow::Result<()> {
+fn write_manifest(out_prefix: &str, suffix: &str, emitted: &[PathBuf]) -> anyhow::Result<()> {
     let json = json!({
         "out_prefix": out_prefix,
         "file_count": emitted.len(),
         "files": emitted.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
     });
-    let path = format!("{out_prefix}.plot.manifest.json");
+    let path = format!("{out_prefix}.{suffix}.manifest.json");
     std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
     Ok(())
 }
