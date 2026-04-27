@@ -47,12 +47,12 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         short = 'o',
-        help = "Output prefix (defaults to --from). Writes {out}.plot.{level}.core{batch}.*.pdf and {out}.plot.manifest.json."
+        help = "Output prefix (defaults to --from). Writes {out}.plots/{kind}/{level}.*.pdf (per-kind subdirs) and {out}.plot.manifest.json."
     )]
     pub out: Option<Box<str>>,
 
     // ─── Figure size ──────────────────────────────────────────────────────
-    #[arg(long, default_value_t = 5.0, help = "Plot width per core (inches)")]
+    #[arg(long, default_value_t = 5.0, help = "Plot width per panel (inches)")]
     pub width: f32,
 
     #[arg(

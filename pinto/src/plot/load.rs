@@ -10,9 +10,57 @@
 use crate::util::common::*;
 use matrix_util::parquet::peek_parquet_field_names;
 use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::record::RowAccessor;
+use parquet::record::{Row, RowAccessor};
 use std::fs::File;
 use std::path::Path;
+
+/// Read a column as a label string, regardless of physical type.
+///
+/// `pinto svd --coord` writes whatever coordinate columns the user
+/// supplied as FLOAT, including a "batch" column that's actually a
+/// numeric batch index. The plot pipeline still wants a `Box<str>`
+/// label, so accept any numeric/string type and stringify.
+pub(crate) fn row_label(row: &Row, idx: usize) -> anyhow::Result<Box<str>> {
+    if let Ok(s) = row.get_string(idx) {
+        return Ok(s.clone().into_boxed_str());
+    }
+    if let Ok(v) = row.get_float(idx) {
+        return Ok(stringify_numeric(v as f64));
+    }
+    if let Ok(v) = row.get_double(idx) {
+        return Ok(stringify_numeric(v));
+    }
+    if let Ok(v) = row.get_long(idx) {
+        return Ok(v.to_string().into_boxed_str());
+    }
+    if let Ok(v) = row.get_int(idx) {
+        return Ok(v.to_string().into_boxed_str());
+    }
+    anyhow::bail!("column {idx} has no string/numeric value");
+}
+
+fn stringify_numeric(v: f64) -> Box<str> {
+    if v.is_finite() && v.fract() == 0.0 {
+        format!("{}", v as i64).into_boxed_str()
+    } else {
+        format!("{v}").into_boxed_str()
+    }
+}
+
+/// Read a numeric column as `f32`, accepting FLOAT or DOUBLE.
+///
+/// `pinto svd --coord` writes coordinates as FLOAT; coord_pairs files
+/// produced by other paths (R/data.table) come in as DOUBLE. The plot
+/// pipeline is single-precision throughout, so we narrow on read.
+fn row_f32(row: &Row, idx: usize) -> anyhow::Result<f32> {
+    if let Ok(v) = row.get_float(idx) {
+        return Ok(v);
+    }
+    if let Ok(v) = row.get_double(idx) {
+        return Ok(v as f32);
+    }
+    anyhow::bail!("column {idx} is not a numeric type")
+}
 
 /// One row per cell. `batch` is `None` if the fit was single-batch
 /// (i.e. `coord_pairs.parquet` lacks a `left_batch` column).
@@ -40,37 +88,54 @@ impl CellTable {
 
 /// Read `{prefix}.coord_pairs.parquet`, union left+right, dedupe.
 ///
-/// We insist on finding at least `left_*` / `right_*` numeric coord
-/// columns paired by suffix — anything else is a fit without `--coord`,
-/// which we reject at plot time.
-pub fn read_cells_from_coord_pairs(path: &Path) -> anyhow::Result<CellTable> {
+/// `coord_columns`, when supplied (typically from `metadata.json`'s
+/// `outputs.coord_columns`), names the bare coord basenames in `(x, y)`
+/// order — e.g. `["pxl_row_in_fullres", "pxl_col_in_fullres"]`. Pass
+/// `None` to fall back to the legacy auto-discovery (first two paired
+/// `left_*` / `right_*` columns by schema order), which is correct for
+/// pinto-written files but brittle when users splice extra columns in.
+pub fn read_cells_from_coord_pairs(
+    path: &Path,
+    coord_columns: Option<&[String]>,
+) -> anyhow::Result<CellTable> {
     let path_str = path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("non-UTF8 path: {path:?}"))?;
     let fields = peek_parquet_field_names(path_str)?;
 
-    // Locate the first paired left_*/right_* coord column (besides
-    // left_batch / left_cell). We only need one axis pair for x; we
-    // pick the first two paired columns as (x, y).
-    let left_coords: Vec<Box<str>> = fields
-        .iter()
-        .filter(|f| {
-            f.starts_with("left_") && f.as_ref() != "left_cell" && f.as_ref() != "left_batch"
-        })
-        .cloned()
-        .collect();
+    let (x_bare, y_bare) = match coord_columns {
+        Some(cols) if cols.len() >= 2 => (cols[0].clone(), cols[1].clone()),
+        Some(_) | None => {
+            // Legacy fallback: scan for paired left_* columns and pick
+            // the first two as (x, y). Excludes the `left_cell` /
+            // `left_batch` non-coord columns.
+            let left_coords: Vec<Box<str>> = fields
+                .iter()
+                .filter(|f| {
+                    f.starts_with("left_")
+                        && f.as_ref() != "left_cell"
+                        && f.as_ref() != "left_batch"
+                })
+                .cloned()
+                .collect();
+            if left_coords.len() < 2 {
+                anyhow::bail!(
+                    "coord_pairs.parquet {path:?} has fewer than 2 coordinate columns \
+                     (needs left_x + left_y pair) and metadata.json carried no \
+                     coord_columns hint. Was this run fit without --coord?"
+                );
+            }
+            (
+                strip_left(&left_coords[0]).to_string(),
+                strip_left(&left_coords[1]).to_string(),
+            )
+        }
+    };
 
-    if left_coords.len() < 2 {
-        anyhow::bail!(
-            "coord_pairs.parquet {path:?} has fewer than 2 coordinate columns \
-             (needs left_x + left_y pair). Was this run fit without --coord?"
-        );
-    }
-
-    let x_col_left = left_coords[0].clone();
-    let y_col_left = left_coords[1].clone();
-    let x_col_right: Box<str> = format!("right_{}", strip_left(&x_col_left)).into_boxed_str();
-    let y_col_right: Box<str> = format!("right_{}", strip_left(&y_col_left)).into_boxed_str();
+    let x_col_left: Box<str> = format!("left_{x_bare}").into_boxed_str();
+    let y_col_left: Box<str> = format!("left_{y_bare}").into_boxed_str();
+    let x_col_right: Box<str> = format!("right_{x_bare}").into_boxed_str();
+    let y_col_right: Box<str> = format!("right_{y_bare}").into_boxed_str();
 
     let has_batch = fields.iter().any(|f| f.as_ref() == "left_batch")
         && fields.iter().any(|f| f.as_ref() == "right_batch");
@@ -115,14 +180,14 @@ pub fn read_cells_from_coord_pairs(path: &Path) -> anyhow::Result<CellTable> {
     for record in row_iter {
         let row = record?;
         for (ic, ix, iy, ib) in [(li_cell, li_x, li_y, li_b), (ri_cell, ri_x, ri_y, ri_b)] {
-            let name = row.get_string(ic)?.clone().into_boxed_str();
+            let name = row_label(&row, ic)?;
             if index.contains_key(&name) {
                 continue;
             }
-            let x = row.get_float(ix)?;
-            let y = row.get_float(iy)?;
+            let x = row_f32(&row, ix)?;
+            let y = row_f32(&row, iy)?;
             let batch = match ib {
-                Some(b) => Some(row.get_string(b)?.clone().into_boxed_str()),
+                Some(b) => Some(row_label(&row, b)?),
                 None => None,
             };
             index.insert(name.clone(), names.len());
@@ -135,10 +200,7 @@ pub fn read_cells_from_coord_pairs(path: &Path) -> anyhow::Result<CellTable> {
     }
 
     let batches = if has_batch { Some(batches) } else { None };
-    let coord_col_names = vec![
-        strip_left(&x_col_left).to_string().into_boxed_str(),
-        strip_left(&y_col_left).to_string().into_boxed_str(),
-    ];
+    let coord_col_names = vec![x_bare.into_boxed_str(), y_bare.into_boxed_str()];
     Ok(CellTable {
         names,
         coords,
@@ -257,8 +319,8 @@ pub fn read_link_community(path: &Path) -> anyhow::Result<(Vec<EdgePair>, Vec<i6
     let mut community: Vec<i64> = Vec::new();
     for record in reader.get_row_iter(None)? {
         let row = record?;
-        let l = row.get_string(li)?.clone().into_boxed_str();
-        let r = row.get_string(ri)?.clone().into_boxed_str();
+        let l = row_label(&row, li)?;
+        let r = row_label(&row, ri)?;
         // Schema may write community as float or int depending on
         // which pinto variant produced it; try float first.
         let c: i64 = row

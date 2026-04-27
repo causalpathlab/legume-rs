@@ -5,6 +5,7 @@
 //! - `{lc_prefix}.coord_pairs.parquet` — per-edge (left_batch, right_batch) when multi-batch.
 //! - `{lr_pairs}` — two-column TSV/CSV of directional (ligand, receptor) gene names.
 
+use crate::plot::load::row_label;
 use crate::util::common::*;
 use matrix_util::common_io::{read_lines_of_words_delim, ReadLinesOut};
 use matrix_util::membership::detect_delimiter;
@@ -50,8 +51,8 @@ pub fn read_link_community(file_path: &str) -> anyhow::Result<Vec<EdgeRecord>> {
         let row = record?;
         let community_f = row.get_float(ci)?;
         out.push(EdgeRecord {
-            left_cell: row.get_string(li)?.clone().into_boxed_str(),
-            right_cell: row.get_string(ri)?.clone().into_boxed_str(),
+            left_cell: row_label(&row, li)?,
+            right_cell: row_label(&row, ri)?,
             community: community_f as u32,
             batch: None,
         });
@@ -93,13 +94,13 @@ pub fn attach_batch_from_coord_pairs(
             ));
         }
         let row = record?;
-        let left_b = row.get_string(li)?.clone();
-        let right_b = row.get_string(ri)?.clone();
+        let left_b = row_label(&row, li)?;
+        let right_b = row_label(&row, ri)?;
         // Edge is single-batch iff both endpoints share a label. We only test
         // within-batch activity; cross-batch edges are dropped downstream by
         // assigning the joint label `None`.
         if left_b == right_b {
-            edges[pos].batch = Some(left_b.into_boxed_str());
+            edges[pos].batch = Some(left_b);
         } else {
             edges[pos].batch = None;
         }
