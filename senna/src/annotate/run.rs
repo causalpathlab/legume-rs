@@ -5,12 +5,15 @@ use super::inputs::load_from_manifest;
 use crate::embed_common::Mat;
 use enrichment::{annotate, AnnotateConfig, AnnotateOutputs};
 use log::info;
+use matrix_util::common_io::mkdir_parent;
 use matrix_util::traits::IoOps;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
 pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.out)?;
+
     let (loaded, mut manifest, manifest_dir) = load_from_manifest(&args.from, &args.markers)?;
 
     let config = AnnotateConfig {

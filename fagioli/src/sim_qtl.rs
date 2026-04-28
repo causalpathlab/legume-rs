@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Args;
 use log::info;
+use matrix_util::common_io::mkdir_parent;
 
 use data_beans::sparse_io::SparseIoBackend;
 use fagioli::genotype::{BedReader, GenomicRegion, GenotypeReader};
@@ -193,6 +194,8 @@ fn read_genotypes(args: &SimQtlArgs) -> Result<fagioli::genotype::GenotypeMatrix
 pub fn sim_qtl(args: &SimQtlArgs) -> Result<()> {
     use fagioli::io::gene_annotations::load_gtf;
     use fagioli::simulation::simulate_gene_annotations;
+
+    mkdir_parent(&args.output)?;
 
     let use_parquet = match args.format.to_lowercase().as_str() {
         "parquet" => true,

@@ -100,10 +100,13 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    if cli.verbose && std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
+    let default_filter = if cli.verbose {
+        matrix_util::common_io::VERBOSE_LOG_FILTER
+    } else {
+        matrix_util::common_io::QUIET_LOG_FILTER
+    };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
+        .init();
 
     match &cli.commands {
         Commands::SimLink(args) => simulation::run_sim_link(args),

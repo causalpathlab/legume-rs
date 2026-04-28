@@ -260,6 +260,31 @@ pub fn load_lr_json(path: &Path) -> anyhow::Result<LrJson> {
     Ok(parsed)
 }
 
+/// Remap "0","1",… numeric batch labels on every `LrResult.batch` and
+/// `LrStratum.batch` to the friendly names supplied by the caller (the
+/// same map that `plot::load::resolve_batch_name_map` builds for
+/// `cells.batches`). Non-numeric or out-of-range labels are left
+/// untouched so user-supplied names pass through unchanged.
+pub fn remap_lr_batches(lr: &mut LrJson, name_map: &[Box<str>]) {
+    let lookup = |label: &str| -> Option<String> {
+        label
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| name_map.get(i))
+            .map(|n| n.to_string())
+    };
+    for r in &mut lr.results {
+        if let Some(friendly) = lookup(&r.batch) {
+            r.batch = friendly;
+        }
+    }
+    for s in &mut lr.strata {
+        if let Some(friendly) = lookup(&s.batch) {
+            s.batch = friendly;
+        }
+    }
+}
+
 /// Render LR-activity overlays for one core. Returns the list of files
 /// written (added to the plot manifest).
 ///
@@ -279,6 +304,7 @@ pub fn render_lr_overlays_for_core(
     lr_expr: Option<&LrExpression>,
     focal_cells: Option<&HashSet<usize>>,
     dominant: Option<&[i64]>,
+    kept_communities: Option<&HashSet<usize>>,
     out_dir: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let mut emitted = Vec::new();
@@ -301,11 +327,14 @@ pub fn render_lr_overlays_for_core(
         None => HashMap::default(),
     };
 
-    // Render every significant result; the per-pair filename carries
-    // `B{batch}` to disambiguate cross-batch results in the same dir.
+    // Render every significant result that belongs to this core's
+    // batch. Per-batch cores own a subdir (`out_dir/{core.name}/`) so
+    // the filename can drop the `B{batch}` prefix; single-batch cores
+    // (no `batch_label`) keep the legacy flat layout.
     // Homotypic pairs (`L == R`, e.g. CADM3-CADM3, PCDHB3-PCDHB3) usually
     // dominate the top-of-list because adhesion molecules co-aggregate
     // — drop them by default so heterotypic signaling stays visible.
+    let core_batch = core.batch_label.as_deref();
     let mut sig: Vec<&LrResult> = lr
         .results
         .iter()
@@ -313,6 +342,14 @@ pub fn render_lr_overlays_for_core(
             r.significant
                 && r.stratum_id.is_some()
                 && (args.lr_keep_homotypic || r.ligand != r.receptor)
+                && match core_batch {
+                    Some(b) => r.batch.as_str() == b,
+                    None => true,
+                }
+                && match kept_communities {
+                    Some(k) => r.community >= 0 && k.contains(&(r.community as usize)),
+                    None => true,
+                }
         })
         .collect();
     if sig.is_empty() {
@@ -522,13 +559,27 @@ pub fn render_lr_overlays_for_core(
             )?,
         };
 
-        let stub = out_dir.join(format!(
-            "B{}.C{}.{}-{}",
-            sanitize(&r.batch),
-            r.community,
-            sanitize(&r.ligand),
-            sanitize(&r.receptor),
-        ));
+        // Per-batch run: filename is already disambiguated by the
+        // per-core subdir (`out_dir/{core.name}/`), so the stub just
+        // carries `C{c}.{L}-{R}`. Single-batch (no batch_label) keeps
+        // the legacy `B{batch}` prefix in case the lr-activity fit
+        // stratified by batch even though the plot core didn't.
+        let leaf = match core_batch {
+            Some(_) => format!(
+                "C{}.{}-{}",
+                r.community,
+                sanitize(&r.ligand),
+                sanitize(&r.receptor),
+            ),
+            None => format!(
+                "B{}.C{}.{}-{}",
+                sanitize(&r.batch),
+                r.community,
+                sanitize(&r.ligand),
+                sanitize(&r.receptor),
+            ),
+        };
+        let stub = core.subdir_in(out_dir).join(leaf);
         let label = format!(
             "{}->{}; B={}; C{}; z={:.2}; q={:.3}",
             r.ligand,

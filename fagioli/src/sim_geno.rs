@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Args;
 use log::info;
+use matrix_util::common_io::mkdir_parent;
 
 use fagioli::genotype::bed_writer::write_plink;
 use fagioli::simulation::genotype_sim::{simulate_wright_fisher, WrightFisherParams};
@@ -58,6 +59,7 @@ pub struct SimGenoArgs {
 }
 
 pub fn sim_geno(args: &SimGenoArgs) -> Result<()> {
+    mkdir_parent(&args.output)?;
     info!("Starting sim-geno");
 
     let params = WrightFisherParams {

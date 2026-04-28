@@ -29,6 +29,7 @@ pub use args::SrtPlotArgs;
 
 use crate::util::common::*;
 use crate::util::input::read_expr_data;
+use matrix_util::common_io::mkdir_parent;
 use rayon::prelude::*;
 use serde_json::json;
 use std::path::PathBuf;
@@ -93,6 +94,7 @@ impl LevelKind {
 use discover::{discover_levels, LevelSelector};
 use load::{
     read_cells_from_coord_pairs, read_gene_community, read_link_community, read_propensity,
+    remap_batch_labels, resolve_batch_name_map,
 };
 use partition::partition_cells;
 use render::{
@@ -111,6 +113,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
     let lr_json_override = resolved.lr_json_override;
 
     let out_prefix = args.out.as_deref().unwrap_or(&prefix).to_string();
+    mkdir_parent(&out_prefix)?;
 
     // LRA mode focuses on the final-level partition (interfaces + LR
     // overlays only) — intermediate L* levels carry the same info.
@@ -134,12 +137,30 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
     if !coord_path.exists() {
         anyhow::bail!("{coord_path:?} not found — did you pass the right --from prefix?");
     }
-    let cells = read_cells_from_coord_pairs(&coord_path, coord_columns_hint.as_deref())?;
+    let mut cells = read_cells_from_coord_pairs(&coord_path, coord_columns_hint.as_deref())?;
     info!(
         "loaded {} cells; batch column: {}",
         cells.n(),
         if cells.batches.is_some() { "yes" } else { "no" }
     );
+
+    // `pinto svd` writes batch labels as "0","1",… when the user
+    // supplied multiple data files without `--batch-files`. The
+    // user-facing batch name is the input file's basename, so remap
+    // here (and again on the LR sidecar below) so plot dirs and LR
+    // overlay titles use the same friendly names.
+    let batch_name_map: Option<Vec<Box<str>>> = match (&cells.batches, &meta_data_files) {
+        (Some(batches), Some(data_files)) => resolve_batch_name_map(batches, data_files),
+        _ => None,
+    };
+    if let (Some(batches), Some(map)) = (cells.batches.as_mut(), batch_name_map.as_deref()) {
+        info!(
+            "remapping {} numeric batch labels → file basenames ({:?})",
+            batches.len(),
+            map,
+        );
+        remap_batch_labels(batches, map);
+    }
 
     let cores = partition_cells(&cells, args.min_core_cells, args.coord_clip);
     if cores.is_empty() {
@@ -210,16 +231,22 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
     // exclude set from CellTable's known coord column names.
     let excluded: HashSet<Box<str>> = cells.coord_col_names.iter().cloned().collect();
 
-    // Each plot type lands in its own subdir; filenames carry only the
-    // level tag (and any kind-specific suffix). Single core → no
-    // `core{batch}` infix.
+    // Each plot type lands in its own subdir; per-batch runs nest one
+    // more level so filenames stay short (`{kind}/{batch}/{level}.{suffix}`).
+    // Summaries that aggregate across batches (LR global/bipartite,
+    // marker Hinton when single-core) keep the flat layout.
     let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
-    if lra_only {
-        std::fs::create_dir_all(plot_dir.join(PlotKind::Interfaces.subdir()))?;
-        std::fs::create_dir_all(plot_dir.join(PlotKind::Lr.subdir()))?;
+    let active_kinds: &[PlotKind] = if lra_only {
+        &[PlotKind::Interfaces, PlotKind::Lr]
     } else {
-        for kind in PlotKind::ALL {
-            std::fs::create_dir_all(plot_dir.join(kind.subdir()))?;
+        PlotKind::ALL
+    };
+    // `create_dir_all` is recursive, so per-batch cores implicitly
+    // create the parent `{kind}/`; single-batch cores collapse to the
+    // same flat layout via `CoreSpec::subdir_in`.
+    for core in &cores {
+        for kind in active_kinds {
+            std::fs::create_dir_all(core.subdir_in(&plot_dir.join(kind.subdir())))?;
         }
     }
 
@@ -303,8 +330,14 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     } else {
                         format!("{}.{}", level.tag, suffix)
                     };
-                    plot_dir.join(kind.subdir()).join(leaf)
+                    core.subdir_in(&plot_dir.join(kind.subdir())).join(leaf)
                 };
+                let kept_communities = communities_above_threshold(
+                    core,
+                    &aligned_dominant,
+                    k,
+                    args.min_cells_per_community,
+                );
                 let mut local_emitted: Vec<PathBuf> = Vec::new();
 
                 // Propensity argmax (every level): color = argmax community, size ∝ propensity.
@@ -333,6 +366,9 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                 // 3. Per-community soft-membership heatmaps (final only)
                 if !lra_only && level_kind == LevelKind::Final {
                     for kk in 0..k {
+                        if !kept_communities.contains(&kk) {
+                            continue;
+                        }
                         let layers = build_propensity_community_heatmap_layers(
                             &frame,
                             &cells,
@@ -455,6 +491,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                         data,
                         ccol_ix,
                         &marker_hulls_by_c,
+                        &kept_communities,
                         &level.tag,
                         &out_prefix,
                         &mut local_emitted,
@@ -481,7 +518,10 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
     if render_lr {
         if let Some(p) = lr_json_path {
             match lr_overlay::load_lr_json(&p) {
-                Ok(lr) => {
+                Ok(mut lr) => {
+                    if let Some(map) = batch_name_map.as_deref() {
+                        lr_overlay::remap_lr_batches(&mut lr, map);
+                    }
                     let n_sig = lr.results.iter().filter(|r| r.significant).count();
                     info!(
                         "Rendering LR overlays from {} ({} strata, {} results, {} significant)",
@@ -588,6 +628,22 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                                     }
                                     focal
                                 });
+                            // Per-core kept set for the LR overlay: same
+                            // `--min-cells-per-community` rule used by
+                            // markers / propensity heatmaps. Computed
+                            // here (not at level loop scope) because
+                            // the LR post-pass loads the final
+                            // propensity independently.
+                            let kept =
+                                match (final_dominant.as_deref(), final_aligned_prop.as_ref()) {
+                                    (Some(dom), Some(prop)) => Some(communities_above_threshold(
+                                        core,
+                                        dom,
+                                        prop.ncols(),
+                                        args.min_cells_per_community,
+                                    )),
+                                    _ => None,
+                                };
                             lr_overlay::render_lr_overlays_for_core(
                                 args,
                                 &frame,
@@ -597,6 +653,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                                 lr_expr.as_ref(),
                                 focal_set.as_ref(),
                                 final_dominant.as_deref(),
+                                kept.as_ref(),
                                 &lr_dir,
                             )
                         })
@@ -770,6 +827,35 @@ fn resolve_lr_json_path(args: &SrtPlotArgs, prefix: &str) -> Option<PathBuf> {
         .and_then(|m| m.outputs.lr_activity.map(PathBuf::from))
 }
 
+/// Communities with at least `min_cells` cells whose argmax falls in
+/// this core. Used to skip per-community plots (propensity heatmap,
+/// markers, LR overlays) for sparse communities **within a batch** —
+/// independent of the global `--min-edges-per-community` filter, which
+/// pools edges across batches.
+fn communities_above_threshold(
+    core: &partition::CoreSpec,
+    dominant: &[i64],
+    k: usize,
+    min_cells: usize,
+) -> HashSet<usize> {
+    if min_cells == 0 || k == 0 {
+        return (0..k).collect();
+    }
+    let mut counts = vec![0usize; k];
+    for &i in &core.cell_ixs {
+        let c = dominant.get(i).copied().unwrap_or(-1);
+        if c >= 0 && (c as usize) < k {
+            counts[c as usize] += 1;
+        }
+    }
+    counts
+        .iter()
+        .enumerate()
+        .filter(|(_, &n)| n >= min_cells)
+        .map(|(c, _)| c)
+        .collect()
+}
+
 fn align_entropy(cells: &CellTable, prop_cell_names: &[Box<str>], entropy: &[f32]) -> Vec<f32> {
     let mut out = vec![f32::NAN; cells.n()];
     for (src_row, name) in prop_cell_names.iter().enumerate() {
@@ -793,13 +879,20 @@ fn emit_marker_figures(
     data: &SparseIoVec,
     cell_col_index: &HashMap<Box<str>, usize>,
     hulls_by_community: &HashMap<i64, Vec<plot_utils::svg_emit::TopicLayer>>,
+    kept_communities: &HashSet<usize>,
     level_tag: &str,
     out_prefix: &str,
     emitted: &mut Vec<PathBuf>,
 ) -> anyhow::Result<()> {
-    // For each community, gather its top-N markers up-front.
+    // For each kept community, gather its top-N markers up-front.
+    // Sparse communities (below `--min-cells-per-community` in this
+    // core) are skipped here so they don't burn through the marker
+    // expression read budget.
     let mut plan: Vec<(usize /*k*/, Box<str>)> = Vec::new();
     for k in 0..gt.ncols() {
+        if !kept_communities.contains(&k) {
+            continue;
+        }
         for (_, gname) in markers::top_n_markers(gt, gene_names, k, args.top_markers) {
             plan.push((k, gname));
         }
@@ -868,7 +961,7 @@ fn emit_marker_figures(
         if let Some(h) = hulls_by_community.get(&(k as i64)) {
             layers.extend(h.iter().cloned());
         }
-        let out_stub = marker_out_path(out_prefix, level_tag, k, &gname);
+        let out_stub = marker_out_path(out_prefix, level_tag, k, &gname, core);
         emit_figure(&layers, frame, args, &out_stub, emitted, false)?;
     }
 
@@ -975,8 +1068,8 @@ fn emit_marker_summary(
     let svg = plot_utils::render_hinton(&mean, n_genes, k, &opts);
 
     let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
-    let stub = plot_dir
-        .join(PlotKind::Markers.subdir())
+    let stub = core
+        .subdir_in(&plot_dir.join(PlotKind::Markers.subdir()))
         .join(format!("{level_tag}.summary"));
 
     let with_ext = |ext: &str| -> PathBuf { PathBuf::from(format!("{}.{ext}", stub.display())) };
@@ -1000,17 +1093,16 @@ fn emit_marker_summary(
     Ok(())
 }
 
-fn marker_out_path(out_prefix: &str, level_tag: &str, k: usize, gname: &str) -> PathBuf {
-    let safe_gname: String = gname
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | ' ' => '_',
-            c => c,
-        })
-        .collect();
+fn marker_out_path(
+    out_prefix: &str,
+    level_tag: &str,
+    k: usize,
+    gname: &str,
+    core: &partition::CoreSpec,
+) -> PathBuf {
+    let safe_gname = partition::sanitize(gname);
     let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
-    plot_dir
-        .join(PlotKind::Markers.subdir())
+    core.subdir_in(&plot_dir.join(PlotKind::Markers.subdir()))
         .join(format!("{level_tag}.C{k}.{safe_gname}"))
 }
 

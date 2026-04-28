@@ -3,7 +3,6 @@ use std::fmt::{Debug, Display};
 
 use anndists::dist::DistL2;
 use hnsw_rs::prelude::*;
-use log::info;
 
 /// A dictionary (HNSW wrapper) for fast column look-up
 ///
@@ -41,6 +40,25 @@ where
 
     pub fn from_dmatrix(data: nalgebra::DMatrix<f32>, names: Vec<K>) -> Self {
         Self::from_dvector_views(data.column_iter().collect(), names)
+    }
+
+    /// Serial-insertion variant for use *inside* a rayon parallel section.
+    /// `from_*_views` use `parallel_insert_slice` which itself fans out via
+    /// rayon — calling that from another `par_iter` nests the pool and
+    /// causes contention.
+    pub fn from_dvector_views_serial(data: Vec<nalgebra::DVectorView<f32>>, names: Vec<K>) -> Self {
+        <ColumnDict<K> as ColumnDictOps<K, nalgebra::DVectorView<f32>>>::from_column_views_serial(
+            data, names,
+        )
+    }
+
+    pub fn from_ndarray_views_serial<'a>(
+        data: Vec<ndarray::ArrayView1<'a, f32>>,
+        names: Vec<K>,
+    ) -> Self {
+        <ColumnDict<K> as ColumnDictOps<K, ndarray::ArrayView1<'a, f32>>>::from_column_views_serial(
+            data, names,
+        )
     }
 
     pub fn empty_ndarray_views() -> Self {
@@ -171,6 +189,7 @@ where
 pub trait ColumnDictOps<K, V> {
     fn empty() -> Self;
     fn from_column_views(data: Vec<V>, names: Vec<K>) -> Self;
+    fn from_column_views_serial(data: Vec<V>, names: Vec<K>) -> Self;
 }
 
 impl<T, V> ColumnDictOps<T, V> for ColumnDict<T>
@@ -188,67 +207,92 @@ where
     }
 
     fn from_column_views(data: Vec<V>, names: Vec<T>) -> Self {
-        let nn = data.len();
+        build_column_dict(data, names, true)
+    }
 
-        debug_assert!(
-            nn == names.len(),
-            "Data and names must have the same length"
-        );
+    fn from_column_views_serial(data: Vec<V>, names: Vec<T>) -> Self {
+        build_column_dict(data, names, false)
+    }
+}
 
-        let data_vec: Vec<VecPoint> = (0..nn).map(|j| data[j].to_vp()).collect();
+fn build_column_dict<T, V>(data: Vec<V>, names: Vec<T>, parallel_insert: bool) -> ColumnDict<T>
+where
+    T: Clone + Eq + std::hash::Hash + Debug + Display,
+    V: Sync + MakeVecPoint,
+{
+    let nn = data.len();
 
-        let mut name2index: HashMap<T, usize> = Default::default();
+    debug_assert!(
+        nn == names.len(),
+        "Data and names must have the same length"
+    );
 
-        names.iter().enumerate().for_each(|(j, x)| {
-            name2index.insert(x.clone(), j);
-        });
+    let data_vec: Vec<VecPoint> = (0..nn).map(|j| data[j].to_vp()).collect();
 
-        // HNSW parameters
-        let max_nb_connection = 24; // M parameter
-        let nb_layer = 16.min((nn as f32).ln().ceil() as usize).max(1);
-        let ef_construction = 400;
+    let mut name2index: HashMap<T, usize> = Default::default();
 
-        let mut hnsw = Hnsw::<f32, DistL2>::new(
-            max_nb_connection,
-            nn.max(1),
-            nb_layer,
-            ef_construction,
-            DistL2 {},
-        );
+    names.iter().enumerate().for_each(|(j, x)| {
+        name2index.insert(x.clone(), j);
+    });
 
-        // Parallel insert — the key performance improvement over instant-distance
-        let data_for_insert: Vec<(&[f32], usize)> = data_vec
-            .iter()
-            .enumerate()
-            .map(|(id, vp)| (vp.data.as_slice(), id))
-            .collect();
+    // HNSW parameters — cheap data-adaptive heuristic.
+    // Why: hnswlib guidance is that M scales with intrinsic dim (M≈6 for d=4
+    // random vectors, M=48-64 for high-dim embeddings) and that
+    // M * ef_construction is roughly constant for a given build quality.
+    // sqrt(d) is a coarse proxy for intrinsic dim; clamp to the practical
+    // M ∈ [16, 48] range and pin the product near 9600 (the previous
+    // hand-tuned 24 * 400) so build cost stays roughly flat.
+    let dim = data_vec.first().map(|v| v.len()).unwrap_or(0);
+    let max_nb_connection = ((dim as f32).sqrt().round() as usize).clamp(16, 48);
+    let ef_construction = (9600 / max_nb_connection.max(1)).max(200);
+    let nb_layer = 16.min((nn as f32).ln().ceil() as usize).max(1);
 
-        info!(
-            "Building HNSW index: {} points, M={}, layers={}, ef={}",
-            nn, max_nb_connection, nb_layer, ef_construction
-        );
+    let mut hnsw = Hnsw::<f32, DistL2>::new(
+        max_nb_connection,
+        nn.max(1),
+        nb_layer,
+        ef_construction,
+        DistL2 {},
+    );
+
+    let data_for_insert: Vec<(&[f32], usize)> = data_vec
+        .iter()
+        .enumerate()
+        .map(|(id, vp)| (vp.data.as_slice(), id))
+        .collect();
+
+    // info!(
+    //     "Building HNSW index: {} points, M={}, layers={}, ef={}",
+    //     nn, max_nb_connection, nb_layer, ef_construction
+    // );
+    if parallel_insert {
         hnsw.parallel_insert_slice(&data_for_insert);
-        hnsw.set_searching_mode(true);
-        info!("HNSW index built");
+    } else {
+        // Called from inside a rayon parallel section — keep insertion serial
+        // so we don't recurse into the global pool.
+        for &item in &data_for_insert {
+            hnsw.insert_slice(item);
+        }
+    }
+    hnsw.set_searching_mode(true);
+    // info!("HNSW index built");
 
-        let ret = ColumnDict {
-            hnsw,
-            data_vec,
-            name2index,
-            names: names.clone(),
-        };
+    let ret = ColumnDict {
+        hnsw,
+        data_vec,
+        name2index,
+        names: names.clone(),
+    };
 
-        #[cfg(debug_assertions)]
-        {
-            // check if the name matches
-            for (i, x) in ret.names.iter().enumerate() {
-                if let Some(&j) = ret.name2index.get(x) {
-                    debug_assert_eq!(i, j);
-                }
+    #[cfg(debug_assertions)]
+    {
+        for (i, x) in ret.names.iter().enumerate() {
+            if let Some(&j) = ret.name2index.get(x) {
+                debug_assert_eq!(i, j);
             }
         }
-        ret
     }
+    ret
 }
 
 #[derive(Clone, Debug)]

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Args;
 use log::info;
+use matrix_util::common_io::mkdir_parent;
 
 use fagioli::mcmc::{McmcFitConfig, McmcPriorType, McmcSampler};
 use fagioli::summary_stats::common::{
@@ -86,6 +87,7 @@ pub struct FitSumstatMcmcArgs {
 }
 
 pub fn fit_sumstat_mcmc(args: &FitSumstatMcmcArgs) -> Result<()> {
+    mkdir_parent(&args.common.output)?;
     info!("Starting fit-sumstat-mcmc");
 
     let input = prepare_sumstat_input(&args.common)?;

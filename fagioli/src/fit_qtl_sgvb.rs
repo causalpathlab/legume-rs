@@ -20,7 +20,7 @@ use fagioli::io::results::{write_gene_summary, write_parameters, write_variant_r
 use fagioli::mapping::fit_qtl_helpers::*;
 use fagioli::mapping::pseudobulk::{collapse_pseudobulk, Membership};
 use fagioli::sgvb::{fit_block_weighted, ComputeDevice, FitConfig, ModelType, PriorType};
-use matrix_util::common_io::basename;
+use matrix_util::common_io::{basename, mkdir_parent};
 
 #[derive(Args, Debug, Clone)]
 pub struct FitQtlSgvbArgs {
@@ -323,6 +323,7 @@ pub struct FitQtlSgvbArgs {
 }
 
 pub fn fit_qtl_sgvb(args: &FitQtlSgvbArgs) -> Result<()> {
+    mkdir_parent(&args.output)?;
     info!("Starting fit-qtl-sgvb");
 
     let device = args.device.to_device(args.device_no)?;

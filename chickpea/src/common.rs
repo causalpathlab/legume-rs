@@ -29,7 +29,7 @@ pub enum ComputeDevice {
 }
 
 pub use matrix_param::traits::TwoStatParam;
-pub use matrix_util::common_io::remove_file;
+pub use matrix_util::common_io::{mkdir_parent, remove_file};
 pub use matrix_util::traits::*;
 
 pub use data_beans_alg::collapse_data::MultilevelCollapsingOps;

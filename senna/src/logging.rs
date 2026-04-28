@@ -7,13 +7,16 @@ use std::sync::LazyLock;
 pub static MULTI_PROGRESS: LazyLock<MultiProgress> = LazyLock::new(MultiProgress::new);
 
 /// Install `env_logger` wrapped in `indicatif_log_bridge::LogWrapper` so
-/// log messages render above any active progress bar. Pass `verbose=true`
-/// to force `RUST_LOG=info` when the env var isn't already set.
+/// log messages render above any active progress bar.
 pub fn init_logger(verbose: bool) {
-    if verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    let logger = env_logger::Builder::from_default_env().build();
+    let default_filter = if verbose {
+        matrix_util::common_io::VERBOSE_LOG_FILTER
+    } else {
+        matrix_util::common_io::QUIET_LOG_FILTER
+    };
+    let logger =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
+            .build();
     let max_level = logger.filter();
     let _ = indicatif_log_bridge::LogWrapper::new(MULTI_PROGRESS.clone(), logger)
         .try_init()

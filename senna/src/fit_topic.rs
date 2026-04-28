@@ -348,6 +348,8 @@ pub struct TopicArgs {
 }
 
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.out)?;
+
     let PreparedData {
         data_vec,
         collapsed_levels,

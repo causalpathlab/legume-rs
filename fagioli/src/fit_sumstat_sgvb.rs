@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Args;
 use log::info;
+use matrix_util::common_io::mkdir_parent;
 use matrix_util::traits::MatOps;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
@@ -123,6 +124,7 @@ pub struct FitSumstatSgvbArgs {
 }
 
 pub fn fit_sumstat_sgvb(args: &FitSumstatSgvbArgs) -> Result<()> {
+    mkdir_parent(&args.common.output)?;
     info!("Starting fit-sumstat-sgvb");
 
     let device = args.device.to_device(args.device_no)?;

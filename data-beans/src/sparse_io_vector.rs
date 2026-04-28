@@ -2,6 +2,7 @@
 
 use crate::sparse_io::*;
 
+use indicatif::{ParallelProgressIterator, ProgressBar, ProgressIterator, ProgressStyle};
 use log::info;
 use matrix_util::knn_match::ColumnDict;
 use matrix_util::knn_match::MakeVecPoint;
@@ -1207,12 +1208,16 @@ impl SparseIoVec {
         self._register_batches(
             feature_matrix,
             batch_membership,
-            |feature_matrix, batch_cells| {
+            |feature_matrix, batch_cells, parallel_insert| {
                 let columns = batch_cells
                     .iter()
                     .map(|&c| feature_matrix.column(c))
                     .collect::<Vec<_>>();
-                ColumnDict::<usize>::from_ndarray_views(columns, batch_cells.clone())
+                if parallel_insert {
+                    ColumnDict::<usize>::from_ndarray_views(columns, batch_cells.clone())
+                } else {
+                    ColumnDict::<usize>::from_ndarray_views_serial(columns, batch_cells.clone())
+                }
             },
         )
     }
@@ -1238,12 +1243,16 @@ impl SparseIoVec {
         self._register_batches(
             feature_matrix,
             batch_membership,
-            |feature_matrix, batch_cells| {
+            |feature_matrix, batch_cells, parallel_insert| {
                 let columns = batch_cells
                     .iter()
                     .map(|&c| feature_matrix.column(c))
                     .collect::<Vec<_>>();
-                ColumnDict::<usize>::from_dvector_views(columns, batch_cells.clone())
+                if parallel_insert {
+                    ColumnDict::<usize>::from_dvector_views(columns, batch_cells.clone())
+                } else {
+                    ColumnDict::<usize>::from_dvector_views_serial(columns, batch_cells.clone())
+                }
             },
         )
     }
@@ -1256,7 +1265,7 @@ impl SparseIoVec {
     ) -> anyhow::Result<()>
     where
         M: Sync,
-        F: Fn(&M, &Vec<usize>) -> ColumnDict<usize> + Sync,
+        F: Fn(&M, &Vec<usize>, bool) -> ColumnDict<usize> + Sync,
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
         let batches = partition_by_membership(batch_membership, None);
@@ -1264,19 +1273,63 @@ impl SparseIoVec {
         let ntot = self.num_columns();
         let mut col_to_batch = vec![0; ntot];
 
-        let mut idx_name_glob_dict = batches
-            .iter()
-            .enumerate()
-            .par_bridge()
-            .map(|(batch_index, (batch_name, batch_glob_indices))| {
-                (
-                    batch_index,
-                    batch_name.to_string().into_boxed_str(),
-                    batch_glob_indices.clone(),
-                    create_column_dict(feature_matrix, batch_glob_indices),
-                )
-            })
-            .collect::<Vec<_>>();
+        // Pick the parallelism level with the most work: when batches >=
+        // threads, parallelize the outer loop and keep HNSW insertion
+        // serial; when batches are few, build batches sequentially and let
+        // each HNSW build use the full thread pool. Either way avoids
+        // nested rayon contention.
+        let n_threads = rayon::current_num_threads();
+        let outer_parallel = batches.len() >= n_threads;
+
+        info!(
+            "building per-batch HNSW indices ({} batches, {} cells, {}) ...",
+            batches.len(),
+            ntot,
+            if outer_parallel {
+                "outer parallel"
+            } else {
+                "inner parallel"
+            }
+        );
+
+        let pb = ProgressBar::new(batches.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] {bar:30.cyan/blue} {pos}/{len} batches HNSW",
+            )
+            .unwrap()
+            .progress_chars("##-"),
+        );
+
+        let enumerated: Vec<_> = batches.iter().enumerate().collect();
+        let mut idx_name_glob_dict: Vec<_> = if outer_parallel {
+            enumerated
+                .into_par_iter()
+                .progress_with(pb.clone())
+                .map(|(batch_index, (batch_name, batch_glob_indices))| {
+                    (
+                        batch_index,
+                        batch_name.to_string().into_boxed_str(),
+                        batch_glob_indices.clone(),
+                        create_column_dict(feature_matrix, batch_glob_indices, false),
+                    )
+                })
+                .collect()
+        } else {
+            enumerated
+                .into_iter()
+                .progress_with(pb.clone())
+                .map(|(batch_index, (batch_name, batch_glob_indices))| {
+                    (
+                        batch_index,
+                        batch_name.to_string().into_boxed_str(),
+                        batch_glob_indices.clone(),
+                        create_column_dict(feature_matrix, batch_glob_indices, true),
+                    )
+                })
+                .collect()
+        };
+        pb.finish_and_clear();
 
         idx_name_glob_dict.sort_by_key(|&(idx, _, _, _)| idx);
 

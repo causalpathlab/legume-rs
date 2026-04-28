@@ -1,5 +1,14 @@
 #![allow(dead_code)]
 
+/// Default `env_logger` filter when verbose mode is on. Promotes everything
+/// to info but pins `hnsw_rs` at warn — its info output spams ~5–7 lines per
+/// HNSW build, which is unreadable when we build one per batch. Override via
+/// `RUST_LOG=...` to get full hnsw_rs output back.
+pub const VERBOSE_LOG_FILTER: &str = "info,hnsw_rs=warn";
+
+/// Default `env_logger` filter when verbose mode is off.
+pub const QUIET_LOG_FILTER: &str = "warn";
+
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
 use std::ffi::OsStr;
@@ -308,6 +317,25 @@ pub fn open_buf_writer(output_file: &str) -> anyhow::Result<Box<dyn std::io::Wri
 pub fn mkdir(file: &str) -> anyhow::Result<()> {
     let path = Path::new(file);
     std::fs::create_dir_all(path)?;
+    Ok(())
+}
+
+/// Ensure the parent directory of an output path/prefix exists.
+///
+/// CLI subcommands typically take an `--out` value used as a *file
+/// prefix* (e.g. `results/run1` → writes `results/run1.foo.parquet`).
+/// Creates the parent directory tree (`results/`) if missing, but
+/// never creates a directory named after the prefix itself
+/// (`results/run1/`).
+///
+/// `Path::parent()` returns `Some("")` for a bare filename like
+/// `"run1"`; `create_dir_all` would error on that, so skip it.
+pub fn mkdir_parent(path: &str) -> anyhow::Result<()> {
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
     Ok(())
 }
 

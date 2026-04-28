@@ -182,6 +182,8 @@ pub struct ClusteringArgs {
 }
 
 pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.out)?;
+
     // Read latent representation
     let MatWithNames {
         rows: cell_names,

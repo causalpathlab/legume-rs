@@ -5,6 +5,7 @@ use clap::Args;
 use data_beans::sparse_io::SparseIo;
 use data_beans::sparse_io::SparseIoBackend;
 use log::info;
+use matrix_util::common_io::mkdir_parent;
 use rustc_hash::FxHashSet;
 
 #[derive(Args, Debug)]
@@ -24,6 +25,8 @@ pub struct FromMultiomeArgs {
 }
 
 pub fn run_from_multiome(args: &FromMultiomeArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.out)?;
+
     let backend = SparseIoBackend::Zarr;
 
     let backends = multiome::convert_multiome_h5(&args.h5_file, &args.out, &backend)?;
