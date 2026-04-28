@@ -164,7 +164,7 @@ enum Commands {
                       - Optionally, expression data (.zarr or .h5)\n\n\
                       Outputs:\n\
                       - {out}.propensity.parquet: per-vertex propensity (N x K)\n\
-                      \x20 Columns: propensity_0 .. propensity_{K-1}, cluster (argmax),\n\
+                      \x20 Columns: C0 .. C{K-1}, cluster (argmax),\n\
                       \x20 entropy (Shannon, nats), plus optional coord trailer.\n\
                       - {out}.edge_cluster.parquet: edge cluster assignments\n\
                       - {out}.genes.parquet: cluster-specific gene expression (when expr_data_files provided).\n\

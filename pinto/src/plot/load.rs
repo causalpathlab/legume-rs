@@ -238,39 +238,114 @@ pub fn read_propensity(
             .ok_or_else(|| anyhow::anyhow!("non-UTF8 path: {path:?}"))?,
     )?;
 
-    let mut prop_idx: Vec<usize> = Vec::new();
+    // Pull propensity columns by NAME. The current writer emits
+    // `C{c}` (e.g. "C0","C1",…,"C{K-1}") so the column name itself
+    // declares "this is community c". Older parquets that wrote bare
+    // integer names ("0","1",…) are still accepted for backwards-compat.
+    // This makes "column j ↔ community j" an explicit, checked invariant
+    // rather than a positional convention.
     let mut cluster_idx: Option<usize> = None;
     let mut entropy_idx: Option<usize> = None;
+    let mut prop_named: Vec<(i64, usize)> = Vec::new();
     for (j, name) in cols.iter().enumerate() {
         match name.as_ref() {
             "cluster" => cluster_idx = Some(j),
             "entropy" => entropy_idx = Some(j),
-            _ if !exclude_cols.contains(name) => prop_idx.push(j),
-            _ => {}
+            _ if exclude_cols.contains(name) => {}
+            n => match parse_community_col_name(n) {
+                Some(c) => prop_named.push((c, j)),
+                None => anyhow::bail!(
+                    "{path:?}: propensity column {n:?} is not a community ID. \
+                     Expected names \"C0\",\"C1\",…,\"C{{K-1}}\" plus optional \"entropy\"/coord cols."
+                ),
+            },
         }
     }
 
-    if prop_idx.is_empty() {
+    if prop_named.is_empty() {
         anyhow::bail!("{path:?}: no propensity columns found (all columns excluded)");
     }
 
-    let n = mat.nrows();
-    let k = prop_idx.len();
-    let mut prop = Mat::zeros(n, k);
-    for (out_j, &src_j) in prop_idx.iter().enumerate() {
-        for i in 0..n {
-            prop[(i, out_j)] = mat[(i, src_j)];
+    // Pin "matrix column j ↔ community j" by mapping each named column
+    // to its parsed ID. Missing intermediate IDs (e.g. labels {0,1,3,5}
+    // → 2 and 4 absent) are tolerated by zero-filling those columns and
+    // warning, so K stays = max_id+1 and every other plot's
+    // `colors.color(c)` keeps working for the present communities. Negative
+    // IDs are rejected — the writer never emits them, so seeing one means
+    // genuine schema corruption.
+    prop_named.sort_by_key(|&(c, _)| c);
+    if let Some(&(c0, _)) = prop_named.first() {
+        if c0 < 0 {
+            anyhow::bail!(
+                "{path:?}: propensity has negative community ID {c0}; expected non-negative integers."
+            );
         }
     }
+    let max_id = prop_named.last().map(|&(c, _)| c).unwrap_or(-1);
+    let k = (max_id + 1).max(0) as usize;
+    let present: HashSet<i64> = prop_named.iter().map(|&(c, _)| c).collect();
+    let missing: Vec<i64> = (0..k as i64).filter(|c| !present.contains(c)).collect();
+    if !missing.is_empty() {
+        log::warn!(
+            "{path:?}: propensity is missing community columns {missing:?} \
+             (have 0..{} with gaps); zero-filling so plot indices stay aligned.",
+            k - 1,
+        );
+    }
+
+    let n = mat.nrows();
+    let mut prop = Mat::zeros(n, k);
+    // Source-column index per *present* community ID. Index by community
+    // ID so the loop below can populate non-contiguous IDs directly.
+    let mut src_for: Vec<Option<usize>> = vec![None; k];
+    for &(c, j) in &prop_named {
+        src_for[c as usize] = Some(j);
+    }
+    for (out_j, slot) in src_for.iter().enumerate() {
+        if let Some(src_j) = *slot {
+            for i in 0..n {
+                prop[(i, out_j)] = mat[(i, src_j)];
+            }
+        }
+    }
+    // For argmax fallback below, only consider present columns so that
+    // an all-zero (missing) community can't accidentally become the
+    // argmax when a row has no signal.
+    let prop_idx: Vec<usize> = prop_named.iter().map(|&(_, j)| j).collect();
 
     let cluster = match cluster_idx {
         Some(j) => (0..n).map(|i| mat[(i, j)] as i64).collect::<Vec<_>>(),
-        None => (0..n).map(|i| argmax_row(&mat, i, &prop_idx)).collect(),
+        None => (0..n)
+            .map(|i| {
+                if prop_idx.is_empty() {
+                    -1
+                } else {
+                    let rank = argmax_row(&mat, i, &prop_idx) as usize;
+                    prop_named[rank].0
+                }
+            })
+            .collect(),
     };
 
     let entropy = entropy_idx.map(|j| (0..n).map(|i| mat[(i, j)]).collect::<Vec<_>>());
 
     Ok((prop, cluster, entropy, rows))
+}
+
+/// Parse a community-column / community-label string into its integer ID.
+///
+/// Accepts the current `C{c}` schema and two legacy forms — bare integer
+/// (`"5"`, older `pinto lc`) and `propensity_{c}` (older `pinto propensity`)
+/// — so existing parquets on disk still load. Returns `None` for anything
+/// else (e.g. `"entropy"`, coord names, malformed labels).
+fn parse_community_col_name(name: &str) -> Option<i64> {
+    if let Some(rest) = name.strip_prefix('C') {
+        return rest.parse::<i64>().ok();
+    }
+    if let Some(rest) = name.strip_prefix("propensity_") {
+        return rest.parse::<i64>().ok();
+    }
+    name.parse::<i64>().ok()
 }
 
 fn argmax_row(mat: &Mat, row: usize, cols: &[usize]) -> i64 {
@@ -390,19 +465,52 @@ pub fn read_gene_community(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         triples.push((g_pos, c_pos, mean));
     }
 
-    // Sort communities numerically by their string label so column k
-    // in the returned matrix corresponds to community `k` in the
-    // propensity parquet (writer emits "0".."K-1").
-    let mut col_order: Vec<usize> = (0..community_labels.len()).collect();
-    col_order.sort_by_key(|&i| community_labels[i].parse::<i64>().unwrap_or(i64::MAX));
-    let new_index: HashMap<usize, usize> = col_order
+    // Map each label to its parsed community ID, then place column j of
+    // the returned matrix at community j (matching `read_propensity`'s
+    // invariant). Missing intermediate IDs are zero-filled with a warn,
+    // not a hard error, so a clustering that drops a community between
+    // levels still produces a usable plot.
+    let mut parsed: Vec<(i64, usize)> = community_labels
         .iter()
         .enumerate()
-        .map(|(new_i, &old_i)| (old_i, new_i))
+        .map(|(i, lab)| {
+            let c = parse_community_col_name(lab).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{path_str}: gene_community `community` label {lab:?} is not a community ID \
+                     (expected \"C{{c}}\" or bare integer)."
+                )
+            })?;
+            Ok::<_, anyhow::Error>((c, i))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    parsed.sort_by_key(|&(c, _)| c);
+    if let Some(&(c0, _)) = parsed.first() {
+        if c0 < 0 {
+            anyhow::bail!(
+                "{path_str}: gene_community has negative community ID {c0}; expected non-negative integers."
+            );
+        }
+    }
+    let max_id = parsed.last().map(|&(c, _)| c).unwrap_or(-1);
+    let n_communities = (max_id + 1).max(0) as usize;
+    let present: HashSet<i64> = parsed.iter().map(|&(c, _)| c).collect();
+    let missing: Vec<i64> = (0..n_communities as i64)
+        .filter(|c| !present.contains(c))
+        .collect();
+    if !missing.is_empty() {
+        log::warn!(
+            "{path_str}: gene_community is missing communities {missing:?} \
+             (have 0..{} with gaps); zero-filling so plot indices stay aligned.",
+            n_communities.saturating_sub(1),
+        );
+    }
+    // old c_pos (insertion order) → new column = community ID
+    let new_index: HashMap<usize, usize> = parsed
+        .iter()
+        .map(|&(c, old_i)| (old_i, c as usize))
         .collect();
 
     let n_genes = gene_names.len();
-    let n_communities = community_labels.len();
     let mut mat = Mat::zeros(n_genes, n_communities);
     for (g, c_old, v) in triples {
         let c_new = new_index[&c_old];

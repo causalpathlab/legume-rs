@@ -174,9 +174,10 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
     let entropy_vec = crate::link_community::profiles::shannon_entropy_rows(&prop_nk);
     let entropy_mat = Mat::from_column_slice(nvertices, 1, entropy_vec.as_slice());
 
-    // Build propensity column names: propensity_0 .. propensity_{K-1}, cluster, entropy
+    // C0..C{K-1} + cluster + entropy — same schema as `pinto lc` so the
+    // plot reader handles either subcommand's output uniformly.
     let mut col_names: Vec<Box<str>> = (0..num_clusters)
-        .map(|k| format!("propensity_{}", k).into_boxed_str())
+        .map(|k| format!("C{}", k).into_boxed_str())
         .collect();
     col_names.push("cluster".into());
     col_names.push("entropy".into());

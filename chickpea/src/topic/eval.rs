@@ -41,10 +41,20 @@ fn save_parameters(
 
     info!("Saving parameters to {}.*", out_prefix);
 
-    finest_dec
-        .log_beta_atac
-        .exp()?
-        .to_parquet(&format!("{}.atac_dict.parquet", out_prefix))?;
+    // `T{c}` topic-column names for the three K-dim outputs below;
+    // single closure keeps them in sync if K changes.
+    let topic_col_names = |t: &Tensor| -> Vec<Box<str>> {
+        let k = t.dims().last().copied().unwrap_or(0);
+        (0..k).map(|i| format!("T{i}").into_boxed_str()).collect()
+    };
+
+    let atac_dict_t = finest_dec.log_beta_atac.exp()?;
+    let atac_dict_cols = topic_col_names(&atac_dict_t);
+    atac_dict_t.to_parquet_with_names(
+        &format!("{}.atac_dict.parquet", out_prefix),
+        (None, None),
+        Some(&atac_dict_cols),
+    )?;
 
     let m_gc = finest_susie.forward()?;
     let is_coarsened = ctx.rna_coarsenings.last().unwrap().is_some()
@@ -56,10 +66,13 @@ fn save_parameters(
     } else {
         rna_dictionary_from_m(&m_gc, &finest_dec.log_beta_atac, ctx.flat_cis_indices)?.log()?
     };
-    finest_dec
-        .gated_log_rna_dictionary(&log_w_linked)?
-        .exp()?
-        .to_parquet(&format!("{}.rna_dict.parquet", out_prefix))?;
+    let rna_dict_t = finest_dec.gated_log_rna_dictionary(&log_w_linked)?.exp()?;
+    let rna_dict_cols = topic_col_names(&rna_dict_t);
+    rna_dict_t.to_parquet_with_names(
+        &format!("{}.rna_dict.parquet", out_prefix),
+        (None, None),
+        Some(&rna_dict_cols),
+    )?;
 
     finest_dec
         .gate_alpha()?
@@ -73,9 +86,12 @@ fn save_parameters(
             .to_parquet(&format!("{}.alpha_amb.parquet", out_prefix))?;
     }
 
-    finest_dec
-        .log_beta_atac
-        .to_parquet(&format!("{}.log_beta.parquet", out_prefix))?;
+    let log_beta_cols = topic_col_names(&finest_dec.log_beta_atac);
+    finest_dec.log_beta_atac.to_parquet_with_names(
+        &format!("{}.log_beta.parquet", out_prefix),
+        (None, None),
+        Some(&log_beta_cols),
+    )?;
 
     let linkage_indices = if is_coarsened {
         let (dg, dp) = model.level_dims[num_levels - 1];
@@ -160,7 +176,16 @@ fn save_latent(model: &TrainedModel, ctx: &EvalContext, out_prefix: &str) -> any
         all_prop.push(log_z.exp()?);
     }
 
-    Tensor::cat(&all_prop, 0)?.to_parquet(&format!("{}.prop.parquet", out_prefix))?;
+    let prop = Tensor::cat(&all_prop, 0)?;
+    let k_topics = prop.dims().last().copied().unwrap_or(0);
+    let prop_topic_cols: Vec<Box<str>> = (0..k_topics)
+        .map(|i| format!("T{i}").into_boxed_str())
+        .collect();
+    prop.to_parquet_with_names(
+        &format!("{}.prop.parquet", out_prefix),
+        (None, None),
+        Some(&prop_topic_cols),
+    )?;
     if collect_rho {
         Tensor::cat(&all_rho, 0)?.to_parquet(&format!("{}.rho.parquet", out_prefix))?;
     }

@@ -513,7 +513,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     z_nk.to_parquet_with_names(
         &(args.out.to_string() + ".latent.parquet"),
         (Some(&cell_names), Some("cell")),
-        None,
+        Some(&axis_id_names("T", z_nk.ncols())),
     )?;
 
     // pb_latent omitted: indexed encoder's PB-level forward pass isn't
