@@ -12,7 +12,7 @@ use fagioli::io::cell_annotations::{
 };
 use fagioli::mapping::pseudobulk::{collapse_pseudobulk, Membership};
 use matrix_param::io::ParamIo;
-use matrix_util::common_io::basename;
+use matrix_util::common_io::{basename, mkdir_parent};
 
 #[derive(Args, Debug, Clone)]
 pub struct PseudobulkArgs {
@@ -53,6 +53,8 @@ pub struct PseudobulkArgs {
 }
 
 pub fn pseudobulk(args: &PseudobulkArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.output)?;
+
     // 1. Open SC backend(s)
     let attach_data_name = args.sc_backend_files.len() > 1;
     let mut data_vec = SparseIoVec::new();

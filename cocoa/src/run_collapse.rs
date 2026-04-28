@@ -6,7 +6,7 @@ use clap::Parser;
 use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
 use data_beans_alg::pseudobulk::collapse_pseudobulk_weighted;
 use matrix_param::io::ParamIo;
-use matrix_util::common_io::write_lines;
+use matrix_util::common_io::{mkdir_parent, write_lines};
 use rustc_hash::FxHashMap as HashMap;
 
 #[derive(Parser, Debug, Clone)]
@@ -108,6 +108,8 @@ pub struct CollapseArgs {
 }
 
 pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.out)?;
+
     let data = read_input_data(InputDataArgs {
         data_files: args.data_files,
         indv_files: args.indv_files,

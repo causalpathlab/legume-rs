@@ -146,6 +146,8 @@ pub struct SvdArgs {
 }
 
 pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.out)?;
+
     // 1. Read the data with batch membership
     let SparseDataWithBatch {
         data: mut data_vec,

@@ -8,6 +8,7 @@ use crate::stat::*;
 use clap::Parser;
 use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
 use matrix_param::io::*;
+use matrix_util::common_io::mkdir_parent;
 use matrix_util::traits::{IoOps, MatOps};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -243,6 +244,8 @@ pub struct DiffArgs {
 /////////////////////////////////////
 
 pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.out)?;
+
     let mut data = read_input_data(InputDataArgs {
         data_files: args.data_files,
         indv_files: Some(args.indv_files),

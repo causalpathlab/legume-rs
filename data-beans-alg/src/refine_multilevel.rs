@@ -62,37 +62,39 @@ fn build_bbknn_neighbors(
     knn: usize,
 ) -> anyhow::Result<Vec<Vec<usize>>> {
     use matrix_util::knn_match::MakeVecPoint;
+    use rayon::prelude::*;
     let num_sc = layout.cell_counts.len();
     let cell_oversample = (knn * 4 + 1).max(knn);
 
-    let mut result = Vec::with_capacity(num_sc);
-    for sc in 0..num_sc {
-        let sc_batch = layout.super_cell_to_batch[sc];
-        let centroid = layout.centroids.column(sc).to_vp();
-        let mut all_scs: Vec<usize> = Vec::new();
-        for (b, bknn) in batch_knn_lookup.iter().enumerate() {
-            if b == sc_batch {
-                continue;
-            }
-            let (cells, _dists) = bknn.search_by_query_data(&centroid, cell_oversample)?;
-            let mut seen: Vec<usize> = Vec::new();
-            for &c in &cells {
-                let other_sc = layout.cell_to_sc[c];
-                if other_sc == usize::MAX || other_sc == sc {
+    (0..num_sc)
+        .into_par_iter()
+        .map(|sc| -> anyhow::Result<Vec<usize>> {
+            let sc_batch = layout.super_cell_to_batch[sc];
+            let centroid = layout.centroids.column(sc).to_vp();
+            let mut all_scs: Vec<usize> = Vec::new();
+            for (b, bknn) in batch_knn_lookup.iter().enumerate() {
+                if b == sc_batch {
                     continue;
                 }
-                if !seen.contains(&other_sc) {
-                    seen.push(other_sc);
-                    if seen.len() >= knn {
-                        break;
+                let (cells, _dists) = bknn.search_by_query_data(&centroid, cell_oversample)?;
+                let mut seen: Vec<usize> = Vec::new();
+                for &c in &cells {
+                    let other_sc = layout.cell_to_sc[c];
+                    if other_sc == usize::MAX || other_sc == sc {
+                        continue;
+                    }
+                    if !seen.contains(&other_sc) {
+                        seen.push(other_sc);
+                        if seen.len() >= knn {
+                            break;
+                        }
                     }
                 }
+                all_scs.extend(seen);
             }
-            all_scs.extend(seen);
-        }
-        result.push(all_scs);
-    }
-    Ok(result)
+            Ok(all_scs)
+        })
+        .collect()
 }
 
 /// Candidate set per super-cell = siblings ∩ (groups of BBKNN neighbors),

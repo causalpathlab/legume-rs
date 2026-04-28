@@ -40,6 +40,7 @@ use crate::util::common::*;
 use crate::util::graph_coarsen::*;
 use crate::util::input::*;
 use data_beans_alg::random_projection::RandProjOps;
+use matrix_util::common_io::mkdir_parent;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
@@ -50,6 +51,8 @@ pub use crate::link_community::args::SrtLinkCommunityArgs;
 pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()> {
     let c = &args.common;
     let k = args.n_communities;
+
+    mkdir_parent(&c.out)?;
 
     //////////////////////////////////////////////////////
     // 1. Load data (with or without coordinates)       //

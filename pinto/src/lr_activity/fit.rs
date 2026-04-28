@@ -54,6 +54,7 @@ use data_beans::convert::try_open_or_convert;
 use data_beans_alg::random_projection::{binary_sort_columns, RandProjOps};
 use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::{CalibrateTarget, Inference, TwoStatParam};
+use matrix_util::common_io::mkdir_parent;
 use matrix_util::membership::GeneIndexResolver;
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
@@ -88,6 +89,7 @@ const MIN_SAMPLES_PER_STRATUM: usize = 4;
 
 pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     let c = &args.common;
+    mkdir_parent(&c.out)?;
 
     //////////////////////////////////////////////////////
     // 1. Load expression + resolve gene index map

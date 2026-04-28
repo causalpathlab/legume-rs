@@ -8,7 +8,7 @@ use clap::Parser;
 use data_beans::simulations::core::{sample_cnv_blocks, CnvSimOut, CnvSimParams};
 use indicatif::ParallelProgressIterator;
 use log::info;
-use matrix_util::common_io::{mkdir, write_lines, write_types};
+use matrix_util::common_io::{mkdir_parent, write_lines, write_types};
 use matrix_util::mtx_io;
 use matrix_util::traits::{IoOps, MatOps, SampleOps};
 use rand::SeedableRng;
@@ -388,6 +388,8 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
         ));
     }
 
+    mkdir_parent(&args.out)?;
+
     let depth_gamma_hyperparam = (args.gamma_hyperparam[0], args.gamma_hyperparam[1]);
 
     let n_indv = args.n_exposure * args.n_samples_per_exposure;
@@ -440,7 +442,6 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
     info!("Successfully simulated");
 
     let output = args.out.clone();
-    mkdir(&output)?;
 
     let backend = args.backend.clone();
     let backend_file = match backend {

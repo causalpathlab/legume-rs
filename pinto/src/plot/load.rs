@@ -8,6 +8,8 @@
 //! run manifest.
 
 use crate::util::common::*;
+use data_beans::hdf5_io::strip_backend_suffix;
+use matrix_util::common_io::basename;
 use matrix_util::parquet::peek_parquet_field_names;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::{Row, RowAccessor};
@@ -517,4 +519,92 @@ pub fn read_gene_community(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         mat[(g, c_new)] = v;
     }
     Ok((mat, gene_names))
+}
+
+/// Map "0","1",… numeric batch labels to the friendly basenames of the
+/// upstream input files (`metadata.json::data_files`).
+///
+/// `pinto svd` assigns string-of-integer batch labels (`"0"`, `"1"`, …)
+/// when the user passes multiple data files without an explicit
+/// `--batch-files`, and these labels propagate through
+/// `coord_pairs.parquet` into the plot. The user-facing batch name is
+/// the input file's basename (without the `.zarr` / `.h5` / `.zarr.zip`
+/// extension), which is what the data-beans merger uses internally —
+/// reusing that here keeps the plot dirs consistent with how the
+/// upstream code names batches.
+///
+/// Returns the resolved name table when all current labels parse as
+/// non-negative integers `< data_files.len()`. `None` means the labels
+/// are already strings (user supplied real batch names) or the
+/// metadata is missing — no remap is applied in either case.
+pub fn resolve_batch_name_map(
+    cells_batches: &[Box<str>],
+    data_files: &[String],
+) -> Option<Vec<Box<str>>> {
+    if data_files.is_empty() {
+        return None;
+    }
+    // Every existing label must be a non-negative integer that indexes
+    // into `data_files`; one non-numeric label is enough to bail (the
+    // user already supplied human-readable batch names).
+    for b in cells_batches {
+        let parsed: Result<usize, _> = b.parse();
+        match parsed {
+            Ok(i) if i < data_files.len() => {}
+            _ => return None,
+        }
+    }
+    Some(unique_batch_names_from_data_files(data_files))
+}
+
+/// Apply the index→name table from `resolve_batch_name_map` to a slice
+/// of batch labels. Caller owns the slice; labels that don't parse are
+/// left as-is (defensive — `resolve_batch_name_map` already guards).
+pub fn remap_batch_labels(labels: &mut [Box<str>], name_map: &[Box<str>]) {
+    for b in labels.iter_mut() {
+        if let Ok(i) = b.parse::<usize>() {
+            if let Some(friendly) = name_map.get(i) {
+                *b = friendly.clone();
+            }
+        }
+    }
+}
+
+/// Mirror of `data_beans::handlers::merging::generate_unique_batch_names`,
+/// reimplemented here because that helper sits inside a non-public
+/// `handlers` module. Strips backend suffixes from each file's
+/// basename and disambiguates duplicates with a `_{n}` counter so the
+/// returned vector is index-aligned with `data_files`.
+fn unique_batch_names_from_data_files(data_files: &[String]) -> Vec<Box<str>> {
+    let bare: Vec<Box<str>> = data_files
+        .iter()
+        .map(|f| {
+            basename(f)
+                .map(|b| {
+                    let stripped = strip_backend_suffix(&b);
+                    if stripped.len() == b.len() {
+                        b
+                    } else {
+                        stripped.into()
+                    }
+                })
+                .unwrap_or_else(|_| f.clone().into_boxed_str())
+        })
+        .collect();
+    let mut counts: HashMap<Box<str>, usize> = HashMap::default();
+    for n in &bare {
+        *counts.entry(n.clone()).or_insert(0) += 1;
+    }
+    let mut counters: HashMap<Box<str>, usize> = HashMap::default();
+    bare.iter()
+        .map(|n| match counts.get(n).copied().unwrap_or(0) {
+            0 | 1 => n.clone(),
+            _ => {
+                let c = counters.entry(n.clone()).or_insert(0);
+                let out = format!("{n}_{c}").into_boxed_str();
+                *c += 1;
+                out
+            }
+        })
+        .collect()
 }

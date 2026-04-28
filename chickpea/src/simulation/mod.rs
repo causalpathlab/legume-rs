@@ -96,6 +96,8 @@ pub struct SimLinkArgs {
 }
 
 pub fn run_sim_link(args: &SimLinkArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.out)?;
+
     let g = args.n_genes;
     let p = args.n_peaks;
     let n = args.n_cells;

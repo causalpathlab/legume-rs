@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Args;
 use log::info;
+use matrix_util::common_io::mkdir_parent;
 use nalgebra::DMatrix;
 use rand::SeedableRng;
 use rayon::prelude::*;
@@ -139,6 +140,7 @@ const SEED_PHENOTYPE: u64 = 200;
 const SEED_EFFECTS: u64 = 300;
 
 pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
+    mkdir_parent(&args.output)?;
     info!("Starting sim-sumstat");
 
     // Create htslib thread pool for parallel BGZF compression

@@ -283,6 +283,8 @@ pub struct IndexedTopicArgs {
 }
 
 pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.out)?;
+
     let PreparedData {
         data_vec,
         collapsed_levels,

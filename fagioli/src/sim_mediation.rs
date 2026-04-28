@@ -21,6 +21,7 @@ use fagioli::summary_stats::{
     write_ld_blocks, write_mediation_ground_truth, EqtlSumstatWriter, GeneTableInput, LdBlock,
     LdBlockParams, LdScoreWriter, SnpWriterParams, SumstatRecord, SumstatWriter,
 };
+use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_util::subset_columns;
 
 #[derive(Args, Debug, Clone)]
@@ -262,6 +263,7 @@ fn remap_sumstat_indices(records: Vec<SumstatRecord>, cis_snps: &[usize]) -> Vec
 }
 
 pub fn sim_mediation(args: &SimMediationArgs) -> Result<()> {
+    mkdir_parent(&args.output)?;
     info!("Starting sim-mediation");
 
     let num_threads = rayon::current_num_threads().max(1) as u32;

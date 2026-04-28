@@ -101,6 +101,8 @@ pub struct EvalTopicArgs {
 }
 
 pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.out)?;
+
     let metadata = TopicModelMetadata::load(&args.model)?;
     info!(
         "Model: {} topics, {} features (encoder {}), decoders: {:?}",

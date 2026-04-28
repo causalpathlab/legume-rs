@@ -194,6 +194,7 @@ pub struct PlotArgs {
 
 pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
     let resolved = resolve_inputs(args)?;
+    mkdir_parent(&resolved.out)?;
     let coords_by_name = read_cell_coords(&resolved.cell_coords)?;
     let x = coords_by_name
         .get("x")
