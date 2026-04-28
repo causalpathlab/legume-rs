@@ -525,13 +525,13 @@ where
     z_nk_bulk.to_parquet_with_names(
         &(config.out_prefix.to_string() + ".deconv.parquet"),
         (Some(&bulk.samples), Some("sample")),
-        None,
+        Some(&axis_id_names("T", z_nk_bulk.ncols())),
     )?;
 
     delta_mean.to_parquet_with_names(
         &(config.out_prefix.to_string() + ".bulk_delta.parquet"),
         (Some(config.gene_names), Some("gene")),
-        None,
+        Some(&axis_id_names("T", delta_mean.ncols())),
     )?;
     info!("Wrote bulk deconvolution results");
     Ok(())
@@ -547,10 +547,11 @@ pub(crate) fn write_indexed_dictionary<Dec: IndexedDecoderT>(
         .get_dictionary()?
         .to_device(&candle_core::Device::Cpu)?;
 
+    let k_topics = dict_tensor.dims().last().copied().unwrap_or(0);
     dict_tensor.to_parquet_with_names(
         &(out_prefix.to_string() + ".dictionary.parquet"),
         (Some(gene_names), Some("gene")),
-        None,
+        Some(&axis_id_names("T", k_topics)),
     )?;
     Ok(())
 }

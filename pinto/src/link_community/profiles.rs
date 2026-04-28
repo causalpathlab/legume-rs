@@ -461,7 +461,7 @@ pub fn write_gene_community_param(
 ) -> anyhow::Result<()> {
     use matrix_param::traits::Inference;
     let k = param.posterior_mean().ncols();
-    let community_names: Vec<Box<str>> = (0..k).map(|i| i.to_string().into_boxed_str()).collect();
+    let community_names: Vec<Box<str>> = (0..k).map(|i| format!("C{i}").into_boxed_str()).collect();
     param.to_melted_parquet(
         &(out_prefix.to_string() + ".gene_community.parquet"),
         (Some(gene_names), Some("gene")),

@@ -499,7 +499,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     z_nk.to_parquet_with_names(
         &(args.out.to_string() + ".latent.parquet"),
         (Some(&cell_names), Some("cell")),
-        None,
+        Some(&axis_id_names("T", z_nk.ncols())),
     )?;
 
     // CNV detection using topic proportions as cell-type membership
@@ -803,7 +803,7 @@ impl DecoderExtras for VmfTopicDecoder {
         out_dk.to_parquet_with_names(
             &(out_prefix.to_string() + ".dictionary.parquet"),
             (Some(gene_names), Some("gene")),
-            None,
+            Some(&axis_id_names("T", out_dk.ncols())),
         )?;
         Ok(())
     }
@@ -942,12 +942,8 @@ where
                 pb_latent_pk[(pi, kj)] = *v;
             }
         }
-        let pb_names: Vec<Box<str>> = (0..n_pb)
-            .map(|i| format!("PB_{i}").into_boxed_str())
-            .collect();
-        let topic_names: Vec<Box<str>> = (0..k)
-            .map(|i| format!("topic_{i}").into_boxed_str())
-            .collect();
+        let pb_names = axis_id_names("PB_", n_pb);
+        let topic_names = axis_id_names("T", k);
         pb_latent_pk.to_parquet_with_names(
             &format!("{}.pb_latent.parquet", ctx.args.out),
             (Some(&pb_names), Some("pb")),
@@ -1022,17 +1018,18 @@ fn write_dictionary_tensor(
         expanded_dk.to_parquet_with_names(
             &(out_prefix.to_string() + ".dictionary.parquet"),
             (Some(gene_names), Some("gene")),
-            None,
+            Some(&axis_id_names("T", expanded_dk.ncols())),
         )?;
         info!(
             "Expanded dictionary from {} to {} features",
             fc.num_coarse, n_features_full
         );
     } else {
+        let k_topics = dict_tensor.dims().last().copied().unwrap_or(0);
         dict_tensor.to_parquet_with_names(
             &(out_prefix.to_string() + ".dictionary.parquet"),
             (Some(gene_names), Some("gene")),
-            None,
+            Some(&axis_id_names("T", k_topics)),
         )?;
     }
     Ok(())

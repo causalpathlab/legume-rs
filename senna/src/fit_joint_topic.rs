@@ -453,16 +453,18 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             base_mat.to_parquet_with_names(
                 &format!("{}.base_dictionary.parquet", args.out),
                 (Some(&base_gene_names), Some("gene")),
-                None,
+                Some(&axis_id_names("T", base_mat.ncols())),
             )?;
 
-            // Write per-modality delta logits [K, D] with gene names as columns
+            // Per-modality delta logits [K × D]: rows are topics, columns are
+            // genes — explicit `T{c}` row labels keep the topic axis
+            // self-described instead of falling back to bare integers.
             for (i, delta) in decoder.get_deltas().iter().enumerate() {
                 let delta = delta.to_device(&candle_core::Device::Cpu)?;
                 let delta_mat = Mat::from_tensor(&delta)?;
                 delta_mat.to_parquet_with_names(
                     &format!("{}_{}.delta_logits.parquet", args.out, i + 1),
-                    (None, Some("topic")),
+                    (Some(&axis_id_names("T", delta_mat.nrows())), Some("topic")),
                     Some(&base_gene_names),
                 )?;
             }

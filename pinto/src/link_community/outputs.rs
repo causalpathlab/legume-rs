@@ -300,7 +300,10 @@ pub fn write_propensity_parquet(
     let entropy_vec = shannon_entropy_rows(&propensity);
     let entropy_mat = Mat::from_column_slice(n_cells, 1, entropy_vec.as_slice());
 
-    let mut col_names: Vec<Box<str>> = (0..k).map(|i| i.to_string().into_boxed_str()).collect();
+    // `C{c}` prefix names the community axis explicitly, so the reader
+    // can identify community columns by name pattern instead of by
+    // exclusion (a coord column named "0" would otherwise be misread).
+    let mut col_names: Vec<Box<str>> = (0..k).map(|i| format!("C{i}").into_boxed_str()).collect();
     col_names.push("entropy".into());
 
     let combined = concatenate_horizontal(&[propensity.clone(), entropy_mat])?;

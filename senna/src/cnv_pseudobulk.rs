@@ -45,9 +45,7 @@ pub fn detect_cnv_cluster_informed(
     for (i, &c) in cluster_labels.iter().enumerate() {
         membership_matrix[(i, c)] = 1.0;
     }
-    let cell_type_names: Vec<Box<str>> = (0..n_clusters)
-        .map(|c| format!("cluster_{c}").into())
-        .collect();
+    let cell_type_names: Vec<Box<str>> = (0..n_clusters).map(|c| format!("K{c}").into()).collect();
     let membership = CellTypeMembership {
         matrix: membership_matrix,
         cell_type_names,
@@ -67,8 +65,7 @@ pub fn detect_cnv_topic_informed(
     cfg: &PerSampleCnvConfig,
 ) -> anyhow::Result<PerSampleCnv> {
     let n_topics = topic_proportions.ncols();
-    let cell_type_names: Vec<Box<str>> =
-        (0..n_topics).map(|k| format!("topic_{k}").into()).collect();
+    let cell_type_names: Vec<Box<str>> = (0..n_topics).map(|k| format!("T{k}").into()).collect();
     let membership = CellTypeMembership {
         matrix: topic_proportions.clone(),
         cell_type_names,
