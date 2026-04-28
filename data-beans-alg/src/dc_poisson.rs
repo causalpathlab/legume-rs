@@ -25,6 +25,7 @@ use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::RngExt;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
 /// Additive floor to keep `ln(.)` finite when a block or feature has zero
@@ -145,26 +146,26 @@ impl Profiles {
     pub fn from_projection(basis: &DMatrix<f32>, entity_to_cells: &[Vec<usize>]) -> Self {
         let num_features = basis.nrows();
         let num_entities = entity_to_cells.len();
-        let mut rows: Vec<Vec<(u32, f32)>> = Vec::with_capacity(num_entities);
-        let mut size_factor = Vec::with_capacity(num_entities);
-        for cells in entity_to_cells {
-            let mut acc = vec![0f32; num_features];
-            for &c in cells {
-                for d in 0..num_features {
-                    acc[d] += basis[(d, c)];
+        let (rows, size_factor): (Vec<Vec<(u32, f32)>>, Vec<f32>) = entity_to_cells
+            .par_iter()
+            .map(|cells| {
+                let mut acc = vec![0f32; num_features];
+                for &c in cells {
+                    for d in 0..num_features {
+                        acc[d] += basis[(d, c)];
+                    }
                 }
-            }
-            let mut out = Vec::with_capacity(num_features);
-            let mut sf = 0f32;
-            for (d, &v) in acc.iter().enumerate() {
-                if v > 0.0 {
-                    out.push((d as u32, v));
-                    sf += v;
+                let mut out = Vec::with_capacity(num_features);
+                let mut sf = 0f32;
+                for (d, &v) in acc.iter().enumerate() {
+                    if v > 0.0 {
+                        out.push((d as u32, v));
+                        sf += v;
+                    }
                 }
-            }
-            rows.push(out);
-            size_factor.push(sf);
-        }
+                (out, sf)
+            })
+            .unzip();
         Self {
             rows,
             size_factor,

@@ -321,6 +321,7 @@ pub(crate) fn resolve_inputs(args: &VisualizeCommonArgs) -> anyhow::Result<Resol
         .ok_or_else(|| {
             anyhow::anyhow!("no --out given and no manifest prefix available (use --from or -o)")
         })?;
+    mkdir_parent(&out)?;
 
     Ok(ResolvedViz {
         data_files,

@@ -1,5 +1,6 @@
 use crate::random_projection::binary_sort_columns;
 use log::info;
+use matrix_util::dmatrix_util::build_columns_par;
 use nalgebra::DMatrix;
 use serde::{Deserialize, Serialize};
 
@@ -21,31 +22,26 @@ impl FeatureCoarsening {
     /// features within each coarse group.
     pub fn aggregate_columns_nd(&self, data_nd: &DMatrix<f32>) -> DMatrix<f32> {
         let n = data_nd.nrows();
-        let mut out = DMatrix::<f32>::zeros(n, self.num_coarse);
-        // Group fine columns by coarse target to keep output column hot in cache
-        for (c, fine_indices) in self.coarse_to_fine.iter().enumerate() {
-            let mut col = out.column_mut(c);
-            for &fine in fine_indices {
-                col += data_nd.column(fine);
+        build_columns_par(n, self.num_coarse, |c, col| {
+            for &fine in &self.coarse_to_fine[c] {
+                let src = data_nd.column(fine);
+                for (dst, src_v) in col.iter_mut().zip(src.iter()) {
+                    *dst += *src_v;
+                }
             }
-        }
-        out
+        })
     }
 
     /// Aggregate rows of a [D, S] matrix → [d, S] by summing
     /// features within each coarse group.
     pub fn aggregate_rows_ds(&self, data_ds: &DMatrix<f32>) -> DMatrix<f32> {
         let s = data_ds.ncols();
-        let mut out = DMatrix::<f32>::zeros(self.num_coarse, s);
-        // Iterate columns (contiguous in column-major) in inner loop
-        for j in 0..s {
+        build_columns_par(self.num_coarse, s, |j, col| {
             let src_col = data_ds.column(j);
-            let mut dst_col = out.column_mut(j);
             for (fine, &coarse) in self.fine_to_coarse.iter().enumerate() {
-                dst_col[coarse] += src_col[fine];
+                col[coarse] += src_col[fine];
             }
-        }
-        out
+        })
     }
 
     /// Expand log-probability dictionary [d, K] → [D, K].
@@ -57,33 +53,27 @@ impl FeatureCoarsening {
     ///   `β[f, k] = β_coarse[c, k] / g`
     pub fn expand_log_dict_dk(&self, log_dict_dk: &DMatrix<f32>, d_fine: usize) -> DMatrix<f32> {
         let k = log_dict_dk.ncols();
-        let mut expanded = DMatrix::<f32>::zeros(d_fine, k);
-        // Iterate columns (contiguous in column-major) in outer loop
-        for kk in 0..k {
+        build_columns_par(d_fine, k, |kk, col| {
             let src_col = log_dict_dk.column(kk);
-            let mut dst_col = expanded.column_mut(kk);
             for (c, fine_indices) in self.coarse_to_fine.iter().enumerate() {
                 let val = src_col[c] - (fine_indices.len() as f32).ln();
                 for &f in fine_indices {
-                    dst_col[f] = val;
+                    col[f] = val;
                 }
             }
-        }
-        expanded
+        })
     }
 
     /// Aggregate a sparse [D, n] CSC matrix → dense [d, n] by summing
     /// rows within each coarse group. Efficient: O(nnz) work.
     pub fn aggregate_sparse_csc(&self, data_dn: &CscMat) -> DMatrix<f32> {
         let n = data_dn.ncols();
-        let mut out = DMatrix::<f32>::zeros(self.num_coarse, n);
-        for j in 0..n {
-            let col = data_dn.col(j);
-            for (&row, &val) in col.row_indices().iter().zip(col.values().iter()) {
-                out[(self.fine_to_coarse[row], j)] += val;
+        build_columns_par(self.num_coarse, n, |j, col| {
+            let src = data_dn.col(j);
+            for (&row, &val) in src.row_indices().iter().zip(src.values().iter()) {
+                col[self.fine_to_coarse[row]] += val;
             }
-        }
-        out
+        })
     }
 }
 

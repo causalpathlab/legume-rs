@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Args, ValueEnum};
 use log::info;
+use matrix_util::common_io::mkdir_parent;
 use matrix_util::traits::MatOps;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
@@ -97,6 +98,7 @@ pub struct FitPrsSusieArgs {
 }
 
 pub fn fit_prs_susie(args: &FitPrsSusieArgs) -> Result<()> {
+    mkdir_parent(&args.common.output)?;
     info!("Starting fit-prs-susie");
 
     // ── Step 1: Load genotypes, z-scores, LD blocks ─────────────────────

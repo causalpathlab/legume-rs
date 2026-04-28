@@ -11,6 +11,7 @@ use data_beans_alg::random_projection::*;
 use clap::Parser;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::*;
+use matrix_util::common_io::mkdir_parent;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtDeltaSvdArgs {
@@ -112,10 +113,12 @@ pub(crate) struct PairDeltaParameters {
 /// 8. Nystrom projection → per-pair latent codes
 /// 9. Export dictionary + pair latents
 pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
+    let c = &args.common;
+    mkdir_parent(&c.out)?;
+
     // 1. Load data (with or without coordinates)
     info!("Loading data files...");
 
-    let c = &args.common;
     let has_coords = c.has_coordinates();
 
     let SRTData {

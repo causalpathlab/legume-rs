@@ -222,6 +222,8 @@ pub struct FitTopicArgs {
 }
 
 pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.out)?;
+
     /* 1. Load paired RNA + ATAC data */
     let mut paired = load_paired_data(
         &args.rna_files,

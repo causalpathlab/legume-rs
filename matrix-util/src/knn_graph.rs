@@ -225,45 +225,36 @@ impl KnnGraph {
         let row_indices = self.adjacency.row_indices();
         let values = self.adjacency.values();
 
-        // Step 1-2: compute rho and sigma per node
-        let mut rho = vec![0.0f32; self.n_nodes];
-        let mut sigma = vec![1.0f32; self.n_nodes];
+        // Step 1-2: compute rho and sigma per node — independent per node.
+        let (rho, sigma): (Vec<f32>, Vec<f32>) = (0..self.n_nodes)
+            .into_par_iter()
+            .map(|i| {
+                let start = offsets[i];
+                let end = offsets[i + 1];
+                let dists: Vec<f32> = (start..end).map(|idx| values[idx]).collect();
+                if dists.is_empty() {
+                    return (0.0_f32, 1.0_f32);
+                }
+                let rho_i = dists.iter().cloned().fold(f32::INFINITY, f32::min);
+                let target = (dists.len() as f32).log2();
+                let sigma_i = smooth_knn_sigma(&dists, rho_i, target);
+                (rho_i, sigma_i)
+            })
+            .unzip();
 
-        for i in 0..self.n_nodes {
-            let start = offsets[i];
-            let end = offsets[i + 1];
-            let dists: Vec<f32> = (start..end).map(|idx| values[idx]).collect();
-
-            if dists.is_empty() {
-                continue;
-            }
-
-            // rho = distance to nearest neighbor
-            rho[i] = dists.iter().cloned().fold(f32::INFINITY, f32::min);
-
-            // Binary search for sigma: target = log2(k)
-            let target = (dists.len() as f32).log2();
-            sigma[i] = smooth_knn_sigma(&dists, rho[i], target);
-        }
-
-        // Step 3-4: compute directed weights and symmetrize per edge
-        let mut weights = Vec::with_capacity(self.edges.len());
-
-        for &(i, j) in &self.edges {
-            // directed weight i → j
-            let d_ij = self.edge_distance_directed(offsets, row_indices, values, i, j);
-            let w_ij = directed_umap_weight(d_ij, rho[i], sigma[i]);
-
-            // directed weight j → i
-            let d_ji = self.edge_distance_directed(offsets, row_indices, values, j, i);
-            let w_ji = directed_umap_weight(d_ji, rho[j], sigma[j]);
-
-            // fuzzy union: P(at least one edge) = P(A) + P(B) - P(A)*P(B)
-            let w_sym = w_ij + w_ji - w_ij * w_ji;
-            weights.push(w_sym);
-        }
-
-        weights
+        // Step 3-4: compute directed weights and symmetrize per edge —
+        // independent per edge, only reads rho/sigma.
+        self.edges
+            .par_iter()
+            .map(|&(i, j)| {
+                let d_ij = self.edge_distance_directed(offsets, row_indices, values, i, j);
+                let w_ij = directed_umap_weight(d_ij, rho[i], sigma[i]);
+                let d_ji = self.edge_distance_directed(offsets, row_indices, values, j, i);
+                let w_ji = directed_umap_weight(d_ji, rho[j], sigma[j]);
+                // fuzzy union: P(at least one edge) = P(A) + P(B) - P(A)*P(B)
+                w_ij + w_ji - w_ij * w_ji
+            })
+            .collect()
     }
 
     /// Look up the distance from node `from` to node `to` in the CSC adjacency.

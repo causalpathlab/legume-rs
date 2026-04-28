@@ -5,6 +5,7 @@ use dmatrix_gamma::GammaMatrix;
 use matrix_param::dmatrix_gamma;
 use matrix_param::io::ParamIo;
 use matrix_param::traits::TwoStatParam;
+use matrix_util::common_io::mkdir_parent;
 use matrix_util::parquet::{
     parquet_add_bytearray, parquet_add_numeric_column, parquet_add_string_column, ParquetWriter,
 };
@@ -96,6 +97,8 @@ pub struct SrtPropensityArgs {
 }
 
 pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.out)?;
+
     let MatWithNames {
         rows,
         cols: _,

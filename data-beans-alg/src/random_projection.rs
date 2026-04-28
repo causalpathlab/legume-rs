@@ -273,10 +273,9 @@ impl RandProjOps for SparseIoVec {
         )?;
 
         if let Some(col_to_batch) = batch_membership {
-            info!("adjusting batch biases ...");
-
             if col_to_batch.len() == ncols {
                 let batches = partition_by_membership(col_to_batch, None);
+                info!("adjusting batch biases ({} batches) ...", batches.len());
                 for (_, cols) in batches.iter() {
                     let xx = subset_columns(&proj_kn, cols.iter().cloned())?
                         .transpose() // n x k
@@ -348,10 +347,9 @@ impl RandProjOps for SparseIoVec {
         )?;
 
         if let Some(col_to_batch) = batch_membership {
-            info!("adjusting batch biases ...");
-
             if col_to_batch.len() == ncols {
                 let batches = partition_by_membership(col_to_batch, None);
+                info!("adjusting batch biases ({} batches) ...", batches.len());
                 for (_, cols) in batches.iter() {
                     let xx = subset_columns(&proj_kn, cols.iter().cloned())?
                         .transpose()

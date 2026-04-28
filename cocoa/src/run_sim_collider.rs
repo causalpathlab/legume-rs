@@ -4,7 +4,7 @@ use crate::run_sim_one_type::sample_logits_each_row;
 use rustc_hash::FxHashMap as HashMap;
 
 use indicatif::ParallelProgressIterator;
-use matrix_util::common_io::{mkdir, write_lines, write_types};
+use matrix_util::common_io::{mkdir_parent, write_lines, write_types};
 use matrix_util::mtx_io;
 use matrix_util::traits::{IoOps, MatOps, SampleOps};
 use rand::SeedableRng;
@@ -508,6 +508,8 @@ pub fn run_sim_collider_data(args: SimColliderArgs) -> anyhow::Result<()> {
         ));
     }
 
+    mkdir_parent(&args.out)?;
+
     let depth_gamma_hyperparam = (args.gamma_hyperparam[0], args.gamma_hyperparam[1]);
     let n_indv = args.n_exposure * args.n_samples_per_exposure;
 
@@ -546,7 +548,6 @@ pub fn run_sim_collider_data(args: SimColliderArgs) -> anyhow::Result<()> {
 
     // Write output files
     let output = args.out.clone();
-    mkdir(&output)?;
 
     let backend = args.backend.clone();
     let backend_file = match backend {

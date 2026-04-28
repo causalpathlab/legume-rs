@@ -9,6 +9,26 @@ use rayon::prelude::*;
 pub use crate::dmatrix_rsvd::nystrom_basis;
 use crate::traits::*;
 
+/// Build a `DMatrix<f32>` column-by-column in parallel. `build_col(j, col)`
+/// fills the `j`-th output column (length `nrows`) directly into the
+/// matrix's backing slice — no per-column `Vec` allocation, no stitching.
+///
+/// Each task gets a disjoint `&mut [f32]`, so reductions stay deterministic
+/// (per-column accumulation order is whatever `build_col` does internally).
+pub fn build_columns_par<F>(nrows: usize, ncols: usize, build_col: F) -> DMatrix<f32>
+where
+    F: Fn(usize, &mut [f32]) + Sync + Send,
+{
+    let mut out = DMatrix::<f32>::zeros(nrows, ncols);
+    if nrows > 0 && ncols > 0 {
+        out.as_mut_slice()
+            .par_chunks_mut(nrows)
+            .enumerate()
+            .for_each(|(j, col)| build_col(j, col));
+    }
+    out
+}
+
 pub fn subset_columns<T, D, S, I>(
     matrix: &Matrix<T, nalgebra::Dyn, D, S>,
     indices: I,

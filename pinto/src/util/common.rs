@@ -22,13 +22,15 @@ pub static MULTI_PROGRESS: LazyLock<MultiProgress> = LazyLock::new(MultiProgress
 
 /// Initialise logging with the `indicatif-log-bridge` so that `log::info!`
 /// messages print above progress bars instead of overwriting them.
-///
-/// * `verbose` – when `true`, sets `RUST_LOG=info` before building the logger.
 pub fn init_logger(verbose: bool) {
-    if verbose {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    let logger = env_logger::Builder::from_default_env().build();
+    let default_filter = if verbose {
+        matrix_util::common_io::VERBOSE_LOG_FILTER
+    } else {
+        matrix_util::common_io::QUIET_LOG_FILTER
+    };
+    let logger =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
+            .build();
     let max_level = logger.filter();
     let _ = indicatif_log_bridge::LogWrapper::new(MULTI_PROGRESS.clone(), logger)
         .try_init()

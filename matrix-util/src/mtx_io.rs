@@ -18,9 +18,7 @@ pub fn write_mtx_triplets<T>(
 where
     T: std::fmt::Display + Copy + std::ops::Add<Output = T> + num_traits::FromPrimitive,
 {
-    if let Some(parent_dir) = std::path::Path::new(mtx_file).parent() {
-        std::fs::create_dir_all(parent_dir)?;
-    }
+    mkdir_parent(mtx_file)?;
 
     let mut buf = open_buf_writer(mtx_file)?;
 

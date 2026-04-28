@@ -280,6 +280,13 @@ pub struct SrtPlotArgs {
 
     #[arg(
         long,
+        default_value_t = 25,
+        help = "Within each batch (core), skip propensity/marker/LR plots for communities whose dominant-cell count is below this threshold. Independent of --min-edges-per-community (which applies across all batches)."
+    )]
+    pub min_cells_per_community: usize,
+
+    #[arg(
+        long,
         default_value_t = 30,
         help = "Min number of drawable arrows (edges with non-zero L+R signal in either orientation) for an LR overlay to be rendered. Skips sparse pairs whose plot is a dust cloud."
     )]
