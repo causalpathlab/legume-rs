@@ -231,7 +231,7 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
     z_nk.to_parquet_with_names(
         &(args.out.to_string() + ".latent.parquet"),
         (Some(&cell_names), Some("cell")),
-        None,
+        Some(&axis_id_names("T", z_nk.ncols())),
     )?;
     info!("Done — wrote {}.latent.parquet", args.out);
     Ok(())

@@ -538,9 +538,12 @@ fn read_cell_coords(path: &str) -> anyhow::Result<FxHashMap<String, Vec<f32>>> {
     Ok(by_name)
 }
 
-/// Argmax over cells × K topic proportions.
+/// Argmax over cells × K topic proportions, returning the **topic ID**
+/// per row (parsed from the column name), not the column position. So a
+/// downstream `T5` legend swatch always means topic 5, even if the
+/// columns aren't in 0..K-1 order on disk.
 fn argmax_topics(path: &str, n_cells_expected: usize) -> anyhow::Result<Vec<i64>> {
-    let MatWithNames { mat, .. } = Mat::from_parquet(path)?;
+    let MatWithNames { cols, mat, .. } = Mat::from_parquet(path)?;
     if mat.nrows() != n_cells_expected {
         anyhow::bail!(
             "topics parquet has {} rows but cell_coords has {}",
@@ -548,6 +551,12 @@ fn argmax_topics(path: &str, n_cells_expected: usize) -> anyhow::Result<Vec<i64>
             n_cells_expected
         );
     }
+    let topic_ids = crate::embed_common::try_parse_axis_ids(&cols, "T").ok_or_else(|| {
+        anyhow::anyhow!(
+            "topics parquet at {path} has columns that aren't topic IDs \
+             (expected \"T{{c}}\" or bare integer)"
+        )
+    })?;
     let mut out = Vec::with_capacity(mat.nrows());
     for i in 0..mat.nrows() {
         let mut best_j = 0usize;
@@ -559,7 +568,7 @@ fn argmax_topics(path: &str, n_cells_expected: usize) -> anyhow::Result<Vec<i64>
                 best_j = j;
             }
         }
-        out.push(best_j as i64);
+        out.push(topic_ids[best_j]);
     }
     Ok(out)
 }

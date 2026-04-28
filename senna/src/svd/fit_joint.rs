@@ -222,16 +222,17 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     let cell_names = data_stack.column_names()?;
     let gene_names = data_stack.row_names()?;
 
+    let component_col_names = axis_id_names("T", nystrom_out.latent_nk.ncols());
     nystrom_out.latent_nk.to_parquet_with_names(
         &(args.out.to_string() + ".latent.parquet"),
         (Some(&cell_names), Some("cell")),
-        None,
+        Some(&component_col_names),
     )?;
 
     nystrom_out.dictionary_dk.to_parquet_with_names(
         &(args.out.to_string() + ".dictionary.parquet"),
         (Some(&gene_names), Some("gene")),
-        None,
+        Some(&component_col_names),
     )?;
 
     // Modality-0 only — joint multi-modality annotation is a follow-up.

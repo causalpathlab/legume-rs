@@ -348,7 +348,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                             &layers,
                             &frame,
                             args,
-                            &kind_path(PlotKind::Propensity, &format!("community{kk}")),
+                            &kind_path(PlotKind::Propensity, &format!("C{kk}")),
                             &mut local_emitted,
                             true,
                         )?;
@@ -610,10 +610,32 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     let lr_parquet = lr_overlay::resolve_lr_parquet_path(&p)
                         .and_then(|pp| lr_overlay::read_lr_activity_parquet(&pp).ok());
                     let lr_parquet_slice = lr_parquet.as_deref();
+                    let k_total = final_aligned_prop.as_ref().map(|p| p.ncols());
+                    // A community ID beyond the propensity's K is the
+                    // tell that lr-activity was run against a different
+                    // prefix (e.g. pre-merge `.draft.`) than plot —
+                    // colours/labels can't be reconciled by the plot
+                    // code in that case, only by the user re-running.
+                    if let Some(k) = k_total {
+                        let lr_max =
+                            lr.results.iter().map(|r| r.community).max().unwrap_or(-1) as i64;
+                        if lr_max >= k as i64 {
+                            log::warn!(
+                                "LR overlay: max community in {} is C{} but final propensity has K={}. \
+                                 Likely the lr-activity JSON was computed against a different prefix \
+                                 (e.g. pre-merge `.draft.`). Community indices in LR plots will not \
+                                 match marker / propensity / mesh plots.",
+                                p.display(),
+                                lr_max,
+                                k,
+                            );
+                        }
+                    }
                     lr_overlay::emit_lr_summary_per_community(
                         args,
                         &lr,
                         lr_parquet_slice,
+                        k_total,
                         &lr_dir,
                         &mut emitted,
                     )?;
@@ -621,6 +643,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                         args,
                         &lr,
                         lr_parquet_slice,
+                        k_total,
                         &lr_dir,
                         &mut emitted,
                     )?;
@@ -628,6 +651,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                         args,
                         &lr,
                         lr_parquet_slice,
+                        k_total,
                         &lr_dir,
                         &mut emitted,
                     )?;
@@ -921,6 +945,13 @@ fn emit_marker_summary(
 
     let col_labels: Vec<Box<str>> = (0..k).map(|c| format!("C{c}").into_boxed_str()).collect();
     let col_colors: Vec<plot_utils::Rgb> = (0..k).map(|c| colors.color(c)).collect();
+    // Publish the C{c} → palette colour mapping in the legend so the user
+    // can verify community indices match across propensity / mesh / LR
+    // plots. Only communities that have any cells assigned are listed.
+    let color_legend: Vec<(Box<str>, plot_utils::Rgb)> = (0..k)
+        .filter(|&c| cnt[c] > 0)
+        .map(|c| (format!("C{c}").into_boxed_str(), colors.color(c)))
+        .collect();
 
     let opts = plot_utils::HintonOpts {
         row_labels: Some(gene_names),
@@ -939,7 +970,7 @@ fn emit_marker_summary(
         )),
         grid_stroke_px: 0.4,
         grid_color: (220, 220, 220),
-        color_legend: None,
+        color_legend: Some(&color_legend),
     };
     let svg = plot_utils::render_hinton(&mean, n_genes, k, &opts);
 
@@ -980,7 +1011,7 @@ fn marker_out_path(out_prefix: &str, level_tag: &str, k: usize, gname: &str) -> 
     let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
     plot_dir
         .join(PlotKind::Markers.subdir())
-        .join(format!("{level_tag}.community{k}.{safe_gname}"))
+        .join(format!("{level_tag}.C{k}.{safe_gname}"))
 }
 
 fn write_manifest(out_prefix: &str, suffix: &str, emitted: &[PathBuf]) -> anyhow::Result<()> {

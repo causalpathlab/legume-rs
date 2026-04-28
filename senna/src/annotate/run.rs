@@ -48,10 +48,9 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
         &config,
     )?;
 
-    // Topic row labels (shared by K × C diagnostics).
-    let topic_names: Vec<Box<str>> = (0..loaded.group.profile_gk.ncols())
-        .map(|i| format!("topic_{i}").into_boxed_str())
-        .collect();
+    // Topic row labels shared across the K × C diagnostics so a reader
+    // can cross-reference topic IDs by name with fit-topic / svd outputs.
+    let topic_names = crate::embed_common::axis_id_names("T", loaded.group.profile_gk.ncols());
 
     // Cell annotation (N × C posterior).
     let annotation_path = format!("{}.annotation.parquet", args.out);

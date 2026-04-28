@@ -173,6 +173,15 @@ fn emit_svg_outputs(
     Ok(())
 }
 
+/// Palette size for the LR plots: the final clustering's total K when
+/// known (so colours match marker Hinton / propensity argmax even when
+/// K crosses the Paired→Category20 boundary), else just enough to hold
+/// every community ID we've seen.
+fn palette_size_for(k_total: Option<usize>, k_max_observed: i32) -> usize {
+    let observed = (k_max_observed + 1).max(1) as usize;
+    k_total.map_or(observed, |k| k.max(observed))
+}
+
 /// Mix `rgb` toward near-white by `t` (0 → unchanged, 1 → almost white).
 /// Used to fade non-significant cells in the Hinton summaries.
 fn fade_to_near_white(rgb: plot_utils::Rgb, t: f32) -> plot_utils::Rgb {
@@ -521,7 +530,7 @@ pub fn render_lr_overlays_for_core(
             sanitize(&r.receptor),
         ));
         let label = format!(
-            "{}->{}; B={}; C={}; z={:.2}; q={:.3}",
+            "{}->{}; B={}; C{}; z={:.2}; q={:.3}",
             r.ligand,
             r.receptor,
             r.batch,
@@ -698,6 +707,7 @@ pub fn emit_lr_summary_global(
     args: &SrtPlotArgs,
     lr: &LrJson,
     parquet_rows: Option<&[LrParquetRow]>,
+    k_total: Option<usize>,
     out_dir: &Path,
     emitted: &mut Vec<PathBuf>,
 ) -> anyhow::Result<()> {
@@ -833,7 +843,7 @@ pub fn emit_lr_summary_global(
         }
     }
 
-    let k = (k_max + 1) as usize;
+    let k = palette_size_for(k_total, k_max);
     let colors = super::render::ColorBook::new(args, k);
     let cell_colors: Vec<plot_utils::Rgb> = major_c
         .iter()
@@ -921,6 +931,7 @@ pub fn emit_lr_bipartite(
     args: &SrtPlotArgs,
     lr: &LrJson,
     parquet_rows: Option<&[LrParquetRow]>,
+    k_total: Option<usize>,
     out_dir: &Path,
     emitted: &mut Vec<PathBuf>,
 ) -> anyhow::Result<()> {
@@ -1031,7 +1042,7 @@ pub fn emit_lr_bipartite(
         .map(|(i, &n)| (n, pad_top + (i as f32 + 0.5) * row_h))
         .collect();
 
-    let k = (k_max + 1) as usize;
+    let k = palette_size_for(k_total, k_max);
     let palette = super::render::ColorBook::new(args, k);
 
     // Edge stroke scale: -log10(fwer_wy), capped to avoid blowups when
@@ -1327,11 +1338,12 @@ fn escape_svg(s: &str) -> String {
 /// available, **non-significant cells are also drawn** in the same
 /// axes (faded color) so you can see which untested-marker pairs sit
 /// just below the FWER cutoff. `--lr-keep-homotypic` filter applies.
-/// One file per active community at `out_dir/community{c}.summary.pdf`.
+/// One file per active community at `out_dir/C{c}.summary.pdf`.
 pub fn emit_lr_summary_per_community(
     args: &SrtPlotArgs,
     lr: &LrJson,
     parquet_rows: Option<&[LrParquetRow]>,
+    k_total: Option<usize>,
     out_dir: &Path,
     emitted: &mut Vec<PathBuf>,
 ) -> anyhow::Result<()> {
@@ -1456,10 +1468,10 @@ pub fn emit_lr_summary_per_community(
             }
         }
 
-        // Color: FWER-survivors get the community's palette color; the
-        // rest fade toward white (visible but visibly subordinate).
+        // FWER-survivors get the community's palette colour; the rest
+        // fade toward white so they read as "tested but subordinate".
         let k_max = lr.results.iter().map(|r| r.community).max().unwrap_or(0);
-        let k = (k_max + 1).max(1) as usize;
+        let k = palette_size_for(k_total, k_max);
         let colors_book = super::render::ColorBook::new(args, k);
         let community_color = if (c as usize) < k {
             colors_book.color(c as usize)
@@ -1489,8 +1501,13 @@ pub fn emit_lr_summary_per_community(
 
         let n_sig_in_cells = sig_cell.iter().filter(|&&b| b).count();
         let title = format!(
-            "Community {c} — L × R (|z|) — {n_l}L × {n_r}R, {n_sig_in_cells} FWER-significant (faded = below cutoff)",
+            "Community C{c} — L × R (|z|) — {n_l}L × {n_r}R, {n_sig_in_cells} FWER-significant (faded = below cutoff)",
         );
+        // Single-entry legend so the focal community's colour is
+        // explicit, matching the C{c} convention used by marker Hinton
+        // and propensity argmax.
+        let color_legend: Vec<(Box<str>, plot_utils::Rgb)> =
+            vec![(format!("C{c}").into_boxed_str(), community_color)];
         let opts = plot_utils::HintonOpts {
             row_labels: Some(&row_labels),
             col_labels: Some(&col_labels),
@@ -1504,14 +1521,14 @@ pub fn emit_lr_summary_per_community(
             title: Some(&title),
             grid_stroke_px: 0.4,
             grid_color: (220, 220, 220),
-            color_legend: None,
+            color_legend: Some(&color_legend),
         };
         let svg = plot_utils::render_hinton(&mat, n_l, n_r, &opts);
         let size = plot_utils::hinton_size(n_l, n_r, &opts);
         emit_svg_outputs(
             args,
             &svg,
-            &out_dir.join(format!("community{c}.summary")),
+            &out_dir.join(format!("C{c}.summary")),
             (size.width_px, size.height_px),
             emitted,
         )?;

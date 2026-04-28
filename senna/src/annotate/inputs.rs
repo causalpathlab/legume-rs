@@ -1,6 +1,6 @@
 //! Manifest + parquet → `enrichment::GroupInputs` + marker matrix.
 
-use crate::embed_common::Mat;
+use crate::embed_common::{try_parse_axis_ids, Mat};
 use crate::marker_support::build_annotation_matrix;
 use crate::run_manifest::{self, RunKind, RunManifest};
 use enrichment::{GroupInputs, SpecificityMode};
@@ -107,6 +107,29 @@ pub fn load_from_manifest(
         dict.mat.ncols()
     );
 
+    // Stronger than the K count above: when both parquets carry topic-ID
+    // names, verify they declare the same IDs in the same order. Catches
+    // dict/latent from different runs with matching K but different
+    // topic identities.
+    if let (Some(dict_ids), Some(latent_ids)) = (
+        try_parse_axis_ids(&dict.cols, "T"),
+        try_parse_axis_ids(&latent.cols, "T"),
+    ) {
+        anyhow::ensure!(
+            dict_ids == latent_ids,
+            "dictionary and latent declare different topic IDs:\n  \
+             dictionary: {dict_ids:?}\n  \
+             latent:     {latent_ids:?}\n  \
+             These parquets came from different runs — pass the manifest \
+             from a single run, or retrain so the topic-ID sets agree."
+        );
+    } else {
+        log::warn!(
+            "dictionary and/or latent column names don't carry explicit topic IDs \
+             (`T{{c}}` or bare integers); falling back to positional K check."
+        );
+    }
+
     // pb_gene (G × P). Required for the sample-permutation null.
     let pb_gene_rel = manifest.outputs.pb_gene.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
@@ -134,6 +157,18 @@ pub fn load_from_manifest(
                 loaded.mat.nrows(),
                 loaded.mat.ncols()
             );
+            // Same explicit topic-ID check as the dict↔latent pair.
+            if let (Some(dict_ids), Some(pb_ids)) = (
+                try_parse_axis_ids(&dict.cols, "T"),
+                try_parse_axis_ids(&loaded.cols, "T"),
+            ) {
+                anyhow::ensure!(
+                    dict_ids == pb_ids,
+                    "dictionary and pb_latent declare different topic IDs:\n  \
+                     dictionary: {dict_ids:?}\n  \
+                     pb_latent:  {pb_ids:?}"
+                );
+            }
             loaded.mat
         }
         None => {
