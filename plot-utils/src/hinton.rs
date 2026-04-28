@@ -65,6 +65,11 @@ pub struct HintonOpts<'a> {
     /// Optional per-column fill color, in original (pre-permutation) order.
     /// `None` ⇒ all boxes drawn in mid-gray.
     pub col_colors: Option<&'a [Rgb]>,
+    /// Optional per-cell fill color (length = `nrows * ncols`, row-major,
+    /// pre-permutation order). When `Some`, takes precedence over
+    /// `col_colors` for each cell. Use this for "color = which group
+    /// dominates this (row, column)" heatmaps.
+    pub cell_colors: Option<&'a [Rgb]>,
     /// Magnitude → side-length mapping.
     pub scale: HintonScale,
     /// Cell tile size (px). Box side = `cell_px * frac`. Default 18.
@@ -73,6 +78,19 @@ pub struct HintonOpts<'a> {
     pub font_px: f32,
     /// Optional title rendered above the grid.
     pub title: Option<&'a str>,
+    /// Stroke width (px) for the cell-boundary grid. `0.0` disables the
+    /// grid (default). Small positive values (≈ 0.3–0.5) give a faint
+    /// guideline that helps the eye line up rows and columns.
+    pub grid_stroke_px: f32,
+    /// Grid stroke color, in (r, g, b) bytes. Only used when
+    /// `grid_stroke_px > 0`.
+    pub grid_color: Rgb,
+    /// Optional categorical color legend: list of `(label, color)`
+    /// entries rendered below the magnitude legend, one swatch per
+    /// entry. Use this when `cell_colors` encodes a categorical
+    /// variable (e.g. "color of each box = major community"). `None`
+    /// (default) skips the color legend.
+    pub color_legend: Option<&'a [(Box<str>, Rgb)]>,
 }
 
 impl<'a> Default for HintonOpts<'a> {
@@ -83,10 +101,14 @@ impl<'a> Default for HintonOpts<'a> {
             row_order: None,
             col_order: None,
             col_colors: None,
+            cell_colors: None,
             scale: HintonScale::default(),
             cell_px: 18.0,
             font_px: 11.0,
             title: None,
+            grid_stroke_px: 0.0,
+            grid_color: (220, 220, 220),
+            color_legend: None,
         }
     }
 }
@@ -106,10 +128,26 @@ pub fn hinton_size(nrows: usize, ncols: usize, opts: &HintonOpts<'_>) -> HintonS
     let grid_w = ncols as f32 * opts.cell_px;
     let grid_h = nrows as f32 * opts.cell_px;
     let legend_w = LEGEND_WIDTH_FACTOR * opts.cell_px;
+    let legend_h = legend_total_height(opts);
+    let content_h = grid_h.max(legend_h);
     HintonSize {
         width_px: (pad_left + grid_w + legend_w).ceil() as u32,
-        height_px: (pad_top + grid_h + 8.0).ceil() as u32,
+        height_px: (pad_top + content_h + 8.0).ceil() as u32,
     }
+}
+
+fn legend_total_height(opts: &HintonOpts<'_>) -> f32 {
+    let cell = opts.cell_px;
+    // Magnitude block: header + 4 swatches.
+    let mag_h = opts.font_px * 1.6 + 4.0 * (cell + 3.0);
+    let color_h = match opts.color_legend {
+        Some(entries) if !entries.is_empty() => {
+            // Header gap + entries (swatch ~ 0.7 * cell, line spacing).
+            opts.font_px * 1.6 + entries.len() as f32 * (cell * 0.7 + 4.0)
+        }
+        _ => 0.0,
+    };
+    mag_h + color_h + 8.0
 }
 
 /// Render a Hinton-style square-grid summary as a standalone SVG document.
@@ -157,6 +195,37 @@ pub fn render_hinton(mat: &[f32], nrows: usize, ncols: usize, opts: &HintonOpts<
         );
     }
 
+    if opts.grid_stroke_px > 0.0 {
+        let (gr, gg, gb) = opts.grid_color;
+        let grid_w = ncols as f32 * cell;
+        let grid_h = nrows as f32 * cell;
+        let _ = writeln!(
+            &mut s,
+            "  <g id=\"grid\" stroke=\"rgb({gr},{gg},{gb})\" stroke-width=\"{sw:.2}\" \
+             shape-rendering=\"crispEdges\">",
+            sw = opts.grid_stroke_px,
+        );
+        for cc in 0..=ncols {
+            let x = pad_left + cc as f32 * cell;
+            let _ = writeln!(
+                &mut s,
+                "    <line x1=\"{x:.2}\" y1=\"{y0:.2}\" x2=\"{x:.2}\" y2=\"{y1:.2}\"/>",
+                y0 = pad_top,
+                y1 = pad_top + grid_h,
+            );
+        }
+        for rr in 0..=nrows {
+            let y = pad_top + rr as f32 * cell;
+            let _ = writeln!(
+                &mut s,
+                "    <line x1=\"{x0:.2}\" y1=\"{y:.2}\" x2=\"{x1:.2}\" y2=\"{y:.2}\"/>",
+                x0 = pad_left,
+                x1 = pad_left + grid_w,
+            );
+        }
+        let _ = writeln!(&mut s, "  </g>");
+    }
+
     let _ = writeln!(&mut s, "  <g id=\"cells\">");
     for rr in 0..nrows {
         let r = row_idx(rr);
@@ -171,8 +240,9 @@ pub fn render_hinton(mat: &[f32], nrows: usize, ncols: usize, opts: &HintonOpts<
             let cx = pad_left + (cc as f32 + 0.5) * cell;
             let cy = pad_top + (rr as f32 + 0.5) * cell;
             let (rgb_r, rgb_g, rgb_b) = opts
-                .col_colors
-                .and_then(|cs| cs.get(c).copied())
+                .cell_colors
+                .and_then(|cs| cs.get(r * ncols + c).copied())
+                .or_else(|| opts.col_colors.and_then(|cs| cs.get(c).copied()))
                 .unwrap_or((90, 90, 90));
             let _ = writeln!(
                 &mut s,
@@ -306,6 +376,39 @@ fn write_legend(
         );
         ly += cell + 3.0;
     }
+
+    if let Some(entries) = opts.color_legend {
+        if !entries.is_empty() {
+            ly += opts.font_px * 0.6;
+            let _ = writeln!(
+                s,
+                "    <text x=\"{x:.1}\" y=\"{y:.1}\" font-weight=\"bold\">color</text>",
+                x = lx,
+                y = ly + opts.font_px,
+            );
+            ly += opts.font_px * 1.6;
+            let swatch = cell * 0.7;
+            for (label, (rgb_r, rgb_g, rgb_b)) in entries {
+                let _ = writeln!(
+                    s,
+                    "    <rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{sw:.2}\" height=\"{sw:.2}\" \
+                     fill=\"rgb({rgb_r},{rgb_g},{rgb_b})\"/>",
+                    x = lx,
+                    y = ly,
+                    sw = swatch,
+                );
+                let _ = writeln!(
+                    s,
+                    "    <text x=\"{x:.1}\" y=\"{y:.1}\">{t}</text>",
+                    x = lx + swatch + 4.0,
+                    y = ly + swatch * 0.5 + opts.font_px * 0.35,
+                    t = escape_xml(label),
+                );
+                ly += swatch + 4.0;
+            }
+        }
+    }
+
     let _ = writeln!(s, "  </g>");
 }
 
