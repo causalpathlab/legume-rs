@@ -604,6 +604,33 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     for v in per_core {
                         emitted.extend(v);
                     }
+                    // Read the lr-activity parquet sibling once and share
+                    // it across the three summary emitters — each one used
+                    // to reopen the file on its own.
+                    let lr_parquet = lr_overlay::resolve_lr_parquet_path(&p)
+                        .and_then(|pp| lr_overlay::read_lr_activity_parquet(&pp).ok());
+                    let lr_parquet_slice = lr_parquet.as_deref();
+                    lr_overlay::emit_lr_summary_per_community(
+                        args,
+                        &lr,
+                        lr_parquet_slice,
+                        &lr_dir,
+                        &mut emitted,
+                    )?;
+                    lr_overlay::emit_lr_summary_global(
+                        args,
+                        &lr,
+                        lr_parquet_slice,
+                        &lr_dir,
+                        &mut emitted,
+                    )?;
+                    lr_overlay::emit_lr_bipartite(
+                        args,
+                        &lr,
+                        lr_parquet_slice,
+                        &lr_dir,
+                        &mut emitted,
+                    )?;
                 }
                 Err(e) => {
                     log::warn!("LR-activity JSON load failed ({}): {e}", p.display())
@@ -901,6 +928,7 @@ fn emit_marker_summary(
         row_order: Some(&row_order),
         col_order: Some(&col_order),
         col_colors: Some(&col_colors),
+        cell_colors: None,
         scale: plot_utils::HintonScale::Sqrt,
         cell_px: 18.0,
         font_px: 11.0,
@@ -909,6 +937,9 @@ fn emit_marker_summary(
             core.n(),
             level_tag,
         )),
+        grid_stroke_px: 0.4,
+        grid_color: (220, 220, 220),
+        color_legend: None,
     };
     let svg = plot_utils::render_hinton(&mean, n_genes, k, &opts);
 

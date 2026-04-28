@@ -287,6 +287,13 @@ pub struct SrtPlotArgs {
 
     #[arg(
         long,
+        default_value_t = 100,
+        help = "Cap on (ligand, receptor) pairs shown in the combined LR Hinton summary (`lr/summary.pdf`). Pairs are ranked by max |z| across communities; rows and columns are restricted to those involved in the top-N. Per-community summaries are unaffected."
+    )]
+    pub lr_summary_pairs: usize,
+
+    #[arg(
+        long,
         default_value_t = 8,
         help = "Number of bins for the diverging blue↔red coexpression color ramp on LR arrows (only used when --lr-color-mode=coexpr)."
     )]
