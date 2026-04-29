@@ -12,6 +12,7 @@
 //! cell stays square at any aspect.
 
 use crate::palette::Rgb;
+use crate::svg_emit::escape_xml;
 use std::fmt::Write;
 
 /// How to map raw magnitudes to box side-length (as a fraction of the
@@ -264,7 +265,7 @@ pub fn render_hinton(mat: &[f32], nrows: usize, ncols: usize, opts: &HintonOpts<
         );
         for rr in 0..nrows {
             let r = row_idx(rr);
-            let label = labels.get(r).map(|s| s.as_ref()).unwrap_or("");
+            let label = labels.get(r).map_or("", AsRef::as_ref);
             let y = pad_top + (rr as f32 + 0.5) * cell + opts.font_px * 0.35;
             let _ = writeln!(
                 &mut s,
@@ -285,7 +286,7 @@ pub fn render_hinton(mat: &[f32], nrows: usize, ncols: usize, opts: &HintonOpts<
         );
         for cc in 0..ncols {
             let c = col_idx(cc);
-            let label = labels.get(c).map(|s| s.as_ref()).unwrap_or("");
+            let label = labels.get(c).map_or("", AsRef::as_ref);
             let x = pad_left + (cc as f32 + 0.5) * cell;
             let y = pad_top - 4.0;
             let _ = writeln!(
@@ -410,19 +411,4 @@ fn write_legend(
     }
 
     let _ = writeln!(s, "  </g>");
-}
-
-fn escape_xml(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            _ => out.push(ch),
-        }
-    }
-    out
 }
