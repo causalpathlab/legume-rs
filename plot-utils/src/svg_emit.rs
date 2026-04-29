@@ -201,7 +201,10 @@ fn emit_halo_text(
     );
 }
 
-fn escape_xml(s: &str) -> String {
+/// Escape the XML-significant characters (`& < > " '`). Use anywhere SVG
+/// element text or attribute strings are built from arbitrary input.
+#[must_use]
+pub fn escape_xml(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

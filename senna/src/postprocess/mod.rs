@@ -1,5 +1,6 @@
 mod fit_layout_mst;
 mod fit_plot;
+mod fit_plot_topic;
 mod fit_visualize_common;
 mod fit_visualize_phate;
 mod fit_visualize_tsne;
@@ -9,6 +10,7 @@ pub(crate) mod viz_prep;
 
 pub use fit_layout_mst::*;
 pub use fit_plot::*;
+pub use fit_plot_topic::*;
 pub use fit_visualize_phate::*;
 pub use fit_visualize_tsne::*;
 pub use fit_visualize_umap::*;
