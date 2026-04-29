@@ -100,10 +100,13 @@ pub struct PlotArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
-        help = "Drop groups with fewer than N cells (0 = keep all)"
+        help = "Drop groups with fewer than N cells (0 = keep all)",
+        long_help = "Filter out small/dead groups before rendering. When unset, \
+                     defaults to max(50, n_cells / 200) for --colour-by topic \
+                     (kills argmax ghosts on dead topics) and 0 otherwise. \
+                     Pass --min-topic-cells 0 to opt out of the auto threshold."
     )]
-    pub min_topic_cells: usize,
+    pub min_topic_cells: Option<usize>,
 
     #[arg(long, default_value_t = 6.0, help = "Plot width (inches)")]
     pub width: f32,
@@ -182,11 +185,19 @@ pub struct PlotArgs {
     )]
     pub hull_fill_alpha: f32,
 
-    #[arg(long, default_value_t = false, help = "Skip SVG output")]
-    pub no_svg: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Also emit SVG (default: PDF only)"
+    )]
+    pub svg: bool,
 
-    #[arg(long, default_value_t = false, help = "Skip flattened PNG output")]
-    pub no_png: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Also emit flattened PNG (default: PDF only)"
+    )]
+    pub png: bool,
 
     #[arg(long, default_value_t = false, help = "Skip PDF output")]
     pub no_pdf: bool,
@@ -260,21 +271,24 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
         anyhow::bail!("no valid group assignments found");
     }
 
-    if args.min_topic_cells > 0 {
+    // Auto-threshold for `--colour-by topic` kills argmax ghosts on dead
+    // topics. Floor of 50 protects small-N runs.
+    let min_topic_cells: usize = args.min_topic_cells.unwrap_or_else(|| {
+        if matches!(resolved.colour_by, ColorBy::Topic) {
+            (n_cells / 200).max(50)
+        } else {
+            0
+        }
+    });
+    if min_topic_cells > 0 {
         let before = pts_by_group.len();
-        pts_by_group.retain(|_g, pts| pts.len() >= args.min_topic_cells);
+        pts_by_group.retain(|_g, pts| pts.len() >= min_topic_cells);
         let dropped = before - pts_by_group.len();
         if dropped > 0 {
-            info!(
-                "Dropped {dropped} groups with fewer than {} cells",
-                args.min_topic_cells
-            );
+            info!("Dropped {dropped} groups with fewer than {min_topic_cells} cells");
         }
         if pts_by_group.is_empty() {
-            anyhow::bail!(
-                "--min-topic-cells {} dropped every group",
-                args.min_topic_cells
-            );
+            anyhow::bail!("--min-topic-cells {min_topic_cells} dropped every group");
         }
     }
 
@@ -308,14 +322,16 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
     // is the right place to fan out rayon (per repo convention).
     let layers: Vec<TopicLayer> = unique
         .par_iter()
-        .enumerate()
-        .map(|(i, g)| -> anyhow::Result<TopicLayer> {
+        .map(|g| -> anyhow::Result<TopicLayer> {
             let pts = pts_by_group.get(g).expect("group present");
             let pts_px: Vec<(f32, f32)> = pts.iter().map(|&p| to_pixel(p, &bounds, ext)).collect();
 
-            let color = palette::color(&palette, i);
+            // Key palette by group id, not enumerate index, so colors
+            // stay aligned across every view that maps id → color.
+            let color_idx = (*g).max(0) as usize;
+            let color = palette::color(&palette, color_idx);
             let shape = if args.point_shape_cycle {
-                PointShape::cycle_nth(i)
+                PointShape::cycle_nth(color_idx)
             } else {
                 args.point_shape
             };
@@ -370,15 +386,16 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
     );
 
     let base = resolved.out.clone();
-    if !args.no_svg {
+    if args.svg {
         let svg_path = format!("{base}.plot.svg");
         fs::write(&svg_path, svg.as_bytes())?;
         info!("Wrote {svg_path}");
     }
 
     // PNG + PDF share the same SVG string and are independent; render
-    // concurrently to hide resvg/svg2pdf parse latency.
-    let png_task = (!args.no_png).then(|| format!("{base}.plot.png"));
+    // concurrently to hide resvg/svg2pdf parse latency. Default is
+    // PDF-only; SVG/PNG are opt-in.
+    let png_task = args.png.then(|| format!("{base}.plot.png"));
     let pdf_task = (!args.no_pdf).then(|| format!("{base}.plot.pdf"));
     let (png_res, pdf_res) = rayon::join(
         || match &png_task {

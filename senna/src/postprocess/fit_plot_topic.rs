@@ -1,0 +1,1217 @@
+//! `senna plot-topic` — admixture-style structure-bar plots per batch
+//! plus a gene × topic dictionary summary (Hinton / heatmap).
+//!
+//! Preferred invocation is `senna plot-topic --from {prefix}.senna.json`;
+//! the manifest carries data/batch/latent/dictionary paths produced by
+//! `senna topic` / `itopic` / `joint-topic`. CLI flags override
+//! manifest values, mirroring the `senna plot` resolution rules at
+//! `fit_plot.rs:428`.
+//!
+//! Outputs default to PDF only — pass `--svg` / `--png` to also emit
+//! those formats. Layout under `{out}.plots/`:
+//!
+//! ```text
+//! {out}.plots/
+//! ├── struct/
+//! │   ├── all.pdf                   # combined panel; widths ∝ #cells
+//! │   └── by_batch/{batch}.pdf
+//! └── dict/
+//!     ├── hinton.pdf                # if n_genes ≤ 100
+//!     └── heatmap.pdf               # if n_genes > 100
+//! ```
+
+use crate::embed_common::*;
+use crate::run_manifest::{self, RunManifest};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use plot_utils::palette::{self, Palette, Rgb};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+const HINTON_GENE_THRESHOLD: usize = 100;
+
+/// What to group cells by when faceting the structure plot. `Batch` is
+/// the default (one panel per data-source). `Annotation` requires an
+/// `argmax.tsv` from `senna annotate` and produces one panel per cell
+/// type — the canonical fastTopics structure-plot view.
+#[derive(ValueEnum, Clone, Debug, PartialEq, Eq)]
+#[clap(rename_all = "kebab-case")]
+pub enum GroupBy {
+    Batch,
+    Annotation,
+}
+
+impl GroupBy {
+    /// Output subdir suffix: `{out}.plots/struct/by_{suffix}/...`.
+    fn subdir_suffix(&self) -> &'static str {
+        match self {
+            GroupBy::Batch => "batch",
+            GroupBy::Annotation => "celltype",
+        }
+    }
+}
+
+/// Cell ordering inside a single batch panel.
+#[derive(ValueEnum, Clone, Debug, PartialEq, Eq)]
+#[clap(rename_all = "kebab-case")]
+pub enum CellOrder {
+    /// Group by argmax topic (T-id ascending), then within-group sort by
+    /// descending dominant-topic probability. Default — produces the
+    /// canonical "blocks" structure plot.
+    Argmax,
+    /// Sort by ascending `x` from `senna layout`'s `cell_coords.parquet`.
+    /// Approximates fastTopic's per-group 1-D t-SNE ordering using the
+    /// already-computed 2-D layout. Falls back to Argmax if no layout.
+    Coord,
+}
+
+/// Hinton / heatmap magnitude → side fraction.
+#[derive(ValueEnum, Clone, Debug, PartialEq, Eq)]
+#[clap(rename_all = "lowercase")]
+pub enum HintonScaleArg {
+    Sqrt,
+    Log1p,
+    Linear,
+}
+
+impl HintonScaleArg {
+    fn into_inner(self) -> plot_utils::HintonScale {
+        match self {
+            HintonScaleArg::Sqrt => plot_utils::HintonScale::Sqrt,
+            HintonScaleArg::Log1p => plot_utils::HintonScale::Log1p,
+            HintonScaleArg::Linear => plot_utils::HintonScale::Linear,
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+pub struct PlotTopicArgs {
+    #[arg(
+        long,
+        short = 'f',
+        help = "Run manifest JSON from `senna topic`/`itopic`/`joint-topic`",
+        long_help = "If set, fills in --latent / --dictionary and the batch-file \
+                     list from the manifest's outputs/data sections. CLI flags \
+                     still override individual values."
+    )]
+    pub from: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Latent parquet (cells × K log-softmax topic proportions)"
+    )]
+    pub latent: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Dictionary parquet (gene × K). Defaults to manifest's dictionary_empirical else dictionary"
+    )]
+    pub dictionary: Option<Box<str>>,
+
+    #[arg(
+        long,
+        short = 'o',
+        help = "Output prefix (defaults to manifest's `prefix` when --from is used)"
+    )]
+    pub out: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 12.0,
+        help = "Combined-panel width (inches); per-batch width is allocated proportional to cell count"
+    )]
+    pub width: f32,
+
+    #[arg(long, default_value_t = 2.0, help = "Per-panel height (inches)")]
+    pub height: f32,
+
+    #[arg(long, default_value_t = 300, help = "Output DPI for rasterized panels")]
+    pub dpi: u32,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = GroupBy::Batch,
+        help = "Group cells into panels by batch (default) or by `senna annotate` cell-type label"
+    )]
+    pub group_by: GroupBy,
+
+    #[arg(
+        long,
+        help = "Argmax TSV from `senna annotate` (cell\\tcell_type\\tprobability). Defaults to manifest's annotate.argmax. Required for --group-by annotation."
+    )]
+    pub annotation: Option<Box<str>>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = CellOrder::Argmax,
+        help = "Cell ordering inside each panel"
+    )]
+    pub order: CellOrder,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Topic palette (default: manifest's defaults.palette, else `auto`)"
+    )]
+    pub palette: Option<Palette>,
+
+    #[arg(
+        long,
+        default_value_t = 20,
+        help = "Top-N genes per topic for dictionary plot (0 = use all genes)"
+    )]
+    pub top_genes: usize,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = HintonScaleArg::Sqrt,
+        help = "Magnitude → side mapping for Hinton (sqrt | log1p | linear)"
+    )]
+    pub hinton_scale: HintonScaleArg,
+
+    #[arg(long, default_value_t = false, help = "Skip the structure-bar plot")]
+    pub no_struct: bool,
+
+    #[arg(long, default_value_t = false, help = "Skip the dictionary plot")]
+    pub no_dict: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Also emit SVG (default: PDF only)"
+    )]
+    pub svg: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Also emit PNG (default: PDF only)"
+    )]
+    pub png: bool,
+
+    #[arg(long, default_value_t = false, help = "Skip PDF output")]
+    pub no_pdf: bool,
+}
+
+/// Resolved manifest + CLI inputs. Paths are absolute or already
+/// resolved relative to the manifest directory.
+struct ResolvedInputs {
+    out: String,
+    latent: String,
+    dictionary: Option<String>,
+    /// Per-data-file batch label list paths (parallel to `data_input`).
+    /// Empty when the run had no `--batch-files`.
+    batch_files: Vec<String>,
+    /// Original data files (used for the cell-count-per-file fallback when
+    /// `batch_files` is empty).
+    data_files: Vec<String>,
+    /// Optional `cell_coords.parquet` for `--order coord`.
+    cell_coords: Option<String>,
+    /// Optional `argmax.tsv` from `senna annotate` for `--group-by annotation`.
+    annotation: Option<String>,
+    palette: Palette,
+}
+
+pub fn fit_plot_topic(args: &PlotTopicArgs) -> anyhow::Result<()> {
+    let resolved = resolve_inputs(args)?;
+    let plot_root = format!("{}.plots", resolved.out);
+
+    // Load topic proportions (cells × K), exp-normalize.
+    let MatWithNames {
+        rows: cell_names,
+        cols: topic_cols,
+        mat: latent,
+    } = Mat::from_parquet(&resolved.latent)?;
+    let n_cells = latent.nrows();
+    let n_topics = latent.ncols();
+    info!(
+        "Loaded latent {} ({} cells × {} topics)",
+        resolved.latent, n_cells, n_topics
+    );
+
+    // Topic IDs: parse from "T{c}" naming when present so the palette
+    // keys by topic-id rather than column index. Falls back to 0..K.
+    let topic_ids = try_parse_axis_ids(&topic_cols, "T")
+        .unwrap_or_else(|| (0..n_topics as i64).collect::<Vec<_>>());
+
+    let palette = palette::resolve(&resolved.palette, n_topics);
+    // One color per *column position*, but keyed by topic-id so a topic
+    // T3 shares its color with `senna plot --colour-by topic` and the
+    // dictionary plot.
+    let topic_colors: Vec<Rgb> = topic_ids
+        .iter()
+        .map(|&tid| palette::color(&palette, tid.max(0) as usize))
+        .collect();
+
+    // Row-stochastic probs via exp + per-row renorm. Stored row-major.
+    let mut probs: Vec<f32> = vec![0.0; n_cells * n_topics];
+    for i in 0..n_cells {
+        let row_off = i * n_topics;
+        let row = &mut probs[row_off..row_off + n_topics];
+        let mut s = 0.0f32;
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = latent[(i, j)].exp();
+            s += *v;
+        }
+        if s > 0.0 {
+            let inv = 1.0 / s;
+            for v in row {
+                *v *= inv;
+            }
+        }
+    }
+
+    if !args.no_struct {
+        let group_labels = match args.group_by {
+            GroupBy::Batch => load_batch_labels(&resolved, n_cells)?,
+            GroupBy::Annotation => load_annotation_labels(&resolved, &cell_names)?,
+        };
+        render_structure_plots(
+            &probs,
+            n_topics,
+            &topic_ids,
+            &topic_colors,
+            &group_labels,
+            args,
+            &resolved,
+            &plot_root,
+        )?;
+    }
+
+    if !args.no_dict {
+        render_dict_plot(&topic_ids, &topic_colors, args, &resolved, &plot_root)?;
+    }
+
+    Ok(())
+}
+
+fn resolve_inputs(args: &PlotTopicArgs) -> anyhow::Result<ResolvedInputs> {
+    let (manifest, manifest_dir): (Option<RunManifest>, PathBuf) = match &args.from {
+        Some(p) => {
+            let (m, dir) = RunManifest::load(Path::new(p.as_ref()))?;
+            info!("Loaded run manifest {} (kind: {})", p, m.kind);
+            (Some(m), dir)
+        }
+        None => (None, PathBuf::from(".")),
+    };
+
+    let resolve_str = |s: &str| {
+        run_manifest::resolve(&manifest_dir, s)
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    let out = args
+        .out
+        .as_deref()
+        .map(String::from)
+        .or_else(|| manifest.as_ref().map(|m| m.prefix.clone()))
+        .ok_or_else(|| anyhow::anyhow!("no --out given and no manifest prefix available"))?;
+
+    let latent = args
+        .latent
+        .as_deref()
+        .map(String::from)
+        .or_else(|| {
+            manifest
+                .as_ref()
+                .and_then(|m| m.outputs.latent.as_deref())
+                .map(resolve_str)
+        })
+        .ok_or_else(|| anyhow::anyhow!("no --latent given and manifest has no outputs.latent"))?;
+
+    // Dictionary preference: empirical (full-resolution) when present,
+    // else the coarse-then-expanded `dictionary`. Mirrors the same
+    // preference `senna annotate` uses.
+    let dictionary = args.dictionary.as_deref().map(String::from).or_else(|| {
+        manifest.as_ref().and_then(|m| {
+            m.outputs
+                .dictionary_empirical
+                .as_deref()
+                .or(m.outputs.dictionary.as_deref())
+                .map(&resolve_str)
+        })
+    });
+
+    let batch_files = manifest
+        .as_ref()
+        .map(|m| m.data.batch.iter().map(|p| resolve_str(p)).collect())
+        .unwrap_or_default();
+
+    let data_files = manifest
+        .as_ref()
+        .map(|m| m.data.input.iter().map(|p| resolve_str(p)).collect())
+        .unwrap_or_default();
+
+    let cell_coords = manifest
+        .as_ref()
+        .and_then(|m| m.layout.cell_coords.as_deref())
+        .map(resolve_str);
+
+    let annotation = args.annotation.as_deref().map(String::from).or_else(|| {
+        manifest
+            .as_ref()
+            .and_then(|m| m.annotate.argmax.as_deref())
+            .map(resolve_str)
+    });
+
+    let palette = args
+        .palette
+        .clone()
+        .or_else(|| {
+            manifest
+                .as_ref()
+                .and_then(|m| m.defaults.palette.as_deref())
+                .and_then(|s| <Palette as clap::ValueEnum>::from_str(s, true).ok())
+        })
+        .unwrap_or(Palette::Auto);
+
+    Ok(ResolvedInputs {
+        out,
+        latent,
+        dictionary,
+        batch_files,
+        data_files,
+        cell_coords,
+        annotation,
+        palette,
+    })
+}
+
+/// Per-cell batch label, length == `n_cells`, in `latent.parquet` row
+/// order. Reads the original batch-file paths from the manifest
+/// (matching pinto's "paths-in-json" pattern); falls back to a synthetic
+/// label per data-file when no batch files were provided.
+fn load_batch_labels(resolved: &ResolvedInputs, n_cells: usize) -> anyhow::Result<Vec<Box<str>>> {
+    use matrix_util::common_io::read_lines;
+
+    if !resolved.batch_files.is_empty() {
+        let mut all = Vec::with_capacity(n_cells);
+        for bf in &resolved.batch_files {
+            info!("Reading batch file: {bf}");
+            for s in read_lines(bf)? {
+                all.push(s);
+            }
+        }
+        if all.len() != n_cells {
+            anyhow::bail!(
+                "batch labels total {} != latent rows {} (manifest data.batch may be stale)",
+                all.len(),
+                n_cells,
+            );
+        }
+        return Ok(all);
+    }
+
+    if resolved.data_files.is_empty() {
+        // No data file list either — single synthetic batch.
+        return Ok(vec!["all".into(); n_cells]);
+    }
+
+    // No batch files: replicate `senna_input.rs:86-92`'s fallback —
+    // batch i = data-file index. Cheap because num_columns() reads only
+    // the on-disk index, not the full matrix.
+    use data_beans::convert::try_open_or_convert;
+    let mut all: Vec<Box<str>> = Vec::with_capacity(n_cells);
+    for (idx, df) in resolved.data_files.iter().enumerate() {
+        let n = try_open_or_convert(df)?
+            .num_columns()
+            .ok_or_else(|| anyhow::anyhow!("data file {df} has no column count"))?;
+        let label: Box<str> = idx.to_string().into_boxed_str();
+        all.extend(std::iter::repeat_n(label, n));
+    }
+    if all.len() != n_cells {
+        anyhow::bail!(
+            "fallback batch labels {} != latent rows {} (data_files inconsistent)",
+            all.len(),
+            n_cells,
+        );
+    }
+    Ok(all)
+}
+
+/// Per-cell label from `senna annotate`'s `argmax.tsv`. The TSV's
+/// `cell` column is matched against `latent.parquet`'s row names —
+/// annotate may have run on a subset, so missing cells are tagged
+/// `"unannotated"` rather than failing.
+fn load_annotation_labels(
+    resolved: &ResolvedInputs,
+    cell_names: &[Box<str>],
+) -> anyhow::Result<Vec<Box<str>>> {
+    let path = resolved.annotation.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "--group-by annotation requires --annotation PATH or `senna annotate` \
+             must have populated manifest.annotate.argmax"
+        )
+    })?;
+    info!("Reading annotation labels from {path}");
+    let content = fs::read_to_string(Path::new(path))?;
+    let mut by_cell: FxHashMap<Box<str>, Box<str>> = FxHashMap::default();
+    for (line_no, raw) in content.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Header: cell\tcell_type\tprobability — skip if first column
+        // is "cell" (matches what annotate writes at run.rs:71).
+        let mut parts = line.split('\t');
+        let cell = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("annotation TSV line {}: missing cell", line_no + 1))?;
+        let label = parts.next().ok_or_else(|| {
+            anyhow::anyhow!("annotation TSV line {}: missing cell_type", line_no + 1)
+        })?;
+        if cell == "cell" && label == "cell_type" {
+            continue;
+        }
+        by_cell.insert(cell.into(), label.into());
+    }
+    let unannotated: Box<str> = "unannotated".into();
+    let mut n_missing = 0usize;
+    let labels: Vec<Box<str>> = cell_names
+        .iter()
+        .map(|c| {
+            by_cell.get(c).cloned().unwrap_or_else(|| {
+                n_missing += 1;
+                unannotated.clone()
+            })
+        })
+        .collect();
+    if n_missing > 0 {
+        info!(
+            "annotation: {n_missing}/{} cells absent from {path} → tagged 'unannotated'",
+            cell_names.len()
+        );
+    }
+    Ok(labels)
+}
+
+/// Cell indices grouped by label, returned in **alphabetical** label
+/// order. Matches the canonical fastTopics structure-plot facet order
+/// (B cell, CD14+, CD34+, NK cell, T cell …) and is stable across
+/// reruns regardless of cell input order.
+fn cells_by_batch(batch_labels: &[Box<str>]) -> Vec<(Box<str>, Vec<usize>)> {
+    let mut buckets: FxHashMap<Box<str>, Vec<usize>> = FxHashMap::default();
+    for (i, b) in batch_labels.iter().enumerate() {
+        buckets.entry(b.clone()).or_default().push(i);
+    }
+    let mut keys: Vec<Box<str>> = buckets.keys().cloned().collect();
+    keys.sort_unstable();
+    keys.into_iter()
+        .map(|b| {
+            let v = buckets.remove(&b).unwrap_or_default();
+            (b, v)
+        })
+        .collect()
+}
+
+/// Argmax-then-dominant-prob ordering inside one batch's cell list.
+fn order_by_argmax(
+    cells: &[usize],
+    probs: &[f32],
+    n_topics: usize,
+    topic_ids: &[i64],
+) -> Vec<usize> {
+    // Per cell: (argmax topic-id, -dominant prob).
+    let mut keyed: Vec<(usize, i64, f32)> = cells
+        .iter()
+        .map(|&i| {
+            let row = &probs[i * n_topics..(i + 1) * n_topics];
+            let mut best_j = 0usize;
+            let mut best_v = f32::NEG_INFINITY;
+            for (j, &v) in row.iter().enumerate() {
+                if v > best_v {
+                    best_v = v;
+                    best_j = j;
+                }
+            }
+            (i, topic_ids[best_j], best_v)
+        })
+        .collect();
+    keyed.sort_by(|a, b| {
+        a.1.cmp(&b.1)
+            .then(b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    keyed.into_iter().map(|(i, _, _)| i).collect()
+}
+
+/// Sort cells by ascending x from `cell_coords.parquet`. Falls back to
+/// argmax order if the file is missing or has no `x` column.
+fn order_by_coord(
+    cells: &[usize],
+    cell_coords_path: Option<&str>,
+    probs: &[f32],
+    n_topics: usize,
+    topic_ids: &[i64],
+) -> anyhow::Result<Vec<usize>> {
+    let Some(path) = cell_coords_path else {
+        info!("--order coord: no layout.cell_coords in manifest, falling back to argmax");
+        return Ok(order_by_argmax(cells, probs, n_topics, topic_ids));
+    };
+    let MatWithNames { cols, mat, .. } = Mat::from_parquet(path)?;
+    let Some(xj) = cols.iter().position(|c| &**c == "x") else {
+        info!("--order coord: no 'x' column in {path}, falling back to argmax");
+        return Ok(order_by_argmax(cells, probs, n_topics, topic_ids));
+    };
+    if mat.nrows() < cells.iter().copied().max().unwrap_or(0) + 1 {
+        info!("--order coord: cell_coords too short, falling back to argmax");
+        return Ok(order_by_argmax(cells, probs, n_topics, topic_ids));
+    }
+    let mut keyed: Vec<(usize, f32)> = cells.iter().map(|&i| (i, mat[(i, xj)])).collect();
+    keyed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(keyed.into_iter().map(|(i, _)| i).collect())
+}
+
+/// Layout knobs for a structure-plot SVG (single-panel or combined).
+/// Pixel-level dimensions are derived from `args.{width,height,dpi}` once
+/// per call so the per-cell pixel density is identical between the
+/// standalone per-group panels and the combined `all.*` plot.
+struct StructDims {
+    bar_h: u32,
+    label_band: u32,
+    legend_band: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_structure_plots(
+    probs: &[f32],
+    n_topics: usize,
+    topic_ids: &[i64],
+    topic_colors: &[Rgb],
+    group_labels: &[Box<str>],
+    args: &PlotTopicArgs,
+    resolved: &ResolvedInputs,
+    plot_root: &str,
+) -> anyhow::Result<()> {
+    let groups = cells_by_batch(group_labels);
+    if groups.is_empty() {
+        info!("No cells to plot for structure plot");
+        return Ok(());
+    }
+
+    let struct_dir = format!("{plot_root}/struct");
+    let by_group_dir = format!("{struct_dir}/by_{}", args.group_by.subdir_suffix());
+    fs::create_dir_all(&by_group_dir)?;
+
+    let ordered: Vec<(Box<str>, Vec<usize>)> = match args.order {
+        CellOrder::Argmax => groups
+            .iter()
+            .map(|(b, cs)| (b.clone(), order_by_argmax(cs, probs, n_topics, topic_ids)))
+            .collect(),
+        CellOrder::Coord => groups
+            .iter()
+            .map(|(b, cs)| {
+                let o = order_by_coord(
+                    cs,
+                    resolved.cell_coords.as_deref(),
+                    probs,
+                    n_topics,
+                    topic_ids,
+                )?;
+                Ok::<_, anyhow::Error>((b.clone(), o))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
+    };
+
+    let total_cells: usize = ordered.iter().map(|(_, v)| v.len()).sum();
+    if total_cells == 0 {
+        info!("No cells in any group, skipping structure plot");
+        return Ok(());
+    }
+
+    let dims = StructDims {
+        bar_h: (args.height * args.dpi as f32).round().max(1.0) as u32,
+        label_band: (args.dpi as f32 * 0.35).round().max(20.0) as u32,
+        legend_band: (args.dpi as f32 * 0.6).round().max(40.0) as u32,
+    };
+    let total_width_px = (args.width * args.dpi as f32).round().max(1.0) as u32;
+
+    // Per-group raster panels (rayon-parallel; each panel is an
+    // independent tiny-skia render).
+    let panels: Vec<PanelOut> = ordered
+        .par_iter()
+        .map(|(batch, order)| -> anyhow::Result<PanelOut> {
+            let n = order.len();
+            let panel_w = ((n as f64 / total_cells as f64) * total_width_px as f64)
+                .round()
+                .max(1.0) as u32;
+            // Reorder probs into a contiguous [n × K] row-major slice so
+            // structure_bar_png can iterate linearly.
+            let mut buf = Vec::with_capacity(n * n_topics);
+            for &cell in order {
+                buf.extend_from_slice(&probs[cell * n_topics..(cell + 1) * n_topics]);
+            }
+            let png = plot_utils::structure_bar_png(
+                &buf,
+                n,
+                n_topics,
+                panel_w,
+                dims.bar_h,
+                topic_colors,
+            )?;
+            Ok(PanelOut {
+                batch: batch.clone(),
+                n_cells: n,
+                width_px: panel_w,
+                png,
+            })
+        })
+        .collect::<anyhow::Result<_>>()?;
+
+    panels.par_iter().try_for_each(|p| -> anyhow::Result<()> {
+        let svg = emit_struct_svg(std::slice::from_ref(p), &dims, topic_ids, topic_colors);
+        let base = format!("{by_group_dir}/{}", sanitize(&p.batch));
+        emit_outputs(
+            &svg,
+            p.width_px + dims.legend_band,
+            dims.label_band + dims.bar_h,
+            &base,
+            args,
+        )
+    })?;
+
+    let combined_w: u32 = panels.iter().map(|p| p.width_px).sum();
+    let svg = emit_struct_svg(&panels, &dims, topic_ids, topic_colors);
+    emit_outputs(
+        &svg,
+        combined_w + dims.legend_band,
+        dims.label_band + dims.bar_h,
+        &format!("{struct_dir}/all"),
+        args,
+    )?;
+
+    Ok(())
+}
+
+struct PanelOut {
+    batch: Box<str>,
+    n_cells: usize,
+    width_px: u32,
+    png: Vec<u8>,
+}
+
+const PANEL_LABEL_FONT_FRAC: f32 = 0.55;
+
+/// Emit a structure-plot SVG laying out `panels` left-to-right with a
+/// single shared topic legend on the right. A 1-element slice produces
+/// the standalone per-group view; a multi-element slice produces the
+/// combined `all.*` view — the layout is identical.
+fn emit_struct_svg(
+    panels: &[PanelOut],
+    d: &StructDims,
+    topic_ids: &[i64],
+    topic_colors: &[Rgb],
+) -> String {
+    let bars_w: u32 = panels.iter().map(|p| p.width_px).sum();
+    let total_w = bars_w + d.legend_band;
+    let total_h = d.label_band + d.bar_h;
+    let label_fs = (d.label_band as f32 * PANEL_LABEL_FONT_FRAC).round();
+
+    let mut s = String::with_capacity(panels.iter().map(|p| p.png.len()).sum::<usize>() * 2 + 4096);
+    let _ = write!(
+        s,
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <svg xmlns=\"http://www.w3.org/2000/svg\" \
+             xmlns:xlink=\"http://www.w3.org/1999/xlink\" \
+             viewBox=\"0 0 {total_w} {total_h}\" width=\"{total_w}\" height=\"{total_h}\">\n",
+    );
+    // White background — PDF backends don't have a defined fill behind
+    // the raster <image>, so missing this paints garbage on some viewers.
+    let _ = writeln!(
+        s,
+        "  <rect x=\"0\" y=\"0\" width=\"{total_w}\" height=\"{total_h}\" fill=\"white\"/>"
+    );
+
+    let mut x_offset: u32 = 0;
+    for p in panels {
+        let label = format!("{} (n={})", plot_utils::escape_xml(&p.batch), p.n_cells);
+        let _ = writeln!(
+            s,
+            "  <text x=\"{x}\" y=\"{y}\" font-family=\"Helvetica, Arial, sans-serif\" \
+             font-size=\"{label_fs}\" text-anchor=\"middle\" dominant-baseline=\"central\" \
+             fill=\"black\">{label}</text>",
+            x = x_offset + p.width_px / 2,
+            y = d.label_band / 2,
+        );
+        let b64 = BASE64.encode(&p.png);
+        let _ = writeln!(
+            s,
+            "  <image x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" \
+             preserveAspectRatio=\"none\" href=\"data:image/png;base64,{b64}\"/>",
+            x = x_offset,
+            y = d.label_band,
+            w = p.width_px,
+            h = d.bar_h,
+        );
+        let _ = writeln!(
+            s,
+            "  <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{w:.1}\" height=\"{h:.1}\" \
+             fill=\"none\" stroke=\"black\" stroke-width=\"1\"/>",
+            x = x_offset as f32 + 0.5,
+            y = d.label_band as f32 + 0.5,
+            w = p.width_px as f32 - 1.0,
+            h = d.bar_h as f32 - 1.0,
+        );
+        x_offset += p.width_px;
+    }
+
+    emit_topic_legend(&mut s, bars_w, d, topic_ids, topic_colors);
+    let _ = writeln!(s, "</svg>");
+    s
+}
+
+fn emit_topic_legend(
+    s: &mut String,
+    bar_x_end: u32,
+    d: &StructDims,
+    topic_ids: &[i64],
+    topic_colors: &[Rgb],
+) {
+    let n = topic_ids.len();
+    if n == 0 || d.legend_band < 8 {
+        return;
+    }
+    let pad_left = 8.0;
+    let swatch = (d.legend_band as f32 * 0.18).clamp(8.0, 18.0);
+    let line_h = swatch + 4.0;
+    let total_legend_h = line_h * n as f32;
+    let start_y = d.label_band as f32 + ((d.bar_h as f32 - total_legend_h) * 0.5).max(0.0);
+
+    let _ = writeln!(s, "  <g id=\"legend\">");
+    for (i, (&tid, &(r, g, b))) in topic_ids.iter().zip(topic_colors).enumerate() {
+        let y = start_y + i as f32 * line_h;
+        let x = bar_x_end as f32 + pad_left;
+        let _ = writeln!(
+            s,
+            "    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{sw:.1}\" height=\"{sw:.1}\" \
+             fill=\"rgb({r},{g},{b})\" stroke=\"black\" stroke-width=\"0.5\"/>",
+            sw = swatch,
+        );
+        let _ = writeln!(
+            s,
+            "    <text x=\"{tx:.1}\" y=\"{ty:.1}\" font-family=\"Helvetica, Arial, sans-serif\" \
+             font-size=\"{fs:.1}\" dominant-baseline=\"central\" fill=\"black\">T{tid}</text>",
+            tx = x + swatch + 4.0,
+            ty = y + swatch * 0.5,
+            fs = swatch * 0.85,
+        );
+    }
+    let _ = writeln!(s, "  </g>");
+}
+
+// ---------------------------------------------------------------------------
+// Dictionary plot (Hinton ≤ 100 rows, heatmap above).
+// ---------------------------------------------------------------------------
+
+fn render_dict_plot(
+    topic_ids: &[i64],
+    topic_colors: &[Rgb],
+    args: &PlotTopicArgs,
+    resolved: &ResolvedInputs,
+    plot_root: &str,
+) -> anyhow::Result<()> {
+    let Some(dict_path) = resolved.dictionary.as_deref() else {
+        info!("No dictionary parquet in manifest, skipping dictionary plot");
+        return Ok(());
+    };
+
+    let MatWithNames {
+        rows: gene_names,
+        cols: dict_cols,
+        mat: dict_gk,
+    } = Mat::from_parquet(dict_path)?;
+    let n_genes_full = dict_gk.nrows();
+    let n_topics = dict_gk.ncols();
+    info!(
+        "Loaded dictionary {} ({} genes × {} topics)",
+        dict_path, n_genes_full, n_topics
+    );
+
+    if n_topics != topic_ids.len() {
+        anyhow::bail!(
+            "dictionary K={} does not match latent K={}",
+            n_topics,
+            topic_ids.len()
+        );
+    }
+
+    // Topic-loadings on the simplex / signed scale: the "weights" we
+    // visualize in Hinton are non-negative magnitudes. For
+    // dictionary_empirical (already simplex-normalized) values are ≥ 0;
+    // for dictionary (log-prob) we exp-then-normalize per column.
+    let mut weights_gk: Vec<f32> = Vec::with_capacity(n_genes_full * n_topics);
+    let any_negative = (0..n_genes_full).any(|i| (0..n_topics).any(|j| dict_gk[(i, j)] < 0.0));
+    if any_negative {
+        // Treat as log-prob: exp + per-column renorm.
+        let mut col_sums = vec![0.0f32; n_topics];
+        let mut tmp = vec![0.0f32; n_genes_full * n_topics];
+        for i in 0..n_genes_full {
+            for j in 0..n_topics {
+                let v = dict_gk[(i, j)].exp();
+                tmp[i * n_topics + j] = v;
+                col_sums[j] += v;
+            }
+        }
+        for i in 0..n_genes_full {
+            for j in 0..n_topics {
+                let s = col_sums[j].max(1e-30);
+                tmp[i * n_topics + j] /= s;
+            }
+        }
+        weights_gk = tmp;
+    } else {
+        for i in 0..n_genes_full {
+            for j in 0..n_topics {
+                weights_gk.push(dict_gk[(i, j)].max(0.0));
+            }
+        }
+    }
+
+    // Gene selection.
+    let gene_idx: Vec<usize> = if args.top_genes == 0 {
+        (0..n_genes_full).collect()
+    } else {
+        top_genes_per_topic(&weights_gk, n_genes_full, n_topics, args.top_genes)
+    };
+    let n_genes = gene_idx.len();
+    if n_genes == 0 {
+        info!("No genes selected for dictionary plot, skipping");
+        return Ok(());
+    }
+    info!(
+        "Dictionary plot: {n_genes} genes × {n_topics} topics ({} mode)",
+        if n_genes <= HINTON_GENE_THRESHOLD {
+            "hinton"
+        } else {
+            "heatmap"
+        }
+    );
+
+    // Verify dict columns parse to topic IDs and align with topic_ids.
+    let dict_topic_ids = try_parse_axis_ids(&dict_cols, "T")
+        .unwrap_or_else(|| (0..n_topics as i64).collect::<Vec<_>>());
+
+    // Submatrix (n_genes × n_topics) row-major in selected gene order.
+    let mut sub: Vec<f32> = Vec::with_capacity(n_genes * n_topics);
+    let mut sub_gene_names: Vec<Box<str>> = Vec::with_capacity(n_genes);
+    for &gi in &gene_idx {
+        for j in 0..n_topics {
+            sub.push(weights_gk[gi * n_topics + j]);
+        }
+        sub_gene_names.push(gene_names[gi].clone());
+    }
+
+    let dict_dir = format!("{plot_root}/dict");
+    fs::create_dir_all(&dict_dir)?;
+
+    // Diagonalize: rows ordered so peak topic per gene runs along the
+    // main diagonal (block-band layout), columns reordered to match.
+    // Same recipe Hinton uses internally; we apply it to both render
+    // paths so heatmap and Hinton share the visual convention.
+    let (row_order, col_order) = plot_utils::diagonalize_order(&sub, n_genes, n_topics);
+
+    if n_genes <= HINTON_GENE_THRESHOLD {
+        let topic_labels: Vec<Box<str>> = dict_topic_ids
+            .iter()
+            .map(|tid| format!("T{tid}").into_boxed_str())
+            .collect();
+        let opts = plot_utils::HintonOpts {
+            row_labels: Some(&sub_gene_names),
+            col_labels: Some(&topic_labels),
+            row_order: Some(&row_order),
+            col_order: Some(&col_order),
+            col_colors: Some(topic_colors),
+            cell_colors: None,
+            scale: args.hinton_scale.clone().into_inner(),
+            cell_px: 18.0,
+            font_px: 11.0,
+            title: None,
+            grid_stroke_px: 0.0,
+            grid_color: (220, 220, 220),
+            color_legend: None,
+        };
+        let svg = plot_utils::render_hinton(&sub, n_genes, n_topics, &opts);
+        let size = plot_utils::hinton_size(n_genes, n_topics, &opts);
+        let base = format!("{dict_dir}/hinton");
+        emit_outputs(&svg, size.width_px, size.height_px, &base, args)?;
+    } else {
+        // Heatmap rasterized via tiny-skia and embedded as <image>. Rows
+        // displayed in `row_order`; columns in `col_order`. Gene labels
+        // alongside each row, with font scaled to row height.
+        let cell_w = 14u32;
+        // Row pixel height auto-tunes to keep the heatmap legible: we
+        // can't fit 1000 rows tall on one page, so cap total bar_h at
+        // ~16 in @ args.dpi and shrink cell_h if needed (gene labels
+        // also scale with cell_h).
+        let max_bar_h = (args.dpi as f32 * 16.0).round() as u32;
+        let cell_h = (max_bar_h / n_genes as u32).clamp(1, 8);
+        let bar_w = n_topics as u32 * cell_w;
+        let bar_h = n_genes as u32 * cell_h;
+
+        // Estimate gene-label character width at the chosen font size.
+        let label_font_px = (cell_h as f32 * 0.85).clamp(4.0, 9.0);
+        let max_label_chars = sub_gene_names
+            .iter()
+            .map(|n| n.chars().count())
+            .max()
+            .unwrap_or(8) as f32;
+        // Crude monospace-ish width estimate for sans-serif at this font
+        // size (≈ 0.55 × font height per char).
+        let label_band_left = ((max_label_chars * label_font_px * 0.55).ceil() as u32 + 8).min(220);
+        let label_band_top: u32 = 28;
+        let total_w = label_band_left + bar_w + 16;
+        let total_h = label_band_top + bar_h + 8;
+
+        // Reorder sub matrix so PNG draws cells in display order.
+        let mut sub_disp: Vec<f32> = Vec::with_capacity(n_genes * n_topics);
+        for &rr in &row_order {
+            for &cc in &col_order {
+                sub_disp.push(sub[rr * n_topics + cc]);
+            }
+        }
+        let topic_colors_disp: Vec<Rgb> = col_order.iter().map(|&cc| topic_colors[cc]).collect();
+
+        let png = render_dict_heatmap_png(
+            &sub_disp,
+            n_genes,
+            n_topics,
+            cell_w,
+            cell_h,
+            &topic_colors_disp,
+        )?;
+
+        let mut s = String::with_capacity(png.len() * 2 + sub_gene_names.len() * 64 + 4096);
+        let _ = write!(
+            s,
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <svg xmlns=\"http://www.w3.org/2000/svg\" \
+                 xmlns:xlink=\"http://www.w3.org/1999/xlink\" \
+                 viewBox=\"0 0 {total_w} {total_h}\" width=\"{total_w}\" height=\"{total_h}\">\n",
+        );
+        let _ = writeln!(
+            s,
+            "  <rect x=\"0\" y=\"0\" width=\"{total_w}\" height=\"{total_h}\" fill=\"white\"/>"
+        );
+        // Topic labels at top, in display order.
+        for (cc_disp, &cc) in col_order.iter().enumerate() {
+            let tid = dict_topic_ids[cc];
+            let cx = label_band_left as f32 + (cc_disp as f32 + 0.5) * cell_w as f32;
+            let _ = writeln!(
+                s,
+                "  <text x=\"{cx:.1}\" y=\"{y}\" font-family=\"Helvetica, Arial, sans-serif\" \
+                 font-size=\"10\" text-anchor=\"middle\" dominant-baseline=\"central\">T{tid}</text>",
+                y = label_band_top / 2,
+            );
+        }
+        // Heatmap raster.
+        let b64 = BASE64.encode(&png);
+        let _ = writeln!(
+            s,
+            "  <image x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" \
+             preserveAspectRatio=\"none\" href=\"data:image/png;base64,{b64}\"/>",
+            x = label_band_left,
+            y = label_band_top,
+            w = bar_w,
+            h = bar_h,
+        );
+        // Gene labels along the left side. Skip when the row pitch is
+        // too small to render legibly even at the auto-shrunk font; in
+        // that case label every Nth row instead.
+        let stride = if label_font_px < 5.0 {
+            ((6.0 / cell_h as f32).ceil() as usize).max(1)
+        } else {
+            1
+        };
+        let _ = writeln!(
+            s,
+            "  <g id=\"gene-labels\" font-family=\"Helvetica, Arial, sans-serif\" \
+             font-size=\"{fs:.1}\" text-anchor=\"end\" dominant-baseline=\"central\">",
+            fs = label_font_px,
+        );
+        for (rr_disp, &rr) in row_order.iter().enumerate() {
+            if rr_disp % stride != 0 {
+                continue;
+            }
+            let cy = label_band_top as f32 + (rr_disp as f32 + 0.5) * cell_h as f32;
+            let _ = writeln!(
+                s,
+                "    <text x=\"{x:.1}\" y=\"{cy:.1}\">{t}</text>",
+                x = label_band_left as f32 - 4.0,
+                t = plot_utils::escape_xml(&sub_gene_names[rr]),
+            );
+        }
+        let _ = writeln!(s, "  </g>");
+        let _ = writeln!(s, "</svg>");
+        let base = format!("{dict_dir}/heatmap");
+        emit_outputs(&s, total_w, total_h, &base, args)?;
+    }
+
+    Ok(())
+}
+
+/// Top-N gene indices per topic, unioned across topics, returned in
+/// sorted order. Tie-break favors specificity: a gene's per-topic weight
+/// minus its mean over the other topics. Mirrors pinto's
+/// `pinto/src/plot/markers.rs:16-61`.
+fn top_genes_per_topic(
+    weights_gk: &[f32],
+    n_genes: usize,
+    n_topics: usize,
+    top_n: usize,
+) -> Vec<usize> {
+    if top_n == 0 || n_genes == 0 || n_topics == 0 {
+        return Vec::new();
+    }
+    let topn = top_n.min(n_genes);
+    let mut keep = vec![false; n_genes];
+
+    let mut row_sums = vec![0.0f32; n_genes];
+    for i in 0..n_genes {
+        for j in 0..n_topics {
+            row_sums[i] += weights_gk[i * n_topics + j];
+        }
+    }
+
+    for j in 0..n_topics {
+        let mut scored: Vec<(usize, f32, f32)> = (0..n_genes)
+            .map(|i| {
+                let w = weights_gk[i * n_topics + j];
+                let other_mean = if n_topics > 1 {
+                    (row_sums[i] - w) / (n_topics - 1) as f32
+                } else {
+                    0.0
+                };
+                (i, w, w - other_mean)
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        for (gi, _, _) in scored.into_iter().take(topn) {
+            keep[gi] = true;
+        }
+    }
+    let mut out: Vec<usize> = (0..n_genes).filter(|&i| keep[i]).collect();
+    out.sort_unstable();
+    out
+}
+
+/// Viridis-bin rasterized heatmap (n_genes × n_topics). Color shade
+/// within a topic-column = log-magnitude bin (cheap quantization, no
+/// external viridis dep). Topic columns share the topic palette to keep
+/// the dictionary plot keyed to the same color identity as the
+/// structure plot.
+fn render_dict_heatmap_png(
+    sub: &[f32],
+    n_genes: usize,
+    n_topics: usize,
+    cell_w: u32,
+    cell_h: u32,
+    topic_colors: &[Rgb],
+) -> anyhow::Result<Vec<u8>> {
+    use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
+
+    let bar_w = n_topics as u32 * cell_w;
+    let bar_h = n_genes as u32 * cell_h;
+    let mut pixmap = Pixmap::new(bar_w, bar_h)
+        .ok_or_else(|| anyhow::anyhow!("pixmap alloc failed ({bar_w}x{bar_h})"))?;
+
+    // Per-column max for normalization.
+    let mut col_max = vec![0.0f32; n_topics];
+    for i in 0..n_genes {
+        for j in 0..n_topics {
+            let v = sub[i * n_topics + j];
+            if v.is_finite() && v > col_max[j] {
+                col_max[j] = v;
+            }
+        }
+    }
+
+    // White background so blend-toward-saturated-topic-color reads
+    // correctly at full alpha — transparency would let the underlying
+    // SVG color through and washed out the low-magnitude cells.
+    pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+
+    let identity = Transform::identity();
+    for i in 0..n_genes {
+        for j in 0..n_topics {
+            let v = sub[i * n_topics + j];
+            if !v.is_finite() || v <= 0.0 || col_max[j] <= 0.0 {
+                continue;
+            }
+            // log1p compression so heavy-tailed weights stay readable.
+            let frac = (v.ln_1p() / col_max[j].ln_1p().max(1e-12)).clamp(0.0, 1.0);
+            let (r, g, b) = topic_colors[j];
+            // Magnitude → blend white→topic-color at full alpha. Avoids
+            // alpha < 1 which renders ambiguously over PDF backgrounds.
+            let inv = 1.0 - frac;
+            let blend = |c: u8| (inv * 255.0 + frac * c as f32).round().clamp(0.0, 255.0) as u8;
+            let mut p = Paint::default();
+            p.set_color_rgba8(blend(r), blend(g), blend(b), 255);
+            p.anti_alias = false;
+            let x = j as f32 * cell_w as f32;
+            let y = i as f32 * cell_h as f32;
+            let mut pb = PathBuilder::new();
+            pb.push_rect(
+                tiny_skia::Rect::from_xywh(x, y, cell_w as f32, cell_h as f32)
+                    .ok_or_else(|| anyhow::anyhow!("invalid rect"))?,
+            );
+            if let Some(path) = pb.finish() {
+                pixmap.fill_path(&path, &p, FillRule::Winding, identity, None);
+            }
+        }
+    }
+
+    pixmap
+        .encode_png()
+        .map_err(|e| anyhow::anyhow!("PNG encode failed: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Output emission (PDF default, SVG/PNG opt-in).
+// ---------------------------------------------------------------------------
+
+fn emit_outputs(svg: &str, w: u32, h: u32, base: &str, args: &PlotTopicArgs) -> anyhow::Result<()> {
+    if args.svg {
+        let path = format!("{base}.svg");
+        fs::write(&path, svg.as_bytes())?;
+        info!("Wrote {path}");
+    }
+    let png_task = args.png.then(|| format!("{base}.png"));
+    let pdf_task = (!args.no_pdf).then(|| format!("{base}.pdf"));
+
+    let (png_res, pdf_res) = rayon::join(
+        || match &png_task {
+            Some(p) => plot_utils::render_png(svg, w, h, Path::new(p)).map(|()| Some(p.clone())),
+            None => Ok(None),
+        },
+        || match &pdf_task {
+            Some(p) => plot_utils::render_pdf(svg, Path::new(p)).map(|()| Some(p.clone())),
+            None => Ok(None),
+        },
+    );
+    if let Some(p) = png_res? {
+        info!("Wrote {p}");
+    }
+    if let Some(p) = pdf_res? {
+        info!("Wrote {p}");
+    }
+    Ok(())
+}
+
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | '.' => c,
+            _ => '_',
+        })
+        .collect()
+}

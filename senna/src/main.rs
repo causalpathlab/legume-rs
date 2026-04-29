@@ -246,6 +246,19 @@ enum Commands {
     Plot(PlotArgs),
 
     #[command(
+        about = "Topic structure-bar (per batch) + gene × topic dictionary plots",
+        long_about = "Admixture-style stacked-bar structure plots per batch (panel\n\
+                      width ∝ #cells), plus a gene × topic dictionary summary\n\
+                      (Hinton ≤ 100 genes; viridis-bin heatmap above).\n\n\
+                      Preferred invocation:\n    \
+                      senna plot-topic --from run.senna.json\n\
+                      Defaults to PDF only — pass --svg / --png to also emit those.\n\
+                      Outputs land under {out}.plots/{struct,dict}/.",
+        visible_alias = "pt"
+    )]
+    PlotTopic(PlotTopicArgs),
+
+    #[command(
         about = "Cluster cells on latent topic / SVD representations",
         long_about = "Cluster cells using a latent matrix from `senna topic` or `senna svd`.\n\n\
                       Algorithms:\n\
@@ -320,6 +333,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Plot(args) => {
             fit_plot(args)?;
+        }
+        Commands::PlotTopic(args) => {
+            fit_plot_topic(args)?;
         }
     }
 
