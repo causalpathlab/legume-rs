@@ -7,7 +7,9 @@ use crate::cluster::{
 };
 use crate::cluster_bhc::{run_cluster_bhc, ClusterBhcConfig};
 use crate::embed_common::*;
+use crate::run_manifest::RunManifest;
 use crate::senna_input::{read_data_on_shared_columns, ReadSharedColumnsArgs};
+use std::path::Path;
 
 /// Clustering method CLI enum
 #[derive(ValueEnum, Clone, Debug, Default, PartialEq)]
@@ -179,6 +181,15 @@ pub struct ClusteringArgs {
         help = "Cells per CSC read block when computing BHC sufficient stats"
     )]
     bhc_block_size: usize,
+
+    #[arg(
+        long = "from",
+        help = "Optional run manifest produced by `senna topic|itopic|joint-topic|svd|joint-svd`",
+        long_help = "When given, the manifest is updated in place with the cluster\n\
+                     output path under `cluster.clusters` so that `senna annotate`\n\
+                     can pick the cluster parquet up automatically."
+    )]
+    from: Option<Box<str>>,
 }
 
 pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
@@ -268,10 +279,29 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
 
     info!("Wrote cluster assignments to {output_file}");
 
+    if let Some(from) = args.from.as_deref() {
+        update_manifest_cluster_path(from, &output_file)?;
+    }
+
     if let Some(data_files) = args.data_files.as_ref() {
         run_bhc_postprocess(data_files, &result, &cell_names, args)?;
     }
 
+    Ok(())
+}
+
+/// Update the run manifest in place with the cluster parquet path. Path is
+/// stored relative to the manifest directory so the run dir stays portable.
+fn update_manifest_cluster_path(manifest_path: &str, cluster_path: &str) -> anyhow::Result<()> {
+    let path = Path::new(manifest_path);
+    let (mut manifest, manifest_dir) = RunManifest::load(path)?;
+    let rel = Path::new(cluster_path)
+        .strip_prefix(&manifest_dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| cluster_path.to_string());
+    manifest.cluster.clusters = Some(rel);
+    manifest.save(path)?;
+    info!("Updated manifest {manifest_path} with cluster path");
     Ok(())
 }
 
