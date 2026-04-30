@@ -73,6 +73,7 @@ pub fn accumulate_gene_sum_pair(
     Ok((sum_a, sum_b))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn block_gene_sum(
     data_vec: &SparseIoVec,
     labels_a: &[usize],

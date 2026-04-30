@@ -234,12 +234,18 @@ enum Commands {
                       optional convex hull polygons, and vector text labels at\n\
                       per-group medians (fully editable in Illustrator/Inkscape).\n\n\
                       Preferred invocation uses a run manifest from\n\
-                      `senna topic` + `senna layout`:\n    \
+                      `senna topic` (and optionally `senna annotate`):\n    \
                       senna plot --from run.senna.json\n\
-                      Everything else (cell_coords, topics, labels, colour_by,\n\
+                      If the manifest has no `layout.cell_coords` yet, plot will\n\
+                      auto-run `senna layout phate` against it first. Everything\n\
+                      else (cell_coords, topics, annotation, labels, colour_by,\n\
                       palette) is read from the manifest; individual CLI flags\n\
                       still override when passed.\n\n\
-                      Group source selectable via --colour-by cluster|pb-id|topic.\n\
+                      Group source selectable via\n\
+                      --colour-by cluster|pb-id|topic|annotation. When\n\
+                      `senna annotate` has populated the manifest and no\n\
+                      explicit --colour-by is given, `annotation` is the default\n\
+                      so cells are coloured + labelled by predicted cell type.\n\
                       Hull polygons are off by default (scRNA groups are rarely\n\
                       separable in 2D); enable with --hull for debugging.\n\
                       Outputs: {out}.plot.svg, {out}.plot.png, {out}.plot.pdf."

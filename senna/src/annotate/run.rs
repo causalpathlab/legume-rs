@@ -27,7 +27,7 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
     };
     let (loaded, mut manifest, manifest_dir) = load_from_manifest(
         &args.from,
-        args.clusters.as_deref().map(|s| s.as_ref()),
+        args.clusters.as_deref(),
         &args.markers,
         args.preload_data,
         &leiden_args,
@@ -41,13 +41,10 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
 
     // ----- NB-Fisher per-gene weights -----
     let nb_fisher: Vec<f32> = compute_nb_fisher_weights(loaded.data_vec(), Some(args.block_size))?;
-    let (w_min, w_max, w_sum) = nb_fisher
-        .par_iter()
-        .map(|&w| (w, w, w))
-        .reduce(
-            || (f32::INFINITY, 0.0f32, 0.0f32),
-            |(lo, hi, s), (a, b, c)| (lo.min(a), hi.max(b), s + c),
-        );
+    let (w_min, w_max, w_sum) = nb_fisher.par_iter().map(|&w| (w, w, w)).reduce(
+        || (f32::INFINITY, 0.0f32, 0.0f32),
+        |(lo, hi, s), (a, b, c)| (lo.min(a), hi.max(b), s + c),
+    );
     info!(
         "NB-Fisher weights: min={:.4}, max={:.4}, mean={:.4}",
         w_min,

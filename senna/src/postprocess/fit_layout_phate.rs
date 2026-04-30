@@ -32,6 +32,53 @@ pub struct LayoutPhateArgs {
     n_hvg: usize,
 }
 
+// Defaults mirror clap `default_value_t` on each field above. Used by
+// callers that build the args programmatically (e.g. `senna plot`
+// auto-running layout when `manifest.layout.cell_coords` is missing).
+impl Default for LayoutPhateArgs {
+    fn default() -> Self {
+        Self {
+            common: LayoutCommonArgs::default(),
+            phate: PhateCliArgs::default(),
+            svd_dims: 0,
+            n_hvg: 2000,
+        }
+    }
+}
+
+/// Run `senna layout phate` against an existing manifest with all
+/// defaults — exactly equivalent to `senna layout phate --from PATH`
+/// from the CLI. The manifest is updated in place with the resulting
+/// `layout.cell_coords` / `layout.pb_coords` / `layout.pb_gene_mean`
+/// paths. `preload` mirrors `--preload-data` (slow disks).
+///
+/// Output files land in the manifest's own directory (rooted at the
+/// manifest's `prefix` basename), not the caller's CWD — so callers
+/// like `senna plot` invoking this from arbitrary working dirs
+/// produce stable layout artifacts next to the manifest.
+pub fn run_default_phate_layout(manifest_path: &str, preload: bool) -> anyhow::Result<()> {
+    use crate::run_manifest::RunManifest;
+    use std::path::Path;
+
+    let mut args = LayoutPhateArgs::default();
+    args.common.from = Some(Box::from(manifest_path));
+    args.common.preload_data = preload;
+
+    // Anchor `out` to the manifest's directory so writes don't leak
+    // into the caller's CWD. Strip any directory portion from
+    // `manifest.prefix` (it may already be a path like
+    // "results/run1") and re-attach to the manifest dir.
+    let (manifest, manifest_dir) = RunManifest::load(Path::new(manifest_path))?;
+    let prefix_base = Path::new(&manifest.prefix)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| manifest.prefix.clone());
+    let abs_out = manifest_dir.join(prefix_base);
+    args.common.out = Some(abs_out.to_string_lossy().into_owned().into_boxed_str());
+
+    fit_layout_phate(&args)
+}
+
 pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
     let prep = preprocess_layout_data(&args.common, &resolved)?;
