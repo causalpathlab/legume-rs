@@ -95,6 +95,16 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
         }
     }
 
+    // Data-aware specificity re-weighting: scale each marker by an empirical
+    // specificity score derived from the actual cluster expression matrix.
+    // Markers that light up broadly (GZMB across NK + CD8 effector) get
+    // attenuated; cluster-exclusive markers (NCAM1 in NK only) keep full
+    // weight. This complements the IDF that already runs on the marker TSV.
+    let mut markers_gc = loaded.markers_gc.clone();
+    if !args.no_empirical_specificity {
+        apply_empirical_specificity_weights(&mut markers_gc, &profile_gk);
+    }
+
     let group = GroupInputs {
         profile_gk: profile_gk.clone(),
         pb_gene_gp,
@@ -132,7 +142,7 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
         qvalue_kc,
         cell_annotation_nc,
         argmax_labels,
-    } = annotate(&group, &loaded.markers_gc, &loaded.celltype_names, &config)?;
+    } = annotate(&group, &markers_gc, &loaded.celltype_names, &config)?;
 
     // ----- Outputs -----
     let cell_expr_path = format!("{}.cluster_expression.parquet", args.out);
@@ -218,6 +228,57 @@ fn rel_to_manifest(manifest_dir: &Path, abs_path: &str) -> String {
         .strip_prefix(manifest_dir)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| abs_path.to_string())
+}
+
+/// Multiply each gene's marker entries by an empirical specificity score
+/// derived from the cluster expression matrix.
+///
+/// For gene `g`, score = `(max_c μ[g,c]/Σ_c μ[g,c] − 1/K) / (1 − 1/K)` ∈
+/// `[0, 1]`. A gene that fires evenly across all K clusters sits at the
+/// uniform floor `1/K`, mapping to score 0. A gene exclusive to one
+/// cluster has max simplex value 1, mapping to score 1.
+fn apply_empirical_specificity_weights(markers_gc: &mut Mat, profile_gk: &Mat) {
+    let g = markers_gc.nrows();
+    let c = markers_gc.ncols();
+    let k = profile_gk.ncols();
+    debug_assert_eq!(profile_gk.nrows(), g);
+    if k < 2 {
+        return;
+    }
+    let inv_k = 1.0 / k as f32;
+    let denom = (1.0 - inv_k).max(1e-8);
+
+    let scores: Vec<f32> = (0..g)
+        .into_par_iter()
+        .map(|gi| {
+            let row = profile_gk.row(gi);
+            let sum: f32 = row.iter().sum();
+            if sum <= 1e-12 {
+                return 0.0;
+            }
+            let max = row.iter().fold(0.0f32, |m, &v| m.max(v));
+            (((max / sum) - inv_k) / denom).clamp(0.0, 1.0)
+        })
+        .collect();
+
+    let (mn, mx, sm) = scores
+        .iter()
+        .fold((f32::INFINITY, 0.0f32, 0.0f32), |(lo, hi, s), &x| {
+            (lo.min(x), hi.max(x), s + x)
+        });
+    info!(
+        "Empirical specificity weights: min={:.3}, max={:.3}, mean={:.3}",
+        mn,
+        mx,
+        sm / g as f32
+    );
+
+    for gi in 0..g {
+        let s = scores[gi];
+        for ci in 0..c {
+            markers_gc[(gi, ci)] *= s;
+        }
+    }
 }
 
 /// `pb_membership[b, c]` = fraction of batch `b`'s cells assigned to cluster `c`.

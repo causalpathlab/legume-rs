@@ -92,4 +92,13 @@ pub struct AnnotateArgs {
     /// On slow disks this trades memory for I/O latency on later block reads.
     #[arg(long = "preload-data", default_value_t = false)]
     pub preload_data: bool,
+
+    /// Disable data-aware specificity re-weighting of marker genes. By
+    /// default, each marker is multiplied by an empirical specificity
+    /// score derived from the cluster expression matrix (`max simplex
+    /// value across clusters`, rescaled to [0, 1]) — this suppresses
+    /// markers that fire broadly (e.g. GZMB shared between NK and CD8
+    /// effector). Set this flag to fall back to IDF-only weighting.
+    #[arg(long = "no-empirical-specificity", default_value_t = false)]
+    pub no_empirical_specificity: bool,
 }
