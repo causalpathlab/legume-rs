@@ -5,8 +5,8 @@ use crate::topic::common::{
 };
 use crate::topic::eval_indexed::{evaluate_latent_by_indexed_encoder, EvaluateLatentConfig};
 use crate::topic::train_indexed::{
-    estimate_bulk_delta, evaluate_bulk_samples, train_mixed, train_progressive,
-    write_indexed_dictionary, BulkEvalConfig, IndexedTrainConfig,
+    estimate_bulk_delta, evaluate_bulk_samples, train_mixed, write_indexed_dictionary,
+    BulkEvalConfig, IndexedTrainConfig,
 };
 
 use candle_util::candle_decoder_indexed_topic::IndexedTopicDecoder;
@@ -101,16 +101,6 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
-        value_enum,
-        default_value = "mixed",
-        help = "Multi-level training schedule (mixed|progressive)",
-        long_help = "mixed       — every level trained simultaneously each epoch.\n\
-                     progressive — coarse→fine, more epochs for coarser levels."
-    )]
-    level_schedule: LevelSchedule,
-
-    #[arg(
-        long,
         default_value_t = 30,
         help = "Batch-correction optimizer iterations",
         long_help = "Coordinate-descent steps when fitting the per-batch delta."
@@ -151,23 +141,6 @@ pub struct IndexedTopicArgs {
 
     #[arg(long, short = 'i', default_value_t = 1000, help = "Training epochs")]
     epochs: usize,
-
-    #[arg(
-        long,
-        short = 'j',
-        default_value_t = 5,
-        help = "Posterior resampling interval (epochs)",
-        long_help = "How often to jitter the collapsed targets by posterior resampling\n\
-                     during VAE training."
-    )]
-    jitter_interval: usize,
-
-    #[arg(
-        long = "no-oversample-pb",
-        default_value_t = false,
-        help = "Disable PB augmentation (default: 2× groups, subsample each jitter)"
-    )]
-    no_oversample_pb: bool,
 
     #[arg(long, default_value_t = 100, help = "Training minibatch size")]
     minibatch_size: usize,
@@ -301,7 +274,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         iter_opt: args.iter_opt,
         block_size: args.block_size,
         out: &args.out,
-        oversample: !args.no_oversample_pb,
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
         refine: Some(data_beans_alg::refine_multilevel::RefineParams {
@@ -396,20 +368,23 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // Bulk data at full D
     let bulk_nd_full: Option<Mat> = bulk.as_ref().map(|b| b.data.transpose());
 
+    info!("Computing NB-Fisher weights for shortlist scoring");
+    let shortlist_weights: Vec<f32> =
+        crate::empirical_dict::compute_nb_fisher_weights(&data_vec, args.block_size)?;
+
     let train_config = IndexedTrainConfig {
         parameters: &parameters,
         dev: &dev,
         epochs: args.epochs,
-        jitter_interval: args.jitter_interval,
         minibatch_size: args.minibatch_size,
         learning_rate: args.learning_rate,
         topic_smoothing: args.topic_smoothing,
         enc_context_size: args.context_size,
         dec_context_size,
-        sort_dim_budget: 1usize << args.sort_dim,
         stop: &stop,
         anchor_prior_per_level: Some(&anchor_tensors),
         anchor_penalty: args.anchor_penalty,
+        shortlist_weights: &shortlist_weights,
     };
 
     let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd_full, &bulk_deltas) {
@@ -417,22 +392,13 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         _ => None,
     };
 
-    let scores = match args.level_schedule {
-        LevelSchedule::Progressive => train_progressive(
-            &collapsed_levels,
-            &base_encoder,
-            &decoders,
-            &train_config,
-            bulk_with_deltas,
-        )?,
-        LevelSchedule::Mixed => train_mixed(
-            &collapsed_levels,
-            &base_encoder,
-            &decoders,
-            &train_config,
-            bulk_with_deltas,
-        )?,
-    };
+    let scores = train_mixed(
+        &collapsed_levels,
+        &base_encoder,
+        &decoders,
+        &train_config,
+        bulk_with_deltas,
+    )?;
 
     info!("Writing down the model parameters");
 
@@ -486,6 +452,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         dec_context_size,
         decoder: &cpu_finest_decoder,
         refine_config: refine_config.as_ref(),
+        shortlist_weights: &shortlist_weights,
     };
     let z_nk = evaluate_latent_by_indexed_encoder(
         &data_vec,
@@ -504,6 +471,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             decoder: &cpu_finest_decoder,
             gene_names: &gene_names,
             out_prefix: &args.out,
+            shortlist_weights: &shortlist_weights,
         };
         evaluate_bulk_samples(bulk, bulk_deltas, &cpu_encoder, &bulk_config)?;
     }

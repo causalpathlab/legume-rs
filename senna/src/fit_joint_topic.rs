@@ -148,16 +148,6 @@ pub struct JointTopicArgs {
     #[arg(long, short = 'i', default_value_t = 1000, help = "Training epochs")]
     pub(crate) epochs: usize,
 
-    #[arg(
-        long,
-        short = 'j',
-        default_value_t = 5,
-        help = "Posterior resampling interval (epochs)",
-        long_help = "How often to jitter the collapsed targets by posterior resampling\n\
-                     during VAE training."
-    )]
-    pub(crate) jitter_interval: usize,
-
     #[arg(long, default_value_t = 100, help = "Training minibatch size")]
     pub(crate) minibatch_size: usize,
 
@@ -290,7 +280,6 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             num_levels: args.num_levels,
             sort_dim: args.sort_dim,
             num_opt_iter: args.iter_opt,
-            oversample: false,
             refine: Some(data_beans_alg::refine_multilevel::RefineParams {
                 gene_weighting: args.refine_weighting.into(),
                 ..data_beans_alg::refine_multilevel::RefineParams::default()

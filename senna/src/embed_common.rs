@@ -64,16 +64,6 @@ pub fn try_parse_axis_ids(cols: &[Box<str>], prefix: &str) -> Option<Vec<i64>> {
     cols.iter().map(|c| parse_axis_id(c, prefix)).collect()
 }
 
-/// Multi-level training schedule
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
-pub enum LevelSchedule {
-    /// Progressive: coarse→fine, more epochs for coarser levels
-    Progressive,
-    /// Mixed: all levels trained simultaneously each epoch
-    Mixed,
-}
-
 /// Shared compute device enum for candle-based models
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -173,38 +163,6 @@ pub fn read_mat(file_path: &str) -> anyhow::Result<MatWithNames<Mat>> {
         "parquet" => Mat::from_parquet(file_path)?,
         _ => Mat::read_data(file_path, &['\t', ','], None, Some(0), None, None)?,
     })
-}
-
-/// Compute per-level sample budgets, weighted inversely by level size.
-/// Coarser levels (fewer, higher-quality samples) get more budget.
-#[must_use]
-pub fn compute_level_budgets(level_sizes: &[usize], target_total: usize) -> Vec<usize> {
-    let inv_weights: Vec<f64> = level_sizes.iter().map(|&n| 1.0 / n.max(1) as f64).collect();
-    let inv_sum: f64 = inv_weights.iter().sum();
-    inv_weights
-        .iter()
-        .map(|&w| ((w / inv_sum) * target_total as f64).round() as usize)
-        .map(|b| b.max(1))
-        .collect()
-}
-
-/// Subsample rows from a (input, batch, target) tuple to `budget` rows.
-/// If the data already has fewer rows than `budget`, returns it unchanged.
-pub fn subsample_rows(
-    data: (Mat, Option<Mat>, Mat),
-    budget: usize,
-    rng: &mut impl rand::Rng,
-) -> (Mat, Option<Mat>, Mat) {
-    let (input, batch, target) = data;
-    let n = input.nrows();
-    if n <= budget {
-        return (input, batch, target);
-    }
-    let idx: Vec<usize> = rand::seq::index::sample(rng, n, budget).into_vec();
-    let sub_input = input.select_rows(idx.iter());
-    let sub_batch = batch.map(|b| b.select_rows(idx.iter()));
-    let sub_target = target.select_rows(idx.iter());
-    (sub_input, sub_batch, sub_target)
 }
 
 /// Apply topic smoothing in log-space: exp → mix with uniform → log.

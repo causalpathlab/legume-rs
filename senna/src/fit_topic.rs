@@ -4,7 +4,7 @@ use crate::topic::common::{
     PreparedData,
 };
 use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
-use crate::topic::train::{train_mixed, train_progressive, TrainConfig};
+use crate::topic::train::{train_mixed, TrainConfig};
 
 use candle_util::candle_decoder_nb_mixture::{
     NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME,
@@ -152,16 +152,6 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        value_enum,
-        default_value = "mixed",
-        help = "Multi-level training schedule (mixed|progressive)",
-        long_help = "mixed       — every level trained simultaneously each epoch.\n\
-                     progressive — coarse→fine, more epochs for coarser levels."
-    )]
-    pub(crate) level_schedule: LevelSchedule,
-
-    #[arg(
-        long,
         default_value_t = 30,
         help = "Batch-correction optimizer iterations",
         long_help = "Coordinate-descent steps when fitting the per-batch delta."
@@ -194,23 +184,6 @@ pub struct TopicArgs {
 
     #[arg(long, short = 'i', default_value_t = 1000, help = "Training epochs")]
     pub(crate) epochs: usize,
-
-    #[arg(
-        long,
-        short = 'j',
-        default_value_t = 5,
-        help = "Posterior resampling interval (epochs)",
-        long_help = "How often to jitter the collapsed targets by posterior resampling\n\
-                     during VAE training."
-    )]
-    pub(crate) jitter_interval: usize,
-
-    #[arg(
-        long = "no-oversample-pb",
-        default_value_t = false,
-        help = "Disable PB augmentation (default: 2× groups, subsample each jitter)"
-    )]
-    pub(crate) no_oversample_pb: bool,
 
     #[arg(long, default_value_t = 100, help = "Training minibatch size")]
     pub(crate) minibatch_size: usize,
@@ -366,7 +339,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         iter_opt: args.iter_opt,
         block_size: args.block_size,
         out: &args.out,
-        oversample: !args.no_oversample_pb,
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
         refine: Some(data_beans_alg::refine_multilevel::RefineParams {
@@ -885,22 +857,13 @@ where
         anchor_prior_per_level: ctx.anchor_prior_per_level,
         anchor_penalty: ctx.args.anchor_penalty,
     };
-    let scores = match &ctx.args.level_schedule {
-        LevelSchedule::Progressive => train_progressive(
-            ctx.collapsed_levels,
-            encoder,
-            &decoders,
-            ctx.level_coarsenings,
-            &train_config,
-        )?,
-        LevelSchedule::Mixed => train_mixed(
-            ctx.collapsed_levels,
-            encoder,
-            &decoders,
-            ctx.level_coarsenings,
-            &train_config,
-        )?,
-    };
+    let scores = train_mixed(
+        ctx.collapsed_levels,
+        encoder,
+        &decoders,
+        ctx.level_coarsenings,
+        &train_config,
+    )?;
 
     // PB-level topic usage + persistence of pb_gene / pb_latent for
     // downstream `senna annotate` (enrichment-based annotation works from

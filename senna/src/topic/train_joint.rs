@@ -3,7 +3,7 @@ use crate::embed_common::*;
 use crate::fit_joint_topic::JointTopicArgs;
 use crate::logging::new_progress_bar;
 
-use candle_core::Device;
+use candle_core::{Device, Tensor};
 use candle_nn::AdamW;
 use candle_nn::Optimizer;
 use candle_util::candle_encoder_joint_softmax::LogSoftmaxJointEncoder;
@@ -298,26 +298,10 @@ where
     let num_modalities = collapsed_levels[0].len();
     let output_null: Vec<Option<Mat>> = vec![None; num_modalities];
 
-    for (level, (collapsed_data_vec, &level_ep)) in
-        collapsed_levels.iter().zip(level_epochs.iter()).enumerate()
-    {
-        let label = if level == 0 {
-            "coarsest"
-        } else if level + 1 == num_levels {
-            "finest"
-        } else {
-            ""
-        };
-        info!(
-            "Level {}/{}: {} epochs, {} samples {}",
-            level + 1,
-            num_levels,
-            level_ep,
-            collapsed_data_vec[0].mu_observed.ncols(),
-            label,
-        );
-
-        for epoch in (0..level_ep).step_by(config.args.jitter_interval) {
+    type LevelEntry = (Vec<Mat>, Vec<Option<Mat>>, Vec<Option<Mat>>);
+    let level_data: Vec<LevelEntry> = collapsed_levels
+        .iter()
+        .map(|collapsed_data_vec| -> anyhow::Result<_> {
             let input = collapsed_data_vec
                 .iter()
                 .zip(config.coarsenings)
@@ -373,71 +357,102 @@ where
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
 
-            let mut data_loader = JointInMemoryData::from(JointInMemoryArgs {
-                input: &input,
-                input_null: &input_null,
-                output: &output,
-                output_null: &output_null,
-            })?;
+            Ok((input, input_null, output))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
-            data_loader.shuffle_minibatch(config.args.minibatch_size)?;
+    let mut data_loaders: Vec<JointInMemoryData> = level_data
+        .iter()
+        .map(|(input, input_null, output)| {
+            JointInMemoryData::from_device(
+                JointInMemoryArgs {
+                    input,
+                    input_null,
+                    output,
+                    output_null: &output_null,
+                },
+                config.dev,
+            )
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
-            let jitter_end = config.args.jitter_interval.min(level_ep - epoch);
-            for jitter in 0..jitter_end {
-                let mut llik_tot = 0f32;
-                let mut kl_tot = 0f32;
+    for (level, (collapsed_data_vec, &level_ep)) in
+        collapsed_levels.iter().zip(level_epochs.iter()).enumerate()
+    {
+        let label = if level == 0 {
+            "coarsest"
+        } else if level + 1 == num_levels {
+            "finest"
+        } else {
+            ""
+        };
+        info!(
+            "Level {}/{}: {} epochs, {} samples {}",
+            level + 1,
+            num_levels,
+            level_ep,
+            collapsed_data_vec[0].mu_observed.ncols(),
+            label,
+        );
 
-                for b in 0..data_loader.num_minibatch() {
-                    let mb = data_loader.minibatch_shuffled(b, config.dev)?;
+        let data_loader = &mut data_loaders[level];
 
-                    let (z_nk, kl) = encoder.forward_t(&mb.input, &mb.input_null, true)?;
+        for epoch in 0..level_ep {
+            data_loader.shuffle_minibatch_on_device(config.args.minibatch_size)?;
 
-                    let y_vec = mb
-                        .output
-                        .into_iter()
-                        .zip(mb.input)
-                        .map(|(y, x)| y.unwrap_or(x))
-                        .collect::<Vec<_>>();
+            let mut llik_tot = 0f32;
+            let mut kl_tot = 0f32;
 
-                    let (_, llik) = decoder.forward_with_llik(&z_nk, &y_vec, &topic_likelihood)?;
+            for b in 0..data_loader.num_minibatch() {
+                let mb = data_loader.minibatch_cached(b);
 
-                    let loss = (&kl - &llik)?.mean_all()?;
-                    adam.backward_step(&loss)?;
+                let (z_nk, kl) = encoder.forward_t(&mb.input, &mb.input_null, true)?;
 
-                    let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
-                    let kl_val = kl.sum_all()?.to_scalar::<f32>()?;
-                    llik_tot += llik_val;
-                    kl_tot += kl_val;
-                }
+                let y_vec: Vec<Tensor> = mb
+                    .output
+                    .iter()
+                    .zip(mb.input.iter())
+                    .map(|(y, x)| y.clone().unwrap_or_else(|| x.clone()))
+                    .collect();
 
-                let n_mb = data_loader.num_minibatch() as f32;
-                kl_trace.push(kl_tot / n_mb);
-                llik_trace.push(llik_tot / n_mb);
+                let (_, llik) = decoder.forward_with_llik(&z_nk, &y_vec, &topic_likelihood)?;
 
-                pb.inc(1);
+                let loss = (&kl - &llik)?.mean_all()?;
+                adam.backward_step(&loss)?;
 
+                let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
+                let kl_val = kl.sum_all()?.to_scalar::<f32>()?;
+                llik_tot += llik_val;
+                kl_tot += kl_val;
+            }
+
+            let n_mb = data_loader.num_minibatch() as f32;
+            kl_trace.push(kl_tot / n_mb);
+            llik_trace.push(llik_tot / n_mb);
+
+            pb.inc(1);
+
+            info!(
+                "[level {}/{}][{}] {} {}",
+                level + 1,
+                num_levels,
+                epoch,
+                llik_tot / n_mb,
+                kl_tot / n_mb
+            );
+
+            if config.stop.load(Ordering::SeqCst) {
+                pb.finish_and_clear();
                 info!(
-                    "[level {}/{}][{}] {} {}",
+                    "Stopping training early at level {}/{}, epoch {}",
                     level + 1,
                     num_levels,
-                    epoch + jitter,
-                    llik_tot / n_mb,
-                    kl_tot / n_mb
+                    epoch
                 );
-
-                if config.stop.load(Ordering::SeqCst) {
-                    pb.finish_and_clear();
-                    info!(
-                        "Stopping training early at level {}/{}, epoch {}",
-                        level + 1,
-                        num_levels,
-                        epoch
-                    );
-                    return Ok(TrainScores {
-                        llik: llik_trace,
-                        kl: kl_trace,
-                    });
-                }
+                return Ok(TrainScores {
+                    llik: llik_trace,
+                    kl: kl_trace,
+                });
             }
         }
     }

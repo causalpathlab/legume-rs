@@ -131,9 +131,8 @@ pub(crate) fn apply_column_delta(data: &Mat, delta_row: &Mat, min_val: f32) -> M
     corrected
 }
 
-/// Sample collapsed data for one jitter interval.
-///
-/// Returns (`mixed_nd`, `batch_nd`, `target_nd`) — all at full D.
+/// Draw `(mixed_nd, batch_nd, target_nd)` from the collapsed posteriors
+/// (one sample per Gamma matrix).
 pub(crate) fn sample_collapsed_data(
     collapsed: &CollapsedOut,
 ) -> anyhow::Result<(Mat, Option<Mat>, Mat)> {
@@ -151,35 +150,6 @@ pub(crate) fn sample_collapsed_data(
     };
 
     Ok((mixed_nd, batch_nd, target_nd))
-}
-
-/// Sample from over-resolved collapsed data and randomly drop ~half the
-/// pseudobulk rows. Returns `None` if no overresolved stats are present.
-///
-/// This is much faster than re-optimizing from stats — the Gamma
-/// posteriors are already fitted for all 2× groups.
-pub(crate) fn sample_overresolved(
-    collapsed: &CollapsedOut,
-    rng: &mut impl rand::Rng,
-) -> Option<anyhow::Result<(Mat, Option<Mat>, Mat)>> {
-    use rand::seq::SliceRandom;
-    collapsed.overresolved_stat.as_ref()?;
-    // Sample from the full 2× CollapsedOut (already fitted)
-    let result = (|| {
-        let (mixed, batch, target) = sample_collapsed_data(collapsed)?;
-        let n = mixed.nrows();
-        let keep = n / 2;
-        let mut indices: Vec<usize> = (0..n).collect();
-        indices.shuffle(rng);
-        indices.truncate(keep);
-        indices.sort_unstable();
-
-        let mixed_sub = mixed.select_rows(indices.iter());
-        let batch_sub = batch.map(|b| b.select_rows(indices.iter()));
-        let target_sub = target.select_rows(indices.iter());
-        Ok((mixed_sub, batch_sub, target_sub))
-    })();
-    Some(result)
 }
 
 /// Result of loading and collapsing input data for topic model training.
@@ -205,7 +175,6 @@ pub struct LoadCollapseArgs<'a> {
     pub iter_opt: usize,
     pub block_size: Option<usize>,
     pub out: &'a str,
-    pub oversample: bool,
     /// Keep top N HVGs (via binned residual variance) for the random
     /// projection; 0 disables. Collapsing still reads all genes.
     pub max_features: usize,
@@ -298,7 +267,6 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
             num_levels: args.num_levels,
             sort_dim: args.sort_dim,
             num_opt_iter: args.iter_opt,
-            oversample: args.oversample,
             refine: args.refine.clone(),
         },
     )?;

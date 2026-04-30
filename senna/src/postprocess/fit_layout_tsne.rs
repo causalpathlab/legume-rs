@@ -3,17 +3,17 @@
 //! placed by cheap Nyström in proj space. Initialised from random 2D
 //! coordinates (seeded via the shared `--seed` flag).
 
-use super::fit_visualize_common::{
-    finalize_viz, preprocess_layout_data, random_init_2d, resolve_inputs, VisualizeCommonArgs,
+use super::fit_layout_common::{
+    finalize_viz, preprocess_layout_data, random_init_2d, resolve_inputs, LayoutCommonArgs,
 };
 use super::viz_prep::apply_svd_preprocessing;
 use crate::embed_common::*;
 use crate::geometry::tsne::{similarity_to_distance, TSne};
 
 #[derive(Args, Debug)]
-pub struct VisualizeTsneArgs {
+pub struct LayoutTsneArgs {
     #[clap(flatten)]
-    common: VisualizeCommonArgs,
+    common: LayoutCommonArgs,
 
     #[arg(long, default_value_t = 30.0, help = "Perplexity for t-SNE")]
     perplexity: f32,
@@ -43,7 +43,7 @@ pub struct VisualizeTsneArgs {
     n_hvg: usize,
 }
 
-pub fn fit_visualize_tsne(args: &VisualizeTsneArgs) -> anyhow::Result<()> {
+pub fn fit_layout_tsne(args: &LayoutTsneArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
     let prep = preprocess_layout_data(&args.common, &resolved)?;
 

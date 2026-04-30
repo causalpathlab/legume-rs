@@ -1,7 +1,33 @@
 use anyhow::anyhow;
 use candle_core::{Device, Tensor};
+use matrix_util::traits::ConvertMatOps;
 use rand::prelude::SliceRandom;
 use rayon::prelude::*;
+
+/// Upload a matrix to `device` as a contiguous `[N, D]` tensor.
+/// `to_tensor` returns a transposed view; `contiguous()` makes it
+/// layout-compatible with `index_select`.
+pub(crate) fn upload_to_device<D: ConvertMatOps>(x: &D, device: &Device) -> anyhow::Result<Tensor> {
+    Ok(x.to_tensor(device)?.contiguous()?)
+}
+
+/// Bootstrap-sample `ntot` indices from `[0, n)` with replacement, in
+/// parallel. Shared by `Minibatches::shuffle_minibatch` (CPU path,
+/// `usize`) and the device-resident loaders (`u32`).
+pub(crate) fn bootstrap_indices<I>(n: usize, ntot: usize) -> Vec<I>
+where
+    I: TryFrom<usize> + Send,
+    <I as TryFrom<usize>>::Error: std::fmt::Debug,
+{
+    use rand_distr::{Distribution, Uniform};
+    let unif = Uniform::new(0usize, n).expect("unif [0 .. n)");
+    (0..ntot)
+        .into_par_iter()
+        .map_init(rand::rng, |rng, _| {
+            I::try_from(unif.sample(rng)).expect("index fits in target type")
+        })
+        .collect()
+}
 
 ///
 /// A helper `struct` for shuffling and creating minibatch indexes;
@@ -14,20 +40,13 @@ pub struct Minibatches {
 
 impl Minibatches {
     pub fn shuffle_minibatch(&mut self, batch_size: usize) {
-        use rand_distr::{Distribution, Uniform};
-
         let mut rng = rand::rng();
         self.samples.shuffle(&mut rng);
 
         let nbatch = (self.size() + batch_size) / batch_size;
         let ntot = nbatch * batch_size;
 
-        let unif = Uniform::new(0, self.size()).expect("unif [0 .. size)");
-
-        let indexes = (0..ntot)
-            .into_par_iter()
-            .map_init(rand::rng, |rng, _| unif.sample(rng))
-            .collect::<Vec<usize>>();
+        let indexes: Vec<usize> = bootstrap_indices(self.size(), ntot);
 
         self.chunks = (0..nbatch)
             .par_bridge()
