@@ -158,7 +158,6 @@ impl RandPartitionOps for SparseIoVec {
             num_levels: refine.num_levels.max(1),
             sort_dim: refine.sort_dim,
             num_opt_iter: refine.num_opt_iter,
-            oversample: false,
             refine: Some(refine.refine_params.clone()),
         };
 

@@ -2,17 +2,17 @@
 //! with PHATE diffusion embedding over the log1p-CPM PB features.
 //! Cells placed by cheap Nyström in proj space.
 
-use super::fit_visualize_common::{
-    finalize_viz, preprocess_layout_data, resolve_inputs, PhateCliArgs, VisualizeCommonArgs,
+use super::fit_layout_common::{
+    finalize_viz, preprocess_layout_data, resolve_inputs, LayoutCommonArgs, PhateCliArgs,
 };
 use super::viz_prep::apply_svd_preprocessing;
 use crate::embed_common::*;
 use crate::geometry::phate::phate_layout_2d;
 
 #[derive(Args, Debug)]
-pub struct VisualizePhateArgs {
+pub struct LayoutPhateArgs {
     #[clap(flatten)]
-    common: VisualizeCommonArgs,
+    common: LayoutCommonArgs,
 
     #[clap(flatten)]
     phate: PhateCliArgs,
@@ -32,7 +32,7 @@ pub struct VisualizePhateArgs {
     n_hvg: usize,
 }
 
-pub fn fit_visualize_phate(args: &VisualizePhateArgs) -> anyhow::Result<()> {
+pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
     let prep = preprocess_layout_data(&args.common, &resolved)?;
 

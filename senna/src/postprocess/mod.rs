@@ -1,16 +1,12 @@
-mod fit_layout_mst;
-mod fit_plot;
-mod fit_plot_topic;
-mod fit_visualize_common;
-mod fit_visualize_phate;
-mod fit_visualize_tsne;
-mod fit_visualize_umap;
-mod plot;
+mod fit_layout_common;
+mod fit_layout_phate;
+mod fit_layout_tsne;
+mod fit_layout_umap;
+pub mod plot;
 pub(crate) mod viz_prep;
 
-pub use fit_layout_mst::*;
-pub use fit_plot::*;
-pub use fit_plot_topic::*;
-pub use fit_visualize_phate::*;
-pub use fit_visualize_tsne::*;
-pub use fit_visualize_umap::*;
+pub use fit_layout_phate::*;
+pub use fit_layout_tsne::*;
+pub use fit_layout_umap::*;
+pub use plot::scatter::*;
+pub use plot::topic::*;

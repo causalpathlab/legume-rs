@@ -35,7 +35,7 @@ const SELF_LOOP_REG: f32 = 0.01;
 /// cell-placement path. Layout-specific args live on the per-command
 /// structs and are not duplicated here.
 #[derive(Args, Debug, Clone)]
-pub struct VisualizeCommonArgs {
+pub struct LayoutCommonArgs {
     #[arg(
         long,
         short = 'f',
@@ -244,7 +244,7 @@ impl From<&PhateCliArgs> for crate::geometry::phate::PhateArgs {
 
 /// Inputs resolved from the merge of CLI flags and an optional
 /// `--from` run manifest. Held by `preprocess_layout_data` / `finalize_viz` in
-/// place of reaching into `VisualizeCommonArgs` directly, which keeps
+/// place of reaching into `LayoutCommonArgs` directly, which keeps
 /// the path-resolution logic out of the pipeline body.
 ///
 /// When `manifest` is `Some`, `finalize_viz` updates its `viz{}`
@@ -258,7 +258,7 @@ pub(crate) struct ResolvedViz {
     pub manifest: Option<RunManifest>,
 }
 
-pub(crate) fn resolve_inputs(args: &VisualizeCommonArgs) -> anyhow::Result<ResolvedViz> {
+pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<ResolvedViz> {
     let (manifest, manifest_dir, manifest_path) = match &args.from {
         Some(p) => {
             let path = PathBuf::from(p.as_ref());
@@ -358,7 +358,7 @@ pub(crate) struct LayoutPrep {
 }
 
 pub(crate) fn preprocess_layout_data(
-    args: &VisualizeCommonArgs,
+    args: &LayoutCommonArgs,
     resolved: &ResolvedViz,
 ) -> anyhow::Result<LayoutPrep> {
     let resolve_from_manifest = |p: &str| -> String {
@@ -413,7 +413,7 @@ pub(crate) fn preprocess_layout_data(
 /// similarity uses a UMAP-style fuzzy kNN graph — dense cosine on
 /// Hellinger-θ saturates and collapses the layout to rank-1.
 fn preprocess_layout_data_from_latent(
-    args: &VisualizeCommonArgs,
+    args: &LayoutCommonArgs,
     resolved: &ResolvedViz,
     latent_path: &str,
     kind: crate::run_manifest::RunKind,
@@ -585,7 +585,7 @@ fn preprocess_layout_data_from_latent(
 /// matching and the Gamma posterior optimization that the recompute
 /// path runs — those are training-side concerns the layout doesn't need.
 fn preprocess_layout_data_from_cache(
-    args: &VisualizeCommonArgs,
+    args: &LayoutCommonArgs,
     resolved: &ResolvedViz,
     cell_proj_path: &str,
 ) -> anyhow::Result<LayoutPrep> {
@@ -713,7 +713,7 @@ fn preprocess_layout_data_from_cache(
 /// without `--from`. Does the full batch-corrected collapse and
 /// builds gene-space log1p-CPM PB features.
 fn preprocess_layout_data_recompute(
-    args: &VisualizeCommonArgs,
+    args: &LayoutCommonArgs,
     resolved: &ResolvedViz,
 ) -> anyhow::Result<LayoutPrep> {
     let PreparedData {
@@ -732,7 +732,6 @@ fn preprocess_layout_data_recompute(
         iter_opt: args.iter_opt,
         block_size: args.block_size,
         out: &resolved.out,
-        oversample: false,
         // Layout recompute is the legacy path: match training's default
         // HVG gate so the projection reflects variable biology.
         max_features: 5000,
@@ -885,7 +884,7 @@ pub(crate) fn random_init_2d(n: usize, seed: u64) -> Mat {
 /// cell coords (e.g. `layout umap`) can init from here and hand the
 /// refined result to [`write_viz_outputs`] directly.
 pub(crate) fn nystrom_cell_coords(
-    args: &VisualizeCommonArgs,
+    args: &LayoutCommonArgs,
     prep: &LayoutPrep,
     pb_coords: &Mat,
 ) -> Mat {
@@ -906,7 +905,7 @@ pub(crate) fn nystrom_cell_coords(
 ///
 /// `pb_coords` comes from the layout subcommand.
 pub(crate) fn finalize_viz(
-    args: &VisualizeCommonArgs,
+    args: &LayoutCommonArgs,
     resolved: &mut ResolvedViz,
     prep: &LayoutPrep,
     pb_coords: &Mat,
@@ -918,7 +917,7 @@ pub(crate) fn finalize_viz(
 /// Write the three layout parquet files + update manifest. Split out so
 /// a caller can supply custom `cell_coords` (e.g. post-refinement).
 pub(crate) fn write_viz_outputs(
-    args: &VisualizeCommonArgs,
+    args: &LayoutCommonArgs,
     resolved: &mut ResolvedViz,
     prep: &LayoutPrep,
     pb_coords: &Mat,

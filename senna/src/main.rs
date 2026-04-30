@@ -272,13 +272,11 @@ enum Commands {
 #[derive(Subcommand, Debug)]
 enum LayoutCmd {
     #[command(about = "PB landmarks laid out by t-SNE on raw-gene similarity (random init)")]
-    Tsne(VisualizeTsneArgs),
+    Tsne(LayoutTsneArgs),
     #[command(about = "PB landmarks laid out by UMAP-style SGD on the fuzzy kNN graph")]
-    Umap(VisualizeUmapArgs),
+    Umap(LayoutUmapArgs),
     #[command(about = "PB landmarks laid out by PHATE diffusion on raw-gene features")]
-    Phate(VisualizePhateArgs),
-    #[command(about = "PB landmarks laid out by MST + Fruchterman–Reingold on PB-PB similarity")]
-    Mst(LayoutMstArgs),
+    Phate(LayoutPhateArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -316,16 +314,13 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Layout { cmd } => match cmd {
             LayoutCmd::Tsne(args) => {
-                fit_visualize_tsne(args)?;
+                fit_layout_tsne(args)?;
             }
             LayoutCmd::Umap(args) => {
-                fit_visualize_umap(args)?;
+                fit_layout_umap(args)?;
             }
             LayoutCmd::Phate(args) => {
-                fit_visualize_phate(args)?;
-            }
-            LayoutCmd::Mst(args) => {
-                fit_layout_mst(args)?;
+                fit_layout_phate(args)?;
             }
         },
         Commands::Clustering(args) => {
