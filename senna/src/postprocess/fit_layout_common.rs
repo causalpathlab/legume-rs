@@ -242,6 +242,50 @@ impl From<&PhateCliArgs> for crate::geometry::phate::PhateArgs {
     }
 }
 
+// Defaults mirror the clap `default_value_t` annotations on each field
+// above. Used by callers that construct args programmatically — e.g.
+// `senna plot` auto-running `senna layout phate` when the manifest is
+// missing `layout.cell_coords`. If a clap default changes, update this
+// to match.
+impl Default for LayoutCommonArgs {
+    fn default() -> Self {
+        Self {
+            from: None,
+            data_files: Vec::new(),
+            out: None,
+            batch_files: None,
+            preload_data: false,
+            proj_dim: 30,
+            sort_dim: 10,
+            knn_cells: DEFAULT_KNN,
+            iter_opt: DEFAULT_OPT_ITER,
+            num_levels: 1,
+            block_size: None,
+            refine_weighting: crate::refine_weighting::WeightingArg::default(),
+            similarity_threshold: 0.0,
+            local_scale_k: None,
+            knn: 15,
+            kernel_alpha: 10.0,
+            pb_coverage: 0.95,
+            clusters: None,
+            seed: 42,
+            n_landmarks: 1000,
+        }
+    }
+}
+
+impl Default for PhateCliArgs {
+    fn default() -> Self {
+        Self {
+            phate_t: 20,
+            phate_knn: 5,
+            phate_alpha: 40.0,
+            phate_mds_iter: 300,
+            phate_mds_tol: 1e-4,
+        }
+    }
+}
+
 /// Inputs resolved from the merge of CLI flags and an optional
 /// `--from` run manifest. Held by `preprocess_layout_data` / `finalize_viz` in
 /// place of reaching into `LayoutCommonArgs` directly, which keeps
