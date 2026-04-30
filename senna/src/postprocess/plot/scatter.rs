@@ -37,6 +37,9 @@ pub enum ColorBy {
     PbId,
     /// Argmax of a separate topic-proportions parquet (`--topics`).
     Topic,
+    /// Per-cell celltype label from `senna annotate`'s argmax TSV
+    /// (`--annotation`, defaults to `manifest.annotate.argmax`).
+    Annotation,
 }
 
 /// Label placement strategy per group.
@@ -91,6 +94,19 @@ pub struct PlotArgs {
         help = "Topic proportions parquet (cells × K); required with --colour-by topic"
     )]
     pub topics: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Annotation argmax TSV from `senna annotate` (cell\\tcell_type\\tprobability). Defaults to manifest's annotate.argmax."
+    )]
+    pub annotation: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Preload data when auto-running `senna layout` for a manifest missing layout.cell_coords (no-op if cell_coords already exists)"
+    )]
+    pub preload_data: bool,
 
     #[arg(
         long,
@@ -206,7 +222,7 @@ pub struct PlotArgs {
 pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
     let resolved = resolve_inputs(args)?;
     mkdir_parent(&resolved.out)?;
-    let coords_by_name = read_cell_coords(&resolved.cell_coords)?;
+    let (cell_names, coords_by_name) = read_cell_coords(&resolved.cell_coords)?;
     let x = coords_by_name
         .get("x")
         .ok_or_else(|| anyhow::anyhow!("cell_coords parquet missing 'x' column"))?;
@@ -215,6 +231,11 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("cell_coords parquet missing 'y' column"))?;
     let n_cells = x.len();
     info!("Loaded {n_cells} cells from {}", resolved.cell_coords);
+
+    // Auto-built id → display name map for `ColorBy::Annotation` (replaces
+    // the empty default below). The `--labels` TSV, when present, layers
+    // on top so users can still rename specific celltypes.
+    let mut auto_label_map: FxHashMap<i64, String> = FxHashMap::default();
 
     let group_ids = match resolved.colour_by {
         ColorBy::Cluster => coords_by_name
@@ -234,6 +255,17 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
             .iter()
             .map(|&v| if v.is_nan() { -1 } else { v as i64 })
             .collect::<Vec<_>>(),
+        ColorBy::Annotation => {
+            let path = resolved.annotation.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--colour-by annotation requires --annotation PATH \
+                     (or `senna annotate` must have populated manifest.annotate.argmax)"
+                )
+            })?;
+            let (ids, label_map) = argmax_annotation(path, &cell_names)?;
+            auto_label_map = label_map;
+            ids
+        }
         ColorBy::Topic => {
             let topics_path = resolved.topics.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -308,10 +340,15 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
     let label_font_px = args.label_font_size * args.dpi as f32 / PT_PER_INCH;
     let palette = palette::resolve(&resolved.palette, unique.len());
 
-    let label_map = match &resolved.labels {
-        Some(p) => read_labels_tsv(p)?,
-        None => FxHashMap::default(),
-    };
+    // Start from the auto-built map (populated for ColorBy::Annotation,
+    // empty otherwise), then layer the user-supplied --labels TSV on
+    // top so per-id renames win over the auto names.
+    let mut label_map = auto_label_map;
+    if let Some(p) = resolved.labels.as_deref() {
+        for (id, name) in read_labels_tsv(p)? {
+            label_map.insert(id, name);
+        }
+    }
 
     // Skip hull/trim computation when nothing needs it — hull polygons
     // are opt-in now and median is the default label position.
@@ -428,6 +465,7 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
 struct ResolvedInputs {
     cell_coords: String,
     topics: Option<String>,
+    annotation: Option<String>,
     labels: Option<String>,
     out: String,
     colour_by: ColorBy,
@@ -435,7 +473,7 @@ struct ResolvedInputs {
 }
 
 fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
-    let (manifest, manifest_dir): (Option<RunManifest>, PathBuf) = match &args.from {
+    let (mut manifest, mut manifest_dir): (Option<RunManifest>, PathBuf) = match &args.from {
         Some(p) => {
             let (m, dir) = RunManifest::load(Path::new(p.as_ref()))?;
             info!("Loaded run manifest {} (kind: {})", p, m.kind);
@@ -443,6 +481,30 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
         }
         None => (None, PathBuf::from(".")),
     };
+
+    // Auto-layout: when the user passed --from but the manifest has no
+    // layout yet, drive `senna layout phate` against it (defaults) so
+    // the natural workflow `train → annotate → plot` works without an
+    // explicit layout step. CLI --cell-coords still wins; only kick in
+    // when both manifest and user are silent on cell_coords.
+    if let Some(from_path) = args.from.as_deref() {
+        let manifest_has_coords = manifest
+            .as_ref()
+            .and_then(|m| m.layout.cell_coords.as_deref())
+            .is_some();
+        if args.cell_coords.is_none() && !manifest_has_coords {
+            info!(
+                "manifest {} has no layout.cell_coords; running `senna layout phate` first",
+                from_path
+            );
+            crate::postprocess::run_default_phate_layout(from_path, args.preload_data)?;
+            // layout rewrote the manifest in place — reload to pick up
+            // the freshly-populated layout.cell_coords / pb_coords.
+            let (m, dir) = RunManifest::load(Path::new(from_path))?;
+            manifest = Some(m);
+            manifest_dir = dir;
+        }
+    }
 
     let resolve_opt = |s: &str| {
         run_manifest::resolve(&manifest_dir, s)
@@ -475,6 +537,13 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
             .map(resolve_opt)
     });
 
+    let annotation = args.annotation.as_deref().map(String::from).or_else(|| {
+        manifest
+            .as_ref()
+            .and_then(|m| m.annotate.argmax.as_deref())
+            .map(resolve_opt)
+    });
+
     let labels = args.labels.as_deref().map(String::from).or_else(|| {
         manifest
             .as_ref()
@@ -489,6 +558,13 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
         .or_else(|| manifest.as_ref().map(|m| m.prefix.clone()))
         .ok_or_else(|| anyhow::anyhow!("no --out given and no manifest prefix available"))?;
 
+    // Colour-by precedence:
+    //   1. explicit CLI flag
+    //   2. manifest `defaults.colour_by`
+    //   3. Annotation, if `manifest.annotate.argmax` is populated
+    //   4. Cluster (existing fallback)
+    // Step 3 makes annotation the natural default for the
+    // train → annotate → plot workflow without forcing users to set it.
     let colour_by = args
         .colour_by
         .clone()
@@ -498,6 +574,7 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
                 .and_then(|m| m.defaults.colour_by.as_deref())
                 .and_then(parse_colour_by)
         })
+        .or_else(|| annotation.as_ref().map(|_| ColorBy::Annotation))
         .unwrap_or(ColorBy::Cluster);
 
     let palette = args
@@ -514,6 +591,7 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
     Ok(ResolvedInputs {
         cell_coords,
         topics,
+        annotation,
         labels,
         out,
         colour_by,
@@ -526,6 +604,7 @@ fn parse_colour_by(s: &str) -> Option<ColorBy> {
         "topic" => Some(ColorBy::Topic),
         "cluster" => Some(ColorBy::Cluster),
         "pb-id" | "pb_id" => Some(ColorBy::PbId),
+        "annotation" => Some(ColorBy::Annotation),
         _ => None,
     }
 }
@@ -546,14 +625,19 @@ fn to_pixel(p: Pt, bounds: &DataBounds, ext: Extent) -> (f32, f32) {
     (tx, ty)
 }
 
-fn read_cell_coords(path: &str) -> anyhow::Result<FxHashMap<String, Vec<f32>>> {
-    let MatWithNames { cols, mat, .. } = Mat::from_parquet(path)?;
+type CellCoords = (Vec<Box<str>>, FxHashMap<String, Vec<f32>>);
+
+/// Returns `(cell_names, columns_by_name)`. Cell names are the parquet
+/// row labels (in data column order), needed when matching against an
+/// annotation TSV by cell name.
+fn read_cell_coords(path: &str) -> anyhow::Result<CellCoords> {
+    let MatWithNames { rows, cols, mat } = Mat::from_parquet(path)?;
     let mut by_name: FxHashMap<String, Vec<f32>> = FxHashMap::default();
     for (j, name) in cols.iter().enumerate() {
         let col: Vec<f32> = (0..mat.nrows()).map(|i| mat[(i, j)]).collect();
         by_name.insert(name.to_string(), col);
     }
-    Ok(by_name)
+    Ok((rows, by_name))
 }
 
 /// Argmax over cells × K topic proportions, returning the **topic ID**
@@ -589,6 +673,85 @@ fn argmax_topics(path: &str, n_cells_expected: usize) -> anyhow::Result<Vec<i64>
         out.push(topic_ids[best_j]);
     }
     Ok(out)
+}
+
+/// Read `senna annotate`'s argmax TSV and produce per-cell integer
+/// group ids + a stable id → celltype-name label map.
+///
+/// Format: `cell\tcell_type\tprobability` with optional header. Cells
+/// absent from the TSV map to `-1` (filtered downstream by the same
+/// `g < 0` skip used for unassigned clusters / NaN pb_ids). Celltype
+/// strings are sorted alphabetically before id assignment so the same
+/// celltype gets the same colour across reruns and across sibling
+/// commands (e.g. `plot-topic --group-by annotation`, which sorts
+/// celltype panels alphabetically too — see plot/topic/mod.rs:533).
+fn argmax_annotation(
+    path: &str,
+    cell_names: &[Box<str>],
+) -> anyhow::Result<(Vec<i64>, FxHashMap<i64, String>)> {
+    let content = fs::read_to_string(Path::new(path))?;
+    let mut by_cell: FxHashMap<Box<str>, Box<str>> = FxHashMap::default();
+    for (line_no, raw) in content.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let cell = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("annotation TSV line {}: missing cell", line_no + 1))?;
+        let label = parts.next().ok_or_else(|| {
+            anyhow::anyhow!("annotation TSV line {}: missing cell_type", line_no + 1)
+        })?;
+        if cell == "cell" && label == "cell_type" {
+            continue;
+        }
+        by_cell.insert(cell.into(), label.into());
+    }
+
+    // Stable id assignment: sort unique celltype strings, assign 0..N.
+    let mut unique: Vec<Box<str>> = {
+        let mut set: Vec<Box<str>> = by_cell.values().cloned().collect();
+        set.sort_unstable();
+        set.dedup();
+        set
+    };
+    // Push "unassigned" to the very end of the colour cycle when present,
+    // so the argmax-thresholded cells don't steal the leading palette
+    // slot.
+    if let Some(pos) = unique.iter().position(|s| s.as_ref() == "unassigned") {
+        let last = unique.remove(pos);
+        unique.push(last);
+    }
+    let name_to_id: FxHashMap<Box<str>, i64> = unique
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.clone(), i as i64))
+        .collect();
+
+    let mut group_ids = Vec::with_capacity(cell_names.len());
+    let mut n_missing = 0usize;
+    for c in cell_names {
+        match by_cell.get(c) {
+            Some(label) => group_ids.push(*name_to_id.get(label).unwrap_or(&-1)),
+            None => {
+                group_ids.push(-1);
+                n_missing += 1;
+            }
+        }
+    }
+    if n_missing > 0 {
+        info!(
+            "annotation: {n_missing}/{} cells absent from {path} → dropped from plot",
+            cell_names.len()
+        );
+    }
+
+    let label_map: FxHashMap<i64, String> = name_to_id
+        .into_iter()
+        .map(|(name, id)| (id, String::from(name)))
+        .collect();
+    Ok((group_ids, label_map))
 }
 
 /// Parse a two-column TSV of `group_id<TAB>display_name`. Blank lines
