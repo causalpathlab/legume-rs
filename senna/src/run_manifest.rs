@@ -82,6 +82,8 @@ pub struct RunManifest {
     #[serde(default)]
     pub layout: RunLayout,
     #[serde(default)]
+    pub cluster: RunCluster,
+    #[serde(default)]
     pub annotate: RunAnnotate,
     #[serde(default)]
     pub defaults: RunDefaults,
@@ -157,8 +159,17 @@ pub struct RunLayout {
     pub pb_gene_mean: Option<String>,
 }
 
-/// Paths to artifacts produced by `senna annotate` — the bipartite-enrichment
-/// annotation pass. Populated by annotate, not by training.
+/// Paths to artifacts produced by `senna cluster`. Populated by `senna
+/// cluster` when invoked with `--from <manifest>`; otherwise empty.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunCluster {
+    /// `{cluster_out}.clusters.parquet` — cells × 1 cluster id (NaN for unassigned).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clusters: Option<String>,
+}
+
+/// Paths to artifacts produced by `senna annotate` — the cluster-based
+/// marker enrichment annotation pass. Populated by annotate, not by training.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunAnnotate {
     /// `{annotate_out}.annotation.parquet` — N × C cell posterior.
@@ -167,14 +178,17 @@ pub struct RunAnnotate {
     /// `{annotate_out}.argmax.tsv` — per-cell label + max probability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argmax: Option<String>,
-    /// `{annotate_out}.topic_celltype_q.parquet` — K × C FDR-sparse
+    /// `{annotate_out}.cluster_celltype_q.parquet` — nClusters × C FDR-sparse
     /// softmax-normalized Q matrix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic_celltype_q: Option<String>,
-    /// `{annotate_out}.topic_celltype_es.parquet` — K × C raw + restandardized
-    /// ES diagnostic matrix (long-format: k, c, es, es_std, p, q).
+    pub cluster_celltype_q: Option<String>,
+    /// `{annotate_out}.cluster_celltype_es.parquet` — nClusters × C raw ES.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic_celltype_es: Option<String>,
+    pub cluster_celltype_es: Option<String>,
+    /// `{annotate_out}.cluster_expression.parquet` — G × nClusters NB-Fisher-
+    /// adjusted per-cluster mean expression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_expression: Option<String>,
     /// Input marker-gene TSV path (provenance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub markers: Option<String>,
@@ -199,6 +213,7 @@ impl RunManifest {
             data: RunData::default(),
             outputs: RunOutputs::default(),
             layout: RunLayout::default(),
+            cluster: RunCluster::default(),
             annotate: RunAnnotate::default(),
             defaults: RunDefaults::default(),
         }

@@ -14,9 +14,9 @@
 //!   `{out}.bhc.merges.parquet` — merge tree (merge_id, left, right, log_bf, n_cells)
 //!   `{out}.bhc.cut.parquet`    — consensus id per original cluster (−1 = empty)
 
+use crate::cluster_aggregation::accumulate_gene_sum;
 use crate::embed_common::*;
 use data_beans_alg::bhc::{bhc_cut, bhc_merge, BhcInput, BhcMerge};
-use rayon::prelude::*;
 
 /// Runtime configuration for cluster BHC.
 pub struct ClusterBhcConfig {
@@ -102,60 +102,6 @@ pub(crate) fn run_cluster_bhc(
     write_bhc_merges(&format!("{out_prefix}.bhc.merges.parquet"), &merges)?;
     write_bhc_cut(&format!("{out_prefix}.bhc.cut.parquet"), &consensus)?;
     Ok(())
-}
-
-/// Stream CSC blocks; per block, accumulate `T_{k,g} += y_{n,g}` for each
-/// assigned cell. Blocks run in parallel and are reduced at the end.
-fn accumulate_gene_sum(
-    data_vec: &SparseIoVec,
-    labels: &[usize],
-    k: usize,
-    m: usize,
-    block_size: usize,
-) -> anyhow::Result<Vec<f64>> {
-    let n = labels.len();
-    let blocks: Vec<(usize, usize)> = (0..n)
-        .step_by(block_size.max(1))
-        .map(|lb| (lb, (lb + block_size).min(n)))
-        .collect();
-
-    let per_block: Vec<Vec<f64>> = blocks
-        .par_iter()
-        .map(|&(lb, ub)| block_gene_sum(data_vec, labels, lb, ub, k, m))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    let mut gene_sum = vec![0.0f64; k * m];
-    for gs_b in per_block {
-        for (a, b) in gene_sum.iter_mut().zip(gs_b.iter()) {
-            *a += b;
-        }
-    }
-    Ok(gene_sum)
-}
-
-fn block_gene_sum(
-    data_vec: &SparseIoVec,
-    labels: &[usize],
-    lb: usize,
-    ub: usize,
-    k: usize,
-    m: usize,
-) -> anyhow::Result<Vec<f64>> {
-    let csc = data_vec.read_columns_csc(lb..ub)?;
-    let mut gene_sum = vec![0.0f64; k * m];
-
-    for j in 0..csc.ncols() {
-        let kk = labels[lb + j];
-        if kk >= k {
-            continue;
-        }
-        let col = csc.col(j);
-        let t_row = &mut gene_sum[kk * m..(kk + 1) * m];
-        for (&row, &val) in col.row_indices().iter().zip(col.values().iter()) {
-            t_row[row] += val as f64;
-        }
-    }
-    Ok(gene_sum)
 }
 
 fn write_bhc_merges(file_path: &str, merges: &[BhcMerge]) -> anyhow::Result<()> {
