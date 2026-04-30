@@ -33,6 +33,7 @@
 mod anchor_common;
 mod annotate;
 mod cluster;
+mod cluster_aggregation;
 mod cluster_bhc;
 mod cnv_pseudobulk;
 mod embed_common;
@@ -158,17 +159,17 @@ enum Commands {
     IndexedTopic(IndexedTopicArgs),
 
     #[command(
-        about = "Annotate cells via bipartite enrichment (topic × celltype markers)",
-        long_about = "Reads a run manifest (topic / itopic / joint-topic / svd /\n\
-                      joint-svd), runs a GSEA-style weighted KS enrichment test\n\
-                      between each topic's gene dictionary and each celltype's\n\
-                      marker set, with Efron–Tibshirani restandardization against\n\
-                      a row-randomization null. The FDR-sparse K × C Q matrix is\n\
-                      softmax-normalized per topic; per-cell labels come from\n\
-                      θ_cell · Q (one matmul, no vMF cosine, no anchor genes).\n\n\
+        about = "Annotate cells via cluster-level marker enrichment",
+        long_about = "Cluster cells (Leiden on cosine-KNN of the manifest's latent),\n\
+                      compute NB-Fisher-adjusted per-cluster mean expression by\n\
+                      streaming raw counts from the manifest's zarr, then run a\n\
+                      weighted-KS marker enrichment with cross-cluster simplex\n\
+                      normalization for housekeeping suppression. The FDR-sparse\n\
+                      nClusters × C Q matrix is softmax-normalized per cluster;\n\
+                      per-cell labels come from cluster-broadcast Q.\n\n\
                       Usage: senna annotate --from run.senna.json -m markers.tsv -o out\n\n\
-                      Inputs are read from the manifest (β, θ_cell, pb_gene,\n\
-                      pb_latent). The zarr is never reopened.",
+                      Provide --clusters <PATH> (or run `senna cluster --from ...`\n\
+                      first) to skip the internal Leiden pass.",
         visible_alias = "annotate"
     )]
     Annotate(AnnotateArgs),
